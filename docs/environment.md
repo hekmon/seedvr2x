@@ -210,9 +210,10 @@ Its visual impact on SeedVR2 output still needs evaluating.
 | *SA2 batched CUDA `sageattn()` (not used by SeedVR2)* | *15.6* | *95.1* |
 
 The low-bit kernels only pay off on long sequences, where SA3 reaches 1.75× FA2. At 4096 tokens
-everything is within 10%, because quantization overhead eats the gain. The sequence length
-SeedVR2 actually uses depends on output resolution and DiT window size, so end-to-end DiT timings
-decide in the end.
+everything is within 10%, because quantization overhead eats the gain. **SeedVR2's attention
+sequences are much shorter:** windowed attention gives about 400 to 3300 tokens depending on
+batch size, whatever the resolution. Almost every call is also variable-length, which
+disables SA3. See [attention.md](attention.md).
 
 ### Smoke test (9 frames, 1920×1080 → 1920×1080, 7B fp16, `sageattn_3`, no offload, no tiling)
 

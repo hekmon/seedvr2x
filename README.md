@@ -16,8 +16,11 @@ Goals:
 | Path | What |
 |---|---|
 | [docs/environment.md](docs/environment.md) | How to build a clean environment with every attention backend (Blackwell / sm_120), the pitfalls, and reference results |
+| [docs/attention.md](docs/attention.md) | DiT windowed attention: sequence lengths, why `sageattn_3` and `sageattn_2` don't do what their names say, what still needs verifying |
 | [scripts/setup_env.sh](scripts/setup_env.sh) | Reproducible environment build: uv venv, stable torch, SageAttention 2/3 and FlashAttention 2 built as wheels |
 | [scripts/probe_env.py](scripts/probe_env.py) | Checks an environment: versions, which attention backend really runs, accuracy and throughput |
+| [docs/benchmarking.md](docs/benchmarking.md) | How runs are measured: the record's fields, what torch and NVML memory figures mean, caveats, reference runs |
+| [scripts/bench.py](scripts/bench.py) | Measurement harness: runs the CLI, samples device memory (NVML), parses the debug log into per-phase JSON records and Markdown tables |
 
 Experiments run on a remote GPU machine. Where that machine is and how it's reached is
 deployment-specific and deliberately left out of this repo.
