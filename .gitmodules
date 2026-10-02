@@ -1,0 +1,6 @@
+[submodule "upstream/seedvr2-numz"]
+	path = upstream/seedvr2-numz
+	url = https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git
+[submodule "upstream/seedvr-bytedance"]
+	path = upstream/seedvr-bytedance
+	url = https://github.com/ByteDance-Seed/SeedVR.git
