@@ -131,8 +131,11 @@ a **Triton** kernel: INT8 QK with FP16 PV, i.e. the SageAttention 1 algorithm. S
 (INT8 QK + FP8 PV, `_qattn_sm89`, the ones selected on sm_120) are only reachable through the
 batched `sageattention.sageattn()` API, which SeedVR2 doesn't call for this mode. So
 `--attention_mode sageattn_2` gains little over FlashAttention 2 (see the
-[throughput table](#reference-results)). Building SA2 properly is still worth it: it is the
-per-call fallback of `sageattn_3`.
+[throughput table](#reference-results)); in SeedVR2 itself it gains nothing (measured in
+[attention.md](attention.md#measurements)). Building SA2 properly still matters if you select
+`sageattn_2` or `sageattn_3`: it is the per-call fallback of `sageattn_3`, and in practice the
+only kernel that mode runs. [attention.md](attention.md#is-the-length-grouping-patch-worth-it)
+recommends `flash_attn_2`.
 
 ### 10. `uv` "failed to hardlink" warning
 
@@ -168,8 +171,14 @@ Then an end-to-end smoke test: 9 frames, no upscale, debug logs giving time and 
 cd "$SEEDVR2_DIR" && PATH=/path/to/ffmpeg/bin:$PATH .venv/bin/python inference_cli.py input.mkv \
   --output out/ --output_format mp4 --video_backend ffmpeg --model_dir /path/to/models \
   --dit_model seedvr2_ema_7b_fp16.safetensors --resolution 1080 --batch_size 9 --load_cap 9 \
-  --attention_mode sageattn_3 --debug
+  --attention_mode flash_attn_2 --debug
 ```
+
+The `--dit_model` matters: the CLI's default is the 3B fp8 model, not the 7B fp16 used in these
+notes ([cli-flags.md](cli-flags.md#models)). The [reference smoke test](#smoke-test-9-frames-19201080--19201080-7b-fp16-sageattn_3-no-offload-no-tiling) was
+run with `--attention_mode sageattn_3`, before [attention.md](attention.md#measurements) showed
+that SA3 never runs inside SeedVR2 and that all backends give the same DiT time (±1.5%):
+use `flash_attn_2`.
 
 ## Reference results
 
@@ -196,7 +205,8 @@ file at a time and take many times longer.
 | `flash_attn_3` | not available | not available | Falls back to `flash_attn_2` |
 
 Random Gaussian inputs are a harsh test, but SA3's error is an order of magnitude above SA2's.
-Its visual impact on SeedVR2 output still needs evaluating.
+In SeedVR2 it doesn't show: SA3 never runs there
+([attention.md](attention.md#consequences-for---attention_mode)).
 
 ### Throughput (ms per call, bf16, 24 heads × 128, uniform batches)
 
@@ -212,16 +222,22 @@ Its visual impact on SeedVR2 output still needs evaluating.
 The low-bit kernels only pay off on long sequences, where SA3 reaches 1.75× FA2. At 4096 tokens
 everything is within 10%, because quantization overhead eats the gain. **SeedVR2's attention
 sequences are much shorter:** windowed attention gives about 400 to 3300 tokens depending on
-batch size, whatever the resolution. Almost every call is also variable-length, which
-disables SA3. See [attention.md](attention.md).
+batch size, whatever the resolution. Every call is also variable-length, which disables SA3:
+measured, SA3 never runs and the backend doesn't change DiT time. See [attention.md](attention.md).
 
 ### Smoke test (9 frames, 1920×1080 → 1920×1080, 7B fp16, `sageattn_3`, no offload, no tiling)
 
-| Phase | Time | VRAM peak |
+| Phase | Time | Torch peak allocated |
 |---|---|---|
-| 1. VAE encode | 8.7 s | 19.7 GB |
-| 2. DiT (one sampling step) | 12.2 s | 19.6 GB (15.9 GB is weights) |
-| 3. VAE decode | 13.4 s | 34.9 GB |
-| 4. Color correction (lab) | 5.0 s | 1.8 GB |
+| 1. VAE encode | 8.7 s | 19.7 GiB |
+| 2. DiT (one sampling step) | 12.2 s | 19.6 GiB (15.9 GiB is weights) |
+| 3. VAE decode | 13.4 s | 34.9 GiB |
+| 4. Color correction (lab) | 5.0 s | 1.8 GiB |
 
 Total 47 s, peak process RSS 19 GB. These are first-call timings, so they include warmup.
+The same log's phase totals, which also count what surrounds these timers (model loading for the
+DiT), are in
+[benchmarking.md](benchmarking.md#reference-two-runs-on-the-reference-stack) (encode 8.80 s, DiT
+16.97 s, decode 15.53 s). The GPU is power-capped and its speed varies by up to 40–60% between
+sessions ([benchmarking.md](benchmarking.md#caveats)): compare absolute times only with runs made
+back to back. SeedVR2 prints these memory figures as "GB"; they are GiB.
