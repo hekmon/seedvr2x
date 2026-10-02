@@ -91,6 +91,10 @@ uv run pytest
 - `uv run pytest -m gpu` runs the tests that need CUDA, never selected by default.
 - Tests that need the model weights read their directory from `SEEDVR2X_MODEL_DIR`, and skip
   without it.
+- `tests/test_regression.py` (GPU) holds every change to the runtime or the vendored code to
+  milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames.
+  Its reference, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how to make it are in
+  its docstring.
 
 ## Comments and documents
 
