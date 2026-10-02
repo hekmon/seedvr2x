@@ -86,9 +86,15 @@ connect through files.
   - An upscale stage inside sptenc: the same protocol, plus changes in sptenc's package `main`.
 
 ### Vendored model code
-- Copied from `upstream/seedvr2-numz` at `4490bd1`: `src/models/{dit_7b,dit_3b,video_vae_v3}`,
-  `src/common/diffusion`, the parts of `src/common` and `src/core/infer.py`
-  (`VideoDiffusionInfer`) that the model needs, the configs and `pos_emb.pt`/`neg_emb.pt`.
+- Copied from `upstream/seedvr2-numz` at `4490bd1`:
+  - `src/models/{dit_7b,dit_3b,video_vae_v3}` and `src/common/diffusion`
+  - the parts of `src/common` and `src/core/infer.py` (`VideoDiffusionInfer`) that the model
+    needs
+  - `src/data/image/transforms/`, the input preparation of [step 0](#pipeline-per-shot):
+    `NaResize`, plus `DivisiblePad` (numz) or `DivisibleCrop` (ByteDance) to reach multiples
+    of 16. numz chains them at `src/core/generation_utils.py:73-81`.
+  - the configs and `pos_emb.pt`/`neg_emb.pt`
+
   About 11k lines ([provenance](../research/docs/provenance.md)).
 - The submodules stay untouched. A script diffs our copy against numz and ByteDance, so every
   change stays visible.
@@ -324,10 +330,16 @@ Work is saved in resumable units; a stop loses only the unit in progress.
 
 1. **Reproduce numz** with the same settings: one batch, no tiling, `flash_attn_2`, same seed,
    numz's input preparation, colour correction off (numz's `lab` runs the StableSR code we don't
-   vendor). The result must be bit-identical, or within quantisation, to numz's float frames,
-   checked with the FFV1 masters. The numerics choices (RoPE precision, attention dtype, VAE
-   mode vs sample, input preparation) are measured beforehand on numz, with patches, and
-   applied once this milestone passes.
+   vendor).
+   - Both sides read the same RGB frames, from an 8-bit RGB copy of the sample. numz decodes
+     with OpenCV at 8 bits (`inference_cli.py:469`, `/ 255` at `:336`), which our 16-bit ffmpeg
+     decode can't match bit for bit. Our decode is validated by the conversion tests instead
+     (see [Input](#input)).
+   - The result must be bit-identical, or within quantisation, to numz's float frames, checked
+     with the FFV1 masters.
+   - The numerics choices (RoPE precision, attention dtype, VAE mode vs sample, input
+     preparation) are measured beforehand on numz, with patches, and applied once this
+     milestone passes.
 2. **Stitching:** reproduce the latent-stitching results from the study.
 3. **Planner:** every card size passes under `vram_cap.py` emulation; plan estimates within a
    few percent of measured time and memory.
