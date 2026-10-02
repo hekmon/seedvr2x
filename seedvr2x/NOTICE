@@ -1,0 +1,13 @@
+seedvr2x
+Copyright 2026 Edouard Hur
+
+This product includes the SeedVR2 model code, in src/seedvr2x/vendor/:
+
+- SeedVR, Copyright (c) 2025 Bytedance Ltd. and/or its affiliates, under the Apache License,
+  Version 2.0 (https://github.com/ByteDance-Seed/SeedVR, commit e4de8c2). Its video VAE files
+  derive from code Copyright (c) 2023 HuggingFace Team, under the same licence.
+- As modified by ComfyUI-SeedVR2_VideoUpscaler (numz and contributors), under the Apache License,
+  Version 2.0 (https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler, commit 4490bd1), from which
+  the files were copied.
+
+The files changed for seedvr2x say so on the line under their original header.

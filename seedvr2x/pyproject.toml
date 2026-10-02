@@ -1,0 +1,79 @@
+[project]
+name = "seedvr2x"
+version = "0.1.0.dev0"
+description = "SeedVR2 video upscaler for long runs: lossless masters, no seams inside a shot"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = "==3.13.*"
+# The versions of the numz environment milestone 1 is compared with (DESIGN.md, Validation
+# milestones), so that the comparison differs by code only: bump one on purpose, and run that
+# comparison again.
+dependencies = [
+    "diffusers==0.40.0",
+    "einops==0.8.2",
+    "numpy==2.5.2",
+    "omegaconf==2.3.1",
+    "rotary-embedding-torch==0.9.1",
+    "safetensors==0.8.0",
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+]
+
+[project.scripts]
+seedvr2x = "seedvr2x.cli:main"
+
+[dependency-groups]
+dev = ["pyright[nodejs]", "pytest", "ruff"]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv]
+# Linux first (DESIGN.md). FlashAttention 2 is not a dependency: see AGENTS.md, Environment.
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# torch's CUDA support packages, at the versions numz's environment got from PyTorch's index:
+# resolved from PyPI, they came out newer (cuda-bindings 13.4.3, cuda-pathfinder 1.8.3,
+# nvidia-nvjitlink 13.4.92).
+constraint-dependencies = [
+    "cuda-bindings==13.3.1",
+    "cuda-pathfinder==1.6.0",
+    "nvidia-nvjitlink==13.3.33",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+# The vendored model code is linted apart, for errors only: see AGENTS.md, Checks.
+exclude = ["src/seedvr2x/vendor/**"]
+
+[tool.ruff.format]
+# Python only: ruff also formats the code blocks of Markdown files, and the documents are edited
+# by hand.
+exclude = ["src/seedvr2x/vendor/**", "*.md"]
+
+[tool.pyright]
+include = ["src", "tests", "tools"]
+exclude = ["src/seedvr2x/vendor", "**/__pycache__"]
+strict = ["src/seedvr2x"]
+pythonVersion = "3.13"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "-m", "not gpu"]
+markers = ["gpu: needs CUDA; never selected by default, run with -m gpu"]

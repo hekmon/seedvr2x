@@ -1,6 +1,6 @@
 # seedvr2x
 
-Our own SeedVR2 command-line upscaler. **Not started yet**: see [DESIGN.md](DESIGN.md) for the decisions so far and the open questions.
+Our own SeedVR2 command-line upscaler. **In progress**: [DESIGN.md](DESIGN.md) is the specification, with the decisions so far and the open questions; [AGENTS.md](AGENTS.md) says how to work on the code.
 
 Planned direction, from the findings in [../research/](../research/):
 - all Python, one process per job; standalone (a video file in, a finished file out), and connected to sptenc through files when used with it (`sptenc split` → seedvr2x → `sptenc encode <dir>`)
