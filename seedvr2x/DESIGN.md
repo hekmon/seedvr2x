@@ -15,11 +15,35 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
 It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of the
 [23 bugs](../research/bugs/README.md) live). It keeps ByteDance's model code.
 
+### Two kinds of users, both first-class
+- **Standalone, the regular workflow:** a video file in, an upscaled file out, with ffmpeg as
+  the only other tool. seedvr2x finds the cuts itself and assembles the finished file, the
+  source's audio, subtitles and chapters included. File size matters here, hence
+  `--segment-cmd` (see [Output](#output)).
+- **With sptenc**, the first use case and the reason for this project. This is the manual
+  workflow, pre-split in and pre-split out: `sptenc split` → seedvr2x →
+  `sptenc encode <dir> -f original`, with a directory of segments as the hand-over. It stays
+  lossless end to end, and its users bring the disk space.
+
+sptenc shapes the interfaces (segment directories, cut lists, master formats), but seedvr2x
+never requires it.
+
 ### Not in the first version
 - Image inputs, ComfyUI nodes, macOS/MPS, AMD/ROCm
 - Multi-GPU in one process (separate processes on separate shot ranges can come later, see
   [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
+- Variable frame rate sources: refused with a clear message, as sptenc does
+- Interlaced and telecined sources, in any version. Deinterlacing and inverse telecine are
+  workflows of their own, with specialised tools and many ways to do them. Detection:
+  - refused when the stream declares interlacing
+  - a warning when ffmpeg's `idet`, run during the first pass, finds combed frames in a source
+    declared progressive, as hard-telecined sources often are
+- Windows: Linux first, since inference is mostly a Linux world. Windows is a best-effort port
+  after the prototype, starting with an analysis of:
+  - FlashAttention 2 and `torch.compile`'s Triton there (SDPA works everywhere)
+  - the driver spilling VRAM into system memory instead of failing (numz enforces the physical
+    limit for this), which the planner must prevent
 
 ## Architecture
 
@@ -32,6 +56,34 @@ It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of
 
 **One long-running process** handles a whole job: models are loaded (and compiled) once and
 stay on the GPU when the plan allows it.
+
+### Language: all Python
+Every layer is Python, in one process per job. seedvr2x stands alone; with sptenc, the two
+connect through files.
+
+- **Why:** inference is Python territory. The model, the frames as tensors, the latents,
+  stitching, the planner (`mem_get_info`), BlockSwap, colour correction and the resume manifest
+  all need torch, so a Python environment is required whatever language orchestrates it, and
+  Python imports the model code and its libraries directly. sptenc could be all Go because it
+  only drives external programs (ffmpeg), which process calls handle completely.
+- **With sptenc:** `sptenc split` → seedvr2x → `sptenc encode <dir> -f original`. sptenc's
+  pre-split directories exist for this ("splitting a source, upscaling its segments and
+  encoding them"). In that chain, sptenc does the scene detection, the encodes, VMAF, concat
+  and the final mux.
+- **Door left open:** the runtime is a library (job → shots → units, emitting events), so a
+  protocol front end can be added if sptenc ever drives seedvr2x directly.
+- **Rejected:**
+  - Go orchestration around a persistent Python worker. The worker would still hold everything
+    above, the manifest included (only it knows windows and latents). Go's share would mostly
+    re-wrap sptenc's `ffmpeg` package (probing, frame counts, scdet, split, concat; ~1.9k
+    lines), at the permanent cost of a versioned protocol, signal translation (sptenc cancels
+    at once and kills its children), progress bridging, `--until` estimates crossing the
+    boundary, and two packagings.
+  - One Python process per segment. Each one reloads the model and recompiles: 10–50 s of DiT
+    compilation, and 108.5 s for the first compiled VAE encode batch against 4.79 s steady
+    ([vram.md](../research/docs/vram.md#torchcompile)). That's 27–136 min of DiT compilation
+    alone over a 163-segment episode, and no stitching across joins.
+  - An upscale stage inside sptenc: the same protocol, plus changes in sptenc's package `main`.
 
 ### Vendored model code
 - Copied from `upstream/seedvr2-numz` at `4490bd1`: `src/models/{dit_7b,dit_3b,video_vae_v3}`,
@@ -61,21 +113,70 @@ adapted from city96/ComfyUI-GGUF (Apache-2.0, credited).
 ## Input
 
 Two forms, one internal model (a list of shots):
-1. **One master plus a list of cuts**: frame numbers or timestamps, e.g. from sptenc's scene
-   detection.
-2. **A directory of segments** (sptenc split output), plus the information of which joins are
-   real cuts. Joins that aren't real cuts are stitched like a long shot.
+1. **A video file**: a source as it is (any codec ffmpeg decodes, no intermediate master
+   needed) or a lossless master. The cuts come from seedvr2x's own detection by default, run as
+   a first pass before any GPU work so the planner knows every shot (time estimate, `--until`,
+   manifest). Or they come from a cut list (frame numbers or timestamps): sptenc's once it
+   exports one, or any other tool's.
+2. **A directory of segments** (sptenc's split, or any other splitter), plus which joins are
+   real cuts: from a cut list, else each join scored by the detector. Joins that aren't real
+   cuts are stitched like a long shot. The output mirrors the input's segments (same frame
+   ranges and names), so sptenc encodes them as it would its own split.
+
+Cuts matter for quality, not only for the VAE context: see [Pipeline](#pipeline-per-shot).
 
 Decoding goes through an ffmpeg pipe:
 - frame-accurate, counting the frames actually decoded (never trusting the container's count,
   bug 11)
-- 16-bit RGB, from a known matrix (BT.709 for HD unless the tags say otherwise)
+- 16-bit RGB, converted by ffmpeg with every parameter given (matrix, range, chroma location):
+  zscale when the build has it, else swscale with its accuracy flags and a warning. The matrix
+  is the tags', else BT.709 for HD and BT.601 for SD, with a warning and an override.
 - exact rational frame rate
+
+ffmpeg does every colour conversion, in and out: we pin its parameters rather than
+reimplementing them. A startup check reports what the build offers (zscale, ffv1, scdet). Tests
+verify its conversions: round trip, white at 940, black at 64, chroma siting.
+
+### Colour and shape, SD sources included
+The rule: the upscale must look like its source in any given player.
+- **Matrix:** BT.709 for the `yuv420p10le` master at HD sizes and above, whatever the source's
+  (BT.601 for SD). Players read the tag, or assume BT.709 at HD sizes, so this is what keeps
+  the colours identical everywhere.
+- **Primaries and transfer:** copied as the source declares them (untagged stays untagged),
+  never converted.
+  - Converting the gamut (SD's SMPTE 170M or BT.470 BG to BT.709) changes the RGB values
+    themselves. Most players ignore the primaries tag, so they would show the upscale
+    differently from its source.
+  - A gamut conversion is a grading choice, for the user's own tools.
+- **Shape:** the declared sample aspect is honoured (with an override for broken tags), and the
+  output has square pixels at the source's display aspect.
+  - Players honour the sample aspect. numz ignores it (OpenCV), so its upscale of a 16:9 DVD
+    comes out 16% too narrow (NTSC) or 30% too narrow (PAL).
+  - The ITU-R BT.601 question of 704 or 720 active pixels (≈ 2%) is left to the stream's
+    declaration.
+  - The correction is only a different target size for the input resize (step 0 of the
+    [Pipeline](#pipeline-per-shot)).
 
 ## Pipeline, per shot
 
+0. **Resize** of the input to the output size. The model restores a picture that is already at
+   its final size: ByteDance's reference pipeline upsamples first ("Upsample image, model only
+   trained for high res."), with torchvision's bicubic (`NaResize`). That is a compiled
+   C++/CUDA kernel, not Python code, and we keep it as the default.
+   - Other kernels (zimg's Spline36 or Lanczos, through ffmpeg) are a measured choice, not a
+     default: a sharper kernel pre-sharpens and rings, and the model takes that for content.
+   - To pin: torchvision's bicubic depends on its `antialias` flag (PIL-like a = −0.5 with
+     it, OpenCV-like a = −0.75 without), and that flag's default changed in torchvision 0.17.
+     Verified with torchvision 0.29.1: `TVF.resize` defaults to `antialias=True`, so NaResize
+     runs a = −0.5.
 1. **VAE encode** of the whole shot in one causal pass. The VAE already streams in 4-frame
-   slices; resetting it at each cut is correct (no context should cross a cut).
+   slices; resetting it at each cut is correct (no context should cross a cut). Shots must
+   start at real cuts:
+   - each latent packs 4 frames (latent frames = 1 + (frames − 1)/4), so a cut inside a group
+     mixes both scenes in one latent
+   - windows stitched across a cut would cross-fade the two scenes
+
+   Expected to be visible; not measured yet.
 2. **DiT** on windows:
    - one window per shot when it fits
    - otherwise equal windows sharing **M = 2 latents** (8 frames), the shared latents mixed
@@ -104,16 +205,47 @@ histogram matching (Apache-2.0), and validate against numz's `lab` with the same
 
 ## Output
 
+seedvr2x delivers the upscale losslessly and owns no encoder flags. How the output gets
+compressed is the user's choice: afterwards, from the master, or during the run with
+`--segment-cmd` (below).
+
 - **FFV1 masters**, every frame a keyframe, per-slice CRCs, exact frame rate, from the float
   frames (no 8-bit step, bugs 09/19):
   - `gbrp16le`: research and archive master, closest to the model
-  - `yuv420p10le`, BT.709, limited range, explicit conversion: the master handed to sptenc
-    (same layout as `sptenc master`, no implicit RGB→YUV anywhere downstream)
+  - `yuv420p10le`, BT.709, limited range, explicit conversion (zscale): the master handed to
+    sptenc, which takes such a file as it is, so no implicit RGB→YUV happens downstream. It
+    shares the pixel format and tags of `sptenc master` (chroma sited left included), not its
+    conversion: sptenc's swscale puts 16-bit white at 943 instead of 940. The conversion tests
+    (see [Input](#input)) check that zscale sites the chroma left, as tagged.
 
   Validated with the [`ffv1_out.py` wrap](../research/docs/output.md): bit-exact round trip,
   tags checked by ffprobe.
 - **PNG** (16-bit) as an alternative.
-- Written as **segment files plus a manifest**, concatenated at the end (`sptenc concat`).
+- **Output segments**, the resume units of the output, listed in a manifest:
+  - **Layout, by sptenc's rule.** The threshold picks the cuts, then the minimum segment
+    length (5 s by default) merges each too-short segment into its shorter neighbour, on the
+    frame grid. With scdet run as sptenc runs it, the same threshold and minimum give the same
+    segments as sptenc. With a directory of segments as input, the output mirrors it instead.
+  - **Shots, the model's units, keep every cut.** A segment can hold several shots, and the
+    model still resets at each cut inside it. So the merge costs no quality. It saves what
+    short segments cost an encoder: a forced keyframe each, and too few frames to amortise it
+    (sptenc's MANUAL, "Too fine: many short segments").
+  - **Writer.** FFV1 by default. With `--segment-cmd`, the user's command runs once per
+    segment: it reads the segment, lossless and tagged, on stdin, and writes the file seedvr2x
+    names, e.g. `--segment-cmd 'ffmpeg -i - -c:v libx265 -crf 16 {out}'`. seedvr2x never
+    parses the command and only checks the result's frame count. Disk use is then the
+    compressed size, against 90–250 GiB per hour of 1080p anime for masters
+    ([output.md](../research/docs/output.md)), and a stop keeps every finished segment.
+  - **Rejected:** `--stream`, the output on stdout for a single compressor process. That
+    process can't be paused, so a stopped run would leave parts to join by hand.
+- **Assembly** of the segments:
+  - **standalone:** joined into one file by stream copy, with the source's other streams
+    (audio, subtitles, chapters, attachments). The join carries sptenc's lessons: each
+    segment's duration comes from its frame count, and timestamps are snapped to the frame
+    grid. Otherwise the video drifts: 46 ms behind the audio over a 163-segment episode, in
+    sptenc's measurements.
+  - **with sptenc:** the directory as it is, for `sptenc encode <dir> -f original` (or
+    `sptenc concat` for one master)
 
 ## Memory planner
 
@@ -156,7 +288,7 @@ Work is saved in resumable units; a stop loses only the unit in progress.
 |---|---|---|
 | VAE encode | the shot's latents (~1 MB per 4 frames at 1080p) | per shot |
 | DiT | each window's output latents | per window |
-| VAE decode | output frames, in segment files | per shot (restart the shot's decode), or per sub-segment with warm-up latents if that proves bit-identical |
+| VAE decode | output segments (FFV1, or the user's `--segment-cmd`) | per output segment: its decode and write restart, the DiT latents are kept (finer, per sub-segment with warm-up latents, if that proves bit-identical) |
 
 - **Manifest:** settings, seed, model hashes, finished shots and windows. A resume with
   different settings is refused.
@@ -199,17 +331,51 @@ Work is saved in resumable units; a stop loses only the unit in progress.
    few percent of measured time and memory.
 4. **Resume:** interrupted and resumed runs bit-identical to uninterrupted ones.
 5. **Colour correction:** rewritten `lab` matches numz's `lab` on the quality metrics.
-6. **Visual review** of long runs by the user.
+6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
+   for frame, and every other stream is copied.
+7. **Visual review** of long runs by the user.
 
 ## Open questions
 
-- **Language split:** all Python, or Go orchestration (sptenc-like: scene splitting, ffmpeg,
-  VMAF, concat) around a small Python worker that turns one segment into one master?
-- **Scene list format:** what sptenc exports (frame numbers, timestamps), and whether sptenc
-  ever splits inside a shot (fades, maximum segment length).
+### Input
+- **Own scene detection:** three candidates.
+  - ffmpeg's scdet, as sptenc runs it: the same scores, so both tools detect alike and, with
+    the same merge, lay out the same output segments. No new dependency.
+  - PySceneDetect: detects fades, but adds a dependency
+  - a detector on our own decoded frames
+
+  Output segments take sptenc's minimum length (see [Output](#output)). Shots are a different
+  matter:
+  - merging a real cut into a shot puts two scenes in one latent
+  - keeping a false detection (a flash, a fast pan) splits continuous motion with a hard
+    boundary
+
+  To measure: the threshold, and whether shots need a minimum of their own.
+- **Scene list format.** Known from sptenc's code:
+  - it exports no scene list (`split --list-scenes` prints a table)
+  - it never splits inside a shot (no maximum length, no fade handling)
+  - but it merges scenes shorter than 5 s into their shorter neighbour, so real cuts can sit
+    inside a segment unmarked
+  - scdet also fires on pans and flashes, so a join isn't always a cut
+
+  Open: the machine-readable list sptenc should export (frame indexes, scores, and the cuts
+  the merge removed), and how seedvr2x treats cuts inside a segment and doubtful joins.
+- **Frame-exact access into long-GOP sources**, to resume a shot and to read its input frames
+  again for colour correction. Three ways:
+  - ffmpeg's accurate seek: fast, but trusts timestamps
+  - decoding from the start and counting: exact, but slow on a film
+  - a lossless intermediate: exact and fast, but large
+
+  Plan: measure accurate seek against decode-and-count on real long-GOP files.
+
+### Scope
 - **Model scope for v1:** 7B fp16 only, or fp8/Q4 and 3B from the start (needed for small
   GPUs).
+
+### To measure
 - **Numerics:** numz's or ByteDance's for RoPE, attention dtype and VAE encode, once measured.
+  The input preparation too: the resize kernel and its `antialias` flag, and multiples of 16
+  reached by padding (numz) or cropping (ByteDance).
 - **Decode resume granularity:** whether sub-segment decoding with warm-up latents is
   bit-identical.
 - **4K and long windows:** the planner's limits on large outputs, where the DiT window is the
