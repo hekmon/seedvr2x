@@ -224,17 +224,29 @@ The rule: the upscale must look like its source in any given player.
    - windows stitched across a cut would cross-fade the two scenes
 
    Expected to be visible; not measured yet.
+
+   A shot that isn't 4n + 1 frames long is padded, then trimmed after decoding. numz mirrors
+   the end (`generation_utils.py:642-654`); ByteDance repeats the last frame
+   (`inference_seedvr2_7b.py:182-196`). We use numz's padding for now: the choice belongs to
+   the numerics.
 2. **DiT** on windows:
    - one window per shot when it fits
-   - otherwise equal windows sharing **M = 2 latents** (8 frames), the shared latents mixed
-     before decoding
-   - noise drawn once per shot from the seed, sliced per window
+   - otherwise windows sharing **M = 2 latents** (8 frames). Their lengths are balanced,
+     differing by at most 1, with as few windows as the cap allows: 21 latents under a cap of
+     6 give 6, 6, 6, 6, 5. A grid of full windows plus a short last one can leave a window of
+     3 latents with only 1 new.
+   - the shared latents are mixed before decoding with cosine weights (0.75 then 0.25 for
+     M = 2), the curve the study measured
+   - noise drawn once per shot from the seed, sliced per window, so a shared latent gets the
+     same noise in both of its windows. This is untested: the study reseeded every window,
+     so its shared latents mixed two different draws. Milestone 2 checks the sliced scheme
+     against the study's.
    - one window per DiT call. Batching windows breaks `na.unconcat_coalesce` when their
      window counts differ, and the planner sizes a window to fill the memory anyway.
 
-   [Measured](../research/docs/stitching.md): −80% boundary jump against independent batches,
-   no softening, output 40.5–40.8 dB from the single-window result, about +3–9% compute
-   (the VAE is most of the time).
+   [Measured](../research/docs/stitching.md) with `lab`: −80% boundary jump against independent
+   batches, no softening, output 40.5–40.8 dB from the single-window result, about +3–9%
+   compute (the VAE is most of the time).
 3. **VAE decode** of the shot in one streaming pass, tiled when the planner says so.
 4. **Colour correction** against the input (see below).
 5. **Write** frames as they come out.
@@ -384,7 +396,18 @@ Work is saved in resumable units; a stop loses only the unit in progress.
    - The numerics choices (RoPE precision, attention dtype, VAE mode vs sample, input
      preparation) are measured beforehand on numz, with patches, and applied once this
      milestone passes.
-2. **Stitching:** reproduce the latent-stitching results from the study.
+2. **Stitching**, with colour correction off. It isn't implemented yet, and `lab` cuts the
+   remaining low-frequency jump about 3× ([stitching.md](../research/docs/stitching.md)), so
+   the study's figures don't carry over.
+   - Material: an 8-bit RGB copy of clip B's frames 20–100, against new numz runs: one batch
+     of 81, independent batches of 21, and `STITCH_LATENT` 6:2.
+   - Our windowing, mixing and decode, run in an internal per-window reseed mode (tests only,
+     not user-facing), reproduce numz + `STITCH_LATENT` bit for bit.
+   - The sliced noise does at least as well as the reseed mode on every boundary metric (hold
+     and low-frequency excess, step and total) and in dB from the one-batch run. Its reduction
+     against independent batches is reported; it was −80% with `lab` in the study. If it loses
+     on any metric, the noise scheme goes back to design.
+   - The single-window case stays bit-identical to milestone 1.
 3. **Planner:** every card size passes under `vram_cap.py` emulation; plan estimates within a
    few percent of measured time and memory.
 4. **Resume:** interrupted and resumed runs bit-identical to uninterrupted ones.
@@ -439,6 +462,8 @@ Work is saved in resumable units; a stop loses only the unit in progress.
   - VAE mode vs sample
   - the input preparation: the resize kernel and its `antialias` flag, and multiples of 16
     reached by padding (numz) or cropping (ByteDance)
+  - a shot padded to 4n + 1 frames by mirroring its end (numz) or repeating its last frame
+    (ByteDance)
 - **Decode resume granularity:** whether sub-segment decoding with warm-up latents is
   bit-identical.
 - **4K and long windows:** the planner's limits on large outputs, where the DiT window is the
