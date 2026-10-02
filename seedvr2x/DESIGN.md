@@ -322,10 +322,12 @@ Work is saved in resumable units; a stop loses only the unit in progress.
 
 ## Validation milestones
 
-1. **Reproduce numz:** same settings (one batch, no tiling, `flash_attn_2`, same seed) →
-   bit-identical or within quantisation of numz's float frames, checked with the FFV1 masters.
-   Then each numerics choice (RoPE precision, attention dtype, VAE mode vs sample) measured
-   separately.
+1. **Reproduce numz** with the same settings: one batch, no tiling, `flash_attn_2`, same seed,
+   numz's input preparation, colour correction off (numz's `lab` runs the StableSR code we don't
+   vendor). The result must be bit-identical, or within quantisation, to numz's float frames,
+   checked with the FFV1 masters. The numerics choices (RoPE precision, attention dtype, VAE
+   mode vs sample, input preparation) are measured beforehand on numz, with patches, and
+   applied once this milestone passes.
 2. **Stitching:** reproduce the latent-stitching results from the study.
 3. **Planner:** every card size passes under `vram_cap.py` emulation; plan estimates within a
    few percent of measured time and memory.
