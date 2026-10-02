@@ -4,12 +4,14 @@ from itertools import pairwise
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
+import numpy.typing as npt
 import pytest
 import torch
 from omegaconf import OmegaConf
 
 from seedvr2x.runtime import model
-from seedvr2x.runtime.shot import mix_weights, pad_4n1, window_layout
+from seedvr2x.runtime.shot import input_slices, mix_weights, pad_4n1, padded_length, window_layout
 
 
 def test_one_window_when_the_shot_fits() -> None:
@@ -64,9 +66,47 @@ def test_padding_as_numz(count: int, expected: list[int]) -> None:
     assert pad_4n1(frames)[:, 0, 0, 0].tolist() == expected
 
 
-def test_streamed_decode_is_the_one_pass_decode() -> None:
-    # A VAE built from the configs with random weights, on the CPU: the streamed decode must give
-    # the one-pass decode's frames bit for bit, through the same slices and causal memory.
+class Reads:
+    """A shot's frames, read as upscale_shot reads them: n at a time, each read recorded."""
+
+    def __init__(self, frames: npt.NDArray[np.float32]) -> None:
+        self.frames, self.read, self.counts = frames, 0, list[int]()
+
+    def __call__(self, count: int) -> npt.NDArray[np.float32]:
+        self.counts.append(count)
+        self.read += count
+        return self.frames[self.read - count : self.read]
+
+
+def vae_slices(frames: int) -> list[int]:
+    vae = SimpleNamespace(use_slicing=True, slicing_sample_min_size=4)
+    return model.encode_slices(
+        cast(model.Models, SimpleNamespace(runner=SimpleNamespace(vae=vae))), frames
+    )
+
+
+@pytest.mark.parametrize("count", range(1, 22))
+def test_streamed_input_is_the_padded_shot(count: int) -> None:
+    # Read in the VAE's slices (5 frames, then 4), padded at the end as pad_4n1 pads the whole.
+    frames = np.random.default_rng(count).random((count, 2, 3, 3), dtype=np.float32)
+    reads = Reads(frames)
+    sizes = vae_slices(padded_length(count))
+    slices = list(input_slices(reads, count, sizes))
+    assert [s.shape[0] for s in slices] == sizes
+    assert sum(reads.counts) == count and all(n <= 5 for n in reads.counts)
+    assert torch.equal(torch.cat(slices), pad_4n1(model.to_input(frames)))
+
+
+def test_vae_slices() -> None:
+    assert vae_slices(1) == [1]
+    assert vae_slices(5) == [5]
+    assert vae_slices(9) == [5, 4]
+    assert vae_slices(45) == [5, *[4] * 10]
+
+
+@pytest.fixture(scope="module")
+def cpu_models() -> model.Models:
+    """A VAE built from the configs with random weights, on the CPU, in a runner."""
     from seedvr2x.vendor.common.config import create_object, load_config
     from seedvr2x.vendor.core.infer import VideoDiffusionInfer
 
@@ -80,7 +120,34 @@ def test_streamed_decode_is_the_one_pass_decode() -> None:
     vae.set_causal_slicing(**config.vae.slicing)
     runner: Any = VideoDiffusionInfer(config, cast(Any, SimpleNamespace(log=lambda *a, **k: None)))
     runner.vae = vae
-    models = cast(model.Models, SimpleNamespace(runner=runner))
+    return cast(model.Models, SimpleNamespace(runner=runner))
+
+
+@pytest.mark.parametrize("count", [1, 2, 6, 13])
+def test_streamed_encode_is_the_one_pass_encode(cpu_models: model.Models, count: int) -> None:
+    # The shot read in slices, each prepared and encoded as it comes, must give the latent of the
+    # whole shot prepared and encoded at once, bit for bit, in the same memory layout (the noise
+    # drawn from it depends on it).
+    frames = np.random.default_rng(count).random((count, 32, 48, 3), dtype=np.float32)
+    transform = model.input_transform((32, 48))
+    padded = padded_length(count)
+    with torch.no_grad():
+        video = pad_4n1(model.to_input(frames)).permute(0, 3, 1, 2).to(torch.float32)
+        one_pass = model.encode(cpu_models, transform(video))
+        slices = (
+            transform(part.permute(0, 3, 1, 2).to(torch.float32))
+            for part in input_slices(Reads(frames), count, model.encode_slices(cpu_models, padded))
+        )
+        streamed = model.encode_stream(cpu_models, slices, padded)
+    assert streamed.shape == one_pass.shape == ((padded - 1) // 4 + 1, 4, 6, 16)
+    assert torch.equal(streamed, one_pass)
+    assert streamed.stride() == one_pass.stride()
+
+
+def test_streamed_decode_is_the_one_pass_decode(cpu_models: model.Models) -> None:
+    # The streamed decode must give the one-pass decode's frames bit for bit, through the same
+    # slices and causal memory.
+    models, runner = cpu_models, cast(Any, cpu_models).runner
     latent = torch.randn(4, 4, 6, 16)  # (T', h, w, C): 13 frames of 32x48
     with torch.no_grad():
         one_pass = runner.vae_decode([latent])[0]

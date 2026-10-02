@@ -19,10 +19,10 @@ def main(argv: list[str] | None = None) -> int:
     """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status."""
     parser = argparse.ArgumentParser(
         prog="seedvr2x",
-        description="SeedVR2 video upscaler for long runs. One shot per input (milestone 2).",
+        description="SeedVR2 video upscaler for long runs.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
-    parser.add_argument("input", type=Path, help="video file, upscaled as one shot")
+    parser.add_argument("input", type=Path, help="video file")
     parser.add_argument(
         "-o",
         "--output",
@@ -40,7 +40,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model-dir", type=Path, required=True, help="directory of the weights")
     parser.add_argument("--dit-model", required=True, help="DiT file, e.g. 7B fp16 safetensors")
     parser.add_argument("--vae-model", default="ema_vae_fp16.safetensors", help="VAE file")
-    parser.add_argument("--resolution", type=int, default=1080, help="output short side")
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=1080,
+        help="short side of the output, square pixels at the source's display aspect",
+    )
+    parser.add_argument(
+        "--cuts",
+        type=Path,
+        metavar="FILE",
+        help="cut list: the first frame of each shot but the first, one frame number per line,"
+        " counted from 0 (default: the whole input is one shot)",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--input-matrix",
@@ -80,22 +92,40 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.source import examine
+    from seedvr2x.runtime.job import (
+        SHARED,
+        JobError,
+        output_size,
+        read_cuts,
+        shots_from_cuts,
+        target_size,
+    )
 
-    # The build and the source are checked before anything touches the GPU.
+    # The build, the source and the cut list are checked before anything touches the GPU.
     try:
+        if args.window is not None and args.window < 2 * SHARED + 1:
+            raise JobError(
+                f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
+                f" a window needs at least {2 * SHARED + 1}"
+            )
         logger.info("ffmpeg %s", ffmpeg.check(("png",) if args.format == "png" else ()))
         source = examine(args.input, args.input_matrix, args.input_sar)
-    except MediaError as error:
+        shots = shots_from_cuts(read_cuts(args.cuts) if args.cuts else [], source.frames)
+    except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
+    stream = source.stream
+    target = target_size(stream.width, stream.height, source.sample_aspect, args.resolution)
+    out_height, out_width = output_size(target)
+    logger.info("%d shots; output %dx%d, square pixels", len(shots), out_width, out_height)
 
     import numpy as np
+    import numpy.typing as npt
     import torch
 
-    from seedvr2x.media.decode import to_float32
     from seedvr2x.media.writer import Tags, open_writer
-    from seedvr2x.runtime.model import load_models, to_input
-    from seedvr2x.runtime.shot import upscale_shot
+    from seedvr2x.runtime.model import load_models
+    from seedvr2x.runtime.run import run_shots
 
     if not torch.cuda.is_available():
         logger.error("no CUDA device")
@@ -104,40 +134,37 @@ def _run(args: argparse.Namespace) -> int:
         logger.error("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
         return 1
     device = torch.device("cuda", 0)
-    try:
-        with source.decoder() as decoder:
-            frames = to_float32(decoder.read(source.frames))
-    except MediaError as error:
-        logger.error("%s: %s", args.input, error)
-        return 1
     started = time.monotonic()
     models = load_models(args.model_dir, args.dit_model, args.vae_model, device)
     logger.info(
         "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
     )
+    if args.dump_frames is not None:
+        args.dump_frames.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    out = upscale_shot(models, to_input(frames), args.resolution, args.seed, args.window)
-    logger.info("upscaled in %.1f s: %s", time.monotonic() - started, tuple(out.shape))
-    out_frames = out.numpy()
-    _, out_height, out_width, _ = out_frames.shape
     try:
         with open_writer(
-            args.format,
-            args.output,
-            out_width,
-            out_height,
-            source.stream.frame_rate,
-            Tags.of(source.stream),
+            args.format, args.output, out_width, out_height, stream.frame_rate, Tags.of(stream)
         ) as writer:
-            writer.write(out_frames)
+
+            def write(frames: npt.NDArray[np.float32]) -> None:
+                if args.dump_frames is not None:
+                    for offset, frame in enumerate(frames, writer.written):
+                        path = args.dump_frames / f"frame_{offset:06d}.npy"
+                        np.save(path, np.ascontiguousarray(frame))
+                writer.write(frames)
+
+            run_shots(models, source, shots, target, args.seed, write, args.window)
     except MediaError as error:
         logger.error("%s", error)
         return 1
-    logger.info("wrote %s: %d frames, %s", args.output, writer.written, args.format)
-    if args.dump_frames is not None:
-        args.dump_frames.mkdir(parents=True, exist_ok=True)
-        for index, frame in enumerate(out_frames):
-            np.save(args.dump_frames / f"frame_{index:06d}.npy", np.ascontiguousarray(frame))
+    logger.info(
+        "upscaled in %.1f s; wrote %s: %d frames, %s",
+        time.monotonic() - started,
+        args.output,
+        writer.written,
+        args.format,
+    )
     return 0
 
 

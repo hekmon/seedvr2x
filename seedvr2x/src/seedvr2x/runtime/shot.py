@@ -1,24 +1,25 @@
-"""Upscaling of one shot (DESIGN.md, Pipeline, per shot).
+"""Upscaling of one shot (DESIGN.md, Pipeline, per shot), streamed end to end.
 
-The shot is VAE-encoded once. The DiT runs on windows of at most `window` latents, one window
-per call, consecutive windows sharing SHARED latents; the shared latents are mixed with cosine
-weights, and the whole shot is decoded in one stream. The noise is drawn once for the shot and
-sliced per window. Every step keeps numz's order and dtypes (src/core/generation_phases.py at
-4490bd1), so a shot that fits one window gives numz's one-batch output, bit for bit
-(milestone 1).
+The shot's frames are read as the VAE encodes them, in its slices of 4 frames, and the shot is
+encoded once. The DiT runs on windows of at most `window` latents, one window per call,
+consecutive windows sharing SHARED latents; the shared latents are mixed with cosine weights, and
+the whole shot is decoded in one stream, its frames written as they come. The noise is drawn once
+for the shot and sliced per window. Every step keeps numz's order and dtypes
+(src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives numz's one-batch
+output, bit for bit (milestone 1). Only the latents are ever whole in memory.
 """
 
 import math
+from collections.abc import Callable, Iterator
 
+import numpy as np
+import numpy.typing as npt
 import torch
 from torch import Tensor
 
 from seedvr2x.runtime import model
+from seedvr2x.runtime.job import SHARED, output_size
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
-
-# Latents shared by consecutive windows, M (DESIGN.md, Pipeline step 2): M = 2 cut the boundary
-# jump by 80% against independent batches in the stitching study (research/docs/stitching.md).
-SHARED = 2
 
 
 def window_layout(latents: int, window: int, shared: int = SHARED) -> list[tuple[int, int]]:
@@ -51,49 +52,99 @@ def mix_weights(shared: int) -> list[float]:
     return [0.5 + 0.5 * math.cos(math.pi * i / (shared + 1)) for i in range(1, shared + 1)]
 
 
+def padded_length(count: int) -> int:
+    """The frames of a shot of `count` frames once padded to 4n + 1: the VAE packs 4 frames per
+    latent after the first."""
+    return count + (-count + 1) % 4
+
+
 def pad_4n1(frames: Tensor) -> Tensor:
     """frames (T, ...) padded at the end to 4n + 1, as numz pads a batch
     (src/core/generation_utils.py, pad_video_temporal): the frames before the last, mirrored,
-    and the last one repeated beyond a full mirror. The VAE packs 4 frames per latent after the
-    first."""
-    count = frames.shape[0]
-    missing = (-count + 1) % 4
+    and the last one repeated beyond a full mirror."""
+    return torch.cat([frames, _padding(frames[-4:], frames.shape[0])])
+
+
+def _padding(tail: Tensor, count: int) -> Tensor:
+    """The frames pad_4n1 appends to a shot of `count` frames, from tail, its last min(count, 4)
+    frames: at most 3 are missing, so the mirror never reaches further back."""
+    missing = padded_length(count) - count
     if missing == 0:
-        return frames
+        return tail[:0]
     if missing >= count:
-        repeated = frames[-1:].repeat(missing - count + 1, *([1] * (frames.dim() - 1)))
-        return torch.cat([frames, frames[1:].flip(0), repeated])
-    return torch.cat([frames, frames[-missing - 1 : -1].flip(0)])
+        repeated = tail[-1:].repeat(missing - count + 1, *([1] * (tail.dim() - 1)))
+        return torch.cat([tail[1:].flip(0), repeated])
+    return tail[-missing - 1 : -1].flip(0)
+
+
+def input_slices(
+    read: Callable[[int], npt.NDArray[np.float32]], count: int, sizes: list[int]
+) -> Iterator[Tensor]:
+    """The `count` frames of a shot, read as they are needed, padded at the end as pad_4n1 pads
+    them, in slices of `sizes` frames (model.encode_slices): (t, H, W, 3) float16 on the CPU,
+    numz's input (model.to_input). Only the last 4 frames read are kept, for the padding."""
+    remaining, given = count, 0
+    tail: Tensor | None = None
+    padding: Tensor | None = None
+    for size in sizes:
+        parts: list[Tensor] = []
+        real = min(size, remaining)
+        if real:
+            frames = read(real)
+            if frames.shape[0] != real:
+                raise RuntimeError(f"{frames.shape[0]} frames read, {real} asked for")
+            part = model.to_input(frames)
+            tail = part[-4:] if tail is None else torch.cat([tail, part])[-4:]
+            parts.append(part)
+            remaining -= real
+        if real < size:
+            if padding is None:
+                assert tail is not None
+                padding = _padding(tail, count)
+            parts.append(padding[given : given + size - real])
+            given += size - real
+        yield parts[0] if len(parts) == 1 else torch.cat(parts)
+    if remaining or (padding is not None and given != padding.shape[0]):
+        raise ValueError(f"slices {sizes} for a shot of {count} frames")
 
 
 def upscale_shot(
     models: Models,
-    frames: Tensor,
-    resolution: int,
+    read: Callable[[int], npt.NDArray[np.float32]],
+    count: int,
+    target: tuple[int, int],
     seed: int,
+    write: Callable[[npt.NDArray[np.float32]], None],
     window: int | None = None,
     *,
     reseed_windows: bool = False,
-) -> Tensor:
-    """Upscale one shot, frames (T, H, W, 3) float16 in [0, 1] on the CPU.
+) -> None:
+    """Upscale one shot of `count` frames, read as they are needed, and write its frames as they
+    come out.
 
-    window caps the DiT windows, in latents (4 frames each after the first); None runs the shot
-    in one window. Returns (T, H', W', 3) float32 in [0, 1] on the CPU, the short side at
-    resolution.
+    read(n) gives the shot's next n frames, (n, H, W, 3) float32 in [0, 1]. target is the
+    (height, width) they are resized to (job.target_size). write(frames) takes the output's next
+    frames, (n, H', W', 3) float32 in [0, 1], the target cropped to even sides
+    (job.output_size). window caps the DiT windows, in latents (4 frames each after the first);
+    None runs the shot in one window.
 
     reseed_windows is for tests only. Each window then reseeds and draws its own noise, as the
     stitching study's reference implementation did (blend_patch.py, STITCH_LATENT), so that the
     windows, the mixing and the decode can be checked against it bit for bit.
     """
-    count, height, width, _ = frames.shape
-    out_height, out_width = model.resized_size(height, width, resolution)
+    out_height, out_width = output_size(target)
+    padded = padded_length(count)
     with torch.no_grad():
         # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
         model.set_seed(seed + 1_000_000)
-        # (T, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388)
-        video = pad_4n1(frames).permute(0, 3, 1, 2).to(models.device, COMPUTE_DTYPE)
-        latent = model.encode(models, model.input_transform(resolution)(video))
-        del video
+        transform = model.input_transform(target)
+        # (t, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388),
+        # then prepared slice by slice: every step works frame by frame.
+        slices = (
+            transform(frames.permute(0, 3, 1, 2).to(models.device, COMPUTE_DTYPE))
+            for frames in input_slices(read, count, model.encode_slices(models, padded))
+        )
+        latent = model.encode_stream(models, slices, padded)
         layout = window_layout(latent.shape[0], window or latent.shape[0])
         if reseed_windows:
             sampled = _sample_reseeded(models, latent, layout, seed)
@@ -111,12 +162,16 @@ def upscale_shot(
         del sampled
         # Decode (generation_phases.py:900-958) and post-process (:1340-1348), slice by slice:
         # (C, t, H, W) to (t, H, W, C) without the padding, then [-1, 1] to [0, 1] in place.
-        chunks: list[Tensor] = []
+        written = 0
         for decoded in model.decode_stream(models, merged.to(models.device)):
-            chunk = decoded.permute(1, 2, 3, 0)[:, :out_height, :out_width]
+            chunk = decoded.permute(1, 2, 3, 0)[: count - written, :out_height, :out_width]
+            if chunk.shape[0] == 0:
+                continue
             chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
-            chunks.append(chunk.to("cpu", torch.float32))
-        return torch.cat(chunks)[:count]
+            write(chunk.to("cpu", torch.float32).numpy())
+            written += chunk.shape[0]
+        if written != count:
+            raise RuntimeError(f"{written} frames decoded for a shot of {count}")
 
 
 def _sample_reseeded(

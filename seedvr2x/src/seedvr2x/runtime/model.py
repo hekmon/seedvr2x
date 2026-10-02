@@ -11,7 +11,7 @@ through typed functions.
 # pyright: basic
 
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,13 +22,13 @@ import torch
 from omegaconf import ListConfig, OmegaConf
 from safetensors.torch import load_file
 from torch import Tensor
-from torchvision.transforms import Compose, Lambda, Normalize
+from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
+from torchvision.transforms import functional as TVF
 
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
 from seedvr2x.vendor.data.image.transforms.divisible_crop import DivisiblePad
-from seedvr2x.vendor.data.image.transforms.na_resize import NaResize
 from seedvr2x.vendor.models.dit_3b import attention as attention_3b
 from seedvr2x.vendor.models.dit_7b import attention as attention_7b
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
@@ -165,28 +165,24 @@ def to_input(frames: npt.NDArray[np.float32]) -> Tensor:
     return torch.from_numpy(frames).to(torch.float16)
 
 
-def input_transform(resolution: int) -> Callable[[Tensor], Tensor]:
-    """numz's input preparation (src/core/generation_utils.py:72-84): the short side resized to
-    resolution (torchvision's bicubic, antialias on), values clamped to [0, 1], bottom and right
-    padded to multiples of 16, normalised to [-1, 1], and (T, C, H, W) to (C, T, H, W)."""
+def input_transform(target: tuple[int, int]) -> Callable[[Tensor], Tensor]:
+    """numz's input preparation (src/core/generation_utils.py:72-84) of frames (T, C, H, W): resized
+    to target, (height, width) (torchvision's bicubic, antialias on), values clamped to [0, 1],
+    bottom and right padded to multiples of 16, normalised to [-1, 1], and moved to (C, T, H, W).
+
+    The resize is NaResize's (side_resize.py: TVF.resize, bicubic, antialias on) to an explicit
+    size, the display aspect's (job.target_size). For square pixels it is the size torchvision
+    computes from NaResize's int, so the same call, bit for bit (tests/test_job.py)."""
+    size = list(target)
     return Compose(
         [
-            NaResize(resolution=resolution, mode="side", downsample_only=False, max_resolution=0),
+            Lambda(lambda x: TVF.resize(x, size, InterpolationMode.BICUBIC, antialias=True)),
             Lambda(lambda x: torch.clamp(x, 0.0, 1.0)),
             DivisiblePad((16, 16)),
             Normalize(0.5, 0.5),
             Lambda(lambda x: x.permute(1, 0, 2, 3)),
         ]
     )
-
-
-def resized_size(height: int, width: int, resolution: int) -> tuple[int, int]:
-    """Height and width of the output for frames of height by width: the resize's, each rounded
-    down to an even number (generation_utils.py:127-136)."""
-    resize = NaResize(resolution=resolution, mode="side", downsample_only=False, max_resolution=0)
-    resized = resize(torch.zeros(1, 3, height, width))
-    out_height, out_width = resized.shape[-2:]
-    return (out_height // 2) * 2, (out_width // 2) * 2
 
 
 def set_seed(seed: int) -> None:
@@ -198,6 +194,60 @@ def encode(models: Models, video: Tensor) -> Tensor:
     """VAE latent of video (C, T, H, W), as the runner returns it: (T', h, w, 16) in channel-major
     memory (a permuted view), which the noise drawn from it depends on."""
     return models.runner.vae_encode([video])[0]
+
+
+def encode_slices(models: Models, frames: int) -> list[int]:
+    """The frames of each slice the VAE encodes a shot of `frames` frames (4n + 1) in, as its
+    slicing_encode cuts it: the first frame with the next split_size (4), then split_size at a
+    time; the shot in one piece when it is no longer than 1 + split_size."""
+    vae = models.runner.vae
+    size: int = vae.slicing_sample_min_size
+    if not (vae.use_slicing and frames - 1 > size):
+        return [frames]
+    whole, rest = divmod(frames - 1, size)
+    parts = [size] * whole + ([rest] if rest else [])
+    return [1 + parts[0], *parts[1:]]
+
+
+@torch.no_grad()
+def encode_stream(models: Models, slices: Iterable[Tensor], frames: int) -> Tensor:
+    """VAE latent of a shot of `frames` frames (4n + 1) fed slice by slice: each (C, t, H, W) in
+    [-1, 1] as input_transform gives it, t following encode_slices. Returns encode's latent bit
+    for bit, (T', h, w, 16) in channel-major memory.
+
+    The steps are those of the runner's vae_encode (core/infer.py) and the VAE's slicing_encode:
+    the same slices, with the same causal memory states, then the posterior's mode (diffusers'
+    DiagonalGaussianDistribution: the first half of the channels), shifted and scaled. Only the
+    input is never whole in memory."""
+    runner, vae = models.runner, models.runner.vae
+    scale = runner.config.vae.scaling_factor
+    shift = runner.config.vae.get("shifting_factor", 0.0)
+    sizes = encode_slices(models, frames)
+    encoded: list[Tensor] = []
+    try:
+        for index, x in enumerate(slices):
+            if index >= len(sizes) or x.shape[1] != sizes[index]:
+                raise ValueError(f"slice {index} of {x.shape[1]} frames, the VAE takes {sizes}")
+            if next(vae.parameters()).dtype != x.dtype:
+                raise ValueError(f"input {x.dtype}, VAE {next(vae.parameters()).dtype}")
+            if len(sizes) == 1:
+                state = MemoryState.DISABLED
+            else:
+                state = MemoryState.INITIALIZING if index == 0 else MemoryState.ACTIVE
+            encoded.append(vae._encode(x.unsqueeze(0), memory_state=state))
+        if len(encoded) != len(sizes):
+            raise ValueError(f"{len(encoded)} slices, the VAE takes {sizes}")
+    finally:
+        for module in vae.modules():
+            if isinstance(module, InflatedCausalConv3d) and module.memory is not None:
+                module.memory = None
+    h = torch.cat(encoded, dim=2) if len(encoded) > 1 else encoded[0]
+    mean = torch.chunk(h, 2, dim=1)[0]  # (1, 16, T', h, w)
+    if isinstance(scale, ListConfig):
+        scale = torch.tensor(scale, device=mean.device, dtype=mean.dtype)
+    if isinstance(shift, ListConfig):
+        shift = torch.tensor(shift, device=mean.device, dtype=mean.dtype)
+    return ((mean.movedim(1, -1) - shift) * scale).squeeze(0)
 
 
 def condition(models: Models, noise: Tensor, latent: Tensor) -> Tensor:
