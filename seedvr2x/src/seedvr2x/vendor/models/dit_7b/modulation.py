@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: no sequence parallelism.
 
 from typing import Callable, List, Optional
 import torch
@@ -18,7 +19,6 @@ from einops import rearrange
 from torch import nn
 
 from ...common.cache import Cache
-from ...common.distributed.ops import slice_inputs
 
 # (dim: int, emb_dim: int)
 ada_layer_type = Callable[[int, int], nn.Module]
@@ -74,10 +74,9 @@ class AdaSingle(nn.Module):
         if hid_len is not None:
             emb = cache(
                 f"emb_repeat_{idx}_{branch_tag}",
-                lambda: slice_inputs(
-                    torch.repeat_interleave(emb, hid_len, dim=0),
-                    dim=0,
-                ),
+                # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code): slice_inputs
+                # returned the repeated emb unchanged, as no sequence-parallel group is ever set up.
+                lambda: torch.repeat_interleave(emb, hid_len, dim=0),
             )
 
         shiftA, scaleA, gateA = emb.unbind(-1)

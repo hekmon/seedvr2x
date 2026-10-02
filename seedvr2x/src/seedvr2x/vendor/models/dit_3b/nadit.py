@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: no sequence parallelism.
 
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union, Callable
@@ -18,7 +19,6 @@ import torch
 from torch import nn
 
 from ...common.cache import Cache
-from ...common.distributed.ops import slice_inputs
 
 from . import na
 from .embedding import TimeEmbedding
@@ -198,20 +198,19 @@ class NaDiT(nn.Module):
     ):
         cache = Cache(disable=disable_cache)
 
-        # slice vid after patching in when using sequence parallelism
+        # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code): slice_inputs returned
+        # txt unchanged in both branches, as no sequence-parallel group is ever set up, and the
+        # patching classes no longer slice vid.
         if isinstance(txt, list):
             assert isinstance(self.txt_in, nn.ModuleList)
             txt = [
                 na.unflatten(fc(i), s) for fc, i, s in zip(self.txt_in, txt, txt_shape)
             ]  # B L D
             txt, txt_shape = na.flatten([torch.cat(t, dim=0) for t in zip(*txt)])
-            txt = slice_inputs(txt, dim=0)
         else:
-            txt = slice_inputs(txt, dim=0)
             txt = self.txt_in(txt)
 
         # Video input.
-        # Sequence parallel slicing is done inside patching class.
         vid, vid_shape = self.vid_in(vid, vid_shape, cache)
 
         # Embedding input.

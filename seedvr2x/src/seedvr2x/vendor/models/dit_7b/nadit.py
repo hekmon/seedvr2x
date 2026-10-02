@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: no sequence parallelism.
 
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union, Callable
@@ -18,7 +19,6 @@ import torch
 from torch import nn
 
 from ...common.cache import Cache
-from ...common.distributed.ops import slice_inputs
 
 from . import na
 from .embedding import TimeEmbedding
@@ -161,12 +161,12 @@ class NaDiT(nn.Module):
         # Text input.
         if txt_shape.size(-1) == 1 and self.need_txt_repeat:
             txt, txt_shape = na.repeat(txt, txt_shape, "l c -> t l c", t=vid_shape[:, 0])
-        # slice vid after patching in when using sequence parallelism
-        txt = slice_inputs(txt, dim=0)
+        # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code): slice_inputs returned
+        # txt unchanged, as no sequence-parallel group is ever set up, and the patching classes
+        # no longer slice vid.
         txt = self.txt_in(txt)
 
         # Video input.
-        # Sequence parallel slicing is done inside patching class.
         vid, vid_shape = self.vid_in(vid, vid_shape)
 
         # Embedding input.
@@ -322,12 +322,11 @@ class NaDiTUpscaler(nn.Module):
         # Text input.
         if txt_shape.size(-1) == 1 and self.need_txt_repeat:
             txt, txt_shape = na.repeat(txt, txt_shape, "l c -> t l c", t=vid_shape[:, 0])
-        # slice vid after patching in when using sequence parallelism
-        txt = slice_inputs(txt, dim=0)
+        # seedvr2x: no sequence parallelism, as in NaDiT.forward: slice_inputs returned txt
+        # unchanged.
         txt = self.txt_in(txt)
 
         # Video input.
-        # Sequence parallel slicing is done inside patching class.
         vid, vid_shape = self.vid_in(vid, vid_shape)
 
         # Embedding input.

@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: no sequence parallelism.
 
 from typing import Tuple, Union
 import torch
@@ -19,7 +20,6 @@ from torch import nn
 from torch.nn.modules.utils import _triple
 
 from ...common.cache import Cache
-from ...common.distributed.ops import gather_outputs, slice_inputs
 
 from . import na
 
@@ -79,8 +79,8 @@ class NaPatchIn(PatchIn):
             vid, vid_shape = na.rearrange(
                 vid, vid_shape, "(T t) (H h) (W w) c -> T H W (t h w c)", t=t, h=h, w=w
             )
-        # slice vid after patching in when using sequence parallelism
-        vid = slice_inputs(vid, dim=0)
+        # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code): slice_inputs returned
+        # vid unchanged, as no sequence-parallel group is ever set up.
         vid = self.proj(vid)
         return vid, vid_shape
 
@@ -97,14 +97,8 @@ class NaPatchOut(PatchOut):
     ]:
         t, h, w = self.patch_size
         vid = self.proj(vid)
-        # gather vid before patching out when enabling sequence parallelism
-        vid = gather_outputs(
-            vid,
-            gather_dim=0,
-            padding_dim=0,
-            unpad_shape=vid_shape,
-            cache=cache.namespace("vid"),
-        )
+        # seedvr2x: no sequence parallelism, as in NaPatchIn: gather_outputs returned vid
+        # unchanged.
         if not (t == h == w == 1):
             vid, vid_shape = na.rearrange(
                 vid, vid_shape, "T H W (t h w c) -> (T t) (H h) (W w) c", t=t, h=h, w=w

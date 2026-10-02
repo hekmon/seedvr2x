@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: no sequence parallelism.
 
 from typing import Tuple, Union
 import torch
@@ -19,12 +20,6 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.modules.utils import _triple
 from ....common.half_precision_fixes import safe_pad_operation
-from ....common.distributed.ops import (
-    gather_heads,
-    gather_heads_scatter_seq,
-    gather_seq_scatter_heads_qkv,
-    scatter_heads,
-)
 
 from ..attention import TorchAttention
 from ..mlp import get_mlp
@@ -77,7 +72,9 @@ class MMWindowAttention(nn.Module):
     ]:
         # Project q, k, v.
         vid_qkv, txt_qkv = self.proj_qkv(vid, txt)
-        vid_qkv = gather_seq_scatter_heads_qkv(vid_qkv, seq_dim=2)
+        # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code):
+        # gather_seq_scatter_heads_qkv returned vid_qkv unchanged, as no sequence-parallel group is
+        # ever set up.
         _, T, H, W, _ = vid_qkv.shape
         _, L, _ = txt.shape
 
@@ -97,7 +94,7 @@ class MMWindowAttention(nn.Module):
 
         vid_qkv = rearrange(vid_qkv, "b T H W (o h d) -> o b h (T H W) d", o=3, d=self.head_dim)
         txt_qkv = rearrange(txt_qkv, "b L (o h d) -> o b h L d", o=3, d=self.head_dim)
-        txt_qkv = scatter_heads(txt_qkv, dim=2)
+        # seedvr2x: no sequence parallelism, as above: scatter_heads returned txt_qkv unchanged.
 
         vid_q, vid_k, vid_v = vid_qkv.unbind()
         txt_q, txt_k, txt_v = txt_qkv.unbind()
@@ -141,7 +138,8 @@ class MMWindowAttention(nn.Module):
             nh=nh,
             nw=nw,
         )
-        vid_out = gather_heads_scatter_seq(vid_out, head_dim=4, seq_dim=2)
+        # seedvr2x: no sequence parallelism, as above: gather_heads_scatter_seq returned vid_out
+        # unchanged.
 
         # Process text attention.
         txt_msk = safe_pad_operation(txt_mask, (T * H * W, 0), value=True)
@@ -153,7 +151,7 @@ class MMWindowAttention(nn.Module):
             txt_msk,
         )
         txt_out = rearrange(txt_out, "b h L d -> b L (h d)")
-        txt_out = gather_heads(txt_out, dim=2)
+        # seedvr2x: no sequence parallelism, as above: gather_heads returned txt_out unchanged.
 
         # Project output.
         vid_out, txt_out = self.proj_out(vid_out, txt_out)

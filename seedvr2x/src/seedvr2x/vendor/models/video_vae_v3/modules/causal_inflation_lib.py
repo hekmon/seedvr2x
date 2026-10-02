@@ -11,7 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: no retry on OOM; the Conv3d workaround flag is set here.
+# Modified for seedvr2x: no retry on OOM; the Conv3d workaround flag is set here; no sequence parallelism.
 
 import math
 from contextlib import contextmanager
@@ -35,21 +35,8 @@ NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND = True
 # Single GPU inference - no distributed processing needed
 #print("Warning: Using single GPU inference mode - distributed features disabled in causal_inflation_lib")
 
-# Mock distributed functions for single GPU inference
-def get_sequence_parallel_group():
-    return None
-
-def get_sequence_parallel_rank():
-    return 0
-
-def get_sequence_parallel_world_size():
-    return 1
-
-def get_next_sequence_parallel_rank():
-    return 0
-
-def get_prev_sequence_parallel_rank():
-    return 0
+# seedvr2x: numz's sequence-parallel stubs removed (DESIGN.md, Vendored model code). Only
+# get_sequence_parallel_group was called, in InflatedCausalConv3d.forward, and it returned None.
 
 
 @contextmanager
@@ -216,7 +203,8 @@ class InflatedCausalConv3d(Conv3d):
         if (
             math.isinf(self.memory_limit)
             and torch.is_tensor(input)
-            and get_sequence_parallel_group() is None
+            # seedvr2x: "and get_sequence_parallel_group() is None" dropped: always True, as numz's
+            # stub returned None.
         ):
             return self.basic_forward(input, memory_state)
         return self.slicing_forward(input, memory_state)

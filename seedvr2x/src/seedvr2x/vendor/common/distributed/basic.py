@@ -11,17 +11,15 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: CUDA device only.
+# Modified for seedvr2x: CUDA device only; no init_torch or convert_to_ddp.
 
 """
 Distributed basic functions.
 """
 
 import os
-from datetime import timedelta
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel
 
 def get_global_rank() -> int:
     """
@@ -60,27 +58,6 @@ def barrier_if_distributed(*args, **kwargs):
         return dist.barrier(*args, **kwargs)
 
 
-def init_torch(cudnn_benchmark=True, timeout=timedelta(seconds=600)):
-    """
-    Common PyTorch initialization configuration.
-    """
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = cudnn_benchmark
-    torch.cuda.set_device(get_local_rank())
-    dist.init_process_group(
-        backend="nccl",
-        rank=get_global_rank(),
-        world_size=get_world_size(),
-        timeout=timeout,
-    )
-
-
-def convert_to_ddp(module: torch.nn.Module, **kwargs) -> DistributedDataParallel:
-    return DistributedDataParallel(
-        module=module,
-        device_ids=[get_local_rank()],
-        output_device=get_local_rank(),
-        **kwargs,
-    )
-    
+# seedvr2x: init_torch and convert_to_ddp removed: nothing calls them, in numz either. init_torch,
+# which ByteDance's scripts call (projects/inference_seedvr2_7b.py:74), turns TF32 on, where numz
+# runs with torch's defaults.

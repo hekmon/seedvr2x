@@ -15,10 +15,11 @@ Usage, from seedvr2x/:
 copy refuses to overwrite a file that differs from numz unless --force: those are our changes.
 diff compares vendor/ with numz, or with ByteDance (--bytedance), whose absolute imports are first
 rewritten in numz's relative form unless --raw, so that the import style isn't reported as a
-change. check verifies that a file carries the marker exactly when it differs from numz, that the
-original header is kept above it, that binary files are untouched, that every relative import
-resolves inside vendor/, which keeps numz's runtime out, and that ruff finds no syntax error or
-undefined name that numz's own files don't have.
+change, and lists the numz files dropped on purpose. check verifies that a file carries the marker
+exactly when it differs from numz, that the original header is kept above it, that binary files
+are untouched, that no dropped file is back, that every relative import resolves inside vendor/,
+which keeps numz's runtime out, and that ruff finds no syntax error or undefined name that numz's
+own files don't have.
 """
 
 import argparse
@@ -72,9 +73,7 @@ FILES: tuple[str, ...] = (
     "src/common/diffusion/types.py",
     "src/common/diffusion/utils.py",
     "src/common/distributed/__init__.py",
-    "src/common/distributed/advanced.py",
     "src/common/distributed/basic.py",
-    "src/common/distributed/ops.py",
     "src/common/half_precision_fixes.py",
     "src/common/logger.py",
     "src/common/seed.py",
@@ -121,6 +120,14 @@ FILES: tuple[str, ...] = (
     "src/models/video_vae_v3/modules/global_config.py",
     "src/models/video_vae_v3/modules/types.py",
     "src/models/video_vae_v3/s8_c16_t4_inflation_sd3.yaml",
+)
+
+# numz files deliberately no longer vendored, which numz's model code imports: the
+# sequence-parallel code, an identity on one GPU (DESIGN.md, Vendored model code), removed with
+# its calls.
+DROPPED: tuple[str, ...] = (
+    "src/common/distributed/advanced.py",
+    "src/common/distributed/ops.py",
 )
 
 # numz path prefix to ByteDance path prefix, first match wins (provenance.md, Lineage).
@@ -212,7 +219,7 @@ def to_numz_imports(text: str, numz_path: str) -> str:
 @dataclass
 class Comparison:
     path: str  # numz path
-    status: str  # identical, modified, missing (from vendor/), absent (from upstream)
+    status: str  # identical, modified, missing (from vendor/), absent (from upstream), dropped
     added: int = 0
     removed: int = 0
     diff: str = ""
@@ -247,14 +254,14 @@ def read_ours(numz_path: str) -> bytes | None:
     return path.read_bytes() if path.is_file() else None
 
 
-def selected(paths: list[str]) -> list[str]:
-    """FILES, or those of them under the given vendor/ paths."""
+def selected(paths: list[str], files: tuple[str, ...] = FILES) -> list[str]:
+    """files (FILES by default), or those of them under the given vendor/ paths."""
     if not paths:
-        return list(FILES)
+        return list(files)
     wanted = [p.rstrip("/").split("vendor/", 1)[-1] for p in paths]
     return [
         f
-        for f in FILES
+        for f in files
         if any(vendor_path(f) == w or vendor_path(f).startswith(w + "/") for w in wanted)
     ]
 
@@ -290,12 +297,13 @@ def cmd_diff(paths: list[str], bytedance: bool, raw: bool, full: bool) -> int:
         if bytedance and upstream is not None and not raw and not is_binary(numz_path):
             upstream = to_numz_imports(upstream.decode(), numz_path).encode()
         results.append(compare(upstream, read_ours(numz_path), numz_path, label))
+    dropped = [Comparison(numz_path, "dropped") for numz_path in selected(paths, DROPPED)]
     counts = {s: sum(1 for r in results if r.status == s) for s in ("identical", "modified")}
     print(
         f"vendor/ against {label} {commit[:7]}: {len(results)} files, "
-        f"{counts['identical']} identical, {counts['modified']} modified"
+        f"{counts['identical']} identical, {counts['modified']} modified; {len(dropped)} dropped"
     )
-    for r in results:
+    for r in results + dropped:
         if r.status == "identical":
             continue
         where = (
@@ -371,6 +379,7 @@ def cmd_check(numz: Path) -> int:
     check_commit(numz, NUMZ_COMMIT)
     problems: list[str] = []
     expected = {vendor_path(f) for f in FILES}
+    dropped = {vendor_path(f) for f in DROPPED}
     for numz_path in FILES:
         where = f"vendor/{vendor_path(numz_path)}"
         upstream = git_show(numz, NUMZ_COMMIT, numz_path)
@@ -398,7 +407,11 @@ def cmd_check(numz: Path) -> int:
             problems += [f"{where}: {p}" for p in unresolved_imports(text, vendor_path(numz_path))]
     for path in sorted(VENDOR.rglob("*")):
         relative = path.relative_to(VENDOR).as_posix()
-        if path.is_file() and "__pycache__" not in path.parts and relative not in expected:
+        if not path.is_file() or "__pycache__" in path.parts or relative in expected:
+            continue
+        if relative in dropped:
+            problems.append(f"vendor/{relative}: dropped on purpose (DROPPED), but back")
+        else:
             problems.append(f"vendor/{relative}: not a numz file")
     problems += new_lint_errors(numz)
     for problem in problems:

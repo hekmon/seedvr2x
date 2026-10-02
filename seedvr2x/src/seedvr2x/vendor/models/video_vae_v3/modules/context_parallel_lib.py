@@ -11,26 +11,19 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: no sequence parallelism.
 
 from typing import List
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from .types import MemoryState
-
 # Single GPU inference - no distributed processing needed
 # print("Warning: Using single GPU inference mode - distributed features disabled")
 
-
-def causal_conv_slice_inputs(x, split_size, memory_state):
-    # Single GPU inference - no slicing needed, return full tensor
-    return x
-
-
-def causal_conv_gather_outputs(x):
-    # Single GPU inference - no gathering needed, return tensor as is
-    return x
+# seedvr2x: causal_conv_slice_inputs and causal_conv_gather_outputs removed with their calls in
+# attn_video_vae.py, as was MemoryState, imported for ByteDance's sequence-parallel slicing:
+# numz's stubs returned their input (DESIGN.md, Vendored model code).
 
 
 def get_output_len(conv_module, input_len, pad_len, dim=0):

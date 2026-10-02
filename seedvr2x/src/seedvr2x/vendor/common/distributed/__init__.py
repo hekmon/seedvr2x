@@ -11,27 +11,25 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: no init_torch or convert_to_ddp.
 
 """
 Distributed package.
 """
 
+# seedvr2x: init_torch and convert_to_ddp are removed from basic.py (see there).
 from .basic import (
     barrier_if_distributed,
-    convert_to_ddp,
     get_device,
     get_global_rank,
     get_local_rank,
     get_world_size,
-    init_torch,
 )
 
 __all__ = [
     "barrier_if_distributed",
-    "convert_to_ddp",
     "get_device",
     "get_global_rank",
     "get_local_rank",
     "get_world_size",
-    "init_torch",
 ]

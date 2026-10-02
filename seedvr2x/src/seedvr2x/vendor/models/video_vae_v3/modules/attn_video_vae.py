@@ -8,7 +8,7 @@
 # available at http://www.apache.org/licenses/LICENSE-2.0.
 #
 # This modified file is released under the same license.
-# Modified for seedvr2x: no retry on OOM.
+# Modified for seedvr2x: no retry on OOM; no sequence parallelism.
 
 
 from contextlib import nullcontext
@@ -30,17 +30,12 @@ from diffusers.utils.accelerate_utils import apply_forward_hook
 from einops import rearrange
 from ....common.half_precision_fixes import safe_pad_operation, safe_interpolate_operation
 
-from ....common.distributed.advanced import get_sequence_parallel_world_size
 from ....common.logger import get_logger
 from .causal_inflation_lib import (
     InflatedCausalConv3d,
     causal_norm_wrapper,
     init_causal_conv3d,
     remove_head,
-)
-from .context_parallel_lib import (
-    causal_conv_gather_outputs,
-    causal_conv_slice_inputs,
 )
 from .global_config import set_norm_limit
 from .types import (
@@ -1204,7 +1199,8 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         # Only transfer if not already on correct device
         _x = x if x.device == self.device else x.to(self.device)
         
-        _x = causal_conv_slice_inputs(_x, self.slicing_sample_min_size, memory_state=memory_state)
+        # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code): numz's stub
+        # causal_conv_slice_inputs returned _x unchanged (context_parallel_lib.py:26-28).
         h = self.encoder(_x, memory_state=memory_state)
         
         if self.quant_conv is not None:
@@ -1212,7 +1208,8 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         else:
             output = h
         
-        output = causal_conv_gather_outputs(output)
+        # seedvr2x: numz's stub causal_conv_gather_outputs returned output unchanged
+        # (context_parallel_lib.py:31-33).
         
         # MPS memory leak workaround (pytorch/pytorch#155060)
         if self.device.type == 'mps':
@@ -1226,13 +1223,14 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         # Only transfer if not already on correct device
         _z = z if z.device == self.device else z.to(self.device)
         
-        _z = causal_conv_slice_inputs(_z, self.slicing_latent_min_size, memory_state=memory_state)
+        # seedvr2x: no sequence parallelism, as in _encode: causal_conv_slice_inputs returned _z
+        # unchanged.
         
         if self.post_quant_conv is not None:
             _z = self.post_quant_conv(_z, memory_state=memory_state)
         
         output = self.decoder(_z, memory_state=memory_state)
-        output = causal_conv_gather_outputs(output)
+        # seedvr2x: as in _encode, causal_conv_gather_outputs returned output unchanged.
         
         # MPS memory leak workaround (pytorch/pytorch#155060)
         if self.device.type == 'mps':
@@ -1242,9 +1240,11 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
         return output if output.device == z.device else output.to(z.device)
 
     def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
-        sp_size = get_sequence_parallel_world_size()
-        if self.use_slicing and (x.shape[2] - 1) > self.slicing_sample_min_size * sp_size:
-            x_slices = x[:, :, 1:].split(split_size=self.slicing_sample_min_size * sp_size, dim=2)
+        # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code): sp_size was 1 with
+        # no group (common/distributed/advanced.py:93-98), and the slicing sizes are ints, which
+        # "* sp_size" left as they were.
+        if self.use_slicing and (x.shape[2] - 1) > self.slicing_sample_min_size:
+            x_slices = x[:, :, 1:].split(split_size=self.slicing_sample_min_size, dim=2)
             encoded_slices = [
                 self._encode(
                     torch.cat((x[:, :, :1], x_slices[0]), dim=2),
@@ -1266,9 +1266,9 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
             return self._encode(x)
 
     def slicing_decode(self, z: torch.Tensor) -> torch.Tensor:
-        sp_size = get_sequence_parallel_world_size()
-        if self.use_slicing and (z.shape[2] - 1) > self.slicing_latent_min_size * sp_size:
-            z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size * sp_size, dim=2)
+        # seedvr2x: no sequence parallelism, as in slicing_encode: sp_size was 1.
+        if self.use_slicing and (z.shape[2] - 1) > self.slicing_latent_min_size:
+            z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size, dim=2)
             decoded_slices = [
                 self._decode(
                     torch.cat((z[:, :, :1], z_slices[0]), dim=2),

@@ -11,6 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
+# Modified for seedvr2x: no sequence parallelism.
 
 from typing import Tuple, Union
 import torch
@@ -19,7 +20,6 @@ from torch.nn import functional as F
 
 # from ..cache import Cache
 from ....common.cache import Cache
-from ....common.distributed.ops import gather_heads_scatter_seq, gather_seq_scatter_heads_qkv
 
 from .. import na
 from ..attention import FlashAttentionVarlen
@@ -78,18 +78,9 @@ class NaSwinAttention(MMWindowAttention):
     ]:
 
         vid_qkv, txt_qkv = self.proj_qkv(vid, txt)
-        vid_qkv = gather_seq_scatter_heads_qkv(
-            vid_qkv,
-            seq_dim=0,
-            qkv_shape=vid_shape,
-            cache=cache.namespace("vid"),
-        )
-        txt_qkv = gather_seq_scatter_heads_qkv(
-            txt_qkv,
-            seq_dim=0,
-            qkv_shape=txt_shape,
-            cache=cache.namespace("txt"),
-        )
+        # seedvr2x: no sequence parallelism (DESIGN.md, Vendored model code):
+        # gather_seq_scatter_heads_qkv returned vid_qkv and txt_qkv unchanged, as no
+        # sequence-parallel group is ever set up.
 
         # re-org the input seq for window attn
         cache_win = cache.namespace(f"{self.window_method}_{self.window}_sd3")
@@ -149,8 +140,8 @@ class NaSwinAttention(MMWindowAttention):
         txt_out = rearrange(txt_out, "l h d -> l (h d)")
         vid_out = window_reverse(vid_out)
 
-        vid_out = gather_heads_scatter_seq(vid_out, head_dim=1, seq_dim=0)
-        txt_out = gather_heads_scatter_seq(txt_out, head_dim=1, seq_dim=0)
+        # seedvr2x: no sequence parallelism, as above: gather_heads_scatter_seq returned vid_out
+        # and txt_out unchanged.
 
         vid_out, txt_out = self.proj_out(vid_out, txt_out)
 
