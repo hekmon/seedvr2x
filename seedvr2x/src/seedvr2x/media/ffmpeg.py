@@ -29,8 +29,9 @@ def input_args(path: Path) -> list[str]:
     return ["-noautorotate", "-i", str(path)]
 
 
-def check() -> str:
-    """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs and return ffmpeg's version.
+def check(output_encoders: tuple[str, ...] = ()) -> str:
+    """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs, and for the output's own
+    encoders (png for PNG output), and return ffmpeg's version.
 
     Raises MediaError naming what is missing."""
     for tool in ("ffmpeg", "ffprobe"):
@@ -39,7 +40,7 @@ def check() -> str:
     filters, encoders, decoders = _listed("-filters"), _listed("-encoders"), _listed("-decoders")
     missing = [
         *(f"the {name} filter" for name in FILTERS if name not in filters),
-        *(f"the {name} encoder" for name in ENCODERS if name not in encoders),
+        *(f"the {name} encoder" for name in ENCODERS + output_encoders if name not in encoders),
         *(f"the {name} decoder" for name in DECODERS if name not in decoders),
     ]
     if missing:

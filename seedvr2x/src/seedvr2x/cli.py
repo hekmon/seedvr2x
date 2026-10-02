@@ -10,6 +10,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 from seedvr2x.media.conversion import MATRICES
+from seedvr2x.media.writer import FORMATS
 
 logger = logging.getLogger("seedvr2x")
 
@@ -22,7 +23,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
     parser.add_argument("input", type=Path, help="video file, upscaled as one shot")
-    parser.add_argument("-o", "--output", type=Path, required=True, help="FFV1 master (.mkv)")
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        required=True,
+        help="FFV1 master (.mkv), or the directory of the PNG frames",
+    )
+    parser.add_argument(
+        "--format",
+        choices=FORMATS,
+        default="gbrp16le",
+        help="FFV1 master in 16-bit RGB or in 10-bit YUV 4:2:0 (BT.709 at HD sizes, limited range),"
+        " or 16-bit PNG (default: %(default)s)",
+    )
     parser.add_argument("--model-dir", type=Path, required=True, help="directory of the weights")
     parser.add_argument("--dit-model", required=True, help="DiT file, e.g. 7B fp16 safetensors")
     parser.add_argument("--vae-model", default="ema_vae_fp16.safetensors", help="VAE file")
@@ -69,7 +83,7 @@ def _run(args: argparse.Namespace) -> int:
 
     # The build and the source are checked before anything touches the GPU.
     try:
-        logger.info("ffmpeg %s", ffmpeg.check())
+        logger.info("ffmpeg %s", ffmpeg.check(("png",) if args.format == "png" else ()))
         source = examine(args.input, args.input_matrix, args.input_sar)
     except MediaError as error:
         logger.error("%s", error)
@@ -79,7 +93,7 @@ def _run(args: argparse.Namespace) -> int:
     import torch
 
     from seedvr2x.media.decode import to_float32
-    from seedvr2x.media.ffv1 import write_gbrp16
+    from seedvr2x.media.writer import Tags, open_writer
     from seedvr2x.runtime.model import load_models, to_input
     from seedvr2x.runtime.shot import upscale_shot
 
@@ -105,8 +119,21 @@ def _run(args: argparse.Namespace) -> int:
     out = upscale_shot(models, to_input(frames), args.resolution, args.seed, args.window)
     logger.info("upscaled in %.1f s: %s", time.monotonic() - started, tuple(out.shape))
     out_frames = out.numpy()
-    write_gbrp16(args.output, out_frames, source.stream.frame_rate)
-    logger.info("wrote %s", args.output)
+    _, out_height, out_width, _ = out_frames.shape
+    try:
+        with open_writer(
+            args.format,
+            args.output,
+            out_width,
+            out_height,
+            source.stream.frame_rate,
+            Tags.of(source.stream),
+        ) as writer:
+            writer.write(out_frames)
+    except MediaError as error:
+        logger.error("%s", error)
+        return 1
+    logger.info("wrote %s: %d frames, %s", args.output, writer.written, args.format)
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
         for index, frame in enumerate(out_frames):

@@ -83,3 +83,10 @@ def test_without_ffprobe(build: Path) -> None:
     fake_build(build, ffprobe=False)
     with pytest.raises(MediaError, match="ffprobe not found"):
         ffmpeg.check()
+
+
+def test_png_encoder_needed_only_for_png_output(build: Path) -> None:
+    fake_build(build, encoders=("ffv1",))
+    assert ffmpeg.check() == "n0.0-fake"
+    with pytest.raises(MediaError, match="lacks the png encoder"):
+        ffmpeg.check(("png",))
