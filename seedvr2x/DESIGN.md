@@ -243,6 +243,12 @@ The rule: the upscale must look like its source in any given player.
      different renderings. Milestone 2 kept the sliced scheme: it is 1.2–2.0 dB closer to the
      one-batch run at every offset to the boundaries, with the same boundary steps (see
      [Validation milestones](#validation-milestones)).
+   - each shot's generator is seeded with the seed plus the shot's first frame index in the
+     source.
+     - A shot starting at frame 0 gets the plain seed, as numz's single batch does.
+     - Shots never share a noise pattern.
+     - A shot's output depends only on the seed, its frames and its place in the source, so a
+       resumed or re-cut job reproduces the untouched shots exactly.
    - one window per DiT call. Batching windows breaks `na.unconcat_coalesce` when their
      window counts differ, and the planner sizes a window to fill the memory anyway.
 
@@ -384,6 +390,13 @@ Work is saved in resumable units; a stop loses only the unit in progress.
 | `--cuda_device` | one device per process |
 
 ## Validation milestones
+
+The numbers name the checks, not the build order. After milestones 1 and 2 comes the I/O layer:
+- decode, writers, cut-list and directory input, output segments and the manifest
+- checked by the conversion tests (see [Input](#input)), frame counts, and per-shot identity
+
+Every later milestone needs it: resume needs segments and a manifest, assembly needs decode and
+writers, and the planner needs real shot lengths.
 
 1. **Reproduce numz.** Passed on 2026-10-02: 45 of 45 frames bit-identical, on the FFV1
    masters and on the float32 dumps. Same settings: one batch, no tiling, `flash_attn_2`, same
