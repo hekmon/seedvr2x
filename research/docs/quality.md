@@ -214,7 +214,9 @@ motion.
   compute and blurs (Lap var −10%, the 50/50 frames average two reconstructions); at batch 21 it
   costs +8%.
 - Overlap 5 (one frame mixed) or 6 and more (two or more frames mixed) would follow the same
-  logic; not measured.
+  logic; not measured here. [stitching.md](stitching.md) measures overlaps 2–8 with the CLI's
+  weights and with corrected ones (a linear ramp over 4 frames removes two thirds of the jump),
+  and latent-space stitching.
 
 ## `--prepend_frames`
 
@@ -345,7 +347,7 @@ not measured):
 |---|---|
 | `--color_correction` | Keep **`lab`** (default): it removes the model's colour, saturation and brightness drift without touching detail, and halves the low-frequency jumps at batch boundaries. `wavelet` is a cheaper second best (leaves some extra saturation). Avoid `hsv` (no brightness fix) and `adain` (flattens); `wavelet_adaptive` brings nothing over `lab` here. `none` keeps the model's +30% saturation and level shift |
 | `--batch_size` | As large as VRAM allows, ideally **one batch per shot**: closer to the input, no boundary jumps inside the shot. With several batches per shot, larger batches mean fewer but stronger jumps. Batch 1 is steady on held frames but slow and least faithful |
-| `--temporal_overlap` | 0, or **3** (or another odd value ≥ 3) if boundary jumps show: only odd overlaps from 3 up actually cross-fade a frame. 1, 2 and 4 cost compute for nothing |
+| `--temporal_overlap` | 0, or **3** (or another odd value ≥ 3) if boundary jumps show: only odd overlaps from 3 up actually cross-fade a frame. 1, 2 and 4 cost compute for nothing. With corrected weights ([`blend_patch.py`](../scripts/blend_patch.py)), 4 with a linear ramp: see [stitching.md](stitching.md#recommendations) |
 | `--prepend_frames` | Optional (makes the clip's first frame an ordinary frame). On one GPU, **cut the first N output frames yourself** |
 | `--uniform_batch_size` | On when the last batch is much shorter than the others: smaller jump into it, less altered frames, at the cost of computing a full batch |
 | `--input_noise_scale`, `--latent_noise_scale` | 0. Input noise turns into texture and grain; latent noise (overly strong because of its timestep shift) washes the image out |

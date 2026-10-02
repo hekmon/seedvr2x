@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Severity | wrong output (hard seam at every chunk boundary) |
-| Status | from code, not reproduced |
+| Status | from code; the equivalent batch-boundary case measured (context only vs blended), chunk mode itself not run |
 | Affected options | `--chunk_size` with `--temporal_overlap` |
 | Version | SeedVR2 `4490bd1` (v2.5.24) |
 
@@ -104,6 +104,14 @@ weights of [06](06-temporal-overlap-blend-weights.md) actually blending; with to
 overlap of 3 would mix one frame.
 
 Alternatively, fix the docstrings and the help to say "context frames, not blended".
+
+Measured on the batch-boundary equivalent ([stitching.md](../docs/stitching.md#pixel-space-results-clip-b)):
+the `prev` curve of [`blend_patch.py`](../scripts/blend_patch.py) keeps the previous batch on the
+overlap frames and switches hard K frames into the new one, which is what a chunk boundary does
+today (minus the chunk's model reloads). On held drawings (clip B, 81 frames, batch 21, `lab`),
+the jump the boundary adds over a single-batch reference drops from 0.78 (no overlap) to 0.58
+with 4 context frames and 0.50 with 8: context alone removes a quarter to a third of it. A real
+linear cross-fade over the same 4 frames brings it to 0.25 (−67%).
 
 Test: the command above on held content; the change across frames 39–42 should drop to the
 level of a blended batch boundary, and the output must still have 84 frames, aligned with the

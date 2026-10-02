@@ -28,6 +28,7 @@ is the 3B fp8 model ([cli-flags.md](docs/cli-flags.md#models)).
 - **Keep the default `cudaMallocAsync` allocator** (or `expandable_segments:True`): on a full card it trims its pool; `backend:native` fragments and fails ([vram.md](docs/vram.md#the-allocator)).
 - **Keep `--color_correction lab`:** it removes the model's colour drift (+30% saturation) without losing detail and halves the low-frequency jumps at batch boundaries ([quality.md](docs/quality.md#colour-correction)). It runs StableSR-derived code under a non-commercial licence, like every mode but `hsv` and `none` ([cli-flags.md](docs/cli-flags.md#quality)).
 - **`--temporal_overlap` only cross-fades with odd values ≥ 3:** 1, 2 and 4 cost compute and change nothing at the boundary ([quality.md](docs/quality.md#--temporal_overlap)).
+- **Batch boundaries need a real cross-fade, best in latent space:** a linear ramp over 4 overlap frames (patched in, the CLI's own weights barely blend) removes two thirds of the boundary jump for +16% compute but softens the mixed frames; mixing 2 shared latents before one continuous VAE decode removes 80% with no softening for +9% ([stitching.md](docs/stitching.md)).
 - **`--prepend_frames` frames are not removed on one GPU:** 45 frames in, 49 out with `--prepend_frames 4` ([quality.md](docs/quality.md#--prepend_frames)).
 - **Both noise options degrade the output:** input noise turns into texture and grain, latent noise washes the image out ([quality.md](docs/quality.md#noise-scales)).
 
@@ -53,6 +54,9 @@ is the 3B fp8 model ([cli-flags.md](docs/cli-flags.md#models)).
 | [scripts/frame_diff.py](scripts/frame_diff.py) | Compares two PNG sequences: PSNR, and a seam / per-tile drift check against SeedVR2's tile grid |
 | [docs/quality.md](docs/quality.md) | Quality options measured with no-reference proxies: colour correction modes, batch size and batch-boundary flicker, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size`, input/latent noise, seed, VAE tiling on flat areas; recommendations |
 | [scripts/quality_metrics.py](scripts/quality_metrics.py) | Quality proxies for a PNG sequence vs its input and a reference run: PSNR/SSIM, colour and CIELAB stats, sharpness and flat-area grain, per-transition temporal change split at batch boundaries (held-frame flicker), per-tile offsets on flat areas |
+| [docs/stitching.md](docs/stitching.md) | How batches are stitched for long runs: why boundaries exist (code), boundary jumps measured against a single-batch reference, the CLI's overlap vs corrected cross-fades (linear, raised cosine, 2–8 frames) vs latent-space stitching, cost model, boundary frame indices for visual review, recommendations for the CLI today and for our own CLI |
+| [scripts/blend_patch.py](scripts/blend_patch.py) | `--wrap` script: replaces the batch cross-fade weights (`numz`, `linear`, `cosine`, `prev`, `cur`), renders several curves from one run, and an experimental latent-space stitching (whole-clip VAE pass, DiT on overlapping latent windows) |
+| [scripts/stitch_metrics.py](scripts/stitch_metrics.py) | Boundary metrics for a PNG sequence against a single-batch reference: held-frame and low-frequency jumps per boundary, excess over the reference, distance to the reference by offset to the boundary, compute cost |
 
 Experiments run on a remote GPU machine. Where that machine is and how it's reached is
 deployment-specific and deliberately left out of this repo.

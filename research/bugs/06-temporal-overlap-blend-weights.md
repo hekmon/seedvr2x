@@ -113,14 +113,33 @@ overlap:
 
 Risks and notes:
 - A blended frame averages two reconstructions and is slightly softer (measured −10% Laplacian
-  variance at batch 5 / overlap 3). Mixing more frames spreads that over more frames; a linear
-  ramp is an alternative.
+  variance at batch 5 / overlap 3, −15 to −20% on the mixed frames with the fix). A linear ramp
+  is an alternative, measured slightly better (below).
 - The first frame of every batch is less restored ([quality.md](../docs/quality.md#--prepend_frames)),
   and it is an overlap frame: giving it weight < 1 for the new batch is desirable.
 - Outputs of existing workflows that use overlap change.
 
 Test: rerun the table above with `quality_metrics.py --temporal-overlap N`; the boundary jump
 should decrease monotonically with N, and the frame count must not change.
+
+Measured with the corrected weights, patched in by [`blend_patch.py`](../scripts/blend_patch.py)
+(`cosine` = the diff above, `linear` = 1 − i / (K + 1)), against a single-batch reference
+([stitching.md](../docs/stitching.md#pixel-space-results-clip-b)): clip B, 81 frames, batch 21,
+`--color_correction lab`; the jump a boundary adds on held drawings over the reference (0.78
+without overlap):
+
+| Overlap | Compute | Today's weights | Raised cosine (the diff) | Linear |
+|---|---|---|---|---|
+| 2 | +6% | 0.79 | 0.34 | 0.34 |
+| 3 | +11% | 0.48 | 0.38 | 0.37 |
+| 4 | +16% | 0.72 | 0.32 | 0.25 |
+| 8 | +45% | 0.44 | 0.30 | 0.25 |
+
+- The fix works: every overlap now reduces the jump, by 55–67% from K = 2 up, against 0–45% today.
+- A linear ramp does slightly better than the raised cosine (its largest frame-to-frame step is
+  smaller), and K = 4 is enough: K = 8 brings nothing more. Prefer `linear` in the fix.
+- Measured softening of the mixed frames: −15 to −20% Laplacian variance (linear a little more
+  than cosine), no ghosting (both renderings are of the same input frame).
 
 ## References
 
