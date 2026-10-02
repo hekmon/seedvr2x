@@ -13,9 +13,10 @@ from typing import TYPE_CHECKING
 
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.writer import FORMATS
+from seedvr2x.runtime.job import MIN_SEGMENT
 
 if TYPE_CHECKING:
-    from seedvr2x.runtime.job import Part
+    from seedvr2x.runtime.job import OutputSegment, Part, Shot
 
 logger = logging.getLogger("seedvr2x")
 
@@ -38,8 +39,10 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         type=Path,
         required=True,
-        help="FFV1 master (.mkv), or the directory of the PNG frames; for a directory of segments,"
-        " a new or empty directory, where the output mirrors them",
+        help="a .mkv path: one FFV1 master (video file input only); else a new or empty"
+        " directory: the output segments (FFV1 files, or PNG directories) and their manifest."
+        " A directory of segments is mirrored; a video file is cut at its shots, merged to"
+        " --min-segment",
     )
     parser.add_argument(
         "--format",
@@ -65,6 +68,14 @@ def main(argv: list[str] | None = None) -> int:
         " counted from 0 (default: the whole input is one shot)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--min-segment",
+        type=_seconds,
+        default=MIN_SEGMENT,
+        metavar="SECONDS",
+        help="output segments of a video file last this long at least, each shorter one merged"
+        " into its shorter neighbour, as sptenc's -L (default: %(default)s; 0 keeps every cut)",
+    )
     parser.add_argument(
         "--input-matrix",
         choices=sorted(MATRICES),
@@ -130,8 +141,9 @@ def _run(args: argparse.Namespace) -> int:
         else:
             sources = [examine(args.input, args.input_matrix, args.input_sar)]
         parts = parts_of(sources)
-        shots = job_shots(parts, read_cuts(args.cuts) if args.cuts else [])
-        outputs = _outputs(args, parts)
+        cuts = read_cuts(args.cuts) if args.cuts else []
+        shots = job_shots(parts, cuts)
+        segments, paths, directory = _layout(args, parts, shots)
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
@@ -140,9 +152,9 @@ def _run(args: argparse.Namespace) -> int:
     target = target_size(stream.width, stream.height, source.sample_aspect, args.resolution)
     out_height, out_width = output_size(target)
     logger.info(
-        "%d shots, %d output files; output %dx%d, square pixels",
+        "%d shots, %d output segments; output %dx%d, square pixels",
         len(shots),
-        len(outputs),
+        len(segments),
         out_width,
         out_height,
     )
@@ -152,6 +164,7 @@ def _run(args: argparse.Namespace) -> int:
     import torch
 
     from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
+    from seedvr2x.runtime import manifest
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.run import run_shots
 
@@ -169,6 +182,23 @@ def _run(args: argparse.Namespace) -> int:
     )
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
+    record = None
+    if directory is not None:
+        directory.mkdir(parents=True, exist_ok=True)
+        record = manifest.Manifest(
+            directory / manifest.NAME,
+            _settings(args, cuts),
+            parts,
+            shots,
+            segments,
+            [path.name for path in paths],
+            {
+                "format": args.format,
+                "size": [out_width, out_height],
+                "frame_rate": str(stream.frame_rate),
+            },
+        )
+        record.write()
     started = time.monotonic()
 
     def open_segment(path: Path) -> Writer:
@@ -177,7 +207,9 @@ def _run(args: argparse.Namespace) -> int:
         )
 
     try:
-        with SegmentWriter(outputs, open_segment) as writer:
+        outputs = [(path, segment.frames) for path, segment in zip(paths, segments, strict=True)]
+        finished = record.segment_finished if record is not None else None
+        with SegmentWriter(outputs, open_segment, finished) as writer:
 
             def write(frames: npt.NDArray[np.float32]) -> None:
                 if args.dump_frames is not None:
@@ -200,26 +232,72 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _outputs(args: argparse.Namespace, parts: "Sequence[Part]") -> list[tuple[Path, int]]:
-    """Where the output goes, (path, frames) in order: for a video file, one FFV1 master or one
-    directory of PNG; for a directory of segments, each mirrored (job.mirrored_segments) in a new
-    or empty directory, sptenc's split layout.
+def _layout(
+    args: argparse.Namespace, parts: "Sequence[Part]", shots: "Sequence[Shot]"
+) -> "tuple[list[OutputSegment], list[Path], Path | None]":
+    """The output's segments, each one's path, and the directory they go in (None for one file).
+    A .mkv path takes a video file's output whole, one FFV1 master. Else the output is a new or
+    empty directory of segments, named and cut as sptenc's split: a directory's own, mirrored;
+    a video file's shots, merged to --min-segment (DESIGN.md, Output).
 
-    Provisional: refusing a directory that holds anything keeps files of another run out of the
-    segments sptenc reads, until resume reads them back."""
-    from seedvr2x.runtime.job import JobError, mirrored_segments
+    Provisional: the .mkv path stands for the one-file output until assembly (milestone 6) joins
+    the segments into it; and refusing a directory that holds anything keeps files of another
+    run out of the segments sptenc reads, until resume reads the manifest back."""
+    from seedvr2x.runtime.job import JobError, OutputSegment, merged_segments, mirrored_segments
 
-    if not args.input.is_dir():
-        return [(args.output, parts[0].source.frames)]
     output: Path = args.output
-    if output.suffix.lower() == ".mkv" or output.is_file():
-        raise JobError(f"{output}: a directory of segments needs a directory as output")
+    total = parts[-1].end
+    if output.suffix.lower() == ".mkv":
+        if args.input.is_dir():
+            raise JobError(f"{output}: a directory of segments needs a directory as output")
+        if args.format == "png":
+            raise JobError(f"{output}: PNG output goes to a directory")
+        return [OutputSegment(output.stem, 0, total)], [output], None
+    if output.is_file():
+        raise JobError(f"{output}: a file; the output segments need a directory")
     if output.is_dir() and any(output.iterdir()):
-        raise JobError(
-            f"{output}: not empty; the output of a directory of segments needs a new one"
-        )
+        raise JobError(f"{output}: not empty; the output segments need a new or empty directory")
+    if args.input.is_dir():
+        segments = mirrored_segments(parts)
+    else:
+        frame_rate = parts[0].source.stream.frame_rate
+        segments = merged_segments(shots, total, frame_rate, args.min_segment)
     suffix = "" if args.format == "png" else ".mkv"
-    return [(output / f"{s.name}{suffix}", s.frames) for s in mirrored_segments(parts)]
+    return segments, [output / f"{segment.name}{suffix}" for segment in segments], output
+
+
+def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
+    """The settings a manifest records, those a resume must find again."""
+    return {
+        "seedvr2x": version("seedvr2x"),
+        "dit_model": {
+            "name": args.dit_model,
+            "size": (args.model_dir / args.dit_model).stat().st_size,
+        },
+        "vae_model": {
+            "name": args.vae_model,
+            "size": (args.model_dir / args.vae_model).stat().st_size,
+        },
+        "resolution": args.resolution,
+        "seed": args.seed,
+        "window": args.window,
+        "format": args.format,
+        "cuts": cuts,
+        "min_segment": None if args.input.is_dir() else str(args.min_segment),
+        "input_matrix": args.input_matrix,
+        "input_sar": None if args.input_sar is None else str(args.input_sar),
+    }
+
+
+def _seconds(text: str) -> Fraction:
+    """A duration in seconds, 0 or more, exact: 4.99 is 499/100."""
+    try:
+        seconds = Fraction(text)
+    except (ValueError, ZeroDivisionError):
+        raise argparse.ArgumentTypeError(f"{text!r}: not a number of seconds") from None
+    if seconds < 0:
+        raise argparse.ArgumentTypeError(f"{text!r}: negative")
+    return seconds
 
 
 def _ratio(text: str) -> Fraction:

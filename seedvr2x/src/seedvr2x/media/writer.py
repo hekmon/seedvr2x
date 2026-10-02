@@ -330,14 +330,19 @@ class PNGWriter(Writer):
 class SegmentWriter:
     """The output written across consecutive segments, each to a writer of its own: opened at the
     segment's first frame, closed, so checked, after its last (DESIGN.md, Output: output
-    segments). segments are (path, frames) in order; open_segment(path) gives a segment's writer.
-    Used as a context manager, as a Writer."""
+    segments). segments are (path, frames) in order; open_segment(path) gives a segment's writer;
+    finished(index), when given, is told each segment closed. Used as a context manager, as a
+    Writer."""
 
     def __init__(
-        self, segments: Sequence[tuple[Path, int]], open_segment: Callable[[Path], Writer]
+        self,
+        segments: Sequence[tuple[Path, int]],
+        open_segment: Callable[[Path], Writer],
+        finished: Callable[[int], None] | None = None,
     ) -> None:
         self._segments = list(segments)
         self._open = open_segment
+        self._finished = finished
         self._index = 0
         self._current: Writer | None = None
         self.written = 0
@@ -357,6 +362,8 @@ class SegmentWriter:
             if self._current.written == count:
                 self._current.close()
                 self._current = None
+                if self._finished is not None:
+                    self._finished(self._index)
                 self._index += 1
 
     def close(self) -> int:

@@ -222,7 +222,8 @@ def test_directory_output_mirrors_its_segments(tmp_path: Path) -> None:
         )
         assert run.returncode == 0, run.stderr[-3000:]
     mirrored = tmp_path / "mirrored"
-    assert sorted(p.name for p in mirrored.iterdir()) == [f"seg_{i:06d}.mkv" for i in range(3)]
+    names = [f"seg_{i:06d}.mkv" for i in range(3)]
+    assert sorted(p.name for p in mirrored.iterdir()) == sorted([*names, "manifest.json"])
     assert [count_packets(mirrored / f"seg_{i:06d}.mkv") for i in range(3)] == [10, 2, 33]
     for index in range(45):
         name = f"frame_{index:06d}.npy"

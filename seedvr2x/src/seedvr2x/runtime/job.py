@@ -98,6 +98,69 @@ def mirrored_segments(parts: Sequence[Part]) -> list[OutputSegment]:
     return segments
 
 
+# sptenc's minimum segment length, its -L default (cmd/sptenc/flags.go, minSegmentLengthDefault):
+# short segments cost an encoder a keyframe each and too few frames to amortise it (DESIGN.md,
+# Output).
+MIN_SEGMENT = Fraction(5)
+
+
+def min_segment_frames(seconds: Fraction, frame_rate: Fraction) -> int:
+    """The fewest frames lasting at least `seconds` at frame_rate: a segment shorter than that is
+    too short. sptenc's durationToFrames rounding up (core/scenes.go), exact: 5 s is 125 frames
+    at 25 fps, 120 at 24000/1001, 150 at 30000/1001."""
+    return math.ceil(seconds * frame_rate)
+
+
+def merge_short(cuts: Sequence[int], frames: int, min_frames: int) -> list[int]:
+    """The cuts left once every segment of a source of `frames` frames cut at `cuts` lasts at
+    least min_frames: sptenc's FilterShortScenes (core/scenes.go:92-188 at vmafv1 5790944), in
+    frames as it counts them. Repeatedly, the shortest segment too short (the first of equals)
+    merges into its shorter neighbour, the left one on a tie; the first and the last into their
+    only one. A merge removes the cut between the two. It stops when no segment is too short, or
+    no cut is left.
+
+    sptenc takes the last segment's end from the container's duration, rounded to a frame; here
+    it is the frames counted, its exact value."""
+    if min_frames <= 0 or not cuts:
+        return list(cuts)
+    kept = list(cuts)
+    lengths = [kept[0], *(b - a for a, b in pairwise(kept)), frames - kept[-1]]
+    while kept:
+        shortest = -1
+        for index, length in enumerate(lengths):
+            if length < min_frames and (shortest == -1 or length < lengths[shortest]):
+                shortest = index
+        if shortest == -1:
+            break
+        # Into the neighbour on the left (shortest - 1) or the right (shortest + 1); the cut
+        # between them is the one at the end of the left one.
+        if shortest == 0:
+            left = 0
+        elif shortest == len(lengths) - 1:
+            left = shortest - 1
+        else:
+            left = shortest - 1 if lengths[shortest - 1] <= lengths[shortest + 1] else shortest
+        lengths[left : left + 2] = [lengths[left] + lengths[left + 1]]
+        del kept[left]
+    return kept
+
+
+def merged_segments(
+    shots: Sequence[Shot], frames: int, frame_rate: Fraction, min_seconds: Fraction
+) -> list[OutputSegment]:
+    """A video file's output segments: its shots' cuts, merged by sptenc's rule to last
+    min_seconds at least (merge_short), named as sptenc's split names its own (seg_%06d,
+    ffmpeg/segment.go). Shots keep every cut: a segment holds whole shots (DESIGN.md, Output)."""
+    kept = merge_short(
+        [shot.start for shot in shots[1:]], frames, min_segment_frames(min_seconds, frame_rate)
+    )
+    bounds = [0, *kept, frames]
+    return [
+        OutputSegment(f"seg_{index:06d}", start, end)
+        for index, (start, end) in enumerate(pairwise(bounds))
+    ]
+
+
 def read_cuts(path: Path) -> list[int]:
     """A cut list: the first frame of each shot but the first, one frame number per line, counted
     from 0 in the source; blank lines and # comments are ignored.
