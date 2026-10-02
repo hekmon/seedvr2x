@@ -9,7 +9,8 @@ with the SeedVR2 venv's python.
 
 Usage:
   bench.py run <name> [--seedvr2-dir D] [--runs-dir R] [--force] [--overwrite]
-               [--env K=V ...] [--interval S] [--gpu I] -- <CLI args>
+               [--python P] [--wrap SCRIPT] [--env K=V ...] [--interval S] [--gpu I]
+               -- <CLI args>
   bench.py parse <log>... [--append] [--results F] [--json]
   bench.py table [--results F] [--all] [names...]
 
@@ -224,7 +225,8 @@ RX = {
     "initial_mem": re.compile(r"Initial CUDA memory: " + NUM + r"GB free / " + NUM + r"GB total"),
     "video_info": re.compile(r"Video info: (\d+) frames, (\d+)x(\d+), " + NUM + " FPS"),
     "target": re.compile(r"Target dimensions: (\d+)x(\d+) \(padded to (\d+)x(\d+)"),
-    "gen_input": re.compile(r"Input: (\d+) frames, (\d+)x(\d+)px → Padded: (\d+)x(\d+)px → Output: (\d+)x(\d+)px"),
+    # "→ Padded: …" is only printed when the output needs padding (e.g. 1080 → 1088, not 2160)
+    "gen_input": re.compile(r"Input: (\d+) frames, (\d+)x(\d+)px(?: → Padded: (\d+)x(\d+)px)? → Output: (\d+)x(\d+)px"),
     "batch": re.compile(r"Batch size: (\d+), Seed: (\d+)"),
     "batch_progress": re.compile(r"(Encoding|Upscaling|Decoding|Post-processing) batch (\d+)/(\d+)"),
     "chunk": re.compile(r"Chunk (\d+)/(\d+): (\d+) new \+ (\d+) context"),
@@ -233,6 +235,12 @@ RX = {
     "fps": re.compile(r"Average FPS: " + NUM),
     "output": re.compile(r"Output saved to: (.+)$"),
     "pid": re.compile(r"Process (\d+) terminating"),
+    # scripts/vram_cap.py (emulated smaller card)
+    "vram_cap": re.compile(r"vram_cap: card " + NUM + r" GiB, hidden " + NUM + r", other " + NUM
+                           + r" -> capacity " + NUM + r" GiB, usable " + NUM + r" GiB; device total " + NUM
+                           + r", already used " + NUM + r" \(context\), left for torch " + NUM
+                           + r" GiB; mode (\w+), alloc conf (\S+)"),
+    "vram_cap_ballast": re.compile(r"vram_cap: ballast (\d+) bytes"),
     # /usr/bin/time -v trailer, if the log has one
     "time_cmd": re.compile(r'Command being timed: "(.*)"'),
     "time_rss": re.compile(r"Maximum resident set size \(kbytes\): (\d+)"),
@@ -251,7 +259,14 @@ def _hms(s):
     return secs
 
 
+# torch allocator warnings for failures it recovered from by itself: cudaMallocAsync trims its pool
+# and retries, expandable segments fail to map a page, release cached memory and retry
+ALLOC_RETRY_RE = re.compile(r"recovered from an allocation failure|expandable_segments: memory mapping failed")
+
+
 def _event_kind(text):
+    if ALLOC_RETRY_RE.search(text):
+        return "alloc-retry"
     low = text.lower()
     if "out of memory" in low or "outofmemory" in low or re.search(r"\boom\b", low) or "allocation on device" in low:
         return "oom"
@@ -364,7 +379,7 @@ def parse_log(path, anchor=None):
 
         for key in ("version", "os_gpu", "python", "cuda", "conv3d", "initial_mem", "video_info", "target",
                     "gen_input", "batch", "batch_progress", "chunk", "latents", "done", "fps", "output", "pid",
-                    "time_cmd", "time_rss", "time_wall", "time_exit"):
+                    "vram_cap", "vram_cap_ballast", "time_cmd", "time_rss", "time_wall", "time_exit"):
             mm_ = RX[key].search(rest)
             if not mm_:
                 continue
@@ -388,7 +403,8 @@ def parse_log(path, anchor=None):
             elif key == "gen_input":
                 gen.setdefault("frames", 0)
                 gen["frames"] += int(g[0])  # summed over chunks (includes context frames)
-                gen.update(input_res=f"{g[1]}x{g[2]}", padded=f"{g[3]}x{g[4]}", output_res=f"{g[5]}x{g[6]}")
+                gen.update(input_res=f"{g[1]}x{g[2]}", output_res=f"{g[5]}x{g[6]}",
+                           padded=f"{g[3]}x{g[4]}" if g[3] else f"{g[5]}x{g[6]}")
                 gen["generations"] = gen.get("generations", 0) + 1
             elif key == "batch":
                 gen.update(batch_size=int(g[0]), seed=int(g[1]))
@@ -407,6 +423,12 @@ def parse_log(path, anchor=None):
                 rec["output"] = g[0].strip()
             elif key == "pid":
                 rec["cli_pid"] = int(g[0])
+            elif key == "vram_cap":
+                rec["vram_cap"] = dict(zip(("card_gib", "hidden_gib", "other_gib", "capacity_gib", "usable_gib",
+                                            "device_total_gib", "context_gib", "torch_room_gib"), map(float, g[:8])),
+                                       mode=g[8], alloc_conf=g[9])
+            elif key == "vram_cap_ballast":
+                rec.setdefault("vram_cap", {})["ballast_gib"] = round(int(g[0]) / GIB, 3)
             elif key == "time_cmd":
                 rec["time_v_command"] = g[0]
             elif key == "time_rss":
@@ -419,7 +441,8 @@ def parse_log(path, anchor=None):
 
     rec["completed"] = "total_s" in rec
     rec["oom_events"] = sum(1 for e in rec["events"] if e["kind"] == "oom")
-    rec["retries"] = sum(1 for e in rec["events"] if re.search(r"retrying", e["line"], re.I))
+    rec["retries"] = sum(1 for e in rec["events"] if e["kind"] != "alloc-retry" and re.search(r"retrying", e["line"], re.I))
+    rec["alloc_retries"] = sum(1 for e in rec["events"] if e["kind"] == "alloc-retry")
     rec["phases"] = aggregate_phases(rec["phase_runs"])
     return rec
 
@@ -482,6 +505,10 @@ def aggregate_phases(runs):
 
 def attach_nvml(rec, sampler, t_start, t_end):
     to_gib = lambda b: round(b / GIB, 2) if b is not None else None  # noqa: E731
+    ballast = (rec.get("vram_cap") or {}).get("ballast_gib")
+    if ballast:  # vram_cap.py's ballast: report the emulated card's memory used, net of it
+        b = ballast * GIB
+        sampler = Samples([(t, max(0.0, u - b)) for t, u in sampler.samples], sampler.interval, sampler.backend)
     peak, peak_t = sampler.peak(t_start, t_end)
     used = [s[1] for s in sampler.samples]
     first_phase = min((r["start_epoch"] for r in rec["phase_runs"] if r["start_epoch"]), default=None)
@@ -492,6 +519,8 @@ def attach_nvml(rec, sampler, t_start, t_end):
         "peak_at": dt.datetime.fromtimestamp(peak_t).strftime("%H:%M:%S.%f")[:-3] if peak_t else None,
         "before_phases_peak_gib": to_gib(pre_peak),
     }
+    if ballast:
+        rec["nvml"]["ballast_gib"] = ballast  # already subtracted from every NVML figure of the record
     for r in rec["phase_runs"]:
         if r["start_epoch"] and r["end_epoch"]:
             # +interval on the end: the last snapshot is logged after the work it measures
@@ -575,10 +604,12 @@ def cmd_run(a):
         if not sep:
             sys.exit(f"bench: --env expects K=V, got {kv!r}")
         extra_env[k] = os.path.expandvars(v)
-    env = dict(os.environ, **extra_env, PYTHONUNBUFFERED="1")
+    # BENCH_LOG / BENCH_RUN_NAME let a --wrap script put its own output next to the log
+    env = dict(os.environ, **extra_env, PYTHONUNBUFFERED="1", BENCH_LOG=str(log_path), BENCH_RUN_NAME=a.name)
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF")
 
-    cmd = [python, "inference_cli.py", *cli_args]
+    wrap = [str(Path(a.wrap).resolve())] if a.wrap else []
+    cmd = [python, *wrap, "inference_cli.py", *cli_args]
 
     sampler = NvmlSampler(a.gpu, a.interval)
     baseline = sampler.read_now()
@@ -625,6 +656,7 @@ def cmd_run(a):
     rec = finalize(rec)
     head = {"name": a.name, "timestamp": started.isoformat(timespec="seconds"), "source": "run",
             "log": str(log_path), "command": cmd, "cli_args": cli_args, "extra_env": extra_env,
+            "wrap": wrap[0] if wrap else None,
             "alloc_conf": alloc_conf or CLI_DEFAULT_ALLOC_CONF,
             "alloc_conf_source": "env" if alloc_conf else "cli-default",
             "seedvr2_git": git_info(seedvr2), "gpu_before": gpu_before, "gpu_after": gpu_state(a.gpu)}
@@ -646,7 +678,7 @@ def write_nvml_csv(path, samples, t0):
 
 # fields only `run` can measure; `parse` carries them over from the run's record
 RUN_FIELDS = ("exit_status", "wall_s", "max_rss_gib", "cpu_user_s", "cpu_sys_s", "interrupted")
-RUN_HEAD = ("name", "timestamp", "log", "command", "cli_args", "extra_env", "alloc_conf", "alloc_conf_source",
+RUN_HEAD = ("name", "timestamp", "log", "command", "cli_args", "extra_env", "wrap", "alloc_conf", "alloc_conf_source",
             "seedvr2_git", "gpu_before", "gpu_after")
 
 
@@ -731,6 +763,11 @@ def key_args(r):
         parts.append(f"enc tile {a.get('vae_encode_tile_size')}/{a.get('vae_encode_tile_overlap')}")
     if a.get("vae_decode_tiled") == "True":
         parts.append(f"dec tile {a.get('vae_decode_tile_size')}/{a.get('vae_decode_tile_overlap')}")
+    if r.get("wrap"):
+        parts.append(f"wrap={Path(r['wrap']).name}")
+    if r.get("vram_cap", {}).get("card_gib"):
+        c = r["vram_cap"]
+        parts.append(f"cap {c['card_gib']:g} GiB card ({c['mode']}, torch room {c['torch_room_gib']:.2f})")
     if r.get("alloc_conf_source") == "env":
         parts.append(f"alloc={r['alloc_conf']}")
     return ", ".join(parts)
@@ -749,7 +786,7 @@ def phase_cell(ph):
 
 def summary_table(recs):
     hdr = ["Run", "Key args", "Frames", "Batches", "Encode", "DiT", "DiT inference", "Decode", "Post",
-           "Total s", "FPS", "NVML peak", "Max RSS", "OOM / retries", "Status"]
+           "Total s", "FPS", "NVML peak", "Max RSS", "OOM / retries / alloc. retries", "Status"]
     rows = ["| " + " | ".join(hdr) + " |", "|" + "---|" * len(hdr)]
     for r in recs:
         ph = r.get("phases", {})
@@ -769,7 +806,7 @@ def summary_table(recs):
             f"{r['avg_fps']:.2f}" if r.get("avg_fps") is not None else "–",
             _g((r.get("nvml") or {}).get("peak_gib")),
             _g(r.get("max_rss_gib")),
-            f"{r.get('oom_events', 0)} / {r.get('retries', 0)}",
+            f"{r.get('oom_events', 0)} / {r.get('retries', 0)} / {r.get('alloc_retries', 0)}",
             r.get("status", "?"),
         ]) + " |")
     rows.append("")
@@ -796,6 +833,8 @@ def main():
     p.add_argument("--interval", type=float, default=0.1, help="NVML sampling period in seconds")
     p.add_argument("--force", action="store_true", help="run even if other compute processes hold the GPU")
     p.add_argument("--overwrite", action="store_true", help="overwrite an existing <name>.log")
+    p.add_argument("--wrap", metavar="SCRIPT",
+                   help="run the CLI through SCRIPT (python SCRIPT inference_cli.py ARGS), e.g. attn_probe.py")
     common(p)
     p.set_defaults(func=cmd_run)
 

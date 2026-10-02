@@ -27,7 +27,12 @@ python3 scripts/bench.py parse runs/x.log --append --runs-dir runs   # store a r
 | `table [names...]` | One Markdown row per run (`--all`: every record instead of the latest per name) |
 
 Other `run` options: `--env K=V` (repeatable, values go through `os.path.expandvars`),
-`--python` (default `<seedvr2-dir>/.venv/bin/python`), `--gpu` (NVML index), `--overwrite`.
+`--python` (default `<seedvr2-dir>/.venv/bin/python`), `--gpu` (NVML index), `--overwrite`,
+`--wrap SCRIPT` (runs `python SCRIPT inference_cli.py ARGS`, e.g.
+[`attn_probe.py`](../scripts/attn_probe.py), [`vae_probe.py`](../scripts/vae_probe.py),
+[`swap_probe.py`](../scripts/swap_probe.py) or [`vram_cap.py`](../scripts/vram_cap.py)). The CLI
+gets `BENCH_LOG` and `BENCH_RUN_NAME` in its environment, so a wrapper can write its own output
+next to the log.
 `SEEDVR2_DIR` and `BENCH_RUNS_DIR` set the defaults for `--seedvr2-dir` and `--runs-dir`.
 
 The CLI only needs `ffmpeg` on `PATH` for `--video_backend ffmpeg`: pass it through `--env PATH=...`.
@@ -40,7 +45,7 @@ One JSON object per line in `results.jsonl`. Memory values are in GiB: SeedVR2 d
 | Field | Content |
 |---|---|
 | `name`, `timestamp`, `source`, `log` | Run name, start time (ISO, with offset), `run` / `parse` / `reparse`, log path |
-| `command`, `cli_args` | Exact command line, and the CLI arguments alone |
+| `command`, `cli_args`, `wrap` | Exact command line, the CLI arguments alone, the `--wrap` script if any |
 | `args` | The `🔧 Arguments:` block of the log: every option's effective value, defaults included |
 | `extra_env`, `alloc_conf`, `alloc_conf_source` | Environment added with `--env`. Effective `PYTORCH_CUDA_ALLOC_CONF`: inherited or set, or `backend:cudaMallocAsync` with source `cli-default`, because the CLI `setdefault`s it |
 | `seedvr2_git` | `rev`, `describe`, `dirty` of the SeedVR2 checkout |
@@ -52,11 +57,12 @@ One JSON object per line in `results.jsonl`. Memory values are in GiB: SeedVR2 d
 | `phase_runs` | Each phase occurrence (several when streaming): start/end log time, time, raw `└─` timings, NVML peak |
 | `nvml` | Sampler (`nvml_v2`, or `nvidia-smi` as a fallback), sample count, baseline before the run, overall peak and its time, peak before phase 1 (CUDA context, model structures) |
 | `events` | Log lines matching OOM / out of memory / retry / Traceback / error / ⚠️ / ❌, with time, phase and kind |
-| `oom_events`, `retries` | Counts. SeedVR2's VAE retries once after an OOM (`retry_on_oom`: "OOM during …", "Clearing memory and retrying") |
+| `oom_events`, `retries`, `alloc_retries` | Counts. SeedVR2's VAE retries once after an OOM (`retry_on_oom`: "OOM during …", "Clearing memory and retrying"). `alloc_retries`: allocation failures torch's allocator recovered from by itself, without an exception ("[cudaMallocAsync] recovered from an allocation failure by trimming the pool and retrying", "expandable_segments: memory mapping failed"); they are neither OOM events nor retries ([vram.md](vram.md#the-allocator)) |
+| `vram_cap` | With [`vram_cap.py`](../scripts/vram_cap.py): the emulated card (size, capacity, usable memory, context, room left for torch, mode, allocator, ballast). The ballast is subtracted from every NVML figure of the record (`nvml.ballast_gib`) |
 | `total_s`, `avg_fps` | The CLI's own figures (its timer starts after the imports) |
 | `wall_s`, `startup_s` | Wall time measured by bench.py, and wall − `total_s` (interpreter start + imports) |
 | `max_rss_gib`, `cpu_user_s`, `cpu_sys_s` | `getrusage(RUSAGE_CHILDREN)` after the CLI exits |
-| `exit_status`, `status`, `gpu_before`, `gpu_after` | Exit code. `ok`, `ok-after-oom`, `oom`, `failed` or `incomplete`. GPU state from `nvidia-smi`: memory, P-state, temperature, power, clocks, compute processes |
+| `exit_status`, `status`, `gpu_before`, `gpu_after` | Exit code. `ok`, `ok-after-oom` (completed after an OOM event; `alloc_retries` don't count), `oom`, `failed` or `incomplete`. GPU state from `nvidia-smi`: memory, P-state, temperature, power, clocks, compute processes |
 
 Per phase (`phases."N"`):
 
@@ -95,6 +101,15 @@ Per phase (`phases."N"`):
   back in batch order. Some grandchild timers ("VAE decode") reuse one name for every batch, so
   the log shows the last batch's value under each batch. They are counted once and flagged with
   a `note`.
+- **The GPU is power-limited, so consecutive runs drift.** VAE and DiT phases hit the card's
+  600 W cap (`nvidia-smi -q -d PERFORMANCE`: "SW Power Cap: Active"), and clocks then depend on
+  temperature. Back-to-back runs of the same configuration slowed by up to 9% over a series.
+  Between sessions the gap is much larger: the same 1080p batch-81 DiT took 39.6 s in one
+  session and 53.6 s in another, and the emulated-card runs of [vram.md](vram.md#recipe-per-card-size-validated)
+  ran 40–60% slower than earlier ones (clocks down to 577 MHz under the cap). **Absolute times
+  are only comparable between runs made back to back.** To compare an option that only affects
+  one phase, normalize by a phase it can't affect (e.g. DiT time / VAE encode time when
+  comparing attention backends), or interleave and repeat runs.
 - **CUDA runs asynchronously, so the time between two log lines is not the GPU time of what
   lies between them.** The work is paid at the next synchronization: a copy to the CPU, or the
   next batch. Per-batch totals ("Encoded/Decoded batch N") are reliable; the split inside a batch
