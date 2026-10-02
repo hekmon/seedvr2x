@@ -1,12 +1,16 @@
-"""A job's layout, before any GPU work: its shots, their seeds, the output size (DESIGN.md, Input
-and Pipeline). Plain Python, no torch: a bad cut list is refused before the models load."""
+"""A job's layout, before any GPU work: its input files, its shots and their seeds, its output
+segments, the output size (DESIGN.md, Input, Pipeline and Output). Plain Python, no torch: a bad
+cut list is refused before the models load."""
 
 import math
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import pairwise
 from pathlib import Path
+
+from seedvr2x.media.source import Source
 
 # Latents shared by consecutive DiT windows, M (DESIGN.md, Pipeline step 2): M = 2 cut the boundary
 # jump by 80% against independent batches in the stitching study (research/docs/stitching.md).
@@ -37,6 +41,63 @@ class Shot:
         return seed + self.start
 
 
+@dataclass(frozen=True)
+class Part:
+    """An input file and its frames in the job, [start, end): the source alone, or one segment of
+    a directory, after the segments before it. Frame indexes, shots and seeds count from the job's
+    first frame."""
+
+    source: Source
+    start: int
+
+    @property
+    def end(self) -> int:
+        return self.start + self.source.frames
+
+
+def parts_of(sources: Sequence[Source]) -> list[Part]:
+    """The parts of a job reading sources one after the other."""
+    parts: list[Part] = []
+    for source in sources:
+        parts.append(Part(source, parts[-1].end if parts else 0))
+    return parts
+
+
+def job_shots(parts: Sequence[Part], cuts: Sequence[int]) -> list[Shot]:
+    """The shots of a job: cut at `cuts`, and at each join between two parts, since each join of
+    a directory's segments is a cut (DESIGN.md, Input; the detector for doubtful joins comes
+    later). So a shot never spans two files. The cut list itself is checked first, as
+    shots_from_cuts checks it: a cut at a join is a cut already there."""
+    check_cuts(cuts, parts[-1].end)
+    joins = [part.start for part in parts[1:]]
+    return shots_from_cuts(sorted({*cuts, *joins}), parts[-1].end)
+
+
+@dataclass(frozen=True)
+class OutputSegment:
+    """Frames [start, end) of the job, the output's unit: a file of their own (FFV1) or a directory
+    (PNG), named name (DESIGN.md, Output)."""
+
+    name: str
+    start: int
+    end: int
+
+    @property
+    def frames(self) -> int:
+        return self.end - self.start
+
+
+def mirrored_segments(parts: Sequence[Part]) -> list[OutputSegment]:
+    """A directory's output segments: its own, mirrored, the same frames under the same names,
+    the files' stems (DESIGN.md, Input), so sptenc encodes them as it would its own split."""
+    segments = [OutputSegment(part.source.path.stem, part.start, part.end) for part in parts]
+    names = [segment.name for segment in segments]
+    for name in names:
+        if names.count(name) > 1:
+            raise JobError(f"two segments named {name} (with another extension): one output each")
+    return segments
+
+
 def read_cuts(path: Path) -> list[int]:
     """A cut list: the first frame of each shot but the first, one frame number per line, counted
     from 0 in the source; blank lines and # comments are ignored.
@@ -59,8 +120,15 @@ def read_cuts(path: Path) -> list[int]:
 
 
 def shots_from_cuts(cuts: list[int], frames: int) -> list[Shot]:
-    """The shots of a source of `frames` frames cut at `cuts` (read_cuts): a cut is the first
-    frame of a shot, so it lies within the source, after frame 0, and they increase."""
+    """The shots of a source of `frames` frames cut at `cuts` (read_cuts, check_cuts)."""
+    check_cuts(cuts, frames)
+    bounds = [0, *cuts, frames]
+    return [Shot(start, end) for start, end in pairwise(bounds)]
+
+
+def check_cuts(cuts: Sequence[int], frames: int) -> None:
+    """Refuse a cut list that isn't one of a source of `frames` frames: a cut is the first frame
+    of a shot, so it lies within the source, after frame 0, and they increase."""
     previous = 0
     for cut in cuts:
         if cut == 0:
@@ -72,8 +140,6 @@ def shots_from_cuts(cuts: list[int], frames: int) -> list[Shot]:
         raise JobError(
             f"cut at frame {cuts[-1]}: the source has {frames} frames (0 to {frames - 1})"
         )
-    bounds = [0, *cuts, frames]
-    return [Shot(start, end) for start, end in pairwise(bounds)]
 
 
 def target_size(

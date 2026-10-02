@@ -1,5 +1,6 @@
 """A source, examined before any GPU work: what it declares, what seedvr2x refuses, how its frames
-become RGB, and the first pass (DESIGN.md, Input)."""
+become RGB, and the first pass (DESIGN.md, Input). A source is a video file, or a directory of
+segments, each a file examined alike."""
 
 import logging
 from dataclasses import dataclass
@@ -86,6 +87,61 @@ def examine(path: Path, matrix: str | None = None, sample_aspect: Fraction | Non
             ", ".join(conversion.guessed),
         )
     return source
+
+
+# The segments of a directory: the files `sptenc encode <dir>` reads, in its order
+# (cmd/sptenc/helpers.go, getSegmentsFromDir): .mkv and .mp4, the extension in any case,
+# subdirectories skipped, sorted by name byte for byte. sptenc's split writes seg_%06d.mkv.
+# Provisional: sptenc's reader, since the output goes back to it; other splitters may need more.
+SEGMENT_EXTENSIONS = (".mkv", ".mp4")
+
+
+def segment_files(directory: Path) -> list[Path]:
+    """The segments of a directory, in their order."""
+    files = [
+        entry
+        for entry in directory.iterdir()
+        if entry.suffix.lower() in SEGMENT_EXTENSIONS and not entry.is_dir()
+    ]
+    return sorted(files, key=lambda path: path.name.encode())
+
+
+def examine_directory(
+    directory: Path, matrix: str | None = None, sample_aspect: Fraction | None = None
+) -> list[Source]:
+    """Examine each segment of a directory (examine), which must make one source: the same size,
+    sample aspect, frame rate, conversion and colour tags throughout, since the output mirrors
+    the segments as one job of one geometry, and sptenc encodes them alike.
+
+    Raises MediaError for an empty directory, a segment refused, or segments that differ."""
+    files = segment_files(directory)
+    if not files:
+        raise MediaError(f"{directory}: no segment (.mkv or .mp4 files)")
+    sources = [examine(path, matrix, sample_aspect) for path in files]
+    first = sources[0]
+    for source in sources[1:]:
+        for what, ours, theirs in (
+            ("size", _size(source.stream), _size(first.stream)),
+            ("sample aspect", source.sample_aspect, first.sample_aspect),
+            ("frame rate", source.stream.frame_rate, first.stream.frame_rate),
+            ("conversion", source.conversion.describe(), first.conversion.describe()),
+            ("pixel format", source.conversion.planar, first.conversion.planar),
+            ("primaries", source.stream.color_primaries, first.stream.color_primaries),
+            ("transfer", source.stream.color_transfer, first.stream.color_transfer),
+        ):
+            if ours != theirs:
+                raise MediaError(
+                    f"{source.path}: {what} {ours or 'untagged'}, where {first.path.name} has"
+                    f" {theirs or 'untagged'}: the segments of a directory must make one source"
+                )
+    logger.info(
+        "%s: %d segments, %d frames", directory, len(sources), sum(s.frames for s in sources)
+    )
+    return sources
+
+
+def _size(stream: VideoStream) -> str:
+    return f"{stream.width}x{stream.height}"
 
 
 def declared_refusal(stream: VideoStream) -> str:

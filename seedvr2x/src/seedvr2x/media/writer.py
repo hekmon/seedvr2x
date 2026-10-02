@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import threading
 from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -208,6 +209,7 @@ class FFV1Writer(Writer):
     ) -> None:
         self.path = path
         self._partial = path.with_name(f"{path.name}.partial")
+        path.parent.mkdir(parents=True, exist_ok=True)
         if pix_fmt == "gbrp16le":
             # Frame properties only, no pixel conversion: without them the muxer writes no
             # primaries and no transfer (ffv1_out.py).
@@ -323,6 +325,69 @@ class PNGWriter(Writer):
 
     def _discard(self) -> None:
         shutil.rmtree(self._partial, ignore_errors=True)
+
+
+class SegmentWriter:
+    """The output written across consecutive segments, each to a writer of its own: opened at the
+    segment's first frame, closed, so checked, after its last (DESIGN.md, Output: output
+    segments). segments are (path, frames) in order; open_segment(path) gives a segment's writer.
+    Used as a context manager, as a Writer."""
+
+    def __init__(
+        self, segments: Sequence[tuple[Path, int]], open_segment: Callable[[Path], Writer]
+    ) -> None:
+        self._segments = list(segments)
+        self._open = open_segment
+        self._index = 0
+        self._current: Writer | None = None
+        self.written = 0
+
+    def write(self, frames: npt.NDArray[np.float32]) -> None:
+        """Write frames (n, H, W, 3) float32 in [0, 1], the next of the output."""
+        while frames.shape[0]:
+            if self._index == len(self._segments):
+                raise ValueError(f"{frames.shape[0]} frames beyond the output's segments")
+            path, count = self._segments[self._index]
+            if self._current is None:
+                self._current = self._open(path)
+            take = min(count - self._current.written, frames.shape[0])
+            self._current.write(frames[:take])
+            frames = frames[take:]
+            self.written += take
+            if self._current.written == count:
+                self._current.close()
+                self._current = None
+                self._index += 1
+
+    def close(self) -> int:
+        """Check that every segment is whole; returns the frames written."""
+        if self._index != len(self._segments):
+            self.abort()
+            raise RuntimeError(
+                f"output stopped after {self.written} frames, in segment {self._index + 1} of"
+                f" {len(self._segments)}"
+            )
+        return self.written
+
+    def abort(self) -> None:
+        """Stop the segment being written and remove it; the segments closed are whole."""
+        if self._current is not None:
+            self._current.abort()
+            self._current = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        kind: type[BaseException] | None,
+        error: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if error is None:
+            self.close()
+        else:
+            self.abort()
 
 
 def open_writer(

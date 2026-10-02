@@ -5,12 +5,17 @@ import logging
 import os
 import re
 import time
+from collections.abc import Sequence
 from fractions import Fraction
 from importlib.metadata import version
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.writer import FORMATS
+
+if TYPE_CHECKING:
+    from seedvr2x.runtime.job import Part
 
 logger = logging.getLogger("seedvr2x")
 
@@ -22,13 +27,19 @@ def main(argv: list[str] | None = None) -> int:
         description="SeedVR2 video upscaler for long runs.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
-    parser.add_argument("input", type=Path, help="video file")
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="video file, or directory of segments (its .mkv and .mp4 files, in name order: each"
+        " join a cut)",
+    )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
         required=True,
-        help="FFV1 master (.mkv), or the directory of the PNG frames",
+        help="FFV1 master (.mkv), or the directory of the PNG frames; for a directory of segments,"
+        " a new or empty directory, where the output mirrors them",
     )
     parser.add_argument(
         "--format",
@@ -91,13 +102,14 @@ def main(argv: list[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.ffmpeg import MediaError
-    from seedvr2x.media.source import examine
+    from seedvr2x.media.source import examine, examine_directory
     from seedvr2x.runtime.job import (
         SHARED,
         JobError,
+        job_shots,
         output_size,
+        parts_of,
         read_cuts,
-        shots_from_cuts,
         target_size,
     )
 
@@ -109,21 +121,37 @@ def _run(args: argparse.Namespace) -> int:
                 f" a window needs at least {2 * SHARED + 1}"
             )
         logger.info("ffmpeg %s", ffmpeg.check(("png",) if args.format == "png" else ()))
-        source = examine(args.input, args.input_matrix, args.input_sar)
-        shots = shots_from_cuts(read_cuts(args.cuts) if args.cuts else [], source.frames)
+        if args.input.is_dir():
+            if args.cuts:
+                # Provisional: a directory's cut list says which joins are cuts (DESIGN.md,
+                # Input), which comes with the detector for doubtful joins.
+                raise JobError("--cuts with a directory: each join of its segments is a cut")
+            sources = examine_directory(args.input, args.input_matrix, args.input_sar)
+        else:
+            sources = [examine(args.input, args.input_matrix, args.input_sar)]
+        parts = parts_of(sources)
+        shots = job_shots(parts, read_cuts(args.cuts) if args.cuts else [])
+        outputs = _outputs(args, parts)
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
+    source = sources[0]
     stream = source.stream
     target = target_size(stream.width, stream.height, source.sample_aspect, args.resolution)
     out_height, out_width = output_size(target)
-    logger.info("%d shots; output %dx%d, square pixels", len(shots), out_width, out_height)
+    logger.info(
+        "%d shots, %d output files; output %dx%d, square pixels",
+        len(shots),
+        len(outputs),
+        out_width,
+        out_height,
+    )
 
     import numpy as np
     import numpy.typing as npt
     import torch
 
-    from seedvr2x.media.writer import Tags, open_writer
+    from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.run import run_shots
 
@@ -142,10 +170,14 @@ def _run(args: argparse.Namespace) -> int:
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+
+    def open_segment(path: Path) -> Writer:
+        return open_writer(
+            args.format, path, out_width, out_height, stream.frame_rate, Tags.of(stream)
+        )
+
     try:
-        with open_writer(
-            args.format, args.output, out_width, out_height, stream.frame_rate, Tags.of(stream)
-        ) as writer:
+        with SegmentWriter(outputs, open_segment) as writer:
 
             def write(frames: npt.NDArray[np.float32]) -> None:
                 if args.dump_frames is not None:
@@ -154,7 +186,7 @@ def _run(args: argparse.Namespace) -> int:
                         np.save(path, np.ascontiguousarray(frame))
                 writer.write(frames)
 
-            run_shots(models, source, shots, target, args.seed, write, args.window)
+            run_shots(models, parts, shots, target, args.seed, write, args.window)
     except MediaError as error:
         logger.error("%s", error)
         return 1
@@ -166,6 +198,28 @@ def _run(args: argparse.Namespace) -> int:
         args.format,
     )
     return 0
+
+
+def _outputs(args: argparse.Namespace, parts: "Sequence[Part]") -> list[tuple[Path, int]]:
+    """Where the output goes, (path, frames) in order: for a video file, one FFV1 master or one
+    directory of PNG; for a directory of segments, each mirrored (job.mirrored_segments) in a new
+    or empty directory, sptenc's split layout.
+
+    Provisional: refusing a directory that holds anything keeps files of another run out of the
+    segments sptenc reads, until resume reads them back."""
+    from seedvr2x.runtime.job import JobError, mirrored_segments
+
+    if not args.input.is_dir():
+        return [(args.output, parts[0].source.frames)]
+    output: Path = args.output
+    if output.suffix.lower() == ".mkv" or output.is_file():
+        raise JobError(f"{output}: a directory of segments needs a directory as output")
+    if output.is_dir() and any(output.iterdir()):
+        raise JobError(
+            f"{output}: not empty; the output of a directory of segments needs a new one"
+        )
+    suffix = "" if args.format == "png" else ".mkv"
+    return [(output / f"{s.name}{suffix}", s.frames) for s in mirrored_segments(parts)]
 
 
 def _ratio(text: str) -> Fraction:
