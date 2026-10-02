@@ -1,6 +1,6 @@
 # seedvr2x
 
-Our own SeedVR2 command-line upscaler. **Not started yet**: this directory only reserves the place.
+Our own SeedVR2 command-line upscaler. **Not started yet**: see [DESIGN.md](DESIGN.md) for the decisions so far and the open questions.
 
 Planned direction, from the findings in [../research/](../research/):
 - vendor the model code (DiT, VAE, sampler) from [../upstream/seedvr2-numz](../upstream/seedvr2-numz) and fix it in our copy, keeping the Apache-2.0 headers and a NOTICE; the submodules stay the untouched reference
