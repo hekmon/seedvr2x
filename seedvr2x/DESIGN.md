@@ -153,18 +153,23 @@ Cuts matter for quality, not only for the VAE context: see [Pipeline](#pipeline-
 Decoding goes through an ffmpeg pipe:
 - frame-accurate, counting the frames actually decoded (never trusting the container's count,
   bug 11)
-- 16-bit RGB, converted by ffmpeg with every parameter given (matrix, range, chroma location):
-  zscale when the build has it, else swscale with its accuracy flags and a warning. The matrix
-  is the tags', else BT.709 for HD and BT.601 for SD, with a warning and an override.
-  - Measured with ffmpeg n9.0.2, the bit depth alone already differs between the two:
-    - zscale expands 8-bit RGB to 16 bits exactly (v × 257, white at 65535), if fed planar
-      RGB. Given packed RGB, ffmpeg puts swscale in front of it, which then does the expansion.
-    - swscale, its accuracy flags included, puts white at 65283, 128 at 32767 and 1 at 256.
+- 16-bit RGB, converted by ffmpeg's zscale with every parameter given (matrix, range, chroma
+  location). The matrix is the tags', else BT.709 for HD and BT.601 for SD, with a warning and
+  an override.
+  - **zscale is required.** Without it, seedvr2x refuses to run and says how to get a build
+    that has it.
+  - swscale is no fallback. Measured with ffmpeg n9.0.2, even the bit depth alone differs:
+    zscale expands 8-bit RGB to 16 bits exactly (v × 257, white at 65535), while swscale, its
+    accuracy flags included, puts white at 65283 (0.4% low), 128 at 32767 and 1 at 256. A
+    systematic error on every frame the model sees breaks the rule that the upscale looks like
+    its source.
+  - zscale must be fed planar RGB: given packed RGB, ffmpeg puts swscale in front of it, which
+    then does the expansion.
 - exact rational frame rate
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
-reimplementing them. A startup check reports what the build offers (zscale, ffv1, scdet). Tests
-verify its conversions: round trip, white at 940, black at 64, chroma siting.
+reimplementing them. A startup check refuses a build without zscale, ffv1 or scdet. Tests verify
+its conversions: round trip, white at 940, black at 64, chroma siting.
 
 ### Colour and shape, SD sources included
 The rule: the upscale must look like its source in any given player.
