@@ -96,17 +96,36 @@ connect through files.
   - the configs and `pos_emb.pt`/`neg_emb.pt`
 
   About 11k lines ([provenance](../research/docs/provenance.md)).
-- The submodules stay untouched. A script diffs our copy against numz and ByteDance, so every
-  change stays visible.
-- Changes we expect to make in our copy:
-  - remove the dependencies on numz's runtime: `retry_on_oom`, the attention dispatch, the
-    Conv3d flag, MPS detection, the banners and import-time shims
-  - attention: SDPA, or FlashAttention 2 when installed, nothing else
-    ([why](../research/docs/attention.md))
-  - drop the ~880 lines of sequence-parallel code
-  - decide per change whether to keep numz's numerics or go back to ByteDance's: RoPE in half
-    precision (ByteDance: fp32), attention in the pipeline dtype (ByteDance: bf16), VAE encode
-    taking the mode instead of a sample. Each one is measured against the other before choosing.
+- The submodules stay untouched. A script (`tools/vendor.py diff`) diffs our copy against numz
+  and ByteDance, so every change stays visible.
+- Changes made in our copy (milestone 1 passed with them):
+  - **numz's runtime dependencies removed:** `retry_on_oom`, the attention dispatch, MPS
+    detection, the banners and import-time shims, the model registry
+    (`src/utils/model_registry`), and the performance helpers
+    (`src/optimization/performance`).
+  - **Logging:** `VideoDiffusionInfer` logs through numz's `Debug` object, which our runtime
+    supplies as a logging adapter.
+  - **Attention:** FlashAttention 2 when installed, else SDPA; any other mode is an error
+    ([why](../research/docs/attention.md)).
+  - **Conv3d workaround:** its dependency is gone, but its flag keeps numz's value and the
+    workaround path stays. The flag is on with torch ≥ 2.9 and cuDNN ≥ 9.10.2, where plain
+    Conv3d takes ≈ 3× the memory ([environment.md](../research/docs/environment.md)). The path
+    stays until a comparison of output, memory and time shows the standard one can replace it.
+- Still to do: drop the ~880 lines of sequence-parallel code (an identity on one GPU).
+- **Numerics:** keep numz's or go back to ByteDance's, change by change, each measured against
+  the other before choosing. What numz's 7B fp16 path actually does (implementation probe):
+  - it computes in bf16: the pipeline dtype comes from a probe at import, the fp16 VAE weights
+    are cast to bf16, the fp16 DiT runs under bf16 autocast, and attention computes in bf16
+  - q and k reach RoPE and attention in fp32 (probed on a 2-layer model)
+  - the RoPE frequencies are stored in fp16 in the checkpoint (36 equal tensors of 10 values),
+    and `rotary_embedding_torch` computes the angles in that dtype
+  - input frames are cast fp32 → fp16 → bf16: 26 of the 256 8-bit codes differ from a direct
+    bf16 cast
+  - VAE encode takes the posterior mode
+
+  So two of the differences listed so far, "RoPE in half precision" and "attention in the
+  pipeline dtype", may not differ from ByteDance on this path. This must be confirmed before
+  any patch.
 - Licence: Apache-2.0. We keep the copyright headers, add a NOTICE, and mark modified files.
   The StableSR-derived colour code (`color_fix.py`, non-commercial licence) is **not**
   vendored: see [Colour correction](#colour-correction).
@@ -137,6 +156,10 @@ Decoding goes through an ffmpeg pipe:
 - 16-bit RGB, converted by ffmpeg with every parameter given (matrix, range, chroma location):
   zscale when the build has it, else swscale with its accuracy flags and a warning. The matrix
   is the tags', else BT.709 for HD and BT.601 for SD, with a warning and an override.
+  - Measured with ffmpeg n9.0.2, the bit depth alone already differs between the two:
+    - zscale expands 8-bit RGB to 16 bits exactly (v × 257, white at 65535), if fed planar
+      RGB. Given packed RGB, ffmpeg puts swscale in front of it, which then does the expansion.
+    - swscale, its accuracy flags included, puts white at 65283, 128 at 32767 and 1 at 256.
 - exact rational frame rate
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
@@ -328,9 +351,10 @@ Work is saved in resumable units; a stop loses only the unit in progress.
 
 ## Validation milestones
 
-1. **Reproduce numz** with the same settings: one batch, no tiling, `flash_attn_2`, same seed,
-   numz's input preparation, colour correction off (numz's `lab` runs the StableSR code we don't
-   vendor).
+1. **Reproduce numz.** Passed on 2026-10-02: 45 of 45 frames bit-identical, on the FFV1
+   masters and on the float32 dumps. Same settings: one batch, no tiling, `flash_attn_2`, same
+   seed, numz's input preparation, colour correction off (numz's `lab` runs the StableSR code
+   we don't vendor).
    - Both sides read the same RGB frames, from an 8-bit RGB copy of the sample. numz decodes
      with OpenCV at 8 bits (`inference_cli.py:469`, `/ 255` at `:336`), which our 16-bit ffmpeg
      decode can't match bit for bit. Our decode is validated by the conversion tests instead
@@ -387,9 +411,14 @@ Work is saved in resumable units; a stop loses only the unit in progress.
   GPUs).
 
 ### To measure
-- **Numerics:** numz's or ByteDance's for RoPE, attention dtype and VAE encode, once measured.
-  The input preparation too: the resize kernel and its `antialias` flag, and multiples of 16
-  reached by padding (numz) or cropping (ByteDance).
+- **Numerics:** numz's or ByteDance's, change by change, once it's confirmed which ones really
+  differ on the 7B fp16 path (see [Vendored model code](#vendored-model-code)):
+  - the RoPE angle precision
+  - the fp32 → fp16 → bf16 cast of input frames
+  - the fp16 weights cast to bf16
+  - VAE mode vs sample
+  - the input preparation: the resize kernel and its `antialias` flag, and multiples of 16
+    reached by padding (numz) or cropping (ByteDance)
 - **Decode resume granularity:** whether sub-segment decoding with warm-up latents is
   bit-identical.
 - **4K and long windows:** the planner's limits on large outputs, where the DiT window is the
