@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Severity | wrong output (small, systematic) |
-| Status | from code; consistent with the measured luma offset |
+| Status | measured (real frames against the float output) |
 | Affected options | every output (MP4 with both backends, PNG, images) |
 | Version | SeedVR2 `4490bd1` (v2.5.24) |
 
@@ -57,6 +57,12 @@ content (our anime clips: mean L\* 14–20) is almost entirely in that range.
 - Small, but it biases every quality comparison against the input, and it is free to fix.
 - The bf16 `final_video` itself limits the output to about 8 significant bits; see
   [19](19-10bit-output-is-8-bit.md).
+- Measured on real frames (1080p, `lab`): the CLI's PNGs are exactly `floor(x × 255)`, 53–56% of
+  the samples one level below `round(x × 255)`, mean −0.53 to −0.56 level
+  ([output.md](../docs/output.md#validation)). At or above 0.5 the only samples that differ are
+  exactly 0.5 (127.5: rounds to 128, truncates to 127).
+- Workaround: [`ffv1_out.py`](../scripts/ffv1_out.py) writes a 16-bit RGB FFV1 master from the
+  float frames, rounded (bit-exact `round(x × 65535)`).
 
 ## Possible fix
 

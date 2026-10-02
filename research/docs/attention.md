@@ -3,8 +3,8 @@
 > Status: **analysis from the code** (SeedVR2 `4490bd1`, 7B DiT), **checked by instrumented
 > runs** on the reference stack (RTX PRO 6000, sm_120). See [Measurements](#measurements): the
 > window predictions hold exactly, `sageattn_3` never runs SA3, attention is 4–9% of DiT time,
-> and the four backends give the same DiT time (±1.5%) up to batch 81. The length-grouping patch
-> is not worth writing.
+> and the four backends give the same DiT time (±1.5%) up to batch 81. Their outputs differ by
+> 55–56 dB PSNR, which VMAF doesn't see. The length-grouping patch is not worth writing.
 
 ## Windowed attention
 
@@ -198,6 +198,29 @@ Phase cells: time · torch peak allocated / torch reserved at phase end / NVML d
 The probe runs' DiT times include the probe's synchronizations; `-prof` includes the profiler.
 
 </details>
+
+### Output differences between backends
+
+Measured on lossless 16-bit RGB masters written by [`ffv1_out.py`](../scripts/ffv1_out.py) from
+the float frames, so the CLI's lossy or truncated output doesn't blur the comparison
+([output.md](output.md#do-attention-backends-change-the-output)). 1080p, batch 5, 21 frames,
+`--color_correction lab`, seed 42:
+
+| Pair | PSNR (RGB) | Worst frame | Max \|difference\| | Samples that differ | VMAF fidelity |
+|---|---|---|---|---|---|
+| `flash_attn_2` vs its rerun | ∞ (bit-identical) | ∞ | 0 | 0% | 100 |
+| `sageattn_2` vs `sageattn_3` | ∞ (bit-identical) | ∞ | 0 | 0% | – |
+| `flash_attn_2` vs `sdpa` | 56.20 dB | 55.33 dB | 10.0 levels | 34% | 100 |
+| `flash_attn_2` vs `sageattn_2` | 55.08 dB | 54.21 dB | 14.4 levels | 40% | 100 |
+| `sdpa` vs `sageattn_2` | 55.02 dB | 54.10 dB | 12.5 levels | 41% | – |
+
+- `flash_attn_2` is deterministic, and `sageattn_3` produces `sageattn_2`'s output bit for bit,
+  as the fallback above predicts.
+- The backends change the output by 55–56 dB PSNR: small, measurable, invisible to VMAF
+  (fidelity 100 at every percentile, CAMBI adds ≤ 0.003). `sdpa` and `flash_attn_2` are the
+  closest pair.
+- Compared through the CLI's mp4s instead, PSNR drops to 47 dB: the mp4 is itself 44.6 dB from
+  the frames it encodes, so x264 dominates the difference.
 
 ### Is the length-grouping patch worth it?
 

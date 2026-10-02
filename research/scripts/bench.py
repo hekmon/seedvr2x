@@ -9,7 +9,7 @@ with the SeedVR2 venv's python.
 
 Usage:
   bench.py run <name> [--seedvr2-dir D] [--runs-dir R] [--force] [--overwrite]
-               [--python P] [--wrap SCRIPT] [--env K=V ...] [--interval S] [--gpu I]
+               [--python P] [--wrap SCRIPT ...] [--env K=V ...] [--interval S] [--gpu I]
                -- <CLI args>
   bench.py parse <log>... [--append] [--results F] [--json]
   bench.py table [--results F] [--all] [names...]
@@ -608,7 +608,8 @@ def cmd_run(a):
     env = dict(os.environ, **extra_env, PYTHONUNBUFFERED="1", BENCH_LOG=str(log_path), BENCH_RUN_NAME=a.name)
     alloc_conf = env.get("PYTORCH_CUDA_ALLOC_CONF")
 
-    wrap = [str(Path(a.wrap).resolve())] if a.wrap else []
+    # each wrapper runs the next script of the line through runpy: python W1 W2 inference_cli.py ARGS
+    wrap = [str(Path(w).resolve()) for w in a.wrap]
     cmd = [python, *wrap, "inference_cli.py", *cli_args]
 
     sampler = NvmlSampler(a.gpu, a.interval)
@@ -656,7 +657,7 @@ def cmd_run(a):
     rec = finalize(rec)
     head = {"name": a.name, "timestamp": started.isoformat(timespec="seconds"), "source": "run",
             "log": str(log_path), "command": cmd, "cli_args": cli_args, "extra_env": extra_env,
-            "wrap": wrap[0] if wrap else None,
+            "wrap": (wrap[0] if len(wrap) == 1 else wrap) or None,  # a list when chained
             "alloc_conf": alloc_conf or CLI_DEFAULT_ALLOC_CONF,
             "alloc_conf_source": "env" if alloc_conf else "cli-default",
             "seedvr2_git": git_info(seedvr2), "gpu_before": gpu_before, "gpu_after": gpu_state(a.gpu)}
@@ -764,7 +765,8 @@ def key_args(r):
     if a.get("vae_decode_tiled") == "True":
         parts.append(f"dec tile {a.get('vae_decode_tile_size')}/{a.get('vae_decode_tile_overlap')}")
     if r.get("wrap"):
-        parts.append(f"wrap={Path(r['wrap']).name}")
+        w = r["wrap"] if isinstance(r["wrap"], list) else [r["wrap"]]
+        parts.append("wrap=" + "+".join(Path(x).name for x in w))
     if r.get("vram_cap", {}).get("card_gib"):
         c = r["vram_cap"]
         parts.append(f"cap {c['card_gib']:g} GiB card ({c['mode']}, torch room {c['torch_room_gib']:.2f})")
@@ -833,8 +835,9 @@ def main():
     p.add_argument("--interval", type=float, default=0.1, help="NVML sampling period in seconds")
     p.add_argument("--force", action="store_true", help="run even if other compute processes hold the GPU")
     p.add_argument("--overwrite", action="store_true", help="overwrite an existing <name>.log")
-    p.add_argument("--wrap", metavar="SCRIPT",
-                   help="run the CLI through SCRIPT (python SCRIPT inference_cli.py ARGS), e.g. attn_probe.py")
+    p.add_argument("--wrap", metavar="SCRIPT", action="append", default=[],
+                   help="run the CLI through SCRIPT (python SCRIPT inference_cli.py ARGS), e.g. attn_probe.py; "
+                        "repeatable: the wrappers are chained in order (python W1 W2 inference_cli.py ARGS)")
     common(p)
     p.set_defaults(func=cmd_run)
 

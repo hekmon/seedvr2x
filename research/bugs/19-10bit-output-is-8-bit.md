@@ -58,8 +58,12 @@ The VAE also decodes in bf16, so the decoded signal itself has ≈ 8–9 signifi
 - Users who pick `--10bit` against banding (dark gradients, anime skies) get x265's slower
   encode and a larger file for the same 8-bit steps. The help's streaming example uses it.
 - With the default backend, users believe they have 10-bit output and don't.
-- Workaround: none for real 10-bit. `--10bit` with ffmpeg still avoids one 8-bit rounding (RGB →
-  YUV), which can help slightly; with OpenCV add `--video_backend ffmpeg`.
+- Workaround: none in the CLI for real 10-bit. `--10bit` with ffmpeg still avoids one 8-bit
+  rounding (RGB → YUV), which can help slightly; with OpenCV add `--video_backend ffmpeg`.
+  [`ffv1_out.py`](../scripts/ffv1_out.py) skips the uint8 step: it stores the bf16 frames as
+  16-bit (or 10-bit) RGB. Below 0.5 the bf16 grid is finer than 8 bits: on dark 1080p frames the
+  master kept 263–347 distinct values per channel, the CLI's PNG 134–218
+  ([output.md](../docs/output.md#validation)).
 
 ## Possible fix
 

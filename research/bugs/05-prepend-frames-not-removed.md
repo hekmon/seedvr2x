@@ -73,7 +73,9 @@ copy of the image, so the output happens to be right.
 - The output has N extra frames at the start (a visible stutter: frames N…1 then 0…), audio muxed
   afterwards is off by N frames, and any frame-accurate comparison with the input is shifted.
 - Workaround: cut the first N frames yourself (`ffmpeg -vf trim=start_frame=N,setpts=PTS-STARTPTS`,
-  or delete the first N PNGs). `quality_metrics.py --drop-first N` does it for the metrics.
+  or delete the first N PNGs). `quality_metrics.py --drop-first N` does it for the metrics, and
+  [`ffv1_out.py`](../scripts/ffv1_out.py) drops them from its lossless master by default
+  ([output.md](../docs/output.md)).
 
 ## Possible fix
 

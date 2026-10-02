@@ -176,6 +176,8 @@ Links to [quality.md](quality.md) in the "Measured" column give the measured eff
   the extension of `--output` (`.jpg` writes a JPEG).
 - Output size: short side = `--resolution`, rounded down to even. The frame rate is the input's,
   and there is no audio.
+- For comparisons, [`ffv1_out.py`](../scripts/ffv1_out.py) writes a lossless 16-bit RGB master from
+  the float frames, rounded and tagged ([output.md](output.md)).
 
 ## Models
 

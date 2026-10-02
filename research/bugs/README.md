@@ -22,7 +22,7 @@ code, not reproduced. Severity, from worst: crash, wrong output, memory, perform
 | [06](06-temporal-overlap-blend-weights.md) | `--temporal_overlap` 1, 2, 4 never blend | wrong output | measured | Weights are exactly 1 then 0; 3 and 5 mix one frame 50/50 |
 | [07](07-chunk-overlap-not-blended.md) | `--chunk_size` overlap is context only, never blended | wrong output | from code | Hard seam at every chunk boundary despite "seamless" docstrings |
 | [08](08-latent-noise-timestep-shift.md) | `--latent_noise_scale` shift from (h, w, c) | wrong output | from code, effect measured | The noise strength depends on resolution only; 4× too strong a shift at 1080p batch 5. Call copied from ByteDance's SeedVR2 scripts, dormant there (scale hard-coded to 0); training convention unknown |
-| [09](09-uint8-truncation.md) | Frames truncated to uint8 instead of rounded | wrong output | from code | Dark content half a level too dark |
+| [09](09-uint8-truncation.md) | Frames truncated to uint8 instead of rounded | wrong output | measured | Dark content half a level too dark |
 | [10](10-ffmpeg-untagged-bt601.md) | ffmpeg writes untagged BT.601 YUV | wrong output | measured | Players assuming BT.709 for HD shift greens by 15% |
 | [11](11-frame-count-trusted.md) | Container frame count trusted | wrong output | from code | An under-reported count silently drops the last frames |
 | [12](12-swap-io-dit-leak.md) | `--swap_io_components` leaks unswapped DiT blocks into decode | memory | measured | +0.42 GiB per unswapped 7B block through decode (+15.2 GiB with no block swapped) |

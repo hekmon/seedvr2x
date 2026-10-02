@@ -30,9 +30,14 @@ Other `run` options: `--env K=V` (repeatable, values go through `os.path.expandv
 `--python` (default `<seedvr2-dir>/.venv/bin/python`), `--gpu` (NVML index), `--overwrite`,
 `--wrap SCRIPT` (runs `python SCRIPT inference_cli.py ARGS`, e.g.
 [`attn_probe.py`](../scripts/attn_probe.py), [`vae_probe.py`](../scripts/vae_probe.py),
-[`swap_probe.py`](../scripts/swap_probe.py) or [`vram_cap.py`](../scripts/vram_cap.py)). The CLI
-gets `BENCH_LOG` and `BENCH_RUN_NAME` in its environment, so a wrapper can write its own output
-next to the log.
+[`swap_probe.py`](../scripts/swap_probe.py), [`vram_cap.py`](../scripts/vram_cap.py) or
+[`ffv1_out.py`](../scripts/ffv1_out.py)). `--wrap` can be repeated: the wrappers are chained in
+order, `python W1 W2 inference_cli.py ARGS`, each running the next script through `runpy`
+(e.g. `--wrap vram_cap.py --wrap ffv1_out.py`). The CLI gets `BENCH_LOG` and `BENCH_RUN_NAME` in
+its environment, so a wrapper can write its own output next to the log.
+For comparisons between configurations, add [`ffv1_out.py`](../scripts/ffv1_out.py): it writes
+a lossless 16-bit RGB master of the output, so differences are not confounded by the CLI's lossy
+or truncated output ([output.md](output.md)).
 `SEEDVR2_DIR` and `BENCH_RUNS_DIR` set the defaults for `--seedvr2-dir` and `--runs-dir`.
 
 The CLI only needs `ffmpeg` on `PATH` for `--video_backend ffmpeg`: pass it through `--env PATH=...`.
@@ -45,7 +50,7 @@ One JSON object per line in `results.jsonl`. Memory values are in GiB: SeedVR2 d
 | Field | Content |
 |---|---|
 | `name`, `timestamp`, `source`, `log` | Run name, start time (ISO, with offset), `run` / `parse` / `reparse`, log path |
-| `command`, `cli_args`, `wrap` | Exact command line, the CLI arguments alone, the `--wrap` script if any |
+| `command`, `cli_args`, `wrap` | Exact command line, the CLI arguments alone, the `--wrap` script if any (a list when several are chained) |
 | `args` | The `🔧 Arguments:` block of the log: every option's effective value, defaults included |
 | `extra_env`, `alloc_conf`, `alloc_conf_source` | Environment added with `--env`. Effective `PYTORCH_CUDA_ALLOC_CONF`: inherited or set, or `backend:cudaMallocAsync` with source `cli-default`, because the CLI `setdefault`s it |
 | `seedvr2_git` | `rev`, `describe`, `dirty` of the SeedVR2 checkout |

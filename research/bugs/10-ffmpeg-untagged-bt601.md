@@ -73,7 +73,9 @@ self.proc = subprocess.Popen(
   varies, which is the problem with untagged streams.
 - Workaround: re-tag without re-encoding is not enough (the coefficients are 601); either convert
   (`ffmpeg -i out.mp4 -vf scale=in_color_matrix=bt601:out_color_matrix=bt709 ...`), or write PNG
-  and encode yourself with explicit colour options.
+  and encode yourself with explicit colour options, or write a tagged lossless master with
+  [`ffv1_out.py`](../scripts/ffv1_out.py) (RGB, or `yuv420p10le` converted with an explicit
+  BT.709 matrix) and encode from it ([output.md](../docs/output.md)).
 
 ## Possible fix
 
