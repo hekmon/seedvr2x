@@ -270,8 +270,8 @@ or as 21.
   the seed + 1 000 000 stream, so it is reproducible.
 - **`--latent_noise_scale s`** pulls the encoded input latent (the DiT's condition) toward a weak
   noise (std ≈ 0.11): (1 − t)·latent + t·noise, with t = shift·s / (1 + (shift − 1)·s). The shift
-  is computed from the latent's (h, w, c) instead of (frames, h, w)
-  ([cli-flags.md](cli-flags.md#quality)): ≈ 5 at 1080p, so t = 0.36, 0.63 and 0.83 for s = 0.1,
+  is computed from the latent's (h, w, c) instead of (frames, h, w), a call inherited from
+  ByteDance's scripts, where the scale is fixed at 0 ([bug 08](../bugs/08-latent-noise-timestep-shift.md)): ≈ 5 at 1080p, so t = 0.36, 0.63 and 0.83 for s = 0.1,
   0.25 and 0.5. The condition keeps 64%, 37% and 17% of its amplitude.
 
 Clip A, batch 21, 21 frames, `--color_correction none`; PSNR ref = vs the same run without noise:
@@ -351,6 +351,12 @@ not measured):
 | `--input_noise_scale`, `--latent_noise_scale` | 0. Input noise turns into texture and grain; latent noise (overly strong because of its timestep shift) washes the image out |
 | `--seed` | Anything; it barely matters (42 dB between seeds), and a fixed seed reproduces bit for bit |
 | VAE tiling | Untiled if it fits; otherwise the largest tiles that fit. With `lab`/`wavelet` colour correction the per-tile drift disappears |
+
+The `lab` recommendation stands on quality grounds, but `lab` (like `wavelet`, `wavelet_adaptive`
+and `adain`) runs code derived from StableSR's `colorfix.py`, under a non-commercial licence
+([cli-flags.md](cli-flags.md#quality)). A reimplementation of its frequency split (or a plain
+Gaussian low-pass) would need validating against the current `lab` on the measures above (ΔE lf,
+a\*/b\* std, batch-boundary jumps).
 
 ## Reproduce
 

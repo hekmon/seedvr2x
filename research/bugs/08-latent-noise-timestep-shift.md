@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| Severity | wrong output |
-| Status | from code; its effect measured at 1080p |
+| Severity | wrong output, unless training used the same convention ([caveat](#caveat-the-training-convention-is-unknown)) |
+| Status | from code; its effect measured at 1080p. Inherited from ByteDance's reference scripts, dormant there |
 | Affected options | `--latent_noise_scale` > 0 |
-| Version | SeedVR2 `4490bd1` (v2.5.24) |
+| Version | SeedVR2 `4490bd1` (v2.5.24); ByteDance SeedVR `e4de8c2` |
 
 ## Summary
 
@@ -15,6 +15,9 @@ shift reads as `(frames, height, width)`. The shift then depends on the resoluti
 what a 64-frame batch should get, so smaller batches get too much noise. At the default batch 5
 at 1080p the shift is 4× too large, and `--latent_noise_scale 0.1` replaces 36% of the condition
 with noise instead of 12%, which visibly washes the image out.
+
+The call comes from ByteDance's SeedVR2 inference scripts, which hard-code the scale to 0, so
+it never runs there; numz exposed the scale as an option and kept the call.
 
 ## Reproduction
 
@@ -87,8 +90,27 @@ F × 8h × 8w = 64·F·h·w for F frames: they match for F ≈ 64 at any resolut
 and `aug_noise` is `0.1 × sampling noise + 0.05 × fresh noise` (std ≈ 0.11,
 `generation_phases.py:683`): t is the fraction of the condition replaced by a near-zero signal.
 
-The same `x.shape[1:]` pattern may come from the reference inference script this code derives
-from; worth checking there too.
+`timestep_transform` itself is ByteDance's code, unchanged, and consistent with the latent
+layout: the VAE encode moves channels last (`b c t h w -> b t h w c`,
+`src/core/infer.py:187`; the encode log prints e.g. `Latents shape: torch.Size([3, 136, 240,
+16])`, i.e. t, h, w, c). The bug is in the caller.
+
+The caller is copied from ByteDance's reference scripts (SeedVR `e4de8c2`,
+`projects/inference_seedvr2_3b.py:95-115`, identical in `inference_seedvr2_7b.py:94-114`):
+same `_add_noise`, same `shape = torch.tensor(x.shape[1:])[None]` and
+`runner.timestep_transform(t, shape)`. There `cond_noise_scale = 0.0` is hard-coded, so the
+wrong shape never matters. Two differences: ByteDance's `aug_noise` is plain `randn_like`
+(std 1), and its `_add_noise` has no early return for 0 (t = 0 leaves x unchanged anyway). The
+SeedVR (v1) scripts (`inference_seedvr_3b.py:93-113`, `inference_seedvr_7b.py:95-115`) use the
+same call with `cond_noise_scale = 0.1`, so there it is live.
+
+### Caveat: the training convention is unknown
+
+ByteDance's training code isn't published. If training noised the condition with the same
+`(h, w, c)` shape, the current shift is what the model saw, and "fixing" it would move
+inference away from it. The v1 scripts ship 0.1 with this call, which doesn't tell whether the
+convention is deliberate. The default 0 (ByteDance's own value for SeedVR2) is unaffected
+either way.
 
 ## Impact
 
@@ -100,6 +122,11 @@ from; worth checking there too.
   our content it only degraded the output ([quality.md](../docs/quality.md#noise-scales)).
 
 ## Possible fix
+
+Fix it in the orchestration layer, where the noise is added; `timestep_transform` needs no
+change. Given the [caveat](#caveat-the-training-convention-is-unknown), ship it as an
+experiment (for instance for heavily compressed sources, where some condition noise could
+help), not as a plain fix, or behind a separate option.
 
 ```diff
 --- a/src/core/generation_phases.py
@@ -115,7 +142,8 @@ from; worth checking there too.
 ```
 
 Risk: existing workflows tuned around the current strength change output (much weaker noise for
-batches under ≈ 64 frames, slightly stronger above). Mention it in the changelog.
+batches under ≈ 64 frames, slightly stronger above), and the result may be further from the
+training conditions than today. Mention it in the changelog.
 
 Test: log `t` for 1080p batch 5 and batch 21 (expect 0.12 and 0.20 for s = 0.1); rerun
 `q-a-ln0.1` and check with `quality_metrics.py --ref` that the output is now closer to the
