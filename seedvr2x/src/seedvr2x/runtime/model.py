@@ -11,7 +11,7 @@ through typed functions.
 # pyright: basic
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,7 +19,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import torch
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 from safetensors.torch import load_file
 from torch import Tensor
 from torchvision.transforms import Compose, Lambda, Normalize
@@ -31,6 +31,8 @@ from seedvr2x.vendor.data.image.transforms.divisible_crop import DivisiblePad
 from seedvr2x.vendor.data.image.transforms.na_resize import NaResize
 from seedvr2x.vendor.models.dit_3b import attention as attention_3b
 from seedvr2x.vendor.models.dit_7b import attention as attention_7b
+from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
+from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
 
 logger = logging.getLogger(__name__)
 
@@ -219,3 +221,38 @@ def sample(models: Models, noise: Tensor, cond: Tensor) -> Tensor:
 def decode(models: Models, latent: Tensor) -> Tensor:
     """VAE decode of latent (T', h, w, 16): frames (C, T, H, W) in [-1, 1], unclamped."""
     return models.runner.vae_decode([latent])[0]
+
+
+@torch.no_grad()
+def decode_stream(models: Models, latent: Tensor) -> Iterator[Tensor]:
+    """VAE decode of latent (T', h, w, 16), slice by slice: frames (C, t, H, W) in [-1, 1],
+    unclamped, as they come.
+
+    The steps are those of the runner's vae_decode (core/infer.py) and the VAE's slicing_decode:
+    the same scaling, the same slices (the first two latents, then one at a time) with the same
+    causal memory states. So the frames are the one-pass decode's, bit for bit; only their
+    concatenation is left out.
+    """
+    runner, vae = models.runner, models.runner.vae
+    scale = runner.config.vae.scaling_factor
+    shift = runner.config.vae.get("shifting_factor", 0.0)
+    if isinstance(scale, ListConfig):
+        scale = torch.tensor(scale, device=latent.device, dtype=latent.dtype)
+    if isinstance(shift, ListConfig):
+        shift = torch.tensor(shift, device=latent.device, dtype=latent.dtype)
+    if next(vae.parameters()).dtype != latent.dtype:
+        raise ValueError(f"latent {latent.dtype}, VAE {next(vae.parameters()).dtype}")
+    z = (latent.unsqueeze(0) / scale + shift).movedim(-1, 1)  # (1, 16, T', h, w)
+    if vae.use_slicing and (z.shape[2] - 1) > vae.slicing_latent_min_size:
+        slices = z[:, :, 1:].split(split_size=vae.slicing_latent_min_size, dim=2)
+        try:
+            first = torch.cat((z[:, :, :1], slices[0]), dim=2)
+            yield vae._decode(first, memory_state=MemoryState.INITIALIZING)[0]
+            for z_slice in slices[1:]:
+                yield vae._decode(z_slice, memory_state=MemoryState.ACTIVE)[0]
+        finally:
+            for module in vae.modules():
+                if isinstance(module, InflatedCausalConv3d) and module.memory is not None:
+                    module.memory = None
+    else:
+        yield vae._decode(z)[0]

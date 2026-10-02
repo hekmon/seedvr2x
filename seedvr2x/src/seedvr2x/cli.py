@@ -14,16 +14,22 @@ def main(argv: list[str] | None = None) -> int:
     """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status."""
     parser = argparse.ArgumentParser(
         prog="seedvr2x",
-        description="SeedVR2 video upscaler for long runs. Milestone 1: one batch, numz's path.",
+        description="SeedVR2 video upscaler for long runs. One shot per input (milestone 2).",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
-    parser.add_argument("input", type=Path, help="RGB video, 4n + 1 frames, upscaled as one batch")
+    parser.add_argument("input", type=Path, help="8- or 16-bit RGB video, upscaled as one shot")
     parser.add_argument("-o", "--output", type=Path, required=True, help="FFV1 master (.mkv)")
     parser.add_argument("--model-dir", type=Path, required=True, help="directory of the weights")
     parser.add_argument("--dit-model", required=True, help="DiT file, e.g. 7B fp16 safetensors")
     parser.add_argument("--vae-model", default="ema_vae_fp16.safetensors", help="VAE file")
     parser.add_argument("--resolution", type=int, default=1080, help="output short side")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--window",
+        type=int,
+        metavar="LATENTS",
+        help="cap on the DiT windows, in latents of 4 frames (default: the shot in one window)",
+    )
     parser.add_argument(
         "--dump-frames",
         type=Path,
@@ -48,8 +54,8 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.decode import read_rgb
     from seedvr2x.media.ffv1 import write_gbrp16
     from seedvr2x.media.probe import probe
-    from seedvr2x.runtime.batch import upscale
     from seedvr2x.runtime.model import load_models, to_input
+    from seedvr2x.runtime.shot import upscale_shot
 
     if not torch.cuda.is_available():
         logger.error("no CUDA device")
@@ -75,7 +81,7 @@ def _run(args: argparse.Namespace) -> int:
         "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
     )
     started = time.monotonic()
-    out = upscale(models, to_input(frames), args.resolution, args.seed)
+    out = upscale_shot(models, to_input(frames), args.resolution, args.seed, args.window)
     logger.info("upscaled in %.1f s: %s", time.monotonic() - started, tuple(out.shape))
     out_frames = out.numpy()
     write_gbrp16(args.output, out_frames, stream.frame_rate)
