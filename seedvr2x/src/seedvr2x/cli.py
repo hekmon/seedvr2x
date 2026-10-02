@@ -18,6 +18,12 @@ from seedvr2x.runtime.job import MIN_SEGMENT
 if TYPE_CHECKING:
     from seedvr2x.runtime.job import OutputSegment, Part, Shot
 
+# Video file names, other than Matroska's, that -o refuses: an FFV1 master is a .mkv file, and
+# anything else names the directory of the output segments, which such a name would only hide.
+VIDEO_SUFFIXES = frozenset(
+    {".mp4", ".mov", ".m4v", ".avi", ".webm", ".ts", ".m2ts", ".mts", ".mxf", ".nut", ".mpg"}
+)
+
 logger = logging.getLogger("seedvr2x")
 
 
@@ -56,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vae-model", default="ema_vae_fp16.safetensors", help="VAE file")
     parser.add_argument(
         "--resolution",
-        type=int,
+        type=_positive,
         default=1080,
         help="short side of the output, square pixels at the source's display aspect",
     )
@@ -117,6 +123,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime.job import (
         SHARED,
         JobError,
+        check_seed,
         job_shots,
         output_size,
         parts_of,
@@ -143,6 +150,7 @@ def _run(args: argparse.Namespace) -> int:
         parts = parts_of(sources)
         cuts = read_cuts(args.cuts) if args.cuts else []
         shots = job_shots(parts, cuts)
+        check_seed(args.seed, shots)
         segments, paths, directory = _layout(args, parts, shots)
     except (MediaError, JobError) as error:
         logger.error("%s", error)
@@ -247,7 +255,14 @@ def _layout(
 
     output: Path = args.output
     total = parts[-1].end
+    if output.suffix.lower() in VIDEO_SUFFIXES:
+        raise JobError(
+            f"{output}: a video file name; an FFV1 master is a .mkv path, and the output segments"
+            " go in a directory"
+        )
     if output.suffix.lower() == ".mkv":
+        if output.is_dir():
+            raise JobError(f"{output}: a directory; a .mkv path names the one FFV1 master")
         if args.input.is_dir():
             raise JobError(f"{output}: a directory of segments needs a directory as output")
         if args.format == "png":
@@ -287,6 +302,13 @@ def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
         "input_matrix": args.input_matrix,
         "input_sar": None if args.input_sar is None else str(args.input_sar),
     }
+
+
+def _positive(text: str) -> int:
+    """A whole number above 0."""
+    if not re.fullmatch(r"\d+", text) or int(text) == 0:
+        raise argparse.ArgumentTypeError(f"{text!r}: not a whole number above 0")
+    return int(text)
 
 
 def _seconds(text: str) -> Fraction:

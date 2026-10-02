@@ -18,7 +18,7 @@ import torch
 from torch import Tensor
 
 from seedvr2x.runtime import model
-from seedvr2x.runtime.job import SHARED, output_size
+from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, SHARED, output_size
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
 
 
@@ -136,7 +136,7 @@ def upscale_shot(
     padded = padded_length(count)
     with torch.no_grad():
         # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
-        model.set_seed(seed + 1_000_000)
+        model.set_seed(seed + ENCODE_SEED_OFFSET)
         transform = model.input_transform(target)
         # (t, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388),
         # then prepared slice by slice: every step works frame by frame.

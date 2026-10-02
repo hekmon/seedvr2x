@@ -12,6 +12,12 @@ from pathlib import Path
 
 from seedvr2x.media.source import Source
 
+# numz seeds Python's, NumPy's and torch's generators with each seed (common/seed.py), and NumPy
+# takes seeds in [0, 2**32). numz seeds again before the VAE encode, with the seed plus
+# ENCODE_SEED_OFFSET (nothing draws then): runtime/shot.py does the same.
+SEED_LIMIT = 2**32
+ENCODE_SEED_OFFSET = 1_000_000
+
 # Latents shared by consecutive DiT windows, M (DESIGN.md, Pipeline step 2): M = 2 cut the boundary
 # jump by 80% against independent batches in the stitching study (research/docs/stitching.md).
 SHARED = 2
@@ -159,6 +165,18 @@ def merged_segments(
         OutputSegment(f"seg_{index:06d}", start, end)
         for index, (start, end) in enumerate(pairwise(bounds))
     ]
+
+
+def check_seed(seed: int, shots: Sequence[Shot]) -> None:
+    """Refuse a seed some shot's seed would put out of numz's range (SEED_LIMIT): the seed plus
+    the shot's first frame, and that plus ENCODE_SEED_OFFSET."""
+    highest = shots[-1].seed(seed) + ENCODE_SEED_OFFSET
+    if seed < 0 or highest >= SEED_LIMIT:
+        raise JobError(
+            f"--seed {seed}: each shot is seeded with the seed plus its first frame, and its"
+            f" encode with {ENCODE_SEED_OFFSET} more, so the seed must be between 0 and"
+            f" {SEED_LIMIT - 1 - ENCODE_SEED_OFFSET - shots[-1].start} for this source"
+        )
 
 
 def read_cuts(path: Path) -> list[int]:

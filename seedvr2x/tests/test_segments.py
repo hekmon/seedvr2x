@@ -181,6 +181,11 @@ def _usable() -> bool:
         (["-o", "out.mkv", "--format", "png"], "PNG output goes to a directory"),
         (["-o", "file.txt"], "a file; the output segments need a directory"),
         (["-o", "out", "--min-segment", "-1"], "negative"),
+        (["-o", "out.mp4"], "a video file name"),
+        (["-o", "dir.mkv"], "a .mkv path names the one FFV1 master"),
+        (["-o", "out", "--resolution", "0"], "not a whole number above 0"),
+        (["-o", "out", "--seed", "-1"], "--seed -1"),
+        (["-o", "out", "--seed", "4293967296"], "between 0 and 4293967295"),
     ],
 )
 def test_output_refusals_before_torch(tmp_path: Path, options: list[str], message: str) -> None:
@@ -193,6 +198,7 @@ def test_output_refusals_before_torch(tmp_path: Path, options: list[str], messag
         check=True,
     )
     (tmp_path / "file.txt").write_text("")
+    (tmp_path / "dir.mkv").mkdir()
     args = [str(source), "--model-dir", ".", "--dit-model", "x", *options]
     code = (
         "import sys; from seedvr2x import cli; status = cli.main(sys.argv[1:]);"
