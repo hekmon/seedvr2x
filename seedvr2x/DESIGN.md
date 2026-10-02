@@ -40,8 +40,16 @@ never requires it.
     frames as stored and carry the rotation to the output.
   - declared cropping (MP4 `clap`, Matroska `PixelCrop`), which ffmpeg applies on decode. The
     likely later way is to accept the cropped picture and size everything from it.
-  - alpha, palette and grey pixel formats. Dropping alpha changes the picture wherever it isn't
-    opaque; palette and grey aren't the YUV or RGB the conversions are pinned and tested for.
+  - any pixel format outside the tested list. Accepted:
+    - planar YUV 4:2:0, 4:2:2 and 4:4:4 at 8 to 16 bits
+    - 4:1:1, 4:1:0 and 4:4:0 at 8 bits
+    - `yuvj` 4:2:0, 4:2:2 and 4:4:4
+    - planar RGB at 8 to 16 bits
+    - 26 packed or semi-planar formats, repacked exactly
+
+    Everything else is refused: alpha (dropping it changes the picture wherever it isn't
+    opaque), palette, grey, XYZ, Bayer, float, 5-6-5 RGB, 4:4:0 above 8 bits,
+    `yuvj440p`/`yuvj411p`.
   - matrices other than BT.709, BT.601 (`bt470bg`, `smpte170m`) and BT.2020 non-constant
     luminance. The constant-luminance ones and ICtCp need the transfer function, which we
     never convert. FCC, SMPTE 240M and YCgCo are rare and would go untested.
@@ -185,9 +193,9 @@ Decoding goes through an ffmpeg pipe:
     That's mpv's rule for untagged video, a player's explicit rule, as our rule (the upscale
     looks like its source in a player) wants. Sizes in between, such as 960×540, count as SD.
   - range: limited for YUV (the `yuvj` formats are full); RGB is read full range
-  - chroma location: left, the H.264, HEVC and MPEG-2 default. The JPEG family (`yuvj`,
-    full range) is centre-sited: ffprobe tells whether ffmpeg declares it, otherwise
-    untagged full-range YUV is read as centre.
+  - chroma location: left, the H.264, HEVC and MPEG-2 default. The JPEG family is
+    centre-sited, and ffmpeg declares it so (MJPEG in AVI, MKV and MOV, with ffmpeg 6.1.1 and
+    n9.0.2), so the tags cover it.
   - chroma kernel: bicubic with b = 0, c = 0.5 (Catmull-Rom: zscale
     `filter=bicubic:param_a=0:param_b=0.5`). That is Keys' cubic with a = −0.5, the kernel of
     step 0's resize, so every interpolation feeding the model is the reference pipeline's.
@@ -201,6 +209,9 @@ Decoding goes through an ffmpeg pipe:
     accuracy flags included, puts white at 65283 (0.4% low), 128 at 32767 and 1 at 256. A
     systematic error on every frame the model sees breaks the rule that the upscale looks like
     its source.
+  - zscale expands 10-bit RGB exactly too. At 9, 12 and 14 bits, some values land one code off
+    out of 65535, because zimg computes in float32. That is far below the fp16 cast that
+    follows, which keeps 11 significant bits.
   - zscale must be fed planar RGB: given packed RGB, ffmpeg puts swscale in front of it, which
     then does the expansion.
 - exact rational frame rate, checked against the frames themselves. The first pass (below)
