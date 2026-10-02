@@ -237,10 +237,12 @@ The rule: the upscale must look like its source in any given player.
      3 latents with only 1 new.
    - the shared latents are mixed before decoding with cosine weights (0.75 then 0.25 for
      M = 2), the curve the study measured
-   - noise drawn once per shot from the seed, sliced per window, so a shared latent gets the
-     same noise in both of its windows. This is untested: the study reseeded every window,
-     so its shared latents mixed two different draws. Milestone 2 checks the sliced scheme
-     against the study's.
+   - noise drawn once per shot from the seed, sliced per window. Each latent gets the noise a
+     one-window run of the shot would give it, and a shared latent gets the same noise in both
+     of its windows. The study reseeded every window instead, so its shared latents mixed two
+     different renderings. Milestone 2 kept the sliced scheme: it is 1.2–2.0 dB closer to the
+     one-batch run at every offset to the boundaries, with the same boundary steps (see
+     [Validation milestones](#validation-milestones)).
    - one window per DiT call. Batching windows breaks `na.unconcat_coalesce` when their
      window counts differ, and the planner sizes a window to fill the memory anyway.
 
@@ -396,17 +398,36 @@ Work is saved in resumable units; a stop loses only the unit in progress.
    - The numerics choices (RoPE precision, attention dtype, VAE mode vs sample, input
      preparation) are measured beforehand on numz, with patches, and applied once this
      milestone passes.
-2. **Stitching**, with colour correction off. It isn't implemented yet, and `lab` cuts the
-   remaining low-frequency jump about 3× ([stitching.md](../research/docs/stitching.md)), so
-   the study's figures don't carry over.
+2. **Stitching.** Passed on 2026-10-02, with colour correction off. It isn't implemented yet,
+   and `lab` cuts the remaining low-frequency jump about 3×
+   ([stitching.md](../research/docs/stitching.md)), so the study's figures don't carry over.
    - Material: an 8-bit RGB copy of clip B's frames 20–100, against new numz runs: one batch
-     of 81, independent batches of 21, and `STITCH_LATENT` 6:2.
+     of 81, independent batches of 21, and `STITCH_LATENT` 6:2. The windows are latents 0–6,
+     4–10, 8–14, 12–18 and 16–21.
    - Our windowing, mixing and decode, run in an internal per-window reseed mode (tests only,
      not user-facing), reproduce numz + `STITCH_LATENT` bit for bit.
-   - The sliced noise does at least as well as the reseed mode on every boundary metric (hold
-     and low-frequency excess, step and total) and in dB from the one-batch run. Its reduction
-     against independent batches is reported; it was −80% with `lab` in the study. If it loses
-     on any metric, the noise scheme goes back to design.
+   - The sliced noise against that reseed mode, both measured against the one-batch run:
+
+     | Metric | Reseed | Sliced |
+     |---|---|---|
+     | PSNR, mean | 40.14 dB | 41.91 dB |
+     | PSNR, worst frame | 39.20 dB | 40.42 dB |
+     | Hold excess step | 0.170 | 0.171 |
+     | Low-frequency excess step | 0.050 | 0.069 |
+     | Hold excess total | 0.185 | 0.297 |
+     | Low-frequency excess total | −0.197 | 0.023 |
+     | Against independent batches: hold step | −85% | −85% |
+     | Against independent batches: low-frequency step | −93% | −91% |
+
+     - Sliced's PSNR is better at every offset to the boundaries.
+     - The excess figures are in 8-bit levels.
+     - Steps read lower-is-better. Totals are signed sums and read closer-to-0-is-better: a
+       negative total means the boundary zone changes less than the one-batch run's, which is
+       a deviation too. The reseed mode is lower on the hold total partly through such a
+       boundary.
+     - Sliced is kept on the dB, which is the closeness to the seamless run; the differences
+       left are fractions of a level. One clip and four boundaries: the visual review of
+       milestone 7 covers the rest.
    - The single-window case stays bit-identical to milestone 1.
 3. **Planner:** every card size passes under `vram_cap.py` emulation; plan estimates within a
    few percent of measured time and memory.
