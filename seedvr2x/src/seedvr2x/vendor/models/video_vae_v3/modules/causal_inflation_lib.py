@@ -11,7 +11,7 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: no retry on OOM; the Conv3d workaround flag is set here; no sequence parallelism.
+# Modified for seedvr2x: no retry on OOM; no Conv3d workaround; no sequence parallelism.
 
 import math
 from contextlib import contextmanager
@@ -27,10 +27,6 @@ from .context_parallel_lib import cache_send_recv, get_cache_size
 from .global_config import get_norm_limit
 from .types import MemoryState, _inflation_mode_t, _memory_device_t
 from ....common.half_precision_fixes import safe_pad_operation
-# seedvr2x: numz computes this flag at import (src/optimization/compatibility.py:596-640): True
-# with CUDA, cuDNN >= 9.10.2 and torch >= 2.9, which the pinned environment has. Kept True, the
-# path numz runs, until a comparison shows that the standard path gives the same output.
-NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND = True
 
 # Single GPU inference - no distributed processing needed
 #print("Warning: Using single GPU inference mode - distributed features disabled in causal_inflation_lib")
@@ -70,37 +66,11 @@ class InflatedCausalConv3d(Conv3d):
 
     def set_memory_device(self, memory_device: _memory_device_t):
         self.memory_device = memory_device
-    
-    def _conv_forward(self, input, weight, bias, *args, **kwargs):
-        """
-        Override _conv_forward to work around NVIDIA Conv3d memory bug.
-        
-        Bug: PyTorch 2.9-2.10 with cuDNN >= 91002 uses 3x memory for Conv3d 
-        with fp16/bfloat16 weights due to buggy dispatch layer.
-        
-        Workaround: Call torch.cudnn_convolution directly to bypass buggy layer.
-        Status is logged at startup in compatibility.py.
-        """
-        if (NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND and 
-            weight.dtype in (torch.float16, torch.bfloat16) and 
-            hasattr(torch.backends.cudnn, 'is_available') and
-            torch.backends.cudnn.is_available() and
-            getattr(torch.backends.cudnn, 'enabled', True)):
-            try:
-                # Direct cuDNN call bypasses buggy PyTorch dispatch layer (NVIDIA only)
-                out = torch.cudnn_convolution(
-                    input, weight, self.padding, self.stride, self.dilation, self.groups,
-                    benchmark=False, deterministic=False, allow_tf32=True
-                )
-                if bias is not None:
-                    out += bias.reshape((1, -1) + (1,) * (out.ndim - 2))
-                return out
-            except RuntimeError:
-                # Fallback if direct cuDNN call fails (dev builds, edge cases)
-                pass
-        
-        # Use standard path for unaffected configurations or if workaround failed
-        return super()._conv_forward(input, weight, bias, *args, **kwargs)
+
+    # seedvr2x: numz's _conv_forward override is gone. It called torch.cudnn_convolution directly,
+    # for a Conv3d memory bug (about 3x) with torch >= 2.9 and cuDNN >= 9.10.2. On the pinned
+    # stack (torch 2.14.1, cuDNN 9.24) the standard path gives the same output, bit for bit,
+    # and the same peak memory and time (research/docs/vram.md:240-254).
 
     def memory_limit_conv(
         self,
