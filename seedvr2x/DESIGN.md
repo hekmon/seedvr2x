@@ -98,7 +98,8 @@ connect through files.
   About 11k lines ([provenance](../research/docs/provenance.md)).
 - The submodules stay untouched. A script (`tools/vendor.py diff`) diffs our copy against numz
   and ByteDance, so every change stays visible.
-- Changes made in our copy (milestone 1 passed with them):
+- Changes made in our copy, each one checked bit-identical to numz by the milestone-1
+  regression test:
   - **numz's runtime dependencies removed:** `retry_on_oom`, the attention dispatch, MPS
     detection, the banners and import-time shims, the model registry
     (`src/utils/model_registry`), and the performance helpers
@@ -107,11 +108,23 @@ connect through files.
     supplies as a logging adapter.
   - **Attention:** FlashAttention 2 when installed, else SDPA; any other mode is an error
     ([why](../research/docs/attention.md)).
-  - **Conv3d workaround:** its dependency is gone, but its flag keeps numz's value and the
-    workaround path stays. The flag is on with torch ≥ 2.9 and cuDNN ≥ 9.10.2, where plain
-    Conv3d takes ≈ 3× the memory ([environment.md](../research/docs/environment.md)). The path
-    stays until a comparison of output, memory and time shows the standard one can replace it.
-- Still to do: drop the ~880 lines of sequence-parallel code (an identity on one GPU).
+  - **Conv3d:** numz's workaround is removed. It called `torch.cudnn_convolution` directly,
+    because plain Conv3d takes ≈ 3× the memory with torch ≥ 2.9 and cuDNN ≥ 9.10.2
+    ([environment.md](../research/docs/environment.md)).
+    - On the pinned stack (torch 2.14.1, cuDNN 9.24), the standard path gives bit-identical
+      output, the same peaks (encode 19.03 GiB, decode 34.49 GiB on 21 frames at 1080p) and the
+      same time. [vram.md](../research/docs/vram.md#other-knobs) found the same memory and time.
+    - The bug depends on the torch and cuDNN versions. The stack therefore stays pinned
+      (`uv.lock`), and any upgrade of torch or cuDNN re-runs the regression test and this
+      memory check.
+  - **Sequence parallelism:** dropped: `common/distributed/{advanced,ops}.py`, numz's stubs in
+    the VAE, and the dead DDP and TF32 helpers, 804 lines in all. On one GPU every call was an
+    identity.
+- **Upstream quirks**, left as they are:
+  - The 3B DiT only works with its cache on: its `vid_out_ada` gets its shape from a cache key
+    that block 0 fills.
+  - `na.unconcat_coalesce` fails on a batch whose samples have different window counts. Each
+    DiT call therefore takes one window (see [Pipeline](#pipeline-per-shot)).
 - **Numerics:** keep numz's or go back to ByteDance's, change by change, each measured against
   the other before choosing. What numz's 7B fp16 path actually does (implementation probe):
   - it computes in bf16: the pipeline dtype comes from a probe at import, the fp16 VAE weights
@@ -216,6 +229,8 @@ The rule: the upscale must look like its source in any given player.
    - otherwise equal windows sharing **M = 2 latents** (8 frames), the shared latents mixed
      before decoding
    - noise drawn once per shot from the seed, sliced per window
+   - one window per DiT call. Batching windows breaks `na.unconcat_coalesce` when their
+     window counts differ, and the planner sizes a window to fill the memory anyway.
 
    [Measured](../research/docs/stitching.md): −80% boundary jump against independent batches,
    no softening, output 40.5–40.8 dB from the single-window result, about +3–9% compute
