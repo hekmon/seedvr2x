@@ -37,8 +37,7 @@ stay on the GPU when the plan allows it.
 - Copied from `upstream/seedvr2-numz` at `4490bd1`: `src/models/{dit_7b,dit_3b,video_vae_v3}`,
   `src/common/diffusion`, the parts of `src/common` and `src/core/infer.py`
   (`VideoDiffusionInfer`) that the model needs, the configs and `pos_emb.pt`/`neg_emb.pt`.
-  About 11k lines. The provenance study (which file comes from ByteDance, what numz changed) is
-  not written up in the repo yet: to add as `research/docs/provenance.md`.
+  About 11k lines ([provenance](../research/docs/provenance.md)).
 - The submodules stay untouched. A script diffs our copy against numz and ByteDance, so every
   change stays visible.
 - Changes we expect to make in our copy:
