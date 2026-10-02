@@ -34,6 +34,18 @@ never requires it.
   [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
 - Variable frame rate sources: refused with a clear message, as sptenc does
+- Sources refused in v1, each with a clear message:
+  - a rotation or flip in the display matrix (phone and camera files). The decode passes
+    `-noautorotate`, so nothing rotates behind our back. The likely later way is to process the
+    frames as stored and carry the rotation to the output.
+  - declared cropping (MP4 `clap`, Matroska `PixelCrop`), which ffmpeg applies on decode. The
+    likely later way is to accept the cropped picture and size everything from it.
+  - alpha, palette and grey pixel formats. Dropping alpha changes the picture wherever it isn't
+    opaque; palette and grey aren't the YUV or RGB the conversions are pinned and tested for.
+  - matrices other than BT.709, BT.601 (`bt470bg`, `smpte170m`) and BT.2020 non-constant
+    luminance. The constant-luminance ones and ICtCp need the transfer function, which we
+    never convert. FCC, SMPTE 240M and YCgCo are rare and would go untested.
+  - RGB tagged limited range: rare, most likely a mis-tag, and either reading could be wrong
 - Interlaced and telecined sources, in any version. Deinterlacing and inverse telecine are
   workflows of their own, with specialised tools and many ways to do them. Detection:
   - refused when the stream declares interlacing
@@ -167,8 +179,21 @@ Decoding goes through an ffmpeg pipe:
 - frame-accurate, counting the frames actually decoded (never trusting the container's count,
   bug 11)
 - 16-bit RGB, converted by ffmpeg's zscale with every parameter given (matrix, range, chroma
-  location). The matrix is the tags', else BT.709 for HD and BT.601 for SD, with a warning and
-  an override.
+  location, chroma kernel). Each is the tags' value; untagged values are guessed with a
+  warning, and the matrix has an override:
+  - matrix: BT.709 when the width is at least 1280 or the height above 576, else BT.601.
+    That's mpv's rule for untagged video, a player's explicit rule, as our rule (the upscale
+    looks like its source in a player) wants. Sizes in between, such as 960×540, count as SD.
+  - range: limited for YUV (the `yuvj` formats are full); RGB is read full range
+  - chroma location: left, the H.264, HEVC and MPEG-2 default. The JPEG family (`yuvj`,
+    full range) is centre-sited: ffprobe tells whether ffmpeg declares it, otherwise
+    untagged full-range YUV is read as centre.
+  - chroma kernel: bicubic with b = 0, c = 0.5 (Catmull-Rom: zscale
+    `filter=bicubic:param_a=0:param_b=0.5`). That is Keys' cubic with a = −0.5, the kernel of
+    step 0's resize, so every interpolation feeding the model is the reference pipeline's.
+    zscale's default, bilinear, blurs chroma edges. Sharper kernels (Spline36, Lanczos)
+    pre-sharpen and ring, so they are measured options, as for the resize.
+  - primaries and transfer: the same on both sides of zscale, so never converted; no dither
   - **zscale is required.** Without it, seedvr2x refuses to run and says how to get a build
     that has it.
   - swscale is no fallback. Measured with ffmpeg n9.0.2, even the bit depth alone differs:
@@ -178,7 +203,16 @@ Decoding goes through an ffmpeg pipe:
     its source.
   - zscale must be fed planar RGB: given packed RGB, ffmpeg puts swscale in front of it, which
     then does the expansion.
-- exact rational frame rate
+- exact rational frame rate, checked against the frames themselves. The first pass (below)
+  decodes every frame before any GPU work and refuses the source when its shortest and
+  longest frame durations differ by more than 1 ms, sptenc's rule. The declared rate must
+  also match the measured durations, since the output is written at that rate.
+  - Comparing declared rates alone fails on Matroska: sptenc found a 24/30 fps mix declared
+    24/1 for both.
+  - The pass costs one software decode (171 fps on an HEVC master, over 1,000 fps on
+    H.264). scdet and idet join it with automatic scene detection.
+- interlacing: refused when the field order is neither progressive nor unknown (sptenc's
+  rule)
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
 reimplementing them. A startup check refuses a build without zscale, ffv1 or scdet. Tests verify
@@ -286,6 +320,9 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     shares the pixel format and tags of `sptenc master` (chroma sited left included), not its
     conversion: sptenc's swscale puts 16-bit white at 943 instead of 940. The conversion tests
     (see [Input](#input)) check that zscale sites the chroma left, as tagged.
+    - The chroma is downsampled with zscale's bilinear, pinned, as `ffv1_out.py` does. That is
+      the right kernel on its own merits: decimation wants a low-pass, not a sharp
+      interpolator, which is why the decode, which interpolates, uses Catmull-Rom.
 
   Validated with the [`ffv1_out.py` wrap](../research/docs/output.md): bit-exact round trip,
   tags checked by ffprobe.
@@ -494,6 +531,8 @@ writers, and the planner needs real shot lengths.
   - the fp32 → fp16 → bf16 cast of input frames
   - the fp16 weights cast to bf16
   - VAE mode vs sample
+  - the chroma kernels: Catmull-Rom upsampling at decode, bilinear downsampling for the
+    `yuv420p10le` master
   - the input preparation: the resize kernel and its `antialias` flag, and multiples of 16
     reached by padding (numz) or cropping (ByteDance)
   - a shot padded to 4n + 1 frames by mirroring its end (numz) or repeating its last frame
