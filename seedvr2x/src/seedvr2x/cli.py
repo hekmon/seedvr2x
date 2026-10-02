@@ -3,9 +3,13 @@
 import argparse
 import logging
 import os
+import re
 import time
+from fractions import Fraction
 from importlib.metadata import version
 from pathlib import Path
+
+from seedvr2x.media.conversion import MATRICES
 
 logger = logging.getLogger("seedvr2x")
 
@@ -17,13 +21,24 @@ def main(argv: list[str] | None = None) -> int:
         description="SeedVR2 video upscaler for long runs. One shot per input (milestone 2).",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
-    parser.add_argument("input", type=Path, help="8- or 16-bit RGB video, upscaled as one shot")
+    parser.add_argument("input", type=Path, help="video file, upscaled as one shot")
     parser.add_argument("-o", "--output", type=Path, required=True, help="FFV1 master (.mkv)")
     parser.add_argument("--model-dir", type=Path, required=True, help="directory of the weights")
     parser.add_argument("--dit-model", required=True, help="DiT file, e.g. 7B fp16 safetensors")
     parser.add_argument("--vae-model", default="ema_vae_fp16.safetensors", help="VAE file")
     parser.add_argument("--resolution", type=int, default=1080, help="output short side")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--input-matrix",
+        choices=sorted(MATRICES),
+        help="matrix of a YUV source, when its tag is missing or wrong",
+    )
+    parser.add_argument(
+        "--input-sar",
+        type=_ratio,
+        metavar="N:D",
+        help="sample aspect ratio of the source, when its tag is missing or wrong",
+    )
     parser.add_argument(
         "--window",
         type=int,
@@ -48,12 +63,23 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    from seedvr2x.media import ffmpeg
+    from seedvr2x.media.ffmpeg import MediaError
+    from seedvr2x.media.source import examine
+
+    # The build and the source are checked before anything touches the GPU.
+    try:
+        logger.info("ffmpeg %s", ffmpeg.check())
+        source = examine(args.input, args.input_matrix, args.input_sar)
+    except MediaError as error:
+        logger.error("%s", error)
+        return 1
+
     import numpy as np
     import torch
 
-    from seedvr2x.media.decode import read_rgb
+    from seedvr2x.media.decode import to_float32
     from seedvr2x.media.ffv1 import write_gbrp16
-    from seedvr2x.media.probe import probe
     from seedvr2x.runtime.model import load_models, to_input
     from seedvr2x.runtime.shot import upscale_shot
 
@@ -64,17 +90,12 @@ def _run(args: argparse.Namespace) -> int:
         logger.error("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
         return 1
     device = torch.device("cuda", 0)
-    stream = probe(args.input)
-    frames = read_rgb(args.input, stream)
-    logger.info(
-        "%s: %d frames %dx%d %s at %s fps",
-        args.input,
-        len(frames),
-        stream.width,
-        stream.height,
-        stream.pix_fmt,
-        stream.frame_rate,
-    )
+    try:
+        with source.decoder() as decoder:
+            frames = to_float32(decoder.read(source.frames))
+    except MediaError as error:
+        logger.error("%s: %s", args.input, error)
+        return 1
     started = time.monotonic()
     models = load_models(args.model_dir, args.dit_model, args.vae_model, device)
     logger.info(
@@ -84,10 +105,18 @@ def _run(args: argparse.Namespace) -> int:
     out = upscale_shot(models, to_input(frames), args.resolution, args.seed, args.window)
     logger.info("upscaled in %.1f s: %s", time.monotonic() - started, tuple(out.shape))
     out_frames = out.numpy()
-    write_gbrp16(args.output, out_frames, stream.frame_rate)
+    write_gbrp16(args.output, out_frames, source.stream.frame_rate)
     logger.info("wrote %s", args.output)
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
         for index, frame in enumerate(out_frames):
             np.save(args.dump_frames / f"frame_{index:06d}.npy", np.ascontiguousarray(frame))
     return 0
+
+
+def _ratio(text: str) -> Fraction:
+    """A positive ratio written N:D or N/D, as the sample aspect ratio option takes it."""
+    match = re.fullmatch(r"(\d+)[:/](\d+)", text)
+    if match is None or int(match[1]) == 0 or int(match[2]) == 0:
+        raise argparse.ArgumentTypeError(f"{text!r}: not a positive ratio N:D")
+    return Fraction(int(match[1]), int(match[2]))

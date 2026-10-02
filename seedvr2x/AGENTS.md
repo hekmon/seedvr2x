@@ -61,6 +61,8 @@ is and what numz changed in it.
   PyTorch's index), diffusers, rotary-embedding-torch and the rest. Bump one on purpose, and run
   that comparison again.
 - Linux x86_64 only for now (DESIGN.md: Linux first).
+- ffmpeg and ffprobe on PATH, with zscale (libzimg), scdet and ffv1: seedvr2x checks the build
+  at startup and refuses to run without them (DESIGN.md, Input).
 - **FlashAttention 2 is not a dependency.** PyPI only has its source, a long CUDA build, and
   seedvr2x runs without it: it uses FA2 when installed, else PyTorch's SDPA, and logs which one
   runs. To use it, build a wheel for your GPU ([setup_env.sh](../research/scripts/setup_env.sh),
@@ -87,7 +89,7 @@ uv run pytest
 ## Tests
 
 - `uv run pytest` runs on the CPU, needs no model and is quick. Tests that need ffmpeg skip
-  without it.
+  without a build seedvr2x accepts (see [Environment](#environment)).
 - `uv run pytest -m gpu` runs the tests that need CUDA, never selected by default.
 - Tests that need the model weights read their directory from `SEEDVR2X_MODEL_DIR`, and skip
   without it.
