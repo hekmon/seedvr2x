@@ -1,0 +1,221 @@
+"""The seam between seedvr2x and the vendored model code.
+
+Builds the DiT, the VAE and the diffusion runner (VideoDiffusionInfer) from the vendored configs,
+loads their weights and sets them up the way numz does, so that milestone 1 reproduces numz's
+output (DESIGN.md, Validation milestones). Line references are to numz at 4490bd1.
+
+The vendored code is untyped: this module is the one place where the rest of seedvr2x calls it,
+through typed functions.
+"""
+
+# pyright: basic
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import numpy.typing as npt
+import torch
+from omegaconf import OmegaConf
+from safetensors.torch import load_file
+from torch import Tensor
+from torchvision.transforms import Compose, Lambda, Normalize
+
+from seedvr2x.vendor.common.config import create_object, load_config
+from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
+from seedvr2x.vendor.core.infer import VideoDiffusionInfer
+from seedvr2x.vendor.data.image.transforms.divisible_crop import DivisiblePad
+from seedvr2x.vendor.data.image.transforms.na_resize import NaResize
+from seedvr2x.vendor.models.dit_3b import attention as attention_3b
+from seedvr2x.vendor.models.dit_7b import attention as attention_7b
+
+logger = logging.getLogger(__name__)
+
+VENDOR = Path(__file__).resolve().parents[1] / "vendor"
+
+# numz's pipeline dtype: bfloat16 on any GPU computing it (src/optimization/compatibility.py:
+# 684-698). The VAE runs in it, its weights cast at load, and the DiT under autocast to it.
+COMPUTE_DTYPE = torch.bfloat16
+
+
+class _DebugLog:
+    """numz's Debug object as far as the vendored code uses it (log), sent to logging."""
+
+    def log(self, message: str, *args: Any, **kwargs: Any) -> None:
+        logger.debug("%s", message)
+
+
+@dataclass
+class Models:
+    """The loaded models, on one device, ready to run."""
+
+    runner: Any  # VideoDiffusionInfer, untyped, its dit and vae set by load_models
+    text_pos: Tensor  # (58, 5120) bfloat16: the positive text embedding, the one used at cfg 1
+    text_neg: Tensor  # (64, 5120) bfloat16
+    attention: str  # flash_attn_2 or sdpa
+    device: torch.device
+
+
+def attention_backend() -> str:
+    """flash_attn_2 when FlashAttention 2 imports, else sdpa (DESIGN.md, Vendored model code)."""
+    available = attention_7b.FLASH_ATTN_2_AVAILABLE and attention_3b.FLASH_ATTN_2_AVAILABLE
+    return "flash_attn_2" if available else "sdpa"
+
+
+def load_models(model_dir: Path, dit_file: str, vae_file: str, device: torch.device) -> Models:
+    """Build and load the DiT named dit_file and the VAE named vae_file, from model_dir."""
+    # The 7B config when the file name says so, else the 3B one (src/core/model_configuration.py
+    # :712-715).
+    config_dir = "configs_7b" if "7b" in dit_file else "configs_3b"
+    config: Any = load_config(str(VENDOR / config_dir / "main.yaml"))
+    runner: Any = VideoDiffusionInfer(config, _DebugLog())
+    OmegaConf.set_readonly(runner.config, False)
+
+    # The VAE's architecture is a config apart, merged into the runner's (model_configuration.py:
+    # 1117-1131); its dtype is the pipeline's.
+    vae_config: Any = load_config(str(VENDOR / "models/video_vae_v3/s8_c16_t4_inflation_sd3.yaml"))
+    vae_config.spatial_downsample_factor = vae_config.get("spatial_downsample_factor", 8)
+    vae_config.temporal_downsample_factor = vae_config.get("temporal_downsample_factor", 4)
+    runner.config.vae.model = OmegaConf.merge(runner.config.vae.model, vae_config)
+    runner.config.vae.dtype = str(COMPUTE_DTYPE).split(".")[-1]
+
+    # Read back from the tree, as numz does: the node assigned is a copy, attached to the config.
+    vae_model_config: Any = runner.config.vae.model
+    with torch.device("meta"):
+        vae = create_object(vae_model_config)
+    _load_weights(vae, model_dir / vae_file, device, COMPUTE_DTYPE)
+    # Out of training mode, the causal convolutions keep their memory across slices
+    # (causal_inflation_lib.py:242, 268). Slicing and memory limits from the config
+    # (model_configuration.py:1241-1259): fixed thresholds on tensor sizes, not on free memory.
+    vae.requires_grad_(False).eval()
+    vae.set_causal_slicing(**runner.config.vae.slicing)
+    vae.set_memory_limit(**runner.config.vae.memory_limit)
+    runner.vae = vae
+
+    # The DiT keeps its weights' dtype (the override is commented out at model_configuration.py:
+    # 1048-1052). numz leaves it in training mode, which changes nothing: its only use is a
+    # gradient checkpointing stub (nadit.py:30-31).
+    with torch.device("meta"):
+        dit = create_object(runner.config.dit.model)
+    _load_weights(dit, model_dir / dit_file, device, None)
+    dit.requires_grad_(False).eval()
+    attention = attention_backend()
+    if attention == "sdpa":
+        logger.warning("FlashAttention 2 is not installed: attention runs on PyTorch's SDPA")
+    # Set on every attention module, as numz does (model_configuration.py:1204-1210).
+    for module in dit.modules():
+        if isinstance(
+            module, attention_7b.FlashAttentionVarlen | attention_3b.FlashAttentionVarlen
+        ):
+            module.attention_mode = attention
+            module.compute_dtype = COMPUTE_DTYPE
+    runner.dit = dit
+
+    # numz's one-step sampling: cfg 1, no rescale, one step (generation_phases.py:599-602).
+    runner.config.diffusion.cfg.scale = 1.0
+    runner.config.diffusion.cfg.rescale = 0.0
+    runner.config.diffusion.timesteps.sampling.steps = 1
+    runner.configure_diffusion(device=device, dtype=COMPUTE_DTYPE)
+
+    text_pos = torch.load(VENDOR / "pos_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
+    text_neg = torch.load(VENDOR / "neg_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
+    return Models(runner, text_pos, text_neg, attention, device)
+
+
+def _load_weights(
+    model: torch.nn.Module, path: Path, device: torch.device, dtype: torch.dtype | None
+) -> None:
+    """Load a safetensors checkpoint into a model built on the meta device, as numz does
+    (src/core/model_loader.py:547-616, 777-835): the file's dtypes, or every floating tensor cast
+    to dtype; then the buffers the checkpoint doesn't hold, still on meta, filled with zeros."""
+    state = load_file(path, device=str(device))
+    if dtype is not None:
+        state = {k: v.to(dtype) if v.is_floating_point() else v for k, v in state.items()}
+    # strict=False as numz, but the mismatches are reported, where numz ignores them silently.
+    result = model.load_state_dict(state, strict=False, assign=True)
+    if result.missing_keys or result.unexpected_keys:
+        logger.warning(
+            "%s: %d keys missing from the checkpoint, %d unexpected: %s",
+            path.name,
+            len(result.missing_keys),
+            len(result.unexpected_keys),
+            (result.missing_keys + result.unexpected_keys)[:8],
+        )
+    del state
+    for name, buffer in list(model.named_buffers()):
+        if buffer.device.type == "meta":
+            module_path, _, buffer_name = name.rpartition(".")
+            module = model.get_submodule(module_path)
+            zeros = torch.zeros_like(buffer, device=device)
+            module.register_buffer(buffer_name, zeros, persistent=False)
+    for name, param in model.named_parameters():
+        if param.device.type == "meta":
+            raise RuntimeError(f"{path.name}: no weight for {name}")
+
+
+def to_input(frames: npt.NDArray[np.float32]) -> Tensor:
+    """numz's input tensor from frames (T, H, W, 3) float32 in [0, 1]: float16 on the CPU
+    (inference_cli.py:613-618, 697), which rounds some 8-bit values differently from a direct
+    bfloat16 cast."""
+    return torch.from_numpy(frames).to(torch.float16)
+
+
+def input_transform(resolution: int) -> Callable[[Tensor], Tensor]:
+    """numz's input preparation (src/core/generation_utils.py:72-84): the short side resized to
+    resolution (torchvision's bicubic, antialias on), values clamped to [0, 1], bottom and right
+    padded to multiples of 16, normalised to [-1, 1], and (T, C, H, W) to (C, T, H, W)."""
+    return Compose(
+        [
+            NaResize(resolution=resolution, mode="side", downsample_only=False, max_resolution=0),
+            Lambda(lambda x: torch.clamp(x, 0.0, 1.0)),
+            DivisiblePad((16, 16)),
+            Normalize(0.5, 0.5),
+            Lambda(lambda x: x.permute(1, 0, 2, 3)),
+        ]
+    )
+
+
+def resized_size(height: int, width: int, resolution: int) -> tuple[int, int]:
+    """Height and width of the output for frames of height by width: the resize's, each rounded
+    down to an even number (generation_utils.py:127-136)."""
+    resize = NaResize(resolution=resolution, mode="side", downsample_only=False, max_resolution=0)
+    resized = resize(torch.zeros(1, 3, height, width))
+    out_height, out_width = resized.shape[-2:]
+    return (out_height // 2) * 2, (out_width // 2) * 2
+
+
+def set_seed(seed: int) -> None:
+    """Seed Python's, NumPy's and torch's global generators, as numz does (common/seed.py)."""
+    vendor_set_seed(seed)
+
+
+def encode(models: Models, video: Tensor) -> Tensor:
+    """VAE latent of video (C, T, H, W), as the runner returns it: (T', h, w, 16) in channel-major
+    memory (a permuted view), which the noise drawn from it depends on."""
+    return models.runner.vae_encode([video])[0]
+
+
+def condition(models: Models, noise: Tensor, latent: Tensor) -> Tensor:
+    """The DiT's conditioning for the super-resolution task: (T', h, w, 17)."""
+    return models.runner.get_condition(noise, task="sr", latent_blur=latent)
+
+
+def sample(models: Models, noise: Tensor, cond: Tensor) -> Tensor:
+    """One Euler step of the DiT from noise, under bfloat16 autocast when its weights are another
+    dtype, as numz runs it (generation_phases.py:704-724)."""
+    autocast = next(models.runner.dit.parameters()).dtype != COMPUTE_DTYPE
+    with torch.no_grad(), torch.autocast(models.device.type, COMPUTE_DTYPE, enabled=autocast):
+        return models.runner.inference(
+            noises=[noise],
+            conditions=[cond],
+            texts_pos=[models.text_pos],
+            texts_neg=[models.text_neg],
+        )[0]
+
+
+def decode(models: Models, latent: Tensor) -> Tensor:
+    """VAE decode of latent (T', h, w, 16): frames (C, T, H, W) in [-1, 1], unclamped."""
+    return models.runner.vae_decode([latent])[0]
