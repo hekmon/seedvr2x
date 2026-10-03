@@ -528,15 +528,28 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       - the distributions imported once every module of seedvr2x is (the vendored models
         included), narrowed to the closure of seedvr2x's declared requirements, followed
         through extras. Dev-only or tooling installs therefore never refuse a resume.
+        - cuda-bindings, which `import torch` imports, is among them.
+        - setuptools' start-up hook is left out. Every Python process imports
+          `_distutils_hack` from `distutils-precedence.pth`, unless
+          `SETUPTOOLS_USE_DISTUTILS=stdlib`. The run itself imports no setuptools, and
+          counting the hook would make the record depend on that variable.
       - flash-attn, which is not a declared dependency
-      - torch's runtime libraries, loaded without being imported: its 15 nvidia-* wheels,
-        triton, cuda-bindings
+      - torch's runtime libraries, loaded without being imported: the distributions it
+        requires (through extras) that ship a shared library other than a Python extension
+        module, since an extension module is loaded only by an import. On the pinned stack,
+        that is its 15 nvidia-* wheels and triton.
       - Python's version
 
-      On the GPU box that is 50 distributions, read in 1.8 s at start. A check at the end of
-      every run warns of any distribution the run imported but didn't record. Known limit,
-      as for any version record: third-party code shadowed on `PYTHONPATH` or installed
-      editable isn't seen changing.
+      On the GPU box that is 47 distributions, read in 1.75 s at start. A check at the end of
+      every run with a manifest warns of any of the run's distributions it imported after the
+      record. Known limits:
+      - As for any version record, third-party code shadowed on `PYTHONPATH` or installed
+        editable isn't seen changing.
+      - An import from outside the closure, flash-attn aside, is neither recorded nor warned
+        of, so a dependency the code imports must be declared. With uv's exact sync, only
+        dev-group packages can be installed outside the closure.
+      - Environment markers other than extras aren't evaluated: another platform's or Python
+        version's requirement counts when it is installed, which only errs toward recording.
 
     The NVIDIA driver is recorded through NVML for information, not compared: the math kernels
     ship with torch.
