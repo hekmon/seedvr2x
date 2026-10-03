@@ -9,11 +9,12 @@ import shutil
 import time
 from bisect import bisect_right
 from collections.abc import Sequence
+from dataclasses import dataclass
 from fractions import Fraction
 from importlib.metadata import PackageNotFoundError, version
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.writer import FORMATS
@@ -23,7 +24,8 @@ from seedvr2x.runtime.stop import Stop, Stopped, Terminated
 if TYPE_CHECKING:
     import torch
 
-    from seedvr2x.runtime.job import OutputSegment, Part, Shot
+    from seedvr2x.media.source import Declared, FirstPass
+    from seedvr2x.runtime.job import JobError, OutputSegment, Part, Shot
     from seedvr2x.runtime.manifest import Manifest
 
 # Video file names, other than Matroska's, that -o refuses: an FFV1 master is a .mkv file, and
@@ -146,7 +148,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.fingerprint import fingerprint
-    from seedvr2x.media.source import examine, examine_directory
+    from seedvr2x.media.source import counted, declare, declare_directory, first_pass
     from seedvr2x.runtime.job import (
         SHARED,
         JobError,
@@ -157,8 +159,13 @@ def _run(args: argparse.Namespace) -> int:
         read_cuts,
         target_size,
     )
+    from seedvr2x.runtime.manifest import NAME
 
-    # The build, the source and the cut list are checked before anything touches the GPU.
+    # The build, the source and the cut list are checked before anything touches the GPU, but
+    # for a job resumed, which is first checked against its record (its settings, environment,
+    # the GPU's included, and inputs), before its first pass, which isn't run again when nothing
+    # it depends on changed (DESIGN.md, Pause and resume).
+    prior: _Prior | None = None
     try:
         if args.window is not None and args.window < 2 * SHARED + 1:
             raise JobError(
@@ -173,37 +180,48 @@ def _run(args: argparse.Namespace) -> int:
                 # Until the detector for doubtful joins comes, each join is a cut (DESIGN.md,
                 # Input).
                 raise JobError("--cuts with a directory: each join of its segments is a cut")
-            sources = examine_directory(args.input, args.input_matrix, args.input_sar)
+            declared = declare_directory(args.input, args.input_matrix, args.input_sar)
         else:
-            sources = [examine(args.input, args.input_matrix, args.input_sar)]
-        parts = parts_of(sources)
+            declared = [declare(args.input, args.input_matrix, args.input_sar)]
         cuts = read_cuts(args.cuts) if args.cuts else []
+        directory = _output(args)
+        if directory is not None and (directory / NAME).is_file():
+            _lock(directory)
+            prior = _prior(args, directory, cuts, declared, ffmpeg_version, conversions)
+        if prior is not None and prior.known is not None:
+            passes = prior.known
+        else:
+            # Each input's content hashed meanwhile, for the manifest.
+            passes = [first_pass(each, hashed=directory is not None) for each in declared]
+        sources = [counted(each, done) for each, done in zip(declared, passes, strict=True)]
+        if args.input.is_dir():
+            frames = sum(source.frames for source in sources)
+            logger.info("%s: %d segments, %d frames", args.input, len(sources), frames)
+        parts = parts_of(sources)
         shots = job_shots(parts, cuts)
         check_seed(args.seed, shots)
-        segments, paths, directory = _layout(args, parts, shots)
-        for name in (args.dit_model, args.vae_model):
-            if not (args.model_dir / name).is_file():
-                raise JobError(f"{args.model_dir / name}: no such model file")
+        segments, paths = _segments(args, parts, shots, directory)
+        source = sources[0]
+        stream = source.stream
+        target = target_size(stream.width, stream.height, source.sample_aspect, args.resolution)
+        out_height, out_width = output_size(target)
+        logger.info(
+            "%d shots, %d output segments; output %dx%d, square pixels",
+            len(shots),
+            len(segments),
+            out_width,
+            out_height,
+        )
+        if prior is not None:
+            identity = prior.identity
+        else:
+            identity = _identity(args, cuts, directory, ffmpeg_version, conversions)
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
-    source = sources[0]
-    stream = source.stream
-    target = target_size(stream.width, stream.height, source.sample_aspect, args.resolution)
-    out_height, out_width = output_size(target)
-    logger.info(
-        "%d shots, %d output segments; output %dx%d, square pixels",
-        len(shots),
-        len(segments),
-        out_width,
-        out_height,
-    )
-    # The manifest's settings, the models' hashes included, before any GPU work.
-    settings = _settings(args, cuts) if directory is not None else {}
 
     import numpy as np
     import numpy.typing as npt
-    import torch
 
     from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
     from seedvr2x.runtime import manifest
@@ -212,25 +230,19 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime.shot import shot_layout
     from seedvr2x.runtime.units import DiskUnits, Units
 
-    if not torch.cuda.is_available():
-        logger.error("no CUDA device")
-        return 1
-    if not torch.cuda.is_bf16_supported():
-        logger.error("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
-        return 1
-    device = torch.device("cuda", 0)
-    units, record, resumed = Units(), None, False
+    units, record = Units(), None
     remaining = list(range(len(segments)))  # the segments to write, those not finished
     if directory is not None:
         try:
-            _lock(directory)
+            if prior is None:
+                _lock(directory)
         except JobError as error:
             logger.error("%s", error)
             return 1
         record = manifest.Manifest(
-            directory / manifest.NAME,
-            settings,
-            _environment(device, ffmpeg_version, conversions),
+            directory / NAME,
+            identity.settings,
+            identity.environment,
             parts,
             shots,
             [shot_layout(shot.frames, args.window) for shot in shots],
@@ -242,14 +254,13 @@ def _run(args: argparse.Namespace) -> int:
                 "frame_rate": str(stream.frame_rate),
             },
         )
-        resumed = record.path.is_file()
-        if not resumed and not _empty(directory):
+        if prior is None and not _empty(directory):
             logger.error("%s: written to since it was checked, by another program", directory)
             return 1
-        if resumed:
-            # The job recorded there, checked and taken up before the models load.
+        if prior is not None:
+            # The job recorded there, checked whole and taken up before the models load.
             try:
-                _resume(record, args.accept_env_change)
+                _resume(record, prior)
             except JobError as error:
                 logger.error("%s", error)
                 return 1
@@ -259,13 +270,13 @@ def _run(args: argparse.Namespace) -> int:
                 return 0
         units = DiskUnits(directory, record)
     started = time.monotonic()
-    models = load_models(args.model_dir, args.dit_model, args.vae_model, device)
+    models = load_models(args.model_dir, args.dit_model, args.vae_model, identity.device)
     logger.info(
         "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
     )
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
-    if record is not None and not resumed:
+    if record is not None and prior is None:
         record.path.parent.mkdir(parents=True, exist_ok=True)
         record.write()
     started = time.monotonic()
@@ -323,21 +334,17 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _layout(
-    args: argparse.Namespace, parts: "Sequence[Part]", shots: "Sequence[Shot]"
-) -> "tuple[list[OutputSegment], list[Path], Path | None]":
-    """The output's segments, each one's path, and the directory they go in (None for one file).
-    A .mkv path takes a video file's output whole, one FFV1 master. Else the output is a new or
-    empty directory of segments, named and cut as sptenc's split: a directory's own, mirrored;
-    a video file's shots, merged to --min-segment (DESIGN.md, Output). Until assembly (milestone
-    6), the .mkv path stands for the one-file output, and the directory must be new or empty,
-    which keeps another run's files out of what sptenc reads (DESIGN.md, Output), or hold a
-    job's manifest, which resume reads back (resume.leftovers checks the rest)."""
-    from seedvr2x.runtime.job import JobError, OutputSegment, merged_segments, mirrored_segments
-    from seedvr2x.runtime.manifest import NAME, STATE
+def _output(args: argparse.Namespace) -> Path | None:
+    """The directory the output segments go in, or None for one file. A .mkv path takes a video
+    file's output whole, one FFV1 master. Else the output is a new or empty directory of
+    segments (DESIGN.md, Output). Until assembly (milestone 6), the .mkv path stands for the
+    one-file output, and the directory must be new or empty, which keeps another run's files out
+    of what sptenc reads (DESIGN.md, Output), or hold a job's manifest, which resume reads back
+    (resume.leftovers checks the rest)."""
+    from seedvr2x.runtime.job import JobError
+    from seedvr2x.runtime.manifest import NAME
 
     output: Path = args.output
-    total = parts[-1].end
     if output.suffix.lower() in VIDEO_SUFFIXES:
         raise JobError(
             f"{output}: a video file name; an FFV1 master is a .mkv path, and the output segments"
@@ -350,7 +357,7 @@ def _layout(
             raise JobError(f"{output}: a directory of segments needs a directory as output")
         if args.format == "png":
             raise JobError(f"{output}: PNG output goes to a directory")
-        return [OutputSegment(output.stem, 0, total)], [output], None
+        return None
     if output.is_file():
         raise JobError(f"{output}: a file; the output segments need a directory")
     if args.dump_frames is not None and args.dump_frames.resolve().is_relative_to(output.resolve()):
@@ -363,18 +370,36 @@ def _layout(
             f"{output}: not empty, and no {NAME} to resume from; the output segments need a new"
             " or empty directory"
         )
+    return output
+
+
+def _segments(
+    args: argparse.Namespace,
+    parts: "Sequence[Part]",
+    shots: "Sequence[Shot]",
+    directory: Path | None,
+) -> "tuple[list[OutputSegment], list[Path]]":
+    """The output's segments and each one's path: one file (directory None); else named and cut
+    as sptenc's split, a directory's own, mirrored, or a video file's shots, merged to
+    --min-segment (DESIGN.md, Output)."""
+    from seedvr2x.runtime.job import JobError, OutputSegment, merged_segments, mirrored_segments
+    from seedvr2x.runtime.manifest import NAME, STATE
+
+    total = parts[-1].end
+    if directory is None:
+        return [OutputSegment(args.output.stem, 0, total)], [args.output]
     if args.input.is_dir():
         segments = mirrored_segments(parts)
     else:
         frame_rate = parts[0].source.stream.frame_rate
         segments = merged_segments(shots, total, frame_rate, args.min_segment)
     suffix = "" if args.format == "png" else ".mkv"
-    paths = [output / f"{segment.name}{suffix}" for segment in segments]
+    paths = [directory / f"{segment.name}{suffix}" for segment in segments]
     for path in paths:
         # A mirrored segment takes its file's stem, which could be one of seedvr2x's own names.
         if path.name in (NAME, STATE) or path.name.endswith(".partial"):
             raise JobError(f"{path.name}: a name seedvr2x keeps for itself in its output")
-    return segments, paths, output
+    return segments, paths
 
 
 def _empty(directory: Path) -> bool:
@@ -435,38 +460,129 @@ def _unlock() -> None:
         os.close(_LOCKS.pop())
 
 
-def _resume(record: "Manifest", accept_env_change: bool) -> None:
-    """Take up the job recorded beside record, refused (JobError) unless it is the one asked, but
-    for an environment change accepted, recorded then; its directory must be as the manifest
-    says. Then discard what a stop left that the manifest doesn't name (resume.leftovers). The
-    manifest is written by the next unit made: a resume stopped before one keeps the record as
-    it was."""
-    from seedvr2x.runtime import resume
+@dataclass(frozen=True)
+class _Identity:
+    """What a job's output depends on besides its frames (DESIGN.md, Pause and resume): its
+    settings, the models by hash, and the environment, both recorded for a directory's manifest
+    only; and the GPU it runs on."""
+
+    settings: dict[str, object]
+    device: "torch.device"
+    environment: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _Prior:
+    """A job resumed, as checked against its record before its first pass (_prior)."""
+
+    recorded: dict[str, Any]  # its manifest, as written
+    identity: _Identity
+    changed: list[str]  # its environment's differences, accepted (--accept-env-change)
+    known: "list[FirstPass] | None"  # its first pass's record, trusted, unless changed
+
+
+def _identity(
+    args: argparse.Namespace,
+    cuts: list[int],
+    directory: Path | None,
+    ffmpeg_version: str,
+    conversions: str,
+) -> _Identity:
+    """The job's identity, refused (JobError) without its model files, or without a CUDA GPU
+    computing in bfloat16. The models are hashed before any GPU work."""
     from seedvr2x.runtime.job import JobError
 
-    recorded = resume.read(record.path)
-    found = resume.differences(recorded, record.content())
+    for name in (args.dit_model, args.vae_model):
+        if not (args.model_dir / name).is_file():
+            raise JobError(f"{args.model_dir / name}: no such model file")
+    settings = _settings(args, cuts) if directory is not None else {}
+    import torch
+
+    if not torch.cuda.is_available():
+        raise JobError("no CUDA device")
+    if not torch.cuda.is_bf16_supported():
+        raise JobError("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
+    device = torch.device("cuda", 0)
+    environment = _environment(device, ffmpeg_version, conversions) if directory is not None else {}
+    return _Identity(settings, device, environment)
+
+
+def _prior(
+    args: argparse.Namespace,
+    directory: Path,
+    cuts: list[int],
+    declared: "Sequence[Declared]",
+    ffmpeg_version: str,
+    conversions: str,
+) -> _Prior:
+    """The job recorded in directory, checked against the one asked before its first pass: the
+    same settings, environment and inputs, an input being its content (resume.identity), or
+    refused (JobError), but for an environment change accepted (--accept-env-change). With
+    nothing changed, the record of the first pass is trusted, and the pass isn't run again: the
+    same bytes, decoded by the same build, give the same frames (DESIGN.md, Pause and resume)."""
+    from seedvr2x.media.source import FirstPass
+    from seedvr2x.runtime import resume
+    from seedvr2x.runtime.manifest import NAME
+
+    path = directory / NAME
+    recorded = resume.read(path)
+    identity = _identity(args, cuts, directory, ffmpeg_version, conversions)
+    asked = {
+        "settings": identity.settings,
+        "environment": identity.environment,
+        "input": [_content(each.path) for each in declared],
+    }
+    found = resume.differences(resume.identity(recorded), resume.identity(asked))
     changed = [line for line in found if resume.section(line) == "environment"]
-    if len(changed) < len(found) or (changed and not accept_env_change):
-        raise JobError(
-            f"{record.path}: another job than the one asked, which differs in:\n  "
-            + "\n  ".join(found[:20])
-            + (f"\n  and {len(found) - 20} more" if len(found) > 20 else "")
-            + (
-                "\nOnly its environment differs: --accept-env-change resumes it anyway, though"
-                " its output then differs from an uninterrupted run's"
-                if len(changed) == len(found)
-                else ""
+    if len(changed) < len(found) or (changed and not args.accept_env_change):
+        raise _another_job(path, found, only_environment=len(changed) == len(found))
+    inputs: list[dict[str, Any]] = recorded["input"]
+    for each, entry in zip(declared, inputs, strict=True):
+        if entry["path"] != str(each.path.resolve()):
+            logger.info(
+                "%s: the input recorded at %s, moved: the same content", each.path, entry["path"]
             )
-        )
-    resume.adopt(record, recorded)
     if changed:
-        record.environment_changes.append(resume.environment_change(recorded, record.environment))
+        return _Prior(recorded, identity, changed, None)
+    logger.info("%s: the same job, its first pass as recorded", directory)
+    return _Prior(recorded, identity, [], [FirstPass(e["frames"], e["sha256"]) for e in inputs])
+
+
+def _content(path: Path) -> dict[str, object]:
+    """An input file's content, as a resume compares it: its size and SHA-256."""
+    from seedvr2x.media.files import sha256
+
+    started = time.monotonic()
+    digest = sha256(path)
+    logger.info("%s: SHA-256 %s, in %.1f s", path, digest, time.monotonic() - started)
+    return {"bytes": path.stat().st_size, "sha256": digest}
+
+
+def _resume(record: "Manifest", prior: _Prior) -> None:
+    """Take up the job recorded beside record, checked before its first pass (_prior): refused
+    (JobError) unless the rest is the job asked too, what the first pass found and the layout
+    following from it; its directory must be as the manifest says. Then record the environment
+    change accepted, and discard what a stop left that the manifest doesn't name
+    (resume.leftovers). The manifest is written by the next unit made: a resume stopped
+    before one keeps the record as it was."""
+    from seedvr2x.runtime import resume
+
+    found = [
+        line
+        for line in resume.differences(prior.recorded, record.content())
+        if resume.section(line) != "environment"  # compared before the first pass
+    ]
+    if found:
+        raise _another_job(record.path, found, only_environment=False)
+    resume.adopt(record, prior.recorded)
+    if prior.changed:
+        change = resume.environment_change(prior.recorded, record.environment)
+        record.environment_changes.append(change)
         logger.warning(
             "%s: resumed in another environment, as accepted, which its manifest records with"
             " the next unit made: %s",
             record.path.parent,
-            "; ".join(changed),
+            "; ".join(prior.changed),
         )
     discarded = resume.leftovers(record)
     for path in discarded:
@@ -488,10 +604,27 @@ def _resume(record: "Manifest", accept_env_change: bool) -> None:
     )
 
 
+def _another_job(path: Path, found: list[str], only_environment: bool) -> "JobError":
+    """A resume refused, each difference listed, `where: recorded -> now`."""
+    from seedvr2x.runtime.job import JobError
+
+    return JobError(
+        f"{path}: another job than the one asked, which differs in:\n  "
+        + "\n  ".join(found[:20])
+        + (f"\n  and {len(found) - 20} more" if len(found) > 20 else "")
+        + (
+            "\nOnly its environment differs: --accept-env-change resumes it anyway, though"
+            " its output then differs from an uninterrupted run's"
+            if only_environment
+            else ""
+        )
+    )
+
+
 def _model(directory: Path, name: str) -> dict[str, object]:
     """A model as the manifest records it: its file's name, size and SHA-256, models being
     identified by hash (DESIGN.md, Options kept and dropped). The 7B fp16 DiT is 16 GB to read."""
-    from seedvr2x.runtime.manifest import sha256
+    from seedvr2x.media.files import sha256
 
     path = directory / name
     started = time.monotonic()

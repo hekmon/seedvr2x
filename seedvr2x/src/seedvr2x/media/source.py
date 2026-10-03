@@ -1,8 +1,11 @@
 """A source, examined before any GPU work: what it declares, what seedvr2x refuses, how its frames
 become RGB, and the first pass (DESIGN.md, Input). A source is a video file, or a directory of
-segments, each a file examined alike."""
+segments, each a file examined alike. A job resumed checks its record between what the source
+declares and its first pass, whose record it then trusts when nothing changed (DESIGN.md, Pause
+and resume)."""
 
 import logging
+import threading
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -10,6 +13,7 @@ from pathlib import Path
 from seedvr2x.media.conversion import Conversion, conversion_for
 from seedvr2x.media.decode import Decoder
 from seedvr2x.media.ffmpeg import MediaError, input_args
+from seedvr2x.media.files import sha256
 from seedvr2x.media.probe import VideoStream, probe
 from seedvr2x.media.scan import scan, timing_error
 
@@ -21,6 +25,26 @@ IDENTITY = (65536, 0, 0, 0, 65536, 0)
 
 
 @dataclass(frozen=True)
+class Declared:
+    """A video file as it declares itself, accepted: its first video stream, how its frames
+    become RGB, and its sample aspect; its frames not counted yet (first_pass)."""
+
+    path: Path
+    stream: VideoStream
+    conversion: Conversion
+    sample_aspect: Fraction  # the override, else the declared one, else 1 (square pixels)
+
+
+@dataclass(frozen=True)
+class FirstPass:
+    """What the first pass found in a file: its frames, decoded and counted, at the constant rate
+    declared; and its content's SHA-256, when hashed."""
+
+    frames: int
+    sha256: str | None = None
+
+
+@dataclass(frozen=True)
 class Source:
     """A video file seedvr2x reads: its first video stream."""
 
@@ -29,6 +53,7 @@ class Source:
     conversion: Conversion
     frames: int  # counted by the first pass
     sample_aspect: Fraction  # the override, else the declared one, else 1 (square pixels)
+    sha256: str | None = None  # the file's content, hashed for a manifest
 
     @property
     def display_aspect(self) -> Fraction:
@@ -46,8 +71,20 @@ class Source:
 
 
 def examine(path: Path, matrix: str | None = None, sample_aspect: Fraction | None = None) -> Source:
-    """Probe path, refuse what seedvr2x doesn't read, then decode it once to count and time its
-    frames. `matrix` (ffprobe's name) and `sample_aspect` override the source's tags.
+    """Probe path, refuse what seedvr2x doesn't read (declare), then decode it once to count and
+    time its frames (first_pass). `matrix` (ffprobe's name) and `sample_aspect` override the
+    source's tags.
+
+    Raises MediaError with the reason for a refusal."""
+    declared = declare(path, matrix, sample_aspect)
+    return counted(declared, first_pass(declared))
+
+
+def declare(
+    path: Path, matrix: str | None = None, sample_aspect: Fraction | None = None
+) -> Declared:
+    """Probe path and refuse what seedvr2x doesn't read, by what it declares. `matrix` (ffprobe's
+    name) and `sample_aspect` override the source's tags.
 
     Raises MediaError with the reason for a refusal."""
     stream = probe(path)
@@ -58,34 +95,77 @@ def examine(path: Path, matrix: str | None = None, sample_aspect: Fraction | Non
         conversion = conversion_for(stream, matrix)
     except MediaError as error:
         raise MediaError(f"{path}: {error}") from None
-    scanned = scan(path)
-    refusal = timing_error(scanned, stream.frame_rate, stream.avg_frame_rate)
-    if refusal:
-        raise MediaError(f"{path}: {refusal}")
     if sample_aspect is None:
         sample_aspect = stream.sample_aspect
         if sample_aspect is None:
             logger.info("%s: no sample aspect declared, read as square pixels", path)
             sample_aspect = Fraction(1)
-    source = Source(path, stream, conversion, scanned.frames, sample_aspect)
-    logger.info(
-        "%s: %d frames, %dx%d %s at %s fps, sample aspect %s (display %s), read as %s",
-        path,
-        source.frames,
-        stream.width,
-        stream.height,
-        stream.pix_fmt,
-        stream.frame_rate,
-        _ratio(sample_aspect),
-        _ratio(source.display_aspect),
-        conversion.describe(),
-    )
     if conversion.guessed:
         logger.warning(
             "%s: untagged, guessed: %s (--input-matrix sets the matrix)",
             path,
             ", ".join(conversion.guessed),
         )
+    return Declared(path, stream, conversion, sample_aspect)
+
+
+def first_pass(declared: Declared, hashed: bool = False) -> FirstPass:
+    """Decode every frame of the file once, to count and time them, refused unless at the constant
+    rate declared; and, when `hashed`, hash its content meanwhile, from another thread: the file
+    read a second time, at the speed of the disk, while ffmpeg decodes it.
+
+    Raises MediaError with the reason for a refusal."""
+    path, stream = declared.path, declared.stream
+    hashed_as: list[str | Exception] = []
+
+    def hash_content() -> None:
+        try:
+            hashed_as.append(sha256(path))
+        except Exception as error:  # raised again by the caller, below
+            hashed_as.append(error)
+
+    # A daemon: should the scan fail, the hash isn't waited for, and ends with the process.
+    reader = threading.Thread(target=hash_content, daemon=True)
+    if hashed:
+        reader.start()
+    scanned = scan(path)
+    refusal = timing_error(scanned, stream.frame_rate, stream.avg_frame_rate)
+    if refusal:
+        raise MediaError(f"{path}: {refusal}")
+    if not hashed:
+        return FirstPass(scanned.frames)
+    reader.join()
+    [digest] = hashed_as
+    if isinstance(digest, OSError):
+        raise MediaError(f"{path}: not readable: {digest}") from digest
+    if isinstance(digest, Exception):
+        raise digest
+    return FirstPass(scanned.frames, digest)
+
+
+def counted(declared: Declared, found: FirstPass) -> Source:
+    """The source declared, its frames counted by its first pass, or by the record of one."""
+    stream = declared.stream
+    source = Source(
+        declared.path,
+        stream,
+        declared.conversion,
+        found.frames,
+        declared.sample_aspect,
+        found.sha256,
+    )
+    logger.info(
+        "%s: %d frames, %dx%d %s at %s fps, sample aspect %s (display %s), read as %s",
+        source.path,
+        source.frames,
+        stream.width,
+        stream.height,
+        stream.pix_fmt,
+        stream.frame_rate,
+        _ratio(source.sample_aspect),
+        _ratio(source.display_aspect),
+        source.conversion.describe(),
+    )
     return source
 
 
@@ -109,7 +189,24 @@ def segment_files(directory: Path) -> list[Path]:
 def examine_directory(
     directory: Path, matrix: str | None = None, sample_aspect: Fraction | None = None
 ) -> list[Source]:
-    """Examine each segment of a directory (examine), which must make one source: the same size,
+    """Examine each segment of a directory: declared alike (declare_directory), then their first
+    passes.
+
+    Raises MediaError for an empty directory, a segment refused, or segments that differ."""
+    sources = [
+        counted(each, first_pass(each))
+        for each in declare_directory(directory, matrix, sample_aspect)
+    ]
+    logger.info(
+        "%s: %d segments, %d frames", directory, len(sources), sum(s.frames for s in sources)
+    )
+    return sources
+
+
+def declare_directory(
+    directory: Path, matrix: str | None = None, sample_aspect: Fraction | None = None
+) -> list[Declared]:
+    """Declare each segment of a directory (declare), which must make one source: the same size,
     sample aspect, frame rate, conversion and colour tags throughout, since the output mirrors
     the segments as one job of one geometry, and sptenc encodes them alike.
 
@@ -117,27 +214,24 @@ def examine_directory(
     files = segment_files(directory)
     if not files:
         raise MediaError(f"{directory}: no segment (.mkv or .mp4 files)")
-    sources = [examine(path, matrix, sample_aspect) for path in files]
-    first = sources[0]
-    for source in sources[1:]:
+    segments = [declare(path, matrix, sample_aspect) for path in files]
+    first = segments[0]
+    for segment in segments[1:]:
         for what, ours, theirs in (
-            ("size", _size(source.stream), _size(first.stream)),
-            ("sample aspect", source.sample_aspect, first.sample_aspect),
-            ("frame rate", source.stream.frame_rate, first.stream.frame_rate),
-            ("conversion", source.conversion.describe(), first.conversion.describe()),
-            ("pixel format", source.conversion.planar, first.conversion.planar),
-            ("primaries", source.stream.color_primaries, first.stream.color_primaries),
-            ("transfer", source.stream.color_transfer, first.stream.color_transfer),
+            ("size", _size(segment.stream), _size(first.stream)),
+            ("sample aspect", segment.sample_aspect, first.sample_aspect),
+            ("frame rate", segment.stream.frame_rate, first.stream.frame_rate),
+            ("conversion", segment.conversion.describe(), first.conversion.describe()),
+            ("pixel format", segment.conversion.planar, first.conversion.planar),
+            ("primaries", segment.stream.color_primaries, first.stream.color_primaries),
+            ("transfer", segment.stream.color_transfer, first.stream.color_transfer),
         ):
             if ours != theirs:
                 raise MediaError(
-                    f"{source.path}: {what} {ours or 'untagged'}, where {first.path.name} has"
+                    f"{segment.path}: {what} {ours or 'untagged'}, where {first.path.name} has"
                     f" {theirs or 'untagged'}: the segments of a directory must make one source"
                 )
-    logger.info(
-        "%s: %d segments, %d frames", directory, len(sources), sum(s.frames for s in sources)
-    )
-    return sources
+    return segments
 
 
 def _size(stream: VideoStream) -> str:

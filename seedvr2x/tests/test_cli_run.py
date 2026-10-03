@@ -9,6 +9,7 @@ is the GPU tests' (test_regression.py, test_shots.py)."""
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import subprocess
 from collections.abc import Callable, Iterator
@@ -102,10 +103,10 @@ def stand_in(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(run, "decode_shot", stand_in_decode)
 
 
-def source(path: Path, frames: int = FRAMES) -> Path:
+def source(path: Path, frames: int = FRAMES, pattern: str = "testsrc2") -> Path:
     subprocess.run(
         [
-            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),
+            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"{pattern}=s=64x48:r=25"),
             *("-frames:v", str(frames), "-c:v", "ffv1", "-pix_fmt", "yuv420p", str(path)),
         ],
         check=True,
@@ -374,6 +375,8 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     }
     assert content["environment"]["gpu"] == "a stand-in"
+    [entry] = content["input"]
+    assert entry["sha256"] == hashlib.sha256(source_path.read_bytes()).hexdigest()
     steps.calls.clear()
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
     assert steps.calls == [
@@ -512,10 +515,10 @@ def test_another_job_refused(
     stopped(tmp_path, source_path, "out", *JOB)
     out = tmp_path / "out"
     kept = contents(out)
-    # Other settings, the layout following, even with an environment change accepted.
+    # Other settings, even with an environment change accepted.
     text = refused(tmp_path, source_path, caplog, *JOB[:3], "6", *JOB[4:])
     assert "another job than the one asked" in text
-    assert "settings.window: 5 -> 6" in text and "shots[2].windows" in text
+    assert "settings.window: 5 -> 6" in text
     assert "--accept-env-change" not in text
     other = (*JOB[:3], "6", *JOB[4:], "--accept-env-change")
     assert "settings.window: 5 -> 6" in refused(tmp_path, source_path, caplog, *other)
@@ -525,11 +528,12 @@ def test_another_job_refused(
     text = refused(tmp_path, source_path, caplog, *JOB)
     assert "settings.dit_model.sha256" in text and "settings.dit_model.size: 0 -> 5" in text
     weights.write_bytes(b"")
-    # The input touched.
-    status = source_path.stat()
-    os.utime(source_path, ns=(status.st_atime_ns, status.st_mtime_ns + 10**9))
-    assert "input[0].modified_ns" in refused(tmp_path, source_path, caplog, *JOB)
-    os.utime(source_path, ns=(status.st_atime_ns, status.st_mtime_ns))
+    # Another input, by its content, even with an environment change accepted.
+    content = source_path.read_bytes()
+    source_path.write_bytes(source(tmp_path / "other.mkv", 25, "testsrc").read_bytes())
+    text = refused(tmp_path, source_path, caplog, *JOB, "--accept-env-change")
+    assert "input[0].sha256" in text
+    source_path.write_bytes(content)
     # Other code.
     from seedvr2x.runtime import manifest
 
@@ -637,6 +641,61 @@ def test_environment_change_accepted(
     assert "environment.gpu" in refused(tmp_path, source_path, caplog, *JOB)
 
 
+def test_input_by_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An input is its content: moved and touched, it is the same input, and the manifest says
+    # where it is now.
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    moved = source_path.rename(tmp_path / "moved.mkv")
+    status = moved.stat()
+    os.utime(moved, ns=(status.st_atime_ns, status.st_mtime_ns + 10**9))
+    steps.calls.clear()
+    steps.stop = None
+    caplog.clear()
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    assert upscale(tmp_path, moved, "out", *JOB) == 0
+    assert steps.calls == ["window 4:1", "decode 4"]
+    assert f"recorded at {source_path.resolve()}, moved: the same content" in caplog.text
+    [entry] = json.loads((tmp_path / "out" / "manifest.json").read_text())["input"]
+    assert entry["path"] == str(moved.resolve())
+    assert entry["modified_ns"] == moved.stat().st_mtime_ns
+    assert entry["sha256"] == hashlib.sha256(moved.read_bytes()).hexdigest()
+
+
+def test_first_pass_not_run_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A resume trusts the record of the first pass while nothing it depends on changed, and
+    # refuses another job before it; after an environment change, accepted, it runs again.
+    from seedvr2x.media import source as examined
+
+    scans: list[Path] = []
+    scan = examined.scan
+
+    def counted(path: Path) -> object:
+        scans.append(path)
+        return scan(path)
+
+    monkeypatch.setattr(examined, "scan", counted)
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    assert len(scans) == 1
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    assert steps.calls[-2:] == ["window 4:0", "window 4:1"]
+    refused(tmp_path, source_path, caplog, *JOB[:3], "6", *JOB[4:])
+    assert len(scans) == 1
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == 0
+    assert len(scans) == 2 and steps.calls == ["window 4:1", "decode 4"]
+
+
 def test_probe_compared(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -655,6 +714,26 @@ def test_probe_compared(
         examined, "probe", lambda path: replace(probe(path), color_primaries="bt709")
     )
     assert 'input[0].primaries: "" -> "bt709"' in refused(tmp_path, source_path, caplog, *JOB)
+    assert manifest.read_bytes() == recorded
+
+
+def test_first_pass_compared_after_a_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # After an environment change, accepted, the first pass runs again, and must find what it
+    # found.
+    from seedvr2x.media import source as examined
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    manifest = tmp_path / "out" / "manifest.json"
+    recorded = manifest.read_bytes()
+    scan = examined.scan
+    monkeypatch.setattr(examined, "scan", lambda path: replace(scan(path), frames=29))
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+    text = refused(tmp_path, source_path, caplog, *JOB, "--accept-env-change")
+    assert "input[0].frames: 25 -> 29" in text
     assert manifest.read_bytes() == recorded
 
 
@@ -717,6 +796,21 @@ def test_directory_resumed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step
             ]
 
 
+def test_directory_moved(tmp_path: Path, steps: Steps) -> None:
+    # The segments of a directory moved elsewhere are the same input.
+    split = tmp_path / "split"
+    split.mkdir()
+    for name, frames in (("a.mkv", 3), ("b.mkv", 2)):
+        source(split / name, frames)
+    steps.stop = "decode 3"
+    stopped(tmp_path, split, "out", "--format", "png")
+    moved = split.rename(tmp_path / "moved")
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, moved, "out", "--format", "png") == 0
+    assert steps.calls == ["decode 3"]
+
+
 def test_one_writer_at_a_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -732,6 +826,15 @@ def test_one_writer_at_a_time(
         os.close(descriptor)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert upscale(tmp_path, source_path, "out", *JOB) == 0  # the lock went with the run
+    # A job resumed: locked before its record is read.
+    descriptor = os.open(out, os.O_RDONLY)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+    try:
+        caplog.clear()
+        assert upscale(tmp_path, source_path, "out", *JOB) == 1
+        assert "another seedvr2x is writing it" in caplog.text
+    finally:
+        os.close(descriptor)
 
 
 def test_first_manifest_write_interrupted(

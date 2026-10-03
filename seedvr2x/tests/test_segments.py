@@ -152,6 +152,7 @@ def test_manifest(tmp_path: Path) -> None:
             ),
             sample_aspect=Fraction(1),
             conversion=SimpleNamespace(describe=lambda: "YUV bt709, limited range, chroma left"),
+            sha256=f"the content of {name}",
         )
         for name, frames in (("a.mkv", 3), ("b.mkv", 2))
     ]
@@ -189,6 +190,7 @@ def test_manifest(tmp_path: Path) -> None:
         (3, 2, 2),
     ]
     assert content["input"][0]["path"] == str((tmp_path / "a.mkv").resolve())
+    assert content["input"][1]["sha256"] == "the content of b.mkv"
     assert not (tmp_path / "manifest.json.partial").exists()
     with pytest.raises(ValueError, match="window 2 after 1"):
         record.window_done(0, 2)

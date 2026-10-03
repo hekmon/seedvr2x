@@ -16,11 +16,13 @@ from seedvr2x.runtime.manifest import NAME, STATE, VERSION, Manifest
 from seedvr2x.runtime.units import size
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
-# the NVIDIA driver, recorded for information only, since the math kernels ship with torch
-# (DESIGN.md, Pause and resume).
+# what is recorded for information only (DESIGN.md, Pause and resume): where an input is and when
+# it was modified, an input being its content, so that a moved input is the same; the NVIDIA
+# driver, since the math kernels ship with torch.
 UNCOMPARED = {
     "shots": ("encoded", "windows_done"),
     "segments": ("finished", "bytes"),
+    "input": ("path", "modified_ns"),
     "environment": ("driver",),
 }
 
@@ -46,6 +48,18 @@ def read(path: Path) -> dict[str, Any]:
             f"{path}: manifest version {found}, where this seedvr2x writes {VERSION}: not resumable"
         )
     return manifest
+
+
+def identity(content: dict[str, Any]) -> dict[str, Any]:
+    """Of a job's manifest content, what a resume compares before the first pass: the settings,
+    the environment, and the inputs' content, their size and SHA-256. The first pass's record is
+    trusted when they are the same, the pass then not run again (DESIGN.md, Pause and resume)."""
+    inputs = cast(list[dict[str, Any]], content.get("input", []))
+    return {
+        "settings": content.get("settings"),
+        "environment": content.get("environment"),
+        "input": [{"bytes": entry.get("bytes"), "sha256": entry.get("sha256")} for entry in inputs],
+    }
 
 
 def differences(recorded: dict[str, Any], asked: dict[str, Any]) -> list[str]:

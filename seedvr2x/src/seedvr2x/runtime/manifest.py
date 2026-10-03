@@ -123,13 +123,16 @@ class Manifest:
 
 def _input(part: Part) -> dict[str, Any]:
     """An input file as the manifest records it: the file itself (where it is, its size and
-    modification time, read when the job starts) and what the first pass found in it."""
+    modification time, read when the job starts, and its content's SHA-256) and what the first
+    pass found in it. Its content says which file it is; where it is and when it was modified are
+    information (resume.UNCOMPARED)."""
     path = part.source.path.resolve()
     status = path.stat()
     return {
         "path": str(path),
         "bytes": status.st_size,
         "modified_ns": status.st_mtime_ns,
+        "sha256": part.source.sha256,
         "start": part.start,
         "frames": part.source.frames,
         "frame_rate": str(part.source.stream.frame_rate),
@@ -152,10 +155,3 @@ def code_sha256() -> str:
         if path.is_file() and "__pycache__" not in path.parts:
             digest.update(str(path.relative_to(package)).encode() + b"\0" + path.read_bytes())
     return digest.hexdigest()
-
-
-def sha256(path: Path) -> str:
-    """The SHA-256 of a file, in hex: models are identified by hash (DESIGN.md, Options kept and
-    dropped)."""
-    with path.open("rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()

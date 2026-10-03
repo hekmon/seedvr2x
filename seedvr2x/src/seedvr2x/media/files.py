@@ -2,6 +2,7 @@
 resume: the manifest and the units a resume trusts)."""
 
 import errno
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -39,6 +40,13 @@ def make_directories(path: Path) -> None:
     for directory in reversed(missing):
         directory.mkdir(exist_ok=True)
         _sync(directory.parent)
+
+
+def sha256(path: Path) -> str:
+    """The SHA-256 of a file's content, in hex: models and inputs are identified by their content
+    (DESIGN.md, Pause and resume)."""
+    with path.open("rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
 
 
 def write_whole(path: Path, data: bytes) -> None:
