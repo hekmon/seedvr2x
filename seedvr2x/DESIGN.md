@@ -272,6 +272,27 @@ they differ and by which metrics, and how users are guided to them. What is know
     GPL-3.0, never copied.
   - The gain is mostly memory. ComfyUI reports about 2× over fp8 or bf16 on Blackwell, but the
     DiT is about a fifth of a 1080p run here: a DiT twice as fast shortens a job by about 10%.
+- **One Hugging Face repo** holds every file seedvr2x makes, its own fp16 included, all
+  converted from the masters by one documented script: each file's origin can be checked, and
+  nothing depends on another party's repo staying as it is. Apache-2.0 allows it, with the
+  licence and a notice of the changes.
+  - Our fp16 changes no bit of v1's output. numz's 7B fp16 DiT and fp16 VAE are the masters
+    rounded to the nearest fp16, ties to even: every element of 1,128 and 250 tensors, under
+    the same names. Truncation would differ on half the elements, a cast through bf16 on 87%.
+    The 3B and the sharp 7B weren't checked: their masters aren't on the GPU box.
+- **The VAE stays in 16 bits.**
+  - Its weights take 0.47 GiB, so quantizing them saves nothing. Its memory is activations,
+    about 34 GiB for an untiled 1080p decode.
+  - Its work is 3D convolutions (128 to 512 channels, one attention block at the smallest
+    size). PyTorch has no fp8 or fp4 convolution (`torch._scaled_mm` multiplies matrices), and
+    comfy-kitchen's kernels are matrix multiplies too.
+  - Its decoder computes the picture itself. In bf16, 8 significant bits, it already puts
+    near-white values on 8-bit steps
+    ([numerics.md](../research/docs/numerics.md#vae-decode-precision)); fp8 keeps 4 and
+    NVFP4 2.
+  - The VAE is about four fifths of a 1080p run, so its speed matters most. Its levers are
+    `compile_vae` (−16 to −19% of VAE time, see [Memory planner](#memory-planner)) and,
+    unmeasured, the convolutions' memory layout.
 - **Checks:** a file kept from numz is bit-identical to numz on milestone 1's input, the 3B fp8
   against numz patched to use the fp16 RoPE values; a file of our own is within the 7B fp16's
   seed spread on every kind of source.
