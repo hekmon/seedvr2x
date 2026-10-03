@@ -299,8 +299,9 @@ Clip A, batch 21, 21 frames, `--color_correction none`; PSNR ref = vs the same r
 
 ## Seed
 
-`set_seed(seed + 1 000 000)` before Phase 1 (VAE posterior sampling and input noise), `set_seed(seed)`
-before every DiT batch: all batches of a run get the same diffusion noise.
+`set_seed(seed + 1 000 000)` before Phase 1 (the input noise only: numz's encode returns the
+posterior mode, `attn_video_vae.py:1688`), `set_seed(seed)` before every DiT batch: all batches
+of a run get the same diffusion noise.
 
 | Clip A, 21 frames | PSNR vs seed 42 (worst frame) | PSNR in | Lap var |
 |---|---|---|---|
