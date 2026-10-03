@@ -666,6 +666,41 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--dit_model`, `--model_dir` | kept; models identified by hash, no silent deletion (bug 22) |
 | `--cuda_device` | one device per process |
 
+## Documentation for users
+
+seedvr2x's README and manual explain what would otherwise surprise a newcomer, with the reason
+and the measurement behind each point.
+
+**Colour correction, first and in full:**
+- **The model itself shifts colours.** Raw SeedVR2 output is more saturated and bluer than its
+  input. On clip A, with colour correction off, the saturation spread is +34% on a* and +28%
+  on b*, and the low-frequency colour error is ΔE 4.44
+  ([quality.md](../research/docs/quality.md#colour-correction)).
+- **ByteDance's own pipeline corrects it, with a fix it can't ship.** Its inference script
+  runs StableSR's wavelet colour fix after the model (`projects/inference_seedvr2_7b.py:300`),
+  but the file is under a non-commercial licence, so the readme asks users to download it
+  themselves (`readme.md:142`). Without it, the script prints "Color fix is not avaliable" and
+  writes the drifted output.
+- **numz bundles that code** (uncredited) as `wavelet`, and adds `lab` on top, its default:
+  the wavelet step, then CIELAB colour matching. The wavelet fix does most of the work (ΔE
+  1.04); `lab` brings the saturation closer still (ΔE 1.01).
+- **seedvr2x:** `lab` by default, with the wavelet split rewritten from its method (no
+  non-commercial code) and numz's LAB matching (Apache-2.0). `none` gives the raw model's
+  colours, for comparison or for users who grade themselves.
+
+**Also explained:**
+- the two workflows: a file in and a finished file out, or sptenc's pre-split directories
+- lossless delivery: why there are no encoder options, and how `--segment-cmd` compresses with
+  the user's own command
+- disk use: master sizes per hour, the decode buffer and input copies during a run
+- why zscale is required, and how to get an ffmpeg build that has it
+- the refused sources (VFR, interlaced, telecined, rotated, cropped, unusual pixel formats or
+  matrices), and what to do with each
+- colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
+  transfer kept, square pixels)
+- resume: the same command resumes; what refuses a resume and why; `--accept-env-change`
+- seeds and reproducibility: the same settings give the same output, bit for bit
+
 ## Validation milestones
 
 The numbers name the checks, not the build order. After milestones 1 and 2 came the I/O layer:
