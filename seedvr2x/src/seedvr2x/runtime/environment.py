@@ -22,7 +22,17 @@ PACKAGE = Path(__file__).resolve().parents[1]
 # (PEP 508): `cuda-toolkit[cublas,cudart]==13.0.3; platform_system == "Linux"`.
 REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?")
 EXTRA = re.compile(r"""\bextra\s*==\s*["']([^"']+)["']""")
+# A shared library (`libcublas.so.13`), and a Python extension module, which only an import loads
+# (PEP 3149: `_speedups.cpython-313-x86_64-linux-gnu.so`, `.abi3.so`). One named with a bare
+# `.so`, as triton's `libtriton.so`, passes for a library: that only errs toward recording.
 SHARED_LIBRARY = re.compile(r"\.so(\.\d+)*$")
+EXTENSION_MODULE = re.compile(r"\.(cpython-[^.]+|abi3)\.so$")
+# Used when installed, though not declared: PyPI only has its source (AGENTS.md, Environment).
+UNDECLARED = ("flash-attn",)
+# setuptools' hook, which site imports at every start from distutils-precedence.pth, unless
+# SETUPTOOLS_USE_DISTUTILS=stdlib, whatever the process runs: the run imports no setuptools, and
+# a resume mustn't depend on that variable.
+START_HOOKS = ("_distutils_hack",)
 
 
 def current(device: torch.device, ffmpeg_version: str, conversions: str) -> dict[str, object]:
@@ -53,10 +63,10 @@ def current(device: torch.device, ffmpeg_version: str, conversions: str) -> dict
 
 def versions() -> dict[str, str]:
     """The version of every distribution the run is made of, by its normalised name (PEP 503):
-    those whose modules are imported once every module of seedvr2x is, the vendored models' too,
-    which the run imports only when it builds them; and the shared libraries torch requires, its
-    runtime (cuBLAS, cuDNN…), loaded without being imported. The same, so, whether a job starts
-    or resumes, before or after its models load."""
+    those of the run's it imports (imported) once every module of seedvr2x is, the vendored
+    models' too, which the run imports only when it builds them; and the shared libraries torch
+    requires, its runtime (cuBLAS, cuDNN…), loaded without being imported. The same, so, whether
+    a job starts or resumes, before or after its models load."""
     for path in sorted(PACKAGE.rglob("*.py")):
         parts = path.relative_to(PACKAGE.parent).with_suffix("").parts
         # The entry point, or no module at all: a stray file, such as an editor's backup,
@@ -69,13 +79,14 @@ def versions() -> dict[str, str]:
 
 
 def imported() -> set[str]:
-    """The distributions whose modules this process has imported, by their normalised names."""
+    """The run's distributions this process has imported, by their normalised names: those within
+    the closure of seedvr2x's declared requirements, and flash-attn. What else a process imports
+    is no part of the run, and a resume mustn't depend on it: pytest, pygments when a dev install
+    has it (httpx 0.28.1 imports it for its command line, httpx/__init__.py:15), a profiler."""
     providers = _providers()
-    return {
-        _name(distribution)
-        for module in list(sys.modules)
-        for distribution in providers.get(module.partition(".")[0], ())
-    }
+    tops = {module.partition(".")[0] for module in list(sys.modules)} - set(START_HOOKS)
+    loaded = {_name(distribution) for top in tops for distribution in providers.get(top, ())}
+    return loaded & _declared()
 
 
 @functools.cache
@@ -86,37 +97,55 @@ def _providers() -> Mapping[str, list[str]]:
     return metadata.packages_distributions()
 
 
+@functools.cache
+def _declared() -> frozenset[str]:
+    """The distributions seedvr2x requires and flash-attn, and their requirements, through the
+    extras each asks: read once, as _providers."""
+    return frozenset(_required([*(metadata.requires("seedvr2x") or []), *UNDECLARED]))
+
+
 def _libraries(root: str) -> set[str]:
     """The distributions root requires, its requirements' requirements and so on, through the
-    extras each asks, that are installed and ship a shared library."""
+    extras each asks, that ship a shared library other than Python's extension modules: one
+    native code loads, which no import shows. Extension modules are seen when imported, as
+    torch imports cuda-bindings' (torch 2.14.1, torch/cuda/_utils.py:9), or aren't loaded, as no
+    run imports MarkupSafe's (jinja2's speed-ups)."""
+    return {
+        name
+        for name in _required(metadata.requires(root) or [])
+        if any(
+            SHARED_LIBRARY.search(file.name) and not EXTENSION_MODULE.search(file.name)
+            for file in metadata.files(name) or []
+        )
+    }
+
+
+def _required(requirements: Iterable[str]) -> set[str]:
+    """The installed distributions requirements name (PEP 508), their requirements and so on,
+    through the extras each asks. Markers other than extras aren't evaluated: another platform's
+    or Python's requirement is rarely installed, and taken then."""
     found: set[str] = set()
-    pending: list[tuple[str, frozenset[str]]] = [(_name(root), frozenset())]
+    # Each requirement with the extras asked of the distribution declaring it.
+    pending: list[tuple[str, frozenset[str]]] = [(each, frozenset()) for each in requirements]
     seen: set[tuple[str, frozenset[str]]] = set()
     while pending:
-        name, extras = pending.pop()
-        if (name, extras) in seen:
+        requirement, extras = pending.pop()
+        match = REQUIREMENT.match(requirement)
+        if match is None:
             continue
-        seen.add((name, extras))
+        asked = _names(EXTRA.findall(requirement.partition(";")[2]))
+        if asked and not asked & extras:
+            continue  # an option not taken
+        name, wanted = _name(match[1]), frozenset(_names((match[2] or "").split(",")))
+        if (name, wanted) in seen:
+            continue
+        seen.add((name, wanted))
         try:
-            requirements = metadata.requires(name) or []
+            requires = metadata.requires(name) or []
         except metadata.PackageNotFoundError:
             continue  # not installed: another platform's
-        for requirement in requirements:
-            match = REQUIREMENT.match(requirement)
-            if match is None:
-                continue
-            marker = requirement.partition(";")[2]
-            asked = {_name(extra) for extra in EXTRA.findall(marker)}
-            if asked and not asked & extras:
-                continue  # an option not taken
-            distribution = _name(match[1])
-            try:
-                files = metadata.files(distribution) or []
-            except metadata.PackageNotFoundError:
-                continue
-            if any(SHARED_LIBRARY.search(file.name) for file in files):
-                found.add(distribution)
-            pending.append((distribution, frozenset(_names((match[2] or "").split(",")))))
+        found.add(name)
+        pending += [(each, wanted) for each in requires]
     return found
 
 

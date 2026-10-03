@@ -13,11 +13,12 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import numpy.typing as npt
@@ -791,19 +792,32 @@ def test_package_change_recorded(
 def test_unrecorded_import_said(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A distribution the run imports after its versions are recorded is one a resume wouldn't
-    # see change: said, as a bug of seedvr2x's.
+    # A distribution of the run's imported after its versions are recorded is one a resume
+    # wouldn't see change: said, as a bug of seedvr2x's. A profiler's isn't the run's.
     from seedvr2x.runtime import environment, model
 
-    imported = environment.imported
+    providers = environment._providers()  # pyright: ignore[reportPrivateUsage]
+    declared = environment._declared()  # pyright: ignore[reportPrivateUsage]
 
     def load(*arguments: object) -> object:
-        monkeypatch.setattr(environment, "imported", lambda: imported() | {"imported-late"})
+        late = {"late_module": ["imported-late"], "profiler_module": ["a-profiler"]}
+        monkeypatch.setattr(environment, "_providers", lambda: {**providers, **late})
+        monkeypatch.setattr(environment, "_declared", lambda: declared | {"imported-late"})
+        for module in late:
+            monkeypatch.setitem(sys.modules, module, ModuleType(module))
         return SimpleNamespace(attention="none", device="cpu")
 
     monkeypatch.setattr(model, "load_models", load)
     assert upscale(tmp_path, source(tmp_path / "in.mkv"), "out") == 0
     assert "not in the manifest's environment, a seedvr2x bug: ['imported-late']" in caplog.text
+
+
+def test_tools_not_said(tmp_path: Path, steps: Steps, caplog: pytest.LogCaptureFixture) -> None:
+    # The process holds pytest and pygments beside the run, recorded by none of its versions:
+    # the end of the run says nothing of them.
+    pytest.importorskip("pygments")
+    assert upscale(tmp_path, source(tmp_path / "in.mkv"), "out") == 0
+    assert "not in the manifest's environment" not in caplog.text
 
 
 def test_driver_recorded_not_compared(

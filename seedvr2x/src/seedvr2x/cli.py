@@ -328,7 +328,8 @@ def _run(args: argparse.Namespace) -> int:
         from seedvr2x.runtime.environment import imported
 
         # The versions recorded were derived before the models loaded: what the run has
-        # imported since must be among them, or a resume wouldn't see it change.
+        # imported since must be among them, or a resume wouldn't see it change. imported()
+        # leaves out what isn't the run's, pytest or a profiler, as the record does.
         recorded = cast(dict[str, str], identity.environment["packages"])
         unrecorded = sorted(imported() - set(recorded))
         if unrecorded:
