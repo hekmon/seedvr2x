@@ -51,6 +51,10 @@ class Units:
         """Shot `shot`'s windows, in order, for its decode, given up here."""
         return self._windows.pop(shot)
 
+    def finished(self, segment: int) -> bool:
+        """Whether segment `segment` is finished already."""
+        return False
+
     def segment_finished(self, segment: int) -> None:
         """Segment `segment` is whole: what its shots kept can go."""
 
@@ -96,6 +100,9 @@ class DiskUnits(Units):
 
     def drop_latent(self, shot: int) -> None:
         (self.shot_directory(shot) / "latent.pt").unlink(missing_ok=True)
+
+    def finished(self, segment: int) -> bool:
+        return self.manifest.finished[segment]
 
     def take_windows(self, shot: int) -> list[Tensor]:
         """Shot `shot`'s windows, in order, read back, on the CPU; they stay on disk until its

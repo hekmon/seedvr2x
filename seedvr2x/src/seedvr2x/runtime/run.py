@@ -50,20 +50,26 @@ def run_job(
     done, then its decode. With units kept on disk, a segment's shots are all encoded and sampled
     before the first of them is decoded: the segment's decode and write is then a unit of its own,
     and units never interleave. With nothing kept, each shot is decoded as soon as it is sampled,
-    as upscale_shot does, and nothing builds up."""
-    if units.persistent:
-        groups = [
-            [i for i, shot in enumerate(shots) if s.start <= shot.start < s.end] for s in segments
-        ]
-    else:
-        groups = [[i] for i in range(len(shots))]
+    as upscale_shot does, and nothing builds up.
+
+    What units kept already is skipped (DESIGN.md, Pause and resume): a finished segment; a
+    shot's encode and the windows done; the input frames of what is skipped, read and dropped.
+    An unfinished segment's decode and write restart whole, from its shots' windows kept."""
+    groups = [
+        [i for i, shot in enumerate(shots) if s.start <= shot.start < s.end] for s in segments
+    ]
     if sorted(i for group in groups for i in group) != list(range(len(shots))):
         raise ValueError("the segments don't hold whole shots")
     with Inputs(parts) as inputs:
-        for group in groups:
+        for segment, group in enumerate(groups):
+            if units.finished(segment):
+                continue
+            if units.persistent:
+                for index in group:
+                    _sample(models, inputs, shots, index, target, seed, window, units)
             for index in group:
-                _sample(models, inputs, shots, index, target, seed, window, units)
-            for index in group:
+                if not units.persistent:
+                    _sample(models, inputs, shots, index, target, seed, window, units)
                 _decode(models, shots, index, target, window, units, write)
 
 
@@ -147,7 +153,9 @@ def _decode(
 
 class Inputs:
     """The job's input frames, read in order: a part's decoder is opened at the first frame asked
-    of it, and finished once every frame of the part is read, its count checked (Decoder). Used
+    of it, and finished once every frame of the part is read, its count checked (Decoder). Frames
+    not asked for, those of shots a resume skips, are decoded and dropped: exact, as the first
+    pass counts them (provisional: seeking is DESIGN.md's open question, Frame-exact access). Used
     as a context manager, which stops a decoder left open on an exception."""
 
     def __init__(self, parts: Sequence[Part]) -> None:
@@ -158,15 +166,22 @@ class Inputs:
 
     def reader(self, shot: Shot) -> Callable[[int], npt.NDArray[np.float32]]:
         """read(n), giving the next n of shot's frames, (n, H, W, 3) float32 in [0, 1], from its
-        first: the frames before it are read already."""
+        first: shots are asked for in order, the frames between them dropped."""
         part = next(part for part in self._parts if part.start <= shot.start < part.end)
         if part is not self._part:
             self._close()
             self._part, self._decoder, self._position = part, part.source.decoder(), part.start
         decoder = self._decoder
         assert decoder is not None
-        if self._position != shot.start:
+        if self._position > shot.start:
             raise ValueError(f"frame {shot.start} asked, frame {self._position} is next")
+        if self._position < shot.start:
+            skipped = decoder.skip(shot.start - self._position)
+            if skipped != shot.start - self._position:
+                raise MediaError(
+                    f"{part.source.path}: the stream ended after {decoder.decoded} frames"
+                )
+            self._position = shot.start
 
         def read(count: int) -> npt.NDArray[np.float32]:
             frames = decoder.read(count)

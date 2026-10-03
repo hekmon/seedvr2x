@@ -479,3 +479,19 @@ def test_sample_aspect_declared_and_overridden(tmp_path: Path) -> None:
     source = examine(path)
     assert (source.sample_aspect, source.display_aspect) == (Fraction(32, 27), Fraction(16, 9))
     assert examine(path, sample_aspect=Fraction(8, 9)).display_aspect == Fraction(4, 3)
+
+
+def test_skipped_frames_are_counted_not_converted(tmp_path: Path) -> None:
+    # Frames skipped are decoded and dropped: the next ones read are those a full read gives
+    # there, and the count at the end still holds.
+    planes = random_planes("gbrp16le", 7)
+    path = save(tmp_path, "rgb.raw", pack("gbrp16le", planes))
+    conversion = Conversion("gbrp16le", "gbr", "full", "left")
+    whole = decode(raw_args("gbrp16le", path), conversion, 7)
+    with Decoder(raw_args("gbrp16le", path), conversion, WIDTH, HEIGHT, 7) as decoder:
+        assert decoder.skip(2) == 2
+        assert np.array_equal(decoder.read(1), whole[2:3])
+        assert decoder.skip(3) == 3 and decoder.decoded == 6
+        assert np.array_equal(decoder.read(1), whole[6:])
+    with Decoder(raw_args("gbrp16le", path), conversion, WIDTH, HEIGHT, 7) as decoder:
+        assert decoder.skip(9) == 7  # fewer only at the end

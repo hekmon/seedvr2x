@@ -6,7 +6,10 @@ its encode through its windows to its decode, which writes, for each frame, the 
 the job divided by 1000: so each output frame says where it comes from. The model's own output
 is the GPU tests' (test_regression.py, test_shots.py)."""
 
+import fcntl
+import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -108,7 +111,9 @@ def source(path: Path, frames: int = FRAMES) -> Path:
 
 
 def upscale(tmp_path: Path, input_path: Path, output: str, *options: str) -> int:
-    (tmp_path / "w.safetensors").write_bytes(b"")
+    weights = tmp_path / "w.safetensors"
+    if not weights.exists():
+        weights.write_bytes(b"")
     return cli.main(
         [
             *(str(input_path), "-o", str(tmp_path / output)),
@@ -247,27 +252,37 @@ def test_directory_mirrored(tmp_path: Path) -> None:
     assert [s["seed"] for s in content["shots"]] == [42, 45]
 
 
-@pytest.mark.usefixtures("stand_in")
-def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Shots of 3, 1 and 21 frames (2, 1 and 6 latents; windows of 5: the last in two), segments
-    # of 4 and 21 frames. In a directory, a segment's shots are encoded and sampled before its
-    # decode, so that its decode and write is a unit of its own; one file decodes each shot as
-    # soon as it is sampled.
-    from seedvr2x.runtime import run
+class Steps:
+    """The stand-in's steps, each call recorded: "encode S", "window S:K", "decode S", S the
+    shot's first frame; each encode's frames, summed up, by S. The call named `stop` raises
+    KeyboardInterrupt from inside, after an encode's reads, before a window's output, after a
+    decode's first frame, as a stop at once would."""
 
-    calls: list[str] = []
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.read: dict[int, str] = {}
+        self.stop: str | None = None
+
+    def _call(self, name: str) -> None:
+        self.calls.append(name)
+        if name == self.stop:
+            raise KeyboardInterrupt
 
     def encode(
+        self,
         models: object,
         read: Callable[[int], npt.NDArray[np.float32]],
         count: int,
         target: tuple[int, int],
         seed: int,
     ) -> torch.Tensor:
-        calls.append(f"encode {seed - SEED}")
-        return stand_in_encode(models, read, count, target, seed)
+        frames = read(count)
+        self.read[seed - SEED] = hashlib.md5(frames.tobytes()).hexdigest()
+        self._call(f"encode {seed - SEED}")
+        return stand_in_encode(models, lambda n: frames[:n], count, target, seed)
 
     def windows(
+        self,
         models: object,
         latent: torch.Tensor,
         layout: list[tuple[int, int]],
@@ -275,30 +290,60 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         start: int = 0,
     ) -> Iterator[torch.Tensor]:
         for number, sampled in enumerate(stand_in_windows(models, latent, layout, seed, start)):
-            calls.append(f"window {seed - SEED}:{start + number}")
+            self._call(f"window {seed - SEED}:{start + number}")
             yield sampled
 
     def decode(
+        self,
         models: object,
         merged: torch.Tensor,
         count: int,
         target: tuple[int, int],
         write: Callable[[npt.NDArray[np.float32]], None],
     ) -> None:
-        calls.append(f"decode {int(merged[0, 0, 0, 0])}")
-        stand_in_decode(models, merged, count, target, write)
+        name = f"decode {int(merged[0, 0, 0, 0])}"
+        self.calls.append(name)
 
-    monkeypatch.setattr(run, "encode_shot", encode)
-    monkeypatch.setattr(run, "sample_windows", windows)
-    monkeypatch.setattr(run, "decode_shot", decode)
+        def write_then_stop(frames: npt.NDArray[np.float32]) -> None:
+            write(frames)
+            if name == self.stop:
+                raise KeyboardInterrupt
+
+        stand_in_decode(models, merged, count, target, write_then_stop)
+
+
+@pytest.fixture
+def steps(stand_in: None, monkeypatch: pytest.MonkeyPatch) -> Steps:
+    from seedvr2x.runtime import run
+
+    recorded = Steps()
+    monkeypatch.setattr(run, "encode_shot", recorded.encode)
+    monkeypatch.setattr(run, "sample_windows", recorded.windows)
+    monkeypatch.setattr(run, "decode_shot", recorded.decode)
+    return recorded
+
+
+# Shots of 3, 1 and 21 frames (2, 1 and 6 latents; windows of 5: the last in two), segments of 4
+# and 21 frames: (0, 3) and (4).
+JOB = ("--cuts", "cuts.txt", "--window", "5", "--min-segment", "0.12")
+UNINTERRUPTED = [
+    *("encode 0", "window 0:0", "encode 3", "window 3:0", "decode 0", "decode 3"),
+    *("encode 4", "window 4:0", "window 4:1", "decode 4"),
+]
+
+
+def job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
     (tmp_path / "cuts.txt").write_text("3\n4\n")
-    source(tmp_path / "in.mkv", 25)
-    options = ("--cuts", str(tmp_path / "cuts.txt"), "--window", "5", "--min-segment", "0.12")
-    assert upscale(tmp_path, tmp_path / "in.mkv", "out", *options) == 0
-    assert calls == [
-        *("encode 0", "window 0:0", "encode 3", "window 3:0", "decode 0", "decode 3"),
-        *("encode 4", "window 4:0", "window 4:1", "decode 4"),
-    ]
+    return source(tmp_path / "in.mkv", 25)
+
+
+def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
+    # In a directory, a segment's shots are encoded and sampled before its decode, so that its
+    # decode and write is a unit of its own; one file decodes each shot as soon as it is sampled.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == UNINTERRUPTED
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == [
         "manifest.json",
@@ -326,9 +371,9 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     }
     assert content["environment"]["gpu"] == "a stand-in"
-    calls.clear()
-    assert upscale(tmp_path, tmp_path / "in.mkv", "one.mkv", *options[:4]) == 0
-    assert calls == [
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    assert steps.calls == [
         *("encode 0", "window 0:0", "decode 0", "encode 3", "window 3:0", "decode 3"),
         *("encode 4", "window 4:0", "window 4:1", "decode 4"),
     ]
@@ -343,3 +388,247 @@ def test_own_names_refused(tmp_path: Path, caplog: pytest.LogCaptureFixture, nam
     source(split / f"{name}.mkv", 2)
     assert upscale(tmp_path, split, "out", "--format", "png") == 1
     assert f"{name}: a name seedvr2x keeps for itself" in caplog.text
+
+
+def stopped(tmp_path: Path, input_path: Path, output: str, *options: str) -> None:
+    """Run a job the stand-in stops at once (Steps.stop)."""
+    with pytest.raises(KeyboardInterrupt):
+        upscale(tmp_path, input_path, output, *options)
+
+
+def decoded(path: Path) -> bytes:
+    return subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo", "-"],
+        capture_output=True,
+        check=True,
+    ).stdout
+
+
+@pytest.mark.parametrize(
+    ("stop", "resumed"),
+    [
+        # Inside an encode: the shot before it kept, its own encode again.
+        ("encode 3", UNINTERRUPTED[2:]),
+        # Inside the first shot of the second segment: the first segment finished, its input
+        # frames read again from the shot's first, the four before dropped.
+        ("encode 4", UNINTERRUPTED[6:]),
+        # Inside a window: the shot's latent and first window kept.
+        ("window 4:1", UNINTERRUPTED[8:]),
+        # Inside a segment's decode: its shots' windows kept, its decode and write again whole.
+        ("decode 0", ["decode 0", "decode 3", *UNINTERRUPTED[6:]]),
+        ("decode 4", UNINTERRUPTED[9:]),
+    ],
+)
+def test_resumed_as_uninterrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, stop: str, resumed: list[str]
+) -> None:
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *JOB) == 0
+    read = dict(steps.read)
+    steps.calls.clear()
+    steps.stop = stop
+    stopped(tmp_path, source_path, "out", *JOB)
+    assert steps.calls[-1] == stop
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == resumed
+    assert steps.read == read  # every encode read its own shot's frames
+    out = tmp_path / "out"
+    assert sorted(p.name for p in out.iterdir()) == [
+        "manifest.json",
+        "seg_000000.mkv",
+        "seg_000001.mkv",
+    ]
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(out / name) == decoded(tmp_path / "whole" / name)
+    content = json.loads((out / "manifest.json").read_text())
+    assert all(segment["finished"] for segment in content["segments"])
+    # Finished already: nothing to do, the models not even loaded.
+    from seedvr2x.runtime import model
+
+    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("models loaded"))
+    steps.calls.clear()
+    (out / "resume" / "shot_000004").mkdir(parents=True)  # as a stop could leave them
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == []
+    assert not (out / "resume").exists()
+
+
+def test_leftovers_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
+    # What a kill leaves, which the manifest doesn't name, is discarded on resume.
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    out = tmp_path / "out"
+    state = out / "resume"
+    assert sorted(str(p.relative_to(state)) for p in state.rglob("*")) == [
+        "shot_000004",
+        "shot_000004/latent.pt",
+        "shot_000004/window_0000.pt",
+    ]
+    planted = [
+        out / "seg_000001.mkv",  # an unfinished segment's file
+        out / "seg_000001.mkv.partial",
+        out / "manifest.json.partial",
+        state / "shot_000004" / "window_0001.pt.partial",
+        state / "shot_000004" / "window_0001.pt",  # not recorded
+        state / "shot_000000" / "window_0000.pt",  # a finished segment's
+    ]
+    for path in planted:
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"left")
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == ["window 4:1", "decode 4"]
+    assert not state.exists() and not list(out.rglob("*.partial"))
+    assert indexes(out / "seg_000001.mkv") == list(range(4, 25))
+
+
+def refused(
+    tmp_path: Path, source_path: Path, caplog: pytest.LogCaptureFixture, *options: str
+) -> str:
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 1
+    return caplog.text
+
+
+def test_another_job_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    out = tmp_path / "out"
+    kept = sorted(out.rglob("*"))
+    # Other settings, the layout following.
+    text = refused(tmp_path, source_path, caplog, *JOB[:3], "6", *JOB[4:])
+    assert "another job than the one asked" in text
+    assert "settings.window: 5 -> 6" in text and "shots[2].windows" in text
+    # Another model, by its hash.
+    (tmp_path / "w.safetensors").write_bytes(b"other")
+    weights = tmp_path / "w.safetensors"
+    text = refused(tmp_path, source_path, caplog, *JOB)
+    assert "settings.dit_model.sha256" in text and "settings.dit_model.size: 0 -> 5" in text
+    weights.write_bytes(b"")
+    # The input touched.
+    status = source_path.stat()
+    os.utime(source_path, ns=(status.st_atime_ns, status.st_mtime_ns + 10**9))
+    assert "input[0].modified_ns" in refused(tmp_path, source_path, caplog, *JOB)
+    os.utime(source_path, ns=(status.st_atime_ns, status.st_mtime_ns))
+    # Other code.
+    from seedvr2x.runtime import manifest
+
+    with monkeypatch.context() as patch:
+        patch.setattr(manifest, "code_sha256", lambda: "0" * 64)
+        assert "settings.code" in refused(tmp_path, source_path, caplog, *JOB)
+    # Another GPU.
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+        text = refused(tmp_path, source_path, caplog, *JOB)
+    assert 'environment.gpu: "a stand-in" -> "another"' in text
+    # Another's files, never deleted.
+    (out / "notes.txt").write_text("mine")
+    assert "not this job's: notes.txt" in refused(tmp_path, source_path, caplog, *JOB)
+    (out / "notes.txt").unlink()
+    (out / "resume" / "shot_000004" / "notes.txt").write_text("mine")
+    assert "shot_000004/notes.txt: not this job's" in refused(tmp_path, source_path, caplog, *JOB)
+    (out / "resume" / "shot_000004" / "notes.txt").unlink()
+    # Missing what the manifest names.
+    (out / "seg_000000.mkv").rename(tmp_path / "moved.mkv")
+    assert "finished, the manifest says, but missing" in refused(
+        tmp_path, source_path, caplog, *JOB
+    )
+    (tmp_path / "moved.mkv").rename(out / "seg_000000.mkv")
+    window = out / "resume" / "shot_000004" / "window_0000.pt"
+    window.rename(tmp_path / "window.pt")
+    assert "kept, the manifest says, but missing" in refused(tmp_path, source_path, caplog, *JOB)
+    (tmp_path / "window.pt").rename(window)
+    # Another manifest version.
+    content = json.loads((out / "manifest.json").read_text())
+    (out / "manifest.json").write_text(json.dumps({**content, "seedvr2x_manifest": 1}))
+    assert "manifest version 1" in refused(tmp_path, source_path, caplog, *JOB)
+    (out / "manifest.json").write_text(json.dumps(content))
+    assert sorted(out.rglob("*")) == kept  # nothing touched
+    # The job asked, at last.
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == ["window 4:1", "decode 4"]
+
+
+def test_directory_resumed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
+    # The segments finished aren't decoded again; the one resumed is read from its first frame.
+    from seedvr2x.media.source import Source
+
+    split = tmp_path / "split"
+    split.mkdir()
+    for name, frames in (("a.mkv", 3), ("b.mkv", 2), ("c.mkv", 4)):
+        source(split / name, frames)
+    assert upscale(tmp_path, split, "whole", "--format", "png") == 0
+    read = dict(steps.read)
+    steps.stop = "decode 5"
+    stopped(tmp_path, split, "out", "--format", "png")
+    opened: list[str] = []
+    decoder = Source.decoder
+
+    def recorded(self: Source) -> object:
+        opened.append(self.path.name)
+        return decoder(self)
+
+    monkeypatch.setattr(Source, "decoder", recorded)
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, split, "out", "--format", "png") == 0
+    assert steps.calls == ["decode 5"] and opened == []
+    steps.stop = "encode 5"
+    stopped(tmp_path, split, "again", "--format", "png")
+    opened.clear()
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, split, "again", "--format", "png") == 0
+    assert steps.calls == ["encode 5", "window 5:0", "decode 5"] and opened == ["c.mkv"]
+    assert steps.read == read
+    for out in ("out", "again"):
+        for name in ("a", "b", "c"):
+            pngs = sorted((tmp_path / out / name).iterdir())
+            assert [p.read_bytes() for p in pngs] == [
+                p.read_bytes() for p in sorted((tmp_path / "whole" / name).iterdir())
+            ]
+
+
+def test_one_writer_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    source_path = job(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    out.mkdir()
+    descriptor = os.open(out, os.O_RDONLY)
+    fcntl.flock(descriptor, fcntl.LOCK_EX)  # another seedvr2x's
+    try:
+        assert upscale(tmp_path, source_path, "out", *JOB) == 1
+        assert "another seedvr2x is writing it" in caplog.text
+    finally:
+        os.close(descriptor)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0  # the lock went with the run
+
+
+def test_first_manifest_write_interrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # What a stop during the first manifest write leaves is no job to resume, and no obstacle.
+    source_path = job(tmp_path, monkeypatch)
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "manifest.json.partial").write_text("{")
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == UNINTERRUPTED
+    assert not (tmp_path / "out" / "manifest.json.partial").exists()
+
+
+def test_dumps_kept_out_of_the_output(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    dumps = str(tmp_path / "out" / "frames")
+    status = upscale(tmp_path, source(tmp_path / "in.mkv"), "out", "--dump-frames", dumps)
+    assert status == 1
+    assert "in the output directory, which holds the job's own files only" in caplog.text

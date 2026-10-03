@@ -82,6 +82,26 @@ class Decoder:
         frames = planes[:whole]
         return np.stack((frames[:, 2], frames[:, 0], frames[:, 1]), axis=-1)
 
+    def skip(self, count: int) -> int:
+        """Decode the next `count` frames and drop them, counted but never converted: fewer only
+        at the end of the stream. Returns the frames dropped."""
+        wanted = count * self._frame_bytes
+        # Each read gives at most what the pipe holds: a few MiB at a time do.
+        buffer = memoryview(bytearray(min(wanted, 4 << 20)))
+        filled = 0
+        while filled < wanted:
+            got = self._stdout.readinto(buffer[: min(len(buffer), wanted - filled)])
+            if not got:
+                break
+            filled += got
+        whole, rest = divmod(filled, self._frame_bytes)
+        self.decoded += whole
+        if rest:
+            raise self._error(f"its output ends {rest} bytes into frame {self.decoded}")
+        if self.frames is not None and self.decoded > self.frames:
+            raise self._error(f"more frames than the {self.frames} the first pass counted")
+        return whole
+
     def finish(self) -> None:
         """Check the end of the stream: ffmpeg done, with no error, after `frames` frames."""
         if self._stdout.read(1):

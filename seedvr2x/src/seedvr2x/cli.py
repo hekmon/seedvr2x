@@ -1,13 +1,17 @@
 """Command line: options and logging."""
 
 import argparse
+import fcntl
 import logging
 import os
 import re
+import shutil
 import time
+from bisect import bisect_right
 from collections.abc import Sequence
 from fractions import Fraction
 from importlib.metadata import PackageNotFoundError, version
+from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,6 +23,7 @@ if TYPE_CHECKING:
     import torch
 
     from seedvr2x.runtime.job import OutputSegment, Part, Shot
+    from seedvr2x.runtime.manifest import Manifest
 
 # Video file names, other than Matroska's, that -o refuses: an FFV1 master is a .mkv file, and
 # anything else names the directory of the output segments, which such a name would only hide.
@@ -115,7 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     # numz's allocator, which DESIGN.md keeps (Allocator): set before torch is imported.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
-    return _run(args)
+    try:
+        return _run(args)
+    finally:
+        _unlock()
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -193,21 +201,18 @@ def _run(args: argparse.Namespace) -> int:
         logger.error("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
         return 1
     device = torch.device("cuda", 0)
-    environment = _environment(device, ffmpeg_version) if directory is not None else {}
-    started = time.monotonic()
-    models = load_models(args.model_dir, args.dit_model, args.vae_model, device)
-    logger.info(
-        "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
-    )
-    if args.dump_frames is not None:
-        args.dump_frames.mkdir(parents=True, exist_ok=True)
-    units = Units()
+    units, record, resumed = Units(), None, False
+    remaining = list(range(len(segments)))  # the segments to write, those not finished
     if directory is not None:
-        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            _lock(directory)
+        except JobError as error:
+            logger.error("%s", error)
+            return 1
         record = manifest.Manifest(
             directory / manifest.NAME,
             settings,
-            environment,
+            _environment(device, ffmpeg_version),
             parts,
             shots,
             [shot_layout(shot.frames, args.window) for shot in shots],
@@ -219,8 +224,32 @@ def _run(args: argparse.Namespace) -> int:
                 "frame_rate": str(stream.frame_rate),
             },
         )
-        record.write()
+        resumed = record.path.is_file()
+        if not resumed and not _empty(directory):
+            logger.error("%s: written to since it was checked, by another program", directory)
+            return 1
+        if resumed:
+            # The job recorded there, checked and taken up before the models load.
+            try:
+                _resume(record)
+            except JobError as error:
+                logger.error("%s", error)
+                return 1
+            remaining = [index for index, done in enumerate(record.finished) if not done]
+            if not remaining:
+                logger.info("%s: finished already, its %d segments", directory, len(segments))
+                return 0
         units = DiskUnits(directory, record)
+    started = time.monotonic()
+    models = load_models(args.model_dir, args.dit_model, args.vae_model, device)
+    logger.info(
+        "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
+    )
+    if args.dump_frames is not None:
+        args.dump_frames.mkdir(parents=True, exist_ok=True)
+    if record is not None and not resumed:
+        record.path.parent.mkdir(parents=True, exist_ok=True)
+        record.write()
     started = time.monotonic()
 
     tags = Tags.of(stream, source.conversion.matrix_tag)
@@ -228,14 +257,23 @@ def _run(args: argparse.Namespace) -> int:
     def open_segment(path: Path) -> Writer:
         return open_writer(args.format, path, out_width, out_height, stream.frame_rate, tags)
 
+    # The n-th frame written is the job's frame number(n): the segments left, in order.
+    ends = list(accumulate(segments[index].frames for index in remaining))
+
+    def number(written: int) -> int:
+        which = bisect_right(ends, written)
+        return segments[remaining[which]].start + written - (ends[which - 1] if which else 0)
+
     try:
-        outputs = [(path, segment.frames) for path, segment in zip(paths, segments, strict=True)]
-        with SegmentWriter(outputs, open_segment, units.segment_finished) as writer:
+        outputs = [(paths[index], segments[index].frames) for index in remaining]
+        with SegmentWriter(
+            outputs, open_segment, lambda which: units.segment_finished(remaining[which])
+        ) as writer:
 
             def write(frames: npt.NDArray[np.float32]) -> None:
                 if args.dump_frames is not None:
-                    for offset, frame in enumerate(frames, writer.written):
-                        path = args.dump_frames / f"frame_{offset:06d}.npy"
+                    for written, frame in enumerate(frames, writer.written):
+                        path = args.dump_frames / f"frame_{number(written):06d}.npy"
                         np.save(path, np.ascontiguousarray(frame))
                 writer.write(frames)
 
@@ -261,7 +299,8 @@ def _layout(
     empty directory of segments, named and cut as sptenc's split: a directory's own, mirrored;
     a video file's shots, merged to --min-segment (DESIGN.md, Output). Until assembly (milestone
     6), the .mkv path stands for the one-file output, and the directory must be new or empty,
-    which keeps another run's files out of what sptenc reads (DESIGN.md, Output)."""
+    which keeps another run's files out of what sptenc reads (DESIGN.md, Output), or hold a
+    job's manifest, which resume reads back (resume.leftovers checks the rest)."""
     from seedvr2x.runtime.job import JobError, OutputSegment, merged_segments, mirrored_segments
     from seedvr2x.runtime.manifest import NAME, STATE
 
@@ -282,8 +321,16 @@ def _layout(
         return [OutputSegment(output.stem, 0, total)], [output], None
     if output.is_file():
         raise JobError(f"{output}: a file; the output segments need a directory")
-    if output.is_dir() and any(output.iterdir()):
-        raise JobError(f"{output}: not empty; the output segments need a new or empty directory")
+    if args.dump_frames is not None and args.dump_frames.resolve().is_relative_to(output.resolve()):
+        raise JobError(
+            f"--dump-frames {args.dump_frames}: in the output directory, which holds the job's"
+            " own files only"
+        )
+    if output.is_dir() and not _empty(output) and not (output / NAME).is_file():
+        raise JobError(
+            f"{output}: not empty, and no {NAME} to resume from; the output segments need a new"
+            " or empty directory"
+        )
     if args.input.is_dir():
         segments = mirrored_segments(parts)
     else:
@@ -296,6 +343,14 @@ def _layout(
         if path.name in (NAME, STATE) or path.name.endswith(".partial"):
             raise JobError(f"{path.name}: a name seedvr2x keeps for itself in its output")
     return segments, paths, output
+
+
+def _empty(directory: Path) -> bool:
+    """Whether directory holds nothing, but what an interrupted first write of the manifest left,
+    which the next write replaces."""
+    from seedvr2x.runtime.manifest import NAME
+
+    return all(entry.name == f"{NAME}.partial" for entry in directory.iterdir())
 
 
 def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
@@ -316,6 +371,72 @@ def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
         "input_matrix": args.input_matrix,
         "input_sar": None if args.input_sar is None else str(args.input_sar),
     }
+
+
+# The output directories this process holds locked (_lock), until main returns.
+_LOCKS: list[int] = []
+
+
+def _lock(directory: Path) -> None:
+    """Lock directory for this process until main returns: one seedvr2x at a time writes an
+    output directory, since two would race on the manifest and discard each other's files in
+    progress (resume.leftovers). The lock is the kernel's (flock), on the directory itself, so
+    no file is added, and it goes with the process, however it ends."""
+    from seedvr2x.media.files import make_directories
+    from seedvr2x.runtime.job import JobError
+
+    make_directories(directory)
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        raise JobError(f"{directory}: another seedvr2x is writing it") from None
+    except OSError as error:
+        # A filesystem without locks: logged, the run goes on (AGENTS.md: no silent fallback).
+        logger.warning("%s: not locked (%s); let one seedvr2x at a time write it", directory, error)
+    _LOCKS.append(descriptor)
+
+
+def _unlock() -> None:
+    while _LOCKS:
+        os.close(_LOCKS.pop())
+
+
+def _resume(record: "Manifest") -> None:
+    """Take up the job recorded beside record, refused (JobError) unless it is the one asked, its
+    directory as the manifest says; then discard what a stop left that the manifest doesn't
+    name (resume.leftovers)."""
+    from seedvr2x.runtime import resume
+    from seedvr2x.runtime.job import JobError
+
+    recorded = resume.read(record.path)
+    found = resume.differences(recorded, record.content())
+    if found:
+        raise JobError(
+            f"{record.path}: another job than the one asked, which differs in:\n  "
+            + "\n  ".join(found[:20])
+            + (f"\n  and {len(found) - 20} more" if len(found) > 20 else "")
+        )
+    resume.adopt(record, recorded)
+    discarded = resume.leftovers(record)
+    for path in discarded:
+        logger.debug("discarded %s", path)
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    logger.info(
+        "resuming %s: %d of %d segments finished, %d of %d shots encoded, %d windows kept; %d"
+        " leftovers discarded",
+        record.path.parent,
+        sum(record.finished),
+        len(record.finished),
+        sum(record.encoded),
+        len(record.encoded),
+        sum(record.windows_done),
+        len(discarded),
+    )
 
 
 def _model(directory: Path, name: str) -> dict[str, object]:
