@@ -13,8 +13,14 @@ from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.manifest import NAME, STATE, VERSION, Manifest
 from seedvr2x.runtime.units import size
 
-# The fields that say how far a job went, which a resume reads and doesn't compare.
-PROGRESS = {"shots": ("encoded", "windows_done"), "segments": ("finished", "bytes")}
+# The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
+# the NVIDIA driver, recorded for information only, since the math kernels ship with torch
+# (DESIGN.md, Pause and resume).
+UNCOMPARED = {
+    "shots": ("encoded", "windows_done"),
+    "segments": ("finished", "bytes"),
+    "environment": ("driver",),
+}
 
 # The names DiskUnits gives a shot's files.
 UNIT_FILE = re.compile(r"latent\.pt|window_\d{4}\.pt")
@@ -134,14 +140,19 @@ def _kept(manifest: Manifest, index: int) -> set[str]:
 
 
 def _job(content: dict[str, Any]) -> dict[str, Any]:
-    """content without its progress fields."""
+    """content without the fields a resume doesn't compare (UNCOMPARED)."""
     job = dict(content)
-    for key, fields in PROGRESS.items():
-        job[key] = [
-            {name: value for name, value in entry.items() if name not in fields}
-            for entry in content.get(key, [])
-        ]
+    for key, fields in UNCOMPARED.items():
+        value: Any = content.get(key)
+        if isinstance(value, dict):
+            job[key] = _without(cast(dict[str, Any], value), fields)
+        elif isinstance(value, list):
+            job[key] = [_without(entry, fields) for entry in cast(list[dict[str, Any]], value)]
     return job
+
+
+def _without(entry: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {name: value for name, value in entry.items() if name not in fields}
 
 
 def _compare(recorded: Any, asked: Any, where: str, found: list[str]) -> None:

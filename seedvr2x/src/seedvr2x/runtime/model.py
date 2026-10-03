@@ -10,6 +10,7 @@ through typed functions.
 
 # pyright: basic
 
+import ctypes
 import logging
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -66,6 +67,30 @@ def attention_backend() -> str:
     """flash_attn_2 when FlashAttention 2 imports, else sdpa (DESIGN.md, Vendored model code)."""
     available = attention_7b.FLASH_ATTN_2_AVAILABLE and attention_3b.FLASH_ATTN_2_AVAILABLE
     return "flash_attn_2" if available else "sdpa"
+
+
+def nvidia_driver() -> str | None:
+    """The NVIDIA driver's version, as nvidia-smi says it, read from NVML, the driver's own
+    library, as torch reads the device count from it (torch/cuda/__init__.py,
+    _raw_device_count_nvml); None, logged, when NVML can't say. torch has no call for it."""
+    try:
+        nvml = ctypes.CDLL("libnvidia-ml.so.1")
+    except OSError as error:
+        logger.warning("the NVIDIA driver's version is unknown: %s", error)
+        return None
+    status = nvml.nvmlInit_v2()
+    if status != 0:
+        logger.warning("the NVIDIA driver's version is unknown: NVML's initialisation: %d", status)
+        return None
+    try:
+        version = ctypes.create_string_buffer(80)  # NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE
+        status = nvml.nvmlSystemGetDriverVersion(version, ctypes.c_uint(len(version)))
+        if status != 0:
+            logger.warning("the NVIDIA driver's version is unknown: NVML's answer: %d", status)
+            return None
+        return version.value.decode()
+    finally:
+        nvml.nvmlShutdown()
 
 
 def load_models(model_dir: Path, dit_file: str, vae_file: str, device: torch.device) -> Models:

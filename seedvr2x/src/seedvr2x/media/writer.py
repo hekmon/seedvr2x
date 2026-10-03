@@ -208,6 +208,46 @@ class Writer:
         )
 
 
+def master_filters(pix_fmt: str, matrix: str, tags: Tags) -> tuple[str, list[str]]:
+    """The filter chain from gbrp16le frames to an FFV1 master's pix_fmt, and the encoder's options
+    for its tags; `matrix` is the yuv420p10le master's (yuv_matrix)."""
+    if pix_fmt == "gbrp16le":
+        # Frame properties only, no pixel conversion: without them the muxer writes no primaries
+        # and no transfer (ffv1_out.py).
+        chain = _setparams("colorspace=gbr", "range=pc", *tags.setparams())
+        return chain, ["-colorspace", "rgb", "-color_range", "pc", *tags.options()]
+    if pix_fmt == "yuv420p10le":
+        # ffv1_out.py's conversion with every parameter given: the primaries and transfer the same
+        # on both sides, so never converted (as the decode does); no dither, rounded to nearest.
+        zscale = [
+            "min=gbr:rin=full",
+            f"m={ZSCALE_MATRICES[matrix]}:r=limited:c={CHROMA_LOCATION}",
+            "pin=unspecified:p=unspecified:tin=unspecified:t=unspecified",
+            "d=none",
+            CHROMA_KERNEL,
+        ]
+        chain = f"zscale={':'.join(zscale)},format=yuv420p10le," + _setparams(
+            f"colorspace={matrix}",
+            "range=tv",
+            f"chroma_location={CHROMA_LOCATION}",
+            *tags.setparams(),
+        )
+        options = [
+            *("-colorspace", matrix, "-color_range", "tv"),
+            *("-chroma_sample_location", CHROMA_LOCATION, *tags.options()),
+        ]
+        return chain, options
+    raise ValueError(f"no FFV1 master in {pix_fmt}")
+
+
+def png_filters(tags: Tags) -> tuple[str, list[str]]:
+    """The filter chain from rgb48be frames to 16-bit PNG, and the encoder's options for its tags.
+    The PNG encoder writes the primaries and transfer as cICP, cHRM and gAMA chunks, and none for
+    an untagged source."""
+    chain = _setparams("colorspace=gbr", "range=pc", *tags.setparams())
+    return chain, ["-colorspace", "rgb", "-color_range", "pc", *tags.options()]
+
+
 class FFV1Writer(Writer):
     """An FFV1 master, gbrp16le or yuv420p10le, written to a temporary file beside path, then
     checked (its frames counted by ffprobe) and renamed: a file at path is always whole, even
@@ -226,35 +266,7 @@ class FFV1Writer(Writer):
         self.path = path
         self._partial = partial_path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if pix_fmt == "gbrp16le":
-            # Frame properties only, no pixel conversion: without them the muxer writes no
-            # primaries and no transfer (ffv1_out.py).
-            chain = _setparams("colorspace=gbr", "range=pc", *tags.setparams())
-            options = ["-colorspace", "rgb", "-color_range", "pc", *tags.options()]
-        elif pix_fmt == "yuv420p10le":
-            matrix = yuv_matrix(width, height, tags.matrix)
-            # ffv1_out.py's conversion with every parameter given: the primaries and transfer the
-            # same on both sides, so never converted (as the decode does); no dither, rounded to
-            # nearest.
-            zscale = [
-                "min=gbr:rin=full",
-                f"m={ZSCALE_MATRICES[matrix]}:r=limited:c={CHROMA_LOCATION}",
-                "pin=unspecified:p=unspecified:tin=unspecified:t=unspecified",
-                "d=none",
-                CHROMA_KERNEL,
-            ]
-            chain = f"zscale={':'.join(zscale)},format=yuv420p10le," + _setparams(
-                f"colorspace={matrix}",
-                "range=tv",
-                f"chroma_location={CHROMA_LOCATION}",
-                *tags.setparams(),
-            )
-            options = [
-                *("-colorspace", matrix, "-color_range", "tv"),
-                *("-chroma_sample_location", CHROMA_LOCATION, *tags.options()),
-            ]
-        else:
-            raise ValueError(f"no FFV1 master in {pix_fmt}")
+        chain, options = master_filters(pix_fmt, yuv_matrix(width, height, tags.matrix), tags)
         command = [
             *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-y"),
             *("-f", "rawvideo", "-pix_fmt", "gbrp16le", "-s", f"{width}x{height}"),
@@ -301,23 +313,12 @@ class PNGWriter(Writer):
         # What an interrupted writer left: frames of a segment never finished.
         shutil.rmtree(self._partial, ignore_errors=True)
         self._partial.mkdir(parents=True)
+        chain, options = png_filters(tags)
         command = [
             *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-y"),
             *("-f", "rawvideo", "-pix_fmt", "rgb48be", "-s", f"{width}x{height}"),
-            *(
-                "-framerate",
-                str(frame_rate),
-                "-i",
-                "-",
-                "-map",
-                "0:v:0",
-                "-fps_mode",
-                "passthrough",
-            ),
-            # The PNG encoder writes the primaries and transfer as cICP, cHRM and gAMA chunks, and
-            # none for an untagged source.
-            *("-vf", _setparams("colorspace=gbr", "range=pc", *tags.setparams())),
-            *("-colorspace", "rgb", "-color_range", "pc", *tags.options()),
+            *("-framerate", str(frame_rate), "-i", "-", "-map", "0:v:0"),
+            *("-fps_mode", "passthrough", "-vf", chain, *options),
             *("-c:v", "png", "-pix_fmt", "rgb48be", "-f", "image2"),
             *("-start_number", str(start), str(self._partial / "%06d.png")),
         ]

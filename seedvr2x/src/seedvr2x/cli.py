@@ -138,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.ffmpeg import MediaError
+    from seedvr2x.media.fingerprint import fingerprint
     from seedvr2x.media.source import examine, examine_directory
     from seedvr2x.runtime.job import (
         SHARED,
@@ -158,7 +159,8 @@ def _run(args: argparse.Namespace) -> int:
                 f" a window needs at least {2 * SHARED + 1}"
             )
         ffmpeg_version = ffmpeg.check(("png",) if args.format == "png" else ())
-        logger.info("ffmpeg %s", ffmpeg_version)
+        conversions = fingerprint()
+        logger.info("ffmpeg %s, its conversions' fingerprint %s", ffmpeg_version, conversions[:16])
         if args.input.is_dir():
             if args.cuts:
                 # Until the detector for doubtful joins comes, each join is a cut (DESIGN.md,
@@ -221,7 +223,7 @@ def _run(args: argparse.Namespace) -> int:
         record = manifest.Manifest(
             directory / manifest.NAME,
             settings,
-            _environment(device, ffmpeg_version),
+            _environment(device, ffmpeg_version, conversions),
             parts,
             shots,
             [shot_layout(shot.frames, args.window) for shot in shots],
@@ -474,13 +476,16 @@ def _model(directory: Path, name: str) -> dict[str, object]:
     return {"name": name, "size": path.stat().st_size, "sha256": digest}
 
 
-def _environment(device: "torch.device", ffmpeg_version: str) -> dict[str, object]:
+def _environment(
+    device: "torch.device", ffmpeg_version: str, conversions: str
+) -> dict[str, object]:
     """What the output's bits depend on besides the settings, which a resume must find again to
     stay bit-identical (DESIGN.md, Pause and resume): the stack, the GPU, the attention backend
-    and FlashAttention's version, ffmpeg's."""
+    and FlashAttention's version, ffmpeg's and its conversions' fingerprint (media/fingerprint.py);
+    and the NVIDIA driver, for information only: the math kernels ship with torch."""
     import torch
 
-    from seedvr2x.runtime.model import attention_backend
+    from seedvr2x.runtime.model import attention_backend, nvidia_driver
 
     try:
         flash_attn = version("flash_attn")
@@ -491,9 +496,11 @@ def _environment(device: "torch.device", ffmpeg_version: str) -> dict[str, objec
         "cuda": torch.version.cuda,
         "cudnn": torch.backends.cudnn.version(),
         "gpu": torch.cuda.get_device_name(device),
+        "driver": nvidia_driver(),
         "attention": attention_backend(),
         "flash_attn": flash_attn,
         "ffmpeg": ffmpeg_version,
+        "conversions": conversions,
     }
 
 

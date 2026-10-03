@@ -1,7 +1,11 @@
-"""The vendored model imports and builds without numz's runtime, on the CPU."""
+"""The vendored model imports and builds without numz's runtime, on the CPU; the NVIDIA
+driver's version is read from NVML."""
 
+import ctypes
 import subprocess
 import sys
+
+import pytest
 
 # A fresh interpreter: importing must print nothing and create no CUDA context, where numz's
 # runtime printed banners, patched libraries and probed the GPU at import (provenance.md).
@@ -59,3 +63,44 @@ def test_vendor_imports_quietly() -> None:
 def test_models_build_from_configs() -> None:
     result = run(BUILD)
     assert result.returncode == 0, result.stderr
+
+
+class NVML:
+    """libnvidia-ml as nvidia_driver calls it, each call answering `status`."""
+
+    def __init__(self, init: int = 0, query: int = 0) -> None:
+        self.init, self.query, self.shut = init, query, False
+
+    def nvmlInit_v2(self) -> int:
+        return self.init
+
+    def nvmlSystemGetDriverVersion(
+        self, version: ctypes.Array[ctypes.c_char], length: ctypes.c_uint
+    ) -> int:
+        assert length.value == len(version) == 80
+        version.value = b"580.82.07"
+        return self.query
+
+    def nvmlShutdown(self) -> int:
+        self.shut = True
+        return 0
+
+
+def test_nvidia_driver(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    # NVML stood in for: no driver is asked anything.
+    from seedvr2x.runtime import model
+
+    for nvml, version in ((NVML(), "580.82.07"), (NVML(query=3), None)):
+        monkeypatch.setattr(ctypes, "CDLL", lambda name, nvml=nvml: nvml)
+        assert model.nvidia_driver() == version
+        assert nvml.shut  # shut down after its initialisation, whatever the answer
+    nvml = NVML(init=9)
+    monkeypatch.setattr(ctypes, "CDLL", lambda name: nvml)
+    assert model.nvidia_driver() is None and not nvml.shut
+
+    def missing(name: str) -> object:
+        raise OSError(f"{name}: cannot open shared object file")
+
+    monkeypatch.setattr(ctypes, "CDLL", missing)
+    assert model.nvidia_driver() is None
+    assert caplog.text.count("the NVIDIA driver's version is unknown") == 3

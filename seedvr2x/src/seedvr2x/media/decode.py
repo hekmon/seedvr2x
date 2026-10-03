@@ -22,11 +22,18 @@ def decode_command(
     return [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", loglevel),
         *input_args,
-        *("-map", "0:v:0", "-vf", conversion.filters(), "-fps_mode", "passthrough"),
+        *("-map", "0:v:0", *decode_output(conversion), "-"),
+    ]
+
+
+def decode_output(conversion: Conversion) -> list[str]:
+    """ffmpeg's options for the decode's output: the frames converted (Conversion), raw gbrp16le."""
+    return [
+        *("-vf", conversion.filters(), "-fps_mode", "passthrough"),
         # A frame size changing within the stream fails, instead of being scaled to the first
         # frame's size by swscale.
         "-noautoscale",
-        *("-f", "rawvideo", "-pix_fmt", "gbrp16le", "-"),
+        *("-f", "rawvideo", "-pix_fmt", "gbrp16le"),
     ]
 
 

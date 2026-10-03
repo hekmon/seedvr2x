@@ -94,6 +94,7 @@ def stand_in(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         model, "load_models", lambda *a: SimpleNamespace(attention="none", device="cpu")
     )
+    monkeypatch.setattr(model, "nvidia_driver", lambda: "a stand-in")
     monkeypatch.setattr(run, "encode_shot", stand_in_encode)
     monkeypatch.setattr(run, "sample_windows", stand_in_windows)
     monkeypatch.setattr(run, "decode_shot", stand_in_decode)
@@ -527,6 +528,12 @@ def test_another_job_refused(
         patch.setattr(torch.cuda, "get_device_name", lambda device: "another")
         text = refused(tmp_path, source_path, caplog, *JOB)
     assert 'environment.gpu: "a stand-in" -> "another"' in text
+    # Other conversions: zimg upgraded, which ffmpeg's version doesn't say.
+    from seedvr2x.media import fingerprint
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fingerprint, "fingerprint", lambda: "0" * 64)
+        assert "environment.conversions" in refused(tmp_path, source_path, caplog, *JOB)
     # Another's files, never deleted.
     (out / "notes.txt").write_text("mine")
     assert "not this job's: notes.txt" in refused(tmp_path, source_path, caplog, *JOB)
@@ -555,6 +562,25 @@ def test_another_job_refused(
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
+
+
+def test_driver_recorded_not_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # The NVIDIA driver is information: the math kernels ship with torch.
+    from seedvr2x.runtime import model
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    manifest = tmp_path / "out" / "manifest.json"
+    assert json.loads(manifest.read_text())["environment"]["driver"] == "a stand-in"
+    monkeypatch.setattr(model, "nvidia_driver", lambda: "another")
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == ["window 4:1", "decode 4"]
+    assert json.loads(manifest.read_text())["environment"]["driver"] == "another"
 
 
 def test_directory_resumed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
