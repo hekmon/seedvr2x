@@ -211,6 +211,19 @@ ByteDance's sharp 7B in fp16, fp8 and Q4_K_M. One VAE, `ema_vae_fp16`, serves th
 - **Recognised by content.** The architecture and the format are read from the file's own
   tensors, not from its name, which is what numz goes by: a renamed file must load as what it
   is (numz picks the config at `src/core/model_configuration.py:717-719`).
+- **numz's fp8 files are plain casts.** Every tensor of the 3B's, and all but the last block's
+  in the 7B's, is rounded to `e4m3fn` (3 mantissa bits), with no scale, down to the biases,
+  norms, modulation tables, input and output layers and RoPE's frequencies. The Q4_K_M file
+  quantises only the 288 large matrices, with a scale every 32 weights, and keeps the other 840
+  tensors in fp16: the likely reason it measures closer to the source than fp8.
+- **RoPE's frequencies are the architecture's:** the fp16 files' values, whatever the weights'
+  format. They are constants, never trained, and the fp8 files hold them rounded: up to 6% off
+  in the 7B's blocks 0–34, and in the 3B's, the 5 lowest of 21 at zero and others up to 41% off.
+  - numz runs the 7B fp8 file on block 35's fp16 values in every block anyway, through
+    [bug 24](../research/bugs/24-rope-wrapper-late-binding.md), so that file stays bit-identical
+    to numz.
+  - The 3B fp8 file runs on its rounded values in numz. Ours is checked against numz patched to
+    use the fp16 values.
 - **Checked as milestone 1 checked the 7B fp16:** each architecture and format bit-identical to
   numz on milestone 1's input, then held there by the regression test. The sharp files run the
   7B's code.
@@ -220,7 +233,8 @@ ByteDance's sharp 7B in fp16, fp8 and Q4_K_M. One VAE, `ema_vae_fp16`, serves th
   - Q4_K_M is as close to the source as fp16, or closer (PSNR-Y +0.11 to +0.49 dB, one seed),
     with a DiT peak of 17.2 GiB against 28.2 at 45 frames of 1080p, for 2–3% more DiT time.
   - fp8 is further from the source on all 4 clips (PSNR-Y −0.25 to −0.58 dB), takes more memory
-    than Q4_K_M (20.7 GiB) and saves only 2–3% of DiT time.
+    than Q4_K_M (20.7 GiB) and saves only 2–3% of DiT time: its weights are widened for the
+    arithmetic, so they save memory, not time.
   - The 3B is a different model. In fp16 it is perceptually worse than the 7B on all 4 clips
     (LPIPS and DISTS), and its fp8 file stays close to it. Its DiT is 25–38% faster, but the VAE
     takes most of the run (15 s saved out of 215), and it needs as much memory as the 7B's
@@ -229,6 +243,10 @@ ByteDance's sharp 7B in fp16, fp8 and Q4_K_M. One VAE, `ema_vae_fp16`, serves th
     its seeds apart from 7B fp16's, VMAF up by 1.9 to 3.5, and less colour error. Despite its
     name, it adds no more fine texture than 7B fp16. ByteDance publishes it beside the regular
     7B (`seedvr2_ema_7b_sharp.pth`), without a word about it in either readme.
+  - A quantized file moves the output no more than a change of seed does: 40–48 dB from its
+    parent at the same seed, against 37–44 dB between two seeds of the 7B fp16 (about equal on
+    one clip). A distance to the 7B fp16 alone would overstate what a smaller file loses, so
+    each figure is read against the spread between seeds.
   - Fidelity is not quality: the model re-renders, so closer to the source can mean redrawing
     less. Live action and blurrier inputs aren't measured.
 - **The default** stays the 7B fp16, the model every milestone checks against. The sharp 7B is
@@ -623,7 +641,10 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
   quality lever: fewer boundaries), BlockSwap blocks, VAE tile sizes, then what's left goes to
   speed: `compile_dit` (−26 to −32% DiT time, +0.1 to +1.4 GiB), and `compile_vae` only when
   its memory fits (it about doubles VAE activation memory, for −16 to −19% VAE time).
-- `--plan` prints the plan and the time estimate without running.
+- `--plan` prints the plan and the time estimate without running, for the model given and for
+  each other model found beside it: window length, BlockSwap, tiles and time on this GPU. A
+  user with a mid-sized card can then weigh the 7B fp16 with BlockSwap against a smaller file
+  with longer windows, on their own card.
 - Validated with `vram_cap.py` emulation of 8–48 GB cards before release.
 
 ### BlockSwap, rewritten
@@ -887,8 +908,9 @@ explanation.
 
 **Also explained:**
 - the two workflows: a file in and a finished file out, or sptenc's pre-split directories
-- the models: which one fits which card, what the measurements found for each, and why the
-  default isn't numz's
+- the models: which one fits which card, what the measurements found for each kind of source
+  (anime, dark, live action…), and why the default isn't numz's. `--plan` shows what each
+  model gets on the user's own card.
 - lossless delivery: why there are no encoder options, and how `--segment-cmd` compresses with
   the user's own command
 - disk use: master sizes per hour, the decode buffer and input copies during a run
@@ -1064,6 +1086,10 @@ writers, and the planner needs real shot lengths.
     (ByteDance)
 - **Decode resume granularity:** whether sub-segment decoding with warm-up latents is
   bit-identical.
+- **The models per kind of source:** [models.md](../research/docs/models.md)'s protocol on each
+  new kind of sample (live action, grainy film, DVD…), with three seeds for the Q4_K_M, which
+  the docs will point small and mid-sized cards to, and the 3B fp8 run on the fp16 RoPE values,
+  as seedvr2x runs it.
 - **A shot's first frame.** The causal VAE encodes it alone, so it comes out less restored,
   closer to the input ([quality.md](../research/docs/quality.md#--prepend_frames)). numz has
   such a frame at every batch; seedvr2x only at each shot's start, right after a cut, where
