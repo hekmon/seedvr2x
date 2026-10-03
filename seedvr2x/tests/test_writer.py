@@ -13,6 +13,7 @@ import numpy.typing as npt
 import pytest
 
 from seedvr2x.media import ffmpeg
+from seedvr2x.media.checksums import frame_bytes
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import (
     FFV1Writer,
@@ -112,6 +113,59 @@ def test_checksums_as_written(tmp_path: Path) -> None:
     planes = decoded(path, "gbrp16le")
     size = 3 * 64 * 16 * 2
     assert writer.checksums == [zlib.crc32(planes[k * size : (k + 1) * size]) for k in range(3)]
+
+
+def test_checksums_as_held(tmp_path: Path) -> None:
+    # A yuv420p10le master holds what ffmpeg converts: its checksums come from ffmpeg's framehash,
+    # the CRC-32 of each frame the file holds, as zlib computes it. A PNG's are of the rgb48be
+    # pixels each file holds.
+    frames = frames_of(3, 64, 16)
+    yuv = tmp_path / "y.mkv"
+    with FFV1Writer(yuv, "yuv420p10le", 64, 16, RATE, BT709) as writer:
+        writer.write(frames)
+    data, size = decoded(yuv, "yuv420p10le"), frame_bytes("yuv420p10le", 64, 16)
+    assert writer.checksums == [zlib.crc32(data[k * size : (k + 1) * size]) for k in range(3)]
+    assert writer._hashes is not None and not writer._hashes.exists()  # pyright: ignore[reportPrivateUsage]
+    with (
+        pytest.raises(RuntimeError),
+        FFV1Writer(yuv, "yuv420p10le", 64, 16, RATE, BT709) as aborted,
+    ):
+        aborted.write(frames)
+        raise RuntimeError
+    assert aborted._hashes is not None and not aborted._hashes.exists()  # pyright: ignore[reportPrivateUsage]
+    with PNGWriter(tmp_path / "p", 64, 16, RATE, BT709) as png:
+        png.write(frames)
+    assert png.checksums == [zlib.crc32(decoded(png.frame_path(k), "rgb48be")) for k in range(3)]
+
+
+def test_framehash_refused_unless_ffmpeg_s(tmp_path: Path) -> None:
+    from seedvr2x.media.writer import _framehash  # pyright: ignore[reportPrivateUsage]
+
+    path = tmp_path / "f.framehash"
+    path.write_text(
+        "#format: frame checksums\n0,          0,          0,        1,     9216, 18cd7050\n"
+    )
+    assert _framehash(path) == [0x18CD7050]
+    for line in ("0, 0, 0, 1, 9216", "1, 0, 0, 1, 9216, 18cd7050", "0, 0, 0, 1, 9216, 18cd705"):
+        path.write_text(f"{line}\n")
+        with pytest.raises(MediaError, match="not ffmpeg's framehash"):
+            _framehash(path)
+
+
+def test_stale_checksums_removed_when_replaced(tmp_path: Path) -> None:
+    # stale: the checksums of what path held, removed only as the new file replaces it.
+    stale = tmp_path / "m.mkv.crc32"
+    stale.write_text("00000000\n")
+    with (
+        pytest.raises(RuntimeError),
+        FFV1Writer(tmp_path / "m.mkv", "gbrp16le", 64, 16, RATE, BT709, stale=stale) as writer,
+    ):
+        writer.write(frames_of(1, 64, 16))
+        raise RuntimeError
+    assert stale.exists()
+    with FFV1Writer(tmp_path / "m.mkv", "gbrp16le", 64, 16, RATE, BT709, stale=stale) as writer:
+        writer.write(frames_of(1, 64, 16))
+    assert not stale.exists()
 
 
 def test_yuv_white_black_and_primaries(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 # expansion is inexact, 255 → 65283: DESIGN.md, Input), scdet for the cut detection, FFV1 to
 # write the masters and to read lossless segments back. The other filters are in any build, and
 # checked for a clear message all the same.
-FILTERS = ("zscale", "scdet", "format", "settb", "metadata", "setparams")
+FILTERS = ("zscale", "scdet", "format", "settb", "metadata", "setparams", "split")
 ENCODERS = ("ffv1",)
 DECODERS = ("ffv1",)
 
@@ -29,19 +29,20 @@ def input_args(path: Path) -> list[str]:
     return ["-noautorotate", "-i", str(path)]
 
 
-def check(output_encoders: tuple[str, ...] = ()) -> str:
+def check(output_encoders: tuple[str, ...] = (), output_muxers: tuple[str, ...] = ()) -> str:
     """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs, and for the output's own
-    encoders (png for PNG output), and return ffmpeg's version.
+    encoders and muxers (png for PNG output; framehash, which hashes a yuv420p10le master's
+    frames), and return ffmpeg's version.
 
     Raises MediaError naming what is missing."""
-    for tool in ("ffmpeg", "ffprobe"):
-        if shutil.which(tool) is None:
-            raise MediaError(f"{tool} not found on PATH: seedvr2x needs ffmpeg and ffprobe")
+    found()
     filters, encoders, decoders = _listed("-filters"), _listed("-encoders"), _listed("-decoders")
+    muxers = _listed("-muxers") if output_muxers else set[str]()
     missing = [
         *(f"the {name} filter" for name in FILTERS if name not in filters),
         *(f"the {name} encoder" for name in ENCODERS + output_encoders if name not in encoders),
         *(f"the {name} decoder" for name in DECODERS if name not in decoders),
+        *(f"the {name} muxer" for name in output_muxers if name not in muxers),
     ]
     if missing:
         raise MediaError(
@@ -50,6 +51,13 @@ def check(output_encoders: tuple[str, ...] = ()) -> str:
         )
     version = _run("-version").splitlines()
     return version[0].split()[2] if version and len(version[0].split()) > 2 else "unknown"
+
+
+def found() -> None:
+    """Raise MediaError unless ffmpeg and ffprobe are on PATH."""
+    for tool in ("ffmpeg", "ffprobe"):
+        if shutil.which(tool) is None:
+            raise MediaError(f"{tool} not found on PATH: seedvr2x needs ffmpeg and ffprobe")
 
 
 def _listed(option: str) -> set[str]:

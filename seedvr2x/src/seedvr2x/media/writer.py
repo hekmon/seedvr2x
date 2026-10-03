@@ -12,8 +12,10 @@ BT.709, for one). So every tag is set twice, on the frames (setparams) and on th
 nothing converts but zscale.
 """
 
+import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import zlib
 from collections import deque
@@ -115,10 +117,13 @@ class Writer:
     time. Used as a context manager: closed and checked on a normal exit; on an exception, ffmpeg
     is stopped and its partial output removed.
 
-    checksums: the CRC-32 of each frame as fed to ffmpeg, in order, computed as it is written
-    (media/checksums.py): of its gbrp16le planes for FFV1, the planes a gbrp16le master and lab's
-    input copy hold and read back. Not what a yuv420p10le master holds: ffmpeg converts the planes
-    it is fed."""
+    checksums: the CRC-32 of each frame as the output holds it, in order (media/checksums.py;
+    DESIGN.md, Output, Checksums). Computed as each frame is written on the planes fed to ffmpeg,
+    which a gbrp16le master, lab's input copy and a PNG hold as they are; a yuv420p10le master's
+    come from ffmpeg once it is closed (FFV1Writer)."""
+
+    # Whether the output holds the planes fed to ffmpeg, so that checksums are theirs.
+    _holds_as_fed = True
 
     def __init__(self, command: list[str], what: Path, width: int, height: int) -> None:
         self.what, self.width, self.height = what, width, height
@@ -153,7 +158,8 @@ class Writer:
                 self._stdin.write(packed)
             except BrokenPipeError:
                 raise self._error(f"it stopped after {self.written} frames") from None
-            self.checksums.append(zlib.crc32(packed))
+            if self._holds_as_fed:
+                self.checksums.append(zlib.crc32(packed))
             self.written += 1
 
     def close(self) -> int:
@@ -260,7 +266,13 @@ def png_filters(tags: Tags) -> tuple[str, list[str]]:
 class FFV1Writer(Writer):
     """An FFV1 master, gbrp16le or yuv420p10le, written to a temporary file beside path, then
     checked (its frames counted by ffprobe) and renamed: a file at path is always whole, even
-    after a power cut (files.replace_whole)."""
+    after a power cut (files.replace_whole).
+
+    A yuv420p10le master holds ffmpeg's conversion of the planes it is fed, so its checksums come
+    from ffmpeg: a second output of the same process hashes the converted frames, framehash's
+    CRC-32 of each raw frame being zlib's (tests/test_writer.py). stale, when given, is the file
+    of the checksums of what path held before: removed just before path is replaced, so that
+    checksums beside a file are always its own, and a run stopped before keeps the old ones."""
 
     def __init__(
         self,
@@ -271,20 +283,44 @@ class FFV1Writer(Writer):
         frame_rate: Fraction,
         tags: Tags,
         slices: int = 16,
+        stale: Path | None = None,
     ) -> None:
-        self.path = path
+        self.path, self._stale = path, stale
         self._partial = partial_path(path)
+        self._holds_as_fed = pix_fmt == "gbrp16le"
+        self._hashes: Path | None = None
         path.parent.mkdir(parents=True, exist_ok=True)
         chain, options = master_filters(pix_fmt, yuv_matrix(width, height, tags.matrix), tags)
+        if self._holds_as_fed:
+            graph, hashed = ["-map", "0:v:0", "-vf", chain], []
+        else:
+            try:
+                descriptor, name = tempfile.mkstemp(suffix=".framehash")
+            except OSError as error:
+                raise MediaError(f"{path}: no temporary file for its checksums: {error}") from error
+            os.close(descriptor)
+            self._hashes = Path(name)
+            graph = ["-filter_complex", f"[0:v]{chain},split=2[master][hashed]", "-map", "[master]"]
+            hashed = [
+                *("-map", "[hashed]", "-fps_mode", "passthrough", *options),
+                *("-c:v", "rawvideo", "-pix_fmt", pix_fmt),
+                *("-f", "framehash", "-hash", "crc32", str(self._hashes)),
+            ]
         command = [
             *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-y"),
             *("-f", "rawvideo", "-pix_fmt", "gbrp16le", "-s", f"{width}x{height}"),
-            *("-framerate", str(frame_rate), "-i", "-", "-map", "0:v:0"),
-            *("-fps_mode", "passthrough", "-vf", chain, *options),
+            *("-framerate", str(frame_rate), "-i", "-", *graph),
+            *("-fps_mode", "passthrough", *options),
             *("-c:v", "ffv1", "-level", "3", "-g", "1", "-slices", str(slices)),
             *("-slicecrc", "1", "-pix_fmt", pix_fmt, "-f", "matroska", str(self._partial)),
+            *hashed,
         ]
-        super().__init__(command, path, width, height)
+        try:
+            super().__init__(command, path, width, height)
+        except BaseException:
+            if self._hashes is not None:
+                self._hashes.unlink(missing_ok=True)
+            raise
 
     def _pack(self, frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
         return to_planar16(frame)
@@ -294,17 +330,47 @@ class FFV1Writer(Writer):
         if counted != self.written:
             self._discard()
             raise MediaError(f"{self.path}: {counted} frames in the file, {self.written} written")
+        if self._hashes is not None:
+            try:
+                self.checksums = _framehash(self._hashes)
+            except MediaError:
+                self._discard()
+                raise
+            self._hashes.unlink()
+            if len(self.checksums) != self.written:
+                self._discard()
+                raise MediaError(
+                    f"{self.path}: {len(self.checksums)} frames hashed, {self.written} written"
+                )
+        if self._stale is not None:
+            self._stale.unlink(missing_ok=True)
         replace_whole(self._partial, self.path)
 
     def _discard(self) -> None:
         self._partial.unlink(missing_ok=True)
+        if self._hashes is not None:
+            self._hashes.unlink(missing_ok=True)
+
+
+def _framehash(path: Path) -> list[int]:
+    """The CRC-32s of ffmpeg's framehash output at path, a frame per line after its # comments:
+    stream, dts, pts, duration, size, hash."""
+    checksums: list[int] = []
+    for line in path.read_text().splitlines():
+        if line.startswith("#"):
+            continue
+        fields = [field.strip() for field in line.split(",")]
+        if len(fields) != 6 or fields[0] != "0" or len(fields[5]) != 8:
+            raise MediaError(f"{path}: not ffmpeg's framehash: {line[:60]!r}")
+        checksums.append(int(fields[5], 16))
+    return checksums
 
 
 class PNGWriter(Writer):
     """16-bit RGB PNG, one file per frame, directory/NNNNNN.png numbered from start, written to a
     temporary directory beside it, then checked (every frame there) and renamed: a directory at
     path is always whole, even after a power cut (files.replace_whole). directory must not exist,
-    or be empty."""
+    or be empty. stale: as FFV1Writer's."""
 
     def __init__(
         self,
@@ -314,8 +380,9 @@ class PNGWriter(Writer):
         frame_rate: Fraction,
         tags: Tags,
         start: int = 0,
+        stale: Path | None = None,
     ) -> None:
-        self.directory, self.start = directory, start
+        self.directory, self.start, self._stale = directory, start, stale
         if directory.exists() and (not directory.is_dir() or any(directory.iterdir())):
             raise MediaError(f"{directory}: exists, and is not an empty directory")
         self._partial = partial_path(directory)
@@ -348,6 +415,8 @@ class PNGWriter(Writer):
         if missing:
             self._discard()
             raise MediaError(f"{self.directory}: {len(missing)} PNG missing, from {missing[0]}")
+        if self._stale is not None:  # as FFV1Writer's
+            self._stale.unlink(missing_ok=True)
         replace_whole(self._partial, self.directory)
 
     def _discard(self) -> None:
@@ -358,14 +427,14 @@ class SegmentWriter:
     """The output written across consecutive segments, each to a writer of its own: opened at the
     segment's first frame, closed, so checked, after its last (DESIGN.md, Output: output
     segments). segments are (path, frames) in order; open_segment(path) gives a segment's writer;
-    finished(index), when given, is told each segment closed. Used as a context manager, as a
-    Writer."""
+    finished(index, checksums), when given, is told each segment closed, with its frames'
+    checksums (Writer.checksums). Used as a context manager, as a Writer."""
 
     def __init__(
         self,
         segments: Sequence[tuple[Path, int]],
         open_segment: Callable[[Path], Writer],
-        finished: Callable[[int], None] | None = None,
+        finished: Callable[[int, list[int]], None] | None = None,
     ) -> None:
         self._segments = list(segments)
         self._open = open_segment
@@ -388,9 +457,9 @@ class SegmentWriter:
             self.written += take
             if self._current.written == count:
                 self._current.close()
-                self._current = None
+                checksums, self._current = self._current.checksums, None
                 if self._finished is not None:
-                    self._finished(self._index)
+                    self._finished(self._index, checksums)
                 self._index += 1
 
     def close(self) -> int:
@@ -432,12 +501,13 @@ def open_writer(
     frame_rate: Fraction,
     tags: Tags,
     start: int = 0,
+    stale: Path | None = None,
 ) -> Writer:
     """A writer of output_format (FORMATS): an FFV1 master at path, or PNG in the directory path,
-    numbered from start."""
+    numbered from start; stale, the checksums of what path held before (FFV1Writer)."""
     if output_format == "png":
-        return PNGWriter(path, width, height, frame_rate, tags, start)
-    return FFV1Writer(path, output_format, width, height, frame_rate, tags)
+        return PNGWriter(path, width, height, frame_rate, tags, start, stale)
+    return FFV1Writer(path, output_format, width, height, frame_rate, tags, stale=stale)
 
 
 def count_packets(path: Path) -> int:

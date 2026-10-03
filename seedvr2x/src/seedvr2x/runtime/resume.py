@@ -5,6 +5,7 @@ which the manifest records; the directory must hold what the manifest says, and 
 anyone's; what a stop left that the manifest doesn't name is discarded."""
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any, cast
 
 from seedvr2x.media.files import partial_path
 from seedvr2x.runtime.job import JobError
-from seedvr2x.runtime.manifest import NAME, STATE, VERSION, Manifest
+from seedvr2x.runtime.manifest import NAME, STATE, SUMS, Manifest, checksums_file
 from seedvr2x.runtime.units import BUFFER, CHECKSUMS, COPY, size
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
@@ -37,23 +38,6 @@ FIRST_PASS = ("ffmpeg", "conversions")
 UNIT_FILE = re.compile(
     rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS, BUFFER)))}"
 )
-
-
-def read(path: Path) -> dict[str, Any]:
-    """The manifest at path, as written; refused unless written by this manifest version."""
-    try:
-        content: Any = json.loads(path.read_text())
-    except (OSError, ValueError) as error:
-        raise JobError(f"{path}: not readable as a manifest: {error}") from None
-    if not isinstance(content, dict):
-        raise JobError(f"{path}: not a manifest")
-    manifest = cast(dict[str, Any], content)
-    found = manifest.get("seedvr2x_manifest")
-    if found != VERSION:
-        raise JobError(
-            f"{path}: manifest version {found}, where this seedvr2x writes {VERSION}: not resumable"
-        )
-    return manifest
 
 
 def identity(content: dict[str, Any]) -> dict[str, Any]:
@@ -128,14 +112,14 @@ def _changes(
 
 def leftovers(manifest: Manifest) -> list[Path]:
     """What a stop left in the output directory that the manifest doesn't name, to discard: the
-    partial files and directories, an unfinished segment's file, a shot's unit files not recorded,
-    the units of finished segments. Refused (JobError): a finished segment missing or of another
-    size, a unit recorded but missing, and anything in the directory that isn't this job's, which
-    is never deleted. A shot's input copy or its checksums missing isn't refused: the copy is
-    derived data, which the run makes again (run_job)."""
+    partial files and directories, an unfinished segment's file and checksums, a shot's unit files
+    not recorded, the units of finished segments. Refused (JobError): a finished segment missing,
+    of another size or without its checksums, a unit recorded but missing, and anything in the
+    directory that isn't this job's, which is never deleted. A shot's input copy or its checksums
+    missing isn't refused: the copy is derived data, which the run makes again (run_job)."""
     directory = manifest.path.parent
     found: list[Path] = []
-    names = {NAME, partial_path(manifest.path).name, STATE}
+    names = {NAME, partial_path(manifest.path).name, STATE, SUMS}
     for index, name in enumerate(manifest.files):
         path = directory / name
         names.update((name, partial_path(path).name))
@@ -156,7 +140,34 @@ def leftovers(manifest: Manifest) -> list[Path]:
     foreign = sorted(entry.name for entry in directory.iterdir() if entry.name not in names)
     if foreign:
         raise JobError(f"{directory}: not this job's: {', '.join(foreign[:5])}")
-    return found + _unit_leftovers(manifest)
+    return found + _checksum_leftovers(manifest) + _unit_leftovers(manifest)
+
+
+def _checksum_leftovers(manifest: Manifest) -> list[Path]:
+    """In SUMS: an unfinished segment's checksums and partial files, to discard. A finished
+    segment's are written before it is recorded, so their absence is refused, as anything there
+    that isn't this job's is."""
+    sums = manifest.path.parent / SUMS
+    if os.path.lexists(sums) and (sums.is_symlink() or not sums.is_dir()):
+        raise JobError(f"{sums}: not this job's")
+    output_format = manifest.output["format"]
+    finished = {
+        checksums_file(name, output_format): done
+        for name, done in zip(manifest.files, manifest.finished, strict=True)
+    }
+    found: list[Path] = []
+    for entry in sorted(sums.iterdir()) if sums.is_dir() else []:
+        name = entry.name.removesuffix(".partial")
+        if name not in finished or not entry.is_file() or entry.is_symlink():
+            raise JobError(f"{entry}: not this job's")
+        if entry.name != name or not finished[name]:
+            found.append(entry)
+    for name, done in finished.items():
+        if done and not (sums / name).is_file():
+            raise JobError(
+                f"{sums / name}: a finished segment's checksums, the manifest says, but missing"
+            )
+    return found
 
 
 def _unit_leftovers(manifest: Manifest) -> list[Path]:

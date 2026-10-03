@@ -10,15 +10,41 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from seedvr2x.media.files import write_whole
-from seedvr2x.runtime.job import OutputSegment, Part, Shot
+from seedvr2x.runtime.job import JobError, OutputSegment, Part, Shot
 
 NAME = "manifest.json"
 VERSION = 2
 # The directory of the units kept for a resume, beside the manifest (units.DiskUnits).
 STATE = "resume"
+# The directory of the output segments' checksums, beside them, which outlives the job
+# (media/checksums.py; DESIGN.md, Output, Checksums).
+SUMS = "checksums"
+
+
+def checksums_file(segment: str, output_format: str) -> str:
+    """The name, in SUMS, of the checksums of the output segment named `segment`: an FFV1 file's
+    name without the .mkv seedvr2x gives it, or a PNG directory's name, as it is; then .crc32.
+    Unique as the segments' own names are."""
+    stem = segment if output_format == "png" else segment.removesuffix(".mkv")
+    return f"{stem}.crc32"
+
+
+def read(path: Path) -> dict[str, Any]:
+    """The manifest at path, as written; refused unless written by this manifest version."""
+    try:
+        content: Any = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise JobError(f"{path}: not readable as a manifest: {error}") from None
+    if not isinstance(content, dict):
+        raise JobError(f"{path}: not a manifest")
+    manifest = cast(dict[str, Any], content)
+    found = manifest.get("seedvr2x_manifest")
+    if found != VERSION:
+        raise JobError(f"{path}: manifest version {found}, where this seedvr2x writes {VERSION}")
+    return manifest
 
 
 @dataclass

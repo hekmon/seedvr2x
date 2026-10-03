@@ -225,7 +225,9 @@ def test_directory_output_mirrors_its_segments(tmp_path: Path) -> None:
         assert "not in the manifest's environment" not in run.stderr
     mirrored = tmp_path / "mirrored"
     names = [f"seg_{i:06d}.mkv" for i in range(3)]
-    assert sorted(p.name for p in mirrored.iterdir()) == sorted([*names, "manifest.json"])
+    assert sorted(p.name for p in mirrored.iterdir()) == sorted(
+        [*names, "checksums", "manifest.json"]
+    )
     assert [count_packets(mirrored / f"seg_{i:06d}.mkv") for i in range(3)] == [10, 2, 33]
     for index in range(45):
         name = f"frame_{index:06d}.npy"

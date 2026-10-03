@@ -176,6 +176,25 @@ def indexes(path: Path, pix_fmt: str = "gbrp16le") -> list[int]:
     return [round(int(v) / 65535 * 1000) for v in values]
 
 
+def stored(input_args: list[str], pix_fmt: str) -> list[int]:
+    """The CRC-32 of each frame of an output at the stand-in's 128x96, decoded as it is stored."""
+    from seedvr2x.media.checksums import frame_bytes
+
+    data = subprocess.run(
+        ["ffmpeg", "-v", "error", *input_args, "-f", "rawvideo", "-pix_fmt", pix_fmt, "-"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    size = frame_bytes(pix_fmt, 128, 96)
+    return [zlib.crc32(data[k : k + size]) for k in range(0, len(data), size)]
+
+
+def checksums(path: Path) -> list[int]:
+    from seedvr2x.media.checksums import read_checksums
+
+    return read_checksums(path)
+
+
 @pytest.mark.usefixtures("stand_in")
 def test_one_master(tmp_path: Path) -> None:
     (tmp_path / "cuts.txt").write_text("3\n4\n")
@@ -188,6 +207,10 @@ def test_one_master(tmp_path: Path) -> None:
     assert indexes(tmp_path / "one.mkv") == list(range(FRAMES))
     assert sorted(p.name for p in dump.iterdir()) == [f"frame_{i:06d}.npy" for i in range(FRAMES)]
     assert not (tmp_path / "manifest.json").exists()
+    # Its checksums beside it, of the planes it holds; verify checks them.
+    master = tmp_path / "one.mkv"
+    assert checksums(tmp_path / "one.mkv.crc32") == stored(["-i", str(master)], "gbrp16le")
+    assert cli.main(["verify", str(master)]) == 0
 
 
 @pytest.mark.usefixtures("stand_in")
@@ -202,10 +225,15 @@ def test_segments_merged_with_manifest(tmp_path: Path, monkeypatch: pytest.Monke
     assert status == 0
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == [
+        "checksums",
         "manifest.json",
         "seg_000000.mkv",
         "seg_000001.mkv",
     ]
+    for name in ("seg_000000", "seg_000001"):
+        segment = ["-i", str(out / f"{name}.mkv")]
+        assert checksums(out / "checksums" / f"{name}.crc32") == stored(segment, "gbrp16le")
+    assert cli.main(["verify", str(out)]) == 0
     assert indexes(out / "seg_000000.mkv") == [0, 1, 2, 3]
     assert indexes(out / "seg_000001.mkv") == [4, 5, 6, 7, 8]
     content = json.loads((out / "manifest.json").read_text())
@@ -223,7 +251,7 @@ def test_segments_merged_with_manifest(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 @pytest.mark.usefixtures("stand_in")
-def test_png_segments(tmp_path: Path) -> None:
+def test_png_segments(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     (tmp_path / "cuts.txt").write_text("4\n")
     status = upscale(
         tmp_path,
@@ -236,18 +264,33 @@ def test_png_segments(tmp_path: Path) -> None:
         pngs = sorted((tmp_path / "png" / name).iterdir())
         assert [p.name for p in pngs] == [f"{i:06d}.png" for i in range(len(frames))]
         assert [indexes(p, "rgb48le")[0] for p in pngs] == list(frames)
+        # Its checksums: of the rgb48be pixels each file holds.
+        pattern = ["-start_number", "0", "-i", str(tmp_path / "png" / name / "%06d.png")]
+        assert checksums(tmp_path / "png" / "checksums" / f"{name}.crc32") == stored(
+            pattern, "rgb48be"
+        )
+    assert cli.main(["verify", str(tmp_path / "png")]) == 0
+    # Its files listed before its frames are decoded: the first missing, or one not its own,
+    # named as such.
+    first = tmp_path / "png" / "seg_000001" / "000000.png"
+    kept = first.read_bytes()
+    first.unlink()
+    assert cli.main(["verify", str(tmp_path / "png")]) == 1
+    assert "seg_000001: 1 PNG missing, from 000000.png" in caplog.text
+    first.write_bytes(kept)
+    (first.parent / "notes.txt").write_text("mine")
+    assert cli.main(["verify", str(tmp_path / "png")]) == 1
+    assert "seg_000001: not its frames: notes.txt" in caplog.text
 
 
 @pytest.mark.usefixtures("stand_in")
 def test_yuv_segments(tmp_path: Path) -> None:
+    (tmp_path / "cuts.txt").write_text("4\n")
     status = upscale(
         tmp_path,
         source(tmp_path / "in.mkv"),
         "yuv",
-        "--min-segment",
-        "0",
-        "--format",
-        "yuv420p10le",
+        *("--cuts", str(tmp_path / "cuts.txt"), "--min-segment", "0", "--format", "yuv420p10le"),
     )
     assert status == 0
     master = tmp_path / "yuv" / "seg_000000.mkv"
@@ -271,7 +314,46 @@ def test_yuv_segments(tmp_path: Path) -> None:
     )
     # 128x96 is an SD size: BT.601, tagged smpte170m since the source is untagged (DESIGN.md,
     # Colour and shape).
-    assert probe.stdout.strip() == f"yuv420p10le,smpte170m,{FRAMES}"
+    assert probe.stdout.strip() == "yuv420p10le,smpte170m,4"
+    # Its checksums, ffmpeg's: of the yuv420p10le frames it holds.
+    for name in ("seg_000000", "seg_000001"):
+        sums = tmp_path / "yuv" / "checksums" / f"{name}.crc32"
+        assert checksums(sums) == stored(
+            ["-i", str(tmp_path / "yuv" / f"{name}.mkv")], "yuv420p10le"
+        )
+    assert cli.main(["verify", str(tmp_path / "yuv")]) == 0
+    # A frame altered, the file valid: verify names it.
+    data = bytearray(
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(master),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p10le",
+                "-",
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+    )
+    from seedvr2x.media.checksums import frame_bytes
+
+    data[2 * frame_bytes("yuv420p10le", 128, 96)] ^= 1
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p10le"),
+            *("-s", "128x96", "-i", "-", "-c:v", "ffv1", "-level", "3", str(master)),
+        ],
+        input=bytes(data),
+        check=True,
+    )
+    assert cli.main(["verify", str(tmp_path / "yuv")]) == 1
+    assert cli.main(["verify", str(master)]) == 1
 
 
 @pytest.mark.usefixtures("stand_in")
@@ -282,7 +364,8 @@ def test_directory_mirrored(tmp_path: Path) -> None:
     source(split / "a.mkv", 3)
     assert upscale(tmp_path, split, "mirror") == 0
     out = tmp_path / "mirror"
-    assert sorted(p.name for p in out.iterdir()) == ["a.mkv", "b.mkv", "manifest.json"]
+    assert sorted(p.name for p in out.iterdir()) == ["a.mkv", "b.mkv", "checksums", "manifest.json"]
+    assert sorted(p.name for p in (out / "checksums").iterdir()) == ["a.crc32", "b.crc32"]
     assert indexes(out / "a.mkv") == [0, 1, 2]  # a.mkv comes first, by name
     assert indexes(out / "b.mkv") == [3, 4]
     content = json.loads((out / "manifest.json").read_text())
@@ -406,6 +489,7 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
     assert steps.calls == UNINTERRUPTED
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == [
+        "checksums",
         "manifest.json",
         "seg_000000.mkv",
         "seg_000001.mkv",
@@ -444,7 +528,7 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
     assert indexes(tmp_path / "one.mkv") == list(range(25))
 
 
-@pytest.mark.parametrize("name", ["resume", "manifest.json", "a.partial"])
+@pytest.mark.parametrize("name", ["resume", "manifest.json", "checksums", "a.partial"])
 def test_own_names_refused(tmp_path: Path, caplog: pytest.LogCaptureFixture, name: str) -> None:
     # A mirrored PNG segment takes its file's stem: not one of seedvr2x's own names.
     split = tmp_path / "split"
@@ -506,12 +590,14 @@ def test_resumed_as_uninterrupted(
     assert steps.read == read  # every encode read its own shot's frames
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == [
+        "checksums",
         "manifest.json",
         "seg_000000.mkv",
         "seg_000001.mkv",
     ]
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(out / name) == decoded(tmp_path / "whole" / name)
+    assert contents(out / "checksums") == contents(tmp_path / "whole" / "checksums")
     content = json.loads((out / "manifest.json").read_text())
     assert all(segment["finished"] for segment in content["segments"])
     # Finished already: nothing to do, the models not even loaded.
@@ -1132,6 +1218,134 @@ def test_leftovers_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, st
     assert steps.calls == ["window 4:1", "decode 4"]
     assert not state.exists() and not list(out.rglob("*.partial"))
     assert indexes(out / "seg_000001.mkv") == list(range(4, 25))
+
+
+def altered(path: Path, frame: int) -> None:
+    """Make the stand-in's gbrp16le segment at path again whole, a pixel of `frame` altered: a
+    valid file, which ffmpeg decodes without a word, its frame not as written."""
+    from seedvr2x.media.decode import Decoder, to_float32
+    from seedvr2x.media.ffmpeg import input_args
+    from seedvr2x.media.writer import FFV1Writer, Tags
+    from seedvr2x.runtime.shot import COPY_READ
+
+    with Decoder(input_args(path), COPY_READ, 128, 96) as decoder:
+        frames = decoder.read(1000)
+    frames[frame, 0, 0, 0] ^= 1
+    with FFV1Writer(path, "gbrp16le", 128, 96, Fraction(25), Tags()) as writer:
+        writer.write(to_float32(frames))
+
+
+def test_verify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # verify decodes each finished segment and checks every frame against its checksums: a
+    # segment not finished isn't checked; a frame not as written, or checksums missing, fail it.
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    out = tmp_path / "out"
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    # A segment unfinished: the output isn't to be trusted whole yet.
+    assert cli.main(["verify", str(out)]) == 1
+    assert f"{out / 'seg_000000.mkv'}: every frame as written" in caplog.text
+    assert f"{out / 'seg_000001.mkv'}: unfinished, not checked" in caplog.text
+    assert f"{out}: of 2, 1 unfinished" in caplog.text
+    # One segment alone, its checksums in the directory's.
+    assert cli.main(["verify", str(out / "seg_000000.mkv")]) == 0
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    altered(out / "seg_000001.mkv", 2)
+    caplog.clear()
+    assert cli.main(["verify", str(out)]) == 1
+    assert f"{out / 'seg_000001.mkv'}: 1 frames not as written: 2" in caplog.text
+    assert f"{out}: of 2, 1 not as written" in caplog.text
+    (out / "checksums" / "seg_000000.crc32").unlink()
+    caplog.clear()
+    assert cli.main(["verify", str(out)]) == 1
+    assert f"{out / 'checksums' / 'seg_000000.crc32'}: missing" in caplog.text
+    assert f"{out}: of 2, 2 not as written" in caplog.text
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    altered(tmp_path / "one.mkv", 20)
+    caplog.clear()
+    assert cli.main(["verify", str(tmp_path / "one.mkv")]) == 1
+    assert "1 frames not as written: 20" in caplog.text
+    (tmp_path / "empty").mkdir()
+    assert cli.main(["verify", str(tmp_path / "empty")]) == 1
+    assert "empty: no manifest.json, so not an output directory of seedvr2x" in caplog.text
+    content = json.loads((out / "manifest.json").read_text())
+    del content["segments"]
+    (out / "manifest.json").write_text(json.dumps(content))
+    assert cli.main(["verify", str(out)]) == 1
+    assert "manifest.json: not a manifest seedvr2x wrote" in caplog.text
+
+
+def test_checksums_of_png_segments_apart(tmp_path: Path, steps: Steps) -> None:
+    # A PNG segment's checksums take its directory's name whole: A and A.mkv, mirrored from A.mkv
+    # and A.mkv.mkv, keep theirs apart.
+    split = tmp_path / "split"
+    split.mkdir()
+    source(split / "A.mkv", 2)
+    source(split / "A.mkv.mkv", 3)
+    assert upscale(tmp_path, split, "out", "--format", "png") == 0
+    sums = tmp_path / "out" / "checksums"
+    assert sorted(p.name for p in sums.iterdir()) == ["A.crc32", "A.mkv.crc32"]
+    assert [len(checksums(sums / name)) for name in ("A.crc32", "A.mkv.crc32")] == [2, 3]
+    assert cli.main(["verify", str(tmp_path / "out")]) == 0
+
+
+def test_one_file_checksums_kept_until_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # The checksums of a one-file output go only when a new file replaces it: a run to the same
+    # file stopped before keeps the old file and its checksums.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    master, sums = tmp_path / "one.mkv", tmp_path / "one.mkv.crc32"
+    before = (master.read_bytes(), sums.read_bytes())
+    steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "one.mkv", *JOB[:4])
+    assert (master.read_bytes(), sums.read_bytes()) == before
+    assert cli.main(["verify", str(master)]) == 0
+
+
+def test_checksums_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A finished segment's checksums are written before it is recorded: missing, the resume is
+    # refused, as it is for anything in checksums/ that isn't this job's. An unfinished segment's,
+    # and partial files, are discarded.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *JOB) == 0
+    steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    sums = tmp_path / "out" / "checksums"
+    assert sorted(p.name for p in sums.iterdir()) == ["seg_000000.crc32"]
+    kept = (sums / "seg_000000.crc32").read_bytes()
+    (sums / "seg_000000.crc32").unlink()
+    steps.stop = None
+    text = refused(tmp_path, source_path, caplog, *JOB)
+    assert (
+        "seg_000000.crc32: a finished segment's checksums, the manifest says, but missing" in text
+    )
+    (sums / "seg_000000.crc32").write_bytes(kept)
+    (sums / "notes.txt").write_text("mine")
+    assert f"{sums / 'notes.txt'}: not this job's" in refused(tmp_path, source_path, caplog, *JOB)
+    (sums / "notes.txt").unlink()
+    (sums / "seg_000001.crc32").mkdir()
+    assert "seg_000001.crc32: not this job's" in refused(tmp_path, source_path, caplog, *JOB)
+    (sums / "seg_000001.crc32").rmdir()
+    sums.rename(tmp_path / "elsewhere")
+    sums.symlink_to(tmp_path / "elsewhere")
+    assert f"{sums}: not this job's" in refused(tmp_path, source_path, caplog, *JOB)
+    sums.unlink()
+    (tmp_path / "elsewhere").rename(sums)
+    for name in ("seg_000001.crc32", "seg_000001.crc32.partial", "seg_000000.crc32.partial"):
+        (sums / name).write_bytes(b"left")
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert "3 leftovers discarded" in caplog.text and steps.calls == ["decode 4"]
+    assert contents(sums) == contents(tmp_path / "whole" / "checksums")
 
 
 def contents(directory: Path) -> dict[str, bytes | None]:

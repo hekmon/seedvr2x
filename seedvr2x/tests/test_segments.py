@@ -280,7 +280,9 @@ def test_joined_segments_are_the_one_file_output(tmp_path: Path) -> None:
         assert run.returncode == 0, run.stderr[-3000:]
     directory = tmp_path / "segments"
     names = [f"seg_{i:06d}.mkv" for i in range(3)]
-    assert sorted(p.name for p in directory.iterdir()) == sorted([*names, "manifest.json"])
+    assert sorted(p.name for p in directory.iterdir()) == sorted(
+        [*names, "checksums", "manifest.json"]
+    )
     content = json.loads((directory / "manifest.json").read_text())
     assert [(s["name"], s["start"], s["end"], s["finished"]) for s in content["segments"]] == [
         ("seg_000000.mkv", 0, 12, True),
@@ -290,3 +292,8 @@ def test_joined_segments_are_the_one_file_output(tmp_path: Path) -> None:
     joined = b"".join(decoded(directory / name) for name in names)
     assert joined == decoded(tmp_path / "one.mkv")
     assert np.frombuffer(joined, dtype="<u2").size == 45 * 3 * 540 * 960
+    # Every frame as the checksums written with it say (DESIGN.md, Output, Checksums).
+    for output in (directory, tmp_path / "one.mkv"):
+        verify = [sys.executable, "-m", "seedvr2x", "verify", str(output)]
+        checked = subprocess.run(verify, capture_output=True, text=True, check=False)
+        assert checked.returncode == 0, checked.stderr[-3000:]

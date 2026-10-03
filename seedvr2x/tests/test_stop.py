@@ -179,6 +179,7 @@ def resumed_as_uninterrupted(directory: Path, resumed: list[str]) -> None:
     out = directory / "out"
     assert indexes(out / "seg_000000.mkv") + indexes(out / "seg_000001.mkv") == list(range(25))
     assert sorted(p.name for p in (directory / "out").iterdir()) == [
+        "checksums",
         "manifest.json",
         "seg_000000.mkv",
         "seg_000001.mkv",

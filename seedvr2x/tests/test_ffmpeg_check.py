@@ -7,7 +7,7 @@ import pytest
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
 
-FILTERS = ("zscale", "scdet", "format", "settb", "metadata", "setparams", "idet")
+FILTERS = ("zscale", "scdet", "format", "settb", "metadata", "setparams", "split", "idet")
 
 
 def fake_build(
@@ -16,9 +16,10 @@ def fake_build(
     encoders: tuple[str, ...] = ("ffv1", "png"),
     decoders: tuple[str, ...] = ("ffv1", "h264"),
     ffprobe: bool = True,
+    muxers: tuple[str, ...] = ("matroska", "framehash"),
 ) -> None:
-    """An ffmpeg answering -filters, -encoders, -decoders and -version as a real one lays them
-    out (n9.0.2), header included; shell builtins only, PATH holding nothing else."""
+    """An ffmpeg answering -filters, -encoders, -decoders, -muxers and -version as a real one lays
+    them out (n9.0.2), header included; shell builtins only, PATH holding nothing else."""
     lists = {
         "-filters": ["Filters:", "  T.. = Timeline support", "  | = Source or sink filter"]
         + [f" .. {name:<16} V->V       A filter." for name in filters],
@@ -26,6 +27,8 @@ def fake_build(
         + [f" V....D {name:<20} A codec." for name in encoders],
         "-decoders": ["Decoders:", " V..... = Video", " ------"]
         + [f" V....D {name:<20} A codec." for name in decoders],
+        "-muxers": ["Formats:", " D. = Demuxing supported", " .E = Muxing supported", " ---"]
+        + [f"  E  {name:<16} A format." for name in muxers],
         "-version": ["ffmpeg version n0.0-fake Copyright (c) 2000-2026 the FFmpeg developers"],
     }
     cases = "".join(
@@ -90,3 +93,11 @@ def test_png_encoder_needed_only_for_png_output(build: Path) -> None:
     assert ffmpeg.check() == "n0.0-fake"
     with pytest.raises(MediaError, match="lacks the png encoder"):
         ffmpeg.check(("png",))
+
+
+def test_framehash_needed_only_for_yuv_output(build: Path) -> None:
+    # It hashes a yuv420p10le master's frames as ffmpeg converts them (writer.FFV1Writer).
+    fake_build(build, muxers=("matroska",))
+    assert ffmpeg.check() == "n0.0-fake"
+    with pytest.raises(MediaError, match="lacks the framehash muxer"):
+        ffmpeg.check((), ("framehash",))

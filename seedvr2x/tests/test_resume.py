@@ -193,6 +193,6 @@ def test_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
     assert status == 0, log[-3000:]
     assert encoded(log) == [3]
     assert progress(out)[2] == [True, True]
-    assert sorted(p.name for p in out.iterdir()) == ["manifest.json", *SEGMENTS]
+    assert sorted(p.name for p in out.iterdir()) == ["checksums", "manifest.json", *SEGMENTS]
     for name in SEGMENTS:
         assert frames(out / name) == frames(tmp_path / "whole" / name), name

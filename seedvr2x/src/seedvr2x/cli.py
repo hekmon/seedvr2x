@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import time
 from bisect import bisect_right
 from collections.abc import Sequence
@@ -39,6 +40,9 @@ logger = logging.getLogger("seedvr2x")
 
 def main(argv: list[str] | None = None) -> int:
     """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status."""
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["verify"]:
+        return verify(argv[1:])
     parser = argparse.ArgumentParser(
         prog="seedvr2x",
         description="SeedVR2 video upscaler for long runs.",
@@ -152,6 +156,142 @@ def main(argv: list[str] | None = None) -> int:
         _unlock()
 
 
+def verify(argv: list[str]) -> int:
+    """seedvr2x verify: decode a job's output and check every frame against the checksums written
+    with it (DESIGN.md, Output, Checksums): an output directory's segments, one of them, or a
+    one-file output. Exit status 1 when a frame isn't as written, checksums are missing, or a
+    segment isn't finished: the output isn't to be trusted whole yet."""
+    parser = argparse.ArgumentParser(
+        prog="seedvr2x verify",
+        description="Check every frame of a job's output against the checksums written with it.",
+    )
+    parser.add_argument(
+        "output", type=Path, help="an output directory, one of its segments, or a one-file output"
+    )
+    args = parser.parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    try:
+        return _verify(args.output)
+    except KeyboardInterrupt:
+        logger.error("stopped (Ctrl-C)")
+        return 130
+
+
+@dataclass(frozen=True)
+class _Checked:
+    """What verify checks: an output segment's file or PNG directory, or a one-file output; the
+    pixel format of the frames as it holds them; their size; its checksums, None for a segment not
+    finished."""
+
+    path: Path
+    pix_fmt: str
+    size: tuple[int, int]
+    checksums: Path | None
+    png: bool = False
+
+
+def _verify(output: Path) -> int:
+    from seedvr2x.media import ffmpeg
+    from seedvr2x.media.checksums import check_frames, read_checksums
+    from seedvr2x.media.ffmpeg import MediaError, input_args
+    from seedvr2x.runtime.job import JobError
+
+    try:
+        ffmpeg.found()
+        checked = _checked(output)
+    except (MediaError, JobError) as error:
+        logger.error("%s", error)
+        return 1
+    wrong = unfinished = 0
+    for item in checked:
+        if item.checksums is None:
+            unfinished += 1
+            logger.warning("%s: unfinished, not checked", item.path)
+            continue
+        try:
+            checksums = read_checksums(item.checksums)
+            found = _png_listing(item.path, len(checksums)) if item.png else []
+            if not found:
+                # PNG frames numbered from 0 (writer.PNGWriter), the first one required.
+                pattern = ["-start_number", "0", "-start_number_range", "1"]
+                reading = (
+                    ["-f", "image2", *pattern, "-i", str(item.path / "%06d.png")]
+                    if item.png
+                    else input_args(item.path)
+                )
+                found = check_frames(reading, item.pix_fmt, *item.size, checksums)
+        except MediaError as error:
+            found = [str(error)]
+        if found:
+            wrong += 1
+            logger.error("%s: %s", item.path, "; ".join(found))
+        else:
+            logger.info("%s: every frame as written", item.path)
+    if wrong or unfinished:
+        counts = [f"{wrong} not as written"] if wrong else []
+        counts += [f"{unfinished} unfinished"] if unfinished else []
+        logger.error("%s: of %d, %s", output, len(checked), " and ".join(counts))
+        return 1
+    logger.info("%s: %d checked, every frame as written", output, len(checked))
+    return 0
+
+
+def _checked(output: Path) -> list[_Checked]:
+    """What verify checks of output: the segments its manifest names, or the one it is, or the
+    one-file output it is."""
+    from seedvr2x.media.ffmpeg import MediaError
+    from seedvr2x.media.probe import probe
+    from seedvr2x.runtime.job import JobError
+    from seedvr2x.runtime.manifest import NAME, SUMS, checksums_file, read
+
+    directory, only = (output, None) if output.is_dir() else (output.parent, output.name)
+    if not (directory / NAME).is_file():
+        if output.is_dir():
+            raise JobError(f"{output}: no {NAME}, so not an output directory of seedvr2x")
+        stream = probe(output)
+        if stream.pix_fmt not in ("gbrp16le", "yuv420p10le"):
+            raise MediaError(f"{output}: {stream.pix_fmt}, not a master seedvr2x writes")
+        sums = output.with_name(f"{output.name}.crc32")
+        return [_Checked(output, stream.pix_fmt, (stream.width, stream.height), sums)]
+    content = read(directory / NAME)
+    try:
+        output_format = str(content["output"]["format"])
+        width, height = (int(side) for side in content["output"]["size"])
+        segments = [(str(entry["name"]), bool(entry["finished"])) for entry in content["segments"]]
+    except (KeyError, TypeError, ValueError):
+        raise JobError(f"{directory / NAME}: not a manifest seedvr2x wrote") from None
+    if only is not None:
+        segments = [segment for segment in segments if segment[0] == only]
+        if not segments:
+            raise JobError(f"{output}: not one of the segments of {directory}")
+    png = output_format == "png"
+    return [
+        _Checked(
+            directory / name,
+            "rgb48be" if png else output_format,
+            (width, height),
+            directory / SUMS / checksums_file(name, output_format) if finished else None,
+            png,
+        )
+        for name, finished in segments
+    ]
+
+
+def _png_listing(directory: Path, count: int) -> list[str]:
+    """What is wrong with a PNG segment's files, before its frames are decoded: each of its
+    `count` frames there, NNNNNN.png from 0, and nothing else."""
+    if not directory.is_dir():
+        return ["missing"]
+    names = {entry.name for entry in directory.iterdir()}
+    expected = {f"{index:06d}.png" for index in range(count)}
+    missing, foreign = sorted(expected - names), sorted(names - expected)
+    found = [f"{len(missing)} PNG missing, from {missing[0]}"] if missing else []
+    found += [f"not its frames: {', '.join(foreign[:5])}"] if foreign else []
+    return found
+
+
 def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.ffmpeg import MediaError
@@ -180,7 +320,10 @@ def _run(args: argparse.Namespace) -> int:
                 f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
                 f" a window needs at least {2 * SHARED + 1}"
             )
-        ffmpeg_version = ffmpeg.check(("png",) if args.format == "png" else ())
+        ffmpeg_version = ffmpeg.check(
+            ("png",) if args.format == "png" else (),
+            ("framehash",) if args.format == "yuv420p10le" else (),
+        )
         conversions = fingerprint()
         logger.info("ffmpeg %s, its conversions' fingerprint %s", ffmpeg_version, conversions[:16])
         if args.input.is_dir():
@@ -232,6 +375,8 @@ def _run(args: argparse.Namespace) -> int:
     import numpy as np
     import numpy.typing as npt
 
+    from seedvr2x.media.checksums import write_checksums
+    from seedvr2x.media.files import make_directories
     from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
     from seedvr2x.runtime import manifest
     from seedvr2x.runtime.model import load_models
@@ -293,7 +438,17 @@ def _run(args: argparse.Namespace) -> int:
     tags = Tags.of(stream, source.conversion.matrix_tag)
 
     def open_segment(path: Path) -> Writer:
-        return open_writer(args.format, path, out_width, out_height, stream.frame_rate, tags)
+        size = (out_width, out_height, stream.frame_rate)
+        stale = _checksums_path(directory, path, args.format)
+        return open_writer(args.format, path, *size, tags, stale=stale)
+
+    def finished(which: int, checksums: list[int]) -> None:
+        """A segment whole: its checksums written whole, then the segment recorded (DESIGN.md,
+        Output, Checksums)."""
+        path = _checksums_path(directory, paths[remaining[which]], args.format)
+        make_directories(path.parent)
+        write_checksums(path, checksums)
+        units.segment_finished(remaining[which])
 
     # The n-th frame written is the job's frame number(n): the segments left, in order.
     ends = list(accumulate(segments[index].frames for index in remaining))
@@ -305,9 +460,7 @@ def _run(args: argparse.Namespace) -> int:
     outputs = [(paths[index], segments[index].frames) for index in remaining]
     with Stop() as stop:
         try:
-            with SegmentWriter(
-                outputs, open_segment, lambda which: units.segment_finished(remaining[which])
-            ) as writer:
+            with SegmentWriter(outputs, open_segment, finished) as writer:
 
                 def write(frames: npt.NDArray[np.float32]) -> None:
                     if args.dump_frames is not None:
@@ -452,7 +605,7 @@ def _segments(
     as sptenc's split, a directory's own, mirrored, or a video file's shots, merged to
     --min-segment (DESIGN.md, Output)."""
     from seedvr2x.runtime.job import JobError, OutputSegment, merged_segments, mirrored_segments
-    from seedvr2x.runtime.manifest import NAME, STATE
+    from seedvr2x.runtime.manifest import NAME, STATE, SUMS
 
     total = parts[-1].end
     if directory is None:
@@ -466,9 +619,19 @@ def _segments(
     paths = [directory / f"{segment.name}{suffix}" for segment in segments]
     for path in paths:
         # A mirrored segment takes its file's stem, which could be one of seedvr2x's own names.
-        if path.name in (NAME, STATE) or path.name.endswith(".partial"):
+        if path.name in (NAME, STATE, SUMS) or path.name.endswith(".partial"):
             raise JobError(f"{path.name}: a name seedvr2x keeps for itself in its output")
     return segments, paths
+
+
+def _checksums_path(directory: Path | None, output: Path, output_format: str) -> Path:
+    """Where the checksums of the output at path `output` go: in the output directory's SUMS, or
+    beside the one-file output, its name and .crc32 (DESIGN.md, Output, Checksums)."""
+    from seedvr2x.runtime.manifest import SUMS, checksums_file
+
+    if directory is None:
+        return output.with_name(f"{output.name}.crc32")
+    return directory / SUMS / checksums_file(output.name, output_format)
 
 
 def _empty(directory: Path) -> bool:
@@ -605,10 +768,10 @@ def _prior(
     nothing else takes part in the pass (DESIGN.md, Pause and resume)."""
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.manifest import NAME
+    from seedvr2x.runtime.manifest import NAME, read
 
     path = directory / NAME
-    recorded = resume.read(path)
+    recorded = read(path)
     identity = _identity(args, cuts, directory, ffmpeg_version, conversions)
     asked = {
         "settings": identity.settings,
