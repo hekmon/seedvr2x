@@ -280,16 +280,23 @@ they differ and by which metrics, and how users are guided to them. What is know
     rounded to the nearest fp16, ties to even: every element of 1,128 and 250 tensors, under
     the same names. Truncation would differ on half the elements, a cast through bf16 on 87%.
     The 3B and the sharp 7B weren't checked: their masters aren't on the GPU box.
-- **The VAE stays in 16 bits.**
-  - Its weights take 0.47 GiB, so quantizing them saves nothing. Its memory is activations,
-    about 34 GiB for an untiled 1080p decode.
-  - Its work is 3D convolutions (128 to 512 channels, one attention block at the smallest
-    size). PyTorch has no fp8 or fp4 convolution (`torch._scaled_mm` multiplies matrices), and
-    comfy-kitchen's kernels are matrix multiplies too.
-  - Its decoder computes the picture itself. In bf16, 8 significant bits, it already puts
-    near-white values on 8-bit steps
-    ([numerics.md](../research/docs/numerics.md#vae-decode-precision)); fp8 keeps 4 and
-    NVFP4 2.
+- **The VAE stays in 16 bits.** Quantizing a model means one of two things, and neither suits
+  the VAE:
+  - The weights alone, stored in 8 or 4 bits and widened back for the arithmetic. The VAE's
+    take 0.47 GiB, so that saves nothing, and widening gains no time: it is why numz's fp8 DiT
+    is only 2–3% faster than fp16.
+  - The activations too, the values the model computes, so that the arithmetic itself runs in
+    8 or 4 bits: that is where the speed comes from.
+    - The VAE's work is 3D convolutions (128 to 512 channels, one attention block at the
+      smallest size). PyTorch has no fp8 or fp4 convolution (`torch._scaled_mm` multiplies
+      matrices), and comfy-kitchen's kernels are matrix multiplies too.
+    - In the decoder's last stages, the activations are the picture taking shape, so their
+      precision becomes the picture's. In bf16, 8 significant bits, near-white values already
+      sit on 8-bit steps ([numerics.md](../research/docs/numerics.md#vae-decode-precision));
+      fp8 keeps 4 significant bits, NVFP4 2. The latent itself is untouched: its rendering
+      into pixels is what would lose precision. In the encoder, the latent itself would.
+  - The VAE's memory is activations, about 34 GiB for an untiled 1080p decode: tiling is the
+    lever there.
   - The VAE is about four fifths of a 1080p run, so its speed matters most. Its levers are
     `compile_vae` (−16 to −19% of VAE time, see [Memory planner](#memory-planner)) and,
     unmeasured, the convolutions' memory layout.
