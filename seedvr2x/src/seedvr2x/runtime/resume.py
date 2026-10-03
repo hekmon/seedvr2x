@@ -91,22 +91,37 @@ def section(difference: str) -> str:
 
 def environment_change(recorded: dict[str, Any], environment: dict[str, Any]) -> dict[str, Any]:
     """The record of a resume in another environment, accepted (--accept-env-change): when, what
-    changed (the driver too, for information), and how far the job had gone, in units made in the
-    environment
-    before (a run takes them in one order: segments, then their shots, then each shot's
-    windows)."""
-    before: dict[str, Any] = recorded["environment"]
-    changed = sorted(
-        key for key in {*before, *environment} if before.get(key) != environment.get(key)
-    )
+    changed (the driver too, for information; of the packages, those changed), and how far the
+    job had gone, in units made in the environment before (a run takes them in one order:
+    segments, then their shots, then each shot's windows)."""
+    before, after = _changes(recorded["environment"], json.loads(json.dumps(environment)))
     return {
         "accepted": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "before": {key: before.get(key) for key in changed},
-        "after": {key: environment.get(key) for key in changed},
+        "before": before,
+        "after": after,
         "segments_finished": sum(bool(segment["finished"]) for segment in recorded["segments"]),
         "shots_encoded": sum(bool(shot["encoded"]) for shot in recorded["shots"]),
         "windows_done": sum(shot["windows_done"] for shot in recorded["shots"]),
     }
+
+
+def _changes(
+    before: dict[str, Any], after: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The fields of two records that differ, with their values in each; those of a record
+    within, such as the packages' versions, by its own fields."""
+    old: dict[str, Any] = {}
+    new: dict[str, Any] = {}
+    for key in sorted({*before, *after}):
+        one: Any = before.get(key)
+        other: Any = after.get(key)
+        if isinstance(one, dict) and isinstance(other, dict):
+            inner = _changes(cast(dict[str, Any], one), cast(dict[str, Any], other))
+            if inner != ({}, {}):
+                old[key], new[key] = inner
+        elif one != other:
+            old[key], new[key] = one, other
+    return old, new
 
 
 def leftovers(manifest: Manifest) -> list[Path]:

@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -375,6 +376,8 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     }
     assert content["environment"]["gpu"] == "a stand-in"
+    assert content["environment"]["python"].startswith("CPython 3.")
+    assert "torchvision" in content["environment"]["packages"]
     [entry] = content["input"]
     assert entry["sha256"] == hashlib.sha256(source_path.read_bytes()).hexdigest()
     steps.calls.clear()
@@ -552,6 +555,19 @@ def test_another_job_refused(
         text = refused(tmp_path, source_path, caplog, *other)
     assert "settings.window: 5 -> 6" in text and "environment.gpu" in text
     assert "Only its environment differs" not in text
+    # Another version of a package the run imports, or of Python.
+    from seedvr2x.runtime import environment
+
+    versions = environment.versions
+    installed = versions()["diffusers"]
+    with monkeypatch.context() as patch:
+        patch.setattr(environment, "versions", lambda: {**versions(), "diffusers": "0.0.1"})
+        text = refused(tmp_path, source_path, caplog, *JOB)
+    assert f'environment.packages.diffusers: "{installed}" -> "0.0.1"' in text
+    assert "Only its environment differs" in text
+    with monkeypatch.context() as patch:
+        patch.setattr(platform, "python_version", lambda: "3.99.0")
+        assert "environment.python" in refused(tmp_path, source_path, caplog, *JOB)
     # Other conversions: zimg upgraded, which ffmpeg's version doesn't say.
     from seedvr2x.media import fingerprint
 
@@ -751,6 +767,43 @@ def test_first_pass_compared_after_a_change(
     text = refused(tmp_path, source_path, caplog, *JOB, "--accept-env-change")
     assert "input[0].frames: 25 -> 29" in text
     assert manifest.read_bytes() == recorded
+
+
+def test_package_change_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # A package's version changed, as accepted: of the packages, the record names that one.
+    from seedvr2x.runtime import environment
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    versions = environment.versions
+    installed = versions()["diffusers"]
+    monkeypatch.setattr(environment, "versions", lambda: {**versions(), "diffusers": "0.0.1"})
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == 0
+    [change] = json.loads((tmp_path / "out" / "manifest.json").read_text())["environment_changes"]
+    assert change["before"] == {"packages": {"diffusers": installed}}
+    assert change["after"] == {"packages": {"diffusers": "0.0.1"}}
+
+
+def test_unrecorded_import_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A distribution the run imports after its versions are recorded is one a resume wouldn't
+    # see change: said, as a bug of seedvr2x's.
+    from seedvr2x.runtime import environment, model
+
+    imported = environment.imported
+
+    def load(*arguments: object) -> object:
+        monkeypatch.setattr(environment, "imported", lambda: imported() | {"imported-late"})
+        return SimpleNamespace(attention="none", device="cpu")
+
+    monkeypatch.setattr(model, "load_models", load)
+    assert upscale(tmp_path, source(tmp_path / "in.mkv"), "out") == 0
+    assert "not in the manifest's environment, a seedvr2x bug: ['imported-late']" in caplog.text
 
 
 def test_driver_recorded_not_compared(

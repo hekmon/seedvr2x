@@ -11,10 +11,10 @@ from bisect import bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import version
 from itertools import accumulate
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.writer import FORMATS
@@ -112,8 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--accept-env-change",
         action="store_true",
-        help="resume a job whose environment changed (torch, CUDA, cuDNN, GPU, attention, ffmpeg"
-        " or its conversions), recorded in its manifest: the output then differs from an"
+        help="resume a job whose environment changed (the GPU, Python, torch or another package,"
+        " ffmpeg or its conversions), recorded in its manifest: the output then differs from an"
         " uninterrupted run's",
     )
     parser.add_argument(
@@ -324,6 +324,15 @@ def _run(args: argparse.Namespace) -> int:
                 )
             logger.warning("stopped after %s, as asked; %s", stop.unit, kept)
             return 130
+    if record is not None:
+        from seedvr2x.runtime.environment import imported
+
+        # The versions recorded were derived before the models loaded: what the run has
+        # imported since must be among them, or a resume wouldn't see it change.
+        recorded = cast(dict[str, str], identity.environment["packages"])
+        unrecorded = sorted(imported() - set(recorded))
+        if unrecorded:
+            logger.warning("not in the manifest's environment, a seedvr2x bug: %s", unrecorded)
     logger.info(
         "upscaled in %.1f s; wrote %s: %d frames, %s",
         time.monotonic() - started,
@@ -503,8 +512,11 @@ def _identity(
     if not torch.cuda.is_bf16_supported():
         raise JobError("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
     device = torch.device("cuda", 0)
-    environment = _environment(device, ffmpeg_version, conversions) if directory is not None else {}
-    return _Identity(settings, device, environment)
+    if directory is None:
+        return _Identity(settings, device, {})
+    from seedvr2x.runtime import environment
+
+    return _Identity(settings, device, environment.current(device, ffmpeg_version, conversions))
 
 
 def _prior(
@@ -635,34 +647,6 @@ def _model(directory: Path, name: str) -> dict[str, object]:
     digest = sha256(path)
     logger.info("%s: SHA-256 %s, in %.1f s", name, digest, time.monotonic() - started)
     return {"name": name, "size": path.stat().st_size, "sha256": digest}
-
-
-def _environment(
-    device: "torch.device", ffmpeg_version: str, conversions: str
-) -> dict[str, object]:
-    """What the output's bits depend on besides the settings, which a resume must find again to
-    stay bit-identical (DESIGN.md, Pause and resume): the stack, the GPU, the attention backend
-    and FlashAttention's version, ffmpeg's and its conversions' fingerprint (media/fingerprint.py);
-    and the NVIDIA driver, for information only: the math kernels ship with torch."""
-    import torch
-
-    from seedvr2x.runtime.model import attention_backend, nvidia_driver
-
-    try:
-        flash_attn = version("flash_attn")
-    except PackageNotFoundError:
-        flash_attn = None
-    return {
-        "torch": torch.__version__,
-        "cuda": torch.version.cuda,
-        "cudnn": torch.backends.cudnn.version(),
-        "gpu": torch.cuda.get_device_name(device),
-        "driver": nvidia_driver(),
-        "attention": attention_backend(),
-        "flash_attn": flash_attn,
-        "ffmpeg": ffmpeg_version,
-        "conversions": conversions,
-    }
 
 
 def _positive(text: str) -> int:

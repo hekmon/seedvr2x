@@ -221,6 +221,8 @@ def test_directory_output_mirrors_its_segments(tmp_path: Path) -> None:
             cwd=tmp_path,
         )
         assert run.returncode == 0, run.stderr[-3000:]
+        # The versions recorded cover what the run imports, the models loaded too.
+        assert "not in the manifest's environment" not in run.stderr
     mirrored = tmp_path / "mirrored"
     names = [f"seg_{i:06d}.mkv" for i in range(3)]
     assert sorted(p.name for p in mirrored.iterdir()) == sorted([*names, "manifest.json"])
