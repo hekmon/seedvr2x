@@ -34,6 +34,9 @@ class Manifest:
     segments: Sequence[OutputSegment]
     files: Sequence[str]  # each segment's file (FFV1) or directory (PNG), in the output
     output: dict[str, Any]
+    # The environment changes a resume accepted (--accept-env-change), oldest first: the units
+    # made before each are the environment's before it (resume.environment_change).
+    environment_changes: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     # How far the job went.
     encoded: list[bool] = field(default_factory=list[bool])  # each shot's latent kept
     windows_done: list[int] = field(default_factory=list[int])  # each shot's windows kept
@@ -86,6 +89,7 @@ class Manifest:
             "seedvr2x_manifest": VERSION,
             "settings": self.settings,
             "environment": self.environment,
+            "environment_changes": self.environment_changes,
             "input": self._inputs,
             "output": self.output,
             "shots": [
@@ -132,6 +136,10 @@ def _input(part: Part) -> dict[str, Any]:
         "size": [part.source.stream.width, part.source.stream.height],
         "sample_aspect": str(part.source.sample_aspect),
         "read_as": part.source.conversion.describe(),
+        # The format decoded, and the tags the output copies (writer.Tags).
+        "pix_fmt": part.source.stream.pix_fmt,
+        "primaries": part.source.stream.color_primaries,
+        "transfer": part.source.stream.color_transfer,
     }
 
 

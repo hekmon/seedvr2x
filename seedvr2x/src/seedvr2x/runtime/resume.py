@@ -1,10 +1,12 @@
 """A job resumed from its output directory (DESIGN.md, Pause and resume), the manifest there being
 the truth: the job asked must be the one recorded, its settings, models, environment, input,
-output and layout alike; the directory must hold what the manifest says, and nothing else of
+output and layout alike, but for an environment change the user accepts (--accept-env-change),
+which the manifest records; the directory must hold what the manifest says, and nothing else of
 anyone's; what a stop left that the manifest doesn't name is discarded."""
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +23,9 @@ UNCOMPARED = {
     "segments": ("finished", "bytes"),
     "environment": ("driver",),
 }
+
+# The manifest's record of the environment changes a resume accepted (Manifest.content).
+CHANGES = "environment_changes"
 
 # The names DiskUnits gives a shot's files.
 UNIT_FILE = re.compile(r"latent\.pt|window_\d{4}\.pt")
@@ -52,11 +57,38 @@ def differences(recorded: dict[str, Any], asked: dict[str, Any]) -> list[str]:
 
 
 def adopt(manifest: Manifest, recorded: dict[str, Any]) -> None:
-    """Take how far the recorded job went into manifest, the same job (differences: none)."""
+    """Take how far the recorded job went into manifest, the same job (differences: none, but
+    the environment's when accepted), and the environment changes accepted before."""
     manifest.encoded = [shot["encoded"] for shot in recorded["shots"]]
     manifest.windows_done = [shot["windows_done"] for shot in recorded["shots"]]
     manifest.finished = [segment["finished"] for segment in recorded["segments"]]
     manifest.sizes = [segment["bytes"] for segment in recorded["segments"]]
+    manifest.environment_changes = list(recorded.get(CHANGES, []))
+
+
+def section(difference: str) -> str:
+    """The manifest's field a difference is in: environment, for `environment.gpu: ...`."""
+    return re.split(r"[.\[:]", difference, maxsplit=1)[0]
+
+
+def environment_change(recorded: dict[str, Any], environment: dict[str, Any]) -> dict[str, Any]:
+    """The record of a resume in another environment, accepted (--accept-env-change): when, what
+    changed (the driver too, for information), and how far the job had gone, in units made in the
+    environment
+    before (a run takes them in one order: segments, then their shots, then each shot's
+    windows)."""
+    before: dict[str, Any] = recorded["environment"]
+    changed = sorted(
+        key for key in {*before, *environment} if before.get(key) != environment.get(key)
+    )
+    return {
+        "accepted": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "before": {key: before.get(key) for key in changed},
+        "after": {key: environment.get(key) for key in changed},
+        "segments_finished": sum(bool(segment["finished"]) for segment in recorded["segments"]),
+        "shots_encoded": sum(bool(shot["encoded"]) for shot in recorded["shots"]),
+        "windows_done": sum(shot["windows_done"] for shot in recorded["shots"]),
+    }
 
 
 def leftovers(manifest: Manifest) -> list[Path]:
@@ -140,8 +172,10 @@ def _kept(manifest: Manifest, index: int) -> set[str]:
 
 
 def _job(content: dict[str, Any]) -> dict[str, Any]:
-    """content without the fields a resume doesn't compare (UNCOMPARED)."""
+    """content without the fields a resume doesn't compare (UNCOMPARED), nor the environment
+    changes accepted, which a resume carries on."""
     job = dict(content)
+    job.pop(CHANGES, None)
     for key, fields in UNCOMPARED.items():
         value: Any = content.get(key)
         if isinstance(value, dict):

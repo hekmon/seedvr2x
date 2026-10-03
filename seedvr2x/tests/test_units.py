@@ -36,7 +36,14 @@ def job(tmp_path: Path, shots: list[Shot], segments: list[OutputSegment]) -> Man
     source = SimpleNamespace(
         path=tmp_path / "in.mkv",
         frames=shots[-1].end,
-        stream=SimpleNamespace(frame_rate=Fraction(25), width=64, height=48),
+        stream=SimpleNamespace(
+            frame_rate=Fraction(25),
+            width=64,
+            height=48,
+            pix_fmt="yuv420p",
+            color_primaries="",
+            color_transfer="",
+        ),
         sample_aspect=Fraction(1),
         conversion=SimpleNamespace(describe=lambda: "RGB"),
     )

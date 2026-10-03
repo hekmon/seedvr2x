@@ -12,6 +12,8 @@ import json
 import os
 import subprocess
 from collections.abc import Callable, Iterator
+from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -486,6 +488,14 @@ def test_leftovers_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, st
     assert indexes(out / "seg_000001.mkv") == list(range(4, 25))
 
 
+def contents(directory: Path) -> dict[str, bytes | None]:
+    """Every path under directory, with a file's bytes."""
+    return {
+        str(path.relative_to(directory)): path.read_bytes() if path.is_file() else None
+        for path in sorted(directory.rglob("*"))
+    }
+
+
 def refused(
     tmp_path: Path, source_path: Path, caplog: pytest.LogCaptureFixture, *options: str
 ) -> str:
@@ -501,11 +511,14 @@ def test_another_job_refused(
     steps.stop = "window 4:1"
     stopped(tmp_path, source_path, "out", *JOB)
     out = tmp_path / "out"
-    kept = sorted(out.rglob("*"))
-    # Other settings, the layout following.
+    kept = contents(out)
+    # Other settings, the layout following, even with an environment change accepted.
     text = refused(tmp_path, source_path, caplog, *JOB[:3], "6", *JOB[4:])
     assert "another job than the one asked" in text
     assert "settings.window: 5 -> 6" in text and "shots[2].windows" in text
+    assert "--accept-env-change" not in text
+    other = (*JOB[:3], "6", *JOB[4:], "--accept-env-change")
+    assert "settings.window: 5 -> 6" in refused(tmp_path, source_path, caplog, *other)
     # Another model, by its hash.
     (tmp_path / "w.safetensors").write_bytes(b"other")
     weights = tmp_path / "w.safetensors"
@@ -523,11 +536,18 @@ def test_another_job_refused(
     with monkeypatch.context() as patch:
         patch.setattr(manifest, "code_sha256", lambda: "0" * 64)
         assert "settings.code" in refused(tmp_path, source_path, caplog, *JOB)
-    # Another GPU.
+    # Another GPU, which the user may accept.
     with monkeypatch.context() as patch:
         patch.setattr(torch.cuda, "get_device_name", lambda device: "another")
         text = refused(tmp_path, source_path, caplog, *JOB)
     assert 'environment.gpu: "a stand-in" -> "another"' in text
+    assert "Only its environment differs: --accept-env-change resumes it anyway" in text
+    # And other settings: refused, even with the change accepted.
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+        text = refused(tmp_path, source_path, caplog, *other)
+    assert "settings.window: 5 -> 6" in text and "environment.gpu" in text
+    assert "Only its environment differs" not in text
     # Other conversions: zimg upgraded, which ffmpeg's version doesn't say.
     from seedvr2x.media import fingerprint
 
@@ -552,16 +572,90 @@ def test_another_job_refused(
     assert "kept, the manifest says, but missing" in refused(tmp_path, source_path, caplog, *JOB)
     (tmp_path / "window.pt").rename(window)
     # Another manifest version.
-    content = json.loads((out / "manifest.json").read_text())
-    (out / "manifest.json").write_text(json.dumps({**content, "seedvr2x_manifest": 1}))
+    written = (out / "manifest.json").read_bytes()
+    (out / "manifest.json").write_text(json.dumps({**json.loads(written), "seedvr2x_manifest": 1}))
     assert "manifest version 1" in refused(tmp_path, source_path, caplog, *JOB)
-    (out / "manifest.json").write_text(json.dumps(content))
-    assert sorted(out.rglob("*")) == kept  # nothing touched
+    (out / "manifest.json").write_bytes(written)
+    assert contents(out) == kept  # nothing touched
     # The job asked, at last.
     steps.calls.clear()
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
+
+
+def test_environment_change_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Resumed on another GPU, as the user accepts: the manifest records the change, and takes the
+    # new environment, from the next unit made on.
+    from seedvr2x.runtime import model
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    manifest = tmp_path / "out" / "manifest.json"
+    recorded = manifest.read_bytes()
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+    monkeypatch.setattr(model, "nvidia_driver", lambda: "another driver")
+    # Stopped again before any unit: the record as it was.
+    stopped(tmp_path, source_path, "out", *JOB, "--accept-env-change")
+    assert manifest.read_bytes() == recorded
+    # Stopped after one.
+    steps.calls.clear()
+    steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "out", *JOB, "--accept-env-change")
+    assert steps.calls == ["window 4:1", "decode 4"]
+    content = json.loads(manifest.read_text())
+    assert content["environment"]["gpu"] == "another"
+    [change] = content["environment_changes"]
+    assert datetime.fromisoformat(change.pop("accepted")).tzinfo is not None
+    assert change == {
+        # The driver too, for information.
+        "before": {"driver": "a stand-in", "gpu": "a stand-in"},
+        "after": {"driver": "another driver", "gpu": "another"},
+        # Stopped in the last shot's second window: the first segment finished, the three
+        # shots encoded, a window each kept.
+        "segments_finished": 1,
+        "shots_encoded": 3,
+        "windows_done": 3,
+    }
+    # A third GPU: a second change, after the first.
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "a third")
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == 0
+    assert steps.calls == ["decode 4"]
+    assert indexes(tmp_path / "out" / "seg_000001.mkv") == list(range(4, 25))
+    first, second = json.loads(manifest.read_text())["environment_changes"]
+    assert first["after"]["gpu"] == "another"
+    assert (second["before"], second["after"]) == ({"gpu": "another"}, {"gpu": "a third"})
+    assert second["windows_done"] == 4
+    # The job is the third GPU's now.
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "a stand-in")
+    assert "environment.gpu" in refused(tmp_path, source_path, caplog, *JOB)
+
+
+def test_probe_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # What the source declares is the job's too: a probe saying otherwise, as another ffmpeg
+    # might, once its change is accepted, is another job.
+    from seedvr2x.media import source as examined
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    manifest = tmp_path / "out" / "manifest.json"
+    recorded = manifest.read_bytes()
+    assert json.loads(recorded)["input"][0]["primaries"] == ""  # untagged
+    probe = examined.probe
+    monkeypatch.setattr(
+        examined, "probe", lambda path: replace(probe(path), color_primaries="bt709")
+    )
+    assert 'input[0].primaries: "" -> "bt709"' in refused(tmp_path, source_path, caplog, *JOB)
+    assert manifest.read_bytes() == recorded
 
 
 def test_driver_recorded_not_compared(

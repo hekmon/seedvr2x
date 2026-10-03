@@ -142,7 +142,14 @@ def test_manifest(tmp_path: Path) -> None:
         SimpleNamespace(
             path=tmp_path / name,
             frames=frames,
-            stream=SimpleNamespace(frame_rate=Fraction(25), width=64, height=48),
+            stream=SimpleNamespace(
+                frame_rate=Fraction(25),
+                width=64,
+                height=48,
+                pix_fmt="yuv420p",
+                color_primaries="",
+                color_transfer="",
+            ),
             sample_aspect=Fraction(1),
             conversion=SimpleNamespace(describe=lambda: "YUV bt709, limited range, chroma left"),
         )

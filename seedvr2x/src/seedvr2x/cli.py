@@ -108,6 +108,13 @@ def main(argv: list[str] | None = None) -> int:
         help="cap on the DiT windows, in latents of 4 frames (default: the shot in one window)",
     )
     parser.add_argument(
+        "--accept-env-change",
+        action="store_true",
+        help="resume a job whose environment changed (torch, CUDA, cuDNN, GPU, attention, ffmpeg"
+        " or its conversions), recorded in its manifest: the output then differs from an"
+        " uninterrupted run's",
+    )
+    parser.add_argument(
         "--dump-frames",
         type=Path,
         metavar="DIR",
@@ -242,7 +249,7 @@ def _run(args: argparse.Namespace) -> int:
         if resumed:
             # The job recorded there, checked and taken up before the models load.
             try:
-                _resume(record)
+                _resume(record, args.accept_env_change)
             except JobError as error:
                 logger.error("%s", error)
                 return 1
@@ -428,22 +435,39 @@ def _unlock() -> None:
         os.close(_LOCKS.pop())
 
 
-def _resume(record: "Manifest") -> None:
-    """Take up the job recorded beside record, refused (JobError) unless it is the one asked, its
-    directory as the manifest says; then discard what a stop left that the manifest doesn't
-    name (resume.leftovers)."""
+def _resume(record: "Manifest", accept_env_change: bool) -> None:
+    """Take up the job recorded beside record, refused (JobError) unless it is the one asked, but
+    for an environment change accepted, recorded then; its directory must be as the manifest
+    says. Then discard what a stop left that the manifest doesn't name (resume.leftovers). The
+    manifest is written by the next unit made: a resume stopped before one keeps the record as
+    it was."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.job import JobError
 
     recorded = resume.read(record.path)
     found = resume.differences(recorded, record.content())
-    if found:
+    changed = [line for line in found if resume.section(line) == "environment"]
+    if len(changed) < len(found) or (changed and not accept_env_change):
         raise JobError(
             f"{record.path}: another job than the one asked, which differs in:\n  "
             + "\n  ".join(found[:20])
             + (f"\n  and {len(found) - 20} more" if len(found) > 20 else "")
+            + (
+                "\nOnly its environment differs: --accept-env-change resumes it anyway, though"
+                " its output then differs from an uninterrupted run's"
+                if len(changed) == len(found)
+                else ""
+            )
         )
     resume.adopt(record, recorded)
+    if changed:
+        record.environment_changes.append(resume.environment_change(recorded, record.environment))
+        logger.warning(
+            "%s: resumed in another environment, as accepted, which its manifest records with"
+            " the next unit made: %s",
+            record.path.parent,
+            "; ".join(changed),
+        )
     discarded = resume.leftovers(record)
     for path in discarded:
         logger.debug("discarded %s", path)
