@@ -26,6 +26,21 @@ from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, SHARED, output_size
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
 
 
+class NonFinite(RuntimeError):
+    """NaN or inf in what a unit made: the unit isn't recorded, and the run stops there, naming it,
+    in either colour correction mode (DESIGN.md, Pause and resume). A resume makes the unit again
+    once the cause is fixed."""
+
+
+def finite(tensor: Tensor, what: str) -> None:
+    """Raise NonFinite, naming `what`, unless every value of tensor is finite. The device is
+    polled first (model.synchronize), so that a Ctrl-C is answered while it works."""
+    model.synchronize(tensor.device)
+    if not bool(torch.isfinite(tensor).all()):
+        bad = int((~torch.isfinite(tensor)).sum())
+        raise NonFinite(f"{what}: {bad} of its {tensor.numel()} values NaN or inf")
+
+
 def window_layout(latents: int, window: int, shared: int = SHARED) -> list[tuple[int, int]]:
     """[start, end) of the windows over a shot of `latents` latents: as few windows as `window`
     allows, their lengths balanced (differing by at most 1, the longer first), consecutive ones
@@ -211,9 +226,12 @@ def decode_shot(
     count: int,
     target: tuple[int, int],
     write: Callable[[npt.NDArray[np.float32]], None],
+    name: str = "the shot",
+    first: int = 0,
 ) -> None:
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in one stream,
-    and write its frames as they come (upscale_shot)."""
+    and write its frames as they come (upscale_shot). Each slice decoded is checked for NaN or
+    inf first (finite), its frames named for the job's, the shot's first being `first`."""
     out_height, out_width = output_size(target)
     # Decode (generation_phases.py:900-958) and post-process (:1340-1348), slice by slice:
     # (C, t, H, W) to (t, H, W, C) without the padding, then [-1, 1] to [0, 1] in place.
@@ -222,6 +240,8 @@ def decode_shot(
         chunk = decoded.permute(1, 2, 3, 0)[: count - written, :out_height, :out_width]
         if chunk.shape[0] == 0:
             continue
+        last = first + written + chunk.shape[0] - 1
+        finite(chunk, f"{name}'s decode, frames {first + written} to {last}")
         chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
         model.synchronize(models.device)
         write(chunk.to("cpu", torch.float32).numpy())

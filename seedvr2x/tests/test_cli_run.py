@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import subprocess
@@ -19,6 +20,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -28,8 +30,7 @@ import torch
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.runtime.job import output_size
-from seedvr2x.runtime.shot import padded_length
+from seedvr2x.runtime.shot import decode_shot, padded_length
 
 
 def _usable() -> bool:
@@ -54,10 +55,11 @@ def stand_in_encode(
     seed: int,
 ) -> torch.Tensor:
     """A latent (T', 1, 1, 16) in channel-major memory, as the VAE's, saying the shot's first frame
-    (channel 0) and frame count (channel 1)."""
+    (channel 0), its frame count (1) and the target's height and width (2, 3)."""
     assert read(count).shape[0] == count
     latent = torch.zeros(16, (padded_length(count) - 1) // 4 + 1, 1, 1)
     latent[0], latent[1] = seed - SEED, count
+    latent[2], latent[3] = target
     return latent.permute(1, 2, 3, 0)
 
 
@@ -68,41 +70,56 @@ def stand_in_windows(
         yield latent[s:e] + 0
 
 
-def stand_in_decode(
-    models: object,
-    merged: torch.Tensor,
-    count: int,
-    target: tuple[int, int],
-    write: Callable[[npt.NDArray[np.float32]], None],
-) -> None:
-    height, width = output_size(target)
-    first, frames = int(merged[0, 0, 0, 0]), int(merged[0, 0, 0, 1])
+def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[torch.Tensor]:
+    """The VAE's decode of a stand-in latent (stand_in_encode), in its slices, the first two
+    latents then one at a time: frames (3, t, H, W) at the target's size padded to multiples of
+    16, as the encoder's input is (model.input_transform), in [-1, 1]: each saying its index in
+    the job, divided by 1000, NaN in the padding, which the decode crops; NaN throughout for the
+    frames of a latent whose channel 4 is NaN."""
+    first, frames = int(latent[0, 0, 0, 0]), int(latent[0, 0, 0, 1])
+    height, width = int(latent[0, 0, 0, 2]), int(latent[0, 0, 0, 3])
+    padded = (-(-height // 16) * 16, -(-width // 16) * 16)
     # Every latent says so: the shot's own windows, none of another's.
-    assert (merged[..., 0] == first).all() and (merged[..., 1] == frames).all()
-    assert frames == count
-    for index in range(first, first + count):
-        # As the decode gives them: a view of (C, t, H, W) planes.
-        planes = np.full((3, 1, height, width), index / 1000, dtype=np.float32)
-        write(planes.transpose(1, 2, 3, 0))
+    assert (latent[..., 0] == first).all() and (latent[..., 1] == frames).all()
+    assert latent.shape[0] == (padded_length(frames) - 1) // 4 + 1
+    latents = latent.shape[0]
+    groups = [range(latents)] if latents <= 2 else [range(2), *([k] for k in range(2, latents))]
+    for group in groups:
+        planes = []
+        for k in group:
+            for frame in [0] if k == 0 else range(4 * k - 3, 4 * k + 1):
+                value = math.nan if latent[k, 0, 0, 4].isnan() else (first + frame) / 500 - 1
+                plane = torch.full((3, 1, *padded), math.nan)
+                plane[:, :, :height, :width] = value
+                planes.append(plane)
+        yield torch.cat(planes, dim=1)
+
+
+def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
+    """Replace the model by the stand-in, through patch: monkeypatch.setattr, or setattr in a
+    process of its own (test_stop.py). The decode around the VAE's is seedvr2x's own."""
+    from seedvr2x.runtime import model, run
+
+    patch(torch.cuda, "is_available", lambda: True)
+    patch(torch.cuda, "is_bf16_supported", lambda: True)
+    patch(torch.cuda, "get_device_name", lambda device: "a stand-in")
+    patch(torch.backends.cudnn, "version", lambda: None)
+    patch(torch.cuda, "reset_peak_memory_stats", lambda device: None)
+    patch(torch.cuda, "max_memory_allocated", lambda device: 0)
+    patch(
+        model,
+        "load_models",
+        lambda *a: SimpleNamespace(attention="none", device=torch.device("cpu")),
+    )
+    patch(model, "nvidia_driver", lambda: "a stand-in")
+    patch(model, "decode_stream", stand_in_decode_stream)
+    patch(run, "encode_shot", stand_in_encode)
+    patch(run, "sample_windows", stand_in_windows)
 
 
 @pytest.fixture
 def stand_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    from seedvr2x.runtime import model, run
-
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
-    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "a stand-in")
-    monkeypatch.setattr(torch.backends.cudnn, "version", lambda: None)
-    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda device: None)
-    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 0)
-    monkeypatch.setattr(
-        model, "load_models", lambda *a: SimpleNamespace(attention="none", device="cpu")
-    )
-    monkeypatch.setattr(model, "nvidia_driver", lambda: "a stand-in")
-    monkeypatch.setattr(run, "encode_shot", stand_in_encode)
-    monkeypatch.setattr(run, "sample_windows", stand_in_windows)
-    monkeypatch.setattr(run, "decode_shot", stand_in_decode)
+    stand_in_model(monkeypatch.setattr)
 
 
 def source(path: Path, frames: int = FRAMES, pattern: str = "testsrc2") -> Path:
@@ -262,12 +279,14 @@ class Steps:
     """The stand-in's steps, each call recorded: "encode S", "window S:K", "decode S", S the
     shot's first frame; each encode's frames, summed up, by S. The call named `stop` raises
     KeyboardInterrupt from inside, after an encode's reads, before a window's output, after a
-    decode's first frame, as a stop at once would."""
+    decode's first frame, as a stop at once would. The call named `poison` makes NaN: in an
+    encode's latent, a window's output, or the frames of a decode's last latent."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.read: dict[int, str] = {}
         self.stop: str | None = None
+        self.poison: str | None = None
 
     def _call(self, name: str) -> None:
         self.calls.append(name)
@@ -285,7 +304,10 @@ class Steps:
         frames = read(count)
         self.read[seed - SEED] = hashlib.md5(frames.tobytes()).hexdigest()
         self._call(f"encode {seed - SEED}")
-        return stand_in_encode(models, lambda n: frames[:n], count, target, seed)
+        latent = stand_in_encode(models, lambda n: frames[:n], count, target, seed)
+        if self.poison == f"encode {seed - SEED}":
+            latent[-1, 0, 0, 5] = math.nan
+        return latent
 
     def windows(
         self,
@@ -296,7 +318,10 @@ class Steps:
         start: int = 0,
     ) -> Iterator[torch.Tensor]:
         for number, sampled in enumerate(stand_in_windows(models, latent, layout, seed, start)):
-            self._call(f"window {seed - SEED}:{start + number}")
+            name = f"window {seed - SEED}:{start + number}"
+            self._call(name)
+            if name == self.poison:
+                sampled[-1, 0, 0, 5] = math.nan
             yield sampled
 
     def decode(
@@ -306,16 +331,26 @@ class Steps:
         count: int,
         target: tuple[int, int],
         write: Callable[[npt.NDArray[np.float32]], None],
+        *names: Any,
     ) -> None:
+        """seedvr2x's decode of the shot, the VAE's a stand-in's (stand_in_decode_stream); the
+        last latent's frames NaN when it is poisoned."""
         name = f"decode {int(merged[0, 0, 0, 0])}"
         self.calls.append(name)
+        if name == self.poison:
+            merged = merged.clone()
+            merged[-1, 0, 0, 4] = math.nan
 
         def write_then_stop(frames: npt.NDArray[np.float32]) -> None:
-            write(frames)
+            # The first frame apart: a stop comes after the decode's first frame, the rest of a
+            # slice unwritten.
+            write(frames[:1])
             if name == self.stop:
                 raise KeyboardInterrupt
+            if len(frames) > 1:
+                write(frames[1:])
 
-        stand_in_decode(models, merged, count, target, write_then_stop)
+        decode_shot(models, merged, count, target, write_then_stop, *names)  # pyright: ignore[reportArgumentType]
 
 
 @pytest.fixture
@@ -462,6 +497,75 @@ def test_resumed_as_uninterrupted(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == []
     assert not (out / "resume").exists()
+
+
+@pytest.mark.parametrize(
+    ("poison", "said", "kept", "files", "resumed"),
+    [
+        # In the encode's latent: the encode made again.
+        ("encode 4", "shot 3/3's encode", (False, 0, False), None, UNINTERRUPTED[6:]),
+        # In a window's output: the windows before it kept.
+        (
+            "window 4:1",
+            "shot 3/3's window 2/2",
+            (True, 1, False),
+            ["latent.pt", "window_0000.pt"],
+            UNINTERRUPTED[8:],
+        ),
+        # In a slice of a decode: its segment unfinished, decoded again whole.
+        (
+            "decode 4",
+            "shot 3/3's decode, frames 21 to 24",
+            (True, 2, False),
+            ["window_0000.pt", "window_0001.pt"],
+            UNINTERRUPTED[9:],
+        ),
+    ],
+)
+def test_non_finite_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    poison: str,
+    said: str,
+    kept: tuple[bool, int, bool],
+    files: list[str] | None,
+    resumed: list[str],
+) -> None:
+    # NaN or inf in what a unit made stops the run there, naming the unit, which isn't recorded:
+    # a resume makes it again, as an uninterrupted run does.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *JOB) == 0
+    steps.poison = poison
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert f"{said}: " in caplog.text
+    assert "NaN or inf, so not recorded; stopped: 1 of 2 segments finished" in caplog.text
+    out = tmp_path / "out"
+    content = json.loads((out / "manifest.json").read_text())
+    shot = content["shots"][2]
+    assert (shot["encoded"], shot["windows_done"], content["segments"][1]["finished"]) == kept
+    shot_directory = out / "resume" / "shot_000004"
+    found = sorted(p.name for p in shot_directory.iterdir()) if shot_directory.exists() else None
+    assert found == files
+    assert not (out / "seg_000001.mkv").exists()
+    steps.calls.clear()
+    steps.poison = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == resumed
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(out / name) == decoded(tmp_path / "whole" / name)
+
+
+def test_non_finite_one_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # One file keeps nothing: stopped, the master's partial file removed.
+    source_path = job(tmp_path, monkeypatch)
+    steps.poison = "window 3:0"
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 1
+    assert "shot 2/3's window 1/1: " in caplog.text and "nothing kept" in caplog.text
+    assert not [path for path in tmp_path.iterdir() if path.name.startswith("one")]
 
 
 def test_leftovers_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
@@ -805,7 +909,7 @@ def test_unrecorded_import_said(
         monkeypatch.setattr(environment, "_declared", lambda: declared | {"imported-late"})
         for module in late:
             monkeypatch.setitem(sys.modules, module, ModuleType(module))
-        return SimpleNamespace(attention="none", device="cpu")
+        return SimpleNamespace(attention="none", device=torch.device("cpu"))
 
     monkeypatch.setattr(model, "load_models", load)
     assert upscale(tmp_path, source(tmp_path / "in.mkv"), "out") == 0

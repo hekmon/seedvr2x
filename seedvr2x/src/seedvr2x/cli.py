@@ -227,7 +227,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime import manifest
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.run import run_job
-    from seedvr2x.runtime.shot import shot_layout
+    from seedvr2x.runtime.shot import NonFinite, shot_layout
     from seedvr2x.runtime.units import DiskUnits, Units
 
     units, record = Units(), None
@@ -314,15 +314,13 @@ def _run(args: argparse.Namespace) -> int:
         except MediaError as error:
             logger.error("%s", error)
             return 1
+        except NonFinite as error:
+            logger.error("%s, so not recorded; stopped: %s", error, _kept(record, len(segments)))
+            return 1
         except Stopped:
-            if record is None:
-                kept = "nothing kept: one file can't resume until assembly (milestone 6)"
-            else:
-                kept = (
-                    f"{sum(record.finished)} of {len(segments)} segments finished, and the"
-                    " units of the next ones kept: the same command resumes"
-                )
-            logger.warning("stopped after %s, as asked; %s", stop.unit, kept)
+            logger.warning(
+                "stopped after %s, as asked; %s", stop.unit, _kept(record, len(segments))
+            )
             return 130
     if record is not None:
         from seedvr2x.runtime.environment import imported
@@ -342,6 +340,16 @@ def _run(args: argparse.Namespace) -> int:
         args.format,
     )
     return 0
+
+
+def _kept(record: "Manifest | None", segments: int) -> str:
+    """What a run stopped before its end keeps, of a job of `segments` output segments."""
+    if record is None:
+        return "nothing kept: one file can't resume until assembly (milestone 6)"
+    return (
+        f"{sum(record.finished)} of {segments} segments finished, and the units of the next ones"
+        " kept: the same command resumes"
+    )
 
 
 def _output(args: argparse.Namespace) -> Path | None:

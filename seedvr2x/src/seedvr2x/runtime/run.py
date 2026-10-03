@@ -19,6 +19,7 @@ from seedvr2x.runtime.model import Models
 from seedvr2x.runtime.shot import (
     decode_shot,
     encode_shot,
+    finite,
     merge_windows,
     sample_windows,
     shot_layout,
@@ -110,6 +111,7 @@ def _sample(
         logger.debug("%s: encoding", name)
         started = _started(models)
         latent = encode_shot(models, inputs.reader(shot), shot.frames, target, shot.seed(seed))
+        finite(latent, f"{name}'s encode")
         units.save_latent(index, latent)
         logger.info(
             "%s, frames %d to %d (%d), seed %d: encoded in %s",
@@ -127,7 +129,9 @@ def _sample(
         _begin(stop, f"{name}'s window {number + 1}/{len(layout)}")
         logger.debug("%s: window %d/%d", name, number + 1, len(layout))
         started = _started(models)
-        units.save_window(index, number, next(sampled))
+        output = next(sampled)
+        finite(output, f"{name}'s window {number + 1}/{len(layout)}")
+        units.save_window(index, number, output)
         start, end = layout[number]
         logger.info(
             "%s: window %d/%d, latents %d to %d, in %s",
@@ -157,7 +161,7 @@ def _decode(
     logger.debug("%s: decoding", name)
     started = _started(models)
     merged = merge_windows(units.take_windows(index), shot_layout(shot.frames, window))
-    decode_shot(models, merged, shot.frames, target, write)
+    decode_shot(models, merged, shot.frames, target, write, name, shot.start)
     logger.info(
         "%s: decoded in %s; RAM %.2f GiB, peak %.2f GiB",
         name,

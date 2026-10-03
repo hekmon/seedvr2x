@@ -27,12 +27,10 @@ TESTS = Path(__file__).resolve().parent
 # runs. The steps called are said last.
 DRIVER = r"""
 import sys, time
-from types import SimpleNamespace
-import torch
 sys.path.insert(0, sys.argv[1])
 import test_cli_run as t
 from seedvr2x import cli
-from seedvr2x.runtime import model, run
+from seedvr2x.runtime import run
 
 slow = sys.argv[2]
 
@@ -46,7 +44,7 @@ class Slow(t.Steps):
         super()._call(name)
         inside(name)
 
-    def decode(self, models, merged, count, target, write):
+    def decode(self, models, merged, count, target, write, *names):
         name = f"decode {int(merged[0, 0, 0, 0])}"
         written = []
         def first_then_inside(frames):
@@ -54,15 +52,9 @@ class Slow(t.Steps):
             written.append(len(frames))
             if len(written) == 1:
                 inside(name)
-        super().decode(models, merged, count, target, first_then_inside)
+        super().decode(models, merged, count, target, first_then_inside, *names)
 
-torch.cuda.is_available = lambda: True
-torch.cuda.is_bf16_supported = lambda: True
-torch.cuda.get_device_name = lambda device: "a stand-in"
-torch.backends.cudnn.version = lambda: None
-torch.cuda.reset_peak_memory_stats = lambda device: None
-torch.cuda.max_memory_allocated = lambda device: 0
-model.load_models = lambda *a: SimpleNamespace(attention="none", device="cpu")
+t.stand_in_model(setattr)
 steps = Slow()
 run.encode_shot, run.sample_windows, run.decode_shot = steps.encode, steps.windows, steps.decode
 status = cli.main(sys.argv[3:])
