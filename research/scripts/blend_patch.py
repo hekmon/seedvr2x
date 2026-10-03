@@ -44,7 +44,17 @@ causal pass, as a single batch. Latent j > 0 covers frames 4j-3..4j, latent 0 fr
 W = 6 is the DiT load of a 21-frame batch and M = 1 shares 4 frames. Every window gets the same
 noise by position (the CLI seeds each batch alike), and windows after the first start with a
 4-frame latent where the DiT always sees a 1-frame latent 0 in a normal batch. W:0 gives hard
-DiT-window boundaries with a continuous VAE (the control).
+DiT-window boundaries with a continuous VAE (the control). The windows start at 0, W-M, 2(W-M)...
+and the last one ends at the clip's last latent (it may be shorter).
+
+Explicit layout (STITCH_WINDOWS, instead of STITCH_LATENT's regular grid): a comma list of latent
+ranges START-END, [START, END), e.g. "0-5,3-9,7-13,11-17,15-21" (21 latents = 81 frames, the
+window 3-9 centred on latents 5|6) or "0-6,6-12,10-16,14-21" (a hard DiT boundary at latent 6,
+2 shared latents elsewhere). Windows may differ in length and in shared count, 0 included: the
+first starts at 0, the last ends at the clip's latent count, and each starts after the previous
+one's start, at or before its end, and ends after it (no gap, no window inside another); the run
+stops with an error otherwise. Each shared zone is cross-faded with STITCH_CURVE over its own
+length. Set, it replaces STITCH_LATENT; unset, STITCH_LATENT's behaviour is unchanged.
 
 Usage (cwd = the SeedVR2 checkout, its venv's python):
   python blend_patch.py inference_cli.py <CLI args> --temporal_overlap 4
@@ -53,6 +63,9 @@ Usage (cwd = the SeedVR2 checkout, its venv's python):
   python blend_patch.py --weights 8                    # print every curve's weights for K = 8
   STITCH_LATENT=6:1 STITCH_CURVE=cosine python blend_patch.py inference_cli.py <CLI args> \
       --load_cap 81 --batch_size 81 --temporal_overlap 0   # latent windows of 6, 1 shared
+  STITCH_WINDOWS=0-6,6-12,10-16,14-21 STITCH_CURVE=cosine python blend_patch.py inference_cli.py \
+      <CLI args> --batch_size 81 --temporal_overlap 0      # explicit layout
+  python blend_patch.py --windows 0-6,6-12,10-16,14-21 21  # check a layout, print its frames
 """
 import argparse
 import copy
@@ -99,6 +112,53 @@ def blend(prev_tail, cur_head, overlap, curve):
     return prev_tail * w_prev + cur_head * (1.0 - w_prev)
 
 
+def parse_windows(spec):
+    """STITCH_WINDOWS "0-6,4-10,..." -> [(0, 6), (4, 10), ...]: latent ranges [start, end)."""
+    wins = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        a, sep, b = part.partition("-")
+        try:
+            wins.append((int(a), int(b)))
+        except ValueError:
+            raise SystemExit(f"blend_patch: STITCH_WINDOWS: {part!r} is not START-END (latents, end excluded)")
+        if not sep:
+            raise SystemExit(f"blend_patch: STITCH_WINDOWS: {part!r} is not START-END (latents, end excluded)")
+    if not wins:
+        raise SystemExit("blend_patch: STITCH_WINDOWS is empty")
+    return wins
+
+
+def check_windows(wins, t):
+    """An explicit layout must cover latents 0..t-1 in order: s_0 = 0, e_last = t, and each window
+    starts after the previous one's start, at or before its end (no gap), and ends after it."""
+    bad = []
+    if wins[0][0] != 0:
+        bad.append(f"the first window starts at {wins[0][0]}, not 0")
+    if wins[-1][1] != t:
+        bad.append(f"the last window ends at {wins[-1][1]}, not at the clip's {t} latents")
+    for s, e in wins:
+        if not 0 <= s < e:
+            bad.append(f"window {s}-{e} is empty or negative")
+    for (s0, e0), (s, e) in zip(wins, wins[1:]):
+        if not s0 < s <= e0:
+            bad.append(f"window {s}-{e} must start after {s0} and at or before {e0} (the previous one's end)")
+        if e <= e0:
+            bad.append(f"window {s}-{e} must end after {e0} (the previous one's end)")
+    if bad:
+        raise SystemExit(f"blend_patch: STITCH_WINDOWS {','.join(f'{s}-{e}' for s, e in wins)}: " + "; ".join(bad))
+    return wins
+
+
+def describe_windows(wins):
+    """Each window's frames (latent j > 0 = frames 4j-3..4j, latent 0 = frame 0) and shared counts."""
+    frames = [f"{s}-{e} = frames {max(0, 4 * s - 3)}..{4 * (e - 1)}" for s, e in wins]
+    shared = [e0 - s for (_, e0), (s, _) in zip(wins, wins[1:])]
+    return f"[{', '.join(frames)}], shared latents {shared}"
+
+
 class State:
     def __init__(self):
         self.curve = os.environ.get("STITCH_CURVE", "numz").strip()
@@ -109,6 +169,8 @@ class State:
             weights(c, 3)  # validates the name
         lat = os.environ.get("STITCH_LATENT", "").strip()
         self.latent = tuple(int(x) for x in lat.split(":")) if lat else None
+        win = os.environ.get("STITCH_WINDOWS", "").strip()
+        self.windows = parse_windows(win) if win else None  # explicit layout: replaces STITCH_LATENT
         self.args = None
         self.pairs = []    # (prev_tail, cur_head) of every Phase 3 blend, in batch order
         self.patched = False
@@ -204,13 +266,19 @@ def latent_upscale(orig_up, a, k):
     import torch
     ctx = k["ctx"] if "ctx" in k else a[1]
     lats = [x for x in ctx["all_latents"] if x is not None]
+    what = "STITCH_WINDOWS" if S.windows else "STITCH_LATENT"
     if len(lats) != 1:
-        log(f"STITCH_LATENT needs one encoded batch (--batch_size >= clip length), got {len(lats)}: not applied")
+        log(f"{what} needs one encoded batch (--batch_size >= clip length), got {len(lats)}: not applied")
         return orig_up(*a, **k)
     lat = lats[0]  # [T, H, W, C], channels last
-    w, m = S.latent
-    wins = latent_windows(lat.shape[0], w, m)
-    log(f"latent windows {wins} over {lat.shape[0]} latents ({tuple(lat.shape)}), {m} shared, curve {S.curve}")
+    if S.windows:
+        wins = check_windows(S.windows, lat.shape[0])
+        log(f"latent windows {wins} over {lat.shape[0]} latents ({tuple(lat.shape)}), explicit layout "
+            f"(STITCH_WINDOWS), curve {S.curve}: {describe_windows(wins)}")
+    else:
+        w, m = S.latent
+        wins = latent_windows(lat.shape[0], w, m)
+        log(f"latent windows {wins} over {lat.shape[0]} latents ({tuple(lat.shape)}), {m} shared, curve {S.curve}")
     ctx["all_latents"] = [lat[s:e].clone() for s, e in wins]
     del lat, lats
     ctx = orig_up(*a, **k)
@@ -248,11 +316,14 @@ def patch_cli(g):
         return orig_pp(*a, **k)
 
     g["postprocess_all_batches"] = postprocess_all_batches
-    if S.latent:
+    if S.latent or S.windows:
         orig_up = g["upscale_all_batches"]
         g["upscale_all_batches"] = lambda *a, **k: latent_upscale(orig_up, a, k)
     S.patched = True
     log(f"curve {S.curve}" + (f", extra curves {', '.join(S.extra)}" if S.extra else ""))
+    if S.windows:
+        log(f"STITCH_WINDOWS {','.join(f'{s}-{e}' for s, e in S.windows)}: {describe_windows(S.windows)}"
+            + (f" (replaces STITCH_LATENT={':'.join(map(str, S.latent))})" if S.latent else ""))
 
 
 def install():
@@ -287,6 +358,10 @@ def main():
         k = int(sys.argv[2])
         for c in CURVES:
             print(f"{c:7s} {[round(x, 3) for x in weights(c, k)]}")
+        return
+    if sys.argv[1] == "--windows" and len(sys.argv) == 4:
+        wins = check_windows(parse_windows(sys.argv[2]), int(sys.argv[3]))
+        print(f"{len(wins)} windows over {sys.argv[3]} latents: {describe_windows(wins)}")
         return
     if sys.argv[1].startswith("--"):
         sys.exit(__doc__)
