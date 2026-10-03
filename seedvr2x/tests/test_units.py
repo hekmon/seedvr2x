@@ -4,6 +4,8 @@ the manifest recording each unit once its file is whole, and what a finished seg
 removed."""
 
 import json
+import os
+import pickle
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +74,37 @@ def test_kept_with_values_and_layout(tmp_path: Path, latents: int) -> None:
     assert torch.equal(noises[0], noises[1])
     if latents > 1:
         assert not torch.equal(noises[0], noises[2])  # why the layout is kept
+
+
+class Payload:
+    """What a tampered unit file could hold: an object whose unpickling runs code, here making a
+    directory."""
+
+    def __init__(self, marker: Path) -> None:
+        self.marker = marker
+
+    def __reduce__(self) -> tuple[object, tuple[str]]:
+        return os.mkdir, (str(self.marker),)
+
+
+def test_tampered_unit_runs_no_code(tmp_path: Path) -> None:
+    # A resume reads its units as tensors only (torch.load with weights_only=True), so a file
+    # put in a unit's place can't run code (DESIGN.md, Pause and resume).
+    record = job(tmp_path, [Shot(0, 5)], [OutputSegment("a", 0, 5)])
+    units = DiskUnits(tmp_path, record)
+    units.save_latent(0, channel_major(2))
+    units.save_window(0, 0, channel_major(2))
+    marker = tmp_path / "ran"
+    for name in ("latent.pt", "window_0000.pt"):
+        torch.save(Payload(marker), units.shot_directory(0) / name)
+    with pytest.raises(pickle.UnpicklingError):
+        units.latent(0)
+    with pytest.raises(pickle.UnpicklingError):
+        units.take_windows(0)
+    assert not marker.exists()
+    # The payload is real: read as any pickle, it runs.
+    torch.load(units.shot_directory(0) / "latent.pt", weights_only=False)
+    assert marker.is_dir()
 
 
 def stand_in_dit(monkeypatch: pytest.MonkeyPatch) -> None:
