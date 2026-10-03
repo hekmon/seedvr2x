@@ -193,9 +193,47 @@ connect through files.
   vendored: see [Colour correction](#colour-correction).
 
 ### Weights
-7B fp16, 7B fp8, 7B Q4_K_M (GGUF), 3B fp16/fp8, all Apache-2.0
-([memory and quality per model](../research/docs/vram.md)). GGUF needs the dequantisation code
-adapted from city96/ComfyUI-GGUF (Apache-2.0, credited).
+v1 runs every DiT of numz's registry, all Apache-2.0: the 3B and the 7B in fp16, fp8 (`e4m3fn`;
+the 7B's file keeps its last block in fp16) and GGUF (Q4_K_M, and Q8_0 for the 3B), and
+ByteDance's sharp 7B in fp16, fp8 and Q4_K_M. One VAE, `ema_vae_fp16`, serves them all.
+- **Why all:** seedvr2x is a pipeline, and the model is its input. Small cards need the smaller
+  files: the 7B fp16 DiT's weights alone take 15.35 GiB, and
+  [vram.md's recipe](../research/docs/vram.md#recipe-per-card-size-validated) runs 8–16 GB
+  cards on Q4_K_M, all 36 blocks swapped and the VAE tiled.
+- **What it takes:**
+  - fp8: numz's conversions for arithmetic (its `CompatibleDiT` wrapper,
+    `src/optimization/compatibility.py`), since the weights stay in fp8 on the GPU
+  - GGUF: numz's dequantisation (`src/optimization/gguf_dequant.py`, `gguf_ops.py`), adapted
+    from city96's ComfyUI-GGUF (Apache-2.0, credited), and the `gguf` library (llama.cpp's,
+    MIT)
+  - the 3B: its cache quirk (see [Vendored model code](#vendored-model-code))
+  - the planner's constants per model, measured in [vram.md](../research/docs/vram.md)
+- **Recognised by content.** The architecture and the format are read from the file's own
+  tensors, not from its name, which is what numz goes by: a renamed file must load as what it
+  is (numz picks the config at `src/core/model_configuration.py:717-719`).
+- **Checked as milestone 1 checked the 7B fp16:** each architecture and format bit-identical to
+  numz on milestone 1's input, then held there by the regression test. The sharp files run the
+  7B's code.
+- **What the measurements found**
+  ([models.md](../research/docs/models.md): 4 animated clips, a ×2 upscale of a mild
+  degradation, against the ground truth), for the docs:
+  - Q4_K_M is as close to the source as fp16, or closer (PSNR-Y +0.11 to +0.49 dB, one seed),
+    with a DiT peak of 17.2 GiB against 28.2 at 45 frames of 1080p, for 2–3% more DiT time.
+  - fp8 is further from the source on all 4 clips (PSNR-Y −0.25 to −0.58 dB), takes more memory
+    than Q4_K_M (20.7 GiB) and saves only 2–3% of DiT time.
+  - The 3B is a different model. In fp16 it is perceptually worse than the 7B on all 4 clips
+    (LPIPS and DISTS), and its fp8 file stays close to it. Its DiT is 25–38% faster, but the VAE
+    takes most of the run (15 s saved out of 215), and it needs as much memory as the 7B's
+    Q4_K_M (17.2 GiB in fp8) or more (20.3 GiB in fp16).
+  - The sharp 7B is the closest of all to the source: PSNR-Y +0.40 to +0.67 dB on all 4 clips,
+    its seeds apart from 7B fp16's, VMAF up by 1.9 to 3.5, and less colour error. Despite its
+    name, it adds no more fine texture than 7B fp16. ByteDance publishes it beside the regular
+    7B (`seedvr2_ema_7b_sharp.pth`), without a word about it in either readme.
+  - Fidelity is not quality: the model re-renders, so closer to the source can mean redrawing
+    less. Live action and blurrier inputs aren't measured.
+- **The default** stays the 7B fp16, the model every milestone checks against. The sharp 7B is
+  the candidate to replace it, and the visual review (milestone 7) compares the two. numz's
+  default is the 3B fp8 (`src/utils/model_registry.py:56`).
 
 ## Input
 
@@ -849,6 +887,8 @@ explanation.
 
 **Also explained:**
 - the two workflows: a file in and a finished file out, or sptenc's pre-split directories
+- the models: which one fits which card, what the measurements found for each, and why the
+  default isn't numz's
 - lossless delivery: why there are no encoder options, and how `--segment-cmd` compresses with
   the user's own command
 - disk use: master sizes per hour, the decode buffer and input copies during a run
@@ -896,9 +936,10 @@ writers, and the planner needs real shot lengths.
    takes about 40 GPU hours.
 2. The `lab` rewrite (milestone 5), next. Without it the output keeps the model's colour
    drift.
-3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
-   1080p, windows and the streamed decode already bound memory, and the planner's inputs (4K
-   limits, the margin) come from the measurement campaign.
+3. The other models, then the planner, BlockSwap and tiling (milestone 3), then `--until`.
+   Small cards need all four (see [Weights](#weights)). On the 96 GB card at 1080p, windows and
+   the streamed decode already bound memory, and the planner's inputs (4K limits, the margin)
+   come from the measurement campaign.
 4. Assembly and `--segment-cmd` (milestone 6), for the regular workflow. The manual sptenc
    workflow already works without it.
 
@@ -1003,10 +1044,6 @@ writers, and the planner needs real shot lengths.
   - a lossless intermediate: exact and fast, but large
 
   Plan: measure accurate seek against decode-and-count on real long-GOP files.
-
-### Scope
-- **Model scope for v1:** 7B fp16 only, or fp8/Q4 and 3B from the start (needed for small
-  GPUs).
 
 ### To measure
 - **Numerics:** numz's or ByteDance's, change by change, once it's confirmed which ones really
