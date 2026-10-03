@@ -9,7 +9,16 @@
 A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
 - produces a lossless, correctly tagged master that the next encoding step can trust
 - has no visible seams inside a shot
-- fits the GPU it runs on without the user tuning memory options
+- fits the GPU it runs on without the user tuning memory options. It is developed on a 96 GB
+  card, but made for consumer cards of 16–32 GB as well, where the planner, BlockSwap and
+  tiling carry the run:
+  - At 1080p, without BlockSwap, a 24 GB card holds windows of about 6 latents and a 32 GB one
+    13, so many shots are split into windows.
+  - A 16 GB card can't hold the 7B fp16's weights (15.35 GiB) at all: it swaps every block,
+    and phase 2's smaller files lighten it (see [Weights](#weights)).
+  - Below 48 GB, the 1080p VAE decode only fits tiled.
+  - These cards also compute more slowly (an RTX 5080 has 84 SMs, the 96 GB card 188), so a
+    job lasts longer there, and resume and `--until` matter most.
 - can be paused and resumed (run at night, give the computer back in the morning)
 
 It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of the
@@ -21,9 +30,20 @@ It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of
   source's audio, subtitles and chapters included. File size matters here, hence
   `--segment-cmd` (see [Output](#output)).
 - **With sptenc**, the first use case and the reason for this project. This is the manual
-  workflow, pre-split in and pre-split out: `sptenc split` → seedvr2x →
-  `sptenc encode <dir> -f original`, with a directory of segments as the hand-over. It stays
-  lossless end to end, and its users bring the disk space.
+  workflow: the source in, a directory of segments out, then
+  `sptenc encode <dir> <out> -f <source>`, which encodes the segments as they are and takes the
+  audio and subtitles back from the source. It stays lossless up to sptenc's encode, and its
+  users bring the disk space.
+  - seedvr2x takes the source itself because shot detection is the biggest quality lever
+    outside the model ([cuts.md](../research/docs/cuts.md)). sptenc's split merges scenes
+    shorter than 5 s into their neighbours, which suits encoding but hides real cuts inside its
+    segments, and a cut the model doesn't see is its costliest error. seedvr2x keeps every cut
+    for the model's shots and merges only its output segments, by sptenc's rule.
+  - A directory of segments, such as an earlier `sptenc split`, is still accepted (see
+    [Input](#input)).
+
+Both workflows start from the source and differ only at the end: seedvr2x's assembly, or
+sptenc's encode.
 
 sptenc shapes the interfaces (segment directories, cut lists, master formats), but seedvr2x
 never requires it.
@@ -81,8 +101,8 @@ never requires it.
   - The length comes from the GPU's memory, through the per-token model in
     [vram.md](../research/docs/vram.md): 16 GiB of weights plus about 1 GiB per latent at
     1080p with the 7B fp16 model, and four times that per latent at 4K.
-    - At 1080p: about 6 latents (21–24 frames) on a 24 GB card, about 75 (≈ 300 frames) on a
-      96 GB card.
+    - At 1080p: about 6 latents (21–24 frames) on a 24 GB card, 13 (49 frames) on a 32 GB
+      card, about 75 (≈ 300 frames) on a 96 GB card.
     - At 4K: about 19 latents (≈ 75 frames) on a 96 GB card.
   - A window bounds the DiT only. The VAE's memory depends on the frame size, not on the
     window, since it streams in 4-frame slices (flat beyond ~9 frames). At 4K the untiled
@@ -116,10 +136,10 @@ connect through files.
   all need torch, so a Python environment is required whatever language orchestrates it, and
   Python imports the model code and its libraries directly. sptenc could be all Go because it
   only drives external programs (ffmpeg), which process calls handle completely.
-- **With sptenc:** `sptenc split` → seedvr2x → `sptenc encode <dir> -f original`. sptenc's
-  pre-split directories exist for this ("splitting a source, upscaling its segments and
-  encoding them"). In that chain, sptenc does the scene detection, the encodes, VMAF, concat
-  and the final mux.
+- **With sptenc:** seedvr2x → `sptenc encode <dir> <out> -f <source>`. sptenc encodes a
+  directory of segments as it is given, RGB ones included, "such as an upscaler delivers"
+  (its MANUAL). In that chain, seedvr2x does the scene detection, and sptenc the encodes, VMAF,
+  concat and the final mux.
 - **Door left open:** the runtime is a library (job → shots → units, emitting events), so a
   protocol front end can be added if sptenc ever drives seedvr2x directly.
 - **Rejected:**
@@ -202,7 +222,11 @@ too. Every other model is phase 2's (below).
   is what numz goes by (`src/core/model_configuration.py:717-719`). Anything but the 7B in fp16
   is refused, saying what the file is.
 - **Small cards** rely on BlockSwap and tiling (milestone 3): the 7B fp16 DiT's weights alone
-  take 15.35 GiB. Milestone 3 measures how small a card that reaches.
+  take 15.35 GiB. Milestone 3 measures how small a card that reaches, 16 GB being the aim:
+  there every block is swapped, its weights in pinned host RAM (about 15 GiB of it). numz's
+  Q4_K_M, every block swapped, ran 1080p in batches of 13 latents on an emulated 16 GB card,
+  and of 5 on an 8 GB one ([vram.md](../research/docs/vram.md#recipe-per-card-size-validated)):
+  phase 2's smaller files make small cards lighter on memory, host RAM and transfers.
 
 #### Phase 2: the other models
 A phase of its own, after v1, settles which models to keep, which to make again and how, how
@@ -325,10 +349,12 @@ Two forms, one internal model (a list of shots):
      first, `#` comments, no timestamps. Frame numbers are exact on the frame grid.
    - Fields after the frame number are ignored, so an export carrying scores (sptenc's, once
      it has one) stays readable.
-2. **A directory of segments** (sptenc's split, or any other splitter), plus which joins are
-   real cuts: from a cut list, else each join scored by the detector. Joins that aren't real
-   cuts are stitched like a long shot. The output mirrors the input's segments (same frame
-   ranges and names), so sptenc encodes them as it would its own split.
+2. **A directory of segments** (sptenc's split, or any other splitter), for material already
+   split. The detector runs over all its frames as over a file's: inside the segments too,
+   since a split that merges short scenes (sptenc's, below 5 s) hides real cuts there, and at
+   the joins, where one that isn't a real cut is stitched like a long shot. The output mirrors
+   the input's segments (same frame ranges and names), so sptenc encodes them as it would its
+   own split.
    - sptenc's split names its segments `seg_%06d.mkv`: FFV1 `yuv420p10le` in Matroska,
      timestamps reset.
    - Its `encode <dir>` takes the `.mkv` and `.mp4` files, any names, in byte-wise name order,
@@ -437,7 +463,9 @@ The rule: the upscale must look like its source in any given player.
      mixes both scenes in one latent
    - windows stitched across a cut would cross-fade the two scenes
 
-   Expected to be visible; not measured yet.
+   Measured ([cuts.md](../research/docs/cuts.md)): a missed cut costs the next shot's first
+   frames, mostly through the causal VAE, which carries the previous shot over. It is the
+   costliest detection error (see [Open questions](#open-questions)).
 
    A shot that isn't 4n + 1 frames long is padded, then trimmed after decoding. numz mirrors
    the end (`generation_utils.py:642-654`); ByteDance repeats the last frame
@@ -631,10 +659,11 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     else found in it is refused, so another run's files never reach what sptenc reads.
   - An `-o` with another video suffix (`.mp4`, `.mov`…) is refused.
 - **Output segments**, the resume units of the output, listed in a manifest:
-  - **Layout, by sptenc's rule.** The threshold picks the cuts, then the minimum segment
-    length (5 s by default) merges each too-short segment into its shorter neighbour, on the
-    frame grid. With scdet run as sptenc runs it, the same threshold and minimum give the same
-    segments as sptenc. With a directory of segments as input, the output mirrors it instead.
+  - **Layout, by sptenc's rule.** The detector picks the cuts, then the minimum segment length
+    (5 s by default) merges each too-short segment into its shorter neighbour, on the frame
+    grid. With a directory of segments as input, the output mirrors it instead.
+    - `sptenc encode` takes any segments, so they needn't match sptenc's own split. They would
+      with scdet run as sptenc runs it, at the same threshold and minimum.
     - The rule counts in frames: the minimum is rounded up (5 s is 120 frames at 24000/1001),
       a segment exactly that long is kept, and ties merge left.
     - Ported, and checked against sptenc's `FilterShortScenes` on 20,000 random cases, run
@@ -699,7 +728,7 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     segment's duration comes from its frame count, and timestamps are snapped to the frame
     grid. Otherwise the video drifts: 46 ms behind the audio over a 163-segment episode, in
     sptenc's measurements.
-  - **with sptenc:** the directory as it is, for `sptenc encode <dir> -f original` (or
+  - **with sptenc:** the directory as it is, for `sptenc encode <dir> <out> -f <source>` (or
     `sptenc concat` for one master)
 
 ## Memory planner
@@ -1040,8 +1069,12 @@ writers, and the planner needs real shot lengths.
    or fp8 file is accepted by its name, then fails later or runs unchecked.
 3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory, and the planner's inputs (4K
-   limits, the margin) come from the measurement campaign.
-4. Assembly and `--segment-cmd` (milestone 6), for the regular workflow. The manual sptenc
+   limits, the margin) come from the measurement campaign. Consumer cards need it to run 1080p
+   at all.
+4. The shot detector, as soon as the scene-detection brief is in (it waits for the user's
+   labels), ahead of what is left of 3: both workflows start from it. Until then, the cuts come
+   from a cut list.
+5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow. The manual sptenc
    workflow already works without it.
 
 After v1, phase 2 brings the other models (see [Weights](#weights)).
@@ -1117,29 +1150,28 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
 ## Open questions
 
 ### Input
-- **Own scene detection:** three candidates.
-  - ffmpeg's scdet, as sptenc runs it: the same scores, so both tools detect alike and, with
-    the same merge, lay out the same output segments. No new dependency.
-  - PySceneDetect: detects fades, but adds a dependency
-  - a detector on our own decoded frames
+- **Own scene detection**, the biggest quality lever outside the model, and what both
+  workflows start from (see [Two kinds of users](#two-kinds-of-users-both-first-class)).
+  - A missed cut is the costly error. On the first three cuts measured, in one run across the
+    cut, the next shot's first frame lost 2.4–9.6 dB of PSNR-Y on two of them, the loss lasted
+    up to 13 frames, and up to 5% of the previous shot showed in it
+    ([cuts.md](../research/docs/cuts.md)).
+  - A false cut costs no fidelity, at most a low-frequency step on a continuous shot, but a
+    burst of them chops a shot into many small pieces. scdet's first passes, not labelled yet:
+    on action anime it fires in bursts on new drawings after held frames and on effects (at
+    threshold 10, half the shots of a dark anime episode last under 0.5 s), and it misses some
+    dark cuts ([PROGRESS.md](../research/PROGRESS.md)).
+  - So the detector must catch every real cut first, then not fire in bursts. Candidates:
+    - ffmpeg's scdet, as sptenc runs it: no new dependency
+    - PySceneDetect's adaptive and content detectors: they detect fades, but add a dependency
+    - TransNetV2, a neural network trained to find shot boundaries (MIT licence, open weights)
+    - a detector on our own decoded frames
+  - Chosen on the user's labels of the measurement campaign's review sheets, which must first
+    hold every candidate's detections. The scene-detection brief also settles the threshold and
+    whether shots need a minimum length of their own: cuts.md finds a short shot better run
+    alone than merged into its neighbour, from 1 frame on.
 
-  Output segments take sptenc's minimum length (see [Output](#output)). Shots are a different
-  matter:
-  - merging a real cut into a shot puts two scenes in one latent
-  - keeping a false detection (a flash, a fast pan) splits continuous motion with a hard
-    boundary
-
-  To measure: the threshold, and whether shots need a minimum of their own.
-- **Scene list format.** Known from sptenc's code:
-  - it exports no scene list (`split --list-scenes` prints a table)
-  - it never splits inside a shot (no maximum length, no fade handling)
-  - but it merges scenes shorter than 5 s into their shorter neighbour, so real cuts can sit
-    inside a segment unmarked
-  - scdet also fires on pans and flashes, so a join isn't always a cut
-
-  seedvr2x's side is settled: it reads a cut list of frame numbers (see [Input](#input)), so
-  sptenc's export can write that, with scores and the cuts the merge removed as extra fields.
-  Open: how seedvr2x treats cuts inside a segment and doubtful joins.
+  Output segments keep sptenc's minimum length (see [Output](#output)).
 - **Frame-exact access into long-GOP sources**, to resume a shot and to read its input frames
   again for colour correction. Three ways:
   - ffmpeg's accurate seek: fast, but trusts timestamps
