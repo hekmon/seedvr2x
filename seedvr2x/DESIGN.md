@@ -449,10 +449,14 @@ Ours:
     - No ffmpeg option makes a slice failing its CRC fail the decode. With
       `-err_detect crccheck+explode` or `-xerror`, ffmpeg n9.0.2 decodes through it and exits
       0, hiding the slice under the previous frame's. Its only signal is a line on stderr.
-    - A damaged slice-size field in FFV1 v3 can make ffmpeg skip slices without a word. On
-      flat frames, a frame came back with 2,880 of its 3,072 pixels from another frame.
-      Fuzzing small copies gave 2 silent wrong frames in 17,585 byte positions on random
-      content, and 2 in 13,160 on smooth content.
+    - A damaged slice-size field in FFV1 v3 can make ffmpeg skip slices without a word. The
+      skipped area keeps whatever its frame buffer held: another frame's picture, or zeros
+      (black) in a newly allocated buffer, so a black frame can come back right by chance. The
+      damage is silent on any flat frame whose slices are all one size.
+      - A frame came back with 2,880 of its 3,072 pixels from another frame.
+      - Fuzzing small copies gave 2 silent wrong frames in 17,585 byte positions on random
+        content, and 2 in 13,160 on smooth content.
+      - The test uses a flat frame at 255.
     - The Matroska demuxer silently drops a block whose ID is damaged.
     - A full temporary directory would silence ffmpeg's errors altogether.
   - **A missing or damaged copy.**
@@ -527,8 +531,13 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     (sptenc's MANUAL, "Too fine: many short segments").
   - **Checksums.** The segments are the product, and the silent FFV1 damage found on input
     copies could hit a finished master on disk too. So each frame of an FFV1 or PNG segment
-    gets a CRC-32 over its planes as written, computed at write time, the only cheap moment
-    (about 2 ms per 1080p frame).
+    gets a CRC-32 over the planes the file holds, computed at write time, the only cheap
+    moment (about 2 ms per 1080p frame).
+    - `gbrp16le` and PNG hold the planes seedvr2x feeds ffmpeg, so their CRC-32 is computed
+      on those planes.
+    - A `yuv420p10le` master holds what ffmpeg converts. Its CRC-32 comes from ffmpeg itself:
+      `framehash -hash crc32` on the converted frames, as a second output of the same process,
+      checked equal to zlib's CRC-32 of the raw frames.
     - They are kept in `<out>/checksums/<segment>.crc32`, one per frame in order, written
       whole before the segment is recorded. They outlive the job, unlike `resume/`, and
       sptenc only reads `.mkv` and `.mp4` files.
