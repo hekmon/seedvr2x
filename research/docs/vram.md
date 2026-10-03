@@ -377,6 +377,11 @@ leaves ≈ 16 GiB in the process RSS until the end (max RSS 19 GiB for a 3-frame
     copies let the following kernels run at higher clocks. **On a GPU that isn't power-limited,
     expect Q4_K_M swap 36 to cost up to its move time, ≈ 0.9 s per batch at this PCIe 5.0
     bandwidth** (≈ +20% at batch 5, +3% at batch 45); still the cheapest swap by far.
+    [models.md](models.md#blockswaps-free-q4_k_m-swap-the-power-cap-test) tested and refuted
+    the power-cap explanation (idle pauses as long as the moves cost their full duration): timed
+    between synchronizations, back to back, swap 36 costs +0.30 s per batch at 1080p batch 5
+    and +1.2 s on the first, because from the second batch on the copies back to the CPU run
+    4.4 times faster (0.46 s of moves per batch, not 1.32).
 - `--swap_io_components` saves 0.16 GiB for ≈ 0.08 s per batch: not worth it. **Used without
   `--blocks_to_swap`, it leaks the whole DiT:** the 36 blocks (15.2 GiB) stay allocated after
   phase 2, so decode ran at 33.4 GiB instead of 18.2 (`dit-1080-bs45-swap0io`, NVML peak 40.2

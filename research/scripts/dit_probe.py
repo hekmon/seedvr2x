@@ -32,9 +32,11 @@ ends the run (the context may be unusable); results are written after every poin
 
 Subcommands:
   run    --model-dir DIR --sweep SIZE:L1,L2,... [--sweep ...] [--ref SIZE:L] [--ref-every N]
-         [--repeats N] [--refine] [--refine-repeats N] [--out RESULTS.json] [--dit-model F]
+         [--repeats N] [--ref-repeats N] [--refine] [--refine-repeats N] [--out RESULTS.json] [--dit-model F]
          [--attention-mode M] [--seed S] [--no-vae]
-  table  RESULTS.json [...]   Markdown tables against the per-token model, and fits
+  table  RESULTS.json [...] [--merge]   Markdown tables against the per-token model, and fits; --merge
+         makes one table of several files (a sweep split into one invocation per point, the GPU
+         lock released in between): points in time order, normalised by every file's references
   plan   --sweep ... [--ref ...] [--ref-every N] [--repeats N] [--room GIB]
          the points, their tokens, model peak and time, and the sweep's GPU time (no GPU used)
 
@@ -448,7 +450,8 @@ def cmd_run(args):
     cfg = runner.config.dit.model
     wcfg = (tuple(int(v) for v in cfg.window[0]), tuple(dict.fromkeys(str(m) for m in cfg.window_method)))
     res = {"argv": sys.argv, "dit_model": args.dit_model, "attention_mode": args.attention_mode, "seed": args.seed,
-           "repeats": args.repeats, "ref": list(ref) if ref else None, "ref_every": args.ref_every,
+           "repeats": args.repeats, "ref_repeats": args.ref_repeats or args.repeats,
+           "ref": list(ref) if ref else None, "ref_every": args.ref_every,
            "model": MODEL, "vae_resident": not args.no_vae, "window_config": [list(wcfg[0]), list(wcfg[1])],
            "initial_free_gib": round(free0 / GIB, 3), "total_gib": round(total / GIB, 3),
            "load_s": round(time.perf_counter() - t_load, 1),
@@ -481,12 +484,12 @@ def cmd_run(args):
         else:
             state["since_ref"] += 1
             if ref and args.ref_every and state["since_ref"] >= args.ref_every:
-                do("ref", *ref, args.repeats)
+                do("ref", *ref, args.ref_repeats or args.repeats)
         return rec
 
     try:
         if ref:
-            do("ref", *ref, args.repeats)
+            do("ref", *ref, args.ref_repeats or args.repeats)
         for w, h, ls in sweeps:
             last_ok = first_oom = None
             for L in ls:
@@ -506,7 +509,7 @@ def cmd_run(args):
             res["edges"].append({"width": w, "height": h, "last_ok": last_ok, "first_oom": first_oom})
             write()
         if ref and state["since_ref"]:
-            do("ref", *ref, args.repeats)
+            do("ref", *ref, args.ref_repeats or args.repeats)
     except Exception as e:  # noqa: BLE001  (not an OOM: record it, stop; the context may be unusable)
         res["error"] = f"{type(e).__name__}: {str(e)[:500]}"
         write()
@@ -592,15 +595,49 @@ def fmt(v, nd=2):
     return "–" if v is None else f"{v:.{nd}f}"
 
 
-def print_tables(paths):
+def load_results(paths, merge=False):
+    """(title, results) per file; with merge, one view of all the files' points in time order, so the reference
+    points of every file normalise every point (runs split into one invocation per point, other jobs between)."""
+    rs = []
     for path in paths:
         with open(path, encoding="utf-8") as f:
-            r = json.load(f)
+            rs.append((os.path.basename(path), json.load(f)))
+    if not merge or len(rs) < 2:
+        return rs
+    first = rs[0][1]
+    for name, r in rs[1:]:
+        for k in ("dit_model", "ref", "vae_resident", "window_config"):
+            if r.get(k) != first.get(k):
+                print(f"dit_probe: warning: {name} has another {k} ({r.get(k)} vs {first.get(k)})", file=sys.stderr)
+    m = dict(first)
+    m["points"] = sorted((p for _, r in rs for p in r["points"]), key=lambda p: p["t_start"])
+    m["error"] = "; ".join(f"{n}: {r['error']}" for n, r in rs if r.get("error")) or None
+    reps = sorted({r["repeats"] for _, r in rs})
+    m["repeats"] = reps[0] if len(reps) == 1 else "/".join(map(str, reps))
+    return [(f"{len(rs)} files merged ({', '.join(n for n, _ in rs)})", m)]
+
+
+def edges_of(points):
+    """Per output size: the longest window that passed and the shortest that ran out of memory."""
+    out = {}
+    for p in points:
+        if p["kind"] == "ref":
+            continue
+        e = out.setdefault((p["width"], p["height"]), {"last_ok": None, "first_oom": None})
+        if p["status"] == "ok":
+            e["last_ok"] = max(e["last_ok"] or 0, p["L"])
+        elif p["status"] == "oom":
+            e["first_oom"] = p["L"] if e["first_oom"] is None else min(e["first_oom"], p["L"])
+    return out
+
+
+def print_tables(paths, merge=False):
+    for title, r in load_results(paths, merge):
         env = r["env"]
         pts = r["points"]
         vae = r.get("vae_resident", True)
         base = normalise(pts)
-        print(f"\n### {os.path.basename(path)}: {r['dit_model']}, {', '.join(env['attention_mode_effective'])}, "
+        print(f"\n### {title}: {r['dit_model']}, {', '.join(env['attention_mode_effective'])}, "
               f"{env['gpu']}, torch {env['torch']}, flash_attn {env['flash_attn']}\n")
         print(f"Loaded: {r['loaded_alloc_gib']:.2f} GiB allocated (DiT {env['dit_param_gib']} + buffers "
               f"{env['dit_buffer_gib']} + VAE {env['vae_param_gib']}), initial free {r['initial_free_gib']} / "
@@ -671,8 +708,8 @@ def print_tables(paths):
         if t2:
             print(f"- tokens + windows, all points: normalised time = {t2[0]:.2f} s + {1000 * t2[1]:.4f} ms × tokens + "
                   f"{1000 * t2[2]:.2f} ms × windows (max residual {t2[3]:.2f} s)")
-        for e in r.get("edges", []):
-            print(f"- edge {e['width']}x{e['height']}: last passing L = {e['last_ok']}, first OOM L = {e['first_oom']}")
+        for (w, h), e in edges_of(pts).items():
+            print(f"- edge {w}x{h}: last passing L = {e['last_ok']}, first OOM L = {e['first_oom']}")
         ooms = [p for p in pts if p["status"] == "oom"]
         for p in ooms:
             last = p["repeats"][-1]
@@ -682,7 +719,7 @@ def print_tables(paths):
 
 
 def cmd_table(args):
-    print_tables(args.results)
+    print_tables(args.results, args.merge)
 
 
 # ---------------------------------------------------------------- plan (no GPU)
@@ -704,10 +741,10 @@ def cmd_plan(args):
             return
         since += 1
         if ref and args.ref_every and since >= args.ref_every:
-            add("ref", *ref, args.repeats)
+            add("ref", *ref, args.ref_repeats or args.repeats)
 
     if ref:
-        add("ref", *ref, args.repeats)
+        add("ref", *ref, args.ref_repeats or args.repeats)
     for w, h, ls in (parse_points(s) for s in args.sweep):
         last_ok = first_oom = None
         for L in ls:
@@ -725,7 +762,7 @@ def cmd_plan(args):
                 else:
                     last_ok = mid
     if ref and since:
-        add("ref", *ref, args.repeats)
+        add("ref", *ref, args.ref_repeats or args.repeats)
     print(f"Model: peak {MODEL['const_gib']} GiB + {MODEL['kib_per_token']} KiB/token, "
           f"{MODEL['ms_per_token']} ms/token; room {args.room} GiB (OOM predicted above it, the forward then fails "
           f"early and costs ~nothing)\n")
@@ -753,6 +790,7 @@ def main():
         p.add_argument("--ref", default="1080:6", help="reference point SIZE:L ('' for none)")
         p.add_argument("--ref-every", type=int, default=3, help="reference after every N points (0: start/end only)")
         p.add_argument("--repeats", type=int, default=2)
+        p.add_argument("--ref-repeats", type=int, help="forwards per reference point (default: --repeats)")
         p.add_argument("--refine", action="store_true", help="bisect the OOM edge after a sweep's first OOM")
         p.add_argument("--refine-repeats", type=int, default=1)
 
@@ -768,6 +806,8 @@ def main():
 
     p = sub.add_parser("table")
     p.add_argument("results", nargs="+")
+    p.add_argument("--merge", action="store_true",
+                   help="one table for all files (points in time order, every file's references normalise them)")
     p.set_defaults(func=cmd_table)
 
     p = sub.add_parser("plan")

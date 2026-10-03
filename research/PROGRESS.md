@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-03 09:20 CEST
+Last update: 2026-10-03 23:10 CEST
 
 ## 0. Setup
 
@@ -61,9 +61,20 @@ temporal regression.
 - [x] Does a black band help where numz pads nothing (720p, 4K)? At 720p, 16 black rows improve
       the rest of the frame on 4 of 4 clips (PSNR-Y +0.23 to +0.61, VMAF +1.8 to +6.4) but
       black right under the picture damages its bottom rows (−2.5 to −10.4 dB)
-- [ ] A guaranteed reflected margin before the black rows (`NUM_PAD=reflect>=8+black+16`,
-      ready; identical to the measured mode at 1080p) at 720p: 4 runs, not reached before the
-      09:00 stop (the GPU lock was busy)
+- [x] A guaranteed reflected margin before the black rows (`NUM_PAD=reflect>=8+black+16`,
+      identical to the measured mode at 1080p): at 720p better than numz's default on all 4 clips
+      (PSNR-Y +0.07 to +1.03 dB, VMAF +0.9 to +10.2) and the bottom band repaired against black
+      alone (+3.8 to +8.5 dB). Recommended at every size
+- [x] The two ByteDance differences left: DiT norm output precision and VAE decode autocast
+      within the seed band, and everything together too (`parity2`); the decode autocast costs
+      decode memory (37.7 vs 35.3 GiB allocated, 56.5 vs 45.5 GiB device peak at 1080p)
+- [x] VAE decode precision (from the design conversation): numz's masters hold 8-bit steps from
+      0.5 up (Phase 4 normalises in bf16), but **no banding in any variant**, even on a new clip
+      with large bright smooth gradients (CAMBI ≤ 0.004; it scores 0.70 on a clean 8-bit ramp).
+      fp16 and fp32 decodes bring colour slightly closer (ΔE00 −0.05 to −0.09 on 5 of 5 clips);
+      fp16 never overflowed (largest activation 3.4× under its limit) and costs no more than bf16;
+      fp32 costs 2× the memory and 1.4–4× the time. Keeping everything after the decode in fp32
+      is free
 - [x] Forced fp16 attention (GPUs without bf16): within the seed band on all 4 clips
 - [x] Second degradation (area, CRF 26) on 2 clips: same picture as d1; reflect then black
       +0.26 dB; the sharper kernels gain a little on the softer input (+0.16 to +0.26 dB),
@@ -71,8 +82,8 @@ temporal regression.
 - [x] Reflect then black on the letterboxed clip: +0.29 dB PSNR-Y, letterbox kept black
 - [x] The combined choice, checked once: numz's numerics + bicubic with antialias + reflect then
       black is the `reflect+black+16` run above
-- [~] Doc ([docs/numerics.md](docs/numerics.md), written) + decision brief (numerics brief given
-      2026-10-03; input preparation after the 720p margin test)
+- [x] Doc ([docs/numerics.md](docs/numerics.md)) + decision briefs (numerics and input preparation,
+      2026-10-03)
 
 ## 2. Cuts
 
@@ -94,8 +105,18 @@ temporal regression.
       at the cut with one VAE pass is the worst case (−7.9 / −16.8 dB, 9–11% ghost). A false
       cut costs no per-frame fidelity, only a temporal step. Very short shots are better alone
       than merged, from 1 frame on
-- [-] Latent layouts at k = 2 and the optional "merged with the previous shot" short-shot runs
-      (16 runs): not reached, the GPU was shared all night
+- [x] Latent layouts at k = 2 and the "merged with the previous shot" short-shot runs (16 runs):
+      windows straddling a cut still cost about what one batch does, a window boundary at the
+      cut's latent is still the worst. A short shot merged into the previous one is worse than run
+      alone at every length (10–21 dB·frames), and at 1–2 frames worse than a missed cut (7–20%
+      ghost): numz pads a batch to 4n + 1 frames by mirroring its end, which reaches back across
+      the cut
+- [x] A shot's first frame (from the design conversation): by the metrics, frame 0 is already
+      the frame closest to the ground truth (the model re-renders it least) on 8 of 8 shots;
+      prepending 4 mirrored frames gives up 0.6–2.8 dB of that lead on 6 of 8 to match the next
+      frames' sharpness (deficit −47% → −15%), P = 8 does no better; ≈ 13 s per shot, +2–8% of
+      GPU time per hour. Whether the sharpness step after a cut shows: for the user's eyes (review
+      clips ready)
 - [~] Decision brief: shared with question 3, waiting for its labels
 
 ## 3. Scene detection
@@ -140,27 +161,40 @@ temporal regression.
 
 ## 6. 4K and long windows
 
-- [x] DiT probe (`dit_probe.py`, numz's own Phase 2 path, random latents) at 4K, L = 1…19
-      latents: L = 20 runs out of memory on 96 GB (L = 19 passes with 2.5 GiB spare). Peaks fit
-      **15.87 GiB + 127.2 KiB per token + 2.72 MiB per attention window** with no residual over
-      12 points (the text tokens are repeated in every window); the per-token model alone is up
-      to 0.8 GiB low at 4K. Time per token stays constant (within 5%) from 1 to 19 latents
-- [ ] DiT probe at 1080p, long windows up to the memory limit (≈ 50 min of GPU, ready)
-- [ ] Tiled VAE at 4K: peaks against the formulas, time per frame, 3 tile sizes (≈ 25 min, ready)
-- [x] Planner margin, by bisection on the emulated card size: runs fail with 0.37 GiB between the
-      free memory seen and the phase's peak (decode-bound), 0.14 (encode-bound), 0.15
-      (DiT-bound); they pass at 0.45 / 0.24 / 0.23. A fourth configuration (DiT without swap,
-      ≈ 20 min) is optional
-- [ ] Doc + decision brief (brief on the margin and the 4K DiT model given 2026-10-03)
+- [x] DiT probe (`dit_probe.py`, numz's own Phase 2 path), 26 window lengths (1080p 1–78 latents,
+      4K 1–19): peak = **15.87 GiB + 127.16 KiB per token + 2.726 MiB per attention window**
+      (the text tokens repeated in every window), residual ≤ 0.005 GiB; the per-token model alone
+      is off by −0.17 to +0.83 GiB. Time per token constant within ±5%. Real 96 GB card: 78
+      latents at 1080p (309 frames), 19 at 4K (73 frames)
+- [x] Tiled VAE at 4K (tiles 1024, 1536, 2048): vram.md's fits hold to ±0.45 GiB up to 1536 and
+      fall short at 2048 (new fits for tiles ≥ 1024); time per frame doesn't depend on the tile
+      size (5.3–5.6 s encode, 11.5–12.3 s decode per 4K frame)
+- [x] Planner margin, by bisection on the emulated card size, 4 configurations: runs fail with up
+      to 0.37 GiB between the free memory seen and the phase's peak (decode-bound) and pass from
+      0.23–0.45; **0.6 GiB** keeps 0.23 GiB over the worst failure, and gives back the validated
+      "N − 2 GiB" rule
+- [x] Doc ([docs/planner-limits.md](docs/planner-limits.md)) + decision brief (2026-10-03)
 
 ## 7. Optional: models and power cap
 
-- [ ] 7B fp8, Q4_K_M, 3B fp16 (and 3B fp8) through question 1's protocol
-- [ ] Power cap: power, clock and throttle sampling with and without BlockSwap; idle-pause control
-- [ ] Doc + decision brief
+- [x] 7B fp8, Q4_K_M, 3B fp16, 3B fp8 and the "sharp" 7B fp16 through question 1's protocol (36
+      runs, [docs/models.md](docs/models.md)). Q4_K_M as close to the source as 7B fp16 or closer
+      (PSNR-Y +0.11 to +0.49 dB); fp8 slightly but consistently further (−0.25 to −0.58 dB, VMAF
+      −1.4 to −3.0) for 2% speed; 3B fp16 perceptually worse on every clip (LPIPS, DISTS); the
+      sharp 7B the closest to the source of all (+0.40 to +0.67 dB on every clip, beyond the seed
+      ranges), and not sharper
+- [x] Power cap: refuted. Idle pauses as long as the moves cost their full duration; the GPU sat at
+      577 MHz with the power cap active throughout. Q4_K_M swap 36 really costs +0.30 s per batch
+      at 1080p batch 5 (+3.6%): from the second batch on, the copies back to the CPU run 4.4 times
+      faster (host memory reused)
+- [x] Doc + decision brief (2026-10-03)
 
 ## Other
 
+- [x] numz's `lab` and tied values (from the design conversation): its unstable sort gives tied
+      pixels different reference values (memory order on the GPU), but on real frames numz's `lab`
+      and a tie-aware `lab` differ by at most 0.06 a*/b* units per pixel, with every metric within
+      the seed band: not a bug worth filing; noted in [docs/quality.md](docs/quality.md)
 - [x] numz bug candidates from the implementation, checked against the code: new
       [bugs 24](bugs/24-rope-wrapper-late-binding.md) (the RoPE wrapper's late-binding closure:
       every block uses the last block's tables, cache bypassed) and
