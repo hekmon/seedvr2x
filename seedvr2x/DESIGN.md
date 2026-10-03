@@ -751,7 +751,24 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
 - **Choices, in order:** window length (the biggest quality lever: fewer boundaries),
   BlockSwap blocks, VAE tile sizes, then what's left goes to speed: `compile_dit` (−26 to −32%
   DiT time, +0.1 to +1.4 GiB), and `compile_vae` only when its memory fits (it about doubles
-  VAE activation memory, for −16 to −19% VAE time).
+  VAE activation memory, for −16 to −19% VAE time). Nothing caps a large card: the memory a
+  16–32 GB card spends on BlockSwap and tiles goes, on 96 GB and more, to longer windows and
+  speed.
+- **A plan shapes the output a little.** Its window lengths set where a long shot's joins
+  fall, and its VAE tiles where the picture is cut. A larger card gives fewer joins and larger
+  tiles, closer to the one-window, untiled run:
+  - Windows change the output about as much as a change of seed: milestone 2's came out
+    41.9 dB from the one-window run, and two seeds are 37–44 dB apart
+    ([models.md](../research/docs/models.md)).
+  - Tiles drift in colour, uniformly across each tile, more as they get smaller: 1024-pixel
+    decode tiles came out 37.9–43.6 dB from the untiled decode on two clips, 512-pixel encode
+    tiles 33.4 ([vram.md](../research/docs/vram.md#tiling)). `lab` removes that drift: tiled
+    and untiled, both corrected, came out 48.9 dB apart
+    ([quality.md](../research/docs/quality.md#vae-tiling-on-flat-areas)).
+  - So the plan is part of the job. The manifest records it, and a resume reuses it rather
+    than planning again, since free memory varies from one start to the next. A resume whose
+    plan no longer fits stops and says so.
+  - `--window` and the tile options pin a plan, for two runs that must match bit for bit.
 - `--plan` prints the plan and the time estimate without running.
 - Validated before release with `vram_cap.py` emulation, from the smallest card the 7B fp16
   reaches up to 48 GB.
@@ -1035,7 +1052,8 @@ explanation.
 - resume: the same command resumes; what refuses a resume and why; `--accept-env-change`
 - integrity: the per-frame checksums kept with the output, and `seedvr2x verify` to check a
   job's masters before trusting them
-- seeds and reproducibility: the same settings give the same output, bit for bit
+- seeds and reproducibility: the same settings and plan (window lengths and tiles, which
+  `--plan` prints) give the same output, bit for bit
 
 ## Validation milestones
 
