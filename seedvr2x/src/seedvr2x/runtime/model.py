@@ -11,6 +11,7 @@ through typed functions.
 # pyright: basic
 
 import logging
+import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -183,6 +184,18 @@ def input_transform(target: tuple[int, int]) -> Callable[[Tensor], Tensor]:
             Lambda(lambda x: x.permute(1, 0, 2, 3)),
         ]
     )
+
+
+def synchronize(device: torch.device) -> None:
+    """Wait for the work queued on device, polling every 10 ms rather than blocking: Python runs
+    a signal's handler between two polls, where a blocking wait holds it until the GPU is done,
+    so that Ctrl-C is answered at once, not after a decode slice or a window (runtime/stop.py)."""
+    if device.type != "cuda":
+        return
+    done = torch.cuda.Event()
+    done.record()
+    while not done.query():
+        time.sleep(0.01)
 
 
 def set_seed(seed: int) -> None:

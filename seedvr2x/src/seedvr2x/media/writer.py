@@ -118,8 +118,14 @@ class Writer:
         self.what, self.width, self.height = what, width, height
         self.written = 0
         self._command = command
+        # In a process group of its own, out of reach of the terminal's Ctrl-C, which only
+        # seedvr2x handles: it lets the segment being written finish (runtime/stop.py).
         self._process = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            process_group=0,
         )
         assert self._process.stdin is not None and self._process.stderr is not None
         self._stdin = self._process.stdin
@@ -435,6 +441,7 @@ def count_packets(path: Path) -> int:
         capture_output=True,
         text=True,
         check=False,
+        process_group=0,  # as the writers' ffmpeg: it checks the segment being finished
     )
     if result.returncode != 0:
         raise MediaError(f"{path}: ffprobe failed: {result.stderr.strip()}")

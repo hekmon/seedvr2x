@@ -223,6 +223,7 @@ def decode_shot(
         if chunk.shape[0] == 0:
             continue
         chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
+        model.synchronize(models.device)
         write(chunk.to("cpu", torch.float32).numpy())
         written += chunk.shape[0]
     if written != count:

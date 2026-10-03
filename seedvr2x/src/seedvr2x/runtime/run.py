@@ -23,6 +23,7 @@ from seedvr2x.runtime.shot import (
     sample_windows,
     shot_layout,
 )
+from seedvr2x.runtime.stop import Stop
 from seedvr2x.runtime.units import Units
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ def run_job(
     window: int | None,
     units: Units,
     write: Callable[[npt.NDArray[np.float32]], None],
+    stop: Stop | None = None,
 ) -> None:
     """Upscale the shots of a job, which cover its parts in order, no shot spanning two
     (job.job_shots), each with its own seed (Shot.seed), its frames resized to target
@@ -54,7 +56,9 @@ def run_job(
 
     What units kept already is skipped (DESIGN.md, Pause and resume): a finished segment; a
     shot's encode and the windows done; the input frames of what is skipped, read and dropped.
-    An unfinished segment's decode and write restart whole, from its shots' windows kept."""
+    An unfinished segment's decode and write restart whole, from its shots' windows kept.
+
+    stop, when given, is checked before each unit (Stop.check)."""
     groups = [
         [i for i, shot in enumerate(shots) if s.start <= shot.start < s.end] for s in segments
     ]
@@ -66,11 +70,20 @@ def run_job(
                 continue
             if units.persistent:
                 for index in group:
-                    _sample(models, inputs, shots, index, target, seed, window, units)
+                    _sample(models, inputs, shots, index, target, seed, window, units, stop)
+                _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write")
             for index in group:
                 if not units.persistent:
-                    _sample(models, inputs, shots, index, target, seed, window, units)
+                    _sample(models, inputs, shots, index, target, seed, window, units, stop)
+                    _begin(stop, f"shot {index + 1}/{len(shots)}'s decode")
                 _decode(models, shots, index, target, window, units, write)
+
+
+def _begin(stop: Stop | None, unit: str) -> None:
+    """Before a unit: stop there if asked (Stop.check), else name it for a Ctrl-C's notice."""
+    if stop is not None:
+        stop.check()
+        stop.unit = unit
 
 
 def _sample(
@@ -82,6 +95,7 @@ def _sample(
     seed: int,
     window: int | None,
     units: Units,
+    stop: Stop | None,
 ) -> None:
     """Shot `index`'s encode and windows, those not kept yet."""
     shot = shots[index]
@@ -92,6 +106,7 @@ def _sample(
         return
     latent = units.latent(index)
     if latent is None:
+        _begin(stop, f"{name}'s encode")
         logger.debug("%s: encoding", name)
         started = _started(models)
         latent = encode_shot(models, inputs.reader(shot), shot.frames, target, shot.seed(seed))
@@ -109,6 +124,7 @@ def _sample(
         latent = latent.to(models.device)
     sampled = sample_windows(models, latent, layout, shot.seed(seed), done)
     for number in range(done, len(layout)):
+        _begin(stop, f"{name}'s window {number + 1}/{len(layout)}")
         logger.debug("%s: window %d/%d", name, number + 1, len(layout))
         started = _started(models)
         units.save_window(index, number, next(sampled))

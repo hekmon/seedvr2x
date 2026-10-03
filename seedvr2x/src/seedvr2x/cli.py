@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.writer import FORMATS
 from seedvr2x.runtime.job import MIN_SEGMENT
+from seedvr2x.runtime.stop import Stop, Stopped, Terminated
 
 if TYPE_CHECKING:
     import torch
@@ -120,8 +121,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     # numz's allocator, which DESIGN.md keeps (Allocator): set before torch is imported.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
+    # A stop at once, a second Ctrl-C or SIGTERM during the run (runtime/stop.py), or Ctrl-C
+    # before it: what is kept is what the manifest says, and the same command resumes.
     try:
         return _run(args)
+    except KeyboardInterrupt:
+        logger.error("stopped at once (Ctrl-C)")
+        return 130
+    except Terminated:
+        logger.error("stopped at once (SIGTERM)")
+        return 143
     finally:
         _unlock()
 
@@ -264,23 +273,37 @@ def _run(args: argparse.Namespace) -> int:
         which = bisect_right(ends, written)
         return segments[remaining[which]].start + written - (ends[which - 1] if which else 0)
 
-    try:
-        outputs = [(paths[index], segments[index].frames) for index in remaining]
-        with SegmentWriter(
-            outputs, open_segment, lambda which: units.segment_finished(remaining[which])
-        ) as writer:
+    outputs = [(paths[index], segments[index].frames) for index in remaining]
+    with Stop() as stop:
+        try:
+            with SegmentWriter(
+                outputs, open_segment, lambda which: units.segment_finished(remaining[which])
+            ) as writer:
 
-            def write(frames: npt.NDArray[np.float32]) -> None:
-                if args.dump_frames is not None:
-                    for written, frame in enumerate(frames, writer.written):
-                        path = args.dump_frames / f"frame_{number(written):06d}.npy"
-                        np.save(path, np.ascontiguousarray(frame))
-                writer.write(frames)
+                def write(frames: npt.NDArray[np.float32]) -> None:
+                    if args.dump_frames is not None:
+                        for written, frame in enumerate(frames, writer.written):
+                            path = args.dump_frames / f"frame_{number(written):06d}.npy"
+                            np.save(path, np.ascontiguousarray(frame))
+                    writer.write(frames)
 
-            run_job(models, parts, shots, segments, target, args.seed, args.window, units, write)
-    except MediaError as error:
-        logger.error("%s", error)
-        return 1
+                run_job(
+                    *(models, parts, shots, segments, target, args.seed, args.window, units),
+                    *(write, stop),
+                )
+        except MediaError as error:
+            logger.error("%s", error)
+            return 1
+        except Stopped:
+            if record is None:
+                kept = "nothing kept: one file can't resume until assembly (milestone 6)"
+            else:
+                kept = (
+                    f"{sum(record.finished)} of {len(segments)} segments finished, and the"
+                    " units of the next ones kept: the same command resumes"
+                )
+            logger.warning("stopped after %s, as asked; %s", stop.unit, kept)
+            return 130
     logger.info(
         "upscaled in %.1f s; wrote %s: %d frames, %s",
         time.monotonic() - started,

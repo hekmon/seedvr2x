@@ -391,9 +391,8 @@ def test_own_names_refused(tmp_path: Path, caplog: pytest.LogCaptureFixture, nam
 
 
 def stopped(tmp_path: Path, input_path: Path, output: str, *options: str) -> None:
-    """Run a job the stand-in stops at once (Steps.stop)."""
-    with pytest.raises(KeyboardInterrupt):
-        upscale(tmp_path, input_path, output, *options)
+    """Run a job the stand-in stops at once (Steps.stop), as a second Ctrl-C would."""
+    assert upscale(tmp_path, input_path, output, *options) == 130
 
 
 def decoded(path: Path) -> bytes:

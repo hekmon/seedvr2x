@@ -12,6 +12,7 @@ from torch import Tensor
 
 from seedvr2x.media.files import make_directories, partial_path, replace_whole
 from seedvr2x.runtime.manifest import STATE, Manifest
+from seedvr2x.runtime.model import synchronize
 
 
 class Units:
@@ -130,6 +131,7 @@ def size(path: Path) -> int:
 
 
 def _save(tensor: Tensor, path: Path) -> None:
+    synchronize(tensor.device)
     copy = tensor.to("cpu")
     if copy.stride() != tensor.stride():
         raise RuntimeError(f"{path}: a CPU copy of {tuple(tensor.stride())} strides changes them")

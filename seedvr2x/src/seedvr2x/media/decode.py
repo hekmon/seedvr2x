@@ -49,8 +49,13 @@ class Decoder:
         self.width, self.height, self.frames = width, height, frames
         self.decoded = 0
         self._frame_bytes = width * height * 3 * 2
+        # In a process group of its own, out of reach of the terminal's Ctrl-C, which only
+        # seedvr2x handles (runtime/stop.py).
         self._process = subprocess.Popen(
-            decode_command(input_args, conversion), stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            decode_command(input_args, conversion),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            process_group=0,
         )
         assert self._process.stdout is not None and self._process.stderr is not None
         # Buffered, as Popen opens it by default.
