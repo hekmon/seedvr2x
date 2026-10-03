@@ -174,12 +174,22 @@ Two forms, one internal model (a list of shots):
 1. **A video file**: a source as it is (any codec ffmpeg decodes, no intermediate master
    needed) or a lossless master. The cuts come from seedvr2x's own detection by default, run as
    a first pass before any GPU work so the planner knows every shot (time estimate, `--until`,
-   manifest). Or they come from a cut list (frame numbers or timestamps): sptenc's once it
-   exports one, or any other tool's.
+   manifest). Or they come from a cut list.
+   - The cut list format: one frame number per line, the first frame of each shot except the
+     first, `#` comments, no timestamps. Frame numbers are exact on the frame grid.
+   - Fields after the frame number are ignored, so an export carrying scores (sptenc's, once
+     it has one) stays readable.
 2. **A directory of segments** (sptenc's split, or any other splitter), plus which joins are
    real cuts: from a cut list, else each join scored by the detector. Joins that aren't real
    cuts are stitched like a long shot. The output mirrors the input's segments (same frame
    ranges and names), so sptenc encodes them as it would its own split.
+   - sptenc's split names its segments `seg_%06d.mkv`: FFV1 `yuv420p10le` in Matroska,
+     timestamps reset.
+   - Its `encode <dir>` takes the `.mkv` and `.mp4` files, any names, in byte-wise name order,
+     and applies no minimum length to a directory. seedvr2x reads a directory the same way.
+   - Every segment must share size, sample aspect, frame rate, conversion, pixel format,
+     primaries and transfer, else the directory is refused.
+   - Until the detector comes, every join is a cut, and `--cuts` is refused with a directory.
 
 Cuts matter for quality, not only for the VAE context: see [Pipeline](#pipeline-per-shot).
 
@@ -234,6 +244,10 @@ The rule: the upscale must look like its source in any given player.
 - **Matrix:** BT.709 for the `yuv420p10le` master at HD sizes and above, whatever the source's
   (BT.601 for SD). Players read the tag, or assume BT.709 at HD sizes, so this is what keeps
   the colours identical everywhere.
+  - Below HD, by the same mpv rule (width under 1280 and height up to 576), the master is
+    BT.601.
+  - It is tagged as the source is when the source says `bt470bg` or `smpte170m`, which have
+    the same coefficients; otherwise it is tagged `smpte170m`.
 - **Primaries and transfer:** copied as the source declares them (untagged stays untagged),
   never converted.
   - Converting the gamut (SD's SMPTE 170M or BT.470 BG to BT.709) changes the RGB values
@@ -261,9 +275,16 @@ The rule: the upscale must look like its source in any given player.
      it, OpenCV-like a = −0.75 without), and that flag's default changed in torchvision 0.17.
      Verified with torchvision 0.29.1: `TVF.resize` defaults to `antialias=True`, so NaResize
      runs a = −0.5.
+   - The target size follows the display aspect. At square pixels it is the size torchvision
+     computes from NaResize's int, and the resize to it is the same call, bit for bit.
 1. **VAE encode** of the whole shot in one causal pass. The VAE already streams in 4-frame
-   slices; resetting it at each cut is correct (no context should cross a cut). Shots must
-   start at real cuts:
+   slices; resetting it at each cut is correct (no context should cross a cut).
+   - The frames are read from the decode as the VAE takes them: 5, then 4 at a time.
+   - The padding to 4n + 1 is made from the last 4 frames read, so the latent is the one-pass
+     encode's, bit for bit.
+   - Only the latents are ever whole in memory.
+
+   Shots must start at real cuts:
    - each latent packs 4 frames (latent frames = 1 + (frames − 1)/4), so a cut inside a group
      mixes both scenes in one latent
    - windows stitched across a cut would cross-fade the two scenes
@@ -294,6 +315,9 @@ The rule: the upscale must look like its source in any given player.
      - Shots never share a noise pattern.
      - A shot's output depends only on the seed, its frames and its place in the source, so a
        resumed or re-cut job reproduces the untouched shots exactly.
+     - Its encode uses the seed plus its first frame plus 1,000,000, as numz does.
+     - numz seeds NumPy, which takes seeds below 2^32, so the highest valid seed depends on
+       the source's length. seedvr2x refuses an out-of-range seed before loading the model.
    - one window per DiT call. Batching windows breaks `na.unconcat_coalesce` when their
      window counts differ, and the planner sizes a window to fill the memory anyway.
 
@@ -336,13 +360,31 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       interpolator, which is why the decode, which interpolates, uses Catmull-Rom.
 
   Validated with the [`ffv1_out.py` wrap](../research/docs/output.md): bit-exact round trip,
-  tags checked by ffprobe.
-- **PNG** (16-bit) as an alternative.
+  tags checked by ffprobe. Our writers give a `yuv420p10le` bit-identical to its output. They
+  set every tag both on the frames (`setparams`) and on the encoder: ffmpeg n9 converts frames
+  whose tags differ from the encoder's.
+- **PNG** (16-bit) as an alternative, one directory per segment, frames numbered from
+  `000000`. ffmpeg's PNG encoder writes the primaries and transfer as cICP, cHRM and gAMA
+  chunks from the frame tags, and none for an untagged frame. So PNG copies the tags as the
+  masters do.
+- **Until assembly** (milestone 6):
+  - `-o x.mkv` writes one FFV1 master; that needs a video file as input.
+  - Any other `-o` is a new or empty directory of segments plus `manifest.json`. The directory
+    must be new or empty, which keeps another run's files out of what sptenc reads, until
+    resume reads the manifest back.
+  - An `-o` with another video suffix (`.mp4`, `.mov`…) is refused.
 - **Output segments**, the resume units of the output, listed in a manifest:
   - **Layout, by sptenc's rule.** The threshold picks the cuts, then the minimum segment
     length (5 s by default) merges each too-short segment into its shorter neighbour, on the
     frame grid. With scdet run as sptenc runs it, the same threshold and minimum give the same
     segments as sptenc. With a directory of segments as input, the output mirrors it instead.
+    - The rule counts in frames: the minimum is rounded up (5 s is 120 frames at 24000/1001),
+      a segment exactly that long is kept, and ties merge left.
+    - Ported, and checked against sptenc's `FilterShortScenes` on 20,000 random cases, run
+      against its Go code.
+    - One known difference: sptenc ends the last segment at the container's duration rounded
+      to a frame, where seedvr2x counts frames. They agree unless that duration is off by
+      half a frame or more.
   - **Shots, the model's units, keep every cut.** A segment can hold several shots, and the
     model still resets at each cut inside it. So the merge costs no quality. It saves what
     short segments cost an encoder: a forced keyframe each, and too few frames to amortise it
@@ -371,6 +413,10 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
   (`mem_get_info`), minus a margin. That covers the desktop and other programs without
   guessing. The validated rule was "torch peak ≤ card size − 2 GiB"; the margin over measured
   free memory is to be re-derived from the emulation data (≈ 0.6 GiB).
+- **Host RAM** too. The process's peak, 16.5 GiB with 7B fp16, comes while the weights load,
+  not during the shots, which stay flat (2.3–2.4 GiB resident over 6 shots). It is probably the
+  weights file mapped while it is copied to the GPU; not measured further. BlockSwap's pinned
+  host copies add their size. Both matter on hosts with little RAM.
 - **Per-phase peaks** (P = output megapixels, T = tile size in megapixels, L = latent frames
   per window):
   - VAE encode ≈ 1.2 + 8.8·P GiB, decode ≈ 0.8 + 16.1·P GiB (flat beyond 9 frames)
@@ -409,6 +455,16 @@ Work is saved in resumable units; a stop loses only the unit in progress.
 
 - **Manifest:** settings, seed, model hashes, finished shots and windows. A resume with
   different settings is refused.
+  - The I/O layer writes a skeleton, `manifest.json`:
+    - settings: version, models by name and size, resolution, seed, window, format, cuts,
+      minimum segment length, overrides
+    - input files: start, frames, rate, size, sample aspect, conversion
+    - output: format, size, rate
+    - shots: start, end, seed
+    - segments: name, frames, finished
+  - It is written once the models load, then rewritten in full as each segment finishes,
+    always atomically (a temporary file, then a rename), since resume will trust it.
+  - Model hashes come with resume.
 - **Stopping:** Ctrl-C once finishes the current unit and exits; twice stops at once.
   `--until HH:MM` stops cleanly before a unit that wouldn't finish in time, using the
   planner's time estimates.
@@ -439,12 +495,37 @@ Work is saved in resumable units; a stop loses only the unit in progress.
 
 ## Validation milestones
 
-The numbers name the checks, not the build order. After milestones 1 and 2 comes the I/O layer:
+The numbers name the checks, not the build order. After milestones 1 and 2 came the I/O layer:
 - decode, writers, cut-list and directory input, output segments and the manifest
 - checked by the conversion tests (see [Input](#input)), frame counts, and per-shot identity
 
 Every later milestone needs it: resume needs segments and a manifest, assembly needs decode and
 writers, and the planner needs real shot lengths.
+
+**The I/O layer passed on 2026-10-03.** The milestone-1 regression is still bit-identical.
+- Writers: `yuv420p10le` bit-identical to `ffv1_out.py`'s; white at 940, black at 64, chroma
+  sited left; tags as declared.
+- Shots: each shot of a cut-list job is identical to the same shot run alone, from its own
+  frames, with its seed.
+- Display aspect: 720×480 at 16:9 gives 1920×1080.
+- Directory input: the output mirrors names and frame counts, and equals the one file cut at
+  the joins, frame for frame.
+- Segments: joined, they equal the one-file output, byte for byte. The merge rule is
+  identical to sptenc's on 20,000 random cases.
+- Long real segment: 377 frames at 1080p, 6 shots including 1- and 2-frame ones, run at 540p
+  with window 8. Every frame came out, resident RAM stayed flat at 2.3–2.4 GiB, and VRAM
+  peaked at 19–26 GiB.
+
+**Next, in this order:**
+1. Resume (milestone 4). Real episodes need it: at 4.4 s per 1080p frame
+   ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode takes
+   about 40 GPU hours. `--until` waits for the planner's time estimates.
+2. The `lab` rewrite (milestone 5). Without it the output keeps the model's colour drift.
+3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
+   1080p, windows and the streamed decode already bound memory, and the planner's inputs (4K
+   limits, the margin) come from the measurement campaign.
+4. Assembly and `--segment-cmd` (milestone 6), for the regular workflow. The manual sptenc
+   workflow already works without it.
 
 1. **Reproduce numz.** Passed on 2026-10-02: 45 of 45 frames bit-identical, on the FFV1
    masters and on the float32 dumps. Same settings: one batch, no tiling, `flash_attn_2`, same
@@ -521,8 +602,21 @@ writers, and the planner needs real shot lengths.
     inside a segment unmarked
   - scdet also fires on pans and flashes, so a join isn't always a cut
 
-  Open: the machine-readable list sptenc should export (frame indexes, scores, and the cuts
-  the merge removed), and how seedvr2x treats cuts inside a segment and doubtful joins.
+  seedvr2x's side is settled: it reads a cut list of frame numbers (see [Input](#input)), so
+  sptenc's export can write that, with scores and the cuts the merge removed as extra fields.
+  Open: how seedvr2x treats cuts inside a segment and doubtful joins.
+- **Colour correction's input frames at decode.** `lab` compares each output frame with its
+  input. The streamed pipeline has passed the input by the time a shot decodes: only the
+  latents are kept. Three ways:
+  - re-read the shot from the source, which needs the frame-exact access below
+  - keep a temporary lossless copy of each shot's decoded input, written while the encode
+    reads it: exact, sequential, and on disk at input resolution, one shot at a time
+  - keep only what the rewritten `lab` needs (its low frequencies and LAB statistics),
+    computed at read time
+
+  Recommendation: the temporary copy. It is the simplest, it's exact, and it doesn't depend on
+  seeking. It stays part of the shot's resumable state until its decode is done. To confirm at
+  the `lab` checkpoint, with the seeking results.
 - **Frame-exact access into long-GOP sources**, to resume a shot and to read its input frames
   again for colour correction. Three ways:
   - ffmpeg's accurate seek: fast, but trusts timestamps
