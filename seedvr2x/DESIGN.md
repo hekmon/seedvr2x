@@ -1036,7 +1036,8 @@ writers, and the planner needs real shot lengths.
    frame ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode
    takes about 40 GPU hours.
 2. The `lab` rewrite (milestone 5), next. Without it the output keeps the model's colour
-   drift.
+   drift. Then, as a small step of its own, the model check of [Weights](#weights): today a 3B
+   or fp8 file is accepted by its name, then fails later or runs unchecked.
 3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory, and the planner's inputs (4K
    limits, the margin) come from the measurement campaign.
