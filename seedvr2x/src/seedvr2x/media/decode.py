@@ -1,12 +1,13 @@
 """Decoding to 16-bit RGB through an ffmpeg pipe, frames read as they are needed."""
 
 import io
+import os
 import subprocess
-import threading
+import tempfile
 from collections import deque
 from collections.abc import Sequence
 from types import TracebackType
-from typing import IO, Self, cast
+from typing import Self, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -43,7 +44,16 @@ class Decoder:
     zscale converts them with every parameter explicit (Conversion). They are counted as they
     come, never trusting the container's count (bug 11): at the end, there must be `frames` of
     them, the first pass's count, when given. Used as a context manager, the end is checked on a
-    normal exit, and ffmpeg is stopped on an exception."""
+    normal exit, and ffmpeg is stopped on an exception.
+
+    strict: anything ffmpeg reports fails the read, before the frames read with it are given. That
+    is how FFV1's slice CRCs are enforced: on a mismatch, ffmpeg's FFV1 decoder reports it, hides
+    the slice under the frame before's and goes on, and ffmpeg exits 0, whatever its options
+    (n9.0.2: -err_detect crccheck+explode and -xerror alike, the slice executor of
+    libavcodec/ffv1dec.c dropping each slice's error). ffmpeg reports a frame's damage as it
+    decodes it, so before writing it: in the file before the frame is in the pipe. ffmpeg's
+    reports go to a temporary file: where the temporary directory is full, ffmpeg loses them
+    without a word, and a strict read then fails on nothing more than a normal one."""
 
     def __init__(
         self,
@@ -52,27 +62,30 @@ class Decoder:
         width: int,
         height: int,
         frames: int | None = None,
+        strict: bool = False,
     ) -> None:
         self.width, self.height, self.frames = width, height, frames
         self.decoded = 0
         self._frame_bytes = width * height * 3 * 2
+        self._strict = strict
+        # ffmpeg's errors go to a file rather than a pipe: ffmpeg never waits on it, and its size
+        # says at once whether ffmpeg has reported anything (strict).
+        try:
+            self._log = tempfile.TemporaryFile()
+        except OSError as error:
+            what = f"decoding with ffmpeg: no temporary file for its errors: {error}"
+            raise MediaError(what) from error
         # In a process group of its own, out of reach of the terminal's Ctrl-C, which only
         # seedvr2x handles (runtime/stop.py).
         self._process = subprocess.Popen(
             decode_command(input_args, conversion),
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self._log,
             process_group=0,
         )
-        assert self._process.stdout is not None and self._process.stderr is not None
+        assert self._process.stdout is not None
         # Buffered, as Popen opens it by default.
         self._stdout = cast(io.BufferedReader, self._process.stdout)
-        self._errors: deque[str] = deque(maxlen=20)
-        # stderr is drained as it comes: a full pipe would stop ffmpeg, and this reader with it.
-        self._drain = threading.Thread(
-            target=self._read_errors, args=(self._process.stderr,), daemon=True
-        )
-        self._drain.start()
 
     def read(self, count: int) -> npt.NDArray[np.uint16]:
         """The next `count` frames, (n, H, W, 3) uint16 RGB: fewer only at the end of the
@@ -91,6 +104,7 @@ class Decoder:
             raise self._error(f"its output ends {rest} bytes into frame {self.decoded}")
         if self.frames is not None and self.decoded > self.frames:
             raise self._error(f"more frames than the {self.frames} the first pass counted")
+        self._check()
         frames = planes[:whole]
         return np.stack((frames[:, 2], frames[:, 0], frames[:, 1]), axis=-1)
 
@@ -112,6 +126,7 @@ class Decoder:
             raise self._error(f"its output ends {rest} bytes into frame {self.decoded}")
         if self.frames is not None and self.decoded > self.frames:
             raise self._error(f"more frames than the {self.frames} the first pass counted")
+        self._check()
         return whole
 
     def finish(self) -> None:
@@ -120,8 +135,10 @@ class Decoder:
             raise self._error(f"frames left after {self.decoded}")
         if self._process.wait() != 0:
             raise self._error(f"exit status {self._process.returncode}")
+        self._check()
         if self.frames is not None and self.decoded != self.frames:
             raise self._error(f"{self.decoded} frames, the first pass counted {self.frames}")
+        self._log.close()
 
     def failure(self, what: str) -> MediaError:
         """ffmpeg stopped, and the error to raise: what, with ffmpeg's last errors."""
@@ -131,6 +148,7 @@ class Decoder:
         """Stop ffmpeg, whatever is left to read."""
         self._process.kill()
         self._process.wait()
+        self._log.close()
 
     def __enter__(self) -> Self:
         return self
@@ -146,14 +164,21 @@ class Decoder:
         else:
             self.stop()
 
-    def _read_errors(self, stream: IO[bytes]) -> None:
-        for line in stream:
-            self._errors.append(line.decode(errors="replace").strip())
+    def _check(self) -> None:
+        """When strict, fail if ffmpeg has reported anything yet."""
+        if self._strict and os.fstat(self._log.fileno()).st_size:
+            raise self._error("an error reported, which fails a strict read")
 
     def _error(self, what: str) -> MediaError:
-        self.stop()
-        self._drain.join(timeout=5)
-        errors = " / ".join(self._errors)
+        """ffmpeg stopped, and what to raise: what, with ffmpeg's last 20 lines of errors."""
+        self._process.kill()
+        self._process.wait()
+        errors = ""
+        if not self._log.closed:
+            self._log.seek(0)  # ffmpeg is done writing at the offset the file shares with it
+            lines = deque(self._log, maxlen=20)
+            errors = " / ".join(line.decode(errors="replace").strip() for line in lines)
+            self._log.close()
         return MediaError(f"decoding with ffmpeg: {what}" + (f": {errors}" if errors else ""))
 
 

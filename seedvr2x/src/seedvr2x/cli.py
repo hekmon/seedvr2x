@@ -236,7 +236,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime import manifest
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.run import run_job
-    from seedvr2x.runtime.shot import NonFinite, shot_layout
+    from seedvr2x.runtime.shot import CopyError, NonFinite, shot_layout
     from seedvr2x.runtime.units import DiskUnits, Units
 
     units, record = Units(work), None
@@ -320,6 +320,11 @@ def _run(args: argparse.Namespace) -> int:
                     *(models, parts, shots, segments, target, args.seed, args.window, units),
                     *(write, stop, args.color_correction == "lab"),
                 )
+        except CopyError as error:
+            # Derived data, removed (run_job): a resume makes it again.
+            again = "" if record is None else "; removed, made again from the input on resuming"
+            logger.error("%s%s; stopped: %s", error, again, _kept(record, len(segments)))
+            return 1
         except MediaError as error:
             logger.error("%s", error)
             return 1

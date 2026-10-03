@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+from pathlib import Path
 from types import TracebackType
 from typing import Self
 
@@ -21,6 +22,7 @@ from seedvr2x.media.writer import FFV1Writer, Tags, Writer
 from seedvr2x.runtime.job import OutputSegment, Part, Shot
 from seedvr2x.runtime.model import Models
 from seedvr2x.runtime.shot import (
+    CopyError,
     Lab,
     decode_shot,
     encode_shot,
@@ -35,6 +37,10 @@ from seedvr2x.runtime.units import Units
 logger = logging.getLogger(__name__)
 
 GIB = 1024**3
+
+# The frames read at a time when a shot's input copy is made again: 8 at 1080p are 200 MB of
+# float32.
+COPY_READS = 8
 
 
 @dataclass(frozen=True)
@@ -76,7 +82,10 @@ def run_job(
 
     stop, when given, is checked before each unit (Stop.check). With lab, the frames each encode
     reads are copied as they come (units.copy_path), and the shot's decode corrects its frames
-    against them (DESIGN.md, Colour correction)."""
+    against them (DESIGN.md, Colour correction). A copy is derived data: one missing is made
+    again from the input before the shot's windows, its latent and windows kept; one its decode
+    can't read whole and intact (CopyError) is removed, and the run stops there, for the next
+    run to make it again."""
     stream = parts[0].source.stream
     copies = Copies(stream.width, stream.height, stream.frame_rate) if lab else None
     groups = [
@@ -120,14 +129,18 @@ def _sample(
     copies: Copies | None,
 ) -> None:
     """Shot `index`'s encode and windows, those not kept yet; with copies, the frames the encode
-    reads copied, the copy whole before the latent is recorded, so recorded with it."""
+    reads copied, the copy whole before the latent is recorded, so recorded with it, and the copy
+    of a shot encoded already made again if missing."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
     layout = shot_layout(shot.frames, window)
     done = units.windows_done(index)
+    latent = None if done == len(layout) else units.latent(index)
+    encoded = done == len(layout) or latent is not None
+    if copies is not None and encoded and not units.copy_path(index).exists():
+        _copy_again(index, name, inputs, shots, units, stop, copies)
     if done == len(layout):
         return
-    latent = units.latent(index)
     if latent is None:
         _begin(stop, f"{name}'s encode")
         logger.debug("%s: encoding", name)
@@ -136,12 +149,7 @@ def _sample(
         if copies is None:
             latent = encode_shot(models, read, shot.frames, target, shot.seed(seed))
         else:
-            path = units.copy_path(index)
-            # Synced in its parent, as a unit's directory is: the copy is recorded with the
-            # latent.
-            make_directories(path.parent)
-            size = (copies.width, copies.height, copies.frame_rate)
-            with FFV1Writer(path, "gbrp16le", *size, Tags()) as copy:
+            with _copy_writer(units.copy_path(index), copies) as copy:
                 latent = encode_shot(
                     models, _copied(read, copy), shot.frames, target, shot.seed(seed)
                 )
@@ -180,6 +188,33 @@ def _sample(
     units.drop_latent(index)
 
 
+def _copy_again(
+    index: int,
+    name: str,
+    inputs: "Inputs",
+    shots: Sequence[Shot],
+    units: Units,
+    stop: Stop | None,
+    copies: Copies,
+) -> None:
+    """Make shot `index`'s input copy again, as its encode did, from the input frames it read:
+    bit for bit the frames the first copy held, the input's content being checked (DESIGN.md,
+    Colour correction), unless an environment change accepted since then changed ffmpeg or its
+    conversions, the copy then being the new decode's frames (--accept-env-change)."""
+    shot = shots[index]
+    _begin(stop, f"{name}'s input copy")
+    started = time.monotonic()
+    read = inputs.reader(shot)
+    with _copy_writer(units.copy_path(index), copies) as copy:
+        for first in range(0, shot.frames, COPY_READS):
+            copy.write(read(min(COPY_READS, shot.frames - first)))
+    logger.info(
+        "%s: its input copy missing, made again from the input in %.1f s",
+        name,
+        time.monotonic() - started,
+    )
+
+
 def _decode(
     models: Models,
     shots: Sequence[Shot],
@@ -201,7 +236,12 @@ def _decode(
     if copies is not None:
         paths = (units.copy_path(index), units.buffer_path(index))
         lab = Lab(*paths, copies.width, copies.height)
-    decode_shot(models, merged, shot.frames, target, write, name, shot.start, lab)
+    try:
+        decode_shot(models, merged, shot.frames, target, write, name, shot.start, lab)
+    except CopyError:
+        # Derived data: removed, the next run makes it again from the input (_sample).
+        units.copy_path(index).unlink(missing_ok=True)
+        raise
     units.shot_decoded(index)
     logger.info(
         "%s: decoded in %s; RAM %.2f GiB, peak %.2f GiB",
@@ -210,6 +250,13 @@ def _decode(
         _resident() / GIB,
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB,
     )
+
+
+def _copy_writer(path: Path, copies: Copies) -> FFV1Writer:
+    """The writer of a shot's input copy at path, its directory made first: synced in its parent,
+    as a unit's directory is, the copy being recorded with the shot's latent."""
+    make_directories(path.parent)
+    return FFV1Writer(path, "gbrp16le", copies.width, copies.height, copies.frame_rate, Tags())
 
 
 def _copied(

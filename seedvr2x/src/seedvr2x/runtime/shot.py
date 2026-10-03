@@ -50,6 +50,16 @@ class Lab:
     height: int
 
 
+class CopyError(MediaError):
+    """A shot's input copy that its decode can't read whole and intact: missing, cut short, or
+    failing FFV1's slice CRCs. It is derived data: the run stops, and the next one makes it again
+    from the input, keeping the shot's latent and windows (DESIGN.md, Colour correction)."""
+
+    def __init__(self, copy: Path, error: MediaError) -> None:
+        super().__init__(f"{copy}: the shot's input copy, not readable whole and intact: {error}")
+        self.copy = copy
+
+
 class NonFinite(RuntimeError):
     """NaN or inf in what a unit made: the unit isn't recorded, and the run stops there, naming it,
     in either colour correction mode (DESIGN.md, Pause and resume). A resume makes the unit again
@@ -318,7 +328,9 @@ def _correct(
     frames (chunks, _decoded) and counts the histograms, the second reads them back, maps them and
     writes them, float32. Each pass rebuilds the reference from the input copy, and converts in
     the same calls, the decode's slices, so that the second finds the values the first counted.
-    The buffer goes at the end, whatever happens."""
+    The second pass writes its last frames once the copy is read whole and checked, since they
+    may finish the output segment, which is then recorded. The buffer goes at the end, whatever
+    happens."""
     height, width = output_size(target)
     histograms = colour.Histograms(models.device)
     sizes: list[int] = []
@@ -343,6 +355,7 @@ def _correct(
                 corrected = colour.rgb_to_lab(colour.unit_range(colour.transfer(content, matched)))
                 histograms.add(corrected, colour.rgb_to_lab(colour.unit_range(matched)))
                 sizes.append(content.shape[0])
+        last: npt.NDArray[np.float32] | None = None
         with _copy_reader(lab, count) as read, open(lab.buffer, "rb") as buffer:
             reference = _frames(encoder_inputs(models, read, count, target), height, width)
             for size in sizes:
@@ -354,7 +367,11 @@ def _correct(
                 corrected = colour.rgb_to_lab(colour.unit_range(colour.transfer(content, matched)))
                 rgb = colour.lab_to_rgb(histograms.match(corrected))
                 model.synchronize(models.device)
-                write(rgb.permute(0, 2, 3, 1).to("cpu").numpy())
+                if last is not None:
+                    write(last)
+                last = rgb.permute(0, 2, 3, 1).to("cpu").numpy()
+        if last is not None:
+            write(last)
     finally:
         lab.buffer.unlink(missing_ok=True)
 
@@ -362,17 +379,38 @@ def _correct(
 @contextmanager
 def _copy_reader(lab: Lab, count: int) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
     """read(n), the next n frames of the shot's input copy, (n, H, W, 3) float32 in [0, 1] as the
-    encode read them; at the end, the copy is checked to hold `count` frames (Decoder)."""
-    with Decoder(input_args(lab.copy), COPY_READ, lab.width, lab.height, count) as decoder:
+    encode read them. The copy is read strictly (Decoder), so that anything ffmpeg reports raises
+    CopyError, before the frames read with it are given: the copy missing, a slice failing its
+    CRC, the file cut short. The frames are counted, `count` of them by the end. What ffmpeg
+    doesn't report goes through: a slice's size damaged can make libavcodec/ffv1dec.c, which
+    derives each frame's slice count from the sizes, skip slices without a word (the picture
+    there left from another frame), and a block whose ID is damaged is dropped, which only the
+    count catches."""
+    decoder = Decoder(input_args(lab.copy), COPY_READ, lab.width, lab.height, count, strict=True)
 
-        def read(n: int) -> npt.NDArray[np.float32]:
+    def read(n: int) -> npt.NDArray[np.float32]:
+        with _copy_failing(lab.copy):
             frames = decoder.read(n)
             if frames.shape[0] != n:
-                ended = f"{lab.copy}: the copy ended after {decoder.decoded} of its {count} frames"
-                raise decoder.failure(ended)
-            return to_float32(frames)
+                raise decoder.failure(f"it ended after {decoder.decoded} of its {count} frames")
+        return to_float32(frames)
 
+    try:
         yield read
+    except BaseException:
+        decoder.stop()
+        raise
+    with _copy_failing(lab.copy):
+        decoder.finish()
+
+
+@contextmanager
+def _copy_failing(copy: Path) -> Generator[None]:
+    """A failure to read the copy, raised as CopyError; what the reader's user raises isn't."""
+    try:
+        yield
+    except MediaError as error:
+        raise CopyError(copy, error) from error
 
 
 def _frames(slices: Iterator[Tensor], height: int, width: int) -> Callable[[int], Tensor]:

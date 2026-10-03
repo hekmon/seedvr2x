@@ -129,7 +129,8 @@ def leftovers(manifest: Manifest) -> list[Path]:
     partial files and directories, an unfinished segment's file, a shot's unit files not recorded,
     the units of finished segments. Refused (JobError): a finished segment missing or of another
     size, a unit recorded but missing, and anything in the directory that isn't this job's, which
-    is never deleted."""
+    is never deleted. A shot's input copy missing isn't refused: it is derived data, which the run
+    makes again (run_job)."""
     directory = manifest.path.parent
     found: list[Path] = []
     names = {NAME, partial_path(manifest.path).name, STATE}
@@ -186,7 +187,7 @@ def _unit_leftovers(manifest: Manifest) -> list[Path]:
         if index in finished:
             continue
         directory = root / f"shot_{manifest.shots[index].start:06d}"
-        for name in sorted(_kept(manifest, index)):
+        for name in sorted(_kept(manifest, index) - {COPY}):
             if not (directory / name).is_file():
                 raise JobError(f"{directory / name}: kept, the manifest says, but missing")
     if all(manifest.finished) and root.is_dir():

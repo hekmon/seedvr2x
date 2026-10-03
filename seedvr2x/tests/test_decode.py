@@ -2,6 +2,7 @@
 the refusals (DESIGN.md, Input). Skipped without an ffmpeg seedvr2x accepts."""
 
 import dataclasses
+import json
 import re
 import shutil
 import subprocess
@@ -15,8 +16,9 @@ import pytest
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion
 from seedvr2x.media.decode import Decoder, decode_command, to_float32
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.ffmpeg import MediaError, input_args
 from seedvr2x.media.source import examine
+from seedvr2x.media.writer import FFV1Writer, Tags
 
 
 def _usable() -> bool:
@@ -32,6 +34,7 @@ pytestmark = pytest.mark.skipif(not _usable(), reason="needs ffmpeg with zscale,
 WIDTH, HEIGHT = 64, 16  # multiples of 4: 4:1:1 and 4:1:0 included
 YUV709 = Conversion("yuv420p", "709", "limited", "left")
 RGB = Conversion("gbrp", "gbr", "full", "left")
+RGB16 = Conversion("gbrp16le", "gbr", "full", "left")
 Planes = tuple[npt.NDArray[np.uint16], npt.NDArray[np.uint16], npt.NDArray[np.uint16]]
 
 
@@ -495,3 +498,68 @@ def test_skipped_frames_are_counted_not_converted(tmp_path: Path) -> None:
         assert np.array_equal(decoder.read(1), whole[6:])
     with Decoder(raw_args("gbrp16le", path), conversion, WIDTH, HEIGHT, 7) as decoder:
         assert decoder.skip(9) == 7  # fewer only at the end
+
+
+def ffv1_copy(path: Path, frames: npt.NDArray[np.uint16]) -> Path:
+    """frames, (T, H, W, 3), written as lab's input copies are (runtime/run.py): FFV1 gbrp16le,
+    each slice with its CRC."""
+    with FFV1Writer(path, "gbrp16le", WIDTH, HEIGHT, Fraction(25), Tags()) as writer:
+        writer.write(to_float32(frames))
+    return path
+
+
+def flipped(path: Path, frame: int) -> Path:
+    """A copy of the file at path, a byte flipped in the middle of frame `frame`'s packet."""
+    probed = run_probe("-show_entries", "packet=pos,size", "-of", "json", str(path))
+    packet = json.loads(probed)["packets"][frame]
+    data = bytearray(path.read_bytes())
+    data[int(packet["pos"]) + int(packet["size"]) // 2] ^= 0xFF
+    damaged = path.with_name(f"flipped-{path.name}")
+    damaged.write_bytes(data)
+    return damaged
+
+
+def run_probe(*args: str) -> bytes:
+    result = subprocess.run(["ffprobe", "-v", "error", *args], capture_output=True)
+    assert result.returncode == 0, result.stderr.decode()
+    return result.stdout
+
+
+def test_strict_read_enforces_slice_crcs(tmp_path: Path) -> None:
+    # ffmpeg decodes through an FFV1 slice failing its CRC, hides it under the frame before's and
+    # exits 0; a strict read fails instead, saying so, and gives no frame wrong before it fails,
+    # ffmpeg reporting a frame's damage before writing the frame. 200 frames, so that ffmpeg is
+    # still decoding ahead when the damaged one comes.
+    frames = np.random.default_rng(0).integers(0, 65536, (200, HEIGHT, WIDTH, 3), dtype=np.uint16)
+    copy = ffv1_copy(tmp_path / "copy.mkv", frames)
+    damaged = flipped(copy, 150)
+    with Decoder(input_args(damaged), RGB16, WIDTH, HEIGHT, 200) as decoder:
+        through = decoder.read(200)
+    assert np.array_equal(through[:150], frames[:150])
+    assert np.array_equal(through[151:], frames[151:])
+    assert not np.array_equal(through[150], frames[150])
+    given: list[npt.NDArray[np.uint16]] = []
+    with (
+        pytest.raises(MediaError, match=r"fails a strict read: .*slice CRC mismatch"),
+        Decoder(input_args(damaged), RGB16, WIDTH, HEIGHT, 200, strict=True) as decoder,
+    ):
+        while True:
+            given.append(decoder.read(1)[0])
+    assert len(given) <= 150
+    assert all(np.array_equal(frame, frames[index]) for index, frame in enumerate(given))
+    with Decoder(input_args(copy), RGB16, WIDTH, HEIGHT, 200, strict=True) as decoder:
+        assert np.array_equal(decoder.read(200), frames)
+
+
+@pytest.mark.parametrize("kept", [0.5, 0.999])
+def test_strict_read_refuses_a_file_cut_short(tmp_path: Path, kept: float) -> None:
+    # Cut short, even in what follows the last frame: ffmpeg says so, which fails a strict read.
+    frames = np.random.default_rng(1).integers(0, 65536, (40, HEIGHT, WIDTH, 3), dtype=np.uint16)
+    data = ffv1_copy(tmp_path / "copy.mkv", frames).read_bytes()
+    cut = tmp_path / "cut.mkv"
+    cut.write_bytes(data[: int(len(data) * kept)])
+    with (
+        pytest.raises(MediaError, match="fails a strict read"),
+        Decoder(input_args(cut), RGB16, WIDTH, HEIGHT, 40, strict=True) as decoder,
+    ):
+        decoder.read(40)
