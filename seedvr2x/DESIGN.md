@@ -343,9 +343,11 @@ What numz's `lab` does, per batch slice (numz `4490bd1`):
   rebuilt with the model's input transform, in fp16 on the CPU. That is not the tensor the
   encoder saw; ByteDance uses that one.
 - **Wavelet split.** The output is the content's high band plus the reference's low band,
-  clamped. The low band is 5 à-trous stages of the 3×3 binomial kernel, dilations 1 to 16,
-  edges replicated at each stage: away from the edges, a separable 63-tap tent filter,
-  σ ≈ 13 px. The high band is the image minus the low band.
+  clamped. The low band is 5 à-trous stages of the 3×3 binomial kernel, edges replicated at
+  each stage: away from the edges, a separable 63-tap tent filter, σ ≈ 13 px. The high band
+  is the image minus the low band.
+  - The dilation at stage s is min(2^s, max(1, ⌊min(H, W) / 8⌋)): 1 to 16, capped only on
+    frames under 128 px.
 - **Matching**, in float32: RGB to CIELAB (sRGB, D65), then histogram matching per channel by
   exact rank over all the slice's frames (a* and b* fully, L* = 0.8 content + 0.2 matched),
   then back to RGB, clamped, bf16.
@@ -367,10 +369,27 @@ Ours:
   integer histograms pooled over the shot: 2^16 bins per channel, linear within a bin.
   - numz's exact sort doesn't scale to a shot: a pooled GPU sort takes about 104 B per output
     pixel-frame, and torch's CUDA sort stops at 2^31 elements (about 1,035 frames at 1080p).
-  - The histograms are deterministic, and tied values map alike rather than by position. The
-    result is within one bin (≈ 0.004 units) of numz's sort.
+  - The histograms are 2^16 bins per channel over [−128, 128), 1/256 unit each. That range
+    holds the CIELAB value of every RGB in [0, 1] (L* 0–100, a* −86.2 to 98.2, b* −107.9 to
+    94.5). A value outside it, or NaN, is refused.
+  - The histograms are deterministic. Each value comes out within one bin of the values
+    numz's sort gives to the values of its bin, and tied values come out alike. Per pixel,
+    the two differ by a median 0.001 units.
+  - numz's sort also orders the values inside a bin, and it gives tied pixels different
+    reference values according to their position in memory: up to 4 a* units apart on a
+    flat test area.
 - **Numerics.**
   - The split runs in float32. numz's bf16 is 0.10 level off on average, 1.17 at most.
+  - The low band is moved by adding the difference of the low bands: content +
+    (low(reference) − low(content)). That is the same sum as high(content) + low(reference),
+    without rounding a high band on its own. A float32 high band added back to its low band
+    misses the image at 0.4–2.2% of values on test frames, whereas content moved onto itself
+    comes back bit for bit.
+  - In the pipeline, `lab` runs on the GPU. On the CPU, torch's `pow` makes the conversions'
+    last bits depend on the call's size and thread count (258 of 1.56M values), and likely on
+    the CPU's vector unit. The resume environment records neither, while the GPU model is
+    compared. The CPU path serves the tests. Each shot is converted in the same calls in both
+    passes.
   - The reference is the encoder's exact input tensor, rebuilt from the input copy with the
     same transform, as ByteDance does.
   - The corrected frames stay float32 for the writer. The low band and the mapping are
@@ -607,6 +626,14 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - `--until HH:MM` stops cleanly before a unit that wouldn't finish in time, using the
     planner's time estimates; it comes with the planner.
 - Exiting frees the GPU entirely.
+- **Non-finite values** (NaN, inf) stop the run, in both colour correction modes, with a
+  message naming the stage, shot, window or frames. numz writes NaN patches about 63 px wide
+  through its `lab`, and with `none` a master would get whatever the VAE produced.
+  - Every unit is checked before it is recorded: the encode's latent, each DiT window, and
+    each decode slice. A unit holding a non-finite value is never recorded, so a resume can't
+    reuse it.
+  - Stopping at the first stage that produces one names the culprit and saves the decode.
+  - A resume restarts that unit once the cause is fixed.
 - **Resume is bit-identical** to an uninterrupted run: deterministic noise per shot, exact
   latents, deterministic attention (FA2 reruns are bit-identical). Checked on 2026-10-03 on
   milestone 1's input in 3 shots (one in 3 windows) and 2 segments:
