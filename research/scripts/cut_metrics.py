@@ -4,6 +4,7 @@
   cut_metrics.py analyze RUN.json --ref REF.json --cut C [--noise JSON ...] [--q 0.95] [--stable 4]
                  [--smooth N] [--thr METRIC=V ...] [--blocks 1,8] [--no-ghost] [--label L] [--json OUT]
   cut_metrics.py compare --row LABEL:JSON:FIRST ... --frames N      # per-frame values side by side
+  cut_metrics.py first JSON[:FIRST] ... [--frames 8]                 # a shot's first frame vs its next ones
   cut_metrics.py join A.mkv B.mkv ... --out AB.mkv                   # lossless concatenation
   cut_metrics.py selftest GT.mkv --cut C [--out OUT.mkv]             # ghost coefficient on known mixes
   cut_metrics.py summary JSON ...                                     # Markdown table of analyses
@@ -55,6 +56,16 @@ of its second frame: d = 0 is the cut itself.
 `compare` prints, for N frames, the per-frame values of several outputs side by side, each row
 taken from its own JSON from frame FIRST on (e.g. a short shot run alone, the same frames inside
 the aligned reference, and inside a one-batch run).
+
+`first` compares a shot's first frame (index FIRST of each JSON, default 0) with its next N
+frames (--frames, default 8): per metric frame 0, the mean of frames 1..N and frame 0's deficit
+d0 (positive = frame 0 worse, as in `analyze`); for the temporal errors, transition 0->1 against
+the mean of transitions 2..N; and the sharpness, fr_clips' Laplacian variance of the luma
+relative to the ground truth's, of frame 0 against frames 1..N and its jump from frame 0 to
+frame 1 (read from the masters the JSONs name). The outputs of the same clip and variant that
+differ by their seed give the seed noise of d0: |d0(seed a) - d0(seed b)| over every pair, its
+--q quantile (default 0.95) and maximum. Made for --prepend_frames, which moves a shot's first
+frame out of the lone first latent.
 
 `join` concatenates RGB masters (FFV1, same size and pixel format) into one FFV1 master of the
 same format, without any pixel conversion, and checks it by framemd5 against its parts.
@@ -534,6 +545,83 @@ def cmd_selftest(a):
     sys.exit(0 if ok else 1)
 
 
+# ------------------------------------------------------------------ first
+
+FIRST_KEYS = ("psnr_y", "lpips", "dists", "vmaf", "temporal_full", "temporal_lf")
+
+
+def lap_vars(path, first, n):
+    """fr_clips.lap_var of the luma of frames first..first+n of a master."""
+    out, gen = [], luma_frames(path)
+    try:
+        for i, y in enumerate(gen):
+            if i >= first:
+                out.append(fr_clips.lap_var(y))
+            if i >= first + n:
+                break
+    finally:
+        gen.close()
+    return np.array(out)
+
+
+def first_frame(r, first, n):
+    """A shot's first frame (index `first` of an fr_metrics result) against its next n frames."""
+    res = {}
+    for k in FIRST_KEYS:
+        s = series(r, k)
+        if s is None or len(s) < first + n + 1:
+            continue
+        s = s[first:]
+        if BY_KEY[k][3]:  # per transition: 0->1 against 2..n
+            f0, rest = float(s[1]), float(np.nanmean(s[2:n + 1]))
+            res[k] = {"f0": f0, "rest": rest, "d0": f0 - rest}
+        else:
+            f0, rest = float(s[0]), float(np.nanmean(s[1:n + 1]))
+            res[k] = {"f0": f0, "rest": rest, "d0": (rest - f0) if BY_KEY[k][2] else (f0 - rest)}
+    ratio = lap_vars(r["out"], first, n) / lap_vars(r["gt"], first, n)
+    res["sharp"] = {"f0": float(ratio[0]), "rest": float(ratio[1:].mean()),
+                    "d0": float(ratio[0] / ratio[1:].mean() - 1), "step": float(ratio[1] / ratio[0] - 1)}
+    return res
+
+
+def cmd_first(a):
+    n, rows = a.frames, []
+    for item in a.runs:
+        path, _, first = item.partition(":")
+        r = load(path)
+        rows.append((r, int(first or 0), first_frame(r, int(first or 0), n)))
+    keys = [k for k in FIRST_KEYS if all(k in x for _, _, x in rows)]
+    head = [BY_KEY[k][1] + (f": 0->1 / 2-{n} (excess)" if BY_KEY[k][3] else f": frame 0 / 1-{n} (d0)") for k in keys]
+    print(f"### A shot's first frame against its next {n} frames (d0 > 0: frame 0 worse)\n")
+    print("| Output | first | " + " | ".join(head)
+          + f" | Sharpness vs the GT's: frame 0 / 1-{n} (frame 0 vs 1-{n}; jump 0->1) |")
+    print("|---|---|" + "---|" * (len(keys) + 1))
+    for r, first, x in rows:
+        cells = [f"{fmt(x[k]['f0'], BY_KEY[k][4])} / {fmt(x[k]['rest'], BY_KEY[k][4])} ({fmt(x[k]['d0'], BY_KEY[k][5])})"
+                 for k in keys]
+        s = x["sharp"]
+        cells.append(f"{s['f0']:.3f} / {s['rest']:.3f} ({s['d0']:+.0%}; {s['step']:+.0%})")
+        print(f"| {r.get('clip')} {r.get('variant')} s{r.get('seed')} | {first} | " + " | ".join(cells) + " |")
+    groups = {}
+    for r, first, x in rows:
+        groups.setdefault((r.get("clip"), r.get("variant"), first), {})[str(r.get("seed"))] = x
+    diffs = {k: [] for k in keys + ["sharp", "step"]}
+    for g in groups.values():
+        seeds = sorted(g)
+        for i in range(len(seeds)):
+            for j in range(i + 1, len(seeds)):
+                x, y = g[seeds[i]], g[seeds[j]]
+                for k in keys:
+                    diffs[k].append(abs(x[k]["d0"] - y[k]["d0"]))
+                diffs["sharp"].append(abs(x["sharp"]["d0"] - y["sharp"]["d0"]))
+                diffs["step"].append(abs(x["sharp"]["step"] - y["sharp"]["step"]))
+    if diffs["sharp"]:
+        names = {"sharp": "sharpness of frame 0", "step": "sharpness jump"}
+        print(f"\nSeed noise of d0, |d0(seed a) - d0(seed b)| over {len(diffs['sharp'])} pairs (q{a.q:g} / max):\n")
+        for k, v in diffs.items():
+            print(f"- {BY_KEY[k][1] if k in BY_KEY else names[k]}: {np.quantile(v, a.q):.4g} / {max(v):.4g}")
+
+
 # ------------------------------------------------------------------ summary
 
 def cmd_summary(a):
@@ -600,6 +688,11 @@ def main():
     s = sub.add_parser("compare", help="per-frame values of several outputs side by side")
     s.add_argument("--row", action="append", required=True, metavar="LABEL:JSON:FIRST")
     s.add_argument("--frames", type=int, required=True)
+    s = sub.add_parser("first", help="a shot's first frame against its next frames, with the seed noise of that")
+    s.add_argument("runs", nargs="+", metavar="JSON[:FIRST]",
+                   help="fr_metrics JSONs; FIRST = index of the shot's first frame in it (default 0)")
+    s.add_argument("--frames", type=int, default=8, help="next frames compared (default 8)")
+    s.add_argument("--q", type=float, default=0.95, help="seed-noise quantile (default 0.95)")
     s = sub.add_parser("join", help="lossless concatenation of RGB masters, checked by framemd5")
     s.add_argument("parts", nargs="+")
     s.add_argument("--out", required=True)
@@ -612,8 +705,8 @@ def main():
     s = sub.add_parser("summary", help="Markdown table of analysis JSONs (files or directories)")
     s.add_argument("files", nargs="+")
     a = ap.parse_args()
-    {"analyze": cmd_analyze, "compare": cmd_compare, "join": cmd_join, "selftest": cmd_selftest,
-     "summary": cmd_summary}[a.cmd](a)
+    {"analyze": cmd_analyze, "compare": cmd_compare, "first": cmd_first, "join": cmd_join,
+     "selftest": cmd_selftest, "summary": cmd_summary}[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -23,20 +23,32 @@ ground truth; the reference is the two shots run separately, what correct shot d
   (cut on a latent boundary) only B suffers; from k = 1 on, A's last frame shares a latent with B
   and loses up to 2.3 dB and 16 VMAF points, with 1–3% of B in it.
 - **What carries the previous shot over is the causal VAE, not the DiT.** With one VAE pass and a
-  hard DiT boundary exactly at the cut, A is bit-identical to A run alone and B is hit hardest
-  of all (−7.9 / −16.8 dB on its first frame, 9–11% ghost). Letting the DiT see both shots halves
-  that. **Latent stitching across a cut is as good as one batch** (mid-window or shared-zone
-  layouts within 0.6 dB of it on B's first frame, or better), **and much worse with a window
-  boundary at the cut.**
+  hard DiT boundary exactly at the cut (k = 0), A is bit-identical to A run alone and B is hit
+  hardest of all (−7.9 / −16.8 dB on its first frame, 9–11% ghost). Letting the DiT see both
+  shots halves that. **Latent stitching across a cut is as good as one batch** when a window
+  straddles the cut's latent (mid-window or shared-zone layouts, k = 0 and 2: from 14 dB·frames
+  less to 2 more over B's first 8 frames), **and worse with a window boundary at the cut's
+  latent:** 1.5–3× the PSNR-Y cost at k = 0; at k = 2 the same PSNR-Y cost, but worse VMAF and
+  DISTS, the longest reach (11–16 frames) and, on the bright cut, a 5% ghost of A lasting 15 frames.
 - **A false cut costs no fidelity:** splitting a continuous shot in two leaves every metric within
   the noise band next to the split, the frames after it are even 0.3–1.7 dB closer to the ground
   truth; what remains is a low-frequency temporal step at the split on 2 of 4 clips.
-- **Very short shots are better alone than merged across their cut, from n = 1 frame on:** 3.6 /
-  7.8 dB better on a single frame, still 1.9 / 2.8 dB at 9 frames, and within 0.6 dB (bright) or
-  2 dB (dark) of the same frames inside a long run.
+- **Very short shots are better alone than merged into the previous shot, from n = 1 frame on:**
+  13.5 / 16.4 dB better on a single frame, where padding the merged batch to 4n + 1 frames copies
+  the previous shot into the short one's latent (15–20% of it shows), 6.9 / 7.1 dB at 2 frames,
+  still 2.1–2.4 dB at 9. From 3 frames on, the merge costs about what a missed cut does. Alone, they are
+  within 0.6 dB (bright) or 2 dB (dark) of the same frames inside a long run.
+- **A shot's first frame, encoded alone, is the closest to the ground truth, not the worst:** it
+  is re-rendered less (less sharp on six of eight shots, by 7–47%) and beats the next eight frames
+  by 0.04–5.5 dB of PSNR-Y. Prepending 4 mirrored frames (one more latent per shot: about 13 s at
+  1080p, 2–8% more GPU time per hour of animation) gives it the next frames' look but costs it
+  0.6–2.8 dB of that lead on six of eight shots ([details](#a-shots-first-frame-prepending-mirrored-frames)).
+  Whether its sharpness step is visible right after a cut, which changes the picture about 40 to
+  120 times more, waits for the review.
 - **For detection, a miss costs far more than a false cut:** 7–31 dB·frames of PSNR-Y over the
   next shot's first 8 frames on the bright and dark cuts (about 0 on the clean one), against a
-  small gain for a false cut ([costs per error](#what-it-means-for-shot-detection)).
+  small gain for a false cut; folding a short shot into the previous one costs 10–21 dB·frames
+  over its own frames ([costs per error](#what-it-means-for-shot-detection)).
 
 ## Why it matters for seedvr2x
 
@@ -79,8 +91,9 @@ CLI does.
 - **The 81-frame clip at offset k** (k = 0 … 3) puts the cut at clip frame 21 + k. Latent 6
   (frames 21 … 24) holds the cut: at k = 0 it is pure B; at k = 1, 2, 3 it holds k frames of A.
 - **A** = its 21 + k frames before the cut; **B** = its 60 − k frames from the cut.
-- **Short shots:** B's first n frames, n = 1, 2, 3, 5, 9, run alone. **Merged:** the same frames
-  inside the 81-frame batch at k = 0 (after A, with the rest of B after them).
+- **Short shots:** B's first n frames, n = 1, 2, 3, 5, 9, run alone. **Merged with A:** A's 21
+  frames and the n frames as one batch of 21 + n, the cut on a latent boundary. **In one batch:**
+  the same frames inside the 81-frame batch at k = 0 (after A, with the rest of B after them).
 - **False cuts:** the four 45-frame single-shot clips of question 1, split 21 + 24.
 
 **Runs** (one batch each, `--batch_size` = clip length, `--temporal_overlap 0`; lossless masters
@@ -90,13 +103,15 @@ through [`ffv1_out.py`](../scripts/ffv1_out.py)):
 |---|---|
 | one | the 81 frames in one batch: the cut inside one VAE pass and one DiT batch |
 | aligned (the reference) | A alone and B alone, their outputs joined losslessly: what correct shot detection gives |
-| latent (iii) hard | one VAE pass, DiT windows `0-6,6-12,10-16,14-21` (latents): a hard DiT boundary at latent 6, 2 shared latents elsewhere: the VAE carries A into B, the DiT doesn't |
+| latent (iii) hard | one VAE pass, DiT windows `0-6,6-12,10-16,14-21` (latents): a hard DiT boundary at latent 6, 2 shared latents elsewhere: the VAE carries A into B, the DiT doesn't (at k = 2, A's last 2 frames share latent 6 with B and fall in B's window) |
 | latent (ii) shared | `0-7,5-11,9-15,13-19,17-21`: latents 5 and 6 shared by two windows, cross-faded (cosine, 0.75 / 0.25) |
 | latent (i) mid | `0-5,3-9,7-13,11-17,15-21`: window 3–9 centred on the cut, latents 5 and 6 inside it |
-| short alone | B's first n frames as their own batch (merged: the same frames inside "one" at k = 0) |
+| short alone | B's first n frames as their own batch (in one batch: the same frames inside "one" at k = 0) |
+| merged with A | A and B's first n frames as one batch: the short shot folded into the previous one, as a minimum shot length does, the next shot starting a unit of its own. A batch that isn't 4n + 1 frames is padded with its last frames mirrored ([cli-flags.md](cli-flags.md)): at n = 1 and 2 the padding reaches back across the cut, and the short shot's latent holds 3 and 1 of A's frames |
 | split | a question-1 clip as two batches, 21 + 24 frames, joined |
+| prepend P | B alone (k = 0, 60 frames) with `--prepend_frames` 4 and 8, and the five question-1 clips (45 frames) with 4; `--batch_size` = frames + P, so the shot stays one batch; the P mirrored frames dropped from the master |
 
-The latent runs (bright and dark cuts, k = 0) stitch like [stitching.md](stitching.md#latent-space-stitching)'s
+The latent runs (bright and dark cuts, k = 0 and 2) stitch like [stitching.md](stitching.md#latent-space-stitching)'s
 6-latent windows sharing 2 (cosine weights, as there), with the layout placed around the cut.
 
 **Measures** ([`cut_metrics.py`](../scripts/cut_metrics.py) on [`fr_metrics.py`](../scripts/fr_metrics.py)'s
@@ -178,40 +193,63 @@ coefficient's excess (share of the other shot's frame next to the cut).
 
 ### What carries one shot into the other: the VAE or the DiT
 
-The three latent layouts, at k = 0 (latent 6 is pure B), against the aligned reference; one batch
-for comparison; "one − (iii)" compares the one batch with layout (iii) directly. Deficits by
-distance d to the cut, positive = worse; reach in frames, before / after the cut (on 4-frame
-averages, beyond the noise band); α8 = the ghost coefficient's excess.
+The three latent layouts against the aligned reference, at k = 0 (latent 6 is pure B) and k = 2
+(latent 6 holds A's last 2 frames and B's first 2); one batch for comparison; "one − (iii)"
+compares the one batch with layout (iii) directly. Deficits by distance d to the cut, positive =
+worse; reach in frames after the cut (on 4-frame averages, beyond the noise band); α8 = the ghost
+coefficient's excess.
 
-| Cut | Run | PSNR-Y deficit, dB: d 0 / 1…3 / 4…7 / 8…15 | DISTS d 0…3 | VMAF d 0…3 | Reach after: PSNR-Y / DISTS / VMAF / T-err lf | A's last 4 frames: PSNR-Y / DISTS | α8 excess d 0 / 1…7 / 8…15 |
-|---|---|---|---|---|---|---|---|
-| bright | one batch | +4.14 / +3.42 / +1.11 / −0.37 | +0.020 | +11.6 | 6 / 2 / 4 / 25 | +0.13 / −0.056 | +0.034 / −0.011 / +0.029 |
-| bright | (i) mid | +4.68 / +2.69 / +0.60 / −0.76 | +0.023 | +13.8 | 5 / 2 / 5 / 13 | +1.57 / −0.022 | +0.041 / −0.000 / +0.024 |
-| bright | (ii) shared | +4.61 / +2.54 / +0.61 / −0.60 | +0.020 | +13.4 | 5 / 2 / 6 / 25 | +0.79 / −0.051 | +0.038 / −0.002 / +0.028 |
-| bright | (iii) hard | **+7.85 / +3.34 / +2.43 / +1.71** | **+0.061** | **+19.3** | **14 / 7 / 27 / 33** | 0 / 0 (bit-identical) | **+0.086 / +0.055 / +0.057** |
-| bright | one − (iii) | −3.71 / +0.08 / −1.33 / −2.08 | −0.041 | −7.7 | 0 / 0 / 0 / 13 | +0.13 / −0.056 | −0.052 / −0.066 / −0.028 |
-| dark | one batch | +9.64 / +3.67 / +2.59 / +1.64 | −0.001 | +4.7 | 13 / 0 / 2 / 8 | +0.59 / +0.018 | +0.045 / +0.017 / +0.012 |
-| dark | (i) mid | +9.62 / +3.51 / +2.62 / +1.57 | +0.004 | +6.5 | 19 / 0 / 2 / 35 | −0.24 / +0.024 | +0.044 / +0.016 / −0.002 |
-| dark | (ii) shared | +8.14 / +1.46 / +1.03 / +1.31 | −0.007 | +4.9 | 17 / 0 / 2 / 35 | −0.17 / −0.008 | +0.034 / +0.006 / −0.001 |
-| dark | (iii) hard | **+16.81 / +12.71 / +7.20 / +2.81** | **+0.090** | **+33.3** | 18 / 4 / 6 / 26 | 0 / 0 (bit-identical) | **+0.110 / +0.047 / +0.008** |
-| dark | one − (iii) | −7.17 / −9.04 / −4.62 / −1.16 | −0.091 | −28.6 | 0 / 0 / 0 / 0 | +0.59 / +0.018 | −0.065 / −0.030 / +0.004 |
+| k | Cut | Run | PSNR-Y deficit, dB: d 0 / 1…3 / 4…7 / 8…15 | DISTS d 0…3 | VMAF d 0…3 | Reach after: PSNR-Y / DISTS / VMAF / T-err lf | A's last 4 frames: PSNR-Y / DISTS | α8 excess d −1 / 0 / 1…7 / 8…15 |
+|---|---|---|---|---|---|---|---|---|
+| 0 | bright | one batch | +4.14 / +3.42 / +1.11 / −0.37 | +0.020 | +11.6 | 6 / 2 / 4 / 25 | +0.13 / −0.056 | +0.003 / +0.034 / −0.011 / +0.029 |
+| 0 | bright | (i) mid | +4.68 / +2.69 / +0.60 / −0.76 | +0.023 | +13.8 | 5 / 2 / 5 / 13 | +1.57 / −0.022 | +0.012 / +0.041 / −0.000 / +0.024 |
+| 0 | bright | (ii) shared | +4.61 / +2.54 / +0.61 / −0.60 | +0.020 | +13.4 | 5 / 2 / 6 / 25 | +0.79 / −0.050 | +0.006 / +0.038 / −0.002 / +0.028 |
+| 0 | bright | (iii) hard | **+7.85 / +3.34 / +2.43 / +1.71** | **+0.061** | **+19.3** | **14 / 7 / 27 / 33** | 0 / 0 (bit-identical) | 0 / **+0.086 / +0.055 / +0.057** |
+| 0 | bright | one − (iii) | −3.71 / +0.08 / −1.33 / −2.08 | −0.041 | −7.7 | 0 / 0 / 0 / 13 | +0.13 / −0.056 | +0.003 / −0.052 / −0.066 / −0.028 |
+| 0 | dark | one batch | +9.64 / +3.67 / +2.59 / +1.64 | −0.001 | +4.7 | 13 / 0 / 2 / 8 | +0.59 / +0.018 | +0.005 / +0.045 / +0.017 / +0.012 |
+| 0 | dark | (i) mid | +9.62 / +3.51 / +2.62 / +1.57 | +0.004 | +6.5 | 19 / 0 / 2 / 35 | −0.24 / +0.024 | +0.008 / +0.044 / +0.016 / −0.002 |
+| 0 | dark | (ii) shared | +8.14 / +1.46 / +1.03 / +1.31 | −0.007 | +4.9 | 17 / 0 / 2 / 35 | −0.17 / −0.008 | +0.007 / +0.034 / +0.006 / −0.001 |
+| 0 | dark | (iii) hard | **+16.81 / +12.71 / +7.20 / +2.81** | **+0.090** | **+33.3** | 18 / 4 / 6 / 26 | 0 / 0 (bit-identical) | 0 / **+0.110 / +0.047** / +0.008 |
+| 0 | dark | one − (iii) | −7.17 / −9.04 / −4.62 / −1.16 | −0.091 | −28.6 | 0 / 0 / 0 / 0 | +0.59 / +0.018 | +0.005 / −0.065 / −0.030 / +0.004 |
+| 2 | bright | one batch | +4.85 / +2.97 / −0.30 / −0.62 | +0.004 | +6.4 | 4 / 0 / 3 / 11 | +0.31 / −0.005 | +0.013 / −0.031 / −0.005 / +0.030 |
+| 2 | bright | (i) mid | +3.66 / +1.24 / −0.86 / −0.77 | +0.009 | +7.3 | 2 / 0 / 3 / 11 | +1.49 / +0.025 | +0.008 / −0.017 / +0.017 / +0.030 |
+| 2 | bright | (ii) shared | +3.57 / +1.25 / −0.89 / −0.62 | +0.004 | +6.9 | 2 / 0 / 3 / 11 | +0.33 / −0.014 | +0.002 / −0.018 / +0.013 / +0.035 |
+| 2 | bright | (iii) hard | +1.51 / +1.81 / +1.40 / +0.35 | **+0.041** | +6.6 | **11 / 4 / 8 / 13** | +0.92 / +0.046 | +0.014 / **+0.035 / +0.052 / +0.048** |
+| 2 | bright | one − (iii) | +3.34 / +1.16 / −1.69 / −0.97 | −0.037 | −0.3 | 2 / 0 / 0 / 0 | −0.61 / −0.051 | −0.001 / −0.066 / −0.058 / −0.018 |
+| 2 | dark | one batch | +4.49 / +4.72 / +1.68 / +0.57 | −0.013 | +1.9 | 10 / 0 / 1 / 16 | +0.29 / +0.024 | +0.019 / −0.013 / +0.015 / +0.007 |
+| 2 | dark | (i) mid | +4.35 / +4.81 / +2.11 / +1.32 | −0.015 | +1.8 | 7 / 0 / 1 / 24 | −0.26 / +0.023 | +0.012 / −0.008 / +0.015 / −0.004 |
+| 2 | dark | (ii) shared | +6.05 / +2.69 / +1.10 / +0.72 | −0.019 | +3.0 | 6 / 0 / 1 / 24 | −0.68 / −0.005 | +0.014 / −0.023 / +0.005 / −0.003 |
+| 2 | dark | (iii) hard | +4.83 / +3.21 / +2.18 / +1.58 | **+0.032** | **+15.3** | **16 / 3 / 4 / 24** | −0.31 / +0.005 | **+0.040** / −0.015 / +0.005 / −0.003 |
+| 2 | dark | one − (iii) | −0.34 / +1.51 / −0.50 / −1.00 | −0.045 | −13.4 | 3 / 0 / 0 / 6 | +0.59 / +0.019 | −0.021 / +0.003 / +0.009 / +0.009 |
 
 - **The VAE alone carries the previous shot into the next.** With a hard DiT boundary exactly at the
-  cut and one VAE pass (iii), A is untouched: its 21 frames are bit-identical to A run alone (the
-  encoder and the decoder are causal, and the first window gets the same noise as A's own batch).
-  B is hit hardest of all the runs: −7.9 and −16.8 dB on its first frame, a ghost of 9–11% of A's
-  last frame (still 5–6% 8 to 15 frames later on the bright cut), and VMAF −19 and −33 on its
-  first 4 frames.
-- **Letting the DiT see across the cut makes it better, not worse.** The one batch, and the two
-  layouts whose DiT window straddles the cut (i, ii), lose about half as much as (iii) on B's
-  first frames (one − (iii): −3.7 and −7.2 dB on the first frame, −0.04 and −0.09 DISTS on the
+  cut and one VAE pass (iii at k = 0), A is untouched: its 21 frames are bit-identical to A run
+  alone (the encoder and the decoder are causal, and the first window gets the same noise as A's
+  own batch). B is hit hardest of all the runs: −7.9 and −16.8 dB on its first frame, a ghost of
+  9–11% of A's last frame (still 5–6% 8 to 15 frames later on the bright cut), and VMAF −19 and
+  −33 on its first 4 frames.
+- **Letting the DiT see across the cut makes it better, not worse.** At k = 0 the one batch, and
+  the two layouts whose DiT window straddles the cut (i, ii), lose about half as much as (iii) on
+  B's first frames (one − (iii): −3.7 and −7.2 dB on the first frame, −0.04 and −0.09 DISTS on the
   first 4). Part of (iii)'s loss is likely its B window starting on a 4-frame latent encoded with
   A in the causal cache, without the DiT context a normal batch has; [stitching.md](stitching.md#latent-space-stitching)
   found the same first-latent outlier on continuous content.
-- **Latent stitching across a cut is as good as one batch**, provided the cut is not on a window
-  boundary: (i) and (ii) within 0.6 dB of the one batch on B's first frame (dark (ii): 1.5 dB
-  better). Both put A's last latents in a window with B: A's last 4 frames lose 1.6 dB (i) and
-  0.8 dB (ii) on the bright cut, nothing on the dark one.
+- **At k = 2 the hard boundary moves the first-frame loss, not the rest.** Latent 6, the first of
+  B's window, now starts with A's last 2 frames. B's first frame loses less than in one batch on
+  the bright cut (1.5 against 4.9 dB) and as much on the dark one (4.8 against 4.5 dB), and A's last
+  frame more on the bright cut (2.9 against 1.8 dB, with DISTS +0.10 and VMAF +9.7 on that frame;
+  on the dark one it takes 4% of B). But B stays worse for longer than in any other run: DISTS
+  +0.03–0.04 on its first 4 frames where one batch and (i), (ii) are within ±0.02, VMAF +15 on the
+  dark cut's first 4 (one batch +1.9), PSNR-Y measurably worse for 11 and 16 frames after the cut,
+  DISTS for 3–4, and on the bright cut 3.5–5% of A stays in B for 15 frames, as at k = 0.
+- **Latent stitching across a cut is as good as one batch**, provided the cut's latent is not at
+  a window boundary. On B's first frame, (i) and (ii) are within 0.6 dB of the one batch at k = 0
+  (dark (ii): 1.5 dB better) and 1.2–1.3 dB better on the bright cut at k = 2; on the dark cut at
+  k = 2, (i) is within 0.2 dB and (ii) 1.6 dB worse on the first frame but 2.0 dB better on the
+  next three. Over B's first 8 frames they cost from 14 dB·frames less to 2 more than one batch
+  ([costs](#what-it-means-for-shot-detection)). Both put A's last latents in a window with B: A's
+  last 4 frames lose 1.5–1.6 dB (i) and 0.3–0.8 dB (ii) on the bright cut at both offsets, nothing
+  on the dark one.
 
 ### The ghost: how much of the other shot shows
 
@@ -225,39 +263,61 @@ offset decides where it shows:
 - After B's first frame the excess stays between −0.013 and +0.030 on every cut and offset,
   without a trend.
 
-With a hard DiT boundary at the cut (layout iii), the VAE alone puts 9–11% of A into B's first
-frame, still 5–6% 8 to 15 frames later on the bright cut. With the DiT seeing both shots (one
-batch, layouts i and ii) the ghost is about half as large: attention across the cut does not add
-to what the causal VAE carries over.
+With a hard DiT boundary at the cut (layout iii, k = 0), the VAE alone puts 9–11% of A into B's
+first frame, still 5–6% 8 to 15 frames later on the bright cut. With the DiT seeing both shots
+(one batch, layouts i and ii) the ghost is about half as large: attention across the cut does not
+add to what the causal VAE carries over. At k = 2, layout (iii) leaves 3.5% of A in B's first
+frame on the bright cut and 5% 1 to 15 frames later, as at k = 0; on the dark cut none in B, but
+4% of B in A's last frame. Layouts (i) and (ii) at k = 2 show none in B's first frame, like the
+one batch.
 
 ### Very short shots: alone or merged
 
-B's first n frames run as a shot of their own ("alone"), against the same frames inside the one
-batch across the cut at k = 0 ("merged": what a minimum shot length that folds them into the
-previous shot does, with B's continuation in the same batch), and inside B run alone ("long", the
-ideal when the shot goes on). Means over the n frames against the ground truth:
+B's first n frames run as a shot of their own ("alone"), against the same frames in three other
+runs: appended to shot A as one batch ("merged with A": what a minimum shot length that folds a
+short shot into the previous one does, the next shot starting a unit of its own), inside the one
+batch across the cut at k = 0 ("in one batch": B's continuation in the same batch), and inside B
+run alone ("long", the ideal when the shot goes on). Means over the n frames against the ground
+truth, the better of alone and merged with A in bold:
 
-| Cut | n | PSNR-Y, dB: alone / merged / long | DISTS: alone / merged / long | VMAF: alone / merged / long |
+| Cut | n | PSNR-Y, dB: alone / merged with A / in one batch / long | DISTS: alone / merged with A / in one batch / long | VMAF: alone / merged with A / in one batch / long |
 |---|---|---|---|---|
-| bright | 1 | **30.94** / 27.35 / 31.49 | **0.027** / 0.100 / 0.038 | **82.7** / 58.7 / 82.9 |
-| bright | 2 | **31.44** / 27.52 / 31.32 | **0.023** / 0.077 / 0.037 | **83.4** / 64.9 / 82.8 |
-| bright | 3 | **31.12** / 27.72 / 31.39 | **0.022** / 0.064 / 0.037 | **82.4** / 69.0 / 82.7 |
-| bright | 5 | **31.13** / 27.93 / 31.25 | **0.022** / 0.053 / 0.038 | **83.2** / 72.7 / 82.5 |
-| bright | 9 | **30.94** / 29.04 / 31.12 | **0.022** / 0.044 / 0.037 | **81.2** / 75.8 / 82.3 |
-| dark | 1 | **37.84** / 30.07 / 39.71 | **0.181** / 0.213 / 0.178 | **70.0** / 57.4 / 67.7 |
-| dark | 2 | **38.75** / 32.19 / 39.70 | **0.160** / 0.195 / 0.177 | **71.8** / 57.4 / 67.4 |
-| dark | 3 | **38.88** / 33.52 / 39.68 | **0.156** / 0.182 / 0.177 | **70.7** / 59.4 / 66.5 |
-| dark | 5 | **38.14** / 34.91 / 39.70 | **0.145** / 0.168 / 0.176 | **72.1** / 62.8 / 66.0 |
-| dark | 9 | **38.72** / 35.94 / 39.67 | **0.157** / 0.158 / 0.179 | **70.8** / 66.6 / 65.1 |
+| bright | 1 | **30.94** / 17.45 / 27.35 / 31.49 | **0.027** / 0.211 / 0.100 / 0.038 | **82.7** / 27.0 / 58.7 / 82.9 |
+| bright | 2 | **31.44** / 24.54 / 27.52 / 31.32 | **0.023** / 0.095 / 0.077 / 0.037 | **83.4** / 57.3 / 64.9 / 82.8 |
+| bright | 3 | **31.12** / 27.18 / 27.72 / 31.39 | **0.022** / 0.069 / 0.064 / 0.037 | **82.4** / 65.7 / 69.0 / 82.7 |
+| bright | 5 | **31.13** / 27.87 / 27.93 / 31.25 | **0.022** / 0.056 / 0.053 / 0.038 | **83.2** / 72.0 / 72.7 / 82.5 |
+| bright | 9 | **30.94** / 28.56 / 29.04 / 31.12 | **0.022** / 0.046 / 0.044 / 0.037 | **81.2** / 75.8 / 75.8 / 82.3 |
+| dark | 1 | **37.84** / 21.42 / 30.07 / 39.71 | **0.181** / 0.331 / 0.213 / 0.178 | **70.0** / 33.3 / 57.4 / 67.7 |
+| dark | 2 | **38.75** / 31.66 / 32.19 / 39.70 | **0.160** / 0.220 / 0.195 / 0.177 | **71.8** / 51.8 / 57.4 / 67.4 |
+| dark | 3 | **38.88** / 35.58 / 33.52 / 39.68 | **0.156** / 0.185 / 0.182 / 0.177 | **70.7** / 61.9 / 59.4 / 66.5 |
+| dark | 5 | **38.14** / 36.06 / 34.91 / 39.70 | **0.145** / 0.170 / 0.168 / 0.176 | **72.1** / 63.0 / 62.8 / 66.0 |
+| dark | 9 | **38.72** / 36.60 / 35.94 / 39.67 | 0.157 / **0.153** / 0.158 / 0.179 | **70.8** / 65.6 / 66.6 / 65.1 |
 
-- **Alone beats merged from n = 1 on, on every metric and both cuts:** a single frame run alone
-  (a batch of 1, one latent) is 3.6 and 7.8 dB better than the same frame merged across the cut,
-  DISTS 0.073 and 0.032 better, VMAF 24 and 13 points better. The gap narrows as n grows (the
-  merged frames get further from the cut) but stays at n = 9: 1.9 / 2.8 dB.
+- **Alone beats merged with A at every n, on both cuts:** by 13.5 and 16.4 dB of PSNR-Y on a
+  single frame, 6.9 and 7.1 dB at 2 frames, 2.1–3.9 dB from 3 frames on, and on DISTS and VMAF
+  too (except DISTS on the dark cut at n = 9: 0.004 better merged). Alone also beats the frames
+  in one batch across the cut, on every metric (3.6 and 7.8 dB on a single frame, 1.9 and 2.8 dB
+  at 9).
+- **Below 3 frames the merge is worse than a missed cut,** because of the padding: the merged
+  batch of 22 or 23 frames is padded to 25 with its last frames mirrored, which reach back across
+  the cut, so the short shot's latent holds 3 (n = 1) or 1 (n = 2) of A's frames. Its first frame
+  then carries 20% / 15% (n = 1) and 12% / 7% (n = 2) of A's last frame (ghost excess against A
+  alone + the n frames alone) and loses 9–16 dB. From the code, a 1- or 2-frame shot at the end
+  of a batch shares a latent with frames of the previous shot at any offset in the 4-frame grid,
+  through the grid itself or the padding. From n = 3 on (no padding frame from A here), the merged
+  frames fare like the same frames in one batch across the cut: within 0.6 dB on the bright cut,
+  0.7–2.1 dB better on the dark one, with 3% / 5–6% of A in the first frame.
+- **Merging costs A nothing consistent:** A's last 4 frames stay within ±0.75 dB of PSNR-Y and
+  +0.012 DISTS of A run alone (inside the noise band; the batch is rendered with other noise and
+  windows), with DISTS even better on the bright cut (by up to 0.045), and VMAF 4–7 points worse
+  throughout A at n = 3 on the bright cut only.
 - **A short shot alone loses little against the ideal:** at most 0.6 dB of PSNR-Y on the bright
   cut, 0.8–1.9 dB on the dark one, and its DISTS is *better* than the same frames inside the long
   run in 9 of 10 cases (VMAF within 1.1 points on the bright cut, 2–6 points better on the dark).
   A 1- to 9-frame batch is one to three latents, rendered with nothing else in view.
+- VMAF understates the merge at n = 1: the merged frame ends its clip right after the cut, where
+  VMAF scores the same output 12–13 points higher than as a clip of its own (B's frame run alone,
+  scored both ways).
 
 ### False cuts: a continuous shot split in two
 
@@ -282,22 +342,96 @@ same clip in one batch (question 1's default run, seed 42), both against the gro
   11 frames on two clips. Whether a step of that size is visible on a continuous shot is for the
   visual review.
 
+### A shot's first frame: prepending mirrored frames
+
+The causal VAE encodes a batch's first frame alone (latent 0), and it comes out less restored,
+closer to its input ([quality.md](quality.md#--prepend_frames)). In seedvr2x that is every shot's
+first frame, right after a cut. numz's `--prepend_frames P` puts frames P … 1, mirrored, before
+frame 0 inside the batch and drops them after decoding: at P = 4, frame 0 shares a latent with
+frames 3 … 1 and the rest of the 4-frame grid is unchanged (one more latent; P = 8: two). On one
+GPU the CLI keeps them ([bug 05](../bugs/05-prepend-frames-not-removed.md));
+[`ffv1_out.py`](../scripts/ffv1_out.py) drops them from the master by default. Every master
+holds the shot's frame count, and each of its first frames matches the ground-truth frame of the
+same index best, and the same frame of the run without prepending. Runs: the three shots B (60
+frames from the cut, alone) with P = 4 and 8, the five question-1 clips (45 frames) with P = 4,
+against the same runs without prepending (B alone at seeds 42 and 43; question 1's default runs at
+three seeds, the noise of the deficit below: q95 / max over 18 seed pairs).
+
+Frame 0's deficit against the mean of frames 1…8, positive = frame 0 worse, without prepending →
+with P = 4 (→ P = 8). Sharpness = the Laplacian variance of luma relative to the ground truth's
+(0.4–6.9× on these shots), frame 0 against frames 1…8, and the jump from frame 0 to frame 1:
+
+| Shot | PSNR-Y, dB | DISTS | VMAF | Sharpness of frame 0 vs 1…8 | Jump 0 → 1 |
+|---|---|---|---|---|---|
+| bright cut, B | −0.41 → **+0.18** (→ **+0.45**) | +0.001 → +0.001 (→ +0.002) | −1.1 → **+1.1** (→ **+1.1**) | −7% → −5% (→ −5%) | +4% → +6% (→ +6%) |
+| dark cut, B | −0.04 → −0.30 (→ +0.04) | −0.002 → **−0.013** (→ −0.005) | −3.3 → −4.0 (→ −2.3) | +14% → **+5%** (→ **+6%**) | −9% → −7% (→ −5%) |
+| clean cut, B | −1.03 → **−0.12** (→ **+0.17**) | −0.005 → +0.000 (→ **+0.003**) | −5.7 → **−1.3** (→ **+0.4**) | −14% → **−2%** (→ **+1%**) | +16% → **+7%** (→ **+6%**) |
+| anime-clean | −1.81 → **−0.48** | −0.001 → +0.002 | −13.3 → **−4.2** | −10% → **+7%** | +2% → 0% |
+| anime-grain | −4.56 → **−1.76** | −0.018 → **−0.008** | −18.9 → **−9.1** | −47% → **−15%** | +39% → **+5%** |
+| anime-dark | −5.53 → **−3.44** | −0.031 → **−0.018** | −27.7 → **−14.5** | +31% → +29% | +8% → +8% |
+| cartoon-bright | −3.98 → **−1.66** | −0.076 → **−0.037** | −25.5 → **−14.4** | −29% → **−14%** | +24% → **+14%** |
+| anime-sky | −0.58 → −0.55 | −0.047 → −0.051 | −3.5 → −3.3 | −16% → −12% | −49% → −51% |
+| input (bicubic), 8 shots | −0.84 … +0.07 | −0.012 … +0.027 | −3.4 … −0.0 | | |
+| seed noise of the deficit | 0.22 / 0.30 | 0.005 / 0.007 | 1.4 / 1.8 | 4% / 5% | 5% / 5% |
+
+(Bold: changed by more than the seed noise's max.)
+
+- **Without prepending, a shot's first frame is the one closest to the ground truth,** not the
+  worst: on all eight shots it beats the next eight frames by 0.04–5.5 dB of PSNR-Y and 1–28 VMAF
+  points, in DISTS by up to 0.076 (within ±0.002 on three shots). Only the dark cut's frame 0 is
+  worse in LPIPS (+0.012). The degraded input accounts for little of it: its own first frame, an
+  x264 I-frame, beats its next ones by at most 0.8 dB. The first latent is re-rendered less: on
+  six shots frame 0 is 7–47% less sharp than the next frames (relative to the ground truth), with
+  a jump of up to +39% to frame 1 (anime-grain); on the two darkest shots it is sharper.
+- **Prepending 4 frames makes frame 0 an ordinary frame.** Its sharpness joins the next frames'
+  (anime-grain −47% → −15%, cartoon-bright −29% → −14%, the clean cut −14% → −2%) and the jump
+  to frame 1 shrinks where it was large (+39% → +5%, +24% → +14%, +16% → +7%). But frame 0 also
+  loses much of its lead in fidelity: 0.6–2.8 dB of PSNR-Y, 2–13 VMAF points and up to 0.039
+  DISTS relative to frames 1…8 on six of the eight shots, beyond the seed noise. The dark cut's
+  frame 0, the one worse in LPIPS, gains (LPIPS 0.031, DISTS 0.011; anime-sky LPIPS 0.005). Eight
+  frames do no better than four.
+- **The step at 0 → 1 is a change of look, not a larger error.** The temporal error of
+  transition 0 → 1 against the ground truth (T-err) is above the next transitions' on three clips
+  without prepending (by 1.2–1.9; the input's own, I-frame then P-frames, by 0.1–0.2), and
+  prepending leaves it there (anime-dark +1.4 → +1.8, cartoon-bright +1.9 → +2.1; anime-sky
+  +1.2 → +0.7): it is not the lone first latent's doing.
+- **The rest of the shot** moves by less than 0.4 dB of PSNR-Y on average over frames 1…end:
+  within 0.1 dB of the spread between seeds on the three shots B, 0.08–0.35 dB better on the five
+  clips, whose batch is 4 frames longer.
+- **Masking:** on the three cuts, prepending changes frame 0 by 1.1–2.6 luma levels on average
+  (mean |ΔY|), where the cut itself changes the picture by 97–145 levels; frame 0's error against
+  the ground truth is about that of frames 1…8 either way (1.6–5.9 levels). Whether the sharpness
+  jump right after a cut is visible is for the review: clips of each cut (A's last 12 frames, B's
+  first 36) without and with prepending, side by side, and 1:1 crops of frames 0 and 1 are
+  prepared for it.
+- **Cost:** one latent per shot, 4 more computed frames: about 13 s per shot at 1080p (3.0–3.3 s
+  per computed frame on this GPU in this session, 3.9–5.1 s in earlier ones: 16–20 s; pairs of
+  runs differ by −0.5 to +28 s for one latent, within the ±7% run-to-run spread). Per hour of
+  video that is 4 frames over the mean shot length, at the shot counts of scdet at threshold 10
+  ([question 3](../PROGRESS.md#3-scene-detection)): 2.2–3.8% more GPU time on the bright cartoon
+  (469–830 shots per hour), 6.6% on the clean digital anime film (1430), 5.9% on the dark action
+  anime episode (1278), 7.7% on the 720p anime episode (1657), 4.2% on the grainy cel film (912).
+
 ## What it means for shot detection
 
 The cost of each kind of detection error against correct boundaries, as sums of per-frame
 deficits over a fixed window next to the boundary (positive = worse): B = the 8 frames after it,
-A = the 4 before it; for a merged short shot, its own n frames. PSNR-Y in dB·frames, VMAF in
-points·frames, DISTS in DISTS·frames:
+A = the 4 before it; for a short shot, its own n frames (and A's last 4 against A run alone).
+PSNR-Y in dB·frames, VMAF in points·frames, DISTS in DISTS·frames:
 
 | Error | Case | PSNR-Y: B / A | VMAF: B / A | DISTS: B |
 |---|---|---|---|---|
 | Missed cut, one batch | bright, k = 0 / 1 / 2 / 3 | 18.8 / 11.9 / 12.6 / 6.7 ; A 0.5 / 2.6 / 1.2 / −2.0 | 56.0 / 35.3 / 26.6 / 7.7 ; A −10.3 / 11.5 / 1.5 / 26.5 | 0.075 / 0.004 / −0.009 / 0.017 |
 | | dark, k = 0 / 1 / 2 / 3 | 31.0 / 15.9 / 25.4 / 23.3 ; A 2.4 / 2.9 / 1.1 / 4.2 | −7.5 / −12.3 / −18.0 / −19.7 ; A −8.9 / −6.9 / −9.4 / 4.3 | −0.153 / −0.171 / −0.175 / −0.173 |
 | | clean, k = 0 / 1 / 2 / 3 | −2.1 / −0.8 / −0.2 / 3.9 ; A −8.9 / −8.5 / −9.6 / −6.5 | −3.1 / −8.9 / −13.3 / −14.3 ; A −26.8 / −24.7 / −27.0 / −13.9 | 0.016 / 0.021 / −0.013 / 0.036 |
-| Missed cut, latent windows (k = 0) | bright: (i) / (ii) / (iii) | 15.2 / 14.7 / 27.6 | 67.2 / 67.2 / 132.3 | 0.078 / 0.063 / 0.312 |
-| | dark: (i) / (ii) / (iii) | 30.7 / 16.6 / 83.7 | −4.5 / −7.1 / 149.0 | −0.208 / −0.245 / 0.281 |
+| Missed cut, latent windows (k = 0) | bright: (i) / (ii) / (iii) | 15.2 / 14.7 / 27.6 ; A 6.3 / 3.2 / 0 | 67.2 / 67.2 / 132.3 ; A 5.1 / 11.0 / 0 | 0.078 / 0.063 / 0.312 |
+| | dark: (i) / (ii) / (iii) | 30.7 / 16.6 / 83.7 ; A −0.9 / −0.7 / 0 | −4.5 / −7.1 / 149.0 ; A 0.3 / −3.2 / 0 | −0.208 / −0.245 / 0.281 |
+| Missed cut, latent windows (k = 2) | bright: (i) / (ii) / (iii) | 3.9 / 3.7 / 12.5 ; A 6.0 / 1.3 / 3.7 | 31.4 / 32.3 / 43.2 ; A 13.6 / 9.2 / 19.7 | 0.009 / −0.016 / 0.188 |
+| | dark: (i) / (ii) / (iii) | 27.2 / 18.5 / 23.2 ; A −1.1 / −2.7 / −1.2 | −23.7 / −15.7 / 57.7 ; A −5.1 / −14.2 / 8.5 | −0.258 / −0.257 / 0.052 |
 | False cut | clean / grainy / dark / bright | −3.9 / −8.8 / −6.6 / −0.5 ; A −0.2 / 0.6 / −0.5 / 0.5 | −20.9 / −32.8 / −9.6 / 4.5 | 0.086 / −0.125 / −0.022 / −0.016 |
-| Short shot merged instead of alone | bright, n = 1 / 2 / 3 / 5 / 9 | 3.6 / 7.8 / 10.2 / 16.0 / 17.1 | 24.0 / 37.0 / 40.3 / 52.5 / 48.0 | 0.073 / 0.108 / 0.126 / 0.157 / 0.201 |
+| Short shot merged with A instead of alone | bright, n = 1 / 2 / 3 / 5 / 9 | 13.5 / 13.8 / 11.8 / 16.3 / 21.4 ; A −2.6 / −1.3 / 3.0 / 1.6 / 1.1 | 55.7 / 52.2 / 50.2 / 56.0 / 48.2 ; A −6.7 / −2.3 / 21.1 / 7.1 / −7.3 | 0.184 / 0.145 / 0.141 / 0.170 / 0.217 |
+| | dark, n = 1 / 2 / 3 / 5 / 9 | 16.4 / 14.2 / 9.9 / 10.4 / 19.1 ; A −1.9 / −0.8 / −0.4 / −0.6 / 2.2 | 36.7 / 40.0 / 26.5 / 45.5 / 46.2 ; A −2.2 / −0.1 / 0.0 / −1.8 / −6.5 | 0.150 / 0.120 / 0.088 / 0.125 / −0.039 |
+| Short shot in one batch across its cut instead of alone | bright, n = 1 / 2 / 3 / 5 / 9 | 3.6 / 7.8 / 10.2 / 16.0 / 17.1 | 24.0 / 37.0 / 40.3 / 52.5 / 48.0 | 0.073 / 0.108 / 0.126 / 0.157 / 0.201 |
 | | dark, n = 1 / 2 / 3 / 5 / 9 | 7.8 / 13.1 / 16.1 / 16.2 / 25.0 | 12.7 / 28.8 / 33.9 / 46.5 / 37.7 | 0.032 / 0.070 / 0.077 / 0.117 / 0.004 |
 
 Read per event:
@@ -305,7 +439,10 @@ Read per event:
 - **A missed cut** costs 7–31 dB·frames of PSNR-Y on the next shot's first 8 frames on two of the
   three cuts, and nothing measurable beyond B's first frame on the clean one. On the dark cut the
   metrics disagree past B's first frames (PSNR-Y worse, VMAF and DISTS better: see the caveats).
-  A window boundary of latent stitching that falls on the missed cut (iii) costs 1.5–3× more.
+  Latent windows that straddle the missed cut (i, ii) cost about what one batch does (from
+  14 dB·frames less to 2 more on B). A window boundary at the cut's latent (iii) costs 1.5–3× more
+  PSNR-Y at k = 0; at k = 2 the same PSNR-Y as one batch, but 17–76 VMAF points·frames and about
+  0.2 DISTS·frames more on B, and 18 VMAF points·frames more on A's last 4 frames.
 - **A false cut** costs no fidelity: the PSNR-Y sums are gains on all four clips (−0.5 to −8.8
   dB·frames), the VMAF sums on three. What it can cost is a low-frequency temporal step,
   measurable for 0–11 frames on 2 of the 4 clips; whether it shows on a continuous shot is for the
@@ -314,13 +451,17 @@ Read per event:
   flicker of ≈ 1.0, which is visible. The fidelity "gain" fits
   [quality.md](quality.md#--prepend_frames)'s finding that a batch's first frame comes out less
   restored, i.e. closer to its input, which this protocol rewards because the model re-renders.
-- **A short shot merged across its cut** costs 3.6–7.8 dB·frames for a single frame and 17–25 for
-  9 frames, against running it alone: the merge is never the cheaper option here.
+- **A short shot merged into the previous shot** costs 10–21 dB·frames of PSNR-Y over its own
+  frames against running it alone, from 1 frame to 9, and the most per frame at 1 and 2 frames
+  (13.5–16.4 dB on a single frame), where the padding copies the previous shot into it; the
+  previous shot itself loses nothing consistent. Inside one batch across its cut (the shot going
+  on after it) it costs 3.6–7.8 dB·frames for a single frame and 17–25 for 9. The merge is never
+  the cheaper option here.
 
 So, against these three cuts, the expected cost of a detector per hour of video is about
-(misses per hour) × 7–31 dB·frames + (short shots merged per hour) × 4–25, plus (false cuts per
-hour) × a temporal step of uncertain visibility and no fidelity loss. The error rates per threshold
-come from question 3's labelled review.
+(misses per hour) × 7–31 dB·frames + (short shots merged into the previous shot per hour) ×
+10–21, plus (false cuts per hour) × a temporal step of uncertain visibility and no fidelity loss.
+The error rates per threshold come from question 3's labelled review.
 
 ## Caveats
 
@@ -343,9 +484,15 @@ come from question 3's labelled review.
   A's last frames of the clean cut (−2.2 dB at k = 0) and on the whole of B far from the cut on
   the clean one; the dark cut's whole shot A is worse in one batch (+0.5–1.6 dB, DISTS +0.018,
   with no ghost: the DiT renders the bright shot differently when the dark one is in view).
-- **The latent layouts were measured at k = 0 only** (latent 6 pure B); the k = 2 layouts and
-  the "merged with the previous shot only" short-shot runs (A + the n frames, without B's
-  continuation) were prepared but not run: the GPU was shared with two other jobs all night.
+- **The latent layouts were measured at k = 0 and 2 only**, on the bright and dark cuts; the
+  merged short shots at one offset only (the cut on a latent boundary, after a 21-frame shot A),
+  which decides how much of A the padding brings in (see above).
+- **A shot's first frame is judged against a ground truth the model doesn't aim at:** it
+  re-renders ([numerics.md](numerics.md)), so the full-reference metrics favour the frame it
+  re-renders least; whether its look or the next frames' is better is for the eye. Its input is
+  an x264 I-frame, a little better than the P-frames after it. One seed per prepend run; P = 8 on
+  the three cuts only. Run times vary by ±7% between runs and by up to 1.7× between sessions on
+  the same GPU, so the cost of one latent comes from the time per computed frame.
 - `--color_correction none`, 1080p from half-size input, 7B fp16 only. With `lab`, low-frequency
   differences between batches shrink ([quality.md](quality.md#colour-correction)).
 
@@ -359,11 +506,13 @@ python3 $F verify clips/cut-long --source --cv2-python /path/to/seedvr2/.venv/bi
 python3 $F slice clips/cut-long --first $((27 - k)) --frames 81 --name cut-k$k            # cut at 21 + k
 python3 $F slice clips/cut-long --first $((27 - k)) --frames $((21 + k)) --name cut-k$k-A --files gt,d1.lr
 python3 $F slice clips/cut-long --first 48 --frames $((60 - k)) --name cut-k$k-B --files gt,d1.lr
+python3 $F slice clips/cut-long --first 48 --frames $n --name cut-B$n --files gt,d1.lr            # short shot
+python3 $F slice clips/cut-long --first 27 --frames $((21 + n)) --name cut-AB$n --files gt,d1.lr  # merged with A
 # runs: one batch each (FFV1 master only); a latent layout through blend_patch.py
 python3 scripts/bench.py run cut-k0-one --wrap scripts/ffv1_out.py --env FFV1_OUT_KEEP=0 -- \
   clips/cut-k0.d1.lr.mkv --output out/ --model_dir /path/to/models --dit_model seedvr2_ema_7b_fp16.safetensors \
   --resolution 1080 --attention_mode flash_attn_2 --batch_size 81 --load_cap 81 --temporal_overlap 0 \
-  --color_correction none --seed 42                                  # likewise A (21 + k) and B (60 - k)
+  --color_correction none --seed 42                    # likewise A (21 + k), B (60 - k), B<n> (n), AB<n> (21 + n)
 python3 scripts/bench.py run cut-k0-lat-hard --wrap scripts/blend_patch.py --wrap scripts/ffv1_out.py \
   --env STITCH_WINDOWS=0-6,6-12,10-16,14-21 --env STITCH_CURVE=cosine --env FFV1_OUT_KEEP=0 -- ...
 # the aligned reference, metrics, analysis
@@ -372,7 +521,22 @@ python3 $M clips/cut-k0.gt.mkv --clip cut-k0 --json-dir m --out one 42 out/cut-k
   --out aligned 42 out/cut-k0-aligned.mkv --out lat-hard 42 out/cut-k0-lat-hard.mkv
 python3 $J analyze m/cut-k0.one.s42.json --ref m/cut-k0.aligned.s42.json --cut $((21 + k)) --smooth 4 \
   --noise m/*.def.s*.json m/cut-k0.aligned.s43.json --json a/cut-k0-one.json > a/cut-k0-one.md
-python3 $J compare --row alone:m/cut-B5.alone.s42.json:0 --row merged:m/cut-k0.one.s42.json:21 --frames 5
+python3 $J compare --row alone:m/cut-B5.alone.s42.json:0 --row with-A:m/cut-AB5.merged.s42.json:21 \
+  --row one-batch:m/cut-k0.one.s42.json:21 --frames 5                         # short shot, n = 5
+python3 $J join out/cut-k0-A.mkv out/cut-B5.mkv --out out/cut-AB5-aligned.mkv  # A alone + B5 alone, scored
+python3 $M clips/cut-AB5.gt.mkv --clip cut-AB5 --json-dir m --out merged 42 out/cut-AB5.mkv \
+  --out aligned 42 out/cut-AB5-aligned.mkv                                      # like the k0 clip above
+python3 $J analyze m/cut-AB5.merged.s42.json --ref m/cut-AB5.aligned.s42.json --cut 21 --smooth 4 \
+  --noise m/*.def.s*.json m/cut-k0.aligned.s43.json --json a/cut-AB5.json > a/cut-AB5.md  # deficits, ghost
 python3 $J selftest clips/cut-k0.gt.mkv --cut 21 --out out/cut-k0-aligned.mkv   # ghost coefficient check
 python3 $J summary a/                                                           # one row per analysis
+# a shot's first frame: B alone with 4 mirrored frames before it, in its batch (ffv1_out.py drops them)
+python3 scripts/bench.py run cut-k0-B-pp4 --wrap scripts/ffv1_out.py --env FFV1_OUT_KEEP=0 -- \
+  clips/cut-k0-B.d1.lr.mkv --output out/ --model_dir /path/to/models --dit_model seedvr2_ema_7b_fp16.safetensors \
+  --resolution 1080 --attention_mode flash_attn_2 --batch_size 64 --load_cap 60 --temporal_overlap 0 \
+  --color_correction none --seed 42 --prepend_frames 4                        # batch = 60 frames + 4
+python3 $M clips/cut-k0-B.gt.mkv --clip cut-B60 --json-dir m --out def 42 out/cut-k0-B.mkv \
+  --out def 43 out/cut-k0-B-s43.mkv --out pp4 42 out/cut-k0-B-pp4.mkv          # B scored as a clip of its own
+python3 $J first m/cut-B60.def.s42.json m/cut-B60.def.s43.json m/cut-B60.pp4.s42.json \
+  m/cut-k0.bicubic.s0.json:21           # frame 0 vs frames 1-8, sharpness, the seed noise of the def pair
 ```

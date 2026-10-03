@@ -127,6 +127,22 @@ And across batch boundaries (45 frames, batch 21, two boundaries):
   on B), and its std matching lowers contrast (Lap var −10 to −15%).
 - The cost is negligible next to the VAE and DiT (≤ 0.6 s per 21-frame batch, except
   `wavelet_adaptive` at 3.8 s), and Phase 4's ≤ 5.6 GiB fit in the pool the decode left.
+- **`lab`'s histogram matching gives tied values different matches, which doesn't show on real
+  frames.** `_histogram_matching_channel` (`src/utils/color_fix.py:477-521`) sorts the batch's
+  a\*, b\* and L\* values with an unstable `torch.sort` and gives rank r the reference's rank-r
+  value, so equal values get different reference values in sort order: memory order (frame, row,
+  column) on the GPU, scrambled on the CPU. On a synthetic extreme (one a\* value over half of a
+  45-frame batch, the input's spread 1) that becomes a drift through the batch: frame means
+  10.3 → 13.7, where ties mapped alike give 12.0 everywhere. On real frames it is negligible,
+  although 97–99.9% of pixels share their a\* or b\* value with others: no value holds more than
+  1.75% of a batch, and the input's values are as dense. Against the same decoded frames matched
+  with ties mapped alike ([`numerics_patch.py`](../scripts/numerics_patch.py)
+  `NUM_CC_EXTRA=labties`, the five full-reference clips of [numerics.md](numerics.md)), numz's
+  `lab` differs by at most 0.06 a\*/b\* units per pixel, the flat-area colour spread is the same to
+  3 decimals, and every full-reference metric stays within `lab`'s seed band. The colour noise
+  `lab` leaves on flat areas over the ground truth (a\*/b\* local std 0.66/0.81 against 0.17/0.21
+  on the bright cartoon) is the model's own: the uncorrected output has it too. Mapping ties alike
+  only makes the result independent of the sort's tie order (device, torch version).
 
 ## Batches and temporal consistency
 

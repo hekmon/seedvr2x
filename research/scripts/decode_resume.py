@@ -47,11 +47,21 @@ Subcommands:
          --profile A[,A]     fresh decodes from latent A to the end
          --snapshot S        snapshot test at latent S (untiled only; needs a decode here)
          --snapshot-dir DIR  where the snapshot file is written (then deleted)
+  dtype-ab --latents LAT.pt --input VIDEO --out AB.json [--n-latents 9] [--pairs 3]
+         [--phases decode,tiled,encode] [--tiled 1024:128] [--budget-min 19]
+         Back to back in one process, alternating bf16, fp16, bf16, fp16…: a decode of the first N
+         latents, the same tiled, and an encode of their 4N - 3 source frames. Per run: time
+         (synchronized), torch peak, SM clock / power / temperature / power-cap share (NVML),
+         non-finite outputs, identity with the first run of the same dtype; fp16 vs bf16 max and
+         mean |difference| of the outputs. Stops before a run that would overrun the budget.
   table  RESULTS.json [...]  Markdown tables
 
-Options for encode and run: --model-dir (the CLI's --model_dir), --dit-model (selects the
-config, default seedvr2_ema_7b_fp16.safetensors). Environment: SEEDVR2_DIR (the numz checkout,
-default: cwd), FFMPEG (default: ffmpeg).
+Options for encode, run and dtype-ab: --model-dir (the CLI's --model_dir), --dit-model (selects
+the config, default seedvr2_ema_7b_fp16.safetensors), --vae-dtype bf16|fp16 (encode and run):
+bf16 (default) = numz, the VAE file's fp16 weights converted to bfloat16 on load; fp16 = the
+file's own float16 weights, unconverted, and float16 inputs (latents cast exactly or nearly,
+numz's bfloat16 frames cast exactly), so numz's vae_encode / vae_decode run without autocast.
+Environment: SEEDVR2_DIR (the numz checkout, default: cwd), FFMPEG (default: ffmpeg).
 
 Usage (cwd = the SeedVR2 checkout, its venv's python; GPU commands under the shared GPU lock):
   python decode_resume.py encode --input clip.mp4 --frames 201 --size 1280x720 \\
@@ -93,8 +103,13 @@ def setup_numz():
     return root
 
 
-def build_runner(args, tiled=None):
-    """The CLI's runner and VAE: prepare_runner with the CLI defaults, then materialize_model."""
+def build_runner(args, tiled=None, vae_dtype=None):
+    """The CLI's runner and VAE: prepare_runner with the CLI defaults, then materialize_model.
+
+    vae_dtype "bf16" (default, numz): the VAE file's fp16 weights converted to bfloat16 on load.
+    "fp16": the file's own float16 weights, unconverted; ctx["vae_in_dtype"] then makes the
+    encode / decode inputs float16 too, so numz's vae_encode / vae_decode run without autocast
+    (their autocast only kicks in when the input's dtype differs from the VAE's)."""
     import torch
     from src.utils.debug import Debug
     from src.utils.model_registry import DEFAULT_VAE
@@ -112,8 +127,20 @@ def build_runner(args, tiled=None):
         encode_tiled=False, encode_tile_size=(1024, 1024), encode_tile_overlap=(128, 128),
         decode_tiled=bool(tiled), decode_tile_size=(tile, tile), decode_tile_overlap=(overlap, overlap),
         tile_debug="false", attention_mode="sdpa", torch_compile_args_dit=None, torch_compile_args_vae=None)
+    vae_dtype = vae_dtype or getattr(args, "vae_dtype", None) or "bf16"
+    if vae_dtype == "fp16":
+        runner._vae_dtype_override = torch.float16  # numz sets its compute dtype (bfloat16) here
+        runner.config.vae.dtype = "float16"
+        ctx["vae_in_dtype"] = torch.float16
+    elif vae_dtype != "bf16":
+        sys.exit(f"unknown VAE dtype {vae_dtype}")
     materialize_model(runner, "vae", ctx["vae_device"], runner.config, debug)
     return runner, ctx
+
+
+def in_dtype(ctx):
+    """The dtype of the VAE's inputs: numz's compute dtype, or the fp16 VAE's own."""
+    return ctx.get("vae_in_dtype", ctx["compute_dtype"])
 
 
 def env_info(runner):
@@ -201,8 +228,8 @@ def decode(runner, ctx, lat_cpu):
     from src.optimization.memory_manager import manage_tensor
     torch.cuda.synchronize()
     t0 = time.perf_counter()
-    z = manage_tensor(tensor=lat_cpu, target_device=ctx["vae_device"], dtype=ctx["compute_dtype"])
-    out = runner.vae_decode([z])[0]  # [C, F, H, W] bf16
+    z = manage_tensor(tensor=lat_cpu, target_device=ctx["vae_device"], dtype=in_dtype(ctx))
+    out = runner.vae_decode([z])[0]  # [C, F, H, W], the VAE's dtype
     torch.cuda.synchronize()
     return out, time.perf_counter() - t0
 
@@ -221,7 +248,7 @@ def decode_from_caches(runner, ctx, hook, lat_cpu, s, e, caches):
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     with torch.no_grad():
-        z = manage_tensor(tensor=lat_cpu[s:e], target_device=ctx["vae_device"], dtype=ctx["compute_dtype"])
+        z = manage_tensor(tensor=lat_cpu[s:e], target_device=ctx["vae_device"], dtype=in_dtype(ctx))
         z = z.unsqueeze(0)
         z = z / scale + shift
         z = optimized_channels_to_second(z)
@@ -344,6 +371,8 @@ def cmd_encode(args):
     no_resize = bool(torch.equal(x[:, :, :height, :width], ((video - 0.5) / 0.5).permute(1, 0, 2, 3)))
     pad_black = bool((x[:, :, height:] == -1).all() and (x[:, :, :, width:] == -1).all())
     log(f"transform: {tuple(x.shape)} {x.dtype}, pad + normalise only: {no_resize}, padding = -1: {pad_black}")
+    if x.dtype != in_dtype(ctx):  # fp16 VAE: numz's bfloat16 frames, cast (exactly) to float16
+        x = x.to(in_dtype(ctx))
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     lat = runner.vae_encode([x])[0]
@@ -533,6 +562,196 @@ def cmd_run(args):
     log(f"done -> {args.out}")
 
 
+# ---------------------------------------------------------------- dtype A/B (bf16 vs fp16 VAE)
+
+class GpuSampler:
+    """NVML through ctypes (as bench.py): SM clock, power, temperature and clock event reasons of
+    GPU 0 every `interval` s, in a thread. Creates no CUDA context."""
+
+    def __init__(self, interval=0.1):
+        import ctypes
+        import threading
+        self.samples, self.interval, self.lib, self.power_limit_w = [], interval, None, None
+        try:
+            lib = ctypes.CDLL("libnvidia-ml.so.1")
+            h = ctypes.c_void_p()
+            if lib.nvmlInit_v2() != 0 or lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(h)) != 0:
+                raise OSError("NVML init failed")
+            self.lib, self.h = lib, h
+            self.reasons = (getattr(lib, "nvmlDeviceGetCurrentClocksEventReasons", None)
+                            or getattr(lib, "nvmlDeviceGetCurrentClocksThrottleReasons", None))
+            v = ctypes.c_uint()
+            if lib.nvmlDeviceGetEnforcedPowerLimit(h, ctypes.byref(v)) == 0:
+                self.power_limit_w = v.value / 1000
+        except (OSError, AttributeError) as e:
+            log(f"NVML unavailable: {e}")
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def read(self):
+        import ctypes
+        clk, pw, tmp, rs = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_ulonglong()
+        self.lib.nvmlDeviceGetClockInfo(self.h, 1, ctypes.byref(clk))  # NVML_CLOCK_SM
+        self.lib.nvmlDeviceGetPowerUsage(self.h, ctypes.byref(pw))  # mW
+        self.lib.nvmlDeviceGetTemperature(self.h, 0, ctypes.byref(tmp))  # NVML_TEMPERATURE_GPU
+        r = rs.value if self.reasons and self.reasons(self.h, ctypes.byref(rs)) == 0 else 0
+        return time.time(), clk.value, pw.value / 1000, tmp.value, r
+
+    def _loop(self):
+        while not self._stop.is_set():
+            self.samples.append(self.read())
+            self._stop.wait(self.interval)
+
+    def start(self):
+        if self.lib:
+            self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self.lib:
+            self._thread.join(timeout=5)
+
+    def stats(self, t0, t1):
+        """Over [t0, t1]: SM clock (MHz), power (W), temperature (C), and the share of samples whose
+        clock event reasons include the software power cap (0x4) or a thermal slowdown (0x20, 0x40)."""
+        s = [x for x in self.samples if t0 <= x[0] <= t1]
+        if not s:
+            return None
+        clk, pw = [x[1] for x in s], [x[2] for x in s]
+        return {"n": len(s), "sm_mhz_mean": round(sum(clk) / len(clk)), "sm_mhz_min": min(clk),
+                "sm_mhz_max": max(clk), "power_w_mean": round(sum(pw) / len(pw), 1), "power_w_max": round(max(pw), 1),
+                "temp_c_max": max(x[3] for x in s),
+                "power_cap_frac": round(sum(1 for x in s if x[4] & 0x4) / len(s), 3),
+                "thermal_frac": round(sum(1 for x in s if x[4] & 0x60) / len(s), 3)}
+
+
+def max_abs_diff(a, b, chunk=8):
+    """max and mean |a - b| in float32, along dim 1 in chunks (bounded memory)."""
+    mx, tot = 0.0, 0.0
+    for i in range(0, a.shape[1], chunk):
+        d = (a[:, i:i + chunk].float() - b[:, i:i + chunk].float()).abs()
+        mx, tot = max(mx, float(d.max())), tot + float(d.sum())
+    return mx, tot / a.numel()
+
+
+def cmd_dtype_ab(args):
+    """Back to back, alternating bf16 / fp16 VAEs in one process: untiled decode, tiled decode and
+    encode, through numz's vae_decode / vae_encode, with time, peak, clocks and power per run."""
+    t_start = time.time()
+    setup_numz()
+    import numpy as np
+    import torch
+    from src.core.generation_utils import prepare_video_transforms
+    from src.optimization.memory_manager import manage_tensor
+    data = torch.load(args.latents, map_location="cpu", weights_only=True)
+    meta = data["meta"]
+    lat = data["latent"][:args.n_latents].contiguous()
+    n_frames = 4 * (lat.shape[0] - 1) + 1
+    inexact = int((lat.to(torch.float16).float() != lat.float()).sum())
+    phases = [p for p in args.phases.split(",") if p]
+    tile, overlap = (int(v) for v in args.tiled.split(":"))
+    log(f"{lat.shape[0]} latents {tuple(lat.shape)} ({n_frames} frames, {meta['width']}x{meta['height']} padded "
+        f"{meta['padded']}); bf16 latent values not exact in float16: {inexact}; phases {phases}")
+    frames = None
+    if "encode" in phases:
+        if not args.input:
+            sys.exit("the encode phase needs --input (the latents' source video)")
+        frames = read_frames(args.input, args.start, n_frames, meta["width"], meta["height"])
+    sampler = GpuSampler()
+    sampler.start()
+    runners = {dt: build_runner(args, None, dt) for dt in ("bf16", "fp16")}
+    hooks = {dt: SliceHook(r.vae) for dt, (r, _) in runners.items()}
+    wdt = {dt: str(next(r.vae.parameters()).dtype) for dt, (r, _) in runners.items()}
+    log(f"VAEs: {wdt}, distinct objects: {runners['bf16'][0].vae is not runners['fp16'][0].vae}")
+    res = {"latents": os.path.basename(args.latents), "meta": meta, "n_latents": lat.shape[0], "frames": n_frames,
+           "latent_values_inexact_fp16": inexact, "tiled": [tile, overlap], "pairs": args.pairs,
+           "vae_weights": wdt, "env": env_info(runners["bf16"][0]), "power_limit_w": sampler.power_limit_w,
+           "runs": [], "diff": {}, "skipped": []}
+
+    def write():
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(res, f, indent=1)
+
+    x_bf16 = None
+    if frames is not None:  # numz's input preparation (bfloat16), once; the fp16 VAE gets it cast exactly
+        _, ctx_b = runners["bf16"]
+        video = manage_tensor(tensor=torch.from_numpy(frames.astype(np.float32) / 255.0).permute(0, 3, 1, 2),
+                              target_device=ctx_b["vae_device"], dtype=ctx_b["compute_dtype"])
+        x_bf16 = prepare_video_transforms(min(meta["width"], meta["height"]), 0, None)(video)
+        del video
+    budget = args.budget_min * 60
+    stop, last = False, 0.0  # last: the previous run's duration, to stop before overrunning the budget
+    for phase in phases:
+        if stop:
+            res["skipped"].append(phase)
+            continue
+        firsts = {}
+        for i, dt in enumerate(["bf16", "fp16"] * args.pairs):
+            if time.time() - t_start + last > budget:
+                log(f"time budget ({args.budget_min} min) reached: {phase} stops at run {i}")
+                res["skipped"].append(f"{phase} from run {i}")
+                stop = True
+                break
+            runner, ctx = runners[dt]
+            runner.decode_tiled = phase == "tiled"
+            runner.decode_tile_size, runner.decode_tile_overlap = (tile, tile), (overlap, overlap)
+            hooks[dt].reset()
+            torch.cuda.synchronize()
+            base = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
+            t0 = time.time()
+            if phase == "encode":
+                x = x_bf16 if x_bf16.dtype == in_dtype(ctx) else x_bf16.to(in_dtype(ctx))
+                torch.cuda.synchronize()
+                tp = time.perf_counter()
+                out = runner.vae_encode([x])[0]
+                torch.cuda.synchronize()
+                sec = time.perf_counter() - tp
+                del x
+            else:
+                out, sec = decode(runner, ctx, lat)
+            t1 = time.time()
+            last = t1 - t0
+            peak = torch.cuda.max_memory_allocated()
+            run = {"phase": phase, "dtype": dt, "i": i, "s": round(sec, 3), "peak_gib": round(peak / 2**30, 2),
+                   "peak_above_gib": round((peak - base) / 2**30, 2), "out_dtype": str(out.dtype),
+                   "out_shape": list(out.shape), "nonfinite": int(torch.isfinite(out).logical_not_().sum()),
+                   "absmax": float(out.abs().max()), "gpu": sampler.stats(t0, t1)}
+            if phase != "encode":
+                run["slices"] = slice_stats(hooks[dt].slices)
+            if dt in firsts:
+                run["identical_to_first"] = bool(torch.equal(firsts[dt], out))
+            else:
+                firsts[dt] = out
+            res["runs"].append(run)
+            g = run["gpu"] or {}
+            log(f"{phase} {dt} #{i}: {sec:.2f} s, peak {run['peak_gib']} GiB (+{run['peak_above_gib']}), "
+                f"non-finite {run['nonfinite']}, |max| {run['absmax']:.4g}, SM {g.get('sm_mhz_mean')} MHz "
+                f"({g.get('sm_mhz_min')}-{g.get('sm_mhz_max')}), {g.get('power_w_mean')} W (max "
+                f"{g.get('power_w_max')}), power cap {g.get('power_cap_frac')}, "
+                f"ACTIVE slice {run.get('slices', {}).get('active_mean_s')}, same as first: "
+                f"{run.get('identical_to_first')}")
+            if out is not firsts.get(dt):
+                del out
+            write()
+        if len(firsts) == 2:
+            mx, mean = max_abs_diff(firsts["bf16"], firsts["fp16"])
+            res["diff"][phase] = {"max_abs": mx, "mean_abs": mean}
+            log(f"{phase}: fp16 vs bf16 output max |diff| {mx:.6g}, mean |diff| {mean:.6g}")
+        del firsts
+        write()
+    sampler.stop()
+    for phase in phases:
+        for dt in ("bf16", "fp16"):
+            rr = [r for r in res["runs"] if r["phase"] == phase and r["dtype"] == dt]
+            steady = [r["s"] for r in rr[1:]]
+            if steady:
+                res.setdefault("steady", {}).setdefault(phase, {})[dt] = round(sum(steady) / len(steady), 3)
+    write()
+    log(f"steady (first run of each dtype excluded): {res.get('steady')}; total {time.time() - t_start:.0f} s "
+        f"-> {args.out}")
+
+
 # ---------------------------------------------------------------- tables
 
 def fmt_psnr(p):
@@ -598,6 +817,9 @@ def main():
     def common(p):
         p.add_argument("--model-dir", required=True)
         p.add_argument("--dit-model", default="seedvr2_ema_7b_fp16.safetensors")
+        p.add_argument("--vae-dtype", choices=("bf16", "fp16"), default="bf16",
+                       help="bf16: numz's (fp16 file converted on load); fp16: the file's own weights, "
+                            "float16 inputs, no autocast")
 
     p = sub.add_parser("encode")
     common(p)
@@ -624,6 +846,19 @@ def main():
     p.add_argument("--snapshot", type=int)
     p.add_argument("--snapshot-dir")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("dtype-ab")
+    common(p)
+    p.add_argument("--latents", required=True)
+    p.add_argument("--input", help="the source video of the latents (encode phase)")
+    p.add_argument("--start", type=int, default=0)
+    p.add_argument("--n-latents", type=int, default=9, help="first N latents (4N - 3 frames)")
+    p.add_argument("--phases", default="decode,tiled,encode")
+    p.add_argument("--pairs", type=int, default=3, help="bf16, fp16 alternations per phase")
+    p.add_argument("--tiled", default="1024:128", help="tiled phase: TILE:OVERLAP (the CLI's defaults)")
+    p.add_argument("--budget-min", type=float, default=19, help="stop before a run that would end later")
+    p.add_argument("--out", required=True)
+    p.set_defaults(func=cmd_dtype_ab)
 
     p = sub.add_parser("table")
     p.add_argument("results", nargs="+")
