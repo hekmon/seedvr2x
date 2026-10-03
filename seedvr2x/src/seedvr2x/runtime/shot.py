@@ -7,10 +7,14 @@ the whole shot is decoded in one stream, its frames written as they come. The no
 for the shot and sliced per window. Every step keeps numz's order and dtypes
 (src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives numz's one-batch
 output, bit for bit (milestone 1). Only the latents are ever whole in memory.
+
+The steps are apart, as the resumable units of DESIGN.md (Pause and resume) are: the encode
+(encode_shot), each window (sample_windows), the decode (merge_windows, decode_shot). Each takes
+what the one before gives, wherever it was kept; upscale_shot runs them in a row.
 """
 
 import math
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -56,6 +60,13 @@ def padded_length(count: int) -> int:
     """The frames of a shot of `count` frames once padded to 4n + 1: the VAE packs 4 frames per
     latent after the first."""
     return count + (-count + 1) % 4
+
+
+def shot_layout(count: int, window: int | None) -> list[tuple[int, int]]:
+    """The DiT windows of a shot of `count` frames (window_layout), capped at `window` latents;
+    None runs the shot in one window."""
+    latents = (padded_length(count) - 1) // 4 + 1
+    return window_layout(latents, window or latents)
 
 
 def pad_4n1(frames: Tensor) -> Tensor:
@@ -120,7 +131,7 @@ def upscale_shot(
     reseed_windows: bool = False,
 ) -> None:
     """Upscale one shot of `count` frames, read as they are needed, and write its frames as they
-    come out.
+    come out: its steps in a row.
 
     read(n) gives the shot's next n frames, (n, H, W, 3) float32 in [0, 1]. target is the
     (height, width) they are resized to (job.target_size). write(frames) takes the output's next
@@ -132,50 +143,95 @@ def upscale_shot(
     stitching study's reference implementation did (blend_patch.py, STITCH_LATENT), so that the
     windows, the mixing and the decode can be checked against it bit for bit.
     """
-    out_height, out_width = output_size(target)
+    latent = encode_shot(models, read, count, target, seed)
+    layout = shot_layout(count, window)
+    if reseed_windows:
+        sampled = _sample_reseeded(models, latent, layout, seed)
+    else:
+        sampled = list(sample_windows(models, latent, layout, seed))
+    del latent
+    merged = merge_windows(sampled, layout)
+    del sampled
+    decode_shot(models, merged, count, target, write)
+
+
+@torch.no_grad()
+def encode_shot(
+    models: Models,
+    read: Callable[[int], npt.NDArray[np.float32]],
+    count: int,
+    target: tuple[int, int],
+    seed: int,
+) -> Tensor:
+    """The VAE latent of a shot of `count` frames, read as they are needed (upscale_shot): (T', h,
+    w, 16) bfloat16 on the device, in the channel-major memory the encode gives it, which the
+    noise drawn from it depends on (model.encode). T' is 1 + (padded_length(count) - 1) / 4."""
     padded = padded_length(count)
-    with torch.no_grad():
-        # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
-        model.set_seed(seed + ENCODE_SEED_OFFSET)
-        transform = model.input_transform(target)
-        # (t, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388),
-        # then prepared slice by slice: every step works frame by frame.
-        slices = (
-            transform(frames.permute(0, 3, 1, 2).to(models.device, COMPUTE_DTYPE))
-            for frames in input_slices(read, count, model.encode_slices(models, padded))
-        )
-        latent = model.encode_stream(models, slices, padded)
-        layout = window_layout(latent.shape[0], window or latent.shape[0])
-        if reseed_windows:
-            sampled = _sample_reseeded(models, latent, layout, seed)
-        else:
-            # One draw for the shot, on the latent's layout as numz draws it for a batch
-            # (generation_phases.py:663-680), sliced per window.
-            model.set_seed(seed)
-            noise = torch.randn_like(latent, dtype=COMPUTE_DTYPE)
-            sampled = [
-                model.sample(models, noise[s:e], model.condition(models, noise[s:e], latent[s:e]))
-                for s, e in layout
-            ]
-        del latent
-        merged = sampled[0] if len(sampled) == 1 else _merge(sampled, layout)
-        del sampled
-        # Decode (generation_phases.py:900-958) and post-process (:1340-1348), slice by slice:
-        # (C, t, H, W) to (t, H, W, C) without the padding, then [-1, 1] to [0, 1] in place.
-        written = 0
-        for decoded in model.decode_stream(models, merged.to(models.device)):
-            chunk = decoded.permute(1, 2, 3, 0)[: count - written, :out_height, :out_width]
-            if chunk.shape[0] == 0:
-                continue
-            chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
-            write(chunk.to("cpu", torch.float32).numpy())
-            written += chunk.shape[0]
-        if written != count:
-            raise RuntimeError(f"{written} frames decoded for a shot of {count}")
+    # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
+    model.set_seed(seed + ENCODE_SEED_OFFSET)
+    transform = model.input_transform(target)
+    # (t, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388), then
+    # prepared slice by slice: every step works frame by frame.
+    slices = (
+        transform(frames.permute(0, 3, 1, 2).to(models.device, COMPUTE_DTYPE))
+        for frames in input_slices(read, count, model.encode_slices(models, padded))
+    )
+    return model.encode_stream(models, slices, padded)
 
 
+@torch.no_grad()
+def sample_windows(
+    models: Models, latent: Tensor, layout: Sequence[tuple[int, int]], seed: int, start: int = 0
+) -> Iterator[Tensor]:
+    """The DiT's output for each window of layout from window `start` on, in order, each (t, h, w,
+    16) on the device: one Euler step per window, from the shot's latent (encode_shot).
+
+    The noise is drawn once for the shot, on the latent's layout as numz draws it for a batch
+    (generation_phases.py:663-680), and sliced per window. Nothing else draws, so a window's
+    noise is the same whether the windows before it ran in this process or in an earlier one: a
+    resumed shot draws it again, from a latent of the same layout."""
+    if layout[-1][1] != latent.shape[0]:
+        raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
+    model.set_seed(seed)
+    noise = torch.randn_like(latent, dtype=COMPUTE_DTYPE)
+    for s, e in layout[start:]:
+        yield model.sample(models, noise[s:e], model.condition(models, noise[s:e], latent[s:e]))
+
+
+def merge_windows(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:
+    """The shot's latents from its windows' DiT outputs (sample_windows): a single window's as it
+    is, else mixed where two windows share latents (_merge)."""
+    return sampled[0] if len(sampled) == 1 else _merge(sampled, layout)
+
+
+@torch.no_grad()
+def decode_shot(
+    models: Models,
+    merged: Tensor,
+    count: int,
+    target: tuple[int, int],
+    write: Callable[[npt.NDArray[np.float32]], None],
+) -> None:
+    """Decode the shot of `count` frames whose latents are merged (merge_windows), in one stream,
+    and write its frames as they come (upscale_shot)."""
+    out_height, out_width = output_size(target)
+    # Decode (generation_phases.py:900-958) and post-process (:1340-1348), slice by slice:
+    # (C, t, H, W) to (t, H, W, C) without the padding, then [-1, 1] to [0, 1] in place.
+    written = 0
+    for decoded in model.decode_stream(models, merged.to(models.device)):
+        chunk = decoded.permute(1, 2, 3, 0)[: count - written, :out_height, :out_width]
+        if chunk.shape[0] == 0:
+            continue
+        chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
+        write(chunk.to("cpu", torch.float32).numpy())
+        written += chunk.shape[0]
+    if written != count:
+        raise RuntimeError(f"{written} frames decoded for a shot of {count}")
+
+
+@torch.no_grad()
 def _sample_reseeded(
-    models: Models, latent: Tensor, layout: list[tuple[int, int]], seed: int
+    models: Models, latent: Tensor, layout: Sequence[tuple[int, int]], seed: int
 ) -> list[Tensor]:
     """Each window's DiT output with noise drawn per window, as numz ran the study's windows:
     the latent offloaded to the CPU, each window cloned from it, the seed reset, the clone moved
@@ -193,7 +249,7 @@ def _sample_reseeded(
     return sampled
 
 
-def _merge(sampled: list[Tensor], layout: list[tuple[int, int]]) -> Tensor:
+def _merge(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:
     """The windows' DiT outputs merged into the shot's latents: on the latents two windows share,
     earlier * w + later * (1 - w). The expression, bfloat16 and the CPU are the study's
     (blend_patch.py, latent_upscale)."""

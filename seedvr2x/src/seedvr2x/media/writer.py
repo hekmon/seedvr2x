@@ -27,6 +27,7 @@ import numpy as np
 import numpy.typing as npt
 
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.files import partial_path, replace_whole
 from seedvr2x.media.probe import VideoStream
 
 FORMATS = ("gbrp16le", "yuv420p10le", "png")
@@ -203,7 +204,8 @@ class Writer:
 
 class FFV1Writer(Writer):
     """An FFV1 master, gbrp16le or yuv420p10le, written to a temporary file beside path, then
-    checked (its frames counted by ffprobe) and renamed: a file at path is always whole."""
+    checked (its frames counted by ffprobe) and renamed: a file at path is always whole, even
+    after a power cut (files.replace_whole)."""
 
     def __init__(
         self,
@@ -216,7 +218,7 @@ class FFV1Writer(Writer):
         slices: int = 16,
     ) -> None:
         self.path = path
-        self._partial = path.with_name(f"{path.name}.partial")
+        self._partial = partial_path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         if pix_fmt == "gbrp16le":
             # Frame properties only, no pixel conversion: without them the muxer writes no
@@ -265,7 +267,7 @@ class FFV1Writer(Writer):
         if counted != self.written:
             self._discard()
             raise MediaError(f"{self.path}: {counted} frames in the file, {self.written} written")
-        self._partial.replace(self.path)
+        replace_whole(self._partial, self.path)
 
     def _discard(self) -> None:
         self._partial.unlink(missing_ok=True)
@@ -274,7 +276,8 @@ class FFV1Writer(Writer):
 class PNGWriter(Writer):
     """16-bit RGB PNG, one file per frame, directory/NNNNNN.png numbered from start, written to a
     temporary directory beside it, then checked (every frame there) and renamed: a directory at
-    path is always whole. directory must not exist, or be empty."""
+    path is always whole, even after a power cut (files.replace_whole). directory must not exist,
+    or be empty."""
 
     def __init__(
         self,
@@ -288,7 +291,7 @@ class PNGWriter(Writer):
         self.directory, self.start = directory, start
         if directory.exists() and (not directory.is_dir() or any(directory.iterdir())):
             raise MediaError(f"{directory}: exists, and is not an empty directory")
-        self._partial = directory.with_name(f"{directory.name}.partial")
+        self._partial = partial_path(directory)
         # What an interrupted writer left: frames of a segment never finished.
         shutil.rmtree(self._partial, ignore_errors=True)
         self._partial.mkdir(parents=True)
@@ -329,7 +332,7 @@ class PNGWriter(Writer):
         if missing:
             self._discard()
             raise MediaError(f"{self.directory}: {len(missing)} PNG missing, from {missing[0]}")
-        self._partial.replace(self.directory)
+        replace_whole(self._partial, self.directory)
 
     def _discard(self) -> None:
         shutil.rmtree(self._partial, ignore_errors=True)

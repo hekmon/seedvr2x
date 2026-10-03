@@ -7,7 +7,7 @@ import re
 import time
 from collections.abc import Sequence
 from fractions import Fraction
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +16,8 @@ from seedvr2x.media.writer import FORMATS
 from seedvr2x.runtime.job import MIN_SEGMENT
 
 if TYPE_CHECKING:
+    import torch
+
     from seedvr2x.runtime.job import OutputSegment, Part, Shot
 
 # Video file names, other than Matroska's, that -o refuses: an FFV1 master is a .mkv file, and
@@ -138,7 +140,8 @@ def _run(args: argparse.Namespace) -> int:
                 f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
                 f" a window needs at least {2 * SHARED + 1}"
             )
-        logger.info("ffmpeg %s", ffmpeg.check(("png",) if args.format == "png" else ()))
+        ffmpeg_version = ffmpeg.check(("png",) if args.format == "png" else ())
+        logger.info("ffmpeg %s", ffmpeg_version)
         if args.input.is_dir():
             if args.cuts:
                 # Until the detector for doubtful joins comes, each join is a cut (DESIGN.md,
@@ -152,6 +155,9 @@ def _run(args: argparse.Namespace) -> int:
         shots = job_shots(parts, cuts)
         check_seed(args.seed, shots)
         segments, paths, directory = _layout(args, parts, shots)
+        for name in (args.dit_model, args.vae_model):
+            if not (args.model_dir / name).is_file():
+                raise JobError(f"{args.model_dir / name}: no such model file")
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
@@ -166,6 +172,8 @@ def _run(args: argparse.Namespace) -> int:
         out_width,
         out_height,
     )
+    # The manifest's settings, the models' hashes included, before any GPU work.
+    settings = _settings(args, cuts) if directory is not None else {}
 
     import numpy as np
     import numpy.typing as npt
@@ -174,7 +182,9 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
     from seedvr2x.runtime import manifest
     from seedvr2x.runtime.model import load_models
-    from seedvr2x.runtime.run import run_shots
+    from seedvr2x.runtime.run import run_job
+    from seedvr2x.runtime.shot import shot_layout
+    from seedvr2x.runtime.units import DiskUnits, Units
 
     if not torch.cuda.is_available():
         logger.error("no CUDA device")
@@ -183,6 +193,7 @@ def _run(args: argparse.Namespace) -> int:
         logger.error("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
         return 1
     device = torch.device("cuda", 0)
+    environment = _environment(device, ffmpeg_version) if directory is not None else {}
     started = time.monotonic()
     models = load_models(args.model_dir, args.dit_model, args.vae_model, device)
     logger.info(
@@ -190,14 +201,16 @@ def _run(args: argparse.Namespace) -> int:
     )
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
-    record = None
+    units = Units()
     if directory is not None:
         directory.mkdir(parents=True, exist_ok=True)
         record = manifest.Manifest(
             directory / manifest.NAME,
-            _settings(args, cuts),
+            settings,
+            environment,
             parts,
             shots,
+            [shot_layout(shot.frames, args.window) for shot in shots],
             segments,
             [path.name for path in paths],
             {
@@ -207,6 +220,7 @@ def _run(args: argparse.Namespace) -> int:
             },
         )
         record.write()
+        units = DiskUnits(directory, record)
     started = time.monotonic()
 
     tags = Tags.of(stream, source.conversion.matrix_tag)
@@ -216,8 +230,7 @@ def _run(args: argparse.Namespace) -> int:
 
     try:
         outputs = [(path, segment.frames) for path, segment in zip(paths, segments, strict=True)]
-        finished = record.segment_finished if record is not None else None
-        with SegmentWriter(outputs, open_segment, finished) as writer:
+        with SegmentWriter(outputs, open_segment, units.segment_finished) as writer:
 
             def write(frames: npt.NDArray[np.float32]) -> None:
                 if args.dump_frames is not None:
@@ -226,7 +239,7 @@ def _run(args: argparse.Namespace) -> int:
                         np.save(path, np.ascontiguousarray(frame))
                 writer.write(frames)
 
-            run_shots(models, parts, shots, target, args.seed, write, args.window)
+            run_job(models, parts, shots, segments, target, args.seed, args.window, units, write)
     except MediaError as error:
         logger.error("%s", error)
         return 1
@@ -250,6 +263,7 @@ def _layout(
     6), the .mkv path stands for the one-file output, and the directory must be new or empty,
     which keeps another run's files out of what sptenc reads (DESIGN.md, Output)."""
     from seedvr2x.runtime.job import JobError, OutputSegment, merged_segments, mirrored_segments
+    from seedvr2x.runtime.manifest import NAME, STATE
 
     output: Path = args.output
     total = parts[-1].end
@@ -276,21 +290,23 @@ def _layout(
         frame_rate = parts[0].source.stream.frame_rate
         segments = merged_segments(shots, total, frame_rate, args.min_segment)
     suffix = "" if args.format == "png" else ".mkv"
-    return segments, [output / f"{segment.name}{suffix}" for segment in segments], output
+    paths = [output / f"{segment.name}{suffix}" for segment in segments]
+    for path in paths:
+        # A mirrored segment takes its file's stem, which could be one of seedvr2x's own names.
+        if path.name in (NAME, STATE) or path.name.endswith(".partial"):
+            raise JobError(f"{path.name}: a name seedvr2x keeps for itself in its output")
+    return segments, paths, output
 
 
 def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
     """The settings a manifest records, those a resume must find again."""
+    from seedvr2x.runtime.manifest import code_sha256
+
     return {
         "seedvr2x": version("seedvr2x"),
-        "dit_model": {
-            "name": args.dit_model,
-            "size": (args.model_dir / args.dit_model).stat().st_size,
-        },
-        "vae_model": {
-            "name": args.vae_model,
-            "size": (args.model_dir / args.vae_model).stat().st_size,
-        },
+        "code": code_sha256(),
+        "dit_model": _model(args.model_dir, args.dit_model),
+        "vae_model": _model(args.model_dir, args.vae_model),
         "resolution": args.resolution,
         "seed": args.seed,
         "window": args.window,
@@ -299,6 +315,41 @@ def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
         "min_segment": None if args.input.is_dir() else str(args.min_segment),
         "input_matrix": args.input_matrix,
         "input_sar": None if args.input_sar is None else str(args.input_sar),
+    }
+
+
+def _model(directory: Path, name: str) -> dict[str, object]:
+    """A model as the manifest records it: its file's name, size and SHA-256, models being
+    identified by hash (DESIGN.md, Options kept and dropped). The 7B fp16 DiT is 16 GB to read."""
+    from seedvr2x.runtime.manifest import sha256
+
+    path = directory / name
+    started = time.monotonic()
+    digest = sha256(path)
+    logger.info("%s: SHA-256 %s, in %.1f s", name, digest, time.monotonic() - started)
+    return {"name": name, "size": path.stat().st_size, "sha256": digest}
+
+
+def _environment(device: "torch.device", ffmpeg_version: str) -> dict[str, object]:
+    """What the output's bits depend on besides the settings, which a resume must find again to
+    stay bit-identical (DESIGN.md, Pause and resume): the stack, the GPU, the attention backend
+    and FlashAttention's version, ffmpeg's."""
+    import torch
+
+    from seedvr2x.runtime.model import attention_backend
+
+    try:
+        flash_attn = version("flash_attn")
+    except PackageNotFoundError:
+        flash_attn = None
+    return {
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version(),
+        "gpu": torch.cuda.get_device_name(device),
+        "attention": attention_backend(),
+        "flash_attn": flash_attn,
+        "ffmpeg": ffmpeg_version,
     }
 
 

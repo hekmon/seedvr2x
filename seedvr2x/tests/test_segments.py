@@ -6,6 +6,7 @@ test needs what tests/test_regression.py needs."""
 
 import json
 import os
+import re
 import subprocess
 import sys
 from fractions import Fraction
@@ -27,7 +28,7 @@ from seedvr2x.runtime.job import (
     min_segment_frames,
     parts_of,
 )
-from seedvr2x.runtime.manifest import Manifest
+from seedvr2x.runtime.manifest import Manifest, code_sha256
 
 
 def at(second: int) -> int:
@@ -147,23 +148,43 @@ def test_manifest(tmp_path: Path) -> None:
         )
         for name, frames in (("a.mkv", 3), ("b.mkv", 2))
     ]
+    for source in sources:
+        source.path.write_bytes(b"x" * source.frames)
     parts = parts_of(cast(list[Source], sources))
     record = Manifest(
         tmp_path / "manifest.json",
         {"seed": 42},
+        {"gpu": "a GPU"},
         parts,
         [Shot(0, 3), Shot(3, 5)],
+        [[(0, 1)], [(0, 1)]],
         [OutputSegment("a", 0, 3), OutputSegment("b", 3, 5)],
         ["a.mkv", "b.mkv"],
         {"format": "gbrp16le"},
     )
     record.write()
-    record.segment_finished(0)
+    record.shot_encoded(0)
+    record.window_done(0, 0)
+    record.segment_finished(0, 1234)
     content = json.loads((tmp_path / "manifest.json").read_text())
-    assert [s["finished"] for s in content["segments"]] == [True, False]
+    assert content["seedvr2x_manifest"] == 2
+    assert re.fullmatch(r"[0-9a-f]{64}", code_sha256()) and code_sha256() == code_sha256()
+    assert content["environment"] == {"gpu": "a GPU"}
+    assert [(s["finished"], s["bytes"]) for s in content["segments"]] == [
+        (True, 1234),
+        (False, None),
+    ]
     assert [s["seed"] for s in content["shots"]] == [42, 45]
-    assert [(i["start"], i["frames"]) for i in content["input"]] == [(0, 3), (3, 2)]
+    assert [(s["encoded"], s["windows_done"]) for s in content["shots"]] == [(True, 1), (False, 0)]
+    assert [(s["latents"], s["windows"]) for s in content["shots"]] == [(1, [[0, 1]])] * 2
+    assert [(i["start"], i["frames"], i["bytes"]) for i in content["input"]] == [
+        (0, 3, 3),
+        (3, 2, 2),
+    ]
+    assert content["input"][0]["path"] == str((tmp_path / "a.mkv").resolve())
     assert not (tmp_path / "manifest.json.partial").exists()
+    with pytest.raises(ValueError, match="window 2 after 1"):
+        record.window_done(0, 2)
 
 
 def _usable() -> bool:
