@@ -429,8 +429,18 @@ Ours:
   resolution (about 70 MiB per second of 1080p input). It is written to
   `resume/shot_<start>/input.mkv` while the encode reads the frames, recorded with the shot's
   latent, and kept until its segment is finished. It's exact, sequential, and independent of
-  seeking. For `-o x.mkv`, the same files live in a work directory beside the output, removed
-  at the end or at a stop.
+  seeking.
+  - It is derived data. It's a lossless decode of an input whose content is checked, so it can
+    be remade bit for bit with the same ffmpeg and conversions.
+  - It is read with FFV1's slice CRCs enforced. ffmpeg would otherwise decode through a
+    damaged copy and exit 0, feeding `lab` wrong reference frames.
+  - A missing or damaged copy (absent, truncated, or failing its CRCs) stops the run. A
+    resume remakes it by reading the shot's frames from the input again, keeping the shot's
+    latent and windows. A lost temporary file never ends a multi-hour job.
+  - For `-o x.mkv`, the same files live in `<output>.work`, made and locked at the start as an
+    output directory is, so a second run to the same file is refused. It is removed when the
+    run ends, however it ends. What a killed run left there (only seedvr2x's files) is emptied
+    at the next start; anything else is refused, never deleted.
 - With `none`, nothing is copied or buffered, and the decode streams.
 
 Validated against numz's `lab` on the metrics, not bit for bit (milestone 5).
@@ -642,6 +652,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     included: anything else is refused, never deleted.
   - These are discarded: `.partial` files, an unfinished segment's file, unrecorded units, and
     the units of finished segments.
+  - A recorded input copy that is missing or damaged is remade from the input, keeping the
+    shot's latent and windows (see [Colour correction](#colour-correction)).
   - Finished segments and kept units are skipped. The input frames of skipped shots are
     decoded and dropped (decode-and-count), until frame-exact seeking is settled.
   - One seedvr2x at a time per directory (flock); a filesystem without locks is warned about.
