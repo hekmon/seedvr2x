@@ -470,26 +470,56 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 - **Manifest** (`manifest.json`, version 2), the truth:
   - settings, with the SHA-256 of the models and of seedvr2x's own files. Any code change
     refuses a resume, even a comment.
-  - environment: torch, CUDA, cuDNN, GPU, attention backend, FlashAttention, ffmpeg, and a
-    fingerprint of the conversion chain (a hash of the startup check's test conversions,
-    which catches a zimg upgrade that ffmpeg's version string doesn't show). The NVIDIA
-    driver is recorded for information: the math kernels ship with torch.
-  - inputs: path, bytes, mtime, SHA-256 of the content, and the first pass's facts
+  - environment, compared on resume:
+    - torch, CUDA, cuDNN, GPU, attention backend, FlashAttention and ffmpeg
+    - a fingerprint of the conversion chain: the SHA-256 of 19 test conversions of fixed
+      frames, run in one ffmpeg process at every start (40–100 ms). They cover the decode's
+      zscale chain at every input depth, chroma subsampling, matrix, range and siting, and
+      the writers' chains. The value is the same on two CPUs with one ffmpeg build, and it
+      catches a zimg upgrade that ffmpeg's version string doesn't show.
+    - the versions of every distribution whose modules the run has imported when the
+      manifest is written, plus torch's runtime library wheels (cuBLAS, cuDNN…), plus
+      Python's. Derived, not a hand-kept list, so a new dependency can't be missed:
+      torchvision (the resize), diffusers (the VAE's blocks) and rotary-embedding-torch
+      change the output bits as surely as torch does, and a venv can drift from its lock.
+
+    The NVIDIA driver is recorded through NVML for information, not compared: the math kernels
+    ship with torch.
+  - inputs: path and mtime for information; the content, compared by size and SHA-256 (hashed
+    by a thread while the first pass decodes); the first pass's facts. Also compared: the pixel
+    format each input is decoded from, and the primaries and transfer the output copies. An
+    accepted ffmpeg change must read and tag the source exactly as before.
   - output, shots (windows, encoded, windows done), and segments (bytes when finished)
+  - `environment_changes`: each change accepted with `--accept-env-change`. It records when,
+    each field that changed with its values before and after (the driver included, for
+    information), and how many segments, shots and windows were already made.
 
   It is rewritten whole after every unit: a temporary file, fsync, rename, then a directory
-  fsync. A unit is recorded only once its file is whole.
+  fsync. A unit is recorded only once its file is whole. The manifest stays at version 2: new
+  fields are additive, and a manifest written by older code is refused anyway, since its
+  `settings.code` differs.
 - **Resuming:** the same command on the same `-o` directory, with no `--resume` flag.
   - Refused, with each difference listed: any difference in settings, inputs (by content),
-    models or code, except progress. A moved input with the same content is accepted, since
-    the path is information.
-  - Environment differences are refused too, unless `--accept-env-change` is given, which the
-    manifest records. A different GPU, stack or ffmpeg only breaks bit-identity across the
-    resume, not the upscale's correctness, and refusing outright would throw away tens of
-    GPU hours over an upgrade.
-  - With the content, environment and settings unchanged, the first pass's record is trusted
-    and the pass isn't run again. That saves a full decode per resume, about 17 min on a
-    2-hour HEVC master.
+    models or code, except progress. A moved or touched input with the same content is
+    accepted, since path and mtime are information.
+  - The comparison has two stages:
+    - Before the first pass: settings (models hashed), environment and the inputs' content.
+      Another job is refused without any decode, and the refusal lists only these
+      differences, not the layout differences that would follow from them.
+    - After the first pass, trusted or run again: everything else, the first pass's facts and
+      the layout.
+  - Environment differences are refused too, unless `--accept-env-change` is given. When they
+    are the only differences, the refusal names the flag. A different GPU, stack or ffmpeg only
+    breaks bit-identity across the resume, not the upscale's correctness, and refusing
+    outright would throw away tens of GPU hours over an upgrade.
+    - The new environment and its `environment_changes` record are written with the next unit
+      made. A resume stopped before making one leaves the manifest as it was, and the job
+      still resumes in its old environment.
+    - Re-running a finished job doesn't rewrite its manifest.
+  - The first pass's record is trusted, and the pass isn't run again, when the content and the
+    settings are unchanged and neither `ffmpeg` nor `conversions` changed. The pass runs only
+    on ffmpeg's decode, so a torch, CUDA, GPU or attention change doesn't touch it. That saves
+    a full decode per resume, about 17 min on a 2-hour HEVC master.
   - The directory must hold what the manifest names and nothing of anyone else's, dotfiles
     included: anything else is refused, never deleted.
   - These are discarded: `.partial` files, an unfinished segment's file, unrecorded units, and
