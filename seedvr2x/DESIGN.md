@@ -432,11 +432,37 @@ Ours:
   seeking.
   - It is derived data. It's a lossless decode of an input whose content is checked, so it can
     be remade bit for bit with the same ffmpeg and conversions.
-  - It is read with FFV1's slice CRCs enforced. ffmpeg would otherwise decode through a
-    damaged copy and exit 0, feeding `lab` wrong reference frames.
-  - A missing or damaged copy (absent, truncated, or failing its CRCs) stops the run. A
-    resume remakes it by reading the shot's frames from the input again, keeping the shot's
-    latent and windows. A lost temporary file never ends a multi-hour job.
+    - After an accepted change of ffmpeg or its conversions, a remade copy holds the new
+      decode's frames. `lab`'s reference may then differ from the encoder's input by what the
+      change changed. Only bit-identity is given up, as with any accepted change.
+  - **Integrity, checked end to end.**
+    - Each frame gets a CRC-32 over its 16-bit planes as written, kept in
+      `resume/shot_<start>/input.crc32`. That file is written whole with the copy, before the
+      latent is recorded, and a missing checksum file counts as a missing copy.
+    - Each frame read back is checked before `lab` uses it. That costs about 2 ms per 1080p
+      frame per pass. The checksums guard the file, not the decode, so a remade copy gets new
+      ones.
+    - The copy is also read strictly. ffmpeg's errors go to a file, and a read fails on
+      anything ffmpeg reports, checked after every read before its frames are used. That
+      names the cause.
+  - Why both checks are needed:
+    - No ffmpeg option makes a slice failing its CRC fail the decode. With
+      `-err_detect crccheck+explode` or `-xerror`, ffmpeg n9.0.2 decodes through it and exits
+      0, hiding the slice under the previous frame's. Its only signal is a line on stderr.
+    - A damaged slice-size field in FFV1 v3 can make ffmpeg skip slices without a word. On
+      flat frames, a frame came back with 2,880 of its 3,072 pixels from another frame.
+      Fuzzing small copies gave 2 silent wrong frames in 17,585 byte positions on random
+      content, and 2 in 13,160 on smooth content.
+    - The Matroska demuxer silently drops a block whose ID is damaged.
+    - A full temporary directory would silence ffmpeg's errors altogether.
+  - **A missing or damaged copy.**
+    - A copy missing when a run starts is remade from the input before the shot's windows or
+      decode, reading the input in shot order.
+    - A copy the decode finds missing, cut short or damaged stops the run. It is named and
+      removed, and the next run remakes it, keeping the shot's latent and windows. A lost or
+      damaged temporary file never ends a multi-hour job.
+  - The decode's second pass writes a shot's last frames only once its copy has been read
+    whole and checked, since they may finish the output segment, which is then recorded.
   - For `-o x.mkv`, the same files live in `<output>.work`, made and locked at the start as an
     output directory is, so a second run to the same file is refused. It is removed when the
     run ends, however it ends. What a killed run left there (only seedvr2x's files) is emptied
@@ -455,10 +481,15 @@ compressed is the user's choice: afterwards, from the master, or during the run 
   frames (no 8-bit step, bugs 09/19):
   - `gbrp16le`: research and archive master, closest to the model
   - `yuv420p10le`, BT.709, limited range, explicit conversion (zscale): the master handed to
-    sptenc, which takes such a file as it is, so no implicit RGB→YUV happens downstream. It
-    shares the pixel format and tags of `sptenc master` (chroma sited left included), not its
-    conversion: sptenc's swscale puts 16-bit white at 943 instead of 940. The conversion tests
-    (see [Input](#input)) check that zscale sites the chroma left, as tagged.
+    sptenc. sptenc takes such a file as it is, without any conversion, which its MANUAL
+    recommends for tools that can write YUV. So the RGB→YUV conversion happens once, in the
+    tool that requires zscale, and exactly (white at 940).
+    - This is sptenc's intended input, not a workaround. sptenc converts RGB sources with
+      swscale (16-bit white at 943 instead of 940), a documented trade-off: zscale isn't in
+      every ffmpeg build, and sptenc ships for any build.
+    - The master shares the pixel format and tags of `sptenc master`, chroma sited left
+      included. The conversion tests (see [Input](#input)) check that zscale sites the chroma
+      left, as tagged.
     - The chroma is downsampled with zscale's bilinear, pinned, as `ffv1_out.py` does. That is
       the right kernel on its own merits: decimation wants a low-pass, not a sharp
       interpolator, which is why the decode, which interpolates, uses Catmull-Rom.
@@ -494,6 +525,19 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     model still resets at each cut inside it. So the merge costs no quality. It saves what
     short segments cost an encoder: a forced keyframe each, and too few frames to amortise it
     (sptenc's MANUAL, "Too fine: many short segments").
+  - **Checksums.** The segments are the product, and the silent FFV1 damage found on input
+    copies could hit a finished master on disk too. So each frame of an FFV1 or PNG segment
+    gets a CRC-32 over its planes as written, computed at write time, the only cheap moment
+    (about 2 ms per 1080p frame).
+    - They are kept in `<out>/checksums/<segment>.crc32`, one per frame in order, written
+      whole before the segment is recorded. They outlive the job, unlike `resume/`, and
+      sptenc only reads `.mkv` and `.mp4` files.
+    - For `-o x.mkv`, they go in `<output>.crc32` beside it.
+    - A resume checks a finished segment's size against the manifest: cheap, and it catches a
+      truncated file. `seedvr2x verify <out>` decodes the segments and checks every frame, on
+      demand, for instance before sptenc or an archive trusts them.
+    - `--segment-cmd` outputs only get their frame count checked: their frames are the user's
+      encoder's.
   - **Writer.** FFV1 by default. With `--segment-cmd`, the user's command runs once per
     segment: it reads the segment, lossless and tagged, on stdin, and writes the file seedvr2x
     names, e.g. `--segment-cmd 'ffmpeg -i - -c:v libx265 -crf 16 {out}'`. seedvr2x never
@@ -654,8 +698,10 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     the units of finished segments.
   - A recorded input copy that is missing or damaged is remade from the input, keeping the
     shot's latent and windows (see [Colour correction](#colour-correction)).
-  - Finished segments and kept units are skipped. The input frames of skipped shots are
-    decoded and dropped (decode-and-count), until frame-exact seeking is settled.
+  - Finished segments and kept units are skipped. A finished segment's size is checked against
+    the manifest, and its frames by `seedvr2x verify` (see [Output](#output)). The input
+    frames of skipped shots are decoded and dropped (decode-and-count), until frame-exact
+    seeking is settled.
   - One seedvr2x at a time per directory (flock); a filesystem without locks is warned about.
     A filesystem that can't sync a directory is warned about once.
   - `--dump-frames` is refused inside the output directory.
@@ -808,6 +854,8 @@ explanation.
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
   transfer kept, square pixels)
 - resume: the same command resumes; what refuses a resume and why; `--accept-env-change`
+- integrity: the per-frame checksums kept with the output, and `seedvr2x verify` to check a
+  job's masters before trusting them
 - seeds and reproducibility: the same settings give the same output, bit for bit
 
 ## Validation milestones
