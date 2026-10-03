@@ -336,10 +336,54 @@ Fallback when latent stitching can't be used: a linear pixel cross-fade over K =
 `lab` is the recommended mode on quality grounds
 ([quality.md](../research/docs/quality.md)): it removes the model's colour drift (+30%
 saturation, toward blue), halves boundary jumps and cancels the VAE tile drift.
-Its first step is StableSR's wavelet split (non-commercial licence). We **rewrite** that split
-(an iterated blur separating low and high frequencies, or a Gaussian low-pass), keep numz's LAB
-histogram matching (Apache-2.0), and validate against numz's `lab` with the same metrics
-(ΔE low-frequency, a*/b* spread, boundary jumps).
+`--color-correction {lab,none}`, `lab` by default, is a setting, so a resume compares it.
+
+What numz's `lab` does, per batch slice (numz `4490bd1`):
+- **Inputs.** The content is the VAE's bf16 output, unclamped. The reference is the input
+  rebuilt with the model's input transform, in fp16 on the CPU. That is not the tensor the
+  encoder saw; ByteDance uses that one.
+- **Wavelet split.** The output is the content's high band plus the reference's low band,
+  clamped. The low band is 5 à-trous stages of the 3×3 binomial kernel, dilations 1 to 16,
+  edges replicated at each stage: away from the edges, a separable 63-tap tent filter,
+  σ ≈ 13 px. The high band is the image minus the low band.
+- **Matching**, in float32: RGB to CIELAB (sRGB, D65), then histogram matching per channel by
+  exact rank over all the slice's frames (a* and b* fully, L* = 0.8 content + 0.2 matched),
+  then back to RGB, clamped, bf16.
+
+Ours:
+- **Licences.** The wavelet functions are StableSR's (non-commercial), so the split is
+  rewritten from its method, clean room: another agent read StableSR's code and passed on
+  only the method. The CIELAB conversions and the matching are numz's own (Apache-2.0),
+  ported and attributed in NOTICE and in the code.
+- **Pooled per shot.** One mapping per shot, which is numz with one batch per shot, as the
+  stitching study advised: no batch boundary is left for the correction to make.
+  - The decode makes two passes. The VAE decodes once into a temporary bf16 buffer in the
+    shot's directory: about 12 MB per 1080p frame, so 18 GB per minute of 1080p shot, and
+    four times that at 4K.
+  - The first pass gathers the histograms; the second maps and writes. A shot's first frames
+    come out after its whole decode.
+  - Decoding twice instead would add about 54% to the run.
+- **Matching.** numz's mapping, each content quantile to the reference's, computed through
+  integer histograms pooled over the shot: 2^16 bins per channel, linear within a bin.
+  - numz's exact sort doesn't scale to a shot: a pooled GPU sort takes about 104 B per output
+    pixel-frame, and torch's CUDA sort stops at 2^31 elements (about 1,035 frames at 1080p).
+  - The histograms are deterministic, and tied values map alike rather than by position. The
+    result is within one bin (≈ 0.004 units) of numz's sort.
+- **Numerics.**
+  - The split runs in float32. numz's bf16 is 0.10 level off on average, 1.17 at most.
+  - The reference is the encoder's exact input tensor, rebuilt from the input copy with the
+    same transform, as ByteDance does.
+  - The corrected frames stay float32 for the writer. The low band and the mapping are
+    computed in float32, and a bf16 cast would cut them back to 8 significant bits.
+- **Input copy.** An FFV1 `gbrp16le` copy of the 16-bit frames the encode reads, at input
+  resolution (about 70 MiB per second of 1080p input). It is written to
+  `resume/shot_<start>/input.mkv` while the encode reads the frames, recorded with the shot's
+  latent, and kept until its segment is finished. It's exact, sequential, and independent of
+  seeking. For `-o x.mkv`, the same files live in a work directory beside the output, removed
+  at the end or at a stop.
+- With `none`, nothing is copied or buffered, and the decode streams.
+
+Validated against numz's `lab` on the metrics, not bit for bit (milestone 5).
 
 ## Output
 
@@ -477,11 +521,22 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       zscale chain at every input depth, chroma subsampling, matrix, range and siting, and
       the writers' chains. The value is the same on two CPUs with one ffmpeg build, and it
       catches a zimg upgrade that ffmpeg's version string doesn't show.
-    - the versions of every distribution whose modules the run has imported when the
-      manifest is written, plus torch's runtime library wheels (cuBLAS, cuDNN…), plus
-      Python's. Derived, not a hand-kept list, so a new dependency can't be missed:
+    - versions, derived rather than hand-kept, so a new dependency can't be missed:
       torchvision (the resize), diffusers (the VAE's blocks) and rotary-embedding-torch
       change the output bits as surely as torch does, and a venv can drift from its lock.
+      The record holds:
+      - the distributions imported once every module of seedvr2x is (the vendored models
+        included), narrowed to the closure of seedvr2x's declared requirements, followed
+        through extras. Dev-only or tooling installs therefore never refuse a resume.
+      - flash-attn, which is not a declared dependency
+      - torch's runtime libraries, loaded without being imported: its 15 nvidia-* wheels,
+        triton, cuda-bindings
+      - Python's version
+
+      On the GPU box that is 50 distributions, read in 1.8 s at start. A check at the end of
+      every run warns of any distribution the run imported but didn't record. Known limit,
+      as for any version record: third-party code shadowed on `PYTHONPATH` or installed
+      editable isn't seen changing.
 
     The NVIDIA driver is recorded through NVML for information, not compared: the math kernels
     ship with torch.
@@ -653,7 +708,23 @@ writers, and the planner needs real shot lengths.
 3. **Planner:** every card size passes under `vram_cap.py` emulation; plan estimates within a
    few percent of measured time and memory.
 4. **Resume:** interrupted and resumed runs bit-identical to uninterrupted ones.
-5. **Colour correction:** rewritten `lab` matches numz's `lab` on the quality metrics.
+5. **Colour correction:** our `lab` against numz's `lab`, one batch = one shot.
+   - Material: milestone 1's input, clip B and the measurement campaign's full-reference
+     clips, plus multi-window shots against numz + `STITCH_LATENT` with `lab` (clip B, 6:2).
+   - Both sides are scored alike from 16-bit masters.
+   - Accepted when ours is at least as good on every metric. Differences below the
+     tolerance count as equal.
+
+     | Metric | Better is | Tolerance |
+     |---|---|---|
+     | ΔE of the low frequencies to the input; ΔE00 to the ground truth on the full-reference clips | lower | 0.1 ΔE |
+     | a*/b* spread | closer to the input's | 1% |
+     | Y shift (signed) | closer to 0 | 0.1 level |
+     | Hold and low-frequency boundary steps | lower | 0.02 level |
+
+   - PSNR between ours and numz's is reported for information.
+   - A GPU test, `test_lab.py`, holds the result on milestone 1's input, with thresholds set
+     from the first runs.
 6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
    for frame, and every other stream is copied.
 7. **Visual review** of long runs by the user.
@@ -684,20 +755,6 @@ writers, and the planner needs real shot lengths.
   seedvr2x's side is settled: it reads a cut list of frame numbers (see [Input](#input)), so
   sptenc's export can write that, with scores and the cuts the merge removed as extra fields.
   Open: how seedvr2x treats cuts inside a segment and doubtful joins.
-- **Colour correction's input frames at decode.** `lab` compares each output frame with its
-  input. The streamed pipeline has passed the input by the time a shot decodes: only the
-  latents are kept. Three ways:
-  - re-read the shot from the source, which needs the frame-exact access below
-  - keep a temporary lossless copy of each shot's decoded input, written while the encode
-    reads it: exact, sequential, and on disk at input resolution. A segment's decode comes
-    after all its shots' windows, so the copies of a whole segment's shots coexist, which
-    is acceptable.
-  - keep only what the rewritten `lab` needs (its low frequencies and LAB statistics),
-    computed at read time
-
-  Recommendation: the temporary copy. It is the simplest, it's exact, and it doesn't depend on
-  seeking. It stays part of the shot's resumable state until its decode is done. To confirm at
-  the `lab` checkpoint, with the seeking results.
 - **Frame-exact access into long-GOP sources**, to resume a shot and to read its input frames
   again for colour correction. Three ways:
   - ffmpeg's accurate seek: fast, but trusts timestamps
@@ -717,6 +774,10 @@ writers, and the planner needs real shot lengths.
   - the fp32 → fp16 → bf16 cast of input frames
   - the fp16 weights cast to bf16
   - VAE mode vs sample
+  - the VAE decode's output precision. bf16 keeps 8 significant bits, ≈ 8-bit steps near
+    white, so a 16-bit master can't hold more there than the decode gives, and smooth bright
+    gradients could band. fp16 keeps 11 bits but VAE activations may overflow it; fp32 costs
+    memory and time.
   - the chroma kernels: Catmull-Rom upsampling at decode, bilinear downsampling for the
     `yuv420p10le` master
   - the input preparation: the resize kernel and its `antialias` flag, and multiples of 16
