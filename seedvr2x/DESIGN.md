@@ -369,9 +369,10 @@ compressed is the user's choice: afterwards, from the master, or during the run 
   masters do.
 - **Until assembly** (milestone 6):
   - `-o x.mkv` writes one FFV1 master; that needs a video file as input.
-  - Any other `-o` is a new or empty directory of segments plus `manifest.json`. The directory
-    must be new or empty, which keeps another run's files out of what sptenc reads, until
-    resume reads the manifest back.
+  - Any other `-o` is a directory of segments plus `manifest.json`. It is either new or empty,
+    or an unfinished job's directory, which the same command resumes (see
+    [Pause and resume](#pause-and-resume)). One seedvr2x at a time writes it, and anything
+    else found in it is refused, so another run's files never reach what sptenc reads.
   - An `-o` with another video suffix (`.mp4`, `.mov`…) is refused.
 - **Output segments**, the resume units of the output, listed in a manifest:
   - **Layout, by sptenc's rule.** The threshold picks the cuts, then the minimum segment
@@ -445,35 +446,82 @@ fails). Set by us, documented, overridable.
 
 ## Pause and resume
 
-Work is saved in resumable units; a stop loses only the unit in progress.
+Work is saved in resumable units; a stop loses only the unit in progress. Milestone 4 passed on
+2026-10-03.
 
 | Stage | Saved | Resume granularity |
 |---|---|---|
-| VAE encode | the shot's latents (~1 MB per 4 frames at 1080p) | per shot |
-| DiT | each window's output latents | per window |
-| VAE decode | output segments (FFV1, or the user's `--segment-cmd`) | per output segment: its decode and write restart, the DiT latents are kept (finer, per sub-segment with warm-up latents, if that proves bit-identical) |
+| VAE encode | the shot's latent | per shot |
+| DiT | each window's output | per window: an encoded shot resumes at its first missing window, its noise drawn again from the seed |
+| VAE decode | the output segment (FFV1, or the user's `--segment-cmd`) | per output segment: its decode and write restart whole |
 
-- **Manifest:** settings, seed, model hashes, finished shots and windows. A resume with
-  different settings is refused.
-  - The I/O layer writes a skeleton, `manifest.json`:
-    - settings: version, models by name and size, resolution, seed, window, format, cuts,
-      minimum segment length, overrides
-    - input files: start, frames, rate, size, sample aspect, conversion
-    - output: format, size, rate
-    - shots: start, end, seed
-    - segments: name, frames, finished
-  - It is written once the models load, then rewritten in full as each segment finishes,
-    always atomically (a temporary file, then a rename), since resume will trust it.
-  - Model hashes come with resume.
-- **Stopping:** Ctrl-C once finishes the current unit and exits; twice stops at once.
-  `--until HH:MM` stops cleanly before a unit that wouldn't finish in time, using the
-  planner's time estimates.
+- **Where:** a directory output keeps the units in `<out>/resume/shot_<start>/` (`latent.pt`,
+  `window_NNNN.pt`).
+  - They are `torch.save` copies on the CPU, values and memory layout kept, since the noise
+    depends on the latent's layout. They are loaded with `weights_only=True`, so a tampered
+    file can't run code.
+  - Each file is written as `.partial`, fsync'd, renamed, and only then recorded.
+  - A latent is deleted once its windows are done, a shot's directory once its segment is
+    finished, and `resume/` once the job is.
+  - `-o x.mkv` keeps its units in memory, so it isn't resumable until assembly gives it
+    segments. Ctrl-C works, but nothing is kept.
+- **Order:** a segment's shots are all encoded and sampled before its decode and write, which
+  reads their windows back, so units never interleave. The first frames come out later.
+- **Manifest** (`manifest.json`, version 2), the truth:
+  - settings, with the SHA-256 of the models and of seedvr2x's own files. Any code change
+    refuses a resume, even a comment.
+  - environment: torch, CUDA, cuDNN, GPU, attention backend, FlashAttention, ffmpeg, and a
+    fingerprint of the conversion chain (a hash of the startup check's test conversions,
+    which catches a zimg upgrade that ffmpeg's version string doesn't show). The NVIDIA
+    driver is recorded for information: the math kernels ship with torch.
+  - inputs: path, bytes, mtime, SHA-256 of the content, and the first pass's facts
+  - output, shots (windows, encoded, windows done), and segments (bytes when finished)
+
+  It is rewritten whole after every unit: a temporary file, fsync, rename, then a directory
+  fsync. A unit is recorded only once its file is whole.
+- **Resuming:** the same command on the same `-o` directory, with no `--resume` flag.
+  - Refused, with each difference listed: any difference in settings, inputs (by content),
+    models or code, except progress. A moved input with the same content is accepted, since
+    the path is information.
+  - Environment differences are refused too, unless `--accept-env-change` is given, which the
+    manifest records. A different GPU, stack or ffmpeg only breaks bit-identity across the
+    resume, not the upscale's correctness, and refusing outright would throw away tens of
+    GPU hours over an upgrade.
+  - With the content, environment and settings unchanged, the first pass's record is trusted
+    and the pass isn't run again. That saves a full decode per resume, about 17 min on a
+    2-hour HEVC master.
+  - The directory must hold what the manifest names and nothing of anyone else's, dotfiles
+    included: anything else is refused, never deleted.
+  - These are discarded: `.partial` files, an unfinished segment's file, unrecorded units, and
+    the units of finished segments.
+  - Finished segments and kept units are skipped. The input frames of skipped shots are
+    decoded and dropped (decode-and-count), until frame-exact seeking is settled.
+  - One seedvr2x at a time per directory (flock); a filesystem without locks is warned about.
+    A filesystem that can't sync a directory is warned about once.
+  - `--dump-frames` is refused inside the output directory.
+- **Stopping:**
+  - Ctrl-C once finishes the unit in progress and stops before the next (exit 130).
+  - Twice, or SIGTERM, stops at once (exit 130, or 143 for SIGTERM).
+  - ffmpeg runs in its own process groups, out of the terminal's reach.
+  - The run polls the GPU (every 10 ms) before device-to-host copies: Python can't run a
+    signal handler during a blocking CUDA copy (a decode slice takes ~8 s at 1080p), and two
+    presses would merge into one.
+  - `--until HH:MM` stops cleanly before a unit that wouldn't finish in time, using the
+    planner's time estimates; it comes with the planner.
 - Exiting frees the GPU entirely.
-- **Resume must be bit-identical** to an uninterrupted run: deterministic noise per shot, exact
-  latents, deterministic attention (FA2 reruns are bit-identical). Automated test: run,
-  interrupt, resume, compare the FFV1 masters bit for bit.
-- The same manifest lets separate processes take separate shot ranges (several GPUs or
-  machines) later.
+- **Resume is bit-identical** to an uninterrupted run: deterministic noise per shot, exact
+  latents, deterministic attention (FA2 reruns are bit-identical). Checked on 2026-10-03 on
+  milestone 1's input in 3 shots (one in 3 windows) and 2 segments:
+  - stopped by a kill in an encode, a kill in a window, Ctrl-C once in a window, and twice, a
+    kill and once in a segment's decode, then resumed after each
+  - every segment equals the uninterrupted run's bit for bit, and every stopped process exits
+    and leaves the GPU
+- **Later:**
+  - Resuming a segment's decode mid-way. Warm-up latents make it bit-identical from 37 on
+    ([decode-resume.md](../research/docs/decode-resume.md)), but that's about 6 s of
+    frames, so it only pays off on long segments. `--until` avoids most of the loss anyway.
+  - The same manifest lets separate processes take separate shot ranges (several GPUs or
+    machines).
 
 ## Options kept and dropped
 
@@ -516,11 +564,12 @@ writers, and the planner needs real shot lengths.
   with window 8. Every frame came out, resident RAM stayed flat at 2.3–2.4 GiB, and VRAM
   peaked at 19–26 GiB.
 
-**Next, in this order:**
-1. Resume (milestone 4). Real episodes need it: at 4.4 s per 1080p frame
-   ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode takes
-   about 40 GPU hours. `--until` waits for the planner's time estimates.
-2. The `lab` rewrite (milestone 5). Without it the output keeps the model's colour drift.
+**The build order:**
+1. Resume (milestone 4): passed on 2026-10-03. Real episodes needed it: at 4.4 s per 1080p
+   frame ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode
+   takes about 40 GPU hours.
+2. The `lab` rewrite (milestone 5), next. Without it the output keeps the model's colour
+   drift.
 3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory, and the planner's inputs (4K
    limits, the margin) come from the measurement campaign.
@@ -610,7 +659,9 @@ writers, and the planner needs real shot lengths.
   latents are kept. Three ways:
   - re-read the shot from the source, which needs the frame-exact access below
   - keep a temporary lossless copy of each shot's decoded input, written while the encode
-    reads it: exact, sequential, and on disk at input resolution, one shot at a time
+    reads it: exact, sequential, and on disk at input resolution. A segment's decode comes
+    after all its shots' windows, so the copies of a whole segment's shots coexist, which
+    is acceptable.
   - keep only what the rewritten `lab` needs (its low frequencies and LAB statistics),
     computed at read time
 
@@ -620,7 +671,7 @@ writers, and the planner needs real shot lengths.
 - **Frame-exact access into long-GOP sources**, to resume a shot and to read its input frames
   again for colour correction. Three ways:
   - ffmpeg's accurate seek: fast, but trusts timestamps
-  - decoding from the start and counting: exact, but slow on a film
+  - decoding from the start and counting: exact, but slow on a film. Resume uses it for now.
   - a lossless intermediate: exact and fast, but large
 
   Plan: measure accurate seek against decode-and-count on real long-GOP files.
