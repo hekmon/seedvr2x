@@ -300,6 +300,12 @@ they differ and by which metrics, and how users are guided to them. What is know
   - The VAE is about four fifths of a 1080p run, so its speed matters most. Its levers are
     `compile_vae` (−16 to −19% of VAE time, see [Memory planner](#memory-planner)) and,
     unmeasured, the convolutions' memory layout.
+- **What a smaller DiT file buys** is VRAM, for longer windows (fewer joins) and, on small
+  cards, less BlockSwap; time only through quantized activations. BlockSwap already gives the
+  fp16 weights the same windows, for host RAM and transfers its prefetch should mostly hide.
+  So a smaller file is weighed against the 7B fp16 with BlockSwap, at the same window length.
+  On the 96 GB card at 1080p, windows are already longer than most shots: the gain is on small
+  and mid-sized cards, and at 4K.
 - **Checks:** a file kept from numz is bit-identical to numz on milestone 1's input, the 3B fp8
   against numz patched to use the fp16 RoPE values; a file of our own is within the 7B fp16's
   seed spread on every kind of source.
