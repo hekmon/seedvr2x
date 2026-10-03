@@ -41,6 +41,8 @@ def test_milestone1_bit_identical(tmp_path: Path) -> None:
             *(sys.executable, "-m", "seedvr2x", str(m1 / "input_rgb.mkv"), "-o", str(master)),
             *("--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors"),
             *("--resolution", "1080", "--seed", "42", "--dump-frames", str(frames)),
+            # numz's output milestone 1 holds to, without its lab (StableSR's, not vendored).
+            *("--color-correction", "none"),
         ],
         capture_output=True,
         text=True,

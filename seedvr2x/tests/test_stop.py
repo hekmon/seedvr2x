@@ -139,6 +139,8 @@ def upscale(
             *("in.mkv", "-o", output, "--model-dir", ".", "--dit-model", "w.safetensors"),
             *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", "42"),
             *("--cuts", "cuts.txt", "--window", "5", "--min-segment", "0.12"),
+            # The stand-in's frames say which they are (test_cli_run.py).
+            *("--color-correction", "none"),
         ],
         stderr=subprocess.PIPE,
         text=True,

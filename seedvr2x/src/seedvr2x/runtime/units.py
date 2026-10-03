@@ -1,5 +1,7 @@
 """Where a run keeps its units (DESIGN.md, Pause and resume): each shot's latent after its encode
-and each window's DiT output, until the shot is decoded, and its output segment finished.
+and each window's DiT output, until the shot is decoded, and its output segment finished; and,
+for `lab` (DESIGN.md, Colour correction), each shot's input copy, made during its encode, and its
+decode's buffer.
 
 A shot's windows are only ever taken in order: the shot's latent is kept until its windows are
 all done, and they are kept until its decode."""
@@ -14,17 +16,43 @@ from seedvr2x.media.files import make_directories, partial_path, replace_whole
 from seedvr2x.runtime.manifest import STATE, Manifest
 from seedvr2x.runtime.model import synchronize
 
+# A shot's files besides its units: the copy of its input frames, an FFV1 gbrp16le file at the
+# input's size, which lab's reference is rebuilt from; and the buffer of its decoded frames
+# between lab's two passes (DESIGN.md, Colour correction).
+COPY = "input.mkv"
+BUFFER = "decoded.bf16"
+
 
 class Units:
     """Units kept in memory, by a run that keeps nothing once it stops: the one-file output (-o
     x.mkv), which can't resume until assembly makes it of segments (DESIGN.md, Output). A shot's
-    latent and windows stay on the device until its decode, as upscale_shot keeps them."""
+    latent and windows stay on the device until its decode, as upscale_shot keeps them. With
+    `lab`, a shot's input copy and buffer go in a directory of its own under work, beside the
+    output, gone once the shot is decoded."""
 
     persistent = False
 
-    def __init__(self) -> None:
+    def __init__(self, work: Path | None = None) -> None:
+        self.work = work
         self._latents: dict[int, Tensor] = {}
         self._windows: dict[int, list[Tensor]] = {}
+
+    def shot_directory(self, shot: int) -> Path:
+        """Where shot `shot`'s files go: its input copy and its buffer."""
+        if self.work is None:
+            raise ValueError("no work directory: a run without lab keeps no files")
+        return self.work / f"shot_{shot:06d}"
+
+    def copy_path(self, shot: int) -> Path:
+        return self.shot_directory(shot) / COPY
+
+    def buffer_path(self, shot: int) -> Path:
+        return self.shot_directory(shot) / BUFFER
+
+    def shot_decoded(self, shot: int) -> None:
+        """Shot `shot` is decoded: its files can go."""
+        if self.work is not None:
+            shutil.rmtree(self.shot_directory(shot), ignore_errors=True)
 
     def windows_done(self, shot: int) -> int:
         """The windows of shot `shot` kept, its first ones."""
@@ -65,7 +93,9 @@ class DiskUnits(Units):
     resume/shot_<start>/, the shot's latent.pt, then window_<k>.pt for each window, each written
     whole (files.replace_whole), then recorded in the manifest, which so only ever names whole
     files. The latent goes once the windows are all done, a shot's directory once its segment is
-    finished, and resume/ once every segment is.
+    finished, and resume/ once every segment is. With `lab`, the shot's input copy (COPY) is made
+    whole before its latent is recorded, and recorded with it; the decode's buffer (BUFFER) is
+    never recorded.
 
     The files are CPU copies saved by torch.save, which keeps a tensor's values and memory layout:
     the noise drawn from a latent depends on its layout (sample_windows), and the decode is fed the
@@ -81,6 +111,10 @@ class DiskUnits(Units):
 
     def shot_directory(self, shot: int) -> Path:
         return self.root / f"shot_{self.manifest.shots[shot].start:06d}"
+
+    def shot_decoded(self, shot: int) -> None:
+        """Shot `shot` is decoded: its files stay until its segment is finished, which a resume
+        may decode again."""
 
     def windows_done(self, shot: int) -> int:
         return self.manifest.windows_done[shot]

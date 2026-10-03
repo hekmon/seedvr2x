@@ -85,6 +85,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--color-correction",
+        choices=("lab", "none"),
+        default="lab",
+        help="lab: the input's colours back under the model's details, matched over each shot, as"
+        " numz's lab; none: the model's colours, which drift (default: %(default)s)",
+    )
+    parser.add_argument(
         "--min-segment",
         type=_seconds,
         default=MIN_SEGMENT,
@@ -141,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("stopped at once (SIGTERM)")
         return 143
     finally:
+        _remove_work()
         _unlock()
 
 
@@ -216,6 +224,7 @@ def _run(args: argparse.Namespace) -> int:
             identity = prior.identity
         else:
             identity = _identity(args, cuts, directory, ffmpeg_version, conversions)
+        work = _work(args.output) if directory is None and args.color_correction == "lab" else None
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
@@ -230,7 +239,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime.shot import NonFinite, shot_layout
     from seedvr2x.runtime.units import DiskUnits, Units
 
-    units, record = Units(), None
+    units, record = Units(work), None
     remaining = list(range(len(segments)))  # the segments to write, those not finished
     if directory is not None:
         try:
@@ -309,7 +318,7 @@ def _run(args: argparse.Namespace) -> int:
 
                 run_job(
                     *(models, parts, shots, segments, target, args.seed, args.window, units),
-                    *(write, stop),
+                    *(write, stop, args.color_correction == "lab"),
                 )
         except MediaError as error:
             logger.error("%s", error)
@@ -350,6 +359,43 @@ def _kept(record: "Manifest | None", segments: int) -> str:
         f"{sum(record.finished)} of {segments} segments finished, and the units of the next ones"
         " kept: the same command resumes"
     )
+
+
+def _work(output: Path) -> Path:
+    """The work directory of a one-file output with lab, beside it (DESIGN.md, Colour correction):
+    its shots' input copies and buffers, one shot at a time. Made and locked from the start, as an
+    output directory is (_lock), so that another run to the same file is refused; removed when
+    main returns, however the run ends. What a killed run left there is removed; anything else
+    is refused, never deleted."""
+    from seedvr2x.runtime.job import JobError
+    from seedvr2x.runtime.units import BUFFER, COPY
+
+    work = output.with_name(f"{output.name}.work")
+    ours = {COPY, f"{COPY}.partial", BUFFER}
+
+    def left(entry: Path) -> bool:
+        """Whether entry is a shot's directory, holding nothing but a run's files."""
+        return (
+            re.fullmatch(r"shot_\d{6}", entry.name) is not None
+            and entry.is_dir()
+            and not entry.is_symlink()
+            and all(f.name in ours and f.is_file() and not f.is_symlink() for f in entry.iterdir())
+        )
+
+    refused = f"{work}: not what a run of seedvr2x leaves: remove it, or choose another -o"
+    if os.path.lexists(work) and (work.is_symlink() or not work.is_dir()):
+        raise JobError(refused)
+    _lock(work)
+    _WORK.append(work)
+    entries = list(work.iterdir())
+    if not all(left(entry) for entry in entries):
+        _WORK.remove(work)
+        raise JobError(refused)
+    for entry in entries:
+        shutil.rmtree(entry)
+    if entries:
+        logger.info("%s: left by a run that was killed, emptied", work)
+    return work
 
 
 def _output(args: argparse.Namespace) -> Path | None:
@@ -439,6 +485,7 @@ def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
         "vae_model": _model(args.model_dir, args.vae_model),
         "resolution": args.resolution,
         "seed": args.seed,
+        "color_correction": args.color_correction,
         "window": args.window,
         "format": args.format,
         "cuts": cuts,
@@ -471,6 +518,15 @@ def _lock(directory: Path) -> None:
         # A filesystem without locks: logged, the run goes on (AGENTS.md: no silent fallback).
         logger.warning("%s: not locked (%s); let one seedvr2x at a time write it", directory, error)
     _LOCKS.append(descriptor)
+
+
+# The work directories this process made (_work), removed when main returns.
+_WORK: list[Path] = []
+
+
+def _remove_work() -> None:
+    while _WORK:
+        shutil.rmtree(_WORK.pop(), ignore_errors=True)
 
 
 def _unlock() -> None:

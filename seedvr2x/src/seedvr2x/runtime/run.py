@@ -5,6 +5,8 @@ import logging
 import resource
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from fractions import Fraction
 from types import TracebackType
 from typing import Self
 
@@ -14,9 +16,12 @@ import torch
 
 from seedvr2x.media.decode import Decoder, to_float32
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.files import make_directories
+from seedvr2x.media.writer import FFV1Writer, Tags, Writer
 from seedvr2x.runtime.job import OutputSegment, Part, Shot
 from seedvr2x.runtime.model import Models
 from seedvr2x.runtime.shot import (
+    Lab,
     decode_shot,
     encode_shot,
     finite,
@@ -32,6 +37,15 @@ logger = logging.getLogger(__name__)
 GIB = 1024**3
 
 
+@dataclass(frozen=True)
+class Copies:
+    """lab's input copies (DESIGN.md, Colour correction): the input's frame size and rate."""
+
+    width: int
+    height: int
+    frame_rate: Fraction
+
+
 def run_job(
     models: Models,
     parts: Sequence[Part],
@@ -43,6 +57,7 @@ def run_job(
     units: Units,
     write: Callable[[npt.NDArray[np.float32]], None],
     stop: Stop | None = None,
+    lab: bool = False,
 ) -> None:
     """Upscale the shots of a job, which cover its parts in order, no shot spanning two
     (job.job_shots), each with its own seed (Shot.seed), its frames resized to target
@@ -59,7 +74,11 @@ def run_job(
     shot's encode and the windows done; the input frames of what is skipped, read and dropped.
     An unfinished segment's decode and write restart whole, from its shots' windows kept.
 
-    stop, when given, is checked before each unit (Stop.check)."""
+    stop, when given, is checked before each unit (Stop.check). With lab, the frames each encode
+    reads are copied as they come (units.copy_path), and the shot's decode corrects its frames
+    against them (DESIGN.md, Colour correction)."""
+    stream = parts[0].source.stream
+    copies = Copies(stream.width, stream.height, stream.frame_rate) if lab else None
     groups = [
         [i for i, shot in enumerate(shots) if s.start <= shot.start < s.end] for s in segments
     ]
@@ -69,15 +88,16 @@ def run_job(
         for segment, group in enumerate(groups):
             if units.finished(segment):
                 continue
+            sample = (models, inputs, shots, target, seed, window, units, stop, copies)
             if units.persistent:
                 for index in group:
-                    _sample(models, inputs, shots, index, target, seed, window, units, stop)
+                    _sample(index, *sample)
                 _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write")
             for index in group:
                 if not units.persistent:
-                    _sample(models, inputs, shots, index, target, seed, window, units, stop)
+                    _sample(index, *sample)
                     _begin(stop, f"shot {index + 1}/{len(shots)}'s decode")
-                _decode(models, shots, index, target, window, units, write)
+                _decode(models, shots, index, target, window, units, write, copies)
 
 
 def _begin(stop: Stop | None, unit: str) -> None:
@@ -88,17 +108,19 @@ def _begin(stop: Stop | None, unit: str) -> None:
 
 
 def _sample(
+    index: int,
     models: Models,
     inputs: "Inputs",
     shots: Sequence[Shot],
-    index: int,
     target: tuple[int, int],
     seed: int,
     window: int | None,
     units: Units,
     stop: Stop | None,
+    copies: Copies | None,
 ) -> None:
-    """Shot `index`'s encode and windows, those not kept yet."""
+    """Shot `index`'s encode and windows, those not kept yet; with copies, the frames the encode
+    reads copied, the copy whole before the latent is recorded, so recorded with it."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
     layout = shot_layout(shot.frames, window)
@@ -110,7 +132,19 @@ def _sample(
         _begin(stop, f"{name}'s encode")
         logger.debug("%s: encoding", name)
         started = _started(models)
-        latent = encode_shot(models, inputs.reader(shot), shot.frames, target, shot.seed(seed))
+        read = inputs.reader(shot)
+        if copies is None:
+            latent = encode_shot(models, read, shot.frames, target, shot.seed(seed))
+        else:
+            path = units.copy_path(index)
+            # Synced in its parent, as a unit's directory is: the copy is recorded with the
+            # latent.
+            make_directories(path.parent)
+            size = (copies.width, copies.height, copies.frame_rate)
+            with FFV1Writer(path, "gbrp16le", *size, Tags()) as copy:
+                latent = encode_shot(
+                    models, _copied(read, copy), shot.frames, target, shot.seed(seed)
+                )
         finite(latent, f"{name}'s encode")
         units.save_latent(index, latent)
         logger.info(
@@ -154,14 +188,21 @@ def _decode(
     window: int | None,
     units: Units,
     write: Callable[[npt.NDArray[np.float32]], None],
+    copies: Copies | None,
 ) -> None:
-    """Shot `index`'s decode, from its windows kept, its frames written as they come."""
+    """Shot `index`'s decode, from its windows kept, its frames written: as they come, or with
+    copies, corrected against its input copy once the shot is decoded."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
     logger.debug("%s: decoding", name)
     started = _started(models)
     merged = merge_windows(units.take_windows(index), shot_layout(shot.frames, window))
-    decode_shot(models, merged, shot.frames, target, write, name, shot.start)
+    lab = None
+    if copies is not None:
+        paths = (units.copy_path(index), units.buffer_path(index))
+        lab = Lab(*paths, copies.width, copies.height)
+    decode_shot(models, merged, shot.frames, target, write, name, shot.start, lab)
+    units.shot_decoded(index)
     logger.info(
         "%s: decoded in %s; RAM %.2f GiB, peak %.2f GiB",
         name,
@@ -169,6 +210,19 @@ def _decode(
         _resident() / GIB,
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB,
     )
+
+
+def _copied(
+    read: Callable[[int], npt.NDArray[np.float32]], copy: Writer
+) -> Callable[[int], npt.NDArray[np.float32]]:
+    """read, the frames it gives written to copy as well."""
+
+    def read_and_copy(count: int) -> npt.NDArray[np.float32]:
+        frames = read(count)
+        copy.write(frames)
+        return frames
+
+    return read_and_copy
 
 
 class Inputs:

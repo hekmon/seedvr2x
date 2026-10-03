@@ -18,9 +18,11 @@ import sys
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from datetime import datetime
+from fractions import Fraction
+from itertools import accumulate, pairwise
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -30,6 +32,7 @@ import torch
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.runtime.job import output_size
 from seedvr2x.runtime.shot import decode_shot, padded_length
 
 
@@ -95,6 +98,15 @@ def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[tor
         yield torch.cat(planes, dim=1)
 
 
+# The stand-in's models: the CPU, and the VAE's slicing, which the encode and lab's reference
+# follow (model.encode_slices).
+STAND_IN_MODELS = SimpleNamespace(
+    attention="none",
+    device=torch.device("cpu"),
+    runner=SimpleNamespace(vae=SimpleNamespace(use_slicing=True, slicing_sample_min_size=4)),
+)
+
+
 def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     """Replace the model by the stand-in, through patch: monkeypatch.setattr, or setattr in a
     process of its own (test_stop.py). The decode around the VAE's is seedvr2x's own."""
@@ -106,11 +118,7 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(torch.backends.cudnn, "version", lambda: None)
     patch(torch.cuda, "reset_peak_memory_stats", lambda device: None)
     patch(torch.cuda, "max_memory_allocated", lambda device: 0)
-    patch(
-        model,
-        "load_models",
-        lambda *a: SimpleNamespace(attention="none", device=torch.device("cpu")),
-    )
+    patch(model, "load_models", lambda *a: STAND_IN_MODELS)
     patch(model, "nvidia_driver", lambda: "a stand-in")
     patch(model, "decode_stream", stand_in_decode_stream)
     patch(run, "encode_shot", stand_in_encode)
@@ -134,14 +142,18 @@ def source(path: Path, frames: int = FRAMES, pattern: str = "testsrc2") -> Path:
 
 
 def upscale(tmp_path: Path, input_path: Path, output: str, *options: str) -> int:
+    """seedvr2x run in this process, without colour correction unless options ask for one: the
+    stand-in's frames then say which they are (stand_in_decode_stream)."""
     weights = tmp_path / "w.safetensors"
     if not weights.exists():
         weights.write_bytes(b"")
+    correction = [] if "--color-correction" in options else ["--color-correction", "none"]
     return cli.main(
         [
             *(str(input_path), "-o", str(tmp_path / output)),
             *("--model-dir", str(tmp_path), "--dit-model", "w.safetensors"),
             *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", str(SEED)),
+            *correction,
             *options,
         ]
     )
@@ -463,19 +475,26 @@ def decoded(path: Path) -> bytes:
         ("decode 4", UNINTERRUPTED[9:]),
     ],
 )
+@pytest.mark.parametrize("correction", ["none", "lab"])
 def test_resumed_as_uninterrupted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, stop: str, resumed: list[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    stop: str,
+    resumed: list[str],
+    correction: str,
 ) -> None:
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "whole", *JOB) == 0
+    options = (*JOB, "--color-correction", correction)
+    assert upscale(tmp_path, source_path, "whole", *options) == 0
     read = dict(steps.read)
     steps.calls.clear()
     steps.stop = stop
-    stopped(tmp_path, source_path, "out", *JOB)
+    stopped(tmp_path, source_path, "out", *options)
     assert steps.calls[-1] == stop
     steps.calls.clear()
     steps.stop = None
-    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert upscale(tmp_path, source_path, "out", *options) == 0
     assert steps.calls == resumed
     assert steps.read == read  # every encode read its own shot's frames
     out = tmp_path / "out"
@@ -494,7 +513,7 @@ def test_resumed_as_uninterrupted(
     monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("models loaded"))
     steps.calls.clear()
     (out / "resume" / "shot_000004").mkdir(parents=True)  # as a stop could leave them
-    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert upscale(tmp_path, source_path, "out", *options) == 0
     assert steps.calls == []
     assert not (out / "resume").exists()
 
@@ -566,6 +585,166 @@ def test_non_finite_one_file(
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 1
     assert "shot 2/3's window 1/1: " in caplog.text and "nothing kept" in caplog.text
     assert not [path for path in tmp_path.iterdir() if path.name.startswith("one")]
+
+
+LAB = ("--color-correction", "lab")
+
+
+def test_lab_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # lab unless asked otherwise: a setting, which a resume compares.
+    source_path = job(tmp_path, monkeypatch)
+    (tmp_path / "w.safetensors").write_bytes(b"")
+    common = ["--model-dir", str(tmp_path), "--dit-model", "w.safetensors"]
+    common += ["--vae-model", "w.safetensors", "--resolution", "96", *JOB]
+    assert cli.main([str(source_path), "-o", str(tmp_path / "out"), *common]) == 0
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["settings"]["color_correction"] == "lab"
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, "--color-correction", "none") == 1
+    assert 'settings.color_correction: "lab" -> "none"' in caplog.text and steps.calls == []
+
+
+def test_lab_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
+    # The frames each encode reads, copied as they come, exactly, and recorded with its latent.
+    from seedvr2x.media.decode import Decoder, to_float32
+    from seedvr2x.media.ffmpeg import input_args
+    from seedvr2x.runtime.shot import COPY_READ
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB, *LAB)
+    shot = tmp_path / "out" / "resume" / "shot_000004"
+    assert sorted(p.name for p in shot.iterdir()) == ["input.mkv", "latent.pt", "window_0000.pt"]
+    with Decoder(input_args(shot / "input.mkv"), COPY_READ, 64, 48, 21) as decoder:
+        frames = to_float32(decoder.read(21))
+    assert hashlib.md5(frames.tobytes()).hexdigest() == steps.read[4]
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["shots"][2]["encoded"]
+
+
+def test_lab_leftovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # What a kill leaves of lab's is discarded: a decode's buffer, a copy being written. A copy
+    # recorded is kept, and refused missing.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *JOB, *LAB) == 0
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB, *LAB)
+    out = tmp_path / "out"
+    shot = out / "resume" / "shot_000004"
+    copy = (shot / "input.mkv").read_bytes()
+    (shot / "input.mkv").unlink()
+    steps.stop = None
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 1
+    assert "input.mkv: kept, the manifest says, but missing" in caplog.text
+    assert steps.calls == []
+    (shot / "input.mkv").write_bytes(copy)
+    for name in ("decoded.bf16", "input.mkv.partial"):
+        (shot / name).write_bytes(b"left")
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
+    assert steps.calls == ["window 4:1", "decode 4"]
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(out / name) == decoded(tmp_path / "whole" / name)
+    assert not (out / "resume").exists()
+
+
+def test_lab_one_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # One file's copies and buffers go in a work directory beside it, removed at the end, at a stop
+    # or an error. A killed run's is removed; anything else there is refused, and kept.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    one, work = tmp_path / "one.mkv", tmp_path / "one.mkv.work"
+    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
+    seen: list[list[str]] = []
+    decode = steps.decode
+
+    def looked(*arguments: Any) -> None:
+        seen.append(sorted(path.name for path in work.iterdir()))
+        decode(*arguments)
+
+    from seedvr2x.runtime import run
+
+    monkeypatch.setattr(run, "decode_shot", looked)
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == 0
+    assert seen == [["shot_000000"], ["shot_000001"], ["shot_000002"]]  # one shot at a time
+    assert not work.exists()
+    out = tmp_path / "out"
+    assert decoded(one) == decoded(out / "seg_000000.mkv") + decoded(out / "seg_000001.mkv")
+    for stop, poison, status in (("decode 4", None, 130), (None, "decode 4", 1)):
+        one.unlink(missing_ok=True)
+        steps.stop, steps.poison = stop, poison
+        assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == status
+        assert not work.exists() and not one.exists()
+    steps.stop = steps.poison = None
+    (work / "shot_000002").mkdir(parents=True)
+    (work / "shot_000002" / "input.mkv.partial").write_bytes(b"left")
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == 0
+    assert "left by a run that was killed, emptied" in caplog.text and not work.exists()
+    work.mkdir()
+    (work / "notes.txt").write_text("mine")
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == 1
+    assert "not what a run of seedvr2x leaves" in caplog.text
+    assert (work / "notes.txt").read_text() == "mine"
+
+
+def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
+    # The two passes give each shot exactly what lab gives its frames in the decode's slices,
+    # histograms pooled over the shot: the second maps the values the first counted, and the
+    # reference rebuilt from the copy is the encoder's input, its padding cropped as the decode's
+    # (target 100 x 133, decoded 112 x 144, written 100 x 132).
+    from seedvr2x.media.decode import to_float32
+    from seedvr2x.media.source import examine
+    from seedvr2x.runtime import colour, model
+    from seedvr2x.runtime.job import target_size
+    from seedvr2x.runtime.shot import encoder_inputs
+
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB, "--resolution", "100") == 0
+    height, width = 100, 132
+    planes = np.frombuffer(decoded(tmp_path / "one.mkv"), dtype="<u2")
+    written = planes.reshape(25, 3, height, width)[:, [2, 0, 1]]  # G, B, R to R, G, B
+    with examine(source_path).decoder() as decoder:
+        frames = to_float32(decoder.read(25))
+    models = cast(model.Models, STAND_IN_MODELS)
+    target = target_size(64, 48, Fraction(1), 100)
+    assert target == (100, 133) and output_size(target) == (height, width)
+    expected: list[torch.Tensor] = []
+    for start, end in ((0, 3), (3, 4), (4, 25)):
+        count = end - start
+        shot = iter(frames[start:end])
+
+        def read(n: int) -> npt.NDArray[np.float32]:
+            return np.stack([next(shot) for _ in range(n)])  # noqa: B023
+
+        reference = torch.cat(list(encoder_inputs(models, read, count, target)), dim=1)
+        assert reference.shape[2:] == (112, 144)  # padded to multiples of 16
+        reference = reference[:, :count, :height, :width].permute(1, 0, 2, 3)
+        values = torch.tensor([(start + frame) / 500 - 1 for frame in range(count)])
+        content = values.view(-1, 1, 1, 1).expand(-1, 3, height, width)
+        # The decode's slices: 5 frames, then 4, the last cut to the shot's end.
+        sizes = [min(5, count), *(min(4, count - frame) for frame in range(5, count, 4))]
+        bounds = accumulate(sizes, initial=0)
+        slices = [(content[a:b], reference[a:b]) for a, b in pairwise(bounds)]
+        histograms = colour.Histograms(models.device)
+        for decoded_slice, matched in slices:
+            moved = colour.transfer(decoded_slice, matched)
+            histograms.add(
+                colour.rgb_to_lab(colour.unit_range(moved)),
+                colour.rgb_to_lab(colour.unit_range(matched)),
+            )
+        for decoded_slice, matched in slices:
+            moved = colour.transfer(decoded_slice, matched)
+            lab = colour.rgb_to_lab(colour.unit_range(moved))
+            expected.append(colour.lab_to_rgb(histograms.match(lab)))
+    codes = (torch.cat(expected) * 65535).round().numpy()
+    assert np.array_equal(codes, written.astype(np.float32))
 
 
 def test_leftovers_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:

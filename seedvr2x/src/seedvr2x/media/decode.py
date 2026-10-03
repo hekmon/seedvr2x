@@ -123,6 +123,10 @@ class Decoder:
         if self.frames is not None and self.decoded != self.frames:
             raise self._error(f"{self.decoded} frames, the first pass counted {self.frames}")
 
+    def failure(self, what: str) -> MediaError:
+        """ffmpeg stopped, and the error to raise: what, with ffmpeg's last errors."""
+        return self._error(what)
+
     def stop(self) -> None:
         """Stop ffmpeg, whatever is left to read."""
         self._process.kill()

@@ -11,19 +11,43 @@ output, bit for bit (milestone 1). Only the latents are ever whole in memory.
 The steps are apart, as the resumable units of DESIGN.md (Pause and resume) are: the encode
 (encode_shot), each window (sample_windows), the decode (merge_windows, decode_shot). Each takes
 what the one before gives, wherever it was kept; upscale_shot runs them in a row.
+
+With `lab` (DESIGN.md, Colour correction), the decode makes two passes over a buffer of its
+frames, against the reference rebuilt from the shot's input copy by the encode's own calls.
 """
 
 import math
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 import torch
 from torch import Tensor
 
-from seedvr2x.runtime import model
+from seedvr2x.media.conversion import Conversion
+from seedvr2x.media.decode import Decoder, to_float32
+from seedvr2x.media.ffmpeg import MediaError, input_args
+from seedvr2x.runtime import colour, model
 from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, SHARED, output_size
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
+
+# A shot's input copy read back: gbrp16le to gbrp16le, which zscale passes through unchanged.
+COPY_READ = Conversion("gbrp16le", "gbr", "full", "left")
+
+
+@dataclass(frozen=True)
+class Lab:
+    """What a shot's decode with `lab` needs besides its latents (DESIGN.md, Colour correction):
+    its input copy, the frames its encode read, width x height (units.COPY), and where to buffer
+    its decoded frames between the two passes (units.BUFFER)."""
+
+    copy: Path
+    buffer: Path
+    width: int
+    height: int
 
 
 class NonFinite(RuntimeError):
@@ -184,14 +208,26 @@ def encode_shot(
     padded = padded_length(count)
     # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
     model.set_seed(seed + ENCODE_SEED_OFFSET)
+    return model.encode_stream(models, encoder_inputs(models, read, count, target), padded)
+
+
+def encoder_inputs(
+    models: Models,
+    read: Callable[[int], npt.NDArray[np.float32]],
+    count: int,
+    target: tuple[int, int],
+) -> Iterator[Tensor]:
+    """The encoder's input for a shot of `count` frames, read as they are needed (encode_shot),
+    slice by slice: each (C, t, H, W) in [-1, 1], COMPUTE_DTYPE on the device, t following
+    model.encode_slices over the shot padded to 4n + 1. lab's reference is rebuilt from the
+    shot's input copy by the same calls, so it is the tensor the encoder took, bit for bit."""
     transform = model.input_transform(target)
     # (t, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388), then
     # prepared slice by slice: every step works frame by frame.
-    slices = (
+    return (
         transform(frames.permute(0, 3, 1, 2).to(models.device, COMPUTE_DTYPE))
-        for frames in input_slices(read, count, model.encode_slices(models, padded))
+        for frames in input_slices(read, count, model.encode_slices(models, padded_length(count)))
     )
-    return model.encode_stream(models, slices, padded)
 
 
 @torch.no_grad()
@@ -228,26 +264,133 @@ def decode_shot(
     write: Callable[[npt.NDArray[np.float32]], None],
     name: str = "the shot",
     first: int = 0,
+    lab: Lab | None = None,
 ) -> None:
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in one stream,
-    and write its frames as they come (upscale_shot). Each slice decoded is checked for NaN or
-    inf first (finite), its frames named for the job's, the shot's first being `first`."""
-    out_height, out_width = output_size(target)
-    # Decode (generation_phases.py:900-958) and post-process (:1340-1348), slice by slice:
-    # (C, t, H, W) to (t, H, W, C) without the padding, then [-1, 1] to [0, 1] in place.
+    and write its frames (upscale_shot): as they come, or with lab corrected once the whole shot
+    is decoded (DESIGN.md, Colour correction). Each slice decoded is checked for NaN or inf first
+    (finite), its frames named for the job's, the shot's first being `first`."""
+    chunks = _decoded(models, merged, count, output_size(target), name, first)
+    if lab is not None:
+        _correct(models, chunks, count, target, write, lab)
+        return
+    # Post-process (generation_phases.py:1340-1348): [-1, 1] to [0, 1] in place.
+    for chunk in chunks:
+        chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
+        model.synchronize(models.device)
+        write(chunk.to("cpu", torch.float32).numpy())
+
+
+def _decoded(
+    models: Models,
+    merged: Tensor,
+    count: int,
+    size: tuple[int, int],
+    name: str,
+    first: int,
+) -> Iterator[Tensor]:
+    """The shot's frames as the VAE decodes them (generation_phases.py:900-958), slice by slice:
+    each (t, H, W, C), a view of the decode's (C, t, H, W) without the padding, cropped to size
+    (height, width), in [-1, 1] unclamped, on the device; each checked (finite) before it goes."""
+    height, width = size
     written = 0
     for decoded in model.decode_stream(models, merged.to(models.device)):
-        chunk = decoded.permute(1, 2, 3, 0)[: count - written, :out_height, :out_width]
+        chunk = decoded.permute(1, 2, 3, 0)[: count - written, :height, :width]
         if chunk.shape[0] == 0:
             continue
         last = first + written + chunk.shape[0] - 1
         finite(chunk, f"{name}'s decode, frames {first + written} to {last}")
-        chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
-        model.synchronize(models.device)
-        write(chunk.to("cpu", torch.float32).numpy())
+        yield chunk
         written += chunk.shape[0]
     if written != count:
         raise RuntimeError(f"{written} frames decoded for a shot of {count}")
+
+
+def _correct(
+    models: Models,
+    chunks: Iterator[Tensor],
+    count: int,
+    target: tuple[int, int],
+    write: Callable[[npt.NDArray[np.float32]], None],
+    lab: Lab,
+) -> None:
+    """lab over a shot (DESIGN.md, Colour correction), pooled: the first pass buffers the decoded
+    frames (chunks, _decoded) and counts the histograms, the second reads them back, maps them and
+    writes them, float32. Each pass rebuilds the reference from the input copy, and converts in
+    the same calls, the decode's slices, so that the second finds the values the first counted.
+    The buffer goes at the end, whatever happens."""
+    height, width = output_size(target)
+    histograms = colour.Histograms(models.device)
+    sizes: list[int] = []
+    dtype = COMPUTE_DTYPE  # the decode's, kept as it is: bfloat16 from the VAE
+    try:
+        with _copy_reader(lab, count) as read, open(lab.buffer, "wb") as buffer:
+            reference = _frames(encoder_inputs(models, read, count, target), height, width)
+            for chunk in chunks:
+                content = chunk.permute(0, 3, 1, 2)  # (t, C, H, W)
+                model.synchronize(models.device)
+                kept = content.to("cpu").contiguous()
+                try:
+                    buffer.write(memoryview(kept.view(torch.uint8).numpy()))
+                except OSError as error:
+                    need = count * kept[0].nbytes
+                    raise MediaError(
+                        f"{lab.buffer}: {error.strerror}; the shot's decoded frames take"
+                        f" {need / 2**30:.1f} GiB there"
+                    ) from error
+                dtype = kept.dtype
+                matched = reference(content.shape[0])
+                corrected = colour.rgb_to_lab(colour.unit_range(colour.transfer(content, matched)))
+                histograms.add(corrected, colour.rgb_to_lab(colour.unit_range(matched)))
+                sizes.append(content.shape[0])
+        with _copy_reader(lab, count) as read, open(lab.buffer, "rb") as buffer:
+            reference = _frames(encoder_inputs(models, read, count, target), height, width)
+            for size in sizes:
+                content = torch.empty((size, 3, height, width), dtype=dtype)
+                if buffer.readinto(content.view(torch.uint8).numpy()) != content.nbytes:
+                    raise RuntimeError(f"{lab.buffer}: shorter than the frames buffered")
+                content = content.to(models.device)
+                matched = reference(size)
+                corrected = colour.rgb_to_lab(colour.unit_range(colour.transfer(content, matched)))
+                rgb = colour.lab_to_rgb(histograms.match(corrected))
+                model.synchronize(models.device)
+                write(rgb.permute(0, 2, 3, 1).to("cpu").numpy())
+    finally:
+        lab.buffer.unlink(missing_ok=True)
+
+
+@contextmanager
+def _copy_reader(lab: Lab, count: int) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
+    """read(n), the next n frames of the shot's input copy, (n, H, W, 3) float32 in [0, 1] as the
+    encode read them; at the end, the copy is checked to hold `count` frames (Decoder)."""
+    with Decoder(input_args(lab.copy), COPY_READ, lab.width, lab.height, count) as decoder:
+
+        def read(n: int) -> npt.NDArray[np.float32]:
+            frames = decoder.read(n)
+            if frames.shape[0] != n:
+                ended = f"{lab.copy}: the copy ended after {decoder.decoded} of its {count} frames"
+                raise decoder.failure(ended)
+            return to_float32(frames)
+
+        yield read
+
+
+def _frames(slices: Iterator[Tensor], height: int, width: int) -> Callable[[int], Tensor]:
+    """take(n), the next n frames of slices (encoder_inputs), each slice (C, t, H', W'): (n, C,
+    height, width), each frame's top left, as the decode's frames are cropped (_decoded)."""
+    pending: list[Tensor] = []
+
+    def take(n: int) -> Tensor:
+        while sum(part.shape[0] for part in pending) < n:
+            part = next(slices, None)
+            if part is None:
+                raise RuntimeError("the reference's frames ran out before the decode's")
+            pending.append(part.permute(1, 0, 2, 3)[:, :, :height, :width])
+        frames = pending[0] if len(pending) == 1 else torch.cat(pending)
+        pending[:] = [frames[n:]] if frames.shape[0] > n else []
+        return frames[:n]
+
+    return take
 
 
 @torch.no_grad()

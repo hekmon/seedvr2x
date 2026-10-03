@@ -54,8 +54,15 @@ class Manifest:
             self.sizes = [None] * len(self.segments)
         self._inputs = [_input(part) for part in self.parts]
 
+    @property
+    def lab(self) -> bool:
+        """Whether the job corrects colours with `lab`, each shot then keeping a copy of its input
+        frames from its encode (units.COPY)."""
+        return self.settings.get("color_correction") == "lab"
+
     def shot_encoded(self, index: int) -> None:
-        """Record shot `index`'s latent as kept, and write the manifest."""
+        """Record shot `index`'s latent as kept, and its input copy with `lab`, and write the
+        manifest."""
         self.encoded[index] = True
         self.write()
 
