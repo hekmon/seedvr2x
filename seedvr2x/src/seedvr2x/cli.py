@@ -478,7 +478,7 @@ class _Prior:
     recorded: dict[str, Any]  # its manifest, as written
     identity: _Identity
     changed: list[str]  # its environment's differences, accepted (--accept-env-change)
-    known: "list[FirstPass] | None"  # its first pass's record, trusted, unless changed
+    known: "list[FirstPass] | None"  # the first pass's record, unless ffmpeg or conversions changed
 
 
 def _identity(
@@ -517,9 +517,10 @@ def _prior(
 ) -> _Prior:
     """The job recorded in directory, checked against the one asked before its first pass: the
     same settings, environment and inputs, an input being its content (resume.identity), or
-    refused (JobError), but for an environment change accepted (--accept-env-change). With
-    nothing changed, the record of the first pass is trusted, and the pass isn't run again: the
-    same bytes, decoded by the same build, give the same frames (DESIGN.md, Pause and resume)."""
+    refused (JobError), but for an environment change accepted (--accept-env-change). The
+    record of the first pass is trusted, and the pass isn't run again, unless ffmpeg or its
+    conversions changed: the same bytes, decoded by the same build, give the same frames, and
+    nothing else takes part in the pass (DESIGN.md, Pause and resume)."""
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import NAME
@@ -542,10 +543,13 @@ def _prior(
             logger.info(
                 "%s: the input recorded at %s, moved: the same content", each.path, entry["path"]
             )
-    if changed:
+    before: dict[str, Any] = recorded["environment"]
+    if any(before.get(key) != identity.environment.get(key) for key in resume.FIRST_PASS):
         return _Prior(recorded, identity, changed, None)
-    logger.info("%s: the same job, its first pass as recorded", directory)
-    return _Prior(recorded, identity, [], [FirstPass(e["frames"], e["sha256"]) for e in inputs])
+    logger.info("%s: the same input and ffmpeg, the first pass as recorded", directory)
+    return _Prior(
+        recorded, identity, changed, [FirstPass(e["frames"], e["sha256"]) for e in inputs]
+    )
 
 
 def _content(path: Path) -> dict[str, object]:

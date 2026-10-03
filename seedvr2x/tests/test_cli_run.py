@@ -668,8 +668,8 @@ def test_input_by_content(
 def test_first_pass_not_run_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A resume trusts the record of the first pass while nothing it depends on changed, and
-    # refuses another job before it; after an environment change, accepted, it runs again.
+    # A resume trusts the record of the first pass while nothing it depends on changed, ffmpeg
+    # and its conversions, and refuses another job before it.
     from seedvr2x.media import source as examined
 
     scans: list[Path] = []
@@ -689,11 +689,27 @@ def test_first_pass_not_run_again(
     assert steps.calls[-2:] == ["window 4:0", "window 4:1"]
     refused(tmp_path, source_path, caplog, *JOB[:3], "6", *JOB[4:])
     assert len(scans) == 1
+    # Another GPU, accepted: the pass takes no part of it.
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+    steps.calls.clear()
+    steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "out", *JOB, "--accept-env-change")
+    assert len(scans) == 1 and steps.calls == ["window 4:1", "decode 4"]
+    # Another ffmpeg, accepted: the pass runs again.
+    check = ffmpeg.check
+    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    stopped(tmp_path, source_path, "out", *JOB, "--accept-env-change")
+    assert len(scans) == 2
+    # Other conversions alone, the same ffmpeg: that stop made no unit, so the record
+    # still has the first.
+    from seedvr2x.media import fingerprint
+
+    monkeypatch.setattr(ffmpeg, "check", check)
+    monkeypatch.setattr(fingerprint, "fingerprint", lambda: "0" * 64)
     steps.calls.clear()
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == 0
-    assert len(scans) == 2 and steps.calls == ["window 4:1", "decode 4"]
+    assert len(scans) == 3 and steps.calls == ["decode 4"]
 
 
 def test_probe_compared(
@@ -731,7 +747,7 @@ def test_first_pass_compared_after_a_change(
     recorded = manifest.read_bytes()
     scan = examined.scan
     monkeypatch.setattr(examined, "scan", lambda path: replace(scan(path), frames=29))
-    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
     text = refused(tmp_path, source_path, caplog, *JOB, "--accept-env-change")
     assert "input[0].frames: 25 -> 29" in text
     assert manifest.read_bytes() == recorded
