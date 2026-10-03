@@ -653,15 +653,36 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     - `gbrp16le` and PNG hold the planes seedvr2x feeds ffmpeg, so their CRC-32 is computed
       on those planes.
     - A `yuv420p10le` master holds what ffmpeg converts. Its CRC-32 comes from ffmpeg itself:
-      `framehash -hash crc32` on the converted frames, as a second output of the same process,
-      checked equal to zlib's CRC-32 of the raw frames.
-    - They are kept in `<out>/checksums/<segment>.crc32`, one per frame in order, written
-      whole before the segment is recorded. They outlive the job, unlike `resume/`, and
-      sptenc only reads `.mkv` and `.mp4` files.
-    - For `-o x.mkv`, they go in `<output>.crc32` beside it.
+      `framehash -hash crc32` on the converted frames, as a second output of the same process
+      (through the `split` filter), checked equal to zlib's CRC-32 of the raw frames. The
+      startup check therefore requires `split`, and `framehash` for a `yuv420p10le` output.
+      The master's bytes are unchanged by the second output: decoded frames, size and metadata
+      were compared with the previous writer's in 7 cases (BT.709, untagged SD, `smpte170m`,
+      `bt470bg`, BT.2020 with PQ, an odd chroma width, an odd size).
+    - They are kept in `<out>/checksums/`, one per frame in order, written whole before the
+      segment is recorded. They outlive the job, unlike `resume/`, and sptenc only reads `.mkv`
+      and `.mp4` files.
+      - Each file is named after its segment, then `.crc32`: an FFV1 file's name without the
+        `.mkv` seedvr2x gives it, a PNG directory's name as it is. So mirrored PNG segments
+        `A` and `A.mkv` (from inputs `A.mkv` and `A.mkv.mkv`) keep theirs apart.
+      - A resume refuses a finished segment whose checksums are missing, since they are
+        written before it is recorded. It discards an unfinished segment's checksums and
+        partial files, and refuses anything else there.
+    - For `-o x.mkv`, they go in `<output>.crc32` beside it. The old ones are removed only as
+      the new file replaces the old, so a run stopped before keeps the old file with its own.
     - A resume checks a finished segment's size against the manifest: cheap, and it catches a
-      truncated file. `seedvr2x verify <out>` decodes the segments and checks every frame, on
-      demand, for instance before sptenc or an archive trusts them.
+      truncated file.
+    - `seedvr2x verify` decodes and checks every frame, on demand, for instance before sptenc or
+      an archive trusts the output.
+      - It takes an output directory, one of its segments (checked against the directory's
+        checksums), or a one-file output.
+      - A PNG segment must hold exactly its frames, `NNNNNN.png` from 0, before any is decoded.
+      - Anything ffmpeg reports while decoding fails the check.
+      - It exits 1 when a frame isn't as written, when checksums are missing, and when a
+        segment is unfinished: the output isn't to be trusted whole yet, so
+        `seedvr2x verify out && sptenc encode out` never hands sptenc an incomplete directory.
+        Its summary says which, e.g. "of 2, 1 unfinished".
+      - It needs only ffmpeg and ffprobe, not zscale: the frames are decoded as stored.
     - `--segment-cmd` outputs only get their frame count checked: their frames are the user's
       encoder's.
   - **Writer.** FFV1 by default. With `--segment-cmd`, the user's command runs once per
