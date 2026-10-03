@@ -11,3 +11,8 @@ This product includes the SeedVR2 model code, in src/seedvr2x/vendor/:
   the files were copied.
 
 The files changed for seedvr2x say so on the line under their original header.
+
+It also includes, ported to src/seedvr2x/runtime/colour.py, the CIELAB conversions and the
+histogram matching of ComfyUI-SeedVR2_VideoUpscaler's `lab` colour correction (numz and
+contributors, src/utils/color_fix.py at commit 4490bd1), under the Apache License, Version 2.0.
+That file says what was changed.
