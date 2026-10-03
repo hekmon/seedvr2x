@@ -77,9 +77,16 @@ never requires it.
   - A shot that fits is one window. A longer one is split into windows of balanced lengths that
     overlap by 2 latents (8 frames), and the overlapping latents are mixed before decoding, so
     the joins don't show.
-  - The length comes from the GPU's memory. At 1080p with the 7B fp16 model, that is about 6
-    latents (21–24 frames) on a 24 GB card and about 75 (≈ 300 frames) on a 96 GB card, from
-    the per-token model in [vram.md](../research/docs/vram.md).
+  - The length comes from the GPU's memory, through the per-token model in
+    [vram.md](../research/docs/vram.md): 16 GiB of weights plus about 1 GiB per latent at
+    1080p with the 7B fp16 model, and four times that per latent at 4K.
+    - At 1080p: about 6 latents (21–24 frames) on a 24 GB card, about 75 (≈ 300 frames) on a
+      96 GB card.
+    - At 4K: about 19 latents (≈ 75 frames) on a 96 GB card.
+  - A window bounds the DiT only. The VAE's memory depends on the frame size, not on the
+    window, since it streams in 4-frame slices (flat beyond ~9 frames). At 4K the untiled
+    decode needs ≈ 134 GiB, so 4K needs tiled decoding, about 18 GiB with 1024-px tiles. The
+    planner sizes the two separately: window length for the DiT, tile size for the VAE.
   - Not to be confused with the DiT's **attention windows**: the space-time tiles its
     attention works in inside one pass ([attention.md](../research/docs/attention.md)), which
     `na.unconcat_coalesce` counts.
@@ -778,6 +785,11 @@ explanation.
 - lossless delivery: why there are no encoder options, and how `--segment-cmd` compresses with
   the user's own command
 - disk use: master sizes per hour, the decode buffer and input copies during a run
+- GPU memory, two points:
+  - nvidia-smi can show the card nearly full while a phase needs much less: the allocator keeps
+    freed memory reserved, and trims it only when an allocation would fail
+  - which phase sets the peak: the DiT through the window length, the VAE through the frame
+    size, which is why 4K needs tiled decoding
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, interlaced, telecined, rotated, cropped, unusual pixel formats or
   matrices), and what to do with each
