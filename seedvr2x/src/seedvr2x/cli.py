@@ -368,15 +368,15 @@ def _kept(record: "Manifest | None", segments: int) -> str:
 
 def _work(output: Path) -> Path:
     """The work directory of a one-file output with lab, beside it (DESIGN.md, Colour correction):
-    its shots' input copies and buffers, one shot at a time. Made and locked from the start, as an
-    output directory is (_lock), so that another run to the same file is refused; removed when
-    main returns, however the run ends. What a killed run left there is removed; anything else
-    is refused, never deleted."""
+    its shots' input copies, their checksums and buffers, one shot at a time. Made and locked from
+    the start, as an output directory is (_lock), so that another run to the same file is
+    refused; removed when main returns, however the run ends. What a killed run left there is
+    removed; anything else is refused, never deleted."""
     from seedvr2x.runtime.job import JobError
-    from seedvr2x.runtime.units import BUFFER, COPY
+    from seedvr2x.runtime.units import BUFFER, CHECKSUMS, COPY
 
     work = output.with_name(f"{output.name}.work")
-    ours = {COPY, f"{COPY}.partial", BUFFER}
+    ours = {COPY, f"{COPY}.partial", CHECKSUMS, f"{CHECKSUMS}.partial", BUFFER}
 
     def left(entry: Path) -> bool:
         """Whether entry is a shot's directory, holding nothing but a run's files."""

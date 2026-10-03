@@ -17,9 +17,11 @@ from seedvr2x.runtime.manifest import STATE, Manifest
 from seedvr2x.runtime.model import synchronize
 
 # A shot's files besides its units: the copy of its input frames, an FFV1 gbrp16le file at the
-# input's size, which lab's reference is rebuilt from; and the buffer of its decoded frames
-# between lab's two passes (DESIGN.md, Colour correction).
+# input's size, which lab's reference is rebuilt from, and its frames' checksums
+# (media/checksums.py); and the buffer of its decoded frames between lab's two passes (DESIGN.md,
+# Colour correction).
 COPY = "input.mkv"
+CHECKSUMS = "input.crc32"
 BUFFER = "decoded.bf16"
 
 
@@ -27,8 +29,8 @@ class Units:
     """Units kept in memory, by a run that keeps nothing once it stops: the one-file output (-o
     x.mkv), which can't resume until assembly makes it of segments (DESIGN.md, Output). A shot's
     latent and windows stay on the device until its decode, as upscale_shot keeps them. With
-    `lab`, a shot's input copy and buffer go in a directory of its own under work, beside the
-    output, gone once the shot is decoded."""
+    `lab`, a shot's input copy, the copy's checksums and its buffer go in a directory of its own
+    under work, beside the output, gone once the shot is decoded."""
 
     persistent = False
 
@@ -38,13 +40,16 @@ class Units:
         self._windows: dict[int, list[Tensor]] = {}
 
     def shot_directory(self, shot: int) -> Path:
-        """Where shot `shot`'s files go: its input copy and its buffer."""
+        """Where shot `shot`'s files go: its input copy, the copy's checksums and its buffer."""
         if self.work is None:
             raise ValueError("no work directory: a run without lab keeps no files")
         return self.work / f"shot_{shot:06d}"
 
     def copy_path(self, shot: int) -> Path:
         return self.shot_directory(shot) / COPY
+
+    def checksums_path(self, shot: int) -> Path:
+        return self.shot_directory(shot) / CHECKSUMS
 
     def buffer_path(self, shot: int) -> Path:
         return self.shot_directory(shot) / BUFFER
@@ -93,9 +98,9 @@ class DiskUnits(Units):
     resume/shot_<start>/, the shot's latent.pt, then window_<k>.pt for each window, each written
     whole (files.replace_whole), then recorded in the manifest, which so only ever names whole
     files. The latent goes once the windows are all done, a shot's directory once its segment is
-    finished, and resume/ once every segment is. With `lab`, the shot's input copy (COPY) is made
-    whole before its latent is recorded, and recorded with it; the decode's buffer (BUFFER) is
-    never recorded.
+    finished, and resume/ once every segment is. With `lab`, the shot's input copy (COPY) and
+    its checksums (CHECKSUMS) are made whole before its latent is recorded, and recorded with it;
+    the decode's buffer (BUFFER) is never recorded.
 
     The files are CPU copies saved by torch.save, which keeps a tensor's values and memory layout:
     the noise drawn from a latent depends on its layout (sample_windows), and the decode is fed the

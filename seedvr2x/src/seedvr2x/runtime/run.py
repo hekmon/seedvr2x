@@ -4,10 +4,10 @@ they come (DESIGN.md, Pipeline, per shot), unit by unit (DESIGN.md, Pause and re
 import logging
 import resource
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
-from pathlib import Path
 from types import TracebackType
 from typing import Self
 
@@ -15,6 +15,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.decode import Decoder, to_float32
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.files import make_directories
@@ -82,10 +83,10 @@ def run_job(
 
     stop, when given, is checked before each unit (Stop.check). With lab, the frames each encode
     reads are copied as they come (units.copy_path), and the shot's decode corrects its frames
-    against them (DESIGN.md, Colour correction). A copy is derived data: one missing is made
-    again from the input before the shot's windows, its latent and windows kept; one its decode
-    can't read whole and intact (CopyError) is removed, and the run stops there, for the next
-    run to make it again."""
+    against them (DESIGN.md, Colour correction). A copy is derived data: one missing, or whose
+    checksums are, is made again from the input before the shot's windows, its latent and
+    windows kept; one its decode can't read whole and intact (CopyError) is removed, its
+    checksums with it, and the run stops there, for the next run to make it again."""
     stream = parts[0].source.stream
     copies = Copies(stream.width, stream.height, stream.frame_rate) if lab else None
     groups = [
@@ -129,16 +130,18 @@ def _sample(
     copies: Copies | None,
 ) -> None:
     """Shot `index`'s encode and windows, those not kept yet; with copies, the frames the encode
-    reads copied, the copy whole before the latent is recorded, so recorded with it, and the copy
-    of a shot encoded already made again if missing."""
+    reads copied, the copy and its checksums whole before the latent is recorded, so recorded
+    with it, and the copy of a shot encoded already made again if it or its checksums are
+    missing."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
     layout = shot_layout(shot.frames, window)
     done = units.windows_done(index)
     latent = None if done == len(layout) else units.latent(index)
     encoded = done == len(layout) or latent is not None
-    if copies is not None and encoded and not units.copy_path(index).exists():
-        _copy_again(index, name, inputs, shots, units, stop, copies)
+    if copies is not None and encoded:
+        if not (units.copy_path(index).exists() and units.checksums_path(index).exists()):
+            _copy_again(index, name, inputs, shots, units, stop, copies)
     if done == len(layout):
         return
     if latent is None:
@@ -149,7 +152,7 @@ def _sample(
         if copies is None:
             latent = encode_shot(models, read, shot.frames, target, shot.seed(seed))
         else:
-            with _copy_writer(units.copy_path(index), copies) as copy:
+            with _copying(units, index, copies) as copy:
                 latent = encode_shot(
                     models, _copied(read, copy), shot.frames, target, shot.seed(seed)
                 )
@@ -204,13 +207,16 @@ def _copy_again(
     shot = shots[index]
     _begin(stop, f"{name}'s input copy")
     started = time.monotonic()
+    paths = (units.copy_path(index), units.checksums_path(index))
+    missing = " and ".join(path.name for path in paths if not path.exists())
     read = inputs.reader(shot)
-    with _copy_writer(units.copy_path(index), copies) as copy:
+    with _copying(units, index, copies) as copy:
         for first in range(0, shot.frames, COPY_READS):
             copy.write(read(min(COPY_READS, shot.frames - first)))
     logger.info(
-        "%s: its input copy missing, made again from the input in %.1f s",
+        "%s: %s missing: its input copy made again from the input in %.1f s",
         name,
+        missing,
         time.monotonic() - started,
     )
 
@@ -234,13 +240,14 @@ def _decode(
     merged = merge_windows(units.take_windows(index), shot_layout(shot.frames, window))
     lab = None
     if copies is not None:
-        paths = (units.copy_path(index), units.buffer_path(index))
+        paths = (units.copy_path(index), units.checksums_path(index), units.buffer_path(index))
         lab = Lab(*paths, copies.width, copies.height)
     try:
         decode_shot(models, merged, shot.frames, target, write, name, shot.start, lab)
     except CopyError:
         # Derived data: removed, the next run makes it again from the input (_sample).
         units.copy_path(index).unlink(missing_ok=True)
+        units.checksums_path(index).unlink(missing_ok=True)
         raise
     units.shot_decoded(index)
     logger.info(
@@ -252,11 +259,20 @@ def _decode(
     )
 
 
-def _copy_writer(path: Path, copies: Copies) -> FFV1Writer:
-    """The writer of a shot's input copy at path, its directory made first: synced in its parent,
-    as a unit's directory is, the copy being recorded with the shot's latent."""
+@contextmanager
+def _copying(units: Units, index: int, copies: Copies) -> Generator[FFV1Writer]:
+    """The writer of shot `index`'s input copy, its directory made first: synced in its parent, as
+    a unit's directory is, the copy being recorded with the shot's latent. Once the copy is whole,
+    its frames' checksums are written whole beside it (DESIGN.md, Colour correction, input copy).
+    Checksums of a copy written before go first, so that checksums beside a copy are always its
+    own, even after a stop between the two files: the copy's rename syncs their directory."""
+    path = units.copy_path(index)
     make_directories(path.parent)
-    return FFV1Writer(path, "gbrp16le", copies.width, copies.height, copies.frame_rate, Tags())
+    units.checksums_path(index).unlink(missing_ok=True)
+    size = (copies.width, copies.height, copies.frame_rate)
+    with FFV1Writer(path, "gbrp16le", *size, Tags()) as copy:
+        yield copy
+    write_checksums(units.checksums_path(index), copy.checksums)
 
 
 def _copied(

@@ -27,6 +27,7 @@ import numpy.typing as npt
 import torch
 from torch import Tensor
 
+from seedvr2x.media.checksums import read_checksums
 from seedvr2x.media.conversion import Conversion
 from seedvr2x.media.decode import Decoder, to_float32
 from seedvr2x.media.ffmpeg import MediaError, input_args
@@ -41,19 +42,22 @@ COPY_READ = Conversion("gbrp16le", "gbr", "full", "left")
 @dataclass(frozen=True)
 class Lab:
     """What a shot's decode with `lab` needs besides its latents (DESIGN.md, Colour correction):
-    its input copy, the frames its encode read, width x height (units.COPY), and where to buffer
-    its decoded frames between the two passes (units.BUFFER)."""
+    its input copy, the frames its encode read, width x height (units.COPY), their checksums
+    (units.CHECKSUMS), and where to buffer its decoded frames between the two passes
+    (units.BUFFER)."""
 
     copy: Path
+    checksums: Path
     buffer: Path
     width: int
     height: int
 
 
 class CopyError(MediaError):
-    """A shot's input copy that its decode can't read whole and intact: missing, cut short, or
-    failing FFV1's slice CRCs. It is derived data: the run stops, and the next one makes it again
-    from the input, keeping the shot's latent and windows (DESIGN.md, Colour correction)."""
+    """A shot's input copy that its decode can't read whole and intact: missing, cut short,
+    failing FFV1's slice CRCs, a frame failing its checksum, or its checksums missing or damaged.
+    It is derived data: the run stops, and the next one makes it again from the input, keeping the
+    shot's latent and windows (DESIGN.md, Colour correction)."""
 
     def __init__(self, copy: Path, error: MediaError) -> None:
         super().__init__(f"{copy}: the shot's input copy, not readable whole and intact: {error}")
@@ -379,14 +383,16 @@ def _correct(
 @contextmanager
 def _copy_reader(lab: Lab, count: int) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
     """read(n), the next n frames of the shot's input copy, (n, H, W, 3) float32 in [0, 1] as the
-    encode read them. The copy is read strictly (Decoder), so that anything ffmpeg reports raises
-    CopyError, before the frames read with it are given: the copy missing, a slice failing its
-    CRC, the file cut short. The frames are counted, `count` of them by the end. What ffmpeg
-    doesn't report goes through: a slice's size damaged can make libavcodec/ffv1dec.c, which
-    derives each frame's slice count from the sizes, skip slices without a word (the picture
-    there left from another frame), and a block whose ID is damaged is dropped, which only the
-    count catches."""
-    decoder = Decoder(input_args(lab.copy), COPY_READ, lab.width, lab.height, count, strict=True)
+    encode read them, each checked against its checksum before it is given (Decoder), `count` of
+    them. The copy is read strictly too, so that what ffmpeg reports names the cause: the copy
+    missing, a slice failing its CRC, the file cut short. A copy that fails either check, or whose
+    checksums are missing or damaged, raises CopyError."""
+    with _copy_failing(lab.copy):
+        checksums = read_checksums(lab.checksums)
+        if len(checksums) != count:
+            raise MediaError(f"{lab.checksums}: {len(checksums)} checksums, for {count} frames")
+    args = (lab.width, lab.height, count)
+    decoder = Decoder(input_args(lab.copy), COPY_READ, *args, strict=True, checksums=checksums)
 
     def read(n: int) -> npt.NDArray[np.float32]:
         with _copy_failing(lab.copy):

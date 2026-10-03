@@ -551,6 +551,50 @@ def test_strict_read_enforces_slice_crcs(tmp_path: Path) -> None:
         assert np.array_equal(decoder.read(200), frames)
 
 
+def test_checksums_catch_what_ffmpeg_decodes_silently(tmp_path: Path) -> None:
+    # A damaged slice size makes FFV1 v3 skip slices without a word (libavcodec/ffv1dec.c derives
+    # each frame's slice count from the sizes): on a flat frame, whose slices are all one size,
+    # ffmpeg reports nothing, even to a strict read, and exits 0, the area skipped keeping what
+    # its frame buffer held. The frames' checksums catch it before the frame is given. Random
+    # frames but frame 50, flat at 255, the top byte of its slice 14's size flipped: neither black,
+    # which a buffer newly allocated holds, nor any frame a reused buffer can hold, so the frame
+    # is wrong whatever ffmpeg's frame threads (one per CPU, 16 at most) and buffers.
+    width, height = 64, 48
+    frames = np.random.default_rng(5).integers(0, 65536, (60, height, width, 3), dtype=np.uint16)
+    frames[50] = 255
+    copy = tmp_path / "copy.mkv"
+    with FFV1Writer(copy, "gbrp16le", width, height, Fraction(25), Tags()) as writer:
+        writer.write(to_float32(frames))
+    probed = run_probe("-show_entries", "packet=pos,size", "-of", "json", str(copy))
+    packet = json.loads(probed)["packets"][50]
+    end = int(packet["pos"]) + 4 + int(packet["size"])  # after the block's track, time and flags
+    data = bytearray(copy.read_bytes())
+    last = int.from_bytes(data[end - 8 : end - 5], "big")  # slice 15's size, in its 8-byte trailer
+    data[end - (last + 8) - 8] ^= 0xFF
+    damaged = tmp_path / "damaged.mkv"
+    damaged.write_bytes(data)
+    with Decoder(input_args(damaged), RGB16, width, height, 60, strict=True) as decoder:
+        through = decoder.read(60)
+    assert np.array_equal(through[:50], frames[:50]) and np.array_equal(through[51:], frames[51:])
+    assert not np.array_equal(through[50], frames[50])
+    given: list[npt.NDArray[np.uint16]] = []
+    checksums = writer.checksums
+    with (
+        pytest.raises(MediaError, match=r"frame 50: CRC-32 [0-9a-f]{8}, where [0-9a-f]{8} was"),
+        Decoder(input_args(damaged), RGB16, width, height, strict=True, checksums=checksums) as d,
+    ):
+        while True:
+            given.append(d.read(1)[0])
+    assert len(given) == 50
+    assert all(np.array_equal(frame, frames[index]) for index, frame in enumerate(given))
+    with Decoder(input_args(copy), RGB16, width, height, strict=True, checksums=checksums) as d:
+        assert np.array_equal(d.read(60), frames)
+        with pytest.raises(ValueError, match="can't be checked"):
+            d.skip(1)
+    with pytest.raises(ValueError, match="60 checksums for 59 frames"):
+        Decoder(input_args(copy), RGB16, width, height, 59, checksums=writer.checksums)
+
+
 @pytest.mark.parametrize("kept", [0.5, 0.999])
 def test_strict_read_refuses_a_file_cut_short(tmp_path: Path, kept: float) -> None:
     # Cut short, even in what follows the last frame: ffmpeg says so, which fails a strict read.

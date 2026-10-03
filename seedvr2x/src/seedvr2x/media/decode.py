@@ -4,6 +4,7 @@ import io
 import os
 import subprocess
 import tempfile
+import zlib
 from collections import deque
 from collections.abc import Sequence
 from types import TracebackType
@@ -53,7 +54,13 @@ class Decoder:
     libavcodec/ffv1dec.c dropping each slice's error). ffmpeg reports a frame's damage as it
     decodes it, so before writing it: in the file before the frame is in the pipe. ffmpeg's
     reports go to a temporary file: where the temporary directory is full, ffmpeg loses them
-    without a word, and a strict read then fails on nothing more than a normal one."""
+    without a word, and a strict read then fails on nothing more than a normal one.
+
+    checksums: the CRC-32 of each frame's gbrp16le planes as written (Writer.checksums), each
+    frame checked against its own before it is given, and as many frames as checksums. That
+    catches what ffmpeg decodes without a word: a damaged slice size, which can make FFV1 v3 skip
+    slices (libavcodec/ffv1dec.c derives each frame's slice count from the sizes), or a Matroska
+    block dropped for its damaged ID (DESIGN.md, Colour correction, input copy)."""
 
     def __init__(
         self,
@@ -63,11 +70,17 @@ class Decoder:
         height: int,
         frames: int | None = None,
         strict: bool = False,
+        checksums: Sequence[int] | None = None,
     ) -> None:
+        if checksums is not None:
+            if frames is not None and frames != len(checksums):
+                raise ValueError(f"{len(checksums)} checksums for {frames} frames")
+            frames = len(checksums)
         self.width, self.height, self.frames = width, height, frames
         self.decoded = 0
         self._frame_bytes = width * height * 3 * 2
         self._strict = strict
+        self._checksums = checksums
         # ffmpeg's errors go to a file rather than a pipe: ffmpeg never waits on it, and its size
         # says at once whether ffmpeg has reported anything (strict).
         try:
@@ -105,12 +118,23 @@ class Decoder:
         if self.frames is not None and self.decoded > self.frames:
             raise self._error(f"more frames than the {self.frames} the first pass counted")
         self._check()
+        if self._checksums is not None:
+            first = self.decoded - whole
+            for index, frame in enumerate(planes[:whole], first):
+                found, written = zlib.crc32(frame), self._checksums[index]
+                if found != written:
+                    raise self._error(
+                        f"frame {index}: CRC-32 {found:08x}, where {written:08x} was written"
+                    )
         frames = planes[:whole]
         return np.stack((frames[:, 2], frames[:, 0], frames[:, 1]), axis=-1)
 
     def skip(self, count: int) -> int:
         """Decode the next `count` frames and drop them, counted but never converted: fewer only
-        at the end of the stream. Returns the frames dropped."""
+        at the end of the stream. Returns the frames dropped. Not with checksums, which only frames
+        read are checked against."""
+        if self._checksums is not None:
+            raise ValueError("frames skipped can't be checked against their checksums")
         wanted = count * self._frame_bytes
         # Each read gives at most what the pipe holds: a few MiB at a time do.
         buffer = memoryview(bytearray(min(wanted, 4 << 20)))

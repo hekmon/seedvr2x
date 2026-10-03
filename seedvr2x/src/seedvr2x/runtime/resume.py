@@ -13,7 +13,7 @@ from typing import Any, cast
 from seedvr2x.media.files import partial_path
 from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.manifest import NAME, STATE, VERSION, Manifest
-from seedvr2x.runtime.units import BUFFER, COPY, size
+from seedvr2x.runtime.units import BUFFER, CHECKSUMS, COPY, size
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
 # what is recorded for information only (DESIGN.md, Pause and resume): where an input is and when
@@ -34,7 +34,9 @@ CHANGES = "environment_changes"
 FIRST_PASS = ("ffmpeg", "conversions")
 
 # The names DiskUnits gives a shot's files.
-UNIT_FILE = re.compile(rf"latent\.pt|window_\d{{4}}\.pt|{re.escape(COPY)}|{re.escape(BUFFER)}")
+UNIT_FILE = re.compile(
+    rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS, BUFFER)))}"
+)
 
 
 def read(path: Path) -> dict[str, Any]:
@@ -129,8 +131,8 @@ def leftovers(manifest: Manifest) -> list[Path]:
     partial files and directories, an unfinished segment's file, a shot's unit files not recorded,
     the units of finished segments. Refused (JobError): a finished segment missing or of another
     size, a unit recorded but missing, and anything in the directory that isn't this job's, which
-    is never deleted. A shot's input copy missing isn't refused: it is derived data, which the run
-    makes again (run_job)."""
+    is never deleted. A shot's input copy or its checksums missing isn't refused: the copy is
+    derived data, which the run makes again (run_job)."""
     directory = manifest.path.parent
     found: list[Path] = []
     names = {NAME, partial_path(manifest.path).name, STATE}
@@ -187,7 +189,7 @@ def _unit_leftovers(manifest: Manifest) -> list[Path]:
         if index in finished:
             continue
         directory = root / f"shot_{manifest.shots[index].start:06d}"
-        for name in sorted(_kept(manifest, index) - {COPY}):
+        for name in sorted(_kept(manifest, index) - {COPY, CHECKSUMS}):
             if not (directory / name).is_file():
                 raise JobError(f"{directory / name}: kept, the manifest says, but missing")
     if all(manifest.finished) and root.is_dir():
@@ -197,14 +199,14 @@ def _unit_leftovers(manifest: Manifest) -> list[Path]:
 
 def _kept(manifest: Manifest, index: int) -> set[str]:
     """The unit files of shot `index` the manifest names: its latent until its windows are all
-    done, its windows done, and with `lab` its input copy once encoded. Its decode's buffer never
-    is."""
+    done, its windows done, and with `lab` its input copy and the copy's checksums once encoded.
+    Its decode's buffer never is."""
     done = manifest.windows_done[index]
     kept = {f"window_{window:04d}.pt" for window in range(done)}
     if manifest.encoded[index] and done < len(manifest.layouts[index]):
         kept.add("latent.pt")
     if manifest.encoded[index] and manifest.lab:
-        kept.add(COPY)
+        kept.update((COPY, CHECKSUMS))
     return kept
 
 

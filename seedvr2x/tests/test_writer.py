@@ -4,6 +4,7 @@
 import json
 import struct
 import subprocess
+import zlib
 from fractions import Fraction
 from pathlib import Path
 
@@ -98,6 +99,19 @@ def test_gbrp16le_round_trip_streamed(tmp_path: Path) -> None:
     assert (tags["color_space"], tags["color_range"]) == ("gbr", "pc")
     assert (tags["color_primaries"], tags["color_transfer"]) == ("bt709", "bt709")
     assert list(tmp_path.iterdir()) == [path]  # the temporary file renamed
+
+
+def test_checksums_as_written(tmp_path: Path) -> None:
+    # Each frame's CRC-32 as fed to ffmpeg, computed as it is written: for a gbrp16le master, of
+    # the planes it holds and gives back (media/checksums.py).
+    frames = frames_of(3, 64, 16)
+    path = tmp_path / "m.mkv"
+    with FFV1Writer(path, "gbrp16le", 64, 16, RATE, BT709) as writer:
+        writer.write(frames[:2])
+        writer.write(frames[2:])
+    planes = decoded(path, "gbrp16le")
+    size = 3 * 64 * 16 * 2
+    assert writer.checksums == [zlib.crc32(planes[k * size : (k + 1) * size]) for k in range(3)]
 
 
 def test_yuv_white_black_and_primaries(tmp_path: Path) -> None:

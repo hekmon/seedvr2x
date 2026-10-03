@@ -15,6 +15,7 @@ nothing converts but zscale.
 import shutil
 import subprocess
 import threading
+import zlib
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -112,11 +113,17 @@ def _quantise(frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
 class Writer:
     """An ffmpeg process writing the frames it is fed on stdin, (n, H, W, 3) float32 in [0, 1] at a
     time. Used as a context manager: closed and checked on a normal exit; on an exception, ffmpeg
-    is stopped and its partial output removed."""
+    is stopped and its partial output removed.
+
+    checksums: the CRC-32 of each frame as fed to ffmpeg, in order, computed as it is written
+    (media/checksums.py): of its gbrp16le planes for FFV1, the planes a gbrp16le master and lab's
+    input copy hold and read back. Not what a yuv420p10le master holds: ffmpeg converts the planes
+    it is fed."""
 
     def __init__(self, command: list[str], what: Path, width: int, height: int) -> None:
         self.what, self.width, self.height = what, width, height
         self.written = 0
+        self.checksums: list[int] = []
         self._command = command
         # In a process group of its own, out of reach of the terminal's Ctrl-C, which only
         # seedvr2x handles: it lets the segment being written finish (runtime/stop.py).
@@ -141,10 +148,12 @@ class Writer:
         if frames.ndim != 4 or frames.shape[1:] != (self.height, self.width, 3):
             raise ValueError(f"frames {frames.shape}, the output is {self.width}x{self.height}")
         for frame in frames:
+            packed = memoryview(self._pack(frame)).cast("B")
             try:
-                self._stdin.write(memoryview(self._pack(frame)).cast("B"))
+                self._stdin.write(packed)
             except BrokenPipeError:
                 raise self._error(f"it stopped after {self.written} frames") from None
+            self.checksums.append(zlib.crc32(packed))
             self.written += 1
 
     def close(self) -> int:
