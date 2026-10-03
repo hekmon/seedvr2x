@@ -26,6 +26,12 @@ def test_cut_list(tmp_path: Path) -> None:
     path.write_text("120\n12.5\n")
     with pytest.raises(JobError, match=r"cuts.txt:2: '12.5' is not a frame number"):
         read_cuts(path)
+    # Fields after the frame number are ignored (DESIGN.md, Input): scores, say.
+    path.write_text("120 13.7\n250\t4.2 flash # doubtful\n300 \n")
+    assert read_cuts(path) == [120, 250, 300]
+    path.write_text("00:00:05.005 120\n")
+    with pytest.raises(JobError, match=r"cuts.txt:1: '00:00:05.005' is not a frame number"):
+        read_cuts(path)
     with pytest.raises(JobError, match=r"missing\.txt"):
         read_cuts(tmp_path / "missing.txt")
 

@@ -92,7 +92,7 @@ def examine(path: Path, matrix: str | None = None, sample_aspect: Fraction | Non
 # The segments of a directory: the files `sptenc encode <dir>` reads, in its order
 # (cmd/sptenc/helpers.go, getSegmentsFromDir): .mkv and .mp4, the extension in any case,
 # subdirectories skipped, sorted by name byte for byte. sptenc's split writes seg_%06d.mkv.
-# Provisional: sptenc's reader, since the output goes back to it; other splitters may need more.
+# seedvr2x reads a directory the same way (DESIGN.md, Input).
 SEGMENT_EXTENSIONS = (".mkv", ".mp4")
 
 

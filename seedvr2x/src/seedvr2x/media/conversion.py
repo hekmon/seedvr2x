@@ -93,11 +93,17 @@ class Conversion:
         ]
         return f"format={self.planar},zscale={':'.join(zscale)},format=gbrp16le"
 
+    @property
+    def matrix_tag(self) -> str:
+        """The matrix ffprobe's name, as tagged, set by --input-matrix or guessed; "" for RGB."""
+        if self.matrix == "gbr":
+            return ""
+        return next(name for name, value in MATRICES.items() if value == self.matrix)
+
     def describe(self) -> str:
         if self.matrix == "gbr":
             return "RGB"
-        matrix = next(name for name, value in MATRICES.items() if value == self.matrix)
-        return f"YUV {matrix}, {self.color_range} range, chroma {self.chroma_location}"
+        return f"YUV {self.matrix_tag}, {self.color_range} range, chroma {self.chroma_location}"
 
 
 def guess_matrix(width: int, height: int) -> str:

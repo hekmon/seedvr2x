@@ -180,23 +180,22 @@ def check_seed(seed: int, shots: Sequence[Shot]) -> None:
 
 
 def read_cuts(path: Path) -> list[int]:
-    """A cut list: the first frame of each shot but the first, one frame number per line, counted
-    from 0 in the source; blank lines and # comments are ignored.
-
-    Provisional: frame numbers only, until DESIGN.md settles the cut list's format (Open
-    questions, scene list format), timestamps included."""
+    """A cut list (DESIGN.md, Input): the first frame of each shot but the first, one frame number
+    per line, counted from 0 in the source, no timestamps; blank lines and # comments are ignored.
+    So are the fields after the frame number, separated by blanks, so that an export carrying
+    scores (sptenc's, once it has one) stays readable."""
     try:
         text = path.read_text()
     except OSError as error:
         raise JobError(f"{path}: {error.strerror}") from None
     cuts: list[int] = []
     for number, line in enumerate(text.splitlines(), 1):
-        entry = line.split("#", 1)[0].strip()
-        if not entry:
+        fields = line.split("#", 1)[0].split()
+        if not fields:
             continue
-        if not re.fullmatch(r"\d+", entry):
-            raise JobError(f"{path}:{number}: {entry!r} is not a frame number")
-        cuts.append(int(entry))
+        if not re.fullmatch(r"\d+", fields[0]):
+            raise JobError(f"{path}:{number}: {fields[0]!r} is not a frame number")
+        cuts.append(int(fields[0]))
     return cuts
 
 

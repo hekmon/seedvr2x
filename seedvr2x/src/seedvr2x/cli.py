@@ -141,8 +141,8 @@ def _run(args: argparse.Namespace) -> int:
         logger.info("ffmpeg %s", ffmpeg.check(("png",) if args.format == "png" else ()))
         if args.input.is_dir():
             if args.cuts:
-                # Provisional: a directory's cut list says which joins are cuts (DESIGN.md,
-                # Input), which comes with the detector for doubtful joins.
+                # Until the detector for doubtful joins comes, each join is a cut (DESIGN.md,
+                # Input).
                 raise JobError("--cuts with a directory: each join of its segments is a cut")
             sources = examine_directory(args.input, args.input_matrix, args.input_sar)
         else:
@@ -209,10 +209,10 @@ def _run(args: argparse.Namespace) -> int:
         record.write()
     started = time.monotonic()
 
+    tags = Tags.of(stream, source.conversion.matrix_tag)
+
     def open_segment(path: Path) -> Writer:
-        return open_writer(
-            args.format, path, out_width, out_height, stream.frame_rate, Tags.of(stream)
-        )
+        return open_writer(args.format, path, out_width, out_height, stream.frame_rate, tags)
 
     try:
         outputs = [(path, segment.frames) for path, segment in zip(paths, segments, strict=True)]
@@ -246,11 +246,9 @@ def _layout(
     """The output's segments, each one's path, and the directory they go in (None for one file).
     A .mkv path takes a video file's output whole, one FFV1 master. Else the output is a new or
     empty directory of segments, named and cut as sptenc's split: a directory's own, mirrored;
-    a video file's shots, merged to --min-segment (DESIGN.md, Output).
-
-    Provisional: the .mkv path stands for the one-file output until assembly (milestone 6) joins
-    the segments into it; and refusing a directory that holds anything keeps files of another
-    run out of the segments sptenc reads, until resume reads the manifest back."""
+    a video file's shots, merged to --min-segment (DESIGN.md, Output). Until assembly (milestone
+    6), the .mkv path stands for the one-file output, and the directory must be new or empty,
+    which keeps another run's files out of what sptenc reads (DESIGN.md, Output)."""
     from seedvr2x.runtime.job import JobError, OutputSegment, merged_segments, mirrored_segments
 
     output: Path = args.output

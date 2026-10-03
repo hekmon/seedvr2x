@@ -1,10 +1,8 @@
 """The manifest of a job's output: its settings, its input, its shots and its output segments, and
-which segments are finished (DESIGN.md, Pause and resume). A skeleton: written beside the
-segments before any GPU work, then again as each segment is finished; resume will read it back,
-and refuse to go on with other settings.
-
-Provisional: its fields are this code's, until resume settles what it needs (model hashes
-included: only the weights' names and sizes are recorded yet)."""
+which segments are finished. The skeleton of DESIGN.md (Pause and resume): written beside the
+segments once the models load, then again as each segment is finished, always atomically;
+resume will read it back, and refuse to go on with other settings. Model hashes come with
+resume."""
 
 import json
 from collections.abc import Sequence

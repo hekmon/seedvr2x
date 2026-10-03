@@ -199,7 +199,8 @@ def test_yuv_segments(tmp_path: Path) -> None:
         text=True,
         check=True,
     )
-    # 128x96 is an SD size: BT.601, provisionally tagged smpte170m (writer.yuv_matrix).
+    # 128x96 is an SD size: BT.601, tagged smpte170m since the source is untagged (DESIGN.md,
+    # Colour and shape).
     assert probe.stdout.strip() == f"yuv420p10le,smpte170m,{FRAMES}"
 
 

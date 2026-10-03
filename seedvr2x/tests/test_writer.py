@@ -172,14 +172,18 @@ def test_yuv_chroma_sited_left(tmp_path: Path) -> None:
     [
         (BT709, (1280, 720), "bt709"),
         (Tags("smpte170m", "smpte170m"), (720, 480), "smpte170m"),
-        (Tags("bt470bg", "bt470bg"), (1920, 1080), "bt709"),
+        (Tags("bt470bg", "bt470bg", "bt470bg"), (720, 576), "bt470bg"),
+        (Tags("smpte170m", "smpte170m", "smpte170m"), (720, 480), "smpte170m"),
+        (Tags("bt709", "bt709", "bt709"), (960, 540), "smpte170m"),
+        (Tags("bt470bg", "bt470bg", "bt470bg"), (1920, 1080), "bt709"),
         (Tags("bt2020", "smpte2084"), (1920, 1080), "bt709"),
         (Tags(), (1280, 720), "bt709"),
     ],
 )
 def test_tags_copied(tmp_path: Path, tags: Tags, size: tuple[int, int], matrix: str) -> None:
     # Primaries and transfer as the source declares them, untagged staying untagged; the yuv
-    # master's matrix from its size alone (DESIGN.md, Colour and shape).
+    # master's matrix from its size, and below HD from the source's BT.601 name (DESIGN.md,
+    # Colour and shape).
     width, height = size
     frame = np.full((1, height, width, 3), 0.5, dtype=np.float32)
     for pix_fmt, expected in (
@@ -198,6 +202,35 @@ def test_tags_copied(tmp_path: Path, tags: Tags, size: tuple[int, int], matrix: 
 def test_yuv_matrix_by_size() -> None:
     assert yuv_matrix(1920, 1080) == yuv_matrix(1280, 720) == yuv_matrix(1024, 578) == "bt709"
     assert yuv_matrix(960, 540) == yuv_matrix(720, 576) == yuv_matrix(640, 480) == "smpte170m"
+
+
+@pytest.mark.parametrize(
+    ("source", "sd", "hd"),
+    [
+        ("bt470bg", "bt470bg", "bt709"),
+        ("smpte170m", "smpte170m", "bt709"),
+        ("bt709", "smpte170m", "bt709"),
+        ("bt2020nc", "smpte170m", "bt709"),
+        ("", "smpte170m", "bt709"),
+    ],
+)
+def test_yuv_matrix_below_hd_named_as_the_source(source: str, sd: str, hd: str) -> None:
+    # BT.601 below HD, under the source's own name when it has one (DESIGN.md, Colour and shape).
+    assert yuv_matrix(720, 576, source) == yuv_matrix(640, 480, source) == sd
+    assert yuv_matrix(1280, 720, source) == yuv_matrix(1920, 1080, source) == hd
+
+
+def test_bt601_names_convert_alike(tmp_path: Path) -> None:
+    # bt470bg and smpte170m have the same coefficients: only the tag differs.
+    frames = frames_of(2, 64, 48)
+    planes: list[bytes] = []
+    for matrix in ("bt470bg", "smpte170m"):
+        path = tmp_path / f"{matrix}.mkv"
+        with FFV1Writer(path, "yuv420p10le", 64, 48, RATE, Tags(matrix=matrix)) as writer:
+            writer.write(frames)
+        assert stream_tags(path)["color_space"] == matrix
+        planes.append(decoded(path, "yuv420p10le"))
+    assert planes[0] == planes[1]
 
 
 def png_chunks(path: Path) -> dict[str, bytes]:

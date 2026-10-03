@@ -41,15 +41,18 @@ CHROMA_LOCATION = "left"
 @dataclass(frozen=True)
 class Tags:
     """The source's primaries and transfer, which the output declares as they are: copied, never
-    converted, and "" (untagged) stays untagged (DESIGN.md, Colour and shape). The names are
-    ffprobe's, which setparams and the encoders take as they are."""
+    converted, and "" (untagged) stays untagged (DESIGN.md, Colour and shape); and the matrix the
+    source is read with, which names the yuv420p10le master's BT.601 below HD (yuv_matrix). The
+    names are ffprobe's, which setparams and the encoders take as they are."""
 
     primaries: str = ""
     transfer: str = ""
+    matrix: str = ""
 
     @classmethod
-    def of(cls, stream: VideoStream) -> Self:
-        return cls(stream.color_primaries, stream.color_transfer)
+    def of(cls, stream: VideoStream, matrix: str = "") -> Self:
+        """The tags of stream, read with `matrix` (Conversion.matrix_tag)."""
+        return cls(stream.color_primaries, stream.color_transfer, matrix)
 
     def setparams(self) -> list[str]:
         """setparams' options for the tags declared."""
@@ -66,18 +69,23 @@ class Tags:
         ]
 
 
-def yuv_matrix(width: int, height: int) -> str:
-    """The yuv420p10le master's matrix, ffprobe's name: BT.709 at HD sizes, whatever the source's,
-    since players read the tag or assume BT.709 there; BT.601 below (DESIGN.md, Colour and shape).
-    HD is mpv's rule, the one the decode guesses an untagged matrix by (DESIGN.md, Input).
+# BT.601's two names, which have the same coefficients.
+BT601 = ("bt470bg", "smpte170m")
 
-    Provisional: the size rule and the BT.601 tag (smpte170m; bt470bg has the same coefficients)
-    are this code's reading of DESIGN.md, which names neither."""
-    return "bt709" if width >= 1280 or height > 576 else "smpte170m"
+
+def yuv_matrix(width: int, height: int, source: str = "") -> str:
+    """The yuv420p10le master's matrix, ffprobe's name, for a source read with the matrix `source`
+    (DESIGN.md, Colour and shape): BT.709 at HD sizes, whatever the source's, since players read
+    the tag or assume BT.709 there. Below HD, by mpv's rule, the one the decode guesses an
+    untagged matrix by (DESIGN.md, Input), BT.601: tagged as the source is when it says bt470bg or
+    smpte170m, else smpte170m."""
+    if width >= 1280 or height > 576:
+        return "bt709"
+    return source if source in BT601 else "smpte170m"
 
 
 # zscale's names for the matrices yuv_matrix gives.
-ZSCALE_MATRICES = {"bt709": "709", "smpte170m": "170m"}
+ZSCALE_MATRICES = {"bt709": "709", "bt470bg": "470bg", "smpte170m": "170m"}
 
 
 def to_planar16(frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
@@ -216,7 +224,7 @@ class FFV1Writer(Writer):
             chain = _setparams("colorspace=gbr", "range=pc", *tags.setparams())
             options = ["-colorspace", "rgb", "-color_range", "pc", *tags.options()]
         elif pix_fmt == "yuv420p10le":
-            matrix = yuv_matrix(width, height)
+            matrix = yuv_matrix(width, height, tags.matrix)
             # ffv1_out.py's conversion with every parameter given: the primaries and transfer the
             # same on both sides, so never converted (as the decode does); no dither, rounded to
             # nearest.
