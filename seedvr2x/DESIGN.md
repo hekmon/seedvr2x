@@ -65,6 +65,28 @@ never requires it.
   - the driver spilling VRAM into system memory instead of failing (numz enforces the physical
     limit for this), which the planner must prevent
 
+## Terms
+
+- **Frame:** one picture of the video.
+- **Latent:** the VAE's compressed form of frames. The first latent of a sequence holds 1
+  frame and every next one holds 4, so a sequence of 4n + 1 frames makes n + 1 latents.
+- **Shot:** the frames from one cut to the next. Nothing crosses a cut: each shot is encoded,
+  upscaled and decoded on its own.
+- **Window** (DiT window): a run of consecutive latents of one shot that the DiT processes in
+  one pass.
+  - A shot that fits is one window. A longer one is split into windows of balanced lengths that
+    overlap by 2 latents (8 frames), and the overlapping latents are mixed before decoding, so
+    the joins don't show.
+  - The length comes from the GPU's memory. At 1080p with the 7B fp16 model, that is about 6
+    latents (21–24 frames) on a 24 GB card and about 75 (≈ 300 frames) on a 96 GB card, from
+    the per-token model in [vram.md](../research/docs/vram.md).
+  - Not to be confused with the DiT's **attention windows**: the space-time tiles its
+    attention works in inside one pass ([attention.md](../research/docs/attention.md)), which
+    `na.unconcat_coalesce` counts.
+- **Output segment:** an output file. It holds one or more whole shots, at least 5 s long by
+  sptenc's rule, or mirrors an input segment. It is the unit of output and of decode resume.
+- **Unit:** a piece of saved work for resume: a shot's encode, a window, a segment's decode.
+
 ## Architecture
 
 | Layer | Contents | Origin |
@@ -279,7 +301,9 @@ The rule: the upscale must look like its source in any given player.
      computes from NaResize's int, and the resize to it is the same call, bit for bit.
 1. **VAE encode** of the whole shot in one causal pass. The VAE already streams in 4-frame
    slices; resetting it at each cut is correct (no context should cross a cut).
-   - The frames are read from the decode as the VAE takes them: 5, then 4 at a time.
+   - The frames are read from ffmpeg's decoding of the source at the VAE's own pace: 5, then 4
+     at a time. The first latent holds 1 frame and every next one 4, and the causal VAE works
+     in those slices anyway. This is not a batch size: the shot is encoded in one pass.
    - The padding to 4n + 1 is made from the last 4 frames read, so the latent is the one-pass
      encode's, bit for bit.
    - Only the latents are ever whole in memory.
@@ -671,6 +695,12 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 seedvr2x's README and manual explain what would otherwise surprise a newcomer, with the reason
 and the measurement behind each point.
 
+They open with the [Terms](#terms) in plain words. A window, for instance: "a stretch of a shot
+that the model upscales in one go. A long shot is done in several windows that overlap a
+little, blended where they overlap before the frames are rebuilt, so the joins don't show.
+seedvr2x sizes the windows from your GPU's memory; you can cap them." The model's internal
+attention windows stay out of the user docs; they matter only to developers.
+
 **Colour correction, first and in full:**
 - **The model itself shifts colours.** Raw SeedVR2 output is more saturated and bluer than its
   input. On clip A, with colour correction off, the saturation spread is +34% on a* and +28%
@@ -687,6 +717,61 @@ and the measurement behind each point.
 - **seedvr2x:** `lab` by default, with the wavelet split rewritten from its method (no
   non-commercial code) and numz's LAB matching (Apache-2.0). `none` gives the raw model's
   colours, for comparison or for users who grade themselves.
+
+**The pipeline, for SeedVR2 users coming from numz.** numz's main knobs (`--batch_size`,
+`--temporal_overlap`, `--chunk_size`…) are absent from seedvr2x, which would puzzle its users.
+So the docs don't go knob by knob. They explain numz's pipeline with each knob where it acts,
+then ours, then why ours has no use for them. The
+[Options kept and dropped](#options-kept-and-dropped) table is the reference, not the
+explanation.
+- **numz works in phases over fixed batches.**
+  - It reads the whole clip into RAM, or each `--chunk_size` chunk.
+  - It cuts the clip into batches of `--batch_size` frames that ignore the cuts, each padded
+    to 4n + 1 frames.
+  - It then runs four phases, each over every batch: encode every batch, upscale every batch,
+    decode every batch, colour-correct every batch.
+  - The latents wait in RAM between phases (`--tensor_offload_device cpu`), and the decoded
+    frames gather in RAM before they are written. Without the cache options, the DiT is
+    loaded for each file or chunk ([cli-flags.md](../research/docs/cli-flags.md)).
+  - So RAM grows with the clip, every batch boundary is a visible jump, and a stop loses
+    everything. Most knobs patch what this design creates:
+    - `--temporal_overlap` cross-fades batch boundaries in pixels, after decoding. Its
+      weights only blend with odd values ≥ 3
+      ([bug 06](../research/bugs/06-temporal-overlap-blend-weights.md)): 1, 2 and 4 are a
+      hard switch that costs compute. Even corrected, a pixel cross-fade removes 67% of the
+      jump, softens the mixed frames by about 20%, and costs +16%.
+    - `--chunk_size` bounds the RAM, and leaves a hard seam at every chunk boundary.
+    - `--cache_dit` and `--cache_vae` keep the models between files or chunks, since each
+      chunk is a full run.
+    - `--prepend_frames` makes the clip's first frame not a batch's first. The causal VAE
+      encodes a batch's first frame alone, and it comes out less restored
+      ([quality.md](../research/docs/quality.md#--prepend_frames)). On one GPU, numz doesn't
+      remove the prepended frames ([bug 05](../research/bugs/05-prepend-frames-not-removed.md)).
+    - `--uniform_batch_size` pads a short last batch to full size.
+    - The offload devices, `--blocks_to_swap` and the tile sizes fit the GPU, by hand.
+- **seedvr2x works per shot, from cut to cut, with no batch size.** A shot of any length is
+  padded once to 4n + 1 frames, because the VAE's first latent holds 1 frame and every next
+  one holds 4. Its DiT windows are as long as the memory allows.
+  - Frames stream from ffmpeg's decoding of the source into the VAE encoder at the VAE's own
+    pace: 5 frames, then 4 per latent. So the shot never has to sit in memory.
+  - A long shot runs as DiT windows sharing 2 latents, mixed before one streamed decode, so
+    no boundary is left inside a shot.
+  - Frames are written into output segments as they come out.
+  - Only the latents are ever whole in memory, so RAM stays flat with length (2.3–2.4 GiB
+    over a 377-frame, 6-shot job).
+  - The models stay loaded for the whole job.
+  - Every unit is saved, so a job stops and resumes, bit for bit.
+- **Why the knobs go:**
+  - No batch boundary is left inside a shot, so there is nothing to cross-fade. Latent
+    windows share whole latents, so there is no parity quirk. They remove 80% of a window
+    boundary's jump, with no softening, for about +3–9%
+    ([stitching.md](../research/docs/stitching.md)).
+  - Streaming keeps RAM flat, so there are no chunks. One process runs the whole job, so
+    there is no cache to keep.
+  - Only a shot's first frame is encoded alone, right after its cut, where it is least
+    visible. numz has one at every batch. Windows are balanced, so none is short.
+  - The planner fits the GPU from its free memory, so offload, swap and tiling aren't tuned
+    by hand, though they stay overridable.
 
 **Also explained:**
 - the two workflows: a file in and a finished file out, or sptenc's pre-split directories
@@ -861,5 +946,11 @@ writers, and the planner needs real shot lengths.
     (ByteDance)
 - **Decode resume granularity:** whether sub-segment decoding with warm-up latents is
   bit-identical.
+- **A shot's first frame.** The causal VAE encodes it alone, so it comes out less restored,
+  closer to the input ([quality.md](../research/docs/quality.md#--prepend_frames)). numz has
+  such a frame at every batch; seedvr2x only at each shot's start, right after a cut, where
+  the eye is least likely to notice. To measure: whether prepending mirrored frames to each
+  shot (numz's `--prepend_frames`, kept inside the shot) is worth its cost of about one latent
+  per shot.
 - **4K and long windows:** the planner's limits on large outputs, where the DiT window is the
   constraint.
