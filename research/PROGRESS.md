@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-03 08:51 CEST
+Last update: 2026-10-03 09:20 CEST
 
 ## 0. Setup
 
@@ -158,3 +158,12 @@ temporal regression.
 - [ ] 7B fp8, Q4_K_M, 3B fp16 (and 3B fp8) through question 1's protocol
 - [ ] Power cap: power, clock and throttle sampling with and without BlockSwap; idle-pause control
 - [ ] Doc + decision brief
+
+## Other
+
+- [x] numz bug candidates from the implementation, checked against the code: new
+      [bugs 24](bugs/24-rope-wrapper-late-binding.md) (the RoPE wrapper's late-binding closure:
+      every block uses the last block's tables, cache bypassed) and
+      [25](bugs/25-naditupscaler-undefined-attention-mode.md) (an unbuildable DiT class);
+      bugs 18, 21 and 22 amended (fallback details, the import-time CUDA context, unchecked
+      checkpoint keys). 25 bugs in all

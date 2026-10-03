@@ -1,9 +1,9 @@
-# 22. Model lookup: `./models/SEEDVR2` shadows `--model_dir`, the architecture comes from the file name, and a hash mismatch deletes the file
+# 22. Model lookup: `./models/SEEDVR2` shadows `--model_dir`, the architecture comes from the file name, a hash mismatch deletes the file, and missing weights pass silently
 
 | | |
 |---|---|
-| Severity | UX-doc (with a data-loss risk) |
-| Status | from code, not reproduced |
+| Severity | UX-doc (with a data-loss risk); silent wrong output with an incomplete custom checkpoint (6) |
+| Status | from code, not reproduced; 6 run on CPU with numz's loader (no real checkpoint) |
 | Affected options | `--model_dir`, `--dit_model` |
 | Version | SeedVR2 `4490bd1` (v2.5.24) |
 
@@ -21,6 +21,12 @@ Several surprises in how the CLI finds, checks and interprets model files:
 5. After a download, the validation cache is written to `./models/SEEDVR2/.validation_cache.json`
    of the current directory (created if needed) instead of `--model_dir`, so the next run hashes
    the 16 GB file again.
+6. Nothing checks that a `.safetensors` or `.pth` checkpoint holds the model's keys: missing and
+   unexpected keys are ignored. A missing buffer becomes zeros (the RoPE frequencies: no positional
+   encoding, no error). A missing weight stays on the meta device: moving its block later fails
+   with an error that doesn't name the file, and a forward through it on CPU returns garbage
+   without error. A checkpoint whose keys carry a prefix loads nothing. Only GGUF files are
+   checked.
 
 ## Reproduction
 
@@ -39,6 +45,16 @@ cp my_finetune.safetensors ./models/SEEDVR2/my_finetune_7B.safetensors   # a 7B 
 python inference_cli.py input.mp4 --dit_model my_finetune_7B.safetensors
 #   → accepted, but built with configs_3b ("7B" doesn't contain "7b"): the 7B weights don't fit
 ```
+
+Item 6, run on CPU (torch 2.14.1) through numz's own `_load_standard_weights` and
+`initialize_meta_buffers`, on a 2-block 7B DiT built on the meta device as numz builds it, with a
+complete checkpoint of 74 tensors minus some keys:
+
+| Checkpoint | `load_state_dict` result (discarded) | After numz's load | Then |
+|---|---|---|---|
+| Without the 2 `rope.freqs` buffers | 2 missing | both buffers zeros, now non-persistent; the only trace is "Initialized 6 non-persistent buffers" (4 otherwise), in `--debug` | angle table all zeros: RoPE returns q and k unchanged, no error |
+| Without one weight | 1 missing | the weight still on meta | `block.to(device)` (BlockSwap, offload): `NotImplementedError: Cannot copy out of meta tensor; no data!`; a forward through it on CPU: no error, garbage values (not tried on CUDA) |
+| Every key prefixed `model.` | 74 missing, 74 unexpected | all 72 weights on meta, no message | as above |
 
 ## Root cause
 
@@ -70,6 +86,19 @@ python inference_cli.py input.mp4 --dit_model my_finetune_7B.safetensors
   `cache_dir` (`downloads.py:260`), so `get_validation_cache_path(None)` →
   `get_base_cache_dir()` (`constants.py:135-147`). The next run looks in `--model_dir`'s cache
   (`downloads.py:209`), misses, and hashes the file again (then stores it in the right place).
+- Unchecked keys: the model is built on the meta device (`src/core/model_loader.py:451-452`) and
+  loaded with `model.load_state_dict(state, strict=False, assign=True)` (`model_loader.py:823`),
+  whose result (the missing and unexpected keys) is dropped. Then `initialize_meta_buffers`
+  (`model_loader.py:598-600`, `777-815`) replaces every buffer still on meta with
+  `torch.zeros_like(...)` on the target device, re-registered as non-persistent (`811-812`): meant
+  for the non-persistent buffers no checkpoint holds (`rotary_embedding_torch`'s `dummy` and
+  `cached_freqs`), it also zeroes the persistent ones the file lacks: the RoPE `freqs`, the DiTs'
+  only persistent buffers (36 on the 7B, 32 on the 3B; the VAE has none). Weights aren't touched
+  and stay on meta. Shape mismatches still raise (`load_state_dict` checks sizes even with
+  `strict=False`). Later checks only look at the first parameter (`model_loader.py:503`,
+  `src/core/generation_phases.py:620`, `src/optimization/memory_manager.py:711`). The GGUF path
+  does check: three key shapes (`model_loader.py:897-933`) and a forced WARNING listing missing
+  and unmatched names (`model_loader.py:749-765`, `867`).
 
 ## Impact
 
@@ -81,6 +110,12 @@ python inference_cli.py input.mp4 --dit_model my_finetune_7B.safetensors
   download again, or a lost custom file.
 - One extra full hash (tens of seconds for 16.5 GB) after each download, and a stray
   `./models/SEEDVR2/` directory in the working directory.
+- Registry files pass the hash check, so item 6 concerns custom and converted files: a conversion
+  that only exports parameters drops the RoPE buffers, and the DiT then runs without positional
+  encoding, with no message (expected to degrade the output; not run on a real checkpoint). A
+  checkpoint saved from a wrapper (`model.` or `module.` prefix) loads nothing; what follows
+  depends on the path: a meta-tensor error that doesn't point at the file when a block is moved
+  (BlockSwap, offload), garbage on CPU (CUDA not tried).
 
 ## Possible fix
 
@@ -95,9 +130,14 @@ python inference_cli.py input.mp4 --dit_model my_finetune_7B.safetensors
 - On hash mismatch, rename to `<file>.mismatch` (or ask), and download to a temporary name;
   never delete a file the CLI didn't download itself.
 - Pass `cache_dir` to `validate_file` at `downloads.py:260`.
+- Keep `load_state_dict`'s result at `model_loader.py:823`: raise on missing keys, naming the file
+  and the first keys, and log unexpected keys as a forced WARNING (as the GGUF path does). In
+  `initialize_meta_buffers_impl`, only initialize buffers registered as non-persistent, and raise
+  for any other tensor still on meta.
 
 Test: the three commands above; a deliberately modified registry file must survive (renamed)
-and be reported.
+and be reported. For item 6, the three checkpoints of the table must fail at load with the missing
+keys named; check that the registry files load without a warning.
 
 ## References
 

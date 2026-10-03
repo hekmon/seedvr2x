@@ -10,7 +10,8 @@ exists on the current upstream `main` (line numbers refer to `4490bd1`), and sea
 issues.
 
 Status: **measured** = reproduced by a run (numbers in the file); **from code** = read from the
-code, not reproduced. Severity, from worst: crash, wrong output, memory, performance, UX-doc.
+code, not reproduced. Severity, from worst: crash, wrong output, memory, performance, UX-doc;
+*latent*: no effect with the shipped configs and the released checkpoints.
 
 | # | Title | Severity | Status | Summary |
 |---|---|---|---|---|
@@ -34,9 +35,11 @@ code, not reproduced. Severity, from worst: crash, wrong output, memory, perform
 | [18](18-attention-modes-misleading.md) | `sageattn_3` never runs SA3; `sageattn_2` runs Triton varlen | UX-doc | measured | The names promise kernels that never run (no speed impact: all backends within ±1.5%) |
 | [19](19-10bit-output-is-8-bit.md) | `--10bit` encodes 8-bit frames; ignored with OpenCV | UX-doc | from code | bf16 → uint8 before a 10-bit encode |
 | [20](20-dynamo-cache-size-limit-no-effect.md) | `--compile_dynamo_cache_size_limit` has no effect | UX-doc | confirmed (torch config) | Alias of `recompile_limit`, overwritten right after |
-| [21](21-cuda-device-nonzero-mask.md) | `--cuda_device N`: mask set after CUDA init | UX-doc | mechanism confirmed, rest from code | Context and memory figures on GPU 0 |
-| [22](22-model-lookup-and-validation.md) | Model lookup, architecture by name, deletion on hash mismatch | UX-doc (data-loss risk) | from code | `./models/SEEDVR2` shadows `--model_dir`; "7b" in the name picks the config |
+| [21](21-cuda-device-nonzero-mask.md) | `--cuda_device N`: mask set after CUDA init | UX-doc | mechanism confirmed, rest from code | Context, memory figures and the compute-dtype probe on GPU 0; the multi-GPU parent also holds a context there |
+| [22](22-model-lookup-and-validation.md) | Model lookup, architecture by name, deletion on hash mismatch, unchecked keys | UX-doc (data-loss risk) | from code; unchecked keys run on CPU | `./models/SEEDVR2` shadows `--model_dir`; "7b" in the name picks the config; missing keys ignored, missing RoPE buffers zeroed |
 | [23](23-help-text-errors.md) | Help text and log messages that don't match the code | UX-doc | from code | `--output` default, `None` choice, 4n+1, cache "requires", misleading logs |
+| [24](24-rope-wrapper-late-binding.md) | RoPE wrapper: every block uses the last block's table | wrong output (latent) | confirmed on CPU (numz's classes) | Late-binding closure; harmless while all blocks hold equal tables (the released checkpoints); bypasses the 7B's RoPE cache |
+| [25](25-naditupscaler-undefined-attention-mode.md) | `NaDiTUpscaler` uses an undefined `attention_mode` | crash (latent) | confirmed on CPU (numz's classes) | `NameError` if built; nothing builds it, and the registry ignores the class name |
 
 ## Considered and not filed
 

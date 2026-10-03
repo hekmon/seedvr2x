@@ -74,8 +74,8 @@ contains compiled modules: `sageattention/_qattn_sm80*.so`, `_qattn_sm89*.so`, `
 
 On top of that, **`sageattn_3` falls back to `sageattn_2` per call** (`call_sage_attn_3_varlen`)
 whenever the sequences of a varlen batch don't all have the same length. SA3's API is batched
-only. The DiT's window attention produces such batches, so a "`sageattn_3`" run is in practice a
-mix of SA3 and SA2.
+only. The DiT's window attention never produces uniform batches, so a "`sageattn_3`" run never
+calls SA3: it runs SA2's varlen kernel throughout ([bug 18](../bugs/18-attention-modes-misleading.md)).
 The only log trace is a WARNING at setup time, so a run that works proves nothing: check with
 `probe_env.py`.
 

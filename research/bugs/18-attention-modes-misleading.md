@@ -4,7 +4,7 @@
 |---|---|
 | Severity | UX-doc (misleading option; no speed impact measured) |
 | Status | measured |
-| Affected options | `--attention_mode sageattn_3`, `sageattn_2` (and silent fallbacks of all modes) |
+| Affected options | `--attention_mode sageattn_3`, `sageattn_2` (and the import-time fallbacks of all modes) |
 | Version | SeedVR2 `4490bd1` (v2.5.24), SageAttention 2.2.0, sageattn3 1.0.0 |
 
 ## Summary
@@ -16,7 +16,10 @@
 - `sageattn_2` calls `sageattention.sageattn_varlen`, a Triton kernel (INT8 QK, FP16 PV: the
   SageAttention 1 algorithm). SA2's CUDA kernels (INT8 QK + FP8 PV) are only reachable through the
   batched `sageattn()` API. The mode also accepts the PyPI `sageattention` 1.0.6 (which is SA1).
-- A backend that can't be imported falls back to another with a single setup-time warning.
+- A backend that can't be imported falls back to another with a single setup-time warning (once
+  per DiT load, printed without `--debug`; `flash_attn_2` → `sdpa` included), never per call. It
+  says "not installed" even when only the package's compiled extension fails to import, and the
+  import error itself is discarded.
 
 None of this costs time today: all four backends give the same DiT time within ±1.5%, attention
 being 4–9% of it. The problem is that the option names promise something else.
@@ -59,11 +62,17 @@ Measured with the probe (every DiT attention call recorded):
            return call_sage_attn_2_varlen(...)
    ```
    The check also forces a GPU → CPU synchronization on every call (`.all()` used as a Python
-   bool).
+   bool). Without SA2 installed, the fallback raises instead (`compatibility.py:503-507`), so the
+   run fails at the first DiT call.
 3. `call_sage_attn_2_varlen` calls `sageattn_varlen` (`compatibility.py:438-443`), which is
    Triton in SageAttention 2.2.0.
-4. Availability is tested by import only (`compatibility.py:147-172`); `validate_attention_mode`
-   (`compatibility.py:175-…`) returns a different mode with a WARNING when the import fails.
+4. Availability is tested by import only, the exception discarded (`compatibility.py:124-172`;
+   FA2 at `134-143` also needs `flash_attn_2_cuda`). `validate_attention_mode`
+   (`compatibility.py:175-283`; FA2 → SDPA at `215-232`) returns a different mode with a WARNING
+   logged with `force=True`. It runs once per DiT load (`src/core/model_configuration.py:1191-1209`,
+   from `materialize_model`), which then sets the mode on every `FlashAttentionVarlen`; the per-call
+   dispatch (`src/models/dit_7b/attention.py:114-148`, the 3B's is identical) has no fallback of its
+   own. Only `sageattn_3`'s fallback to SA2 happens per call.
 
 ## Impact
 
@@ -87,6 +96,8 @@ measured slower than FA2 at these lengths):
   SageAttention 2 varlen" (a module-level flag in `call_sage_attn_3_varlen`).
 - Check the SageAttention version at import (`importlib.metadata.version("sageattention")`) and
   warn when it is < 2 (SA1 from PyPI).
+- Keep each backend's import exception and print it in the fallback warning instead of "not
+  installed" (`compatibility.py:137-143`, `218-229`, and the other three).
 - Cache the uniformity test per window layout (the layout only changes with the token grid),
   instead of `.all()` on GPU tensors at every call, to drop the per-call sync.
 

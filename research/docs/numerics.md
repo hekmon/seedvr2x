@@ -182,6 +182,31 @@ frames match exactly, so their mean PSNR is infinite and the spread undefined.
 
 ## Numerics
 
+### What differs from ByteDance on the 7B fp16 path
+
+Checked in the code before patching anything (numz `4490bd1` paths under `src/`, ByteDance
+`e4de8c2` paths as in its repository), and confirmed by the `NUM_CHECK` probe on the full 7B
+model in the CLI:
+
+| Item | numz | ByteDance | Differs? | Run |
+|---|---|---|---|---|
+| Compute dtype, attention | bf16 when a bf16 matmul works (`optimization/compatibility.py:684-698`); the DiT under bf16 autocast (`core/generation_phases.py:718-724`); q, k, v cast to it before the kernel (`models/dit_7b/attention.py:117-121`). q and k arrive in fp32 (the norms and RoPE output fp32 under autocast), v in bf16 | explicit `.bfloat16()` (`models/dit/nablocks/mmsr_block.py:130-132`) under bf16 autocast (`projects/inference_seedvr2_7b.py:119`) | no: bf16 in both | `attn16` = GPUs without bf16 |
+| RoPE | angle table from the checkpoint's fp16 `rope.freqs` (128π stored as 402.0), angles computed in fp16 by rotary_embedding_torch, then cast to q's dtype (fp32) for the rotation (`models/dit_7b/rope.py:84-89`) | fp32 table and rotation (`models/dit/rope.py:84-88`, fp32 checkpoint) | yes: the table's precision | `rope` |
+| Input frames | 8-bit → fp32 → fp16 (`inference_cli.py:697`) → bf16, resize and normalisation in bf16 (`core/generation_phases.py:380-388`) | uint8 → fp32, resize and normalisation in fp32, bf16 at encode (`projects/inference_seedvr2_7b.py:228-244`) | yes | `prep` |
+| Weights | fp16 files, cast to bf16 per layer under autocast | fp32 `.pth`, cast under autocast | yes | `w32` |
+| VAE encode | posterior mode (`models/video_vae_v3/modules/attn_video_vae.py:1688`) | posterior sample (`models/video_vae_v3/modules/attn_video_vae.py:1305`) | yes | `vaes` |
+| Multiples of 16 | black padding, bottom and right, trimmed after decode (`data/image/transforms/divisible_crop.py:61-72`) | centre crop (`data/image/transforms/divisible_crop.py:36-39`) | yes | [Padding](#padding) |
+| TF32 | off (numz never calls the init that sets it) | on for matmul and cuDNN (`common/distributed/basic.py:66-68`) | yes, no effect: bit-identical | smoke test |
+| Conv3d bias | added separately by the Conv3d workaround (`models/video_vae_v3/modules/causal_inflation_lib.py:94-107`) | inside the convolution | yes, no effect: bit-identical with the workaround off | smoke test |
+| DiT norms | custom RMS/LayerNorm, fp32 output under autocast (`models/dit_7b/normalization.py:28-97`) | Apex fused norms, bf16 in and out | yes | not measured |
+| VAE decode | no autocast, norm casts removed (`models/video_vae_v3/modules/causal_inflation_lib.py:354-409`) | bf16 autocast, norm outputs cast back (`models/video_vae_v3/modules/causal_inflation_lib.py:330-367`) | yes | not measured |
+
+The sampler, CFG (off, one step), the timestep and the positive/negative text embeddings are the
+same (the embeddings are byte-identical files). The resize kernel is the same, torchvision's
+bicubic with antialias, and the targets agree for 16:9 sources.
+
+### Results
+
 Paired difference to the default, `none`: the range over the 4 clips, and how many clips are
 better (B) or worse (W); "–" = within everywhere.
 
