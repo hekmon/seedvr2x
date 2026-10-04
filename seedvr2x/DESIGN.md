@@ -721,11 +721,14 @@ compressed is the user's choice: afterwards, from the master, or during the run 
 
 - **FFV1 masters**, every frame a keyframe, per-slice CRCs, exact frame rate, from the float
   frames (no 8-bit step, bugs 09/19):
-  - `gbrp16le`: research and archive master, closest to the model
-  - `yuv420p10le`, BT.709, limited range, explicit conversion (zscale): the master handed to
-    sptenc. sptenc takes such a file as it is, without any conversion, which its MANUAL
-    recommends for tools that can write YUV. So the RGB→YUV conversion happens once, in the
-    tool that requires zscale, and exactly (white at 940).
+  - `yuv420p10le`, **the default** (the user's decision, 2026-10-04): BT.709, limited range,
+    explicit conversion (zscale). It is what sptenc and every encoder take. sptenc takes such
+    a file as it is, without any conversion, which its MANUAL recommends for tools that can
+    write YUV. So the RGB→YUV conversion happens once, in the tool that requires zscale, and
+    exactly (white at 940).
+    - With `gbrp16le` the default, that conversion would fall to whatever reads the master:
+      sptenc's swscale (white at 943), or the user's `--segment-cmd`. And a `gbrp16le` master
+      with `lab` takes 540–690 GiB per hour of 1080p, five times as much: impossible to keep.
     - This is sptenc's intended input, not a workaround. sptenc converts RGB sources with
       swscale (16-bit white at 943 instead of 940), a documented trade-off: zscale isn't in
       every ffmpeg build, and sptenc ships for any build.
@@ -735,6 +738,8 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     - The chroma is downsampled with zscale's bilinear, pinned, as `ffv1_out.py` does. That is
       the right kernel on its own merits: decimation wants a low-pass, not a sharp
       interpolator, which is why the decode, which interpolates, uses Catmull-Rom.
+  - `gbrp16le`, on request: the research and archive master, closest to the model, at its
+    full size (see Master sizes below).
 
   Validated with the [`ffv1_out.py` wrap](../research/docs/output.md): bit-exact round trip,
   tags checked by ffprobe. Our writers give a `yuv420p10le` bit-identical to its output. They
@@ -808,14 +813,15 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     - `--segment-cmd` outputs only get their frame count checked: their frames are the user's
       encoder's.
   - **Writer.** FFV1 by default. With `--segment-cmd`, the user's command runs once per
-    segment: it reads the segment, lossless and tagged, on stdin, and writes the file seedvr2x
+    segment: it reads the segment, lossless and tagged, on stdin, in the master's format
+    (`yuv420p10le` by default, so the encoder converts nothing), and writes the file seedvr2x
     names, e.g. `--segment-cmd 'ffmpeg -i - -c:v libx265 -crf 16 {out}'`. seedvr2x never
     parses the command and only checks the result's frame count. Disk use is then the
     compressed size, and a stop keeps every finished segment.
   - **Master sizes,** per hour of 1080p at 24000/1001, four times that at 4K: about 100–135
-    GiB in `yuv420p10le`, 540–690 GiB in `gbrp16le` with `lab` (milestone 5). `lab`'s float32
-    output fills the 16 bits, tens of thousands of distinct codes in a frame against 300–400
-    in numz's bf16 output, whose `gbrp16le` masters took 250–350 GiB
+    GiB in `yuv420p10le`, the default, and 540–690 GiB in `gbrp16le` with `lab` (milestone
+    5). `lab`'s float32 output fills the 16 bits, tens of thousands of distinct codes in a
+    frame against 300–400 in numz's bf16 output, whose `gbrp16le` masters took 250–350 GiB
     ([output.md](../research/docs/output.md) measured 2.97 MiB per frame). Rounding ours to
     bf16 would save 34–43%, for 8 significant bits.
   - **Rejected:** `--stream`, the output on stdout for a single compressor process. That
@@ -1042,7 +1048,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--compile_dit`, `--compile_vae` | chosen by the planner when memory allows; overridable |
 | `--cache_dit`, `--cache_vae`, `--chunk_size` | dropped: one long-running process, streaming by design |
 | `--seed` | kept (comparisons, reproducibility) |
-| `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`gbrp16le` / `yuv420p10le`) and 16-bit PNG |
+| `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
 | `--resolution`, `--max_resolution` | kept |
 | `--dit_model`, `--model_dir` | kept; models identified by hash, no silent deletion (bug 22) |
 | `--cuda_device` | one device per process |
