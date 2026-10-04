@@ -620,6 +620,65 @@ Ours:
 
 Validated against numz's `lab` on the metrics, not bit for bit (milestone 5).
 
+### Beyond numz's `lab`
+
+Milestone 5 checks that ours is at least as good as numz's. That is a floor, not the aim: the
+colour correction decides how faithful the output's colours are, and the measurements leave
+room.
+
+- **The gap.** On the full-reference clips, `lab` brings the low-frequency colour error to the
+  ground truth down by 37–55%, to a ΔE00 of 1.07–1.58 after a 4 px blur, but the input itself,
+  upscaled with Catmull-Rom, is at 0.6–0.7 ([numerics.md](../research/docs/numerics.md)). The
+  split replaces only what is coarser than about 30–60 px (σ ≈ 13 px), while the model's extra
+  saturation and colour drift sit finer
+  ([quality.md](../research/docs/quality.md#colour-correction)). The histogram matching then
+  corrects their distribution over the shot, not where they are.
+- **Tiles are part of it.** On 16–32 GB cards the VAE runs tiled, and a tile's damage is a
+  colour drift: each tile shifted uniformly, by up to 2 levels in the decode and 4 in the
+  encode at 512 px ([vram.md](../research/docs/vram.md#tiling)). The colour correction is what
+  removes it: tiled and untiled decodes, both through `lab`, came out 48.9 dB apart
+  ([quality.md](../research/docs/quality.md#vae-tiling-on-flat-areas)). The encode's tiles,
+  which drift more, were never measured through `lab`.
+  - So every variant is also scored on tiled runs, at the tile sizes of vram.md's recipes for
+    16, 24 and 32 GB cards (encode / decode: 1024 / 768, 1344 / 1024, untiled / 1280), on
+    the per-tile offsets left after correction, flat areas first.
+  - What's left of the drift sets how small the planner may make tiles: on the smallest
+    cards, and wherever smaller tiles would make room for `compile_vae`, which doubles the
+    VAE's memory.
+- **The aim:** colour and brightness as close to the source as the input holds them, at every
+  scale where it does, with the model's detail kept: no detail lost, no flicker, halo or
+  banding added.
+- **Candidates**, most promising first:
+  - Colour and brightness at different scales: the split in a luma-chroma space, chroma taken
+    from the input at a finer scale than luma. The eye resolves colour less finely, the drift
+    is in colour, and the model's work is mostly in brightness detail. The input's own chroma
+    sets the floor: a 4:2:0 source upscaled ×2 has a chroma sample every 4 output pixels.
+  - An edge-aware transfer (a guided filter steered by the output's luma), so that a finer
+    correction doesn't bleed colour across edges as a plain blur does.
+  - The scale following the upscale factor: 13 px of output is 6.5 source pixels at ×2, 3.3 at
+    ×4.
+  - The histogram step: whether it still adds anything after a finer split (on clip A,
+    `wavelet` alone gave ΔE 1.04 and `lab` 1.01). If it stays: jointly over a\* and b\* rather
+    than channel by channel, and the L\* weight (0.8 output + 0.2 matched, numz's constant,
+    never measured).
+  - OKLab rather than CIELAB, whose hues bend as chroma changes, in blues most: the model's
+    drift is toward blue.
+- **Protocol:** no model run per variant. The raw decodes (`none`, unclamped) and the
+  encoder's input are dumped once per clip and tiling (untiled, and the tiles above), and each
+  variant post-processes them, built on `runtime/colour.py` (ours, Apache-2.0) so that a
+  winner ports as it is.
+  - Clips: animation and live action, with the mild and the heavier degradation.
+  - Scores: ΔE00 after blurs of 1 to 16 px (where the error stays), PSNR-Y, LPIPS, DISTS and
+    Laplacian variance (detail kept), temporal error (flicker), colour fringes at strong edges,
+    CAMBI (banding brought back from the source), and milestone 2's boundary steps on clip B.
+  - Verdicts are paired against our `lab` and must exceed the seed spread, as in
+    numerics.md. Then the user's eyes, on crops of edges, skin, skies and flat areas.
+- **Constraints:** written from its own maths, never from StableSR's code (the clean room
+  holds). Its time and memory per 4K frame are recorded, since it runs in the decode's second
+  pass.
+- **Order:** measured once milestone 5 is accepted. A winner becomes an implementation step of
+  its own, and `test_lab.py`'s thresholds follow it.
+
 ## Output
 
 seedvr2x delivers the upscale losslessly and owns no encoder flags. How the output gets
@@ -1225,3 +1284,5 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
   per shot.
 - **4K and long windows:** the planner's limits on large outputs, where the DiT window is the
   constraint.
+- **Colour correction beyond numz's `lab`,** once milestone 5 is accepted: see
+  [Beyond numz's `lab`](#beyond-numzs-lab).
