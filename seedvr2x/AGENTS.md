@@ -102,6 +102,10 @@ uv run pytest
   milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames.
   Its reference, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how to make it are in
   its docstring.
+- `tests/test_lab.py` (GPU) holds `lab` to milestone 5 on the same input: at least as good as
+  numz's `lab` on the metrics that apply to one window without a ground truth, within DESIGN.md's
+  tolerances, and close to its output. Its reference, `numz_lab.mkv`, sits beside the
+  regression's; how to make it is in its docstring.
 
 ## Comments and documents
 
