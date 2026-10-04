@@ -3,11 +3,12 @@
 a second opinion from PySceneDetect, review candidates and statistics per threshold.
 
   scd_scores.py check SOURCE --out DIR [--synthetic]  # sptenc's own command vs the all-score pass
-  scd_scores.py score SOURCE --out DIR [--until SEC]  # one scdet pass: every frame's score
+  scd_scores.py score SOURCE --out DIR [--no-reinit]  # one scdet pass: every frame's score
   scd_scores.py pysd --out DIR [--range A:B]          # AdaptiveDetector + ContentDetector
   scd_scores.py pysd-check FILE --out DIR             # our PySceneDetect loop vs its own pipeline
   scd_scores.py analyse --out DIR [--name NAME]       # candidates, auto-classes, stats per threshold
   scd_scores.py activity --out DIR [--window 25]      # where a film is busiest (to pick a chunk)
+  scd_scores.py compare REF OTHER [--md OUT.md]       # one video scored twice (original vs segments)
   scd_scores.py summary DIR... [--labels INDEX.csv]   # tables across episodes (and label stats)
 
 SOURCE is a video file, a directory of segment files played in name order (an episode kept as
@@ -15,7 +16,8 @@ the segments of an earlier split), or @LIST (one file per line). Frames are numb
 decode order over the whole source: frame n of a segment list is the n-th frame of the
 concatenation. A cut at frame n means a new shot starts at n (scdet and PySceneDetect agree on
 this convention). Every decode is a plain sequential one (no seeking), video stream only,
--fps_mode passthrough (no frame dropped or repeated).
+-fps_mode passthrough (no frame dropped or repeated). Timecodes are the frames' presentation
+times relative to the first frame, as a player shows them.
 
 check: runs sptenc's own detection command on a single file (its filter chain, threshold and
 metadata key, the log parsed as sptenc parses it), then the all-score pass, and verifies that
@@ -29,7 +31,12 @@ print), every key printed for every frame: lavfi.scd.mafd, lavfi.scd.score, and 
 where the score reaches 10 (sptenc's detections). A segment list is decoded segment by segment
 into one raw pipe read by a single scdet, so the joins are scored like any frame (the first
 frame of a segment against the last one of the previous segment). Writes DIR/source.json,
-DIR/scdet.txt (the raw print) and DIR/scores.tsv (n, pts_time, mafd, score, t10).
+DIR/scdet.txt (the raw print) and DIR/scores.tsv (n, pts_time, mafd, score, t10). The print is
+checked against ffmpeg's own count of the frames it passed: when the stream's parameters change
+mid-way (a DVD whose colour description appears after a few frames), ffmpeg rebuilds the
+filtergraph, which restarts the metadata filter's frame counter, setpts' start and scdet, and
+reopens the print file; sptenc's command then numbers every later frame from 0 again.
+--no-reinit adds -reinit_filter 0 so that one filtergraph sees every frame.
 
 pysd: PySceneDetect's AdaptiveDetector and ContentDetector with their defaults, fed the same
 decoded frames as BGR, converted as its OpenCV backend converts them (swscale, bicubic flags,
@@ -56,6 +63,12 @@ are left out). Writes DIR/candidates.csv, DIR/stats.json, DIR/stats.md.
 
 activity: scdet activity along a scored source (local maxima per block of minutes), and the
 windows richest in doubtful-range local maxima: to pick a chunk of a long film.
+
+compare: the same video scored twice, e.g. an original and the re-encoded segments of an earlier
+split: the frame offset between them (found on the strong peaks), detections per threshold on
+the same frame, one frame apart or in one version only, score and mafd differences, held frames,
+bursts, and the reference's scores at the other version's segment joins (each join was a cut the
+splitter detected).
 
 summary: Markdown tables across episodes. --labels takes the review index (scd_review.py) with
 its label column filled (cut / flash / pan / fade / dissolve / other / not-a-cut) and adds,
@@ -106,11 +119,19 @@ def fmt_num(x):
     return ("%.6f" % x).rstrip("0").rstrip(".")
 
 
-def timecode(frame, fps):
-    s = float(Fraction(frame) / Fraction(fps))
+def hms(s):
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
     return f"{int(h)}:{int(m):02d}:{sec:06.3f}"
+
+
+def timecode(frame, fps, pts=None):
+    """Frame time as a player shows it: its presentation time (relative to the first frame) when
+    pts (the score pass's pts_time array) knows it, else frame / fps (they part when a stream's
+    declared rate differs from its timestamps, or frames are missing)."""
+    if pts is not None and 0 <= frame < len(pts) and not math.isnan(pts[frame]):
+        return hms(float(pts[frame]))
+    return hms(float(Fraction(frame) / Fraction(fps)))
 
 
 def score_band(x):
@@ -170,8 +191,8 @@ def source_files(spec):
 def probe(path):
     r = subprocess.run(
         [FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
-         "stream=codec_name,pix_fmt,width,height,r_frame_rate,avg_frame_rate,nb_frames,"
-         "color_space,color_range,field_order:format=duration", "-of", "json", path],
+         "stream=codec_name,pix_fmt,width,height,sample_aspect_ratio,r_frame_rate,avg_frame_rate,"
+         "nb_frames,color_space,color_range,field_order:format=duration", "-of", "json", path],
         capture_output=True, text=True, check=True)
     d = json.loads(r.stdout)
     if not d.get("streams"):
@@ -205,7 +226,8 @@ def describe_source(spec, pix_fmt=None):
         "avg_fps": p0.get("avg_frame_rate"), "codecs": sorted({p["codec_name"] for p in probes}),
         "pix_fmts": pix_fmts, "pipe_pix_fmt": pix_fmt or p0["pix_fmt"],
         "color_space": p0.get("color_space"), "color_range": p0.get("color_range"),
-        "field_order": p0.get("field_order"), "container_frames": nb,
+        "field_order": p0.get("field_order"), "sar": p0.get("sample_aspect_ratio"),
+        "container_frames": nb,
     }
 
 
@@ -276,16 +298,24 @@ def progress_frames(path):
     return frames
 
 
-def score_pass(src, out_txt, threads, until=None, t=SPTENC_T):
-    """Run scdet over the source; returns the frame count of each segment (None for a file)."""
+def score_pass(src, out_txt, threads, until=None, t=SPTENC_T, no_reinit=False):
+    """Run scdet over the source; returns the frame count of each segment (None for a file)
+    and ffmpeg's own count of the frames the filtergraph passed."""
     if src["kind"] == "file":
-        cmd = [FFMPEG, "-y", "-hide_banner", "-nostats", "-threads", str(threads), "-i", src["files"][0]]
+        prog = out_txt + ".progress"
+        cmd = [FFMPEG, "-y", "-hide_banner", "-nostats", "-threads", str(threads)]
+        if no_reinit:
+            cmd += ["-reinit_filter", "0"]
+        cmd += ["-i", src["files"][0]]
         if until:
             cmd += ["-t", str(until)]
-        cmd += ["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", scdet_vf(t, file=out_txt), "-f", "null", "-"]
+        cmd += ["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", scdet_vf(t, file=out_txt), "-progress", prog,
+                "-f", "null", "-"]
         log("scdet: " + " ".join(cmd))
         subprocess.run(cmd, check=True)
-        return None
+        frames = progress_frames(prog)
+        os.remove(prog)
+        return None, frames
     pix = src["pipe_pix_fmt"]
     cmd = [FFMPEG, "-y", "-hide_banner", "-nostats", "-f", "rawvideo", "-pix_fmt", pix,
            "-video_size", f"{src['width']}x{src['height']}", "-framerate", src["fps"], "-i", "pipe:0",
@@ -310,7 +340,7 @@ def score_pass(src, out_txt, threads, until=None, t=SPTENC_T):
             os.remove(prog)
     if rc:
         sys.exit(f"scdet ffmpeg exited with {rc}")
-    return counts
+    return counts, sum(counts)
 
 
 def parse_print(path):
@@ -389,12 +419,13 @@ def cmd_score(a):
         f"{src['pix_fmts']}")
     txt = os.path.join(a.out, "scdet.txt")
     t0 = time.time()
-    counts = score_pass(src, txt, a.threads, a.until)
+    counts, ff_frames = score_pass(src, txt, a.threads, a.until, no_reinit=a.no_reinit)
     secs = time.time() - t0
     rows = parse_print(txt)
     write_scores(rows, os.path.join(a.out, "scores.tsv"))
     src["frames"] = len(rows)
     src["until"] = a.until
+    src["no_reinit"] = a.no_reinit
     if counts is not None:
         start = 0
         src["segments"] = []
@@ -403,6 +434,11 @@ def cmd_score(a):
             start += c
         src["segment_frames_total"] = start
     chk = validate(rows, src["fps"])
+    chk["ffmpeg_frames"] = ff_frames
+    chk["print_has_every_frame"] = ff_frames == len(rows)
+    if ff_frames != len(rows):
+        log(f"WARNING: the print holds {len(rows)} frames, ffmpeg passed {ff_frames}: the filtergraph was "
+            "rebuilt mid-stream (its counter restarted); score again with --no-reinit")
     if counts is not None:
         chk["segments_sum_equals_frames"] = src["segment_frames_total"] == len(rows)
         cf = src["container_frames"]
@@ -732,7 +768,7 @@ def cmd_analyse(a):
         c["burst"] = int((s[lo:hi] >= BURST[1]).sum() - (s[f] >= BURST[1]))
         sure = c["scdet"] >= SURE_MIN and c["adaptive"] is not None and c["content"] is not None
         c["class"] = "sure" if sure else "doubtful"
-        c["timecode"] = timecode(f, fps)
+        c["timecode"] = timecode(f, fps, sc["pts_time"])
     name = a.name or os.path.basename(os.path.normpath(d))
     cols = ["frame", "timecode", "class", "scdet", "mafd", "prev", "next", "local_max", "scdet_lm",
             "adaptive", "content", "ad_ratio", "content_val", "join", "burst"]
@@ -750,8 +786,8 @@ def cmd_analyse(a):
     st = {
         "name": name, "source": src["spec"], "kind": src["kind"], "files": len(src["files"]),
         "fps": fps, "size": f"{src['width']}x{src['height']}", "frames_scored": n,
-        "range": [S, E], "range_tc": [timecode(S, fps), timecode(E, fps)], "frames": E - S,
-        "duration_s": round((E - S) / float(Fraction(fps)), 1),
+        "range": [S, E], "range_tc": [timecode(S, fps, sc["pts_time"]), timecode(E, fps, sc["pts_time"])],
+        "frames": E - S, "duration_s": round((E - S) / float(Fraction(fps)), 1),
         "joins_in_range": sum(1 for j in joins if S <= j < E),
         "pysd": bool(pysd),
         "checks": src.get("checks"),
@@ -946,6 +982,102 @@ def cmd_activity(a):
               f"{int(strong[w0 + win] - strong[w0])}  (frames {w0}..{w0 + win})")
 
 
+def local_peaks(s, floor):
+    left = np.concatenate(([np.inf], s[:-1]))
+    right = np.concatenate((s[1:], [-np.inf]))
+    return np.nonzero((s > left) & (s >= right) & (s >= floor))[0]
+
+
+def gap_hist(det):
+    g = np.diff(det)
+    return {"1": int((g == 1).sum()), "2": int((g == 2).sum()), "3": int((g == 3).sum()),
+            "4-11": int(((g >= 4) & (g <= 11)).sum()), ">=12": int((g >= 12).sum())}
+
+
+def cmd_compare(a):
+    ra, rb = load_scores(a.ref), load_scores(a.other)
+    sa, sb, ma, mb = ra["score"], rb["score"], ra["mafd"], rb["mafd"]
+    na, nb = len(sa), len(sb)
+    pa, pb = set(local_peaks(sa, a.peak).tolist()), local_peaks(sb, a.peak)
+    best, off = -1, 0
+    for d in range(-a.max_offset, a.max_offset + 1):  # other frame i is reference frame i + off
+        c = sum(1 for x in pb if x + d in pa)
+        if c > best:
+            best, off = c, d
+    lo, hi = max(0, -off), min(nb, na - off)
+    ib = np.arange(lo, hi)
+    ia = ib + off
+    xa, xb = sa[ia], sb[ib]
+    res = {"ref": a.ref, "other": a.other, "frames_ref": na, "frames_other": nb, "offset": off,
+           "overlap": len(ib), "peaks": {"floor": a.peak, "ref": len(pa), "other": len(pb), "matched": best}}
+
+    def dist(v):
+        return {"median": round(float(np.median(v)), 3), "p95": round(float(np.percentile(v, 95)), 3),
+                "p99": round(float(np.percentile(v, 99)), 3), "max": round(float(v.max()), 3)}
+
+    res["score_absdiff"] = dist(np.abs(xa - xb))
+    act = (xa >= 6) | (xb >= 6)
+    res["score_absdiff_where_either_ge6"] = dist(np.abs(xa - xb)[act]) if act.any() else None
+    res["mafd_absdiff"] = dist(np.abs(ma[ia] - mb[ib]))
+    res["held_frames_share"] = {"ref": round(float((ma[ia] < 0.5).mean()), 3),
+                                "other": round(float((mb[ib] < 0.5).mean()), 3)}
+    per_t = {}
+    for t in THRESHOLDS:
+        da, db = set(np.nonzero(xa >= t)[0].tolist()), set(np.nonzero(xb >= t)[0].tolist())
+        same = da & db
+        rest_a, rest_b = da - same, db - same
+        near = 0
+        for x in sorted(rest_b):
+            for y in (x - 1, x + 1):
+                if y in rest_a:
+                    rest_a.discard(y)
+                    near += 1
+                    break
+        per_t[f"{t:g}"] = {"ref": len(da), "other": len(db), "same_frame": len(same), "one_frame_apart": near,
+                           "only_ref": len(da) - len(same) - near, "only_other": len(db) - len(same) - near,
+                           "gaps_ref": gap_hist(np.array(sorted(da))), "gaps_other": gap_hist(np.array(sorted(db)))}
+    res["per_threshold"] = per_t
+    src = load_json(os.path.join(a.other, "source.json"))
+    joins = np.array([g["start"] for g in src.get("segments", [])[1:] if lo <= g["start"] < hi], int)
+    if len(joins):
+        ja, jb = sa[joins + off], sb[joins]
+        order = np.argsort(ja)
+        res["joins"] = {
+            "n": len(joins), "ref_min": round(float(ja.min()), 3), "other_min": round(float(jb.min()), 3),
+            "ref_below": {f"{t:g}": int((ja < t).sum()) for t in (4, 6, 8, 10, 14)},
+            "other_below": {f"{t:g}": int((jb < t).sum()) for t in (4, 6, 8, 10, 14)},
+            "absdiff": dist(np.abs(ja - jb)),
+            "other_higher_by_1": int((jb > ja + 1).sum()), "ref_higher_by_1": int((ja > jb + 1).sum()),
+            "lowest_in_ref": [(int(joins[i]), round(float(ja[i]), 3), round(float(jb[i]), 3)) for i in order[:12]],
+        }
+    lines = [f"# {os.path.basename(os.path.normpath(a.other))} against {os.path.basename(os.path.normpath(a.ref))}",
+             "", f"Frames: reference {na}, other {nb}; other frame i = reference frame i {off:+d}; "
+             f"{best} of the other's {len(pb)} peaks >= {a.peak:g} on a reference peak (reference: {len(pa)}).",
+             f"Score |difference| per frame: {res['score_absdiff']}; where either scores >= 6: "
+             f"{res['score_absdiff_where_either_ge6']}; mafd: {res['mafd_absdiff']}; held frames (mafd < 0.5): "
+             f"{res['held_frames_share']}.", "",
+             "| T | reference | other | same frame | 1 frame apart | only reference | only other | "
+             "gaps 1/2/3/4-11/>=12 reference | other |", "|---:|---:|---:|---:|---:|---:|---:|---|---|"]
+    for t, v in per_t.items():
+        g1 = "/".join(str(x) for x in v["gaps_ref"].values())
+        g2 = "/".join(str(x) for x in v["gaps_other"].values())
+        lines.append(f"| {t} | {v['ref']} | {v['other']} | {v['same_frame']} | {v['one_frame_apart']} | "
+                     f"{v['only_ref']} | {v['only_other']} | {g1} | {g2} |")
+    if "joins" in res:
+        j = res["joins"]
+        lines += ["", f"Segment joins ({j['n']}): reference scores below 4/6/8/10/14: "
+                  f"{'/'.join(str(x) for x in j['ref_below'].values())} (min {j['ref_min']}); the other's: "
+                  f"{'/'.join(str(x) for x in j['other_below'].values())} (min {j['other_min']}); |difference| "
+                  f"{j['absdiff']}; other higher by > 1: {j['other_higher_by_1']}, reference higher by > 1: "
+                  f"{j['ref_higher_by_1']}. Lowest in the reference (join, reference, other): {j['lowest_in_ref']}"]
+    md = "\n".join(lines) + "\n"
+    print(md)
+    if a.md:
+        with open(a.md, "w", encoding="utf-8") as f:
+            f.write(md)
+        save_json(res, os.path.splitext(a.md)[0] + ".json")
+
+
 def cmd_summary(a):
     sts = [load_json(os.path.join(d, "stats.json")) for d in a.dirs]
     lab = label_stats(a.labels) if a.labels else None
@@ -970,6 +1102,8 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--until", type=float, help="stop after this many seconds")
     p.add_argument("--pix-fmt", help="raw pipe pixel format for segment lists (default: the segments')")
+    p.add_argument("--no-reinit", action="store_true",
+                   help="-reinit_filter 0: one filtergraph for every frame even if the stream's parameters change")
     p.add_argument("--threads", type=int, default=16)
     p = sub.add_parser("pysd")
     p.add_argument("--out", required=True)
@@ -994,13 +1128,19 @@ def main():
     p.add_argument("--skip-head", type=float, default=5.0, help="minutes left out at the start")
     p.add_argument("--skip-tail", type=float, default=10.0, help="minutes left out at the end (credits)")
     p.add_argument("--top", type=int, default=8)
+    p = sub.add_parser("compare")
+    p.add_argument("ref", help="scored directory of the reference (the original)")
+    p.add_argument("other", help="scored directory of the other version (e.g. its segments)")
+    p.add_argument("--peak", type=float, default=20.0, help="peak floor for the offset search")
+    p.add_argument("--max-offset", type=int, default=500)
+    p.add_argument("--md", help="write the tables there (and the figures to the same name .json)")
     p = sub.add_parser("summary")
     p.add_argument("dirs", nargs="+")
     p.add_argument("--labels", help="review index CSV with the label column filled")
     p.add_argument("--md", help="also write the tables to this file")
     a = ap.parse_args()
     {"check": cmd_check, "score": cmd_score, "pysd": cmd_pysd, "pysd-check": cmd_pysd_check,
-     "analyse": cmd_analyse, "activity": cmd_activity, "summary": cmd_summary}[a.cmd](a)
+     "analyse": cmd_analyse, "activity": cmd_activity, "compare": cmd_compare, "summary": cmd_summary}[a.cmd](a)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-03 23:10 CEST
+Last update: 2026-10-04 04:51 CEST
 
 ## 0. Setup
 
@@ -22,8 +22,12 @@ Last update: 2026-10-03 23:10 CEST
       validated on known cases (`fr_clips.py`, `fr_metrics.py`); VMAF identical to `sptenc vmaf`
       frame for frame. Four clips so far: clean digital anime, grainy cel anime, dark anime,
       bright flat-colour cartoon (web source, more compressed)
-- [ ] Samples from the user: live action (grainy film, clean digital), HEVC with open GOPs,
-      MPEG-2, an anamorphic DVD and a telecined one
+- [~] Samples from the user: two live-action Blu-rays (both with film grain, close to the grainy
+      cel film's), a bright anime episode, an NTSC DVD episode (16:9 anamorphic, declared interlaced;
+      an inverse telecine leaves half the frames combed, so interlaced video), the original of the
+      dark anime episode; two 4K remasters on their way (HEVC with open GOPs?). No broadcast TS,
+      no clean digital live action yet. Running on them: full-reference clips (question 1), cuts
+      (question 2), scdet passes (question 3), seek tests (question 4)
 
 ## 1. Numerics and input preparation
 
@@ -80,6 +84,13 @@ temporal regression.
       +0.26 dB; the sharper kernels gain a little on the softer input (+0.16 to +0.26 dB),
       beyond the spread on the grainy clip only
 - [x] Reflect then black on the letterboxed clip: +0.29 dB PSNR-Y, letterbox kept black
+- [x] Three more clips (two grainy live-action films, a bright anime; 27 runs). On live action
+      the perceptual metrics favour the model over bicubic (LPIPS 0.173 vs 0.266, DISTS 0.087 vs
+      0.107), PSNR, VMAF, colour and temporal error still bicubic. ByteDance's numerics as a whole
+      bring slightly better low-frequency colour on all 3 (ΔE00 −0.05 to −0.09), as the fp16 decode
+      does on all 8 clips. Kernels: antialias off worse on 7 of 7 clips; the zimg kernels cost
+      colour and flicker on the fast live-action clip: keep numz's bicubic. Padding confirmed. The
+      model restores about half of the source's film grain (1.75 → 0.93–0.98 on the fast clip)
 - [x] The combined choice, checked once: numz's numerics + bicubic with antialias + reflect then
       black is the `reflect+black+16` run above
 - [x] Doc ([docs/numerics.md](docs/numerics.md)) + decision briefs (numerics and input preparation,
@@ -117,6 +128,10 @@ temporal regression.
       frames' sharpness (deficit −47% → −15%), P = 8 does no better; ≈ 13 s per shot, +2–8% of
       GPU time per hour. Whether the sharpness step after a cut shows: for the user's eyes (review
       clips ready)
+- [x] Three more cuts (bright anime, fast and slow live action; 21 runs): the conclusions hold.
+      A miss costs 5–31 dB·frames over the next shot's first 8 frames on 4 of 6 cuts (about 0 on
+      the clean anime and colour cuts), up to 12% ghost in its first frame, measurable for up to 17
+      frames; prepending loses 0.6–2.8 dB of frame 0's lead on 7 of 11 shots
 - [~] Decision brief: shared with question 3, waiting for its labels
 
 ## 3. Scene detection
@@ -126,7 +141,15 @@ temporal regression.
       cel film, 25 min of a clean digital anime film, a 720p anime episode. Live action when it arrives
 - [x] Second opinion (PySceneDetect, frame-aligned with scdet); review sheets: 61 pages, 848
       candidates, a weighted sample by score band so partial labels still give estimates
-- [ ] Review of the sheets by the user (waiting)
+- [x] New sources: the original of the dark anime episode (identical scores to its segments,
+      2 frames apart), a bright anime episode, 25 minutes of each live-action film, the DVD
+      episode (for the record). Live action shows no bursts, but scdet misses about half the cuts
+      PySceneDetect finds there (dark, low-contrast shots); the bright anime's very short shots
+      are mostly real (text-card flash cuts). 45 more review pages
+- [x] Pipeline finding: a filter-graph rebuild mid-stream (the DVD's colour description appears at
+      frame 14) restarts the frame counter sptenc reads cut indices from, so every later cut comes
+      out 14 frames early; `-reinit_filter 0` fixes it
+- [ ] Review of the sheets by the user (waiting; 1,476 rows now, partial labels fine)
 - [~] Per threshold 8–14: hits, false positives by kind (flash, pan, fade…), misses, shot lengths.
       Unlabelled so far: on action anime, scdet fires in bursts on new drawings after held frames
       and on effects (at threshold 10, half the shots of the dark anime episode are under 0.5 s),
@@ -145,7 +168,15 @@ temporal regression.
       their parameter sets). Recommended: a first-pass index of pts and picture hashes, seek to a
       keyframe at least 1 GOP and 1 s early, select by pts, verify the hashes, fall back
       (≈ 0.15 s per access on Blu-ray, ≈ 1 s on long-GOP HEVC)
-- [ ] Real DVD (VOB), broadcast TS and open-GOP HEVC files (waiting for samples)
+- [x] Five more real sources: a DVD episode (MPEG-2 in MKV, closed GOPs), two anime and two
+      film Blu-rays. Seeking one GOP early and checking by hash still holds everywhere; three
+      additions: flag frames the decoder reports errors on (damaged frames only match from the
+      start), count frames in the reader, never with ffmpeg's `select n` (a filter-graph rebuild
+      restarts it: 14 frames late on the DVD), and take output timing from the source's
+      timestamps, never the declared rate (a film declared 24 fps runs at 23.976 by its
+      timestamps, which match its audio: 5.9 s apart at the end). Invalid entry points on 2 of 7
+      real H.264 sources, so the content check is required
+- [ ] Real VOB, broadcast TS, open-GOP MPEG-2 and open-GOP HEVC (the 4K remasters may cover HEVC)
 - [x] Doc ([docs/seeking.md](docs/seeking.md)) + decision brief (2026-10-02)
 
 ## 5. Decode resume granularity

@@ -4,7 +4,11 @@ frames c-2, c-1, c, c+1 (a real cut falls between c-1 and c, marked red), the sc
 PySceneDetect's verdicts; an index (CSV and Markdown) with an empty label column.
 
   scd_review.py sheets DIR... --out REVIEW [--rows 15] [--width 320] [--cap 120] [--sure-frac 0.1]
-  scd_review.py index REVIEW         # merge REVIEW/*/index.csv into REVIEW/index.{csv,md}
+  scd_review.py index REVIEW         # add REVIEW/*/index.csv to REVIEW/index.{csv,md}
+
+An episode already in REVIEW is skipped (--force makes it again). The combined index is only
+ever appended to: the episodes it lacks are added at its end, its existing rows (and the labels
+written in them) are left byte for byte, in the delimiter and line ends the file already uses.
 
 Selection, per episode: a random --sure-frac of the sure candidates (to check the auto-class),
 and every doubtful one up to --cap. Above it, --max-rows doubtful rows at most, sampled by
@@ -21,9 +25,10 @@ labels into estimates, even when only part of the rows are labelled. Sampling is
 
 Thumbnails come from one sequential decode of the source, the score pass's: same files, frames
 counted from 0 in decode order (ffmpeg's trim filter keeps the span from the first frame needed
-to the last; no seeking), scaled to --width with the BT.709 matrix (--matrix). As a check of
-the frame indexing, the luma change between the thumbnails of each sampled sure cut must be
-largest between c-1 and c.
+to the last; no seeking), scaled to --width at the display aspect (the stream's sample aspect
+ratio: anamorphic sources are shown unsqueezed, interlaced ones as decoded) with the BT.709
+matrix (--matrix). As a check of the frame indexing, the luma change between the thumbnails of
+each sampled sure cut must be largest between c-1 and c.
 
 hints.csv (per episode, kept apart from the sheets and the index so as not to steer the labels):
 mean absolute luma changes between the thumbnails (before = c-2 to c-1, jump = c-1 to c, after =
@@ -39,19 +44,22 @@ Needs ffmpeg, numpy and Pillow; scd_scores.py next to it.
 """
 import argparse
 import csv
+import io
 import math
 import os
 import random
 import subprocess
 import sys
+import time
 from collections import defaultdict
+from fractions import Fraction
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scd_scores import (LABELS, decode_cmd, load_json, log, pysd_agreement, read_full,  # noqa: E402
-                        score_band, segments_of, timecode)
+from scd_scores import (LABELS, decode_cmd, load_json, load_scores, log, pysd_agreement,  # noqa: E402
+                        read_full, score_band, segments_of, timecode)
 
 INDEX_COLS = ["page", "row", "episode", "frame", "timecode", "class", "stratum", "stratum_size", "weight",
               "selection", "scdet", "mafd", "prev", "next", "burst", "adaptive", "content", "ad_ratio",
@@ -145,7 +153,12 @@ def select_rows(cands, a, rng):
 def grab(src, frames, width, matrix, threads):
     """Thumbnails {frame: PIL image} of the given frames, from sequential decodes."""
     w, h = src["width"], src["height"]
-    th = int(round(h * width / w / 2)) * 2
+    try:
+        sar = Fraction(*(int(x) for x in str(src.get("sar") or "1:1").split(":")))
+    except (ValueError, ZeroDivisionError, TypeError):
+        sar = Fraction(1)
+    sar = sar if sar > 0 else Fraction(1)
+    th = int(round(h * width / float(w * sar) / 2)) * 2
     size = width * th * 3
     conv = (f"scale={width}:{th}:flags=bicubic:in_color_matrix={matrix}:in_range=tv:out_range=pc,"
             "format=rgb24")
@@ -230,7 +243,7 @@ def verdict(c, key, metric, nd):
     return f"no  ({metric} {fmt(c['ad_ratio'] if key == 'adaptive' else c['content_val'], nd)})"
 
 
-def draw_pages(name, rows, thumbs, tsize, fps, out_dir, per_page, note):
+def draw_pages(name, rows, thumbs, tsize, fps, pts, out_dir, per_page, note):
     tw, th = tsize
     f_lab, f_cap, f_head = font(15), font(13), font(18)
     label_w, gap, mid_gap, margin, cap_h, pad = 330, 6, 14, 10, 20, 14
@@ -272,7 +285,7 @@ def draw_pages(name, rows, thumbs, tsize, fps, out_dir, per_page, note):
                 else:
                     dr.rectangle([x, y, x + tw, y + th], fill=(128, 128, 128))
                 tag = ("c-2", "c-1", "c", "c+1")[k]
-                dr.text((x + 2, y + th + 2), f"{tag}  {f}  {timecode(f, fps)}" if f >= 0 else tag,
+                dr.text((x + 2, y + th + 2), f"{tag}  {f}  {timecode(f, fps, pts)}" if f >= 0 else tag,
                         fill="black", font=f_cap)
                 x += tw + (mid_gap if k == 1 else gap)
         img.save(os.path.join(out_dir, f"page_{p:03d}.jpg"), quality=85, optimize=True)
@@ -297,11 +310,18 @@ def write_index(rows, csv_path, md_path, title, note):
                 "(scd_scores.py summary --labels).\n\n")
         if note:
             f.write(note + "\n\n")
-        cols = ["page", "row", "episode", "frame", "timecode", "class", "scdet", "adaptive", "content",
-                "join", "stratum", "weight", "label"]
-        f.write("| " + " | ".join(cols) + " |\n|" + "---|" * len(cols) + "\n")
-        for c in rows:
-            f.write("| " + " | ".join(str(index_value(c, k)) for k in cols) + " |\n")
+        f.write(md_table(rows))
+
+
+MD_COLS = ["page", "row", "episode", "frame", "timecode", "class", "scdet", "adaptive", "content", "join",
+           "stratum", "weight", "label"]
+
+
+def md_table(rows):
+    out = "| " + " | ".join(MD_COLS) + " |\n|" + "---|" * len(MD_COLS) + "\n"
+    for c in rows:
+        out += "| " + " | ".join(str(index_value(c, k)) for k in MD_COLS) + " |\n"
+    return out
 
 
 def index_value(c, k):
@@ -318,6 +338,10 @@ def cmd_sheets(a):
         src = load_json(os.path.join(d, "source.json"))
         name = st["name"]
         fps = src["fps"]
+        ep_dir = os.path.join(a.out, name)
+        if os.path.exists(os.path.join(ep_dir, "index.csv")) and not a.force:
+            log(f"{name}: already in {a.out}, skipped (--force makes it again)")
+            continue
         cands = load_candidates(d)
         rng = random.Random(f"{a.seed}:{name}")
         rows, note = select_rows(cands, a, rng)
@@ -343,7 +367,8 @@ def cmd_sheets(a):
                 bad += 1
                 log(f"  sure cut {c['frame']}: thumbnail changes {['%.1f' % x for x in dif]}")
         note += f"; thumbnail check on sampled sure cuts: {ok} aligned, {bad} not"
-        ep_dir = os.path.join(a.out, name)
+        if a.note:
+            note += f"; {a.note}"
         os.makedirs(ep_dir, exist_ok=True)
         kinds = ("step", "transient", "motion", "tiny", "")
         tally = defaultdict(lambda: defaultdict(float))
@@ -376,7 +401,7 @@ def cmd_sheets(a):
         for old in os.listdir(ep_dir):
             if old.startswith("page_") and old.endswith(".jpg"):
                 os.remove(os.path.join(ep_dir, old))
-        n_pages = draw_pages(name, rows, thumbs, tsize, fps, ep_dir, a.rows, note)
+        n_pages = draw_pages(name, rows, thumbs, tsize, fps, load_scores(d)["pts_time"], ep_dir, a.rows, note)
         note = f"{len(rows)} rows on {n_pages} pages: {note}"
         with open(os.path.join(ep_dir, "note.txt"), "w", encoding="utf-8") as f:
             f.write(note + "\n")
@@ -386,21 +411,57 @@ def cmd_sheets(a):
     merge_index(a.out)
 
 
+def episode_rows(review, name):
+    with open(os.path.join(review, name, "index.csv"), newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    q = os.path.join(review, name, "note.txt")
+    note = ""
+    if os.path.isfile(q):
+        with open(q, encoding="utf-8") as f:
+            note = f"- {name}: {f.read().strip()}"
+    return rows, note
+
+
 def merge_index(review):
+    """Create REVIEW/index.{csv,md}, or append the episodes they lack; never rewrite a row."""
+    names = sorted(n for n in os.listdir(review) if os.path.isfile(os.path.join(review, n, "index.csv")))
+    csv_path, md_path = os.path.join(review, "index.csv"), os.path.join(review, "index.md")
+    if not os.path.exists(csv_path):
+        rows, notes = [], []
+        for n in names:
+            r, note = episode_rows(review, n)
+            rows += r
+            notes.append(note)
+        write_index(rows, csv_path, md_path, "Scene-cut review: all episodes", "\n".join(notes))
+        log(f"index: {len(rows)} rows from {len(names)} episodes in {csv_path} and index.md")
+        return
+    with open(csv_path, "rb") as f:
+        raw = f.read()
+    text = raw.decode("utf-8-sig")
+    first = text.splitlines()[0] if text else ""
+    delim = ";" if first.count(";") > first.count(",") else ","
+    eol = "\r\n" if b"\r\n" in raw[:65536] else "\n"
+    header = next(csv.reader([first], delimiter=delim)) if first else INDEX_COLS
+    present = {r.get("episode") for r in csv.DictReader(io.StringIO(text), delimiter=delim)}
+    new = [n for n in names if n not in present]
+    if not new:
+        log(f"index: {csv_path} already lists every episode, nothing appended")
+        return
     rows, notes = [], []
-    for name in sorted(os.listdir(review)):
-        p = os.path.join(review, name, "index.csv")
-        if not os.path.isfile(p):
-            continue
-        with open(p, newline="", encoding="utf-8") as f:
-            rows += list(csv.DictReader(f))
-        q = os.path.join(review, name, "note.txt")
-        if os.path.isfile(q):
-            with open(q, encoding="utf-8") as f:
-                notes.append(f"- {name}: {f.read().strip()}")
-    write_index(rows, os.path.join(review, "index.csv"), os.path.join(review, "index.md"),
-                "Scene-cut review: all episodes", "\n".join(notes))
-    log(f"index: {len(rows)} rows from {len(notes)} episodes in {review}/index.csv and index.md")
+    for n in new:
+        r, note = episode_rows(review, n)
+        rows += r
+        notes.append(note)
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        if raw and not raw.endswith(b"\n"):
+            f.write(eol)
+        w = csv.writer(f, delimiter=delim, lineterminator=eol)
+        for r in rows:
+            w.writerow([r.get(k, "") for k in header])
+    with open(md_path, "a", encoding="utf-8") as f:
+        f.write(f"\n## Added {time.strftime('%Y-%m-%d')}: {', '.join(new)}\n\n" + "\n".join(notes) +
+                "\n\n" + md_table(rows))
+    log(f"index: {len(rows)} rows of {len(new)} episodes ({', '.join(new)}) appended to {csv_path} and index.md")
 
 
 def main():
@@ -422,6 +483,8 @@ def main():
     p.add_argument("--seed", default="1")
     p.add_argument("--matrix", default="bt709")
     p.add_argument("--threads", type=int, default=16)
+    p.add_argument("--note", help="added to the episodes' notes in the indexes")
+    p.add_argument("--force", action="store_true", help="make the sheets of an episode already reviewed again")
     p = sub.add_parser("index")
     p.add_argument("review")
     a = ap.parse_args()

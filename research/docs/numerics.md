@@ -8,40 +8,57 @@
 > paired statistics), for the "Numerics" question in
 > [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). SeedVR2 `4490bd1`, 7B fp16, `flash_attn_2`,
 > one batch of 45 frames, 1080p (one 720p test), `--color_correction none`, with `lab` rendered
-> from the same run. Four animated clips, and a fifth (a bright sky) for the VAE decode
-> precision; live action is not measured yet.
+> from the same run. Four animated clips, a fifth (a bright sky) for the VAE decode precision,
+> and three more for [live action and a bright anime](#live-action-and-a-bright-anime): two
+> letterboxed live-action films with grain, and a bright anime.
 
-In short (4 animated clips of 45 frames, a ×2 upscale of a mildly degraded input to 1080p; every
-variant paired with numz's default at the same seed, and judged against the spread of 3 seeds):
+In short (4 animated clips of 45 frames, and for parts of it 4 more: a bright sky, two
+letterboxed live-action films with grain, a bright anime; a ×2 upscale of a mildly degraded input
+to 1080p; every variant paired with numz's default at the same seed, and judged against the spread
+of 3 seeds):
 
 - **SeedVR2 re-renders the picture: a plain bicubic upscale is closer to the source on every
-  fidelity metric.** numz's default lands at PSNR-Y 27.1–32.1 dB, VMAF 51–65 and a
+  pixel-wise metric.** numz's default lands at PSNR-Y 27.1–32.1 dB, VMAF 51–65 and a
   low-frequency ΔE00 of 1.8–2.6, where a Catmull-Rom upscale of the same input gets 32.2–43.2 dB,
-  83–92 and 0.6–0.7; LPIPS is worse on 3 of 4 clips. Given the ground truth itself as input, the
-  model moves it as far (25.4–30.4 dB, ΔE00 2.4–3.5). Registration is not the cause (shifts
-  ≤ 0.12 px, every frame matches its own): the model redraws texture, and its mean brightness is
-  off by −0.7 to +6 levels, changing from frame to frame (−6.9 to +7.6 on the ground truth
-  itself). These metrics compare variants, paired and against the seed spread; they don't rate
-  the model.
-- **The seed is the noise floor:** 3 seeds of the default spread by 0.09–0.47 dB PSNR-Y,
-  0.0002–0.018 LPIPS and 0.3–3.3 VMAF, depending on the clip.
-- **ByteDance's numerics change nothing measurable:** float32 RoPE angles, VAE posterior
-  sampling, a float32 input chain, the float32 weights, bfloat16 DiT norms, a VAE decode under
-  bfloat16 autocast, and all of them together stay within the seed spread on all 4 clips for
+  83–92 and 0.6–0.7; LPIPS is worse on 3 of 4 animated clips. On live action the perceptual
+  metrics side with the model (LPIPS 0.17 against 0.27 and 0.087 against 0.107, DISTS likewise)
+  while PSNR-Y (−6.8 to −7.1 dB), VMAF, colour and temporal error still side with bicubic: the
+  model redraws grain and detail of the right kind at the wrong place. Given the ground truth
+  itself as input (animated clips), the model moves it as far (25.4–30.4 dB, ΔE00 2.4–3.5).
+  Registration is not the cause (shifts ≤ 0.12 px, every frame matches its own): the model
+  redraws texture, and its mean brightness is off by −0.7 to +6 levels, changing from frame to
+  frame (−6.9 to +7.6 on the ground truth itself). These metrics compare variants, paired and
+  against the seed spread; they don't rate the model.
+- **The seed is the noise floor:** 3 seeds of the default spread by 0.03–0.51 dB PSNR-Y,
+  0.0001–0.018 LPIPS and 0.13–5.5 VMAF, depending on the clip (5.5: live-vfx's flickering light).
+- **ByteDance's numerics change little:** float32 RoPE angles, VAE posterior sampling, a
+  float32 input chain, the float32 weights, bfloat16 DiT norms, a VAE decode under bfloat16
+  autocast, and all of them together stay within the seed spread on all 4 animated clips for
   PSNR, SSIM, LPIPS, DISTS, VMAF and temporal error (|ΔPSNR-Y| ≤ 0.14 dB, |ΔVMAF| ≤ 1.1), with or
   without `lab`; on anime-clean they move the output by 0.1–0.5 levels on average, a seed by
-  1.9. So does float16 attention, the path of GPUs without bfloat16 (|ΔPSNR-Y| ≤ 0.06 dB).
+  1.9. So does float16 attention, the path of GPUs without bfloat16 (|ΔPSNR-Y| ≤ 0.06 dB). On
+  the live-action and bright-anime clips all of them together (`parity`) move slightly toward
+  the GT: low-frequency colour on 3 of 3 (ΔE00 lf −0.05 to −0.09), temporal error on both
+  live-action clips (−0.07 and −0.17), less after `lab`.
 - **numz's bfloat16 decode costs colour, not banding.** The VAE decodes in bfloat16 and numz
   normalises in bfloat16: its 16-bit masters hold at most 129 codes per channel from mid-grey
   up, one 8-bit level apart. Yet CAMBI finds no banding in any output (≤ 0.004, a bright sky
   clip included): the model's rendering dithers the steps. Decoding in float16 (or float32, the
-  same picture 0.02 levels apart) brings low-frequency colour closer to the source on 5 of 5
-  clips (ΔE00 lf −0.05 to −0.09); float16 costs nothing and never overflowed (largest
-  activation 19,088 of 65,504), float32 doubles the decode's memory. Recommended: float32 after
-  the decoder (free) and a float16 decode with a non-finite check.
-- **The resize kernel is second order:** zimg spline36 stays within the spread everywhere,
-  lanczos is better on the grainy clip only (+0.24 dB, LPIPS −0.005), and torchvision's bicubic
-  without antialiasing adds a little low-frequency colour error and flicker on 4 of 4 clips.
+  same picture 0.02 levels apart) brings low-frequency colour closer to the source on 8 of 8
+  clips (ΔE00 lf −0.05 to −0.09); float16 costs at most a little LPIPS (+0.0003 to +0.0024 on 3
+  of 8 clips) and never overflowed (largest activation 19,088 of 65,504), float32 doubles the
+  decode's memory. Recommended: float32 after the decoder (free) and a float16 decode with a
+  non-finite check.
+- **The resize kernel is second order:** torchvision's bicubic without antialiasing adds a
+  little low-frequency colour error and flicker on 7 of 7 clips (live-slow: every metric worse).
+  The sharper zimg kernels help a little on some grainy or detailed clips (lanczos on the
+  grainy anime clip +0.24 dB, LPIPS −0.005; both on live-slow, VMAF +0.2 to +0.3) but add
+  low-frequency colour error and flicker on the fast live-action clip (lanczos: temporal error
+  +0.11, ΔE00 lf +0.05; spline36 half that). numz's antialiased bicubic stays a sound default;
+  spline36 only where the pipeline resizes with zimg anyway.
+- **Film grain comes back at half strength:** on the grainy live-action clip the output holds
+  0.93–0.98 levels of grain against the source's 1.75 and the degraded input's 0.45 (std of the
+  high-pass luma in the smoothest 30% of the picture), whatever the variant, `lab` or not.
 - **numz's black padding is both a defect and an anchor.** At 1080p numz pads 8 black rows: the
   bottom 16 rows lose 3–10 dB against the rest of the frame. Padding without black (reflect,
   replicate, mid grey) repairs that band, but it, and no padding at all (a crop to 1072 rows),
@@ -73,9 +90,9 @@ source than a change of seed does.
 
 ### Clips
 
-Single shots of 45 frames from 1080p 8-bit 4:2:0 sources (BT.709, limited range, 23.976 fps),
-extracted by decoding from the start and counting frames. Statistics of the ground truth (Y on
-the 8-bit scale):
+Single shots of 45 frames from 1080p 8-bit 4:2:0 sources (BT.709, limited range, 23.976 fps;
+live-slow 24 fps, live-vfx's source untagged and read as BT.709), extracted by decoding from the
+start and counting frames. Statistics of the ground truth (Y on the 8-bit scale):
 
 | Clip | Content | Mean Y | Near black (Y < 10) | Motion (mean \|ΔY\| per frame) | Detail (Laplacian variance) |
 |---|---|---|---|---|---|
@@ -84,6 +101,12 @@ the 8-bit scale):
 | anime-dark | dark anime | 53 | 6.8% | 12.3 | 12 |
 | cartoon-bright | bright cartoon | 163 | 0.1% | 17.1 | 277 |
 | anime-sky | bright sky and clouds, digital anime, slow pan ([VAE decode precision](#vae-decode-precision) only) | 216 | 0.0% | 3.4 | 8 |
+| live-vfx | live action with VFX, fast: a soldier's face, flying debris, flickering light; film grain; letterboxed (140 black rows at the top and the bottom) | 78 | 26.0% | 15.3 | 86 |
+| live-slow | live action from a slow film: people before a sunlit window grille, camera move; film grain; letterboxed (131 black rows at the top, 132 at the bottom) | 88 | 24.4% | 20.1 | 100 |
+| anime-bright | bright anime: a character on white, line art and credit text (an opening sequence) | 174 | 5.7% | 20.2 | 237 |
+
+The last three are measured in [Live action and a bright anime](#live-action-and-a-bright-anime)
+with a subset of the variants; their verdicts are also rows of the tables below.
 
 ### Ground truth, inputs and runs
 
@@ -165,17 +188,32 @@ it under 0.43 levels on average.
 | cartoon-bright | default | 27.13 | 0.931 | 0.080 | 0.100 | 65.3 | 2.59 | 7.42 |
 | | `ident` | 25.36 | 0.920 | 0.100 | 0.107 | 55.1 | 3.50 | 9.01 |
 | | bicubic | 32.23 | 0.955 | 0.118 | 0.085 | 82.7 | 0.63 | 3.92 |
+| live-vfx | default | 31.75 | 0.927 | 0.173 | 0.157 | 67.6 | 2.06 | 5.48 |
+| | bicubic | 38.55 | 0.951 | 0.266 | 0.202 | 85.4 | 0.61 | 2.07 |
+| live-slow | default | 28.51 | 0.920 | 0.087 | 0.074 | 75.2 | 1.84 | 7.97 |
+| | bicubic | 35.65 | 0.970 | 0.107 | 0.104 | 90.3 | 0.61 | 2.60 |
+| anime-bright | default | 25.12 | 0.932 | 0.082 | 0.083 | 69.6 | 2.16 | 9.42 |
+| | bicubic | 32.16 | 0.968 | 0.080 | 0.067 | 85.5 | 0.87 | 4.07 |
 
-- **The model is further from the source than bicubic** on every clip and metric but LPIPS on
-  cartoon-bright: 5.1 to 12.0 dB of PSNR-Y, 17 to 32 points of VMAF, ΔE00 2.7 to 4.1 times
-  higher, temporal error 1.9 to 3.6 times. The windows where it departs most from the baseline show redrawn
-  lines and texture (review crops `bicubic-<clip>-max-*`: mean |ΔY| 12–16 levels against the GT
-  where the baseline has 1.4–6.5).
+- **The model is further from the source than bicubic** on every animated clip and metric but
+  LPIPS on cartoon-bright: 5.1 to 12.0 dB of PSNR-Y, 16 to 32 points of VMAF, ΔE00 2.5 to 4.1
+  times higher, temporal error 1.9 to 3.6 times. The windows where it departs most from the
+  baseline show redrawn lines and texture (review crops `bicubic-<clip>-max-*`: mean |ΔY| 12–16
+  levels against the GT where the baseline has 1.4–6.5).
+- **On live action the perceptual metrics side with the model:** LPIPS 0.173 against bicubic's
+  0.266 on live-vfx, 0.087 against 0.107 on live-slow, DISTS 0.157 against 0.202 and 0.074 against
+  0.104, far beyond the seed spreads (≤ 0.008), while PSNR-Y (−6.8 and −7.1 dB), VMAF (−18 and
+  −15), colour (ΔE00 lf 3.0–3.4 times higher) and temporal error (2.7–3.1 times) still side with
+  bicubic. The blurred upscale of a grainy, detailed picture is what LPIPS and DISTS penalise;
+  the model redraws texture of the right kind, at the wrong place for the pixel metrics.
 - **`ident`**, the GT itself (8-bit) at `--resolution 1080`, is as far or further: the degradation
   is not what limits fidelity, the model's rendering is. It is closer on LPIPS on 3 clips
   (anime-dark: 0.150 against 0.213) and further on colour on all 4.
 - **`lab` brings the default closer to the GT:** PSNR-Y +0.9 to +4.0 dB (anime-dark 36.09),
-  ΔE00 lf down 37–55% (1.07–1.58), VMAF +3.9 to +6.6, LPIPS slightly lower on all 4 clips.
+  ΔE00 lf down 37–55% (1.07–1.58), VMAF +3.9 to +6.6, LPIPS slightly lower on all 4 clips; on
+  live-vfx and live-slow PSNR-Y +3.5 and +1.4 dB, ΔE00 lf −55% and −40%, VMAF +5.2 and +2.9,
+  LPIPS lower. **anime-bright is the exception:** `lab` gains 0.55 dB of PSNR-Y and 15% of ΔE00 lf
+  but costs LPIPS +0.019, DISTS +0.012, SSIM −0.005 and VMAF −3.1, far beyond the seed spreads.
 
 ## Seed bands
 
@@ -189,11 +227,17 @@ VMAF of these):
 | anime-dark | 0.09 | 0.0012 | 0.0074 | 0.0049 | 2.18 | 0.001 | 0.050 | 0.088 | 1.18 |
 | cartoon-bright | 0.25 | 0.0007 | 0.0002 | 0.0008 | 0.34 | 0.013 | 0.034 | 0.072 | 2.35 |
 | anime-sky | 0.51 (0.07 without the bottom rows) | 0.0007 | 0.0014 | 0.0024 | 0.41 | 0.017 | 0.017 | 0.017 | 2.19 |
+| live-vfx | 0.51 (`lab`: 1.11) | 0.0023 | 0.0080 | 0.0047 | 5.53 | 0.019 | 0.019 | 0.018 | – |
+| live-slow | 0.03 | 0.0020 | 0.0001 | 0.0002 | 0.13 | 0.019 | 0.068 | 0.069 | – |
+| anime-bright | 0.30 | 0.0020 | 0.0017 | 0.0023 | 0.66 | 0.019 | 0.056 | 0.308 | 1.11 |
 
 A seed moves the whole clip together (one batch): seed 1234 is +0.37 dB on 100% of
 anime-clean's frames. A variant measured at one seed is compared with this spread for that
 reason. anime-grain's bottom rows are black in the GT and nearly so in every output; a few
-frames match exactly, so their mean PSNR is infinite and the spread undefined.
+frames match exactly, so their mean PSNR is infinite and the spread undefined (the same for the
+live-action clips' letterbox bars). The spreads differ by clip far more than the means do:
+live-slow's seeds agree within 0.03 dB and 0.13 VMAF, so differences of a few hundredths reach a
+verdict there, while live-vfx's VMAF moves by 5.5 points from seed to seed.
 
 ## Numerics
 
@@ -208,7 +252,7 @@ model in the CLI:
 | Compute dtype, attention | bf16 when a bf16 matmul works (`optimization/compatibility.py:684-698`); the DiT under bf16 autocast (`core/generation_phases.py:718-724`); q, k, v cast to it before the kernel (`models/dit_7b/attention.py:117-121`). q and k arrive in fp32 (the norms and RoPE output fp32 under autocast), v in bf16 | explicit `.bfloat16()` (`models/dit/nablocks/mmsr_block.py:130-132`) under bf16 autocast (`projects/inference_seedvr2_7b.py:119`) | no: bf16 in both | `attn16` = GPUs without bf16 |
 | RoPE | angle table from the checkpoint's fp16 `rope.freqs` (128π stored as 402.0), angles computed in fp16 by rotary_embedding_torch, then cast to q's dtype (fp32) for the rotation (`models/dit_7b/rope.py:84-89`) | fp32 table and rotation (`models/dit/rope.py:84-88`, fp32 checkpoint) | yes: the table's precision | `rope` |
 | Input frames | 8-bit → fp32 → fp16 (`inference_cli.py:697`) → bf16, resize and normalisation in bf16 (`core/generation_phases.py:380-388`) | uint8 → fp32, resize and normalisation in fp32, bf16 at encode (`projects/inference_seedvr2_7b.py:228-244`) | yes | `prep` |
-| Weights | fp16 files, cast to bf16 per layer under autocast | fp32 `.pth`, cast under autocast | yes | `w32` |
+| Weights | fp16 files, ByteDance's fp32 `.pth` rounded to the nearest fp16 (below), cast to bf16 per layer under autocast | fp32 `.pth`, cast under autocast | yes | `w32` |
 | VAE encode | posterior mode (`models/video_vae_v3/modules/attn_video_vae.py:1688`) | posterior sample (`models/video_vae_v3/modules/attn_video_vae.py:1305`) | yes | `vaes` |
 | Multiples of 16 | black padding, bottom and right, trimmed after decode (`data/image/transforms/divisible_crop.py:61-72`) | centre crop (`data/image/transforms/divisible_crop.py:36-39`) | yes | [Padding](#padding) |
 | TF32 | off (numz never calls the init that sets it) | on for matmul and cuDNN (`common/distributed/basic.py:66-68`) | yes, no effect: bit-identical | smoke test |
@@ -216,14 +260,21 @@ model in the CLI:
 | DiT norms | custom RMS/LayerNorm, fp32 output under autocast (`models/dit_7b/normalization.py:28-97`) | Apex fused norms, bf16 in and out | yes | `norm16` |
 | VAE decode | no autocast, norm casts removed (`models/video_vae_v3/modules/causal_inflation_lib.py:354-409`) | bf16 autocast, norm outputs cast back (`models/video_vae_v3/modules/causal_inflation_lib.py:330-367`) | yes | `vaeac` |
 
+numz's `seedvr2_ema_7b_fp16.safetensors` and `ema_vae_fp16.safetensors` are ByteDance's
+`seedvr2_ema_7b.pth` and `ema_vae.pth` rounded to the nearest fp16, ties to even, element for
+element (checked on the files: all 1,128 and 250 tensors, same names, no metadata, fp16
+subnormals kept, no value above 65504; truncation would differ on 50% of the elements, a cast
+through bf16 on 87%).
+
 The sampler, CFG (off, one step), the timestep and the positive/negative text embeddings are the
 same (the embeddings are byte-identical files). The resize kernel is the same, torchvision's
 bicubic with antialias, and the targets agree for 16:9 sources.
 
 ### Results
 
-Paired difference to the default, `none`: the range over the 4 clips, and how many clips are
-better (B) or worse (W); "–" = within everywhere.
+Paired difference to the default, `none`: the range over the 4 animated clips (the "3 new clips"
+row: over live-vfx, live-slow and anime-bright), and how many clips are better (B) or worse (W);
+"–" = within everywhere.
 
 | Variant | Switch | PSNR-Y | LPIPS | DISTS | VMAF | ΔE00 lf | Temporal error |
 |---|---|---|---|---|---|---|---|
@@ -232,6 +283,7 @@ better (B) or worse (W); "–" = within everywhere.
 | `prep` | `NUM_PREP=fp32` | −0.06..+0.02 (–) | −0.0001..+0.0030 (–) | −0.0007..+0.0014 (–) | −0.58..+0.19 (–) | −0.035..−0.015 (3 B) | −0.065..+0.101 (–) |
 | `w32` | the fp32 `.pth` weights | −0.09..+0.00 (–) | −0.0009..+0.0015 (–) | −0.0006..+0.0006 (–) | −0.60..−0.08 (–) | +0.006..+0.050 (3 W) | −0.005..+0.081 (–) |
 | `parity` | `rope` + `vaes` + `prep` + `w32` | −0.09..+0.03 (–) | −0.0003..+0.0038 (–) | −0.0005..+0.0018 (–) | −0.80..+0.16 (–) | −0.019..−0.000 (1 B) | −0.074..+0.131 (–) |
+| `parity`, 3 new clips | the same, on live-vfx, live-slow, anime-bright | −0.01..+0.38 (1 B) | −0.0001..+0.0008 (1 B) | −0.0000..+0.0003 (–) | −0.31..+0.18 (1 B) | −0.088..−0.046 (3 B) | −0.166..+0.060 (2 B) |
 | `norm16` | `NUM_NORM=bf16` | −0.03..+0.01 (–) | −0.0004..+0.0015 (–) | −0.0003..+0.0011 (–) | −0.70..+0.08 (–) | −0.006..+0.017 (–) | −0.011..+0.024 (–) |
 | `vaeac` | `NUM_VAE_AUTOCAST=1` | ±0.00 (–) | ±0.0000 (–) | ±0.0000 (–) | ±0.00 (–) | ±0.000 (–) | ±0.000 (–) |
 | `parity2` | `parity` + `norm16` + `vaeac` | −0.12..+0.03 (–) | −0.0002..+0.0030 (–) | −0.0002..+0.0015 (–) | −1.06..+0.09 (–) | −0.016..+0.013 (1 B) | −0.074..+0.138 (–) |
@@ -242,8 +294,16 @@ better (B) or worse (W); "–" = within everywhere.
 and the Conv3d bias change no bit): ByteDance's numerics on numz's code.
 
 - **Nothing reaches the seed spread on PSNR, SSIM, LPIPS, DISTS, VMAF or temporal error,** on any
-  clip, `none` or `lab` (`lab`: |ΔPSNR-Y| ≤ 0.14 dB, |ΔVMAF| ≤ 0.82).
-- The only verdicts are low-frequency colour shifts of 0.002–0.05 ΔE00 against values of 1.8–2.6,
+  of the 4 animated clips, `none` or `lab` (`lab`: |ΔPSNR-Y| ≤ 0.14 dB, |ΔVMAF| ≤ 0.82).
+- **On the 3 new clips `parity` moves a little further, toward the GT:** low-frequency colour on
+  all 3 (ΔE00 lf −0.05 to −0.09, 2.4 to 4.6 times their spreads, as much as a float16 decode),
+  temporal error on both live-action clips (live-vfx −0.17 and its low-frequency flicker −0.18,
+  nine times its spread; live-slow −0.07), and on live-slow, whose seeds agree within 0.03 dB,
+  PSNR-Y +0.12 dB and VMAF +0.18. Small throughout (live-vfx's +0.38 dB stays within its
+  0.51 dB spread), and smaller after `lab`: ΔE00 lf −0.008 on the live clips, temporal error
+  −0.045 on live-vfx, PSNR-Y +0.03 dB on live-slow. Which of the four switches does it is not
+  measured on these clips.
+- On those 4, the only verdicts are low-frequency colour shifts of 0.002–0.05 ΔE00 against values of 1.8–2.6,
   and low-frequency flicker 0.08–0.09 lower on anime-dark (`prep`, `parity`, `parity2`): they pass
   only because those spreads are tiny (ΔE00 0.001–0.034). After `lab` they vanish, but for DISTS
   changes of ±0.0004 on cartoon-bright, whose DISTS spread is 0.0003.
@@ -274,13 +334,33 @@ with `antialias=True` (a = −0.5).
 | `noaa` | torchvision bicubic, no antialias (a = −0.75) | −0.09..+0.12 (–) | −0.0052..+0.0005 (1 B) | −1.38..+0.10 (–) | +0.010..+0.088 (4 W) | +0.037..+0.149 (4 W) | −0.150..+0.161 (1 W) |
 | `spline36` | zimg spline36 | +0.01..+0.16 (–) | −0.0040..−0.0001 (–) | −0.89..+0.77 (–) | −0.009..+0.010 (1 B) | −0.014..+0.051 (1 W) | −0.104..+0.061 (–) |
 | `lanczos` | zimg lanczos (3 taps) | −0.02..+0.24 (1 B) | −0.0082..−0.0001 (1 B) | −0.93..+0.79 (–) | −0.004..+0.030 (1 B, 1 W) | −0.004..+0.108 (1 W) | −0.163..+0.110 (1 W) |
+| `noaa`, 3 new clips | | −0.27..−0.10 (1 W) | +0.0002..+0.0008 (1 W) | −0.79..−0.29 (1 W) | +0.019..+0.093 (3 W) | +0.078..+0.292 (3 W) | +0.133..+0.279 (2 W) |
+| `spline36`, 3 new clips | | −0.20..+0.06 (1 B) | −0.0007..+0.0003 (1 B) | −1.21..+0.29 (1 B) | −0.000..+0.023 (1 W) | −0.030..+0.055 (1 W) | −0.064..+0.061 (1 W) |
+| `lanczos`, 3 new clips | | −0.34..−0.02 (–) | −0.0012..−0.0004 (1 B) | −1.57..+0.18 (1 B) | +0.003..+0.046 (2 W) | +0.010..+0.126 (1 W) | +0.002..+0.107 (1 W) |
 
 The kernels change the output by 0.6–1.7 levels (mean |ΔY|) in the windows where they differ
-most from the default (review crops). The sharper zimg kernels lean slightly toward the GT on
-detail (LPIPS lower on all 4 clips, DISTS on 3), significantly so only on anime-grain
-(lanczos: +0.24 dB, LPIPS −0.005, DISTS −0.0023; `lab`: +0.30 dB). Not worth a CPU resize through
-ffmpeg on its own; spline36 or lanczos are safe if the pipeline resizes with zimg anyway. On the
-softer d2 input all three kernels gain a little more ([Degradation d2](#degradation-d2)).
+most from the default (review crops). On the animated clips the sharper zimg kernels lean
+slightly toward the GT on detail (LPIPS lower on all 4 clips, DISTS on 3), significantly so only
+on anime-grain (lanczos: +0.24 dB, LPIPS −0.005, DISTS −0.0023; `lab`: +0.30 dB). On softer d2
+input all three kernels gain a little more ([Degradation d2](#degradation-d2)).
+
+On the 3 new clips the picture is mixed:
+
+- **torchvision without antialiasing is worse on all 3** (low-frequency colour +0.02 to +0.09
+  ΔE00, low-frequency flicker +0.08 to +0.29), and on live-slow on every metric (PSNR-Y −0.25 dB,
+  LPIPS +0.0008, VMAF −0.48, temporal error +0.28); `lab` keeps it (live-slow −0.10 dB, temporal
+  error +0.19). 7 clips of 7.
+- **The zimg kernels help live-slow and cost live-vfx:** on live-slow (slow, grainy, detailed)
+  spline36 gains +0.06 dB, LPIPS −0.0005, VMAF +0.29, lanczos LPIPS −0.0004 and VMAF +0.18 but
+  low-frequency colour +0.030; on live-vfx (fast, grainy) both add low-frequency colour error
+  (+0.023, +0.046) and flicker (temporal error +0.043, +0.107; low-frequency +0.055, +0.126:
+  2 to 7 times its spreads, 1–3% of the values); anime-bright stays within with both.
+  After `lab` the live-slow gains remain (+0.05 to +0.08 dB) and the live-vfx costs shrink to
+  +0.004 to +0.008 ΔE00 lf and +0.01 to +0.03 temporal error.
+
+numz's antialiased torchvision bicubic stays a sound default. A zimg resize is not worth a CPU
+pass through ffmpeg on its own; if the pipeline resizes with zimg anyway, spline36 is the safer of
+the two (half lanczos's colour and flicker cost on live-vfx, and no colour cost on live-slow).
 
 ## Padding
 
@@ -352,8 +432,11 @@ own; at 720p it reflects 16 ([720p](#720p-no-padding-at-all)).
 | `black+16`, `lab` | +0.15..+0.21 (–) | −0.0070..−0.0009 (1 B) | +0.29..+1.16 (1 B) | −0.017..+0.018 (1 B) | +0.003..+0.013 (–) | −0.050..−0.024 (–) | +0.45..+0.93 (–) | +0.08..+0.18 (–) |
 | `reflect+black+16`, `none` | +0.29..+0.40 (3 B) | −0.0069..−0.0016 (2 B) | −1.03..+1.15 (1 B) | −0.011..+0.149 (1 B, 2 W) | +0.005..+0.090 (2 W) | −0.133..+0.051 (–) | +7.07..+13.38 (3 B); letterbox −5.03 (W) | −0.13..+0.29 (2 B) |
 | `reflect+black+16`, `lab` | +0.33..+0.54 (3 B) | −0.0068..−0.0010 (2 B) | −0.45..+1.00 (1 B) | −0.026..+0.003 (1 B) | +0.003..+0.041 (1 W) | −0.134..+0.059 (–) | +2.10..+17.36 (4 B) | −0.01..+0.33 (1 B) |
+| `reflect>=8+black+16`, `none`, 3 new clips | +0.10..+0.36 (2 B) | −0.0013..−0.0008 (1 B) | +0.15..+3.85 (1 B) | −0.001..+0.014 (–) | −0.026..+0.037 (1 W) | −0.144..+0.024 (1 B, 1 W) | +0.37..+8.94 (1 B) | +0.08..+0.23 (1 B) |
+| `reflect>=8+black+16`, `lab`, 3 new clips | +0.11..+0.69 (2 B) | −0.0014..−0.0007 (1 B) | +0.20..+4.00 (1 B) | −0.031..−0.003 (1 B) | −0.024..+0.010 (–) | −0.088..−0.001 (1 B) | +1.91..+8.09 (3 B) | +0.11..+0.69 (1 B) |
 
-`black+16` on the 3 clips without black areas; `reflect+black+16` on all 4.
+`black+16` on the 3 clips without black areas; `reflect+black+16` on all 4 animated clips;
+`reflect>=8+black+16` (the same padding at 1080p) on live-vfx, live-slow and anime-bright.
 
 - **`reflect+black+16` keeps the anchor and repairs the band:** the bottom 16 rows gain 7–17 dB
   (`none`: anime-clean 25.0 dB, 3.2 below its rest where the bicubic baseline's bottom is 5.3
@@ -370,6 +453,15 @@ own; at 720p it reflects 16 ([720p](#720p-no-padding-at-all)).
   Its bottom 16 rows are black in the GT and stay black within 0.2–0.4 levels RMS in both (PSNR
   55–62 dB, 5–6 frames exact): the −5.03 dB is a difference between very high PSNRs (`lab`:
   +2.10).
+- **The new clips confirm it.** anime-bright, bright to its bottom edge, loses 6.9 dB in its
+  bottom band with numz's padding (18.5 against 25.4 for the rest); `reflect>=8+black+16` brings
+  the band to 27.4 dB (+8.9) and the frame +0.36 dB, SSIM +0.004. The live-action clips are
+  letterboxed, so the reflected rows are their own black bars, 24 black rows in all as on
+  anime-grain: live-slow is better on PSNR-Y (+0.10 dB), LPIPS, DISTS, VMAF (+0.31) and temporal
+  error; live-vfx stays within its wide spread (PSNR-Y +0.23 dB, VMAF +3.9 against a spread of
+  5.5) but for slightly more flicker in `none` (temporal error +0.024, low-frequency +0.037,
+  twice its spread), gone after `lab` (−0.001, +0.010). Their bottom rows are bars, black in
+  every output (PSNR-Y 64 dB or more, often exact).
 - Cost: 16 more rows, +1.5% of the DiT tokens and of the VAE's work at 1080p (138 latent rows
   instead of 136).
 
@@ -493,7 +585,7 @@ clouds over 45 frames (73% of each frame bright and smooth: luma ≥ 140, 15×15
 The codes are counted over 45 frames, `none`; numz's `lab` rendering has the same 129 at most
 (it is cast back to bfloat16 before the normalisation); anime-dark barely reaches 0.5 (75–114).
 
-Paired difference to the default, `none` (5 clips):
+Paired difference to the default, `none` (5 clips; the last row: `dec16` on the 3 new clips):
 
 | Variant | PSNR-Y | LPIPS | DISTS | VMAF | ΔE00 lf | Temporal error |
 |---|---|---|---|---|---|---|
@@ -501,6 +593,7 @@ Paired difference to the default, `none` (5 clips):
 | `dec16` | +0.03..+0.12 (1 B) | +0.0000..+0.0014 (1 W) | −0.0025..+0.0011 (1 B) | −0.00..+0.12 (–) | −0.086..−0.046 (5 B) | −0.039..−0.012 (1 B) |
 | `dec32` | +0.03..+0.11 (1 B) | +0.0000..+0.0014 (1 W) | −0.0025..+0.0010 (1 B) | −0.01..+0.13 (–) | −0.086..−0.047 (5 B) | −0.038..−0.015 (1 B) |
 | `dec32tf` | +0.03..+0.12 (1 B) | +0.0000..+0.0014 (1 W) | −0.0025..+0.0010 (1 B) | −0.01..+0.13 (–) | −0.086..−0.047 (5 B) | −0.038..−0.015 (1 B) |
+| `dec16`, 3 new clips | +0.02..+0.06 (1 B) | +0.0003..+0.0024 (2 W) | −0.0003..+0.0009 (1 W) | −0.01..+0.03 (–) | −0.092..−0.047 (3 B) | −0.055..−0.022 (1 B) |
 
 - **numz's masters hold one 8-bit level of precision near white:** at most 129 codes per channel
   from 0.5 up, all on the bfloat16 grid. `out32` removes only the last rounding: the decoder's
@@ -517,7 +610,11 @@ Paired difference to the default, `none` (5 clips):
   +0.03 to +0.12 dB (beyond the spread on anime-dark only); LPIPS +0.0014 on the sky clip (its
   spread); the rest within. After `lab` the verdicts left are small: ΔE00 lf −0.01 to −0.02 and
   SSIM +0.001 on 2 clips, LPIPS +0.002 on the sky. `out32` alone stays within but for single
-  small verdicts.
+  small verdicts. `dec16` does the same on the 3 new clips (ΔE00 lf −0.05 to −0.09, beyond
+  their spreads on all 3): 8 clips of 8. Its cost there is a little LPIPS, +0.0003 on live-slow
+  (whose spread is 0.0001) and +0.0024 on anime-bright (3% of its value), and DISTS +0.0008 on
+  live-slow; after `lab`, LPIPS +0.0007 and DISTS +0.0008 on live-slow, DISTS −0.0028 on
+  anime-bright, ΔE00 lf −0.01 on both live-action clips.
 - **float16 and float32 give the same picture:** 0.02 levels apart on average (TF32: 0.006–0.009
   from strict float32), where they move numz's output by 0.26–0.31 levels and another seed moves
   it by 1.05 (anime-sky).
@@ -534,10 +631,86 @@ Paired difference to the default, `none` (5 clips):
 - **No float16 overflow:** no non-finite value in any of the 1,529 module outputs of a decode, on
   any clip; the largest activations are in the last up block (`up_blocks.3`): 5,616 to 19,088,
   the sky's 19,088 3.4 times under float16's 65,504. Brighter content runs closer to the limit.
+  The 3 new clips stay under the sky: 10,416 (live-slow), 11,936 (live-vfx), 13,464
+  (anime-bright, mean Y 174), no non-finite value.
 - **Recommended:** keep everything after the decoder in float32 (free), and decode in float16
   with a non-finite check that redoes the batch in float32 if it trips: float32's output for
   3–5% more decode time than bfloat16. Not for banding, which nothing here shows, but for
   colour; numz's bfloat16 decode with float32 after it remains a sound default without the check.
+
+## Live action and a bright anime
+
+Three clips from three more sources ([Clips](#clips)): live-vfx and live-slow, letterboxed live
+action with film grain (a fast VFX shot, a slow film), and anime-bright, line art on white. Same
+d1 protocol: the default at seeds 42, 43 and 1234; at seed 42 `parity`, the three resize
+kernels, `reflect>=8+black+16` and `dec16`, each with its `lab` rendering. Their rows are in the
+tables above ([Seed bands](#seed-bands), [Results](#results), [Resize kernels](#resize-kernels),
+[reflect+black+16](#reflectblack16), [VAE decode precision](#variants)). Per clip, `none`, the
+metrics beyond the clip's seed spread (B better, W worse; the rest within):
+
+| Variant | live-vfx | live-slow | anime-bright |
+|---|---|---|---|
+| `parity` | B: ΔE00 lf −0.088, temporal error −0.166 (low-frequency −0.181) | B: PSNR-Y +0.12 dB, VMAF +0.18, LPIPS −0.0001, ΔE00 lf −0.046, temporal error −0.074 | B: ΔE00 lf −0.072 |
+| `reflect>=8+black+16` | W: temporal error +0.024 (low-frequency +0.037) | B: PSNR-Y +0.10 dB, LPIPS −0.0008, DISTS −0.0006, VMAF +0.31, temporal error −0.073 | B: PSNR-Y +0.36 dB, SSIM +0.004, bottom 16 rows +8.94 dB |
+| `dec16` | B: ΔE00 lf −0.047, temporal error −0.023 | B: PSNR-Y +0.06 dB, SSIM +0.004, ΔE00 lf −0.092; W: LPIPS +0.0003, DISTS +0.0008 | B: ΔE00 lf −0.048; W: LPIPS +0.0024 |
+| `noaa` | W: ΔE00 lf +0.039, temporal error +0.185 (low-frequency +0.205) | W on every metric: PSNR-Y −0.25 dB, LPIPS +0.0008, DISTS +0.0006, VMAF −0.48, ΔE00 lf +0.093, temporal error +0.279 | W: ΔE00 lf +0.019, low-frequency flicker +0.078 |
+| `spline36` | W: ΔE00 lf +0.023, temporal error +0.043 (low-frequency +0.055) | B: PSNR-Y +0.06 dB, LPIPS −0.0005, VMAF +0.29 | within |
+| `lanczos` | W: ΔE00 lf +0.046, temporal error +0.107 (low-frequency +0.126) | B: LPIPS −0.0004, VMAF +0.18; W: ΔE00 lf +0.030 | within |
+
+The live-action clips' bottom rows are letterbox bars (PSNR-Y 64 dB or more in every output,
+often exact), left out.
+After `lab` the signs hold, smaller: anime-bright keeps only `reflect>=8+black+16`'s gains (+0.34
+dB, bottom rows +8.1 dB) and a DISTS −0.003 for `dec16`; on live-vfx `reflect>=8+black+16`'s
+flicker is gone (ΔE00 lf −0.003, B) and the zimg kernels' costs shrink to +0.004/+0.008 ΔE00 lf
+and +0.01 to +0.03 temporal error; `noaa` stays worse on every metric of live-slow.
+
+- **The spreads, not the means, decide the verdicts here.** live-slow's seeds agree within
+  0.03 dB, 0.13 VMAF and 0.0001 LPIPS, so changes of a few hundredths of a dB pass; live-vfx's
+  flickering light makes its VMAF move by 5.5 points from seed to seed (PSNR-Y 0.51 dB, 1.11
+  after `lab`), and only colour and temporal error, whose spreads stay at 0.02, show anything.
+- **The recommendations hold but one** ([In short](#numerics-and-input-preparation-against-a-ground-truth)):
+  the padding, a float16 decode and float32 after the decoder are confirmed; ByteDance's numerics
+  gain a little on these clips; the zimg kernels are no longer safe everywhere (live-vfx), so
+  spline36 only, and only where zimg resizes anyway; torchvision's bicubic without antialiasing
+  stays the one to avoid.
+- **`lab` hurts anime-bright's perceptual metrics** (LPIPS +0.019, DISTS +0.012, VMAF −3.1 against
+  the default) while it fixes the mean level: over the clip's flat white areas (13% of the frame)
+  the default is 3.3 levels too bright, `lab` +0.1, with no drift through the batch (−0.08 from
+  the first frame to the last, so not the tie order of `lab`'s histogram matching,
+  [quality.md](quality.md)) and their local noise 0.71 levels against 0.54. The cause of the
+  LPIPS cost is not established.
+
+### Grain
+
+The measure of the source survey: the standard deviation of the full-range luma minus its
+2-pixel Gaussian blur, over the 30% of the picture where the blurred image's gradient is lowest
+(and 16 < Y < 235), in 8-bit levels; per frame, the median over the 45 frames (25–75% in
+brackets), the letterbox bars and the 8 picture rows next to them left out:
+
+| | live-vfx | live-slow |
+|---|---|---|
+| source, 12 frames over the film | 1.65 | 1.64 |
+| GT (the clip) | 1.75 (1.69–1.83) | 3.96 (3.55–4.29) |
+| bicubic baseline (the d1 input upscaled) | 0.45 (0.41–0.50) | 2.62 (2.34–2.76) |
+| default, 3 seeds | 0.93–0.98 | 4.19–4.30 |
+| default + `lab`, 3 seeds | 0.93–0.96 | 4.27–4.45 |
+| every variant, `none` / `lab` | 0.91–0.94 / 0.89–0.93 | 4.29–4.35 / 4.32–4.42 |
+
+- **On live-vfx the model gives back about half of the grain.** The d1 input keeps a quarter of
+  it (0.45 against 1.75); the output has 0.93–0.98, whatever the variant, `lab` or not. What it
+  puts there behaves like grain, not like a fixed texture: on consecutive frames registered by
+  phase correlation the residual changes at least as much as two independent fields would (1.19
+  for the output, 1.80 for the GT, against 0.93 and 1.75 within a frame). At the finest scale (1-pixel
+  blur) the output keeps less: 0.61 against 1.40.
+- **On live-slow the measure reads texture, not grain.** The shot's smoothest areas hold fine
+  texture (a window grille, leaves): its smoothest 10% has more residual than its smoothest 30%
+  (5.41 against 3.96), and the film as a whole measures 1.64. There the output is 6–12% above the
+  GT, the model drawing that texture a little stronger; at the 1-pixel scale it is again below
+  (1.80 against 2.21).
+- So SeedVR2, given a ×2-degraded grainy source, renders a cleaner picture than the source:
+  about half its grain on live-vfx, from a quarter in its input. None of the switches measured
+  here changes that (±0.05); keeping the source's grain would need its own step (grain synthesis,
+  or a lighter degradation of the input than d1).
 
 ## Visual review
 
@@ -558,8 +731,11 @@ the default (`max`, any frame) and, for padding, where its bottom 16 rows differ
 
 ## Caveats
 
-- **Four animated clips**, 45 frames each, from 1080p sources; live action, film grain at 4K and
-  other content are not measured. anime-grain is letterboxed, which changes the padding results.
+- **Eight clips**, 45 frames each, from 1080p sources: four animated ones with every variant, the
+  sky for the decode precision, two live-action films and a bright anime with a subset; 4K sources
+  and other content are not measured. anime-grain and both live-action clips are letterboxed,
+  which changes the padding results. Grain has one measure (high-pass residual in the smoothest
+  30% of the picture), which also counts fine texture there.
 - **One model and one size:** 7B fp16 at 1080p (one 720p test), `flash_attn_2`; the 3B, fp8 and
   GGUF weights and 4K are not covered (`NUM_NORM=bf16` patches the 3B's norms too, unmeasured).
 - **One batch of 45 frames per clip:** batch boundaries are measured in
@@ -614,6 +790,16 @@ python3 $S/numerics_patch.py --selftest     # zimg resize, 8-bit recovery, paddi
 #   the codes used from 32768 up, and the share of those samples (below 65535) on rint(65535 k / 256),
 #   k = 128..255; CAMBI: the JSONs' per-frame cambi_out and cambi_added. The sky clip: fr_clips.py scan
 #   of a source, its calmest bright windows ranked by bright smooth area, then make --degrade d1 --crop
+# long sources (the live-action clips): scan in segments (--ss, --duration), keep windows with every
+#   scene score < 3, no fade, the most motion per shot; scan's indices come from timestamps, so confirm
+#   the window frame-exactly before make (one source's timestamps ran 44 frames ahead of the decode
+#   order 30 minutes in):
+python3 $S/fr_clips.py scores /path/to/source.mkv --first FIRST_FRAME-10 --last FIRST_FRAME+54
+# grain: Y = 255 (0.2126 R + 0.7152 G + 0.0722 B) of the 16-bit RGB files (ffmpeg's yuv -> gray16le
+#   / 257 scale); residual = Y - GaussianBlur(Y, sigma 2 px); mask = Sobel magnitude of the blurred
+#   image at or below its 30th percentile among the pixels with 16 < blurred < 235, outside the
+#   letterbox rows and the 8 rows next to them; grain = std of the residual over the mask, median over
+#   the 45 frames
 ```
 
 <details>
@@ -628,8 +814,10 @@ none</code> plus the <code>lab</code> rendering of the same run)</summary>
 also on anime-grain; `defcheck`, `defcheck2`, `defcheck3` (anime-clean, the default re-run,
 compared bit for bit). Decode precision: `out32`, `dec16`, `dec32`, `dec32tf` on the four clips
 and `anime-sky` (with its `def` at 42, 43 and 1234), `dec16nh` (anime-clean, float16 without the
-hooks: bit-identical to `dec16`, for the timing). `ident`: `q1-<clip>-gt-ident-s42`, the 8-bit
-GT as input. 720p:
+hooks: bit-identical to `dec16`, for the timing). Live action and a bright anime: `live-vfx`,
+`live-slow`, `anime-bright` at d1, 1080p: `def` (42, 43, 1234), `refl8black16`
+(`NUM_PAD=reflect>=8+black+16`, at 1080p the padding of `reflblack16`), `parity`, `noaa`,
+`spline36`, `lanczos`, `dec16`. `ident`: `q1-<clip>-gt-ident-s42`, the 8-bit GT as input. 720p:
 `q1-<clip>-d1-720-{def,black16,refl8black16}-s42`. d2, anime-clean and anime-grain: `def` (42,
 43, 1234), `reflblack16`, `lanczos`, `noaa`, `spline36`. Metric labels:
 `<clip>-d1`, `<clip>-d1-crop` (rows 4–1075), `<clip>-d1-720`, `<clip>-d2`; `lab` renderings as

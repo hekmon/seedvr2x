@@ -1,12 +1,13 @@
 # Models: 7B fp8, Q4_K_M, 3B and the sharp 7B against a ground truth
 
-> Status: **measured** with the full-reference protocol of [numerics.md](numerics.md#the-full-reference-protocol)
+> Status: **measured** with the full-reference protocol of
+> [numerics.md](numerics.md#the-full-reference-protocol)
 > ([`scripts/fr_metrics.py`](../scripts/fr_metrics.py), 16-bit masters from
-> [`scripts/ffv1_out.py`](../scripts/ffv1_out.py)), for the "Model scope for v1" question in
-> [DESIGN.md](../../seedvr2x/DESIGN.md#scope); BlockSwap's power-cap explanation tested with
-> [`scripts/swap_idle.py`](../scripts/swap_idle.py). SeedVR2 `4490bd1`, `flash_attn_2`, one batch
-> of 45 frames, 1080p, `--color_correction none` with `lab` rendered from the same run. Four
-> animated clips; live action is not measured.
+> [`scripts/ffv1_out.py`](../scripts/ffv1_out.py)), for the model-scope question of
+> [DESIGN.md](../../seedvr2x/DESIGN.md#phase-2-the-other-models); BlockSwap's power-cap
+> explanation tested with [`scripts/swap_idle.py`](../scripts/swap_idle.py). SeedVR2 `4490bd1`,
+> `flash_attn_2`, one batch of 45 frames, 1080p, `--color_correction none` with `lab` rendered
+> from the same run. Four animated clips; live action is not measured.
 
 In short (4 animated clips of 45 frames, a ×2 upscale of a mildly degraded input to 1080p; each
 model paired at the same seed with its fp16 parent, or with 7B fp16, and judged against the
@@ -44,8 +45,9 @@ seed spreads):
 
 ## Why it matters for seedvr2x
 
-DESIGN.md's [scope](../../seedvr2x/DESIGN.md#scope) asks whether v1 supports the 7B fp16 model
-only, or also the fp8, GGUF Q4_K_M and 3B weights from the start. Small GPUs need them:
+DESIGN.md asked whether v1 supports the 7B fp16 model only, or also the fp8, GGUF Q4_K_M and 3B
+weights from the start; design has since kept v1 to the 7B fp16 and moved the other models to
+a [phase 2 after v1](../../seedvr2x/DESIGN.md#phase-2-the-other-models). Small GPUs need them:
 [vram.md's recipe](vram.md#recipe-per-card-size-validated) runs 8–16 GB cards on Q4_K_M with
 all 36 blocks swapped, and the 7B fp16 weights alone (15.35 GiB) don't fit a 16 GB card. Each
 extra model costs code (GGUF dequantisation adapted from city96, the 3B DiT's cache quirk) and
@@ -66,6 +68,10 @@ to the source as another seed of 7B fp16 does.
 | 3B fp16 | `seedvr2_ema_3b_fp16.safetensors` | 6.8 GB | fp16, a smaller DiT (32 blocks) | 7B fp16: a different model |
 | 3B fp8 | `seedvr2_ema_3b_fp8_e4m3fn.safetensors` | 3.4 GB | fp8 e4m3fn | 3B fp16, its parent |
 | 7B sharp | `seedvr2_ema_7b_sharp_fp16.safetensors` | 16.5 GB | fp16; ByteDance's "sharp" 7B weights, same architecture | 7B fp16: different weights |
+
+The Q4_K_M file quantizes (Q4_K) only the 288 weight matrices of the blocks' attention and MLP,
+8 per block, 99% of the weights; its other 840 tensors, the 6 matrices outside the blocks
+included, are the fp16 file's, byte for byte, in F16 (checked on the file).
 
 All use the same VAE (`ema_vae_fp16`). numz's CLI downloads each from its registry and checks
 its sha256; the sharp file was fetched with the CLI's own `download_weight` (sha256 verified).

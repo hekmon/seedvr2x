@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| Severity | wrong output, latent (none with the released checkpoints, whose blocks hold equal tables); the 7B's RoPE cache is bypassed |
-| Status | confirmed on CPU with numz's own model classes (no weights); effect on output from code |
+| Severity | wrong output with numz's 7B fp8 file (its blocks 0–34 run on block 35's fp16 table, not their own fp8-rounded one); latent with the other files checked, whose blocks hold equal tables; the 7B's RoPE cache is bypassed |
+| Status | confirmed on CPU with numz's own model classes (no weights) and the files' tables; effect on output from code |
 | Affected options | every DiT run, 3B and 7B (`CompatibleDiT` wraps every loaded DiT); BlockSwap |
 | Version | SeedVR2 `4490bd1` (v2.5.24), torch 2.14.1, rotary-embedding-torch 0.9.1 |
 
@@ -22,9 +22,13 @@ inside it, and the last match is the library module of the last block. As a resu
   method. On the 7B, whose per-forward cache is disabled, every block recomputes the table of every
   window at every DiT forward.
 
-The output is unaffected today: the frequencies are constants, never trained, so all blocks hold
-the same table (numz's 7B fp16 checkpoint: 36 equal tensors of 10 values, measured by our
-implementation probe).
+The frequencies are constants, never trained, so the blocks of most files hold the same table and
+their output is unaffected: 36 equal tensors of 10 values in the 7B fp16 file (and the sharp
+7B's, and the Q4_K_M's, which keeps them in F16), 32 of 21 values in each 3B file. The exception
+is numz's 7B fp8 file, `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors`, a plain
+`e4m3fn` cast without scale tensors: blocks 0–34 share one table rounded to fp8, up to 5.8% off
+the fp16 values (136.125 → 144, 269.25 → 256), and block 35 holds the fp16 table. numz runs every
+block of that file on block 35's fp16 table.
 
 ## Reproduction
 
@@ -112,13 +116,18 @@ for name, module in self.dit_model.named_modules():
 
 ## Impact
 
-- Output: none with tables equal in every block, the case of the released checkpoints. The
-  frequencies are computed at construction (7B: `linspace(1, 128, 10)·π`; 3B: `10000^(−2k/42)`,
-  21 values) and never trained (ByteDance turns them into buffers, `dit_7b/rope.py:33-42`); the 3B
-  files weren't checked, but are built the same way.
-- A checkpoint whose blocks hold different tables (a fine-tune that trains or rescales the
-  frequencies, or a conversion that stores blocks at different precisions) would run on the 7B with
-  block 35's table in every block, where ByteDance's code uses each block's own.
+- Output: none with tables equal in every block: the 7B fp16, sharp 7B fp16, 7B Q4_K_M, 3B fp16
+  and 3B fp8 files (read on CPU). The frequencies are computed at construction (7B:
+  `linspace(1, 128, 10)·π`; 3B: `10000^(−2k/42)`, 21 values) and never trained (ByteDance turns
+  them into buffers, `dit_7b/rope.py:33-42`). The 3B fp8 file, also a plain `e4m3fn` cast, holds
+  them rounded (5 of the 21 values at zero, the others up to 41% off), but alike in all 32 blocks.
+- A checkpoint whose blocks hold different tables runs on the 7B with block 35's table in every
+  block, where ByteDance's code uses each block's own. numz's 7B fp8 file is one (a conversion
+  that stores blocks at different precisions): all 36 blocks run on block 35's fp16 table, angles
+  in fp16 as with the 7B fp16 file, where blocks 0–34 would use their fp8-rounded table, converted
+  at load to the compute dtype, bf16 (`compatibility.py:787-804`; rotary_embedding_torch computes
+  the angles in the table's dtype). A fine-tune that trains or rescales the frequencies would be
+  another case.
 - Speed (7B, not measured): 1,980 table computations per DiT forward at 1080p batch 5 (50 and 60
   windows in the regular and shifted layers, 18 of each: [18](18-attention-modes-misleading.md)),
   about 30 small tensor operations each, after a GPU → CPU sync (`shape.tolist()`), where an intact
@@ -127,7 +136,8 @@ for name, module in self.dit_model.named_modules():
   last block sits on the CPU while the others run, so their tables are computed on the CPU and
   copied to the GPU by `freqs.to(device=q.device, ...)` (`dit_7b/rope.py:85`). From code.
 - `--debug` logs "Stabilized 72 RoPE modules" for 36.
-- Workaround: none needed with the released checkpoints.
+- Workaround: none needed; with the 7B fp8 file the bug keeps the fp16 table, within 0.05% of
+  the fp32 values, where the file's own is up to 5.8% off.
 
 ## Possible fix
 
@@ -163,7 +173,10 @@ Either way each block computes its table from its own `freqs` through ByteDance'
 Test: the 4-block check above (block i's table equals its own unwrapped one, `lru_cache` hits > 0);
 done on CPU with this diff applied: 7B and 3B, 4 of 4 blocks get their own table, 4 cache hits in 8
 calls. With numz's 7B fp16 checkpoint the output should stay bit-identical (equal tables), and the
-7B DiT time per batch drop by the table computations (to be measured).
+7B DiT time per batch drop by the table computations (to be measured). The 3B fp8's output
+doesn't change either (equal tables); the 7B fp8's does: blocks 0–34 then run on their own
+fp8-rounded table, in bf16, instead of block 35's fp16 one. Keeping its current output would take
+the fp16 table in every block.
 
 ## References
 

@@ -8,20 +8,25 @@
 > [`scripts/fr_clips.py`](../scripts/fr_clips.py) `slice` (frame-exact sub-clips),
 > [`scripts/fr_metrics.py`](../scripts/fr_metrics.py) (per-frame metrics),
 > [`scripts/blend_patch.py`](../scripts/blend_patch.py) `STITCH_WINDOWS` (explicit latent-window
-> layouts). Three real hard cuts, all from a dark shot to a bright one or back.
+> layouts). Six real hard cuts, all between a darker and a brighter shot: three animated ones
+> measured in full, then a colourful anime and two live-action films at k = 0 and 2.
 
-In short (three hard cuts, 81-frame clips with the cut at 21 + k, k = 0…3, scored against the
-ground truth; the reference is the two shots run separately, what correct shot detection gives):
+In short (six hard cuts, 81-frame clips with the cut at 21 + k, k = 0…3 on three animated cuts,
+k = 0 and 2 on a colourful anime and two live-action films, scored against the ground truth; the
+reference is the two shots run separately, what correct shot detection gives):
 
 - **A missed cut costs the first frames of the next shot.** In one batch across the cut, B's
   first frame loses 2.4–9.6 dB of PSNR-Y on the bright and dark cuts, its next three 1.5–4.7 dB,
   and VMAF drops 2–12 points over its first four frames; the clean cut loses far less (0.1–3.9 dB
-  on B's first frame only).
-  The loss is measurable for up to 13 frames after the cut in PSNR-Y (4–6 bright, 8–13 dark,
-  0–2 clean), 1–4 in VMAF, at most 2 in DISTS. Up to 5% of the previous shot's last frame shows in B's first frame (ghost coefficient).
+  on B's first frame only). The three later cuts agree: 2.0–7.4 dB on B's first frame.
+  The loss is measurable for up to 17 frames after the cut in PSNR-Y (0–2 on the clean and
+  colourful cuts, 4–6 bright, 8–17 on the dark and live-action ones, where all of shot B comes out
+  different in one batch), up to 6 in VMAF and 5 in DISTS. Up to 12% of the previous shot's last
+  frame shows in B's first frame (ghost coefficient: 3–5% on the bright and dark cuts, 12% on the
+  colourful anime, none on the clean and live-action ones).
 - **The offset k in the 4-frame latent group moves the damage, it doesn't remove it.** At k = 0
   (cut on a latent boundary) only B suffers; from k = 1 on, A's last frame shares a latent with B
-  and loses up to 2.3 dB and 16 VMAF points, with 1–3% of B in it.
+  and loses up to 2.3 dB and 16 VMAF points, with 1–4% of B in it.
 - **What carries the previous shot over is the causal VAE, not the DiT.** With one VAE pass and a
   hard DiT boundary exactly at the cut (k = 0), A is bit-identical to A run alone and B is hit
   hardest of all (−7.9 / −16.8 dB on its first frame, 9–11% ghost). Letting the DiT see both
@@ -38,17 +43,19 @@ ground truth; the reference is the two shots run separately, what correct shot d
   the previous shot into the short one's latent (15–20% of it shows), 6.9 / 7.1 dB at 2 frames,
   still 2.1–2.4 dB at 9. From 3 frames on, the merge costs about what a missed cut does. Alone, they are
   within 0.6 dB (bright) or 2 dB (dark) of the same frames inside a long run.
-- **A shot's first frame, encoded alone, is the closest to the ground truth, not the worst:** it
-  is re-rendered less (less sharp on six of eight shots, by 7–47%) and beats the next eight frames
-  by 0.04–5.5 dB of PSNR-Y. Prepending 4 mirrored frames (one more latent per shot: about 13 s at
-  1080p, 2–8% more GPU time per hour of animation) gives it the next frames' look but costs it
-  0.6–2.8 dB of that lead on six of eight shots ([details](#a-shots-first-frame-prepending-mirrored-frames)).
-  Whether its sharpness step is visible right after a cut, which changes the picture about 40 to
-  120 times more, waits for the review.
-- **For detection, a miss costs far more than a false cut:** 7–31 dB·frames of PSNR-Y over the
-  next shot's first 8 frames on the bright and dark cuts (about 0 on the clean one), against a
-  small gain for a false cut; folding a short shot into the previous one costs 10–21 dB·frames
-  over its own frames ([costs per error](#what-it-means-for-shot-detection)).
+- **A shot's first frame, encoded alone, is the closest to the ground truth, not the worst:** on
+  all eleven shots measured it beats the next eight frames by 0.04–5.5 dB of PSNR-Y, and it is
+  re-rendered less (less sharp on nine of them, by 3–55%). Prepending 4 mirrored frames (one more
+  latent per shot: about 13 s at 1080p, 2–8% more GPU time per hour of animation) mostly gives it
+  the next frames' look but costs it 0.6–2.8 dB of that lead on seven of eleven shots
+  ([details](#a-shots-first-frame-prepending-mirrored-frames)). Whether its sharpness step is
+  visible right after a cut, which changes the picture about 40 to 120 times more, waits for the
+  review.
+- **For detection, a miss costs far more than a false cut:** 5–31 dB·frames of PSNR-Y over the
+  next shot's first 8 frames on four of the six cuts (about 0 on the clean and colourful ones,
+  whose next frames come out better in one batch, though B's first frame still loses up to
+  7.4 dB), against a small gain for a false cut; folding a short shot into the previous one costs
+  10–21 dB·frames over its own frames ([costs per error](#what-it-means-for-shot-detection)).
 
 ## Why it matters for seedvr2x
 
@@ -80,6 +87,15 @@ weighed against them.
 | bright | flat-colour cartoon, web H.264 1080p | 48.2 (4.8) | 49 → 188 | 2.5 / 3.3 | 308 |
 | dark | dark anime, HEVC 1080p segment | 41.4 (0.25) | 156 → 33 | 0.8 / 0.8 | 5 |
 | clean | clean digital anime, Blu-ray H.264 1080p | 32.0 (1.9) | 52 → 143 | 1.2 / 5.7 | 35 |
+| colour | bright, colourful anime, H.264 1080p | 50.7 (3.1) | 52 → 167 | 0.5 / 10.1 | 103 |
+| live fast | live action, fast, with effects, Blu-ray H.264 1080p (untagged: BT.709 assumed), letterboxed | 30.1 (6.3) | 140 → 56 | 8.9 / 15.4 | 100 |
+| live slow | live action, slow, Blu-ray H.264 1080p, 24 fps, letterboxed | 36.7 (0.81) | 151 → 45 | 0.8 / 2.9 | 72 |
+
+The last three cuts came later, from three more sources, and were run at k = 0 and 2 only. A
+score of 30 or more with long shots on both sides is rare in live action: 1 such cut in the fast
+film and 6 in the slow one (about 1 h 40 min each), against 26 in 22 minutes of the anime episode.
+All of the films' were between a darker and a brighter shot; the anime's few cuts between shots of
+similar brightness were all between still shots.
 
 **Clips.** Per cut, one range of 132 frames, from 48 before the cut to 84 after it, was made once
 with `fr_clips.py make` (ground truth: 16-bit RGB; input: half size, Mitchell, x264 CRF 20, fed
@@ -148,22 +164,29 @@ the transition across the cut).
 
 ### A missed cut: one batch across the cut, by offset k
 
-The 81 frames in one batch against the aligned reference (A alone + B alone). Deficits by
-distance d to the cut, positive = the batch across the cut is worse; reach = frames measurably
-worse next to the cut (4-frame averages beyond the noise band), before / after it; α8 = the ghost
-coefficient's excess (share of the other shot's frame next to the cut).
+The 81 frames in one batch against the aligned reference (A alone + B alone); the colourful anime
+and the two live-action cuts at k = 0 and 2 only. Deficits by distance d to the cut, positive =
+the batch across the cut is worse; reach = frames measurably worse next to the cut (4-frame
+averages beyond the noise band), before / after it; α8 = the ghost coefficient's excess (share of
+the other shot's frame next to the cut).
 
 | k | Cut | PSNR-Y deficit, dB: d −1 / 0 / 1…3 / 4…7 / 8…15 | DISTS d 0…3 | VMAF d 0…3 | T-err lf at the cut | Reach before / after: PSNR-Y, DISTS, VMAF, T-err lf | α8 excess d −1 / 0 / 1…7 / 8…15 |
 |---|---|---|---|---|---|---|---|
 | 0 | bright | +0.44 / +4.14 / +3.42 / +1.11 / −0.37 | +0.020 | +11.6 | +4.82 | 0/6, 0/2, 0/4, 0/25 | +0.003 / +0.034 / −0.011 / +0.029 |
 | 0 | dark | +0.53 / +9.64 / +3.67 / +2.59 / +1.64 | −0.001 | +4.7 | −0.78 | 0/13, 21/0, 0/2, 0/8 | +0.005 / +0.045 / +0.017 / +0.012 |
 | 0 | clean | −2.21 / +0.10 / +0.53 / −0.96 / −0.93 | +0.009 | +3.7 | −0.43 | 0/0, 0/0, 0/2, 0/13 | +0.016 / −0.004 / −0.004 / +0.020 |
+| 0 | colour | +0.37 / +7.41 / −0.39 / −1.80 / −1.25 | +0.042 | +12.4 | +14.32 | 0/2, 0/5, 0/2, 0/5 | +0.008 / **+0.116** / +0.022 / +0.019 |
+| 0 | live fast | −0.85 / +2.79 / +2.23 / +2.79 / +0.73 | +0.007 | −0.6 | +3.50 | 0/11, 0/1, 0/6, 0/8 | +0.003 / −0.041 / +0.030 / +0.015 |
+| 0 | live slow | −1.69 / +6.18 / +3.43 / +2.77 / +2.01 | +0.008 | +7.2 | +0.73 | 0/17, 0/0, 0/3, 0/6 | +0.024 / −0.032 / +0.021 / +0.021 |
 | 1 | bright | +2.08 / +3.02 / +2.35 / +0.45 / −0.34 | +0.004 | +7.3 | +0.72 | 2/5, 0/0, 2/3, 3/24 | +0.010 / −0.012 / −0.005 / +0.024 |
 | 1 | dark | +0.46 / +4.01 / +1.50 / +1.84 / +1.08 | −0.006 | +3.4 | +0.18 | 0/12, 20/0, 0/2, 3/18 | +0.034 / −0.009 / +0.007 / +0.005 |
 | 1 | clean | −2.01 / +1.54 / +0.09 / −0.66 / −0.63 | +0.008 | +2.2 | +1.70 | 0/1, 0/0, 0/1, 3/5 | −0.002 / −0.012 / −0.006 / +0.008 |
 | 2 | bright | +1.80 / +4.85 / +2.97 / −0.30 / −0.62 | +0.004 | +6.4 | +2.68 | 0/4, 1/0, 0/3, 4/11 | +0.013 / −0.031 / −0.005 / +0.030 |
 | 2 | dark | −1.14 / +4.49 / +4.72 / +1.68 / +0.57 | −0.013 | +1.9 | +0.37 | 0/10, 23/0, 0/1, 4/16 | +0.019 / −0.013 / +0.015 / +0.007 |
 | 2 | clean | −2.61 / +3.04 / +0.01 / −0.82 / −0.96 | +0.002 | +2.5 | +4.96 | 0/1, 0/0, 0/1, 4/11 | +0.001 / −0.048 / −0.012 / +0.014 |
+| 2 | colour | +1.59 / +2.02 / −1.59 / −1.87 / −1.15 | +0.016 | −3.2 | +1.12 | 1/0, 0/2, 0/0, 4/3 | +0.009 / +0.016 / +0.022 / +0.016 |
+| 2 | live fast | −1.81 / +2.58 / +0.13 / +0.56 / +0.61 | +0.017 | +4.1 | +1.97 | 0/10, 0/2, 0/4, 6/12 | +0.008 / −0.033 / +0.005 / +0.004 |
+| 2 | live slow | −2.80 / +4.11 / +1.26 / +0.69 / +1.00 | −0.001 | +4.2 | −1.55 | 0/12, 0/0, 0/2, 4/17 | +0.044 / −0.031 / +0.011 / +0.010 |
 | 3 | bright | +0.43 / +2.35 / +1.93 / −0.37 / −0.33 | +0.006 | +2.7 | +2.40 | 0/4, 1/0, 3/1, 5/12 | −0.015 / −0.005 / +0.001 / +0.021 |
 | 3 | dark | +2.32 / +8.84 / +3.46 / +1.01 / −0.46 | −0.005 | +2.8 | +6.89 | 24/8, 24/0, 1/1, 4/11 | −0.011 / −0.039 / +0.011 / +0.006 |
 | 3 | clean | −0.24 / +3.89 / +1.05 / −0.77 / −0.84 | +0.013 | +4.3 | +5.87 | 0/2, 0/1, 0/2, 4/10 | −0.009 / −0.053 / −0.013 / +0.012 |
@@ -171,25 +194,36 @@ coefficient's excess (share of the other shot's frame next to the cut).
 - **The cost lands on B's first frames.** B's first frame loses 2.4–9.6 dB of PSNR-Y on the
   bright and dark cuts at every offset, its next three frames 1.5–4.7 dB, and VMAF drops 2–12
   points over B's first four frames. DISTS hardly moves (within ±0.02). The clean cut suffers
-  least: 0.1–3.9 dB on B's first frame, within the band from the next one on (k = 0, 1, 2).
+  least: 0.1–3.9 dB on B's first frame, within the band from the next one on (k = 0, 1, 2). The
+  three later cuts agree: B's first frame loses 2.0–7.4 dB (the colourful anime 7.4 at k = 0,
+  with DISTS +0.042 over B's first 4 frames, the only DISTS loss beyond ±0.02; the live-action
+  cuts 2.6–6.2). The colourful anime's next frames come out better in one batch than B alone, as
+  on the clean cut; the live-action ones worse, by 0.1–3.4 dB.
 - **How far it reaches:** PSNR-Y is measurably worse for 4–6 frames after the cut on the bright
-  cut, 8–13 on the dark one, 0–2 on the clean one; VMAF for 1–4 frames, DISTS for at most 2. The
-  low-frequency temporal error (T-err lf), whose band is narrow, stays different for 5–25 frames.
+  cut, 8–13 on the dark one, 0–2 on the clean and the colourful anime ones, 10–17 on the
+  live-action ones; VMAF for up to 6 frames, DISTS for up to 5 (the colourful anime, k = 0), at
+  most 2 elsewhere. On the dark and live-action cuts the far deficits are a rendering difference
+  of the whole shot B in one batch (PSNR-Y still +0.5 to +4.3 dB 16 or more frames after the cut,
+  with DISTS within ±0.011 there) rather than the cut's reach. The low-frequency
+  temporal error (T-err lf), whose band is narrow, stays different for 3–25 frames.
 - **The offset moves the damage between the shots.** At k = 0 the cut sits on a latent boundary
   and A's last frames are no worse than the rest of A (the dark cut's A is worse throughout, see
   below). From k = 1 on, A's last frames share latent 6 with B: the last one loses up to 2.3 dB
-  of PSNR-Y and up to 16 VMAF points (bright, k = 1), carries 1–3% of B (α8 at d = −1, k = 1 and
+  of PSNR-Y and up to 16 VMAF points (bright, k = 1), carries 1–4% of B (α8 at d = −1, k = 1 and
   2), and the low-frequency temporal error is measurably worse for A's last 3–5 frames, where it
-  is clean at k = 0. B's first frame carries 3–5% of A at k = 0 on the bright and dark cuts (none
-  on the clean one), and none at k ≥ 1.
+  is clean at k = 0. B's first frame carries 3–5% of A at k = 0 on the bright and dark cuts and
+  12% on the colourful anime (none on the clean and live-action ones), and at most 1.6% at k ≥ 1.
 - **No offset is cheap.** Summed over B's first 8 frames, the PSNR-Y cost falls with k on the
   bright cut (18.8, 11.9, 12.6, 6.7 dB·frames for k = 0…3) but not on the dark one (31.0, 15.9,
   25.4, 23.3); meanwhile A's last 4 frames go from −10 VMAF points·frames at k = 0 to +27 at
-  k = 3 (bright). The clean cut stays within ±4 dB·frames at every k.
+  k = 3 (bright). The clean cut stays within ±4 dB·frames at every k. Of the later cuts, the
+  live-action ones fall from 20.7 and 27.5 dB·frames at k = 0 to 5.2 and 10.6 at k = 2, and the
+  colourful anime's is −1.0 and −10.2 (its later frames come out better in one batch).
 - On the dark cut, shot A is worse in one batch back to its first frame at every k (DISTS reach
   20–24 frames before the cut; +0.5 to +1.6 dB of PSNR-Y and +0.02 DISTS at k = 0), with no
   ghost: the DiT renders the bright shot differently with the dark one in view (the VAE, causal,
-  can't carry B back into A).
+  can't carry B back into A). On the live-action cuts it goes the other way: shot A comes out
+  0.6–1.7 dB closer to the ground truth in one batch.
 
 ### What carries one shot into the other: the VAE or the DiT
 
@@ -254,12 +288,13 @@ coefficient's excess.
 ### The ghost: how much of the other shot shows
 
 The ghost coefficient α (8×8 block means of luma, excess over the aligned reference) stays small
-in one batch, at most +0.045 (4.5% of the other shot's frame next to the cut), and the cut's latent
-offset decides where it shows:
+in one batch on five of the six cuts, at most +0.045 (4.5% of the other shot's frame next to the
+cut); the colourful anime's B takes 12% at k = 0. The cut's latent offset decides where it shows:
 
-- **k = 0:** in B's first frame, 3.4% (bright) and 4.5% (dark); none on the clean cut.
-- **k ≥ 1:** none in B's first frame (excess −0.005 to −0.053); A's last frame takes 1.0–3.4% of B
-  at k = 1 and 2, none at k = 3 (one B frame in the shared latent).
+- **k = 0:** in B's first frame, 3.4% (bright), 4.5% (dark) and 11.6% (colourful anime, whose
+  shot A is a nearly still, dark shot); none on the clean and live-action cuts.
+- **k ≥ 1:** at most 1.6% in B's first frame (excess −0.053 to +0.016); A's last frame takes
+  0.8–4.4% of B at k = 1 and 2, none at k = 3 (one B frame in the shared latent).
 - After B's first frame the excess stays between −0.013 and +0.030 on every cut and offset,
   without a trend.
 
@@ -352,58 +387,66 @@ frames 3 … 1 and the rest of the 4-frame grid is unchanged (one more latent; P
 GPU the CLI keeps them ([bug 05](../bugs/05-prepend-frames-not-removed.md));
 [`ffv1_out.py`](../scripts/ffv1_out.py) drops them from the master by default. Every master
 holds the shot's frame count, and each of its first frames matches the ground-truth frame of the
-same index best, and the same frame of the run without prepending. Runs: the three shots B (60
-frames from the cut, alone) with P = 4 and 8, the five question-1 clips (45 frames) with P = 4,
-against the same runs without prepending (B alone at seeds 42 and 43; question 1's default runs at
-three seeds, the noise of the deficit below: q95 / max over 18 seed pairs).
+same index best, and the same frame of the run without prepending. Runs: the three first shots B
+(60 frames from the cut, alone) with P = 4 and 8, the three later cuts' shots B with P = 4, the
+five question-1 clips (45 frames) with P = 4, against the same runs without prepending (the first
+shots B at seeds 42 and 43; question 1's default runs at three seeds, the noise of the deficit
+below: q95 / max over 18 seed pairs).
 
 Frame 0's deficit against the mean of frames 1…8, positive = frame 0 worse, without prepending →
 with P = 4 (→ P = 8). Sharpness = the Laplacian variance of luma relative to the ground truth's
-(0.4–6.9× on these shots), frame 0 against frames 1…8, and the jump from frame 0 to frame 1:
+(0.3–6.9× on these shots), frame 0 against frames 1…8, and the jump from frame 0 to frame 1:
 
 | Shot | PSNR-Y, dB | DISTS | VMAF | Sharpness of frame 0 vs 1…8 | Jump 0 → 1 |
 |---|---|---|---|---|---|
 | bright cut, B | −0.41 → **+0.18** (→ **+0.45**) | +0.001 → +0.001 (→ +0.002) | −1.1 → **+1.1** (→ **+1.1**) | −7% → −5% (→ −5%) | +4% → +6% (→ +6%) |
 | dark cut, B | −0.04 → −0.30 (→ +0.04) | −0.002 → **−0.013** (→ −0.005) | −3.3 → −4.0 (→ −2.3) | +14% → **+5%** (→ **+6%**) | −9% → −7% (→ −5%) |
 | clean cut, B | −1.03 → **−0.12** (→ **+0.17**) | −0.005 → +0.000 (→ **+0.003**) | −5.7 → **−1.3** (→ **+0.4**) | −14% → **−2%** (→ **+1%**) | +16% → **+7%** (→ **+6%**) |
+| colour cut, B | −1.15 → −0.85 | +0.006 → +0.010 | −15.6 → **−9.9** | −55% → −53% | +9% → **−1%** |
+| live fast cut, B | −1.78 → −1.71 | −0.012 → **+0.011** | −9.3 → −10.8 | −3% → **−14%** | −6% → **+2%** |
+| live slow cut, B | −1.60 → **−0.89** | −0.017 → −0.011 | −9.6 → **−6.6** | −15% → **+0%** | +3% → +1% |
 | anime-clean | −1.81 → **−0.48** | −0.001 → +0.002 | −13.3 → **−4.2** | −10% → **+7%** | +2% → 0% |
 | anime-grain | −4.56 → **−1.76** | −0.018 → **−0.008** | −18.9 → **−9.1** | −47% → **−15%** | +39% → **+5%** |
 | anime-dark | −5.53 → **−3.44** | −0.031 → **−0.018** | −27.7 → **−14.5** | +31% → +29% | +8% → +8% |
 | cartoon-bright | −3.98 → **−1.66** | −0.076 → **−0.037** | −25.5 → **−14.4** | −29% → **−14%** | +24% → **+14%** |
 | anime-sky | −0.58 → −0.55 | −0.047 → −0.051 | −3.5 → −3.3 | −16% → −12% | −49% → −51% |
-| input (bicubic), 8 shots | −0.84 … +0.07 | −0.012 … +0.027 | −3.4 … −0.0 | | |
+| input (bicubic), 11 shots | −0.84 … +1.51 | −0.012 … +0.027 | −3.4 … +0.1 | | |
 | seed noise of the deficit | 0.22 / 0.30 | 0.005 / 0.007 | 1.4 / 1.8 | 4% / 5% | 5% / 5% |
 
 (Bold: changed by more than the seed noise's max.)
 
 - **Without prepending, a shot's first frame is the one closest to the ground truth,** not the
-  worst: on all eight shots it beats the next eight frames by 0.04–5.5 dB of PSNR-Y and 1–28 VMAF
-  points, in DISTS by up to 0.076 (within ±0.002 on three shots). Only the dark cut's frame 0 is
-  worse in LPIPS (+0.012). The degraded input accounts for little of it: its own first frame, an
-  x264 I-frame, beats its next ones by at most 0.8 dB. The first latent is re-rendered less: on
-  six shots frame 0 is 7–47% less sharp than the next frames (relative to the ground truth), with
-  a jump of up to +39% to frame 1 (anime-grain); on the two darkest shots it is sharper.
-- **Prepending 4 frames makes frame 0 an ordinary frame.** Its sharpness joins the next frames'
-  (anime-grain −47% → −15%, cartoon-bright −29% → −14%, the clean cut −14% → −2%) and the jump
-  to frame 1 shrinks where it was large (+39% → +5%, +24% → +14%, +16% → +7%). But frame 0 also
-  loses much of its lead in fidelity: 0.6–2.8 dB of PSNR-Y, 2–13 VMAF points and up to 0.039
-  DISTS relative to frames 1…8 on six of the eight shots, beyond the seed noise. The dark cut's
-  frame 0, the one worse in LPIPS, gains (LPIPS 0.031, DISTS 0.011; anime-sky LPIPS 0.005). Eight
-  frames do no better than four.
+  worst: on all eleven shots it beats the next eight frames by 0.04–5.5 dB of PSNR-Y and 1–28
+  VMAF points, in DISTS by up to 0.076 (within ±0.006 on four shots). Only the dark cut's frame 0
+  is worse in LPIPS (+0.012). The degraded input accounts for little of it: its own first frame,
+  an x264 I-frame, is between 0.8 dB better and 1.5 dB worse than its next ones. The first
+  latent is re-rendered less: on nine shots frame 0 is 3–55% less sharp than the next frames
+  (relative to the ground truth; on the colourful anime the input's first frame already is, by
+  43%), with a jump of up to +39% to frame 1 (anime-grain); on the two darkest shots it is sharper.
+- **Prepending 4 frames mostly makes frame 0 an ordinary frame.** Its sharpness joins the next
+  frames' (anime-grain −47% → −15%, cartoon-bright −29% → −14%, the clean cut −14% → −2%, the
+  slow live-action cut −15% → 0%) and the jump to frame 1 shrinks where it was large (+39% → +5%,
+  +24% → +14%, +16% → +7%); not on the colourful anime (−55% → −53%), and on the fast
+  live-action cut frame 0 gets softer (−3% → −14%). But frame 0 also loses much of its lead in
+  fidelity: 0.6–2.8 dB of PSNR-Y, 2–13 VMAF points and up to 0.039 DISTS relative to frames 1…8
+  on seven of the eleven shots, beyond the seed noise (0.3 dB on the colourful anime, at its
+  edge). The dark cut's frame 0, the one worse in LPIPS, gains (LPIPS 0.031, DISTS 0.011; the
+  slow live-action cut LPIPS 0.011, anime-sky 0.005). Eight frames do no better than four.
 - **The step at 0 → 1 is a change of look, not a larger error.** The temporal error of
-  transition 0 → 1 against the ground truth (T-err) is above the next transitions' on three clips
-  without prepending (by 1.2–1.9; the input's own, I-frame then P-frames, by 0.1–0.2), and
-  prepending leaves it there (anime-dark +1.4 → +1.8, cartoon-bright +1.9 → +2.1; anime-sky
-  +1.2 → +0.7): it is not the lone first latent's doing.
+  transition 0 → 1 against the ground truth (T-err) is above the next transitions' on four shots
+  without prepending (by 1.2–1.9: three clips and the fast live-action cut; the input's own,
+  I-frame then P-frames, by 0.1–0.3), and prepending leaves it there (anime-dark +1.4 → +1.8,
+  cartoon-bright +1.9 → +2.1, live fast +1.7 → +2.2; anime-sky +1.2 → +0.7): it is not the lone
+  first latent's doing.
 - **The rest of the shot** moves by less than 0.4 dB of PSNR-Y on average over frames 1…end:
-  within 0.1 dB of the spread between seeds on the three shots B, 0.08–0.35 dB better on the five
-  clips, whose batch is 4 frames longer.
-- **Masking:** on the three cuts, prepending changes frame 0 by 1.1–2.6 luma levels on average
-  (mean |ΔY|), where the cut itself changes the picture by 97–145 levels; frame 0's error against
-  the ground truth is about that of frames 1…8 either way (1.6–5.9 levels). Whether the sharpness
-  jump right after a cut is visible is for the review: clips of each cut (A's last 12 frames, B's
-  first 36) without and with prepending, side by side, and 1:1 crops of frames 0 and 1 are
-  prepared for it.
+  within 0.1 dB of the spread between seeds on the three first shots B, within 0.11 dB on the
+  three later ones, 0.08–0.35 dB better on the five clips, whose batch is 4 frames longer.
+- **Masking:** on the six cuts, prepending changes frame 0 by 1.1–4.0 luma levels on average
+  (mean |ΔY|), where the cut itself changes the picture by 97–152 levels; on the first three,
+  frame 0's error against the ground truth is about that of frames 1…8 either way (1.6–5.9
+  levels). Whether the sharpness jump right after a cut is visible is for the review: clips of
+  each cut (A's last 12 frames, B's first 36) without and with prepending, side by side, and 1:1
+  crops of frames 0 and 1 are prepared for it.
 - **Cost:** one latent per shot, 4 more computed frames: about 13 s per shot at 1080p (3.0–3.3 s
   per computed frame on this GPU in this session, 3.9–5.1 s in earlier ones: 16–20 s; pairs of
   runs differ by −0.5 to +28 s for one latent, within the ±7% run-to-run spread). Per hour of
@@ -424,6 +467,9 @@ PSNR-Y in dB·frames, VMAF in points·frames, DISTS in DISTS·frames:
 | Missed cut, one batch | bright, k = 0 / 1 / 2 / 3 | 18.8 / 11.9 / 12.6 / 6.7 ; A 0.5 / 2.6 / 1.2 / −2.0 | 56.0 / 35.3 / 26.6 / 7.7 ; A −10.3 / 11.5 / 1.5 / 26.5 | 0.075 / 0.004 / −0.009 / 0.017 |
 | | dark, k = 0 / 1 / 2 / 3 | 31.0 / 15.9 / 25.4 / 23.3 ; A 2.4 / 2.9 / 1.1 / 4.2 | −7.5 / −12.3 / −18.0 / −19.7 ; A −8.9 / −6.9 / −9.4 / 4.3 | −0.153 / −0.171 / −0.175 / −0.173 |
 | | clean, k = 0 / 1 / 2 / 3 | −2.1 / −0.8 / −0.2 / 3.9 ; A −8.9 / −8.5 / −9.6 / −6.5 | −3.1 / −8.9 / −13.3 / −14.3 ; A −26.8 / −24.7 / −27.0 / −13.9 | 0.016 / 0.021 / −0.013 / 0.036 |
+| | colour, k = 0 / 2 | −1.0 / −10.2 ; A 1.3 / 2.4 | 15.3 / −48.4 ; A −6.5 / −6.0 | 0.199 / 0.059 |
+| | live fast, k = 0 / 2 | 20.7 / 5.2 ; A −3.0 / −1.1 | 16.1 / 17.0 ; A −28.1 / −13.9 | 0.010 / 0.054 |
+| | live slow, k = 0 / 2 | 27.5 / 10.6 ; A −6.3 / −5.9 | 28.5 / 1.3 ; A −11.7 / −7.4 | −0.027 / −0.076 |
 | Missed cut, latent windows (k = 0) | bright: (i) / (ii) / (iii) | 15.2 / 14.7 / 27.6 ; A 6.3 / 3.2 / 0 | 67.2 / 67.2 / 132.3 ; A 5.1 / 11.0 / 0 | 0.078 / 0.063 / 0.312 |
 | | dark: (i) / (ii) / (iii) | 30.7 / 16.6 / 83.7 ; A −0.9 / −0.7 / 0 | −4.5 / −7.1 / 149.0 ; A 0.3 / −3.2 / 0 | −0.208 / −0.245 / 0.281 |
 | Missed cut, latent windows (k = 2) | bright: (i) / (ii) / (iii) | 3.9 / 3.7 / 12.5 ; A 6.0 / 1.3 / 3.7 | 31.4 / 32.3 / 43.2 ; A 13.6 / 9.2 / 19.7 | 0.009 / −0.016 / 0.188 |
@@ -436,9 +482,13 @@ PSNR-Y in dB·frames, VMAF in points·frames, DISTS in DISTS·frames:
 
 Read per event:
 
-- **A missed cut** costs 7–31 dB·frames of PSNR-Y on the next shot's first 8 frames on two of the
-  three cuts, and nothing measurable beyond B's first frame on the clean one. On the dark cut the
-  metrics disagree past B's first frames (PSNR-Y worse, VMAF and DISTS better: see the caveats).
+- **A missed cut** costs 5–31 dB·frames of PSNR-Y on the next shot's first 8 frames on four of
+  the six cuts (bright, dark, the two live-action ones), and nothing measurable beyond B's first
+  frame on the clean and the colourful anime ones, whose next frames come out better in one batch
+  (the colourful anime's first frame still loses 7.4 dB at k = 0, and its DISTS sum, 0.20, is the
+  largest of all one-batch cases).
+  On the dark and live-action cuts part of the sum is shot B rendered differently throughout, and
+  the metrics disagree past B's first frames (PSNR-Y worse, DISTS level or better: see the caveats).
   Latent windows that straddle the missed cut (i, ii) cost about what one batch does (from
   14 dB·frames less to 2 more on B). A window boundary at the cut's latent (iii) costs 1.5–3× more
   PSNR-Y at k = 0; at k = 2 the same PSNR-Y as one batch, but 17–76 VMAF points·frames and about
@@ -458,26 +508,32 @@ Read per event:
   on after it) it costs 3.6–7.8 dB·frames for a single frame and 17–25 for 9. The merge is never
   the cheaper option here.
 
-So, against these three cuts, the expected cost of a detector per hour of video is about
-(misses per hour) × 7–31 dB·frames + (short shots merged into the previous shot per hour) ×
-10–21, plus (false cuts per hour) × a temporal step of uncertain visibility and no fidelity loss.
+So, against these six cuts, the expected cost of a detector per hour of video is about
+(misses per hour) × 5–31 dB·frames (about 0 on two of the six) + (short shots merged into the
+previous shot per hour) × 10–21, plus (false cuts per hour) × a temporal step of uncertain
+visibility and no fidelity loss.
 The error rates per threshold come from question 3's labelled review.
 
 ## Caveats
 
-- **Three cuts, all between a dark shot and a bright one** (mean luma 49 → 188, 156 → 33,
-  52 → 143). A cut between shots of similar brightness and colour may leak less visibly, and the
-  ghost coefficient is ill-conditioned there (it projects on the difference between the shots).
-  No live action yet.
+- **Six cuts, all between a darker and a brighter shot** (mean luma 49 → 188, 156 → 33,
+  52 → 143, 52 → 167, 140 → 56, 151 → 45): a scene score of 30 or more picks such cuts, and in
+  live action it is rare. A cut between shots of similar brightness and colour may leak less
+  visibly, and the ghost coefficient is ill-conditioned there (it projects on the difference
+  between the shots). The live action is two cuts, from two films, both letterboxed: a quarter
+  of the frame is black bars, which dilutes their full-frame deficits by about a quarter. The
+  three later cuts were run at k = 0 and 2 only, without the latent layouts, short shots or a
+  second seed.
 - **One rendering per configuration (seed 42).** The noise band comes from question 1's seed
-  runs on other clips, pooled with the three cuts' aligned references at a second seed (15 pairs,
+  runs on other clips, pooled with the three first cuts' aligned references at a second seed (15 pairs,
   783 values per metric). It is wide for PSNR-Y (0.82 dB on 4-frame averages) and very narrow for
   the low-frequency measures (CIEDE2000 lf 0.044, T-err lf 0.078), which flag almost any
   systematic change.
 - **PSNR-Y on dark content is hypersensitive:** shot B of the dark cut sits at a mean luma of 33,
   where a one-level shift is worth several dB. Its PSNR-Y deficits far from the cut (+3.4 dB at
   d ≥ 32, where VMAF and DISTS say the one batch is as good or better) are a rendering
-  difference, not the cut. DISTS and VMAF are the steadier measures there.
+  difference, not the cut. DISTS and VMAF are the steadier measures there. The same goes for the
+  slow live-action cut's shot B (mean luma 45: +4.2 dB at d ≥ 32, DISTS level).
 - **The aligned reference is not a perfect target:** B alone starts on a 1-frame latent and A
   alone ends a batch, and both differ from a longer batch for reasons that have nothing to do
   with the cut (DiT windows, noise by position). The one batch is *better* than the reference on
@@ -490,8 +546,8 @@ The error rates per threshold come from question 3's labelled review.
 - **A shot's first frame is judged against a ground truth the model doesn't aim at:** it
   re-renders ([numerics.md](numerics.md)), so the full-reference metrics favour the frame it
   re-renders least; whether its look or the next frames' is better is for the eye. Its input is
-  an x264 I-frame, a little better than the P-frames after it. One seed per prepend run; P = 8 on
-  the three cuts only. Run times vary by ±7% between runs and by up to 1.7× between sessions on
+  an x264 I-frame, between 0.8 dB better and 1.5 dB worse than the P-frames after it. One seed
+  per prepend run; P = 8 on the three first cuts only. Run times vary by ±7% between runs and by up to 1.7× between sessions on
   the same GPU, so the cost of one latent comes from the time per computed frame.
 - `--color_correction none`, 1080p from half-size input, 7B fp16 only. With `lab`, low-frequency
   differences between batches shrink ([quality.md](quality.md#colour-correction)).
@@ -500,6 +556,9 @@ The error rates per threshold come from question 3's labelled review.
 
 ```bash
 F=scripts/fr_clips.py; M=scripts/fr_metrics.py; J=scripts/cut_metrics.py
+# a hard cut: scdet as sptenc runs it (seeking: approximate indices), then frame-exact scores
+python3 $F scan SRC --ss T --duration D --hard 30 --before 48 --after 84 --json scan.json
+python3 $F scores SRC --first $((c - 60)) --last $((c + 100))    # c = the cut's exact frame index
 # one degraded range around the cut (c = the cut frame), then frame-exact slices of it
 python3 $F make SRC --start $((c - 48)) --frames 132 --name cut-long --out clips --degrade d1
 python3 $F verify clips/cut-long --source --cv2-python /path/to/seedvr2/.venv/bin/python
