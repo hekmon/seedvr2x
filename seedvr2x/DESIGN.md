@@ -514,8 +514,9 @@ Fallback when latent stitching can't be used: a linear pixel cross-fade over K =
 ## Colour correction
 
 `lab` is the recommended mode on quality grounds
-([quality.md](../research/docs/quality.md)): it removes the model's colour drift (+30%
-saturation, toward blue), halves boundary jumps and cancels the VAE tile drift.
+([quality.md](../research/docs/quality.md)): it removes the model's colour drift (more
+saturation, +30% on the dark anime clips, and a hue shift that depends on the content), halves
+boundary jumps and cancels the VAE tile drift.
 `--color-correction {lab,none}`, `lab` by default, is a setting, so a resume compares it.
 
 What numz's `lab` does, per batch slice (numz `4490bd1`):
@@ -668,10 +669,22 @@ output's colours are, it repairs what tiling does to them, and the measurements 
     `wavelet` alone gave ΔE 1.04 and `lab` 1.01). If it stays: jointly over a\* and b\* rather
     than channel by channel, and the L\* weight (0.8 output + 0.2 matched, numz's constant,
     never measured).
-  - OKLab rather than CIELAB, whose hues bend as chroma changes, in blues most: the model's
-    drift is toward blue.
-- **Protocol:** no model run per variant. The raw decodes (`none`, unclamped) and the
-  encoder's input are dumped once per clip and tiling (untiled, and the tiles above), and each
+  - OKLab rather than CIELAB, whose hues bend as chroma changes, in blues most.
+- **Step 0, the diagnosis** ([colour.md](../research/docs/colour.md); CPU only, on
+  numerics.md's masters, 10 clips, indicative):
+  - numz's histogram step causes most of `lab`'s coarse colour error. The split alone does
+    better after a 16 px blur on all 10 clips, and adding numz's matching to it reproduces
+    `lab`'s figures.
+  - Colour taken from the input at 3.2 px, lightness at 13 px, beats `lab` at every blur scale
+    on all 10 clips (−6 to −45% after a 4 px blur), with the luma detail unchanged. Finer
+    lightness closes the rest of the gap for detail, a trade-off for steps 2–3.
+  - The uncorrected model's drift: more saturation on 9 of the 10 clips, and b\* toward yellow
+    on 7. "Toward blue" held on the dark anime clips alone.
+  - Should steps 1–3 confirm that the histogram step goes, the shot-pooled histograms go with
+    it, and so do the decode's two passes and its buffer: the decode would stream with the
+    correction on, the input copy staying for the reference.
+- **Protocol:** no model run per variant. The raw decodes (`none`, unclamped) and `lab`'s
+  reference are dumped once per clip and tiling (untiled, and the tiles above), and each
   variant post-processes them, built on `runtime/colour.py` (ours, Apache-2.0) so that a
   winner ports as it is.
   - Clips: animation and live action, with the mild and the heavier degradation.
@@ -1027,10 +1040,12 @@ seedvr2x sizes the windows from your GPU's memory; you can cap them." The model'
 attention windows stay out of the user docs; they matter only to developers.
 
 **Colour correction, first and in full:**
-- **The model itself shifts colours.** Raw SeedVR2 output is more saturated and bluer than its
-  input. On clip A, with colour correction off, the saturation spread is +34% on a* and +28%
-  on b*, and the low-frequency colour error is ΔE 4.44
-  ([quality.md](../research/docs/quality.md#colour-correction)).
+- **The model itself shifts colours.** Raw SeedVR2 output is more saturated than its input,
+  and its hue moves with the content. On a dark anime clip (clip A), with colour correction
+  off, the saturation spread is +34% on a* and +28% on b*, toward blue, and the low-frequency
+  colour error is ΔE 4.44 ([quality.md](../research/docs/quality.md#colour-correction)). On 7
+  of 10 full-reference clips the shift is toward yellow
+  ([colour.md](../research/docs/colour.md)).
 - **ByteDance's own pipeline corrects it, with a fix it can't ship.** Its inference script
   runs StableSR's wavelet colour fix after the model (`projects/inference_seedvr2_7b.py:300`),
   but the file is under a non-commercial licence, so the readme asks users to download it
