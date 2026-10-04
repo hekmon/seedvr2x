@@ -705,6 +705,9 @@ output's colours are, it repairs what tiling does to them, and the measurements 
   - Scores: ΔE00 after blurs of 1 to 16 px (where the error stays), PSNR-Y, LPIPS, DISTS and
     Laplacian variance (detail kept), temporal error (flicker), colour fringes at strong edges,
     CAMBI (banding brought back from the source), and milestone 2's boundary steps on clip B.
+  - The finalists are scored again through the default master's conversion, `yuv420p10le` as
+    seedvr2x writes it: what users get keeps colour at half resolution, a sample every 2
+    output pixels, and 10 bits, where banding is checked.
   - Verdicts are paired against our `lab` and must exceed the seed spread, as in
     numerics.md. Then the user's eyes, on crops of edges, skin, skies and flat areas.
 - **Constraints:** written from its own maths, never from StableSR's code (the clean room
@@ -1329,7 +1332,8 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
     gradients could band. fp16 keeps 11 bits but VAE activations may overflow it; fp32 costs
     memory and time.
   - the chroma kernels: Catmull-Rom upsampling at decode, bilinear downsampling for the
-    `yuv420p10le` master
+    `yuv420p10le` master. The master being the default, every default output goes through
+    that downsampling.
   - the input preparation: the resize kernel and its `antialias` flag, and multiples of 16
     reached by padding (numz) or cropping (ByteDance)
   - a shot padded to 4n + 1 frames by mirroring its end (numz) or repeating its last frame
