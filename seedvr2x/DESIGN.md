@@ -23,7 +23,7 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
 - can be paused and resumed (run at night, give the computer back in the morning)
 
 It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of the
-[23 bugs](../research/bugs/README.md) live). It keeps ByteDance's model code.
+[25 bugs](../research/bugs/README.md) live). It keeps ByteDance's model code.
 
 ### Two kinds of users, both first-class
 - **Standalone, the regular workflow:** a video file in, an upscaled file out, with ffmpeg as
@@ -244,8 +244,11 @@ they differ and by which metrics, and how users are guided to them. What is know
 - **numz's fp8 files are plain casts.** Every tensor of the 3B's, and all but the last block's
   in the 7B's, is rounded to `e4m3fn` (3 mantissa bits), with no scale, down to the biases,
   norms, modulation tables, input and output layers and RoPE's frequencies. The Q4_K_M file
-  quantises only the 288 large matrices, with a scale every 32 weights, and keeps the other 840
-  tensors in fp16: the likely reason it measures closer to the source than fp8.
+  quantises only the 288 attention and MLP matrices of the blocks, 8 per block, 99% of the
+  weights, with a scale every 32 weights. Its other 840 tensors, the 6 matrices outside the
+  blocks included, are the fp16 file's byte for byte
+  ([models.md](../research/docs/models.md)): the likely reason it measures closer to the source
+  than fp8.
 - **RoPE's frequencies are constants of the architecture,** never trained, yet the fp8 files
   hold them rounded: up to 6% off in the 7B's blocks 0–34, and in the 3B's, the 5 lowest of 21
   at zero and others up to 41% off. numz runs the 7B's file on block 35's fp16 values in every
