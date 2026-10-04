@@ -16,7 +16,8 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
     13, so many shots are split into windows.
   - A 16 GB card can't hold the 7B fp16's weights (15.35 GiB) at all: it swaps every block,
     and phase 2's smaller files lighten it (see [Weights](#weights)).
-  - Below 48 GB, the 1080p VAE decode only fits tiled.
+  - Below 48 GB, the 1080p VAE decode only fits tiled. At 4K, every card tiles the decode,
+    the 96 GB one included, and that one's windows hold about 19 latents.
   - These cards also compute more slowly (an RTX 5080 has 84 SMs, the 96 GB card 188), so a
     job lasts longer there, and resume and `--until` matter most.
 - can be paused and resumed (run at night, give the computer back in the morning)
@@ -622,9 +623,9 @@ Validated against numz's `lab` on the metrics, not bit for bit (milestone 5).
 
 ### Beyond numz's `lab`
 
-Milestone 5 checks that ours is at least as good as numz's. That is a floor, not the aim: the
-colour correction decides how faithful the output's colours are, and the measurements leave
-room.
+Milestone 5 checks that ours is at least as good as numz's. That is a floor, not the aim. The
+user counts colour correction among seedvr2x's critical parts: it decides how faithful the
+output's colours are, it repairs what tiling does to them, and the measurements leave room.
 
 - **The gap.** On the full-reference clips, `lab` brings the low-frequency colour error to the
   ground truth down by 37–55%, to a ΔE00 of 1.07–1.58 after a 4 px blur, but the input itself,
@@ -633,15 +634,18 @@ room.
   saturation and colour drift sit finer
   ([quality.md](../research/docs/quality.md#colour-correction)). The histogram matching then
   corrects their distribution over the shot, not where they are.
-- **Tiles are part of it.** On 16–32 GB cards the VAE runs tiled, and a tile's damage is a
-  colour drift: each tile shifted uniformly, by up to 2 levels in the decode and 4 in the
-  encode at 512 px ([vram.md](../research/docs/vram.md#tiling)). The colour correction is what
+- **Tiles are part of it.** The VAE runs tiled at 4K on every card, the 96 GB one included (an
+  untiled 4K decode needs ≈ 134 GiB), and at 1080p below 48 GB. A tile's damage is a colour
+  drift: each tile shifted uniformly, by up to 2 levels in the decode and 4 in the encode at
+  512 px ([vram.md](../research/docs/vram.md#tiling)). The colour correction is what
   removes it: tiled and untiled decodes, both through `lab`, came out 48.9 dB apart
   ([quality.md](../research/docs/quality.md#vae-tiling-on-flat-areas)). The encode's tiles,
   which drift more, were never measured through `lab`.
-  - So every variant is also scored on tiled runs, at the tile sizes of vram.md's recipes for
-    16, 24 and 32 GB cards (encode / decode: 1024 / 768, 1344 / 1024, untiled / 1280), on
-    the per-tile offsets left after correction, flat areas first.
+  - So every variant is also scored on tiled runs, on the per-tile offsets left after
+    correction, flat areas first. At 1080p, at the tile sizes of vram.md's recipes for 16, 24
+    and 32 GB cards (encode / decode: 1024 / 768, 1344 / 1024, untiled / 1280). At 4K, at the
+    96 GB card's (encode untiled, decode tiles of 1536 px and up) and the consumer cards',
+    on 4K ground truth (×2 from 1080p) once the UHD samples are in.
   - What's left of the drift sets how small the planner may make tiles: on the smallest
     cards, and wherever smaller tiles would make room for `compile_vae`, which doubles the
     VAE's memory.
