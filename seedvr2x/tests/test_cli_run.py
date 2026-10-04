@@ -1139,13 +1139,14 @@ def test_lab_one_file(
 def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
     # The two passes give each shot exactly what lab gives its frames in the decode's slices,
     # histograms pooled over the shot: the second maps the values the first counted, and the
-    # reference rebuilt from the copy is the encoder's input, its padding cropped as the decode's
-    # (target 100 x 133, decoded 112 x 144, written 100 x 132).
+    # reference is the copy's frames through the encoder's transform in float32 (DESIGN.md, Colour
+    # correction, Numerics), its padding cropped as the decode's (target 100 x 133, decoded 112 x
+    # 144, written 100 x 132).
     from seedvr2x.media.decode import to_float32
     from seedvr2x.media.source import examine
     from seedvr2x.runtime import colour, model
     from seedvr2x.runtime.job import target_size
-    from seedvr2x.runtime.shot import encoder_inputs
+    from seedvr2x.runtime.shot import pad_4n1
 
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB, "--resolution", "100") == 0
@@ -1157,15 +1158,12 @@ def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps
     models = cast(model.Models, STAND_IN_MODELS)
     target = target_size(64, 48, Fraction(1), 100)
     assert target == (100, 133) and output_size(target) == (height, width)
+    transform = model.input_transform(target)
     expected: list[torch.Tensor] = []
     for start, end in ((0, 3), (3, 4), (4, 25)):
         count = end - start
-        shot = iter(frames[start:end])
-
-        def read(n: int) -> npt.NDArray[np.float32]:
-            return np.stack([next(shot) for _ in range(n)])  # noqa: B023
-
-        reference = torch.cat(list(encoder_inputs(models, read, count, target)), dim=1)
+        reference = transform(pad_4n1(torch.from_numpy(frames[start:end])).permute(0, 3, 1, 2))
+        assert reference.dtype == torch.float32
         assert reference.shape[2:] == (112, 144)  # padded to multiples of 16
         reference = reference[:, :count, :height, :width].permute(1, 0, 2, 3)
         values = torch.tensor([(start + frame) / 500 - 1 for frame in range(count)])

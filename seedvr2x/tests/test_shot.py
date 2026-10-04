@@ -1,4 +1,5 @@
-"""The shot pipeline's parts on the CPU: windows, mixing weights, padding, streamed decode."""
+"""The shot pipeline's parts on the CPU: windows, mixing weights, padding, the encoder's input
+and lab's reference, streamed encode and decode."""
 
 from itertools import pairwise
 from types import SimpleNamespace
@@ -11,7 +12,25 @@ import torch
 from omegaconf import OmegaConf
 
 from seedvr2x.runtime import model
-from seedvr2x.runtime.shot import input_slices, mix_weights, pad_4n1, padded_length, window_layout
+from seedvr2x.runtime.shot import (
+    encoder_inputs,
+    input_slices,
+    mix_weights,
+    pad_4n1,
+    padded_length,
+    reference_inputs,
+    window_layout,
+)
+
+# The models as far as the encoder's input and lab's reference use them: the CPU and the VAE's
+# slicing (model.encode_slices).
+SLICING = cast(
+    model.Models,
+    SimpleNamespace(
+        device=torch.device("cpu"),
+        runner=SimpleNamespace(vae=SimpleNamespace(use_slicing=True, slicing_sample_min_size=4)),
+    ),
+)
 
 
 def test_one_window_when_the_shot_fits() -> None:
@@ -79,10 +98,7 @@ class Reads:
 
 
 def vae_slices(frames: int) -> list[int]:
-    vae = SimpleNamespace(use_slicing=True, slicing_sample_min_size=4)
-    return model.encode_slices(
-        cast(model.Models, SimpleNamespace(runner=SimpleNamespace(vae=vae))), frames
-    )
+    return model.encode_slices(SLICING, frames)
 
 
 @pytest.mark.parametrize("count", range(1, 22))
@@ -102,6 +118,38 @@ def test_vae_slices() -> None:
     assert vae_slices(5) == [5]
     assert vae_slices(9) == [5, 4]
     assert vae_slices(45) == [5, *[4] * 10]
+
+
+# Frames resized 2x, as milestone 1's are, to a height the transform pads (24 to 32).
+SOURCE, TARGET = (12, 16), (24, 32)
+
+
+@pytest.mark.parametrize("count", [1, 6, 13])
+def test_reference_is_the_transform_in_float32(count: int) -> None:
+    # lab's reference (DESIGN.md, Colour correction, Numerics): the frames read, through the
+    # encoder's transform in float32, with no float16 or bfloat16 step, which random values would
+    # show; slice by slice as the encoder's input.
+    frames = np.random.default_rng(count).random((count, *SOURCE, 3), dtype=np.float32)
+    # From a copy, before the reference is built: on the CPU, the reference's slices hold the
+    # frames read without a copy, so a step altering them in place would alter both sides alike.
+    video = pad_4n1(torch.from_numpy(frames.copy())).permute(0, 3, 1, 2)
+    expected = model.input_transform(TARGET)(video)
+    slices = list(reference_inputs(SLICING, Reads(frames), count, TARGET))
+    assert [s.shape[1] for s in slices] == vae_slices(padded_length(count))
+    assert all(s.dtype == torch.float32 for s in slices)
+    assert torch.equal(torch.cat(slices, dim=1), expected)
+
+
+@pytest.mark.parametrize("count", [1, 6, 13])
+def test_encoder_input_is_numz(count: int) -> None:
+    # The encoder's input stays numz's (milestone 1): float16 frames, cast to bfloat16 before the
+    # transform (generation_phases.py:380-413).
+    frames = np.random.default_rng(count).random((count, *SOURCE, 3), dtype=np.float32)
+    slices = list(encoder_inputs(SLICING, Reads(frames), count, TARGET))
+    assert [s.shape[1] for s in slices] == vae_slices(padded_length(count))
+    assert all(s.dtype == model.COMPUTE_DTYPE == torch.bfloat16 for s in slices)
+    video = pad_4n1(model.to_input(frames)).permute(0, 3, 1, 2).to(torch.bfloat16)
+    assert torch.equal(torch.cat(slices, dim=1), model.input_transform(TARGET)(video))
 
 
 @pytest.fixture(scope="module")

@@ -24,7 +24,7 @@ by 2x2 means) on its 8-bit scale:
 CIELAB is colour.rgb_to_lab, numz's sRGB/D65 formulas (test_colour.py), where quality_metrics.py has
 OpenCV's float conversion, which approximates them: up to 0.6 units off on random colours, 0.08 on
 average. Both outputs go through the same one, so the comparison holds; on milestone 1's input ours
-reads ΔE lf 0.6260 here, 0.6301 by quality_metrics.py.
+reads ΔE lf 0.6287 here, 0.6321 by quality_metrics.py.
 
 The run goes through the CLI in a process of its own, as test_regression.py's does.
 """
@@ -53,14 +53,16 @@ pytestmark = [
     ),
 ]
 
-# DESIGN.md's tolerances (Validation milestones 5): ΔE, percent of the input's spread, 8-bit level.
-DE_LF, SPREAD, SHIFT = 0.1, 1.0, 0.1
+# DESIGN.md's tolerances (Validation milestones 5): ΔE; for the a*/b* spread, 1% of the input's
+# or 0.1 unit if larger; 8-bit level.
+DE_LF, SPREAD, SPREAD_UNITS, SHIFT = 0.1, 0.01, 0.1, 0.1
 # The PSNR of ours against numz's output, information in milestone 5's acceptance, is this test's
-# own hold, tighter than the tolerances on purpose: 59.63 dB in the first runs (58.58 at the worst
-# frame). The floor lets the output move by about 0.1 level more, 0.04 ΔE at mid-grey (2.5 levels
-# per L* unit), against a tolerance of 0.1 ΔE. Measured again and set again after a deliberate
-# change of lab or of what it is fed, the decode's precision for one.
-PSNR_FLOOR = 59.0
+# own hold, tighter than the tolerances on purpose: 60.18 dB with lab's reference in float32 (59.50
+# at the worst frame), 59.63 with the first, the encoder's bfloat16 input. The floor lets the
+# output move by about 0.1 level more, 0.04 ΔE at mid-grey (2.5 levels per L* unit), against a
+# tolerance of 0.1 ΔE. Measured again and set again after a deliberate change of lab or of what it
+# is fed, the decode's precision for one.
+PSNR_FLOOR = 59.5
 # BT.601 luma, as quality_metrics.py weighs it.
 LUMA = (0.299, 0.587, 0.114)
 # OpenCV's Gaussian kernel for sigma 4 on float images: cvRound(8 sigma + 1) | 1 = 33 taps.
@@ -108,8 +110,9 @@ def blur(frames: torch.Tensor) -> torch.Tensor:
 
 
 def scores(output: npt.NDArray[np.generic], source: npt.NDArray[np.generic]) -> dict[str, float]:
-    """ΔE lf, a*/b* spreads (percent off the input's) and Y shift of output (n, 3, 2h, 2w) against
-    source (n, 3, h, w), frame by frame."""
+    """ΔE lf, a*/b* spreads and Y shift of output (n, 3, 2h, 2w) against source (n, 3, h, w),
+    frame by frame: the spreads in CIELAB units, the output's (a_spread, b_spread) and the
+    input's (a_input, b_input)."""
     count, _, height, width = source.shape
     luma = torch.tensor(LUMA, dtype=torch.float64).view(3, 1, 1)
     de_lf, shift = 0.0, 0.0
@@ -124,11 +127,13 @@ def scores(output: npt.NDArray[np.generic], source: npt.NDArray[np.generic]) -> 
         lows = blur(lab.double())
         de_lf += float((lows[0] - lows[1]).square().sum(0).sqrt().mean())
         spreads += lab[:, 1:].double().flatten(2).std(2, correction=0).numpy()
-    spread = 100 * (spreads[0] / spreads[1] - 1)
+    spreads /= count
     return {
         "de_lf": de_lf / count,
-        "a_spread": float(spread[0]),
-        "b_spread": float(spread[1]),
+        "a_spread": float(spreads[0, 0]),
+        "b_spread": float(spreads[0, 1]),
+        "a_input": float(spreads[1, 0]),
+        "b_input": float(spreads[1, 1]),
         "shift": shift / count,
     }
 
@@ -153,6 +158,7 @@ def test_lab_against_numz(tmp_path: Path) -> None:
             *(sys.executable, "-m", "seedvr2x", str(m1 / "input_rgb.mkv"), "-o", str(master)),
             *("--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors"),
             *("--resolution", "1080", "--seed", "42", "--color-correction", "lab"),
+            *("--format", "gbrp16le"),
         ],
         capture_output=True,
         text=True,
@@ -168,7 +174,10 @@ def test_lab_against_numz(tmp_path: Path) -> None:
     report = f"ours {mine}, numz {theirs}, PSNR ours against numz {distance:.3f} dB"
     print(report)
     assert mine["de_lf"] <= theirs["de_lf"] + DE_LF, report
-    for spread in ("a_spread", "b_spread"):
-        assert abs(mine[spread]) <= abs(theirs[spread]) + SPREAD, report
+    for channel in "ab":
+        source_spread = mine[f"{channel}_input"]
+        tolerance = max(SPREAD * source_spread, SPREAD_UNITS)
+        off = abs(mine[f"{channel}_spread"] - source_spread)
+        assert off <= abs(theirs[f"{channel}_spread"] - source_spread) + tolerance, report
     assert abs(mine["shift"]) <= abs(theirs["shift"]) + SHIFT, report
     assert distance >= PSNR_FLOOR, report

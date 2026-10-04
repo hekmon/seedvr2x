@@ -13,7 +13,8 @@ The steps are apart, as the resumable units of DESIGN.md (Pause and resume) are:
 what the one before gives, wherever it was kept; upscale_shot runs them in a row.
 
 With `lab` (DESIGN.md, Colour correction), the decode makes two passes over a buffer of its
-frames, against the reference rebuilt from the shot's input copy by the encode's own calls.
+frames, against the reference built from the shot's input copy through the encoder's transform,
+in float32 (reference_inputs).
 """
 
 import math
@@ -142,11 +143,15 @@ def _padding(tail: Tensor, count: int) -> Tensor:
 
 
 def input_slices(
-    read: Callable[[int], npt.NDArray[np.float32]], count: int, sizes: list[int]
+    read: Callable[[int], npt.NDArray[np.float32]],
+    count: int,
+    sizes: list[int],
+    to_tensor: Callable[[npt.NDArray[np.float32]], Tensor] = model.to_input,
 ) -> Iterator[Tensor]:
     """The `count` frames of a shot, read as they are needed, padded at the end as pad_4n1 pads
-    them, in slices of `sizes` frames (model.encode_slices): (t, H, W, 3) float16 on the CPU,
-    numz's input (model.to_input). Only the last 4 frames read are kept, for the padding."""
+    them, in slices of `sizes` frames (model.encode_slices): (t, H, W, 3) on the CPU, as to_tensor
+    makes them, by default float16, numz's input (model.to_input). Only the last 4 frames read are
+    kept, for the padding."""
     remaining, given = count, 0
     tail: Tensor | None = None
     padding: Tensor | None = None
@@ -157,7 +162,7 @@ def input_slices(
             frames = read(real)
             if frames.shape[0] != real:
                 raise RuntimeError(f"{frames.shape[0]} frames read, {real} asked for")
-            part = model.to_input(frames)
+            part = to_tensor(frames)
             tail = part[-4:] if tail is None else torch.cat([tail, part])[-4:]
             parts.append(part)
             remaining -= real
@@ -233,14 +238,48 @@ def encoder_inputs(
 ) -> Iterator[Tensor]:
     """The encoder's input for a shot of `count` frames, read as they are needed (encode_shot),
     slice by slice: each (C, t, H, W) in [-1, 1], COMPUTE_DTYPE on the device, t following
-    model.encode_slices over the shot padded to 4n + 1. lab's reference is rebuilt from the
-    shot's input copy by the same calls, so it is the tensor the encoder took, bit for bit."""
+    model.encode_slices over the shot padded to 4n + 1."""
+    return _transformed(models, read, count, target, model.to_input, COMPUTE_DTYPE)
+
+
+def reference_inputs(
+    models: Models,
+    read: Callable[[int], npt.NDArray[np.float32]],
+    count: int,
+    target: tuple[int, int],
+) -> Iterator[Tensor]:
+    """lab's reference for a shot of `count` frames, read from its input copy as they are needed
+    (_correct): the frames through the encoder's transform (model.input_transform) in float32,
+    slice by slice as encoder_inputs gives the encoder's input: each
+    (C, t, H, W) float32 in [-1, 1] on the device (DESIGN.md, Colour correction, Numerics).
+
+    Not the encoder's own input: numz's numerics cast the frames to bfloat16 before the resize
+    (generation_phases.py:380-413), which rounds 89% of 8-bit codes up, +0.114 level on average,
+    and brightened lab's output by its clip's bias (milestone 5's first run). numz's own lab
+    transforms the float16 frames without that cast (:127-168), ByteDance the frames in float32
+    (projects/inference_seedvr2_7b.py:255-268 at e4de8c2)."""
+    return _transformed(models, read, count, target, torch.as_tensor, torch.float32)
+
+
+def _transformed(
+    models: Models,
+    read: Callable[[int], npt.NDArray[np.float32]],
+    count: int,
+    target: tuple[int, int],
+    to_tensor: Callable[[npt.NDArray[np.float32]], Tensor],
+    dtype: torch.dtype,
+) -> Iterator[Tensor]:
+    """The frames of a shot of `count` frames, read as they are needed, made tensors by
+    to_tensor (input_slices) and through model.input_transform(target) as dtype on the device,
+    slice by slice: each (C, t, H, W) in [-1, 1], t following model.encode_slices over the shot
+    padded to 4n + 1."""
     transform = model.input_transform(target)
     # (t, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388), then
     # prepared slice by slice: every step works frame by frame.
+    sizes = model.encode_slices(models, padded_length(count))
     return (
-        transform(frames.permute(0, 3, 1, 2).to(models.device, COMPUTE_DTYPE))
-        for frames in input_slices(read, count, model.encode_slices(models, padded_length(count)))
+        transform(frames.permute(0, 3, 1, 2).to(models.device, dtype))
+        for frames in input_slices(read, count, sizes, to_tensor)
     )
 
 
@@ -330,8 +369,9 @@ def _correct(
 ) -> None:
     """lab over a shot (DESIGN.md, Colour correction), pooled: the first pass buffers the decoded
     frames (chunks, _decoded) and counts the histograms, the second reads them back, maps them and
-    writes them, float32. Each pass rebuilds the reference from the input copy, and converts in
-    the same calls, the decode's slices, so that the second finds the values the first counted.
+    writes them, float32. Each pass rebuilds the reference from the input copy (reference_inputs),
+    and converts in the same calls, the decode's slices, so that the second finds the values the
+    first counted.
     The second pass writes its last frames once the copy is read whole and checked, since they
     may finish the output segment, which is then recorded. The buffer goes at the end, whatever
     happens."""
@@ -341,7 +381,7 @@ def _correct(
     dtype = COMPUTE_DTYPE  # the decode's, kept as it is: bfloat16 from the VAE
     try:
         with _copy_reader(lab, count) as read, open(lab.buffer, "wb") as buffer:
-            reference = _frames(encoder_inputs(models, read, count, target), height, width)
+            reference = _frames(reference_inputs(models, read, count, target), height, width)
             for chunk in chunks:
                 content = chunk.permute(0, 3, 1, 2)  # (t, C, H, W)
                 model.synchronize(models.device)
@@ -361,7 +401,7 @@ def _correct(
                 sizes.append(content.shape[0])
         last: npt.NDArray[np.float32] | None = None
         with _copy_reader(lab, count) as read, open(lab.buffer, "rb") as buffer:
-            reference = _frames(encoder_inputs(models, read, count, target), height, width)
+            reference = _frames(reference_inputs(models, read, count, target), height, width)
             for size in sizes:
                 content = torch.empty((size, 3, height, width), dtype=dtype)
                 if buffer.readinto(content.view(torch.uint8).numpy()) != content.nbytes:
@@ -420,7 +460,7 @@ def _copy_failing(copy: Path) -> Generator[None]:
 
 
 def _frames(slices: Iterator[Tensor], height: int, width: int) -> Callable[[int], Tensor]:
-    """take(n), the next n frames of slices (encoder_inputs), each slice (C, t, H', W'): (n, C,
+    """take(n), the next n frames of slices (reference_inputs), each slice (C, t, H', W'): (n, C,
     height, width), each frame's top left, as the decode's frames are cropped (_decoded)."""
     pending: list[Tensor] = []
 
