@@ -1,8 +1,9 @@
 # seedvr2x design
 
-> Status: **draft for review**, nothing implemented. It collects the decisions taken so far and
-> the questions still open. Each decision links to the measurement it rests on in
-> [../research/](../research/).
+> Status: **being built.** It holds the decisions taken and the questions still open, and the
+> code follows it: milestones 1, 2 and 4 and the I/O layer have passed (see
+> [Validation milestones](#validation-milestones)). Each decision links to the measurement it
+> rests on in [../research/](../research/).
 
 ## Goal
 
@@ -541,11 +542,13 @@ Ours:
 - **Pooled per shot.** One mapping per shot, which is numz with one batch per shot, as the
   stitching study advised: no batch boundary is left for the correction to make.
   - The decode makes two passes. The VAE decodes once into a temporary bf16 buffer in the
-    shot's directory: about 12 MB per 1080p frame, so 18 GB per minute of 1080p shot, and
-    four times that at 4K.
+    shot's directory: 12,441,600 B per 1080p frame, so 17.9 GB per minute of 1080p shot at
+    24000/1001, and four times that at 4K.
   - The first pass gathers the histograms; the second maps and writes. A shot's first frames
     come out after its whole decode.
   - Decoding twice instead would add about 54% to the run.
+  - Measured in milestone 5: the two passes cost no measurable time, +0.17 GiB on the
+    decode's VRAM peak and +0.3 GiB of host RAM.
 - **Matching.** numz's mapping, each content quantile to the reference's, computed through
   integer histograms pooled over the shot: 2^16 bins per channel, linear within a bin.
   - numz's exact sort doesn't scale to a shot: a pooled GPU sort takes about 104 B per output
@@ -571,15 +574,26 @@ Ours:
     the CPU's vector unit. The resume environment records neither, while the GPU model is
     compared. The CPU path serves the tests. Each shot is converted in the same calls in both
     passes.
-  - The reference is the encoder's exact input tensor, rebuilt from the input copy with the
-    same transform, as ByteDance does.
+  - The reference is the input copy's frames through the encoder's transform (the same resize,
+    clamp, padding and normalisation) in float32, ByteDance's precision. It is not the
+    encoder's own tensor, decided after milestone 5:
+    - numz's numerics cast the frames to bf16 before the resize
+      (`generation_phases.py:380-413`), and 89% of 8-bit codes round up in bf16: +0.114 level
+      on average, +0.186 over codes 128–255, where the fp16 path averages 0.000.
+    - A resize keeps the mean, so a reference built that way brightens `lab`'s output by the
+      clip's own bias. As first built, ours exceeded numz's Y shift on 5 of 8 full-reference
+      clips, by 0.10–0.16 level, as predicted from their codes.
+    - numz's own `lab` never used that tensor: it transforms the fp16 frames without the cast
+      (`:130-168`).
   - The corrected frames stay float32 for the writer. The low band and the mapping are
-    computed in float32, and a bf16 cast would cut them back to 8 significant bits.
+    computed in float32, and a bf16 cast would cut them back to 8 significant bits. The output
+    then fills the 16 bits: a `gbrp16le` master takes 2.0–2.5 times numz's (see
+    [Output](#output)).
 - **Input copy.** An FFV1 `gbrp16le` copy of the 16-bit frames the encode reads, at input
-  resolution (about 70 MiB per second of 1080p input). It is written to
-  `resume/shot_<start>/input.mkv` while the encode reads the frames, recorded with the shot's
-  latent, and kept until its segment is finished. It's exact, sequential, and independent of
-  seeking.
+  resolution (about 32 MiB per second of 1080p input: 1.38 MB per frame on clip B). It is
+  written to `resume/shot_<start>/input.mkv` while the encode reads the frames, recorded with
+  the shot's latent, and kept until its segment is finished. It's exact, sequential, and
+  independent of seeking.
   - It is derived data. It's a lossless decode of an input whose content is checked, so it can
     be remade bit for bit with the same ffmpeg and conversions.
     - After an accepted change of ffmpeg or its conversions, a remade copy holds the new
@@ -797,8 +811,13 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     segment: it reads the segment, lossless and tagged, on stdin, and writes the file seedvr2x
     names, e.g. `--segment-cmd 'ffmpeg -i - -c:v libx265 -crf 16 {out}'`. seedvr2x never
     parses the command and only checks the result's frame count. Disk use is then the
-    compressed size, against 90–250 GiB per hour of 1080p anime for masters
-    ([output.md](../research/docs/output.md)), and a stop keeps every finished segment.
+    compressed size, and a stop keeps every finished segment.
+  - **Master sizes,** per hour of 1080p at 24000/1001, four times that at 4K: about 100–135
+    GiB in `yuv420p10le`, 540–690 GiB in `gbrp16le` with `lab` (milestone 5). `lab`'s float32
+    output fills the 16 bits, tens of thousands of distinct codes in a frame against 300–400
+    in numz's bf16 output, whose `gbrp16le` masters took 250–350 GiB
+    ([output.md](../research/docs/output.md) measured 2.97 MiB per frame). Rounding ours to
+    bf16 would save 34–43%, for 8 significant bits.
   - **Rejected:** `--stream`, the output on stdout for a single compressor process. That
     process can't be paused, so a stopped run would leave parts to join by hand.
 - **Assembly** of the segments:
@@ -1235,13 +1254,26 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
      | Metric | Better is | Tolerance |
      |---|---|---|
      | ΔE of the low frequencies to the input; ΔE00 to the ground truth on the full-reference clips | lower | 0.1 ΔE |
-     | a*/b* spread | closer to the input's | 1% |
+     | a*/b* spread | closer to the input's | 1% of the input's spread, or 0.1 unit if larger |
      | Y shift (signed) | closer to 0 | 0.1 level |
-     | Hold and low-frequency boundary steps | lower | 0.02 level |
+     | Hold and low-frequency boundary steps, as the excess over each run's own one-batch output (milestone 2's measure) | lower | 0.02 level |
 
    - PSNR between ours and numz's is reported for information.
    - A GPU test, `test_lab.py`, holds the result on milestone 1's input, with thresholds set
      from the first runs.
+   - Two rules were sharpened after the first run, on 2026-10-04. On a near-neutral sky, 1% of
+     the input's a\* spread is 0.0097 unit, far below anything else the milestone resolves,
+     hence the 0.1-unit floor, the ΔE tolerance's unit. A raw boundary step also counts each
+     pipeline's own motion there (ours' one-batch run 1.223, numz's 1.246): the excess
+     isolates the boundary.
+   - **First run, 2026-10-04: not met as built,** 4 of 11 comparisons. Ours was as good on ΔE
+     to the input and better on ΔE00 to the ground truth everywhere, but brighter than numz's
+     on 5 of 8 full-reference clips, through the bf16 reference (see
+     [Colour correction](#colour-correction), Numerics). With the reference in float32, 9 of 10
+     materials passed, and the 10th's a\* spread passes the 0.1-unit floor. Clip B's 6:2 passes
+     on the excess steps (hold 0.152 against 0.156, low-frequency 0.037 against 0.033). Step 3b
+     builds the float32 reference and runs ours' side again, 6:2 included: milestone 5 is
+     accepted when that run passes.
 6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
    for frame, and every other stream is copied.
 7. **Visual review** of long runs by the user.
