@@ -741,8 +741,10 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     - The chroma is downsampled with zscale's bilinear, pinned, as `ffv1_out.py` does. That is
       the right kernel on its own merits: decimation wants a low-pass, not a sharp
       interpolator, which is why the decode, which interpolates, uses Catmull-Rom.
-  - `gbrp16le`, on request: the research and archive master, closest to the model, at its
-    full size (see Master sizes below).
+  - `gbrp16le`, on request: closest to the model, the master for precision work and for
+    measurements on short samples, where methods are searched and verified (the tests and the
+    research scoring use it). At its full size (see Master sizes below), it isn't meant for
+    whole films.
 
   Validated with the [`ffv1_out.py` wrap](../research/docs/output.md): bit-exact round trip,
   tags checked by ffprobe. Our writers give a `yuv420p10le` bit-identical to its output. They
