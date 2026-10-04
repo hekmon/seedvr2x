@@ -71,7 +71,18 @@ to the source as another seed of 7B fp16 does.
 
 The Q4_K_M file quantizes (Q4_K) only the 288 weight matrices of the blocks' attention and MLP,
 8 per block, 99% of the weights; its other 840 tensors, the 6 matrices outside the blocks
-included, are the fp16 file's, byte for byte, in F16 (checked on the file).
+included, are the fp16 file's, byte for byte, in F16 (checked on the file). One of those six,
+`emb_in.proj_out.weight` (56.6M values), is larger than any matrix the file quantizes (tensor
+shapes and types read from the GGUF header).
+
+The fp8 files are plain e4m3fn casts: the fp16 files' tensor names and shapes, no metadata, no
+scale tensors. The 7B fp8 file is ByteDance's fp32 `seedvr2_ema_7b.pth` cast straight to
+e4m3fn: compared element by element, all 1,097 fp8 tensors match that cast bit for bit, and the
+31 it keeps in fp16 match the fp32 values rounded to fp16, where a re-cast of numz's fp16 file
+would differ on 0.28% of the values. Its blocks' RoPE tables differ as a result (rounded to fp8
+except block 35's), which is [bug 24](../bugs/24-rope-wrapper-late-binding.md)'s case. The 3B
+fp8 file shows the same pattern against its fp16 file and is probably cast the same way; its
+fp32 master isn't available to prove it.
 
 All use the same VAE (`ema_vae_fp16`). numz's CLI downloads each from its registry and checks
 its sha256; the sharp file was fetched with the CLI's own `download_weight` (sha256 verified).
