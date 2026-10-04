@@ -1,7 +1,7 @@
 # seedvr2x design
 
 > Status: **being built.** It holds the decisions taken and the questions still open, and the
-> code follows it: milestones 1, 2 and 4 and the I/O layer have passed (see
+> code follows it: milestones 1, 2, 4 and 5 and the I/O layer have passed (see
 > [Validation milestones](#validation-milestones)). Each decision links to the measurement it
 > rests on in [../research/](../research/).
 
@@ -547,8 +547,10 @@ Ours:
   - The first pass gathers the histograms; the second maps and writes. A shot's first frames
     come out after its whole decode.
   - Decoding twice instead would add about 54% to the run.
-  - Measured in milestone 5: the two passes cost no measurable time, +0.17 GiB on the
-    decode's VRAM peak and +0.3 GiB of host RAM.
+  - Measured in milestone 5: the two passes cost no measurable time and +0.3 GiB of host RAM.
+    The decode's VRAM peak gains 0.23–0.24 GiB (50.48 GiB on milestone 1's input, 50.50 on
+    clip B, against 50.24 and 50.27 without `lab`): the float32 reference's slices are twice
+    the bf16 ones.
 - **Matching.** numz's mapping, each content quantile to the reference's, computed through
   integer histograms pooled over the shot: 2^16 bins per channel, linear within a bin.
   - numz's exact sort doesn't scale to a shot: a pooled GPU sort takes about 104 B per output
@@ -584,7 +586,7 @@ Ours:
       clip's own bias. As first built, ours exceeded numz's Y shift on 5 of 8 full-reference
       clips, by 0.10–0.16 level, as predicted from their codes.
     - numz's own `lab` never used that tensor: it transforms the fp16 frames without the cast
-      (`:130-168`).
+      (`:127-168`).
   - The corrected frames stay float32 for the writer. The low band and the mapping are
     computed in float32, and a bf16 cast would cut them back to 8 significant bits. The output
     then fills the 16 bits: a `gbrp16le` master takes 2.0–2.5 times numz's (see
@@ -1193,9 +1195,10 @@ writers, and the planner needs real shot lengths.
 1. Resume (milestone 4): passed on 2026-10-03. Real episodes needed it: at 4.4 s per 1080p
    frame ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode
    takes about 40 GPU hours.
-2. The `lab` rewrite (milestone 5), next. Without it the output keeps the model's colour
-   drift. Then, as a small step of its own, the model check of [Weights](#weights): today a 3B
-   or fp8 file is accepted by its name, then fails later or runs unchecked.
+2. The `lab` rewrite (milestone 5): passed on 2026-10-04. Then, as small steps of their own,
+   next: the default master format (`yuv420p10le`, see [Output](#output)), and the model
+   check of [Weights](#weights): today a 3B or fp8 file is accepted by its name, then fails
+   later or runs unchecked.
 3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory, and the planner's inputs (4K
    limits, the margin) come from the measurement campaign. Consumer cards need it to run 1080p
@@ -1277,14 +1280,17 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
      hence the 0.1-unit floor, the ΔE tolerance's unit. A raw boundary step also counts each
      pipeline's own motion there (ours' one-batch run 1.223, numz's 1.246): the excess
      isolates the boundary.
-   - **First run, 2026-10-04: not met as built,** 4 of 11 comparisons. Ours was as good on ΔE
-     to the input and better on ΔE00 to the ground truth everywhere, but brighter than numz's
-     on 5 of 8 full-reference clips, through the bf16 reference (see
-     [Colour correction](#colour-correction), Numerics). With the reference in float32, 9 of 10
-     materials passed, and the 10th's a\* spread passes the 0.1-unit floor. Clip B's 6:2 passes
-     on the excess steps (hold 0.152 against 0.156, low-frequency 0.037 against 0.033). Step 3b
-     builds the float32 reference and runs ours' side again, 6:2 included: milestone 5 is
-     accepted when that run passes.
+   - **Passed on 2026-10-04: 11 of 11 materials,** with the float32 reference (step 3b).
+     - The first run, with the encoder's bf16 tensor as the reference, passed 4: ours came out
+       brighter than numz's on 5 of 8 full-reference clips, by each clip's own bf16 bias (see
+       [Colour correction](#colour-correction), Numerics).
+     - ΔE to the input: equal everywhere (within 0.008). ΔE00 to the ground truth: lower than
+       numz's on 7 of 8 clips (anime-bright +0.0014). PSNR to numz: 53.6–60.3 dB on the
+       one-batch materials, 0.5–1.5 dB above the first run's.
+     - Closest calls: anime-sky's a\* spread, 0.023 unit narrower than the input's against
+       numz's 0.001 (inside the 0.1-unit floor, outside 1% alone); clip B 6:2's low-frequency
+       excess, 0.036 against 0.033. Its hold excess: 0.152 against 0.156.
+     - `test_lab.py` holds it on milestone 1's input: PSNR to numz 60.18 dB, floor 59.5.
 6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
    for frame, and every other stream is copied.
 7. **Visual review** of long runs by the user.
