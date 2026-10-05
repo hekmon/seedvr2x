@@ -244,12 +244,15 @@ they differ and by which metrics, and how users are guided to them. What is know
     ([vram.md](../research/docs/vram.md)).
 - **numz's fp8 files are plain casts.** Every tensor of the 3B's, and all but the last block's
   in the 7B's, is rounded to `e4m3fn` (3 mantissa bits), with no scale, down to the biases,
-  norms, modulation tables, input and output layers and RoPE's frequencies. The Q4_K_M file
-  quantises only the 288 attention and MLP matrices of the blocks, 8 per block, 99% of the
-  weights, with a scale every 32 weights. Its other 840 tensors, the 6 matrices outside the
-  blocks included, are the fp16 file's byte for byte
-  ([models.md](../research/docs/models.md)): the likely reason it measures closer to the source
-  than fp8.
+  norms, modulation tables, input and output layers and RoPE's frequencies. The 7B's file is
+  ByteDance's fp32 master cast straight to `e4m3fn`, bit for bit, not numz's fp16 file cast
+  again, which would differ on 0.28% of the values. The 3B's is probably cast the same way; its
+  master isn't on the GPU box to prove it. The Q4_K_M file quantises only the 288 attention and
+  MLP matrices of the blocks, 8 per block, 99% of the weights, with a scale every 32 weights.
+  Its other 840 tensors, the 6 matrices outside the blocks included, are the fp16 file's byte
+  for byte ([models.md](../research/docs/models.md)): the likely reason it measures closer to
+  the source than fp8. One of those 6, `emb_in.proj_out` (56.6M values), is larger than any
+  matrix it quantises.
 - **RoPE's frequencies are constants of the architecture,** never trained, yet the fp8 files
   hold them rounded: up to 6% off in the 7B's blocks 0–34, and in the 3B's, the 5 lowest of 21
   at zero and others up to 41% off. numz runs the 7B's file on block 35's fp16 values in every
@@ -415,6 +418,21 @@ Decoding goes through an ffmpeg pipe:
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
 reimplementing them. A startup check refuses a build without zscale, ffv1 or scdet. Tests verify
 its conversions: round trip, white at 940, black at 64, chroma siting.
+
+Every zscale runs on one slice, with libavfilter's per-filter option `threads=1`, in the decode
+and in the `yuv420p10le` writer alike
+([numerics.md](../research/docs/numerics.md#the-masters-chroma-420-kernels-and-zscales-slices)).
+By default, ffmpeg cuts zscale into slices, one per CPU the process may use, and each slice is
+a zimg graph of its own, whose vertical chroma filter stops at the slice's edge:
+- A `yuv420p10le` master then changes with the slice count, so with the machine: up to 1.7% of
+  its chroma samples, by up to 13 ten-bit codes. Every count from 1 to 16 gave other bytes.
+- A 10-bit 4:2:0 source reads off the exact conversion from 4 slices on: nearly every sample,
+  by up to 0.57 level. An 8-bit source reads exactly at any count, which is why nothing so far
+  showed it.
+
+One slice costs 2.3–2.6 ms per 1080p frame, against about 4 s of GPU time. Reproduced with
+seedvr2x's own chains on the 48-CPU box: with `threads=1`, 48 slices give the one-slice bytes,
+both ways. A test holds the chains to that.
 
 ### Colour and shape, SD sources included
 The rule: the upscale must look like its source in any given player.
@@ -740,9 +758,16 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     - The master shares the pixel format and tags of `sptenc master`, chroma sited left
       included. The conversion tests (see [Input](#input)) check that zscale sites the chroma
       left, as tagged.
-    - The chroma is downsampled with zscale's bilinear, pinned, as `ffv1_out.py` does. That is
-      the right kernel on its own merits: decimation wants a low-pass, not a sharp
-      interpolator, which is why the decode, which interpolates, uses Catmull-Rom.
+    - The chroma is downsampled with zscale's bilinear, pinned, as `ffv1_out.py` does, on one
+      slice (see [Input](#input)). Decimation wants a low-pass, not a sharp interpolator (the
+      decode, which interpolates, uses Catmull-Rom), and the measurement agrees
+      ([numerics.md](../research/docs/numerics.md#the-masters-chroma-420-kernels-and-zscales-slices)):
+      - On the 8 full-reference clips, bilinear gives the lowest ΔE00 on every clip, against
+        Catmull-Rom, Spline16, Spline36 and Lanczos. These lose 0.3–0.5 dB on Cb and Cr on
+        average, 0.05–0.07 of ΔE00, and ring more.
+      - The round trip even brings the output closer to the ground truth (PSNR-Cb +1.1 dB),
+        whose colour comes from 4:2:0 sources. The luma metrics don't move (PSNR-Y within
+        0.012 dB, VMAF within 0.24).
   - `gbrp16le`, on request: closest to the model, the master for precision work and for
     measurements on short samples, where methods are searched and verified (the tests and the
     research scoring use it). At its full size (see Master sizes below), it isn't meant for
@@ -928,8 +953,9 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     - a fingerprint of the conversion chain: the SHA-256 of 19 test conversions of fixed
       frames, run in one ffmpeg process at every start (40–100 ms). They cover the decode's
       zscale chain at every input depth, chroma subsampling, matrix, range and siting, and
-      the writers' chains. The value is the same on two CPUs with one ffmpeg build, and it
-      catches a zimg upgrade that ffmpeg's version string doesn't show.
+      the writers' chains. The value is the same on two CPUs with one ffmpeg build, and with
+      zscale on one slice it can't depend on the CPU count (see [Input](#input)). It catches
+      a zimg upgrade that ffmpeg's version string doesn't show.
     - versions, derived rather than hand-kept, so a new dependency can't be missed:
       torchvision (the resize), diffusers (the VAE's blocks) and rotary-embedding-torch
       change the output bits as surely as torch does, and a venv can drift from its lock.
@@ -1196,9 +1222,9 @@ writers, and the planner needs real shot lengths.
    frame ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode
    takes about 40 GPU hours.
 2. The `lab` rewrite (milestone 5): passed on 2026-10-04. Then, as small steps of their own,
-   next: the default master format (`yuv420p10le`, see [Output](#output)), and the model
-   check of [Weights](#weights): today a 3B or fp8 file is accepted by its name, then fails
-   later or runs unchecked.
+   next: zscale on one slice (see [Input](#input)) and the default master format
+   (`yuv420p10le`, see [Output](#output)), then the model check of [Weights](#weights): today a
+   3B or fp8 file is accepted by its name, then fails later or runs unchecked.
 3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory, and the planner's inputs (4K
    limits, the margin) come from the measurement campaign. Consumer cards need it to run 1080p
@@ -1293,7 +1319,8 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
      - `test_lab.py` holds it on milestone 1's input: PSNR to numz 60.18 dB, floor 59.5.
 6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
    for frame, and every other stream is copied.
-7. **Visual review** of long runs by the user.
+7. **Visual review** of long runs by the user, fast motion included, where the frames inside a
+   latent group can ghost (see [To measure](#to-measure)).
 
 ## Open questions
 
@@ -1315,9 +1342,12 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
     - TransNetV2, a neural network trained to find shot boundaries (MIT licence, open weights)
     - a detector on our own decoded frames
   - Chosen on the user's labels of the measurement campaign's review sheets, which must first
-    hold every candidate's detections. The scene-detection brief also settles the threshold and
-    whether shots need a minimum length of their own: cuts.md finds a short shot better run
-    alone than merged into its neighbour, from 1 frame on.
+    hold every candidate's detections. They do since 2026-10-05: scdet's, PySceneDetect's and
+    TransNetV2's, 1,734 rows to label. CPU time per hour of 1080p source, 16 threads: scdet 1.8
+    min, PySceneDetect 2.4, TransNetV2 4.4 ([PROGRESS.md](../research/PROGRESS.md)). The
+    scene-detection brief also settles the threshold and whether shots need a minimum length of
+    their own: cuts.md finds a short shot better run alone than merged into its neighbour, from
+    1 frame on.
 
   Output segments keep sptenc's minimum length (see [Output](#output)).
 - **Frame-exact access into long-GOP sources**, to resume a shot and to read its input frames
@@ -1339,9 +1369,8 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
     white, so a 16-bit master can't hold more there than the decode gives, and smooth bright
     gradients could band. fp16 keeps 11 bits but VAE activations may overflow it; fp32 costs
     memory and time.
-  - the chroma kernels: Catmull-Rom upsampling at decode, bilinear downsampling for the
-    `yuv420p10le` master. The master being the default, every default output goes through
-    that downsampling.
+  - the chroma kernel at decode, Catmull-Rom upsampling, which shapes what the model sees
+    (GPU runs). The master's downsampling is settled: bilinear (see [Output](#output)).
   - the input preparation: the resize kernel and its `antialias` flag, and multiples of 16
     reached by padding (numz) or cropping (ByteDance)
   - a shot padded to 4n + 1 frames by mirroring its end (numz) or repeating its last frame
@@ -1354,6 +1383,16 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
   the eye is least likely to notice. To measure: whether prepending mirrored frames to each
   shot (numz's `--prepend_frames`, kept inside the shot) is worth its cost of about one latent
   per shot.
+- **Every fourth frame is the model's best**
+  ([numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
+  shot's first frame, the causal VAE packs 4 frames per latent, and the last frame of each
+  group comes out closest to the ground truth: on 8 of 8 clips by VMAF and LPIPS, 7 of 8 by
+  PSNR-Y, 0.8–5.0 dB above the group's second frame, the seeds agreeing within 0.5 dB, with
+  `lab` too. On fast motion, the frames inside a group carry ghosts (doubled line art). A
+  shot's first frame is the same effect. Nothing measured removes it. Taking each frame from a
+  run whose grid ends a group there would take 4 runs per shot, the grid shifted by 0–3
+  frames: 4× the GPU time, so at most a quality mode after v1. Not measured (about 2 GPU h on
+  the 8 clips).
 - **4K and long windows:** the planner's limits on large outputs, where the DiT window is the
   constraint.
 - **Colour correction beyond numz's `lab`,** once milestone 5 is accepted: see
