@@ -473,8 +473,14 @@ Decoding goes through an ffmpeg pipe:
     takes 0.47 ms per 1080p frame, which keeps up with the first pass on one thread.
   - The index is written once with the first pass's record, beside the manifest, which names
     it by its SHA-256; a resume trusts it as it trusts that record.
-  - Real VOB, broadcast TS and open-GOP MPEG-2 and HEVC aren't tested yet. The check covers
-    them: a wrong picture fails its CRC-32, and the read falls back.
+  - Real open-GOP HEVC in MKV is tested (an x265 encode: one IDR, then 435 CRA, 54 leading
+    pictures): frame-exact on 136 targets, 96 of them around every leading picture, at 0.21 s
+    per read. A decode started exactly at a CRA outputs none of its leading pictures and says
+    nothing, but every later frame is right: frames go missing, never come out wrong. Starting
+    one GOP early avoids it, and the CRC-32s would catch it.
+  - Real VOB, broadcast TS, open-GOP MPEG-2, open-GOP HEVC in MP4 and TS, and BLA pictures
+    aren't tested yet. The check covers them: a wrong or missing picture fails its CRC-32, and
+    the read falls back.
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
 reimplementing them. A startup check refuses a build without zscale, ffv1 or scdet. Tests verify
