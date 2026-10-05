@@ -770,8 +770,10 @@ output's colours are, it repairs what tiling does to them, and the measurements 
   - So every variant is also scored on tiled runs, on the per-tile offsets left after
     correction, flat areas first. At 1080p, at the tile sizes of vram.md's recipes for 16, 24
     and 32 GB cards (encode / decode: 1024 / 768, 1344 / 1024, untiled / 1280). At 4K, at the
-    96 GB card's (encode untiled, decode tiles of 1536 px and up) and the consumer cards',
-    on 4K ground truth (×2 from 1080p) once the UHD samples are in.
+    96 GB card's (encode untiled, decode tiles of 1536 px and up, 2048 being what the planner
+    picks there) and the consumer cards', on 4K ground truth, ×2 from 1080p: 4 shots of 45
+    frames from a UHD Blu-ray remux, made SDR by one fixed tone map since v1 refuses HDR
+    ([numerics.md](../research/docs/numerics.md#clips)).
   - What's left of the drift sets how small the planner may make tiles: on the smallest
     cards, and wherever smaller tiles would make room for `compile_vae`, which doubles the
     VAE's memory.
