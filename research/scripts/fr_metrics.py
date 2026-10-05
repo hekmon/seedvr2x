@@ -3,7 +3,8 @@
 
   fr_metrics.py GT.mkv --clip NAME --out VARIANT SEED OUT.mkv [--out ...] --json-dir DIR
                 [--rows Y0:Y1] [--frames N] [--no-vmaf] [--no-deep] [--batch B] [--threads T]
-  fr_metrics.py --summary DIR_OR_JSON ... [--default VARIANT] [--reference bicubic] [--block L]
+  fr_metrics.py --summary DIR_OR_JSON ... [--default VARIANT] [--reference bicubic] [--versus bicubic]
+                [--block L]
   fr_metrics.py --make-test GT.mkv --work DIR [--blur 1.0] [--noise 2.0] [--seed S]  # test inputs
 
 Why: with a ground truth (fr_clips.py), a change of SeedVR2's numerics or input preparation can
@@ -54,6 +55,10 @@ seed, and prints Markdown tables:
   correlated), and a verdict: "better" / "worse" when the CI excludes 0 and the difference
   exceeds the seed band, "within" otherwise; then, per variant and metric, the count of clips
   better / worse / within
+- with --versus VARIANT (a reference run, the bicubic baseline: is the model closer to the ground
+  truth than a plain upscale?): every other variant, the default included, paired the same way
+  with that variant's run, each seed against its one run (by seed if it has several); the band is
+  then the paired variant's own seed spread
 
 --make-test writes the ground truth blurred (Gaussian, sigma --blur px) and with Gaussian noise
 (sigma --noise 8-bit levels, --seed) as 16-bit RGB masters, to check the metrics on known cases.
@@ -501,6 +506,29 @@ def summary(a):
     def order(variants):
         return sorted(variants, key=lambda v: (v in refs, v != a.default, v))
 
+    def paired(pairs, k, higher, f, b):
+        """Table cell and verdict of x − y frame by frame, pooled over (x run, y run) pairs; b = the band."""
+        diffs = []
+        for rx, ry in pairs:
+            x, y = series_of(rx, k), series_of(ry, k)
+            if x is None or y is None:
+                continue
+            m = min(len(x), len(y))
+            d = x[:m] - y[:m]
+            d = d[np.isfinite(d)]
+            if d.size:
+                diffs.append(d)
+        if not diffs:
+            return "–", None
+        mean = float(np.concatenate(diffs).mean())
+        lo, hi = block_bootstrap(diffs, a.block, a.boot, rng)
+        if (lo > 0 or hi < 0) and abs(mean) > b:
+            verdict = "better" if (mean > 0) == higher else "worse"
+        else:
+            verdict = "within"
+        g = "{:+" + f[2:]
+        return f"{fmt(mean, g)} [{fmt(lo, g)}, {fmt(hi, g)}] {verdict}", verdict
+
     print("## Means per clip and variant\n")
     print("Mean over the seeds of each run's mean (per-frame PSNR averaged); `n` = seeds.\n")
     print("| Clip | Variant | n | " + " | ".join(t for _, t, _, _ in keys) + " |")
@@ -545,29 +573,45 @@ def summary(a):
             common = sorted(set(by[clip][v]) & set(by[clip][a.default]))
             cells = []
             for k, _, higher, f in keys:
-                diffs = []
-                for s in common:
-                    x, y = series_of(by[clip][v][s], k), series_of(by[clip][a.default][s], k)
-                    if x is None or y is None:
-                        continue
-                    m = min(len(x), len(y))
-                    d = x[:m] - y[:m]
-                    d = d[np.isfinite(d)]
-                    if d.size:
-                        diffs.append(d)
-                if not diffs:
-                    cells.append("–")
-                    continue
-                mean = float(np.concatenate(diffs).mean())
-                lo, hi = block_bootstrap(diffs, a.block, a.boot, rng)
-                b = band.get((clip, k), 0.0)
-                if (lo > 0 or hi < 0) and abs(mean) > b:
-                    verdict = "better" if (mean > 0) == higher else "worse"
-                else:
-                    verdict = "within"
-                tally[k][verdict] += 1
-                cells.append(f"{fmt(mean, '{:+' + f[2:])} [{fmt(lo, '{:+' + f[2:])}, {fmt(hi, '{:+' + f[2:])}] {verdict}")
+                pairs = [(by[clip][v][s], by[clip][a.default][s]) for s in common]
+                cell, verdict = paired(pairs, k, higher, f, band.get((clip, k), 0.0))
+                if verdict:
+                    tally[k][verdict] += 1
+                cells.append(cell)
             print(f"| {clip} | {', '.join(common) or '–'} | " + " | ".join(cells) + " |")
+        print("| **clips better / worse / within** | | " + " | ".join(
+            f"{tally[k]['better']} / {tally[k]['worse']} / {tally[k]['within']}" for k, *_ in keys) + " |")
+
+    if not a.versus:
+        return
+    if not any(a.versus in by[clip] for clip in by):
+        raise SystemExit(f"--versus {a.versus}: no run of that variant")
+    for v in order({v for clip in by for v in by[clip] if v != a.versus}):
+        print(f"\n## `{v}` − `{a.versus}`, frame by frame\n")
+        print(f"Mean difference per frame (per transition for the temporal errors), each seed of `{v}` against "
+              f"`{a.versus}`'s run (paired by seed if it has several), pooled [95% CI, block bootstrap, blocks of "
+              f"{a.block}]: better / worse when the CI excludes 0 and |Δ| > `{v}`'s own seed band.\n")
+        print("| Clip | Seeds | " + " | ".join(t for _, t, _, _ in keys) + " |")
+        print("|---|---|" + "---|" * len(keys))
+        tally = defaultdict(lambda: defaultdict(int))
+        for clip in sorted(by):
+            if v not in by[clip] or a.versus not in by[clip]:
+                continue
+            ref = by[clip][a.versus]
+            if len(ref) == 1:
+                pairs = {s: (r, next(iter(ref.values()))) for s, r in by[clip][v].items()}
+            else:
+                pairs = {s: (by[clip][v][s], ref[s]) for s in set(by[clip][v]) & set(ref)}
+            cells = []
+            for k, _, higher, f in keys:
+                vals = [r["means"].get(k) for r, _ in pairs.values()]
+                vals = [x for x in vals if x is not None and math.isfinite(x)]
+                b = max(vals) - min(vals) if vals else 0.0
+                cell, verdict = paired([pairs[s] for s in sorted(pairs)], k, higher, f, b)
+                if verdict:
+                    tally[k][verdict] += 1
+                cells.append(cell)
+            print(f"| {clip} | {', '.join(sorted(pairs)) or '–'} | " + " | ".join(cells) + " |")
         print("| **clips better / worse / within** | | " + " | ".join(
             f"{tally[k]['better']} / {tally[k]['worse']} / {tally[k]['within']}" for k, *_ in keys) + " |")
 
@@ -631,6 +675,8 @@ def main():
     ap.add_argument("--summary", nargs="+", metavar="JSON_OR_DIR", help="Markdown tables of saved results")
     ap.add_argument("--default", default="default", help="--summary: the variant the others are paired with")
     ap.add_argument("--reference", default="bicubic", help="--summary: comma list of reference-only variants")
+    ap.add_argument("--versus", metavar="VARIANT",
+                    help="--summary: also pair every other variant with this one's run, frame by frame (e.g. bicubic)")
     ap.add_argument("--block", type=int, default=8, help="--summary: bootstrap block length (frames)")
     ap.add_argument("--boot", type=int, default=2000, help="--summary: bootstrap resamples")
     ap.add_argument("--make-test", metavar="GT", help="write blurred and noisy copies of GT into --work")
