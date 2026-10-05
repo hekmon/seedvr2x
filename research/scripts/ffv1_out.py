@@ -63,8 +63,11 @@ RGB_TAGS = ["-colorspace", "rgb", "-color_primaries", "bt709", "-color_trc", "bt
 YUV_TAGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
 # frame properties only, no pixel conversion: without them the muxer writes no primaries/transfer
 SETPARAMS = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=gbr:range=pc"
-# RGB in, BT.709 matrix, limited range out; same primaries/transfer on both sides (no conversion)
-ZSCALE = "zscale=rin=full:pin=709:tin=709:m=709:r=limited:p=709:t=709:d=none"
+# RGB in, BT.709 matrix, limited range out; same primaries/transfer on both sides (no conversion).
+# threads=1: ffmpeg runs zscale in slices, by default one per CPU, and each slice filters the 4:2:0
+# chroma up to its own edge: the master's chroma would depend on the machine's CPU count
+# (chroma_kernels.py threads: 1.7% of the samples, up to 13 codes, from 16 slices)
+ZSCALE = "zscale=threads=1:rin=full:pin=709:tin=709:m=709:r=limited:p=709:t=709:d=none"
 FORMATS = {
     "gbrp16le": (16, ["-vf", SETPARAMS] + RGB_TAGS),
     "gbrp10le": (10, ["-vf", SETPARAMS] + RGB_TAGS),

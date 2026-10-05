@@ -214,10 +214,13 @@ def yuv_tags(c):
 
 
 def zscale_to_rgb(c, extra=""):
-    """zscale: YUV of the plan -> RGB (full range), no primaries/transfer conversion."""
+    """zscale: YUV of the plan -> RGB (full range), no primaries/transfer conversion. threads=1 here
+    and in every zscale below: ffmpeg's slice threading (one slice per CPU by default) changes a
+    10-bit 4:2:0 source's RGB from 4 slices on (chroma_kernels.py upcheck); 8-bit sources and the
+    resizes were measured unaffected, and are pinned alike."""
     z = "full" if c["range"] == "pc" else "limited"
-    return (f"zscale=matrixin={ZMATRIX[c['matrix']]}:rangein={z}:chromalin={c['chroma_location']}:dither=none"
-            + (f":{extra}" if extra else ""))
+    return (f"zscale=threads=1:matrixin={ZMATRIX[c['matrix']]}:rangein={z}:chromalin={c['chroma_location']}"
+            ":dither=none" + (f":{extra}" if extra else ""))
 
 
 # ------------------------------------------------------------------ scene scores
@@ -439,7 +442,7 @@ def cmd_make(a):
         spec = DEGRADATIONS[deg]
         zr = "full" if c["range"] == "pc" else "limited"
         if deg == "d1":
-            down = (f"zscale=w={w}:h={h}:{MITCHELL}:matrixin={zm}:matrix={zm}:rangein={zr}:range=limited"
+            down = (f"zscale=threads=1:w={w}:h={h}:{MITCHELL}:matrixin={zm}:matrix={zm}:rangein={zr}:range=limited"
                     f":chromalin={c['chroma_location']}:chromal=left:dither=none")
         else:
             down = f"scale={w}:{h}:flags=area+accurate_rnd:out_range=tv"
@@ -456,7 +459,7 @@ def cmd_make(a):
                  "-vf", f"{zscale_to_rgb(lr_tags)},format=gbrp,{rgb_params(c)}", "-fps_mode", "passthrough",
                  *FFV1, "-threads", str(T), "-pix_fmt", "bgr0", *rgb_tags(c), p(f"{deg}.lr.mkv")], f"{deg} input", cmds)
             run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", p(f"{deg}.lr.mkv"),
-                 "-map", "0:v:0", "-vf", f"zscale=w={W}:h={H}:{CATROM}:dither=none,format=gbrp16le,{rgb_params(c)}",
+                 "-map", "0:v:0", "-vf", f"zscale=threads=1:w={W}:h={H}:{CATROM}:dither=none,format=gbrp16le,{rgb_params(c)}",
                  "-fps_mode", "passthrough", *FFV1, "-threads", str(T), "-pix_fmt", "gbrp16le", *rgb_tags(c),
                  p(f"{deg}.bicubic.mkv")], f"{deg} bicubic baseline", cmds)
             files[deg] = {"what": spec["what"], "keyint": KEYINT,
@@ -468,7 +471,7 @@ def cmd_make(a):
                  "-fps_mode", "passthrough", *FFV1, "-threads", str(T), "-pix_fmt", "bgr0", *rgb_tags(c),
                  p(f"{deg}.crop.lr.mkv")], f"{deg} crop input", cmds)
             run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", p(f"{deg}.crop.lr.mkv"),
-                 "-map", "0:v:0", "-vf", f"zscale=w={W16}:h={H16}:{CATROM}:dither=none,format=gbrp16le,{rgb_params(c)}",
+                 "-map", "0:v:0", "-vf", f"zscale=threads=1:w={W16}:h={H16}:{CATROM}:dither=none,format=gbrp16le,{rgb_params(c)}",
                  "-fps_mode", "passthrough", *FFV1, "-threads", str(T), "-pix_fmt", "gbrp16le", *rgb_tags(c),
                  p(f"{deg}.crop.bicubic.mkv")], f"{deg} crop bicubic baseline", cmds)
             files[f"{deg}.crop"] = {"lr": file_info(p(f"{deg}.crop.lr.mkv"), N),
@@ -802,7 +805,7 @@ def cmd_sheet(a):
     W = a.width
     H = round(W * st["height"] / st["width"] / 2) * 2
     if st["pix_fmt"] in RGB_BITS:
-        conv = f"zscale=w={W}:h={H}:filter=spline36:dither=none"
+        conv = f"zscale=threads=1:w={W}:h={H}:filter=spline36:dither=none"
     else:  # tag the frames first: zimg finds no path from an untagged source's unknown transfer
         plan = colour_plan(st)
         conv = f"{yuv_params(plan)},{zscale_to_rgb(plan, f'w={W}:h={H}:filter=spline36')}"

@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-04 04:51 CEST
+Last update: 2026-10-05 11:16 CEST
 
 ## 0. Setup
 
@@ -93,6 +93,17 @@ temporal regression.
       model restores about half of the source's film grain (1.75 → 0.93–0.98 on the fast clip)
 - [x] The combined choice, checked once: numz's numerics + bicubic with antialias + reflect then
       black is the `reflect+black+16` run above
+- [x] The default `yuv420p10le` master's chroma kernel (from the design conversation, CPU only,
+      8 clips): zscale's bilinear keeps the model's output the closest to the ground truth of 6
+      kernels on 8 of 8 clips (sharper kernels −0.3 to −0.5 dB on Cb/Cr, more ringing); the 4:2:0
+      round trip even brings it closer than the unconverted output; the usual metrics don't move.
+      Found on the way: zscale's slice threading (ffmpeg's default, one slice per CPU) changes the
+      master's chroma (1.7% of the samples, up to 13 codes) and a 10-bit source's read; zscale's
+      `threads=1` fixes it, now set in ffv1_out.py and fr_clips.py (earlier data unaffected)
+- [x] Every fourth frame is the model's best: the last frame of each 4-frame latent group is
+      PSNR-Y +0.8 to +5.0 dB and VMAF +2 to +19 closer to the ground truth than the group's
+      second, on every clip, with or without `lab`; the input has no such pattern. Fast motion
+      shows ghosts inside a group (from question 1's per-frame scores)
 - [x] Doc ([docs/numerics.md](docs/numerics.md)) + decision briefs (numerics and input preparation,
       2026-10-03)
 
@@ -149,12 +160,24 @@ temporal regression.
 - [x] Pipeline finding: a filter-graph rebuild mid-stream (the DVD's colour description appears at
       frame 14) restarts the frame counter sptenc reads cut indices from, so every later cut comes
       out 14 frames early; `-reinit_filter 0` fixes it
-- [ ] Review of the sheets by the user (waiting; 1,476 rows now, partial labels fine)
+- [x] TransNetV2, the neural shot-boundary detector DESIGN.md lists (official MIT code and weights;
+      its PyTorch port matches TensorFlow within 3e-7 on real frames, same detections): every
+      episode scored. It marks a cut on the outgoing shot's last frame (on 98% of the sure cuts).
+      Unlabelled so far: on action anime it hardly fires in bursts (dark anime episode at p = 0.5
+      against scdet at T = 10: detections 1–3 frames apart 627 → 5, shots under 0.5 s 782 → 18);
+      on live action it takes almost every cut PySceneDetect finds below scdet's threshold (185 of
+      191 where both of PySceneDetect's detectors agree, on one film); it misses 5 of the 15 sure
+      cuts of the grainy cel film. CPU cost per hour of 1080p source, 16 threads: 4.4 min (scdet
+      1.8, PySceneDetect 2.4). 258 more review rows: the candidates only TransNetV2 finds, at most
+      30 per episode
+- [ ] Review of the sheets by the user (waiting; 1,476 rows, 1,734 with TransNetV2's; partial
+      labels fine)
 - [~] Per threshold 8–14: hits, false positives by kind (flash, pan, fade…), misses, shot lengths.
       Unlabelled so far: on action anime, scdet fires in bursts on new drawings after held frames
       and on effects (at threshold 10, half the shots of the dark anime episode are under 0.5 s),
       and misses some dark cuts; the bright cartoon is clean
-- [ ] Doc + decision brief: the threshold and a minimum shot length, with question 2's costs
+- [ ] Doc + decision brief: the detector, its threshold and a minimum shot length, with question
+      2's costs
 
 ## 4. Frame-exact access into long-GOP sources (CPU only)
 

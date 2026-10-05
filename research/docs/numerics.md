@@ -4,8 +4,10 @@
 > per numerics or input-preparation choice, patched in at import; with no switch set, the output
 > is bit-identical to numz's), [`scripts/ffv1_out.py`](../scripts/ffv1_out.py) (16-bit RGB
 > masters), [`scripts/fr_clips.py`](../scripts/fr_clips.py) (ground-truth clips and degraded
-> inputs) and [`scripts/fr_metrics.py`](../scripts/fr_metrics.py) (full-reference metrics and
-> paired statistics), for the "Numerics" question in
+> inputs), [`scripts/fr_metrics.py`](../scripts/fr_metrics.py) (full-reference metrics and
+> paired statistics), [`scripts/chroma_kernels.py`](../scripts/chroma_kernels.py) (the master's
+> 4:2:0 conversion) and [`scripts/cut_metrics.py`](../scripts/cut_metrics.py) `phase` (the
+> 4-frame latent grid), for the "Numerics" question in
 > [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). SeedVR2 `4490bd1`, 7B fp16, `flash_attn_2`,
 > one batch of 45 frames, 1080p (one 720p test), `--color_correction none`, with `lab` rendered
 > from the same run. Four animated clips, a fifth (a bright sky) for the VAE decode precision,
@@ -31,6 +33,14 @@ of 3 seeds):
   against the seed spread; they don't rate the model.
 - **The seed is the noise floor:** 3 seeds of the default spread by 0.03–0.51 dB PSNR-Y,
   0.0001–0.018 LPIPS and 0.13–5.5 VMAF, depending on the clip (5.5: live-vfx's flickering light).
+- **Every fourth frame is the model's best.** The causal VAE gives a unit's first frame a latent
+  of its own, then packs 4 frames per latent. The last frame of each group is the closest to the
+  GT on 8 of 8 clips by VMAF and LPIPS, 7 of 8 by PSNR-Y: against the group's second frame,
+  PSNR-Y +0.8 to +5.0 dB (the smallest on the slow sky pan) and VMAF +2.2 to +19.3, the 3 seeds
+  within 0.5 dB of each other; the bicubic baseline has no such pattern (0.2–0.8 dB, in no
+  consistent direction). On fast motion
+  the frames inside a group carry ghosts, doubled line art on the bright cartoon. `lab` keeps it
+  ([Every fourth frame](#every-fourth-frame-the-latent-grid)).
 - **ByteDance's numerics change little:** float32 RoPE angles, VAE posterior sampling, a
   float32 input chain, the float32 weights, bfloat16 DiT norms, a VAE decode under bfloat16
   autocast, and all of them together stay within the seed spread on all 4 animated clips for
@@ -49,6 +59,17 @@ of 3 seeds):
   of 8 clips) and never overflowed (largest activation 19,088 of 65,504), float32 doubles the
   decode's memory. Recommended: float32 after the decoder (free) and a float16 decode with a
   non-finite check.
+- **The `yuv420p10le` master: keep zscale's bilinear chroma, on one slice.** Through 4:2:0 and
+  back (Catmull-Rom, as seedvr2x reads), bilinear keeps the model's output the closest to the GT
+  of 6 kernels (8 of 8 clips by PSNR-Cb and ΔE00, 7 of 8 by PSNR-Cr); Catmull-Rom, spline16/36
+  and lanczos lose 0.3–0.5 dB of
+  PSNR-Cb/Cr and ring more. The round trip even brings the output's chroma closer to the GT than
+  the unconverted output (PSNR-Cb +1.1 dB), the GT's own chroma being 4:2:0; the usual metrics
+  don't move. But ffmpeg runs zscale in slices, one per CPU by default, and the bytes depend on
+  them: the master's chroma on 1.7% of the samples (up to 13 ten-bit codes), a 10-bit 4:2:0
+  source's RGB on nearly every sample (up to 0.57 level) from 4 slices on. zscale's `threads=1`
+  restores the single-slice bytes for 2.5 ms per 1080p frame
+  ([The master's chroma](#the-masters-chroma-420-kernels-and-zscales-slices)).
 - **The resize kernel is second order:** torchvision's bicubic without antialiasing adds a
   little low-frequency colour error and flicker on 7 of 7 clips (live-slow: every metric worse).
   The sharper zimg kernels help a little on some grainy or detailed clips (lanczos on the
@@ -214,6 +235,43 @@ it under 0.43 levels on average.
   live-vfx and live-slow PSNR-Y +3.5 and +1.4 dB, ΔE00 lf −55% and −40%, VMAF +5.2 and +2.9,
   LPIPS lower. **anime-bright is the exception:** `lab` gains 0.55 dB of PSNR-Y and 15% of ΔE00 lf
   but costs LPIPS +0.019, DISTS +0.012, SSIM −0.005 and VMAF −3.1, far beyond the seed spreads.
+
+## Every fourth frame: the latent grid
+
+SeedVR2's causal VAE encodes a unit's first frame alone, then 4 frames per latent, and its decoder
+rebuilds each group of 4 from one latent. Per frame, against the bicubic baseline of the same clip
+(which shows whether the input itself varies with the frame's place), numz's default without
+`lab`, 3 seeds each, frames 1–44 by their place in their group (0 to 3, 3 = the group's last;
+`cut_metrics.py phase`):
+
+| Clip | PSNR-Y − bicubic, place 0 / 1 / 2 / 3 | Gap 3 − 1 (3 seeds) | VMAF gap 3 − 1 | Bicubic's own PSNR-Y, place 0 / 1 / 2 / 3 |
+|---|---|---|---|---|
+| anime-clean | −12.04 / −12.65 / −11.99 / −11.28 | +1.36 (+1.35…+1.39) | +8.9 | 39.84 / 39.63 / 39.66 / 39.51 |
+| anime-grain | −8.42 / −8.59 / −8.30 / −7.44 | +1.15 (+1.14…+1.18) | +8.4 | 37.29 / 37.31 / 37.20 / 37.64 |
+| anime-dark | −10.67 / −13.22 / −12.45 / −8.24 | +4.98 (+4.91…+5.03) | +19.2 | 42.79 / 43.11 / 43.08 / 43.62 |
+| cartoon-bright | −7.19 / −5.64 / −5.28 / −2.60 | +3.04 (+2.91…+3.17) | +19.3 | 32.23 / 32.14 / 32.31 / 32.21 |
+| anime-sky | −15.18 / −16.19 / −15.65 / −15.39 | +0.80 (+0.77…+0.84) | +2.2 | 44.77 / 44.80 / 44.72 / 44.46 |
+| live-vfx | −7.27 / −8.52 / −7.34 / −4.36 | +4.17 (+3.96…+4.45) | +12.2 | 38.57 / 38.53 / 38.38 / 38.59 |
+| live-slow | −8.33 / −7.98 / −7.53 / −5.01 | +2.97 (+2.94…+3.00) | +12.9 | 35.73 / 35.65 / 35.60 / 35.55 |
+| anime-bright | −8.60 / −7.57 / −7.41 / −4.88 | +2.69 (+2.64…+2.78) | +13.0 | 32.17 / 32.10 / 32.01 / 32.26 |
+
+- **The last frame of each group is the model's best:** the closest to the GT on 7 of 8 clips by
+  PSNR-Y (anime-sky, a slow pan, is flat), 8 of 8 by VMAF and by LPIPS (place 3 − 1: −0.003 to
+  −0.045); the gap between places 3 and 1 also favours place 3 on 8 of 8 clips by DISTS and ΔE00
+  lf, 7 of 8 by SSIM. Place 1 trails place 3 by 0.8–5.0 dB of PSNR-Y. The seeds agree to 0.5 dB
+  on the gap; the bicubic baseline's own range over the places is 0.2–0.8 dB, in no consistent
+  direction, so the input's coding doesn't cause it.
+- **It shows as ghosts on fast motion.** On the bright cartoon (a character walking past the
+  camera, frames 34, 36 and 38, GT | bicubic | default with `lab`): frames 34 and 38, place 1,
+  double the line art and let the background through the body; frame 36, place 3, is clean
+  ([review crop](#visual-review)).
+- **`lab` keeps it:** with `lab` the PSNR-Y gap is −0.1 to +3.1 dB and the VMAF gap +1.3 to
+  +17.7.
+- A shot's first frame, a latent of its own, is the same effect: it is the frame closest to the
+  GT on 8 of 8 shots ([cuts.md](cuts.md)), and runs whose 4-frame grids start on different frames
+  differ with a period of 4 for the same reason. The period-4 pattern is the model's; nothing
+  measured here removes it. Taking each frame from the run where it ends its group would take 4
+  runs with the grid shifted (4× the GPU time): not measured.
 
 ## Seed bands
 
@@ -638,6 +696,88 @@ Paired difference to the default, `none` (5 clips; the last row: `dec16` on the 
   3–5% more decode time than bfloat16. Not for banding, which nothing here shows, but for
   colour; numz's bfloat16 decode with float32 after it remains a sound default without the check.
 
+## The master's chroma: 4:2:0 kernels and zscale's slices
+
+seedvr2x's default master is FFV1 `yuv420p10le`, converted from the float RGB frames as
+[`ffv1_out.py`](../scripts/ffv1_out.py) does it (zscale: BT.709 matrix, limited range, chroma
+sited left, no dither, zscale's default chroma kernel, bilinear;
+[DESIGN.md](../../seedvr2x/DESIGN.md#output)). Every default output goes through that chroma
+downsampling. [`chroma_kernels.py`](../scripts/chroma_kernels.py) sends the 16-bit RGB output
+of the 8 clips (numz's default with `lab`, seed 42) and their GTs through `yuv420p10le` with 6
+chroma kernels and back to 16-bit RGB with one upsampler, seedvr2x's reader (zscale,
+Catmull-Rom), then scores each round trip against the GT: PSNR on Y', Cb and Cr (BT.709, 8-bit
+scale), CIEDE2000 after blurs of 0 to 4 px, CIEDE2000 on colour edges (the 10% of pixels with
+the GT's largest chroma gradient), and ringing (Cb or Cr beyond the GT's local 5×5 range by more
+than 2 levels). A `yuv444p10le` round trip is the control: 10 bits, no subsampling.
+
+Checks: the bilinear master is ffv1_out.py's own conversion, 45 of 45 frames by framemd5 on all
+16 files (an explicit `f=bilinear` too, same tags); a synthetic frame confirms the siting (left
+across, centred down, the round trip symmetric); the σ = 4 ΔE00 equals fr_metrics' ΔE00 lf
+exactly; no round trip shifts the mean by more than 0.03 level (point 0.10).
+
+Model output, means over the 8 clips (wins: clips where the kernel beats bilinear on ΔE00):
+
+| Round trip | PSNR-Cb | PSNR-Cr | ΔE00 | ΔE00 σ = 4 | ΔE00 on colour edges | Ringing | Wins |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| none (the output itself) | 42.61 | 42.02 | 2.319 | 1.190 | 5.35 | 14.0% | |
+| bilinear (zscale's default) | **43.68** | **43.06** | **2.161** | **1.174** | **4.86** | **11.2%** | |
+| Catmull-Rom | 43.35 | 42.75 | 2.207 | 1.181 | 5.00 | 12.3% | 0/8 |
+| spline16 | 43.29 | 42.70 | 2.214 | 1.182 | 5.02 | 12.5% | 0/8 |
+| spline36 | 43.24 | 42.65 | 2.221 | 1.181 | 5.05 | 12.5% | 0/8 |
+| lanczos (3 taps) | 43.20 | 42.60 | 2.227 | 1.181 | 5.07 | 12.7% | 0/8 |
+| point (aliasing control) | 42.69 | 42.13 | 2.293 | 1.205 | 5.33 | 13.4% | 0/8 |
+| yuv444p10le (no subsampling) | 42.60 | 42.01 | 2.326 | 1.184 | 5.36 | 13.0% | 0/8 |
+
+- **Bilinear wins on the model's output:** every sharper kernel loses 0.3–0.5 dB of PSNR-Cb and
+  PSNR-Cr (one clip of 8 on Cr goes the other way), 0.05–0.07 of ΔE00, 0.14–0.21 on colour edges,
+  and rings more, on anime and live action alike.
+- **The 4:2:0 round trip brings the output closer to the GT:** PSNR-Cb +1.1 dB and colour edges
+  −0.49 against the unconverted output, and no subsampling (`yuv444p10le`) is no better than the
+  output itself. The GT's chroma comes from 4:2:0 sources; the model's chroma detail beyond that
+  resolution is not in the GT, and a smooth 4:2:0 kernel takes it out.
+- **The GT's own round trip prefers sharper kernels** (lanczos: ΔE00 0.118 against 0.188, colour
+  edges 0.25 against 0.50, 8 of 8), the format's cost on perfect content. That GT's chroma was
+  itself upsampled from 4:2:0 with zscale's default, bilinear
+  ([Ground truth](#ground-truth-inputs-and-runs)), which a sharper
+  downsampler partly undoes: against the source's own 4:2:0 samples, the sharper kernels land
+  closer for the GT (16 of 16 planes) and further for the model's output (15 of 16). Both amounts
+  are tiny next to the model's own error.
+- **The usual metrics don't move:** fr_metrics on the round trips stays within 0.012 dB of
+  PSNR-Y, 0.24 of VMAF and 0.007 of LPIPS of the unconverted output, CAMBI 0; the conversion lowers
+  ΔE00 lf by 0.016 on average (8 of 8 clips).
+- **Cost:** zscale alone takes 2.5 ms per 1080p frame for the bilinear conversion on one slice
+  (lanczos 2.6, the Catmull-Rom read 2.3), against about 4 s of GPU time per frame.
+
+**zscale's slices change the bytes.** ffmpeg runs zscale in `-filter_threads` slices, by
+default one per CPU the process may use, and each slice is a separate zimg graph on its own rows:
+the vertical chroma filter stops at the slice's edge. On the first 3 frames of anime-clean's
+output, each count against one slice:
+
+| Chain | 2 slices | 4 | 8 | 16 or more |
+|---|---|---|---|---|
+| RGB → `yuv420p10le` (the master): Cb / Cr samples that differ, largest difference (10-bit codes) | 0.12% / 0.11%, 6 | 0.33% / 0.29%, 10 | 0.79% / 0.73%, 10 | 1.70% / 1.58%, 13 |
+| `yuv420p10le` → RGB (Catmull-Rom): samples that differ (16-bit codes) | 0 | 99.97%, up to 146 | same | same |
+
+- Every slice count from 1 to 16 gives a different master (framemd5; 16 and 48 agree), its luma
+  untouched. Against a float64 Catmull-Rom reference, the 10-bit read is exact on 1 to 3 slices
+  (at most 1 sixteen-bit code off) and off from 4 on (rms 35, up to 146 codes, 0.57 level); an
+  8-bit 4:2:0 source reads exactly at any count. Why 10-bit and not 8-bit is not known (ffmpeg
+  n9.0.2).
+- **zscale's own `threads=1` option fixes it:** with `-filter_threads 48`, both chains then give
+  the one-slice bytes (framemd5). ffv1_out.py and fr_clips.py set it since 2026-10-05: on the
+  48-CPU box ffv1_out.py's master then equals the one-slice one, 45 of 45 frames.
+- **The measurements so far are unaffected:** fr_clips.py's GT conversions of these 8-bit
+  sources, its d1 downscale and its bicubic baselines give the same bytes on 1 and 48 slices (the
+  stored files equal the one-slice output), and every score here reads 16-bit RGB masters, not
+  `yuv420p10le` ones. A GT made from a 10-bit source (4K HEVC) would have gone through the
+  faulty read.
+
+So: keep bilinear for the master's chroma, and run every zscale conversion on one slice
+(`threads=1`), the master's and the reader's alike: with ffmpeg's default, a master and its
+checksum change with the machine's CPU count, and a 10-bit source reads off the exact
+conversion. The review sheets (`chroma-<clip>.png`, [Visual review](#visual-review)) show 3
+crops per clip where the GT's colour edges are sharpest.
+
 ## Live action and a bright anime
 
 Three clips from three more sources ([Clips](#clips)): live-vfx and live-slow, letterboxed live
@@ -728,6 +868,8 @@ the default (`max`, any frame) and, for padding, where its bottom 16 rows differ
 | `noaa-`, `spline36-`, `lanczos-anime-clean-max-f1-*.png` | resize kernels: 1.2–1.7 levels at most |
 | `dec32sky-anime-sky-f44-x136-y688.png`, `dec32-anime-sky-f44-x136-y808.png` | GT \| numz's bfloat16 decode \| float32 decode, on the sky, where the two decodes differ most (rows 0–959, and anywhere): 0.31–0.32 levels apart on average, both 7.4–9.8 levels from the GT; `.stretch.png`: the same crops with the GT window's 1st–99th luma percentiles stretched to the full range (one 8-bit level becomes 2.7–4.4), to look for the bfloat16 steps; `.diff.png`: bfloat16 − float32 on luma, ×16 around grey |
 | `dec32lab-anime-sky-f44-x80-y808.png` | the same after `lab` (0.28 levels apart, 1.8 from the GT) |
+| `chroma-<clip>.png` | the master's chroma: 3 windows of 96×96 px per clip at 4× (nearest), where the GT's colour edges are sharpest: GT \| the output \| its bilinear, spline36 and lanczos round trips through `yuv420p10le`, each with its ΔE00 to the GT over the window (cartoon-bright: bilinear the lowest of the three in all 3 windows) |
+| `latent-cartoon-bright-f34-36-38-x0-y520.png` | the latent grid: GT \| bicubic \| default with `lab` (columns), frames 34, 36, 38 (rows), 640×400 px at x 0, y 520, 1:1: ghosts in 34 and 38 (place 1 of their latent group), none in 36 (place 3) |
 
 ## Caveats
 
@@ -748,6 +890,12 @@ the default (`max`, any frame) and, for padding, where its bottom 16 rows differ
   differences for a visual check.
 - **Paired differences only:** VMAF and DISTS are not read as absolute quality here; VMAF's model
   assumes 1080p viewing, and the 720p scores use it too.
+- **The chroma kernels were scored on one seed** (42, with `lab`) at 1080p, against GTs whose
+  chroma is itself 4:2:0 upsampled with bilinear: the model's chroma detail beyond 4:2:0 can't be
+  checked against any of these sources. The conversion is deterministic once on one slice;
+  zscale's slice behaviour was seen with ffmpeg n9.0.2 and may change with the version.
+- **The latent grid was measured on single 45-frame batches** at 1080p from per-frame scores
+  already computed; frames 1–44 (11 groups) per clip, no 4K, no other weights.
 - **Banding has one measure, CAMBI,** whole-frame (on the sky clip, mostly bright gradients); it
   ignores steps of more than a few 10-bit levels (a ramp rounded to 7 or 6 bits scores 0). The
   float16 headroom (3.4 times on the brightest clip) is for these five SDR clips; brighter or
@@ -800,6 +948,36 @@ python3 $S/fr_clips.py scores /path/to/source.mkv --first FIRST_FRAME-10 --last 
 #   image at or below its 30th percentile among the pixels with 16 < blurred < 235, outside the
 #   letterbox rows and the 8 rows next to them; grain = std of the residual over the mask, median over
 #   the 45 frames
+# the master's chroma (CPU): per clip, round trips of the output (MODEL = its lab master) and of the GT,
+#   scores, then one fr_metrics call on the model's round trips (every kernel; see its docstring)
+python3 $S/chroma_kernels.py siting --json siting.json
+python3 $S/chroma_kernels.py convert --clip anime-clean --model MODEL.mkv --gt $C/anime-clean.gt.mkv \
+  --dir rt --filter-threads 1
+python3 $S/chroma_kernels.py score --clip anime-clean --model MODEL.mkv --gt $C/anime-clean.gt.mkv \
+  --dir rt --json scores/anime-clean.json
+taskset -c 0 python3 $S/chroma_kernels.py proof --src MODEL.mkv \
+  --yuv rt/anime-clean/model.bilinear.yuv.mkv --work proof --json proof/anime-clean.json
+python3 $S/chroma_kernels.py srcchroma --clip anime-clean --src $C/anime-clean.src.mkv --dir rt \
+  --json srcchroma/anime-clean.json
+python3 $S/chroma_kernels.py review --clip anime-clean --model MODEL.mkv --gt $C/anime-clean.gt.mkv \
+  --dir rt --out review
+python3 $S/chroma_kernels.py threads --src MODEL.mkv --json threads.json   # slices against one
+python3 $S/chroma_kernels.py upcheck --yuv rt/anime-clean/model.bilinear.yuv.mkv --json up.json
+python3 $S/chroma_kernels.py gtcheck --gt $C/anime-clean.gt.mkv --src $C/anime-clean.src.mkv \
+  --json gtcheck.json
+python3 $S/chroma_kernels.py timing --src MODEL.mkv --json timing.json
+python3 $S/chroma_kernels.py summary scores/*.json --frm frm --q1 m/d1-lab --proof proof/*.json \
+  --siting siting.json --threads-json threads.json --gtcheck gtcheck.json --upcheck up.json \
+  --srcchroma srcchroma/*.json --timing timing.json --md summary.md
+# the latent grid: per-frame scores by place in the 4-frame groups, against each clip's bicubic baseline
+python3 $S/cut_metrics.py phase m/d1-none/*-d1.def.s{42,43,1234}.json \
+  $(for f in m/d1-lab/*-d1.bicubic.s0.json; do echo --base $f; done) \
+  --metrics psnr_y,ssim_y,lpips,dists,vmaf,de00_lf
+# its review crop: frames 34, 36, 38 of cartoon-bright, GT | bicubic | default with lab
+F="select='eq(n\,34)+eq(n\,36)+eq(n\,38)',crop=640:400:0:520,format=rgb24"
+ffmpeg -i $C/cartoon-bright.gt.mkv -i $C/cartoon-bright.d1.bicubic.mkv -i LAB_MASTER.mkv \
+  -filter_complex "[0]$F[a];[1]$F[b];[2]$F[c];[a][b][c]hstack=3,tile=1x3" \
+  -frames:v 1 -update 1 latent-cartoon-bright-f34-36-38-x0-y520.png
 ```
 
 <details>

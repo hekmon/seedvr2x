@@ -7,6 +7,7 @@
   cut_metrics.py first JSON[:FIRST] ... [--frames 8]                 # a shot's first frame vs its next ones
   cut_metrics.py join A.mkv B.mkv ... --out AB.mkv                   # lossless concatenation
   cut_metrics.py selftest GT.mkv --cut C [--out OUT.mkv]             # ghost coefficient on known mixes
+  cut_metrics.py phase RUN.json ... --base BASE.json ... [--metrics psnr_y,lpips,vmaf]  # latent grid
   cut_metrics.py summary JSON ...                                     # Markdown table of analyses
 
 Why: SeedVR2 packs 4 frames per latent and runs causal VAE passes and windowed DiT attention, so
@@ -66,6 +67,13 @@ frame 1 (read from the masters the JSONs name). The outputs of the same clip and
 differ by their seed give the seed noise of d0: |d0(seed a) - d0(seed b)| over every pair, its
 --q quantile (default 0.95) and maximum. Made for --prepend_frames, which moves a shot's first
 frame out of the lone first latent.
+
+`phase` measures fidelity by a frame's place in the causal VAE's latent grid: a unit's first
+frame (--first) is a latent of its own, then each latent holds 4 frames, places 0 to 3 (3 = the
+group's last). Each run is compared frame by frame with its clip's baseline (--base, matched on
+the JSONs' clip; a bicubic upscale, whose own values show whether the input has a pattern of its
+own), oriented as the run's gain (> 0 = closer to the GT), then averaged per place over the frames
+after the first and over the runs; plus the gap between places 3 and 1, per run.
 
 `join` concatenates RGB masters (FFV1, same size and pixel format) into one FFV1 master of the
 same format, without any pixel conversion, and checks it by framemd5 against its parts.
@@ -622,6 +630,55 @@ def cmd_first(a):
             print(f"- {BY_KEY[k][1] if k in BY_KEY else names[k]}: {np.quantile(v, a.q):.4g} / {max(v):.4g}")
 
 
+# ------------------------------------------------------------------ phase
+
+PHASE_KEYS = "psnr_y,lpips,vmaf"
+
+
+def latent_pos(t, first=0):
+    """Frame t's place in the causal VAE's latent grid of a unit starting at `first`: the unit's
+    first frame is a latent of its own (-1), then 0…3 in each group of 4 (3 = the group's last)."""
+    d = t - first
+    return -1 if d == 0 else (d - 1) % 4
+
+
+def cmd_phase(a):
+    bases = {}
+    for p in a.base:
+        b = load(p)
+        bases[b.get("clip")] = b
+    groups = {}
+    for p in a.runs:
+        r = load(p)
+        if r.get("clip") not in bases:
+            raise SystemExit(f"{p}: no --base for clip {r.get('clip')!r}")
+        groups.setdefault(r.get("clip"), []).append(r)
+    for k in [k for k in a.metrics.split(",") if k in BY_KEY and not BY_KEY[k][3]]:
+        name, up, f, df = BY_KEY[k][1], BY_KEY[k][2], BY_KEY[k][4], BY_KEY[k][5]
+        print(f"\n### {name} by place in the 4-frame latent grid (frames after the first; 3 = a group's last)\n")
+        print("Run − baseline, oriented (> 0: the run closer to the GT), mean over frames and runs; the gap "
+              "between places 3 and 1 per run (its range over the runs); the baseline's own values.\n")
+        print("| clip | runs | 0 | 1 | 2 | 3 | 3 − 1 (range) | baseline 0 / 1 / 2 / 3 |")
+        print("|---|---:|---:|---:|---:|---:|---|---|")
+        for clip, runs in groups.items():
+            b = series(bases[clip], k)
+            n = len(b)
+            pos = [latent_pos(t, a.first) for t in range(n)]
+            per = {p: [] for p in range(4)}
+            gaps = []
+            for r in runs:
+                s = series(r, k)[:n]
+                d = (s - b) if up else (b - s)
+                m = {p: float(np.nanmean([d[t] for t in range(n) if pos[t] == p])) for p in range(4)}
+                for p in range(4):
+                    per[p] += [d[t] for t in range(n) if pos[t] == p]
+                gaps.append(m[3] - m[1])
+            bp = [float(np.nanmean([b[t] for t in range(n) if pos[t] == p])) for p in range(4)]
+            print(f"| {clip} | {len(runs)} | " + " | ".join(df.format(float(np.nanmean(per[p]))) for p in range(4)) +
+                  f" | {df.format(float(np.mean(gaps)))} ({df.format(min(gaps))}…{df.format(max(gaps))}) | " +
+                  " / ".join(f.format(x) for x in bp) + " |")
+
+
 # ------------------------------------------------------------------ summary
 
 def cmd_summary(a):
@@ -702,11 +759,17 @@ def main():
     s.add_argument("--cut", type=int, required=True)
     s.add_argument("--out", help="an output of the same clip: also mixes of its own frames")
     s.add_argument("--blocks", default="1,8")
+    s = sub.add_parser("phase", help="fidelity by place in the 4-frame latent grid, against a baseline")
+    s.add_argument("runs", nargs="+", help="fr_metrics JSONs of the runs (e.g. a variant's seeds), any clips")
+    s.add_argument("--base", action="append", required=True,
+                   help="fr_metrics JSON of a clip's baseline (e.g. bicubic), matched on its clip; repeatable")
+    s.add_argument("--metrics", default=PHASE_KEYS, help=f"per-frame metrics (default {PHASE_KEYS})")
+    s.add_argument("--first", type=int, default=0, help="index of the unit's first frame (default 0)")
     s = sub.add_parser("summary", help="Markdown table of analysis JSONs (files or directories)")
     s.add_argument("files", nargs="+")
     a = ap.parse_args()
     {"analyze": cmd_analyze, "compare": cmd_compare, "first": cmd_first, "join": cmd_join,
-     "selftest": cmd_selftest, "summary": cmd_summary}[a.cmd](a)
+     "selftest": cmd_selftest, "phase": cmd_phase, "summary": cmd_summary}[a.cmd](a)
 
 
 if __name__ == "__main__":
