@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Scene-cut detection measurements: every frame's ffmpeg scdet score, computed as sptenc runs it,
-a second opinion from PySceneDetect, review candidates and statistics per threshold.
+second opinions from PySceneDetect and TransNetV2, review candidates and statistics per threshold.
 
   scd_scores.py check SOURCE --out DIR [--synthetic]  # sptenc's own command vs the all-score pass
   scd_scores.py score SOURCE --out DIR [--no-reinit]  # one scdet pass: every frame's score
   scd_scores.py pysd --out DIR [--range A:B]          # AdaptiveDetector + ContentDetector
   scd_scores.py pysd-check FILE --out DIR             # our PySceneDetect loop vs its own pipeline
+  scd_scores.py tnet --out DIR [--threads 16]         # TransNetV2's probabilities, every frame
+  scd_scores.py tnet-check FILE --out DIR             # our TransNetV2 run vs the official TF one
   scd_scores.py analyse --out DIR [--name NAME]       # candidates, auto-classes, stats per threshold
   scd_scores.py activity --out DIR [--window 25]      # where a film is busiest (to pick a chunk)
   scd_scores.py compare REF OTHER [--md OUT.md]       # one video scored twice (original vs segments)
@@ -51,6 +53,31 @@ pysd-check: on one file, our PySceneDetect loop against PySceneDetect's own pipe
 (open_video, OpenCV backend, SceneManager): cut lists per detector, plus the pixel difference
 between OpenCV's decoded frames and ours.
 
+tnet: TransNetV2 (github.com/soCzech/TransNetV2, MIT), a network trained to find shot
+boundaries, on CPU: the official PyTorch model, imported from a checkout of the official
+repository (--tnet-dir or TNET_DIR: inference-pytorch/transnetv2_pytorch.py), with the weights
+its convert_weights.py converts from the official TF ones (--weights or TNET_WEIGHTS). Frames 0
+to the end of the scored range plus TNET_MARGIN are decoded as the score pass decodes them (same
+files, decode order, segments concatenated, -fps_mode passthrough, where the official extraction
+leaves ffmpeg's rawvideo default free to drop or repeat frames by timestamp) and scaled as the
+official extraction scales them: ffmpeg's own output scaler (-s 48x27, its default flags) to
+rgb24, frames as decoded (an anamorphic or interlaced source is neither unsqueezed nor
+deinterlaced). The official predict_frames is reproduced: 25 copies of the first frame before
+the frames, 25 to 74 copies of the last after, windows of 100 frames every 50, each keeping
+its frames 25-74, then the sigmoid of the single-frame and all-frames outputs. A frame's window
+reaches 74 frames ahead at most, so the scored range gets the values of a run on the whole
+source. Writes DIR/tnet.npz: single and all (float32, one per decoded frame), frames,
+weights_sha256, decode_seconds, inference_seconds, threads, and meta (JSON: commit, versions,
+CPU seconds, the decode command).
+
+tnet-check: the same frames through the official TF model (inference/transnetv2.py's
+TransNetV2.predict_frames with the TF weights of --tf-weights) and through ours: first --random
+random frames, then --frames frames of FILE from --start, decoded as tnet decodes them (and
+compared byte for byte with the official extraction's own command); per run, the largest
+absolute differences of both outputs, and whether the official predictions_to_scenes at 0.5 and
+our detections at 0.5 are identical. Also our model with --batch windows per forward against
+one at a time (the official way).
+
 analyse: candidates = scdet local maxima (score >= 4, above the previous frame and not below the
 next) + PySceneDetect detections + segment joins, merged within +-1 frame. "sure" = scdet >= 30
 and both PySceneDetect detectors within +-1 frame, otherwise "doubtful". A candidate's burst is
@@ -59,7 +86,25 @@ motion come in bursts, every 2 or 3 frames; a cut stands alone). Per threshold T
 (every frame scoring >= T is a cut, as in sptenc), their gaps to the previous detection, sure
 cuts below T, possible misses (PySceneDetect detections whose scdet score is below T), shot
 lengths (median, and counts under 0.5, 1 and 2 s; the partial first and last shots of a chunk
-are left out). Writes DIR/candidates.csv, DIR/stats.json, DIR/stats.md.
+are left out). Also PySceneDetect's detectors alone: detections, gaps, shots
+(pysd_detectors). Writes DIR/candidates.csv, DIR/stats.json, DIR/stats.md.
+
+analyse with DIR/tnet.npz adds TransNetV2. Alignment: on the sure cuts that are scdet local
+maxima, the frame of TransNetV2's single-frame peak within +-3 frames minus the cut's frame
+(its official predictions_to_scenes ends a shot on its positive frame, so -1 is expected: it
+marks the last frame of the outgoing shot); the modal offset (or --tnet-offset) aligns its
+values: an aligned value at frame f is TransNetV2's for a cut at f in our convention. Its
+local peaks >= 0.1 (aligned) become candidates where no candidate of the old population lies
+within +-1 frame; a candidate belongs to the old population iff scdet_lm, adaptive, content or
+join is set, and those keep their frame and columns byte for byte. Three columns end
+candidates.csv: tnet and tnet_all, the highest aligned single-frame and all-frames
+probabilities within +-1 frame, and tnet_peak, the aligned frame of the first when it reaches
+0.1. Per threshold p (TNET_P): detections (runs of aligned frames >= p, one per run at its
+peak), their gaps, shots, sure cuts with tnet >= p, TransNetV2-only candidates and those 2-3
+frames from an old candidate (an alignment check: a wrong offset puts them there), PySceneDetect's
+possible misses at T=10 that TransNetV2 gets, and the scdet T x TransNetV2 p agreement on
+candidates. The statistics of the old population keep their keys and values; TransNetV2's go
+under "tnet".
 
 activity: scdet activity along a scored source (local maxima per block of minutes), and the
 windows richest in doubtful-range local maxima: to pick a chunk of a long film.
@@ -71,19 +116,31 @@ bursts, and the reference's scores at the other version's segment joins (each jo
 splitter detected).
 
 summary: Markdown tables across episodes. --labels takes the review index (scd_review.py) with
-its label column filled (cut / flash / pan / fade / dissolve / other / not-a-cut) and adds,
-per threshold, estimated cuts detected, false positives by label and missed cuts (each labelled
-row weighted by the candidates of its review stratum it stands for).
+its label column filled (cut / flash / pan / fade / dissolve / other / not-a-cut) and joins each
+labelled row on (episode, frame) with the candidates.csv of the DIRS given. Per detector
+(scdet >= T for each threshold, PySceneDetect's adaptive and content detectors, TransNetV2 >= p
+for each p): estimated cuts detected and missed, recall, false positives by label, precision
+with every other label counted as an error, and with fades and dissolves left out (gradual
+transitions, not hard cuts: a detector may rightly cut there); per episode, then pooled by kind
+(animation / live action / DVD: KINDS, --kind NAME=KIND; any other episode is animation). Each
+labelled row stands for the candidates of its review stratum (stratum size / labelled rows of
+the stratum), so a partly labelled index still gives estimates. Recall is relative to the cuts
+among the candidates, the union of every detector's (a cut no detector comes near is never
+shown). Rows of episodes missing from DIRS are counted apart.
 
 Needs ffmpeg and ffprobe on PATH (a build with scdet; FFMPEG/FFPROBE override) and numpy;
-pysd and pysd-check need scenedetect and OpenCV.
+pysd and pysd-check need scenedetect and OpenCV; tnet needs torch and the TransNetV2 checkout,
+tnet-check TensorFlow as well.
 """
 import argparse
 import csv
+import hashlib
+import io
 import json
 import math
 import os
 import re
+import resource
 import subprocess
 import sys
 import time
@@ -104,6 +161,16 @@ LABELS = ("cut", "flash", "pan", "fade", "dissolve", "other", "not-a-cut")
 
 BANDS = (4, 6, 8, 10, 12, 14, 17, 20, 30)  # scdet score bands of the review strata
 BURST = (6, 6.0)  # burst: other frames within +-6 frames scoring >= 6
+
+TNET_P = (0.1, 0.2, 0.3, 0.5, 0.7, 0.9)  # TransNetV2 thresholds of the statistics
+TNET_MIN = 0.1  # TransNetV2 local peaks from this probability on are candidates
+TNET_BANDS = (0.1, 0.3, 0.5, 0.7, 0.9)  # TransNetV2 bands of the review strata
+TNET_SIZE = (48, 27)  # TransNetV2's input frames, width x height
+TNET_WINDOW, TNET_STEP, TNET_PAD = 100, 50, 25  # predict_frames: 100 frames every 50, keeps 25-74
+TNET_MARGIN = 100  # frames decoded past the scored range: a frame's window reaches 74 frames ahead
+TNET_SEARCH = 3  # alignment: TransNetV2's peak searched within +-3 frames of a sure cut
+TNET_OFFSET = -1  # the official convention (last frame of the outgoing shot), when nothing is measured
+KINDS = {"edge-of-tomorrow": "live action", "oss117": "live action", "malcolm-s01e01": "DVD"}
 
 FRAME_RE = re.compile(r"frame:(\d+)\s+pts:(\S+)\s+pts_time:(\S+)")
 SCDET_LOG_RE = re.compile(r"lavfi\.scd\.score: ([\d.]+), lavfi\.scd\.time: (\S+)")
@@ -147,6 +214,23 @@ def pysd_agreement(c):
     """both / one / none: PySceneDetect detectors cutting within +-1 frame of a candidate."""
     a, b = c.get("adaptive") not in (None, ""), c.get("content") not in (None, "")
     return "both" if a and b else ("one" if a or b else "none")
+
+
+def tnet_band(x):
+    """TransNetV2 band of the review strata: 0.1-0.3 ... >=0.9."""
+    if x < TNET_BANDS[0]:
+        return f"<{TNET_BANDS[0]:g}"
+    for lo, hi in zip(TNET_BANDS, TNET_BANDS[1:]):
+        if lo <= x < hi:
+            return f"{lo:g}-{hi:g}"
+    return f">={TNET_BANDS[-1]:g}"
+
+
+def old_population(c):
+    """A candidate of scdet, PySceneDetect or a segment join, not of TransNetV2 alone (an analyse
+    candidate or a candidates.csv row)."""
+    return c.get("scdet_lm") in (True, "True") or any(c.get(k) not in (None, "")
+                                                      for k in ("adaptive", "content", "join"))
 
 
 def load_json(path):
@@ -238,15 +322,20 @@ def segments_of(src):
     return [(g["file"], g["start"], g["frames"]) for g in src["segments"]]
 
 
-def decode_cmd(path, pix_fmt, threads, vf=None, frames=None, progress=None):
-    """Plain sequential decode of the video stream to raw frames on stdout."""
-    cmd = [FFMPEG, "-hide_banner", "-nostats", "-v", "error", "-threads", str(threads), "-i", path,
-           "-map", "0:v:0", "-an", "-sn", "-dn"]
+def decode_cmd(path, pix_fmt, threads, vf=None, frames=None, progress=None, size=None, filter_threads=None):
+    """Plain sequential decode of the video stream to raw frames on stdout; size (WxH) scales them
+    with ffmpeg's own output scaler (-s), as TransNetV2's extraction does."""
+    cmd = [FFMPEG, "-hide_banner", "-nostats", "-v", "error", "-threads", str(threads)]
+    if filter_threads:
+        cmd += ["-filter_threads", str(filter_threads)]
+    cmd += ["-i", path, "-map", "0:v:0", "-an", "-sn", "-dn"]
     if vf:
         cmd += ["-vf", vf]
     if frames:
         cmd += ["-frames:v", str(frames)]
     cmd += ["-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", pix_fmt]
+    if size:
+        cmd += ["-s", size]
     if progress:
         cmd += ["-progress", progress]
     return cmd + ["pipe:1"]
@@ -661,6 +750,228 @@ def cmd_pysd_check(a):
     print("counts: ours", {k: len(v) for k, v in ours.items()}, "own", {k: len(v) for k, v in own.items()})
 
 
+# --- TransNetV2 ----------------------------------------------------------------------------------
+
+def scored_range(d, src):
+    """The analysed range (S, E): PySceneDetect's chunk, else the whole source."""
+    n = src["frames"]
+    p = os.path.join(d, "pysd.json")
+    if os.path.exists(p):
+        s, e = load_json(p)["range"]
+        return s, min(e, n)
+    return 0, n
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def cpu_seconds(who):
+    r = resource.getrusage(who)
+    return r.ru_utime + r.ru_stime
+
+
+def tnet_model(tnet_dir, weights, threads):
+    """The official PyTorch TransNetV2 (imported from the checkout) with converted weights, on CPU."""
+    import torch
+    torch.set_num_threads(threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    sys.path.insert(0, os.path.join(tnet_dir, "inference-pytorch"))
+    from transnetv2_pytorch import TransNetV2
+    model = TransNetV2()
+    model.load_state_dict(torch.load(weights, map_location="cpu"))
+    model.eval()
+    try:
+        commit = subprocess.run(["git", "-C", tnet_dir, "rev-parse", "HEAD"], capture_output=True, text=True,
+                                check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = None
+    return model, {"tnet_dir": os.path.abspath(tnet_dir), "commit": commit, "weights": os.path.abspath(weights),
+                   "weights_sha256": sha256(weights), "torch": torch.__version__, "threads": threads}
+
+
+def tnet_frames(src, end, threads, every=20000):
+    """Frames 0..end-1 of a scored source as TransNetV2 takes them: decoded as the score pass
+    decodes them, scaled by ffmpeg's output scaler to 48x27 rgb24 (the official extraction's
+    -s 48x27 -pix_fmt rgb24). Returns a [n, 27, 48, 3] uint8 array and the first decode command."""
+    w, h = TNET_SIZE
+    size = w * h * 3
+    out = np.empty((end, h, w, 3), np.uint8)
+    flat = out.reshape(-1)
+    got, first, t0 = 0, None, time.time()
+    for path, off, cnt in segments_of(src):
+        if off >= end:
+            break
+        if off != got:
+            raise RuntimeError(f"{path}: starts at frame {off}, but {got} frames were decoded before it")
+        want = end - off if cnt is None or end < off + cnt else None
+        cmd = decode_cmd(path, "rgb24", threads, frames=want, size=f"{w}x{h}", filter_threads=threads)
+        first = first or cmd
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
+        try:
+            while got < end:
+                k = min(end - got, 4096)
+                r = read_full(p.stdout, flat[got * size:(got + k) * size])
+                if r % size:
+                    raise RuntimeError(f"{path}: truncated frame ({r % size} of {size} bytes)")
+                if (got + r // size) // every > got // every:
+                    log(f"decode: {got + r // size} frames, {(got + r // size) / (time.time() - t0):.0f} fps")
+                got += r // size
+                if r < k * size:
+                    break
+        finally:
+            p.stdout.close()
+            rc = p.wait()
+        if rc:
+            raise RuntimeError(f"{path}: decoder exited with {rc}")
+        if want is None and cnt is not None and got - off != cnt:
+            log(f"WARNING {path}: {got - off} frames decoded, the score pass counted {cnt}")
+    return out[:got], first
+
+
+def tnet_predict(model, frames, batch=1, every=20000):
+    """TransNetV2's predict_frames with the PyTorch model: 25 copies of the first frame before, 25 to
+    74 of the last after, windows of 100 frames every 50 (batch windows per forward; officially
+    one), frames 25-74 of each kept; sigmoid of the single-frame and all-frames logits."""
+    import torch
+    n = len(frames)
+    pad_end = TNET_PAD + TNET_STEP - (n % TNET_STEP or TNET_STEP)
+    idx = np.concatenate((np.zeros(TNET_PAD, np.int64), np.arange(n), np.full(pad_end, n - 1)))
+    starts = list(range(0, len(idx) - TNET_WINDOW + 1, TNET_STEP))
+    one = np.empty(len(starts) * TNET_STEP, np.float32)
+    many = np.empty_like(one)
+    t0 = time.time()
+    with torch.inference_mode():
+        for b in range(0, len(starts), batch):
+            sl = starts[b:b + batch]
+            x = torch.from_numpy(np.stack([frames[idx[s:s + TNET_WINDOW]] for s in sl]))
+            logits, d = model(x)
+            keep = slice(TNET_PAD, TNET_PAD + TNET_STEP)
+            one[b * TNET_STEP:(b + len(sl)) * TNET_STEP] = torch.sigmoid(logits)[:, keep, 0].reshape(-1).numpy()
+            many[b * TNET_STEP:(b + len(sl)) * TNET_STEP] = torch.sigmoid(d["many_hot"])[:, keep, 0].reshape(-1).numpy()
+            done = min((b + len(sl)) * TNET_STEP, n)
+            if done // every > min(b * TNET_STEP, n) // every:
+                log(f"inference: {done}/{n} frames, {done / (time.time() - t0):.0f} fps")
+    return one[:n], many[:n]
+
+
+def tnet_detections(x, p):
+    """One detection per run of frames >= p, at the run's highest frame (the first if tied)."""
+    m = np.concatenate(([False], np.nan_to_num(x, nan=-1.0) >= p, [False]))
+    d = np.diff(m.astype(np.int8))
+    return [int(a + np.argmax(x[a:b])) for a, b in zip(np.nonzero(d == 1)[0], np.nonzero(d == -1)[0])]
+
+
+def cmd_tnet(a):
+    src = load_json(os.path.join(a.out, "source.json"))
+    n = src["frames"]
+    S, E = scored_range(a.out, src)
+    end = min(n, E + TNET_MARGIN)
+    model, info = tnet_model(a.tnet_dir, a.weights, a.threads)
+    log(f"tnet: frames 0..{end} of {n} (scored range {S}..{E}); TransNetV2 {info['commit']}, weights "
+        f"{info['weights']} (sha256 {info['weights_sha256']}), torch {info['torch']}, {a.threads} threads, "
+        f"batch {a.batch}")
+    c0, t0 = cpu_seconds(resource.RUSAGE_CHILDREN), time.time()
+    frames, cmd = tnet_frames(src, end, a.threads)
+    dec_s, dec_cpu = time.time() - t0, cpu_seconds(resource.RUSAGE_CHILDREN) - c0
+    log(f"decode: {len(frames)} frames in {dec_s:.1f} s ({len(frames) / max(dec_s, 1e-9):.0f} fps), "
+        f"ffmpeg CPU {dec_cpu:.0f} s; {' '.join(cmd)}")
+    if len(frames) != end:
+        log(f"WARNING: {len(frames)} frames decoded, {end} expected")
+    c0, t0 = cpu_seconds(resource.RUSAGE_SELF), time.time()
+    one, many = tnet_predict(model, frames, a.batch)
+    inf_s, inf_cpu = time.time() - t0, cpu_seconds(resource.RUSAGE_SELF) - c0
+    log(f"inference: {len(frames)} frames in {inf_s:.1f} s ({len(frames) / max(inf_s, 1e-9):.0f} fps), "
+        f"CPU {inf_cpu:.0f} s; frames >= 0.5: single {int((one >= 0.5).sum())}, all {int((many >= 0.5).sum())}")
+    meta = {**info, "range": [S, E], "source_frames": n, "decoded": len(frames), "margin": TNET_MARGIN,
+            "batch": a.batch, "size": "x".join(str(v) for v in TNET_SIZE), "fps": src["fps"],
+            "decode_cpu_seconds": round(dec_cpu, 1), "inference_cpu_seconds": round(inf_cpu, 1),
+            "decode": " ".join(cmd)}
+    np.savez(os.path.join(a.out, "tnet.npz"), single=one, all=many, frames=len(frames),
+             weights_sha256=info["weights_sha256"], decode_seconds=round(dec_s, 1),
+             inference_seconds=round(inf_s, 1), threads=a.threads, meta=json.dumps(meta))
+    log(f"wrote {os.path.join(a.out, 'tnet.npz')}")
+
+
+def tnet_official_extraction(path, n, threads):
+    """The official extraction's command (ffmpeg-python's -i FILE -f rawvideo -pix_fmt rgb24 -s 48x27
+    pipe:), its first n frames; -threads and quiet logging added."""
+    w, h = TNET_SIZE
+    cmd = [FFMPEG, "-hide_banner", "-nostats", "-v", "error", "-threads", str(threads), "-i", path,
+           "-frames:v", str(n), "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "pipe:"]
+    r = subprocess.run(cmd, capture_output=True, check=True)
+    return np.frombuffer(r.stdout, np.uint8).reshape(-1, h, w, 3), cmd
+
+
+def tnet_compare(official, model, frames, batch):
+    """The same frames through the official TF predict_frames and ours."""
+    t0 = time.time()
+    tf_one, tf_all = official.predict_frames(frames)
+    t_tf = time.time() - t0
+    t0 = time.time()
+    one, many = tnet_predict(model, frames, 1)
+    t_pt = time.time() - t0
+    sc_tf = official.predictions_to_scenes(tf_one, 0.5)
+    sc_pt = official.predictions_to_scenes(one, 0.5)
+    d_tf, d_pt = tnet_detections(tf_one, 0.5), tnet_detections(one, 0.5)
+    res = {"frames": len(frames), "seconds_tf": round(t_tf, 1), "seconds_torch": round(t_pt, 1),
+           "max_abs_single": float(np.abs(tf_one - one).max()), "max_abs_all": float(np.abs(tf_all - many).max()),
+           "mean_abs_single": float(np.abs(tf_one - one).mean()),
+           "frames_ge_0.5": {"tf": int((tf_one >= 0.5).sum()), "torch": int((one >= 0.5).sum())},
+           "scenes_0.5": len(sc_tf), "scenes_0.5_identical": bool(np.array_equal(sc_tf, sc_pt)),
+           "detections_0.5": len(d_tf), "detections_0.5_identical": d_tf == d_pt,
+           "detections_0.5_head": d_tf[:20]}
+    if batch > 1:
+        t0 = time.time()
+        b_one, b_all = tnet_predict(model, frames, batch)
+        res["batch"] = {"windows": batch, "seconds_torch": round(time.time() - t0, 1),
+                        "max_abs_single_vs_one": float(np.abs(b_one - one).max()),
+                        "max_abs_all_vs_one": float(np.abs(b_all - many).max())}
+    return res
+
+
+def cmd_tnet_check(a):
+    import tensorflow as tf
+    tf.config.threading.set_intra_op_parallelism_threads(a.threads)
+    tf.config.threading.set_inter_op_parallelism_threads(2)
+    os.makedirs(a.out, exist_ok=True)
+    model, info = tnet_model(a.tnet_dir, a.weights, a.threads)
+    sys.path.insert(0, os.path.join(a.tnet_dir, "inference"))
+    from transnetv2 import TransNetV2 as Official
+    tf_weights = a.tf_weights or os.path.join(a.tnet_dir, "inference", "transnetv2-weights")
+    official = Official(tf_weights)
+    res = {"file": a.source, **info, "tensorflow": tf.__version__, "tf_weights": os.path.abspath(tf_weights),
+           "tf_variables_sha256": sha256(os.path.join(tf_weights, "variables", "variables.data-00000-of-00001"))}
+    if a.random:
+        rnd = np.random.default_rng(a.seed).integers(0, 256, (a.random, TNET_SIZE[1], TNET_SIZE[0], 3), np.uint8)
+        log(f"random frames: {a.random}")
+        res["random"] = tnet_compare(official, model, rnd, a.batch)
+        log(json.dumps(res["random"]))
+    end = a.start + a.frames
+    src = {"kind": "file", "files": [a.source], "frames": None}
+    frames, cmd = tnet_frames(src, end, a.threads)
+    ref, ref_cmd = tnet_official_extraction(a.source, end, a.threads)
+    m = min(len(frames), len(ref))
+    diff = np.abs(frames[:m].astype(np.int16) - ref[:m].astype(np.int16))
+    res["extraction"] = {"ours": " ".join(cmd), "official": " ".join(ref_cmd), "frames_ours": len(frames),
+                         "frames_official": len(ref), "identical": len(frames) == len(ref) and not diff.any(),
+                         "frames_differing": int(diff.reshape(m, -1).any(1).sum()), "max_abs": int(diff.max())}
+    log(json.dumps(res["extraction"]))
+    ex = frames[a.start:end]
+    log(f"excerpt: frames {a.start}..{a.start + len(ex)} of {a.source}")
+    res["excerpt"] = {"start": a.start, **tnet_compare(official, model, ex, a.batch)}
+    log(json.dumps(res["excerpt"]))
+    save_json(res, os.path.join(a.out, "tnet_check.json"))
+    print(json.dumps(res, indent=1))
+
+
 # --- candidates and statistics -------------------------------------------------------------------
 
 def adaptive_ratio(cv, f, w=2, min_content_val=15.0):
@@ -755,7 +1066,8 @@ def cmd_analyse(a):
     cv = np.load(cv_path) if os.path.exists(cv_path) else np.full(n, np.nan, np.float32)
     joins = [g["start"] for g in src.get("segments", [])[1:]]
     cands, lm = build_candidates(s, (S, E), pysd["cuts"] if pysd else {}, joins)
-    for c in cands:
+
+    def describe(c):
         f = c["frame"]
         c["scdet"] = float(s[f])
         c["mafd"] = float(mafd[f])
@@ -769,18 +1081,53 @@ def cmd_analyse(a):
         sure = c["scdet"] >= SURE_MIN and c["adaptive"] is not None and c["content"] is not None
         c["class"] = "sure" if sure else "doubtful"
         c["timecode"] = timecode(f, fps, sc["pts_time"])
+
+    for c in cands:
+        describe(c)
+    old = list(cands)  # the old population: scdet, PySceneDetect and joins
+    tn = load_tnet(d)
+    if tn:
+        hist = tnet_offsets(tn["single"], old)
+        peaks = {int(k): v for k, v in hist.items() if k != "none"}
+        if a.tnet_offset is not None:
+            toff, how = a.tnet_offset, "forced"
+        elif peaks:
+            toff, how = max(peaks, key=lambda k: (peaks[k], -abs(k))), "modal"
+        else:
+            toff, how = TNET_OFFSET, "official convention (no sure cut with a peak)"
+        one, many = tnet_align(tn["single"], toff, n), tnet_align(tn["all"], toff, n)
+        have = {c["frame"] for c in old}
+        for f in local_peaks(np.nan_to_num(one, nan=-1.0), TNET_MIN):
+            if S <= f < E and not have & {f - 1, f, f + 1}:
+                c = {"frame": int(f), "scdet_lm": False, "adaptive": None, "content": None, "join": None}
+                describe(c)
+                cands.append(c)
+        cands.sort(key=lambda c: c["frame"])
+        for c in cands:
+            lo, hi = max(0, c["frame"] - 1), min(n, c["frame"] + 2)
+            if np.isnan(one[lo:hi]).all():
+                c["tnet"] = c["tnet_all"] = c["tnet_peak"] = None
+                continue
+            c["tnet"] = round(float(np.nanmax(one[lo:hi])), 6)
+            c["tnet_all"] = round(float(np.nanmax(many[lo:hi])), 6)
+            c["tnet_peak"] = int(lo + np.nanargmax(one[lo:hi])) if c["tnet"] >= TNET_MIN else None
+        log(f"TransNetV2: offset {toff} ({how}; its peak minus the sure cut's frame: {hist}), "
+            f"{len(cands) - len(old)} TransNetV2-only candidates")
     name = a.name or os.path.basename(os.path.normpath(d))
     cols = ["frame", "timecode", "class", "scdet", "mafd", "prev", "next", "local_max", "scdet_lm",
             "adaptive", "content", "ad_ratio", "content_val", "join", "burst"]
+    tcols = ["tnet", "tnet_all", "tnet_peak"] if tn else []
     with open(os.path.join(d, "candidates.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(cols)
+        w.writerow(cols + tcols)
         for c in cands:
             w.writerow([("" if c[k] is None else (f"{c[k]:.3f}" if isinstance(c[k], float) else c[k]))
-                        for k in cols])
+                        for k in cols] +
+                       [("" if c[k] is None else (f"{c[k]:.6f}" if isinstance(c[k], float) else c[k]))
+                        for k in tcols])
 
-    sure = [c for c in cands if c["class"] == "sure"]
-    doubt = [c for c in cands if c["class"] == "doubtful"]
+    sure = [c for c in old if c["class"] == "sure"]
+    doubt = [c for c in old if c["class"] == "doubtful"]
     rs = s[S:E]
     bins = [(4, 6), (6, 10), (10, 14), (14, 20), (20, 30), (30, 1e9)]
     st = {
@@ -791,12 +1138,12 @@ def cmd_analyse(a):
         "joins_in_range": sum(1 for j in joins if S <= j < E),
         "pysd": bool(pysd),
         "checks": src.get("checks"),
-        "candidates": len(cands), "sure": len(sure), "doubtful": len(doubt),
+        "candidates": len(old), "sure": len(sure), "doubtful": len(doubt),
         "candidates_by_source": {
-            "scdet_only": sum(1 for c in cands if c["scdet_lm"] and c["adaptive"] is None and c["content"] is None),
-            "scdet_and_pysd": sum(1 for c in cands if c["scdet_lm"] and (c["adaptive"] is not None or c["content"] is not None)),
-            "pysd_only": sum(1 for c in cands if not c["scdet_lm"] and (c["adaptive"] is not None or c["content"] is not None)),
-            "join_only": sum(1 for c in cands if not c["scdet_lm"] and c["adaptive"] is None and c["content"] is None),
+            "scdet_only": sum(1 for c in old if c["scdet_lm"] and c["adaptive"] is None and c["content"] is None),
+            "scdet_and_pysd": sum(1 for c in old if c["scdet_lm"] and (c["adaptive"] is not None or c["content"] is not None)),
+            "pysd_only": sum(1 for c in old if not c["scdet_lm"] and (c["adaptive"] is not None or c["content"] is not None)),
+            "join_only": sum(1 for c in old if not c["scdet_lm"] and c["adaptive"] is None and c["content"] is None),
         },
         "doubtful_by_scdet": {f"{lo:g}-{hi:g}" if hi < 1e9 else f">={lo:g}":
                               sum(1 for c in doubt if c["scdet_lm"] and lo <= c["scdet"] < hi) for lo, hi in bins},
@@ -808,7 +1155,7 @@ def cmd_analyse(a):
     }
     # index alignment: PySceneDetect's frame against scdet's on strong cuts
     off = {"adaptive": {}, "content": {}}
-    for c in cands:
+    for c in old:
         if c["scdet_lm"] and c["scdet"] >= SURE_MIN:
             for k in off:
                 if c[k] is not None:
@@ -819,10 +1166,10 @@ def cmd_analyse(a):
     for t in THRESHOLDS:
         det = np.nonzero(rs >= t)[0] + S
         detset = set(int(x) for x in det)
-        lmset = {c["frame"] for c in cands if c["scdet_lm"]}
-        pm_both = [c["frame"] for c in cands
+        lmset = {c["frame"] for c in old if c["scdet_lm"]}
+        pm_both = [c["frame"] for c in old
                    if c["adaptive"] is not None and c["content"] is not None and c["scdet"] < t]
-        pm_one = [c["frame"] for c in cands
+        pm_one = [c["frame"] for c in old
                   if (c["adaptive"] is None) != (c["content"] is None) and c["scdet"] < t]
         gaps = np.diff(det)
         per_t[f"{t:g}"] = {
@@ -841,11 +1188,100 @@ def cmd_analyse(a):
             **shot_stats(det, (S, E), n, fps),
         }
     st["per_threshold"] = per_t
+    if pysd:  # each PySceneDetect detector alone
+        st["pysd_detectors"] = {}
+        for k, v in pysd["cuts"].items():
+            det = np.array(sorted(x for x in v if S <= x < E), int)
+            st["pysd_detectors"][k] = {"detections": len(det), "gaps": gap_hist(det), **shot_stats(det, (S, E), n, fps)}
+    if tn:
+        st["tnet"] = tnet_stats(tn, hist, toff, how, one, cands, old, sure, (S, E), n, fps)
     save_json(st, os.path.join(d, "stats.json"))
     with open(os.path.join(d, "stats.md"), "w", encoding="utf-8") as f:
         f.write(stats_markdown([st]))
-    log(f"{name}: {E - S} frames, {len(cands)} candidates ({len(sure)} sure, {len(doubt)} doubtful)")
+    log(f"{name}: {E - S} frames, {len(old)} candidates ({len(sure)} sure, {len(doubt)} doubtful)" +
+        (f", {len(cands) - len(old)} more of TransNetV2 alone" if tn else ""))
     print(stats_markdown([st]))
+
+
+def load_tnet(d):
+    p = os.path.join(d, "tnet.npz")
+    if not os.path.exists(p):
+        return None
+    with np.load(p) as z:
+        return {"single": z["single"].astype(np.float64), "all": z["all"].astype(np.float64),
+                **{k: z[k].item() for k in ("frames", "weights_sha256", "decode_seconds", "inference_seconds",
+                                            "threads")},
+                "meta": json.loads(str(z["meta"]))}
+
+
+def tnet_align(x, off, n):
+    """TransNetV2's values in our convention (n frames): index f holds its value of frame f + off,
+    NaN where it has none."""
+    y = np.full(n, np.nan)
+    lo, hi = max(0, -off), min(n, len(x) - off)
+    if hi > lo:
+        y[lo:hi] = x[lo + off:hi + off]
+    return y
+
+
+def tnet_offsets(single, cands):
+    """Histogram of the frame of TransNetV2's single-frame peak within +-TNET_SEARCH frames minus the
+    frame of each sure cut that is a scdet local maximum; "none" where no frame reaches TNET_MIN."""
+    hist = {}
+    for c in cands:
+        if c["class"] != "sure" or not c["scdet_lm"]:
+            continue
+        f = c["frame"]
+        lo, hi = max(0, f - TNET_SEARCH), min(len(single), f + TNET_SEARCH + 1)
+        w = single[lo:hi]
+        k = str(int(lo + np.argmax(w) - f)) if len(w) and w.max() >= TNET_MIN else "none"
+        hist[k] = hist.get(k, 0) + 1
+    return {k: hist[k] for k in sorted(hist, key=lambda k: (k == "none", int(k) if k != "none" else 0))}
+
+
+def tnet_stats(tn, hist, toff, how, one, cands, old, sure, rng, n, fps):
+    """TransNetV2's statistics: alignment, its own candidates, and per threshold p."""
+    S, E = rng
+    peaks = sum(v for k, v in hist.items() if k != "none")
+    tonly = [c for c in cands if not old_population(c)]
+    oldf = np.array(sorted(c["frame"] for c in old), int)
+
+    def gap_to_old(f):
+        i = np.searchsorted(oldf, f)
+        return min([abs(f - int(oldf[j])) for j in (i - 1, i) if 0 <= j < len(oldf)] or [10 ** 9])
+
+    near = {c["frame"] for c in tonly if 2 <= gap_to_old(c["frame"]) <= 3}
+    pm = {k: [c for c in old if pysd_agreement(c) == k and c["scdet"] < SPTENC_T] for k in ("both", "one")}
+    out = {"offset": toff, "offset_how": how, "offset_on_sure": hist,
+           "offset_share": round(hist.get(str(toff), 0) / peaks, 4) if peaks else None,
+           "sure_with_peak": peaks, "sure_without_peak": hist.get("none", 0),
+           "decoded": tn["frames"], "commit": tn["meta"].get("commit"), "weights_sha256": tn["weights_sha256"],
+           "threads": tn["threads"], "decode_seconds": tn["decode_seconds"],
+           "inference_seconds": tn["inference_seconds"],
+           "tnet_only": len(tonly),
+           "tnet_only_by_band": {tnet_band(x): sum(1 for c in tonly if tnet_band(c["tnet"]) == tnet_band(x))
+                                 for x in TNET_BANDS},
+           "tnet_only_2_3_from_old": len(near),
+           "possible_misses_t10": {k: len(v) for k, v in pm.items()}}
+    per_p = {}
+    for p in TNET_P:
+        det = np.array([f for f in tnet_detections(one, p) if S <= f < E], int)
+        hit = {c["frame"] for c in cands if c["tnet"] is not None and c["tnet"] >= p}
+        per_p[f"{p:g}"] = {
+            "detections": len(det), "gaps": gap_hist(det), **shot_stats(det, (S, E), n, fps),
+            "sure_detected": sum(1 for c in sure if c["frame"] in hit),
+            "candidates": len(hit),
+            "old_candidates": sum(1 for c in old if c["frame"] in hit),
+            "tnet_only": sum(1 for c in tonly if c["frame"] in hit),
+            "tnet_only_2_3_from_old": len(near & hit),
+            "possible_misses_t10_detected": {k: sum(1 for c in v if c["frame"] in hit) for k, v in pm.items()},
+            "agreement": {f"{t:g}": {"both": sum(1 for c in cands if c["scdet"] >= t and c["frame"] in hit),
+                                     "scdet_only": sum(1 for c in cands if c["scdet"] >= t and c["frame"] not in hit),
+                                     "tnet_only": sum(1 for c in cands if c["scdet"] < t and c["frame"] in hit)}
+                          for t in THRESHOLDS},
+        }
+    out["per_p"] = per_p
+    return out
 
 
 def stats_markdown(sts, labelled=None):
@@ -913,46 +1349,196 @@ def stats_markdown(sts, labelled=None):
         o = st["pysd_offset_on_scdet_ge30"]
         out.append(f"- {st['name']}: adaptive {o['adaptive']}, content {o['content']}")
     out.append("")
+    more = detectors_markdown(sts)
+    if more:
+        out.append(more)
     if labelled:
         out.append(labelled)
     return "\n".join(out) + "\n"
 
 
-def label_stats(index_path):
-    """Per episode and threshold, from the review index with labels: estimated cuts detected,
-    false positives by label and missed cuts. The review samples within strata (scd_review.py):
-    each labelled row stands for stratum_size / (labelled rows of its stratum) candidates, so a
-    partly labelled index still gives estimates; strata without any label are counted apart."""
-    with open(index_path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+def detector_cell(x):
+    """detections (gaps 1/2/3/4-11/>=12), shots, median s, under 0.5/1/2 s"""
+    return (f"{x['detections']} ({'/'.join(str(x['gaps'][k]) for k in ('1', '2', '3', '4-11', '>=12'))}), "
+            f"{x['shots']}, {x['median_s']}, {x['under_0.5s']}/{x['under_1s']}/{x['under_2s']}")
+
+
+def detectors_markdown(sts):
+    """PySceneDetect's detectors alone and TransNetV2, for the episodes that have them."""
+    out = []
+    pd = [st for st in sts if st.get("pysd_detectors")]
+    if pd:
+        out.append("PySceneDetect's detectors alone: detections (gaps 1/2/3/4-11/>=12), shots, median length (s), "
+                   "shots under 0.5 / 1 / 2 s:\n")
+        out.append("| episode | adaptive | content |")
+        out.append("|---|---|---|")
+        for st in pd:
+            cells = [detector_cell(st["pysd_detectors"][k]) for k in ("adaptive", "content")]
+            out.append(f"| {st['name']} | " + " | ".join(cells) + " |")
+        out.append("")
+    tn = [st for st in sts if st.get("tnet")]
+    if not tn:
+        return "\n".join(out)
+    ps = list(tn[0]["tnet"]["per_p"])
+    bands = list(tn[0]["tnet"]["tnet_only_by_band"])
+    out.append("TransNetV2: frame of its single-frame peak (within +-3) minus the sure cut's (scdet local maxima), "
+               "the offset that aligns it (modal), its share of the sure cuts with a peak >= 0.1; candidates of "
+               "TransNetV2 alone (aligned peaks >= 0.1, no old candidate within +-1 frame) by band "
+               f"({' / '.join(bands)}), and those 2-3 frames from an old candidate:\n")
+    out.append("| episode | peak offsets on sure cuts | offset | share | TransNetV2-only | by band | 2-3 frames "
+               "from an old one |")
+    out.append("|---|---|---:|---:|---:|---|---:|")
+    for st in tn:
+        t = st["tnet"]
+        out.append(f"| {st['name']} | {t['offset_on_sure']} | {t['offset']} | {t['offset_share']} | "
+                   f"{t['tnet_only']} | {' / '.join(str(v) for v in t['tnet_only_by_band'].values())} | "
+                   f"{t['tnet_only_2_3_from_old']} |")
+    out.append("")
+    out.append("TransNetV2 per threshold p (one detection per run of aligned frames >= p, at its peak): "
+               "detections (gaps 1/2/3/4-11/>=12), shots, median length (s), shots under 0.5 / 1 / 2 s:\n")
+    out.append("| episode | " + " | ".join(f"p={p}" for p in ps) + " |")
+    out.append("|---|" + "---|" * len(ps))
+    for st in tn:
+        out.append(f"| {st['name']} | " + " | ".join(detector_cell(st["tnet"]["per_p"][p]) for p in ps) + " |")
+    out.append("")
+    out.append("TransNetV2 >= p on candidates: sure cuts detected / sure cuts; PySceneDetect's possible misses at "
+               "T=10 (scdet < 10) it detects, both detectors / one; TransNetV2-only candidates (2-3 frames from an "
+               "old one):\n")
+    out.append("| episode | " + " | ".join(f"p={p}" for p in ps) + " |")
+    out.append("|---|" + "---|" * len(ps))
+    for st in tn:
+        t = st["tnet"]
+        cells = []
+        for p in ps:
+            x = t["per_p"][p]
+            pm = x["possible_misses_t10_detected"]
+            cells.append(f"{x['sure_detected']}/{st['sure']}; {pm['both']}/{t['possible_misses_t10']['both']} / "
+                         f"{pm['one']}/{t['possible_misses_t10']['one']}; {x['tnet_only']} "
+                         f"({x['tnet_only_2_3_from_old']})")
+        out.append(f"| {st['name']} | " + " | ".join(cells) + " |")
+    out.append("")
+    t = f"{SPTENC_T:g}"  # the other thresholds are in stats.json
+    out.append(f"Candidates by scdet T={t} x TransNetV2 p: both / scdet only / TransNetV2 only:\n")
+    out.append("| episode | " + " | ".join(f"p={p}" for p in ps) + " |")
+    out.append("|---|" + "---|" * len(ps))
+    for st in tn:
+        ag = [st["tnet"]["per_p"][p]["agreement"][t] for p in ps]
+        cells = [f"{g['both']} / {g['scdet_only']} / {g['tnet_only']}" for g in ag]
+        out.append(f"| {st['name']} | " + " | ".join(cells) + " |")
+    out.append("")
+    return "\n".join(out)
+
+
+def read_index(path):
+    """Rows of a review index, in the delimiter its header uses (a spreadsheet may save ';')."""
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        text = f.read()
+    first = text.splitlines()[0] if text else ""
+    delim = ";" if first.count(";") > first.count(",") else ","
+    return list(csv.DictReader(io.StringIO(text), delimiter=delim))
+
+
+def norm_label(x):
+    return "-".join(x.strip().lower().replace("_", " ").split())
+
+
+def label_detectors(tnet):
+    """(name, rule) per detector; a rule takes a candidates.csv row."""
+    ds = [(f"scdet >= {t:g}", lambda c, t=t: float(c["scdet"]) >= t) for t in THRESHOLDS]
+    ds += [(f"PySceneDetect {k}", lambda c, k=k: c[k] != "") for k in ("adaptive", "content")]
+    if tnet:
+        ds += [(f"TransNetV2 >= {p:g}", lambda c, p=p: c["tnet"] != "" and float(c["tnet"]) >= p) for p in TNET_P]
+    return ds
+
+
+def ratio(a, b):
+    return f"{a / b:.3f}" if b > 0 else "-"
+
+
+def label_table(est, dets):
+    """est: (candidates.csv row, label, weight) of the labelled rows. Per detector: cuts detected and
+    missed, recall, false positives by label, precision with fades and dissolves counted as
+    errors, then without them (gradual transitions, where a detector may rightly cut)."""
+    hard = [lab for lab in LABELS[1:] if lab not in ("fade", "dissolve")]
+    out = ["| detector | cuts detected | missed | recall | " + " | ".join(f"FP {lab}" for lab in hard) +
+           " | FP without fades/dissolves | fade | dissolve | precision | precision, fades/dissolves not "
+           "counted |", "|---|" + "---:|" * (len(hard) + 8)]
+    for name, rule in dets:
+        hit = [(k, w) for c, k, w in est if rule(c)]
+        tp = sum(w for k, w in hit if k == "cut")
+        miss = sum(w for c, k, w in est if k == "cut") - tp
+        fp = {lab: sum(w for k, w in hit if k == lab) for lab in LABELS[1:]}
+        fp_hard = sum(fp[lab] for lab in hard)
+        grad = fp["fade"] + fp["dissolve"]
+        out.append(f"| {name} | {tp:.0f} | {miss:.0f} | {ratio(tp, tp + miss)} | " +
+                   " | ".join(f"{fp[lab]:.0f}" for lab in hard) + f" | {fp_hard:.0f} | {fp['fade']:.0f} | "
+                   f"{fp['dissolve']:.0f} | {ratio(tp, tp + fp_hard + grad)} | {ratio(tp, tp + fp_hard)} |")
+    return out
+
+
+def label_stats(index_path, dirs, kinds=None):
+    """Per detector, from the review index with labels joined on (episode, frame) with the
+    episodes' candidates.csv: estimated cuts detected and missed, false positives by label, recall
+    and precision; per episode, then pooled by kind. The review samples within strata
+    (scd_review.py): each labelled row stands for stratum_size / (labelled rows of its stratum)
+    candidates, so a partly labelled index still gives estimates; strata without any label are
+    counted apart."""
+    kinds = {**KINDS, **(kinds or {})}
+    cands = {}
+    for d in dirs:
+        name = load_json(os.path.join(d, "stats.json"))["name"]
+        with open(os.path.join(d, "candidates.csv"), newline="", encoding="utf-8") as f:
+            cands[name] = {int(r["frame"]): r for r in csv.DictReader(f)}
+    tnet = bool(cands) and all("tnet" in next(iter(c.values())) for c in cands.values() if c)
+    dets = label_detectors(tnet)
     eps = {}
-    for r in rows:
+    for r in read_index(index_path):
         eps.setdefault(r["episode"], {}).setdefault(r["stratum"], []).append(r)
-    ts = [f"{t:g}" for t in THRESHOLDS]
-    out = ["Labelled review: estimated candidates per threshold (detected = scdet >= T at the "
-           "candidate; FP = detected and not labelled cut; missed = labelled cut, scdet < T)\n"]
+    out = ["Labelled review: estimated candidates per detector (detected: scdet >= T at the candidate, a "
+           "PySceneDetect detector within +-1 frame, TransNetV2's aligned probability >= p within +-1 frame; FP: "
+           "detected and labelled other than cut; missed: labelled cut, not detected; recall among the cuts that "
+           "are candidates, of any detector)\n"]
+    est = {}
     for ep, strata in eps.items():
-        est, unlabelled, n_lab = [], 0, 0
+        n_rows = sum(len(g) for g in strata.values())
+        if ep not in cands:
+            out.append(f"- {ep}: not among the episode directories given, its {n_rows} rows left out")
+            continue
+        e, unlabelled, n_lab, lost, odd = [], 0, 0, 0, 0
         for g in strata.values():
             lab = [r for r in g if (r.get("label") or "").strip()]
             if not lab:
-                unlabelled += int(g[0]["stratum_size"])
+                unlabelled += int(float(g[0]["stratum_size"]))
                 continue
             n_lab += len(lab)
-            w = int(g[0]["stratum_size"]) / len(lab)
+            w = int(float(g[0]["stratum_size"])) / len(lab)
             for r in lab:
-                k = r["label"].strip().lower()
-                est.append((float(r["scdet"]), k if k in LABELS else "other", w))
-        out.append(f"{ep}: {n_lab} labelled rows; {unlabelled} candidates in strata without a label\n")
-        out.append("| T | cuts detected | " + " | ".join(f"FP {lab}" for lab in LABELS[1:]) + " | missed cuts |")
-        out.append("|---:|" + "---:|" * (len(LABELS) + 1))
-        for t in ts:
-            tv = float(t)
-            tp = sum(w for x, k, w in est if k == "cut" and x >= tv)
-            miss = sum(w for x, k, w in est if k == "cut" and x < tv)
-            fp = [sum(w for x, k, w in est if k == lab and x >= tv) for lab in LABELS[1:]]
-            out.append(f"| {t} | {tp:.0f} | " + " | ".join(f"{v:.0f}" for v in fp) + f" | {miss:.0f} |")
-        out.append("")
+                k = norm_label(r["label"])
+                if k not in LABELS:
+                    odd += 1
+                    k = "other"
+                c = cands[ep].get(int(float(r["frame"])))
+                if c is None:
+                    lost += 1
+                    continue
+                e.append((c, k, w))
+        est[ep] = e
+        out.append(f"- {ep} ({kinds.get(ep, 'animation')}): {n_lab} labelled rows of {n_rows}; {unlabelled} "
+                   "candidates in strata without a label" + (f"; {odd} labels read as other" if odd else "") +
+                   (f"; {lost} rows missing from its candidates.csv" if lost else ""))
+    out.append("")
+    for ep, e in est.items():
+        out += [f"{ep}:\n"] + label_table(e, dets) + [""]
+    pools = {}
+    for ep in est:
+        pools.setdefault(kinds.get(ep, "animation"), []).append(ep)
+    if len(est) > 1:
+        for kind, members in sorted(pools.items()):
+            out += [f"Pooled, {kind} ({', '.join(members)}):\n"]
+            out += label_table([x for ep in members for x in est[ep]], dets) + [""]
+        if len(pools) > 1:
+            out += [f"Pooled, every episode ({', '.join(est)}):\n"]
+            out += label_table([x for e in est.values() for x in e], dets) + [""]
     return "\n".join(out)
 
 
@@ -1080,7 +1666,8 @@ def cmd_compare(a):
 
 def cmd_summary(a):
     sts = [load_json(os.path.join(d, "stats.json")) for d in a.dirs]
-    lab = label_stats(a.labels) if a.labels else None
+    kinds = dict(k.split("=", 1) for k in a.kind or [])
+    lab = label_stats(a.labels, a.dirs, kinds) if a.labels else None
     md = stats_markdown(sts, lab)
     if a.md:
         with open(a.md, "w", encoding="utf-8") as f:
@@ -1117,9 +1704,31 @@ def main():
     p.add_argument("--frames", type=int, default=48, help="frames compared pixel by pixel with OpenCV's")
     p.add_argument("--matrix", default="auto")
     p.add_argument("--threads", type=int, default=16)
+    tnet_dir = os.environ.get("TNET_DIR")
+    tnet_weights = os.environ.get("TNET_WEIGHTS") or (
+        tnet_dir and os.path.join(tnet_dir, "inference-pytorch", "transnetv2-pytorch-weights.pth"))
+    for name in ("tnet", "tnet-check"):
+        p = sub.add_parser(name)
+        if name == "tnet-check":
+            p.add_argument("source", help="a video file")
+        p.add_argument("--out", required=True)
+        p.add_argument("--tnet-dir", default=tnet_dir, required=not tnet_dir,
+                       help="checkout of github.com/soCzech/TransNetV2 (default: TNET_DIR)")
+        p.add_argument("--weights", default=tnet_weights, required=not tnet_weights,
+                       help="converted PyTorch weights (default: TNET_WEIGHTS, else convert_weights.py's output "
+                            "in the checkout)")
+        p.add_argument("--threads", type=int, default=16, help="torch threads, and ffmpeg's")
+        p.add_argument("--batch", type=int, default=1, help="windows per forward (officially 1)")
+    p.add_argument("--tf-weights", help="the official TF SavedModel directory (default: the checkout's)")
+    p.add_argument("--frames", type=int, default=3000, help="frames of the excerpt")
+    p.add_argument("--start", type=int, default=0, help="first frame of the excerpt (decoded from 0)")
+    p.add_argument("--random", type=int, default=1000, help="random frames compared first")
+    p.add_argument("--seed", type=int, default=1)
     p = sub.add_parser("analyse")
     p.add_argument("--out", required=True)
     p.add_argument("--name")
+    p.add_argument("--tnet-offset", type=int,
+                   help="TransNetV2's frame offset to ours (default: the modal one on sure cuts)")
     p = sub.add_parser("activity")
     p.add_argument("--out", required=True)
     p.add_argument("--block", type=float, default=5.0, help="minutes")
@@ -1137,10 +1746,13 @@ def main():
     p = sub.add_parser("summary")
     p.add_argument("dirs", nargs="+")
     p.add_argument("--labels", help="review index CSV with the label column filled")
+    p.add_argument("--kind", action="append", metavar="NAME=KIND",
+                   help="pool an episode with this kind (default: KINDS, else animation)")
     p.add_argument("--md", help="also write the tables to this file")
     a = ap.parse_args()
-    {"check": cmd_check, "score": cmd_score, "pysd": cmd_pysd, "pysd-check": cmd_pysd_check,
-     "analyse": cmd_analyse, "activity": cmd_activity, "compare": cmd_compare, "summary": cmd_summary}[a.cmd](a)
+    {"check": cmd_check, "score": cmd_score, "pysd": cmd_pysd, "pysd-check": cmd_pysd_check, "tnet": cmd_tnet,
+     "tnet-check": cmd_tnet_check, "analyse": cmd_analyse, "activity": cmd_activity, "compare": cmd_compare,
+     "summary": cmd_summary}[a.cmd](a)
 
 
 if __name__ == "__main__":

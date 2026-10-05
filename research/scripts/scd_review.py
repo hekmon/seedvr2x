@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 """Review sheets for scene-cut candidates (scd_scores.py analyse): one row per candidate with
 frames c-2, c-1, c, c+1 (a real cut falls between c-1 and c, marked red), the scdet score and
-PySceneDetect's verdicts; an index (CSV and Markdown) with an empty label column.
+PySceneDetect's verdicts (and TransNetV2's, once analysed with it); an index (CSV and Markdown)
+with an empty label column.
 
   scd_review.py sheets DIR... --out REVIEW [--rows 15] [--width 320] [--cap 120] [--sure-frac 0.1]
+  scd_review.py extend REVIEW DIR... [--cap 30] [--seed 1] [--skip NAME...]  # TransNetV2's own
   scd_review.py index REVIEW         # add REVIEW/*/index.csv to REVIEW/index.{csv,md}
 
 An episode already in REVIEW is skipped (--force makes it again). The combined index is only
 ever appended to: the episodes it lacks are added at its end, its existing rows (and the labels
 written in them) are left byte for byte, in the delimiter and line ends the file already uses.
 
-Selection, per episode: a random --sure-frac of the sure candidates (to check the auto-class),
-and every doubtful one up to --cap. Above it, --max-rows doubtful rows at most, sampled by
-stratum: the decision group first (scdet in [--keep-lo, --keep-hi], the scores that decide a
-threshold in 8-14, plus PySceneDetect detections scoring below --keep-lo, the possible misses,
-and segment joins scoring below --keep-lo), whole if it fits, then the rest (scdet 4-6 that
-PySceneDetect ignores, scdet above --keep-hi): the unused rows, and at least --rest-frac of it
-(between --rest-min and --rest-cap rows). A stratum is a group, a scdet band (4, 6, 8, 10, 12,
-14, 17, 20, 30) and PySceneDetect's agreement (both / one / none); samples are allocated in
-proportion to stratum sizes, one row per stratum at least. The index gives each row's stratum,
-its size and its weight (candidates the row stands for): scd_scores.py summary --labels turns
-labels into estimates, even when only part of the rows are labelled. Sampling is seeded
-(--seed) and repeatable.
+Selection (sheets), per episode, among the candidates of scdet, PySceneDetect and segment joins
+(those of TransNetV2 alone are extend's): a random --sure-frac of the sure candidates (to check
+the auto-class), and every doubtful one up to --cap. Above it, --max-rows doubtful rows at
+most, sampled by stratum: the decision group first (scdet in [--keep-lo, --keep-hi], the scores
+that decide a threshold in 8-14, plus PySceneDetect detections scoring below --keep-lo, the
+possible misses, and segment joins scoring below --keep-lo), whole if it fits, then the rest
+(scdet 4-6 that PySceneDetect ignores, scdet above --keep-hi): the unused rows, and at least
+--rest-frac of it (between --rest-min and --rest-cap rows). A stratum is a group, a scdet band
+(4, 6, 8, 10, 12, 14, 17, 20, 30) and PySceneDetect's agreement (both / one / none); samples are
+allocated in proportion to stratum sizes, one row per stratum at least. The index gives each
+row's stratum, its size and its weight (candidates the row stands for): scd_scores.py summary
+--labels turns labels into estimates, even when only part of the rows are labelled. Sampling is
+seeded (--seed) and repeatable.
 
 Thumbnails come from one sequential decode of the source, the score pass's: same files, frames
 counted from 0 in decode order (ffmpeg's trim filter keeps the span from the first frame needed
@@ -38,6 +41,21 @@ cut-like), tiny (hardly any change), plus dark (both frames dim) and brightness 
 mostly a global luma shift: fade, flash, exposure) and burst (2 or more other frames scoring
 >= 6 within +-6 frames). Unverified: a first look before the labels.
 
+extend: the candidates of TransNetV2 alone (scd_scores.py analyse with tnet.npz: its aligned
+peaks >= 0.1 with no candidate of scdet, PySceneDetect or a join within +-1 frame) added to the
+episodes already in REVIEW, without touching a row or a page there. Strata "tnet <band>" by the
+candidate's TransNetV2 probability (0.1-0.3, 0.3-0.5, 0.5-0.7, 0.7-0.9, >=0.9); all of them shown
+up to --cap per episode, else --cap rows sampled by stratum (one at least each, seeded), weight
+= stratum size / rows taken, selection tnet-all (the whole stratum) or tnet-sampled. Thumbnails
+as sheets takes them. The pages are new files numbered on from the episode's last page and
+headed as TransNetV2-only candidates; the rows are appended to the episode's index.csv and
+index.md and to REVIEW/index.csv and index.md, same columns, in the delimiter and line ends each
+file uses, every existing byte kept; hints-tnet.csv/md and note-tnet.txt hold the rest. Frame
+indexing check: of the rows whose thumbnails show one clear change (>= 8 luma levels, twice the
+next largest), the share where it falls between c-1 and c. Running it again adds nothing: an
+episode whose index.csv holds tnet rows gets no page, REVIEW/index.csv only the tnet rows it
+lacks.
+
 Labels: cut / flash / pan / fade / dissolve / other / not-a-cut.
 
 Needs ffmpeg, numpy and Pillow; scd_scores.py next to it.
@@ -48,6 +66,7 @@ import io
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -58,12 +77,13 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scd_scores import (LABELS, decode_cmd, load_json, load_scores, log, pysd_agreement,  # noqa: E402
-                        read_full, score_band, segments_of, timecode)
+from scd_scores import (LABELS, decode_cmd, load_json, load_scores, log, old_population,  # noqa: E402
+                        pysd_agreement, read_full, score_band, segments_of, timecode, tnet_band)
 
 INDEX_COLS = ["page", "row", "episode", "frame", "timecode", "class", "stratum", "stratum_size", "weight",
               "selection", "scdet", "mafd", "prev", "next", "burst", "adaptive", "content", "ad_ratio",
               "content_val", "join", "label"]
+TNET_PREFIX = "tnet "  # strata of the candidates of TransNetV2 alone (extend)
 FONT_PATHS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
               "/usr/share/fonts/TTF/DejaVuSans.ttf")
 
@@ -243,7 +263,14 @@ def verdict(c, key, metric, nd):
     return f"no  ({metric} {fmt(c['ad_ratio'] if key == 'adaptive' else c['content_val'], nd)})"
 
 
-def draw_pages(name, rows, thumbs, tsize, fps, pts, out_dir, per_page, note):
+def tnet_verdict(c):
+    pk = c.get("tnet_peak")
+    where = "" if pk in (None, "") else ("  at c" if int(pk) == c["frame"] else f"  at c{int(pk) - c['frame']:+d}")
+    return f"TransNetV2: {float(c['tnet']):.3f}{where}  (all-frames {float(c['tnet_all']):.3f})"
+
+
+def draw_pages(name, rows, thumbs, tsize, fps, pts, out_dir, per_page, note, first=1, what=None):
+    """page_NNN.jpg from number first; what (extend's pages) heads them, and they never overwrite."""
     tw, th = tsize
     f_lab, f_cap, f_head = font(15), font(13), font(18)
     label_w, gap, mid_gap, margin, cap_h, pad = 330, 6, 14, 10, 20, 14
@@ -252,13 +279,19 @@ def draw_pages(name, rows, thumbs, tsize, fps, pts, out_dir, per_page, note):
     page_w = margin * 2 + label_w + 4 * tw + 2 * gap + mid_gap
     pages = [rows[i:i + per_page] for i in range(0, len(rows), per_page)]
     for p, page in enumerate(pages, 1):
+        num = first + p - 1
+        path = os.path.join(out_dir, f"page_{num:03d}.jpg")
+        if what and os.path.exists(path):
+            raise RuntimeError(f"{path} exists: a page is never overwritten")
         img = Image.new("RGB", (page_w, head_h + len(page) * row_h + margin), "white")
         dr = ImageDraw.Draw(img)
-        dr.text((margin, 8), f"{name}   page {p}/{len(pages)}   rows {(p - 1) * per_page + 1}-"
-                f"{(p - 1) * per_page + len(page)} of {len(rows)}   frames c-2, c-1 | c, c+1: a real cut "
-                f"falls on the red mark", fill="black", font=f_head)
+        span = f"rows {(p - 1) * per_page + 1}-{(p - 1) * per_page + len(page)} of {len(rows)}"
+        head = (f"{name}   page {p}/{len(pages)}   {span}" if not what else
+                f"{name}   page {num}: {what} {p}/{len(pages)}, {span}")
+        dr.text((margin, 8), f"{head}   frames c-2, c-1 | c, c+1: a real cut falls on the red mark", fill="black",
+                font=f_head)
         for r, c in enumerate(page, 1):
-            c["page"], c["row"] = p, r
+            c["page"], c["row"] = num, r
             y = head_h + (r - 1) * row_h
             dr.line([(margin, y - 4), (page_w - margin, y - 4)], fill=(200, 200, 200), width=1)
             sel = f"{c['stratum']}: {c['selection']}" + (f", w {c['weight']:.1f}" if c["weight"] != 1 else "")
@@ -270,6 +303,8 @@ def draw_pages(name, rows, thumbs, tsize, fps, pts, out_dir, per_page, note):
                 ("Adaptive: " + verdict(c, "adaptive", "ratio", 2), "black"),
                 ("Content: " + verdict(c, "content", "val", 1), "black"),
             ]
+            if c.get("tnet") not in (None, ""):
+                lines.append((tnet_verdict(c), "black"))
             if c["join"]:
                 lines.append((f"segment join at {c['join']}", (160, 0, 0)))
             lines.append((sel, (90, 90, 90)))
@@ -288,7 +323,7 @@ def draw_pages(name, rows, thumbs, tsize, fps, pts, out_dir, per_page, note):
                 dr.text((x + 2, y + th + 2), f"{tag}  {f}  {timecode(f, fps, pts)}" if f >= 0 else tag,
                         fill="black", font=f_cap)
                 x += tw + (mid_gap if k == 1 else gap)
-        img.save(os.path.join(out_dir, f"page_{p:03d}.jpg"), quality=85, optimize=True)
+        img.save(path, quality=85, optimize=True)
     return len(pages)
 
 
@@ -331,6 +366,37 @@ def index_value(c, k):
     return "" if v is None else v
 
 
+def write_hints(ep_dir, stem, name, rows, thumbs, cols=HINT_COLS, what=""):
+    """stem.csv: each row's thumbnail luma changes and hint; stem.md: the hints per stratum, weighted."""
+    kinds = ("step", "transient", "motion", "tiny", "")
+    tally = defaultdict(lambda: defaultdict(float))
+    with open(os.path.join(ep_dir, stem + ".csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        for c in rows:
+            ims = [thumbs.get(c["frame"] + k) for k in (-2, -1, 0, 1)]
+            if any(t is None for t in ims):
+                continue
+            h = {**c, **hint(ims, int(c["burst"]))}
+            w.writerow([f"{h[k]:.2f}" if isinstance(h[k], float) else h[k] for k in cols])
+            tags = h["hint"].split("+")
+            t = tally[c["stratum"]]
+            t[next((k for k in kinds if k in tags), "")] += c["weight"]
+            t["dark"] += c["weight"] * ("dark" in tags)
+            t["brightness"] += c["weight"] * ("brightness" in tags)
+            t["burst"] += c["weight"] * ("burst" in tags)
+            t["n"] += 1
+    with open(os.path.join(ep_dir, stem + ".md"), "w", encoding="utf-8") as f:
+        f.write(f"# Heuristic hints, {name}{what} (unverified, before any label)\n\nCandidates per stratum "
+                "(weighted: what the sampled rows stand for) by thumbnail pattern; rows = sampled "
+                "rows.\n\n| stratum | rows | step | transient | motion | tiny | other | dark | brightness "
+                "| burst |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        for key in sorted(tally, key=stratum_order):
+            t = tally[key]
+            f.write(f"| {key} | {int(t['n'])} | " + " | ".join(f"{t[k]:.0f}" for k in kinds) +
+                    f" | {t['dark']:.0f} | {t['brightness']:.0f} | {t['burst']:.0f} |\n")
+
+
 def cmd_sheets(a):
     os.makedirs(a.out, exist_ok=True)
     for d in a.dirs:
@@ -342,7 +408,7 @@ def cmd_sheets(a):
         if os.path.exists(os.path.join(ep_dir, "index.csv")) and not a.force:
             log(f"{name}: already in {a.out}, skipped (--force makes it again)")
             continue
-        cands = load_candidates(d)
+        cands = [c for c in load_candidates(d) if old_population(c)]
         rng = random.Random(f"{a.seed}:{name}")
         rows, note = select_rows(cands, a, rng)
         for c in rows:
@@ -370,34 +436,7 @@ def cmd_sheets(a):
         if a.note:
             note += f"; {a.note}"
         os.makedirs(ep_dir, exist_ok=True)
-        kinds = ("step", "transient", "motion", "tiny", "")
-        tally = defaultdict(lambda: defaultdict(float))
-        with open(os.path.join(ep_dir, "hints.csv"), "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(HINT_COLS)
-            for c in rows:
-                ims = [thumbs.get(c["frame"] + k) for k in (-2, -1, 0, 1)]
-                if any(t is None for t in ims):
-                    continue
-                h = {**c, **hint(ims, int(c["burst"]))}
-                w.writerow([f"{h[k]:.2f}" if isinstance(h[k], float) else h[k] for k in HINT_COLS])
-                tags = h["hint"].split("+")
-                key = f"{c['group']} {c['band']}/{c['pysd']}" if c["group"] != "sure" else "sure"
-                t = tally[key]
-                t[next((k for k in kinds if k in tags), "")] += c["weight"]
-                t["dark"] += c["weight"] * ("dark" in tags)
-                t["brightness"] += c["weight"] * ("brightness" in tags)
-                t["burst"] += c["weight"] * ("burst" in tags)
-                t["n"] += 1
-        with open(os.path.join(ep_dir, "hints.md"), "w", encoding="utf-8") as f:
-            f.write(f"# Heuristic hints, {name} (unverified, before any label)\n\nCandidates per stratum "
-                    "(weighted: what the sampled rows stand for) by thumbnail pattern; rows = sampled "
-                    "rows.\n\n| stratum | rows | step | transient | motion | tiny | other | dark | brightness "
-                    "| burst |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
-            for key in sorted(tally, key=stratum_order):
-                t = tally[key]
-                f.write(f"| {key} | {int(t['n'])} | " + " | ".join(f"{t[k]:.0f}" for k in kinds) +
-                        f" | {t['dark']:.0f} | {t['brightness']:.0f} | {t['burst']:.0f} |\n")
+        write_hints(ep_dir, "hints", name, rows, thumbs)
         for old in os.listdir(ep_dir):
             if old.startswith("page_") and old.endswith(".jpg"):
                 os.remove(os.path.join(ep_dir, old))
@@ -422,6 +461,30 @@ def episode_rows(review, name):
     return rows, note
 
 
+def read_csv_keep(path):
+    """A CSV's rows, and the delimiter, line end and columns it uses (a spreadsheet may have saved it
+    with ';' or other line ends): what append_rows needs to add rows without touching a byte."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    text = raw.decode("utf-8-sig")
+    first = text.splitlines()[0] if text else ""
+    delim = ";" if first.count(";") > first.count(",") else ","
+    eol = "\r\n" if b"\r\n" in raw[:65536] else "\n"
+    header = next(csv.reader([first], delimiter=delim)) if first else INDEX_COLS
+    rows = list(csv.DictReader(io.StringIO(text), delimiter=delim))
+    return rows, {"delim": delim, "eol": eol, "header": header, "open_line": bool(raw) and not raw.endswith(b"\n")}
+
+
+def append_rows(path, rows, fmt):
+    """Append rows (dicts) to a CSV read by read_csv_keep, in its delimiter, line ends and columns."""
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        if fmt["open_line"]:
+            f.write(fmt["eol"])
+        w = csv.writer(f, delimiter=fmt["delim"], lineterminator=fmt["eol"])
+        for r in rows:
+            w.writerow([r.get(k, "") for k in fmt["header"]])
+
+
 def merge_index(review):
     """Create REVIEW/index.{csv,md}, or append the episodes they lack; never rewrite a row."""
     names = sorted(n for n in os.listdir(review) if os.path.isfile(os.path.join(review, n, "index.csv")))
@@ -435,14 +498,8 @@ def merge_index(review):
         write_index(rows, csv_path, md_path, "Scene-cut review: all episodes", "\n".join(notes))
         log(f"index: {len(rows)} rows from {len(names)} episodes in {csv_path} and index.md")
         return
-    with open(csv_path, "rb") as f:
-        raw = f.read()
-    text = raw.decode("utf-8-sig")
-    first = text.splitlines()[0] if text else ""
-    delim = ";" if first.count(";") > first.count(",") else ","
-    eol = "\r\n" if b"\r\n" in raw[:65536] else "\n"
-    header = next(csv.reader([first], delimiter=delim)) if first else INDEX_COLS
-    present = {r.get("episode") for r in csv.DictReader(io.StringIO(text), delimiter=delim)}
+    have, fmt = read_csv_keep(csv_path)
+    present = {r.get("episode") for r in have}
     new = [n for n in names if n not in present]
     if not new:
         log(f"index: {csv_path} already lists every episode, nothing appended")
@@ -452,16 +509,150 @@ def merge_index(review):
         r, note = episode_rows(review, n)
         rows += r
         notes.append(note)
-    with open(csv_path, "a", newline="", encoding="utf-8") as f:
-        if raw and not raw.endswith(b"\n"):
-            f.write(eol)
-        w = csv.writer(f, delimiter=delim, lineterminator=eol)
-        for r in rows:
-            w.writerow([r.get(k, "") for k in header])
+    append_rows(csv_path, rows, fmt)
     with open(md_path, "a", encoding="utf-8") as f:
         f.write(f"\n## Added {time.strftime('%Y-%m-%d')}: {', '.join(new)}\n\n" + "\n".join(notes) +
                 "\n\n" + md_table(rows))
     log(f"index: {len(rows)} rows of {len(new)} episodes ({', '.join(new)}) appended to {csv_path} and index.md")
+
+
+TNET_NOTE = ("Candidates of TransNetV2 alone: its aligned peaks >= 0.1 with no candidate of scdet, PySceneDetect or "
+             "a segment join within +-1 frame. stratum: tnet and the band of TransNetV2's probability (its highest "
+             "within +-1 frame); selection: tnet-all (the whole stratum) or tnet-sampled; weight: candidates the row "
+             "stands for. Frames, marks and labels as above.")
+
+
+def tnet_section(title, notes):
+    return f"\n## Added {time.strftime('%Y-%m-%d')}: {title}\n\n{TNET_NOTE}\n\n{notes}\n\n"
+
+
+def tnet_rows(cands, cap, rng):
+    """The candidates of TransNetV2 alone to review, in strata by TransNetV2 band: all of them up to
+    cap, else cap rows sampled by stratum (one at least each)."""
+    new = [c for c in cands if not old_population(c)]
+    groups = defaultdict(list)
+    for c in new:
+        c["tnet"], c["tnet_all"] = float(c["tnet"]), float(c["tnet_all"])
+        c["stratum"] = TNET_PREFIX + tnet_band(c["tnet"])
+        groups[c["stratum"]].append(c)
+    alloc = allocate(groups, min(cap, len(new)))
+    picked = []
+    for k in sorted(groups):
+        g = groups[k]
+        take = rng.sample(g, alloc[k]) if alloc[k] < len(g) else list(g)
+        for c in take:
+            c["stratum_size"], c["weight"] = len(g), len(g) / len(take)
+            c["selection"] = "tnet-all" if len(take) == len(g) else "tnet-sampled"
+            picked.append(c)
+    note = (f"{len(new)} candidates of TransNetV2 alone (" +
+            ", ".join(f"{k[len(TNET_PREFIX):]}: {len(groups[k])}" for k in sorted(groups)) + "), " +
+            ("all shown" if len(picked) == len(new) else f"{len(picked)} shown, sampled by stratum"))
+    return sorted(picked, key=lambda c: c["frame"]), note
+
+
+def thumb_check(rows, thumbs):
+    """Where the thumbnails' one clear change falls (>= 8 luma levels, twice the next largest):
+    counts at c-2|c-1, c-1|c, c|c+1, for every row and for those with TransNetV2 >= 0.5. A cut found
+    at the right frame changes between c-1 and c."""
+    at, at_hi = [0, 0, 0], [0, 0, 0]
+    for c in rows:
+        ims = [thumbs.get(c["frame"] + k) for k in (-2, -1, 0, 1)]
+        if any(t is None for t in ims):
+            continue
+        y = [luma(t) for t in ims]
+        dif = [float(np.abs(y[i + 1] - y[i]).mean()) for i in range(3)]
+        i = int(np.argmax(dif))
+        if dif[i] >= 8 and dif[i] >= 2 * sorted(dif)[1]:
+            at[i] += 1
+            at_hi[i] += c["tnet"] >= 0.5
+            if i != 1:
+                log(f"  {c['frame']} (TransNetV2 {c['tnet']:.2f}): thumbnail changes {['%.1f' % x for x in dif]}")
+    return at, at_hi
+
+
+def cmd_extend(a):
+    done = []
+    for d in a.dirs:
+        st = load_json(os.path.join(d, "stats.json"))
+        src = load_json(os.path.join(d, "source.json"))
+        name = st["name"]
+        ep_dir = os.path.join(a.review, name)
+        idx = os.path.join(ep_dir, "index.csv")
+        if name in a.skip:
+            log(f"{name}: skipped (--skip)")
+            continue
+        if not os.path.isfile(idx):
+            log(f"{name}: not in {a.review} (sheets makes an episode's first rows), skipped")
+            continue
+        have, fmt = read_csv_keep(idx)
+        done.append(name)
+        if any((r.get("stratum") or "").startswith(TNET_PREFIX) for r in have):
+            log(f"{name}: {idx} already holds TransNetV2 rows, no page added")
+            continue
+        cands = load_candidates(d)
+        if cands and "tnet" not in cands[0]:
+            sys.exit(f"{d}/candidates.csv has no tnet column: run scd_scores.py tnet, then analyse")
+        rows, note = tnet_rows(cands, a.cap, random.Random(f"{a.seed}:{name}:tnet"))
+        if not rows:
+            log(f"{name}: {note}, nothing to add")
+            continue
+        last = max((int(r["page"]) for r in have if (r.get("page") or "").isdigit()), default=0)
+        files = [int(m.group(1)) for m in (re.match(r"page_(\d+)\.jpg$", f) for f in os.listdir(ep_dir)) if m]
+        if max(files, default=0) > last:
+            sys.exit(f"{ep_dir}: page files beyond the index's last page ({last}), from an interrupted extend? "
+                     "Remove them first")
+        for c in rows:
+            c["episode"], c["label"] = name, ""
+        frames = [f for c in rows for f in range(c["frame"] - 2, c["frame"] + 2)]
+        log(f"{name}: {note}; {len(rows)} rows, {len(set(frames))} frames to grab")
+        thumbs, tsize = grab(src, frames, a.width, a.matrix, a.threads)
+        at, at_hi = thumb_check(rows, thumbs)
+        note += (f"; thumbnail check, rows with one clear change at c-2|c-1, c-1|c, c|c+1: {'/'.join(map(str, at))}, "
+                 f"of them with TransNetV2 >= 0.5: {'/'.join(map(str, at_hi))}")
+        n_pages = draw_pages(name, rows, thumbs, tsize, src["fps"], load_scores(d)["pts_time"], ep_dir, a.rows,
+                             note, first=last + 1, what="TransNetV2-only candidates")
+        write_hints(ep_dir, "hints-tnet", name, rows, thumbs, HINT_COLS + ["tnet", "tnet_all"],
+                    ", TransNetV2-only candidates")
+        note = f"{len(rows)} rows on {n_pages} pages ({last + 1}-{last + n_pages}): {note}"
+        with open(os.path.join(ep_dir, "note-tnet.txt"), "w", encoding="utf-8") as f:
+            f.write(note + "\n")
+        with open(os.path.join(ep_dir, "index.md"), "a", encoding="utf-8") as f:
+            f.write(tnet_section("TransNetV2-only candidates", note) + md_table(rows))
+        append_rows(idx, [{k: index_value(c, k) for k in INDEX_COLS} for c in rows], fmt)
+        log(f"{name}: {note} ({ep_dir})")
+    merge_tnet(a.review, done)
+
+
+def merge_tnet(review, names):
+    """Append to REVIEW/index.{csv,md} the TransNetV2 rows of the episodes' indexes that it lacks."""
+    csv_path, md_path = os.path.join(review, "index.csv"), os.path.join(review, "index.md")
+    if not os.path.exists(csv_path):
+        merge_index(review)
+        return
+    have, fmt = read_csv_keep(csv_path)
+    present = {(r.get("episode"), r.get("frame")) for r in have if (r.get("stratum") or "").startswith(TNET_PREFIX)}
+    rows, notes, eps = [], [], []
+    for n in names:
+        er, _ = read_csv_keep(os.path.join(review, n, "index.csv"))
+        add = [r for r in er if (r.get("stratum") or "").startswith(TNET_PREFIX) and
+               (r.get("episode"), r.get("frame")) not in present]
+        if not add:
+            continue
+        rows += add
+        eps.append(n)
+        q = os.path.join(review, n, "note-tnet.txt")
+        if os.path.isfile(q):
+            with open(q, encoding="utf-8") as f:
+                notes.append(f"- {n}: {f.read().strip()}")
+    if not rows:
+        log(f"index: {csv_path} already holds the TransNetV2 rows of {', '.join(names) or 'no episode'}, "
+            "nothing appended")
+        return
+    with open(md_path, "a", encoding="utf-8") as f:
+        f.write(tnet_section(f"TransNetV2-only candidates of {', '.join(eps)}", "\n".join(notes)) + md_table(rows))
+    append_rows(csv_path, rows, fmt)
+    log(f"index: {len(rows)} TransNetV2 rows of {len(eps)} episodes ({', '.join(eps)}) appended to {csv_path} "
+        "and index.md")
 
 
 def main():
@@ -485,11 +676,23 @@ def main():
     p.add_argument("--threads", type=int, default=16)
     p.add_argument("--note", help="added to the episodes' notes in the indexes")
     p.add_argument("--force", action="store_true", help="make the sheets of an episode already reviewed again")
+    p = sub.add_parser("extend")
+    p.add_argument("review", help="review directory made by sheets")
+    p.add_argument("dirs", nargs="+", help="episode directories of scd_scores.py (analysed with tnet.npz)")
+    p.add_argument("--cap", type=int, default=30, help="candidates of TransNetV2 alone shown per episode")
+    p.add_argument("--seed", default="1")
+    p.add_argument("--skip", nargs="*", default=[], metavar="NAME", help="episodes left out")
+    p.add_argument("--rows", type=int, default=15, help="rows per page")
+    p.add_argument("--width", type=int, default=320, help="thumbnail width")
+    p.add_argument("--matrix", default="bt709")
+    p.add_argument("--threads", type=int, default=16)
     p = sub.add_parser("index")
     p.add_argument("review")
     a = ap.parse_args()
     if a.cmd == "sheets":
         cmd_sheets(a)
+    elif a.cmd == "extend":
+        cmd_extend(a)
     else:
         merge_index(a.review)
 
