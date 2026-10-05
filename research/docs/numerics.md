@@ -131,6 +131,21 @@ start and counting frames. Statistics of the ground truth (Y on the 8-bit scale)
 The last three are measured in [Live action and a bright anime](#live-action-and-a-bright-anime)
 with a subset of the variants; their verdicts are also rows of the tables below.
 
+**4K clips, for 4K output** (2026-10-05, not used in this page yet): 4 single shots of 45 frames
+from a 4K UHD Blu-ray remux of a live-action film (HEVC Main 10, HDR10 with Dolby Vision profile
+7, whose HDR10 base layer ffmpeg decodes), letterboxed (picture rows 42–2117 of 2160):
+`ouatia-face` (a close-up, film grain), `ouatia-dark` (an interior by lamp and candle light),
+`ouatia-street` (a sunny street), `ouatia-motion` (a fast pan, heavy motion blur). seedvr2x
+refuses HDR in v1, so the ground truth is an SDR rendition through one fixed tone map
+(`fr_clips.py make --tonemap mobius`): PQ to linear light (100 cd/m² = 1.0), BT.709 primaries,
+ffmpeg's `tonemap` with mobius (param 0.3, desat 0, peak 10 = 1,000 cd/m², written out because
+zscale drops the frames' MaxCLL), then BT.709 matrix and BT.1886 transfer (zimg's display-referred
+709) to 10-bit 4:2:0: a source like any SDR UHD file, from which the GT (3840×2160, 16-bit RGB),
+the d1 input (1920×1080) and the bicubic baseline are made as above. 18 cd/m² grey lands at Y
+125, 100 cd/m² at 215, the film's MaxCLL (873 cd/m²) at 254; mean Y 44, 30, 83 and 71 in that
+order, nothing at 255. Hable, tried first, put grey at 84 and white at 157: too dark for an SDR
+grade.
+
 ### Ground truth, inputs and runs
 
 - **Ground truth (GT):** the source frames as decoded, converted to 16-bit RGB (zscale, BT.709
@@ -955,6 +970,10 @@ python3 $S/numerics_patch.py --selftest     # zimg resize, 8-bit recovery, paddi
 #   the window frame-exactly before make (one source's timestamps ran 44 frames ahead of the decode
 #   order 30 minutes in):
 python3 $S/fr_clips.py scores /path/to/source.mkv --first FIRST_FRAME-10 --last FIRST_FRAME+54
+# 4K clips from an HDR source: an SDR rendition through one fixed tone map (see Clips)
+python3 $S/fr_clips.py make /path/to/uhd-remux.mkv --start 98208 --frames 45 --name ouatia-face \
+  --out $C4 --degrade d1 --tonemap mobius   # likewise ouatia-dark 11185, -street 71258, -motion 64948
+python3 $S/fr_clips.py verify $C4/ouatia-face --cv2-python /path/to/seedvr2/.venv/bin/python --source
 # grain: every frame of an RGB file, or 12 frames over a source's middle 80% (seeking; taller than
 #   1080 rows: area-downscaled to 1080); --sigma 1 and --share 10 for the other scales
 python3 $S/fr_clips.py grain $C/live-vfx.gt.mkv --json grain-live-vfx-gt.json

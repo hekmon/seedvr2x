@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 13:45 CEST
+Last update: 2026-10-05 16:04 CEST
 
 ## 0. Setup
 
@@ -104,6 +104,10 @@ temporal regression.
       master's chroma (1.7% of the samples, up to 13 codes) and a 10-bit source's read; zscale's
       `threads=1` (libavfilter's generic per-filter option) fixes it, now set in ffv1_out.py and
       fr_clips.py (earlier data unaffected)
+- [x] 4K full-reference clips (2026-10-05, CPU): 4 shots of 45 frames from the 4K remaster, a
+      16-bit RGB 3840×2160 ground truth and 1920×1080 d1 inputs; seedvr2x refuses HDR, so the
+      ground truth is an SDR rendition through one fixed tone map (mobius; hable was too dark).
+      For colour's 4K tile study, and for scoring 4K output later
 - [x] Every fourth frame is the model's best: the last frame of each 4-frame latent group is
       PSNR-Y +0.8 to +5.0 dB and VMAF +2 to +19 closer to the ground truth than the group's
       second, on every clip, with or without `lab`; the input has no such pattern. Fast motion

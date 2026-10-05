@@ -4,9 +4,10 @@
   fr_clips.py scan SRC [--ss T] [--duration D] [--frames N] [--json F]   # candidate shots (seek)
   fr_clips.py scores SRC --first A --last B [--json F]                    # frame-exact scene scores
   fr_clips.py make SRC --start S --frames N --name NAME --out DIR [--degrade d1,d2] [--crop]
+                   [--tonemap mobius|hable]                              # HDR10 sources: SDR tone map
   fr_clips.py slice DIR/NAME --first A --frames N --name NEW [--out DIR2] [--files gt,d1.lr]
   fr_clips.py verify DIR/NAME [--cv2-python PY] [--source]                # bit- and frame-exactness
-  fr_clips.py sheet VIDEO --frames 0,22,44 --out PNG [--width 640]        # contact sheet
+  fr_clips.py sheet VIDEO --frames 0,22,44 --out PNG [--width 640] [--tonemap mobius]  # contact sheet
   fr_clips.py grain FILE [--frames N | --every] [--sigma 2] [--share 30] [--json F]  # film grain (levels)
   fr_clips.py selftest                                                    # colour chain, extraction
 
@@ -26,7 +27,10 @@ the concat demuxer: the index then counts across the files.
 
 Files written by `make` (DIR/NAME.*):
   src.mkv          frames S..S+N-1 of the source as decoded: YUV, FFV1, lossless (the reference of
-                   the frame-exactness check, and what everything below is made from)
+                   the frame-exactness check, and what everything below is made from); with
+                   --tonemap, their SDR tone map (see below)
+  hdr.mkv          --tonemap: frames S..S+N-1 of the HDR source as decoded, YUV, FFV1, lossless (the
+                   reference of the frame-exactness check)
   gt.mkv           ground truth: src in RGB, FFV1 gbrp16le, tagged RGB / BT.709 / full range.
                    zscale, the source's matrix (BT.709 for untagged HD), range (limited if
                    untagged) and chroma siting (left if untagged), no primaries/transfer change
@@ -48,7 +52,42 @@ Files written by `make` (DIR/NAME.*):
 Every file is all-intra FFV1 but the x264 one, starts at timestamp 0 at the source's exact frame
 rate, and holds exactly N frames (checked).
 
-`slice` cuts frames A..A+N-1 out of a clip made by `make` (its src, gt, <deg>.lr and
+HDR sources (`make --tonemap mobius`): seedvr2x takes SDR only, so the ground truth of an HDR10 (PQ)
+source is an SDR rendition made by one fixed tone map. `make` refuses a PQ or HLG source without
+--tonemap, and --tonemap on a source that is not PQ or whose colours are not all tagged. The frames,
+extracted as above, are kept as hdr.mkv; src.mkv is their SDR rendition (4:2:0 10-bit, BT.709
+matrix, primaries and transfer, limited range, chroma sited left, no HDR side data), and every later
+step runs from it exactly as from an SDR source. The map, FFmpeg's zscale + tonemap chain (every
+zscale threads=1; the source's own tags written out as zscale's input properties, and set on the
+frames first with setparams, as zscale keeps the frame's primaries through its first step):
+  zscale=min=2020_ncl:rin=limited:pin=2020:tin=smpte2084:cin=topleft:t=linear:npl=100,format=gbrpf32le
+                     PQ to linear light, float RGB, 1.0 = 100 cd/m²
+  zscale=p=709       BT.2020 to BT.709 primaries in linear light (out-of-gamut: negative values, kept)
+  tonemap=tonemap=mobius:param=0.3:desat=0:peak=10
+                     on the largest of R, G, B, the three scaled by the same factor (hue kept), no
+                     desaturation, 10 = 1000 cd/m² becomes white. mobius (the clips' map): the identity
+                     up to param 0.3 (30 cd/m²), so mid-tones stay where an SDR rendering puts them, then
+                     a Möbius curve with slope 1 there that reaches 1 at the peak (100 cd/m² -> 0.663);
+                     0.3 is ffmpeg's default param, written out. hable (tonemap=tonemap=hable:desat=0:
+                     peak=10): Hable's filmic curve h(x) / h(10), darker (18 cd/m² -> 0.069, 100 -> 0.312)
+  zscale=t=709:m=709:r=limited:c=left,format=yuv420p10le
+                     zimg's BT.709 transfer, display-referred: the BT.1886 inverse EOTF, V = L^(1/2.4),
+                     negative values to 0 (above 1: clipped by the 10-bit quantisation); the BT.709
+                     matrix, limited range, chroma downsampled (bilinear) and sited left
+peak=10 is the peak n9.0.2's tonemap takes by itself in this chain: the first zscale drops the HDR
+side data of the frames (mastering display, MaxCLL/MaxFALL, Dolby Vision), so tonemap reads no
+MaxCLL and falls back to its default for frames in linear light, 10. Written out, the map no longer
+depends on what an FFmpeg version keeps of the side data (MaxCLL read, e.g. 873 cd/m², would give
+8.73). The manifest keeps the operator, its param, the chain, the source's colours and its HDR
+metadata (mastering display, content light level, Dolby Vision configuration). `make` with another
+--tonemap on a made clip keeps its hdr.mkv (if its md5 still matches) and redoes the rest. `verify`
+re-runs the chain on hdr.mkv (framemd5 equal to src.mkv's) and checks src.mkv's tags and side data;
+its --source check compares the source's frames with hdr.mkv's. `sheet --tonemap` shows a PQ source
+through the same map, and `selftest` checks both maps against the equations (PQ EOTF, primaries
+matrix, Möbius or Hable, BT.1886: within 0.5 LSB, the 10-bit rounding), and that tonemap's own peak
+is 10 on frames that carry MaxCLL and its own mobius param 0.3.
+
+`slice` cuts frames A..A+N-1 out of a clip made by `make` (its src, gt, hdr, <deg>.lr and
 <deg>.bicubic files, or those named by --files; never the x264 file, which is long-GOP, nor the
 crop files) into DIR2/NEW.*, re-encoded as the same all-intra FFV1 without any pixel
 conversion. Several slices of one degraded clip thus share bit-identical inputs (a degradation
@@ -61,15 +100,20 @@ frames (its entry, inside and exit scores) and its statistics.
 Statistics (from gt.mkv, Y = BT.709 luma of the full-range RGB, 8-bit scale): mean Y, the
 fraction of near-black pixels (Y < 10), mean |dY| between consecutive frames (motion) and the
 number of held transitions (mean |dY| < 0.5: anime drawn on twos/threes), luma Laplacian variance
-(detail). Scene scores: ffmpeg's scdet, as sptenc runs it (on the decoded source format; score
+(detail), and per channel the shares of samples at 0 and at 255 on the 8-bit scale (rounded), over
+the frame and over the picture (without the bars: the rows from each edge whose mean over the frames
+is below 4 levels; `make` adds these to a clip made before them). Scene
+scores: ffmpeg's scdet, as sptenc runs it (on the decoded source format; score
 = min(mafd, |mafd - previous mafd|), %), for the transitions into the clip, inside it and out.
 
 `verify` checks (a) that cv2.VideoCapture, run by the given Python (the SeedVR2 venv's: cv2 only,
 no torch), reads every *.lr.mkv bit-exactly as ffmpeg decodes it (decoded as stored, repacked by
-numpy: no swscale on our side), (b) with --source, that frames S..S+N-1 of the source (framemd5 of a
-plain decode, frames counted by the muxer, no filter) are src.mkv's frames, and (c) the frame
-count of every file. `selftest` checks the colour chain against the BT.709 equations, the FFV1
-round trips, and the extraction and a slice on a synthetic long-GOP H.264 file.
+numpy: no swscale on our side), (b) with --source, that frames S..S+N-1 of the source (frame hashes
+of a plain decode, frames counted by the muxer, no filter; murmur3, as md5 cannot keep up with a 4K
+decode) are src.mkv's frames (hdr.mkv's with --tonemap), (c) the frame count of every file, and
+(d) with --tonemap, the tone map (above). `selftest` checks the colour chain against the BT.709
+equations, the FFV1 round trips, the extraction and a slice on a synthetic long-GOP H.264 file, and
+the tone map on patches and on a synthetic HEVC PQ file.
 
 `grain` measures film grain (docs/numerics.md, Grain): Y = the BT.709 luma of the RGB in full-range
 8-bit levels (a YUV file goes through its colour plan's zscale to 16-bit RGB first; frames taller
@@ -119,6 +163,14 @@ DEGRADATIONS = {
 ZMATRIX = {"bt709": "709", "smpte170m": "170m", "bt470bg": "470bg", "bt2020nc": "2020_ncl"}
 LOCATIONS = ("left", "center", "topleft", "top", "bottomleft", "bottom")
 RGB_BITS = {"bgr0": 8, "gbrp": 8, "gbrp10le": 10, "gbrp12le": 12, "gbrp16le": 16}
+TONEMAPS = {"mobius": 0.3, "hable": None}  # operator -> its param, written into the chain: ffmpeg's default
+#                                          (vf_tonemap's init: mobius 0.3); hable takes none
+TM_PEAK = 10  # tonemap's peak in units of npl (100 cd/m²): 1000 cd/m², what n9.0.2 takes by itself
+BAR_LEVEL = 4  # statistics: a row is a bar's when its mean (all frames, 8-bit levels) stays below this
+ZPRIM = {"bt709": "709", "bt2020": "2020"}
+HDR_TRC = {"smpte2084": "PQ", "arib-std-b67": "HLG"}
+SDR = {"matrix": "bt709", "range": "tv", "chroma_location": "left", "primaries": "bt709", "transfer": "bt709",
+       "assumed": []}  # what a tone-mapped src.mkv is
 
 
 def log(msg):
@@ -241,6 +293,73 @@ def zscale_to_rgb(c, extra=""):
             ":dither=none" + (f":{extra}" if extra else ""))
 
 
+def check_tonemap(path, c):
+    """Refuse a source --tonemap can't map: not PQ, primaries other than BT.2020/BT.709, colours assumed."""
+    if c["transfer"] != "smpte2084":
+        raise SystemExit(f"{path}: transfer {c['transfer']}: --tonemap maps PQ (smpte2084) sources only")
+    if c["assumed"]:
+        raise SystemExit(f"{path}: a PQ source with untagged colours (assumed: {', '.join(c['assumed'])}): "
+                         "--tonemap needs them all tagged")
+    if c["primaries"] not in ZPRIM:
+        raise SystemExit(f"{path}: primaries {c['primaries']}: --tonemap takes {', '.join(ZPRIM)} only")
+
+
+def tonemap_chain(c, op, peak=TM_PEAK, param=True):
+    """The fixed tone map (see the docstring): a PQ source's YUV (plan c, its tags written out as zscale's
+    input properties) to SDR YUV 4:2:0 10-bit, BT.709 matrix, primaries and transfer, limited range,
+    chroma sited left. The frames are tagged with the plan first: zscale takes the properties it keeps
+    (the first one's primaries) from the frame, and a file whose primaries are untagged gives it no path.
+    The operator's param (TONEMAPS) is written out. peak=None and param=False leave tonemap to find its
+    peak and param itself (selftest)."""
+    zr = "full" if c["range"] == "pc" else "limited"
+    pm = TONEMAPS[op] if param else None
+    return (f"{yuv_params(c)},zscale=threads=1:min={ZMATRIX[c['matrix']]}:rin={zr}:pin={ZPRIM[c['primaries']]}"
+            f":tin=smpte2084:cin={c['chroma_location']}:t=linear:npl=100,format=gbrpf32le,zscale=threads=1:p=709,"
+            f"tonemap=tonemap={op}" + (f":param={pm}" if pm is not None else "") + ":desat=0"
+            + (f":peak={peak}" if peak is not None else "") +
+            ",zscale=threads=1:t=709:m=709:r=limited:c=left,format=yuv420p10le")
+
+
+def tonemap_cmd(hdr, chain, threads, out=None):
+    """ffmpeg: the frames of hdr (an FFV1 hdr.mkv) through a tone-map chain, tagged SDR, into the FFV1 file
+    out, or as framemd5 lines on stdout (out None). -filter_threads: tonemap's slices (rows, independent)."""
+    cmd = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-threads", str(threads), "-i", hdr,
+           "-map", "0:v:0", "-filter_threads", str(threads), "-vf", f"{chain},{yuv_params(SDR)}",
+           "-fps_mode", "passthrough"]
+    if out is None:
+        return cmd + ["-f", "framemd5", "-"]
+    return cmd + [*FFV1, "-threads", str(threads), "-pix_fmt", "yuv420p10le", *yuv_tags(SDR), out]
+
+
+def side_data(path):
+    """The side data of a file's video stream and of its first frame, as ffprobe lists them."""
+    res = {}
+    for key, args in (("stream", ["-show_entries", "stream_side_data_list"]),
+                      ("first_frame", ["-read_intervals", "%+#1", "-show_entries", "frame_side_data_list"])):
+        r = subprocess.run([FFPROBE, "-v", "error", *concat_opts(path), "-select_streams", "v:0", *args, "-of", "json",
+                            path], capture_output=True, text=True)
+        if r.returncode:
+            raise SystemExit(f"ffprobe {path}: {r.stderr.strip()}")
+        j = json.loads(r.stdout or "{}")
+        items = j.get("streams" if key == "stream" else "frames") or [{}]
+        res[key] = items[0].get("side_data_list", [])
+    return res
+
+
+def hdr_side_data(sd):
+    """The HDR entries of side_data(): mastering display, content light level, Dolby Vision configuration in
+    full; Dolby Vision's per-frame RPU and enhancement layer by their type only."""
+    keep = ("Mastering display metadata", "Content light level metadata", "DOVI configuration record")
+    other = ("Dolby Vision", "DOVI", "enhancement-layer")
+    out = {}
+    for key, items in sd.items():
+        hdr = [x if x.get("side_data_type") in keep else {"side_data_type": x.get("side_data_type")}
+               for x in items if x.get("side_data_type") in keep or any(o in str(x.get("side_data_type")) for o in other)]
+        if hdr:
+            out[key] = hdr
+    return out
+
+
 # ------------------------------------------------------------------ scene scores
 
 def parse_metadata(path):
@@ -269,9 +388,11 @@ def parse_metadata(path):
 
 
 def y_full(yavg, st):
-    """signalstats' YAVG (native range, 8-bit scale) -> full-range 8-bit levels."""
+    """signalstats' YAVG (native range, at the source's bit depth) -> full-range 8-bit levels."""
     if yavg is None:
         return None
+    fmt = st.get("pix_fmt") or ""
+    yavg /= 1 << next((b for b in (16, 14, 12, 10, 9) if f"p{b}" in fmt), 8) - 8
     if st.get("color_range") == "pc":
         return yavg
     return (yavg - 16) * 255 / 219
@@ -355,7 +476,7 @@ def lap_var(y):
 
 def clip_stats(gt):
     ymean, dark, lapv, dy = [], [], [], []
-    prev = None
+    prev = zero = full = rowsum = None
     for rgb, bits in rgb_frames(gt):
         y = luma709(rgb, bits)
         ymean.append(float(y.mean()))
@@ -364,11 +485,32 @@ def clip_stats(gt):
         if prev is not None:
             dy.append(float(np.abs(y - prev).mean()))
         prev = y
+        # samples at 0 and at 255 on the 8-bit scale, rounded: v * 255 / top < 0.5, >= 254.5 (16-bit: <= 128,
+        # >= 65407), integer thresholds; counted per row and channel
+        top = (1 << bits) - 1
+        lo, hi = rgb <= (top + 509) // 510 - 1, rgb >= -(-509 * top // 510)
+        z, f, s = lo.sum(axis=1), hi.sum(axis=1), rgb.sum(axis=(1, 2), dtype=np.float64)
+        zero, full, rowsum = (z, f, s) if zero is None else (zero + z, full + f, rowsum + s)
     r = lambda v, n=3: round(float(v), n)  # noqa: E731
-    return {"frames": len(ymean), "mean_y": r(np.mean(ymean), 2), "min_frame_y": r(min(ymean), 2),
+    n, (H, W) = len(ymean), prev.shape
+    # the bars: the rows from each edge whose mean over the frames stays below BAR_LEVEL (8-bit levels); a
+    # bar is rarely exactly 0 (faint noise, ringing next to the picture)
+    low = rowsum / (n * W * 3) * 255 / ((1 << bits) - 1) < BAR_LEVEL
+    bar_top = H if low.all() else int(np.argmin(low))
+    bar_bottom = H if low.all() else int(np.argmin(low[::-1]))
+    pic = np.zeros(H, bool)
+    pic[bar_top:H - bar_bottom] = True
+
+    def share(counts, rows):  # per channel (R, G, B), over the given rows of every frame
+        k = int(rows.sum())
+        return [round(float(v) / (n * k * W), 5) for v in counts[rows].sum(axis=0)] if k else None
+    every = np.ones(H, bool)
+    return {"frames": n, "mean_y": r(np.mean(ymean), 2), "min_frame_y": r(min(ymean), 2),
             "max_frame_y": r(max(ymean), 2), "dark_fraction": r(np.mean(dark)),
             "mean_abs_dy": r(np.mean(dy)) if dy else None, "max_abs_dy": r(max(dy)) if dy else None,
             "held_transitions": int(sum(v < 0.5 for v in dy)), "lap_var": r(np.mean(lapv), 1),
+            "at_0": share(zero, every), "at_255": share(full, every), "bar_rows": [bar_top, bar_bottom],
+            "at_0_picture": share(zero, pic), "at_255_picture": share(full, pic),
             "per_transition_abs_dy": [r(v) for v in dy], "per_frame_y": [r(v, 2) for v in ymean]}
 
 
@@ -394,7 +536,14 @@ def cmd_make(a):
     st = probe(src)
     if st["pix_fmt"] in RGB_BITS or not st["pix_fmt"].startswith(("yuv", "yuvj")):
         raise SystemExit(f"{src}: {st['pix_fmt']}, a planar YUV source is expected")
-    c = colour_plan(st)
+    cs = colour_plan(st)  # the source's colours; c: src.mkv's, what every file below is made from
+    if a.tonemap:
+        check_tonemap(src, cs)
+    elif cs["transfer"] in HDR_TRC:
+        raise SystemExit(f"{src}: an HDR source ({HDR_TRC[cs['transfer']]}) and seedvr2x takes SDR only: "
+                         + ("--tonemap hable makes its SDR ground truth" if cs["transfer"] == "smpte2084"
+                            else "--tonemap maps PQ sources only"))
+    c = dict(SDR) if a.tonemap else cs
     fps = Fraction(st["r_frame_rate"])
     p = lambda suffix: os.path.join(out, f"{name}.{suffix}")  # noqa: E731
     mpath = manifest_path(out, name)
@@ -402,50 +551,76 @@ def cmd_make(a):
     if os.path.exists(mpath):
         with open(mpath, encoding="utf-8") as f:
             man = json.load(f)
-    same = man.get("source") == src and man.get("start") == S and man.get("frames") == N
+    same_frames = man.get("source") == src and man.get("start") == S and man.get("frames") == N
+    same = same_frames and (man.get("tonemap") or {}).get("operator") == a.tonemap
     if not same or a.force:
+        old = man
         man = {"name": name, "source": src, "start": S, "frames": N, "fps": str(fps), "source_stream": st,
                "colours": c, "ffmpeg": ffmpeg_version(), "files": {}, "commands": []}
+        if a.tonemap:
+            man["tonemap"] = {"operator": a.tonemap, "param": TONEMAPS[a.tonemap],
+                              "param_note": "ffmpeg's default for the operator, written out" if TONEMAPS[a.tonemap]
+                              is not None else "the operator takes none",
+                              "chain": tonemap_chain(cs, a.tonemap), "peak": TM_PEAK,
+                              "peak_cd_m2": TM_PEAK * 100, "npl": 100, "desat": 0, "source_colours": cs,
+                              "source_hdr": hdr_side_data(side_data(src)), "sdr_colours": c}
+            # another tone map of the same frames keeps the extraction: hdr.mkv (if its md5 still matches) and
+            # what the extraction pass recorded; everything from src.mkv on is redone
+            hdr = (old.get("files") or {}).get("hdr")
+            if (same_frames and not a.force and old.get("tonemap") and hdr and os.path.exists(p("hdr.mkv"))
+                    and md5_file(p("hdr.mkv")) == hdr.get("md5")):
+                man["files"]["hdr"] = hdr
+                man["commands"] = old.get("commands", [])[:1]
+                man.update({k: old[k] for k in ("scdet", "pts_time_first", "pts_time_last", "pts_check") if k in old})
+                man["tonemap"]["extraction_kept_from"] = old["tonemap"].get("operator")
+                log(f"{name}: hdr.mkv kept (md5 {hdr['md5']}) from the {old['tonemap'].get('operator')} tone map")
     cmds = man["commands"]
     files = man["files"]
+    ext = "hdr" if a.tonemap else "src"  # the file of the source's frames as decoded
 
     # 1. the clip, by decoding and counting; the scene scores of frames S-2 .. S+N in the same pass
     if "src" not in files or not os.path.exists(p("src.mkv")):
-        a0 = max(0, S - 2)
-        lead, end = S - a0, S + N
-        with tempfile.TemporaryDirectory() as d:
-            meta = os.path.join(d, "scd.txt")
-            fc = (f"[0:v:0]select='between(n,{a0},{end})',split=2[c][s];"
-                  f"[c]select='between(n,{lead},{lead + N - 1})',setpts=N/FRAME_RATE/TB,{yuv_params(c)}[clip];"
-                  f"[s]scdet=t=10,metadata=mode=print:file={meta}[sc]")
-            run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-threads", str(T), *concat_opts(src),
-                 "-i", src, "-filter_complex", fc,
-                 "-map", "[clip]", "-fps_mode", "passthrough", "-frames:v", str(N), *FFV1, "-threads", str(T),
-                 "-pix_fmt", st["pix_fmt"], *yuv_tags(c), p("src.mkv"),
-                 "-map", "[sc]", "-fps_mode", "passthrough", "-frames:v", str(end - a0 + 1), "-f", "null", "-"],
-                "extraction", cmds)
-            fr = parse_metadata(meta)
-        idx = {a0 + k: f for k, f in enumerate(fr)}
-        inside = [idx[i]["score"] for i in range(S + 1, S + N) if i in idx and "score" in idx[i]]
-        man["scdet"] = {
-            "entry": idx.get(S, {}).get("score") if S - a0 >= 2 or S == 0 else None,
-            "inside_max": round(max(inside), 3) if inside else None,
-            "inside_mean": round(float(np.mean(inside)), 3) if inside else None,
-            "exit": idx.get(end, {}).get("score"),
-            "inside": [round(v, 3) for v in inside],
-        }
-        man["pts_time_first"] = idx.get(S, {}).get("pts_time")
-        man["pts_time_last"] = idx.get(S + N - 1, {}).get("pts_time")
-        expect = round(S / fps, 3) if fps else None
-        man["pts_check"] = {"expected_first": float(expect) if expect is not None else None,
-                            "index_matches_time": (man["pts_time_first"] is not None and expect is not None
-                                                   and abs(man["pts_time_first"] - float(S / fps)) < 0.5 / float(fps))}
-        files["src"] = file_info(p("src.mkv"), N)
+        if ext not in files or not os.path.exists(p(f"{ext}.mkv")):
+            a0 = max(0, S - 2)
+            lead, end = S - a0, S + N
+            with tempfile.TemporaryDirectory() as d:
+                meta = os.path.join(d, "scd.txt")
+                fc = (f"[0:v:0]select='between(n,{a0},{end})',split=2[c][s];"
+                      f"[c]select='between(n,{lead},{lead + N - 1})',setpts=N/FRAME_RATE/TB,{yuv_params(cs)}[clip];"
+                      f"[s]scdet=t=10,metadata=mode=print:file={meta}[sc]")
+                run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-threads", str(T),
+                     *concat_opts(src), "-i", src, "-filter_complex", fc,
+                     "-map", "[clip]", "-fps_mode", "passthrough", "-frames:v", str(N), *FFV1, "-threads", str(T),
+                     "-pix_fmt", st["pix_fmt"], *yuv_tags(cs), p(f"{ext}.mkv"),
+                     "-map", "[sc]", "-fps_mode", "passthrough", "-frames:v", str(end - a0 + 1), "-f", "null", "-"],
+                    "extraction", cmds)
+                fr = parse_metadata(meta)
+            idx = {a0 + k: f for k, f in enumerate(fr)}
+            inside = [idx[i]["score"] for i in range(S + 1, S + N) if i in idx and "score" in idx[i]]
+            man["scdet"] = {
+                "entry": idx.get(S, {}).get("score") if S - a0 >= 2 or S == 0 else None,
+                "inside_max": round(max(inside), 3) if inside else None,
+                "inside_mean": round(float(np.mean(inside)), 3) if inside else None,
+                "exit": idx.get(end, {}).get("score"),
+                "inside": [round(v, 3) for v in inside],
+            }
+            man["pts_time_first"] = idx.get(S, {}).get("pts_time")
+            man["pts_time_last"] = idx.get(S + N - 1, {}).get("pts_time")
+            expect = round(S / fps, 3) if fps else None
+            man["pts_check"] = {"expected_first": float(expect) if expect is not None else None,
+                                "index_matches_time": (man["pts_time_first"] is not None and expect is not None
+                                                       and abs(man["pts_time_first"] - float(S / fps)) < 0.5 / float(fps))}
+            files[ext] = file_info(p(f"{ext}.mkv"), N)
+        if a.tonemap:  # 1b. the SDR source: the frames' tone map
+            run(tonemap_cmd(p("hdr.mkv"), man["tonemap"]["chain"], T, p("src.mkv")), "tone map", cmds)
+            files["src"] = file_info(p("src.mkv"), N)
         # 2. the ground truth
         run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", p("src.mkv"), "-map", "0:v:0",
              "-vf", f"{zscale_to_rgb(c)},format=gbrp16le,{rgb_params(c)}", "-fps_mode", "passthrough",
              *FFV1, "-threads", str(T), "-pix_fmt", "gbrp16le", *rgb_tags(c), p("gt.mkv")], "ground truth", cmds)
         files["gt"] = file_info(p("gt.mkv"), N)
+        man["stats"] = clip_stats(p("gt.mkv"))
+    elif "bar_rows" not in man.get("stats", {}):  # a clip made before the 0 / 255 shares: add them
         man["stats"] = clip_stats(p("gt.mkv"))
 
     W, H = st["width"], st["height"]
@@ -508,6 +683,12 @@ def cmd_make(a):
     s = man.get("stats", {})
     sc = man.get("scdet", {})
     print(f"{name}: frames {S}..{S + N - 1} of {src} ({man.get('pts_time_first')} s), {N} frames at {fps}")
+    if a.tonemap:
+        print(f"  tone map {a.tonemap}" + (f" (param {TONEMAPS[a.tonemap]})" if TONEMAPS[a.tonemap] is not None else "")
+              + f", peak {TM_PEAK} = {TM_PEAK * 100} cd/m², of {cs['matrix']} {cs['range']} {cs['primaries']} "
+              f"{cs['transfer']} chroma {cs['chroma_location']}" + (f"; hdr.mkv kept from the {man['tonemap']['extraction_kept_from']} "
+                                                                     "clip" if man["tonemap"].get("extraction_kept_from") else "")
+              + f": {man['tonemap']['chain']}")
     print(f"  colours {c['matrix']} {c['range']} chroma {c['chroma_location']}"
           + (f" (assumed: {', '.join(c['assumed'])})" if c["assumed"] else ""))
     print(f"  scdet: entry {sc.get('entry')}, inside max {sc.get('inside_max')} mean {sc.get('inside_mean')}, "
@@ -515,6 +696,9 @@ def cmd_make(a):
     print(f"  mean Y {s.get('mean_y')} (frames {s.get('min_frame_y')}..{s.get('max_frame_y')}), dark {s.get('dark_fraction')}, "
           f"mean |dY| {s.get('mean_abs_dy')} (max {s.get('max_abs_dy')}, held {s.get('held_transitions')}), "
           f"Laplacian var {s.get('lap_var')}")
+    if "bar_rows" in s:
+        print(f"  8-bit 0 / 255 shares (R, G, B): frame {s['at_0']} / {s['at_255']}; picture (without the bars, "
+              f"{s['bar_rows'][0]} + {s['bar_rows'][1]} rows) {s['at_0_picture']} / {s['at_255_picture']}")
     for k, v in files.items():
         for sub in ([v] if "path" in v else [x for x in v.values() if isinstance(x, dict) and "path" in x]):
             print(f"  {os.path.basename(sub['path'])}: {sub['pix_fmt']} {sub['size'][0]}x{sub['size'][1]}, "
@@ -526,11 +710,12 @@ def cmd_make(a):
 
 def intra_files(man):
     """(manifest key path, file suffix, info) of a clip's all-intra FFV1 files that a slice can cut:
-    src, gt, and every degradation's lr and bicubic (not the x264 file, not the crop files)."""
+    src, gt, hdr (--tonemap), and every degradation's lr and bicubic (not the x264 file, not the crop
+    files)."""
     out = []
     for k, v in man["files"].items():
         if "path" in v:
-            if k in ("src", "gt"):
+            if k in ("src", "gt", "hdr"):
                 out.append(((k,), k, v))
         elif k in DEGRADATIONS:
             for sub in ("lr", "bicubic"):
@@ -566,15 +751,18 @@ def cmd_slice(a):
            "slice_of": {"name": pname, "manifest": os.path.abspath(ppath), "first": A, "parent_start": pman["start"],
                         "parent_frames": N0},
            "files": {}, "commands": [], "slice_check": {}}
+    if pman.get("tonemap"):
+        man["tonemap"] = pman["tonemap"]
     for key, suffix, info in jobs:
         src = info["path"]
         fmt = probe(src)["pix_fmt"]
         rgb = fmt in RGB_BITS
+        cc = pman["tonemap"]["source_colours"] if suffix == "hdr" else c  # hdr.mkv keeps the HDR source's tags
         run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-threads", str(T), "-i", src,
              "-map", "0:v:0", "-vf", f"select='between(n,{A},{A + N - 1})',setpts=N/FRAME_RATE/TB,"
-                                     f"{rgb_params(c) if rgb else yuv_params(c)}",
+                                     f"{rgb_params(cc) if rgb else yuv_params(cc)}",
              "-fps_mode", "passthrough", "-frames:v", str(N), *FFV1, "-threads", str(T), "-pix_fmt", fmt,
-             *(rgb_tags(c) if rgb else yuv_tags(c)), p(f"{suffix}.mkv")], f"slice {suffix}", man["commands"])
+             *(rgb_tags(cc) if rgb else yuv_tags(cc)), p(f"{suffix}.mkv")], f"slice {suffix}", man["commands"])
         parent_h = framemd5(src, A + N, T)[A:A + N]
         slice_h = framemd5(p(f"{suffix}.mkv"), None, T)
         same = sum(x == y for x, y in zip(parent_h, slice_h))
@@ -641,17 +829,24 @@ def rgb24_md5s(path):
     return out
 
 
-def framemd5(path, count=None, threads=16):
+def hash_lines(text):
+    """The per-frame hashes of framemd5 / framehash output."""
+    return [ln.split(",")[-1].strip() for ln in text.splitlines() if ln and not ln.startswith("#")]
+
+
+def framemd5(path, count=None, threads=16, algo="md5"):
+    """Per-frame hashes of a plain decode (frames counted by the muxer): md5, or another of framehash's
+    algorithms (murmur3: md5 hashes about 1 GB/s, 42 4K 10-bit frames/s, below a 4K decode)."""
     cmd = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-threads", str(threads), *concat_opts(path),
            "-i", path, "-map", "0:v:0", "-fps_mode", "passthrough"]
     if count:
         cmd += ["-frames:v", str(count)]
-    cmd += ["-f", "framemd5", "-"]
+    cmd += ["-f", "framemd5", "-"] if algo == "md5" else ["-f", "framehash", "-hash", algo, "-"]
     log(f"$ {shlex.join(cmd)}")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         raise SystemExit(f"framemd5 {path}: {r.stderr.strip()}")
-    return [ln.split(",")[-1].strip() for ln in r.stdout.splitlines() if ln and not ln.startswith("#")]
+    return hash_lines(r.stdout)
 
 
 def cmd_verify(a):
@@ -694,11 +889,40 @@ def cmd_verify(a):
                   f"frames bit-exact vs ffmpeg's planar decode ({len(info['md5'])} read, "
                   f"CAP_PROP_FRAME_COUNT {info.get('frame_count_prop')}, shape {info.get('shape')}): "
                   f"{'OK' if exact else 'DIFFERS'}")
+    tm = man.get("tonemap")
+    ref = "hdr" if tm else "src"  # the file of the source's frames as decoded
+    has = lambda k: "path" in man["files"].get(k, {})  # noqa: E731
+    # the tone map: the recorded chain re-run on hdr.mkv gives src.mkv; src.mkv tagged SDR, no HDR side data
+    if tm and has("hdr") and has("src"):
+        t0 = time.perf_counter()
+        hdr, sdr = (os.path.join(out, f"{name}.{k}.mkv") for k in ("hdr", "src"))
+        cmd = tonemap_cmd(hdr, tm["chain"], 16)
+        log(f"$ {shlex.join(cmd)}")
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode:
+            raise SystemExit(f"tone map re-run failed: {r.stderr.strip()}")
+        again, have = hash_lines(r.stdout), framemd5(sdr)
+        same = sum(x == y for x, y in zip(again, have))
+        st = probe(sdr)
+        tags = {k: st.get(k) for k in ("color_space", "color_primaries", "color_transfer", "color_range",
+                                       "chroma_location")}
+        want = {"color_space": "bt709", "color_primaries": "bt709", "color_transfer": "bt709", "color_range": "tv",
+                "chroma_location": "left"}
+        left = hdr_side_data(side_data(sdr))
+        good = same == len(again) == len(have) == N and tags == want and not left
+        ok &= good
+        ver["tonemap"] = {"reproduced_frames": same, "frames": len(have), "src_tags": tags, "src_tags_sdr": tags == want,
+                          "src_hdr_side_data": left, "ok": good, "s": round(time.perf_counter() - t0, 1)}
+        print(f"  tone map re-run on {name}.hdr.mkv: {same}/{N} frames equal to {name}.src.mkv's (framemd5); src tags "
+              f"{'BT.709 tv left' if tags == want else tags}; HDR side data left {left or 'none'}: "
+              f"{'OK' if good else 'DIFFERS'}")
     # the clip is frames S..S+N-1 of the source
     if a.source:
+        if not has(ref):
+            raise SystemExit(f"{name} has no {ref}.mkv: --source can't check it")
         t0 = time.perf_counter()
-        src_h = framemd5(man["source"], S + N)
-        clip_h = framemd5(os.path.join(out, f"{name}.src.mkv"))
+        src_h = framemd5(man["source"], S + N, algo="murmur3")
+        clip_h = framemd5(os.path.join(out, f"{name}.{ref}.mkv"), algo="murmur3")
         pick = src_h[S:S + N]
         same = sum(x == y for x, y in zip(pick, clip_h))
         exact = len(pick) == N and len(clip_h) == N and same == N
@@ -706,12 +930,13 @@ def cmd_verify(a):
         # where else do the first and last frames appear in the decoded source (off-by-one guard)
         first_at = [i for i, hsh in enumerate(src_h) if hsh == clip_h[0]] if clip_h else []
         last_at = [i for i, hsh in enumerate(src_h) if hsh == clip_h[-1]] if clip_h else []
-        ver["source"] = {"frames_hashed": len(src_h), "equal_frames": same, "exact": exact,
+        ver["source"] = {"file": f"{name}.{ref}.mkv", "hash": "murmur3", "frames_hashed": len(src_h),
+                         "equal_frames": same, "exact": exact,
                          "first_frame_found_at": first_at[:10], "last_frame_found_at": last_at[:10],
-                         "first_md5": clip_h[0] if clip_h else None, "last_md5": clip_h[-1] if clip_h else None,
+                         "first_hash": clip_h[0] if clip_h else None, "last_hash": clip_h[-1] if clip_h else None,
                          "s": round(time.perf_counter() - t0, 1)}
-        print(f"  source framemd5 frames {S}..{S + N - 1} vs {name}.src.mkv: {same}/{N} equal; first frame found at "
-              f"source index {first_at[:5]}, last at {last_at[:5]}: {'OK' if exact else 'DIFFERS'}")
+        print(f"  source frames {S}..{S + N - 1} vs {name}.{ref}.mkv (murmur3 frame hashes): {same}/{N} equal; first "
+              f"frame found at source index {first_at[:5]}, last at {last_at[:5]}: {'OK' if exact else 'DIFFERS'}")
     ver["ok"] = bool(ok)
     with open(mpath, "w", encoding="utf-8") as f:
         json.dump(man, f, indent=1)
@@ -832,18 +1057,25 @@ def cmd_sheet(a):
     W = a.width
     H = round(W * st["height"] / st["width"] / 2) * 2
     if st["pix_fmt"] in RGB_BITS:
+        if a.tonemap:
+            raise SystemExit(f"{a.video}: {st['pix_fmt']}: --tonemap maps a YUV PQ source")
         conv = f"zscale=threads=1:w={W}:h={H}:filter=spline36:dither=none"
     else:  # tag the frames first: zimg finds no path from an untagged source's unknown transfer
         plan = colour_plan(st)
-        conv = f"{yuv_params(plan)},{zscale_to_rgb(plan, f'w={W}:h={H}:filter=spline36')}"
+        if a.tonemap:  # the make --tonemap map, then the SDR frames as any SDR source's
+            check_tonemap(a.video, plan)
+            conv = f"{tonemap_chain(plan, a.tonemap)},{zscale_to_rgb(SDR, f'w={W}:h={H}:filter=spline36')}"
+        else:
+            conv = f"{yuv_params(plan)},{zscale_to_rgb(plan, f'w={W}:h={H}:filter=spline36')}"
     sel = "+".join(f"eq(n,{i})" for i in idx)
     cols = a.columns or len(idx)
     rows = -(-len(idx) // cols)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-threads", str(a.threads),
-         *concat_opts(a.video), "-i", a.video, "-map", "0:v:0", "-vf", f"select='{sel}',{conv},format=rgb24,tile=layout={cols}x{rows}:padding=6:color=white",
+         *concat_opts(a.video), "-i", a.video, "-map", "0:v:0", "-filter_threads", str(a.threads),
+         "-vf", f"select='{sel}',{conv},format=rgb24,tile=layout={cols}x{rows}:padding=6:color=white",
          "-fps_mode", "passthrough", "-frames:v", "1", "-update", "1", a.out], "sheet")
-    print(f"{a.out}: frames {idx} of {a.video}, {W}x{H} each")
+    print(f"{a.out}: frames {idx} of {a.video}, {W}x{H} each" + (f", tone map {a.tonemap}" if a.tonemap else ""))
 
 
 # ------------------------------------------------------------------ grain
@@ -976,6 +1208,87 @@ def bt709_rgb(y, u, v):
     return np.clip(np.stack([r, g, b], -1), 0, 1)
 
 
+PQ_M1, PQ_M2 = 2610 / 16384, 2523 / 4096 * 128
+PQ_C1, PQ_C2, PQ_C3 = 3424 / 4096, 2413 / 4096 * 32, 2392 / 4096 * 32
+BT709_XY = ((0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
+BT2020_XY = ((0.708, 0.292), (0.170, 0.797), (0.131, 0.046))
+
+
+def pq_eotf(e):
+    """PQ signal (SMPTE ST 2084) -> cd/m²."""
+    p = np.power(np.clip(e, 0, 1), 1 / PQ_M2)
+    return 10000 * np.power(np.maximum(p - PQ_C1, 0) / (PQ_C2 - PQ_C3 * p), 1 / PQ_M1)
+
+
+def pq_inverse_eotf(cd):
+    y = np.power(np.asarray(cd, float) / 10000, PQ_M1)
+    return np.power((PQ_C1 + PQ_C2 * y) / (1 + PQ_C3 * y), PQ_M2)
+
+
+def rgb_to_xyz(xy, white=(0.3127, 0.3290)):
+    """RGB -> XYZ matrix of the R, G, B chromaticities xy and a white point (D65)."""
+    xy = np.array(xy, float)
+    p = np.stack([xy[:, 0] / xy[:, 1], np.ones(3), (1 - xy[:, 0] - xy[:, 1]) / xy[:, 1]])
+    w = np.array([white[0] / white[1], 1, (1 - white[0] - white[1]) / white[1]])
+    return p * np.linalg.solve(p, w)
+
+
+def hable(x):
+    a, b, c, d, e, f = 0.15, 0.50, 0.10, 0.20, 0.02, 0.30
+    return (x * (x * a + b * c) + d * e) / (x * (x * a + b) + d * f) - e / f
+
+
+def mobius(x, j, peak):
+    """ffmpeg's mobius (vf_tonemap.c): the identity up to j, then a Möbius transform with slope 1 at j that
+    reaches 1 at the peak."""
+    a = -j * j * (peak - 1) / (j * j - 2 * j + peak)
+    b = (j * j - 2 * j * peak + peak) / max(peak - 1, 1e-6)
+    return np.where(x <= j, x, (b * b + 2 * b * j + j * j) / (b - a) * (x + a) / (x + b))
+
+
+def pq_yuv(lin709):
+    """10-bit limited BT.2020 PQ YUV codes of linear BT.709 RGB (1.0 = 100 cd/m²)."""
+    lin = np.asarray(lin709, float) @ (np.linalg.inv(rgb_to_xyz(BT2020_XY)) @ rgb_to_xyz(BT709_XY)).T
+    r, g, b = np.moveaxis(pq_inverse_eotf(100 * lin), -1, 0)
+    y = 0.2627 * r + 0.6780 * g + 0.0593 * b
+    return np.rint(np.stack([64 + 876 * y, 512 + 896 * (b - y) / 1.8814, 512 + 896 * (r - y) / 1.4746], -1))
+
+
+def tonemap_equations(yuv, op, peak=TM_PEAK):
+    """The tone map by the equations: 10-bit limited BT.2020 PQ YUV [..., 3] -> 10-bit limited BT.709 YUV
+    (unrounded): PQ EOTF, npl 100, BT.2020 -> BT.709 primaries, the operator on max(R, G, B) (Hable(x) /
+    Hable(peak), or ffmpeg's mobius with its TONEMAPS param), the three scaled alike, the BT.1886 inverse
+    EOTF (gamma 1/2.4), BT.709 matrix."""
+    y, u, v = (np.asarray(yuv, float)[..., k] for k in range(3))
+    yn, cb, cr = (y - 64) / 876, (u - 512) / 896, (v - 512) / 896
+    r, b = yn + 1.4746 * cr, yn + 1.8814 * cb
+    g = (yn - 0.2627 * r - 0.0593 * b) / 0.6780
+    lin = pq_eotf(np.stack([r, g, b], -1)) / 100
+    lin = lin @ (np.linalg.inv(rgb_to_xyz(BT709_XY)) @ rgb_to_xyz(BT2020_XY)).T
+    sig = np.maximum(lin.max(-1, keepdims=True), 1e-6)
+    out = hable(sig) / hable(peak) if op == "hable" else mobius(sig, TONEMAPS[op], peak)
+    lin = lin * out / sig
+    rp, gp, bp = np.moveaxis(np.power(np.clip(lin, 0, None), 1 / 2.4), -1, 0)
+    yo = 0.2126 * rp + 0.7152 * gp + 0.0722 * bp
+    return np.stack([64 + 876 * yo, 512 + 896 * (bp - yo) / 1.8556, 512 + 896 * (rp - yo) / 1.5748], -1)
+
+
+def yuv420p10_frames(path):
+    """The planes (Y, U, V) of every frame of a 4:2:0 10-bit file, as decoded."""
+    st = probe(path)
+    W, H = st["width"], st["height"]
+    r = subprocess.run([FFMPEG, "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0", "-fps_mode", "passthrough",
+                        "-f", "rawvideo", "-pix_fmt", "yuv420p10le", "-"], capture_output=True)
+    x = np.frombuffer(r.stdout, "<u2")
+    n = W * H * 3 // 2
+    out = []
+    for k in range(len(x) // n):
+        f = x[k * n:(k + 1) * n]
+        out.append((f[:W * H].reshape(H, W), f[W * H:W * H * 5 // 4].reshape(H // 2, W // 2),
+                    f[W * H * 5 // 4:].reshape(H // 2, W // 2)))
+    return out
+
+
 def cmd_selftest(a):
     ok = True
     rng = np.random.default_rng(1)
@@ -1039,7 +1352,7 @@ def cmd_selftest(a):
         all_h = framemd5(syn)
         S, N = 133, 45
         sa = argparse.Namespace(src=syn, start=S, frames=N, name="syn", out=d, threads=4, degrade="d1", crop=True,
-                                force=False)
+                                force=False, tonemap=None)
         cmd_make(sa)
         clip_h = framemd5(os.path.join(d, "syn.src.mkv"))
         good = clip_h == all_h[S:S + N]
@@ -1057,6 +1370,104 @@ def cmd_selftest(a):
         ok &= good
         print(f"slice of frames {A}..{A + M - 1} of the clip ({', '.join(sm['slice_check'])}): "
               f"{'frame-exact, and src = source frames ' + str(S + A) + '..' + str(S + A + M - 1) if good else 'DIFFERS'}")
+        # 5. the tone map against the equations: flat patches of known BT.2020 PQ YUV (10-bit 4:2:0, limited),
+        #    made from linear BT.709 colours (black, greys from 0.5 to 950 cd/m², skin, random), read at centres
+        lin = np.concatenate([[[0, 0, 0], [0.005] * 3, [0.05] * 3, [0.18] * 3, [1] * 3, [2.5] * 3, [6] * 3, [9.5] * 3,
+                               [0.45, 0.3, 0.22], [1.2, 0.8, 0.6], [0.1, 0.25, 0.6], [3, 2, 0.5]],
+                              rng.uniform(0.02, 9, (cols * rws - 12, 3))])
+        codes = pq_yuv(lin)
+        Y = np.zeros((rws * P, cols * P), "<u2")
+        U = np.zeros((rws * P // 2, cols * P // 2), "<u2")
+        V = np.zeros_like(U)
+        for k, (y, u, v) in enumerate(codes.astype(int)):
+            r, c = divmod(k, cols)
+            Y[r * P:(r + 1) * P, c * P:(c + 1) * P] = y
+            U[r * P // 2:(r + 1) * P // 2, c * P // 2:(c + 1) * P // 2] = u
+            V[r * P // 2:(r + 1) * P // 2, c * P // 2:(c + 1) * P // 2] = v
+        raw = os.path.join(d, "pq.yuv")
+        with open(raw, "wb") as f:
+            f.write(Y.tobytes() + U.tobytes() + V.tobytes())
+        cpq = {"matrix": "bt2020nc", "range": "tv", "chroma_location": "topleft", "primaries": "bt2020",
+               "transfer": "smpte2084", "assumed": []}
+        pqp, sdr = os.path.join(d, "pq-patches.mkv"), os.path.join(d, "pq-patches.sdr.mkv")
+        # (tagged by setparams as well as by the encoder's options: tags on the encoder alone make n9.0.2
+        # convert the untagged frames to them)
+        run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "yuv420p10le",
+             "-s", f"{cols * P}x{rws * P}", "-framerate", "24000/1001", "-i", raw, "-vf", yuv_params(cpq), "-c:v", "ffv1",
+             "-pix_fmt", "yuv420p10le", *yuv_tags(cpq), pqp], "PQ patches")
+        for op in TONEMAPS:
+            run(tonemap_cmd(pqp, tonemap_chain(cpq, op), 4, sdr), f"tone map {op} of the PQ patches")
+            y, u, v = yuv420p10_frames(sdr)[0]
+            got = np.array([(y[k // cols * P + P // 2, k % cols * P + P // 2],
+                             u[k // cols * P // 2 + P // 4, k % cols * P // 2 + P // 4],
+                             v[k // cols * P // 2 + P // 4, k % cols * P // 2 + P // 4]) for k in range(len(codes))], float)
+            want = tonemap_equations(codes, op)
+            err = np.abs(got - want)
+            good = err.max() <= 1.0
+            ok &= good
+            worst = int(np.argmax(err.max(axis=1)))
+            curve = f"Hable / Hable({TM_PEAK})" if op == "hable" else f"Möbius, param {TONEMAPS[op]}, peak {TM_PEAK}"
+            print(f"tone map {op} of BT.2020 PQ 10-bit patches (0 to 950 cd/m²) -> BT.709 10-bit: max |error| vs the "
+                  f"equations (PQ EOTF, primaries, {curve}, BT.1886 inverse EOTF) {err.max():.3f} LSB over "
+                  f"{len(codes)} patches (Y, U, V: {', '.join(f'{e:.3f}' for e in err.max(axis=0))}): "
+                  + ("OK" if good else f"FAILED (worst: PQ YUV {codes[worst]} gave {got[worst]}, "
+                                       f"{np.round(want[worst], 2)} expected)"))
+        # 6. make --tonemap on a synthetic long-GOP HEVC PQ file carrying HDR10 metadata (MaxCLL 873)
+        pq = os.path.join(d, "pq-syn.mkv")
+        run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+             "testsrc2=size=320x180:rate=24000/1001:duration=12", "-vf", f"format=yuv420p10le,{yuv_params(cpq)}",
+             "-c:v", "libx265",
+             "-preset", "fast", "-x265-params", "log-level=error:keyint=120:bframes=3:chromaloc=2:hdr10=1:"
+             "max-cll=873,422:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1)",
+             "-pix_fmt", "yuv420p10le", *yuv_tags(cpq), pq], "synthetic PQ source")
+        refused = []
+        for src_, tm_ in ((pq, None), (syn, "hable")):  # a PQ source without --tonemap, an SDR one with it
+            try:
+                cmd_make(argparse.Namespace(src=src_, start=0, frames=3, name="refused", out=d, threads=4, degrade="",
+                                            crop=False, force=True, tonemap=tm_))
+                refused.append(False)
+            except SystemExit as e:
+                refused.append("--tonemap" in str(e.code))
+        good = all(refused)
+        ok &= good
+        print(f"make refuses a PQ source without --tonemap, and --tonemap on an SDR source: {'OK' if good else 'FAILED'}")
+        pall = framemd5(pq)
+        for op in TONEMAPS:  # the second operator re-uses the first one's hdr.mkv
+            cmd_make(argparse.Namespace(src=pq, start=S, frames=N, name="pq", out=d, threads=4, degrade="d1", crop=False,
+                                        force=False, tonemap=op))
+            vok = False
+            try:
+                cmd_verify(argparse.Namespace(clip=os.path.join(d, "pq"), cv2_python=None, source=True))
+            except SystemExit as e:
+                vok = e.code == 0
+            with open(manifest_path(d, "pq"), encoding="utf-8") as f:
+                tm = json.load(f)["tonemap"]
+            kept = tm.get("extraction_kept_from")
+            good = (framemd5(os.path.join(d, "pq.hdr.mkv")) == pall[S:S + N] and vok and tm["operator"] == op
+                    and tm["param"] == TONEMAPS[op] and kept == (None if op == list(TONEMAPS)[0] else list(TONEMAPS)[0]))
+            ok &= good
+            print(f"make --tonemap {op} on frames {S}..{S + N - 1} of a long-GOP HEVC PQ file"
+                  + (f" (hdr.mkv kept from {kept})" if kept else "") + ": hdr.mkv identical to its plain decode, verify "
+                  f"(tone map re-run, SDR tags, source frames) {'OK' if good else 'FAILED'}")
+        # 7. what tonemap finds by itself in this chain: the first zscale drops the HDR side data, so without peak=
+        #    it takes its default for linear-light frames, TM_PEAK, not MaxCLL / 100 (8.73); the param written out
+        #    is ffmpeg's own default
+        cll = [x for x in side_data(pq)["first_frame"] if x.get("side_data_type") == "Content light level metadata"]
+
+        def hashes_of(op, pk=TM_PEAK, param=True):
+            r = subprocess.run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-i", pq, "-map", "0:v:0",
+                                "-frames:v", "5", "-vf", tonemap_chain(cpq, op, pk, param), "-f", "framemd5", "-"],
+                               capture_output=True, text=True)
+            return hash_lines(r.stdout)
+        good = bool(cll) and cll[0].get("max_content") == 873
+        for op in TONEMAPS:
+            h = hashes_of(op)
+            good &= len(h) == 5 and hashes_of(op, None) == h != hashes_of(op, 8.73) and hashes_of(op, param=False) == h
+        ok &= good
+        print(f"tonemap's own peak on frames carrying MaxCLL {cll[0].get('max_content') if cll else None}: the same "
+              f"frames as peak={TM_PEAK}, not as peak=8.73 ({', '.join(TONEMAPS)}); the params written out "
+              f"({', '.join(f'{k} {v}' for k, v in TONEMAPS.items() if v is not None)}) = ffmpeg's defaults: "
+              f"{'OK' if good else 'FAILED'}")
     print("selftest", "ok" if ok else "FAILED")
     sys.exit(0 if ok else 1)
 
@@ -1091,6 +1502,8 @@ def main():
     s.add_argument("--out", required=True, help="output directory")
     s.add_argument("--degrade", default="d1", help="comma list: d1 (Mitchell, CRF 20), d2 (area, CRF 26)")
     s.add_argument("--crop", action="store_true", help="also the multiple-of-16 crop control")
+    s.add_argument("--tonemap", choices=list(TONEMAPS),
+                   help="a PQ source (required): src.mkv = the frames' SDR tone map by this operator (mobius: the clips')")
     s.add_argument("--force", action="store_true", help="redo what the manifest says is done")
     s.add_argument("--threads", type=int, default=16)
     s = sub.add_parser("slice", help="frames A..A+N-1 of a made clip's all-intra files, checked by framemd5")
@@ -1111,6 +1524,7 @@ def main():
     s.add_argument("--out", required=True, help="PNG")
     s.add_argument("--width", type=int, default=640, help="width of each frame")
     s.add_argument("--columns", type=int, default=0)
+    s.add_argument("--tonemap", choices=list(TONEMAPS), help="a PQ source through make's SDR tone map")
     s.add_argument("--threads", type=int, default=16)
     s = sub.add_parser("grain", help="film grain: luma high-pass residual over the smoothest 30%%, per frame")
     s.add_argument("file", help="an RGB file (GT, baseline, master) or a YUV source")
