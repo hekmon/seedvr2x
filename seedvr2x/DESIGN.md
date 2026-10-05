@@ -23,6 +23,10 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
     job lasts longer there, and resume and `--until` matter most.
 - can be paused and resumed (run at night, give the computer back in the morning)
 
+v1 is for SDR sources, made as perfect as they can be: the user's priority, SDR being what gets
+upscaled today. HDR comes in a later version (see
+[Not in the first version](#not-in-the-first-version)).
+
 It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of the
 [25 bugs](../research/bugs/README.md) live). It keeps ByteDance's model code.
 
@@ -58,6 +62,15 @@ never requires it.
 - Models other than the 7B fp16: phase 2, after v1 (see [Weights](#weights))
 - Variable frame rate sources: refused with a clear message, as sptenc does
 - Sources refused in v1, each with a clear message:
+  - HDR: the PQ (`smpte2084`) and HLG (`arib-std-b67`) transfers. The model was trained on SDR
+    video, and `lab`'s CIELAB conversion assumes an SDR transfer: what PQ-coded pixels passed
+    through untouched would give is unmeasured, and HDR10's metadata (mastering display,
+    MaxCLL) isn't carried. The message says how to get an SDR upscale: tone-map the source
+    to SDR first, a grading choice for the user's own tools, as a gamut conversion is.
+    - Dolby Vision is read through its base layer: accepted when that layer is SDR, refused
+      otherwise, profile 5's included, which isn't viewable without Dolby's processing.
+    - The later version measures passthrough against tone mapping first (2 HDR clips at
+      1080p, about 1 GPU hour) and carries HDR10's metadata.
   - a rotation or flip in the display matrix (phone and camera files). The decode passes
     `-noautorotate`, so nothing rotates behind our back. The likely later way is to process the
     frames as stored and carry the rotation to the output.
@@ -1286,9 +1299,9 @@ explanation.
   - which phase sets the peak: the DiT through the window length, the VAE through the frame
     size, which is why 4K needs tiled decoding
 - why zscale is required, and how to get an ffmpeg build that has it
-- the refused sources (VFR, interlaced, telecined, rotated, cropped, unusual pixel formats or
-  matrices), and what to do with each; for a rate its timestamps contradict, the two fixes
-  and what each costs (see [Input](#input))
+- the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
+  formats or matrices), and what to do with each; for a rate its timestamps contradict, the
+  two fixes and what each costs (see [Input](#input))
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
   transfer kept, square pixels)
 - resume: the same command resumes; what refuses a resume and why; `--accept-env-change`
