@@ -45,8 +45,8 @@ It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of
     shorter than 5 s into their neighbours, which suits encoding but hides real cuts inside its
     segments, and a cut the model doesn't see is its costliest error. seedvr2x keeps every cut
     for the model's shots and merges only its output segments, by sptenc's rule.
-  - A directory of segments, such as an earlier `sptenc split`, is still accepted (see
-    [Input](#input)).
+  - The source is seedvr2x's only input, in both workflows (the user's decision, 2026-10-05):
+    a directory of segments from an outside splitter is no input (see [Input](#input)).
 
 Both workflows start from the source and differ only at the end: seedvr2x's assembly, or
 sptenc's encode.
@@ -127,7 +127,7 @@ never requires it.
     attention works in inside one pass ([attention.md](../research/docs/attention.md)), which
     `na.unconcat_coalesce` counts.
 - **Output segment:** an output file. It holds one or more whole shots, at least 5 s long by
-  sptenc's rule, or mirrors an input segment. It is the unit of output and of decode resume.
+  sptenc's rule. It is the unit of output and of decode resume.
 - **Unit:** a piece of saved work for resume: a shot's encode, a window, a segment's decode.
 
 ## Architecture
@@ -323,10 +323,26 @@ they differ and by which metrics, and how users are guided to them. What is know
     GPL-3.0, never copied.
   - The gain is mostly memory. ComfyUI reports about 2× over fp8 or bf16 on Blackwell, but the
     DiT is about a fifth of a 1080p run here: a DiT twice as fast shortens a job by about 10%.
-- **One Hugging Face repo** holds every file seedvr2x makes, its own fp16 included, all
-  converted from the masters by one documented script: each file's origin can be checked, and
-  nothing depends on another party's repo staying as it is. Apache-2.0 allows it, with the
-  licence and a notice of the changes.
+- **One Hugging Face repo, seedvr2x's own, from v1 on** (the user's plan, 2026-10-05), holds
+  every file seedvr2x runs, each made by a documented script: each file's origin can be
+  checked, and nothing depends on another party's repo staying as it is. Apache-2.0 allows it,
+  with the licence and a notice of the changes; TransNetV2's weights are MIT.
+  - v1 seeds it with the 7B and sharp 7B fp16 DiTs and the fp16 VAE, rounded from ByteDance's
+    fp32 masters, and TransNetV2's weights (see [Shot detection](#shot-detection)). Phase 2
+    adds its files.
+  - `models/`, at the repository's root, holds the scripts that make them. Each records its
+    inputs (URL, revision and SHA-256) and runs its check: our fp16 files equal numz's element
+    for element; TransNetV2 in PyTorch matches its TensorFlow original. The scripts run on
+    their own, with inline dependencies (TensorFlow only in TransNetV2's conversion), so
+    seedvr2x stays the repository's only uv project.
+  - Every file is safetensors, TransNetV2's PyTorch conversion included: no pickle, and a
+    header the model check reads without torch.
+  - The files are made in `models/dist/`, which git ignores, and the user uploads that
+    directory as it is (`hf upload`, from the GPU box), with a list of each file's SHA-256 and
+    a model card giving the licences and how each file was made.
+  - seedvr2x pulls its files from that repo at a revision pinned in its code, each checked by a
+    SHA-256 pinned there too, so a version always runs the same bytes. A local directory
+    holding the same files works offline.
   - Our fp16 changes no bit of v1's output. numz's 7B fp16 DiT and fp16 VAE are the masters
     rounded to the nearest fp16, ties to even: every element of 1,128 and 250 tensors, under
     the same names. Truncation would differ on half the elements, a cast through bf16 on 87%.
@@ -367,30 +383,21 @@ they differ and by which metrics, and how users are guided to them. What is know
 
 ## Input
 
-Two forms, one internal model (a list of shots):
-1. **A video file**: a source as it is (any codec ffmpeg decodes, no intermediate master
-   needed) or a lossless master. The cuts come from seedvr2x's own detection by default (see
-   [Shot detection](#shot-detection)), run as a first pass before the model's work so the
-   planner knows every shot (time estimate, `--until`, manifest). Or they come from a cut list.
-   - The cut list format: one frame number per line, the first frame of each shot except the
-     first, `#` comments, no timestamps. Frame numbers are exact on the frame grid.
-   - Fields after the frame number are ignored, so an export carrying scores (sptenc's, once
-     it has one) stays readable.
-2. **A directory of segments** (sptenc's split, or any other splitter), for material already
-   split. The detector runs over all its frames as over a file's: inside the segments too,
-   since a split that merges short scenes (sptenc's, below 5 s) hides real cuts there, and at
-   the joins, where one that isn't a real cut is stitched like a long shot: of an earlier
-   split's 411 joins, 63 scored under scdet's threshold of 10 and 14 under 4
-   ([scene-detection.md](../research/docs/scene-detection.md)). The output mirrors the
-   input's segments (same frame ranges and names), so sptenc encodes them as it would its own
-   split.
-   - sptenc's split names its segments `seg_%06d.mkv`: FFV1 `yuv420p10le` in Matroska,
-     timestamps reset.
-   - Its `encode <dir>` takes the `.mkv` and `.mp4` files, any names, in byte-wise name order,
-     and applies no minimum length to a directory. seedvr2x reads a directory the same way.
-   - Every segment must share size, sample aspect, frame rate, conversion, pixel format,
-     primaries and transfer, else the directory is refused.
-   - Until the detector comes, every join is a cut, and `--cuts` is refused with a directory.
+One input, a video file, made into a list of shots: a source as it is (any codec ffmpeg
+decodes, no intermediate master needed) or a lossless master. The cuts come from seedvr2x's own
+detection by default (see [Shot detection](#shot-detection)), run as a first pass before the
+model's work so the planner knows every shot (time estimate, `--until`, manifest). Or they come
+from a cut list.
+- The cut list format: one frame number per line, the first frame of each shot except the
+  first, `#` comments, no timestamps. Frame numbers are exact on the frame grid.
+- Fields after the frame number are ignored, so an export carrying scores (sptenc's, once it
+  has one) stays readable.
+- A directory of segments is no input (the user's decision, 2026-10-05). The source is the only
+  gateway, so every cut and every output segment comes from seedvr2x's own detection and
+  rules, never from an outside splitter's joins: of an earlier split's 411 joins, 63 scored
+  under scdet's threshold of 10 and 14 under 4
+  ([scene-detection.md](../research/docs/scene-detection.md)). Segments split losslessly can
+  be joined back into one file.
 
 Cuts matter for quality, not only for the VAE context: see [Pipeline](#pipeline-per-shot).
 
@@ -519,7 +526,8 @@ on the user's labels: 80 candidates drawn where the detectors disagree, shown bl
 [cuts.md](../research/docs/cuts.md#what-it-means-for-shot-detection)).
 - **The detector: TransNetV2**, the official model (MIT): its PyTorch code vendored, its
   weights converted from the official TensorFlow ones by its own `convert_weights.py` (PyTorch
-  matches TensorFlow within 3e-7) and checked by SHA-256.
+  matches TensorFlow within 3e-7), saved as safetensors by `models/`'s script and pulled from
+  seedvr2x's Hugging Face repo (see [Weights](#weights)).
   - It reads every frame of the first pass's decode, scaled to 48×27 as its official extraction
     scales them (ffmpeg's default scaler; another scaler is untested), on one thread, so that
     its input doesn't depend on the CPU count.
@@ -927,7 +935,7 @@ compressed is the user's choice: afterwards, from the master, or during the run 
   chunks from the frame tags, and none for an untagged frame. So PNG copies the tags as the
   masters do.
 - **Until assembly** (milestone 6):
-  - `-o x.mkv` writes one FFV1 master; that needs a video file as input.
+  - `-o x.mkv` writes one FFV1 master.
   - Any other `-o` is a directory of segments plus `manifest.json`. It is either new or empty,
     or an unfinished job's directory, which the same command resumes (see
     [Pause and resume](#pause-and-resume)). One seedvr2x at a time writes it, and anything
@@ -936,7 +944,7 @@ compressed is the user's choice: afterwards, from the master, or during the run 
 - **Output segments**, the resume units of the output, listed in a manifest:
   - **Layout, by sptenc's rule.** The detector picks the cuts, then the minimum segment length
     (5 s by default) merges each too-short segment into its shorter neighbour, on the frame
-    grid. With a directory of segments as input, the output mirrors it instead.
+    grid.
     - `sptenc encode` takes any segments, so they needn't match sptenc's own split, whose
       cuts come from scdet (seedvr2x's come from TransNetV2, see
       [Shot detection](#shot-detection)).
@@ -968,8 +976,7 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       segment is recorded. They outlive the job, unlike `resume/`, and sptenc only reads `.mkv`
       and `.mp4` files.
       - Each file is named after its segment, then `.crc32`: an FFV1 file's name without the
-        `.mkv` seedvr2x gives it, a PNG directory's name as it is. So mirrored PNG segments
-        `A` and `A.mkv` (from inputs `A.mkv` and `A.mkv.mkv`) keep theirs apart.
+        `.mkv` seedvr2x gives it, a PNG directory's name as it is.
       - A resume refuses a finished segment whose checksums are missing, since they are
         written before it is recorded. It discards an unfinished segment's checksums and
         partial files, and refuses anything else there.
@@ -1258,7 +1265,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--seed` | kept (comparisons, reproducibility) |
 | `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
 | `--resolution`, `--max_resolution` | kept |
-| `--dit_model`, `--model_dir` | kept; models identified by hash, no silent deletion (bug 22) |
+| `--dit_model`, `--model_dir` | kept; the files come from seedvr2x's own Hugging Face repo, pinned by revision and SHA-256, `--model_dir` holding a local copy; no silent deletion (bug 22) |
 | `--cuda_device` | one device per process |
 
 ## Documentation for users
@@ -1393,7 +1400,7 @@ writers, and the planner needs real shot lengths.
   frames, with its seed.
 - Display aspect: 720×480 at 16:9 gives 1920×1080.
 - Directory input: the output mirrors names and frame counts, and equals the one file cut at
-  the joins, frame for frame.
+  the joins, frame for frame. (Dropped since, the source being the only input.)
 - Segments: joined, they equal the one-file output, byte for byte. The merge rule is
   identical to sptenc's on 20,000 random cases.
 - Long real segment: 377 frames at 1080p, 6 shots including 1- and 2-frame ones, run at 540p
@@ -1410,11 +1417,14 @@ writers, and the planner needs real shot lengths.
    3B or fp8 file is accepted by its name, then fails later or runs unchecked. Then the
    padding of step 0 (see [Pipeline](#pipeline-per-shot)), before the planner counts tokens,
    and the refusal of HDR sources (see [Not in the first version](#not-in-the-first-version)).
-3. The first pass's new work, ahead of the planner, since both workflows start from it: the
-   shot detector (see [Shot detection](#shot-detection)), whose brief is in, and with it the
-   frame index (see [Input](#input)), so a resume seeks instead of decoding from the start,
-   and the frame-rate refusal's guidance. The detector's threshold and gate come from the
-   brief's second round, as settings. Until then, the cuts come from a cut list.
+3. The model files from seedvr2x's own Hugging Face repo: `models/`'s scripts, the user's
+   upload, seedvr2x's pinned pull (see [Weights](#weights)). Then the first pass's new work,
+   ahead of the planner, since both workflows start from it: the directory input goes, the
+   source being the only input; then the shot detector (see [Shot detection](#shot-detection)),
+   whose brief is in, and with it the frame index (see [Input](#input)), so a resume seeks
+   instead of decoding from the start, and the frame-rate refusal's guidance. The detector's
+   threshold and gate come from the brief's second round, as settings. Until then, the cuts
+   come from a cut list.
 4. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory. The planner's inputs (budget,
    margin, the DiT's and the tiled VAE's peaks, 4K limits, measured times) are in
