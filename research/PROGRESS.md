@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 16:55 CEST
+Last update: 2026-10-05 18:14 CEST
 
 ## 0. Setup
 
@@ -107,7 +107,10 @@ temporal regression.
 - [x] 4K full-reference clips (2026-10-05, CPU): 4 shots of 45 frames from the 4K remaster, a
       16-bit RGB 3840×2160 ground truth and 1920×1080 d1 inputs; seedvr2x refuses HDR, so the
       ground truth is an SDR rendition through one fixed tone map (mobius; hable was too dark).
-      For colour's 4K tile study, and for scoring 4K output later
+      For colour's 4K tile study, and for scoring 4K output later. Their bicubic baselines (CPU):
+      PSNR-Y 35.8–41.0 dB, VMAF 74–85 with sptenc's 2160p model, which `fr_metrics.py` now picks
+      from 2160 rows up as sptenc does (it used the 1080p one at every size). VMAF v1 alone from now
+      on: v0's NEG models are dropped, NEG being built into v1 (VMAF unchanged without them)
 - [x] Every fourth frame is the model's best: the last frame of each 4-frame latent group is
       PSNR-Y +0.8 to +5.0 dB and VMAF +2 to +19 closer to the ground truth than the group's
       second, on every clip, with or without `lab`; the input has no such pattern. Fast motion
@@ -151,7 +154,8 @@ temporal regression.
       A miss costs 5–31 dB·frames over the next shot's first 8 frames on 4 of 6 cuts (about 0 on
       the clean anime and colour cuts), up to 12% ghost in its first frame, measurable for up to 17
       frames; prepending loses 0.6–2.8 dB of frame 0's lead on 7 of 11 shots
-- [~] Decision brief: shared with question 3, waiting for its labels
+- [x] Decision brief (2026-10-05), joint with question 3
+      ([docs/scene-detection.md](docs/scene-detection.md#decision-brief))
 
 ## 3. Scene detection
 
@@ -182,18 +186,18 @@ temporal regression.
       4.30 (half of it the network); over the decode seedvr2x already makes for its frame index,
       scdet costs about nothing. All three deterministic; TransNetV2's port checked against
       TensorFlow again, kept this time (5.1 × 10⁻⁷ at most, same detections)
-- [~] Labels: round 1 built (2026-10-05, `scd_review.py round`): 100 of the review's 1,734 rows,
-      drawn by agreement group and kind (the detectors' disagreements first), shown blind on 10
-      pages, one letter per row; estimates by `scd_scores.py round`. The user is labelling
+- [x] Labels, round 1 (2026-10-05): 100 of the review's 1,734 rows, drawn by agreement group and
+      kind, shown blind, labelled by the user. The DVD's 20 left out: its thumbnails sat 14 frames
+      late (a rebuilt filter graph restarted the trim filter's count; fixed in `scd_review.py`).
+      On the 80 others: live action, TransNetV2 at 0.5 finds 95% of the cuts and scdet at 10 24%,
+      at the same precision; animation, the same recall (0.80 against 0.84) with precision 0.88
+      against 0.69 (scdet's bursts); filtering scdet's bursts drops recall to 0.64
 - [~] Per threshold 8–14: hits, false positives by kind (flash, pan, fade…), misses, shot lengths.
       Unlabelled so far: on action anime, scdet fires in bursts on new drawings after held frames
       and on effects (at threshold 10, half the shots of the dark anime episode are under 0.5 s),
       and misses some dark cuts; the bright cartoon is clean
-- [~] Doc + decision brief: the detector, its threshold and a minimum shot length, with question
-      2's costs. The unlabelled parts are written
-      ([docs/scene-detection.md](docs/scene-detection.md): sources, detectors, statistics per
-      threshold by kind, where the detectors agree, costs, pipeline findings, the review's
-      design); the estimates and the brief wait for the labels
+- [x] Doc + decision brief ([docs/scene-detection.md](docs/scene-detection.md), 2026-10-05):
+      TransNetV2 at p = 0.3, no burst handling, no minimum shot length
 
 ## 4. Frame-exact access into long-GOP sources (CPU only)
 

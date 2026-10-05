@@ -223,7 +223,10 @@ def grab(src, frames, width, matrix, threads):
         if not local:
             continue
         lo, hi = local[0], local[-1] + 1
-        cmd = decode_cmd(path, "rgb24", threads, vf=f"trim=start_frame={lo}:end_frame={hi},{conv}")
+        # trim counts the graph's frames: one graph for every frame where the score pass needed it
+        # (a DVD whose colour description appears at frame 14 showed every thumbnail 14 frames late)
+        cmd = decode_cmd(path, "rgb24", threads, vf=f"trim=start_frame={lo}:end_frame={hi},{conv}",
+                         reinit=not src.get("no_reinit"))
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=0)
         need = set(local)
         try:

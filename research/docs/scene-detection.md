@@ -1,17 +1,24 @@
 # Scene detection
 
-> Status: **statistics measured, labels pending** (2026-10-05), for DESIGN.md's open question
-> on seedvr2x's own scene detection ([DESIGN.md](../../seedvr2x/DESIGN.md#open-questions)):
-> which detector, which threshold, what to do with bursts, and whether shots need a minimum
-> length. Three detectors ran on every frame of 11 sources; their candidates wait for the user's
-> labels, which turn the counts below into recall and false cuts.
-> [Labelled estimates](#labelled-estimates) and the [decision brief](#decision-brief), joint with
-> question 2 ([cuts.md](cuts.md)), are placeholders until then. Tools:
+> Status: **round 1 labelled, brief written** (2026-10-05), for DESIGN.md's open question on
+> seedvr2x's own scene detection ([DESIGN.md](../../seedvr2x/DESIGN.md#open-questions)): which
+> detector, which threshold, what to do with bursts, and whether shots need a minimum length.
+> Three detectors ran on every frame of 11 sources; the user labelled 100 of their candidates,
+> drawn where the detectors disagree ([round 1](#round-1-targeted-on-the-disagreements),
+> [estimates](#labelled-estimates)). The [decision brief](#decision-brief) is joint with question
+> 2 ([cuts.md](cuts.md)). Tools:
 > [`scripts/scd_scores.py`](../scripts/scd_scores.py) (scores, detectors, candidates,
 > statistics, label estimates), [`scripts/scd_review.py`](../scripts/scd_review.py) (review
 > sheets and index).
 
-In short (unlabelled: these are detections, not yet errors):
+In short (the statistics count detections; the estimates come from the labels):
+
+- **Labelled, TransNetV2 wins** (round 1: 80 valid rows, 46 animated, 34 live action). On live
+  action it finds 95% of the cuts at p = 0.5 and 99% at 0.3, where scdet at sptenc's T = 10 finds
+  24%, at the same precision (0.86). On animation it finds as many as scdet (0.80 at 0.5, 0.88 at
+  0.3, against 0.84) with fewer false cuts (precision 0.88 and 0.84 against 0.69: scdet's
+  bursts). Filtering scdet's bursts loses real cuts (recall 0.64). The
+  [brief](#decision-brief): TransNetV2 at p = 0.3, no burst handling, no minimum shot length.
 
 - **Three detectors, every frame of 11 sources:** 8 animated (three cartoon episodes, three
   anime episodes, two anime films), two live-action films and a DVD episode, 4.4 hours analysed.
@@ -51,10 +58,9 @@ In short (unlabelled: these are detections, not yet errors):
   seedvr2x counts frames in its own reader); the joins of an earlier split are not all cuts (63 of
   411 score below 10 in a fresh pass, 14 below 4); a PQ-coded HDR film scores far lower (moot while
   v1 refuses HDR).
-- **What the labels decide:** recall and false cuts per detector, threshold and kind, from a
-  [round of 100 rows](#round-1-targeted-on-the-disagreements) aimed at the disagreements (built,
-  the labels under way), then the joint brief with question 2's costs: the detector, its
-  threshold, what to do with bursts, and whether shots need a minimum length.
+- **The DVD's labels are out:** its review thumbnails sat 14 frames after their candidates (the
+  filter-graph rebuild again, this time restarting the `trim` filter that cuts thumbnails out;
+  fixed), and seedvr2x refuses its interlaced source anyway.
 
 ## Why it matters for seedvr2x
 
@@ -305,6 +311,12 @@ running, two runs in opposite orders:
   HLG sources.
 - **sptenc's command maps no stream,** so ffmpeg decodes the audio track as well (a Blu-ray's
   lossless audio included): time spent, scores unchanged. seedvr2x reads the video stream alone.
+- **The review's thumbnails for the DVD sat 14 frames late.** The sheets cut thumbnails out of a
+  sequential decode with ffmpeg's `trim` filter, whose frame count restarts with a rebuilt filter
+  graph: every DVD thumbnail showed the frames 14 after its candidate (checked by decoding around
+  two rows both ways). The first review's own alignment check had flagged it (0 of 1 sure cut
+  aligned). `scd_review.py` now keeps one graph wherever the score pass did. Any frame count
+  ffmpeg keeps restarts with a rebuilt graph.
 - **TransNetV2's official extraction** (`-f rawvideo`, no frame-rate option) leaves ffmpeg free to
   drop or repeat frames by timestamp; ours passes every decoded frame through (`-fps_mode
   passthrough`), and gives the official bytes on the checked excerpts.
@@ -368,21 +380,117 @@ is where they don't. So round 1 takes 100 of the first review's rows, by agreeme
 
 ## Labelled estimates
 
-*To come with the labels.* Per detector and threshold, by kind: recall, false cuts by label
-(flash, pan, fade or dissolve, other, not a cut), bursts that are real cuts, short shots that are
-real; whether the sure candidates are all cuts.
+Round 1, labelled by the user on 2026-10-05: 99 of the 100 rows (one "can't tell").
+
+- **The DVD's 20 rows are left out.** Its thumbnails show the frames 14 after their candidates:
+  the review cut them out of a decode with ffmpeg's `trim` filter, whose frame count restarts
+  when the filter graph is rebuilt at frame 14 ([pipeline findings](#pipeline-findings)). Decoded
+  around its two G1 rows, the biggest change sits 14 frames early in the default decode and on
+  the mark with `-reinit_filter 0`. The first review's own alignment check had flagged it (0 of 1
+  sure cut aligned), and seedvr2x refuses the interlaced source anyway (DESIGN.md, Input). Every
+  other source passed that check; live-2, which has no sure cut to check, decodes aligned both
+  ways.
+- That leaves **80 rows: 46 animated, 34 live action**, each standing for its cell's candidates
+  / the cell's labelled rows.
+
+Labels by agreement group: cuts / labelled rows (the cell's candidates):
+
+| Group | Animation | Live action |
+|---|---|---|
+| G1, all three | 4 / 4 (1,884) | 2 / 2 (172) |
+| G2, TransNetV2 and one other | 3 / 4 (795) | 5 / 6 (538) |
+| G3, TransNetV2 alone | 2 / 12 (160): 7 nothing, 1 flash, 1 pan, 1 fade | 8 / 12 (69): 2 fades, 1 flash, 1 pan |
+| G4, the others, TransNetV2 at 0.1–0.5 | 5 / 10 (603) | 3 / 6 (52) |
+| G5, the others, TransNetV2 under 0.1 | 0 / 6 (848) | 1 / 4 (42) |
+| G5b, lone scdet hits in bursts | 2 / 6 (932) | |
+| G6, none at the working thresholds | 0 / 4 (5,974) | 0 / 4 (160) |
+
+Per detector: recall and precision (every label but cut counted as an error), with 90% intervals
+from 2,000 bootstraps of the labelled rows within their cells:
+
+| Detector | Animation: recall | precision | Live action: recall | precision |
+|---|---|---|---|---|
+| scdet ≥ 8 | 0.99 (0.98–1.00) | 0.50 (0.35–0.73) | 0.50 (0.28–0.75) | 0.93 (0.85–0.98) |
+| scdet ≥ 10 (sptenc) | 0.84 (0.74–0.95) | 0.69 (0.59–0.79) | 0.24 (0.21–0.32) | 0.86 (0.78–0.95) |
+| scdet ≥ 14 | 0.78 (0.66–0.90) | 0.90 (0.80–0.98) | 0.12 (0.00–0.28) | 0.89 |
+| scdet ≥ 10 outside bursts | 0.64 (0.56–0.75) | 1.00 | 0.24 (0.21–0.32) | 0.95 (0.87–1.00) |
+| PySceneDetect adaptive | 0.87 (0.78–0.97) | 0.78 (0.68–0.88) | 0.76 (0.55–0.91) | 0.82 (0.59–0.97) |
+| PySceneDetect content | 0.77 (0.66–0.89) | 0.89 (0.81–1.00) | 0.93 (0.91–0.96) | 0.86 (0.63–0.99) |
+| TransNetV2 ≥ 0.3 | 0.88 (0.79–0.98) | 0.84 (0.73–0.93) | 0.99 (0.96–1.00) | 0.86 (0.64–0.99) |
+| TransNetV2 ≥ 0.5 | 0.80 (0.72–0.90) | 0.88 (0.76–0.96) | 0.95 (0.91–0.98) | 0.86 (0.63–0.99) |
+| TransNetV2 ≥ 0.7 | 0.80 (0.71–0.89) | 0.97 (0.96–0.99) | 0.93 (0.89–0.97) | 0.87 (0.63–0.99) |
+| TransNetV2 ≥ 0.5 or scdet ≥ 10 | 0.98 (0.94–1.00) | 0.67 (0.56–0.77) | 0.95 (0.91–0.98) | 0.83 (0.61–0.96) |
+| TransNetV2 ≥ 0.3 or PySceneDetect content | 0.88 (0.79–0.98) | 0.78 (0.67–0.88) | 1.00 | 0.84 (0.64–0.97) |
+
+- **Live action: TransNetV2.** At 0.5 it finds 95% of the cuts and scdet at 10 a quarter
+  (difference +0.70, 90% interval +0.61 to +0.75), at the same precision; at 0.3, 99%.
+  PySceneDetect's content detector comes close (0.93). No scdet threshold gets there: at 8 it
+  finds half.
+- **Animation: TransNetV2 finds as many cuts as scdet, with fewer false ones.** At 0.5, recall
+  0.80 against 0.84 (−0.04, −0.19 to +0.12) and precision 0.88 against 0.69 (+0.20, +0.05 to
+  +0.33); at 0.3, recall 0.88 and precision 0.84. scdet's lost precision is its bursts.
+- **Between 0.3 and 0.5** sit 7 cuts (4 animated, 3 live action) and 3 pans of the round: 0.3
+  gains 7 real cuts for 3 false ones.
+- **TransNetV2's misses:** 7 of the 11 cuts it misses at 0.5 score 0.35–0.49; the other 4 score
+  0.002–0.17, three of them in action anime where scdet fires in bursts (2 of the 6 lone scdet
+  hits inside bursts are real cuts).
+- **TransNetV2's false cuts on animation** fall mostly where nothing changes: 7 of its 12 lone
+  animated detections are labelled nothing, with scdet at 0.0–1.3 there (held frames, rolling
+  credits).
+- **A filter on scdet's bursts costs real cuts:** scdet ≥ 10 outside bursts keeps only cuts but
+  finds 64% of them on animation. A detector that doesn't burst is the fix.
+- **Rows 008 and 010** (a light or white frame, then the new shot at c + 1; labelled other and
+  flash) read as cuts: TransNetV2 at 0.5 goes from 0.80 to 0.77 on animation and from 0.95 to
+  0.94 on live action. No conclusion changes.
+- **The intervals are optimistic:** a bootstrap within cells gives no width to a cell whose few
+  rows agree (G6 on animation: 0 cuts in 4 rows standing for 5,974 candidates, whose 90% Wilson
+  interval goes up to 0.40). Recall is relative to the cuts among the candidates.
 
 ## Decision brief
 
-*To come with the labels*, joint with question 2
-([cuts.md](cuts.md#what-it-means-for-shot-detection)): the detector (or a combination), its
-threshold, what to do with bursts, whether shots need a minimum length, and the cost per hour.
+Joint with question 2 ([cuts.md](cuts.md#what-it-means-for-shot-detection)), 2026-10-05.
+
+- **Recommendation:** seedvr2x detects shots with TransNetV2 at p = 0.3: the official model
+  (MIT; weights converted from the official TensorFlow ones), on 48×27 frames scaled as its
+  official extraction scales them, a cut on the frame after its peak (it marks the outgoing
+  shot's last frame). No burst handling and no minimum shot length: every detection starts a
+  shot, however short. Neither scdet nor PySceneDetect is needed.
+- **Evidence:**
+  - Live action: recall 0.99 at 0.3 (0.95 at 0.5) against 0.24 for scdet at sptenc's T = 10,
+    precision 0.86 for both. scdet at 10 would miss about three quarters of the cuts (an
+    estimated 640 per hour on these two films), and question 2 measured a miss at 5–31
+    dB·frames on four of its six cuts.
+  - Animation: recall 0.88 at 0.3 (0.80 at 0.5) against scdet's 0.84, precision 0.84 (0.88)
+    against 0.69. Unlabelled: TransNetV2 at 0.3 bursts 19 times per hour and makes 67 shots
+    under 0.5 s per hour; scdet at 10, 351 and 489.
+  - 0.3 over 0.5: 7 more real cuts for 3 more false ones (pans) in the round. A miss costs
+    fidelity, a false cut none (cuts.md: a low-frequency step on a continuous shot at most).
+  - Bursts: TransNetV2 needs no filter; filtering scdet's bursts loses real cuts (recall 0.64).
+  - Minimum shot length: none. Question 2 found a short shot better run alone than merged, from
+    1 frame on (10–21 dB·frames), and real cuts come 1–3 frames apart in action anime.
+  - Cost: about 2.3 min of CPU per hour of 1080p source over the decode the frame index already
+    makes (16 threads), deterministic; probably far less on the GPU (not measured).
+- **Confidence:** high for live action and for leaving scdet as sptenc runs it; medium for 0.3
+  over 0.5 (10 rows between them) and for the animated recall (80 rows; some rows stand for
+  600–6,000 candidates).
+- **Caveats:**
+  - TransNetV2's blind spot is fast action anime, where scdet bursts: 2 of 6 lone scdet hits
+    there were real cuts it scores under 0.1. A union with scdet takes them back with the bursts
+    (recall 0.98, precision 0.67 on animation).
+  - Its false cuts on animation fall where nothing changes (held frames, rolling credits; scdet
+    0.0–1.3): a gate on a picture change at the candidate would likely remove them (untested).
+  - Its inputs must be scaled as the official extraction scales them (ffmpeg's default scaler to
+    48×27); another scaler is untested.
+  - The DVD is out (its labels were on misaligned thumbnails; refused as interlaced). Two
+    live-action films; no broadcast or clean digital live action.
+  - Optional: a second round of at most 50 rows on the 0.1–0.5 band and the change gate would
+    firm up the threshold.
 
 ## Caveats
 
-- **Unlabelled.** A burst may be real flash cuts; a PySceneDetect cut below scdet's threshold
-  may be a pan, a fade or a flash; a TransNetV2-only candidate may be motion. Every count above
-  is a detection until the labels say what it is.
+- **Labels on 80 rows.** The statistics count detections; only the estimates rest on labels,
+  and those on 80 rows, a few of which stand for 600–6,000 candidates each. The DVD's 20 rows
+  are out (misaligned thumbnails).
 - **Recall will be relative** to the cuts among the candidates, the union of every detector's at
   low thresholds (scdet local maxima from 4, TransNetV2 peaks from 0.1): a cut no detector comes
   near is never shown.
@@ -421,7 +529,7 @@ python3 $R extend $O/review $O/EP... --cap 30 --skip anime-dark-seg
 python3 $R index $O/review
 # round 1: 100 of the review's rows by agreement group and kind, blind; estimates from its labels
 python3 $R round $O/review $O/EP... --out $O/round1
-python3 $S round $O/round1 --md round1.md
+python3 $S round $O/round1 --skip malcolm-s01e01 --md round1.md   # the DVD: thumbnails misaligned
 # costs on one source, 16 threads, page cache warm: decode alone, then sptenc's chain
 # (score, pysd and tnet as above: each logs its own seconds)
 ffmpeg -threads 16 -i SRC -map 0:v:0 -fps_mode passthrough -f null -

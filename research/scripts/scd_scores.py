@@ -329,12 +329,17 @@ def segments_of(src):
     return [(g["file"], g["start"], g["frames"]) for g in src["segments"]]
 
 
-def decode_cmd(path, pix_fmt, threads, vf=None, frames=None, progress=None, size=None, filter_threads=None):
+def decode_cmd(path, pix_fmt, threads, vf=None, frames=None, progress=None, size=None, filter_threads=None,
+               reinit=True):
     """Plain sequential decode of the video stream to raw frames on stdout; size (WxH) scales them
-    with ffmpeg's own output scaler (-s), as TransNetV2's extraction does."""
+    with ffmpeg's own output scaler (-s), as TransNetV2's extraction does. reinit=False keeps one
+    filter graph for every frame (-reinit_filter 0): a graph rebuilt mid-stream restarts the frame
+    counts of its filters (trim, select), as it restarts scdet's (see score)."""
     cmd = [FFMPEG, "-hide_banner", "-nostats", "-v", "error", "-threads", str(threads)]
     if filter_threads:
         cmd += ["-filter_threads", str(filter_threads)]
+    if not reinit:
+        cmd += ["-reinit_filter", "0"]
     cmd += ["-i", path, "-map", "0:v:0", "-an", "-sn", "-dn"]
     if vf:
         cmd += ["-vf", vf]
@@ -1702,23 +1707,65 @@ def wilson(k, n, z=1.645):
     return c - h, c + h
 
 
+def round_detectors():
+    """summary's detectors, then combinations the labels can weigh: scdet without its bursts, and
+    TransNetV2 with a second detector."""
+    num = lambda c, k: float(c[k]) if c[k] not in ("", "nan") else 0.0  # noqa: E731
+    return label_detectors(True) + [
+        ("scdet >= 10 outside bursts", lambda c: num(c, "scdet") >= 10 and int(c["burst"] or 0) < 2),
+        ("scdet >= 8 outside bursts", lambda c: num(c, "scdet") >= 8 and int(c["burst"] or 0) < 2),
+        ("TransNetV2 >= 0.5 or scdet >= 10", lambda c: num(c, "tnet") >= 0.5 or num(c, "scdet") >= 10),
+        ("TransNetV2 >= 0.5 or PySceneDetect content", lambda c: num(c, "tnet") >= 0.5 or c["content"] != ""),
+        ("TransNetV2 >= 0.3 or PySceneDetect content", lambda c: num(c, "tnet") >= 0.3 or c["content"] != ""),
+    ]
+
+
+def round_rates(est, rule):
+    """Recall and precision (every other label an error) of a rule over weighted labelled rows."""
+    cuts = sum(w for c, k, w in est if k == "cut")
+    det = sum(w for c, k, w in est if rule(c))
+    tp = sum(w for c, k, w in est if k == "cut" and rule(c))
+    return (tp / cuts if cuts else math.nan), (tp / det if det else math.nan)
+
+
+def round_boot(cells, dets, n, seed):
+    """Per detector: recall and precision with 90% intervals from a bootstrap of the labelled rows
+    within each cell (the round's strata), and the paired differences to scdet >= 10."""
+    rng = np.random.default_rng(seed)
+    full = [(c, k, size / len(lab)) for size, lab in cells for c, k in lab]
+    ref = [name for name, _ in dets].index("scdet >= 10")
+    point = [round_rates(full, rule) for _, rule in dets]
+    draws = np.full((n, len(dets), 2), np.nan)
+    for b in range(n):
+        est = []
+        for size, lab in cells:
+            idx = rng.integers(0, len(lab), len(lab))
+            est += [(lab[i][0], lab[i][1], size / len(lab)) for i in idx]
+        draws[b] = [round_rates(est, rule) for _, rule in dets]
+    diff = draws - draws[:, ref:ref + 1, :]
+    ci = lambda x: tuple(np.nanpercentile(x, (5, 95))) if np.isfinite(x).any() else (math.nan, math.nan)  # noqa: E731
+    return [(name, point[i], [ci(draws[:, i, j]) for j in (0, 1)],
+             [(point[i][j] - point[ref][j], ci(diff[:, i, j])) for j in (0, 1)]) for i, (name, _) in enumerate(dets)]
+
+
 def cmd_round(a):
     """Estimates from a round of labels (scd_review.py round): each labelled row stands for its
     cell's candidates / the cell's labelled rows; cells without a label are counted apart."""
     with open(os.path.join(a.round, "rows.csv"), newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
+        rows = [r for r in csv.DictReader(f) if r["episode"] not in a.skip]
     labels, odd = read_round_labels(os.path.join(a.round, "labels.txt"))
+    labels = {k: v for k, v in labels.items() if k in {int(r["round_row"]) for r in rows}}
     cells = {}
     for r in rows:
         cells.setdefault((r["group"], r["kind"]), []).append(r)
     out = [f"Round {a.round}: {len(labels)} of {len(rows)} rows labelled" + (f"; {odd} letters read as other" if odd
-           else "") + ". Labels: c cut, f flash, p pan or motion, d fade or dissolve (the tables' fade), o other, "
-           "n nothing (not-a-cut).\n",
+           else "") + (f"; left out: {', '.join(a.skip)}" if a.skip else "") + ". Labels: c cut, f flash, p pan "
+           "or motion, d fade or dissolve (the tables' fade), o other, n nothing (not-a-cut).\n",
            "Per agreement group and kind (scd_review.py round): candidates, rows labelled, labels, the share of "
            "cuts with its 90% Wilson interval:\n",
            "| group | kind | candidates | labelled | " + " | ".join(LABELS) + " | cuts | 90% interval |",
            "|---|---|---:|---:|" + "---:|" * (len(LABELS) + 2)]
-    est, unlabelled = {}, {}
+    est, unlabelled, strata = {}, {}, {}
     for (g, kind), rs in sorted(cells.items()):
         size = int(rs[0]["cell_size"])
         lab = [(r, labels[int(r["round_row"])]) for r in rs if int(r["round_row"]) in labels]
@@ -1730,14 +1777,28 @@ def cmd_round(a):
                    f"| {g} | {kind} | {size} | 0 of {len(rs)} | " + " | ".join("" for _ in LABELS) + " | - | - |")
         if not n:
             unlabelled[kind] = unlabelled.get(kind, 0) + size
+            continue
+        strata.setdefault(kind, []).append((size, lab))
         for r, k in lab:
             est.setdefault(kind, []).append((r, k, size / n))
     out.append("")
-    dets = label_detectors(True)
+    dets = round_detectors()
     for kind in sorted(est):
         miss = f"; {unlabelled[kind]} candidates in cells without a label" if kind in unlabelled else ""
         out += [f"Estimated per detector, {kind} (each labelled row stands for its cell's candidates / the "
                 f"cell's labelled rows{miss}):\n"] + label_table(est[kind], dets) + [""]
+        out += [f"{kind}: recall and precision (every other label an error) with 90% intervals from {a.boot} "
+                "bootstraps of the labelled rows within their cells, and the paired differences to scdet >= 10:\n",
+                "| detector | recall | 90% | precision | 90% | recall - scdet 10 | 90% | precision - scdet 10 | 90% |",
+                "|---|---:|---|---:|---|---:|---|---:|---|"]
+        fmt2 = lambda x: f"{x:.2f}" if x == x else "-"  # noqa: E731
+        for name, (rc, pr), (rci, pci), ((dr, drci), (dp, dpci)) in round_boot(strata[kind], dets, a.boot, a.seed):
+            out.append(f"| {name} | {fmt2(rc)} | {fmt2(rci[0])}-{fmt2(rci[1])} | {fmt2(pr)} | "
+                       f"{fmt2(pci[0])}-{fmt2(pci[1])} | {dr:+.2f} | {fmt2(drci[0])}-{fmt2(drci[1])} | {dp:+.2f} | "
+                       f"{fmt2(dpci[0])}-{fmt2(dpci[1])} |" if dr == dr and dp == dp else
+                       f"| {name} | {fmt2(rc)} | {fmt2(rci[0])}-{fmt2(rci[1])} | {fmt2(pr)} | "
+                       f"{fmt2(pci[0])}-{fmt2(pci[1])} | - | | - | |")
+        out.append("")
     if len(est) > 1:
         out += ["Estimated per detector, every kind:\n"] + label_table([x for e in est.values() for x in e], dets)
     md = "\n".join(out) + "\n"
@@ -1834,6 +1895,9 @@ def main():
     p.add_argument("--md", help="also write the tables to this file")
     p = sub.add_parser("round")
     p.add_argument("round", help="a round's directory (scd_review.py round): rows.csv and labels.txt")
+    p.add_argument("--skip", nargs="*", default=[], metavar="NAME", help="episodes left out")
+    p.add_argument("--boot", type=int, default=2000, help="bootstrap draws for the intervals")
+    p.add_argument("--seed", type=int, default=1)
     p.add_argument("--md", help="also write the tables to this file")
     a = ap.parse_args()
     {"check": cmd_check, "score": cmd_score, "pysd": cmd_pysd, "pysd-check": cmd_pysd_check, "tnet": cmd_tnet,
