@@ -7,6 +7,7 @@
   fr_clips.py slice DIR/NAME --first A --frames N --name NEW [--out DIR2] [--files gt,d1.lr]
   fr_clips.py verify DIR/NAME [--cv2-python PY] [--source]                # bit- and frame-exactness
   fr_clips.py sheet VIDEO --frames 0,22,44 --out PNG [--width 640]        # contact sheet
+  fr_clips.py grain FILE [--frames N | --every] [--sigma 2] [--share 30] [--json F]  # film grain (levels)
   fr_clips.py selftest                                                    # colour chain, extraction
 
 Why: scoring SeedVR2 against a ground truth (GT) needs a GT that is exactly the frames the
@@ -70,8 +71,24 @@ plain decode, frames counted by the muxer, no filter) are src.mkv's frames, and 
 count of every file. `selftest` checks the colour chain against the BT.709 equations, the FFV1
 round trips, and the extraction and a slice on a synthetic long-GOP H.264 file.
 
-Needs numpy, and ffmpeg/ffprobe with zimg (zscale), libx264 and ffv1 (FR_FFMPEG, FR_FFPROBE
-override the binaries found on PATH).
+`grain` measures film grain (docs/numerics.md, Grain): Y = the BT.709 luma of the RGB in full-range
+8-bit levels (a YUV file goes through its colour plan's zscale to 16-bit RGB first; frames taller
+than 1080 rows are area-downscaled to 1080), the residual Y - GaussianBlur(Y, sigma 2 px), and its
+standard deviation over the mask: the 30% of the picture where the blurred image's gradient (Sobel
+magnitude) is lowest, among the pixels with 16 < blurred < 235 (none if 1000 pixels or fewer). Left
+out of the mask: black bars, the rows (and columns) from each edge whose mean Y over the measured
+frames is below 20, and the 8 rows (columns) next to them, or next to the frame's edge where there
+is no bar. Blur and gradient are taken on the whole frame, whose reflected border shows no gradient
+across it: a dark picture edge there (OSS 117 fades to black over its 3-4 outermost columns, several
+Blu-rays carry a darker outermost line) would otherwise dominate the residual. Per frame, then the
+median over the frames (25-75%). Frames: an RGB file (a clip's GT, a baseline, a master) every one,
+or with --frames N, N spread over its middle 80%; a YUV source N (12 by default) at even times over
+the middle 80% of its duration (clear of logos and end credits), each decoded with an input seek
+(-ss before -i): a survey, not frame-exact. --every decodes every frame in order (frame-exact); the
+measured frames' luma stays in memory until the bars are known: for clips.
+
+Needs numpy (and OpenCV for `grain`), and ffmpeg/ffprobe with zimg (zscale), libx264 and ffv1
+(FR_FFMPEG, FR_FFPROBE override the binaries found on PATH).
 """
 import argparse
 import hashlib
@@ -214,10 +231,11 @@ def yuv_tags(c):
 
 
 def zscale_to_rgb(c, extra=""):
-    """zscale: YUV of the plan -> RGB (full range), no primaries/transfer conversion. threads=1 here
-    and in every zscale below: ffmpeg's slice threading (one slice per CPU by default) changes a
-    10-bit 4:2:0 source's RGB from 4 slices on (chroma_kernels.py upcheck); 8-bit sources and the
-    resizes were measured unaffected, and are pinned alike."""
+    """zscale: YUV of the plan -> RGB (full range), no primaries/transfer conversion. threads=1,
+    libavfilter's generic per-filter option, here and in every zscale below: ffmpeg's slice
+    threading (one slice per CPU by default) changes a 10-bit 4:2:0 source's RGB from 4 slices on
+    (chroma_kernels.py upcheck); 8-bit sources and the resizes were measured unaffected, and are
+    pinned alike."""
     z = "full" if c["range"] == "pc" else "limited"
     return (f"zscale=threads=1:matrixin={ZMATRIX[c['matrix']]}:rangein={z}:chromalin={c['chroma_location']}"
             ":dither=none" + (f":{extra}" if extra else ""))
@@ -283,18 +301,27 @@ def scene_scores(src, first, last, threads, yavg=True):
 
 # ------------------------------------------------------------------ RGB decode and statistics
 
-def rgb_frames(path, threads=16):
-    """Yield (RGB array [H, W, 3], bits) of an RGB file, as stored: planar gbrp* (16-bit masters) or
-    packed bgr0 (FFV1's only 8-bit RGB layout: it takes no 8-bit gbrp)."""
+def rgb_frames(path, threads=16, ss=None, count=None):
+    """Yield (RGB array [H, W, 3], bits) of a file. An RGB file as stored: planar gbrp* (16-bit masters)
+    or packed bgr0 (FFV1's only 8-bit RGB layout: it takes no 8-bit gbrp); a YUV file in 16-bit RGB
+    through its colour plan (tagged first, as `sheet` does). ss: input seek in seconds (-ss before -i,
+    not frame-exact); count: at most that many frames."""
     st = probe(path)
     fmt = st["pix_fmt"]
+    vf = []
     if fmt not in RGB_BITS:
-        raise SystemExit(f"{path}: {fmt}, not an RGB file")
+        if not fmt.startswith(("yuv", "yuvj")):
+            raise SystemExit(f"{path}: {fmt}, neither RGB nor planar YUV")
+        plan = colour_plan(st)
+        fmt = "gbrp16le"
+        vf = ["-vf", f"{yuv_params(plan)},{zscale_to_rgb(plan)},format={fmt}"]
     W, H, bits = st["width"], st["height"], RGB_BITS[fmt]
     dtype = np.dtype(np.uint8) if bits == 8 else np.dtype("<u2")
     size = (4 if fmt == "bgr0" else 3) * W * H * dtype.itemsize
-    proc = subprocess.Popen([FFMPEG, "-v", "error", "-nostdin", "-threads", str(threads), "-i", path, "-map", "0:v:0",
-                             "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", fmt, "-"],
+    proc = subprocess.Popen([FFMPEG, "-v", "error", "-nostdin", "-threads", str(threads),
+                             *(["-ss", f"{ss:.3f}"] if ss is not None else []), *concat_opts(path), "-i", path,
+                             "-map", "0:v:0", *vf, "-fps_mode", "passthrough",
+                             *(["-frames:v", str(count)] if count else []), "-f", "rawvideo", "-pix_fmt", fmt, "-"],
                             stdout=subprocess.PIPE)
     done = False
     try:
@@ -819,6 +846,125 @@ def cmd_sheet(a):
     print(f"{a.out}: frames {idx} of {a.video}, {W}x{H} each")
 
 
+# ------------------------------------------------------------------ grain
+
+GRAIN = {"sigma_px": 2.0, "smoothest_pct": 30, "blurred_range": [16, 235], "min_mask_px": 1000,
+         "bar_mean_y_below": 20, "margin_px": 8, "max_rows": 1080}
+
+
+def spread(n):
+    """Where `grain` measures n frames, as fractions of the file: evenly over its middle 80%."""
+    return [0.5] if n == 1 else [0.1 + 0.8 * k / (n - 1) for k in range(n)]
+
+
+def probe_luma(rgb, bits):
+    """Full-range BT.709 luma, 8-bit levels, area-downscaled to GRAIN['max_rows'] rows when taller."""
+    import cv2
+    y = luma709(rgb, bits)
+    h, w, m = *y.shape, GRAIN["max_rows"]
+    return y if h <= m else cv2.resize(y, (round(w * m / h / 2) * 2, m), interpolation=cv2.INTER_AREA)
+
+
+def picture_window(lumas):
+    """(bars top, bottom, left, right; mask window r0, r1, c0, c1): the bars are the rows (columns) from
+    each edge whose mean Y over the frames is below GRAIN['bar_mean_y_below']; the window leaves them out
+    and the GRAIN['margin_px'] rows (columns) next to them, or next to the frame's edge where there is no
+    bar."""
+    lo, m = GRAIN["bar_mean_y_below"], GRAIN["margin_px"]
+
+    def edges(mean):
+        pic = np.nonzero(mean >= lo)[0]
+        return (int(pic[0]), int(len(mean) - 1 - pic[-1])) if len(pic) else (0, 0)
+    top, bottom = edges(np.mean([y.mean(axis=1) for y in lumas], axis=0))
+    left, right = edges(np.mean([y.mean(axis=0) for y in lumas], axis=0))
+    H, W = lumas[0].shape
+    return (top, bottom, left, right), (top + m, H - bottom - m, left + m, W - right - m)
+
+
+def grain_frame(y, win):
+    """(grain, mask pixels, mean blurred Y over the valid pixels) of one frame's luma; grain None when the
+    mask has GRAIN['min_mask_px'] pixels or fewer."""
+    import cv2
+    b = cv2.GaussianBlur(y, (0, 0), GRAIN["sigma_px"])
+    g = np.hypot(cv2.Sobel(b, cv2.CV_32F, 1, 0), cv2.Sobel(b, cv2.CV_32F, 0, 1))
+    r0, r1, c0, c1 = win
+    ok = np.zeros(y.shape, bool)
+    ok[r0:r1, c0:c1] = True
+    lo, hi = GRAIN["blurred_range"]
+    ok &= (b > lo) & (b < hi)
+    if not ok.any():
+        return None, 0, None
+    m = ok & (g <= np.percentile(g[ok], GRAIN["smoothest_pct"]))
+    n = int(m.sum())
+    return (float((y - b)[m].std(dtype=np.float64)) if n > GRAIN["min_mask_px"] else None), n, float(b[ok].mean())
+
+
+def cmd_grain(a):
+    import cv2
+    cv2.setNumThreads(a.threads)
+    if a.sigma is not None:  # other scales of the same measure (e.g. 1 px: the finest grain)
+        GRAIN["sigma_px"] = a.sigma
+    if a.share is not None:  # a smaller share reads the very smoothest areas only
+        GRAIN["smoothest_pct"] = a.share
+    t0 = time.perf_counter()
+    st = probe(a.file)
+    rgb = st["pix_fmt"] in RGB_BITS
+    frames = []  # (frame index, seek time, luma)
+    if rgb or a.every:
+        n = count_frames(a.file) if a.frames else None
+        want = None if n is None else sorted({round((n - 1) * f) for f in spread(a.frames)})
+        how = "every frame" if want is None else f"frames {want} of {n}"
+        for i, (x, bits) in enumerate(rgb_frames(a.file, a.threads)):
+            if want is None or i in want:
+                frames.append((i, None, probe_luma(x, bits)))
+    else:
+        if not st["duration"]:
+            raise SystemExit(f"{a.file}: no duration to spread the frames over (--every decodes every frame)")
+        N = a.frames or 12
+        how = f"{N} frames over the middle 80% of {st['duration']:.1f} s, input seeks (a survey, not frame-exact)"
+        for f in spread(N):
+            got = list(rgb_frames(a.file, a.threads, ss=st["duration"] * f, count=1))
+            frames.append((None, st["duration"] * f, probe_luma(*got[0]) if got else None))
+    lumas = [y for _, _, y in frames if y is not None]
+    if not lumas:
+        raise SystemExit(f"{a.file}: no frame decoded")
+    (top, bottom, left, right), win = picture_window(lumas)
+    H, W = lumas[0].shape
+    plan = None if rgb else colour_plan(st)
+    col = "" if plan is None else f"; colours {plan['matrix']} {plan['range']}" + (
+        f" (assumed: {', '.join(plan['assumed'])})" if plan["assumed"] else "")
+    print(f"{a.file}: {st['pix_fmt']} {st['width']}x{st['height']}, measured at {W}x{H}; {how}{col}")
+    print(f"  bars: top {top}, bottom {bottom}, left {left}, right {right}; mask window rows {win[0]}..{win[1] - 1},"
+          f" columns {win[2]}..{win[3] - 1}")
+    rows, vals, mys = [], [], []
+    for i, t, y in frames:
+        g, npx, my = grain_frame(y, win) if y is not None else (None, 0, None)
+        vals += [] if g is None else [g]
+        mys += [] if my is None else [my]
+        rows.append({"frame": i, "t": None if t is None else round(t, 3), "grain": None if g is None else round(g, 4),
+                     "mask_px": npx, "mean_y": None if my is None else round(my, 2)})
+        where = f"frame {i}" if i is not None else f"t {t:.3f} s"
+        print(f"  {where}: " + ("no frame decoded" if y is None else
+                                f"grain {g:.3f}" if g is not None else f"no grain (mask {npx} px)")
+              + (f", mask {npx} px, mean Y {my:.1f}" if g is not None else ""))
+    v = np.array(vals)
+    res = {"file": a.file, "pix_fmt": st["pix_fmt"], "size": [st["width"], st["height"]], "measured_size": [W, H],
+           "colours": plan, "frames_how": how, "params": GRAIN,
+           "bars": {"top": top, "bottom": bottom, "left": left, "right": right},
+           "window": {"rows": [win[0], win[1]], "columns": [win[2], win[3]]},
+           "frames": rows, "n": int(len(v)), "median": None, "q25": None, "q75": None,
+           "mean_y": round(float(np.mean(mys)), 2) if mys else None, "ffmpeg": ffmpeg_version()}
+    if len(v):
+        res.update(median=round(float(np.median(v)), 4), q25=round(float(np.percentile(v, 25)), 4),
+                   q75=round(float(np.percentile(v, 75)), 4))
+    res["seconds"] = round(time.perf_counter() - t0, 1)
+    print(f"  grain {res['median']:.2f} ({res['q25']:.2f}-{res['q75']:.2f}) over {len(v)} of {len(rows)} frames, "
+          f"mean Y {res['mean_y']}, {res['seconds']} s" if len(v) else f"  no grain measured ({res['seconds']} s)")
+    if a.json:
+        with open(a.json, "w", encoding="utf-8") as f:
+            json.dump(res, f, indent=1)
+
+
 # ------------------------------------------------------------------ selftest
 
 def bt709_rgb(y, u, v):
@@ -966,10 +1112,19 @@ def main():
     s.add_argument("--width", type=int, default=640, help="width of each frame")
     s.add_argument("--columns", type=int, default=0)
     s.add_argument("--threads", type=int, default=16)
+    s = sub.add_parser("grain", help="film grain: luma high-pass residual over the smoothest 30%%, per frame")
+    s.add_argument("file", help="an RGB file (GT, baseline, master) or a YUV source")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--frames", type=int, help="N frames over the middle 80%% (YUV sources: 12 by default, seeking)")
+    g.add_argument("--every", action="store_true", help="every frame, decoded in order (RGB files: the default)")
+    s.add_argument("--sigma", type=float, help="Gaussian blur of the high-pass, px (default 2)")
+    s.add_argument("--share", type=float, help="smoothest share of the picture measured, %% (default 30)")
+    s.add_argument("--threads", type=int, default=16)
+    s.add_argument("--json")
     sub.add_parser("selftest", help="colour chain vs the equations, FFV1 round trips, extraction")
     a = ap.parse_args()
     {"scan": cmd_scan, "scores": cmd_scores, "make": cmd_make, "slice": cmd_slice, "verify": cmd_verify,
-     "sheet": cmd_sheet, "selftest": cmd_selftest}[a.cmd](a)
+     "sheet": cmd_sheet, "grain": cmd_grain, "selftest": cmd_selftest}[a.cmd](a)
 
 
 if __name__ == "__main__":

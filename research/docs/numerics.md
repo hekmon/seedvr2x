@@ -38,8 +38,8 @@ of 3 seeds):
   GT on 8 of 8 clips by VMAF and LPIPS, 7 of 8 by PSNR-Y: against the group's second frame,
   PSNR-Y +0.8 to +5.0 dB (the smallest on the slow sky pan) and VMAF +2.2 to +19.3, the 3 seeds
   within 0.5 dB of each other; the bicubic baseline has no such pattern (0.2–0.8 dB, in no
-  consistent direction). On fast motion
-  the frames inside a group carry ghosts, doubled line art on the bright cartoon. `lab` keeps it
+  consistent direction). On fast motion the frames inside a group carry ghosts, doubled line art
+  on the bright cartoon. `lab` keeps it
   ([Every fourth frame](#every-fourth-frame-the-latent-grid)).
 - **ByteDance's numerics change little:** float32 RoPE angles, VAE posterior sampling, a
   float32 input chain, the float32 weights, bfloat16 DiT norms, a VAE decode under bfloat16
@@ -62,13 +62,13 @@ of 3 seeds):
 - **The `yuv420p10le` master: keep zscale's bilinear chroma, on one slice.** Through 4:2:0 and
   back (Catmull-Rom, as seedvr2x reads), bilinear keeps the model's output the closest to the GT
   of 6 kernels (8 of 8 clips by PSNR-Cb and ΔE00, 7 of 8 by PSNR-Cr); Catmull-Rom, spline16/36
-  and lanczos lose 0.3–0.5 dB of
-  PSNR-Cb/Cr and ring more. The round trip even brings the output's chroma closer to the GT than
-  the unconverted output (PSNR-Cb +1.1 dB), the GT's own chroma being 4:2:0; the usual metrics
-  don't move. But ffmpeg runs zscale in slices, one per CPU by default, and the bytes depend on
-  them: the master's chroma on 1.7% of the samples (up to 13 ten-bit codes), a 10-bit 4:2:0
-  source's RGB on nearly every sample (up to 0.57 level) from 4 slices on. `threads=1` on zscale (libavfilter's
-  generic per-filter option) restores the single-slice bytes for 2.5 ms per 1080p frame
+  and lanczos lose 0.3–0.5 dB of PSNR-Cb/Cr and ring more. The round trip even brings the
+  output's chroma closer to the GT than the unconverted output (PSNR-Cb +1.1 dB), the GT's own
+  chroma being 4:2:0; the usual metrics don't move. But ffmpeg runs zscale in slices, one per CPU
+  by default, and the bytes depend on them: the master's chroma on 1.7% of the samples (up to 13
+  ten-bit codes), a 10-bit 4:2:0 source's RGB on nearly every sample (up to 0.57 level) from 4
+  slices on. `threads=1` on zscale (libavfilter's generic per-filter option) restores the
+  single-slice bytes for 2.5 ms per 1080p frame
   ([The master's chroma](#the-masters-chroma-420-kernels-and-zscales-slices)).
 - **The resize kernel is second order:** torchvision's bicubic without antialiasing adds a
   little low-frequency colour error and flicker on 7 of 7 clips (live-slow: every metric worse).
@@ -78,8 +78,10 @@ of 3 seeds):
   +0.11, ΔE00 lf +0.05; spline36 half that). numz's antialiased bicubic stays a sound default;
   spline36 only where the pipeline resizes with zimg anyway.
 - **Film grain comes back at half strength:** on the grainy live-action clip the output holds
-  0.93–0.98 levels of grain against the source's 1.75 and the degraded input's 0.45 (std of the
-  high-pass luma in the smoothest 30% of the picture), whatever the variant, `lab` or not.
+  0.93–0.97 levels of grain against the source's 1.75 and the degraded input's 0.45 (std of the
+  high-pass luma in the smoothest 30% of the picture), whatever the variant, `lab` or not. On the
+  slow film, whose degraded input keeps most of its grain (1.29 of 1.59), the output holds a
+  little more than the source (1.86–1.89) ([Grain](#grain), corrected on 2026-10-05).
 - **numz's black padding is both a defect and an anchor.** At 1080p numz pads 8 black rows: the
   bottom 16 rows lose 3–10 dB against the rest of the frame. Padding without black (reflect,
   replicate, mid grey) repairs that band, but it, and no padding at all (a crop to 1072 rows),
@@ -825,36 +827,43 @@ and +0.01 to +0.03 temporal error; `noaa` stays worse on every metric of live-sl
 
 ### Grain
 
-The measure of the source survey: the standard deviation of the full-range luma minus its
+The measure (`fr_clips.py grain`): the standard deviation of the full-range BT.709 luma minus its
 2-pixel Gaussian blur, over the 30% of the picture where the blurred image's gradient is lowest
-(and 16 < Y < 235), in 8-bit levels; per frame, the median over the 45 frames (25–75% in
-brackets), the letterbox bars and the 8 picture rows next to them left out:
+(and 16 < Y < 235), in 8-bit levels; per frame, the median over the frames (25–75% in brackets).
+Black bars (rows or columns whose mean Y stays below 20) and the 8 pixels next to them, or next
+to the frame's edge where there is no bar, are left out. A source is surveyed on 12 frames over
+the middle 80% of its duration.
+
+Corrected on 2026-10-05: the first version had no margin at the frame's own edges, where its
+blur and gradient see a mirrored border. A dark edge line then counts among the smoothest areas
+and dominates the measure: live-slow read 3.96 instead of 1.59 (its outermost 9 columns, 0.7% of
+the mask, held 83% of the squared residual) and its film 1.64 instead of 1.02 (a 3-column fade to
+black at both sides). live-vfx and its film have clean edges and keep their figures.
 
 | | live-vfx | live-slow |
 |---|---|---|
-| source, 12 frames over the film | 1.65 | 1.64 |
-| GT (the clip) | 1.75 (1.69–1.83) | 3.96 (3.55–4.29) |
-| bicubic baseline (the d1 input upscaled) | 0.45 (0.41–0.50) | 2.62 (2.34–2.76) |
-| default, 3 seeds | 0.93–0.98 | 4.19–4.30 |
-| default + `lab`, 3 seeds | 0.93–0.96 | 4.27–4.45 |
-| every variant, `none` / `lab` | 0.91–0.94 / 0.89–0.93 | 4.29–4.35 / 4.32–4.42 |
+| source, 12 frames over the film | 1.65 | 1.02 |
+| GT (the clip) | 1.75 (1.69–1.83) | 1.59 (1.52–1.70) |
+| bicubic baseline (the d1 input upscaled) | 0.45 (0.41–0.50) | 1.29 (1.24–1.35) |
+| default, 3 seeds | 0.93–0.97 | 1.86–1.89 |
+| default + `lab`, 3 seeds | 0.92–0.95 | 1.95–1.97 |
+| every variant, `none` / `lab` | 0.90–0.93 / 0.89–0.93 | 1.87–1.93 / 1.95–1.98 |
 
 - **On live-vfx the model gives back about half of the grain.** The d1 input keeps a quarter of
-  it (0.45 against 1.75); the output has 0.93–0.98, whatever the variant, `lab` or not. What it
+  it (0.45 against 1.75); the output has 0.93–0.97, whatever the variant, `lab` or not. What it
   puts there behaves like grain, not like a fixed texture: on consecutive frames registered by
   phase correlation the residual changes at least as much as two independent fields would (1.19
-  for the output, 1.80 for the GT, against 0.93 and 1.75 within a frame). At the finest scale (1-pixel
-  blur) the output keeps less: 0.61 against 1.40.
-- **On live-slow the measure reads texture, not grain.** The shot's smoothest areas hold fine
-  texture (a window grille, leaves): its smoothest 10% has more residual than its smoothest 30%
-  (5.41 against 3.96), and the film as a whole measures 1.64. There the output is 6–12% above the
-  GT, the model drawing that texture a little stronger; at the 1-pixel scale it is again below
-  (1.80 against 2.21).
-- So SeedVR2, given a ×2-degraded grainy source, renders a cleaner picture than the source:
-  about half its grain on live-vfx, from a quarter in its input. None of the switches measured
-  here changes that (±0.05); keeping the source's grain would need its own step (grain synthesis,
-  or a lighter degradation of the input than d1).
-
+  for the output, 1.80 for the GT, against 0.93 and 1.75 within a frame). At the finest scale
+  (1-pixel blur) the output keeps less: 0.61–0.64 against 1.40 (the input 0.21).
+- **On live-slow the input keeps most of the grain, and the output a little more than the GT.**
+  The d1 input keeps 1.29 of the GT's 1.59; the output has 1.86–1.89 (+17 to +19%; with `lab`
+  1.95–1.97), and the smoothest 10% reads the same way (GT 1.05, output 1.26–1.28). At the
+  1-pixel scale it matches the GT (0.71–0.72 against 0.76; the input 0.41).
+- So the output's grain follows its input: from a quarter of the source's grain (live-vfx) the
+  model gives back about half; from most of it (live-slow) it draws a little more than the source
+  at the 2-pixel scale and as much at 1 pixel. None of the switches measured here changes that
+  (±0.05); keeping more of a grainy source's grain would need its own step (grain synthesis, or a
+  lighter degradation of the input than d1).
 ## Visual review
 
 Side-by-side crops, 1:1, GT | default | variant, 480×270 each, where the variant differs most from
@@ -946,11 +955,10 @@ python3 $S/numerics_patch.py --selftest     # zimg resize, 8-bit recovery, paddi
 #   the window frame-exactly before make (one source's timestamps ran 44 frames ahead of the decode
 #   order 30 minutes in):
 python3 $S/fr_clips.py scores /path/to/source.mkv --first FIRST_FRAME-10 --last FIRST_FRAME+54
-# grain: Y = 255 (0.2126 R + 0.7152 G + 0.0722 B) of the 16-bit RGB files (ffmpeg's yuv -> gray16le
-#   / 257 scale); residual = Y - GaussianBlur(Y, sigma 2 px); mask = Sobel magnitude of the blurred
-#   image at or below its 30th percentile among the pixels with 16 < blurred < 235, outside the
-#   letterbox rows and the 8 rows next to them; grain = std of the residual over the mask, median over
-#   the 45 frames
+# grain: every frame of an RGB file, or 12 frames over a source's middle 80% (seeking; taller than
+#   1080 rows: area-downscaled to 1080); --sigma 1 and --share 10 for the other scales
+python3 $S/fr_clips.py grain $C/live-vfx.gt.mkv --json grain-live-vfx-gt.json
+python3 $S/fr_clips.py grain /path/to/source.mkv
 # the master's chroma (CPU): per clip, round trips of the output (MODEL = its lab master) and of the GT,
 #   scores, then one fr_metrics call on the model's round trips (every kernel; see its docstring)
 python3 $S/chroma_kernels.py siting --json siting.json

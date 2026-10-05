@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 11:16 CEST
+Last update: 2026-10-05 12:10 CEST
 
 ## 0. Setup
 
@@ -22,8 +22,8 @@ Last update: 2026-10-05 11:16 CEST
       validated on known cases (`fr_clips.py`, `fr_metrics.py`); VMAF identical to `sptenc vmaf`
       frame for frame. Four clips so far: clean digital anime, grainy cel anime, dark anime,
       bright flat-colour cartoon (web source, more compressed)
-- [~] Samples from the user: two live-action Blu-rays (both with film grain, close to the grainy
-      cel film's), a bright anime episode, an NTSC DVD episode (16:9 anamorphic, declared interlaced;
+- [~] Samples from the user: two live-action Blu-rays (film grain 1.65 and 1.02, the grainy cel
+      film 1.91), a bright anime episode, an NTSC DVD episode (16:9 anamorphic, declared interlaced;
       an inverse telecine leaves half the frames combed, so interlaced video), the original of the
       dark anime episode; two 4K remasters on their way (HEVC with open GOPs?). No broadcast TS,
       no clean digital live action yet. Running on them: full-reference clips (question 1), cuts
@@ -76,7 +76,8 @@ temporal regression.
       0.5 up (Phase 4 normalises in bf16), but **no banding in any variant**, even on a new clip
       with large bright smooth gradients (CAMBI ≤ 0.004; it scores 0.70 on a clean 8-bit ramp).
       fp16 and fp32 decodes bring colour slightly closer (ΔE00 −0.05 to −0.09 on 5 of 5 clips);
-      fp16 never overflowed (largest activation 3.4× under its limit) and costs no more than bf16;
+      fp16 never overflowed (largest activation 3.4× under its limit), takes bf16's memory and 3–5%
+      more decode time;
       fp32 costs 2× the memory and 1.4–4× the time. Keeping everything after the decode in fp32
       is free
 - [x] Forced fp16 attention (GPUs without bf16): within the seed band on all 4 clips
@@ -90,7 +91,8 @@ temporal regression.
       bring slightly better low-frequency colour on all 3 (ΔE00 −0.05 to −0.09), as the fp16 decode
       does on all 8 clips. Kernels: antialias off worse on 7 of 7 clips; the zimg kernels cost
       colour and flicker on the fast live-action clip: keep numz's bicubic. Padding confirmed. The
-      model restores about half of the source's film grain (1.75 → 0.93–0.98 on the fast clip)
+      model restores about half of the source's film grain (1.75 → 0.93–0.97 on the fast clip;
+      the grain measure corrected on 2026-10-05: frame edges left out)
 - [x] The combined choice, checked once: numz's numerics + bicubic with antialias + reflect then
       black is the `reflect+black+16` run above
 - [x] The default `yuv420p10le` master's chroma kernel (from the design conversation, CPU only,
