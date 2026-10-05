@@ -7,6 +7,7 @@ with an empty label column.
   scd_review.py sheets DIR... --out REVIEW [--rows 15] [--width 320] [--cap 120] [--sure-frac 0.1]
   scd_review.py extend REVIEW DIR... [--cap 30] [--seed 1] [--skip NAME...]  # TransNetV2's own
   scd_review.py index REVIEW         # add REVIEW/*/index.csv to REVIEW/index.{csv,md}
+  scd_review.py round REVIEW DIR... --out ROUND [--per-page 10] [--seed 1] [--skip NAME...]
 
 An episode already in REVIEW is skipped (--force makes it again). The combined index is only
 ever appended to: the episodes it lacks are added at its end, its existing rows (and the labels
@@ -56,6 +57,21 @@ next largest), the share where it falls between c-1 and c. Running it again adds
 episode whose index.csv holds tnet rows gets no page, REVIEW/index.csv only the tnet rows it
 lacks.
 
+round: a batch of the review's rows aimed at the detectors' disagreements, for a first labelling
+that takes an hour, not a day. Each candidate of the DIRS (analysed with tnet.npz) falls in one
+agreement group at the working thresholds (TransNetV2 >= 0.5, scdet >= 10, a detection of either
+PySceneDetect detector): G1 all three (both PySceneDetect detectors), G2 TransNetV2 with scdet or
+PySceneDetect but not G1, G3 TransNetV2 alone, G4 scdet or PySceneDetect with TransNetV2 at
+0.1-0.5, G5 the same with TransNetV2 under 0.1 (G5b: its lone scdet hits inside a burst), G6 none
+of them; and in one kind (animation, live action, DVD, as scd_scores.py summary pools them).
+ROUND_PLAN gives the rows per group and kind, drawn among the index's rows of that cell with a
+probability proportional to their weight (the candidates each stands for), so that each row drawn
+stands for (candidates of its cell) / (rows drawn in it). The rows are shuffled, numbered and shown
+without any detector's value: each one's four thumbnails are cropped from its review page into
+ROUND/page_NN.jpg (--per-page rows a page). ROUND/labels.txt takes one letter per row (c cut, f
+flash, p pan or motion, d fade or dissolve, o other, n nothing, ? can't tell); ROUND/rows.csv keeps
+each row's cell, weight, review page and row, and every detector's values; ROUND/cells.md the cells.
+
 Labels: cut / flash / pan / fade / dissolve / other / not-a-cut.
 
 Needs ffmpeg, numpy and Pillow; scd_scores.py next to it.
@@ -77,13 +93,30 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from scd_scores import (LABELS, decode_cmd, load_json, load_scores, log, old_population,  # noqa: E402
-                        pysd_agreement, read_full, score_band, segments_of, timecode, tnet_band)
+from scd_scores import (KINDS, LABELS, decode_cmd, load_json, load_scores, log,  # noqa: E402
+                        old_population, pysd_agreement, read_full, score_band, segments_of, timecode,
+                        tnet_band)
 
 INDEX_COLS = ["page", "row", "episode", "frame", "timecode", "class", "stratum", "stratum_size", "weight",
               "selection", "scdet", "mafd", "prev", "next", "burst", "adaptive", "content", "ad_ratio",
               "content_val", "join", "label"]
 TNET_PREFIX = "tnet "  # strata of the candidates of TransNetV2 alone (extend)
+SHEET_LAYOUT = (330, 6, 14, 10, 20, 14, 34)  # pages: label_w, gap, mid_gap, margin, cap_h, pad, head_h
+
+ROUND_TN, ROUND_TN_LOW, ROUND_SCDET = 0.5, 0.1, 10.0  # the agreement groups' working thresholds
+ROUND_PLAN = (  # rows per agreement group and kind: the disagreements first (see the docstring)
+    ("G1", "animation", 4), ("G1", "live action", 2), ("G1", "DVD", 2),
+    ("G2", "animation", 4), ("G2", "live action", 6), ("G2", "DVD", 2),
+    ("G3", "animation", 12), ("G3", "live action", 12), ("G3", "DVD", 6),
+    ("G4", "animation", 10), ("G4", "live action", 6), ("G4", "DVD", 4),
+    ("G5", "animation", 6), ("G5", "live action", 4), ("G5", "DVD", 4), ("G5b", "animation", 6),
+    ("G6", "animation", 4), ("G6", "live action", 4), ("G6", "DVD", 2),
+)
+ROUND_LETTERS = {"c": "cut", "f": "flash", "p": "pan", "d": "fade/dissolve", "o": "other",
+                 "n": "not-a-cut"}
+ROUND_COLS = ["round_row", "round_page", "episode", "frame", "timecode", "kind", "group", "cell_size",
+              "cell_rows", "weight", "review_page", "review_row", "review_stratum", "review_weight",
+              "scdet", "mafd", "burst", "adaptive", "content", "tnet", "tnet_all", "join"]
 FONT_PATHS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/dejavu/DejaVuSans.ttf",
               "/usr/share/fonts/TTF/DejaVuSans.ttf")
 
@@ -273,9 +306,8 @@ def draw_pages(name, rows, thumbs, tsize, fps, pts, out_dir, per_page, note, fir
     """page_NNN.jpg from number first; what (extend's pages) heads them, and they never overwrite."""
     tw, th = tsize
     f_lab, f_cap, f_head = font(15), font(13), font(18)
-    label_w, gap, mid_gap, margin, cap_h, pad = 330, 6, 14, 10, 20, 14
+    label_w, gap, mid_gap, margin, cap_h, pad, head_h = SHEET_LAYOUT
     row_h = th + cap_h + pad
-    head_h = 34
     page_w = margin * 2 + label_w + 4 * tw + 2 * gap + mid_gap
     pages = [rows[i:i + per_page] for i in range(0, len(rows), per_page)]
     for p, page in enumerate(pages, 1):
@@ -655,6 +687,161 @@ def merge_tnet(review, names):
         "and index.md")
 
 
+def agreement_group(c):
+    """A candidate's group at the working thresholds: TransNetV2 >= ROUND_TN, scdet >= ROUND_SCDET,
+    a detection of either PySceneDetect detector (see the docstring)."""
+    try:
+        tn = float(c.get("tnet") or 0.0)
+    except ValueError:
+        tn = 0.0
+    tn = 0.0 if math.isnan(tn) else tn
+    n_p = (c["adaptive"] != "") + (c["content"] != "")
+    T, S, P = tn >= ROUND_TN, c["scdet"] >= ROUND_SCDET, n_p > 0  # a NaN score is no detection
+    if T and S and n_p == 2:
+        return "G1"
+    if T and (S or P):
+        return "G2"
+    if T:
+        return "G3"
+    if (S or P) and tn >= ROUND_TN_LOW:
+        return "G4"
+    if S and not P and int(c.get("burst") or 0) >= 2:
+        return "G5b"
+    return "G5" if S or P else "G6"
+
+
+def round_strip(review, row, rows_on_page):
+    """A review row's four thumbnails and their captions, cropped from its page: no detector value."""
+    path = os.path.join(review, row["episode"], f"page_{int(row['page']):03d}.jpg")
+    label_w, _, _, margin, cap_h, pad, head_h = SHEET_LAYOUT
+    with Image.open(path) as img:
+        row_h, rest = divmod(img.height - head_h - margin, rows_on_page)
+        if rest:
+            raise RuntimeError(f"{path}: {img.height} px is not {rows_on_page} rows of the sheet layout")
+        y = head_h + (int(row["row"]) - 1) * row_h
+        return img.crop((margin + label_w - 4, y - 2, img.width - margin + 4, y + row_h - pad + 2))
+
+
+def draw_round_pages(sel, strips, out_dir, per_page):
+    """page_NN.jpg: per_page numbered strips a page."""
+    f_num, f_head = font(30), font(18)
+    num_w, gap, margin, head_h = 80, 14, 10, 40
+    width = margin * 2 + num_w + max(s.width for s in strips.values())
+    pages = [sel[i:i + per_page] for i in range(0, len(sel), per_page)]
+    for p, page in enumerate(pages, 1):
+        height = head_h + sum(strips[r["round_row"]].height + gap for r in page) + margin
+        img = Image.new("RGB", (width, height), "white")
+        dr = ImageDraw.Draw(img)
+        dr.text((margin, 10), f"Round page {p:02d}/{len(pages):02d}, rows {page[0]['round_row']:03d}-"
+                f"{page[-1]['round_row']:03d}   frames c-2, c-1 | c, c+1: a cut, if any, falls on the red mark",
+                fill="black", font=f_head)
+        y = head_h
+        for r in page:
+            s = strips[r["round_row"]]
+            dr.line([(margin, y - gap // 2), (width - margin, y - gap // 2)], fill=(170, 170, 170), width=2)
+            dr.text((margin, y + s.height // 2 - 20), f"{r['round_row']:03d}", fill="black", font=f_num)
+            img.paste(s, (margin + num_w, y))
+            r["round_page"] = p
+            y += s.height + gap
+        img.save(os.path.join(out_dir, f"page_{p:02d}.jpg"), quality=90, optimize=True)
+    return len(pages)
+
+
+def write_round_labels(path, sel, pages, per_page):
+    lines = [
+        f"# Scene-cut review, round 1: {len(sel)} rows on {pages} pages (page_01.jpg to page_{pages:02d}.jpg),",
+        f"# {per_page} rows a page. Each row shows four frames, c-2, c-1 | c, c+1, with a red mark between",
+        "# c-1 and c. After each row's number, write ONE letter for what happens at the mark:",
+        "#   c  cut: a new shot starts at the mark, or one frame beside it. A shot of one or two frames",
+        "#      (a text card, an insert) is a new shot too: c.",
+        "#   f  flash: a brief light change (flash, explosion, lightning, strobe), then the same shot",
+        "#   p  pan or motion: the same shot moving (camera move, fast action, a new drawing)",
+        "#   d  fade or dissolve: a gradual transition, between shots or to or from black",
+        "#   o  other: anything else (a few words after the letter if you like)",
+        "#   n  nothing: the same shot, nothing notable at the mark",
+        "#   ?  can't tell",
+        "# Lines starting with # are ignored; anything after the letter is a comment. Partial labels are",
+        "# fine: save the file, the rows left empty count as not labelled.",
+    ]
+    for p in range(1, pages + 1):
+        lines += ["", f"# page {p:02d}"]
+        lines += [f"{r['round_row']:03d} " for r in sel if r["round_page"] == p]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def cmd_round(a):
+    os.makedirs(a.out, exist_ok=True)
+    for f in ("labels.txt", "rows.csv"):
+        if os.path.exists(os.path.join(a.out, f)):
+            sys.exit(f"{os.path.join(a.out, f)} exists: a round is never overwritten")
+    with open(os.path.join(a.review, "index.csv"), newline="", encoding="utf-8-sig") as f:
+        text = f.read()
+    first = text.splitlines()[0]
+    index = list(csv.DictReader(io.StringIO(text), delimiter=";" if first.count(";") > first.count(",") else ","))
+    on_page = defaultdict(int)
+    for r in index:
+        on_page[(r["episode"], r["page"])] += 1
+    sizes, pool, missing = defaultdict(int), defaultdict(list), 0
+    for d in a.dirs:
+        name = os.path.basename(os.path.normpath(d))
+        if name in a.skip:
+            continue
+        kind = KINDS.get(name, "animation")
+        cands = {c["frame"]: c for c in load_candidates(d)}
+        for c in cands.values():
+            sizes[(agreement_group(c), kind)] += 1
+        for r in index:
+            if r["episode"] != name:
+                continue
+            c = cands.get(int(r["frame"]))
+            if c is None:
+                missing += 1
+                continue
+            pool[(agreement_group(c), kind)].append((r, c))
+    if missing:
+        log(f"WARNING: {missing} index rows have no candidate in their directory's candidates.csv")
+    rng = random.Random(f"round-{a.seed}")
+    sel, cells = [], []
+    for group, kind, n in ROUND_PLAN:
+        rows = pool.get((group, kind), [])
+        # weighted sampling without replacement (Efraimidis-Spirakis): row i kept with a probability
+        # growing with its weight, the candidates of its first-review stratum it stands for
+        keyed = sorted(rows, key=lambda rc: rng.random() ** (1.0 / max(float(rc[0]["weight"] or 1), 1e-9)),
+                       reverse=True)
+        take = keyed[:n]
+        cells.append((group, kind, sizes[(group, kind)], len(rows), len(take)))
+        if len(take) < n:
+            log(f"WARNING: {group} {kind}: {len(rows)} index rows, {n} wanted")
+        for r, c in take:
+            sel.append({"episode": r["episode"], "frame": int(r["frame"]), "timecode": r["timecode"],
+                        "kind": kind, "group": group, "cell_size": sizes[(group, kind)], "cell_rows": len(take),
+                        "weight": round(sizes[(group, kind)] / len(take), 3), "review_page": int(r["page"]),
+                        "review_row": int(r["row"]), "review_stratum": r["stratum"],
+                        "review_weight": r["weight"], "scdet": c["scdet"], "mafd": c["mafd"],
+                        "burst": c["burst"], "adaptive": c["adaptive"], "content": c["content"],
+                        "tnet": c.get("tnet", ""), "tnet_all": c.get("tnet_all", ""), "join": c["join"],
+                        "_index": r})
+    rng.shuffle(sel)
+    strips = {}
+    for i, r in enumerate(sel, 1):
+        r["round_row"] = i
+        strips[i] = round_strip(a.review, r["_index"], on_page[(r["episode"], r["_index"]["page"])])
+    pages = draw_round_pages(sel, strips, a.out, a.per_page)
+    write_round_labels(os.path.join(a.out, "labels.txt"), sel, pages, a.per_page)
+    with open(os.path.join(a.out, "rows.csv"), "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(ROUND_COLS)
+        for r in sel:
+            w.writerow([r[k] for k in ROUND_COLS])
+    with open(os.path.join(a.out, "cells.md"), "w", encoding="utf-8") as f:
+        f.write("| group | kind | candidates | index rows | drawn | each stands for |\n"
+                "|---|---|---:|---:|---:|---:|\n")
+        for g, k, size, avail, n in cells:
+            f.write(f"| {g} | {k} | {size} | {avail} | {n} | {size / n if n else float('nan'):.1f} |\n")
+    log(f"round: {len(sel)} rows on {pages} pages in {a.out} (labels.txt, rows.csv, cells.md)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -688,11 +875,20 @@ def main():
     p.add_argument("--threads", type=int, default=16)
     p = sub.add_parser("index")
     p.add_argument("review")
+    p = sub.add_parser("round")
+    p.add_argument("review", help="review directory (its index.csv and pages)")
+    p.add_argument("dirs", nargs="+", help="episode directories of scd_scores.py (analysed with tnet.npz)")
+    p.add_argument("--out", required=True, help="the round's directory (never overwritten)")
+    p.add_argument("--per-page", type=int, default=10, help="rows per page")
+    p.add_argument("--seed", default="1")
+    p.add_argument("--skip", nargs="*", default=[], metavar="NAME", help="episodes left out")
     a = ap.parse_args()
     if a.cmd == "sheets":
         cmd_sheets(a)
     elif a.cmd == "extend":
         cmd_extend(a)
+    elif a.cmd == "round":
+        cmd_round(a)
     else:
         merge_index(a.review)
 

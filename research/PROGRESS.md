@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 16:37 CEST
+Last update: 2026-10-05 16:55 CEST
 
 ## 0. Setup
 
@@ -177,14 +177,14 @@ temporal regression.
       191 where both of PySceneDetect's detectors agree, on one film); it misses 5 of the 15 sure
       cuts of the grainy cel film. 258 more review rows: the candidates only TransNetV2 finds, at
       most 30 per episode
-- [x] Costs measured back to back (2026-10-05, one 1080p Blu-ray episode, 16 threads, two rounds):
+- [x] Costs measured back to back (2026-10-05, one 1080p Blu-ray episode, 16 threads, two runs):
       per hour of source, decoding alone 1.96 min, scdet 1.98, PySceneDetect 2.28, TransNetV2
       4.30 (half of it the network); over the decode seedvr2x already makes for its frame index,
       scdet costs about nothing. All three deterministic; TransNetV2's port checked against
       TensorFlow again, kept this time (5.1 × 10⁻⁷ at most, same detections)
-- [ ] Review of the sheets by the user (waiting; 1,734 rows, partial labels fine). Planned first:
-      a round of about 100 rows aimed at the detectors' disagreements, on compact sheets with
-      one-letter labels, when the user is ready
+- [~] Labels: round 1 built (2026-10-05, `scd_review.py round`): 100 of the review's 1,734 rows,
+      drawn by agreement group and kind (the detectors' disagreements first), shown blind on 10
+      pages, one letter per row; estimates by `scd_scores.py round`. The user is labelling
 - [~] Per threshold 8–14: hits, false positives by kind (flash, pan, fade…), misses, shot lengths.
       Unlabelled so far: on action anime, scdet fires in bursts on new drawings after held frames
       and on effects (at threshold 10, half the shots of the dark anime episode are under 0.5 s),

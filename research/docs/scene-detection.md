@@ -52,8 +52,8 @@ In short (unlabelled: these are detections, not yet errors):
   411 score below 10 in a fresh pass, 14 below 4); a PQ-coded HDR film scores far lower (moot while
   v1 refuses HDR).
 - **What the labels decide:** recall and false cuts per detector, threshold and kind, from a
-  [round of about 100 rows](#round-1-targeted-on-the-disagreements) aimed at the disagreements
-  (when the user is ready), then the joint brief with question 2's costs: the detector, its
+  [round of 100 rows](#round-1-targeted-on-the-disagreements) aimed at the disagreements (built,
+  the labels under way), then the joint brief with question 2's costs: the detector, its
   threshold, what to do with bursts, and whether shots need a minimum length.
 
 ## Why it matters for seedvr2x
@@ -254,9 +254,9 @@ review already holds.
 
 Measured back to back on one 1080p Blu-ray episode (anime-bright: H.264 High, 26.3 Mbit/s,
 37,327 frames, 25.9 min), 16 threads of the 48-core machine, page cache warm, nothing else
-running, two rounds in opposite orders:
+running, two runs in opposite orders:
 
-| Pass | Wall, round 1 / 2 | Per hour of source | CPU time per hour |
+| Pass | Wall, run 1 / 2 | Per hour of source | CPU time per hour |
 |---|---|---:|---:|
 | decode alone (video stream, null output) | 50.8 / 50.8 s | 1.96 min | 17.3 min |
 | scdet, sptenc's chain (video only) | 51.4 / 51.6 s | 1.98 min | 17.7 min |
@@ -276,7 +276,7 @@ running, two rounds in opposite orders:
 - The official TensorFlow model ran the check's excerpts 1.3–1.4 times faster than the PyTorch
   port (3.4–3.5 s against 4.6–4.9 s per 3,000 frames).
 - **Deterministic:** the score pass, PySceneDetect and TransNetV2, each run three times on this
-  source (the stored pass and both rounds), gave the same scores file byte for byte, the same
+  source (the stored pass and both runs), gave the same scores file byte for byte, the same
   cuts and the same probabilities to the bit.
 - DESIGN.md's earlier figures (scdet 1.8, PySceneDetect 2.4, TransNetV2 4.4 min per hour) came
   from the detection passes themselves, on a machine loaded by other jobs; these agree within
@@ -339,26 +339,32 @@ detector's values, 15 rows per page. Labels: cut, flash, pan, fade, dissolve, ot
 
 ### Round 1: targeted on the disagreements
 
-Planned, for when the user is ready. Labelling 1,734 rows takes uninterrupted hours, and most of
-them sit where the detectors agree; what decides between detectors is where they don't. So round 1
-draws about 100 rows by agreement group and kind (animation, live action, DVD):
+Built on 2026-10-05 (`scd_review.py round`); the labels are under way. Labelling 1,734 rows takes
+uninterrupted hours, and most of them sit where the detectors agree; what decides between detectors
+is where they don't. So round 1 takes 100 of the first review's rows, by agreement group and kind:
 
-| Group | Rows | Why |
-|---|---:|---|
-| G3, TransNetV2 alone | 30 | its extra cuts: real, or flashes and motion? |
-| G4, scdet or PySceneDetect with TransNetV2 at 0.1–0.5 | 20 | what TransNetV2 would miss at 0.5 |
-| G5, scdet or PySceneDetect with TransNetV2 under 0.1 | 20 | scdet's case, about 6 of them inside bursts |
-| G1 and G2, TransNetV2 with the others | 20 | does agreement mean a cut? |
-| G6, none at the working thresholds | 10 | what everyone misses |
+| Group | Animation | Live action | DVD | Why |
+|---|---:|---:|---:|---|
+| G1, all three | 4 | 2 | 2 | does agreement mean a cut? |
+| G2, TransNetV2 and one other | 4 | 6 | 2 | the same, where one of the others is missing |
+| G3, TransNetV2 alone | 12 | 12 | 6 | its extra cuts: real, or flashes and motion? |
+| G4, the others with TransNetV2 at 0.1–0.5 | 10 | 6 | 4 | what TransNetV2 would miss at 0.5 |
+| G5, the others with TransNetV2 under 0.1 | 6, and 6 lone scdet hits in bursts | 4 | 4 | scdet's case |
+| G6, none at the working thresholds | 4 | 4 | 2 | what everyone misses |
 
-- **Compact sheets:** the same four frames per row, more rows per page, and a batch file with
-  one-letter labels (c cut, f flash, p pan, d fade or dissolve, o other, n not a cut).
-- **Weights:** each row stands for its group-and-kind cell (cell size / rows drawn), so the
-  summary reads the batch like the first review's index. Thresholds other than the working ones
-  are estimated from the rows' own values, more coarsely than the first review's score bands
-  allow.
+- **Drawn from the first review's rows** of each cell, with a probability proportional to their
+  weight (the candidates each stands for), so that each row drawn stands for (candidates of its
+  cell) / (rows drawn): from 1.7 candidates (TransNetV2 alone on the DVD) to 1,494 (G6 on
+  animation).
+- **Shown blind:** shuffled and numbered on 10 pages of 10 rows, each row's four thumbnails cropped
+  from its review page, without any detector's value. One letter per row in a text file: c cut,
+  f flash, p pan or motion, d fade or dissolve, o other, n nothing, ? can't tell.
+- **Estimates:** `scd_scores.py round` gives, per group and kind, the labels and the share of cuts
+  (with its 90% Wilson interval), then the first review's per-detector table (recall, false cuts
+  by label, precision), each labelled row standing for its cell's candidates / the cell's
+  labelled rows, per kind and for every kind.
 - A second round of at most 50 rows if the intervals are too wide to choose. The first review's
-  index stays as it is; any labels written there add to the estimates.
+  index stays as it is; labels written there add to the estimates.
 
 ## Labelled estimates
 
@@ -413,6 +419,9 @@ python3 $S summary $O/EP... --md summary.md [--labels $O/review/index.csv]
 python3 $R sheets $O/EP... --out $O/review
 python3 $R extend $O/review $O/EP... --cap 30 --skip anime-dark-seg
 python3 $R index $O/review
+# round 1: 100 of the review's rows by agreement group and kind, blind; estimates from its labels
+python3 $R round $O/review $O/EP... --out $O/round1
+python3 $S round $O/round1 --md round1.md
 # costs on one source, 16 threads, page cache warm: decode alone, then sptenc's chain
 # (score, pysd and tnet as above: each logs its own seconds)
 ffmpeg -threads 16 -i SRC -map 0:v:0 -fps_mode passthrough -f null -

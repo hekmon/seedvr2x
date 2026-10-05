@@ -12,6 +12,7 @@ second opinions from PySceneDetect and TransNetV2, review candidates and statist
   scd_scores.py activity --out DIR [--window 25]      # where a film is busiest (to pick a chunk)
   scd_scores.py compare REF OTHER [--md OUT.md]       # one video scored twice (original vs segments)
   scd_scores.py summary DIR... [--labels INDEX.csv]   # tables across episodes (and label stats)
+  scd_scores.py round ROUND [--md OUT.md]             # estimates from a round of labels
 
 SOURCE is a video file, a directory of segment files played in name order (an episode kept as
 the segments of an earlier split), or @LIST (one file per line). Frames are numbered from 0 in
@@ -127,6 +128,12 @@ labelled row stands for the candidates of its review stratum (stratum size / lab
 the stratum), so a partly labelled index still gives estimates. Recall is relative to the cuts
 among the candidates, the union of every detector's (a cut no detector comes near is never
 shown). Rows of episodes missing from DIRS are counted apart.
+
+round: estimates from a round of labels made by scd_review.py round (ROUND/rows.csv: each row's
+agreement group, kind, cell size and detector values; ROUND/labels.txt: one letter per row). Per
+group and kind, the labels and the share of cuts with its 90% Wilson interval; then summary's table
+per detector, each labelled row standing for its cell's candidates / the cell's labelled rows, per
+kind and for every kind.
 
 Needs ffmpeg and ffprobe on PATH (a build with scdet; FFMPEG/FFPROBE override) and numpy;
 pysd and pysd-check need scenedetect and OpenCV; tnet needs torch and the TransNetV2 checkout,
@@ -1664,6 +1671,82 @@ def cmd_compare(a):
         save_json(res, os.path.splitext(a.md)[0] + ".json")
 
 
+ROUND_LETTER = {"c": "cut", "f": "flash", "p": "pan", "d": "fade", "o": "other", "n": "not-a-cut"}
+
+
+def read_round_labels(path):
+    """{row: label} from a round's labels.txt: a row number then one letter (scd_review.py round);
+    '?' and empty rows are not labelled, an unknown letter reads as other."""
+    labels, odd = {}, 0
+    with open(path, encoding="utf-8-sig") as f:
+        for ln in f:
+            m = re.match(r"\s*(\d+)\s*(\S?)", ln)
+            if ln.lstrip().startswith("#") or not m or not m.group(2) or m.group(2) == "?":
+                continue
+            k = ROUND_LETTER.get(m.group(2).lower())
+            if k is None:
+                odd += 1
+                k = "other"
+            labels[int(m.group(1))] = k
+    return labels, odd
+
+
+def wilson(k, n, z=1.645):
+    """90% Wilson interval of a share k/n."""
+    if n == 0:
+        return math.nan, math.nan
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return c - h, c + h
+
+
+def cmd_round(a):
+    """Estimates from a round of labels (scd_review.py round): each labelled row stands for its
+    cell's candidates / the cell's labelled rows; cells without a label are counted apart."""
+    with open(os.path.join(a.round, "rows.csv"), newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    labels, odd = read_round_labels(os.path.join(a.round, "labels.txt"))
+    cells = {}
+    for r in rows:
+        cells.setdefault((r["group"], r["kind"]), []).append(r)
+    out = [f"Round {a.round}: {len(labels)} of {len(rows)} rows labelled" + (f"; {odd} letters read as other" if odd
+           else "") + ". Labels: c cut, f flash, p pan or motion, d fade or dissolve (the tables' fade), o other, "
+           "n nothing (not-a-cut).\n",
+           "Per agreement group and kind (scd_review.py round): candidates, rows labelled, labels, the share of "
+           "cuts with its 90% Wilson interval:\n",
+           "| group | kind | candidates | labelled | " + " | ".join(LABELS) + " | cuts | 90% interval |",
+           "|---|---|---:|---:|" + "---:|" * (len(LABELS) + 2)]
+    est, unlabelled = {}, {}
+    for (g, kind), rs in sorted(cells.items()):
+        size = int(rs[0]["cell_size"])
+        lab = [(r, labels[int(r["round_row"])]) for r in rs if int(r["round_row"]) in labels]
+        n = len(lab)
+        cnt = {k: sum(1 for _, x in lab if x == k) for k in LABELS}
+        lo, hi = wilson(cnt["cut"], n)
+        out.append(f"| {g} | {kind} | {size} | {n} of {len(rs)} | " + " | ".join(str(cnt[k]) for k in LABELS) +
+                   f" | {ratio(cnt['cut'], n)} | {lo:.2f}-{hi:.2f} |" if n else
+                   f"| {g} | {kind} | {size} | 0 of {len(rs)} | " + " | ".join("" for _ in LABELS) + " | - | - |")
+        if not n:
+            unlabelled[kind] = unlabelled.get(kind, 0) + size
+        for r, k in lab:
+            est.setdefault(kind, []).append((r, k, size / n))
+    out.append("")
+    dets = label_detectors(True)
+    for kind in sorted(est):
+        miss = f"; {unlabelled[kind]} candidates in cells without a label" if kind in unlabelled else ""
+        out += [f"Estimated per detector, {kind} (each labelled row stands for its cell's candidates / the "
+                f"cell's labelled rows{miss}):\n"] + label_table(est[kind], dets) + [""]
+    if len(est) > 1:
+        out += ["Estimated per detector, every kind:\n"] + label_table([x for e in est.values() for x in e], dets)
+    md = "\n".join(out) + "\n"
+    if a.md:
+        with open(a.md, "w", encoding="utf-8") as f:
+            f.write(md)
+    print(md)
+
+
 def cmd_summary(a):
     sts = [load_json(os.path.join(d, "stats.json")) for d in a.dirs]
     kinds = dict(k.split("=", 1) for k in a.kind or [])
@@ -1749,10 +1832,13 @@ def main():
     p.add_argument("--kind", action="append", metavar="NAME=KIND",
                    help="pool an episode with this kind (default: KINDS, else animation)")
     p.add_argument("--md", help="also write the tables to this file")
+    p = sub.add_parser("round")
+    p.add_argument("round", help="a round's directory (scd_review.py round): rows.csv and labels.txt")
+    p.add_argument("--md", help="also write the tables to this file")
     a = ap.parse_args()
     {"check": cmd_check, "score": cmd_score, "pysd": cmd_pysd, "pysd-check": cmd_pysd_check, "tnet": cmd_tnet,
      "tnet-check": cmd_tnet_check, "analyse": cmd_analyse, "activity": cmd_activity, "compare": cmd_compare,
-     "summary": cmd_summary}[a.cmd](a)
+     "summary": cmd_summary, "round": cmd_round}[a.cmd](a)
 
 
 if __name__ == "__main__":
