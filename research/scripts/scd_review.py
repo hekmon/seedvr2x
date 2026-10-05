@@ -7,7 +7,7 @@ with an empty label column.
   scd_review.py sheets DIR... --out REVIEW [--rows 15] [--width 320] [--cap 120] [--sure-frac 0.1]
   scd_review.py extend REVIEW DIR... [--cap 30] [--seed 1] [--skip NAME...]  # TransNetV2's own
   scd_review.py index REVIEW         # add REVIEW/*/index.csv to REVIEW/index.{csv,md}
-  scd_review.py round REVIEW DIR... --out ROUND [--per-page 10] [--seed 1] [--skip NAME...]
+  scd_review.py round REVIEW DIR... --out ROUND [--plan 1|2] [--exclude ROWS.csv...] [--skip NAME...]
 
 An episode already in REVIEW is skipped (--force makes it again). The combined index is only
 ever appended to: the episodes it lacks are added at its end, its existing rows (and the labels
@@ -71,6 +71,8 @@ without any detector's value: each one's four thumbnails are cropped from its re
 ROUND/page_NN.jpg (--per-page rows a page). ROUND/labels.txt takes one letter per row (c cut, f
 flash, p pan or motion, d fade or dissolve, o other, n nothing, ? can't tell); ROUND/rows.csv keeps
 each row's cell, weight, review page and row, and every detector's values; ROUND/cells.md the cells.
+--plan 2 draws ROUND2_PLAN in scd_scores.py's refined cells instead (TransNetV2's band, and the
+picture's change where it alone fires), --exclude leaving out the rows of earlier rounds.
 
 Labels: cut / flash / pan / fade / dissolve / other / not-a-cut.
 
@@ -94,8 +96,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from scd_scores import (KINDS, LABELS, decode_cmd, load_json, load_scores, log,  # noqa: E402
-                        old_population, pysd_agreement, read_full, score_band, segments_of, timecode,
-                        tnet_band)
+                        old_population, pysd_agreement, read_full, refined_group, score_band, segments_of,
+                        timecode, tnet_band)
 
 INDEX_COLS = ["page", "row", "episode", "frame", "timecode", "class", "stratum", "stratum_size", "weight",
               "selection", "scdet", "mafd", "prev", "next", "burst", "adaptive", "content", "ad_ratio",
@@ -111,6 +113,14 @@ ROUND_PLAN = (  # rows per agreement group and kind: the disagreements first (se
     ("G4", "animation", 10), ("G4", "live action", 6), ("G4", "DVD", 4),
     ("G5", "animation", 6), ("G5", "live action", 4), ("G5", "DVD", 4), ("G5b", "animation", 6),
     ("G6", "animation", 4), ("G6", "live action", 4), ("G6", "DVD", 2),
+)
+ROUND2_PLAN = (  # round 2 (--plan 2), in refined cells (scd_scores.refined_group): the threshold
+    # (TransNetV2 0.3-0.5), a picture-change gate (TransNetV2 alone on a still picture) and its blind
+    # spot (lone scdet hits in bursts); live action already decided, the DVD left out
+    ("R3z", "animation", 6), ("R3z", "live action", 3), ("R3m", "animation", 3), ("R3m", "live action", 2),
+    ("R4h", "animation", 6), ("R4h", "live action", 2), ("R6hz", "animation", 3), ("R6hz", "live action", 2),
+    ("R6hm", "animation", 3), ("R6hm", "live action", 2), ("R4l", "animation", 4), ("R4l", "live action", 1),
+    ("R5b", "animation", 8), ("R6z", "animation", 3), ("R5", "animation", 2),
 )
 ROUND_LETTERS = {"c": "cut", "f": "flash", "p": "pan", "d": "fade/dissolve", "o": "other",
                  "n": "not-a-cut"}
@@ -750,9 +760,9 @@ def draw_round_pages(sel, strips, out_dir, per_page):
     return len(pages)
 
 
-def write_round_labels(path, sel, pages, per_page):
+def write_round_labels(path, sel, pages, per_page, n=1):
     lines = [
-        f"# Scene-cut review, round 1: {len(sel)} rows on {pages} pages (page_01.jpg to page_{pages:02d}.jpg),",
+        f"# Scene-cut review, round {n}: {len(sel)} rows on {pages} pages (page_01.jpg to page_{pages:02d}.jpg),",
         f"# {per_page} rows a page. Each row shows four frames, c-2, c-1 | c, c+1, with a red mark between",
         "# c-1 and c. After each row's number, write ONE letter for what happens at the mark:",
         "#   c  cut: a new shot starts at the mark, or one frame beside it. A shot of one or two frames",
@@ -785,6 +795,11 @@ def cmd_round(a):
     on_page = defaultdict(int)
     for r in index:
         on_page[(r["episode"], r["page"])] += 1
+    group, plan = (agreement_group, ROUND_PLAN) if a.plan == 1 else (refined_group, ROUND2_PLAN)
+    drawn = set()
+    for path in a.exclude:  # rows of earlier rounds
+        with open(path, newline="", encoding="utf-8") as f:
+            drawn |= {(r["episode"], int(r["frame"])) for r in csv.DictReader(f)}
     sizes, pool, missing = defaultdict(int), defaultdict(list), 0
     for d in a.dirs:
         name = os.path.basename(os.path.normpath(d))
@@ -793,33 +808,33 @@ def cmd_round(a):
         kind = KINDS.get(name, "animation")
         cands = {c["frame"]: c for c in load_candidates(d)}
         for c in cands.values():
-            sizes[(agreement_group(c), kind)] += 1
+            sizes[(group(c), kind)] += 1
         for r in index:
-            if r["episode"] != name:
+            if r["episode"] != name or (name, int(r["frame"])) in drawn:
                 continue
             c = cands.get(int(r["frame"]))
             if c is None:
                 missing += 1
                 continue
-            pool[(agreement_group(c), kind)].append((r, c))
+            pool[(group(c), kind)].append((r, c))
     if missing:
         log(f"WARNING: {missing} index rows have no candidate in their directory's candidates.csv")
-    rng = random.Random(f"round-{a.seed}")
+    rng = random.Random(f"round-{a.seed}" if a.plan == 1 else f"round{a.plan}-{a.seed}")
     sel, cells = [], []
-    for group, kind, n in ROUND_PLAN:
-        rows = pool.get((group, kind), [])
+    for g, kind, n in plan:
+        rows = pool.get((g, kind), [])
         # weighted sampling without replacement (Efraimidis-Spirakis): row i kept with a probability
         # growing with its weight, the candidates of its first-review stratum it stands for
         keyed = sorted(rows, key=lambda rc: rng.random() ** (1.0 / max(float(rc[0]["weight"] or 1), 1e-9)),
                        reverse=True)
         take = keyed[:n]
-        cells.append((group, kind, sizes[(group, kind)], len(rows), len(take)))
+        cells.append((g, kind, sizes[(g, kind)], len(rows), len(take)))
         if len(take) < n:
-            log(f"WARNING: {group} {kind}: {len(rows)} index rows, {n} wanted")
+            log(f"WARNING: {g} {kind}: {len(rows)} index rows, {n} wanted")
         for r, c in take:
             sel.append({"episode": r["episode"], "frame": int(r["frame"]), "timecode": r["timecode"],
-                        "kind": kind, "group": group, "cell_size": sizes[(group, kind)], "cell_rows": len(take),
-                        "weight": round(sizes[(group, kind)] / len(take), 3), "review_page": int(r["page"]),
+                        "kind": kind, "group": g, "cell_size": sizes[(g, kind)], "cell_rows": len(take),
+                        "weight": round(sizes[(g, kind)] / len(take), 3), "review_page": int(r["page"]),
                         "review_row": int(r["row"]), "review_stratum": r["stratum"],
                         "review_weight": r["weight"], "scdet": c["scdet"], "mafd": c["mafd"],
                         "burst": c["burst"], "adaptive": c["adaptive"], "content": c["content"],
@@ -831,7 +846,7 @@ def cmd_round(a):
         r["round_row"] = i
         strips[i] = round_strip(a.review, r["_index"], on_page[(r["episode"], r["_index"]["page"])])
     pages = draw_round_pages(sel, strips, a.out, a.per_page)
-    write_round_labels(os.path.join(a.out, "labels.txt"), sel, pages, a.per_page)
+    write_round_labels(os.path.join(a.out, "labels.txt"), sel, pages, a.per_page, a.plan)
     with open(os.path.join(a.out, "rows.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(ROUND_COLS)
@@ -883,6 +898,9 @@ def main():
     p.add_argument("dirs", nargs="+", help="episode directories of scd_scores.py (analysed with tnet.npz)")
     p.add_argument("--out", required=True, help="the round's directory (never overwritten)")
     p.add_argument("--per-page", type=int, default=10, help="rows per page")
+    p.add_argument("--plan", type=int, choices=(1, 2), default=1,
+                   help="1: ROUND_PLAN in agreement groups; 2: ROUND2_PLAN in refined cells")
+    p.add_argument("--exclude", nargs="*", default=[], metavar="ROWS.csv", help="rows of earlier rounds left out")
     p.add_argument("--seed", default="1")
     p.add_argument("--skip", nargs="*", default=[], metavar="NAME", help="episodes left out")
     a = ap.parse_args()

@@ -12,7 +12,7 @@ second opinions from PySceneDetect and TransNetV2, review candidates and statist
   scd_scores.py activity --out DIR [--window 25]      # where a film is busiest (to pick a chunk)
   scd_scores.py compare REF OTHER [--md OUT.md]       # one video scored twice (original vs segments)
   scd_scores.py summary DIR... [--labels INDEX.csv]   # tables across episodes (and label stats)
-  scd_scores.py round ROUND [--md OUT.md]             # estimates from a round of labels
+  scd_scores.py round ROUND... [--dirs DIR...]        # estimates from rounds of labels
 
 SOURCE is a video file, a directory of segment files played in name order (an episode kept as
 the segments of an earlier split), or @LIST (one file per line). Frames are numbered from 0 in
@@ -129,11 +129,13 @@ the stratum), so a partly labelled index still gives estimates. Recall is relati
 among the candidates, the union of every detector's (a cut no detector comes near is never
 shown). Rows of episodes missing from DIRS are counted apart.
 
-round: estimates from a round of labels made by scd_review.py round (ROUND/rows.csv: each row's
+round: estimates from rounds of labels made by scd_review.py round (ROUND/rows.csv: each row's
 agreement group, kind, cell size and detector values; ROUND/labels.txt: one letter per row). Per
 group and kind, the labels and the share of cuts with its 90% Wilson interval; then summary's table
 per detector, each labelled row standing for its cell's candidates / the cell's labelled rows, per
-kind and for every kind.
+kind and for every kind, with bootstrap intervals within the cells and paired differences to scdet
+at 10. Several rounds (or --dirs) pool their rows in refined cells (refined_group: TransNetV2's
+band, and the picture's change where it alone fires), sized in the episodes' candidates.csv.
 
 Needs ffmpeg and ffprobe on PATH (a build with scdet; FFMPEG/FFPROBE override) and numpy;
 pysd and pysd-check need scenedetect and OpenCV; tnet needs torch and the TransNetV2 checkout,
@@ -1707,16 +1709,53 @@ def wilson(k, n, z=1.645):
     return c - h, c + h
 
 
+def cval(c, k):
+    """A candidate's numeric value (candidates.csv or a round's rows.csv), 0 when empty or NaN."""
+    try:
+        v = float(c.get(k) or 0.0)
+    except ValueError:
+        return 0.0
+    return 0.0 if math.isnan(v) else v
+
+
+REFINED = ("R1", "R2", "R3m", "R3z", "R4h", "R4l", "R5", "R5b", "R6hm", "R6hz", "R6l", "R6z")
+STILL_MAFD = 4.0  # MAFD under this: the picture hardly changes at the candidate (round 2's gate question)
+
+
+def refined_group(c):
+    """Round 2's cells, a refinement of round 1's agreement groups by TransNetV2's band (>= 0.5,
+    0.3-0.5, 0.1-0.3, under 0.1) and, where it alone fires, the picture's change (MAFD): R1 all three
+    (both PySceneDetect detectors), R2 TransNetV2 >= 0.5 with scdet >= 10 or PySceneDetect, R3m/R3z
+    TransNetV2 >= 0.5 alone, the picture moving / still (MAFD < STILL_MAFD), R4h/R4l TransNetV2 at
+    0.3-0.5 / 0.1-0.3 with another detector, R5 the others with TransNetV2 under 0.1, R5b lone scdet
+    hits inside a burst, R6hm/R6hz TransNetV2 at 0.3-0.5 alone (moving / still), R6l at 0.1-0.3
+    alone, R6z none of them."""
+    tn, n_p = cval(c, "tnet"), (c["adaptive"] != "") + (c["content"] != "")
+    S, P = cval(c, "scdet") >= 10, n_p > 0
+    still = cval(c, "mafd") < STILL_MAFD
+    if tn >= 0.5:
+        return "R1" if S and n_p == 2 else "R2" if S or P else "R3z" if still else "R3m"
+    if tn >= 0.3:
+        return "R4h" if S or P else "R6hz" if still else "R6hm"
+    if tn >= 0.1:
+        return "R4l" if S or P else "R6l"
+    if S and not P and int(c.get("burst") or 0) >= 2:
+        return "R5b"
+    return "R5" if S or P else "R6z"
+
+
 def round_detectors():
-    """summary's detectors, then combinations the labels can weigh: scdet without its bursts, and
-    TransNetV2 with a second detector."""
-    num = lambda c, k: float(c[k]) if c[k] not in ("", "nan") else 0.0  # noqa: E731
+    """summary's detectors, then combinations the labels can weigh: scdet without its bursts,
+    TransNetV2 with a second detector, and TransNetV2 gated on a picture change (MAFD)."""
     return label_detectors(True) + [
-        ("scdet >= 10 outside bursts", lambda c: num(c, "scdet") >= 10 and int(c["burst"] or 0) < 2),
-        ("scdet >= 8 outside bursts", lambda c: num(c, "scdet") >= 8 and int(c["burst"] or 0) < 2),
-        ("TransNetV2 >= 0.5 or scdet >= 10", lambda c: num(c, "tnet") >= 0.5 or num(c, "scdet") >= 10),
-        ("TransNetV2 >= 0.5 or PySceneDetect content", lambda c: num(c, "tnet") >= 0.5 or c["content"] != ""),
-        ("TransNetV2 >= 0.3 or PySceneDetect content", lambda c: num(c, "tnet") >= 0.3 or c["content"] != ""),
+        ("scdet >= 10 outside bursts", lambda c: cval(c, "scdet") >= 10 and int(c["burst"] or 0) < 2),
+        ("scdet >= 8 outside bursts", lambda c: cval(c, "scdet") >= 8 and int(c["burst"] or 0) < 2),
+        ("TransNetV2 >= 0.5 or scdet >= 10", lambda c: cval(c, "tnet") >= 0.5 or cval(c, "scdet") >= 10),
+        ("TransNetV2 >= 0.5 or PySceneDetect content", lambda c: cval(c, "tnet") >= 0.5 or c["content"] != ""),
+        ("TransNetV2 >= 0.3 or PySceneDetect content", lambda c: cval(c, "tnet") >= 0.3 or c["content"] != ""),
+        ("TransNetV2 >= 0.3, MAFD >= 2", lambda c: cval(c, "tnet") >= 0.3 and cval(c, "mafd") >= 2),
+        ("TransNetV2 >= 0.3, MAFD >= 3", lambda c: cval(c, "tnet") >= 0.3 and cval(c, "mafd") >= 3),
+        ("TransNetV2 >= 0.5, MAFD >= 3", lambda c: cval(c, "tnet") >= 0.5 and cval(c, "mafd") >= 3),
     ]
 
 
@@ -1749,18 +1788,44 @@ def round_boot(cells, dets, n, seed):
 
 
 def cmd_round(a):
-    """Estimates from a round of labels (scd_review.py round): each labelled row stands for its
-    cell's candidates / the cell's labelled rows; cells without a label are counted apart."""
-    with open(os.path.join(a.round, "rows.csv"), newline="", encoding="utf-8") as f:
-        rows = [r for r in csv.DictReader(f) if r["episode"] not in a.skip]
-    labels, odd = read_round_labels(os.path.join(a.round, "labels.txt"))
-    labels = {k: v for k, v in labels.items() if k in {int(r["round_row"]) for r in rows}}
+    """Estimates from rounds of labels (scd_review.py round): each labelled row stands for its
+    cell's candidates / the cell's labelled rows; cells without a label are counted apart. One
+    round: its own cells (rows.csv's group and cell_size). Several, or --dirs: every row in its
+    refined cell (refined_group), the cells' sizes counted in the episodes' candidates.csv."""
+    if len(a.round) > 1 and not a.dirs:
+        sys.exit("several rounds are pooled in refined cells: --dirs (the episode directories) is needed")
+    rows, labels, odd = [], {}, 0
+    for i, rd in enumerate(a.round):
+        with open(os.path.join(rd, "rows.csv"), newline="", encoding="utf-8") as f:
+            rs = [r for r in csv.DictReader(f) if r["episode"] not in a.skip]
+        lab, o = read_round_labels(os.path.join(rd, "labels.txt"))
+        odd += o
+        for r in rs:
+            r["round_row"] = f"{i + 1}.{int(r['round_row']):03d}"  # unique across rounds
+            k = int(r["round_row"].split(".")[1])
+            if k in lab:
+                labels[r["round_row"]] = lab[k]
+        rows += rs
+    if a.dirs:
+        sizes = {}
+        for d in a.dirs:
+            name = load_json(os.path.join(d, "stats.json"))["name"]
+            if name in a.skip:
+                continue
+            kind = KINDS.get(name, "animation")
+            with open(os.path.join(d, "candidates.csv"), newline="", encoding="utf-8") as f:
+                for c in csv.DictReader(f):
+                    sizes[(refined_group(c), kind)] = sizes.get((refined_group(c), kind), 0) + 1
+        for r in rows:
+            r["group"] = refined_group(r)
+            r["cell_size"] = sizes.get((r["group"], r["kind"]), 0)
     cells = {}
     for r in rows:
         cells.setdefault((r["group"], r["kind"]), []).append(r)
-    out = [f"Round {a.round}: {len(labels)} of {len(rows)} rows labelled" + (f"; {odd} letters read as other" if odd
-           else "") + (f"; left out: {', '.join(a.skip)}" if a.skip else "") + ". Labels: c cut, f flash, p pan "
-           "or motion, d fade or dissolve (the tables' fade), o other, n nothing (not-a-cut).\n",
+    out = [f"Round {', '.join(a.round)}: {len(labels)} of {len(rows)} rows labelled" +
+           (f"; {odd} letters read as other" if odd else "") + (f"; left out: {', '.join(a.skip)}" if a.skip else "") +
+           (" (refined cells)" if a.dirs else "") + ". Labels: c cut, f flash, p pan or motion, d fade or dissolve "
+           "(the tables' fade), o other, n nothing (not-a-cut).\n",
            "Per agreement group and kind (scd_review.py round): candidates, rows labelled, labels, the share of "
            "cuts with its 90% Wilson interval:\n",
            "| group | kind | candidates | labelled | " + " | ".join(LABELS) + " | cuts | 90% interval |",
@@ -1768,7 +1833,7 @@ def cmd_round(a):
     est, unlabelled, strata = {}, {}, {}
     for (g, kind), rs in sorted(cells.items()):
         size = int(rs[0]["cell_size"])
-        lab = [(r, labels[int(r["round_row"])]) for r in rs if int(r["round_row"]) in labels]
+        lab = [(r, labels[r["round_row"]]) for r in rs if r["round_row"] in labels]
         n = len(lab)
         cnt = {k: sum(1 for _, x in lab if x == k) for k in LABELS}
         lo, hi = wilson(cnt["cut"], n)
@@ -1894,7 +1959,8 @@ def main():
                    help="pool an episode with this kind (default: KINDS, else animation)")
     p.add_argument("--md", help="also write the tables to this file")
     p = sub.add_parser("round")
-    p.add_argument("round", help="a round's directory (scd_review.py round): rows.csv and labels.txt")
+    p.add_argument("round", nargs="+", help="rounds' directories (scd_review.py round): rows.csv, labels.txt")
+    p.add_argument("--dirs", nargs="*", default=[], help="episode directories: pool the rows in refined cells")
     p.add_argument("--skip", nargs="*", default=[], metavar="NAME", help="episodes left out")
     p.add_argument("--boot", type=int, default=2000, help="bootstrap draws for the intervals")
     p.add_argument("--seed", type=int, default=1)

@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 18:14 CEST
+Last update: 2026-10-05 18:23 CEST
 
 ## 0. Setup
 
@@ -196,6 +196,9 @@ temporal regression.
       Unlabelled so far: on action anime, scdet fires in bursts on new drawings after held frames
       and on effects (at threshold 10, half the shots of the dark anime episode are under 0.5 s),
       and misses some dark cuts; the bright cartoon is clean
+- [~] Labels, round 2 (2026-10-05, `scd_review.py round --plan 2`): 50 more rows in refined cells
+      (TransNetV2's band, the picture's change where it alone fires), for the threshold, a
+      picture-change gate and the bursts it misses. The user is labelling
 - [x] Doc + decision brief ([docs/scene-detection.md](docs/scene-detection.md), 2026-10-05):
       TransNetV2 at p = 0.3, no burst handling, no minimum shot length
 

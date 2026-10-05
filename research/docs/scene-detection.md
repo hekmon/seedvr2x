@@ -1,8 +1,9 @@
 # Scene detection
 
-> Status: **round 1 labelled, brief written** (2026-10-05), for DESIGN.md's open question on
-> seedvr2x's own scene detection ([DESIGN.md](../../seedvr2x/DESIGN.md#open-questions)): which
-> detector, which threshold, what to do with bursts, and whether shots need a minimum length.
+> Status: **round 1 labelled, brief written, round 2 under way** (2026-10-05), for DESIGN.md's
+> open question on seedvr2x's own scene detection
+> ([DESIGN.md](../../seedvr2x/DESIGN.md#open-questions)): which detector, which threshold, what
+> to do with bursts, and whether shots need a minimum length.
 > Three detectors ran on every frame of 11 sources; the user labelled 100 of their candidates,
 > drawn where the detectors disagree ([round 1](#round-1-targeted-on-the-disagreements),
 > [estimates](#labelled-estimates)). The [decision brief](#decision-brief) is joint with question
@@ -18,7 +19,9 @@ In short (the statistics count detections; the estimates come from the labels):
   24%, at the same precision (0.86). On animation it finds as many as scdet (0.80 at 0.5, 0.88 at
   0.3, against 0.84) with fewer false cuts (precision 0.88 and 0.84 against 0.69: scdet's
   bursts). Filtering scdet's bursts loses real cuts (recall 0.64). The
-  [brief](#decision-brief): TransNetV2 at p = 0.3, no burst handling, no minimum shot length.
+  [brief](#decision-brief): TransNetV2 at p = 0.3, no burst handling, no minimum shot length;
+  [round 2](#round-2-the-threshold-a-picture-change-gate-and-the-bursts) settles the threshold
+  and tests a gate on a picture change.
 
 - **Three detectors, every frame of 11 sources:** 8 animated (three cartoon episodes, three
   anime episodes, two anime films), two live-action films and a DVD episode, 4.4 hours analysed.
@@ -375,8 +378,33 @@ is where they don't. So round 1 takes 100 of the first review's rows, by agreeme
   (with its 90% Wilson interval), then the first review's per-detector table (recall, false cuts
   by label, precision), each labelled row standing for its cell's candidates / the cell's
   labelled rows, per kind and for every kind.
-- A second round of at most 50 rows if the intervals are too wide to choose. The first review's
-  index stays as it is; labels written there add to the estimates.
+- A second round of at most 50 rows if the intervals are too wide to choose (below). The first
+  review's index stays as it is; labels written there add to the estimates.
+
+### Round 2: the threshold, a picture-change gate and the bursts
+
+Built on 2026-10-05 (`scd_review.py round --plan 2`); the labels are under way. Round 1 left three
+questions open on animation: where TransNetV2's threshold goes (between 0.3 and 0.5 sat 7 cuts
+and 3 pans), whether its false cuts on still pictures can be gated away (round 1's cuts all had a
+MAFD of 3.35 or more, 8 of its false cuts 0.4–3.0), and how many cuts hide in the bursts it misses
+(2 of 6 lone scdet hits there). So round 2 takes 50 more of the first review's rows (none of
+round 1's, none of the DVD's), in refined cells: TransNetV2's band (≥ 0.5, 0.3–0.5, 0.1–0.3, under
+0.1) and, where it alone fires, the picture's change (MAFD under 4, still, or not):
+
+| Cell | Animation | Live action | Question |
+|---|---:|---:|---|
+| R3z, TransNetV2 ≥ 0.5 alone, still picture | 6 | 3 | does a gate lose cuts? |
+| R3m, TransNetV2 ≥ 0.5 alone, moving | 3 | 2 | the same, moving |
+| R4h, TransNetV2 0.3–0.5 with another detector | 6 | 2 | the threshold |
+| R6hz, R6hm, TransNetV2 0.3–0.5 alone, still / moving | 3, 3 | 2, 2 | the threshold, and the gate |
+| R4l, TransNetV2 0.1–0.3 with another detector | 4 | 1 | below 0.3 |
+| R5b, lone scdet hits inside bursts | 8 | | TransNetV2's blind spot |
+| R6z, R5: none, or the others alone, TransNetV2 under 0.1 | 3, 2 | | what TransNetV2 misses |
+
+The rows are drawn and shown as round 1's. `scd_scores.py round ROUND1 ROUND2 --dirs ...` pools
+both rounds: every labelled row goes to its refined cell (round 1's re-sorted by their own values)
+and stands for the cell's candidates / the cell's labelled rows, the cells sized in the episodes'
+candidates.csv. Its detectors include TransNetV2 gated on MAFD ≥ 2 and ≥ 3.
 
 ## Labelled estimates
 
@@ -483,8 +511,9 @@ Joint with question 2 ([cuts.md](cuts.md#what-it-means-for-shot-detection)), 202
     48×27); another scaler is untested.
   - The DVD is out (its labels were on misaligned thumbnails; refused as interlaced). Two
     live-action films; no broadcast or clean digital live action.
-  - Optional: a second round of at most 50 rows on the 0.1–0.5 band and the change gate would
-    firm up the threshold.
+  - Round 2 (50 rows, under way) settles the threshold between 0.3 and 0.5, tests a gate on a
+    picture change against TransNetV2's false cuts on still pictures, and sizes its blind spot in
+    bursts. The detector choice doesn't depend on it.
 
 ## Caveats
 
@@ -530,6 +559,9 @@ python3 $R index $O/review
 # round 1: 100 of the review's rows by agreement group and kind, blind; estimates from its labels
 python3 $R round $O/review $O/EP... --out $O/round1
 python3 $S round $O/round1 --skip malcolm-s01e01 --md round1.md   # the DVD: thumbnails misaligned
+# round 2: 50 more rows in refined cells; then both rounds pooled in those cells
+python3 $R round $O/review $O/EP... --out $O/round2 --plan 2 --exclude $O/round1/rows.csv
+python3 $S round $O/round1 $O/round2 --dirs $O/EP... --skip malcolm-s01e01 --md rounds.md
 # costs on one source, 16 threads, page cache warm: decode alone, then sptenc's chain
 # (score, pysd and tnet as above: each logs its own seconds)
 ffmpeg -threads 16 -i SRC -map 0:v:0 -fps_mode passthrough -f null -
