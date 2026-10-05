@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 12:10 CEST
+Last update: 2026-10-05 12:54 CEST
 
 ## 0. Setup
 
@@ -25,7 +25,8 @@ Last update: 2026-10-05 12:10 CEST
 - [~] Samples from the user: two live-action Blu-rays (film grain 1.65 and 1.02, the grainy cel
       film 1.91), a bright anime episode, an NTSC DVD episode (16:9 anamorphic, declared interlaced;
       an inverse telecine leaves half the frames combed, so interlaced video), the original of the
-      dark anime episode; two 4K remasters on their way (HEVC with open GOPs?). No broadcast TS,
+      dark anime episode; a 4K UHD Blu-ray remux (HEVC, HDR10 + Dolby Vision 7, closed GOPs), a
+      second 4K remaster awaited. No broadcast TS,
       no clean digital live action yet. Running on them: full-reference clips (question 1), cuts
       (question 2), scdet passes (question 3), seek tests (question 4)
 
@@ -202,7 +203,8 @@ temporal regression.
       timestamps, never the declared rate (a film declared 24 fps runs at 23.976 by its
       timestamps, which match its audio: 5.9 s apart at the end). Invalid entry points on 2 of 7
       real H.264 sources, so the content check is required
-- [ ] Real VOB, broadcast TS, open-GOP MPEG-2 and open-GOP HEVC (the 4K remasters may cover HEVC)
+- [ ] Real VOB, broadcast TS, open-GOP MPEG-2 and open-GOP HEVC (the first 4K remaster has closed
+      GOPs: an IDR every 24 frames, no leading pictures; it decodes at 204 fps on 16 threads)
 - [x] Doc ([docs/seeking.md](docs/seeking.md)) + decision brief (2026-10-02)
 
 ## 5. Decode resume granularity

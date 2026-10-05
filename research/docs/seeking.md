@@ -221,6 +221,14 @@ file whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 
    steps of 62–63 ms, one every ≈ 20.9 s; the frames around the first one show no repeated
    fields (`pic_struct` 0). The audio (DTS 5.1) ends at 5,942.46 s, with the timestamps; at 24/1
    the video would end 5.9 s early. `n/fps` at the declared rate falls up to 142 frames early.
+   The 41–42 ms steps average 24 fps; the long ones, from frame 251 and then every 498–502 frames,
+   pull the timeline back onto 24000/1001: against that grid anchored at frame 0, every frame lies
+   within −10.83 … +10.88 ms, a quarter of a frame, none beyond half. Retimed on decode
+   (`fps=24000/1001`, `-fps_mode cfr -r 24000/1001`, or `settb=1001/24000,setpts=N` with
+   `-fps_mode passthrough`), the first 3,000 frames come out as the source's own, in order, none
+   dropped or doubled (framemd5); ffmpeg n9 refuses `-r` with `-fps_mode passthrough` (measured by
+   the design conversation, 2026-10-05). seedvr2x refuses such a file and says how to fix it
+   ([DESIGN.md](../../seedvr2x/DESIGN.md#input)).
 8. **ffmpeg-side counting resets when ffmpeg rebuilds its filter graph.** S6's first 14 frames
    carry no colour description and the 15th brings BT.601 (`smpte170m`). ffmpeg reconfigures the
    filter graph ("video parameters changed") and `select`'s `n` starts again from 0: `d_count`
@@ -269,7 +277,12 @@ file whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 
   VOB boundaries), open-GOP MPEG-2 (the DVD tested is closed), broadcast TS (timestamp wraps,
   missing keyframe flags). The synthetic files only exercised the missing index.
 - **Real open-GOP HEVC** (CRA/RASL, BLA): in MKV, in MP4 with and without a `sync` sample group,
-  and in TS.
+  and in TS. The first 4K UHD Blu-ray remux (HEVC Main 10, 3840×2160, HDR10 with Dolby Vision
+  profile 7 in the same track, 361,198 frames, MKV) has closed GOPs: an IDR without leading
+  pictures every 24 frames, or sooner at cuts, B-runs of up to 4, pts on the 24000/1001 grid
+  within 0.6 ms (`info` and `nal`; the packet scan took 3.5 s for 87 GB). It decodes at 204 frames
+  per second on 16 threads and 315–326 on 48: a first pass over its 4 h 11 min takes at least 30
+  or 19 minutes.
 - **The method's own costs:** how often the hash check falls back on real sources, and the hash's
   cost inside seedvr2x's first pass, next to scene detection.
 - **Not covered:** deinterlacing and telecine (S6 was read as interlaced frames, as decoded).
