@@ -416,18 +416,27 @@ Decoding goes through an ffmpeg pipe:
   also match the measured durations, since the output is written at that rate.
   - Comparing declared rates alone fails on Matroska: sptenc found a 24/30 fps mix declared
     24/1 for both.
-  - A file whose timestamps contradict its declared rate is a bad file to remake, refused
-    like any other, not reinterpreted (the user's decision). The case measured: a Blu-ray
-    remux declared 24/1 whose frames step at 24 fps, with one frame in 500 held 62–63 ms
-    instead of 42, which keeps every frame within ±10.9 ms of a steady 24000/1001 timeline,
-    its audio's ([seeking.md](../research/docs/seeking.md), mechanism 7).
-  - When the timestamps follow a constant rate within half a frame, as there, the message
-    gives that rate and how to remake the file: an FFV1 master at that rate, the other
-    streams copied with it. ffmpeg keeps every frame doing so: on that file's first 3,000
-    frames, `fps=24000/1001`, `-fps_mode cfr -r 24000/1001` and a plain retiming all gave the
-    source's frames in order, none dropped or doubled.
+  - A file whose timestamps contradict its declared rate is a bad file: refused like any
+    other, never reinterpreted on seedvr2x's own (the user's decision). The case measured: a
+    Blu-ray remux declared 24/1 whose frames step at 24 fps, with one frame in 500 held 62–63
+    ms instead of 42, which keeps every frame within ±10.9 ms of a steady 24000/1001
+    timeline, its audio's ([seeking.md](../research/docs/seeking.md), mechanism 7).
+  - The fix is the user's, and seedvr2x guides it. When the timestamps follow a constant rate
+    within half a frame, as there, the message gives that rate, the largest deviation, and
+    two fixes:
+    - Remake the file: an FFV1 master at that rate, the other streams copied with it, a clean
+      file for every tool. ffmpeg keeps every frame doing so: on that file's first 3,000
+      frames, `fps=24000/1001`, `-fps_mode cfr -r 24000/1001` and a plain retiming all gave
+      the source's frames in order, none dropped or doubled. It costs about 80 GB for that
+      film (0.53–0.55 MB per frame, against the source's 14.5 GB) and a full encode.
+    - Or `--frame-rate R`, an override like the matrix's and the sample aspect's: the frames
+      are taken at R, accepted only if every one lies within half a frame of R's timeline,
+      so none is dropped or doubled, and R is recorded as a setting. The same frames on the
+      same timeline, without the intermediate file.
   - The pass costs one software decode (171 fps on an HEVC master, over 1,000 fps on
-    H.264). scdet and idet join it with automatic scene detection.
+    H.264). scdet and idet join it with automatic scene detection. A 4K UHD HEVC remux
+    decodes at 204 fps on 16 threads and 315–326 on 48: at least 19–30 min for a 4-hour film
+    ([seeking.md](../research/docs/seeking.md)).
 - interlacing: refused when the field order is neither progressive nor unknown (sptenc's
   rule)
 - frame-exact reading from any frame, through an index the first pass builds
@@ -1278,7 +1287,8 @@ explanation.
     size, which is why 4K needs tiled decoding
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, interlaced, telecined, rotated, cropped, unusual pixel formats or
-  matrices), and what to do with each
+  matrices), and what to do with each; for a rate its timestamps contradict, the two fixes
+  and what each costs (see [Input](#input))
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
   transfer kept, square pixels)
 - resume: the same command resumes; what refuses a resume and why; `--accept-env-change`
@@ -1457,6 +1467,11 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
     spread) for 4.4% more decode time and bf16's memory, 3.4 times under float16's overflow on
     the brightest clip. After `lab`, only −0.01 to −0.02 is left. So it is decided on the
     colour study's winner, scored on float16 decodes; numz's bf16 decode stays until then.
+    If float16 is taken, a non-finite value redoes the decode unit in bf16 from its start
+    (the shot, or a warm-up of min(s, 37) latents before the failing slice), never switching
+    precision mid-pass: bf16 and float16 decodes differ by about 0.3 level, so a switch would
+    leave a step and mix precisions in the causal caches. That shot gets numz's bf16 picture.
+    A test forces a non-finite value, since none ever occurred.
   - the chroma kernel at decode, Catmull-Rom upsampling, which shapes what the model sees
     (GPU runs). The master's downsampling is settled: bilinear (see [Output](#output)).
   - a shot padded to 4n + 1 frames by mirroring its end (numz) or repeating its last frame
