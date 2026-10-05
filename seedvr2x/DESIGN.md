@@ -521,13 +521,13 @@ both ways. A test holds the chains to that.
 ### Shot detection
 Shot detection is the biggest quality lever outside the model, and what both workflows start
 from (see [Two kinds of users](#two-kinds-of-users-both-first-class)). The detector was chosen
-on the user's labels: 80 candidates drawn where the detectors disagree, shown blind
-([scene-detection.md](../research/docs/scene-detection.md#decision-brief), jointly with
+on the user's labels: 130 candidates in two rounds, drawn where the detectors disagree, shown
+blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief), jointly with
 [cuts.md](../research/docs/cuts.md#what-it-means-for-shot-detection)).
 - **The detector: TransNetV2**, the official model (MIT): its PyTorch code vendored, its
   weights converted from the official TensorFlow ones by its own `convert_weights.py` (PyTorch
-  matches TensorFlow within 3e-7), saved as safetensors by `models/`'s script and pulled from
-  seedvr2x's Hugging Face repo (see [Weights](#weights)).
+  matches TensorFlow within 5.1e-7, with the same detections), saved as safetensors by
+  `models/`'s script and pulled from seedvr2x's Hugging Face repo (see [Weights](#weights)).
   - It reads every frame of the first pass's decode, scaled to 48×27 as its official extraction
     scales them (ffmpeg's default scaler; another scaler is untested), on one thread, so that
     its input doesn't depend on the CPU count.
@@ -535,34 +535,48 @@ on the user's labels: 80 candidates drawn where the detectors disagree, shown bl
     of 1080p source over the decode the frame index makes anyway (16 threads), deterministic;
     the GPU's is measured at the build step, the cut list checked equal to the CPU's on the
     labelled sources.
-- **A cut** starts on the frame after each peak above the threshold: TransNetV2 marks the
-  outgoing shot's last frame (offset −1 on 98% of the sure cuts). Every detection starts a
-  shot, however short: no burst filter and no minimum shot length. A short shot is better run
-  alone than merged into its neighbour, from 1 frame on (10–21 dB·frames of PSNR-Y), and real
-  cuts come 1–3 frames apart in action anime.
-- **The threshold is 0.3 for now**, a setting recorded in the manifest. Between 0.3 and 0.5 sat
-  7 real cuts and 3 pans, and a miss costs fidelity (5–31 dB·frames of PSNR-Y on four of six
-  cuts) where a false cut costs none (at most a low-frequency step on a continuous shot). A
-  second labelling round (50 rows, under way) settles it, and whether a gate on a picture
-  change at the candidate removes TransNetV2's false cuts on still pictures (held frames,
-  rolling credits) without losing dark, low-contrast cuts. The gate would be a setting too.
+- **A cut:** a detection is a run of frames whose single-frame probability (the sigmoid of
+  TransNetV2's single-frame head) reaches the threshold, one per run, at its peak. The cut is
+  the frame after the peak: TransNetV2 marks the outgoing shot's last frame (offset −1 on 98%
+  of the sure cuts). Every detection starts a shot, however short: no burst filter and no
+  minimum shot length. A short shot is better run alone than merged into its neighbour, from 1
+  frame on (10–21 dB·frames of PSNR-Y), and real cuts come 1–3 frames apart in action anime.
+- **The threshold is 0.3**, confirmed by the second round: a setting recorded in the manifest,
+  not an option, since the cut list is how to add cuts. Against 0.5 it misses an estimated 92
+  cuts per hour of animation instead of 122, and 19 per hour of live action instead of 70, for
+  more false cuts (animation's precision 0.82 against 0.89). A miss costs fidelity (5–31
+  dB·frames of PSNR-Y on four of six cuts), a false cut none (at most a low-frequency step on
+  a continuous shot).
+- **No gate on a picture change.** Its measure, scdet's MAFD at the cut frame (the mean
+  absolute difference between that frame's luma and the previous one's, at full resolution and
+  native bit depth, in percent), at 2 keeps every labelled cut but adds only 0.02–0.03 of
+  precision, and at 3 loses live-action cuts. The lowest real cuts sit at 2.14 and 2.93
+  (low-contrast cuts in a slow film) and 2.45 (rolling credits); TransNetV2's false cuts on
+  still pictures run from 0.42 to 3.87.
+  - Should false cuts on held pictures show in the user's visual review (stitching found a
+    unit boundary's step visible on held drawings), the fallback keeps a detection only at a
+    MAFD of 1.5 or more, 0.6 under the lowest labelled cut.
 - **Why TransNetV2:**
-  - Live action: recall 0.99 at 0.3, against 0.24 for scdet as sptenc runs it (threshold 10),
-    precision 0.86 for both. scdet would miss about three quarters of the cuts, an estimated
-    640 per hour on the two films.
-  - Animation: recall 0.88 against scdet's 0.84, precision 0.84 against 0.69. scdet bursts by
+  - Live action: recall 0.98 at 0.3, against 0.25 for scdet as sptenc runs it (threshold 10),
+    precision 0.84 against 0.89: scdet misses three quarters of the cuts.
+  - Animation: recall 0.90 against scdet's 0.84, precision 0.82 against 0.62. scdet bursts by
     construction: its score is the smaller of the frame difference and that difference's change
     from the previous frame, so every new drawing after a held one scores its whole difference
     (351 bursts per hour against TransNetV2's 19). Filtering scdet's bursts loses a third of
     its cuts. PySceneDetect avoids bursts only through its 15-frame minimum scene length, which
     merges real flash cuts too.
-  - Its blind spot is fast action anime, where scdet bursts: 2 of the 6 lone scdet hits there
-    were real cuts TransNetV2 scored under 0.1. A union with scdet takes them back with the
-    bursts (recall 0.98, precision 0.67 on animation): not taken. The second round sizes it.
+  - Its blind spot is fast action anime, inside scdet's bursts: of 14 labelled lone scdet hits
+    there, 2 were real cuts (14%, 5–35%) that TransNetV2 scored under 0.1. So it misses about
+    60–70 cuts per hour of action anime (25–180 at the interval's ends). Taking them back with
+    scdet would bring 6 false cuts for each real one, a burst again: not taken. Such content
+    gets its missing cuts by hand, through a cut list.
+  - Unlabelled: the 548 animated candidates TransNetV2 alone scores 0.1–0.3 hold at most
+    about 80 cuts, under 3% of animation's estimated 2,910.
 - scdet and PySceneDetect aren't used, and the startup check doesn't require scdet. idet stays,
   for telecined sources declared progressive.
 - The cuts are recorded with the first pass's record, which a resume trusts. A cut list given
-  with `--cuts` replaces the detection.
+  with `--cuts` replaces the detection, and `--plan` writes the detected one in the same
+  format, so that adding or removing a few cuts is an edit, not a rewrite.
 
 ### Colour and shape, SD sources included
 The rule: the upscale must look like its source in any given player.
@@ -1081,7 +1095,9 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
     than planning again, since free memory varies from one start to the next. A resume whose
     plan no longer fits stops and says so.
   - `--window` and the tile options pin a plan, for two runs that must match bit for bit.
-- `--plan` prints the plan and the time estimate without running the job.
+- `--plan` prints the plan and the time estimate without running the job, after the first pass
+  (the shots are the plan's input), and writes the detected cut list for editing (see
+  [Shot detection](#shot-detection)).
 - Validated before release with `vram_cap.py` emulation, from the smallest card the 7B fp16
   reaches up to 48 GB.
 
@@ -1357,7 +1373,7 @@ explanation.
 - the two workflows: a file in and a finished file out, or the source in and a directory of
   segments out for sptenc's encode
 - how shots are found: TransNetV2, why a missed cut costs more than a false one, and a cut list
-  (`--cuts`) for content it gets wrong
+  (`--cuts`) for content it gets wrong, fast action anime first
 - the model: v1 runs the 7B fp16 alone, the reference every check is made against, and phase 2
   brings the others
 - what the model does to live action ([numerics.md](../research/docs/numerics.md)): the
@@ -1423,8 +1439,7 @@ writers, and the planner needs real shot lengths.
    source being the only input; then the shot detector (see [Shot detection](#shot-detection)),
    whose brief is in, and with it the frame index (see [Input](#input)), so a resume seeks
    instead of decoding from the start, and the frame-rate refusal's guidance. The detector's
-   threshold and gate come from the brief's second round, as settings. Until then, the cuts
-   come from a cut list.
+   threshold is settled (0.3), with no gate. Until it is built, the cuts come from a cut list.
 4. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory. The planner's inputs (budget,
    margin, the DiT's and the tiled VAE's peaks, 4K limits, measured times) are in
@@ -1517,7 +1532,8 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
 6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
    for frame, and every other stream is copied.
 7. **Visual review** of long runs by the user, fast motion included, where the frames inside a
-   latent group can ghost (see [To measure](#to-measure)).
+   latent group can ghost (see [To measure](#to-measure)), and held pictures, where a false
+   cut's step would show (see [Shot detection](#shot-detection): the fallback gate).
 
 ## Open questions
 
