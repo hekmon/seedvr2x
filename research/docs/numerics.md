@@ -67,8 +67,8 @@ of 3 seeds):
   the unconverted output (PSNR-Cb +1.1 dB), the GT's own chroma being 4:2:0; the usual metrics
   don't move. But ffmpeg runs zscale in slices, one per CPU by default, and the bytes depend on
   them: the master's chroma on 1.7% of the samples (up to 13 ten-bit codes), a 10-bit 4:2:0
-  source's RGB on nearly every sample (up to 0.57 level) from 4 slices on. zscale's `threads=1`
-  restores the single-slice bytes for 2.5 ms per 1080p frame
+  source's RGB on nearly every sample (up to 0.57 level) from 4 slices on. `threads=1` on zscale (libavfilter's
+  generic per-filter option) restores the single-slice bytes for 2.5 ms per 1080p frame
   ([The master's chroma](#the-masters-chroma-420-kernels-and-zscales-slices)).
 - **The resize kernel is second order:** torchvision's bicubic without antialiasing adds a
   little low-frequency colour error and flicker on 7 of 7 clips (live-slow: every metric worse).
@@ -763,9 +763,12 @@ output, each count against one slice:
   (at most 1 sixteen-bit code off) and off from 4 on (rms 35, up to 146 codes, 0.57 level); an
   8-bit 4:2:0 source reads exactly at any count. Why 10-bit and not 8-bit is not known (ffmpeg
   n9.0.2).
-- **zscale's own `threads=1` option fixes it:** with `-filter_threads 48`, both chains then give
-  the one-slice bytes (framemd5). ffv1_out.py and fr_clips.py set it since 2026-10-05: on the
-  48-CPU box ffv1_out.py's master then equals the one-slice one, 45 of 45 frames.
+- **`threads=1` on zscale fixes it:** with `-filter_threads 48`, both chains then give the
+  one-slice bytes (framemd5). `threads` is libavfilter's generic per-filter option ("Allowed
+  number of threads", beside `enable` and `thread_type`), not one of zscale's own: `ffmpeg -h
+  filter=zscale` doesn't list it, `ffmpeg -h full` does among the generic filter options, and
+  any build takes it. ffv1_out.py and fr_clips.py set it since 2026-10-05: on the 48-CPU box
+  ffv1_out.py's master then equals the one-slice one, 45 of 45 frames.
 - **The measurements so far are unaffected:** fr_clips.py's GT conversions of these 8-bit
   sources, its d1 downscale and its bicubic baselines give the same bytes on 1 and 48 slices (the
   stored files equal the one-slice output), and every score here reads 16-bit RGB masters, not
@@ -969,6 +972,16 @@ python3 $S/chroma_kernels.py timing --src MODEL.mkv --json timing.json
 python3 $S/chroma_kernels.py summary scores/*.json --frm frm --q1 m/d1-lab --proof proof/*.json \
   --siting siting.json --threads-json threads.json --gtcheck gtcheck.json --upcheck up.json \
   --srcchroma srcchroma/*.json --timing timing.json --md summary.md
+# zscale's slices, standalone (ffmpeg + zimg only, e.g. for an FFmpeg report): one testsrc2 frame
+DOWN="zscale=rin=full:pin=709:tin=709:m=709:r=limited:p=709:t=709:d=none:c=left,format=yuv420p10le"
+UP="zscale=min=709:rin=limited:cin=left:pin=709:tin=709:m=gbr:r=full:p=709:t=709:d=none:f=bicubic"
+UP="$UP:param_a=0:param_b=0.5,format=gbrp16le"
+ffmpeg -f lavfi -i testsrc2=s=1920x1080:r=24:d=1 -frames:v 1 -vf format=gbrp16le -c:v ffv1 rgb.mkv
+for t in 1 2 4 16; do ffmpeg -i rgb.mkv -filter_threads $t -vf "$DOWN" -f framemd5 - | tail -1; done
+#   4 different hashes (n9.0.2); with -vf "zscale=threads=1:${DOWN#zscale=}" at 16: the 1-slice hash
+ffmpeg -i rgb.mkv -filter_threads 1 -vf "$DOWN" -c:v ffv1 yuv10.mkv
+for t in 1 3 4 16; do ffmpeg -i yuv10.mkv -filter_threads $t -vf "$UP" -f framemd5 - | tail -1; done
+#   1 = 3, 4 = 16, the two differ; threads=1 restores 1's; an 8-bit yuv420p copy reads alike at any count
 # the latent grid: per-frame scores by place in the 4-frame groups, against each clip's bicubic baseline
 python3 $S/cut_metrics.py phase m/d1-none/*-d1.def.s{42,43,1234}.json \
   $(for f in m/d1-lab/*-d1.bicubic.s0.json; do echo --base $f; done) \

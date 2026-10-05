@@ -99,7 +99,8 @@ temporal regression.
       round trip even brings it closer than the unconverted output; the usual metrics don't move.
       Found on the way: zscale's slice threading (ffmpeg's default, one slice per CPU) changes the
       master's chroma (1.7% of the samples, up to 13 codes) and a 10-bit source's read; zscale's
-      `threads=1` fixes it, now set in ffv1_out.py and fr_clips.py (earlier data unaffected)
+      `threads=1` (libavfilter's generic per-filter option) fixes it, now set in ffv1_out.py and
+      fr_clips.py (earlier data unaffected)
 - [x] Every fourth frame is the model's best: the last frame of each 4-frame latent group is
       PSNR-Y +0.8 to +5.0 dB and VMAF +2 to +19 closer to the ground truth than the group's
       second, on every clip, with or without `lab`; the input has no such pattern. Fast motion
