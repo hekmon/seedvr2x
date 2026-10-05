@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 18:42 CEST
+Last update: 2026-10-05 20:18 CEST
 
 ## 0. Setup
 
@@ -197,9 +197,13 @@ temporal regression.
       Unlabelled so far: on action anime, scdet fires in bursts on new drawings after held frames
       and on effects (at threshold 10, half the shots of the dark anime episode are under 0.5 s),
       and misses some dark cuts; the bright cartoon is clean
-- [~] Labels, round 2 (2026-10-05, `scd_review.py round --plan 2`): 50 more rows in refined cells
-      (TransNetV2's band, the picture's change where it alone fires), for the threshold, a
-      picture-change gate and the bursts it misses. The user is labelling
+- [x] Labels, round 2 (2026-10-05, `scd_review.py round --plan 2`): 50 more rows in refined cells
+      (TransNetV2's band, the picture's change where it alone fires), labelled. Both rounds pooled
+      (130 rows): TransNetV2 at 0.3 finds 90% of the animated cuts (scdet at 10: 84%, precision
+      0.82 against 0.62) and 98% of the live-action ones (scdet: 25%); 0.3 confirmed over 0.5; no
+      picture-change gate (MAFD >= 2 gains 0.02-0.03 precision, a 0.14 margin to real cuts); the
+      blind spot: 14% of scdet's lone hits inside bursts are real cuts, about 60-70 per hour of
+      action anime. Addendum to the brief written
 - [x] Doc + decision brief ([docs/scene-detection.md](docs/scene-detection.md), 2026-10-05):
       TransNetV2 at p = 0.3, no burst handling, no minimum shot length
 

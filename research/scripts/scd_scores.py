@@ -1753,6 +1753,8 @@ def round_detectors():
         ("TransNetV2 >= 0.5 or scdet >= 10", lambda c: cval(c, "tnet") >= 0.5 or cval(c, "scdet") >= 10),
         ("TransNetV2 >= 0.5 or PySceneDetect content", lambda c: cval(c, "tnet") >= 0.5 or c["content"] != ""),
         ("TransNetV2 >= 0.3 or PySceneDetect content", lambda c: cval(c, "tnet") >= 0.3 or c["content"] != ""),
+        ("TransNetV2 >= 0.3, MAFD >= 1", lambda c: cval(c, "tnet") >= 0.3 and cval(c, "mafd") >= 1),
+        ("TransNetV2 >= 0.3, MAFD >= 1.5", lambda c: cval(c, "tnet") >= 0.3 and cval(c, "mafd") >= 1.5),
         ("TransNetV2 >= 0.3, MAFD >= 2", lambda c: cval(c, "tnet") >= 0.3 and cval(c, "mafd") >= 2),
         ("TransNetV2 >= 0.3, MAFD >= 3", lambda c: cval(c, "tnet") >= 0.3 and cval(c, "mafd") >= 3),
         ("TransNetV2 >= 0.5, MAFD >= 3", lambda c: cval(c, "tnet") >= 0.5 and cval(c, "mafd") >= 3),
@@ -1822,6 +1824,11 @@ def cmd_round(a):
     cells = {}
     for r in rows:
         cells.setdefault((r["group"], r["kind"]), []).append(r)
+    empty = {}  # refined cells with candidates but no row in any round
+    if a.dirs:
+        for (g, kind), size in sorted(sizes.items()):
+            if (g, kind) not in cells:
+                empty.setdefault(kind, []).append(f"{g} {size}")
     out = [f"Round {', '.join(a.round)}: {len(labels)} of {len(rows)} rows labelled" +
            (f"; {odd} letters read as other" if odd else "") + (f"; left out: {', '.join(a.skip)}" if a.skip else "") +
            (" (refined cells)" if a.dirs else "") + ". Labels: c cut, f flash, p pan or motion, d fade or dissolve "
@@ -1846,6 +1853,9 @@ def cmd_round(a):
         strata.setdefault(kind, []).append((size, lab))
         for r, k in lab:
             est.setdefault(kind, []).append((r, k, size / n))
+    for kind, cs in sorted(empty.items()):
+        out.append(f"- {kind}: cells without any row, left out of the estimates: {', '.join(cs)} candidates")
+        unlabelled[kind] = unlabelled.get(kind, 0) + sum(int(c.split()[1]) for c in cs)
     out.append("")
     dets = round_detectors()
     for kind in sorted(est):

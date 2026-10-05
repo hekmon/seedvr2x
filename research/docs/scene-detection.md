@@ -1,6 +1,6 @@
 # Scene detection
 
-> Status: **round 1 labelled, brief written, round 2 under way** (2026-10-05), for DESIGN.md's
+> Status: **rounds 1 and 2 labelled, brief and addendum written** (2026-10-05), for DESIGN.md's
 > open question on seedvr2x's own scene detection
 > ([DESIGN.md](../../seedvr2x/DESIGN.md#open-questions)): which detector, which threshold, what
 > to do with bursts, and whether shots need a minimum length.
@@ -14,14 +14,13 @@
 
 In short (the statistics count detections; the estimates come from the labels):
 
-- **Labelled, TransNetV2 wins** (round 1: 80 valid rows, 46 animated, 34 live action). On live
-  action it finds 95% of the cuts at p = 0.5 and 99% at 0.3, where scdet at sptenc's T = 10 finds
-  24%, at the same precision (0.86). On animation it finds as many as scdet (0.80 at 0.5, 0.88 at
-  0.3, against 0.84) with fewer false cuts (precision 0.88 and 0.84 against 0.69: scdet's
-  bursts). Filtering scdet's bursts loses real cuts (recall 0.64). The
-  [brief](#decision-brief): TransNetV2 at p = 0.3, no burst handling, no minimum shot length;
-  [round 2](#round-2-the-threshold-a-picture-change-gate-and-the-bursts) settles the threshold
-  and tests a gate on a picture change.
+- **Labelled, TransNetV2 wins** (two rounds, 130 valid rows: 84 animated, 46 live action). On
+  live action it finds 98% of the cuts at p = 0.3 (92% at 0.5), where scdet at sptenc's T = 10
+  finds 25%, at about the same precision (0.84 against 0.89). On animation it finds more than
+  scdet (0.90 at 0.3, 0.87 at 0.5, against 0.84) with fewer false cuts (precision 0.82 and 0.89
+  against 0.62: scdet's bursts). Filtering scdet's bursts loses real cuts (recall 0.70). The
+  [brief](#decision-brief): TransNetV2 at p = 0.3, no gate, no burst handling, no minimum shot
+  length; it misses some cuts inside action anime's bursts (14% of scdet's lone hits there).
 
 - **Three detectors, every frame of 11 sources:** 8 animated (three cartoon episodes, three
   anime episodes, two anime films), two live-action films and a DVD episode, 4.4 hours analysed.
@@ -383,7 +382,7 @@ is where they don't. So round 1 takes 100 of the first review's rows, by agreeme
 
 ### Round 2: the threshold, a picture-change gate and the bursts
 
-Built on 2026-10-05 (`scd_review.py round --plan 2`); the labels are under way. Round 1 left three
+Built and labelled on 2026-10-05 (`scd_review.py round --plan 2`). Round 1 left three
 questions open on animation: where TransNetV2's threshold goes (between 0.3 and 0.5 sat 7 cuts
 and 3 pans), whether its false cuts on still pictures can be gated away (round 1's cuts all had a
 MAFD of 3.35 or more, 8 of its false cuts 0.4–3.0), and how many cuts hide in the bursts it misses
@@ -474,9 +473,66 @@ from 2,000 bootstraps of the labelled rows within their cells:
   rows agree (G6 on animation: 0 cuts in 4 rows standing for 5,974 candidates, whose 90% Wilson
   interval goes up to 0.40). Recall is relative to the cuts among the candidates.
 
+### Rounds 1 and 2 pooled
+
+130 rows (84 animated, 46 live action), each in its refined cell; cuts / labelled rows, the
+cell's candidates in brackets:
+
+| Cell | Animation | Live action |
+|---|---|---|
+| R1, all three | 4 / 4 (1,884) | 2 / 2 (172) |
+| R2, TransNetV2 ≥ 0.5 and another | 3 / 4 (795) | 5 / 6 (538) |
+| R3m, TransNetV2 ≥ 0.5 alone, moving | 3 / 7 (73) | 8 / 10 (37) |
+| R3z, TransNetV2 ≥ 0.5 alone, still (MAFD < 4) | 1 / 14 (87) | 4 / 7 (32) |
+| R4h, TransNetV2 0.3–0.5 and another | 6 / 13 (211) | 5 / 5 (31) |
+| R6hm, R6hz, TransNetV2 0.3–0.5 alone | 0 / 6 (133) | 1 / 4 (32) |
+| R4l, TransNetV2 0.1–0.3 and another | 1 / 7 (392) | 1 / 4 (21) |
+| R5, the others, TransNetV2 under 0.1 | 1 / 8 (848) | 1 / 4 (42) |
+| R5b, lone scdet hits inside bursts | 2 / 14 (932) | |
+| R6l, TransNetV2 0.1–0.3 alone | no row (548) | 0 / 3 (74) |
+| R6z, none | 0 / 7 (5,293) | 0 / 1 (54) |
+
+Per detector, recall and precision (90% bootstrap intervals within the cells):
+
+| Detector | Animation: recall | precision | Live action: recall | precision |
+|---|---|---|---|---|
+| scdet ≥ 10 (sptenc) | 0.84 (0.74–0.97) | 0.62 (0.55–0.69) | 0.25 (0.21–0.32) | 0.89 (0.82–0.97) |
+| PySceneDetect content | 0.84 (0.73–0.94) | 0.85 (0.78–0.93) | 0.91 (0.88–0.94) | 0.86 (0.63–0.99) |
+| TransNetV2 ≥ 0.3 | 0.90 (0.82–0.98) | 0.82 (0.71–0.89) | 0.98 (0.95–1.00) | 0.84 (0.64–0.97) |
+| TransNetV2 ≥ 0.5 | 0.87 (0.79–0.94) | 0.89 (0.75–0.96) | 0.92 (0.88–0.95) | 0.86 (0.63–0.98) |
+| TransNetV2 ≥ 0.3, MAFD ≥ 2 | 0.90 (0.82–0.98) | 0.84 (0.73–0.92) | 0.98 (0.95–1.00) | 0.87 (0.65–0.98) |
+| TransNetV2 ≥ 0.3, MAFD ≥ 3 | 0.90 (0.82–0.97) | 0.85 (0.73–0.92) | 0.96 (0.92–0.99) | 0.86 (0.65–0.98) |
+| scdet ≥ 10 outside bursts | 0.70 (0.63–0.80) | 0.99 | 0.25 (0.21–0.32) | 0.97 (0.94–1.00) |
+| TransNetV2 ≥ 0.5 or scdet ≥ 10 | 0.99 (0.98–1.00) | 0.61 (0.53–0.69) | 0.93 (0.89–0.96) | 0.84 (0.62–0.96) |
+
+- **The threshold: 0.3.** Against 0.5 it misses an estimated 92 cuts per hour of animation
+  instead of 122, and 19 per hour of live action instead of 70, for more false cuts (precision
+  0.82 against 0.89 on animation, 0.84 against 0.86 on live action), which cost no fidelity.
+- **No gate.** On the labels, a gate on MAFD ≥ 2 at the cut frame loses no cut and raises
+  precision by 0.02–0.03; ≥ 3 already loses live-action cuts. The lowest-MAFD real cuts are a slow
+  film's low-contrast ones (2.14, 2.93, 3.35–4.09; and 2.45 on rolling credits), TransNetV2's
+  false cuts on still pictures run 0.42–3.87 (11 of 20 under 2): the margin at 2 is 0.14 on 46
+  live-action rows. A small precision gain is not worth a cut lost.
+- **The blind spot:** 2 of the 14 lone scdet hits inside bursts are real cuts (14%, 90% Wilson
+  5–35%), all others flashes, motion or nothing. Those hits come at 433–512 per hour on the
+  action anime, 150–190 on the films and the bright anime, none on the cartoon: TransNetV2
+  misses about 60–70 cuts per hour of action anime there (25–180 at the interval's ends). Taking
+  them back with scdet brings 6 false cuts for each real one.
+- **Left out:** animation's 548 candidates where TransNetV2 alone scores 0.1–0.3 got no row in
+  either round. At the neighbouring cells' cut rates (0–14%) they would hold at most about 80
+  cuts, under 3% of animation's estimated 2,910, which no detector takes at its working
+  threshold: every detector's recall would drop by the same share.
+- **Borderline rows:** five round-2 rows the user marked borderline (zooms, focus pulls, an
+  effect transition; labelled pan or other) read as cuts move TransNetV2 at 0.3 from 0.90 to 0.86
+  on animation (three of them score 0.39–0.49, which 0.3 takes and 0.5 misses), scdet from 0.84
+  to 0.85; no conclusion changes.
+
 ## Decision brief
 
 Joint with question 2 ([cuts.md](cuts.md#what-it-means-for-shot-detection)), 2026-10-05.
+
+Addendum after round 2, 2026-10-05: the threshold stays 0.3, no gate, and nothing beyond the cut
+list for fast action anime ([pooled estimates](#rounds-1-and-2-pooled)).
 
 - **Recommendation:** seedvr2x detects shots with TransNetV2 at p = 0.3: the official model
   (MIT; weights converted from the official TensorFlow ones), on 48×27 frames scaled as its
@@ -498,9 +554,10 @@ Joint with question 2 ([cuts.md](cuts.md#what-it-means-for-shot-detection)), 202
     1 frame on (10–21 dB·frames), and real cuts come 1–3 frames apart in action anime.
   - Cost: about 2.3 min of CPU per hour of 1080p source over the decode the frame index already
     makes (16 threads), deterministic; probably far less on the GPU (not measured).
-- **Confidence:** high for live action and for leaving scdet as sptenc runs it; medium for 0.3
-  over 0.5 (10 rows between them) and for the animated recall (80 rows; some rows stand for
-  600–6,000 candidates).
+- **Confidence:** high for live action, for leaving scdet as sptenc runs it, and for 0.3 over 0.5
+  (28 labelled rows in TransNetV2's 0.3–0.5 band, 18 of them round 2's); medium for the animated
+  recall's level
+  (130 rows, some standing for up to 760 candidates; 548 candidates in a cell no round drew).
 - **Caveats:**
   - TransNetV2's blind spot is fast action anime, where scdet bursts: 2 of 6 lone scdet hits
     there were real cuts it scores under 0.1. A union with scdet takes them back with the bursts
@@ -511,14 +568,15 @@ Joint with question 2 ([cuts.md](cuts.md#what-it-means-for-shot-detection)), 202
     48×27); another scaler is untested.
   - The DVD is out (its labels were on misaligned thumbnails; refused as interlaced). Two
     live-action films; no broadcast or clean digital live action.
-  - Round 2 (50 rows, under way) settles the threshold between 0.3 and 0.5, tests a gate on a
-    picture change against TransNetV2's false cuts on still pictures, and sizes its blind spot in
-    bursts. The detector choice doesn't depend on it.
+  - Round 2 (50 more rows): 0.3 confirmed; a picture-change gate (MAFD ≥ 2 at the cut frame)
+    loses no labelled cut but gains only 0.02–0.03 precision with a 0.14 margin to a slow film's
+    low-contrast cuts: not recommended; the blind spot is 14% (5–35%) of scdet's lone hits in
+    bursts, about 60–70 cuts per hour of action anime, not worth scdet's bursts back.
 
 ## Caveats
 
-- **Labels on 80 rows.** The statistics count detections; only the estimates rest on labels,
-  and those on 80 rows, a few of which stand for 600–6,000 candidates each. The DVD's 20 rows
+- **Labels on 130 rows.** The statistics count detections; only the estimates rest on labels,
+  and those on 130 rows, some of which stand for up to 760 candidates each. The DVD's 20 rows
   are out (misaligned thumbnails).
 - **Recall will be relative** to the cuts among the candidates, the union of every detector's at
   low thresholds (scdet local maxima from 4, TransNetV2 peaks from 0.1): a cut no detector comes
