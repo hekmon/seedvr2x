@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 16:04 CEST
+Last update: 2026-10-05 16:37 CEST
 
 ## 0. Setup
 
@@ -175,17 +175,25 @@ temporal regression.
       against scdet at T = 10: detections 1–3 frames apart 627 → 5, shots under 0.5 s 782 → 18);
       on live action it takes almost every cut PySceneDetect finds below scdet's threshold (185 of
       191 where both of PySceneDetect's detectors agree, on one film); it misses 5 of the 15 sure
-      cuts of the grainy cel film. CPU cost per hour of 1080p source, 16 threads: 4.4 min (scdet
-      1.8, PySceneDetect 2.4). 258 more review rows: the candidates only TransNetV2 finds, at most
-      30 per episode
-- [ ] Review of the sheets by the user (waiting; 1,476 rows, 1,734 with TransNetV2's; partial
-      labels fine)
+      cuts of the grainy cel film. 258 more review rows: the candidates only TransNetV2 finds, at
+      most 30 per episode
+- [x] Costs measured back to back (2026-10-05, one 1080p Blu-ray episode, 16 threads, two rounds):
+      per hour of source, decoding alone 1.96 min, scdet 1.98, PySceneDetect 2.28, TransNetV2
+      4.30 (half of it the network); over the decode seedvr2x already makes for its frame index,
+      scdet costs about nothing. All three deterministic; TransNetV2's port checked against
+      TensorFlow again, kept this time (5.1 × 10⁻⁷ at most, same detections)
+- [ ] Review of the sheets by the user (waiting; 1,734 rows, partial labels fine). Planned first:
+      a round of about 100 rows aimed at the detectors' disagreements, on compact sheets with
+      one-letter labels, when the user is ready
 - [~] Per threshold 8–14: hits, false positives by kind (flash, pan, fade…), misses, shot lengths.
       Unlabelled so far: on action anime, scdet fires in bursts on new drawings after held frames
       and on effects (at threshold 10, half the shots of the dark anime episode are under 0.5 s),
       and misses some dark cuts; the bright cartoon is clean
-- [ ] Doc + decision brief: the detector, its threshold and a minimum shot length, with question
-      2's costs
+- [~] Doc + decision brief: the detector, its threshold and a minimum shot length, with question
+      2's costs. The unlabelled parts are written
+      ([docs/scene-detection.md](docs/scene-detection.md): sources, detectors, statistics per
+      threshold by kind, where the detectors agree, costs, pipeline findings, the review's
+      design); the estimates and the brief wait for the labels
 
 ## 4. Frame-exact access into long-GOP sources (CPU only)
 
