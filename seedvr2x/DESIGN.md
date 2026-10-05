@@ -369,9 +369,9 @@ they differ and by which metrics, and how users are guided to them. What is know
 
 Two forms, one internal model (a list of shots):
 1. **A video file**: a source as it is (any codec ffmpeg decodes, no intermediate master
-   needed) or a lossless master. The cuts come from seedvr2x's own detection by default, run as
-   a first pass before any GPU work so the planner knows every shot (time estimate, `--until`,
-   manifest). Or they come from a cut list.
+   needed) or a lossless master. The cuts come from seedvr2x's own detection by default (see
+   [Shot detection](#shot-detection)), run as a first pass before the model's work so the
+   planner knows every shot (time estimate, `--until`, manifest). Or they come from a cut list.
    - The cut list format: one frame number per line, the first frame of each shot except the
      first, `#` comments, no timestamps. Frame numbers are exact on the frame grid.
    - Fields after the frame number are ignored, so an export carrying scores (sptenc's, once
@@ -426,7 +426,7 @@ Decoding goes through an ffmpeg pipe:
   - zscale must be fed planar RGB: given packed RGB, ffmpeg puts swscale in front of it, which
     then does the expansion.
 - exact rational frame rate, checked against the frames themselves. The first pass (below)
-  decodes every frame before any GPU work and refuses the source when its shortest and
+  decodes every frame before the model's work and refuses the source when its shortest and
   longest frame durations differ by more than 1 ms, sptenc's rule. The declared rate must
   also match the measured durations, since the output is written at that rate.
   - Comparing declared rates alone fails on Matroska: sptenc found a 24/30 fps mix declared
@@ -452,8 +452,8 @@ Decoding goes through an ffmpeg pipe:
     (a 26 Mbit/s Blu-ray: 735 on 16 threads, about 4 min for a 2-hour film), and 204 fps on
     16 threads, 315–326 on 48, on a 4K UHD HEVC remux: at least 19–30 min for a 4-hour film
     ([seeking.md](../research/docs/seeking.md),
-    [scene-detection.md](../research/docs/scene-detection.md)). scdet and idet join it with
-    automatic scene detection.
+    [scene-detection.md](../research/docs/scene-detection.md)). The shot detector and idet
+    join it (see [Shot detection](#shot-detection)).
   - Software, not NVDEC (the user asked). The decode is about 0.03% of a run (1.4 ms per
     1080p frame against about 4 s of GPU time), seen only as the first pass's wait. The frame
     index's CRC-32s must match every later read: H.264, HEVC, AV1 and VP9 decode bit-exactly
@@ -493,8 +493,8 @@ Decoding goes through an ffmpeg pipe:
     the read falls back.
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
-reimplementing them. A startup check refuses a build without zscale, ffv1 or scdet. Tests verify
-its conversions: round trip, white at 940, black at 64, chroma siting.
+reimplementing them. A startup check refuses a build without zscale or ffv1. Tests verify its
+conversions: round trip, white at 940, black at 64, chroma siting.
 
 Every zscale runs on one slice, with libavfilter's per-filter option `threads=1`, in the decode
 and in the `yuv420p10le` writer alike
@@ -510,6 +510,51 @@ a zimg graph of its own, whose vertical chroma filter stops at the slice's edge:
 One slice costs 2.3–2.6 ms per 1080p frame, against about 4 s of GPU time. Reproduced with
 seedvr2x's own chains on the 48-CPU box: with `threads=1`, 48 slices give the one-slice bytes,
 both ways. A test holds the chains to that.
+
+### Shot detection
+Shot detection is the biggest quality lever outside the model, and what both workflows start
+from (see [Two kinds of users](#two-kinds-of-users-both-first-class)). The detector was chosen
+on the user's labels: 80 candidates drawn where the detectors disagree, shown blind
+([scene-detection.md](../research/docs/scene-detection.md#decision-brief), jointly with
+[cuts.md](../research/docs/cuts.md#what-it-means-for-shot-detection)).
+- **The detector: TransNetV2**, the official model (MIT): its PyTorch code vendored, its
+  weights converted from the official TensorFlow ones by its own `convert_weights.py` (PyTorch
+  matches TensorFlow within 3e-7) and checked by SHA-256.
+  - It reads every frame of the first pass's decode, scaled to 48×27 as its official extraction
+    scales them (ffmpeg's default scaler; another scaler is untested), on one thread, so that
+    its input doesn't depend on the CPU count.
+  - It runs on the GPU, idle during the first pass. Its cost is about 2.3 min of CPU per hour
+    of 1080p source over the decode the frame index makes anyway (16 threads), deterministic;
+    the GPU's is measured at the build step, the cut list checked equal to the CPU's on the
+    labelled sources.
+- **A cut** starts on the frame after each peak above the threshold: TransNetV2 marks the
+  outgoing shot's last frame (offset −1 on 98% of the sure cuts). Every detection starts a
+  shot, however short: no burst filter and no minimum shot length. A short shot is better run
+  alone than merged into its neighbour, from 1 frame on (10–21 dB·frames of PSNR-Y), and real
+  cuts come 1–3 frames apart in action anime.
+- **The threshold is 0.3 for now**, a setting recorded in the manifest. Between 0.3 and 0.5 sat
+  7 real cuts and 3 pans, and a miss costs fidelity (5–31 dB·frames of PSNR-Y on four of six
+  cuts) where a false cut costs none (at most a low-frequency step on a continuous shot). A
+  second labelling round (50 rows, under way) settles it, and whether a gate on a picture
+  change at the candidate removes TransNetV2's false cuts on still pictures (held frames,
+  rolling credits) without losing dark, low-contrast cuts. The gate would be a setting too.
+- **Why TransNetV2:**
+  - Live action: recall 0.99 at 0.3, against 0.24 for scdet as sptenc runs it (threshold 10),
+    precision 0.86 for both. scdet would miss about three quarters of the cuts, an estimated
+    640 per hour on the two films.
+  - Animation: recall 0.88 against scdet's 0.84, precision 0.84 against 0.69. scdet bursts by
+    construction: its score is the smaller of the frame difference and that difference's change
+    from the previous frame, so every new drawing after a held one scores its whole difference
+    (351 bursts per hour against TransNetV2's 19). Filtering scdet's bursts loses a third of
+    its cuts. PySceneDetect avoids bursts only through its 15-frame minimum scene length, which
+    merges real flash cuts too.
+  - Its blind spot is fast action anime, where scdet bursts: 2 of the 6 lone scdet hits there
+    were real cuts TransNetV2 scored under 0.1. A union with scdet takes them back with the
+    bursts (recall 0.98, precision 0.67 on animation): not taken. The second round sizes it.
+- scdet and PySceneDetect aren't used, and the startup check doesn't require scdet. idet stays,
+  for telecined sources declared progressive.
+- The cuts are recorded with the first pass's record, which a resume trusts. A cut list given
+  with `--cuts` replaces the detection.
 
 ### Colour and shape, SD sources included
 The rule: the upscale must look like its source in any given player.
@@ -892,8 +937,9 @@ compressed is the user's choice: afterwards, from the master, or during the run 
   - **Layout, by sptenc's rule.** The detector picks the cuts, then the minimum segment length
     (5 s by default) merges each too-short segment into its shorter neighbour, on the frame
     grid. With a directory of segments as input, the output mirrors it instead.
-    - `sptenc encode` takes any segments, so they needn't match sptenc's own split. They would
-      with scdet run as sptenc runs it, at the same threshold and minimum.
+    - `sptenc encode` takes any segments, so they needn't match sptenc's own split, whose
+      cuts come from scdet (seedvr2x's come from TransNetV2, see
+      [Shot detection](#shot-detection)).
     - The rule counts in frames: the minimum is rounded up (5 s is 120 frames at 24000/1001),
       a segment exactly that long is kept, and ties merge left.
     - Ported, and checked against sptenc's `FilterShortScenes` on 20,000 random cases, run
@@ -1301,7 +1347,10 @@ explanation.
     by hand, though they stay overridable.
 
 **Also explained:**
-- the two workflows: a file in and a finished file out, or sptenc's pre-split directories
+- the two workflows: a file in and a finished file out, or the source in and a directory of
+  segments out for sptenc's encode
+- how shots are found: TransNetV2, why a missed cut costs more than a false one, and a cut list
+  (`--cuts`) for content it gets wrong
 - the model: v1 runs the 7B fp16 alone, the reference every check is made against, and phase 2
   brings the others
 - what the model does to live action ([numerics.md](../research/docs/numerics.md)): the
@@ -1359,16 +1408,17 @@ writers, and the planner needs real shot lengths.
    next: zscale on one slice (see [Input](#input)) and the default master format
    (`yuv420p10le`, see [Output](#output)), then the model check of [Weights](#weights): today a
    3B or fp8 file is accepted by its name, then fails later or runs unchecked. Then the
-   padding of step 0 (see [Pipeline](#pipeline-per-shot)), before the planner counts tokens.
-3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
+   padding of step 0 (see [Pipeline](#pipeline-per-shot)), before the planner counts tokens,
+   and the refusal of HDR sources (see [Not in the first version](#not-in-the-first-version)).
+3. The first pass's new work, ahead of the planner, since both workflows start from it: the
+   shot detector (see [Shot detection](#shot-detection)), whose brief is in, and with it the
+   frame index (see [Input](#input)), so a resume seeks instead of decoding from the start,
+   and the frame-rate refusal's guidance. The detector's threshold and gate come from the
+   brief's second round, as settings. Until then, the cuts come from a cut list.
+4. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory. The planner's inputs (budget,
    margin, the DiT's and the tiled VAE's peaks, 4K limits, measured times) are in
-   [Memory planner](#memory-planner). Consumer cards need it to run 1080p at all. Then, as a
-   small step, the frame index (see [Input](#input)), so a resume seeks instead of decoding
-   from the start.
-4. The shot detector, as soon as the scene-detection brief is in (it waits for the user's
-   labels), ahead of what is left of 3: both workflows start from it. Until then, the cuts come
-   from a cut list.
+   [Memory planner](#memory-planner). Consumer cards need it to run 1080p at all.
 5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow. The manual sptenc
    workflow already works without it.
 
@@ -1460,50 +1510,6 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
    latent group can ghost (see [To measure](#to-measure)).
 
 ## Open questions
-
-### Input
-- **Own scene detection**, the biggest quality lever outside the model, and what both
-  workflows start from (see [Two kinds of users](#two-kinds-of-users-both-first-class)).
-  - A missed cut is the costly error. On the first three cuts measured, in one run across the
-    cut, the next shot's first frame lost 2.4–9.6 dB of PSNR-Y on two of them, the loss lasted
-    up to 13 frames, and up to 5% of the previous shot showed in it
-    ([cuts.md](../research/docs/cuts.md)).
-  - A false cut costs no fidelity, at most a low-frequency step on a continuous shot, but a
-    burst of them chops a shot into many small pieces. scdet's first passes, not labelled yet:
-    on action anime it fires in bursts on new drawings after held frames and on effects (at
-    threshold 10, half the shots of a dark anime episode last under 0.5 s), and it misses some
-    dark cuts ([PROGRESS.md](../research/PROGRESS.md)).
-  - So the detector must catch every real cut first, then not fire in bursts. Candidates:
-    - ffmpeg's scdet, as sptenc runs it: no new dependency
-    - PySceneDetect's adaptive and content detectors: they detect fades, but add a dependency
-    - TransNetV2, a neural network trained to find shot boundaries (MIT licence, open weights)
-    - a detector on our own decoded frames
-  - Chosen on the user's labels of the measurement campaign's review sheets, which must first
-    hold every candidate's detections. They do since 2026-10-05: scdet's, PySceneDetect's and
-    TransNetV2's, 1,734 rows. The labels come last, in a first round of about 100 rows aimed
-    at where the detectors disagree, then at most 50 more if needed
-    ([scene-detection.md](../research/docs/scene-detection.md)). The scene-detection brief
-    also settles the threshold and whether shots need a minimum length of their own: cuts.md
-    finds a short shot better run alone than merged into its neighbour, from 1 frame on.
-  - Unlabelled so far (scene-detection.md, 11 sources, 4.4 hours):
-    - scdet bursts by construction: its score is the smaller of the frame difference and that
-      difference's change from the previous frame, so in limited animation every new drawing
-      after a held one scores its whole difference. At threshold 10, 28% of its detections on
-      animation come 1–3 frames after the previous one (43% on the dark action episode, still
-      23% at 14, where the cuts PySceneDetect finds under the threshold grow from 151 to 267).
-    - PySceneDetect never bursts, but only through its 15-frame minimum scene length, which
-      would merge real flash cuts too.
-    - TransNetV2 at 0.5: 5 bursts per hour of animation against scdet's 351; it takes 332 of
-      the 345 animated cuts all three detectors are sure of, and on live action 302 of the 313
-      cuts both PySceneDetect detectors find under scdet's threshold; but only 10 of a grainy
-      cel film's 15 sure cuts.
-  - Cost per hour of 1080p source, 16 threads, measured back to back: decoding alone 1.96 min,
-    scdet 1.98, PySceneDetect 2.28, TransNetV2 4.30 (2.02 decoding to 48×27, 2.25 inference).
-    Over the decode the first pass makes anyway for the frame index, scdet costs about nothing,
-    PySceneDetect about 0.3 min and TransNetV2 about 2.3, less with its inference on the GPU.
-    All three are deterministic.
-
-  Output segments keep sptenc's minimum length (see [Output](#output)).
 
 ### To measure
 - **Numerics:** settled but for three items ([numerics.md](../research/docs/numerics.md)).
