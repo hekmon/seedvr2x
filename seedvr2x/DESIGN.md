@@ -379,9 +379,11 @@ Two forms, one internal model (a list of shots):
 2. **A directory of segments** (sptenc's split, or any other splitter), for material already
    split. The detector runs over all its frames as over a file's: inside the segments too,
    since a split that merges short scenes (sptenc's, below 5 s) hides real cuts there, and at
-   the joins, where one that isn't a real cut is stitched like a long shot. The output mirrors
-   the input's segments (same frame ranges and names), so sptenc encodes them as it would its
-   own split.
+   the joins, where one that isn't a real cut is stitched like a long shot: of an earlier
+   split's 411 joins, 63 scored under scdet's threshold of 10 and 14 under 4
+   ([scene-detection.md](../research/docs/scene-detection.md)). The output mirrors the
+   input's segments (same frame ranges and names), so sptenc encodes them as it would its own
+   split.
    - sptenc's split names its segments `seg_%06d.mkv`: FFV1 `yuv420p10le` in Matroska,
      timestamps reset.
    - Its `encode <dir>` takes the `.mkv` and `.mp4` files, any names, in byte-wise name order,
@@ -446,10 +448,18 @@ Decoding goes through an ffmpeg pipe:
       are taken at R, accepted only if every one lies within half a frame of R's timeline,
       so none is dropped or doubled, and R is recorded as a setting. The same frames on the
       same timeline, without the intermediate file.
-  - The pass costs one software decode (171 fps on an HEVC master, over 1,000 fps on
-    H.264). scdet and idet join it with automatic scene detection. A 4K UHD HEVC remux
-    decodes at 204 fps on 16 threads and 315–326 on 48: at least 19–30 min for a 4-hour film
-    ([seeking.md](../research/docs/seeking.md)).
+  - The pass costs one software decode: 171 fps on an HEVC master, 730–2,360 on 1080p H.264
+    (a 26 Mbit/s Blu-ray: 735 on 16 threads, about 4 min for a 2-hour film), and 204 fps on
+    16 threads, 315–326 on 48, on a 4K UHD HEVC remux: at least 19–30 min for a 4-hour film
+    ([seeking.md](../research/docs/seeking.md),
+    [scene-detection.md](../research/docs/scene-detection.md)). scdet and idet join it with
+    automatic scene detection.
+  - Software, not NVDEC (the user asked). The decode is about 0.03% of a run (1.4 ms per
+    1080p frame against about 4 s of GPU time), seen only as the first pass's wait. The frame
+    index's CRC-32s must match every later read: H.264, HEVC, AV1 and VP9 decode bit-exactly
+    by their specs, but MPEG-2 and MPEG-4 Part 2 allow IDCT differences, so a hardware first
+    pass could disagree with a software read. NVDEC also lacks FFV1 and some profiles on some
+    generations, so a software path stays anyway.
 - interlacing: refused when the field order is neither progressive nor unknown (sptenc's
   rule)
 - frame-exact reading from any frame, through an index the first pass builds
@@ -1470,11 +1480,28 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
     - a detector on our own decoded frames
   - Chosen on the user's labels of the measurement campaign's review sheets, which must first
     hold every candidate's detections. They do since 2026-10-05: scdet's, PySceneDetect's and
-    TransNetV2's, 1,734 rows to label. CPU time per hour of 1080p source, 16 threads: scdet 1.8
-    min, PySceneDetect 2.4, TransNetV2 4.4 ([PROGRESS.md](../research/PROGRESS.md)). The
-    scene-detection brief also settles the threshold and whether shots need a minimum length of
-    their own: cuts.md finds a short shot better run alone than merged into its neighbour, from
-    1 frame on.
+    TransNetV2's, 1,734 rows. The labels come last, in a first round of about 100 rows aimed
+    at where the detectors disagree, then at most 50 more if needed
+    ([scene-detection.md](../research/docs/scene-detection.md)). The scene-detection brief
+    also settles the threshold and whether shots need a minimum length of their own: cuts.md
+    finds a short shot better run alone than merged into its neighbour, from 1 frame on.
+  - Unlabelled so far (scene-detection.md, 11 sources, 4.4 hours):
+    - scdet bursts by construction: its score is the smaller of the frame difference and that
+      difference's change from the previous frame, so in limited animation every new drawing
+      after a held one scores its whole difference. At threshold 10, 28% of its detections on
+      animation come 1–3 frames after the previous one (43% on the dark action episode, still
+      23% at 14, where the cuts PySceneDetect finds under the threshold grow from 151 to 267).
+    - PySceneDetect never bursts, but only through its 15-frame minimum scene length, which
+      would merge real flash cuts too.
+    - TransNetV2 at 0.5: 5 bursts per hour of animation against scdet's 351; it takes 332 of
+      the 345 animated cuts all three detectors are sure of, and on live action 302 of the 313
+      cuts both PySceneDetect detectors find under scdet's threshold; but only 10 of a grainy
+      cel film's 15 sure cuts.
+  - Cost per hour of 1080p source, 16 threads, measured back to back: decoding alone 1.96 min,
+    scdet 1.98, PySceneDetect 2.28, TransNetV2 4.30 (2.02 decoding to 48×27, 2.25 inference).
+    Over the decode the first pass makes anyway for the frame index, scdet costs about nothing,
+    PySceneDetect about 0.3 min and TransNetV2 about 2.3, less with its inference on the GPU.
+    All three are deterministic.
 
   Output segments keep sptenc's minimum length (see [Output](#output)).
 
