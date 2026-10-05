@@ -104,7 +104,6 @@ METRICS = [
     ("dists", "DISTS", False, False, "{:.4f}", "{:+.4f}"),
     ("de00_lf", "ΔE00 lf", False, False, "{:.3f}", "{:+.3f}"),
     ("vmaf", "VMAF", True, False, "{:.2f}", "{:+.2f}"),
-    ("vmaf_neg", "VMAF NEG", True, False, "{:.2f}", "{:+.2f}"),
     ("temporal_lf", "T-err lf", False, True, "{:.3f}", "{:+.3f}"),
     ("temporal_full", "T-err", False, True, "{:.3f}", "{:+.3f}"),
 ]

@@ -27,13 +27,15 @@ Per frame (Y = BT.709 luma of the full-range RGB, 8-bit scale):
 - de00_lf: mean CIEDE2000 between output and ground truth after a Gaussian blur (sigma 4 px) in
   CIELAB (OpenCV, sRGB/D65): low-frequency colour and brightness error, blind to detail; computed
   on every second pixel of the blurred images (the blur leaves nothing above that sampling rate)
-- vmaf: VMAF as sptenc measures it: model vmaf_v1.0.16_3d0h (1080p, 3 picture heights) with its
-  CAMBI feature clipped to 0 ("fidelity", what `sptenc vmaf` reports first); vmaf_neg: the v0
-  model vmaf_v0.6.1neg (no enhancement gain); cambi_added: banding the output adds to the ground
-  truth (libvmaf CAMBI full-reference, sptenc's options). Both RGB inputs go through sptenc's own
-  RGB -> YUV conversion (--vmaf-convert sptenc: swscale BT.709, limited range, chroma left,
-  yuv420p10le) or zscale's (--vmaf-convert zscale), then libvmaf (distorted first, reference
-  second, frames paired by index), as `sptenc vmaf` runs it
+- vmaf: VMAF v1 as sptenc measures it: the model sptenc selects for the ground truth's height,
+  vmaf_v1.0.16_3d0h (a 1080p display at 3 picture heights) below 2160 rows, vmaf_v1.0.16_1d5h_2160
+  (a 2160p display at 1.5 picture heights) from 2160 up, with its CAMBI feature clipped to 0
+  ("fidelity", what `sptenc vmaf` reports first). v1 has NEG (no enhancement gain) built in, so
+  no separate NEG model is run (the v0 ones were dropped on 2026-10-05). cambi_added: banding the
+  output adds to the ground truth (libvmaf CAMBI full-reference, sptenc's options). Both RGB
+  inputs go through sptenc's own RGB -> YUV conversion (--vmaf-convert sptenc: swscale BT.709,
+  limited range, chroma left, yuv420p10le) or zscale's (--vmaf-convert zscale), then libvmaf
+  (distorted first, reference second, frames paired by index), as `sptenc vmaf` runs it
 Per transition t (frames t-1 -> t), with D = Y_out - Y_gt:
 - temporal_full: mean |D_t - D_t-1| = |(out_t - out_t-1) - (gt_t - gt_t-1)|: the change between
   frames that the ground truth does not have (flicker, crawling detail), full resolution
@@ -81,8 +83,19 @@ FFPROBE = os.environ.get("FR_FFPROBE") or shutil.which("ffprobe") or "ffprobe"
 RGB_BITS = {"bgr0": 8, "gbrp": 8, "gbrp10le": 10, "gbrp12le": 12, "gbrp16le": 16}
 
 SEP = r"\\:"  # ':' escaped for the option value, then for the filtergraph (sptenc's libvmafParamSeparator)
-VMAF_MODELS = (f"version=vmaf_v1.0.16_3d0h{SEP}cambi.cambi_max_val=0{SEP}name=vmaf|"
-               f"version=vmaf_v0.6.1neg{SEP}name=vmaf_neg")
+VMAF_V1 = ("vmaf_v1.0.16_3d0h", "vmaf_v1.0.16_1d5h_2160")  # sptenc's two (ffmpeg/vmaf.go SelectVMAFModel)
+UHD_ROWS = 2160  # sptenc's Height4K: its 2160p model from there up
+
+
+def vmaf_models(height):
+    """libvmaf's model option for a ground truth of this height, as sptenc selects it: the 2160p
+    display's model (1.5 picture heights) from 2160 rows up, else the 1080p display's (3 picture
+    heights), its CAMBI feature clipped to 0 ("fidelity"). v1 has NEG built in ("NEG is enabled by
+    default for VMAF v1 without a need for a separate model", Netflix; sptenc's AGENTS.md)."""
+    return f"version={VMAF_V1[height >= UHD_ROWS]}{SEP}cambi.cambi_max_val=0{SEP}name=vmaf"
+
+
+VMAF_MODELS = vmaf_models(1080)  # the 1080p model (colour_eval.py reads this name)
 CAMBI_FEATURE = (f"name=cambi{SEP}full_ref=true{SEP}cambi_high_res_speedup=1080"
                  f"{SEP}cambi_vis_lum_threshold=0.06")
 VMAF_CONVERT = {
@@ -98,7 +111,6 @@ METRICS = [
     ("lpips", "LPIPS", False, "{:.4f}"),
     ("dists", "DISTS", False, "{:.4f}"),
     ("vmaf", "VMAF", True, "{:.2f}"),
-    ("vmaf_neg", "VMAF NEG", True, "{:.2f}"),
     ("de00_lf", "ΔE00 lf", False, "{:.3f}"),
     ("temporal_lf", "T-err lf", False, "{:.3f}"),
     ("temporal_full", "T-err", False, "{:.3f}"),
@@ -279,14 +291,17 @@ class Deep:
 
 # ------------------------------------------------------------------ VMAF
 
-def vmaf(gt, out, n, fps, rows_gt, rows_out, convert, threads):
-    """Per-frame VMAF (v1 fidelity, v0.6.1neg) and CAMBI added, as sptenc computes them."""
+def vmaf(gt, out, n, fps, rows_gt, rows_out, convert, threads, height=None):
+    """Per-frame VMAF (v1 fidelity) and CAMBI added, as sptenc computes them; the model is the one
+    for a ground truth of this height (vmaf_models), the ground truth's own when not given."""
+    if height is None:
+        height = int(probe(gt)["height"])
     def chain(rows):
         crop = f",crop=iw:{rows[1] - rows[0]}:0:{rows[0]}" if rows else ""
         return f"setpts=PTS-STARTPTS,trim=end_frame={n}{crop},{VMAF_CONVERT[convert]},setparams=colorspace=unknown"
     with tempfile.TemporaryDirectory() as d:
         report = os.path.join(d, "vmaf.json")
-        lav = (f"libvmaf=model={VMAF_MODELS}:feature={CAMBI_FEATURE}:log_fmt=json:log_path={report}"
+        lav = (f"libvmaf=model={vmaf_models(height)}:feature={CAMBI_FEATURE}:log_fmt=json:log_path={report}"
                f":n_threads={threads}")
         cmd = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-r", fps, "-i", out, "-r", fps, "-i", gt,
                "-filter_complex", f"[0:v]{chain(rows_out)}[distorted];[1:v]{chain(rows_gt)}[reference];"
@@ -301,10 +316,11 @@ def vmaf(gt, out, n, fps, rows_gt, rows_out, convert, threads):
     frames = rep.get("frames", [])
     get = lambda k: [fr["metrics"].get(k) for fr in frames]  # noqa: E731
     pooled = rep.get("pooled_metrics", {})
-    return {"vmaf": get("vmaf"), "vmaf_neg": get("vmaf_neg"), "cambi_added": get("cambi_full_reference"),
+    return {"vmaf": get("vmaf"), "cambi_added": get("cambi_full_reference"),
             "cambi_out": get("cambi_hrs_1080_vlt_0.06"), "cambi_gt": get("cambi_source")}, \
-        {k: pooled.get(k) for k in ("vmaf", "vmaf_neg", "cambi_full_reference")}, \
-        {"libvmaf": rep.get("version"), "s": round(time.perf_counter() - t0, 1), "convert": convert}
+        {k: pooled.get(k) for k in ("vmaf", "cambi_full_reference")}, \
+        {"libvmaf": rep.get("version"), "s": round(time.perf_counter() - t0, 1), "convert": convert,
+         "models": [VMAF_V1[height >= UHD_ROWS]]}
 
 
 # ------------------------------------------------------------------ scoring
@@ -388,7 +404,7 @@ def score(a):
             res["versions"] = deep.versions
         if not a.no_vmaf:
             series, pooled, info = vmaf(os.path.abspath(a.gt), os.path.abspath(o["path"]), n, fps,
-                                        gt_src.rows, o["src"].rows, a.vmaf_convert, a.vmaf_threads)
+                                        gt_src.rows, o["src"].rows, a.vmaf_convert, a.vmaf_threads, gt_src.H)
             for k, v in series.items():
                 res["per_frame"][k] = [None if x is None else round(x, 6) for x in v]
             res["vmaf_pooled"] = pooled

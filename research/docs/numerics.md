@@ -131,7 +131,7 @@ start and counting frames. Statistics of the ground truth (Y on the 8-bit scale)
 The last three are measured in [Live action and a bright anime](#live-action-and-a-bright-anime)
 with a subset of the variants; their verdicts are also rows of the tables below.
 
-**4K clips, for 4K output** (2026-10-05, not used in this page yet): 4 single shots of 45 frames
+**4K clips, for 4K output** (2026-10-05; their bicubic baselines below): 4 single shots of 45 frames
 from a 4K UHD Blu-ray remux of a live-action film (HEVC Main 10, HDR10 with Dolby Vision profile
 7, whose HDR10 base layer ffmpeg decodes), letterboxed (picture rows 42–2117 of 2160):
 `ouatia-face` (a close-up, film grain), `ouatia-dark` (an interior by lamp and candle light),
@@ -145,6 +145,22 @@ the d1 input (1920×1080) and the bicubic baseline are made as above. 18 cd/m² 
 125, 100 cd/m² at 215, the film's MaxCLL (873 cd/m²) at 254; mean Y 44, 30, 83 and 71 in that
 order, nothing at 255. Hable, tried first, put grey at 84 and white at 157: too dark for an SDR
 grade.
+
+Bicubic at 4K (the d1 input upscaled back to 3840×2160; whole frames, the bars' 84 rows included;
+VMAF with sptenc's 2160p model):
+
+| Clip | PSNR-Y | SSIM-Y | LPIPS | DISTS | VMAF | ΔE00 lf | T-err lf | T-err |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ouatia-face | 41.03 | 0.946 | 0.199 | 0.141 | 74.3 | 0.607 | 0.316 | 1.78 |
+| ouatia-dark | 40.52 | 0.948 | 0.223 | 0.133 | 84.0 | 0.722 | 0.478 | 2.45 |
+| ouatia-street | 38.22 | 0.938 | 0.185 | 0.072 | 84.8 | 0.788 | 0.481 | 2.64 |
+| ouatia-motion | 35.83 | 0.862 | 0.275 | 0.154 | 79.8 | 0.761 | 0.515 | 4.27 |
+
+Until 2026-10-05, `fr_metrics.py` used the 1080p model at every size: at 4K it gives 0.2–1.2
+points more VMAF (75.5, 84.2, 85.0, 80.5); every other metric is the same. It also ran v0's NEG
+models beside v1 until then; they are dropped, since v1 has NEG built in, and VMAF v1 comes out
+identical frame for frame without them (checked at 1080p and 4K). Scoring one 4K clip takes about
+6 minutes on 16 cores (DISTS runs at 0.15 frames per second) and 48 GiB of memory.
 
 ### Ground truth, inputs and runs
 
@@ -167,7 +183,8 @@ grade.
 
 `fr_metrics.py` scores each output against the GT, frame by frame (per transition for the
 temporal errors): PSNR-Y and SSIM-Y (BT.709 luma, 8-bit scale), LPIPS (AlexNet) and DISTS at full
-resolution, VMAF as `sptenc vmaf` measures it (v1 1080p model, CAMBI clipped) and VMAF NEG, ΔE00
+resolution, VMAF v1 as `sptenc vmaf` measures it (its model for the GT's height: the 1080p
+display's, the 2160p display's from 2160 rows up; CAMBI clipped; NEG built into v1), ΔE00
 after a 4 px Gaussian blur (low-frequency colour and brightness), the temporal error |Δout − ΔGT|
 between consecutive frames (and on 16×16 block means: low-frequency flicker), and PSNR-Y of the
 bottom 16 rows and of the rest. A variant's figure is its paired difference to the default at
@@ -974,6 +991,8 @@ python3 $S/fr_clips.py scores /path/to/source.mkv --first FIRST_FRAME-10 --last 
 python3 $S/fr_clips.py make /path/to/uhd-remux.mkv --start 98208 --frames 45 --name ouatia-face \
   --out $C4 --degrade d1 --tonemap mobius   # likewise ouatia-dark 11185, -street 71258, -motion 64948
 python3 $S/fr_clips.py verify $C4/ouatia-face --cv2-python /path/to/seedvr2/.venv/bin/python --source
+python3 $S/fr_metrics.py $C4/ouatia-face.gt.mkv --clip ouatia-face-d1 --json-dir m4k \
+  --out bicubic 0 $C4/ouatia-face.d1.bicubic.mkv   # the 4K bicubic baseline; likewise the others
 # grain: every frame of an RGB file, or 12 frames over a source's middle 80% (seeking; taller than
 #   1080 rows: area-downscaled to 1080); --sigma 1 and --share 10 for the other scales
 python3 $S/fr_clips.py grain $C/live-vfx.gt.mkv --json grain-live-vfx-gt.json

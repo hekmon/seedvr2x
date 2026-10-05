@@ -961,7 +961,7 @@ SRC_COLS = [
 ]
 PAIRED = ["psnr_cb", "psnr_cr", "de00_s0", "de00_s1", "de00_s4", "de00_edge", "ring_share", "ring05_share"]
 FRM = [("psnr_y", "PSNR-Y", "{:.3f}"), ("ssim_y", "SSIM-Y", "{:.5f}"), ("lpips", "LPIPS", "{:.5f}"),
-       ("dists", "DISTS", "{:.5f}"), ("vmaf", "VMAF", "{:.3f}"), ("vmaf_neg", "VMAF NEG", "{:.3f}"),
+       ("dists", "DISTS", "{:.5f}"), ("vmaf", "VMAF", "{:.3f}"),
        ("de00_lf", "ΔE00 lf", "{:.4f}"), ("temporal_lf", "T-err lf", "{:.4f}"), ("temporal_full", "T-err", "{:.4f}"),
        ("cambi_added", "CAMBI added", "{:.4f}")]
 
