@@ -597,6 +597,44 @@ PSNR-Y 25.2–31.1 dB (bicubic 33.4–43.8).
   back part of plain black's frame-wide gain on two clips, never all of it: the frame stays better
   than the default's on every clip.
 
+### 4K: no padding, inside the letterbox
+
+2026-10-05. A 1080p source upscaled to 4K reaches the model at 2160 rows, a multiple of 16: numz
+pads nothing there, the 720p situation. The four 4K clips ([Clips](#clips)) come from a
+letterboxed film, whose own bars would anchor both variants, so they are cropped inside the
+picture: 3840×2048 (GT rows 56–2103; d1 input 1920×1024, rows 28–1051), 25 frames, no black
+in the frame, and 2048 = 128 × 16, so numz again pads nothing. `reflect>=8+black+16` reflects 16
+rows and adds 16 black ones (2080 rows: latents 260 rows high instead of 256, +1.6% tokens).
+Seed 42 for both, seed 43 of the default for the band; 7B fp16, `--color_correction none`,
+encode untiled, decode tiled 2048 with an overlap of 128 (untiled would need about 128 GiB);
+5–6 minutes per run. The default lands at PSNR-Y 26.5–32.6 dB (bicubic 35.4–40.9).
+
+The band between the default's two seeds is small: PSNR-Y 0.01–0.12 dB, VMAF 0.06–1.09, ΔE00 lf
+0.007–0.036, LPIPS 0.0005–0.0032. `reflect>=8+black+16` − default, paired by frame (95% interval,
+block bootstrap; B / W beyond the band):
+
+| Clip | Rest of the frame | Bottom 16 rows | VMAF | LPIPS | ΔE00 lf | Temporal error lf |
+|---|---|---|---|---|---|---|
+| ouatia-face | −0.94 (W) | +4.80 (B) | +1.80 (B) | +0.0037 (W) | +0.225 (W) | −0.003 |
+| ouatia-dark | −0.18 | +1.88 (B) | −1.07 | −0.0042 (B) | +0.045 | +0.075 (W) |
+| ouatia-street | −0.38 (W) | +1.98 (B) | −1.34 | −0.0082 (B) | +0.287 (W) | −0.019 |
+| ouatia-motion | +0.05 | +2.39 (B) | +2.17 (B) | −0.0056 (B) | +0.071 (W) | +0.117 (W) |
+
+- **The band repair carries over:** the bottom 16 rows gain 1.9–4.8 dB on all 4 clips.
+- **720p's frame-wide gain doesn't:** the rest of the frame is worse on 2 clips (−0.94 and
+  −0.38 dB) and within the band on 2; low-frequency colour is a little worse on 3 (ΔE00 lf
+  +0.07 to +0.29), LPIPS better on 3, VMAF better on 2. A mixed picture, not the anchor effect.
+  The padded frame also changes the latent grid (260 rows instead of 256), which moves the
+  DiT's windows: at 4K, where two seeds differ by 0.01–0.12 dB, that alone may move the
+  rendering more than a seed does (not separated here).
+- **At 4K the model is far from the ground truth, perceptually too,** without colour correction
+  and with decode tiles: PSNR-Y 26.5–32.6 dB against bicubic's 35.4–40.9, VMAF 38–48 against
+  75–86, DISTS 0.14–0.22 against 0.08–0.16 (worse on all 4), LPIPS worse on 3 of 4 (better on
+  the close-up), ΔE00 lf 2.1–3.9 against 0.6–0.8, and low-frequency flicker on the dark and fast
+  clips (temporal error lf 3.2 and 9.2 against 0.5). At 1080p, LPIPS and DISTS favoured the model
+  on live action. Every output lines up with the GT frame for frame (best offset 0 on every
+  clip). How much colour correction and the tiles account for is the colour study's 4K question.
+
 ## Degradation d2
 
 anime-clean and anime-grain with a stronger degradation (area downscale, CRF 26): the default
@@ -993,6 +1031,16 @@ python3 $S/fr_clips.py make /path/to/uhd-remux.mkv --start 98208 --frames 45 --n
 python3 $S/fr_clips.py verify $C4/ouatia-face --cv2-python /path/to/seedvr2/.venv/bin/python --source
 python3 $S/fr_metrics.py $C4/ouatia-face.gt.mkv --clip ouatia-face-d1 --json-dir m4k \
   --out bicubic 0 $C4/ouatia-face.d1.bicubic.mkv   # the 4K bicubic baseline; likewise the others
+# 4K padding: crops inside the letterbox (GT 3840x2048 from row 56, input 1920x1024 from row 28,
+#   25 frames), then the default and NUM_PAD=reflect>=8+black+16 at --resolution 2048
+ffmpeg -i $C4/ouatia-face.gt.mkv -vf crop=3840:2048:0:56 -frames:v 25 -pix_fmt gbrp16le -c:v ffv1 face.c2048.gt.mkv
+ffmpeg -i $C4/ouatia-face.d1.lr.mkv -vf crop=1920:1024:0:28 -frames:v 25 -pix_fmt bgr0 -c:v ffv1 \
+  face.c2048.d1.lr.mkv
+python3 $S/bench.py run p4k-face-pad-s42 --wrap $S/numerics_patch.py --wrap $S/ffv1_out.py \
+  --env FFV1_OUT_KEEP=0 --env 'NUM_PAD=reflect>=8+black+16' -- face.c2048.d1.lr.mkv --output out/ \
+  --model_dir /path/to/models --dit_model seedvr2_ema_7b_fp16.safetensors --resolution 2048 \
+  --attention_mode flash_attn_2 --batch_size 25 --load_cap 25 --color_correction none --seed 42 \
+  --vae_decode_tiled --vae_decode_tile_size 2048 --vae_decode_tile_overlap 128
 # grain: every frame of an RGB file, or 12 frames over a source's middle 80% (seeking; taller than
 #   1080 rows: area-downscaled to 1080); --sigma 1 and --share 10 for the other scales
 python3 $S/fr_clips.py grain $C/live-vfx.gt.mkv --json grain-live-vfx-gt.json

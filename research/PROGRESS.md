@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 20:18 CEST
+Last update: 2026-10-05 21:42 CEST
 
 ## 0. Setup
 
@@ -111,6 +111,13 @@ temporal regression.
       PSNR-Y 35.8–41.0 dB, VMAF 74–85 with sptenc's 2160p model, which `fr_metrics.py` now picks
       from 2160 rows up as sptenc does (it used the 1080p one at every size). VMAF v1 alone from now
       on: v0's NEG models are dropped, NEG being built into v1 (VMAF unchanged without them)
+- [x] Padding at 4K (2026-10-05, 12 GPU runs, ≈ 1.2 h): the four 4K clips cropped inside their
+      letterbox to 3840×2048 (no black in the frame, no numz padding), 25 frames, default (2
+      seeds) against `reflect>=8+black+16`. The bottom band's repair carries over (+1.9 to +4.8
+      dB, 4 of 4); 720p's frame-wide gain doesn't (rest of the frame −0.94 and −0.38 dB on 2
+      clips, within the seed band on 2; low-frequency colour slightly worse on 3, LPIPS better on
+      3, VMAF better on 2). Also seen: at 4K the model is further from the ground truth than
+      bicubic on every metric, DISTS included, without colour correction
 - [x] Every fourth frame is the model's best: the last frame of each 4-frame latent group is
       PSNR-Y +0.8 to +5.0 dB and VMAF +2 to +19 closer to the ground truth than the group's
       second, on every clip, with or without `lab`; the input has no such pattern. Fast motion
