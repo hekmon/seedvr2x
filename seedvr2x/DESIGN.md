@@ -104,8 +104,8 @@ never requires it.
     [vram.md](../research/docs/vram.md): 16 GiB of weights plus about 1 GiB per latent at
     1080p with the 7B fp16 model, and four times that per latent at 4K.
     - At 1080p: about 6 latents (21–24 frames) on a 24 GB card, 13 (49 frames) on a 32 GB
-      card, about 75 (≈ 300 frames) on a 96 GB card.
-    - At 4K: about 19 latents (≈ 75 frames) on a 96 GB card.
+      card, 78 (309 frames) on a 96 GB card.
+    - At 4K: 19 latents (73 frames) on a 96 GB card.
   - A window bounds the DiT only. The VAE's memory depends on the frame size, not on the
     window, since it streams in 4-frame slices (flat beyond ~9 frames). At 4K the untiled
     decode needs ≈ 134 GiB, so 4K needs tiled decoding, about 18 GiB with 1024-px tiles. The
@@ -164,7 +164,8 @@ connect through files.
     needs
   - `src/data/image/transforms/`, the input preparation of [step 0](#pipeline-per-shot):
     `NaResize`, plus `DivisiblePad` (numz) or `DivisibleCrop` (ByteDance) to reach multiples
-    of 16. numz chains them at `src/core/generation_utils.py:73-81`.
+    of 16. numz chains them at `src/core/generation_utils.py:73-81`. seedvr2x pads its own
+    way (see step 0).
   - the configs and `pos_emb.pt`/`neg_emb.pt`
 
   About 11k lines ([provenance](../research/docs/provenance.md)).
@@ -208,9 +209,14 @@ connect through files.
     bf16 cast
   - VAE encode takes the posterior mode
 
-  So two of the differences listed so far, "RoPE in half precision" and "attention in the
-  pipeline dtype", may not differ from ByteDance on this path. This must be confirmed before
-  any patch.
+  Measured since ([numerics.md](../research/docs/numerics.md)): none of ByteDance's choices
+  moves the output beyond the spread between seeds, alone or all together (float32 RoPE angles,
+  a float32 input chain, the fp32 weights, posterior sampling, bf16 DiT norms, the decode under
+  bf16 autocast, fp16 attention), on 4 animated clips and every metric (PSNR-Y within 0.14 dB,
+  VMAF within 1.1). So numz's numerics stay, and with them bit-identity with milestone 1. The
+  exception is the padding to multiples of 16, which measured better done otherwise (step 0 of
+  the [Pipeline](#pipeline-per-shot)); the decode's output precision waits for the colour study
+  (see [To measure](#to-measure)).
 - Licence: Apache-2.0. We keep the copyright headers, add a NOTICE, and mark modified files.
   The StableSR-derived colour code (`color_fix.py`, non-commercial licence) is **not**
   vendored: see [Colour correction](#colour-correction).
@@ -414,6 +420,29 @@ Decoding goes through an ffmpeg pipe:
     H.264). scdet and idet join it with automatic scene detection.
 - interlacing: refused when the field order is neither progressive nor unknown (sptenc's
   rule)
+- frame-exact reading from any frame, through an index the first pass builds
+  ([seeking.md](../research/docs/seeking.md)):
+  - The first pass, which decodes every frame anyway, records each frame's timestamp, a CRC-32
+    of the decoded picture and whether the decoder reported an error on it, plus the keyframes'
+    timestamps from a packet scan. Frames are counted as they arrive, never from ffmpeg's own
+    counters, which restart when it rebuilds its filter graph mid-stream.
+  - Reading frames n to m (a resumed job's first unfinished shot, later another process's
+    range) seeks to the keyframe one GOP before n's own, selects by timestamp, and checks every
+    frame against the index. A mismatch starts again one keyframe further back, doubling; the
+    last resort decodes from the start and counts.
+  - Why every part: seeking to n / fps missed on 6 of 10 real sources, by up to 142 frames on
+    a Blu-ray declaring 24/1. The exact timestamp lands late on open-GOP leading pictures, and
+    keyframes that aren't valid entry points (6.7% and 8.3% on two Blu-ray remuxes) return
+    wrong pictures with the right timestamps. One GOP early and selected by timestamp was exact
+    on 538 of 540 targets outside one passage of dense keyframes, where the CRC-32 caught what
+    it missed.
+  - Cost: 0.04–0.23 s per read on DVD, Blu-ray and web H.264, 1.3 s median and 16 s worst on a
+    long-GOP HEVC master, against 1.2–17 min to decode a 2-hour source to its end. The CRC-32
+    takes 0.47 ms per 1080p frame, which keeps up with the first pass on one thread.
+  - The index is written once with the first pass's record, beside the manifest, which names
+    it by its SHA-256; a resume trusts it as it trusts that record.
+  - Real VOB, broadcast TS and open-GOP MPEG-2 and HEVC aren't tested yet. The check covers
+    them: a wrong picture fails its CRC-32, and the read falls back.
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
 reimplementing them. A startup check refuses a build without zscale, ffv1 or scdet. Tests verify
@@ -472,6 +501,27 @@ The rule: the upscale must look like its source in any given player.
      runs a = −0.5.
    - The target size follows the display aspect. At square pixels it is the size torchvision
      computes from NaResize's int, and the resize to it is the same call, bit for bit.
+   - Measured, the default stays: without antialiasing, worse on 7 of 7 clips; zimg's Spline36
+     and Lanczos gain a little on some grainy or detailed clips and cost colour and flicker on
+     fast live action ([numerics.md](../research/docs/numerics.md)). No kernel option in v1.
+   - The frame is then padded to multiples of 16: at least 8 rows reflected from the picture,
+     then 16 black rows, all trimmed after decoding (`reflect>=8+black+16`,
+     [numerics.md](../research/docs/numerics.md#reflectblack16)).
+     - numz pads with black alone (8 rows at 1080p, none at 720p), which costs the bottom 16
+       rows 3–10 dB. Padding without black, or cropping as ByteDance does, repairs that band
+       but makes the whole frame worse on clips without black areas of their own (−0.6 to
+       −1.1 dB PSNR-Y): the black rows anchor the model's tone.
+     - Reflected rows, then black ones: the bottom band +7 to +13 dB at 1080p and the rest as
+       good or better (PSNR-Y +0.29 to +0.40 dB on 3 of 4 clips); at 720p better on all 4
+       clips (PSNR-Y +0.07 to +1.03 dB, VMAF +0.9 to +10.2). Effects 1.7–8 times the spread
+       between seeds; through `lab` they hold, smaller.
+     - Columns, when the width isn't a multiple of 16, the same way (not measured: outputs are
+       mostly 1920 or 3840 wide). It costs 24 rows at 1080p (1,104 for numz's 1,088, +1.5% of
+       the tokens) and 32 at 720p.
+     - That ends bit-identity with numz on the default path. The milestone-1 regression runs
+       with numz's padding through a mode internal to the tests, and the new padding is checked
+       bit-identical to numz with measurement's `NUM_PAD` patch, as milestone 2 checked the
+       stitching.
 1. **VAE encode** of the whole shot in one causal pass. The VAE already streams in 4-frame
    slices; resetting it at each cut is correct (no context should cross a cut).
    - The frames are read from ffmpeg's decoding of the source at the VAE's own pace: 5, then 4
@@ -869,27 +919,50 @@ compressed is the user's choice: afterwards, from the master, or during the run 
 
 ## Memory planner
 
-Built into the CLI, from the validated models in [vram.md](../research/docs/vram.md):
-- **Budget:** free memory reported by the driver after the CUDA context exists
-  (`mem_get_info`), minus a margin. That covers the desktop and other programs without
-  guessing. The validated rule was "torch peak ≤ card size − 2 GiB"; the margin over measured
-  free memory is to be re-derived from the emulation data (≈ 0.6 GiB).
+Built into the CLI, from the validated models in [vram.md](../research/docs/vram.md) and
+[planner-limits.md](../research/docs/planner-limits.md):
+- **Budget:** the free memory the driver reports once the CUDA context exists (`mem_get_info`,
+  read before anything else allocates on the GPU), minus 0.6 GiB. That covers the desktop and
+  other programs without guessing.
+  - The margin was bisected on emulated cards: a run needs 0.15–0.45 GiB between the free
+    memory it starts with and the torch peak of its bounding phase, the decode-bound 8 GB card
+    the most (it failed with 0.37 GiB). 0.6 GiB keeps 0.23 over the worst failure, and gives
+    back the validated "torch peak ≤ card size − 2 GiB" on those cards.
+  - Below the margin a run fails in its bounding phase, after dozens of silent allocator
+    retries.
 - **Host RAM** too. The process's peak, 16.5 GiB with 7B fp16, comes while the weights load,
   not during the shots, which stay flat (2.3–2.4 GiB resident over 6 shots). It is probably the
   weights file mapped while it is copied to the GPU; not measured further. BlockSwap's pinned
   host copies add their size. Both matter on hosts with little RAM.
-- **Per-phase peaks** (P = output megapixels, T = tile size in megapixels, L = latent frames
-  per window):
+- **Per-phase peaks** (P = output megapixels, T² = a tile's area in megapixels):
   - VAE encode ≈ 1.2 + 8.8·P GiB, decode ≈ 0.8 + 16.1·P GiB (flat beyond 9 frames)
-  - tiled: encode ≈ 1.7 + 8.4·T², decode ≈ 1.6 + 15.6·T²
-  - DiT (7B fp16) ≈ 16.05 GiB + 128.5 KiB per token (≈ 0.48 GiB per Mpx per latent frame),
-    constants per model in vram.md
+  - tiled, from 1024-px tiles: encode ≈ 1.36 + 8.66·T², decode ≈ 0.44 + 16.29·T², refitted
+    at 4K up to 2048-px tiles, where vram.md's fits fell 1.7 GiB short. Below 1024 px,
+    vram.md's: encode ≈ 1.7 + 8.4·T², decode ≈ 1.6 + 15.6·T². Each adds what is on the GPU
+    before the call: the weights, not the shot's frames, since seedvr2x feeds the encode slice
+    by slice (numz moves a batch's frames there first, 0.046 GiB per 4K frame).
+  - DiT (7B fp16) ≈ 15.87 GiB + 127.16 KiB per token + 2.726 MiB per attention window, the
+    windows counted with the model's own window functions (the larger of its two layouts).
+    That fits 26 window lengths, 1–78 latents at 1080p and 1–19 at 4K, to 0.005 GiB; tokens
+    alone were up to 0.83 GiB off at 4K, since each attention window repeats the 58 text
+    tokens. The other models' constants are in vram.md.
+  - On the 96 GB card: windows of 78 latents (309 frames) at 1080p, 0.56 GiB to spare, and 19
+    (73 frames) at 4K; one latent more fails within 3 s. vram.md's recipes per card size,
+    validated on emulated cards, are milestone 3's starting points.
 - **Choices, in order:** window length (the biggest quality lever: fewer boundaries),
   BlockSwap blocks, VAE tile sizes, then what's left goes to speed: `compile_dit` (−26 to −32%
   DiT time, +0.1 to +1.4 GiB), and `compile_vae` only when its memory fits (it about doubles
   VAE activation memory, for −16 to −19% VAE time). Nothing caps a large card: the memory a
   16–32 GB card spends on BlockSwap and tiles goes, on 96 GB and more, to longer windows and
   speed.
+  - The tiles are the largest that fit. A frame takes the same time whatever the tile (a 4K
+    frame 5.3–5.6 s to encode and 11.5–12.3 s to decode with 1024-, 1536- or 2048-px tiles),
+    and smaller tiles drift more in colour.
+- **Time estimates** (for `--until`, `--plan` and progress) are measured, never constants.
+  The DiT's time is its tokens times the machine's time per token, flat within ±5% across
+  window lengths and resolutions, but anywhere from 0.23 to 0.45 ms on this one GPU, with its
+  clock. A run measures it on its first window, and the VAE's time per frame on its first
+  slices; `--plan` measures both with a short calibration on the GPU.
 - **A plan shapes the output a little.** Its window lengths set where a long shot's joins
   fall, and its VAE tiles where the picture is cut. A larger card gives fewer joins and larger
   tiles, closer to the one-window, untiled run:
@@ -905,7 +978,7 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
     than planning again, since free memory varies from one start to the next. A resume whose
     plan no longer fits stops and says so.
   - `--window` and the tile options pin a plan, for two runs that must match bit for bit.
-- `--plan` prints the plan and the time estimate without running.
+- `--plan` prints the plan and the time estimate without running the job.
 - Validated before release with `vram_cap.py` emulation, from the smallest card the 7B fp16
   reaches up to 48 GB.
 
@@ -1031,8 +1104,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     shot's latent and windows (see [Colour correction](#colour-correction)).
   - Finished segments and kept units are skipped. A finished segment's size is checked against
     the manifest, and its frames by `seedvr2x verify` (see [Output](#output)). The input
-    frames of skipped shots are decoded and dropped (decode-and-count), until frame-exact
-    seeking is settled.
+    frames of skipped shots are reached through the frame index (see [Input](#input)); until
+    that step is built, they are decoded and dropped (decode-and-count).
   - One seedvr2x at a time per directory (flock); a filesystem without locks is warned about.
     A filesystem that can't sync a directory is warned about once.
   - `--dump-frames` is refused inside the output directory.
@@ -1062,9 +1135,15 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - every segment equals the uninterrupted run's bit for bit, and every stopped process exits
     and leaves the GPU
 - **Later:**
-  - Resuming a segment's decode mid-way. Warm-up latents make it bit-identical from 37 on
-    ([decode-resume.md](../research/docs/decode-resume.md)), but that's about 6 s of
-    frames, so it only pays off on long segments. `--until` avoids most of the loss anyway.
+  - Resuming a segment's decode mid-way
+    ([decode-resume.md](../research/docs/decode-resume.md)). Decoding a warm-up of min(s, 37)
+    latents before the resume point and dropping them is bit-identical, never with fewer: 37
+    is the decoder's receptive field, to the frame. A snapshot of its 33 causal-conv caches is
+    the exact alternative, 8.05 GiB per output megapixel (18 GB at 1080p).
+    - Either needs the run's own tiling, memory limits and slice size, which the recorded plan
+      keeps. With `lab`'s two passes, the shot's histograms too.
+    - A warm-up costs 4.7 min at 1080p (148 frames), so it only pays off on segments much
+      longer than that. `--until` avoids most of the loss anyway.
   - The same manifest lets separate processes take separate shot ranges (several GPUs or
     machines).
 
@@ -1175,6 +1254,10 @@ explanation.
 - the two workflows: a file in and a finished file out, or sptenc's pre-split directories
 - the model: v1 runs the 7B fp16 alone, the reference every check is made against, and phase 2
   brings the others
+- what the model does to live action ([numerics.md](../research/docs/numerics.md)): the
+  perceptual metrics side with it over a plain upscale, the pixel ones with the plain upscale.
+  It redraws grain and detail of the right kind at the wrong place, and from a heavily degraded
+  grainy source it gives back about half of the film's grain.
 - lossless delivery: why there are no encoder options, and how `--segment-cmd` compresses with
   the user's own command
 - disk use: master sizes per hour, the decode buffer and input copies during a run
@@ -1224,11 +1307,14 @@ writers, and the planner needs real shot lengths.
 2. The `lab` rewrite (milestone 5): passed on 2026-10-04. Then, as small steps of their own,
    next: zscale on one slice (see [Input](#input)) and the default master format
    (`yuv420p10le`, see [Output](#output)), then the model check of [Weights](#weights): today a
-   3B or fp8 file is accepted by its name, then fails later or runs unchecked.
+   3B or fp8 file is accepted by its name, then fails later or runs unchecked. Then the
+   padding of step 0 (see [Pipeline](#pipeline-per-shot)), before the planner counts tokens.
 3. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
-   1080p, windows and the streamed decode already bound memory, and the planner's inputs (4K
-   limits, the margin) come from the measurement campaign. Consumer cards need it to run 1080p
-   at all.
+   1080p, windows and the streamed decode already bound memory. The planner's inputs (budget,
+   margin, the DiT's and the tiled VAE's peaks, 4K limits, measured times) are in
+   [Memory planner](#memory-planner). Consumer cards need it to run 1080p at all. Then, as a
+   small step, the frame index (see [Input](#input)), so a resume seeks instead of decoding
+   from the start.
 4. The shot detector, as soon as the scene-detection brief is in (it waits for the user's
    labels), ahead of what is left of 3: both workflows start from it. Until then, the cuts come
    from a cut list.
@@ -1350,33 +1436,21 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
     1 frame on.
 
   Output segments keep sptenc's minimum length (see [Output](#output)).
-- **Frame-exact access into long-GOP sources**, to resume a shot and to read its input frames
-  again for colour correction. Three ways:
-  - ffmpeg's accurate seek: fast, but trusts timestamps
-  - decoding from the start and counting: exact, but slow on a film. Resume uses it for now.
-  - a lossless intermediate: exact and fast, but large
-
-  Plan: measure accurate seek against decode-and-count on real long-GOP files.
 
 ### To measure
-- **Numerics:** numz's or ByteDance's, change by change, once it's confirmed which ones really
-  differ on the 7B fp16 path (see [Vendored model code](#vendored-model-code)):
-  - the RoPE angle precision
-  - the fp32 → fp16 → bf16 cast of input frames
-  - the fp16 weights cast to bf16
-  - VAE mode vs sample
-  - the VAE decode's output precision. bf16 keeps 8 significant bits, ≈ 8-bit steps near
-    white, so a 16-bit master can't hold more there than the decode gives, and smooth bright
-    gradients could band. fp16 keeps 11 bits but VAE activations may overflow it; fp32 costs
-    memory and time.
+- **Numerics:** settled but for three items ([numerics.md](../research/docs/numerics.md)).
+  numz's choices stay (see [Vendored model code](#vendored-model-code)), and so does its
+  resize; the padding changes (step 0 of the [Pipeline](#pipeline-per-shot)). Left:
+  - the VAE decode's output precision. bf16 bands nowhere: CAMBI gives every output 0.004 at
+    most, the model's rendering dithering bf16's steps. A float16 decode brings low-frequency
+    colour closer to the ground truth on 8 of 8 clips (ΔE00 −0.05 to −0.09, beyond the seed
+    spread) for 4.4% more decode time and bf16's memory, 3.4 times under float16's overflow on
+    the brightest clip. After `lab`, only −0.01 to −0.02 is left. So it is decided on the
+    colour study's winner, scored on float16 decodes; numz's bf16 decode stays until then.
   - the chroma kernel at decode, Catmull-Rom upsampling, which shapes what the model sees
     (GPU runs). The master's downsampling is settled: bilinear (see [Output](#output)).
-  - the input preparation: the resize kernel and its `antialias` flag, and multiples of 16
-    reached by padding (numz) or cropping (ByteDance)
   - a shot padded to 4n + 1 frames by mirroring its end (numz) or repeating its last frame
     (ByteDance)
-- **Decode resume granularity:** whether sub-segment decoding with warm-up latents is
-  bit-identical.
 - **A shot's first frame.** The causal VAE encodes it alone, so it comes out less restored,
   closer to the input ([quality.md](../research/docs/quality.md#--prepend_frames)). numz has
   such a frame at every batch; seedvr2x only at each shot's start, right after a cut, where
@@ -1393,7 +1467,5 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
   run whose grid ends a group there would take 4 runs per shot, the grid shifted by 0–3
   frames: 4× the GPU time, so at most a quality mode after v1. Not measured (about 2 GPU h on
   the 8 clips).
-- **4K and long windows:** the planner's limits on large outputs, where the DiT window is the
-  constraint.
 - **Colour correction beyond numz's `lab`,** once milestone 5 is accepted: see
   [Beyond numz's `lab`](#beyond-numzs-lab).
