@@ -416,6 +416,16 @@ Decoding goes through an ffmpeg pipe:
   also match the measured durations, since the output is written at that rate.
   - Comparing declared rates alone fails on Matroska: sptenc found a 24/30 fps mix declared
     24/1 for both.
+  - A file whose timestamps contradict its declared rate is a bad file to remake, refused
+    like any other, not reinterpreted (the user's decision). The case measured: a Blu-ray
+    remux declared 24/1 whose frames step at 24 fps, with one frame in 500 held 62–63 ms
+    instead of 42, which keeps every frame within ±10.9 ms of a steady 24000/1001 timeline,
+    its audio's ([seeking.md](../research/docs/seeking.md), mechanism 7).
+  - When the timestamps follow a constant rate within half a frame, as there, the message
+    gives that rate and how to remake the file: an FFV1 master at that rate, the other
+    streams copied with it. ffmpeg keeps every frame doing so: on that file's first 3,000
+    frames, `fps=24000/1001`, `-fps_mode cfr -r 24000/1001` and a plain retiming all gave the
+    source's frames in order, none dropped or doubled.
   - The pass costs one software decode (171 fps on an HEVC master, over 1,000 fps on
     H.264). scdet and idet join it with automatic scene detection.
 - interlacing: refused when the field order is neither progressive nor unknown (sptenc's
