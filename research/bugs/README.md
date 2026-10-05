@@ -41,6 +41,15 @@ code, not reproduced. Severity, from worst: crash, wrong output, memory, perform
 | [24](24-rope-wrapper-late-binding.md) | RoPE wrapper: every block uses the last block's table | wrong output (7B fp8 file; latent with the others) | confirmed on CPU (numz's classes, the files' tables) | Late-binding closure; the 7B fp8 file's blocks 0–34 run on block 35's fp16 table, not their own fp8-rounded one; harmless with equal tables (the other files checked); bypasses the 7B's RoPE cache |
 | [25](25-naditupscaler-undefined-attention-mode.md) | `NaDiTUpscaler` uses an undefined `attention_mode` | crash (latent) | confirmed on CPU (numz's classes) | `NameError` if built; nothing builds it, and the registry ignores the class name |
 
+## Found in other projects
+
+Found while building seedvr2x, outside numz's code; candidate reports to those projects, not yet
+filed, with the same checks before filing.
+
+| File | Project | Title | Severity | Status | Summary |
+|---|---|---|---|---|---|
+| [ffmpeg-zscale-slice-threading](ffmpeg-zscale-slice-threading.md) | FFmpeg | `zscale`'s output depends on the filter thread count | wrong output | measured | A seam in the 4:2:0 chroma at each band edge; a 10-bit 4:2:0 read off on nearly every sample from 4 bands on; `threads=1` restores the one-band output |
+
 ## Considered and not filed
 
 Measured or read in the notes, but design choices or limitations rather than bugs:
