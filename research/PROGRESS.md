@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 12:54 CEST
+Last update: 2026-10-05 13:45 CEST
 
 ## 0. Setup
 
@@ -203,8 +203,11 @@ temporal regression.
       timestamps, never the declared rate (a film declared 24 fps runs at 23.976 by its
       timestamps, which match its audio: 5.9 s apart at the end). Invalid entry points on 2 of 7
       real H.264 sources, so the content check is required
-- [ ] Real VOB, broadcast TS, open-GOP MPEG-2 and open-GOP HEVC (the first 4K remaster has closed
-      GOPs: an IDR every 24 frames, no leading pictures; it decodes at 204 fps on 16 threads)
+- [x] Real open-GOP HEVC in MKV (2026-10-05, an x265 encode the user made: one IDR, 435 CRA, 54
+      RASL pictures): every method exact on every target, all 54 leading pictures included; a
+      decode started at a CRA drops its RASL pictures silently, never shows a wrong one. The first
+      4K remaster has closed GOPs (an IDR every 24 frames) and decodes at 204 fps on 16 threads
+- [ ] Real VOB, broadcast TS, open-GOP MPEG-2, open-GOP HEVC in MP4 and TS
 - [x] Doc ([docs/seeking.md](docs/seeking.md)) + decision brief (2026-10-02)
 
 ## 5. Decode resume granularity

@@ -7,10 +7,10 @@
 > was tested; MPEG-2 in VOB or broadcast TS, open-GOP MPEG-2 and open-GOP HEVC come from
 > synthetic files only.
 
-In short (10 real sources and 9 synthetic or remuxed files; at each target, 8 consecutive frames
+In short (11 real sources and 9 synthetic or remuxed files; at each target, 8 consecutive frames
 are read and their md5 compared with a decode from the start):
 
-- **Seeking to `n / fps` is never safe:** it missed on 6 of the 10 real sources. One frame off
+- **Seeking to `n / fps` is never safe:** it missed on 6 of the 11 real sources. One frame off
   where millisecond timestamps stray (3–4 of 40 targets), 1–2 frames early on 36 of 40 where the
   decoder drops 2 frames at the start, up to 142 frames early on a Blu-ray that declares 24/1
   fps while its timestamps run at 24000/1001; and 12–16 of 20 on every MP4, TS and VOB test
@@ -21,9 +21,10 @@ are read and their md5 compared with a decode from the start):
   are not valid entry points: a seek landing there returns **wrong pictures that carry the right
   pts**, or drops frames until the next good keyframe (14 of 28 targets in one passage). Checking
   pts can't see either.
-- **Seeking one GOP early, then selecting by pts,** was exact on 538 of 540 targets outside that
-  passage, where it still failed 9 of 28; the 2 others are damaged frames that no seek reproduces.
-  Seeking 1 s early missed 19 of 540.
+- **Seeking one GOP early, then selecting by pts,** was exact on 674 of 676 targets outside that
+  passage (all 54 open-GOP leading pictures of a real x265 encode included), where it still
+  failed 9 of 28; the 2 others are damaged frames that no seek reproduces. Seeking 1 s early
+  missed 19 of 676.
 - **Decoding from the start and counting** costs 1.2–3.9 min to the end of a 2-hour 1080p H.264
   source (730–2,360 fps), 17 min for a 172 Mbit/s HEVC master (171 fps). It is exact only when
   the reader counts: ffmpeg's `select` restarts its count when ffmpeg rebuilds its filter graph
@@ -86,6 +87,7 @@ intermediate, is not measured here: at the 16-bit FFV1 masters' ≈ 70 MiB per s
 | S8 | anime OVA episode, 69 min: H.264 High 1080p, 23.7 Mbit/s, MKV | 99,583 | ≤ 26 (1.1 s) | ≤ 2 B (4 declared). Open: 3,223 of 4,763 keyframes have up to 2 leading pictures | ms, ≤ 0.63 ms off |
 | S9 | Blu-ray remux of a live-action film declared 24/1 fps: H.264 High 1080p, 17.2 Mbit/s, MKV | 142,477 | IDR every 18 (0.75 s) | ≤ 2 B, closed | run at 24000/1001: see [mechanism 7](#failure-mechanisms) |
 | S10 | Blu-ray remux of a live-action film: H.264 High 1080p, 25.6 Mbit/s, MKV | 163,248 | 20 (0.83 s) | 1 B. Open, like S1: 5,193 of 9,851 keyframes have a leading B-frame | ms, ≤ 0.71 ms off |
+| S11 | the user's x265 encode of a Blu-ray anime episode (x265 4.1, `crf=22 open-gop keyint=240 min-keyint=24 scenecut=40 bframes=4 radl=0`): HEVC Main 1080p, 1.1 Mbit/s, MKV | 34,801 | CRA (one IDR at the start), median 61 (2.5 s), max 240 (10 s) | pyramid of 4 B. **Open**: 435 CRA; only the 14 placed by keyint (240 frames after the previous keyframe) have leading pictures, 54 RASL (12 × 4, 2 × 3); no RADL, BLA or in-band parameter set | ms, ≤ 0.5 ms off |
 
 **Synthetic files** (`synth`), from 2 minutes (2,878 frames) of S3: x264 `open-gop=1` keyint 48
 (non-IDR I-frames with a recovery point; 40 of 64 keyframes have up to 3 leading pictures), x265
@@ -111,6 +113,8 @@ returned the same frames as `b_pts` on every target of every file.
 | S8 (40) | 4 / 36 (−2, −1) | 40 | 40 | 40 | 3 / 3 |
 | S9 (40) | 4 / 36 (−2 to −142) | 38 / 0 / 2 | 38 / 0 / 2 | 38 / 0 / 2 | 3 / 3 |
 | S10 (40) | 35 / 4 (+1, +6), 1 short | 39 / 1 (+6) / 0 | 40 | 40 | 3 / 3 |
+| S11, open-GOP HEVC (40) | 40 | 40 | 40 | 40 | 3 / 3 |
+| S11, every RASL picture, its CRA and the frames either side (96) | 96 | 96 | 96 | 96 | – |
 | x264 or x265 open GOP, MKV (20 each) | 20 | 20 | 20 | 20 | 3 / 3 |
 | x264 open GOP, MP4 (20) | 8 / 12 (+1, +3) | 15 / 5 (+1, +3) | 20 | 20 | 3 / 3 |
 | x265 open GOP, MP4 (20) | 8 / 12 (+1, +2) | 14 / 6 (+1, +2) | 20 | 20 | 3 / 3 |
@@ -144,6 +148,8 @@ GOP (6,118 frames, 4.3 min); on S4, `c_1s` lands in the previous 987-frame GOP.
 | S8 | 0.162 | 0.189 | 0.202 | 0.28 | 18–37 |
 | S9 | 0.108 | 0.130 | 0.138 | 0.22 | 12–26 |
 | S10 | 0.136 | 0.157 | 0.167 | 0.21 | 18–30 |
+| S11 (1.1 Mbit/s HEVC) | 0.107 | 0.132 | 0.213 | 0.74 | 1.5–4.7 |
+| S11, the 96 leading-picture targets | 0.250 | 0.248 | 0.334 | 1.00 | 4–15 |
 | Synthetic, 1080p H.264/HEVC | 0.08–0.13 | 0.09–0.15 | 0.11–0.14 | 0.19 | 3–7 |
 | Synthetic, MPEG-2 480p | 0.016–0.017 | 0.017–0.018 | 0.018 | 0.021 | 5–6 |
 
@@ -159,10 +165,12 @@ target costs half):
 | S5 | 171 (24,607) | 25 | 16.8 min |
 | S6, DVD 480i | 2,225–2,406 (1,465–20,806) | 23 | 1.5–1.6 min |
 | S7 / S8 / S9 / S10 | 732–779 / 856–920 / 999–1,039 / 768–788 | 37 / 24 / 21 / 23 | 3.7–3.9 / 3.1–3.4 / 2.8–2.9 / 3.7–3.8 min |
+| S11, HEVC | 1,270–1,831 (1,860–34,800) | 4–12 | 1.6–2.3 min |
 | Synthetic MPEG-2, 480p | 15,825–17,079 (2,801) | 5–6 | 10–11 s |
 
-The reference decode, which also hashes every frame, ran at 308–339 fps on every 1080p H.264
-file whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 fps on S6.
+The reference decode, which also hashes every frame, ran at 308–339 fps on every 1080p H.264 file
+whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 fps on S6, 338 fps on
+S11 (HEVC; with 1 decoder thread 300 fps and the same md5 on every frame).
 
 ## Failure mechanisms
 
@@ -180,7 +188,8 @@ file whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 
    point when the demuxer doesn't seek on pts (no `AVFMT_SEEK_TO_PTS`; the Matroska demuxer lacks
    it) and a stream has a B-frame delay. Decoding starts at the keyframe before that point, so
    open-GOP leading pictures (displayed before their keyframe, decoded after it, referencing the
-   previous GOP) came out right in every MKV: x264, x265, S1, S7, S8 and S10.
+   previous GOP) came out right in every MKV: x264, x265, S1, S7, S8, S10 and S11 (all 54 of its
+   RASL pictures).
 3. **MP4 seeks on decode timestamps.** `libavformat/mov.c` sets `AVFMT_SEEK_TO_PTS` (no 130 ms)
    and searches its sample index by dts after a constant offset ("Here we consider timestamp to
    be PTS, hence try to offset it so that we can search over the DTS timeline",
@@ -188,6 +197,9 @@ file whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 
    the picture, and the output starts 1–3 frames late: every `b_pts` miss in MP4 was a frame
    shown just before a keyframe. mov.c's guard (`can_seek_to_key_sample`) only covers HEVC
    samples the file lists as open (a `sync` sample group); our x265 MP4 still missed 6 of 20.
+   The decoder's side, on real open-GOP HEVC (S11's `keycheck`, all 436 keyframes): a decode
+   started at a CRA outputs none of its RASL pictures (54 of 54), logs nothing at `-v error`,
+   and every later frame is exact. The pictures go missing; they never come out wrong.
 4. **TS and PS have no index.** `mpegts.c` and `mpeg.c` only provide `read_timestamp`: ffmpeg
    bisects on timestamps read from the stream, and decoding started at the next keyframe after
    the position found. The shifts are the rest of the GOP (e.g. +43 = 48 − 5 frames past the
@@ -257,9 +269,9 @@ file whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 
    pass decoded with errors may only match from the start (mechanism 9).
 
 - **Cost per access:** the `c_gop` times above: 0.04 s on the DVD, 0.14–0.23 s on Blu-ray and
-  web H.264, 0.2 s on the 720p HEVC segment, 1.3 s median and 16 s worst on S5. The first try
-  would have failed on 2 of 540 targets outside S1's dense-IDR passage (S9's damaged frames), and
-  on 9 of 28 inside it.
+  web H.264, 0.2 s on the 720p HEVC segment and 0.21 s (0.74 s worst) on the open-GOP x265
+  encode, 1.3 s median and 16 s worst on S5. The first try would have failed on 2 of 676 targets
+  outside S1's dense-IDR passage (S9's damaged frames), and on 9 of 28 inside it.
 - **Cost per frame of the first pass,** the hash (`hashcost`, load 16): md5 334 frames/s on one
   thread (3.0 ms per 1080p 8-bit 4:2:0 frame, 1,039 MB/s), 2,640 on 8; CRC-32 (`zlib.crc32`)
   2,140 frames/s on one (0.47 ms, 6,658 MB/s), 12,249 on 8. Against a first pass decoding the
@@ -276,18 +288,23 @@ file whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 
 - **MPEG-2 beyond one DVD in MKV:** DVD VOB (packets without pts, timestamp jumps at cell and
   VOB boundaries), open-GOP MPEG-2 (the DVD tested is closed), broadcast TS (timestamp wraps,
   missing keyframe flags). The synthetic files only exercised the missing index.
-- **Real open-GOP HEVC** (CRA/RASL, BLA): in MKV, in MP4 with and without a `sync` sample group,
-  and in TS. The first 4K UHD Blu-ray remux (HEVC Main 10, 3840×2160, HDR10 with Dolby Vision
-  profile 7 in the same track, 361,198 frames, MKV) has closed GOPs: an IDR without leading
-  pictures every 24 frames, or sooner at cuts, B-runs of up to 4, pts on the 24000/1001 grid
-  within 0.6 ms (`info` and `nal`; the packet scan took 3.5 s for 87 GB). It decodes at 204 frames
-  per second on 16 threads and 315–326 on 48: a first pass over its 4 h 11 min takes at least 30
-  or 19 minutes.
+- **Open-GOP HEVC in MP4** (with and without a `sync` sample group) **and in TS**, and BLA
+  pictures: S11 covers real open-GOP HEVC in MKV only. The first 4K UHD Blu-ray remux (HEVC Main
+  10, 3840×2160, HDR10 with Dolby Vision profile 7 in the same track, 361,198 frames, MKV) has
+  closed GOPs: an IDR without leading pictures every 24 frames, or sooner at cuts, B-runs of up to
+  4, pts on the 24000/1001 grid within 0.6 ms (`info` and `nal`; the packet scan took 3.5 s for 87
+  GB). It decodes at 204 frames per second on 16 threads and 315–326 on 48: a first pass over its
+  4 h 11 min takes at least 30 or 19 minutes.
 - **The method's own costs:** how often the hash check falls back on real sources, and the hash's
   cost inside seedvr2x's first pass, next to scene detection.
 - **Not covered:** deinterlacing and telecine (S6 was read as interlaced frames, as decoded).
-- **A `keycheck` quirk:** from a file's first keyframe its "bad" result (S3, synthetic MKV and
-  MP4, one each) is an artifact: the stream copy drops the first packets, which have no dts.
+- **A `keycheck` quirk:** from a file's first keyframe its "bad" result (S3, S11, synthetic MKV
+  and MP4) is an artifact of its stream copy, which keeps every packet but moves every timestamp
+  forward by the reorder delay (+83 ms in MKV, whose first 2 packets have no dts; +1328/16000 s
+  in MP4, whose first dts is −1328; the NUT output makes the first dts non-negative). Compared in
+  order, the frames match the reference (28–29 of 30, the rest is the 30-packet cut).
+  `-avoid_negative_ts disabled` on the copy keeps the pts on 5 of these 6 files; on S11 ffprobe
+  then can't read the NUT stream back.
 - **The tool is ready** for these files: `seek` adds the `-seek_timestamp` variants when
   start_time ≠ 0, `nal` decodes MPEG-2 GOP flags and HEVC NAL types, `targets` includes leading
   pictures, `keycheck` works with any codec (`paramsets`: H.264 and HEVC only).
@@ -307,7 +324,7 @@ python3 $S ref $SRC $OUT --name ref2 --threads 1 && python3 $S same $OUT ref ref
 python3 $S synth /path/to/web-episode.mkv out/seek/synth --remux /path/to/bluray-remux.mkv \
   --remux-start 290                  # synthetic open-GOP files + an M2TS excerpt
 python3 $S hashcost                  # md5, sha1, blake2b, CRC-32, Adler-32 per 1080p frame
-python3 $S report out/seek/*/ out/seek/synth/*/   # Markdown tables, video bitrates
+python3 $S report $(ls -d out/seek/*/ | grep -v '/synth/$') out/seek/synth/*/   # Markdown tables
 ```
 
 S5 used `--count-at 0.02,0.1`; `keycheck --sample 200 --range 305:315` on S1, `--sample 60` on
@@ -316,4 +333,9 @@ synthetic file. S1's passage: a hand-written `targets.json` (every other frame f
 7,459) in a directory linked to S1's `info.json`, `ref.framemd5`, `packets.csv` and
 `paramsets.json`, then `seek --methods b_pts,c_1s,c_gop --repeats 1`. S9's last frames: `seek
 --only-kinds last --methods b_pts,d_count --count-at 0.999993 --repeats 1`, and again with
-`--methods b_pts,c_gop --threads 1`.
+`--methods b_pts,c_gop --threads 1`. S11: `keycheck --sample 436` (every keyframe); the 96
+leading-picture targets (every RASL picture, its CRA, the frame after the CRA and the frame before
+the RASL run) were written by hand into a `targets.json` in a directory linked to S11's
+`info.json`, `packets.csv` and `ref.framemd5`, then `seek --methods
+a_naive,b_pts,b_copyts,c_1s,c_gop,e_pipe --repeats 3`; the decode-and-count to the last frame:
+`seek --only-kinds last --methods d_count --count-at 0.99999 --count-repeats 3 --repeats 3`.
