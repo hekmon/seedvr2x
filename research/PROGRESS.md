@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 18:23 CEST
+Last update: 2026-10-05 18:42 CEST
 
 ## 0. Setup
 
@@ -173,7 +173,8 @@ temporal regression.
       frame 14) restarts the frame counter sptenc reads cut indices from, so every later cut comes
       out 14 frames early; `-reinit_filter 0` fixes it
 - [x] TransNetV2, the neural shot-boundary detector DESIGN.md lists (official MIT code and weights;
-      its PyTorch port matches TensorFlow within 3e-7 on real frames, same detections): every
+      its PyTorch port matches TensorFlow within 3e-7 on real frames, same detections; 5.1e-7 on
+      2026-10-05's excerpts): every
       episode scored. It marks a cut on the outgoing shot's last frame (on 98% of the sure cuts).
       Unlabelled so far: on action anime it hardly fires in bursts (dark anime episode at p = 0.5
       against scdet at T = 10: detections 1–3 frames apart 627 → 5, shots under 0.5 s 782 → 18);
