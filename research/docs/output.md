@@ -146,7 +146,10 @@ included):
 | CLI PNG, 8-bit | – | 44 ms (12 frames) |
 
 Against ≈ 4 s of processing per frame, either is noise. A 16-bit master is 27× the CLI's mp4:
-about 70 MiB per second of 1080p video.
+about 70 MiB per second of 1080p video. That is numz's output with `lab`, whose values sit on
+bf16's steps ([numerics.md](numerics.md#where-the-precision-goes)). seedvr2x's `lab` keeps a
+float32 output: its `gbrp16le` master takes 2.0–2.5× that (the implementation's milestone 5
+masters), while its `yuv420p10le` master stays the same size.
 
 ## Do attention backends change the output?
 

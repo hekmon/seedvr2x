@@ -48,6 +48,14 @@ Unless a table says otherwise: `--color_correction none` (to see the model alone
 | hold ΔY | On clip B's held pairs, the output's mean \|ΔY\| between consecutive frames: since the drawing doesn't change, this is flicker. Split into transitions inside a batch and at batch boundaries (where the output switches DiT batch). Input: 0.45 |
 | added lf | Mean \|Δ(output − input)\| between consecutive frames on 16×16-pixel block means: low-frequency change the input doesn't have (brightness/colour flicker), inside batches / at boundaries |
 
+The Y shift is read from the CLI's 8-bit PNGs, so it includes numz's uint8 truncation: −0.5 level
+for evenly spread fractions, about −0.4 measured on synthetic frames by the implementation's
+milestone 5 scoring. It shifts every row alike, so differences between rows are unaffected. When
+the output is larger than the input, `quality_metrics.py` first scales it down with OpenCV's
+`INTER_AREA` on uint8, which at exactly 2× rounds the 2×2 means half up: +0.125 level on average
+(+0.125 on random frames, +0.130 on smooth ones). That doesn't apply on this page, where every
+clip is 1080p in and out.
+
 Times (DiT, Phase 4, total) are indicative only: the GPU is power-capped and its speed varied by
 up to 40–60% between sessions ([benchmarking.md](benchmarking.md#caveats)), so compare them only
 between runs made back to back.
@@ -110,7 +118,8 @@ And across batch boundaries (45 frames, batch 21, two boundaries):
 - **`wavelet` and `lab` put the input's low frequencies back** without touching detail: ΔE lf
   4.4 → 1.0 (A) and 2.0 → 0.7 (B), L\*a\*b\* means within 0.2 of the input, PSNR in +9.5 dB (A)
   and +3.3 dB (B), same Laplacian variance and grain.
-  The −0.59 level left is mostly the uint8 truncation (−0.5 on average, [cli-flags.md](cli-flags.md#output)).
+  The −0.59 level left is mostly the uint8 truncation (−0.5 on average, [cli-flags.md](cli-flags.md#output);
+  about −0.4 on synthetic frames, see [Method](#method)).
   `lab`'s histogram step also matches the saturation: a\*/b\* std 1.86/2.90 vs 1.84/2.87 for
   the input on B, where `wavelet` leaves 2.18/3.14 (the pyramid only replaces what is coarser
   than ≈ 30–60 px, and the extra saturation is finer). On A the two are close.
