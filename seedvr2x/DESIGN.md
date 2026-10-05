@@ -637,6 +637,14 @@ The rule: the upscale must look like its source in any given player.
        good or better (PSNR-Y +0.29 to +0.40 dB on 3 of 4 clips); at 720p better on all 4
        clips (PSNR-Y +0.07 to +1.03 dB, VMAF +0.9 to +10.2). Effects 1.7–8 times the spread
        between seeds; through `lab` they hold, smaller.
+     - At 4K, measured inside a letterboxed film's picture (2048 rows, where numz pads
+       nothing, as at 720p): the bottom band +1.9 to +4.8 dB on 4 of 4 clips, but no gain
+       across the frame. The rest is worse on 2 clips (−0.94 and −0.38 dB, beyond the seeds'
+       band) and within it on 2; LPIPS is better on 3, VMAF on 2, low-frequency colour worse on
+       3 (ΔE00 +0.07 to +0.29), which colour correction works on. The rule stays at every size,
+       since a second rule would buy nothing measured (one film, 25 frames, colour correction
+       off; the latent grid's change, 260 rows instead of 256, isn't separated from the black
+       rows).
      - Columns, when the width isn't a multiple of 16, the same way (not measured: outputs are
        mostly 1920 or 3840 wide). It costs 24 rows at 1080p (1,104 for numz's 1,088, +1.5% of
        the tokens) and 32 at 720p.
@@ -1579,5 +1587,14 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
   run whose grid ends a group there would take 4 runs per shot, the grid shifted by 0–3
   frames: 4× the GPU time, so at most a quality mode after v1. Not measured (about 2 GPU h on
   the 8 clips).
+- **4K output's quality.** The first full-reference runs at 4K (one film, 4 shots of 25
+  frames, ×2 from 1080p, colour correction off, decode tiles of 2048 px) put the model further
+  from the ground truth than bicubic on every metric, the perceptual ones included: DISTS on 4
+  of 4 clips, LPIPS on 3, where at 1080p both favoured it on live action. PSNR-Y 26.5–32.6 dB
+  against 35.4–40.9, VMAF 38–48 against 75–86, low-frequency colour (ΔE00) 2.1–3.9 against
+  0.6–0.8, low-frequency flicker 3.2 and 9.2 against 0.5 on the dark and fast clips
+  ([numerics.md](../research/docs/numerics.md#4k-no-padding-inside-the-letterbox)). How much
+  colour correction and the tiles account for is the colour study's 4K question; what is left
+  decides what seedvr2x does at 4K.
 - **Colour correction beyond numz's `lab`,** once milestone 5 is accepted: see
   [Beyond numz's `lab`](#beyond-numzs-lab).
