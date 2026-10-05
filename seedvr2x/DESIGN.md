@@ -323,8 +323,9 @@ they differ and by which metrics, and how users are guided to them. What is know
     GPL-3.0, never copied.
   - The gain is mostly memory. ComfyUI reports about 2× over fp8 or bf16 on Blackwell, but the
     DiT is about a fifth of a 1080p run here: a DiT twice as fast shortens a job by about 10%.
-- **One Hugging Face repo, seedvr2x's own, from v1 on** (the user's plan, 2026-10-05), holds
-  every file seedvr2x runs, each made by a documented script: each file's origin can be
+- **One Hugging Face repo, seedvr2x's own, from v1 on**,
+  [`hekmon/seedvr2x`](https://huggingface.co/hekmon/seedvr2x) (the user's plan, 2026-10-05),
+  holds every file seedvr2x runs, each made by a documented script: each file's origin can be
   checked, and nothing depends on another party's repo staying as it is. Apache-2.0 allows it,
   with the licence and a notice of the changes; TransNetV2's weights are MIT.
   - v1 seeds it with the 7B and sharp 7B fp16 DiTs and the fp16 VAE, rounded from ByteDance's
@@ -340,6 +341,12 @@ they differ and by which metrics, and how users are guided to them. What is know
   - The files are made in `models/dist/`, which git ignores, and the user uploads that
     directory as it is (`hf upload`, from the GPU box), with a list of each file's SHA-256 and
     a model card giving the licences and how each file was made.
+  - Licences: the repo is `apache-2.0`, as ByteDance's SeedVR2 repos and seedvr2x are, with
+    the Apache-2.0 text and a NOTICE at its root. The NOTICE names each SeedVR2 file's origin
+    (ByteDance's file and revision) and its change (rounded to fp16; later, the quantization),
+    as Apache-2.0 asks of modified files, and each file's safetensors metadata says so too.
+    TransNetV2's file keeps its MIT licence, the notice beside it. The card says the files are
+    unofficial conversions, not ByteDance's.
   - seedvr2x pulls its files from that repo at a revision pinned in its code, each checked by a
     SHA-256 pinned there too, so a version always runs the same bytes. A local directory
     holding the same files works offline.
