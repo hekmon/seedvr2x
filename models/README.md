@@ -10,7 +10,18 @@ runs its check, and writes into `models/dist/`, which git ignores and the upload
 |---|---|---|---|
 | `seedvr2_fp16.py` | `seedvr2x_ema_7b_fp16.safetensors`, `seedvr2x_ema_7b_sharp_fp16.safetensors`, `seedvr2x_ema_vae_fp16.safetensors` | ByteDance's fp32 masters (ByteDance-Seed/SeedVR2-7B at `eb0c428`), every tensor rounded to the nearest float16, ties to even | equal to numz's fp16 files (numz/SeedVR2_comfyUI at `09ced71`), element for element |
 | `transnetv2_weights.py` | `transnetv2.safetensors`, `transnetv2.LICENSE` | TransNetV2's TensorFlow weights (soCzech/TransNetV2 at `85cef72`), through its own `convert_weights.py` | the converter's output byte for byte as measurement's ([scene-detection.md](../research/docs/scene-detection.md#transnetv2)); PyTorch against TensorFlow on the same frames |
-| `dist.py` | `LICENSE`, `NOTICE`, `README.md` (the model card, from `card.md`), `SHA256SUMS` | each file's safetensors metadata | |
+| `dist.py` | `LICENSE`, `NOTICE`, `README.md` (the model card, from `hf/README.md`), `SHA256SUMS` | each file's safetensors metadata | |
+| `seedvr2_fp8.py` | phase 2: `seedvr2x_ema_7b{,_sharp}_fp8_scaled.safetensors` | the fp32 masters: the 288 block matrices in E4M3 with one scale per tensor (comfy-kitchen's layout), the rest our fp16 values | each matrix's error; read back; the 16-bit tensors byte for byte our fp16 file's |
+| `seedvr2_gguf.py` | phase 2: `seedvr2x_ema_7b{,_sharp}_{Q4_K,Q8_0}.gguf` | the fp32 masters, by ggml's own quantizer (llama.cpp `abeada3`, built from source), the rest float16 | ggml's and gguf-py's decoders agree; each matrix's error, numz's Q4_K_M's beside; read back |
+| `seedvr2_int8.py` | phase 2: `seedvr2x_ema_7b{,_sharp}_int8_convrot.safetensors` | the fp32 masters: the 288 block matrices rotated (comfy-kitchen's Hadamard), int8 with one scale per row, the rest our fp16 values | each matrix's error; codes against comfy-kitchen's own quantizer; read back; the 16-bit tensors byte for byte |
+| `ck_check.py` | | our fp8 and int8 files | comfy-kitchen (0.2.37, CPU) decodes every marked layer as we do, and multiplies one |
+| `numz_gguf_check.py` | | our GGUF files, run in numz's environment | numz's own loader: every tensor, the 7B DiT loaded, one layer's forward |
+| `numz_check.py` | | numz's files and ByteDance's masters | how numz's 3B and 7B files were made |
+| `formats_study.py` | | the 7B's fp32 master | every format's error per weight: [FORMATS.md](FORMATS.md) |
+
+Phase 2's files are made ahead of phase 2, on the CPU, and stay out of `models/dist/` until GPU
+runs validate them (DESIGN.md, Weights); what each format does to the weights, and why it is made
+as it is: [FORMATS.md](FORMATS.md).
 
 `common.py` holds what they share: downloads checked by SHA-256 (resumed when cut), and the
 safetensors writer.
