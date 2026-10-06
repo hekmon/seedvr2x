@@ -865,7 +865,9 @@ output's colours are, it repairs what tiling does to them, and the measurements 
     96 GB card's (encode untiled, decode tiles of 1536 px and up, 2048 being what the planner
     picks there) and the consumer cards', on 4K ground truth, ×2 from 1080p: 4 shots of 45
     frames from a UHD Blu-ray remux, made SDR by one fixed tone map since v1 refuses HDR
-    ([numerics.md](../research/docs/numerics.md#clips)).
+    ([numerics.md](../research/docs/numerics.md#clips)). That remux is an old film's
+    restoration: grainy, with few flat areas, where tile drift shows least. Animation
+    mastered in 4K and clean, digitally shot live action, smooth skies included, come next.
   - What's left of the drift sets how small the planner may make tiles: on the smallest
     cards, and wherever smaller tiles would make room for `compile_vae`, which doubles the
     VAE's memory.
@@ -1596,5 +1598,9 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
   ([numerics.md](../research/docs/numerics.md#4k-no-padding-inside-the-letterbox)). How much
   colour correction and the tiles account for is the colour study's 4K question; what is left
   decides what seedvr2x does at 4K.
+  - That ground truth is one old film's restoration, whose finest detail is grain, which no
+    method recovers from a halved, compressed input and which pixel metrics favour smoothing
+    over. The figures stay provisional until animation mastered in 4K (flat colour) and clean,
+    digitally shot live action are measured too.
 - **Colour correction beyond numz's `lab`,** once milestone 5 is accepted: see
   [Beyond numz's `lab`](#beyond-numzs-lab).
