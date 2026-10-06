@@ -10,7 +10,8 @@ steps 2 and 3).
                  --variants SPEC[@REF],... --out DIR [--pix-fmt yuv420p10le[,gbrp16le]]
   colour_eval.py vmaf --clip NAME --gt GT.mkv --master TAG=MASTER.mkv [--master ...] --out DIR
                  [--master-content s42[,s43]] [--frames N]
-  colour_eval.py summary DIR [DIR ...] --baseline SPEC@REF [--block 8] [--boot 2000]
+  colour_eval.py summary DIR [DIR ...] [--baseline SPEC@REF] [--versus NAME] [--rename OLD=NEW ...]
+                 [--block 8] [--boot 2000]
 
 Why: every variant post-processes the same dumped decode and reference (colour_dump.py), so a
 variant's score differs from the baseline's by the variant alone.
@@ -21,11 +22,18 @@ score --master: masters scored as they are, each under its tag; a YUV master is 
 full-range RGB with zscale (BT.709, limited range, chroma sited left), as a player shows it.
 --vmaf adds VMAF and CAMBI (fr_metrics.py's libvmaf models and options): an RGB master through
 fr_metrics.py's own chain, a YUV master as stored against the ground truth through ffv1_out.py's
-yuv420p10le chain, at 10 bits where the master quantises.
+yuv420p10le chain, at 10 bits where the master quantises. The model is fr_metrics.py's for the
+ground truth's size: vmaf_v1.0.16_1d5h_2160 from 2160 rows or 3840 columns up (cropped 4K such as
+3840x2016 included), else vmaf_v1.0.16_3d0h; the JSON records it (vmaf_info.models).
 vmaf: VMAF and CAMBI alone, the masters scored as score --master --vmaf scores them (an RGB master
 through fr_metrics.py's chain, as measurement scores its baselines; a YUV master as stored), one JSON
 per master and content tag (a baseline that has no seed, e.g. the bicubic upscale, under each seed's
 tag so that it pairs with each): what the other metrics would repeat from the dumps is not computed.
+A tag SPEC@REF is recorded as variant SPEC with reference REF, as score --master records it, so that
+summary adds VMAF and CAMBI to that variant's scores from the dumps. Give vmaf its own --out
+directory: a tag without @ (bicubic) gets score --master's file name. CAMBI comes only from libvmaf,
+with VMAF, so only for masters: a variant's VMAF and CAMBI added come from its master, rendered by
+render --pix-fmt gbrp16le (or the default yuv420p10le), then vmaf --master SPEC@REF=MASTER.
 stitch: clip B's boundary steps after each variant (milestone 2's measure): a windowed run and its
 one-batch run (colour_dump.py decodes), both corrected by the variant, written as rounded 8-bit
 PNGs and compared by stitch_metrics.py (measurement's) with its --latent analysis.
@@ -36,7 +44,8 @@ VAE's raw output) and variant (colour_variants.py's specs, @TAG picks the refere
 - de<s>: ΔE00 after a Gaussian blur of s = 0, 1, 2, 4, 8, 16 px, whole frame (colour_diag.py's,
   fr_metrics.py's ΔE00 lf at 4); tl<s>, tc<s>: its lightness and colour parts over the picture
   (the letterbox bars and bottom 16 rows left out)
-- psnr_y: PSNR of the BT.709 luma, 8-bit scale; lap: luma Laplacian variance (fr_clips.py's)
+- psnr_y: PSNR of the BT.709 luma, 8-bit scale; ssim_y: SSIM of that luma (fr_metrics.py's ssim:
+  11x11 Gaussian window, σ 1.5); lap: luma Laplacian variance (fr_clips.py's)
 - t_full, t_lf (per transition): |Δout - ΔGT| of luma between consecutive frames, at full
   resolution and on 16x16 block means (fr_metrics.py's temporal errors)
 - fringe: the colour part of the unblurred ΔE00 on the GT's strong edges: the top 5% of its luma
@@ -53,7 +62,14 @@ summary: tables over the JSONs of DIR: means per clip, content and variant (seed
 s43, s1234, untiled); paired differences to --baseline per clip, frame by frame pooled over the
 seeds, a 95% interval from a moving-block bootstrap, and a verdict: better or worse when the interval
 excludes 0 and the difference exceeds the baseline's seed spread (max - min of its per-seed means),
-within otherwise, as numerics.md's protocol; per tiling, the block offsets left after correction
+within otherwise, as numerics.md's protocol; with --versus NAME (e.g. bicubic, scored from its
+master), every variant against that output as fr_metrics.py --summary --versus pairs them: each seed
+against NAME's run of the same seed, or against its one run if it has one; better or worse beyond
+the interval and the VARIANT's own seed spread over the paired seeds (0 with one seed: the interval
+alone decides), per clip and over the clips. JSONs of the same clip, content and variant@ref (score's
+and vmaf's) are merged: the series of each kept, the later file's on a series both hold. --rename
+OLD=NEW renames a variant on loading (e.g. c43=split:ycc:4:3@f32, a vmaf tag to its spec and
+reference); per tiling, the block offsets left after correction
 (largest |block mean| per frame, and over the GT's flattest third of blocks); with the table groups,
 the latent grid (numerics.md, every fourth frame): after a shot's first frame the causal VAE packs 4
 frames per latent, and the last of each group (place 3) comes out closest to the GT; per variant,
@@ -81,7 +97,8 @@ SIGMAS = D.SIGMAS
 BLOCK = 60
 EDGE_SHARE = 0.05
 PER_TRANSITION = ("t_full", "t_lf")
-HIGHER = {"psnr_y", "lap", "psnr_tile", "vmaf"}  # higher is better (lap: reported as a change)
+HIGHER = {"psnr_y", "ssim_y", "lap", "psnr_tile", "vmaf"}  # higher is better (lap: reported as a change)
+YUV_VMAF_CHAIN = "yuv as stored, GT through ffv1_out.py's chain"
 
 
 def log(msg):
@@ -161,12 +178,21 @@ class MasterFrames:
         self.proc.wait()
 
 
-def vmaf_master(gt, master, n, fps, threads, height):
+def vmaf_model(height, width=None):
+    """The VMAF v1 model fr_metrics.py takes for a ground truth of this size (its uhd rule: the 2160p
+    model from 2160 rows or 3840 columns up, else the 1080p one)."""
+    import fr_metrics
+    return fr_metrics.VMAF_V1[fr_metrics.uhd(height, width)]
+
+
+def vmaf_master(gt, master, n, fps, threads, height, width=None, info=None):
     """VMAF (v1 fidelity) and CAMBI as fr_metrics.py runs libvmaf (its CAMBI options, and its model
-    for a ground truth of this height, as sptenc picks it: the 2160p model from 2160 rows up), but on
-    a YUV master as stored: the master is the distorted input as it is, and the ground truth goes
-    through ffv1_out.py's yuv420p10le chain (zscale, BT.709, limited range, chroma sited left), where
-    seedvr2x's default master quantises."""
+    for a ground truth of this size, vmaf_model: the 2160p model from 2160 rows or 3840 columns up;
+    give the width, or a cropped 4K ground truth gets the 1080p model), but on a YUV master as
+    stored: the master is the distorted input as it is, and the ground truth goes through
+    ffv1_out.py's yuv420p10le chain (zscale, BT.709, limited range, chroma sited left), where
+    seedvr2x's default master quantises. info, a dict, receives the model, chain and libvmaf
+    version."""
     import subprocess
     import tempfile
     import fr_metrics
@@ -174,8 +200,8 @@ def vmaf_master(gt, master, n, fps, threads, height):
     chain = ffv1_out.FORMATS["yuv420p10le"][1][1]  # "-vf" value: zscale ...,format=yuv420p10le
     with tempfile.TemporaryDirectory() as d:
         report = os.path.join(d, "vmaf.json")
-        lav = (f"libvmaf=model={fr_metrics.vmaf_models(height)}:feature={fr_metrics.CAMBI_FEATURE}:log_fmt=json"
-               f":log_path={report}:n_threads={threads}")
+        lav = (f"libvmaf=model={fr_metrics.vmaf_models(height, width)}:feature={fr_metrics.CAMBI_FEATURE}"
+               f":log_fmt=json:log_path={report}:n_threads={threads}")
         fc = (f"[0:v]setpts=PTS-STARTPTS,trim=end_frame={n},setparams=colorspace=unknown[distorted];"
               f"[1:v]setpts=PTS-STARTPTS,trim=end_frame={n},{chain},setparams=colorspace=unknown[reference];"
               f"[distorted][reference]{lav}")
@@ -185,6 +211,8 @@ def vmaf_master(gt, master, n, fps, threads, height):
             raise SystemExit(f"libvmaf failed on {master}")
         with open(report, encoding="utf-8") as f:
             rep = json.load(f)
+    if info is not None:
+        info.update({"libvmaf": rep.get("version"), "chain": YUV_VMAF_CHAIN, "models": [vmaf_model(height, width)]})
     get = lambda k: [fr["metrics"].get(k) for fr in rep.get("frames", [])]  # noqa: E731
     return {"vmaf": get("vmaf"), "cambi_added": get("cambi_full_reference"),
             "cambi_out": get("cambi_hrs_1080_vlt_0.06")}
@@ -260,6 +288,7 @@ def render(a):
 def score(a):
     import torch
     import colour_variants as V
+    import fr_metrics  # its SSIM (and LPIPS, DISTS, VMAF)
     torch.set_num_threads(a.threads)
     cv2.setNumThreads(a.threads)
     os.makedirs(a.out, exist_ok=True)
@@ -276,7 +305,6 @@ def score(a):
         raise SystemExit("--untiled must name the first --content")
     deep = None
     if a.lpips or a.dists_every:
-        import fr_metrics
         deep = fr_metrics.Deep(a.threads)
     # the ground truth, read once
     src = D.Master(a.gt, 4)
@@ -370,6 +398,7 @@ def score(a):
                 y = luma8(x)
                 d = y - gy[i]
                 pf["psnr_y"].append(10 * math.log10(255.0 ** 2 / max(float(np.mean(d * d, dtype=np.float64)), 1e-12)))
+                pf["ssim_y"].append(fr_metrics.ssim(y, gy[i]))
                 pf["lap"].append(D.lap_var(y))
                 dlf = cv2.resize(d, (w // 16, h // 16), interpolation=cv2.INTER_AREA)
                 if prev is not None:
@@ -395,26 +424,32 @@ def score(a):
                         if a.dists_every and i % a.dists_every == 0:
                             ds = deep.dists_score(deep.dists.forward_once(xo), deep.dists.forward_once(g))
                             pf["dists"].append(float(ds[0]))
-            if a.master and a.vmaf:
+            vinfo = None
+            if a.master and a.vmaf:  # the model for the GT's size (h rows, w columns), recorded
                 import ffv1_out
                 fps = ffv1_out.probe_fps(a.gt)
                 if master_fmt.startswith("yuv"):
-                    pf.update(vmaf_master(a.gt, masters[spec], t, fps, a.threads, h))
+                    vinfo = {}
+                    pf.update(vmaf_master(a.gt, masters[spec], t, fps, a.threads, h, w, vinfo))
                 else:
-                    import fr_metrics
-                    pf.update(fr_metrics.vmaf(a.gt, masters[spec], t, str(fps), None, None, "sptenc", a.threads)[0])
+                    vpf, _, vinfo = fr_metrics.vmaf(a.gt, masters[spec], t, str(fps), None, None, "sptenc",
+                                                    a.threads, h, w)
+                    pf.update(vpf)
             res = {"clip": a.clip, "content": ctag, "content_path": os.path.abspath(cpath), "variant": vspec,
                    "ref": rtag, "ref_path": os.path.abspath(refs[rtag]) if rtag in refs else None,
                    "frames": t, "size": [w, h],
                    "dists_every": a.dists_every, "per_frame": pf, "per_transition": pt,
                    "seconds": {"apply": round(t_apply, 1), "total": round(time.perf_counter() - t0, 1)}}
+            if vinfo:
+                res["vmaf_info"] = vinfo
             for tag in (a.master_content.split(",") if a.master else [ctag]):
                 res["content"] = tag
                 name = f"{a.clip}.{tag}.{safe(vspec)}~{rtag}.json"
                 with open(os.path.join(a.out, name), "w", encoding="utf-8") as f:
                     json.dump(res, f)
             log(f"{a.clip} {ctag} {spec}: ΔE00 σ4 {np.mean(pf['de4']):.3f}, PSNR-Y {np.mean(pf['psnr_y']):.2f}, "
-                f"lap {np.mean(pf['lap']):.1f}" + (f", LPIPS {np.mean(pf['lpips']):.4f}" if pf.get("lpips") else "")
+                f"SSIM-Y {np.mean(pf['ssim_y']):.4f}, lap {np.mean(pf['lap']):.1f}"
+                + (f", LPIPS {np.mean(pf['lpips']):.4f}" if pf.get("lpips") else "")
                 + (f", vs untiled {np.mean(pf['psnr_tile']):.2f} dB" if pf.get("psnr_tile") else "")
                 + f" ({res['seconds']['apply']} + {res['seconds']['total'] - res['seconds']['apply']:.1f} s)")
             if a.untiled and ctag == a.untiled:
@@ -423,13 +458,16 @@ def score(a):
 
 
 def vmaf(a):
-    """VMAF (v1, the model for the ground truth's height) and CAMBI of masters against the GT."""
+    """VMAF (v1, the model for the ground truth's size: rows and columns, vmaf_model) and CAMBI of
+    masters against the GT. A tag SPEC@REF is recorded as variant SPEC, reference REF (score --master's
+    reading), so that summary merges these series into that variant's scores; any other tag as it is."""
     import subprocess
     import ffv1_out
     import fr_metrics
     os.makedirs(a.out, exist_ok=True)
     fps = ffv1_out.probe_fps(a.gt)
-    height = int(fr_metrics.probe(a.gt)["height"])
+    st_gt = fr_metrics.probe(a.gt)
+    height, width = int(st_gt["height"]), int(st_gt["width"])
     for tag, path in (m.split("=", 1) for m in a.master):
         r = subprocess.run([D.FFPROBE, "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
                             "stream=pix_fmt,nb_read_frames", "-of", "json", path], capture_output=True, text=True)
@@ -437,14 +475,18 @@ def vmaf(a):
         n = min(int(st["nb_read_frames"]), a.frames or 1 << 30)
         t0 = time.perf_counter()
         if st["pix_fmt"].startswith("yuv"):
-            pf, how = vmaf_master(a.gt, path, n, fps, a.threads, height), "yuv as stored, GT through ffv1_out.py's chain"
+            info = {}
+            pf = vmaf_master(a.gt, path, n, fps, a.threads, height, width, info)
+            how = f"{YUV_VMAF_CHAIN} ({info['models'][0]})"
         else:
-            pf, _, info = fr_metrics.vmaf(a.gt, path, n, str(fps), None, None, "sptenc", a.threads)
+            pf, _, info = fr_metrics.vmaf(a.gt, path, n, str(fps), None, None, "sptenc", a.threads, height, width)
             how = f"fr_metrics.py's chain ({info['convert']}, {info['models'][0]})"
+        info = dict(info, gt_size=[width, height])
+        vspec, _, rtag = tag.partition("@")
         for ctag in a.master_content.split(","):
-            res = {"clip": a.clip, "content": ctag, "content_path": os.path.abspath(path), "variant": tag, "ref": "",
-                   "ref_path": None, "frames": n, "size": None, "vmaf_chain": how, "per_frame": pf,
-                   "per_transition": {}, "seconds": {"total": round(time.perf_counter() - t0, 1)}}
+            res = {"clip": a.clip, "content": ctag, "content_path": os.path.abspath(path), "variant": vspec,
+                   "ref": rtag, "ref_path": None, "frames": n, "size": None, "vmaf_chain": how, "vmaf_info": info,
+                   "per_frame": pf, "per_transition": {}, "seconds": {"total": round(time.perf_counter() - t0, 1)}}
             with open(os.path.join(a.out, f"{a.clip}.{ctag}.{safe(tag)}~.json"), "w", encoding="utf-8") as f:
                 json.dump(res, f)
         log(f"{a.clip} {tag}: VMAF {np.mean(pf['vmaf']):.2f}, CAMBI added {np.mean(pf['cambi_added']):.4f} "
@@ -493,8 +535,21 @@ def summary(a):
     runs, gts = load(a.dirs)
     rng = np.random.default_rng(1)
     key = lambda r: f"{r['variant']}@{r['ref']}"  # noqa: E731
+    renames = {}
+    for spec in a.rename or []:
+        old, _, new = spec.partition("=")
+        if not old or not new:
+            raise SystemExit(f"--rename {spec}: OLD=NEW")
+        renames[old if "@" in old else old + "@"] = new  # OLD without @: a run without a reference (vmaf's tags)
     by = defaultdict(lambda: defaultdict(dict))  # clip -> variant@ref -> content -> run
     for r in runs:
+        new = renames.get(key(r))
+        if new:
+            r["variant"], _, r["ref"] = new.partition("@")
+        prev = by[r["clip"]][key(r)].get(r["content"])
+        if prev is not None:  # the same output in another JSON (vmaf's beside score's): both kept, this one first
+            for part in ("per_frame", "per_transition"):
+                r[part] = {**prev.get(part, {}), **r.get(part, {})}
         by[r["clip"]][key(r)][r["content"]] = r
     seeds = ("s42", "s43", "s1234")
     tables = set(a.tables.split(","))
@@ -529,6 +584,114 @@ def summary(a):
         tiles_table(by, gts)
     if "groups" in tables:
         groups_table(by, seeds)
+    if a.versus:
+        versus_tables(a, by, seeds)
+
+
+VERSUS_METRICS = ["de0", "de1", "de2", "de4", "de8", "de16", "tl2", "tc2", "psnr_y", "ssim_y", "lpips", "dists",
+                  "lap", "fringe", "t_full", "t_lf", "vmaf", "cambi_added"]
+
+
+def diff_fmt(k):
+    return ("{:+.2f}" if k in ("psnr_y", "lap", "vmaf") else "{:+.4f}" if k in ("lpips", "dists", "ssim_y")
+            else "{:+.3f}")
+
+
+def run_mean(r, k):
+    """A run's mean of metric k over its finite values (fr_metrics.py's means), None without any."""
+    x = series(r, k)
+    if x is None:
+        return None
+    x = x[np.isfinite(x)]
+    return float(x.mean()) if x.size else None
+
+
+def versus_tables(a, by, seeds):
+    """Every variant against the output --versus names (e.g. bicubic, scored from its master), paired
+    as fr_metrics.py --summary --versus pairs them. Per clip, each seed's run of the variant (contents
+    s42, s43, s1234) against the versus output's run of the same content tag, or against its only run
+    when it has one (whatever its tag). Frame by frame (per transition for the temporal errors), each
+    pair's series cut to the shorter one and its non-finite values dropped, pooled over the pairs: the
+    mean difference (variant − NAME), a 95% interval from a moving-block bootstrap (--block, --boot),
+    and better / worse when the interval excludes 0 and |mean| exceeds the band: the variant's own
+    seed spread, max − min of its per-seed means over the paired seeds that hold the metric (NAME has
+    none: one upscale); with one seed the band is 0 and the interval alone decides. lap (detail) is
+    reported as a change (↑ / ↓), not counted. Then, over the clips, the mean of the per-clip
+    differences and the counts."""
+    names = {k for clip in by for k in by[clip]}
+    name = a.versus if a.versus in names else (a.versus + "@" if a.versus + "@" in names else None)
+    if name is None:
+        raise SystemExit(f"--versus {a.versus}: no run of that output (variant@ref: {', '.join(sorted(names))})")
+    rng = np.random.default_rng(0)  # its own draws: the same intervals with or without --baseline
+    ks = [k for k in VERSUS_METRICS if any(series(r, k) is not None for clip in by if name in by[clip]
+                                           for v in by[clip] for r in by[clip][v].values())]
+    across = defaultdict(lambda: defaultdict(list))  # variant -> metric -> [(clip mean diff, tag)]
+    print(f"\n## Against {name}: variant − {name}, frame by frame (B / W: beyond the interval and the variant's "
+          f"own seed spread)\n")
+    print("| Clip | Variant | Seeds | " + " | ".join(ks) + " |")
+    print("|---|---|---|" + "---|" * len(ks))
+    for clip in sorted(by):
+        ref = by[clip].get(name)
+        if not ref:
+            continue
+        for v in sorted(by[clip]):
+            if v == name:
+                continue
+            runs = {s: r for s, r in by[clip][v].items() if s in seeds}
+            if not runs:
+                continue
+            if len(ref) == 1:  # one run of NAME: every seed against it
+                only = next(iter(ref.values()))
+                pairs = {s: (r, only) for s, r in runs.items()}
+            else:
+                pairs = {s: (runs[s], ref[s]) for s in runs if s in ref}
+            if not pairs:
+                continue
+            cells = []
+            for k in ks:
+                diffs = []
+                for s in sorted(pairs):
+                    x, y = series(pairs[s][0], k), series(pairs[s][1], k)
+                    if x is None or y is None:
+                        continue
+                    m = min(len(x), len(y))
+                    d = x[:m] - y[:m]
+                    d = d[np.isfinite(d)]
+                    if d.size:
+                        diffs.append(d)
+                if not diffs:
+                    cells.append("–")
+                    continue
+                vals = [run_mean(r, k) for r, _ in pairs.values()]
+                vals = [x for x in vals if x is not None]
+                band = max(vals) - min(vals) if vals else 0.0
+                mean = float(np.concatenate(diffs).mean())
+                lo, hi = boot(diffs, a.block, a.boot, rng)
+                sig = (lo > 0 or hi < 0) and abs(mean) > band
+                if k == "lap":
+                    tag = ("↓" if mean < 0 else "↑") if sig else ""
+                else:
+                    tag = ("B" if (mean > 0) == (k in HIGHER) else "W") if sig else ""
+                cells.append(diff_fmt(k).format(mean) + (f" {tag}" if tag else ""))
+                across[v][k].append((mean, tag))
+            print(f"| {clip} | {v} | {', '.join(sorted(pairs))} | " + " | ".join(cells) + " |")
+    print(f"\n### Over the clips: mean of the per-clip differences to {name} (better / worse / within; lap: ↑ ↓)\n")
+    print("| Variant | Clips | " + " | ".join(ks) + " |")
+    print("|---|---|" + "---|" * len(ks))
+    for v in sorted(across):
+        cells = []
+        for k in ks:
+            vals = across[v].get(k)
+            if not vals:
+                cells.append("–")
+                continue
+            b = sum(t == "B" for _, t in vals)
+            w = sum(t == "W" for _, t in vals)
+            cnt = (f"{sum(t == '↑' for _, t in vals)}↑ {sum(t == '↓' for _, t in vals)}↓" if k == "lap"
+                   else f"{b}/{w}/{len(vals) - b - w}")
+            cells.append(f"{diff_fmt(k).format(np.mean([x for x, _ in vals]))} ({cnt})")
+        n = max(len(across[v][k]) for k in ks if across[v].get(k))
+        print(f"| {v} | {n} | " + " | ".join(cells) + " |")
 
 
 GROUP_METRICS = (("psnr_y", "{:+.2f}"), ("de4", "{:+.3f}"), ("lpips", "{:+.4f}"))
@@ -721,6 +884,12 @@ def main():
     m = sub.add_parser("summary")
     m.add_argument("dirs", nargs="+")
     m.add_argument("--baseline")
+    m.add_argument("--versus", metavar="NAME",
+                   help="also pair every variant with this output (e.g. bicubic, scored from its master), "
+                        "as fr_metrics.py --summary --versus does")
+    m.add_argument("--rename", action="append", metavar="OLD=NEW",
+                   help="rename a variant@ref on loading (OLD without @: a run without reference, as vmaf's tags; "
+                        "e.g. c43=split:ycc:4:3@f32)")
     m.add_argument("--block", type=int, default=8)
     m.add_argument("--boot", type=int, default=2000)
     m.add_argument("--tables", default="means,pairs,verdicts,across,tiles",
