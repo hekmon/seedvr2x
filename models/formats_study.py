@@ -83,7 +83,12 @@ def q8_0(w: torch.Tensor) -> torch.Tensor:
 
 
 def e2m1(x: torch.Tensor) -> torch.Tensor:
-    return E2M1[torch.bucketize(x.abs().clamp(max=6.0), MID)] * x.sign()
+    """x rounded to the nearest E2M1 value, ties to the even code, saturated at +-6."""
+    a = x.abs().clamp(max=6.0)
+    i = torch.bucketize(a, MID)  # a tie (a == MID[i]) lands on the lower value
+    tie = (i < len(MID)) & (a == MID[i.clamp(max=len(MID) - 1)])
+    i = torch.where(tie & (i % 2 == 1), i + 1, i)
+    return E2M1[i] * x.sign()
 
 
 def nvfp4(w: torch.Tensor, below: int) -> torch.Tensor:

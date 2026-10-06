@@ -20,13 +20,18 @@ comfy-kitchen (Comfy-Org, Apache-2.0) at 0.2.37 (its eager backend: no GPU neede
 `packaging` without declaring it). For every layer marked by `<layer>.comfy_quant`:
 - the marker's JSON gives the layout: {"format": "float8_e4m3fn"} for FP8 (TensorCoreFP8Layout,
   one float32 scale), {"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}
-  for INT8 with a rotation (TensorWiseINT8Layout, a scale per row);
+  for INT8 with a rotation (TensorWiseINT8Layout, a scale per row), {"format": "nvfp4"} for NVFP4
+  (TensorCoreNVFP4Layout: two E2M1 codes per byte, an E4M3 scale per 16 values in cuBLAS's 128x4
+  tiles, and `<layer>.weight_scale_2`, one float32 scale);
 - comfy-kitchen's QuantizedTensor built from the file's raw tensors, as a loader would, dequantized
   to float32: for fp8, equal bit for bit to our own reconstruction q x s; for int8, (q x s) x H per
   256 columns, H comfy-kitchen's rotation (its own inverse), equal to float32's precision, the
-  rotation's sums possibly running in another order;
+  rotation's sums possibly running in another order; for NVFP4, each code's E2M1 value (the even
+  value's code in the high nibble) times its block's scale, un-swizzled (comfy-kitchen's
+  from_blocked), times the float32 scale, equal bit for bit;
 - for one layer, F.linear with a float input through comfy-kitchen's dispatch, against F.linear
-  with the dequantized weight.
+  with the dequantized weight (NVFP4 multiplies in 4 bits only an input quantized to NVFP4, on a
+  GPU: a float input runs on the dequantized weight).
 Every other tensor must be float16. Prints a JSON report; exits 1 if a check fails.
 """
 
@@ -41,12 +46,19 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 import torch
 import torch.nn.functional as F
+from comfy_kitchen.float_utils import from_blocked
 from comfy_kitchen.tensor import (
     QuantizedTensor,
     TensorCoreFP8Layout,
+    TensorCoreNVFP4Layout,
     TensorWiseINT8Layout,
 )
 from safetensors import safe_open
+
+# NVFP4: each 4-bit E2M1 code's value, the sign in bit 3.
+E2M1 = torch.tensor(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0]
+)
 
 
 def weight(f, layer: str, fmt: dict) -> tuple[QuantizedTensor, torch.Tensor]:
@@ -77,6 +89,22 @@ def weight(f, layer: str, fmt: dict) -> tuple[QuantizedTensor, torch.Tensor]:
         h = hadamard(g)
         w = (q.float() * s).reshape(q.shape[0], -1, g) @ h
         return qt, w.reshape(q.shape)
+    if fmt == {"format": "nvfp4"}:
+        s2 = f.get_tensor(f"{layer}.weight_scale_2")
+        n, k = q.shape[0], q.shape[1] * 2
+        qt = QuantizedTensor(
+            q,
+            "TensorCoreNVFP4Layout",
+            TensorCoreNVFP4Layout.Params(
+                scale=s2,
+                orig_dtype=torch.float32,
+                orig_shape=(n, k),
+                block_scale=f.get_tensor(f"{layer}.weight_scale"),
+            ),
+        )
+        codes = torch.stack([q >> 4, q & 15], dim=-1).reshape(n, -1, 16)  # the even value high
+        w = E2M1[codes.long()] * (from_blocked(s, n, k // 16) * s2).unsqueeze(2)
+        return qt, w.reshape(n, k)
     raise SystemExit(f"{layer}: comfy_quant {fmt}: not a layout this check knows")
 
 
@@ -109,6 +137,8 @@ def check(path: str) -> dict:
             deq = qt.dequantize()
             if fmt["format"] == "float8_e4m3fn":
                 equal += bool(torch.equal(deq.float(), ours))
+            elif fmt["format"] == "nvfp4":  # bit for bit, the zeros' signs too
+                equal += bool(torch.equal(deq.view(torch.int32), ours.view(torch.int32)))
             else:  # the rotation's sums may run in another order: equal to float32's precision
                 equal += float((deq.float() - ours).abs().max() / ours.abs().max()) < 1e-6
             if first is None:
@@ -122,7 +152,9 @@ def check(path: str) -> dict:
                     "rel_diff": float((y.float() - y_ref).norm() / y_ref.norm()),
                 }
         quantized = {
-            f"{layer}.{s}" for layer in layers for s in ("weight", "weight_scale", "comfy_quant")
+            f"{layer}.{s}"
+            for layer in layers
+            for s in ("weight", "weight_scale", "weight_scale_2", "comfy_quant")
         }
         others = {f.get_tensor(k).dtype for k in keys if k not in quantized}
     r.update(
@@ -133,9 +165,10 @@ def check(path: str) -> dict:
             "other_dtypes": sorted(str(d) for d in others),
         }
     )
-    # fp8 runs F.linear on the dequantized weight: equal; int8 multiplies quantized activations
-    # (per token, after the rotation): close, not equal.
-    tol = 0.0 if all(json.loads(k)["format"] == "float8_e4m3fn" for k in formats) else 0.05
+    # fp8 and NVFP4 run F.linear on the dequantized weight: equal; int8 multiplies quantized
+    # activations (per token, after the rotation): close, not equal.
+    exact = ("float8_e4m3fn", "nvfp4")
+    tol = 0.0 if all(json.loads(k)["format"] in exact for k in formats) else 0.05
     r["pass"] = (
         len(layers) == 288
         and equal == 288

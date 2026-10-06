@@ -3,10 +3,11 @@
 > Status: **measured on the CPU**, weights only, against ByteDance's fp32 masters:
 > [`formats_study.py`](formats_study.py), [`numz_check.py`](numz_check.py), and each build
 > script's own checks ([`seedvr2_fp8.py`](seedvr2_fp8.py), [`seedvr2_gguf.py`](seedvr2_gguf.py),
-> [`seedvr2_int8.py`](seedvr2_int8.py)), with [`ck_check.py`](ck_check.py) and
-> [`numz_gguf_check.py`](numz_gguf_check.py) loading the files in their runtimes. What each file
-> does to the video is measured by GPU runs to come: until then its quality is "to be measured".
-> [DESIGN.md](../seedvr2x/DESIGN.md#weights) (Weights) cites these figures.
+> [`seedvr2_int8.py`](seedvr2_int8.py), [`seedvr2_nvfp4.py`](seedvr2_nvfp4.py)), with
+> [`ck_check.py`](ck_check.py) and [`numz_gguf_check.py`](numz_gguf_check.py) loading the files in
+> their runtimes. What each file does to the video is measured by GPU runs to come: until then its
+> quality is "to be measured". [DESIGN.md](../seedvr2x/DESIGN.md#weights) (Weights) cites these
+> figures.
 
 In short, on the 7B's 288 attention and MLP matrices of the blocks, 99% of its weights, the error
 per weight being ||W_hat - W|| / ||W|| against the fp32 master:
@@ -26,13 +27,13 @@ per weight being ||W_hat - W|| / ||W|| against the fp32 master:
 - **Every format, typical (worst):** float16 0.02% (0.02%); fp8 with a scale per tensor 2.65%
   (2.67%); int8 with a scale per row 1.01% (1.78%), 0.86% (1.08%) with comfy-kitchen's rotation;
   GGUF Q8_0 0.56% (0.64%); Q4_K 7.35% (7.95%); NVFP4 9.45% (10.1%) with comfy-kitchen's scales,
-  8.80% (8.94%) with each block's scale chosen among 8 to minimise its error.
+  8.80% (8.94%) with each block's scale chosen among 8 to minimise its error, as in our file.
 - **numz's 3B is ByteDance's first 3B.** ByteDance replaced the 3B's weights on 2025-06-22
   ("update ckpt"); numz's 3B fp16 file is the earlier master rounded to the nearest float16, and
   its fp8 file that master cast straight to fp8, every one of 635 tensors; against the current
   master they agree on 4.9% and 96% of the values.
 - **Our phase-2 files** (the 7B and the sharp 7B): fp8 8.33 GB, Q4_K 4.76 GB, Q8_0 8.84 GB, INT8
-  8.33 GB, each loading in its runtime, made the same on every run.
+  8.33 GB, NVFP4 4.76 GB, each loading in its runtime, made the same on every run.
 
 ## Method
 
@@ -107,8 +108,8 @@ stores them:
 - **At 4 bits, Q4_K is closer than NVFP4 as comfy-kitchen quantizes it** (7.35% against 9.45%):
   Q4_K's scale and minimum per 32 weights, searched to minimise the error, against NVFP4's scale
   per 16 from the block's max with one mantissa bit per value. Choosing each NVFP4 block's scale
-  to minimise its error narrows the gap (8.80%); the layout is unchanged, so
-  comfy-kitchen loads such a file as it is.
+  to minimise its error narrows the gap (8.80%); the layout is unchanged, so comfy-kitchen loads
+  such a file as it is: ours is one ([`seedvr2_nvfp4.py`](seedvr2_nvfp4.py)).
 
 ## numz's files against ByteDance's masters
 
@@ -144,6 +145,8 @@ quantized, every other tensor our fp16 file's, byte for byte:
 | `seedvr2x_ema_7b_sharp_Q8_0.gguf` | 8,835,171,072 | `03fad523…` | 0.558% (0.639%) | ggml = gguf-py; numz's loader |
 | `seedvr2x_ema_7b_int8_convrot.safetensors` | 8,333,648,992 | `7eb2c784…` | 0.855% (1.075%) | read back; comfy-kitchen's own quantizer gives the same codes on 99.9994%; comfy-kitchen decodes all 288 as we do (to float32's precision), its int8 multiply 0.74% from the float one on a layer (the activations' own rounding) |
 | `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` | 8,333,649,000 | `d83aeaa4…` | 0.855% (1.077%) | read back; comfy-kitchen's own quantizer gives the same codes on 99.9994%; comfy-kitchen decodes all 288 as we do (to float32's precision), its int8 multiply 0.74% from the float one on a layer (the activations' own rounding) |
+| `seedvr2x_ema_7b_nvfp4.safetensors` | 4,758,446,416 | `9cd14359…` | 8.802% (8.941%), comfy-kitchen's own quantizer 9.451% (10.087%), ours lower on all 288 | read back; comfy-kitchen's own quantizer gives the search's first candidate, every code and scale; comfy-kitchen decodes all 288 bit for bit, its multiply with a float input exact |
+| `seedvr2x_ema_7b_sharp_nvfp4.safetensors` | 4,758,446,424 | `d0a1d5a4…` | 8.803% (8.951%), comfy-kitchen's own quantizer 9.452% (10.142%), ours lower on all 288 | read back; comfy-kitchen's own quantizer gives the search's first candidate, every code and scale; comfy-kitchen decodes all 288 bit for bit, its multiply with a float input exact |
 
 - **fp8:** comfy-kitchen's FP8 layout, `<layer>.weight` (E4M3, W x (1/s) rounded to nearest, ties
   to even, clamped to +-448) and `<layer>.weight_scale` (float32, s = max|W| / 448), marked by
@@ -162,6 +165,16 @@ quantized, every other tensor our fp16 file's, byte for byte:
   {"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}. At run time
   comfy-kitchen rotates each input the same way, inside its int8 linear, before quantizing it per
   token: (x H)(W H)^T = x W^T, so nothing is rotated back.
+- **NVFP4:** comfy-kitchen's NVFP4 layout, `<layer>.weight` (uint8 [N, K/2], two E2M1 codes per
+  byte, the even value's in the high nibble, the sign in bit 3), `<layer>.weight_scale` (E4M3, one
+  per 16 values along the input, in cuBLAS's 128x4 tiles) and `<layer>.weight_scale_2` (float32,
+  s2 = max|W| / (448 x 6)); marked by {"format": "nvfp4"} as Comfy-Org's SeedVR2 files mark theirs.
+  Each block's scale is searched: comfy-kitchen takes the block's max / 6 / s2, rounded to the
+  nearest E4M3; we try that one and the 7 E4M3 values below it, each with the block's values
+  rounded to the nearest E2M1 (ties to even, saturated at +-6), and keep the one with the smallest
+  squared error, the first of equals. The first candidate is comfy-kitchen's own quantizer's, so
+  no matrix can come out worse. comfy-kitchen decodes any block scale, the max's or not: it loads
+  the file as it is, and the search costs nothing at run time.
 
 ## How each format runs
 
@@ -176,7 +189,7 @@ until the GPU runs. "W8A8": weights and activations in 8 bits, the multiply in 8
 | int8, rotated | 8.3 GB | W8A8 from RTX 20 (Turing, sm_75) | RTX 20 to 50 | 0.86% | to be measured |
 | GGUF Q8_0 | 8.8 GB | W8A16 | none: memory only | 0.56% | to be measured |
 | GGUF Q4_K | 4.8 GB | W4A16 | none: memory only, a little slower | 7.35% | to be measured |
-| NVFP4 | 4.8 GB | W4A4 on Blackwell (sm_100, sm_120); W4A16 before | RTX 50 | 9.45% (8.80% with searched scales) | to be measured |
+| NVFP4, searched scales | 4.8 GB | W4A4 on Blackwell (sm_100, sm_120); W4A16 before | RTX 50 | 8.80% | to be measured |
 
 - Speed: only the DiT gets faster, about a fifth of a 1080p job (the VAE, in 16 bits, is the
   rest): a DiT twice as fast shortens a job by about 10%. The main gain is memory. No speed is
@@ -195,6 +208,8 @@ uv run models/formats_study.py /path/to/seedvr2_ema_7b.pth formats.json \
 uv run models/seedvr2_fp8.py $M --fp16 models/dist --out phase2
 uv run models/seedvr2_gguf.py $M --numz /path/to/numz --out phase2
 uv run models/seedvr2_int8.py $M --fp16 models/dist --out phase2
-CUDA_VISIBLE_DEVICES= uv run models/ck_check.py phase2/*fp8_scaled.safetensors phase2/*int8_convrot.safetensors
+uv run models/seedvr2_nvfp4.py $M --fp16 models/dist --out phase2
+CUDA_VISIBLE_DEVICES= uv run models/ck_check.py phase2/*fp8_scaled.safetensors phase2/*int8_convrot.safetensors \
+  phase2/*nvfp4.safetensors
 cd /path/to/numz && CUDA_VISIBLE_DEVICES= .venv/bin/python /path/to/models/numz_gguf_check.py . phase2/*.gguf
 ```
