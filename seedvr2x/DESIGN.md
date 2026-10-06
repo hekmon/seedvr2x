@@ -228,8 +228,16 @@ connect through files.
   bf16 autocast, fp16 attention), on 4 animated clips and every metric (PSNR-Y within 0.14 dB,
   VMAF within 1.1). So numz's numerics stay, and with them bit-identity with milestone 1. The
   exception is the padding to multiples of 16, which measured better done otherwise (step 0 of
-  the [Pipeline](#pipeline-per-shot)); the decode's output precision waits for the colour study
-  (see [To measure](#to-measure)).
+  the [Pipeline](#pipeline-per-shot)).
+
+  The decode stays in bf16 too. bf16 bands nowhere: CAMBI gives every output 0.004 at most, the
+  model's rendering dithering bf16's steps. A float16 decode brings the raw output's
+  low-frequency colour closer to the ground truth (ΔE00 −0.05 to −0.09 on 8 of 8 clips, for
+  4.4% more decode time), but colour correction replaces that band with the input's: after it,
+  float16 moves ΔE00 by 0.01 at most, 0.002 after a 4 px blur, within the spread between seeds
+  on 5 to 8 of the 8 clips for every score
+  ([colour.md](../research/docs/colour.md#a-float16-decode)). So no float16 decode, and no
+  overflow fallback to go with it.
 - Licence: Apache-2.0. We keep the copyright headers, add a NOTICE, and mark modified files.
   The StableSR-derived colour code (`color_fix.py`, non-commercial licence) is **not**
   vendored: see [Colour correction](#colour-correction).
@@ -669,6 +677,16 @@ The rule: the upscale must look like its source in any given player.
    Measured ([cuts.md](../research/docs/cuts.md)): a missed cut costs the next shot's first
    frames, mostly through the causal VAE, which carries the previous shot over. It is the
    costliest detection error (see [Open questions](#open-questions)).
+
+   A shot's first frame is encoded alone, the first latent holding 1 frame. It comes out closer
+   to the ground truth than the next 8 frames (by 0.04–5.5 dB of PSNR-Y, on 11 shots), but
+   re-rendered less: less sharp on 9 of them, by 3–55%
+   ([cuts.md](../research/docs/cuts.md#a-shots-first-frame-prepending-mirrored-frames)).
+   Prepending 4 mirrored frames, as numz's `--prepend_frames` does, gives it the next frames'
+   look for one more latent per shot (2–8% more GPU time per hour of animation), at the cost of
+   0.6–2.8 dB of that lead on 7 of the 11: not done. Whether its sharpness step shows right
+   after a cut, which changes the picture 40 to 120 times more, is for the user's visual review
+   (milestone 7).
 
    A shot that isn't 4n + 1 frames long is padded, then trimmed after decoding. numz mirrors
    the end (`generation_utils.py:642-654`); ByteDance repeats the last frame
@@ -1548,47 +1566,37 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
      - `test_lab.py` holds it on milestone 1's input: PSNR to numz 60.18 dB, floor 59.5.
 6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
    for frame, and every other stream is copied.
-7. **Visual review** of long runs by the user, fast motion included, where the frames inside a
-   latent group can ghost (see [To measure](#to-measure)), and held pictures, where a false
-   cut's step would show (see [Shot detection](#shot-detection): the fallback gate).
+7. **Visual review** of long runs by the user: fast motion, where the frames inside a latent
+   group can ghost (see [To measure](#to-measure)); held pictures, where a false cut's step
+   would show (see [Shot detection](#shot-detection): the fallback gate); and shots' first
+   frames, re-rendered less than the next ones (see [Pipeline](#pipeline-per-shot), step 1).
 
 ## Open questions
 
 ### To measure
-- **Numerics:** settled but for three items ([numerics.md](../research/docs/numerics.md)).
-  numz's choices stay (see [Vendored model code](#vendored-model-code)), and so does its
-  resize; the padding changes (step 0 of the [Pipeline](#pipeline-per-shot)). Left:
-  - the VAE decode's output precision. bf16 bands nowhere: CAMBI gives every output 0.004 at
-    most, the model's rendering dithering bf16's steps. A float16 decode brings low-frequency
-    colour closer to the ground truth on 8 of 8 clips (ΔE00 −0.05 to −0.09, beyond the seed
-    spread) for 4.4% more decode time and bf16's memory, 3.4 times under float16's overflow on
-    the brightest clip. After `lab`, only −0.01 to −0.02 is left. So it is decided on the
-    colour study's winner, scored on float16 decodes; numz's bf16 decode stays until then.
-    If float16 is taken, a non-finite value redoes the decode unit in bf16 from its start
-    (the shot, or a warm-up of min(s, 37) latents before the failing slice), never switching
-    precision mid-pass: bf16 and float16 decodes differ by about 0.3 level, so a switch would
-    leave a step and mix precisions in the causal caches. That shot gets numz's bf16 picture.
-    A test forces a non-finite value, since none ever occurred.
+- **Numerics:** settled but for two items ([numerics.md](../research/docs/numerics.md)).
+  numz's choices stay (see [Vendored model code](#vendored-model-code)), its bf16 decode
+  included, and so does its resize; the padding changes (step 0 of the
+  [Pipeline](#pipeline-per-shot)). Left:
   - the chroma kernel at decode, Catmull-Rom upsampling, which shapes what the model sees
     (GPU runs). The master's downsampling is settled: bilinear (see [Output](#output)).
   - a shot padded to 4n + 1 frames by mirroring its end (numz) or repeating its last frame
     (ByteDance)
-- **A shot's first frame.** The causal VAE encodes it alone, so it comes out less restored,
-  closer to the input ([quality.md](../research/docs/quality.md#--prepend_frames)). numz has
-  such a frame at every batch; seedvr2x only at each shot's start, right after a cut, where
-  the eye is least likely to notice. To measure: whether prepending mirrored frames to each
-  shot (numz's `--prepend_frames`, kept inside the shot) is worth its cost of about one latent
-  per shot.
 - **Every fourth frame is the model's best**
   ([numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
   shot's first frame, the causal VAE packs 4 frames per latent, and the last frame of each
   group comes out closest to the ground truth: on 8 of 8 clips by VMAF and LPIPS, 7 of 8 by
   PSNR-Y, 0.8–5.0 dB above the group's second frame, the seeds agreeing within 0.5 dB, with
   `lab` too. On fast motion, the frames inside a group carry ghosts (doubled line art). A
-  shot's first frame is the same effect. Nothing measured removes it. Taking each frame from a
-  run whose grid ends a group there would take 4 runs per shot, the grid shifted by 0–3
-  frames: 4× the GPU time, so at most a quality mode after v1. Not measured (about 2 GPU h on
-  the 8 clips).
+  shot's first frame is the same effect. Colour correction narrows the gap as far as it takes
+  from the input, which has no grid: PSNR-Y's from 2.72 dB without it to 1.87 with `lab` and
+  1.59 with the split the colour study recommends, colour's (ΔE00 after a 4 px blur) from 0.50
+  to 0.29 and 0.12. The perceptual gap barely moves (LPIPS from 0.021 to 0.018): the inner
+  frames' texture, ghosts included, stays the model's
+  ([colour.md](../research/docs/colour.md#the-latent-grid)). Nothing measured removes it.
+  Taking each frame from a run whose grid ends a group there would take 4 runs per shot, the
+  grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Not
+  measured (about 2 GPU h on the 8 clips).
 - **4K output's quality.** The first full-reference runs at 4K (one film, 4 shots of 25
   frames, ×2 from 1080p, colour correction off, decode tiles of 2048 px) put the model further
   from the ground truth than bicubic on every metric, the perceptual ones included: DISTS on 4
