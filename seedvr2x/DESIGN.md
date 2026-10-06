@@ -274,6 +274,10 @@ they differ and by which metrics, and how users are guided to them. What is know
     `gguf_ops.py` there, adapted from city96's ComfyUI-GGUF, Apache-2.0) with the `gguf`
     library (llama.cpp's, MIT), the 3B's cache quirk, and the planner's constants per model
     ([vram.md](../research/docs/vram.md)).
+- **Comfy-Org's own repo** (`Comfy-Org/SeedVR2` on Hugging Face, apache-2.0, "repackaged
+  model files for ComfyUI") ships the 3B, 7B and sharp 7B in fp16, fp8 (a plain cast, like
+  numz's), MXFP8, INT8 W8A8 with a rotation, and NVFP4 (the 7B 4.76 GB); its VAE is numz's file.
+  It is made by a GPL converter, never read.
 - **numz's fp8 files are plain casts.** Every tensor of the 3B's, and all but the last block's
   in the 7B's, is rounded to `e4m3fn` (3 mantissa bits), with no scale, down to the biases,
   norms, modulation tables, input and output layers and RoPE's frequencies. The 7B's file is
@@ -321,19 +325,30 @@ they differ and by which metrics, and how users are guided to them. What is know
     for another seed: within the seed spread on every metric
     ([numerics.md](../research/docs/numerics.md#results)).
   - Converting from the master costs nothing more, so every file seedvr2x makes starts there.
-- **Files of our own,** the small tensors and RoPE's frequencies kept in 16 bits, as in the
-  Q4_K_M file:
-  - fp8 with scales, its matrices multiplied in fp8 on the GPUs that can (Ada and later)
-  - NVFP4 for Blackwell: 4-bit weights and activations, a scale every 16 values
-  - GGUF with each tensor's bit width chosen by how much the output suffers from it, as
-    Unsloth's dynamic method chooses from a calibration set
+- **Files of our own,** made by `models/`'s scripts from the fp32 masters, the small tensors and
+  RoPE's frequencies kept in 16 bits, as in the Q4_K_M file. They are prepared ahead of phase 2,
+  on the CPU (the user's request, 2026-10-06), and uploaded only once GPU runs show each within
+  the 7B fp16's seed spread on every kind of source and the user's eyes agree:
+  - fp8: the 288 block matrices in `e4m3fn` with one float32 scale per tensor (max |W| / 448),
+    in comfy-kitchen's layout (weight and weight scale). The activations get their scale at run
+    time: multiplied in fp8 (W8A8) from the RTX 40 generation on, widened to 16 bits (W8A16)
+    before it.
+  - GGUF, made by ggml's own quantize function (llama.cpp's, MIT) and written by gguf-py in
+    city96's conventions, which numz's loader reads: first static files, Q4_K on the 288 block
+    matrices (numz's Q4_K_M layout, for a comparison one to one) and Q8_0, everything else in
+    16 bits; then a dynamic one, each tensor's type chosen from a sensitivity scan on the GPU
+    (as Unsloth's method chooses from a calibration set), kept only if it beats the static ones.
+  - NVFP4 for Blackwell: 4-bit weights and activations, a scale every 16 values. Its activations
+    are the risk; its form is settled with the user before it is made.
+  - INT8 W8A8 with a rotation: the fast path on the RTX 20 and 30 generations, where fp8 can't
+    multiply.
   - The weights need no data: their scales come from their own values. Activations quantized
     to 4 bits are where quality can go, and on video DiTs mostly because their ranges drift
     across the denoising steps; SeedVR2 runs a single step. Should a calibration set be needed,
     the full-reference clips of each kind of source can serve.
-  - Kernels: comfy-kitchen (Comfy-Org, Apache-2.0) quantizes and multiplies FP8, NVFP4 and
-    MXFP8, its activations quantized on the fly, but converts no model. ComfyUI's own code is
-    GPL-3.0, never copied.
+  - Kernels: comfy-kitchen (Comfy-Org, Apache-2.0) quantizes and multiplies FP8 (natively from
+    sm_89), NVFP4 (Blackwell), MXFP8 (from sm_100) and INT8 W8A8 (from sm_75), its activations
+    quantized on the fly, but converts no model. ComfyUI's own code is GPL-3.0, never copied.
   - The gain is mostly memory. ComfyUI reports about 2× over fp8 or bf16 on Blackwell, but the
     DiT is about a fifth of a 1080p run here: a DiT twice as fast shortens a job by about 10%.
 - **One Hugging Face repo, seedvr2x's own, from v1 on**,
@@ -342,11 +357,19 @@ they differ and by which metrics, and how users are guided to them. What is know
   checked, and nothing depends on another party's repo staying as it is. Apache-2.0 allows it,
   with the licence and a notice of the changes; TransNetV2's weights are MIT.
   - v1 seeds it with the 7B and sharp 7B fp16 DiTs and the fp16 VAE, rounded from ByteDance's
-    fp32 masters, and TransNetV2's weights (see [Shot detection](#shot-detection)). Phase 2
-    adds its files.
+    fp32 masters (`ByteDance-Seed/SeedVR2-7B` at `eb0c428`), and TransNetV2's weights (see
+    [Shot detection](#shot-detection)): `seedvr2x_ema_7b_fp16.safetensors`,
+    `seedvr2x_ema_7b_sharp_fp16.safetensors`, `seedvr2x_ema_vae_fp16.safetensors` and
+    `transnetv2.safetensors`. Phase 2 adds its files.
+    - The names aren't numz's: numz's downloader deletes a file named like one of its own whose
+      SHA-256 differs (`src/utils/downloads.py:216-235`), and ours differ by their header, so
+      a model directory shared with numz would lose them.
   - `models/`, at the repository's root, holds the scripts that make them. Each records its
-    inputs (URL, revision and SHA-256) and runs its check: our fp16 files equal numz's element
-    for element; TransNetV2 in PyTorch matches its TensorFlow original. The scripts run on
+    inputs (URL, revision and SHA-256) and its outputs' SHA-256, and runs its check: our fp16
+    files equal numz's element for element; TransNetV2 in PyTorch matches its TensorFlow
+    original. A run from the masters gives the same bytes: the files are written in the
+    safetensors layout by our own writer, since the library writes the metadata in a random
+    order. The scripts run on
     their own, with inline dependencies (TensorFlow only in TransNetV2's conversion), so
     seedvr2x stays the repository's only uv project.
   - Every file is safetensors, TransNetV2's PyTorch conversion included: no pickle, and a
@@ -363,10 +386,11 @@ they differ and by which metrics, and how users are guided to them. What is know
   - seedvr2x pulls its files from that repo at a revision pinned in its code, each checked by a
     SHA-256 pinned there too, so a version always runs the same bytes. A local directory
     holding the same files works offline.
-  - Our fp16 changes no bit of v1's output. numz's 7B fp16 DiT and fp16 VAE are the masters
-    rounded to the nearest fp16, ties to even: every element of 1,128 and 250 tensors, under
-    the same names. Truncation would differ on half the elements, a cast through bf16 on 87%.
-    The 3B and the sharp 7B weren't checked: their masters aren't on the GPU box.
+  - Our fp16 changes no bit of v1's output. numz's 7B and sharp 7B fp16 DiTs and its fp16 VAE
+    are the masters rounded to the nearest fp16, ties to even: every element of 1,128, 1,128
+    and 250 tensors, under the same names, the data sections byte for byte ours (the files
+    differ in their headers' metadata alone). Truncation would differ on half the elements, a
+    cast through bf16 on 87%. The 3B wasn't checked: its master isn't on the GPU box.
 - **The VAE stays in 16 bits.** Quantizing a model means one of two things, and neither suits
   the VAE:
   - The weights alone, stored in 8 or 4 bits and widened back for the arithmetic. The VAE's
@@ -396,10 +420,15 @@ they differ and by which metrics, and how users are guided to them. What is know
 - **Checks:** a file kept from numz is bit-identical to numz on milestone 1's input, the 3B fp8
   against numz patched to use the fp16 RoPE values; a file of our own is within the 7B fp16's
   seed spread on every kind of source.
-- **Guiding users:** the docs, per kind of source (anime, dark, live action…), each figure read
-  against the spread between seeds; `--plan` showing what each model gets on the user's own
-  card (window length, BlockSwap, tiles, time); whether the planner may pick a smaller file
-  when the user allows it; and whether the sharp 7B becomes the default.
+- **Guiding users:** a table of the files, on the Hugging Face card and in seedvr2x's README
+  alike (the user's requirement, 2026-10-06: "to help users choose in their right mind"):
+  each file's size, how it multiplies on each GPU generation (W8A8, W8A16, W4A4, W4A16), where
+  it is faster and what that buys (the DiT is about a fifth of a 1080p run), and its measured
+  quality against the 7B fp16's seed spread. Then the docs, per kind of source (anime, dark,
+  live action…), each figure read against the spread between seeds; `--plan` showing what each
+  model gets on the user's own card (window length, BlockSwap, tiles, time); whether the
+  planner may pick a smaller file when the user allows it; and whether the sharp 7B becomes the
+  default.
 
 ## Input
 
@@ -1504,8 +1533,9 @@ writers, and the planner needs real shot lengths.
    Then `split` in place of `lab` (see [Colour correction](#colour-correction)): the decode
    streams, and its buffer, the histograms and the code ported from numz go, before the
    planner sizes the decode.
-3. The model files from seedvr2x's own Hugging Face repo: `models/`'s scripts, the user's
-   upload, seedvr2x's pinned pull (see [Weights](#weights)). Then the first pass's new work,
+3. The model files from seedvr2x's own Hugging Face repo: `models/`'s scripts are done, then
+   the user's upload, and seedvr2x's pull, pinned to the upload's revision and the files'
+   SHA-256s (see [Weights](#weights)). Then the first pass's new work,
    ahead of the planner, since both workflows start from it: the directory input goes, the
    source being the only input; then the shot detector (see [Shot detection](#shot-detection)),
    whose brief is in, and with it the frame index (see [Input](#input)), so a resume seeks
