@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-06 09:40 CEST
+Last update: 2026-10-06 10:15 CEST
 
 ## 0. Setup
 
@@ -128,9 +128,14 @@ temporal regression.
       made natively in 4K (its SDR ProRes master, CC BY 4.0). Four come from a 4K scan of a
       grainy cel-animated film (cropped to 3840×2048). Each is frame-exact and cut-free, with
       its bicubic baseline (PSNR-Y 37.2–47.4 dB). New `fr_clips.py make --src-crop`
-- [~] 4K output with colour correction against bicubic (2026-10-06, CPU): colour's default 4K
+- [x] 4K output with colour correction against bicubic (2026-10-06, CPU): colour's default 4K
       runs on the first film (none, lab, its split:ycc:4:3; 2 seeds), scored on the picture's
-      rows and paired with bicubic
+      rows and paired with bicubic. The correction closes the colour gap: split:ycc:4:3 brings
+      ΔE00 lf to bicubic's level. Everything else stays behind bicubic: PSNR-Y 3.0–8.6 dB lower,
+      VMAF 57–59 against 75–85, DISTS worse on 4 of 4, LPIPS on 3 (level on the close-up),
+      flicker on 4. The model adds less banding than bicubic. split:ycc:4:3 beats lab on 4 of 4
+      (PSNR-Y, VMAF, colour, flicker)
+- [ ] The same on the 13 new clips, once the colour study has run its default 4K runs on them
 - [x] Every fourth frame is the model's best: the last frame of each 4-frame latent group is
       PSNR-Y +0.8 to +5.0 dB and VMAF +2 to +19 closer to the ground truth than the group's
       second, on every clip, with or without `lab`; the input has no such pattern. Fast motion

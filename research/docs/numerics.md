@@ -712,7 +712,69 @@ every verdict, comes out the same with either model.
   the close-up), ΔE00 lf 2.1–3.9 against 0.6–0.8, and low-frequency flicker on the dark and fast
   clips (temporal error lf 3.2 and 9.2 against 0.5). At 1080p, LPIPS and DISTS favoured the model
   on live action. Every output lines up with the GT frame for frame (best offset 0 on every
-  clip). How much colour correction and the tiles account for is the colour study's 4K question.
+  clip). How much colour correction and the tiles account for is the colour study's 4K question:
+  see [4K output with colour correction](#4k-output-with-colour-correction-against-bicubic).
+
+## 4K output with colour correction, against bicubic
+
+2026-10-06. These are the colour study's default 4K runs on the first film
+([colour.md](colour.md)):
+- the setup: 7B fp16, numz `4490bd1`, the four 4K clips' d1 inputs ×2 to 3840×2160, 45 frames,
+  seeds 42 and 43;
+- the 96 GB card's plan: encode untiled, decode tiles of 2048 with an overlap of 64;
+- `--color_correction none` with the raw decode dumped, then each correction applied to that same
+  decode:
+  - none: the float32 decode clamped;
+  - `lab`: milestone 5's, with the float32 reference;
+  - `split:ycc:4:3`: colour's recommendation, colour from the input below 3.2 px, brightness
+    below 6.5 px, no histogram step.
+
+They are scored here with `fr_metrics.py` on the picture's rows only (56–2103, inside the bars), and
+paired frame by frame with bicubic scored on the same rows (`--summary --versus bicubic`). A
+verdict needs a difference beyond the variant's own seed spread, which is small: `lab`'s two seeds
+differ by at most 0.11 dB PSNR-Y, 0.7 VMAF and 0.005 LPIPS. Means over the two seeds:
+
+| Clip | Variant | PSNR-Y | SSIM-Y | LPIPS | DISTS | VMAF | ΔE00 lf | T-err lf | CAMBI added |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| face | bicubic | 40.88 | 0.944 | 0.204 | 0.144 | 74.5 | 0.63 | 0.33 | 0.075 |
+|  | none | 33.75 | 0.911 | 0.220 | 0.189 | 52.6 | 2.08 | 0.53 | 0.009 |
+|  | lab | 37.74 | 0.915 | 0.211 | 0.183 | 56.3 | 0.68 | 0.40 | 0.010 |
+|  | split:ycc:4:3 | 37.93 | 0.916 | 0.205 | 0.176 | 58.9 | 0.62 | 0.35 | 0.009 |
+| dark | bicubic | 40.47 | 0.946 | 0.227 | 0.135 | 84.3 | 0.74 | 0.49 | 0.006 |
+|  | none | 33.37 | 0.895 | 0.290 | 0.203 | 46.4 | 2.41 | 2.26 | 0.000 |
+|  | lab | 34.60 | 0.899 | 0.278 | 0.199 | 52.5 | 1.09 | 1.55 | 0.000 |
+|  | split:ycc:4:3 | 35.26 | 0.901 | 0.260 | 0.203 | 58.1 | 0.77 | 0.95 | 0.000 |
+| street | bicubic | 38.79 | 0.936 | 0.188 | 0.072 | 85.0 | 0.81 | 0.50 | 0.003 |
+|  | none | 28.35 | 0.804 | 0.283 | 0.132 | 46.9 | 2.23 | 1.54 | 0.000 |
+|  | lab | 30.00 | 0.809 | 0.279 | 0.125 | 53.1 | 1.25 | 1.04 | 0.000 |
+|  | split:ycc:4:3 | 30.20 | 0.809 | 0.277 | 0.124 | 56.6 | 0.86 | 0.76 | 0.000 |
+| motion | bicubic | 35.83 | 0.858 | 0.281 | 0.159 | 80.6 | 0.78 | 0.52 | 0.031 |
+|  | none | 28.65 | 0.741 | 0.390 | 0.227 | 46.8 | 3.13 | 7.26 | 0.000 |
+|  | lab | 31.48 | 0.747 | 0.374 | 0.225 | 52.7 | 1.19 | 2.27 | 0.000 |
+|  | split:ycc:4:3 | 32.02 | 0.749 | 0.363 | 0.224 | 57.9 | 0.86 | 1.27 | 0.000 |
+
+- **Colour correction closes the colour gap, not the rest.** `split:ycc:4:3` brings low-frequency
+  colour to bicubic's level: ΔE00 lf 0.62–0.86 against 0.63–0.81, better on the close-up, 0.03–0.08
+  worse on the other three. `lab` leaves 0.68–1.25, none 2.1–3.1.
+- **Everything else stays behind bicubic, the perceptual metrics included, whatever the
+  correction.** With `split:ycc:4:3` (verdicts paired by frame, beyond the seed band):
+  - PSNR-Y is 3.0–8.6 dB lower;
+  - VMAF is 57–59 against 75–85;
+  - DISTS is worse on 4 of 4 (0.12–0.22 against 0.07–0.16);
+  - LPIPS is worse on 3, level on the close-up;
+  - low-frequency flicker is worse on 4, about twice bicubic's on the dark and fast clips.
+
+  `lab` and none are worse than bicubic on every metric on every clip, but one: the model adds
+  less banding than bicubic (CAMBI added 0.000–0.009 against 0.003–0.075) whatever the correction.
+- **`split:ycc:4:3` beats `lab`** on 4 of 4 clips:
+  - PSNR-Y +0.2 to +0.7 dB;
+  - VMAF +2.6 to +5.6;
+  - low-frequency colour and flicker better.
+
+  DISTS is better on 2, worse on 1 (the dark clip), within on 1.
+- **This film's finest detail is grain** (1.3–3.4 at 1080 rows), which no method recovers from a
+  halved, compressed input. Whether the 4K verdict depends on grain and kind waits for the same runs
+  on the [13 new clips](#clips): clean digital live action, native 4K animation, a 4K cel scan.
 
 ## Degradation d2
 
@@ -1120,6 +1182,18 @@ python3 $S/bench.py run p4k-face-pad-s42 --wrap $S/numerics_patch.py --wrap $S/f
   --model_dir /path/to/models --dit_model seedvr2_ema_7b_fp16.safetensors --resolution 2048 \
   --attention_mode flash_attn_2 --batch_size 25 --load_cap 25 --color_correction none --seed 42 \
   --vae_decode_tiled --vae_decode_tile_size 2048 --vae_decode_tile_overlap 128
+# the 13 more 4K clips: make with the picture's window where the film has bars (frame indices and
+#   windows in each clip's JSON; the shots found on seek-based contact sheets, then checked here)
+python3 $S/fr_clips.py make /path/to/digital-remux.mkv --start 14930 --frames 45 --name digital-sunrise \
+  --out $C4 --degrade d1 --tonemap mobius --src-crop 3840:2016:0:72   # a 1.85:1 scan: --src-crop 3840:2048:0:54
+python3 $S/fr_clips.py make /path/to/SolLevante_SDR_UHD_24fps.mov --start 874 --frames 45 \
+  --name sollevante-painted --out $C4 --degrade d1                    # an SDR master: no tone map, full frame
+# 4K with colour correction: the colour study's default-run masters (none, lab, split:ycc:4:3; gbrp16le),
+#   scored on the picture's rows, then paired with bicubic
+python3 $S/fr_metrics.py $C4/ouatia-face.gt.mkv --clip ouatia-face-pic --rows 56:2104 --json-dir m4k/default \
+  --out bicubic 0 $C4/ouatia-face.d1.bicubic.mkv --out lab 42 face.s42.lab.mkv \
+  --out split_ycc_4_3 42 face.s42.split_ycc_4_3.mkv   # likewise none, seed 43, the other clips
+python3 $S/fr_metrics.py --summary m4k/default --default lab --versus bicubic
 # grain: every frame of an RGB file, or 12 frames over a source's middle 80% (seeking; taller than
 #   1080 rows: area-downscaled to 1080); --sigma 1 and --share 10 for the other scales
 python3 $S/fr_clips.py grain $C/live-vfx.gt.mkv --json grain-live-vfx-gt.json
