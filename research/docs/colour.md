@@ -1,10 +1,10 @@
 # Colour correction beyond numz's `lab`
 
-> Status: **steps 0 to 3 measured; step 4, the eyes, pending.** Step 0 (the diagnosis) ran on the
-> CPU from [numerics.md](numerics.md)'s masters; steps 1 to 3 on dumps of 7B fp16 runs (1080p,
-> ×1.5 to ×4, the heavier degradation, VAE tiles, 4K), scored on the CPU; step 4's crops are made.
-> The study answers "Beyond numz's `lab`" in
-> [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab); its decision brief is at the end.
+> Status: **steps 0 to 4 done** (step 4: the user's eyes, 2026-10-06). Step 0 (the diagnosis) ran
+> on the CPU from [numerics.md](numerics.md)'s masters; steps 1 to 3 on dumps of 7B fp16 runs
+> (1080p, ×1.5 to ×4, the heavier degradation, VAE tiles, 4K), scored on the CPU. The study
+> answers "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab); its
+> decision brief is at the end.
 
 In short:
 
@@ -25,7 +25,7 @@ In short:
 - **Lightness at 3.2 px too** (`ycc:3:3`) gives the most fidelity before detail goes (PSNR-Y +1.7
   dB, flicker −1.13 against `ycc:4:3`'s −0.44, a quarter of `lab`'s tile drift) at the price of
   faint fine texture (a sky loses 15% of its Laplacian variance). The crops put both beside `lab`
-  for the eyes.
+  for the eyes; the user can't tell `4:3` and `3:3` apart (step 4).
 - **4K:** the correction closes the colour part of the gap to bicubic (with `ycc:3:3`,
   low-frequency ΔE00 below bicubic's on 4 of 4 shots). The rest, 2.6–7.4 dB of PSNR-Y, 10–20
   points of VMAF, DISTS on 4 of 4, is the model's 4K rendering, not colour.
@@ -687,7 +687,19 @@ window's 1st–99th percentiles (small level and colour shifts become visible). 
 best windows of each kind, one per frame: where `lab` and `ycc:3:3` differ most, the most strong
 edges, the flattest areas that aren't black, the most skin tones, the most sky. 1080p: anime-clean,
 anime-dark, cartoon-bright, anime-sky, live-slow and live-vfx at d1, anime-clean, anime-sky and
-live-slow at d2 (480×270 windows); 4K: the 4 shots (640×360). The user's verdict is pending.
+live-slow at d2 (480×270 windows); 4K: the 4 shots (640×360).
+
+The user's verdict (2026-10-06), on four crops:
+
+- **`ycc:4:3` is never worse than `lab`, and better where `lab`'s colour noise shows:** on the
+  cartoon in fast motion (`cartoon-bright-d1-diff-f37`), `lab` is the worst panel (blotches, an
+  elbow too white); on the compressed live action (`live-slow-d2-diff-f41`), `ycc:4:3` is the
+  cleanest and sharpest, sharper than the GT (the model redraws detail the camera frame never had).
+- **`ycc:4:3` and `ycc:3:3` can't be told apart** on any of them: a slight leaning to `3:3` on the
+  cartoon, to `4:3` on the sky (`anime-sky-d1-diff-f44`, a hair more detail). Nothing wrong seen in
+  `lab` on the sky.
+- **The 4K close-up's skin (its skin crop) is over-textured in every panel**, far beyond the GT:
+  the model's own rendering at 4K, which no correction changes (see 4K above).
 
 ## Decision brief
 
@@ -760,7 +772,8 @@ perceptual side, where DISTS is mixed: within on half the clips at d1 (2 better,
 fidelity before detail goes: PSNR-Y +1.69 dB, VMAF +9.7 in the master, flicker −1.13, the tiles'
 drift a quarter of `lab`'s, at 4K VMAF +12.5 and DISTS −0.011. It costs 15% of the sky's fine
 texture, and DISTS is mixed on compressed inputs (3 of 7 clips worse, 3 better). The crops put
-`lab`, `ycc:5:3:histY0.8`, `ycc:4:3` and `ycc:3:3` side by side.
+`lab`, `ycc:5:3:histY0.8`, `ycc:4:3` and `ycc:3:3` side by side: the user finds `4:3` never worse
+than `lab` and can't tell it from `3:3` (step 4).
 
 **4K's quality (for DESIGN.md's open question):** with the correction, the 4K output's
 low-frequency colour reaches bicubic's (ΔE00 lf 0.59–0.78 with `ycc:3:3`, below bicubic's on 4
