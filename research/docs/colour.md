@@ -1,12 +1,13 @@
 # Colour correction beyond numz's `lab`
 
 > Status: **steps 0 to 5 done** (step 4: the user's eyes, 2026-10-06; step 5, baton 1 of the 4K
-> relay, 2026-10-06: the user's eyes on its crops pending). Step 0 (the diagnosis) ran on the CPU
-> from [numerics.md](numerics.md)'s masters; steps 1 to 3 and 5 on dumps of 7B fp16 runs (1080p,
-> ×1.5 to ×4, the heavier degradation, VAE tiles, 4K on 17 shots), scored on the CPU. The study
-> answers "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab) and,
-> with step 5, part of "4K output's quality" ([To measure](../../seedvr2x/DESIGN.md#to-measure));
-> its decision brief is at the end.
+> relay, 2026-10-06, with the user's eyes on its crops given the same day: the 0.25 / 0.5
+> recommendation is withdrawn). Step 0 (the diagnosis) ran on the CPU from
+> [numerics.md](numerics.md)'s masters; steps 1 to 3 and 5 on dumps of 7B fp16 runs (1080p, ×1.5
+> to ×4, the heavier degradation, VAE tiles, 4K on 17 shots), scored on the CPU. The study answers
+> "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab) and, with step
+> 5, part of "4K output's quality" ([To measure](../../seedvr2x/DESIGN.md#to-measure)); its
+> decision brief is at the end.
 
 In short:
 
@@ -35,12 +36,12 @@ In short:
   the model trails bicubic on clean digital live action (PSNR-Y −5.8 dB, VMAF −19) and on
   animation made in 4K (−7.6 dB, −25) as on grain, while adding less banding. It over-renders:
   3.4–3.7 times the GT's fine detail on clean sources (Laplacian variance; bicubic 0.15–0.17).
-- **Recommended too: a detail strength** (step 5): the split's lightness blended with the
-  input's, A × split + (1 − A) × input, one multiply-add per pixel, A = 0.25 at 4K output and 0.5
-  at 1080p. At 4K, A = 0.25 beats bicubic on LPIPS and DISTS on 9 of 9 clean shots and on VMAF on
-  8, at bicubic's PSNR-Y, with less banding; on grain bicubic stays ahead, A = 0.25 the model's
-  closest output. At 1080p, A = 0.5 beats the split on LPIPS on 7 of 8 clips and bicubic on LPIPS
-  and DISTS on 7 of 8. The user's eyes on the crops are to confirm both values.
+- **A detail strength wins on the metrics, not by eye** (step 5): the split's lightness blended
+  with the input's beats bicubic on LPIPS and DISTS (A = 0.25 at 4K, 9 of 9 clean shots; 0.5 at
+  1080p, 7 of 8). The user's eyes want the model's redraw on structure, not its invented texture,
+  by an amount that changes with the content: no single value fits, and the default stays the
+  split alone. A user scale is the user's proposal, not a finding; the sharp 7B is to be looked
+  at first.
 - **A float16 decode adds nothing after the correction** (within the seed band): numz's
   bfloat16 decode can stay.
 
@@ -941,10 +942,11 @@ Against the split:
   1 on live-vfx. A = 0.5 is within one step of every d1 clip's best on both scores but live-vfx's,
   whose finest detail is already below the GT's (0.64 times its RMS below 0.7 px); at d2,
   anime-dark's DISTS also prefers 1.
-- **So the detail strength is not a 4K-only setting; its best value is higher at 1080p:** 0.5
-  against 4K's 0.25. The model's fine detail strays less from the GT at 1080p: its finest bands
-  correlate 0.42–0.54 and 0.76–0.84 with the GT's on three of the four 1080p clips scanned,
-  against 0.09–0.35 and 0.30–0.69 on average per kind at 4K.
+- **By the metrics, the detail strength is not a 4K-only setting, and its best value is higher
+  at 1080p:** 0.5 against 4K's 0.25. The model's fine detail strays less from the GT at 1080p: its
+  finest bands correlate 0.42–0.54 and 0.76–0.84 with the GT's on three of the four 1080p clips
+  scanned, against 0.09–0.35 and 0.30–0.69 on average per kind at 4K. The user's eyes then
+  overturned these values (below).
 
 ### 4K tiles on flat content
 
@@ -997,14 +999,81 @@ What to look at: at 4K, whether A = 0.25 or 0.5 looks right on skin, which the s
 over-textures (step 4), and on line art, which A = 0.25 softens toward bicubic's; whether banding
 shows in the skies at A = 0.25; on grain, whether any model panel beats bicubic. At 1080p, A = 0.5
 against 1 (the split) and 0.75, live-vfx being the clip where the scores prefer 1. The user's
-verdict: pending.
+verdict follows.
+
+### The user's eyes
+
+The user judged the crops on 2026-10-06: at 4K at least one window per clip, mostly the first of
+each folder (each crop sits next to its `.stretch.png` twin there, which kept the others out of
+view); at 1080p both windows of the 5 clips. Their criterion, in their words: "Tu veux l'image
+redessinée avec des traits plus francs, plus fins, des couleurs plus nettes, pas juste la même
+image délavée et nettoyée". A diffusion restorer should give a redrawn picture, with crisper,
+finer lines and cleaner colours, the style kept, not the original's washed-out picture made
+bigger, as if passed under a sponge. `ycc:4:3` and `ycc:3:3` still look the same to them.
+
+At 4K:
+
+| Shot | Preferred | What the eyes saw |
+|---|---|---|
+| `cel4k-detail` | the split | far better: redrawn, crisper, the style kept; A = 0.25 too close to the washed-out GT |
+| `cel4k-flat` | bicubic | the thread-thin fake writing is beyond the model, which comes out blocky; bicubic doesn't deform it |
+| `cel4k-night` | the split; A = 0.25 a good compromise | the split makes the blurred city readable (the buildings show); A = 0.25 keeps the original's soft style |
+| `digital-cockpit` | none | bicubic loses the GT's pores, the split over-emphasises them, the blends attenuate them without reaching the GT's sharpness |
+| `digital-dogfight` | not a blend | the blends are the worst: they mix the GT's grain and the model's sharp lines into an incoherent picture |
+| `digital-jet` | the split, `ycc:3:3` | they restore the stencilled text better than the GT: more legible, sharper, some of the original blur kept |
+| `digital-space` | A = 0.25 | the split and `ycc:3:3` destroy the clouds with bright, over-sharpened artefacts |
+| `digital-sunrise` | A = 0.5 | no GT grain, a clean, coherent gradient |
+| the first film's close-up | A = 0.25 | the split and `ycc:3:3` make the skin "almost reptilian" |
+| `sollevante-action`, `-line`, `-painted` | A = 0.25, the least bad | nothing satisfies against the GT |
+
+At 1080p:
+
+| Clip | Window | Preferred | What the eyes saw |
+|---|---|---|---|
+| anime-bright | credit text | none | the split blocky, bicubic washed out |
+| | face | the split | detail beyond the GT, no artefacts |
+| anime-clean | the facade's windows | A = 0.25 | – |
+| | small characters | A = 0.25 | the split too sharp |
+| cartoon-bright | flowers | A = 0.5 or 0.25 | – |
+| | the dog's face | A = 0.25 | still below the GT |
+| live-slow | the man, frontal | A = 0.75 | – |
+| | the couple | A = 0.5 | the split slightly too sharp, degrading a little; bicubic poor |
+| live-vfx | shoulder | a matter of taste | all fine but bicubic |
+| | the soldier's face | the split | detail without over-sharpening or artefacts |
+
+- **At 4K, eyes and metrics agree where the model invents isotropic texture:** skin, clouds, the
+  sky, brush texture, and structure too thin for it (`cel4k-flat`). There a blend toward the
+  input helps, preferred at A = 0.25 or 0.5, though on `cockpit` no strength reaches the GT's
+  pores.
+- **They disagree where the model redraws structure:** cel lines, text, buildings, motion. The
+  eyes prefer the redraw; full-reference metrics count a redraw sharper than the GT as error,
+  even where it beats the GT (`digital-jet`'s text).
+- **At 1080p the metrics' best A (seed 42, at d1) was the eyes' choice on anime-clean (0.25),
+  live-slow (0.5 and 0.75) and live-vfx (1),** within one step on cartoon-bright (metrics 0.5–0.75,
+  eyes 0.25–0.5), and away from it on anime-bright (metrics 0.5; eyes the split on the face, no
+  winner on the text).
+- **The preferred amount of redraw varies with the content,** even between two windows of one
+  clip (anime-bright: the text against the face). No single global strength fits, and the global
+  blend has its own failure: it softens lines and, on `dogfight`, mixes two styles.
+- **Limits:** one viewer; at 4K mostly one window per clip; one model (7B fp16), ×2 from the mild
+  degradation (d1).
 
 ### What step 5 recommends
 
-seedvr2x gets a detail strength: the split's corrected lightness blended with the input's,
-A · L_split + (1 − A) · L_input, colour untouched, A = 0.25 at 4K output and 0.5 at 1080p, the
-user's eyes on the crops to confirm both values (the decision brief, "4K and the detail
-strength").
+- **No fixed strength.** seedvr2x's default stays the split alone (A = 1), as DESIGN.md has it.
+  The 0.25 (4K) and 0.5 (1080p) defaults this step first drew from the metrics are withdrawn after
+  the user's eyes.
+- **What the findings support:** the right amount of the model's redraw depends on the content,
+  within a clip too; a global blend is a crude tool, which softens lines and can mix two styles.
+- **What they don't settle:**
+  - whether seedvr2x needs a user scale ("detail recreation", as commercial upscalers offer): the
+    user's proposal, supported by the content dependence the eyes show, not a measured
+    conclusion;
+  - what such a scale should move: the global blend measured here, or a structure-aware strength
+    that keeps the model's lines and attenuates its isotropic invented texture, untested;
+  - whether the sharp 7B changes the picture (the decision brief below).
+- **Next, for design to decide:** the sharp 7B on batch A at 4K first, with the same protocol and
+  crops for the eyes; a scale study only if the over-texture remains.
 
 ## Decision brief
 
@@ -1092,31 +1161,42 @@ of 4; 0.60–0.84 with `ycc:4:3`, at most 0.08 above it; bicubic 0.61–0.79), a
 comes close. The rest of the gap is the model's: PSNR-Y 2.7–7.3 dB below bicubic, VMAF 10–20
 points below, DISTS worse on 4 of 4 and LPIPS on 3 of 4, even with `ycc:3:3`.
 
-**4K and the detail strength (step 5, baton 1, 2026-10-06; the user's eyes to come).**
-Recommendation: seedvr2x gets a detail strength: after the split, the corrected lightness blended
-with the input's, A · L_split + (1 − A) · L_input, colour untouched; A = 0.25 by default at 4K
-output, 0.5 at 1080p. Between those output sizes it is untested.
-- **Why 0.25 at 4K:** it is the lowest-LPIPS point on 8 of the 9 clean shots (digital live action,
-  animation made in 4K; `space`: 0.5) and beats bicubic on LPIPS and DISTS on 9 of 9 (−0.030 and
-  −0.023) and on VMAF on 8 (+3.1), at bicubic's PSNR-Y (−0.07 dB), with less banding than bicubic
-  on 12 of the 13 batch A shots (within on one). On grain bicubic stays ahead on LPIPS and DISTS
-  (+0.013 and +0.012 over 8 shots); A = 0.25 is the model's closest output there, VMAF above
-  bicubic's on 6 of 8.
-- **Why 0.5 at 1080p:** it is within one step of every clip's best but live-vfx's (best at 1; at
-  d2, anime-dark's DISTS too), beats the split on LPIPS on 7 of 8 clips (DISTS on 6, low-frequency
-  flicker on 8) and bicubic on LPIPS and DISTS on 7 of 8 (within on one), where 0.25 costs DISTS
-  on compressed inputs (+0.0042 against the split at d2, 3 / 4 / 0).
-- **Why the two values differ:** the model's fine detail strays further from the GT at 4K: 3.4–3.7
-  times the GT's Laplacian variance on clean shots, its finest bands correlating less with the
-  GT's than at 1080p.
-- **The user's eyes** are to confirm both values on the crops: at 4K 0.25 against 0.5, at 1080p
-  0.5 against 1 and 0.75.
-- **Cost:** one multiply-add per pixel after the split; the lightness drift the split leaves from
-  the VAE tiles scales by A (see the tiles above). For DESIGN.md: a setting whose default follows
-  the output size; each frame is still corrected alone, so the decode still streams.
-- **For "4K output's quality":** with the split alone the 4K output trails bicubic on clean
-  sources too (PSNR-Y 5.8–7.6 dB, VMAF 19–25 points, LPIPS on 7 of 9 shots); at A = 0.25 it beats
-  bicubic on LPIPS and DISTS on every clean shot and comes close on grain.
+**4K and the detail strength (step 5, baton 1, and the user's eyes, 2026-10-06).**
+Recommendation: no fixed detail strength. seedvr2x's default stays the split alone (A = 1), as
+DESIGN.md has it; the 0.25 (4K) and 0.5 (1080p) defaults drawn from the metrics are withdrawn
+after the user's eyes.
+- **What the metrics found:** blending the split's lightness with the input's,
+  A · L_split + (1 − A) · L_input, one multiply-add per pixel, gains LPIPS and DISTS. At 4K,
+  A = 0.25 beats bicubic on both on 9 of 9 clean shots and on VMAF on 8, at bicubic's PSNR-Y; at
+  1080p, A = 0.5 beats the split on LPIPS on 7 of 8 clips and bicubic on LPIPS and DISTS on 7 of 8.
+- **What the eyes found:** they want the model's redraw where it redraws structure (cel lines,
+  text, buildings), which full-reference metrics count as error, and not the isotropic texture it
+  invents (skin, clouds, skies), where eyes and metrics agree. The preferred amount varies with
+  the content, even within a clip, and the global blend softens lines and can mix two styles
+  (`dogfight`).
+- **What the findings support:** the right amount of the model's redraw depends on the content;
+  a global blend is a crude tool.
+- **What they don't settle:**
+  - (a) whether seedvr2x needs a user scale ("detail recreation", as commercial upscalers offer):
+    the user's proposal, supported by the content dependence the eyes show, not a measured
+    conclusion;
+  - (b) what such a scale should move: the global blend measured here, or a structure-aware
+    strength keeping the model's lines and attenuating its isotropic invented texture, untested;
+  - (c) whether the sharp 7B changes the picture. [models.md](models.md) measured it on 4 animated
+    1080p clips, by metrics only: the closest of all models to the source (PSNR-Y +0.40 to +0.67
+    dB, VMAF +1.9 to +3.5) and, despite its name, no more fine texture than 7B fp16 (2–10% less);
+    never at 4K, on live action or by eye. ByteDance's readme (Limitations,
+    [`upstream/seedvr-bytedance/readme.md`](../../upstream/seedvr-bytedance/readme.md)) says its
+    models "tend to overly generate details on inputs with very light degradations […] leading
+    to oversharpened results occasionally". The user has read online that the sharp model does
+    better, and expects it to redraw without the over-sharpening, artefacts and blockiness.
+- **Next, for design to decide:** the sharp 7B on batch A at 4K first (the same protocol, crops
+  for the eyes), then a scale study only if the over-texture remains.
+- **For "4K output's quality":** by the metrics, the model's 4K output trails bicubic whatever
+  the colour correction (with the split, PSNR-Y 5.8–7.6 dB and VMAF 19–25 points behind on clean
+  sources); only a blend toward the input beats bicubic, on LPIPS and DISTS. By eye it depends on
+  the content: better than bicubic on structure (lines, text), worse where the model invents
+  texture.
 
 ## Caveats
 
@@ -1141,9 +1221,16 @@ output, 0.5 at 1080p. Between those output sizes it is untested.
 - **Bicubic stands in for A = 0 in the sweep:** the reference's lightness is bicubic's to 2
   decimals in every band, but bicubic also takes all of its colour from the input, where A = 0
   keeps the split's.
-- **No eyes yet on the detail strength.** At 1080p, bicubic is scored on the 8 clips at d1 but on
-  2 of 7 at d2 (the other 5 have no bicubic master). The strength is tested at ×2 only (1080p to
-  4K, and 540p to 1080p): output sizes between 1080p and 4K, and other factors, are untested.
+- **At 1080p, bicubic is scored on the 8 clips at d1 but on 2 of 7 at d2** (the other 5 have no
+  bicubic master). The detail strength is tested at ×2 only (1080p to 4K, and 540p to 1080p):
+  output sizes between 1080p and 4K, and other factors, are untested.
+- **Full-reference metrics cannot reward a redraw better than the GT:** a line or a text drawn
+  sharper than the GT counts as error. So on structure (cel lines, text, buildings, motion) they
+  disagree with the eyes, who found `digital-jet`'s text better than the GT's; they agree where
+  the model invents texture.
+- **Step 5's eyes are one viewer's:** at 4K mostly one window per clip (the first of each
+  folder; the `.stretch.png` twins kept the others out of view), at 1080p both windows of 5
+  clips; one model (7B fp16), ×2 from the mild degradation (d1).
 
 ## Reproduce
 
