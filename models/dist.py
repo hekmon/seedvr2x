@@ -10,7 +10,7 @@ Run after the scripts making the files (seedvr2_fp16.py, transnetv2_weights.py).
 (default models/dist):
 - LICENSE: the Apache License 2.0, downloaded from apache.org and checked by its SHA-256;
 - NOTICE: each file's origin, copyright, licence and change, from its own safetensors metadata;
-- README.md: the model card (card.md, beside this script), with a table of the files;
+- README.md: the model card, hf/README.md beside this script, with the table of the files filled in;
 - SHA256SUMS: every file of the directory but itself, as sha256sum writes it.
 A file under the MIT licence must have its licence beside it, as NAME.LICENSE for NAME.safetensors.
 """
@@ -89,7 +89,7 @@ def main() -> None:
         f"| {short(md['change'])} |"
         for name, size, sha, md in files
     ]
-    card = Template((HERE / "card.md").read_text()).substitute(files="\n".join(rows))
+    card = Template((HERE / "hf" / "README.md").read_text()).substitute(files="\n".join(rows))
     (out / "README.md").write_text(card)
     known = {name: sha for name, _, sha, _ in files}
     sums = [
