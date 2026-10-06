@@ -327,8 +327,9 @@ they differ and by which metrics, and how users are guided to them. What is know
   - Converting from the master costs nothing more, so every file seedvr2x makes starts there.
 - **Files of our own,** made by `models/`'s scripts from the fp32 masters, the small tensors and
   RoPE's frequencies kept in 16 bits, as in the Q4_K_M file. They are prepared ahead of phase 2,
-  on the CPU (the user's request, 2026-10-06), and uploaded only once GPU runs show each within
-  the 7B fp16's seed spread on every kind of source and the user's eyes agree:
+  on the CPU (the user's request, 2026-10-06), validated by GPU runs before implementation's
+  next steps, and uploaded with v1's files only if within the 7B fp16's seed spread on every
+  kind of source, the user's eyes agreeing:
   - fp8: the 288 block matrices in `e4m3fn` with one float32 scale per tensor (max |W| / 448),
     in comfy-kitchen's layout (weight and weight scale). The activations get their scale at run
     time: multiplied in fp8 (W8A8) from the RTX 40 generation on, widened to 16 bits (W8A16)
@@ -360,7 +361,8 @@ they differ and by which metrics, and how users are guided to them. What is know
     fp32 masters (`ByteDance-Seed/SeedVR2-7B` at `eb0c428`), and TransNetV2's weights (see
     [Shot detection](#shot-detection)): `seedvr2x_ema_7b_fp16.safetensors`,
     `seedvr2x_ema_7b_sharp_fp16.safetensors`, `seedvr2x_ema_vae_fp16.safetensors` and
-    `transnetv2.safetensors`. Phase 2 adds its files.
+    `transnetv2.safetensors`. They go up in one upload with phase 2's own files, once these are
+    validated, and the card's table of every file (the user's choice, 2026-10-06).
     - The names aren't numz's: numz's downloader deletes a file named like one of its own whose
       SHA-256 differs (`src/utils/downloads.py:216-235`), and ours differ by their header, so
       a model directory shared with numz would lose them.
@@ -1533,9 +1535,10 @@ writers, and the planner needs real shot lengths.
    Then `split` in place of `lab` (see [Colour correction](#colour-correction)): the decode
    streams, and its buffer, the histograms and the code ported from numz go, before the
    planner sizes the decode.
-3. The model files from seedvr2x's own Hugging Face repo: `models/`'s scripts are done, then
-   the user's upload, and seedvr2x's pull, pinned to the upload's revision and the files'
-   SHA-256s (see [Weights](#weights)). Then the first pass's new work,
+3. The model files from seedvr2x's own Hugging Face repo: `models/`'s scripts are done; once
+   phase 2's own files are validated, one upload holds every file and the card's table, and
+   seedvr2x's pull is pinned to its revision and the files' SHA-256s (see
+   [Weights](#weights)). Then the first pass's new work,
    ahead of the planner, since both workflows start from it: the directory input goes, the
    source being the only input; then the shot detector (see [Shot detection](#shot-detection)),
    whose brief is in, and with it the frame index (see [Input](#input)), so a resume seeks
