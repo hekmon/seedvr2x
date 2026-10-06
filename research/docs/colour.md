@@ -1,10 +1,12 @@
 # Colour correction beyond numz's `lab`
 
-> Status: **steps 0 to 4 done** (step 4: the user's eyes, 2026-10-06). Step 0 (the diagnosis) ran
-> on the CPU from [numerics.md](numerics.md)'s masters; steps 1 to 3 on dumps of 7B fp16 runs
-> (1080p, ×1.5 to ×4, the heavier degradation, VAE tiles, 4K), scored on the CPU. The study
-> answers "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab); its
-> decision brief is at the end.
+> Status: **steps 0 to 5 done** (step 4: the user's eyes, 2026-10-06; step 5, baton 1 of the 4K
+> relay, 2026-10-06: the user's eyes on its crops pending). Step 0 (the diagnosis) ran on the CPU
+> from [numerics.md](numerics.md)'s masters; steps 1 to 3 and 5 on dumps of 7B fp16 runs (1080p,
+> ×1.5 to ×4, the heavier degradation, VAE tiles, 4K on 17 shots), scored on the CPU. The study
+> answers "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab) and,
+> with step 5, part of "4K output's quality" ([To measure](../../seedvr2x/DESIGN.md#to-measure));
+> its decision brief is at the end.
 
 In short:
 
@@ -27,8 +29,18 @@ In short:
   faint fine texture (a sky loses 15% of its Laplacian variance). The crops put both beside `lab`
   for the eyes; the user can't tell `4:3` and `3:3` apart (step 4).
 - **4K:** the correction closes the colour part of the gap to bicubic (with `ycc:3:3`,
-  low-frequency ΔE00 below bicubic's on 4 of 4 shots). The rest, 2.6–7.4 dB of PSNR-Y, 10–20
-  points of VMAF, DISTS on 4 of 4, is the model's 4K rendering, not colour.
+  low-frequency ΔE00 below bicubic's on 4 of 4 shots of the first film, 9 of 13 in step 5). The
+  rest, 2.7–7.3 dB of PSNR-Y, 10–20 points of VMAF, DISTS on 4 of 4, is the model's 4K
+  rendering, not colour, and clean sources keep it (step 5, 13 more shots): with `split:ycc:4:3`
+  the model trails bicubic on clean digital live action (PSNR-Y −5.8 dB, VMAF −19) and on
+  animation made in 4K (−7.6 dB, −25) as on grain, while adding less banding. It over-renders:
+  3.4–3.7 times the GT's fine detail on clean sources (Laplacian variance; bicubic 0.15–0.17).
+- **Recommended too: a detail strength** (step 5): the split's lightness blended with the
+  input's, A × split + (1 − A) × input, one multiply-add per pixel, A = 0.25 at 4K output and 0.5
+  at 1080p. At 4K, A = 0.25 beats bicubic on LPIPS and DISTS on 9 of 9 clean shots and on VMAF on
+  8, at bicubic's PSNR-Y, with less banding; on grain bicubic stays ahead, A = 0.25 the model's
+  closest output. At 1080p, A = 0.5 beats the split on LPIPS on 7 of 8 clips and bicubic on LPIPS
+  and DISTS on 7 of 8. The user's eyes on the crops are to confirm both values.
 - **A float16 decode adds nothing after the correction** (within the seed band): numz's
   bfloat16 decode can stay.
 
@@ -596,9 +608,9 @@ on PSNR-Y and flicker, VMAF +1.8.
   against bicubic's 0.6–0.8. `lab` leaves 0.66–1.21; with lightness and colour from the input
   at 3.2 px it is below bicubic's on all 4 clips (0.59–0.78), and the dark and fast clips'
   low-frequency flicker falls from 1.5 and 2.2 (`lab`) to 0.56 and 0.71 (bicubic 0.48, 0.52).
-- **The rest is the model's rendering, not colour:** even `ycc:3:3` stays 2.6–7.4 dB below
+- **The rest is the model's rendering, not colour:** even `ycc:3:3` stays 2.7–7.3 dB below
   bicubic on PSNR-Y, 10–20 VMAF points below (64–69 against 74–85), worse on DISTS on all 4 and
-  on LPIPS on 3 (on par on the close-up). The sunny street is furthest (−7.4 dB, DISTS 0.115
+  on LPIPS on 3 (on par on the close-up). The sunny street is furthest (−7.3 dB, DISTS 0.115
   against 0.073): fine, regular detail the model redraws. More from the input closes the gap
   further, at the price of detail: what's left is a question about the model at 4K for design,
   not about the colour correction.
@@ -627,10 +639,15 @@ third in brackets):
   `ycc:4:3`, the worst block moves by 0.14–0.42 levels at decode tiles from 1536 down to 512 px,
   0.35–0.49 with the consumer cards' encode tiles; after `lab`, 0.38–0.95 and 0.77–1.10.
   Against the 2048 decode, PSNR rises 0.5–0.8 dB over `lab`'s.
-- **For the planner:** after `ycc:4:3`, no tiling measured here leaves half a level in the worst
-  block of a frame, on flat areas a third of a level, at 1080p (5 clips) or at 4K (4): colour
-  drift needs no floor on tile size above 512 px; time and memory set it. After `lab`, 512-px
-  tiles and the 1024 / 768 recipe leave about one level.
+- **For the planner:** after `ycc:4:3`, decode tiles down to 512 px and the consumer cards' two
+  recipes leave at most half a level in the worst block of a frame, about a third on flat areas,
+  at 1080p (5 clips) and on the first film at 4K (4 shots). On painted 4K animation (step 5)
+  512-px decode tiles leave up to 0.77 in textured blocks, the flattest third at most 0.15.
+  512-px encode tiles leave more at 1080p: 0.23–0.56 with 512-px decode tiles and 0.32–0.77
+  decoded untiled (the flat third 0.13–0.27), still about half of `lab`'s 0.60–1.39. Colour drift
+  needs no floor on tile size down to 512 px; time and memory set it. With a detail strength
+  (step 5) the lightness drift left scales by A. After `lab`, 512-px tiles and the 1024 / 768
+  recipe leave about one level on the first film, up to 1.6 on painted animation.
 - `ycc:5:3:histY0.8` leaves what `lab` leaves, as at 1080p.
 
 ### A float16 decode
@@ -701,6 +718,294 @@ The user's verdict (2026-10-06), on four crops:
 - **The 4K close-up's skin (its skin crop) is over-textured in every panel**, far beyond the GT:
   the model's own rendering at 4K, which no correction changes (see 4K above).
 
+## Step 5: 4K on clean and grainy sources, and a detail strength
+
+DESIGN.md's open question "4K output's quality": on the first film the model trails bicubic on
+every metric but banding, whatever the correction (step 3's 4K, and
+[numerics.md](numerics.md#4k-output-with-colour-correction-against-bicubic)). That film is a
+grainy restoration. Step 5 asks whether the verdict holds on clean native 4K, and what the colour
+side can close: lightness at 3.2 px (`ycc:3:3`) and a detail strength, which it then scores at
+1080p too.
+
+### The clips and runs
+
+13 shots of measurement's batch A ([numerics.md](numerics.md#clips)), from three sources:
+- `digital-*`, clean digital live action (an IMAX film's native 4K master through a fixed tone
+  map), cropped to 3840×2016: `sunrise` (a smooth sky), `cockpit` (clean skin in a helmet),
+  `space`, `jet` (29 frames), `dogfight` (motion blur);
+- `sollevante-*`, animation made natively in 4K, *Sol Levante* (Netflix / Production I.G,
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), 3840×2160: `painted`, `line` (line
+  art on flat colour), `action`, `dark` (41 frames);
+- `cel4k-*`, a 4K scan of a grainy cel film, cropped to 3840×2048: `detail`, `motion`, `night`,
+  `flat`.
+
+Each is ×2 from the d1 recipe (×½ Mitchell, x264 CRF 20, 8-bit), 45 frames unless said, with the
+first film's setup: 7B fp16, numz `4490bd1`, encode untiled, decode tiles of 2048 px (overlap 64),
+`--color_correction none` with the raw decode dumped and every variant applied to that decode.
+Seed 42 on all 13, seed 43 too on the four `sollevante-*`, `sunrise` and `space` (VMAF and CAMBI
+of `ds4_0.75` and `ds4_0.25` at seed 42 only); on the other 7 a verdict rests on one seed, where
+the bootstrap interval alone decides. The first film's 4 shots come along with their seeds (42, 43
+and 1234; the detail strengths at 42 and 43, or 42 alone).
+
+Scores as in step 3 (`colour_eval.py score`): LPIPS on every frame, DISTS on every 9th (5 frames a
+clip, so its figures compare variants here, never with numerics.md's), VMAF v1 with the 2160p
+model, chosen by the GT's width too (3840-wide crops), and CAMBI added, both from `gbrp16le`
+masters. Bicubic, the d1 input upscaled ×2 with Catmull-Rom, scored by `colour_eval.py` from its
+master, reproduces measurement's figures exactly (`sunrise`: PSNR-Y 45.53, VMAF 68.62, CAMBI
+added 1.651). Verdicts against bicubic come from `summary --versus bicubic` (paired by frame,
+beyond the variant's own seed spread), against `lab` from `--baseline lab@f32` as before.
+`ds…` below is short for `split:ycc:4:3:ds…`.
+
+Against `lab`, the split's 4K verdicts hold on the 13 shots: ΔE00 lf −0.33, PSNR-Y +0.57 dB,
+VMAF +5.3 and low-frequency flicker −0.58 (13 / 0 / 0 each), LPIPS −0.0086 (10 / 3 / 0); DISTS
+−0.0012 (6 / 6 / 1).
+
+### Against bicubic, by kind of source
+
+Variant − bicubic, mean over the shots (better / worse / within); detail: the luma Laplacian
+variance over the GT's, geometric mean over the shots (bicubic's in brackets):
+
+| Source (shots) | Variant | PSNR-Y (dB) | VMAF | LPIPS | DISTS | CAMBI added | Detail ÷ GT's |
+|---|---|---|---|---|---|---|---|
+| digital live action (5) | `ycc:4:3` | −5.84 (0/5/0) | −19.26 (0/5/0) | +0.0195 (0/4/1) | +0.0215 (1/4/0) | −2.209 (5/0/0) | 3.42 (0.15) |
+| | `ycc:3:3` | −5.03 (0/5/0) | −12.32 (0/5/0) | +0.0121 (1/3/1) | +0.0148 (1/4/0) | −2.227 (5/0/0) | 3.38 |
+| Sol Levante (4) | `ycc:4:3` | −7.57 (0/4/0) | −25.32 (0/4/0) | +0.0224 (0/3/1) | −0.0051 (3/1/0) | −0.963 (4/0/0) | 3.70 (0.17) |
+| | `ycc:3:3` | −6.67 (0/4/0) | −15.66 (0/4/0) | +0.0159 (1/2/1) | −0.0078 (3/1/0) | −0.963 (4/0/0) | 3.67 |
+| cel scan (4) | `ycc:4:3` | −9.36 (0/4/0) | −25.30 (0/4/0) | +0.1563 (0/4/0) | +0.0910 (0/4/0) | −0.016 (3/0/1) | 7.30 (0.54) |
+| | `ycc:3:3` | −8.06 (0/4/0) | −16.22 (0/4/0) | +0.1573 (0/4/0) | +0.0919 (0/4/0) | −0.016 (3/0/1) | 7.11 |
+| first film (4) | `ycc:4:3` | −4.98 (0/4/0) | −23.15 (0/4/0) | +0.0471 (0/3/1) | +0.0416 (0/4/0) | −0.026 (4/0/0) | 1.96 (0.12) |
+| | `ycc:3:3` | −4.27 (0/4/0) | −14.68 (0/4/0) | +0.0432 (0/3/1) | +0.0316 (0/4/0) | −0.027 (4/0/0) | 1.94 |
+
+Bicubic's own, for scale: PSNR-Y 37.2–47.4 dB, VMAF 68.6–98.3 on the 13 shots.
+
+- **Clean sources don't change the verdict.** With the split, the model trails bicubic on clean
+  digital live action and on animation made in 4K as on grain: PSNR-Y and VMAF on 17 of 17 shots
+  (VMAF 4.7 points below on `sollevante-dark` to 46 on `cel4k-motion`), LPIPS on 14 (within on
+  `space`, `sollevante-line` and the close-up). DISTS is worse on 13, better on three of the four
+  Sol Levante shots (`painted`, `line`, `action`) and on `sunrise`.
+- **Less banding than bicubic** on 16 of 17 (within on `cel4k-detail`, where neither adds any),
+  most where the 8-bit input bands skies and dark gradients: CAMBI added 0.00–0.16 against
+  bicubic's 1.11–4.61 on `sunrise`, `cockpit`, `space`, `jet`, `sollevante-line` and `-dark`.
+- **Low-frequency colour:** `ycc:3:3` is at bicubic's level (ΔE00 lf −0.009 to +0.018 on
+  average, lower on 9 of 13), the split 0.02–0.11 above it (12 of 13).
+- **The model over-renders.** The split keeps 3.4–3.7 times the GT's Laplacian variance on the
+  clean sources and 7.3 on the grainy scan (the first film 2.0), where bicubic keeps 0.12–0.54:
+  fine detail the GT doesn't have, as the user saw on the close-up's skin (step 4).
+- **`ycc:3:3` closes a little of the gap, not the over-rendering:** against the split, PSNR-Y
+  +0.99 dB and VMAF +8.4 (13 / 0 / 0), DISTS −0.0032 (9 / 2 / 2; on digital live action −0.0068,
+  4 of 5), LPIPS −0.0045 (9 / 2 / 2), but the detail ratio falls by 1–3% only: the excess sits
+  finer than 3.2 px.
+
+### Where the model's excess sits
+
+`colour_bands.py` splits the luma Y' into the à-trous bands (band k between k − 1 and k stages:
+below 0.7, 0.7–1.6, 1.6–3.2, 3.2–6.5 and 6.5–13 px) and measures in each the RMS of the split's
+output, the GT, bicubic and the reference, and their correlation with the GT's band, on every
+third frame, over the picture (inside the bars) and over the GT's flattest third of 60-px blocks.
+Scanned: the 13 batch A shots, the first film's 4 and 4 clips at 1080p (anime-clean,
+cartoon-bright, live-slow and live-vfx at d1). Per kind, whole picture, means over the shots:
+
+| Source (shots) | below 0.7 px | 0.7–1.6 px | 1.6–3.2 px | 3.2–6.5 px | Least-squares A (K = 4) | Energy-match A (K = 4) |
+|---|---|---|---|---|---|---|
+| digital live action (5) | 1.99 · 0.15 | 1.64 · 0.41 | 1.48 · 0.68 | 1.22 · 0.90 | 0.11 | 0.23–0.28 (`sunrise` 0.97) |
+| Sol Levante (4) | 1.99 · 0.32 | 1.74 · 0.66 | 1.50 · 0.88 | 1.21 · 0.96 | 0.13 | 0.22–0.32 |
+| cel scan (4) | 2.71 · 0.35 | 2.06 · 0.69 | 1.52 · 0.88 | 1.18 · 0.96 | 0.10 | 0.09–0.24 |
+| first film (4) | 1.58 · 0.09 | 1.31 · 0.30 | 1.30 · 0.73 | 1.15 · 0.95 | 0.08 | 0.20–0.93 |
+
+Each band: the split's RMS over the GT's · its correlation with the GT. The two A columns are the
+detail strength's (below) at K = 4: the least-squares one (PSNR's optimum, the mean over the
+shots), and the one at which the output's fine bands meet the GT's RMS (range over the shots).
+
+- **The reference is the bicubic upscale, in effect:** its RMS ratio equals bicubic's to 2
+  decimals in every band of all 21 clips scanned (its correlation with the GT too, on the 8
+  measured in full), and the reference's lightness (K = 4 at A = 0, below) has bicubic's PSNR-Y
+  within 0.02 dB. Lightness detail taken from the reference is bicubic's.
+- **At 4K the model's two finest bands are mostly not the GT's:** they correlate 0.09–0.35 and
+  0.30–0.69 with it on average per kind (bicubic's correlate more on the first film: 0.09–0.77
+  against the model's 0.02–0.61), from 3.2 px up 0.90–0.96. At 1080p they correlate more on
+  three of the four clips scanned: 0.42–0.54 and 0.76–0.84 (live-vfx 0.04 and 0.37).
+- **They also carry more energy than the GT's:** 1.3–2.7 times its RMS in the three finest bands
+  on average per kind, most on the grainy scan (2.7, 2.1 and 1.5); the sky of `sunrise` (0.89 and
+  0.88 in the two finest bands) and the first film's fast pan are the exceptions. On the first
+  film, the sunny street 2.4, 2.0 and 1.6 times the GT's RMS, the dark interior 1.9, 1.4 and 1.4;
+  on the grainy close-up the model's texture is at about the grain's energy (1.05–1.17 times)
+  but uncorrelated with it (0.02 and 0.12 below 1.6 px): texture as strong as the grain, in other
+  places.
+- **Energy matching can't see that kind of over-texture:** it keeps 0.09–0.32 of the model's
+  detail on 12 of the 13 batch A shots, but 0.97 on `sunrise`, whose sky's fine bands are already
+  at the GT's level, and 0.84 and 0.93 on the close-up and the fast pan, where the model's
+  texture has the GT's energy without its pattern.
+- **Fidelity wants almost none of it:** the least-squares A is 0 for K = 1 on all 21 clips,
+  negative before clipping for K = 2 on average on every kind (0 after clipping on 19 of 21;
+  `sollevante-dark` 0.06, cartoon-bright 0.14), and for K = 4 0.10–0.13 on average on every
+  batch A kind (the first film 0.08; per shot 0.03–0.23; 0.10–0.25 at 1080p). How much of the
+  model's detail to keep is for the perceptual scores and the eyes.
+
+### The detail strength
+
+`split:ycc:4:3:ds<K>_<A>` (`colour_variants.py`, ours) adds (1 − A) · hp_K(d) to the split's
+lightness, with d = reference − decode in Y' and hp_K(x) = x − low_K(x), the part of x finer than
+K à-trous stages (K ≤ 4). Colour stays the split's, and each frame is still corrected alone.
+A = 1 is the split; A = 0 takes that band from the reference.
+
+- **At K = 4 it is a blend of two lightnesses.** With c and r the decode's and the reference's Y',
+  the split's lightness is L_split = hp_4(c) + low_4(r), so L_ref − L_split = hp_4(r) − hp_4(c) =
+  hp_4(d), and `ds4_A` gives L_split + (1 − A) · hp_4(d) = A · L_split + (1 − A) · L_ref: one
+  multiply-add per pixel, no filtering beyond the split's own. So the tiles' drift that the split
+  leaves in the lightness scales by A exactly (before the clamp), the reference having none; and
+  A = 0 is bicubic's lightness, in effect, with the split's colour.
+- **K = 2 (below 1.6 px only),** the band diagnostic's first pick, does worse than K = 4 on DISTS:
+  on digital live action `ds2_0.5` and `ds2_0` stay worse than bicubic (+0.0056 and +0.0078,
+  worse on 3 of 5), where `ds4_0.5` and `ds4_0.25` are better (−0.0046, 3 of 5; −0.0112, 5 of
+  5); on the first film `ds2_0` is worse than the split itself (+0.0063, 3 of 4). The excess
+  reaches 1.6–3.2 px (above), which K = 2 leaves to the model.
+
+Along K = 4: where LPIPS and DISTS are lowest per shot (seed 42, the mean over seeds 42 and 43
+picking the same A on the 6 shots that have both; A = 1, 0.75, 0.5, 0.25, and bicubic standing in
+for A = 0), then A = 0.25 and 0.5 against bicubic, as in the table above:
+
+| Source (shots) | Lowest LPIPS at A | Lowest DISTS at A | Variant | PSNR-Y (dB) | VMAF | LPIPS | DISTS | CAMBI added | Detail ÷ GT's |
+|---|---|---|---|---|---|---|---|---|---|
+| digital live action (5) | 0.25 ×4, 0.5 | 0.25 ×3, 0.5, 0.75 | `ds4_0.25` | −0.24 (1/4/0) | +2.30 (4/1/0) | −0.0214 (5/0/0) | −0.0112 (5/0/0) | −1.617 (5/0/0) | 0.35 |
+| | | | `ds4_0.5` | −1.98 (0/5/0) | −3.00 (1/3/1) | −0.0137 (5/0/0) | −0.0046 (3/2/0) | −2.048 (5/0/0) | 0.96 |
+| Sol Levante (4) | 0.25 ×4 | 0.25 ×2, 0.5, 0.75 | `ds4_0.25` | +0.13 (1/3/0) | +4.14 (4/0/0) | −0.0406 (4/0/0) | −0.0378 (4/0/0) | −0.681 (4/0/0) | 0.42 |
+| | | | `ds4_0.5` | −2.45 (0/4/0) | −2.79 (1/3/0) | −0.0310 (4/0/0) | −0.0419 (4/0/0) | −0.903 (4/0/0) | 1.09 |
+| cel scan (4) | bicubic ×4 | bicubic ×3, 0.25 | `ds4_0.25` | −0.83 (2/2/0) | +2.16 (3/1/0) | +0.0230 (0/4/0) | +0.0153 (1/3/0) | −0.015 (3/0/1) | 1.03 |
+| | | | `ds4_0.5` | −4.08 (0/4/0) | −5.13 (2/2/0) | +0.0588 (0/4/0) | +0.0405 (0/4/0) | −0.016 (3/0/1) | 2.33 |
+| first film (4) | bicubic ×3, 0.25 | bicubic ×4 | `ds4_0.25` | −0.24 (0/4/0) | +2.04 (3/1/0) | +0.0030 (0/2/2) | +0.0092 (0/4/0) | −0.022 (4/0/0) | 0.22 |
+| | | | `ds4_0.5` | −1.65 (0/4/0) | −4.35 (0/4/0) | +0.0189 (0/4/0) | +0.0209 (0/4/0) | −0.026 (4/0/0) | 0.56 |
+
+- **The split (A = 1) is never the best point at 4K:** on all 17 shots LPIPS and DISTS are
+  lowest at A = 0.75 or below, or at bicubic. Against the split on batch A, `ds4_0.25` gains
+  PSNR-Y +7.2 dB, VMAF +25.8 and LPIPS −0.076 (13 / 0 / 0 each), DISTS −0.046 (11 / 2 / 0);
+  `ds4_0.5` VMAF +19.4, LPIPS −0.059 and DISTS −0.037 (13 / 0 / 0 each).
+- **Clean sources (9 shots): A = 0.25 is the lowest-LPIPS point on 8** (`space`: 0.5) **and
+  beats bicubic on LPIPS and DISTS on 9 of 9** (−0.030 and −0.023 on average), with VMAF above
+  bicubic's on 8 (+3.1 on average; `cockpit` 89.6 against 85.9, `sollevante-line` 87.4 against
+  83.8; `dogfight` 0.1 below) at bicubic's PSNR-Y (−0.07 dB on average: above it on `sunrise` and
+  `sollevante-dark`, within 0.6 dB on 6 more, the painted landscape 1.2 dB below). A = 0.5 beats
+  bicubic on LPIPS on 9 of 9 and DISTS on 7 (−0.021 both), 2.2 dB and 2.9 VMAF points below it,
+  and brings the detail to the GT's own level (0.96 and 1.09 times its Laplacian variance,
+  against 0.35 and 0.42 at A = 0.25 and bicubic's 0.15 and 0.17).
+- **Grain (the cel scan, the first film): bicubic stays ahead** on LPIPS (+0.013 at A = 0.25:
+  worse on 6 of 8, within on 2) and DISTS (+0.012, worse on 7 of 8). A = 0.25 is the model's
+  closest output, VMAF above bicubic's on 6 of 8 (+2.1); on `cel4k-detail` it beats bicubic on
+  DISTS too (0.0390 against 0.0410; VMAF 91.1 against 87.3).
+- **What it costs.** Banding comes back as A falls, still below bicubic's: CAMBI added at
+  A = 0.25 on `cockpit` 1.63 (the split 0.14, bicubic 3.58), on `sollevante-line` 0.11 (0.00 and
+  1.11), on `sunrise` 0.22 (0.0035 and 1.65); against the split, more on 9 of 13 shots at
+  A = 0.25 and on 8 at A = 0.5. Line art softens toward bicubic's (the crops). Low-frequency
+  flicker falls with A (`ds4_0.25` −0.41 against the split, 12 / 0 / 1).
+
+### At 1080p
+
+The same strengths on the 1080p dumps (×2 from 540p, d1 and d2), against bicubic, its master
+scored as at 4K (the 8 clips at d1; at d2 only anime-clean and anime-grain have one), and against
+the split; `ds4_0.75` and `ds4_0.25` at seed 42, `ds4_0.5` and the split at 2–3 seeds. Against
+bicubic at d1, 8 clips:
+
+| Variant | PSNR-Y (dB) | LPIPS | DISTS | ΔE00 lf | Flicker lf |
+|---|---|---|---|---|---|
+| `ycc:4:3` | −6.18 (0/8/0) | −0.0062 (4/4/0) | −0.0134 (4/4/0) | +0.061 (0/7/1) | +0.681 (0/8/0) |
+| `ds4_0.75` | −4.21 (0/8/0) | −0.0173 (5/2/1) | −0.0206 (6/2/0) | +0.012 (2/4/2) | +0.436 (0/7/1) |
+| `ds4_0.5` | −1.75 (0/6/2) | −0.0272 (7/0/1) | −0.0228 (7/0/1) | −0.028 (4/1/3) | +0.210 (1/7/0) |
+| `ds4_0.25` | +0.28 (6/1/1) | −0.0285 (8/0/0) | −0.0203 (8/0/0) | −0.053 (8/0/0) | +0.038 (1/6/1) |
+
+Against the split:
+
+| Set (clips) | Variant | PSNR-Y (dB) | LPIPS | DISTS | Flicker lf | Detail |
+|---|---|---|---|---|---|---|
+| d1 (8) | `ds4_0.75` | +2.10 (7/0/1) | −0.0134 (7/1/0) | −0.0083 (6/1/1) | −0.248 (8/0/0) | 8↓ |
+| | `ds4_0.5` | +4.43 (8/0/0) | −0.0210 (7/1/0) | −0.0094 (6/1/1) | −0.471 (8/0/0) | 8↓ |
+| | `ds4_0.25` | +6.58 (8/0/0) | −0.0246 (6/2/0) | −0.0080 (6/2/0) | −0.646 (8/0/0) | 8↓ |
+| d2 (7) | `ds4_0.75` | +1.95 (6/0/1) | −0.0119 (6/1/0) | −0.0058 (5/1/1) | −0.208 (7/0/0) | 7↓ |
+| | `ds4_0.5` | +4.02 (7/0/0) | −0.0186 (6/1/0) | −0.0034 (4/3/0) | −0.387 (7/0/0) | 7↓ |
+| | `ds4_0.25` | +5.85 (7/0/0) | −0.0201 (5/2/0) | +0.0042 (3/4/0) | −0.510 (7/0/0) | 7↓ |
+
+- **Against bicubic, the split is level at 1080p and the strengths are ahead.** The split beats
+  bicubic on LPIPS on half the clips and on DISTS on half (4 / 4 / 0 each), 6.2 dB below it, with
+  more low-frequency flicker on 8 of 8. `ds4_0.5` beats bicubic on LPIPS and DISTS on 7
+  of 8 (within on anime-clean), 1.75 dB below it; `ds4_0.25` on 8 of 8, at bicubic's PSNR-Y
+  (+0.28 dB, above it on 6) with a lower ΔE00 lf on 8. At d2, on the two clips with a bicubic
+  master, the split is worse than bicubic on LPIPS and DISTS on both, `ds4_0.25` better on both.
+- **Against the split, A = 0.5 is better on LPIPS on 7 of 8 clips at d1 (6 of 7 at d2) and on
+  DISTS on 6 (4 at d2; worse on anime-dark, the sky and live-vfx),** with less low-frequency
+  flicker on 8 of 8 (−0.47). Live-vfx is the one clip where every strength is worse than the
+  split (A = 0.5: LPIPS +0.042 and DISTS +0.034 at d1). A = 0.25 also costs LPIPS on
+  cartoon-bright and DISTS on the sky at d1, and DISTS on compressed inputs: +0.0042 at d2, worse
+  on 4 of 7.
+- **The best A per clip** (lowest LPIPS and DISTS along A = 1, 0.75, 0.5, 0.25 and bicubic, seed
+  42): at d1, LPIPS at 0.25 on 3 clips (anime-clean, -dark, -grain), 0.5 on 3 (anime-bright,
+  anime-sky, live-slow), 0.75 on cartoon-bright and 1 on live-vfx; DISTS at 0.25 on 3, 0.5 on 2,
+  0.75 on 2 and 1 on live-vfx; bicubic is never best. At d2, LPIPS picks 0.25 on 3, 0.5 on 3 and
+  1 on live-vfx. A = 0.5 is within one step of every d1 clip's best on both scores but live-vfx's,
+  whose finest detail is already below the GT's (0.64 times its RMS below 0.7 px); at d2,
+  anime-dark's DISTS also prefers 1.
+- **So the detail strength is not a 4K-only setting; its best value is higher at 1080p:** 0.5
+  against 4K's 0.25. The model's fine detail strays less from the GT at 1080p: its finest bands
+  correlate 0.42–0.54 and 0.76–0.84 with the GT's on three of the four 1080p clips scanned,
+  against 0.09–0.35 and 0.30–0.69 on average per kind at 4K.
+
+### 4K tiles on flat content
+
+Seed 42's latents decoded again with tiles of 1024 and 512 px (overlap 64) on `sunrise`, `space`
+and `sollevante-painted`, the smooth and flat shots, each against the 2048-px decode; and the
+consumer cards' 1024 / 768 recipe as a full run on `sunrise`. The worst 60×60 block per frame,
+range over the shots (the GT's flattest third in brackets):
+
+| Encode / decode tiles | `none` | `lab` | `ycc:4:3` | `ycc:3:3` |
+|---|---|---|---|---|
+| untiled / 1024 | 5.23–12.85 (4.19–10.05) | 0.38–1.19 (0.11–0.30) | 0.11–0.58 (0.04–0.13) | 0.04–0.27 (0.02–0.08) |
+| untiled / 512 | 7.78–15.29 (5.64–9.92) | 0.39–1.58 (0.28–0.44) | 0.12–0.77 (0.08–0.15) | 0.05–0.35 (0.02–0.10) |
+| 1024 / 768 (`sunrise`) | 11.91 (11.24) | 0.74 (0.34) | 0.24 (0.12) | 0.09 (0.05) |
+
+- **Still no floor from colour down to 512 px, on flat content too:** after the split the
+  flattest third moves by 0.04–0.13 levels with 1024-px decode tiles and 0.08–0.15 with 512-px
+  ones (the first film: 0.11–0.28), the worst block by 0.11–0.58 and 0.12–0.77: a third to a half
+  of `lab`'s (0.38–1.19, 0.39–1.58), `ycc:3:3` a tenth to a quarter. The consumer recipe leaves
+  0.24 on the sky (its flattest third 0.12), against `lab`'s 0.74.
+- **The worst blocks sit in texture:** every maximum is on the painted landscape, whose worst
+  block moves by 0.58 and 0.77, its flattest third by 0.13 and 0.15. That is more than the first
+  film's worst (0.42 at 512 px), on the shot whose uncorrected decode drifts most (12.9–15.3
+  levels).
+- With a detail strength the drift left in the lightness scales by A (above): at A = 0.25, a
+  quarter of the split's, at 0.5 half.
+
+### Crops
+
+`colour_crops.py` with `--bicubic` and windows placed by hand (`--at`), on seed 42's frames, each
+panel at 1:1 labelled with its mean ΔE00 to the GT, and a `.stretch.png` twin with every panel's
+luma stretched by the GT window's 1st–99th percentiles (the better view of the dark ones); each
+folder's README.txt lists its crops.
+
+- **4K:** 31 strips in `D:\Video\seedvr2x\colour\crops-b1\`, GT | bicubic | `ycc:4:3` |
+  `ycc:3:3` | `ds2_0.5` | `ds4_0.5` | `ds4_0.25`, panels of 512×288: each strip is 3584 px wide,
+  to be viewed at 1:1, scrolling. Windows by hand on the middle frame, plus the tool's pick where
+  `ds4_0.25` differs most from the split, and on two cel shots its flattest window that isn't
+  black:
+  - skin: the first film's close-up (3), `cockpit` (3);
+  - line art and flat colour: `sollevante-line` (3), `-painted` (3), `-action` (2);
+  - skies and smooth gradients: `sunrise` (3), `space` (3);
+  - grain and flat cel: `cel4k-detail`, `-flat` and `-night` (3 each);
+  - `jet`'s stencilled text and `dogfight`'s motion blur (1 each).
+- **1080p:** 10 crops of 5 clips in `D:\Video\seedvr2x\colour\crops-b1-1080p\` (anime-clean,
+  anime-bright, cartoon-bright, live-slow, live-vfx, 2 each, at d1), GT | bicubic | `ycc:4:3` |
+  `ds4_0.75` | `ds4_0.5` | `ds4_0.25`, panels of 384×216: line art and flat colour, credit text,
+  faces and skin, film grain.
+
+What to look at: at 4K, whether A = 0.25 or 0.5 looks right on skin, which the split
+over-textures (step 4), and on line art, which A = 0.25 softens toward bicubic's; whether banding
+shows in the skies at A = 0.25; on grain, whether any model panel beats bicubic. At 1080p, A = 0.5
+against 1 (the split) and 0.75, live-vfx being the clip where the scores prefer 1. The user's
+verdict: pending.
+
+### What step 5 recommends
+
+seedvr2x gets a detail strength: the split's corrected lightness blended with the input's,
+A · L_split + (1 − A) · L_input, colour untouched, A = 0.25 at 4K output and 0.5 at 1080p, the
+user's eyes on the crops to confirm both values (the decision brief, "4K and the detail
+strength").
+
 ## Decision brief
 
 **Recommendation.** seedvr2x's colour correction becomes a split in BT.709 Y'CbCr without numz's
@@ -717,9 +1022,13 @@ What it changes in DESIGN.md:
   input frames at decode time.
 - **Cost:** 22.8 ms and 0.56 GiB per 4K frame on the GPU, against `lab`'s 104.6 ms and 0.84 GiB.
 - **The upscale factor sets the colour scale** (the correction needs it; the plan has it).
-- **The tiles:** a split leaves half of what `lab` leaves of the VAE tiles' drift, at every tile
-  size at 1080p and 4K: under half a level in the worst block of a frame down to 512-px tiles.
-  Colour gives the planner no floor on tile size above 512 px.
+- **The tiles:** a split leaves half or less of what `lab` leaves of the VAE tiles' drift, at
+  every tile size at 1080p and 4K: at most half a level in the worst block of a frame with decode
+  tiles down to 512 px and with the consumer cards' recipes, at 1080p and on the first film's 4K
+  shots; on painted 4K animation, 512-px decode tiles leave up to 0.77 in textured blocks (the
+  flattest third at most 0.15); 512-px encode tiles leave up to 0.77 at 1080p (`lab` 1.39).
+  Colour gives the planner no floor on tile size down to 512 px; with the detail strength the
+  lightness drift scales by A.
 - **A float16 decode isn't needed:** after the correction it changes nothing beyond the seed
   band; numz's bfloat16 decode stays.
 - `test_lab.py`'s thresholds follow the new correction (DESIGN.md's order for a winner).
@@ -740,7 +1049,8 @@ better / worse / within):
 - Tiles at 1080p (5 clips, decode tiles 1280 to 512 px, encode tiles 1344 to 512): the worst
   60-px block left after correction 0.04–0.77 levels against `lab`'s 0.10–1.39; at 4K (4 shots,
   decode tiles 1536 to 512, 2 encode recipes, against the 2048-px decode) 0.14–0.49 against
-  0.38–1.10.
+  0.38–1.10; on 3 smooth or painted 4K shots (step 5: decode tiles of 1024 and 512, the 1024 / 768
+  recipe) 0.11–0.77 against 0.38–1.58.
 - ×4 (5 clips, 2–3 seeds), at `ycc:4:4`: ΔE00 σ 4 −0.18 (5 / 0 / 0), PSNR-Y +0.55 (3 / 0 / 2),
   LPIPS −0.0020 (4 / 0 / 1), DISTS +0.0009 (2 / 2 / 1), flicker lf −0.58 (5 / 0 / 0). The ×2
   scale at ×4 (`ycc:4:3`) costs DISTS on 3 of 5.
@@ -763,7 +1073,8 @@ perceptual side, where DISTS is mixed: within on half the clips at d1 (2 better,
 - Fidelity to a ground truth is not quality: a correction that takes more from the input scores
   better on it. DISTS and the eyes are the guard on the model's detail.
 - One model (7B fp16) with numz's numerics; single shots of 45 frames, one batch; 8 clips at
-  1080p (animation and live action), 4 at 4K from one film; ×4 on 5.
+  1080p (animation and live action), 4 at 4K from one film (13 more from three sources in step
+  5); ×4 on 5.
 - Factors tested: ×1.5, ×2, ×3 and ×4; the rule in between (×2.25 for 480p to 1080p, say) is
   an interpolation.
 - The 4K gap to bicubic that remains is the model's (below), not the correction's.
@@ -778,8 +1089,34 @@ than `lab` and can't tell it from `3:3` (step 4).
 **4K's quality (for DESIGN.md's open question):** with the correction, the 4K output's
 low-frequency colour reaches bicubic's (ΔE00 lf 0.59–0.78 with `ycc:3:3`, below bicubic's on 4
 of 4; 0.60–0.84 with `ycc:4:3`, at most 0.08 above it; bicubic 0.61–0.79), and its flicker
-comes close. The rest of the gap is the model's: PSNR-Y 2.6–7.4 dB below bicubic, VMAF 10–20
+comes close. The rest of the gap is the model's: PSNR-Y 2.7–7.3 dB below bicubic, VMAF 10–20
 points below, DISTS worse on 4 of 4 and LPIPS on 3 of 4, even with `ycc:3:3`.
+
+**4K and the detail strength (step 5, baton 1, 2026-10-06; the user's eyes to come).**
+Recommendation: seedvr2x gets a detail strength: after the split, the corrected lightness blended
+with the input's, A · L_split + (1 − A) · L_input, colour untouched; A = 0.25 by default at 4K
+output, 0.5 at 1080p. Between those output sizes it is untested.
+- **Why 0.25 at 4K:** it is the lowest-LPIPS point on 8 of the 9 clean shots (digital live action,
+  animation made in 4K; `space`: 0.5) and beats bicubic on LPIPS and DISTS on 9 of 9 (−0.030 and
+  −0.023) and on VMAF on 8 (+3.1), at bicubic's PSNR-Y (−0.07 dB), with less banding than bicubic
+  on 12 of the 13 batch A shots (within on one). On grain bicubic stays ahead on LPIPS and DISTS
+  (+0.013 and +0.012 over 8 shots); A = 0.25 is the model's closest output there, VMAF above
+  bicubic's on 6 of 8.
+- **Why 0.5 at 1080p:** it is within one step of every clip's best but live-vfx's (best at 1; at
+  d2, anime-dark's DISTS too), beats the split on LPIPS on 7 of 8 clips (DISTS on 6, low-frequency
+  flicker on 8) and bicubic on LPIPS and DISTS on 7 of 8 (within on one), where 0.25 costs DISTS
+  on compressed inputs (+0.0042 against the split at d2, 3 / 4 / 0).
+- **Why the two values differ:** the model's fine detail strays further from the GT at 4K: 3.4–3.7
+  times the GT's Laplacian variance on clean shots, its finest bands correlating less with the
+  GT's than at 1080p.
+- **The user's eyes** are to confirm both values on the crops: at 4K 0.25 against 0.5, at 1080p
+  0.5 against 1 and 0.75.
+- **Cost:** one multiply-add per pixel after the split; the lightness drift the split leaves from
+  the VAE tiles scales by A (see the tiles above). For DESIGN.md: a setting whose default follows
+  the output size; each frame is still corrected alone, so the decode still streams.
+- **For "4K output's quality":** with the split alone the 4K output trails bicubic on clean
+  sources too (PSNR-Y 5.8–7.6 dB, VMAF 19–25 points, LPIPS on 7 of 9 shots); at A = 0.25 it beats
+  bicubic on LPIPS and DISTS on every clean shot and comes close on grain.
 
 ## Caveats
 
@@ -788,10 +1125,25 @@ points below, DISTS worse on 4 of 4 and LPIPS on 3 of 4, even with `ycc:3:3`.
   band (step 0). DISTS, the Laplacian variance and the eyes are the guard on the model's detail.
 - One model (7B fp16) with numz's numerics; single shots of 45 frames in one batch; 8 clips at
   1080p (animation and live action), 7 at the heavier degradation, 5 at ×4, 4 at 4K from one
-  film; 3 at ×1.5 and ×3. Seeds: 3 at d1, 2–3 elsewhere.
+  film (13 more from three sources in step 5); 3 at ×1.5 and ×3. Seeds: 3 at d1, 2–3 elsewhere.
 - Factors tested: ×1.5, ×2, ×3, ×4 (×1.5 and ×3 on 3 clips, 2 seeds).
 - The variants are scored on the decode in float32, as seedvr2x keeps it; numz's own `lab`
   masters (step 0) were clamped bfloat16.
+- **Step 5 rests on one seed on 7 of its 13 shots:** seeds 42 and 43 on the four `sollevante-*`,
+  `sunrise` and `space`, seed 42 alone on the other 7, whose verdicts rest on the bootstrap
+  interval alone, with no seed band. VMAF and CAMBI of `ds4_0.75` and `ds4_0.25` are seed 42's,
+  as are the first film's `ds4_0.25` and `ds4_0.75`, the 1080p `ds4_0.75` and `ds4_0.25`, and
+  the sweep's lowest points (the two-seed mean picks the same A where it exists).
+- **DISTS on 5 frames a clip** (every 9th, as in step 3): enough to compare variants on the same
+  frames, not comparable with numerics.md's DISTS figures.
+- **The Laplacian variance is a proxy for detail:** one number, blind to whether the detail is
+  the GT's; the bands' correlations and the eyes are the check.
+- **Bicubic stands in for A = 0 in the sweep:** the reference's lightness is bicubic's to 2
+  decimals in every band, but bicubic also takes all of its colour from the input, where A = 0
+  keeps the split's.
+- **No eyes yet on the detail strength.** At 1080p, bicubic is scored on the 8 clips at d1 but on
+  2 of 7 at d2 (the other 5 have no bicubic master). The strength is tested at ×2 only (1080p to
+  4K, and 540p to 1080p): output sizes between 1080p and 4K, and other factors, are untested.
 
 ## Reproduce
 
@@ -859,4 +1211,54 @@ python3 $S/colour_eval.py summary eval/*-d1 --tables groups                     
 python3 $S/colour_crops.py --clip anime-clean-d1 --gt $C/anime-clean.gt.mkv \
   --ref $D/anime-clean-d1/s42/ref_f32.pt --content $D/anime-clean-d1/s42/decode.pt \
   --variants lab,split:ycc:5:3:histY0.8,split:ycc:4:3,split:ycc:3:3 --out crops/anime-clean-d1
+```
+
+Step 5. The batch A dumps come from runs made as the first film's 4K ones (step 1: encode
+untiled, decode tiles of 2048, overlap 64), one per clip and seed; the rest runs on the CPU:
+
+```bash
+S=scripts; C=/path/to/clips; C4=/path/to/clips4k; D=/path/to/dumps; c=digital-sunrise
+V=none,lab,split:ycc:4:3,split:ycc:3:3,split:ycc:4:3:ds2_0.5,split:ycc:4:3:ds2_0
+V=$V,split:ycc:4:3:ds4_0.75,split:ycc:4:3:ds4_0.5,split:ycc:4:3:ds4_0.25
+python3 $S/colour_eval.py score --clip $c-d1 --gt $C4/$c.gt.mkv --ref f32=$D/$c-d1/s42/ref_f32.pt \
+  --content s42=$D/$c-d1/s42/decode.pt --variants $V --out eval-b1/$c-d1 --lpips --dists-every 9
+python3 $S/colour_eval.py score --clip $c-d1 --gt $C4/$c.gt.mkv --master bicubic=$C4/$c.d1.bicubic.mkv \
+  --master-content s42,s43 --out eval-b1/$c-d1 --lpips --dists-every 9      # bicubic, from its master
+python3 $S/colour_eval.py render --clip $c-d1 --gt $C4/$c.gt.mkv --ref f32=$D/$c-d1/s42/ref_f32.pt \
+  --content s42=$D/$c-d1/s42/decode.pt --variants ${V#none,} --out masters-b1 --pix-fmt gbrp16le  # all but none
+python3 $S/colour_eval.py vmaf --clip $c-d1 --gt $C4/$c.gt.mkv --master bicubic=$C4/$c.d1.bicubic.mkv \
+  --master-content s42,s43 --out vmaf-b1/$c-d1                                # VMAF and CAMBI
+python3 $S/colour_eval.py vmaf --clip $c-d1 --gt $C4/$c.gt.mkv --master-content s42 --out vmaf-b1/$c-d1 \
+  --master split:ycc:4:3:ds4_0.25@f32=masters-b1/$c-d1.s42.split_ycc_4_3_ds4_0.25~f32.gbrp16le.mkv  # one per variant
+python3 $S/colour_eval.py summary eval-b1/digital-*-d1 vmaf-b1/digital-*-d1 --versus bicubic \
+  --tables versus                                                    # against bicubic, per kind
+python3 $S/colour_eval.py summary eval-b1/*-d1 vmaf-b1/*-d1 --baseline lab@f32      # against lab
+python3 $S/colour_eval.py summary eval-b1/*-d1 vmaf-b1/*-d1 --baseline split:ycc:4:3@f32
+python3 $S/colour_eval.py score --clip $c-d1 --gt $C4/$c.gt.mkv --ref f32=$D/$c-d1/s42/ref_f32.pt \
+  --content s42=$D/$c-d1/s42/decode.pt --content s42-d512=$D/$c-d1/s42/dec/decode-512-64.pt \
+  --untiled s42 --variants none,lab,split:ycc:4:3,split:ycc:3:3 --out eval-b1/$c-d1-tiled   # tiles
+python3 $S/colour_bands.py selftest
+python3 $S/colour_bands.py scan --clip face-d1 --gt $C4/face.gt.mkv --bicubic $C4/face.d1.bicubic.mkv \
+  --ref $D/face-d1/s42/ref_f32.pt --content $D/face-d1/s42/decode.pt --rows 64:2096 --every 3 \
+  --out bands/face-d1.json                               # --rows: inside the letterbox
+python3 $S/colour_bands.py report bands/*.json > bands.md  # --detail: each clip's full tables too
+python3 $S/colour_crops.py --clip digital-cockpit-d1 --gt $C4/digital-cockpit.gt.mkv \
+  --bicubic $C4/digital-cockpit.d1.bicubic.mkv --ref $D/digital-cockpit-d1/s42/ref_f32.pt \
+  --content $D/digital-cockpit-d1/s42/decode.pt \
+  --variants split:ycc:4:3,split:ycc:3:3,split:ycc:4:3:ds2_0.5,split:ycc:4:3:ds4_0.5,split:ycc:4:3:ds4_0.25 \
+  --at 1840,700 --at 2020,430 --at-frame 22 --size 512x288 --per-kind 1 --out crops-b1/digital-cockpit
+# 1080p: the strengths on steps 1-3's dumps, bicubic from its master, then against bicubic
+python3 $S/colour_eval.py score --clip anime-clean-d1 --gt $C/anime-clean.gt.mkv \
+  --ref f32=$D/anime-clean-d1/s42/ref_f32.pt --content s42=$D/anime-clean-d1/s42/decode.pt \
+  --variants split:ycc:4:3:ds4_0.75,split:ycc:4:3:ds4_0.5,split:ycc:4:3:ds4_0.25 \
+  --out eval-ds/anime-clean-d1 --lpips --dists-every 9
+python3 $S/colour_eval.py score --clip anime-clean-d1 --gt $C/anime-clean.gt.mkv \
+  --master bicubic=$C/anime-clean.d1.bicubic.mkv --master-content s42 --out eval-ds/anime-clean-d1 \
+  --lpips --dists-every 9
+python3 $S/colour_eval.py summary eval/*-d1 eval-ds/*-d1 --versus bicubic --tables versus
+python3 $S/colour_crops.py --clip anime-clean-d1 --gt $C/anime-clean.gt.mkv \
+  --bicubic $C/anime-clean.d1.bicubic.mkv --ref $D/anime-clean-d1/s42/ref_f32.pt \
+  --content $D/anime-clean-d1/s42/decode.pt \
+  --variants split:ycc:4:3,split:ycc:4:3:ds4_0.75,split:ycc:4:3:ds4_0.5,split:ycc:4:3:ds4_0.25 \
+  --at 800,864 --at 400,480 --at-frame 22 --size 384x216 --per-kind 0 --out crops-b1-1080p/anime-clean
 ```
