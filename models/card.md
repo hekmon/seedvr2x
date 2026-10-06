@@ -37,6 +37,22 @@ ComfyUI-SeedVR2_VideoUpscaler runs, hold the same values: `seedvr2_fp16.py` chec
 them, equal element for element. Only the header differs, which holds the metadata, and the file
 names: numz's downloader deletes a file that bears one of its names with another SHA-256.
 
+## Precision
+
+ByteDance's masters are float32: 33 GB for a 7B DiT. The files here hold them in float16, 16.5 GB.
+
+- Rounding to float16 changes each weight by 0.05% at most, and it doesn't show: in seedvr2x's
+  measurements, the float32 weights moved the output by 0.38 8-bit levels on average, where
+  another seed moves it by 1.90.
+- float16 rather than bfloat16: float16 keeps 3 more bits of each weight, and every SeedVR2
+  weight fits its range. The model computes in bfloat16 anyway.
+- The VAE stays in float16 too: quantizing its weights (0.47 GiB) would save nothing, and its 3D
+  convolutions have no 8- or 4-bit path.
+
+Smaller files, 8-bit and 4-bit, come later, each published once GPU runs have measured how close
+it stays to the float16 model, against the spread between seeds. This card will then compare
+them, to help choose: size, how each one multiplies on each GPU generation, speed and quality.
+
 ## TransNetV2
 
 [TransNetV2](https://github.com/soCzech/TransNetV2) finds the cuts between shots; seedvr2x splits
