@@ -162,6 +162,78 @@ models beside v1 until then; they are dropped, since v1 has NEG built in, and VM
 identical frame for frame without them (checked at 1080p and 4K). Scoring one 4K clip takes about
 6 minutes on 16 cores (DISTS runs at 0.15 frames per second) and 48 GiB of memory.
 
+**More 4K clips** (2026-10-06): the first film's verdicts rest on old film grain, which no method
+recovers from a halved, compressed input, and on few flat areas. Thirteen shots from three more
+sources let the 4K verdict be read by grain and by kind:
+
+- `digital-*`, clean digital live action: a 2022 film shot digitally at 6K and finished as a
+  native 4K master, from its UHD Blu-ray remux (HEVC Main 10, HDR10 under Dolby Vision profile 7,
+  mastered at 1,000 cd/m²), through the first film's tone map. Its aspect ratio varies (2.39:1,
+  and 1.90:1 in the IMAX scenes). All five shots come from IMAX scenes (picture rows 68–2091),
+  cropped inside the picture to 3840×2016, so the input is 1920×1008:
+  - `digital-sunrise`: a high-altitude sunrise, a smooth sky gradient across the whole width
+    and the sun's glow over a dark lower half;
+  - `digital-cockpit`: a close-up in a pressure helmet, with skin, thin reflections on the
+    visor, small green reflections on the face and a near-black surround;
+  - `digital-space`: the earth from near space, clouds lit by a low sun, a thin contrail;
+  - `digital-jet`: an aircraft seen close as it accelerates, stencilled text on the fuselage
+    and the engine's flame next to dark. A 30-frame take, of which 29 frames are kept;
+  - `digital-dogfight`: a jet tearing past and the camera whipping after it, heavy motion blur.
+- `sollevante-*`, clean animation made natively in 4K: *Sol Levante* (Netflix / Production I.G,
+  [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)). Its creators' own SDR grade (ProRes
+  422 HQ, 3840×2160, 10-bit 4:2:2, BT.709, 24 fps) needs no tone map; full frames:
+  - `sollevante-painted`: a misty painted landscape, a character running in;
+  - `sollevante-line`: line art on flat colour over a painted sky;
+  - `sollevante-action`: a bird in a fast, swirling stream of water and cloud. The film's faster
+    camera flights hold cuts no detector catches ([scene detection](scene-detection.md)), so this
+    is the fastest stretch that is one take by both detectors and by eye;
+  - `sollevante-dark`: space and a planet's lit edge, the darkest shot. A 41-frame take, kept
+    whole.
+- `cel4k-*`, grainy cel animation: a 1988 animated film's native 4K scan of its 35 mm film, from
+  its UHD Blu-ray remux (HEVC Main 10, HDR10), through the same tone map. It is 1.85:1 (picture rows
+  42–2116), cropped to 3840×2048, so the input is 1920×1024:
+  - `cel4k-detail`: a night street full of debris, still;
+  - `cel4k-motion`: a fast tilt up a city's towers;
+  - `cel4k-night`: helicopters over a dark crater, the darkest shot (mean Y 17);
+  - `cel4k-flat`: a figure at a desk against a flat wall.
+
+The shots were chosen on contact sheets (frames decoded by seeking, through the clips' tone map),
+with cuts found from the luma change between frames and from TransNetV2. `make` then takes each
+clip by decoding the source from its start and counting, and records the scene scores into, inside
+and out of the clip. `verify --source` checks every frame against the decoded source. The crops
+are `make --src-crop`: the window is cut from the decoded frames before anything else, so no bar
+enters the degradation, the model's input or the scores. Both inputs' heights (1008, 1024) are
+multiples of 16, so the CLI pads nothing.
+
+Bicubic at 4K on these clips (whole cropped frames; VMAF with the 2160p model, as for every picture
+3840 wide). The last column is grain, measured as in [Grain](#grain), at 1080 rows. On clean
+content it also counts the texture of the smoothest areas: the painted landscape reads 1.98, the
+dark cockpit 2.40. The first film's clips read 1.34 (face), 1.90 (dark), 2.18 (street) and 3.36
+(motion).
+
+| Clip | Frames | GT | PSNR-Y | SSIM-Y | LPIPS | DISTS | VMAF | ΔE00 lf | T-err lf | T-err | CAMBI added | Grain |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| digital-sunrise | 45 | 3840×2016 | 45.53 | 0.979 | 0.111 | 0.156 | 68.6 | 0.518 | 0.310 | 1.36 | 1.65 | 0.79 |
+| digital-cockpit | 45 | 3840×2016 | 43.24 | 0.981 | 0.085 | 0.072 | 85.9 | 0.590 | 0.329 | 1.41 | 3.58 | 2.40 |
+| digital-space | 45 | 3840×2016 | 43.38 | 0.971 | 0.187 | 0.118 | 82.5 | 0.576 | 0.259 | 1.33 | 1.39 | 1.07 |
+| digital-jet | 29 | 3840×2016 | 47.43 | 0.988 | 0.103 | 0.132 | 85.8 | 0.602 | 0.367 | 1.07 | 4.61 | 0.55 |
+| digital-dogfight | 45 | 3840×2016 | 43.83 | 0.974 | 0.241 | 0.174 | 85.4 | 0.634 | 0.466 | 1.82 | 0.12 | 1.27 |
+| sollevante-painted | 45 | 3840×2160 | 37.21 | 0.953 | 0.132 | 0.109 | 82.5 | 0.714 | 0.525 | 2.91 | 0.48 | 1.98 |
+| sollevante-line | 45 | 3840×2160 | 40.77 | 0.968 | 0.140 | 0.162 | 83.8 | 0.617 | 0.496 | 2.01 | 1.11 | 0.83 |
+| sollevante-action | 45 | 3840×2160 | 41.42 | 0.975 | 0.138 | 0.132 | 88.3 | 0.521 | 0.540 | 1.95 | 0.04 | 0.84 |
+| sollevante-dark | 41 | 3840×2160 | 43.36 | 0.987 | 0.070 | 0.103 | 84.5 | 0.513 | 0.351 | 0.94 | 2.23 | 1.10 |
+| cel4k-detail | 45 | 3840×2048 | 41.56 | 0.978 | 0.079 | 0.041 | 87.3 | 0.955 | 0.486 | 1.27 | 0.00 | 1.71 |
+| cel4k-motion | 45 | 3840×2048 | 40.99 | 0.977 | 0.063 | 0.040 | 98.3 | 0.794 | 0.674 | 2.37 | 0.00 | 2.94 |
+| cel4k-night | 45 | 3840×2048 | 45.37 | 0.982 | 0.111 | 0.086 | 82.7 | 0.812 | 0.482 | 1.49 | 0.01 | 1.55 |
+| cel4k-flat | 45 | 3840×2048 | 42.34 | 0.986 | 0.057 | 0.038 | 85.4 | 0.666 | 0.414 | 1.22 | 0.05 | 0.68 |
+
+- The input is 8-bit (x264 4:2:0, as d1 everywhere), so bicubic brings banding into the clean
+  sources' smooth dark gradients (CAMBI added 1.4–4.6 on four of the digital shots and 2.2 on
+  `sollevante-dark`). On the first film's crops the uncorrected model added almost none
+  (0.000–0.009, where bicubic added 0.005–0.117).
+- The 4K scan's flat cel colour carries little grain at this scale (0.68 on `cel4k-flat`), less
+  than the same film's 1080p Blu-ray surveyed (1.91, over its whole length).
+
 ### Ground truth, inputs and runs
 
 - **Ground truth (GT):** the source frames as decoded, converted to 16-bit RGB (zscale, BT.709
@@ -183,8 +255,10 @@ identical frame for frame without them (checked at 1080p and 4K). Scoring one 4K
 
 `fr_metrics.py` scores each output against the GT, frame by frame (per transition for the
 temporal errors): PSNR-Y and SSIM-Y (BT.709 luma, 8-bit scale), LPIPS (AlexNet) and DISTS at full
-resolution, VMAF v1 as `sptenc vmaf` measures it (its model for the GT's height: the 1080p
-display's, the 2160p display's from 2160 rows up; CAMBI clipped; NEG built into v1), ΔE00
+resolution, VMAF v1 as `sptenc vmaf` measures it (CAMBI clipped, NEG built into v1), with the
+2160p display's model from 2160 rows up, as sptenc picks it, and from 3840 columns up whatever the
+rows (a 4K picture cropped inside its bars carries 4K detail; sptenc looks at the height alone),
+the 1080p display's below (until 2026-10-06 by the height alone: see the 4K sections), ΔE00
 after a 4 px Gaussian blur (low-frequency colour and brightness), the temporal error |Δout − ΔGT|
 between consecutive frames (and on 16×16 block means: low-frequency flicker), and PSNR-Y of the
 bottom 16 rows and of the rest. A variant's figure is its paired difference to the default at
@@ -609,16 +683,21 @@ Seed 42 for both, seed 43 of the default for the band; 7B fp16, `--color_correct
 encode untiled, decode tiled 2048 with an overlap of 128 (untiled would need about 128 GiB);
 5–6 minutes per run. The default lands at PSNR-Y 26.5–32.6 dB (bicubic 35.4–40.9).
 
-The band between the default's two seeds is small: PSNR-Y 0.01–0.12 dB, VMAF 0.06–1.09, ΔE00 lf
+The band between the default's two seeds is small: PSNR-Y 0.01–0.12 dB, VMAF 0.07–1.15, ΔE00 lf
 0.007–0.036, LPIPS 0.0005–0.0032. `reflect>=8+black+16` − default, paired by frame (95% interval,
 block bootstrap; B / W beyond the band):
 
 | Clip | Rest of the frame | Bottom 16 rows | VMAF | LPIPS | ΔE00 lf | Temporal error lf |
 |---|---|---|---|---|---|---|
-| ouatia-face | −0.94 (W) | +4.80 (B) | +1.80 (B) | +0.0037 (W) | +0.225 (W) | −0.003 |
-| ouatia-dark | −0.18 | +1.88 (B) | −1.07 | −0.0042 (B) | +0.045 | +0.075 (W) |
-| ouatia-street | −0.38 (W) | +1.98 (B) | −1.34 | −0.0082 (B) | +0.287 (W) | −0.019 |
-| ouatia-motion | +0.05 | +2.39 (B) | +2.17 (B) | −0.0056 (B) | +0.071 (W) | +0.117 (W) |
+| ouatia-face | −0.94 (W) | +4.80 (B) | +1.93 (B) | +0.0037 (W) | +0.225 (W) | −0.003 |
+| ouatia-dark | −0.18 | +1.88 (B) | −1.12 | −0.0042 (B) | +0.045 | +0.075 (W) |
+| ouatia-street | −0.38 (W) | +1.98 (B) | −1.43 | −0.0082 (B) | +0.287 (W) | −0.019 |
+| ouatia-motion | +0.05 | +2.39 (B) | +2.29 (B) | −0.0056 (B) | +0.071 (W) | +0.117 (W) |
+
+VMAF here is the 2160p display's model, as for every picture 3840 columns wide since 2026-10-06.
+These 2048-row crops were first scored with the 1080p model, by the height alone: the model's
+outputs scored 3.5–4 points higher with it and bicubic up to 1.2, while every other metric, and
+every verdict, comes out the same with either model.
 
 - **The band repair carries over:** the bottom 16 rows gain 1.9–4.8 dB on all 4 clips.
 - **720p's frame-wide gain doesn't:** the rest of the frame is worse on 2 clips (−0.94 and
@@ -628,8 +707,8 @@ block bootstrap; B / W beyond the band):
   DiT's windows: at 4K, where two seeds differ by 0.01–0.12 dB, that alone may move the
   rendering more than a seed does (not separated here).
 - **At 4K the model is far from the ground truth, perceptually too,** without colour correction
-  and with decode tiles: PSNR-Y 26.5–32.6 dB against bicubic's 35.4–40.9, VMAF 38–48 against
-  75–86, DISTS 0.14–0.22 against 0.08–0.16 (worse on all 4), LPIPS worse on 3 of 4 (better on
+  and with decode tiles: PSNR-Y 26.5–32.6 dB against bicubic's 35.4–40.9, VMAF 34–44 against
+  74–86, DISTS 0.14–0.22 against 0.08–0.16 (worse on all 4), LPIPS worse on 3 of 4 (better on
   the close-up), ΔE00 lf 2.1–3.9 against 0.6–0.8, and low-frequency flicker on the dark and fast
   clips (temporal error lf 3.2 and 9.2 against 0.5). At 1080p, LPIPS and DISTS favoured the model
   on live action. Every output lines up with the GT frame for frame (best offset 0 on every

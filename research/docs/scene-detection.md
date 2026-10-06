@@ -573,6 +573,41 @@ list for fast action anime ([pooled estimates](#rounds-1-and-2-pooled)).
     low-contrast cuts: not recommended; the blind spot is 14% (5–35%) of scdet's lone hits in
     bursts, about 60–70 cuts per hour of action anime, not worth scdet's bursts back.
 
+## Native 4K animation: cuts inside fast camera motion
+
+2026-10-06, while choosing 4K full-reference clips ([numerics.md](numerics.md#clips)) from *Sol
+Levante* (Netflix / Production I.G, CC BY 4.0), a short made natively in 4K: its SDR master,
+6,314 frames at 24 fps, run whole through scdet and TransNetV2. TransNetV2 makes 61 detections at
+0.3, 100 at 0.1.
+
+A fast camera flight (frames 1619–1711) looked like one take to every detector. The user, checking
+it in a player, found two real cuts, which frame strips then placed at frames 1639 and 1661. Between
+them is a 22-frame shot of a bird flying. Later in the same flight, frames 1686–1692 are one shot:
+the bird changes shape as it flies off into the distance, the user confirmed on the extracted
+frames.
+
+| Frames | What | TransNetV2 (single, peak) | scdet score |
+|---|---|---|---|
+| 1639 | real cut | 0.207 | 1.8 |
+| 1661 | real cut | 0.155 | 1.3 |
+| 1658, 1664 | no cut | 0.161, 0.142 | 0.8, 4.6 |
+| 1691 | no cut (one shot) | 0.232 | 0.0–0.9 |
+
+The whole frame moves fast here: the mean absolute difference between consecutive frames is 13–16
+on every frame, so a cut between two similar-coloured moving shots is no larger a step than the
+motion itself. In this flight no threshold separates the real cuts from the rest:
+
+| Threshold | Real cuts caught | False cuts |
+|---|---|---|
+| 0.3 (the default) | 0 of 2 | 0 |
+| 0.2 | 1 of 2 | 1 |
+| 0.15 | 2 of 2 | 2 |
+
+This adds native 4K animation's fast camera work to the blind spot above. The user proposed letting
+the threshold be set at the plan stage: a user who sees cuts missing lowers it and checks the cut
+list again before the upscale. Listing the near-misses (0.1–0.3) beside the cuts would make that
+check quick: 39 of them on this film.
+
 ## Caveats
 
 - **Labels on 130 rows.** The statistics count detections; only the estimates rest on labels,

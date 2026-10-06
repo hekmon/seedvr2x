@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-05 21:42 CEST
+Last update: 2026-10-06 09:40 CEST
 
 ## 0. Setup
 
@@ -118,6 +118,19 @@ temporal regression.
       clips, within the seed band on 2; low-frequency colour slightly worse on 3, LPIPS better on
       3, VMAF better on 2). Also seen: at 4K the model is further from the ground truth than
       bicubic on every metric, DISTS included, without colour correction
+- [x] VMAF's 2160p model for every picture 3840 columns wide (2026-10-06, the user's rule):
+      sptenc picks its model by the height alone, which gave 4K pictures cropped inside their bars
+      the 1080p model. The padding check's crops are rescored: the model's VMAF is 3.5–4 points
+      lower (34–44 against bicubic's 74–86), every other metric and every verdict the same
+- [x] More 4K clips (2026-10-06, CPU): 13 shots from three more sources, so that the 4K verdict
+      can be read by grain and by kind. Five come from clean digital live action (IMAX scenes,
+      cropped inside the picture to 3840×2016). Four come from *Sol Levante*, clean animation
+      made natively in 4K (its SDR ProRes master, CC BY 4.0). Four come from a 4K scan of a
+      grainy cel-animated film (cropped to 3840×2048). Each is frame-exact and cut-free, with
+      its bicubic baseline (PSNR-Y 37.2–47.4 dB). New `fr_clips.py make --src-crop`
+- [~] 4K output with colour correction against bicubic (2026-10-06, CPU): colour's default 4K
+      runs on the first film (none, lab, its split:ycc:4:3; 2 seeds), scored on the picture's
+      rows and paired with bicubic
 - [x] Every fourth frame is the model's best: the last frame of each 4-frame latent group is
       PSNR-Y +0.8 to +5.0 dB and VMAF +2 to +19 closer to the ground truth than the group's
       second, on every clip, with or without `lab`; the input has no such pattern. Fast motion
@@ -213,6 +226,10 @@ temporal regression.
       action anime. Addendum to the brief written
 - [x] Doc + decision brief ([docs/scene-detection.md](docs/scene-detection.md), 2026-10-05):
       TransNetV2 at p = 0.3, no burst handling, no minimum shot length
+- [x] Native 4K animation (2026-10-06, *Sol Levante*): inside a fast camera flight, two real cuts
+      that every detector missed. The user found them; TransNetV2 scored 0.21 and 0.16, scdet 1.8
+      and 1.3. A one-shot stretch in the same flight scored higher (0.23), so no threshold
+      separates them there. The user proposes setting the threshold at the plan stage
 
 ## 4. Frame-exact access into long-GOP sources (CPU only)
 

@@ -5,6 +5,7 @@
   fr_clips.py scores SRC --first A --last B [--json F]                    # frame-exact scene scores
   fr_clips.py make SRC --start S --frames N --name NAME --out DIR [--degrade d1,d2] [--crop]
                    [--tonemap mobius|hable]                              # HDR10 sources: SDR tone map
+                   [--src-crop W:H:X:Y]                                  # the picture alone (bars out)
   fr_clips.py slice DIR/NAME --first A --frames N --name NEW [--out DIR2] [--files gt,d1.lr]
   fr_clips.py verify DIR/NAME [--cv2-python PY] [--source]                # bit- and frame-exactness
   fr_clips.py sheet VIDEO --frames 0,22,44 --out PNG [--width 640] [--tonemap mobius]  # contact sheet
@@ -51,6 +52,14 @@ Files written by `make` (DIR/NAME.*):
                    every file (frames, size, md5), every command, and the checks of `verify`
 Every file is all-intra FFV1 but the x264 one, starts at timestamp 0 at the source's exact frame
 rate, and holds exactly N frames (checked).
+
+--src-crop W:H:X:Y crops the source's frames in the extraction, before anything else: the picture
+alone, without a film's letterbox (or a variable aspect ratio's bars), so that no bar enters the
+degradation, the model's input or the scores. src.mkv (and hdr.mkv) hold the W x H window at X, Y
+of the source's frames, and every file is W x H (the inputs W/2 x H/2). All four values even (4:2:0
+chroma); H a multiple of 32 keeps the input a multiple of 16 rows, which the CLI then pads with
+nothing. The manifest keeps the window, `verify --source` crops the source the same way before
+hashing it, and `slice` passes it on.
 
 HDR sources (`make --tonemap mobius`): seedvr2x takes SDR only, so the ground truth of an HDR10 (PQ)
 source is an SDR rendition made by one fixed tone map. `make` refuses a PQ or HLG source without
@@ -109,11 +118,12 @@ scores: ffmpeg's scdet, as sptenc runs it (on the decoded source format; score
 `verify` checks (a) that cv2.VideoCapture, run by the given Python (the SeedVR2 venv's: cv2 only,
 no torch), reads every *.lr.mkv bit-exactly as ffmpeg decodes it (decoded as stored, repacked by
 numpy: no swscale on our side), (b) with --source, that frames S..S+N-1 of the source (frame hashes
-of a plain decode, frames counted by the muxer, no filter; murmur3, as md5 cannot keep up with a 4K
-decode) are src.mkv's frames (hdr.mkv's with --tonemap), (c) the frame count of every file, and
+of a plain decode, frames counted by the muxer, no filter but the clip's --src-crop; murmur3, as md5
+cannot keep up with a 4K decode) are src.mkv's frames (hdr.mkv's with --tonemap), (c) the frame
+count of every file, and
 (d) with --tonemap, the tone map (above). `selftest` checks the colour chain against the BT.709
-equations, the FFV1 round trips, the extraction and a slice on a synthetic long-GOP H.264 file, and
-the tone map on patches and on a synthetic HEVC PQ file.
+equations, the FFV1 round trips, the extraction, a slice and a --src-crop clip on a synthetic
+long-GOP H.264 file, and the tone map on patches and on a synthetic HEVC PQ file.
 
 `grain` measures film grain (docs/numerics.md, Grain): Y = the BT.709 luma of the RGB in full-range
 8-bit levels (a YUV file goes through its colour plan's zscale to 16-bit RGB first; frames taller
@@ -530,12 +540,32 @@ def manifest_path(out, name):
     return os.path.join(out, f"{name}.json")
 
 
+def parse_src_crop(spec, st):
+    """--src-crop W:H:X:Y as [W, H, X, Y], checked against the source's frame (None without it)."""
+    if not spec:
+        return None
+    try:
+        w, h, x, y = (int(v) for v in spec.split(":"))
+    except ValueError:
+        raise SystemExit(f"--src-crop {spec}: W:H:X:Y expected") from None
+    if min(w, h) <= 0 or min(x, y) < 0 or x + w > st["width"] or y + h > st["height"]:
+        raise SystemExit(f"--src-crop {spec}: not inside the source's {st['width']}x{st['height']} frame")
+    if any(v % 2 for v in (w, h, x, y)):
+        raise SystemExit(f"--src-crop {spec}: every value must be even (4:2:0 chroma)")
+    return [w, h, x, y]
+
+
+def crop_filter(crop):
+    return f"crop={crop[0]}:{crop[1]}:{crop[2]}:{crop[3]}" if crop else None
+
+
 def cmd_make(a):
     src, S, N, name, out, T = os.path.abspath(a.src), a.start, a.frames, a.name, a.out, a.threads
     os.makedirs(out, exist_ok=True)
     st = probe(src)
     if st["pix_fmt"] in RGB_BITS or not st["pix_fmt"].startswith(("yuv", "yuvj")):
         raise SystemExit(f"{src}: {st['pix_fmt']}, a planar YUV source is expected")
+    crop = parse_src_crop(a.src_crop, st)
     cs = colour_plan(st)  # the source's colours; c: src.mkv's, what every file below is made from
     if a.tonemap:
         check_tonemap(src, cs)
@@ -551,12 +581,15 @@ def cmd_make(a):
     if os.path.exists(mpath):
         with open(mpath, encoding="utf-8") as f:
             man = json.load(f)
-    same_frames = man.get("source") == src and man.get("start") == S and man.get("frames") == N
+    same_frames = (man.get("source") == src and man.get("start") == S and man.get("frames") == N
+                   and man.get("src_crop") == crop)
     same = same_frames and (man.get("tonemap") or {}).get("operator") == a.tonemap
     if not same or a.force:
         old = man
         man = {"name": name, "source": src, "start": S, "frames": N, "fps": str(fps), "source_stream": st,
                "colours": c, "ffmpeg": ffmpeg_version(), "files": {}, "commands": []}
+        if crop:
+            man["src_crop"] = crop
         if a.tonemap:
             man["tonemap"] = {"operator": a.tonemap, "param": TONEMAPS[a.tonemap],
                               "param_note": "ffmpeg's default for the operator, written out" if TONEMAPS[a.tonemap]
@@ -585,8 +618,9 @@ def cmd_make(a):
             lead, end = S - a0, S + N
             with tempfile.TemporaryDirectory() as d:
                 meta = os.path.join(d, "scd.txt")
+                cf = f"{crop_filter(crop)}," if crop else ""
                 fc = (f"[0:v:0]select='between(n,{a0},{end})',split=2[c][s];"
-                      f"[c]select='between(n,{lead},{lead + N - 1})',setpts=N/FRAME_RATE/TB,{yuv_params(cs)}[clip];"
+                      f"[c]select='between(n,{lead},{lead + N - 1})',setpts=N/FRAME_RATE/TB,{cf}{yuv_params(cs)}[clip];"
                       f"[s]scdet=t=10,metadata=mode=print:file={meta}[sc]")
                 run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-threads", str(T),
                      *concat_opts(src), "-i", src, "-filter_complex", fc,
@@ -623,7 +657,7 @@ def cmd_make(a):
     elif "bar_rows" not in man.get("stats", {}):  # a clip made before the 0 / 255 shares: add them
         man["stats"] = clip_stats(p("gt.mkv"))
 
-    W, H = st["width"], st["height"]
+    W, H = (crop[0], crop[1]) if crop else (st["width"], st["height"])
     w, h = W // 2, H // 2
     H16, W16 = H // 16 * 16, W // 16 * 16
     top, left = (H - H16) // 2, (W - W16) // 2
@@ -682,7 +716,8 @@ def cmd_make(a):
         json.dump(man, f, indent=1)
     s = man.get("stats", {})
     sc = man.get("scdet", {})
-    print(f"{name}: frames {S}..{S + N - 1} of {src} ({man.get('pts_time_first')} s), {N} frames at {fps}")
+    print(f"{name}: frames {S}..{S + N - 1} of {src} ({man.get('pts_time_first')} s), {N} frames at {fps}"
+          + (f", cropped to {crop[0]}x{crop[1]} at {crop[2]},{crop[3]}" if crop else ""))
     if a.tonemap:
         print(f"  tone map {a.tonemap}" + (f" (param {TONEMAPS[a.tonemap]})" if TONEMAPS[a.tonemap] is not None else "")
               + f", peak {TM_PEAK} = {TM_PEAK * 100} cd/m², of {cs['matrix']} {cs['range']} {cs['primaries']} "
@@ -753,6 +788,8 @@ def cmd_slice(a):
            "files": {}, "commands": [], "slice_check": {}}
     if pman.get("tonemap"):
         man["tonemap"] = pman["tonemap"]
+    if pman.get("src_crop"):
+        man["src_crop"] = pman["src_crop"]
     for key, suffix, info in jobs:
         src = info["path"]
         fmt = probe(src)["pix_fmt"]
@@ -834,11 +871,14 @@ def hash_lines(text):
     return [ln.split(",")[-1].strip() for ln in text.splitlines() if ln and not ln.startswith("#")]
 
 
-def framemd5(path, count=None, threads=16, algo="md5"):
+def framemd5(path, count=None, threads=16, algo="md5", vf=None):
     """Per-frame hashes of a plain decode (frames counted by the muxer): md5, or another of framehash's
-    algorithms (murmur3: md5 hashes about 1 GB/s, 42 4K 10-bit frames/s, below a 4K decode)."""
+    algorithms (murmur3: md5 hashes about 1 GB/s, 42 4K 10-bit frames/s, below a 4K decode); vf, a
+    filter applied first (a clip's --src-crop)."""
     cmd = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-threads", str(threads), *concat_opts(path),
            "-i", path, "-map", "0:v:0", "-fps_mode", "passthrough"]
+    if vf:
+        cmd += ["-vf", vf]
     if count:
         cmd += ["-frames:v", str(count)]
     cmd += ["-f", "framemd5", "-"] if algo == "md5" else ["-f", "framehash", "-hash", algo, "-"]
@@ -921,7 +961,7 @@ def cmd_verify(a):
         if not has(ref):
             raise SystemExit(f"{name} has no {ref}.mkv: --source can't check it")
         t0 = time.perf_counter()
-        src_h = framemd5(man["source"], S + N, algo="murmur3")
+        src_h = framemd5(man["source"], S + N, algo="murmur3", vf=crop_filter(man.get("src_crop")))
         clip_h = framemd5(os.path.join(out, f"{name}.{ref}.mkv"), algo="murmur3")
         pick = src_h[S:S + N]
         same = sum(x == y for x, y in zip(pick, clip_h))
@@ -1352,7 +1392,7 @@ def cmd_selftest(a):
         all_h = framemd5(syn)
         S, N = 133, 45
         sa = argparse.Namespace(src=syn, start=S, frames=N, name="syn", out=d, threads=4, degrade="d1", crop=True,
-                                force=False, tonemap=None)
+                                force=False, tonemap=None, src_crop=None)
         cmd_make(sa)
         clip_h = framemd5(os.path.join(d, "syn.src.mkv"))
         good = clip_h == all_h[S:S + N]
@@ -1370,6 +1410,21 @@ def cmd_selftest(a):
         ok &= good
         print(f"slice of frames {A}..{A + M - 1} of the clip ({', '.join(sm['slice_check'])}): "
               f"{'frame-exact, and src = source frames ' + str(S + A) + '..' + str(S + A + M - 1) if good else 'DIFFERS'}")
+        # 4b. --src-crop: the window of the source's frames, every file at its size, verify --source cropping alike
+        win = [160, 96, 32, 42]
+        cmd_make(argparse.Namespace(src=syn, start=S, frames=9, name="syn-crop", out=d, threads=4, degrade="d1",
+                                    crop=False, force=False, tonemap=None, src_crop=":".join(map(str, win))))
+        vok = False
+        try:
+            cmd_verify(argparse.Namespace(clip=os.path.join(d, "syn-crop"), cv2_python=None, source=True))
+        except SystemExit as e:
+            vok = e.code == 0
+        sizes = {k: (probe(os.path.join(d, f"syn-crop.{k}.mkv"))["width"], probe(os.path.join(d, f"syn-crop.{k}.mkv"))["height"])
+                 for k in ("src", "gt", "d1.lr", "d1.bicubic")}
+        good = (vok and framemd5(os.path.join(d, "syn-crop.src.mkv")) == framemd5(syn, S + 9, vf=crop_filter(win))[S:]
+                and sizes == {"src": (160, 96), "gt": (160, 96), "d1.lr": (80, 48), "d1.bicubic": (160, 96)})
+        ok &= good
+        print(f"make --src-crop {':'.join(map(str, win))}: {'the source window, every file at its size, verify --source OK' if good else f'DIFFERS {sizes}'}")
         # 5. the tone map against the equations: flat patches of known BT.2020 PQ YUV (10-bit 4:2:0, limited),
         #    made from linear BT.709 colours (black, greys from 0.5 to 950 cd/m², skin, random), read at centres
         lin = np.concatenate([[[0, 0, 0], [0.005] * 3, [0.05] * 3, [0.18] * 3, [1] * 3, [2.5] * 3, [6] * 3, [9.5] * 3,
@@ -1424,7 +1479,7 @@ def cmd_selftest(a):
         for src_, tm_ in ((pq, None), (syn, "hable")):  # a PQ source without --tonemap, an SDR one with it
             try:
                 cmd_make(argparse.Namespace(src=src_, start=0, frames=3, name="refused", out=d, threads=4, degrade="",
-                                            crop=False, force=True, tonemap=tm_))
+                                            crop=False, force=True, tonemap=tm_, src_crop=None))
                 refused.append(False)
             except SystemExit as e:
                 refused.append("--tonemap" in str(e.code))
@@ -1434,7 +1489,7 @@ def cmd_selftest(a):
         pall = framemd5(pq)
         for op in TONEMAPS:  # the second operator re-uses the first one's hdr.mkv
             cmd_make(argparse.Namespace(src=pq, start=S, frames=N, name="pq", out=d, threads=4, degrade="d1", crop=False,
-                                        force=False, tonemap=op))
+                                        force=False, tonemap=op, src_crop=None))
             vok = False
             try:
                 cmd_verify(argparse.Namespace(clip=os.path.join(d, "pq"), cv2_python=None, source=True))
@@ -1502,6 +1557,8 @@ def main():
     s.add_argument("--out", required=True, help="output directory")
     s.add_argument("--degrade", default="d1", help="comma list: d1 (Mitchell, CRF 20), d2 (area, CRF 26)")
     s.add_argument("--crop", action="store_true", help="also the multiple-of-16 crop control")
+    s.add_argument("--src-crop", metavar="W:H:X:Y",
+                   help="crop the source's frames first: the picture alone, without bars (even values)")
     s.add_argument("--tonemap", choices=list(TONEMAPS),
                    help="a PQ source (required): src.mkv = the frames' SDR tone map by this operator (mobius: the clips')")
     s.add_argument("--force", action="store_true", help="redo what the manifest says is done")

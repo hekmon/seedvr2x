@@ -40,6 +40,7 @@ code, not reproduced. Severity, from worst: crash, wrong output, memory, perform
 | [23](23-help-text-errors.md) | Help text and log messages that don't match the code | UX-doc | from code | `--output` default, `None` choice, 4n+1, cache "requires", misleading logs |
 | [24](24-rope-wrapper-late-binding.md) | RoPE wrapper: every block uses the last block's table | wrong output (7B fp8 file; latent with the others) | confirmed on CPU (numz's classes, the files' tables) | Late-binding closure; the 7B fp8 file's blocks 0–34 run on block 35's fp16 table, not their own fp8-rounded one; harmless with equal tables (the other files checked); bypasses the 7B's RoPE cache |
 | [25](25-naditupscaler-undefined-attention-mode.md) | `NaDiTUpscaler` uses an undefined `attention_mode` | crash (latent) | confirmed on CPU (numz's classes) | `NameError` if built; nothing builds it, and the registry ignores the class name |
+| [26](26-output-directory-with-a-dot.md) | `--output` naming a directory with a dot is taken for a file | crash (at save) | met in a run; path confirmed in the code, both writers checked on CPU | The directory test is "no suffix" (`clip-x1.5/` has one); the video writer fails at the first save, after the processing |
 
 ## Found in other projects
 
