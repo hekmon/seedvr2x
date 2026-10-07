@@ -282,13 +282,18 @@ they differ and by which metrics, and how users are guided to them. What is know
   in the 7B's, is rounded to `e4m3fn` (3 mantissa bits), with no scale, down to the biases,
   norms, modulation tables, input and output layers and RoPE's frequencies. The 7B's file is
   ByteDance's fp32 master cast straight to `e4m3fn`, bit for bit, not numz's fp16 file cast
-  again, which would differ on 0.28% of the values. The 3B's is probably cast the same way; its
-  master isn't on the GPU box to prove it. The Q4_K_M file quantises only the 288 attention and
-  MLP matrices of the blocks, 8 per block, 99% of the weights, with a scale every 32 weights.
-  Its other 840 tensors, the 6 matrices outside the blocks included, are the fp16 file's byte
-  for byte ([models.md](../research/docs/models.md)): the likely reason it measures closer to
-  the source than fp8. One of those 6, `emb_in.proj_out` (56.6M values), is larger than any
-  matrix it quantises.
+  again, which would differ on 0.28% of the values. The 3B's is cast the same way, from
+  ByteDance's first 3B weights: ByteDance replaced the 3B's master on 2025-06-22, and numz's 3B
+  files, fp16 included, are the earlier one's (635 of 635 tensors). Every 3B figure in
+  models.md ran those first weights ([FORMATS.md](../models/FORMATS.md)). The Q4_K_M file
+  quantises only the 288 attention and MLP matrices of the blocks, 8 per block, 99% of the
+  weights, with a scale every 32 weights. Its other 840 tensors, the 6 matrices outside the
+  blocks included, are the fp16 file's byte for byte
+  ([models.md](../research/docs/models.md)). That is why it measures closer to the source than
+  fp8: a cast without a scale puts a median 36% of a matrix's weights in E4M3's subnormal range,
+  all of the timestep embedding's (15.5% error per weight) and 70–100% of the last blocks' text
+  matrices' (up to 16.7%), where one scale per tensor gives 2.65%. One of those 6,
+  `emb_in.proj_out` (56.6M values), is larger than any matrix it quantises.
 - **RoPE's frequencies are constants of the architecture,** never trained, yet the fp8 files
   hold them rounded: up to 6% off in the 7B's blocks 0–34, and in the 3B's, the 5 lowest of 21
   at zero and others up to 41% off. numz runs the 7B's file on block 35's fp16 values in every
@@ -330,19 +335,28 @@ they differ and by which metrics, and how users are guided to them. What is know
   on the CPU (the user's request, 2026-10-06), validated by GPU runs before implementation's
   next steps, and uploaded with v1's files only if within the 7B fp16's seed spread on every
   kind of source, the user's eyes agreeing:
+  - Made, for the 7B and the sharp 7B, reproducible byte for byte, the 840 tensors outside the
+    288 block matrices our fp16 file's ([FORMATS.md](../models/FORMATS.md); error per weight,
+    median and worst):
   - fp8: the 288 block matrices in `e4m3fn` with one float32 scale per tensor (max |W| / 448),
-    in comfy-kitchen's layout (weight and weight scale). The activations get their scale at run
-    time: multiplied in fp8 (W8A8) from the RTX 40 generation on, widened to 16 bits (W8A16)
-    before it.
+    in comfy-kitchen's layout (weight and weight scale): 2.65% (2.67%); a scale per row gains
+    nothing (2.64%). The activations get their scale at run time: multiplied in fp8 (W8A8) from
+    the RTX 40 generation on, widened to 16 bits (W8A16) before it.
   - GGUF, made by ggml's own quantize function (llama.cpp's, MIT) and written by gguf-py in
-    city96's conventions, which numz's loader reads: first static files, Q4_K on the 288 block
-    matrices (numz's Q4_K_M layout, for a comparison one to one) and Q8_0, everything else in
-    16 bits; then a dynamic one, each tensor's type chosen from a sensitivity scan on the GPU
-    (as Unsloth's method chooses from a calibration set), kept only if it beats the static ones.
-  - NVFP4 for Blackwell: 4-bit weights and activations, a scale every 16 values. Its activations
-    are the risk; its form is settled with the user before it is made.
-  - INT8 W8A8 with a rotation: the fast path on the RTX 20 and 30 generations, where fp8 can't
-    multiply.
+    city96's conventions, which numz's loader reads: Q4_K on the 288 block matrices (numz's
+    Q4_K_M layout, 7.35% for both) and Q8_0 (0.56%), everything else in 16 bits. numz decodes
+    them in float16, which rounds Q4_K's values twice: seedvr2x decodes in float32. Then a
+    dynamic file, each tensor's type chosen from a sensitivity scan on the GPU (as Unsloth's
+    method chooses from a calibration set), kept only if it beats the static ones.
+  - NVFP4 for Blackwell, 4-bit weights and activations, in comfy-kitchen's layout (a scale
+    every 16 values), each block's scale chosen among 8 to minimise its error: 8.80% (8.94%),
+    against 9.45% with comfy-kitchen's own scales, lower on every matrix. At 4 bits, Q4_K stays
+    closer per weight: NVFP4's case is its 4-bit multiply on Blackwell, its 4-bit activations
+    the risk.
+  - INT8 W8A8 with comfy-kitchen's rotation, the fast path on the RTX 20 and 30 generations,
+    where fp8 can't multiply: each 256 input columns of a matrix rotated by a Hadamard matrix,
+    its own inverse, one int8 scale per row; at run time comfy-kitchen rotates and quantizes
+    each input the same way. 0.86% (1.08%), against 1.01% unrotated.
   - The weights need no data: their scales come from their own values. Activations quantized
     to 4 bits are where quality can go, and on video DiTs mostly because their ranges drift
     across the denoising steps; SeedVR2 runs a single step. Should a calibration set be needed,
@@ -392,7 +406,8 @@ they differ and by which metrics, and how users are guided to them. What is know
     are the masters rounded to the nearest fp16, ties to even: every element of 1,128, 1,128
     and 250 tensors, under the same names, the data sections byte for byte ours (the files
     differ in their headers' metadata alone). Truncation would differ on half the elements, a
-    cast through bf16 on 87%. The 3B wasn't checked: its master isn't on the GPU box.
+    cast through bf16 on 87%. numz's 3B fp16 is ByteDance's first 3B master rounded the same
+    way.
 - **The VAE stays in 16 bits.** Quantizing a model means one of two things, and neither suits
   the VAE:
   - The weights alone, stored in 8 or 4 bits and widened back for the arithmetic. The VAE's
@@ -426,11 +441,12 @@ they differ and by which metrics, and how users are guided to them. What is know
   alike (the user's requirement, 2026-10-06: "to help users choose in their right mind"):
   each file's size, how it multiplies on each GPU generation (W8A8, W8A16, W4A4, W4A16), where
   it is faster and what that buys (the DiT is about a fifth of a 1080p run), and its measured
-  quality against the 7B fp16's seed spread. Then the docs, per kind of source (anime, dark,
-  live action…), each figure read against the spread between seeds; `--plan` showing what each
-  model gets on the user's own card (window length, BlockSwap, tiles, time); whether the
-  planner may pick a smaller file when the user allows it; and whether the sharp 7B becomes the
-  default.
+  quality against the 7B fp16's seed spread. A second table sets other repositories' files
+  (numz's, Comfy-Org's) against ours, measured the same way. Then the docs, per kind of source
+  (anime, dark, live action…), each figure read against the spread between seeds; `--plan`
+  showing what each model gets on the user's own card (window length, BlockSwap, tiles, time);
+  whether the planner may pick a smaller file when the user allows it; and whether the sharp 7B
+  becomes the default.
 
 ## Input
 
