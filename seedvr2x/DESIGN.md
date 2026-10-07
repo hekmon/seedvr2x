@@ -248,10 +248,20 @@ connect through files.
   vendored: see [Colour correction](#colour-correction).
 
 ### Weights
-v1 runs the reference model, the one milestone 1 is checked with: numz's 7B fp16 DiT
-(`seedvr2_ema_7b_fp16.safetensors`) and fp16 VAE (`ema_vae_fp16.safetensors`), Apache-2.0.
-ByteDance's sharp 7B, in numz's fp16 file, has the same architecture and format, so it runs
-too. Every other model is phase 2's (below).
+v1 runs ByteDance's sharp 7B by default, and the regular 7B, both DiTs in fp16 with the fp16
+VAE, Apache-2.0 (seedvr2x's own files: see the Hugging Face repo below). Every other model is
+phase 2's (below).
+- **The sharp 7B is the default, on the user's eyes** (2026-10-07): on 75 windows of 4K and
+  1080p crops they preferred it or saw no difference on 67 (it 27, the 7B 8), the grainy first
+  film's skin no longer "almost reptilian". At 4K it invents less of the fine texture the eyes
+  rejected with the 7B: 2.6–5.7 times the ground truth's fine detail per kind of source on 13
+  shots, against the 7B's 3.4–7.3, the same kind of texture, and on the first film 1.0 against
+  2.0. No guard gets worse: the same banding and colour after the split, fewer colour fringes
+  and less flicker. At ×2 to 1080p the metrics barely tell them apart
+  ([colour.md](../research/docs/colour.md#step-6-the-sharp-7b-for-the-eyes)). It has the 7B's
+  architecture, memory and time.
+- **The regular 7B stays the reference** milestone 1 is checked with: numz's 7B fp16 file, and
+  ours equal to it.
 - **Recognised by content.** A model file is checked by its own tensors, not by its name, which
   is what numz goes by (`src/core/model_configuration.py:717-719`). Anything but the 7B in fp16
   is refused, saying what the file is.
@@ -445,8 +455,7 @@ they differ and by which metrics, and how users are guided to them. What is know
   (numz's, Comfy-Org's) against ours, measured the same way. Then the docs, per kind of source
   (anime, dark, live action…), each figure read against the spread between seeds; `--plan`
   showing what each model gets on the user's own card (window length, BlockSwap, tiles, time);
-  whether the planner may pick a smaller file when the user allows it; and whether the sharp 7B
-  becomes the default.
+  and whether the planner may pick a smaller file when the user allows it.
 
 ## Input
 
@@ -1391,7 +1400,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--seed` | kept (comparisons, reproducibility) |
 | `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
 | `--resolution`, `--max_resolution` | kept |
-| `--dit_model`, `--model_dir` | kept; the files come from seedvr2x's own Hugging Face repo, pinned by revision and SHA-256, `--model_dir` holding a local copy; no silent deletion (bug 22) |
+| `--dit_model`, `--model_dir` | kept, the sharp 7B by default; the files come from seedvr2x's own Hugging Face repo, pinned by revision and SHA-256, `--model_dir` holding a local copy; no silent deletion (bug 22) |
 | `--cuda_device` | one device per process |
 
 ## Documentation for users
@@ -1495,6 +1504,15 @@ explanation.
   perceptual metrics side with it over a plain upscale, the pixel ones with the plain upscale.
   It redraws grain and detail of the right kind at the wrong place, and from a heavily degraded
   grainy source it gives back about half of the film's grain.
+- what the model does at 4K
+  ([colour.md](../research/docs/colour.md#step-5-4k-on-clean-and-grainy-sources-and-a-detail-strength),
+  step 6): ×2 from 1080p, it redraws rather than enlarges. Full-reference metrics, which reward
+  a copy of the source's own blur and grain, put it behind a plain upscale on every score but
+  banding, on clean sources as on grainy ones (17 shots, PSNR-Y 4–9 dB lower), while the eyes
+  prefer its redraw of lines and text. The regular 7B invents fine texture the eyes rejected
+  (skin "almost reptilian"); the sharp 7B, the default, invents less of it and keeps the
+  redraw. A more compressed input changes neither. Clouds and smooth gradients from compressed
+  sources can still show light artefacts.
 - lossless delivery: why there are no encoder options, and how `--segment-cmd` compresses with
   the user's own command
 - disk use: master sizes per hour, and the input copies during a run
@@ -1693,30 +1711,16 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
   Taking each frame from a run whose grid ends a group there would take 4 runs per shot, the
   grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Not
   measured (about 2 GPU h on the 8 clips).
-- **4K output's quality.** ×2 from 1080p, the 7B fp16's output is further from the ground
-  truth than bicubic on every full-reference metric but banding, on clean sources as on grainy
-  ones, whatever the colour correction. On 17 shots (clean digital live action, animation made
-  natively in 4K, a grainy cel scan, the grainy first film), `split` is worse on PSNR-Y and
-  VMAF on 17, LPIPS on 14 and DISTS on 13 (better on 3 of the 4 natively 4K animated shots
-  and on a smooth sky), and adds less banding than bicubic on 16
-  ([colour.md](../research/docs/colour.md#step-5-4k-on-clean-and-grainy-sources-and-a-detail-strength),
-  [numerics.md](../research/docs/numerics.md#4k-output-with-colour-correction-against-bicubic)).
-  - The model over-renders. It keeps 3.4–3.7 times the ground truth's fine detail (Laplacian
-    variance) on the clean sources and 7.3 on the grainy scan, where bicubic keeps 0.12–0.54,
-    and its two finest bands are mostly not the ground truth's (correlation 0.09–0.35 and
-    0.30–0.69 by kind of source, against 0.42–0.54 and 0.76–0.84 at 1080p on three of four
-    clips). ByteDance's readme warns of it: the models "tend to overly generate details on
-    inputs with very light degradations" (`readme.md:119`).
-  - The user's eyes split by content. The model's redraw wins on structure: cel lines,
-    stencilled text sharper and more legible than the ground truth, a blurred city made
-    readable. It loses on the texture it invents: skin "almost reptilian", clouds with bright
-    over-sharpened artefacts, painted texture.
-  - A detail strength, the corrected lightness blended with the input's (A · split + (1 − A) ·
-    input), is the full-reference metrics' best at A = 0.25 at 4K (LPIPS and DISTS better
-    than bicubic on 9 of 9 clean shots), but no default: to the eyes it washes lines out and
-    can mix two styles. Whether users get a scale ("detail recreation", the user's proposal),
-    and what it would move (a global blend, or a strength that keeps lines and tames invented
-    texture), waits for the sharp 7B.
-  - Next: ByteDance's sharp 7B, the same architecture and cost, never run at 4K, on live
-    action or for the eyes, at 4K and 1080p. Then what seedvr2x does at 4K, and which 7B is the
-    default, go to the user.
+- **The sharp 7B at other upscale factors.** It is the default on crops at ×2 (see
+  [Weights](#weights)). At ×1.5, ×3 and ×4 the metrics are mixed (×4: PSNR-Y −0.05 dB, DISTS
+  worse on 3 of 5 clips, one clip −3.5 dB) and no eyes have looked yet: crops from the colour
+  study's runs, on the CPU.
+- **A detail scale, not in v1.** The user proposed a "detail recreation" scale for the
+  over-rendering at 4K. With the sharp 7B the eyes' main complaint, invented skin texture, is
+  gone, and what remains goes both ways with the content: the 7B's sharper thin cel lines, the
+  sharp's fused gradient colours and its clouds from a compressed input. A global strength
+  would mend one case by harming another, and the global blend measured
+  (A · split + (1 − A) · input lightness) washes lines out to the eyes. Should users need one,
+  the candidate is a strength that keeps the model's lines and tames its isotropic invented
+  texture, measured on the colour study's runs
+  ([colour.md](../research/docs/colour.md#step-6-the-sharp-7b-for-the-eyes)).
