@@ -343,8 +343,8 @@ they differ and by which metrics, and how users are guided to them. What is know
 - **Files of our own,** made by `models/`'s scripts from the fp32 masters, the small tensors and
   RoPE's frequencies kept in 16 bits, as in the Q4_K_M file. They are prepared ahead of phase 2,
   on the CPU (the user's request, 2026-10-06), validated by GPU runs before implementation's
-  next steps, and uploaded with v1's files only if within the 7B fp16's seed spread on every
-  kind of source, the user's eyes agreeing:
+  next steps, and uploaded with v1's files, every format of both 7Bs, each with its measured
+  quality (the user's choice, 2026-10-07):
   - Made, for the 7B and the sharp 7B, reproducible byte for byte, the 840 tensors outside the
     288 block matrices our fp16 file's ([FORMATS.md](../models/FORMATS.md); error per weight,
     median and worst):
@@ -356,8 +356,11 @@ they differ and by which metrics, and how users are guided to them. What is know
     city96's conventions, which numz's loader reads: Q4_K on the 288 block matrices (numz's
     Q4_K_M layout, 7.35% for both) and Q8_0 (0.56%), everything else in 16 bits. numz decodes
     them in float16, which rounds Q4_K's values twice: seedvr2x decodes in float32. Then a
-    dynamic file, each tensor's type chosen from a sensitivity scan on the GPU (as Unsloth's
-    method chooses from a calibration set), kept only if it beats the static ones.
+    dynamic file within Q4_K's bytes: each matrix's type (Q3_K to Q8_0) chosen from an
+    importance matrix of each linear's inputs, collected on the GPU over 4 calibration clips
+    (as Unsloth's method chooses from a calibration set): mostly Q4_K, the attention's output
+    projections in Q5_K, a few in Q3_K, mostly in the text branch. Its importance files are
+    published with it, the only reproducible start of the file.
   - NVFP4 for Blackwell, 4-bit weights and activations, in comfy-kitchen's layout (a scale
     every 16 values), each block's scale chosen among 8 to minimise its error: 8.80% (8.94%),
     against 9.45% with comfy-kitchen's own scales, lower on every matrix. At 4 bits, Q4_K stays
@@ -374,6 +377,32 @@ they differ and by which metrics, and how users are guided to them. What is know
   - Kernels: comfy-kitchen (Comfy-Org, Apache-2.0) quantizes and multiplies FP8 (natively from
     sm_89), NVFP4 (Blackwell), MXFP8 (from sm_100) and INT8 W8A8 (from sm_75), its activations
     quantized on the fly, but converts no model. ComfyUI's own code is GPL-3.0, never copied.
+    - comfy-kitchen 0.2.37 indexes its fp8 and NVFP4 activation quantizers in 32 bits. From
+      2^32 values in one linear's input, the 7B's MLP output projection from 41 frames at
+      3840×2160, fp8 W8A8 turns the video to NaN and NVFP4 W4A4 quantizes wrong values without
+      a word; int8 indexes in 64 bits. seedvr2x quantizes such an input in row chunks at the
+      whole tensor's scale, bit-identical below the limit, until a fixed comfy-kitchen; the
+      report upstream is the user's ([VALIDATION.md](../models/VALIDATION.md)).
+    - Phase 2's runtime starts with INT8 W8A8: the closest 8-bit file after Q8_0, the fastest
+      8-bit multiply on GeForce cards from RTX 20, and comfy-kitchen's cheapest activation
+      quantizer, fused, per token.
+  - **Validated on the GPU** (numz with comfy-kitchen's layers for our safetensors files, its
+    own loader for the GGUF ones; [VALIDATION.md](../models/VALIDATION.md)), each file against
+    its own model's float16 output at the same seed, at 1080p on 8 clips and at 4K on 5–6
+    shots:
+    - Every 8-bit file (Q8_0, INT8, fp8 multiplied in 16 or 8 bits) is as close to its float16
+      model as another seed of it, or closer, for both 7Bs, at 1080p and 4K. At 1080p, two seeds
+      of the 7B fp16 are 40.6 dB apart; Q8_0 is 56.3 dB from it, INT8 53.8, fp8 50.6 in 16 bits
+      and 48.0 in 8.
+    - At 4 bits a file moves the output about as much as a seed does, each in its own way: the
+      7B's Q4_K is softer; the dynamic GGUF is the closest 4 GB file; NVFP4 multiplied in 4 bits
+      is clearly worse on DISTS. Every 4-bit file of the sharp 7B goes past the line somewhere
+      at 1080p.
+    - The user's eyes found nothing to report on the 7B's files at 1080p, Q4_K and NVFP4 W4A4
+      included; the 4 GB files and the sharp's are still to be seen.
+    - The card leads with a pick per memory tier: the sharp 7B in fp16, its INT8 file at 8 GB,
+      its dynamic GGUF at 4 GB (closer to its float16 than Q4_K on all 5 4K shots), the last
+      two once the eyes agree.
   - The gain is mostly memory. ComfyUI reports about 2× over fp8 or bf16 on Blackwell, but the
     DiT is about a fifth of a 1080p run here: a DiT twice as fast shortens a job by about 10%.
 - **One Hugging Face repo, seedvr2x's own, from v1 on**,
@@ -445,8 +474,14 @@ they differ and by which metrics, and how users are guided to them. What is know
   On the 96 GB card at 1080p, windows are already longer than most shots: the gain is on small
   and mid-sized cards, and at 4K.
 - **Checks:** a file kept from numz is bit-identical to numz on milestone 1's input, the 3B fp8
-  against numz patched to use the fp16 RoPE values; a file of our own is within the 7B fp16's
-  seed spread on every kind of source.
+  against numz patched to use the fp16 RoPE values. A file of our own is judged against its
+  float16 model's own seed spread on every kind of source, by the calibrated rule: a difference
+  counts when its 95% interval excludes 0 and it exceeds K times that spread, K = 2.7 with 3
+  seeds and 10.9 with 2, the multiple a further float16 seed exceeds 5% of the time. The plain
+  rule (K = 1) fails a further float16 seed on 94% of 8-clip runs. A file is read by its count
+  of cells past the line, its worst multiple, its distance and the pattern, and the user's eyes
+  have the last word. Where two seeds agree to the metric's resolution, the spread gets a
+  floor.
 - **Guiding users:** a table of the files, on the Hugging Face card and in seedvr2x's README
   alike (the user's requirement, 2026-10-06: "to help users choose in their right mind"):
   each file's size, how it multiplies on each GPU generation (W8A8, W8A16, W4A4, W4A16), where
