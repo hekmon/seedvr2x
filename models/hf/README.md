@@ -90,25 +90,6 @@ publish, each against ours.
 > 16–32 GB card, seedvr2x can process more frames at a time and move less of the model out to
 > system memory.
 
-**Other repositories' files, against ours**
-
-| File | Repository | Size (7B) | Error per weight: typical (worst layer) | Against ours |
-|---|---|---|---|---|
-| float32, the original | ByteDance-Seed/SeedVR2-7B | 33 GB | 0, the reference | the source of every file here; too big to run |
-| float16 (7B, sharp 7B, VAE) | numz/SeedVR2_comfyUI | 16.5 GB | 0.02% (0.02%) | **the same values**, checked element for element; only the header differs |
-| float16 | Comfy-Org/SeedVR2 | 16.5 GB | 0.02% (0.02%) | the same values (one layer checked), with two text embeddings added |
-| GGUF Q4_K_M | AInVFX/SeedVR2_comfyUI | 4.8 GB | 7.3% (7.9%) | **the same**: Q4_K on the same matrices, the same error |
-| fp8, without scale, the last block in float16 | AInVFX/SeedVR2_comfyUI (numz's 7B fp8) | 8.5 GB | 2.8% (11%) | further: no scale, and its biases, embeddings and output layer in fp8 too (up to 15%) |
-| fp8, without scale | Comfy-Org/SeedVR2 | 8.2 GB | 2.8% (17%) | further: every tensor in fp8, with no scale |
-| NVFP4 | Comfy-Org/SeedVR2 | 4.8 GB | 9.5% (10.1%) | further: each block's scale from its largest weight |
-| int8, rotated | Comfy-Org/SeedVR2 | 8.3 GB | 0.86% (1.08%) | the same method, comfy-kitchen's quantizer (one layer checked) |
-| MXFP8 | Comfy-Org/SeedVR2 | 8.6 GB | not measured | Blackwell only; not made here |
-| 3B (float16, fp8, GGUF) | numz/SeedVR2_comfyUI, AInVFX/SeedVR2_comfyUI | | | ByteDance's first 3B weights, which ByteDance replaced on 2025-06-22 (checked on the float16 and fp8 files) |
-
-"The same" means weights as close to ByteDance's as ours; the files' bytes still differ, by their
-header and by the precision they were made from. Where a dynamic GGUF (each layer's type chosen by how much
-the output suffers from it) beats the plain Q4_K in tests to come, it will be added here.
-
 How to read it:
 
 - **Error per weight:** how far each stored weight is from ByteDance's original, relative to
@@ -129,6 +110,25 @@ How to read it:
   runs. NVFP4 has a scale per 16 weights: comfy-kitchen sets each from its block's largest
   weight; here each is the one, of that scale and the 7 below it, that minimises its block's
   error, in the same layout, which comfy-kitchen runs as it is.
+
+**Other repositories' files, against ours**
+
+| File | Repository | Size (7B) | Error per weight: typical (worst layer) | Against ours |
+|---|---|---|---|---|
+| float32, the original | ByteDance-Seed/SeedVR2-7B | 33 GB | 0, the reference | the source of every file here; too big to run |
+| float16 (7B, sharp 7B, VAE) | numz/SeedVR2_comfyUI | 16.5 GB | 0.02% (0.02%) | **the same values**, checked element for element; only the header differs |
+| float16 | Comfy-Org/SeedVR2 | 16.5 GB | 0.02% (0.02%) | the same values (one layer checked), with two text embeddings added |
+| GGUF Q4_K_M | AInVFX/SeedVR2_comfyUI | 4.8 GB | 7.3% (7.9%) | **the same**: Q4_K on the same matrices, the same error |
+| fp8, without scale, the last block in float16 | AInVFX/SeedVR2_comfyUI (numz's 7B fp8) | 8.5 GB | 2.8% (11%) | further: no scale, and its biases, embeddings and output layer in fp8 too (up to 15%) |
+| fp8, without scale | Comfy-Org/SeedVR2 | 8.2 GB | 2.8% (17%) | further: every tensor in fp8, with no scale |
+| NVFP4 | Comfy-Org/SeedVR2 | 4.8 GB | 9.5% (10.1%) | further: each block's scale from its largest weight |
+| int8, rotated | Comfy-Org/SeedVR2 | 8.3 GB | 0.86% (1.08%) | the same method, comfy-kitchen's quantizer (one layer checked) |
+| MXFP8 | Comfy-Org/SeedVR2 | 8.6 GB | not measured | Blackwell only; not made here |
+| 3B (float16, fp8, GGUF) | numz/SeedVR2_comfyUI, AInVFX/SeedVR2_comfyUI | | | ByteDance's first 3B weights, which ByteDance replaced on 2025-06-22 (checked on the float16 and fp8 files) |
+
+"The same" means weights as close to ByteDance's as ours; the files' bytes still differ, by their
+header and by the precision they were made from. Where a dynamic GGUF (each layer's type chosen by how much
+the output suffers from it) beats the plain Q4_K in tests to come, it will be added here.
 
 ## TransNetV2
 
