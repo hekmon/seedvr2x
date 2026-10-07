@@ -23,13 +23,14 @@ the scripts again gives the same bytes (`SHA256SUMS`).
 
 | | File | Size | What you give up |
 |---|---|---|---|
-| **Recommended** | `seedvr2x_ema_7b_fp16.safetensors` (float16) | 16.5 GB | nothing: the reference |
-| 8 GB tier | `seedvr2x_ema_7b_int8_convrot.safetensors` (int8, rotated) | 8.3 GB | almost nothing: as close to the float16 model as another seed of it, or closer; faster on GeForce RTX 20 to 50 |
-| 4 GB tier | `seedvr2x_ema_7b_Q4_K.gguf` (GGUF Q4_K) | 4.8 GB | some fine detail on some sources; saves memory only, a little slower |
+| **Recommended** | `seedvr2x_ema_7b_sharp_fp16.safetensors` (float16) | 16.5 GB | nothing: the reference |
+| 8 GB tier | `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` (int8, rotated) | 8.3 GB | almost nothing: as close to the float16 model as another seed of it, or closer; faster on GeForce RTX 20 to 50 |
+| 4 GB tier | `seedvr2x_ema_7b_sharp_dyn.gguf` (GGUF, a type per matrix) | 4.8 GB | some fidelity: the closest 4 GB file to the float16 model at 1080p, closer than Q4_K at 4K too, yet further from it than another seed on some sources (at 1080p a cartoon's LPIPS and DISTS, live action's finest texture, an anime clip's flicker and colour; at 4K live action's finest texture); saves memory only, a little slower |
 
-Take float16 when your GPU has room for it, else the 8 GB file, else the 4 GB one. The sharp
-7B has the same three, with `_sharp` after `7b` in the name. The other formats, and how each was
-measured, are [further down](#every-format-in-detail).
+Take float16 when your GPU has room for it, else the 8 GB file, else the 4 GB one. These are the
+sharp 7B's, the model seedvr2x runs by default; ByteDance's regular 7B has the same files, named
+without `_sharp`. The other formats, and how each was measured, are
+[further down](#every-format-in-detail).
 
 | File | Bytes | SHA-256 | Made from | Change |
 |---|---|---|---|---|
@@ -66,19 +67,21 @@ ByteDance's masters are float32: 33 GB for a 7B DiT. The files here hold them in
 The 7B DiT, the model that does the upscaling (the VAE turns frames into its input and back),
 can be stored in several formats. A smaller file saves memory, sometimes time, and loses some
 precision. These tables measure that loss on the weights themselves, against ByteDance's
-originals: first the files of this repository, then the SeedVR2 files other repositories
-publish, each against ours.
+originals, and this repository's files on video too: first the files of this repository, then
+the SeedVR2 files other repositories publish, each against ours.
 
 **This repository's files**
 
-| Format | Size (7B) | Multiply speed, against float16 | Error per weight: typical (worst layer) | Here |
-|---|---|---|---|---|
-| **float16** | 16.5 GB | 1x on every GPU: the reference | 0.02% (0.02%) | **yes** |
-| fp8, with a scale per tensor | 8.3 GB | 2x on RTX 40 and 50 (up to 3x measured on RTX 50) and on workstation Ada and Blackwell cards; 1x before RTX 40: memory only | 2.6% (2.7%) | to come |
-| int8, rotated, with a scale per row | 8.3 GB | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% (1.08%) | to come |
-| GGUF Q8_0 | 8.8 GB | 1x: memory only | 0.6% (0.6%) | to come |
-| GGUF Q4_K | 4.8 GB | 1x: memory only, a little slower | 7.3% (7.9%) | to come |
-| NVFP4, with searched scales | 4.8 GB | 8x on RTX 50; 4x on workstation Blackwell cards (RTX PRO); 1x before Blackwell: memory only | 8.8% (8.9%) | to come |
+| Format | Size (7B) | Multiply speed, against float16 | Error per weight: typical (worst layer) | On video: the sharp 7B | On video: the 7B | Here |
+|---|---|---|---|---|---|---|
+| **float16** | 16.5 GB | 1x on every GPU: the reference | 0.02% (0.02%) | the reference | the reference | **yes** |
+| fp8, with a scale per tensor | 8.3 GB | 2x on RTX 40 and 50 (up to 3x measured on RTX 50) and on workstation Ada and Blackwell cards; 1x before RTX 40: memory only | 2.6% (2.7%) | as close as another seed or closer, multiplied in 8 or 16 bits | the same | yes |
+| int8, rotated, with a scale per row | 8.3 GB | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% (1.08%) | as close as another seed or closer | the same (one score on one clip just past the line) | yes |
+| GGUF Q8_0 | 8.8 GB | 1x: memory only | 0.6% (0.6%) | as close as another seed or closer: the closest of all | the same | yes |
+| GGUF Q4_K | 4.8 GB | 1x: memory only, a little slower | 7.3% (7.9%); weighted 7.15% (9.0%) | further than a seed on cartoon, live action and anime | as close as another seed, softer on some sources | yes |
+| GGUF Q4_K, with an importance matrix | 4.8 GB | 1x: memory only, a little slower | 7.55% (8.8%); weighted 6.64% (7.4%) | further than a seed on a cartoon's DISTS and live action's finest texture | further than a seed on a cartoon's DISTS and live action's fine detail | yes |
+| GGUF, a type per matrix (Q3_K to Q5_K), with an importance matrix | 4.8 GB | 1x: memory only, a little slower | 7.55% (18%); weighted 6.31% (12%) | further than a seed on cartoon, live action and an anime clip's flicker | the closest 4 GB file: further than a seed on a cartoon's DISTS only | yes |
+| NVFP4, with searched scales | 4.8 GB | 8x on RTX 50; 4x on workstation Blackwell cards (RTX PRO); 1x before Blackwell: memory only | 8.8% (8.9%) | multiplied in 4 bits: clearly worse on DISTS (cartoon, anime); in 16 bits: further than a seed on anime, cartoon and live action | in 4 bits: clearly worse on DISTS (cartoon, anime); in 16 bits: softer on live action | yes |
 
 > **Multiply speed is not job speed.**
 >
@@ -102,6 +105,16 @@ publish, each against ours.
 > 16–32 GB card, seedvr2x can process more frames at a time and move less of the model out to
 > system memory.
 
+> **At 4K, the fp8 file in W8A8 and the NVFP4 file in W4A4 need care with comfy-kitchen.**
+>
+> comfy-kitchen 0.2.37, ComfyUI's kernel library, rounds a layer's input wrongly once it holds
+> 2^32 values or more. With the fp8 file multiplied in 8 bits (W8A8), the video then comes out
+> all NaN; with NVFP4 multiplied in 4 bits (W4A4), silently wrong. In the 7B that is the MLP's
+> output projection, from about 350,000 video tokens in one pass: at 3840×2160, a batch of 41
+> frames or more. Until comfy-kitchen fixes it, keep such batches to 37 frames, or multiply in 16
+> bits (W8A16, W4A16). int8 and the GGUF files are not affected. seedvr2x's validation runs
+> quantize such inputs in row chunks at comfy-kitchen's own scale.
+
 How to read it:
 
 - **Error per weight:** how far each stored weight is from ByteDance's original, relative to
@@ -111,11 +124,25 @@ How to read it:
   of them fall into fp8's coarsest range. A scale per tensor lifts them out of it.
 - **Memory only:** the weights are stored small but widened to 16 bits for every
   multiplication. The file saves memory, not time.
+- **Weighted:** for the GGUF files, each weight's error weighted by how much the layer's input
+  uses its channel, measured on runs of the float16 model (an importance matrix, llama.cpp's
+  method): close to how much the layer's output moves. The files made with an importance matrix
+  trade error on rarely used inputs for less on the busy ones: their plain error is a little
+  higher than the plain Q4_K's, their weighted one lower.
 - **8-bit or 4-bit multiply:** the GPU multiplies in 8 or 4 bits, which is faster, but each
-  layer's input is rounded to 8 or 4 bits too: a second loss, which this table doesn't show.
-- **What you see** is measured separately, on videos, against how much two seeds of the float16
-  model differ. Each smaller file is published once it passes that test, its result added here.
-- Measured on the 7B (the sharp 7B's files are within 0.01%), against its float32 master: this
+  layer's input is rounded to 8 or 4 bits too: a second loss, which the error per weight doesn't
+  show, and the videos do.
+- **On video** is measured separately (seedvr2x's `models/VALIDATION.md`): each file against its
+  own model's float16 output at the same seed, on 8 clips at 1080p, judged against how much the
+  float16 model's own seeds differ. "As close as another seed" means no score past 2.7 times the
+  spread of 3 seeds, a line another seed of the float16 model crosses on one score in twenty;
+  "further than a seed" names where a file crosses it. "Clearly worse": many times past it. At
+  4K, against 2 seeds (the line at 10.9 times their spread): the sharp 7B's int8 and Q8_0 and
+  the 7B's fp8 (W8A16) and Q8_0 within it; the sharp's fp8 W8A8, dynamic GGUF and Q4_K past it
+  only where its two seeds agree almost exactly, Q4_K adding fine texture to live action, the
+  dynamic GGUF taking a little away; the other files were not run at 4K.
+- Measured on the 7B (the sharp 7B's files are within 0.01%; those made with an importance
+  matrix within 0.05%, their weighted worst within 0.4%), against its float32 master: this
   repository's files themselves; the others' files where checked, their method otherwise (fp8
   without scale, Comfy-Org's NVFP4 and int8: each repository's own way, applied to the master).
   int8's rotation spreads each row's largest values before rounding, the input's too when it
@@ -130,7 +157,7 @@ How to read it:
 | float32, the original | ByteDance-Seed/SeedVR2-7B | 33 GB | 0, the reference | the source of every file here; too big to run |
 | float16 (7B, sharp 7B, VAE) | numz/SeedVR2_comfyUI | 16.5 GB | 0.02% (0.02%) | **the same values**, checked element for element; only the header differs |
 | float16 | Comfy-Org/SeedVR2 | 16.5 GB | 0.02% (0.02%) | the same values (one layer checked), with two text embeddings added |
-| GGUF Q4_K_M | AInVFX/SeedVR2_comfyUI | 4.8 GB | 7.3% (7.9%) | **the same**: Q4_K on the same matrices, the same error |
+| GGUF Q4_K_M | AInVFX/SeedVR2_comfyUI | 4.8 GB | 7.3% (7.9%) | **the same**: Q4_K on the same matrices, the same error; on video too (4 clips: within the seed band on nearly every score) |
 | fp8, without scale, the last block in float16 | AInVFX/SeedVR2_comfyUI (numz's 7B fp8) | 8.5 GB | 2.8% (11%) | further: no scale, and its biases, embeddings and output layer in fp8 too (up to 15%) |
 | fp8, without scale | Comfy-Org/SeedVR2 | 8.2 GB | 2.8% (17%) | further: every tensor in fp8, with no scale |
 | NVFP4 | Comfy-Org/SeedVR2 | 4.8 GB | 9.5% (10.1%) | further: each block's scale from its largest weight |
@@ -139,8 +166,7 @@ How to read it:
 | 3B (float16, fp8, GGUF) | numz/SeedVR2_comfyUI, AInVFX/SeedVR2_comfyUI | | | ByteDance's first 3B weights, which ByteDance replaced on 2025-06-22 (checked on the float16 and fp8 files) |
 
 "The same" means weights as close to ByteDance's as ours; the files' bytes still differ, by their
-header and by the precision they were made from. Where a dynamic GGUF (each layer's type chosen by how much
-the output suffers from it) beats the plain Q4_K in tests to come, it will be added here.
+header and by the precision they were made from.
 
 ## TransNetV2
 
@@ -154,11 +180,13 @@ converts them for its PyTorch model, values unchanged: that model loads the file
 ## Licences
 
 - SeedVR2's files: the Apache License 2.0, in `LICENSE`, as ByteDance's. `NOTICE` gives each
-  file's origin and what was changed.
+  file's origin and what was changed, and credits ggml (MIT), whose quantizer made the GGUF files.
 - `transnetv2.safetensors`: the MIT License, in `transnetv2.LICENSE` beside it.
 
-Each file's safetensors metadata says the same: `source`, `source_url` (at its revision),
-`source_sha256`, `change`, `license`, `copyright` and `conversion`.
+Each file's metadata says the same: a safetensors file's `source`, `source_url` (at its
+revision), `source_sha256`, `change`, `license`, `copyright` and `conversion`; a GGUF file's
+`general.license`, `general.source.url` and `seedvr2x.source`, `.source_sha256`, `.change`,
+`.copyright` and `.conversion`.
 
 ## How they were made
 
@@ -172,4 +200,15 @@ By the scripts in seedvr2x's `models/` directory, on a CPU, each with its depend
   `convert_weights.py` unchanged (TensorFlow 2.21.0, PyTorch 2.14.1), checks the result byte for
   byte against an earlier conversion, saves it as safetensors, and runs both models on the same
   frames.
+- `seedvr2_fp8.py` stores the 288 block matrices of the float32 master in fp8 with one scale per
+  tensor (comfy-kitchen's layout); every other tensor stays the float16 file's, here and below.
+- `seedvr2_int8.py` rotates the same matrices (comfy-kitchen's Hadamard) and rounds them to int8
+  with a scale per row, checked against comfy-kitchen's own quantizer.
+- `seedvr2_nvfp4.py` stores them in NVFP4 (comfy-kitchen's layout), each block's scale the one of
+  8 that minimises the block's error; comfy-kitchen decodes every layer as the script does.
+- `seedvr2_gguf.py` quantizes them to Q4_K or Q8_0 by ggml's own quantizer (llama.cpp `abeada3`,
+  built from source); ggml's and gguf-py's decoders agree on every tensor.
+- `seedvr2_gguf_dyn.py` chooses a type per matrix among Q3_K to Q8_0, the least error weighted by
+  an importance matrix (from runs of the float16 model on a GPU) within the Q4_K file's bytes, and
+  quantizes them by ggml with that importance; and Q4_K with the same importance.
 - `dist.py` writes `LICENSE`, `NOTICE`, this card and `SHA256SUMS`.

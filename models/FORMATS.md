@@ -3,11 +3,11 @@
 > Status: **measured on the CPU**, weights only, against ByteDance's fp32 masters:
 > [`formats_study.py`](formats_study.py), [`numz_check.py`](numz_check.py), and each build
 > script's own checks ([`seedvr2_fp8.py`](seedvr2_fp8.py), [`seedvr2_gguf.py`](seedvr2_gguf.py),
-> [`seedvr2_int8.py`](seedvr2_int8.py), [`seedvr2_nvfp4.py`](seedvr2_nvfp4.py)), with
-> [`ck_check.py`](ck_check.py) and [`numz_gguf_check.py`](numz_gguf_check.py) loading the files in
-> their runtimes. What each file does to the video is measured by GPU runs to come: until then its
-> quality is "to be measured". [DESIGN.md](../seedvr2x/DESIGN.md#weights) (Weights) cites these
-> figures.
+> [`seedvr2_int8.py`](seedvr2_int8.py), [`seedvr2_nvfp4.py`](seedvr2_nvfp4.py),
+> [`seedvr2_gguf_dyn.py`](seedvr2_gguf_dyn.py)), with [`ck_check.py`](ck_check.py) and
+> [`numz_gguf_check.py`](numz_gguf_check.py) loading the files in their runtimes. What each file
+> does to the video was measured by GPU runs: [VALIDATION.md](VALIDATION.md).
+> [DESIGN.md](../seedvr2x/DESIGN.md#weights) (Weights) cites these figures.
 
 In short, on the 7B's 288 attention and MLP matrices of the blocks, 99% of its weights, the error
 per weight being ||W_hat - W|| / ||W|| against the fp32 master:
@@ -32,8 +32,15 @@ per weight being ||W_hat - W|| / ||W|| against the fp32 master:
   ("update ckpt"); numz's 3B fp16 file is the earlier master rounded to the nearest float16, and
   its fp8 file that master cast straight to fp8, every one of 635 tensors; against the current
   master they agree on 4.9% and 96% of the values.
+- **An importance matrix helps where the activations are large:** made with one (from GPU runs
+  of the fp16 model), Q4_K is closer to the master than ours on all 288 matrices once each
+  weight's error is weighted by the activations it meets (median 6.64% against 7.15%), though
+  not by the plain error (7.55% against 7.35%); one type per matrix within the same bytes goes
+  further (6.31%). On video, the 7B's dynamic file is the closest 4 GB file to the fp16 model
+  ([VALIDATION.md](VALIDATION.md)).
 - **Our phase-2 files** (the 7B and the sharp 7B): fp8 8.33 GB, Q4_K 4.76 GB, Q8_0 8.84 GB, INT8
-  8.33 GB, NVFP4 4.76 GB, each loading in its runtime, made the same on every run.
+  8.33 GB, NVFP4 4.76 GB, the dynamic GGUF and its control 4.76 GB, each loading in its runtime,
+  made the same on every run.
 
 ## Method
 
@@ -175,21 +182,107 @@ quantized, every other tensor our fp16 file's, byte for byte:
   squared error, the first of equals. The first candidate is comfy-kitchen's own quantizer's, so
   no matrix can come out worse. comfy-kitchen decodes any block scale, the max's or not: it loads
   the file as it is, and the search costs nothing at run time.
+- **The dynamic GGUF** and its control, made with an importance matrix: [their own
+  section](#dynamic-gguf-a-type-per-matrix-chosen-with-an-importance-matrix).
+
+## Dynamic GGUF: a type per matrix, chosen with an importance matrix
+
+> Status: **built and measured** (2026-10-07): the importance matrices from GPU runs of each
+> model's fp16 file, the files on the CPU, then judged like the others on the GPU
+> ([VALIDATION.md](VALIDATION.md)).
+
+[`seedvr2_gguf_dyn.py`](seedvr2_gguf_dyn.py) makes, from the fp32 master and an importance matrix,
+`seedvr2x_ema_7b_dyn.gguf` (one ggml type per block matrix, within our uniform Q4_K's bytes) and
+`seedvr2x_ema_7b_Q4_K_imatrix.gguf` (every block matrix Q4_K with the same importance, our Q4_K's
+size: the control that tells the importance's effect from the mix's); with `--model sharp`, the
+sharp 7B's, from its own importance.
+
+- **The importance matrix** ([`gpu/imatrix_hook.py`](gpu/imatrix_hook.py), llama.cpp's method):
+  numz's own runs of the model's fp16 file; a forward pre-hook on each of the 288 block matrices
+  adds, at every DiT forward, the input's sum of squares per input channel and its token count;
+  the importance of channel k is the mean of x_k^2. Calibration: 4 clips, one per kind (anime,
+  flat cel, live action, dark), none of tier 1's nor of the 7B's 4K shots, so that the evaluation
+  never sees its calibration: colour_clips.py's d1 at a quarter of the size of four 4K shots, 45
+  frames at 1080p, seed 42, the reference runs' settings. The hooks only read: numz's 7B gives
+  the same output, bit for bit, with and without them (on the CPU; on the GPU, a control run's
+  decode has the unhooked run's SHA-256).
+- **The quantizer:** ggml's own `ggml_quantize_chunk` with the importance (llama.cpp `abeada3`,
+  as our static files). Q3_K, Q4_K and Q5_K weigh each weight's squared error by
+  imp_k sqrt(sigma^2 + w^2) in their search, Q6_K by imp_k; Q8_0 ignores it. A flat importance is
+  not "no importance": ggml then runs its importance-aware search instead of its reference one;
+  on the 7B, Q4_K so made is closer to the master than ours on all 288 matrices (median 7.283%
+  against 7.345%).
+- **The measure:** per matrix and type, besides the plain error, the error weighted by the
+  activations, e = sqrt(sum_k imp_k ||dW[:, k]||^2 / sum_k imp_k ||W[:, k]||^2): with uncorrelated
+  channels, the layer's output error relative to its output on the calibration. For a file made
+  with an importance the plain error misleads: the importance moves error from the input channels
+  the activations barely use to those they use most, and the plain error counts both the same.
+- **The choice:** among Q3_K, Q4_K, Q5_K, Q6_K and Q8_0 (numz's loader also decodes Q2_K, Q4_0,
+  Q4_1, Q5_0, Q5_1 and BF16: Q2_K is too coarse to trust a per-layer measure with; the four legacy
+  types are never on a matrix's best trade-off curve), the types minimising the sum of e^2 within
+  our uniform Q4_K's bytes for the 288 matrices, less 1 MiB for the metadata (the file is no
+  larger than our Q4_K): a greedy over each matrix's lower convex hull of (bytes, e^2), the most
+  error saved per byte first, ties broken by name. The last block's text attention output and MLP
+  take the cheapest type: nothing reads their output (NaDiT keeps only the video tokens after the
+  blocks; zeroed, numz's output is unchanged bit for bit).
+- **Limits:** per-layer statistics: every layer's relative error weighs the same whatever it does
+  to the video; errors taken as additive, channels as uncorrelated; 4 calibration clips. No
+  end-to-end sensitivity: the GPU runs judge the file, against its control.
+- **Checks, as for the static files:** ggml's and gguf-py's decoders agree on every tensor; each
+  matrix's errors against the master beside our static Q4_K's (which the reference quantization
+  reproduces byte for byte); the second quantization of each chosen matrix equal to the first;
+  read back, with no path or time in the metadata; the size; numz's loader
+  (`numz_gguf_check.py`).
+
+| File | Bytes | SHA-256 | Error: median (worst) | Weighted: median (worst) | Q3_K / Q4_K / Q5_K | Quality ([VALIDATION.md](VALIDATION.md)) |
+|---|---|---|---|---|---|---|
+| `seedvr2x_ema_7b_dyn.gguf` | 4,757,055,264 | `e93f3add…` | 7.550% (18.26%) | 6.310% (11.67%) | 17 / 203 / 68 | the closest 4 GB file to the fp16 model (44.2 dB); past the calibrated line on the cartoon clip's DISTS |
+| `seedvr2x_ema_7b_Q4_K_imatrix.gguf` | 4,758,308,480 | `a3da9e6f…` | 7.548% (8.831%) | 6.641% (7.370%) | 0 / 288 / 0 | 43.7 dB; past the line on live action's detail and the cartoon clip's DISTS |
+| `seedvr2x_ema_7b_Q4_K.gguf` (ours, static) | 4,758,307,552 | `7f4642d0…` | 7.345% (7.948%) | 7.154% (8.987%) | 0 / 288 / 0 | 42.9 dB; softer on some sources, within the line |
+| `seedvr2x_ema_7b_sharp_dyn.gguf` | 4,757,129,024 | `652d42c8…` | 7.545% (18.31%) | 6.346% (12.05%) | 17 / 204 / 67 | 42.5 dB; past the line on cartoon, live action and an anime clip's flicker; at 4K 43.3 dB, closer than Q4_K on all 5 shots: the card's 4 GB pick |
+| `seedvr2x_ema_7b_sharp_Q4_K_imatrix.gguf` | 4,758,308,512 | `28333c70…` | 7.537% (8.867%) | 6.651% (7.410%) | 0 / 288 / 0 | 42.1 dB; past the line on live action's texture and the cartoon clip's DISTS |
+| `seedvr2x_ema_7b_sharp_Q4_K.gguf` (ours, static) | 4,758,307,584 | `a5e423a5…` | 7.347% (7.942%) | 7.161% (8.416%) | 0 / 288 / 0 | 41.4 dB; past the line on cartoon, live action and anime; at 4K 42.0 dB, adding fine texture to digital live action |
+
+- **Weighted, the importance helps on every matrix:** the Q4_K made with it is closer than our
+  static Q4_K on all 288 (median 6.64% against 7.15%), though further by the plain error on all
+  but 20 (7.55% against 7.35%). The dynamic file goes further: 6.31% median, below the static
+  Q4_K on 271 of 288; its sum of e^2 over the matrices whose output is read is 24% below the
+  static Q4_K's and 11% below its control's (the sharp's: 22% and 10%).
+- **Its worst errors sit where the measure says they cost least** (the 7B's): the 17 Q3_K
+  matrices (the 3 of block 35 nothing reads, the text MLP's output projection of blocks 0 to 10
+  but 3 and of block 34, block 3's text MLP input, block 0's video MLP) hold the worst plain
+  error (18.3%) and weighted one (11.7%, block 35's; 11.4% the worst of a matrix whose output is
+  read, block 0's video MLP input). The Q5_K bytes go to every video attention output projection
+  and 32 of the 36 text ones. The sharp's choice differs on 5 matrices: block 0's video attention
+  output projection in Q4_K (the 7B's Q5_K), block 1's video QKV in Q3_K (Q4_K), the text MLP's
+  output projection of blocks 9 and 10 in Q4_K (Q3_K) and of block 16 in Q3_K (Q4_K).
+- **The importance files** (`seedvr2_ema_7b_fp16.imatrix.safetensors`, 12,459,016 bytes,
+  `c9c75937…`; the sharp's, 12,459,160 bytes, `02d7cfa7…`) key the pinned outputs in
+  `seedvr2_gguf_dyn.py`. The files' metadata name the importance file by its name and SHA-256 and
+  the calibration clips by name, with no path: the same importance file, under its name, gives
+  the same bytes wherever it is read from, and a second build gave them.
+- 1.25 MB smaller than our Q4_K (the 7B's; the sharp's 1.18 MB), the dynamic file loads in
+  numz's GGUF loader as it is: numz decodes every K-quant type.
 
 ## How each format runs
 
-The users' table, as the card gives it once the files are published, quality "to be measured"
-until the GPU runs. "W8A8": weights and activations in 8 bits, the multiply in 8 bits;
-"W8A16": weights stored in 8 bits, widened to 16 for the multiply (memory only).
+The users' table, as the card gives it, the quality from the GPU runs
+([VALIDATION.md](VALIDATION.md): tier 1, 8 clips at 1080p, each file against its own model's fp16
+output at the same seed, judged against how much the fp16 model's own seeds differ; "as close as
+another seed": no score past 2.7 times the spread of 3 seeds, a line a further seed of the fp16
+model crosses on one score in twenty). "W8A8": weights and activations in 8 bits, the multiply
+in 8 bits; "W8A16": weights stored in 8 bits, widened to 16 for the multiply (memory only).
 
 | Format | Size (7B) | How it multiplies | Multiply rate against 16 bits | Error per weight | Quality |
 |---|---|---|---|---|---|
 | float16 | 16.5 GB | 16-bit: bf16 accumulated in fp32 (fp16 on RTX 20) | 1x, the reference | 0.02% | the reference |
-| fp8, a scale per tensor | 8.3 GB | W8A8 from RTX 40 (Ada, sm_89); W8A16 before | 2x on RTX 40 and 50 (RTX 50: 2.3-2.9x measured by others) and on workstation Ada and Blackwell cards; 1x before RTX 40 | 2.65% | to be measured |
-| int8, rotated | 8.3 GB | W8A8 from RTX 20 (Turing, sm_75) | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% | to be measured |
-| GGUF Q8_0 | 8.8 GB | W8A16 | 1x: memory only | 0.56% | to be measured |
-| GGUF Q4_K | 4.8 GB | W4A16 | 1x: memory only, a little slower | 7.35% | to be measured |
-| NVFP4, searched scales | 4.8 GB | W4A4 on Blackwell (sm_100, sm_120); W4A16 before | 8x on RTX 50; 4x on workstation Blackwell cards; 1x before Blackwell | 8.80% | to be measured |
+| fp8, a scale per tensor | 8.3 GB | W8A8 from RTX 40 (Ada, sm_89); W8A16 before | 2x on RTX 40 and 50 (RTX 50: 2.3-2.9x measured by others) and on workstation Ada and Blackwell cards; 1x before RTX 40 | 2.65% | as close as another seed or closer, W8A8 and W8A16, both models |
+| int8, rotated | 8.3 GB | W8A8 from RTX 20 (Turing, sm_75) | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% | as close as another seed or closer (the 7B: one score on one clip just past the line) |
+| GGUF Q8_0 | 8.8 GB | W8A16 | 1x: memory only | 0.56% | as close as another seed or closer: the closest of all |
+| GGUF Q4_K | 4.8 GB | W4A16 | 1x: memory only, a little slower | 7.35%; weighted 7.15% | the 7B: softer on some sources, within the line; the sharp 7B: further than a seed on cartoon, live action and anime |
+| GGUF Q4_K, with an importance matrix | 4.8 GB | W4A16 | 1x: memory only, a little slower | 7.55%; weighted 6.64% | further than a seed on the cartoon clip's DISTS and live action's fine detail, both models |
+| GGUF, a type per matrix (dynamic) | 4.8 GB | W4A16 (3 to 5 bits per matrix) | 1x: memory only, a little slower | 7.55%; weighted 6.31% | the 7B: the closest 4 GB file, further than a seed on the cartoon clip's DISTS only; the sharp 7B: further on cartoon, live action and anime |
+| NVFP4, searched scales | 4.8 GB | W4A4 on Blackwell (sm_100, sm_120); W4A16 before | 8x on RTX 50; 4x on workstation Blackwell cards; 1x before Blackwell | 8.80% | W4A4: clearly worse on DISTS (cartoon, anime), both models; W4A16: softer on live action (the 7B), further than a seed on anime, cartoon and live action (the sharp 7B) |
 
 - The rate column gives the peak rate of the multiply the DiT's matrices use, by NVIDIA's own
   tables, against the 16-bit multiply on the same card: Turing (TU102), Ampere (GA102), Ada
@@ -212,7 +305,17 @@ until the GPU runs. "W8A8": weights and activations in 8 bits, the multiply in 8
   a job about 10% shorter. The main gain is memory. No speed is measured here: the GPU box has a
   power-cap fault, until a healthy card measures it.
 - An 8- or 4-bit multiply rounds each layer's input too: a second loss the error per weight
-  doesn't show, which only the GPU runs measure.
+  doesn't show. The GPU runs measured it on real activations: a layer's output moves by 2.09% in
+  fp8 W8A8 against 1.50% in W8A16, by 7.18% in NVFP4 W4A4 against 4.93% in W4A16, by 0.76% in
+  int8 (medians, [VALIDATION.md](VALIDATION.md#per-layer-on-real-activations-the-smoke-test-the-7b)).
+- **comfy-kitchen 0.2.37 rounds a layer's input wrongly from 2^32 values on** (its CUDA
+  quantizers index in 32 bits): fp8 W8A8 then gives an all-NaN video, NVFP4 W4A4 a silently
+  wrong one; int8, W8A16 and W4A16 are unaffected. In the 7B only the MLP's output projection
+  gets there, from 349,526 video tokens in one forward: at 3840×2160, a batch of 41 frames or
+  more. [`gpu/ck_patch.py`](gpu/ck_patch.py) quantizes such an input in row chunks at the scale
+  comfy-kitchen gives the whole tensor, comfy-kitchen's values bit for bit; a runtime calling
+  comfy-kitchen must do the same, or stay below the limit
+  ([VALIDATION.md](VALIDATION.md#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)).
 
 ## Reproduce
 
@@ -225,7 +328,12 @@ uv run models/seedvr2_fp8.py $M --fp16 models/dist --out phase2
 uv run models/seedvr2_gguf.py $M --numz /path/to/numz --out phase2
 uv run models/seedvr2_int8.py $M --fp16 models/dist --out phase2
 uv run models/seedvr2_nvfp4.py $M --fp16 models/dist --out phase2
+uv run models/seedvr2_gguf_dyn.py --imatrix seedvr2_ema_7b_fp16.imatrix.safetensors $M \
+  --static phase2/seedvr2x_ema_7b_Q4_K.gguf --out phase2-dyn   # the importance: gpu/imatrix_hook.py's runs, merged
+uv run models/seedvr2_gguf_dyn.py --imatrix seedvr2_ema_7b_sharp_fp16.imatrix.safetensors --model sharp $M \
+  --static phase2/seedvr2x_ema_7b_sharp_Q4_K.gguf --out phase2-dyn
 CUDA_VISIBLE_DEVICES= uv run models/ck_check.py phase2/*fp8_scaled.safetensors phase2/*int8_convrot.safetensors \
   phase2/*nvfp4.safetensors
-cd /path/to/numz && CUDA_VISIBLE_DEVICES= .venv/bin/python /path/to/models/numz_gguf_check.py . phase2/*.gguf
+cd /path/to/numz && CUDA_VISIBLE_DEVICES= .venv/bin/python /path/to/models/numz_gguf_check.py . phase2/*.gguf \
+  phase2-dyn/*.gguf
 ```
