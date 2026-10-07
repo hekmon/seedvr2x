@@ -2,11 +2,12 @@
 
 > Status: **steps 0 to 5 done** (step 4: the user's eyes, 2026-10-06; step 5, baton 1 of the 4K
 > relay, 2026-10-06, with the user's eyes on its crops given the same day: the 0.25 / 0.5
-> recommendation is withdrawn). Step 0 (the diagnosis) ran on the CPU from
+> recommendation is withdrawn); **step 6 measured** (baton 2, the sharp 7B, night of
+> 2026-10-06; its crops await the user's eyes). Step 0 (the diagnosis) ran on the CPU from
 > [numerics.md](numerics.md)'s masters; steps 1 to 3 and 5 on dumps of 7B fp16 runs (1080p, ×1.5
 > to ×4, the heavier degradation, VAE tiles, 4K on 17 shots), scored on the CPU. The study answers
-> "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab) and, with step
-> 5, part of "4K output's quality" ([To measure](../../seedvr2x/DESIGN.md#to-measure)); its
+> "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab) and, with steps
+> 5 and 6, part of "4K output's quality" ([To measure](../../seedvr2x/DESIGN.md#to-measure)); its
 > decision brief is at the end.
 
 In short:
@@ -1075,6 +1076,307 @@ At 1080p:
 - **Next, for design to decide:** the sharp 7B on batch A at 4K first, with the same protocol and
   crops for the eyes; a scale study only if the over-texture remains.
 
+## Step 6: the sharp 7B, for the eyes
+
+DESIGN.md's "4K output's quality" ([To measure](../../seedvr2x/DESIGN.md#to-measure)) left two
+questions after step 5: whether ByteDance's sharp 7B over-renders less than the 7B, and whether a
+heavier degradation tames the over-rendering, since ByteDance's readme says its models "tend to
+overly generate details on inputs with very light degradations"
+([`readme.md:119`](../../upstream/seedvr-bytedance/readme.md)). Step 6 runs the sharp 7B on the
+clips and shots of steps 3 and 5, at 4K and 1080p, then both models at 4K from the heavier
+degradation, and cuts crops of the two side by side for the user's eyes.
+
+### The runs
+
+- **The model:** `seedvr2_ema_7b_sharp_fp16.safetensors`, numz's fp16 file of ByteDance's sharp
+  7B (the 7B's architecture, 16.5 GB, [models.md](models.md)). Each run is the 7B's of steps 1
+  and 5 with `--dit_model` alone changed (the job lines compared word by word): numz `4490bd1`; at
+  4K, encode untiled and decode tiles of 2048 px (overlap 64); at 1080p, untiled; seed 42;
+  `--color_correction none` with the raw decode dumped (`colour_dump.py`), every variant applied
+  to that decode.
+- **One reference for both models:** the sharp's encoder input and float32 reference are
+  bit-identical to the 7B's (md5 of `enc_bf16.pt` and `ref_f32.pt` on `sollevante-painted`): they
+  come before the model. Each sharp decode is corrected and scored with the 7B run's reference,
+  and paired with the 7B's output of the same input frame by frame.
+- **58 runs, none failed:** (a) the sharp at 4K from d1 on step 5's 17 shots (batch A's 13, the
+  first film's 4); (b) the sharp at 1080p on 26 clips: ×2 from d1 (8) and from d2 (7), ×1.5 and
+  ×3 (3 each, from d1), ×4 (5); (c) both models at 4K from d2 on 5 shots chosen by content:
+  `digital-cockpit` and the first film's close-up (skin), `digital-space` (clouds),
+  `sollevante-painted` (painted texture), `cel4k-detail` (lines); (d) the sharp at seed 43 on those
+  5 shots, from d1.
+- **The 4K d2 inputs are new:** fr_clips.py's d2 (×½ in Y'CbCr by swscale's area filter, zimg
+  having none; x264 slow, CRF 26), made from the 4K clips' tone-mapped SDR sources by
+  `colour_clips.py`, which now imports fr_clips.py's recipe, with their bicubic baselines
+  (Catmull-Rom ×2). The chain is frame-exact against measurement's own files: remade, d1 at 4K
+  (`digital-sunrise`, the first film's close-up) and d2 at 1080p (anime-clean) give frames
+  identical to fr_clips.py's by framemd5 (the files' md5 differ only by Matroska's random UIDs).
+  Bicubic from d2 is 0.96–2.24 dB below bicubic from d1 by PSNR-Y (`cockpit` 43.19 → 41.28, the
+  close-up 41.01 → 40.05, `space` 43.36 → 41.93, `painted` 37.12 → 34.88, `cel4k-detail` 41.52 →
+  39.29).
+- **Scores as in step 5:** LPIPS on every frame, DISTS on every 9th (to compare outputs within
+  these tables only), VMAF v1 with the model the GT's width picks (2160p at 4K, 1080p at 1080p)
+  and CAMBI added, from `gbrp16le` masters; `colour_bands.py` on every new decode (every third
+  frame). At 1080p both models and bicubic were scored again at seed 42 with these settings (the
+  7B's scores equal steps 1–3's on all 52 outputs), bicubic on all 26 clips. Verdicts as in step
+  5, paired by frame over the seeds both outputs hold, beyond the 95% block-bootstrap interval and
+  a seed spread: against the 7B, the 7B's own (seeds 42 and 43 on six batch A shots, 42, 43 and
+  1234 on the first film); against bicubic, the output's own (the sharp's on the 5 shots of part
+  (d)); with one seed the interval alone decides.
+- **Time:** 4K runs took 7.5–15.8 minutes, 1080p runs 3.4–3.9, under the card's known fault: an
+  SM clock of 577 MHz at a reported 604 W and 38 °C (medians under load; the clock-event reason SW
+  power cap on 985 of 1,020 samples), as NVIDIA's forum reports on other RTX PRO 6000 Blackwell
+  boards. It slows the runs, not their values.
+
+### At 4K, against the 7B
+
+The sharp's split minus the 7B's (`ycc:4:3`, each on its own decode, the same reference), frame
+by frame over the seeds both hold (42; 43 too on `space`, `sollevante-painted` and the close-up),
+mean over the shots (better / worse / within for the sharp: closer to / further from the GT by
+that score); detail: the luma Laplacian variance over the GT's, geometric mean over the shots, the
+sharp's (the 7B's), and the sharp's over the 7B's:
+
+| Source (shots) | PSNR-Y (dB) | VMAF | LPIPS | DISTS | CAMBI added | ΔE00 lf | Flicker lf | Detail ÷ GT's: sharp (7B) | Sharp ÷ 7B |
+|---|---|---|---|---|---|---|---|---|---|
+| digital live action (5) | +0.49 (4/0/1) | +0.74 (4/1/0) | −0.0082 (4/1/0) | +0.0024 (4/1/0) | −0.026 (3/1/1) | +0.003 (2/2/1) | −0.011 (3/1/1) | 2.58 (3.42) | 0.76 |
+| Sol Levante (4) | +0.52 (3/1/0) | +1.92 (3/1/0) | −0.0108 (3/1/0) | +0.0025 (1/2/1) | −0.001 (0/0/4) | −0.004 (2/2/0) | −0.028 (1/0/3) | 3.29 (3.73) | 0.88 |
+| cel scan (4) | +0.67 (3/1/0) | +2.13 (3/1/0) | −0.0279 (4/0/0) | −0.0105 (4/0/0) | +0.000 (0/0/4) | +0.012 (1/3/0) | +0.009 (2/2/0) | 5.68 (7.30) | 0.78 |
+| first film (4) | +0.85 (4/0/0) | +2.47 (4/0/0) | +0.0017 (1/1/2) | +0.0054 (2/2/0) | −0.002 (1/0/3) | +0.005 (0/2/2) | −0.014 (4/0/0) | 1.04 (1.97) | 0.53 |
+
+- **Closer to the GT by PSNR-Y and VMAF on every kind, with less detail.** Per shot, PSNR-Y is
+  higher on 14 of 17 (+0.32 to +1.44 dB) and VMAF on 14 (+0.66 to +4.78), LPIPS lower on 12
+  (−0.0064 to −0.0526) and DISTS on 11 (the digital mean, +0.0024, is `space`'s +0.0219). The
+  sharp keeps 0.45–0.88 of the 7B's Laplacian variance on 15 shots: still 2.6–5.7 times the GT's
+  on batch A's kinds, 1.04 on the first film.
+- **Where step 5's eyes rejected the 7B's invented texture:** on the close-up's skin ("almost
+  reptilian" with the 7B) the sharp keeps 0.66 of the GT's fine detail where the 7B keeps 1.47,
+  with PSNR-Y +1.14 dB, VMAF +4.8, LPIPS within (+0.0007) and DISTS −0.0025; on `cockpit`'s pores
+  3.23 times the GT's (the 7B 4.30), closer on all four scores. `space`'s clouds are the exception:
+  the sharp keeps the 7B's detail there (0.96 of it, 3.65 times the GT's) and is further from the
+  GT on LPIPS (+0.0112), DISTS (+0.0219) and VMAF (−3.0), PSNR-Y within.
+- **Where they wanted the 7B's redraw:** on `digital-jet`'s stencilled text (0.79 of the 7B's
+  detail) and `cel4k-night`'s city (0.73) the sharp is closer on all four scores; on
+  `cel4k-detail` (0.88) LPIPS and DISTS are lower (−0.0104, −0.0060), PSNR-Y and VMAF further
+  (−0.11 dB, −1.4).
+- **`sollevante-line` is the one shot where the sharp has more fine detail than the 7B** (1.20
+  times its Laplacian variance), and it is further from the GT on all four scores (PSNR-Y −0.26
+  dB, VMAF −1.2, LPIPS +0.0065, DISTS +0.0081).
+- **On the first film** the sharp keeps about half the 7B's detail (0.45–0.74; the fast pan 0.44
+  of the GT's) and is closer by PSNR-Y and VMAF on 4 of 4, but LPIPS and DISTS are mixed: further
+  on the fast pan (+0.0169, +0.0123) and on the dark interior's DISTS (+0.0170), closer on the
+  street (both) and on the close-up's DISTS.
+- **Colour is the correction's, not the model's:** uncorrected, the sharp's colour is closer to
+  the GT's on Sol Levante and the first film (ΔE00 lf −0.18 and −0.25, 4 of 4 each), as
+  models.md found at 1080p; after the split the two are within 0.012 of each other per kind.
+  Colour fringes and full-resolution flicker are lower with the sharp on 15 and 13 of the 17
+  shots (−0.10 to −0.13 and −0.15 to −0.29 per kind), along with its lower fine detail. Banding
+  doesn't change (CAMBI added within on 12 shots, lower on 4, higher by 0.001 on `space`).
+
+### Against bicubic
+
+Each model's split − bicubic, as step 5's table (the 7B's rows are step 5's; the sharp's over
+seeds 42 and 43 on the 5 shots of part (d); bicubic's detail in brackets):
+
+| Source (shots) | Model | PSNR-Y (dB) | VMAF | LPIPS | DISTS | CAMBI added | Detail ÷ GT's |
+|---|---|---|---|---|---|---|---|
+| digital live action (5) | 7B | −5.84 (0/5/0) | −19.26 (0/5/0) | +0.0195 (0/4/1) | +0.0215 (1/4/0) | −2.209 (5/0/0) | 3.42 (0.15) |
+| | sharp | −5.36 (0/5/0) | −18.56 (0/5/0) | +0.0114 (0/3/2) | +0.0241 (1/4/0) | −2.235 (5/0/0) | 2.58 |
+| Sol Levante (4) | 7B | −7.57 (0/4/0) | −25.32 (0/4/0) | +0.0224 (0/3/1) | −0.0051 (3/1/0) | −0.963 (4/0/0) | 3.70 (0.17) |
+| | sharp | −7.07 (0/4/0) | −23.39 (0/4/0) | +0.0121 (1/2/1) | −0.0024 (2/1/1) | −0.963 (4/0/0) | 3.29 |
+| cel scan (4) | 7B | −9.36 (0/4/0) | −25.30 (0/4/0) | +0.1563 (0/4/0) | +0.0910 (0/4/0) | −0.016 (3/0/1) | 7.30 (0.54) |
+| | sharp | −8.69 (0/4/0) | −23.16 (0/4/0) | +0.1283 (0/4/0) | +0.0806 (0/4/0) | −0.016 (3/0/1) | 5.66 |
+| first film (4) | 7B | −4.98 (0/4/0) | −23.15 (0/4/0) | +0.0471 (0/3/1) | +0.0416 (0/4/0) | −0.026 (4/0/0) | 1.96 (0.12) |
+| | sharp | −4.12 (0/4/0) | −20.60 (0/4/0) | +0.0477 (0/3/1) | +0.0463 (0/4/0) | −0.028 (4/0/0) | 1.04 |
+
+- **The sharp doesn't change step 5's verdict.** Its split trails bicubic on PSNR-Y and VMAF on
+  17 of 17 shots (VMAF 2.5 points below on `sollevante-dark` to 45 on `cel4k-motion`), by 0.5–0.9
+  dB and 0.7–2.6 VMAF points less than the 7B's per kind. LPIPS is above bicubic's on 12 shots
+  (the 7B 14), within on 4, below on `sollevante-action`; DISTS above on 13 (the 7B 13), below on
+  `sunrise`, `sollevante-line` and `-action`, within on `sollevante-painted`, which the 7B has
+  below bicubic's (−0.0063).
+- **Less banding than bicubic** on 16 of 17, as the 7B (within on `cel4k-detail`, where neither
+  adds any). Low-frequency colour and flicker against bicubic stay the 7B's (ΔE00 lf +0.019 to
+  +0.118 per kind, the 7B +0.016 to +0.106).
+- **It still over-renders:** 2.6–5.7 times the GT's Laplacian variance on batch A's kinds (the 7B
+  3.4–7.3), where bicubic keeps 0.15–0.54; on the first film 1.04 (the 7B 1.96, bicubic 0.12).
+
+### Band by band
+
+`colour_bands.py` on the sharp's split as step 5 on the 7B's (seed 42, every third frame): each
+band's RMS over the GT's · its correlation with the GT, whole picture, means over the shots:
+
+| Source (shots) | Model | below 0.7 px | 0.7–1.6 px | 1.6–3.2 px | 3.2–6.5 px |
+|---|---|---|---|---|---|
+| digital live action (5) | 7B | 1.99 · 0.15 | 1.64 · 0.41 | 1.48 · 0.68 | 1.22 · 0.90 |
+| | sharp | 1.72 · 0.16 | 1.52 · 0.42 | 1.42 · 0.68 | 1.22 · 0.90 |
+| Sol Levante (4) | 7B | 1.99 · 0.32 | 1.74 · 0.66 | 1.50 · 0.88 | 1.21 · 0.96 |
+| | sharp | 1.85 · 0.32 | 1.64 · 0.66 | 1.45 · 0.88 | 1.20 · 0.96 |
+| cel scan (4) | 7B | 2.71 · 0.35 | 2.06 · 0.69 | 1.52 · 0.88 | 1.18 · 0.96 |
+| | sharp | 2.37 · 0.36 | 1.86 · 0.71 | 1.46 · 0.89 | 1.18 · 0.96 |
+| first film (4) | 7B | 1.58 · 0.09 | 1.31 · 0.30 | 1.30 · 0.73 | 1.15 · 0.95 |
+| | sharp | 1.17 · 0.10 | 1.10 · 0.33 | 1.24 · 0.73 | 1.15 · 0.95 |
+
+- **The same kind of invented texture, less of it.** The sharp's three finest bands carry less
+  energy than the 7B's on every kind (below 0.7 px, 1.72–2.37 times the GT's RMS on batch A's
+  kinds against 1.99–2.71; 1.17 on the first film against 1.58), with the same correlation with
+  the GT within 0.03 (0.10–0.36 below 0.7 px): fine detail that is mostly not the GT's, as with
+  the 7B. From 3.2 px up the two are the same. On the GT's flattest third likewise: below 0.7 px,
+  0.93–2.30 times the GT's RMS per kind against 1.07–2.44.
+- **Still above the GT's energy on batch A** in the three finest bands (1.42–2.37 per kind). On
+  three shots the sharp's two finest bands sit below it: the close-up (0.78 and 0.75; the 7B 1.17
+  and 1.05), the fast pan (0.60 and 0.62; 0.89 and 0.73) and `sunrise`'s sky (0.77 and 0.71; 0.89
+  and 0.88).
+- **`space` and `sollevante-line` keep the 7B's energy,** the two shots where the sharp's detail
+  doesn't fall: `space` 2.07 times the GT's RMS below 0.7 px (the 7B 2.08) and more from 1.6 px
+  up (1.48 and 1.15 against 1.42 and 1.09); `sollevante-line` more below 0.7 px (1.53 against
+  1.40).
+
+### At 1080p
+
+The 26 clips, seed 42, both models' splits (`ycc:4:3`; `ycc:4:4` at ×3 and ×4, the factor rule)
+scored again; the sharp − the 7B per set, as at 4K (one seed: the interval alone decides):
+
+| Set (clips) | PSNR-Y (dB) | VMAF | LPIPS | DISTS | ΔE00 lf | Flicker lf | Detail ÷ GT's: sharp (7B) | Sharp ÷ 7B |
+|---|---|---|---|---|---|---|---|---|
+| d1 (8) | +0.64 (6/2/0) | +1.40 (5/3/0) | +0.0019 (4/2/2) | +0.0034 (3/5/0) | −0.004 (5/1/2) | −0.037 (5/2/1) | 1.86 (1.90) | 0.98 |
+| d2 (7) | +0.68 (5/1/1) | +1.59 (4/2/1) | +0.0013 (3/2/2) | +0.0033 (2/5/0) | −0.007 (5/0/2) | −0.043 (6/0/1) | 1.76 (1.85) | 0.95 |
+| ×1.5 (3) | +0.61 (3/0/0) | +2.22 (3/0/0) | −0.0112 (3/0/0) | −0.0034 (3/0/0) | −0.023 (3/0/0) | −0.082 (2/0/1) | 2.32 (2.60) | 0.89 |
+| ×3 (3) | +0.35 (3/0/0) | +0.96 (2/0/1) | −0.0041 (3/0/0) | +0.0008 (1/2/0) | −0.003 (2/1/0) | −0.070 (3/0/0) | 2.12 (2.30) | 0.92 |
+| ×4 (5) | −0.05 (4/1/0) | −1.02 (1/3/1) | +0.0078 (3/1/1) | +0.0055 (2/3/0) | +0.002 (3/2/0) | −0.030 (4/0/1) | 1.61 (1.96) | 0.82 |
+
+Each model's split − bicubic (bicubic's detail in brackets):
+
+| Set (clips) | Model | PSNR-Y (dB) | VMAF | LPIPS | DISTS | Detail ÷ GT's |
+|---|---|---|---|---|---|---|
+| d1 (8) | 7B | −6.30 (0/8/0) | −12.52 (0/8/0) | −0.0039 (4/4/0) | −0.0124 (4/4/0) | 1.90 (0.16) |
+| | sharp | −5.67 (0/8/0) | −11.11 (0/8/0) | −0.0020 (4/4/0) | −0.0090 (5/3/0) | 1.86 |
+| d2 (7) | 7B | −5.53 (0/7/0) | −11.56 (0/7/0) | −0.0202 (5/2/0) | −0.0327 (5/2/0) | 1.85 (0.18) |
+| | sharp | −4.86 (0/7/0) | −9.97 (0/7/0) | −0.0189 (5/1/1) | −0.0294 (6/1/0) | 1.76 |
+| ×1.5 (3) | 7B | −9.77 (0/3/0) | −20.98 (0/3/0) | +0.0635 (0/3/0) | +0.0348 (1/2/0) | 2.60 (0.37) |
+| | sharp | −9.16 (0/3/0) | −18.77 (0/3/0) | +0.0523 (1/2/0) | +0.0314 (1/2/0) | 2.32 |
+| ×3 (3) | 7B | −2.97 (0/3/0) | +2.65 (2/1/0) | −0.0891 (2/1/0) | −0.0466 (3/0/0) | 2.30 (0.09) |
+| | sharp | −2.62 (0/3/0) | +3.61 (2/1/0) | −0.0932 (2/1/0) | −0.0458 (2/1/0) | 2.12 |
+| ×4 (5) | 7B | −1.42 (3/2/0) | +15.16 (4/0/1) | −0.1660 (5/0/0) | −0.1051 (5/0/0) | 1.96 (0.03) |
+| | sharp | −1.47 (2/3/0) | +14.14 (4/0/1) | −0.1583 (5/0/0) | −0.0996 (5/0/0) | 1.61 |
+
+- **At ×2 the sharp keeps the 7B's detail on average** (0.98 and 0.95 of its Laplacian
+  variance), and the scores split: closer to the GT by PSNR-Y and VMAF on most clips, LPIPS and
+  DISTS a little higher on average (DISTS +0.0034 and +0.0033, higher on 5 of 8 and 5 of 7), as
+  models.md found on 4 animated clips (PSNR-Y +0.40 to +0.67 dB, 2–10% less fine texture). Its
+  finest band loses less energy than at 4K: at d1, 1.60 times the GT's RMS against the 7B's 1.68
+  (whole picture, the same correlation: 0.38), 1.47 against 1.67 on the GT's flattest third.
+- **The clips differ most:** on anime-bright (d1) the sharp has 1.58 times the 7B's detail and
+  is further on all four scores (PSNR-Y −0.96 dB, VMAF −1.7, LPIPS +0.0119, DISTS +0.0131); on
+  anime-sky 0.69 times, with PSNR-Y +3.10 dB but VMAF −0.9 and DISTS +0.0051; on live-vfx, at the
+  7B's detail (0.97 and 1.04 times at d1 and d2), PSNR-Y +1.3 and +1.2 dB and VMAF +7.3 and +7.1,
+  LPIPS +0.034 and +0.035, DISTS +0.017 and +0.020.
+- **×1.5:** closer on all four scores on 3 of 3 clips (detail 0.89 of the 7B's). **×4:** detail
+  0.82; live-vfx much further (PSNR-Y −3.46 dB, VMAF −7.2, LPIPS +0.055, DISTS +0.024), the other
+  4 closer by PSNR-Y (+0.12 to +1.97 dB).
+- **Against bicubic the sharp changes nothing:** at ×2 both splits trail bicubic on PSNR-Y and
+  VMAF on every clip, split LPIPS and DISTS about evenly at d1 and are ahead on 5–6 of 7 at d2; at
+  ×3 and ×4 both are ahead on LPIPS and DISTS (×4: 5 of 5) and on VMAF (×4: +14 to +15); at ×1.5
+  both trail on all four on most clips. The 7B's rows are seed 42's (step 5's, over 2–3 seeds,
+  give PSNR-Y −6.18 dB at d1).
+
+### The heavier degradation at 4K
+
+Both models from d2 on the 5 shots. At seed 42 throughout, each output's detail from d1 and from
+d2, bicubic's of each input, and the sharp − the 7B from d1 and from d2:
+
+| Shot | Detail ÷ GT's: 7B d1 → d2 | sharp | bicubic | Sharp − 7B: PSNR-Y (dB) d1 → d2 | VMAF | LPIPS | DISTS |
+|---|---|---|---|---|---|---|---|
+| `digital-cockpit` | 4.30 → 4.69 | 3.23 → 3.94 | 0.29 → 0.31 | +0.63 → +0.41 | +1.72 → +1.57 | −0.0107 → −0.0047 | −0.0012 → +0.0068 |
+| the close-up | 1.49 → 0.69 | 0.69 → 0.67 | 0.07 → 0.03 | +1.13 → +0.18 | +4.82 → −0.16 | +0.0002 → +0.0205 | −0.0030 → +0.0155 |
+| `digital-space` | 3.86 → 4.22 | 3.77 → 5.54 | 0.17 → 0.15 | −0.09 → −1.05 | −3.32 → −8.80 | +0.0133 → +0.0341 | +0.0220 → +0.0425 |
+| `sollevante-painted` | 6.71 → 6.94 | 5.80 → 6.46 | 0.23 → 0.27 | +0.49 → +0.21 | +2.96 → +1.16 | −0.0142 → −0.0085 | +0.0065 → +0.0068 |
+| `cel4k-detail` | 3.98 → 4.25 | 3.48 → 3.39 | 0.53 → 0.56 | −0.11 → +0.37 | −1.38 → +0.69 | −0.0104 → −0.0121 | −0.0060 → −0.0099 |
+| the 5 shots | 3.66 → 3.32 | 2.79 → 3.17 | 0.21 → 0.19 | +0.41 → +0.02 | +0.96 → −1.11 | −0.0044 → +0.0058 | +0.0037 → +0.0124 |
+
+Against bicubic of the d2 input, the means over the 5 shots:
+
+| Model | PSNR-Y (dB) | VMAF | LPIPS | DISTS | CAMBI added | Detail ÷ GT's |
+|---|---|---|---|---|---|---|
+| 7B | −5.61 (0/5/0) | −19.48 (0/5/0) | −0.0136 (2/2/1) | −0.0075 (3/2/0) | −2.956 (5/0/0) | 3.32 (0.19) |
+| sharp | −5.58 (0/5/0) | −20.59 (0/5/0) | −0.0078 (2/2/1) | +0.0049 (2/3/0) | −2.969 (5/0/0) | 3.17 |
+
+- **The heavier degradation doesn't tame the over-rendering.** From d2 both models keep 3.2–3.3
+  times the GT's Laplacian variance (geometric mean of the 5 shots; from d1 3.66 and 2.79), their
+  finest band at about 1.9 times the GT's RMS with the same low correlation (the 7B 1.94 · 0.26 →
+  1.93 · 0.25, the sharp 1.75 · 0.27 → 1.89 · 0.26). The detail rises from d1 to d2 on 4 of the 5
+  shots with the 7B and 3 with the sharp. It falls clearly only on the close-up with the 7B (1.49
+  → 0.69, the sharp's level from d1); the sharp's falls are small (the close-up 0.69 → 0.67,
+  `cel4k-detail` 3.48 → 3.39).
+- **The sharp's lead shrinks:** from d2 its detail is 0.95 of the 7B's (0.76 from d1 on these
+  shots), and the paired means move against it: PSNR-Y +0.02 dB (4 / 1 / 0), VMAF −1.11 (3 / 1 /
+  1), LPIPS +0.0058 (3 / 2 / 0), DISTS +0.0124 (1 / 4 / 0), against +0.41 dB, +0.96, −0.0044 and
+  +0.0037 from d1.
+- **`space` again:** from d2 the sharp's split has 5.54 times the GT's detail (the 7B 4.22) and
+  2.50 times its RMS below 0.7 px (2.18), and is further from the GT on all four scores. On the
+  other four shots the sharp stays closer by PSNR-Y (+0.18 to +0.41 dB).
+- **Against bicubic, the gap narrows: bicubic loses more from d2 than the models** (but the
+  sharp on `space`). PSNR-Y is 5.6 dB below bicubic's for both models from d2, against 6.9 (the
+  7B) and 6.5 (the sharp) on the same 5 shots from d1. LPIPS and DISTS fall below bicubic's on 2–3
+  of the 5 shots (the close-up: LPIPS −0.121 and −0.101, DISTS −0.043 and −0.027), where from d1
+  the models' DISTS was above bicubic's on 4 and 5 of them.
+- **d2 is only mildly heavier on these sources:** bicubic's two finest bands barely move (0.52 →
+  0.51 and 0.71 → 0.70 times the GT's RMS) and its PSNR-Y falls by 0.96–2.24 dB. ByteDance's
+  heavier degradations (blur, noise) are untested.
+
+### The seed
+
+The sharp at seed 43 on the 5 shots of part (d), from d1: its seed spread (seed 43's mean minus
+seed 42's, per shot) against the sharp − the 7B at seed 42, over the 5 shots:
+
+| Score | Seed spread, mean size | Sharp − 7B, mean size | Shots where the models differ by more than the spread |
+|---|---|---|---|
+| PSNR-Y (dB) | 0.11 | 0.49 | 4 (not `space`) |
+| VMAF | 0.55 | 2.84 | 5 |
+| LPIPS | 0.0026 | 0.0097 | 4 (not the close-up) |
+| DISTS | 0.0016 | 0.0077 | 5 |
+| Detail ÷ GT's | 0.19 | 0.67 | 4 (not `space`) |
+| RMS ÷ GT's below 0.7 px | 0.04 | 0.20 | 4 (not `space`) |
+
+- **The two models differ by 3.5–5.2 times the sharp's own seed spread on average,** on every
+  score, and by more than the spread on 4 or 5 of the 5 shots. The exceptions are seed 42's
+  near-ties: `space`'s PSNR-Y and detail (the sharp − the 7B: −0.09 dB and −0.09 of the GT's
+  Laplacian variance; the seed: +0.18 dB and −0.24) and the close-up's LPIPS (+0.0002 against
+  0.0037). `space`'s DISTS and VMAF gaps hold (7.1 and 4.7 spreads); on `sollevante-painted` the
+  gaps are the narrowest, 1.6–3.6 spreads on every score.
+- **The sharp's spread is of the 7B's order, a little wider,** on the three shots where the 7B has
+  seed 43 too (`space`, `sollevante-painted`, the close-up): PSNR-Y 0.07–0.22 dB against
+  0.05–0.12, VMAF 0.6–1.2 against 0.1–0.7, the detail ratio 0.05–0.55 against 0.05–0.49.
+- **Pooled into the 4K tables above** (the sharp's rows against bicubic; the pairs with the 7B on
+  `space`, `sollevante-painted` and the close-up), seed 43 moves the means per kind by at most
+  0.03 dB of PSNR-Y, 0.15 VMAF point, 0.0005 of LPIPS, 0.0003 of DISTS and 0.04 of the detail
+  ratio, and changes five per-shot verdicts at the margin: against bicubic, `sollevante-painted`'s
+  DISTS (+0.0009, worse, to −0.0002, within) and `space`'s low-frequency flicker (better to
+  within); against the 7B, `space`'s colour fringes (within to better, −0.085) and ΔE00 after a
+  16 px blur (within to better, −0.001), and the close-up's ΔE00 lf (within to worse, +0.001).
+
+### Crops
+
+`colour_crops.py` now puts several decodes in one strip (`--content LABEL=DECODE.pt`, repeated:
+every variant on each) and leaves out the luma-stretched twins (`--no-stretch`). Each strip is
+GT | bicubic | 7B split | sharp split at 1:1, each panel labelled with its mean ΔE00 to the GT;
+each folder's README.txt lists its windows, what each shows and the verdict recorded on it:
+
+- **4K from d1:** 31 strips in `D:\Video\seedvr2x\colour\crops-b2\`, step 5's windows on 13
+  shots (the first film's close-up included), panels of 512×288 (strips 2048 px wide); the 7B
+  panel is step 5's split panel, pixel for pixel.
+- **1080p:** 29 strips in `D:\Video\seedvr2x\colour\crops-b2-1080p\`: step 5's 10 windows at d1
+  (384×216) and step 4's 19 windows of anime-clean, anime-sky and live-slow at d2 (480×270).
+- **4K from d2:** 15 strips in `D:\Video\seedvr2x\colour\crops-b2-d2\`: step 5's windows on the
+  5 d2 shots, both models run from d2, bicubic from the d2 input.
+
+What to look at: on the shots where step 5's eyes rejected the 7B's invented texture (the
+close-up's skin, `cockpit`'s pores, `space`'s clouds, Sol Levante's painted texture), how the
+sharp's texture looks; where they wanted the 7B's redraw (`cel4k-detail`, `cel4k-night`,
+`digital-jet`'s text), whether the sharp keeps it; whether the d2 strips differ from the d1 ones
+on the same windows. The metrics part the two models most on the close-up (the sharp at under
+half the 7B's detail), `space` (the sharp further from the GT, from d1 and from d2),
+`sollevante-line` (the sharp with more detail) and anime-bright at 1080p (1.58 times the 7B's
+detail). The user's verdict follows.
+
 ## Decision brief
 
 **Recommendation.** seedvr2x's colour correction becomes a split in BT.709 Y'CbCr without numz's
@@ -1203,9 +1505,10 @@ after the user's eyes.
 - **Fidelity is not quality** ([numerics.md](numerics.md#caveats)): every score but DISTS and
   the detail measure rewards taking more from the input, which the GT is closer to in every
   band (step 0). DISTS, the Laplacian variance and the eyes are the guard on the model's detail.
-- One model (7B fp16) with numz's numerics; single shots of 45 frames in one batch; 8 clips at
-  1080p (animation and live action), 7 at the heavier degradation, 5 at ×4, 4 at 4K from one
-  film (13 more from three sources in step 5); 3 at ×1.5 and ×3. Seeds: 3 at d1, 2–3 elsewhere.
+- One model (7B fp16) with numz's numerics, the sharp 7B beside it in step 6; single shots of 45
+  frames in one batch; 8 clips at 1080p (animation and live action), 7 at the heavier
+  degradation, 5 at ×4, 4 at 4K from one film (13 more from three sources in step 5); 3 at ×1.5
+  and ×3. Seeds: 3 at d1, 2–3 elsewhere.
 - Factors tested: ×1.5, ×2, ×3, ×4 (×1.5 and ×3 on 3 clips, 2 seeds).
 - The variants are scored on the decode in float32, as seedvr2x keeps it; numz's own `lab`
   masters (step 0) were clamped bfloat16.
@@ -1231,6 +1534,11 @@ after the user's eyes.
 - **Step 5's eyes are one viewer's:** at 4K mostly one window per clip (the first of each
   folder; the `.stretch.png` twins kept the others out of view), at 1080p both windows of 5
   clips; one model (7B fp16), ×2 from the mild degradation (d1).
+- **Step 6's limits:** the sharp 7B at one seed (42) on 12 of its 17 4K shots and on all 26
+  1080p clips, at two only on the 5 shots of part (d); the comparison from d2 on 5 shots at one
+  seed. d2 is only mildly heavier than d1 on these sources (bicubic's fine bands barely move), and
+  ByteDance's heavier degradations (blur, noise) are untested. At 4K, ×2 only. The eyes on its
+  crops will be one viewer's.
 
 ## Reproduce
 
@@ -1348,4 +1656,37 @@ python3 $S/colour_crops.py --clip anime-clean-d1 --gt $C/anime-clean.gt.mkv \
   --content $D/anime-clean-d1/s42/decode.pt \
   --variants split:ycc:4:3,split:ycc:4:3:ds4_0.75,split:ycc:4:3:ds4_0.5,split:ycc:4:3:ds4_0.25 \
   --at 800,864 --at 400,480 --at-frame 22 --size 384x216 --per-kind 0 --out crops-b1-1080p/anime-clean
+```
+
+Step 6. The sharp's runs are the 7B's job lines with `--dit_model` alone changed (its inputs
+dumped once, `COLOUR_DUMP_INPUTS=1`, to check that they are the 7B's); `colour_clips.py` makes the
+4K d2 inputs; each sharp decode is scored with the 7B run's reference, under the tag `sharp`, then
+paired with the 7B's split:
+
+```bash
+S=scripts; C4=/path/to/clips4k; D=/path/to/dumps; N=/path/to/numz; c=digital-cockpit
+python3 $S/colour_clips.py make $C4/$c --factor 2 --degrade d2 --out clips4k   # fr_clips.py's d2, at 4K
+python3 $S/bench.py run colour-b2-$c-d1-sh42 --seedvr2-dir $N --wrap $S/colour_dump.py \
+  --env COLOUR_DUMP=$D/$c-d1/sh42 --env COLOUR_DUMP_INPUTS=0 -- $C4/$c.d1.lr.mkv --output out/ \
+  --dit_model seedvr2_ema_7b_sharp_fp16.safetensors --resolution 2016 --batch_size 45 --load_cap 45 \
+  --color_correction none --seed 42 --vae_decode_tiled --vae_decode_tile_size 2048 \
+  --vae_decode_tile_overlap 64                     # the 7B's line but --dit_model; 1080p: untiled
+# from d2: both models on clips4k/$c.d2.lr.mkv, the 7B first (COLOUR_DUMP_INPUTS=1: its reference serves both)
+python3 $S/colour_eval.py score --clip $c-d1 --gt $C4/$c.gt.mkv --bars 0:0 \
+  --ref sharp=$D/$c-d1/s42/ref_f32.pt --content s42=$D/$c-d1/sh42/decode.pt \
+  --variants none,split:ycc:4:3 --out eval-b2/$c-d1 --lpips --dists-every 9   # --bars: the 7B's own
+python3 $S/colour_eval.py render --clip $c-d1 --gt $C4/$c.gt.mkv --ref sharp=$D/$c-d1/s42/ref_f32.pt \
+  --content s42=$D/$c-d1/sh42/decode.pt --variants none,split:ycc:4:3 --out masters-b2 --pix-fmt gbrp16le
+python3 $S/colour_eval.py vmaf --clip $c-d1 --gt $C4/$c.gt.mkv --master-content s42 --out vmaf-b2/$c-d1 \
+  --master split:ycc:4:3@sharp=masters-b2/$c-d1.s42.split_ycc_4_3~sharp.gbrp16le.mkv   # one per variant
+python3 $S/colour_eval.py summary eval-b1/$c-d1 vmaf-b1/$c-d1 eval-b2/$c-d1 vmaf-b2/$c-d1 \
+  --baseline split:ycc:4:3@f32 --tables pairs      # the sharp - the 7B, frame by frame
+python3 $S/colour_eval.py summary eval-b1/$c-d1 vmaf-b1/$c-d1 eval-b2/$c-d1 vmaf-b2/$c-d1 \
+  --versus bicubic --tables versus                 # each model against bicubic
+python3 $S/colour_bands.py scan --clip $c-d1 --gt $C4/$c.gt.mkv --bicubic $C4/$c.d1.bicubic.mkv \
+  --ref $D/$c-d1/s42/ref_f32.pt --content $D/$c-d1/sh42/decode.pt --every 3 --out bands-b2/$c-d1-sharp.json
+python3 $S/colour_crops.py --clip $c-d1 --gt $C4/$c.gt.mkv --bicubic $C4/$c.d1.bicubic.mkv \
+  --ref $D/$c-d1/s42/ref_f32.pt --content 7B=$D/$c-d1/s42/decode.pt \
+  --content sharp=$D/$c-d1/sh42/decode.pt --variants split:ycc:4:3 --no-stretch --per-kind 0 \
+  --at 1840,700 --at 2020,430 --at-frame 22 --size 512x288 --out crops-b2/$c
 ```
