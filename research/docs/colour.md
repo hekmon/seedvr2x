@@ -2,8 +2,8 @@
 
 > Status: **steps 0 to 5 done** (step 4: the user's eyes, 2026-10-06; step 5, baton 1 of the 4K
 > relay, 2026-10-06, with the user's eyes on its crops given the same day: the 0.25 / 0.5
-> recommendation is withdrawn); **step 6 measured** (baton 2, the sharp 7B, night of
-> 2026-10-06; its crops await the user's eyes). Step 0 (the diagnosis) ran on the CPU from
+> recommendation is withdrawn); **step 6 done** (baton 2, the sharp 7B, night of
+> 2026-10-06, with the user's eyes on its crops on 2026-10-07). Step 0 (the diagnosis) ran on the CPU from
 > [numerics.md](numerics.md)'s masters; steps 1 to 3 and 5 on dumps of 7B fp16 runs (1080p, ×1.5
 > to ×4, the heavier degradation, VAE tiles, 4K on 17 shots), scored on the CPU. The study answers
 > "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab) and, with steps
@@ -41,8 +41,15 @@ In short:
   with the input's beats bicubic on LPIPS and DISTS (A = 0.25 at 4K, 9 of 9 clean shots; 0.5 at
   1080p, 7 of 8). The user's eyes want the model's redraw on structure, not its invented texture,
   by an amount that changes with the content: no single value fits, and the default stays the
-  split alone. A user scale is the user's proposal, not a finding; the sharp 7B is to be looked
-  at first.
+  split alone. A user scale is the user's proposal, not a finding.
+- **The sharp 7B over-renders less, and the eyes prefer it** (step 6): at 4K it keeps 0.53–0.88
+  of the 7B's fine detail by kind of source (the same uncorrelated texture, 7–26% less energy in
+  the finest band), closer to the GT by PSNR-Y and VMAF on 14 of 17 shots, with no guard worse.
+  The user's eyes prefer it on 27 of 75 windows, the 7B on 8, and see no difference on the rest:
+  the first film's skin loses its reptilian texture, light artefacts and blockiness go. The 7B
+  keeps the thinnest cel lines sharper; a heavier degradation (d2) tames neither model, and from
+  it the sharp over-renders clouds more. Recommended: the sharp 7B as the default model, with the
+  split alone.
 - **A float16 decode adds nothing after the correction** (within the seed band): numz's
   bfloat16 decode can stay.
 
@@ -1377,6 +1384,97 @@ half the 7B's detail), `space` (the sharp further from the GT, from d1 and from 
 `sollevante-line` (the sharp with more detail) and anime-bright at 1080p (1.58 times the 7B's
 detail). The user's verdict follows.
 
+### The user's eyes
+
+The user judged all 75 strips on 2026-10-07, window by window, the 7B's split against the
+sharp's (with no stretched twins, every window was seen). The criterion is step 5's: a picture
+redrawn, with crisper lines and cleaner colours, not the GT's washed-out picture made bigger.
+
+At 4K from d1 (31 windows):
+
+| Shot (windows) | Preferred | What the eyes saw |
+|---|---|---|
+| the first film's close-up (3) | the sharp, on all 3 | "way better": the reptilian texture is gone |
+| `cockpit` (3) | the sharp (2), alike (1) | the sharp really reduces the light artefacts, "much better" on the first window |
+| `dogfight` (1) | the sharp | cleaner |
+| `jet` (1) | the sharp | its letters a bit more readable, the style kept |
+| `sollevante-painted` (3) | the sharp (1), leaning to it (1), alike (1) | less blocky, fewer light artefacts |
+| `cel4k-detail` (3) | alike (2), the sharp (1) | in the flat window a bit more noise, but more consistent across the picture |
+| `cel4k-night` (3) | alike (2; the 7B maybe a bit sharper on one), the sharp (1) | the flat dark window cleaner with the sharp: fewer artefacts, more coherent |
+| `sollevante-line` (3) | alike | very thin differences: the 7B smoothing a little more on one, the sharp a little better on the finest lines on another |
+| `sollevante-action` (2) | alike | the source too detailed to tell |
+| `space` (3) | neither (2), the sharp a little (1) | both bad, on a hard source |
+| `sunrise` (3) | the sharp (1), the 7B a little (2) | the sharp more coherent on one; on another it fuses the colours too much |
+| `cel4k-flat` (3) | the 7B (2), neither (1) | the 7B draws sharper lines, "funny (that the sharp model is not the sharpest)"; both fail on the thread-thin writing, as expected |
+
+At 4K from d2 (15 windows):
+
+| Shot (windows) | Preferred | What the eyes saw |
+|---|---|---|
+| the first film's close-up (3) | the sharp, on all 3 | a better skin texture ("way better" on one), the GT's light grain removed |
+| `cockpit` (3) | the sharp (1), alike (2) | fewer light artefacts |
+| `sollevante-painted` (3) | the sharp (2), alike (1) | fewer artefacts |
+| `cel4k-detail` (3) | alike (2), the sharp (1) | the flat window smoother, less blocky |
+| `space` (3) | the 7B, on all 3 | the sharp increases the light artefacts a bit too much |
+
+At 1080p (29 windows: 10 at d1, step 4's 19 at d2):
+
+| Clip (windows) | Preferred | What the eyes saw |
+|---|---|---|
+| anime-bright, d1 (2) | alike; a tie | the sharp sharper but with fewer details, the 7B more details but a bit blurrier, like the GT |
+| anime-clean, d1 (2) | the sharp (1), alike (1) | the sharp keeps more of the existing detail |
+| live-slow, d1 (2) | alike, leaning to the sharp on one | a more homogeneous skin texture |
+| cartoon-bright and live-vfx, d1 (4) | alike | – |
+| anime-clean, d2 (5) | alike, leaning to the sharp on one edge | the sharp recreates better a drawing flaw the GT itself has |
+| anime-sky, d2 (8) | the sharp (2), alike (1), can't tell (5) | the sharp less noisy, a bit smoother; too bright to tell on five |
+| live-slow, d2 (6) | alike | plants a bit better with the sharp on one, the 7B maybe a little smoother on another |
+
+Over the 75 windows the eyes prefer or lean to the sharp on 27 (14 at 4K from d1, 7 from d2, 6
+at 1080p), the 7B on 8 (`cel4k-flat`'s lines 2, `cel4k-night` 1, `sunrise` 2, `space` from d2
+3), and see no difference, or can't tell, on 40.
+
+- **The sharp wins where step 5's eyes rejected the 7B's invented texture,** from d1 and from
+  d2: the close-up's skin on all 6 windows, `cockpit`'s light artefacts, Sol Levante's
+  blockiness, the cel scan's flat areas; at 1080p, a more homogeneous skin. Eyes and metrics
+  agree there: on the close-up the sharp keeps 0.66 of the GT's fine detail where the 7B keeps
+  1.47, and on `cockpit` it is closer to the GT on all four scores.
+- **On lines and text the two are mostly alike, and the sharp keeps the redraw step 5's eyes
+  wanted:** `jet`'s stencilled text a bit more readable, the style kept; Sol Levante's line art
+  and `cel4k-detail` alike. The exception is the cel scan's thinnest lines: on `cel4k-flat` the
+  7B draws them sharper on both hand-placed windows, where the metrics put the sharp closer to
+  the GT on all four scores (PSNR-Y +1.44 dB, DISTS −0.0129; 0.73 of the 7B's detail). As in
+  step 5, the eyes want a redraw of structure that full-reference metrics count as error.
+- **Smooth gradients split:** on `sunrise` the sharp is more coherent on one window, the 7B a
+  bit better on two, where the sharp fuses the colours too much; the metrics put the sharp
+  closer on all four scores there.
+- **From d2, clouds turn against the sharp:** `space` from d2 is the one shot where the eyes
+  prefer the 7B on every window, as the metrics found (5.54 times the GT's fine detail against
+  4.22; LPIPS +0.034, DISTS +0.043). From d1 both models fail on that source.
+- **At 1080p the two look alike** on most windows (17 of 29); where the eyes split, they lean
+  to the sharp (6) and never to the 7B. On anime-bright, where the sharp has 1.58 times the 7B's
+  Laplacian variance and is further from the GT on every score, the eyes see a tie: sharper
+  lines, fewer details.
+- **Limits:** one viewer; 1:1 crops of 1–3 windows per shot, one seed; no crops at ×1.5, ×3 or
+  ×4 (at ×4 the metrics are mixed: live-vfx 3.46 dB further from the GT with the sharp).
+
+### What step 6 recommends
+
+- **The sharp 7B as seedvr2x's default model, at 1080p and 4K.** The eyes prefer it or see no
+  difference on 67 of 75 windows, and it removes the defect that drove step 5's detail-strength
+  idea, the over-textured skin, with no guard worse: banding the same, colour the same after the
+  split, colour fringes and full-resolution flicker lower. It has the 7B's architecture, memory
+  and time.
+- **No detail strength by default, and no user scale needed in v1:** the split alone (A = 1)
+  stays. What remains goes both ways with the content (the 7B's sharper thin cel lines, the
+  sharp's fused gradient colours, its clouds from compressed input), where a global strength
+  would mend one case by harming another (step 5). If a scale is wanted later, the candidate is
+  a structure-aware strength (keep the lines, tame isotropic texture), to study on step 6's
+  dumps, on the CPU, with `space` from d2 as its test case.
+- **Before trusting the default at other factors:** crops at ×1.5, ×3 and ×4 from step 6's
+  dumps (CPU only); the metrics are mixed at ×4.
+- **ByteDance's warning is tested only mildly:** a heavier compression (d2) tames neither model;
+  blurred or noisy inputs would need GPU runs.
+
 ## Decision brief
 
 **Recommendation.** seedvr2x's colour correction becomes a split in BT.709 Y'CbCr without numz's
@@ -1500,6 +1598,24 @@ after the user's eyes.
   the content: better than bicubic on structure (lines, text), worse where the model invents
   texture.
 
+**The sharp 7B (step 6, baton 2, and the user's eyes, 2026-10-07).** Recommendation: the sharp
+7B (`seedvr2_ema_7b_sharp_fp16`) as seedvr2x's default model at 1080p and 4K, with the split
+alone (A = 1); no detail scale in v1.
+- **It answers (c) above:** it over-renders less (at 4K 0.53–0.88 of the 7B's fine detail by
+  kind, the same texture with less energy), the eyes prefer it or see no difference on 67 of 75
+  windows, and it removes the defect behind (a): the first film's skin is no longer reptilian.
+  The 7B's architecture, memory and time; banding and colour after the split unchanged, fringes
+  and flicker lower.
+- **(a) and (b):** with the sharp model the eyes' main complaint is gone. What remains goes both
+  ways with the content (the 7B's sharper thin cel lines, the sharp's fused gradient colours, its
+  clouds from compressed input), where a global strength would mend one case by harming another;
+  a structure-aware strength stays the candidate if a scale is wanted later.
+- **ByteDance's warning, tested mildly:** a heavier degradation (d2: area ×½, x264 CRF 26) tames
+  neither model at 4K; blur and noise are untested.
+- **For "4K output's quality":** the sharp model still trails bicubic on PSNR-Y and VMAF on every
+  shot; by eye it is the better of the two models on invented texture and level with the 7B on
+  most lines.
+
 ## Caveats
 
 - **Fidelity is not quality** ([numerics.md](numerics.md#caveats)): every score but DISTS and
@@ -1538,7 +1654,7 @@ after the user's eyes.
   1080p clips, at two only on the 5 shots of part (d); the comparison from d2 on 5 shots at one
   seed. d2 is only mildly heavier than d1 on these sources (bicubic's fine bands barely move), and
   ByteDance's heavier degradations (blur, noise) are untested. At 4K, ×2 only. The eyes on its
-  crops will be one viewer's.
+  crops are one viewer's, with no crops at ×1.5, ×3 or ×4.
 
 ## Reproduce
 
