@@ -50,6 +50,7 @@ filed, with the same checks before filing.
 | File | Project | Title | Severity | Status | Summary |
 |---|---|---|---|---|---|
 | [ffmpeg-zscale-slice-threading](ffmpeg-zscale-slice-threading.md) | FFmpeg | `zscale`'s output depends on the filter thread count | wrong output | measured | A seam in the 4:2:0 chroma at each band edge; a 10-bit 4:2:0 read off on nearly every sample from 4 bands on; `threads=1` restores the one-band output |
+| [comfy-kitchen-32-bit-quantizer-indices](comfy-kitchen-32-bit-quantizer-indices.md) | comfy-kitchen | The CUDA fp8 and NVFP4 quantizers index in 32 bits | wrong output | measured, and read in the code | From 2^32 values in one tensor, fp8 never writes the last 2^32 bytes of its output (SeedVR2's 7B in fp8 W8A8 at 4K came out all NaN), and NVFP4's aligned path quantizes the values 2^32 earlier, finite and wrong; int8 runs right |
 
 ## Considered and not filed
 
