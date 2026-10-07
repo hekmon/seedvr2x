@@ -19,6 +19,18 @@ files itself, at a revision of this repository and with SHA-256s pinned in its c
 was made from its original by a script that pins its inputs and checks its output, and running
 the scripts again gives the same bytes (`SHA256SUMS`).
 
+## Which file to use
+
+| | File | Size | What you give up |
+|---|---|---|---|
+| **Recommended** | `seedvr2x_ema_7b_fp16.safetensors` (float16) | 16.5 GB | nothing: the reference |
+| 8 GB tier | `seedvr2x_ema_7b_int8_convrot.safetensors` (int8, rotated) | 8.3 GB | almost nothing: as close to the float16 model as another seed of it, or closer; faster on GeForce RTX 20 to 50 |
+| 4 GB tier | `seedvr2x_ema_7b_Q4_K.gguf` (GGUF Q4_K) | 4.8 GB | some fine detail on some sources; saves memory only, a little slower |
+
+Take float16 when your GPU has room for it, else the 8 GB file, else the 4 GB one. The sharp
+7B has the same three, with `_sharp` after `7b` in the name. The other formats, and how each was
+measured, are [further down](#every-format-in-detail).
+
 | File | Bytes | SHA-256 | Made from | Change |
 |---|---|---|---|---|
 $files
@@ -49,7 +61,7 @@ ByteDance's masters are float32: 33 GB for a 7B DiT. The files here hold them in
 - The VAE stays in float16 too: quantizing its weights (0.47 GiB) would save nothing, and its 3D
   convolutions have no 8- or 4-bit path.
 
-## Which file to choose
+## Every format, in detail
 
 The 7B DiT, the model that does the upscaling (the VAE turns frames into its input and back),
 can be stored in several formats. A smaller file saves memory, sometimes time, and loses some
