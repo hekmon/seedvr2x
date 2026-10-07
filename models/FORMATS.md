@@ -182,19 +182,35 @@ The users' table, as the card gives it once the files are published, quality "to
 until the GPU runs. "W8A8": weights and activations in 8 bits, the multiply in 8 bits;
 "W8A16": weights stored in 8 bits, widened to 16 for the multiply (memory only).
 
-| Format | Size (7B) | How it multiplies | Faster on | Error per weight | Quality |
+| Format | Size (7B) | How it multiplies | Multiply rate against 16 bits | Error per weight | Quality |
 |---|---|---|---|---|---|
-| float16 | 16.5 GB | 16-bit | every GPU, the reference | 0.02% | the reference |
-| fp8, a scale per tensor | 8.3 GB | W8A8 from RTX 40 (Ada, sm_89); W8A16 before | RTX 40, 50 | 2.65% | to be measured |
-| int8, rotated | 8.3 GB | W8A8 from RTX 20 (Turing, sm_75) | RTX 20 to 50 | 0.86% | to be measured |
-| GGUF Q8_0 | 8.8 GB | W8A16 | none: memory only | 0.56% | to be measured |
-| GGUF Q4_K | 4.8 GB | W4A16 | none: memory only, a little slower | 7.35% | to be measured |
-| NVFP4, searched scales | 4.8 GB | W4A4 on Blackwell (sm_100, sm_120); W4A16 before | RTX 50 | 8.80% | to be measured |
+| float16 | 16.5 GB | 16-bit: bf16 accumulated in fp32 (fp16 on RTX 20) | 1x, the reference | 0.02% | the reference |
+| fp8, a scale per tensor | 8.3 GB | W8A8 from RTX 40 (Ada, sm_89); W8A16 before | 2x on RTX 40 and 50 (RTX 50: 2.3-2.9x measured by others) and on workstation Ada and Blackwell cards; 1x before RTX 40 | 2.65% | to be measured |
+| int8, rotated | 8.3 GB | W8A8 from RTX 20 (Turing, sm_75) | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% | to be measured |
+| GGUF Q8_0 | 8.8 GB | W8A16 | 1x: memory only | 0.56% | to be measured |
+| GGUF Q4_K | 4.8 GB | W4A16 | 1x: memory only, a little slower | 7.35% | to be measured |
+| NVFP4, searched scales | 4.8 GB | W4A4 on Blackwell (sm_100, sm_120); W4A16 before | 8x on RTX 50; 4x on workstation Blackwell cards; 1x before Blackwell | 8.80% | to be measured |
 
-- Speed: only the DiT gets faster, about a fifth of a 1080p job (the VAE, in 16 bits, is the
-  rest): a DiT twice as fast shortens a job by about 10%. The main gain is memory. No speed is
-  measured here: the GPU box has a power-cap fault, so this column states native support only,
-  until a healthy card measures it.
+- The rate column gives the peak rate of the multiply the DiT's matrices use, by NVIDIA's own
+  tables, against the 16-bit multiply on the same card: Turing (TU102), Ampere (GA102), Ada
+  (AD102) and RTX Blackwell (GB202, GeForce and PRO) whitepapers, each card family's dense rates.
+  - GeForce cards run a multiply accumulated in fp32 at half rate when its inputs are 16-bit
+    floats or fp8, but integer and 4-bit multiplies at full rate. Workstation cards (Quadro RTX
+    6000/8000, RTX A6000, RTX 6000 Ada, RTX PRO 6000) and the TITAN RTX halve nothing.
+  - So int8's multiply is 4 times the 16-bit one on a GeForce card, twice fp8's on an RTX 40. On a
+    workstation card both 8-bit multiplies are twice the 16-bit one.
+  - RTX 20 has no bf16 tensor cores: its 16-bit reference is fp16.
+  - RTX 50's fp8 at 2x is NVIDIA's table. cuBLAS, which runs it, uses Blackwell's block-scaled
+    instruction, which GeForce doesn't halve: others measured 2.3-2.9x the bf16 rate.
+  - fp8 and NVFP4 accumulate in fp32: cuBLAS offers them no other way.
+- A peak is not a job's speed:
+  - each 8- or 4-bit multiply first rounds its input, an extra pass over the activations;
+  - attention stays in 16 bits;
+  - the DiT is about a fifth of a 1080p job (the VAE, in 16 bits, is the rest).
+
+  By our estimate, matrices multiplied 3 to 4 times faster make the DiT about twice as fast, and
+  a job about 10% shorter. The main gain is memory. No speed is measured here: the GPU box has a
+  power-cap fault, until a healthy card measures it.
 - An 8- or 4-bit multiply rounds each layer's input too: a second loss the error per weight
   doesn't show, which only the GPU runs measure.
 

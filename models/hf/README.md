@@ -59,14 +59,14 @@ publish, each against ours.
 
 **This repository's files**
 
-| Format | Size (7B) | Where it runs faster | Error per weight: typical (worst layer) | Here |
+| Format | Size (7B) | Multiply speed, against float16 | Error per weight: typical (worst layer) | Here |
 |---|---|---|---|---|
-| **float16** | 16.5 GB | every GPU, at the reference speed | 0.02% (0.02%) | **yes** |
-| fp8, with a scale per tensor | 8.3 GB | RTX 40 and 50: 8-bit multiply | 2.6% (2.7%) | to come |
-| int8, rotated, with a scale per row | 8.3 GB | RTX 20 to 50: 8-bit multiply | 0.86% (1.08%) | to come |
-| GGUF Q8_0 | 8.8 GB | none: memory only | 0.6% (0.6%) | to come |
-| GGUF Q4_K | 4.8 GB | none: memory only, a little slower | 7.3% (7.9%) | to come |
-| NVFP4, with searched scales | 4.8 GB | RTX 50: 4-bit multiply | 8.8% (8.9%) | to come |
+| **float16** | 16.5 GB | 1x on every GPU: the reference | 0.02% (0.02%) | **yes** |
+| fp8, with a scale per tensor | 8.3 GB | 2x on RTX 40 and 50 (up to 3x measured on RTX 50) and on workstation Ada and Blackwell cards; 1x before RTX 40: memory only | 2.6% (2.7%) | to come |
+| int8, rotated, with a scale per row | 8.3 GB | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% (1.08%) | to come |
+| GGUF Q8_0 | 8.8 GB | 1x: memory only | 0.6% (0.6%) | to come |
+| GGUF Q4_K | 4.8 GB | 1x: memory only, a little slower | 7.3% (7.9%) | to come |
+| NVFP4, with searched scales | 4.8 GB | 8x on RTX 50; 4x on workstation Blackwell cards (RTX PRO); 1x before Blackwell: memory only | 8.8% (8.9%) | to come |
 
 **Other repositories' files, against ours**
 
@@ -98,10 +98,18 @@ How to read it:
   multiplication. The file saves memory, not time.
 - **8-bit or 4-bit multiply:** the GPU multiplies in 8 or 4 bits, which is faster, but each
   layer's input is rounded to 8 or 4 bits too: a second loss, which this table doesn't show.
+- **Multiply speed:** the GPU's peak rate for the DiT's matrices, from NVIDIA's specifications,
+  against its own 16-bit rate (RTX 20 has no bf16 support: there the reference is fp16).
+  GeForce cards run 16-bit and fp8 multiplies at half rate when they add up in 32 bits, as they
+  do here, but integer and 4-bit multiplies at full rate. Workstation cards (Quadro RTX, RTX
+  A6000, RTX 6000 Ada, RTX PRO 6000) halve nothing. That is why int8 gets 4x on a GeForce card,
+  twice fp8's on an RTX 40. RTX 50's fp8 is 2x in NVIDIA's table; others measured up to 3x.
 - **What you see** is measured separately, on videos, against how much two seeds of the float16
   model differ. Each smaller file is published once it passes that test, its result added here.
-- **Speed:** only the DiT gets faster. At 1080p it takes about a fifth of a job (the VAE, which
-  stays in float16, takes the rest), so even a DiT twice as fast shortens a job by about 10%.
+- **Speed:** a faster multiply is not a faster job. Rounding each input takes its own pass,
+  attention stays in 16 bits, and only the DiT gets faster. At 1080p the DiT takes about a fifth
+  of a job (the VAE, which stays in float16, takes the rest). By our estimate, multiplies 3 to 4
+  times faster make the DiT about twice as fast, and a job about 10% shorter.
   The main gain of a smaller file is memory: on a 16–32 GB card, seedvr2x can process more
   frames at a time and move less of the model out to system memory.
 - Measured on the 7B (the sharp 7B's files are within 0.01%), against its float32 master: this
