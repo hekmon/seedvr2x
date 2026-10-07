@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Full-reference inputs at another upscale factor, for the colour study (docs/colour.md).
 
-  colour_clips.py make CLIPS_DIR/NAME --factor F --out DIR [--degrade d1|d2] [--threads 8]   # F: 4, 3, 1.5...
+  colour_clips.py make CLIPS_DIR/NAME --factor F --out DIR [--degrade d1|d2] [--threads 16]   # F: 4, 3, 2, 1.5...
 
 Why: fr_clips.py makes a clip's ground truth and its x1/2 inputs (d1, d2). The colour study also
 needs x4 inputs, since the scale of a colour correction's split may follow the upscale factor
@@ -16,9 +16,16 @@ for the other clips (at x1/2 the files are NAME.d2.*, fr_clips.py's names, in DI
   bgr0, which the CLI's reader (cv2) gets bit-exactly
 - NAME.d1xF.bicubic.mkv: the baseline: the input upscaled xF with zscale bicubic b = 0, c = 1/2
   (Catmull-Rom) to 16-bit RGB at the ground truth's size
-The ground truth stays CLIPS_DIR/NAME.gt.mkv. Needs ffmpeg with zimg and libx264. Every zscale runs
-on one slice (threads=1), as fr_clips.py's: ffmpeg's slice threading changes a 10-bit 4:2:0
-source's RGB (8-bit sources and the resizes were measured unaffected).
+The ground truth stays CLIPS_DIR/NAME.gt.mkv. The 4K clips (fr_clips.py make --tonemap and
+--src-crop: a film's HDR frames, the picture without its bars) work alike: their src.mkv is already
+the SDR tone map of the picture's window and their manifest's colours SDR's, so the inputs are
+fr_clips.py's 4K ones (x1/2 of 3840x2016: 1920x1008). The recipe (filters, x264 and FFV1 settings,
+colour tags) is fr_clips.py's own, imported (next to this script, or MEAS_SCRIPTS), and so are the
+commands: at --factor 2 the files are, frame for frame, the ones fr_clips.py writes, with its
+--threads (16, its default and the clips'), as x264's output depends on its thread count. (Their
+md5 still differ: the Matroska muxer writes random segment and track UIDs.) Needs ffmpeg with zimg
+and libx264. Every zscale runs on one slice (threads=1), as fr_clips.py's: ffmpeg's slice threading
+changes a 10-bit 4:2:0 source's RGB (8-bit sources and the resizes were measured unaffected).
 """
 import argparse
 import json
@@ -27,16 +34,13 @@ import shutil
 import subprocess
 import sys
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+# fr_clips.py (measurement's, imported for its recipe): next to this script, or MEAS_SCRIPTS
+sys.path.append(os.environ.get("MEAS_SCRIPTS", HERE))
+import fr_clips as FR  # noqa: E402
+
 FFMPEG = os.environ.get("COLOUR_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
 FFPROBE = os.environ.get("COLOUR_FFPROBE") or shutil.which("ffprobe") or "ffprobe"
-# fr_clips.py's constants (its d1 recipe)
-FFV1 = ["-c:v", "ffv1", "-level", "3", "-g", "1", "-slices", "16", "-slicecrc", "1"]
-THIRD = "0.3333333333333333"
-MITCHELL = f"filter=bicubic:param_a={THIRD}:param_b={THIRD}"  # zimg: param_a = b, param_b = c
-CATROM = "filter=bicubic:param_a=0:param_b=0.5"
-KEYINT = 48
-CRF = {"d1": 20, "d2": 26}  # fr_clips.py's DEGRADATIONS
-ZMATRIX = {"bt709": "709", "smpte170m": "170m", "bt470bg": "470bg", "bt2020nc": "2020_ncl"}
 
 
 def run(cmd, what):
@@ -57,31 +61,15 @@ def probe(path):
     return s["width"], s["height"], s["pix_fmt"], int(s["nb_read_packets"])
 
 
-def rgb_params(c):
-    return f"setparams=colorspace=gbr:range=pc:color_primaries={c['primaries']}:color_trc={c['transfer']}"
-
-
-def rgb_tags(c):
-    return ["-colorspace", "rgb", "-color_primaries", c["primaries"], "-color_trc", c["transfer"],
-            "-color_range", "pc"]
-
-
-def yuv_params(c):
-    return (f"setparams=colorspace={c['matrix']}:range={c['range']}:color_primaries={c['primaries']}"
-            f":color_trc={c['transfer']}:chroma_location={c['chroma_location']}")
-
-
-def yuv_tags(c):
-    return ["-colorspace", c["matrix"], "-color_primaries", c["primaries"], "-color_trc", c["transfer"],
-            "-color_range", c["range"], "-chroma_sample_location", c["chroma_location"]]
-
-
 def make(a):
     base = a.clip
     name = os.path.basename(base)
+    for suffix in ("json", "src.mkv", "gt.mkv"):
+        if not os.path.exists(f"{base}.{suffix}"):
+            sys.exit(f"{base}.{suffix}: missing (fr_clips.py make's NAME.json, NAME.src.mkv and NAME.gt.mkv needed)")
     with open(base + ".json", encoding="utf-8") as f:
         man = json.load(f)
-    c = man["colours"]
+    c = man["colours"]  # src.mkv's: a tone-mapped clip's are SDR's
     W, H, _, n_gt = probe(base + ".gt.mkv")
     F = a.factor  # 1.5 too: 1920x1080 / 1.5 = 1280x720
     w, h = round(W / F), round(H / F)
@@ -91,27 +79,29 @@ def make(a):
     deg = a.degrade
     tag = deg if F == 2 else f"{deg}x{F:g}"
     p = lambda suffix: os.path.join(a.out, f"{name}.{tag}.{suffix}")  # noqa: E731
-    zm = ZMATRIX[c["matrix"]]
+    zm = FR.ZMATRIX[c["matrix"]]
     zr = "full" if c["range"] == "pc" else "limited"
     lr = {"matrix": c["matrix"], "range": "tv", "chroma_location": "left", "primaries": c["primaries"],
           "transfer": c["transfer"]}
     T = str(a.threads)
+    # fr_clips.py make's degradation commands, the size x1/F instead of x1/2
     if deg == "d1":
-        down = (f"zscale=threads=1:w={w}:h={h}:{MITCHELL}:matrixin={zm}:matrix={zm}:rangein={zr}:range=limited"
+        down = (f"zscale=threads=1:w={w}:h={h}:{FR.MITCHELL}:matrixin={zm}:matrix={zm}:rangein={zr}:range=limited"
                 f":chromalin={c['chroma_location']}:chromal=left:dither=none")
     else:  # fr_clips.py's d2: swscale's area filter (zimg has none)
         down = f"scale={w}:{h}:flags=area+accurate_rnd:out_range=tv"
     run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", base + ".src.mkv", "-map", "0:v:0",
-         "-vf", f"{down},format=yuv420p,{yuv_params(lr)}", "-fps_mode", "passthrough",
-         "-c:v", "libx264", "-preset", "slow", "-crf", str(CRF[deg]), "-x264-params", f"keyint={KEYINT}",
-         "-threads", T, "-pix_fmt", "yuv420p", *yuv_tags(lr), p("x264.mkv")], f"{tag} encode")
-    to_rgb = f"zscale=threads=1:matrixin={ZMATRIX[lr['matrix']]}:rangein=limited:chromalin=left:dither=none"
+         "-vf", f"{down},format=yuv420p,{FR.yuv_params(lr)}", "-fps_mode", "passthrough",
+         "-c:v", "libx264", "-preset", "slow", "-crf", str(FR.DEGRADATIONS[deg]["crf"]),
+         "-x264-params", f"keyint={FR.KEYINT}", "-threads", T, "-pix_fmt", "yuv420p", *FR.yuv_tags(lr),
+         p("x264.mkv")], f"{tag} encode")
     run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-threads", T, "-i", p("x264.mkv"),
-         "-map", "0:v:0", "-vf", f"{to_rgb},format=gbrp,{rgb_params(c)}", "-fps_mode", "passthrough",
-         *FFV1, "-threads", T, "-pix_fmt", "bgr0", *rgb_tags(c), p("lr.mkv")], f"{tag} input")
+         "-map", "0:v:0", "-vf", f"{FR.zscale_to_rgb(lr)},format=gbrp,{FR.rgb_params(c)}",
+         "-fps_mode", "passthrough", *FR.FFV1, "-threads", T, "-pix_fmt", "bgr0", *FR.rgb_tags(c), p("lr.mkv")],
+        f"{tag} input")
     run([FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", p("lr.mkv"), "-map", "0:v:0",
-         "-vf", f"zscale=threads=1:w={W}:h={H}:{CATROM}:dither=none,format=gbrp16le,{rgb_params(c)}",
-         "-fps_mode", "passthrough", *FFV1, "-threads", T, "-pix_fmt", "gbrp16le", *rgb_tags(c),
+         "-vf", f"zscale=threads=1:w={W}:h={H}:{FR.CATROM}:dither=none,format=gbrp16le,{FR.rgb_params(c)}",
+         "-fps_mode", "passthrough", *FR.FFV1, "-threads", T, "-pix_fmt", "gbrp16le", *FR.rgb_tags(c),
          p("bicubic.mkv")], f"{tag} bicubic baseline")
     for suffix, want in (("x264.mkv", (w, h)), ("lr.mkv", (w, h)), ("bicubic.mkv", (W, H))):
         fw, fh, fmt, n = probe(p(suffix))
@@ -127,10 +117,12 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("make")
     m.add_argument("clip", help="CLIPS_DIR/NAME: NAME.json, NAME.src.mkv and NAME.gt.mkv there")
-    m.add_argument("--factor", type=float, default=4, help="the upscale factor: x1/F inputs (4, 3, 1.5...)")
+    m.add_argument("--factor", type=float, default=4,
+                   help="the upscale factor: x1/F inputs (4, 3, 1.5...; 2: fr_clips.py's own)")
     m.add_argument("--out", required=True)
-    m.add_argument("--degrade", choices=tuple(CRF), default="d1", help="fr_clips.py's recipe: d1 or d2")
-    m.add_argument("--threads", type=int, default=8)
+    m.add_argument("--degrade", choices=tuple(FR.DEGRADATIONS), default="d1", help="fr_clips.py's recipe: d1 or d2")
+    m.add_argument("--threads", type=int, default=16,
+                   help="ffmpeg's and x264's: x264's output depends on it (16: fr_clips.py's default, the clips')")
     a = ap.parse_args()
     make(a)
 
