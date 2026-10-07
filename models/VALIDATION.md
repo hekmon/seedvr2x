@@ -4,8 +4,8 @@
 > (Weights: phase 2's files are validated by GPU runs before they ship). Tier 1 (1080p, 8 clips)
 > done for every file of the 7B and the sharp 7B, in every way it multiplies; the 4K slice done
 > for the 7B's fp8 (W8A16) and Q8_0 and for five of the sharp's files (int8, the dynamic GGUF,
-> Q4_K, fp8 W8A8, Q8_0); the user's eyes given on the 7B's 1080p crops, not yet on the 4 GB
-> files' nor on the sharp's. numz's SeedVR2 at `4490bd1` ran our safetensors files through
+> Q4_K, fp8 W8A8, Q8_0); the user's eyes given on the 7B's 1080p crops and the sharp's 4K
+> crops, the two other sets left as optional. numz's SeedVR2 at `4490bd1` ran our safetensors files through
 > [`gpu/ck_patch.py`](gpu/ck_patch.py) (comfy-kitchen 0.2.37's layers) and our GGUF files through
 > its own loader; colour.md's tools scored them ([colour.md](../research/docs/colour.md#reproduce)).
 > What each format does to the weights: [FORMATS.md](FORMATS.md). The GPU has a power-cap fault:
@@ -45,11 +45,13 @@ own seeds differ):
   **The 4 GB pick is its dynamic GGUF:** the closest to float16 at 1080p, and at 4K too (43.3 dB
   against Q4_K's 42.0, closer on all 5 shots; the Q4_K with importance did not run there), where
   it crosses the line only on digital live action's finest texture (lower, as on live action at
-  1080p) and on one colour cell of near-zero spread. The eyes have yet to judge it.
+  1080p) and on one colour cell of near-zero spread. To the eyes, at 4K, it looks the same as the
+  others.
 - **The eyes:** on 10 windows of 5 clips at 1080p, the 7B's fp8 (both ways), int8, Q8_0, Q4_K,
   numz's Q4_K_M and NVFP4 W4A4 beside float16: nothing to report on any window (the user,
-  2026-10-07). The 4 GB files' crops and the sharp's, at 1080p and 4K: not given when this was
-  written.
+  2026-10-07). At 4K, the sharp's int8, dynamic GGUF, Q4_K, fp8 W8A8 and Q8_0 beside its
+  float16: all alike at a few seconds per strip. The 7B's 4 GB files and the sharp at 1080p were
+  left as optional, not judged.
 - **The runtime path is the one meant:** exactly the 288 marked matrices become comfy-kitchen
   layers, every other tensor equal to the float16 file's; each mode runs its kernel on all 288
   and none dequantizes where it must not (W8A8 torch's scaled_mm, int8 comfy-kitchen's
@@ -419,12 +421,14 @@ digital-space too (numz's warning of a NaN cast in all three runs), where it ran
 - **The 7B at 1080p** (10 windows on anime-clean, anime-bright, cartoon-bright, live-vfx,
   live-slow: GT, bicubic, float16, fp8 W8A16, fp8 W8A8, int8, Q8_0, Q4_K, numz's Q4_K_M, NVFP4
   W4A4): nothing to report on any window, NVFP4 W4A4 and Q4_K included (the user, 2026-10-07).
-- **The 7B's 4 GB files at 1080p** (the same windows: float16, Q4_K, Q4_K with importance, the
-  dynamic file, NVFP4 W4A16 and W4A4, numz's Q4_K_M): not given when this was written.
-- **The sharp 7B at 1080p** (the same windows: its float16 and its 9 file-modes): not given when
-  this was written.
 - **The sharp 7B at 4K** (colour's 15 windows on its 5 shots, 512×288 at 1:1: GT, bicubic,
-  float16, int8, the dynamic GGUF, Q4_K, fp8 W8A8, Q8_0): not given when this was written.
+  float16, int8, the dynamic GGUF, Q4_K, fp8 W8A8, Q8_0): "they all seem quite similar", the
+  same to the user at a few seconds per strip; a minute on each might find a small imperfection
+  (the user, 2026-10-07).
+- **The 7B's 4 GB files at 1080p** (the same windows: float16, Q4_K, Q4_K with importance, the
+  dynamic file, NVFP4 W4A16 and W4A4, numz's Q4_K_M) and **the sharp 7B at 1080p** (its float16
+  and its 9 file-modes): left as optional by the user, not judged: the 7B's 1080p crops had
+  shown nothing, NVFP4 W4A4 included.
 
 ## Caveats
 
