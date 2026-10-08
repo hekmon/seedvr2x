@@ -60,11 +60,15 @@ safetensors writer.
   TensorFlow weights). What other tools' files show (tensor names, layouts, which tensors they
   quantize) is taken only where a runtime needs it to load ours, and checked, never copied as a
   choice.
-- **Third-party code:** none is copied into `models/`. `transnetv2_weights.py` downloads and
-  runs TransNetV2's own `convert_weights.py` and model code (MIT, Tomáš Souček) at the pinned
-  commit, unchanged; `NOTICE`, the card and `transnetv2.LICENSE` credit it. Code used or ported
-  from elsewhere is named here, with its licence, and in `NOTICE` when an uploaded file is made
-  with it.
+- **Third-party code:** none is copied into `models/`. Two pieces are adapted, rebuilt or
+  rewritten here rather than copied, and credited in the repository's [`NOTICE`](../NOTICE):
+  comfy-kitchen's regular Hadamard rotation (Apache-2.0), rebuilt from its definition
+  (H4 ⊗ H4 ⊗ … / √n) in `ck_check.py`, `seedvr2_int8.py` and `gpu/ck_patch.py`; and TransNetV2's
+  `predict_frames` windows (MIT), rewritten in `transnetv2_weights.py` for the PyTorch model.
+  `transnetv2_weights.py` also downloads and runs TransNetV2's own `convert_weights.py` and model
+  code (MIT, Tomáš Souček) at the pinned commit, unchanged; the upload's `NOTICE`, the card and
+  `transnetv2.LICENSE` credit it. Code used or ported from elsewhere is named here, with its
+  licence, and in the upload's `NOTICE` when an uploaded file is made with it.
   - comfy-kitchen (Comfy-Org, Apache-2.0, Copyright (c) 2025 Comfy Org; 0.2.37 at `be003b7`): a
     run-time dependency of `ck_check.py` (inline, installed by uv) and `gpu/ck_patch.py`
     (installed for numz's interpreter, outside its venv), not vendored; our fp8, int8 and NVFP4

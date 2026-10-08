@@ -119,6 +119,6 @@ their lines word for word), tests and one-off helpers (estimates, reorders, crop
 Our code. It calls this repository's [research/scripts](../../../research/scripts):
 `colour_dump.py`, `colour_eval.py`, `colour_bands.py`, `colour_crops.py`
 ([colour.md](../../../research/docs/colour.md#reproduce)), `bench.py`, `fr_metrics.py`,
-`ffv1_out.py`; it runs numz's SeedVR2 CLI (numz/SeedVR2_comfyUI at `4490bd1`, Apache-2.0),
-unchanged, through `bench.py` and our wrapper `../ck_patch.py`, which uses comfy-kitchen
-(Apache-2.0); ffmpeg with libvmaf scores. No third-party code is copied here.
+`ffv1_out.py`; it runs numz's SeedVR2 CLI (numz/ComfyUI-SeedVR2_VideoUpscaler at `4490bd1`,
+Apache-2.0), unchanged, through `bench.py` and our wrapper `../ck_patch.py`, which uses
+comfy-kitchen (Apache-2.0); ffmpeg with libvmaf scores. No third-party code is copied here.
