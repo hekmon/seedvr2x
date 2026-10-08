@@ -264,8 +264,11 @@ phase 2's (below).
 - **The regular 7B stays the reference** milestone 1 is checked with: numz's 7B fp16 file, and
   ours equal to it.
 - **Recognised by content.** A model file is checked by its own tensors, not by its name, which
-  is what numz goes by (`src/core/model_configuration.py:717-719`). Anything but a 7B in fp16,
-  the sharp one or the regular one, is refused, saying what the file is.
+  is what numz goes by (`src/core/model_configuration.py:718-720`): their names and shapes,
+  pinned per architecture, and every tensor's dtype, read from the file's header without
+  torch, before anything else runs (the resume's comparison, the first pass). Anything but a 7B
+  in fp16, the sharp one or the regular one, is refused, saying what the file is; so is a file
+  holding other tensors beside the model's.
 - **Small cards** rely on BlockSwap and tiling (milestone 3): the 7B fp16 DiT's weights alone
   take 15.35 GiB. Milestone 3 measures how small a card that reaches, 16 GB being the aim:
   there every block is swapped, its weights in pinned host RAM (about 15 GiB of it). numz's
@@ -288,7 +291,8 @@ they differ and by which metrics, and how users are guided to them. What is know
 - **Comfy-Org's own repo** (`Comfy-Org/SeedVR2` on Hugging Face, apache-2.0, "repackaged
   model files for ComfyUI") ships the 3B, 7B and sharp 7B in fp16, fp8 (a plain cast, like
   numz's), MXFP8, INT8 W8A8 with a rotation, and NVFP4 (the 7B 4.76 GB); its VAE is numz's file.
-  It is made by a GPL converter, never read.
+  Its 7B in fp16 holds the positive and negative text conditioning in bf16 beside the model's
+  1,128 tensors, so v1's check refuses it. It is made by a GPL converter, never read.
 - **numz's fp8 files are plain casts.** Every tensor of the 3B's, and all but the last block's
   in the 7B's, is rounded to `e4m3fn` (3 mantissa bits), with no scale, down to the biases,
   norms, modulation tables, input and output layers and RoPE's frequencies. The 7B's file is
@@ -641,16 +645,20 @@ Every zscale runs on one slice, with libavfilter's per-filter option `threads=1`
 and in the `yuv420p10le` writer alike
 ([numerics.md](../research/docs/numerics.md#the-masters-chroma-420-kernels-and-zscales-slices)).
 By default, ffmpeg cuts zscale into slices, one per CPU the process may use, and each slice is
-a zimg graph of its own, whose vertical chroma filter stops at the slice's edge:
-- A `yuv420p10le` master then changes with the slice count, so with the machine: up to 1.7% of
-  its chroma samples, by up to 13 ten-bit codes. Every count from 1 to 16 gave other bytes.
-- A 10-bit 4:2:0 source reads off the exact conversion from 4 slices on: nearly every sample,
-  by up to 0.57 level. An 8-bit source reads exactly at any count, which is why nothing so far
-  showed it.
+a zimg graph of its own:
+- A `yuv420p10le` master then changes with the slice count, so with the machine, on the rows at
+  the slices' edges, where the vertical chroma filter stops: on real frames up to 1.7% of its
+  chroma samples, by up to 13 ten-bit codes (on a random frame 5.4%, by up to 75). Every count
+  from 1 to 16 gave other bytes.
+- A 10-bit 4:2:0 source reads off the exact conversion from 4 slices on, on every row: on real
+  frames nearly every sample, by up to 0.57 level; on a random frame up to 49 levels. Why at 10
+  bits and not at 8 is not known: an 8-bit source reads exactly at any count, which is why
+  nothing so far showed it.
 
 One slice costs 2.3–2.6 ms per 1080p frame, against about 4 s of GPU time. Reproduced with
 seedvr2x's own chains on the 48-CPU box: with `threads=1`, 48 slices give the one-slice bytes,
-both ways. A test holds the chains to that.
+both ways. A test holds the chains to that at 1080p, on 1 and 16 threads; the writer's graph is
+a `-filter_complex` one, whose slices follow `-filter_complex_threads`, not `-filter_threads`.
 
 ### Shot detection
 Shot detection is the biggest quality lever outside the model, and what both workflows start
@@ -1619,15 +1627,15 @@ writers, and the planner needs real shot lengths.
 1. Resume (milestone 4): passed on 2026-10-03. Real episodes needed it: at 4.4 s per 1080p
    frame ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode
    takes about 40 GPU hours.
-2. The `lab` rewrite (milestone 5): passed on 2026-10-04. Then, as small steps of their own,
-   next: zscale on one slice (see [Input](#input)) and the default master format
-   (`yuv420p10le`, see [Output](#output)), then the model check of [Weights](#weights): today a
-   3B or fp8 file is accepted by its name, then fails later or runs unchecked. Then the
-   padding of step 0 (see [Pipeline](#pipeline-per-shot)), before the planner counts tokens,
-   and the refusal of HDR sources (see [Not in the first version](#not-in-the-first-version)).
-   Then `split` in place of `lab` (see [Colour correction](#colour-correction)): the decode
-   streams, and its buffer, the histograms and the code ported from numz go, before the
-   planner sizes the decode.
+2. The `lab` rewrite (milestone 5): passed on 2026-10-04. Then, as small steps of their own:
+   zscale on one slice (see [Input](#input)), the default master format (`yuv420p10le`, see
+   [Output](#output)) and the model check of [Weights](#weights), done on 2026-10-08, the
+   milestone-1 regression bit-identical with numz's 7B, with ours, and with our sharp 7B
+   against numz's own run of it. Next, the padding of step 0 (see
+   [Pipeline](#pipeline-per-shot)), before the planner counts tokens, and the refusal of HDR
+   sources (see [Not in the first version](#not-in-the-first-version)). Then `split` in place
+   of `lab` (see [Colour correction](#colour-correction)): the decode streams, and its buffer,
+   the histograms and the code ported from numz go, before the planner sizes the decode.
 3. The model files from seedvr2x's own Hugging Face repo: the upload is done (revision
    `c14a2bc4`, 2026-10-08), and seedvr2x's pull is pinned to it and to its `SHA256SUMS` (see
    [Weights](#weights)). Then the first pass's new work,
