@@ -12,8 +12,9 @@ tags:
 
 # seedvr2x's model files
 
-The files seedvr2x runs. seedvr2x is a SeedVR2 video upscaler for long runs; it downloads these
-files itself, at a revision of this repository and with SHA-256s pinned in its code.
+The files [seedvr2x](https://github.com/hekmon/seedvr2x) runs. seedvr2x is a SeedVR2 video upscaler
+for long runs; it downloads these files itself, at a revision of this repository and with SHA-256s
+pinned in its code.
 
 **These are unofficial conversions: neither ByteDance's files nor TransNetV2's authors'.** Each
 was made from its original by a script that pins its inputs and checks its output, and running
@@ -25,7 +26,7 @@ the scripts again gives the same bytes (`SHA256SUMS`).
 |---|---|---|---|
 | **Recommended** | `seedvr2x_ema_7b_sharp_fp16.safetensors` (float16) | 16.5 GB | nothing: the reference |
 | 8 GB tier | `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` (int8, rotated) | 8.3 GB | almost nothing: as close to the float16 model as another seed of it, or closer; faster on GeForce RTX 20 to 50 |
-| 4 GB tier | `seedvr2x_ema_7b_sharp_dyn.gguf` (GGUF, a type per matrix) | 4.8 GB | some fidelity: the closest 4 GB file to the float16 model at 1080p, closer than Q4_K at 4K too, yet further from it than another seed on some sources (at 1080p a cartoon's LPIPS and DISTS, live action's finest texture, an anime clip's flicker and colour; at 4K live action's finest texture); saves memory only, a little slower |
+| 4 GB tier | `seedvr2x_ema_7b_sharp_dyn.gguf` (GGUF, a type per matrix) | 4.8 GB | some fidelity: the closest 4 GB file to the float16 model at 1080p, yet further from it than another seed on some sources there (a cartoon's LPIPS and DISTS, live action's finest texture, an anime clip's flicker and colour); at 4K the closest 4 GB file too, and as close as another seed; saves memory only, a little slower |
 
 Take float16 when your GPU has room for it, else the 8 GB file, else the 4 GB one. These are the
 sharp 7B's, the model seedvr2x runs by default; ByteDance's regular 7B has the same files, named
@@ -112,7 +113,8 @@ the SeedVR2 files other repositories publish, each against ours.
 > all NaN; with NVFP4 multiplied in 4 bits (W4A4), silently wrong. In the 7B that is the MLP's
 > output projection, from about 350,000 video tokens in one pass: at 3840×2160, a batch of 41
 > frames or more. Until comfy-kitchen fixes it, keep such batches to 37 frames, or multiply in 16
-> bits (W8A16, W4A16). int8 and the GGUF files are not affected. seedvr2x's validation runs
+> bits (W8A16, W4A16). int8 and the GGUF files are not affected. seedvr2x's
+> [validation runs](https://github.com/hekmon/seedvr2x/blob/main/models/VALIDATION.md#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)
 > quantize such inputs in row chunks at comfy-kitchen's own scale.
 
 How to read it:
@@ -132,15 +134,22 @@ How to read it:
 - **8-bit or 4-bit multiply:** the GPU multiplies in 8 or 4 bits, which is faster, but each
   layer's input is rounded to 8 or 4 bits too: a second loss, which the error per weight doesn't
   show, and the videos do.
-- **On video** is measured separately (seedvr2x's `models/VALIDATION.md`): each file against its
+- **On video** is measured separately (seedvr2x's
+  [`models/VALIDATION.md`](https://github.com/hekmon/seedvr2x/blob/main/models/VALIDATION.md)): each file against its
   own model's float16 output at the same seed, on 8 clips at 1080p, judged against how much the
   float16 model's own seeds differ. "As close as another seed" means no score past 2.7 times the
   spread of 3 seeds, a line another seed of the float16 model crosses on one score in twenty;
   "further than a seed" names where a file crosses it. "Clearly worse": many times past it. At
-  4K, against 2 seeds (the line at 10.9 times their spread): the sharp 7B's int8 and Q8_0 and
-  the 7B's fp8 (W8A16) and Q8_0 within it; the sharp's fp8 W8A8, dynamic GGUF and Q4_K past it
-  only where its two seeds agree almost exactly, Q4_K adding fine texture to live action, the
-  dynamic GGUF taking a little away; the other files were not run at 4K.
+  4K, against 2 seeds (the line at 10.9 times their spread; where they agree to a score's last
+  digit, the spread counts as one unit of that digit): within it, the sharp 7B's int8, Q8_0, fp8
+  in W8A8, dynamic GGUF and Q4_K with an importance matrix, and the 7B's fp8 (in W8A16, and in
+  W8A8 on the 2 shots it ran), int8, Q8_0 and dynamic GGUF, each closer to float16 than another
+  seed on every shot. Past it, on one digital live-action shot: the sharp's Q4_K and NVFP4 on
+  fine detail, which they raise (the files made with an importance matrix lower it a little), and
+  the sharp's fp8 in W8A16 on flicker with the colour correction; on a close-up without the
+  colour correction: NVFP4's colour, and in 4 bits its flicker. NVFP4 in 4 bits is further from
+  float16 than another seed on 2 of the 5 shots. Not measured at 4K: the 7B's Q4_K, Q4_K with an
+  importance matrix and NVFP4, and its fp8 in W8A8 on its other 4 shots.
 - Measured on the 7B (the sharp 7B's files are within 0.01%; those made with an importance
   matrix within 0.05%, their weighted worst within 0.4%), against its float32 master: this
   repository's files themselves; the others' files where checked, their method otherwise (fp8
@@ -163,7 +172,7 @@ How to read it:
 | NVFP4 | Comfy-Org/SeedVR2 | 4.8 GB | 9.5% (10.1%) | further: each block's scale from its largest weight |
 | int8, rotated | Comfy-Org/SeedVR2 | 8.3 GB | 0.86% (1.08%) | the same method, comfy-kitchen's quantizer (one layer checked) |
 | MXFP8 | Comfy-Org/SeedVR2 | 8.6 GB | not measured | Blackwell only; not made here |
-| 3B (float16, fp8, GGUF) | numz/SeedVR2_comfyUI, AInVFX/SeedVR2_comfyUI | | | ByteDance's first 3B weights, which ByteDance replaced on 2025-06-22 (checked on the float16 and fp8 files) |
+| 3B (float16, fp8, GGUF) | numz/SeedVR2_comfyUI, AInVFX/SeedVR2_comfyUI | | | ByteDance's first 3B weights, which ByteDance replaced on 2025-06-22 (checked on the float16 and fp8 files); on video, at 1080p, the current weights' output differs from the first weights' more than two seeds of a 7B do, about as much as the 7B's from the sharp 7B's (seedvr2x's `models/VALIDATION.md`) |
 
 "The same" means weights as close to ByteDance's as ours; the files' bytes still differ, by their
 header and by the precision they were made from.
@@ -183,15 +192,16 @@ converts them for its PyTorch model, values unchanged: that model loads the file
   file's origin and what was changed, and credits ggml (MIT), whose quantizer made the GGUF files.
 - `transnetv2.safetensors`: the MIT License, in `transnetv2.LICENSE` beside it.
 
-Each file's metadata says the same: a safetensors file's `source`, `source_url` (at its
+Each model file's metadata says the same: a safetensors file's `source`, `source_url` (at its
 revision), `source_sha256`, `change`, `license`, `copyright` and `conversion`; a GGUF file's
 `general.license`, `general.source.url` and `seedvr2x.source`, `.source_sha256`, `.change`,
-`.copyright` and `.conversion`.
+`.copyright` and `.conversion`. An importance matrix's holds the runs it sums instead: the
+float16 file, numz's commit and arguments, the clips, by name, with no path or time.
 
 ## How they were made
 
-By the scripts in seedvr2x's `models/` directory, on a CPU, each with its dependencies inline
-(`uv run models/<script>.py`):
+By the scripts in seedvr2x's [`models/`](https://github.com/hekmon/seedvr2x/tree/main/models)
+directory, on a CPU, each with its dependencies inline (`uv run models/<script>.py`):
 
 - `seedvr2_fp16.py` downloads each master at the pinned revision and checks its SHA-256, rounds
   it (torch's conversion, checked bit for bit against numpy's), reads the file back with the
@@ -210,5 +220,9 @@ By the scripts in seedvr2x's `models/` directory, on a CPU, each with its depend
   built from source); ggml's and gguf-py's decoders agree on every tensor.
 - `seedvr2_gguf_dyn.py` chooses a type per matrix among Q3_K to Q8_0, the least error weighted by
   an importance matrix (from runs of the float16 model on a GPU) within the Q4_K file's bytes, and
-  quantizes them by ggml with that importance; and Q4_K with the same importance.
+  quantizes them by ggml with that importance; and Q4_K with the same importance. The importance
+  matrices are here too, `seedvr2_ema_7b_fp16.imatrix.safetensors` and
+  `seedvr2_ema_7b_sharp_fp16.imatrix.safetensors` (`gpu/imatrix_hook.py`'s, from numz's runs of
+  each float16 7B on 4 clips): the GGUF files made with them name them by name and SHA-256, and
+  the script makes the same bytes again from them.
 - `dist.py` writes `LICENSE`, `NOTICE`, this card and `SHA256SUMS`.

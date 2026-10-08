@@ -135,7 +135,8 @@ file's dtype (float16: nearest, ties to even; fp8: the master cast straight to E
   cast of its fp16 file differing on 0.28% of the values.
 - numz's 3B files are made the same way, but from the 3B's first weights, which ByteDance
   replaced on 2025-06-22 (`seedvr2_ema_3b.pth` 91627bba… then 6bcc5ac5…, same size; the 7B's
-  never changed). Every measurement of the 3B so far (models.md) ran those first weights.
+  never changed). Every measurement of the 3B in models.md ran those first weights; on video, the
+  current ones run beside them in [VALIDATION.md](VALIDATION.md#the-3b-at-1080p).
 
 ## Our phase-2 files
 
@@ -236,12 +237,12 @@ sharp 7B's, from its own importance.
 
 | File | Bytes | SHA-256 | Error: median (worst) | Weighted: median (worst) | Q3_K / Q4_K / Q5_K | Quality ([VALIDATION.md](VALIDATION.md)) |
 |---|---|---|---|---|---|---|
-| `seedvr2x_ema_7b_dyn.gguf` | 4,757,055,264 | `e93f3add…` | 7.550% (18.26%) | 6.310% (11.67%) | 17 / 203 / 68 | the closest 4 GB file to the fp16 model (44.2 dB); past the calibrated line on the cartoon clip's DISTS |
-| `seedvr2x_ema_7b_Q4_K_imatrix.gguf` | 4,758,308,480 | `a3da9e6f…` | 7.548% (8.831%) | 6.641% (7.370%) | 0 / 288 / 0 | 43.7 dB; past the line on live action's detail and the cartoon clip's DISTS |
-| `seedvr2x_ema_7b_Q4_K.gguf` (ours, static) | 4,758,307,552 | `7f4642d0…` | 7.345% (7.948%) | 7.154% (8.987%) | 0 / 288 / 0 | 42.9 dB; softer on some sources, within the line |
-| `seedvr2x_ema_7b_sharp_dyn.gguf` | 4,757,129,024 | `652d42c8…` | 7.545% (18.31%) | 6.346% (12.05%) | 17 / 204 / 67 | 42.5 dB; past the line on cartoon, live action and an anime clip's flicker; at 4K 43.3 dB, closer than Q4_K on all 5 shots: the card's 4 GB pick |
-| `seedvr2x_ema_7b_sharp_Q4_K_imatrix.gguf` | 4,758,308,512 | `28333c70…` | 7.537% (8.867%) | 6.651% (7.410%) | 0 / 288 / 0 | 42.1 dB; past the line on live action's texture and the cartoon clip's DISTS |
-| `seedvr2x_ema_7b_sharp_Q4_K.gguf` (ours, static) | 4,758,307,584 | `a5e423a5…` | 7.347% (7.942%) | 7.161% (8.416%) | 0 / 288 / 0 | 41.4 dB; past the line on cartoon, live action and anime; at 4K 42.0 dB, adding fine texture to digital live action |
+| `seedvr2x_ema_7b_dyn.gguf` | 4,757,055,264 | `f8c0c50d…` | 7.550% (18.26%) | 6.310% (11.67%) | 17 / 203 / 68 | the closest 4 GB file to the fp16 model (44.2 dB); past the calibrated line on the cartoon clip's DISTS; at 4K 44.3 dB, closer than another seed on all 6 shots and past the line nowhere |
+| `seedvr2x_ema_7b_Q4_K_imatrix.gguf` | 4,758,308,480 | `2d9f7e60…` | 7.548% (8.831%) | 6.641% (7.370%) | 0 / 288 / 0 | 43.7 dB; past the line on live action's detail and the cartoon clip's DISTS; not run at 4K |
+| `seedvr2x_ema_7b_Q4_K.gguf` (ours, static) | 4,758,307,552 | `7f4642d0…` | 7.345% (7.948%) | 7.154% (8.987%) | 0 / 288 / 0 | 42.9 dB; softer on some sources, within the line; not run at 4K |
+| `seedvr2x_ema_7b_sharp_dyn.gguf` | 4,757,129,024 | `90ba80c8…` | 7.545% (18.31%) | 6.346% (12.05%) | 17 / 204 / 67 | 42.5 dB; past the line on cartoon, live action and an anime clip's flicker; at 4K 43.3 dB, closer than its control and Q4_K on all 5 shots and past the line nowhere: the card's 4 GB pick |
+| `seedvr2x_ema_7b_sharp_Q4_K_imatrix.gguf` | 4,758,308,512 | `486a7da9…` | 7.537% (8.867%) | 6.651% (7.410%) | 0 / 288 / 0 | 42.1 dB; past the line on live action's texture and the cartoon clip's DISTS; at 4K 42.8 dB, between the dynamic file and Q4_K on all 5 shots, past the line nowhere |
+| `seedvr2x_ema_7b_sharp_Q4_K.gguf` (ours, static) | 4,758,307,584 | `a5e423a5…` | 7.347% (7.942%) | 7.161% (8.416%) | 0 / 288 / 0 | 41.4 dB; past the line on cartoon, live action and anime; at 4K 42.0 dB, adding detail to digital live action, past the line |
 
 - **Weighted, the importance helps on every matrix:** the Q4_K made with it is closer than our
   static Q4_K on all 288 (median 6.64% against 7.15%), though further by the plain error on all
@@ -256,11 +257,14 @@ sharp 7B's, from its own importance.
   and 32 of the 36 text ones. The sharp's choice differs on 5 matrices: block 0's video attention
   output projection in Q4_K (the 7B's Q5_K), block 1's video QKV in Q3_K (Q4_K), the text MLP's
   output projection of blocks 9 and 10 in Q4_K (Q3_K) and of block 16 in Q3_K (Q4_K).
-- **The importance files** (`seedvr2_ema_7b_fp16.imatrix.safetensors`, 12,459,016 bytes,
-  `c9c75937…`; the sharp's, 12,459,160 bytes, `02d7cfa7…`) key the pinned outputs in
-  `seedvr2_gguf_dyn.py`. The files' metadata name the importance file by its name and SHA-256 and
-  the calibration clips by name, with no path: the same importance file, under its name, gives
-  the same bytes wherever it is read from, and a second build gave them.
+- **The importance files** (`seedvr2_ema_7b_fp16.imatrix.safetensors`, 12,454,888 bytes,
+  `f2283e03…`; the sharp's, 12,454,944 bytes, `2c0dedc3…`) key the pinned outputs in
+  `seedvr2_gguf_dyn.py`. Their own metadata hold the fp16 file by name and size and each run's
+  settings, numz's arguments with each path cut to its base name, with no path and no time, in a
+  fixed layout: the same runs merged give the same bytes. The GGUF files' metadata name the
+  importance file by its name and SHA-256 and the calibration clips by name, with no path: the
+  same importance file, under its name, gives the same bytes wherever it is read from, and a
+  second build gave them.
 - 1.25 MB smaller than our Q4_K (the 7B's; the sharp's 1.18 MB), the dynamic file loads in
   numz's GGUF loader as it is: numz decodes every K-quant type.
 
