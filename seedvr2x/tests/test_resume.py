@@ -62,6 +62,8 @@ def upscale(
                 MODELS,
                 "--dit-model",
                 "seedvr2_ema_7b_fp16.safetensors",
+                "--vae-model",
+                "ema_vae_fp16.safetensors",
             ),
             *(*OPTIONS, "-v"),
         ],

@@ -35,7 +35,8 @@ def upscale(source: Path, output: Path, *options: str) -> None:
     run = subprocess.run(
         [
             *(sys.executable, "-m", "seedvr2x", str(source), "-o", str(output)),
-            *("--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors", *options),
+            *("--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors"),
+            *("--vae-model", "ema_vae_fp16.safetensors", *options),
         ],
         capture_output=True,
         text=True,

@@ -27,6 +27,7 @@ from torch import Tensor
 from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 
+from seedvr2x.runtime import weights
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
@@ -94,10 +95,13 @@ def nvidia_driver() -> str | None:
 
 
 def load_models(model_dir: Path, dit_file: str, vae_file: str, device: torch.device) -> Models:
-    """Build and load the DiT named dit_file and the VAE named vae_file, from model_dir."""
-    # The 7B config when the file name says so, else the 3B one (src/core/model_configuration.py
-    # :712-715).
-    config_dir = "configs_7b" if "7b" in dit_file else "configs_3b"
+    """Build and load the DiT in dit_file and the VAE in vae_file, from model_dir, each checked
+    first (weights.check, ModelError): the DiT is built from the config of what its file is."""
+    # numz goes by "7b" in the file name (src/core/model_configuration.py:718-720), so a renamed
+    # file loads as what its name says; seedvr2x goes by the file's tensors (DESIGN.md, Weights).
+    config_dir = weights.check(model_dir / dit_file, "dit").config
+    weights.check(model_dir / vae_file, "vae")
+    assert config_dir is not None, "the DiT accepted has its config"
     config: Any = load_config(str(VENDOR / config_dir / "main.yaml"))
     runner: Any = VideoDiffusionInfer(config, _DebugLog())
     OmegaConf.set_readonly(runner.config, False)

@@ -14,6 +14,7 @@ from typing import cast
 
 import numpy as np
 import pytest
+from test_weights import default_models
 
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
@@ -160,10 +161,13 @@ def test_directory_refusals_before_torch(tmp_path: Path, options: list[str], mes
     (tmp_path / "full").mkdir()
     (tmp_path / "full" / "old.mkv").write_bytes(b"")
     (tmp_path / "cuts.txt").write_text("1\n")
-    args = [str(source), "-o", "out", "--model-dir", ".", "--dit-model", "x", *options]
+    # Models the check accepts, under the default names: each refusal is the one tested.
+    default_models(tmp_path)
+    args = [str(source), "-o", "out", "--model-dir", ".", *options]
+    # Exit 3 if torch was imported: a failed assert would exit 1, as the refusal does.
     code = (
         "import sys; from seedvr2x import cli; status = cli.main(sys.argv[1:]);"
-        " assert 'torch' not in sys.modules; sys.exit(status)"
+        " sys.exit(3 if 'torch' in sys.modules else status)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code, *args],
@@ -203,7 +207,7 @@ def test_directory_output_mirrors_its_segments(tmp_path: Path) -> None:
         )
     (tmp_path / "cuts.txt").write_text("10\n12\n")
     common = ["--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors"]
-    common += ["--resolution", "540", "--window", "5"]
+    common += ["--vae-model", "ema_vae_fp16.safetensors", "--resolution", "540", "--window", "5"]
     runs = (
         (split, tmp_path / "mirrored", tmp_path / "dir_frames", []),
         (source, tmp_path / "one.mkv", tmp_path / "file_frames", ["--cuts", "cuts.txt"]),

@@ -16,6 +16,7 @@ from typing import cast
 
 import numpy as np
 import pytest
+from test_weights import default_models
 
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
@@ -229,10 +230,13 @@ def test_output_refusals_before_torch(tmp_path: Path, options: list[str], messag
     )
     (tmp_path / "file.txt").write_text("")
     (tmp_path / "dir.mkv").mkdir()
-    args = [str(source), "--model-dir", ".", "--dit-model", "x", *options]
+    # Models the check accepts, under the default names: the seed's refusals come after it.
+    default_models(tmp_path)
+    args = [str(source), "--model-dir", ".", *options]
+    # Exit 3 if torch was imported: a failed assert would exit 1, as the refusal does.
     code = (
         "import sys; from seedvr2x import cli; status = cli.main(sys.argv[1:]);"
-        " assert 'torch' not in sys.modules; sys.exit(status)"
+        " sys.exit(3 if 'torch' in sys.modules else status)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code, *args],
@@ -268,6 +272,7 @@ def test_joined_segments_are_the_one_file_output(tmp_path: Path) -> None:
     source = Path(REFERENCE) / "m1" / "input_rgb.mkv"
     (tmp_path / "cuts.txt").write_text("10\n12\n30\n")
     common = ["--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors"]
+    common += ["--vae-model", "ema_vae_fp16.safetensors"]
     common += ["--resolution", "540", "--window", "5", "--cuts", "cuts.txt"]
     # gbrp16le: the frames are read below as stored, three 16-bit planes.
     common += ["--format", "gbrp16le"]

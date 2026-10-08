@@ -97,11 +97,15 @@ uv run pytest
   without a build seedvr2x accepts (see [Environment](#environment)).
 - `uv run pytest -m gpu` runs the tests that need CUDA, never selected by default.
 - Tests that need the model weights read their directory from `SEEDVR2X_MODEL_DIR`, and skip
-  without it.
+  without it. It holds numz's files and seedvr2x's own side by side (links will do): the GPU
+  tests run numz's 7B fp16 and VAE, the weights their references were made with, and the
+  regression seedvr2x's own as well. With it, the CPU suite also checks every known model file
+  there by its header (`tests/test_weights.py`).
 - `tests/test_regression.py` (GPU) holds every change to the runtime or the vendored code to
-  milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames.
-  Its reference, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how to make it are in
-  its docstring.
+  milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames,
+  with numz's 7B fp16, with seedvr2x's own 7B, and with seedvr2x's sharp 7B against numz's run
+  of its sharp 7B. Its references, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how
+  to make them are in its docstring.
 - `tests/test_lab.py` (GPU) holds `lab` to milestone 5 on the same input: at least as good as
   numz's `lab` on the metrics that apply to one window without a ground truth, within DESIGN.md's
   tolerances, and close to its output. Its reference, `numz_lab.mkv`, sits beside the

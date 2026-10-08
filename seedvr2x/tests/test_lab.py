@@ -157,6 +157,7 @@ def test_lab_against_numz(tmp_path: Path) -> None:
         [
             *(sys.executable, "-m", "seedvr2x", str(m1 / "input_rgb.mkv"), "-o", str(master)),
             *("--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors"),
+            *("--vae-model", "ema_vae_fp16.safetensors"),
             *("--resolution", "1080", "--seed", "42", "--color-correction", "lab"),
             *("--format", "gbrp16le"),
         ],

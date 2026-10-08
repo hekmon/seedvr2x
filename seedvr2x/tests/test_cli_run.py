@@ -35,6 +35,7 @@ import torch
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.runtime import weights
 from seedvr2x.runtime.job import output_size
 from seedvr2x.runtime.shot import decode_shot, padded_length
 
@@ -112,9 +113,11 @@ STAND_IN_MODELS = SimpleNamespace(
 
 def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     """Replace the model by the stand-in, through patch: monkeypatch.setattr, or setattr in a
-    process of its own (test_stop.py). The decode around the VAE's is seedvr2x's own."""
-    from seedvr2x.runtime import model, run
+    process of its own (test_stop.py). The decode around the VAE's is seedvr2x's own. Its files,
+    one empty w.safetensors as both, pass for models: the check is test_weights.py's."""
+    from seedvr2x.runtime import model, run, weights
 
+    patch(weights, "check_models", lambda *a: None)
     patch(torch.cuda, "is_available", lambda: True)
     patch(torch.cuda, "is_bf16_supported", lambda: True)
     patch(torch.cuda, "get_device_name", lambda device: "a stand-in")
@@ -557,6 +560,7 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
     assert indexes(tmp_path / "one.mkv") == list(range(25))
 
 
+@pytest.mark.usefixtures("stand_in")
 @pytest.mark.parametrize("name", ["resume", "manifest.json", "checksums", "a.partial"])
 def test_own_names_refused(tmp_path: Path, caplog: pytest.LogCaptureFixture, name: str) -> None:
     # A mirrored PNG segment takes its file's stem: not one of seedvr2x's own names.
@@ -1546,6 +1550,48 @@ def test_another_job_refused(
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
+
+
+# The model check, which the stand-in replaces (stand_in_model), as the module was imported.
+CHECK_MODELS = weights.check_models
+
+
+def test_models_checked_before_the_resume_compares(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The model files are checked by their headers before a resume compares the job with its
+    # record, which hashes them (cli._model; 16 GB for the DiT): a 3B as the DiT, refused unhashed.
+    from test_weights import V1, as_dtype, write
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
+    monkeypatch.setattr(cli, "_model", lambda *a: pytest.fail("the model files hashed"))
+    write(tmp_path / "w.safetensors", as_dtype("3b", "F16"))
+    text = refused(tmp_path, source_path, caplog, *JOB)
+    assert f"w.safetensors: SeedVR2's 3B DiT in fp16: {V1}" in text
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_model_replaced_before_its_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A model file replaced after its check, during the first pass: load_models' own check
+    # refuses it, as the first one would have, logged without a traceback.
+    from seedvr2x.runtime import model
+
+    said = "w.safetensors: SeedVR2's 3B DiT in fp16"
+
+    def replaced(*args: object) -> None:
+        raise weights.ModelError(said)
+
+    monkeypatch.setattr(model, "load_models", replaced)
+    assert upscale(tmp_path, job(tmp_path, monkeypatch), "out", *JOB) == 1
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert [record.getMessage() for record in errors] == [said]
+    assert all(record.exc_info is None for record in errors)
+    assert not (tmp_path / "out" / "manifest.json").exists()
 
 
 def test_environment_change_accepted(

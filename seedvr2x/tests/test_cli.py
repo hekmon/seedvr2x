@@ -49,9 +49,10 @@ def test_refused_source_stops_before_torch(tmp_path: Path) -> None:
         check=True,
     )
     args = [str(source), "-o", str(tmp_path / "out.mkv"), "--model-dir", ".", "--dit-model", "x"]
+    # Exit 3 if torch was imported: a failed assert would exit 1, as the refusal does.
     code = (
         "import sys; from seedvr2x import cli; status = cli.main(sys.argv[1:]);"
-        " assert 'torch' not in sys.modules; sys.exit(status)"
+        " sys.exit(3 if 'torch' in sys.modules else status)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code, *args], capture_output=True, text=True, check=False

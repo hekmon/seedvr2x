@@ -78,8 +78,20 @@ def main(argv: list[str] | None = None) -> int:
         " of 1080p with colour correction; png, 16-bit PNG",
     )
     parser.add_argument("--model-dir", type=Path, required=True, help="directory of the weights")
-    parser.add_argument("--dit-model", required=True, help="DiT file, e.g. 7B fp16 safetensors")
-    parser.add_argument("--vae-model", default="ema_vae_fp16.safetensors", help="VAE file")
+    # The sharp 7B by default, on the user's eyes: preferred or alike on 67 of 75 windows
+    # (DESIGN.md, Weights). A file is recognised by its tensors, not its name (runtime/weights.py).
+    parser.add_argument(
+        "--dit-model",
+        default="seedvr2x_ema_7b_sharp_fp16.safetensors",
+        help="the DiT's file in --model-dir: SeedVR2's 7B DiT, regular or sharp, in fp16,"
+        " recognised by its tensors (default: %(default)s, the sharp 7B)",
+    )
+    parser.add_argument(
+        "--vae-model",
+        default="seedvr2x_ema_vae_fp16.safetensors",
+        help="the VAE's file in --model-dir: SeedVR2's VAE in fp16, recognised by its tensors"
+        " (default: %(default)s)",
+    )
     parser.add_argument(
         "--resolution",
         type=_positive,
@@ -314,11 +326,12 @@ def _run(args: argparse.Namespace) -> int:
         target_size,
     )
     from seedvr2x.runtime.manifest import NAME
+    from seedvr2x.runtime.weights import ModelError, check_models
 
-    # The build, the source and the cut list are checked before anything touches the GPU, but
-    # for a job resumed, which is first checked against its record (its settings, environment,
-    # the GPU's included, and inputs), before its first pass, which isn't run again when nothing
-    # it depends on changed (DESIGN.md, Pause and resume).
+    # The build, the source, the cut list and the model files are checked before anything
+    # touches the GPU, but for a job resumed, which is first checked against its record (its
+    # settings, environment, the GPU's included, and inputs), before its first pass, which isn't
+    # run again when nothing it depends on changed (DESIGN.md, Pause and resume).
     prior: _Prior | None = None
     try:
         if args.window is not None and args.window < 2 * SHARED + 1:
@@ -342,6 +355,10 @@ def _run(args: argparse.Namespace) -> int:
             declared = [declare(args.input, args.input_matrix, args.input_sar)]
         cuts = read_cuts(args.cuts) if args.cuts else []
         directory = _output(args)
+        # By their headers, in a second: before the resume's comparison, which hashes the files
+        # (16 GB for the DiT), and the first pass, which decodes the whole source (DESIGN.md,
+        # Weights).
+        check_models(args.model_dir, args.dit_model, args.vae_model)
         if directory is not None and (directory / NAME).is_file():
             _lock(directory)
             prior = _prior(args, directory, cuts, declared, ffmpeg_version, conversions)
@@ -430,7 +447,13 @@ def _run(args: argparse.Namespace) -> int:
                 return 0
         units = DiskUnits(directory, record)
     started = time.monotonic()
-    models = load_models(args.model_dir, args.dit_model, args.vae_model, identity.device)
+    try:
+        models = load_models(args.model_dir, args.dit_model, args.vae_model, identity.device)
+    except ModelError as error:
+        # A model file replaced since its check, during the first pass: refused as the check
+        # refuses it.
+        logger.error("%s", error)
+        return 1
     logger.info(
         "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
     )
@@ -736,13 +759,11 @@ def _identity(
     ffmpeg_version: str,
     conversions: str,
 ) -> _Identity:
-    """The job's identity, refused (JobError) without its model files, or without a CUDA GPU
-    computing in bfloat16. The models are hashed before any GPU work."""
+    """The job's identity, refused (JobError) without a CUDA GPU computing in bfloat16; its model
+    files are checked before (weights.check_models). The models are hashed before any GPU
+    work."""
     from seedvr2x.runtime.job import JobError
 
-    for name in (args.dit_model, args.vae_model):
-        if not (args.model_dir / name).is_file():
-            raise JobError(f"{args.model_dir / name}: no such model file")
     settings = _settings(args, cuts) if directory is not None else {}
     import torch
 
