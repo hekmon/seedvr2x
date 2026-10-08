@@ -10,6 +10,9 @@ fp16's 3-seed spread as the band, colour_eval's bootstrap; B = L better than q4k
 sharper), DISTS 45f from fr_metrics.py's JSONs (fr_pair()); each label's own detail, band energy and dB to the 7B
 fp16 s42 (label_data()); and the dB between L's none master and q4k's (ffv1_out.py --diff, written in OUT/diff).
 Writes OUT/pair4g.md; its pairing cache in OUT/cache (never the pool's).
+S23 (2026-10-08, design's decision of 10:20: one rule at 1080p and 4K): the band is the 7B fp16's 3-seed spread or its
+floor (ms_floor.py), in both rules and every printed multiple (a multiple of the floor carries a †), on the pairs and
+on each label's label_data().
 """
 
 import argparse
@@ -22,6 +25,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ms_sum as S  # noqa: E402
+import ms_floor as FL  # noqa: E402  S23: the floor at 1080p too
+
+FL.install(S)
 
 KEYS = (
     "psnr_y",
@@ -103,6 +109,8 @@ def main():
     gl = S.GtLap(gp)
     B = a.base
     data = {L: S.label_data(L, gl) for L in [B] + labels}
+    for d in data.values():
+        FL.apply(S, d)  # S23: the floor at 1080p too
     lines = [
         "# The 4 GB files against our static Q4_K (q4k), slice A tier 1 (1080p ×2 from d1, seed 42)",
         "",
@@ -110,7 +118,8 @@ def main():
         "label's frames minus q4k's at seed 42; **B / W** = the label better / worse than q4k (bootstrap interval "
         "excludes 0 AND |difference| > the 7B fp16's 3-seed spread); Laplacian ↑ = sharper than q4k; multiples "
         "of the spread; bold = beyond 2.7 × the spread (calibrated). dB L–q4k = RGB PSNR between the two none "
-        "masters (for scale: the 7B fp16's seeds 43, 1234 vs 42: 40.62 dB mean).",
+        "masters (for scale: the 7B fp16's seeds 43, 1234 vs 42: 40.62 dB mean). "
+        + FL.FLOOR_TXT_1080,
         "",
     ]
     summary = []
@@ -127,6 +136,7 @@ def main():
                 F = S.fr_pair(frL, frQ, fr7, f"{v}@{L}", f"{v}@{B}", f"{v}@f32")
                 if "dists" in F:
                     P["dists_all"] = F["dists"]
+                FL.apply_pairs(S, P, data[L][c]["none"]["gtlap"])  # S23: the floor at 1080p too
                 for k in KEYS:
                     if k in P:
                         t = P[k]["tag"]

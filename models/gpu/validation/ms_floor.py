@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Model conversation, S16 (2026-10-08): the 4K floor (design's decision of 2026-10-07 23:55), for ms_sum4k.py (the
-7B's slice B) and ms_sum4ksh.py (the sharp's slice B); ms_sum.py (1080p, 3-seed bands) is left as it was.
+7B's slice B) and ms_sum4ksh.py (the sharp's slice B). S23 (2026-10-08, design's decision of 10:20): at 1080p too, one
+rule for both resolutions: ms_sum.py (3-seed bands: every label's data and our Q4_K against numz's Q4_K_M), pair4g.py
+and pair3b.py (their differences against a 3-seed band).
 
 At 4K the band is two seeds; where the two agree to the resolution a metric is printed at, their spread is ~0 and any
 difference becomes a huge multiple of it (the sharp's ouatia-face ΔE00 lf: a spread near 0.00001, fp8 W8A8's +0.001
-87.5 times it). One floor per metric = one unit of the resolution at which the summaries print it:
+87.5 times it). At 1080p three seeds can agree as closely (CAMBI added, a few other cells: floor_report.py 1080).
+One floor per metric = one unit of the resolution at which the summaries print it:
   - colour_eval.diff_fmt: PSNR-Y, VMAF (and the Laplacian) "{:+.2f}"; SSIM-Y, LPIPS, DISTS "{:+.4f}"; every other
     metric "{:+.3f}" (CAMBI added, ΔE00 lf and the other ΔE00 scales, T-err, T-err lf, fringes);
   - ms_sum.fmt: DISTS 45f (fr_metrics.py's every frame) "{:+.4f}"; fr_metrics' PSNR-Y parts as PSNR-Y;
@@ -58,6 +61,13 @@ FLOOR_LIST = (
     "PSNR-Y 0.01 dB, VMAF 0.01, SSIM-Y 0.0001, LPIPS 0.0001, DISTS 5f and 45f 0.0001, CAMBI+ 0.001, "
     "ΔE00 lf 0.001, T-err 0.001, T-err lf 0.001, detail 0.01 (÷ GT's), finest band 0.01 (÷ GT's)"
 )
+FLOOR_TXT_1080 = (
+    "**Floor (S23, 2026-10-08, design's decision: one rule at 1080p and 4K):** three seeds too can agree to "
+    "the printed resolution, the band then ~0; the spread used is max(the seeds' spread, one unit of the "
+    "resolution the metric is printed at): PSNR-Y, VMAF 0.01; SSIM-Y, LPIPS, DISTS 5f and 45f 0.0001; CAMBI+, "
+    "ΔE00 lf, T-err, T-err lf 0.001; detail and the finest band 0.01 of the GT's: in both rules and in every "
+    "multiple; **†** = a multiple of the floor (the seeds closer than the printed resolution)."
+)
 
 
 class Floored(float):
@@ -90,6 +100,21 @@ def floor_of(k, gtlap):
     if k == "lap":
         return LAP_RATIO * gtlap if gtlap else None
     return FLOOR.get(k)
+
+
+def eff(k, spread, gtlap=None):
+    """S23: a seed spread -> the spread used: Floored(the floor) where the spread is under it (k "band": the finest
+    band's ratio; "lap" with gtlap 1.0: detail as a ratio to the GT's); None stays None."""
+    if spread is None:
+        return None
+    fl = BAND_RATIO if k == "band" else floor_of(k, gtlap)
+    return Floored(fl) if fl is not None and spread < fl else spread
+
+
+def apply_pairs(S, P, gtlap=None):
+    """S23: apply()'s floor on one pair dict {metric key: ms_sum.pair entry} (x_md, pair4g.py, pair3b.py), in place.
+    Returns the number of spreads it raised."""
+    return apply(S, {"_": {"none": {"pairs": P, "gtlap": gtlap}}})["pairs"]
 
 
 def apply(S, data):

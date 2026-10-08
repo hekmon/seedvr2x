@@ -24,6 +24,9 @@ bands-b2); ms_sum.py's own functions (imported, unchanged: loading, merging, pai
  4. decode-to-decode distances: RGB PSNR between the 16-bit none masters (ffv1_out.py --diff, cached in WORK/diff).
 The 3B has no seed band of its own tonight (one seed): said on the page. Writes OUT/NAME.md and OUT/NAME.csv; its
 pairing cache, GT Laplacian copy and distances in WORK (never the pool's sum/cache).
+S23 (2026-10-08, design's decision of 10:20: one rule at 1080p and 4K): every spread is the seeds' or its floor
+(ms_floor.py): the strict rule's B / W and ↑ / ↓, and every multiple, of the sharp's spread and of the 7B's (a multiple
+of the floor carries a †); the CSV's spreads are the ones used.
 """
 
 import argparse
@@ -40,6 +43,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ms_sum as S  # noqa: E402
+import ms_floor as FL  # noqa: E402  S23: the floor at 1080p too
+
+FL.install(S)
 
 E, O, G = S.E, S.O, S.G
 PY = S.env("METRICS_PY")
@@ -269,6 +275,7 @@ def main():
                 )
                 if "dists" in F:
                     P["dists_all"] = F["dists"]
+                FL.apply_pairs(S, P, gtlap)  # S23: the floor at 1080p too
                 out = {}
                 for k, _, _ in MET:
                     if k == "band":
@@ -279,7 +286,7 @@ def main():
                         if va is None or vb is None:
                             continue
                         mean, lo, hi = va - vb, None, None
-                        sp = ssh["band"]
+                        sp = FL.eff("band", ssh["band"])
                         tag = (
                             ("↑" if mean > 0 else "↓") if sp is not None and abs(mean) > sp else ""
                         )
@@ -302,6 +309,8 @@ def main():
                         if k != "lap"
                         else (s7["lap"] / gtlap if s7["lap"] is not None and gtlap else None)
                     )
+                    # S23: the floor in every multiple (detail and the finest band as ratios to the GT's)
+                    shs, s7k = FL.eff(k, shs, 1.0), FL.eff(k, s7k, 1.0)
                     msh = S.mult_of(mean, shs) if shs is not None else None
                     m7 = S.mult_of(mean, s7k) if s7k is not None else None
                     out[k] = {
@@ -385,6 +394,7 @@ def main():
         "- **The 3B has no seed band of its own tonight:** each 3B file ran seed 42 only, so every B / W and "
         "multiple below is set against the sharp 7B fp16's own 3-seed spread (colour's sh42, our s43 and s1234), "
         "with the 7B fp16's 3-seed spread for scale, not against the 3B's own seed scatter, unmeasured.",
+        "- " + FL.FLOOR_TXT_1080,
         "- **Size:** the 3B float16 file 6.8 GB against 4.8 GB for the sharp 7B's dynamic GGUF (sh-dyn)"
         + (f" (on disk: {szt})" if szt else "")
         + ".",
@@ -429,8 +439,8 @@ def main():
         "## 2. Per pair: clips where each side is closer to the GT, bands less, flickers less, has more detail",
         "",
         "A n · B n · = n (ties: the same value at the printed resolution); in brackets the clips where the "
-        "difference is beyond the sharp 7B fp16's 3-seed spread with the interval excluding 0 (ms_sum's strict "
-        "rule): A n · B n.",
+        "difference is beyond the sharp 7B fp16's 3-seed spread or its floor with the interval excluding 0 "
+        "(ms_sum's strict rule): A n · B n.",
         "",
     ]
     rows = []
@@ -485,8 +495,9 @@ def main():
         "## 4. Paired differences per clip: A − B frames at seed 42",
         "",
         "Cell: the difference [colour_eval's 95% interval]; **B / W** = A better / worse than B beyond the sharp "
-        "7B fp16's 3-seed spread with the interval excluding 0, detail / finest band ↑ ↓ = A more / less; then "
-        "the difference's multiples of the sharp's 3-seed spread / of the 7B fp16's (for scale). Detail and "
+        "7B fp16's 3-seed spread or its floor with the interval excluding 0, detail / finest band ↑ ↓ = A more / "
+        "less; then the difference's multiples of the sharp's 3-seed spread / of the 7B fp16's (for scale), each "
+        "spread or its floor (**†**: a multiple of the floor). Detail and "
         "finest band in units of the GT's; the finest band has no interval; DISTS 5f's is degenerate (5 frames).",
         "",
     ]

@@ -46,12 +46,12 @@ The runs themselves are numz's CLI at `4490bd1` through `bench.py`, wrapped by c
 | `ms_status2.sh` | the pool at a glance: jobs by state, running, failed, times by kind, memory, the pages | `bash $VAL_GLUE/ms_status2.sh -q` |
 | `ms_vmafcheck.py` | a VMAF JSON is whole: every frame finite, VMAF v1's 4K model from 2160 rows or 3840 columns up, else its 1080p one | called by the vm jobs |
 | `ms_inputs.sh` | a run's encoder input and reference against colour's 7B s42 ones, by MD5 (the 3B's anime-clean runs); a report, never a block | called by the pool |
-| `ms_sum.py` | 1080p: each file's frames paired with its float16 model's at seed 42 (colour_eval.py's series and bootstrap), the guards per kind of source, the strict and calibrated rules: `<label>.md`, `00-overview.md`, `7b-band.md`, `sharp-band.md`, `validation.md` | the pool; `$METRICS_PY $VAL_GLUE/ms_sum.py [--out DIR]` |
-| `ms_sum4k.py`, `ms_sum4ksh.py` | the same at 4K, the 7B's files and the sharp's, against two-seed bands with the 4K floor: `4k-*.md`, `4k-sh-*.md` | the pool |
-| `ms_floor.py` | the 4K floor: a minimum spread per metric where two seeds agree almost exactly (imported) | |
-| `pair4g.py` | the 4 GB files against our Q4_K (or `--base`), 1080p: cell by cell, detail and band energy, the distance between the files | `$METRICS_PY $VAL_GLUE/pair4g.py`; `--base q4ki --labels dyn --name pair-dyn-q4ki.md` |
-| `pair3b.py` | the 3B (ours from the current weights, numz's from the first) against the sharp 7B's dynamic GGUF, the sharp and the 7B, against the GT; `--test`: stand-in labels | the pool, once both 3B labels are scored |
-| `floor_report.py` | which verdicts and rows the 4K floor changes | `$METRICS_PY $VAL_GLUE/floor_report.py 4k\|4ksh\|1080` |
+| `ms_sum.py` | 1080p: each file's frames paired with its float16 model's at seed 42 (colour_eval.py's series and bootstrap), the guards per kind of source, the strict and calibrated rules with the floor: `<label>.md`, `00-overview.md`, `7b-band.md`, `sharp-band.md`, `validation.md` | the pool; `$METRICS_PY $VAL_GLUE/ms_sum.py [--out DIR]` |
+| `ms_sum4k.py`, `ms_sum4ksh.py` | the same at 4K, the 7B's files and the sharp's, against two-seed bands with the floor: `4k-*.md`, `4k-sh-*.md` | the pool |
+| `ms_floor.py` | the floor: a minimum spread per metric, one unit of the resolution it is printed at, where the seeds agree closer than that; at 4K since 2026-10-08 (S16), at 1080p too since S23 (one rule for both resolutions), in both rules and every multiple, a multiple of the floor marked † (imported by the summaries and the pairings) | |
+| `pair4g.py` | the 4 GB files against our Q4_K (or `--base`), 1080p: cell by cell against the 7B fp16's 3-seed spread or its floor, detail and band energy, the distance between the files | `$METRICS_PY $VAL_GLUE/pair4g.py`; `--base q4ki --labels dyn --name pair-dyn-q4ki.md` |
+| `pair3b.py` | the 3B (ours from the current weights, numz's from the first) against the sharp 7B's dynamic GGUF, the sharp and the 7B, against the GT, their differences against the sharp's 3-seed spread or its floor; `--test`: stand-in labels | the pool, once both 3B labels are scored |
+| `floor_report.py` | which verdicts and rows the floor changes: at 4K (the 7B's, the sharp's), at 1080p | `$METRICS_PY $VAL_GLUE/floor_report.py 4k\|4ksh\|1080` |
 | `remake_all.sh` | every page again, after a pool summary in progress | `bash $VAL_GLUE/remake_all.sh [all]` |
 | `ms_crops.py`, `ms_crops4k.py` | strips for the eyes (GT, bicubic, float16, each file) at colour's windows, cut by colour_crops.py: `$VAL_DATA/gpu/crops/<name>/`; `ms_crops.py --refs` names the float16 panels itself (`7B fp16`, `sharp fp16`), and captions the 3B's labels in words (3B current, 3B first) | `$METRICS_PY $VAL_GLUE/ms_crops.py --labels ... --name ... [--refs ...]`; the 3B's: `--refs "sharp fp16" --labels sh-dyn,3b-cur,3b-first --name crops-3b` |
 | `count4k.py` | the cells past the strict and the calibrated line in 4K pages | `$METRICS_PY $VAL_GLUE/count4k.py $VAL_STATE/sum/4k-sh-*.md` |
@@ -106,6 +106,11 @@ summaries make the pool's 38 live pages, and from empty caches the box versions'
 pairings, the floor report, the job list, the smoke test's report and the other tools give the
 box versions' outputs; all but each page's `Generated <time> by <script>` line. The Monte Carlo
 prints VALIDATION.md's figures (29% and 50% of cells, 94% and 98% of runs; K 2.70 and 10.93).
+Then the floor went to 1080p too (S23, 2026-10-08): `ms_sum.py`, `ms_floor.py`, `pair4g.py`,
+`pair3b.py` and `floor_report.py` took the same edit here and on the box, proved the same way
+(the box's values substituted back give the box's new files byte for byte, the syntax trees
+unchanged by ruff; with the box's values the summaries, the pairings and the floor report give
+the box versions' pages, all but the stamped line).
 Left on the box: the first pool (`ms_jobs.sh`, `ms_pool.sh`, `ms_status.sh`; `ms_jobs2.sh` keeps
 their lines word for word), tests and one-off helpers (estimates, reorders, crops loops).
 

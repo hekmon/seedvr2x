@@ -4,8 +4,8 @@
 
   $METRICS_PY $VAL_GLUE/floor_report.py 4k|4ksh|1080 [--out DIR]
 
-4k: ms_sum4k.py's labels (the 7B's slice B), 4ksh: ms_sum4ksh.py's (the sharp's), 1080: ms_sum.py's (information only:
-the floor is NOT applied at 1080p). Per label, data = the script's label_data() as it was (before) and with
+4k: ms_sum4k.py's labels (the 7B's slice B), 4ksh: ms_sum4ksh.py's (the sharp's), 1080: ms_sum.py's (applied there
+too since S23, 2026-10-08). Per label, data = the script's label_data() as it was (before) and with
 ms_floor.apply() (after): every printed verdict cell whose strict or calibrated verdict changes (shot or clip, variant,
 metric; guard cells and the reported ones), the guards per kind that change, and the VALIDATION.md row before and
 after (cells past the strict / calibrated line, guards past the calibrated line with their kinds, the worst multiple,
@@ -155,7 +155,7 @@ def main():
         }
 
     lines = [
-        f"# The 4K floor's effect: {a.mode} ({'information only: not applied at 1080p' if a.mode == '1080' else 'applied'})",
+        f"# The 4K floor's effect: {a.mode} ({'applied at 1080p too since S23' if a.mode == '1080' else 'applied'})",
         "",
         f"Generated {S.stamp()} by floor_report.py. Floors: {F.FLOOR_LIST}.",
         "",

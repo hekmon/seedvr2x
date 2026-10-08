@@ -38,6 +38,12 @@ The 3B (labels 3b-*, S16 2026-10-08: 3b-cur = our seedvr2x_ema_3b_fp16 from Byte
 numz's seedvr2_ema_3b_fp16, the first weights): scored and paired as any file, against the 7B fp16 and its band; the
 3B has no seed band of its own: its page and overview row say so (informative only); the 3B against the sharp's 4 GB
 pick: pair3b.py -> 3b-00-overview.md. Nothing else changed (verdicts, other pages: as before S16).
+S23 (2026-10-08, design's decision of 10:20): the floor at 1080p too, one rule for both resolutions (ms_floor.py, as
+ms_sum4k.py and ms_sum4ksh.py since S16): the spread used = max(the 3-seed spread, one unit of the resolution the
+metric is printed at), in both rules and every printed multiple (a multiple of the floor carries a †); main() applies
+it to every label's label_data() (3b-* and valsharp included) and to our Q4_K against numz's Q4_K_M (x_md); not
+label_data() itself (imported by the 4K summaries, the pairings and floor_report.py), nor the validation's colour
+mode (band 0) or the band pages (the seeds' own spreads).
 """
 
 import argparse
@@ -58,6 +64,7 @@ from glue_env import env  # noqa: E402  the paths: glue.env (models/gpu/validati
 SCRIPTS = env("COLOUR_SCRIPTS")
 sys.path.insert(0, SCRIPTS)
 import colour_eval as E  # noqa: E402  series, boot, HIGHER, METRICS, diff_fmt; colour_diag as E.D
+import ms_floor as FL  # noqa: E402  S23: the floor at 1080p too
 
 O = env("COLOUR_OUT")
 G = env("VAL_DATA") + "/gpu"
@@ -858,7 +865,7 @@ RULE = (
     "**calibrated** = strict AND |difference| > K × the spread, K = 2.7 with 3 seeds (10.9 with 2): the multiple "
     "a further fp16 seed would exceed with 5% probability per clip-variant (S4's Monte Carlo, Gaussian seed "
     "scatter, both directions), where the strict rule fails such a seed 29% of the time (50% with 2 seeds); "
-    "**bold** cell = worse by the calibrated rule too."
+    "**bold** cell = worse by the calibrated rule too. " + FL.FLOOR_TXT_1080
 )
 
 
@@ -890,7 +897,7 @@ def label_md(L, data, spread_note):
     nk = {kd: sum(KIND[c] == kd for c in CLIPS_A) for kd in KINDS}
     for mode, head in (
         ("tag", "strict rule"),
-        ("tagc", f"calibrated rule (strict AND beyond {KCAL[3]} × the 3-seed spread)"),
+        ("tagc", f"calibrated rule (strict AND beyond {KCAL[3]} × the 3-seed spread or its floor)"),
     ):
         lines += [f"## Guards per kind of source, {head} (none · split:ycc:4:3)", ""]
         kn, ks = kind_cells(data, "none", mode), kind_cells(data, "split", mode)
@@ -1111,10 +1118,11 @@ def band_md(clip_bys, who="7b"):
     return lines
 
 
-def x_md(clip_bys):
-    """Our Q4_K against numz's Q4_K_M, paired at seed 42, the 7B fp16's 3-seed spread as the band."""
+def x_md(clip_bys, gl=None):
+    """Our Q4_K against numz's Q4_K_M, paired at seed 42, the 7B fp16's 3-seed spread as the band (S23: or its
+    floor; detail's from the GT's Laplacian, gl)."""
     lines = [
-        "## Our Q4_K − numz's Q4_K_M (paired at seed 42; band: the 7B fp16's 3-seed spread)",
+        "## Our Q4_K − numz's Q4_K_M (paired at seed 42; band: the 7B fp16's 3-seed spread or its floor)",
         "",
     ]
     rows = []
@@ -1125,6 +1133,9 @@ def x_md(clip_bys):
                 pair(by, f"{v}@q4k", f"{v}@nq4km", f"{v}@f32")
                 if f"{v}@q4k" in by and f"{v}@nq4km" in by
                 else {}
+            )
+            FL.apply_pairs(
+                sys.modules[__name__], P, gl.get(f"{CLIPS}/{c}.gt.mkv", 45) if gl and P else None
             )
             rows.append(
                 [c, short]
@@ -1377,6 +1388,8 @@ def main():
     ap.add_argument("--t4", default=f"{O}/sum-b2/T4-1080p.md")
     a = ap.parse_args()
     t0 = time.time()
+    me = sys.modules[__name__]
+    FL.install(me)  # S23: a multiple of a floored spread prints a †
     X["out"] = a.out
     os.makedirs(a.out, exist_ok=True)
     gl = GtLap(os.path.join(a.out, "gt_lap.json"))
@@ -1396,9 +1409,10 @@ def main():
     for L in labels:
         try:  # one label's trouble never stops the others' files
             data = label_data(L, gl)
+            FL.apply(me, data)  # S23: the floor at 1080p too
             write(
                 os.path.join(a.out, f"{L}.md"),
-                label_md(L, data, spread_note) + (["", *x_md(clip_bys)] if L == "q4k" else []),
+                label_md(L, data, spread_note) + (["", *x_md(clip_bys, gl)] if L == "q4k" else []),
             )
             overview[L] = data
         except Exception as ex:  # noqa: BLE001
@@ -1429,7 +1443,7 @@ def main():
         RULE,
         "",
         "## Guards failed (kinds of source where a guard is worse on at least one clip), strict and calibrated "
-        f"rules (calibrated: beyond {KCAL[3]} × the 3-seed spread)",
+        f"rules (calibrated: beyond {KCAL[3]} × the 3-seed spread or its floor; floors: {FL.FLOOR_LIST})",
         "",
     ]
     rows = []
@@ -1506,7 +1520,7 @@ def main():
     if any(L.startswith("3b-") for L in overview):  # S16
         lines += ["", THREEB]
     if "q4k" in labels or "nq4km" in labels:
-        lines += ["", *x_md(clip_bys)]
+        lines += ["", *x_md(clip_bys, gl)]
     if "valsharp" in labels and "validation" in X:
         ag, tot, bad = X["validation"]
         lines += [
