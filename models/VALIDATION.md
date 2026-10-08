@@ -6,8 +6,8 @@
 > every way it multiplies; the 4K slice done for every file of the sharp 7B and for the 7B's fp8
 > W8A16, int8, Q8_0 and dynamic GGUF, its fp8 W8A8 on 2 of its 6 shots, its other 4-bit files
 > not run at 4K ([Slice B](#slice-b-4k)); the 3B checked at 1080p against the sharp 7B's 4 GB
-> file ([The 3B](#the-3b-at-1080p)); the user's eyes given on the 7B's 1080p crops and the
-> sharp's 4K crops, two other sets left as optional, the 3B's not yet judged.
+> file ([The 3B](#the-3b-at-1080p)); the user's eyes given on the 7B's 1080p crops, the sharp's
+> 4K crops and the 3B's (both 3Bs worse than the 4 GB file), two other sets left as optional.
 > numz's SeedVR2 at `4490bd1` ran our safetensors files through [`gpu/ck_patch.py`](gpu/ck_patch.py)
 > (comfy-kitchen 0.2.37's layers) and our GGUF files through its own loader; colour.md's tools
 > scored them ([colour.md](../research/docs/colour.md#reproduce)). What each format does to the
@@ -66,8 +66,8 @@ own seeds differ):
   numz's Q4_K_M and NVFP4 W4A4 beside float16: nothing to report on any window (the user,
   2026-10-07). At 4K, the sharp's int8, dynamic GGUF, Q4_K, fp8 W8A8 and Q8_0 beside its
   float16: all alike at a few seconds per strip. The 7B's 4 GB files and the sharp at 1080p were
-  left as optional, not judged; the 3B's strips, beside the sharp 7B's float16 and its dynamic
-  GGUF, are not judged yet.
+  left as optional, not judged. On the 3B's strips, beside the sharp 7B's float16 and its
+  dynamic GGUF, both 3Bs are systematically worse than the dynamic GGUF (the user, 2026-10-08).
 - **The runtime path is the one meant:** exactly the 288 marked matrices become comfy-kitchen
   layers, every other tensor equal to the float16 file's; each mode runs its kernel on all 288
   and none dequantizes where it must not (W8A8 torch's scaled_mm, int8 comfy-kitchen's
@@ -625,8 +625,8 @@ flickers more than the first on 6 clips, 5 of them past the test (with it, 8 and
   differs from the first's about as much as the 7B's from the sharp 7B's, further from the source
   on the mean of every full-reference score, with more flicker (T-err) and more fine texture. And
   neither 3B in float16 (6.8 GB) comes as close to the source as the sharp 7B's dynamic GGUF (4.8
-  GB): on these scores the 3B does not beat the 4 GB pick. Whether the 3Bs' extra texture reads
-  as a crisper redraw or as noise is for the eyes (their strips, below: not judged yet).
+  GB): on these scores the 3B does not beat the 4 GB pick. The eyes agree: on the strips, both
+  3Bs are systematically worse than the dynamic GGUF ([below](#the-eyes-1)).
 
 ### The eyes
 
@@ -642,8 +642,8 @@ flickers more than the first on 6 clips, 5 of them past the test (with it, 8 and
   and its 9 file-modes): left as optional by the user, not judged: the 7B's 1080p crops had
   shown nothing, NVFP4 W4A4 included.
 - **The 3B at 1080p** (the same windows: GT, bicubic, the sharp 7B's float16 and its dynamic
-  GGUF, then the 3B from its current weights and from its first, all with `split:ycc:4:3`): left
-  to the user's eyes, not judged yet.
+  GGUF, then the 3B from its current weights and from its first, all with `split:ycc:4:3`): both
+  3Bs systematically worse than the sharp 7B's dynamic GGUF (the user, 2026-10-08).
 
 ## Caveats
 
