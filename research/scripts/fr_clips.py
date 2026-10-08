@@ -1273,17 +1273,23 @@ def rgb_to_xyz(xy, white=(0.3127, 0.3290)):
     return p * np.linalg.solve(p, w)
 
 
+# Hable's filmic curve (John Hable, "Uncharted 2: HDR Lighting", GDC 2010; filmicworlds.com).
 def hable(x):
-    a, b, c, d, e, f = 0.15, 0.50, 0.10, 0.20, 0.02, 0.30
-    return (x * (x * a + b * c) + d * e) / (x * (x * a + b) + d * f) - e / f
+    """h(x), not normalised: the tone map is h(x) / h(peak). A to F are Hable's shoulder strength, linear
+    strength, linear angle, toe strength, toe numerator and toe denominator."""
+    A, B, C, D, E, F = 0.15, 0.50, 0.10, 0.20, 0.02, 0.30
+    return (x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F) - E / F
 
 
+# The Möbius transform with a linear section: the identity up to a knee, a Möbius arc above it.
 def mobius(x, j, peak):
-    """ffmpeg's mobius (vf_tonemap.c): the identity up to j, then a Möbius transform with slope 1 at j that
-    reaches 1 at the peak."""
-    a = -j * j * (peak - 1) / (j * j - 2 * j + peak)
-    b = (j * j - 2 * j * peak + peak) / max(peak - 1, 1e-6)
-    return np.where(x <= j, x, (b * b + 2 * b * j + j * j) / (b - a) * (x + a) / (x + b))
+    """The identity up to the knee j (the operator's param), then y = (a x + b) / (x + c), equal to the identity
+    at j in value (j) and slope (1), and mapping the peak to 1; not clamped (above the peak, y keeps rising
+    towards a). The three conditions give b = -j², a = 2j + c and c + j = (1 - j)(peak - j) / (peak - 1), peak - 1
+    floored at 1e-6."""
+    c = (1 - j) * (peak - j) / max(peak - 1, 1e-6) - j
+    a, b = 2 * j + c, -j * j
+    return np.where(x <= j, x, (a * x + b) / (x + c))
 
 
 def pq_yuv(lin709):
