@@ -14,14 +14,20 @@
 importance matrix, under the size of our uniform Q4_K file; and that Q4_K quantized with the same
 importance, the control that tells the importance's own effect from the mix's.
 
-    uv run models/seedvr2_gguf_dyn.py --imatrix FILE|ones [--model 7b|sharp] [--types Q3_K,...]
-        [--masters DIR]... [--cache DIR] [--work DIR] [--static FILE] [--out DIR]
+    uv run models/seedvr2_gguf_dyn.py [--model 7b|sharp] [--imatrix FILE|ones] [--imatrices DIR]...
+        [--types Q3_K,...] [--masters DIR]... [--cache DIR] [--work DIR] [--static FILE] [--out DIR]
         [--only REGEX] [--probe] [--table FILE] [--margin BYTES] [--threads N]
 
-- The importance: FILE is models/gpu/imatrix_hook.py's (or several runs' merged by it): per matrix
-  and input channel k, imp_k = in_sum2_k / counts, the mean of x_k^2 over the calibration runs'
-  tokens (llama.cpp's imatrix), collected on numz's fp16 file of the same model. `ones` (every
-  imp_k = 1) is a placeholder for tests: ggml does NOT treat it as no importance (below).
+- The importance: models/gpu/imatrix_hook.py's file (several runs' merged by it): per matrix and
+  input channel k, imp_k = in_sum2_k / counts, the mean of x_k^2 over the calibration runs' tokens
+  (llama.cpp's imatrix), collected on numz's fp16 file of the same model. By default --model's own,
+  pinned in IMATRICES: ours, uploaded to hekmon/seedvr2x on Hugging Face at IMATRIX_REVISION with
+  the files made from it; read where an --imatrices directory has it, never moved, else downloaded
+  into --cache (default ~/.cache/seedvr2x-models), and refused unless its size and SHA-256 are the
+  pinned ones, before the master is read. It keeps its name: the outputs' metadata name it by name
+  and SHA-256. --imatrix FILE: another importance file, read as it is (OUTPUTS pins the outputs of
+  the pinned ones only). `ones` (every imp_k = 1) is a placeholder for tests: ggml does NOT treat
+  it as no importance (below).
 - Each of the 288 attention and MLP matrices of the blocks, from the float32 master, quantized by
   ggml's own ggml_quantize_chunk WITH the importance (llama.cpp at seedvr2_gguf.py's LLAMA_CPP, MIT,
   the same build), to each candidate type (default Q3_K, Q4_K, Q5_K, Q6_K, Q8_0: types numz's GGUF
@@ -53,13 +59,13 @@ importance, the control that tells the importance's own effect from the mix's.
   for bit; its errors against the master (median, worst), beside our static Q4_K's; the file read
   back by gguf-py's reader (names, types, shapes, every byte; no metadata value holding a path or
   a time); its size against our Q4_K's; the second quantization of each chosen matrix equal to
-  the first; the SHA-256 against the one pinned in OUTPUTS for that importance file (printed when
-  none is). numz's own loader:
+  the first; the SHA-256 against the one OUTPUTS pins for that importance file (both outputs of
+  each pinned importance file; another importance's printed, not checked). numz's own loader:
   models/numz_gguf_check.py, in numz's environment. A file failing a check is deleted.
 - --only REGEX: only the matching block matrices (the choice under their own Q4_K bytes), nothing
-  written; --probe: on them, each type quantized with no importance, with ones and with --imatrix,
-  bytes compared and errors given. --table FILE: the per-matrix measures of an earlier run with the
-  same inputs (master, importance, types, llama.cpp), not measured again.
+  written; --probe: on them, each type quantized with no importance, with ones and with the
+  importance, bytes compared and errors given. --table FILE: the per-matrix measures of an earlier
+  run with the same inputs (master, importance, types, llama.cpp), not measured again.
 - Why ones isn't "no importance": with no importance ggml quantizes Q3_K..Q6_K by its reference
   functions (quantize_row_q*_K_ref: their own weights, x^2 or av_x + |x|), with one by the
   importance-aware ones (quantize_row_q*_K_impl: weights imp_k * sqrt(sigma^2 + x^2), or imp_k for
@@ -107,12 +113,25 @@ MODELS = {  # --model: our fp16 file (its master), the fp16 file the importance 
 DEAD = re.compile(r"^blocks\.35\.(attn\.proj_out\.txt|mlp\.txt\.proj_(in|out))\.weight$")
 STATIC_Q4K = {"7b": ("seedvr2x_ema_7b_Q4_K.gguf", 4758307552), "sharp": ("seedvr2x_ema_7b_sharp_Q4_K.gguf", 4758307584)}
 
+# The importance files, by --model: models/gpu/imatrix_hook.py's runs of numz's fp16 file on 4 calibration clips,
+# merged, with no path and no time in their metadata; uploaded to our Hugging Face repo, IMATRIX_REPO, with the files
+# made from them. Without --imatrix, --model's is read where an --imatrices directory has it, else downloaded from
+# IMATRIX_REPO at IMATRIX_REVISION into --cache; refused unless it has this size and SHA-256.
+IMATRIX_REPO = "hekmon/seedvr2x"
+IMATRIX_REVISION = "c14a2bc4aab04cf38ad9b0d324014c4213f07048"  # the upload of 2026-10-08
+IMATRICES = {  # --model: (name, size, SHA-256)
+    "7b": ("seedvr2_ema_7b_fp16.imatrix.safetensors", 12454888,
+           "f2283e03e507c5db9234434bfe89fb79a554377c7dd79894c8bcb35a557ac6ab"),
+    "sharp": ("seedvr2_ema_7b_sharp_fp16.imatrix.safetensors", 12454944,
+              "2c0dedc3a67931d413dbe0a3ad74f3271a70a79947e39edcbd1bdba8477d5e20"),
+}
+
 # The outputs of the pinned inputs and versions, by (file name, the importance file's SHA-256): a run must give these
-# bytes, and a second run gave them. The importance files: models/gpu/imatrix_hook.py's runs of numz's fp16 file on 4
-# calibration clips, merged, with no path and no time in their metadata (seedvr2_ema_7b_fp16.imatrix.safetensors,
-# 12,454,888 bytes; seedvr2_ema_7b_sharp_fp16.imatrix.safetensors, 12,454,944 bytes). The metadata name the importance
-# file by its name and SHA-256, the clips by name, and hold no path: read from anywhere under that name, it gives these
-# bytes.
+# bytes, and a second run gave them. The importance files are IMATRICES's, from hekmon/seedvr2x at revision c14a2bc4:
+# seedvr2_ema_7b_fp16.imatrix.safetensors (12,454,888 bytes, SHA-256 f2283e03...) and
+# seedvr2_ema_7b_sharp_fp16.imatrix.safetensors (12,454,944 bytes, SHA-256 2c0dedc3...). The metadata name the
+# importance file by its name and SHA-256, the clips by name, and hold no path: read from anywhere under that name, it
+# gives these bytes.
 OUTPUTS: dict[tuple[str, str], str] = {
     ("seedvr2x_ema_7b_dyn.gguf", "f2283e03e507c5db9234434bfe89fb79a554377c7dd79894c8bcb35a557ac6ab"): (
         "f8c0c50d233dad8a26fb82d5eda4072c2ad935100e842b3fee953994849a487d"
@@ -185,6 +204,16 @@ def measure(wd: torch.Tensor, d: np.ndarray, imp64: torch.Tensor | None, colw: t
     if imp64 is None:
         return plain, plain
     return plain, float(((imp64 @ cold) / (imp64 @ colw)).sqrt())
+
+
+def pinned_imatrix(a) -> Path:
+    """--model's importance file (IMATRICES), under its own name: read where an --imatrices directory has it, else
+    downloaded into --cache; refused unless its size and SHA-256 are the pinned ones."""
+    name, size, digest = IMATRICES[a.model]
+    p = find_or_fetch(name, hf_url(IMATRIX_REPO, IMATRIX_REVISION, name), digest, size, a.imatrices, a.cache)
+    log(f"importance: {name}, {size} bytes, SHA-256 {digest}: the pinned file ({IMATRIX_REPO} at "
+        f"{IMATRIX_REVISION[:8]})")
+    return p
 
 
 def load_imatrix(spec: str, a, blocks: list, sd: dict) -> tuple[dict, dict]:
@@ -280,7 +309,10 @@ def stats(v: list) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--imatrix", required=True, help="imatrix_hook.py's file, or 'ones' (a test placeholder)")
+    ap.add_argument("--imatrix", help="imatrix_hook.py's file, or 'ones' (a test placeholder); default: --model's "
+                    "pinned file (IMATRICES)")
+    ap.add_argument("--imatrices", type=Path, action="append", default=[],
+                    help="a directory holding our importance files (read in place)")
     ap.add_argument("--model", choices=tuple(MODELS), default="7b")
     ap.add_argument("--types", default=",".join(DEFAULT_TYPES))
     ap.add_argument("--masters", type=Path, action="append", default=[])
@@ -289,7 +321,7 @@ def main() -> None:
     ap.add_argument("--static", type=Path, help="our static Q4_K file: its bytes checked equal to the reference")
     ap.add_argument("--out", type=Path, default=DIST)
     ap.add_argument("--only", help="a regex: only these block matrices, nothing written")
-    ap.add_argument("--probe", action="store_true", help="with --only: no importance, ones, --imatrix, per type")
+    ap.add_argument("--probe", action="store_true", help="with --only: no importance, ones, the importance, per type")
     ap.add_argument("--table", type=Path, help="an earlier run's measures with the same inputs")
     ap.add_argument("--margin", type=int, default=1 << 20)
     ap.add_argument("--threads", type=int, default=len(os.sched_getaffinity(0)))
@@ -310,6 +342,7 @@ def main() -> None:
         f"candidates {', '.join(types)}")
     fp16_name, imatrix_model, stem = MODELS[a.model]
     f = FILES[fp16_name]
+    imatrix = str(pinned_imatrix(a)) if a.imatrix is None else a.imatrix  # checked before the master is read
     master = find_or_fetch(f.master, hf_url(REPO, REVISION, f.master), f.master_sha256, f.master_size,
                            a.masters, a.cache)
     sd = load_master(master)
@@ -317,7 +350,7 @@ def main() -> None:
     if len(blocks) != 288:
         raise SystemExit(f"{master}: {len(blocks)} block matrices, 288 expected")
     sel = [k for k in blocks if not a.only or re.search(a.only, k)]
-    imp, src = load_imatrix(a.imatrix, a, blocks, sd)
+    imp, src = load_imatrix(imatrix, a, blocks, sd)
     static = {}
     if a.static:
         static = {t.name: t for t in gguf.GGUFReader(a.static).tensors}

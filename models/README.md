@@ -18,7 +18,7 @@ around numz's own CLI: the GPU runs that validate phase 2's files, and the impor
 | `seedvr2_gguf.py` | phase 2: `seedvr2x_ema_7b{,_sharp}_{Q4_K,Q8_0}.gguf` | the fp32 masters, by ggml's own quantizer (llama.cpp `abeada3`, built from source), the rest float16 | ggml's and gguf-py's decoders agree; each matrix's error, numz's Q4_K_M's beside; read back |
 | `seedvr2_int8.py` | phase 2: `seedvr2x_ema_7b{,_sharp}_int8_convrot.safetensors` | the fp32 masters: the 288 block matrices rotated (comfy-kitchen's Hadamard), int8 with one scale per row, the rest our fp16 values | each matrix's error; codes against comfy-kitchen's own quantizer; read back; the 16-bit tensors byte for byte |
 | `seedvr2_nvfp4.py` | phase 2: `seedvr2x_ema_7b{,_sharp}_nvfp4.safetensors` | the fp32 masters: the 288 block matrices in NVFP4 (comfy-kitchen's layout), each block's scale the one of 8 that minimises its error, the rest our fp16 values | each matrix's error, beside comfy-kitchen's own quantizer's; read back; comfy-kitchen decodes every layer bit for bit as we do; the 16-bit tensors byte for byte |
-| `seedvr2_gguf_dyn.py` | phase 2: `seedvr2x_ema_7b{,_sharp}_dyn.gguf` (a type per matrix) and `seedvr2x_ema_7b{,_sharp}_Q4_K_imatrix.gguf` (its control) | the fp32 masters and an importance matrix (`gpu/imatrix_hook.py`'s), by ggml's own quantizer with the importance (llama.cpp `abeada3`, MIT), the types among Q3_K to Q8_0 chosen by activation-weighted error within our Q4_K's bytes, the rest float16 | each matrix's plain and weighted error, our static Q4_K's beside (its bytes reproduced); ggml's and gguf-py's decoders agree; read back; the size within our Q4_K's; numz's loader (`numz_gguf_check.py`); outputs pinned by the importance file's SHA-256 |
+| `seedvr2_gguf_dyn.py` | phase 2: `seedvr2x_ema_7b{,_sharp}_dyn.gguf` (a type per matrix) and `seedvr2x_ema_7b{,_sharp}_Q4_K_imatrix.gguf` (its control) | the fp32 masters and an importance matrix (`gpu/imatrix_hook.py`'s; by default ours, pinned: the one uploaded to `hekmon/seedvr2x` at `c14a2bc4`, its size and SHA-256 checked), by ggml's own quantizer with the importance (llama.cpp `abeada3`, MIT), the types among Q3_K to Q8_0 chosen by activation-weighted error within our Q4_K's bytes, the rest float16 | each matrix's plain and weighted error, our static Q4_K's beside (its bytes reproduced); ggml's and gguf-py's decoders agree; read back; the size within our Q4_K's; numz's loader (`numz_gguf_check.py`); outputs pinned by the importance file's SHA-256 |
 | `seedvr2_fp16_3b.py` | research, not uploaded: `seedvr2x_ema_3b_fp16.safetensors` | the 3B's current master (ByteDance-Seed/SeedVR2-3B at `37255ff`), rounded as `seedvr2_fp16.py` rounds | read back; numz's 3B fp16 file's tensor names, dtypes and shapes, in its order at its offsets, 4.9% of the values equal (numz's holds the first 3B weights); `--first`: the first master rounded the same way gives numz's data section byte for byte |
 | `ck_check.py` | | our fp8, int8 and NVFP4 files | comfy-kitchen (0.2.37, CPU) decodes every marked layer as we do, and multiplies one |
 | `numz_gguf_check.py` | | our GGUF files, run in numz's environment | numz's own loader: every tensor, the 7B DiT loaded, one layer's forward |
@@ -52,9 +52,9 @@ safetensors writer.
 - **The names** are not numz's: numz's downloader deletes a file named like one of its own whose
   SHA-256 differs (`src/utils/downloads.py:216-235` at `4490bd1`), and ours differ from numz's
   by their header.
-- **Masters and references are read where they are**, never moved: `--masters` and
-  `--reference` name directories holding them; what is missing is downloaded into `--cache`
-  (default `~/.cache/seedvr2x-models`).
+- **Masters and references are read where they are**, never moved: `--masters`,
+  `--reference` and `--imatrices` (our importance matrices) name directories holding them; what
+  is missing is downloaded into `--cache` (default `~/.cache/seedvr2x-models`).
 - **Others' files are checks, not models.** numz's files serve as a reference to compare with,
   never as a source: every file starts from its original (ByteDance's fp32 masters, TransNetV2's
   TensorFlow weights). What other tools' files show (tensor names, layouts, which tensors they
