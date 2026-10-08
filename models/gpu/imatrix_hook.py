@@ -9,6 +9,11 @@ is unchanged: the wrapper patches its loader at import, as ck_patch.py does.
     python imatrix_hook.py merge OUT FILE...     # several runs' files: sums of sums and of counts
     python imatrix_hook.py show FILE             # what a file holds
 
+merge adds the files' sums and counts in the order given (the float64 sums' last bits depend on
+it), keeps their runs' records as the files keep them (below; a file written before this rule, its
+records holding paths and times, gives the same records as one written after), and records
+merged, the number of files; the files' paths and SHA-256s are printed, not kept.
+
 NUMZ is numz's ComfyUI-SeedVR2_VideoUpscaler at 4490bd1 with its environment (Apache-2.0: the hook
 point is its src/core/model_loader._load_model_weights). As research/scripts/numerics_patch.py and
 ck_patch.py do, the wrapper rewrites argv, runs the next script with runpy, and patches numz's
@@ -34,12 +39,21 @@ llama.cpp's imatrix (tools/imatrix, MIT), which ggml's quantizers take per colum
 
 IMATRIX_OUT=FILE   written when numz's CLI returns normally (FILE.part, then renamed): a safetensors
                    file, per layer <layer>.weight.in_sum2 (float64 [in_features]) and
-                   <layer>.weight.counts (int64 [1]), keyed by the weight's name in the state dict;
-                   metadata: format, the DiT file (name, path, real path, size), and one record per
-                   run (numz's arguments, the input, numz's commit, torch, the device, the DiT's
-                   forwards with their vid/txt shapes, the tokens per stream, the hook's md5, times).
+                   <layer>.weight.counts (int64 [1]), keyed by the weight's name in the state dict.
                    Nothing is written if numz fails, or if a hooked layer saw no input (exit 4).
 IMATRIX_DRYRUN=1   stop once numz has parsed its arguments (the guards run): prints the plan.
+
+The metadata, run or merge (META_KEYS, nothing else): format, what, the DiT file (model: its base
+name and size), one record per run (runs, RUN_KEYS: the clip by its base name; frames, the video
+frames through the DiT; resolution and seed; the tokens per stream; numz's commit and arguments,
+each path cut to its base name; torch's version; the DiT's forwards with their vid/txt shapes;
+the inputs' dtypes), and for a merge, merged. No path and no time: an importance file is published
+beside the GGUF files made with it, whose metadata name it by its SHA-256, and the same runs must
+give the same bytes wherever they ran; the paths and times of a run go to its log. The file is
+written in the safetensors library's layout with the metadata's keys in order (the library writes
+them in a random order, as models/common.py says), then read back by the library: refused and
+deleted unless the metadata keep only those keys, hold no absolute or home path and no date-time
+(and, in the model and the runs, no path at all), and every tensor reads back equal.
 """
 
 from __future__ import annotations
@@ -61,6 +75,15 @@ FORMAT = "seedvr2x-imatrix-1"
 LAYER = re.compile(r"^blocks\.(\d+)\.(attn\.proj_(qkv|out)\.(txt|vid)|mlp\.(txt|vid)\.proj_(in|out))$")
 N_LAYERS = 288
 CHUNK = 1 << 24  # values per float64 square-and-sum
+WHAT = ("per linear layer of the DiT's blocks: in_sum2 = sum over every input token of x^2 per input channel "
+        "(float64), counts = tokens; importance = in_sum2 / counts (llama.cpp's imatrix)")
+# the metadata a file keeps, and nothing else: no path, no time
+META_KEYS = ("format", "merged", "model", "runs", "what")
+MODEL_KEYS = ("name", "size")
+RUN_KEYS = ("dit_forwards", "forward_shapes", "frames", "input", "input_dtypes", "numz_args", "numz_commit",
+            "resolution", "seed", "tokens", "torch")
+HOST_PATH = re.compile(r"(?:^|[\s\"'\[(,=:])~?/[^/\s]")  # an absolute or home path; not a URL's //, not " / "
+TIME = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 
 
 def log(msg: str) -> None:
@@ -119,14 +142,6 @@ def check_dit_file(path: str) -> None:
     bad = sorted(k for k, v in blocks.items() if v.get("dtype") != "F16")
     if len(blocks) != N_LAYERS or bad:
         abort(f"the DiT {path}: {len(blocks)} block matrices ({N_LAYERS} expected), not F16: {bad[:4]}")
-
-
-def md5(path: str) -> str:
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for b in iter(lambda: f.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
 
 
 def numz_commit(d: str) -> str | None:
@@ -244,42 +259,140 @@ def tensors() -> dict:
 
 
 def run_record() -> dict:
-    fw = []
-    for shapes in S.forwards:
-        fw.append([v.tolist() if hasattr(v, "tolist") else v for v in shapes])
-    vid = S.counts.get("blocks.0.attn.proj_qkv.vid", 0)
-    txt = S.counts.get("blocks.0.attn.proj_qkv.txt", 0)
-    args = {k: v for k, v in vars(S.args).items()} if S.args is not None else None
+    """This run's record, before public_run keeps what defines it."""
     import torch
 
-    dev = next((str(t.device) for t in S.sums.values()), None)
+    fw = [[v.tolist() if hasattr(v, "tolist") else v for v in shapes] for shapes in S.forwards]
+    args = dict(vars(S.args)) if S.args is not None else {}
     return {
-        "input": args.get("input") if args else None,
+        "input": args.get("input"),
         "numz_args": args,
-        "argv": sys.argv,
-        "cwd": os.getcwd(),
         "numz_commit": numz_commit(os.getcwd()),
         "torch": torch.__version__,
-        "device": dev,
         "input_dtypes": S.in_dtypes,
         "dit_forwards": len(S.forwards),
         "forward_shapes": fw,
-        "tokens": {"vid": vid, "txt": txt},
-        "hook": os.path.abspath(__file__),
-        "hook_md5": md5(os.path.abspath(__file__)),
-        "started": S.started,
-        "ended": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "tokens": {"vid": S.counts.get("blocks.0.attn.proj_qkv.vid", 0),
+                   "txt": S.counts.get("blocks.0.attn.proj_qkv.txt", 0)},
     }
 
 
-def write(path: str, tens: dict, meta: dict) -> None:
-    from safetensors.torch import save_file
+def base(v):
+    """A path cut to its base name (without its trailing separators); any other value as it is."""
+    if isinstance(v, str) and ("/" in v or "\\" in v or v.startswith("~")):
+        return os.path.basename(v.replace("\\", "/").rstrip("/"))
+    return v
 
+
+def public_run(r: dict) -> dict:
+    """A run's record as a file keeps it (RUN_KEYS): what defines the run, no path, no time. The clip and
+    numz's path arguments by their base names; frames, the video frames through the DiT (numz pads each
+    batch to 4n+1 frames): 1 + 4 (T - 1) per latent of T frames (SeedVR2's VAE, 4x in time), over the
+    run's forwards. A kept record gives itself: files merged again keep the same records."""
+    args = {k: base(v) for k, v in sorted((r.get("numz_args") or {}).items())}
+    shapes = r.get("forward_shapes") or []
+    frames = sum(1 + 4 * (int(s[0]) - 1) for fw in shapes if fw and fw[0] for s in fw[0])
+    return {
+        "dit_forwards": r.get("dit_forwards"),
+        "forward_shapes": shapes,
+        "frames": frames if shapes else r.get("frames"),
+        "input": base(r.get("input")),
+        "input_dtypes": r.get("input_dtypes"),
+        "numz_args": args,
+        "numz_commit": r.get("numz_commit"),
+        "resolution": args.get("resolution", r.get("resolution")),
+        "seed": args.get("seed", r.get("seed")),
+        "tokens": r.get("tokens"),
+        "torch": r.get("torch"),
+    }
+
+
+def _strings(v):
+    """Every string of a JSON value, keys included."""
+    if isinstance(v, dict):
+        for k, x in v.items():
+            yield k
+            yield from _strings(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _strings(x)
+    elif isinstance(v, str):
+        yield v
+
+
+def check_meta(meta: dict) -> None:
+    """Refuses (ValueError) stored metadata (strings) keeping more than META_KEYS, a model other than
+    MODEL_KEYS, a run other than RUN_KEYS, or holding an absolute or home path or a date-time; in the
+    model and the runs, which come from where the runs ran, a path of any kind (a name has no separator)."""
+    if extra := sorted(set(meta) - set(META_KEYS)):
+        raise ValueError(f"metadata keys {extra}: only {list(META_KEYS)} are kept")
+    if meta.get("format") != FORMAT:
+        raise ValueError(f"format {meta.get('format')!r}, {FORMAT!r} expected")
+    for k, v in meta.items():
+        if not isinstance(v, str):
+            raise ValueError(f"metadata {k}: a {type(v).__name__}, not a string")
+        if HOST_PATH.search(v) or TIME.search(v):
+            raise ValueError(f"metadata {k} holds a path or a time: {v[:160]!r}")
+    model, runs = json.loads(meta.get("model", "{}")), json.loads(meta.get("runs", "[]"))
+    if not isinstance(model, dict) or set(model) != set(MODEL_KEYS):
+        raise ValueError(f"model {model!r}: {list(MODEL_KEYS)} expected")
+    for r in runs:
+        if not isinstance(r, dict) or set(r) != set(RUN_KEYS):
+            raise ValueError(f"a run keeps {sorted(r) if isinstance(r, dict) else r!r}: {list(RUN_KEYS)} expected")
+    for s in _strings([model, runs]):
+        if "/" in s or "\\" in s or s.startswith("~"):
+            raise ValueError(f"a path in the model or a run: {s[:160]!r}")
+
+
+def serialize(tens: dict, meta: dict) -> bytes:
+    """A file's bytes: the tensors as the safetensors library lays them out (its save(), without metadata:
+    by dtype, then by name), and a header holding the metadata first, keys sorted, then the tensors in
+    data order: compact JSON padded with spaces to a multiple of 8 bytes, as the library pads it."""
+    from safetensors.torch import save
+
+    blob = save(tens)
+    (n,) = struct.unpack("<Q", blob[:8])
+    lib = json.loads(blob[8:8 + n])
+    lib.pop("__metadata__", None)
+    header = {"__metadata__": dict(sorted(meta.items()))}
+    header.update(sorted(lib.items(), key=lambda kv: kv[1]["data_offsets"][0]))
+    raw = json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode()
+    raw += b" " * (-len(raw) % 8)
+    return struct.pack("<Q", len(raw)) + raw + blob[8 + n:]
+
+
+def write(path: str, tens: dict, meta: dict) -> None:
+    """tens and meta (each value JSON-encoded, but strings) written to path (path.part, then renamed), then
+    read back by the library: refused and deleted unless the metadata read back are the ones written and
+    pass check_meta, and every tensor reads back with its dtype, shape and values."""
+    import torch
+    from safetensors import safe_open
+
+    meta = {k: v if isinstance(v, str) else json.dumps(v, sort_keys=True) for k, v in meta.items()}
+    try:
+        check_meta(meta)
+    except ValueError as e:
+        sys.exit(f"imatrix_hook: {path} not written: {e}")
     part = path + ".part"
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    save_file(tens, part, metadata={k: v if isinstance(v, str) else json.dumps(v, sort_keys=True)
-                                    for k, v in meta.items()})
+    with open(part, "wb") as f:
+        f.write(serialize(tens, meta))
     os.replace(part, path)
+    try:
+        with safe_open(path, framework="pt", device="cpu") as f:
+            back = f.metadata() or {}
+            if back != meta:
+                raise ValueError("the metadata read back are not the ones written")
+            check_meta(back)
+            if set(f.keys()) != set(tens):
+                raise ValueError("the tensors read back are not the ones written")
+            for k, v in tens.items():
+                t = f.get_tensor(k)
+                if t.dtype != v.dtype or t.shape != v.shape or not torch.equal(t, v.detach().cpu()):
+                    raise ValueError(f"{k} reads back otherwise")
+    except ValueError as e:
+        os.remove(path)
+        sys.exit(f"imatrix_hook: {path} refused and deleted: {e}")
 
 
 def write_run() -> None:
@@ -287,12 +400,16 @@ def write_run() -> None:
     if missing:
         log(f"ERROR: {len(missing)} hooked layers saw no input ({missing[:3]}): {S.out} not written")
         raise SystemExit(4)
+    rec = run_record()
+    dev = next((str(t.device) for t in S.sums.values()), None)
+    # where and when it ran: the log's, never the file's
+    log(f"run on {dev}, {S.started} to {time.strftime('%Y-%m-%dT%H:%M:%S%z')}: input {rec['input']}, "
+        f"DiT {S.dit['path']} (-> {S.dit['realpath']}), cwd {os.getcwd()}, hook {os.path.abspath(__file__)}")
     meta = {
         "format": FORMAT,
-        "what": "per linear layer of the DiT's blocks: in_sum2 = sum over every input token of x^2 per input "
-                "channel (float64), counts = tokens; importance = in_sum2 / counts (llama.cpp's imatrix)",
-        "model": S.dit,
-        "runs": [run_record()],
+        "what": WHAT,
+        "model": {k: S.dit[k] for k in MODEL_KEYS},
+        "runs": [public_run(rec)],
     }
     write(S.out, tensors(), meta)
     c = S.counts
@@ -362,6 +479,12 @@ def preflight(args) -> None:
     dit = str(getattr(args, "dit_model", "") or "")
     if not dit.endswith(".safetensors"):
         abort(f"--dit_model {dit}: the fp16 .safetensors file only")
+    args_kept = public_run({"input": getattr(args, "input", None), "numz_args": dict(vars(args))})
+    try:  # the file's metadata would refuse them after the run: refuse them before
+        check_meta({"format": FORMAT, "model": json.dumps({"name": base(dit), "size": 0}),
+                    "runs": json.dumps([args_kept], sort_keys=True)})
+    except ValueError as e:
+        abort(f"numz's arguments, as the file keeps them: {e}")
     log(f"numz's arguments: input {getattr(args, 'input', None)}, --dit_model {dit}, "
         f"--model_dir {getattr(args, 'model_dir', None)}; output {S.out}")
     if S.dryrun:
@@ -397,7 +520,7 @@ def read(path: str):
         if meta.get("format") != FORMAT:
             sys.exit(f"{path}: format {meta.get('format')!r}, {FORMAT!r} expected")
         t = {k: f.get_tensor(k) for k in f.keys()}
-    return t, {k: (json.loads(v) if k in ("model", "runs", "merged_from") else v) for k, v in meta.items()}
+    return t, {k: (json.loads(v) if k in ("model", "runs", "merged", "merged_from") else v) for k, v in meta.items()}
 
 
 def sha256(path: str) -> str:
@@ -411,15 +534,15 @@ def sha256(path: str) -> str:
 def merge(out: str, paths: list) -> None:
     import torch
 
-    total, runs, model, sources = None, [], None, []
+    total, runs, model = None, [], None
     for p in paths:
         t, meta = read(p)
         m = meta.get("model") or {}
-        key = (m.get("name"), m.get("size"))
+        key = (base(m.get("name")), m.get("size"))
         if model is None:
-            model = m
-        elif key != (model.get("name"), model.get("size")):
-            sys.exit(f"{p}: model {key}, {(model.get('name'), model.get('size'))} expected: one model per file")
+            model = key
+        elif key != model:
+            sys.exit(f"{p}: model {key}, {model} expected: one model per file")
         if total is None:
             total = {k: v.clone() for k, v in t.items()}
         else:
@@ -429,12 +552,12 @@ def merge(out: str, paths: list) -> None:
                 if v.shape != total[k].shape or v.dtype != total[k].dtype:
                     sys.exit(f"{p}: {k} {tuple(v.shape)} {v.dtype}, {tuple(total[k].shape)} {total[k].dtype} expected")
                 total[k] = total[k] + v
-        runs += meta.get("runs") or []
-        sources.append({"file": os.path.abspath(p), "sha256": sha256(p)})
+        runs += [public_run(r) for r in meta.get("runs") or []]
+        print(f"merged: {os.path.abspath(p)} sha256 {sha256(p)}")  # the sources: the log's, not the file's
     assert all(v.dtype in (torch.float64, torch.int64) for v in total.values())
-    write(out, total, {"format": FORMAT, "what": read(paths[0])[1]["what"], "model": model, "runs": runs,
-                       "merged_from": sources})
-    print(f"{out}: {len(paths)} files, {len(runs)} runs, {len(total) // 2} layers")
+    write(out, total, {"format": FORMAT, "what": WHAT, "model": dict(zip(MODEL_KEYS, model)), "runs": runs,
+                       "merged": len(paths)})
+    print(f"{out}: {len(paths)} files, {len(runs)} runs, {len(total) // 2} layers; sha256 {sha256(out)}")
 
 
 def show(path: str) -> None:
@@ -447,10 +570,11 @@ def show(path: str) -> None:
     finite = all(bool(torch.isfinite(v).all()) for v in imp.values())
     counts = [int(t[n + ".counts"][0]) for n in layers]
     print(json.dumps({"file": path, "layers": len(layers), "model": meta.get("model"),
-                      "runs": [{"input": r.get("input"), "dit_forwards": r.get("dit_forwards"),
+                      "runs": [{"input": r.get("input"), "frames": r.get("frames"), "resolution": r.get("resolution"),
+                                "seed": r.get("seed"), "dit_forwards": r.get("dit_forwards"),
                                 "tokens": r.get("tokens"), "numz_commit": r.get("numz_commit")}
                                for r in meta.get("runs", [])],
-                      "merged_from": meta.get("merged_from"), "tokens_per_layer": [min(counts), max(counts)],
+                      "merged": meta.get("merged", meta.get("merged_from")), "tokens_per_layer": [min(counts), max(counts)],
                       "channels_with_zero_importance": zeros, "finite": finite,
                       "mean_importance_range": [float(min(v.mean() for v in imp.values())),
                                                 float(max(v.mean() for v in imp.values()))]}, indent=1))

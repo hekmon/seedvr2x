@@ -109,21 +109,22 @@ STATIC_Q4K = {"7b": ("seedvr2x_ema_7b_Q4_K.gguf", 4758307552), "sharp": ("seedvr
 
 # The outputs of the pinned inputs and versions, by (file name, the importance file's SHA-256): a run must give these
 # bytes, and a second run gave them. The importance files: models/gpu/imatrix_hook.py's runs of numz's fp16 file on 4
-# calibration clips, merged (seedvr2_ema_7b_fp16.imatrix.safetensors, 12,459,016 bytes;
-# seedvr2_ema_7b_sharp_fp16.imatrix.safetensors, 12,459,160 bytes). The metadata name the importance file by its name
-# and SHA-256, the clips by name, and hold no path: read from anywhere under that name, it gives these bytes.
+# calibration clips, merged, with no path and no time in their metadata (seedvr2_ema_7b_fp16.imatrix.safetensors,
+# 12,454,888 bytes; seedvr2_ema_7b_sharp_fp16.imatrix.safetensors, 12,454,944 bytes). The metadata name the importance
+# file by its name and SHA-256, the clips by name, and hold no path: read from anywhere under that name, it gives these
+# bytes.
 OUTPUTS: dict[tuple[str, str], str] = {
-    ("seedvr2x_ema_7b_dyn.gguf", "c9c759370b50c93719ec53c843a81af104ce6cbcf863a206d79c7d4c007ce20b"): (
-        "e93f3add0ce5622f42d9c09db6718a8fc3d28a9d6fbfac83280d5bb41357018c"
+    ("seedvr2x_ema_7b_dyn.gguf", "f2283e03e507c5db9234434bfe89fb79a554377c7dd79894c8bcb35a557ac6ab"): (
+        "f8c0c50d233dad8a26fb82d5eda4072c2ad935100e842b3fee953994849a487d"
     ),
-    ("seedvr2x_ema_7b_Q4_K_imatrix.gguf", "c9c759370b50c93719ec53c843a81af104ce6cbcf863a206d79c7d4c007ce20b"): (
-        "a3da9e6f873da0e5c3b5adb327ae33184dff3f90f7bb7c4277de56882a007ce4"
+    ("seedvr2x_ema_7b_Q4_K_imatrix.gguf", "f2283e03e507c5db9234434bfe89fb79a554377c7dd79894c8bcb35a557ac6ab"): (
+        "2d9f7e607d9cdb1dd86debf9b89c2e3dbd34d19d99016454f048d827ca3f1385"
     ),
-    ("seedvr2x_ema_7b_sharp_dyn.gguf", "02d7cfa7304c7075a56eb9b1cd7b352a1eb7c652d29c3dfc527e129e88dad0a7"): (
-        "652d42c8077a54a286030806895b1a83dbfb59abc0e4dcbc72df2f7561d23c86"
+    ("seedvr2x_ema_7b_sharp_dyn.gguf", "2c0dedc3a67931d413dbe0a3ad74f3271a70a79947e39edcbd1bdba8477d5e20"): (
+        "90ba80c85e25ee08162882be58c0e05f1b4fc19c8dd9837b6f87c0efc4fad779"
     ),
-    ("seedvr2x_ema_7b_sharp_Q4_K_imatrix.gguf", "02d7cfa7304c7075a56eb9b1cd7b352a1eb7c652d29c3dfc527e129e88dad0a7"): (
-        "28333c7095afe4866af1be88f3c9459e0c352484d56a64d1c87cfc7c8078f5ca"
+    ("seedvr2x_ema_7b_sharp_Q4_K_imatrix.gguf", "2c0dedc3a67931d413dbe0a3ad74f3271a70a79947e39edcbd1bdba8477d5e20"): (
+        "486a7da980d83a5fa475d623cf9d29675355975f0e57bacb390f30008163fab1"
     ),
 }
 
