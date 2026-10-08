@@ -256,8 +256,9 @@ def import_ck() -> None:
     try:
         v = version("comfy-kitchen")
     except PackageNotFoundError:
-        abort("comfy-kitchen is not importable (PYTHONPATH must hold its directory, e.g. "
-              "/home/rat/seedvr2x-models/pylib)")
+        abort(f"comfy-kitchen is not importable: install comfy-kitchen {CK_VERSION} for numz's interpreter, outside "
+              f"its venv (uv pip install --python NUMZ/.venv/bin/python --target PYLIB --no-deps "
+              f"comfy-kitchen=={CK_VERSION}), and run with PYTHONPATH=PYLIB")
     if v != CK_VERSION:
         abort(f"comfy-kitchen {v}: this patch's paths are checked for {CK_VERSION} only")
     import comfy_kitchen

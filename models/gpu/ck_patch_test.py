@@ -5,10 +5,16 @@ references. Re-runnable; nothing is written but OUT and the scratch directory.
 
     cd NUMZ && CUDA_VISIBLE_DEVICES= PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=PYLIB nice -n 19 \\
         taskset -c 0-31 .venv/bin/python /path/to/models/gpu/ck_patch_test.py --out OUT.json \\
-        [--parts cli,load,forward,dit,xchunk] [--scratch DIR]
+        --model-dir DIR --phase2 DIR --fp16 FILE --numz-models DIR --colour-dump FILE --clip FILE \\
+        --scratch DIR [--parts cli,load,forward,dit,xchunk]
 
 NUMZ is numz's checkout at 4490bd1 with its environment, PYLIB the directory holding comfy-kitchen
-0.2.37; the paths below are the GPU box's (--model-dir, --phase2, --fp16, --colour-dump, --clip).
+0.2.37. The inputs, every path absolute (numz runs in NUMZ, and the paths it resolves are compared
+with them): --model-dir our model directory (links to phase 2's files and to numz's VAE), --phase2
+the directory of phase 2's files it links to, --fp16 our seedvr2x_ema_7b_fp16.safetensors,
+--numz-models numz's model directory (its ema_vae_fp16.safetensors, the VAE the model directory
+links to), --colour-dump research/scripts/colour_dump.py, --clip a clip for numz's CLI
+(anime-clean.d1.lr.mkv; the runs stop before inference), --scratch the runs' logs and outputs.
 - cli: python colour_dump.py ck_patch.py inference_cli.py ARGS in a subprocess, CK_PATCH_DRYRUN=1
   (it stops once numz has built the DiT's and the VAE's structures, before any weight is read): our
   fp8, NVFP4 and GGUF names in the model directory pass numz's argument parser and resolve to our
@@ -57,12 +63,13 @@ ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
 ap.add_argument("--out", required=True)
 ap.add_argument("--parts", default="cli,load,forward,dit,xchunk")
 ap.add_argument("--numz", default=os.getcwd())
-ap.add_argument("--model-dir", default="/home/rat/seedvr2x-models/modeldir")
-ap.add_argument("--phase2", default="/home/rat/seedvr2x-models/phase2")
-ap.add_argument("--fp16", default="/home/rat/seedvr2x-models/models/dist/seedvr2x_ema_7b_fp16.safetensors")
-ap.add_argument("--colour-dump", default="/srv/rat/seedvr2_output/colour/scripts/colour_dump.py")
-ap.add_argument("--clip", default="/srv/rat/seedvr2_output/meas/fr/clips/anime-clean.d1.lr.mkv")
-ap.add_argument("--scratch", default="/srv/rat/sv2/model/s1")
+ap.add_argument("--model-dir", required=True, help="our model directory: links to phase 2's files and numz's VAE")
+ap.add_argument("--phase2", required=True, help="the directory of phase 2's files the model directory links to")
+ap.add_argument("--fp16", required=True, help="our seedvr2x_ema_7b_fp16.safetensors")
+ap.add_argument("--numz-models", required=True, help="numz's model directory: its ema_vae_fp16.safetensors")
+ap.add_argument("--colour-dump", required=True, help="research/scripts/colour_dump.py")
+ap.add_argument("--clip", required=True, help="a clip for numz's CLI (the runs stop before inference)")
+ap.add_argument("--scratch", required=True, help="the runs' logs and outputs")
 A = ap.parse_args()
 PARTS = set(A.parts.split(","))
 NUMZ = os.path.abspath(A.numz)
@@ -125,7 +132,7 @@ def part_cli() -> None:
         ok(f"cli {key}: the 7B's configuration", dit.get("config") == "dit_7b.nadit", dit.get("config"))
         ok(f"cli {key}: the VAE our directory's (numz's fp16 VAE)",
            vae.get("path") == os.path.join(A.model_dir, "ema_vae_fp16.safetensors")
-           and vae.get("realpath") == "/srv/rat/seedvr2_models/ema_vae_fp16.safetensors", vae)
+           and vae.get("realpath") == os.path.realpath(os.path.join(A.numz_models, "ema_vae_fp16.safetensors")), vae)
         if mode:
             ok(f"cli {key}: format read in preflight", (rep.get("dit") or {}).get("layers_marked") == 288,
                rep.get("dit"))
@@ -181,8 +188,8 @@ def part_registry(cp, C, mr) -> None:
        all(f in ours for f in need) and all(f in choices for f in ours) and choices[: len(choices0)] == choices0,
        {"ours": ours, "need": need})
     ok("the registry's names keep numz's resolution",
-       C.find_model_file("seedvr2_ema_7b_fp16.safetensors", "/srv/rat/seedvr2_models")
-       == "/srv/rat/seedvr2_models/seedvr2_ema_7b_fp16.safetensors"
+       C.find_model_file("seedvr2_ema_7b_fp16.safetensors", A.numz_models)
+       == os.path.join(A.numz_models, "seedvr2_ema_7b_fp16.safetensors")
        and C.find_model_file("ema_vae_fp16.safetensors", A.model_dir) == os.path.join(A.model_dir, "ema_vae_fp16.safetensors")
        and "ema_vae_fp16.safetensors" not in C.get_all_model_files())
     ok("our names resolve to the model directory", all(

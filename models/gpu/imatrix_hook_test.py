@@ -7,9 +7,15 @@ Re-runnable; nothing is written but OUT, IMATRIX and the scratch directory.
 
     cd NUMZ && CUDA_VISIBLE_DEVICES= PYTHONDONTWRITEBYTECODE=1 nice -n 19 taskset -c 0-31 \\
         .venv/bin/python /path/to/models/gpu/imatrix_hook_test.py --out OUT.json --imatrix FILE \\
-        [--parts meta,cli,dit] [--scratch DIR] [--threads 8]
+        --fp16 FILE --model-dir DIR --colour-dump FILE --clip FILE --scratch DIR \\
+        [--parts meta,cli,dit] [--gguf NAME] [--threads 8]
 
-NUMZ is numz's checkout at 4490bd1 with its environment; the paths below are the GPU box's.
+NUMZ is numz's checkout at 4490bd1 with its environment. The inputs, every path absolute (numz runs
+in NUMZ): --fp16 numz's seedvr2_ema_7b_fp16.safetensors, --model-dir numz's model directory holding
+it (the runs' --model_dir; --gguf a GGUF name of numz's registry for a guard, by default
+seedvr2_ema_7b-Q4_K_M.gguf), --colour-dump research/scripts/colour_dump.py, --clip a clip for
+numz's CLI (anime-clean.d1.lr.mkv; the runs stop before inference), --scratch the runs' logs and
+outputs.
 - meta: no numz. A run's record as imatrix_hook.py wrote it before the metadata rule (absolute and
   home paths, times, argv, cwd, the hook's path) kept as RUN_KEYS: base names, frames from the
   latent shapes, numz's other arguments unchanged, a kept record kept again equal to itself; a file
@@ -58,12 +64,12 @@ ap.add_argument("--out", required=True)
 ap.add_argument("--imatrix", required=True, help="where the tiny forward's importance matrix goes")
 ap.add_argument("--parts", default="meta,cli,dit")
 ap.add_argument("--numz", default=os.getcwd())
-ap.add_argument("--fp16", default="/srv/rat/seedvr2_models/seedvr2_ema_7b_fp16.safetensors")
-ap.add_argument("--model-dir", default="/srv/rat/seedvr2_models")
+ap.add_argument("--fp16", required=True, help="numz's seedvr2_ema_7b_fp16.safetensors")
+ap.add_argument("--model-dir", required=True, help="numz's model directory, holding --fp16")
 ap.add_argument("--gguf", default="seedvr2_ema_7b-Q4_K_M.gguf")
-ap.add_argument("--colour-dump", default="/srv/rat/seedvr2_output/colour/scripts/colour_dump.py")
-ap.add_argument("--clip", default="/srv/rat/seedvr2_output/meas/fr/clips/anime-clean.d1.lr.mkv")
-ap.add_argument("--scratch", default="/srv/rat/sv2/model/s5")
+ap.add_argument("--colour-dump", required=True, help="research/scripts/colour_dump.py")
+ap.add_argument("--clip", required=True, help="a clip for numz's CLI (the runs stop before inference)")
+ap.add_argument("--scratch", required=True, help="the runs' logs and outputs")
 ap.add_argument("--threads", type=int, default=8)
 A = ap.parse_args()
 PARTS = set(A.parts.split(","))
