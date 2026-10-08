@@ -43,6 +43,8 @@ def test_milestone1_bit_identical(tmp_path: Path) -> None:
             *("--resolution", "1080", "--seed", "42", "--dump-frames", str(frames)),
             # numz's output milestone 1 holds to, without its lab (StableSR's, not vendored).
             *("--color-correction", "none"),
+            # numz.mkv's format, ffv1_out.py's default: compare.py reads both masters as stored.
+            *("--format", "gbrp16le"),
         ],
         capture_output=True,
         text=True,

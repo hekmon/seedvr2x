@@ -146,17 +146,21 @@ def source(path: Path, frames: int = FRAMES, pattern: str = "testsrc2") -> Path:
 
 def upscale(tmp_path: Path, input_path: Path, output: str, *options: str) -> int:
     """seedvr2x run in this process, without colour correction unless options ask for one: the
-    stand-in's frames then say which they are (stand_in_decode_stream)."""
+    stand-in's frames then say which they are (stand_in_decode_stream). In gbrp16le unless options
+    name a format, not the default yuv420p10le: the tests read the masters' frames as the RGB
+    planes written (indexes, stored)."""
     weights = tmp_path / "w.safetensors"
     if not weights.exists():
         weights.write_bytes(b"")
     correction = [] if "--color-correction" in options else ["--color-correction", "none"]
+    output_format = [] if "--format" in options else ["--format", "gbrp16le"]
     return cli.main(
         [
             *(str(input_path), "-o", str(tmp_path / output)),
             *("--model-dir", str(tmp_path), "--dit-model", "w.safetensors"),
             *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", str(SEED)),
             *correction,
+            *output_format,
             *options,
         ]
     )
@@ -354,6 +358,31 @@ def test_yuv_segments(tmp_path: Path) -> None:
     )
     assert cli.main(["verify", str(tmp_path / "yuv")]) == 1
     assert cli.main(["verify", str(master)]) == 1
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_yuv_by_default(tmp_path: Path) -> None:
+    # yuv420p10le unless asked otherwise (DESIGN.md, Output), one file or a directory: at 960x720,
+    # an HD size, BT.709 and limited range (writer.yuv_matrix), chroma sited left; its checksums,
+    # ffmpeg's, of the frames it holds; a setting, which the manifest records.
+    from seedvr2x.media.probe import probe
+
+    source_path = source(tmp_path / "in.mkv")
+    (tmp_path / "w.safetensors").write_bytes(b"")
+    common = ["--model-dir", str(tmp_path), "--dit-model", "w.safetensors"]
+    common += ["--vae-model", "w.safetensors", "--resolution", "720", "--color-correction", "none"]
+    for output in ("one.mkv", "out"):
+        assert cli.main([str(source_path), "-o", str(tmp_path / output), *common]) == 0
+    for master in (tmp_path / "one.mkv", tmp_path / "out" / "seg_000000.mkv"):
+        stream = probe(master)
+        assert (stream.pix_fmt, stream.width, stream.height) == ("yuv420p10le", 960, 720)
+        tags = (stream.color_space, stream.color_range, stream.chroma_location)
+        assert tags == ("bt709", "tv", "left")
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["output"]["format"] == content["settings"]["format"] == "yuv420p10le"
+    # Its checksums, beside the file and in the directory's: every frame checked against them.
+    for output in ("one.mkv", "out"):
+        assert cli.main(["verify", str(tmp_path / output)]) == 0
 
 
 @pytest.mark.usefixtures("stand_in")
@@ -612,6 +641,64 @@ def test_resumed_as_uninterrupted(
 
 
 @pytest.mark.parametrize(
+    ("stop", "resumed"),
+    [
+        # After the first segment's unit: its master and checksums kept.
+        ("encode 4", UNINTERRUPTED[6:]),
+        # Inside the last segment's decode: its master and checksums written again whole.
+        ("decode 4", UNINTERRUPTED[9:]),
+    ],
+)
+def test_default_format_resumed_as_uninterrupted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, stop: str, resumed: list[str]
+) -> None:
+    # The default format, yuv420p10le (no --format, which upscale would add), stopped then
+    # resumed: the masters' frames, decoded as stored, and their checksums are the uninterrupted
+    # job's, byte for byte.
+    from seedvr2x.media.checksums import frame_bytes
+    from seedvr2x.media.probe import probe
+
+    source_path = job(tmp_path, monkeypatch)
+    (tmp_path / "w.safetensors").write_bytes(b"")
+    common = ["--model-dir", str(tmp_path), "--dit-model", "w.safetensors"]
+    common += ["--vae-model", "w.safetensors", "--resolution", "96", "--seed", str(SEED)]
+    common += [*JOB, "--color-correction", "none"]
+
+    def run(output: str) -> int:
+        return cli.main([str(source_path), "-o", str(tmp_path / output), *common])
+
+    assert run("whole") == 0
+    steps.calls.clear()
+    steps.stop = stop
+    assert run("out") == 130
+    assert steps.calls[-1] == stop
+    steps.calls.clear()
+    steps.stop = None
+    assert run("out") == 0
+    assert steps.calls == resumed
+    for name, frames in (("seg_000000.mkv", 4), ("seg_000001.mkv", 21)):
+        stored_frames = []
+        for output in ("whole", "out"):
+            master = tmp_path / output / name
+            assert probe(master).pix_fmt == "yuv420p10le"
+            stored_frames.append(
+                subprocess.run(
+                    [
+                        *("ffmpeg", "-v", "error", "-i", str(master)),
+                        *("-f", "rawvideo", "-pix_fmt", "yuv420p10le", "-"),
+                    ],
+                    capture_output=True,
+                    check=True,
+                ).stdout
+            )
+        assert len(stored_frames[0]) == frames * frame_bytes("yuv420p10le", 128, 96)
+        assert stored_frames[1] == stored_frames[0]
+    sums = contents(tmp_path / "whole" / "checksums")
+    assert sorted(sums) == ["seg_000000.crc32", "seg_000001.crc32"]
+    assert contents(tmp_path / "out" / "checksums") == sums
+
+
+@pytest.mark.parametrize(
     ("poison", "said", "kept", "files", "resumed"),
     [
         # In the encode's latent: the encode made again.
@@ -697,12 +784,15 @@ def test_lab_by_default(
     (tmp_path / "w.safetensors").write_bytes(b"")
     common = ["--model-dir", str(tmp_path), "--dit-model", "w.safetensors"]
     common += ["--vae-model", "w.safetensors", "--resolution", "96", *JOB]
+    # upscale's format: the resume below differs by its colour correction alone.
+    common += ["--format", "gbrp16le"]
     assert cli.main([str(source_path), "-o", str(tmp_path / "out"), *common]) == 0
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["settings"]["color_correction"] == "lab"
     steps.calls.clear()
     assert upscale(tmp_path, source_path, "out", *JOB, "--color-correction", "none") == 1
     assert 'settings.color_correction: "lab" -> "none"' in caplog.text and steps.calls == []
+    assert "settings.format" not in caplog.text
 
 
 def test_lab_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
@@ -1149,7 +1239,9 @@ def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps
     from seedvr2x.runtime.shot import pad_4n1
 
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB, "--resolution", "100") == 0
+    # gbrp16le: its frames are read below as stored, three 16-bit planes.
+    options = (*JOB[:4], *LAB, "--resolution", "100", "--format", "gbrp16le")
+    assert upscale(tmp_path, source_path, "one.mkv", *options) == 0
     height, width = 100, 132
     planes = np.frombuffer(decoded(tmp_path / "one.mkv"), dtype="<u2")
     written = planes.reshape(25, 3, height, width)[:, [2, 0, 1]]  # G, B, R to R, G, B

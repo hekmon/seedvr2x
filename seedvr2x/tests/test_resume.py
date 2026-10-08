@@ -33,9 +33,11 @@ pytestmark = [
 
 # Milestone 1's 45 frames at 540p, shots of 4, 33 and 8 frames (2, 9 and 3 latents: the second
 # in three windows of 5, 4 and 4), segments of 37 and 8 frames (0.2 s is 5 frames at 24000/1001):
-# the first holds two shots.
+# the first holds two shots. In gbrp16le, the masters hold the frames as written, compared as
+# stored (frames).
 CUTS = "4\n37\n"
 OPTIONS = ["--resolution", "540", "--window", "5", "--cuts", "cuts.txt", "--min-segment", "0.2"]
+OPTIONS += ["--format", "gbrp16le"]
 SEGMENTS = ["seg_000000.mkv", "seg_000001.mkv"]
 
 

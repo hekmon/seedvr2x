@@ -64,12 +64,18 @@ def main(argv: list[str] | None = None) -> int:
         " A directory of segments is mirrored; a video file is cut at its shots, merged to"
         " --min-segment",
     )
+    # yuv420p10le by default (DESIGN.md, Output): what every encoder takes, converted here by
+    # zscale, exactly, rather than later by sptenc's swscale (16-bit white at 943, not 940). The
+    # sizes per hour of 1080p at 24000/1001: DESIGN.md, Output, Master sizes (milestone 5).
     parser.add_argument(
         "--format",
         choices=FORMATS,
-        default="gbrp16le",
-        help="FFV1 master in 16-bit RGB or in 10-bit YUV 4:2:0 (BT.709 at HD sizes, limited range),"
-        " or 16-bit PNG (default: %(default)s)",
+        default="yuv420p10le",
+        help="output format (default: %(default)s): yuv420p10le, FFV1 master in 10-bit YUV 4:2:0"
+        " (BT.709 at HD sizes, limited range), what encoders take, converted here exactly by"
+        " zscale (white at 940), about 100-135 GiB per hour of 1080p; gbrp16le, FFV1 master in"
+        " 16-bit RGB, for precision work, tests and scoring on short samples, 540-690 GiB per hour"
+        " of 1080p with colour correction; png, 16-bit PNG",
     )
     parser.add_argument("--model-dir", type=Path, required=True, help="directory of the weights")
     parser.add_argument("--dit-model", required=True, help="DiT file, e.g. 7B fp16 safetensors")

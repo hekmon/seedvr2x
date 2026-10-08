@@ -269,6 +269,8 @@ def test_joined_segments_are_the_one_file_output(tmp_path: Path) -> None:
     (tmp_path / "cuts.txt").write_text("10\n12\n30\n")
     common = ["--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors"]
     common += ["--resolution", "540", "--window", "5", "--cuts", "cuts.txt"]
+    # gbrp16le: the frames are read below as stored, three 16-bit planes.
+    common += ["--format", "gbrp16le"]
     for output, options in (("one.mkv", []), ("segments", ["--min-segment", "0.5"])):
         run = subprocess.run(
             [sys.executable, "-m", "seedvr2x", str(source), "-o", output, *common, *options],
