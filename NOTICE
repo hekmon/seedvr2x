@@ -1,0 +1,108 @@
+seedvr2-research
+Copyright 2026 Edouard Hur
+
+seedvr2x/ carries its own NOTICE, for the SeedVR2 model code it vendors and the colour code it
+ports. The submodules in upstream/ (numz's ComfyUI-SeedVR2_VideoUpscaler at 4490bd1,
+ByteDance-Seed's SeedVR at e4de8c2) are pinned references, not part of this repository's own
+files: they keep their own licences.
+
+This product includes code adapted from:
+
+- SeedVR, Copyright (c) 2025 Bytedance Ltd. and/or its affiliates, as modified by
+  ComfyUI-SeedVR2_VideoUpscaler (numz and contributors), under the Apache License, Version 2.0:
+  in research/scripts/numerics_patch.py, NaRotaryEmbedding3d.forward with a float32 table,
+  _histogram_matching_channel with tied values averaged, SideResize and DivisiblePad with other
+  kernels and pads; and the steps of numz's pipeline that research/scripts/dit_probe.py,
+  decode_resume.py, blend_patch.py and quality_metrics.py reproduce. Each file names what it
+  follows and what it changes.
+- comfy-kitchen, Copyright (c) 2025 Comfy Org, under the Apache License, Version 2.0: its
+  regular Hadamard rotation, rebuilt in models/ck_check.py, models/seedvr2_int8.py and
+  models/gpu/ck_patch.py.
+- DISTS (DISTS_pytorch), Copyright (c) 2020 Keyan Ding, under the MIT License: its score,
+  computed from given features in research/scripts/fr_metrics.py.
+- TransNetV2, Copyright (c) 2020 Tomáš Souček, under the MIT License: predict_frames' windows,
+  rewritten in research/scripts/scd_scores.py and models/transnetv2_weights.py.
+- PySceneDetect, Copyright (C) 2014, Brandon Castellano, under the BSD 3-Clause License:
+  AdaptiveDetector's adaptive ratio, recomputed in research/scripts/scd_scores.py.
+
+Sol Levante (Netflix / Production I.G) is under CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/): the measurements name it; no frame of it is in
+this repository.
+
+The MIT and BSD 3-Clause licences of those three projects follow.
+
+DISTS (MIT License):
+MIT License
+
+Copyright (c) 2020 Keyan Ding
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+TransNetV2 (MIT License):
+MIT License
+
+Copyright (c) 2020 Tomáš Souček
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+PySceneDetect (BSD 3-Clause License):
+BSD 3-Clause License
+
+Copyright (C) 2014, Brandon Castellano
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
