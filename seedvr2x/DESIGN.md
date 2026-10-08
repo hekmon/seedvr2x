@@ -64,7 +64,8 @@ never requires it.
 - Multi-GPU in one process (separate processes on separate shot ranges can come later, see
   [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
-- Models other than the 7B fp16: phase 2, after v1 (see [Weights](#weights))
+- Models other than ByteDance's 7B and sharp 7B in fp16: phase 2, after v1 (see
+  [Weights](#weights))
 - Variable frame rate sources: refused with a clear message, as sptenc does
 - Sources refused in v1, each with a clear message:
   - HDR: the PQ (`smpte2084`) and HLG (`arib-std-b67`) transfers. The model was trained on SDR
@@ -263,8 +264,8 @@ phase 2's (below).
 - **The regular 7B stays the reference** milestone 1 is checked with: numz's 7B fp16 file, and
   ours equal to it.
 - **Recognised by content.** A model file is checked by its own tensors, not by its name, which
-  is what numz goes by (`src/core/model_configuration.py:717-719`). Anything but the 7B in fp16
-  is refused, saying what the file is.
+  is what numz goes by (`src/core/model_configuration.py:717-719`). Anything but a 7B in fp16,
+  the sharp one or the regular one, is refused, saying what the file is.
 - **Small cards** rely on BlockSwap and tiling (milestone 3): the 7B fp16 DiT's weights alone
   take 15.35 GiB. Milestone 3 measures how small a card that reaches, 16 GB being the aim:
   there every block is swapped, its weights in pinned host RAM (about 15 GiB of it). numz's
@@ -331,6 +332,14 @@ they differ and by which metrics, and how users are guided to them. What is know
     each figure is read against the spread between seeds.
   - Fidelity is not quality: the model re-renders, so closer to the source can mean redrawing
     less. Live action and blurrier inputs aren't measured.
+- **No 3B in phase 2** (2026-10-08). ByteDance's current 3B master (`SeedVR2-3B` at `37255ff`)
+  isn't the first one numz's files hold: on the 8 clips at 1080p their outputs lie 36.5 dB
+  apart, as far as the 7B's from the sharp 7B's (35.5), and the current one is further from the
+  source on every mean, flickers more and draws more fine texture. Neither 3B in fp16 (6.8 GB)
+  comes as close to the source as the sharp 7B's dynamic GGUF (4.8 GB): PSNR-Y 30.7 and 31.4 dB
+  against its 32.2, DISTS 0.131 and 0.120 against 0.107, and the user's eyes find both
+  systematically worse ([VALIDATION.md](../models/VALIDATION.md)). Small cards get the sharp
+  7B's 4 GB file.
 - **Sources: ByteDance's fp32 releases,** the masters: `seedvr2_ema_7b.pth` and
   `seedvr2_ema_7b_sharp.pth` (33 GB each), `seedvr2_ema_3b.pth` (13.6 GB), `ema_vae.pth`.
   numz's files are 16-bit, so a file made from them is rounded twice.
@@ -360,7 +369,8 @@ they differ and by which metrics, and how users are guided to them. What is know
     importance matrix of each linear's inputs, collected on the GPU over 4 calibration clips
     (as Unsloth's method chooses from a calibration set): mostly Q4_K, the attention's output
     projections in Q5_K, a few in Q3_K, mostly in the text branch. Its importance files are
-    published with it, the only reproducible start of the file.
+    published with it, the only reproducible start of the file, their metadata naming no path,
+    account or time.
   - NVFP4 for Blackwell, 4-bit weights and activations, in comfy-kitchen's layout (a scale
     every 16 values), each block's scale chosen among 8 to minimise its error: 8.80% (8.94%),
     against 9.45% with comfy-kitchen's own scales, lower on every matrix. At 4 bits, Q4_K stays
@@ -381,28 +391,36 @@ they differ and by which metrics, and how users are guided to them. What is know
       2^32 values in one linear's input, the 7B's MLP output projection from 41 frames at
       3840×2160, fp8 W8A8 turns the video to NaN and NVFP4 W4A4 quantizes wrong values without
       a word; int8 indexes in 64 bits. seedvr2x quantizes such an input in row chunks at the
-      whole tensor's scale, bit-identical below the limit, until a fixed comfy-kitchen; the
-      report upstream is the user's ([VALIDATION.md](../models/VALIDATION.md)).
+      whole tensor's scale, bit-identical below the limit, until a fixed comfy-kitchen: at 4K
+      the validation's fp8 W8A8 and NVFP4 W4A4 runs went through it with no NaN. The report
+      upstream is the user's
+      ([comfy-kitchen-32-bit-quantizer-indices.md](../research/bugs/comfy-kitchen-32-bit-quantizer-indices.md)).
     - Phase 2's runtime starts with INT8 W8A8: the closest 8-bit file after Q8_0, the fastest
       8-bit multiply on GeForce cards from RTX 20, and comfy-kitchen's cheapest activation
       quantizer, fused, per token.
   - **Validated on the GPU** (numz with comfy-kitchen's layers for our safetensors files, its
     own loader for the GGUF ones; [VALIDATION.md](../models/VALIDATION.md)), each file against
-    its own model's float16 output at the same seed, at 1080p on 8 clips and at 4K on 5–6
-    shots:
+    its own model's float16 output at the same seed, at 1080p on 8 clips and at 4K on 5 shots
+    for every file of the sharp 7B, on 6 for the 7B's (fp8 multiplied in 8 bits on 2; its Q4_K
+    files and NVFP4 not yet):
     - Every 8-bit file (Q8_0, INT8, fp8 multiplied in 16 or 8 bits) is as close to its float16
       model as another seed of it, or closer, for both 7Bs, at 1080p and 4K. At 1080p, two seeds
       of the 7B fp16 are 40.6 dB apart; Q8_0 is 56.3 dB from it, INT8 53.8, fp8 50.6 in 16 bits
-      and 48.0 in 8.
-    - At 4 bits a file moves the output about as much as a seed does, each in its own way: the
-      7B's Q4_K is softer; the dynamic GGUF is the closest 4 GB file; NVFP4 multiplied in 4 bits
-      is clearly worse on DISTS. Every 4-bit file of the sharp 7B goes past the line somewhere
-      at 1080p.
+      and 48.0 in 8. At 4K, two seeds of the sharp 7B are 39.2 dB apart; Q8_0 is 55.5 dB from
+      it, INT8 52.8, fp8 49.3 and 46.8. One cell crosses the line there, fp8's flicker in 16
+      bits on one shot whose seeds agree closer than the scores print: within, in practice.
+    - At 4 bits a file moves the output about as much as a seed does, each in its own way. The
+      7B's Q4_K is softer at 1080p; at 4K the sharp's Q4_K and NVFP4 add fine detail to a clean
+      live-action close-up, and NVFP4 moves the grainy film's colour before the correction.
+      NVFP4 multiplied in 4 bits is clearly worse on DISTS, the only file further from its
+      float16 than another seed (on 2 of 5 4K shots). The dynamic GGUF is the closest 4 GB file,
+      0.3–0.8 dB closer than Q4_K with the same importance at 4K, and passes there for both
+      7Bs. Every 4-bit file of the sharp 7B goes past the line somewhere at 1080p.
     - The user's eyes found nothing to report on the 7B's files at 1080p, Q4_K and NVFP4 W4A4
-      included; the 4 GB files and the sharp's are still to be seen.
-    - The card leads with a pick per memory tier: the sharp 7B in fp16, its INT8 file at 8 GB,
-      its dynamic GGUF at 4 GB (closer to its float16 than Q4_K on all 5 4K shots), the last
-      two once the eyes agree.
+      included, and saw the sharp 7B's at 4K alike (INT8, the dynamic GGUF, Q4_K, fp8 W8A8 and
+      Q8_0 beside float16).
+    - The card leads with a pick per memory tier (the user's word, 2026-10-07): the sharp 7B in
+      fp16, its INT8 file at 8 GB, its dynamic GGUF at 4 GB. All three pass at 4K.
   - The gain is mostly memory. ComfyUI reports about 2× over fp8 or bf16 on Blackwell, but the
     DiT is about a fifth of a 1080p run here: a DiT twice as fast shortens a job by about 10%.
 - **One Hugging Face repo, seedvr2x's own, from v1 on**,
@@ -414,8 +432,11 @@ they differ and by which metrics, and how users are guided to them. What is know
     fp32 masters (`ByteDance-Seed/SeedVR2-7B` at `eb0c428`), and TransNetV2's weights (see
     [Shot detection](#shot-detection)): `seedvr2x_ema_7b_fp16.safetensors`,
     `seedvr2x_ema_7b_sharp_fp16.safetensors`, `seedvr2x_ema_vae_fp16.safetensors` and
-    `transnetv2.safetensors`. They go up in one upload with phase 2's own files, once these are
-    validated, and the card's table of every file (the user's choice, 2026-10-06).
+    `transnetv2.safetensors`. They went up in one upload with phase 2's files and the card's
+    table of every file (the user's choice, 2026-10-06): revision
+    `c14a2bc4aab04cf38ad9b0d324014c4213f07048`, 2026-10-08, 25 files (v1's 4, phase 2's 14, the
+    two importance files, the licences, the notice, the card and `SHA256SUMS`), each one's
+    SHA-256 read back equal to `SHA256SUMS` and to its script's pin.
     - The names aren't numz's: numz's downloader deletes a file named like one of its own whose
       SHA-256 differs (`src/utils/downloads.py:216-235`), and ours differ by their header, so
       a model directory shared with numz would lose them.
@@ -480,13 +501,15 @@ they differ and by which metrics, and how users are guided to them. What is know
   seeds and 10.9 with 2, the multiple a further float16 seed exceeds 5% of the time. The plain
   rule (K = 1) fails a further float16 seed on 94% of 8-clip runs. A file is read by its count
   of cells past the line, its worst multiple, its distance and the pattern, and the user's eyes
-  have the last word. Where two seeds agree to the metric's resolution, the spread gets a
-  floor.
+  have the last word. Where the seeds agree to the precision the scores are printed at, one unit
+  of that precision stands in for their spread (PSNR-Y and VMAF 0.01; SSIM, LPIPS and DISTS
+  0.0001; CAMBI, ΔE00 and flicker 0.001; detail 0.01 of the ground truth's), at 1080p and 4K
+  alike.
 - **Guiding users:** a table of the files, on the Hugging Face card and in seedvr2x's README
   alike (the user's requirement, 2026-10-06: "to help users choose in their right mind"):
   each file's size, how it multiplies on each GPU generation (W8A8, W8A16, W4A4, W4A16), where
   it is faster and what that buys (the DiT is about a fifth of a 1080p run), and its measured
-  quality against the 7B fp16's seed spread. A second table sets other repositories' files
+  quality against its float16 model's seed spread. A second table sets other repositories' files
   (numz's, Comfy-Org's) against ours, measured the same way. Then the docs, per kind of source
   (anime, dark, live action…), each figure read against the spread between seeds; `--plan`
   showing what each model gets on the user's own card (window length, BlockSwap, tiles, time);
@@ -1533,8 +1556,9 @@ explanation.
 - how shots are found: TransNetV2, why a missed cut costs more than a false one, and for content
   it gets wrong (fast action anime first, fast camera work) `--cut-threshold`, the possible
   cuts `--plan` lists, and a cut list (`--cuts`)
-- the model: v1 runs the 7B fp16 alone, the reference every check is made against, and phase 2
-  brings the others
+- the model: v1 runs ByteDance's 7B in fp16, the sharp 7B by default and the regular one as the
+  reference every check is made against; phase 2 brings the smaller files, each with its
+  measured quality
 - what the model does to live action ([numerics.md](../research/docs/numerics.md)): the
   perceptual metrics side with it over a plain upscale, the pixel ones with the plain upscale.
   It redraws grain and detail of the right kind at the wrong place, and from a heavily degraded
@@ -1604,9 +1628,8 @@ writers, and the planner needs real shot lengths.
    Then `split` in place of `lab` (see [Colour correction](#colour-correction)): the decode
    streams, and its buffer, the histograms and the code ported from numz go, before the
    planner sizes the decode.
-3. The model files from seedvr2x's own Hugging Face repo: `models/`'s scripts are done; once
-   phase 2's own files are validated, one upload holds every file and the card's table, and
-   seedvr2x's pull is pinned to its revision and the files' SHA-256s (see
+3. The model files from seedvr2x's own Hugging Face repo: the upload is done (revision
+   `c14a2bc4`, 2026-10-08), and seedvr2x's pull is pinned to it and to its `SHA256SUMS` (see
    [Weights](#weights)). Then the first pass's new work,
    ahead of the planner, since both workflows start from it: the directory input goes, the
    source being the only input; then the shot detector (see [Shot detection](#shot-detection)),
