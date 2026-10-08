@@ -3,7 +3,7 @@ tags' value or a guess (DESIGN.md, Input)."""
 
 from dataclasses import dataclass
 
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.ffmpeg import MediaError, zscale
 from seedvr2x.media.probe import VideoStream
 
 
@@ -80,7 +80,7 @@ class Conversion:
 
     def filters(self) -> str:
         """The filter chain, from the decoded frames to gbrp16le."""
-        zscale = [
+        to_rgb = zscale(
             f"min={self.matrix}",
             f"rin={self.color_range}",
             f"cin={self.chroma_location}",
@@ -90,8 +90,8 @@ class Conversion:
             "m=gbr:r=full",
             "d=none",  # rounded to nearest, deterministic
             KERNEL,
-        ]
-        return f"format={self.planar},zscale={':'.join(zscale)},format=gbrp16le"
+        )
+        return f"format={self.planar},{to_rgb},format=gbrp16le"
 
     @property
     def matrix_tag(self) -> str:

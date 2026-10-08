@@ -29,7 +29,7 @@ from typing import IO, Self
 import numpy as np
 import numpy.typing as npt
 
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.ffmpeg import MediaError, zscale
 from seedvr2x.media.files import partial_path, replace_whole
 from seedvr2x.media.probe import VideoStream
 
@@ -234,14 +234,14 @@ def master_filters(pix_fmt: str, matrix: str, tags: Tags) -> tuple[str, list[str
     if pix_fmt == "yuv420p10le":
         # ffv1_out.py's conversion with every parameter given: the primaries and transfer the same
         # on both sides, so never converted (as the decode does); no dither, rounded to nearest.
-        zscale = [
+        to_yuv = zscale(
             "min=gbr:rin=full",
             f"m={ZSCALE_MATRICES[matrix]}:r=limited:c={CHROMA_LOCATION}",
             "pin=unspecified:p=unspecified:tin=unspecified:t=unspecified",
             "d=none",
             CHROMA_KERNEL,
-        ]
-        chain = f"zscale={':'.join(zscale)},format=yuv420p10le," + _setparams(
+        )
+        chain = f"{to_yuv},format=yuv420p10le," + _setparams(
             f"colorspace={matrix}",
             "range=tv",
             f"chroma_location={CHROMA_LOCATION}",

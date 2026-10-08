@@ -29,6 +29,25 @@ def input_args(path: Path) -> list[str]:
     return ["-noautorotate", "-i", str(path)]
 
 
+# Every zscale runs on one slice (DESIGN.md, Input; research/docs/numerics.md, The master's
+# chroma: 4:2:0 kernels and zscale's slices). ffmpeg cuts zscale into slices by default, one per
+# CPU the process may use, each a zimg graph of its own whose vertical chroma filter stops at the
+# slice's edge. On the first 3 frames of anime-clean's output, a yuv420p10le master then changes
+# with the machine on the slices' edge rows: up to 1.7% of its chroma samples, by up to 13 ten-bit
+# codes, other bytes at every count from 1 to 16. A 10-bit 4:2:0 source also reads off the exact
+# conversion from 4 slices on, on every row, which the edges don't explain: on anime-clean nearly
+# every sample, by up to 0.57 level; on tests/test_zscale.py's random 1080p frame 66% of the
+# samples, by up to 12,703 sixteen-bit codes. An 8-bit one reads exactly at any count: why 10-bit
+# and not 8-bit is not known. One slice costs 2.3-2.6 ms per 1080p frame, against about 4 s of
+# GPU time. `threads` is libavfilter's generic per-filter option, not one of zscale's own:
+# `ffmpeg -h filter=zscale` doesn't list it, `ffmpeg -h full` does (AVFilter AVOptions:
+# thread_type, enable, threads), and ffmpeg refuses any option a filter lacks (exit 8).
+def zscale(*options: str) -> str:
+    """The zscale filter with zscale's own options, key=value strings, on one slice. Every zscale
+    seedvr2x builds comes from here (tests/test_zscale.py)."""
+    return ":".join(("zscale=threads=1", *options))
+
+
 def check(output_encoders: tuple[str, ...] = (), output_muxers: tuple[str, ...] = ()) -> str:
     """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs, and for the output's own
     encoders and muxers (png for PNG output; framehash, which hashes a yuv420p10le master's
