@@ -26,7 +26,7 @@ the scripts again gives the same bytes (`SHA256SUMS`).
 |---|---|---|---|
 | **Recommended** | `seedvr2x_ema_7b_sharp_fp16.safetensors` (float16) | 16.5 GB | nothing: the reference |
 | 8 GB tier | `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` (int8, rotated) | 8.3 GB | almost nothing: as close to the float16 model as another seed of it, or closer; faster on GeForce RTX 20 to 50 |
-| 4 GB tier | `seedvr2x_ema_7b_sharp_dyn.gguf` (GGUF, a type per matrix) | 4.8 GB | some fidelity: the closest 4 GB file to the float16 model at 1080p, yet further from it than another seed on some sources there (a cartoon's LPIPS and DISTS, live action's finest texture, an anime clip's flicker and colour); at 4K the closest 4 GB file too, and as close as another seed; saves memory only, a little slower |
+| 4 GB tier | `seedvr2x_ema_7b_sharp_dyn.gguf` (GGUF, a type per matrix) | 4.8 GB | some fidelity: the closest 4 GB file to the float16 model at 1080p, yet further from it than another seed on some sources there (a cartoon's LPIPS and DISTS, an anime clip's flicker and colour); at 4K the closest 4 GB file too, and as close as another seed; saves memory only, a little slower |
 
 Take float16 when your GPU has room for it, else the 8 GB file, else the 4 GB one. These are the
 sharp 7B's, the model seedvr2x runs by default; ByteDance's regular 7B has the same files, named
@@ -77,12 +77,12 @@ the SeedVR2 files other repositories publish, each against ours.
 |---|---|---|---|---|---|---|
 | **float16** | 16.5 GB | 1x on every GPU: the reference | 0.02% (0.02%) | the reference | the reference | **yes** |
 | fp8, with a scale per tensor | 8.3 GB | 2x on RTX 40 and 50 (up to 3x measured on RTX 50) and on workstation Ada and Blackwell cards; 1x before RTX 40: memory only | 2.6% (2.7%) | as close as another seed or closer, multiplied in 8 or 16 bits | the same | yes |
-| int8, rotated, with a scale per row | 8.3 GB | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% (1.08%) | as close as another seed or closer | the same (one score on one clip just past the line) | yes |
+| int8, rotated, with a scale per row | 8.3 GB | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% (1.08%) | as close as another seed or closer | the same | yes |
 | GGUF Q8_0 | 8.8 GB | 1x: memory only | 0.6% (0.6%) | as close as another seed or closer: the closest of all | the same | yes |
 | GGUF Q4_K | 4.8 GB | 1x: memory only, a little slower | 7.3% (7.9%); weighted 7.15% (9.0%) | further than a seed on cartoon, live action and anime | as close as another seed, softer on some sources | yes |
-| GGUF Q4_K, with an importance matrix | 4.8 GB | 1x: memory only, a little slower | 7.55% (8.8%); weighted 6.64% (7.4%) | further than a seed on a cartoon's DISTS and live action's finest texture | further than a seed on a cartoon's DISTS and live action's fine detail | yes |
-| GGUF, a type per matrix (Q3_K to Q5_K), with an importance matrix | 4.8 GB | 1x: memory only, a little slower | 7.55% (18%); weighted 6.31% (12%) | further than a seed on cartoon, live action and an anime clip's flicker | the closest 4 GB file: further than a seed on a cartoon's DISTS only | yes |
-| NVFP4, with searched scales | 4.8 GB | 8x on RTX 50; 4x on workstation Blackwell cards (RTX PRO); 1x before Blackwell: memory only | 8.8% (8.9%) | multiplied in 4 bits: clearly worse on DISTS (cartoon, anime); in 16 bits: further than a seed on anime, cartoon and live action | in 4 bits: clearly worse on DISTS (cartoon, anime); in 16 bits: softer on live action | yes |
+| GGUF Q4_K, with an importance matrix | 4.8 GB | 1x: memory only, a little slower | 7.55% (8.8%); weighted 6.64% (7.4%) | further than a seed on a cartoon's DISTS | further than a seed on a cartoon's DISTS and live action's fine detail | yes |
+| GGUF, a type per matrix (Q3_K to Q5_K), with an importance matrix | 4.8 GB | 1x: memory only, a little slower | 7.55% (18%); weighted 6.31% (12%) | further than a seed on cartoon and an anime clip's flicker and colour | the closest 4 GB file: further than a seed on a cartoon's DISTS only | yes |
+| NVFP4, with searched scales | 4.8 GB | 8x on RTX 50; 4x on workstation Blackwell cards (RTX PRO); 1x before Blackwell: memory only | 8.8% (8.9%) | multiplied in 4 bits: clearly worse on DISTS (cartoon, anime); in 16 bits: further than a seed on anime and cartoon | in 4 bits: clearly worse on DISTS (cartoon, anime); in 16 bits: softer on live action | yes |
 
 > **Multiply speed is not job speed.**
 >
@@ -137,19 +137,19 @@ How to read it:
 - **On video** is measured separately (seedvr2x's
   [`models/VALIDATION.md`](https://github.com/hekmon/seedvr2x/blob/main/models/VALIDATION.md)): each file against its
   own model's float16 output at the same seed, on 8 clips at 1080p, judged against how much the
-  float16 model's own seeds differ. "As close as another seed" means no score past 2.7 times the
-  spread of 3 seeds, a line another seed of the float16 model crosses on one score in twenty;
-  "further than a seed" names where a file crosses it. "Clearly worse": many times past it. At
-  4K, against 2 seeds (the line at 10.9 times their spread; where they agree to a score's last
-  digit, the spread counts as one unit of that digit): within it, the sharp 7B's int8, Q8_0, fp8
-  in W8A8, dynamic GGUF and Q4_K with an importance matrix, and the 7B's fp8 (in W8A16, and in
-  W8A8 on the 2 shots it ran), int8, Q8_0 and dynamic GGUF, each closer to float16 than another
-  seed on every shot. Past it, on one digital live-action shot: the sharp's Q4_K and NVFP4 on
-  fine detail, which they raise (the files made with an importance matrix lower it a little), and
-  the sharp's fp8 in W8A16 on flicker with the colour correction; on a close-up without the
-  colour correction: NVFP4's colour, and in 4 bits its flicker. NVFP4 in 4 bits is further from
-  float16 than another seed on 2 of the 5 shots. Not measured at 4K: the 7B's Q4_K, Q4_K with an
-  importance matrix and NVFP4, and its fp8 in W8A8 on its other 4 shots.
+  float16 model's own seeds differ; where they agree to a score's last digit, their spread counts
+  as one unit of that digit. "As close as another seed" means no score past 2.7 times the spread
+  of 3 seeds, a line another seed of the float16 model crosses on one score in twenty; "further
+  than a seed" names where a file crosses it. "Clearly worse": many times past it. At 4K, against
+  2 seeds (the line at 10.9 times their spread): within it, the sharp 7B's int8, Q8_0, fp8 in
+  W8A8, dynamic GGUF and Q4_K with an importance matrix, and the 7B's fp8 (in W8A16, and in W8A8
+  on the 2 shots it ran), int8, Q8_0 and dynamic GGUF, each closer to float16 than another seed on
+  every shot. Past it, on one digital live-action shot: the sharp's Q4_K and NVFP4 on fine detail,
+  which they raise (the files made with an importance matrix lower it a little), and the sharp's
+  fp8 in W8A16 on flicker with the colour correction; on a close-up without the colour correction:
+  NVFP4's colour, and in 4 bits its flicker. NVFP4 in 4 bits is further from float16 than another
+  seed on 2 of the 5 shots. Not measured at 4K: the 7B's Q4_K, Q4_K with an importance matrix and
+  NVFP4, and its fp8 in W8A8 on its other 4 shots.
 - Measured on the 7B (the sharp 7B's files are within 0.01%; those made with an importance
   matrix within 0.05%, their weighted worst within 0.4%), against its float32 master: this
   repository's files themselves; the others' files where checked, their method otherwise (fp8

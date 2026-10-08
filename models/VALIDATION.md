@@ -18,19 +18,19 @@ In short (each file against its own model's float16 output at the same seed, 108
 own seeds differ):
 
 - **Every 8-bit file is as close to its float16 model as another seed of it, or closer**, for
-  both models: at 1080p no score past the calibrated line but one, on one clip (the 7B's int8:
-  LPIPS +0.0002 on live-slow, 2.85 times the seed spread, the line at 2.7). Distance to the
-  float16 output at the same seed: Q8_0 56.3 dB (the sharp's 54.4), int8 53.8 (51.9), fp8
-  multiplied in 16 bits 50.6 (48.5), in 8 bits 48.0 (46.0), where two seeds of the float16 model
-  are 40.6 dB apart (the sharp's 39.2). At 4K too, against two seeds and the 4K floor
-  ([Method](#the-guards-and-two-rules)): the 7B's Q8_0, int8 and fp8 W8A16 (56.1, 53.8 and 50.4
-  dB; its seeds 39.5 apart) and its fp8 W8A8 on the 2 shots it ran (44.7 dB; its seeds 37.1
+  both models: at 1080p no score past the calibrated line (the nearest: the 7B's int8, LPIPS
+  +0.0002 on live-slow, 2.40 times the floor of 0.0001, the line at 2.7; its 3 seeds 0.00008
+  apart). Distance to the float16 output at the same seed: Q8_0 56.3 dB (the sharp's 54.4), int8
+  53.8 (51.9), fp8 multiplied in 16 bits 50.6 (48.5), in 8 bits 48.0 (46.0), where two seeds of
+  the float16 model are 40.6 dB apart (the sharp's 39.2). At 4K too, against two seeds and the
+  floor ([Method](#the-guards-and-two-rules)): the 7B's Q8_0, int8 and fp8 W8A16 (56.1, 53.8 and
+  50.4 dB; its seeds 39.5 apart) and its fp8 W8A8 on the 2 shots it ran (44.7 dB; its seeds 37.1
   apart on those), the sharp's Q8_0, int8, fp8 W8A16 and W8A8 (55.5, 52.8, 49.3 and 46.8 dB; its
   seeds 39.2), past the line on one cell only: the sharp's fp8 W8A16, digital-cockpit's flicker
   with the correction, where the sharp's two seeds agree closer than the pages print (13.9 times
   that floor). The sharp's fp8 W8A8 first came out NaN at 4K: comfy-kitchen's quantizer of the
-  activations breaks from 2^32 values, which ck_patch.py now works around
-  ([below](#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)).
+  activations breaks once a layer's input holds 2^32 values or more, which ck_patch.py now works
+  around ([below](#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)).
 - **At 4 bits, a file moves the output about as much as a seed does** (37.3 to 44.2 dB), and
   where it departs shows a pattern:
   - the 7B's Q4_K (ours, the same as numz's Q4_K_M on video too) is softer: fine detail 16% lower
@@ -46,17 +46,17 @@ own seeds differ):
     spread, on an anime clip 3.6 times; 38.9 dB, further than a seed), and softer on live action
     multiplied in 16 bits (W4A16, 42.1 dB).
 - **The sharp 7B's 4-bit files all go past the line somewhere at 1080p**, its own seeds
-  scattering more than the 7B's notwithstanding: the cartoon clip's DISTS on all five, live
-  action's finest texture on four, an anime clip's flicker on three. The closest: its dynamic
-  GGUF (42.5 dB, 6 cells past the line) and its Q4_K with importance (42.1 dB, 4 cells); its Q4_K
-  has 9 (41.4 dB). **The 4 GB pick is its dynamic GGUF:** the closest to float16 at 1080p, and at
-  4K too (43.3 dB against the Q4_K with importance's 42.8 and Q4_K's 42.0, closer than both on
-  all 5 shots), where none of its cells crosses the line, nor the Q4_K with importance's: both
-  take a little detail away from digital live action, as from live action at 1080p; Q4_K adds
-  some there, past the line. NVFP4 adds more and shifts a close-up's colour without the
-  correction, past the line too (41.4 dB multiplied in 16 bits; 38.9 in 4 bits, further than the
-  other seed on 2 of the 5 shots). To the eyes, at 4K, the dynamic GGUF looks the same as Q4_K
-  and the 8-bit files shown beside it.
+  scattering more than the 7B's notwithstanding: the cartoon clip's DISTS on all five, an anime
+  clip's flicker on three, live action's finest texture on one (the static Q4_K, which adds it).
+  The closest: its dynamic GGUF (42.5 dB, 4 cells past the line) and its Q4_K with importance
+  (42.1 dB, 2 cells); its Q4_K has 9 (41.4 dB). **The 4 GB pick is its dynamic GGUF:** the closest
+  to float16 at 1080p, and at 4K too (43.3 dB against the Q4_K with importance's 42.8 and Q4_K's
+  42.0, closer than both on all 5 shots), where none of its cells crosses the line, nor the Q4_K
+  with importance's: both take a little detail away from digital live action, as from live action
+  at 1080p; Q4_K adds some there, past the line. NVFP4 adds more and shifts a close-up's colour
+  without the correction, past the line too (41.4 dB multiplied in 16 bits; 38.9 in 4 bits,
+  further than the other seed on 2 of the 5 shots). To the eyes, at 4K, the dynamic GGUF looks the
+  same as Q4_K and the 8-bit files shown beside it.
 - **The 3B** ([at 1080p](#the-3b-at-1080p)): its current weights' video differs from its first
   weights' about as much as the 7B's from the sharp 7B's (36.5 dB apart), further from the
   source on most clips, with more flicker and more fine texture; both 3B files in float16 (6.8
@@ -143,10 +143,10 @@ load, the 840 tensors kept in 16 bits must equal the float16 file's. Then:
   ([`ffv1_out.py`](../research/scripts/ffv1_out.py) `--diff`).
 - **The reference:** each file paired frame by frame with its own model's float16 at seed 42 (the
   7B's: colour's runs; the sharp's: colour's `sh42`). **The band:** that float16 model's spread
-  over 3 seeds (42, 43, 1234: max − min of the per-seed means), per clip, variant and score; the
-  7B's seeds 43 and 1234 are colour's runs, the sharp's ours. The sharp's spread is wider on most
-  scores (median over the clips: LPIPS 1.78 times the 7B's, DISTS 1.3 to 1.5, VMAF 1.25, PSNR-Y
-  1.14).
+  over 3 seeds (42, 43, 1234: max − min of the per-seed means), per clip, variant and score, or
+  the floor where that is larger ([below](#the-guards-and-two-rules)); the 7B's seeds 43 and 1234
+  are colour's runs, the sharp's ours. The sharp's spread is wider on most scores (median over the
+  clips: LPIPS 1.78 times the 7B's, DISTS 1.3 to 1.5, VMAF 1.25, PSNR-Y 1.14).
 - **The pipeline checked:** colour's sharp decodes scored through it give colour's own JSONs,
   series for series (56 of 56 comparisons), and colour's table of the sharp against the 7B, cell
   for cell (240 of 240); at 4K, 28 of 28 for the 7B's shots and 22 of 22 for the sharp's.
@@ -188,20 +188,20 @@ load, the 840 tensors kept in 16 bits must equal the float16 file's. Then:
   A further seed would still go past it on about one cell in twenty: a file is read by its count
   of cells past the line, its worst multiple, its distance in dB and the pattern, not by any one
   cell.
-- **The 4K floor** ([DESIGN.md](../seedvr2x/DESIGN.md#weights), 2026-10-07): two seeds can agree
-  to the resolution a score is printed at, and their spread is then about 0, any difference a
-  huge multiple of it (the sharp's ouatia-face, ΔE00 lf with the correction: a spread near
-  0.00001, fp8 W8A8's +0.001 87.5 times it). The floor is one unit of that resolution: PSNR-Y and
-  VMAF 0.01; SSIM-Y, LPIPS and DISTS 0.0001; CAMBI, ΔE00 lf, T-err and T-err lf 0.001; detail and
-  the finest band 0.01 of the GT's. Both rules, and every multiple, take the larger of the seeds'
-  spread and the floor; a multiple of the floor is marked † (the seeds closer than the printed
-  resolution). Applied at 4K, to both models' files
-  ([what it changes](#what-the-4k-floor-changes)). Not at 1080p, where 3 seeds make the band: 40
-  of its cells sit under the floor there (CAMBI on every clip and variant, for both models; the
-  sharp's finest band on live action; 4 others); applied, it would take the 7B's int8 under the
-  calibrated line (LPIPS on live-slow, 2.85 times the spread, 2.40 times the floor) and the
-  sharp's dynamic GGUF, Q4_K with importance and NVFP4 W4A16 under it on live-slow's finest band,
-  each still past it elsewhere.
+- **The floor** ([DESIGN.md](../seedvr2x/DESIGN.md#weights): at 4K since 2026-10-07, at 1080p too
+  since 2026-10-08, one rule): the seeds can agree to the resolution a score is printed at, and
+  their spread is then about 0, any difference a huge multiple of it (the sharp's ouatia-face at
+  4K, ΔE00 lf with the correction: a spread near 0.00001, fp8 W8A8's +0.001 87.5 times it). The
+  floor is one unit of that resolution: PSNR-Y and VMAF 0.01; SSIM-Y, LPIPS and DISTS 0.0001;
+  CAMBI, ΔE00 lf, T-err and T-err lf 0.001; detail and the finest band 0.01 of the GT's. Both
+  rules, and every multiple, take the larger of the seeds' spread and the floor; a multiple of the
+  floor is marked † (the seeds closer than the printed resolution). At 1080p 40 of the bands'
+  cells sit under it (CAMBI on every clip and variant, for both models; the sharp's finest band on
+  live action; 4 others): it takes the 7B's int8 under the calibrated line (LPIPS on live-slow)
+  and the sharp's dynamic GGUF, Q4_K with importance and NVFP4 W4A16 under it on live-slow's
+  finest band, each still past it elsewhere; the sharp's fp8 W8A8, int8 and NVFP4 W4A4 under the
+  strict line there, and NVFP4 W4A16 under it on live-vfx's colour with the correction
+  ([what it changes](#what-the-floor-changes)).
 
 ### The dynamic GGUF
 
@@ -249,7 +249,7 @@ does it beat the sharp 7B's 4 GB file?
   both 3B files).
 - **No seed band of its own:** each 3B ran one seed. Each is paired frame by frame with the other
   and with the sharp 7B's dynamic GGUF, the sharp 7B's float16 and the 7B's for scale; a
-  difference is set against the sharp 7B's 3-seed spread, the 7B's beside it.
+  difference is set against the sharp 7B's 3-seed spread or its floor, the 7B's beside it.
 - **The size:** 6.8 GB in float16, against the 4.8 GB of the sharp 7B's dynamic GGUF, the 4 GB
   tier's pick: the file a 3B would compete with on small cards.
 
@@ -298,15 +298,15 @@ output:
 
 ### 1080p, the 7B
 
-Each file against the 7B's float16 at seed 42, the band its 3 seeds' spread. Cells: a score on a
-clip and variant (8 clips × 2 variants). PSNR-Y and VMAF: the mean difference against the ground
-truth with `split:ycc:4:3`, the file's minus the float16's (+: closer to the source).
+Each file against the 7B's float16 at seed 42, the band its 3 seeds' spread or its floor. Cells: a
+score on a clip and variant (8 clips × 2 variants). PSNR-Y and VMAF: the mean difference against
+the ground truth with `split:ycc:4:3`, the file's minus the float16's (+: closer to the source).
 
 | File, mode | Cells past the strict / calibrated line | Guards past the calibrated line (kinds) | Worst multiple of the band | dB to float16, seed 42: mean (worst) | PSNR-Y, VMAF |
 |---|---|---|---|---|---|
 | fp8, W8A16 | 0 / 0 | none | – | 50.56 (45.50) | −0.01, −0.08 |
 | fp8, W8A8 | 6 / 0 | none | 2.36× | 47.97 (42.69) | −0.03, −0.15 |
-| int8, rotated | 4 / 1 | LPIPS (live action: +0.0002 on live-slow) | 2.85× | 53.79 (49.22) | −0.01, −0.14 |
+| int8, rotated | 4 / 0 | none | 2.40×† | 53.79 (49.22) | −0.01, −0.14 |
 | GGUF Q8_0 | 0 / 0 | none | – | 56.28 (51.64) | −0.04, −0.17 |
 | GGUF Q4_K | 11 / 0 | none (strict: detail and finest band lower on anime and live action; DISTS on cartoon) | 2.68× | 42.87 (37.68) | +0.30, +0.47 |
 | GGUF Q4_K, importance | 11 / 6 | detail ↓, finest band ↓ (live action); DISTS (cartoon) | 2.90× | 43.74 (37.89) | +0.10, +0.32 |
@@ -318,9 +318,9 @@ truth with `split:ycc:4:3`, the file's minus the float16's (+: closer to the sou
 
 - **8-bit:** Q8_0 and fp8 W8A16 have no cell past even the strict line. fp8 W8A8's strict cells
   (flicker and colour drift on anime-clean, LPIPS and DISTS on the cartoon clip) stay under 2.4
-  times the band; int8's are LPIPS and DISTS on the cartoon clip and live-slow, +0.0001 to
-  +0.0003, one of them 2.85 times the band (live-slow's LPIPS band is 0.0001): a further seed
-  would cross that line on one cell in twenty.
+  times the band; int8's are LPIPS on the cartoon clip and live-slow and DISTS on live-slow,
+  +0.0001 to +0.0003, the largest 2.40 times the floor (live-slow's LPIPS without the correction,
+  its seeds 0.00008 apart): none past the calibrated line.
 - **Q4_K** lowers fine detail: anime-sky's Laplacian variance 5.08 times the GT's against the
   float16's 6.04 (its seeds 5.42 to 6.12), live-slow's 1.15 against 1.22; and it lands closer to
   the source on most full-reference scores (without correction: PSNR-Y +0.41 to +0.69 dB beyond
@@ -333,28 +333,29 @@ truth with `split:ycc:4:3`, the file's minus the float16's (+: closer to the sou
 
 ### 1080p, the sharp 7B
 
-Each file against the sharp's float16 at seed 42, the band the sharp's own 3 seeds' spread.
+Each file against the sharp's float16 at seed 42, the band its own 3 seeds' spread or its floor.
 
 | File, mode | Cells past the strict / calibrated line | Guards past the calibrated line (kinds) | Worst multiple of the band | dB to float16, seed 42: mean (worst) | PSNR-Y, VMAF |
 |---|---|---|---|---|---|
 | fp8, W8A16 | 4 / 0 | none | 2.06× | 48.52 (43.28) | −0.04, −0.15 |
-| fp8, W8A8 | 5 / 0 | none | 1.53× | 45.96 (40.41) | −0.08, −0.26 |
-| int8, rotated | 2 / 0 | none | 1.13× | 51.94 (46.59) | +0.02, +0.07 |
+| fp8, W8A8 | 3 / 0 | none | 1.53× | 45.96 (40.41) | −0.08, −0.26 |
+| int8, rotated | 0 / 0 | none | – | 51.94 (46.59) | +0.02, +0.07 |
 | GGUF Q8_0 | 0 / 0 | none | – | 54.43 (49.04) | +0.00, −0.04 |
-| GGUF Q4_K | 30 / 9 | flicker, detail ↑, finest band ↑ (live action); colour drift (anime); LPIPS, DISTS (cartoon) | 6.51× | 41.43 (35.30) | −0.20, −0.33 |
-| GGUF Q4_K, importance | 22 / 4 | finest band ↓ (live action); DISTS (cartoon) | 4.20× | 42.05 (35.82) | +0.02, +0.01 |
-| GGUF dynamic | 25 / 6 | flicker, colour drift (anime); finest band ↓ (live action); LPIPS, DISTS (cartoon) | 4.37× | 42.48 (36.36) | −0.07, −0.13 |
-| NVFP4, W4A16 | 13 / 4 | flicker (anime); finest band ↓ (live action); DISTS (cartoon) | 5.23× | 40.36 (34.21) | +0.20, +0.42 |
-| NVFP4, W4A4 | 18 / 7 | flicker (anime); colour drift (live action); LPIPS (cartoon); DISTS (anime, cartoon) | 12.9× | 37.28 (30.99) | +0.23, +0.05 |
+| GGUF Q4_K | 30 / 9 | flicker, detail ↑, finest band ↑ (live action); colour drift (anime); LPIPS, DISTS (cartoon) | 5.66× | 41.43 (35.30) | −0.20, −0.33 |
+| GGUF Q4_K, importance | 22 / 2 | DISTS (cartoon) | 4.20× | 42.05 (35.82) | +0.02, +0.01 |
+| GGUF dynamic | 25 / 4 | flicker, colour drift (anime); LPIPS, DISTS (cartoon) | 4.37× | 42.48 (36.36) | −0.07, −0.13 |
+| NVFP4, W4A16 | 12 / 2 | flicker (anime); DISTS (cartoon) | 5.23× | 40.36 (34.21) | +0.20, +0.42 |
+| NVFP4, W4A4 | 16 / 7 | flicker (anime); colour drift (live action); LPIPS (cartoon); DISTS (anime, cartoon) | 12.9× | 37.28 (30.99) | +0.23, +0.05 |
 | float16, seeds 43 and 1234 | | | | 39.15 (34.59) | |
 
 - **8-bit:** as the 7B's, closer than a seed: no cell past the calibrated line, the strict ones
   under 2.1 times the band.
 - **4-bit:** past the line on the cartoon clip's DISTS in every file (+0.0032 to +0.0169), on
-  live-slow's finest band in four (the static Q4_K adds texture there, 6.5 times the band; the
-  others remove it), on an anime clip's flicker in three. The sharp's band is the wider of the
-  two, yet its 4-bit files cross it more often (30 cells in all) than the 7B's cross the 7B's
-  (20): the sharp 7B looks the more sensitive to 4-bit weights.
+  an anime clip's flicker in three, on live-slow's finest band in one: the static Q4_K adds
+  texture there (3.89 times the floor), where the dynamic GGUF, the Q4_K with importance and NVFP4
+  W4A16 remove some, 1.66 to 2.25 times the floor, under the line. The sharp's band is the wider
+  of the two, yet its 4-bit files cross it more often (24 cells in all) than the 7B's cross the
+  7B's (20): the sharp 7B looks the more sensitive to 4-bit weights.
 
 ### Distances to float16
 
@@ -384,7 +385,7 @@ clip, the 7B's 4-bit files, and its float16's own seeds for scale:
 | Types of the 288 matrices | Q3_K 17, Q4_K 203, Q5_K 68 | Q3_K 17, Q4_K 204, Q5_K 67 |
 | Size against our Q4_K's | −1,252,288 bytes | −1,178,560 bytes |
 | dB to float16: dynamic / control / Q4_K | 44.15 / 43.74 / 42.87 | 42.48 / 42.05 / 41.43 |
-| Cells past the calibrated line: dynamic / control / Q4_K | 2 / 6 / 0 | 6 / 4 / 9 |
+| Cells past the calibrated line: dynamic / control / Q4_K | 2 / 6 / 0 | 4 / 2 / 9 |
 | At 4K (the 7B: 6 shots; the sharp: 5): dB to float16, dynamic / control / Q4_K; cells past the calibrated line | 44.34 / not run / not run; 0 | 43.31 / 42.75 / 41.96; 0 / 0 / 2 |
 
 - **Where the bytes went** (the 7B; the sharp's choice differs on 5 matrices,
@@ -401,17 +402,18 @@ clip, the 7B's 4-bit files, and its float16's own seeds for scale:
   the work, the mix of types adds 0.4 dB. At 4K, on the 7B's 6 shots, it is closer to float16
   than the other seed on every one (38.3 to 47.5 dB, the seed 34.7 to 42.0) and past the
   calibrated line nowhere ([4K, the 7B](#4k-the-7b)); its control and Q4_K did not run at 4K.
-- **The sharp:** at 1080p the three files fail differently (above); none is past the line on
-  fewer than two kinds of source. At 4K the dynamic file is closer to float16 than its control on
-  every shot (0.3 to 0.8 dB), the control closer than Q4_K (0.5 to 1.1 dB); neither the dynamic
-  file nor its control is past the line anywhere, and both take a little of digital live action's
-  detail away (digital-cockpit: 3.19 and 3.16 times the GT's against the float16's 3.23) where
-  Q4_K adds some (3.40), past the line.
+- **The sharp:** at 1080p the three files fail differently (above): the control is past the line
+  on the cartoon clip's DISTS only, the dynamic file on two kinds of source (anime, cartoon), Q4_K
+  on three. At 4K the dynamic file is closer to float16 than its control on every shot (0.3 to 0.8
+  dB), the control closer than Q4_K (0.5 to 1.1 dB); neither the dynamic file nor its control is
+  past the line anywhere, and both take a little of digital live action's detail away
+  (digital-cockpit: 3.19 and 3.16 times the GT's against the float16's 3.23) where Q4_K adds some
+  (3.40), past the line.
 
 ### 4K, the 7B
 
 The 7B's files on its 6 shots, against its two seeds (39.53 dB apart, 34.66 to 42.02 per shot),
-with the 4K floor; kinds: Sol Levante (sollevante-painted, -line, -action, -dark), digital live
+with the floor; kinds: Sol Levante (sollevante-painted, -line, -action, -dark), digital live
 action (digital-sunrise, digital-space).
 
 | File, mode | Shots | Cells past the strict / calibrated line | Guards past the calibrated line (kinds) | Worst multiple of the band | dB to float16, seed 42: mean (worst) | PSNR-Y, VMAF |
@@ -454,12 +456,12 @@ The floor took 10 cells off the strict count (int8 5, the dynamic GGUF 2, fp8 W8
 colour drift with the correction where the two seeds agreed closer than 0.001 (sollevante-dark
 for all four, digital-space for all but Q8_0, sollevante-action for int8) and int8's finest band
 on digital-sunrise (both variants, the seeds 0.004 apart); it changes no worst multiple but fp8
-W8A8's, now the floor's ([what it changes](#what-the-4k-floor-changes)).
+W8A8's, now the floor's ([what it changes](#what-the-floor-changes)).
 
 ### 4K, the sharp 7B
 
 The sharp's files on its 5 shots, against its own two seeds (39.22 dB apart, 34.18 to 42.25 per
-shot), with the 4K floor; kinds: digital live action (digital-cockpit, digital-space), the first
+shot), with the floor; kinds: digital live action (digital-cockpit, digital-space), the first
 film's close-up (ouatia-face), Sol Levante (sollevante-painted), cel (cel4k-detail).
 
 | File, mode | Shots | Cells past the strict / calibrated line | Guards past the calibrated line (kinds) | Worst multiple of the band | dB to float16, seed 42: mean (worst) | PSNR-Y, VMAF |
@@ -506,17 +508,17 @@ film's close-up (ouatia-face), Sol Levante (sollevante-painted), cel (cel4k-deta
   importance 3.16: 3.7 and 6.6 times the floor; their finest band 1.76 and 1.77). On digital-space
   NVFP4 raises it too (4.56 and 4.65 against 3.73, within the line: the seeds 3.49 and 3.73). At
   1080p Q4_K and the importance files went the same ways on live action, but NVFP4 took texture
-  away there (W4A16: live-slow's finest band, past the line).
+  away there (W4A16: live-slow's finest band, past the strict line only).
 - **Fidelity:** the GGUF 4-bit files land a little closer to the source (PSNR-Y +0.08 to +0.19,
   LPIPS −0.004 to −0.006 with the correction), NVFP4 about where float16 does (PSNR-Y −0.04 and
   +0.02, LPIPS +0.0016 and −0.0004), the 8-bit ones within 0.05 dB of float16's.
 
-### What the 4K floor changes
+### What the floor changes
 
-Each 4K file scored with and without the floor (`floor_report.py`): the guards it no longer
-fails, per rule, and the cells behind them, with their multiple before and after (of the seeds'
-spread, or of the floor where marked †; "within": no longer past the strict line). A floor only
-widens the spread: no verdict goes the other way.
+Each file scored with and without the floor (`floor_report.py`), at 4K and at 1080p: the guards it
+no longer fails, per rule, and the cells behind them, with their multiple before and after (of the
+seeds' spread, or of the floor where marked †; "within": no longer past the strict line). A floor
+only widens the spread: no verdict goes the other way. At 4K:
 
 | File, mode | No longer past the calibrated line | No longer past the strict line | The cells: shot, variant, score, multiple before → after |
 |---|---|---|---|
@@ -538,6 +540,30 @@ The 7B's fp8 W8A8, on its 2 shots, has no cell that changes: only its worst mult
 floor's (sollevante-line's finest band without the correction, 1.32 times the seeds' spread, 1.23
 times the floor).
 
+At 1080p, against 3 seeds:
+
+| File, mode | No longer past the calibrated line | No longer past the strict line | The cells: clip, variant, score, multiple before → after |
+|---|---|---|---|
+| the 7B's int8 | LPIPS (live action, without the correction) | – | live-slow without the correction, LPIPS: 2.85× → 2.40×† |
+| the 7B's Q8_0 | – | – | a better cell, live-slow without the correction, LPIPS: 1.06× → within |
+| the sharp's fp8, W8A16 | – | – | SSIM-Y (reported, not a guard), anime-sky without the correction: 5.83× → 2.01×†, under the calibrated line |
+| the sharp's fp8, W8A8 | – | finest band (live action, both variants) | live-slow, finest band: 1.24× and 1.22× → within |
+| the sharp's int8 | – | finest band (live action, both variants) | live-slow, finest band: 1.13× and 1.12× → within |
+| the sharp's Q4_K, importance | finest band (live action, both variants) | – | live-slow, finest band: 2.78× and 2.75× → 1.66×† |
+| the sharp's dynamic GGUF | finest band (live action, both variants) | – | live-slow, finest band: 3.76× and 3.74× → 2.25×† |
+| the sharp's NVFP4, W4A16 | finest band (live action, both variants) | colour drift (live action, with the correction) | live-slow, finest band: 3.66× and 3.57× → 2.19×† and 2.15×†; live-vfx with the correction, ΔE00 lf: 1.08× → within |
+| the sharp's NVFP4, W4A4 | – | finest band (live action, both variants) | live-slow, finest band: 1.37× and 1.27× → within |
+
+No other file of either 7B has a cell whose verdict changes at 1080p. The floor moves a few
+multiples there without moving a verdict: the sharp's Q4_K on live-slow's finest band (6.51× and
+6.45× → 3.89×†), still past the calibrated line, its worst multiple now 5.66× (anime-clean's
+colour with the correction); its NVFP4 W4A4 on live-vfx's colour with the correction (4.08× →
+2.95×†), still past it; live-vfx's finest band for the sharp's Q4_K (1.55× and 1.54× → 1.52×† and
+1.51×†), Q4_K with importance (2.29× and 2.28× → 2.25×† and 2.24×†) and dynamic GGUF (2.28× and
+2.27× → 2.24×† and 2.23×†), and the 7B's int8 on live-slow's DISTS on every frame with the
+correction (2.49× → 1.28×†), each still past the strict line. Our Q4_K against numz's Q4_K_M and
+the 4 GB files against each other change in multiples only, no cell's verdict.
+
 ### fp8 W8A8 at 4K: comfy-kitchen's 32-bit indices
 
 The sharp's fp8 file multiplied in 8 bits first came out NaN at 4K: on digital-cockpit and
@@ -546,10 +572,12 @@ digital-space too (numz's warning of a NaN cast in all three runs), where it ran
 (46.0 dB).
 
 - **The cause:** comfy-kitchen 0.2.37's CUDA quantizers of the activations index in 32 bits. The
-  fp8 one takes the element count as a 32-bit integer and leaves its output past 2^32 elements
-  unwritten: whatever memory it was given, NaN codes among it, and one NaN makes the next layer's
-  per-tensor scale NaN, then the whole video. The NVFP4 one quantizes, from 2^32 elements on, the
-  values found 2^32 elements earlier: finite, wrong, without a word.
+  fp8 one takes the element count as a 32-bit integer, so it sees the count modulo 2^32: of an
+  input of 2^32 + r elements it writes the first r and never the last 2^32 (at 4K, r is
+  164,102,144 to 482,607,104: 90 to 96% of the output left unwritten). Those keep whatever memory
+  they were given, NaN codes among it, and one NaN makes the next layer's per-tensor scale NaN,
+  then the whole video. The NVFP4 one quantizes, from 2^32 elements on, the values found 2^32
+  elements earlier: finite, wrong, without a word.
 - **When:** a linear's input of 2^32 elements or more. In the 7B only the MLP's output projection
   gets there (12,288 values per token), from 349,526 video tokens in one forward: at 3840×2160 a
   batch of 41 frames or more (45 frames: 388,800 tokens), so all five of the sharp's 4K shots
@@ -560,9 +588,11 @@ digital-space too (numz's warning of a NaN cast in all three runs), where it ran
   of a multiple of 128 rows, each quantized by comfy-kitchen's own quantizer at the scale its
   formula gives the whole tensor: its values bit for bit wherever its kernel is right (on the
   GPU, chunks forced on a smaller input equal its unchunked output; a 1080p layer's forward is
-  unchanged, bit for bit; on a 4K input the rows past 2^32 elements are as accurate as the
-  others). The five shots ran again with it, each run 36 chunked inputs (the 36 blocks' video
-  MLP, 3 chunks each), no NaN: [the sharp's 4K table](#4k-the-sharp-7b) holds those runs.
+  unchanged, bit for bit; on a 4K input of 388,800 rows, every row alike, the ones comfy-kitchen
+  alone gets wrong included: each row's output about 0.17% from the exact product of its rounded
+  input in W8A8, 0.24% in W4A4). The five shots ran again with it, each run 36 chunked inputs
+  (the 36 blocks' video MLP, 3 chunks each), no NaN: [the sharp's 4K table](#4k-the-sharp-7b)
+  holds those runs.
 - **NVFP4 W4A4 at 4K** ran on the same five shots, through the same chunks: each run 36 chunked
   inputs in 108 chunks, the largest of 4,459,069,440 elements (the digital shots), 4,529,848,320
   (cel4k-detail) or 4,777,574,400 (ouatia-face, sollevante-painted), all past 2^32, and no
@@ -574,7 +604,8 @@ digital-space too (numz's warning of a NaN cast in all three runs), where it ran
 - **Beyond this repository:** any runtime that quantizes a layer's input through comfy-kitchen
   0.2.37's CUDA kernels meets it (comfy-kitchen is ComfyUI's kernel library): with our fp8 and
   NVFP4 files in W8A8 or W4A4, from a 3840×2160 batch of 41 frames. An upstream report is
-  pending.
+  pending: [its text](../research/bugs/comfy-kitchen-32-bit-quantizer-indices.md), with the
+  measurements and comfy-kitchen's code.
 
 ### The 3B, at 1080p
 
@@ -593,7 +624,8 @@ over the GT's, tells the redraw's texture, not a closeness):
 
 Clip by clip, paired frame by frame: on how many of the 8 clips each side is the closer to the
 GT, flickers less, bands less or draws more detail (in brackets, those where the difference also
-passes the strict rule's test against the sharp 7B's 3-seed spread), and the decodes' distance:
+passes the strict rule's test against the sharp 7B's 3-seed spread or its floor), and the decodes'
+distance:
 
 | Pair, with the correction | Closer to the GT: PSNR-Y, LPIPS, DISTS | Flickers less (T-err) | Bands less (CAMBI) | More detail | dB apart: mean (worst) |
 |---|---|---|---|---|---|
@@ -647,16 +679,18 @@ flickers more than the first on 6 clips, 5 of them past the test (with it, 8 and
 
 ## Caveats
 
-- **One seed per file** (42), judged against its float16 model's spread over 3 seeds: an effect
-  that changed sign with the seed would not show. The patterns hold across clips (Q4_K softer on
-  3, NVFP4 W4A4's DISTS on 2 kinds), which argues against chance.
+- **One seed per file** (42), judged against its float16 model's spread over 3 seeds or its floor:
+  an effect that changed sign with the seed would not show. The patterns hold across clips (Q4_K
+  softer on 3, NVFP4 W4A4's DISTS on 2 kinds), which argues against chance.
 - **4K bands from 2 seeds:** |s42 − s43| is a noisy spread, the calibrated line sits at 10.9 times
   it, and the sharp's is much wider than the 7B's (PSNR-Y 2.3 times, VMAF 5, LPIPS 6.7). Where
   two seeds happen to agree closer than a score is printed (digital-cockpit's detail and finest
   band, ouatia-face's colour with the correction), the floor stands in for their spread: a unit
   chosen, not measured, and 7 of the 10 cells past the line at 4K are multiples of it (the other
-  3: NVFP4 on ouatia-face's colour and flicker without the correction). 4K results say less than
-  1080p's.
+  3: NVFP4 on ouatia-face's colour and flicker without the correction); at 1080p, where 3 seeds
+  can agree as closely, 3 of the 48 (the sharp's Q4_K on live-slow's finest band, both variants,
+  3.89 times; its NVFP4 W4A4 on live-vfx's colour with the correction, 2.95 times). 4K results say
+  less than 1080p's.
 - **Short clips, one degradation:** 8 clips of 45 frames, d1 only, ×2 at 1080p; 6 and 5 shots at
   4K.
 - **The 3B has no band of its own:** one seed per 3B file, its differences read against the
@@ -702,8 +736,8 @@ ln -s /path/to/phase2/seedvr2x_ema_7b*.safetensors /path/to/phase2/seedvr2x_ema_
   /path/to/phase2-dyn/seedvr2x_ema_7b*.gguf /path/to/numz-models/ema_vae_fp16.safetensors $MD/
 # the patch on the CPU: wrapper chain and guards, every format loaded into numz's 7B, every mode's multiply
 (cd $N && CUDA_VISIBLE_DEVICES= PYTHONPATH=$P $PY /path/to/models/gpu/ck_patch_test.py --out ck_test.json \
-  --model-dir $MD --phase2 /path/to/phase2 --fp16 $F16 --colour-dump /path/to/research/scripts/colour_dump.py \
-  --clip $C/anime-clean.d1.lr.mkv --scratch /path/to/scratch)
+  --model-dir $MD --phase2 /path/to/phase2 --fp16 $F16 --numz-models /path/to/numz-models \
+  --colour-dump /path/to/research/scripts/colour_dump.py --clip $C/anime-clean.d1.lr.mkv --scratch /path/to/scratch)
 # the smoke test: one run per mode with the check mode (here int8; w8a16, w8a8, w4a4, w4a16 the same)
 $PY $S/bench.py run model-smoke-int8 --seedvr2-dir $N --wrap $S/colour_dump.py --wrap $M/gpu/ck_patch.py \
   --env PYTHONPATH=$P --env CK_PATCH_MODE=int8 --env CK_PATCH_EXPECT=288 --env CK_PATCH_CHECK=1 \
@@ -767,7 +801,7 @@ python3 $S/colour_crops.py --clip anime-clean-d1 --gt $C/anime-clean.gt.mkv \
 ```
 
 The tables pair each file's per-clip means with its float16's at seed 42 and apply the two rules
-of Method, with the floor at 4K: [`gpu/validation/`](gpu/validation/README.md)'s `ms_sum.py`,
+of Method, with the floor: [`gpu/validation/`](gpu/validation/README.md)'s `ms_sum.py`,
 `ms_sum4k.py` and `ms_sum4ksh.py`, which its scoring pool ran again as each run was scored (the
 floor: `ms_floor.py`; what it changes: `floor_report.py`). The GPU queue, the job lines, the
 pairings and the crops are there too, every path read from `glue.env`.

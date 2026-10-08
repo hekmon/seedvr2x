@@ -240,8 +240,8 @@ sharp 7B's, from its own importance.
 | `seedvr2x_ema_7b_dyn.gguf` | 4,757,055,264 | `f8c0c50d…` | 7.550% (18.26%) | 6.310% (11.67%) | 17 / 203 / 68 | the closest 4 GB file to the fp16 model (44.2 dB); past the calibrated line on the cartoon clip's DISTS; at 4K 44.3 dB, closer than another seed on all 6 shots and past the line nowhere |
 | `seedvr2x_ema_7b_Q4_K_imatrix.gguf` | 4,758,308,480 | `2d9f7e60…` | 7.548% (8.831%) | 6.641% (7.370%) | 0 / 288 / 0 | 43.7 dB; past the line on live action's detail and the cartoon clip's DISTS; not run at 4K |
 | `seedvr2x_ema_7b_Q4_K.gguf` (ours, static) | 4,758,307,552 | `7f4642d0…` | 7.345% (7.948%) | 7.154% (8.987%) | 0 / 288 / 0 | 42.9 dB; softer on some sources, within the line; not run at 4K |
-| `seedvr2x_ema_7b_sharp_dyn.gguf` | 4,757,129,024 | `90ba80c8…` | 7.545% (18.31%) | 6.346% (12.05%) | 17 / 204 / 67 | 42.5 dB; past the line on cartoon, live action and an anime clip's flicker; at 4K 43.3 dB, closer than its control and Q4_K on all 5 shots and past the line nowhere: the card's 4 GB pick |
-| `seedvr2x_ema_7b_sharp_Q4_K_imatrix.gguf` | 4,758,308,512 | `486a7da9…` | 7.537% (8.867%) | 6.651% (7.410%) | 0 / 288 / 0 | 42.1 dB; past the line on live action's texture and the cartoon clip's DISTS; at 4K 42.8 dB, between the dynamic file and Q4_K on all 5 shots, past the line nowhere |
+| `seedvr2x_ema_7b_sharp_dyn.gguf` | 4,757,129,024 | `90ba80c8…` | 7.545% (18.31%) | 6.346% (12.05%) | 17 / 204 / 67 | 42.5 dB; past the line on cartoon and an anime clip's flicker and colour; at 4K 43.3 dB, closer than its control and Q4_K on all 5 shots and past the line nowhere: the card's 4 GB pick |
+| `seedvr2x_ema_7b_sharp_Q4_K_imatrix.gguf` | 4,758,308,512 | `486a7da9…` | 7.537% (8.867%) | 6.651% (7.410%) | 0 / 288 / 0 | 42.1 dB; past the line on the cartoon clip's DISTS only; at 4K 42.8 dB, between the dynamic file and Q4_K on all 5 shots, past the line nowhere |
 | `seedvr2x_ema_7b_sharp_Q4_K.gguf` (ours, static) | 4,758,307,584 | `a5e423a5…` | 7.347% (7.942%) | 7.161% (8.416%) | 0 / 288 / 0 | 41.4 dB; past the line on cartoon, live action and anime; at 4K 42.0 dB, adding detail to digital live action, past the line |
 
 - **Weighted, the importance helps on every matrix:** the Q4_K made with it is closer than our
@@ -258,8 +258,10 @@ sharp 7B's, from its own importance.
   output projection in Q4_K (the 7B's Q5_K), block 1's video QKV in Q3_K (Q4_K), the text MLP's
   output projection of blocks 9 and 10 in Q4_K (Q3_K) and of block 16 in Q3_K (Q4_K).
 - **The importance files** (`seedvr2_ema_7b_fp16.imatrix.safetensors`, 12,454,888 bytes,
-  `f2283e03…`; the sharp's, 12,454,944 bytes, `2c0dedc3…`) key the pinned outputs in
-  `seedvr2_gguf_dyn.py`. Their own metadata hold the fp16 file by name and size and each run's
+  `f2283e03…`; the sharp's, 12,454,944 bytes, `2c0dedc3…`) are `seedvr2_gguf_dyn.py`'s pinned
+  inputs, uploaded with the files made from them (`hekmon/seedvr2x` at `c14a2bc4`): without
+  `--imatrix` the script takes them from there, size and SHA-256 checked, and they key its pinned
+  outputs. Their own metadata hold the fp16 file by name and size and each run's
   settings, numz's arguments with each path cut to its base name, with no path and no time, in a
   fixed layout: the same runs merged give the same bytes. The GGUF files' metadata name the
   importance file by its name and SHA-256 and the calibration clips by name, with no path: the
@@ -273,20 +275,21 @@ sharp 7B's, from its own importance.
 The users' table, as the card gives it, the quality from the GPU runs
 ([VALIDATION.md](VALIDATION.md): tier 1, 8 clips at 1080p, each file against its own model's fp16
 output at the same seed, judged against how much the fp16 model's own seeds differ; "as close as
-another seed": no score past 2.7 times the spread of 3 seeds, a line a further seed of the fp16
-model crosses on one score in twenty). "W8A8": weights and activations in 8 bits, the multiply
-in 8 bits; "W8A16": weights stored in 8 bits, widened to 16 for the multiply (memory only).
+another seed": no score past 2.7 times the spread of 3 seeds or [its
+floor](VALIDATION.md#the-guards-and-two-rules), a line a further seed of the fp16 model crosses on
+one score in twenty). "W8A8": weights and activations in 8 bits, the multiply in 8 bits; "W8A16":
+weights stored in 8 bits, widened to 16 for the multiply (memory only).
 
 | Format | Size (7B) | How it multiplies | Multiply rate against 16 bits | Error per weight | Quality |
 |---|---|---|---|---|---|
 | float16 | 16.5 GB | 16-bit: bf16 accumulated in fp32 (fp16 on RTX 20) | 1x, the reference | 0.02% | the reference |
 | fp8, a scale per tensor | 8.3 GB | W8A8 from RTX 40 (Ada, sm_89); W8A16 before | 2x on RTX 40 and 50 (RTX 50: 2.3-2.9x measured by others) and on workstation Ada and Blackwell cards; 1x before RTX 40 | 2.65% | as close as another seed or closer, W8A8 and W8A16, both models |
-| int8, rotated | 8.3 GB | W8A8 from RTX 20 (Turing, sm_75) | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% | as close as another seed or closer (the 7B: one score on one clip just past the line) |
+| int8, rotated | 8.3 GB | W8A8 from RTX 20 (Turing, sm_75) | 4x on GeForce RTX 20 to 50; 2x on workstation cards | 0.86% | as close as another seed or closer |
 | GGUF Q8_0 | 8.8 GB | W8A16 | 1x: memory only | 0.56% | as close as another seed or closer: the closest of all |
 | GGUF Q4_K | 4.8 GB | W4A16 | 1x: memory only, a little slower | 7.35%; weighted 7.15% | the 7B: softer on some sources, within the line; the sharp 7B: further than a seed on cartoon, live action and anime |
-| GGUF Q4_K, with an importance matrix | 4.8 GB | W4A16 | 1x: memory only, a little slower | 7.55%; weighted 6.64% | further than a seed on the cartoon clip's DISTS and live action's fine detail, both models |
-| GGUF, a type per matrix (dynamic) | 4.8 GB | W4A16 (3 to 5 bits per matrix) | 1x: memory only, a little slower | 7.55%; weighted 6.31% | the 7B: the closest 4 GB file, further than a seed on the cartoon clip's DISTS only; the sharp 7B: further on cartoon, live action and anime |
-| NVFP4, searched scales | 4.8 GB | W4A4 on Blackwell (sm_100, sm_120); W4A16 before | 8x on RTX 50; 4x on workstation Blackwell cards; 1x before Blackwell | 8.80% | W4A4: clearly worse on DISTS (cartoon, anime), both models; W4A16: softer on live action (the 7B), further than a seed on anime, cartoon and live action (the sharp 7B) |
+| GGUF Q4_K, with an importance matrix | 4.8 GB | W4A16 | 1x: memory only, a little slower | 7.55%; weighted 6.64% | further than a seed on the cartoon clip's DISTS (both models), live action's fine detail (the 7B) |
+| GGUF, a type per matrix (dynamic) | 4.8 GB | W4A16 (3 to 5 bits per matrix) | 1x: memory only, a little slower | 7.55%; weighted 6.31% | the 7B: the closest 4 GB file, further than a seed on the cartoon clip's DISTS only; the sharp 7B: further on cartoon and anime |
+| NVFP4, searched scales | 4.8 GB | W4A4 on Blackwell (sm_100, sm_120); W4A16 before | 8x on RTX 50; 4x on workstation Blackwell cards; 1x before Blackwell | 8.80% | W4A4: clearly worse on DISTS (cartoon, anime), both models; W4A16: softer on live action (the 7B), further than a seed on anime and cartoon (the sharp 7B) |
 
 - The rate column gives the peak rate of the multiply the DiT's matrices use, by NVIDIA's own
   tables, against the 16-bit multiply on the same card: Turing (TU102), Ampere (GA102), Ada
@@ -312,14 +315,16 @@ in 8 bits; "W8A16": weights stored in 8 bits, widened to 16 for the multiply (me
   doesn't show. The GPU runs measured it on real activations: a layer's output moves by 2.09% in
   fp8 W8A8 against 1.50% in W8A16, by 7.18% in NVFP4 W4A4 against 4.93% in W4A16, by 0.76% in
   int8 (medians, [VALIDATION.md](VALIDATION.md#per-layer-on-real-activations-the-smoke-test-the-7b)).
-- **comfy-kitchen 0.2.37 rounds a layer's input wrongly from 2^32 values on** (its CUDA
-  quantizers index in 32 bits): fp8 W8A8 then gives an all-NaN video, NVFP4 W4A4 a silently
-  wrong one; int8, W8A16 and W4A16 are unaffected. In the 7B only the MLP's output projection
-  gets there, from 349,526 video tokens in one forward: at 3840×2160, a batch of 41 frames or
-  more. [`gpu/ck_patch.py`](gpu/ck_patch.py) quantizes such an input in row chunks at the scale
-  comfy-kitchen gives the whole tensor, comfy-kitchen's values bit for bit; a runtime calling
-  comfy-kitchen must do the same, or stay below the limit
-  ([VALIDATION.md](VALIDATION.md#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)).
+- **comfy-kitchen 0.2.37 rounds a layer's input wrongly once it holds 2^32 values or more**
+  (its CUDA quantizers index in 32 bits): fp8 W8A8 then gives an all-NaN video, NVFP4 W4A4 a
+  silently wrong one; int8, W8A16 and W4A16 are unaffected. In the 7B only the MLP's output
+  projection gets there, from 349,526 video tokens in one forward: at 3840×2160, a batch of 41
+  frames or more. [`gpu/ck_patch.py`](gpu/ck_patch.py) quantizes such an input in row chunks at
+  the scale comfy-kitchen gives the whole tensor, comfy-kitchen's values bit for bit; a runtime
+  calling comfy-kitchen must do the same, or stay below the limit
+  ([VALIDATION.md](VALIDATION.md#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices); the report for
+  comfy-kitchen, not filed yet:
+  [research/bugs](../research/bugs/comfy-kitchen-32-bit-quantizer-indices.md)).
 
 ## Reproduce
 
@@ -332,10 +337,9 @@ uv run models/seedvr2_fp8.py $M --fp16 models/dist --out phase2
 uv run models/seedvr2_gguf.py $M --numz /path/to/numz --out phase2
 uv run models/seedvr2_int8.py $M --fp16 models/dist --out phase2
 uv run models/seedvr2_nvfp4.py $M --fp16 models/dist --out phase2
-uv run models/seedvr2_gguf_dyn.py --imatrix seedvr2_ema_7b_fp16.imatrix.safetensors $M \
-  --static phase2/seedvr2x_ema_7b_Q4_K.gguf --out phase2-dyn   # the importance: gpu/imatrix_hook.py's runs, merged
-uv run models/seedvr2_gguf_dyn.py --imatrix seedvr2_ema_7b_sharp_fp16.imatrix.safetensors --model sharp $M \
-  --static phase2/seedvr2x_ema_7b_sharp_Q4_K.gguf --out phase2-dyn
+uv run models/seedvr2_gguf_dyn.py $M --static phase2/seedvr2x_ema_7b_Q4_K.gguf \
+  --out phase2-dyn   # the importance: ours, fetched from hekmon/seedvr2x at c14a2bc4 into --cache and checked
+uv run models/seedvr2_gguf_dyn.py --model sharp $M --static phase2/seedvr2x_ema_7b_sharp_Q4_K.gguf --out phase2-dyn
 CUDA_VISIBLE_DEVICES= uv run models/ck_check.py phase2/*fp8_scaled.safetensors phase2/*int8_convrot.safetensors \
   phase2/*nvfp4.safetensors
 cd /path/to/numz && CUDA_VISIBLE_DEVICES= .venv/bin/python /path/to/models/numz_gguf_check.py . phase2/*.gguf \
