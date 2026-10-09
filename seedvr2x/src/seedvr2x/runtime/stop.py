@@ -10,7 +10,7 @@ GPU polling (model.synchronize), not blocked in a copy for a whole decode slice 
 import contextlib
 import os
 import signal
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from types import FrameType, TracebackType
 from typing import Any, Self
 
@@ -44,7 +44,7 @@ class Stop:
 
     def _handle(self, number: int, frame: FrameType | None) -> None:
         if number == signal.SIGTERM:
-            raise Terminated
+            _terminated(number, frame)
         if self.asked:
             raise KeyboardInterrupt
         self.asked = True
@@ -68,3 +68,21 @@ class Stop:
     ) -> None:
         for number, handler in self._previous.items():
             signal.signal(number, handler)
+
+
+@contextlib.contextmanager
+def terminable() -> Generator[None]:
+    """SIGTERM raised as Terminated inside the with block, as Stop raises it during the run,
+    Python's handler given back on exit; Ctrl-C left to Python, as KeyboardInterrupt. For what runs
+    before the run and must unwind on either, its finally clauses with it: the model files'
+    download (runtime/pull.py), whose partial file the library removes then. Stop doesn't fit
+    there: its first Ctrl-C lets the unit in progress finish, which no download checks for."""
+    previous = signal.signal(signal.SIGTERM, _terminated)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _terminated(number: int, frame: FrameType | None) -> None:
+    raise Terminated

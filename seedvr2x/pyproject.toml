@@ -8,10 +8,12 @@ license-files = ["LICENSE", "NOTICE"]
 requires-python = "==3.13.*"
 # The versions of the numz environment milestone 1 is compared with (DESIGN.md, Validation
 # milestones), so that the comparison differs by code only: bump one on purpose, and run that
-# comparison again.
+# comparison again. huggingface-hub, which pulls seedvr2x's own model files (DESIGN.md, Weights),
+# at the version the lock held already through diffusers.
 dependencies = [
     "diffusers==0.40.0",
     "einops==0.8.2",
+    "huggingface-hub==1.33.0",
     "numpy==2.5.2",
     "omegaconf==2.3.1",
     "rotary-embedding-torch==0.9.1",

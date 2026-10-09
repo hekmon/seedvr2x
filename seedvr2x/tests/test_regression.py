@@ -39,7 +39,12 @@ the tests only):
   bit;
 - ours-sharp: seedvr2x_ema_7b_sharp_fp16.safetensors and seedvr2x_ema_vae_fp16.safetensors, against
   numz_sharp.mkv, skipped when that reference is absent.
-A case whose model file isn't in SEEDVR2X_MODEL_DIR is skipped, naming the file.
+A case whose model file isn't in SEEDVR2X_MODEL_DIR is skipped, naming the file. One more,
+test_milestone1_from_the_cache, runs ours-sharp with the default models taken from Hugging Face's
+cache (runtime/pull.py): no --model-dir, no --dit-model or --vae-model, and HF_HUB_OFFLINE=1 in
+its environment, so that only the cache can serve them; it needs no SEEDVR2X_MODEL_DIR, and is
+skipped, saying how to fill the cache (uv run hf download, the two files, 17 GB), unless the run
+would find both there: at the pinned revision, or downloaded at another (runtime/pull.py).
 
 seedvr2x's own padding, the default (at least 8 rows reflected from the picture, up to a multiple
 of 16, then 16 black rows; columns alike when the width isn't a multiple of 16), is held to numz
@@ -83,6 +88,7 @@ from pathlib import Path
 import pytest
 
 from seedvr2x.cli import NUMZ_PADDING
+from seedvr2x.runtime import pull
 
 PROJECT = Path(__file__).resolve().parents[1]
 MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")
@@ -90,18 +96,22 @@ REFERENCE = os.environ.get("SEEDVR2X_REFERENCE_DIR")
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(
-        not MODELS or not REFERENCE, reason="needs SEEDVR2X_MODEL_DIR and SEEDVR2X_REFERENCE_DIR"
-    ),
+    pytest.mark.skipif(not REFERENCE, reason="needs SEEDVR2X_REFERENCE_DIR"),
 ]
 
 # numz's model files, which the references were made with.
 NUMZ_DIT, NUMZ_VAE = "seedvr2_ema_7b_fp16.safetensors", "ema_vae_fp16.safetensors"
+# The command line's defaults, the sharp 7B and the VAE (cli.py).
+DEFAULT_DIT, DEFAULT_VAE = (
+    "seedvr2x_ema_7b_sharp_fp16.safetensors",
+    "seedvr2x_ema_vae_fp16.safetensors",
+)
 
 
 def models_present(*names: str) -> None:
     """Skip, naming the file, unless SEEDVR2X_MODEL_DIR holds each of names."""
-    assert MODELS is not None
+    if MODELS is None:
+        pytest.skip("needs SEEDVR2X_MODEL_DIR")
     for name in names:
         if not (Path(MODELS) / name).is_file():
             pytest.skip(f"{name}: not in SEEDVR2X_MODEL_DIR")
@@ -111,23 +121,29 @@ def bit_identical(
     tmp_path: Path,
     source: Path,
     resolution: int,
-    models: tuple[str, str],
+    models: tuple[str, str] | None,
     reference: Path,
     *,
     numz_padding: bool,
-) -> None:
-    """Run seedvr2x on source at resolution with the DiT and VAE files of models, in numz's
-    padding or in its own, and compare its master and float32 frames with the reference's,
-    <reference>.mkv and <reference>_frames/, bit for bit."""
-    assert MODELS is not None
+) -> str:
+    """Run seedvr2x on source at resolution with the DiT and VAE files of models in
+    SEEDVR2X_MODEL_DIR, or with None, its default models from Hugging Face's cache, offline
+    (HF_HUB_OFFLINE=1), in numz's padding or in its own; compare its master and float32 frames
+    with the reference's, <reference>.mkv and <reference>_frames/, bit for bit. Returns its
+    log."""
     master, frames = tmp_path / "ours.mkv", tmp_path / "frames"
     environment = {name: value for name, value in os.environ.items() if name != NUMZ_PADDING}
     if numz_padding:
         environment[NUMZ_PADDING] = "1"
+    if models is None:
+        options = []
+        environment["HF_HUB_OFFLINE"] = "1"
+    else:
+        assert MODELS is not None
+        options = ["--model-dir", MODELS, "--dit-model", models[0], "--vae-model", models[1]]
     run = subprocess.run(
         [
-            *(sys.executable, "-m", "seedvr2x", str(source), "-o", str(master)),
-            *("--model-dir", MODELS, "--dit-model", models[0], "--vae-model", models[1]),
+            *(sys.executable, "-m", "seedvr2x", str(source), "-o", str(master), *options),
             *("--resolution", str(resolution), "--seed", "42", "--dump-frames", str(frames)),
             # numz's output milestone 1 holds to, without its lab (StableSR's, not vendored).
             *("--color-correction", "none"),
@@ -152,6 +168,7 @@ def bit_identical(
             check=False,
         )
         assert compare.returncode == 0, f"{kind}: {compare.stdout[-3000:]}"
+    return run.stderr
 
 
 @pytest.mark.parametrize(
@@ -182,6 +199,32 @@ def test_milestone1_bit_identical(tmp_path: Path, dit: str, vae: str, reference:
                 pytest.skip(f"{path}: absent; this module's docstring says how to make it")
     source = m1 / "input_rgb.mkv"
     bit_identical(tmp_path, source, 1080, (dit, vae), m1 / reference, numz_padding=True)
+
+
+def test_milestone1_from_the_cache(tmp_path: Path) -> None:
+    # ours-sharp, its files taken from Hugging Face's cache, as a user's run takes them by
+    # default: offline, so that the cache alone can serve them, bit for bit as SEEDVR2X_MODEL_DIR
+    # does. Skipped unless the run would find both there (pull.cached).
+    assert REFERENCE is not None
+    for name in (DEFAULT_DIT, DEFAULT_VAE):
+        if pull.cached(name) is None:
+            pytest.skip(
+                f"{name}: not in Hugging Face's cache; fill it with the two default files, 17 GB:"
+                f" uv run hf download {pull.REPO} {DEFAULT_DIT} {DEFAULT_VAE} --revision"
+                f" {pull.REVISION}"
+            )
+    m1 = Path(REFERENCE) / "m1"
+    for path in (m1 / "numz_sharp.mkv", m1 / "numz_sharp_frames"):
+        if not path.exists():
+            pytest.skip(f"{path}: absent; this module's docstring says how to make it")
+    log = bit_identical(
+        tmp_path, m1 / "input_rgb.mkv", 1080, None, m1 / "numz_sharp", numz_padding=True
+    )
+    for name in (DEFAULT_DIT, DEFAULT_VAE):
+        assert f"{name}: in the cache, " in log
+        pinned = f"its size and SHA-256 as seedvr2x pins them, {pull.REPO} at {pull.REVISION[:8]}"
+        assert f"{name}: {pinned}" in log
+    assert "downloading" not in log
 
 
 @pytest.mark.parametrize(

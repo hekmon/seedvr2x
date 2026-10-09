@@ -72,6 +72,9 @@ V1 = (
     "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, with its VAE in fp16; phase 2"
     " brings the two 7Bs' smaller files"
 )
+# The end of a refusal of a file missing data (_read): for one of seedvr2x's own files in its own
+# role, check_models says where from instead (runtime/pull.py, advice).
+AGAIN = "fetch it again"
 
 
 @dataclass(frozen=True)
@@ -131,22 +134,27 @@ def check(path: Path, role: Role) -> Architecture:
     raise ModelError(f"{path}: {_what(read, found)}{given}: {V1}")
 
 
-def check_models(model_dir: Path, dit: str, vae: str) -> None:
-    """Check the DiT file dit and the VAE file vae of model_dir (check), each accepted one logged
-    with what it is; ModelError says what is wrong with each one refused. The CLI calls it before
-    the first pass, which can take tens of minutes on a film.
+def check_models(dit: Path, vae: Path, advice: Mapping[Role, str] | None = None) -> None:
+    """Check the DiT file at dit and the VAE file at vae (check), in --model-dir or in Hugging
+    Face's cache (runtime/pull.py), each accepted one logged with what it is; ModelError says what
+    is wrong with each one refused, and how to fetch it again when advice has it for its role (one
+    of seedvr2x's own files, given in its own role: pull.advice), in place of AGAIN. The CLI calls
+    it before the first pass, which can take tens of minutes on a film.
 
     The CPU tests' stand-in replaces this function (tests/test_cli_run.py, stand_in_model): for
     tests only, never a way around the check for users."""
     refusals: list[str] = []
-    files: tuple[tuple[str, Role, str], ...] = (("DiT", "dit", dit), ("VAE", "vae", vae))
-    for label, role, name in files:
+    files: tuple[tuple[str, Role, Path], ...] = (("DiT", "dit", dit), ("VAE", "vae", vae))
+    for label, role, path in files:
         try:
-            found = check(model_dir / name, role)
+            found = check(path, role)
         except ModelError as error:
-            refusals.append(str(error))
+            said = str(error)
+            if advice is not None and role in advice:
+                said = f"{said.removesuffix(f'; {AGAIN}')}; {advice[role]}"
+            refusals.append(said)
             continue
-        logger.info("%s %s: %s in fp16", label, name, found.name)
+        logger.info("%s %s: %s in fp16", label, path.name, found.name)
     if refusals:
         raise ModelError("\n".join(refusals))
 
@@ -194,7 +202,7 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
             # kind, so refused as one cut short is, without V1's tail. wget -O truncates its
             # file at once (GNU Wget's manual, -O), and leaves it empty on a 404 (Wget 1.21.4).
             if size == 0:
-                raise ModelError(f"{path}: empty (0 bytes); fetch it again")
+                raise ModelError(f"{path}: empty (0 bytes); {AGAIN}")
             # 1 to 8 bytes: too few for a safetensors header's length and the brace that tell the
             # format (below), and for any model file's header (GGUF's 24 bytes, ggml's
             # docs/gguf.md; a zip's local file header 30, APPNOTE.TXT 4.3.7): what a download cut
@@ -203,7 +211,7 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
             if size < 9:
                 raise ModelError(
                     f"{path}: cut short, {_count(size, 'byte')}, too few for any model file;"
-                    " fetch it again"
+                    f" {AGAIN}"
                 )
             # The header's length, then the header, which begins with its JSON object's brace,
             # as safetensors' format requires. GGUF's signature is told first: read as a header's
@@ -225,7 +233,7 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
             if 8 + length > size:
                 raise ModelError(
                     f"{path}: cut short inside its header, {size:,} bytes of at least"
-                    f" {8 + length:,}; fetch it again"
+                    f" {8 + length:,}; {AGAIN}"
                 )
             header = start[8:] + file.read(length - 1)
     except OSError as error:
@@ -233,7 +241,7 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
     tensors, data = _parse(path, header)
     end = 8 + length + data
     if size < end:
-        raise ModelError(f"{path}: cut short, {size:,} of {end:,} bytes; fetch it again")
+        raise ModelError(f"{path}: cut short, {size:,} of {end:,} bytes; {AGAIN}")
     if size > end:
         raise _damaged(path, f"{_count(size - end, 'byte')} after its tensors' data")
     return tensors

@@ -18,7 +18,7 @@ import pytest
 
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.runtime.stop import Stop, Stopped, Terminated
+from seedvr2x.runtime.stop import Stop, Stopped, Terminated, terminable
 
 TESTS = Path(__file__).resolve().parent
 
@@ -91,6 +91,22 @@ def test_handlers_while_running() -> None:
             time.sleep(5)
         with pytest.raises(Terminated):
             os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+    assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
+
+
+def test_terminable() -> None:
+    # Around the model files' fetch, before the run's handlers (cli.py): SIGTERM raised as
+    # Terminated, so that a download unwinds; Ctrl-C left to Python, KeyboardInterrupt; Python's
+    # handlers given back.
+    before = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
+    with terminable():
+        assert signal.getsignal(signal.SIGINT) is before[0]
+        with pytest.raises(Terminated):
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(5)
+        with pytest.raises(KeyboardInterrupt):
+            os.kill(os.getpid(), signal.SIGINT)
             time.sleep(5)
     assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
 

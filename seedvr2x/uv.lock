@@ -645,6 +645,7 @@ source = { editable = "." }
 dependencies = [
     { name = "diffusers" },
     { name = "einops" },
+    { name = "huggingface-hub" },
     { name = "numpy" },
     { name = "omegaconf" },
     { name = "rotary-embedding-torch" },
@@ -664,6 +665,7 @@ dev = [
 requires-dist = [
     { name = "diffusers", specifier = "==0.40.0" },
     { name = "einops", specifier = "==0.8.2" },
+    { name = "huggingface-hub", specifier = "==1.33.0" },
     { name = "numpy", specifier = "==2.5.2" },
     { name = "omegaconf", specifier = "==2.3.1" },
     { name = "rotary-embedding-torch", specifier = "==0.9.1" },

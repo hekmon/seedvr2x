@@ -33,6 +33,13 @@ UNDECLARED = ("flash-attn",)
 # SETUPTOOLS_USE_DISTUTILS=stdlib, whatever the process runs: the run imports no setuptools, and
 # a resume mustn't depend on that variable.
 START_HOOKS = ("_distutils_hack",)
+# Imported by a download alone, huggingface_hub's of a Xet file (1.33.0: file_download.py:554,
+# utils/_xet.py:284), which leaves the output alone: what it fetches is checked against its pinned
+# SHA-256 before it loads (runtime/pull.py). Recorded, it would set a job started with a download
+# apart from its resume, the files then in the cache. huggingface_hub itself is the run's: the
+# vendored model imports diffusers, which imports it. Provisional (implementation, 2026-10-09):
+# DESIGN.md's environment doesn't say.
+DOWNLOAD_ONLY = frozenset({"hf-xet"})
 
 
 def current(device: torch.device, ffmpeg_version: str, conversions: str) -> dict[str, object]:
@@ -82,11 +89,12 @@ def imported() -> set[str]:
     """The run's distributions this process has imported, by their normalised names: those within
     the closure of seedvr2x's declared requirements, and flash-attn. What else a process imports
     is no part of the run, and a resume mustn't depend on it: pytest, pygments when a dev install
-    has it (httpx 0.28.1 imports it for its command line, httpx/__init__.py:15), a profiler."""
+    has it (httpx 0.28.1 imports it for its command line, httpx/__init__.py:15), a profiler, and
+    what a model file's download alone imports (DOWNLOAD_ONLY)."""
     providers = _providers()
     tops = {module.partition(".")[0] for module in list(sys.modules)} - set(START_HOOKS)
     loaded = {_name(distribution) for top in tops for distribution in providers.get(top, ())}
-    return loaded & _declared()
+    return (loaded & _declared()) - DOWNLOAD_ONLY
 
 
 @functools.cache

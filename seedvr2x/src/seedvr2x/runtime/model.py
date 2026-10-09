@@ -29,6 +29,7 @@ from torchvision.transforms import functional as TVF
 
 from seedvr2x.runtime import weights
 from seedvr2x.runtime.job import BLACK, padding
+from seedvr2x.runtime.pull import Hashes
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
@@ -95,13 +96,28 @@ def nvidia_driver() -> str | None:
         nvml.nvmlShutdown()
 
 
-def load_models(model_dir: Path, dit_file: str, vae_file: str, device: torch.device) -> Models:
-    """Build and load the DiT in dit_file and the VAE in vae_file, from model_dir, each checked
-    first (weights.check, ModelError): the DiT is built from the config of what its file is."""
+def load_models(
+    dit_file: Path, vae_file: Path, device: torch.device, hashes: Hashes | None = None
+) -> Models:
+    """Build and load the DiT in the file at dit_file and the VAE in the file at vae_file, as
+    pull.resolve found them, in --model-dir or in Hugging Face's cache, each checked first
+    (weights.check, ModelError): the DiT is built from the config of what its file is. A file
+    hashed this run (hashes) must still be the one hashed (Hashes.unchanged, ModelError), before
+    anything is built and right after its own load."""
     # numz goes by "7b" in the file name (src/core/model_configuration.py:718-720), so a renamed
     # file loads as what its name says; seedvr2x goes by the file's tensors (DESIGN.md, Weights).
-    config_dir = weights.check(model_dir / dit_file, "dit").config
-    weights.check(model_dir / vae_file, "vae")
+    config_dir = weights.check(dit_file, "dit").config
+    weights.check(vae_file, "vae")
+
+    # Each file's stat again, before anything is built and right after its own load, which ends
+    # seconds after the other's: a file replaced before its load or during it is refused, never
+    # run unchecked (pull.Hashes, which says what a stat misses).
+    def unchanged(path: Path) -> None:
+        if hashes is not None:
+            hashes.unchanged(path)
+
+    unchanged(dit_file)
+    unchanged(vae_file)
     assert config_dir is not None, "the DiT accepted has its config"
     config: Any = load_config(str(VENDOR / config_dir / "main.yaml"))
     runner: Any = VideoDiffusionInfer(config, _DebugLog())
@@ -119,7 +135,8 @@ def load_models(model_dir: Path, dit_file: str, vae_file: str, device: torch.dev
     vae_model_config: Any = runner.config.vae.model
     with torch.device("meta"):
         vae = create_object(vae_model_config)
-    _load_weights(vae, model_dir / vae_file, device, COMPUTE_DTYPE)
+    _load_weights(vae, vae_file, device, COMPUTE_DTYPE)
+    unchanged(vae_file)
     # Out of training mode, the causal convolutions keep their memory across slices
     # (causal_inflation_lib.py:242, 268). Slicing and memory limits from the config
     # (model_configuration.py:1241-1259): fixed thresholds on tensor sizes, not on free memory.
@@ -133,7 +150,8 @@ def load_models(model_dir: Path, dit_file: str, vae_file: str, device: torch.dev
     # gradient checkpointing stub (nadit.py:30-31).
     with torch.device("meta"):
         dit = create_object(runner.config.dit.model)
-    _load_weights(dit, model_dir / dit_file, device, None)
+    _load_weights(dit, dit_file, device, None)
+    unchanged(dit_file)
     dit.requires_grad_(False).eval()
     attention = attention_backend()
     if attention == "sdpa":

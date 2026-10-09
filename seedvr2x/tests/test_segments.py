@@ -19,7 +19,7 @@ from typing import cast
 
 import numpy as np
 import pytest
-from test_weights import default_models
+from test_weights import accepted_models
 
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
@@ -317,9 +317,9 @@ def test_output_refusals_before_torch(tmp_path: Path, options: list[str], messag
     # the job's own (DESIGN.md, Output).
     (tmp_path / "full").mkdir()
     (tmp_path / "full" / "old.mkv").write_bytes(b"")
-    # Models the check accepts, under the default names: the seed's refusals come after it.
-    default_models(tmp_path)
-    args = [str(source), "--model-dir", ".", *options]
+    # Models the check accepts, which no pin refuses: the seed's refusals come after them.
+    models = accepted_models(tmp_path)
+    args = [str(source), "--model-dir", ".", *models, *options]
     # Exit 3 if torch was imported: a failed assert would exit 1, as the refusal does.
     code = (
         "import sys; from seedvr2x import cli; status = cli.main(sys.argv[1:]);"

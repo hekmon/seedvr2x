@@ -66,6 +66,12 @@ is and what numz changed in it.
   PyTorch's index), diffusers, rotary-embedding-torch and the rest. Bump one on purpose, and run
   that comparison again.
 - Linux x86_64 only for now (DESIGN.md: Linux first).
+- huggingface_hub is declared, at the version the lock held already through diffusers: it pulls
+  seedvr2x's own model files from its repo at the pinned revision, into Hugging Face's cache
+  (`runtime/pull.py`). seedvr2x imports it to look in the cache on every run without
+  `--model-dir`, which reads the files from a directory instead; diffusers, which the vendored
+  model imports, brings it into every run anyway. hf_xet, its Xet downloader, seedvr2x never
+  imports: its import writes a log file under `HF_HOME`.
 - ffmpeg and ffprobe on PATH, 7.1 or later (for setparams' chroma_location), with zscale
   (libzimg), scdet and ffv1: seedvr2x checks the build at startup and refuses to run without
   them (DESIGN.md, Input).
@@ -102,6 +108,16 @@ uv run pytest
   tests run numz's 7B fp16 and VAE, the weights their references were made with, and the
   regression seedvr2x's own as well. With it, the CPU suite also checks every known model file
   there by its header (`tests/test_weights.py`).
+- `tests/test_pull.py` holds the pull of seedvr2x's own files (`runtime/pull.py`) on the CPU,
+  huggingface_hub's two calls replaced, and the pins to the revision itself: `SHA256SUMS`, a few
+  kilobytes, downloaded into a temporary `HF_HOME` behind a link, and the sizes read from the
+  Hub's API, skipped offline (no network to huggingface.co, or `HF_HUB_OFFLINE` set). A test
+  that runs seedvr2x in a process of its own gives it its own `HF_HOME` and `HF_HUB_OFFLINE=1`,
+  but that one; hf_xet is imported in such a process only. With `SEEDVR2X_TESTS_PULL=1`, it
+  pulls the three v1 files into Hugging Face's cache too, about 33 GB the first time;
+  `test_regression.py`'s `test_milestone1_from_the_cache` (GPU) then runs the default models
+  from the cache, `HF_HUB_OFFLINE=1`, and skips until both are there, saying how to fetch the
+  two alone (`uv run hf download`, 17 GB).
 - `tests/test_regression.py` (GPU) holds every change to the runtime or the vendored code to
   milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames,
   with numz's 7B fp16, with seedvr2x's own 7B, and with seedvr2x's sharp 7B against numz's run

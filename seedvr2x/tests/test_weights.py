@@ -51,7 +51,7 @@ def vendored(model: str) -> dict[str, tuple[int, ...]]:
     device with tests/test_model.py's BUILD calls; "7b" and "3b" the DiTs of configs_7b and
     configs_3b, "vae" configs_7b's VAE merged with its architecture's config, as
     runtime/model.py's load_models merges it. Built once per session, as a module-scoped fixture
-    would be, and taken by the CLI's tests of other modules too (default_models)."""
+    would be, and taken by the CLI's tests of other modules too (accepted_models)."""
     import torch
     from omegaconf import OmegaConf
 
@@ -95,12 +95,15 @@ def write(path: Path, tensors: Tensors, metadata: Mapping[str, str] | None = Non
     return path
 
 
-def default_models(directory: Path) -> None:
-    """SeedVR2's 7B DiT and its VAE in fp16, synthetic (write), under the CLI's default names in
-    directory: models the check accepts, for the CLI's tests running it for real in a process of
-    their own, which imports no torch."""
-    write(directory / "seedvr2x_ema_7b_sharp_fp16.safetensors", as_dtype("7b", "F16"))
-    write(directory / "seedvr2x_ema_vae_fp16.safetensors", as_dtype("vae", "F16"))
+def accepted_models(directory: Path) -> list[str]:
+    """SeedVR2's 7B DiT and its VAE in fp16, synthetic (write), in directory under numz's names,
+    which seedvr2x doesn't pin (runtime/pull.py): models the header check accepts and no pin
+    refuses, for the CLI's tests running it for real in a process of their own, which imports no
+    torch. Returns the options naming them."""
+    dit, vae = "seedvr2_ema_7b_sharp_fp16.safetensors", "ema_vae_fp16.safetensors"
+    write(directory / dit, as_dtype("7b", "F16"))
+    write(directory / vae, as_dtype("vae", "F16"))
+    return ["--dit-model", dit, "--vae-model", vae]
 
 
 # The 288 matrices of the 7B's blocks, 8 per block, which phase 2's files quantise (DESIGN.md,
@@ -230,7 +233,9 @@ def test_load_models_by_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     write(tmp_path / "seedvr2_ema_3b_fp16.safetensors", as_dtype("7b", "F16"))
     write(tmp_path / "ema_vae_fp16.safetensors", as_dtype("vae", "F16"))
     models = model.load_models(
-        tmp_path, "seedvr2_ema_3b_fp16.safetensors", "ema_vae_fp16.safetensors", torch.device("cpu")
+        tmp_path / "seedvr2_ema_3b_fp16.safetensors",
+        tmp_path / "ema_vae_fp16.safetensors",
+        torch.device("cpu"),
     )
     assert type(models.runner.dit).__module__ == "seedvr2x.vendor.models.dit_7b.nadit"
     assert loaded == ["ema_vae_fp16.safetensors", "seedvr2_ema_3b_fp16.safetensors"]
@@ -244,7 +249,7 @@ def test_load_models_by_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         ("seedvr2_ema_3b_fp16.safetensors", "ema_vae_bf16.safetensors", "VAE in bf16"),
     ):
         with pytest.raises(ModelError, match=f"SeedVR2's {what}"):
-            model.load_models(tmp_path, dit, vae, torch.device("cpu"))
+            model.load_models(tmp_path / dit, tmp_path / vae, torch.device("cpu"))
     assert loaded == []
 
 
@@ -655,15 +660,15 @@ def test_safetensors_told_first(tmp_path: Path) -> None:
 
 
 def test_check_models(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    default_models(tmp_path)
-    dit, vae = "seedvr2x_ema_7b_sharp_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors"
+    accepted_models(tmp_path)
+    dit, vae = "seedvr2_ema_7b_sharp_fp16.safetensors", "ema_vae_fp16.safetensors"
     with caplog.at_level(logging.INFO):
-        weights.check_models(tmp_path, dit, vae)
+        weights.check_models(tmp_path / dit, tmp_path / vae)
     assert f"DiT {dit}: SeedVR2's 7B DiT in fp16" in caplog.messages
     assert f"VAE {vae}: SeedVR2's VAE in fp16" in caplog.messages
     # Both refused at once, each saying what it is.
     with pytest.raises(ModelError) as error:
-        weights.check_models(tmp_path, vae, dit)
+        weights.check_models(tmp_path / vae, tmp_path / dit)
     assert str(error.value).splitlines() == [
         f"{tmp_path / vae}: SeedVR2's VAE in fp16, given as the DiT (--dit-model): {V1}",
         f"{tmp_path / dit}: SeedVR2's 7B DiT in fp16, given as the VAE (--vae-model): {V1}",

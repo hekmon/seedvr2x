@@ -2,7 +2,9 @@
 from the libraries torch loads, on the CPU."""
 
 import importlib
+import os
 import re
+import subprocess
 import sys
 from collections.abc import Iterator
 from importlib import metadata
@@ -65,6 +67,39 @@ def test_start_hook_not_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "_distutils_hack", ModuleType("_distutils_hack"))
     assert "setuptools" in metadata.packages_distributions()["_distutils_hack"]
     assert "setuptools" not in environment.imported()
+
+
+# In a process of its own, whose HF_HOME is the test's: importing hf_xet writes a log under it.
+DOWNLOAD_ONLY = """
+import sys
+
+import hf_xet
+
+from seedvr2x.runtime import environment
+
+assert hf_xet.__name__ in sys.modules
+assert "hf-xet" in environment._declared()
+assert "hf-xet" not in environment.imported()
+found = environment.versions()
+assert "hf-xet" not in found and "huggingface-hub" in found
+"""
+
+
+def test_download_only_not_recorded(tmp_path: Path) -> None:
+    # hf_xet, which huggingface_hub imports for a Xet file's download alone, is none of the run's:
+    # a job started with a download and resumed with the files in the cache record the same
+    # environment. It is within seedvr2x's requirements, through huggingface-hub's.
+    environment_variables = {
+        name: value for name, value in os.environ.items() if name != "HF_XET_CACHE"
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", DOWNLOAD_ONLY],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**environment_variables, "HF_HOME": str(tmp_path / "hf")},
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def stand_in_distribution(site: Path, name: str, module: str, *requires: str) -> None:

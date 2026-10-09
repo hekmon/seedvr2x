@@ -21,7 +21,8 @@ from typing import TYPE_CHECKING, Any, cast
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.writer import FORMATS
 from seedvr2x.runtime.job import MIN_SEGMENT
-from seedvr2x.runtime.stop import Stop, Stopped, Terminated
+from seedvr2x.runtime.pull import REPO
+from seedvr2x.runtime.stop import Stop, Stopped, Terminated, terminable
 
 if TYPE_CHECKING:
     import torch
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from seedvr2x.media.source import Declared, FirstPass, Source
     from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
+    from seedvr2x.runtime.pull import ModelFile, ModelFiles
 
 # Video file names, other than Matroska's, that -o refuses: an FFV1 master is a .mkv file, and
 # anything else names the directory of the output segments, which such a name would only hide.
@@ -81,20 +83,31 @@ def main(argv: list[str] | None = None) -> int:
         " 16-bit RGB, for precision work, tests and scoring on short samples, 540-690 GiB per hour"
         " of 1080p with colour correction; png, 16-bit PNG",
     )
-    parser.add_argument("--model-dir", type=Path, required=True, help="directory of the weights")
+    # Optional (DESIGN.md, Weights, decided 2026-10-09): without it, seedvr2x's own files come
+    # from Hugging Face's cache, pulled from its repo when missing (runtime/pull.py).
+    parser.add_argument(
+        "--model-dir",
+        type=Path,
+        help="a directory holding the model files, each read there by its name; nothing is"
+        " downloaded. Without it, --dit-model and --vae-model name seedvr2x's own files, taken"
+        f" from Hugging Face's cache (HF_HOME moves it), downloaded into it from {REPO} at a"
+        " pinned revision when missing (HF_HUB_OFFLINE keeps the network out). Either way,"
+        " seedvr2x's own files are checked by their pinned size and SHA-256",
+    )
     # The sharp 7B by default, on the user's eyes: preferred or alike on 67 of 75 windows
     # (DESIGN.md, Weights). A file is recognised by its tensors, not its name (runtime/weights.py).
     parser.add_argument(
         "--dit-model",
         default="seedvr2x_ema_7b_sharp_fp16.safetensors",
-        help="the DiT's file in --model-dir: SeedVR2's 7B DiT, regular or sharp, in fp16,"
-        " recognised by its tensors (default: %(default)s, the sharp 7B)",
+        help="the DiT's file: SeedVR2's 7B DiT, regular or sharp, in fp16, recognised by its"
+        " tensors; without --model-dir, seedvr2x_ema_7b_fp16.safetensors or the default"
+        " (default: %(default)s, the sharp 7B)",
     )
     parser.add_argument(
         "--vae-model",
         default="seedvr2x_ema_vae_fp16.safetensors",
-        help="the VAE's file in --model-dir: SeedVR2's VAE in fp16, recognised by its tensors"
-        " (default: %(default)s)",
+        help="the VAE's file: SeedVR2's VAE in fp16, recognised by its tensors (default:"
+        " %(default)s)",
     )
     parser.add_argument(
         "--resolution",
@@ -164,8 +177,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     # numz's allocator, which DESIGN.md keeps (Allocator): set before torch is imported.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
-    # A stop at once, a second Ctrl-C or SIGTERM during the run (runtime/stop.py), or Ctrl-C
-    # before it: what is kept is what the manifest says, and the same command resumes.
+    # A stop at once, a second Ctrl-C or SIGTERM during the run (runtime/stop.py), SIGTERM during
+    # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
+    # manifest says, and the same command resumes.
     try:
         return _run(args)
     except KeyboardInterrupt:
@@ -321,6 +335,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.fingerprint import fingerprint
     from seedvr2x.media.source import counted, declare, first_pass
+    from seedvr2x.runtime import pull
     from seedvr2x.runtime.job import (
         SHARED,
         JobError,
@@ -364,14 +379,26 @@ def _run(args: argparse.Namespace) -> int:
         check_target(target, args.resolution)
         cuts = read_cuts(args.cuts) if args.cuts else []
         directory = _output(args)
-        # By their headers, in a second: before the resume's comparison, which hashes the files
-        # (16 GB for the DiT), and the first pass, which decodes the whole source (DESIGN.md,
-        # Weights).
-        check_models(args.model_dir, args.dit_model, args.vae_model)
+        # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
+        # into it when missing; checked by their headers, in a second, then seedvr2x's own by
+        # their pinned size and SHA-256 (16.5 GB to read for the DiT), which the manifest's
+        # record takes: before the resume's comparison and the first pass, which decodes the
+        # whole source (DESIGN.md, Weights). The header check comes first, as DESIGN.md has it
+        # (Weights, Recognised by content); its refusal of one of seedvr2x's own files, given in its
+        # own role, says how to fetch it again, as the pin's does (pull.advice).
+        # SIGTERM, which kills the process at once until the run installs its handlers
+        # (runtime/stop.py), unwinds a download as Ctrl-C does, so that the library removes its
+        # partial file, up to 16.5 GB that no later download takes up (runtime/pull.py, at its
+        # end).
+        with terminable():
+            model_files = pull.resolve(args.model_dir, args.dit_model, args.vae_model)
+        check_models(model_files.dit.path, model_files.vae.path, pull.advice(model_files))
+        pull.check_pinned(model_files)
         if directory is not None and (directory / NAME).is_file():
             _lock(directory)
             prior = _prior(
-                *(args, directory, cuts, declared, ffmpeg_version, conversions), numz_padding
+                *(args, directory, cuts, declared, ffmpeg_version, conversions),
+                *(numz_padding, model_files),
             )
         if prior is not None and prior.known is not None:
             found = prior.known
@@ -394,7 +421,7 @@ def _run(args: argparse.Namespace) -> int:
             identity = prior.identity
         else:
             identity = _identity(
-                *(args, cuts, directory, ffmpeg_version, conversions), numz_padding
+                *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
             )
         work = (
             _work(args.output) if directory is None and args.color_correction == "split" else None
@@ -456,10 +483,12 @@ def _run(args: argparse.Namespace) -> int:
         units = DiskUnits(directory, record)
     started = time.monotonic()
     try:
-        models = load_models(args.model_dir, args.dit_model, args.vae_model, identity.device)
+        models = load_models(
+            model_files.dit.path, model_files.vae.path, identity.device, model_files.hashes
+        )
     except ModelError as error:
         # A model file replaced since its check, during the first pass: refused as the check
-        # refuses it.
+        # refuses it, or as changed since its hash.
         logger.error("%s", error)
         return 1
     logger.info(
@@ -699,7 +728,9 @@ def _empty(directory: Path) -> bool:
     return all(entry.name == f"{NAME}.partial" for entry in directory.iterdir())
 
 
-def _settings(args: argparse.Namespace, cuts: list[int], numz_padding: bool) -> dict[str, object]:
+def _settings(
+    args: argparse.Namespace, cuts: list[int], numz_padding: bool, model_files: "ModelFiles"
+) -> dict[str, object]:
     """The settings a manifest records, those a resume must find again; numz's padding only when
     the tests ask for it (NUMZ_PADDING), so that a user's manifest never names it."""
     from seedvr2x.runtime.manifest import code_sha256
@@ -707,8 +738,8 @@ def _settings(args: argparse.Namespace, cuts: list[int], numz_padding: bool) -> 
     settings: dict[str, object] = {
         "seedvr2x": version("seedvr2x"),
         "code": code_sha256(),
-        "dit_model": _model(args.model_dir, args.dit_model),
-        "vae_model": _model(args.model_dir, args.vae_model),
+        "dit_model": _model(model_files.dit, model_files),
+        "vae_model": _model(model_files.vae, model_files),
         "resolution": args.resolution,
         "seed": args.seed,
         "color_correction": args.color_correction,
@@ -805,13 +836,14 @@ def _identity(
     ffmpeg_version: str,
     conversions: str,
     numz_padding: bool,
+    model_files: "ModelFiles",
 ) -> _Identity:
     """The job's identity, refused (JobError) without a CUDA GPU computing in bfloat16; its model
-    files are checked before (weights.check_models). The models are hashed before any GPU
-    work."""
+    files are checked before (weights.check_models, pull.check_pinned). The models are hashed
+    before any GPU work, each once a run (pull.Hashes)."""
     from seedvr2x.runtime.job import JobError
 
-    settings = _settings(args, cuts, numz_padding) if directory is not None else {}
+    settings = _settings(args, cuts, numz_padding, model_files) if directory is not None else {}
     import torch
 
     if not torch.cuda.is_available():
@@ -834,6 +866,7 @@ def _prior(
     ffmpeg_version: str,
     conversions: str,
     numz_padding: bool,
+    model_files: "ModelFiles",
 ) -> _Prior:
     """The job recorded in directory, checked against the one asked before its first pass: the
     same settings, environment and source, the source being its content (resume.identity), or
@@ -847,7 +880,9 @@ def _prior(
 
     path = directory / NAME
     recorded = read(path)
-    identity = _identity(args, cuts, directory, ffmpeg_version, conversions, numz_padding)
+    identity = _identity(
+        *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
+    )
     asked = {
         "settings": identity.settings,
         "environment": identity.environment,
@@ -942,16 +977,12 @@ def _another_job(path: Path, found: list[str], only_environment: bool) -> "JobEr
     )
 
 
-def _model(directory: Path, name: str) -> dict[str, object]:
-    """A model as the manifest records it: its file's name, size and SHA-256, models being
-    identified by hash (DESIGN.md, Options kept and dropped). The 7B fp16 DiT is 16 GB to read."""
-    from seedvr2x.media.files import sha256
-
-    path = directory / name
-    started = time.monotonic()
-    digest = sha256(path)
-    logger.info("%s: SHA-256 %s, in %.1f s", name, digest, time.monotonic() - started)
-    return {"name": name, "size": path.stat().st_size, "sha256": digest}
+def _model(file: "ModelFile", model_files: "ModelFiles") -> dict[str, object]:
+    """A model as the manifest records it: its file's name, as given, its size and SHA-256, models
+    being identified by hash (DESIGN.md, Options kept and dropped). The 7B fp16 DiT is 16.5 GB to
+    read, once a run: a file seedvr2x pins was hashed by its check already (pull.Hashes)."""
+    digest = model_files.hashes.sha256(file.path)
+    return {"name": file.name, "size": file.path.stat().st_size, "sha256": digest}
 
 
 def _positive(text: str) -> int:
