@@ -230,8 +230,16 @@ HLG = f"HDR, transfer arib-std-b67 (HLG): not supported: {WHY_HLG}; {TONE_MAP}"
             f"Dolby Vision profile 8, its base layer HDR10 (PQ): not supported: {WHY_PQ};"
             f" {TONE_MAP}",
         ),
-        # The stream's transfer over its first frame's.
-        ({"color_transfer": "smpte2084", "first_frame": first("arib-std-b67")}, PQ),
+        # The stream's transfer over its first frame's, which contradicts it: said apart, since the
+        # stream's HDR reason doesn't name the frame's (source._contradiction).
+        (
+            {"color_transfer": "smpte2084", "first_frame": first("arib-std-b67")},
+            f"2 reasons: (1) {PQ}; (2) its colour tags contradicted: transfer smpte2084 against"
+            " arib-std-b67 on its first frame: a bad file, not read on a guess: correct its"
+            " container's tags with a remux, to its frames' with ffmpeg -i SOURCE -map 0 -map -0:d"
+            " -c copy -color_trc:v arib-std-b67 retagged.mkv or with mkvpropedit on a Matroska"
+            " file",
+        ),
         # An HDR transfer over Dolby Vision's metadata without a record, which adds nothing.
         ({"color_transfer": "arib-std-b67", "first_frame": first("arib-std-b67", True)}, HLG),
         (

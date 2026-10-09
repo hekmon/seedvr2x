@@ -31,6 +31,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
+from test_probe import BT709_VUI, has_x265, x265_file
 
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
@@ -392,6 +393,34 @@ def test_yuv_by_default(tmp_path: Path) -> None:
     # Its checksums, beside the file and in the directory's: every frame checked against them.
     for output in ("one.mkv", "out"):
         assert cli.main(["verify", str(tmp_path / output)]) == 0
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_tags_of_one_side_carried(tmp_path: Path) -> None:
+    # The container declaring the matrix alone over a bitstream tagged BT.709 throughout: the
+    # source's primaries and transfer are its first frame's (media/source.py, resolved), which the
+    # output declares as they are (DESIGN.md, Colour and shape) and the manifest records with the
+    # reading.
+    if not has_x265():
+        pytest.skip("needs ffmpeg with libx265")
+    source_path = x265_file(tmp_path / "in.mkv", "", BT709_VUI, "-colorspace", "bt709")
+    assert upscale(tmp_path, source_path, "out") == 0
+    master = tmp_path / "out" / "seg_000000.mkv"
+    tags = subprocess.run(
+        [
+            *("ffprobe", "-v", "error", "-select_streams", "v:0", "-of", "json"),
+            *("-show_entries", "stream=color_primaries,color_transfer", str(master)),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(tags.stdout)["streams"] == [
+        {"color_primaries": "bt709", "color_transfer": "bt709"}
+    ]
+    entry = json.loads((tmp_path / "out" / "manifest.json").read_text())["input"]
+    assert (entry["primaries"], entry["transfer"]) == ("bt709", "bt709")
+    assert entry["read_as"] == "YUV bt709, limited range, chroma left"
 
 
 class Steps:

@@ -1,14 +1,20 @@
 """What probe reads of ffprobe's JSON, the Dolby Vision configuration record and the first frame
 among it, and what they make of a source: HDR refused by the stream's transfer or its first
 frame's; Dolby Vision read through its base layer when its record says SDR, refused otherwise, and
-without a record (DESIGN.md, Not in the first version). A stream probe can't read is refused: no
-decoder for it, no pixel format or size found, or no frame decoded.
+without a record (DESIGN.md, Not in the first version); the colour tags read from the stream and
+from its first frame, one side's taken, both sides' contradicting refused (DESIGN.md, Input), but
+the chroma location's, the stream's then taken (provisional: media/source.py, SITING). A stream
+probe can't read is refused: no decoder for it, no pixel format or size found, or no frame
+decoded.
 
 The fixtures need no ffmpeg. A file made for a test, read by the installed ffprobe, skips without
-a build seedvr2x accepts; one made by libx265 or ffmpeg's mpeg4 encoder, without it."""
+a build seedvr2x accepts; one made by an encoder a build may lack (libx265, libx264, libopenh264,
+or ffmpeg's own mpeg1video, mpeg2video or mpeg4), without it."""
 
 import json
 import logging
+import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -19,9 +25,11 @@ from typing import Any
 import pytest
 
 from seedvr2x.media import ffmpeg
+from seedvr2x.media import source as sources
+from seedvr2x.media.conversion import Conversion, conversion_for
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.probe import DoviRecord, FirstFrame, parse, probe
-from seedvr2x.media.source import declare, declared_refusal
+from seedvr2x.media.source import SITING, declare, declared_refusal, resolved
 
 
 def _usable() -> bool:
@@ -48,6 +56,12 @@ def has_x265() -> bool:
 needs_ffmpeg = pytest.mark.skipif(not _usable(), reason="needs ffmpeg with zscale, scdet and ffv1")
 needs_x265 = pytest.mark.skipif(not has_x265(), reason="needs ffmpeg with libx265")
 needs_mpeg4 = pytest.mark.skipif(not has_encoder("mpeg4"), reason="needs ffmpeg's mpeg4 encoder")
+
+
+def needs_encoders(*names: str) -> pytest.MarkDecorator:
+    """Skips a test without any of ffmpeg's encoders `names`."""
+    missing = [name for name in names if not has_encoder(name)]
+    return pytest.mark.skipif(bool(missing), reason=f"needs ffmpeg with {', '.join(missing)}")
 
 
 def written(profile: int, el: int, bl: int, compatibility: int) -> dict[str, Any]:
@@ -211,7 +225,9 @@ def test_no_record() -> None:
     assert (stream.dovi, declared_refusal(stream)) == (None, "")
 
 
-# ffprobe n9.0.2's JSON for streams whose first frame says what their tags don't, cut likewise.
+# ffprobe n9.0.2's JSON for streams whose first frame says what their tags don't, cut likewise, the
+# frames' other colour tags left out (test_hdr_on_the_first_frame reads them, which contradict
+# pq_vui_709.mkv's stream).
 # The first two are x265 encodes in Matroska tagged BT.2020 PQ in their bitstream: hdr10.mkv given
 # -colorspace, -color_primaries and -color_trc too, of which ffmpeg writes the matrix alone to the
 # container, and pq_vui_709.mkv's frames tagged BT.709 before the encoder, which the container
@@ -545,13 +561,14 @@ HIDDEN = {
 }
 
 
-def x265_file(path: Path, tags: str, parameters: str, *options: str) -> Path:
-    """A short x265 encode in 10 bits, its frames tagged by setparams's `tags` before the
-    encoder, its bitstream by x265's `parameters`, with ffmpeg's output `options`."""
+def x265_file(path: Path, tags: str, parameters: str, *options: str, size: str = "128x72") -> Path:
+    """A short x265 encode in 10 bits, `size` (width x height), its frames tagged by setparams's
+    `tags` before the encoder, its bitstream by x265's `parameters`, with ffmpeg's output
+    `options`."""
     subprocess.run(
         [
             *("ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi"),
-            *("-i", "testsrc2=s=128x72:r=25:d=0.4", "-vf", f"{tags}format=yuv420p10le"),
+            *("-i", f"testsrc2=s={size}:r=25:d=0.4", "-vf", f"{tags}format=yuv420p10le"),
             *("-c:v", "libx265", "-x265-params", f"{parameters}:log-level=error", *options),
             *("-color_range", "tv", str(path)),
         ],
@@ -573,14 +590,454 @@ def test_hdr_on_the_first_frame(tmp_path: Path, name: str) -> None:
         # ffmpeg n9.0.2 writes the matrix alone of the three options to Matroska: FIRST_FRAMES
         # keeps its case.
         pytest.skip("this ffmpeg writes the transfer to Matroska: nothing hidden")
-    assert (stream.color_transfer, stream.first_frame) == (declared, FirstFrame(transfer, False))
+    bitstream = FirstFrame(transfer, False, "bt2020nc", "tv", "left", "bt2020")
+    assert (stream.color_transfer, stream.first_frame) == (declared, bitstream)
     with pytest.raises(MediaError) as refused:
         declare(path)
     hdr, why = ("PQ", WHY_PQ) if transfer == "smpte2084" else ("HLG", WHY_HLG)
-    assert str(refused.value) == (
-        f"{path}: HDR, transfer {transfer} ({hdr}) on its first frame, where the stream declares"
+    pixels = (
+        f"HDR, transfer {transfer} ({hdr}) on its first frame, where the stream declares"
         f" {declared or 'none'}: not supported: {why}; {TONE_MAP}"
     )
+    if name == "hdr10.mkv":
+        # The container declaring the matrix alone over an HDR10 bitstream: the stream's
+        # primaries and transfer unspecified with it (libavformat/demux.c:2590-2596), the frame's
+        # taken, the PQ refusal alone.
+        assert (stream.color_space, stream.color_primaries) == ("bt2020nc", "")
+        assert str(refused.value) == f"{path}: {pixels}"
+        return
+    # A container saying BT.709 throughout contradicts the bitstream's matrix and primaries too;
+    # its transfer, which the HDR reason names with the stream's, isn't said twice.
+    tags_reason = contradiction(
+        "matrix bt709 against bt2020nc on its first frame, primaries bt709 against bt2020",
+        "-colorspace:v bt2020nc -color_primaries:v bt2020",
+        matrix=True,
+    )
+    assert str(refused.value) == f"{path}: 2 reasons: (1) {pixels}; (2) {tags_reason}"
+
+
+# The colour tags (source.COLOUR) as ffprobe n9.0.2 writes them: for each, a stream's value and a
+# frame's contradicting it, what the refusal says of them and the option its remux sets; the chroma
+# location's never refused nor remuxed (provisional: source.SITING), what its info line says of
+# them. Untagged, ffprobe writes "unknown", but "unspecified" for the chroma location
+# (fftools/ffprobe.c:1240-1288).
+TAGS = {
+    "color_space": ("bt470bg", "bt709", "matrix bt470bg against bt709", "-colorspace:v bt709"),
+    "color_range": ("pc", "tv", "range pc (full) against tv (limited)", "-color_range:v tv"),
+    "chroma_location": (
+        "topleft",
+        "left",
+        "chroma location topleft against left",
+        "-chroma_sample_location:v left",
+    ),
+    "color_primaries": (
+        "bt470bg",
+        "bt709",
+        "primaries bt470bg against bt709",
+        "-color_primaries:v bt709",
+    ),
+    "color_transfer": (
+        "smpte170m",
+        "bt709",
+        "transfer smpte170m against bt709",
+        "-color_trc:v bt709",
+    ),
+}
+UNTAGGED = {name: "unspecified" if name == "chroma_location" else "unknown" for name in TAGS}
+STREAM = UNTAGGED | {
+    "codec_name": "hevc",
+    "width": 64,
+    "height": 48,
+    "pix_fmt": "yuv420p",
+    "sample_aspect_ratio": "1:1",
+    "field_order": "progressive",
+    "r_frame_rate": "25/1",
+    "avg_frame_rate": "25/1",
+}
+
+
+def contradiction(said: str, options: str, matrix: bool) -> str:
+    """The reason for colour tags contradicted, quoted whole: `said` names them, `options` are its
+    remux's, `matrix` whether the matrix is among them, which --input-matrix settles."""
+    return (
+        f"its colour tags contradicted: {said}: a bad file, not read on a guess: correct its"
+        " container's tags with a remux, to its frames' with ffmpeg -i SOURCE -map 0 -map -0:d -c"
+        f" copy {options} retagged.mkv or with mkvpropedit on a Matroska file"
+        + (", or give the matrix with --input-matrix" if matrix else "")
+    )
+
+
+@pytest.mark.parametrize("name", TAGS)
+@pytest.mark.parametrize(
+    ("sides", "read"),
+    [
+        (("", ""), ""),  # untagged: conversion_for's guesses
+        (("stream", ""), "stream"),
+        (("", "frame"), "frame"),
+        (("stream", "stream"), "stream"),
+        (("stream", "frame"), None),  # refused, but the chroma location
+    ],
+    ids=["untagged", "stream", "frame", "equal", "different"],
+)
+def test_colour_tag_resolved(name: str, sides: tuple[str, str], read: str | None) -> None:
+    # A tag declared on one side only is taken; on both sides, differently, the source is a bad
+    # file, refused naming both (DESIGN.md, Input); but the chroma location, the stream's then
+    # taken, a decoder's default being no declaration (provisional: source.SITING).
+    declared, decoded, said, option = TAGS[name]
+    values = {"": UNTAGGED[name], "stream": declared, "frame": decoded}
+    on_stream, on_frame = (values[side] for side in sides)
+    probed = parse(Path("in.mkv"), output(STREAM | {name: on_stream}, UNTAGGED | {name: on_frame}))
+    if read is None and name == SITING:
+        read = "stream"
+    if read is None:
+        refusal = contradiction(f"{said} on its first frame", option, name == "color_space")
+        assert declared_refusal(probed) == refusal
+        return
+    assert declared_refusal(probed) == ""
+    taken = resolved(probed)
+    assert getattr(taken, name) == {"": "", "stream": declared, "frame": decoded}[read]
+    # That tag alone resolved: the rest of the stream as declared.
+    assert replace(taken, **{name: getattr(probed, name)}) == probed
+
+
+def test_input_matrix_settles_the_matrix_alone() -> None:
+    # Every tag contradicted: one reason naming each, in the order of COLOUR, the first "on its
+    # first frame", the remux setting each; but the chroma location, never refused nor remuxed
+    # (provisional: source.SITING). --input-matrix settles the matrix, its contradiction then not
+    # said, nor its way out; the others are still refused. Settled, the matrix alone is no reason.
+    frame = UNTAGGED | {name: values[1] for name, values in TAGS.items()}
+    probed = parse(
+        Path("in.mkv"), output(STREAM | {name: values[0] for name, values in TAGS.items()}, frame)
+    )
+    others = (
+        "range pc (full) against tv (limited){}, primaries bt470bg against bt709, transfer"
+        " smpte170m against bt709"
+    )
+    remux = "-color_primaries:v bt709 -color_trc:v bt709"
+    assert declared_refusal(probed) == contradiction(
+        f"matrix bt470bg against bt709 on its first frame, {others.format('')}",
+        f"-colorspace:v bt709 -color_range:v tv {remux}",
+        matrix=True,
+    )
+    assert declared_refusal(probed, "bt709") == contradiction(
+        others.format(" on its first frame"), f"-color_range:v tv {remux}", matrix=False
+    )
+    matrix = parse(
+        Path("in.mkv"),
+        output(STREAM | {"color_space": "bt470bg"}, UNTAGGED | {"color_space": "bt709"}),
+    )
+    assert declared_refusal(matrix, "smpte170m") == ""
+    assert declared_refusal(matrix) == contradiction(
+        "matrix bt470bg against bt709 on its first frame", "-colorspace:v bt709", matrix=True
+    )
+
+
+def test_chroma_location_apart_said(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The stream's chroma location and its first frame's, both declared and different, the other
+    # tags alike: no refusal, the stream's siting taken, both said in an info line, a decoder
+    # giving its codec's default where the bitstream carries none (provisional: source.SITING).
+    # With the range contradicted as well, the range alone is refused and remuxed. Through declare,
+    # its probe giving the parsed stream.
+    sited, default, said, _ = TAGS[SITING]
+    stream = STREAM | BT709 | {"color_range": "tv", SITING: sited}
+    frame = UNTAGGED | BT709 | {"color_range": "tv", SITING: default}
+    probed = parse(Path("in.mkv"), output(stream, frame))
+    monkeypatch.setattr(sources, "probe", lambda path: probed)
+    caplog.set_level(logging.INFO)
+    assert declare(Path("in.mkv")).conversion == Conversion("yuv420p", "709", "limited", sited)
+    assert (
+        f"in.mkv: {said} on its first frame: the stream's taken, a decoder giving its codec's"
+        " default where the bitstream carries none"
+    ) in caplog.text
+    probed = parse(Path("in.mkv"), output(stream, frame | {"color_range": "pc"}))
+    assert declared_refusal(probed) == contradiction(
+        "range tv (limited) against pc (full) on its first frame", "-color_range:v pc", matrix=False
+    )
+
+
+def test_conversion_of_the_tags_resolved(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The conversion reads the stream resolved (source.resolved), not as declared: a 720x576
+    # stream declaring no matrix, range or siting, its first frame tagged bt709, limited range and
+    # sited top left, is read as its frame says, nothing guessed, where the stream alone gives
+    # conversion_for's guesses, the matrix smpte170m from that size among them. Through declare,
+    # its probe giving the parsed stream.
+    frame = UNTAGGED | {"color_space": "bt709", "color_range": "tv", SITING: "topleft"}
+    probed = parse(Path("in.mkv"), output(STREAM | {"width": 720, "height": 576}, frame))
+    monkeypatch.setattr(sources, "probe", lambda path: probed)
+    caplog.set_level(logging.INFO)
+    assert declare(Path("in.mkv")).conversion == Conversion("yuv420p", "709", "limited", "topleft")
+    assert "guessed" not in caplog.text
+    assert conversion_for(probed).guessed == (
+        "matrix smpte170m (from 720x576)",
+        "limited range",
+        "chroma sited left",
+    )
+
+
+def test_contradiction_among_the_other_reasons() -> None:
+    # After the pixels' reason, before the geometry's, numbered. The transfer of an HDR first
+    # frame, which the HDR reason names with the stream's, isn't said twice; the stream's own HDR
+    # transfer names only its own, so a first frame's other one is.
+    cropped = {"side_data_list": [{"side_data_type": "Frame Cropping"}]}
+    pq = {"color_space": "bt2020nc", "color_primaries": "bt2020", "color_transfer": "smpte2084"}
+    probed = parse(
+        Path("in.mkv"), output(STREAM | {"field_order": "tt"} | cropped | BT709, UNTAGGED | pq)
+    )
+    tags = contradiction(
+        "matrix bt709 against bt2020nc on its first frame, primaries bt709 against bt2020",
+        "-colorspace:v bt2020nc -color_primaries:v bt2020",
+        matrix=True,
+    )
+    assert declared_refusal(probed) == (
+        "4 reasons: (1) interlaced (field order tt): not supported; (2) HDR, transfer smpte2084"
+        f" (PQ) on its first frame, where the stream declares bt709: not supported: {WHY_PQ};"
+        f" {TONE_MAP}; (3) {tags}; (4) cropped by its container: not supported"
+    )
+    hlg = {"color_transfer": "arib-std-b67"}
+    probed = parse(Path("in.mkv"), output(STREAM | pq, UNTAGGED | pq | hlg))
+    tags = contradiction(
+        "transfer smpte2084 against arib-std-b67 on its first frame",
+        "-color_trc:v arib-std-b67",
+        matrix=False,
+    )
+    assert declared_refusal(probed) == (
+        f"2 reasons: (1) HDR, transfer smpte2084 (PQ): not supported: {WHY_PQ}; {TONE_MAP};"
+        f" (2) {tags}"
+    )
+
+
+def test_rgb_matrix_contradicted(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An RGB source's matrix tag contradicted: the remux is its one way out, its matrix gbr to
+    # ffprobe and rgb to -colorspace; --input-matrix is none, RGB having no matrix. Given, it
+    # waives the contradiction and ends in conversion_for's refusal of the option, the one
+    # refusal, no line saying it settled anything. Through declare, its probe giving the parsed
+    # stream.
+    rgb = STREAM | {"pix_fmt": "gbrp", "color_space": "bt709"}
+    probed = parse(Path("in.mkv"), output(rgb, UNTAGGED | {"color_space": "gbr"}))
+    monkeypatch.setattr(sources, "probe", lambda path: probed)
+    refusal = contradiction(
+        "matrix bt709 against gbr on its first frame", "-colorspace:v rgb", matrix=False
+    )
+    assert declared_refusal(probed) == refusal
+    with pytest.raises(MediaError) as refused:
+        declare(Path("in.mkv"))
+    assert str(refused.value) == f"in.mkv: {refusal}"
+    caplog.set_level(logging.INFO)
+    with pytest.raises(MediaError) as refused:
+        declare(Path("in.mkv"), "bt709")
+    assert str(refused.value) == "in.mkv: --input-matrix bt709: the source is RGB, it has no matrix"
+    assert "settled" not in caplog.text
+
+
+def remuxed(path: Path, out: Path, *options: str) -> Path:
+    """path remuxed to out, every stream copied, ffmpeg's output `options` setting the
+    container's tags (a stream copy takes them, fftools/ffmpeg_mux_init.c:1015-1024 at n9.0.2)."""
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-map", "0", "-c", "copy"),
+            *options,
+            str(out),
+        ],
+        check=True,
+    )
+    return out
+
+
+# x265's parameters tagging a bitstream BT.709 throughout, in limited range.
+BT709_VUI = "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=limited"
+
+
+def contradicted_file(path: Path, *options: str) -> Path:
+    """An x265 encode tagged BT.709 in limited range, container and bitstream, then remuxed to
+    path, its container given the tags of ffmpeg's `options`."""
+    consistent = x265_file(path.with_name(f"consistent_{path.name}"), SDR_TAGS, BT709_VUI)
+    return remuxed(consistent, path, *options)
+
+
+def retagged(refusal: str, path: Path, directory: Path) -> Path:
+    """The remux a refusal gives, run on path in a new directory: the file it writes."""
+    found = re.search(r"ffmpeg -i SOURCE .* retagged\.mkv", refusal)
+    assert found is not None
+    command = [str(path) if word == "SOURCE" else word for word in shlex.split(found[0])]
+    directory.mkdir()
+    subprocess.run(command, cwd=directory, check=True, capture_output=True)
+    return directory / "retagged.mkv"
+
+
+def codec_types(path: Path) -> list[str]:
+    """The types of path's streams, in order: "video", "audio", "data"... (ffprobe's streams, not
+    its stream groups, which list a MOV timecode track's video and data streams again)."""
+    listed = subprocess.run(
+        [
+            *("ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json"),
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [stream["codec_type"] for stream in json.loads(listed.stdout)["streams"]]
+
+
+@needs_ffmpeg
+@needs_x265
+def test_contradicted_tags_refused(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # A Matroska file whose container declares bt470bg and full range over a BT.709 limited-range
+    # bitstream, which ffmpeg alone would read as bt470bg full: refused, naming both values of
+    # both. --input-matrix settles the matrix, not the range. The remux the refusal gives, run on
+    # the file, makes it read as its frames say; and on a MOV file with a timecode track, a data
+    # stream, which it leaves out, Matroska having no place for it (media/source.py).
+    tags = ("-colorspace:v", "bt470bg", "-color_range:v", "pc")
+    path = contradicted_file(tmp_path / "in.mkv", *tags)
+    stream = probe(path)
+    assert (stream.color_space, stream.color_range) == ("bt470bg", "pc")
+    assert stream.first_frame == FirstFrame("bt709", False, "bt709", "tv", "left", "bt709")
+    refusal = contradiction(
+        "matrix bt470bg against bt709 on its first frame, range pc (full) against tv (limited)",
+        "-colorspace:v bt709 -color_range:v tv",
+        matrix=True,
+    )
+    with pytest.raises(MediaError) as refused:
+        declare(path)
+    assert str(refused.value) == f"{path}: {refusal}"
+    with pytest.raises(MediaError) as refused:
+        declare(path, "bt709")
+    assert str(refused.value) == f"{path}: " + contradiction(
+        "range pc (full) against tv (limited) on its first frame", "-color_range:v tv", matrix=False
+    )
+    bt709 = Conversion("yuv420p10le", "709", "limited", "left")
+    assert declare(retagged(refusal, path, tmp_path / "mkv")).conversion == bt709
+    bt470bg = ("-colorspace:v", "bt470bg", "-color_primaries:v", "bt470bg")
+    tags = (*bt470bg, "-color_trc:v", "smpte170m", "-timecode", "00:00:00:00")
+    path = contradicted_file(tmp_path / "timecode.mov", *tags)
+    assert codec_types(path) == ["video", "data"]
+    refusal = contradiction(
+        "matrix bt470bg against bt709 on its first frame, primaries bt470bg against bt709,"
+        " transfer smpte170m against bt709",
+        "-colorspace:v bt709 -color_primaries:v bt709 -color_trc:v bt709",
+        matrix=True,
+    )
+    with pytest.raises(MediaError) as refused:
+        declare(path)
+    assert str(refused.value) == f"{path}: {refusal}"
+    remuxed_file = retagged(refusal, path, tmp_path / "mov")
+    assert codec_types(remuxed_file) == ["video"]
+    assert declare(remuxed_file).conversion == bt709
+    # The matrix alone contradicted: --input-matrix settles it, and says so.
+    path = contradicted_file(tmp_path / "matrix.mkv", "-colorspace:v", "bt470bg")
+    with pytest.raises(MediaError, match="its colour tags contradicted: matrix bt470bg against"):
+        declare(path)
+    caplog.set_level(logging.INFO)
+    assert declare(path, "bt709").conversion.matrix == "709"
+    said = f"{path}: matrix bt470bg against bt709 on its first frame, settled by --input-matrix"
+    assert f"{said}: read as bt709" in caplog.text
+
+
+@needs_ffmpeg
+@needs_x265
+def test_one_side_taken(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # One side's tags taken, both ways ffmpeg makes it. The container declaring the matrix alone
+    # over a bitstream tagged BT.709 throughout: the stream's primaries and transfer unspecified
+    # with it (libavformat/demux.c:2590-2596), the frame's taken. A bitstream without colour
+    # description under a container tagged BT.709: HEVC's frames untagged
+    # (libavcodec/hevc/hevcdec.c:360-364), the container's taken. Nothing guessed either way.
+    caplog.set_level(logging.INFO)
+    matrix = x265_file(tmp_path / "matrix.mkv", "", BT709_VUI, "-colorspace", "bt709")
+    stream = probe(matrix)
+    assert (stream.color_space, stream.color_primaries, stream.color_transfer) == ("bt709", "", "")
+    assert stream.first_frame == FirstFrame("bt709", False, "bt709", "tv", "left", "bt709")
+    untagged = x265_file(tmp_path / "untagged.mkv", "", "")
+    bt709 = ("-colorspace:v", "bt709", "-color_primaries:v", "bt709", "-color_trc:v", "bt709")
+    container = remuxed(untagged, tmp_path / "container.mkv", *bt709)
+    stream = probe(container)
+    assert (stream.color_space, stream.color_primaries, stream.color_transfer) == ("bt709",) * 3
+    assert stream.first_frame == FirstFrame("", False, "", "tv", "left", "")
+    for path in (matrix, container):
+        declared = declare(path)
+        tags = (declared.stream.color_primaries, declared.stream.color_transfer)
+        assert (declared.stream.color_space, *tags) == ("bt709",) * 3
+        assert declared.conversion == Conversion("yuv420p10le", "709", "limited", "left")
+    # The conversion reads the matrix taken: a 720x576 bitstream tagged BT.709 throughout, its
+    # container declaring the primaries alone, the stream's matrix unspecified with them, is read
+    # as its frames' bt709, where the stream alone gave a guess from its size, smpte170m.
+    sd = x265_file(tmp_path / "sd.mkv", "", BT709_VUI, size="720x576")
+    unknown = ("-colorspace:v", "unknown", "-color_trc:v", "unknown")
+    primaries = remuxed(sd, tmp_path / "primaries.mkv", "-color_primaries:v", "bt709", *unknown)
+    stream = probe(primaries)
+    assert (stream.color_space, stream.color_primaries, stream.color_transfer) == ("", "bt709", "")
+    assert stream.first_frame == FirstFrame("bt709", False, "bt709", "tv", "left", "bt709")
+    declared = declare(primaries)
+    assert declared.conversion == Conversion("yuv420p10le", "709", "limited", "left")
+    assert "guessed" not in caplog.text
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("encoder", "pix_fmt", "sited", "default"),
+    [
+        # The decoders' defaults (libavcodec at n9.0.2): MPEG-2's in 4:2:0 (mpeg12dec.c:958).
+        pytest.param(
+            "mpeg2video", "yuv420p", "topleft", "left", marks=needs_encoders("mpeg2video")
+        ),
+        # MPEG-4 Part 2's (mpeg4videodec.c:4032).
+        pytest.param("mpeg4", "yuv420p", "topleft", "left", marks=needs_encoders("mpeg4")),
+        # H.264's from a VUI without chroma_loc_info (h2645_vui.c:99).
+        pytest.param(
+            "libopenh264", "yuv420p", "topleft", "left", marks=needs_encoders("libopenh264")
+        ),
+        # MPEG-1's (mpeg12dec.c:948).
+        pytest.param("mpeg1video", "yuv420p", "left", "center", marks=needs_encoders("mpeg1video")),
+        # MPEG-2's in 4:2:2 (mpeg12dec.c:959-960), the same siting as left without vertical
+        # subsampling; its source an x264 4:2:2 encode, sited left by its decoder (h2645_vui.c:99).
+        pytest.param(
+            "mpeg2video",
+            "yuv422p",
+            "left",
+            "topleft",
+            marks=needs_encoders("mpeg2video", "libx264"),
+        ),
+    ],
+    ids=["mpeg2video", "mpeg4", "libopenh264", "mpeg1video", "mpeg2video-422"],
+)
+def test_chroma_location_of_a_decoder_default(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    encoder: str,
+    pix_fmt: str,
+    sited: str,
+    default: str,
+) -> None:
+    # Consistent files ffmpeg makes, tagged BT.709 throughout, their bitstream carrying no chroma
+    # siting: their Matroska container's is their source's frames' (media/source.py, SITING), their
+    # first frame's their decoder's default. Accepted, the container's siting read, both said.
+    ffmpeg_command = ("ffmpeg", "-v", "error", "-nostdin")
+    testsrc = ("-f", "lavfi", "-i", "testsrc2=s=64x48:r=25:d=0.2")
+    if pix_fmt == "yuv422p":
+        x264 = tmp_path / "x264.mkv"
+        tagged = f"{SDR_TAGS}format={pix_fmt}"
+        subprocess.run(
+            [*ffmpeg_command, *testsrc, "-vf", tagged, "-c:v", "libx264", str(x264)], check=True
+        )
+        assert probe(x264).first_frame == FirstFrame("bt709", False, "bt709", "tv", sited, "bt709")
+        source: tuple[str, ...] = ("-i", str(x264))
+    else:
+        tagged = f"{SDR_TAGS}setparams=chroma_location={sited},format={pix_fmt}"
+        source = (*testsrc, "-vf", tagged)
+    path = tmp_path / f"{encoder}.mkv"
+    subprocess.run([*ffmpeg_command, *source, "-c:v", encoder, str(path)], check=True)
+    stream = probe(path)
+    assert stream.first_frame is not None
+    assert (stream.chroma_location, stream.first_frame.chroma_location) == (sited, default)
+    caplog.set_level(logging.INFO)
+    assert declare(path).conversion == Conversion(pix_fmt, "709", "limited", sited)
+    said = f"{path}: chroma location {sited} against {default} on its first frame: the stream's"
+    assert f"{said} taken" in caplog.text
 
 
 def dropped(path: Path) -> int:
@@ -621,7 +1078,9 @@ def test_first_frame_behind_an_edit_list(tmp_path: Path, caplog: pytest.LogCaptu
     caplog.set_level(logging.INFO)
     for cut in (near, far):
         stream = probe(cut)
-        assert stream.first_frame == FirstFrame("", dovi=False)
+        # MPEG-4 Part 2's frames, untagged but for their chroma location, which its decoder sets
+        # (libavcodec/mpeg4videodec.c:4032 at n9.0.2).
+        assert stream.first_frame == FirstFrame("", dovi=False, chroma_location="left")
         retried = f"{cut}: no frame decoded from its first packet: decoding up to 250 for one"
         assert retried in caplog.text
         # The stream as declared, the edit list kept: as read without its frames.

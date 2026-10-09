@@ -84,20 +84,27 @@ class DoviRecord:
 @dataclass(frozen=True)
 class FirstFrame:
     """What the stream's first frame decoded carries, where the stream's tags can hide it: a
-    decoder tags its frames with the bitstream's own (HEVC: libavcodec/hevc/hevcdec.c:356-364 at
+    decoder tags its frames with the bitstream's own (HEVC: libavcodec/hevc/hevcdec.c:350-373 at
     n9.0.2), while the stream gets the container's primaries, transfer and matrix, all three,
-    when the container declares any one of them (libavformat/demux.c:2590-2596). A Matroska file
-    tagging the matrix alone, or BT.709 throughout, thus hides a PQ bitstream. Behind an MP4 edit
-    list, it is the first frame the list hides, from the same keyframe on (probe)."""
+    when the container declares any one of them, and its range and chroma location each when
+    declared (libavformat/demux.c:2584-2598). A Matroska file tagging the matrix alone, or BT.709
+    throughout, thus hides a PQ bitstream. Behind an MP4 edit list, it is the first frame the
+    list hides, from the same keyframe on (probe). Its colour tags, read with the stream's
+    (media/source.py, COLOUR), are VideoStream's, "" when untagged."""
 
-    color_transfer: str  # "" when untagged
+    color_transfer: str
     dovi: bool  # Dolby Vision's metadata, its RPU (DOVI_FRAME)
+    color_space: str = ""
+    color_range: str = ""
+    chroma_location: str = ""
+    color_primaries: str = ""
 
 
 @dataclass(frozen=True)
 class VideoStream:
-    """The first video stream of a file, as declared. An absent tag reads "", whatever word
-    ffprobe has for it ("unknown", "unspecified")."""
+    """The first video stream of a file, as declared: ffprobe's stream level, whose colour tags a
+    source resolves with its first frame's (media/source.py, resolved). An absent tag reads "",
+    whatever word ffprobe has for it ("unknown", "unspecified")."""
 
     width: int
     height: int
@@ -255,6 +262,10 @@ def _first_frame(frame: dict[str, Any]) -> FirstFrame:
     return FirstFrame(
         color_transfer=_tag(frame.get("color_transfer")),
         dovi=any(d.get("side_data_type") in DOVI_FRAME for d in side_data),
+        color_space=_tag(frame.get("color_space")),
+        color_range=_tag(frame.get("color_range")),
+        chroma_location=_tag(frame.get("chroma_location")),
+        color_primaries=_tag(frame.get("color_primaries")),
     )
 
 

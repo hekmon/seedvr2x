@@ -10,7 +10,16 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from test_probe import BT2020, SDR_TAGS, dolby_vision_file, has_x265, record_box, x265_file
+from test_probe import (
+    BT2020,
+    SDR_TAGS,
+    contradicted_file,
+    contradiction,
+    dolby_vision_file,
+    has_x265,
+    record_box,
+    x265_file,
+)
 
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
@@ -149,14 +158,18 @@ def hdr_file(path: Path, transfer: str) -> Path:
         ("smpte2084", "in.mkv: HDR, transfer smpte2084 (PQ): not supported: the model was trained"),
         ("arib-std-b67", "in.mkv: HDR, transfer arib-std-b67 (HLG): not supported: the model"),
         ("dolby vision", "in.mp4: Dolby Vision profile 5, its base layer Dolby's own"),
-        ("first frame", "in.mkv: HDR, transfer smpte2084 (PQ) on its first frame, where the"),
+        (
+            "first frame",
+            "in.mkv: 2 reasons: (1) HDR, transfer smpte2084 (PQ) on its first frame, where the",
+        ),
     ],
 )
 def test_hdr_refused_before_the_first_pass(tmp_path: Path, kind: str, said: str) -> None:
     # With the source's other declared refusals (DESIGN.md, Not in the first version): before the
     # first pass, the model files' check and torch, so no model loaded, and nothing written. PQ on
     # the first frame alone, its container saying BT.709, is read by the same probe
-    # (media/probe.py).
+    # (media/probe.py); that container contradicts the bitstream's BT.2020 matrix and primaries
+    # too, a second reason (test_probe.py, test_hdr_on_the_first_frame).
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
@@ -178,6 +191,35 @@ def test_hdr_refused_before_the_first_pass(tmp_path: Path, kind: str, said: str)
     assert result.returncode == 1, result.stderr
     assert said in result.stderr
     assert sorted(tmp_path.rglob("*")) == files
+
+
+def test_contradicted_tags_refused_before_the_first_pass(tmp_path: Path) -> None:
+    # Colour tags its first frame contradicts, a declared refusal like the others (DESIGN.md,
+    # Input): before the first pass, the model files' check and torch, whatever the output, and
+    # nothing written. A container declaring bt470bg and full range over a BT.709 limited-range
+    # bitstream (test_probe.py, test_contradicted_tags_refused).
+    try:
+        ffmpeg.check()
+    except ffmpeg.MediaError:
+        pytest.skip("needs ffmpeg with zscale, scdet and ffv1")
+    if not has_x265():
+        pytest.skip("needs ffmpeg with libx265")
+    tags = ("-colorspace:v", "bt470bg", "-color_range:v", "pc")
+    source = contradicted_file(tmp_path / "in.mkv", *tags)
+    refusal = contradiction(
+        "matrix bt470bg against bt709 on its first frame, range pc (full) against tv (limited)",
+        "-colorspace:v bt709 -color_range:v tv",
+        matrix=True,
+    )
+    files = sorted(tmp_path.rglob("*"))
+    for output in ("out.mkv", "out"):
+        args = [str(source), "-o", str(tmp_path / output), "--model-dir", str(tmp_path / "models")]
+        result = subprocess.run(
+            [sys.executable, "-c", EARLY, *args], capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 1, result.stderr
+        assert f"{source}: {refusal}\n" in result.stderr
+        assert sorted(tmp_path.rglob("*")) == files
 
 
 # EARLY, the build's check and its conversions' fingerprint exiting 4 as well.
