@@ -1,11 +1,13 @@
 # Scene detection
 
-> Status: **rounds 1 and 2 labelled, brief and addendum written** (2026-10-05), for DESIGN.md's
-> open question on seedvr2x's own scene detection
-> ([DESIGN.md](../../seedvr2x/DESIGN.md#open-questions)): which detector, which threshold, what
-> to do with bursts, and whether shots need a minimum length.
-> Three detectors ran on every frame of 11 sources; the user labelled 100 of their candidates,
-> drawn where the detectors disagree ([round 1](#round-1-targeted-on-the-disagreements),
+> Status: **rounds 1 and 2 labelled, brief and addendum written** (2026-10-05); **the threshold
+> below 0.3 estimated, and native 4K animation checked at 1080p** (2026-10-09). For seedvr2x's own
+> shot detection ([DESIGN.md](../../seedvr2x/DESIGN.md#shot-detection), decided from this page):
+> which detector, which threshold, what to do with bursts, and whether shots need a minimum
+> length. Three detectors ran on every frame of 11 sources; the user labelled 130 of their
+> candidates in two rounds, drawn where the detectors disagree
+> ([round 1](#round-1-targeted-on-the-disagreements),
+> [round 2](#round-2-the-threshold-a-picture-change-gate-and-the-bursts),
 > [estimates](#labelled-estimates)). The [decision brief](#decision-brief) is joint with question
 > 2 ([cuts.md](cuts.md)). Tools:
 > [`scripts/scd_scores.py`](../scripts/scd_scores.py) (scores, detectors, candidates,
@@ -21,6 +23,12 @@ In short (the statistics count detections; the estimates come from the labels):
   against 0.62: scdet's bursts). Filtering scdet's bursts loses real cuts (recall 0.70). The
   [brief](#decision-brief): TransNetV2 at p = 0.3, no gate, no burst handling, no minimum shot
   length; it misses some cuts inside action anime's bursts (14% of scdet's lone hits there).
+- **The threshold stays 0.3** ([below 0.3](#the-threshold-below-03), 2026-10-09). Counted as
+  seedvr2x detects, 0.2 would find 6–13 more cuts per hour of animation for 75–81 more false
+  cuts, 0.15 10–22 for 133–145: 6 to 14 false cuts for each cut found, where going from 0.5 to
+  0.3 took 2.5. Live action gains 2–4 cuts per hour, its recall 0.98 already. Most of 0.3's
+  misses (77–81 of 92 per hour of animation) score under 0.1, beyond any threshold. Native 4K
+  animation's missed cuts are no 4K effect: at 1080p TransNetV2 scores within 0.016.
 
 - **Three detectors, every frame of 11 sources:** 8 animated (three cartoon episodes, three
   anime episodes, two anime films), two live-action films and a DVD episode, 4.4 hours analysed.
@@ -527,12 +535,82 @@ Per detector, recall and precision (90% bootstrap intervals within the cells):
   on animation (three of them score 0.39–0.49, which 0.3 takes and 0.5 misses), scdet from 0.84
   to 0.85; no conclusion changes.
 
+### The threshold below 0.3
+
+2026-10-09, before the detector's build: would 0.2 or 0.15 serve better than 0.3? The pooled
+estimates above can't tell. Each labelled row stands for its cell, and no labelled row of either
+round scores 0.2–0.3 (the 7 animated rows of TransNetV2's 0.1–0.3 band with another detector all
+sit at 0.1–0.2; the band alone has none), so at 0.2 they count none of that band's candidates as
+detected and repeat 0.3's figures exactly.
+
+`scd_scores.py round --thresholds` counts instead each cell's candidates above each threshold
+exactly, from the episodes' candidates.csv, and detects as seedvr2x will: one detection per run
+of frames at or above p, at its peak, a candidate taken when a detection falls within ±1 frame of
+it. Each cell keeps its labelled rows' cut share. The 548 animated candidates of the one cell
+without a row (TransNetV2 alone at 0.1–0.3) count as no cuts; a second count gives them 1 in 7,
+the share of the same band with another detector. At 0.3 and 0.5 this repeats the pooled figures
+within 0.002, and no labelled cut is lost to a run merging it with a neighbour at any threshold
+from 0.1 to 0.5. Misses and false cuts are counted in candidates per hour of the analysed range;
+90% intervals from 2,000 bootstraps of the labelled rows within their cells, the differences to
+0.3 paired.
+
+Animation (8 sources, 3.22 h):
+
+| Threshold | Detections per hour | Recall | Precision | Misses per hour | False cuts per hour | Misses, against 0.3 | False cuts, against 0.3 |
+|---|---:|---|---|---:|---:|---|---|
+| 0.15 | 1,135 | 0.91 (0.84–0.97) | 0.72 (0.63–0.79) | 82 | 319 | −10 (−31 to 0) | +145 (+124 to +156) |
+| 0.2 | 1,069 | 0.90 (0.83–0.97) | 0.76 (0.66–0.83) | 86 | 255 | −6 (−19 to 0) | +81 (+68 to +88) |
+| 0.3 | 982 | 0.90 (0.82–0.97) | 0.82 (0.71–0.90) | 92 | 174 | | |
+| 0.5 | 880 | 0.86 (0.79–0.94) | 0.89 (0.75–0.96) | 122 | 100 | +30 (+15 to +45) | −74 (−89 to −59) |
+
+Live action (2 films, 0.83 h):
+
+| Threshold | Detections per hour | Recall | Precision | Misses per hour | False cuts per hour | Misses, against 0.3 | False cuts, against 0.3 |
+|---|---:|---|---|---:|---:|---|---|
+| 0.15 | 1,072 | 0.98 (0.96–1.00) | 0.80 (0.61–0.91) | 15 | 217 | −4 (−13 to +1) | +59 (+50 to +65) |
+| 0.2 | 1,044 | 0.98 (0.96–1.00) | 0.82 (0.63–0.93) | 17 | 190 | −2 (−5 to +1) | +32 (+28 to +35) |
+| 0.3 | 1,010 | 0.98 (0.95–1.00) | 0.84 (0.65–0.96) | 19 | 158 | | |
+| 0.5 | 935 | 0.92 (0.88–0.95) | 0.86 (0.64–0.98) | 70 | 133 | +51 (+37 to +65) | −25 (−38 to −11) |
+
+With the cell without a row at 1 cut in 7, animation at 0.2 misses 104 cuts per hour against 117
+at 0.3 (−13, −26 to −6) for 249 false cuts (+75); at 0.15, 94 (−22, −43 to −12) for 307 (+133).
+
+- **Below 0.3, each cut found costs far more false cuts.** From 0.5 to 0.3 animation took back
+  30 misses per hour for 74 false cuts, 2.5 false cuts for each cut found, and live action 51
+  for 25, 0.5 for each. From 0.3 to 0.2 it would be 6–13 misses for 75–81 false cuts, 5.9 to 12.9
+  for each cut found, and 1.5 for 32 (21 each) in live action; to 0.15, 6.0 to 14.2, and 14.
+- **Most misses are beyond any threshold.** Even at 0.1, TransNetV2 still misses 77–81 cuts per
+  hour of animation, for 392–412 false cuts per hour: they score under 0.1, where scdet or
+  PySceneDetect fire and it doesn't (about 33 per hour) and inside scdet's bursts (about 41), the
+  [blind spot](#rounds-1-and-2-pooled) above.
+- **Not measured: the cut share at 0.2–0.3.** Animation has 308 candidates there (150 with another
+  detector, 158 alone) and no labelled row. Should the share rise with the score to the next
+  band's (6 cuts in 13 rows at 0.3–0.5 with another detector), 0.2 would take back about 27 misses
+  per hour for about 63 false cuts, 2.3 for each: the trade 0.3 made over 0.5. A third round of
+  about 30 animated rows at 0.2–0.3 and 10 at 0.15–0.2 would settle it; the band without another
+  detector has no review row, so its strips would be decoded anew.
+- **What a false cut costs:** no fidelity, but a temporal step where the shot goes on
+  ([cuts.md](cuts.md#what-it-means-for-shot-detection)), visible on held drawings
+  ([stitching.md](stitching.md)); the labelled false cuts at 0.1–0.5 are mostly pans and flashes
+  (12 of 19 on animation), 3 labelled nothing. A miss costs 5–31 dB·frames of PSNR-Y on four of
+  six cuts.
+- **The possible cuts `--plan` lists** (runs peaking from 0.1 up to the threshold) come to about
+  250 per hour of animation at 0.3, about one real cut in 7 to 17 of them by the cut shares above,
+  and about 100 per hour of live action, about one in 18.
+
 ## Decision brief
 
 Joint with question 2 ([cuts.md](cuts.md#what-it-means-for-shot-detection)), 2026-10-05.
 
 Addendum after round 2, 2026-10-05: the threshold stays 0.3, no gate, and nothing beyond the cut
 list for fast action anime ([pooled estimates](#rounds-1-and-2-pooled)).
+
+Addendum, 2026-10-09 ([the threshold below 0.3](#the-threshold-below-03)): the threshold stays
+0.3. Below it each cut found costs 6 to 14 false cuts on animation and 14 to 21 on live action,
+against 2.5 and 0.5 from 0.5 to 0.3, and most of 0.3's misses score under 0.1, beyond any
+threshold. Only the unmeasured cut share at 0.2–0.3, rising to the next band's, would make 0.2
+the trade 0.3 was: a third round of about 40 animated rows would settle it, should a lower
+default be wanted. Native 4K animation's misses in fast camera motion are the same at 1080p.
 
 - **Recommendation:** seedvr2x detects shots with TransNetV2 at p = 0.3: the official model
   (MIT; weights converted from the official TensorFlow ones), on 48×27 frames scaled as its
@@ -608,11 +686,23 @@ the threshold be set at the plan stage: a user who sees cuts missing lowers it a
 list again before the upscale. Listing the near-misses (0.1–0.3) beside the cuts would make that
 check quick: 39 of them on this film.
 
+**At 1080p, the same** (2026-10-09). The film downscaled to 1080p (lanczos, its 10-bit 4:2:2 kept,
+lossless) and run through TransNetV2 as any source is (48×27 frames by ffmpeg's default scaler):
+every frame's probability within 0.016 of the 4K source's (mean difference 0.0001, 99th
+percentile 0.002), the flight's within 0.003 (the cuts at 0.204 and 0.154, the shot's peak at
+0.233). The detections are the same at 0.5, 0.3 and 0.2 (46, 61 and 76), but for one that moves
+by a frame where two neighbouring frames score within 0.002 of each other; at 0.15 one more
+appears at 1080p, a frame scoring 0.138 at 4K and 0.154. An x264 encode of the 1080p file (CRF
+18, 8-bit 4:2:0) scores alike: within 0.016, the same detections from 0.2 up. TransNetV2 sees
+48×27 frames either way: these misses come from the motion, not from the source's resolution.
+
 ## Caveats
 
 - **Labels on 130 rows.** The statistics count detections; only the estimates rest on labels,
   and those on 130 rows, some of which stand for up to 760 candidates each. The DVD's 20 rows
   are out (misaligned thumbnails).
+- **Below 0.3,** the estimates take each cell's cut share across its whole band: no labelled row
+  scores 0.2–0.3 ([the threshold below 0.3](#the-threshold-below-03)).
 - **Recall will be relative** to the cuts among the candidates, the union of every detector's at
   low thresholds (scdet local maxima from 4, TransNetV2 peaks from 0.1): a cut no detector comes
   near is never shown.
@@ -655,6 +745,16 @@ python3 $S round $O/round1 --skip dvd-sitcom --md round1.md   # the DVD: thumbna
 # round 2: 50 more rows in refined cells; then both rounds pooled in those cells
 python3 $R round $O/review $O/EP... --out $O/round2 --plan 2 --exclude $O/round1/rows.csv
 python3 $S round $O/round1 $O/round2 --dirs $O/EP... --skip dvd-sitcom --md rounds.md
+# the threshold below 0.3: TransNetV2 per threshold as seedvr2x detects, cells counted exactly
+python3 $S round $O/round1 $O/round2 --dirs $O/EP... --skip dvd-sitcom \
+  --thresholds 0.1 0.15 0.2 0.25 0.3 0.5 --empty-share 0 0.142857 --md thresholds.md
+# native 4K animation at 1080p: a lossless lanczos downscale and an x264 encode of it, scored as
+# any source; then each tnet.npz's 'single' against the 4K source's, frame by frame
+ffmpeg -i SRC -map 0:v:0 -fps_mode passthrough -vf scale=1920:1080:flags=lanczos \
+  -c:v ffv1 -level 3 -g 1 -slices 16 -pix_fmt yuv422p10le sl1080.mkv
+ffmpeg -i sl1080.mkv -map 0:v:0 -fps_mode passthrough -c:v libx264 -preset medium -crf 18 \
+  -pix_fmt yuv420p sl1080-x264.mkv
+python3 $S score sl1080.mkv --out $O/sl1080 && python3 $S tnet --out $O/sl1080 --threads 8
 # costs on one source, 16 threads, page cache warm: decode alone, then sptenc's chain
 # (score, pysd and tnet as above: each logs its own seconds)
 ffmpeg -threads 16 -i SRC -map 0:v:0 -fps_mode passthrough -f null -

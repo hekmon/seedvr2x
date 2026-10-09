@@ -136,6 +136,13 @@ per detector, each labelled row standing for its cell's candidates / the cell's 
 kind and for every kind, with bootstrap intervals within the cells and paired differences to scdet
 at 10. Several rounds (or --dirs) pool their rows in refined cells (refined_group: TransNetV2's
 band, and the picture's change where it alone fires), sized in the episodes' candidates.csv.
+With --thresholds (and --dirs), TransNetV2 per threshold p as seedvr2x detects: one detection per
+run of frames >= p, at its peak (tnet.npz, aligned by the episode's offset), a candidate taken
+when a detection falls within +-1 frame of it. Its cells' candidates are counted exactly, so a
+threshold inside a cell's band (0.1-0.3) takes its candidates above p, not its labelled rows';
+each cell's cut share comes from its labelled rows, cells without one at --empty-share. Recall,
+precision, misses and false cuts per hour of the episodes' analysed range, and their differences
+to --versus, with bootstrap intervals within the cells.
 
 Needs ffmpeg and ffprobe on PATH (a build with scdet; FFMPEG/FFPROBE override) and numpy;
 pysd and pysd-check need scenedetect and OpenCV; tnet needs torch and the TransNetV2 checkout,
@@ -1789,6 +1796,115 @@ def round_boot(cells, dets, n, seed):
              [(point[i][j] - point[ref][j], ci(diff[:, i, j])) for j in (0, 1)]) for i, (name, _) in enumerate(dets)]
 
 
+THRESHOLD_BANDS = (0.1, 0.15, 0.2, 0.25, 0.3)  # where the cells spanning 0.1-0.3 are counted apart
+
+
+def threshold_rates(size, det, hours, share):
+    """Per threshold: recall, precision, misses and false cuts per hour, from each cell's candidates
+    (size), those detected at each threshold (det) and its cut share (share), all keyed by cell."""
+    n = len(next(iter(det.values())))
+    cuts = sum(size[g] * share[g] for g in size)
+    tp = [sum(det[g][i] * share[g] for g in size) for i in range(n)]
+    fp = [sum(det[g][i] * (1 - share[g]) for g in size) for i in range(n)]
+    return [(tp[i] / cuts, tp[i] / (tp[i] + fp[i]) if tp[i] + fp[i] else math.nan, (cuts - tp[i]) / hours,
+             fp[i] / hours) for i in range(n)]
+
+
+def round_thresholds(a, cells, labels):
+    """TransNetV2 per threshold, post-stratified (see the docstring, round --thresholds): lines of
+    Markdown. cells: {(refined cell, kind): rows}; labels: {round_row: label}."""
+    ps = sorted(set(a.thresholds) | {a.versus})
+    ref = ps.index(a.versus)
+    cands, hours, runs = {}, {}, {}
+    for d in a.dirs:
+        st = load_json(os.path.join(d, "stats.json"))
+        if st["name"] in a.skip:
+            continue
+        kind = KINDS.get(st["name"], "animation")
+        tn = load_tnet(d)
+        if tn is None:
+            sys.exit(f"{d}: no tnet.npz, which --thresholds needs")
+        S, E = st["range"]
+        one = tnet_align(tn["single"], st["tnet"]["offset"], load_json(os.path.join(d, "source.json"))["frames"])
+        hours[kind] = hours.get(kind, 0.0) + st["duration_s"] / 3600
+        near = []
+        for i, p in enumerate(ps):
+            det = [f for f in tnet_detections(one, p) if S <= f < E]
+            runs.setdefault(kind, [0] * len(ps))[i] += len(det)
+            near.append({f + k for f in det for k in (-1, 0, 1)})
+        with open(os.path.join(d, "candidates.csv"), newline="", encoding="utf-8") as f:
+            for c in csv.DictReader(f):
+                hit = tuple(int(c["frame"]) in s for s in near)
+                cands.setdefault(kind, []).append((refined_group(c), cval(c, "tnet"), hit))
+    out = [(f"TransNetV2 per threshold, as seedvr2x detects (one detection per run of frames >= p, at its "
+            f"peak; a candidate taken when a detection is within +-1 frame): each refined cell's candidates "
+            f"counted exactly, its cut share from its labelled rows (every other label an error); misses and "
+            f"false cuts in candidates per hour of the analysed range; differences to p = {a.versus:g}; 90% "
+            f"intervals from {a.boot} bootstraps of the labelled rows within their cells.\n")]
+    rng = np.random.default_rng(a.seed)
+
+    def fmt(x):
+        return "-" if math.isnan(x) else f"{x:.2f}"
+
+    def ci(x):
+        return np.percentile(x, (5, 95))
+
+    for kind in sorted(cands):
+        lab = {}
+        for (g, k), rs in cells.items():
+            v = [labels[r["round_row"]] == "cut" for r in rs if r["round_row"] in labels]
+            if k == kind and v:
+                lab[g] = v
+        size, det = {}, {}
+        for g, _, hit in cands[kind]:
+            size[g] = size.get(g, 0) + 1
+            row = det.setdefault(g, [0] * len(ps))
+            for i, h in enumerate(hit):
+                row[i] += h
+        bands = {}
+        for g, t, _ in cands[kind]:
+            if THRESHOLD_BANDS[0] <= t < THRESHOLD_BANDS[-1]:
+                b = max(i for i, lo in enumerate(THRESHOLD_BANDS[:-1]) if t >= lo)
+                bands.setdefault(g, [0] * (len(THRESHOLD_BANDS) - 1))[b] += 1
+        empty = sorted(g for g in size if g not in lab)
+        h = hours[kind]
+        out.append(f"{kind}: {h:.3f} h; detections per hour (runs): " +
+                   ", ".join(f"{p:g} {runs[kind][i] / h:.0f}" for i, p in enumerate(ps)) +
+                   "; candidates per TransNetV2 band " + "/".join(f"{lo:g}" for lo in THRESHOLD_BANDS) +
+                   ": " + "; ".join(f"{g} {', '.join(map(str, v))}" for g, v in sorted(bands.items())) +
+                   "; labelled rows in those cells: " +
+                   "; ".join(f"{g} {sum(lab[g])} cut of {len(lab[g])}" for g in sorted(bands) if g in lab) +
+                   (f"; cells without a labelled row: {', '.join(f'{g} ({size[g]})' for g in empty)}" if empty else "")
+                   + "\n")
+        for e in a.empty_share:
+            share = {g: (sum(lab[g]) / len(lab[g]) if g in lab else e) for g in size}
+            point = np.array(threshold_rates(size, det, h, share))
+            draws = np.empty((a.boot, len(ps), 4))
+            for b in range(a.boot):
+                s = dict(share)
+                for g in sorted(lab):
+                    v = lab[g]
+                    s[g] = sum(v[j] for j in rng.integers(0, len(v), len(v))) / len(v)
+                draws[b] = threshold_rates(size, det, h, s)
+            diff = draws - draws[:, ref:ref + 1, :]
+            out += [f"{kind}, cells without a labelled row at a cut share of {e:g}:\n",
+                    (f"| p | detections per hour | recall | 90% | precision | 90% | missed per hour | 90% | false "
+                     f"cuts per hour | 90% | missed per hour, against {a.versus:g} | 90% | false cuts per hour, "
+                     f"against {a.versus:g} | 90% |"),
+                    "|---|---:|---:|---|---:|---|---:|---|---:|---|---:|---|---:|---|"]
+            for i, p in enumerate(ps):
+                r, pr, mi, fa = point[i]
+                cr, cp, cm, cf = (ci(draws[:, i, j]) for j in range(4))
+                dm, df = point[i][2] - point[ref][2], point[i][3] - point[ref][3]
+                cdm, cdf = ci(diff[:, i, 2]), ci(diff[:, i, 3])
+                out.append(f"| {p:g} | {runs[kind][i] / h:.0f} | {r:.3f} | {fmt(cr[0])}-{fmt(cr[1])} | {pr:.3f} | "
+                           f"{fmt(cp[0])}-{fmt(cp[1])} | {mi:.0f} | {cm[0]:.0f}-{cm[1]:.0f} | {fa:.0f} | "
+                           f"{cf[0]:.0f}-{cf[1]:.0f} | {dm:+.0f} | {cdm[0]:+.0f} to {cdm[1]:+.0f} | {df:+.0f} | "
+                           f"{cdf[0]:+.0f} to {cdf[1]:+.0f} |")
+            out.append("")
+    return out
+
+
 def cmd_round(a):
     """Estimates from rounds of labels (scd_review.py round): each labelled row stands for its
     cell's candidates / the cell's labelled rows; cells without a label are counted apart. One
@@ -1876,6 +1992,8 @@ def cmd_round(a):
         out.append("")
     if len(est) > 1:
         out += ["Estimated per detector, every kind:\n"] + label_table([x for e in est.values() for x in e], dets)
+    if a.thresholds:
+        out += round_thresholds(a, cells, labels)
     md = "\n".join(out) + "\n"
     if a.md:
         with open(a.md, "w", encoding="utf-8") as f:
@@ -1975,7 +2093,14 @@ def main():
     p.add_argument("--boot", type=int, default=2000, help="bootstrap draws for the intervals")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--md", help="also write the tables to this file")
+    p.add_argument("--thresholds", type=float, nargs="*", default=[], metavar="P",
+                   help="TransNetV2 at these thresholds as seedvr2x detects, post-stratified (needs --dirs)")
+    p.add_argument("--versus", type=float, default=0.3, help="the threshold --thresholds' differences are to")
+    p.add_argument("--empty-share", type=float, nargs="+", default=[0.0], metavar="S",
+                   help="cut share assumed in cells without a labelled row, one table per value")
     a = ap.parse_args()
+    if a.cmd == "round" and a.thresholds and not a.dirs:
+        sys.exit("--thresholds needs --dirs (the episodes' candidates.csv, stats.json and tnet.npz)")
     {"check": cmd_check, "score": cmd_score, "pysd": cmd_pysd, "pysd-check": cmd_pysd_check, "tnet": cmd_tnet,
      "tnet-check": cmd_tnet_check, "analyse": cmd_analyse, "activity": cmd_activity, "compare": cmd_compare,
      "summary": cmd_summary, "round": cmd_round}[a.cmd](a)
