@@ -497,6 +497,12 @@ they differ and by which metrics, and how users are guided to them. What is know
       log saying it isn't pinned.
     - The repo's head moved to `502436ca` on 2026-10-08 with a new card alone: no model byte
       changed, and the pin stays `c14a2bc4`.
+    - A file downloaded at another revision is taken from the cache by its SHA-256, offline too.
+      No token is ever sent, even one the user stored, and seedvr2x sets
+      `HF_HUB_DISABLE_TELEMETRY` unless the user has set it. Without a network, a missing file
+      is refused after the library's retries, about 23 s.
+    - Built on 2026-10-09: the first pull on the GPU box fetched the three v1 files, 33.46 GB, in
+      746 s, and the milestone-1 regression ran from the cache, offline, bit for bit.
   - Our fp16 changes no bit of v1's output. numz's 7B and sharp 7B fp16 DiTs and its fp16 VAE
     are the masters rounded to the nearest fp16, ties to even: every element of 1,128, 1,128
     and 250 tensors, under the same names, the data sections byte for byte ours (the files
@@ -608,9 +614,18 @@ Decoding goes through an ffmpeg pipe:
   gives the stream the container's primaries, transfer and matrix as a group as soon as the
   container declares one of them, and its range or chroma location each when declared
   (`libavformat/demux.c`, `parameters_from_context`). A value declared on one side is taken;
-  declared on both sides and different, the source is a bad file, refused naming both, as a
-  contradicted frame rate is. The way out is the user's: correct the container's tags with a
-  remux, or give the matrix with `--input-matrix`.
+  declared on both sides and different in meaning (`bt470bg` and `smpte170m` are one matrix,
+  and BT.709's transfer is SMPTE 170M's and BT.2020's), the source is a bad file, refused
+  naming both, as a contradicted frame rate is. The way out is the user's: a remux setting the
+  container's tags to the frames' (or the bitstream's own fix, when the container is right),
+  or, for a YUV source, the matrix given with `--input-matrix`. An MJPEG file its container
+  tags BT.709 is refused so: its decoder always says BT.601.
+  - The chroma location is the exception. A decoder gives its codec's default where the
+    bitstream carries none (left for H.264, HEVC, MPEG-2 and MPEG-4 at 4:2:0, centre for
+    MPEG-1), and ffmpeg's encoders and Matroska muxer write their frames' siting: a difference
+    proves nothing, and a remux to the frames' would mis-site what ffmpeg itself writes. The
+    stream's siting is taken (the container's, else the decoder's), the first frame's where the
+    stream has none, and a difference is said in an info line.
 - exact rational frame rate, checked against the frames themselves. The first pass (below)
   decodes every frame before the model's work and refuses the source when its shortest and
   longest frame durations differ by more than 1 ms, sptenc's rule. The declared rate must
@@ -1437,9 +1452,10 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     information), and how many segments, shots and windows were already made.
 
   It is rewritten whole after every unit: a temporary file, fsync, rename, then a directory
-  fsync. A unit is recorded only once its file is whole. The manifest moves to version 3
-  (decided 2026-10-09), its input now one record, the source: a change of shape bumps the
-  version, so that older code refuses a newer manifest cleanly. New fields stay additive, and a
+  fsync. A unit is recorded only once its file is whole. The manifest is at version 3 since
+  2026-10-09, its input one record, the source: a change of shape bumps the version, so that
+  older code refuses a newer manifest cleanly. A version-2 manifest is still read, for a
+  resume to refuse it as another job and for `seedvr2x verify` to check its segments. New fields stay additive, and a
   manifest written by older code is refused anyway, since its `settings.code` differs.
 - **Resuming:** the same command on the same `-o` directory, with no `--resume` flag.
   - Refused, with each difference listed: any difference in settings, the source (by content),
@@ -1701,8 +1717,8 @@ writers, and the planner needs real shot lengths.
    [Colour correction](#colour-correction)): the decode streams, its buffer, the histograms
    and the code ported from numz gone.
 3. The model files from seedvr2x's own Hugging Face repo: the upload is done (revision
-   `c14a2bc4`, 2026-10-08); next, seedvr2x's pull, pinned to it and to its `SHA256SUMS` (see
-   [Weights](#weights)). Then the first pass's new work,
+   `c14a2bc4`, 2026-10-08), and seedvr2x's pull, pinned to it and to its `SHA256SUMS`, since
+   2026-10-09 (see [Weights](#weights)). Then the first pass's new work,
    ahead of the planner, since both workflows start from it: the directory input went on
    2026-10-09, the source being the only input; then the shot detector (see
    [Shot detection](#shot-detection)), whose brief is in, and with it the frame index (see
@@ -1739,8 +1755,8 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      of 81, independent batches of 21, and `STITCH_LATENT` 6:2. The windows are latents 0–6,
      4–10, 8–14, 12–18 and 16–21.
    - Our windowing, mixing and decode, run in an internal per-window reseed mode (tests only,
-     not user-facing), reproduce numz + `STITCH_LATENT` bit for bit. That mode goes, nothing
-     calling it since (2026-10-09); git keeps it.
+     not user-facing), reproduce numz + `STITCH_LATENT` bit for bit. That mode went on
+     2026-10-09, nothing calling it since; git keeps it.
    - The sliced noise against that reseed mode, both measured against the one-batch run:
 
      | Metric | Reseed | Sliced |
