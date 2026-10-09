@@ -64,10 +64,11 @@ never requires it.
 - Multi-GPU in one process (separate processes on separate shot ranges can come later, see
   [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
-- Models other than ByteDance's 7B and sharp 7B in fp16: phase 2, after v1 (see
-  [Weights](#weights))
+- Models other than ByteDance's 7B and sharp 7B in fp16. Phase 2, after v1, brings smaller
+  files of those two 7Bs; no other model is planned (see [Weights](#weights))
 - Variable frame rate sources: refused with a clear message, as sptenc does
-- Sources refused in v1, each with a clear message:
+- Sources refused in v1, each with a clear message, every reason a source has given in one
+  numbered refusal:
   - HDR: the PQ (`smpte2084`) and HLG (`arib-std-b67`) transfers. The model was trained on SDR
     video: what PQ-coded pixels passed through untouched would give is unmeasured, and HDR10's
     metadata (mastering display, MaxCLL) isn't carried. The message says how to get an SDR
@@ -75,6 +76,14 @@ never requires it.
     gamut conversion is.
     - Dolby Vision is read through its base layer: accepted when that layer is SDR, refused
       otherwise, profile 5's included, which isn't viewable without Dolby's processing.
+    - Read from the stream's tags and from the first decoded frame's, since a container can
+      declare tags its bitstream contradicts; Dolby Vision from its configuration record.
+      Dolby Vision metadata on the frames with no record leaves the base layer unknown: refused
+      too, with the ways out (the original file, a remux to Matroska, or the metadata stripped
+      from a base layer known to be SDR). Done on 2026-10-09: of 30 real files, 27 SDR ones
+      accepted, 3 HDR films refused.
+    - Only the first frame is read: a stream that turns to HDR later passes, which the user
+      docs say.
     - The later version measures passthrough against tone mapping first (2 HDR clips at
       1080p, about 1 GPU hour) and carries HDR10's metadata.
   - a rotation or flip in the display matrix (phone and camera files). The decode passes
@@ -250,8 +259,8 @@ connect through files.
 
 ### Weights
 v1 runs ByteDance's sharp 7B by default, and the regular 7B, both DiTs in fp16 with the fp16
-VAE, Apache-2.0 (seedvr2x's own files: see the Hugging Face repo below). Every other model is
-phase 2's (below).
+VAE, Apache-2.0 (seedvr2x's own files: see the Hugging Face repo below). Phase 2 brings the
+two 7Bs' smaller files (below).
 - **The sharp 7B is the default, on the user's eyes** (2026-10-07): on 75 windows of 4K and
   1080p crops they preferred it or saw no difference on 67 (it 27, the 7B 8), the grainy first
   film's skin no longer "almost reptilian". At 4K it invents less of the fine texture the eyes
@@ -465,7 +474,20 @@ they differ and by which metrics, and how users are guided to them. What is know
     unofficial conversions, not ByteDance's.
   - seedvr2x pulls its files from that repo at a revision pinned in its code, each checked by a
     SHA-256 pinned there too, so a version always runs the same bytes. A local directory
-    holding the same files works offline.
+    holding the same files works offline. How (decided 2026-10-09):
+    - `huggingface_hub`'s download, at the pinned revision (`c14a2bc4`), into Hugging Face's own
+      cache (`HF_HOME` and `HF_HUB_OFFLINE` honoured), with no token: the repo is public. The
+      library is already in the environment through diffusers; seedvr2x declares it.
+    - `--model-dir` becomes optional: given, the files are read from it by name and nothing is
+      downloaded.
+    - Each of seedvr2x's own files is checked against its pinned size and SHA-256 before it
+      loads, hashed once per run, the manifest's record reusing that hash. A mismatch is
+      refused, naming the file, both hashes and how to fetch it again; nothing is deleted.
+    - A file the user names that isn't one of seedvr2x's own (numz's 7B fp16, for one) runs
+      when the model check accepts it, its SHA-256 recorded in the manifest and a line in the
+      log saying it isn't pinned.
+    - The repo's head moved to `502436ca` on 2026-10-08 with a new card alone: no model byte
+      changed, and the pin stays `c14a2bc4`.
   - Our fp16 changes no bit of v1's output. numz's 7B and sharp 7B fp16 DiTs and its fp16 VAE
     are the masters rounded to the nearest fp16, ties to even: every element of 1,128, 1,128
     and 250 tensors, under the same names, the data sections byte for byte ours (the files
@@ -535,7 +557,10 @@ from a cut list.
   rules, never from an outside splitter's joins: of an earlier split's 411 joins, 63 scored
   under scdet's threshold of 10 and 14 under 4
   ([scene-detection.md](../research/docs/scene-detection.md)). Segments split losslessly can
-  be joined back into one file.
+  be joined back into one file: a directory given is refused, saying how. ffmpeg's concat
+  demuxer gives every frame back, its timestamps 1 ms early per join, off the frame grid;
+  `sptenc concat` keeps them on it. The first pass's null output takes microsecond
+  timestamps, so off-grid ones raise no false decode error.
 
 Cuts matter for quality, not only for the VAE context: see [Pipeline](#pipeline-per-shot).
 
@@ -570,6 +595,13 @@ Decoding goes through an ffmpeg pipe:
     follows, which keeps 11 significant bits.
   - zscale must be fed planar RGB: given packed RGB, ffmpeg puts swscale in front of it, which
     then does the expansion.
+- colour tags read per property from the stream and from the first decoded frame: ffmpeg
+  gives the stream the container's primaries, transfer and matrix as a group as soon as the
+  container declares one of them, and its range or chroma location each when declared
+  (`libavformat/demux.c`, `parameters_from_context`). A value declared on one side is taken;
+  declared on both sides and different, the source is a bad file, refused naming both, as a
+  contradicted frame rate is. The way out is the user's: correct the container's tags with a
+  remux, or give the matrix with `--input-matrix`.
 - exact rational frame rate, checked against the frames themselves. The first pass (below)
   decodes every frame before the model's work and refuses the source when its shortest and
   longest frame durations differ by more than 1 ms, sptenc's rule. The declared rate must
@@ -638,7 +670,8 @@ Decoding goes through an ffmpeg pipe:
     the read falls back.
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
-reimplementing them. A startup check refuses a build without zscale or ffv1. Tests verify its
+reimplementing them. A startup check refuses a build without zscale or ffv1, or one whose
+`setparams` lacks `chroma_location` (ffmpeg 7.1 and later have it), saying so. Tests verify its
 conversions: round trip, white at 940, black at 64, chroma siting.
 
 Every zscale runs on one slice, with libavfilter's per-filter option `threads=1`, in the decode
@@ -801,7 +834,10 @@ The rule: the upscale must look like its source in any given player.
      - That ends bit-identity with numz on the default path. The milestone-1 regression runs
        with numz's padding through a mode internal to the tests, and the new padding is checked
        bit-identical to numz with measurement's `NUM_PAD` patch, as milestone 2 checked the
-       stitching.
+       stitching. Done on 2026-10-09: bit-identical at 1080p (8 rows reflected), at 720p (16)
+       and from a 956×530 input to 1912×1060 (12 rows and 8 columns). A target under 17 rows
+       or 16 columns is refused before the first pass: a reflection needs fewer rows than the
+       picture holds.
 1. **VAE encode** of the whole shot in one causal pass. The VAE already streams in 4-frame
    slices; resetting it at each cut is correct (no context should cross a cut).
    - The frames are read from ffmpeg's decoding of the source at the VAE's own pace: 5, then 4
@@ -888,8 +924,10 @@ What `split` does, frame by frame:
   - Lightness (Y') below 4 à-trous stages, σ 6.5 px of output, at every upscale factor.
   - Colour (Cb, Cr) below the stage whose σ is nearest 1.6 source pixels: round(2 + log2(f))
     stages, so 3 (σ 3.2 px) from ×1.41 to ×2.83, 4 (σ 6.5 px) from ×2.83 to ×5.66, and 2 (σ
-    1.6 px) below ×1.41. f is the upscale factor; where the display aspect gives the two axes
-    different factors (anamorphic SD), their geometric mean.
+    1.6 px) below ×1.41. f is the upscale factor, from the stored frame to the target; where the
+    display aspect gives the two axes different factors (anamorphic SD), their geometric mean.
+    The formula is the rule: the stages' exact σ would put the upper boundaries at ×2.87 and
+    ×5.77, with no factor measured between; above ×5.66 it gives 5 stages, untested.
   - The stages are the wavelet split's: the 3×3 binomial kernel, its taps 2^s pixels apart at
     stage s, at most an eighth of the frame's smaller side, edges replicated at each stage.
 - **Why these scales.**
@@ -936,7 +974,8 @@ What `split` does, frame by frame:
 - **Numerics.**
   - The split runs in float32. numz's bf16 is 0.10 level off on average, 1.17 at most.
   - The low band is moved by adding the difference of the low bands: content +
-    (low(reference) − low(content)). That is the same sum as high(content) + low(reference),
+    (low(reference) − low(content)), computed as low(reference − content) in one cascade, the
+    same by linearity. That is the same sum as high(content) + low(reference),
     without rounding a high band on its own. A float32 high band added back to its low band
     misses the image at 0.4–2.2% of values on test frames, whereas content moved onto itself
     comes back bit for bit.
@@ -1322,7 +1361,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     segments. Ctrl-C works, but nothing is kept.
 - **Order:** a segment's shots are all encoded and sampled before its decode and write, which
   reads their windows back, so units never interleave. The first frames come out later.
-- **Manifest** (`manifest.json`, version 2), the truth:
+- **Manifest** (`manifest.json`, version 3), the truth:
   - settings, with the SHA-256 of the models and of seedvr2x's own files. Any code change
     refuses a resume, even a comment.
   - environment, compared on resume:
@@ -1365,9 +1404,10 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 
     The NVIDIA driver is recorded through NVML for information, not compared: the math kernels
     ship with torch.
-  - inputs: path and mtime for information; the content, compared by size and SHA-256 (hashed
-    by a thread while the first pass decodes); the first pass's facts. Also compared: the pixel
-    format each input is decoded from, and the primaries and transfer the output copies. An
+  - input, the source: path and mtime for information; the content, compared by size and
+    SHA-256 (hashed by a thread while the first pass decodes); the first pass's facts. Also
+    compared: the pixel format it is decoded from, and the primaries and transfer the output
+    copies. An
     accepted ffmpeg change must read and tag the source exactly as before.
   - output, shots (windows, encoded, windows done), and segments (bytes when finished)
   - `environment_changes`: each change accepted with `--accept-env-change`. It records when,
@@ -1375,15 +1415,16 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     information), and how many segments, shots and windows were already made.
 
   It is rewritten whole after every unit: a temporary file, fsync, rename, then a directory
-  fsync. A unit is recorded only once its file is whole. The manifest stays at version 2: new
-  fields are additive, and a manifest written by older code is refused anyway, since its
-  `settings.code` differs.
+  fsync. A unit is recorded only once its file is whole. The manifest moves to version 3
+  (decided 2026-10-09), its input now one record, the source: a change of shape bumps the
+  version, so that older code refuses a newer manifest cleanly. New fields stay additive, and a
+  manifest written by older code is refused anyway, since its `settings.code` differs.
 - **Resuming:** the same command on the same `-o` directory, with no `--resume` flag.
-  - Refused, with each difference listed: any difference in settings, inputs (by content),
-    models or code, except progress. A moved or touched input with the same content is
+  - Refused, with each difference listed: any difference in settings, the source (by content),
+    models or code, except progress. A moved or touched source with the same content is
     accepted, since path and mtime are information.
   - The comparison has two stages:
-    - Before the first pass: settings (models hashed), environment and the inputs' content.
+    - Before the first pass: settings (models hashed), environment and the source's content.
       Another job is refused without any decode, and the refusal lists only these
       differences, not the layout differences that would follow from them.
     - After the first pass, trusted or run again: everything else, the first pass's facts and
@@ -1631,17 +1672,18 @@ writers, and the planner needs real shot lengths.
    zscale on one slice (see [Input](#input)), the default master format (`yuv420p10le`, see
    [Output](#output)) and the model check of [Weights](#weights), done on 2026-10-08, the
    milestone-1 regression bit-identical with numz's 7B, with ours, and with our sharp 7B
-   against numz's own run of it. Next, the padding of step 0 (see
-   [Pipeline](#pipeline-per-shot)), before the planner counts tokens, and the refusal of HDR
-   sources (see [Not in the first version](#not-in-the-first-version)). Then `split` in place
-   of `lab` (see [Colour correction](#colour-correction)): the decode streams, and its buffer,
-   the histograms and the code ported from numz go, before the planner sizes the decode.
+   against numz's own run of it. Then, on 2026-10-09: the padding of step 0 (see
+   [Pipeline](#pipeline-per-shot)), the refusal of HDR sources (see
+   [Not in the first version](#not-in-the-first-version)) and `split` in place of `lab` (see
+   [Colour correction](#colour-correction)): the decode streams, its buffer, the histograms
+   and the code ported from numz gone.
 3. The model files from seedvr2x's own Hugging Face repo: the upload is done (revision
-   `c14a2bc4`, 2026-10-08), and seedvr2x's pull is pinned to it and to its `SHA256SUMS` (see
+   `c14a2bc4`, 2026-10-08); next, seedvr2x's pull, pinned to it and to its `SHA256SUMS` (see
    [Weights](#weights)). Then the first pass's new work,
-   ahead of the planner, since both workflows start from it: the directory input goes, the
-   source being the only input; then the shot detector (see [Shot detection](#shot-detection)),
-   whose brief is in, and with it the frame index (see [Input](#input)), so a resume seeks
+   ahead of the planner, since both workflows start from it: the directory input went on
+   2026-10-09, the source being the only input; then the shot detector (see
+   [Shot detection](#shot-detection)), whose brief is in, and with it the frame index (see
+   [Input](#input)), so a resume seeks
    instead of decoding from the start, and the frame-rate refusal's guidance. The detector's
    threshold is settled (0.3 by default, `--cut-threshold`), with no gate, and `--plan` lists
    the possible cuts. Until it is built, the cuts come from a cut list.
@@ -1652,7 +1694,7 @@ writers, and the planner needs real shot lengths.
 5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow. The manual sptenc
    workflow already works without it.
 
-After v1, phase 2 brings the other models (see [Weights](#weights)).
+After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
 
 1. **Reproduce numz.** Passed on 2026-10-02: 45 of 45 frames bit-identical, on the FFV1
    masters and on the float32 dumps. Same settings: one batch, no tiling, `flash_attn_2`, same
@@ -1674,7 +1716,8 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
      of 81, independent batches of 21, and `STITCH_LATENT` 6:2. The windows are latents 0–6,
      4–10, 8–14, 12–18 and 16–21.
    - Our windowing, mixing and decode, run in an internal per-window reseed mode (tests only,
-     not user-facing), reproduce numz + `STITCH_LATENT` bit for bit.
+     not user-facing), reproduce numz + `STITCH_LATENT` bit for bit. That mode goes, nothing
+     calling it since (2026-10-09); git keeps it.
    - The sliced noise against that reseed mode, both measured against the one-batch run:
 
      | Metric | Reseed | Sliced |
@@ -1744,6 +1787,11 @@ After v1, phase 2 brings the other models (see [Weights](#weights)).
        tests);
      - the GPU test that follows `test_lab.py` holds it on milestone 1's input, its thresholds
        set from the first runs.
+   - **Passed on 2026-10-09.** Equal to the study's `split()` to 0.0 on 20 CPU cases (×1.2 to
+     ×6, an NTSC DVD at 4:3 and at 16:9) and on the GPU at ×2 and ×4, in one window and in
+     three; the decode streams and resume stays bit-identical. On milestone 1's input: ΔE of
+     the low frequencies 0.131 against numz's `lab`'s 0.625, Y shift −0.007 against +0.030,
+     a\*/b\* spreads 2.187/5.245 against the input's 2.161/5.212. `test_lab.py` is retired.
 6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
    for frame, and every other stream is copied.
 7. **Visual review** of long runs by the user: fast motion, where the frames inside a latent
