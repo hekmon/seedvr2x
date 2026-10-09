@@ -58,7 +58,7 @@ def test_too_small_to_pad_refused_before_the_first_pass(
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
     from seedvr2x.media import source as sources
 
     def first_pass(*args: object, **kwargs: object) -> None:
@@ -97,7 +97,7 @@ def test_refused_source_stops_before_torch(tmp_path: Path) -> None:
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
     source = tmp_path / "tff.mkv"
     subprocess.run(
         [
@@ -173,7 +173,7 @@ def test_hdr_refused_before_the_first_pass(tmp_path: Path, kind: str, said: str)
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
     if kind == "first frame" and not has_x265():
         pytest.skip("needs ffmpeg with libx265")
     if kind == "dolby vision":
@@ -201,7 +201,7 @@ def test_contradicted_tags_refused_before_the_first_pass(tmp_path: Path) -> None
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
     if not has_x265():
         pytest.skip("needs ffmpeg with libx265")
     tags = ("-colorspace:v", "bt470bg", "-color_range:v", "pc")
@@ -279,7 +279,7 @@ def test_verify_reads_no_frame_to_probe(tmp_path: Path, caplog: pytest.LogCaptur
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
     master = tmp_path / "one.mkv"
     with FFV1Writer(master, "gbrp16le", 64, 48, Fraction(60), Tags()) as writer:
         writer.write(np.zeros((260, 48, 64, 3), np.float32))

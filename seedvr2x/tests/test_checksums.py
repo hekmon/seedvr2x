@@ -49,7 +49,7 @@ def test_refused_unless_whole(tmp_path: Path, content: bytes | None, said: str) 
         read_checksums(path)
 
 
-@pytest.mark.skipif(not _usable(), reason="needs ffmpeg with zscale, scdet and ffv1")
+@pytest.mark.skipif(not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
 def test_check_frames(tmp_path: Path) -> None:
     # Every frame decoded as stored and checked, to the end: those not as written, a count other
     # than the checksums', what ffmpeg reports.

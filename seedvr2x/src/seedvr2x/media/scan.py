@@ -48,14 +48,11 @@ def scan(path: Path) -> Scan:
         # the drift crosses half a frame, and the null muxer reports a "non monotonically
         # increasing dts" error, which ERROR would take for a decode error: 19 of them on a
         # 2,400-frame join at 24000/1001, with ffmpeg n9.0.2 and 6.1.1, none with the option; its
-        # master gives none either way. Written as a number, which older ffmpeg takes too:
-        # "filter", the same here, is taken from 6.1 on only, 5.1 and 6.0 parse the value with
-        # av_parse_ratio and exit on it, "Invalid time base: filter" (fftools/ffmpeg_opt.c,
-        # ffmpeg_mux_init.c), and ffmpeg.check checks filters, encoders and decoders, not options.
-        # The frames are printed by the filters, before the encoder: their lines came out the
-        # same with or without the option, byte for byte, on that join and on its master, with
-        # both builds, and the null muxer was given the same packets with 1:1000000 as with
-        # "filter", in 1/1000000 (-stats_mux_pre).
+        # master gives none either way. Written as the value, which "filter", the filters' own
+        # time base, equals here (settb). The frames are printed by the filters, before the
+        # encoder: their lines came out the same with or without the option, byte for byte, on
+        # that join and on its master, with both builds, and the null muxer was given the same
+        # packets with 1:1000000 as with "filter", in 1/1000000 (-stats_mux_pre).
         *("-enc_time_base:v", "1:1000000", "-f", "null", "-"),
     ]
     process = subprocess.Popen(

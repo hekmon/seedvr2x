@@ -49,7 +49,9 @@ def _usable() -> bool:
     return True
 
 
-pytestmark = pytest.mark.skipif(not _usable(), reason="needs ffmpeg with zscale, scdet and ffv1")
+pytestmark = pytest.mark.skipif(
+    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1"
+)
 
 SEED = 42
 FRAMES = 9

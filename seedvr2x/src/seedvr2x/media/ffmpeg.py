@@ -11,10 +11,25 @@ from pathlib import Path
 FILTERS = ("zscale", "scdet", "format", "settb", "metadata", "setparams", "split")
 ENCODERS = ("ffv1",)
 DECODERS = ("ffv1",)
+# Options of those filters that older builds lack: (filter, option, the ffmpeg that brought it).
+# setparams' chroma_location tags the yuv420p10le master's frames with its chroma siting
+# (media/writer.py:247, master_filters), and so the conversions' fingerprint runs it at every
+# start, whatever the output (media/fingerprint.py:90-96, _conversions). It came with ffmpeg
+# 7.1: libavfilter/vf_setparams.c:124 at n7.1, absent at n6.1 and n7.0. A build without it passed
+# the check of names, then failed the fingerprint with ffmpeg's own error (Ubuntu 24.04's 6.1.1:
+# "Error applying option 'chroma_location' to filter 'setparams': Option not found"). Checked by
+# the option, as the filter's help lists it, never by the version string: a release's git build
+# says n9.0.2-22-g46d8f462ee, a build of master N-<commits>-g<hash>, with no version at all
+# (ffbuild/version.sh at n9.0.2), a distribution's 7.1.1-1ubuntu1.
+OPTIONS = (("setparams", "chroma_location", "7.1"),)
 
+# BtbN's builds are of ffmpeg's master and latest release branches (8.1 and 9.0 on 2026-10-08),
+# with libzimg. Ubuntu's ffmpeg package is built with libzimg, at 7.1.1 in 25.04 and 25.10, 8.0.1
+# in 26.04, 6.1.1 in 24.04 (Launchpad, 2026-10-09).
 HOW_TO_GET = (
-    "zscale comes with libzimg (ffmpeg configured with --enable-libzimg): Ubuntu's ffmpeg package"
-    " has it, and so do the builds of https://github.com/BtbN/FFmpeg-Builds"
+    "seedvr2x needs ffmpeg 7.1 or later with zscale, which comes with libzimg (ffmpeg configured"
+    " with --enable-libzimg): the builds of https://github.com/BtbN/FFmpeg-Builds will do, and so"
+    " will Ubuntu's ffmpeg package from 25.04 on (24.04's is 6.1)"
 )
 
 
@@ -49,16 +64,23 @@ def zscale(*options: str) -> str:
 
 
 def check(output_encoders: tuple[str, ...] = (), output_muxers: tuple[str, ...] = ()) -> str:
-    """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs, and for the output's own
-    encoders and muxers (png for PNG output; framehash, which hashes a yuv420p10le master's
-    frames), and return ffmpeg's version.
+    """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs, the options of OPTIONS
+    included, and for the output's own encoders and muxers (png for PNG output; framehash, which
+    hashes a yuv420p10le master's frames), and return ffmpeg's version.
 
-    Raises MediaError naming what is missing."""
+    Raises MediaError naming what is missing, and which ffmpeg to get when it is zscale or an
+    option of a newer ffmpeg (HOW_TO_GET)."""
     found()
     filters, encoders, decoders = _listed("-filters"), _listed("-encoders"), _listed("-decoders")
     muxers = _listed("-muxers") if output_muxers else set[str]()
+    options = [
+        f"the {option} option of its {name} filter (ffmpeg {since} and later have it)"
+        for name, option, since in OPTIONS
+        if name in filters and option not in _options(name)
+    ]
     missing = [
         *(f"the {name} filter" for name in FILTERS if name not in filters),
+        *options,
         *(f"the {name} encoder" for name in ENCODERS + output_encoders if name not in encoders),
         *(f"the {name} decoder" for name in DECODERS if name not in decoders),
         *(f"the {name} muxer" for name in output_muxers if name not in muxers),
@@ -66,7 +88,7 @@ def check(output_encoders: tuple[str, ...] = (), output_muxers: tuple[str, ...] 
     if missing:
         raise MediaError(
             f"{shutil.which('ffmpeg')} lacks {', '.join(missing)}."
-            + (f" {HOW_TO_GET}." if "the zscale filter" in missing else "")
+            + (f" {HOW_TO_GET}." if options or "the zscale filter" in missing else "")
         )
     version = _run("-version").splitlines()
     return version[0].split()[2] if version and len(version[0].split()) > 2 else "unknown"
@@ -85,10 +107,20 @@ def _listed(option: str) -> set[str]:
     return {fields[1] for fields in map(str.split, _run(option).splitlines()) if len(fields) > 1}
 
 
-def _run(option: str) -> str:
+def _options(name: str) -> set[str]:
+    """The options ffmpeg lists for the filter `name` (-h filter=name): the first column of each
+    line whose second is a type in angle brackets, <int>, where a named value's is the value."""
+    return {
+        fields[0]
+        for fields in map(str.split, _run("-h", f"filter={name}").splitlines())
+        if len(fields) > 1 and fields[1].startswith("<") and fields[1].endswith(">")
+    }
+
+
+def _run(*options: str) -> str:
     result = subprocess.run(
-        ["ffmpeg", "-hide_banner", option], capture_output=True, text=True, check=False
+        ["ffmpeg", "-hide_banner", *options], capture_output=True, text=True, check=False
     )
     if result.returncode != 0:
-        raise MediaError(f"ffmpeg {option} failed: {result.stderr.strip()}")
+        raise MediaError(f"ffmpeg {' '.join(options)} failed: {result.stderr.strip()}")
     return result.stdout

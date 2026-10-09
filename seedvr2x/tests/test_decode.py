@@ -31,7 +31,9 @@ def _usable() -> bool:
     return True
 
 
-pytestmark = pytest.mark.skipif(not _usable(), reason="needs ffmpeg with zscale, scdet and ffv1")
+pytestmark = pytest.mark.skipif(
+    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1"
+)
 
 WIDTH, HEIGHT = 64, 16  # multiples of 4: 4:1:1 and 4:1:0 included
 YUV709 = Conversion("yuv420p", "709", "limited", "left")

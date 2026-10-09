@@ -677,7 +677,7 @@ def _usable() -> bool:
     return True
 
 
-@pytest.mark.skipif(not _usable(), reason="needs ffmpeg with zscale, scdet and ffv1")
+@pytest.mark.skipif(not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
 def test_cli_refuses_before_the_first_pass(tmp_path: Path) -> None:
     # A 3B as the DiT stops the run in its checks, before the first pass (which logs the frames
     # it counted) and before torch is imported.

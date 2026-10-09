@@ -66,8 +66,9 @@ is and what numz changed in it.
   PyTorch's index), diffusers, rotary-embedding-torch and the rest. Bump one on purpose, and run
   that comparison again.
 - Linux x86_64 only for now (DESIGN.md: Linux first).
-- ffmpeg and ffprobe on PATH, with zscale (libzimg), scdet and ffv1: seedvr2x checks the build
-  at startup and refuses to run without them (DESIGN.md, Input).
+- ffmpeg and ffprobe on PATH, 7.1 or later (for setparams' chroma_location), with zscale
+  (libzimg), scdet and ffv1: seedvr2x checks the build at startup and refuses to run without
+  them (DESIGN.md, Input).
 - **FlashAttention 2 is not a dependency.** PyPI only has its source, a long CUDA build, and
   seedvr2x runs without it: it uses FA2 when installed, else PyTorch's SDPA, and logs which one
   runs. To use it, build a wheel for your GPU ([setup_env.sh](../research/scripts/setup_env.sh),
