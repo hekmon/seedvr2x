@@ -41,7 +41,7 @@ BYTES = {"F16": 2, "BF16": 2, "F32": 4, "F8_E4M3": 1, "I8": 1, "U8": 1, "I64": 8
 # What every refusal of a readable file ends with.
 V1 = (
     "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, with its VAE in fp16; phase 2"
-    " brings the other models"
+    " brings the two 7Bs' smaller files"
 )
 
 
@@ -375,8 +375,8 @@ def test_refused_saying_what(
 
 def test_other_formats(tmp_path: Path) -> None:
     # Known by their first bytes: GGUF's signature, a zip (torch.save's format), a pickle (its
-    # earlier one); random bytes and an empty file are neither. GGUF's version, then its tensor
-    # count: the 3B's 635 = 0x027B puts safetensors' brace at byte 8.
+    # earlier one); random bytes are neither. GGUF's version, then its tensor count: the 3B's
+    # 635 = 0x027B puts safetensors' brace at byte 8.
     for name, tensors in (("seedvr2_ema_7b-Q4_K_M.gguf", 1128), ("seedvr2_ema_3b-Q8_0.gguf", 635)):
         header = b"GGUF" + (3).to_bytes(4, "little") + tensors.to_bytes(8, "little") + bytes(8)
         (tmp_path / name).write_bytes(header)
@@ -387,7 +387,6 @@ def test_other_formats(tmp_path: Path) -> None:
     noise = random.Random(0).randbytes(4096)
     assert noise[8:9] != b"{" and noise[:1] not in (b"G", b"P", b"\x80")
     (tmp_path / "noise.safetensors").write_bytes(noise)
-    (tmp_path / "empty.safetensors").write_bytes(b"")
     checkpoint = (
         "a PyTorch checkpoint ({}), as ByteDance's fp32 masters (.pth) are; seedvr2x reads"
         " safetensors files, which the repository's models/ scripts make from them"
@@ -402,7 +401,6 @@ def test_other_formats(tmp_path: Path) -> None:
         "seedvr2_ema_7b.pth": checkpoint.format("zip"),
         "ema_vae.pth": checkpoint.format("pickle"),
         "noise.safetensors": "neither safetensors, GGUF nor a PyTorch checkpoint",
-        "empty.safetensors": "an empty file",
     }
     for name, what in expected.items():
         path = tmp_path / name
@@ -442,6 +440,19 @@ def test_cut_short(tmp_path: Path) -> None:
     assert refused(path, "dit") == (
         f"{path}: cut short inside its header, 1,000 bytes of at least {header:,}; fetch it again"
     )
+
+
+def test_empty(tmp_path: Path) -> None:
+    # What a download failed before its first byte leaves (wget -O): refused as a file cut short
+    # is, not as a file of another kind, so without V1's tail, in either role; describe too.
+    path = tmp_path / "seedvr2x_ema_7b_sharp_fp16.safetensors"
+    path.write_bytes(b"")
+    said = f"{path}: empty (0 bytes); fetch it again"
+    for role in ("dit", "vae"):
+        assert refused(path, role) == said
+    with pytest.raises(ModelError) as error:
+        weights.describe(path)
+    assert str(error.value) == said
 
 
 def raw(path: Path, header: bytes | object, data: int, length: int | None = None) -> Path:

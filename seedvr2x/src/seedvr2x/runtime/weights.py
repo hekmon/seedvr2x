@@ -66,9 +66,11 @@ ARCHITECTURES = (DIT_7B, DIT_3B, VAE)
 # What v1 runs in each role (DESIGN.md, Weights): the 7B DiT, the regular and the sharp one alike
 # (one architecture, the same tensors), and the VAE, every tensor in F16.
 ACCEPTED: dict[Role, Architecture] = {"dit": DIT_7B, "vae": VAE}
+# The end of every refusal of a readable file, the 3B's included: phase 2 brings the two 7Bs'
+# smaller files, and no 3B (DESIGN.md, Weights, Phase 2).
 V1 = (
     "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, with its VAE in fp16; phase 2"
-    " brings the other models"
+    " brings the two 7Bs' smaller files"
 )
 
 
@@ -152,8 +154,8 @@ def check_models(model_dir: Path, dit: str, vae: str) -> None:
 def describe(path: Path) -> str:
     """What the model file at path is, in words: SeedVR2's 7B or 3B DiT or its VAE, and its
     precision; another DiT and how it is quantised; another safetensors file; a GGUF file; a
-    PyTorch checkpoint; or neither. Raises ModelError when it is missing, not a regular file, cut
-    short or damaged."""
+    PyTorch checkpoint; or neither. Raises ModelError when it is missing, not a regular file,
+    empty, cut short or damaged."""
     read = _read(path)
     return read if isinstance(read, str) else _what(read, _architecture(read))
 
@@ -179,7 +181,8 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
     """The tensors of the safetensors file at path, as its header declares them, validated as the
     safetensors library validates a file (_parse); or what a file of another format is, in words
     (_other). Reads the fewest bytes: the header's length (8), then the header, never the data.
-    Raises ModelError when the file is missing, not a regular file, cut short or damaged."""
+    Raises ModelError when the file is missing, not a regular file, empty, cut short or
+    damaged."""
     if not path.is_file():
         if os.path.lexists(path):
             raise ModelError(f"{path}: not a regular file")
@@ -187,6 +190,11 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
     try:
         with path.open("rb") as file:
             size = os.fstat(file.fileno()).st_size
+            # Empty: what a download failed before its first byte leaves, not a file of another
+            # kind, so refused as one cut short is, without V1's tail. wget -O truncates its
+            # file at once (GNU Wget's manual, -O), and leaves it empty on a 404 (Wget 1.21.4).
+            if size == 0:
+                raise ModelError(f"{path}: empty (0 bytes); fetch it again")
             # The header's length, then the header, which begins with its JSON object's brace,
             # as safetensors' format requires. GGUF's signature is told first: read as a header's
             # length, it is at least 0x46554747 = 1,179,993,927 bytes, over the limit, so no
@@ -197,7 +205,7 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
             # does.
             start = file.read(9)
             if start.startswith(b"GGUF") or start[8:] != b"{":
-                return _other(start, size)
+                return _other(start)
             length = int.from_bytes(start[:8], "little")
             if length == 0 or length > HEADER_LIMIT:
                 raise _damaged(
@@ -221,13 +229,11 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
     return tensors
 
 
-def _other(start: bytes, size: int) -> str:
+def _other(start: bytes) -> str:
     """What a file that isn't safetensors is, by its first bytes (start): GGUF's signature,
     "GGUF" (ggml's docs/gguf.md); a zip's, "PK" 3 4, torch.save's format from PyTorch 1.6; or a
     pickle's protocol 2 to 5 (pickle's PROTO opcode, 0x80, then the protocol), torch.save's
     format before it."""
-    if size == 0:
-        return "an empty file"
     if start.startswith(b"GGUF"):
         return (
             "a GGUF file (quantised weights, as numz's Q4_K_M and seedvr2x's own Q8_0, Q4_K and"
