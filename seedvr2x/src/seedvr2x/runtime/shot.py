@@ -12,7 +12,8 @@ Only the latents are ever whole in memory.
 
 The steps are apart, as the resumable units of DESIGN.md (Pause and resume) are: the encode
 (encode_shot), each window (sample_windows), the decode (merge_windows, decode_shot). Each takes
-what the one before gives, wherever it was kept; upscale_shot runs them in a row.
+what the one before gives, wherever it was kept (runtime/units.py); runtime/run.py's run_job runs
+them in order.
 
 With `split` (DESIGN.md, Colour correction), each slice of the decode is corrected as it comes out,
 against its own frames of the reference, built from the shot's input copy through the encoder's
@@ -177,44 +178,6 @@ def input_slices(
         raise ValueError(f"slices {sizes} for a shot of {count} frames")
 
 
-def upscale_shot(
-    models: Models,
-    read: Callable[[int], npt.NDArray[np.float32]],
-    count: int,
-    target: tuple[int, int],
-    seed: int,
-    write: Callable[[npt.NDArray[np.float32]], None],
-    window: int | None = None,
-    *,
-    reseed_windows: bool = False,
-    numz_padding: bool = False,
-) -> None:
-    """Upscale one shot of `count` frames, read as they are needed, and write its frames as they
-    come out: its steps in a row.
-
-    read(n) gives the shot's next n frames, (n, H, W, 3) float32 in [0, 1]. target is the
-    (height, width) they are resized to (job.target_size). write(frames) takes the output's next
-    frames, (n, H', W', 3) float32 in [0, 1], the target cropped to even sides
-    (job.output_size). window caps the DiT windows, in latents (4 frames each after the first);
-    None runs the shot in one window.
-
-    reseed_windows is for tests only. Each window then reseeds and draws its own noise, as the
-    stitching study's reference implementation did (blend_patch.py, STITCH_LATENT), so that the
-    windows, the mixing and the decode can be checked against it bit for bit. numz_padding is
-    for tests only too (encode_shot).
-    """
-    latent = encode_shot(models, read, count, target, seed, numz_padding=numz_padding)
-    layout = shot_layout(count, window)
-    if reseed_windows:
-        sampled = _sample_reseeded(models, latent, layout, seed)
-    else:
-        sampled = list(sample_windows(models, latent, layout, seed))
-    del latent
-    merged = merge_windows(sampled, layout)
-    del sampled
-    decode_shot(models, merged, count, target, write)
-
-
 @torch.no_grad()
 def encode_shot(
     models: Models,
@@ -225,10 +188,12 @@ def encode_shot(
     *,
     numz_padding: bool = False,
 ) -> Tensor:
-    """The VAE latent of a shot of `count` frames, read as they are needed (upscale_shot): (T', h,
-    w, 16) bfloat16 on the device, in the channel-major memory the encode gives it, which the
-    noise drawn from it depends on (model.encode). T' is 1 + (padded_length(count) - 1) / 4, and
-    (h, w) the padded frames' size (job.padded_size) over 8.
+    """The VAE latent of a shot of `count` frames, read as they are needed: (T', h, w, 16)
+    bfloat16 on the device, in the channel-major memory the encode gives it, which the noise
+    drawn from it depends on (model.encode). T' is 1 + (padded_length(count) - 1) / 4, and (h, w)
+    the padded frames' size (job.padded_size) over 8. read(n) gives the shot's next n frames,
+    (n, H, W, 3) float32 in [0, 1] at the source's size; target is the (height, width) the encode
+    resizes them to (job.target_size), through model.input_transform.
 
     numz_padding is for tests only (cli.NUMZ_PADDING): the frames padded as numz pads them
     (model.input_transform), so that milestone 1's regression holds the output to numz's."""
@@ -337,10 +302,11 @@ def decode_shot(
     correction: Correction | None = None,
 ) -> None:
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in one stream,
-    and write its frames as they come (upscale_shot), each slice corrected first when a
-    correction is given (_correct; DESIGN.md, Colour correction). Each slice decoded is checked
-    for NaN or inf first (finite), its frames named for the job's, the shot's first being
-    `first`."""
+    and write its frames as they come, write(frames) taking the output's next frames,
+    (n, H', W', 3) float32 in [0, 1], the target cropped to even sides (job.output_size); each
+    slice corrected first when a correction is given (_correct; DESIGN.md, Colour correction).
+    Each slice decoded is checked for NaN or inf first (finite), its frames named for the job's,
+    the shot's first being `first`."""
     chunks = _decoded(models, merged, count, output_size(target), name, first)
     if correction is not None:
         _correct(models, chunks, count, target, write, correction)
@@ -474,26 +440,6 @@ def _frames(slices: Iterator[Tensor], height: int, width: int) -> Callable[[int]
         return frames[:n]
 
     return take
-
-
-@torch.no_grad()
-def _sample_reseeded(
-    models: Models, latent: Tensor, layout: Sequence[tuple[int, int]], seed: int
-) -> list[Tensor]:
-    """Each window's DiT output with noise drawn per window, as numz ran the study's windows:
-    the latent offloaded to the CPU, each window cloned from it, the seed reset, the clone moved
-    back and the noise drawn on it (blend_patch.py, latent_upscale; generation_phases.py:654-680).
-    """
-    offloaded = latent.cpu()
-    sampled: list[Tensor] = []
-    for s, e in layout:
-        window_latent = offloaded[s:e].clone()
-        model.set_seed(seed)
-        window_latent = window_latent.to(models.device, COMPUTE_DTYPE)
-        noise = torch.randn_like(window_latent, dtype=COMPUTE_DTYPE)
-        cond = model.condition(models, noise, window_latent)
-        sampled.append(model.sample(models, noise, cond))
-    return sampled
 
 
 def _merge(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:

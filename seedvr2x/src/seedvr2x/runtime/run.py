@@ -79,7 +79,7 @@ def run_job(
     done, then its decode. With units kept on disk, a segment's shots are all encoded and sampled
     before the first of them is decoded: the segment's decode and write is then a unit of its own,
     and units never interleave. With nothing kept, each shot is decoded as soon as it is sampled,
-    as upscale_shot does, and nothing builds up.
+    its steps in a row, and nothing builds up.
 
     What units kept already is skipped (DESIGN.md, Pause and resume): a finished segment; a
     shot's encode and the windows done; the input frames of what is skipped, read and dropped.

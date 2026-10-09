@@ -86,7 +86,7 @@ def test_padding_as_numz(count: int, expected: list[int]) -> None:
 
 
 class Reads:
-    """A shot's frames, read as upscale_shot reads them: n at a time, each read recorded."""
+    """A shot's frames, read as encode_shot reads them: n at a time, each read recorded."""
 
     def __init__(self, frames: npt.NDArray[np.float32]) -> None:
         self.frames, self.read, self.counts = frames, 0, list[int]()

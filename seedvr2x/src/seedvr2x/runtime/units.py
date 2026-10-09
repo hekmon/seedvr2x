@@ -25,9 +25,10 @@ CHECKSUMS = "input.crc32"
 class Units:
     """Units kept in memory, by a run that keeps nothing once it stops: the one-file output (-o
     x.mkv), which can't resume until assembly makes it of segments (DESIGN.md, Output). A shot's
-    latent and windows stay on the device until its decode, as upscale_shot keeps them. With
-    `split`, a shot's input copy and the copy's checksums go in a directory of its own under
-    work, beside the output, gone once the shot is decoded."""
+    latent and windows stay on the device, as its steps give them, until its decode, which
+    run.run_job runs as soon as they are done. With `split`, a shot's input copy and the copy's
+    checksums go in a directory of its own under work, beside the output, gone once the shot is
+    decoded."""
 
     persistent = False
 
