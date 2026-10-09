@@ -22,8 +22,9 @@ Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR: numz's 7B fp16 and
 test_split_is_the_study, the colour study's colour_variants.py and its baseline colour.py: the
 repository's research/ and git, or SEEDVR2X_COLOUR_STUDY (the directory holding
 colour_variants.py) and COLOUR_BASELINE (its baseline, git blob f7ad9cc6, test_colour.py's
-BASELINE_BLOB). numz's lab's output, m1/numz_lab.mkv (milestone 5's; how it was made: test_lab.py
-in git history, 6c29aa1), is read when there, for information.
+BASELINE_BLOB). numz's lab's output, m1/numz_lab.mkv (milestone 5's), is read when there, for
+information; research/scripts/m5_run.sh's stage m1 makes it in its first run, numz 4490bd1's lab
+on milestone 1's input, one batch (the command in test_lab.py's docstring: git history, 6c29aa1).
 
 Its scores (ΔE lf, a*/b* spread, Y shift):
 - ΔE lf, the low frequencies' colour error: the mean CIE76 distance to the input after a Gaussian

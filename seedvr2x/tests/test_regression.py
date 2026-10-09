@@ -4,8 +4,21 @@ in.
 
 Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR) and milestone 1's reference, in
 the m1/ directory of SEEDVR2X_REFERENCE_DIR:
-- input_rgb.mkv: 45 frames of 8-bit RGB FFV1 at 960x540, read alike by numz (OpenCV) and by us
-- numz.mkv and numz_frames/: numz 4490bd1's output for it, captured by
+- input_rgb.mkv: 45 frames of 8-bit RGB FFV1 at 960x540, read alike by numz (OpenCV) and by us:
+  frames 48-92 of SEGMENT, a 1920x1080 yuv420p FFV1 segment of an animated episode (limited
+  range, chroma left, no colour tags, 23.976 fps, 377 frames; its first 26 black, then a fade-in
+  to about frame 50), BT.709 limited range to full-range RGB, its chroma upsampled and the
+  picture brought to 960x540 by zimg's spline36, with ffmpeg n9.0.2:
+
+    VF=trim=start_frame=48:end_frame=93,setpts=PTS-STARTPTS
+    VF=$VF,zscale=w=960:h=540:filter=spline36:matrixin=709:transferin=709:primariesin=709
+    VF=$VF:rangein=limited:transfer=709:primaries=709:range=full:dither=none,format=gbrp
+    ffmpeg -nostdin -y -i SEGMENT -map 0:v:0 -vf "$VF" -fps_mode passthrough \
+      -c:v ffv1 -level 3 -g 1 -pix_fmt bgr0 -an -sn input_rgb.mkv
+
+  Remade so on 2026-10-09: the same frames and packets, the two files differing only in the
+  Matroska muxer's random UIDs.
+- numz.mkv and numz_frames/: numz 4490bd1's output for input_rgb.mkv, captured by
   research/scripts/ffv1_out.py, from numz's checkout:
 
     FFV1_OUT_PATH=numz.mkv FFV1_OUT_KEEP=0 FFV1_OUT_DUMP=numz_frames \
