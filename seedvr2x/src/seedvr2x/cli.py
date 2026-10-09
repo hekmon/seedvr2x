@@ -39,11 +39,11 @@ logger = logging.getLogger("seedvr2x")
 
 # numz's padding of the frames before the model, DivisiblePad((16, 16)), zeros up to multiples of
 # 16, in place of seedvr2x's (DESIGN.md, Pipeline step 0), for seedvr2x's GPU tests only, never a
-# user's: milestone 1's regression and test_lab hold the output to numz's own with it. They run
-# the CLI in a process of its own, the allocator being set before torch is imported (main), so an
-# environment variable reaches it, and no option shows it to users. Read once (_run), passed down
-# as a parameter, and recorded in a directory's settings, so that a job is never resumed in the
-# other padding.
+# user's: milestone 1's regression holds the output to numz's own with it. It runs the CLI in a
+# process of its own, the allocator being set before torch is imported (main), so an environment
+# variable reaches it, and no option shows it to users. Read once (_run), passed down as a
+# parameter, and recorded in a directory's settings, so that a job is never resumed in the other
+# padding.
 NUMZ_PADDING = "SEEDVR2X_TESTS_NUMZ_PADDING"
 
 
@@ -115,12 +115,13 @@ def main(argv: list[str] | None = None) -> int:
         " counted from 0 (default: the whole input is one shot)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
     parser.add_argument(
         "--color-correction",
-        choices=("lab", "none"),
-        default="lab",
-        help="lab: the input's colours back under the model's details, matched over each shot, as"
-        " numz's lab; none: the model's colours, which drift (default: %(default)s)",
+        choices=("split", "none"),
+        default="split",
+        help="split: the input's coarse lightness and colour under the model's details, frame by"
+        " frame; none: the model's colours, which drift (default: %(default)s)",
     )
     parser.add_argument(
         "--min-segment",
@@ -411,7 +412,9 @@ def _run(args: argparse.Namespace) -> int:
             identity = _identity(
                 *(args, cuts, directory, ffmpeg_version, conversions), numz_padding
             )
-        work = _work(args.output) if directory is None and args.color_correction == "lab" else None
+        work = (
+            _work(args.output) if directory is None and args.color_correction == "split" else None
+        )
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
@@ -521,7 +524,7 @@ def _run(args: argparse.Namespace) -> int:
 
                 run_job(
                     *(models, parts, shots, segments, target, args.seed, args.window, units),
-                    *(write, stop, args.color_correction == "lab"),
+                    *(write, stop, args.color_correction == "split"),
                     numz_padding=numz_padding,
                 )
         except CopyError as error:
@@ -571,16 +574,16 @@ def _kept(record: "Manifest | None", segments: int) -> str:
 
 
 def _work(output: Path) -> Path:
-    """The work directory of a one-file output with lab, beside it (DESIGN.md, Colour correction):
-    its shots' input copies, their checksums and buffers, one shot at a time. Made and locked from
-    the start, as an output directory is (_lock), so that another run to the same file is
+    """The work directory of a one-file output with split, beside it (DESIGN.md, Colour
+    correction): its shots' input copies and their checksums, one shot at a time. Made and locked
+    from the start, as an output directory is (_lock), so that another run to the same file is
     refused; removed when main returns, however the run ends. What a killed run left there is
     removed; anything else is refused, never deleted."""
     from seedvr2x.runtime.job import JobError
-    from seedvr2x.runtime.units import BUFFER, CHECKSUMS, COPY
+    from seedvr2x.runtime.units import CHECKSUMS, COPY
 
     work = output.with_name(f"{output.name}.work")
-    ours = {COPY, f"{COPY}.partial", CHECKSUMS, f"{CHECKSUMS}.partial", BUFFER}
+    ours = {COPY, f"{COPY}.partial", CHECKSUMS, f"{CHECKSUMS}.partial"}
 
     def left(entry: Path) -> bool:
         """Whether entry is a shot's directory, holding nothing but a run's files."""

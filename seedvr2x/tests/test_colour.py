@@ -1,275 +1,163 @@
-"""The colour correction's parts (runtime/colour.py), on the CPU: the CIELAB conversions are numz's
-bit for bit, the matching is within a bin of numz's sort, the wavelet split is an à-trous
-computed apart in float64 and, away from the edges, the 63-tap tent it amounts to; and the
-correction is deterministic.
+"""The colour correction (runtime/colour.py), on the CPU: `split` equals the colour study's own
+split() on the same frames, within one 16-bit code, at every factor the study ran and around them
+(DESIGN.md, Validation milestones 5); the colour's stages follow the upscale factor's rule,
+exactly; the à-trous low band is one computed apart in float64 and, away from the edges, the tent
+it amounts to; content moved onto itself comes back bit for bit.
 
-numz's code is read from the pinned commit's git object, as tools/vendor.py reads it, and only
-its own functions (Apache-2.0) are loaded: the wavelet functions beside them are StableSR's, under
-a non-commercial licence, and are neither loaded nor run here."""
+The study's script, research/scripts/colour_variants.py, is loaded from the repository with its
+baseline, the colour.py it was built on, taken from git (BASELINE_BLOB); or, when both are set,
+from STUDY, the directory holding colour_variants.py, and BASELINE, that baseline colour.py
+(test_split.py runs on a copy of seedvr2x/ alone). One set without the other fails, naming the
+other. With neither the repository nor both set, the comparisons are skipped."""
 
-import ast
+import importlib.util
 import math
+import os
 import subprocess
+from collections.abc import Iterator
+from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from types import ModuleType
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from seedvr2x.runtime import colour
+from seedvr2x.runtime.job import target_size
 
-NUMZ = Path(__file__).resolve().parents[2] / "upstream" / "seedvr2-numz"
-NUMZ_COMMIT = "4490bd1f482e026674543386bb2a4d176da245b9"  # tools/vendor.py
-# numz's own functions in color_fix.py, the only ones loaded, and the constants lab_color_transfer
-# gives them.
-NUMZ_FUNCTIONS = ("_rgb_to_lab_batch", "_lab_to_rgb_batch", "_histogram_matching_channel")
-NUMZ_CONSTANTS = ("rgb_to_xyz_matrix", "xyz_to_rgb_matrix", "epsilon", "kappa")
-CPU = torch.device("cpu")
-# One bin of DESIGN.md's 2^16 over [-128, 128), and the float32 rounding of a matched value.
-WITHIN = 1 / 256 + 2**-16
-match_channel = colour._match  # pyright: ignore[reportPrivateUsage]
-
-
-def numz_source(path: str) -> ast.Module:
-    shown = subprocess.run(
-        ["git", "-C", str(NUMZ), "show", f"{NUMZ_COMMIT}:{path}"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return ast.parse(shown.stdout)
+REPOSITORY = Path(__file__).resolve().parents[2]
+# runtime/colour.py as the colour study ran it, which colour_variants.py loads as its baseline
+# (COLOUR_BASELINE): colour.py as of 6c29aa1, unchanged until split replaced `lab`.
+BASELINE_BLOB = "f7ad9cc669b2742c16983de1bb5e836f2fa8aa81"
+# The directory holding colour_variants.py, and the baseline colour.py it loads, when the
+# repository isn't there.
+STUDY = "SEEDVR2X_COLOUR_STUDY"
+BASELINE = "COLOUR_BASELINE"
+WHY_SKIPPED = (
+    f"needs the colour study's colour_variants.py and its baseline: the repository's research/ and"
+    f" git, or {STUDY} and {BASELINE}"
+)
+# One 16-bit code on [0, 1]: DESIGN.md's bound for split against the study's (milestone 5).
+CODE = 1 / 65535
 
 
-def _function(module: ast.Module, name: str) -> ast.FunctionDef:
-    return next(n for n in module.body if isinstance(n, ast.FunctionDef) and n.name == name)
+def load_study(scratch: Path) -> ModuleType | None:
+    """The colour study's colour_variants.py, loaded with its baseline: from STUDY and BASELINE
+    when both are set, else from the repository, the baseline taken from git into scratch; None
+    when there is no study to load.
+
+    One set without the other fails, naming the other, rather than skip the comparisons or load
+    another study or baseline than the one meant: alone, neither says which pair goes together.
+    BASELINE is the study's own variable, which colour.md's Reproduce exports for its scoring;
+    without it, colour_variants.py loads the repository's runtime/colour.py, split's since split
+    replaced lab, not its baseline."""
+    directory, baseline = os.environ.get(STUDY), os.environ.get(BASELINE)
+    if directory or baseline:
+        if not (directory and baseline):
+            given, missing = (STUDY, BASELINE) if directory else (BASELINE, STUDY)
+            pytest.fail(
+                f"{given} is set but {missing} isn't: set both (on a copy of seedvr2x/ alone), or"
+                " neither (in the repository)",
+                pytrace=False,
+            )
+        script, base = Path(directory) / "colour_variants.py", Path(baseline)
+    else:
+        script = REPOSITORY / "research" / "scripts" / "colour_variants.py"
+        if not (script.is_file() and (REPOSITORY / ".git").exists()):
+            return None
+        shown = subprocess.run(
+            ["git", "-C", str(REPOSITORY), "cat-file", "-p", BASELINE_BLOB],
+            capture_output=True,
+            check=False,
+        )
+        if shown.returncode:
+            return None
+        base = scratch / "colour_baseline.py"
+        base.write_bytes(shown.stdout)
+    if not (script.is_file() and base.is_file()):
+        return None
+    spec = importlib.util.spec_from_file_location("colour_variants", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Read when the module loads (colour_variants.py, BASELINE), then put back as it was.
+    before = os.environ.get(BASELINE)
+    os.environ[BASELINE] = str(base)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if before is None:
+            del os.environ[BASELINE]
+        else:
+            os.environ[BASELINE] = before
+    return module
 
 
 @pytest.fixture(scope="module")
-def numz() -> dict[str, Any]:
-    """numz's functions, and the constants lab_color_transfer gives them, by name."""
-    if not (NUMZ / ".git").exists():
-        pytest.skip("numz submodule not checked out")
-    module = numz_source("src/utils/color_fix.py")
-    functions: list[ast.stmt] = [_function(module, name) for name in NUMZ_FUNCTIONS]
-    found: dict[str, Any] = {"torch": torch, "Tensor": Tensor}
-    exec(compile(ast.Module(body=functions, type_ignores=[]), "color_fix.py", "exec"), found)
-    transfer = _function(module, "lab_color_transfer")
-    for node in ast.walk(transfer):
-        if (
-            isinstance(node, ast.Assign)
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id in NUMZ_CONSTANTS
-        ):
-            value = node.value
-            if isinstance(value, ast.Call) and value.args:  # torch.tensor([...], dtype=…)
-                value = value.args[0]
-            expression = ast.Expression(body=value)
-            found[node.targets[0].id] = eval(compile(expression, "color_fix.py", "eval"), {})
-    # The weight numz runs it with.
-    phases = numz_source("src/core/generation_phases.py")
-    [call] = [
-        node
-        for node in ast.walk(phases)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "lab_color_transfer"
-    ]
-    [weight] = [k.value for k in call.keywords if k.arg == "luminance_weight"]
-    found["luminance_weight"] = ast.literal_eval(weight)
+def study(tmp_path_factory: pytest.TempPathFactory) -> ModuleType:
+    found = load_study(tmp_path_factory.mktemp("study"))
+    if found is None:
+        pytest.skip(WHY_SKIPPED)
     return found
 
 
-def test_constants_numz(numz: dict[str, Any]) -> None:
-    assert numz["rgb_to_xyz_matrix"] == [list(row) for row in colour.RGB_TO_XYZ]
-    assert numz["xyz_to_rgb_matrix"] == [list(row) for row in colour.XYZ_TO_RGB]
-    assert (numz["epsilon"], numz["kappa"]) == (colour.EPSILON, colour.KAPPA)
-    assert numz["luminance_weight"] == colour.LUMINANCE_WEIGHT
+# (height, width) of the frames as stored, the target they are resized to, and the colour's
+# stages the rule gives (DESIGN.md, Colour correction): the factors the study ran (x1.5, x2, x3,
+# x4; x4 from 480x270 to 1080p, its GPU run's), 480p to 1080p (x2.25), below and above them, and
+# anamorphic NTSC DVDs, 4:3 and 16:9 (720x480, sample aspects 8:9 and 32:27, to 1080p).
+FACTORS = {
+    "x1.2": ((90, 160), (108, 192), 2),
+    "x1.5": ((72, 128), (108, 192), 3),
+    "x2": ((54, 96), (108, 192), 3),
+    "x2.25": ((48, 64), (108, 144), 3),
+    "x3": ((36, 64), (108, 192), 4),
+    "x4": ((27, 48), (108, 192), 4),
+    "x4 270p to 1080p": ((270, 480), (1080, 1920), 4),
+    "x6": ((18, 32), (108, 192), 5),
+    "4:3 DVD": ((480, 720), target_size(720, 480, Fraction(8, 9), 1080), 3),
+    "16:9 DVD": ((480, 720), target_size(720, 480, Fraction(32, 27), 1080), 3),
+}
 
 
-def scene(frames: int = 4, height: int = 48, width: int = 64, seed: int = 0) -> Tensor:
-    """RGB frames (T, 3, H, W) in [0, 1] that change from frame to frame: gradients, edges, a
-    flat area whose pixels are tied, and noise elsewhere."""
-    generator = torch.Generator().manual_seed(seed)
-    y = torch.linspace(0, 1, height).view(1, -1, 1)
-    x = torch.linspace(0, 1, width).view(1, 1, -1)
-    t = torch.arange(frames).view(-1, 1, 1) / frames
-    shape = (frames, height, width)
-    red = (0.2 + 0.6 * x * (1 - y) + 0.1 * t).expand(shape)
-    green = (0.5 + 0.4 * torch.sin(6 * x + 3 * y + t)).expand(shape)
-    blue = (((x + y + 0.1 * t) % 0.5 > 0.25).float() * 0.6 + 0.2).expand(shape)
-    rgb = torch.stack([red, green, blue], dim=1)
-    rgb = rgb + 0.03 * torch.randn(rgb.shape, generator=generator)
-    rgb[:, :, : height // 4, : width // 4] = torch.tensor([0.7, 0.3, 0.4]).view(1, 3, 1, 1)
-    return rgb.clamp(0.0, 1.0)
+def test_colour_stages() -> None:
+    for name, (source, target, stages) in FACTORS.items():
+        assert colour.colour_stages(source, target) == stages, name
+    # The DVDs: each axis its own factor, the geometric mean taken (x2 and x2.25; x2.67 and x2.25).
+    assert FACTORS["4:3 DVD"][1] == (1080, 1440) and FACTORS["16:9 DVD"][1] == (1080, 1920)
+    # At the boundaries, f² = 2^(2k - 3) exactly, half up: x√2 (2 by 1), x√8 (4 by 2), x√32 (8 by
+    # 4); just below, the stage below.
+    for (height, width), stages in (((1, 2), 3), ((2, 4), 4), ((4, 8), 5), ((8, 16), 6)):
+        assert colour.colour_stages((100, 100), (100 * height, 100 * width)) == stages
+        assert colour.colour_stages((100, 100), (100 * height, 100 * width - 1)) == stages - 1
+    # The geometric mean, not the larger nor the mean of the two: x1.2 by x6 is x2.68.
+    assert colour.colour_stages((100, 100), (120, 600)) == 3
+    # Never fewer than 2, at x1 and below.
+    for factor in (1, 2, 4, 10):
+        assert colour.colour_stages((100 * factor, 100 * factor), (100, 100)) == 2
+    # The study's rule, round(2 + log2 f), wherever no float tie can decide it.
+    for source_height in range(40, 400, 7):
+        for target_height in range(60, 2200, 37):
+            factor = target_height / source_height
+            exact = 2 + math.log2(factor)
+            if abs(exact - math.floor(exact) - 0.5) < 1e-6:
+                continue
+            expected = max(2, math.floor(exact + 0.5))
+            source, target = (source_height, 2 * source_height), (target_height, 2 * target_height)
+            assert colour.colour_stages(source, target) == expected, (source, target)
 
 
-def drifted(rgb: Tensor) -> Tensor:
-    """rgb as the model renders it: 30% more saturated, toward blue (research/docs/quality.md)."""
-    grey = rgb.mean(dim=1, keepdim=True)
-    shift = torch.tensor([-0.02, 0.0, 0.04]).view(1, 3, 1, 1)
-    return (grey + 1.3 * (rgb - grey) + shift).clamp(0.0, 1.0)
-
-
-def rgb_samples() -> Tensor:
-    """RGB (6, 3, 37, 53) in [0, 1], random, with the conversions' thresholds and their
-    neighbours."""
-    rgb = torch.rand(6, 3, 37, 53, generator=torch.Generator().manual_seed(1))
-    edges = torch.tensor([0.0, 1.0, 0.04045, 0.0031308, 0.5, 1e-7])
-    edges = torch.cat(
-        [edges, torch.nextafter(edges, torch.zeros(1)), torch.nextafter(edges, torch.ones(1))]
-    )
-    rgb.view(-1)[: edges.numel()] = edges
-    return rgb
-
-
-def test_rgb_to_lab_numz(numz: dict[str, Any]) -> None:
-    rgb = rgb_samples()
-    matrix = torch.tensor(numz["rgb_to_xyz_matrix"], dtype=torch.float32)
-    expected = numz["_rgb_to_lab_batch"](rgb.clone(), CPU, matrix, numz["epsilon"], numz["kappa"])
-    assert torch.equal(colour.rgb_to_lab(rgb), expected)
-    # Laid out as the decode gives frames, (3, T, H, W), seen as (T, 3, H, W).
-    assert torch.equal(
-        colour.rgb_to_lab(rgb.transpose(0, 1).contiguous().transpose(0, 1)), expected
-    )
-
-
-def test_lab_to_rgb_numz(numz: dict[str, Any]) -> None:
-    # In gamut and out of it.
-    generator = torch.Generator().manual_seed(2)
-    span = torch.tensor([110.0, 260.0, 260.0]).view(1, 3, 1, 1)
-    offset = torch.tensor([-5.0, -130.0, -130.0]).view(1, 3, 1, 1)
-    lab = torch.cat(
-        [
-            torch.rand(6, 3, 37, 53, generator=generator) * span + offset,
-            colour.rgb_to_lab(rgb_samples()),
-        ]
-    )
-    matrix = torch.tensor(numz["xyz_to_rgb_matrix"], dtype=torch.float32)
-    expected = numz["_lab_to_rgb_batch"](lab.clone(), CPU, matrix, numz["epsilon"], numz["kappa"])
-    assert torch.equal(colour.lab_to_rgb(lab), expected)
-    assert torch.equal(
-        colour.lab_to_rgb(lab.transpose(0, 1).contiguous().transpose(0, 1)), expected
-    )
-
-
-def bounds(numz: dict[str, Any], content: Tensor, reference: Tensor) -> tuple[Tensor, Tensor]:
-    """The least and the greatest value numz's sort gives the values of each one's content bin,
-    one channel's (B, H, W)."""
-    matched = numz["_histogram_matching_channel"](content, reference, CPU)
-    bins = ((content.double() + 128) * 256).floor().long().flatten()
-    least = torch.full((1 << 16,), math.inf).scatter_reduce(0, bins, matched.flatten(), "amin")
-    most = torch.full((1 << 16,), -math.inf).scatter_reduce(0, bins, matched.flatten(), "amax")
-    return least[bins].view(content.shape), most[bins].view(content.shape)
-
-
-@pytest.mark.parametrize("quantised", [False, True], ids=["continuous", "8-bit"])
-def test_matching_numz(numz: dict[str, Any], quantised: bool) -> None:
-    # Each value within one bin of what numz's sort gives the values of its bin, tied values
-    # alike: 8-bit frames tie wherever their RGB values do.
-    reference_rgb = scene()
-    content_rgb = drifted(scene(seed=1))
-    if quantised:
-        reference_rgb, content_rgb = (
-            (rgb * 255).round() / 255 for rgb in (reference_rgb, content_rgb)
-        )
-    content, reference = colour.rgb_to_lab(content_rgb), colour.rgb_to_lab(reference_rgb)
-    histograms = colour.Histograms(CPU)
-    histograms.add(content, reference)
-    for channel in range(3):
-        ours = match_channel(
-            content[:, channel], histograms.content[channel], histograms.reference[channel]
-        )
-        least, most = bounds(numz, content[:, channel], reference[:, channel])
-        assert bool((ours >= least - WITHIN).all() and (ours <= most + WITHIN).all()), channel
-        values, groups = torch.unique(content[:, channel], return_inverse=True)
-        assert values.numel() < content[:, channel].numel()  # ties there are
-        tied = torch.full_like(values, math.inf).scatter_reduce(
-            0, groups.flatten(), ours.flatten(), "amin"
-        )
-        assert torch.equal(tied[groups], ours), channel
-    matched = histograms.match(content)
-    # L* a fifth matched, by numz's expression (color_fix.py:339) with the weight it runs.
-    lightness = match_channel(content[:, 0], histograms.content[0], histograms.reference[0])
-    weight = numz["luminance_weight"]
-    assert torch.equal(matched[:, 0], content[:, 0].mul(weight).add_(lightness.mul(1.0 - weight)))
-    assert torch.equal(
-        matched[:, 1:],
-        torch.stack(
-            [
-                match_channel(content[:, c], histograms.content[c], histograms.reference[c])
-                for c in (1, 2)
-            ],
-            dim=1,
-        ),
-    )
-
-
-def test_matching_identity() -> None:
-    # Linear within a bin: a shot matched onto itself comes back, but for float32's rounding.
-    lab = colour.rgb_to_lab(scene())
-    histograms = colour.Histograms(CPU)
-    histograms.add(lab, lab)
-    assert float((histograms.match(lab) - lab).abs().max()) <= 2**-16
-
-
-def test_histograms_hold_every_rgb() -> None:
-    # The CIELAB values of every RGB in [0, 1] are inside the histograms' range: its extremes are
-    # at the RGB cube's corners, among this grid's points.
-    steps = torch.linspace(0, 1, 65)
-    rgb = torch.stack(torch.meshgrid(steps, steps, steps, indexing="ij")).reshape(1, 3, 65, -1)
-    lab = colour.rgb_to_lab(rgb)
-    assert lab.amin(dim=(0, 2, 3)).tolist() == pytest.approx([0.0, -86.18, -107.86], abs=0.01)
-    assert lab.amax(dim=(0, 2, 3)).tolist() == pytest.approx([100.0, 98.23, 94.48], abs=0.01)
-    colour.Histograms(CPU).add(lab, lab)  # not refused
-
-
-def test_histograms_pooled() -> None:
-    # Counted in integers: the same frames give the same histograms, and the same matches,
-    # added together or one by one, in any order.
-    content, reference = colour.rgb_to_lab(drifted(scene(seed=1))), colour.rgb_to_lab(scene())
-    together, apart, backwards = (colour.Histograms(CPU) for _ in range(3))
-    together.add(content, reference)
-    for frame in range(content.shape[0]):
-        apart.add(content[frame : frame + 1], reference[frame : frame + 1])
-    backwards.add(content.flip(0), reference.flip(0))
-    for histograms in (apart, backwards):
-        assert torch.equal(histograms.content, together.content)
-        assert torch.equal(histograms.reference, together.reference)
-        assert torch.equal(histograms.match(content), together.match(content))
-
-
-def test_histograms_refuse() -> None:
-    lab = colour.rgb_to_lab(scene())
-    histograms = colour.Histograms(CPU)
-    with pytest.raises(ValueError, match="values counted"):
-        histograms.match(lab)  # nothing counted
-    for wrong in (math.nan, 128.0, -128.5):
-        bad = lab.clone()
-        bad[0, 1, 0, 0] = wrong
-        with pytest.raises(ValueError, match="outside"):
-            histograms.add(bad, lab)
-        with pytest.raises(ValueError, match="outside"):
-            histograms.add(lab, bad)
-        assert not histograms.content.any() and not histograms.reference.any()  # nothing counted
-    histograms.add(lab, lab)
-    histograms.add(lab[:1], lab[:1])
-    histograms.reference[0, 0] += 1  # one value more on one side
-    with pytest.raises(ValueError, match="values counted"):
-        histograms.match(lab)
-
-
-def a_trous(plane: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-    """The low band in float64, written apart from colour.low_band: each stage's 3-by-3 binomial
+def a_trous(plane: npt.NDArray[np.float64], stages: int) -> npt.NDArray[np.float64]:
+    """The low band in float64, written apart from colour.low_bands: each stage's 3-by-3 binomial
     kernel tap by tap, the indices clamped to the plane."""
     height, width = plane.shape
     cap = max(1, min(height, width) // 8)
     rows, columns = np.arange(height), np.arange(width)
     weights = {-1: 0.25, 0: 0.5, 1: 0.25}
     x = plane
-    for stage in range(5):
+    for stage in range(stages):
         d = min(2**stage, cap)
         out = np.zeros_like(x)
         for i, wi in weights.items():
@@ -282,20 +170,24 @@ def a_trous(plane: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     return x
 
 
+@pytest.mark.parametrize("stages", [1, 2, 3, 4, 5])
 @pytest.mark.parametrize("size", [(128, 144), (40, 57)], ids=["taps 1 to 16", "taps capped at 5"])
-def test_low_band_a_trous(size: tuple[int, int]) -> None:
+def test_low_band_a_trous(size: tuple[int, int], stages: int) -> None:
     frames = torch.rand(2, 3, *size, generator=torch.Generator().manual_seed(3)) * 2 - 1
-    low = colour.low_band(frames)
+    low = colour.low_band(frames, stages)
     assert low.dtype == torch.float32 and low.shape == frames.shape
     planes = frames.double().reshape(-1, *size).numpy()
-    expected = np.stack([a_trous(plane) for plane in planes]).reshape(frames.shape)
+    expected = np.stack([a_trous(plane, stages) for plane in planes]).reshape(frames.shape)
     assert np.abs(low.numpy() - expected).max() < 1e-7
 
 
-def test_low_band_tent() -> None:
-    # Away from the edges, 31 pixels and more, the stages amount to a separable tent of 63 taps.
+@pytest.mark.parametrize("stages", [4, 5])
+def test_low_band_tent(stages: int) -> None:
+    # Away from the edges, 2^stages - 1 pixels and more, k stages amount to a separable tent of
+    # 2^(k + 1) - 1 taps: 31 for the lightness's 4, 63 for 5.
     frame = torch.rand(130, 150, generator=torch.Generator().manual_seed(4)) * 2 - 1
-    tent = (32 - np.abs(np.arange(-31, 32))) / 1024
+    half = 1 << stages
+    tent = (half - np.abs(np.arange(1 - half, half))) / (half * half)
 
     def convolve(line: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         return np.convolve(line, tent, mode="valid")
@@ -303,49 +195,111 @@ def test_low_band_tent() -> None:
     expected = np.apply_along_axis(
         convolve, 0, np.apply_along_axis(convolve, 1, frame.double().numpy())
     )
-    low = colour.low_band(frame)[31:-31, 31:-31].numpy()
+    margin = half - 1
+    low = colour.low_band(frame, stages)[margin:-margin, margin:-margin].numpy()
     assert low.shape == expected.shape
     assert np.abs(low - expected).max() < 1e-7
 
 
-def test_transfer_exact() -> None:
-    # The split loses nothing: frames transferred onto themselves come back bit for bit.
-    content = (
-        torch.rand(2, 3, 64, 80, generator=torch.Generator().manual_seed(5)) * 2.1 - 1.05
-    ).to(torch.bfloat16)
-    assert torch.equal(colour.transfer(content, content), content.float())
-    # Onto another, the content's high band on the reference's low band.
-    reference = torch.rand(2, 3, 64, 80, generator=torch.Generator().manual_seed(6)) * 2 - 1
-    high = content.float() - colour.low_band(content)
-    moved = colour.transfer(content, reference)
-    assert torch.allclose(moved - colour.low_band(reference), high, rtol=0, atol=1e-6)
+def test_low_bands_one_cascade() -> None:
+    # Each count's band from one cascade is low_band's, bit for bit; 0 stages are the frames.
+    frames = torch.rand(2, 3, 50, 70, generator=torch.Generator().manual_seed(5)) * 2 - 1
+    bands = colour.low_bands(frames, (0, 2, 4, 5))
+    assert sorted(bands) == [0, 2, 4, 5]
+    assert torch.equal(bands[0], frames)
+    for stages in (2, 4, 5):
+        assert torch.equal(bands[stages], colour.low_band(frames, stages))
+    with pytest.raises(ValueError, match="negative"):
+        colour.low_bands(frames, (-1, 2))
+
+
+def frames_for(kind: str, size: tuple[int, int], seed: int) -> tuple[Tensor, Tensor]:
+    """content (2, 3, H, W) bfloat16, as the VAE decodes, and reference (2, 3, H, W) float32 in
+    [-1, 1]: random, the content out of range in places, or smooth, the content the reference
+    brightened and noisier, as the study's self-test makes them."""
+    generator = torch.Generator().manual_seed(seed)
+    height, width = size
+    if kind == "random":
+        content = torch.rand(2, 3, height, width, generator=generator) * 2.2 - 1.1
+        reference = torch.rand(2, 3, height, width, generator=generator) * 2 - 1
+        return content.to(torch.bfloat16), reference
+    base = torch.rand(2, 3, max(1, height // 8), max(1, width // 8), generator=generator) * 2 - 1
+    reference = F.interpolate(base, size=size, mode="bilinear", align_corners=False)
+    noise = 0.1 * torch.randn(2, 3, height, width, generator=generator)
+    content = (reference * 1.2 + noise).clamp(-1.05, 1.05)
+    return content.to(torch.bfloat16), reference
+
+
+def cases() -> Iterator[tuple[str, tuple[int, int], int]]:
+    for name, (_, target, stages) in FACTORS.items():
+        yield name, target, stages
+
+
+@pytest.mark.parametrize("kind", ["random", "smooth"])
+@pytest.mark.parametrize(("name", "target", "stages"), list(cases()), ids=list(FACTORS))
+def test_split_is_the_study(
+    study: ModuleType, name: str, target: tuple[int, int], stages: int, kind: str
+) -> None:
+    # Ours against the study's split() on the same frames, `split:ycc:4:SC`, SC the stages the rule
+    # gives at the factor (FACTORS): within one 16-bit code, bit for bit in fact.
+    source = FACTORS[name][0]
+    assert colour.colour_stages(source, target) == stages
+    content, reference = frames_for(kind, target, seed=len(name) + target[1])
+    ours = colour.split(content, reference, colour.colour_stages(source, target))
+    theirs = study.split(content, reference, "ycc", 4, stages)
+    assert ours.dtype == torch.float32 and ours.shape == reference.shape
+    assert 0 <= float(ours.min()) and float(ours.max()) <= 1
+    difference = float((ours - theirs).abs().max())
+    print(
+        f"{name} ({kind}): {source} to {target}, {stages} stages: max |ours - study| {difference}"
+    )
+    assert difference < CODE
+    # From the decode's layout, (3, T, H, W) seen as (T, 3, H, W), the same values.
+    decoded = content.transpose(0, 1).contiguous().transpose(0, 1)
+    assert torch.equal(colour.split(decoded, reference, stages), ours)
+
+
+def test_split_onto_itself() -> None:
+    # The split loses nothing: content moved onto itself comes back bit for bit in Y'CbCr, and to
+    # float32's rounding of the matrix there and back in RGB.
+    content, _ = frames_for("random", (64, 80), seed=6)
+    for stages in (2, 3, 4, 5):
+        assert torch.equal(colour.transfer(content, content, stages), colour.ycc(content))
+        back = colour.split(content, content, stages)
+        assert float((back - colour.unit_range(content)).abs().max()) < 1e-6
     with pytest.raises(ValueError):
-        colour.transfer(content, reference[:1])  # one frame's low band for all: refused
+        colour.split(content, content[:1], 3)  # one frame's low band for all: refused
+
+
+def test_split_moves_the_low_bands() -> None:
+    # The content's detail on the reference's coarse lightness and colour: flat frames take the
+    # reference's values; a pattern finer than both scales added to the reference stays, the
+    # reference's level under it.
+    flat = torch.full((1, 3, 48, 64), 0.25)
+    shifted = torch.tensor([0.1, -0.3, 0.6]).view(1, 3, 1, 1).expand(1, 3, 48, 64)
+    moved = colour.split(flat, shifted, 3)
+    assert float((moved - colour.unit_range(shifted)).abs().max()) < 1e-6
+    checks = (torch.arange(64).view(1, -1) + torch.arange(48).view(-1, 1)) % 2 * 0.2 - 0.1
+    reference = torch.rand(1, 3, 6, 8, generator=torch.Generator().manual_seed(7)) - 0.5
+    reference = F.interpolate(reference, size=(48, 64), mode="bilinear", align_corners=False)
+    content = (reference + 0.3 + checks).to(torch.bfloat16)  # brighter, with a fine pattern
+    corrected = colour.split(content, reference, 3)[..., 16:-16, 16:-16]
+    expected = colour.unit_range(reference + checks)[..., 16:-16, 16:-16]
+    assert float((corrected - expected).abs().max()) < 0.01
+
+
+def test_ycc_bt709() -> None:
+    # BT.709's luma weights, and the colour differences scaled to [-0.5, 0.5]: white has no
+    # colour, pure blue and pure red the extremes of Cb and Cr.
+    white, blue, red = (
+        torch.tensor(rgb).view(1, 3, 1, 1) for rgb in ((1.0,) * 3, (0, 0, 1.0), (1.0, 0, 0))
+    )
+    assert colour.ycc(white).flatten().tolist() == pytest.approx([1, 0, 0], abs=1e-6)
+    assert colour.ycc(blue).flatten().tolist() == pytest.approx([0.0722, 0.5, -0.0458], abs=1e-4)
+    assert colour.ycc(red).flatten().tolist() == pytest.approx([0.2126, -0.1146, 0.5], abs=1e-4)
 
 
 def test_unit_range() -> None:
-    # [-1, 1] to [0, 1], clamped as numz's clamp to [-1, 1] then its map would.
+    # [-1, 1] to [0, 1], clamped.
     x = torch.tensor([-math.inf, -1.5, -1.0, 0.0, 1.0, 1.5, math.inf])
     assert torch.equal(colour.unit_range(x), torch.tensor([0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0]))
-
-
-def test_correct() -> None:
-    # The model's drift taken out, the same way every time, from the decode's layout too.
-    reference = scene() * 2 - 1
-    content = (drifted(scene()) * 2 - 1).to(torch.bfloat16)
-    corrected = colour.correct(content, reference)
-    assert corrected.dtype == torch.float32 and corrected.shape == reference.shape
-    assert 0 <= float(corrected.min()) and float(corrected.max()) <= 1
-    assert torch.equal(colour.correct(content, reference), corrected)
-    decoded = content.transpose(0, 1).contiguous().transpose(0, 1)
-    assert torch.equal(colour.correct(decoded, reference), corrected)
-    spread = {
-        name: colour.rgb_to_lab(rgb)[:, 1:].std(dim=(0, 2, 3))
-        for name, rgb in (
-            ("input", colour.unit_range(reference)),
-            ("model", colour.unit_range(content)),
-            ("corrected", corrected),
-        )
-    }
-    assert ((spread["model"] / spread["input"] - 1).abs() > 0.1).all()
-    assert ((spread["corrected"] / spread["input"] - 1).abs() < 0.01).all()

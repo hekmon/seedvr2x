@@ -1,228 +1,156 @@
-"""Colour correction (DESIGN.md, Colour correction): numz's `lab`, pooled over a shot.
+"""Colour correction (DESIGN.md, Colour correction): `split`, frame by frame.
 
-The model drifts in colour (+30% saturation, toward blue: research/docs/quality.md). `lab` gives
-each frame the input's low frequencies under the decoded frame's details (the wavelet split),
-then matches the CIELAB values of the result to the input's: a* and b* fully, L* by a fifth.
+The model drifts in colour (more saturation on 9 of 10 clips, b* toward yellow on 7:
+research/docs/colour.md), and the VAE's tiles shift each tile's level and colour. `split` keeps
+the decoded frame's detail and takes its coarse lightness and colour from the input, in BT.709
+Y'CbCr: Y' below LIGHTNESS_STAGES à-trous stages, Cb and Cr below colour_stages. Nothing is pooled
+over the shot, so each frame needs only its own decode and its reference frame, and the decode
+streams.
 
+- Ported from the colour study's split(), `split:ycc:4:SC` (research/scripts/colour_variants.py:
+  split, split_space, to_space and from_space for ycc, mix, YCC, low_bands), the same operations
+  in the same order: on the same frames, the two agree bit for bit on the CPU
+  (tests/test_colour.py), and the study's measurements hold for this code.
 - The wavelet split is written from its method (DESIGN.md), clean room: numz's comes from
   StableSR, whose licence is non-commercial.
-- The CIELAB conversions and the matching are ported from numz (ComfyUI-SeedVR2_VideoUpscaler,
-  numz and contributors, src/utils/color_fix.py:249-521 at 4490bd1, Apache-2.0; see NOTICE).
-  Changed for seedvr2x: the matching is pooled over the shot through integer histograms, where
-  numz sorts each batch's values.
+- No numz code is left in the correction: the CIELAB conversions and the histogram matching
+  ported from numz for `lab` went with it.
 """
+
+from collections.abc import Iterable
+from fractions import Fraction
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-# The wavelet split's à-trous stages: each blurs the one before with the 3-by-3 binomial kernel,
-# (1, 2, 1)/4 on each axis, its taps 2^stage pixels apart (DESIGN.md, Colour correction).
-STAGES = 5
+# The lightness's à-trous stages at every upscale factor: sigma 6.5 px of output. At 13 px (5,
+# numz's split) the model's own lightness flickers more than lab's; at 3.2 px (3) fine texture
+# starts to go (DESIGN.md, Colour correction; research/docs/colour.md).
+LIGHTNESS_STAGES = 4
+# The colour's fewest stages, sigma 1.6 px, below x1.41 (colour_stages).
+COLOUR_STAGES_MIN = 2
 
-# sRGB and CIELAB under D65, numz's constants (color_fix.py:303-317).
-RGB_TO_XYZ = (
-    (0.4124564, 0.3575761, 0.1804375),
-    (0.2126729, 0.7151522, 0.0721750),
-    (0.0193339, 0.1191920, 0.9503041),
+# BT.709's Y'CbCr of gamma-encoded RGB, built as the study builds it (colour_variants.py, YCC):
+# float64, cast to float32 where applied. A linear map, so the frames go through it in [-1, 1]
+# as they are: only the difference of the low bands moves them.
+YCC = torch.tensor(
+    [
+        [0.2126, 0.7152, 0.0722],
+        [-0.2126 / 1.8556, -0.7152 / 1.8556, 0.9278 / 1.8556],
+        [0.7874 / 1.5748, -0.7152 / 1.5748, -0.0722 / 1.5748],
+    ],
+    dtype=torch.float64,
 )
-XYZ_TO_RGB = (
-    (3.2404542, -1.5371385, -0.4985314),
-    (-0.9692660, 1.8760108, 0.0415560),
-    (0.0556434, -0.2040259, 1.0572252),
-)
-EPSILON = 6.0 / 29.0
-KAPPA = (29.0 / 3.0) ** 3
-
-# The share of its own L* each value keeps, the rest matched: numz's (generation_phases.py:1303).
-LUMINANCE_WEIGHT = 0.8
-
-# The histograms: 2^16 bins per channel over [-128, 128), 1/256 unit each. They hold the CIELAB
-# values of every RGB in [0, 1]: L* 0 to 100, a* -86.2 to 98.2, b* -107.9 to 94.5, at the RGB
-# cube's corners (tests/test_colour.py).
-BINS = 1 << 16
-LAB_LOW = -128.0
-PER_UNIT = BINS / (-2 * LAB_LOW)
+YCC_INV = torch.inverse(YCC)  # torch.linalg.inv's alias, which the study calls
 
 
-def low_band(frames: Tensor) -> Tensor:
-    """The low band of the wavelet split of frames (..., H, W), each (H, W) plane apart: STAGES
-    à-trous stages, their taps 1, 2, 4, 8 and 16 pixels apart, at most an eighth of the smaller
-    side, edges replicated at each stage. Away from the edges, a separable 63-tap tent filter,
-    (32 - |k|)/1024, a standard deviation of 13 px. float32, the shape of frames."""
+def colour_stages(source: tuple[int, int], target: tuple[int, int]) -> int:
+    """The à-trous stages of the colour (Cb, Cr) for frames of source (height, width), as stored,
+    resized to target (height, width) (job.target_size): the stage whose sigma is nearest 1.6
+    source pixels, the input's own colour resolution (a 4:2:0 source has a chroma sample every 2),
+    round(2 + log2 f), and COLOUR_STAGES_MIN at the least. f is the upscale factor; where the
+    display aspect gives the two axes different factors (anamorphic SD), their geometric mean.
+
+    Rounded on a log scale, half up, from f² exactly, so that no float rounding decides a
+    boundary: k stages when 2^(2k - 5) <= f² < 2^(2k - 3). That is 2 below x1.41 (√2), 3 (sigma
+    3.2 px) from x1.41 to x2.83 (√8), 4 (sigma 6.5 px) from x2.83 to x5.66 (√32), and 5 above."""
+    (source_height, source_width), (height, width) = source, target
+    squared = Fraction(height, source_height) * Fraction(width, source_width)
+    # Checked at x1.5, x2, x3 and x4, interpolated between (x2.25, 480p to 1080p): DESIGN.md,
+    # Colour correction. PROVISIONAL from x5.66 on: 5 stages (sigma 13 px) are the same rule,
+    # untested. The stages' own sigmas, √((4^k - 1)/6) (1.58, 3.24, 6.52, 13.06 px), would put
+    # the nearest's boundaries at x1.41, x2.87 and x5.77: DESIGN.md's formula decides.
+    stages = COLOUR_STAGES_MIN
+    while squared >= Fraction(2) ** (2 * stages - 3):
+        stages += 1
+    return stages
+
+
+def low_bands(frames: Tensor, stages: Iterable[int]) -> dict[int, Tensor]:
+    """The low band of frames (..., H, W), each (H, W) plane apart, at each stage count of
+    `stages` (counts >= 0), from one à-trous cascade, each count's band taken as the cascade
+    passes it: {count: float32, the shape of frames}. 0 stages: the frames themselves.
+
+    Stage s blurs the one before with the 3-by-3 binomial kernel, (1, 2, 1)/4 on each axis, its
+    taps 2^s pixels apart (s from 0), at most an eighth of the smaller side, edges replicated at
+    each stage. Away from the edges, k stages amount to a separable tent of 2^(k + 1) - 1 taps,
+    sigma √((4^k - 1)/6): 4 stages 31 taps, sigma 6.52 px; 5 stages 63 taps, sigma 13.06 px."""
     *lead, height, width = frames.shape
+    wanted = set(stages)
+    if any(count < 0 for count in wanted):
+        raise ValueError(f"stage counts {sorted(wanted)}: none can be negative")
     x = frames.reshape(-1, 1, height, width).to(torch.float32)
     cap = max(1, min(height, width) // 8)
-    for stage in range(STAGES):
+    bands = {0: x.reshape(*lead, height, width)} if 0 in wanted else {}
+    for stage in range(max(wanted, default=0)):
         d = min(2**stage, cap)
         # (a + 2b + c)/4: the weight of 4 exact, two roundings per axis.
         x = F.pad(x, (d, d, d, d), mode="replicate")
         x = (x[..., :, : -2 * d] + x[..., :, 2 * d :] + 2 * x[..., :, d:-d]) * 0.25
         x = (x[..., : -2 * d, :] + x[..., 2 * d :, :] + 2 * x[..., d:-d, :]) * 0.25
-    return x.reshape(*lead, height, width)
+        if stage + 1 in wanted:
+            bands[stage + 1] = x.reshape(*lead, height, width)
+    return bands
 
 
-def transfer(content: Tensor, reference: Tensor) -> Tensor:
-    """content's high band on reference's low band (low_band), both (..., H, W) of one shape:
-    float32, unclamped.
+def low_band(frames: Tensor, stages: int) -> Tensor:
+    """The low band of frames (..., H, W) after `stages` à-trous stages (low_bands): float32, the
+    shape of frames."""
+    return low_bands(frames, (stages,))[stages]
 
-    Computed as content plus the difference of the low bands, the same sum without rounding a high
-    band on its own: a float32 high band added back to its low band misses the image at 0.4 to
-    2.2% of the values of test frames, where content transferred onto itself comes back bit for
-    bit."""
+
+def ycc(frames: Tensor) -> Tensor:
+    """BT.709 Y'CbCr of frames (T, 3, H, W), gamma-encoded RGB in any range, here [-1, 1]: (T, 3,
+    H, W) float32, Y' then Cb then Cr.
+
+    Made contiguous first: a frame's values then never depend on its layout, such as the decode's
+    (3, T, H, W) seen as (T, 3, H, W), which the matrix product could take another way, to other
+    last bits."""
+    return _mix(frames.to(torch.float32).contiguous(), YCC)
+
+
+def rgb(frames: Tensor) -> Tensor:
+    """RGB of frames (T, 3, H, W) float32 in Y'CbCr (ycc) of RGB in [-1, 1], brought to [0, 1] and
+    clamped: (T, 3, H, W) float32."""
+    return unit_range(_mix(frames, YCC_INV))
+
+
+def _mix(frames: Tensor, matrix: Tensor) -> Tensor:
+    """matrix (3, 3) applied to the channels of frames (T, 3, H, W) float32, as the study applies
+    it (colour_variants.py, mix): in float32, on the frames' device."""
+    weights = matrix.to(device=frames.device, dtype=torch.float32)
+    return torch.einsum("ij,tjhw->tihw", weights, frames)
+
+
+def transfer(content: Tensor, reference: Tensor, colour_stages: int) -> Tensor:
+    """content moved onto the low bands of reference, in Y'CbCr (ycc): Y' below LIGHTNESS_STAGES,
+    Cb and Cr below colour_stages. content (T, 3, H, W) is the VAE's decode, in [-1, 1]
+    unclamped, reference (T, 3, H, W) the same frames of the input, in [-1, 1]: (T, 3, H, W)
+    float32, Y'CbCr, unclamped.
+
+    Computed as the study computes it: the content plus the low band of the difference, d =
+    reference - content, one cascade per scale. That is content + (low(reference) -
+    low(content)), the low band being linear, the same sum as the content's high band on the
+    reference's low band without rounding a high band on its own: a float32 high band added back
+    to its low band misses the image at 0.4 to 2.2% of the values of test frames, whereas content
+    moved onto itself comes back bit for bit (DESIGN.md, Colour correction, Numerics)."""
     if content.shape != reference.shape:
         raise ValueError(f"content {tuple(content.shape)}, reference {tuple(reference.shape)}")
-    return content.to(torch.float32) + (low_band(reference) - low_band(content))
+    moved = ycc(content)
+    difference = ycc(reference).sub_(moved)
+    lightness = moved[:, :1] + low_band(difference[:, :1], LIGHTNESS_STAGES)
+    chroma = moved[:, 1:] + low_band(difference[:, 1:], colour_stages)
+    return torch.cat([lightness, chroma], dim=1)
+
+
+def split(content: Tensor, reference: Tensor, colour_stages: int) -> Tensor:
+    """The colour correction of content against reference (transfer), back to RGB: (T, 3, H, W)
+    float32 in [0, 1], kept float32 for the writer. Each frame is corrected alone. colour_stages
+    follows the upscale factor (colour_stages)."""
+    return rgb(transfer(content, reference, colour_stages))
 
 
 def unit_range(frames: Tensor) -> Tensor:
-    """frames in [-1, 1], the model's range, to [0, 1], clamped: float32, as numz maps both its
-    inputs (color_fix.py:319-321)."""
+    """frames in [-1, 1], the model's range, to [0, 1], clamped: float32."""
     return frames.to(torch.float32).add(1.0).mul_(0.5).clamp_(0.0, 1.0)
-
-
-def rgb_to_lab(rgb: Tensor) -> Tensor:
-    """CIELAB under D65 of rgb (B, 3, H, W) float32 in [0, 1], sRGB: (B, 3, H, W) float32, L*
-    then a* then b*. numz's _rgb_to_lab_batch (color_fix.py:368-413), bit for bit.
-
-    Made contiguous first, as lab_to_rgb: from another layout, such as the decode's (3, B, H, W),
-    the (B·H·W, 3) pixels are a strided view, which the matrix product takes another way, to other
-    last bits. So a frame's values never depend on its layout. On the CPU they depend on the
-    call's size and threads, though: torch's pow rounds the scalar tail of each thread's share
-    apart from its vectorised body (258 of 1.56M values differ between 16 frames in one call and
-    one at a time), so the two passes over a shot convert it in the same calls."""
-    rgb = rgb.contiguous()
-    matrix = torch.tensor(RGB_TO_XYZ, dtype=torch.float32, device=rgb.device)
-    linear = torch.where(rgb > 0.04045, torch.pow((rgb + 0.055) / 1.055, 2.4), rgb / 12.92)
-    batch, _, height, width = linear.shape
-    flat = linear.permute(0, 2, 3, 1).reshape(-1, 3)
-    del linear
-    xyz = torch.matmul(flat, matrix.T).reshape(batch, height, width, 3).permute(0, 3, 1, 2)
-    del flat
-    xyz[:, 0].div_(0.95047)
-    xyz[:, 2].div_(1.08883)
-    f = torch.where(
-        xyz > EPSILON**3, torch.pow(xyz, 1.0 / 3.0), xyz.mul(KAPPA).add_(16.0).div_(116.0)
-    )
-    del xyz
-    lightness = f[:, 1].mul(116.0).sub_(16.0)
-    a = (f[:, 0] - f[:, 1]).mul_(500.0)
-    b = (f[:, 1] - f[:, 2]).mul_(200.0)
-    return torch.stack([lightness, a, b], dim=1)
-
-
-def lab_to_rgb(lab: Tensor) -> Tensor:
-    """sRGB of lab (B, 3, H, W) float32, CIELAB under D65 (rgb_to_lab): (B, 3, H, W) float32,
-    clamped to [0, 1]. numz's _lab_to_rgb_batch (color_fix.py:416-474), bit for bit."""
-    lab = lab.contiguous()
-    matrix = torch.tensor(XYZ_TO_RGB, dtype=torch.float32, device=lab.device)
-    lightness, a, b = lab[:, 0], lab[:, 1], lab[:, 2]
-    fy = (lightness + 16.0) / 116.0
-    fx = a.div(500.0).add_(fy)
-    fz = fy - b / 200.0
-    x = torch.where(fx > EPSILON, torch.pow(fx, 3.0), fx.mul(116.0).sub_(16.0).div_(KAPPA))
-    y = torch.where(fy > EPSILON, torch.pow(fy, 3.0), fy.mul(116.0).sub_(16.0).div_(KAPPA))
-    z = torch.where(fz > EPSILON, torch.pow(fz, 3.0), fz.mul(116.0).sub_(16.0).div_(KAPPA))
-    del fx, fy, fz
-    x.mul_(0.95047)
-    z.mul_(1.08883)
-    xyz = torch.stack([x, y, z], dim=1)
-    del x, y, z
-    batch, _, height, width = xyz.shape
-    flat = torch.matmul(xyz.permute(0, 2, 3, 1).reshape(-1, 3), matrix.T)
-    del xyz
-    linear = flat.reshape(batch, height, width, 3).permute(0, 3, 1, 2)
-    rgb = torch.where(
-        linear > 0.0031308,
-        torch.pow(torch.clamp(linear, min=0.0), 1.0 / 2.4).mul_(1.055).sub_(0.055),
-        linear * 12.92,
-    )
-    return torch.clamp(rgb, 0.0, 1.0)
-
-
-class Histograms:
-    """The CIELAB histograms of a shot's corrected frames (transfer) and of its input, pooled over
-    the shot: BINS per channel, counted in integers, so the same in whatever order and grouping
-    the frames come.
-
-    match maps each value to the reference's at the same quantile, numz's mapping
-    (color_fix.py:477-521), linearly within a bin. A sort also orders the values inside a bin,
-    and spreads tied values by their position, which a histogram can't see: each value comes out
-    within one bin of what numz gives the values of its bin, and tied values alike."""
-
-    def __init__(self, device: torch.device) -> None:
-        self.content = torch.zeros(3, BINS, dtype=torch.int64, device=device)
-        self.reference = torch.zeros(3, BINS, dtype=torch.int64, device=device)
-
-    def add(self, content: Tensor, reference: Tensor) -> None:
-        """Count content and reference, the CIELAB values (B, 3, H, W) float32 (rgb_to_lab) of
-        the same frames, corrected and input."""
-        if content.shape != reference.shape:
-            raise ValueError(f"content {tuple(content.shape)}, reference {tuple(reference.shape)}")
-        # Both checked before anything is counted: a refused call leaves the histograms as they
-        # were.
-        _inside(content)
-        _inside(reference)
-        for channel in range(3):
-            for counts, values in ((self.content, content), (self.reference, reference)):
-                index = _positions(values[:, channel]).floor_().long().flatten()
-                counts[channel] += torch.bincount(index, minlength=BINS)
-
-    def match(self, content: Tensor) -> Tensor:
-        """content, CIELAB values (B, 3, H, W) float32 among those counted, matched: a* and b* to
-        the reference's, L* to LUMINANCE_WEIGHT of its own and the rest matched, as numz does
-        (color_fix.py:330-343). (B, 3, H, W) float32."""
-        totals = [int(total) for total in self.content.sum(dim=1)]
-        references = [int(total) for total in self.reference.sum(dim=1)]
-        if totals != references or len(set(totals)) != 1 or not totals[0]:
-            raise ValueError(f"{totals} content values counted, {references} reference values")
-        _inside(content)
-        lightness, a, b = (
-            _match(content[:, channel], self.content[channel], self.reference[channel])
-            for channel in range(3)
-        )
-        blended = content[:, 0].mul(LUMINANCE_WEIGHT).add_(lightness.mul(1.0 - LUMINANCE_WEIGHT))
-        return torch.stack([blended, a, b], dim=1)
-
-
-def correct(content: Tensor, reference: Tensor) -> Tensor:
-    """numz's `lab` (color_fix.py:249-365) on frames held at once, its one batch: content (T, 3,
-    H, W) as the VAE decodes it, in [-1, 1] unclamped, against reference (T, 3, H, W), the
-    encoder's input, in [-1, 1]. (T, 3, H, W) float32 in [0, 1], kept float32 for the writer."""
-    corrected = rgb_to_lab(unit_range(transfer(content, reference)))
-    histograms = Histograms(content.device)
-    histograms.add(corrected, rgb_to_lab(unit_range(reference)))
-    return lab_to_rgb(histograms.match(corrected))
-
-
-def _inside(values: Tensor) -> None:
-    """Refuse CIELAB values outside the histograms' range, NaN included: no RGB in [0, 1] gives
-    them."""
-    if not bool(((values >= LAB_LOW) & (values < -LAB_LOW)).all()):
-        raise ValueError(f"CIELAB values outside [{LAB_LOW:g}, {-LAB_LOW:g}), or NaN")
-
-
-def _positions(values: Tensor) -> Tensor:
-    """values, CIELAB float32 inside the histograms' range (_inside), in bins from LAB_LOW:
-    float64, exact but within 2^-22 of 0, where the rounding moves a value by less than a bin."""
-    return (values.to(torch.float64) - LAB_LOW) * PER_UNIT
-
-
-def _match(values: Tensor, content: Tensor, reference: Tensor) -> Tensor:
-    """values, one channel's, mapped from the content's histogram to the reference's (BINS, equal
-    totals): each to the reference's value at its quantile, linearly within each bin. float32."""
-    position = _positions(values)
-    index = position.floor()
-    within = position - index
-    bins = index.long()
-    # Its rank among the content's values: below the total, as within < 1, but for a rounding up
-    # to it at the top of a long shot.
-    rank = (content.cumsum(0) - content).double()[bins] + within * content.double()[bins]
-    # The reference's bin holding that rank, never empty: the first whose end passes it, or the
-    # last with values for the total itself.
-    ends = reference.cumsum(0)
-    last = int(reference.nonzero()[-1])
-    found = torch.searchsorted(ends.double(), rank, right=True).clamp_(max=last)
-    start = (ends - reference).double()[found]
-    matched = found.double() + (rank - start) / reference.double()[found]
-    return (matched / PER_UNIT + LAB_LOW).to(torch.float32)

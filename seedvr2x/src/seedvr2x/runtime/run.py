@@ -24,7 +24,7 @@ from seedvr2x.runtime.job import OutputSegment, Part, Shot
 from seedvr2x.runtime.model import Models
 from seedvr2x.runtime.shot import (
     CopyError,
-    Lab,
+    Correction,
     decode_shot,
     encode_shot,
     finite,
@@ -46,7 +46,8 @@ COPY_READS = 8
 
 @dataclass(frozen=True)
 class Copies:
-    """lab's input copies (DESIGN.md, Colour correction): the input's frame size and rate."""
+    """split's input copies (DESIGN.md, Colour correction): the input's frame size, as stored,
+    and rate."""
 
     width: int
     height: int
@@ -64,7 +65,7 @@ def run_job(
     units: Units,
     write: Callable[[npt.NDArray[np.float32]], None],
     stop: Stop | None = None,
-    lab: bool = False,
+    split: bool = False,
     *,
     numz_padding: bool = False,
 ) -> None:
@@ -83,17 +84,17 @@ def run_job(
     shot's encode and the windows done; the input frames of what is skipped, read and dropped.
     An unfinished segment's decode and write restart whole, from its shots' windows kept.
 
-    stop, when given, is checked before each unit (Stop.check). With lab, the frames each encode
-    reads are copied as they come (units.copy_path), and the shot's decode corrects its frames
-    against them (DESIGN.md, Colour correction). A copy is derived data: one missing, or whose
-    checksums are, is made again from the input before the shot's windows, its latent and
-    windows kept; one its decode can't read whole and intact (CopyError) is removed, its
-    checksums with it, and the run stops there, for the next run to make it again.
+    stop, when given, is checked before each unit (Stop.check). With split, the frames each
+    encode reads are copied as they come (units.copy_path), and the shot's decode corrects each
+    slice against them as it comes out (DESIGN.md, Colour correction). A copy is derived data: one
+    missing, or whose checksums are, is made again from the input before the shot's windows, its
+    latent and windows kept; one its decode can't read whole and intact (CopyError) is removed,
+    its checksums with it, and the run stops there, for the next run to make it again.
 
     numz_padding is for tests only (cli.NUMZ_PADDING): each encode's frames padded as numz pads
     them (shot.encode_shot)."""
     stream = parts[0].source.stream
-    copies = Copies(stream.width, stream.height, stream.frame_rate) if lab else None
+    copies = Copies(stream.width, stream.height, stream.frame_rate) if split else None
     groups = [
         [i for i, shot in enumerate(shots) if s.start <= shot.start < s.end] for s in segments
     ]
@@ -240,19 +241,19 @@ def _decode(
     write: Callable[[npt.NDArray[np.float32]], None],
     copies: Copies | None,
 ) -> None:
-    """Shot `index`'s decode, from its windows kept, its frames written: as they come, or with
-    copies, corrected against its input copy once the shot is decoded."""
+    """Shot `index`'s decode, from its windows kept, its frames written as they come: with copies,
+    each slice corrected against its input copy first."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
     logger.debug("%s: decoding", name)
     started = _started(models)
     merged = merge_windows(units.take_windows(index), shot_layout(shot.frames, window))
-    lab = None
+    correction = None
     if copies is not None:
-        paths = (units.copy_path(index), units.checksums_path(index), units.buffer_path(index))
-        lab = Lab(*paths, copies.width, copies.height)
+        paths = (units.copy_path(index), units.checksums_path(index))
+        correction = Correction(*paths, copies.width, copies.height)
     try:
-        decode_shot(models, merged, shot.frames, target, write, name, shot.start, lab)
+        decode_shot(models, merged, shot.frames, target, write, name, shot.start, correction)
     except CopyError:
         # Derived data: removed, the next run makes it again from the input (_sample).
         units.copy_path(index).unlink(missing_ok=True)

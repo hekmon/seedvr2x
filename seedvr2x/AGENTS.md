@@ -49,8 +49,8 @@ is and what numz changed in it.
   whoever changes it doesn't read StableSR's functions in numz's `src/utils/color_fix.py`, lines
   25-247 at 4490bd1 (`adain_color_fix`, `wavelet_color_fix`, `calc_mean_std`,
   `adaptive_instance_normalization`, `wavelet_blur`, `wavelet_decomposition`,
-  `wavelet_reconstruction`). numz's own `lab` code there (lines 249-521, Apache-2.0), which
-  `colour.py` ports, may be read.
+  `wavelet_reconstruction`). numz's own `lab` code there (lines 249-521, Apache-2.0) may be read;
+  no numz code is left in the correction since `split` replaced `lab`.
 - `tools/vendor.py diff` compares the copy with numz and with ByteDance, both read from the
   submodules' git objects at the pinned commits, never from their work trees: a moved submodule
   can't shift the reference. `tools/vendor.py check`, also run by the tests, verifies that a file
@@ -109,14 +109,18 @@ uv run pytest
   at 720p and on a crop whose width isn't a multiple of 16. Its references, in the `m1/`
   directory of `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its docstring.
 - numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
-  cases and `test_lab.py` run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment
-  (`cli.NUMZ_PADDING`), which a directory's manifest records, so that a job is never resumed in
-  the other padding. `test_regression.py`'s padding cases and the other GPU tests run in the
-  default padding.
-- `tests/test_lab.py` (GPU) holds `lab` to milestone 5 on the same input, in numz's padding: at
-  least as good as numz's `lab` on the metrics that apply to one window without a ground truth,
-  within DESIGN.md's tolerances, and close to its output. Its reference, `numz_lab.mkv`, sits
-  beside the regression's; how to make it is in its docstring.
+  cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`cli.NUMZ_PADDING`),
+  which a directory's manifest records, so that a job is never resumed in the other padding.
+  `test_regression.py`'s padding cases and the other GPU tests run in the default padding.
+- `split`, the colour correction, is held to the colour study's own `split()`
+  (`../research/scripts/colour_variants.py`): on the CPU by `tests/test_colour.py`, on the GPU
+  in the pipeline by `tests/test_split.py`, at x2 and x4, in one window and in three, within one
+  16-bit code. Both load the study's script with its baseline `colour.py` from the repository
+  (the baseline from git), or from `SEEDVR2X_COLOUR_STUDY` (the directory holding
+  `colour_variants.py`) and `COLOUR_BASELINE` (that `colour.py`) on a copy of `seedvr2x/` alone,
+  and skip without them; one of the two set without the other fails. `tests/test_split.py` also
+  scores `split` against milestone 1's input with milestone 5's metrics, its thresholds its first
+  run's figures (2026-10-09) plus milestone 5's tolerances.
 
 ## Comments and documents
 

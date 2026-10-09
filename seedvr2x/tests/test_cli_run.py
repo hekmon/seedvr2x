@@ -25,7 +25,7 @@ from fractions import Fraction
 from itertools import accumulate, pairwise
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -108,7 +108,7 @@ def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[tor
         yield torch.cat(planes, dim=1)
 
 
-# The stand-in's models: the CPU, and the VAE's slicing, which the encode and lab's reference
+# The stand-in's models: the CPU, and the VAE's slicing, which the encode and split's reference
 # follow (model.encode_slices).
 STAND_IN_MODELS = SimpleNamespace(
     attention="none",
@@ -611,7 +611,7 @@ def decoded(path: Path) -> bytes:
         ("decode 4", UNINTERRUPTED[9:]),
     ],
 )
-@pytest.mark.parametrize("correction", ["none", "lab"])
+@pytest.mark.parametrize("correction", ["none", "split"])
 def test_resumed_as_uninterrupted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -737,7 +737,7 @@ def test_default_format_resumed_as_uninterrupted(
         ),
     ],
 )
-@pytest.mark.parametrize("correction", ["none", "lab"])
+@pytest.mark.parametrize("correction", ["none", "split"])
 def test_non_finite_stops(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -751,10 +751,10 @@ def test_non_finite_stops(
     correction: str,
 ) -> None:
     # NaN or inf in what a unit made stops the run there, naming the unit, which isn't recorded:
-    # a resume makes it again, as an uninterrupted run does. With lab, the shot's input copy and
+    # a resume makes it again, as an uninterrupted run does. With split, the shot's input copy and
     # its checksums, whole before its latent is checked: discarded unrecorded, else kept.
     options = (*JOB, "--color-correction", correction)
-    if correction == "lab":
+    if correction == "split":
         files = sorted([*(files or []), "input.crc32", "input.mkv"])
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "whole", *options) == 0
@@ -789,13 +789,13 @@ def test_non_finite_one_file(
     assert not [path for path in tmp_path.iterdir() if path.name.startswith("one")]
 
 
-LAB = ("--color-correction", "lab")
+SPLIT = ("--color-correction", "split")
 
 
-def test_lab_by_default(
+def test_split_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # lab unless asked otherwise: a setting, which a resume compares.
+    # split unless asked otherwise: a setting, which a resume compares.
     source_path = job(tmp_path, monkeypatch)
     (tmp_path / "w.safetensors").write_bytes(b"")
     common = ["--model-dir", str(tmp_path), "--dit-model", "w.safetensors"]
@@ -804,14 +804,14 @@ def test_lab_by_default(
     common += ["--format", "gbrp16le"]
     assert cli.main([str(source_path), "-o", str(tmp_path / "out"), *common]) == 0
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
-    assert content["settings"]["color_correction"] == "lab"
+    assert content["settings"]["color_correction"] == "split"
     steps.calls.clear()
     assert upscale(tmp_path, source_path, "out", *JOB, "--color-correction", "none") == 1
-    assert 'settings.color_correction: "lab" -> "none"' in caplog.text and steps.calls == []
+    assert 'settings.color_correction: "split" -> "none"' in caplog.text and steps.calls == []
     assert "settings.format" not in caplog.text
 
 
-def test_lab_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
+def test_split_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
     # The frames each encode reads, copied as they come, exactly, and recorded with its latent.
     from seedvr2x.media.decode import Decoder, to_float32
     from seedvr2x.media.ffmpeg import input_args
@@ -819,7 +819,7 @@ def test_lab_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps)
 
     source_path = job(tmp_path, monkeypatch)
     steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "out", *JOB, *LAB)
+    stopped(tmp_path, source_path, "out", *JOB, *SPLIT)
     from seedvr2x.media.checksums import read_checksums
 
     shot = tmp_path / "out" / "resume" / "shot_000004"
@@ -835,24 +835,24 @@ def test_lab_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps)
     assert content["shots"][2]["encoded"]
 
 
-def test_lab_leftovers(
+def test_split_leftovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # What a kill leaves of lab's is discarded: a decode's buffer, a copy being written. A copy
+    # What a kill leaves of split's is discarded: a copy being written, its checksums. A copy
     # recorded is kept.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "whole", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "whole", *JOB, *SPLIT) == 0
     steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "out", *JOB, *LAB)
+    stopped(tmp_path, source_path, "out", *JOB, *SPLIT)
     out = tmp_path / "out"
     shot = out / "resume" / "shot_000004"
-    for name in ("decoded.bf16", "input.mkv.partial", "input.crc32.partial"):
+    for name in ("input.mkv.partial", "input.crc32.partial"):
         (shot / name).write_bytes(b"left")
     steps.stop = None
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
-    assert "3 leftovers discarded" in caplog.text and "made again" not in caplog.text
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 0
+    assert "2 leftovers discarded" in caplog.text and "made again" not in caplog.text
     assert steps.calls == ["window 4:1", "decode 4"]
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(out / name) == decoded(tmp_path / "whole" / name)
@@ -879,7 +879,7 @@ def copied(path: Path, count: int) -> str:
         ("decode 4", ["decode 4"]),
     ],
 )
-def test_lab_copy_missing(
+def test_split_copy_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,
@@ -893,9 +893,9 @@ def test_lab_copy_missing(
     # output is then an uninterrupted run's.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "whole", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "whole", *JOB, *SPLIT) == 0
     steps.stop = stop
-    stopped(tmp_path, source_path, "out", *JOB, *LAB)
+    stopped(tmp_path, source_path, "out", *JOB, *SPLIT)
     out = tmp_path / "out"
     (out / "resume" / "shot_000004" / missing).unlink()
     seen: list[str] = []
@@ -910,7 +910,7 @@ def test_lab_copy_missing(
     monkeypatch.setattr(run, "decode_shot", looked)
     steps.stop = None
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 0
     assert steps.calls == resumed
     assert f"shot 3/3: {missing} missing: its input copy made again from the input" in caplog.text
     assert seen == [steps.read[4]]
@@ -919,7 +919,7 @@ def test_lab_copy_missing(
 
 
 def damage(path: Path, how: str) -> None:
-    """Damage a shot's input copy or its checksums (Steps.damage, test_lab_copy_damaged): a byte
+    """Damage a shot's input copy or its checksums (Steps.damage, test_split_copy_damaged): a byte
     flipped in the middle of the copy's third frame, so a slice of it fails its CRC; the copy cut
     short at half its bytes; the copy made again whole with a pixel of frame 7 altered, as ffmpeg
     decodes a damaged slice size without a word; a digit of the first checksum changed; the
@@ -976,7 +976,7 @@ def damage(path: Path, how: str) -> None:
         ("checksums short a line", r"input\.crc32: 20 checksums, for 21 frames"),
     ],
 )
-def test_lab_copy_damaged(
+def test_split_copy_damaged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,
@@ -988,16 +988,16 @@ def test_lab_copy_damaged(
     # it: the copy is removed, named, and the next run makes it again from the input, the shot's
     # latent and windows kept; the output is then an uninterrupted run's.
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "whole", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "whole", *JOB, *SPLIT) == 0
     steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "out", *JOB, *LAB)
+    stopped(tmp_path, source_path, "out", *JOB, *SPLIT)
     out = tmp_path / "out"
     copy = out / "resume" / "shot_000004" / "input.mkv"
     checksums = copy.with_name("input.crc32")
     damage(checksums if how.startswith("checksums") else copy, how)
     steps.stop = None
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 1
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 1
     assert steps.calls == ["window 4:1", "decode 4"]
     assert f"{copy}: the shot's input copy, not readable whole and intact: " in caplog.text
     assert re.search(said, caplog.text)
@@ -1008,20 +1008,20 @@ def test_lab_copy_damaged(
     assert not copy.exists() and not checksums.exists()
     assert not (out / "seg_000001.mkv").exists()
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 0
     assert steps.calls == ["decode 4"]
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(out / name) == decoded(tmp_path / "whole" / name)
 
 
-def test_lab_copy_damaged_one_file(
+def test_split_copy_damaged_one_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # One file keeps nothing: stopped, the copy named, the work directory and the partial master
     # removed.
     source_path = job(tmp_path, monkeypatch)
     steps.damage = "decode 4"
-    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == 1
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 1
     copy = tmp_path / "one.mkv.work" / "shot_000002" / "input.mkv"
     assert f"{copy}: the shot's input copy, not readable whole and intact: " in caplog.text
     assert "slice CRC mismatch" in caplog.text and "on resuming" not in caplog.text
@@ -1029,28 +1029,28 @@ def test_lab_copy_damaged_one_file(
     assert not [path for path in tmp_path.iterdir() if path.name.startswith("one")]
 
 
-def test_lab_copy_checked_before_its_last_frames(
+def test_split_copy_checked_before_its_last_frames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # A shot's last frames are written once its copy is read whole and checked: they may finish
-    # the segment, which is then recorded, so a copy failing at the very end of the second pass
-    # leaves the segment unfinished, decoded again whole by the next run.
+    # the segment, which is then recorded, so a copy failing at the very end of its read leaves
+    # the segment unfinished, decoded again whole by the next run.
     from seedvr2x.media.decode import Decoder
 
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "whole", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "whole", *JOB, *SPLIT) == 0
     finish = Decoder.finish
     finished: list[Decoder] = []
 
     def failing(self: Decoder) -> None:
         if self._strict:  # pyright: ignore[reportPrivateUsage]
             finished.append(self)
-            if len(finished) == 4:  # shot 2/3's second pass, the last of segment 1
+            if len(finished) == 2:  # shot 2/3's copy, the last of segment 1
                 raise self.failure("a stand-in failure at the end")
         finish(self)
 
     monkeypatch.setattr(Decoder, "finish", failing)
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 1
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 1
     assert "a stand-in failure at the end; removed" in caplog.text
     assert "stopped: 0 of 2 segments finished" in caplog.text
     out = tmp_path / "out"
@@ -1060,14 +1060,14 @@ def test_lab_copy_checked_before_its_last_frames(
     assert not (out / "resume" / "shot_000003" / "input.mkv").exists()
     monkeypatch.setattr(Decoder, "finish", finish)
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 0
     assert steps.calls == ["decode 0", "decode 3", *UNINTERRUPTED[6:]]
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(out / name) == decoded(tmp_path / "whole" / name)
 
 
 @pytest.mark.parametrize("presses", [1, 2])
-def test_lab_copy_again_stopped(
+def test_split_copy_again_stopped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,
@@ -1080,9 +1080,9 @@ def test_lab_copy_again_stopped(
     from seedvr2x.runtime import run
 
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "whole", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "whole", *JOB, *SPLIT) == 0
     steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "out", *JOB, *LAB)
+    stopped(tmp_path, source_path, "out", *JOB, *SPLIT)
     copy = tmp_path / "out" / "resume" / "shot_000004" / "input.mkv"
     copy.unlink()
     reader = run.Inputs.reader
@@ -1104,7 +1104,7 @@ def test_lab_copy_again_stopped(
     monkeypatch.setattr(run.Inputs, "reader", pressing)
     steps.stop = None
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 130
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 130
     assert steps.calls == []
     if presses == 1:
         assert "stopped after shot 3/3's input copy, as asked" in caplog.text
@@ -1115,7 +1115,7 @@ def test_lab_copy_again_stopped(
     monkeypatch.setattr(run.Inputs, "reader", reader)
     caplog.clear()
     caplog.set_level(logging.INFO, logger="seedvr2x")
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
     assert ("made again from the input" in caplog.text) == (presses == 2)
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
@@ -1123,7 +1123,7 @@ def test_lab_copy_again_stopped(
         assert decoded(out) == decoded(tmp_path / "whole" / name)
 
 
-def test_lab_copy_again_interrupted(
+def test_split_copy_again_interrupted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # A copy made again replaces checksums written before, which go first: a stop between the
@@ -1133,9 +1133,9 @@ def test_lab_copy_again_interrupted(
 
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "whole", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "whole", *JOB, *SPLIT) == 0
     steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "out", *JOB, *LAB)
+    stopped(tmp_path, source_path, "out", *JOB, *SPLIT)
     copy = tmp_path / "out" / "resume" / "shot_000004" / "input.mkv"
     checksums = copy.with_name("input.crc32")
     copy.unlink()
@@ -1147,10 +1147,10 @@ def test_lab_copy_again_interrupted(
     monkeypatch.setattr(run, "write_checksums", killed)
     steps.stop = None
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 130
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 130
     assert steps.calls == [] and copy.exists() and not checksums.exists()
     monkeypatch.setattr(run, "write_checksums", written)
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 0
     assert "shot 3/3: input.crc32 missing: its input copy made again" in caplog.text
     assert steps.calls == ["window 4:1", "decode 4"]
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
@@ -1158,7 +1158,7 @@ def test_lab_copy_again_interrupted(
         assert decoded(out) == decoded(tmp_path / "whole" / name)
 
 
-def test_lab_copy_again_from_a_directory(
+def test_split_copy_again_from_a_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
     # A directory's input: the copy made again from its own input file, from its first frame,
@@ -1169,9 +1169,9 @@ def test_lab_copy_again_from_a_directory(
     split.mkdir()
     for name, frames in (("a.mkv", 3), ("b.mkv", 2), ("c.mkv", 4)):
         source(split / name, frames)
-    assert upscale(tmp_path, split, "whole", *LAB) == 0
+    assert upscale(tmp_path, split, "whole", *SPLIT) == 0
     steps.stop = "decode 5"
-    stopped(tmp_path, split, "out", *LAB)
+    stopped(tmp_path, split, "out", *SPLIT)
     copy = tmp_path / "out" / "resume" / "shot_000005" / "input.mkv"
     frames = copied(copy, 4)
     copy.unlink()
@@ -1194,21 +1194,21 @@ def test_lab_copy_again_from_a_directory(
     monkeypatch.setattr(run, "decode_shot", looked)
     steps.calls.clear()
     steps.stop = None
-    assert upscale(tmp_path, split, "out", *LAB) == 0
+    assert upscale(tmp_path, split, "out", *SPLIT) == 0
     assert steps.calls == ["decode 5"] and opened == ["c.mkv"] and seen == [frames]
     for name in ("a.mkv", "b.mkv", "c.mkv"):
         assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
 
 
-def test_lab_one_file(
+def test_split_one_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # One file's copies and buffers go in a work directory beside it, removed at the end, at a stop
-    # or an error. A killed run's is removed; anything else there is refused, and kept.
+    # One file's copies go in a work directory beside it, removed at the end, at a stop or an
+    # error. A killed run's is removed; anything else there is refused, and kept.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     one, work = tmp_path / "one.mkv", tmp_path / "one.mkv.work"
-    assert upscale(tmp_path, source_path, "out", *JOB, *LAB) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 0
     seen: list[list[str]] = []
     decode = steps.decode
 
@@ -1219,7 +1219,7 @@ def test_lab_one_file(
     from seedvr2x.runtime import run
 
     monkeypatch.setattr(run, "decode_shot", looked)
-    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == 0
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 0
     assert seen == [["shot_000000"], ["shot_000001"], ["shot_000002"]]  # one shot at a time
     assert not work.exists()
     out = tmp_path / "out"
@@ -1227,27 +1227,54 @@ def test_lab_one_file(
     for stop, poison, status in (("decode 4", None, 130), (None, "decode 4", 1)):
         one.unlink(missing_ok=True)
         steps.stop, steps.poison = stop, poison
-        assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == status
+        assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == status
         assert not work.exists() and not one.exists()
     steps.stop = steps.poison = None
     (work / "shot_000002").mkdir(parents=True)
     for name in ("input.mkv.partial", "input.crc32.partial"):
         (work / "shot_000002" / name).write_bytes(b"left")
-    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == 0
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 0
     assert "left by a run that was killed, emptied" in caplog.text and not work.exists()
     work.mkdir()
     (work / "notes.txt").write_text("mine")
-    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LAB) == 1
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 1
     assert "not what a run of seedvr2x leaves" in caplog.text
     assert (work / "notes.txt").read_text() == "mine"
 
 
-def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
-    # The two passes give each shot exactly what lab gives its frames in the decode's slices,
-    # histograms pooled over the shot: the second maps the values the first counted, and the
-    # reference is the copy's frames through the encoder's transform in float32 (DESIGN.md, Colour
+def test_none_one_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
+    # With none, nothing is copied (DESIGN.md, Colour correction): one file gets no work
+    # directory beside it, and no shot an input copy; each decode goes uncorrected.
+    source_path = job(tmp_path, monkeypatch)
+    work = tmp_path / "one.mkv.work"
+    seen: list[tuple[bool, list[str], object]] = []
+    decode = steps.decode
+
+    def looked(*arguments: Any) -> None:
+        copies = [path.name for path in tmp_path.rglob("input.*")]
+        seen.append((work.exists(), copies, arguments[-1]))  # the last, its correction
+        decode(*arguments)
+
+    from seedvr2x.runtime import run
+
+    monkeypatch.setattr(run, "decode_shot", looked)
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], "--color-correction", "none") == 0
+    assert seen == [(False, [], None)] * 3
+    assert indexes(tmp_path / "one.mkv") == list(range(25))
+
+
+def test_split_frame_by_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # Each slice of the decode corrected as it comes out, each frame against its own frame of the
+    # reference: the copy's frames through the encoder's transform in float32 (DESIGN.md, Colour
     # correction, Numerics), its padding cropped as the decode's (target 100 x 133, decoded 128 x
-    # 160: 12 rows and 11 columns reflected, 16 black; written 100 x 132).
+    # 160: 12 rows and 11 columns reflected, 16 black; written 100 x 132); the colour at the
+    # stages of x2.08 (48 x 64 to 100 x 133: 3). The content split receives is the decode as it
+    # comes out (milestone 5: on the same decode), unclamped (DESIGN.md, Beyond numz's lab): the
+    # stand-in's frames get a pattern by channel and position, past ±1 in places, the padding
+    # still NaN, so that a channel moved, a frame flipped or a value clamped on the way changes
+    # the output.
     from seedvr2x.media.decode import to_float32
     from seedvr2x.media.source import examine
     from seedvr2x.runtime import colour, model
@@ -1255,17 +1282,28 @@ def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps
     from seedvr2x.runtime.shot import pad_4n1
 
     source_path = job(tmp_path, monkeypatch)
+    # Uniform noise from -0.5 to 2.5, the same on each frame: the stand-in's frames, -1 to -0.95,
+    # then go from -1.5 to 1.55.
+    pattern = torch.rand(3, 1, 128, 160, generator=torch.Generator().manual_seed(0)) * 3 - 0.5
+    stream = model.decode_stream  # the stand-in's (stand_in_model)
+
+    def patterned(models: object, latent: torch.Tensor) -> Iterator[torch.Tensor]:
+        for frames in stream(models, latent):  # pyright: ignore[reportArgumentType]
+            yield frames + pattern
+
+    monkeypatch.setattr(model, "decode_stream", patterned)
     # gbrp16le: its frames are read below as stored, three 16-bit planes.
-    options = (*JOB[:4], *LAB, "--resolution", "100", "--format", "gbrp16le")
+    options = (*JOB[:4], *SPLIT, "--resolution", "100", "--format", "gbrp16le")
     assert upscale(tmp_path, source_path, "one.mkv", *options) == 0
     height, width = 100, 132
     planes = np.frombuffer(decoded(tmp_path / "one.mkv"), dtype="<u2")
     written = planes.reshape(25, 3, height, width)[:, [2, 0, 1]]  # G, B, R to R, G, B
     with examine(source_path).decoder() as decoder:
         frames = to_float32(decoder.read(25))
-    models = cast(model.Models, STAND_IN_MODELS)
     target = target_size(64, 48, Fraction(1), 100)
     assert target == (100, 133) and output_size(target) == (height, width)
+    stages = colour.colour_stages((48, 64), target)
+    assert stages == 3
     transform = model.input_transform(target)
     expected: list[torch.Tensor] = []
     for start, end in ((0, 3), (3, 4), (4, 25)):
@@ -1275,24 +1313,69 @@ def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps
         assert reference.shape[2:] == (128, 160) == padded_size(target)
         reference = reference[:, :count, :height, :width].permute(1, 0, 2, 3)
         values = torch.tensor([(start + frame) / 500 - 1 for frame in range(count)])
-        content = values.view(-1, 1, 1, 1).expand(-1, 3, height, width)
+        content = values.view(-1, 1, 1, 1) + pattern[:, 0, :height, :width]
+        assert content.min() < -1 and content.max() > 1
         # The decode's slices: 5 frames, then 4, the last cut to the shot's end.
         sizes = [min(5, count), *(min(4, count - frame) for frame in range(5, count, 4))]
-        bounds = accumulate(sizes, initial=0)
-        slices = [(content[a:b], reference[a:b]) for a, b in pairwise(bounds)]
-        histograms = colour.Histograms(models.device)
-        for decoded_slice, matched in slices:
-            moved = colour.transfer(decoded_slice, matched)
-            histograms.add(
-                colour.rgb_to_lab(colour.unit_range(moved)),
-                colour.rgb_to_lab(colour.unit_range(matched)),
-            )
-        for decoded_slice, matched in slices:
-            moved = colour.transfer(decoded_slice, matched)
-            lab = colour.rgb_to_lab(colour.unit_range(moved))
-            expected.append(colour.lab_to_rgb(histograms.match(lab)))
+        for a, b in pairwise(accumulate(sizes, initial=0)):
+            expected.append(colour.split(content[a:b], reference[a:b], stages))
     codes = (torch.cat(expected) * 65535).round().numpy()
     assert np.array_equal(codes, written.astype(np.float32))
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_split_streams(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The decode streams (DESIGN.md, Colour correction): one pass per shot, each slice corrected
+    # and written as it comes out, never a file beside the shot's units but its input copy and
+    # their checksums; its last frames once the copy is read whole and checked.
+    from seedvr2x.media.decode import Decoder
+    from seedvr2x.runtime import model, run, shot
+
+    source_path = job(tmp_path, monkeypatch)
+    state = tmp_path / "out" / "resume"
+    events: list[str] = []
+    seen: set[str] = set()
+
+    def look() -> None:
+        seen.update(path.name for path in state.rglob("*") if not path.is_dir())
+
+    stream = model.decode_stream  # the stand-in's (stand_in_model)
+
+    def streamed(models: object, latent: torch.Tensor) -> Iterator[torch.Tensor]:
+        events.append(f"decode {int(latent[0, 0, 0, 0])}")
+        for frames in stream(models, latent):  # pyright: ignore[reportArgumentType]
+            look()
+            events.append(f"slice {frames.shape[1]}")
+            yield frames
+
+    finish = Decoder.finish
+
+    def finished(self: Decoder) -> None:
+        if self._strict:  # pyright: ignore[reportPrivateUsage]
+            events.append("copy checked")
+        finish(self)
+
+    def decode(*arguments: Any) -> None:
+        models, merged, count, target, write, *names = arguments
+
+        def written(frames: npt.NDArray[np.float32]) -> None:
+            look()
+            events.append(f"write {frames.shape[0]}")
+            write(frames)
+
+        shot.decode_shot(models, merged, count, target, written, *names)
+
+    monkeypatch.setattr(model, "decode_stream", streamed)
+    monkeypatch.setattr(Decoder, "finish", finished)
+    monkeypatch.setattr(run, "decode_shot", decode)
+    assert upscale(tmp_path, source_path, "out", *JOB, *SPLIT) == 0
+    assert events == [
+        *("decode 0", "slice 5", "copy checked", "write 3"),
+        *("decode 3", "slice 1", "copy checked", "write 1"),
+        *("decode 4", "slice 5", "write 5", "slice 4", "write 4", "slice 4", "write 4"),
+        *("slice 4", "write 4", "slice 4", "copy checked", "write 4"),
+    ]
+    assert seen == {"input.mkv", "input.crc32", "window_0000.pt", "window_0001.pt"}
 
 
 def test_leftovers_discarded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
@@ -1590,8 +1673,8 @@ def test_numz_padding_for_tests_only(
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(tmp_path / "numz" / name) == decoded(tmp_path / "ours" / name)
     # Every encode of the other paths too: one file, each shot decoded as soon as it is sampled
-    # (run_job), and lab, each encode copying the frames it reads (run._sample).
-    for output, options in (("numz.mkv", JOB[:4]), ("numz_lab", (*JOB, *LAB))):
+    # (run_job), and split, each encode copying the frames it reads (run._sample).
+    for output, options in (("numz.mkv", JOB[:4]), ("numz_split", (*JOB, *SPLIT))):
         steps.numz_padding.clear()
         assert upscale(tmp_path, source_path, output, *options) == 0
         assert steps.numz_padding == [True] * 3, output

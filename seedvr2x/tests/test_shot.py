@@ -1,5 +1,5 @@
 """The shot pipeline's parts on the CPU: windows, mixing weights, padding, the encoder's input
-and lab's reference, streamed encode and decode."""
+and split's reference, streamed encode and decode."""
 
 from itertools import pairwise
 from types import SimpleNamespace
@@ -22,7 +22,7 @@ from seedvr2x.runtime.shot import (
     window_layout,
 )
 
-# The models as far as the encoder's input and lab's reference use them: the CPU and the VAE's
+# The models as far as the encoder's input and split's reference use them: the CPU and the VAE's
 # slicing (model.encode_slices).
 SLICING = cast(
     model.Models,
@@ -127,7 +127,7 @@ SOURCE, TARGET = (12, 16), (24, 32)
 
 @pytest.mark.parametrize("count", [1, 6, 13])
 def test_reference_is_the_transform_in_float32(count: int) -> None:
-    # lab's reference (DESIGN.md, Colour correction, Numerics): the frames read, through the
+    # split's reference (DESIGN.md, Colour correction, Numerics): the frames read, through the
     # encoder's transform in float32, with no float16 or bfloat16 step, which random values would
     # show; slice by slice as the encoder's input.
     frames = np.random.default_rng(count).random((count, *SOURCE, 3), dtype=np.float32)

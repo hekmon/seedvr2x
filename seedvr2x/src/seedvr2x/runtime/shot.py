@@ -14,9 +14,9 @@ The steps are apart, as the resumable units of DESIGN.md (Pause and resume) are:
 (encode_shot), each window (sample_windows), the decode (merge_windows, decode_shot). Each takes
 what the one before gives, wherever it was kept; upscale_shot runs them in a row.
 
-With `lab` (DESIGN.md, Colour correction), the decode makes two passes over a buffer of its
-frames, against the reference built from the shot's input copy through the encoder's transform,
-in float32 (reference_inputs).
+With `split` (DESIGN.md, Colour correction), each slice of the decode is corrected as it comes out,
+against its own frames of the reference, built from the shot's input copy through the encoder's
+transform, in float32 (reference_inputs), then written: no second pass, no buffer.
 """
 
 import math
@@ -43,15 +43,13 @@ COPY_READ = Conversion("gbrp16le", "gbr", "full", "left")
 
 
 @dataclass(frozen=True)
-class Lab:
-    """What a shot's decode with `lab` needs besides its latents (DESIGN.md, Colour correction):
-    its input copy, the frames its encode read, width x height (units.COPY), their checksums
-    (units.CHECKSUMS), and where to buffer its decoded frames between the two passes
-    (units.BUFFER)."""
+class Correction:
+    """What a shot's decode with `split` needs besides its latents (DESIGN.md, Colour correction):
+    its input copy, the frames its encode read, width x height as the input stores them
+    (units.COPY), and their checksums (units.CHECKSUMS)."""
 
     copy: Path
     checksums: Path
-    buffer: Path
     width: int
     height: int
 
@@ -263,12 +261,12 @@ def reference_inputs(
     count: int,
     target: tuple[int, int],
 ) -> Iterator[Tensor]:
-    """lab's reference for a shot of `count` frames, read from its input copy as they are needed
-    (_correct): the frames through the encoder's transform (model.input_transform) in float32,
-    slice by slice as encoder_inputs gives the encoder's input: each
-    (C, t, H, W) float32 in [-1, 1] on the device (DESIGN.md, Colour correction, Numerics).
-    Padded by default whatever the encoder's padding (numz_padding): lab takes each frame's
-    picture alone, cropped as the decode's frames are (_frames, _decoded), which no padding moves.
+    """split's reference for a shot of `count` frames, read from its input copy as they are
+    needed (_correct): the frames through the encoder's transform (model.input_transform) in
+    float32, slice by slice as encoder_inputs gives the encoder's input: each (C, t, H, W) float32
+    in [-1, 1] on the device (DESIGN.md, Colour correction, Numerics). Padded by default whatever
+    the encoder's padding (numz_padding): split takes each frame's picture alone, cropped as the
+    decode's frames are (_frames, _decoded), which no padding moves.
 
     Not the encoder's own input: numz's numerics cast the frames to bfloat16 before the resize
     (generation_phases.py:380-413), which rounds 89% of 8-bit codes up, +0.114 level on average,
@@ -336,15 +334,16 @@ def decode_shot(
     write: Callable[[npt.NDArray[np.float32]], None],
     name: str = "the shot",
     first: int = 0,
-    lab: Lab | None = None,
+    correction: Correction | None = None,
 ) -> None:
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in one stream,
-    and write its frames (upscale_shot): as they come, or with lab corrected once the whole shot
-    is decoded (DESIGN.md, Colour correction). Each slice decoded is checked for NaN or inf first
-    (finite), its frames named for the job's, the shot's first being `first`."""
+    and write its frames as they come (upscale_shot), each slice corrected first when a
+    correction is given (_correct; DESIGN.md, Colour correction). Each slice decoded is checked
+    for NaN or inf first (finite), its frames named for the job's, the shot's first being
+    `first`."""
     chunks = _decoded(models, merged, count, output_size(target), name, first)
-    if lab is not None:
-        _correct(models, chunks, count, target, write, lab)
+    if correction is not None:
+        _correct(models, chunks, count, target, write, correction)
         return
     # Post-process (generation_phases.py:1340-1348): [-1, 1] to [0, 1] in place.
     for chunk in chunks:
@@ -385,77 +384,56 @@ def _correct(
     count: int,
     target: tuple[int, int],
     write: Callable[[npt.NDArray[np.float32]], None],
-    lab: Lab,
+    correction: Correction,
 ) -> None:
-    """lab over a shot (DESIGN.md, Colour correction), pooled: the first pass buffers the decoded
-    frames (chunks, _decoded) and counts the histograms, the second reads them back, maps them and
-    writes them, float32. Each pass rebuilds the reference from the input copy (reference_inputs),
-    and converts in the same calls, the decode's slices, so that the second finds the values the
-    first counted.
-    The second pass writes its last frames once the copy is read whole and checked, since they
-    may finish the output segment, which is then recorded. The buffer goes at the end, whatever
-    happens."""
+    """split on each slice of the shot's decode as it comes out (chunks, _decoded), against the
+    slice's own frames of the reference, rebuilt from the input copy as the decode goes
+    (reference_inputs), then written, float32 (DESIGN.md, Colour correction): one pass, no
+    buffer, on the models' device. The colour's stages follow the upscale factor, from the frames
+    as the input stores them to target (colour.colour_stages).
+    The shot's last frames are written once the copy is read whole and checked, since they may
+    finish the output segment, which is then recorded."""
     height, width = output_size(target)
-    histograms = colour.Histograms(models.device)
-    sizes: list[int] = []
-    dtype = COMPUTE_DTYPE  # the decode's, kept as it is: bfloat16 from the VAE
-    try:
-        with _copy_reader(lab, count) as read, open(lab.buffer, "wb") as buffer:
-            reference = _frames(reference_inputs(models, read, count, target), height, width)
-            for chunk in chunks:
-                content = chunk.permute(0, 3, 1, 2)  # (t, C, H, W)
-                model.synchronize(models.device)
-                kept = content.to("cpu").contiguous()
-                try:
-                    buffer.write(memoryview(kept.view(torch.uint8).numpy()))
-                except OSError as error:
-                    need = count * kept[0].nbytes
-                    raise MediaError(
-                        f"{lab.buffer}: {error.strerror}; the shot's decoded frames take"
-                        f" {need / 2**30:.1f} GiB there"
-                    ) from error
-                dtype = kept.dtype
-                matched = reference(content.shape[0])
-                corrected = colour.rgb_to_lab(colour.unit_range(colour.transfer(content, matched)))
-                histograms.add(corrected, colour.rgb_to_lab(colour.unit_range(matched)))
-                sizes.append(content.shape[0])
-        last: npt.NDArray[np.float32] | None = None
-        with _copy_reader(lab, count) as read, open(lab.buffer, "rb") as buffer:
-            reference = _frames(reference_inputs(models, read, count, target), height, width)
-            for size in sizes:
-                content = torch.empty((size, 3, height, width), dtype=dtype)
-                if buffer.readinto(content.view(torch.uint8).numpy()) != content.nbytes:
-                    raise RuntimeError(f"{lab.buffer}: shorter than the frames buffered")
-                content = content.to(models.device)
-                matched = reference(size)
-                corrected = colour.rgb_to_lab(colour.unit_range(colour.transfer(content, matched)))
-                rgb = colour.lab_to_rgb(histograms.match(corrected))
-                model.synchronize(models.device)
-                if last is not None:
-                    write(last)
-                last = rgb.permute(0, 2, 3, 1).to("cpu").numpy()
-        if last is not None:
-            write(last)
-    finally:
-        lab.buffer.unlink(missing_ok=True)
+    stages = colour.colour_stages((correction.height, correction.width), target)
+    last: npt.NDArray[np.float32] | None = None
+    with _copy_reader(correction, count) as read:
+        reference = _frames(reference_inputs(models, read, count, target), height, width)
+        done = 0
+        for chunk in chunks:
+            content = chunk.permute(0, 3, 1, 2)  # (t, C, H, W)
+            corrected = colour.split(content, reference(content.shape[0]), stages)
+            model.synchronize(models.device)
+            frames = corrected.permute(0, 2, 3, 1).to("cpu").numpy()
+            done += frames.shape[0]
+            if done < count:
+                write(frames)
+            else:
+                last = frames
+    if last is not None:
+        write(last)
 
 
 @contextmanager
-def _copy_reader(lab: Lab, count: int) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
+def _copy_reader(
+    correction: Correction, count: int
+) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
     """read(n), the next n frames of the shot's input copy, (n, H, W, 3) float32 in [0, 1] as the
     encode read them, each checked against its checksum before it is given (Decoder), `count` of
     them. The copy is read strictly too, so that what ffmpeg reports names the cause: the copy
     missing, a slice failing its CRC, the file cut short. A copy that fails either check, or whose
     checksums are missing or damaged, raises CopyError."""
-    with _copy_failing(lab.copy):
-        checksums = read_checksums(lab.checksums)
+    copy = correction.copy
+    with _copy_failing(copy):
+        checksums = read_checksums(correction.checksums)
         if len(checksums) != count:
-            raise MediaError(f"{lab.checksums}: {len(checksums)} checksums, for {count} frames")
-    args = (lab.width, lab.height, count)
-    decoder = Decoder(input_args(lab.copy), COPY_READ, *args, strict=True, checksums=checksums)
+            raise MediaError(
+                f"{correction.checksums}: {len(checksums)} checksums, for {count} frames"
+            )
+    args = (correction.width, correction.height, count)
+    decoder = Decoder(input_args(copy), COPY_READ, *args, strict=True, checksums=checksums)
 
     def read(n: int) -> npt.NDArray[np.float32]:
-        with _copy_failing(lab.copy):
+        with _copy_failing(copy):
             frames = decoder.read(n)
             if frames.shape[0] != n:
                 raise decoder.failure(f"it ended after {decoder.decoded} of its {count} frames")
@@ -466,7 +444,7 @@ def _copy_reader(lab: Lab, count: int) -> Generator[Callable[[int], npt.NDArray[
     except BaseException:
         decoder.stop()
         raise
-    with _copy_failing(lab.copy):
+    with _copy_failing(copy):
         decoder.finish()
 
 

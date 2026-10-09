@@ -561,7 +561,7 @@ def test_skipped_frames_are_counted_not_converted(tmp_path: Path) -> None:
 
 
 def ffv1_copy(path: Path, frames: npt.NDArray[np.uint16]) -> Path:
-    """frames, (T, H, W, 3), written as lab's input copies are (runtime/run.py): FFV1 gbrp16le,
+    """frames, (T, H, W, 3), written as split's input copies are (runtime/run.py): FFV1 gbrp16le,
     each slice with its CRC."""
     with FFV1Writer(path, "gbrp16le", WIDTH, HEIGHT, Fraction(25), Tags()) as writer:
         writer.write(to_float32(frames))

@@ -1,9 +1,9 @@
 """The frames' padding before the model, on the CPU (DESIGN.md, Pipeline step 0): at the bottom, at
 least 8 rows reflected from the picture, up to a multiple of 16, then 16 black ones; at the right,
-columns alike when the width isn't a multiple of 16; all trimmed after the decode, and from lab's
-reference. Held bit for bit to research/scripts/numerics_patch.py's Pad, which padded the variant
-measured (NUM_PAD=reflect>=8+black+16), and the tests' numz padding to numz's DivisiblePad. The
-GPU's side is test_regression.py's."""
+columns alike when the width isn't a multiple of 16; all trimmed after the decode, and from
+split's reference. Held bit for bit to research/scripts/numerics_patch.py's Pad, which padded the
+variant measured (NUM_PAD=reflect>=8+black+16), and the tests' numz padding to numz's
+DivisiblePad. The GPU's side is test_regression.py's."""
 
 import importlib.util
 import math
@@ -311,7 +311,7 @@ def test_decode_trimmed(monkeypatch: pytest.MonkeyPatch, target: tuple[int, int]
 
 @pytest.mark.parametrize("target", [(24, 32), (17, 16), (30, 37), (541, 961)])
 def test_reference_is_the_picture(target: tuple[int, int]) -> None:
-    # lab's reference, cropped as the decode's frames are (_frames): the picture alone, whatever
+    # split's reference, cropped as the decode's frames are (_frames): the picture alone, whatever
     # padding the transform made, numz's included: the frames resized, clamped and normalised.
     from test_shot import SLICING, Reads
 

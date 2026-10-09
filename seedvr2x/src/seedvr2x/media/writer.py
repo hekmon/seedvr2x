@@ -119,7 +119,7 @@ class Writer:
 
     checksums: the CRC-32 of each frame as the output holds it, in order (media/checksums.py;
     DESIGN.md, Output, Checksums). Computed as each frame is written on the planes fed to ffmpeg,
-    which a gbrp16le master, lab's input copy and a PNG hold as they are; a yuv420p10le master's
+    which a gbrp16le master, split's input copy and a PNG hold as they are; a yuv420p10le master's
     come from ffmpeg once it is closed (FFV1Writer)."""
 
     # Whether the output holds the planes fed to ffmpeg, so that checksums are theirs.

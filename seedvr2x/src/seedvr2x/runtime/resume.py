@@ -14,7 +14,7 @@ from typing import Any, cast
 from seedvr2x.media.files import partial_path
 from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.manifest import NAME, STATE, SUMS, Manifest, checksums_file
-from seedvr2x.runtime.units import BUFFER, CHECKSUMS, COPY, size
+from seedvr2x.runtime.units import CHECKSUMS, COPY, size
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
 # what is recorded for information only (DESIGN.md, Pause and resume): where an input is and when
@@ -36,7 +36,7 @@ FIRST_PASS = ("ffmpeg", "conversions")
 
 # The names DiskUnits gives a shot's files.
 UNIT_FILE = re.compile(
-    rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS, BUFFER)))}"
+    rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS)))}"
 )
 
 
@@ -210,13 +210,13 @@ def _unit_leftovers(manifest: Manifest) -> list[Path]:
 
 def _kept(manifest: Manifest, index: int) -> set[str]:
     """The unit files of shot `index` the manifest names: its latent until its windows are all
-    done, its windows done, and with `lab` its input copy and the copy's checksums once encoded.
-    Its decode's buffer never is."""
+    done, its windows done, and with `split` its input copy and the copy's checksums once
+    encoded."""
     done = manifest.windows_done[index]
     kept = {f"window_{window:04d}.pt" for window in range(done)}
     if manifest.encoded[index] and done < len(manifest.layouts[index]):
         kept.add("latent.pt")
-    if manifest.encoded[index] and manifest.lab:
+    if manifest.encoded[index] and manifest.split:
         kept.update((COPY, CHECKSUMS))
     return kept
 

@@ -13,11 +13,6 @@ src/seedvr2x/vendor/:
 
 The files changed for seedvr2x say so on the line under their original header.
 
-It also includes, ported to src/seedvr2x/runtime/colour.py, the CIELAB conversions and the
-histogram matching of ComfyUI-SeedVR2_VideoUpscaler's `lab` colour correction (numz and
-contributors, src/utils/color_fix.py at commit 4490bd1), under the Apache License, Version 2.0.
-That file says what was changed.
-
 It also includes, adapted in src/seedvr2x/runtime/model.py (encode_stream, decode_stream), the
 VAE encode and decode of ComfyUI-SeedVR2_VideoUpscaler (numz and contributors, commit 4490bd1):
 VideoDiffusionInfer's vae_encode and vae_decode, in src/core/infer.py, and VideoAutoencoderKL's
