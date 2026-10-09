@@ -77,6 +77,7 @@ class Conversion:
     color_range: str  # "limited" or "full"
     chroma_location: str  # zscale's name; no effect without chroma subsampling
     guessed: tuple[str, ...] = ()  # the untagged values guessed, said in a warning
+    matrix_guessed: bool = False  # the matrix among them, the one --input-matrix sets
 
     def filters(self) -> str:
         """The filter chain, from the decoded frames to gbrp16le."""
@@ -131,11 +132,13 @@ def conversion_for(stream: VideoStream, matrix: str | None = None) -> Conversion
             )
         return Conversion(pixel_format.planar, "gbr", "full", "left")
     guessed: list[str] = []
+    matrix_guessed = False
     if matrix is None:
         matrix = stream.color_space
         if not matrix:
             matrix = guess_matrix(stream.width, stream.height)
             guessed.append(f"matrix {matrix} (from {stream.width}x{stream.height})")
+            matrix_guessed = True
     if matrix not in MATRICES:
         raise MediaError(f"matrix {matrix} is not supported (only {', '.join(MATRICES)})")
     if pixel_format.family == "jpeg":
@@ -155,7 +158,12 @@ def conversion_for(stream: VideoStream, matrix: str | None = None) -> Conversion
         if pixel_format.subsampled:
             guessed.append("chroma sited left")
     return Conversion(
-        pixel_format.planar, MATRICES[matrix], color_range, chroma_location, tuple(guessed)
+        pixel_format.planar,
+        MATRICES[matrix],
+        color_range,
+        chroma_location,
+        tuple(guessed),
+        matrix_guessed,
     )
 
 

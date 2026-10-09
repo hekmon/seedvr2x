@@ -1,19 +1,22 @@
 """The decode's parameters and refusals, from what a stream declares: no ffmpeg needed."""
 
 import dataclasses
+import logging
 from fractions import Fraction
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 from test_probe import NO_RECORD, TONE_MAP, WHY_HLG, WHY_PQ
 
+from seedvr2x.media import source
 from seedvr2x.media.conversion import conversion_for, guess_matrix
 from seedvr2x.media.decode import to_float32
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.probe import DoviRecord, FirstFrame, VideoStream
 from seedvr2x.media.scan import Scan, timing_error
-from seedvr2x.media.source import declared_refusal
+from seedvr2x.media.source import declare, declared_refusal
 
 NTSC_FILM = Fraction(24000, 1001)
 UNTAGGED_HD = VideoStream(
@@ -103,6 +106,32 @@ def test_tags_are_taken() -> None:
 def test_matrix_override() -> None:
     assert conversion_for(stream(color_space="bt709"), "bt2020nc").matrix == "2020_ncl"
     assert conversion_for(stream(), "bt470bg").guessed == ("limited range", "chroma sited left")
+
+
+@pytest.mark.parametrize(
+    ("changes", "matrix", "guessed"),
+    [
+        ({}, None, "matrix bt709 (from 1920x1080), limited range, chroma sited left"),
+        ({"color_range": "tv", "chroma_location": "left"}, None, "matrix bt709 (from 1920x1080)"),
+        ({"color_space": "bt709", "chroma_location": "left"}, None, "limited range"),
+        ({"color_space": "bt709", "color_range": "tv"}, None, "chroma sited left"),
+        ({}, "bt709", "limited range, chroma sited left"),
+    ],
+)
+def test_guesses_said(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    changes: dict[str, Any],
+    matrix: str | None,
+    guessed: str,
+) -> None:
+    # The untagged values guessed are said in a warning, which names --input-matrix when the
+    # matrix is among them, and only then: no option sets a range or a chroma siting.
+    monkeypatch.setattr(source, "probe", lambda path: stream(**changes))
+    caplog.set_level(logging.WARNING, logger="seedvr2x")
+    declare(Path("in.mkv"), matrix)
+    option = " (--input-matrix sets the matrix)" if guessed.startswith("matrix") else ""
+    assert caplog.messages == [f"in.mkv: untagged, guessed: {guessed}{option}"]
 
 
 def test_siting_is_no_guess_without_subsampling() -> None:

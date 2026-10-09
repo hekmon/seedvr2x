@@ -455,6 +455,31 @@ def test_empty(tmp_path: Path) -> None:
     assert str(error.value) == said
 
 
+def test_too_short_to_tell(tmp_path: Path) -> None:
+    # 1 to 8 bytes: too few for a safetensors header's length and its brace, which tell the
+    # format, and for any model file: what a download cut short leaves, refused as one, its size
+    # said, without V1's tail, in either role; describe too. "GGUF" and a zip's signature alone
+    # are such files, not a GGUF file or a checkpoint. From 9 bytes on, the start tells.
+    path = tmp_path / "seedvr2x_ema_7b_sharp_fp16.safetensors"
+    for start in (b"\x01", b"\x80\x02", b"GGUF", b"PK\x03\x04", b"GGUF\x03\x00\x00", bytes(8)):
+        path.write_bytes(start)
+        size = f"{len(start)} byte{'s' if len(start) > 1 else ''}"
+        said = f"{path}: cut short, {size}, too few for any model file; fetch it again"
+        for role in ("dit", "vae"):
+            assert refused(path, role) == said
+        with pytest.raises(ModelError) as error:
+            weights.describe(path)
+        assert str(error.value) == said
+    path.write_bytes(b"GGUF" + bytes(5))
+    assert weights.describe(path).startswith("a GGUF file")
+    path.write_bytes(random.Random(0).randbytes(9))
+    assert weights.describe(path) == "neither safetensors, GGUF nor a PyTorch checkpoint"
+    path.write_bytes((1_000).to_bytes(8, "little") + b"{")
+    assert refused(path, "dit") == (
+        f"{path}: cut short inside its header, 9 bytes of at least 1,008; fetch it again"
+    )
+
+
 def raw(path: Path, header: bytes | object, data: int, length: int | None = None) -> Path:
     """A safetensors file of this header, JSON unless bytes, its length said as length when given,
     followed by data bytes of zeros."""

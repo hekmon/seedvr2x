@@ -195,6 +195,16 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
             # file at once (GNU Wget's manual, -O), and leaves it empty on a 404 (Wget 1.21.4).
             if size == 0:
                 raise ModelError(f"{path}: empty (0 bytes); fetch it again")
+            # 1 to 8 bytes: too few for a safetensors header's length and the brace that tell the
+            # format (below), and for any model file's header (GGUF's 24 bytes, ggml's
+            # docs/gguf.md; a zip's local file header 30, APPNOTE.TXT 4.3.7): what a download cut
+            # short leaves, refused as one, its size said, without V1's tail. "GGUF" or "PK" 3 4
+            # alone is such a file, not a GGUF file or a checkpoint.
+            if size < 9:
+                raise ModelError(
+                    f"{path}: cut short, {_count(size, 'byte')}, too few for any model file;"
+                    " fetch it again"
+                )
             # The header's length, then the header, which begins with its JSON object's brace,
             # as safetensors' format requires. GGUF's signature is told first: read as a header's
             # length, it is at least 0x46554747 = 1,179,993,927 bytes, over the limit, so no

@@ -226,10 +226,13 @@ def declare(
             logger.info("%s: no sample aspect declared, read as square pixels", path)
             sample_aspect = Fraction(1)
     if conversion.guessed:
+        # --input-matrix sets the matrix alone: named when the matrix is among the guesses, not
+        # for a range or a chroma siting, which no option sets.
         logger.warning(
-            "%s: untagged, guessed: %s (--input-matrix sets the matrix)",
+            "%s: untagged, guessed: %s%s",
             path,
             ", ".join(conversion.guessed),
+            " (--input-matrix sets the matrix)" if conversion.matrix_guessed else "",
         )
     return Declared(path, stream, conversion, sample_aspect)
 
