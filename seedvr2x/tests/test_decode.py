@@ -17,6 +17,7 @@ from seedvr2x.media import ffmpeg
 from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion
 from seedvr2x.media.decode import Decoder, decode_command, to_float32
 from seedvr2x.media.ffmpeg import MediaError, input_args
+from seedvr2x.media.probe import probe
 from seedvr2x.media.source import examine
 from seedvr2x.media.writer import FFV1Writer, Tags
 
@@ -330,18 +331,20 @@ def test_matrix_applied_primaries_and_transfer_never(tmp_path: Path) -> None:
             "color_primaries": "smpte170m",
             "color_trc": "smpte170m",
         },
-        "709, PQ": {"colorspace": "bt709", "color_primaries": "bt2020", "color_trc": "smpte2084"},
+        # A transfer far from BT.709's, HDR's being refused (test_hdr_refused).
+        "709, linear": {"colorspace": "bt709", "color_primaries": "bt2020", "color_trc": "linear"},
     }
     decoded = {}
     for name, tags in files.items():
         path = yuv_file(tmp_path / f"{len(decoded)}.mkv", data, "yuv420p", **tags, **common)
         source = examine(path)
         assert source.conversion.guessed == ()
+        assert source.stream.color_transfer == tags.get("color_trc", "")
         with source.decoder() as decoder:
             decoded[name] = decoder.read(1)
     assert not np.array_equal(decoded["709"], decoded["601"])
     assert np.array_equal(decoded["709"], decoded["709, SD primaries"])
-    assert np.array_equal(decoded["709"], decoded["709, PQ"])
+    assert np.array_equal(decoded["709"], decoded["709, linear"])
 
 
 def test_mjpeg_declares_its_centre_siting(tmp_path: Path) -> None:
@@ -464,6 +467,63 @@ def test_declared_crop_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(MediaError, match="cropped by its container"):
         examine(path)
+
+
+@pytest.mark.parametrize(
+    ("transfer", "refusal"),
+    [
+        (
+            "smpte2084",
+            "HDR, transfer smpte2084 (PQ): not supported: the model was trained on SDR video, what"
+            " it makes of PQ-coded pixels is unmeasured, and HDR10's metadata (mastering display,"
+            " MaxCLL) isn't carried",
+        ),
+        (
+            "arib-std-b67",
+            "HDR, transfer arib-std-b67 (HLG): not supported: the model was trained on SDR video,"
+            " and what it makes of HLG-coded pixels is unmeasured",
+        ),
+        ("bt2020-10", ""),  # BT.2020's SDR transfer, read
+    ],
+)
+def test_hdr_refused(tmp_path: Path, transfer: str, refusal: str) -> None:
+    # BT.2020, as HDR10 and HLG are, and tagged on the frames: n9.0.2 writes the frames' transfer
+    # and primaries, which -color_trc and -color_primaries alone leave unknown.
+    path = tmp_path / "hdr.mkv"
+    tags = f"colorspace=bt2020nc:color_primaries=bt2020:color_trc={transfer}:range=tv"
+    vf = f"setparams={tags},format=yuv420p10le"
+    run("-f", "lavfi", "-i", "testsrc2=s=64x48:r=25:d=0.2", "-vf", vf, "-c:v", "ffv1", str(path))
+    assert probe(path).color_transfer == transfer  # as ffprobe reads it back
+    if not refusal:
+        assert examine(path).frames == 5
+        return
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    tone_map = (
+        "for an SDR upscale, tone-map the source to SDR first, a grading choice for your own"
+        " tools, as a gamut conversion is"
+    )
+    assert str(refused.value) == f"{path}: {refusal}; {tone_map}"
+
+
+def test_every_declared_reason_in_one_refusal(tmp_path: Path) -> None:
+    # Interlaced, PQ and rotated: each reason said at once, numbered, interlacing first, refused in
+    # every version, so that tone-mapping the source never ends on another of these reasons.
+    base, path = tmp_path / "base.mkv", tmp_path / "rotated.mp4"
+    tags = "colorspace=bt2020nc:color_primaries=bt2020:color_trc=smpte2084:range=tv"
+    vf = f"setfield=tff,setparams={tags},format=yuv420p10le"
+    run("-f", "lavfi", "-i", "testsrc2=s=64x48:r=25:d=0.2", "-vf", vf, "-c:v", "ffv1", str(base))
+    run("-display_rotation", "90", "-i", str(base), "-c", "copy", str(path))
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    assert str(refused.value) == (
+        f"{path}: 3 reasons: (1) interlaced (field order tb): not supported; (2) HDR, transfer"
+        " smpte2084 (PQ): not supported: the model was trained on SDR video, what it makes of"
+        " PQ-coded pixels is unmeasured, and HDR10's metadata (mastering display, MaxCLL) isn't"
+        " carried; for an SDR upscale, tone-map the source to SDR first, a grading choice for your"
+        " own tools, as a gamut conversion is; (3) rotated or flipped by its display matrix (0,"
+        " -65536, 0, 65536, 0, 0, 0, 0, 1073741824): not supported"
+    )
 
 
 def test_sample_aspect_declared_and_overridden(tmp_path: Path) -> None:

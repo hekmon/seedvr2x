@@ -277,7 +277,8 @@ def _checked(output: Path) -> list[_Checked]:
     if not (directory / NAME).is_file():
         if output.is_dir():
             raise JobError(f"{output}: no {NAME}, so not an output directory of seedvr2x")
-        stream = probe(output)
+        # No frame read: verify decodes every one, and its report says what doesn't decode.
+        stream = probe(output, first_frame=False)
         if stream.pix_fmt not in ("gbrp16le", "yuv420p10le"):
             raise MediaError(f"{output}: {stream.pix_fmt}, not a master seedvr2x writes")
         sums = output.with_name(f"{output.name}.crc32")

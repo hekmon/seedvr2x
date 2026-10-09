@@ -6,11 +6,12 @@ from typing import Any
 
 import numpy as np
 import pytest
+from test_probe import NO_RECORD, TONE_MAP, WHY_HLG, WHY_PQ
 
 from seedvr2x.media.conversion import conversion_for, guess_matrix
 from seedvr2x.media.decode import to_float32
 from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.media.probe import VideoStream
+from seedvr2x.media.probe import DoviRecord, FirstFrame, VideoStream
 from seedvr2x.media.scan import Scan, timing_error
 from seedvr2x.media.source import declared_refusal
 
@@ -30,10 +31,22 @@ UNTAGGED_HD = VideoStream(
     chroma_location="",
     display_matrix=None,
     cropped=False,
+    dovi=None,
+    first_frame=FirstFrame(color_transfer="", dovi=False),
 )
 ROTATED_90 = (0, -65536, 0, 65536, 0, 0, 0, 0, 1 << 30)
 FLIPPED = (-65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30)
 UNROTATED = (65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30)
+
+
+def dovi(profile: int, compatibility: int, el: bool = False, bl: bool = True) -> DoviRecord:
+    """A Dolby Vision configuration record, its RPU present."""
+    return DoviRecord(profile, True, el, bl, compatibility)
+
+
+def first(transfer: str = "", rpu: bool = False) -> FirstFrame:
+    """A first frame tagged with that transfer, Dolby Vision's metadata on it or not."""
+    return FirstFrame(transfer, rpu)
 
 
 def stream(**changes: Any) -> VideoStream:
@@ -154,14 +167,140 @@ def test_refused_conversions(changes: dict[str, Any], matrix: str | None, reason
         ({"display_matrix": ROTATED_90}, "rotated or flipped"),
         ({"display_matrix": FLIPPED}, "rotated or flipped"),
         ({"cropped": True}, "cropped"),
+        ({"color_transfer": "smpte2084"}, "HDR, transfer smpte2084 (PQ): not supported"),
+        ({"color_transfer": "arib-std-b67"}, "HDR, transfer arib-std-b67 (HLG): not supported"),
+        # An SDR base layer read through, but for a stream tagged HDR all the same.
+        ({"dovi": dovi(8, 2), "color_transfer": "smpte2084"}, "HDR, transfer smpte2084 (PQ)"),
+        ({"dovi": dovi(8, 2), "color_transfer": "arib-std-b67"}, "HDR, transfer arib-std-b67"),
+        # The record refuses an HDR base layer, untagged as it may be.
+        ({"dovi": dovi(8, 1)}, "Dolby Vision profile 8, its base layer HDR10 (PQ): not supported"),
+        ({"dovi": dovi(7, 6, el=True)}, "profile 7, its base layer UHD Blu-ray's HDR10 (PQ)"),
+        ({"dovi": dovi(7, 6, el=True, bl=False)}, "Dolby Vision profile 7 with no base layer"),
+        ({"dovi": dovi(8, 3)}, "profile 8, its base layer of compatibility id 3, unknown"),
+        # No base layer, whatever the id says: a profile 4 enhancement layer's track.
+        (
+            {"dovi": dovi(4, 2, el=True, bl=False)},
+            "Dolby Vision profile 4 with no base layer: not supported: only an SDR base layer is"
+            f" read; {TONE_MAP}",
+        ),
+        # Id 0 is Dolby's own IPTPQc2 for profiles 5 and 10 alone (source.DOLBYS_OWN).
+        (
+            {"dovi": dovi(5, 0)},
+            "Dolby Vision profile 5, its base layer Dolby's own, viewable only through Dolby's"
+            f" processing: not supported: the model was trained on SDR video; {TONE_MAP}",
+        ),
+        ({"dovi": dovi(10, 0)}, "profile 10, its base layer Dolby's own"),
+        (
+            {"dovi": dovi(8, 0)},
+            "Dolby Vision profile 8, its base layer compatible with no other display (id 0): not"
+            f" supported: only an SDR base layer, id 2, is read; {TONE_MAP}",
+        ),
+        ({"dovi": dovi(7, 0, el=True)}, "profile 7, its base layer compatible with no other"),
+        # The first frame's transfer, which the container's tags can hide (media/probe.py).
+        (
+            {"first_frame": first("smpte2084")},
+            "HDR, transfer smpte2084 (PQ) on its first frame, where the stream declares none: not"
+            f" supported: {WHY_PQ}; {TONE_MAP}",
+        ),
+        (
+            {"color_transfer": "bt709", "first_frame": first("arib-std-b67")},
+            "HDR, transfer arib-std-b67 (HLG) on its first frame, where the stream declares bt709:"
+            f" not supported: {WHY_HLG}; {TONE_MAP}",
+        ),
+        # Dolby Vision's metadata without a record, whatever the tags (provisional,
+        # source.NO_RECORD).
+        ({"first_frame": first(rpu=True)}, NO_RECORD),
+        ({"color_transfer": "bt709", "first_frame": first("bt709", rpu=True)}, NO_RECORD),
     ],
 )
 def test_declared_refusals(changes: dict[str, Any], reason: str) -> None:
     assert reason in declared_refusal(stream(**changes))
 
 
+PQ = f"HDR, transfer smpte2084 (PQ): not supported: {WHY_PQ}; {TONE_MAP}"
+HLG = f"HDR, transfer arib-std-b67 (HLG): not supported: {WHY_HLG}; {TONE_MAP}"
+
+
 @pytest.mark.parametrize(
-    "changes", [{}, {"field_order": ""}, {"display_matrix": UNROTATED}], ids=str
+    ("changes", "refusal"),
+    [
+        # The record's refusal, which names the profile, over the transfer's and the metadata's.
+        (
+            {"dovi": dovi(8, 1), "color_transfer": "smpte2084", "first_frame": first(rpu=True)},
+            f"Dolby Vision profile 8, its base layer HDR10 (PQ): not supported: {WHY_PQ};"
+            f" {TONE_MAP}",
+        ),
+        # The stream's transfer over its first frame's.
+        ({"color_transfer": "smpte2084", "first_frame": first("arib-std-b67")}, PQ),
+        # An HDR transfer over Dolby Vision's metadata without a record, which adds nothing.
+        ({"color_transfer": "arib-std-b67", "first_frame": first("arib-std-b67", True)}, HLG),
+        (
+            {"first_frame": first("smpte2084", rpu=True)},
+            "HDR, transfer smpte2084 (PQ) on its first frame, where the stream declares none: not"
+            f" supported: {WHY_PQ}; {TONE_MAP}",
+        ),
+    ],
+)
+def test_one_reason_for_the_pixels(changes: dict[str, Any], refusal: str) -> None:
+    assert declared_refusal(stream(**changes)) == refusal
+
+
+@pytest.mark.parametrize(
+    ("changes", "refusal"),
+    [
+        # An interlaced HDR source is told both, and so never tone-maps in vain. Numbered, since
+        # a reason can hold "; " itself (TONE_MAP's).
+        (
+            {"field_order": "tt", "color_transfer": "smpte2084"},
+            f"2 reasons: (1) interlaced (field order tt): not supported; (2) {PQ}",
+        ),
+        # An iPhone's HLG, Dolby Vision 8.4, rotated (ffmpeg's FATE sample hevc/dv84.mov).
+        (
+            {"dovi": dovi(8, 4), "color_transfer": "arib-std-b67", "display_matrix": ROTATED_90},
+            "2 reasons: (1) Dolby Vision profile 8, its base layer HLG: not supported:"
+            f" {WHY_HLG}; {TONE_MAP}; (2) rotated or flipped by its display matrix {ROTATED_90}:"
+            " not supported",
+        ),
+        (
+            {"display_matrix": FLIPPED, "cropped": True},
+            f"2 reasons: (1) rotated or flipped by its display matrix {FLIPPED}: not supported;"
+            " (2) cropped by its container: not supported",
+        ),
+        # Every one, in their order.
+        (
+            {
+                "cropped": True,
+                "display_matrix": ROTATED_90,
+                "first_frame": first(rpu=True),
+                "field_order": "bb",
+            },
+            f"4 reasons: (1) interlaced (field order bb): not supported; (2) {NO_RECORD}; (3)"
+            f" rotated or flipped by its display matrix {ROTATED_90}: not supported; (4) cropped by"
+            " its container: not supported",
+        ),
+    ],
+)
+def test_every_reason_in_one_refusal(changes: dict[str, Any], refusal: str) -> None:
+    assert declared_refusal(stream(**changes)) == refusal
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {"field_order": ""},
+        {"display_matrix": UNROTATED},
+        *({"color_transfer": sdr} for sdr in ("bt709", "smpte170m", "bt2020-10", "iec61966-2-1")),
+        # Read through an SDR base layer, whatever the rest of the stream holds.
+        {"dovi": dovi(8, 2), "color_transfer": "bt709"},
+        {"dovi": dovi(9, 2)},
+        {"dovi": dovi(4, 2, el=True)},
+        # The first frame SDR, Dolby Vision's metadata on it with a record saying SDR.
+        {"first_frame": first("bt709")},
+        {"color_transfer": "bt2020-10", "first_frame": first("bt2020-10")},
+        {"dovi": dovi(8, 2), "color_transfer": "bt709", "first_frame": first("bt709", rpu=True)},
+    ],
+    ids=str,
 )
 def test_declared_accepted(changes: dict[str, Any]) -> None:
     assert declared_refusal(stream(**changes)) == ""
