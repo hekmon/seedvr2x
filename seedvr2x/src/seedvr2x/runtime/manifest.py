@@ -17,7 +17,17 @@ from seedvr2x.media.source import Source
 from seedvr2x.runtime.job import JobError, OutputSegment, Shot
 
 NAME = "manifest.json"
-VERSION = 2
+# 3 since the input is one record, the source's, where it was a list: a change of shape bumps the
+# version (DESIGN.md, Pause and resume), so that older code, which reads its own version only,
+# refuses a newer manifest cleanly. At version 2, the record (3ec48b9) made the code before it
+# fail on a resume, its resume.identity taking the record for a list (AttributeError).
+VERSION = 3
+# The versions read: this code's, and 2, older code's, its input a list of one per input file or
+# already the source's record, so that a resume refuses its job as another job, its differences
+# listed (settings.code always among them: the code changed), as it did before version 3, rather
+# than for its version alone; and so that verify still checks its segments, recorded as they
+# are now. Version 1, from before resume (7c7c90d), is refused.
+READ = (2, VERSION)
 # The directory of the units kept for a resume, beside the manifest (units.DiskUnits).
 STATE = "resume"
 # The directory of the output segments' checksums, beside them, which outlives the job
@@ -34,7 +44,7 @@ def checksums_file(segment: str, output_format: str) -> str:
 
 
 def read(path: Path) -> dict[str, Any]:
-    """The manifest at path, as written; refused unless written by this manifest version."""
+    """The manifest at path, as written; refused unless of a version this code reads (READ)."""
     try:
         content: Any = json.loads(path.read_text())
     except (OSError, ValueError) as error:
@@ -43,8 +53,10 @@ def read(path: Path) -> dict[str, Any]:
         raise JobError(f"{path}: not a manifest")
     manifest = cast(dict[str, Any], content)
     found = manifest.get("seedvr2x_manifest")
-    if found != VERSION:
-        raise JobError(f"{path}: manifest version {found}, where this seedvr2x writes {VERSION}")
+    if found not in READ:
+        # Said as written: a number as it is, anything else as JSON writes it ("3", a string).
+        said = "no manifest version" if found is None else f"manifest version {json.dumps(found)}"
+        raise JobError(f"{path}: {said}, where this seedvr2x writes {VERSION}")
     return manifest
 
 

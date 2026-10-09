@@ -5,9 +5,11 @@ The merge tests are sptenc's own (core/scenes_test.go at vmafv1 5790944), its bo
 a 25 fps grid as there: at(s) is frame 25 s, and a duration of s seconds is 25 s frames. The GPU
 test needs what tests/test_regression.py needs."""
 
+import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from fractions import Fraction
@@ -24,13 +26,14 @@ from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.source import Source
 from seedvr2x.media.writer import SegmentWriter, Tags, Writer, count_packets, open_writer
 from seedvr2x.runtime.job import (
+    JobError,
     OutputSegment,
     Shot,
     merge_short,
     merged_segments,
     min_segment_frames,
 )
-from seedvr2x.runtime.manifest import Manifest, code_sha256
+from seedvr2x.runtime.manifest import Manifest, code_sha256, read
 
 
 def at(second: int) -> int:
@@ -139,7 +142,9 @@ def test_merged_segments_keep_whole_shots() -> None:
     ]
 
 
-def test_manifest(tmp_path: Path) -> None:
+def written_manifest(tmp_path: Path) -> Manifest:
+    """A job's manifest, written to tmp_path / manifest.json: its source in.mkv there, a stand-in
+    for a Source of 5 frames, in two shots and two segments."""
     source = SimpleNamespace(
         path=tmp_path / "in.mkv",
         frames=5,
@@ -168,11 +173,16 @@ def test_manifest(tmp_path: Path) -> None:
         {"format": "gbrp16le"},
     )
     record.write()
+    return record
+
+
+def test_manifest(tmp_path: Path) -> None:
+    record = written_manifest(tmp_path)
     record.shot_encoded(0)
     record.window_done(0, 0)
     record.segment_finished(0, 1234)
     content = json.loads((tmp_path / "manifest.json").read_text())
-    assert content["seedvr2x_manifest"] == 2
+    assert content["seedvr2x_manifest"] == 3
     assert re.fullmatch(r"[0-9a-f]{64}", code_sha256()) and code_sha256() == code_sha256()
     assert content["environment"] == {"gpu": "a GPU"}
     assert [(s["finished"], s["bytes"]) for s in content["segments"]] == [
@@ -191,6 +201,60 @@ def test_manifest(tmp_path: Path) -> None:
     assert not (tmp_path / "manifest.json.partial").exists()
     with pytest.raises(ValueError, match="window 2 after 1"):
         record.window_done(0, 2)
+
+
+def test_manifest_versions(tmp_path: Path) -> None:
+    # Version 3 is read, and 2, older code's, so that a resume refuses its job as another job, its
+    # differences listed, and verify checks its segments (test_cli_run.py's
+    # test_version_2_job_refused); any other version, or none, is refused, naming it: a number as
+    # it is, anything else as JSON writes it, none as none.
+    path = tmp_path / "manifest.json"
+    for version in (2, 3):
+        path.write_text(json.dumps({"seedvr2x_manifest": version}))
+        assert read(path) == {"seedvr2x_manifest": version}
+    for manifest, said in (
+        ({"seedvr2x_manifest": 1}, "manifest version 1"),
+        ({"seedvr2x_manifest": 4}, "manifest version 4"),
+        ({"seedvr2x_manifest": "3"}, 'manifest version "3"'),
+        ({"seedvr2x_manifest": None}, "no manifest version"),
+        ({}, "no manifest version"),
+    ):
+        path.write_text(json.dumps(manifest))
+        with pytest.raises(JobError) as refused:
+            read(path)
+        assert str(refused.value) == f"{path}: {said}, where this seedvr2x writes 3"
+
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+# runtime/manifest.py as of 4c13da5, the last code to write version 2, its input already the
+# source's record; it reads its own version only.
+VERSION_2_BLOB = "4187c45028f04ae2509d83483d7a1850dc802686"
+
+
+def test_older_code_refuses_version_3(tmp_path: Path) -> None:
+    # Older code refuses a manifest of this code's for its version, naming both, rather than fail
+    # on its shape (manifest.VERSION). Skipped without git or that blob, as on a copy of seedvr2x/
+    # alone.
+    why = "needs git and the repository's history: runtime/manifest.py as of 4c13da5"
+    if shutil.which("git") is None or not (REPOSITORY / ".git").exists():
+        pytest.skip(why)
+    shown = subprocess.run(
+        ["git", "-C", str(REPOSITORY), "cat-file", "-p", VERSION_2_BLOB],
+        capture_output=True,
+        check=False,
+    )
+    if shown.returncode:
+        pytest.skip(why)
+    older = tmp_path / "manifest_version_2.py"
+    older.write_bytes(shown.stdout)
+    spec = importlib.util.spec_from_file_location("manifest_version_2", older)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.VERSION == 2
+    written_manifest(tmp_path)
+    with pytest.raises(JobError, match=r"manifest version 3, where this seedvr2x writes 2$"):
+        module.read(tmp_path / "manifest.json")
 
 
 def _usable() -> bool:

@@ -45,9 +45,9 @@ def identity(content: dict[str, Any]) -> dict[str, Any]:
     the environment, and the source's content, its size and SHA-256. The first pass's record is
     trusted when they are the same, the pass then not run again (DESIGN.md, Pause and resume)."""
     recorded: Any = content.get("input")
-    # One input, the source (DESIGN.md, Input). Older code recorded a list, of a directory's
-    # segments or of the one file: compared as it is, it differs, another job's, as the manifest's
-    # settings.code makes it already.
+    # One input, the source (DESIGN.md, Input). A manifest of version 2 (manifest.READ) may hold a
+    # list, as older code recorded, of a directory's segments or of the one file: compared as it
+    # is, it differs, another job's, as the manifest's settings.code makes it already.
     source = recorded
     if isinstance(recorded, dict):
         entry = cast(dict[str, Any], recorded)

@@ -1583,10 +1583,14 @@ def test_another_job_refused(
     window.rename(tmp_path / "window.pt")
     assert "kept, the manifest says, but missing" in refused(tmp_path, source_path, caplog, *JOB)
     (tmp_path / "window.pt").rename(window)
-    # Another manifest version.
+    # Another manifest version: 1, from before resume, or one above this code's, of newer code,
+    # refused for it, naming both (manifest.READ).
     written = (out / "manifest.json").read_bytes()
-    (out / "manifest.json").write_text(json.dumps({**json.loads(written), "seedvr2x_manifest": 1}))
-    assert "manifest version 1" in refused(tmp_path, source_path, caplog, *JOB)
+    for version in (1, 4):
+        content = {**json.loads(written), "seedvr2x_manifest": version}
+        (out / "manifest.json").write_text(json.dumps(content))
+        text = refused(tmp_path, source_path, caplog, *JOB)
+        assert f"manifest version {version}, where this seedvr2x writes 3" in text
     (out / "manifest.json").write_bytes(written)
     assert contents(out) == kept  # nothing touched
     # The job asked, at last.
@@ -1829,26 +1833,42 @@ def test_probe_compared(
     assert manifest.read_bytes() == recorded
 
 
-def test_directory_job_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("inputs", ["list", "record"])
+def test_version_2_job_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    inputs: str,
 ) -> None:
-    # A job of older code, which read a directory of segments (DESIGN.md, Input: no input since):
-    # its manifest records a list of inputs, one per segment with its start in the job, and its
-    # own code. With the source, it is another job, refused as one, its manifest untouched.
+    # A job of older code, its manifest at version 2, which this code reads (manifest.READ), and
+    # its own code: its input a list of one per input file with its start in the job, as before
+    # the source was the only input (a directory of segments was one: DESIGN.md, Input), or the
+    # source's record already. Compared, it is another job, refused as one, exit 1, its
+    # differences listed, nothing discarded; verify checks its segments, recorded as now.
     source_path = job(tmp_path, monkeypatch)
     steps.stop = "window 4:1"
     stopped(tmp_path, source_path, "out", *JOB)
-    manifest = tmp_path / "out" / "manifest.json"
-    content = json.loads(manifest.read_text())
-    entry = content["input"]
-    content["input"] = [{**entry, "start": 0, "frames": 3}, {**entry, "start": 3, "frames": 22}]
-    content["settings"].update(code="0" * 64, min_segment=None)
-    manifest.write_text(json.dumps(content))
-    recorded = manifest.read_bytes()
+    out = tmp_path / "out"
+    content = json.loads((out / "manifest.json").read_text())
+    content["seedvr2x_manifest"] = 2
+    content["settings"]["code"] = "0" * 64
+    if inputs == "list":
+        entry = content["input"]
+        content["input"] = [{**entry, "start": 0, "frames": 3}, {**entry, "start": 3, "frames": 22}]
+        content["settings"]["min_segment"] = None
+    (out / "manifest.json").write_text(json.dumps(content))
+    kept = contents(out)
     text = refused(tmp_path, source_path, caplog, *JOB)
     assert "another job than the one asked" in text and "--accept-env-change" not in text
-    assert "settings.code" in text and 'input: [{"bytes": ' in text
-    assert manifest.read_bytes() == recorded
+    assert "settings.code" in text
+    assert ('input: [{"bytes": ' in text) == (inputs == "list")
+    assert contents(out) == kept
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    caplog.clear()
+    assert cli.main(["verify", str(out)]) == 1
+    assert f"{out / 'seg_000000.mkv'}: every frame as written" in caplog.text
+    assert f"{out / 'seg_000001.mkv'}: unfinished, not checked" in caplog.text
 
 
 def test_first_pass_compared_after_a_change(
