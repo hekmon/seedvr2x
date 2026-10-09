@@ -93,7 +93,9 @@ intermediate, is not measured here: at the 16-bit FFV1 masters' ≈ 70 MiB per s
 (non-IDR I-frames with a recovery point; 40 of 64 keyframes have up to 3 leading pictures), x265
 `open-gop=1` keyint 48 (CRA with up to 4 RASL, 51 of 64), MPEG-2 720×480 GOP 15 (`closed_gop=0`
 after the first GOP, 2 leading B-frames); in MKV, MP4 and MPEG-TS (start_time 1.48 s), MPEG-2 in
-VOB/MPEG-PS (0.54 s) and TS (1.44 s). Plus 2 minutes of S1 stream-copied into M2TS (1.44 s).
+VOB/MPEG-PS (0.54 s) and TS (1.44 s). Plus 2 minutes of S1 stream-copied into M2TS (1.44 s):
+its 2,896 frames decode to S1's frames 6,936 to 9,832, md5 for md5, without 9,831, a B-frame
+decoded after 9,832, which the cut left out.
 
 ## Results
 
@@ -321,8 +323,8 @@ python3 $S seek $SRC $OUT --repeats 3 --count-at 0.02,0.1,0.5 --count-repeats 3
 python3 $S paramsets $SRC $OUT       # H.264/HEVC: keyframes a decoder can't start from
 python3 $S keycheck $SRC $OUT --sample 100 --range 305:315   # decode from exactly each keyframe
 python3 $S ref $SRC $OUT --name ref2 --threads 1 && python3 $S same $OUT ref ref2
-python3 $S synth /path/to/web-episode.mkv out/seek/synth --remux /path/to/bluray-remux.mkv \
-  --remux-start 290                  # synthetic open-GOP files + an M2TS excerpt
+python3 $S synth /path/to/S3.mkv out/seek/synth --remux /path/to/S1.mkv \
+  --remux-start 290                  # synthetic open-GOP files from S3 + an M2TS excerpt of S1
 python3 $S hashcost                  # md5, sha1, blake2b, CRC-32, Adler-32 per 1080p frame
 python3 $S report $(ls -d out/seek/*/ | grep -v '/synth/$') out/seek/synth/*/   # Markdown tables
 ```
