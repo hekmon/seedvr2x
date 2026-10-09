@@ -179,7 +179,7 @@ TNET_WINDOW, TNET_STEP, TNET_PAD = 100, 50, 25  # predict_frames: 100 frames eve
 TNET_MARGIN = 100  # frames decoded past the scored range: a frame's window reaches 74 frames ahead
 TNET_SEARCH = 3  # alignment: TransNetV2's peak searched within +-3 frames of a sure cut
 TNET_OFFSET = -1  # the official convention (last frame of the outgoing shot), when nothing is measured
-KINDS = {"edge-of-tomorrow": "live action", "oss117": "live action", "malcolm-s01e01": "DVD"}
+KINDS = {"live-1": "live action", "live-2": "live action", "dvd-sitcom": "DVD"}
 
 FRAME_RE = re.compile(r"frame:(\d+)\s+pts:(\S+)\s+pts_time:(\S+)")
 SCDET_LOG_RE = re.compile(r"lavfi\.scd\.score: ([\d.]+), lavfi\.scd\.time: (\S+)")

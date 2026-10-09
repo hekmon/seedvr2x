@@ -651,10 +651,10 @@ python3 $R extend $O/review $O/EP... --cap 30 --skip anime-dark-seg
 python3 $R index $O/review
 # round 1: 100 of the review's rows by agreement group and kind, blind; estimates from its labels
 python3 $R round $O/review $O/EP... --out $O/round1
-python3 $S round $O/round1 --skip malcolm-s01e01 --md round1.md   # the DVD: thumbnails misaligned
+python3 $S round $O/round1 --skip dvd-sitcom --md round1.md   # the DVD: thumbnails misaligned
 # round 2: 50 more rows in refined cells; then both rounds pooled in those cells
 python3 $R round $O/review $O/EP... --out $O/round2 --plan 2 --exclude $O/round1/rows.csv
-python3 $S round $O/round1 $O/round2 --dirs $O/EP... --skip malcolm-s01e01 --md rounds.md
+python3 $S round $O/round1 $O/round2 --dirs $O/EP... --skip dvd-sitcom --md rounds.md
 # costs on one source, 16 threads, page cache warm: decode alone, then sptenc's chain
 # (score, pysd and tnet as above: each logs its own seconds)
 ffmpeg -threads 16 -i SRC -map 0:v:0 -fps_mode passthrough -f null -

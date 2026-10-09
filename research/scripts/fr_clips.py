@@ -133,13 +133,13 @@ magnitude) is lowest, among the pixels with 16 < blurred < 235 (none if 1000 pix
 out of the mask: black bars, the rows (and columns) from each edge whose mean Y over the measured
 frames is below 20, and the 8 rows (columns) next to them, or next to the frame's edge where there
 is no bar. Blur and gradient are taken on the whole frame, whose reflected border shows no gradient
-across it: a dark picture edge there (OSS 117 fades to black over its 3-4 outermost columns, several
-Blu-rays carry a darker outermost line) would otherwise dominate the residual. Per frame, then the
-median over the frames (25-75%). Frames: an RGB file (a clip's GT, a baseline, a master) every one,
-or with --frames N, N spread over its middle 80%; a YUV source N (12 by default) at even times over
-the middle 80% of its duration (clear of logos and end credits), each decoded with an input seek
-(-ss before -i): a survey, not frame-exact. --every decodes every frame in order (frame-exact); the
-measured frames' luma stays in memory until the bars are known: for clips.
+across it: a dark picture edge there (live-slow's film fades to black over its 3-4 outermost
+columns, several Blu-rays carry a darker outermost line) would otherwise dominate the residual. Per
+frame, then the median over the frames (25-75%). Frames: an RGB file (a clip's GT, a baseline, a
+master) every one, or with --frames N, N spread over its middle 80%; a YUV source N (12 by default)
+at even times over the middle 80% of its duration (clear of logos and end credits), each decoded
+with an input seek (-ss before -i): a survey, not frame-exact. --every decodes every frame in order
+(frame-exact); the measured frames' luma stays in memory until the bars are known: for clips.
 
 Needs numpy (and OpenCV for `grain`), and ffmpeg/ffprobe with zimg (zscale), libx264 and ffv1
 (FR_FFMPEG, FR_FFPROBE override the binaries found on PATH).
