@@ -475,9 +475,18 @@ they differ and by which metrics, and how users are guided to them. What is know
   - seedvr2x pulls its files from that repo at a revision pinned in its code, each checked by a
     SHA-256 pinned there too, so a version always runs the same bytes. A local directory
     holding the same files works offline. How (decided 2026-10-09):
-    - `huggingface_hub`'s download, at the pinned revision (`c14a2bc4`), into Hugging Face's own
-      cache (`HF_HOME` and `HF_HUB_OFFLINE` honoured), with no token: the repo is public. The
-      library is already in the environment through diffusers; seedvr2x declares it.
+    - File by file, only those the run uses: the DiT it runs (the sharp 7B by default, 16.5 GB)
+      and the VAE (0.5 GB), the regular 7B only when asked for, TransNetV2's weights with the
+      shot detector. Never the repository whole: 122 GB, most of it phase 2's files, which v1
+      doesn't run.
+    - `huggingface_hub`'s download of one file, at the pinned revision (`c14a2bc4`), into Hugging
+      Face's own cache, with no token: the repo is public. The library is already in the
+      environment through diffusers; seedvr2x declares it.
+    - The cache holds only the files downloaded, each once, by its hash. It sits in
+      `~/.cache/huggingface` unless `HF_HOME` (or `HF_HUB_CACHE`) puts it on another disk, and
+      `HF_HUB_OFFLINE` keeps the network out. The log names it, and before a download the free
+      space of its disk is checked against the file's pinned size: too little is refused,
+      naming the directory, `HF_HOME` and `--model-dir`.
     - `--model-dir` becomes optional: given, the files are read from it by name and nothing is
       downloaded.
     - Each of seedvr2x's own files is checked against its pinned size and SHA-256 before it
