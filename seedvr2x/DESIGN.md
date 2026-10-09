@@ -733,6 +733,11 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
   - `--cut-threshold P` sets it (the user's proposal, 2026-10-06), a setting the manifest
     records: lower where cuts go missing, higher where false ones show. Erring lower is the
     cheaper mistake. It is refused with `--cuts`, whose list replaces the detection.
+  - Below 0.3 the trade turns (measured 2026-10-09): at 0.2 or 0.15 each cut found costs 6 to
+    14 false cuts on animation and 14 to 21 on live action, where going from 0.5 to 0.3 cost
+    2.5 and 0.5; and most misses score under 0.1, beyond any threshold (77 to 81 of
+    animation's 92 per hour). 0.3 stays the default. The cut share between 0.2 and 0.3 isn't
+    labelled: a third round would tell, should a lower default be wanted.
 - **No gate on a picture change.** Its measure, scdet's MAFD at the cut frame (the mean
   absolute difference between that frame's luma and the previous one's, at full resolution and
   native bit depth, in percent), at 2 keeps every labelled cut but adds only 0.02–0.03 of
@@ -762,7 +767,9 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
     same flight peaked at 0.232. No threshold separates them there: 0.2 finds 1 of the 2 and 1
     false cut, 0.15 both and 2 false ones
     ([scene-detection.md](../research/docs/scene-detection.md#native-4k-animation-cuts-inside-fast-camera-motion)).
-    Full-resolution measures missed both cuts as well (scdet 1.8 and 1.3).
+    Full-resolution measures missed both cuts as well (scdet 1.8 and 1.3), and on a 1080p
+    downscale TransNetV2 scores every frame within 0.016 of the 4K pass: the misses come from
+    the motion, not the resolution.
   - Unlabelled: the 548 animated candidates TransNetV2 alone scores 0.1–0.3 hold at most
     about 80 cuts, under 3% of animation's estimated 2,910.
 - scdet and PySceneDetect aren't used, and the startup check doesn't require scdet. idet stays,
@@ -775,7 +782,9 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
   - The possible cuts go in it too, as comments: each run peaking from 0.1 up to the
     threshold, with its probability and timecode. Checking them is a jump to each timecode in
     a player, and keeping a real one is uncommenting its line. `--plan` prints the counts: a
-    4.4-minute short made natively in 4K has 61 cuts at 0.3 and 39 possible cuts.
+    4.4-minute short made natively in 4K has 61 cuts at 0.3 and 39 possible cuts. On the
+    labelled sources, about 250 possible cuts per hour of animation and 100 of live action,
+    about one real cut in 7 to 18 of them.
 
 ### Colour and shape, SD sources included
 The rule: the upscale must look like its source in any given player.
@@ -1311,6 +1320,10 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
   window lengths and resolutions, but anywhere from 0.23 to 0.45 ms on this one GPU, with its
   clock. A run measures it on its first window, and the VAE's time per frame on its first
   slices; `--plan` measures both with a short calibration on the GPU.
+  - Every time figure in this document comes from a card whose faulty power reading caps its
+    clock under load (about 580 MHz, where it runs 2.6 GHz free): the values hold, but a
+    healthy card should take 2 to 3 times less, unmeasured. The times are measured again on a
+    healthy card, which milestone 3's estimates need.
 - **A plan shapes the output a little.** Its window lengths set where a long shot's joins
   fall, and its VAE tiles where the picture is cut. A larger card gives fewer joins and larger
   tiles, closer to the one-window, untiled run:
@@ -1676,7 +1689,8 @@ writers, and the planner needs real shot lengths.
 **The build order:**
 1. Resume (milestone 4): passed on 2026-10-03. Real episodes needed it: at 4.4 s per 1080p
    frame ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode
-   takes about 40 GPU hours.
+   takes about 40 GPU hours on the power-capped card (see
+   [Memory planner](#memory-planner)).
 2. The `lab` rewrite (milestone 5): passed on 2026-10-04. Then, as small steps of their own:
    zscale on one slice (see [Input](#input)), the default master format (`yuv420p10le`, see
    [Output](#output)) and the model check of [Weights](#weights), done on 2026-10-08, the
