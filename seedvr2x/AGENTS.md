@@ -110,8 +110,9 @@ uv run pytest
   directory of `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its docstring.
 - numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
   cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`cli.NUMZ_PADDING`),
-  which a directory's manifest records, so that a job is never resumed in the other padding.
-  `test_regression.py`'s padding cases and the other GPU tests run in the default padding.
+  which an output directory's manifest records, so that a job is never resumed in the other
+  padding. `test_regression.py`'s padding cases and the other GPU tests run in the default
+  padding.
 - `split`, the colour correction, is held to the colour study's own `split()`
   (`../research/scripts/colour_variants.py`): on the CPU by `tests/test_colour.py`, on the GPU
   in the pipeline by `tests/test_split.py`, at x2 and x4, in one window and in three, within one

@@ -1,6 +1,6 @@
 """The manifest of a job's output (DESIGN.md, Pause and resume): what the job is, which a resume
-must find again (its settings, models by hash, environment, input files, output, shots with
-their windows, output segments), and how far it went: each shot encoded, its windows done, each
+must find again (its settings, models by hash, environment, input file, output, shots with their
+windows, output segments), and how far it went: each shot encoded, its windows done, each
 segment finished. A unit is recorded once its file is whole, so the manifest only names whole
 files. Written once the models load, then again after every unit, always whole (a temporary
 file, synced, renamed)."""
@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from seedvr2x.media.files import write_whole
-from seedvr2x.runtime.job import JobError, OutputSegment, Part, Shot
+from seedvr2x.media.source import Source
+from seedvr2x.runtime.job import JobError, OutputSegment, Shot
 
 NAME = "manifest.json"
 VERSION = 2
@@ -54,7 +55,7 @@ class Manifest:
     path: Path
     settings: dict[str, Any]
     environment: dict[str, Any]  # what the output's bits depend on besides the settings
-    parts: Sequence[Part]
+    source: Source  # the job's only input (DESIGN.md, Input)
     shots: Sequence[Shot]
     layouts: Sequence[Sequence[tuple[int, int]]]  # each shot's DiT windows, latents [start, end)
     segments: Sequence[OutputSegment]
@@ -78,7 +79,7 @@ class Manifest:
             self.finished = [False] * len(self.segments)
         if not self.sizes:
             self.sizes = [None] * len(self.segments)
-        self._inputs = [_input(part) for part in self.parts]
+        self._input = _input(self.source)
 
     @property
     def split(self) -> bool:
@@ -123,7 +124,7 @@ class Manifest:
             "settings": self.settings,
             "environment": self.environment,
             "environment_changes": self.environment_changes,
-            "input": self._inputs,
+            "input": self._input,
             "output": self.output,
             "shots": [
                 {
@@ -154,28 +155,27 @@ class Manifest:
         }
 
 
-def _input(part: Part) -> dict[str, Any]:
-    """An input file as the manifest records it: the file itself (where it is, its size and
+def _input(source: Source) -> dict[str, Any]:
+    """The source as the manifest records it: the file itself (where it is, its size and
     modification time, read when the job starts, and its content's SHA-256) and what the first
     pass found in it. Its content says which file it is; where it is and when it was modified are
     information (resume.UNCOMPARED)."""
-    path = part.source.path.resolve()
+    path = source.path.resolve()
     status = path.stat()
     return {
         "path": str(path),
         "bytes": status.st_size,
         "modified_ns": status.st_mtime_ns,
-        "sha256": part.source.sha256,
-        "start": part.start,
-        "frames": part.source.frames,
-        "frame_rate": str(part.source.stream.frame_rate),
-        "size": [part.source.stream.width, part.source.stream.height],
-        "sample_aspect": str(part.source.sample_aspect),
-        "read_as": part.source.conversion.describe(),
+        "sha256": source.sha256,
+        "frames": source.frames,
+        "frame_rate": str(source.stream.frame_rate),
+        "size": [source.stream.width, source.stream.height],
+        "sample_aspect": str(source.sample_aspect),
+        "read_as": source.conversion.describe(),
         # The format decoded, and the tags the output copies (writer.Tags).
-        "pix_fmt": part.source.stream.pix_fmt,
-        "primaries": part.source.stream.color_primaries,
-        "transfer": part.source.stream.color_transfer,
+        "pix_fmt": source.stream.pix_fmt,
+        "primaries": source.stream.color_primaries,
+        "transfer": source.stream.color_transfer,
     }
 
 

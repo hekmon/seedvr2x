@@ -42,13 +42,20 @@ UNIT_FILE = re.compile(
 
 def identity(content: dict[str, Any]) -> dict[str, Any]:
     """Of a job's manifest content, what a resume compares before the first pass: the settings,
-    the environment, and the inputs' content, their size and SHA-256. The first pass's record is
+    the environment, and the source's content, its size and SHA-256. The first pass's record is
     trusted when they are the same, the pass then not run again (DESIGN.md, Pause and resume)."""
-    inputs = cast(list[dict[str, Any]], content.get("input", []))
+    recorded: Any = content.get("input")
+    # One input, the source (DESIGN.md, Input). Older code recorded a list, of a directory's
+    # segments or of the one file: compared as it is, it differs, another job's, as the manifest's
+    # settings.code makes it already.
+    source = recorded
+    if isinstance(recorded, dict):
+        entry = cast(dict[str, Any], recorded)
+        source = {"bytes": entry.get("bytes"), "sha256": entry.get("sha256")}
     return {
         "settings": content.get("settings"),
         "environment": content.get("environment"),
-        "input": [{"bytes": entry.get("bytes"), "sha256": entry.get("sha256")} for entry in inputs],
+        "input": source,
     }
 
 

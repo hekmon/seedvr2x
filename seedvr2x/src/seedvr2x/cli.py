@@ -5,6 +5,7 @@ import fcntl
 import logging
 import os
 import re
+import shlex
 import shutil
 import sys
 import time
@@ -25,8 +26,8 @@ from seedvr2x.runtime.stop import Stop, Stopped, Terminated
 if TYPE_CHECKING:
     import torch
 
-    from seedvr2x.media.source import Declared, FirstPass
-    from seedvr2x.runtime.job import JobError, OutputSegment, Part, Shot
+    from seedvr2x.media.source import Declared, FirstPass, Source
+    from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
 
 # Video file names, other than Matroska's, that -o refuses: an FFV1 master is a .mkv file, and
@@ -42,8 +43,8 @@ logger = logging.getLogger("seedvr2x")
 # user's: milestone 1's regression holds the output to numz's own with it. It runs the CLI in a
 # process of its own, the allocator being set before torch is imported (main), so an environment
 # variable reaches it, and no option shows it to users. Read once (_run), passed down as a
-# parameter, and recorded in a directory's settings, so that a job is never resumed in the other
-# padding.
+# parameter, and recorded in an output directory's settings, so that a job is never resumed in
+# the other padding.
 NUMZ_PADDING = "SEEDVR2X_TESTS_NUMZ_PADDING"
 
 
@@ -57,21 +58,15 @@ def main(argv: list[str] | None = None) -> int:
         description="SeedVR2 video upscaler for long runs.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
-    parser.add_argument(
-        "input",
-        type=Path,
-        help="video file, or directory of segments (its .mkv and .mp4 files, in name order: each"
-        " join a cut)",
-    )
+    parser.add_argument("input", type=Path, help="the source, one video file")
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
         required=True,
-        help="a .mkv path: one FFV1 master (video file input only); else a new or empty"
-        " directory: the output segments (FFV1 files, or PNG directories) and their manifest."
-        " A directory of segments is mirrored; a video file is cut at its shots, merged to"
-        " --min-segment",
+        help="a .mkv path: one FFV1 master; else a new or empty directory: the output segments"
+        " (FFV1 files, or PNG directories) and their manifest, the source cut at its shots,"
+        " merged to --min-segment",
     )
     # yuv420p10le by default (DESIGN.md, Output): what every encoder takes, converted here by
     # zscale, exactly, rather than later by sptenc's swscale (16-bit white at 943, not 940). The
@@ -128,8 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         type=_seconds,
         default=MIN_SEGMENT,
         metavar="SECONDS",
-        help="output segments of a video file last this long at least, each shorter one merged"
-        " into its shorter neighbour, as sptenc's -L (default: %(default)s; 0 keeps every cut)",
+        help="output segments last this long at least, each shorter one merged into its shorter"
+        " neighbour, as sptenc's -L (default: %(default)s; 0 keeps every cut)",
     )
     parser.add_argument(
         "--input-matrix",
@@ -325,16 +320,15 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.fingerprint import fingerprint
-    from seedvr2x.media.source import counted, declare, declare_directory, first_pass
+    from seedvr2x.media.source import counted, declare, first_pass
     from seedvr2x.runtime.job import (
         SHARED,
         JobError,
         check_seed,
         check_target,
-        job_shots,
         output_size,
-        parts_of,
         read_cuts,
+        shots_from_cuts,
         target_size,
     )
     from seedvr2x.runtime.manifest import NAME
@@ -342,10 +336,14 @@ def _run(args: argparse.Namespace) -> int:
 
     # The build, the source, the target, the cut list and the model files are checked before
     # anything touches the GPU, but for a job resumed, which is first checked against its record
-    # (its settings, environment, the GPU's included, and inputs), before its first pass, which
+    # (its settings, environment, the GPU's included, and input), before its first pass, which
     # isn't run again when nothing it depends on changed (DESIGN.md, Pause and resume).
     prior: _Prior | None = None
     try:
+        # The source is the only input (DESIGN.md, Input): a directory is refused before anything
+        # is done, the build's check included, so that nothing is made.
+        if args.input.is_dir():
+            raise JobError(_directory_refused(args.input))
         numz_padding = _numz_padding()
         if args.window is not None and args.window < 2 * SHARED + 1:
             raise JobError(
@@ -358,20 +356,11 @@ def _run(args: argparse.Namespace) -> int:
         )
         conversions = fingerprint()
         logger.info("ffmpeg %s, its conversions' fingerprint %s", ffmpeg_version, conversions[:16])
-        if args.input.is_dir():
-            if args.cuts:
-                # Until the detector for doubtful joins comes, each join is a cut (DESIGN.md,
-                # Input).
-                raise JobError("--cuts with a directory: each join of its segments is a cut")
-            declared = declare_directory(args.input, args.input_matrix, args.input_sar)
-        else:
-            declared = [declare(args.input, args.input_matrix, args.input_sar)]
-        # The size the frames are resized to, from what the source declares, its segments all
-        # alike; refused, before the first pass, when too small to pad (job.check_target).
-        stream = declared[0].stream
-        target = target_size(
-            stream.width, stream.height, declared[0].sample_aspect, args.resolution
-        )
+        declared = declare(args.input, args.input_matrix, args.input_sar)
+        # The size the frames are resized to, from what the source declares; refused, before the
+        # first pass, when too small to pad (job.check_target).
+        stream = declared.stream
+        target = target_size(stream.width, stream.height, declared.sample_aspect, args.resolution)
         check_target(target, args.resolution)
         cuts = read_cuts(args.cuts) if args.cuts else []
         directory = _output(args)
@@ -385,19 +374,14 @@ def _run(args: argparse.Namespace) -> int:
                 *(args, directory, cuts, declared, ffmpeg_version, conversions), numz_padding
             )
         if prior is not None and prior.known is not None:
-            passes = prior.known
+            found = prior.known
         else:
-            # Each input's content hashed meanwhile, for the manifest.
-            passes = [first_pass(each, hashed=directory is not None) for each in declared]
-        sources = [counted(each, done) for each, done in zip(declared, passes, strict=True)]
-        if args.input.is_dir():
-            frames = sum(source.frames for source in sources)
-            logger.info("%s: %d segments, %d frames", args.input, len(sources), frames)
-        parts = parts_of(sources)
-        shots = job_shots(parts, cuts)
+            # The source's content hashed meanwhile, for the manifest.
+            found = first_pass(declared, hashed=directory is not None)
+        source = counted(declared, found)
+        shots = shots_from_cuts(cuts, source.frames)
         check_seed(args.seed, shots)
-        segments, paths = _segments(args, parts, shots, directory)
-        source = sources[0]
+        segments, paths = _segments(args, source, shots, directory)
         out_height, out_width = output_size(target)
         logger.info(
             "%d shots, %d output segments; output %dx%d, square pixels",
@@ -444,7 +428,7 @@ def _run(args: argparse.Namespace) -> int:
             directory / NAME,
             identity.settings,
             identity.environment,
-            parts,
+            source,
             shots,
             [shot_layout(shot.frames, args.window) for shot in shots],
             segments,
@@ -523,7 +507,7 @@ def _run(args: argparse.Namespace) -> int:
                     writer.write(frames)
 
                 run_job(
-                    *(models, parts, shots, segments, target, args.seed, args.window, units),
+                    *(models, source, shots, segments, target, args.seed, args.window, units),
                     *(write, stop, args.color_correction == "split"),
                     numz_padding=numz_padding,
                 )
@@ -561,6 +545,37 @@ def _run(args: argparse.Namespace) -> int:
         args.format,
     )
     return 0
+
+
+def _directory_refused(path: Path) -> str:
+    """Why a directory is no input, and what to give instead (DESIGN.md, Input, the user's
+    decision of 2026-10-05)."""
+    # The source is the only gateway, so that every cut comes from seedvr2x's own detection or a
+    # cut list, and every output segment from its rules, never from an outside splitter's joins:
+    # of an earlier split's 411 joins, 63 scored under scdet's threshold of 10 and 14 under 4
+    # (research/docs/scene-detection.md). The joins given, checked with ffmpeg n9.0.2 on a
+    # 2,400-frame FFV1 master at 24000/1001 cut as sptenc's split cuts one (stream copy, the
+    # segment muxer, timestamps reset) into 156 Matroska segments: each gives every frame back,
+    # identical (framemd5) and in order. ffmpeg's concat demuxer starts each segment where the one
+    # before ends by its declared duration, its last timestamp plus its packets' 41 ms, where a
+    # frame lasts 41.708: 1 ms early at each of the 155 joins, the last frame 155 ms early. That
+    # is not the drift sptenc's ffmpeg/concat.go describes, of encoded segments counting their
+    # last frame for 42 ms, late. The frames stay 41 or 42 ms apart, which the first pass
+    # accepts, and the output is written at the declared rate, frame by frame; but a default
+    # read by ffmpeg (vfr) drops 3 of the 2,400 frames. sptenc's concat, with a duration line
+    # per segment and every timestamp snapped to the frame grid (ffmpeg/concat.go), gives the
+    # master's timestamps back, every one.
+    return (
+        f"{path}: a directory; seedvr2x takes one video file, the source, so that every cut comes"
+        " from its own detection or a cut list (--cuts), and every output segment from its rules."
+        " Give it the file the segments were split from, or join segments split losslessly back"
+        " into one file first, with ffmpeg's concat demuxer, which needs no other tool: ffmpeg -f"
+        " concat -i list.txt -c copy joined.mkv, list.txt beside them naming each in order, one"
+        " line each: file 'seg_000000.mkv'. seedvr2x reads every frame of that join, but its"
+        " timestamps drift off the frame grid, and other tools may drop frames. Segments of"
+        " sptenc's split can also be joined by sptenc, on the grid:"
+        f" sptenc concat {shlex.quote(str(path))} joined.mkv"
+    )
 
 
 def _kept(record: "Manifest | None", segments: int) -> str:
@@ -611,8 +626,8 @@ def _work(output: Path) -> Path:
 
 
 def _output(args: argparse.Namespace) -> Path | None:
-    """The directory the output segments go in, or None for one file. A .mkv path takes a video
-    file's output whole, one FFV1 master. Else the output is a new or empty directory of
+    """The directory the output segments go in, or None for one file. A .mkv path takes the
+    source's output whole, one FFV1 master. Else the output is a new or empty directory of
     segments (DESIGN.md, Output). Until assembly (milestone 6), the .mkv path stands for the
     one-file output, and the directory must be new or empty, which keeps another run's files out
     of what sptenc reads (DESIGN.md, Output), or hold a job's manifest, which resume reads back
@@ -629,8 +644,6 @@ def _output(args: argparse.Namespace) -> Path | None:
     if output.suffix.lower() == ".mkv":
         if output.is_dir():
             raise JobError(f"{output}: a directory; a .mkv path names the one FFV1 master")
-        if args.input.is_dir():
-            raise JobError(f"{output}: a directory of segments needs a directory as output")
         if args.format == "png":
             raise JobError(f"{output}: PNG output goes to a directory")
         return None
@@ -651,31 +664,21 @@ def _output(args: argparse.Namespace) -> Path | None:
 
 def _segments(
     args: argparse.Namespace,
-    parts: "Sequence[Part]",
+    source: "Source",
     shots: "Sequence[Shot]",
     directory: Path | None,
 ) -> "tuple[list[OutputSegment], list[Path]]":
-    """The output's segments and each one's path: one file (directory None); else named and cut
-    as sptenc's split, a directory's own, mirrored, or a video file's shots, merged to
-    --min-segment (DESIGN.md, Output)."""
-    from seedvr2x.runtime.job import JobError, OutputSegment, merged_segments, mirrored_segments
-    from seedvr2x.runtime.manifest import NAME, STATE, SUMS
+    """The output's segments and each one's path: one file (directory None); else the source's
+    shots, merged to --min-segment, and named as sptenc's split names its own (DESIGN.md,
+    Output)."""
+    from seedvr2x.runtime.job import OutputSegment, merged_segments
 
-    total = parts[-1].end
     if directory is None:
-        return [OutputSegment(args.output.stem, 0, total)], [args.output]
-    if args.input.is_dir():
-        segments = mirrored_segments(parts)
-    else:
-        frame_rate = parts[0].source.stream.frame_rate
-        segments = merged_segments(shots, total, frame_rate, args.min_segment)
+        return [OutputSegment(args.output.stem, 0, source.frames)], [args.output]
+    frame_rate = source.stream.frame_rate
+    segments = merged_segments(shots, source.frames, frame_rate, args.min_segment)
     suffix = "" if args.format == "png" else ".mkv"
-    paths = [directory / f"{segment.name}{suffix}" for segment in segments]
-    for path in paths:
-        # A mirrored segment takes its file's stem, which could be one of seedvr2x's own names.
-        if path.name in (NAME, STATE, SUMS) or path.name.endswith(".partial"):
-            raise JobError(f"{path.name}: a name seedvr2x keeps for itself in its output")
-    return segments, paths
+    return segments, [directory / f"{segment.name}{suffix}" for segment in segments]
 
 
 def _checksums_path(directory: Path | None, output: Path, output_format: str) -> Path:
@@ -712,7 +715,7 @@ def _settings(args: argparse.Namespace, cuts: list[int], numz_padding: bool) -> 
         "window": args.window,
         "format": args.format,
         "cuts": cuts,
-        "min_segment": None if args.input.is_dir() else str(args.min_segment),
+        "min_segment": str(args.min_segment),
         "input_matrix": args.input_matrix,
         "input_sar": None if args.input_sar is None else str(args.input_sar),
     }
@@ -777,8 +780,8 @@ def _unlock() -> None:
 @dataclass(frozen=True)
 class _Identity:
     """What a job's output depends on besides its frames (DESIGN.md, Pause and resume): its
-    settings, the models by hash, and the environment, both recorded for a directory's manifest
-    only; and the GPU it runs on."""
+    settings, the models by hash, and the environment, both recorded for an output directory's
+    manifest only; and the GPU it runs on."""
 
     settings: dict[str, object]
     device: "torch.device"
@@ -792,7 +795,7 @@ class _Prior:
     recorded: dict[str, Any]  # its manifest, as written
     identity: _Identity
     changed: list[str]  # its environment's differences, accepted (--accept-env-change)
-    known: "list[FirstPass] | None"  # the first pass's record, unless ffmpeg or conversions changed
+    known: "FirstPass | None"  # the first pass's record, unless ffmpeg or conversions changed
 
 
 def _identity(
@@ -827,13 +830,13 @@ def _prior(
     args: argparse.Namespace,
     directory: Path,
     cuts: list[int],
-    declared: "Sequence[Declared]",
+    declared: "Declared",
     ffmpeg_version: str,
     conversions: str,
     numz_padding: bool,
 ) -> _Prior:
     """The job recorded in directory, checked against the one asked before its first pass: the
-    same settings, environment and inputs, an input being its content (resume.identity), or
+    same settings, environment and source, the source being its content (resume.identity), or
     refused (JobError), but for an environment change accepted (--accept-env-change). The
     record of the first pass is trusted, and the pass isn't run again, unless ffmpeg or its
     conversions changed: the same bytes, decoded by the same build, give the same frames, and
@@ -848,29 +851,26 @@ def _prior(
     asked = {
         "settings": identity.settings,
         "environment": identity.environment,
-        "input": [_content(each.path) for each in declared],
+        "input": _content(declared.path),
     }
     found = resume.differences(resume.identity(recorded), resume.identity(asked))
     changed = [line for line in found if resume.section(line) == "environment"]
     if len(changed) < len(found) or (changed and not args.accept_env_change):
         raise _another_job(path, found, only_environment=len(changed) == len(found))
-    inputs: list[dict[str, Any]] = recorded["input"]
-    for each, entry in zip(declared, inputs, strict=True):
-        if entry["path"] != str(each.path.resolve()):
-            logger.info(
-                "%s: the input recorded at %s, moved: the same content", each.path, entry["path"]
-            )
+    entry: dict[str, Any] = recorded["input"]
+    if entry["path"] != str(declared.path.resolve()):
+        logger.info(
+            "%s: the input recorded at %s, moved: the same content", declared.path, entry["path"]
+        )
     before: dict[str, Any] = recorded["environment"]
     if any(before.get(key) != identity.environment.get(key) for key in resume.FIRST_PASS):
         return _Prior(recorded, identity, changed, None)
     logger.info("%s: the same input and ffmpeg, the first pass as recorded", directory)
-    return _Prior(
-        recorded, identity, changed, [FirstPass(e["frames"], e["sha256"]) for e in inputs]
-    )
+    return _Prior(recorded, identity, changed, FirstPass(entry["frames"], entry["sha256"]))
 
 
 def _content(path: Path) -> dict[str, object]:
-    """An input file's content, as a resume compares it: its size and SHA-256."""
+    """The source's content, as a resume compares it: its size and SHA-256."""
     from seedvr2x.media.files import sha256
 
     started = time.monotonic()

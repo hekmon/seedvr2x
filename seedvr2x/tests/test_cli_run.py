@@ -394,23 +394,6 @@ def test_yuv_by_default(tmp_path: Path) -> None:
         assert cli.main(["verify", str(tmp_path / output)]) == 0
 
 
-@pytest.mark.usefixtures("stand_in")
-def test_directory_mirrored(tmp_path: Path) -> None:
-    split = tmp_path / "split"
-    split.mkdir()
-    source(split / "b.mkv", 2)
-    source(split / "a.mkv", 3)
-    assert upscale(tmp_path, split, "mirror") == 0
-    out = tmp_path / "mirror"
-    assert sorted(p.name for p in out.iterdir()) == ["a.mkv", "b.mkv", "checksums", "manifest.json"]
-    assert sorted(p.name for p in (out / "checksums").iterdir()) == ["a.crc32", "b.crc32"]
-    assert indexes(out / "a.mkv") == [0, 1, 2]  # a.mkv comes first, by name
-    assert indexes(out / "b.mkv") == [3, 4]
-    content = json.loads((out / "manifest.json").read_text())
-    assert content["settings"]["min_segment"] is None
-    assert [s["seed"] for s in content["shots"]] == [42, 45]
-
-
 class Steps:
     """The stand-in's steps, each call recorded: "encode S", "window S:K", "decode S", S the
     shot's first frame; each encode's frames, summed up, by S. The call named `stop` raises
@@ -561,7 +544,7 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
     assert content["environment"]["gpu"] == "a stand-in"
     assert content["environment"]["python"].startswith("CPython 3.")
     assert "torchvision" in content["environment"]["packages"]
-    [entry] = content["input"]
+    entry = content["input"]
     assert entry["sha256"] == hashlib.sha256(source_path.read_bytes()).hexdigest()
     steps.calls.clear()
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
@@ -570,17 +553,6 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
         *("encode 4", "window 4:0", "window 4:1", "decode 4"),
     ]
     assert indexes(tmp_path / "one.mkv") == list(range(25))
-
-
-@pytest.mark.usefixtures("stand_in")
-@pytest.mark.parametrize("name", ["resume", "manifest.json", "checksums", "a.partial"])
-def test_own_names_refused(tmp_path: Path, caplog: pytest.LogCaptureFixture, name: str) -> None:
-    # A mirrored PNG segment takes its file's stem: not one of seedvr2x's own names.
-    split = tmp_path / "split"
-    split.mkdir()
-    source(split / f"{name}.mkv", 2)
-    assert upscale(tmp_path, split, "out", "--format", "png") == 1
-    assert f"{name}: a name seedvr2x keeps for itself" in caplog.text
 
 
 def stopped(tmp_path: Path, input_path: Path, output: str, *options: str) -> None:
@@ -1158,48 +1130,6 @@ def test_split_copy_again_interrupted(
         assert decoded(out) == decoded(tmp_path / "whole" / name)
 
 
-def test_split_copy_again_from_a_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
-) -> None:
-    # A directory's input: the copy made again from its own input file, from its first frame,
-    # those of the parts before it never decoded.
-    from seedvr2x.media.source import Source
-
-    split = tmp_path / "split"
-    split.mkdir()
-    for name, frames in (("a.mkv", 3), ("b.mkv", 2), ("c.mkv", 4)):
-        source(split / name, frames)
-    assert upscale(tmp_path, split, "whole", *SPLIT) == 0
-    steps.stop = "decode 5"
-    stopped(tmp_path, split, "out", *SPLIT)
-    copy = tmp_path / "out" / "resume" / "shot_000005" / "input.mkv"
-    frames = copied(copy, 4)
-    copy.unlink()
-    opened: list[str] = []
-    seen: list[str] = []
-    decoder = Source.decoder
-    decode = steps.decode
-
-    def recorded(self: Source) -> object:
-        opened.append(self.path.name)
-        return decoder(self)
-
-    def looked(*arguments: Any) -> None:
-        seen.append(copied(arguments[-1].copy, arguments[2]))
-        decode(*arguments)
-
-    from seedvr2x.runtime import run
-
-    monkeypatch.setattr(Source, "decoder", recorded)
-    monkeypatch.setattr(run, "decode_shot", looked)
-    steps.calls.clear()
-    steps.stop = None
-    assert upscale(tmp_path, split, "out", *SPLIT) == 0
-    assert steps.calls == ["decode 5"] and opened == ["c.mkv"] and seen == [frames]
-    for name in ("a.mkv", "b.mkv", "c.mkv"):
-        assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
-
-
 def test_split_one_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1468,20 +1398,6 @@ def test_verify(
     assert "manifest.json: not a manifest seedvr2x wrote" in caplog.text
 
 
-def test_checksums_of_png_segments_apart(tmp_path: Path, steps: Steps) -> None:
-    # A PNG segment's checksums take its directory's name whole: A and A.mkv, mirrored from A.mkv
-    # and A.mkv.mkv, keep theirs apart.
-    split = tmp_path / "split"
-    split.mkdir()
-    source(split / "A.mkv", 2)
-    source(split / "A.mkv.mkv", 3)
-    assert upscale(tmp_path, split, "out", "--format", "png") == 0
-    sums = tmp_path / "out" / "checksums"
-    assert sorted(p.name for p in sums.iterdir()) == ["A.crc32", "A.mkv.crc32"]
-    assert [len(checksums(sums / name)) for name in ("A.crc32", "A.mkv.crc32")] == [2, 3]
-    assert cli.main(["verify", str(tmp_path / "out")]) == 0
-
-
 def test_one_file_checksums_kept_until_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
@@ -1582,7 +1498,7 @@ def test_another_job_refused(
     content = source_path.read_bytes()
     source_path.write_bytes(source(tmp_path / "other.mkv", 25, "testsrc").read_bytes())
     text = refused(tmp_path, source_path, caplog, *JOB, "--accept-env-change")
-    assert "input[0].sha256" in text
+    assert "input.sha256" in text
     source_path.write_bytes(content)
     # Other code.
     from seedvr2x.runtime import manifest
@@ -1810,7 +1726,7 @@ def test_input_by_content(
     assert upscale(tmp_path, moved, "out", *JOB) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
     assert f"recorded at {source_path.resolve()}, moved: the same content" in caplog.text
-    [entry] = json.loads((tmp_path / "out" / "manifest.json").read_text())["input"]
+    entry = json.loads((tmp_path / "out" / "manifest.json").read_text())["input"]
     assert entry["path"] == str(moved.resolve())
     assert entry["modified_ns"] == moved.stat().st_mtime_ns
     assert entry["sha256"] == hashlib.sha256(moved.read_bytes()).hexdigest()
@@ -1875,12 +1791,34 @@ def test_probe_compared(
     stopped(tmp_path, source_path, "out", *JOB)
     manifest = tmp_path / "out" / "manifest.json"
     recorded = manifest.read_bytes()
-    assert json.loads(recorded)["input"][0]["primaries"] == ""  # untagged
+    assert json.loads(recorded)["input"]["primaries"] == ""  # untagged
     probe = examined.probe
     monkeypatch.setattr(
         examined, "probe", lambda path: replace(probe(path), color_primaries="bt709")
     )
-    assert 'input[0].primaries: "" -> "bt709"' in refused(tmp_path, source_path, caplog, *JOB)
+    assert 'input.primaries: "" -> "bt709"' in refused(tmp_path, source_path, caplog, *JOB)
+    assert manifest.read_bytes() == recorded
+
+
+def test_directory_job_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A job of older code, which read a directory of segments (DESIGN.md, Input: no input since):
+    # its manifest records a list of inputs, one per segment with its start in the job, and its
+    # own code. With the source, it is another job, refused as one, its manifest untouched.
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    manifest = tmp_path / "out" / "manifest.json"
+    content = json.loads(manifest.read_text())
+    entry = content["input"]
+    content["input"] = [{**entry, "start": 0, "frames": 3}, {**entry, "start": 3, "frames": 22}]
+    content["settings"].update(code="0" * 64, min_segment=None)
+    manifest.write_text(json.dumps(content))
+    recorded = manifest.read_bytes()
+    text = refused(tmp_path, source_path, caplog, *JOB)
+    assert "another job than the one asked" in text and "--accept-env-change" not in text
+    assert "settings.code" in text and 'input: [{"bytes": ' in text
     assert manifest.read_bytes() == recorded
 
 
@@ -1900,8 +1838,27 @@ def test_first_pass_compared_after_a_change(
     monkeypatch.setattr(examined, "scan", lambda path: replace(scan(path), frames=29))
     monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
     text = refused(tmp_path, source_path, caplog, *JOB, "--accept-env-change")
-    assert "input[0].frames: 25 -> 29" in text
+    assert "input.frames: 25 -> 29" in text
     assert manifest.read_bytes() == recorded
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_frames_left_after_the_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A job ends with the source's end checked (run.Inputs): its decoder finished, ffmpeg done
+    # with no error after the frames the first pass counted. A frame more than counted fails it.
+    from seedvr2x.media import source as examined
+
+    scan = examined.scan
+
+    def missed(path: Path) -> object:
+        found = scan(path)
+        return replace(found, frames=found.frames - 1)
+
+    monkeypatch.setattr(examined, "scan", missed)
+    assert upscale(tmp_path, source(tmp_path / "in.mkv"), "one.mkv") == 1
+    assert f"decoding with ffmpeg: frames left after {FRAMES - 1}" in caplog.text
 
 
 def test_package_change_recorded(
@@ -1971,61 +1928,6 @@ def test_driver_recorded_not_compared(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
     assert json.loads(manifest.read_text())["environment"]["driver"] == "another"
-
-
-def test_directory_resumed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
-    # The segments finished aren't decoded again; the one resumed is read from its first frame.
-    from seedvr2x.media.source import Source
-
-    split = tmp_path / "split"
-    split.mkdir()
-    for name, frames in (("a.mkv", 3), ("b.mkv", 2), ("c.mkv", 4)):
-        source(split / name, frames)
-    assert upscale(tmp_path, split, "whole", "--format", "png") == 0
-    read = dict(steps.read)
-    steps.stop = "decode 5"
-    stopped(tmp_path, split, "out", "--format", "png")
-    opened: list[str] = []
-    decoder = Source.decoder
-
-    def recorded(self: Source) -> object:
-        opened.append(self.path.name)
-        return decoder(self)
-
-    monkeypatch.setattr(Source, "decoder", recorded)
-    steps.calls.clear()
-    steps.stop = None
-    assert upscale(tmp_path, split, "out", "--format", "png") == 0
-    assert steps.calls == ["decode 5"] and opened == []
-    steps.stop = "encode 5"
-    stopped(tmp_path, split, "again", "--format", "png")
-    opened.clear()
-    steps.calls.clear()
-    steps.stop = None
-    assert upscale(tmp_path, split, "again", "--format", "png") == 0
-    assert steps.calls == ["encode 5", "window 5:0", "decode 5"] and opened == ["c.mkv"]
-    assert steps.read == read
-    for out in ("out", "again"):
-        for name in ("a", "b", "c"):
-            pngs = sorted((tmp_path / out / name).iterdir())
-            assert [p.read_bytes() for p in pngs] == [
-                p.read_bytes() for p in sorted((tmp_path / "whole" / name).iterdir())
-            ]
-
-
-def test_directory_moved(tmp_path: Path, steps: Steps) -> None:
-    # The segments of a directory moved elsewhere are the same input.
-    split = tmp_path / "split"
-    split.mkdir()
-    for name, frames in (("a.mkv", 3), ("b.mkv", 2)):
-        source(split / name, frames)
-    steps.stop = "decode 3"
-    stopped(tmp_path, split, "out", "--format", "png")
-    moved = split.rename(tmp_path / "moved")
-    steps.calls.clear()
-    steps.stop = None
-    assert upscale(tmp_path, moved, "out", "--format", "png") == 0
-    assert steps.calls == ["decode 3"]
 
 
 def test_one_writer_at_a_time(

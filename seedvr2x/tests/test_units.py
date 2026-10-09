@@ -17,7 +17,7 @@ from torch import Tensor
 
 from seedvr2x.media.source import Source
 from seedvr2x.runtime import model
-from seedvr2x.runtime.job import OutputSegment, Shot, parts_of
+from seedvr2x.runtime.job import OutputSegment, Shot
 from seedvr2x.runtime.manifest import Manifest
 from seedvr2x.runtime.shot import sample_windows, shot_layout
 from seedvr2x.runtime.units import STATE, DiskUnits, Units
@@ -55,7 +55,7 @@ def job(tmp_path: Path, shots: list[Shot], segments: list[OutputSegment]) -> Man
         tmp_path / "manifest.json",
         {"seed": 42, "window": 5},
         {},
-        parts_of([cast(Source, source)]),
+        cast(Source, source),
         shots,
         [shot_layout(shot.frames, 5) for shot in shots],
         segments,

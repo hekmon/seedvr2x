@@ -1,5 +1,5 @@
-"""A job's run: its shots upscaled in order, their frames read from the input files and written as
-they come (DESIGN.md, Pipeline, per shot), unit by unit (DESIGN.md, Pause and resume)."""
+"""A job's run: its shots upscaled in order, their frames read from the source and written as they
+come (DESIGN.md, Pipeline, per shot), unit by unit (DESIGN.md, Pause and resume)."""
 
 import logging
 import resource
@@ -19,8 +19,9 @@ from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.decode import Decoder, to_float32
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.files import make_directories
+from seedvr2x.media.source import Source
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer
-from seedvr2x.runtime.job import OutputSegment, Part, Shot
+from seedvr2x.runtime.job import OutputSegment, Shot
 from seedvr2x.runtime.model import Models
 from seedvr2x.runtime.shot import (
     CopyError,
@@ -56,7 +57,7 @@ class Copies:
 
 def run_job(
     models: Models,
-    parts: Sequence[Part],
+    source: Source,
     shots: Sequence[Shot],
     segments: Sequence[OutputSegment],
     target: tuple[int, int],
@@ -69,10 +70,10 @@ def run_job(
     *,
     numz_padding: bool = False,
 ) -> None:
-    """Upscale the shots of a job, which cover its parts in order, no shot spanning two
-    (job.job_shots), each with its own seed (Shot.seed), its frames resized to target
-    (job.target_size), its DiT windows capped at `window` latents; write(frames) takes the output
-    frames as they come, (n, H', W', 3) float32 in [0, 1], the segments' in turn.
+    """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
+    with its own seed (Shot.seed), its frames resized to target (job.target_size), its DiT windows
+    capped at `window` latents; write(frames) takes the output frames as they come, (n, H', W', 3)
+    float32 in [0, 1], the segments' in turn.
 
     A shot's units run in order: its encode, then its windows, each kept by `units` as it is
     done, then its decode. With units kept on disk, a segment's shots are all encoded and sampled
@@ -93,14 +94,14 @@ def run_job(
 
     numz_padding is for tests only (cli.NUMZ_PADDING): each encode's frames padded as numz pads
     them (shot.encode_shot)."""
-    stream = parts[0].source.stream
+    stream = source.stream
     copies = Copies(stream.width, stream.height, stream.frame_rate) if split else None
     groups = [
         [i for i, shot in enumerate(shots) if s.start <= shot.start < s.end] for s in segments
     ]
     if sorted(i for group in groups for i in group) != list(range(len(shots))):
         raise ValueError("the segments don't hold whole shots")
-    with Inputs(parts) as inputs:
+    with Inputs(source) as inputs:
         for segment, group in enumerate(groups):
             if units.finished(segment):
                 continue
@@ -299,43 +300,36 @@ def _copied(
 
 
 class Inputs:
-    """The job's input frames, read in order: a part's decoder is opened at the first frame asked
-    of it, and finished once every frame of the part is read, its count checked (Decoder). Frames
-    not asked for, those of shots a resume skips, are decoded and dropped: exact, as the first
-    pass counts them (provisional: seeking is DESIGN.md's open question, Frame-exact access). Used
-    as a context manager, which stops a decoder left open on an exception."""
+    """The source's frames, read in order: its decoder is opened at the first frame asked, and
+    finished once every frame is read, its count checked (Decoder). Frames not asked for, those of
+    shots a resume skips, are decoded and dropped: exact, as the first pass counts them
+    (provisional: seeking is DESIGN.md's open question, Frame-exact access). Used as a context
+    manager, which stops the decoder left open on an exception."""
 
-    def __init__(self, parts: Sequence[Part]) -> None:
-        self._parts = parts
-        self._part: Part | None = None
+    def __init__(self, source: Source) -> None:
+        self._source = source
         self._decoder: Decoder | None = None
-        self._position = 0  # the job's index of the next frame the open decoder gives
+        self._position = 0  # the index of the next frame the decoder gives
 
     def reader(self, shot: Shot) -> Callable[[int], npt.NDArray[np.float32]]:
         """read(n), giving the next n of shot's frames, (n, H, W, 3) float32 in [0, 1], from its
         first: shots are asked for in order, the frames between them dropped."""
-        part = next(part for part in self._parts if part.start <= shot.start < part.end)
-        if part is not self._part:
-            self._close()
-            self._part, self._decoder, self._position = part, part.source.decoder(), part.start
+        path = self._source.path
+        if self._decoder is None:
+            self._decoder = self._source.decoder()
         decoder = self._decoder
-        assert decoder is not None
         if self._position > shot.start:
             raise ValueError(f"frame {shot.start} asked, frame {self._position} is next")
         if self._position < shot.start:
             skipped = decoder.skip(shot.start - self._position)
             if skipped != shot.start - self._position:
-                raise MediaError(
-                    f"{part.source.path}: the stream ended after {decoder.decoded} frames"
-                )
+                raise MediaError(f"{path}: the stream ended after {decoder.decoded} frames")
             self._position = shot.start
 
         def read(count: int) -> npt.NDArray[np.float32]:
             frames = decoder.read(count)
             if frames.shape[0] != count:
-                raise MediaError(
-                    f"{part.source.path}: the stream ended after {decoder.decoded} frames"
-                )
+                raise MediaError(f"{path}: the stream ended after {decoder.decoded} frames")
             self._position += count
             return to_float32(frames)
 
@@ -343,11 +337,10 @@ class Inputs:
 
     def _close(self) -> None:
         """Finish the open decoder, its every frame read; else stop it."""
-        decoder, part = self._decoder, self._part
-        self._decoder, self._part = None, None
-        if decoder is None or part is None:
+        decoder, self._decoder = self._decoder, None
+        if decoder is None:
             return
-        if self._position == part.end:
+        if self._position == self._source.frames:
             decoder.finish()
         else:
             decoder.stop()

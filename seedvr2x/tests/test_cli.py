@@ -149,15 +149,14 @@ def hdr_file(path: Path, transfer: str) -> Path:
         ("smpte2084", "in.mkv: HDR, transfer smpte2084 (PQ): not supported: the model was trained"),
         ("arib-std-b67", "in.mkv: HDR, transfer arib-std-b67 (HLG): not supported: the model"),
         ("dolby vision", "in.mp4: Dolby Vision profile 5, its base layer Dolby's own"),
-        ("directory", "seg_000001.mkv: HDR, transfer smpte2084 (PQ): not supported"),
         ("first frame", "in.mkv: HDR, transfer smpte2084 (PQ) on its first frame, where the"),
     ],
 )
 def test_hdr_refused_before_the_first_pass(tmp_path: Path, kind: str, said: str) -> None:
     # With the source's other declared refusals (DESIGN.md, Not in the first version): before the
-    # first pass, the model files' check and torch, so no model loaded, and nothing written. Each
-    # segment of a directory is declared, so a PQ one after an SDR one is refused. PQ on the first
-    # frame alone, its container saying BT.709, is read by the same probe (media/probe.py).
+    # first pass, the model files' check and torch, so no model loaded, and nothing written. PQ on
+    # the first frame alone, its container saying BT.709, is read by the same probe
+    # (media/probe.py).
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
@@ -168,14 +167,9 @@ def test_hdr_refused_before_the_first_pass(tmp_path: Path, kind: str, said: str)
         source = dolby_vision_file(tmp_path / "in.mp4", record_box(5, 0))
     elif kind == "first frame":
         source = x265_file(tmp_path / "in.mkv", SDR_TAGS, f"{BT2020}:transfer=smpte2084")
-    elif kind == "directory":
-        source = tmp_path / "in"
-        source.mkdir()
-        hdr_file(source / "seg_000000.mkv", "bt2020-10")
-        hdr_file(source / "seg_000001.mkv", "smpte2084")
     else:
         source = hdr_file(tmp_path / "in.mkv", kind)
-    output = tmp_path / ("out" if kind == "directory" else "out.mkv")
+    output = tmp_path / "out.mkv"
     files = sorted(tmp_path.rglob("*"))
     args = [str(source), "-o", str(output), "--model-dir", str(tmp_path / "models")]
     result = subprocess.run(
@@ -184,6 +178,54 @@ def test_hdr_refused_before_the_first_pass(tmp_path: Path, kind: str, said: str)
     assert result.returncode == 1, result.stderr
     assert said in result.stderr
     assert sorted(tmp_path.rglob("*")) == files
+
+
+# EARLY, the build's check and its conversions' fingerprint exiting 4 as well.
+FIRST = """
+import sys
+
+from seedvr2x import cli
+from seedvr2x.media import ffmpeg, fingerprint, source
+from seedvr2x.runtime import weights
+
+
+def ran(*args, **kwargs):
+    sys.exit(4)
+
+
+ffmpeg.check = fingerprint.fingerprint = source.first_pass = weights.check_models = ran
+status = cli.main(sys.argv[1:])
+sys.exit(3 if "torch" in sys.modules else status)
+"""
+
+
+def test_directory_refused_first(tmp_path: Path) -> None:
+    # The source is the only input (DESIGN.md, Input): a directory of segments is refused before
+    # anything is done, the build's check included, saying how to join them; nothing is written,
+    # neither output, nor an output directory. The directory's name needs quoting for a shell, a
+    # space and an apostrophe, so that the sptenc command the message gives is checked quoted.
+    segments = tmp_path / "the film's segments"
+    segments.mkdir()
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        (segments / name).write_bytes(b"")
+    files = sorted(tmp_path.rglob("*"))
+    for output in ("out", "out.mkv"):
+        args = [str(segments), "-o", str(tmp_path / output), "--model-dir", str(tmp_path)]
+        result = subprocess.run(
+            [sys.executable, "-c", FIRST, *args], capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 1, result.stderr
+        said = f"{segments}: a directory; seedvr2x takes one video file, the source, so that"
+        assert said in result.stderr
+        assert "its own detection or a cut list (--cuts), and every output segment" in result.stderr
+        joined = "ffmpeg -f concat -i list.txt -c copy joined.mkv, list.txt beside them naming"
+        assert joined in result.stderr
+        # sptenc's join, on the frame grid, an option: seedvr2x never requires sptenc. The path as
+        # shlex.quote gives it, one word for a shell, its apostrophe written '"'"'.
+        quoted = f"'{tmp_path}/the film'\"'\"'s segments'"
+        sptenc = f"joined by sptenc, on the grid: sptenc concat {quoted} joined.mkv"
+        assert sptenc in result.stderr
+        assert sorted(tmp_path.rglob("*")) == files
 
 
 def test_verify_reads_no_frame_to_probe(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

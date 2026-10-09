@@ -1,4 +1,5 @@
-"""Output segments: sptenc's minimum length merge, their names, the manifest (DESIGN.md, Output).
+"""Output segments: sptenc's minimum length merge, their names, their writer, the manifest
+(DESIGN.md, Output).
 
 The merge tests are sptenc's own (core/scenes_test.go at vmafv1 5790944), its boundaries placed on
 a 25 fps grid as there: at(s) is frame 25 s, and a duration of s seconds is 25 s frames. The GPU
@@ -21,13 +22,13 @@ from test_weights import default_models
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.source import Source
+from seedvr2x.media.writer import SegmentWriter, Tags, Writer, count_packets, open_writer
 from seedvr2x.runtime.job import (
     OutputSegment,
     Shot,
     merge_short,
     merged_segments,
     min_segment_frames,
-    parts_of,
 )
 from seedvr2x.runtime.manifest import Manifest, code_sha256
 
@@ -139,32 +140,27 @@ def test_merged_segments_keep_whole_shots() -> None:
 
 
 def test_manifest(tmp_path: Path) -> None:
-    sources = [
-        SimpleNamespace(
-            path=tmp_path / name,
-            frames=frames,
-            stream=SimpleNamespace(
-                frame_rate=Fraction(25),
-                width=64,
-                height=48,
-                pix_fmt="yuv420p",
-                color_primaries="",
-                color_transfer="",
-            ),
-            sample_aspect=Fraction(1),
-            conversion=SimpleNamespace(describe=lambda: "YUV bt709, limited range, chroma left"),
-            sha256=f"the content of {name}",
-        )
-        for name, frames in (("a.mkv", 3), ("b.mkv", 2))
-    ]
-    for source in sources:
-        source.path.write_bytes(b"x" * source.frames)
-    parts = parts_of(cast(list[Source], sources))
+    source = SimpleNamespace(
+        path=tmp_path / "in.mkv",
+        frames=5,
+        stream=SimpleNamespace(
+            frame_rate=Fraction(25),
+            width=64,
+            height=48,
+            pix_fmt="yuv420p",
+            color_primaries="",
+            color_transfer="",
+        ),
+        sample_aspect=Fraction(1),
+        conversion=SimpleNamespace(describe=lambda: "YUV bt709, limited range, chroma left"),
+        sha256="the content of in.mkv",
+    )
+    source.path.write_bytes(b"x" * 7)
     record = Manifest(
         tmp_path / "manifest.json",
         {"seed": 42},
         {"gpu": "a GPU"},
-        parts,
+        cast(Source, source),
         [Shot(0, 3), Shot(3, 5)],
         [[(0, 1)], [(0, 1)]],
         [OutputSegment("a", 0, 3), OutputSegment("b", 3, 5)],
@@ -186,12 +182,12 @@ def test_manifest(tmp_path: Path) -> None:
     assert [s["seed"] for s in content["shots"]] == [42, 45]
     assert [(s["encoded"], s["windows_done"]) for s in content["shots"]] == [(True, 1), (False, 0)]
     assert [(s["latents"], s["windows"]) for s in content["shots"]] == [(1, [[0, 1]])] * 2
-    assert [(i["start"], i["frames"], i["bytes"]) for i in content["input"]] == [
-        (0, 3, 3),
-        (3, 2, 2),
-    ]
-    assert content["input"][0]["path"] == str((tmp_path / "a.mkv").resolve())
-    assert content["input"][1]["sha256"] == "the content of b.mkv"
+    # The source, the only input (DESIGN.md, Input): one record, where its file is, its size and
+    # content, and its frames.
+    entry = content["input"]
+    assert (entry["path"], entry["bytes"]) == (str((tmp_path / "in.mkv").resolve()), 7)
+    assert (entry["sha256"], entry["frames"]) == ("the content of in.mkv", 5)
+    assert "start" not in entry
     assert not (tmp_path / "manifest.json.partial").exists()
     with pytest.raises(ValueError, match="window 2 after 1"):
         record.window_done(0, 2)
@@ -206,6 +202,28 @@ def _usable() -> bool:
 
 
 @pytest.mark.skipif(not _usable(), reason="needs ffmpeg with zscale, scdet and ffv1")
+def test_segment_writer_routes_frames(tmp_path: Path) -> None:
+    frames = np.random.default_rng(0).random((5, 16, 32, 3), dtype=np.float32)
+    outputs = [(tmp_path / "a.mkv", 3), (tmp_path / "b.mkv", 2)]
+
+    def open_segment(path: Path) -> Writer:
+        return open_writer("gbrp16le", path, 32, 16, Fraction(25), Tags())
+
+    with SegmentWriter(outputs, open_segment) as writer:
+        for chunk in (frames[:2], frames[2:4], frames[4:]):
+            writer.write(chunk)
+    assert writer.written == 5
+    assert [count_packets(path) for path, _ in outputs] == [3, 2]
+    with pytest.raises(RuntimeError, match="stopped after 4 frames, in segment 2 of 2"):
+        with SegmentWriter(outputs, open_segment) as writer:
+            writer.write(frames[:4])
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.mkv", "b.mkv"]  # no partial left
+    with pytest.raises(ValueError, match="1 frames beyond"):
+        with SegmentWriter(outputs, open_segment) as writer:
+            writer.write(np.concatenate([frames, frames[:1]]))
+
+
+@pytest.mark.skipif(not _usable(), reason="needs ffmpeg with zscale, scdet and ffv1")
 @pytest.mark.parametrize(
     ("options", "message"),
     [
@@ -214,6 +232,7 @@ def _usable() -> bool:
         (["-o", "out", "--min-segment", "-1"], "negative"),
         (["-o", "out.mp4"], "a video file name"),
         (["-o", "dir.mkv"], "a .mkv path names the one FFV1 master"),
+        (["-o", "full"], "not empty, and no manifest.json to resume from"),
         (["-o", "out", "--resolution", "0"], "not a whole number above 0"),
         (["-o", "out", "--seed", "-1"], "--seed -1"),
         (["-o", "out", "--seed", "4293967296"], "between 0 and 4293967295"),
@@ -230,6 +249,10 @@ def test_output_refusals_before_torch(tmp_path: Path, options: list[str], messag
     )
     (tmp_path / "file.txt").write_text("")
     (tmp_path / "dir.mkv").mkdir()
+    # An output directory holding another run's files, and no manifest: what sptenc reads must be
+    # the job's own (DESIGN.md, Output).
+    (tmp_path / "full").mkdir()
+    (tmp_path / "full" / "old.mkv").write_bytes(b"")
     # Models the check accepts, under the default names: the seed's refusals come after it.
     default_models(tmp_path)
     args = [str(source), "--model-dir", ".", *options]
