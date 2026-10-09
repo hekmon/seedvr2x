@@ -36,7 +36,7 @@ from seedvr2x import cli
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.runtime import weights
-from seedvr2x.runtime.job import output_size
+from seedvr2x.runtime.job import output_size, padded_size
 from seedvr2x.runtime.shot import decode_shot, padded_length
 
 
@@ -60,13 +60,17 @@ def stand_in_encode(
     count: int,
     target: tuple[int, int],
     seed: int,
+    *,
+    numz_padding: bool = False,
 ) -> torch.Tensor:
     """A latent (T', 1, 1, 16) in channel-major memory, as the VAE's, saying the shot's first frame
-    (channel 0), its frame count (1) and the target's height and width (2, 3)."""
+    (channel 0), its frame count (1), the target's height and width (2, 3), and whether the frames
+    were padded as numz pads them (6: cli.NUMZ_PADDING)."""
     assert read(count).shape[0] == count
     latent = torch.zeros(16, (padded_length(count) - 1) // 4 + 1, 1, 1)
     latent[0], latent[1] = seed - SEED, count
     latent[2], latent[3] = target
+    latent[6] = numz_padding
     return latent.permute(1, 2, 3, 0)
 
 
@@ -79,13 +83,15 @@ def stand_in_windows(
 
 def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[torch.Tensor]:
     """The VAE's decode of a stand-in latent (stand_in_encode), in its slices, the first two
-    latents then one at a time: frames (3, t, H, W) at the target's size padded to multiples of
-    16, as the encoder's input is (model.input_transform), in [-1, 1]: each saying its index in
-    the job, divided by 1000, NaN in the padding, which the decode crops; NaN throughout for the
-    frames of a latent whose channel 4 is NaN."""
+    latents then one at a time: frames (3, t, H, W) at the target's size padded as the encoder's
+    input is (model.input_transform: job.padded_size, or numz's multiples of 16), in [-1, 1]: each
+    saying its index in the job, divided by 1000, NaN in the padding, which the decode crops; NaN
+    throughout for the frames of a latent whose channel 4 is NaN."""
     first, frames = int(latent[0, 0, 0, 0]), int(latent[0, 0, 0, 1])
     height, width = int(latent[0, 0, 0, 2]), int(latent[0, 0, 0, 3])
-    padded = (-(-height // 16) * 16, -(-width // 16) * 16)
+    padded = padded_size((height, width))
+    if latent[0, 0, 0, 6]:
+        padded = (-(-height // 16) * 16, -(-width // 16) * 16)
     # Every latent says so: the shot's own windows, none of another's.
     assert (latent[..., 0] == first).all() and (latent[..., 1] == frames).all()
     assert latent.shape[0] == (padded_length(frames) - 1) // 4 + 1
@@ -416,6 +422,7 @@ class Steps:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.read: dict[int, str] = {}
+        self.numz_padding: list[bool] = []  # each encode's, as run_job passed it
         self.stop: str | None = None
         self.poison: str | None = None
         self.damage: str | None = None
@@ -432,11 +439,16 @@ class Steps:
         count: int,
         target: tuple[int, int],
         seed: int,
+        *,
+        numz_padding: bool = False,
     ) -> torch.Tensor:
         frames = read(count)
         self.read[seed - SEED] = hashlib.md5(frames.tobytes()).hexdigest()
+        self.numz_padding.append(numz_padding)
         self._call(f"encode {seed - SEED}")
-        latent = stand_in_encode(models, lambda n: frames[:n], count, target, seed)
+        latent = stand_in_encode(
+            models, lambda n: frames[:n], count, target, seed, numz_padding=numz_padding
+        )
         if self.poison == f"encode {seed - SEED}":
             latent[-1, 0, 0, 5] = math.nan
         return latent
@@ -1234,8 +1246,8 @@ def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps
     # The two passes give each shot exactly what lab gives its frames in the decode's slices,
     # histograms pooled over the shot: the second maps the values the first counted, and the
     # reference is the copy's frames through the encoder's transform in float32 (DESIGN.md, Colour
-    # correction, Numerics), its padding cropped as the decode's (target 100 x 133, decoded 112 x
-    # 144, written 100 x 132).
+    # correction, Numerics), its padding cropped as the decode's (target 100 x 133, decoded 128 x
+    # 160: 12 rows and 11 columns reflected, 16 black; written 100 x 132).
     from seedvr2x.media.decode import to_float32
     from seedvr2x.media.source import examine
     from seedvr2x.runtime import colour, model
@@ -1260,7 +1272,7 @@ def test_lab_as_one_batch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps
         count = end - start
         reference = transform(pad_4n1(torch.from_numpy(frames[start:end])).permute(0, 3, 1, 2))
         assert reference.dtype == torch.float32
-        assert reference.shape[2:] == (112, 144)  # padded to multiples of 16
+        assert reference.shape[2:] == (128, 160) == padded_size(target)
         reference = reference[:, :count, :height, :width].permute(1, 0, 2, 3)
         values = torch.tensor([(start + frame) / 500 - 1 for frame in range(count)])
         content = values.view(-1, 1, 1, 1).expand(-1, 3, height, width)
@@ -1451,10 +1463,14 @@ def contents(directory: Path) -> dict[str, bytes | None]:
 
 
 def refused(
-    tmp_path: Path, source_path: Path, caplog: pytest.LogCaptureFixture, *options: str
+    tmp_path: Path,
+    source_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    *options: str,
+    output: str = "out",
 ) -> str:
     caplog.clear()
-    assert upscale(tmp_path, source_path, "out", *options) == 1
+    assert upscale(tmp_path, source_path, output, *options) == 1
     return caplog.text
 
 
@@ -1550,6 +1566,52 @@ def test_another_job_refused(
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
+
+
+def test_numz_padding_for_tests_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # numz's padding (cli.NUMZ_PADDING), which holds the GPU tests' output to numz's: set, every
+    # encode gets it, the output is the same (the stand-in's decode crops numz's padding then),
+    # and the job's settings record it, so that a resume in the other padding is refused; unset,
+    # the settings don't name it.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "ours", *JOB) == 0
+    assert steps.numz_padding == [False] * 3
+    ours = json.loads((tmp_path / "ours" / "manifest.json").read_text())
+    assert "numz_padding" not in ours["settings"]
+    monkeypatch.setenv(cli.NUMZ_PADDING, "1")
+    steps.numz_padding.clear()
+    assert upscale(tmp_path, source_path, "numz", *JOB) == 0
+    assert steps.numz_padding == [True] * 3
+    assert f"{cli.NUMZ_PADDING}=1: numz's padding, for seedvr2x's tests only" in caplog.text
+    numz = json.loads((tmp_path / "numz" / "manifest.json").read_text())
+    assert numz["settings"] == {**ours["settings"], "numz_padding": True}
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(tmp_path / "numz" / name) == decoded(tmp_path / "ours" / name)
+    # Every encode of the other paths too: one file, each shot decoded as soon as it is sampled
+    # (run_job), and lab, each encode copying the frames it reads (run._sample).
+    for output, options in (("numz.mkv", JOB[:4]), ("numz_lab", (*JOB, *LAB))):
+        steps.numz_padding.clear()
+        assert upscale(tmp_path, source_path, output, *options) == 0
+        assert steps.numz_padding == [True] * 3, output
+    # A job stopped in one padding isn't resumed in the other.
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "numz_stopped", *JOB)
+    monkeypatch.delenv(cli.NUMZ_PADDING)
+    assert "settings.numz_padding: true -> null" in refused(
+        tmp_path, source_path, caplog, *JOB, output="numz_stopped"
+    )
+    stopped(tmp_path, source_path, "ours_stopped", *JOB)
+    monkeypatch.setenv(cli.NUMZ_PADDING, "1")
+    assert "settings.numz_padding: null -> true" in refused(
+        tmp_path, source_path, caplog, *JOB, output="ours_stopped"
+    )
+    # Anything else than 1 is refused, set but empty too.
+    for value in ("yes", ""):
+        monkeypatch.setenv(cli.NUMZ_PADDING, value)
+        text = refused(tmp_path, source_path, caplog, *JOB, output="other")
+        assert f"{cli.NUMZ_PADDING}={value!r}: for seedvr2x's tests only, 1 or unset" in text
 
 
 # The model check, which the stand-in replaces (stand_in_model), as the module was imported.

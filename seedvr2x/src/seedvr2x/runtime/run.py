@@ -65,6 +65,8 @@ def run_job(
     write: Callable[[npt.NDArray[np.float32]], None],
     stop: Stop | None = None,
     lab: bool = False,
+    *,
+    numz_padding: bool = False,
 ) -> None:
     """Upscale the shots of a job, which cover its parts in order, no shot spanning two
     (job.job_shots), each with its own seed (Shot.seed), its frames resized to target
@@ -86,7 +88,10 @@ def run_job(
     against them (DESIGN.md, Colour correction). A copy is derived data: one missing, or whose
     checksums are, is made again from the input before the shot's windows, its latent and
     windows kept; one its decode can't read whole and intact (CopyError) is removed, its
-    checksums with it, and the run stops there, for the next run to make it again."""
+    checksums with it, and the run stops there, for the next run to make it again.
+
+    numz_padding is for tests only (cli.NUMZ_PADDING): each encode's frames padded as numz pads
+    them (shot.encode_shot)."""
     stream = parts[0].source.stream
     copies = Copies(stream.width, stream.height, stream.frame_rate) if lab else None
     groups = [
@@ -101,11 +106,11 @@ def run_job(
             sample = (models, inputs, shots, target, seed, window, units, stop, copies)
             if units.persistent:
                 for index in group:
-                    _sample(index, *sample)
+                    _sample(index, *sample, numz_padding)
                 _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write")
             for index in group:
                 if not units.persistent:
-                    _sample(index, *sample)
+                    _sample(index, *sample, numz_padding)
                     _begin(stop, f"shot {index + 1}/{len(shots)}'s decode")
                 _decode(models, shots, index, target, window, units, write, copies)
 
@@ -128,11 +133,12 @@ def _sample(
     units: Units,
     stop: Stop | None,
     copies: Copies | None,
+    numz_padding: bool,
 ) -> None:
     """Shot `index`'s encode and windows, those not kept yet; with copies, the frames the encode
     reads copied, the copy and its checksums whole before the latent is recorded, so recorded
     with it, and the copy of a shot encoded already made again if it or its checksums are
-    missing."""
+    missing. numz_padding as run_job takes it."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
     layout = shot_layout(shot.frames, window)
@@ -150,11 +156,14 @@ def _sample(
         started = _started(models)
         read = inputs.reader(shot)
         if copies is None:
-            latent = encode_shot(models, read, shot.frames, target, shot.seed(seed))
+            latent = encode_shot(
+                *(models, read, shot.frames, target, shot.seed(seed)), numz_padding=numz_padding
+            )
         else:
             with _copying(units, index, copies) as copy:
                 latent = encode_shot(
-                    models, _copied(read, copy), shot.frames, target, shot.seed(seed)
+                    *(models, _copied(read, copy), shot.frames, target, shot.seed(seed)),
+                    numz_padding=numz_padding,
                 )
         finite(latent, f"{name}'s encode")
         units.save_latent(index, latent)

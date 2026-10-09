@@ -28,6 +28,7 @@ from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 
 from seedvr2x.runtime import weights
+from seedvr2x.runtime.job import BLACK, padding
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
@@ -195,24 +196,43 @@ def to_input(frames: npt.NDArray[np.float32]) -> Tensor:
     return torch.from_numpy(frames).to(torch.float16)
 
 
-def input_transform(target: tuple[int, int]) -> Callable[[Tensor], Tensor]:
-    """numz's input preparation (src/core/generation_utils.py:72-84) of frames (T, C, H, W): resized
-    to target, (height, width) (torchvision's bicubic, antialias on), values clamped to [0, 1],
-    bottom and right padded to multiples of 16, normalised to [-1, 1], and moved to (C, T, H, W).
+def input_transform(
+    target: tuple[int, int], *, numz_padding: bool = False
+) -> Callable[[Tensor], Tensor]:
+    """numz's input preparation (src/core/generation_utils.py:72-84) of frames (T, C, H, W), but
+    for its padding: resized to target, (height, width) (torchvision's bicubic, antialias on),
+    values clamped to [0, 1], padded at the bottom and right (pad), normalised to [-1, 1], and
+    moved to (C, T, H', W'), (H', W') = job.padded_size(target).
 
     The resize is NaResize's (side_resize.py: TVF.resize, bicubic, antialias on) to an explicit
     size, the display aspect's (job.target_size). For square pixels it is the size torchvision
-    computes from NaResize's int, so the same call, bit for bit (tests/test_job.py)."""
+    computes from NaResize's int, so the same call, bit for bit (tests/test_job.py).
+
+    numz_padding is for tests only (cli.NUMZ_PADDING): numz's own padding, DivisiblePad((16, 16)),
+    zeros up to multiples of 16, in which milestone 1's regression holds the output to numz's."""
     size = list(target)
     return Compose(
         [
             Lambda(lambda x: TVF.resize(x, size, InterpolationMode.BICUBIC, antialias=True)),
             Lambda(lambda x: torch.clamp(x, 0.0, 1.0)),
-            DivisiblePad((16, 16)),
+            DivisiblePad((16, 16)) if numz_padding else Lambda(pad),
             Normalize(0.5, 0.5),
             Lambda(lambda x: x.permute(1, 0, 2, 3)),
         ]
     )
+
+
+def pad(frames: Tensor) -> Tensor:
+    """frames (T, C, H, W) padded for the model (DESIGN.md, Pipeline step 0): at the bottom, the
+    rows job.padding gives, reflected from the picture (torch's reflect, the edge row not repeated:
+    row H + k is row H - 2 - k), then job.BLACK rows of zeros, black once normalised; at the right,
+    columns the same way when any are reflected. As research/scripts/numerics_patch.py's Pad pads
+    for NUM_PAD=reflect>=8+black+16, the variant measured, bit for bit: the reflection in one call,
+    then the zeros in another (research/docs/numerics.md, reflect+black+16)."""
+    rows, columns = padding((frames.shape[-2], frames.shape[-1]))
+    reflected = torch.nn.functional.pad(frames, (0, columns, 0, rows), mode="reflect")
+    black = (0, BLACK if columns else 0, 0, BLACK)
+    return torch.nn.functional.pad(reflected, black, mode="constant", value=0.0)
 
 
 def synchronize(device: torch.device) -> None:

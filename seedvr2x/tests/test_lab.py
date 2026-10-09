@@ -26,7 +26,9 @@ OpenCV's float conversion, which approximates them: up to 0.6 units off on rando
 average. Both outputs go through the same one, so the comparison holds; on milestone 1's input ours
 reads ΔE lf 0.6287 here, 0.6321 by quality_metrics.py.
 
-The run goes through the CLI in a process of its own, as test_regression.py's does.
+The run goes through the CLI in a process of its own, as test_regression.py's does, in numz's
+padding (cli.NUMZ_PADDING), numz_lab.mkv's, until lab gives way to split (DESIGN.md, Colour
+correction).
 """
 
 import math
@@ -41,6 +43,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from seedvr2x.cli import NUMZ_PADDING
 from seedvr2x.runtime import colour
 
 MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")
@@ -164,6 +167,7 @@ def test_lab_against_numz(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, NUMZ_PADDING: "1"},
     )
     assert run.returncode == 0, run.stderr[-3000:]
     source = planes(m1 / "input_rgb.mkv", "gbrp", "u1")

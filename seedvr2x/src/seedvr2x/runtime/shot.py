@@ -6,7 +6,9 @@ consecutive windows sharing SHARED latents; the shared latents are mixed with co
 the whole shot is decoded in one stream, its frames written as they come. The noise is drawn once
 for the shot and sliced per window. Every step keeps numz's order and dtypes
 (src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives numz's one-batch
-output, bit for bit (milestone 1). Only the latents are ever whole in memory.
+output, bit for bit, in numz's padding (milestone 1); in seedvr2x's (DESIGN.md, Pipeline step 0),
+numz's patched to pad alike (research/scripts/numerics_patch.py, NUM_PAD=reflect>=8+black+16).
+Only the latents are ever whole in memory.
 
 The steps are apart, as the resumable units of DESIGN.md (Pause and resume) are: the encode
 (encode_shot), each window (sample_windows), the decode (merge_windows, decode_shot). Each takes
@@ -187,6 +189,7 @@ def upscale_shot(
     window: int | None = None,
     *,
     reseed_windows: bool = False,
+    numz_padding: bool = False,
 ) -> None:
     """Upscale one shot of `count` frames, read as they are needed, and write its frames as they
     come out: its steps in a row.
@@ -199,9 +202,10 @@ def upscale_shot(
 
     reseed_windows is for tests only. Each window then reseeds and draws its own noise, as the
     stitching study's reference implementation did (blend_patch.py, STITCH_LATENT), so that the
-    windows, the mixing and the decode can be checked against it bit for bit.
+    windows, the mixing and the decode can be checked against it bit for bit. numz_padding is
+    for tests only too (encode_shot).
     """
-    latent = encode_shot(models, read, count, target, seed)
+    latent = encode_shot(models, read, count, target, seed, numz_padding=numz_padding)
     layout = shot_layout(count, window)
     if reseed_windows:
         sampled = _sample_reseeded(models, latent, layout, seed)
@@ -220,14 +224,21 @@ def encode_shot(
     count: int,
     target: tuple[int, int],
     seed: int,
+    *,
+    numz_padding: bool = False,
 ) -> Tensor:
     """The VAE latent of a shot of `count` frames, read as they are needed (upscale_shot): (T', h,
     w, 16) bfloat16 on the device, in the channel-major memory the encode gives it, which the
-    noise drawn from it depends on (model.encode). T' is 1 + (padded_length(count) - 1) / 4."""
+    noise drawn from it depends on (model.encode). T' is 1 + (padded_length(count) - 1) / 4, and
+    (h, w) the padded frames' size (job.padded_size) over 8.
+
+    numz_padding is for tests only (cli.NUMZ_PADDING): the frames padded as numz pads them
+    (model.input_transform), so that milestone 1's regression holds the output to numz's."""
     padded = padded_length(count)
     # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
     model.set_seed(seed + ENCODE_SEED_OFFSET)
-    return model.encode_stream(models, encoder_inputs(models, read, count, target), padded)
+    inputs = encoder_inputs(models, read, count, target, numz_padding=numz_padding)
+    return model.encode_stream(models, inputs, padded)
 
 
 def encoder_inputs(
@@ -235,11 +246,15 @@ def encoder_inputs(
     read: Callable[[int], npt.NDArray[np.float32]],
     count: int,
     target: tuple[int, int],
+    *,
+    numz_padding: bool = False,
 ) -> Iterator[Tensor]:
     """The encoder's input for a shot of `count` frames, read as they are needed (encode_shot),
     slice by slice: each (C, t, H, W) in [-1, 1], COMPUTE_DTYPE on the device, t following
-    model.encode_slices over the shot padded to 4n + 1."""
-    return _transformed(models, read, count, target, model.to_input, COMPUTE_DTYPE)
+    model.encode_slices over the shot padded to 4n + 1; numz_padding as encode_shot takes it."""
+    return _transformed(
+        models, read, count, target, model.to_input, COMPUTE_DTYPE, numz_padding=numz_padding
+    )
 
 
 def reference_inputs(
@@ -252,6 +267,8 @@ def reference_inputs(
     (_correct): the frames through the encoder's transform (model.input_transform) in float32,
     slice by slice as encoder_inputs gives the encoder's input: each
     (C, t, H, W) float32 in [-1, 1] on the device (DESIGN.md, Colour correction, Numerics).
+    Padded by default whatever the encoder's padding (numz_padding): lab takes each frame's
+    picture alone, cropped as the decode's frames are (_frames, _decoded), which no padding moves.
 
     Not the encoder's own input: numz's numerics cast the frames to bfloat16 before the resize
     (generation_phases.py:380-413), which rounds 89% of 8-bit codes up, +0.114 level on average,
@@ -268,12 +285,14 @@ def _transformed(
     target: tuple[int, int],
     to_tensor: Callable[[npt.NDArray[np.float32]], Tensor],
     dtype: torch.dtype,
+    *,
+    numz_padding: bool = False,
 ) -> Iterator[Tensor]:
     """The frames of a shot of `count` frames, read as they are needed, made tensors by
     to_tensor (input_slices) and through model.input_transform(target) as dtype on the device,
     slice by slice: each (C, t, H, W) in [-1, 1], t following model.encode_slices over the shot
     padded to 4n + 1."""
-    transform = model.input_transform(target)
+    transform = model.input_transform(target, numz_padding=numz_padding)
     # (t, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388), then
     # prepared slice by slice: every step works frame by frame.
     sizes = model.encode_slices(models, padded_length(count))
@@ -343,8 +362,9 @@ def _decoded(
     first: int,
 ) -> Iterator[Tensor]:
     """The shot's frames as the VAE decodes them (generation_phases.py:900-958), slice by slice:
-    each (t, H, W, C), a view of the decode's (C, t, H, W) without the padding, cropped to size
-    (height, width), in [-1, 1] unclamped, on the device; each checked (finite) before it goes."""
+    each (t, H, W, C), a view of the decode's (C, t, H', W') cropped to size (height, width) from
+    its top left, which drops the padding, whatever its amount, at the bottom and right
+    (job.padding), in [-1, 1] unclamped, on the device; each checked (finite) before it goes."""
     height, width = size
     written = 0
     for decoded in model.decode_stream(models, merged.to(models.device)):
@@ -461,7 +481,8 @@ def _copy_failing(copy: Path) -> Generator[None]:
 
 def _frames(slices: Iterator[Tensor], height: int, width: int) -> Callable[[int], Tensor]:
     """take(n), the next n frames of slices (reference_inputs), each slice (C, t, H', W'): (n, C,
-    height, width), each frame's top left, as the decode's frames are cropped (_decoded)."""
+    height, width), each frame's top left, without its padding, as the decode's frames are
+    cropped (_decoded)."""
     pending: list[Tensor] = []
 
     def take(n: int) -> Tensor:

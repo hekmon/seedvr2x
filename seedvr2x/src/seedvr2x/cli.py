@@ -37,6 +37,15 @@ VIDEO_SUFFIXES = frozenset(
 
 logger = logging.getLogger("seedvr2x")
 
+# numz's padding of the frames before the model, DivisiblePad((16, 16)), zeros up to multiples of
+# 16, in place of seedvr2x's (DESIGN.md, Pipeline step 0), for seedvr2x's GPU tests only, never a
+# user's: milestone 1's regression and test_lab hold the output to numz's own with it. They run
+# the CLI in a process of its own, the allocator being set before torch is imported (main), so an
+# environment variable reaches it, and no option shows it to users. Read once (_run), passed down
+# as a parameter, and recorded in a directory's settings, so that a job is never resumed in the
+# other padding.
+NUMZ_PADDING = "SEEDVR2X_TESTS_NUMZ_PADDING"
+
 
 def main(argv: list[str] | None = None) -> int:
     """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status."""
@@ -319,6 +328,7 @@ def _run(args: argparse.Namespace) -> int:
         SHARED,
         JobError,
         check_seed,
+        check_target,
         job_shots,
         output_size,
         parts_of,
@@ -328,12 +338,13 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime.manifest import NAME
     from seedvr2x.runtime.weights import ModelError, check_models
 
-    # The build, the source, the cut list and the model files are checked before anything
-    # touches the GPU, but for a job resumed, which is first checked against its record (its
-    # settings, environment, the GPU's included, and inputs), before its first pass, which isn't
-    # run again when nothing it depends on changed (DESIGN.md, Pause and resume).
+    # The build, the source, the target, the cut list and the model files are checked before
+    # anything touches the GPU, but for a job resumed, which is first checked against its record
+    # (its settings, environment, the GPU's included, and inputs), before its first pass, which
+    # isn't run again when nothing it depends on changed (DESIGN.md, Pause and resume).
     prior: _Prior | None = None
     try:
+        numz_padding = _numz_padding()
         if args.window is not None and args.window < 2 * SHARED + 1:
             raise JobError(
                 f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
@@ -353,6 +364,13 @@ def _run(args: argparse.Namespace) -> int:
             declared = declare_directory(args.input, args.input_matrix, args.input_sar)
         else:
             declared = [declare(args.input, args.input_matrix, args.input_sar)]
+        # The size the frames are resized to, from what the source declares, its segments all
+        # alike; refused, before the first pass, when too small to pad (job.check_target).
+        stream = declared[0].stream
+        target = target_size(
+            stream.width, stream.height, declared[0].sample_aspect, args.resolution
+        )
+        check_target(target, args.resolution)
         cuts = read_cuts(args.cuts) if args.cuts else []
         directory = _output(args)
         # By their headers, in a second: before the resume's comparison, which hashes the files
@@ -361,7 +379,9 @@ def _run(args: argparse.Namespace) -> int:
         check_models(args.model_dir, args.dit_model, args.vae_model)
         if directory is not None and (directory / NAME).is_file():
             _lock(directory)
-            prior = _prior(args, directory, cuts, declared, ffmpeg_version, conversions)
+            prior = _prior(
+                *(args, directory, cuts, declared, ffmpeg_version, conversions), numz_padding
+            )
         if prior is not None and prior.known is not None:
             passes = prior.known
         else:
@@ -376,8 +396,6 @@ def _run(args: argparse.Namespace) -> int:
         check_seed(args.seed, shots)
         segments, paths = _segments(args, parts, shots, directory)
         source = sources[0]
-        stream = source.stream
-        target = target_size(stream.width, stream.height, source.sample_aspect, args.resolution)
         out_height, out_width = output_size(target)
         logger.info(
             "%d shots, %d output segments; output %dx%d, square pixels",
@@ -389,7 +407,9 @@ def _run(args: argparse.Namespace) -> int:
         if prior is not None:
             identity = prior.identity
         else:
-            identity = _identity(args, cuts, directory, ffmpeg_version, conversions)
+            identity = _identity(
+                *(args, cuts, directory, ffmpeg_version, conversions), numz_padding
+            )
         work = _work(args.output) if directory is None and args.color_correction == "lab" else None
     except (MediaError, JobError) as error:
         logger.error("%s", error)
@@ -501,6 +521,7 @@ def _run(args: argparse.Namespace) -> int:
                 run_job(
                     *(models, parts, shots, segments, target, args.seed, args.window, units),
                     *(write, stop, args.color_correction == "lab"),
+                    numz_padding=numz_padding,
                 )
         except CopyError as error:
             # Derived data, removed (run_job): a resume makes it again.
@@ -671,11 +692,12 @@ def _empty(directory: Path) -> bool:
     return all(entry.name == f"{NAME}.partial" for entry in directory.iterdir())
 
 
-def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
-    """The settings a manifest records, those a resume must find again."""
+def _settings(args: argparse.Namespace, cuts: list[int], numz_padding: bool) -> dict[str, object]:
+    """The settings a manifest records, those a resume must find again; numz's padding only when
+    the tests ask for it (NUMZ_PADDING), so that a user's manifest never names it."""
     from seedvr2x.runtime.manifest import code_sha256
 
-    return {
+    settings: dict[str, object] = {
         "seedvr2x": version("seedvr2x"),
         "code": code_sha256(),
         "dit_model": _model(args.model_dir, args.dit_model),
@@ -690,6 +712,23 @@ def _settings(args: argparse.Namespace, cuts: list[int]) -> dict[str, object]:
         "input_matrix": args.input_matrix,
         "input_sar": None if args.input_sar is None else str(args.input_sar),
     }
+    if numz_padding:
+        settings["numz_padding"] = True
+    return settings
+
+
+def _numz_padding() -> bool:
+    """Whether seedvr2x's tests ask for numz's padding (NUMZ_PADDING=1), said when they do;
+    refused (JobError) when the variable is set to anything else."""
+    from seedvr2x.runtime.job import JobError
+
+    value = os.environ.get(NUMZ_PADDING)
+    if value is None:
+        return False
+    if value != "1":
+        raise JobError(f"{NUMZ_PADDING}={value!r}: for seedvr2x's tests only, 1 or unset")
+    logger.warning("%s=1: numz's padding, for seedvr2x's tests only", NUMZ_PADDING)
+    return True
 
 
 # The output directories this process holds locked (_lock), until main returns.
@@ -758,13 +797,14 @@ def _identity(
     directory: Path | None,
     ffmpeg_version: str,
     conversions: str,
+    numz_padding: bool,
 ) -> _Identity:
     """The job's identity, refused (JobError) without a CUDA GPU computing in bfloat16; its model
     files are checked before (weights.check_models). The models are hashed before any GPU
     work."""
     from seedvr2x.runtime.job import JobError
 
-    settings = _settings(args, cuts) if directory is not None else {}
+    settings = _settings(args, cuts, numz_padding) if directory is not None else {}
     import torch
 
     if not torch.cuda.is_available():
@@ -786,6 +826,7 @@ def _prior(
     declared: "Sequence[Declared]",
     ffmpeg_version: str,
     conversions: str,
+    numz_padding: bool,
 ) -> _Prior:
     """The job recorded in directory, checked against the one asked before its first pass: the
     same settings, environment and inputs, an input being its content (resume.identity), or
@@ -799,7 +840,7 @@ def _prior(
 
     path = directory / NAME
     recorded = read(path)
-    identity = _identity(args, cuts, directory, ffmpeg_version, conversions)
+    identity = _identity(args, cuts, directory, ffmpeg_version, conversions, numz_padding)
     asked = {
         "settings": identity.settings,
         "environment": identity.environment,

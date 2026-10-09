@@ -120,7 +120,8 @@ def test_vae_slices() -> None:
     assert vae_slices(45) == [5, *[4] * 10]
 
 
-# Frames resized 2x, as milestone 1's are, to a height the transform pads (24 to 32).
+# Frames resized 2x, as milestone 1's are, to a height the transform pads (24 rows to 48: 8
+# reflected, 16 black).
 SOURCE, TARGET = (12, 16), (24, 32)
 
 
@@ -175,7 +176,7 @@ def cpu_models() -> model.Models:
 def test_streamed_encode_is_the_one_pass_encode(cpu_models: model.Models, count: int) -> None:
     # The shot read in slices, each prepared and encoded as it comes, must give the latent of the
     # whole shot prepared and encoded at once, bit for bit, in the same memory layout (the noise
-    # drawn from it depends on it).
+    # drawn from it depends on it). The 32 rows are padded to 64 (16 reflected, 16 black).
     frames = np.random.default_rng(count).random((count, 32, 48, 3), dtype=np.float32)
     transform = model.input_transform((32, 48))
     padded = padded_length(count)
@@ -187,7 +188,7 @@ def test_streamed_encode_is_the_one_pass_encode(cpu_models: model.Models, count:
             for part in input_slices(Reads(frames), count, model.encode_slices(cpu_models, padded))
         )
         streamed = model.encode_stream(cpu_models, slices, padded)
-    assert streamed.shape == one_pass.shape == ((padded - 1) // 4 + 1, 4, 6, 16)
+    assert streamed.shape == one_pass.shape == ((padded - 1) // 4 + 1, 8, 6, 16)
     assert torch.equal(streamed, one_pass)
     assert streamed.stride() == one_pass.stride()
 

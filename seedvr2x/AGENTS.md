@@ -104,12 +104,19 @@ uv run pytest
 - `tests/test_regression.py` (GPU) holds every change to the runtime or the vendored code to
   milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames,
   with numz's 7B fp16, with seedvr2x's own 7B, and with seedvr2x's sharp 7B against numz's run
-  of its sharp 7B. Its references, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how
-  to make them are in its docstring.
-- `tests/test_lab.py` (GPU) holds `lab` to milestone 5 on the same input: at least as good as
-  numz's `lab` on the metrics that apply to one window without a ground truth, within DESIGN.md's
-  tolerances, and close to its output. Its reference, `numz_lab.mkv`, sits beside the
-  regression's; how to make it is in its docstring.
+  of its sharp 7B, all in numz's padding. seedvr2x's own padding, the default, is held
+  bit-identical to numz patched to pad the same way (`numerics_patch.py`'s `NUM_PAD`) at 1080p,
+  at 720p and on a crop whose width isn't a multiple of 16. Its references, in the `m1/`
+  directory of `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its docstring.
+- numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
+  cases and `test_lab.py` run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment
+  (`cli.NUMZ_PADDING`), which a directory's manifest records, so that a job is never resumed in
+  the other padding. `test_regression.py`'s padding cases and the other GPU tests run in the
+  default padding.
+- `tests/test_lab.py` (GPU) holds `lab` to milestone 5 on the same input, in numz's padding: at
+  least as good as numz's `lab` on the metrics that apply to one window without a ground truth,
+  within DESIGN.md's tolerances, and close to its output. Its reference, `numz_lab.mkv`, sits
+  beside the regression's; how to make it is in its docstring.
 
 ## Comments and documents
 
