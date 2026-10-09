@@ -1,8 +1,8 @@
 seedvr2-research
 Copyright 2026 Edouard Hur
 
-seedvr2x/ carries its own NOTICE, for the SeedVR2 model code it vendors and the colour code it
-ports. The submodules in upstream/ (numz's ComfyUI-SeedVR2_VideoUpscaler at 4490bd1,
+seedvr2x/ carries its own NOTICE, for the SeedVR2 model code it vendors and adapts. The
+submodules in upstream/ (numz's ComfyUI-SeedVR2_VideoUpscaler at 4490bd1,
 ByteDance-Seed's SeedVR at e4de8c2) are pinned references, not part of this repository's own
 files: they keep their own licences.
 
