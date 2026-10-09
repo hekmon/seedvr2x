@@ -257,10 +257,11 @@ def encode_stream(models: Models, slices: Iterable[Tensor], frames: int) -> Tens
     [-1, 1] as input_transform gives it, t following encode_slices. Returns encode's latent bit
     for bit, (T', h, w, 16) in channel-major memory.
 
-    The steps are those of the runner's vae_encode (core/infer.py) and the VAE's slicing_encode:
-    the same slices, with the same causal memory states, then the posterior's mode (diffusers'
-    DiagonalGaussianDistribution: the first half of the channels), shifted and scaled. Only the
-    input is never whole in memory."""
+    Adapted from numz's vae_encode (src/core/infer.py:117) and slicing_encode
+    (src/models/video_vae_v3/modules/attn_video_vae.py:1254), ByteDance's (e4de8c2) as numz
+    modified them, Apache-2.0 (NOTICE). The steps are theirs: the same slices, with the same
+    causal memory states, then the posterior's mode (diffusers' DiagonalGaussianDistribution: the
+    first half of the channels), shifted and scaled. Only the input is never whole in memory."""
     runner, vae = models.runner, models.runner.vae
     scale = runner.config.vae.scaling_factor
     shift = runner.config.vae.get("shifting_factor", 0.0)
@@ -320,10 +321,11 @@ def decode_stream(models: Models, latent: Tensor) -> Iterator[Tensor]:
     """VAE decode of latent (T', h, w, 16), slice by slice: frames (C, t, H, W) in [-1, 1],
     unclamped, as they come.
 
-    The steps are those of the runner's vae_decode (core/infer.py) and the VAE's slicing_decode:
-    the same scaling, the same slices (the first two latents, then one at a time) with the same
-    causal memory states. So the frames are the one-pass decode's, bit for bit; only their
-    concatenation is left out.
+    Adapted from numz's vae_decode (src/core/infer.py:203) and slicing_decode
+    (src/models/video_vae_v3/modules/attn_video_vae.py:1278), ByteDance's (e4de8c2) as numz
+    modified them, Apache-2.0 (NOTICE). The steps are theirs: the same scaling, the same slices
+    (the first two latents, then one at a time) with the same causal memory states. So the frames
+    are the one-pass decode's, bit for bit; only their concatenation is left out.
     """
     runner, vae = models.runner, models.runner.vae
     scale = runner.config.vae.scaling_factor

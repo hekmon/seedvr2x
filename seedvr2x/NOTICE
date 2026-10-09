@@ -1,7 +1,8 @@
 seedvr2x
 Copyright 2026 Edouard Hur
 
-This product includes the SeedVR2 model code, in src/seedvr2x/vendor/:
+This product includes the SeedVR2 model code and its text embeddings (pos_emb.pt, neg_emb.pt), in
+src/seedvr2x/vendor/:
 
 - SeedVR, Copyright (c) 2025 Bytedance Ltd. and/or its affiliates, under the Apache License,
   Version 2.0 (https://github.com/ByteDance-Seed/SeedVR, commit e4de8c2). Its video VAE files
@@ -15,4 +16,12 @@ The files changed for seedvr2x say so on the line under their original header.
 It also includes, ported to src/seedvr2x/runtime/colour.py, the CIELAB conversions and the
 histogram matching of ComfyUI-SeedVR2_VideoUpscaler's `lab` colour correction (numz and
 contributors, src/utils/color_fix.py at commit 4490bd1), under the Apache License, Version 2.0.
+That file says what was changed.
+
+It also includes, adapted in src/seedvr2x/runtime/model.py (encode_stream, decode_stream), the
+VAE encode and decode of ComfyUI-SeedVR2_VideoUpscaler (numz and contributors, commit 4490bd1):
+VideoDiffusionInfer's vae_encode and vae_decode, in src/core/infer.py, and VideoAutoencoderKL's
+slicing_encode and slicing_decode, in src/models/video_vae_v3/modules/attn_video_vae.py. They are
+numz's modified copies of SeedVR's own (commit e4de8c2: projects/video_diffusion_sr/infer.py and
+models/video_vae_v3/modules/attn_video_vae.py). All are under the Apache License, Version 2.0.
 That file says what was changed.
