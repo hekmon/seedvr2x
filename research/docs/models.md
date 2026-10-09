@@ -7,7 +7,11 @@
 > [DESIGN.md](../../seedvr2x/DESIGN.md#phase-2-the-other-models); BlockSwap's power-cap
 > explanation tested with [`scripts/swap_idle.py`](../scripts/swap_idle.py). SeedVR2 `4490bd1`,
 > `flash_attn_2`, one batch of 45 frames, 1080p, `--color_correction none` with `lab` rendered
-> from the same run. Four animated clips; live action is not measured.
+> from the same run. Four animated clips; live action is not measured. Since then,
+> [colour.md](colour.md#step-6-the-sharp-7b-for-the-eyes)'s step 6 put the sharp 7B before the
+> user's eyes, and [FORMATS.md](../../models/FORMATS.md) and
+> [VALIDATION.md](../../models/VALIDATION.md) measured seedvr2x's own phase-2 files and
+> ByteDance's current 3B: the notes below say what that changes here.
 
 In short (4 animated clips of 45 frames, a ×2 upscale of a mildly degraded input to 1080p; each
 model paired at the same seed with its fp16 parent, or with 7B fp16, and judged against the
@@ -26,11 +30,22 @@ seed spreads):
   colour are better on 2 clips, worse on 2. Its DiT is 34% faster, but 15 s saved on a 215 s
   run is 7% of the time, and its DiT peak (20.3 GiB at batch 45) is above Q4_K_M's (17.2).
   **3B fp8** stays near 3B fp16 (closer on detail and flicker, +0.05 to +0.11 ΔE00 on colour).
+  These figures ran numz's files, ByteDance's first 3B weights, which ByteDance replaced on
+  2025-06-22 ([Models](#models)). The current 3B's outputs lie 36.5 dB from the first's (RGB
+  PSNR between masters, mean of 8 clips at 1080p), about as far as the sharp 7B's from the 7B's
+  (35.5). Neither 3B in fp16 (6.8 GB) comes as close to the source as the sharp 7B's dynamic
+  GGUF (4.8 GB), and the user's eyes find both systematically worse than it
+  ([VALIDATION.md](../../models/VALIDATION.md#the-3b-at-1080p)).
 - **The sharp 7B is the closest of all models to the source:** PSNR-Y +0.40 to +0.67 dB on all 4
   clips (the seed ranges don't overlap), VMAF +1.9 to +3.5, colour error −0.09 to −0.68 ΔE00,
   less flicker, LPIPS lower on 2 clips; with `lab` the gains shrink (+0.27 to +0.47 dB) but
   remain. Despite its name it adds no more high-frequency texture than 7B fp16 (2–10% less on
-  average). Same architecture and cost as 7B fp16.
+  average). Same architecture and cost as 7B fp16. On 8 clips with `split` it stays closer by
+  PSNR-Y and VMAF, not by LPIPS or DISTS (0.1230 against 0.1211, 0.1054 against 0.1034;
+  [VALIDATION.md](../../models/VALIDATION.md#the-3b-at-1080p)). On the user's eyes it is
+  seedvr2x's default model: on 75 windows of 4K and 1080p crops they preferred it or saw no
+  difference on 67 (it 27, the regular 7B 8; colour.md's
+  [step 6](colour.md#step-6-the-sharp-7b-for-the-eyes)).
 - **Quantization moves the output less than a change of seed:** 40.0–47.8 dB between a quantized
   model and its parent at the same seed, against 37.3–44.4 dB between two seeds of 7B fp16
   (about the same on one clip). Its error is small but systematic: the seed's averages out,
@@ -46,8 +61,11 @@ seed spreads):
 ## Why it matters for seedvr2x
 
 DESIGN.md asked whether v1 supports the 7B fp16 model only, or also the fp8, GGUF Q4_K_M and 3B
-weights from the start; design has since kept v1 to the 7B fp16 and moved the other models to
-a [phase 2 after v1](../../seedvr2x/DESIGN.md#phase-2-the-other-models). Small GPUs need them:
+weights from the start; design has since kept v1 to the two 7Bs in fp16, the sharp one by
+default, and moved the other models to a
+[phase 2 after v1](../../seedvr2x/DESIGN.md#phase-2-the-other-models), with no 3B; seedvr2x's
+own smaller files of both 7Bs are measured in [FORMATS.md](../../models/FORMATS.md) (the
+weights) and [VALIDATION.md](../../models/VALIDATION.md) (the video). Small GPUs need them:
 [vram.md's recipe](vram.md#recipe-per-card-size-validated) runs 8–16 GB cards on Q4_K_M with
 all 36 blocks swapped, and the 7B fp16 weights alone (15.35 GiB) don't fit a 16 GB card. Each
 extra model costs code (GGUF dequantisation adapted from city96, the 3B DiT's cache quirk) and
@@ -65,7 +83,7 @@ to the source as another seed of 7B fp16 does.
 | 7B fp16 | `seedvr2_ema_7b_fp16.safetensors` | 16.5 GB | fp16 weights, cast to bf16 per layer under autocast | – (the reference) |
 | 7B fp8 | `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors` | 8.5 GB | fp8 e4m3fn weights (the last block fp16), cast per layer | 7B fp16, its parent |
 | 7B Q4_K_M | `seedvr2_ema_7b-Q4_K_M.gguf` | 4.8 GB | GGUF 4-bit, dequantized per layer | 7B fp16, its parent |
-| 3B fp16 | `seedvr2_ema_3b_fp16.safetensors` | 6.8 GB | fp16, a smaller DiT (32 blocks) | 7B fp16: a different model |
+| 3B fp16 | `seedvr2_ema_3b_fp16.safetensors` | 6.8 GB | fp16, a smaller DiT (32 blocks); ByteDance's first 3B weights | 7B fp16: a different model |
 | 3B fp8 | `seedvr2_ema_3b_fp8_e4m3fn.safetensors` | 3.4 GB | fp8 e4m3fn | 3B fp16, its parent |
 | 7B sharp | `seedvr2_ema_7b_sharp_fp16.safetensors` | 16.5 GB | fp16; ByteDance's "sharp" 7B weights, same architecture | 7B fp16: different weights |
 
@@ -81,8 +99,12 @@ e4m3fn: compared element by element, all 1,097 fp8 tensors match that cast bit f
 31 it keeps in fp16 match the fp32 values rounded to fp16, where a re-cast of numz's fp16 file
 would differ on 0.28% of the values. Its blocks' RoPE tables differ as a result (rounded to fp8
 except block 35's), which is [bug 24](../bugs/24-rope-wrapper-late-binding.md)'s case. The 3B
-fp8 file shows the same pattern against its fp16 file and is probably cast the same way; its
-fp32 master isn't available to prove it.
+fp8 file shows the same pattern against its fp16 file and is cast the same way, from ByteDance's
+first 3B master, which ByteDance replaced on 2025-06-22: numz's 3B fp16 and fp8 files are that
+master rounded to fp16 and cast straight to e4m3fn, all 635 tensors of each, and agree with the
+current master on 4.9% and 96% of the values
+([FORMATS.md](../../models/FORMATS.md#numzs-files-against-bytedances-masters)). Every 3B figure
+in this document ran those first weights.
 
 All use the same VAE (`ema_vae_fp16`). numz's CLI downloads each from its registry and checks
 its sha256; the sharp file was fetched with the CLI's own `download_weight` (sha256 verified).
@@ -353,7 +375,10 @@ pays the first moves of every block):
   clips (fp8 always further, Q4_K_M nearly always closer) argues against chance.
 - **Fidelity is not quality.** The model re-renders ([numerics.md](numerics.md#the-model-re-renders));
   closer to the source can mean redrawing less. The metrics compare models, they don't rate
-  them; no visual review was done for this question.
+  them; these runs had no visual review. The user's eyes judged the sharp 7B against the 7B later,
+  on 4K and 1080p crops (colour.md's [step 6](colour.md#step-6-the-sharp-7b-for-the-eyes)), and
+  both 3Bs against the sharp 7B's dynamic GGUF
+  ([VALIDATION.md](../../models/VALIDATION.md#the-3b-at-1080p)).
 - **numz's implementations:** the fp8 file is numz's ("mixed", the last block in fp16), the GGUF
   path numz's city96-derived dequantisation. A seedvr2x reimplementation must reproduce them;
   its own fp8 or GGUF numerics would need their own check.
