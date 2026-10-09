@@ -40,7 +40,23 @@ def scan(path: Path) -> Scan:
     command = [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "level+info"),
         *input_args(path),
-        *("-map", "0:v:0", "-vf", FILTERS, "-fps_mode", "passthrough", "-f", "null", "-"),
+        *("-map", "0:v:0", "-vf", FILTERS, "-fps_mode", "passthrough"),
+        # The null output encodes in microseconds, 1:1000000, settb's AVTB (AV_TIME_BASE_Q) and so
+        # the filters' own time base, not in its default of one tick per frame at the declared
+        # rate: there, the timestamps of a file drifting off the frame grid, as segments joined by
+        # ffmpeg's concat demuxer do (cli._directory_refused), put two frames on one tick wherever
+        # the drift crosses half a frame, and the null muxer reports a "non monotonically
+        # increasing dts" error, which ERROR would take for a decode error: 19 of them on a
+        # 2,400-frame join at 24000/1001, with ffmpeg n9.0.2 and 6.1.1, none with the option; its
+        # master gives none either way. Written as a number, which older ffmpeg takes too:
+        # "filter", the same here, is taken from 6.1 on only, 5.1 and 6.0 parse the value with
+        # av_parse_ratio and exit on it, "Invalid time base: filter" (fftools/ffmpeg_opt.c,
+        # ffmpeg_mux_init.c), and ffmpeg.check checks filters, encoders and decoders, not options.
+        # The frames are printed by the filters, before the encoder: their lines came out the
+        # same with or without the option, byte for byte, on that join and on its master, with
+        # both builds, and the null muxer was given the same packets with 1:1000000 as with
+        # "filter", in 1/1000000 (-stats_mux_pre).
+        *("-enc_time_base:v", "1:1000000", "-f", "null", "-"),
     ]
     process = subprocess.Popen(
         command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace"

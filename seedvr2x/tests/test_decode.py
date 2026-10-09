@@ -18,6 +18,7 @@ from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion
 from seedvr2x.media.decode import Decoder, decode_command, to_float32
 from seedvr2x.media.ffmpeg import MediaError, input_args
 from seedvr2x.media.probe import probe
+from seedvr2x.media.scan import Scan, scan
 from seedvr2x.media.source import examine
 from seedvr2x.media.writer import FFV1Writer, Tags
 
@@ -438,6 +439,33 @@ def test_vfr_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(MediaError, match="variable frame rate"):
         examine(path)
+
+
+def test_drifted_join_scanned_without_errors(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The join the refusal of a directory gives (cli._directory_refused): 32 frames at
+    # 24000/1001 split losslessly, one per segment, joined by ffmpeg's concat demuxer, each
+    # segment starting 41 ms after the one before, where a frame lasts 41.708. From frame 30 on,
+    # half a frame off the grid: no error for the first pass to report, every frame counted, and
+    # the steady 41 ms accepted.
+    master, joined, listed = tmp_path / "master.mkv", tmp_path / "joined.mkv", tmp_path / "list"
+    frames = 32
+    run(
+        *("-f", "lavfi", "-i", "testsrc2=s=64x48:r=24000/1001", "-frames:v", str(frames)),
+        *("-c:v", "ffv1", "-g", "1", str(master)),
+    )
+    run(
+        *("-i", str(master), "-map", "0:v", "-c", "copy", "-f", "segment", "-reset_timestamps"),
+        *("1", "-segment_frames", ",".join(str(k) for k in range(1, frames))),
+        str(tmp_path / "seg_%06d.mkv"),
+    )
+    listed.write_text("".join(f"file 'seg_{k:06d}.mkv'\n" for k in range(frames)))
+    run("-f", "concat", "-i", str(listed), "-c", "copy", str(joined))
+    assert scan(joined) == Scan(frames, frames - 1, 41000, 41000)
+    source = examine(joined)
+    assert (source.frames, source.stream.frame_rate) == (frames, Fraction(24000, 1001))
+    assert "reported errors" not in caplog.text
 
 
 def test_interlaced_refused(tmp_path: Path) -> None:
