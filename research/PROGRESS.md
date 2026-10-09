@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-06 10:15 CEST
+Last update: 2026-10-09 12:30 CEST
 
 ## 0. Setup
 
@@ -235,6 +235,23 @@ temporal regression.
       that every detector missed. The user found them; TransNetV2 scored 0.21 and 0.16, scdet 1.8
       and 1.3. A one-shot stretch in the same flight scored higher (0.23), so no threshold
       separates them there. The user proposes setting the threshold at the plan stage
+- [x] The threshold below 0.3 (2026-10-09, `scd_scores.py round --thresholds`: each cell's
+      candidates counted per threshold, detections as seedvr2x makes them): 0.3 stays. On
+      animation 0.2 finds 6–13 more cuts per hour for 75–81 more false cuts and 0.15 10–22 for
+      133–145, 6 to 14 false cuts per cut found where 0.5 to 0.3 took 2.5; live action gains 2–4
+      per hour (recall 0.98 at 0.3). 77–81 of 0.3's 92 misses per hour of animation score under
+      0.1, beyond any threshold. No labelled row scores 0.2–0.3: only a cut share there rising to
+      the next band's (6 in 13) would make 0.2 the trade 0.3 was
+- [x] Native 4K animation at 1080p (2026-10-09): the film downscaled losslessly to 1080p, and an
+      x264 encode of it, score within 0.016 of the 4K source on every frame (the missed cuts 0.204
+      and 0.154, the one-shot stretch 0.233): the same detections at 0.2 to 0.5. These misses come
+      from the motion, not the resolution
+- [x] Neutral labels (2026-10-09, the user's decision): the two live-action films and the DVD
+      episode are live-1, live-2 and dvd-sitcom in the scripts too (`scd_scores.py`'s KINDS), their
+      data renamed with them; every summary, estimate and both rounds' rebuilds identical before
+      and after
+- [ ] Optional: a third labelled round at TransNetV2 0.2–0.3 (about 30 animated rows, 10 more at
+      0.15–0.2; new strips for the band without another detector), should a lower default be wanted
 
 ## 4. Frame-exact access into long-GOP sources (CPU only)
 
@@ -261,6 +278,8 @@ temporal regression.
       decode started at a CRA drops its RASL pictures silently, never shows a wrong one. The first
       4K remaster has closed GOPs (an IDR every 24 frames) and decodes at 204 fps on 16 threads
 - [ ] Real VOB, broadcast TS, open-GOP MPEG-2, open-GOP HEVC in MP4 and TS
+- [x] The synthetic M2TS excerpt's source (2026-10-09): S1, its 2,896 frames S1's 6,936 to 9,832
+      but 9,831, md5 for md5 ([docs/seeking.md](docs/seeking.md))
 - [x] Doc ([docs/seeking.md](docs/seeking.md)) + decision brief (2026-10-02)
 
 ## 5. Decode resume granularity
@@ -298,11 +317,31 @@ temporal regression.
       −1.4 to −3.0) for 2% speed; 3B fp16 perceptually worse on every clip (LPIPS, DISTS); the
       sharp 7B the closest to the source of all (+0.40 to +0.67 dB on every clip, beyond the seed
       ranges), and not sharper
+- [x] models.md brought up to date (2026-10-09): the sharp 7B is seedvr2x's default on the user's
+      eyes (colour.md's step 6, 67 of 75 windows); every 3B figure ran ByteDance's first 3B
+      weights (replaced 2025-06-22; the current 3B 36.5 dB from them, models/VALIDATION.md); phase
+      2's files in models/FORMATS.md and VALIDATION.md
 - [x] Power cap: refuted. Idle pauses as long as the moves cost their full duration; the GPU sat at
       577 MHz with the power cap active throughout. Q4_K_M swap 36 really costs +0.30 s per batch
       at 1080p batch 5 (+3.6%): from the second batch on, the copies back to the CPU run 4.4 times
       faster (host memory reused)
 - [x] Doc + decision brief (2026-10-03)
+
+## After the RMA (healthy GPU)
+
+The 2026-10-01/02 run records were lost with /tmp; every timing in vram.md, attention.md,
+benchmarking.md and stitching.md was taken with the card's power cap already active (its clocks
+down to 577 MHz in some sessions). Values hold, times don't.
+- [ ] CPU, possible now: quality.md's and stitching.md's metric tables re-made from the surviving
+      frames (about 1.25 h of CPU), vram.md's frame differences, output.md's sizes
+- [ ] Numerics: a shot's end padded by repeating its last frame (ByteDance) against mirroring it
+      (numz): the repeat arm on cuts.md's 29 cut shots, then the 8 clips cut to 42 and 44 frames
+      (about 1.2 GPU h); the decode's chroma kernel: Catmull-Rom, spline36 and lanczos on the 8
+      clips against the existing runs, whose inputs had bilinear chroma (about 0.5 GPU h)
+- [ ] The lost records' runs, back to back on the healthy card where times matter: stitching's
+      cost model, the benchmarking reference and drift, vram.md's time and memory models,
+      attention.md, quality.md's and output.md's times (about 5.4 GPU h; 7 h with the numerics
+      items, which, like the memory figures, could run on the faulty card too, 3–4× slower)
 
 ## Other
 
