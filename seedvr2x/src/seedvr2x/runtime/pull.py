@@ -38,18 +38,24 @@ REVISION = "c14a2bc4aab04cf38ad9b0d324014c4213f07048"
 @dataclass(frozen=True)
 class Pin:
     """A file of REPO at REVISION: its size, in bytes, its SHA-256, in hex, and the role it takes
-    as a model file (the DiT's or the VAE's), None for another file."""
+    as a model file (the DiT's, the VAE's or the shot detector's), None for another file."""
 
     size: int
     sha256: str
     role: Role | None = None
 
 
+# The shot detector's file, TransNetV2's weights (DESIGN.md, Input, Shot detection), named by
+# itself. Provisional (implementation, 2026-10-09; DESIGN.md names no option for it): with
+# --model-dir, read from that directory by this name.
+DETECTOR = "transnetv2.safetensors"
+
 # v1's files (DESIGN.md, Weights), read from REVISION on 2026-10-09 without downloading them: each
 # SHA-256 is the file's line of SHA256SUMS there, which the Hub's API gives as its LFS SHA-256 too,
 # and each size the API's (HfApi.get_paths_info); both as the model conversation recorded them at
-# the upload. tests/test_pull.py holds them to the revision. TransNetV2's weights come with the
-# shot detector.
+# the upload. tests/test_pull.py holds them to the revision. TransNetV2's weights, the shot
+# detector's, the same way, its size and SHA-256 also those of the file downloaded at REVISION
+# that day.
 PINNED: dict[str, Pin] = {
     "seedvr2x_ema_7b_fp16.safetensors": Pin(
         16_479_335_080, "071cab5e5ef7a4471e1df0023c26cc16deeb14e58f8ad5c9196d2a08f96da5f2", "dit"
@@ -60,6 +66,9 @@ PINNED: dict[str, Pin] = {
     "seedvr2x_ema_vae_fp16.safetensors": Pin(
         501_325_454, "b9c6ebf0b14107be595825f476b9f89029a067d5b13e9db39c1351a608265468", "vae"
     ),
+    DETECTOR: Pin(
+        30_482_632, "bb8c838811a5e52e23be70e2794646a758d2bf4dcbd110dec8211ae7b8cbefdf", "detector"
+    ),
 }
 # Every file's SHA-256 at REVISION, a few kilobytes, which tests/test_pull.py fetches to hold the
 # pins to the revision: its size and SHA-256 read from the revision as the files' are (a git blob,
@@ -67,9 +76,18 @@ PINNED: dict[str, Pin] = {
 SUMS = "SHA256SUMS"
 SUMS_PIN = Pin(2_335, "57cf5a7b00bec79fac929f6776d1819ef80f28fc957a8b131cf2b6887cd09b53")
 
-# The option naming each role's file, and what one of seedvr2x's own files in that role is.
-OPTIONS: dict[Role, str] = {"dit": "--dit-model", "vae": "--vae-model"}
-KINDS: dict[Role, str] = {"dit": "one of seedvr2x's DiTs", "vae": "seedvr2x's VAE"}
+# The option naming each role's file, or what takes the shot detector's, which no option names
+# (DETECTOR); and what one of seedvr2x's own files in that role is.
+OPTIONS: dict[Role, str] = {
+    "dit": "--dit-model",
+    "vae": "--vae-model",
+    "detector": "seedvr2x's shot detection",
+}
+KINDS: dict[Role, str] = {
+    "dit": "one of seedvr2x's DiTs",
+    "vae": "seedvr2x's VAE",
+    "detector": "TransNetV2's weights",
+}
 
 # The errors of a cache that can't be written: permissions, a read-only or full disk, a quota.
 UNWRITABLE = frozenset({errno.EACCES, errno.EPERM, errno.EROFS, errno.ENOSPC, errno.EDQUOT})
@@ -137,8 +155,8 @@ class Hashes:
 
 @dataclass(frozen=True)
 class ModelFile:
-    """A model file of the run: the name it was given (--dit-model, --vae-model) and its path, in
-    --model-dir or in Hugging Face's cache."""
+    """A model file of the run: the name it was given (--dit-model, --vae-model; DETECTOR, the
+    shot detector's) and its path, in --model-dir or in Hugging Face's cache."""
 
     name: str
     path: Path
@@ -147,24 +165,39 @@ class ModelFile:
 @dataclass(frozen=True)
 class ModelFiles:
     """The run's model files, the DiT's and the VAE's; the directory of Hugging Face's cache they
-    come from, None for --model-dir's; and their SHA-256, each read once (hashes)."""
+    come from, None for --model-dir's; their SHA-256, each read once (hashes); and the shot
+    detector's, DETECTOR, when the run detects shots, else None."""
 
     dit: ModelFile
     vae: ModelFile
     cache: Path | None
     hashes: Hashes
+    detector: ModelFile | None = None
+
+    def roles(self) -> list[tuple[Role, ModelFile]]:
+        """The run's model files, each with the role it was given, the shot detector's last."""
+        given: list[tuple[Role, ModelFile]] = [("dit", self.dit), ("vae", self.vae)]
+        if self.detector is not None:
+            given.append(("detector", self.detector))
+        return given
 
 
-def resolve(model_dir: Path | None, dit: str, vae: str) -> ModelFiles:
-    """The run's model files, the DiT's named dit and the VAE's named vae. With model_dir, each is
-    read there by its name, and nothing is downloaded: huggingface_hub isn't imported here.
-    Without, each must be one of seedvr2x's own (PINNED) in its role, taken from Hugging Face's
-    cache, and downloaded into it when missing (fetch). ModelError says what to do for each one
+def resolve(model_dir: Path | None, dit: str, vae: str, detector: bool = False) -> ModelFiles:
+    """The run's model files, the DiT's named dit and the VAE's named vae, and with detector the
+    shot detector's, DETECTOR (DESIGN.md, Weights: TransNetV2's weights with the shot detector).
+    With model_dir, each is read there by its name, and nothing is downloaded: huggingface_hub
+    isn't imported here. Without, each must be one of seedvr2x's own (PINNED) in its role, taken
+    from Hugging Face's cache, and downloaded into it when missing, in one fetch, whose check of
+    the free space counts every file it downloads. ModelError says what to do for each one
     refused, before anything is fetched."""
     if model_dir is not None:
         logger.info("model files from %s (--model-dir), nothing downloaded", model_dir)
         return ModelFiles(
-            ModelFile(dit, model_dir / dit), ModelFile(vae, model_dir / vae), None, Hashes()
+            ModelFile(dit, model_dir / dit),
+            ModelFile(vae, model_dir / vae),
+            None,
+            Hashes(),
+            ModelFile(DETECTOR, model_dir / DETECTOR) if detector else None,
         )
     refusals: list[str] = []
     given: tuple[tuple[Role, str], ...] = (("dit", dit), ("vae", vae))
@@ -185,8 +218,15 @@ def resolve(model_dir: Path | None, dit: str, vae: str) -> ModelFiles:
             )
     if refusals:
         raise ModelError("\n".join(refusals))
-    found = fetch({name: PINNED[name] for name in (dit, vae)})
-    return ModelFiles(ModelFile(dit, found[dit]), ModelFile(vae, found[vae]), cache(), Hashes())
+    names = (dit, vae, DETECTOR) if detector else (dit, vae)
+    found = fetch({name: PINNED[name] for name in names})
+    return ModelFiles(
+        ModelFile(dit, found[dit]),
+        ModelFile(vae, found[vae]),
+        cache(),
+        Hashes(),
+        ModelFile(DETECTOR, found[DETECTOR]) if detector else None,
+    )
 
 
 def cache() -> Path:
@@ -258,14 +298,17 @@ def check_pinned(model_files: ModelFiles) -> None:
     file's own role (advice). Every file refused is said at once (ModelError, a line each). A file
     seedvr2x doesn't pin is said so in the log, and runs as the header check accepted it."""
     refusals: list[str] = []
-    for file in dict.fromkeys((model_files.dit, model_files.vae)):
+    # Each file once, in the first role it was given.
+    first: dict[ModelFile, Role] = {}
+    for role, file in model_files.roles():
+        first.setdefault(file, role)
+    for file, role in first.items():
         name = _pinned_name(file)
         if name is None:
             logger.info(
                 "%s: not one of seedvr2x's pinned files, so not checked against a pin", file.name
             )
             continue
-        role: Role = "dit" if file == model_files.dit else "vae"
         try:
             check_pin(name, file.path, PINNED[name], model_files.hashes, model_files.cache, role)
         except ModelError as error:
@@ -278,12 +321,11 @@ def advice(model_files: ModelFiles) -> dict[Role, str]:
     """How to fetch each of the run's files named like one of seedvr2x's own again, by its role,
     when given in the pinned file's own role: what a refusal of its header check adds
     (weights.check_models), as a refusal of its pin says it (check_pin), from Hugging Face's cache
-    or into --model-dir. A pinned name given in the other role, which only --model-dir lets
+    or into --model-dir. A pinned name given in another role, which only --model-dir lets
     through (resolve refuses it), gets none: the pinned file fetched again would be refused in
     that role all the same, and leaving out --model-dir would be refused by resolve."""
     found: dict[Role, str] = {}
-    given: tuple[tuple[Role, ModelFile], ...] = (("dit", model_files.dit), ("vae", model_files.vae))
-    for role, file in given:
+    for role, file in model_files.roles():
         name = _pinned_name(file)
         if name is not None and PINNED[name].role == role:
             found[role] = _again(name, file.path, model_files.cache)

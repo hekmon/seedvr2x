@@ -20,3 +20,16 @@ slicing_encode and slicing_decode, in src/models/video_vae_v3/modules/attn_video
 numz's modified copies of SeedVR's own (commit e4de8c2: projects/video_diffusion_sr/infer.py and
 models/video_vae_v3/modules/attn_video_vae.py). All are under the Apache License, Version 2.0.
 That file says what was changed.
+
+It also includes TransNetV2's official PyTorch model, src/seedvr2x/transnetv2/transnetv2_pytorch.py,
+copied unchanged from TransNetV2 (https://github.com/soCzech/TransNetV2, commit 85cef72,
+inference-pytorch/transnetv2_pytorch.py): TransNetV2, Copyright (c) 2020 Tomáš Souček, under the
+MIT License, whose text is beside it, in src/seedvr2x/transnetv2/LICENSE. seedvr2x pulls its
+weights, transnetv2.safetensors, from its own Hugging Face repo (hekmon/seedvr2x), under the same
+licence: TransNetV2's official TensorFlow weights converted to PyTorch by its own
+inference-pytorch/convert_weights.py, values unchanged, by the repository's
+models/transnetv2_weights.py. It also includes code adapted from TransNetV2, under the same
+licence: predict_frames' windows (inference/transnetv2.py at that commit), rewritten in
+src/seedvr2x/runtime/detector.py to run on frames as they come, after the repository's
+research/scripts/scd_scores.py (tnet_predict), whose rewrite tests/test_detector.py copies to hold
+them to.

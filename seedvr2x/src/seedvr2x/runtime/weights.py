@@ -3,9 +3,10 @@ header is read and checked before anything else runs, without torch, so that a w
 refused in a second, saying what it is, rather than failing after the first pass or running
 unchecked.
 
-v1 runs SeedVR2's 7B DiT, the regular or the sharp one, with its VAE, every tensor in fp16. A
-safetensors file is known by its header alone, read without the safetensors library: the header's
-length, then the header, never the data."""
+v1 runs SeedVR2's 7B DiT, the regular or the sharp one, with its VAE, every tensor in fp16, and
+detects shots with TransNetV2 in fp32 (DESIGN.md, Input, Shot detection). A safetensors file is
+known by its header alone, read without the safetensors library: the header's length, then the
+header, never the data."""
 
 import hashlib
 import json
@@ -22,7 +23,7 @@ from seedvr2x.runtime.job import JobError
 
 logger = logging.getLogger(__name__)
 
-Role = Literal["dit", "vae"]
+Role = Literal["dit", "vae", "detector"]
 
 
 class ModelError(JobError):
@@ -33,19 +34,27 @@ class ModelError(JobError):
 @dataclass(frozen=True)
 class Architecture:
     """A model seedvr2x knows by its tensors: their count and their inventory's digest
-    (inventory), and the vendored config directory a DiT is built from, None for the VAE."""
+    (inventory); the vendored config directory a DiT is built from, None for another model; and
+    the dtype seedvr2x runs it in, every tensor's but a BatchNorm counter's (COUNTER), I64."""
 
     name: str
     tensors: int
     digest: str
     config: str | None
+    dtype: str = "F16"
 
+
+# A BatchNorm layer's count of the batches it trained on, num_batches_tracked, I64 in PyTorch's
+# state_dict, which no inference reads: TransNetV2's file holds its six as the converter saved
+# them (models/transnetv2_weights.py), and a precision is said of the other tensors.
+COUNTER = ".num_batches_tracked"
 
 # Each digest is inventory()'s, over the model's tensors' names and shapes: what the vendored
 # model's state_dict gives, built on the meta device, from which tests/test_weights.py derives
 # each; and what the real files' headers give: numz's 7B, sharp 7B and 7B fp8 files and seedvr2x's
 # 7B and sharp 7B fp16 ones the 7B's, numz's 3B fp16 and fp8 files the 3B's, numz's and seedvr2x's
-# fp16 VAE the VAE's.
+# fp16 VAE the VAE's, seedvr2x's transnetv2.safetensors TransNetV2's (read on 2026-10-09 from
+# the file pinned at hekmon/seedvr2x's c14a2bc4: 84 tensors F32 and the 6 counters I64).
 DIT_7B = Architecture(
     "SeedVR2's 7B DiT",
     1128,
@@ -61,20 +70,50 @@ DIT_3B = Architecture(
 VAE = Architecture(
     "SeedVR2's VAE", 250, "090ead68b30f9e815c50f1bdd1ed9c522f669461d42888ed56cbf0e57fb863e1", None
 )
-ARCHITECTURES = (DIT_7B, DIT_3B, VAE)
+TRANSNETV2 = Architecture(
+    "TransNetV2",
+    90,
+    "007f515b2f0977ca26cdec87b41da10511f34c4c6138f60cb9547e63ccee1504",
+    None,
+    "F32",
+)
+ARCHITECTURES = (DIT_7B, DIT_3B, VAE, TRANSNETV2)
 
 # What v1 runs in each role (DESIGN.md, Weights): the 7B DiT, the regular and the sharp one alike
-# (one architecture, the same tensors), and the VAE, every tensor in F16.
-ACCEPTED: dict[Role, Architecture] = {"dit": DIT_7B, "vae": VAE}
-# The end of every refusal of a readable file, the 3B's included: phase 2 brings the two 7Bs'
-# smaller files, and no 3B (DESIGN.md, Weights, Phase 2).
+# (one architecture, the same tensors), and the VAE, every tensor in F16; and TransNetV2, the shot
+# detector, as its official weights are converted, every tensor F32 but its counters (DESIGN.md,
+# Input, Shot detection).
+ACCEPTED: dict[Role, Architecture] = {"dit": DIT_7B, "vae": VAE, "detector": TRANSNETV2}
+# The end of every refusal of a readable file given as the DiT or the VAE, the 3B's included:
+# phase 2 brings the two 7Bs' smaller files, and no 3B (DESIGN.md, Weights, Phase 2).
 V1 = (
     "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, with its VAE in fp16; phase 2"
     " brings the two 7Bs' smaller files"
 )
+# The same, of a file given as the shot detector.
+SHOTS = "seedvr2x detects shots with TransNetV2 in fp32, as its own transnetv2.safetensors holds it"
+# What a safetensors file of other tensors is not.
+NONE_OF_THEM = "neither SeedVR2's DiT, its VAE nor TransNetV2"
+# How each role's refusal names it, when the file is a model of another role.
+GIVEN: dict[Role, str] = {
+    "dit": "given as the DiT (--dit-model)",
+    "vae": "given as the VAE (--vae-model)",
+    "detector": "given as the shot detector",
+}
 # The end of a refusal of a file missing data (_read): for one of seedvr2x's own files in its own
 # role, check_models says where from instead (runtime/pull.py, advice).
 AGAIN = "fetch it again"
+# A file that isn't there (_read) was never fetched there: check_models' advice says so, without
+# its "again"; and says what it is for the role whose file no option names, the shot detector's,
+# which --model-dir holds under seedvr2x's own name for it (pull.DETECTOR).
+MISSING = "no such model file"
+FETCH = "fetch it"
+UNNAMED: dict[Role, str] = {
+    "detector": (
+        "the shot detector's weights, TransNetV2's, which a run that detects its shots reads in"
+        " --model-dir (--cuts, a cut list, runs without them)"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -116,53 +155,62 @@ MATRICES = {"I8": "INT8", "U8": "4-bit values packed two per byte"}
 
 
 def check(path: Path, role: Role) -> Architecture:
-    """The architecture of the model file at path, given as the DiT or as the VAE (role), known by
-    its tensors, not its name: SeedVR2's 7B DiT as the DiT, the regular or the sharp one, whoever
-    made the file, and its VAE as the VAE, every tensor F16. Anything else raises ModelError,
-    saying what the file is (describe)."""
+    """The architecture of the model file at path, given as the DiT, the VAE or the shot detector
+    (role), known by its tensors, not its name: SeedVR2's 7B DiT as the DiT, the regular or the
+    sharp one, whoever made the file, and its VAE as the VAE, every tensor F16; TransNetV2 as the
+    shot detector, every tensor F32 but its BatchNorm counters (COUNTER), I64. Anything else
+    raises ModelError, saying what the file is (describe)."""
+    tail = SHOTS if role == "detector" else V1
     read = _read(path)
     if isinstance(read, str):
-        raise ModelError(f"{path}: {read}: {V1}")
+        raise ModelError(f"{path}: {read}: {tail}")
     found, accepted = _architecture(read), ACCEPTED[role]
-    if found is accepted and all(info.dtype == "F16" for info in read.values()):
+    if found is accepted and _as_run(read, accepted):
         return accepted
-    given = ""
-    if role == "dit" and found is VAE:
-        given = ", given as the DiT (--dit-model)"
-    elif role == "vae" and (found in DITS.values() or _dit(read) is not None):
-        given = ", given as the VAE (--vae-model)"
-    raise ModelError(f"{path}: {_what(read, found)}{given}: {V1}")
+    owner = _role(read, found)
+    given = f", {GIVEN[role]}" if owner is not None and owner != role else ""
+    raise ModelError(f"{path}: {_what(read, found)}{given}: {tail}")
 
 
-def check_models(dit: Path, vae: Path, advice: Mapping[Role, str] | None = None) -> None:
-    """Check the DiT file at dit and the VAE file at vae (check), in --model-dir or in Hugging
-    Face's cache (runtime/pull.py), each accepted one logged with what it is; ModelError says what
-    is wrong with each one refused, and how to fetch it again when advice has it for its role (one
-    of seedvr2x's own files, given in its own role: pull.advice), in place of AGAIN. The CLI calls
-    it before the first pass, which can take tens of minutes on a film.
+def check_models(
+    dit: Path, vae: Path, advice: Mapping[Role, str] | None = None, detector: Path | None = None
+) -> None:
+    """Check the DiT file at dit, the VAE file at vae and, given, the shot detector's file at
+    detector (check), in --model-dir or in Hugging Face's cache (runtime/pull.py), each accepted
+    one logged with what it is; ModelError says what is wrong with each one refused, and how to
+    fetch it again when advice has it for its role (one of seedvr2x's own files, given in its own
+    role: pull.advice), in place of AGAIN; how to fetch it, without "again", when it isn't there
+    (MISSING), and what it is when no option named it (UNNAMED). The CLI calls it before the
+    first pass, which can take tens of minutes on a film.
 
     The CPU tests' stand-in replaces this function (tests/test_cli_run.py, stand_in_model): for
     tests only, never a way around the check for users."""
     refusals: list[str] = []
-    files: tuple[tuple[str, Role, Path], ...] = (("DiT", "dit", dit), ("VAE", "vae", vae))
+    files: list[tuple[str, Role, Path]] = [("DiT", "dit", dit), ("VAE", "vae", vae)]
+    if detector is not None:
+        files.append(("Shot detector", "detector", detector))
     for label, role, path in files:
         try:
             found = check(path, role)
         except ModelError as error:
             said = str(error)
+            missing = said.endswith(MISSING)
+            if missing and role in UNNAMED:
+                said = f"{said}: {UNNAMED[role]}"
             if advice is not None and role in advice:
-                said = f"{said.removesuffix(f'; {AGAIN}')}; {advice[role]}"
+                how = advice[role].replace(AGAIN, FETCH, 1) if missing else advice[role]
+                said = f"{said.removesuffix(f'; {AGAIN}')}; {how}"
             refusals.append(said)
             continue
-        logger.info("%s %s: %s in fp16", label, path.name, found.name)
+        logger.info("%s %s: %s in %s", label, path.name, found.name, PRECISIONS[found.dtype])
     if refusals:
         raise ModelError("\n".join(refusals))
 
 
 def describe(path: Path) -> str:
-    """What the model file at path is, in words: SeedVR2's 7B or 3B DiT or its VAE, and its
-    precision; another DiT and how it is quantised; another safetensors file; a GGUF file; a
-    PyTorch checkpoint; or neither. Raises ModelError when it is missing, not a regular file,
+    """What the model file at path is, in words: SeedVR2's 7B or 3B DiT, its VAE or TransNetV2,
+    and its precision; another DiT and how it is quantised; another safetensors file; a GGUF file;
+    a PyTorch checkpoint; or neither. Raises ModelError when it is missing, not a regular file,
     empty, cut short or damaged."""
     read = _read(path)
     return read if isinstance(read, str) else _what(read, _architecture(read))
@@ -185,6 +233,28 @@ def _architecture(tensors: Mapping[str, TensorInfo]) -> Architecture | None:
     return next((each for each in candidates if each.digest == digest), None)
 
 
+def _as_run(tensors: Mapping[str, TensorInfo], architecture: Architecture) -> bool:
+    """Whether an architecture's tensors are in the dtypes seedvr2x runs it in: its dtype, but a
+    BatchNorm's counters (COUNTER), I64."""
+    return all(
+        info.dtype == ("I64" if name.endswith(COUNTER) else architecture.dtype)
+        for name, info in tensors.items()
+    )
+
+
+def _role(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> Role | None:
+    """The role of the model these tensors are, found the architecture they are exactly, if any:
+    a DiT's, SeedVR2's or one named as SeedVR2's names its tensors (_dit), the VAE's, or the shot
+    detector's; None for any other file."""
+    if found in DITS.values() or (found is None and _dit(tensors) is not None):
+        return "dit"
+    if found is VAE:
+        return "vae"
+    if found is TRANSNETV2:
+        return "detector"
+    return None
+
+
 def _read(path: Path) -> dict[str, TensorInfo] | str:
     """The tensors of the safetensors file at path, as its header declares them, validated as the
     safetensors library validates a file (_parse); or what a file of another format is, in words
@@ -194,7 +264,7 @@ def _read(path: Path) -> dict[str, TensorInfo] | str:
     if not path.is_file():
         if os.path.lexists(path):
             raise ModelError(f"{path}: not a regular file")
-        raise ModelError(f"{path}: no such model file")
+        raise ModelError(f"{path}: {MISSING}")
     try:
         with path.open("rb") as file:
             size = os.fstat(file.fileno()).st_size
@@ -368,16 +438,21 @@ def _what(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> str:
     exactly, if any."""
     dtypes = Counter(info.dtype for info in tensors.values())
     if found is not None:
-        return f"{found.name} {_precision(dtypes)}"
+        # The precision of the values, a BatchNorm's counters (COUNTER) apart, said only when
+        # they aren't I64, as PyTorch keeps them.
+        values = Counter(info.dtype for name, info in tensors.items() if not name.endswith(COUNTER))
+        counters = Counter(info.dtype for name, info in tensors.items() if name.endswith(COUNTER))
+        said = f"{found.name} {_precision(values)}"
+        if counters.keys() - {"I64"}:
+            said += f", its BatchNorm counters {_counts(counters)} where PyTorch keeps them I64"
+        return said
     dit = _dit(tensors)
     if dit is not None:
         return _other_dit(tensors, *dit, dtypes)
     if not tensors:
-        return "a safetensors file of no tensors, neither SeedVR2's DiT nor its VAE"
-    return (
-        f"a safetensors file of {_count(len(tensors), 'tensor')} ({_counts(dtypes)}), neither"
-        " SeedVR2's DiT nor its VAE"
-    )
+        return f"a safetensors file of no tensors, {NONE_OF_THEM}"
+    tensor_count = _count(len(tensors), "tensor")
+    return f"a safetensors file of {tensor_count} ({_counts(dtypes)}), {NONE_OF_THEM}"
 
 
 def _precision(dtypes: Counter[str]) -> str:

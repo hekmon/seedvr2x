@@ -3,8 +3,9 @@ name = "seedvr2x"
 version = "0.1.0.dev0"
 description = "SeedVR2 video upscaler for long runs: lossless masters, no seams inside a shot"
 readme = "README.md"
-license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE"]
+# MIT: TransNetV2's model, vendored, and its windows, rewritten (NOTICE).
+license = "Apache-2.0 AND MIT"
+license-files = ["LICENSE", "NOTICE", "src/seedvr2x/transnetv2/LICENSE"]
 requires-python = "==3.13.*"
 # The versions of the numz environment milestone 1 is compared with (DESIGN.md, Validation
 # milestones), so that the comparison differs by code only: bump one on purpose, and run that
@@ -59,17 +60,18 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "RUF"]
-# The vendored model code is linted apart, for errors only: see AGENTS.md, Checks.
-exclude = ["src/seedvr2x/vendor/**"]
+# The vendored model code is linted apart, for errors only, and TransNetV2's held to its pinned
+# bytes: see AGENTS.md, Checks.
+exclude = ["src/seedvr2x/vendor/**", "src/seedvr2x/transnetv2/**"]
 
 [tool.ruff.format]
 # Python only: ruff also formats the code blocks of Markdown files, and the documents are edited
 # by hand.
-exclude = ["src/seedvr2x/vendor/**", "*.md"]
+exclude = ["src/seedvr2x/vendor/**", "src/seedvr2x/transnetv2/**", "*.md"]
 
 [tool.pyright]
 include = ["src", "tests", "tools"]
-exclude = ["src/seedvr2x/vendor", "**/__pycache__"]
+exclude = ["src/seedvr2x/vendor", "src/seedvr2x/transnetv2", "**/__pycache__"]
 strict = ["src/seedvr2x"]
 pythonVersion = "3.13"
 venvPath = "."

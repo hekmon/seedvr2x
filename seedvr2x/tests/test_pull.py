@@ -12,12 +12,14 @@ partial file left there said; SIGTERM during a download unwinding it; the log na
 cache behind a link; a header refusal of one of seedvr2x's own files saying how to fetch it again,
 in its own role only; a file changed between its hash and its load refused, before and after its
 load; all of it before torch. Hugging Face's telemetry off unless the user set it, before the
-library is imported.
+library is imported. The shot detector's file, TransNetV2's weights, resolved on its own (the CLI
+doesn't ask for it yet): with the others, in the same fetch, its space counted; from --model-dir
+by its name; checked by its pin, and its refusals saying how to fetch it again.
 
 Then the revision itself, skipped offline: SHA256SUMS, a few kilobytes, downloaded at the pinned
 revision through seedvr2x's own fetch, into a temporary HF_HOME behind a link, and checked by its
 own pin; every pinned file's SHA-256 is its line there, and every pinned size the Hub's. With
-SEEDVR2X_TESTS_PULL=1, the three v1 files themselves, into Hugging Face's cache: about 33 GB the
+SEEDVR2X_TESTS_PULL=1, the four v1 files themselves, into Hugging Face's cache: about 33 GB the
 first time.
 
 Every test that could reach the Hub replaces the library's two calls, or runs in a process of its
@@ -54,7 +56,7 @@ from huggingface_hub.errors import (
     RevisionNotFoundError,
 )
 from test_cli_run import STAND_IN_MODELS, source, stand_in_model
-from test_weights import V1, as_dtype, write
+from test_weights import SHOTS, V1, as_dtype, write
 
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg, files
@@ -239,7 +241,9 @@ def test_pins_recorded() -> None:
         "seedvr2x_ema_7b_fp16.safetensors": (16_479_335_080, "071cab5e", "dit"),
         "seedvr2x_ema_7b_sharp_fp16.safetensors": (16_479_335_088, "5eb47fde", "dit"),
         "seedvr2x_ema_vae_fp16.safetensors": (501_325_454, "b9c6ebf0", "vae"),
+        "transnetv2.safetensors": (30_482_632, "bb8c8388", "detector"),
     }
+    assert pull.DETECTOR == "transnetv2.safetensors"
     assert (pull.SUMS, pull.SUMS_PIN.size, pull.SUMS_PIN.sha256[:8], pull.SUMS_PIN.role) == (
         "SHA256SUMS",
         2335,
@@ -459,6 +463,174 @@ def test_pinned_name_in_the_other_role_refused(hub: Hub) -> None:
         " (--dit-model: seedvr2x_ema_7b_fp16.safetensors or"
         " seedvr2x_ema_7b_sharp_fp16.safetensors)",
         "--vae-model seedvr2x_ema_7b_fp16.safetensors: one of seedvr2x's DiTs, which --dit-model"
+        " takes (--vae-model: seedvr2x_ema_vae_fp16.safetensors)",
+    ]
+    assert hub.calls == hub.lookups == []
+
+
+# A small file in place of TransNetV2's weights, under the shot detector's name (detector_pin).
+DETECTOR_CONTENT = b"TransNetV2's bytes " * 30
+
+
+@pytest.fixture
+def detector_pin(pins: dict[str, Pin], hub: Hub) -> Pin:
+    """seedvr2x's pins, the small files' in their place (pins), the shot detector's with them, in
+    its role, the Hub serving it."""
+    pin = Pin(len(DETECTOR_CONTENT), hashlib.sha256(DETECTOR_CONTENT).hexdigest(), "detector")
+    pins[pull.DETECTOR] = pin  # pull.PINNED itself, until the test ends (pins)
+    hub.served[pull.DETECTOR] = DETECTOR_CONTENT
+    return pin
+
+
+def test_detector_pulled_with_the_others(
+    hub: Hub, detector_pin: Pin, caplog: pytest.LogCaptureFixture
+) -> None:
+    # With the shot detector, its file comes with the DiT's and the VAE's, last, in the same
+    # fetch: asked of the library at the pinned revision with no token, then found in the cache;
+    # checked by its pin, how to fetch it again said for its role. Without, never looked up.
+    caplog.set_level(logging.INFO)
+    found = pull.resolve(None, DIT, VAE, detector=True)
+    assert [call["filename"] for call in hub.calls] == [DIT, VAE, pull.DETECTOR]
+    assert hub.calls[-1] == {
+        "repo_id": "hekmon/seedvr2x",
+        "filename": pull.DETECTOR,
+        "revision": REVISION,
+        "cache_dir": hub.cache,
+        "token": False,
+    }
+    snapshot = hub.snapshot(pull.DETECTOR)
+    assert found.detector == pull.ModelFile(pull.DETECTOR, snapshot)
+    assert found.roles() == [("dit", found.dit), ("vae", found.vae), ("detector", found.detector)]
+    size = f"{detector_pin.size:,} bytes"
+    assert f"{pull.DETECTOR}: not in the cache, downloading {size} from {SHORT}" in caplog.messages
+    pull.check_pinned(found)
+    said = f"{pull.DETECTOR}: its size and SHA-256 as seedvr2x pins them, {SHORT}"
+    assert said in caplog.messages
+    assert pull.advice(found)["detector"] == from_the_cache(pull.DETECTOR, snapshot, hub.cache)
+    hub.calls.clear()
+    assert pull.resolve(None, DIT, VAE, detector=True).detector == found.detector
+    assert hub.calls == []
+    hub.lookups.clear()
+    without = pull.resolve(None, DIT, VAE)
+    assert without.detector is None and hub.lookups == [DIT, VAE]
+    assert without.roles() == [("dit", without.dit), ("vae", without.vae)]
+    assert "detector" not in pull.advice(without)
+
+
+def test_detector_counted_in_the_space(
+    monkeypatch: pytest.MonkeyPatch, hub: Hub, pins: dict[str, Pin], detector_pin: Pin
+) -> None:
+    # The free space checked before the first download counts the shot detector's file with the
+    # others': a byte short of the three, refused before any; enough, the three downloaded.
+    free = [pins[DIT].size + pins[VAE].size + detector_pin.size - 1]
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=free[0]))
+    with pytest.raises(ModelError) as error:
+        pull.resolve(None, DIT, VAE, detector=True)
+    assert str(error.value) == (
+        f"Hugging Face's cache, {hub.cache}: {free[0]:,} bytes free on its disk, where downloading"
+        f" {DIT}, {VAE} and {pull.DETECTOR} needs {free[0] + 1:,} bytes: free some space there,"
+        f" set HF_HOME (or HF_HUB_CACHE) to a directory on a disk with room, {ELSEWHERE}"
+    )
+    assert hub.calls == []
+    free[0] += 1
+    pull.resolve(None, DIT, VAE, detector=True)
+    assert [call["filename"] for call in hub.calls] == [DIT, VAE, pull.DETECTOR]
+
+
+def test_detector_from_model_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, detector_pin: Pin, hashed: list[Path]
+) -> None:
+    # With --model-dir, the shot detector's file is read there by its name, the library never
+    # called: refused by its pin, saying how to fetch it again into --model-dir, and left as it
+    # is; as pinned, accepted, hashed once with the others.
+    def called(*args: object, **kwargs: object) -> None:
+        pytest.fail("huggingface_hub called")
+
+    monkeypatch.setattr(file_download, "try_to_load_from_cache", called)
+    monkeypatch.setattr(file_download, "hf_hub_download", called)
+    directory = model_dir(tmp_path)
+    path = directory / pull.DETECTOR
+    path.write_bytes(DETECTOR_CONTENT + b"!")
+    found = pull.resolve(directory, DIT, VAE, detector=True)
+    assert found.detector == pull.ModelFile(pull.DETECTOR, path) and found.cache is None
+    with pytest.raises(ModelError) as error:
+        pull.check_pinned(found)
+    assert str(error.value) == (
+        f"{path}: {detector_pin.size + 1:,} bytes, where hekmon/seedvr2x's {pull.DETECTOR} at"
+        f" {REVISION[:8]} has {detector_pin.size:,}: not the file seedvr2x pins, left as it is;"
+        f" fetch it again from {url(pull.DETECTOR)}, {INTO_MODEL_DIR}"
+    )
+    assert path.read_bytes() == DETECTOR_CONTENT + b"!"
+    path.write_bytes(DETECTOR_CONTENT)
+    hashed.clear()
+    found = pull.resolve(directory, DIT, VAE, detector=True)
+    pull.check_pinned(found)
+    assert hashed == [directory / DIT, directory / VAE, path]
+    assert found.hashes.sha256(path) == detector_pin.sha256
+
+
+@pytest.mark.parametrize("where", ["cache", "model-dir"])
+def test_detector_header_refusal_says_how_to_fetch_again(
+    tmp_path: Path, hub: Hub, detector_pin: Pin, where: str
+) -> None:
+    # The header check of the shot detector's file, one of seedvr2x's own in its own role: its
+    # refusal says how to fetch it again, as the pin's does, from the cache or into --model-dir.
+    directory = model_dir(tmp_path) if where == "model-dir" else None
+    if directory is not None:
+        (directory / pull.DETECTOR).write_bytes(DETECTOR_CONTENT)
+    found = pull.resolve(directory, DIT, VAE, detector=True)
+    assert found.detector is not None
+    with pytest.raises(ModelError) as error:
+        weights.check_models(
+            found.dit.path, found.vae.path, pull.advice(found), found.detector.path
+        )
+    path = found.detector.path
+    again = (
+        from_the_cache(pull.DETECTOR, path, hub.cache)
+        if directory is None
+        else f"fetch it again from {url(pull.DETECTOR)}, {INTO_MODEL_DIR}"
+    )
+    lines = str(error.value).splitlines()
+    assert len(lines) == 3
+    assert lines[-1] == (
+        f"{path}: neither safetensors, GGUF nor a PyTorch checkpoint: {SHOTS}; {again}"
+    )
+
+
+def test_detector_missing_from_model_dir_said_for_what_it_is(
+    tmp_path: Path, detector_pin: Pin
+) -> None:
+    # --model-dir without the shot detector's file, which no option names: the refusal says what
+    # the file is, that a cut list runs without it, and how to fetch it, never "again" for a
+    # file that was never there.
+    directory = model_dir(tmp_path)
+    found = pull.resolve(directory, DIT, VAE, detector=True)
+    assert found.detector is not None
+    with pytest.raises(ModelError) as error:
+        weights.check_models(
+            found.dit.path, found.vae.path, pull.advice(found), found.detector.path
+        )
+    assert str(error.value).splitlines()[-1] == (
+        f"{directory / pull.DETECTOR}: no such model file: the shot detector's weights,"
+        " TransNetV2's, which a run that detects its shots reads in --model-dir (--cuts, a cut"
+        f" list, runs without them); fetch it from {url(pull.DETECTOR)}, {INTO_MODEL_DIR}"
+    )
+    # Without the advice (a name of the user's own): what it is, all the same.
+    with pytest.raises(ModelError) as error:
+        weights.check_models(found.dit.path, found.vae.path, None, found.detector.path)
+    assert str(error.value).splitlines()[-1].endswith("(--cuts, a cut list, runs without them)")
+
+
+def test_detector_named_in_another_role_refused(hub: Hub) -> None:
+    # TransNetV2's file given as the DiT or the VAE: refused by its name, before any lookup or
+    # download, saying what takes it.
+    with pytest.raises(ModelError) as error:
+        pull.resolve(None, pull.DETECTOR, pull.DETECTOR)
+    assert str(error.value).splitlines() == [
+        "--dit-model transnetv2.safetensors: TransNetV2's weights, which seedvr2x's shot detection"
+        " takes (--dit-model: seedvr2x_ema_7b_fp16.safetensors or"
+        " seedvr2x_ema_7b_sharp_fp16.safetensors)",
+        "--vae-model transnetv2.safetensors: TransNetV2's weights, which seedvr2x's shot detection"
         " takes (--vae-model: seedvr2x_ema_vae_fp16.safetensors)",
     ]
     assert hub.calls == hub.lookups == []
@@ -1390,7 +1562,7 @@ def test_header_refusal_says_how_to_fetch_again(
     assert upscale(tmp_path, "out", *options) == 1
     other = "neither safetensors, GGUF nor a PyTorch checkpoint"
     assert caplog.messages[-1].splitlines() == [
-        f"{directory / DIT}: no such model file; fetch it again from {url(DIT)}, {INTO_MODEL_DIR}",
+        f"{directory / DIT}: no such model file; fetch it from {url(DIT)}, {INTO_MODEL_DIR}",
         f"{directory / VAE}: {other}: {V1}; fetch it again from {url(VAE)}, {INTO_MODEL_DIR}",
     ]
     hub.served[VAE] = (100).to_bytes(8, "little") + b"{"
@@ -1449,8 +1621,12 @@ def test_fetch_advice_in_its_own_role_only(
             f"{directory / vae}: {dit_as_vae}{again(vae)}",
         ]
     else:
+        # Never fetched there: "fetch it", no "again".
         swapped = [f"{directory / name}: no such model file" for name in (vae, dit)]
-        own = [f"{directory / name}: no such model file{again(name)}" for name in (dit, vae)]
+        own = [
+            f"{directory / name}: no such model file; fetch it from {url(name)}, {INTO_MODEL_DIR}"
+            for name in (dit, vae)
+        ]
     options = ["--model-dir", str(directory)]
     assert upscale(tmp_path, "out", *options, "--dit-model", vae, "--vae-model", dit) == 1
     assert caplog.messages[-1].splitlines() == swapped
@@ -1766,7 +1942,7 @@ def test_pins_are_the_revisions(tmp_path: Path) -> None:
 def test_pull_v1_files(
     caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The three v1 files through seedvr2x's own fetch into the cache HF_HOME names, each checked
+    # The four v1 files through seedvr2x's own fetch into the cache HF_HOME names, each checked
     # by its pin; the cache read only, once they are there. The library's paths are resolved
     # (file_download.py:999), the cache's as seedvr2x names it maybe not: compared resolved.
     caplog.set_level(logging.INFO)

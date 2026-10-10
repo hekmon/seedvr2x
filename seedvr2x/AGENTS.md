@@ -19,8 +19,9 @@ seedvr2x/
     cli.py __main__.py   CLI layer: options, logging
     media/               I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
     runtime/             runtime layer: the pipeline per shot, then stitching, planner, BlockSwap,
-                         resume
+                         resume; the shot detector
     vendor/              model layer, vendored from numz (below)
+    transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
   tests/
   tools/vendor.py        copy, diff and check of the vendored code
 ```
@@ -56,6 +57,24 @@ is and what numz changed in it.
   can't shift the reference. `tools/vendor.py check`, also run by the tests, verifies that a file
   carries the marker exactly when it differs from numz, that the original headers are kept, that
   nothing imports numz's runtime, and that our edits add no syntax error or undefined name.
+
+## The vendored TransNetV2
+
+`src/seedvr2x/transnetv2/` holds the shot detector's model (DESIGN.md, Shot detection):
+TransNetV2's official PyTorch code (github.com/soCzech/TransNetV2 at `85cef72`, MIT),
+`inference-pytorch/transnetv2_pytorch.py` as `transnetv2_pytorch.py`, with TransNetV2's `LICENSE`
+beside it; the `__init__.py` is seedvr2x's.
+
+- **A directory of its own,** not `vendor/`: `vendor/` is numz's tree path for path, which
+  `tools/vendor.py` diffs against numz, and TransNetV2 is another upstream under another licence.
+  The file's own directory is left out, `inference-pytorch` being no name Python imports.
+- **Byte for byte,** never reformatted, excluded from ruff and pyright as `vendor/` is:
+  `tests/test_detector.py` holds the file and the licence to their SHA-256 at that commit, those
+  `../models/transnetv2_weights.py` pins (`SOURCES`), so any change is deliberate. It runs with
+  the locked torch unchanged; a change would be marked as `vendor/`'s are, its pin changed with it.
+- `runtime/detector.py` builds it, loads seedvr2x's `transnetv2.safetensors` into it (pinned in
+  `runtime/pull.py`, made by `../models/transnetv2_weights.py`) and runs measurement's windows on
+  it. NOTICE and README.md credit it.
 
 ## Environment
 
@@ -93,10 +112,11 @@ uv run pyright
 uv run pytest
 ```
 
-- ruff: line length 100, rules E, F, W, I, B, UP and RUF. The vendored code is excluded from
-  formatting and from that lint. `uv run tools/vendor.py check` lints it for errors only (syntax
-  errors, undefined names), and reports those that numz's own files don't have: numz has some
-  already, false positives and a bug in a class nothing builds.
+- ruff: line length 100, rules E, F, W, I, B, UP and RUF. The vendored code, `vendor/` and
+  `transnetv2/`, is excluded from formatting and from that lint. `uv run tools/vendor.py check`
+  lints `vendor/` for errors only (syntax errors, undefined names), and reports those that numz's
+  own files don't have: numz has some already, false positives and a bug in a class nothing
+  builds. `transnetv2/` is held to its pinned bytes (`tests/test_detector.py`).
 - pyright: strict on `src/seedvr2x`, standard on the tests and tools. The vendored code is
   excluded: the tests show that it imports and runs.
 
@@ -109,14 +129,17 @@ uv run pytest
   without it. It holds numz's files and seedvr2x's own side by side (links will do): the GPU
   tests run numz's 7B fp16 and VAE, the weights their references were made with, and the
   regression seedvr2x's own as well. With it, the CPU suite also checks every known model file
-  there by its header (`tests/test_weights.py`).
+  there by its header (`tests/test_weights.py`), and runs the shot detector on TransNetV2's
+  weights, `transnetv2.safetensors` (`tests/test_detector.py`: the cuts of a synthetic clip, and
+  measurement's own run reproduced bit for bit); without, the detector's windows run on the
+  untrained model's weights, written by the test.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`runtime/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself: `SHA256SUMS`, a few
   kilobytes, downloaded into a temporary `HF_HOME` behind a link, and the sizes read from the
   Hub's API, skipped offline (no network to huggingface.co, or `HF_HUB_OFFLINE` set). A test
   that runs seedvr2x in a process of its own gives it its own `HF_HOME` and `HF_HUB_OFFLINE=1`,
   but that one; hf_xet is imported in such a process only. With `SEEDVR2X_TESTS_PULL=1`, it
-  pulls the three v1 files into Hugging Face's cache too, about 33 GB the first time;
+  pulls the four v1 files into Hugging Face's cache too, about 33 GB the first time;
   `test_regression.py`'s `test_milestone1_from_the_cache` (GPU) then runs the default models
   from the cache, `HF_HUB_OFFLINE=1`, and skips until both are there, saying how to fetch the
   two alone (`uv run hf download`, 17 GB).

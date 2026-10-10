@@ -1,7 +1,8 @@
 """The model check (DESIGN.md, Weights: recognised by content): a model file is known by its
 tensors, from its safetensors header, read without torch, never by its name. v1 accepts SeedVR2's
-7B DiT, regular or sharp, and its VAE, every tensor F16; anything else is refused before the first
-pass, the message saying what the file is.
+7B DiT, regular or sharp, and its VAE, every tensor F16, and TransNetV2 as the shot detector, every
+tensor F32 but its BatchNorm counters, I64; anything else is refused before the first pass, the
+message saying what the file is, and a model given in another's role saying so.
 
 The files are synthetic: a header written from the vendored model's tensors, or from a variant of
 them as the real files measured hold theirs, then the file extended to its full size without its
@@ -38,11 +39,16 @@ Tensors = dict[str, tuple[str, tuple[int, ...]]]
 # Bytes per value of the dtypes these files hold, safetensors' sizes.
 BYTES = {"F16": 2, "BF16": 2, "F32": 4, "F8_E4M3": 1, "I8": 1, "U8": 1, "I64": 8, "F64": 8}
 
-# What every refusal of a readable file ends with.
+# What every refusal of a readable file given as the DiT or the VAE ends with, and as the shot
+# detector.
 V1 = (
     "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, with its VAE in fp16; phase 2"
     " brings the two 7Bs' smaller files"
 )
+SHOTS = "seedvr2x detects shots with TransNetV2 in fp32, as its own transnetv2.safetensors holds it"
+TAILS: dict[weights.Role, str] = {"dit": V1, "vae": V1, "detector": SHOTS}
+# What a safetensors file of other tensors is not.
+NONE_OF_THEM = "neither SeedVR2's DiT, its VAE nor TransNetV2"
 
 
 @functools.cache
@@ -76,6 +82,35 @@ def vendored(model: str) -> dict[str, tuple[int, ...]]:
 def as_dtype(model: str, dtype: str) -> Tensors:
     """The vendored model's tensors, every one in dtype."""
     return {name: (dtype, shape) for name, shape in vendored(model).items()}
+
+
+@functools.cache
+def transnetv2() -> Tensors:
+    """TransNetV2's tensors as the vendored model's state_dict gives them, built on the meta
+    device, by name: F32, its BatchNorm counters I64, as transnetv2.safetensors holds them."""
+    import torch
+
+    from seedvr2x.transnetv2.transnetv2_pytorch import TransNetV2
+
+    with torch.device("meta"):
+        built = TransNetV2()
+    dtypes = {torch.float32: "F32", torch.int64: "I64"}
+    return {name: (dtypes[t.dtype], tuple(t.shape)) for name, t in built.state_dict().items()}
+
+
+def transnetv2_with(
+    name: str, dtype: str | None = None, shape: tuple[int, ...] | None = None
+) -> Tensors:
+    """TransNetV2's tensors, the one named name in another dtype or shape."""
+    tensors = dict(transnetv2())
+    found, size = tensors[name]
+    tensors[name] = (dtype or found, shape or size)
+    return tensors
+
+
+# The metadata of seedvr2x's transnetv2.safetensors, as models/transnetv2_weights.py writes it,
+# in part: the check reads none of it.
+TRANSNETV2_METADATA = {"format": "pt", "license": "mit"}
 
 
 def write(path: Path, tensors: Tensors, metadata: Mapping[str, str] | None = None) -> Path:
@@ -183,6 +218,24 @@ def test_pinned_digests(model: str, architecture: Architecture) -> None:
         assert weights.DITS[(len(blocks), shapes["txt_in.weight"][0])] is architecture
 
 
+def test_transnetv2_pinned() -> None:
+    # TransNetV2's pin is the vendored model's inventory, as for the others; and the tensors of
+    # seedvr2x's file, read from its header at c14a2bc4: 90, 84 F32 and its 6 BatchNorm counters
+    # I64, 7,618,056 values.
+    tensors = transnetv2()
+    infos = {name: TensorInfo(dtype, shape) for name, (dtype, shape) in tensors.items()}
+    assert len(infos) == weights.TRANSNETV2.tensors == 90
+    assert weights.inventory(infos) == weights.TRANSNETV2.digest
+    counters = sorted(name for name in tensors if name.endswith(weights.COUNTER))
+    assert counters == [
+        f"SDDCNN.{i}.DDCNN.{j}.bn.num_batches_tracked" for i in range(3) for j in (0, 1)
+    ]
+    assert sorted(name for name, (dtype, _) in tensors.items() if dtype == "I64") == counters
+    assert sum(math.prod(shape) for _, shape in tensors.values()) == 7_618_056
+    assert tensors["fc1.weight"] == ("F32", (1024, 4864))
+    assert tensors["SDDCNN.0.DDCNN.0.Conv3D_1.layers.0.weight"] == ("F32", (32, 3, 1, 3, 3))
+
+
 @pytest.mark.parametrize(
     ("name", "metadata"),
     [
@@ -209,6 +262,16 @@ def test_vae_accepted(tmp_path: Path, name: str, metadata: dict[str, str] | None
     path = write(tmp_path / name, as_dtype("vae", "F16"), metadata)
     assert weights.check(path, "vae") is VAE
     assert weights.describe(path) == "SeedVR2's VAE in fp16"
+
+
+@pytest.mark.parametrize("metadata", [None, TRANSNETV2_METADATA], ids=["bare", "seedvr2x"])
+def test_transnetv2_accepted(tmp_path: Path, metadata: dict[str, str] | None) -> None:
+    # As the shot detector, in its own role only, whatever its name; its counters said nowhere.
+    path = write(tmp_path / "transnetv2.safetensors", transnetv2(), metadata)
+    assert weights.check(path, "detector") is weights.TRANSNETV2
+    assert weights.describe(path) == "TransNetV2 in fp32"
+    renamed = write(tmp_path / "seedvr2x_ema_vae_fp16.safetensors", transnetv2(), metadata)
+    assert weights.check(renamed, "detector") is weights.TRANSNETV2
 
 
 def test_renamed_files_recognised_by_content(tmp_path: Path) -> None:
@@ -351,7 +414,73 @@ QUANTISED += " in comfy-kitchen's layout ({})"
                 | {f"layer{k}.step": ("I64", ()) for k in range(6)}
             ),
             "vae",
-            "a safetensors file of 90 tensors (84 F32, 6 I64), neither SeedVR2's DiT nor its VAE",
+            f"a safetensors file of 90 tensors (84 F32, 6 I64), {NONE_OF_THEM}",
+        ),
+        # TransNetV2 given as another model, and the others given as the shot detector.
+        (
+            "transnetv2.safetensors",
+            transnetv2,
+            "dit",
+            "TransNetV2 in fp32, given as the DiT (--dit-model)",
+        ),
+        (
+            "transnetv2.safetensors",
+            transnetv2,
+            "vae",
+            "TransNetV2 in fp32, given as the VAE (--vae-model)",
+        ),
+        (
+            "seedvr2x_ema_7b_sharp_fp16.safetensors",
+            lambda: as_dtype("7b", "F16"),
+            "detector",
+            "SeedVR2's 7B DiT in fp16, given as the shot detector",
+        ),
+        (
+            "seedvr2x_ema_vae_fp16.safetensors",
+            lambda: as_dtype("vae", "F16"),
+            "detector",
+            "SeedVR2's VAE in fp16, given as the shot detector",
+        ),
+        (
+            "seedvr2_ema_3b_fp16.safetensors",
+            lambda: as_dtype("3b", "F16"),
+            "detector",
+            "SeedVR2's 3B DiT in fp16, given as the shot detector",
+        ),
+        (
+            "seedvr2x_ema_7b_int8_convrot.safetensors",
+            lambda: phase2("int8_convrot"),
+            "detector",
+            QUANTISED.format("INT8", "1,704 tensors: 840 F16, 288 F32, 288 I8, 288 U8")
+            + ", given as the shot detector",
+        ),
+        # TransNetV2 in other dtypes, or with a tensor of another shape.
+        (
+            "transnetv2.safetensors",
+            lambda: {
+                name: ("I64" if dtype == "I64" else "F16", shape)
+                for name, (dtype, shape) in transnetv2().items()
+            },
+            "detector",
+            "TransNetV2 in fp16",
+        ),
+        (
+            "transnetv2.safetensors",
+            lambda: transnetv2_with("fc1.weight", dtype="F16"),
+            "detector",
+            "TransNetV2 in mixed precision (83 tensors F32, 1 F16)",
+        ),
+        (
+            "transnetv2.safetensors",
+            lambda: {name: ("F32", shape) for name, (_, shape) in transnetv2().items()},
+            "detector",
+            "TransNetV2 in fp32, its BatchNorm counters 6 F32 where PyTorch keeps them I64",
+        ),
+        (
+            "transnetv2.safetensors",
+            lambda: transnetv2_with("fc1.weight", shape=(1024, 4096)),
+            "detector",
+            f"a safetensors file of 90 tensors (84 F32, 6 I64), {NONE_OF_THEM}",
         ),
     ],
     ids=[
@@ -369,13 +498,23 @@ QUANTISED += " in comfy-kitchen's layout ({})"
         "7b-as-vae",
         "nvfp4-as-vae",
         "other-safetensors",
+        "transnetv2-as-dit",
+        "transnetv2-as-vae",
+        "7b-as-detector",
+        "vae-as-detector",
+        "3b-as-detector",
+        "int8-as-detector",
+        "transnetv2-fp16",
+        "transnetv2-one-f16",
+        "transnetv2-counters-f32",
+        "transnetv2-a-shape-changed",
     ],
 )
 def test_refused_saying_what(
     tmp_path: Path, name: str, tensors: Callable[[], Tensors], role: weights.Role, what: str
 ) -> None:
     path = write(tmp_path / name, tensors())
-    assert refused(path, role) == f"{path}: {what}: {V1}"
+    assert refused(path, role) == f"{path}: {what}: {TAILS[role]}"
 
 
 def test_other_formats(tmp_path: Path) -> None:
@@ -410,8 +549,8 @@ def test_other_formats(tmp_path: Path) -> None:
     for name, what in expected.items():
         path = tmp_path / name
         assert weights.describe(path) == what
-        for role in ("dit", "vae"):
-            assert refused(path, role) == f"{path}: {what}: {V1}"
+        for role in ("dit", "vae", "detector"):
+            assert refused(path, role) == f"{path}: {what}: {TAILS[role]}"
 
 
 def test_missing(tmp_path: Path) -> None:
@@ -453,7 +592,7 @@ def test_empty(tmp_path: Path) -> None:
     path = tmp_path / "seedvr2x_ema_7b_sharp_fp16.safetensors"
     path.write_bytes(b"")
     said = f"{path}: empty (0 bytes); fetch it again"
-    for role in ("dit", "vae"):
+    for role in ("dit", "vae", "detector"):
         assert refused(path, role) == said
     with pytest.raises(ModelError) as error:
         weights.describe(path)
@@ -470,7 +609,7 @@ def test_too_short_to_tell(tmp_path: Path) -> None:
         path.write_bytes(start)
         size = f"{len(start)} byte{'s' if len(start) > 1 else ''}"
         said = f"{path}: cut short, {size}, too few for any model file; fetch it again"
-        for role in ("dit", "vae"):
+        for role in ("dit", "vae", "detector"):
             assert refused(path, role) == said
         with pytest.raises(ModelError) as error:
             weights.describe(path)
@@ -615,9 +754,7 @@ def test_block_index_of_any_length(tmp_path: Path) -> None:
     # 4,300), read as written.
     header = {f"blocks.{'1' * 5000}.weight": {"dtype": "U8", "shape": [1], "data_offsets": [0, 1]}}
     path = raw(tmp_path / "x.safetensors", header, 1)
-    assert weights.describe(path) == (
-        "a safetensors file of 1 tensor (1 U8), neither SeedVR2's DiT nor its VAE"
-    )
+    assert weights.describe(path) == f"a safetensors file of 1 tensor (1 U8), {NONE_OF_THEM}"
 
 
 def test_header_length_limits(tmp_path: Path) -> None:
@@ -643,7 +780,7 @@ def test_unknown_dtype_read(tmp_path: Path) -> None:
     # A dtype the read doesn't size fails no read, and no check passes it.
     header = {"a": {"dtype": "F4", "shape": [4], "data_offsets": [0, 2]}}
     path = raw(tmp_path / "x.safetensors", header, 2)
-    what = "a safetensors file of 1 tensor (1 F4), neither SeedVR2's DiT nor its VAE"
+    what = f"a safetensors file of 1 tensor (1 F4), {NONE_OF_THEM}"
     assert weights.describe(path) == what
     assert refused(path, "vae") == f"{path}: {what}: {V1}"
 
@@ -655,7 +792,7 @@ def test_safetensors_told_first(tmp_path: Path) -> None:
     path = raw(tmp_path / "x.safetensors", header + b" " * (640 - len(header)), 1)
     with path.open("rb") as file:
         assert file.read(2) == b"\x80\x02"
-    what = "a safetensors file of 1 tensor (1 U8), neither SeedVR2's DiT nor its VAE"
+    what = f"a safetensors file of 1 tensor (1 U8), {NONE_OF_THEM}"
     assert weights.describe(path) == what
 
 
@@ -675,12 +812,42 @@ def test_check_models(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     ]
 
 
+def test_check_models_with_the_detector(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # The shot detector's file checked with the others when given, logged with what it is; every
+    # file refused at once, the detector's last, the advice for its role in place of "fetch it
+    # again".
+    accepted_models(tmp_path)
+    dit, vae = "seedvr2_ema_7b_sharp_fp16.safetensors", "ema_vae_fp16.safetensors"
+    detector = write(tmp_path / "transnetv2.safetensors", transnetv2())
+    with caplog.at_level(logging.INFO):
+        weights.check_models(tmp_path / dit, tmp_path / vae, None, detector)
+    assert "Shot detector transnetv2.safetensors: TransNetV2 in fp32" in caplog.messages
+    cut = tmp_path / "cut" / "transnetv2.safetensors"
+    cut.parent.mkdir()
+    cut.write_bytes(detector.read_bytes()[:1000])
+    advice: dict[weights.Role, str] = {"detector": "the detector's advice"}
+    with pytest.raises(ModelError) as error:
+        weights.check_models(tmp_path / vae, tmp_path / vae, advice, cut)
+    header = 8 + int.from_bytes(detector.read_bytes()[:8], "little")
+    assert str(error.value).splitlines() == [
+        f"{tmp_path / vae}: SeedVR2's VAE in fp16, given as the DiT (--dit-model): {V1}",
+        f"{cut}: cut short inside its header, 1,000 bytes of at least {header:,}; the detector's"
+        " advice",
+    ]
+    with pytest.raises(ModelError) as error:
+        weights.check_models(tmp_path / dit, tmp_path / vae, None, tmp_path / dit)
+    assert str(error.value) == (
+        f"{tmp_path / dit}: SeedVR2's 7B DiT in fp16, given as the shot detector: {SHOTS}"
+    )
+
+
 # In a fresh interpreter: the header read takes neither torch nor the safetensors library.
 NO_TORCH = """
 import sys
 from pathlib import Path
 from seedvr2x.runtime import weights
 assert weights.check(Path(sys.argv[1]), "dit") is weights.DIT_7B
+assert weights.check(Path(sys.argv[3]), "detector") is weights.TRANSNETV2
 print(weights.describe(Path(sys.argv[2])))
 assert "torch" not in sys.modules and "safetensors" not in sys.modules, "imported"
 """
@@ -689,8 +856,9 @@ assert "torch" not in sys.modules and "safetensors" not in sys.modules, "importe
 def test_header_read_without_torch(tmp_path: Path) -> None:
     seven = write(tmp_path / "seedvr2x_ema_7b_fp16.safetensors", as_dtype("7b", "F16"))
     three = write(tmp_path / "seedvr2_ema_3b_fp16.safetensors", as_dtype("3b", "F16"))
+    detector = write(tmp_path / "transnetv2.safetensors", transnetv2())
     result = subprocess.run(
-        [sys.executable, "-c", NO_TORCH, str(seven), str(three)],
+        [sys.executable, "-c", NO_TORCH, str(seven), str(three), str(detector)],
         capture_output=True,
         text=True,
         check=False,
@@ -758,7 +926,7 @@ GIVEN_AS_VAE = "SeedVR2's 7B DiT in fp16, given as the VAE (--vae-model)"
 GIVEN_AS_DIT = "SeedVR2's VAE in fp16, given as the DiT (--dit-model)"
 PHASE_2 = "SeedVR2's 7B DiT quantised, its block matrices in {} with scale tensors beside them"
 GGUF = "a GGUF file"
-OTHER = "a safetensors file of {}, neither SeedVR2's DiT nor its VAE"
+OTHER = f"a safetensors file of {{}}, {NONE_OF_THEM}"
 REAL: list[tuple[str, weights.Role, str | None]] = [
     # numz's
     ("seedvr2_ema_7b_fp16.safetensors", "dit", None),
@@ -804,7 +972,12 @@ REAL: list[tuple[str, weights.Role, str | None]] = [
         for sharp in ("", "_sharp")
         for kind in ("Q8_0", "Q4_K", "Q4_K_imatrix", "dyn")
     ),
-    ("transnetv2.safetensors", "dit", OTHER.format("90 tensors (84 F32, 6 I64)")),
+    ("transnetv2.safetensors", "detector", None),
+    ("transnetv2.safetensors", "dit", "TransNetV2 in fp32, given as the DiT (--dit-model)"),
+    ("transnetv2.safetensors", "vae", "TransNetV2 in fp32, given as the VAE (--vae-model)"),
+    ("seedvr2x_ema_7b_sharp_fp16.safetensors", "detector", "7B DiT in fp16, given as the shot"),
+    ("seedvr2x_ema_vae_fp16.safetensors", "detector", "VAE in fp16, given as the shot detector"),
+    ("seedvr2_ema_7b-Q4_K_M.gguf", "detector", GGUF),
     *(
         (
             f"seedvr2_ema_7b{sharp}_fp16.imatrix.safetensors",
@@ -829,4 +1002,5 @@ def test_real_files(name: str, role: weights.Role, refusal: str | None) -> None:
         assert weights.check(path, role) is weights.ACCEPTED[role]
     else:
         message = refused(path, role)
-        assert message.startswith(f"{path}: ") and refusal in message and message.endswith(V1)
+        assert message.startswith(f"{path}: ") and refusal in message
+        assert message.endswith(TAILS[role])
