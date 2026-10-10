@@ -17,7 +17,7 @@ from seedvr2x.media.index import FrameIndex
 from seedvr2x.media.probe import DoviRecord, VideoStream, probe
 from seedvr2x.media.rate import Timeline
 from seedvr2x.media.reader import Reader
-from seedvr2x.media.scan import TOLERANCE_US, Scan, scan, timing_error
+from seedvr2x.media.scan import TOLERANCE_US, Idet, Scan, name_error, scan, timing_error
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,18 @@ SYNONYMS = {
 # option for the chroma location goes unused.
 SITING = "chroma_location"
 
+# PROVISIONAL (DESIGN.md says "finds combed frames", not how many): the share of the frames idet's
+# multiple-frame detection finds interlaced, top or bottom field first (Idet.combed), from which a
+# source is warned of. Measured on 2026-10-09, n9.0.2, on the first 6,000 frames of every real
+# source the gate accepts (27, declared progressive or with no field order) and of 9 Blu-ray and
+# web films and episodes: at most 2.1% (126 TFF on a live-action film with film grain, the next
+# 0.8%), repeated fields at most 17 of 6,001; the DVD control, telecined content (MPEG-2 480i,
+# refused for its field order anyway), 88% (5,302 BFF of 6,001), 403 repeated fields; a clip
+# hard-telecined here (tests/test_idet.py), 98%, 2 frames in 5 with a repeated field. Single-frame
+# detection is noisier (1.9% TFF on that film, many undetermined): not used. Sharp synthetic
+# pictures fool it: lavfi's testsrc2 at 320x240 reads 92% combed.
+COMBED = Fraction(1, 10)
+
 # The remake's cost, as DESIGN.md gives it (Input): FFV1 took 0.53-0.55 MB a frame on S9, a 1080p
 # Blu-ray film (research/docs/seeking.md, mechanism 7), 80 GB against its source's 14.5 GB.
 REMAKE_COST = "lossless, so large: 0.53-0.55 MB a frame on a 1080p film; and a full encode"
@@ -155,11 +167,13 @@ class Declared:
 @dataclass(frozen=True)
 class FirstPass:
     """What the first pass found in a file: its frames, decoded and counted, at the constant rate
-    declared; its content's SHA-256, when hashed; and its frame index (media/index.py)."""
+    declared; its content's SHA-256, when hashed; its frame index (media/index.py); idet's counts
+    (scan.Idet)."""
 
     frames: int
     sha256: str | None = None
     index: FrameIndex | None = None
+    idet: Idet | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +188,7 @@ class Source:
     sha256: str | None = None  # the file's content, hashed for a manifest
     index: FrameIndex | None = None  # the first pass's frame index, or its record's
     rate_override: Fraction | None = None  # --frame-rate, which its first pass accepted
+    idet: Idet | None = None  # idet's counts in its first pass, or its record's
 
     @property
     def display_aspect(self) -> Fraction:
@@ -233,6 +248,13 @@ def declare(
     against its frames by the first pass (timing_refusal).
 
     Raises MediaError with the reason for a refusal."""
+    # A name the first pass refuses (scan.name_error), refused here, first: the command line
+    # checks what a source declares before it fetches, checks and hashes the model files, and
+    # the pass ran after them, a 17 GB pull and a 16.5 GB hash before a refusal its name alone
+    # gives (a review's finding, 2026-10-10).
+    named = name_error(path)
+    if named:
+        raise MediaError(named)
     probed = probe(path)
     try:
         refusal = declared_refusal(probed, matrix)
@@ -324,20 +346,20 @@ def first_pass(declared: Declared, hashed: bool = False) -> FirstPass:
     if refusal:
         raise MediaError(f"{path}: {refusal}")
     if not hashed:
-        return FirstPass(scanned.frames, index=scanned.index)
+        return FirstPass(scanned.frames, index=scanned.index, idet=scanned.idet)
     reader.join()
     [digest] = hashed_as
     if isinstance(digest, OSError):
         raise MediaError(f"{path}: not readable: {digest}") from digest
     if isinstance(digest, Exception):
         raise digest
-    return FirstPass(scanned.frames, digest, scanned.index)
+    return FirstPass(scanned.frames, digest, scanned.index, scanned.idet)
 
 
 def counted(declared: Declared, found: FirstPass) -> Source:
     """The source declared, its frames counted and indexed by its first pass, or by the record of
     one; warned of when, read at the rate it declares, its frames leave that rate's timeline
-    (_strays)."""
+    (_strays), and when idet found combed frames there (combing)."""
     stream = declared.stream
     source = Source(
         declared.path,
@@ -348,6 +370,7 @@ def counted(declared: Declared, found: FirstPass) -> Source:
         found.sha256,
         found.index,
         declared.rate_override,
+        found.idet,
     )
     declares = rate.fraction(stream.frame_rate)
     forced = "" if source.rate_override is None else f" (--frame-rate; it declares {declares})"
@@ -370,7 +393,38 @@ def counted(declared: Declared, found: FirstPass) -> Source:
         # index. Said by the pass alone, a job resumed read on without it (a review's finding,
         # 2026-10-10).
         _strays(source)
+    combing(source)
     return source
+
+
+def combing(source: Source) -> None:
+    """Warn when idet's multiple-frame detection finds combed frames in the first pass, COMBED of
+    them or more: telecined or interlaced content in a source declared progressive, or declaring
+    no field order, the interlaced ones being refused (DESIGN.md, Not in the first version). The
+    run goes on."""
+    idet = source.idet
+    if idet is None or not idet.analysed or idet.combed < COMBED * idet.analysed:
+        return
+    # PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has the warning
+    # for "a source declared progressive"): a source that declares no field order is warned of
+    # too, since one that declares nothing could be telecined as well, and sptenc's rule reads it
+    # as it reads a progressive one (declared_refusal).
+    declared = source.stream.field_order == "progressive"
+    logger.warning(
+        "%s: ffmpeg's idet finds combed frames in a source %s: %d of %d (%.0f%%) interlaced by its"
+        " multiple-frame detection, %d top field first and %d bottom field first, %d with a"
+        " repeated field: likely telecined or interlaced content, which seedvr2x reads as"
+        " progressive frames, combing and all; for a clean upscale, inverse-telecine or"
+        " deinterlace it first with a tool made for it; the run goes on",
+        source.path,
+        "declared progressive" if declared else "that declares no field order",
+        idet.combed,
+        idet.analysed,
+        100 * idet.combed / idet.analysed,
+        idet.multiple[0],
+        idet.multiple[1],
+        idet.repeated[1] + idet.repeated[2],
+    )
 
 
 def timing_refusal(declared: Declared, scanned: Scan) -> str:

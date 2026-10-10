@@ -1,18 +1,19 @@
-"""The first pass over a source: every frame decoded, counted and timed, before any GPU work, and
-the frame index made meanwhile (DESIGN.md, Input; media/index.py). Automatic scene detection will
-join it."""
+"""The first pass over a source: every frame decoded, counted and timed, before any GPU work, the
+frame index made meanwhile (DESIGN.md, Input; media/index.py), and ffmpeg's idet run on every
+frame (Idet). Automatic scene detection will join it."""
 
 import logging
 import math
 import re
 import subprocess
 import threading
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from itertools import pairwise
 from pathlib import Path
-from typing import IO
+from typing import IO, Any, cast
 
 import numpy as np
 
@@ -30,9 +31,11 @@ logger = logging.getLogger(__name__)
 # newline, whatever thread printed it (libavutil/log.c:380-439, its print_prefix one for all):
 # the muxer reports a pts going back in two pieces (fftools/ffmpeg_mux.c:180-189), and a decoder's
 # line then came glued to the first, "... current: 5536800; decoder -> pts:5572800 ...", in 2
-# first passes of 6 over MPEG-TS files joined, their timestamps going back 40 s (2026-10-10). The
-# patterns below take the message wherever it starts, in the lines ffmpeg prints once it decodes
-# (MAPPING).
+# first passes of 6 over MPEG-TS files joined, their timestamps going back 40 s (2026-10-10). An
+# output's header, which av_dump_format prints in pieces, does it too, "[info]   Stream
+# #1decoder -> pts:167 ...": 14 first passes of 100 lost a decoder line's prefix with idet's
+# output (scan), 0 of 100 without it (2026-10-09). The patterns below take the message wherever
+# it starts, in the lines ffmpeg prints once it decodes (MAPPING).
 DECODED = re.compile(r"decoder -> pts:(-?\d+|NOPTS) .* time_base:(\d+)/(\d+)$")
 # fftools' report of a frame whose decoder flagged it: decode_error_flags set (H.264's slices or
 # its concealment, libavcodec/h264dec.c:752-764, 804-812; MPEG-2's concealment,
@@ -43,6 +46,11 @@ DECODED = re.compile(r"decoder -> pts:(-?\d+|NOPTS) .* time_base:(\d+)/(\d+)$")
 # print between them, so each report is tied to its frame exactly. By its message alone, as
 # DECODED.
 CORRUPT = "corrupt decoded frame"
+# A message of ffmpeg's at the error level or above, by its level, which -loglevel level prints.
+# One glued after a message that ended without a newline comes without it, as DECODED's, and no
+# pattern finds a level that isn't printed: what such an error does is then seen where it shows,
+# not in its line: ffmpeg's exit status (scan, which then quotes its last lines, _Decoded.last),
+# a frame's CORRUPT report, the counts of the frames decoded and hashed.
 ERROR = re.compile(r"\[(error|fatal|panic)\]")
 # The same at the start of its line, behind its contexts alone, its own and its parent's when it
 # has one, each "[name @ 0x...] " (libavutil/log.c:333-345 at n9.0.2: "[mpeg2video @ 0x...]
@@ -54,16 +62,19 @@ ERROR_AT_START = re.compile(r"(\[[^\]]* @ 0x[0-9a-f]+\] )*\[(error|fatal|panic)\
 # input's dump at ffmpeg_demux.c:2340), whole, with its level. Before it, ffmpeg prints the
 # source's own text at info level. Its metadata and chapters' titles, a line break in one begun
 # again behind an indent alone, without "[info]" (libavformat/dump.c:147-165), which a pattern
-# matching a message wherever it starts would take for the decoder's: a title "decoder -> pts:7
-# ... time_base:1/0" counted a frame, and raised in the thread reading stderr, ffmpeg then
-# blocked on it for good (a review's finding, 2026-10-09). And some of it raw, a line break in
-# it beginning a line of the text's own making: a stream's language (dump.c:638), a program's
+# matching a message wherever it starts would take for the decoder's or idet's: a title "decoder
+# -> pts:7 ... time_base:1/0" counted a frame, and raised in the thread reading stderr, ffmpeg
+# then blocked on it for good (a review's finding, 2026-10-09). And some of it raw, a line break
+# in it beginning a line of the text's own making: a stream's language (dump.c:638), a program's
 # name (:920), a tag's key (:155-156). A language "x\n[info] Stream mapping:\n" printed this very
-# line inside its input's dump, and the title after it was read as the decoder's lines (a
-# review's finding, 2026-10-10). So nothing before it is read but errors (ERROR_AT_START), and
-# each such line begins the reading again (_Decoded.read): fftools prints it once (ffmpeg.c:736),
-# after every input's dump, so that the last one read is its own. Nothing after it holds the
-# source's text: no output takes its metadata (ffmpeg.NO_METADATA), a stream's language among it.
+# line inside its input's dump, and the title after it was read as the decoder's lines, and as
+# idet's (a review's finding, 2026-10-10). So nothing before it is read but errors
+# (ERROR_AT_START), and each such line begins the reading again (_Decoded.read): fftools prints
+# it once (ffmpeg.c:736), after every input's dump, so that the last one read is its own. Nothing
+# after it holds the source's text: no output takes its metadata (ffmpeg.NO_METADATA), a
+# stream's language among it; and a name with a line break, which ffmpeg prints as it is in its
+# input's dump, is refused all the same, before anything is done with the file (name_error).
+# The all-zero summary of the idet graph fftools parses first comes before it too.
 # A known limit: before it an error is taken at its line's start, and the text printed raw can
 # begin a line with one, a language "x\n[error] made up\n" giving the warning "ffmpeg reported
 # errors decoding it: [error] made up" (a review's finding, 2026-10-10). A source's text can so
@@ -84,6 +95,20 @@ MAPPING = "[info] Stream mapping:"
 HASHED = re.compile(r"0, *-?\d+, *(-?\d+), *-?\d+, *\d+, ([0-9a-f]{8})\b")
 # The hashes' header line saying the stream's time base (libavformat/framehash.c:35).
 TIME_BASE = re.compile(r"#tb 0: (\d+)/(\d+)$")
+# idet's counts, printed at info level when its filter is freed (libavfilter/vf_idet.c:358-381 at
+# n9.0.2), three lines, each count %6d: [Parsed_idet_0 @ 0x...] [info] Multi frame detection: TFF:
+# 0 BFF: 0 Progressive: 240 Undetermined: 1. fftools frees a graph it parses to learn its inputs
+# before any frame (an all-zero summary first), and one it rebuilds when the frames' parameters
+# change (a summary of the frames before): the summaries are summed (Idet). By the message alone,
+# as DECODED: only idet prints these.
+IDET = re.compile(r"(Repeated Fields|Single frame detection|Multi frame detection): (.*)$")
+IDET_COUNT = re.compile(r"(\w+): *(\d+)")
+# Each line's counts, by their names in the line: Idet's fields.
+IDET_LINES = {
+    "Repeated Fields": ("repeated", ("Neither", "Top", "Bottom")),
+    "Single frame detection": ("single", ("TFF", "BFF", "Progressive", "Undetermined")),
+    "Multi frame detection": ("multiple", ("TFF", "BFF", "Progressive", "Undetermined")),
+}
 
 # How much the time between two frames may vary in a constant frame rate stream: sptenc's
 # tolerance (ffmpeg/probe.go, IsConstantFrameRate). Matroska rounds timestamps to the
@@ -139,6 +164,55 @@ class Discontinuity:
 
 
 @dataclass(frozen=True)
+class Idet:
+    """ffmpeg's idet over the first pass's frames (DESIGN.md, Not in the first version: interlaced
+    and telecined sources), its counts summed over its summaries (IDET): frames with a repeated
+    field (neither, top, bottom), and each frame's field order by its single-frame and its
+    multiple-frame detection (TFF, BFF, progressive, undetermined). About one count a frame: a
+    graph rebuilt mid-stream frees the frame idet holds uncounted, 119 counts for 120 frames
+    on a stream tagged from its 15th."""
+
+    repeated: tuple[int, ...]  # neither, top, bottom
+    single: tuple[int, ...]  # TFF, BFF, progressive, undetermined
+    multiple: tuple[int, ...]  # TFF, BFF, progressive, undetermined
+
+    @property
+    def combed(self) -> int:
+        """The frames its multiple-frame detection finds interlaced, top or bottom field first."""
+        return self.multiple[0] + self.multiple[1]
+
+    @property
+    def analysed(self) -> int:
+        """The frames its multiple-frame detection counts."""
+        return sum(self.multiple)
+
+    def record(self) -> dict[str, dict[str, int]]:
+        """The counts as the manifest records them, by idet's names, lower-cased."""
+        return {
+            key: {
+                name.lower(): count for name, count in zip(names, getattr(self, key), strict=True)
+            }
+            for key, names in IDET_LINES.values()
+        }
+
+    @classmethod
+    def from_record(cls, recorded: object) -> "Idet | None":
+        """The counts a manifest records (record), None for anything else."""
+        if not isinstance(recorded, Mapping):
+            return None
+        found: dict[str, tuple[int, ...]] = {}
+        for key, names in IDET_LINES.values():
+            counts: Any = cast(Mapping[str, Any], recorded).get(key)
+            if not isinstance(counts, Mapping):
+                return None
+            values = [cast(Mapping[str, Any], counts).get(name.lower()) for name in names]
+            if not all(type(value) is int for value in values):
+                return None
+            found[key] = tuple(cast(list[int], values))
+        return cls(found["repeated"], found["single"], found["multiple"])
+
+
+@dataclass(frozen=True)
 class Scan:
     """What the first pass measured. The frame times are exact: the source's own timestamps, in
     its stream's time base, turned into microseconds without rounding (Fraction)."""
@@ -147,27 +221,32 @@ class Scan:
     durations: int  # times measured between consecutive frames that have a timestamp
     shortest: Fraction  # the shortest of them, in microseconds; 0 without any
     longest: Fraction  # the longest, in microseconds; 0 without any
-    # The frame index made meanwhile; not part of what a scan is compared by.
+    # The frame index and idet's counts, made meanwhile; not part of what a scan is compared by.
     index: FrameIndex | None = field(default=None, compare=False)
+    idet: Idet | None = field(default=None, compare=False)
     # The first jump in the frames' timestamps, which is refused (timing_error); None without one.
     discontinuity: Discontinuity | None = None
 
 
 def scan(path: Path) -> Scan:
     """Decode every frame of the first video stream of path, counting, timing and indexing them,
-    its packets scanned for keyframes meanwhile.
+    and running idet on them, its packets scanned for keyframes meanwhile.
 
     One ffmpeg process decodes, prints each frame's line (DECODED) and the reports tied to it on
     stderr, and hashes each decoded frame on stdout, a CRC-32 of its planes as the decoder gives
     them (rawvideo to the framehash muxer, whose crc32 is zlib's: tests/test_index.py), so that no
-    frame crosses a pipe. The timestamps are the source's own, each read from its frame's hash
-    line (HASHED): -copyts, and the hashes' time base the demuxer's. The frames are counted here
+    frame crosses a pipe; a second output runs idet on every frame, its counts on stderr at the
+    end (IDET). The timestamps are the source's own, each read from its frame's hash line
+    (HASHED): -copyts, and the hashes' time base the demuxer's. The frames are counted here
     as their lines come, on stdout and on stderr, which must agree, never by ffmpeg's counters,
     which restart when it rebuilds its filter graph mid-stream (research/docs/seeking.md,
     mechanism 8). ffprobe scans the packets in another process meanwhile (packets).
 
-    Raises MediaError when ffmpeg or ffprobe fails, their counts disagree, or the hashes come
-    in no time base."""
+    Raises MediaError when ffmpeg or ffprobe fails, their counts disagree, the hashes come in no
+    time base, or the path holds a line break (name_error)."""
+    refused = name_error(path)
+    if refused:
+        raise MediaError(refused)
     command = [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats"),
         # repeat: two reports alike in a row are both printed, never folded into "Last message
@@ -179,6 +258,23 @@ def scan(path: Path) -> Scan:
         # grid on one tick, as joins of ffmpeg's concat demuxer do (cli._directory_refused).
         *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux"),
         *(*NO_METADATA, "-c:v", "rawvideo", "-f", "framehash", "-hash", "crc32", "-"),
+        # idet on every frame decoded (DESIGN.md, Not in the first version), in an output and a
+        # filter graph of its own, so that the frames hashed are the decoder's whatever idet
+        # takes: for a format it doesn't (RGB, packed), ffmpeg converts in idet's graph alone. A
+        # branch of a split would share one list of formats with the hashed branch
+        # (libavfilter/formats.c:1171-1232, ff_default_query_formats), a conversion then falling
+        # before the split or after it by the order the links are merged in. Measured on
+        # 2026-10-09 (n9.0.2, 16 cores, 3 runs): the pass at 1,237-1,242 and 623-627 fps on 1080p
+        # x264 at 10 and 55 Mbit/s, 1,180-1,193 and 612-619 with this output (4.5% and 1.7%),
+        # 1,216-1,218 and 621-622 with the split; at 4K, idet is the pass's bottleneck either way,
+        # not slice-threaded (libavfilter/vf_idet.c:453-464), about 10-12 ms a frame: 178-207 fps
+        # on HEVC 10-bit 4:2:0, 104-106 with it, 198-214 on ProRes 4:2:2 10-bit, 80-83 with it.
+        # Detecting the same costs that: idet reads every plane (:148-163), and luma alone would
+        # detect otherwise. The null muxer writes nothing; its time base the stream's too, or a
+        # join drifting off the frame grid puts two frames on one tick, and the muxer reports an
+        # error (tests/test_decode.py, a concat join).
+        *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux"),
+        *(*NO_METADATA, "-vf", "idet", "-f", "null", "-"),
     ]
     scanned: list[object] = []
     scanner = threading.Thread(target=_packets_into, args=(path, scanned), daemon=True)
@@ -197,7 +293,8 @@ def scan(path: Path) -> Scan:
     scanner.join()
     errors = decoded.errors
     if status != 0:
-        raise MediaError(f"{path}: ffmpeg failed decoding it: {' / '.join(errors[-5:])}")
+        said = errors[-5:] or list(decoded.last)
+        raise MediaError(f"{path}: ffmpeg failed decoding it: {' / '.join(said)}")
     [packets] = scanned
     if isinstance(packets, OSError):
         raise MediaError(f"{path}: ffprobe failed scanning its packets: {packets}") from packets
@@ -234,11 +331,30 @@ def scan(path: Path) -> Scan:
         np.array(decoded.corrupt, dtype=np.bool_),
         np.unique(np.array(packets.keyframes, dtype=np.int64)),
     )
+    idet = decoded.idet()
+    if idet is None:
+        # Said, never silent (AGENTS.md): a build printing its counts otherwise.
+        logger.warning("%s: ffmpeg's idet gave no counts: combed frames not looked for", path)
     jump = _discontinuity(hashed.pts, decoded.pts, time_base, packets.remux)
-    return replace(_timed(hashed.pts, time_base, index), discontinuity=jump)
+    return replace(_timed(hashed.pts, time_base, index, idet), discontinuity=jump)
 
 
-def _timed(pts: list[int], time_base: Fraction, index: FrameIndex) -> Scan:
+def name_error(path: Path) -> str:
+    """Why a source's name is refused, or "": a line break in it. ffmpeg prints the name as it
+    is, in its input's dump and in its errors: a line of the name's own making among those the
+    first pass reads (MAPPING). Known from the command line: refused before anything is done with
+    the file (media/source.py, declare), and by the pass itself (scan)."""
+    if "\n" in str(path) or "\r" in str(path):
+        return (
+            f"{str(path)!r}: a line break in its name, which ffmpeg prints as it is among the"
+            " lines the first pass reads: rename it"
+        )
+    return ""
+
+
+def _timed(
+    pts: list[int], time_base: Fraction, index: FrameIndex, idet: Idet | None = None
+) -> Scan:
     """The frames' timing from their pts, sptenc's way: a frame without a timestamp breaks the
     chain, the next time measured being between the two frames after it."""
     durations = 0
@@ -252,7 +368,7 @@ def _timed(pts: list[int], time_base: Fraction, index: FrameIndex) -> Scan:
             longest = duration if durations == 0 else max(longest, duration)
             durations += 1
         previous = current
-    return Scan(len(pts), durations, shortest, longest, index)
+    return Scan(len(pts), durations, shortest, longest, index, idet)
 
 
 def _discontinuity(
@@ -326,13 +442,36 @@ class _Hashed:
 
 class _Decoded:
     """What the first pass's stderr says, read as it comes: each frame the decoder gives, with its
-    own pts (DECODED) and whether the decoder flagged it (CORRUPT, the report before it), and the
-    errors; of the lines before ffmpeg decodes (MAPPING), the errors alone."""
+    own pts (DECODED) and whether the decoder flagged it (CORRUPT, the report before it), the
+    errors, idet's counts (IDET); of the lines before ffmpeg decodes (MAPPING), the errors alone.
+    `last` keeps its last lines, for a failure no error line tells of (ERROR)."""
 
     def __init__(self) -> None:
         self.pts: list[int] = []  # the decoder's own: the frames' are the hashes' (_Hashed)
         self.corrupt: list[bool] = []
         self.errors: list[str] = []
+        self.last: deque[str] = deque(maxlen=5)
+        self.counted: dict[str, list[int]] = {}  # idet's, summed, by Idet's fields
+
+    def idet(self) -> Idet | None:
+        """idet's counts, summed over its summaries; None without all three lines."""
+        if len(self.counted) != len(IDET_LINES):
+            return None
+        return Idet(*(tuple(self.counted[key]) for key, _ in IDET_LINES.values()))
+
+    def _idet(self, line: str) -> None:
+        """Add one of idet's summary lines to the counts; another shape is ignored, idet's counts
+        then incomplete (idet)."""
+        found = IDET.search(line.rstrip("\n"))
+        if found is None:
+            return
+        key, names = IDET_LINES[found[1]]
+        counts = dict(IDET_COUNT.findall(found[2]))
+        if set(counts) != set(names):
+            return
+        summed = self.counted.setdefault(key, [0] * len(names))
+        for place, name in enumerate(names):
+            summed[place] += int(counts[name])
 
     def read(self, lines: Iterable[str]) -> None:
         reported = False
@@ -341,6 +480,7 @@ class _Decoded:
         # (ERROR_AT_START): no errors, should another such line come.
         loose: list[int] = []
         for line in lines:
+            self.last.append(line.strip())
             if line.startswith(MAPPING) and line.rstrip("\n") == MAPPING:
                 # The reading begins again: what was read since the line before this one, a line
                 # of the source's own text then, is its text too (MAPPING).
@@ -349,13 +489,14 @@ class _Decoded:
                 loose.clear()
                 self.pts.clear()
                 self.corrupt.clear()
+                self.counted.clear()
                 reported, mapped = False, True
                 continue
             if not mapped:
                 if ERROR_AT_START.match(line):
                     self.errors.append(line.strip())
                 continue
-            # About 9 lines a frame with -debug_ts: the cheapest test first.
+            # About 14 lines a frame with -debug_ts: the cheapest test first.
             if "decoder -> pts:" in line:
                 found = DECODED.search(line.rstrip("\n"))
                 if found is None:
@@ -365,6 +506,8 @@ class _Decoded:
                 reported = False
             elif CORRUPT in line:
                 reported = True
+            elif "Fields: " in line or "frame detection: " in line:
+                self._idet(line)
             elif ERROR.search(line):
                 if not ERROR_AT_START.match(line):
                     loose.append(len(self.errors))

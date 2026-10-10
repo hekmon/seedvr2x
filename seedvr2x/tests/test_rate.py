@@ -47,7 +47,7 @@ def _usable() -> bool:
 
 
 needs_ffmpeg = pytest.mark.skipif(
-    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1"
+    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1"
 )
 needs_x264 = pytest.mark.skipif(not has_encoder("libx264"), reason="needs ffmpeg with libx264")
 

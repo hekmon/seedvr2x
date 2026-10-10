@@ -59,7 +59,7 @@ def test_too_small_to_pad_refused_before_the_first_pass(
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, idet and ffv1")
     from seedvr2x.media import source as sources
 
     def first_pass(*args: object, **kwargs: object) -> None:
@@ -108,7 +108,7 @@ def test_refused_source_stops_before_torch(tmp_path: Path) -> None:
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, idet and ffv1")
     source = tmp_path / "tff.mkv"
     subprocess.run(
         [
@@ -184,7 +184,7 @@ def test_hdr_refused_before_the_first_pass(tmp_path: Path, kind: str, said: str)
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, idet and ffv1")
     if kind == "first frame" and not has_x265():
         pytest.skip("needs ffmpeg with libx265")
     if kind == "dolby vision":
@@ -204,6 +204,43 @@ def test_hdr_refused_before_the_first_pass(tmp_path: Path, kind: str, said: str)
     assert sorted(tmp_path.rglob("*")) == files
 
 
+# EARLY, the model files' fetch exiting 4 as well.
+BEFORE_THE_MODEL_FILES = EARLY.replace(
+    "from seedvr2x.runtime import weights", "from seedvr2x.runtime import pull, weights"
+).replace("source.first_pass = ", "pull.resolve = source.first_pass = ")
+
+
+def test_a_line_break_in_the_name_refused_before_the_model_files(tmp_path: Path) -> None:
+    # A name ffmpeg prints as it is, a line of the name's own among those the first pass reads
+    # (media/scan.py, MAPPING): refused with what the source declares, before the model files are
+    # fetched, checked and hashed, where the first pass refused it after them, a 17 GB pull and a
+    # 16.5 GB hash later; nothing written. The file is there, a video like another.
+    try:
+        ffmpeg.check()
+    except ffmpeg.MediaError:
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, idet and ffv1")
+    assert "pull.resolve = source.first_pass = weights.check_models = ran" in BEFORE_THE_MODEL_FILES
+    source = tmp_path / "a\n[info] Stream mapping:.mkv"
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),
+            *("-frames:v", "3", "-c:v", "ffv1", str(source)),
+        ],
+        check=True,
+    )
+    files = sorted(tmp_path.rglob("*"))
+    args = [str(source), "-o", str(tmp_path / "out.mkv"), "--model-dir", str(tmp_path / "models")]
+    result = subprocess.run(
+        [sys.executable, "-c", BEFORE_THE_MODEL_FILES, *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert f"{str(source)!r}: a line break in its name, which ffmpeg prints" in result.stderr
+    assert sorted(tmp_path.rglob("*")) == files
+
+
 def test_contradicted_tags_refused_before_the_first_pass(tmp_path: Path) -> None:
     # Colour tags its first frame contradicts, a declared refusal like the others (DESIGN.md,
     # Input): before the first pass, the model files' check and torch, whatever the output, and
@@ -212,7 +249,7 @@ def test_contradicted_tags_refused_before_the_first_pass(tmp_path: Path) -> None
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, idet and ffv1")
     if not has_x265():
         pytest.skip("needs ffmpeg with libx265")
     tags = ("-colorspace:v", "bt470bg", "-color_range:v", "pc")
@@ -291,7 +328,7 @@ def test_verify_reads_no_frame_to_probe(tmp_path: Path, caplog: pytest.LogCaptur
     try:
         ffmpeg.check()
     except ffmpeg.MediaError:
-        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, idet and ffv1")
     master = tmp_path / "one.mkv"
     with FFV1Writer(master, "gbrp16le", 64, 48, Fraction(60), Tags()) as writer:
         writer.write(np.zeros((260, 48, 64, 3), np.float32))

@@ -51,7 +51,7 @@ def _usable() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1"
+    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1"
 )
 
 SEED = 42
@@ -2519,3 +2519,49 @@ def test_frame_rate_override(
     assert scans == []  # the first pass's record trusted
     for name in names:
         assert decoded(tmp_path / "out" / name) == decoded(whole / name)
+
+
+def test_idet_recorded_not_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # idet's counts go in the manifest's input record, for information (manifest._input): a
+    # resume trusting the first pass's record says the warning again from them, without a pass;
+    # one whose pass runs again (its frame index removed: cli._prior) finds other counts than the
+    # recorded ones, which is no other job (resume.UNCOMPARED), and records them.
+    from seedvr2x.media import source as examined
+
+    scans: list[Path] = []
+    scan = examined.scan
+
+    def counted(path: Path) -> object:
+        scans.append(path)
+        return scan(path)
+
+    monkeypatch.setattr(examined, "scan", counted)
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    manifest = tmp_path / "out" / "manifest.json"
+    content = json.loads(manifest.read_text())
+    found = json.loads(json.dumps(content["input"]["idet"]))
+    assert scans and set(found) == {"repeated", "single", "multiple"}
+    assert set(found["multiple"]) == {"tff", "bff", "progressive", "undetermined"}
+    combed = {"tff": 20, "bff": 10, "progressive": 0, "undetermined": 0}
+    content["input"]["idet"]["multiple"] = combed
+    manifest.write_text(json.dumps(content, indent=2) + "\n")
+    caplog.clear()
+    scans.clear()
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    assert scans == []
+    said = "ffmpeg's idet finds combed frames in a source declared progressive: 30 of 30 (100%)"
+    assert (
+        f"{source_path}: {said} interlaced by its multiple-frame detection, 20 top" in caplog.text
+    )
+    assert json.loads(manifest.read_text())["input"]["idet"]["multiple"] == combed
+    (tmp_path / "out" / "frame_index.bin").unlink()
+    caplog.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert len(scans) == 1 and "another job" not in caplog.text
+    assert json.loads(manifest.read_text())["input"]["idet"] == found

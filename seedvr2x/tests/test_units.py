@@ -48,6 +48,7 @@ def job(tmp_path: Path, shots: list[Shot], segments: list[OutputSegment]) -> Man
         conversion=SimpleNamespace(describe=lambda: "RGB"),
         sha256=None,
         index=None,
+        idet=None,
     )
     source.path.write_bytes(b"")
     for segment in segments:

@@ -32,7 +32,7 @@ def _usable() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1"
+    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1"
 )
 
 WIDTH, HEIGHT = 64, 16  # multiples of 4: 4:1:1 and 4:1:0 included

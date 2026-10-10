@@ -182,10 +182,11 @@ class Manifest:
 def _input(source: Source) -> dict[str, Any]:
     """The source as the manifest records it: the file itself (where it is, its size and
     modification time, read when the job starts, and its content's SHA-256) and what the first
-    pass found in it; with its frame index, the index's file, INDEX, by its name, size and
-    SHA-256. Its content says which file it is; where it is and when it was modified are
-    information (resume.UNCOMPARED), as the index is: derived data, which a resume checks against
-    this record before trusting it, and makes again when missing or damaged (cli._prior)."""
+    pass found in it, idet's counts included; with its frame index, the index's file, INDEX, by
+    its name, size and SHA-256. Its content says which file it is; where it is and when it was
+    modified are information (resume.UNCOMPARED), as the index is: derived data, which a resume
+    checks against this record before trusting it, and makes again when missing or damaged
+    (cli._prior); and as idet's counts are."""
     path = source.path.resolve()
     status = path.stat()
     record: dict[str, Any] = {
@@ -208,6 +209,10 @@ def _input(source: Source) -> dict[str, Any]:
         data = source.index.to_bytes()
         digest = hashlib.sha256(data).hexdigest()
         record["index"] = {"name": INDEX, "bytes": len(data), "sha256": digest}
+    if source.idet is not None:
+        # For information, not compared (resume.UNCOMPARED): what idet found, the warning's
+        # figures (source.combing), said again by a resume trusting this record.
+        record["idet"] = source.idet.record()
     return record
 
 

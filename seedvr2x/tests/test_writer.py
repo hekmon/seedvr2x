@@ -34,7 +34,7 @@ def _usable() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1"
+    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1"
 )
 
 RATE = Fraction(24000, 1001)

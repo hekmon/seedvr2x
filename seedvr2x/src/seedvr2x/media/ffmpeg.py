@@ -4,13 +4,41 @@ import shutil
 import subprocess
 from pathlib import Path
 
-# What seedvr2x asks of the build: zscale for every colour conversion (swscale's 8 → 16-bit
-# expansion is inexact, 255 → 65283: DESIGN.md, Input), scdet for the cut detection, FFV1 to
-# write the masters and to read lossless segments back. The other filters are in any build, and
-# checked for a clear message all the same.
-FILTERS = ("zscale", "scdet", "format", "settb", "metadata", "setparams", "split")
-ENCODERS = ("ffv1",)
-DECODERS = ("ffv1",)
+# What seedvr2x's own ffmpeg commands use, every one checked, so that a build lacking one is
+# refused at startup, saying which, rather than failing a pass hours in. zscale for every colour
+# conversion (swscale's 8 → 16-bit expansion is inexact, 255 → 65283: DESIGN.md, Input), idet for
+# combed frames in the first pass (media/scan.py), FFV1 to write the masters and read them back
+# are the ones a build may well lack; the others are in any build, and checked for a clear
+# message all the same. scdet is no longer asked: TransNetV2 detects the cuts (DESIGN.md, Shot
+# detection), and nothing runs it; nor settb and metadata, the first pass's before it read the
+# decoder's timestamps (media/scan.py).
+FILTERS = (
+    "zscale",  # every colour conversion: the decode's (media/conversion.py), the writers'
+    "format",  # the formats the conversions are fed and give
+    # Inserted by ffmpeg where a format filter meets a packed format, to repack it (DESIGN.md,
+    # Not in the first version: 26 packed or semi-planar formats, repacked exactly), and before
+    # idet for a format it doesn't take (libavfilter/vf_idet.c:385-417 at n9.0.2): RGB.
+    "scale",
+    "setparams",  # the writers' colour tags, its chroma_location (OPTIONS)
+    "split",  # the yuv420p10le writer's two branches, its file and its hashes (media/writer.py)
+    # The reads' frames from the pts of the first asked (media/reader.py), in an output of their
+    # own, no split; alone, no trim: the reads seek without accurate seek (-noaccurate_seek),
+    # whose trim fftools would put in front of each graph (fftools/ffmpeg_filter.c:1945-1947).
+    "select",
+    "idet",  # the first pass's combing detection (media/scan.py)
+    # The graph fftools gives an output without filters (fftools/ffmpeg_mux_init.c:436): the
+    # first pass's hashes, the checksums' decode (media/checksums.py).
+    "null",
+)
+# rawvideo: the frames given raw, on a pipe (-f rawvideo) or to framehash; wrapped_avframe, the
+# null muxer's, the first pass's idet output (libavformat/nullenc.c:34).
+ENCODERS = ("ffv1", "rawvideo", "wrapped_avframe")
+# rawvideo: the writers' input and the fingerprint's frames (-f rawvideo -i).
+DECODERS = ("ffv1", "rawvideo")
+# framehash: the first pass's and the reads' CRC-32s (media/scan.py, media/reader.py); null: the
+# first pass's idet output; rawvideo: the frames on a pipe; matroska: the FFV1 masters and the
+# input copies, whatever the output's format.
+MUXERS = ("framehash", "null", "rawvideo", "matroska")
 # Options of those filters that older builds lack: (filter, option, the ffmpeg that brought it).
 # setparams' chroma_location tags the yuv420p10le master's frames with its chroma siting
 # (media/writer.py:247, master_filters), and so the conversions' fingerprint runs it at every
@@ -76,15 +104,15 @@ def zscale(*options: str) -> str:
 
 
 def check(output_encoders: tuple[str, ...] = (), output_muxers: tuple[str, ...] = ()) -> str:
-    """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs, the options of OPTIONS
-    included, and for the output's own encoders and muxers (png for PNG output; framehash, which
-    hashes a yuv420p10le master's frames), and return ffmpeg's version.
+    """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs (FILTERS, ENCODERS, DECODERS,
+    MUXERS), the options of OPTIONS included, and for the output's own encoders and muxers (png
+    and image2 for PNG output), and return ffmpeg's version.
 
     Raises MediaError naming what is missing, and which ffmpeg to get when it is zscale or an
     option of a newer ffmpeg (HOW_TO_GET)."""
     found()
     filters, encoders, decoders = _listed("-filters"), _listed("-encoders"), _listed("-decoders")
-    muxers = _listed("-muxers") if output_muxers else set[str]()
+    muxers = _listed("-muxers")
     options = [
         f"the {option} option of its {name} filter (ffmpeg {since} and later have it)"
         for name, option, since in OPTIONS
@@ -95,7 +123,7 @@ def check(output_encoders: tuple[str, ...] = (), output_muxers: tuple[str, ...] 
         *options,
         *(f"the {name} encoder" for name in ENCODERS + output_encoders if name not in encoders),
         *(f"the {name} decoder" for name in DECODERS if name not in decoders),
-        *(f"the {name} muxer" for name in output_muxers if name not in muxers),
+        *(f"the {name} muxer" for name in MUXERS + output_muxers if name not in muxers),
     ]
     if missing:
         raise MediaError(
@@ -114,8 +142,8 @@ def found() -> None:
 
 
 def _listed(option: str) -> set[str]:
-    """The names ffmpeg lists for -filters, -encoders or -decoders: the second column of each
-    line, after the flags."""
+    """The names ffmpeg lists for -filters, -encoders, -decoders or -muxers: the second column
+    of each line, after the flags."""
     return {fields[1] for fields in map(str.split, _run(option).splitlines()) if len(fields) > 1}
 
 

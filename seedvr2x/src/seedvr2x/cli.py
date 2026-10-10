@@ -385,10 +385,8 @@ def _run(args: argparse.Namespace) -> int:
                 f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
                 f" a window needs at least {2 * SHARED + 1}"
             )
-        ffmpeg_version = ffmpeg.check(
-            ("png",) if args.format == "png" else (),
-            ("framehash",) if args.format == "yuv420p10le" else (),
-        )
+        png = args.format == "png"
+        ffmpeg_version = ffmpeg.check(("png",) if png else (), ("image2",) if png else ())
         conversions = fingerprint()
         logger.info("ffmpeg %s, its conversions' fingerprint %s", ffmpeg_version, conversions[:16])
         declared = declare(args.input, args.input_matrix, args.input_sar, args.frame_rate)
@@ -911,6 +909,7 @@ def _prior(
     record of the first pass is trusted, and the pass isn't run again, unless ffmpeg or its
     conversions changed: the same bytes, decoded by the same build, give the same frames, and
     nothing else takes part in the pass (DESIGN.md, Pause and resume)."""
+    from seedvr2x.media.scan import Idet
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import NAME, read
@@ -945,7 +944,7 @@ def _prior(
         logger.warning("%s; the first pass runs again, which makes it", why)
         return _Prior(recorded, identity, changed, None)
     logger.info("%s: the same input and ffmpeg, the first pass as recorded", directory)
-    found = FirstPass(entry["frames"], entry["sha256"], index)
+    found = FirstPass(entry["frames"], entry["sha256"], index, Idet.from_record(entry.get("idet")))
     return _Prior(recorded, identity, changed, found)
 
 

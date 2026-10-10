@@ -29,7 +29,7 @@ def _usable() -> bool:
 
 
 needs_ffmpeg = pytest.mark.skipif(
-    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1"
+    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1"
 )
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "seedvr2x"

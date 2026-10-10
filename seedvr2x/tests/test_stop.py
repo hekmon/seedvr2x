@@ -131,7 +131,7 @@ def test_notice_lost_stop_kept(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def job(tmp_path: Path) -> Path:
     if not _usable():
-        pytest.skip("needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
+        pytest.skip("needs ffmpeg 7.1 or later with zscale, idet and ffv1")
     subprocess.run(
         [
             *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),

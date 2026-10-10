@@ -10,7 +10,7 @@ import pytest
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
 
-FILTERS = ("zscale", "scdet", "format", "settb", "metadata", "setparams", "split", "idet")
+FILTERS = ("zscale", "format", "scale", "setparams", "split", "select", "idet", "null")
 
 # setparams' options as ffmpeg n9.0.2's -h filter=setparams lists them, each with its help, and
 # the named values of two of them (the others' left out): (name, value, help).
@@ -70,13 +70,18 @@ def setparams_help(options: tuple[str, ...]) -> list[str]:
     return [*lines, "", "", "Exiting with exit code 0"]
 
 
+ENCODERS = ("ffv1", "rawvideo", "wrapped_avframe", "png")
+DECODERS = ("ffv1", "rawvideo", "h264")
+MUXERS = ("matroska", "framehash", "null", "rawvideo", "image2")
+
+
 def fake_build(
     directory: Path,
     filters: tuple[str, ...] = FILTERS,
-    encoders: tuple[str, ...] = ("ffv1", "png"),
-    decoders: tuple[str, ...] = ("ffv1", "h264"),
+    encoders: tuple[str, ...] = ENCODERS,
+    decoders: tuple[str, ...] = DECODERS,
     ffprobe: bool = True,
-    muxers: tuple[str, ...] = ("matroska", "framehash"),
+    muxers: tuple[str, ...] = MUXERS,
     setparams: tuple[str, ...] = tuple(SETPARAMS),
 ) -> None:
     """An ffmpeg answering -filters, -encoders, -decoders, -muxers, -version and -h
@@ -195,15 +200,32 @@ def test_refused_before_anything(tmp_path: Path) -> None:
         assert sorted(tmp_path.rglob("*")) == files
 
 
-WITHOUT_SCDET = tuple(name for name in FILTERS if name != "scdet")
+def without(names: tuple[str, ...], name: str) -> tuple[str, ...]:
+    return tuple(other for other in names if other != name)
 
 
 @pytest.mark.parametrize(
-    ("filters", "encoders", "decoders", "missing"),
+    ("filters", "encoders", "decoders", "muxers", "missing"),
     [
-        (WITHOUT_SCDET, ("ffv1",), ("ffv1",), "the scdet filter"),
-        (FILTERS, ("png",), ("ffv1",), "the ffv1 encoder"),
-        (FILTERS, ("ffv1",), ("h264",), "the ffv1 decoder"),
+        # Each one seedvr2x's own commands use (ffmpeg.FILTERS, ENCODERS, DECODERS, MUXERS):
+        # idet, which the first pass runs, select and split, which the reads use, the null graph
+        # of an output without filters; rawvideo, the frames raw on a pipe or hashed;
+        # wrapped_avframe and null, idet's output; framehash, the frame index's CRC-32s.
+        *(
+            (without(FILTERS, name), ENCODERS, DECODERS, MUXERS, f"the {name} filter")
+            for name in ("idet", "select", "split", "scale", "null")
+        ),
+        (FILTERS, ("png", "rawvideo", "wrapped_avframe"), DECODERS, MUXERS, "the ffv1 encoder"),
+        *(
+            (FILTERS, without(ENCODERS, name), DECODERS, MUXERS, f"the {name} encoder")
+            for name in ("rawvideo", "wrapped_avframe")
+        ),
+        (FILTERS, ENCODERS, ("h264", "rawvideo"), MUXERS, "the ffv1 decoder"),
+        (FILTERS, ENCODERS, ("ffv1", "h264"), MUXERS, "the rawvideo decoder"),
+        *(
+            (FILTERS, ENCODERS, DECODERS, without(MUXERS, name), f"the {name} muxer")
+            for name in ("framehash", "null", "rawvideo", "matroska")
+        ),
     ],
 )
 def test_incomplete_build(
@@ -211,12 +233,21 @@ def test_incomplete_build(
     filters: tuple[str, ...],
     encoders: tuple[str, ...],
     decoders: tuple[str, ...],
+    muxers: tuple[str, ...],
     missing: str,
 ) -> None:
-    fake_build(build, filters, encoders, decoders)
+    fake_build(build, filters, encoders, decoders, muxers=muxers)
     with pytest.raises(MediaError, match=f"lacks {missing}") as refused:
         ffmpeg.check()
     assert "libzimg" not in str(refused.value)
+
+
+def test_scdet_no_longer_needed(build: Path) -> None:
+    # TransNetV2 detects the cuts (DESIGN.md, Shot detection): a build without scdet runs; nor
+    # are settb and metadata, the first pass's before it read the decoder's timestamps, needed.
+    assert not {"scdet", "settb", "metadata"} & set(ffmpeg.FILTERS)
+    fake_build(build)
+    assert ffmpeg.check() == "n0.0-fake"
 
 
 def test_without_ffprobe(build: Path) -> None:
@@ -225,16 +256,8 @@ def test_without_ffprobe(build: Path) -> None:
         ffmpeg.check()
 
 
-def test_png_encoder_needed_only_for_png_output(build: Path) -> None:
-    fake_build(build, encoders=("ffv1",))
+def test_png_encoder_and_muxer_needed_only_for_png_output(build: Path) -> None:
+    fake_build(build, encoders=without(ENCODERS, "png"), muxers=without(MUXERS, "image2"))
     assert ffmpeg.check() == "n0.0-fake"
-    with pytest.raises(MediaError, match="lacks the png encoder"):
-        ffmpeg.check(("png",))
-
-
-def test_framehash_needed_only_for_yuv_output(build: Path) -> None:
-    # It hashes a yuv420p10le master's frames as ffmpeg converts them (writer.FFV1Writer).
-    fake_build(build, muxers=("matroska",))
-    assert ffmpeg.check() == "n0.0-fake"
-    with pytest.raises(MediaError, match="lacks the framehash muxer"):
-        ffmpeg.check((), ("framehash",))
+    with pytest.raises(MediaError, match="lacks the png encoder, the image2 muxer"):
+        ffmpeg.check(("png",), ("image2",))

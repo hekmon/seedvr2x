@@ -57,7 +57,7 @@ def _usable() -> bool:
 
 
 needs_ffmpeg = pytest.mark.skipif(
-    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1"
+    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1"
 )
 
 SIZE = "160x96"
@@ -829,14 +829,12 @@ def decoder_line(pts: int, time_base: str = "1/25") -> str:
 
 
 @pytest.fixture
-def faked(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Callable[[list[str], list[str]], Path]:
-    """(hashes, logged) -> a file to scan, a real one for ffprobe's packet scan, ffmpeg from then
-    on a fake one on PATH that writes the lines `hashes` on stdout and `logged` on stderr, and
-    ends: what the first pass reads, chosen."""
+def faked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., Path]:
+    """(hashes, logged, status) -> a file to scan, a real one for ffprobe's packet scan, ffmpeg
+    from then on a fake one on PATH that writes the lines `hashes` on stdout and `logged` on
+    stderr, and ends with `status`: what the first pass reads, chosen."""
 
-    def fake(hashes: list[str], logged: list[str]) -> Path:
+    def fake(hashes: list[str], logged: list[str], status: int = 0) -> Path:
         path = tmp_path / "in.mkv"
         run(*SOURCE, "-frames:v", "3", "-c:v", "ffv1", str(path))
         directory = tmp_path / "fake"
@@ -844,7 +842,8 @@ def faked(
         for name, lines in (("out", hashes), ("err", logged)):
             (directory / name).write_text("".join(f"{line}\n" for line in lines))
         script = directory / "ffmpeg"
-        script.write_text(f"#!/bin/sh\ncat '{directory}/out'\ncat '{directory}/err' >&2\n")
+        lines = f"cat '{directory}/out'\ncat '{directory}/err' >&2\nexit {status}\n"
+        script.write_text(f"#!/bin/sh\n{lines}")
         script.chmod(0o755)
         monkeypatch.setenv("PATH", f"{directory}{os.pathsep}{os.environ['PATH']}")
         return path
@@ -853,7 +852,7 @@ def faked(
 
 
 @needs_ffmpeg
-def test_pts_are_the_hashes(faked: Callable[[list[str], list[str]], Path]) -> None:
+def test_pts_are_the_hashes(faked: Callable[..., Path]) -> None:
     # Each frame's pts and the time base are read from the hashes on stdout, where ffmpeg writes
     # nothing else: whatever stderr says of them, the source's metadata being printed there, gives
     # no frame another pts, and a time base of 1/0 on a decoder's line stops nothing (it raised
@@ -877,7 +876,7 @@ def test_pts_are_the_hashes(faked: Callable[[list[str], list[str]], Path]) -> No
 
 @needs_ffmpeg
 @pytest.mark.parametrize("decoded", [2, 4])
-def test_counts_must_agree(faked: Callable[[list[str], list[str]], Path], decoded: int) -> None:
+def test_counts_must_agree(faked: Callable[..., Path], decoded: int) -> None:
     # A frame the decoder gave and no hash line, or a hash line and no frame of the decoder's:
     # refused, since the reports of stderr are tied to the frames of stdout by their order.
     hashes = [*HEADER, *(hash_line(pts, pts) for pts in range(3))]
@@ -897,9 +896,7 @@ def test_counts_must_agree(faked: Callable[[list[str], list[str]], Path], decode
         ("#no time base", "ffmpeg gave its hashes no time base"),
     ],
 )
-def test_time_base_refused(
-    faked: Callable[[list[str], list[str]], Path], header: str, said: str
-) -> None:
+def test_time_base_refused(faked: Callable[..., Path], header: str, said: str) -> None:
     # A time base no pts can be read in is refused, a zero raising nothing (ffmpeg gives none).
     hashes = [header if line.startswith("#tb") else line for line in HEADER]
     path = faked([*hashes, hash_line(0, 1)], [MAPPED, decoder_line(0)])
@@ -1065,6 +1062,39 @@ def test_each_stream_mapping_line_begins_the_reading_again() -> None:
     decoded.read(f"{line}\n" for line in [*dumped, *again, *third])
     assert (decoded.pts, decoded.corrupt) == ([1], [False])
     assert decoded.errors == [dumped[0], dumped[-2], "[error] real"]
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("logged", "said"),
+    [
+        # Its errors, by their level, those before it decodes included, an input it can't open.
+        (
+            ["[in#0 @ 0x5d1c] [error] Error opening input: Invalid data", MAPPED, "[fatal] no"],
+            "[in#0 @ 0x5d1c] [error] Error opening input: Invalid data / [fatal] no",
+        ),
+        # An error glued after a message that ended without a newline comes without its level,
+        # which no pattern then finds (media/scan.py, ERROR): the failure quotes ffmpeg's last
+        # lines, never nothing.
+        (
+            [MAPPED, "[info]   Stream #1Error while filtering: Cannot allocate memory", "done"],
+            f"{MAPPED} / [info]   Stream #1Error while filtering: Cannot allocate memory / done",
+        ),
+    ],
+)
+def test_a_failure_says_why(faked: Callable[..., Path], logged: list[str], said: str) -> None:
+    path = faked(HEADER, logged, status=1)
+    with pytest.raises(MediaError) as refused:
+        scan(path)
+    assert str(refused.value) == f"{path}: ffmpeg failed decoding it: {said}"
+
+
+def test_a_line_break_in_the_name_refused(tmp_path: Path) -> None:
+    # ffmpeg prints the source's name as it is, in its input's dump and its errors: a line break
+    # in it would start a line of the name's own making among those the first pass reads.
+    for name in ("a\n[info] Stream mapping:.mkv", "a\rb.mkv"):
+        with pytest.raises(MediaError, match="a line break in its name"):
+            scan(tmp_path / name)
 
 
 def joined_ts(directory: Path, offsets: tuple[int, int]) -> tuple[Path, list[Path]]:
@@ -1336,8 +1366,8 @@ def stalling(directory: Path, written: int) -> None:
 def test_each_output_encodes_in_one_thread() -> None:
     # rawvideo's frame threads held frames back, a frame's CRC-32 behind frames still to come
     # through stdout: the box's hang (media/reader.py, ONE_THREAD). Each output's encoder runs in
-    # one thread; and none takes the source's metadata or chapters, as the first pass's doesn't,
-    # whose header ffmpeg prints among the lines it reads (ffmpeg.NO_METADATA).
+    # one thread; and none takes the source's metadata or chapters, as none of the first pass's
+    # does, whose headers ffmpeg prints among the lines it reads (ffmpeg.NO_METADATA).
     conversion = Conversion("yuv420p", "709", "limited", "left")
     for md5 in (None, 6):
         command = read_command(Path("in.mkv"), conversion, "1.000000", 1000, 5, md5)

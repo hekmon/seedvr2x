@@ -23,11 +23,11 @@ from seedvr2x.runtime.units import CHECKSUMS, COPY, size
 # (DESIGN.md says only that the manifest names it): derived data, as an input copy is, checked
 # against its record when the first pass's record is trusted, made again with the pass otherwise
 # (cli._prior), whose new decode may hash some frames otherwise after an ffmpeg change accepted,
-# which is no other job.
+# which is no other job. idet's counts likewise, information (manifest._input).
 UNCOMPARED = {
     "shots": ("encoded", "windows_done"),
     "segments": ("finished", "bytes"),
-    "input": ("path", "modified_ns", "index"),
+    "input": ("path", "modified_ns", "index", "idet"),
     "environment": ("driver",),
 }
 

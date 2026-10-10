@@ -160,6 +160,7 @@ def written_manifest(tmp_path: Path) -> Manifest:
         conversion=SimpleNamespace(describe=lambda: "YUV bt709, limited range, chroma left"),
         sha256="the content of in.mkv",
         index=None,
+        idet=None,
     )
     source.path.write_bytes(b"x" * 7)
     record = Manifest(
@@ -266,7 +267,7 @@ def _usable() -> bool:
     return True
 
 
-@pytest.mark.skipif(not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
+@pytest.mark.skipif(not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1")
 def test_segment_writer_routes_frames(tmp_path: Path) -> None:
     frames = np.random.default_rng(0).random((5, 16, 32, 3), dtype=np.float32)
     outputs = [(tmp_path / "a.mkv", 3), (tmp_path / "b.mkv", 2)]
@@ -288,7 +289,7 @@ def test_segment_writer_routes_frames(tmp_path: Path) -> None:
             writer.write(np.concatenate([frames, frames[:1]]))
 
 
-@pytest.mark.skipif(not _usable(), reason="needs ffmpeg 7.1 or later with zscale, scdet and ffv1")
+@pytest.mark.skipif(not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1")
 @pytest.mark.parametrize(
     ("options", "message"),
     [

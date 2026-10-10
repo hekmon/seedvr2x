@@ -74,8 +74,9 @@ is and what numz changed in it.
   `HF_HUB_DISABLE_TELEMETRY` before either import, unless the user has. hf_xet, its Xet
   downloader, seedvr2x never imports: its import writes a log file under `HF_HOME`.
 - ffmpeg and ffprobe on PATH, 7.1 or later (for setparams' chroma_location), with zscale
-  (libzimg), scdet and ffv1: seedvr2x checks the build at startup and refuses to run without
-  them (DESIGN.md, Input).
+  (libzimg), idet and ffv1: seedvr2x checks the build at startup and refuses to run without
+  them, or without any other filter, encoder, decoder or muxer it uses (`media/ffmpeg.py`;
+  DESIGN.md, Input).
 - **FlashAttention 2 is not a dependency.** PyPI only has its source, a long CUDA build, and
   seedvr2x runs without it: it uses FA2 when installed, else PyTorch's SDPA, and logs which one
   runs. To use it, build a wheel for your GPU ([setup_env.sh](../research/scripts/setup_env.sh),
@@ -146,7 +147,9 @@ uv run pytest
   made on purpose; the first pass's reading of ffmpeg's lines (`media/scan.py`) to a fake ffmpeg
   on `PATH` writing chosen ones, and to a source whose titles and language tag are made of its own
   lines; and a jump in the timestamps to MPEG-TS files joined, with the remux its refusal gives,
-  a constant rate under 0.1 fps having none.
+  a constant rate under 0.1 fps having none. `tests/test_idet.py` holds idet's counts and the
+  combing warning to clips made there, and their reading to such a source, its titles idet's own
+  lines.
   `tests/test_seek_sources.py` holds the index and its reads to measurement's real sources, on the
   CPU: opt-in, it reads the list of sources named by `SEEDVR2X_SEEK_SOURCES`, each with
   `seek_test.py`'s outputs for it (its docstring says the list's format), and skips without it.
