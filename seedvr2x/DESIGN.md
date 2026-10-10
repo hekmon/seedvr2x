@@ -115,11 +115,25 @@ never requires it.
     luminance. The constant-luminance ones and ICtCp need the transfer function, which we
     never convert. FCC, SMPTE 240M and YCgCo are rare and would go untested.
   - RGB tagged limited range: rare, most likely a mis-tag, and either reading could be wrong
+  - timestamps that jump: a step back of more than 0.1 s, or one forward of more than 10 s
+    (ffmpeg's own bounds). The first pass keeps the source's timestamps, which the frame index
+    needs, where ffmpeg would otherwise smooth such a jump over, as in joined MPEG-TS
+    recordings. The message names the frame and both times, and ffmpeg's remux as the way out
+    for the formats it corrects.
+  - missing frames: frames on their grid with places left empty, as when a decoder drops a
+    keyframe's leading pictures (found on a Blu-ray episode: two frames at its second
+    keyframe, [seeking.md](../research/docs/seeking.md), mechanism 1). A player holds the
+    frame before the hole. The message names the frame and the hole's length, and the way out
+    is the user's, as for a contradicted rate: a remake that repeats the frame before each
+    hole. The likely later way is an override that fills them without the intermediate file.
 - Interlaced and telecined sources, in any version. Deinterlacing and inverse telecine are
   workflows of their own, with specialised tools and many ways to do them. Detection:
   - refused when the stream declares interlacing
-  - a warning when ffmpeg's `idet`, run during the first pass, finds combed frames in a source
-    declared progressive, as hard-telecined sources often are
+  - a warning when ffmpeg's `idet`, run on every frame of the first pass, finds 10% of them or
+    more combed (its multiple-frame detection) in a source not declared interlaced, as
+    hard-telecined sources often are. Measured: at most 2.1% on 35 real progressive sources'
+    first 6,000 frames and 0.09% over 7 whole films and episodes, against 88% on a telecined
+    DVD (97% over the whole). Its counts go in the manifest, for information.
 - Windows: Linux first, since inference is mostly a Linux world. Windows is a best-effort port
   after the prototype, starting with an analysis of:
   - FlashAttention 2 and `torch.compile`'s Triton there (SDPA works everywhere)
@@ -492,9 +506,9 @@ they differ and by which metrics, and how users are guided to them. What is know
     SHA-256 pinned there too, so a version always runs the same bytes. A local directory
     holding the same files works offline. How (decided 2026-10-09):
     - File by file, only those the run uses: the DiT it runs (the sharp 7B by default, 16.5 GB)
-      and the VAE (0.5 GB), the regular 7B only when asked for, TransNetV2's weights with the
-      shot detector. Never the repository whole: 122 GB, most of it phase 2's files, which v1
-      doesn't run.
+      and the VAE (0.5 GB), the regular 7B only when asked for, TransNetV2's weights (30 MB)
+      when the shot detector runs, so not with `--cuts`. Never the repository whole: 122 GB,
+      most of it phase 2's files, which v1 doesn't run.
     - `huggingface_hub`'s download of one file, at the pinned revision (`c14a2bc4`), into Hugging
       Face's own cache, with no token: the repo is public. The library is already in the
       environment through diffusers; seedvr2x declares it.
@@ -588,10 +602,11 @@ from a cut list.
   rules, never from an outside splitter's joins: of an earlier split's 411 joins, 63 scored
   under scdet's threshold of 10 and 14 under 4
   ([scene-detection.md](../research/docs/scene-detection.md)). Segments split losslessly can
-  be joined back into one file: a directory given is refused, saying how. ffmpeg's concat
-  demuxer gives every frame back, its timestamps 1 ms early per join, off the frame grid;
-  `sptenc concat` keeps them on it. The first pass's null output takes microsecond
-  timestamps, so off-grid ones raise no false decode error.
+  be joined back into one file: a directory given is refused, saying how. The join must keep
+  the frame grid, as `sptenc concat` does: ffmpeg's concat demuxer gives every frame back,
+  but its timestamps 1 ms early per join, and such a file is refused once it has drifted half
+  a frame from its declared rate's timeline, 21 joins at 24 fps (see the frame rate, below).
+  The advice names a join by ffmpeg alone that holds the grid, tested with that rule.
 
 Cuts matter for quality, not only for the VAE context: see [Pipeline](#pipeline-per-shot).
 
@@ -630,12 +645,16 @@ Decoding goes through an ffmpeg pipe:
   gives the stream the container's primaries, transfer and matrix as a group as soon as the
   container declares one of them, and its range or chroma location each when declared
   (`libavformat/demux.c`, `parameters_from_context`). A value declared on one side is taken;
-  declared on both sides and different in meaning (`bt470bg` and `smpte170m` are one matrix,
-  and BT.709's transfer is SMPTE 170M's and BT.2020's), the source is a bad file, refused
-  naming both, as a contradicted frame rate is. The way out is the user's: a remux setting the
-  container's tags to the frames' (or the bitstream's own fix, when the container is right),
-  or, for a YUV source, the matrix given with `--input-matrix`. An MJPEG file its container
-  tags BT.709 is refused so: its decoder always says BT.601.
+  declared on both sides and different in meaning, the source is a bad file, refused naming
+  both, as a contradicted frame rate is. Two names of one meaning are no contradiction, by
+  H.273's tables and ffmpeg's own: `bt470bg` and `smpte170m` are one matrix, BT.709's
+  transfer is SMPTE 170M's and BT.2020's, and `smpte170m` and `smpte240m` are one set of
+  primaries. They are read, the stream's name kept. The way out of a refusal is the user's:
+  a remux setting the container's tags to the frames'; or, when the container is right, the
+  bitstream's own fix, whose command the refusal gives when the codec's bitstream filter can
+  set every contradicted tag (H.264, HEVC, AV1, VP9, MPEG-2, ProRes and APV have one); or,
+  for a YUV source, the matrix given with `--input-matrix`. An MJPEG file its container tags
+  BT.709 is refused so: its decoder always says BT.601.
   - The chroma location is the exception. A decoder gives its codec's default where the
     bitstream carries none (left for H.264, HEVC, MPEG-2 and MPEG-4 at 4:2:0, centre for
     MPEG-1), and ffmpeg's encoders and Matroska muxer write their frames' siting: a difference
@@ -644,8 +663,14 @@ Decoding goes through an ffmpeg pipe:
     stream has none, and a difference is said in an info line.
 - exact rational frame rate, checked against the frames themselves. The first pass (below)
   decodes every frame before the model's work and refuses the source when its shortest and
-  longest frame durations differ by more than 1 ms, sptenc's rule. The declared rate must
-  also match the measured durations, since the output is written at that rate.
+  longest frame durations differ by more than 1 ms, sptenc's rule, or when a frame lies half
+  a frame or more from its place on the declared rate's timeline, counted from the first
+  frame: the output is written at that rate.
+  - The second test is seedvr2x's own (decided 2026-10-10). sptenc's rule alone passes clean
+    timestamps that run at another rate within 1 ms of the declared period: 24000/1001
+    declared 24/1 would come out 0.1% short, 3.6 s an hour off its audio, and 48 fps declared
+    50, 4% short. Real sources hold their declared timeline: none of 34 Blu-ray, DVD and web
+    files measured leaves it.
   - Comparing declared rates alone fails on Matroska: sptenc found a 24/30 fps mix declared
     24/1 for both.
   - A file whose timestamps contradict its declared rate is a bad file: refused like any
@@ -653,24 +678,41 @@ Decoding goes through an ffmpeg pipe:
     Blu-ray remux declared 24/1 whose frames step at 24 fps, with one frame in 500 held 62–63
     ms instead of 42, which keeps every frame within ±10.9 ms of a steady 24000/1001
     timeline, its audio's ([seeking.md](../research/docs/seeking.md), mechanism 7).
-  - The fix is the user's, and seedvr2x guides it. When the timestamps follow a constant rate
-    within half a frame, as there, the message gives that rate, the largest deviation, and
-    two fixes:
+  - The fix is the user's, and seedvr2x guides it. When the timestamps follow another rate,
+    exactly (to one tick of the file's time base) or, where sptenc's rule fails as there, one
+    of ffmpeg's standard rates within half a frame, the message gives that rate, the largest
+    deviation, and two fixes:
     - Remake the file: an FFV1 master at that rate, the other streams copied with it, a clean
       file for every tool. ffmpeg keeps every frame doing so: on that file's first 3,000
       frames, `fps=24000/1001`, `-fps_mode cfr -r 24000/1001` and a plain retiming all gave
-      the source's frames in order, none dropped or doubled. It costs about 80 GB for that
-      film (0.53–0.55 MB per frame, against the source's 14.5 GB) and a full encode.
+      the source's frames in order, none dropped or doubled. The message's command gives the
+      rate as an input option (`-r:v:0`), which numbers the frames as they come: on a file
+      whose video starts 23 ms after its audio, `fps` dropped a frame and doubled another, and
+      `-fps_mode cfr` doubled the first. It costs about 80 GB for that film (0.53–0.55 MB per
+      frame, against the source's 14.5 GB) and a full encode.
     - Or `--frame-rate R`, an override like the matrix's and the sample aspect's: the frames
       are taken at R, accepted only if every one lies within half a frame of R's timeline,
       so none is dropped or doubled, and R is recorded as a setting. The same frames on the
-      same timeline, without the intermediate file.
+      same timeline, without the intermediate file. R is then the job's rate everywhere: the
+      writers, the segments' merge rule, the manifest.
+  - When the timestamps follow no rate exactly, as a file joined by ffmpeg's concat demuxer
+    does, timestamps alone can't tell a drifting join from a retagged file: the message says
+    how far the frames wander and from which frame, and the ways out are a join that keeps the
+    frame grid, or the remake at the declared rate. `--frame-rate` can't hold there.
   - The pass costs one software decode: 171 fps on an HEVC master, 730–2,360 on 1080p H.264
     (a 26 Mbit/s Blu-ray: 735 on 16 threads, about 4 min for a 2-hour film), and 204 fps on
     16 threads, 315–326 on 48, on a 4K UHD HEVC remux: at least 19–30 min for a 4-hour film
     ([seeking.md](../research/docs/seeking.md),
     [scene-detection.md](../research/docs/scene-detection.md)). The shot detector and idet
     join it (see [Shot detection](#shot-detection)).
+  - Built on 2026-10-10 as one ffmpeg process that keeps the source's timestamps (`-copyts`),
+    each of its jobs an output of its own: the frames' CRC-32 for the index (ffmpeg's
+    `framehash`), idet, and the shot detector's 48×27 frames. The decoder's own log ties each
+    error report to its frame. The index costs a pass about 5% (581 and 1,223 fps against 612
+    and 1,282 on two 1080p H.264 files), idet 1.4–3.2% at 1080p. At 4K idet is the pass's
+    bottleneck, a ProRes 4:2:2 10-bit pass falling from 190 to 98 fps, and it reads every
+    frame all the same: a 4-hour 4K film's pass stays about an hour, against days of GPU
+    time.
   - Software, not NVDEC (the user asked). The decode is about 0.03% of a run (1.4 ms per
     1080p frame against about 4 s of GPU time), seen only as the first pass's wait. The frame
     index's CRC-32s must match every later read: H.264, HEVC, AV1 and VP9 decode bit-exactly
@@ -687,8 +729,10 @@ Decoding goes through an ffmpeg pipe:
     counters, which restart when it rebuilds its filter graph mid-stream.
   - Reading frames n to m (a resumed job's first unfinished shot, later another process's
     range) seeks to the keyframe one GOP before n's own, selects by timestamp, and checks every
-    frame against the index. A mismatch starts again one keyframe further back, doubling; the
-    last resort decodes from the start and counts.
+    frame against the index, its timestamp and its CRC-32. A mismatch starts again one
+    keyframe further back, doubling; the last resort decodes from the start and counts. n's
+    own keyframe is the last whose timestamp is at most n's. A frame before the third
+    keyframe, or after one the first pass flagged as damaged, is read from the start at once.
   - Why every part: seeking to n / fps missed on 6 of 10 real sources, by up to 142 frames on
     a Blu-ray declaring 24/1. The exact timestamp lands late on open-GOP leading pictures, and
     keyframes that aren't valid entry points (6.7% and 8.3% on two Blu-ray remuxes) return
@@ -699,7 +743,19 @@ Decoding goes through an ffmpeg pipe:
     long-GOP HEVC master, against 1.2–17 min to decode a 2-hour source to its end. The CRC-32
     takes 0.47 ms per 1080p frame, which keeps up with the first pass on one thread.
   - The index is written once with the first pass's record, beside the manifest, which names
-    it by its SHA-256; a resume trusts it as it trusts that record.
+    it by its SHA-256; a resume trusts it as it trusts that record. It holds the shot
+    detector's probabilities too (see [Shot detection](#shot-detection)).
+  - Built on 2026-10-10 and exact on measurement's real sources: 664 targets in 21 cases,
+    every one at the first try but 9 in a passage of dense keyframes (8 keyframes back at
+    most, 0.34 s at worst) and 2 damaged frames, read from the start. A read takes 0.15–0.27 s
+    (median) on Blu-ray and web H.264, and 1.24 s on a long-GOP HEVC master, 16 s at worst.
+  - A damaged frame doesn't decode the same way twice: ffmpeg's frame threads conceal it
+    differently from one decode to the next. On a real Blu-ray remux, three first passes gave
+    one damaged frame three CRC-32s, and flagged it in two of them only. So an index can hold
+    a frame that no later decode gives again, flagged or not. Read from the start, a frame at
+    its place with its timestamp is therefore taken as decoded whatever its CRC-32, with a
+    warning; a wrong timestamp, a missing or an extra frame still fails, and seeks stay
+    strict. One decoder thread would settle it, at several times the pass's cost.
   - Real open-GOP HEVC in MKV is tested (an x265 encode: one IDR, then 435 CRA, 54 leading
     pictures): frame-exact on 136 targets, 96 of them around every leading picture, at 0.21 s
     per read. A decode started exactly at a CRA outputs none of its leading pictures and says
@@ -710,9 +766,10 @@ Decoding goes through an ffmpeg pipe:
     the read falls back.
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
-reimplementing them. A startup check refuses a build without zscale or ffv1, or one whose
-`setparams` lacks `chroma_location` (ffmpeg 7.1 and later have it), saying so. Tests verify its
-conversions: round trip, white at 940, black at 64, chroma siting.
+reimplementing them. A startup check refuses a build lacking any filter, encoder, decoder or
+muxer the passes use (zscale, idet and ffv1 among them), or one whose `setparams` lacks
+`chroma_location` (ffmpeg 7.1 and later have it), saying which. Tests verify its conversions:
+round trip, white at 940, black at 64, chroma siting.
 
 Every zscale runs on one slice, with libavfilter's per-filter option `threads=1`, in the decode
 and in the `yuv420p10le` writer alike
@@ -744,12 +801,20 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
   matches TensorFlow within 5.1e-7, with the same detections), saved as safetensors by
   `models/`'s script and pulled from seedvr2x's Hugging Face repo (see [Weights](#weights)).
   - It reads every frame of the first pass's decode, scaled to 48×27 as its official extraction
-    scales them (ffmpeg's default scaler; another scaler is untested), on one thread, so that
-    its input doesn't depend on the CPU count.
-  - It runs on the GPU, idle during the first pass. Its cost is about 2.3 min of CPU per hour
-    of 1080p source over the decode the frame index makes anyway (16 threads), deterministic;
-    the GPU's is measured at the build step, the cut list checked equal to the CPU's on the
-    labelled sources.
+    scales them (ffmpeg's default scaler; another scaler is untested), on a fixed number of
+    threads, 4, so that its input doesn't depend on the CPU count. The scaled bytes were the
+    same on 1, 2, 16 and 32 threads for 10 pixel formats, and one thread, as first built,
+    capped a fast pass at about half its speed (839–897 fps against 1,811–2,213 on 1080p
+    cartoons).
+  - It runs on the job's GPU, idle during the first pass, 4 windows a forward, and gives its
+    memory back before the models load (0.56 GiB allocated at its peak, 0.66 reserved). Its
+    weights (30 MB) are fetched and checked only when it runs, so not with `--cuts`.
+  - Built on 2026-10-10. On the CPU, seedvr2x's first pass gives measurement's probabilities
+    bit for bit on its 11 single-file sources. On the GPU they differ by 1.04e-06 at most,
+    and every cut list and possible-cut list is the CPU's. On the power-capped card it scores
+    810 fps under sustained load, 107 s per hour of source, and is then a fast pass's bound
+    (723–808 fps on five films, where they decode at 807–1,126); where the decode is the
+    slower, 2,200–2,500 fps. On the CPU, 490–575 fps on 16 threads, 2.5 to 3.3 min per hour.
 - **A cut:** a detection is a run of frames whose single-frame probability (the sigmoid of
   TransNetV2's single-frame head) reaches the threshold, one per run, at its peak. The cut is
   the frame after the peak: TransNetV2 marks the outgoing shot's last frame (offset −1 on 98%
@@ -806,16 +871,28 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
 - scdet and PySceneDetect aren't used, and the startup check doesn't require scdet. idet stays,
   for telecined sources declared progressive.
 - The first pass's record keeps TransNetV2's per-frame probabilities (its single-frame head),
-  and the cuts derive from them and the threshold: another threshold gives its cuts without a
-  second decode or detection. A resume trusts the record.
-- A cut list given with `--cuts` replaces the detection, and `--plan` writes the detected one
-  in the same format, so that adding or removing a few cuts is an edit, not a rewrite.
+  a column of the frame index, and the cuts derive from them and the threshold: another
+  threshold gives its cuts without a second decode or detection. A resume trusts the record.
+- A cut list given with `--cuts` replaces the detection, and `--plan FILE` writes the detected
+  one to FILE in the same format, so that adding or removing a few cuts is an edit, not a
+  rewrite. A line holds the cut's frame, its probability, and its time from the file's start,
+  rounded up to the millisecond.
   - The possible cuts go in it too, as comments: each run peaking from 0.1 up to the
     threshold, with its probability and timecode. Checking them is a jump to each timecode in
     a player, and keeping a real one is uncommenting its line. `--plan` prints the counts: a
-    4.4-minute short made natively in 4K has 61 cuts at 0.3 and 39 possible cuts. On the
-    labelled sources, about 250 possible cuts per hour of animation and 100 of live action,
-    about one real cut in 7 to 18 of them.
+    4.4-minute short made natively in 4K has 61 cuts at 0.3 and 39 possible cuts, and planned
+    again at 0.2, with no decode, 76 and 24. On the labelled sources, about 250 possible cuts
+    per hour of animation and 100 of live action, about one real cut in 7 to 18 of them.
+  - The player is VLC, the user's choice (2026-10-10). Its Go to Time takes whole seconds, and
+    it steps forward only: one goes to the time's second, then a frame a key press, and the
+    cut comes within the second. Given the list's milliseconds on its command line, VLC lands
+    within 3 frames of the cut on a file with B-frames, mostly before it, which a time rounded
+    up serves better than one rounded down; mpv lands on the cut frame.
+  - A possible cut inside a run that holds a detection isn't listed, the run being the
+    detection's (0 to 7 such runs per labelled recording).
+- The milestone-1 regression's clip holds two cuts at 0.3 (0.324 and 0.388: two short shots at
+  its end, which numz's one batch runs through). Its runs pass `--cut-threshold 0.5`, the
+  detector running all the same.
 
 ### Colour and shape, SD sources included
 The rule: the upscale must look like its source in any given player.
@@ -1384,7 +1461,9 @@ first pass, whose shots are its input, and before the models load:
 
     These take the free memory numz's process found (94.50 GiB on the 96 GB card, N − 1.44 on
     a card emulated at N GB) and the swap's saving reckoned as above: milestone 3 measures
-    both on seedvr2x itself. vram.md's recipes per card size, validated on emulated cards with
+    both on seedvr2x itself. Its first reading: 94.34 GiB free on the 96 GB card, before the
+    shot detector and after it, so a budget of 93.74 GiB, which 76 latents fit (92.98) and 77
+    don't (94.07). vram.md's recipes per card size, validated on emulated cards with
     the DiT off the GPU in the VAE's phases, as numz has it, are its starting points.
 - **Choices, in order,** the same plan for every shot of the job:
   1. The window, the biggest quality lever (fewer joins): the longest shot's length when it
@@ -1494,9 +1573,10 @@ first pass, whose shots are its input, and before the models load:
       A plan recorded with no unit made yet is made again whole.
     - This rests on swapping changing no bit of the output, milestone 3's first gate (see
       [BlockSwap, rewritten](#blockswap-rewritten)).
-- `--plan` prints the plan and the time estimate without running the job, after the first pass
-  (the shots are the plan's input), and writes the detected cut list for editing (see
-  [Shot detection](#shot-detection)). It loads the models, for the calibration. It prints:
+- `--plan FILE` prints the plan and the time estimate without running the job, after the first
+  pass (the shots are the plan's input), and writes the detected cut list to FILE for editing
+  (see [Shot detection](#shot-detection)). It fetches and checks the model files as a run
+  does, and loads them, for the calibration. It prints:
   - the card, its free memory and the budget
   - the padded size and the tokens per latent
   - the shots and the longest one; the window cap, the shots that run in one window, the joins
@@ -1618,7 +1698,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     The NVIDIA driver is recorded through NVML for information, not compared: the math kernels
     ship with torch.
   - input, the source: path and mtime for information; the content, compared by size and
-    SHA-256 (hashed by a thread while the first pass decodes); the first pass's facts. Also
+    SHA-256 (hashed by a thread while the first pass decodes); the first pass's facts, the
+    frame index by its name, size and SHA-256, and idet's counts, for information. Also
     compared: the pixel format it is decoded from, and the primaries and transfer the output
     copies. An
     accepted ffmpeg change must read and tag the source exactly as before.
@@ -1652,12 +1733,27 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     outright would throw away tens of GPU hours over an upgrade.
     - The new environment and its `environment_changes` record are written with the next unit
       made. A resume stopped before making one leaves the manifest as it was, and the job
-      still resumes in its old environment.
-    - Re-running a finished job doesn't rewrite its manifest.
+      still resumes in its old environment. Two things rewrite it at once: a plan taken up or
+      planned again (below), and a frame index made again.
+    - Re-running a finished job doesn't rewrite its manifest, and makes nothing again, its
+      frame index included.
+  - **A plan** is a job with no unit made: what `--plan FILE` leaves in a directory output,
+    its manifest and its frame index (see [Shot detection](#shot-detection)).
+    - The same command without `--plan` runs it, with no second first pass.
+    - A run whose settings differ only in its cuts (the cut list, the threshold, the
+      detector's file) plans it again from its record, with no decode: the cuts are derived
+      again and the manifest rewritten at once, in the run's environment. A plan cut by a list
+      and planned again without one costs a first pass, no probabilities having been kept.
+    - Any other difference, or a unit made, is another job, as above.
+    - `-o x.mkv` keeps no plan: FILE alone is written, until assembly makes it a directory
+      job.
   - The first pass's record is trusted, and the pass isn't run again, when the content and the
-    settings are unchanged and neither `ffmpeg` nor `conversions` changed. The pass runs only
-    on ffmpeg's decode, so a torch, CUDA, GPU or attention change doesn't touch it. That saves
-    a full decode per resume, about 17 min on a 2-hour HEVC master.
+    settings are unchanged and neither `ffmpeg` nor `conversions` changed. The shot detector's
+    probabilities are part of that record, though torch computes them: a torch, CUDA, GPU or
+    attention change doesn't run the detector again, so that a job's cuts stay its own. That
+    saves a full decode per resume, about 17 min on a 2-hour HEVC master.
+  - The frame index is derived data: missing or damaged on a resume, the first pass runs again
+    and writes it.
   - The directory must hold what the manifest names and nothing of anyone else's, dotfiles
     included: anything else is refused, never deleted.
   - These are discarded: `.partial` files, an unfinished segment's file, unrecorded units, and
@@ -1666,8 +1762,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     shot's latent and windows (see [Colour correction](#colour-correction)).
   - Finished segments and kept units are skipped. A finished segment's size is checked against
     the manifest, and its frames by `seedvr2x verify` (see [Output](#output)). The input
-    frames of skipped shots are reached through the frame index (see [Input](#input)); until
-    that step is built, they are decoded and dropped (decode-and-count).
+    frames of skipped shots are reached through the frame index (see [Input](#input)).
   - One seedvr2x at a time per directory (flock); a filesystem without locks is warned about.
     A filesystem that can't sync a directory is warned about once.
   - `--dump-frames` is refused inside the output directory.
@@ -1695,7 +1790,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - Stopping at the first stage that produces one names the culprit and saves the decode.
   - A resume restarts that unit once the cause is fixed.
 - **Resume is bit-identical** to an uninterrupted run: deterministic noise per shot, exact
-  latents, deterministic attention (FA2 reruns are bit-identical). Checked on 2026-10-03 on
+  latents, deterministic attention (FA2 reruns are bit-identical), for a source that decodes
+  the same each time (a damaged frame may not: see [Input](#input)). Checked on 2026-10-03 on
   milestone 1's input in 3 shots (one in 3 windows) and 2 segments:
   - stopped by a kill in an encode, a kill in a window, Ctrl-C once in a window, and twice, a
     kill and once in a segment's decode, then resumed after each
@@ -1830,7 +1926,8 @@ explanation.
   segments out for sptenc's encode
 - how shots are found: TransNetV2, why a missed cut costs more than a false one, and for content
   it gets wrong (fast action anime first, fast camera work) `--cut-threshold`, the possible
-  cuts `--plan` lists, and a cut list (`--cuts`)
+  cuts `--plan` lists, a cut list (`--cuts`), and how to check a cut in a player (VLC takes a
+  time's whole seconds, then steps a frame a key press)
 - the model: v1 runs ByteDance's 7B in fp16, the sharp 7B by default and the regular one as the
   reference every check is made against; phase 2 brings the smaller files, each with its
   measured quality
@@ -1860,8 +1957,9 @@ explanation.
   VRAM, counted from what is free at the start, not from the card's size (4K: 22 to 23 GiB)
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
-  formats or matrices), and what to do with each; for a rate its timestamps contradict, the
-  two fixes and what each costs (see [Input](#input))
+  formats or matrices, timestamps that jump, missing frames, tags that contradict each other),
+  and what to do with each; for a rate its timestamps contradict, the two fixes and what each
+  costs (see [Input](#input))
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
   transfer kept, square pixels)
 - resume: the same command resumes; what refuses a resume and why; `--accept-env-change`
@@ -1913,12 +2011,12 @@ writers, and the planner needs real shot lengths.
    `c14a2bc4`, 2026-10-08), and seedvr2x's pull, pinned to it and to its `SHA256SUMS`, since
    2026-10-09 (see [Weights](#weights)). Then the first pass's new work,
    ahead of the planner, since both workflows start from it: the directory input went on
-   2026-10-09, the source being the only input; then the shot detector (see
-   [Shot detection](#shot-detection)), whose brief is in, and with it the frame index (see
-   [Input](#input)), so a resume seeks
-   instead of decoding from the start, and the frame-rate refusal's guidance. The detector's
-   threshold is settled (0.3 by default, `--cut-threshold`), with no gate, and `--plan` lists
-   the possible cuts. Until it is built, the cuts come from a cut list.
+   2026-10-09, the source being the only input; then, built on 2026-10-10, the shot detector
+   (see [Shot detection](#shot-detection)) at 0.3 by default with `--cut-threshold`, no gate,
+   and `--plan`'s cut list with its possible cuts; the frame index (see [Input](#input)), so
+   that a resume seeks instead of decoding from the start; the frame-rate refusal's guidance
+   and `--frame-rate`; idet's warning. The milestone-1 regression stays bit-identical with the
+   detector running before the models.
 4. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory. The planner's inputs (budget,
    margin, the DiT's and the tiled VAE's peaks, 4K limits, measured times) are in
@@ -2085,6 +2183,10 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
     before the DiT starts (the user's idea, 2026-10-10): a long shot's windows have at most
     two lengths, a shorter shot is one window of its own, and a length compiled once serves
     the whole process
+  - what another window layout would give the DiT: balanced windows spread a long shot's over
+    the lengths from about half the cap to the cap, where full windows with the last one slid
+    back to end with the shot have one length, for a few latents computed twice and joins
+    that fall elsewhere (a stitching check of its own)
   - the DiT compiled over seedvr2x's own swap, numz's breaking the graph at every block
 - **The sharp 7B at other upscale factors.** It is the default on crops at ×2 (see
   [Weights](#weights)). At ×1.5, ×3 and ×4 the metrics are mixed (×4: PSNR-Y −0.05 dB, DISTS
