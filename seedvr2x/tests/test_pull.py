@@ -11,7 +11,8 @@ advice to set a token; the free space checked before each download against the d
 partial file left there said; SIGTERM during a download unwinding it; the log naming the cache; a
 cache behind a link; a header refusal of one of seedvr2x's own files saying how to fetch it again,
 in its own role only; a file changed between its hash and its load refused, before and after its
-load; all of it before torch.
+load; all of it before torch. Hugging Face's telemetry off unless the user set it, before the
+library is imported.
 
 Then the revision itself, skipped offline: SHA256SUMS, a few kilobytes, downloaded at the pinned
 revision through seedvr2x's own fetch, into a temporary HF_HOME behind a link, and checked by its
@@ -1220,6 +1221,69 @@ def test_library_handler_removed_before_its_import(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "0\n"
+
+
+# python -m seedvr2x in a process of its own, its arguments argv[1:]: the telemetry variable as
+# huggingface_hub reads it, when first imported (constants.py:244-248 in 1.33.0), and the
+# library's constant after the run, which imports it.
+TELEMETRY = """
+import os
+import runpy
+import sys
+
+seen = []
+
+
+class Watch:
+    def find_spec(self, name, path=None, target=None):
+        if name == "huggingface_hub" and not seen:
+            seen.append(os.environ.get("HF_HUB_DISABLE_TELEMETRY"))
+
+
+sys.meta_path.insert(0, Watch())
+sys.argv = ["seedvr2x", *sys.argv[1:]]
+try:
+    runpy.run_module("seedvr2x", run_name="__main__", alter_sys=True)
+except SystemExit as exit:
+    status = exit.code
+imported = "huggingface_hub" in sys.modules
+from huggingface_hub import constants
+
+print(status, imported, seen, constants.HF_HUB_DISABLE_TELEMETRY)
+"""
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("given", [None, "0", "1"], ids=["unset", "0", "1"])
+def test_telemetry_off_unless_set(tmp_path: Path, given: str | None) -> None:
+    # Hugging Face's telemetry off unless the user set it (DESIGN.md, Weights): seedvr2x's entry
+    # sets HF_HUB_DISABLE_TELEMETRY before anything imports huggingface_hub, the user's own value
+    # kept. A run without --model-dir, in a process of its own whose HF_HOME is the test's,
+    # offline: it imports the library to look in the cache, empty, then refuses the files
+    # missing, exit 1. The library's other two switches unset (constants.py:246-247).
+    source(tmp_path / "in.mkv")
+    hidden = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_XET_CACHE")
+    switches = ("HF_HUB_DISABLE_TELEMETRY", "DISABLE_TELEMETRY", "DO_NOT_TRACK")
+    environment = {
+        name: value for name, value in os.environ.items() if name not in (*hidden, *switches)
+    }
+    environment |= {"HF_HOME": str(tmp_path / "home"), "HF_HUB_OFFLINE": "1"}
+    if given is not None:
+        environment["HF_HUB_DISABLE_TELEMETRY"] = given
+    result = subprocess.run(
+        [
+            *(sys.executable, "-c", TELEMETRY),
+            *(str(tmp_path / "in.mkv"), "-o", str(tmp_path / "out.mkv")),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    read = "1" if given is None else given
+    assert result.stdout == f"1 True ['{read}'] {read == '1'}\n", result.stderr
+    assert "not in Hugging Face's cache" in result.stderr
 
 
 @needs_ffmpeg

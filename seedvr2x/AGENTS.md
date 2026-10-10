@@ -70,8 +70,9 @@ is and what numz changed in it.
   seedvr2x's own model files from its repo at the pinned revision, into Hugging Face's cache
   (`runtime/pull.py`). seedvr2x imports it to look in the cache on every run without
   `--model-dir`, which reads the files from a directory instead; diffusers, which the vendored
-  model imports, brings it into every run anyway. hf_xet, its Xet downloader, seedvr2x never
-  imports: its import writes a log file under `HF_HOME`.
+  model imports, brings it into every run anyway. Its telemetry is off: `cli.main` sets
+  `HF_HUB_DISABLE_TELEMETRY` before either import, unless the user has. hf_xet, its Xet
+  downloader, seedvr2x never imports: its import writes a log file under `HF_HOME`.
 - ffmpeg and ffprobe on PATH, 7.1 or later (for setparams' chroma_location), with zscale
   (libzimg), scdet and ffv1: seedvr2x checks the build at startup and refuses to run without
   them (DESIGN.md, Input).

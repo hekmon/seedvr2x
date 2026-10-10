@@ -52,6 +52,15 @@ NUMZ_PADDING = "SEEDVR2X_TESTS_NUMZ_PADDING"
 
 def main(argv: list[str] | None = None) -> int:
     """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status."""
+    # Hugging Face's telemetry off unless the user set it (DESIGN.md, Weights). huggingface_hub
+    # reads the variable once, when imported (constants.py:244-248 in 1.33.0), by runtime/pull.py's
+    # lookup in the cache or by diffusers, which the vendored model imports: both after this line,
+    # where every entry starts (seedvr2x, seedvr2x verify, python -m seedvr2x). Without it, every
+    # request the library makes names torch's version and the AI agent it detects running it, from a
+    # registry it fetches from the Hub's /api/agent-harnesses at most once a day and writes to
+    # HF_HOME/.agent_harnesses.json (utils/_headers.py:183-189, utils/_detect_agent.py:143-163,
+    # 180-203).
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["verify"]:
         return verify(argv[1:])
