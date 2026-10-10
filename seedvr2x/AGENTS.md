@@ -140,6 +140,16 @@ uv run pytest
   and skip without them; one of the two set without the other fails. `tests/test_split.py` also
   scores `split` against milestone 1's input with milestone 5's metrics, its thresholds its first
   run's figures (2026-10-09) plus milestone 5's tolerances.
+- The frame index and the reads through it (`media/index.py`, `media/reader.py`) are held by
+  `tests/test_index.py` to full decodes of files it makes, the kinds of
+  `../research/scripts/seek_test.py`'s `synth` and three of `seeking.md`'s failure mechanisms
+  made on purpose; the first pass's reading of ffmpeg's lines (`media/scan.py`) to a fake ffmpeg
+  on `PATH` writing chosen ones, and to a source whose titles and language tag are made of its own
+  lines; and a jump in the timestamps to MPEG-TS files joined, with the remux its refusal gives,
+  a constant rate under 0.1 fps having none.
+  `tests/test_seek_sources.py` holds the index and its reads to measurement's real sources, on the
+  CPU: opt-in, it reads the list of sources named by `SEEDVR2X_SEEK_SOURCES`, each with
+  `seek_test.py`'s outputs for it (its docstring says the list's format), and skips without it.
 
 ## Comments and documents
 

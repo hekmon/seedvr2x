@@ -13,17 +13,21 @@ from typing import Any, cast
 
 from seedvr2x.media.files import partial_path
 from seedvr2x.runtime.job import JobError
-from seedvr2x.runtime.manifest import NAME, STATE, SUMS, Manifest, checksums_file
+from seedvr2x.runtime.manifest import INDEX, NAME, STATE, SUMS, Manifest, checksums_file
 from seedvr2x.runtime.units import CHECKSUMS, COPY, size
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
 # what is recorded for information only (DESIGN.md, Pause and resume): where an input is and when
 # it was modified, an input being its content, so that a moved input is the same; the NVIDIA
-# driver, since the math kernels ship with torch.
+# driver, since the math kernels ship with torch. And the frame index's file, PROVISIONAL
+# (DESIGN.md says only that the manifest names it): derived data, as an input copy is, checked
+# against its record when the first pass's record is trusted, made again with the pass otherwise
+# (cli._prior), whose new decode may hash some frames otherwise after an ffmpeg change accepted,
+# which is no other job.
 UNCOMPARED = {
     "shots": ("encoded", "windows_done"),
     "segments": ("finished", "bytes"),
-    "input": ("path", "modified_ns"),
+    "input": ("path", "modified_ns", "index"),
     "environment": ("driver",),
 }
 
@@ -123,10 +127,14 @@ def leftovers(manifest: Manifest) -> list[Path]:
     not recorded, the units of finished segments. Refused (JobError): a finished segment missing,
     of another size or without its checksums, a unit recorded but missing, and anything in the
     directory that isn't this job's, which is never deleted. A shot's input copy or its checksums
-    missing isn't refused: the copy is derived data, which the run makes again (run_job)."""
+    missing isn't refused: the copy is derived data, which the run makes again (run_job); nor is
+    the frame index (INDEX), made again with the first pass (cli._prior)."""
     directory = manifest.path.parent
     found: list[Path] = []
-    names = {NAME, partial_path(manifest.path).name, STATE, SUMS}
+    indexed = partial_path(directory / INDEX)
+    names = {NAME, partial_path(manifest.path).name, STATE, SUMS, INDEX, indexed.name}
+    if indexed.exists():
+        found.append(indexed)
     for index, name in enumerate(manifest.files):
         path = directory / name
         names.update((name, partial_path(path).name))

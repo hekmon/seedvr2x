@@ -16,6 +16,7 @@ from seedvr2x.media import ffmpeg, fingerprint
 from seedvr2x.media.conversion import CHROMA_LOCATIONS, MATRICES, PIXEL_FORMATS, Conversion
 from seedvr2x.media.decode import decode_output
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.reader import read_command
 from seedvr2x.media.writer import Tags, master_filters, png_filters, yuv_matrix
 
 
@@ -92,6 +93,19 @@ def test_decode_on_one_slice() -> None:
     # The master's chroma: 4:2:0 kernels and zscale's slices).
     frame = _samples("yuv420p10le", WIDTH * HEIGHT * 3 // 2, 10)
     output = decode_output(Conversion("yuv420p10le", "709", "limited", "left"))
+    _on_one_slice(frame, "yuv420p10le", output, "-filter_threads")
+
+
+@needs_ffmpeg
+def test_reads_on_one_slice() -> None:
+    # A source's reads run the decode's conversion after a select, in the -vf graph of an output
+    # of its own (media/reader.py), its slices following -filter_threads: the frames as a read
+    # gives them.
+    frame = _samples("yuv420p10le", WIDTH * HEIGHT * 3 // 2, 10)
+    conversion = Conversion("yuv420p10le", "709", "limited", "left")
+    command = read_command(Path("in.mkv"), conversion, None, 0, 3)
+    output = command[command.index("-map") : command.index("pipe:1")]
+    assert output[output.index("-vf") + 1].startswith("select=gte(pts\\,0),")
     _on_one_slice(frame, "yuv420p10le", output, "-filter_threads")
 
 

@@ -2,12 +2,13 @@
 must find again (its settings, models by hash, environment, input file, output, shots with their
 windows, output segments), and how far it went: each shot encoded, its windows done, each
 segment finished. A unit is recorded once its file is whole, so the manifest only names whole
-files. Written once the models load, then again after every unit, always whole (a temporary
-file, synced, renamed)."""
+files: the frame index too, written before the manifest's first write (INDEX). Written once the
+models load, then again after every unit, and with the index of a first pass a resume ran again
+(cli._index_made_again), always whole (a temporary file, synced, renamed)."""
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -33,6 +34,11 @@ STATE = "resume"
 # The directory of the output segments' checksums, beside them, which outlives the job
 # (media/checksums.py; DESIGN.md, Output, Checksums).
 SUMS = "checksums"
+# The source's frame index, beside the manifest, which names it in its input record (_input):
+# written once with the first pass's record, kept with the manifest, which a finished job's run
+# again reads too (DESIGN.md, Input; media/index.py). PROVISIONAL: the name, and the record's
+# fields, name, bytes and sha256, DESIGN.md's "names it by its SHA-256".
+INDEX = "frame_index.bin"
 
 
 def checksums_file(segment: str, output_format: str) -> str:
@@ -81,6 +87,9 @@ class Manifest:
     windows_done: list[int] = field(default_factory=list[int])  # each shot's windows kept
     finished: list[bool] = field(default_factory=list[bool])  # each segment whole
     sizes: list[int | None] = field(default_factory=list[int | None])  # finished ones' bytes
+    # Called once, before the manifest's next write, then dropped: it writes the frame index that
+    # write names, made again by a resume in another environment (cli._index_made_again).
+    before_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.encoded:
@@ -127,6 +136,9 @@ class Manifest:
 
     def write(self) -> None:
         """Write the manifest, whole or not at all, even after a power cut."""
+        if self.before_write is not None:
+            self.before_write()
+            self.before_write = None
         write_whole(self.path, (json.dumps(self.content(), indent=2) + "\n").encode())
 
     def content(self) -> dict[str, Any]:
@@ -170,11 +182,13 @@ class Manifest:
 def _input(source: Source) -> dict[str, Any]:
     """The source as the manifest records it: the file itself (where it is, its size and
     modification time, read when the job starts, and its content's SHA-256) and what the first
-    pass found in it. Its content says which file it is; where it is and when it was modified are
-    information (resume.UNCOMPARED)."""
+    pass found in it; with its frame index, the index's file, INDEX, by its name, size and
+    SHA-256. Its content says which file it is; where it is and when it was modified are
+    information (resume.UNCOMPARED), as the index is: derived data, which a resume checks against
+    this record before trusting it, and makes again when missing or damaged (cli._prior)."""
     path = source.path.resolve()
     status = path.stat()
-    return {
+    record: dict[str, Any] = {
         "path": str(path),
         "bytes": status.st_size,
         "modified_ns": status.st_mtime_ns,
@@ -189,6 +203,11 @@ def _input(source: Source) -> dict[str, Any]:
         "primaries": source.stream.color_primaries,
         "transfer": source.stream.color_transfer,
     }
+    if source.index is not None:
+        data = source.index.to_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        record["index"] = {"name": INDEX, "bytes": len(data), "sha256": digest}
+    return record
 
 
 def code_sha256() -> str:

@@ -177,7 +177,7 @@ def test_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
     )
     assert status == 130, log[-3000:]
     assert "stopped at once (Ctrl-C)" in log
-    assert sorted(p.name for p in out.iterdir()) == ["manifest.json", "resume"]
+    assert sorted(p.name for p in out.iterdir()) == ["frame_index.bin", "manifest.json", "resume"]
 
     # Killed inside it: what ffmpeg left of the segment is discarded on resume.
     status, log = upscale(tmp_path, "out", ("run: shot 2/3: decoding", kill(1.0)))
@@ -197,6 +197,11 @@ def test_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
     assert status == 0, log[-3000:]
     assert encoded(log) == [3]
     assert progress(out)[2] == [True, True]
-    assert sorted(p.name for p in out.iterdir()) == ["checksums", "manifest.json", *SEGMENTS]
+    assert sorted(p.name for p in out.iterdir()) == [
+        "checksums",
+        "frame_index.bin",
+        "manifest.json",
+        *SEGMENTS,
+    ]
     for name in SEGMENTS:
         assert frames(out / name) == frames(tmp_path / "whole" / name), name

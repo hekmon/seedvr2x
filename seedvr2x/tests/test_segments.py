@@ -159,6 +159,7 @@ def written_manifest(tmp_path: Path) -> Manifest:
         sample_aspect=Fraction(1),
         conversion=SimpleNamespace(describe=lambda: "YUV bt709, limited range, chroma left"),
         sha256="the content of in.mkv",
+        index=None,
     )
     source.path.write_bytes(b"x" * 7)
     record = Manifest(
@@ -375,7 +376,7 @@ def test_joined_segments_are_the_one_file_output(tmp_path: Path) -> None:
     directory = tmp_path / "segments"
     names = [f"seg_{i:06d}.mkv" for i in range(3)]
     assert sorted(p.name for p in directory.iterdir()) == sorted(
-        [*names, "checksums", "manifest.json"]
+        [*names, "checksums", "frame_index.bin", "manifest.json"]
     )
     content = json.loads((directory / "manifest.json").read_text())
     assert [(s["name"], s["start"], s["end"], s["finished"]) for s in content["segments"]] == [

@@ -16,9 +16,10 @@ import numpy.typing as npt
 import torch
 
 from seedvr2x.media.checksums import write_checksums
-from seedvr2x.media.decode import Decoder, to_float32
+from seedvr2x.media.decode import to_float32
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.files import make_directories
+from seedvr2x.media.reader import Reader, listed
 from seedvr2x.media.source import Source
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer
 from seedvr2x.runtime.job import OutputSegment, Shot
@@ -82,8 +83,9 @@ def run_job(
     its steps in a row, and nothing builds up.
 
     What units kept already is skipped (DESIGN.md, Pause and resume): a finished segment; a
-    shot's encode and the windows done; the input frames of what is skipped, read and dropped.
-    An unfinished segment's decode and write restart whole, from its shots' windows kept.
+    shot's encode and the windows done; the input frames of what is skipped, never decoded, the
+    next ones reached through the frame index (Inputs). An unfinished segment's decode and write
+    restart whole, from its shots' windows kept.
 
     stop, when given, is checked before each unit (Stop.check). With split, the frames each
     encode reads are copied as they come (units.copy_path), and the shot's decode corrects each
@@ -211,10 +213,11 @@ def _copy_again(
     stop: Stop | None,
     copies: Copies,
 ) -> None:
-    """Make shot `index`'s input copy again, as its encode did, from the input frames it read:
-    bit for bit the frames the first copy held, the input's content being checked (DESIGN.md,
-    Colour correction), unless an environment change accepted since then changed ffmpeg or its
-    conversions, the copy then being the new decode's frames (--accept-env-change)."""
+    """Make shot `index`'s input copy again, as its encode did, from the input frames it read,
+    reached through the frame index (Inputs): bit for bit the frames the first copy held, the
+    input's content being checked (DESIGN.md, Colour correction), and each frame against the
+    index, unless an environment change accepted since then changed ffmpeg or its conversions,
+    the copy then being the new decode's frames (--accept-env-change)."""
     shot = shots[index]
     _begin(stop, f"{name}'s input copy")
     started = time.monotonic()
@@ -300,50 +303,61 @@ def _copied(
 
 
 class Inputs:
-    """The source's frames, read in order: its decoder is opened at the first frame asked, and
-    finished once every frame is read, its count checked (Decoder). Frames not asked for, those of
-    shots a resume skips, are decoded and dropped: exact, as the first pass counts them
-    (provisional: seeking is DESIGN.md's open question, Frame-exact access). Used as a context
-    manager, which stops the decoder left open on an exception."""
+    """The source's frames, read in order, each checked against the frame index (Reader). A reader
+    is opened at the first frame asked, and finished once every frame is read, its count checked.
+    Frames not asked for, those of shots a resume skips, are never decoded: the next frame asked
+    is reached through the frame index, a reader opened there (DESIGN.md, Pause and resume). A run
+    reading every shot from the source's first frame keeps one reader from the start, which seeks
+    nowhere, its frames checked all the same: PROVISIONAL (DESIGN.md checks a read from frame n),
+    one code path for the run and its resume, at the cost of a CRC-32 a frame in ffmpeg, and a
+    source changed under a run said: its frames' count and pts checked, a picture other than the
+    first pass's taken from the start with a warning (Reader.otherwise), every such frame of the
+    run summed up at its end. Used as a context manager, which stops the reader left open on an
+    exception."""
 
     def __init__(self, source: Source) -> None:
         self._source = source
-        self._decoder: Decoder | None = None
-        self._position = 0  # the index of the next frame the decoder gives
+        self._reader: Reader | None = None
+        self._position = 0  # the index of the next frame the reader gives
+        self._otherwise: list[int] = []  # each reader's Reader.otherwise, once it is done
 
     def reader(self, shot: Shot) -> Callable[[int], npt.NDArray[np.float32]]:
         """read(n), giving the next n of shot's frames, (n, H, W, 3) float32 in [0, 1], from its
-        first: shots are asked for in order, the frames between them dropped."""
+        first: shots are asked for in order, a reader opened at a shot whose first frame isn't the
+        next one."""
         path = self._source.path
-        if self._decoder is None:
-            self._decoder = self._source.decoder()
-        decoder = self._decoder
         if self._position > shot.start:
             raise ValueError(f"frame {shot.start} asked, frame {self._position} is next")
-        if self._position < shot.start:
-            skipped = decoder.skip(shot.start - self._position)
-            if skipped != shot.start - self._position:
-                raise MediaError(f"{path}: the stream ended after {decoder.decoded} frames")
+        if self._reader is None or self._position < shot.start:
+            if self._reader is not None:
+                self._reader.stop()
+                self._otherwise += self._reader.otherwise
+            self._reader = None  # a failure opening the next leaves none open
+            self._reader = self._source.reader(shot.start)
             self._position = shot.start
+        reader = self._reader
 
         def read(count: int) -> npt.NDArray[np.float32]:
-            frames = decoder.read(count)
+            frames = reader.read(count)
             if frames.shape[0] != count:
-                raise MediaError(f"{path}: the stream ended after {decoder.decoded} frames")
+                raise MediaError(f"{path}: the stream ended after {reader.position} frames")
             self._position += count
             return to_float32(frames)
 
         return read
 
-    def _close(self) -> None:
-        """Finish the open decoder, its every frame read; else stop it."""
-        decoder, self._decoder = self._decoder, None
-        if decoder is None:
+    def _close(self, finish: bool) -> None:
+        """Finish the open reader when `finish` and its every frame is read; else stop it."""
+        reader, self._reader = self._reader, None
+        if reader is None:
             return
-        if self._position == self._source.frames:
-            decoder.finish()
-        else:
-            decoder.stop()
+        try:
+            if finish and self._position == self._source.frames:
+                reader.finish()
+            else:
+                reader.stop()
+        finally:
+            self._otherwise += reader.otherwise
 
     def __enter__(self) -> Self:
         return self
@@ -354,10 +368,21 @@ class Inputs:
         error: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if error is None:
-            self._close()
-        elif self._decoder is not None:
-            self._decoder.stop()
+        try:
+            self._close(finish=error is None)
+        finally:
+            if self._otherwise:
+                # The run's last word on it (Reader._take): what it means for a resume.
+                count = len(self._otherwise)
+                logger.warning(
+                    "%s: %d frame%s in all decoded otherwise than in the first pass, read from the"
+                    " start and taken as decoded (%s): an output is bit-identical across a resume"
+                    " only for a source that decodes the same each time",
+                    self._source.path,
+                    count,
+                    "" if count == 1 else "s",
+                    listed(self._otherwise),
+                )
 
 
 def _started(models: Models) -> float:

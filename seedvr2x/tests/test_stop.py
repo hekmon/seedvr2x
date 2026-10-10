@@ -197,6 +197,7 @@ def resumed_as_uninterrupted(directory: Path, resumed: list[str]) -> None:
     assert indexes(out / "seg_000000.mkv") + indexes(out / "seg_000001.mkv") == list(range(25))
     assert sorted(p.name for p in (directory / "out").iterdir()) == [
         "checksums",
+        "frame_index.bin",
         "manifest.json",
         "seg_000000.mkv",
         "seg_000001.mkv",
@@ -249,5 +250,9 @@ def test_stopped_at_once(job: Path, signals: tuple[int, ...], status: int, said:
     assert calls == UNINTERRUPTED[:5]  # stopped inside the decode of shot 0
     # The segment being written is gone, partial file and all; the windows are kept.
     assert progress(job) == ([False, False], [1, 1, 0])
-    assert sorted(p.name for p in (job / "out").iterdir()) == ["manifest.json", "resume"]
+    assert sorted(p.name for p in (job / "out").iterdir()) == [
+        "frame_index.bin",
+        "manifest.json",
+        "resume",
+    ]
     resumed_as_uninterrupted(job, ["decode 0", "decode 3", *UNINTERRUPTED[6:]])

@@ -464,7 +464,7 @@ def test_drifted_join_scanned_without_errors(
     )
     listed.write_text("".join(f"file 'seg_{k:06d}.mkv'\n" for k in range(frames)))
     run("-f", "concat", "-i", str(listed), "-c", "copy", str(joined))
-    assert scan(joined) == Scan(frames, frames - 1, 41000, 41000)
+    assert scan(joined) == Scan(frames, frames - 1, Fraction(41000), Fraction(41000))
     source = examine(joined)
     assert (source.frames, source.stream.frame_rate) == (frames, Fraction(24000, 1001))
     assert "reported errors" not in caplog.text

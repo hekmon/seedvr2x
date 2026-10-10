@@ -11,10 +11,11 @@ from pathlib import Path
 
 from seedvr2x.media import bitstream
 from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion, conversion_for
-from seedvr2x.media.decode import Decoder
-from seedvr2x.media.ffmpeg import MediaError, input_args
+from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.files import sha256
+from seedvr2x.media.index import FrameIndex
 from seedvr2x.media.probe import DoviRecord, VideoStream, probe
+from seedvr2x.media.reader import Reader
 from seedvr2x.media.scan import scan, timing_error
 
 logger = logging.getLogger(__name__)
@@ -148,10 +149,11 @@ class Declared:
 @dataclass(frozen=True)
 class FirstPass:
     """What the first pass found in a file: its frames, decoded and counted, at the constant rate
-    declared; and its content's SHA-256, when hashed."""
+    declared; its content's SHA-256, when hashed; and its frame index (media/index.py)."""
 
     frames: int
     sha256: str | None = None
+    index: FrameIndex | None = None
 
 
 @dataclass(frozen=True)
@@ -164,19 +166,28 @@ class Source:
     frames: int  # counted by the first pass
     sample_aspect: Fraction  # the override, else the declared one, else 1 (square pixels)
     sha256: str | None = None  # the file's content, hashed for a manifest
+    index: FrameIndex | None = None  # the first pass's frame index, or its record's
 
     @property
     def display_aspect(self) -> Fraction:
         return self.sample_aspect * self.stream.width / self.stream.height
 
-    def decoder(self) -> Decoder:
-        """A decoder of every frame, from the first, checked against the first pass's count."""
-        return Decoder(
-            input_args(self.path),
-            self.conversion,
-            self.stream.width,
-            self.stream.height,
+    def decoder(self) -> Reader:
+        """A reader of every frame, from the first (reader)."""
+        return self.reader(0)
+
+    def reader(self, first: int, md5: bool = False) -> Reader:
+        """A reader of the frames from frame `first` on, each checked against the frame index,
+        reached through it (media/reader.py); `frames` of them in all, the first pass's count.
+        md5 is for the tests (Reader)."""
+        if self.index is None:
+            raise ValueError(f"{self.path}: no frame index to read its frames by")
+        stream = self.stream
+        return Reader(
+            *(self.path, self.conversion, stream.width, stream.height, self.index),
+            first,
             self.frames,
+            md5=md5,
         )
 
 
@@ -265,9 +276,10 @@ def declare(
 
 
 def first_pass(declared: Declared, hashed: bool = False) -> FirstPass:
-    """Decode every frame of the file once, to count and time them, refused unless at the constant
-    rate declared; and, when `hashed`, hash its content meanwhile, from another thread: the file
-    read a second time, at the speed of the disk, while ffmpeg decodes it.
+    """Decode every frame of the file once, to count, time and index them (media/scan.py), refused
+    unless at the constant rate declared; and, when `hashed`, hash its content meanwhile, from
+    another thread: the file read a second time, at the speed of the disk, while ffmpeg decodes
+    it.
 
     Raises MediaError with the reason for a refusal."""
     path, stream = declared.path, declared.stream
@@ -288,18 +300,19 @@ def first_pass(declared: Declared, hashed: bool = False) -> FirstPass:
     if refusal:
         raise MediaError(f"{path}: {refusal}")
     if not hashed:
-        return FirstPass(scanned.frames)
+        return FirstPass(scanned.frames, index=scanned.index)
     reader.join()
     [digest] = hashed_as
     if isinstance(digest, OSError):
         raise MediaError(f"{path}: not readable: {digest}") from digest
     if isinstance(digest, Exception):
         raise digest
-    return FirstPass(scanned.frames, digest)
+    return FirstPass(scanned.frames, digest, scanned.index)
 
 
 def counted(declared: Declared, found: FirstPass) -> Source:
-    """The source declared, its frames counted by its first pass, or by the record of one."""
+    """The source declared, its frames counted and indexed by its first pass, or by the record of
+    one."""
     stream = declared.stream
     source = Source(
         declared.path,
@@ -308,6 +321,7 @@ def counted(declared: Declared, found: FirstPass) -> Source:
         found.frames,
         declared.sample_aspect,
         found.sha256,
+        found.index,
     )
     logger.info(
         "%s: %d frames, %dx%d %s at %s fps, sample aspect %s (display %s), read as %s",

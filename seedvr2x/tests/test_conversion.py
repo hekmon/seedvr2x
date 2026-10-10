@@ -347,18 +347,33 @@ def test_declared_accepted(changes: dict[str, Any]) -> None:
     assert declared_refusal(stream(**changes)) == ""
 
 
+def timed(frames: int, durations: int, shortest: Fraction | int, longest: Fraction | int) -> Scan:
+    """A scan's timing, its frame times in microseconds, exact."""
+    return Scan(frames, durations, Fraction(shortest), Fraction(longest))
+
+
+# MPEG-TS's 90 kHz ticks at 24000/1001 fps: frames 3,753 and 3,754 ticks apart, 41.7 and 41.711 ms.
+TICK = Fraction(1_000_000, 90_000)
+
+
 @pytest.mark.parametrize(
     ("scanned", "avg_frame_rate", "reason"),
     [
-        (Scan(100, 99, 41000, 42000), NTSC_FILM, ""),  # Matroska's milliseconds at 23.976 fps
-        (Scan(100, 99, 41708, 41709), NTSC_FILM, ""),
-        (Scan(100, 98, 33333, 41667), NTSC_FILM, "variable frame rate"),  # 24 and 30 fps
-        (Scan(100, 99, 40000, 42000), NTSC_FILM, "variable frame rate"),  # 24 and 25 fps
-        (Scan(100, 99, 40000, 40000), NTSC_FILM, "not the frames' own"),  # declared wrong
-        (Scan(1, 0, 0, 0), NTSC_FILM, ""),  # one frame: the declared rates agree
-        (Scan(1, 0, 0, 0), Fraction(24), "can't be checked"),
-        (Scan(1, 0, 0, 0), None, "can't be checked"),
-        (Scan(0, 0, 0, 0), NTSC_FILM, "no frame"),
+        (timed(100, 99, 41000, 42000), NTSC_FILM, ""),  # Matroska's milliseconds at 23.976 fps
+        (timed(100, 99, 41708, 41709), NTSC_FILM, ""),
+        (timed(100, 99, 3753 * TICK, 3754 * TICK), NTSC_FILM, ""),
+        (timed(100, 98, 33333, 41667), NTSC_FILM, "variable frame rate"),  # 24 and 30 fps
+        (timed(100, 99, 40000, 42000), NTSC_FILM, "variable frame rate"),  # 24 and 25 fps
+        (timed(100, 99, 40000, 40000), NTSC_FILM, "not the frames' own"),  # declared wrong
+        # The tolerance exactly, 90 ticks, and a tick over it, 1,011.1 us: the times are the
+        # timestamps' own, exact, where each timestamp was rounded to the microsecond before
+        # (settb), the times then within 1 us of these.
+        (timed(100, 99, 3663 * TICK, 3753 * TICK), NTSC_FILM, ""),
+        (timed(100, 99, 3662 * TICK, 3753 * TICK), NTSC_FILM, "variable frame rate"),
+        (timed(1, 0, 0, 0), NTSC_FILM, ""),  # one frame: the declared rates agree
+        (timed(1, 0, 0, 0), Fraction(24), "can't be checked"),
+        (timed(1, 0, 0, 0), None, "can't be checked"),
+        (timed(0, 0, 0, 0), NTSC_FILM, "no frame"),
     ],
 )
 def test_timing(scanned: Scan, avg_frame_rate: Fraction | None, reason: str) -> None:

@@ -37,6 +37,18 @@ class MediaError(RuntimeError):
     """A source seedvr2x refuses, or a failure of ffmpeg or ffprobe; the message says which."""
 
 
+# No output takes the source's metadata or chapters, which fftools copies to every output by
+# default: global metadata, each stream's, the chapters with theirs. -map_metadata -1 stops the
+# three copies at once (fftools/ffmpeg_mux_init.c:2911-2916, 3029-3046 at n9.0.2: an output
+# without a specifier and no input sets every one manual), -map_chapters -1 the chapters
+# themselves (:3024-3026). A muxer's header is printed at info level once its streams are ready,
+# while the frames are decoded (fftools/ffmpeg_mux.c:566), a title among it, and each stream's
+# language: text of the source's own among the lines the first pass reads (media/scan.py,
+# MAPPING). Checked on 2026-10-10: with them, the outputs' headers print their "encoder" tags
+# alone.
+NO_METADATA = ("-map_metadata", "-1", "-map_chapters", "-1")
+
+
 def input_args(path: Path) -> list[str]:
     """ffmpeg's input options for a source, the same for every pass over it. Nothing rotates the
     frames behind our back: a rotated source is refused (DESIGN.md, Not in the first version),

@@ -27,6 +27,7 @@ from seedvr2x.runtime.stop import Stop, Stopped, Terminated, terminable
 if TYPE_CHECKING:
     import torch
 
+    from seedvr2x.media.index import FrameIndex
     from seedvr2x.media.source import Declared, FirstPass, Source
     from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
@@ -486,6 +487,9 @@ def _run(args: argparse.Namespace) -> int:
                 logger.error("%s", error)
                 return 1
             remaining = [index for index, done in enumerate(record.finished) if not done]
+            if prior.known is None:
+                # The first pass ran again: its index is written with a manifest naming it.
+                _index_made_again(record, prior)
             if not remaining:
                 logger.info("%s: finished already, its %d segments", directory, len(segments))
                 return 0
@@ -507,6 +511,8 @@ def _run(args: argparse.Namespace) -> int:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
     if record is not None and prior is None:
         record.path.parent.mkdir(parents=True, exist_ok=True)
+        # The frame index first, whole, then the manifest naming it (manifest.INDEX).
+        _write_index(record.path.parent, source)
         record.write()
     started = time.monotonic()
 
@@ -731,10 +737,21 @@ def _checksums_path(directory: Path | None, output: Path, output_format: str) ->
 
 def _empty(directory: Path) -> bool:
     """Whether directory holds nothing, but what an interrupted first write of the manifest left,
-    which the next write replaces."""
-    from seedvr2x.runtime.manifest import NAME
+    which the next write replaces: the manifest's partial file, the frame index written whole
+    before it (manifest.INDEX), or the index's partial file."""
+    from seedvr2x.runtime.manifest import INDEX, NAME
 
-    return all(entry.name == f"{NAME}.partial" for entry in directory.iterdir())
+    left = {f"{NAME}.partial", INDEX, f"{INDEX}.partial"}
+    return all(entry.name in left for entry in directory.iterdir())
+
+
+def _write_index(directory: Path, source: "Source") -> None:
+    """Write the source's frame index beside the manifest, whole (manifest.INDEX)."""
+    from seedvr2x.runtime.manifest import INDEX
+
+    if source.index is None:
+        raise ValueError(f"{source.path}: no frame index to write")
+    source.index.write(directory / INDEX)
 
 
 def _settings(
@@ -909,8 +926,48 @@ def _prior(
     before: dict[str, Any] = recorded["environment"]
     if any(before.get(key) != identity.environment.get(key) for key in resume.FIRST_PASS):
         return _Prior(recorded, identity, changed, None)
+    index, why = _recorded_index(directory, entry)
+    if index is None:
+        # PROVISIONAL (DESIGN.md has the index trusted as the first pass's record is, and says
+        # nothing of one missing or damaged): derived data, as an input copy is, never trusted
+        # unchecked, nor a reason to refuse the job: the first pass runs again and makes it.
+        logger.warning("%s; the first pass runs again, which makes it", why)
+        return _Prior(recorded, identity, changed, None)
     logger.info("%s: the same input and ffmpeg, the first pass as recorded", directory)
-    return _Prior(recorded, identity, changed, FirstPass(entry["frames"], entry["sha256"]))
+    found = FirstPass(entry["frames"], entry["sha256"], index)
+    return _Prior(recorded, identity, changed, found)
+
+
+def _recorded_index(directory: Path, entry: dict[str, Any]) -> "tuple[FrameIndex | None, str]":
+    """The frame index the input's record names, read from directory and checked against the
+    record (manifest.INDEX): its size, SHA-256 and frames; or None, and why it isn't trusted."""
+    import hashlib
+
+    from seedvr2x.media.index import FrameIndex
+    from seedvr2x.runtime.manifest import INDEX
+
+    path = directory / INDEX
+    recorded: Any = entry.get("index")
+    if not isinstance(recorded, dict):
+        return None, f"{path}: not in the manifest's record of the input"
+    named = cast(dict[str, Any], recorded)
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None, f"{path}: the frame index missing"
+    except OSError as error:
+        return None, f"{path}: the frame index not readable: {error}"
+    if len(data) != named.get("bytes"):
+        return None, f"{path}: {len(data)} bytes, where the manifest recorded {named.get('bytes')}"
+    if hashlib.sha256(data).hexdigest() != named.get("sha256"):
+        return None, f"{path}: not the frame index the manifest recorded, by its SHA-256"
+    try:
+        index = FrameIndex.from_bytes(data)
+    except ValueError as error:
+        return None, f"{path}: not readable as a frame index: {error}"
+    if index.frames != entry.get("frames"):
+        return None, f"{path}: {index.frames} frames, where the record has {entry.get('frames')}"
+    return index, ""
 
 
 def _content(path: Path) -> dict[str, object]:
@@ -929,7 +986,8 @@ def _resume(record: "Manifest", prior: _Prior) -> None:
     following from it; its directory must be as the manifest says. Then record the environment
     change accepted, and discard what a stop left that the manifest doesn't name
     (resume.leftovers). The manifest is written by the next unit made: a resume stopped
-    before one keeps the record as it was."""
+    before one keeps the record as it was, but for the index of a first pass run again
+    (_index_made_again)."""
     from seedvr2x.runtime import resume
 
     found = [
@@ -967,6 +1025,45 @@ def _resume(record: "Manifest", prior: _Prior) -> None:
         sum(record.windows_done),
         len(discarded),
     )
+
+
+def _index_made_again(record: "Manifest", prior: _Prior) -> None:
+    """The frame index of a first pass a resume ran again (_prior), written only with a manifest
+    that names it and records the environment it was made in (manifest.INDEX).
+
+    Made in the environment recorded, the recorded index being missing or damaged: at once, then
+    the manifest as recorded, naming it, so that the next run trusts the record, that of a job
+    finished already too, which makes no unit to write its manifest with. Left to the next unit, a
+    finished job kept index bytes its manifest didn't name when the pass gave others (a damaged
+    source decodes otherwise from one pass to the next: media/reader.py), and every later run
+    warned of them and ran the pass again.
+
+    Made in another environment, accepted (ffmpeg or its conversions changed): with the next unit
+    made, whose manifest records that environment (DESIGN.md, Pause and resume), the directory
+    keeping the recorded index until then: a resume stopped before a unit "still resumes in its
+    old environment", its record whole, and a job finished already, which makes none, keeps what
+    it has.
+
+    PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has a resume stopped
+    before a unit leave the manifest as it was, which holds but for the record of an index made
+    again in the environment recorded)."""
+    from dataclasses import replace
+
+    from seedvr2x.runtime import resume
+
+    directory = record.path.parent
+    source = record.source
+    before: dict[str, Any] = prior.recorded["environment"]
+    if any(before.get(key) != record.environment.get(key) for key in resume.FIRST_PASS):
+        record.before_write = lambda: _write_index(directory, source)
+        return
+    _write_index(directory, source)
+    as_recorded = replace(
+        record,
+        environment=before,
+        environment_changes=list(prior.recorded.get(resume.CHANGES, [])),
+    )
+    as_recorded.write()
 
 
 def _another_job(path: Path, found: list[str], only_environment: bool) -> "JobError":

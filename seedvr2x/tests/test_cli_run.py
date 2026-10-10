@@ -31,7 +31,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
-from test_probe import BT709_VUI, has_x265, x265_file
+from test_probe import BT709_VUI, has_encoder, has_x265, x265_file
 
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
@@ -242,6 +242,7 @@ def test_segments_merged_with_manifest(tmp_path: Path, monkeypatch: pytest.Monke
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == [
         "checksums",
+        "frame_index.bin",
         "manifest.json",
         "seg_000000.mkv",
         "seg_000001.mkv",
@@ -548,6 +549,7 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == [
         "checksums",
+        "frame_index.bin",
         "manifest.json",
         "seg_000000.mkv",
         "seg_000001.mkv",
@@ -639,6 +641,7 @@ def test_resumed_as_uninterrupted(
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == [
         "checksums",
+        "frame_index.bin",
         "manifest.json",
         "seg_000000.mkv",
         "seg_000001.mkv",
@@ -2024,3 +2027,369 @@ def test_dumps_kept_out_of_the_output(tmp_path: Path, caplog: pytest.LogCaptureF
     status = upscale(tmp_path, source(tmp_path / "in.mkv"), "out", "--dump-frames", dumps)
     assert status == 1
     assert "in the output directory, which holds the job's own files only" in caplog.text
+
+
+needs_x264 = pytest.mark.skipif(not has_encoder("libx264"), reason="needs ffmpeg with libx264")
+
+
+def x264_source(path: Path, frames: int = 40) -> Path:
+    """An x264 encode with open GOPs and B-frames, a keyframe every 8 frames: what a resume's
+    reads seek in (DESIGN.md, Input)."""
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),
+            *("-frames:v", str(frames), "-c:v", "libx264", "-preset", "veryfast"),
+            *("-x264-params", "keyint=8:min-keyint=8:scenecut=0:open-gop=1:bframes=3"),
+            *("-pix_fmt", "yuv420p", str(path)),
+        ],
+        check=True,
+    )
+    return path
+
+
+def recorded_reads(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The ffmpeg command of every read of a source from now on (media/reader.py)."""
+    from seedvr2x.media import reader
+
+    commands: list[list[str]] = []
+    command = reader.read_command
+
+    def recorded(*arguments: Any, **options: Any) -> list[str]:
+        commands.append(command(*arguments, **options))
+        return commands[-1]
+
+    monkeypatch.setattr(reader, "read_command", recorded)
+    return commands
+
+
+# Shots of 16 and 24 frames (5 and 7 latents: the second in two windows of 5), a segment each.
+SEEKING = ("--cuts", "cuts.txt", "--window", "5", "--min-segment", "0")
+SEEKING_RUN = ["encode 0", "window 0:0", "decode 0", "encode 16", "window 16:0", "window 16:1"]
+SEEKING_RUN += ["decode 16"]
+
+
+@needs_x264
+@pytest.mark.parametrize("correction", ["none", "split"])
+def test_resume_reads_through_the_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, correction: str
+) -> None:
+    # A run from the source's first frame reads it once, in order, seeking nowhere. Resumed after
+    # its first segment, a job reads its next shot through the frame index: one read, decoding
+    # from the keyframe one before the shot's own (frame 8, 0.32 s), its frames selected from the
+    # shot's first pts on (640 ms), never from frame 0; the frames each encode reads, and the
+    # output, the uninterrupted run's.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cuts.txt").write_text("16\n")
+    source_path = x264_source(tmp_path / "in.mkv")
+    options = (*SEEKING, "--color-correction", correction)
+    commands = recorded_reads(monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *options) == 0
+    assert steps.calls == SEEKING_RUN
+    [whole] = commands
+    assert "-ss" not in whole and "select=" not in whole[whole.index("-vf") + 1]
+    read = dict(steps.read)
+    commands.clear()
+    steps.calls.clear()
+    steps.stop = "encode 16"
+    stopped(tmp_path, source_path, "out", *options)
+    commands.clear()
+    steps.calls.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert steps.calls == SEEKING_RUN[3:]
+    [seeking] = commands
+    assert seeking[seeking.index("-ss") + 1] == "0.320000"
+    assert "select=gte(pts\\,640)," in seeking[seeking.index("-vf") + 1]
+    assert steps.read == read
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
+
+
+@needs_x264
+def test_copy_made_again_through_the_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # split's input copy of a shot, missing on resume, made again from the input through the frame
+    # index (run._copy_again): one read from the keyframe before the shot's own; the copy holds
+    # the frames the shot's encode read, and the output is the uninterrupted run's.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cuts.txt").write_text("16\n")
+    source_path = x264_source(tmp_path / "in.mkv")
+    assert upscale(tmp_path, source_path, "whole", *SEEKING, *SPLIT) == 0
+    steps.stop = "decode 16"
+    stopped(tmp_path, source_path, "out", *SEEKING, *SPLIT)
+    out = tmp_path / "out"
+    (out / "resume" / "shot_000016" / "input.mkv").unlink()
+    seen: list[str] = []
+    decode = steps.decode
+
+    def looked(*arguments: Any) -> None:
+        seen.append(copied(arguments[-1].copy, arguments[2]))
+        decode(*arguments)
+
+    from seedvr2x.runtime import run
+
+    monkeypatch.setattr(run, "decode_shot", looked)
+    commands = recorded_reads(monkeypatch)
+    steps.stop = None
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *SEEKING, *SPLIT) == 0
+    assert steps.calls == ["decode 16"]
+    assert "shot 2/2: input.mkv missing: its input copy made again from the input" in caplog.text
+    [seeking] = commands
+    assert seeking[seeking.index("-ss") + 1] == "0.320000"
+    assert seen == [steps.read[16]]
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(out / name) == decoded(tmp_path / "whole" / name)
+
+
+@pytest.mark.parametrize("how", ["missing", "damaged", "cut short"])
+def test_index_derived_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    how: str,
+) -> None:
+    # The frame index a resume finds missing, or not the one its manifest records, is no reason to
+    # refuse the job: the first pass runs again, said, and makes it again, the same bytes; the
+    # output is the uninterrupted run's.
+    from seedvr2x.media import source as examined
+
+    scans: list[Path] = []
+    scan = examined.scan
+
+    def counted(path: Path) -> object:
+        scans.append(path)
+        return scan(path)
+
+    monkeypatch.setattr(examined, "scan", counted)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *JOB) == 0
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    index = tmp_path / "out" / "frame_index.bin"
+    kept = index.read_bytes()
+    if how == "missing":
+        index.unlink()
+        said = f"{index}: the frame index missing; the first pass runs again"
+    elif how == "damaged":
+        index.write_bytes(kept[:100] + bytes([kept[100] ^ 1]) + kept[101:])
+        said = f"{index}: not the frame index the manifest recorded, by its SHA-256"
+    else:
+        index.write_bytes(kept[:-1])
+        said = f"{index}: {len(kept) - 1} bytes, where the manifest recorded {len(kept)}"
+    scans.clear()
+    steps.stop = None
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert said in caplog.text and len(scans) == 1
+    assert steps.calls == UNINTERRUPTED[6:]
+    assert index.read_bytes() == kept
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
+
+
+def another_index(monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], list[bool]]:
+    """The first passes run, and a switch: on, a pass gives another index than the source's own,
+    frame 7's CRC-32 changed, as a damaged source does, decoded otherwise from one pass to the
+    next (media/reader.py)."""
+    from seedvr2x.media import source as examined
+
+    scans: list[Path] = []
+    scan = examined.scan
+    otherwise = [False]
+
+    def counted(path: Path) -> object:
+        scans.append(path)
+        found = scan(path)
+        if not otherwise[0]:
+            return found
+        assert found.index is not None
+        crc32 = found.index.crc32.copy()
+        crc32[7] ^= 1
+        return replace(found, index=replace(found.index, crc32=crc32))
+
+    monkeypatch.setattr(examined, "scan", counted)
+    return scans, otherwise
+
+
+@pytest.mark.parametrize("stop", [None, "encode 4"])
+def test_index_made_again_named_at_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    stop: str | None,
+) -> None:
+    # A first pass run again, its recorded index missing, that gives another index than the one
+    # recorded: the index is written with a manifest naming it, at once, in the environment
+    # recorded, whether the job is finished already, which makes no unit to write its manifest
+    # with, or stopped before one. The next run then trusts the record, and runs no first pass;
+    # left to the next unit, every run of the finished job warned of an index its manifest didn't
+    # name and ran the pass again.
+    scans, otherwise = another_index(monkeypatch)
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = stop
+    assert upscale(tmp_path, source_path, "out", *JOB) == (0 if stop is None else 130)
+    out = tmp_path / "out"
+    index, manifest = out / "frame_index.bin", out / "manifest.json"
+    first, recorded = index.read_bytes(), json.loads(manifest.read_text())
+    index.unlink()
+    otherwise[0] = True
+    scans.clear()
+    steps.calls.clear()
+    # Another GPU, accepted: the manifest written with the index keeps the environment recorded.
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == (
+        0 if stop is None else 130
+    )
+    assert f"{index}: the frame index missing; the first pass runs again" in caplog.text
+    assert len(scans) == 1 and steps.calls == ([] if stop is None else ["encode 4"])
+    assert ("finished already" in caplog.text) == (stop is None)
+    data = index.read_bytes()
+    assert data != first and len(data) == len(first)
+    written = json.loads(manifest.read_text())
+    named = {"name": "frame_index.bin", "bytes": len(data)}
+    assert written["input"]["index"] == named | {"sha256": hashlib.sha256(data).hexdigest()}
+    assert written["environment"]["gpu"] != "another"
+    assert written == recorded | {"input": written["input"]}
+    # The next run reads the record, its index as named: no first pass.
+    otherwise[0] = False
+    scans.clear()
+    caplog.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == 0
+    assert not scans and "the first pass as recorded" in caplog.text
+    assert "the first pass runs again" not in caplog.text
+    assert index.read_bytes() == data
+
+
+@pytest.mark.parametrize("stop", [None, "encode 4"])
+def test_index_of_another_ffmpeg_written_with_its_unit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    stop: str | None,
+) -> None:
+    # A first pass run again under another ffmpeg, accepted, gives an index its manifest's
+    # environment didn't make: it is written with the next unit made, whose manifest records that
+    # environment, never before. A resume stopped before a unit, or a job finished already, which
+    # makes none, keeps its recorded index and its manifest as they were, and the first ffmpeg
+    # then finds its record whole, no pass run again.
+    scans, otherwise = another_index(monkeypatch)
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = stop
+    assert upscale(tmp_path, source_path, "out", *JOB) == (0 if stop is None else 130)
+    out = tmp_path / "out"
+    index, manifest = out / "frame_index.bin", out / "manifest.json"
+    first, recorded = index.read_bytes(), manifest.read_bytes()
+    check = ffmpeg.check
+    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    otherwise[0] = True
+    scans.clear()
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    status = upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change")
+    assert status == (0 if stop is None else 130) and len(scans) == 1
+    assert (index.read_bytes(), manifest.read_bytes()) == (first, recorded)
+    # Back on the first ffmpeg, no change to accept: the record as it was, trusted.
+    monkeypatch.setattr(ffmpeg, "check", check)
+    otherwise[0] = False
+    scans.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == (0 if stop is None else 130)
+    assert not scans and "the first pass as recorded" in caplog.text
+    assert (index.read_bytes(), manifest.read_bytes()) == (first, recorded)
+    if stop is None:
+        return
+    # The other ffmpeg again, to the job's end: the index its pass made is written with the first
+    # unit, shot 4's latent, in a manifest naming it and recording that ffmpeg and the change.
+    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    otherwise[0] = True
+    steps.stop = "window 4:0"
+    stopped(tmp_path, source_path, "out", *JOB, "--accept-env-change")
+    data = index.read_bytes()
+    assert data != first and len(data) == len(first) and len(scans) == 1
+    written = json.loads(manifest.read_text())
+    named = {"name": "frame_index.bin", "bytes": len(data)}
+    assert written["input"]["index"] == named | {"sha256": hashlib.sha256(data).hexdigest()}
+    assert written["environment"]["ffmpeg"] == "n0.0-another"
+    assert len(written["environment_changes"]) == 1
+    scans.clear()
+    caplog.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert not scans and "the first pass as recorded" in caplog.text
+
+
+def test_frame_index_beside_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The index is written whole before the manifest's first write, which names it in its input
+    # record by its size and SHA-256 (manifest.INDEX); one file keeps it in memory. What an
+    # interrupted first write leaves, the index or its partial file, is no obstacle; a partial
+    # file a resume finds is discarded.
+    from seedvr2x.media.index import FrameIndex
+
+    source_path = job(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    out.mkdir()
+    for name in ("frame_index.bin", "frame_index.bin.partial", "manifest.json.partial"):
+        (out / name).write_bytes(b"left")
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    index = out / "frame_index.bin"
+    entry = json.loads((out / "manifest.json").read_text())["input"]
+    data = index.read_bytes()
+    assert entry["index"] == {
+        "name": "frame_index.bin",
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    found = FrameIndex.read(index)
+    assert found.frames == entry["frames"] == 25
+    assert found.pts.tolist() == list(range(0, 1000, 40))
+    assert not (out / "frame_index.bin.partial").exists()
+    (out / "frame_index.bin.partial").write_bytes(b"left")
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert "1 leftovers discarded" in caplog.text
+    assert not (out / "frame_index.bin.partial").exists()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    assert not list(tmp_path.glob("*frame_index*"))
+
+
+def test_a_frame_decoded_otherwise_taken_and_summed_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A first pass whose index holds another CRC-32 for frame 10, as one concealing a damaged
+    # frame otherwise would (media/reader.py, _take): the run reads every frame from the first,
+    # takes frame 10 as decoded, said at once, and says it again at its end, with what it means
+    # for a resume; the output is the run's with the index's own.
+    from seedvr2x.media import source as examined
+
+    scan = examined.scan
+
+    def concealed(path: Path) -> object:
+        found = scan(path)
+        assert found.index is not None
+        crc32 = found.index.crc32.copy()
+        crc32[10] ^= 1
+        return replace(found, index=replace(found.index, crc32=crc32))
+
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *JOB) == 0
+    assert "decoded otherwise" not in caplog.text
+    monkeypatch.setattr(examined, "scan", concealed)
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == UNINTERRUPTED
+    assert re.search(r"frame 10: CRC-32 [0-9a-f]{8}, where the index has .* taken as", caplog.text)
+    said = "1 frame in all decoded otherwise than in the first pass, read from the start and taken"
+    assert f"{said} as decoded (10): an output is bit-identical across a resume only" in caplog.text
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
