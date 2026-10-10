@@ -120,12 +120,6 @@ never requires it.
     needs, where ffmpeg would otherwise smooth such a jump over, as in joined MPEG-TS
     recordings. The message names the frame and both times, and ffmpeg's remux as the way out
     for the formats it corrects.
-  - missing frames: frames on their grid with places left empty, as when a decoder drops a
-    keyframe's leading pictures (found on a Blu-ray episode: two frames at its second
-    keyframe, [seeking.md](../research/docs/seeking.md), mechanism 1). A player holds the
-    frame before the hole. The message names the frame and the hole's length, and the way out
-    is the user's, as for a contradicted rate: a remake that repeats the frame before each
-    hole. The likely later way is an override that fills them without the intermediate file.
 - Interlaced and telecined sources, in any version. Deinterlacing and inverse telecine are
   workflows of their own, with specialised tools and many ways to do them. Detection:
   - refused when the stream declares interlacing
@@ -603,7 +597,9 @@ from a cut list.
   under scdet's threshold of 10 and 14 under 4
   ([scene-detection.md](../research/docs/scene-detection.md)). Segments split losslessly can
   be joined back into one file: a directory given is refused, saying how. The join must keep
-  the frame grid, as `sptenc concat` does: ffmpeg's concat demuxer gives every frame back,
+  the frame grid, as `sptenc concat` does and as seedvr2x's own assembly does: a file either
+  of them builds is never refused (seedvr2x's own output, read back as a source, is part of
+  milestone 6's acceptance). ffmpeg's concat demuxer gives every frame back,
   but its timestamps 1 ms early per join, and such a file is refused once it has drifted half
   a frame from its declared rate's timeline, 21 joins at 24 fps (see the frame rate, below).
   The advice names a join by ffmpeg alone that holds the grid, tested with that rule.
@@ -699,6 +695,20 @@ Decoding goes through an ffmpeg pipe:
     does, timestamps alone can't tell a drifting join from a retagged file: the message says
     how far the frames wander and from which frame, and the ways out are a join that keeps the
     frame grid, or the remake at the declared rate. `--frame-rate` can't hold there.
+  - Missing frames are filled, not refused (decided with the user, 2026-10-10). Frames that
+    sit on the declared rate's grid with places left empty, as when a decoder drops a
+    keyframe's leading pictures (found on a Blu-ray episode: two frames at its second
+    keyframe, [seeking.md](../research/docs/seeking.md), mechanism 1), have one reading, the
+    one a player shows: the frame before the hole, held. seedvr2x repeats that frame in each
+    empty place, says so (the frame, the hole's length, how many holes) and records it: the
+    output keeps the source's length and stays with its audio. A contradicted rate has two
+    readings, which is why it is refused; so is a frame off the grid, a variable frame rate.
+    - By seedvr2x's own rule, from the frame index, not by ffmpeg's constant-rate mode: that
+      mode fills holes, but also drops and doubles frames elsewhere on its own judgement (it
+      doubled the first frame of a file whose video starts after its audio), and "no frame
+      dropped or doubled" could no longer be checked.
+    - A file whose encoder dropped repeated frames on a constant grid is read the same way,
+      each drawing held as it was. The share of filled places is said, however large.
   - The pass costs one software decode: 171 fps on an HEVC master, 730–2,360 on 1080p H.264
     (a 26 Mbit/s Blu-ray: 735 on 16 threads, about 4 min for a 2-hour film), and 204 fps on
     16 threads, 315–326 on 48, on a 4K UHD HEVC remux: at least 19–30 min for a 4-hour film
@@ -888,6 +898,9 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
     cut comes within the second. Given the list's milliseconds on its command line, VLC lands
     within 3 frames of the cut on a file with B-frames, mostly before it, which a time rounded
     up serves better than one rounded down; mpv lands on the cut frame.
+  - `--plan FILE` also writes a playlist beside the list, an entry per possible cut starting a
+    second before it, so that VLC goes from one to the next with no time to type (the user's
+    go, 2026-10-10; built and tested in VLC with the detector's follow-ups).
   - A possible cut inside a run that holds a detection isn't listed, the run being the
     detection's (0 to 7 such runs per labelled recording).
 - The milestone-1 regression's clip holds two cuts at 0.3 (0.324 and 0.388: two short shots at
@@ -1957,7 +1970,7 @@ explanation.
   VRAM, counted from what is free at the start, not from the card's size (4K: 22 to 23 GiB)
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
-  formats or matrices, timestamps that jump, missing frames, tags that contradict each other),
+  formats or matrices, timestamps that jump, tags that contradict each other),
   and what to do with each; for a rate its timestamps contradict, the two fixes and what each
   costs (see [Input](#input))
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
@@ -2138,7 +2151,8 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      the low frequencies 0.131 against numz's `lab`'s 0.625, Y shift −0.007 against +0.030,
      a\*/b\* spreads 2.187/5.245 against the input's 2.161/5.212. `test_lab.py` is retired.
 6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
-   for frame, and every other stream is copied.
+   for frame, and every other stream is copied. Given back to seedvr2x as a source, the file
+   is accepted, its frames on their grid.
 7. **Visual review** of long runs by the user: fast motion, where the frames inside a latent
    group can ghost (see [To measure](#to-measure)); held pictures, where a false cut's step
    would show (see [Shot detection](#shot-detection): the fallback gate); and shots' first
