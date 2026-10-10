@@ -17,7 +17,7 @@ from seedvr2x.media.index import FrameIndex
 from seedvr2x.media.probe import DoviRecord, VideoStream, probe
 from seedvr2x.media.rate import Timeline
 from seedvr2x.media.reader import Reader
-from seedvr2x.media.scan import TOLERANCE_US, Idet, Scan, name_error, scan, timing_error
+from seedvr2x.media.scan import TOLERANCE_US, Detects, Idet, Scan, name_error, scan, timing_error
 
 logger = logging.getLogger(__name__)
 
@@ -321,11 +321,14 @@ def declare(
     return Declared(path, stream, conversion, sample_aspect, frame_rate)
 
 
-def first_pass(declared: Declared, hashed: bool = False) -> FirstPass:
+def first_pass(
+    declared: Declared, hashed: bool = False, detector: Detects | None = None
+) -> FirstPass:
     """Decode every frame of the file once, to count, time and index them (media/scan.py), refused
-    unless at the constant rate declared, or --frame-rate's (timing_refusal); and, when `hashed`,
-    hash its content meanwhile, from another thread: the file read a second time, at the speed of
-    the disk, while ffmpeg decodes it.
+    unless at the constant rate declared, or --frame-rate's (timing_refusal); given the shot
+    detector, feed it every frame, its probabilities kept in the index; and, when `hashed`, hash
+    its content meanwhile, from another thread: the file read a second time, at the speed of the
+    disk, while ffmpeg decodes it.
 
     Raises MediaError with the reason for a refusal."""
     path = declared.path
@@ -341,7 +344,7 @@ def first_pass(declared: Declared, hashed: bool = False) -> FirstPass:
     reader = threading.Thread(target=hash_content, daemon=True)
     if hashed:
         reader.start()
-    scanned = scan(path)
+    scanned = scan(path, detector)
     refusal = timing_refusal(declared, scanned)
     if refusal:
         raise MediaError(f"{path}: {refusal}")

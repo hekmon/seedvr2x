@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.writer import FORMATS
 from seedvr2x.runtime.job import MIN_SEGMENT
-from seedvr2x.runtime.pull import REPO
+from seedvr2x.runtime.pull import DETECTOR, REPO
 from seedvr2x.runtime.stop import Stop, Stopped, Terminated, terminable
 
 if TYPE_CHECKING:
@@ -98,10 +98,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model-dir",
         type=Path,
-        help="a directory holding the model files, each read there by its name; nothing is"
-        " downloaded. Without it, --dit-model and --vae-model name seedvr2x's own files, taken"
-        f" from Hugging Face's cache (HF_HOME moves it), downloaded into it from {REPO} at a"
-        " pinned revision when missing (HF_HUB_OFFLINE keeps the network out). Either way,"
+        help="a directory holding the model files, each read there by its name, the shot"
+        f" detector's {DETECTOR} among them unless --cuts is given; nothing is downloaded."
+        " Without it, --dit-model and --vae-model name seedvr2x's own files, taken from Hugging"
+        f" Face's cache (HF_HOME moves it) with the shot detector's, downloaded into it from {REPO}"
+        " at a pinned revision when missing (HF_HUB_OFFLINE keeps the network out). Either way,"
         " seedvr2x's own files are checked by their pinned size and SHA-256",
     )
     # The sharp 7B by default, on the user's eyes: preferred or alike on 67 of 75 windows
@@ -125,12 +126,15 @@ def main(argv: list[str] | None = None) -> int:
         default=1080,
         help="short side of the output, square pixels at the source's display aspect",
     )
+    # Without it, the shot detector runs in the first pass, its probabilities recorded; the cuts
+    # they give are the next step's (DESIGN.md, Shot detection), the input one shot until then.
     parser.add_argument(
         "--cuts",
         type=Path,
         metavar="FILE",
         help="cut list: the first frame of each shot but the first, one frame number per line,"
-        " counted from 0 (default: the whole input is one shot)",
+        " counted from 0, in place of the shot detector (default: the whole input is one shot,"
+        " the shot detector run and its probabilities recorded)",
     )
     parser.add_argument("--seed", type=int, default=42)
     # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
@@ -354,11 +358,12 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.fingerprint import fingerprint
-    from seedvr2x.media.source import counted, declare, first_pass
+    from seedvr2x.media.source import counted, declare
     from seedvr2x.runtime import pull
     from seedvr2x.runtime.job import (
         SHARED,
         JobError,
+        Shot,
         check_seed,
         check_target,
         output_size,
@@ -366,13 +371,14 @@ def _run(args: argparse.Namespace) -> int:
         shots_from_cuts,
         target_size,
     )
-    from seedvr2x.runtime.manifest import NAME
+    from seedvr2x.runtime.manifest import NAME, read
     from seedvr2x.runtime.weights import ModelError, check_models
 
     # The build, the source, the target, the cut list and the model files are checked before
     # anything touches the GPU, but for a job resumed, which is first checked against its record
     # (its settings, environment, the GPU's included, and input), before its first pass, which
-    # isn't run again when nothing it depends on changed (DESIGN.md, Pause and resume).
+    # isn't run again when nothing it depends on changed (DESIGN.md, Pause and resume). The job's
+    # GPU is checked before its first pass, whose shot detector runs on it.
     prior: _Prior | None = None
     try:
         # The source is the only input (DESIGN.md, Input): a directory is refused before anything
@@ -396,33 +402,67 @@ def _run(args: argparse.Namespace) -> int:
         target = target_size(stream.width, stream.height, declared.sample_aspect, args.resolution)
         check_target(target, args.resolution)
         cuts = read_cuts(args.cuts) if args.cuts else []
+        # The seed against the last shot known before the first pass, the cut list's, so that a
+        # seed out of range is refused at once, before the model files and the first pass, whose
+        # shot detector imports torch; against every shot after it (check_seed, below).
+        # PROVISIONAL (implementation, 2026-10-09; DESIGN.md doesn't order the checks).
+        last = cuts[-1] if cuts else 0
+        check_seed(args.seed, [Shot(last, last + 1)])
         directory = _output(args)
-        # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
-        # into it when missing; checked by their headers, in a second, then seedvr2x's own by
-        # their pinned size and SHA-256 (16.5 GB to read for the DiT), which the manifest's
-        # record takes: before the resume's comparison and the first pass, which decodes the
-        # whole source (DESIGN.md, Weights). The header check comes first, as DESIGN.md has it
-        # (Weights, Recognised by content); its refusal of one of seedvr2x's own files, given in its
-        # own role, says how to fetch it again, as the pin's does (pull.advice).
-        # SIGTERM, which kills the process at once until the run installs its handlers
-        # (runtime/stop.py), unwinds a download as Ctrl-C does, so that the library removes its
-        # partial file, up to 16.5 GB that no later download takes up (runtime/pull.py, at its
-        # end).
-        with terminable():
-            model_files = pull.resolve(args.model_dir, args.dit_model, args.vae_model)
-        check_models(model_files.dit.path, model_files.vae.path, pull.advice(model_files))
-        pull.check_pinned(model_files)
+        # A job resumed: its record read first, and whether its first pass's would be trusted
+        # (_trusted), so that the shot detector's file is fetched and checked only when the
+        # detector runs: without --cuts, whose list replaces the detection, and in a first pass
+        # run (DESIGN.md, Weights: TransNetV2's weights with the shot detector). Nor for a job
+        # recorded with a cut list and asked without one, another job, refused below (_prior)
+        # before any first pass: its refusal neither fetches nor hashes a file it wouldn't run.
+        recorded: dict[str, Any] | None = None
+        trusted: FrameIndex | None = None
+        untrusted = ""
         if directory is not None and (directory / NAME).is_file():
             _lock(directory)
+            recorded = read(directory / NAME)
+            trusted, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
+        detects = args.cuts is None and trusted is None and _detecting(recorded)
+        # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
+        # into it when missing, in one fetch; checked by their headers, in a second, then
+        # seedvr2x's own by their pinned size and SHA-256 (16.5 GB to read for the DiT), which the
+        # manifest's record takes: before the resume's comparison and the first pass, which
+        # decodes the whole source (DESIGN.md, Weights). The header check comes first, as
+        # DESIGN.md has it (Weights, Recognised by content); its refusal of one of seedvr2x's own
+        # files, given in its own role, says how to fetch it again, as the pin's does
+        # (pull.advice). SIGTERM, which kills the process at once until the run installs its
+        # handlers (runtime/stop.py), unwinds a download as Ctrl-C does, so that the library
+        # removes its partial file, up to 16.5 GB that no later download takes up
+        # (runtime/pull.py, at its end).
+        with terminable():
+            model_files = pull.resolve(
+                args.model_dir, args.dit_model, args.vae_model, detector=detects
+            )
+        detector = model_files.detector
+        check_models(
+            *(model_files.dit.path, model_files.vae.path, pull.advice(model_files)),
+            None if detector is None else detector.path,
+        )
+        pull.check_pinned(model_files)
+        if recorded is not None:
+            assert directory is not None
             prior = _prior(
-                *(args, directory, cuts, declared, ffmpeg_version, conversions),
-                *(numz_padding, model_files),
+                *(args, directory, recorded, trusted, cuts, declared, ffmpeg_version),
+                *(conversions, numz_padding, model_files),
+            )
+            identity = prior.identity
+        else:
+            identity = _identity(
+                *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
             )
         if prior is not None and prior.known is not None:
             found = prior.known
         else:
+            if untrusted:
+                # Said once the job is known for the one recorded, never before a refusal.
+                logger.warning("%s; the first pass runs again, which makes it", untrusted)
             # The source's content hashed meanwhile, for the manifest.
-            found = first_pass(declared, hashed=directory is not None)
+            found = _first_pass(declared, directory is not None, model_files, identity.device)
         source = counted(declared, found)
         shots = shots_from_cuts(cuts, source.frames)
         check_seed(args.seed, shots)
@@ -435,12 +475,6 @@ def _run(args: argparse.Namespace) -> int:
             out_width,
             out_height,
         )
-        if prior is not None:
-            identity = prior.identity
-        else:
-            identity = _identity(
-                *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
-            )
         work = (
             _work(args.output) if directory is None and args.color_correction == "split" else None
         )
@@ -754,12 +788,29 @@ def _empty(directory: Path) -> bool:
 
 
 def _write_index(directory: Path, source: "Source") -> None:
-    """Write the source's frame index beside the manifest, whole (manifest.INDEX)."""
+    """Write the source's frame index beside the manifest, whole (manifest.INDEX), the shot
+    detector's probabilities with it when it ran."""
     from seedvr2x.runtime.manifest import INDEX
 
     if source.index is None:
         raise ValueError(f"{source.path}: no frame index to write")
     source.index.write(directory / INDEX)
+
+
+def _first_pass(
+    declared: "Declared", hashed: bool, model_files: "ModelFiles", device: "torch.device"
+) -> "FirstPass":
+    """The first pass over the source, its content hashed meanwhile when `hashed`
+    (source.first_pass); with the shot detector when its file was resolved (no --cuts):
+    TransNetV2 on the job's device, fed every frame the pass decodes, its memory given back
+    before the models load (DESIGN.md, Shot detection; Memory planner, Budget)."""
+    from seedvr2x.media.source import first_pass
+    from seedvr2x.runtime.detector import Detector
+
+    if model_files.detector is None:
+        return first_pass(declared, hashed=hashed)
+    with Detector(model_files.detector.path, device, hashes=model_files.hashes) as detector:
+        return first_pass(declared, hashed=hashed, detector=detector)
 
 
 def _settings(
@@ -774,6 +825,9 @@ def _settings(
         "code": code_sha256(),
         "dit_model": _model(model_files.dit, model_files),
         "vae_model": _model(model_files.vae, model_files),
+        # The shot detector's file, as the DiT's and the VAE's, when the job detects shots: a
+        # resume with another is another job.
+        **({"detector_model": _detector_model(model_files)} if args.cuts is None else {}),
         "resolution": args.resolution,
         "seed": args.seed,
         "color_correction": args.color_correction,
@@ -896,6 +950,8 @@ def _identity(
 def _prior(
     args: argparse.Namespace,
     directory: Path,
+    recorded: dict[str, Any],
+    trusted: "FrameIndex | None",
     cuts: list[int],
     declared: "Declared",
     ffmpeg_version: str,
@@ -903,19 +959,20 @@ def _prior(
     numz_padding: bool,
     model_files: "ModelFiles",
 ) -> _Prior:
-    """The job recorded in directory, checked against the one asked before its first pass: the
-    same settings, environment and source, the source being its content (resume.identity), or
-    refused (JobError), but for an environment change accepted (--accept-env-change). The
-    record of the first pass is trusted, and the pass isn't run again, unless ffmpeg or its
-    conversions changed: the same bytes, decoded by the same build, give the same frames, and
-    nothing else takes part in the pass (DESIGN.md, Pause and resume)."""
+    """The job recorded in directory, its manifest's content `recorded`, checked against the one
+    asked before its first pass: the same settings, environment and source, the source being its
+    content (resume.identity), or refused (JobError), but for an environment change accepted
+    (--accept-env-change). The record of the first pass is trusted, and the pass isn't run
+    again, with its index `trusted` (_trusted): unless ffmpeg or its conversions changed, the
+    same bytes, decoded by the same build, give the same frames, and nothing else takes part in
+    the pass's decode (DESIGN.md, Pause and resume); the shot detector's probabilities are the
+    record's then, never made again."""
     from seedvr2x.media.scan import Idet
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.manifest import NAME, read
+    from seedvr2x.runtime.manifest import NAME
 
     path = directory / NAME
-    recorded = read(path)
     identity = _identity(
         *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
     )
@@ -933,24 +990,67 @@ def _prior(
         logger.info(
             "%s: the input recorded at %s, moved: the same content", declared.path, entry["path"]
         )
-    before: dict[str, Any] = recorded["environment"]
-    if any(before.get(key) != identity.environment.get(key) for key in resume.FIRST_PASS):
+    if trusted is None:
         return _Prior(recorded, identity, changed, None)
-    index, why = _recorded_index(directory, entry)
-    if index is None:
-        # PROVISIONAL (DESIGN.md has the index trusted as the first pass's record is, and says
-        # nothing of one missing or damaged): derived data, as an input copy is, never trusted
-        # unchecked, nor a reason to refuse the job: the first pass runs again and makes it.
-        logger.warning("%s; the first pass runs again, which makes it", why)
-        return _Prior(recorded, identity, changed, None)
-    logger.info("%s: the same input and ffmpeg, the first pass as recorded", directory)
-    found = FirstPass(entry["frames"], entry["sha256"], index, Idet.from_record(entry.get("idet")))
+    logger.info(
+        "%s: the same input and ffmpeg, the first pass as recorded%s",
+        directory,
+        "" if trusted.probabilities is None else ", the shot detector's probabilities with it",
+    )
+    found = FirstPass(
+        entry["frames"], entry["sha256"], trusted, Idet.from_record(entry.get("idet"))
+    )
     return _Prior(recorded, identity, changed, found)
+
+
+def _detecting(recorded: dict[str, Any] | None) -> bool:
+    """Whether the job a manifest records detects its shots, its settings naming the shot
+    detector's file (_settings); true without a record, a new job detecting unless a cut list is
+    given."""
+    if recorded is None:
+        return True
+    settings: Any = recorded.get("settings")
+    return isinstance(settings, dict) and "detector_model" in settings
+
+
+def _trusted(
+    directory: Path,
+    recorded: dict[str, Any],
+    ffmpeg_version: str,
+    conversions: str,
+) -> "tuple[FrameIndex | None, str]":
+    """The frame index of the first pass the manifest `recorded` in directory records, when a
+    resume may trust that record (DESIGN.md, Pause and resume): made by the same ffmpeg and
+    conversions (manifest.FIRST_PASS), and there as recorded (_recorded_index); else None, the
+    first pass then run again, and why, when the index is the reason, for the run to say if the
+    pass runs. Read before the model files are, so that a resume trusting it neither fetches nor
+    reads the shot detector's file, which it doesn't run, its probabilities there (cli._run);
+    whether the job is the one recorded is _prior's to say. Nothing here imports torch, which the
+    model files' check comes before (DESIGN.md, Weights, Recognised by content): runtime/resume.py
+    does, and isn't read."""
+    from seedvr2x.runtime.manifest import FIRST_PASS
+
+    environment: Any = recorded.get("environment")
+    entry: Any = recorded.get("input")
+    if not isinstance(environment, dict) or not isinstance(entry, dict):
+        return None, ""  # not this code's record: _prior refuses the job
+    # The environment's fields the first pass depends on, as runtime/environment.py records them.
+    current = {"ffmpeg": ffmpeg_version, "conversions": conversions}
+    before = cast(dict[str, Any], environment)
+    if any(before.get(key) != current[key] for key in FIRST_PASS):
+        return None, ""
+    # PROVISIONAL (DESIGN.md has the index trusted as the first pass's record is, and says nothing
+    # of one missing or damaged): derived data, as an input copy is, never trusted unchecked, nor
+    # a reason to refuse the job: the first pass runs again and makes it.
+    return _recorded_index(directory, cast(dict[str, Any], entry))
 
 
 def _recorded_index(directory: Path, entry: dict[str, Any]) -> "tuple[FrameIndex | None, str]":
     """The frame index the input's record names, read from directory and checked against the
-    record (manifest.INDEX): its size, SHA-256 and frames; or None, and why it isn't trusted."""
+    record (manifest.INDEX): its size, SHA-256 and frames; or None, and why it isn't trusted. Its
+    shot detector's probabilities come with it when it has them: a record this code wrote has
+    them exactly when its job detects its shots, which its settings say (_detecting), a job
+    detecting or cut by a list being another job (_prior)."""
     import hashlib
 
     from seedvr2x.media.index import FrameIndex
@@ -1060,11 +1160,12 @@ def _index_made_again(record: "Manifest", prior: _Prior) -> None:
     from dataclasses import replace
 
     from seedvr2x.runtime import resume
+    from seedvr2x.runtime.manifest import FIRST_PASS
 
     directory = record.path.parent
     source = record.source
     before: dict[str, Any] = prior.recorded["environment"]
-    if any(before.get(key) != record.environment.get(key) for key in resume.FIRST_PASS):
+    if any(before.get(key) != record.environment.get(key) for key in FIRST_PASS):
         record.before_write = lambda: _write_index(directory, source)
         return
     _write_index(directory, source)
@@ -1099,6 +1200,21 @@ def _model(file: "ModelFile", model_files: "ModelFiles") -> dict[str, object]:
     read, once a run: a file seedvr2x pins was hashed by its check already (pull.Hashes)."""
     digest = model_files.hashes.sha256(file.path)
     return {"name": file.name, "size": file.path.stat().st_size, "sha256": digest}
+
+
+def _detector_model(model_files: "ModelFiles") -> dict[str, object]:
+    """The shot detector as the manifest records it (_model): its file, when the run resolved it;
+    else, on a resume whose first pass's record is trusted (_trusted), which runs no detector and
+    so neither fetches nor reads its file, the file by its pin: the only one seedvr2x runs in that
+    role (pull.check_pinned refuses any other), so the one any run of this code recorded.
+    PROVISIONAL (implementation, 2026-10-09; DESIGN.md records the models by hash): settings'
+    detector_model, by the pin on such a resume."""
+    from seedvr2x.runtime import pull
+
+    if model_files.detector is not None:
+        return _model(model_files.detector, model_files)
+    pin = pull.PINNED[pull.DETECTOR]
+    return {"name": pull.DETECTOR, "size": pin.size, "sha256": pin.sha256}
 
 
 def _positive(text: str) -> int:

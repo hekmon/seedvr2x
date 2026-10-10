@@ -25,7 +25,7 @@ from fractions import Fraction
 from itertools import accumulate, pairwise
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import numpy.typing as npt
@@ -37,8 +37,10 @@ from test_rate import mechanism7, retagged, strayed
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.runtime import weights
+from seedvr2x.runtime import pull, weights
+from seedvr2x.runtime.detector import BATCH, Detector
 from seedvr2x.runtime.job import output_size, padded_size
+from seedvr2x.runtime.pull import Pin
 from seedvr2x.runtime.shot import decode_shot, padded_length
 
 
@@ -121,13 +123,68 @@ STAND_IN_MODELS = SimpleNamespace(
 )
 
 
+def stand_in_probabilities(frames: npt.NDArray[np.uint8]) -> npt.NDArray[np.float32]:
+    """The stand-in detector's probability of each frame, (n, 27, 48, 3) uint8: its mean component
+    value over 255, float32, so that a record's probabilities say which frames reached it."""
+    return (frames.mean(axis=(1, 2, 3), dtype=np.float64) / 255).astype(np.float32)
+
+
+class StandInDetector:
+    """The shot detector's stand-in, runtime/detector.py's Detector to the first pass: each
+    frame's probability as soon as it is pushed (stand_in_probabilities), none at finish; its file,
+    an empty transnetv2.safetensors pinned as such (stand_in_model). `built` lists each one made,
+    with the path and device it was given."""
+
+    built: ClassVar[list["StandInDetector"]] = []
+
+    def __init__(
+        self, path: Path, device: torch.device, *, batch: int = 4, hashes: object = None
+    ) -> None:
+        self.path, self.device, self.pushed, self.closed = path, device, 0, False
+        StandInDetector.built.append(self)
+
+    @property
+    def scored(self) -> int:
+        return self.pushed
+
+    def push(self, frames: npt.NDArray[np.uint8]) -> npt.NDArray[np.float32]:
+        assert frames.dtype == np.uint8 and frames.shape[1:] == (27, 48, 3)
+        self.pushed += len(frames)
+        return stand_in_probabilities(frames)
+
+    def finish(self) -> npt.NDArray[np.float32]:
+        return np.empty(0, np.float32)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> "StandInDetector":
+        return self
+
+    def __exit__(self, *raised: object) -> None:
+        self.close()
+
+
+# The stand-in detector's file: empty, under the shot detector's name, beside the stand-in's
+# model files (upscale), pinned as such in place of TransNetV2's weights (stand_in_model).
+STAND_IN_DETECTOR = Pin(0, hashlib.sha256(b"").hexdigest(), "detector")
+# The shot detector and its pin as seedvr2x has them, which the stand-in replaces.
+DETECTOR_PIN = pull.PINNED[pull.DETECTOR]
+REAL_DETECTOR = Detector
+
+
 def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     """Replace the model by the stand-in, through patch: monkeypatch.setattr, or setattr in a
     process of its own (test_stop.py). The decode around the VAE's is seedvr2x's own. Its files,
-    one empty w.safetensors as both, pass for models: the check is test_weights.py's."""
-    from seedvr2x.runtime import model, run, weights
+    one empty w.safetensors as both, pass for models: the check is test_weights.py's. The shot
+    detector is StandInDetector, its file an empty transnetv2.safetensors, pinned so in place of
+    TransNetV2's weights, which its pin then checks."""
+    from seedvr2x.runtime import detector, model, pull, run, weights
 
     patch(weights, "check_models", lambda *a: None)
+    patch(detector, "Detector", StandInDetector)
+    patch(pull, "PINNED", {**pull.PINNED, pull.DETECTOR: STAND_IN_DETECTOR})
+    StandInDetector.built.clear()
     patch(torch.cuda, "is_available", lambda: True)
     patch(torch.cuda, "is_bf16_supported", lambda: True)
     patch(torch.cuda, "get_device_name", lambda device: "a stand-in")
@@ -157,14 +214,20 @@ def source(path: Path, frames: int = FRAMES, pattern: str = "testsrc2") -> Path:
     return path
 
 
-def upscale(tmp_path: Path, input_path: Path, output: str, *options: str) -> int:
+def upscale(
+    tmp_path: Path, input_path: Path, output: str, *options: str, detector: bool = True
+) -> int:
     """seedvr2x run in this process, without colour correction unless options ask for one: the
     stand-in's frames then say which they are (stand_in_decode_stream). In gbrp16le unless options
     name a format, not the default yuv420p10le: the tests read the masters' frames as the RGB
-    planes written (indexes, stored)."""
+    planes written (indexes, stored). The stand-in detector's file beside the models' unless
+    `detector` is False."""
     weights = tmp_path / "w.safetensors"
     if not weights.exists():
         weights.write_bytes(b"")
+    detector_file = tmp_path / pull.DETECTOR  # the stand-in detector's (stand_in_model)
+    if detector and not detector_file.exists():
+        detector_file.write_bytes(b"")
     correction = [] if "--color-correction" in options else ["--color-correction", "none"]
     output_format = [] if "--format" in options else ["--format", "gbrp16le"]
     return cli.main(
@@ -383,6 +446,7 @@ def test_yuv_by_default(tmp_path: Path) -> None:
 
     source_path = source(tmp_path / "in.mkv")
     (tmp_path / "w.safetensors").write_bytes(b"")
+    (tmp_path / pull.DETECTOR).write_bytes(b"")  # the stand-in detector's (stand_in_model)
     common = ["--model-dir", str(tmp_path), "--dit-model", "w.safetensors"]
     common += ["--vae-model", "w.safetensors", "--resolution", "720", "--color-correction", "none"]
     for output in ("one.mkv", "out"):
@@ -1781,9 +1845,9 @@ def test_first_pass_not_run_again(
     scans: list[Path] = []
     scan = examined.scan
 
-    def counted(path: Path) -> object:
+    def counted(path: Path, *detector: Any) -> object:
         scans.append(path)
-        return scan(path)
+        return scan(path, *detector)
 
     monkeypatch.setattr(examined, "scan", counted)
     source_path = job(tmp_path, monkeypatch)
@@ -1890,7 +1954,9 @@ def test_first_pass_compared_after_a_change(
     manifest = tmp_path / "out" / "manifest.json"
     recorded = manifest.read_bytes()
     scan = examined.scan
-    monkeypatch.setattr(examined, "scan", lambda path: replace(scan(path), frames=29))
+    monkeypatch.setattr(
+        examined, "scan", lambda path, *detector: replace(scan(path, *detector), frames=29)
+    )
     monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
     text = refused(tmp_path, source_path, caplog, *JOB, "--accept-env-change")
     assert "input.frames: 25 -> 29" in text
@@ -1907,8 +1973,8 @@ def test_frames_left_after_the_last(
 
     scan = examined.scan
 
-    def missed(path: Path) -> object:
-        found = scan(path)
+    def missed(path: Path, *detector: Any) -> object:
+        found = scan(path, *detector)
         return replace(found, frames=found.frames - 1)
 
     monkeypatch.setattr(examined, "scan", missed)
@@ -2161,9 +2227,9 @@ def test_index_derived_data(
     scans: list[Path] = []
     scan = examined.scan
 
-    def counted(path: Path) -> object:
+    def counted(path: Path, *detector: Any) -> object:
         scans.append(path)
-        return scan(path)
+        return scan(path, *detector)
 
     monkeypatch.setattr(examined, "scan", counted)
     source_path = job(tmp_path, monkeypatch)
@@ -2202,9 +2268,9 @@ def another_index(monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], list[boo
     scan = examined.scan
     otherwise = [False]
 
-    def counted(path: Path) -> object:
+    def counted(path: Path, *detector: Any) -> object:
         scans.append(path)
-        found = scan(path)
+        found = scan(path, *detector)
         if not otherwise[0]:
             return found
         assert found.index is not None
@@ -2375,8 +2441,8 @@ def test_a_frame_decoded_otherwise_taken_and_summed_up(
 
     scan = examined.scan
 
-    def concealed(path: Path) -> object:
-        found = scan(path)
+    def concealed(path: Path, *detector: Any) -> object:
+        found = scan(path, *detector)
         assert found.index is not None
         crc32 = found.index.crc32.copy()
         crc32[10] ^= 1
@@ -2409,9 +2475,9 @@ def test_a_drift_off_the_declared_rate_warned_of_again_on_a_resume(
     scans: list[Path] = []
     scan = examined.scan
 
-    def counted(path: Path) -> object:
+    def counted(path: Path, *detector: Any) -> object:
         scans.append(path)
-        return scan(path)
+        return scan(path, *detector)
 
     monkeypatch.setattr(examined, "scan", counted)
     monkeypatch.chdir(tmp_path)
@@ -2478,9 +2544,9 @@ def test_frame_rate_override(
     scans: list[Path] = []
     scan = examined.scan
 
-    def counted(path: Path) -> object:
+    def counted(path: Path, *detector: Any) -> object:
         scans.append(path)
-        return scan(path)
+        return scan(path, *detector)
 
     monkeypatch.setattr(examined, "scan", counted)
     monkeypatch.chdir(tmp_path)
@@ -2533,9 +2599,9 @@ def test_idet_recorded_not_compared(
     scans: list[Path] = []
     scan = examined.scan
 
-    def counted(path: Path) -> object:
+    def counted(path: Path, *detector: Any) -> object:
         scans.append(path)
-        return scan(path)
+        return scan(path, *detector)
 
     monkeypatch.setattr(examined, "scan", counted)
     source_path = job(tmp_path, monkeypatch)
@@ -2565,3 +2631,232 @@ def test_idet_recorded_not_compared(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert len(scans) == 1 and "another job" not in caplog.text
     assert json.loads(manifest.read_text())["input"]["idet"] == found
+
+
+def extracted(path: Path) -> npt.NDArray[np.uint8]:
+    """The frames of path as TransNetV2's official extraction gives them (tests/test_detection.py):
+    (n, 27, 48, 3) uint8."""
+    data = subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-i", str(path)),
+            *("-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "48x27", "pipe:"),
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    return np.frombuffer(data, np.uint8).reshape(-1, 27, 48, 3)
+
+
+def asked_of_the_pull(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Whether each run asked pull.resolve for the shot detector's file, in order."""
+    asked: list[bool] = []
+    resolve = pull.resolve
+
+    def resolving(*arguments: Any, detector: bool = False) -> Any:
+        asked.append(detector)
+        return resolve(*arguments, detector=detector)
+
+    monkeypatch.setattr(pull, "resolve", resolving)
+    return asked
+
+
+def given_to_the_run(monkeypatch: pytest.MonkeyPatch) -> list[npt.NDArray[np.float32] | None]:
+    """The shot probabilities of the source each run's job was given (run.run_job), in order."""
+    from seedvr2x.runtime import run
+
+    given: list[npt.NDArray[np.float32] | None] = []
+    run_job = run.run_job
+
+    def running(models: Any, source: Any, *arguments: Any, **options: Any) -> Any:
+        given.append(None if source.index is None else source.index.probabilities)
+        return run_job(models, source, *arguments, **options)
+
+    monkeypatch.setattr(run, "run_job", running)
+    return given
+
+
+def test_shot_probabilities_recorded_then_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Without --cuts, the shot detector runs in the first pass: its file asked of the pull and
+    # checked with the models'; built once, on the job's device, given every frame in order and
+    # closed before the models load; each frame's probability in the frame index's file, the
+    # manifest's settings naming its file as they name the DiT's. The job one shot, as before the
+    # cuts' step. A resume trusting the first pass's record reads them back, never asks for the
+    # file nor runs the detector again: the job's source holds the recorded probabilities.
+    from seedvr2x.media.index import FrameIndex
+    from seedvr2x.runtime import model
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    asked, given = asked_of_the_pull(monkeypatch), given_to_the_run(monkeypatch)
+    closed_first: list[bool] = []
+
+    def loading(*arguments: Any) -> Any:
+        closed_first.append(all(built.closed for built in StandInDetector.built))
+        return STAND_IN_MODELS
+
+    monkeypatch.setattr(model, "load_models", loading)
+    options = ("--window", "5")
+    steps.stop = "window 0:1"
+    stopped(tmp_path, source_path, "out", *options)
+    [built] = StandInDetector.built
+    assert (built.path, built.device, built.pushed) == (
+        tmp_path / pull.DETECTOR,
+        torch.device("cuda", 0),
+        25,
+    )
+    assert built.closed and closed_first == [True] and asked == [True]
+    expected = stand_in_probabilities(extracted(source_path))
+    out = tmp_path / "out"
+    index = out / "frame_index.bin"
+    recorded = FrameIndex.read(index).probabilities
+    assert recorded is not None and recorded.tobytes() == expected.tobytes()
+    assert [found.tobytes() for found in given if found is not None] == [expected.tobytes()]
+    content = json.loads((out / "manifest.json").read_text())
+    assert content["settings"]["detector_model"] == {
+        "name": pull.DETECTOR,
+        "size": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    }
+    assert [(shot["start"], shot["end"]) for shot in content["shots"]] == [(0, 25)]
+    kept = index.read_bytes()
+    StandInDetector.built.clear()
+    given.clear()
+    caplog.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert StandInDetector.built == [] and asked == [True, False]
+    assert [found.tobytes() for found in given if found is not None] == [expected.tobytes()]
+    said = "the first pass as recorded, the shot detector's probabilities with it"
+    assert f"{out}: the same input and ffmpeg, {said}" in caplog.text
+    assert index.read_bytes() == kept
+
+
+def test_cuts_replace_the_detector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # With --cuts, the list replaces the detection: the shot detector's file neither asked of the
+    # pull nor there, the detector never built, the first pass without its output; no
+    # probabilities in the index, no detector in the settings.
+    from seedvr2x.media import scan
+    from seedvr2x.media.index import FrameIndex
+
+    source_path = job(tmp_path, monkeypatch)
+    asked = asked_of_the_pull(monkeypatch)
+    outputs: list[int | None] = []
+    command = scan.command
+
+    def commanded(path: Path, frames: int | None = None) -> list[str]:
+        outputs.append(frames)
+        return command(path, frames)
+
+    monkeypatch.setattr(scan, "command", commanded)
+    assert upscale(tmp_path, source_path, "out", *JOB, detector=False) == 0
+    assert not (tmp_path / pull.DETECTOR).exists()
+    assert asked == [False] and outputs == [None] and StandInDetector.built == []
+    out = tmp_path / "out"
+    assert FrameIndex.read(out / "frame_index.bin").probabilities is None
+    assert "detector_model" not in json.loads((out / "manifest.json").read_text())["settings"]
+
+
+@pytest.mark.parametrize("first", ["detected", "cut list"])
+def test_detection_or_cut_list_another_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    first: str,
+) -> None:
+    # A job detecting its shots resumed with a cut list, or the other way round, even one
+    # cutting nowhere: another job, refused before its first pass, the detector's file in the
+    # settings' differences, by its pin: the refusal neither asks the pull for the file of a
+    # detector it wouldn't run, nor warns of the record's index, with or without probabilities,
+    # as a first pass to run again.
+    source_path = job(tmp_path, monkeypatch)
+    asked = asked_of_the_pull(monkeypatch)
+    (tmp_path / "none.txt").write_text("")
+    cut_list = ("--cuts", "none.txt")
+    steps.stop = "encode 0"
+    stopped(tmp_path, source_path, "out", *(cut_list if first == "cut list" else ()))
+    built = len(StandInDetector.built)
+    caplog.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *(cut_list if first == "detected" else ())) == 1
+    assert "another job than the one asked" in caplog.text
+    recorded, now = ("{", "null") if first == "detected" else ("null", "{")
+    assert f"settings.detector_model: {recorded}" in caplog.text
+    assert f"-> {now}" in caplog.text
+    assert len(StandInDetector.built) == built  # refused before any first pass
+    assert asked == [first == "detected", False]
+    assert "the first pass runs again" not in caplog.text
+    assert "probabilities" not in caplog.text
+    # Its index cut short, its first pass's record no longer trusted: no warning of a first pass
+    # to run again either, before the refusal of a job that runs none, nor the detector's file
+    # asked for the job recorded with a cut list.
+    index = tmp_path / "out" / "frame_index.bin"
+    index.write_bytes(index.read_bytes()[:-1])
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *(cut_list if first == "detected" else ())) == 1
+    assert "another job than the one asked" in caplog.text
+    assert "the first pass runs again" not in caplog.text and "frame_index.bin" not in caplog.text
+    assert asked == [first == "detected", False, False]
+
+
+def test_first_pass_run_again_detects_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The frame index a resume finds damaged: the first pass runs again, the detector with it, its
+    # file asked of the pull again, the same probabilities recorded again.
+    from seedvr2x.media.index import FrameIndex
+
+    source_path = job(tmp_path, monkeypatch)
+    asked = asked_of_the_pull(monkeypatch)
+    steps.stop = "encode 0"
+    stopped(tmp_path, source_path, "out")
+    index = tmp_path / "out" / "frame_index.bin"
+    kept = index.read_bytes()
+    index.write_bytes(kept[:-1])
+    StandInDetector.built.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out") == 0
+    assert asked == [True, True] and len(StandInDetector.built) == 1
+    assert "the first pass runs again" in caplog.text
+    assert index.read_bytes() == kept
+    found = FrameIndex.read(index).probabilities
+    assert found is not None
+    assert found.tobytes() == stand_in_probabilities(extracted(source_path)).tobytes()
+
+
+def test_real_detector_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # TransNetV2 itself in the CLI's first pass, its weights from SEEDVR2X_MODEL_DIR (skipped
+    # without) checked by their pin, run on the CPU in place of the job's GPU: the index file holds
+    # runtime/detector.py's probabilities of the official extraction's frames, bit for bit at its
+    # batch, the stand-in model doing the rest.
+    from seedvr2x.media.index import FrameIndex
+    from seedvr2x.runtime import detector
+
+    models = os.environ.get("SEEDVR2X_MODEL_DIR")
+    if not models or not (Path(models) / pull.DETECTOR).is_file():
+        pytest.skip(f"needs SEEDVR2X_MODEL_DIR holding {pull.DETECTOR}")
+    weights_file = Path(models) / pull.DETECTOR
+    (tmp_path / pull.DETECTOR).symlink_to(weights_file)
+    monkeypatch.setattr(pull, "PINNED", {**pull.PINNED, pull.DETECTOR: DETECTOR_PIN})
+    devices: list[torch.device] = []
+
+    def on_the_cpu(path: Path, device: torch.device, **options: Any) -> Detector:
+        devices.append(device)
+        return REAL_DETECTOR(path, torch.device("cpu"), **options)
+
+    monkeypatch.setattr(detector, "Detector", on_the_cpu)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out") == 0
+    assert devices == [torch.device("cuda", 0)]
+    found = FrameIndex.read(tmp_path / "out" / "frame_index.bin").probabilities
+    assert found is not None
+    with REAL_DETECTOR(weights_file, torch.device("cpu"), batch=BATCH) as reference:
+        frames = extracted(source_path)
+        expected = np.concatenate((reference.push(frames), reference.finish()))
+    assert len(expected) == 25 and found.tobytes() == expected.tobytes()

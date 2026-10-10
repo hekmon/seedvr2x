@@ -2,15 +2,17 @@
 that any frame is read again exactly, through a seek (media/reader.py). For each frame, in the
 order the decoder gives them, counted as they come: its timestamp, a CRC-32 of its decoded picture
 in the decoder's own pixel format, and whether the decoder reported an error on it; and the
-keyframes' timestamps, from a packet scan (media/scan.py).
+keyframes' timestamps, from a packet scan (media/scan.py). When the shot detector ran in the first
+pass, each frame's probability too (DESIGN.md, Shot detection: the first pass's record keeps
+TransNetV2's per-frame probabilities).
 
 One file (-o x.mkv) keeps it in memory. An output directory holds it beside the manifest, written
 once with the first pass's record, which names it by its size and SHA-256 (runtime/manifest.py);
 a resume reads it back as it trusts that record. Its format is exact and versioned: a magic line, a
 JSON line saying the version, the time base, the file's start time and each table's columns, then
-the columns' values, little-endian, column after column. A later step adds a per-frame column (the
-shot detector's probabilities, float32) by naming it in the header: a reader takes the columns it
-knows by name and skips the others by their size."""
+the columns' values, little-endian, column after column. The probabilities are a column of the
+frames' table, PROBABILITIES, named in the header when the detector ran: a reader takes the columns
+it knows by name and skips the others by their size, so the version stays."""
 
 import json
 from dataclasses import dataclass
@@ -38,6 +40,12 @@ VERSION = 1
 # Each table's columns, (name, numpy's dtype), the order they are written in.
 FRAME_COLUMNS = (("pts", "<i8"), ("crc32", "<u4"), ("error", "|u1"))
 KEYFRAME_COLUMNS = (("pts", "<i8"),)
+# The shot detector's probability of each frame, the sigmoid of TransNetV2's single-frame head
+# (runtime/detector.py), float32 as it computes them: a column of the frames' table, after the
+# others, only when the detector ran (absent with --cuts, whose list replaces the detection).
+# PROVISIONAL, as the format is: its name and place (DESIGN.md: "the first pass's record keeps"
+# them).
+PROBABILITIES = ("transnetv2", "<f4")
 
 
 @dataclass(frozen=True, eq=False)
@@ -53,6 +61,9 @@ class FrameIndex:
     crc32: npt.NDArray[np.uint32]  # each frame's decoded picture, as stored in its pixel format
     error: npt.NDArray[np.bool_]  # whether the decoder reported an error on the frame
     keyframes: npt.NDArray[np.int64]  # the keyframe packets' pts, sorted, each once
+    # Each frame's shot probability, float32 in [0, 1] (PROBABILITIES); None when the shot
+    # detector didn't run.
+    probabilities: npt.NDArray[np.float32] | None = None
 
     @property
     def frames(self) -> int:
@@ -122,30 +133,36 @@ class FrameIndex:
     def to_bytes(self) -> bytes:
         """The index as its file holds it (the module's docstring): the same bytes for the same
         index, so that one made again from the same decode has the SHA-256 recorded (a damaged
-        source's need not, its decode not the same each time: media/reader.py)."""
+        source's need not, its decode not the same each time: media/reader.py). ValueError when
+        the probabilities aren't one per frame."""
+        frame_columns = FRAME_COLUMNS
+        columns = [self.pts.astype("<i8"), self.crc32.astype("<u4"), self.error.astype("|u1")]
+        if self.probabilities is not None:
+            if len(self.probabilities) != self.frames:
+                raise ValueError(
+                    f"{len(self.probabilities)} shot probabilities for {self.frames} frames"
+                )
+            frame_columns = (*FRAME_COLUMNS, PROBABILITIES)
+            columns.append(self.probabilities.astype(PROBABILITIES[1]))
         header = {
             "version": VERSION,
             "time_base": f"{self.time_base.numerator}/{self.time_base.denominator}",
             "start_time": self.start_time,
-            "frames": {"rows": self.frames, "columns": [list(c) for c in FRAME_COLUMNS]},
+            "frames": {"rows": self.frames, "columns": [list(c) for c in frame_columns]},
             "keyframes": {
                 "rows": len(self.keyframes),
                 "columns": [list(c) for c in KEYFRAME_COLUMNS],
             },
         }
         line = json.dumps(header, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-        columns = (
-            self.pts.astype("<i8"),
-            self.crc32.astype("<u4"),
-            self.error.astype("|u1"),
-            self.keyframes.astype("<i8"),
-        )
+        columns.append(self.keyframes.astype("<i8"))
         return MAGIC + line + b"".join(column.tobytes() for column in columns)
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "FrameIndex":
-        """The index a file holds (to_bytes). Raises ValueError, saying why, for anything else:
-        another format or version, a column missing or of another type, the values cut short or
+        """The index a file holds (to_bytes), its probabilities with it when it has them.
+        Raises ValueError, saying why, for anything else: another format or version, a column
+        missing or of another type, a probability outside [0, 1], the values cut short or
         followed by more."""
         if not data.startswith(MAGIC):
             raise ValueError("not a frame index of seedvr2x")
@@ -168,8 +185,13 @@ class FrameIndex:
             raise ValueError(f"start time {json.dumps(start_time)}, not microseconds")
         offset = end + 1
         tables: dict[str, dict[str, npt.NDArray[Any]]] = {}
-        for name, known in (("frames", FRAME_COLUMNS), ("keyframes", KEYFRAME_COLUMNS)):
-            tables[name], offset = _table(data, offset, name, fields.get(name), dict(known))
+        for name, known, optional in (
+            ("frames", FRAME_COLUMNS, (PROBABILITIES,)),
+            ("keyframes", KEYFRAME_COLUMNS, ()),
+        ):
+            tables[name], offset = _table(
+                data, offset, name, fields.get(name), dict(known), dict(optional)
+            )
         if offset != len(data):
             raise ValueError(f"{len(data) - offset} bytes after its last column")
         frames, keyframes = tables["frames"], tables["keyframes"]
@@ -177,6 +199,13 @@ class FrameIndex:
             raise ValueError("an error flag neither 0 nor 1")
         if np.any(np.diff(keyframes["pts"]) <= 0):
             raise ValueError("its keyframes not in order, each once")
+        found = frames.get(PROBABILITIES[0])
+        probabilities = None
+        if found is not None:
+            # A NaN fails both bounds: the detector gives a sigmoid's values.
+            if not bool(np.all((found >= 0) & (found <= 1))):
+                raise ValueError("a shot probability outside [0, 1]")
+            probabilities = found.astype(np.float32)
         return cls(
             time_base,
             start_time,
@@ -184,6 +213,7 @@ class FrameIndex:
             frames["crc32"].astype(np.uint32),
             frames["error"].astype(np.bool_),
             keyframes["pts"].astype(np.int64),
+            probabilities,
         )
 
     def write(self, path: Path) -> None:
@@ -217,10 +247,17 @@ def _fraction(value: object) -> Fraction:
 
 
 def _table(
-    data: bytes, offset: int, name: str, declared: object, known: dict[str, str]
+    data: bytes,
+    offset: int,
+    name: str,
+    declared: object,
+    known: dict[str, str],
+    optional: dict[str, str] | None = None,
 ) -> tuple[dict[str, npt.NDArray[Any]], int]:
-    """The columns of table `name` its header declares, those of `known` with their dtypes, from
-    data at offset; and the offset after them, every column declared skipped by its size."""
+    """The columns of table `name` its header declares, those of `known` with their dtypes, and
+    those of `optional` it declares, from data at offset; and the offset after them, every column
+    declared skipped by its size."""
+    read = {**known, **(optional or {})}
     if not isinstance(declared, dict):
         raise ValueError(f"no {name} table")
     table = cast(dict[str, Any], declared)
@@ -240,9 +277,9 @@ def _table(
         size = rows * kind.itemsize
         if offset + size > len(data):
             raise ValueError(f"cut short in its {name} column {label}")
-        if label in known:
-            if dtype != known[label]:
-                raise ValueError(f"{name} column {label} of type {dtype}, not {known[label]}")
+        if label in read:
+            if dtype != read[label]:
+                raise ValueError(f"{name} column {label} of type {dtype}, not {read[label]}")
             found[label] = np.frombuffer(data, kind, rows, offset)
         offset += size
     missing = sorted(set(known) - set(found))

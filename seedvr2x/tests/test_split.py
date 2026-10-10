@@ -60,10 +60,13 @@ pytestmark = [
     ),
 ]
 
-# The models the other GPU tests run, those of milestone 1's references.
+# The models the other GPU tests run, those of milestone 1's references; an empty cut list, the
+# one shot it gives the input as no detection would yet, the shot detector, the regression's
+# (tests/test_regression.py), neither run nor its file needed.
 MODEL_OPTIONS = (
     *("--dit-model", "seedvr2_ema_7b_fp16.safetensors"),
     *("--vae-model", "ema_vae_fp16.safetensors"),
+    *("--cuts", os.devnull),
 )
 # 33 frames, 9 latents: one window, or three (--window 5: latents 0 to 4, 3 to 6 and 5 to 8, so
 # 5, 4 and 4), two shared between each; the run's log names each window it ran (WINDOW_LOGGED).

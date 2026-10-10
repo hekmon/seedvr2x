@@ -56,7 +56,7 @@ from huggingface_hub.errors import (
     RevisionNotFoundError,
 )
 from test_cli_run import STAND_IN_MODELS, source, stand_in_model
-from test_weights import SHOTS, V1, as_dtype, write
+from test_weights import SHOTS, V1, as_dtype, transnetv2, write
 
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg, files
@@ -191,16 +191,22 @@ def stand_in(monkeypatch: pytest.MonkeyPatch) -> None:
     stand_in_model(monkeypatch.setattr)
 
 
-def upscale(tmp_path: Path, output: str, *options: str) -> int:
+def upscale(tmp_path: Path, output: str, *options: str, detect: bool = False) -> int:
     """seedvr2x run in this process on test_cli_run.py's source, the model's stand-in's frames
-    written as stored."""
+    written as stored; with an empty cut list, unless `detect`, so that the shot detector, which it
+    replaces, neither fetches nor checks its file: these tests hold the DiT's and the VAE's pull,
+    and test_detector_pulled_with_the_others the detector's."""
     input_path = tmp_path / "in.mkv"
     if not input_path.exists():
         source(input_path)
+    one_shot = tmp_path / "one_shot.txt"
+    one_shot.write_text("")
     return cli.main(
         [
             *(str(input_path), "-o", str(tmp_path / output), "--resolution", "96"),
-            *("--seed", "42", "--color-correction", "none", "--format", "gbrp16le", *options),
+            *("--seed", "42", "--color-correction", "none", "--format", "gbrp16le"),
+            *(() if detect else ("--cuts", str(one_shot))),
+            *options,
         ]
     )
 
@@ -260,14 +266,14 @@ def test_help(capsys: pytest.CaptureFixture[str]) -> None:
     text = " ".join(capsys.readouterr().out.split())
     assert "[--model-dir MODEL_DIR]" in text
     assert (
-        "a directory holding the model files, each read there by its name; nothing is downloaded."
-        in text
+        "a directory holding the model files, each read there by its name, the shot detector's"
+        " transnetv2.safetensors among them unless --cuts is given; nothing is downloaded." in text
     )
     assert (
-        "taken from Hugging Face's cache (HF_HOME moves it), downloaded into it from"
-        " hekmon/seedvr2x at a pinned revision when missing (HF_HUB_OFFLINE keeps the network"
-        " out). Either way, seedvr2x's own files are checked by their pinned size and SHA-256"
-        in text
+        "taken from Hugging Face's cache (HF_HOME moves it) with the shot detector's, downloaded"
+        " into it from hekmon/seedvr2x at a pinned revision when missing (HF_HUB_OFFLINE keeps"
+        " the network out). Either way, seedvr2x's own files are checked by their pinned size and"
+        " SHA-256" in text
     )
     assert "without --model-dir, seedvr2x_ema_7b_fp16.safetensors or the default" in text
 
@@ -1813,44 +1819,61 @@ sys.exit(5 if mode == "model-dir" and "huggingface_hub" in sys.modules else stat
 
 
 @needs_ffmpeg
-@pytest.mark.parametrize("mode", ["cached", "downloaded", "model-dir"])
+@pytest.mark.parametrize("mode", ["cached", "downloaded", "model-dir", "resumed"])
 def test_pulled_before_torch(tmp_path: Path, mode: str) -> None:
-    # The default files, from the cache, downloaded into it, or in --model-dir: their headers
-    # accepted, their sizes not the pinned ones (synthetic files, their data's holes), refused
-    # before the first pass, unhashed, without torch; with --model-dir, without huggingface_hub.
+    # The default files, the shot detector's with them, from the cache, downloaded into it, or in
+    # --model-dir: their headers accepted, their sizes not the pinned ones (synthetic files, their
+    # data's holes), refused before the first pass, unhashed, without torch; with --model-dir,
+    # without huggingface_hub. A job resumed likewise (in --model-dir): its record is read before
+    # the model files, to know whether its first pass runs again, the shot detector with it, and
+    # nothing read for it imports torch (runtime/resume.py does, through runtime/units.py: read
+    # there, torch came before the files' check).
     made = tmp_path / "made"
     made.mkdir()
     dit, vae = "seedvr2x_ema_7b_sharp_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors"
     sizes = {
         dit: write(made / dit, as_dtype("7b", "F16")).stat().st_size,
         vae: write(made / vae, as_dtype("vae", "F16")).stat().st_size,
+        pull.DETECTOR: write(made / pull.DETECTOR, transnetv2()).stat().st_size,
     }
-    assert sizes[dit] != pull.PINNED[dit].size and sizes[vae] != pull.PINNED[vae].size
+    assert all(size != pull.PINNED[name].size for name, size in sizes.items())
     cache = tmp_path / "hf" / "hub"
     where = cache / "models--hekmon--seedvr2x" / "snapshots" / REVISION
     if mode == "cached":
         where.mkdir(parents=True)
-        for name in (dit, vae):
+        for name in sizes:
             os.link(made / name, where / name)
     source(tmp_path / "in.mkv")
     args = [str(tmp_path / "in.mkv"), "-o", str(tmp_path / "out")]
-    if mode == "model-dir":
+    if mode in ("model-dir", "resumed"):
         args += ["--model-dir", str(made)]
         where = made
+    record = {
+        "seedvr2x_manifest": 3,
+        "settings": {"detector_model": {}},
+        "environment": {"ffmpeg": "another"},
+        "input": {},
+    }
+    if mode == "resumed":
+        # A detecting job's record, another ffmpeg's: the first pass would run again, the shot
+        # detector with it, its file asked.
+        (tmp_path / "out").mkdir()
+        (tmp_path / "out" / "manifest.json").write_text(json.dumps(record))
     # The user's cache out of reach, and the network: HF_HUB_OFFLINE=1, which the script lifts in
     # the library only where it replaces its two calls.
     hidden = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_XET_CACHE")
     environment = {name: value for name, value in os.environ.items() if name not in hidden}
     environment |= {"HF_HOME": str(tmp_path / "home"), "HF_HUB_OFFLINE": "1"}
+    script_mode = "model-dir" if mode == "resumed" else mode
     result = subprocess.run(
-        [sys.executable, "-c", PULLED, str(cache), str(made), mode, *args],
+        [sys.executable, "-c", PULLED, str(cache), str(made), script_mode, *args],
         capture_output=True,
         text=True,
         check=False,
         env=environment,
     )
     assert result.returncode == 1, result.stderr
-    for name in (dit, vae):
+    for name in sizes:
         pin = pull.PINNED[name]
         said = (
             f"{where / name}: {sizes[name]:,} bytes, where hekmon/seedvr2x's {name} at"
@@ -1858,7 +1881,11 @@ def test_pulled_before_torch(tmp_path: Path, mode: str) -> None:
         )
         assert said in result.stderr
     assert "SHA-256" not in result.stderr
-    assert not (tmp_path / "out").exists()
+    if mode == "resumed":
+        left = {path.name: path.read_bytes() for path in (tmp_path / "out").iterdir()}
+        assert left == {"manifest.json": json.dumps(record).encode()}
+    else:
+        assert not (tmp_path / "out").exists()
 
 
 def _offline() -> str | None:

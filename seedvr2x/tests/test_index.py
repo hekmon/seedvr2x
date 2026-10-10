@@ -756,7 +756,7 @@ def test_index_file(tmp_path: Path) -> None:
         assert np.array_equal(getattr(back, name), getattr(written, name)), name
     header, values = data[len(index.MAGIC) :].split(b"\n", 1)
     fields = json.loads(header)
-    fields["frames"]["columns"].append(["transnetv2", "<f4"])
+    fields["frames"]["columns"].append(["later", "<f4"])
     more = np.full(10, 0.5, dtype="<f4").tobytes()
     frame_columns = 10 * (8 + 4 + 1)
     extended = (
@@ -767,7 +767,8 @@ def test_index_file(tmp_path: Path) -> None:
         + more
         + values[frame_columns:]
     )
-    assert np.array_equal(FrameIndex.from_bytes(extended).keyframes, written.keyframes)
+    later = FrameIndex.from_bytes(extended)
+    assert np.array_equal(later.keyframes, written.keyframes) and later.probabilities is None
     refused = {
         b"seedvr2x frame list\n" + data[len(index.MAGIC) :]: "not a frame index",
         data[:-1]: "cut short",
@@ -785,6 +786,45 @@ def test_index_file(tmp_path: Path) -> None:
     assert FrameIndex.read(path).frames == 10
     with pytest.raises(MediaError, match=r"frame_index\.bin\.gone: missing"):
         FrameIndex.read(tmp_path / "frame_index.bin.gone")
+
+
+def test_index_file_with_probabilities() -> None:
+    # The shot detector's probabilities, a column of the frames' table named transnetv2, float32,
+    # after the others: the same bytes again, read back exactly; absent when the detector didn't
+    # run, the file as before; one per frame, each in [0, 1], else refused.
+    probabilities = np.linspace(0, 1, 10, dtype=np.float32)
+    probabilities[3] = np.float32(0.1)  # not exact in binary: read back to the bit
+    written = replace(sample(), probabilities=probabilities)
+    data = written.to_bytes()
+    assert data == replace(sample(), probabilities=probabilities.copy()).to_bytes()
+    header, values = data[len(index.MAGIC) :].split(b"\n", 1)
+    assert json.loads(header)["frames"]["columns"][-1] == ["transnetv2", "<f4"]
+    without = sample().to_bytes()
+    header_without, values_without = without[len(index.MAGIC) :].split(b"\n", 1)
+    assert json.loads(header_without)["frames"]["columns"] == [
+        ["pts", "<i8"],
+        ["crc32", "<u4"],
+        ["error", "|u1"],
+    ]
+    frame_columns = 10 * (8 + 4 + 1)
+    assert values[frame_columns:][: 4 * 10] == probabilities.astype("<f4").tobytes()
+    assert values[:frame_columns] + values[frame_columns + 4 * 10 :] == values_without
+    back = FrameIndex.from_bytes(data)
+    assert back.probabilities is not None and back.probabilities.dtype == np.float32
+    assert back.probabilities.tobytes() == probabilities.tobytes()
+    assert back.to_bytes() == data
+    assert FrameIndex.from_bytes(without).probabilities is None
+    keyframes = 3 * 8  # the last column, after the probabilities
+    refused = {
+        data.replace(b'["transnetv2","<f4"]', b'["transnetv2","<i4"]'): "of type <i4, not <f4",
+        data[: -keyframes - 40] + np.float32(1.5).tobytes() + data[-keyframes - 36 :]: "[0, 1]",
+        data[: -keyframes - 4] + np.float32(np.nan).tobytes() + data[-keyframes:]: "[0, 1]",
+    }
+    for damaged_data, said in refused.items():
+        with pytest.raises(ValueError, match=re.escape(said)):
+            FrameIndex.from_bytes(damaged_data)
+    with pytest.raises(ValueError, match="9 shot probabilities for 10 frames"):
+        replace(sample(), probabilities=probabilities[:9]).to_bytes()
 
 
 def test_keyframe_arithmetic() -> None:

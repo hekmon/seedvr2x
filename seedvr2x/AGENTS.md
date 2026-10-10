@@ -128,28 +128,35 @@ uv run pytest
 - Tests that need the model weights read their directory from `SEEDVR2X_MODEL_DIR`, and skip
   without it. It holds numz's files and seedvr2x's own side by side (links will do): the GPU
   tests run numz's 7B fp16 and VAE, the weights their references were made with, and the
-  regression seedvr2x's own as well. With it, the CPU suite also checks every known model file
-  there by its header (`tests/test_weights.py`), and runs the shot detector on TransNetV2's
-  weights, `transnetv2.safetensors` (`tests/test_detector.py`: the cuts of a synthetic clip, and
-  measurement's own run reproduced bit for bit); without, the detector's windows run on the
-  untrained model's weights, written by the test.
+  regression seedvr2x's own as well, and the shot detector's, `transnetv2.safetensors`. With it,
+  the CPU suite also checks every known model file there by its header
+  (`tests/test_weights.py`), and runs the shot detector on TransNetV2's weights
+  (`tests/test_detector.py`: the cuts of a synthetic clip, and measurement's own run reproduced
+  bit for bit; `tests/test_detection.py`: the first pass recording the module's probabilities
+  bit for bit); without, the detector's windows run on the untrained model's weights, written by
+  the test.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`runtime/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself: `SHA256SUMS`, a few
   kilobytes, downloaded into a temporary `HF_HOME` behind a link, and the sizes read from the
   Hub's API, skipped offline (no network to huggingface.co, or `HF_HUB_OFFLINE` set). A test
   that runs seedvr2x in a process of its own gives it its own `HF_HOME` and `HF_HUB_OFFLINE=1`,
-  but that one; hf_xet is imported in such a process only. With `SEEDVR2X_TESTS_PULL=1`, it
-  pulls the four v1 files into Hugging Face's cache too, about 33 GB the first time;
-  `test_regression.py`'s `test_milestone1_from_the_cache` (GPU) then runs the default models
-  from the cache, `HF_HUB_OFFLINE=1`, and skips until both are there, saying how to fetch the
-  two alone (`uv run hf download`, 17 GB).
+  but that one; hf_xet is imported in such a process only. Its runs of the CLI give an empty cut
+  list, so that the shot detector, which it replaces, neither fetches nor checks its file, but
+  where a test holds that pull. With `SEEDVR2X_TESTS_PULL=1`, it pulls the four v1 files into
+  Hugging Face's cache too, about 33 GB the first time; `test_regression.py`'s
+  `test_milestone1_from_the_cache` (GPU) then runs the default models from the cache,
+  `HF_HUB_OFFLINE=1`, and skips until the three it takes are there, saying how to fetch them
+  alone (`uv run hf download`, 17 GB).
 - `tests/test_regression.py` (GPU) holds every change to the runtime or the vendored code to
   milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames,
   with numz's 7B fp16, with seedvr2x's own 7B, and with seedvr2x's sharp 7B against numz's run
   of its sharp 7B, all in numz's padding. seedvr2x's own padding, the default, is held
   bit-identical to numz patched to pad the same way (`numerics_patch.py`'s `NUM_PAD`) at 1080p,
-  at 720p and on a crop whose width isn't a multiple of 16. Its references, in the `m1/`
-  directory of `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its docstring.
+  at 720p and on a crop whose width isn't a multiple of 16. Its runs detect their shots, as a
+  user's does without `--cuts`, the shot detector on the GPU before the models load: each case
+  skips, naming the file, without `transnetv2.safetensors` in `SEEDVR2X_MODEL_DIR`. The other GPU
+  tests' runs give a cut list, empty for one shot. Its references, in the `m1/` directory of
+  `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its docstring.
 - numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
   cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`cli.NUMZ_PADDING`),
   which an output directory's manifest records, so that a job is never resumed in the other
@@ -176,6 +183,17 @@ uv run pytest
   `tests/test_seek_sources.py` holds the index and its reads to measurement's real sources, on the
   CPU: opt-in, it reads the list of sources named by `SEEDVR2X_SEEK_SOURCES`, each with
   `seek_test.py`'s outputs for it (its docstring says the list's format), and skips without it.
+- The shot detector in the first pass (`media/scan.py`) is held by `tests/test_detection.py`, a
+  recording stand-in in its place: its frames are the official extraction command's byte for
+  byte, every frame of the index once, its scaler's graph on one thread of ffmpeg's (counted by
+  the names ffmpeg gives its threads, `/proc`), a slow detector holding ffmpeg back, one that
+  stops moving stopped by the watchdog, a thread reading one of ffmpeg's pipes that raises
+  stopping the pass at once, the detector's queue full or not; and the detector itself, on the
+  untrained model's weights, its
+  probabilities recorded bit for bit. The CLI's runs on the CPU take a stand-in detector with
+  the stand-in model (`tests/test_cli_run.py`'s `StandInDetector`, each frame's probability its
+  mean value): its file an empty `transnetv2.safetensors` beside the stand-in's model files,
+  pinned so in place of TransNetV2's weights, which the pin's check then checks.
 - A source's rate against its frames' timestamps (`media/rate.py`), the refusal's guidance and
   `--frame-rate` are held by `tests/test_rate.py` to `seeking.md`'s mechanism 7 made on purpose,
   S9's timestamps (`mechanism7`); the warning of a file sptenc's rule passes whose frames leave

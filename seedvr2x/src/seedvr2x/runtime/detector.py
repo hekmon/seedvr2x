@@ -82,6 +82,17 @@ class Detector:
         weights.check(path, "detector")
         if hashes is not None:
             hashes.unchanged(path)
+        if device.type == "cuda":
+            # Its peak, from here, said as close gives it back (DESIGN.md, Memory planner, Budget).
+            # CUDA initialised first, whoever built the detector: torch initialises it at the
+            # first allocation, and the reset of its statistics asks the allocator at once
+            # (torch/cuda/memory.py, where memory_stats returns {} until then), which
+            # cudaMallocAsync, the command line's allocator (cli.main), refuses for a device it
+            # hasn't met: "RuntimeError: Invalid device argument." on the GPU box, a Detector
+            # built before anything else touched the GPU (2026-10-10; the command line's own
+            # runs record their environment, the GPU's, before).
+            torch.cuda.init()
+            torch.cuda.reset_peak_memory_stats(device)
         # Built on the meta device, then given memory of its own on device and the file's values:
         # no random initialisation, which would draw from torch's generator, and every tensor the
         # file holds, nothing else (strict).
@@ -155,20 +166,32 @@ class Detector:
 
     def close(self) -> None:
         """Give the model's memory back: on the GPU, every block torch's allocator holds for it
-        (torch.cuda.empty_cache), so that the planner's budget, read before anything else
-        allocates on the GPU, isn't taken by the detector (DESIGN.md, Memory planner, Budget). The
-        detector takes nothing more after; close again does nothing."""
+        (torch.cuda.empty_cache) and the workspaces it keeps for cuBLAS, so that the planner's
+        budget, read before anything else allocates on the GPU, isn't taken by the detector
+        (DESIGN.md, Memory planner, Budget). What the process then keeps on the GPU isn't the
+        detector's to give back: the CUDA context, cuDNN's and cuBLAS's handles and the kernels
+        they loaded, which stay until the process ends, outside torch's allocator, and which the
+        models' own load would have brought anyway. On the GPU box, the free memory was 94.50 GiB
+        with CUDA initialised and 94.34 after two detections, torch's counters at 0 both times
+        (2026-10-09): 0.16 GiB of the libraries' own; a budget read then is the smaller one, on
+        the safe side. The detector takes nothing more after; close again does nothing."""
         if self._model is None:
             return
         self._model = None
         self._held = np.empty((0, HEIGHT, WIDTH, 3), np.uint8)
         if self._device.type == "cuda":
+            peak = torch.cuda.max_memory_allocated(self._device)
             # torch keeps the workspace it gives cuBLAS for a handle and stream, allocated from its
             # allocator at the first matrix product, until told otherwise: empty_cache frees what
             # is cached, not what is held. torch's own memory-leak check clears them so before it
             # compares (torch/testing/_internal/common_utils.py, CudaMemoryLeakCheck).
             torch._C._cuda_clearCublasWorkspaces()  # pyright: ignore[reportPrivateUsage]
             torch.cuda.empty_cache()
+            logger.info(
+                "shot detector: VRAM peak %.2f GiB, given back (%.0f MiB still reserved by torch)",
+                peak / 2**30,
+                torch.cuda.memory_reserved(self._device) / 2**20,
+            )
 
     def __enter__(self) -> Self:
         return self

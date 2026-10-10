@@ -22,6 +22,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -205,16 +206,22 @@ def streamed(
     return result
 
 
-@pytest.fixture(scope="module")
-def untrained(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A transnetv2.safetensors of the untrained model's weights, drawn from a generator of its
-    own: no cut to find, but every window's output depends on its frames as the trained one's."""
-    path = tmp_path_factory.mktemp("untrained") / "transnetv2.safetensors"
+def untrained_weights(directory: Path) -> Path:
+    """A transnetv2.safetensors of the untrained model's weights, in directory, drawn from a
+    generator of its own: no cut to find, but every window's output depends on its frames as the
+    trained one's."""
+    path = directory / "transnetv2.safetensors"
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(0)
         model = TransNetV2()
     save_file(model.state_dict(), path)
     return path
+
+
+@pytest.fixture(scope="module")
+def untrained(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The untrained model's weights (untrained_weights)."""
+    return untrained_weights(tmp_path_factory.mktemp("untrained"))
 
 
 MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")
@@ -375,6 +382,46 @@ def test_measurement_reproduced(trained: Path, clip: npt.NDArray[np.uint8]) -> N
     batched = streamed(trained, clip, batch=BATCH)
     assert streamed(trained, clip, (250, 30), batch=BATCH).tobytes() == batched.tobytes()
     assert tnet_detections(batched, 0.3) == tnet_detections(first, 0.3)
+
+
+# A Detector built on the GPU before anything else of its process touched CUDA, then run.
+FIRST_ON_THE_GPU = """
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from seedvr2x.runtime.detector import Detector
+
+assert not torch.cuda.is_initialized()
+with Detector(Path(sys.argv[1]), torch.device("cuda", 0)) as found:
+    frames = np.zeros((120, 27, 48, 3), np.uint8)
+    print(len(found.push(frames)) + len(found.finish()))
+"""
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("allocator", ["backend:cudaMallocAsync", "backend:native"])
+def test_gpu_detector_first_on_the_gpu(untrained: Path, allocator: str) -> None:
+    # The detector doesn't depend on who initialised CUDA: built first thing in a process of its
+    # own, under the command line's allocator (cli.main sets cudaMallocAsync) and under torch's
+    # own. Under cudaMallocAsync, the reset of torch's peak statistics before CUDA's
+    # initialisation raised "RuntimeError: Invalid device argument." on the GPU box
+    # (2026-10-10, runtime/detector.py), which no test saw: each initialised CUDA before it built
+    # one, as the command line's runs do. With the untrained model's weights: no file needed.
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    environment = os.environ | {"PYTORCH_CUDA_ALLOC_CONF": allocator}
+    result = subprocess.run(
+        [sys.executable, "-c", FIRST_ON_THE_GPU, str(untrained)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["120"]
 
 
 @pytest.mark.gpu

@@ -319,7 +319,8 @@ def test_output_refusals_before_torch(tmp_path: Path, options: list[str], messag
     # the job's own (DESIGN.md, Output).
     (tmp_path / "full").mkdir()
     (tmp_path / "full" / "old.mkv").write_bytes(b"")
-    # Models the check accepts, which no pin refuses: the seed's refusals come after them.
+    # Models the check accepts, which no pin refuses: none of these refusals is theirs, each
+    # coming before them, the seed's too (cli._run).
     models = accepted_models(tmp_path)
     args = [str(source), "--model-dir", ".", *models, *options]
     # Exit 3 if torch was imported: a failed assert would exit 1, as the refusal does.

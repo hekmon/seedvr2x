@@ -34,10 +34,6 @@ UNCOMPARED = {
 # The manifest's record of the environment changes a resume accepted (Manifest.content).
 CHANGES = "environment_changes"
 
-# What the first pass depends on in the environment: it runs on ffmpeg's decode alone, so that
-# its record stands through any other change accepted (DESIGN.md, Pause and resume).
-FIRST_PASS = ("ffmpeg", "conversions")
-
 # The names DiskUnits gives a shot's files.
 UNIT_FILE = re.compile(
     rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS)))}"

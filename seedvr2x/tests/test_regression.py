@@ -39,12 +39,16 @@ the tests only):
   bit;
 - ours-sharp: seedvr2x_ema_7b_sharp_fp16.safetensors and seedvr2x_ema_vae_fp16.safetensors, against
   numz_sharp.mkv, skipped when that reference is absent.
-A case whose model file isn't in SEEDVR2X_MODEL_DIR is skipped, naming the file. One more,
+Every run detects its shots, as a user's does without --cuts (DESIGN.md, Shot detection): the
+shot detector runs on the GPU in the first pass, before the models load, so that its settings,
+scoped to its own forwards, and the memory it gives back are held to the bits too; the job stays
+one shot until the cuts' step. A case whose model file, or the shot detector's
+(transnetv2.safetensors), isn't in SEEDVR2X_MODEL_DIR is skipped, naming the file. One more,
 test_milestone1_from_the_cache, runs ours-sharp with the default models taken from Hugging Face's
 cache (runtime/pull.py): no --model-dir, no --dit-model or --vae-model, and HF_HUB_OFFLINE=1 in
 its environment, so that only the cache can serve them; it needs no SEEDVR2X_MODEL_DIR, and is
-skipped, saying how to fill the cache (uv run hf download, the two files, 17 GB), unless the run
-would find both there: at the pinned revision, or downloaded at another (runtime/pull.py).
+skipped, saying how to fill the cache (uv run hf download, the three files, 17 GB), unless the
+run would find them there: at the pinned revision, or downloaded at another (runtime/pull.py).
 
 seedvr2x's own padding, the default (at least 8 rows reflected from the picture, up to a multiple
 of 16, then 16 black rows; columns alike when the width isn't a multiple of 16), is held to numz
@@ -109,10 +113,11 @@ DEFAULT_DIT, DEFAULT_VAE = (
 
 
 def models_present(*names: str) -> None:
-    """Skip, naming the file, unless SEEDVR2X_MODEL_DIR holds each of names."""
+    """Skip, naming the file, unless SEEDVR2X_MODEL_DIR holds each of names, and the shot
+    detector's file, which every run here takes (the module's docstring)."""
     if MODELS is None:
         pytest.skip("needs SEEDVR2X_MODEL_DIR")
-    for name in names:
+    for name in (*names, pull.DETECTOR):
         if not (Path(MODELS) / name).is_file():
             pytest.skip(f"{name}: not in SEEDVR2X_MODEL_DIR")
 
@@ -156,6 +161,9 @@ def bit_identical(
         env=environment,
     )
     assert run.returncode == 0, run.stderr[-3000:]
+    # The shot detector ran in the first pass, on the GPU, and gave its memory back.
+    assert "the shot detector scored" in run.stderr, run.stderr[-3000:]
+    assert "shot detector: VRAM peak" in run.stderr, run.stderr[-3000:]
     expected = (
         reference.parent / f"{reference.name}.mkv",
         reference.parent / f"{reference.name}_frames",
@@ -203,15 +211,16 @@ def test_milestone1_bit_identical(tmp_path: Path, dit: str, vae: str, reference:
 
 def test_milestone1_from_the_cache(tmp_path: Path) -> None:
     # ours-sharp, its files taken from Hugging Face's cache, as a user's run takes them by
-    # default: offline, so that the cache alone can serve them, bit for bit as SEEDVR2X_MODEL_DIR
-    # does. Skipped unless the run would find both there (pull.cached).
+    # default, the shot detector's with them: offline, so that the cache alone can serve them,
+    # bit for bit as SEEDVR2X_MODEL_DIR does. Skipped unless the run would find all three there
+    # (pull.cached).
     assert REFERENCE is not None
-    for name in (DEFAULT_DIT, DEFAULT_VAE):
+    for name in (DEFAULT_DIT, DEFAULT_VAE, pull.DETECTOR):
         if pull.cached(name) is None:
             pytest.skip(
-                f"{name}: not in Hugging Face's cache; fill it with the two default files, 17 GB:"
-                f" uv run hf download {pull.REPO} {DEFAULT_DIT} {DEFAULT_VAE} --revision"
-                f" {pull.REVISION}"
+                f"{name}: not in Hugging Face's cache; fill it with the three default files, 17"
+                f" GB: uv run hf download {pull.REPO} {DEFAULT_DIT} {DEFAULT_VAE} {pull.DETECTOR}"
+                f" --revision {pull.REVISION}"
             )
     m1 = Path(REFERENCE) / "m1"
     for path in (m1 / "numz_sharp.mkv", m1 / "numz_sharp_frames"):
@@ -220,7 +229,7 @@ def test_milestone1_from_the_cache(tmp_path: Path) -> None:
     log = bit_identical(
         tmp_path, m1 / "input_rgb.mkv", 1080, None, m1 / "numz_sharp", numz_padding=True
     )
-    for name in (DEFAULT_DIT, DEFAULT_VAE):
+    for name in (DEFAULT_DIT, DEFAULT_VAE, pull.DETECTOR):
         assert f"{name}: in the cache, " in log
         pinned = f"its size and SHA-256 as seedvr2x pins them, {pull.REPO} at {pull.REVISION[:8]}"
         assert f"{name}: {pinned}" in log

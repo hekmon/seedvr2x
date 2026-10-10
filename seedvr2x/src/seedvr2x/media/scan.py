@@ -1,21 +1,26 @@
-"""The first pass over a source: every frame decoded, counted and timed, before any GPU work, the
-frame index made meanwhile (DESIGN.md, Input; media/index.py), and ffmpeg's idet run on every
-frame (Idet). Automatic scene detection will join it."""
+"""The first pass over a source: every frame decoded, counted and timed, before the model's work,
+the frame index made meanwhile (DESIGN.md, Input; media/index.py), ffmpeg's idet run on every
+frame (Idet), and, given the shot detector, every frame scaled to its input and fed to it as it
+comes, its probabilities kept in the index (DESIGN.md, Shot detection)."""
 
 import logging
 import math
+import os
+import queue
 import re
 import subprocess
 import threading
+import time
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from itertools import pairwise
 from pathlib import Path
-from typing import IO, Any, cast
+from typing import IO, Any, Protocol, cast
 
 import numpy as np
+import numpy.typing as npt
 
 from seedvr2x.media.ffmpeg import NO_METADATA, MediaError, input_args
 from seedvr2x.media.index import NOPTS, FrameIndex
@@ -152,6 +157,36 @@ DISCONTINUOUS = frozenset(
 )
 
 
+# The shot detector's frames, TransNetV2's input (runtime/detector.py): 48x27 RGB, 8 bits a
+# component, FRAME bytes each on their pipe.
+WIDTH, HEIGHT = 48, 27
+FRAME = WIDTH * HEIGHT * 3
+# The frames read from their pipe at a time, and the reads held for the detector at most, 64 of
+# 50 frames (12.4 MB): a detector slower than the decode holds ffmpeg back once they wait, where
+# a 2-hour film's frames would take 672 MB at 24 fps. The detector's probabilities don't depend
+# on how its frames are pushed (runtime/detector.py: its windows run in whole batches).
+# PROVISIONAL (implementation, 2026-10-09; DESIGN.md asks for no bound).
+CHUNK = 50
+HELD = 64
+# PROVISIONAL (implementation, 2026-10-09; DESIGN.md doesn't say): a first pass in which nothing
+# moves for this long, in seconds, no line from ffmpeg on any pipe, no frame read or scored, is
+# stopped and refused, never left hanging. Every pipe is drained by a thread of its own (scan), so
+# no wait of seedvr2x's can hold ffmpeg; this is for what else could, as an ffmpeg hung on its
+# input. A frame takes milliseconds to decode (DESIGN.md, Input: 171-2,360 fps), and the detector
+# a fraction of a second per read on the CPU.
+WATCHDOG = 120.0
+
+
+class Detects(Protocol):
+    """The shot detector as the first pass feeds it (runtime/detector.py's Detector): the source's
+    frames in order, (n, 27, 48, 3) uint8 RGB, any n from 0; their probabilities given back in
+    order, (m,) float32 in [0, 1], push's and finish's together one per frame pushed."""
+
+    def push(self, frames: npt.NDArray[np.uint8]) -> npt.NDArray[np.float32]: ...
+
+    def finish(self) -> npt.NDArray[np.float32]: ...
+
+
 @dataclass(frozen=True)
 class Discontinuity:
     """A jump in a source's timestamps (JUMP_FORWARD, JUMP_BACK): frame `frame`'s, `after`, against
@@ -228,26 +263,179 @@ class Scan:
     discontinuity: Discontinuity | None = None
 
 
-def scan(path: Path) -> Scan:
+def scan(path: Path, detector: Detects | None = None) -> Scan:
     """Decode every frame of the first video stream of path, counting, timing and indexing them,
-    and running idet on them, its packets scanned for keyframes meanwhile.
+    and running idet on them, its packets scanned for keyframes meanwhile; given detector, the
+    shot detector, feed it every frame and keep its probabilities in the index.
 
     One ffmpeg process decodes, prints each frame's line (DECODED) and the reports tied to it on
     stderr, and hashes each decoded frame on stdout, a CRC-32 of its planes as the decoder gives
     them (rawvideo to the framehash muxer, whose crc32 is zlib's: tests/test_index.py), so that no
     frame crosses a pipe; a second output runs idet on every frame, its counts on stderr at the
-    end (IDET). The timestamps are the source's own, each read from its frame's hash line
-    (HASHED): -copyts, and the hashes' time base the demuxer's. The frames are counted here
-    as their lines come, on stdout and on stderr, which must agree, never by ffmpeg's counters,
-    which restart when it rebuilds its filter graph mid-stream (research/docs/seeking.md,
-    mechanism 8). ffprobe scans the packets in another process meanwhile (packets).
+    end (IDET); with the detector, a third scales every frame for it on a pipe of its own
+    (command). The timestamps are the source's own, each read from its frame's hash line
+    (HASHED): -copyts, and the hashes' time base the demuxer's. The frames are counted here as
+    their lines come, on stdout and on stderr, which must agree, never by ffmpeg's counters, which
+    restart when it rebuilds its filter graph mid-stream (research/docs/seeking.md, mechanism 8).
+    ffprobe scans the packets in another process meanwhile (packets).
+
+    Every pipe of ffmpeg's is drained by a thread of its own, whatever the detector's pace, which
+    takes its frames from a queue of HELD reads in this thread: ffmpeg's decoder gives each frame
+    to every output's filter graph in turn, through queues of 2 frames (fftools/ffmpeg_sched.c:
+    2389-2419, ffmpeg_sched.h:262 at n9.0.2), so an output left unread stalls them all, as a read
+    once deadlocked waiting for one output's line while ffmpeg waited on another
+    (media/reader.py). WATCHDOG stops a pass in which nothing moves.
 
     Raises MediaError when ffmpeg or ffprobe fails, their counts disagree, the hashes come in no
-    time base, or the path holds a line break (name_error)."""
+    time base, the path holds a line break (name_error), ffmpeg gives the detector another number
+    of frames than it decoded, the reading of one of its pipes fails, or the pass stalls;
+    ValueError when the detector gives another number of probabilities than it got frames, or one
+    outside [0, 1]."""
     refused = name_error(path)
     if refused:
         raise MediaError(refused)
-    command = [
+    pipe = os.pipe() if detector is not None else None
+    arguments = command(path, None if pipe is None else pipe[1])
+    scanned: list[object] = []
+    scanner = threading.Thread(target=_packets_into, args=(path, scanned), daemon=True)
+    scanner.start()
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            arguments,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            pass_fds=() if pipe is None else (pipe[1],),
+        )
+    except BaseException:
+        if pipe is not None:
+            os.close(pipe[0])
+            os.close(pipe[1])
+        raise
+    if pipe is not None:
+        os.close(pipe[1])  # ffmpeg's alone: the pipe ends when its output does
+    try:
+        run = _Run(process, None if pipe is None else pipe[0])
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    try:
+        probabilities = run.detect(detector)
+        status = run.wait()
+    finally:
+        run.close()
+    scanner.join()
+    decoded, hashed = run.decoded, run.hashed
+    errors = decoded.errors
+    if run.failed:
+        what, error = run.failed[0]
+        said = f"{path}: the first pass stopped, {what} read no further: {error!r}"
+        raise MediaError(said) from error
+    if run.stalled:
+        raise MediaError(f"{path}: {run.stalled[0]}")
+    if status != 0:
+        said = errors[-5:] or list(decoded.last)
+        raise MediaError(f"{path}: ffmpeg failed decoding it: {' / '.join(said)}")
+    [packets] = scanned
+    if isinstance(packets, OSError):
+        raise MediaError(f"{path}: ffprobe failed scanning its packets: {packets}") from packets
+    if isinstance(packets, Exception):
+        raise packets
+    assert isinstance(packets, _Packets)
+    hashes = hashed.crc32
+    if len(hashes) != len(decoded.pts):
+        raise MediaError(
+            f"{path}: ffmpeg decoded {len(decoded.pts)} frames and hashed {len(hashes)}"
+        )
+    if hashed.refused or (hashes and hashed.time_base is None):
+        raise MediaError(f"{path}: {hashed.refused or 'ffmpeg gave its hashes no time base'}")
+    if run.frames is not None:
+        if run.frames.error:
+            raise MediaError(f"{path}: ffmpeg's frames for the shot detector {run.frames.error}")
+        # Every frame the index holds, once, in its order (DESIGN.md, Shot detection: every frame
+        # of the first pass's decode).
+        if run.frames.read != len(hashes):
+            raise MediaError(
+                f"{path}: ffmpeg decoded {len(hashes)} frames and scaled {run.frames.read} for"
+                " the shot detector"
+            )
+        assert probabilities is not None
+        if len(probabilities) != run.frames.read:
+            raise ValueError(
+                f"the shot detector gave {len(probabilities)} probabilities for"
+                f" {run.frames.read} frames"
+            )
+        # As the index's reader refuses them (index.FrameIndex.from_bytes): recorded, a NaN made
+        # the next resume refuse the index and run the pass again. A NaN fails both bounds.
+        outside = np.flatnonzero(~((probabilities >= 0) & (probabilities <= 1)))
+        if len(outside):
+            raise ValueError(
+                f"the shot detector gave frame {int(outside[0])} the probability"
+                f" {float(probabilities[outside[0]])}, outside [0, 1]"
+            )
+        elapsed = time.monotonic() - started
+        logger.info(
+            "%s: the shot detector scored %d frames in %.1f s of its own (%.0f fps), during a first"
+            " pass of %.1f s (%.0f fps)",
+            path,
+            len(probabilities),
+            run.spent,
+            len(probabilities) / max(run.spent, 1e-9),
+            elapsed,
+            len(probabilities) / max(elapsed, 1e-9),
+        )
+    errors += packets.errors
+    if errors:
+        logger.warning("%s: ffmpeg reported errors decoding it: %s", path, " / ".join(errors[:5]))
+    flagged = [frame for frame, flag in enumerate(decoded.corrupt) if flag]
+    if flagged:
+        # No seek decodes them as the start does, nor a decode always the same (media/reader.py).
+        several = f"{len(flagged)} frames decoded with an error, from frame {flagged[0]}"
+        logger.warning(
+            "%s: %s: a read seeking through %s decodes the source from its start, and takes %s as"
+            " decoded",
+            path,
+            several if len(flagged) > 1 else f"frame {flagged[0]} decoded with an error",
+            *(("them", "them") if len(flagged) > 1 else ("it", "it")),
+        )
+    time_base = hashed.time_base or Fraction(1)
+    index = FrameIndex(
+        time_base,
+        packets.start_time,
+        np.array(hashed.pts, dtype=np.int64),
+        np.array(hashes, dtype=np.uint32),
+        np.array(decoded.corrupt, dtype=np.bool_),
+        np.unique(np.array(packets.keyframes, dtype=np.int64)),
+        probabilities,
+    )
+    idet = decoded.idet()
+    if idet is None:
+        # Said, never silent (AGENTS.md): a build printing its counts otherwise.
+        logger.warning("%s: ffmpeg's idet gave no counts: combed frames not looked for", path)
+    jump = _discontinuity(hashed.pts, decoded.pts, time_base, packets.remux)
+    return replace(_timed(hashed.pts, time_base, index, idet), discontinuity=jump)
+
+
+def name_error(path: Path) -> str:
+    """Why a source's name is refused, or "": a line break in it. ffmpeg prints the name as it
+    is, in its input's dump and in its errors: a line of the name's own making among those the
+    first pass reads (MAPPING). Known from the command line: refused before anything is done with
+    the file (media/source.py, declare), and by the pass itself (scan)."""
+    if "\n" in str(path) or "\r" in str(path):
+        return (
+            f"{str(path)!r}: a line break in its name, which ffmpeg prints as it is among the"
+            " lines the first pass reads: rename it"
+        )
+    return ""
+
+
+def command(path: Path, frames: int | None = None) -> list[str]:
+    """The first pass's ffmpeg command over path (scan); with frames, the file descriptor of the
+    pipe the shot detector's frames go to, a third output (_detector_output)."""
+    return [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats"),
         # repeat: two reports alike in a row are both printed, never folded into "Last message
         # repeated" (libavutil/log.c), each tied to its frame.
@@ -275,81 +463,226 @@ def scan(path: Path) -> Scan:
         # error (tests/test_decode.py, a concat join).
         *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux"),
         *(*NO_METADATA, "-vf", "idet", "-f", "null", "-"),
+        *(() if frames is None else _detector_output(frames)),
     ]
-    scanned: list[object] = []
-    scanner = threading.Thread(target=_packets_into, args=(path, scanned), daemon=True)
-    scanner.start()
-    process = subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace"
-    )
-    assert process.stdout is not None and process.stderr is not None
-    decoded = _Decoded()
-    reader = threading.Thread(target=decoded.read, args=(process.stderr,), daemon=True)
-    reader.start()
-    hashed = _Hashed()
-    hashed.read(process.stdout)
-    status = process.wait()
-    reader.join()
-    scanner.join()
-    errors = decoded.errors
-    if status != 0:
-        said = errors[-5:] or list(decoded.last)
-        raise MediaError(f"{path}: ffmpeg failed decoding it: {' / '.join(said)}")
-    [packets] = scanned
-    if isinstance(packets, OSError):
-        raise MediaError(f"{path}: ffprobe failed scanning its packets: {packets}") from packets
-    if isinstance(packets, Exception):
-        raise packets
-    assert isinstance(packets, _Packets)
-    hashes = hashed.crc32
-    if len(hashes) != len(decoded.pts):
-        raise MediaError(
-            f"{path}: ffmpeg decoded {len(decoded.pts)} frames and hashed {len(hashes)}"
-        )
-    if hashed.refused or (hashes and hashed.time_base is None):
-        raise MediaError(f"{path}: {hashed.refused or 'ffmpeg gave its hashes no time base'}")
-    errors += packets.errors
-    if errors:
-        logger.warning("%s: ffmpeg reported errors decoding it: %s", path, " / ".join(errors[:5]))
-    flagged = [frame for frame, flag in enumerate(decoded.corrupt) if flag]
-    if flagged:
-        # No seek decodes them as the start does, nor a decode always the same (media/reader.py).
-        several = f"{len(flagged)} frames decoded with an error, from frame {flagged[0]}"
-        logger.warning(
-            "%s: %s: a read seeking through %s decodes the source from its start, and takes %s as"
-            " decoded",
-            path,
-            several if len(flagged) > 1 else f"frame {flagged[0]} decoded with an error",
-            *(("them", "them") if len(flagged) > 1 else ("it", "it")),
-        )
-    time_base = hashed.time_base or Fraction(1)
-    index = FrameIndex(
-        time_base,
-        packets.start_time,
-        np.array(hashed.pts, dtype=np.int64),
-        np.array(hashes, dtype=np.uint32),
-        np.array(decoded.corrupt, dtype=np.bool_),
-        np.unique(np.array(packets.keyframes, dtype=np.int64)),
-    )
-    idet = decoded.idet()
-    if idet is None:
-        # Said, never silent (AGENTS.md): a build printing its counts otherwise.
-        logger.warning("%s: ffmpeg's idet gave no counts: combed frames not looked for", path)
-    jump = _discontinuity(hashed.pts, decoded.pts, time_base, packets.remux)
-    return replace(_timed(hashed.pts, time_base, index, idet), discontinuity=jump)
 
 
-def name_error(path: Path) -> str:
-    """Why a source's name is refused, or "": a line break in it. ffmpeg prints the name as it
-    is, in its input's dump and in its errors: a line of the name's own making among those the
-    first pass reads (MAPPING). Known from the command line: refused before anything is done with
-    the file (media/source.py, declare), and by the pass itself (scan)."""
-    if "\n" in str(path) or "\r" in str(path):
-        return (
-            f"{str(path)!r}: a line break in its name, which ffmpeg prints as it is among the"
-            " lines the first pass reads: rename it"
-        )
-    return ""
+def _detector_output(descriptor: int) -> list[str]:
+    """The first pass's output of the shot detector's frames, to the pipe of file descriptor
+    descriptor: every frame decoded, scaled to WIDTH x HEIGHT rgb24 on one thread."""
+    # DESIGN.md, Shot detection: every frame of the first pass's decode, scaled to 48x27 as
+    # TransNetV2's official extraction scales them (ffmpeg's default scaler), on one thread. As
+    # measurement extracted them (research/scripts/scd_scores.py's tnet_frames and decode_cmd;
+    # research/docs/scene-detection.md, TransNetV2): ffmpeg's output scaler, -s 48x27 -pix_fmt
+    # rgb24, the official predict_video's arguments (inference/transnetv2.py at 85cef72), with
+    # its default flags (bicubic); every frame passed through, measurement's choice, where the
+    # official command leaves the rawvideo muxer's default, a constant rate, free to drop or
+    # repeat frames by timestamp. An output of the first pass's own ffmpeg: the index's decoded
+    # frames, no second decode. One thread: fftools gives the graph of an output, where it inserts
+    # that scaler (fftools/ffmpeg_filter.c:1674-1694 at n9.0.2), the thread count of the output's
+    # own -threads (ffmpeg_mux_init.c:1371, 955-958; ffmpeg_filter.c:1284-1285, 2076-2078), which
+    # swscale takes (libavfilter/vf_scale.c:424-426): by ffmpeg's thread names, that graph then
+    # runs on its own thread alone, where it takes 63 by default on 32 CPUs and 33 with the global
+    # -filter_threads 1 (measured 2026-10-09). The bytes didn't change with the count: the same
+    # at 1, 2, 16 and 32 threads on 10 formats, gray to 12-bit 4:2:0 4K, and the official
+    # command's and measurement's on a 3,000-frame 1080p x264 file (tests/test_detection.py).
+    # Measurement's decode differed in what doesn't change a frame: no -copyts, 16 decoder and
+    # filter threads, -reinit_filter 0 on its DVD, where a graph rebuilt here takes the frames'
+    # new tags (the same bytes on a stream tagged from its 15th frame: tests/test_detection.py).
+    # Its time base the stream's, as the other outputs', and no metadata of the source's
+    # (command; ffmpeg.NO_METADATA).
+    return [
+        *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux", *NO_METADATA),
+        *("-threads", "1", "-s", f"{WIDTH}x{HEIGHT}", "-pix_fmt", "rgb24"),
+        *("-f", "rawvideo", f"pipe:{descriptor}"),
+    ]
+
+
+class _Progress:
+    """When the first pass last moved (WATCHDOG): a line read from ffmpeg, frames read or
+    scored; and the frames scored."""
+
+    def __init__(self) -> None:
+        self.at = time.monotonic()
+        self.scored = 0
+
+    def moved(self) -> None:
+        self.at = time.monotonic()
+
+
+class _Frames:
+    """The shot detector's frames, read from their pipe by a thread of their own as ffmpeg writes
+    them (drain), CHUNK at a time, into a queue of HELD reads at most (get), the end marked by
+    None. read counts the frames read; error says why their output ended inside a frame."""
+
+    def __init__(self, descriptor: int, progress: _Progress) -> None:
+        self.read = 0
+        self.error = ""
+        self._progress = progress
+        self._queue: queue.Queue[npt.NDArray[np.uint8] | None] = queue.Queue(HELD)
+        self._stopped = threading.Event()
+        self._stream = os.fdopen(descriptor, "rb", buffering=0)
+
+    def get(self) -> npt.NDArray[np.uint8] | None:
+        """The next frames read, (n, 27, 48, 3) uint8, or None at their end."""
+        return self._queue.get()
+
+    def stop(self) -> None:
+        """Stop queueing, ffmpeg stopped: what is queued is dropped, so that the thread, which
+        reads on to the pipe's end, never waits for room."""
+        self._stopped.set()
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def drain(self) -> None:
+        """Read the frames to their pipe's end, or until stopped: a thread's whole work."""
+        try:
+            while not self._stopped.is_set():
+                chunk = np.empty((CHUNK, HEIGHT, WIDTH, 3), np.uint8)
+                view = memoryview(chunk).cast("B")
+                filled = 0
+                while filled < len(view):
+                    got = self._stream.readinto(view[filled:])
+                    if not got:
+                        break
+                    filled += got
+                    self._progress.moved()
+                whole, left = divmod(filled, FRAME)
+                if left:
+                    self.error = f"end {left} bytes into a frame, after {self.read + whole}"
+                    return
+                if whole:
+                    self.read += whole
+                    self._put(chunk[:whole])
+                if filled < len(view):
+                    return  # the pipe's end
+        finally:
+            self._put(None)
+
+    def _put(self, item: npt.NDArray[np.uint8] | None) -> None:
+        while not self._stopped.is_set():
+            try:
+                self._queue.put(item, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+
+class _Run:
+    """The first pass's ffmpeg process at work (scan): its stderr read by a thread (_Decoded), its
+    hashes on stdout by another (_Hashed), the shot detector's frames by a third (_Frames), and a
+    watchdog stopping ffmpeg when nothing moves for WATCHDOG seconds, which stalled then says.
+    What a reading thread raises stops ffmpeg at once, and failed says it (_reading)."""
+
+    def __init__(self, process: "subprocess.Popen[str]", frames: int | None) -> None:
+        assert process.stdout is not None and process.stderr is not None
+        self.process = process
+        self.progress = _Progress()
+        self.decoded = _Decoded(self.progress)
+        self.hashed = _Hashed(self.progress)
+        self.frames = None if frames is None else _Frames(frames, self.progress)
+        self.spent = 0.0  # seconds in the detector
+        self.stalled: list[str] = []
+        # What a reading thread raised, with which thread it was (_reading).
+        self.failed: list[tuple[str, Exception]] = []
+        self._done = threading.Event()
+        stderr, stdout = process.stderr, process.stdout
+        readers: list[tuple[str, Callable[[], None]]] = [
+            ("the thread reading ffmpeg's messages", lambda: self.decoded.read(stderr)),
+            ("the thread reading ffmpeg's hashes", lambda: self.hashed.read(stdout)),
+        ]
+        if self.frames is not None:
+            readers.append(("the thread reading the shot detector's frames", self.frames.drain))
+        self._threads = [
+            threading.Thread(target=self._reading, args=reader, daemon=True) for reader in readers
+        ]
+        for thread in self._threads:
+            thread.start()
+        self._watchdog = threading.Thread(target=self._watch, daemon=True)
+        self._watchdog.start()
+
+    def detect(self, detector: Detects | None) -> npt.NDArray[np.float32] | None:
+        """Feed the detector every frame read, in order, as they come, then finish it: every
+        frame's probability; None without a detector."""
+        if detector is None or self.frames is None:
+            return None
+        given: list[npt.NDArray[np.float32]] = []
+        while (frames := self.frames.get()) is not None:
+            if self.failed:
+                # scan raises what failed at once, the frames still queued left. Their thread is
+                # stopped first: with its queue full, it waited for room that no read would make
+                # any more, and wait, which joins it, never came back, the pass hanging for good,
+                # past the watchdog's kill (a review's finding, 2026-10-10: the queue at 64,
+                # "nothing moved in 120 s" said at 120 s, scan not back at 150 s).
+                self.frames.stop()
+                return None
+            started = time.monotonic()
+            given.append(detector.push(frames))
+            self.spent += time.monotonic() - started
+            self.progress.scored += len(frames)
+            self.progress.moved()
+        started = time.monotonic()
+        given.append(detector.finish())
+        self.spent += time.monotonic() - started
+        return np.concatenate(given)
+
+    def wait(self) -> int:
+        """ffmpeg's exit status, once every pipe is read to its end."""
+        for thread in self._threads:
+            thread.join()
+        return self.process.wait()
+
+    def close(self) -> None:
+        """ffmpeg stopped if it still runs, every thread ended."""
+        self._done.set()
+        if self.process.poll() is None:
+            self.process.kill()
+        if self.frames is not None:
+            self.frames.stop()
+        for thread in self._threads:
+            thread.join()
+        self.process.wait()
+        self._watchdog.join()
+        if self.frames is not None:
+            self.frames.close()
+
+    def _reading(self, what: str, read: Callable[[], None]) -> None:
+        """Run a pipe's reader in its thread. What it raises is kept (failed) and ffmpeg stopped at
+        once, the other pipes then ending, so that the pass fails saying it (scan): a thread
+        ended by an exception drained its pipe no more, ffmpeg blocked writing to it, and the pass
+        was stopped by the watchdog alone, WATCHDOG seconds later, as one in which nothing moved,
+        or never, before the watchdog (reviews' findings, 2026-10-09)."""
+        try:
+            read()
+        except Exception as error:
+            self.failed.append((what, error))
+            logger.error("the first pass stopped, %s read no further: %r", what, error)
+            self.process.kill()
+
+    def _watch(self) -> None:
+        while not self._done.wait(min(1.0, WATCHDOG / 4)):
+            if time.monotonic() - self.progress.at < WATCHDOG:
+                continue
+            said = (
+                f"the first pass stopped, nothing moved in {WATCHDOG:g} s: {len(self.decoded.pts)}"
+                f" frames decoded, {len(self.hashed.crc32)} hashed"
+            )
+            if self.frames is not None:
+                said += (
+                    f", {self.frames.read} scaled for the shot detector,"
+                    f" {self.progress.scored} scored"
+                )
+            self.stalled.append(said)
+            # Said at once: the detector may be the one stuck, scan's refusal then never coming.
+            logger.error("%s", said)
+            self.process.kill()
+            return
 
 
 def _timed(
@@ -416,9 +749,11 @@ def _discontinuity(
 
 class _Hashed:
     """What the first pass's stdout says, read as it comes: the time base (TIME_BASE), then each
-    frame's pts and CRC-32 (HASHED). `refused` says a time base no pts can be read in."""
+    frame's pts and CRC-32 (HASHED); each line marked as progress (_Progress), given one.
+    `refused` says a time base no pts can be read in."""
 
-    def __init__(self) -> None:
+    def __init__(self, progress: _Progress | None = None) -> None:
+        self._progress = progress
         self.pts: list[int] = []
         self.crc32: list[int] = []
         self.time_base: Fraction | None = None
@@ -426,6 +761,8 @@ class _Hashed:
 
     def read(self, lines: Iterable[str]) -> None:
         for line in lines:
+            if self._progress is not None:
+                self._progress.moved()
             found = HASHED.match(line)
             if found is not None:
                 self.pts.append(int(found[1]))
@@ -443,10 +780,12 @@ class _Hashed:
 class _Decoded:
     """What the first pass's stderr says, read as it comes: each frame the decoder gives, with its
     own pts (DECODED) and whether the decoder flagged it (CORRUPT, the report before it), the
-    errors, idet's counts (IDET); of the lines before ffmpeg decodes (MAPPING), the errors alone.
-    `last` keeps its last lines, for a failure no error line tells of (ERROR)."""
+    errors, idet's counts (IDET); of the lines before ffmpeg decodes (MAPPING), the errors alone;
+    each line marked as progress (_Progress), given one. `last` keeps its last lines, for a
+    failure no error line tells of (ERROR)."""
 
-    def __init__(self) -> None:
+    def __init__(self, progress: _Progress | None = None) -> None:
+        self._progress = progress
         self.pts: list[int] = []  # the decoder's own: the frames' are the hashes' (_Hashed)
         self.corrupt: list[bool] = []
         self.errors: list[str] = []
@@ -480,6 +819,8 @@ class _Decoded:
         # (ERROR_AT_START): no errors, should another such line come.
         loose: list[int] = []
         for line in lines:
+            if self._progress is not None:
+                self._progress.moved()
             self.last.append(line.strip())
             if line.startswith(MAPPING) and line.rstrip("\n") == MAPPING:
                 # The reading begins again: what was read since the line before this one, a line

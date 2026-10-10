@@ -31,12 +31,16 @@ pytestmark = [
 
 
 def upscale(source: Path, output: Path, *options: str) -> None:
+    """seedvr2x run on source; with an empty cut list unless options give one, its one shot as
+    no detection would give it yet: the shot detector, the regression's (tests/test_regression.py),
+    neither run nor its file needed."""
     assert MODELS is not None
+    one_shot = () if "--cuts" in options else ("--cuts", os.devnull)
     run = subprocess.run(
         [
             *(sys.executable, "-m", "seedvr2x", str(source), "-o", str(output)),
             *("--model-dir", MODELS, "--dit-model", "seedvr2_ema_7b_fp16.safetensors"),
-            *("--vae-model", "ema_vae_fp16.safetensors", *options),
+            *("--vae-model", "ema_vae_fp16.safetensors", *one_shot, *options),
         ],
         capture_output=True,
         text=True,
