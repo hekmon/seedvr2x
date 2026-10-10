@@ -18,12 +18,17 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
 - fits the GPU it runs on without the user tuning memory options. It is developed on a 96 GB
   card, but made for consumer cards of 16–32 GB as well, where the planner, BlockSwap and
   tiling carry the run:
-  - At 1080p, without BlockSwap, a 24 GB card holds windows of about 6 latents and a 32 GB one
-    13, so many shots are split into windows.
+  - At 1080p, with every block on the GPU, a 24 GB card holds windows of about 5 latents and a
+    32 GB one 13, so many shots would be split into windows. BlockSwap buys the room back:
+    with every block swapped, about 19 and 27 latents, by the memory model's fit, which
+    milestone 3 measures (see [Memory planner](#memory-planner)).
   - A 16 GB card can't hold the 7B fp16's weights (15.35 GiB) at all: it swaps every block,
-    and phase 2's smaller files lighten it (see [Weights](#weights)).
+    for windows of about 11 latents at 1080p by the same fit, and phase 2's smaller files
+    lighten it (see [Weights](#weights)).
   - Below 48 GB, the 1080p VAE decode only fits tiled. At 4K, every card tiles the decode,
     the 96 GB one included, and that one's windows hold about 19 latents.
+  - 4K takes about 22 GiB for the DiT's smallest window, every block swapped: a 16 GB card is
+    refused it, and a 24 GB one stands at the edge (see [Memory planner](#memory-planner)).
   - These cards also compute more slowly (an RTX 5080 has 84 SMs, the 96 GB card 188), so a
     job lasts longer there, and resume and `--until` matter most.
 - can be paused and resumed (run at night, give the computer back in the morning)
@@ -66,6 +71,10 @@ never requires it.
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
 - Models other than ByteDance's 7B and sharp 7B in fp16. Phase 2, after v1, brings smaller
   files of those two 7Bs; no other model is planned (see [Weights](#weights))
+- `torch.compile`, numz's `compile_dit` and `compile_vae` (see
+  [Memory planner](#memory-planner))
+- An output size whose smallest window the card can't hold, 4K on a 16 GB card for one:
+  refused, naming the largest size that fits (see [Memory planner](#memory-planner))
 - Variable frame rate sources: refused with a clear message, as sptenc does
 - Sources refused in v1, each with a clear message, every reason a source has given in one
   numbered refusal:
@@ -130,10 +139,15 @@ never requires it.
     the joins don't show.
   - The length comes from the GPU's memory, through the per-token model in
     [vram.md](../research/docs/vram.md): 16 GiB of weights plus about 1 GiB per latent at
-    1080p with the 7B fp16 model, and four times that per latent at 4K.
-    - At 1080p: about 6 latents (21–24 frames) on a 24 GB card, 13 (49 frames) on a 32 GB
-      card, 78 (309 frames) on a 96 GB card.
+    1080p with the 7B fp16 model, and four times that per latent at 4K. With every block on
+    the GPU, by the fit of [Memory planner](#memory-planner):
+    - At 1080p: about 5 latents (17 frames) on a 24 GB card, 13 (49 frames) on a 32 GB
+      card, 76 (301 frames) on a 96 GB card.
     - At 4K: 19 latents (73 frames) on a 96 GB card.
+    - Swapped blocks give their memory to the window: with all 36 swapped, about 19 latents
+      (73 frames) at 1080p on a 24 GB card.
+  - No cap goes under 5 latents: a window in the middle of a shot shares 2 latents with each
+    neighbour and keeps at least one of its own. A shorter shot is one window of its length.
   - A window bounds the DiT only. The VAE's memory depends on the frame size, not on the
     window, since it streams in 4-frame slices (flat beyond ~9 frames). At 4K the untiled
     decode needs ≈ 134 GiB, so 4K needs tiled decoding, about 18 GiB with 1024-px tiles. The
@@ -154,8 +168,8 @@ never requires it.
 | I/O | ffmpeg pipes in and out, FFV1/PNG writers, manifest | ours |
 | CLI | options, logging | ours |
 
-**One long-running process** handles a whole job: models are loaded (and compiled) once and
-stay on the GPU when the plan allows it.
+**One long-running process** handles a whole job: the models are loaded once, and the plan says
+which stay on the GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewritten)).
 
 ### Language: all Python
 Every layer is Python, in one process per job. seedvr2x stands alone; with sptenc, the two
@@ -179,8 +193,9 @@ connect through files.
     lines), at the permanent cost of a versioned protocol, signal translation (sptenc cancels
     at once and kills its children), progress bridging, `--until` estimates crossing the
     boundary, and two packagings.
-  - One Python process per segment. Each one reloads the model and recompiles: 10–50 s of DiT
-    compilation, and 108.5 s for the first compiled VAE encode batch against 4.79 s steady
+  - One Python process per segment. Each one reloads the models, and with compilation (not in
+    v1, see [Memory planner](#memory-planner)) recompiles them: 10–50 s of DiT compilation, and
+    108.5 s for the first compiled VAE encode batch against 4.79 s steady
     ([vram.md](../research/docs/vram.md#torchcompile)). That's 27–136 min of DiT compilation
     alone over a 163-segment episode, and no stitching across joins.
   - An upscale stage inside sptenc: the same protocol, plus changes in sptenc's package `main`.
@@ -526,8 +541,8 @@ they differ and by which metrics, and how users are guided to them. What is know
       into pixels is what would lose precision. In the encoder, the latent itself would.
   - The VAE's memory is activations, about 34 GiB for an untiled 1080p decode: tiling is the
     lever there.
-  - The VAE is about four fifths of a 1080p run, so its speed matters most. Its levers are
-    `compile_vae` (−16 to −19% of VAE time, see [Memory planner](#memory-planner)) and,
+  - The VAE is about four fifths of a 1080p run, so its speed matters most. Its levers, after
+    v1, are `compile_vae` (−16 to −19% of VAE time, see [Memory planner](#memory-planner)) and,
     unmeasured, the convolutions' memory layout.
 - **What a smaller DiT file buys** is VRAM, for longer windows (fewer joins) and, on small
   cards, less BlockSwap; time only through quantized activations. BlockSwap already gives the
@@ -878,7 +893,8 @@ The rule: the upscale must look like its source in any given player.
      in those slices anyway. This is not a batch size: the shot is encoded in one pass.
    - The padding to 4n + 1 is made from the last 4 frames read, so the latent is the one-pass
      encode's, bit for bit.
-   - Only the latents are ever whole in memory.
+   - Only the latents are ever whole in memory, unless the encode is tiled: each tile then
+     runs over the whole shot, whose transformed input waits in the shot's scratch (step 3).
 
    Shots must start at real cuts:
    - each latent packs 4 frames (latent frames = 1 + (frames − 1)/4), so a cut inside a group
@@ -932,12 +948,37 @@ The rule: the upscale must look like its source in any given player.
    [Measured](../research/docs/stitching.md) with `lab`: −80% boundary jump against independent
    batches, no softening, output 40.5–40.8 dB from the single-window result, about +3–9%
    compute (the VAE is most of the time).
-3. **VAE decode** of the shot in one streaming pass, tiled when the planner says so.
+3. **VAE decode** of the shot: one streaming pass, or tiled when the planner says so.
+   - A tiled decode can't stream. Each tile keeps its own causal state over the whole shot, so
+     the tiles run one after the other, each over every frame, as numz's do over a batch, and
+     a frame is whole only after the last tile.
+   - The weighted tiles are summed in a scratch, in bf16: system memory up to an allowance, a
+     memory-mapped file in the shot's unit directory beyond it. It takes 12.7 MB per 1080p
+     frame and 50.5 MB per 4K frame, the padding included. After the last tile, the sums are
+     divided by the summed weights and handed on slice by slice, so colour correction and the
+     writers get what a streamed decode gives them. numz's CLI sums a whole batch on the CPU
+     and divides it on the GPU: its batches are short, a shot can be any length.
+   - The grid and the blend are numz's, bit for bit, in v1: tiles laid from the top left
+     corner, a stride of the tile's side less the overlap, a cosine ramp across the overlap on
+     the edges inside the picture, in bf16. It gives a bit-identity test against numz.
+     - The overlap is fixed at 64 px: the colour study's tiles after `split` and the recipes
+       validated per card size ran at 64 (see [Beyond numz's `lab`](#beyond-numzs-lab)), and
+       the one pair measured, 512-px decode tiles at 1080p, gained nothing at 128 (38.3 dB
+       from the untiled decode both ways, [vram.md](../research/docs/vram.md#tiling)).
+     - A balanced grid, without the sliver row this one leaves (144 px at 1080p under 1024-px
+       tiles), is a later change, measured as the padding was.
+   - A tiled encode goes the same way, each tile over the whole shot: the transformed input is
+     kept in the same scratch, exact, with no seeking back into the source.
+   - Streaming a tiled decode slice by slice would hold every tile's causal caches at once,
+     8.05 GiB per megapixel decoded ([decode-resume.md](../research/docs/decode-resume.md)): a
+     later way, for large cards.
 4. **Colour correction** against the input (see below).
 5. **Write** frames as they come out.
 
-Fallback when latent stitching can't be used: a linear pixel cross-fade over K = 4 frames
-(−67% boundary jump, mixed frames ~20% softer).
+No fallback where latent stitching can't be used, on a card too small for a window of 5
+latents: the size is refused (see [Memory planner](#memory-planner)). The alternative measured,
+a linear pixel cross-fade over K = 4 frames (−67% boundary jump, mixed frames ~20% softer),
+isn't built.
 
 ## Colour correction
 
@@ -973,8 +1014,9 @@ What `split` does, frame by frame:
     lightness flickers more than `lab`'s; at 3.2 px, fine texture starts to go.
   - No histogram step: numz's a\*b\* matching is what costs `lab` colour, moving it at every
     scale. With no statistics pooled over the shot, each frame needs only its own decode and
-    its reference frame, so the decode streams: no second pass, no buffer, a shot's first
-    frames out as they are decoded.
+    its reference frame, so the correction asks for no second pass and no buffer: an untiled
+    decode streams, a shot's first frames out as they are decoded (a tiled one holds them
+    until its last tile, see [Pipeline](#pipeline-per-shot), step 3).
 - **Against our `lab`** (colour.md: 7B fp16, shots of 45 frames, each verdict paired by frame
   and beyond `lab`'s seed spread, counted better / worse / within):
   - 1080p, ×2 from the mild degradation (8 clips, 3 seeds): ΔE00 −0.30, −0.46 and −0.29 after
@@ -1287,10 +1329,13 @@ compressed is the user's choice: afterwards, from the master, or during the run 
 ## Memory planner
 
 Built into the CLI, from the validated models in [vram.md](../research/docs/vram.md) and
-[planner-limits.md](../research/docs/planner-limits.md):
-- **Budget:** the free memory the driver reports once the CUDA context exists (`mem_get_info`,
-  read before anything else allocates on the GPU), minus 0.6 GiB. That covers the desktop and
+[planner-limits.md](../research/docs/planner-limits.md). It makes one plan per job, after the
+first pass, whose shots are its input, and before the models load:
+- **Budget:** the free memory the driver reports (`mem_get_info`) once the shot detector has
+  given its own back and before the models load, minus 0.6 GiB. That covers the desktop and
   other programs without guessing.
+  - The plan is made once, from what is free at the start: no option reserves more, and a run
+    never plans again as it goes (the user's decision, 2026-10-09).
   - The margin was bisected on emulated cards: a run needs 0.15–0.45 GiB between the free
     memory it starts with and the torch peak of its bounding phase, the decode-bound 8 GB card
     the most (it failed with 0.37 GiB). 0.6 GiB keeps 0.23 over the worst failure, and gives
@@ -1299,15 +1344,19 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
     retries.
 - **Host RAM** too. The process's peak, 16.5 GiB with 7B fp16, comes while the weights load,
   not during the shots, which stay flat (2.3–2.4 GiB resident over 6 shots). It is probably the
-  weights file mapped while it is copied to the GPU; not measured further. BlockSwap's pinned
-  host copies add their size. Both matter on hosts with little RAM.
+  weights file mapped while it is copied to the GPU; not measured further. On top come the
+  pinned host copies of what leaves the GPU (15.19 GiB for the DiT's 36 blocks, see
+  [BlockSwap, rewritten](#blockswap-rewritten)) and a tiled shot's scratch, up to its
+  allowance. The plan counts them against the host's available memory: a job they don't fit,
+  or whose copies the host won't pin, is refused before the run, naming the RAM it needs.
 - **Per-phase peaks** (P = output megapixels, T² = a tile's area in megapixels):
   - VAE encode ≈ 1.2 + 8.8·P GiB, decode ≈ 0.8 + 16.1·P GiB (flat beyond 9 frames)
   - tiled, from 1024-px tiles: encode ≈ 1.36 + 8.66·T², decode ≈ 0.44 + 16.29·T², refitted
     at 4K up to 2048-px tiles, where vram.md's fits fell 1.7 GiB short. Below 1024 px,
-    vram.md's: encode ≈ 1.7 + 8.4·T², decode ≈ 1.6 + 15.6·T². Each adds what is on the GPU
-    before the call: the weights, not the shot's frames, since seedvr2x feeds the encode slice
-    by slice (numz moves a batch's frames there first, 0.046 GiB per 4K frame).
+    vram.md's: encode ≈ 1.7 + 8.4·T², decode ≈ 1.6 + 15.6·T². The overlap doesn't move them.
+    Each adds what is on the GPU before the call: the VAE's weights (0.47 GiB) and the DiT
+    blocks the plan leaves there in that phase, not the shot's frames, since seedvr2x feeds the
+    encode slice by slice (numz moves a batch's frames there first, 0.046 GiB per 4K frame).
   - the colour correction, counted in the decode's phase, where it runs on each decoded slice:
     0.56 GiB per 4K frame it corrects at once
     ([colour.md](../research/docs/colour.md#cost-and-what-streams)).
@@ -1316,25 +1365,78 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
     That fits 26 window lengths, 1–78 latents at 1080p and 1–19 at 4K, to 0.005 GiB; tokens
     alone were up to 0.83 GiB off at 4K, since each attention window repeats the 58 text
     tokens. The other models' constants are in vram.md.
-  - On the 96 GB card: windows of 78 latents (309 frames) at 1080p, 0.56 GiB to spare, and 19
-    (73 frames) at 4K; one latent more fails within 3 s. vram.md's recipes per card size,
-    validated on emulated cards, are milestone 3's starting points.
-- **Choices, in order:** window length (the biggest quality lever: fewer boundaries),
-  BlockSwap blocks, VAE tile sizes, then what's left goes to speed: `compile_dit` (−26 to −32%
-  DiT time, +0.1 to +1.4 GiB), and `compile_vae` only when its memory fits (it about doubles
-  VAE activation memory, for −16 to −19% VAE time). Nothing caps a large card: the memory a
-  16–32 GB card spends on BlockSwap and tiles goes, on 96 GB and more, to longer windows and
-  speed.
-  - The tiles are the largest that fit. A frame takes the same time whatever the tile (a 4K
-    frame 5.3–5.6 s to encode and 11.5–12.3 s to decode with 1024-, 1536- or 2048-px tiles),
-    and smaller tiles drift more in colour, though after `split` too little to set a floor down
-    to 512 px, the smallest tile the planner makes (see
-    [Beyond numz's `lab`](#beyond-numzs-lab)).
+    - The 15.87 GiB hold the DiT's weights (15.35) and the VAE's (0.47), which numz keeps on
+      the GPU in its DiT phase. A swapped block takes its 0.42 GiB off, but for the two blocks
+      in the slots (see [BlockSwap, rewritten](#blockswap-rewritten)), and the VAE sent away
+      for the phase its 0.47 (measured on numz: 28.15 to 27.68 GiB). numz's own swap, one
+      block on the GPU at a time, saved 0.42 GiB × (S − 1) for S blocks, to 0.01 GiB;
+      seedvr2x's saving is measured with milestone 3.
+  - On the 96 GB card, in numz's padding (1,088 rows at 1080p): windows of 78 latents (309
+    frames) at 1080p, 0.56 GiB to spare, and 19 (73 frames) at 4K; one latent more fails
+    within 3 s.
+  - By the fit, in step 0's padding (1,104 rows at 1080p, 2,192 at 4K) and under the margin:
+    - every block on the GPU, at 1080p: 5 latents on a 24 GB card (6 take 22.22 GiB of its
+      21.96), 13 on 32 GB, 29 on 48 GB and 76 (301 frames) on 96 GB, where numz's padding gave
+      78; at 4K: 3 on 32 GB, 7 on 48 GB, and the 96 GB card keeps its 19
+    - all 36 blocks swapped, at 1080p: about 11 on 16 GB, 19 on 24 GB and 27 on 32 GB; at 4K:
+      2 on 16 GB, 4 on 24 GB, 6 on 32 GB, 10 on 48 GB and 22 on 96 GB
+
+    These take the free memory numz's process found (94.50 GiB on the 96 GB card, N − 1.44 on
+    a card emulated at N GB) and the swap's saving reckoned as above: milestone 3 measures
+    both on seedvr2x itself. vram.md's recipes per card size, validated on emulated cards with
+    the DiT off the GPU in the VAE's phases, as numz has it, are its starting points.
+- **Choices, in order,** the same plan for every shot of the job:
+  1. The window, the biggest quality lever (fewer joins): the longest shot's length when it
+     fits; else the longest window that fits, with as many blocks swapped as it takes, up to
+     all 36, and the VAE off the GPU for the DiT's phase. A card swaps blocks before it
+     shortens a window, the 96 GB one included, on a shot longer than its 76 latents.
+  2. The fewest swapped blocks that hold that window.
+  3. The largest VAE tiles, the decode's then the encode's, none where the untiled pass fits.
+     The DiT leaves the GPU for the VAE's phases before a tile shrinks.
+
+  What follows from them:
+  - The tiles are squares, their side a multiple of 64 px from 512 up, cut off at the
+    picture's edges (a 1280-px tile at 1080p is 1104×1280), the largest that fit. A frame
+    takes the same time whatever the tile (a 4K frame 5.3–5.6 s to encode and 11.5–12.3 s to
+    decode with 1024-, 1536- or 2048-px tiles), and smaller tiles drift more in colour, though
+    after `split` too little to set a floor down to 512 px, the smallest tile the planner
+    makes (see [Beyond numz's `lab`](#beyond-numzs-lab)). The encode's drift more than the
+    decode's (at 512 px, 33.4 dB from the untiled run against 38.3,
+    [vram.md](../research/docs/vram.md#tiling)), and no card tiles the encode without tiling
+    the decode, whose peak is about twice the encode's.
+  - Nothing caps a large card: the memory a 16–32 GB card spends on BlockSwap and tiles goes,
+    on 96 GB and more, to longer windows.
+  - **No `torch.compile` in v1.** numz's `compile_dit` (−26 to −32% DiT time, +0.1 to +1.4
+    GiB) and `compile_vae` (−16 to −19% VAE time, for about twice the VAE's activation memory,
+    the cause not isolated) compile again for every new input shape, and seedvr2x's windows
+    take every length up to the cap. The first compilation takes 10–50 s, a recompilation was
+    never timed, and whether compiled output equals the plain one bit for bit isn't measured
+    ([vram.md](../research/docs/vram.md#torchcompile)). The plan's record keeps both flags,
+    false. The first speed lever after v1 is `compile_vae` at 1080p on large cards: the VAE
+    being four fifths of a 1080p run, 13–15% of a job.
+  - **A size that doesn't fit is refused, never degraded.** When the smallest window, 5
+    latents, doesn't fit the DiT's phase with every block swapped, the job is refused before
+    the run, naming the largest output size that fits; no pixel cross-fade stands in (see
+    [Pipeline](#pipeline-per-shot)). At 4K such a window takes about 22 GiB: beyond a 16 GB
+    card, whose budget is about 14, and at the edge of a 24 GB card's 21.96: by the fit from
+    0.3 GiB over it to 0.6 under, as the swap's saving and the VAE's 0.47 GiB turn out.
+    Milestone 3 measures it; a 24 GB card that also drives a desktop falls short either way.
+- **Pins.** `--window N`, `--swap-blocks N`, `--encode-tile PX` and `--decode-tile PX` (0 for
+  untiled) each fix one choice, and the planner makes the others around it. A pin is taken
+  exactly or refused, never adjusted: the refusal names what fits, the longest window, the
+  fewest blocks or the largest tile. `--window N` pins the cap, 5 at least: no window longer
+  than N latents, a shorter shot still one window of its own length. Two runs pinned alike
+  match bit for bit.
 - **Time estimates** (for `--until`, `--plan` and progress) are measured, never constants.
-  The DiT's time is its tokens times the machine's time per token, flat within ±5% across
-  window lengths and resolutions, but anywhere from 0.23 to 0.45 ms on this one GPU, with its
-  clock. A run measures it on its first window, and the VAE's time per frame on its first
-  slices; `--plan` measures both with a short calibration on the GPU.
+  - One model per kind of unit, each a constant plus a rate: a shot's encode and a segment's
+    decode by the frame, a window by the token. The DiT's time per token is flat within ±5%
+    across window lengths and resolutions, but anywhere from 0.23 to 0.45 ms on this one GPU,
+    with its clock.
+  - One calibration sets them, at the job's size and tiles: 13 frames encoded and decoded, and
+    one window of 2 latents. `--plan` runs it, and so does a run given `--until`; any other
+    run takes its first units' times.
+  - After every unit, each model is corrected by the median of the last 5 ratios of measured
+    to predicted time, which follows a card whose speed drifts.
   - Every time figure in this document comes from a card whose faulty power reading caps its
     clock under load (about 580 MHz, where it runs 2.6 GHz free): the values hold, but a
     healthy card should take 2 to 3 times less, unmeasured. The times are measured again on a
@@ -1352,24 +1454,66 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
     ([quality.md](../research/docs/quality.md#vae-tiling-on-flat-areas)), and `split` leaves
     about half of what `lab` leaves
     ([colour.md](../research/docs/colour.md#vae-tiles-at-1080p)).
-  - So the plan is part of the job. The manifest records it, and a resume reuses it rather
-    than planning again, since free memory varies from one start to the next. A resume whose
-    plan no longer fits stops and says so.
-  - `--window` and the tile options pin a plan, for two runs that must match bit for bit.
+  - So the plan is part of the job, and the manifest records it in two parts:
+    - What shapes the output: the window cap, the tiles and their overlap, and the two compile
+      flags. A resume compares them as it does the layout, and takes them as recorded.
+    - What doesn't: the swapped blocks, what stays on the GPU in each phase, the free memory,
+      the budget, the predicted peaks and the timings, recorded for information. Free memory
+      varies from one start to the next, so a resume plans these again around the recorded
+      shape, from the memory free that day.
+    - A resume whose recorded shape no longer fits stops, naming the phase and the shortfall.
+      A plan recorded with no unit made yet is made again whole.
+    - This rests on swapping changing no bit of the output, milestone 3's first gate (see
+      [BlockSwap, rewritten](#blockswap-rewritten)).
 - `--plan` prints the plan and the time estimate without running the job, after the first pass
   (the shots are the plan's input), and writes the detected cut list for editing (see
-  [Shot detection](#shot-detection)).
+  [Shot detection](#shot-detection)). It loads the models, for the calibration. It prints:
+  - the card, its free memory and the budget
+  - the padded size and the tokens per latent
+  - the shots and the longest one; the window cap, the shots that run in one window, the joins
+  - the swapped blocks and the pinned host memory
+  - the tiles and their grid, and the scratch of the longest tiled shot
+  - each phase's predicted peak, and which one bounds the plan
+  - the time per phase, the total, and the longest unit, which is how early `--until` may stop
+  - what was pinned
 - Validated before release with `vram_cap.py` emulation, from the smallest card the 7B fp16
-  reaches up to 48 GB.
+  reaches up to 48 GB, and on a real consumer card for what emulation doesn't show: pinned
+  host memory, the transfers, a desktop's share of the card, and the times.
 
 ### BlockSwap, rewritten
-numz moves each block to the GPU and back to pageable memory at every forward pass,
-synchronously ([measured](../research/docs/vram.md)). Weights never change, so:
-- one **pinned** host copy per block, host→device only (57 GB/s pinned vs 4 GB/s back to
-  pageable memory)
-- **prefetch** the next block on a side stream while the current one computes
+numz swaps its first N blocks: each goes to the GPU for its forward pass and back to pageable
+memory after it, synchronously, about 25 ms up and 95 ms back per block
+([measured](../research/docs/vram.md#blockswap)). Weights never change, so:
+- one **pinned** host copy per block that leaves the GPU, host→device only (57 GB/s pinned vs
+  4 GB/s back to pageable memory): nothing is ever copied back
+- the **last** S blocks are the swapped ones, so the first upload hides behind the resident
+  blocks' compute
+- they stream through **two slots** on the GPU, allocated once and written in place: the
+  DiT's peak falls by each swapped block's 0.42 GiB, but for those two
+- only parameters move: RoPE's tables are buffers, and stay on the GPU
+- **prefetch**: the next block is copied on a side stream while the current one computes. A
+  copy waits for its slot's last reader and a block for its copy, by the GPU's own events,
+  the host never waiting. The synchronous version is built first: it is the reference the
+  prefetch is checked against, and already rid of numz's way back.
+- **Per phase.** The plan says what stays on the GPU in each phase; the rest waits in its
+  pinned copy. Below 48 GB at 1080p the DiT leaves for the VAE's encode and decode: an untiled
+  decode takes about 35 GiB with the VAE alone (34.9–35.7 measured on numz, which has the DiT
+  off the GPU in those phases), and the DiT's 15.35 GiB beside it would pass that card's
+  budget. It comes back in about 0.3 s at the pinned rate. The VAE's 0.47 GiB leave for the
+  DiT's phase the same way, when the window wants them. Once a model has left, the GPU holds
+  what the other alone would.
+- **The loader** never puts a swapped DiT whole on the GPU, which a 16 GB card couldn't hold:
+  its swapped blocks go straight to their pinned copies.
+- **Pinned memory refused, or too little host RAM:** the job is refused before the run, naming
+  the RAM it needs. A pageable copy (18–25 GB/s to the GPU, measured) is a later fallback,
+  logged.
+- **The gate: swapping changes no bit** of the output, for any number of swapped blocks, with
+  and without the prefetch. numz's own swap changed none
+  ([models.md](../research/docs/models.md#blockswaps-free-q4_k_m-swap-the-power-cap-test)).
+  The resume rule rests on it (see [Memory planner](#memory-planner)).
 
-Expected: most of the swap cost hidden. To measure.
+Expected: most of the swap cost hidden. To measure, on a healthy card above all: its blocks
+should compute 2 to 3 times faster, which leaves the prefetch less time to hide in.
 
 ### Allocator
 `cudaMallocAsync` stays the default (it trims its pool on a full card; `native` fragments and
@@ -1392,6 +1536,9 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     depends on the latent's layout. They are loaded with `weights_only=True`, so a tampered
     file can't run code.
   - Each file is written as `.partial`, fsync'd, renamed, and only then recorded.
+  - A tiled shot's scratch goes there too when it outgrows its allowance of system memory (see
+    [Pipeline](#pipeline-per-shot), step 3). It is derived data, never recorded: a stopped
+    encode or decode starts again, and a resume discards the file.
   - A latent is deleted once its windows are done, a shot's directory once its segment is
     finished, and `resume/` once the job is.
   - `-o x.mkv` keeps its units in memory, so it isn't resumable until assembly gives it
@@ -1447,6 +1594,9 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     copies. An
     accepted ffmpeg change must read and tag the source exactly as before.
   - output, shots (windows, encoded, windows done), and segments (bytes when finished)
+  - plan: what shapes the output (the window cap, the tiles and their overlap, the compile
+    flags), compared on resume, and what doesn't, for information (see
+    [Memory planner](#memory-planner))
   - `environment_changes`: each change accepted with `--accept-env-change`. It records when,
     each field that changed with its values before and after (the driver included, for
     information), and how many segments, shots and windows were already made.
@@ -1499,8 +1649,13 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - The run polls the GPU (every 10 ms) before device-to-host copies: Python can't run a
     signal handler during a blocking CUDA copy (a decode slice takes ~8 s at 1080p), and two
     presses would merge into one.
-  - `--until HH:MM` stops cleanly before a unit that wouldn't finish in time, using the
-    planner's time estimates; it comes with the planner.
+  - `--until HH:MM` stops cleanly before a unit that wouldn't finish in time: the next time the
+    local clock shows HH:MM, logged as a full date. Before each unit, the run stops when now
+    plus 1.15 times the unit's estimate passes it (see [Memory planner](#memory-planner), time
+    estimates). Units are never reordered to fill the time left. It exits 75 (`EX_TEMPFAIL`),
+    so that a script tells a job stopped by the clock, to be run again, from a finished one
+    (0) and from a Ctrl-C (130). The longest unit, a segment's decode, sets how early it may
+    stop: `--plan` prints it.
 - Exiting frees the GPU entirely.
 - **Non-finite values** (NaN, inf) stop the run, in both colour correction modes, with a
   message naming the stage, shot, window or frames. numz writes NaN patches about 63 px wide
@@ -1538,9 +1693,9 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--color_correction` | `split` (ours, beyond numz's `lab`) by default; `none` available; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` dropped |
 | `--input_noise_scale` | dropped (numz's own addition, only degrades) |
 | `--latent_noise_scale` | dropped from v1 (ByteDance uses 0; corrected version possibly later as an experiment, see bug 08) |
-| `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | replaced by shots, windows and latent stitching, chosen by the planner; window length can be capped by the user |
-| `--blocks_to_swap`, tile sizes, offload devices | chosen by the planner; overridable |
-| `--compile_dit`, `--compile_vae` | chosen by the planner when memory allows; overridable |
+| `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | replaced by shots, windows and latent stitching, chosen by the planner; `--window` pins the window cap |
+| `--blocks_to_swap`, tile sizes, offload devices | chosen by the planner; `--swap-blocks`, `--encode-tile` and `--decode-tile` pin them, exactly or refused; no offload device, the DiT's host copy being pinned memory |
+| `--compile_dit`, `--compile_vae` | not in v1: every new window length compiles again; the first speed lever after it |
 | `--cache_dit`, `--cache_vae`, `--chunk_size` | dropped: one long-running process, streaming by design |
 | `--seed` | kept (comparisons, reproducibility) |
 | `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
@@ -1623,6 +1778,10 @@ explanation.
   - Frames are written into output segments as they come out.
   - Only the latents are ever whole in memory, so RAM stays flat with length (2.3–2.4 GiB
     over a 377-frame, 6-shot job).
+  - That is the untiled VAE. Tiled, as the decode is below 48 GB at 1080p and on every card at
+    4K, each tile runs over the whole shot, whose frames wait in a scratch: system memory up to
+    an allowance, then a file beside the saved units (see [Pipeline](#pipeline-per-shot),
+    step 3). The docs give its size per frame.
   - The models stay loaded for the whole job.
   - Every unit is saved, so a job stops and resumes, bit for bit.
 - **Why the knobs go:**
@@ -1667,6 +1826,8 @@ explanation.
     freed memory reserved, and trims it only when an allocation would fail
   - which phase sets the peak: the DiT through the window length, the VAE through the frame
     size, which is why 4K needs tiled decoding
+- what a small card asks of the host and can't run: pinned RAM for the DiT's swapped blocks
+  (15.19 GiB with all 36), a tiled shot's scratch, and the sizes refused (4K on a 16 GB card)
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
   formats or matrices), and what to do with each; for a rate its timestamps contradict, the
@@ -1674,6 +1835,8 @@ explanation.
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
   transfer kept, square pixels)
 - resume: the same command resumes; what refuses a resume and why; `--accept-env-change`
+- stopping at a set time: `--until`, what it stops before, its exit code (75) for scripts that
+  run a job night after night, and the longest unit `--plan` prints
 - integrity: the per-frame checksums kept with the output, and `seedvr2x verify` to check a
   job's masters before trusting them
 - seeds and reproducibility: the same settings and plan (window lengths and tiles, which
@@ -1729,7 +1892,12 @@ writers, and the planner needs real shot lengths.
 4. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory. The planner's inputs (budget,
    margin, the DiT's and the tiled VAE's peaks, 4K limits, measured times) are in
-   [Memory planner](#memory-planner). Consumer cards need it to run 1080p at all.
+   [Memory planner](#memory-planner). Consumer cards need it to run 1080p at all. Decided on
+   2026-10-10, ahead of the build: how a tiled encode and decode run and where their frames
+   wait (see [Pipeline](#pipeline-per-shot), step 3), which blocks swap and what leaves the
+   GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewritten)), the order of the
+   planner's choices, the pins, what of a plan a resume keeps, the time model and `--until`'s
+   rule, and no `torch.compile` in v1.
 5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow. The manual sptenc
    workflow already works without it.
 
@@ -1780,8 +1948,18 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
        left are fractions of a level. One clip and four boundaries: the visual review of
        milestone 7 covers the rest.
    - The single-window case stays bit-identical to milestone 1.
-3. **Planner:** every card size passes under `vram_cap.py` emulation; plan estimates within a
-   few percent of measured time and memory.
+3. **Planner, BlockSwap and tiling.**
+   - Swapping changes no bit: the output with any number of blocks swapped, with and without
+     the prefetch, equals the output with none.
+   - Tiling is numz's, bit for bit: a tiled encode and decode equal numz's on milestone 1's
+     input, in numz's padding.
+   - Every card size passes under `vram_cap.py` emulation, each phase's predicted peak within
+     a few percent of the measured one.
+   - A job resumed with other memory free gives the uninterrupted run's output, bit for bit.
+   - Time estimates within a few percent of the measured times, on a healthy card: the
+     power-capped one's time per token moves between 0.23 and 0.45 ms. A real consumer card
+     also shows what emulation can't: pinned host memory, the transfers, a desktop's share of
+     the card.
 4. **Resume:** interrupted and resumed runs bit-identical to uninterrupted ones.
 5. **Colour correction:** our `lab` against numz's `lab`, one batch = one shot.
    - Material: milestone 1's input, clip B and the measurement campaign's full-reference
