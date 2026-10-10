@@ -93,6 +93,16 @@ def test_ratio_option() -> None:
             cli._ratio(text)
 
 
+def test_rate_option() -> None:
+    # --frame-rate: N/D or a whole number, exact and positive; a decimal refused, saying how to
+    # write it.
+    assert cli._rate("24000/1001") == Fraction(24000, 1001)
+    assert cli._rate("25") == cli._rate("50/2") == Fraction(25)
+    for text in ("23.976", "0", "24/0", "0/1001", "-24", "24:1", "24/1/1", ""):
+        with pytest.raises(argparse.ArgumentTypeError, match="write it N/D or as a whole number"):
+            cli._rate(text)
+
+
 def test_refused_source_stops_before_torch(tmp_path: Path) -> None:
     # The build and the source are checked before the GPU is touched: torch isn't even imported.
     try:

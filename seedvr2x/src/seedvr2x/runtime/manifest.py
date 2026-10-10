@@ -194,6 +194,7 @@ def _input(source: Source) -> dict[str, Any]:
         "modified_ns": status.st_mtime_ns,
         "sha256": source.sha256,
         "frames": source.frames,
+        # The rate it declares; the job's, --frame-rate's when given, is the output's (cli._run).
         "frame_rate": str(source.stream.frame_rate),
         "size": [source.stream.width, source.stream.height],
         "sample_aspect": str(source.sample_aspect),

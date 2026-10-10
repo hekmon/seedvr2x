@@ -32,6 +32,7 @@ import numpy.typing as npt
 import pytest
 import torch
 from test_probe import BT709_VUI, has_encoder, has_x265, x265_file
+from test_rate import mechanism7, retagged, strayed
 
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
@@ -2393,3 +2394,128 @@ def test_a_frame_decoded_otherwise_taken_and_summed_up(
     assert f"{said} as decoded (10): an output is bit-identical across a resume only" in caplog.text
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
+
+
+def test_a_drift_off_the_declared_rate_warned_of_again_on_a_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 48 fps declared 50/1 (test_rate.retagged), 100 frames: read at the rate it declares, its
+    # frames half a frame and more off that rate's timeline from frame 12, warned of
+    # (media/source.py, _strays). A resume takes the first pass from its record, reads on at
+    # the same rate, and says so again, from the recorded index, in the same words: the
+    # warning was the first pass's alone, and a job resumed read on without it.
+    from seedvr2x.media import source as examined
+
+    scans: list[Path] = []
+    scan = examined.scan
+
+    def counted(path: Path) -> object:
+        scans.append(path)
+        return scan(path)
+
+    monkeypatch.setattr(examined, "scan", counted)
+    monkeypatch.chdir(tmp_path)
+    source_path = retagged(tmp_path / "retagged.mkv", 50, "round(N*1000/48)", 100)
+    (tmp_path / "cuts.txt").write_text("12\n")
+    options = ("--cuts", "cuts.txt", "--min-segment", "0.1")
+    steps.stop = "encode 12"
+    stopped(tmp_path, source_path, "out", *options)
+    first = strayed(caplog)
+    assert len(first) == 1 and len(scans) == 1
+    assert first[0].startswith(
+        f"{source_path}: 88 of its 100 frames half a frame or more from their place on the"
+        " timeline of the rate it declares, 50/1, from frame 12, up to 83 ms (4.15 of a frame):"
+    )
+    assert "its timestamps follow 48/1 fps (48) exactly" in first[0]
+    caplog.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert len(scans) == 1  # the first pass's record trusted
+    assert strayed(caplog) == first
+    names = ("seg_000000.mkv", "seg_000001.mkv")
+    assert indexes(tmp_path / "out" / names[0]) + indexes(tmp_path / "out" / names[1]) == list(
+        range(100)
+    )
+    # With --frame-rate, the rate asked for is the job's, and nothing of the declared one's
+    # timeline is said, in the first run or in its resume.
+    caplog.clear()
+    steps.stop = "encode 12"
+    stopped(tmp_path, source_path, "at48", *options, "--frame-rate", "48")
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "at48", *options, "--frame-rate", "48") == 0
+    assert len(scans) == 2 and not strayed(caplog)
+
+
+def rate_of(path: Path) -> str:
+    """The frame rate an output declares, as ffprobe gives it (r_frame_rate)."""
+    probed = subprocess.run(
+        [
+            *("ffprobe", "-v", "error", "-select_streams", "v:0"),
+            *("-show_entries", "stream=r_frame_rate", "-of", "csv=p=0", str(path)),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return probed.strip()
+
+
+@needs_x264
+def test_frame_rate_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # research/docs/seeking.md's mechanism 7 at 64x48 (test_rate.mechanism7): declared 24/1, its
+    # 260 frames within 10.8 ms of 24000/1001's timeline. Refused without --frame-rate, the
+    # refusal giving that rate; with --frame-rate 24000/1001, every frame read, in order, and that
+    # rate the job's everywhere (media/source.py, Source.frame_rate): each output segment
+    # declares it; the segments' merge rule takes it, 0.5005 s being 12 frames at 24000/1001 and
+    # 13 at 24/1, so the 12-frame first shot is a segment of its own; the manifest records it,
+    # its settings and output, the input keeping the rate it declares. --frame-rate 24 refused,
+    # naming frame 252. A resume with another --frame-rate, or none, is another job, refused
+    # before its first pass; with the same, the uninterrupted run's output.
+    from seedvr2x.media import source as examined
+
+    scans: list[Path] = []
+    scan = examined.scan
+
+    def counted(path: Path) -> object:
+        scans.append(path)
+        return scan(path)
+
+    monkeypatch.setattr(examined, "scan", counted)
+    monkeypatch.chdir(tmp_path)
+    source_path = mechanism7(tmp_path / "s9.mkv", size="64x48")
+    (tmp_path / "cuts.txt").write_text("12\n")
+    options = ("--cuts", "cuts.txt", "--min-segment", "0.5005")
+    ntsc = ("--frame-rate", "24000/1001")
+    text = refused(tmp_path, source_path, caplog, *options)
+    assert "s9.mkv: its timestamps run at 24000/1001 fps (23.976), within 10.8 ms" in text
+    assert "; or give --frame-rate 24000/1001, which takes its frames at that rate" in text
+    assert upscale(tmp_path, source_path, "whole", *options, *ntsc) == 0
+    whole = tmp_path / "whole"
+    names = ("seg_000000.mkv", "seg_000001.mkv")
+    assert sorted(p.name for p in whole.glob("*.mkv")) == list(names)
+    assert indexes(whole / names[0]) + indexes(whole / names[1]) == list(range(260))
+    assert [rate_of(whole / name) for name in names] == ["24000/1001"] * 2
+    content = json.loads((whole / "manifest.json").read_text())
+    assert content["settings"]["frame_rate"] == content["output"]["frame_rate"] == "24000/1001"
+    assert content["input"]["frame_rate"] == "24"
+    assert [(s["start"], s["end"]) for s in content["segments"]] == [(0, 12), (12, 260)]
+    text = refused(tmp_path, source_path, caplog, *options, "--frame-rate", "24", output="at24")
+    assert "s9.mkv: --frame-rate 24/1: frame 252 lies 21.0 ms after its place on" in text
+    steps.stop = "encode 12"
+    stopped(tmp_path, source_path, "out", *options, *ntsc)
+    scans.clear()
+    for other, said in (("24", '"24000/1001" -> "24"'), (None, '"24000/1001" -> null')):
+        rate = ("--frame-rate", other) if other else ()
+        text = refused(tmp_path, source_path, caplog, *options, *rate)
+        assert (
+            f"another job than the one asked, which differs in:\n  settings.frame_rate: {said}"
+            in text
+        )
+    assert scans == []
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *options, *ntsc) == 0
+    assert scans == []  # the first pass's record trusted
+    for name in names:
+        assert decoded(tmp_path / "out" / name) == decoded(whole / name)

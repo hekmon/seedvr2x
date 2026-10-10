@@ -160,6 +160,16 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N:D",
         help="sample aspect ratio of the source, when its tag is missing or wrong",
     )
+    # An override like the two above (DESIGN.md, Input: exact rational frame rate), for a file
+    # whose timestamps contradict the rate it declares; the refusal of such a file says which.
+    parser.add_argument(
+        "--frame-rate",
+        type=_rate,
+        metavar="N/D",
+        help="frame rate of the source, when its timestamps contradict the one it declares, N/D or"
+        " a whole number (24000/1001, 25): its frames taken at that rate, only if every one lies"
+        " within half a frame of that rate's timeline",
+    )
     parser.add_argument(
         "--window",
         type=int,
@@ -381,7 +391,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         conversions = fingerprint()
         logger.info("ffmpeg %s, its conversions' fingerprint %s", ffmpeg_version, conversions[:16])
-        declared = declare(args.input, args.input_matrix, args.input_sar)
+        declared = declare(args.input, args.input_matrix, args.input_sar, args.frame_rate)
         # The size the frames are resized to, from what the source declares; refused, before the
         # first pass, when too small to pad (job.check_target).
         stream = declared.stream
@@ -473,7 +483,7 @@ def _run(args: argparse.Namespace) -> int:
             {
                 "format": args.format,
                 "size": [out_width, out_height],
-                "frame_rate": str(stream.frame_rate),
+                "frame_rate": str(source.frame_rate),
             },
         )
         if prior is None and not _empty(directory):
@@ -519,7 +529,7 @@ def _run(args: argparse.Namespace) -> int:
     tags = Tags.of(stream, source.conversion.matrix_tag)
 
     def open_segment(path: Path) -> Writer:
-        size = (out_width, out_height, stream.frame_rate)
+        size = (out_width, out_height, source.frame_rate)
         stale = _checksums_path(directory, path, args.format)
         return open_writer(args.format, path, *size, tags, stale=stale)
 
@@ -605,7 +615,8 @@ def _directory_refused(path: Path) -> str:
     # frame lasts 41.708: 1 ms early at each of the 155 joins, the last frame 155 ms early. That
     # is not the drift sptenc's ffmpeg/concat.go describes, of encoded segments counting their
     # last frame for 42 ms, late. The frames stay 41 or 42 ms apart, which the first pass
-    # accepts, and the output is written at the declared rate, frame by frame; but a default
+    # accepts, and the output is written at the declared rate, frame by frame, the drift warned
+    # of once a frame lies half a frame off that rate's timeline (source._strays); but a default
     # read by ffmpeg (vfr) drops 3 of the 2,400 frames. sptenc's concat, with a duration line
     # per segment and every timestamp snapped to the frame grid (ffmpeg/concat.go), gives the
     # master's timestamps back, every one.
@@ -719,8 +730,7 @@ def _segments(
 
     if directory is None:
         return [OutputSegment(args.output.stem, 0, source.frames)], [args.output]
-    frame_rate = source.stream.frame_rate
-    segments = merged_segments(shots, source.frames, frame_rate, args.min_segment)
+    segments = merged_segments(shots, source.frames, source.frame_rate, args.min_segment)
     suffix = "" if args.format == "png" else ".mkv"
     return segments, [directory / f"{segment.name}{suffix}" for segment in segments]
 
@@ -775,6 +785,7 @@ def _settings(
         "min_segment": str(args.min_segment),
         "input_matrix": args.input_matrix,
         "input_sar": None if args.input_sar is None else str(args.input_sar),
+        "frame_rate": None if args.frame_rate is None else str(args.frame_rate),
     }
     if numz_padding:
         settings["numz_padding"] = True
@@ -1107,6 +1118,18 @@ def _seconds(text: str) -> Fraction:
     if seconds < 0:
         raise argparse.ArgumentTypeError(f"{text!r}: negative")
     return seconds
+
+
+def _rate(text: str) -> Fraction:
+    """A positive frame rate, exact, written N/D or as a whole number, as ffprobe's r_frame_rate
+    gives it: 24000/1001, not 23.976."""
+    match = re.fullmatch(r"(\d+)(?:/(\d+))?", text)
+    if match is None or int(match[1]) == 0 or (match[2] is not None and int(match[2]) == 0):
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: not a frame rate; write it N/D or as a whole number, exact: 24000/1001 for"
+            " 23.976, 30000/1001 for 29.97, 25"
+        )
+    return Fraction(int(match[1]), int(match[2] or 1))
 
 
 def _ratio(text: str) -> Fraction:

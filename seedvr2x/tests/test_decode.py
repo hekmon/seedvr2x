@@ -439,8 +439,10 @@ def test_vfr_refused(tmp_path: Path) -> None:
         "ffv1",
         str(path),
     )
-    with pytest.raises(MediaError, match="variable frame rate"):
+    with pytest.raises(MediaError, match="variable frame rate") as refused:
         examine(path)
+    # No constant rate holds such a mix within half a frame: no guidance (media/rate.py).
+    assert "--frame-rate" not in str(refused.value)
 
 
 def test_drifted_join_scanned_without_errors(
@@ -450,7 +452,9 @@ def test_drifted_join_scanned_without_errors(
     # 24000/1001 split losslessly, one per segment, joined by ffmpeg's concat demuxer, each
     # segment starting 41 ms after the one before, where a frame lasts 41.708. From frame 30 on,
     # half a frame off the grid: no error for the first pass to report, every frame counted, and
-    # the steady 41 ms accepted.
+    # the steady 41 ms accepted: read at the rate declared, and warned of (source._strays), a
+    # join at every frame being a constant rate of its own, 1000/41 fps, named there, where
+    # joins further apart are no rate's (tests/test_rate.py).
     master, joined, listed = tmp_path / "master.mkv", tmp_path / "joined.mkv", tmp_path / "list"
     frames = 32
     run(
@@ -468,6 +472,12 @@ def test_drifted_join_scanned_without_errors(
     source = examine(joined)
     assert (source.frames, source.stream.frame_rate) == (frames, Fraction(24000, 1001))
     assert "reported errors" not in caplog.text
+    assert (
+        f"{joined}: 2 of its 32 frames half a frame or more from their place on the timeline of"
+        " the rate it declares, 24000/1001, from frame 30, up to 22 ms (0.53 of a frame): read at"
+        " the rate it declares all the same, frame after frame, as a file joined by ffmpeg's"
+        " concat demuxer is; its timestamps follow 1000/41 fps (24.39) exactly"
+    ) in caplog.text
 
 
 def test_interlaced_refused(tmp_path: Path) -> None:

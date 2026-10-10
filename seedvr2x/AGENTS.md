@@ -150,6 +150,15 @@ uv run pytest
   `tests/test_seek_sources.py` holds the index and its reads to measurement's real sources, on the
   CPU: opt-in, it reads the list of sources named by `SEEDVR2X_SEEK_SOURCES`, each with
   `seek_test.py`'s outputs for it (its docstring says the list's format), and skips without it.
+- A source's rate against its frames' timestamps (`media/rate.py`), the refusal's guidance and
+  `--frame-rate` are held by `tests/test_rate.py` to `seeking.md`'s mechanism 7 made on purpose,
+  S9's timestamps (`mechanism7`); the warning of a file sptenc's rule passes whose frames leave
+  its declared rate's timeline, to rates contradicted within its 1 ms (24000/1001 declared 24/1,
+  48 declared 50/1, 33 ms a frame declared 30/1), read and warned of with the rate their
+  timestamps are exactly, and to joins by ffmpeg's concat demuxer, warned of without one; and by
+  `tests/test_cli_run.py` to a run. Opt-in, a real source:
+  `SEEDVR2X_RATE_SOURCE` names it, `SEEDVR2X_RATE_EXPECTED` the rate its timestamps follow (N/D);
+  one first pass, then the rule without and with `--frame-rate` (its docstring says how).
 
 ## Comments and documents
 

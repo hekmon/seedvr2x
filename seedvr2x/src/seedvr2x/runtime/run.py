@@ -97,7 +97,7 @@ def run_job(
     numz_padding is for tests only (cli.NUMZ_PADDING): each encode's frames padded as numz pads
     them (shot.encode_shot)."""
     stream = source.stream
-    copies = Copies(stream.width, stream.height, stream.frame_rate) if split else None
+    copies = Copies(stream.width, stream.height, source.frame_rate) if split else None
     groups = [
         [i for i, shot in enumerate(shots) if s.start <= shot.start < s.end] for s in segments
     ]
