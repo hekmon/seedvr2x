@@ -106,6 +106,7 @@ class VideoStream:
     source resolves with its first frame's (media/source.py, resolved). An absent tag reads "",
     whatever word ffprobe has for it ("unknown", "unspecified")."""
 
+    codec_name: str  # ffprobe's name: "h264", "hevc", "mpeg2video"...
     width: int
     height: int
     pix_fmt: str
@@ -199,6 +200,7 @@ def parse(path: Path, output: str, first_frame: bool = True) -> VideoStream:
     if frame_rate is None:
         raise MediaError(f"{path}: no frame rate declared")
     return VideoStream(
+        codec_name=_tag(stream.get("codec_name")),
         width=int(stream["width"]),
         height=int(stream["height"]),
         pix_fmt=str(stream["pix_fmt"]),

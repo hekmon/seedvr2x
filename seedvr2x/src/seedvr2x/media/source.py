@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 
+from seedvr2x.media import bitstream
 from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion, conversion_for
 from seedvr2x.media.decode import Decoder
 from seedvr2x.media.ffmpeg import MediaError, input_args
@@ -100,8 +101,21 @@ RANGES = {"tv": "tv (limited)", "pc": "pc (full)"}
 # (libavutil/pixdesc.c:3327, libavcodec/options_table.h:321).
 OPTION_VALUES = {"gbr": "rgb"}
 
-# PROVISIONAL (DESIGN.md, Input, reads the chroma location with the other tags, a contradiction
-# refused; design decides): the chroma location is out of the contradiction rule, since a decoder's
+# Two names of one meaning, the stream's and its first frame's, are no contradiction (DESIGN.md,
+# Input): the stream's name is kept (resolved). ITU-T H.273 (07/2024) says which code points are
+# "functionally the same": the matrices 5 and 6 (Table 4), ffmpeg's bt470bg and smpte170m, whose
+# coefficients are equal (libavutil/csp.c:48-49 at n9.0.2; "functionally identical", pixfmt.h:707);
+# the transfers 1, 6, 14 and 15 (Table 3), its bt709, smpte170m, bt2020-10 and bt2020-12
+# (pixfmt.h:668, 673, 681-682), one function in its own tables (csp.c:445-457). The primaries
+# bt470bg and smpte170m differ (Table 2, csp.c:79-80). Provisional (DESIGN.md names the matrix's
+# and the transfer's alone): H.273's primaries 6 and 7, smpte170m and smpte240m, are "functionally
+# the same" too (Table 2; "identical", pixfmt.h:645), and still refused.
+SYNONYMS = {
+    "color_space": frozenset({"bt470bg", "smpte170m"}),
+    "color_transfer": frozenset({"bt709", "smpte170m", "bt2020-10", "bt2020-12"}),
+}
+
+# The chroma location is the exception to the contradiction rule (DESIGN.md, Input): a decoder's
 # default is no declaration. Many bitstreams carry no siting, and their decoders give their codec's
 # default: MPEG-1's centre, MPEG-2's left in 4:2:0 and top left in 4:2:2 and 4:4:4
 # (libavcodec/mpeg12dec.c:948, 958-960 at n9.0.2), MPEG-4 Part 2's left (mpeg4videodec.c:4032),
@@ -113,9 +127,9 @@ OPTION_VALUES = {"gbr": "rgb"}
 # that its decoder calls top left (the same siting, without vertical subsampling) are consistent
 # files that the rule would refuse, its remux to the frames' siting mis-siting them. The stream's
 # siting is taken, the container's when it declares one, else the decoder's
-# (libavformat/demux.c:2597-2598), as when the stream alone was read; the first frame's where the
-# stream has none (resolved). Both declared and different are said (declare), never refused nor in
-# the remux: COLOUR's option for the chroma location goes unused while it is out.
+# (libavformat/demux.c:2597-2598); the first frame's where the stream has none (resolved). Both
+# declared and different are said in an info line (declare), never refused nor fixed: COLOUR's
+# option for the chroma location goes unused.
 SITING = "chroma_location"
 
 
@@ -202,6 +216,19 @@ def declare(
             *waived,
             matrix,
         )
+    for name, (declared_as, decoded_as) in _sides(probed).items():
+        settled = name == "color_space" and matrix is not None  # read as --input-matrix's
+        if _one_meaning(name, declared_as, decoded_as) and not settled:
+            # Provisional (DESIGN.md doesn't say whether it is said): the conversion, the output's
+            # tags and the manifest take the stream's name (resolved), not the bitstream's.
+            logger.info(
+                "%s: %s %s against %s on its first frame: two names of one %s, the stream's kept",
+                path,
+                COLOUR[name][0],
+                declared_as,
+                decoded_as,
+                COLOUR[name][0],
+            )
     sited, decoded = _sides(probed)[SITING]
     if sited and decoded and sited != decoded:
         # Never refused (SITING): said, the stream's taken.
@@ -300,9 +327,9 @@ def counted(declared: Declared, found: FirstPass) -> Source:
 def declared_refusal(stream: VideoStream, matrix: str | None = None) -> str:
     """Why a stream is refused for what it declares and its first frame carries, every such reason
     in one, numbered when there are several, or "": interlacing; HDR, Dolby Vision unless over an
-    SDR base layer; colour tags its first frame contradicts, the matrix's but when `matrix`
-    (--input-matrix) settles it, the chroma location's never (SITING); a rotation or flip; a
-    declared crop (DESIGN.md, Input, Not in the first version)."""
+    SDR base layer; colour tags its first frame contradicts in meaning (SYNONYMS), the matrix's but
+    when `matrix` (--input-matrix) settles it, the chroma location's never (SITING); a rotation or
+    flip; a declared crop (DESIGN.md, Input, Not in the first version)."""
     # Every declared reason at once, so that dealing with one doesn't end on another of them
     # (conversion_for's refusals, parse's and the first pass's come apart): interlacing first,
     # refused in every version; then what the pixels are, and the tags saying how to read them;
@@ -363,23 +390,34 @@ def _pixels(stream: VideoStream) -> tuple[str, bool]:
 
 
 def contradicted(stream: VideoStream) -> dict[str, tuple[str, str]]:
-    """The colour tags (COLOUR) the stream and its first frame both declare, differently, but the
-    chroma location (SITING): each field with the stream's value and the frame's, in COLOUR's
-    order."""
+    """The colour tags (COLOUR) the stream and its first frame both declare, differently in
+    meaning, not two names of one (SYNONYMS), but the chroma location (SITING): each field with the
+    stream's value and the frame's, in COLOUR's order."""
     return {
         name: (declared, decoded)
         for name, (declared, decoded) in _sides(stream).items()
-        if declared and decoded and declared != decoded and name != SITING
+        if declared
+        and decoded
+        and declared != decoded
+        and not _one_meaning(name, declared, decoded)
+        and name != SITING
     }
+
+
+def _one_meaning(name: str, declared: str, decoded: str) -> bool:
+    """Whether a colour tag's two values, the stream's and its first frame's, are two names of one
+    meaning (SYNONYMS)."""
+    return declared != decoded and {declared, decoded} <= SYNONYMS.get(name, frozenset())
 
 
 def resolved(stream: VideoStream) -> VideoStream:
     """The stream, each of its colour tags (COLOUR) as the source declares it: the stream's, or
     its first frame's where the stream has none, a tag declared on one side only being taken
-    (DESIGN.md, Input). Every reader after takes it from there: the conversion, the output's tags,
-    the manifest. Both sides declaring a tag differently are refused before (declared_refusal), but
-    for the matrix when --input-matrix settles it, which conversion_for reads in place of either,
-    and for the chroma location, the stream's then taken (SITING)."""
+    (DESIGN.md, Input), and the stream's name of two of one meaning (SYNONYMS). Every reader after
+    takes it from there: the conversion, the output's tags, the manifest. Both sides declaring a
+    tag differently in meaning are refused before (declared_refusal), but for the matrix when
+    --input-matrix settles it, which conversion_for reads in place of either, and for the chroma
+    location, the stream's then taken (SITING)."""
     return replace(
         stream,
         **{name: declared or decoded for name, (declared, decoded) in _sides(stream).items()},
@@ -404,7 +442,8 @@ def _contradiction(stream: VideoStream, matrix: str | None, both_transfers: bool
     (contradicted, the chroma location never), named with both values; but the matrix when
     `matrix` (--input-matrix) settles it, and the transfer when the HDR reason names both already
     (`both_transfers`, _pixels). A bad file, as a contradicted frame rate is (DESIGN.md, Input);
-    its ways out a remux, and --input-matrix for a YUV source's matrix."""
+    its ways out a remux when its frames are right, the bitstream's own fix when its container is,
+    for a codec that has one, and --input-matrix for a YUV source's matrix."""
     found = contradicted(stream)
     if matrix is not None:
         found.pop("color_space", None)
@@ -417,17 +456,37 @@ def _contradiction(stream: VideoStream, matrix: str | None, both_transfers: bool
         for name, (declared, decoded) in found.items()
     ]
     said[0] += " on its first frame"
-    # The way out is the user's (DESIGN.md, Input). Provisional (DESIGN.md names the remux, not
-    # its values): the command given sets the container's tags to the frames', since a stream
-    # copy leaves the bitstream's as they are; and writes Matroska, which keeps each tag, where MP4
-    # keeps none of the primaries, transfer and matrix unless all three are declared
-    # (libavformat/movenc.c:2945-2948). It copies every stream but the data streams (-map -0:d),
-    # which Matroska refuses (matroskaenc.c:2163-2165): -map 0 alone failed on a MOV file's
-    # timecode track, exit 234. A subtitle codec Matroska has no id for, MP4's mov_text, still
-    # fails it (matroskaenc.c:2151-2154), left to the user to convert or drop.
+    # The way out is the user's (DESIGN.md, Input): when the frames are right, a remux setting the
+    # container's tags to theirs, a stream copy leaving the bitstream's as they are; when the
+    # container is, the bitstream's own fix, its codec's filter setting the bitstream's tags to the
+    # container's (media/bitstream.py), or to another name of the container's meaning where the
+    # filter doesn't take its own (SYNONYMS: the file is then read, the stream's name kept), named
+    # only for a filter setting each tag contradicted, the file otherwise still refused.
+    # Provisional (DESIGN.md names neither command): both write
+    # Matroska, which keeps each tag, where MP4 keeps none of the primaries, transfer and matrix
+    # unless all three are declared (libavformat/movenc.c:2945-2948), and copy every stream but the
+    # data streams (-map -0:d), which Matroska refuses (matroskaenc.c:2163-2165): -map 0 alone
+    # failed on a MOV file's timecode track, exit 234. A subtitle codec Matroska has no id for,
+    # MP4's mov_text, still fails them (matroskaenc.c:2151-2154), left to the user to convert or
+    # drop. The filter is given to the first video stream alone (-bsf:v:0), the one seedvr2x reads
+    # (media/probe.py): given to every video stream (-bsf:v), it failed on an MP4 file with a
+    # cover, a PNG stream, exit 234.
     options = " ".join(
         f"{COLOUR[name][1]} {OPTION_VALUES.get(decoded, decoded)}"
         for name, (_, decoded) in found.items()
+    )
+    remux = (
+        "correct its container's tags with a remux, to its frames' with ffmpeg -i SOURCE -map 0"
+        f" -map -0:d -c copy {options} retagged.mkv or with mkvpropedit on a Matroska file"
+    )
+    fix = bitstream.setting(
+        stream.codec_name, {name: declared for name, (declared, _) in found.items()}, SYNONYMS
+    )
+    ways = (
+        f"if its frames are right, {remux}; if its container is right, correct its bitstream's to"
+        f" its container's with ffmpeg -i SOURCE -map 0 -map -0:d -c copy -bsf:v:0 {fix} fixed.mkv"
+        if fix
+        else remux
     )
     # --input-matrix is a way out for YUV alone: RGB has no matrix, and conversion_for refuses the
     # option there. Given for RGB, it still waives the contradiction above, so that this refusal
@@ -435,11 +494,11 @@ def _contradiction(stream: VideoStream, matrix: str | None, both_transfers: bool
     pixel_format = PIXEL_FORMATS.get(stream.pix_fmt)
     rgb = pixel_format is not None and pixel_format.family == "rgb"
     matrix_way = "color_space" in found and not rgb
-    override = ", or give the matrix with --input-matrix" if matrix_way else ""
+    separator = "; " if fix else ", "  # a third clause after the two ways', as they are parted
+    override = f"{separator}or give the matrix with --input-matrix" if matrix_way else ""
     return (
-        f"its colour tags contradicted: {', '.join(said)}: a bad file, not read on a guess: correct"
-        " its container's tags with a remux, to its frames' with ffmpeg -i SOURCE -map 0 -map -0:d"
-        f" -c copy {options} retagged.mkv or with mkvpropedit on a Matroska file{override}"
+        f"its colour tags contradicted: {', '.join(said)}: a bad file, not read on a guess: {ways}"
+        f"{override}"
     )
 
 

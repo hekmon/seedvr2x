@@ -20,6 +20,7 @@ from seedvr2x.media.source import declare, declared_refusal
 
 NTSC_FILM = Fraction(24000, 1001)
 UNTAGGED_HD = VideoStream(
+    codec_name="h264",
     width=1920,
     height=1080,
     pix_fmt="yuv420p",
@@ -260,14 +261,17 @@ HLG = f"HDR, transfer arib-std-b67 (HLG): not supported: {WHY_HLG}; {TONE_MAP}"
             f" {TONE_MAP}",
         ),
         # The stream's transfer over its first frame's, which contradicts it: said apart, since the
-        # stream's HDR reason doesn't name the frame's (source._contradiction).
+        # stream's HDR reason doesn't name the frame's (source._contradiction). UNTAGGED_HD is
+        # H.264: its bitstream filter is named.
         (
             {"color_transfer": "smpte2084", "first_frame": first("arib-std-b67")},
             f"2 reasons: (1) {PQ}; (2) its colour tags contradicted: transfer smpte2084 against"
-            " arib-std-b67 on its first frame: a bad file, not read on a guess: correct its"
-            " container's tags with a remux, to its frames' with ffmpeg -i SOURCE -map 0 -map -0:d"
-            " -c copy -color_trc:v arib-std-b67 retagged.mkv or with mkvpropedit on a Matroska"
-            " file",
+            " arib-std-b67 on its first frame: a bad file, not read on a guess: if its frames are"
+            " right, correct its container's tags with a remux, to its frames' with ffmpeg -i"
+            " SOURCE -map 0 -map -0:d -c copy -color_trc:v arib-std-b67 retagged.mkv or with"
+            " mkvpropedit on a Matroska file; if its container is right, correct its bitstream's"
+            " to its container's with ffmpeg -i SOURCE -map 0 -map -0:d -c copy -bsf:v:0"
+            " h264_metadata=transfer_characteristics=16 fixed.mkv",
         ),
         # An HDR transfer over Dolby Vision's metadata without a record, which adds nothing.
         ({"color_transfer": "arib-std-b67", "first_frame": first("arib-std-b67", True)}, HLG),

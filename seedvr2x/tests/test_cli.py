@@ -17,6 +17,7 @@ from test_probe import (
     contradiction,
     dolby_vision_file,
     has_x265,
+    hevc,
     record_box,
     x265_file,
 )
@@ -209,7 +210,8 @@ def test_contradicted_tags_refused_before_the_first_pass(tmp_path: Path) -> None
     refusal = contradiction(
         "matrix bt470bg against bt709 on its first frame, range pc (full) against tv (limited)",
         "-colorspace:v bt709 -color_range:v tv",
-        matrix=True,
+        True,
+        hevc("matrix_coefficients=5", "video_full_range_flag=1"),
     )
     files = sorted(tmp_path.rglob("*"))
     for output in ("out.mkv", "out"):
