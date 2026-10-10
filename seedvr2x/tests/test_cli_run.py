@@ -6,6 +6,7 @@ its encode through its windows to its decode, which writes, for each frame, the 
 the job divided by 1000: so each output frame says where it comes from. The model's own output
 is the GPU tests' (test_regression.py, test_shots.py)."""
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -2424,7 +2425,7 @@ def test_frame_index_beside_the_manifest(
     caplog.set_level(logging.INFO, logger="seedvr2x")
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    assert "1 leftovers discarded" in caplog.text
+    assert "1 leftover discarded" in caplog.text
     assert not (out / "frame_index.bin.partial").exists()
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
     assert not list(tmp_path.glob("*frame_index*"))
@@ -2681,9 +2682,11 @@ def test_shot_probabilities_recorded_then_trusted(
     # Without --cuts, the shot detector runs in the first pass: its file asked of the pull and
     # checked with the models'; built once, on the job's device, given every frame in order and
     # closed before the models load; each frame's probability in the frame index's file, the
-    # manifest's settings naming its file as they name the DiT's. The job one shot, as before the
-    # cuts' step. A resume trusting the first pass's record reads them back, never asks for the
-    # file nor runs the detector again: the job's source holds the recorded probabilities.
+    # manifest's settings naming its file as they name the DiT's, and the threshold, 0.3 by
+    # default, no cut list. The job one shot: the stand-in's probabilities, about 0.25 on every
+    # frame, reach no threshold of 0.3. A resume trusting the first pass's record reads them
+    # back, never asks for the file nor runs the detector again: the job's source holds the
+    # recorded probabilities.
     from seedvr2x.media.index import FrameIndex
     from seedvr2x.runtime import model
 
@@ -2719,6 +2722,7 @@ def test_shot_probabilities_recorded_then_trusted(
         "size": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     }
+    assert (content["settings"]["cut_threshold"], content["settings"]["cuts"]) == ("0.3", None)
     assert [(shot["start"], shot["end"]) for shot in content["shots"]] == [(0, 25)]
     kept = index.read_bytes()
     StandInDetector.built.clear()
@@ -2738,7 +2742,7 @@ def test_cuts_replace_the_detector(
 ) -> None:
     # With --cuts, the list replaces the detection: the shot detector's file neither asked of the
     # pull nor there, the detector never built, the first pass without its output; no
-    # probabilities in the index, no detector in the settings.
+    # probabilities in the index, no detector nor threshold in the settings, the list there.
     from seedvr2x.media import scan
     from seedvr2x.media.index import FrameIndex
 
@@ -2757,7 +2761,9 @@ def test_cuts_replace_the_detector(
     assert asked == [False] and outputs == [None] and StandInDetector.built == []
     out = tmp_path / "out"
     assert FrameIndex.read(out / "frame_index.bin").probabilities is None
-    assert "detector_model" not in json.loads((out / "manifest.json").read_text())["settings"]
+    settings = json.loads((out / "manifest.json").read_text())["settings"]
+    assert "detector_model" not in settings and "cut_threshold" not in settings
+    assert settings["cuts"] == [3, 4]
 
 
 @pytest.mark.parametrize("first", ["detected", "cut list"])
@@ -2769,15 +2775,17 @@ def test_detection_or_cut_list_another_job(
     first: str,
 ) -> None:
     # A job detecting its shots resumed with a cut list, or the other way round, even one
-    # cutting nowhere: another job, refused before its first pass, the detector's file in the
-    # settings' differences, by its pin: the refusal neither asks the pull for the file of a
-    # detector it wouldn't run, nor warns of the record's index, with or without probabilities,
-    # as a first pass to run again.
+    # cutting nowhere, once it has made a unit (its shot's latent, before the stop in its
+    # window): another job, refused before its first pass, the detector's file, the threshold
+    # and the list in the settings' differences, and why its cuts stay (a plan's change:
+    # test_replanned). The detector's file is given by its pin: the refusal neither asks the pull
+    # for the file of a detector it wouldn't run, nor warns of the record's index, with or without
+    # probabilities, as a first pass to run again.
     source_path = job(tmp_path, monkeypatch)
     asked = asked_of_the_pull(monkeypatch)
     (tmp_path / "none.txt").write_text("")
     cut_list = ("--cuts", "none.txt")
-    steps.stop = "encode 0"
+    steps.stop = "window 0:0"
     stopped(tmp_path, source_path, "out", *(cut_list if first == "cut list" else ()))
     built = len(StandInDetector.built)
     caplog.clear()
@@ -2787,6 +2795,13 @@ def test_detection_or_cut_list_another_job(
     recorded, now = ("{", "null") if first == "detected" else ("null", "{")
     assert f"settings.detector_model: {recorded}" in caplog.text
     assert f"-> {now}" in caplog.text
+    if first == "detected":
+        threshold, cuts = '"0.3" -> null', "null -> []"
+    else:
+        threshold, cuts = 'null -> "0.3"', "[] -> null"
+    assert f"settings.cut_threshold: {threshold}" in caplog.text
+    assert f"settings.cuts: {cuts}" in caplog.text
+    assert "Its cuts change only while it is a plan, before its first unit" in caplog.text
     assert len(StandInDetector.built) == built  # refused before any first pass
     assert asked == [first == "detected", False]
     assert "the first pass runs again" not in caplog.text
@@ -2860,3 +2875,713 @@ def test_real_detector_recorded(
         frames = extracted(source_path)
         expected = np.concatenate((reference.push(frames), reference.finish()))
     assert len(expected) == 25 and found.tobytes() == expected.tobytes()
+
+
+# The probabilities a scripted detector gives job()'s 25 frames, whatever they show
+# (ScriptedDetector): at 0.3, cuts at 5, 15 and 22, after runs peaking on 4 (0.9), on 14 of 14
+# and 15 (0.6 both: the first) and on 21 (float32's 0.3, exactly); possible cuts at 10, after a
+# run of 9 and 10 peaking at 0.2 on 9, and at 19, after 18's 0.12; a peak on the last frame, 24,
+# which cuts nothing. At 0.5, cuts at 5 and 15, 22 a possible cut.
+SCRIPT = np.full(25, 0.01, np.float32)
+SCRIPT[[3, 4, 9, 10, 14, 15, 18, 21, 24]] = (0.4, 0.9, 0.2, 0.15, 0.6, 0.6, 0.12, 0.3, 0.5)
+# The cut list's lines --plan writes of them at 0.3, each cut's time at 25 fps, each probability
+# its float32's exact decimals, cut: 0.9's is 0.899999976, 0.12's 0.119999997.
+PLANNED = [
+    "5 0.899 0:00:00.200",
+    "# 10 0.200 0:00:00.400",
+    "15 0.600 0:00:00.600",
+    "# 19 0.119 0:00:00.760",
+    "22 0.300 0:00:00.880",
+]
+# The options of the jobs cut so: windows of 5 latents, a segment per shot.
+CUT = ("--window", "5", "--min-segment", "0")
+
+
+class ScriptedDetector(StandInDetector):
+    """The stand-in detector giving SCRIPT's probabilities in order, frame by frame."""
+
+    def push(self, frames: npt.NDArray[np.uint8]) -> npt.NDArray[np.float32]:
+        first = self.pushed
+        super().push(frames)
+        return SCRIPT[first : self.pushed].copy()
+
+
+@pytest.fixture
+def scripted(steps: Steps, monkeypatch: pytest.MonkeyPatch) -> Steps:
+    """The stand-in's steps (steps), the shot detector ScriptedDetector."""
+    from seedvr2x.runtime import detector
+
+    monkeypatch.setattr(detector, "Detector", ScriptedDetector)
+    return steps
+
+
+def first_passes(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """The source of each first pass from now on (source.scan)."""
+    from seedvr2x.media import source as examined
+
+    scans: list[Path] = []
+    scan = examined.scan
+
+    def counted(path: Path, *detector: Any) -> object:
+        scans.append(path)
+        return scan(path, *detector)
+
+    monkeypatch.setattr(examined, "scan", counted)
+    return scans
+
+
+def cut_lines(path: Path) -> list[str]:
+    """The lines of a cut list --plan wrote that are cuts, or possible cuts, commented: a frame,
+    a probability for a detection's, a time."""
+    cut = r"(# )?\d+( [01]\.\d{3})? \d+:\d\d:\d\d\.\d{3}"
+    return [line for line in path.read_text().splitlines() if re.fullmatch(cut, line)]
+
+
+def shots_of(directory: Path) -> list[tuple[int, int]]:
+    content = json.loads((directory / "manifest.json").read_text())
+    return [(shot["start"], shot["end"]) for shot in content["shots"]]
+
+
+def written(directory: Path) -> list[int]:
+    """Each frame's index in the job, as the stand-in wrote it, segment after segment."""
+    names = sorted(path.name for path in directory.glob("seg_*.mkv"))
+    return [index for name in names for index in indexes(directory / name)]
+
+
+def encoded(steps: Steps) -> list[int]:
+    """The first frame of each shot the stand-in encoded."""
+    return [int(call.split()[1]) for call in steps.calls if call.startswith("encode ")]
+
+
+@pytest.mark.parametrize(
+    ("threshold", "recorded", "bounds", "said"),
+    [
+        (None, "0.3", [0, 5, 15, 22, 25], "4 shots: 3 cuts detected at 0.3, and 2 possible cuts"),
+        ("0.5", "0.5", [0, 5, 15, 25], "3 shots: 2 cuts detected at 0.5, and 3 possible cuts"),
+        (
+            "0.15",
+            "0.15",
+            [0, 5, 10, 15, 22, 25],
+            "5 shots: 4 cuts detected at 0.15, and 1 possible",
+        ),
+        ("1", "1.0", [0, 25], "1 shot: 0 cuts detected at 1.0, and 5 possible cuts"),
+    ],
+)
+def test_cuts_detected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+    threshold: str | None,
+    recorded: str,
+    bounds: list[int],
+    said: str,
+) -> None:
+    # Without --cuts, the shots come from the detection (DESIGN.md, Shot detection): a cut after
+    # the peak of each run reaching --cut-threshold, 0.3 by default, recorded as Python writes the
+    # float; the log says how the shots were found; every shot run, every frame written.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    option = () if threshold is None else ("--cut-threshold", threshold)
+    assert upscale(tmp_path, source_path, "out", *CUT, *option) == 0
+    out = tmp_path / "out"
+    assert shots_of(out) == list(pairwise(bounds))
+    settings = json.loads((out / "manifest.json").read_text())["settings"]
+    assert (settings["cut_threshold"], settings["cuts"]) == (recorded, None)
+    assert said in caplog.text
+    assert encoded(scripted) == bounds[:-1]
+    assert written(out) == list(range(25))
+
+
+def test_cut_threshold_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # With --cuts, whose list replaces the detection (DESIGN.md, Shot detection), refused before
+    # anything is made; out of (0, 1], refused, saying the range.
+    source_path = job(tmp_path, monkeypatch)
+    text = refused(tmp_path, source_path, caplog, *JOB, "--cut-threshold", "0.5")
+    said = "--cut-threshold 0.5: refused with --cuts, whose list replaces the detection"
+    assert said in text
+    assert not (tmp_path / "out").exists() and steps.calls == []
+    for given in ("0", "-0.1", "1.01", "nan", "inf", "0.3x", ""):
+        with pytest.raises(SystemExit) as exited:
+            upscale(tmp_path, source_path, "out", "--cut-threshold", given)
+        assert exited.value.code == 2
+        error = capsys.readouterr().err
+        assert f"argument --cut-threshold: {given!r}: not a threshold; give a probability" in error
+        assert "above 0 and at most 1, such as 0.3, the default" in error
+    for given, value in (("0.3", 0.3), ("1", 1.0), ("1e-1", 0.1), (" 0.30 ", 0.3)):
+        assert cli._threshold(given) == value  # pyright: ignore[reportPrivateUsage]
+
+
+def test_plan_then_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # --plan FILE with an output directory: the first pass, the shot detector in it, then the cut
+    # list in FILE and the counts said; the job's manifest and frame index made, its shots the
+    # detected ones, no unit, the models never loaded. The cut list in --cuts' format: a header,
+    # then the cuts and the possible ones, commented, in frame order, each with its probability
+    # and time. The same command without --plan runs the plan, its first pass as recorded, never
+    # run again.
+    from seedvr2x.runtime import model
+    from seedvr2x.runtime.job import read_cuts
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    passes = first_passes(monkeypatch)
+    plan = tmp_path / "plan.txt"
+    with monkeypatch.context() as patch:
+        patch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+        assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    assert len(passes) == 1 and len(StandInDetector.built) == 1 and scripted.calls == []
+    out = tmp_path / "out"
+    assert sorted(path.name for path in out.iterdir()) == ["frame_index.bin", "manifest.json"]
+    content = json.loads((out / "manifest.json").read_text())
+    assert shots_of(out) == [(0, 5), (5, 15), (15, 22), (22, 25)]
+    assert not any(shot["encoded"] or shot["windows_done"] for shot in content["shots"])
+    assert not any(segment["finished"] for segment in content["segments"])
+    said = "3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3: the cut list in"
+    assert f"{said} {plan}" in caplog.text
+    assert plan.read_text().splitlines() == [
+        "# seedvr2x cut list of in.mkv: 25 frames at 25 fps",
+        f"# Shot detector: TransNetV2, {pull.DETECTOR} (SHA-256 e3b0c442), threshold 0.3",
+        "# Found: 3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3",
+        "#",
+        "# A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;",
+        "# the shot detector's peak probability, on the frame before it; the time of that frame",
+        "# from the source's start, H:MM:SS.mmm, as a player shows it. seedvr2x reads the frame",
+        "# number alone. A possible cut is a commented line: checking it is a jump to its time in",
+        "# a player.",
+        "# Uncomment a possible cut to keep it, delete a line to drop a cut, then run with --cuts",
+        "# FILE, this file.",
+        *PLANNED,
+    ]
+    assert read_cuts(plan) == [5, 15, 22]
+    # Every "# <digit>" line uncommented, as a search over the file keeps every possible cut: the
+    # cuts and the possible cuts, nothing of the header's (its counts begin with a word).
+    every = tmp_path / "every.txt"
+    every.write_text(re.sub(r"(?m)^# (?=\d)", "", plan.read_text()))
+    assert read_cuts(every) == [5, 10, 15, 19, 22]
+    passes.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *CUT) == 0
+    assert passes == [] and len(StandInDetector.built) == 1
+    said = "the first pass as recorded, the shot detector's probabilities with it"
+    assert f"{out}: the same input and ffmpeg, {said}" in caplog.text
+    assert encoded(scripted) == [0, 5, 15, 22]
+    assert written(out) == list(range(25))
+
+
+def test_replanned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A plan, a job that has made no unit, is planned again by a run whose settings differ in its
+    # cuts alone: another threshold, its cuts derived again from the recorded probabilities, no
+    # first pass, a stop's leftovers of the plan's own layout discarded; then a cut list, the
+    # plan's own with a possible cut uncommented, likewise, the probabilities kept in the frame
+    # index; the layout and settings rewritten, said; run, the new shots.
+    from seedvr2x.media.index import FrameIndex
+    from seedvr2x.runtime.job import read_cuts
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    passes = first_passes(monkeypatch)
+    first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(first)) == 0
+    out = tmp_path / "out"
+    index = (out / "frame_index.bin").read_bytes()
+    # What a stop in shot 22's encode leaves, which the plan at 0.5 has no shot for.
+    left = out / "resume" / "shot_000022"
+    left.mkdir(parents=True)
+    for name in ("input.mkv.partial", "latent.pt.partial"):
+        (left / name).write_bytes(b"left")
+    passes.clear()
+    caplog.clear()
+    options = (*CUT, "--cut-threshold", "0.5", "--plan", str(second))
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert passes == [] and len(StandInDetector.built) == 1
+    assert shots_of(out) == [(0, 5), (5, 15), (15, 25)]
+    content = json.loads((out / "manifest.json").read_text())
+    assert content["settings"]["cut_threshold"] == "0.5"
+    said = 're-planned, its job having made no unit yet: settings.cut_threshold: "0.3" -> "0.5"'
+    assert f"{out}: {said}; 2 leftovers discarded" in caplog.text
+    assert sorted(path.name for path in out.iterdir()) == ["frame_index.bin", "manifest.json"]
+    assert (out / "frame_index.bin").read_bytes() == index
+    assert cut_lines(second) == [*PLANNED[:3], "# 19 0.119 0:00:00.760", "# 22 0.300 0:00:00.880"]
+    second.write_text(second.read_text().replace("# 10 ", "10 "))
+    assert read_cuts(second) == [5, 10, 15]
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *CUT, "--cuts", str(second)) == 0
+    assert passes == [] and len(StandInDetector.built) == 1
+    for difference in (
+        "settings.cuts: null -> [5, 10, 15]",
+        'settings.cut_threshold: "0.5" -> null',
+        "settings.detector_model: {",
+    ):
+        assert difference in caplog.text
+    content = json.loads((out / "manifest.json").read_text())
+    assert (
+        "cut_threshold" not in content["settings"] and "detector_model" not in content["settings"]
+    )
+    assert shots_of(out) == [(0, 5), (5, 10), (10, 15), (15, 25)]
+    assert encoded(scripted) == [0, 5, 10, 15]
+    recorded = FrameIndex.read(out / "frame_index.bin").probabilities
+    assert recorded is not None and recorded.tobytes() == SCRIPT.tobytes()
+    assert written(out) == list(range(25))
+
+
+def test_plan_taken_up_narrowly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Only a plan's cuts change: another setting, alone or with another threshold, is another
+    # job, refused before any first pass, the plan untouched. Once a unit is made, the job's cuts
+    # are its own: another threshold or a cut list refused, saying why; the same command resumes.
+    source_path = job(tmp_path, monkeypatch)
+    passes = first_passes(monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(tmp_path / "plan.txt")) == 0
+    out = tmp_path / "out"
+    kept = contents(out)
+    passes.clear()
+    text = refused(tmp_path, source_path, caplog, *CUT, "--seed", "7")
+    assert "another job than the one asked" in text and "settings.seed: 42 -> 7" in text
+    assert "Its cuts change only" not in text
+    text = refused(tmp_path, source_path, caplog, *CUT, "--seed", "7", "--cut-threshold", "0.5")
+    assert "settings.seed: 42 -> 7" in text and 'settings.cut_threshold: "0.3" -> "0.5"' in text
+    assert contents(out) == kept and passes == []
+    # A unit made: shot 0's latent, the stop in shot 5's encode.
+    scripted.stop = "encode 5"
+    stopped(tmp_path, source_path, "out", *CUT)
+    kept = contents(out)
+    for other, difference in (
+        (("--cut-threshold", "0.5"), 'settings.cut_threshold: "0.3" -> "0.5"'),
+        (("--cuts", "cuts.txt"), "settings.cuts: null -> [3, 4]"),
+    ):
+        text = refused(tmp_path, source_path, caplog, *CUT, *other)
+        assert "another job than the one asked" in text and difference in text
+        said = "Its cuts change only while it is a plan, before its first unit, and it has made"
+        assert f"{said} some: its cuts are its own; another output directory takes new ones" in text
+    assert contents(out) == kept and passes == []
+    scripted.stop = None
+    scripted.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *CUT) == 0
+    assert encoded(scripted) == [5, 15, 22]
+
+
+def test_one_file_plan_writes_its_cut_list_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scripted: Steps
+) -> None:
+    # -o x.mkv --plan FILE: nothing written but FILE, which replaces the one there, whole: no
+    # master, no checksums, no work directory for split; the models never loaded.
+    from seedvr2x.runtime import model
+    from seedvr2x.runtime.job import read_cuts
+
+    source_path = job(tmp_path, monkeypatch)
+    (tmp_path / "w.safetensors").write_bytes(b"")
+    (tmp_path / pull.DETECTOR).write_bytes(b"")
+    plan = tmp_path / "plan.txt"
+    plan.write_text("an older plan")
+    before = sorted(os.listdir(tmp_path))
+    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    # The work directory is removed at the run's end: only its making tells.
+    monkeypatch.setattr(cli, "_work", lambda *a: pytest.fail("a work directory made"))
+    assert upscale(tmp_path, source_path, "one.mkv", *SPLIT, "--plan", str(plan)) == 0
+    assert sorted(os.listdir(tmp_path)) == before
+    assert cut_lines(plan) == PLANNED and read_cuts(plan) == [5, 15, 22]
+    assert scripted.calls == []
+
+
+def test_plan_file_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A --plan FILE in the place of what the job reads or writes, or that can't be written,
+    # refused before the first pass: nothing made.
+    source_path = job(tmp_path, monkeypatch)
+    passes = first_passes(monkeypatch)
+    for output, plan, said in (
+        ("out", "in.mkv", "the source; it names the cut list's file"),
+        ("one.mkv", "one.mkv", "the output; it names the cut list's file"),
+        ("out", "out/plan.txt", "in the output directory, which holds the job's own files only"),
+        ("out", "out", "in the output directory, which holds the job's own files only"),
+        ("out", "missing/plan.txt", "no directory missing to write it in"),
+        ("out", ".", "a directory; it names the cut list's file"),
+    ):
+        text = refused(tmp_path, source_path, caplog, "--plan", plan, output=output)
+        assert f"--plan {plan}: {said}" in text
+    # The cut list given: its plan written over it would lose its comments, the possible cuts it
+    # kept commented among them. By its path or by a link to it.
+    listed = (tmp_path / "cuts.txt").read_bytes()
+    (tmp_path / "link.txt").symlink_to("cuts.txt")
+    for plan in ("cuts.txt", "link.txt", str(tmp_path / "cuts.txt")):
+        text = refused(tmp_path, source_path, caplog, "--cuts", "cuts.txt", "--plan", plan)
+        said = "the cut list given (--cuts), which it would replace, its comments lost; it names"
+        assert f"--plan {plan}: {said} another file" in text
+    assert (tmp_path / "cuts.txt").read_bytes() == listed
+    # A directory that takes no new file: said now, not once the first pass has run.
+    if os.geteuid() != 0:  # root writes anywhere
+        locked = tmp_path / "locked"
+        locked.mkdir(mode=0o555)
+        text = refused(tmp_path, source_path, caplog, "--plan", "locked/plan.txt", output="one.mkv")
+        assert "--plan locked/plan.txt: no file can be written in locked: Permission denied" in text
+    assert passes == [] and not (tmp_path / "out").exists()
+    assert not (tmp_path / "one.mkv").exists()
+
+
+def test_plan_of_a_cut_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # With --cuts, the plan of that list: FILE holds it normalised, each cut with its time, no
+    # possible cut; the shot detector never built; the counts said.
+    from seedvr2x.runtime.job import read_cuts
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    (tmp_path / "cuts.txt").write_text("# mine\n4 a score\n\n12  # a flash\n")
+    plan = tmp_path / "plan.txt"
+    assert upscale(tmp_path, source_path, "out", "--cuts", "cuts.txt", "--plan", str(plan)) == 0
+    assert StandInDetector.built == []
+    assert f"2 cuts from the cut list cuts.txt (3 shots): the cut list in {plan}" in caplog.text
+    assert plan.read_text().splitlines() == [
+        "# seedvr2x cut list of in.mkv: 25 frames at 25 fps",
+        "# Found: 2 cuts from the cut list cuts.txt (3 shots)",
+        "#",
+        "# A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;",
+        "# the time of that frame from the source's start, H:MM:SS.mmm, as a player shows it.",
+        "# seedvr2x reads the frame number alone.",
+        "# Delete a line to drop a cut, add one to cut at its frame, then run with --cuts FILE,",
+        "# this file.",
+        "4 0:00:00.160",
+        "12 0:00:00.480",
+    ]
+    assert read_cuts(plan) == [4, 12]
+    assert json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]["cuts"] == [
+        4,
+        12,
+    ]
+
+
+def test_plan_cut_by_a_list_detected_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A plan cut by a list holds no probabilities: planned again without one, its first pass
+    # runs again, the shot detector with it, which said; its record then holds them, the manifest
+    # naming the new index, and another threshold needs no decode.
+    from seedvr2x.media.index import FrameIndex
+    from seedvr2x.runtime.job import read_cuts
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    passes = first_passes(monkeypatch)
+    plan = tmp_path / "plan.txt"
+    listed = (*CUT, "--cuts", "cuts.txt", "--plan", str(plan))
+    assert upscale(tmp_path, source_path, "out", *listed) == 0
+    out = tmp_path / "out"
+    assert FrameIndex.read(out / "frame_index.bin").probabilities is None
+    passes.clear()
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    assert len(passes) == 1 and len(StandInDetector.built) == 1
+    said = "no shot probabilities in its record, its cuts given by a list: the first pass runs"
+    assert f"{out}: {said} again, the shot detector with it" in caplog.text
+    assert 'settings.cut_threshold: null -> "0.3"' in caplog.text
+    index = out / "frame_index.bin"
+    found = FrameIndex.read(index).probabilities
+    assert found is not None and found.tobytes() == SCRIPT.tobytes()
+    entry = json.loads((out / "manifest.json").read_text())["input"]["index"]
+    assert entry["sha256"] == hashlib.sha256(index.read_bytes()).hexdigest()
+    assert shots_of(out) == [(0, 5), (5, 15), (15, 22), (22, 25)]
+    assert read_cuts(plan) == [5, 15, 22]
+    passes.clear()
+    # What a stop in shot 22's encode leaves: one leftover, said as one.
+    left = out / "resume" / "shot_000022"
+    left.mkdir(parents=True)
+    (left / "latent.pt.partial").write_bytes(b"left")
+    options = (*CUT, "--cut-threshold", "0.5", "--plan", str(plan))
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert passes == [] and shots_of(out) == [(0, 5), (5, 15), (15, 25)]
+    assert '"0.3" -> "0.5"; 1 leftover discarded' in caplog.text and not (out / "resume").exists()
+
+
+def test_replanned_in_another_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A plan planned again under another ffmpeg. Not accepted: refused before any first pass,
+    # the refusal naming --accept-env-change, which takes it. Accepted: its first pass runs
+    # again, and its manifest is rewritten at once in that environment, the change recorded,
+    # naming the index that pass made: a plan has made no unit in the environment before. Written
+    # in the environment recorded, it named the other ffmpeg's index under the first one's name,
+    # and the first ffmpeg trusted it. The other ffmpeg then finds its record its own, no pass
+    # run again; the first one, a job of another environment.
+    scans, otherwise = another_index(monkeypatch)
+    source_path = job(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.txt"
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    out = tmp_path / "out"
+    index, manifest = out / "frame_index.bin", out / "manifest.json"
+    kept, first = contents(out), index.read_bytes()
+    check = ffmpeg.check
+    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    otherwise[0] = True
+    scans.clear()
+    again = (*CUT, "--cut-threshold", "0.5", "--plan", str(plan))
+    text = refused(tmp_path, source_path, caplog, *again)
+    assert "another job than the one asked" in text and "environment.ffmpeg" in text
+    assert 'settings.cut_threshold: "0.3" -> "0.5"' in text
+    said = "A plan, which has made no unit yet, is planned again with other cuts; its environment"
+    assert f"{said} differs too: --accept-env-change takes it up anyway" in text
+    assert "Only its environment differs" not in text
+    assert contents(out) == kept and scans == []
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    assert upscale(tmp_path, source_path, "out", *again, "--accept-env-change") == 0
+    assert len(scans) == 1
+    content = json.loads(manifest.read_text())
+    data = index.read_bytes()
+    assert data != first and content["input"]["index"]["sha256"] == hashlib.sha256(data).hexdigest()
+    assert content["environment"]["ffmpeg"] == "n0.0-another"
+    [change] = content["environment_changes"]
+    assert "ffmpeg" in json.dumps(change)
+    assert content["settings"]["cut_threshold"] == "0.5"
+    assert shots_of(out) == [(0, 5), (5, 15), (15, 25)]
+    said = "planned again in another environment, as accepted, which its manifest records at once"
+    assert said in caplog.text
+    # The other ffmpeg again, nothing to accept: its record, no first pass.
+    scans.clear()
+    assert upscale(tmp_path, source_path, "out", *again) == 0 and scans == []
+    # The first ffmpeg: a job of another environment, never the one it recorded.
+    monkeypatch.setattr(ffmpeg, "check", check)
+    otherwise[0] = False
+    text = refused(tmp_path, source_path, caplog, *again)
+    assert "environment.ffmpeg" in text and "Only its environment differs" in text
+    assert scans == []
+
+
+@pytest.mark.parametrize("how", ["planned", "run", "another GPU"])
+def test_plan_taken_up_in_another_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+    how: str,
+) -> None:
+    # A plan taken up as it is in another environment, accepted, by --plan again or by its run,
+    # stopped before any unit: its manifest is written at once in that environment, the change
+    # recorded; under another ffmpeg, its first pass run again, with the index that pass made,
+    # which the manifest names; under another GPU, the pass's record standing, the index as it
+    # was. The next start in that environment accepts nothing and runs no first pass.
+    scans, otherwise = another_index(monkeypatch)
+    source_path = job(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.txt"
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    out = tmp_path / "out"
+    index, manifest = out / "frame_index.bin", out / "manifest.json"
+    first = index.read_bytes()
+    if how == "another GPU":
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+    else:
+        monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    otherwise[0] = True
+    scans.clear()
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    if how == "run":
+        scripted.stop = "encode 0"
+        stopped(tmp_path, source_path, "out", *CUT, "--accept-env-change")
+        assert scripted.calls == ["encode 0"]
+    else:
+        options = (*CUT, "--plan", str(plan), "--accept-env-change")
+        assert upscale(tmp_path, source_path, "out", *options) == 0
+    content = json.loads(manifest.read_text())
+    data = index.read_bytes()
+    assert content["input"]["index"]["sha256"] == hashlib.sha256(data).hexdigest()
+    assert len(content["environment_changes"]) == 1
+    assert not any(shot["encoded"] for shot in content["shots"])
+    if how == "another GPU":
+        assert scans == [] and data == first and content["environment"]["gpu"] == "another"
+    else:
+        assert len(scans) == 1 and data != first
+        assert content["environment"]["ffmpeg"] == "n0.0-another"
+    said = "which its manifest records at once, a plan having made no unit in the one before"
+    assert f"resumed in another environment, as accepted, {said}" in caplog.text
+    scans.clear()
+    scripted.stop = None
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    assert scans == []
+
+
+def test_plan_of_a_finished_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # --plan on a job finished already: said, and its cut list written all the same, the job's
+    # plan, from its record: no first pass, nothing of the job touched, the models not loaded.
+    from seedvr2x.runtime import model
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *CUT) == 0
+    out = tmp_path / "out"
+    kept = contents(out)
+    passes = first_passes(monkeypatch)
+    plan = tmp_path / "plan.txt"
+    scripted.calls.clear()
+    caplog.clear()
+    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    assert f"{out}: finished already, its 4 segments" in caplog.text
+    said = "3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3: the cut list in"
+    assert f"{said} {plan}" in caplog.text
+    assert cut_lines(plan) == PLANNED
+    assert passes == [] and scripted.calls == [] and contents(out) == kept
+
+
+def test_replan_compares_what_its_first_pass_finds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A plan planned again whose first pass, run again, finds another source than the one
+    # recorded, here another number of frames: another job, refused, as a resume's is; only its
+    # cuts and the layout they give are a plan's to change.
+    source_path = job(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.txt"
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    manifest = tmp_path / "out" / "manifest.json"
+    content = json.loads(manifest.read_text())
+    assert content["input"]["frames"] == 25
+    content["input"]["frames"] = 24
+    manifest.write_text(json.dumps(content))
+    passes = first_passes(monkeypatch)
+    text = refused(tmp_path, source_path, caplog, *CUT, "--cut-threshold", "0.5")
+    assert len(passes) == 1  # the index's frames aren't the record's: the pass run again
+    assert "another job than the one asked" in text and "input.frames: 24 -> 25" in text
+    assert json.loads(manifest.read_text()) == content and scripted.calls == []
+
+
+@pytest.mark.parametrize("threshold", ["0.1", "0.05"])
+def test_no_possible_cuts_at_their_floor_or_under(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+    threshold: str,
+) -> None:
+    # At a threshold of 0.1 or under, no run from 0.1 up peaks under it: the run's log and the
+    # plan's counts say the cuts alone, the plan that there are no possible cuts and why, and its
+    # list holds none.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.txt"
+    options = (*CUT, "--cut-threshold", threshold, "--plan", str(plan))
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    said = [record.getMessage() for record in caplog.records]
+    assert f"6 shots: 5 cuts detected at {threshold}" in said  # the whole message
+    counts = f"5 cuts at {threshold} (6 shots), no possible cuts at a threshold of 0.1 or under"
+    assert f"{counts}: the cut list in {plan}" in said
+    assert f"# Found: {counts}" in plan.read_text().splitlines()
+    lines = cut_lines(plan)
+    assert [line.split()[0] for line in lines] == ["5", "10", "15", "19", "22"]
+
+
+def test_plan_not_written_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The cut list can't be written after all, the disk full once the first pass has run: said,
+    # and the command fails, where its only output is that list.
+    from seedvr2x.media import files
+
+    def full(path: Path, data: bytes) -> None:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    source_path = job(tmp_path, monkeypatch)
+    plan = tmp_path / "plan.txt"
+    monkeypatch.setattr(files, "write_whole", full)
+    text = refused(tmp_path, source_path, caplog, "--plan", str(plan), output="one.mkv")
+    assert f"--plan {plan}: not written: [Errno 28] No space left on device" in text
+    assert not plan.exists()
+
+
+def synthetic_clip(path: Path) -> Path:
+    """tests/test_detector.py's synthetic clip, an FFV1 file: four lavfi shots at 25 fps, 280
+    frames at 320x180, its cuts at CUTS."""
+    from test_detector import SHOTS
+
+    inputs = [arg for source, _ in SHOTS for arg in ("-f", "lavfi", "-i", source)]
+    trims = "".join(
+        f"[{k}]trim=end_frame={count},setpts=PTS-STARTPTS,format=yuv420p[s{k}];"
+        for k, (_, count) in enumerate(SHOTS)
+    )
+    joined = "".join(f"[s{k}]" for k in range(len(SHOTS)))
+    graph = f"{trims}{joined}concat=n={len(SHOTS)}:v=1:a=0[v]"
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", *inputs, "-filter_complex", graph, "-map", "[v]"),
+            *("-c:v", "ffv1", str(path)),
+        ],
+        check=True,
+    )
+    return path
+
+
+def test_real_detection_cuts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # TransNetV2 itself in the CLI's first pass, its weights from SEEDVR2X_MODEL_DIR (skipped
+    # without) checked by their pin, run on the CPU in place of the job's GPU, on the synthetic
+    # clip of tests/test_detector.py: its cuts, exactly, at 0.3, in the plan's manifest, the log
+    # and the cut list; no possible cut, every other frame scoring under 0.05. The log's lines and
+    # the cut list printed (-rP).
+    from test_detector import CUTS
+
+    from seedvr2x.runtime import detector
+    from seedvr2x.runtime.job import read_cuts
+
+    models = os.environ.get("SEEDVR2X_MODEL_DIR")
+    if not models or not (Path(models) / pull.DETECTOR).is_file():
+        pytest.skip(f"needs SEEDVR2X_MODEL_DIR holding {pull.DETECTOR}")
+    (tmp_path / pull.DETECTOR).symlink_to(Path(models) / pull.DETECTOR)
+    monkeypatch.setattr(pull, "PINNED", {**pull.PINNED, pull.DETECTOR: DETECTOR_PIN})
+
+    def on_the_cpu(path: Path, device: torch.device, **options: Any) -> Detector:
+        return REAL_DETECTOR(path, torch.device("cpu"), **options)
+
+    monkeypatch.setattr(detector, "Detector", on_the_cpu)
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    clip = synthetic_clip(tmp_path / "clip.mkv")
+    plan = tmp_path / "plan.txt"
+    assert upscale(tmp_path, clip, "out", "--plan", str(plan)) == 0
+    bounds = [0, *CUTS, 280]
+    assert shots_of(tmp_path / "out") == list(pairwise(bounds))
+    said = "4 shots: 3 cuts detected at 0.3, and 0 possible cuts from 0.1 up to 0.3"
+    assert said in caplog.text
+    assert "3 cuts at 0.3 (4 shots), 0 possible cuts from 0.1 up to 0.3" in caplog.text
+    assert read_cuts(plan) == CUTS
+    lines = cut_lines(plan)
+    assert [line.split()[2] for line in lines] == ["0:00:02.920", "0:00:06.000", "0:00:08.480"]
+    assert all(float(line.split()[1]) > 0.5 for line in lines)
+    print("\n".join(record.getMessage() for record in caplog.records))
+    print(plan.read_text())

@@ -153,10 +153,12 @@ uv run pytest
   of its sharp 7B, all in numz's padding. seedvr2x's own padding, the default, is held
   bit-identical to numz patched to pad the same way (`numerics_patch.py`'s `NUM_PAD`) at 1080p,
   at 720p and on a crop whose width isn't a multiple of 16. Its runs detect their shots, as a
-  user's does without `--cuts`, the shot detector on the GPU before the models load: each case
-  skips, naming the file, without `transnetv2.safetensors` in `SEEDVR2X_MODEL_DIR`. The other GPU
-  tests' runs give a cut list, empty for one shot. Its references, in the `m1/` directory of
-  `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its docstring.
+  user's does without `--cuts`, the shot detector on the GPU before the models load, at
+  `--cut-threshold 0.5`, where milestone 1's input is one shot, as numz's one batch (0.3 cuts it
+  in three): each case skips, naming the file, without `transnetv2.safetensors` in
+  `SEEDVR2X_MODEL_DIR`. The other GPU tests' runs give a cut list, empty for one shot. Its
+  references, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its
+  docstring.
 - numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
   cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`cli.NUMZ_PADDING`),
   which an output directory's manifest records, so that a job is never resumed in the other
@@ -194,6 +196,14 @@ uv run pytest
   the stand-in model (`tests/test_cli_run.py`'s `StandInDetector`, each frame's probability its
   mean value): its file an empty `transnetv2.safetensors` beside the stand-in's model files,
   pinned so in place of TransNetV2's weights, which the pin's check then checks.
+- The cuts drawn from the probabilities (`runtime/cuts.py`) are held by `tests/test_cuts.py` to
+  measurement's own detection (`../research/scripts/scd_scores.py`'s `tnet_detections`, copied
+  there, on the float32 values read as float64, as its analysis reads them), the possible cuts
+  and the cut list `--plan` writes with them, read back by `--cuts`. The CLI's
+  (`--cut-threshold`, `--plan`, a plan planned again or taken up in another environment) by
+  `tests/test_cli_run.py`, a `ScriptedDetector` giving chosen probabilities in place of the
+  stand-in's, about 0.25 on its clips, which cut nothing at 0.3; with `SEEDVR2X_MODEL_DIR`,
+  TransNetV2 itself cuts `tests/test_detector.py`'s synthetic clip at its cuts through the CLI.
 - A source's rate against its frames' timestamps (`media/rate.py`), the refusal's guidance and
   `--frame-rate` are held by `tests/test_rate.py` to `seeking.md`'s mechanism 7 made on purpose,
   S9's timestamps (`mechanism7`); the warning of a file sptenc's rule passes whose frames leave

@@ -61,8 +61,8 @@ pytestmark = [
 ]
 
 # The models the other GPU tests run, those of milestone 1's references; an empty cut list, the
-# one shot it gives the input as no detection would yet, the shot detector, the regression's
-# (tests/test_regression.py), neither run nor its file needed.
+# one shot of numz's one batch, which the detection cuts in three at its default threshold
+# (tests/test_regression.py), the shot detector neither run nor its file needed.
 MODEL_OPTIONS = (
     *("--dit-model", "seedvr2_ema_7b_fp16.safetensors"),
     *("--vae-model", "ema_vae_fp16.safetensors"),

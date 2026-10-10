@@ -36,7 +36,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
-from test_detector import CUTS, SHOTS, streamed, tnet_detections, tnet_predict, untrained_weights
+from test_detector import CUTS, SHOTS, streamed, tnet_predict, untrained_weights
 from test_detector import official as measurements_model
 from test_index import make
 from test_probe import has_encoder
@@ -45,6 +45,7 @@ from seedvr2x.media import ffmpeg
 from seedvr2x.media import scan as first
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.runtime import pull
+from seedvr2x.runtime.cuts import detections
 from seedvr2x.runtime.detector import BATCH, Detector
 
 
@@ -547,7 +548,7 @@ def test_the_first_pass_records_the_detectors_probabilities(
     if batch == 1:
         reference, _ = tnet_predict(measurements_model(trained), frames)
         assert found.tobytes() == reference.tobytes()
-    assert tnet_detections(found, 0.3) == [cut - 1 for cut in CUTS]
+    assert detections(found, 0.3) == [cut - 1 for cut in CUTS]
 
 
 @pytest.mark.gpu
@@ -577,7 +578,7 @@ def test_gpu_first_pass_against_cpu(
     difference = float(np.abs(gpu.astype(np.float64) - cpu).max())
     peaks = [record.getMessage() for record in caplog.records if "VRAM peak" in record.getMessage()]
     print(f"{source}: GPU against CPU {difference:.3g} at most, {len(cpu)} frames; {peaks}")
-    assert tnet_detections(gpu, 0.3) == tnet_detections(cpu, 0.3)
+    assert detections(gpu, 0.3) == detections(cpu, 0.3)
     if source == "clip":
-        assert tnet_detections(gpu, 0.3) == [cut - 1 for cut in CUTS]
+        assert detections(gpu, 0.3) == [cut - 1 for cut in CUTS]
     assert torch.cuda.memory_allocated(device) <= allocated

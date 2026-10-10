@@ -32,8 +32,8 @@ pytestmark = [
 
 def upscale(source: Path, output: Path, *options: str) -> None:
     """seedvr2x run on source; with an empty cut list unless options give one, its one shot as
-    no detection would give it yet: the shot detector, the regression's (tests/test_regression.py),
-    neither run nor its file needed."""
+    numz's one batch ran milestone 1's input, which the detection cuts in three at its default
+    threshold (tests/test_regression.py): the shot detector neither run nor its file needed."""
     assert MODELS is not None
     one_shot = () if "--cuts" in options else ("--cuts", os.devnull)
     run = subprocess.run(

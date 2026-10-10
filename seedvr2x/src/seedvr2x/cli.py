@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import logging
+import math
 import os
 import re
 import shlex
@@ -11,7 +12,7 @@ import sys
 import time
 from bisect import bisect_right
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 from importlib.metadata import version
 from itertools import accumulate
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.writer import FORMATS
+from seedvr2x.runtime.cuts import POSSIBLE, THRESHOLD
 from seedvr2x.runtime.job import MIN_SEGMENT
 from seedvr2x.runtime.pull import DETECTOR, REPO
 from seedvr2x.runtime.stop import Stop, Stopped, Terminated, terminable
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
 
     from seedvr2x.media.index import FrameIndex
     from seedvr2x.media.source import Declared, FirstPass, Source
+    from seedvr2x.runtime.cuts import Cut
     from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
     from seedvr2x.runtime.pull import ModelFile, ModelFiles
@@ -126,15 +129,43 @@ def main(argv: list[str] | None = None) -> int:
         default=1080,
         help="short side of the output, square pixels at the source's display aspect",
     )
-    # Without it, the shot detector runs in the first pass, its probabilities recorded; the cuts
-    # they give are the next step's (DESIGN.md, Shot detection), the input one shot until then.
+    # Without it, the shot detector runs in the first pass, its probabilities recorded, and the
+    # cuts derive from them and --cut-threshold (DESIGN.md, Shot detection).
     parser.add_argument(
         "--cuts",
         type=Path,
         metavar="FILE",
         help="cut list: the first frame of each shot but the first, one frame number per line,"
-        " counted from 0, in place of the shot detector (default: the whole input is one shot,"
-        " the shot detector run and its probabilities recorded)",
+        " counted from 0, # comments, the fields after the number ignored, as --plan writes it;"
+        " in place of the shot detector (default: the cuts TransNetV2 detects, see"
+        " --cut-threshold)",
+    )
+    # The user's proposal, 2026-10-06 (DESIGN.md, Shot detection): erring lower is the cheaper
+    # mistake, a miss costing fidelity on four cuts of six, a false cut at most a low-frequency
+    # step on a continuous shot (research/docs/cuts.md, What it means for shot detection).
+    parser.add_argument(
+        "--cut-threshold",
+        type=_threshold,
+        metavar="P",
+        help="the shot detector's threshold, a probability above 0 and at most 1: a cut after the"
+        " peak of each run of frames reaching it; lower where cuts go missing, higher where false"
+        f" ones show (default: {THRESHOLD}); refused with --cuts, whose list replaces the"
+        " detection",
+    )
+    # PROVISIONAL (implementation, 2026-10-09): DESIGN.md names --plan (Memory planner, Shot
+    # detection) without saying where its cut list goes: to a path given, so that --plan works
+    # with a one-file output as with a directory, and the list is the user's to edit and keep,
+    # never among the job's own files.
+    parser.add_argument(
+        "--plan",
+        type=Path,
+        metavar="FILE",
+        help="plan the job and stop before the upscale: the first pass, then the cut list"
+        f" written to FILE, for editing and --cuts, the possible cuts (runs peaking from {POSSIBLE}"
+        " up to the threshold) commented with their probabilities and times; and the counts"
+        " printed. With an output directory, the job's manifest and frame index too: the same"
+        " command without --plan then runs it, another --cut-threshold or --cuts plans it again,"
+        " with no second decode",
     )
     parser.add_argument("--seed", type=int, default=42)
     # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
@@ -371,7 +402,7 @@ def _run(args: argparse.Namespace) -> int:
         shots_from_cuts,
         target_size,
     )
-    from seedvr2x.runtime.manifest import NAME, read
+    from seedvr2x.runtime.manifest import NAME, planned, read
     from seedvr2x.runtime.weights import ModelError, check_models
 
     # The build, the source, the target, the cut list and the model files are checked before
@@ -391,6 +422,12 @@ def _run(args: argparse.Namespace) -> int:
                 f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
                 f" a window needs at least {2 * SHARED + 1}"
             )
+        # DESIGN.md, Shot detection: --cut-threshold "is refused with --cuts".
+        if args.cuts is not None and args.cut_threshold is not None:
+            raise JobError(
+                f"--cut-threshold {args.cut_threshold}: refused with --cuts, whose list replaces"
+                " the detection"
+            )
         png = args.format == "png"
         ffmpeg_version = ffmpeg.check(("png",) if png else (), ("image2",) if png else ())
         conversions = fingerprint()
@@ -409,6 +446,8 @@ def _run(args: argparse.Namespace) -> int:
         last = cuts[-1] if cuts else 0
         check_seed(args.seed, [Shot(last, last + 1)])
         directory = _output(args)
+        if args.plan is not None:
+            _plan_file(args, directory)
         # A job resumed: its record read first, and whether its first pass's would be trusted
         # (_trusted), so that the shot detector's file is fetched and checked only when the
         # detector runs: without --cuts, whose list replaces the detection, and in a first pass
@@ -416,13 +455,26 @@ def _run(args: argparse.Namespace) -> int:
         # recorded with a cut list and asked without one, another job, refused below (_prior)
         # before any first pass: its refusal neither fetches nor hashes a file it wouldn't run.
         recorded: dict[str, Any] | None = None
-        trusted: FrameIndex | None = None
+        kept: FrameIndex | None = None
         untrusted = ""
         if directory is not None and (directory / NAME).is_file():
             _lock(directory)
             recorded = read(directory / NAME)
-            trusted, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
-        detects = args.cuts is None and trusted is None and _detecting(recorded)
+            kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
+        # A job detecting its shots needs the record's probabilities: a plan cut by a list has
+        # none, its first pass run again with the shot detector when it is planned again without
+        # one (_prior), which gives the detector its frames (PROVISIONAL, implementation,
+        # 2026-10-09: the decode is the one way to the frames, a full pass's cost, said in the
+        # log). A cut list takes the record with or without them.
+        reprobed = args.cuts is None and kept is not None and kept.probabilities is None
+        trusted = None if reprobed else kept
+        # The detector's file isn't asked for a job recorded with a cut list that has made units,
+        # asked without one: another job, which no plan's change takes (_prior).
+        detects = (
+            args.cuts is None
+            and trusted is None
+            and (_detecting(recorded) or (recorded is not None and planned(recorded)))
+        )
         # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
         # into it when missing, in one fetch; checked by their headers, in a second, then
         # seedvr2x's own by their pinned size and SHA-256 (16.5 GB to read for the DiT), which the
@@ -461,23 +513,30 @@ def _run(args: argparse.Namespace) -> int:
             if untrusted:
                 # Said once the job is known for the one recorded, never before a refusal.
                 logger.warning("%s; the first pass runs again, which makes it", untrusted)
+            elif reprobed:
+                logger.info(
+                    "%s: no shot probabilities in its record, its cuts given by a list: the first"
+                    " pass runs again, the shot detector with it",
+                    directory,
+                )
             # The source's content hashed meanwhile, for the manifest.
             found = _first_pass(declared, directory is not None, model_files, identity.device)
         source = counted(declared, found)
-        shots = shots_from_cuts(cuts, source.frames)
+        found_cuts = _source_cuts(args, cuts, source)
+        shots = shots_from_cuts([cut.frame for cut in found_cuts.cuts], source.frames)
+        logger.info("%s: %s", _plural(len(shots), "shot"), _said(found_cuts))
         check_seed(args.seed, shots)
         segments, paths = _segments(args, source, shots, directory)
         out_height, out_width = output_size(target)
         logger.info(
-            "%d shots, %d output segments; output %dx%d, square pixels",
-            len(shots),
-            len(segments),
+            "%s; output %dx%d, square pixels",
+            _plural(len(segments), "output segment"),
             out_width,
             out_height,
         )
-        work = (
-            _work(args.output) if directory is None and args.color_correction == "split" else None
-        )
+        # No work directory for a plan, which writes nothing but its cut list for one file.
+        split = args.color_correction == "split"
+        work = _work(args.output) if directory is None and split and args.plan is None else None
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
@@ -522,20 +581,33 @@ def _run(args: argparse.Namespace) -> int:
             logger.error("%s: written to since it was checked, by another program", directory)
             return 1
         if prior is not None:
-            # The job recorded there, checked whole and taken up before the models load.
+            # The job recorded there, checked whole and taken up before the models load: a plan
+            # whose cuts changed planned again (_replan).
             try:
                 _resume(record, prior)
             except JobError as error:
                 logger.error("%s", error)
                 return 1
             remaining = [index for index, done in enumerate(record.finished) if not done]
-            if prior.known is None:
-                # The first pass ran again: its index is written with a manifest naming it.
-                _index_made_again(record, prior)
+            if not prior.replanned:
+                # The job as recorded: what of it is written before a unit, its first pass run
+                # again or its plan taken up in another environment (a plan planned again wrote
+                # its own, _replan).
+                _taken_up(record, prior)
             if not remaining:
+                # Said for --plan too, which still writes the finished job's cut list, its plan.
                 logger.info("%s: finished already, its %d segments", directory, len(segments))
-                return 0
+                if args.plan is None:
+                    return 0
+        elif args.plan is not None:
+            # A new job's directory made a plan (DESIGN.md, Memory planner): its frame index and
+            # manifest, no unit; the same command without --plan runs it.
+            _first_write(record, source)
         units = DiskUnits(directory, record)
+    if args.plan is not None:
+        # No upscale: --plan prints the plan "without running the job" (DESIGN.md, Memory
+        # planner), the models not loaded.
+        return _write_plan(args, source, found_cuts, len(shots), model_files)
     started = time.monotonic()
     try:
         models = load_models(
@@ -552,10 +624,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
     if record is not None and prior is None:
-        record.path.parent.mkdir(parents=True, exist_ok=True)
-        # The frame index first, whole, then the manifest naming it (manifest.INDEX).
-        _write_index(record.path.parent, source)
-        record.write()
+        _first_write(record, source)
     started = time.monotonic()
 
     tags = Tags.of(stream, source.conversion.matrix_tag)
@@ -797,6 +866,14 @@ def _write_index(directory: Path, source: "Source") -> None:
     source.index.write(directory / INDEX)
 
 
+def _first_write(record: "Manifest", source: "Source") -> None:
+    """A new job's first write in its directory: the frame index, whole, then the manifest naming
+    it (manifest.INDEX)."""
+    record.path.parent.mkdir(parents=True, exist_ok=True)
+    _write_index(record.path.parent, source)
+    record.write()
+
+
 def _first_pass(
     declared: "Declared", hashed: bool, model_files: "ModelFiles", device: "torch.device"
 ) -> "FirstPass":
@@ -820,6 +897,7 @@ def _settings(
     the tests ask for it (NUMZ_PADDING), so that a user's manifest never names it."""
     from seedvr2x.runtime.manifest import code_sha256
 
+    detects = args.cuts is None
     settings: dict[str, object] = {
         "seedvr2x": version("seedvr2x"),
         "code": code_sha256(),
@@ -827,13 +905,18 @@ def _settings(
         "vae_model": _model(model_files.vae, model_files),
         # The shot detector's file, as the DiT's and the VAE's, when the job detects shots: a
         # resume with another is another job.
-        **({"detector_model": _detector_model(model_files)} if args.cuts is None else {}),
+        **({"detector_model": _detector_model(model_files)} if detects else {}),
         "resolution": args.resolution,
         "seed": args.seed,
         "color_correction": args.color_correction,
         "window": args.window,
         "format": args.format,
-        "cuts": cuts,
+        # How the source is cut (resume.CUT_SETTINGS): the cut list given, or none and the
+        # detection's threshold, "a setting the manifest records" (DESIGN.md, Shot detection),
+        # as Python writes the float, which reads back exactly; the cuts it gives are the
+        # layout's shots, compared after the first pass.
+        "cuts": None if detects else cuts,
+        **({"cut_threshold": repr(_cut_threshold(args))} if detects else {}),
         "min_segment": str(args.min_segment),
         "input_matrix": args.input_matrix,
         "input_sar": None if args.input_sar is None else str(args.input_sar),
@@ -916,6 +999,8 @@ class _Prior:
     identity: _Identity
     changed: list[str]  # its environment's differences, accepted (--accept-env-change)
     known: "FirstPass | None"  # the first pass's record, unless ffmpeg or conversions changed
+    # A plan planned again: its cut settings' differences (resume.CUT_SETTINGS); else none.
+    replanned: list[str] = field(default_factory=list[str])
 
 
 def _identity(
@@ -962,15 +1047,22 @@ def _prior(
     """The job recorded in directory, its manifest's content `recorded`, checked against the one
     asked before its first pass: the same settings, environment and source, the source being its
     content (resume.identity), or refused (JobError), but for an environment change accepted
-    (--accept-env-change). The record of the first pass is trusted, and the pass isn't run
-    again, with its index `trusted` (_trusted): unless ffmpeg or its conversions changed, the
-    same bytes, decoded by the same build, give the same frames, and nothing else takes part in
-    the pass's decode (DESIGN.md, Pause and resume); the shot detector's probabilities are the
-    record's then, never made again."""
+    (--accept-env-change), and for a plan's cuts. The record of the first pass is trusted, and
+    the pass isn't run again, with its index `trusted` (_trusted): unless ffmpeg or its
+    conversions changed, the same bytes, decoded by the same build, give the same frames, and
+    nothing else takes part in the pass's decode (DESIGN.md, Pause and resume); the shot
+    detector's probabilities are the record's then, never made again.
+
+    A plan, a job that has made no unit yet (manifest.planned), is planned again when the settings
+    asked differ from its own in how its source is cut alone (resume.CUT_SETTINGS): another
+    --cut-threshold, a cut list given or another, or none, its cuts derived again from its first
+    pass's record (DESIGN.md, Shot detection: another threshold gives its cuts without a second
+    decode or detection), the layout and settings rewritten (_replan). PROVISIONAL
+    (implementation, 2026-10-09, reported to design), as resume.CUT_SETTINGS says."""
     from seedvr2x.media.scan import Idet
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.manifest import NAME
+    from seedvr2x.runtime.manifest import NAME, planned
 
     path = directory / NAME
     identity = _identity(
@@ -983,15 +1075,24 @@ def _prior(
     }
     found = resume.differences(resume.identity(recorded), resume.identity(asked))
     changed = [line for line in found if resume.section(line) == "environment"]
-    if len(changed) < len(found) or (changed and not args.accept_env_change):
-        raise _another_job(path, found, only_environment=len(changed) == len(found))
+    recut = [line for line in found if resume.setting(line) in resume.CUT_SETTINGS]
+    other = len(found) > len(changed) + len(recut)
+    replanned = recut if recut and not other and planned(recorded) else []
+    if other or recut != replanned or (changed and not args.accept_env_change):
+        raise _another_job(
+            path,
+            found,
+            only_environment=len(changed) == len(found),
+            units_made=bool(recut) and not other and not replanned,
+            plan_elsewhere=bool(replanned) and bool(changed),
+        )
     entry: dict[str, Any] = recorded["input"]
     if entry["path"] != str(declared.path.resolve()):
         logger.info(
             "%s: the input recorded at %s, moved: the same content", declared.path, entry["path"]
         )
     if trusted is None:
-        return _Prior(recorded, identity, changed, None)
+        return _Prior(recorded, identity, changed, None, replanned)
     logger.info(
         "%s: the same input and ffmpeg, the first pass as recorded%s",
         directory,
@@ -1000,7 +1101,7 @@ def _prior(
     found = FirstPass(
         entry["frames"], entry["sha256"], trusted, Idet.from_record(entry.get("idet"))
     )
-    return _Prior(recorded, identity, changed, found)
+    return _Prior(recorded, identity, changed, found, replanned)
 
 
 def _detecting(recorded: dict[str, Any] | None) -> bool:
@@ -1048,9 +1149,10 @@ def _trusted(
 def _recorded_index(directory: Path, entry: dict[str, Any]) -> "tuple[FrameIndex | None, str]":
     """The frame index the input's record names, read from directory and checked against the
     record (manifest.INDEX): its size, SHA-256 and frames; or None, and why it isn't trusted. Its
-    shot detector's probabilities come with it when it has them: a record this code wrote has
-    them exactly when its job detects its shots, which its settings say (_detecting), a job
-    detecting or cut by a list being another job (_prior)."""
+    shot detector's probabilities, when there, come with it: a record this code wrote has them
+    when its job detected its shots, which its settings say (_detecting), or when it is a
+    detected plan planned again by a cut list, which keeps them (_replan), so that a later
+    threshold needs no second decode."""
     import hashlib
 
     from seedvr2x.media.index import FrameIndex
@@ -1096,25 +1198,38 @@ def _resume(record: "Manifest", prior: _Prior) -> None:
     following from it; its directory must be as the manifest says. Then record the environment
     change accepted, and discard what a stop left that the manifest doesn't name
     (resume.leftovers). The manifest is written by the next unit made: a resume stopped
-    before one keeps the record as it was, but for the index of a first pass run again
-    (_index_made_again)."""
+    before one keeps the record as it was, but for the index of a first pass run again and for
+    a plan's (_taken_up). A plan planned again (_prior) takes its new cuts and the layout they
+    give (_replan)."""
     from seedvr2x.runtime import resume
+    from seedvr2x.runtime.manifest import planned
+
+    def compared(line: str) -> bool:
+        # The environment compared before the first pass; a plan's cuts, accepted there.
+        if resume.section(line) == "environment":
+            return False
+        recut = resume.setting(line) in resume.CUT_SETTINGS
+        return not prior.replanned or not (recut or resume.section(line) in ("shots", "segments"))
 
     found = [
-        line
-        for line in resume.differences(prior.recorded, record.content())
-        if resume.section(line) != "environment"  # compared before the first pass
+        line for line in resume.differences(prior.recorded, record.content()) if compared(line)
     ]
     if found:
         raise _another_job(record.path, found, only_environment=False)
+    if prior.replanned:
+        _replan(record, prior)
+        return
     resume.adopt(record, prior.recorded)
     if prior.changed:
         change = resume.environment_change(prior.recorded, record.environment)
         record.environment_changes.append(change)
         logger.warning(
-            "%s: resumed in another environment, as accepted, which its manifest records with"
-            " the next unit made: %s",
+            "%s: resumed in another environment, as accepted, which its manifest records %s: %s",
             record.path.parent,
+            # A plan's at once (_taken_up).
+            "at once, a plan having made no unit in the one before"
+            if planned(prior.recorded)
+            else "with the next unit made",
             "; ".join(prior.changed),
         )
     discarded = resume.leftovers(record)
@@ -1125,28 +1240,42 @@ def _resume(record: "Manifest", prior: _Prior) -> None:
         else:
             path.unlink()
     logger.info(
-        "resuming %s: %d of %d segments finished, %d of %d shots encoded, %d windows kept; %d"
-        " leftovers discarded",
+        "resuming %s: %d of %d segments finished, %d of %d shots encoded, %d windows kept; %s"
+        " discarded",
         record.path.parent,
         sum(record.finished),
         len(record.finished),
         sum(record.encoded),
         len(record.encoded),
         sum(record.windows_done),
-        len(discarded),
+        _plural(len(discarded), "leftover"),
     )
 
 
-def _index_made_again(record: "Manifest", prior: _Prior) -> None:
-    """The frame index of a first pass a resume ran again (_prior), written only with a manifest
-    that names it and records the environment it was made in (manifest.INDEX).
+def _taken_up(record: "Manifest", prior: _Prior) -> None:
+    """What a job taken up as it is recorded (_resume) writes before any unit: nothing, unless its
+    first pass ran again or it is a plan taken up in another environment. The frame index is
+    written only with a manifest that names it and records the environment it was made in
+    (manifest.INDEX).
 
-    Made in the environment recorded, the recorded index being missing or damaged: at once, then
-    the manifest as recorded, naming it, so that the next run trusts the record, that of a job
-    finished already too, which makes no unit to write its manifest with. Left to the next unit, a
-    finished job kept index bytes its manifest didn't name when the pass gave others (a damaged
-    source decodes otherwise from one pass to the next: media/reader.py), and every later run
-    warned of them and ran the pass again.
+    A plan, a job that has made no unit yet (manifest.planned), whose first pass ran again or
+    whose environment changed, accepted (--accept-env-change): its index, when made again, then
+    its manifest, at once, in this run's environment, the change recorded
+    (environment_changes). No unit of it was made in the environment recorded, so nothing is
+    left to resume there, and its record then stands for what this run made and found: written
+    as recorded, a plan whose pass ran again under another ffmpeg named that ffmpeg's index
+    beside the first one's name, and the first ffmpeg then trusted it (a review's finding,
+    2026-10-10). PROVISIONAL (implementation, 2026-10-10, for design, as the plan's form is:
+    DESIGN.md has the new environment written "with the next unit made").
+
+    A job that has made units, its first pass run again (_prior):
+
+    Its index made in the environment recorded, the recorded one being missing or damaged: at
+    once, then the manifest as recorded, naming it, so that the next run trusts the record, that
+    of a job finished already too, which makes no unit to write its manifest with. Left to the
+    next unit, a finished job kept index bytes its manifest didn't name when the pass gave others
+    (a damaged source decodes otherwise from one pass to the next: media/reader.py), and every
+    later run warned of them and ran the pass again.
 
     Made in another environment, accepted (ffmpeg or its conversions changed): with the next unit
     made, whose manifest records that environment (DESIGN.md, Pause and resume), the directory
@@ -1156,14 +1285,22 @@ def _index_made_again(record: "Manifest", prior: _Prior) -> None:
 
     PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has a resume stopped
     before a unit leave the manifest as it was, which holds but for the record of an index made
-    again in the environment recorded)."""
+    again in the environment recorded, and for a plan's)."""
     from dataclasses import replace
 
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.manifest import FIRST_PASS
+    from seedvr2x.runtime.manifest import FIRST_PASS, planned
 
     directory = record.path.parent
     source = record.source
+    if planned(prior.recorded):
+        if prior.known is None:
+            _write_index(directory, source)
+        if prior.known is None or prior.changed:
+            record.write()
+        return
+    if prior.known is not None:
+        return
     before: dict[str, Any] = prior.recorded["environment"]
     if any(before.get(key) != record.environment.get(key) for key in FIRST_PASS):
         record.before_write = lambda: _write_index(directory, source)
@@ -1177,8 +1314,67 @@ def _index_made_again(record: "Manifest", prior: _Prior) -> None:
     as_recorded.write()
 
 
-def _another_job(path: Path, found: list[str], only_environment: bool) -> "JobError":
-    """A resume refused, each difference listed, `where: recorded -> now`."""
+def _replan(record: "Manifest", prior: _Prior) -> None:
+    """Take up a plan with other cuts (_prior): what a stop left of it, found by its own layout
+    (resume.recorded_job, resume.leftovers: anything not its own refused, never deleted), is
+    discarded, its units' directories with it, none of them the new layout's; its first pass's
+    index replaced when the pass ran again (a plan cut by a list, planned again without one, or
+    one planned again under another ffmpeg, accepted); then its manifest rewritten with the new
+    settings and layout, at once, so that the plan is the new one whether a unit follows or not,
+    in this run's environment, a change accepted recorded with it, as a plan taken up is
+    (_taken_up). PROVISIONAL, as the rule is (resume.CUT_SETTINGS)."""
+    from seedvr2x.runtime import resume
+    from seedvr2x.runtime.manifest import STATE
+
+    directory = record.path.parent
+    planned = resume.recorded_job(record.path, prior.recorded, record.source)
+    discarded = resume.leftovers(planned)
+    for path in discarded:
+        logger.debug("discarded %s", path)
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    # Only the plan's units' directories are left there, emptied (leftovers): rmdir, which
+    # refuses a directory not empty, removes nothing else.
+    state = directory / STATE
+    if state.is_dir():
+        for shot in state.iterdir():
+            shot.rmdir()
+        state.rmdir()
+    record.environment_changes = list(prior.recorded.get(resume.CHANGES, []))
+    if prior.changed:
+        record.environment_changes.append(
+            resume.environment_change(prior.recorded, record.environment)
+        )
+        logger.warning(
+            "%s: planned again in another environment, as accepted, which its manifest records"
+            " at once, a plan having made no unit in the one before: %s",
+            directory,
+            "; ".join(prior.changed),
+        )
+    if prior.known is None:
+        _write_index(directory, record.source)
+    record.write()
+    logger.info(
+        "%s: re-planned, its job having made no unit yet: %s; %s discarded",
+        directory,
+        "; ".join(prior.replanned),
+        _plural(len(discarded), "leftover"),
+    )
+
+
+def _another_job(
+    path: Path,
+    found: list[str],
+    only_environment: bool,
+    units_made: bool = False,
+    plan_elsewhere: bool = False,
+) -> "JobError":
+    """A resume refused, each difference listed, `where: recorded -> now`; `units_made` when the
+    cuts differ alone, which a plan would take (_prior), but the job has made units;
+    `plan_elsewhere` when a plan's cuts differ, which it takes, and its environment too, which
+    --accept-env-change takes."""
     from seedvr2x.runtime.job import JobError
 
     return JobError(
@@ -1189,6 +1385,19 @@ def _another_job(path: Path, found: list[str], only_environment: bool) -> "JobEr
             "\nOnly its environment differs: --accept-env-change resumes it anyway, though"
             " its output then differs from an uninterrupted run's"
             if only_environment
+            else ""
+        )
+        + (
+            "\nIts cuts change only while it is a plan, before its first unit, and it has made"
+            " some: its cuts are its own; another output directory takes new ones"
+            if units_made
+            else ""
+        )
+        + (
+            "\nA plan, which has made no unit yet, is planned again with other cuts; its"
+            " environment differs too: --accept-env-change takes it up anyway, its first pass"
+            " run again where ffmpeg or its conversions changed"
+            if plan_elsewhere
             else ""
         )
     )
@@ -1215,6 +1424,183 @@ def _detector_model(model_files: "ModelFiles") -> dict[str, object]:
         return _model(model_files.detector, model_files)
     pin = pull.PINNED[pull.DETECTOR]
     return {"name": pull.DETECTOR, "size": pin.size, "sha256": pin.sha256}
+
+
+def _cut_threshold(args: argparse.Namespace) -> float:
+    """The detection's threshold: --cut-threshold's, else THRESHOLD."""
+    return THRESHOLD if args.cut_threshold is None else args.cut_threshold
+
+
+@dataclass(frozen=True)
+class _Cuts:
+    """How a job's source is cut (_source_cuts): its cuts, and the possible ones a detection
+    found (--plan's list); the threshold of a detection, as the manifest records it, or the cut
+    list given."""
+
+    cuts: "list[Cut]"
+    possible: "list[Cut]"
+    threshold: str | None  # the detection's, None for a cut list's
+    listed: Path | None  # the cut list given, None for a detection's
+
+
+def _source_cuts(args: argparse.Namespace, listed: list[int], source: "Source") -> _Cuts:
+    """The cuts of the job's source: the cut list's, `listed`, as read (--cuts); else detected
+    at --cut-threshold from the shot detector's probabilities, its first pass's or its record's
+    (DESIGN.md, Shot detection: "the cuts derive from them and the threshold"), with the
+    possible ones."""
+    from seedvr2x.runtime.cuts import Cut, detected, possible
+
+    if args.cuts is not None:
+        return _Cuts([Cut(frame) for frame in listed], [], None, args.cuts)
+    probabilities = None if source.index is None else source.index.probabilities
+    if probabilities is None:
+        # The detector runs in every first pass of a job detecting its shots, and a record
+        # without them isn't trusted then (_run).
+        raise ValueError(f"{source.path}: no shot probabilities to cut it by: a seedvr2x bug")
+    threshold = _cut_threshold(args)
+    found = detected(probabilities, threshold), possible(probabilities, threshold)
+    return _Cuts(*found, repr(threshold), None)
+
+
+def _said(found: _Cuts) -> str:
+    """How the shots were found, as a run's log says it: "61 cuts detected at 0.3, and 39
+    possible cuts from 0.1 up to 0.3, which --plan lists", or "3 cuts from the cut list
+    cuts.txt"."""
+    if found.threshold is None:
+        return f"{_plural(len(found.cuts), 'cut')} from the cut list {found.listed}"
+    said = f"{_plural(len(found.cuts), 'cut')} detected at {found.threshold}"
+    if float(found.threshold) <= POSSIBLE:
+        return said
+    possible = _plural(len(found.possible), "possible cut")
+    return f"{said}, and {possible} from {POSSIBLE} up to {found.threshold}, which --plan lists"
+
+
+def _counts(found: _Cuts, shots: int) -> str:
+    """The counts --plan prints (DESIGN.md, Shot detection): "61 cuts at 0.3 (62 shots), 39
+    possible cuts from 0.1 up to 0.3"; "3 cuts from the cut list cuts.txt (4 shots)"."""
+    cuts, shots_said = _plural(len(found.cuts), "cut"), _plural(shots, "shot")
+    if found.threshold is None:
+        return f"{cuts} from the cut list {found.listed} ({shots_said})"
+    said = f"{cuts} at {found.threshold} ({shots_said})"
+    if float(found.threshold) <= POSSIBLE:
+        # No run from POSSIBLE up peaks under such a threshold (cuts.possible).
+        return f"{said}, no possible cuts at a threshold of {POSSIBLE} or under"
+    possible = _plural(len(found.possible), "possible cut")
+    return f"{said}, {possible} from {POSSIBLE} up to {found.threshold}"
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
+    """Refuse a --plan FILE (JobError) that would take the place of what the job reads or writes:
+    the source, the cut list given (--cuts), the one-file output or anything in the output
+    directory, which holds the job's own files only (resume.leftovers); or that can't be
+    written: a directory, in none, or in one that takes no new file. Before the first pass, which
+    may take an hour. PROVISIONAL (implementation, 2026-10-09), with the plan's form."""
+    import tempfile
+
+    from seedvr2x.runtime.job import JobError
+
+    plan: Path = args.plan
+    where = plan.resolve()
+    if where == args.input.resolve():
+        raise JobError(f"--plan {plan}: the source; it names the cut list's file")
+    if args.cuts is not None and where == args.cuts.resolve():
+        # The plan of a cut list is that list normalised: written over it, the list's own
+        # comments went, the possible cuts it kept commented and their probabilities with them.
+        raise JobError(
+            f"--plan {plan}: the cut list given (--cuts), which it would replace, its comments"
+            " lost; it names another file"
+        )
+    if directory is None and where == args.output.resolve():
+        raise JobError(f"--plan {plan}: the output; it names the cut list's file")
+    if directory is not None and where.is_relative_to(directory.resolve()):
+        raise JobError(
+            f"--plan {plan}: in the output directory, which holds the job's own files only"
+        )
+    if plan.is_dir():
+        raise JobError(f"--plan {plan}: a directory; it names the cut list's file")
+    if not plan.parent.is_dir():
+        raise JobError(f"--plan {plan}: no directory {plan.parent} to write it in")
+    # The list is written beside its place, then renamed into it (files.write_whole): a file made
+    # there and removed tells now, not once the first pass has run, whether the directory takes
+    # one.
+    try:
+        with tempfile.NamedTemporaryFile(dir=plan.parent, prefix=f"{plan.name}."):
+            pass
+    except OSError as error:
+        raise JobError(
+            f"--plan {plan}: no file can be written in {plan.parent}: {error.strerror}"
+        ) from None
+
+
+def _write_plan(
+    args: argparse.Namespace,
+    source: "Source",
+    found: _Cuts,
+    shots: int,
+    model_files: "ModelFiles",
+) -> int:
+    """--plan's end: the cut list written to FILE, whole, an existing one replaced (files.
+    write_whole), in the cut list format (cuts.cut_list), and the counts said; 0, or 1 when FILE
+    can't be written. PROVISIONAL (implementation, 2026-10-09): the header's wording, and the
+    probability and time after each cut, which --cuts ignores (DESIGN.md, Input)."""
+    import textwrap
+
+    from seedvr2x.media.files import write_whole
+    from seedvr2x.runtime.cuts import cut_list
+
+    if source.index is None:
+        raise ValueError(f"{source.path}: no frame index to time its cuts by: a seedvr2x bug")
+    rate = source.frame_rate
+    # No line of the header begins with a digit, nor holds a line break (cuts.cut_list).
+    header = [f"seedvr2x cut list of {source.path.name}: {source.frames} frames at {rate} fps"]
+    if found.threshold is not None:
+        model = _detector_model(model_files)
+        header.append(
+            f"Shot detector: TransNetV2, {model['name']} (SHA-256 {str(model['sha256'])[:8]}),"
+            f" threshold {found.threshold}"
+        )
+    header += [f"Found: {_counts(found, shots)}", ""]
+    detected = found.threshold is not None
+    peak = "the shot detector's peak probability, on the frame before it; " if detected else ""
+    possible = " A possible cut is a commented line: checking it is a jump to its time in a player."
+    lines = (
+        "A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;"
+        f" {peak}the time of that frame from the source's start, H:MM:SS.mmm, as a player shows it."
+        f" seedvr2x reads the frame number alone.{possible if detected else ''}"
+    )
+    usage = (
+        "Uncomment a possible cut to keep it, delete a line to drop a cut"
+        if detected
+        else "Delete a line to drop a cut, add one to cut at its frame"
+    )
+    header += textwrap.wrap(lines, 86)
+    header += textwrap.wrap(f"{usage}, then run with --cuts FILE, this file.", 86)
+    text = cut_list(header, source.index, found.cuts, found.possible)
+    try:
+        write_whole(args.plan, text.encode())
+    except OSError as error:
+        logger.error("--plan %s: not written: %s", args.plan, error)
+        return 1
+    logger.info("%s: the cut list in %s", _counts(found, shots), args.plan)
+    return 0
+
+
+def _threshold(text: str) -> float:
+    """--cut-threshold's P: a probability above 0 and at most 1 (DESIGN.md, Shot detection)."""
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not 0 < value <= 1:  # NaN fails it too
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: not a threshold; give a probability above 0 and at most 1, such as"
+            f" {THRESHOLD}, the default"
+        )
+    return value
 
 
 def _positive(text: str) -> int:

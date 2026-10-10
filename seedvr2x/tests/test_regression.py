@@ -41,9 +41,15 @@ the tests only):
   numz_sharp.mkv, skipped when that reference is absent.
 Every run detects its shots, as a user's does without --cuts (DESIGN.md, Shot detection): the
 shot detector runs on the GPU in the first pass, before the models load, so that its settings,
-scoped to its own forwards, and the memory it gives back are held to the bits too; the job stays
-one shot until the cuts' step. A case whose model file, or the shot detector's
-(transnetv2.safetensors), isn't in SEEDVR2X_MODEL_DIR is skipped, naming the file. One more,
+scoped to its own forwards, and the memory it gives back are held to the bits too. At
+--cut-threshold 0.5, where its cuts are none, so that the job is one shot, as numz's one batch,
+which the log must say. At the default, 0.3, it isn't: input_rgb.mkv ends on two short shots,
+which numz's batch ran through, TransNetV2 peaking at 0.3242 on frame 41 and 0.3880 on frame 43,
+and at 0.1171 on frame 0, on the CPU and on the GPU alike (1.19e-07 apart; the same on its
+956x530 crop): cut at 42 and 44, 3 shots, none of the run's 45 frames was numz's, where at 0.5,
+1 shot and 2 possible cuts, all 45 are (the GPU box, 2026-10-10). A case whose model file, or the
+shot detector's (transnetv2.safetensors), isn't in SEEDVR2X_MODEL_DIR is skipped, naming the file.
+One more,
 test_milestone1_from_the_cache, runs ours-sharp with the default models taken from Hugging Face's
 cache (runtime/pull.py): no --model-dir, no --dit-model or --vae-model, and HF_HUB_OFFLINE=1 in
 its environment, so that only the cache can serve them; it needs no SEEDVR2X_MODEL_DIR, and is
@@ -150,6 +156,9 @@ def bit_identical(
         [
             *(sys.executable, "-m", "seedvr2x", str(source), "-o", str(master), *options),
             *("--resolution", str(resolution), "--seed", "42", "--dump-frames", str(frames)),
+            # The shots detected, and none found: at the default 0.3, the input is cut at 42 and
+            # 44, 3 shots where numz ran one batch (the module's docstring).
+            *("--cut-threshold", "0.5"),
             # numz's output milestone 1 holds to, without its lab (StableSR's, not vendored).
             *("--color-correction", "none"),
             # numz.mkv's format, ffv1_out.py's default: compare.py reads both masters as stored.
@@ -161,9 +170,11 @@ def bit_identical(
         env=environment,
     )
     assert run.returncode == 0, run.stderr[-3000:]
-    # The shot detector ran in the first pass, on the GPU, and gave its memory back.
+    # The shot detector ran in the first pass, on the GPU, and gave its memory back; no cut at
+    # 0.5, the input one shot, as numz's one batch (the module's docstring).
     assert "the shot detector scored" in run.stderr, run.stderr[-3000:]
     assert "shot detector: VRAM peak" in run.stderr, run.stderr[-3000:]
+    assert "1 shot: 0 cuts detected at 0.5" in run.stderr, run.stderr[-3000:]
     expected = (
         reference.parent / f"{reference.name}.mkv",
         reference.parent / f"{reference.name}_frames",

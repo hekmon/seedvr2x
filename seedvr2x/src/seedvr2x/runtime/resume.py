@@ -1,8 +1,9 @@
 """A job resumed from its output directory (DESIGN.md, Pause and resume), the manifest there being
 the truth: the job asked must be the one recorded, its settings, models, environment, input,
 output and layout alike, but for an environment change the user accepts (--accept-env-change),
-which the manifest records; the directory must hold what the manifest says, and nothing else of
-anyone's; what a stop left that the manifest doesn't name is discarded."""
+which the manifest records, and for a plan's cuts (CUT_SETTINGS); the directory must hold what the
+manifest says, and nothing else of anyone's; what a stop left that the manifest doesn't name is
+discarded."""
 
 import json
 import os
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from seedvr2x.media.files import partial_path
-from seedvr2x.runtime.job import JobError
+from seedvr2x.media.source import Source
+from seedvr2x.runtime.job import JobError, OutputSegment, Shot
 from seedvr2x.runtime.manifest import INDEX, NAME, STATE, SUMS, Manifest, checksums_file
 from seedvr2x.runtime.units import CHECKSUMS, COPY, size
 
@@ -38,6 +40,15 @@ CHANGES = "environment_changes"
 UNIT_FILE = re.compile(
     rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS)))}"
 )
+
+# The settings that say how a job's source is cut (cli._settings): the cut list given, or the
+# detection's threshold and the shot detector's file, which a cut list drops. A plan, a job that
+# has made no unit yet (manifest.planned), is taken up with them changed, its cuts derived again
+# from the first pass's record, or taken from the new list (cli._prior, cli._replan); any other
+# difference, or a unit made, is another job's. PROVISIONAL (implementation, 2026-10-09):
+# DESIGN.md has another threshold give its cuts "without a second decode or detection", the
+# record kept in an output directory, and says not how a run reaches it; reported to design.
+CUT_SETTINGS = frozenset({"cuts", "cut_threshold", "detector_model"})
 
 
 def identity(content: dict[str, Any]) -> dict[str, Any]:
@@ -80,6 +91,38 @@ def adopt(manifest: Manifest, recorded: dict[str, Any]) -> None:
 def section(difference: str) -> str:
     """The manifest's field a difference is in: environment, for `environment.gpu: ...`."""
     return re.split(r"[.\[:]", difference, maxsplit=1)[0]
+
+
+def setting(difference: str) -> str | None:
+    """The setting a difference is in: seed, for `settings.seed: 42 -> 7`, cuts for
+    `settings.cuts[0]: 3 -> 4`; None for a difference outside the settings."""
+    found = re.match(r"settings\.(\w+)", difference)
+    return None if found is None else found[1]
+
+
+def recorded_job(path: Path, content: dict[str, Any], source: Source) -> Manifest:
+    """The job the manifest at path records, its content `content`, as Manifest holds it, with
+    how far it went, `source` its input: so that what a stop left of a plan is found by the
+    plan's own layout (leftovers) when it is re-planned (cli._replan)."""
+    shots: list[Any] = content["shots"]
+    entries: list[Any] = content["segments"]
+    files = [str(entry["name"]) for entry in entries]
+    job = Manifest(
+        path,
+        content["settings"],
+        content["environment"],
+        source,
+        [Shot(int(shot["start"]), int(shot["end"])) for shot in shots],
+        [[(int(first), int(end)) for first, end in shot["windows"]] for shot in shots],
+        [
+            OutputSegment(name.removesuffix(".mkv"), int(entry["start"]), int(entry["end"]))
+            for name, entry in zip(files, entries, strict=True)
+        ],
+        files,
+        content["output"],
+    )
+    adopt(job, content)
+    return job
 
 
 def environment_change(recorded: dict[str, Any], environment: dict[str, Any]) -> dict[str, Any]:

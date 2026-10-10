@@ -3,8 +3,10 @@ must find again (its settings, models by hash, environment, input file, output, 
 windows, output segments), and how far it went: each shot encoded, its windows done, each
 segment finished. A unit is recorded once its file is whole, so the manifest only names whole
 files: the frame index too, written before the manifest's first write (INDEX). Written once the
-models load, then again after every unit, and with the index of a first pass a resume ran again
-(cli._index_made_again), always whole (a temporary file, synced, renamed)."""
+models load, or before any does when the job is planned (--plan: its plan, no unit made), then
+again after every unit; and, before a unit, with the index of a first pass a resume ran again,
+or for a plan taken up or planned again (cli._taken_up, cli._replan); always whole (a temporary
+file, synced, renamed)."""
 
 import hashlib
 import json
@@ -57,6 +59,21 @@ def checksums_file(segment: str, output_format: str) -> str:
     return f"{stem}.crc32"
 
 
+def planned(content: dict[str, Any]) -> bool:
+    """Whether the job a manifest's content records has made no unit yet: no shot encoded, no
+    window kept, no segment finished. Such a job is a plan: written by --plan, or by a run
+    stopped before its first unit. False for a record this code can't read so: another job's
+    anyway (cli._prior). Here, not in runtime/resume.py, which imports torch: the command line
+    asks before it checks the model files (cli._run), which comes before torch."""
+    shots: Any = content.get("shots")
+    segments: Any = content.get("segments")
+    try:
+        made = any(shot["encoded"] or shot["windows_done"] for shot in shots)
+        return not made and not any(segment["finished"] for segment in segments)
+    except (KeyError, TypeError):
+        return False
+
+
 def read(path: Path) -> dict[str, Any]:
     """The manifest at path, as written; refused unless of a version this code reads (READ)."""
     try:
@@ -96,7 +113,7 @@ class Manifest:
     finished: list[bool] = field(default_factory=list[bool])  # each segment whole
     sizes: list[int | None] = field(default_factory=list[int | None])  # finished ones' bytes
     # Called once, before the manifest's next write, then dropped: it writes the frame index that
-    # write names, made again by a resume in another environment (cli._index_made_again).
+    # write names, made again by a resume in another environment (cli._taken_up).
     before_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:

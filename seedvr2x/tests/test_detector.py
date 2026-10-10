@@ -36,6 +36,7 @@ from test_weights import as_dtype, write
 
 import seedvr2x.transnetv2
 from seedvr2x.runtime import detector, pull
+from seedvr2x.runtime.cuts import detections
 from seedvr2x.runtime.detector import BATCH, STEP, WINDOW, Detector
 from seedvr2x.runtime.weights import ModelError
 from seedvr2x.transnetv2.transnetv2_pytorch import TransNetV2
@@ -156,16 +157,6 @@ def tnet_predict(model: Any, frames: Any, batch: int = 1) -> tuple[Any, Any]:
                 torch.sigmoid(d["many_hot"])[:, keep, 0].reshape(-1).numpy()
             )
     return one[:n], many[:n]
-
-
-def tnet_detections(x: npt.NDArray[np.float32], p: float) -> list[int]:
-    """One detection per run of frames >= p, at the run's highest frame (the first if tied):
-    measurement's tnet_detections (scd_scores.py), DESIGN.md's detection, until the cuts' commit
-    brings seedvr2x's own."""
-    m = np.concatenate(([False], np.nan_to_num(x, nan=-1.0) >= p, [False]))
-    d = np.diff(m.astype(np.int8))
-    starts, ends = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
-    return [int(a + np.argmax(x[a:b])) for a, b in zip(starts, ends, strict=True)]
 
 
 def official(path: Path) -> torch.nn.Module:
@@ -369,7 +360,7 @@ def test_cuts_found(trained: Path, clip: npt.NDArray[np.uint8]) -> None:
     peaks = [cut - 1 for cut in CUTS]
     assert all(found[peak] > 0.5 for peak in peaks)
     assert float(np.delete(found, peaks).max()) < 0.05
-    assert tnet_detections(found, 0.3) == tnet_detections(found, 0.5) == peaks
+    assert detections(found, 0.3) == detections(found, 0.5) == peaks
 
 
 def test_measurement_reproduced(trained: Path, clip: npt.NDArray[np.uint8]) -> None:
@@ -381,7 +372,7 @@ def test_measurement_reproduced(trained: Path, clip: npt.NDArray[np.uint8]) -> N
     assert streamed(trained, clip, (17,)).tobytes() == first.tobytes()
     batched = streamed(trained, clip, batch=BATCH)
     assert streamed(trained, clip, (250, 30), batch=BATCH).tobytes() == batched.tobytes()
-    assert tnet_detections(batched, 0.3) == tnet_detections(first, 0.3)
+    assert detections(batched, 0.3) == detections(first, 0.3)
 
 
 # A Detector built on the GPU before anything else of its process touched CUDA, then run.
@@ -448,7 +439,7 @@ def test_gpu_against_cpu(trained: Path, clip: npt.NDArray[np.uint8]) -> None:
         f" {allocated:,} then {torch.cuda.memory_allocated(device):,} bytes, reserved"
         f" {reserved:,} then {torch.cuda.memory_reserved(device):,}"
     )
-    assert tnet_detections(gpu, 0.3) == tnet_detections(cpu, 0.3) == [cut - 1 for cut in CUTS]
+    assert detections(gpu, 0.3) == detections(cpu, 0.3) == [cut - 1 for cut in CUTS]
     assert gpu.tobytes() == again.tobytes()
     assert torch.cuda.memory_allocated(device) <= allocated
     assert torch.cuda.memory_reserved(device) <= reserved

@@ -188,7 +188,7 @@ def test_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
     # Ctrl-C once inside it: the segment is finished first, its ffmpeg out of Ctrl-C's reach.
     status, log = upscale(tmp_path, "out", ("run: shot 2/3: decoding", ctrl_c(1.0)))
     assert status == 130, log[-3000:]
-    assert encoded(log) == [] and re.search(r"; [1-9]\d* leftovers discarded", log)
+    assert encoded(log) == [] and re.search(r"; [1-9]\d* leftovers? discarded", log)
     assert not (out / "seg_000000.mkv.partial").exists()
     assert progress(out) == ([True, True, False], [1, 3, 0], [True, False])
 
