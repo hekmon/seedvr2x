@@ -27,8 +27,10 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
     lighten it (see [Weights](#weights)).
   - Below 48 GB, the 1080p VAE decode only fits tiled. At 4K, every card tiles the decode,
     the 96 GB one included, and that one's windows hold about 19 latents.
-  - 4K takes about 22 GiB for the DiT's smallest window, every block swapped: a 16 GB card is
-    refused it, and a 24 GB one stands at the edge (see [Memory planner](#memory-planner)).
+  - 4K takes 22 to 23 GiB of free VRAM for the DiT's smallest window, every block swapped,
+    and is refused under it. What counts is the memory free at the start, whatever the card:
+    a 16 GB card never has that much, a 24 GB one about that with nothing else on it (see
+    [Memory planner](#memory-planner)).
   - These cards also compute more slowly (an RTX 5080 has 84 SMs, the 96 GB card 188), so a
     job lasts longer there, and resume and `--until` matter most.
 - can be paused and resumed (run at night, give the computer back in the morning)
@@ -73,8 +75,9 @@ never requires it.
   files of those two 7Bs; no other model is planned (see [Weights](#weights))
 - `torch.compile`, numz's `compile_dit` and `compile_vae` (see
   [Memory planner](#memory-planner))
-- An output size whose smallest window the card can't hold, 4K on a 16 GB card for one:
-  refused, naming the largest size that fits (see [Memory planner](#memory-planner))
+- An output size whose smallest window doesn't fit the VRAM free at the start, 4K under 22 to
+  23 GiB free for one: refused, naming the free VRAM it takes and the largest size that fits
+  (see [Memory planner](#memory-planner))
 - Variable frame rate sources: refused with a clear message, as sptenc does
 - Sources refused in v1, each with a clear message, every reason a source has given in one
   numbered refusal:
@@ -1406,21 +1409,46 @@ first pass, whose shots are its input, and before the models load:
     the decode, whose peak is about twice the encode's.
   - Nothing caps a large card: the memory a 16–32 GB card spends on BlockSwap and tiles goes,
     on 96 GB and more, to longer windows.
-  - **No `torch.compile` in v1.** numz's `compile_dit` (−26 to −32% DiT time, +0.1 to +1.4
-    GiB) and `compile_vae` (−16 to −19% VAE time, for about twice the VAE's activation memory,
-    the cause not isolated) compile again for every new input shape, and seedvr2x's windows
-    take every length up to the cap. The first compilation takes 10–50 s, a recompilation was
-    never timed, and whether compiled output equals the plain one bit for bit isn't measured
-    ([vram.md](../research/docs/vram.md#torchcompile)). The plan's record keeps both flags,
-    false. The first speed lever after v1 is `compile_vae` at 1080p on large cards: the VAE
-    being four fifths of a 1080p run, 13–15% of a job.
+  - **No `torch.compile` in v1.** PyTorch's compiler turns a model's Python code into fused
+    GPU kernels the first time the model meets an input of a given shape, and compiles again
+    for each new shape. A job's frame size being fixed, the DiT's shape is its window's length
+    in latents, and the VAE's, called slice by slice, stays the same all job long. The
+    weights don't change, nor what goes in and comes out: only how the computation between
+    them runs. numz offers it for the DiT and for the VAE, measured on numz
+    ([vram.md](../research/docs/vram.md#torchcompile)):
+    - `compile_dit`: −26 to −32% of DiT time, for +0.1 to +1.4 GiB and 10–50 s of compilation.
+      numz's batches all have one length, so it compiles once and pays for itself after about
+      15 batches of 6 latents, or 5 of 12. seedvr2x's windows take every length up to the cap,
+      and each length would compile again. The DiT being a fifth of a 1080p run, the gain is
+      5–6% of a job at best. With numz's BlockSwap it gains nothing (16.0 s per batch against
+      15.5, all 36 blocks swapped), the compiled graph breaking at every swapped block.
+    - `compile_vae`: −16 to −19% of VAE time, 13–15% of a 1080p job, the VAE being four fifths
+      of it, for minutes of compilation per process. It takes about twice the VAE's working
+      memory, the intermediate pictures it computes, not its 0.47 GiB of weights (a
+      1080p decode 68.6 GiB against 34.9, an encode 33.8 against 19.7), 39 GiB more on the
+      compiling call at 4K, and leaves 5.5 GiB behind in the DiT's phase, about 5 latents of
+      window at 1080p. The cause isn't isolated
+      ([bug 14](../research/bugs/14-compile-vae-doubles-memory.md)), and no fit of the
+      compiled VAE's peaks exists for the planner. On a card that tiles, it would trade tile
+      size for speed.
+    - Not measured: whether compiled output equals the plain one bit for bit, on which
+      milestone 1's regression and the resume rule stand; a recompilation's cost; one
+      compilation serving every window length (dynamic shapes); the DiT compiled over
+      seedvr2x's own swap.
+
+    The plan's record keeps both flags, false. The first speed lever after v1 is `compile_vae`
+    where the doubled VAE fits, once its memory is understood and its output compared.
   - **A size that doesn't fit is refused, never degraded.** When the smallest window, 5
     latents, doesn't fit the DiT's phase with every block swapped, the job is refused before
-    the run, naming the largest output size that fits; no pixel cross-fade stands in (see
-    [Pipeline](#pipeline-per-shot)). At 4K such a window takes about 22 GiB: beyond a 16 GB
-    card, whose budget is about 14, and at the edge of a 24 GB card's 21.96: by the fit from
-    0.3 GiB over it to 0.6 under, as the swap's saving and the VAE's 0.47 GiB turn out.
-    Milestone 3 measures it; a 24 GB card that also drives a desktop falls short either way.
+    the run; no pixel cross-fade stands in (see [Pipeline](#pipeline-per-shot)).
+    - The rule counts in free VRAM, never in card sizes (the user's word, 2026-10-10): the
+      message gives the free VRAM the size takes, what the driver reports free, and the
+      largest output size that fits in it. A card that drives a desktop is judged by what it
+      has left, and a 96 GB card half taken by another program is a 48 GB one to seedvr2x.
+    - At 4K the smallest window takes 22 to 23 GiB of free VRAM by the fit: a peak of 21.3 to
+      22.3 GiB, as the swap's saving and the VAE's 0.47 GiB turn out, and the margin. A 16 GB
+      card never has that, and a 24 GB one has about that with nothing else on it (22.56 GiB
+      free on an emulated one). Milestone 3 measures it.
 - **Pins.** `--window N`, `--swap-blocks N`, `--encode-tile PX` and `--decode-tile PX` (0 for
   untiled) each fix one choice, and the planner makes the others around it. A pin is taken
   exactly or refused, never adjusted: the refusal names what fits, the longest window, the
@@ -1695,7 +1723,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--latent_noise_scale` | dropped from v1 (ByteDance uses 0; corrected version possibly later as an experiment, see bug 08) |
 | `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | replaced by shots, windows and latent stitching, chosen by the planner; `--window` pins the window cap |
 | `--blocks_to_swap`, tile sizes, offload devices | chosen by the planner; `--swap-blocks`, `--encode-tile` and `--decode-tile` pin them, exactly or refused; no offload device, the DiT's host copy being pinned memory |
-| `--compile_dit`, `--compile_vae` | not in v1: every new window length compiles again; the first speed lever after it |
+| `--compile_dit`, `--compile_vae` | not in v1: compiled, the DiT would compile again at every new window length, and the VAE takes twice its memory; the first speed lever after it |
 | `--cache_dit`, `--cache_vae`, `--chunk_size` | dropped: one long-running process, streaming by design |
 | `--seed` | kept (comparisons, reproducibility) |
 | `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
@@ -1827,7 +1855,8 @@ explanation.
   - which phase sets the peak: the DiT through the window length, the VAE through the frame
     size, which is why 4K needs tiled decoding
 - what a small card asks of the host and can't run: pinned RAM for the DiT's swapped blocks
-  (15.19 GiB with all 36), a tiled shot's scratch, and the sizes refused (4K on a 16 GB card)
+  (15.19 GiB with all 36), a tiled shot's scratch, and the sizes refused for want of free
+  VRAM, counted from what is free at the start, not from the card's size (4K: 22 to 23 GiB)
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
   formats or matrices), and what to do with each; for a rate its timestamps contradict, the
