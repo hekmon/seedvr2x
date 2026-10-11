@@ -27,7 +27,7 @@ from torch import Tensor
 from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 
-from seedvr2x.runtime import blockswap, weights
+from seedvr2x.runtime import blockswap, memory, weights
 from seedvr2x.runtime.blockswap import Part, Placement
 from seedvr2x.runtime.job import BLACK, padding
 from seedvr2x.runtime.plan import Phase, Plan
@@ -88,6 +88,10 @@ class Models:
         VAE's do. What comes back is queued, one copy per part, ahead of the unit's work: the
         7B whole, 15.35 GiB, in 0.30 s from its pinned copies on a desktop's PCIe 5.0 link
         (research/scripts/placement_bench.py)."""
+        # Where seedvr2x holds itself to the card (a driver that gives system memory in its
+        # place), other programs filling the card stop the run here, before the unit passes it
+        # (runtime/memory.py).
+        memory.check(self.device)
         if self.plan is None or phase == self.phase:
             return
         # Unknown until every move is done: an enter that raises half-way, the VAE gone and the

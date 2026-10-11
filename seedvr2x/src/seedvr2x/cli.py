@@ -265,8 +265,6 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    # numz's allocator, which DESIGN.md keeps (Allocator): set before torch is imported.
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
     # A stop at once, a second Ctrl-C or SIGTERM during the run (runtime/stop.py), SIGTERM during
     # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
     # manifest says, and the same command resumes.
@@ -425,7 +423,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.fingerprint import fingerprint
     from seedvr2x.media.source import counted, declare
-    from seedvr2x.runtime import planner, pull
+    from seedvr2x.runtime import memory, planner, pull
     from seedvr2x.runtime.job import (
         SHARED,
         JobError,
@@ -536,6 +534,12 @@ def _run(args: argparse.Namespace) -> int:
             None if detector is None else detector.path,
         )
         pull.check_pinned(model_files)
+        # The allocator, set before torch is imported, which the job's identity does and, for a
+        # job recorded, the modules that compare it (_prior): numz's, which DESIGN.md keeps
+        # (Allocator), or torch's own where the GPU's driver gives memory the card doesn't have,
+        # which is asked here (runtime/memory.py), where a run first takes the GPU: one refused
+        # before, for its source, its settings or its model files, asks the card nothing.
+        memory.startup()
         if recorded is not None:
             assert directory is not None
             prior = _prior(
@@ -599,7 +603,9 @@ def _run(args: argparse.Namespace) -> int:
         else:
             import torch
 
-            free = _free_memory(identity.device)
+            # Less what a driver that gives memory the card doesn't have is held back from
+            # (runtime/memory.py): all of it elsewhere.
+            free = memory.usable(_free_memory(identity.device))
             # A one-file output keeps its units in memory, a shot's windows on the GPU until
             # its decode, which the DiT's phase is judged with (planner.DIT_WINDOWS_KEPT).
             plan, peaks = planner.plan(
@@ -703,6 +709,10 @@ def _run(args: argparse.Namespace) -> int:
         # planner), the models not loaded.
         return _write_plan(args, source, found_cuts, len(shots), model_files)
     started = time.monotonic()
+    import torch  # loaded since the job's identity: named here for the refusals below
+
+    # Where the driver spills, torch refuses from here on what passes the card's free memory.
+    memory.hold(identity.device)
     try:
         models = load_models(
             model_files.dit.path, model_files.vae.path, identity.device, model_files.hashes, plan
@@ -713,6 +723,11 @@ def _run(args: argparse.Namespace) -> int:
         # of the weights the plan has away from the GPU: refused before the run, naming the RAM
         # they take (DESIGN.md, BlockSwap, rewritten).
         logger.error("%s", error)
+        return 1
+    except torch.OutOfMemoryError as error:
+        # The weights the plan has on the GPU don't fit there after all: other programs hold
+        # the card's memory, or the plan is wrong.
+        logger.error("%s, as the models loaded: nothing was run", _refused(error))
         return 1
     logger.info(
         "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
@@ -773,6 +788,13 @@ def _run(args: argparse.Namespace) -> int:
         except NonFinite as error:
             logger.error("%s, so not recorded; stopped: %s", error, _kept(record, len(segments)))
             return 1
+        except torch.OutOfMemoryError as error:
+            # The plan passed the GPU's memory: refused by the driver, or by torch where
+            # seedvr2x holds it under a driver that would give system memory instead
+            # (runtime/memory.py), which also refuses when other programs fill the card.
+            # Nothing of the unit is recorded.
+            logger.error("%s; stopped: %s", _refused(error), _kept(record, len(segments)))
+            return 1
         except Stopped:
             logger.warning(
                 "stopped after %s, as asked; %s", stop.unit, _kept(record, len(segments))
@@ -796,6 +818,16 @@ def _run(args: argparse.Namespace) -> int:
         args.format,
     )
     return 0
+
+
+def _refused(error: BaseException) -> str:
+    """The GPU's memory refused, in words: the error's first line (torch's goes on with advice
+    on its allocator's settings, which are seedvr2x's here), and whether the run was held to
+    the card by seedvr2x (runtime/memory.py)."""
+    from seedvr2x.runtime import memory
+
+    held = " (held to the card's own memory: its driver gives more)" * memory.spills()
+    return f"the GPU's memory was refused{held}: {str(error).partition(chr(10))[0]}"
 
 
 def _directory_refused(path: Path) -> str:

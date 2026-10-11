@@ -205,9 +205,12 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     one empty w.safetensors as both, pass for models: the check is test_weights.py's. The shot
     detector is StandInDetector, its file an empty transnetv2.safetensors, pinned so in place of
     TransNetV2's weights, which its pin then checks."""
-    from seedvr2x.runtime import detector, model, pull, run, weights
+    from seedvr2x.runtime import detector, memory, model, pull, run, weights
 
     patch(weights, "check_models", lambda *a: None)
+    # The stand-in's GPU has no driver to ask (runtime/memory.py): in a process of its own too,
+    # where conftest.py's fixture doesn't reach.
+    patch(memory, "paravirtual", lambda: False)
     patch(detector, "Detector", StandInDetector)
     patch(pull, "PINNED", {**pull.PINNED, pull.DETECTOR: STAND_IN_DETECTOR})
     StandInDetector.built.clear()
@@ -273,18 +276,21 @@ def upscale(
     detector_file = tmp_path / pull.DETECTOR  # the stand-in detector's (stand_in_model)
     if detector and not detector_file.exists():
         detector_file.write_bytes(b"")
+    return cli.main(command(tmp_path, input_path, output, *options))
+
+
+def command(tmp_path: Path, input_path: Path, output: str, *options: str) -> list[str]:
+    """upscale's command line."""
     correction = [] if "--color-correction" in options else ["--color-correction", "none"]
     output_format = [] if "--format" in options else ["--format", "gbrp16le"]
-    return cli.main(
-        [
-            *(str(input_path), "-o", str(tmp_path / output)),
-            *("--model-dir", str(tmp_path), "--dit-model", "w.safetensors"),
-            *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", str(SEED)),
-            *correction,
-            *output_format,
-            *options,
-        ]
-    )
+    return [
+        *(str(input_path), "-o", str(tmp_path / output)),
+        *("--model-dir", str(tmp_path), "--dit-model", "w.safetensors"),
+        *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", str(SEED)),
+        *correction,
+        *output_format,
+        *options,
+    ]
 
 
 def indexes(path: Path, pix_fmt: str = "gbrp16le") -> list[int]:
@@ -873,6 +879,250 @@ def test_swap_blocks_pin_places_the_weights(
     assert content["plan"]["memory"]["swapped_blocks"] == 36
     assert content["plan"] == plan_record(*made)
     assert content["plan"] | {"memory": None} == Plan(5).record() | {"memory": None}
+
+
+def spilling_driver(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """A driver behind WSL2's device that gives memory the card doesn't have (runtime/memory.py),
+    the probe's answer a stand-in's; returns the limits torch is then given, as fractions."""
+    from seedvr2x.runtime import memory
+
+    monkeypatch.setattr(memory, "paravirtual", lambda: True)
+    monkeypatch.setattr(
+        memory, "probe", lambda: memory.Driver(True, FREE + memory.OVER, FREE, TOTAL)
+    )
+    limits: list[float] = []
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_per_process_memory_fraction",
+        lambda fraction, device: limits.append(fraction),
+    )
+    return limits
+
+
+def test_a_driver_that_spills_is_planned_under_and_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Where the driver gives memory the card doesn't have: torch's own allocator, chosen before
+    # torch is imported; the plan made in the memory free less what is held back; torch limited
+    # to that before the models load. The run itself is the same.
+    from seedvr2x.runtime import memory, model
+
+    caplog.set_level(logging.INFO)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    limits = spilling_driver(monkeypatch)
+    loads: list[tuple[Any, int]] = []
+    monkeypatch.setattr(
+        model, "load_models", lambda *a: loads.append((a[4], len(limits))) or STAND_IN_MODELS
+    )
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
+    planned_in = FREE - memory.HELD_BACK - memory.RESERVE
+    made = planner.plan(planned_in, TARGET, JOB_SHOTS, Pins(window=5), HOST)
+    assert loads == [(made[0], 1)] and limits == [(FREE - memory.HELD_BACK) / TOTAL]
+    assert steps.calls == UNINTERRUPTED
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["plan"]["memory"]["free"] == planned_in
+    assert "the GPU's driver gives memory the card doesn't have" in caplog.text
+    assert "the plan counts on 89.20 GiB of the GPU's memory, of the 94.50 GiB" in caplog.text
+    assert "torch held to 91.50 GiB on the GPU: the 94.50 GiB free less 3.0" in caplog.text
+
+
+def test_the_user_s_allocator_stands_on_a_driver_that_spills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
+    limits = spilling_driver(monkeypatch)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync" and len(limits) == 1
+    said = "the allocator is the environment's, backend:cudaMallocAsync: torch's limit counts"
+    assert said in caplog.text
+
+
+def test_a_driver_that_refuses_holds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # No WSL2 device (the tests' own, conftest.py), as on Linux: DESIGN.md's allocator, the whole
+    # free memory planned in, torch given no limit, the driver asked nothing.
+    from seedvr2x.runtime import memory
+
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    monkeypatch.setattr(memory, "probe", lambda: pytest.fail("the driver was asked"))
+    limits: list[float] = []
+    monkeypatch.setattr(
+        torch.cuda,
+        "set_per_process_memory_fraction",
+        lambda fraction, device: limits.append(fraction),
+    )
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync" and not limits
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["plan"]["memory"]["free"] == FREE
+
+
+# The command line in a process of its own, up to where the driver is asked: its status says
+# whether torch was imported by then, 7, or not, 8. The model files pass unread.
+UP_TO_THE_DRIVER = """
+import sys
+from seedvr2x import cli
+from seedvr2x.runtime import memory, weights
+
+def asked():
+    sys.exit(7 if "torch" in sys.modules else 8)
+
+weights.check_models = lambda *a: None
+memory.startup = asked
+sys.exit(cli.main(sys.argv[1:]))
+"""
+
+
+def test_the_allocator_is_chosen_before_torch_is_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # torch's library fixes its allocator when it loads, whatever the environment says after:
+    # the driver is asked, and the allocator set, before anything imports torch. For a new job;
+    # and for one recorded, whose comparison with its record imports the runtime, torch with it:
+    # asked later, a resumed job ran on torch's default allocator, never the one chosen.
+    source_path = job(tmp_path, monkeypatch)
+    args = command(tmp_path, source_path, "out", *JOB)
+    for recorded in (False, True):
+        if recorded:
+            steps.stop = "encode 4"
+            stopped(tmp_path, source_path, "out", *JOB)
+            assert (tmp_path / "out" / "manifest.json").exists()
+        result = subprocess.run(
+            [sys.executable, "-c", UP_TO_THE_DRIVER, *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 8, (recorded, result.stderr)
+
+
+def test_a_run_refused_before_its_gpu_asks_the_driver_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # The driver is asked where a run first takes the GPU: a run refused before, here for a
+    # setting, disturbs no card, and sets no allocator.
+    from seedvr2x.runtime import memory
+
+    monkeypatch.setattr(memory, "paravirtual", lambda: True)
+    monkeypatch.setattr(memory, "probe", lambda: pytest.fail("the driver was asked"))
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB, "--until", "7:30") == 1
+    assert not any(name in os.environ for name in memory.VARIABLES)
+
+
+def test_a_plan_on_a_driver_that_spills_holds_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # --plan counts in the memory a run would: the same plan as the run's; torch, which loads
+    # no model, is given no limit.
+    from seedvr2x.runtime import memory
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    limits = spilling_driver(monkeypatch)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB, "--plan", "plan.txt") == 0
+    assert not limits and steps.calls == []
+    planned_in = FREE - memory.HELD_BACK - memory.RESERVE
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["plan"] == plan_record(
+        *planner.plan(planned_in, TARGET, JOB_SHOTS, Pins(window=5), HOST)
+    )
+    assert "the plan counts on 89.20 GiB of the GPU's memory" in caplog.text
+
+
+def test_resumed_on_a_driver_that_spills_is_held_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # Each start asks the driver, plans in the memory it may count on and holds torch to the
+    # card: a job stopped on a driver that refuses and taken up on one that spills keeps its
+    # shape, and its memory is planned in less.
+    from seedvr2x.runtime import memory
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    manifest = tmp_path / "out" / "manifest.json"
+    assert json.loads(manifest.read_text())["plan"]["memory"]["free"] == FREE
+    limits = spilling_driver(monkeypatch)
+    # The first start's allocator, left in this process's environment: each start is a process
+    # of its own, which finds none.
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF")
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
+    assert limits == [(FREE - memory.HELD_BACK) / TOTAL]
+    planned_in = FREE - memory.HELD_BACK - memory.RESERVE
+    assert json.loads(manifest.read_text())["plan"]["memory"]["free"] == planned_in
+    made = [indexes(tmp_path / "out" / f"seg_{number:06d}.mkv") for number in range(2)]
+    assert made[0] + made[1] == list(range(25))
+
+
+def test_gpu_memory_refused_at_the_load_stops_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The weights refused GPU memory as they load, the limit set before them where seedvr2x
+    # holds torch: one line, no traceback, nothing run.
+    from seedvr2x.runtime import model
+
+    spilling_driver(monkeypatch)
+
+    def refused(*arguments: object) -> None:
+        raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 432.00 MiB.\nMore.")
+
+    monkeypatch.setattr(model, "load_models", refused)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert [record.getMessage() for record in errors] == [
+        "the GPU's memory was refused (held to the card's own memory: its driver gives more):"
+        " CUDA out of memory. Tried to allocate 432.00 MiB., as the models loaded: nothing was"
+        " run"
+    ]
+    assert all(record.exc_info is None for record in errors) and steps.calls == []
+
+
+@pytest.mark.parametrize("spills", [False, True])
+def test_gpu_memory_refused_in_a_run_stops_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    spills: bool,
+) -> None:
+    # A unit refused GPU memory, by the driver or by torch where seedvr2x holds it: said in one
+    # line, no traceback, what is finished kept; the unit isn't recorded.
+    if spills:
+        spilling_driver(monkeypatch)
+    entered: list[str] = []
+
+    def enter(phase: str) -> None:
+        entered.append(phase)
+        if phase == "decode":
+            # torch's refusal goes on with advice on its allocator; and one with no word at all.
+            words = "CUDA out of memory. Tried to allocate 586.00 MiB.\nMore." if spills else ""
+            raise torch.OutOfMemoryError(words)
+
+    monkeypatch.setattr(STAND_IN_MODELS, "enter", enter)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    held = (
+        " (held to the card's own memory: its driver gives more): CUDA out of memory. Tried to"
+        " allocate 586.00 MiB."
+        if spills
+        else ": "
+    )
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert [record.getMessage() for record in errors] == [
+        f"the GPU's memory was refused{held}; stopped: 0 of 2 segments finished, and the units"
+        " of the next ones kept: the same command resumes"
+    ]
+    assert all(record.exc_info is None for record in errors) and entered[-1] == "decode"
 
 
 def test_host_short_of_memory_for_the_pinned_copies_refused(

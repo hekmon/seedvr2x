@@ -17,6 +17,7 @@ set it); the probe runs under the command line's, cudaMallocAsync.
 import gc
 import hashlib
 import os
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -201,3 +202,24 @@ def test_a_plan_s_load_never_has_the_dit_whole_on_the_device(loaded: Loaded) -> 
         models.enter("decode")
         assert abs(allocated(device) - resting - vae.size) < SLACK
         assert round_trip(models) == loaded.vae
+
+
+def test_the_driver_is_asked() -> None:
+    # The startup probe (runtime/memory.py) on a real driver, its calls through ctypes and all:
+    # it answers, in under two seconds, and leaves the card as it found it. A driver reached
+    # without WSL's device refuses what the card can't hold; under WSL, Windows' driver gave it
+    # (driver 616.92, 2026-10-11), and whichever it does now is said in the test's output.
+    from seedvr2x.runtime import memory
+
+    device = torch.device("cuda:0")
+    torch.cuda.synchronize(device)
+    before = torch.cuda.mem_get_info(device)[0]
+    started = time.perf_counter()
+    found = memory.probe()
+    took = time.perf_counter() - started
+    assert found is not None and took < 2.0, (found, took)
+    print(f"{found.said()}; {took:.2f} s; WSL's GPU device: {memory.paravirtual()}")
+    assert found.asked == found.free + memory.OVER and found.total >= found.free
+    if not memory.paravirtual():
+        assert not found.spills
+    assert abs(torch.cuda.mem_get_info(device)[0] - before) < SLACK
