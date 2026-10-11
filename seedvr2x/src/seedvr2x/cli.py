@@ -1,6 +1,7 @@
 """Command line: options and logging."""
 
 import argparse
+import datetime
 import fcntl
 import logging
 import math
@@ -211,6 +212,39 @@ def main(argv: list[str] | None = None) -> int:
         metavar="LATENTS",
         help="cap on the DiT windows, in latents of 4 frames (default: the shot in one window)",
     )
+    # The planner's other pins (DESIGN.md, Memory planner, Pins), each fixing one choice, taken
+    # exactly or refused, never adjusted; and --until (DESIGN.md, Pause and resume, Stopping).
+    # Milestone 3's seam adds the four at once: each is refused until its work is built
+    # (planner.plan, _run).
+    parser.add_argument(
+        "--encode-tile",
+        type=_tile,
+        metavar="PX",
+        help="pin the VAE encode's tiles: squares of PX output pixels a side, a multiple of 64"
+        " from 512 up, or 0 for an encode in one pass, untiled; taken exactly or refused",
+    )
+    parser.add_argument(
+        "--decode-tile",
+        type=_tile,
+        metavar="PX",
+        help="pin the VAE decode's tiles, as --encode-tile pins the encode's; 0 for a decode in"
+        " one stream, untiled",
+    )
+    parser.add_argument(
+        "--swap-blocks",
+        type=_count,
+        metavar="N",
+        help="pin the DiT's swapped blocks: its last N wait in system memory and stream through"
+        " the GPU, their memory left to the windows; 0 keeps every block on the GPU; taken"
+        " exactly or refused",
+    )
+    parser.add_argument(
+        "--until",
+        type=_until,
+        metavar="HH:MM",
+        help="stop before the first unit that wouldn't finish by the next time the local clock"
+        " shows HH:MM, what is done kept (exit status 75): the same command resumes",
+    )
     parser.add_argument(
         "--accept-env-change",
         action="store_true",
@@ -390,7 +424,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.fingerprint import fingerprint
     from seedvr2x.media.source import counted, declare
-    from seedvr2x.runtime import pull
+    from seedvr2x.runtime import planner, pull
     from seedvr2x.runtime.job import (
         SHARED,
         JobError,
@@ -403,6 +437,7 @@ def _run(args: argparse.Namespace) -> int:
         target_size,
     )
     from seedvr2x.runtime.manifest import NAME, planned, read
+    from seedvr2x.runtime.planner import Pins
     from seedvr2x.runtime.weights import ModelError, check_models
 
     # The build, the source, the target, the cut list and the model files are checked before
@@ -422,6 +457,10 @@ def _run(args: argparse.Namespace) -> int:
                 f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
                 f" a window needs at least {2 * SHARED + 1}"
             )
+        pins = Pins(args.window, args.encode_tile, args.decode_tile, args.swap_blocks)
+        if args.until is not None:
+            # Leaves with --until's commit (run.run_job's clock).
+            raise JobError(f"--until {args.until:%H:%M}: stopping by the clock isn't built yet")
         # DESIGN.md, Shot detection: --cut-threshold "is refused with --cuts".
         if args.cuts is not None and args.cut_threshold is not None:
             raise JobError(
@@ -534,9 +573,16 @@ def _run(args: argparse.Namespace) -> int:
             out_width,
             out_height,
         )
-        # No work directory for a plan, which writes nothing but its cut list for one file.
+        # The job's plan (DESIGN.md, Memory planner): one for the job, made after the first pass,
+        # whose shots are its input, and before the models load.
+        plan = planner.plan(pins)
+        # The work directory of a one-file output: for split's input copies, and for a tiled
+        # pass's scratch (run._scratch). None for --plan, which writes nothing but its cut list
+        # for one file.
         split = args.color_correction == "split"
-        work = _work(args.output) if directory is None and split and args.plan is None else None
+        tiled = plan.encode_tiles is not None or plan.decode_tiles is not None
+        keeps = directory is None and (split or tiled) and args.plan is None
+        work = _work(args.output) if keeps else None
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
@@ -568,7 +614,7 @@ def _run(args: argparse.Namespace) -> int:
             identity.environment,
             source,
             shots,
-            [shot_layout(shot.frames, args.window) for shot in shots],
+            [shot_layout(shot.frames, plan.window) for shot in shots],
             segments,
             [path.name for path in paths],
             {
@@ -576,6 +622,7 @@ def _run(args: argparse.Namespace) -> int:
                 "size": [out_width, out_height],
                 "frame_rate": str(source.frame_rate),
             },
+            plan.record(),
         )
         if prior is None and not _empty(directory):
             logger.error("%s: written to since it was checked, by another program", directory)
@@ -662,7 +709,7 @@ def _run(args: argparse.Namespace) -> int:
                     writer.write(frames)
 
                 run_job(
-                    *(models, source, shots, segments, target, args.seed, args.window, units),
+                    *(models, source, shots, segments, target, args.seed, plan, units),
                     *(write, stop, args.color_correction == "split"),
                     numz_padding=numz_padding,
                 )
@@ -1601,6 +1648,32 @@ def _threshold(text: str) -> float:
             f" {THRESHOLD}, the default"
         )
     return value
+
+
+def _count(text: str) -> int:
+    """A whole number, 0 or more."""
+    if not re.fullmatch(r"\d+", text):
+        raise argparse.ArgumentTypeError(f"{text!r}: not a whole number, 0 or more")
+    return int(text)
+
+
+def _tile(text: str) -> int:
+    """A VAE tile's side in output pixels (DESIGN.md, Memory planner): a multiple of 64 from 512
+    up, the smallest tile the planner makes; or 0, untiled."""
+    if not re.fullmatch(r"\d+", text) or (int(text) and (int(text) < 512 or int(text) % 64)):
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: not a tile's side: a multiple of 64 from 512 up, in output pixels, or 0"
+            " for an untiled pass"
+        )
+    return int(text)
+
+
+def _until(text: str) -> datetime.time:
+    """A time of day on the local clock, HH:MM, of 24 hours."""
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if match is None or int(match[1]) > 23 or int(match[2]) > 59:
+        raise argparse.ArgumentTypeError(f"{text!r}: not a time of day, HH:MM, from 00:00 to 23:59")
+    return datetime.time(int(match[1]), int(match[2]))
 
 
 def _positive(text: str) -> int:

@@ -28,7 +28,7 @@ class Units:
     latent and windows stay on the device, as its steps give them, until its decode, which
     run.run_job runs as soon as they are done. With `split`, a shot's input copy and the copy's
     checksums go in a directory of its own under work, beside the output, gone once the shot is
-    decoded."""
+    decoded; a tiled pass's scratch goes there too (run._scratch)."""
 
     persistent = False
 
@@ -38,9 +38,12 @@ class Units:
         self._windows: dict[int, list[Tensor]] = {}
 
     def shot_directory(self, shot: int) -> Path:
-        """Where shot `shot`'s files go: its input copy and the copy's checksums."""
+        """Where shot `shot`'s files go: its input copy and the copy's checksums, and a tiled
+        pass's scratch."""
         if self.work is None:
-            raise ValueError("no work directory: a run without colour correction keeps no files")
+            raise ValueError(
+                "no work directory: a run without colour correction or tiles keeps no files"
+            )
         return self.work / f"shot_{shot:06d}"
 
     def copy_path(self, shot: int) -> Path:

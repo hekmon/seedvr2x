@@ -34,6 +34,7 @@ from seedvr2x.runtime.job import (
     min_segment_frames,
 )
 from seedvr2x.runtime.manifest import Manifest, code_sha256, read
+from seedvr2x.runtime.plan import Plan
 
 
 def at(second: int) -> int:
@@ -173,6 +174,7 @@ def written_manifest(tmp_path: Path) -> Manifest:
         [OutputSegment("a", 0, 3), OutputSegment("b", 3, 5)],
         ["a.mkv", "b.mkv"],
         {"format": "gbrp16le"},
+        Plan(None).record(),
     )
     record.write()
     return record

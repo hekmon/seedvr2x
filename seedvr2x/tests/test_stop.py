@@ -44,7 +44,7 @@ class Slow(t.Steps):
         super()._call(name)
         inside(name)
 
-    def decode(self, models, merged, count, target, write, *names):
+    def decode(self, models, merged, count, target, write, *names, **tiled):
         name = f"decode {int(merged[0, 0, 0, 0])}"
         written = []
         def first_then_inside(frames):
@@ -52,7 +52,7 @@ class Slow(t.Steps):
             written.append(len(frames))
             if len(written) == 1:
                 inside(name)
-        super().decode(models, merged, count, target, first_then_inside, *names)
+        super().decode(models, merged, count, target, first_then_inside, *names, **tiled)
 
 t.stand_in_model(setattr)
 steps = Slow()

@@ -1,6 +1,6 @@
 """The manifest of a job's output (DESIGN.md, Pause and resume): what the job is, which a resume
-must find again (its settings, models by hash, environment, input file, output, shots with their
-windows, output segments), and how far it went: each shot encoded, its windows done, each
+must find again (its settings, models by hash, environment, input file, output, plan, shots with
+their windows, output segments), and how far it went: each shot encoded, its windows done, each
 segment finished. A unit is recorded once its file is whole, so the manifest only names whole
 files: the frame index too, written before the manifest's first write (INDEX). Written once the
 models load, or before any does when the job is planned (--plan: its plan, no unit made), then
@@ -104,6 +104,10 @@ class Manifest:
     segments: Sequence[OutputSegment]
     files: Sequence[str]  # each segment's file (FFV1) or directory (PNG), in the output
     output: dict[str, Any]
+    # The job's plan (Plan.record; DESIGN.md, Memory planner): what shapes the output, which a
+    # resume must find again, and for information what doesn't (resume.UNCOMPARED). A field added
+    # to the record, whose shape stays: VERSION too.
+    plan: dict[str, Any]
     # The environment changes a resume accepted (--accept-env-change), oldest first: the units
     # made before each are the environment's before it (resume.environment_change).
     environment_changes: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
@@ -175,6 +179,7 @@ class Manifest:
             "environment_changes": self.environment_changes,
             "input": self._input,
             "output": self.output,
+            "plan": self.plan,
             "shots": [
                 {
                     "start": shot.start,

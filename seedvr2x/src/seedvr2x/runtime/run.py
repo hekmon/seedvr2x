@@ -8,6 +8,7 @@ from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from fractions import Fraction
+from pathlib import Path
 from types import TracebackType
 from typing import Self
 
@@ -24,6 +25,7 @@ from seedvr2x.media.source import Source
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer
 from seedvr2x.runtime.job import OutputSegment, Shot
 from seedvr2x.runtime.model import Models
+from seedvr2x.runtime.plan import Plan, Tiles
 from seedvr2x.runtime.shot import (
     CopyError,
     Correction,
@@ -63,18 +65,23 @@ def run_job(
     segments: Sequence[OutputSegment],
     target: tuple[int, int],
     seed: int,
-    window: int | None,
+    plan: Plan,
     units: Units,
     write: Callable[[npt.NDArray[np.float32]], None],
     stop: Stop | None = None,
     split: bool = False,
     *,
     numz_padding: bool = False,
+    clock: object | None = None,
 ) -> None:
     """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
-    with its own seed (Shot.seed), its frames resized to target (job.target_size), its DiT windows
-    capped at `window` latents; write(frames) takes the output frames as they come, (n, H', W', 3)
+    with its own seed (Shot.seed), its frames resized to target (job.target_size), as the job's
+    plan says (runtime/plan.py): its DiT windows capped at plan.window latents, its encodes and
+    decodes tiled or not; write(frames) takes the output frames as they come, (n, H', W', 3)
     float32 in [0, 1], the segments' in turn.
+
+    Before each unit, the models are told its phase (Models.enter), which puts on the GPU what
+    the plan has there for it.
 
     A shot's units run in order: its encode, then its windows, each kept by `units` as it is
     done, then its decode. With units kept on disk, a segment's shots are all encoded and sampled
@@ -95,7 +102,12 @@ def run_job(
     its checksums with it, and the run stops there, for the next run to make it again.
 
     numz_padding is for tests only (cli.NUMZ_PADDING): each encode's frames padded as numz pads
-    them (shot.encode_shot)."""
+    them (shot.encode_shot).
+
+    clock is --until's, with the time estimates each unit's cost comes from (_begin; DESIGN.md,
+    Pause and resume, Stopping): not built yet, None."""
+    if clock is not None:
+        raise NotImplementedError("--until isn't built yet")
     stream = source.stream
     copies = Copies(stream.width, stream.height, source.frame_rate) if split else None
     groups = [
@@ -107,20 +119,23 @@ def run_job(
         for segment, group in enumerate(groups):
             if units.finished(segment):
                 continue
-            sample = (models, inputs, shots, target, seed, window, units, stop, copies)
+            sample = (models, inputs, shots, target, seed, plan, units, stop, copies)
             if units.persistent:
                 for index in group:
                     _sample(index, *sample, numz_padding)
-                _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write")
+                _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write", None)
             for index in group:
                 if not units.persistent:
                     _sample(index, *sample, numz_padding)
-                    _begin(stop, f"shot {index + 1}/{len(shots)}'s decode")
-                _decode(models, shots, index, target, window, units, write, copies)
+                    _begin(stop, f"shot {index + 1}/{len(shots)}'s decode", None)
+                _decode(models, shots, index, target, plan, units, write, copies)
 
 
-def _begin(stop: Stop | None, unit: str) -> None:
-    """Before a unit: stop there if asked (Stop.check), else name it for a Ctrl-C's notice."""
+def _begin(stop: Stop | None, unit: str, cost: float | None) -> None:
+    """Before a unit: stop there if asked (Stop.check), else name it for a Ctrl-C's notice. cost
+    is the time the unit is expected to take, in seconds, None when nothing estimates it: for
+    --until, which stops before a unit that wouldn't finish in time (DESIGN.md, Pause and resume,
+    Stopping); not built yet, so not looked at."""
     if stop is not None:
         stop.check()
         stop.unit = unit
@@ -133,7 +148,7 @@ def _sample(
     shots: Sequence[Shot],
     target: tuple[int, int],
     seed: int,
-    window: int | None,
+    plan: Plan,
     units: Units,
     stop: Stop | None,
     copies: Copies | None,
@@ -145,7 +160,7 @@ def _sample(
     missing. numz_padding as run_job takes it."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
-    layout = shot_layout(shot.frames, window)
+    layout = shot_layout(shot.frames, plan.window)
     done = units.windows_done(index)
     latent = None if done == len(layout) else units.latent(index)
     encoded = done == len(layout) or latent is not None
@@ -155,19 +170,27 @@ def _sample(
     if done == len(layout):
         return
     if latent is None:
-        _begin(stop, f"{name}'s encode")
+        _begin(stop, f"{name}'s encode", None)
         logger.debug("%s: encoding", name)
         started = _started(models)
+        models.enter("encode")
         read = inputs.reader(shot)
+        tiles = plan.encode_tiles
+        scratch = _scratch(units, index, tiles)
         if copies is None:
             latent = encode_shot(
-                *(models, read, shot.frames, target, shot.seed(seed)), numz_padding=numz_padding
+                *(models, read, shot.frames, target, shot.seed(seed)),
+                numz_padding=numz_padding,
+                tiles=tiles,
+                scratch=scratch,
             )
         else:
             with _copying(units, index, copies) as copy:
                 latent = encode_shot(
                     *(models, _copied(read, copy), shot.frames, target, shot.seed(seed)),
                     numz_padding=numz_padding,
+                    tiles=tiles,
+                    scratch=scratch,
                 )
         finite(latent, f"{name}'s encode")
         units.save_latent(index, latent)
@@ -184,9 +207,10 @@ def _sample(
         latent = latent.to(models.device)
     sampled = sample_windows(models, latent, layout, shot.seed(seed), done)
     for number in range(done, len(layout)):
-        _begin(stop, f"{name}'s window {number + 1}/{len(layout)}")
+        _begin(stop, f"{name}'s window {number + 1}/{len(layout)}", None)
         logger.debug("%s: window %d/%d", name, number + 1, len(layout))
         started = _started(models)
+        models.enter("dit")
         output = next(sampled)
         finite(output, f"{name}'s window {number + 1}/{len(layout)}")
         units.save_window(index, number, output)
@@ -219,7 +243,7 @@ def _copy_again(
     index, unless an environment change accepted since then changed ffmpeg or its conversions,
     the copy then being the new decode's frames (--accept-env-change)."""
     shot = shots[index]
-    _begin(stop, f"{name}'s input copy")
+    _begin(stop, f"{name}'s input copy", None)
     started = time.monotonic()
     paths = (units.copy_path(index), units.checksums_path(index))
     missing = " and ".join(path.name for path in paths if not path.exists())
@@ -240,7 +264,7 @@ def _decode(
     shots: Sequence[Shot],
     index: int,
     target: tuple[int, int],
-    window: int | None,
+    plan: Plan,
     units: Units,
     write: Callable[[npt.NDArray[np.float32]], None],
     copies: Copies | None,
@@ -251,13 +275,18 @@ def _decode(
     name = f"shot {index + 1}/{len(shots)}"
     logger.debug("%s: decoding", name)
     started = _started(models)
-    merged = merge_windows(units.take_windows(index), shot_layout(shot.frames, window))
+    models.enter("decode")
+    merged = merge_windows(units.take_windows(index), shot_layout(shot.frames, plan.window))
     correction = None
     if copies is not None:
         paths = (units.copy_path(index), units.checksums_path(index))
         correction = Correction(*paths, copies.width, copies.height)
     try:
-        decode_shot(models, merged, shot.frames, target, write, name, shot.start, correction)
+        decode_shot(
+            *(models, merged, shot.frames, target, write, name, shot.start, correction),
+            tiles=plan.decode_tiles,
+            scratch=_scratch(units, index, plan.decode_tiles),
+        )
     except CopyError:
         # Derived data: removed, the next run makes it again from the input (_sample).
         units.copy_path(index).unlink(missing_ok=True)
@@ -271,6 +300,14 @@ def _decode(
         _resident() / GIB,
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB,
     )
+
+
+def _scratch(units: Units, index: int, tiles: Tiles | None) -> Path | None:
+    """Where a tiled pass of shot `index` keeps its scratch once it outgrows its allowance of
+    system memory (DESIGN.md, Pipeline, per shot, step 3): the shot's own directory, among its
+    units, or in the work directory of a one-file output, which a plan with tiles has for it
+    (cli._run). None for an untiled pass, which keeps none."""
+    return None if tiles is None else units.shot_directory(index)
 
 
 @contextmanager

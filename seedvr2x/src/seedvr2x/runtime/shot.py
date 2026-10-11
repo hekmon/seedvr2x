@@ -38,6 +38,7 @@ from seedvr2x.media.ffmpeg import MediaError, input_args
 from seedvr2x.runtime import colour, model
 from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, SHARED, output_size
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
+from seedvr2x.runtime.plan import Tiles
 
 # A shot's input copy read back: gbrp16le to gbrp16le, which zscale passes through unchanged.
 COPY_READ = Conversion("gbrp16le", "gbr", "full", "left")
@@ -187,6 +188,8 @@ def encode_shot(
     seed: int,
     *,
     numz_padding: bool = False,
+    tiles: Tiles | None = None,
+    scratch: Path | None = None,
 ) -> Tensor:
     """The VAE latent of a shot of `count` frames, read as they are needed: (T', h, w, 16)
     bfloat16 on the device, in the channel-major memory the encode gives it, which the noise
@@ -196,7 +199,13 @@ def encode_shot(
     resizes them to (job.target_size), through model.input_transform.
 
     numz_padding is for tests only (cli.NUMZ_PADDING): the frames padded as numz pads them
-    (model.input_transform), so that milestone 1's regression holds the output to numz's."""
+    (model.input_transform), so that milestone 1's regression holds the output to numz's.
+
+    tiles, when the plan tiles the encode, and scratch, the directory its scratch goes to when it
+    outgrows its allowance of system memory (DESIGN.md, Pipeline, per shot, steps 1 and 3): not
+    built yet, None."""
+    if tiles is not None or scratch is not None:
+        raise NotImplementedError("the tiled encode isn't built yet")
     padded = padded_length(count)
     # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
     model.set_seed(seed + ENCODE_SEED_OFFSET)
@@ -300,13 +309,22 @@ def decode_shot(
     name: str = "the shot",
     first: int = 0,
     correction: Correction | None = None,
+    *,
+    tiles: Tiles | None = None,
+    scratch: Path | None = None,
 ) -> None:
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in one stream,
     and write its frames as they come, write(frames) taking the output's next frames,
     (n, H', W', 3) float32 in [0, 1], the target cropped to even sides (job.output_size); each
     slice corrected first when a correction is given (_correct; DESIGN.md, Colour correction).
     Each slice decoded is checked for NaN or inf first (finite), its frames named for the job's,
-    the shot's first being `first`."""
+    the shot's first being `first`.
+
+    tiles, when the plan tiles the decode, and scratch, the directory its scratch goes to when it
+    outgrows its allowance of system memory (DESIGN.md, Pipeline, per shot, step 3): not built
+    yet, None."""
+    if tiles is not None or scratch is not None:
+        raise NotImplementedError("the tiled decode isn't built yet")
     chunks = _decoded(models, merged, count, output_size(target), name, first)
     if correction is not None:
         _correct(models, chunks, count, target, write, correction)

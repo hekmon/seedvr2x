@@ -19,6 +19,7 @@ from seedvr2x.media.source import Source
 from seedvr2x.runtime import model
 from seedvr2x.runtime.job import OutputSegment, Shot
 from seedvr2x.runtime.manifest import Manifest
+from seedvr2x.runtime.plan import Plan
 from seedvr2x.runtime.shot import sample_windows, shot_layout
 from seedvr2x.runtime.units import STATE, DiskUnits, Units
 
@@ -63,6 +64,7 @@ def job(tmp_path: Path, shots: list[Shot], segments: list[OutputSegment]) -> Man
         segments,
         [f"{segment.name}.mkv" for segment in segments],
         {},
+        Plan(5).record(),
     )
 
 

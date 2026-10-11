@@ -41,6 +41,7 @@ from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.runtime import pull, weights
 from seedvr2x.runtime.detector import BATCH, Detector
 from seedvr2x.runtime.job import output_size, padded_size
+from seedvr2x.runtime.plan import Plan, Tiles
 from seedvr2x.runtime.pull import Pin
 from seedvr2x.runtime.shot import decode_shot, padded_length
 
@@ -69,10 +70,14 @@ def stand_in_encode(
     seed: int,
     *,
     numz_padding: bool = False,
+    tiles: Tiles | None = None,
+    scratch: Path | None = None,
 ) -> torch.Tensor:
     """A latent (T', 1, 1, 16) in channel-major memory, as the VAE's, saying the shot's first frame
     (channel 0), its frame count (1), the target's height and width (2, 3), and whether the frames
-    were padded as numz pads them (6: cli.NUMZ_PADDING)."""
+    were padded as numz pads them (6: cli.NUMZ_PADDING). Untiled: the plan's tiles are the tiled
+    passes' own tests'."""
+    assert tiles is None and scratch is None
     assert read(count).shape[0] == count
     latent = torch.zeros(16, (padded_length(count) - 1) // 4 + 1, 1, 1)
     latent[0], latent[1] = seed - SEED, count
@@ -115,12 +120,15 @@ def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[tor
         yield torch.cat(planes, dim=1)
 
 
+# The phases the stand-in's models were told, in order (Models.enter), since stand_in_model.
+ENTERED: list[str] = []
 # The stand-in's models: the CPU, and the VAE's slicing, which the encode and split's reference
 # follow (model.encode_slices).
 STAND_IN_MODELS = SimpleNamespace(
     attention="none",
     device=torch.device("cpu"),
     runner=SimpleNamespace(vae=SimpleNamespace(use_slicing=True, slicing_sample_min_size=4)),
+    enter=ENTERED.append,
 )
 
 
@@ -186,6 +194,7 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(detector, "Detector", StandInDetector)
     patch(pull, "PINNED", {**pull.PINNED, pull.DETECTOR: STAND_IN_DETECTOR})
     StandInDetector.built.clear()
+    ENTERED.clear()
     patch(torch.cuda, "is_available", lambda: True)
     patch(torch.cuda, "is_bf16_supported", lambda: True)
     patch(torch.cuda, "get_device_name", lambda device: "a stand-in")
@@ -522,13 +531,18 @@ class Steps:
         seed: int,
         *,
         numz_padding: bool = False,
+        tiles: Tiles | None = None,
+        scratch: Path | None = None,
     ) -> torch.Tensor:
         frames = read(count)
         self.read[seed - SEED] = hashlib.md5(frames.tobytes()).hexdigest()
         self.numz_padding.append(numz_padding)
         self._call(f"encode {seed - SEED}")
         latent = stand_in_encode(
-            models, lambda n: frames[:n], count, target, seed, numz_padding=numz_padding
+            *(models, lambda n: frames[:n], count, target, seed),
+            numz_padding=numz_padding,
+            tiles=tiles,
+            scratch=scratch,
         )
         if self.poison == f"encode {seed - SEED}":
             latent[-1, 0, 0, 5] = math.nan
@@ -557,6 +571,7 @@ class Steps:
         target: tuple[int, int],
         write: Callable[[npt.NDArray[np.float32]], None],
         *names: Any,
+        **tiled: Any,
     ) -> None:
         """seedvr2x's decode of the shot, the VAE's a stand-in's (stand_in_decode_stream); the
         last latent's frames NaN when it is poisoned."""
@@ -577,7 +592,7 @@ class Steps:
             if len(frames) > 1:
                 write(frames[1:])
 
-        decode_shot(models, merged, count, target, write_then_stop, *names)  # pyright: ignore[reportArgumentType]
+        decode_shot(models, merged, count, target, write_then_stop, *names, **tiled)  # pyright: ignore[reportArgumentType]
 
 
 @pytest.fixture
@@ -652,6 +667,123 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
         *("encode 4", "window 4:0", "window 4:1", "decode 4"),
     ]
     assert indexes(tmp_path / "one.mkv") == list(range(25))
+
+
+# The plan of JOB, as its manifest records it: the pins, nothing on the GPU moved.
+JOB_PLAN = Plan(5).record()
+
+
+def test_plan_recorded_and_phases_entered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The models are told each unit's phase before it (Models.enter), a segment's decodes after
+    # its shots' windows in a directory, each shot's after its own for one file; the manifest
+    # records the plan, which a resume compares but for where the weights are (DESIGN.md, Memory
+    # planner).
+    caplog.set_level(logging.INFO)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    encode_and_window = ["encode", "dit"]
+    assert ENTERED == [
+        *(*encode_and_window, *encode_and_window, "decode", "decode"),
+        *("encode", "dit", "dit", "decode"),
+    ]
+    manifest = tmp_path / "out" / "manifest.json"
+    content = json.loads(manifest.read_text())
+    assert content["plan"] == JOB_PLAN
+    assert list(content).index("plan") == list(content).index("output") + 1
+    ENTERED.clear()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    assert ENTERED == [*(["encode", "dit", "decode"] * 2), "encode", "dit", "dit", "decode"]
+    # Pins of 0, untiled and nothing swapped, are the same job; where the weights were is no
+    # part of it; what shapes the output is.
+    content["plan"]["memory"] = {"swapped_blocks": 36, "vae_in_dit": False}
+    content["plan"]["timings"] = {"window": 1.5}
+    manifest.write_text(json.dumps(content))
+    pinned = ("--encode-tile", "0", "--decode-tile", "0", "--swap-blocks", "0")
+    assert upscale(tmp_path, source_path, "out", *JOB, *pinned) == 0
+    assert "finished already" in caplog.text
+    content["plan"]["window"] = 6
+    manifest.write_text(json.dumps(content))
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert "plan.window: 6 -> 5" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (("--encode-tile", "1024"), "--encode-tile 1024: the tiled passes aren't built yet"),
+        (("--decode-tile", "512"), "--decode-tile 512: the tiled passes aren't built yet"),
+        (("--swap-blocks", "36"), "--swap-blocks 36: BlockSwap isn't built yet"),
+        (("--until", "7:30"), "--until 07:30: stopping by the clock isn't built yet"),
+    ],
+)
+def test_pins_not_built_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    options: tuple[str, str],
+    message: str,
+) -> None:
+    # Milestone 3's seam: the options are read, and refused until their work is built, nothing
+    # made: no unit, no manifest.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB, *options) == 1
+    assert message in caplog.text
+    assert steps.calls == []
+    assert not (tmp_path / "out" / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("output", ["out", "one.mkv"])
+def test_plan_tiles_reach_the_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, output: str
+) -> None:
+    # A plan's tiles go to each encode and decode with the shot's own directory for their
+    # scratch: among its units in an output directory; for one file, in the work directory,
+    # which a plan with tiles has without split too, gone with the run.
+    from seedvr2x.runtime import planner, run
+
+    tiled = Plan(5, Tiles(512), Tiles(1024))
+    monkeypatch.setattr(planner, "plan", lambda pins: tiled)
+    given: list[tuple[str, Tiles | None, Path | None]] = []
+    work: list[bool] = []
+
+    def encode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, **options: Any) -> Any:
+        given.append(("encode", tiles, scratch))
+        work.append((tmp_path / "one.mkv.work").is_dir())
+        return steps.encode(*arguments, **options)
+
+    def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None) -> None:
+        given.append(("decode", tiles, scratch))
+        steps.decode(*arguments)
+
+    monkeypatch.setattr(run, "encode_shot", encode)
+    monkeypatch.setattr(run, "decode_shot", decode)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, output, *JOB) == 0
+    # A shot's directory is named for its first frame among the units, its index for one file.
+    directory = tmp_path / "out" / "resume" if output == "out" else tmp_path / "one.mkv.work"
+    shots = [
+        directory / f"shot_{name:06d}" for name in ((0, 3, 4) if output == "out" else range(3))
+    ]
+    order = [0, 1, 0, 1, 2, 2] if output == "out" else [0, 0, 1, 1, 2, 2]
+    kinds = ["encode", "encode", "decode", "decode", "encode", "decode"]
+    if output == "one.mkv":
+        kinds = ["encode", "decode"] * 3
+    assert given == [
+        (kind, Tiles(512) if kind == "encode" else Tiles(1024), shots[index])
+        for kind, index in zip(kinds, order, strict=True)
+    ]
+    assert work == [output == "one.mkv"] * 3
+    assert not (tmp_path / "one.mkv.work").exists()
+    if output == "out":
+        content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+        assert content["plan"] == tiled.record()
 
 
 def stopped(tmp_path: Path, input_path: Path, output: str, *options: str) -> None:
@@ -973,9 +1105,9 @@ def test_split_copy_missing(
     seen: list[str] = []
     decode = steps.decode
 
-    def looked(*arguments: Any) -> None:
+    def looked(*arguments: Any, **tiled: Any) -> None:
         seen.append(copied(arguments[-1].copy, arguments[2]))
-        decode(*arguments)
+        decode(*arguments, **tiled)
 
     from seedvr2x.runtime import run
 
@@ -1242,9 +1374,9 @@ def test_split_one_file(
     seen: list[list[str]] = []
     decode = steps.decode
 
-    def looked(*arguments: Any) -> None:
+    def looked(*arguments: Any, **tiled: Any) -> None:
         seen.append(sorted(path.name for path in work.iterdir()))
-        decode(*arguments)
+        decode(*arguments, **tiled)
 
     from seedvr2x.runtime import run
 
@@ -1280,10 +1412,10 @@ def test_none_one_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: S
     seen: list[tuple[bool, list[str], object]] = []
     decode = steps.decode
 
-    def looked(*arguments: Any) -> None:
+    def looked(*arguments: Any, **tiled: Any) -> None:
         copies = [path.name for path in tmp_path.rglob("input.*")]
         seen.append((work.exists(), copies, arguments[-1]))  # the last, its correction
-        decode(*arguments)
+        decode(*arguments, **tiled)
 
     from seedvr2x.runtime import run
 
@@ -1385,7 +1517,7 @@ def test_split_streams(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             events.append("copy checked")
         finish(self)
 
-    def decode(*arguments: Any) -> None:
+    def decode(*arguments: Any, **tiled: Any) -> None:
         models, merged, count, target, write, *names = arguments
 
         def written(frames: npt.NDArray[np.float32]) -> None:
@@ -1393,7 +1525,7 @@ def test_split_streams(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
             events.append(f"write {frames.shape[0]}")
             write(frames)
 
-        shot.decode_shot(models, merged, count, target, written, *names)
+        shot.decode_shot(models, merged, count, target, written, *names, **tiled)
 
     monkeypatch.setattr(model, "decode_stream", streamed)
     monkeypatch.setattr(Decoder, "finish", finished)
@@ -2018,7 +2150,7 @@ def test_unrecorded_import_said(
         monkeypatch.setattr(environment, "_declared", lambda: declared | {"imported-late"})
         for module in late:
             monkeypatch.setitem(sys.modules, module, ModuleType(module))
-        return SimpleNamespace(attention="none", device=torch.device("cpu"))
+        return STAND_IN_MODELS
 
     monkeypatch.setattr(model, "load_models", load)
     assert upscale(tmp_path, source(tmp_path / "in.mkv"), "out") == 0
@@ -2192,9 +2324,9 @@ def test_copy_made_again_through_the_index(
     seen: list[str] = []
     decode = steps.decode
 
-    def looked(*arguments: Any) -> None:
+    def looked(*arguments: Any, **tiled: Any) -> None:
         seen.append(copied(arguments[-1].copy, arguments[2]))
-        decode(*arguments)
+        decode(*arguments, **tiled)
 
     from seedvr2x.runtime import run
 

@@ -29,6 +29,7 @@ from torchvision.transforms import functional as TVF
 
 from seedvr2x.runtime import weights
 from seedvr2x.runtime.job import BLACK, padding
+from seedvr2x.runtime.plan import Phase
 from seedvr2x.runtime.pull import Hashes
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
@@ -64,6 +65,12 @@ class Models:
     text_neg: Tensor  # (64, 5120) bfloat16
     attention: str  # flash_attn_2 or sdpa
     device: torch.device
+
+    def enter(self, phase: Phase) -> None:
+        """Before a unit of `phase`, a shot's encode, a window or a decode: put on the device
+        what the plan has there in that phase, the rest waiting in its pinned copy (DESIGN.md,
+        BlockSwap, rewritten, Per phase). Called before every unit, so most calls find the phase
+        entered already. Nothing moves yet: every weight stays on the device in every phase."""
 
 
 def attention_backend() -> str:
