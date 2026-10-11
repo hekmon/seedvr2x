@@ -1454,7 +1454,9 @@ Built into the CLI, from the validated models in [vram.md](../research/docs/vram
 first pass, whose shots are its input, and before the models load:
 - **Budget:** the free memory the driver reports (`mem_get_info`) once the shot detector has
   given its own back and before the models load, minus 0.6 GiB. That covers the desktop and
-  other programs without guessing.
+  other programs without guessing, where the driver refuses a full card. Where it gives
+  memory the card doesn't have, that figure isn't the card's, and the plan counts on less
+  (see [Allocator](#allocator)).
   - It is read with a first allocation in place, and after a small convolution and a small
     product: a process's first allocation and its libraries take 0.29 GiB that no reading
     before them shows, the margin was bisected against readings after them, and a job whose
@@ -1476,7 +1478,7 @@ first pass, whose shots are its input, and before the models load:
     the most (it failed with 0.37 GiB). 0.6 GiB keeps 0.23 over the worst failure, and gives
     back the validated "torch peak ≤ card size − 2 GiB" on those cards.
   - Below the margin a run fails in its bounding phase, after dozens of silent allocator
-    retries.
+    retries: it stops in one line, the units it made kept.
 - **Host RAM** too. The process's peak, 16.5 GiB with 7B fp16, comes while the weights load,
   not during the shots, which stay flat (2.3–2.4 GiB resident over 6 shots). It is probably the
   weights file mapped while it is copied to the GPU; not measured further. On top come the
@@ -1485,6 +1487,8 @@ first pass, whose shots are its input, and before the models load:
   [BlockSwap, rewritten](#blockswap-rewritten)) and a tiled shot's scratch, up to its
   allowance. The plan counts them against the host's available memory: a job they don't fit,
   or whose copies the host won't pin, is refused before the run, naming the RAM it needs.
+  The load checks again, against a container's memory limit as well, which the plan's own
+  reading is to follow.
   - The planner sets the scratch's allowance per job: half of what the host has available
     once the pinned copies are counted, and no more than the longest tiled shot needs
     (provisional, until measured on a consumer host). Too small, shots go to disk; too
@@ -1541,6 +1545,12 @@ first pass, whose shots are its input, and before the models load:
     That fits 26 window lengths, 1–78 latents at 1080p and 1–19 at 4K, to 0.005 GiB; tokens
     alone were up to 0.83 GiB off at 4K, since each attention window repeats the 58 text
     tokens. The other models' constants are in vram.md.
+    - The fit is FlashAttention 2's: 12 latents at 1080p measured 28.316 GiB for 28.320.
+      Under SDPA, which a machine without a FlashAttention build runs, the DiT peaks higher:
+      by 0.06 to 0.61 GiB at 1 to 12 latents of 1080p on a desktop card (2026-10-11), 5 to 6%
+      of the per-token term, the same with blocks swapped. The margin is gone at 12 latents.
+      The planner is to hold a fit per attention backend, SDPA's being measured (see
+      [To measure](#to-measure)).
     - The 15.87 GiB hold the DiT's weights (15.35) and the VAE's (0.47), which numz keeps on
       the GPU in its DiT phase. A swapped block takes its 0.42 GiB off, but for the two blocks
       in the slots (see [BlockSwap, rewritten](#blockswap-rewritten)), and the VAE sent away
@@ -1644,9 +1654,10 @@ first pass, whose shots are its input, and before the models load:
   fewest blocks or the largest tile. `--window N` pins the cap, 5 at least: no window longer
   than N latents, a shorter shot still one window of its own length. Two runs pinned alike
   match bit for bit. The tile pins are settings, which a resume must repeat; `--swap-blocks`
-  isn't, shaping no bit. Of two pins that don't fit together, `--window` is the one refused
-  while some cap fits the pinned blocks, `--swap-blocks` when none does. A tile pin above
-  2048 px is taken by its fit, with a warning: no peak is measured there.
+  isn't, shaping no bit, and `--swap-blocks 1` or `2` is taken with a warning that it frees
+  nothing, the two slots holding as much. Of two pins that don't fit together, `--window` is
+  the one refused while some cap fits the pinned blocks, `--swap-blocks` when none does. A
+  tile pin above 2048 px is taken by its fit, with a warning: no peak is measured there.
 - **Time estimates** (for `--until`, `--plan` and progress) are measured, never constants.
   - One model per kind of unit, each a constant plus a rate: a shot's encode and a segment's
     decode by the frame, a window by the token. The DiT's time per token is flat within ±5%
@@ -1751,20 +1762,48 @@ forward, about 30% on a window of one latent with all 36 swapped and 6% at 6 lat
 it, 2 to 10% at one latent and nothing measurable at 6.
 
 ### Allocator
-`cudaMallocAsync` stays the default (it trims its pool on a full card; `native` fragments and
-fails). Set by us, documented, overridable.
+`cudaMallocAsync` is the allocator where the driver refuses a full card (it trims its pool
+there; `native` fragments and fails), and torch's own where the driver gives memory the card
+doesn't have (below). Set by us before torch is imported, documented, overridable: a user's
+`PYTORCH_CUDA_ALLOC_CONF` or `PYTORCH_ALLOC_CONF` stands.
 - During a window the GPU holds more than torch's peak, the pool's slack: 2.7 to 3.7 GiB at 6
   latents of 1080p, 3.4 on the 96 GB card at 12. Where the driver refuses a full card, the
   pool gives it back, and the planner's margin was measured that way.
 - **A driver that gives memory it doesn't have** never makes it give it back. Seen on
-  2026-10-11 under WSL, with a Windows driver whose fallback to system memory the user had
-  turned off in its panel, which doesn't seem to reach WSL: a request for 2 GiB more than
-  was free was granted; a window over the card ran 2 to 3 times slower, then CUDA failed with
-  an out-of-memory error that no Python code can catch and the process aborted; in one run,
-  two forwards gave other bits before it. So seedvr2x looks for such a driver at startup,
-  says so, and holds itself to the memory really free by its own means; how (torch's own
-  cap, the allocator, a larger margin) is being measured on that card. Until it is built, a
-  run there must be kept well under the card by hand.
+  2026-10-11 under WSL2, with a Windows driver whose fallback to system memory the user had
+  turned off in its panel, which doesn't reach WSL2: a request for more than was free was
+  granted, where a Linux driver refuses it in 0.2 s; a window over the card ran 2 to 3 times
+  slower, then CUDA failed with an error that no Python code can catch and the process
+  aborted; in one run, two forwards gave other bits before it, not seen again and not
+  explained.
+- **seedvr2x holds itself to the card there** (built on 2026-10-11, its figures provisional):
+  - Found at every start, once the model files are checked and before torch is imported.
+    Only behind WSL2's GPU device is the driver asked, by one request of the free memory and
+    0.25 GiB, freed at once (1 to 2 s). Refused, nothing changes. Given, or no answer, the
+    run is held, and says so.
+  - Held by torch's own allocator under torch's limit, the free memory less 3 GiB: a window
+    past it is refused in 0.2 to 0.7 s, an error the run catches, where `cudaMallocAsync`
+    went 2.06 GiB past its limit. The plan counts on 2.3 GiB less again, what that allocator
+    held beyond a window's peak at the limit (8 latents of 1080p ran, 9 were refused), and
+    the margin comes on top.
+  - Checked before every unit: when the card has less left than the run may still take,
+    another program having taken it, the run stops in one line, its units kept, and the same
+    command resumes. Within a unit nothing protects.
+  - It costs window. On a 32 GB card with a desktop on it the plan counted on 24.7 of the
+    30.0 GiB free: by the DiT's fit, 7 latents at 1080p where 13 fit with every block on the
+    GPU, and 22 where 27 with all 36 swapped. A window takes the time it took, a 720p decode
+    3.5 s where it took 3.0.
+  - The two figures rest on one card and one driver, at 1080p and under, the second on one
+    run. And the free memory such a driver reports is the process's own while the card has
+    room: beside a program holding 8 GiB, another read 30.2 GiB free, as on an empty card,
+    where `nvidia-smi` showed the whole card's use. The 3 GiB were sized with a desktop
+    holding 2.7 to 2.9 GiB of the card, and are probably its share. So the card's real use
+    is to be read through NVML, the plan, the limit and the check taking the smaller of the
+    two readings, and both figures measured again on it, at 4K too (see
+    [To measure](#to-measure)). Until then a run started beside a program that holds much
+    of the card is stopped at its first unit, where it should be planned smaller.
+  - The plan's lines and refusals still give the reduced figure as the driver's own: each
+    figure is to be named for what it is.
 
 ## Pause and resume
 
@@ -2093,6 +2132,9 @@ explanation.
 - what a small card asks of the host and can't run: pinned RAM for the DiT's swapped blocks
   (15.19 GiB with all 36), a tiled shot's scratch, and the sizes refused for want of free
   VRAM, counted from what is free at the start, not from the card's size (4K: 22.4 GiB)
+- under WSL2: the Windows driver gives memory the card doesn't have, so seedvr2x holds itself
+  to the card: why the plan counts on less than is shown free, what stops a run there and
+  how it resumes, and one seedvr2x per card
 - why zscale is required, and how to get an ffmpeg build that has it
 - the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
   formats or matrices, timestamps that jump, tags that contradict each other),
@@ -2322,6 +2364,15 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   written into one output instead; failing those, the room bisected per pass size, as the
   margin was; and what the 32 MiB a process's first VAE pass leaves allocated are. The aim
   is to give the 1.5 GiB back to the tiles.
+- **The hold on a driver that gives memory the card doesn't have** (see
+  [Allocator](#allocator)): the card's real use read through NVML; then, against it, what
+  must be left outside torch's allocator and what that allocator holds beyond a peak, per
+  window length at 1080p, at 4K's smallest window and on the tiled VAE passes, each more
+  than once, the bits checked against a reference; and the other bits seen once after a
+  window had passed the card, tried again.
+- **The DiT's fit under SDPA** (see [Memory planner](#memory-planner)): the window lengths
+  of [planner-limits.md](../research/docs/planner-limits.md) without FlashAttention, at
+  1080p and 4K, then a fit per attention backend in the planner.
 - **`torch.compile`, undecided** (see [Memory planner](#memory-planner)). Every figure is
   numz's, on numz's flow, and its VAE setup has a defect of its own. To measure on seedvr2x:
   - the VAE compiled with its causal convolutions in the graph and out of it, as numz meant:
