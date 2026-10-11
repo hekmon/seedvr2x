@@ -40,10 +40,12 @@ def plan(pins: Pins) -> Plan:
 
 
 def _tiles(option: str, size: int | None) -> Tiles | None:
-    """A tile pin's tiles; None without a pin or at 0, an untiled pass."""
-    if size:
-        # Leaves with the tiled passes' commit (shot.encode_shot, shot.decode_shot).
-        raise PlanError(f"{option} {size}: the tiled passes aren't built yet")
+    """A tile pin's tiles, the pin's size taken as it is: squares of `size` output pixels a side,
+    sharing plan.OVERLAP; None without a pin or at 0, an untiled pass. Nothing is refused here
+    yet: the tiles' rule, a side a multiple of 64 px from 512 up (DESIGN.md, Memory planner), is
+    held where `option` is read (cli._tile), and the pins are taken together as they come, the
+    encode tiled without the decode too: no card's plan is so, but that is the planner's choice,
+    no rule on a pin."""
     return Tiles(size) if size else None
 
 

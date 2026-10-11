@@ -16,6 +16,7 @@ from seedvr2x.media.files import partial_path
 from seedvr2x.media.source import Source
 from seedvr2x.runtime.job import JobError, OutputSegment, Shot
 from seedvr2x.runtime.manifest import INDEX, NAME, STATE, SUMS, Manifest, checksums_file
+from seedvr2x.runtime.tiling import SCRATCH
 from seedvr2x.runtime.units import CHECKSUMS, COPY, size
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
@@ -39,9 +40,10 @@ UNCOMPARED = {
 # The manifest's record of the environment changes a resume accepted (Manifest.content).
 CHANGES = "environment_changes"
 
-# The names DiskUnits gives a shot's files.
+# The names DiskUnits gives a shot's files, and the scratch a tiled pass keeps beside them
+# (tiling.SCRATCH): derived data, never recorded, so a leftover wherever a kill left it.
 UNIT_FILE = re.compile(
-    rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS)))}"
+    rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS, SCRATCH)))}"
 )
 
 # The settings that say how a job's source is cut (cli._settings): the cut list given, or the

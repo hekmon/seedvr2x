@@ -1,7 +1,8 @@
 """Milestone 4 on the GPU (DESIGN.md, Validation milestones): a job interrupted inside an encode,
 inside a window and inside a segment's decode, by a kill, by Ctrl-C once and twice, and resumed
 each time, gives the uninterrupted run's output, bit for bit; each stopped process exits, and
-leaves nothing on the GPU.
+leaves nothing on the GPU. And the same job with its encodes and decodes tiled, killed inside a
+tiled encode and inside a tiled decode, their scratch on disk, which each resume discards.
 
 Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR) and milestone 1's input,
 m1/input_rgb.mkv in SEEDVR2X_REFERENCE_DIR (tests/test_regression.py). Each run goes through the
@@ -16,7 +17,7 @@ import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -41,18 +42,45 @@ OPTIONS += ["--format", "gbrp16le"]
 SEGMENTS = ["seg_000000.mkv", "seg_000001.mkv"]
 
 
+# seedvr2x's command line with every tiled pass's scratch on disk (python -c): tiling.ALLOWANCE
+# set to 0 before the run, once the command line has set the process up as it does for a user
+# (cli.main: the allocator, before torch is imported). No option of seedvr2x's does that.
+ON_DISK = """
+import sys
+
+from seedvr2x import cli
+
+run = cli._run
+
+
+def on_disk(args):
+    from seedvr2x.runtime import tiling
+
+    tiling.ALLOWANCE = 0
+    return run(args)
+
+
+cli._run = on_disk
+sys.exit(cli.main())
+"""
+
+
 def upscale(
-    directory: Path, output: str, *acts: tuple[str, Callable[[int], None]]
+    directory: Path,
+    output: str,
+    *acts: tuple[str, Callable[[int], None]],
+    options: Sequence[str] = (),
+    on_disk: bool = False,
 ) -> tuple[int, str]:
-    """Run the job into output; for each (text, action) of acts in turn, action(pid) once a line
-    of its log holds text. Its status and log, once it has exited and left the GPU."""
+    """Run the job into output, with `options` besides; for each (text, action) of acts in turn,
+    action(pid) once a line of its log holds text. Its status and log, once it has exited and
+    left the GPU. on_disk runs it with every tiled pass's scratch on disk (ON_DISK)."""
     assert MODELS is not None
     process = subprocess.Popen(
         [
             *(
                 sys.executable,
-                "-m",
-                "seedvr2x",
+                *(("-c", ON_DISK) if on_disk else ("-m", "seedvr2x")),
                 str(Path(REFERENCE or "") / "m1" / "input_rgb.mkv"),
             ),
             *(
@@ -65,7 +93,7 @@ def upscale(
                 "--vae-model",
                 "ema_vae_fp16.safetensors",
             ),
-            *(*OPTIONS, "-v"),
+            *(*OPTIONS, *options, "-v"),
         ],
         stderr=subprocess.PIPE,
         text=True,
@@ -104,6 +132,19 @@ def kill(delay: float = 0.0) -> Callable[[int], None]:
 
     def act(pid: int) -> None:
         time.sleep(delay)
+        os.kill(pid, signal.SIGKILL)
+
+    return act
+
+
+def kill_once_there(path: Path) -> Callable[[int], None]:
+    """SIGKILL as soon as path is there: inside a tiled pass, once its scratch is on disk."""
+
+    def act(pid: int) -> None:
+        deadline = time.monotonic() + 300
+        while not path.exists():
+            assert time.monotonic() < deadline, f"{path} never came"
+            time.sleep(0.005)
         os.kill(pid, signal.SIGKILL)
 
     return act
@@ -203,5 +244,68 @@ def test_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
         "manifest.json",
         *SEGMENTS,
     ]
+    for name in SEGMENTS:
+        assert frames(out / name) == frames(tmp_path / "whole" / name), name
+
+
+# The job with its encodes and decodes tiled: at 540p, padded to 960x576, 4 tiles of 512 px, 2
+# rows of 2.
+TILED = ["--encode-tile", "512", "--decode-tile", "512"]
+GRID = "4 tiles of 512 px sharing 64, 2 across and 2 down,"
+
+
+def test_tiled_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
+    # The tiled job uninterrupted, its scratch in system memory, as a user's at this size, then
+    # on disk (ON_DISK): the same segments, bit for bit, and nothing of the scratch left.
+    (tmp_path / "cuts.txt").write_text(CUTS)
+    status, log = upscale(tmp_path, "memory", options=TILED)
+    assert status == 0, log[-3000:]
+    assert f"tiled encode: {GRID}" in log and f"tiled decode: {GRID}" in log
+    assert "in system memory" in log and "scratch.bf16" not in log
+    status, log = upscale(tmp_path, "whole", options=TILED, on_disk=True)
+    assert status == 0, log[-3000:]
+    assert f"tiled encode: {GRID}" in log and f"tiled decode: {GRID}" in log
+    assert "resume/shot_000004/scratch.bf16" in log and "in system memory" not in log
+    listing = ["checksums", "frame_index.bin", "manifest.json", *SEGMENTS]
+    assert sorted(p.name for p in (tmp_path / "whole").iterdir()) == listing
+    for name in SEGMENTS:
+        assert frames(tmp_path / "whole" / name) == frames(tmp_path / "memory" / name), name
+    out = tmp_path / "out"
+    scratch = out / "resume" / "shot_000004" / "scratch.bf16"
+    discarded = r"discarded \S*resume/shot_000004/scratch\.bf16"
+
+    # Killed inside the second shot's tiled encode, once its scratch is on disk: the kill leaves
+    # it, with the first shot's units.
+    status, log = upscale(
+        tmp_path,
+        "out",
+        ("run: shot 2/3: encoding", kill_once_there(scratch)),
+        options=TILED,
+        on_disk=True,
+    )
+    assert status == -signal.SIGKILL
+    assert progress(out) == ([True, False, False], [1, 0, 0], [False, False])
+    assert scratch.exists() and not re.search(discarded, log)
+
+    # Resumed: the scratch left is discarded, never read, and the shot encoded again. Killed
+    # inside its tiled decode, the first segment's, once that scratch is on disk.
+    status, log = upscale(
+        tmp_path,
+        "out",
+        ("run: shot 2/3: decoding", kill_once_there(scratch)),
+        options=TILED,
+        on_disk=True,
+    )
+    assert status == -signal.SIGKILL
+    assert re.search(discarded, log) and encoded(log) == [2]
+    assert progress(out) == ([True, True, False], [1, 3, 0], [False, False])
+    assert scratch.exists()
+
+    # The rest: the decode's scratch discarded in turn, and the tiled job's own output.
+    status, log = upscale(tmp_path, "out", options=TILED, on_disk=True)
+    assert status == 0, log[-3000:]
+    assert re.search(discarded, log) and encoded(log) == [3]
+    assert progress(out)[2] == [True, True]
+    assert sorted(p.name for p in out.iterdir()) == listing
     for name in SEGMENTS:
         assert frames(out / name) == frames(tmp_path / "whole" / name), name

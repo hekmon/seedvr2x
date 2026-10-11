@@ -1,7 +1,11 @@
 """The shot pipeline's parts on the CPU: windows, mixing weights, padding, the encoder's input
-and split's reference, streamed encode and decode."""
+and split's reference, streamed encode and decode; and a shot's tiled encode and decode
+(runtime/tiling.py) through encode_shot and decode_shot, over test_tiling.py's stand-in VAE."""
 
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from itertools import pairwise
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -10,9 +14,16 @@ import numpy.typing as npt
 import pytest
 import torch
 from omegaconf import OmegaConf
+from test_tiling import MEMORY, Failing, StandIn, failing_at, latent_of, mapped, models_of, same
 
-from seedvr2x.runtime import model
+from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.runtime import model, shot, tiling
+from seedvr2x.runtime.job import output_size, padded_size
+from seedvr2x.runtime.plan import Tiles
 from seedvr2x.runtime.shot import (
+    Correction,
+    decode_shot,
+    encode_shot,
     encoder_inputs,
     input_slices,
     mix_weights,
@@ -21,6 +32,7 @@ from seedvr2x.runtime.shot import (
     reference_inputs,
     window_layout,
 )
+from seedvr2x.runtime.tiling import Scratch, ScratchError
 
 # The models as far as the encoder's input and split's reference use them: the CPU and the VAE's
 # slicing (model.encode_slices).
@@ -203,3 +215,260 @@ def test_streamed_decode_is_the_one_pass_decode(cpu_models: model.Models) -> Non
         streamed = torch.cat(list(model.decode_stream(models, latent)), dim=1)
     assert streamed.shape == one_pass.shape == (3, 13, 32, 48)
     assert torch.equal(streamed, one_pass)
+
+
+# A shot's tiled passes through encode_shot and decode_shot, over test_tiling.py's stand-in VAE.
+
+# Frames of 28x20 resized 2x to 56x40, padded to 80x64 (8 rows and 8 columns reflected, 16 black
+# each way): 8x10 latents, which tiles of 32 px sharing 8 cover in 9, 3 rows of 3.
+SMALL, LARGE = (20, 28), (40, 56)
+TILES = Tiles(32, 8)
+# One tile holds the picture: the untiled pass.
+WHOLE = Tiles(1024)
+
+
+@pytest.fixture
+def stand_in() -> model.Models:
+    return models_of(StandIn())
+
+
+def shot_frames(count: int) -> npt.NDArray[np.float32]:
+    """A shot's `count` frames as the encode reads them, (count, 20, 28, 3) float32 in [0, 1]."""
+    return np.random.default_rng(count).random((count, *SMALL, 3), dtype=np.float32)
+
+
+def shot_latent(count: int) -> torch.Tensor:
+    """The merged latents of a shot of `count` frames at LARGE, (T', 8, 10, 16) bfloat16, small
+    enough for the stand-in's frames to stay within [-1, 1] but for a few, which the clamp
+    takes."""
+    padded = padded_size(LARGE)
+    assert padded == (64, 80) and len(tiling.grid((8, 10), TILES)) == 9
+    latents = (padded_length(count) - 1) // 4 + 1
+    return (latent_of(latents, (padded[0] // 8, padded[1] // 8), seed=count).float() * 0.3).to(
+        torch.bfloat16
+    )
+
+
+def written_by(
+    models: model.Models, latent: torch.Tensor, count: int, **options: Any
+) -> list[npt.NDArray[np.float32]]:
+    """The frames decode_shot writes for a shot of `count` frames at LARGE, write by write."""
+    written: list[npt.NDArray[np.float32]] = []
+    decode_shot(models, latent, count, LARGE, written.append, **options)
+    assert sum(frames.shape[0] for frames in written) == count
+    assert all(frames.shape[1:] == (*output_size(LARGE), 3) for frames in written)
+    return written
+
+
+def same_writes(ours: list[npt.NDArray[np.float32]], theirs: list[npt.NDArray[np.float32]]) -> bool:
+    """Whether two decodes wrote the same frames in the same writes, bit for bit."""
+    return len(ours) == len(theirs) and all(
+        one.shape == other.shape and one.tobytes() == other.tobytes()
+        for one, other in zip(ours, theirs, strict=True)
+    )
+
+
+@pytest.mark.parametrize("count", [1, 6, 13])
+def test_tiled_encode_is_tilings(stand_in: model.Models, count: int) -> None:
+    # encode_shot with tiles: tiling's encode of the encoder's own input, bit for bit, in the
+    # same memory layout, the frames read once; with one tile, the untiled pass.
+    frames = shot_frames(count)
+    reads = Reads(frames)
+    tiled = encode_shot(stand_in, reads, count, LARGE, 42, tiles=TILES)
+    assert sum(reads.counts) == count and all(n <= 5 for n in reads.counts)
+    inputs = encoder_inputs(stand_in, Reads(frames), count, LARGE)
+    direct = tiling.encode_tiled(
+        stand_in, inputs, padded_length(count), TILES, Scratch(None, MEMORY)
+    )
+    assert tiled.shape == ((padded_length(count) - 1) // 4 + 1, 8, 10, 16)
+    assert same(tiled, direct) and tiled.stride() == direct.stride()
+    untiled = encode_shot(stand_in, Reads(frames), count, LARGE, 42)
+    assert untiled.stride() == tiled.stride() and not same(tiled, untiled)
+    one = encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=WHOLE)
+    assert same(one, untiled) and one.stride() == untiled.stride()
+
+
+def tiled_slices(models: model.Models, latent: torch.Tensor) -> Iterator[torch.Tensor]:
+    """tiling's decode of latent under TILES, in model.decode_stream's place: the untiled pass
+    then takes its slices, and gives what a tiled one must."""
+    return tiling.decode_tiled(models, latent, TILES, Scratch(None, MEMORY))
+
+
+@pytest.mark.parametrize("count", [1, 6, 13])
+def test_tiled_decode_is_tilings(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    # decode_shot with tiles: tiling's slices, checked, cropped and written as a streamed
+    # decode's are, write by write; with one tile, the untiled pass.
+    latent = shot_latent(count)
+    given = latent.clone()
+    tiled = written_by(stand_in, latent, count, tiles=TILES)
+    untiled = written_by(stand_in, latent, count)
+    with monkeypatch.context() as patch:
+        patch.setattr(model, "decode_stream", tiled_slices)
+        expected = written_by(stand_in, latent, count)
+    assert same_writes(tiled, expected) and same(latent, given)
+    assert [frames.shape[0] for frames in tiled] == [frames.shape[0] for frames in untiled]
+    assert not same_writes(tiled, untiled)  # blended
+    # Few values at the clamp's ends: the comparison is of the decode's own values.
+    values = np.concatenate(tiled)
+    assert ((values > 0) & (values < 1)).mean() > 0.99
+    assert same_writes(written_by(stand_in, latent, count, tiles=WHOLE), untiled)
+
+
+def test_tiled_decode_is_corrected_as_a_streamed_one(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With split, each slice a tiled decode hands on is corrected against its own frames of the
+    # reference and written, as a streamed decode's is (_correct), the last one once the copy is
+    # read whole. The shot's input copy is read from memory here, without ffmpeg.
+    count = 13
+    frames, latent = shot_frames(count), shot_latent(count)
+    copies: list[Reads] = []
+
+    @contextmanager
+    def copy_reader(
+        correction: Correction, count: int
+    ) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
+        copies.append(Reads(frames))
+        yield copies[-1]
+
+    monkeypatch.setattr(shot, "_copy_reader", copy_reader)
+    correction = Correction(Path("input.mkv"), Path("input.crc32"), SMALL[1], SMALL[0])
+    tiled = written_by(stand_in, latent, count, correction=correction, tiles=TILES)
+    with monkeypatch.context() as patch:
+        patch.setattr(model, "decode_stream", tiled_slices)
+        expected = written_by(stand_in, latent, count, correction=correction)
+    assert same_writes(tiled, expected)
+    assert [written.shape[0] for written in tiled] == [5, 4, 4]
+    assert [sum(copy.counts) for copy in copies] == [count, count]
+    # Corrected, and tiled: neither the tiled decode alone nor the untiled one corrected.
+    assert not same_writes(tiled, written_by(stand_in, latent, count, tiles=TILES))
+    assert not same_writes(tiled, written_by(stand_in, latent, count, correction=correction))
+
+
+def test_tiled_passes_keep_their_scratch_where_told(
+    stand_in: model.Models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    count = 13
+    frames, latent = shot_frames(count), shot_latent(count)
+    vae = cast(Any, stand_in).runner.vae
+    directory = tmp_path / "resume" / "shot_000000"  # not there yet
+    path = directory / tiling.SCRATCH
+    seen: list[bool] = []
+    vae.before = lambda: seen.append(path.is_file() and mapped(path))
+
+    # Within its allowance, the scratch is in system memory: nothing on disk, no directory made.
+    assert Scratch.needed(count, padded_size(LARGE)) < tiling.ALLOWANCE == 8 * 2**30
+    in_memory = encode_shot(
+        stand_in, Reads(frames), count, LARGE, 42, tiles=TILES, scratch=directory
+    )
+    frames_in_memory = written_by(stand_in, latent, count, tiles=TILES, scratch=directory)
+    assert len(seen) == 9 * 3 * 2 and not any(seen) and not list(tmp_path.iterdir())
+
+    # Beyond it, here an allowance of 0 read when the pass starts: the file in the directory
+    # given, made with it, there through every tile's pass and every write, gone after; the
+    # directory stays, the run's to remove with the shot's units. The same bits either way.
+    monkeypatch.setattr(tiling, "ALLOWANCE", 0)
+    seen.clear()
+    on_disk = encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=TILES, scratch=directory)
+    assert len(seen) == 9 * 3 and all(seen) and same(on_disk, in_memory)
+    assert not list(directory.iterdir()) and not mapped(path)
+    seen.clear()
+    there: list[bool] = []
+    frames_on_disk: list[npt.NDArray[np.float32]] = []
+
+    def write(written: npt.NDArray[np.float32]) -> None:
+        there.append(path.is_file())
+        frames_on_disk.append(written)
+
+    decode_shot(stand_in, latent, count, LARGE, write, tiles=TILES, scratch=directory)
+    assert len(seen) == 9 * 3 and all(seen) and there == [True] * 3
+    assert same_writes(frames_on_disk, frames_in_memory)
+    assert not list(directory.iterdir()) and not mapped(path)
+
+    # The picture within one tile: the untiled pass, which asks for no scratch, and so runs
+    # with nowhere to put one.
+    seen.clear()
+    encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=WHOLE)
+    written_by(stand_in, latent, count, tiles=WHOLE)
+    assert len(seen) == 3 * 2 and not any(seen)
+
+    # With nowhere to put its file, a scratch beyond the allowance is refused, as a file the run
+    # can't write (cli._run reports a MediaError and exits 1).
+    assert issubclass(ScratchError, MediaError)
+    with pytest.raises(ScratchError, match="no directory for its file"):
+        encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=TILES)
+    with pytest.raises(ScratchError, match="no directory for its file"):
+        written_by(stand_in, latent, count, tiles=TILES)
+    assert vae.carry.memory is None
+
+
+@pytest.mark.parametrize("failure", ["writer", "tile", "correction"])
+def test_tiled_decode_failing_leaves_nothing(
+    stand_in: model.Models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    # A tiled decode whose consumer fails, the writer or the correction, or one of whose tiles
+    # does: its scratch's file goes at once, while the failure is still held with its traceback,
+    # and the VAE's causal memory is cleared.
+    monkeypatch.setattr(tiling, "ALLOWANCE", 0)
+    count = 13
+    latent, vae = shot_latent(count), cast(Any, stand_in).runner.vae
+    path = tmp_path / tiling.SCRATCH
+    there: list[bool] = []
+    options: dict[str, Any] = {}
+
+    def write(frames: npt.NDArray[np.float32]) -> None:
+        there.append(path.is_file() and mapped(path))
+        raise Failing("the writer")
+
+    if failure == "tile":
+        failing_at(vae, 14)  # the fifth tile's last slice
+    if failure == "correction":
+
+        @contextmanager
+        def copy_reader(
+            correction: Correction, count: int
+        ) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
+            def read(n: int) -> npt.NDArray[np.float32]:
+                there.append(path.is_file() and mapped(path))
+                raise Failing("the copy")
+
+            yield read
+
+        monkeypatch.setattr(shot, "_copy_reader", copy_reader)
+        options["correction"] = Correction(tmp_path / "input.mkv", tmp_path / "input.crc32", 28, 20)
+    with pytest.raises(Failing) as raised:
+        decode_shot(stand_in, latent, count, LARGE, write, tiles=TILES, scratch=tmp_path, **options)
+    assert there == ([] if failure == "tile" else [True])
+    assert not path.exists() and vae.carry.memory is None
+    assert not list(tmp_path.iterdir())
+    del raised
+    assert not mapped(path)
+
+
+def test_tiled_encode_failing_leaves_nothing(
+    stand_in: model.Models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A tiled encode whose source fails while its slices are kept, or one of whose tiles does:
+    # its scratch's file goes, and the VAE's causal memory is cleared.
+    monkeypatch.setattr(tiling, "ALLOWANCE", 0)
+    count = 13
+    frames, vae = shot_frames(count), cast(Any, stand_in).runner.vae
+    path = tmp_path / tiling.SCRATCH
+    there: list[bool] = []
+
+    def read(n: int) -> npt.NDArray[np.float32]:
+        if n != 5:
+            there.append(path.is_file())
+            raise Failing("the source")
+        return frames[:5]
+
+    with pytest.raises(Failing, match="the source"):
+        encode_shot(stand_in, read, count, LARGE, 42, tiles=TILES, scratch=tmp_path)
+    assert there == [True] and not path.exists()
+    failing_at(vae, 4)  # the second tile's second slice
+    with pytest.raises(Failing, match="pass 4"):
+        encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=TILES, scratch=tmp_path)
+    assert not path.exists() and vae.carry.memory is None
+    assert not list(tmp_path.iterdir())

@@ -716,8 +716,6 @@ def test_plan_recorded_and_phases_entered(
 @pytest.mark.parametrize(
     ("options", "message"),
     [
-        (("--encode-tile", "1024"), "--encode-tile 1024: the tiled passes aren't built yet"),
-        (("--decode-tile", "512"), "--decode-tile 512: the tiled passes aren't built yet"),
         (("--swap-blocks", "37"), "--swap-blocks 37: the DiT has 36 blocks"),
         (("--until", "7:30"), "--until 07:30: stopping by the clock isn't built yet"),
     ],
@@ -832,6 +830,177 @@ def test_plan_tiles_reach_the_passes(
     if output == "out":
         content = json.loads((tmp_path / "out" / "manifest.json").read_text())
         assert content["plan"] == tiled.record()
+
+
+# The tile pins of the tests below, and the plan JOB then records.
+TILE_PINS = ("--encode-tile", "1344", "--decode-tile", "1024")
+TILED_PLAN = Plan(5, Tiles(1344), Tiles(1024)).record()
+
+
+def tiled_steps(
+    monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> list[tuple[str, Tiles | None, Path | None]]:
+    """Make the stand-in's encode and decode (steps) take a plan's tiles: each keeps a scratch in
+    the directory the run gives it, on disk, as a tiled pass beyond its allowance does
+    (tiling.Scratch), around the stand-in's own pass, untiled. Returns the list each pass adds
+    its kind, its tiles and that directory to. The tiled passes themselves are test_tiling.py's
+    and test_shot.py's."""
+    from seedvr2x.runtime import run, tiling
+
+    given: list[tuple[str, Tiles | None, Path | None]] = []
+
+    def encode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, **options: Any) -> Any:
+        given.append(("encode", tiles, scratch))
+        assert scratch is not None and not (scratch / tiling.SCRATCH).exists()
+        with tiling.Scratch(scratch, 0).store(1, (8, 8)):
+            assert (scratch / tiling.SCRATCH).is_file()
+            return steps.encode(*arguments, **options)
+
+    def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None) -> None:
+        given.append(("decode", tiles, scratch))
+        assert scratch is not None and not (scratch / tiling.SCRATCH).exists()
+        with tiling.Scratch(scratch, 0).store(1, (8, 8)):
+            assert (scratch / tiling.SCRATCH).is_file()
+            steps.decode(*arguments)
+
+    monkeypatch.setattr(run, "encode_shot", encode)
+    monkeypatch.setattr(run, "decode_shot", decode)
+    return given
+
+
+@pytest.mark.parametrize("output", ["out", "one.mkv"])
+@pytest.mark.parametrize("split", [False, True], ids=["none", "split"])
+def test_tile_pins_are_the_plan_and_no_scratch_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, output: str, split: bool
+) -> None:
+    # --encode-tile and --decode-tile are the plan's tiles, which reach each pass and are
+    # recorded; and of a scratch kept on disk nothing stays once the shot is done: the resume
+    # directory goes with the job, the work directory of one file holds one shot's directory at
+    # a time and goes with the run, with split's copies beside the scratch or without.
+    given = tiled_steps(monkeypatch, steps)
+    source_path = job(tmp_path, monkeypatch)
+    work = tmp_path / "one.mkv.work"
+    others: list[set[str]] = []
+    encode = steps.encode
+
+    def looked(*arguments: Any, **options: Any) -> Any:
+        if work.is_dir():
+            others.append({entry.name for entry in work.iterdir()} - {given[-1][2].name})  # pyright: ignore[reportOptionalMemberAccess]
+        return encode(*arguments, **options)
+
+    monkeypatch.setattr(steps, "encode", looked)
+    options = (*(JOB if output == "out" else JOB[:4]), *TILE_PINS, *(SPLIT if split else ()))
+    assert upscale(tmp_path, source_path, output, *options) == 0
+    kinds = ["encode", "encode", "decode", "decode", "encode", "decode"]
+    if output == "one.mkv":
+        kinds = ["encode", "decode"] * 3
+    assert [(kind, tiles) for kind, tiles, _ in given] == [
+        (kind, Tiles(1344) if kind == "encode" else Tiles(1024)) for kind in kinds
+    ]
+    assert not work.exists() and others == ([] if output == "out" else [set()] * 3)
+    if output == "out":
+        out = tmp_path / "out"
+        assert sorted(p.name for p in out.iterdir()) == [
+            "checksums",
+            "frame_index.bin",
+            "manifest.json",
+            "seg_000000.mkv",
+            "seg_000001.mkv",
+        ]
+        assert json.loads((out / "manifest.json").read_text())["plan"] == TILED_PLAN
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(output)) == (
+        ["out"] if output == "out" else ["one.mkv", "one.mkv.crc32"]
+    )
+
+
+def test_tile_pins_are_the_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The tiles shape the output: a job is resumed with the pins it was made with, and refused
+    # with others, or without.
+    tiled_steps(monkeypatch, steps)
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB, *TILE_PINS)
+    steps.stop = None
+    text = refused(tmp_path, source_path, caplog, *JOB, *TILE_PINS[:2], "--decode-tile", "512")
+    assert "plan.decode_tiles.size: 1024 -> 512" in text
+    text = refused(tmp_path, source_path, caplog, *JOB)
+    assert 'plan.encode_tiles: {"size": 1344, "overlap": 64} -> null' in text
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, *TILE_PINS) == 0
+    assert steps.calls == ["window 4:1", "decode 4"]
+
+
+def test_scratch_left_by_a_kill_is_discarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A run killed in a tiled pass leaves its scratch in the shot's directory (tiling.SCRATCH),
+    # derived data the manifest never names: the resume discards it, and keeps the shot's units.
+    from seedvr2x.runtime import tiling
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB)
+    shot = tmp_path / "out" / "resume" / "shot_000004"
+    scratch = shot / tiling.SCRATCH
+    scratch.write_bytes(b"left")
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    steps.calls.clear()
+    steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    assert f"discarded {scratch}" in caplog.text and "; 1 leftover discarded" in caplog.text
+    assert steps.calls == ["window 4:1", "decode 4"]
+    assert sorted(p.name for p in shot.iterdir()) == ["window_0000.pt", "window_0001.pt"]
+    # In a finished segment's directory too, which goes whole.
+    stale = tmp_path / "out" / "resume" / "shot_000000" / tiling.SCRATCH
+    stale.parent.mkdir()
+    stale.write_bytes(b"left")
+    scratch.write_bytes(b"left")
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert not (tmp_path / "out" / "resume").exists()
+    assert indexes(tmp_path / "out" / "seg_000001.mkv") == list(range(4, 25))
+
+
+@pytest.mark.parametrize("output", ["out", "one.mkv"])
+def test_scratch_that_cant_be_made_stops_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    output: str,
+) -> None:
+    # A scratch's file that can't be made, on a full disk, is the user's to fix: the run says so
+    # and stops, exit status 1, as for any file it can't write; the units made before are kept,
+    # and the same command resumes once there is room.
+    from seedvr2x.runtime import run
+    from seedvr2x.runtime.tiling import ScratchError
+
+    source_path = job(tmp_path, monkeypatch)
+    said = "scratch.bf16: the shot's scratch, 12718080 bytes: [Errno 28] No space left on device"
+    decode = steps.decode
+
+    def full(*arguments: Any, **tiled: Any) -> None:
+        if int(arguments[1][0, 0, 0, 0]) == 4:
+            raise ScratchError(said)
+        decode(*arguments, **tiled)
+
+    monkeypatch.setattr(run, "decode_shot", full)
+    options = JOB if output == "out" else JOB[:4]
+    assert upscale(tmp_path, source_path, output, *options) == 1
+    assert caplog.text.count(said) == 1 and "Traceback" not in caplog.text
+    assert not (tmp_path / "one.mkv.work").exists()
+    if output == "one.mkv":
+        return
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert [segment["finished"] for segment in content["segments"]] == [True, False]
+    assert [shot["windows_done"] for shot in content["shots"]] == [1, 1, 2]
+    monkeypatch.setattr(run, "decode_shot", decode)
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert steps.calls == ["decode 4"]
+    assert indexes(tmp_path / "out" / "seg_000001.mkv") == list(range(4, 25))
 
 
 def stopped(tmp_path: Path, input_path: Path, output: str, *options: str) -> None:
@@ -1441,7 +1610,8 @@ def test_split_one_file(
         assert not work.exists() and not one.exists()
     steps.stop = steps.poison = None
     (work / "shot_000002").mkdir(parents=True)
-    for name in ("input.mkv.partial", "input.crc32.partial"):
+    # A tiled pass's scratch among them (tiling.SCRATCH), left on disk by a kill.
+    for name in ("input.mkv.partial", "input.crc32.partial", "scratch.bf16"):
         (work / "shot_000002" / name).write_bytes(b"left")
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 0
     assert "left by a run that was killed, emptied" in caplog.text and not work.exists()

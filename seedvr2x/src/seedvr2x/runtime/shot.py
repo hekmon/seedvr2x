@@ -1,4 +1,5 @@
-"""Upscaling of one shot (DESIGN.md, Pipeline, per shot), streamed end to end.
+"""Upscaling of one shot (DESIGN.md, Pipeline, per shot), streamed end to end unless the plan
+tiles its encode or its decode.
 
 The shot's frames are read as the VAE encodes them, in its slices of 4 frames, and the shot is
 encoded once. The DiT runs on windows of at most `window` latents, one window per call,
@@ -8,7 +9,14 @@ for the shot and sliced per window. Every step keeps numz's order and dtypes
 (src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives numz's one-batch
 output, bit for bit, in numz's padding (milestone 1); in seedvr2x's (DESIGN.md, Pipeline step 0),
 numz's patched to pad alike (research/scripts/numerics_patch.py, NUM_PAD=reflect>=8+black+16).
-Only the latents are ever whole in memory.
+Only the latents are ever whole in memory, unless a pass is tiled.
+
+A tiled pass can't stream (runtime/tiling.py; DESIGN.md, Pipeline steps 1 and 3): each tile runs
+over the whole shot, so a tiled encode keeps the shot's transformed input, and a tiled decode
+its frames until the last tile, in the shot's scratch, system memory up to tiling.ALLOWANCE, a
+file beyond. The frames are still read once, as the encode's slices come, and the decode's are
+handed on in the slices a streamed decode gives, once the last tile is in: what follows a decode
+(finite, the crop, the correction, the writers) is the same either way.
 
 The steps are apart, as the resumable units of DESIGN.md (Pause and resume) are: the encode
 (encode_shot), each window (sample_windows), the decode (merge_windows, decode_shot). Each takes
@@ -22,7 +30,7 @@ transform, in float32 (reference_inputs), then written: no second pass, no buffe
 
 import math
 from collections.abc import Callable, Generator, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,7 +43,7 @@ from seedvr2x.media.checksums import read_checksums
 from seedvr2x.media.conversion import Conversion
 from seedvr2x.media.decode import Decoder, to_float32
 from seedvr2x.media.ffmpeg import MediaError, input_args
-from seedvr2x.runtime import colour, model
+from seedvr2x.runtime import colour, model, tiling
 from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, SHARED, output_size
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
 from seedvr2x.runtime.plan import Tiles
@@ -201,16 +209,21 @@ def encode_shot(
     numz_padding is for tests only (cli.NUMZ_PADDING): the frames padded as numz pads them
     (model.input_transform), so that milestone 1's regression holds the output to numz's.
 
-    tiles, when the plan tiles the encode, and scratch, the directory its scratch goes to when it
-    outgrows its allowance of system memory (DESIGN.md, Pipeline, per shot, steps 1 and 3): not
-    built yet, None."""
-    if tiles is not None or scratch is not None:
-        raise NotImplementedError("the tiled encode isn't built yet")
+    tiles, when the plan tiles the encode (None: one pass, streamed): the shot is then encoded
+    tile by tile (tiling.encode_tiled), numz's tiled encode of it, bit for bit, the frames still
+    read once, their transformed slices waiting in the shot's scratch, each tile's crop taken from
+    there. scratch is the directory the scratch's file goes to when it outgrows its allowance of
+    system memory (tiling.ALLOWANCE; DESIGN.md, Pipeline, per shot, steps 1 and 3), made only
+    then, the file gone when this returns or fails; None with nowhere to put one, a larger scratch
+    then refused (tiling.ScratchError)."""
     padded = padded_length(count)
     # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
     model.set_seed(seed + ENCODE_SEED_OFFSET)
     inputs = encoder_inputs(models, read, count, target, numz_padding=numz_padding)
-    return model.encode_stream(models, inputs, padded)
+    if tiles is None:
+        return model.encode_stream(models, inputs, padded)
+    store = tiling.Scratch(scratch, tiling.ALLOWANCE)
+    return tiling.encode_tiled(models, inputs, padded, tiles, store)
 
 
 def encoder_inputs(
@@ -320,37 +333,56 @@ def decode_shot(
     Each slice decoded is checked for NaN or inf first (finite), its frames named for the job's,
     the shot's first being `first`.
 
-    tiles, when the plan tiles the decode, and scratch, the directory its scratch goes to when it
-    outgrows its allowance of system memory (DESIGN.md, Pipeline, per shot, step 3): not built
-    yet, None."""
-    if tiles is not None or scratch is not None:
-        raise NotImplementedError("the tiled decode isn't built yet")
-    chunks = _decoded(models, merged, count, output_size(target), name, first)
-    if correction is not None:
-        _correct(models, chunks, count, target, write, correction)
+    tiles, when the plan tiles the decode (None: one stream): the shot is then decoded tile by
+    tile (tiling.decode_tiled), numz's tiled decode of it, bit for bit. Nothing is written before
+    the last tile is decoded: the shot's frames wait in its scratch until then, and are handed on
+    in the slices a streamed decode gives, each checked, corrected and written as one of those.
+    scratch is the directory the scratch's file goes to when it outgrows its allowance of system
+    memory (tiling.ALLOWANCE; DESIGN.md, Pipeline, per shot, step 3), made only then, the file
+    gone when this returns or fails; None with nowhere to put one, a larger scratch then refused
+    (tiling.ScratchError)."""
+    with _slices(models, merged, tiles, scratch) as slices:
+        chunks = _decoded(slices, count, output_size(target), name, first)
+        if correction is not None:
+            _correct(models, chunks, count, target, write, correction)
+            return
+        # Post-process (generation_phases.py:1340-1348): [-1, 1] to [0, 1] in place.
+        for chunk in chunks:
+            chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
+            model.synchronize(models.device)
+            write(chunk.to("cpu", torch.float32).numpy())
+
+
+@contextmanager
+def _slices(
+    models: Models, merged: Tensor, tiles: Tiles | None, scratch: Path | None
+) -> Generator[Iterator[Tensor]]:
+    """The VAE's decode of the shot's latents, merged, slice by slice: each (C, t, H', W') in
+    [-1, 1], unclamped, on the device; streamed (model.decode_stream), or with tiles, tile by tile
+    (tiling.decode_tiled), its scratch's file in the directory scratch when it takes one. A tiled
+    decode holds its scratch until its last slice is taken: it is closed on leaving the block,
+    whatever ends it, a writer that fails or a stop, so that the scratch goes at once, not with
+    the failure's traceback, and the tile in progress clears its causal memory."""
+    latent = merged.to(models.device)
+    if tiles is None:
+        yield model.decode_stream(models, latent)
         return
-    # Post-process (generation_phases.py:1340-1348): [-1, 1] to [0, 1] in place.
-    for chunk in chunks:
-        chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
-        model.synchronize(models.device)
-        write(chunk.to("cpu", torch.float32).numpy())
+    store = tiling.Scratch(scratch, tiling.ALLOWANCE)
+    with closing(tiling.decode_tiled(models, latent, tiles, store)) as slices:
+        yield slices
 
 
 def _decoded(
-    models: Models,
-    merged: Tensor,
-    count: int,
-    size: tuple[int, int],
-    name: str,
-    first: int,
+    slices: Iterator[Tensor], count: int, size: tuple[int, int], name: str, first: int
 ) -> Iterator[Tensor]:
-    """The shot's frames as the VAE decodes them (generation_phases.py:900-958), slice by slice:
-    each (t, H, W, C), a view of the decode's (C, t, H', W') cropped to size (height, width) from
-    its top left, which drops the padding, whatever its amount, at the bottom and right
-    (job.padding), in [-1, 1] unclamped, on the device; each checked (finite) before it goes."""
+    """The shot's frames as the VAE decodes them (generation_phases.py:900-958), slice by slice
+    (slices, _slices): each (t, H, W, C), a view of the decode's (C, t, H', W') cropped to size
+    (height, width) from its top left, which drops the padding, whatever its amount, at the bottom
+    and right (job.padding), in [-1, 1] unclamped, on the device; each checked (finite) before it
+    goes."""
     height, width = size
     written = 0
-    for decoded in model.decode_stream(models, merged.to(models.device)):
+    for decoded in slices:
         chunk = decoded.permute(1, 2, 3, 0)[: count - written, :height, :width]
         if chunk.shape[0] == 0:
             continue

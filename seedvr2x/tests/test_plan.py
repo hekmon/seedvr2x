@@ -60,15 +60,17 @@ def test_stand_in_planner() -> None:
     assert planner.plan(Pins(window=7)) == Plan(7)
     assert planner.plan(Pins(5, 0, 0, 0)) == Plan(5)
     assert planner.plan(Pins(swap_blocks=36)) == Plan(None, swapped=36)
+    # A tile pin's size is the plan's tiles, sharing 64 px, each pass's own: the pins are taken
+    # as they come, the encode tiled without the decode too, which no card's plan is.
+    assert planner.plan(Pins(encode_tile=1344, decode_tile=1024)) == Plan(
+        None, Tiles(1344, 64), Tiles(1024, 64)
+    )
+    assert planner.plan(Pins(7, 0, 512)) == Plan(7, None, Tiles(512))
+    assert planner.plan(Pins(encode_tile=512, decode_tile=0)) == Plan(None, Tiles(512))
     assert issubclass(PlanError, JobError)  # refused as a job is, before the run
-    for pins, message in [
-        (Pins(encode_tile=1024), "--encode-tile 1024: the tiled passes aren't built yet"),
-        (Pins(decode_tile=512), "--decode-tile 512: the tiled passes aren't built yet"),
-        (Pins(swap_blocks=37), "--swap-blocks 37: the DiT has 36 blocks"),
-    ]:
-        with pytest.raises(PlanError) as refused:
-            planner.plan(pins)
-        assert str(refused.value) == message
+    with pytest.raises(PlanError) as refused:
+        planner.plan(Pins(swap_blocks=37))
+    assert str(refused.value) == "--swap-blocks 37: the DiT has 36 blocks"
 
 
 @pytest.mark.parametrize("text", ["0", "512", "576", "1024", "4096"])

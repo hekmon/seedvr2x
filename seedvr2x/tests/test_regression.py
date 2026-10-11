@@ -1,6 +1,6 @@
 """Milestone 1 as a regression test: seedvr2x's output stays bit-identical to numz's, in numz's
 padding; and in seedvr2x's own (DESIGN.md, Pipeline step 0), to numz's with that padding patched
-in.
+in. And the VAE tiling (DESIGN.md, Pipeline step 3): seedvr2x tiled, to numz tiled.
 
 Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR) and milestone 1's reference, in
 the m1/ directory of SEEDVR2X_REFERENCE_DIR:
@@ -86,6 +86,26 @@ numz logs each size (src/core/generation_utils.py:274-279):
 "Padded: 1936x1088px → Output: 1912x1060px"; seedvr2x's --resolution gives the same
 (tests/test_padding.py). A case whose input or reference is absent is skipped, naming the file.
 
+The VAE tiling (runtime/tiling.py) is held to numz's own, on milestone 1's input in numz's padding,
+numz's 7B fp16 and VAE on both sides: seedvr2x with its tiles pinned, the whole shot under each
+tile, against numz 4490bd1's CLI tiling its one batch of 45 frames, bit for bit. The references are
+in the m3/ directory of SEEDVR2X_REFERENCE_DIR, each made on 2026-10-10 by numz.mkv's command
+above with numz's tiling options added, its overlap the 64 px seedvr2x fixes, and
+--tensor_offload_device left at its default, cpu: numz then weights each tile on the GPU, sums
+them on the CPU and divides the sums on the GPU, as runtime/tiling.py does:
+- d1024: --decode-tile 1024, against numz_d1024.mkv and numz_d1024_frames/ (FFV1_OUT_PATH and
+  FFV1_OUT_DUMP so named, as for each case), made with
+  --vae_decode_tiled --vae_decode_tile_size 1024 --vae_decode_tile_overlap 64: on the frames
+  padded to 1920x1088, 4 tiles, 2 rows of 2 (rows 0-1024 and 960-1088, columns 0-1024 and
+  960-1920);
+- e1344-d1024: --encode-tile 1344 --decode-tile 1024, against numz_e1344-d1024.mkv and
+  numz_e1344-d1024_frames/, made with d1024's three options and
+  --vae_encode_tiled --vae_encode_tile_size 1344 --vae_encode_tile_overlap 64: the encode in 2
+  tiles, one row (columns 0-1344 and 1280-1920);
+- e512-d512: --encode-tile 512 --decode-tile 512, against numz_e512-d512.mkv and
+  numz_e512-d512_frames/, made with the six options at 512 and 64: 15 tiles each way, 3 rows of 5.
+Each run's log must say those grids. A case whose reference is absent is skipped, naming the file.
+
 The run goes through the CLI in a process of its own, as a user's would: the allocator is set
 before torch is imported, which a test process importing torch first wouldn't do.
 """
@@ -134,14 +154,14 @@ def bit_identical(
     resolution: int,
     models: tuple[str, str] | None,
     reference: Path,
-    *,
+    *more: str,
     numz_padding: bool,
 ) -> str:
     """Run seedvr2x on source at resolution with the DiT and VAE files of models in
     SEEDVR2X_MODEL_DIR, or with None, its default models from Hugging Face's cache, offline
-    (HF_HUB_OFFLINE=1), in numz's padding or in its own; compare its master and float32 frames
-    with the reference's, <reference>.mkv and <reference>_frames/, bit for bit. Returns its
-    log."""
+    (HF_HUB_OFFLINE=1), in numz's padding or in its own, with the options of `more` besides;
+    compare its master and float32 frames with the reference's, <reference>.mkv and
+    <reference>_frames/, bit for bit. Returns its log."""
     master, frames = tmp_path / "ours.mkv", tmp_path / "frames"
     environment = {name: value for name, value in os.environ.items() if name != NUMZ_PADDING}
     if numz_padding:
@@ -163,6 +183,7 @@ def bit_identical(
             *("--color-correction", "none"),
             # numz.mkv's format, ffv1_out.py's default: compare.py reads both masters as stored.
             *("--format", "gbrp16le"),
+            *more,
         ],
         capture_output=True,
         text=True,
@@ -266,3 +287,59 @@ def test_padding_bit_identical(
             pytest.skip(f"{path}: absent; this module's docstring says how to make it")
     models = (NUMZ_DIT, NUMZ_VAE)
     bit_identical(tmp_path, m1 / source, resolution, models, m1 / reference, numz_padding=False)
+
+
+@pytest.mark.parametrize(
+    ("pins", "reference", "grids"),
+    [
+        pytest.param(
+            ("--decode-tile", "1024"),
+            "numz_d1024",
+            ["tiled decode: 4 tiles of 1024 px sharing 64, 2 across and 2 down,"],
+            id="d1024",
+        ),
+        pytest.param(
+            ("--encode-tile", "1344", "--decode-tile", "1024"),
+            "numz_e1344-d1024",
+            [
+                "tiled encode: 2 tiles of 1344 px sharing 64, 2 across and 1 down,",
+                "tiled decode: 4 tiles of 1024 px sharing 64, 2 across and 2 down,",
+            ],
+            id="e1344-d1024",
+        ),
+        pytest.param(
+            ("--encode-tile", "512", "--decode-tile", "512"),
+            "numz_e512-d512",
+            [
+                "tiled encode: 15 tiles of 512 px sharing 64, 5 across and 3 down,",
+                "tiled decode: 15 tiles of 512 px sharing 64, 5 across and 3 down,",
+            ],
+            id="e512-d512",
+        ),
+    ],
+)
+def test_tiled_bit_identical(
+    tmp_path: Path, pins: tuple[str, ...], reference: str, grids: list[str]
+) -> None:
+    # seedvr2x's tiled passes against numz's own tiling, in numz's padding (the module's
+    # docstring): the whole shot under each tile here, numz's one batch there. The debug log
+    # says each tiled pass's grid, over the 45 frames padded to 1920x1088, its scratch in system
+    # memory at that size (564,019,200 bytes).
+    assert REFERENCE is not None
+    models_present(NUMZ_DIT, NUMZ_VAE)
+    source, m3 = Path(REFERENCE) / "m1" / "input_rgb.mkv", Path(REFERENCE) / "m3"
+    for path in (source, m3 / f"{reference}.mkv", m3 / f"{reference}_frames"):
+        if not path.exists():
+            pytest.skip(f"{path}: absent; this module's docstring says how to make it")
+    models = (NUMZ_DIT, NUMZ_VAE)
+    log = bit_identical(
+        tmp_path, source, 1080, models, m3 / reference, *pins, "-v", numz_padding=True
+    )
+    said = [line.split("tiling: ", 1)[1] for line in log.splitlines() if "tiling: tiled " in line]
+    assert len(said) == len(grids), said
+    for line, grid in zip(said, grids, strict=True):
+        assert line.startswith(grid), said
+        assert line.endswith(
+            "over 45 frames padded to 1920x1088; its scratch, 564019200 bytes, in system memory"
+        ), said
+    assert not (tmp_path / "ours.mkv.work").exists()
