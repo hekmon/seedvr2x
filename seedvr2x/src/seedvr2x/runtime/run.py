@@ -183,6 +183,7 @@ def _sample(
                 numz_padding=numz_padding,
                 tiles=tiles,
                 scratch=scratch,
+                allowance=plan.scratch_allowance,
             )
         else:
             with _copying(units, index, copies) as copy:
@@ -191,6 +192,7 @@ def _sample(
                     numz_padding=numz_padding,
                     tiles=tiles,
                     scratch=scratch,
+                    allowance=plan.scratch_allowance,
                 )
         finite(latent, f"{name}'s encode")
         units.save_latent(index, latent)
@@ -286,6 +288,7 @@ def _decode(
             *(models, merged, shot.frames, target, write, name, shot.start, correction),
             tiles=plan.decode_tiles,
             scratch=_scratch(units, index, plan.decode_tiles),
+            allowance=plan.scratch_allowance,
         )
     except CopyError:
         # Derived data: removed, the next run makes it again from the input (_sample).

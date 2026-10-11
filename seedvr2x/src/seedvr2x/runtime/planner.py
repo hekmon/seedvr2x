@@ -3,12 +3,16 @@ whose shots are its input, and before the models load. No GPU here: what is free
 figure. Nor torch at import: the command line imports this module before its first refusals,
 which don't wait for torch (tests/test_cli.py).
 
-Its memory model: what each phase is predicted to peak at on the GPU, in bytes, by the fits of
-research/docs/planner-limits.md and research/docs/vram.md, measured on numz's CLI with the 7B
-fp16, the one DiT seedvr2x runs (weights.ACCEPTED); where the weights are in each phase, and what
+Its memory model: what each phase is predicted to peak at on the GPU, in bytes. The DiT's and
+the VAE's passes by the fits of research/docs/planner-limits.md and research/docs/vram.md,
+measured on numz's CLI with the 7B fp16, the one DiT seedvr2x runs (weights.ACCEPTED); a square
+tile by the peaks measured on seedvr2x's own tiled passes (MEASURED), the fits serving the tiles
+cut off at the picture's edges; and what a VAE pass keeps on the GPU of the shot itself, which
+grows with it, counted for the job's longest shot. Where the weights are in each phase, and what
 that takes, by what runtime/blockswap.py does with them, measured on seedvr2x itself (milestone
-3); the tiles and their scratch by runtime/tiling.py's. Sizes are (height, width) in pixels;
-`padded` is the frame the model takes, the target padded (job.padded_size).
+3). The tiles and their scratch by runtime/tiling.py's, and what the scratch may take of system
+memory from the host's (Plan.scratch_allowance). Sizes are (height, width) in pixels; `padded` is
+the frame the model takes, the target padded (job.padded_size).
 
 Its choices, in DESIGN.md's order (plan): the window, the biggest quality lever; the fewest
 swapped blocks that hold it; the largest VAE tiles, none where the untiled pass fits. A pin is
@@ -39,6 +43,7 @@ from seedvr2x.vendor.models.dit_7b.window import (
 )
 
 GIB = 1024**3
+MIB = 1024**2
 
 # What the plan leaves of the free memory the driver reports, the budget being free - MARGIN
 # (DESIGN.md, Memory planner, Budget): bisected on emulated cards, a run needs 0.15-0.45 GiB
@@ -105,6 +110,38 @@ DECODE_TILED = (0.44, 16.29)
 ENCODE_TILED_SMALL = (1.7, 8.4)
 DECODE_TILED_SMALL = (1.6, 15.6)
 REFITTED = 1024  # the tile's side the refit starts at, in pixels
+# A square tile's measured peaks, one the frame doesn't cut off, by its side in pixels: the
+# encode's and the decode's, in GiB above what is allocated before the call, on seedvr2x's own
+# tiled passes over 21 frames (the tiling track, 2026-10-11; DESIGN.md, Memory planner, Per-phase
+# peaks). The fits hold them within 0.3 GiB from 1024 px up, and fall up to 0.43 short below
+# (the encode at 768 px), most of the margin: DESIGN.md has the planner take the measured peak
+# of every size it may choose. PROVISIONAL (implementation, 2026-10-11): five of those 25 sizes,
+# the others being measured; until the table has them all, a square between two of these takes
+# the larger of its fit and of the straight line between them, by area (_fit).
+MEASURED = {
+    512: (3.52, 5.89),
+    768: (7.08, 11.11),
+    1024: (10.47, 17.46),
+    1536: (21.50, 38.73),
+    2048: (37.76, 68.51),
+}
+
+# What a VAE pass keeps on the GPU of the shot itself, which grows with it, each in MiB per
+# megapixel of the padded frame and per latent of the shot, as the tiling track measured them on
+# seedvr2x (2026-10-11), and counted for the job's longest shot (DESIGN.md, Memory planner,
+# Per-phase peaks: "A pass's peak mustn't grow with the shot ... Each is being taken off the GPU;
+# until then the planner counts them"). 1080p is padded to 1104x1920, 2.12 megapixels, and 4K to
+# 2192x3840, 8.42.
+# A decode, tiled or not, keeps the shot's latent and a copy of it: 2.02 MiB a latent at 1080p,
+# 8.03 at 4K. PROVISIONAL (implementation, 2026-10-11), until the tiling track's READY says it
+# is gone.
+DECODE_LATENT = 0.954
+# A tiled encode sends its tiles' sums there at its end: 4 MiB a latent at 1080p, 16 at 4K.
+# PROVISIONAL (implementation, 2026-10-11), until the tiling track's READY says it is gone.
+ENCODE_TILED_SUMS = 1.9
+# An untiled encode holds its moments through the pass: 6 MiB a latent at 1080p at its end.
+# PROVISIONAL (implementation, 2026-10-11), until the tiling track's READY says it is gone.
+ENCODE_UNTILED_MOMENTS = 2.83
 
 # What seedvr2x's encode holds over its fit, tiled or not, in bytes: the largest excess of a
 # measured peak over the fit's in the planner's first matrix (the 96 GB card emulating smaller
@@ -120,9 +157,9 @@ ENCODE_EXTRA = round(0.4 * GIB)
 # the free memory runs out of memory in memory_limit_conv's torch.cat: the device full while
 # torch holds 3.3 to 4.9 GiB less than the free memory it started with, at the pass's largest
 # request, 2.0 to 4.8 GiB. Every pass that had 1.67 GiB or more between its measured peak and
-# the free memory ran (1.67, 1.97, 3.53, 3.69, 3.8, 4.98, 9.97, 13.8, 25.6); every failure had
-# 1.6 GiB or less between its predicted, or true, peak and the free memory (0.65, 0.80, 0.86,
-# 0.94, 1.09, 1.53, 1.6); passes also ran with 0.63, 0.88, 1.01, 1.28 and 1.32: the band
+# the free memory ran (1.67, 1.97, 3.53, 3.69, 3.8, 4.98, 9.97, 13.8, 25.6); each of the six
+# failures had 1.6 GiB or less between its predicted, or true, peak and the free memory (0.65,
+# 0.80, 0.86, 0.94, 1.09, 1.6); passes also ran with 0.63, 0.88, 1.01, 1.28 and 1.32: the band
 # between isn't safe. The first matrix's tiled decodes passed only for split's term, which
 # padded their predicted peaks then (decode_peak). PROVISIONAL (implementation, 2026-10-11): a
 # guard, the cause isn't known; numz's margin, 0.6 GiB, was bisected on passes whose largest
@@ -160,10 +197,11 @@ HOST_RESIDENT = round(2.4 * GIB)
 # store, of the shot's frames padded to 4n + 1 (tiling.Scratch.needed, which
 # tests/test_planner.py holds scratch() to), one at a time.
 SCRATCH_PIXEL = 6
-# What of a scratch stays in system memory, a larger one going whole to a memory-mapped file:
-# tiling.ALLOWANCE, a literal here since tiling imports torch (tests/test_planner.py holds the
-# two equal). PROVISIONAL there: DESIGN.md gives the allowance no figure.
-SCRATCH_ALLOWANCE = 8 * GIB
+# The most a scratch may take of system memory when what the host has available can't be read
+# (cli._host_available), in bytes. PROVISIONAL (implementation, 2026-10-11): DESIGN.md sets the
+# allowance from the host's memory, and gives no figure without it: 8 GiB, which holds 675 frames
+# at 1080p and 170 at 4K, what every scratch was allowed before the planner set it.
+ALLOWANCE_UNKNOWN_HOST = 8 * GIB
 
 
 class PlanError(JobError):
@@ -292,16 +330,29 @@ def encode_peak(
     tiles: Tiles | None = None,
     resident: int | None = None,
     swapped: int = 0,
+    *,
+    latents: int = 0,
 ) -> int:
-    """The predicted peak of the VAE's encode of padded frames, in bytes: its fit, untiled
-    (tiles None) or of its largest tile (tile_area), above what is on the GPU before the call,
-    the VAE's weights and what of the DiT stays there (dit_on_gpu's resident and swapped), and
-    what seedvr2x's encode holds over the fit (ENCODE_EXTRA). Not the shot's frames: seedvr2x
-    feeds the encode slice by slice, where numz moves a batch's there first, 0.046 GiB per 4K
-    frame (DESIGN.md, Memory planner, Per-phase peaks). Nor the room every VAE pass is held to
-    (VAE_ROOM), which the planner judges it by and no peak holds."""
-    fit = _fit(padded, tiles, ENCODE_UNTILED, ENCODE_TILED, ENCODE_TILED_SMALL)
-    return round(fit) + ENCODE_EXTRA + VAE_WEIGHTS + dit_on_gpu(resident, swapped)
+    """The predicted peak of the VAE's encode of a shot of `latents` latents of padded frames, in
+    bytes: its peak untiled (tiles None) or that of its largest tile (_fit), above what is on the
+    GPU before the call, the VAE's weights and what of the DiT stays there (dit_on_gpu's resident
+    and swapped); what seedvr2x's encode holds over it (ENCODE_EXTRA); and what it keeps there of
+    the shot, which grows with it: an untiled encode's moments, a tiled one's sums
+    (ENCODE_UNTILED_MOMENTS, ENCODE_TILED_SUMS), none of it with latents left at 0. Not the
+    shot's frames: seedvr2x feeds the encode slice by slice, where numz moves a batch's there
+    first, 0.046 GiB per 4K frame (DESIGN.md, Memory planner, Per-phase peaks). Nor the room
+    every VAE pass is held to (VAE_ROOM), which the planner judges it by and no peak holds.
+
+    PROVISIONAL (implementation, 2026-10-11): a tiled encode's sums are added to its tile's
+    peak, as an upper bound. They go to the GPU at its end, once its last tile is done, and on
+    a shot of 301 frames at 540p the tiled encode's peak equalled a 21-frame shot's (DESIGN.md):
+    the larger of the two may be all it takes.
+
+    ValueError for tiles of which one covers the whole padded frame, which is no tiling
+    (covers)."""
+    kept = ENCODE_UNTILED_MOMENTS if tiles is None else ENCODE_TILED_SUMS
+    above = _fit(padded, tiles, 0) + kept * MIB * _megapixels(padded) * latents
+    return round(above) + ENCODE_EXTRA + VAE_WEIGHTS + dit_on_gpu(resident, swapped)
 
 
 def decode_peak(
@@ -311,11 +362,16 @@ def decode_peak(
     resident: int | None = None,
     swapped: int = 0,
     split: bool = False,
+    *,
+    latents: int = 0,
 ) -> int:
-    """The predicted peak of the VAE's decode of padded frames, in bytes, its fit above what is
-    on the GPU before the call as encode_peak has the encode's (without ENCODE_EXTRA, the
-    encode's); with split, the colour correction too, which corrects a slice of the decode at
-    once, SLICE frames at most of the output's size (job.output_size).
+    """The predicted peak of the VAE's decode of a shot of `latents` latents of padded frames, in
+    bytes, its peak above what is on the GPU before the call as encode_peak has the encode's
+    (without ENCODE_EXTRA, the encode's), and the shot's latent with its copy, there through the
+    pass, tiled or not (DECODE_LATENT; none of it with latents left at 0); with split, the colour
+    correction too, which corrects a slice of the decode at once, SLICE frames at most of the
+    output's size (job.output_size). ValueError for tiles of which one covers the whole padded
+    frame, as encode_peak.
 
     The untiled decode, streamed, corrects each slice while it holds its working memory, and its
     peak is the two together: at 1080p with every weight on the GPU, 50.98 GiB measured for
@@ -326,26 +382,45 @@ def decode_peak(
     decodes' peaks were under the sum by the correction's term or about: at 4K, where it is
     2.80 GiB, by 2.85 and 2.84 (26.85 GiB measured for 29.695 in tiles of 1216 px, 19.01 for
     21.845 at 1024 px); at 1080p, where it is 0.70, by 0.75 in tiles of 832 px (12.87 for
-    13.624) and by 0.57 at 640 px (9.22 for 9.792), whose prediction is then 0.13 GiB under
-    its measured peak, the small tiles' fit that much short there (tests/test_planner.py,
-    test_first_matrix). A tile that covers the frame is the untiled pass (_fit)."""
-    fit = _fit(padded, tiles, DECODE_UNTILED, DECODE_TILED, DECODE_TILED_SMALL)
+    13.624) and by 0.57 at 640 px (9.22 for 9.792), whose prediction by the fit alone was then
+    0.13 GiB under its measured peak, the small tiles' fit that much short there: a tile of 640
+    px takes the line between the measured 512 and 768 px, 0.25 GiB over its fit (_fit;
+    tests/test_planner.py, test_first_matrix)."""
+    fit = _fit(padded, tiles, 1)
     corrected = SPLIT_FRAME_4K * SLICE * output[0] * output[1] / PIXELS_4K if split else 0
-    streamed = tiles is None or covers(padded, tiles)
-    above = fit + corrected if streamed else max(fit, corrected)
-    return round(above) + VAE_WEIGHTS + dit_on_gpu(resident, swapped)
+    above = fit + corrected if tiles is None else max(fit, corrected)
+    kept = DECODE_LATENT * MIB * _megapixels(padded) * latents
+    return round(above + kept) + VAE_WEIGHTS + dit_on_gpu(resident, swapped)
 
 
-def _fit(
-    padded: tuple[int, int],
-    tiles: Tiles | None,
-    untiled: tuple[float, float],
-    tiled: tuple[float, float],
-    small: tuple[float, float],
-) -> float:
-    """A VAE pass's peak above what is on the GPU before the call, in bytes, by its fits (GiB,
-    GiB per megapixel). A tile that covers the whole padded frame is the untiled pass, as the
-    tiled passes run it (covers).
+# The VAE's fits by MEASURED's columns, the encode's then the decode's: each untiled, of a tile
+# from REFITTED pixels, and of one below.
+_FITS = (
+    (ENCODE_UNTILED, ENCODE_TILED, ENCODE_TILED_SMALL),
+    (DECODE_UNTILED, DECODE_TILED, DECODE_TILED_SMALL),
+)
+
+
+def _megapixels(padded: tuple[int, int]) -> float:
+    """The padded frame's area, in megapixels (10^6 pixels)."""
+    return padded[0] * padded[1] / 1e6
+
+
+def _fit(padded: tuple[int, int], tiles: Tiles | None, column: int) -> float:
+    """A VAE pass's peak above what is on the GPU before the call, in bytes: the encode's
+    (column 0) or the decode's (1), untiled (tiles None) or of its largest tile.
+
+    A tile takes (DESIGN.md, Memory planner, Per-phase peaks: "the planner takes the measured
+    peak of every size it may choose, the fits serving the tiles cut off at the picture's
+    edges"):
+    - cut off at the picture's edges (a 1280-px tile at 1080p is 1104x1280), its fit at its area
+      (tile_area): 13.60 and 23.46 GiB there, where 13.55 and 23.34 were measured;
+    - square, its measured peak when MEASURED has its side;
+    - square, of a side between two that MEASURED has, the larger of its fit and of the straight
+      line between those two, by area; of a side outside them, its fit. PROVISIONAL
+      (implementation, 2026-10-11), until MEASURED has every size the planner may choose.
+    ValueError for tiles of which one covers the whole padded frame: no tiling, and no pass the
+    planner makes or takes (covers).
 
     PROVISIONAL (implementation, 2026-10-11): an untiled pass takes the larger of its own fit
     and the small tiles' at the padded frame's area. The untiled fits come from frames of 720p
@@ -358,17 +433,37 @@ def _fit(
     not the fits' errors (planner-limits.md, The margin over free memory); the 540p encode's
     measured peak is still 0.31 GiB over its prediction. The two fits cross at 1.25 megapixels
     for the encode and 1.6 for the decode: 1080p and up are unchanged."""
-    if tiles is None or covers(padded, tiles):
-        area = padded[0] * padded[1] / 1e6
+    untiled, tiled, small = _FITS[column]
+    if tiles is None:
+        area = _megapixels(padded)
         return max(constant + slope * area for constant, slope in (untiled, small)) * GIB
-    constant, slope = tiled if tiles.size >= REFITTED else small
-    return (constant + slope * tile_area(padded, tiles)) * GIB
+    if covers(padded, tiles):
+        raise ValueError(
+            f"tiles of {tiles.size} px over frames padded to {padded[1]}x{padded[0]}: one covers"
+            " the whole frame, which is no tiling"
+        )
+    side, area = tiles.size, tile_area(padded, tiles)
+    constant, slope = tiled if side >= REFITTED else small
+    fit = constant + slope * area
+    if side > min(padded):  # cut off at the picture's edges
+        return fit * GIB
+    if side in MEASURED:
+        return MEASURED[side][column] * GIB
+    if not min(MEASURED) < side < max(MEASURED):
+        return fit * GIB
+    below = max(measured for measured in MEASURED if measured < side)
+    above = min(measured for measured in MEASURED if measured > side)
+    share = (side**2 - below**2) / (above**2 - below**2)
+    line = MEASURED[below][column] + share * (MEASURED[above][column] - MEASURED[below][column])
+    return max(fit, line) * GIB
 
 
 def covers(padded: tuple[int, int], tiles: Tiles) -> bool:
-    """Whether one tile covers the whole padded frame, its grid one tile: the pass then runs
-    untiled, its scratch untouched (tiling.encode_tiled, tiling.decode_tiled, as numz's tiled
-    passes take it, attn_video_vae.py:1315-1317, 1489-1491)."""
+    """Whether one tile covers the whole padded frame, its grid one tile, which is no tiling
+    (DESIGN.md, Pipeline, per shot, step 3): a pin of one is refused, naming 0, the untiled pass
+    (plan), a record of one is no plan's (check_recorded), and the planner never makes one
+    (_tile_sizes). The tiled passes would run such a grid untiled (tiling.encode_tiled,
+    tiling.decode_tiled, as numz's take it, attn_video_vae.py:1315-1317, 1489-1491)."""
     return tiles.size >= max(padded)
 
 
@@ -396,7 +491,7 @@ class Peaks:
     encode: int  # each phase's predicted peak on the GPU
     dit: int
     decode: int
-    host: int  # the system memory the plan takes
+    host: int  # the system memory the plan takes, the scratch up to its allowance
     scratch: int  # the scratch of the longest shot's tiled passes; 0 untiled
     window: int  # the longest window the job really runs, in latents
     tokens: int  # the DiT's tokens per latent
@@ -450,11 +545,7 @@ class _Job:
 
     @property
     def padded(self) -> tuple[int, int]:
-        """The frame the model takes: the target in seedvr2x's padding (job.padded_size), or in
-        numz's, zeros up to multiples of 16, for the tests (model.input_transform)."""
-        if self.numz_padding:
-            return -(-self.target[0] // 16) * 16, -(-self.target[1] // 16) * 16
-        return padded_size(self.target)
+        return _padded(self.target, self.numz_padding)
 
     @property
     def output(self) -> tuple[int, int]:
@@ -485,6 +576,9 @@ def plan(
     takes more system memory than host_available, in bytes (None: not checked). split: whether the
     decode corrects colours; numz_padding is for tests only (cli.NUMZ_PADDING).
 
+    A tile pinned that covers the whole padded frame is no tiling, and is refused, naming 0, the
+    untiled pass (DESIGN.md, Pipeline, per shot, step 3), whatever the memory.
+
     The choices, each made once for the job (DESIGN.md, Memory planner, Choices, in order):
     1. the window cap, the longest shot's length when the DiT's phase holds it, with as many
        blocks swapped as it takes and the VAE's weights away, else the largest cap whose longest
@@ -497,23 +591,35 @@ def plan(
        the largest that fit, TILE_MAX at most, each pass with its room (VAE_ROOM), the DiT
        leaving the phase before a tile shrinks; then as much of it left there as fits
        (_resident).
+    Then what a tiled shot's scratch may take of system memory, from host_available
+    (_allowance).
 
     recorded is the plan of a job resumed that has made units: what shapes the output is taken
-    from it as it is, the cap, the tiles and the compile flags, and where the weights are planned
-    again around it (DESIGN.md, Memory planner, A plan shapes the output a little)."""
+    from it as it is, the cap, the tiles and the compile flags, and where the weights are and
+    the scratch's allowance planned again around it (DESIGN.md, Memory planner, A plan shapes
+    the output a little); one with tiles of which one covers the frame is no plan's, refused
+    (check_recorded)."""
     job = _job(free, target, shots, split, numz_padding)
     if pins.swap_blocks is not None and pins.swap_blocks > BLOCKS:
         raise PlanError(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {BLOCKS} blocks, so from 0 to {BLOCKS}"
         )
+    for phase, pin in (("encode", pins.encode_tile), ("decode", pins.decode_tile)):
+        if pin and covers(job.padded, Tiles(pin)):
+            height, width = job.padded
+            raise PlanError(
+                f"--{phase}-tile {pin}: a tile of {pin} px covers the whole padded frame,"
+                f" {width}x{height}: --{phase}-tile 0 pins an untiled {phase}"
+            )
     if recorded is None:
         made = _chosen(job, pins)
-        refused = _unfit(job, made, host_available)
     else:
+        _check_tiles(job.padded, recorded)
         made = _around(job, recorded, pins)
-        refused = _unfit(job, made, host_available)
-        if refused is not None:
-            refused = f"the recorded plan no longer fits the memory free now: {refused}"
+    made = replace(made, scratch_allowance=_allowance(job, made, host_available))
+    refused = _unfit(job, made, host_available)
+    if refused is not None and recorded is not None:
+        refused = f"the recorded plan no longer fits the memory free now: {refused}"
     if refused is not None:
         raise PlanError(refused)
     return made, _peaks(job, made)
@@ -531,17 +637,28 @@ def fits(
 ) -> str | None:
     """None when every phase of `plan` fits `free` bytes of GPU memory less MARGIN, a VAE pass
     with its room (VAE_ROOM), and the plan host_available bytes of system memory (None: not
-    checked), for a job as plan() takes it; else one sentence naming the first phase that
-    doesn't and what it is short of, in GiB."""
+    checked), its scratch's allowance as the plan has it, for a job as plan() takes it; else one
+    sentence naming the first phase that doesn't and what it is short of, in GiB. ValueError for
+    a plan with tiles of which one covers the whole padded frame, which plan() never returns
+    (covers)."""
     return _unfit(_job(free, target, shots, split, numz_padding), plan, host_available)
 
 
-def check_recorded(recorded: Plan, shots: Sequence[Shot]) -> None:
-    """Refuse (PlanError) a recorded plan whose cap no layout exists for (shot.window_layout):
-    one under 2 * SHARED + 1 latents that a shot is longer than. The planner makes a cap that
-    short only for a job whose longest shot is as short, each shot then one window
-    (_Job.smallest), so that record was edited; Plan.recorded, which has no shots, can't tell
-    the two apart."""
+def check_recorded(
+    recorded: Plan,
+    shots: Sequence[Shot],
+    target: tuple[int, int],
+    *,
+    numz_padding: bool = False,
+) -> None:
+    """Refuse (PlanError) a recorded plan that the planner makes for no job of `shots` resized to
+    target (job.target_size; numz_padding as plan takes it), which Plan.recorded, with neither,
+    can't tell from one it does:
+    - a cap no layout exists for (shot.window_layout): one under 2 * SHARED + 1 latents that a
+      shot is longer than. The planner makes a cap that short only for a job whose longest shot
+      is as short, each shot then one window (_Job.smallest), so that record was edited;
+    - tiles of which one covers the whole padded frame, which is no tiling (covers): the planner
+      makes none, and refuses the pin of one (plan)."""
     longest = max(_latents(shot.frames) for shot in shots)
     if recorded.window is not None and recorded.window < min(2 * SHARED + 1, longest):
         raise PlanError(
@@ -549,6 +666,21 @@ def check_recorded(recorded: Plan, shots: Sequence[Shot]) -> None:
             f" {_count(longest, 'latent')}: a cap that a shot is longer than is"
             f" {2 * SHARED + 1} latents at least"
         )
+    _check_tiles(_padded(target, numz_padding), recorded)
+
+
+def _check_tiles(padded: tuple[int, int], recorded: Plan) -> None:
+    """Refuse (PlanError) a recorded plan with tiles of which one covers the whole padded frame
+    (check_recorded)."""
+    height, width = padded
+    passes = (("encode", recorded.encode_tiles), ("decode", recorded.decode_tiles))
+    for phase, tiles in passes:
+        if tiles is not None and covers(padded, tiles):
+            raise PlanError(
+                f"not a plan as seedvr2x records one: its {phase}_tiles, of {tiles.size} px, with"
+                f" frames padded to {width}x{height}: a tile that covers the whole frame is no"
+                f" tiling, and an untiled {phase} records none"
+            )
 
 
 def said(
@@ -567,10 +699,11 @@ def said(
     the joins; the swapped blocks and what stays on the GPU in each phase; the pinned system
     memory; the tiles and their grid, and the room the VAE's passes are held to (VAE_ROOM);
     each phase's predicted peak, without that room, and which bounds the plan, a VAE phase
-    counted with its room (Peaks.bound) and said so; the scratch of the longest tiled shot; what
-    was pinned. PROVISIONAL (implementation, 2026-10-10): the wording; the time estimates' lines
-    come with them. The longest window the job runs is said only where it isn't the cap, one
-    pinned or recorded above it."""
+    counted with its room (Peaks.bound) and said so; the scratch of the longest tiled shot, what
+    a scratch may take of system memory (Plan.scratch_allowance) and the shots whose scratch goes
+    to its file instead; what was pinned. PROVISIONAL (implementation, 2026-10-10): the wording;
+    the time estimates' lines come with them. The longest window the job runs is said only where
+    it isn't the cap, one pinned or recorded above it."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
@@ -624,13 +757,21 @@ def said(
         f"{_gib(peaks.budget - peaks.need(peaks.bound))} GiB under the budget"
     )
     if peaks.scratch:
-        where = (
-            "in system memory"
-            if peaks.scratch <= SCRATCH_ALLOWANCE
-            else f"in a memory-mapped file, over the {_gib(SCRATCH_ALLOWANCE)} GiB a scratch may"
-            " take of system memory"
+        # A scratch over the allowance goes whole to its file (tiling.Scratch).
+        allowed = plan.scratch_allowance
+        over = sum(
+            number for count, number in frames.items() if scratch(job.padded, count) > allowed
         )
-        lines.append(f"scratch of the longest tiled shot: {_gib(peaks.scratch)} GiB, {where}")
+        where = (
+            f"over which the scratch of {over} of {_count(len(shots), 'shot')} goes whole to a"
+            " memory-mapped file"
+            if over
+            else "which holds every shot's"
+        )
+        lines.append(
+            f"scratch of the longest tiled shot: {_gib(peaks.scratch)} GiB; an allowance of"
+            f" {_gib(allowed)} GiB of system memory, {where}"
+        )
     options = (
         ("--window", pins.window),
         ("--swap-blocks", pins.swap_blocks),
@@ -650,6 +791,14 @@ def _job(
     lengths = sorted({_latents(shot.frames) for shot in shots})
     frames = max(shot.frames for shot in shots)
     return _Job(free, target, tuple(lengths), frames, split, numz_padding)
+
+
+def _padded(target: tuple[int, int], numz_padding: bool) -> tuple[int, int]:
+    """The frame the model takes: the target in seedvr2x's padding (job.padded_size), or in
+    numz's, zeros up to multiples of 16, for the tests (model.input_transform)."""
+    if numz_padding:
+        return -(-target[0] // 16) * 16, -(-target[1] // 16) * 16
+    return padded_size(target)
 
 
 def _latents(frames: int) -> int:
@@ -845,7 +994,7 @@ def _swap_refused(job: _Job, swapped: int, latents: int, whose: str, fewest: int
 def _tile_sizes(padded: tuple[int, int]) -> range:
     """The sides of the tiles the planner makes for padded frames, the largest first: multiples
     of TILE_STEP from the largest under the frame's longer side, a tile that covers the frame
-    being the untiled pass, or from TILE_MAX on a frame longer than it, down to TILE_MIN; none
+    being no tiling (covers), or from TILE_MAX on a frame longer than it, down to TILE_MIN; none
     for a frame that small."""
     largest = min(TILE_MAX, (max(padded) - 1) // TILE_STEP * TILE_STEP)
     return range(largest, TILE_MIN - 1, -TILE_STEP)
@@ -854,10 +1003,12 @@ def _tile_sizes(padded: tuple[int, int]) -> range:
 def _vae_peak(
     job: _Job, phase: Phase, tiles: Tiles | None, resident: int | None, swapped: int
 ) -> int:
-    """The predicted peak of the job's encode or decode (encode_peak, decode_peak)."""
+    """The predicted peak of the job's encode or decode (encode_peak, decode_peak), of its
+    longest shot's: what a pass keeps on the GPU of the shot grows with it."""
+    shot = job.lengths[-1]
     if phase == "encode":
-        return encode_peak(job.padded, tiles, resident, swapped)
-    return decode_peak(job.padded, job.output, tiles, resident, swapped, job.split)
+        return encode_peak(job.padded, tiles, resident, swapped, latents=shot)
+    return decode_peak(job.padded, job.output, tiles, resident, swapped, job.split, latents=shot)
 
 
 def _vae_need(
@@ -882,20 +1033,14 @@ def _fitting(job: _Job, phase: Phase, swapped: int) -> list[Tiles | None]:
 def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | None:
     """The tiles of the job's encode or decode (plan's choice 3), None untiled; --encode-tile or
     --decode-tile, `pin`, taken exactly or refused, the refusal naming the largest tile that
-    fits. The job's floor holds already (_floor), so some pass fits: its smallest tiles at least,
-    or the untiled pass on a frame too small for a tile (_least_pass).
+    fits. The job's floor holds already (_floor), so some pass fits (_least_pass); and no tile
+    pinned covers the frame, which plan refuses first.
 
-    PROVISIONAL (implementation, 2026-10-11): a tile pinned that covers the whole padded frame
-    is taken as it is. The plan records the tiles, a setting a resume must find again; the pass
-    runs untiled, as the tiled passes run a grid of one tile (covers), its peak the untiled fit
-    (_fit), no scratch. DESIGN.md has a pin taken exactly or refused, and doesn't say that one
-    is refused for another that runs the same, 0, as the planner refused it before the tiled
-    passes were built.
-
-    PROVISIONAL (implementation, 2026-10-11), two more. A tile pinned above TILE_MAX is taken
-    exactly when it fits by its fit, outside the fits' range as it is: a pin is the user's, and
-    the search alone never chooses one, nor does a refusal name one. And a pass pinned, tiled
-    or not, is held to the room the planner's own is (VAE_ROOM), and refused without it."""
+    PROVISIONAL (implementation, 2026-10-11), two choices DESIGN.md doesn't make. A tile pinned
+    above TILE_MAX is taken exactly when it fits by its fit, outside the fits' range as it is: a
+    pin is the user's, and the search alone never chooses one, nor does a refusal name one. And
+    a pass pinned, tiled or not, is held to the room the planner's own is (VAE_ROOM), and
+    refused without it."""
     fitting = _fitting(job, phase, swapped)
     if pin is None:
         return fitting[0]
@@ -904,13 +1049,18 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
     need = _vae_need(job, phase, tiles, 0, swapped) + MARGIN
     if need <= job.free:
         return tiles
-    # A frame too small for a tile has the untiled pass alone, whatever is pinned, which the
-    # floor holds: a pass refused has tiles, the smallest of which fit.
-    largest = next(fit.size for fit in fitting if fit is not None)
+    # The untiled pass alone fits where a frame little larger than the smallest tile takes less
+    # untiled than in that tile (_least_pass).
+    largest = next((fit.size for fit in fitting if fit is not None), None)
+    fits = (
+        f"no tile fits, the untiled {phase} does, --{phase}-tile 0"
+        if largest is None
+        else f"the largest tile that fits is --{phase}-tile {largest}"
+    )
     raise PlanError(
-        f"{option}: the {phase} {_tiles_said(job, tiles)} takes {_over(need)} GiB of free VRAM,"
+        f"{option}: the {phase} {_tiles_said(tiles)} takes {_over(need)} GiB of free VRAM,"
         f" the DiT off the GPU{_ROOM_HELD}, and the driver reports {_under(job.free)} GiB"
-        f" free: the largest tile that fits is --{phase}-tile {largest}"
+        f" free: {fits}"
     )
 
 
@@ -943,27 +1093,32 @@ def _floor(job: _Job) -> tuple[Phase, int] | None:
     when that is over the budget, no plan then fitting the job (DESIGN.md, Memory planner: a size
     that doesn't fit is refused, never degraded); else None. The least: the smallest window the
     job can run, every block of the DiT swapped and the VAE's weights away; the encode and the
-    decode each in its smallest tiles, untiled on a frame too small for one (_least_pass), the
+    decode each in the pass that takes the least, of the job's longest shot (_least_pass), the
     DiT away, whatever the plan swaps: a phase that keeps nothing of it frees its slots too
     (dit_on_gpu). What a phase takes is its peak, and for the encode and the decode their room
     with it (_vae_need)."""
     least: dict[Phase, int] = {
-        "encode": _vae_need(job, "encode", _least_pass(job), 0, BLOCKS),
+        "encode": _vae_need(job, "encode", _least_pass(job, "encode"), 0, BLOCKS),
         "dit": dit_peak(job.padded, _longest(job.lengths, job.smallest), BLOCKS, vae_in_dit=False),
-        "decode": _vae_need(job, "decode", _least_pass(job), 0, BLOCKS),
+        "decode": _vae_need(job, "decode", _least_pass(job, "decode"), 0, BLOCKS),
     }
     phase = max(PHASES, key=lambda phase: least[phase])
     return (phase, least[phase]) if least[phase] > job.budget else None
 
 
-def _least_pass(job: _Job) -> Tiles | None:
-    """The pass of the job's encode, or of its decode, that takes the least: its smallest tiles;
-    None, the untiled pass, on a frame too small for a tile. An untiled pass never takes less
-    than a tile of its frame below REFITTED pixels: its fit is at least those tiles' at the
-    frame's area, which a tile's is under (_fit; tests/test_planner.py holds it over many
-    sizes), the room the same for both (VAE_ROOM)."""
+def _least_pass(job: _Job, phase: Phase) -> Tiles | None:
+    """The pass of the job's encode or decode that takes the least, the DiT away: None, the
+    untiled pass, or tiles; untiled on a frame too small for a tile. The least of three, which
+    tests/test_planner.py holds to the least of every pass the planner may make, over many
+    sizes: the smallest tiles, the least of all in most frames; the untiled pass, under them on
+    a frame little larger than one, 512x528, where a square tile takes its measured peak
+    (MEASURED) and the untiled pass its fit; and the smallest tiles the refit serves
+    (REFITTED), under the smallest of all on a strip over 1024 px long and under 74 px high
+    for the encode, 134 for the decode, where the two tiled fits cross."""
     sizes = _tile_sizes(job.padded)
-    return Tiles(sizes[-1]) if sizes else None
+    least = dict.fromkeys(size for size in (*sizes[-1:], REFITTED) if size in sizes)
+    passes = [None, *(Tiles(size) for size in least)]
+    return min(passes, key=lambda tiles: _vae_need(job, phase, tiles, 0, BLOCKS))
 
 
 def _too_large(job: _Job, phase: Phase, least: int) -> str:
@@ -983,8 +1138,9 @@ def _too_large(job: _Job, phase: Phase, least: int) -> str:
         )
         room = 0
     else:
-        tiles = _least_pass(job)
-        tiled = "untiled, too small for a tile" if tiles is None else _tiles_said(job, tiles)
+        tiled = _tiles_said(_least_pass(job, phase))
+        if not _tile_sizes(job.padded):
+            tiled += ", too small for a tile"
         how = f"its {phase} {tiled}, with the DiT off the GPU"
         room = VAE_ROOM
     # The room as what is left of the total once the peak and the margin are said, each rounded
@@ -1059,48 +1215,73 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
     """What the plan is predicted to take for the job.
 
     Its system memory: the process's own during the shots, the pinned copies of what leaves the
-    GPU, and a tiled shot's scratch up to its allowance. PROVISIONAL (implementation,
-    2026-10-10): the loader's own peak while the weights load, 16.5 GiB, mostly the weights' file
-    mapped (DESIGN.md, Memory planner, Host RAM), isn't counted. PROVISIONAL (implementation,
-    2026-10-11): a scratch over its allowance goes whole to its memory-mapped file
-    (tiling.Scratch), and is still counted for the allowance, as DESIGN.md counts it, for the
-    page cache its mapping works in. Nor is what a tiled encode sums beside its scratch
-    counted, its tiles' moments on the CPU (tiling.encode_tiled): a byte per pixel of the
-    padded frame and per latent of the shot, a twenty-fourth of the scratch, 2.0 GiB for 1,001
-    frames at 4K.
-
-    The scratch is one pass's, the encode's and the decode's being the same size and never open
-    together; none for a pass whose pinned tile covers the frame (covers)."""
+    GPU, and what a tiled shot's scratch may take of it, the plan's allowance
+    (Plan.scratch_allowance). PROVISIONAL (implementation, 2026-10-10): the loader's own peak
+    while the weights load, 16.5 GiB, mostly the weights' file mapped (DESIGN.md, Memory planner,
+    Host RAM), isn't counted. PROVISIONAL (implementation, 2026-10-11): a scratch over its
+    allowance goes whole to its memory-mapped file (tiling.Scratch), and the allowance is still
+    counted, as DESIGN.md counts it, for the page cache its mapping works in. Nor is what a
+    tiled encode sums beside its scratch counted, its tiles' moments on the CPU
+    (tiling.encode_tiled): a byte per pixel of the padded frame and per latent of the shot, a
+    twenty-fourth of the scratch, 2.0 GiB for 1,001 frames at 4K."""
     latents = _longest(job.lengths, plan.window)
-    passes = (plan.encode_tiles, plan.decode_tiles)
-    tiled = any(tiles is not None and not covers(job.padded, tiles) for tiles in passes)
-    kept = scratch(job.padded, job.frames) if tiled else 0
     return Peaks(
         job.free,
         job.budget,
         _vae_peak(job, "encode", plan.encode_tiles, plan.resident_encode, plan.swapped),
         dit_peak(job.padded, latents, plan.swapped, plan.vae_in_dit),
         _vae_peak(job, "decode", plan.decode_tiles, plan.resident_decode, plan.swapped),
-        HOST_RESIDENT + _pinned(plan) + min(kept, SCRATCH_ALLOWANCE),
-        kept,
+        HOST_RESIDENT + _pinned(plan) + plan.scratch_allowance,
+        _kept(job, plan),
         latents,
         tokens(job.padded, 1),
     )
 
 
+def _kept(job: _Job, plan: Plan) -> int:
+    """The scratch of the job's longest shot under the plan, in bytes (scratch); 0 when neither
+    pass is tiled. One pass's: the encode's and the decode's are the same size, and never open
+    together."""
+    tiled = plan.encode_tiles is not None or plan.decode_tiles is not None
+    return scratch(job.padded, job.frames) if tiled else 0
+
+
+def _allowance(job: _Job, plan: Plan, host_available: int | None) -> int:
+    """What a tiled shot's scratch may take of system memory under the plan, in bytes
+    (Plan.scratch_allowance), a larger one going to its file: half of what the host has
+    available once the pinned copies are counted, and no more than the longest tiled shot needs
+    (DESIGN.md, Memory planner, Host RAM: provisional, until measured on a consumer host); 0 when
+    no pass is tiled. It shapes no bit.
+
+    PROVISIONAL (implementation, 2026-10-11), two choices DESIGN.md doesn't make. No more either
+    than what the host has left once the process's own memory is counted with the pinned copies
+    (HOST_RESIDENT), down to nothing, every scratch then going to its file: so that a job is
+    refused for the system memory the process and its pinned copies take (_unfit), never for an
+    allowance: half of what the copies leave is more than the process leaves of it where they
+    leave under 4.8 GiB. And with what the host has available unknown (None), the longest tiled
+    shot's scratch, ALLOWANCE_UNKNOWN_HOST at most."""
+    kept = _kept(job, plan)
+    if host_available is None:
+        return min(kept, ALLOWANCE_UNKNOWN_HOST)
+    left = host_available - _pinned(plan)
+    return max(0, min(kept, left // 2, left - HOST_RESIDENT))
+
+
 def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     """Why the plan doesn't fit the job's memory (fits): the first phase over the budget, a VAE
     phase judged with its room as the planner chose it (Peaks.need), or the system memory it
-    takes over what is available; None when it fits."""
+    takes over what is available, the process's own, the pinned copies and the scratch's
+    allowance; None when it fits. A plan of the planner's own is never refused for its
+    allowance, which is nothing where the first two leave nothing (_allowance)."""
     peaks = _peaks(job, plan)
     blocks = _count(plan.swapped, "block")
     vae = "" if plan.vae_in_dit else " and the VAE off the GPU"
     whats = {
-        "encode": f"the encode, {_tiles_said(job, plan.encode_tiles)}, with"
+        "encode": f"the encode, {_tiles_said(plan.encode_tiles)}, with"
         f" {_resident_said(plan.resident_encode, plan.swapped)},",
         "dit": f"the DiT's phase, a window of {_count(peaks.window, 'latent')} with {blocks}"
         f" swapped{vae},",
-        "decode": f"the decode, {_tiles_said(job, plan.decode_tiles)}, with"
+        "decode": f"the decode, {_tiles_said(plan.decode_tiles)}, with"
         f" {_resident_said(plan.resident_decode, plan.swapped)},",
     }
     for phase in PHASES:
@@ -1117,8 +1298,8 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
         if pinned:
             left = _left(plan, "the DiT's other parameters", "the VAE's weights")
             parts.append((pinned, f"pinned for {left} that leave the GPU"))
-        if peaks.scratch:
-            parts.append((min(peaks.scratch, SCRATCH_ALLOWANCE), "for a tiled shot's scratch"))
+        if plan.scratch_allowance:
+            parts.append((plan.scratch_allowance, "for a tiled shot's scratch"))
         # Each part rounded up, as what something takes is in every refusal, and the total their
         # sum as said, so that the message's figures add up: up to 0.02 GiB over the total
         # rounded once.
@@ -1133,24 +1314,17 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     return None
 
 
-def _tiles_said(job: _Job, tiles: Tiles | None) -> str:
-    """A pass of the job as a refusal says it: untiled, in its tiles, or untiled under a tile
-    that covers its frames (covers)."""
-    if tiles is None:
-        return "untiled"
-    if covers(job.padded, tiles):
-        return f"untiled (one tile of {tiles.size} px covers the padded frame)"
-    return f"in tiles of {tiles.size} px"
+def _tiles_said(tiles: Tiles | None) -> str:
+    """A pass as a refusal says it: untiled, or in its tiles."""
+    return "untiled" if tiles is None else f"in tiles of {tiles.size} px"
 
 
 def _pass_said(job: _Job, tiles: Tiles | None) -> str:
-    """A pass as the plan's lines say it: untiled, or its tiles and their grid, rows x columns;
-    a grid of one tile is the untiled pass (covers)."""
+    """A pass as the plan's lines say it: untiled, or its tiles and their grid, rows x columns."""
     if tiles is None:
         return "untiled"
     rows, columns = grid(job.padded, tiles)
-    untiled = ", which is the untiled pass" if covers(job.padded, tiles) else ""
-    return f"in tiles of {tiles.size} px, {rows} x {columns}{untiled}"
+    return f"in tiles of {tiles.size} px, {rows} x {columns}"
 
 
 def _resident_said(resident: int | None, swapped: int) -> str:

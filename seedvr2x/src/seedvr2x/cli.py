@@ -215,8 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         " or refused (default: the planner's, the longest that fits the GPU's free memory)",
     )
     # The planner's other pins (DESIGN.md, Memory planner, Pins), each fixing one choice, taken
-    # exactly or refused, never adjusted (planner.plan); and --until (DESIGN.md, Pause and
-    # resume, Stopping), refused until its work is built (_run).
+    # exactly or refused, never adjusted (planner.plan). Then --until (DESIGN.md, Pause and
+    # resume, Stopping), the one option still refused until its work is built (_run).
     parser.add_argument(
         "--encode-tile",
         type=_tile,
@@ -584,7 +584,9 @@ def _run(args: argparse.Namespace) -> int:
         plan_record: dict[str, Any] | None = None
         if prior is not None and not planned(prior.recorded):
             assert directory is not None
-            kept_plan = _recorded_plan(directory / NAME, prior.recorded, shots)
+            kept_plan = _recorded_plan(
+                *(directory / NAME, prior.recorded, shots, target), numz_padding=numz_padding
+            )
             if complete(prior.recorded):
                 # A finished job makes nothing again (DESIGN.md, Pause and resume): its plan
                 # stays as recorded, the memory free now none of its business, nor read.
@@ -610,7 +612,8 @@ def _run(args: argparse.Namespace) -> int:
             for line in said:
                 logger.info("%s", line)
             # What shapes the output, compared on a resume, and under memory what doesn't, the
-            # predicted peaks with where the weights are, for information (resume.UNCOMPARED).
+            # predicted peaks with where the weights are and the scratch's allowance, for
+            # information (resume.UNCOMPARED).
             plan_record = plan.record()
             plan_record["memory"].update(peaks.record())
         # The work directory of a one-file output: for split's input copies, and for a tiled
@@ -1024,17 +1027,25 @@ def _host_available(meminfo: Path = Path("/proc/meminfo")) -> int | None:
     return None
 
 
-def _recorded_plan(path: Path, recorded: dict[str, Any], shots: "Sequence[Shot]") -> "Plan":
+def _recorded_plan(
+    path: Path,
+    recorded: dict[str, Any],
+    shots: "Sequence[Shot]",
+    target: tuple[int, int],
+    *,
+    numz_padding: bool,
+) -> "Plan":
     """The plan the manifest at path records, as a resume takes it (Plan.recorded): refused
-    (JobError), naming the manifest, when its record isn't a plan's, or when its cap is one the
-    job's shots can't be laid out by (planner.check_recorded)."""
+    (JobError), naming the manifest, when its record isn't a plan's, or is one the planner makes
+    for no job of these shots at this target: a cap they can't be laid out by, or a tile that
+    covers the whole padded frame (planner.check_recorded)."""
     from seedvr2x.runtime import planner
     from seedvr2x.runtime.job import JobError
     from seedvr2x.runtime.plan import Plan
 
     try:
         plan = Plan.recorded(recorded.get("plan"))
-        planner.check_recorded(plan, shots)
+        planner.check_recorded(plan, shots, target, numz_padding=numz_padding)
     except JobError as error:
         raise JobError(f"{path}: {error}") from None
     return plan

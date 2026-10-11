@@ -15,7 +15,7 @@ from seedvr2x import cli
 from seedvr2x.runtime import resume
 from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.plan import OVERLAP, Plan, Tiles
-from seedvr2x.runtime.planner import PlanError
+from seedvr2x.runtime.planner import GIB, PlanError
 
 
 def test_record() -> None:
@@ -33,18 +33,22 @@ def test_record() -> None:
             "resident_encode": None,
             "resident_decode": None,
             "vae_in_dit": True,
+            "scratch_allowance": 0,
         },
     }
-    plan = Plan(12, Tiles(1536), Tiles(1024), 20, 0, 4, vae_in_dit=False)
+    plan = Plan(12, Tiles(1536), Tiles(1024), 20, 0, 4, vae_in_dit=False, scratch_allowance=3 * GIB)
     record = plan.record()
     assert record["window"] == 12
     assert record["encode_tiles"] == {"size": 1536, "overlap": 64}
     assert record["decode_tiles"] == {"size": 1024, "overlap": 64}
+    # What a tiled shot's scratch may take of system memory, in bytes, with where the weights
+    # are: for information, as they are (DESIGN.md, Memory planner, Host RAM: "it shapes no bit").
     assert record["memory"] == {
         "swapped_blocks": 20,
         "resident_encode": 0,
         "resident_decode": 4,
         "vae_in_dit": False,
+        "scratch_allowance": 3 * GIB,
     }
     assert resume.UNCOMPARED["plan"] == ("memory", "timings")
     one = {"plan": plan.record()}
@@ -60,9 +64,9 @@ def test_record() -> None:
 
 def test_recorded() -> None:
     # A resume takes what shapes the output as the manifest records it, and plans the rest
-    # again: where the weights were isn't read, nor the timings.
+    # again: where the weights were isn't read, nor the scratch's allowance, nor the timings.
     assert issubclass(PlanError, JobError)  # refused as a job is, before the run
-    plan = Plan(12, Tiles(1536), Tiles(1024, 128), 20, 0, 4, vae_in_dit=False)
+    plan = Plan(12, Tiles(1536), Tiles(1024, 128), 20, 0, 4, vae_in_dit=False, scratch_allowance=7)
     assert Plan.recorded(plan.record()) == Plan(12, Tiles(1536), Tiles(1024, 128))
     assert Plan.recorded(Plan(None).record()) == Plan(None)
     record = {**Plan(7).record(), "memory": {"swapped_blocks": "all"}, "timings": {"window": 1.5}}

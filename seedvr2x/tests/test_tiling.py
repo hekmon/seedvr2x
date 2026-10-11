@@ -444,6 +444,20 @@ def test_scratch_goes_on_failure(tmp_path: Path) -> None:
         assert path.exists()
 
 
+def test_scratch_allowance_is_its_passs() -> None:
+    # What a scratch may take of system memory is given with it, a run's from its plan
+    # (planner.plan); one given none, by a test or a script, takes a default of 8 GiB.
+    assert Scratch(None, 0).allowance == 0 and Scratch(None, 12_345).allowance == 12_345
+    assert Scratch(None).allowance == Scratch(None, None).allowance == tiling.DEFAULT_ALLOWANCE
+    assert tiling.DEFAULT_ALLOWANCE == 8 * 2**30
+    assert Scratch(None).where(675, (1104, 1920)) == "system memory"
+    with (
+        pytest.raises(ScratchError, match=f"over the {8 * 2**30} allowed in system memory"),
+        Scratch(None).store(676, (1104, 1920)),
+    ):
+        pass
+
+
 def test_scratch_replaces_a_killed_runs(tmp_path: Path) -> None:
     path = tmp_path / tiling.SCRATCH
     path.write_bytes(b"\xff" * 4096)

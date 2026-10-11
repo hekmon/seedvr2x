@@ -1,8 +1,9 @@
 """A job's plan (DESIGN.md, Memory planner): what the planner chooses once for the job, the same
 for every shot, and the run follows: the cap on the DiT windows, the VAE's tiles, the DiT's
-swapped blocks and what stays on the GPU in each phase. Made by runtime/planner.py; recorded in
-the manifest (record), and read back from it by a resume (Plan.recorded). Nothing here imports
-torch: the command line plans before it does."""
+swapped blocks, what stays on the GPU in each phase, and what a tiled shot's scratch may take of
+system memory. Made by runtime/planner.py; recorded in the manifest (record), and read back from
+it by a resume (Plan.recorded). Nothing here imports torch: the command line plans before it
+does."""
 
 from dataclasses import dataclass
 from typing import Any, Literal, TypeGuard, cast
@@ -21,8 +22,9 @@ Phase = Literal["encode", "dit", "decode"]
 @dataclass(frozen=True)
 class Tiles:
     """A tiled VAE pass's tiles: squares of `size` output pixels a side, cut off at the picture's
-    edges, each sharing `overlap` pixels with its neighbours. Tiles of which one covers the
-    whole padded frame run the pass untiled (runtime/tiling.py)."""
+    edges, each sharing `overlap` pixels with its neighbours. A tile that covers the whole padded
+    frame is no tiling (DESIGN.md, Pipeline, per shot, step 3): the planner neither makes nor
+    takes one (planner.covers)."""
 
     size: int
     overlap: int = OVERLAP
@@ -32,7 +34,8 @@ class Tiles:
 class Plan:
     """A job's plan. Its first part shapes the output, where a long shot's joins fall and where
     the picture is cut, and a resume takes it as recorded; the rest only says where the weights
-    are, which changes no bit, and a resume plans it again (DESIGN.md, Memory planner)."""
+    are and where a tiled shot's frames wait, which changes no bit, and a resume plans it again
+    (DESIGN.md, Memory planner)."""
 
     # What shapes the output.
     window: int | None  # the cap on the DiT windows, in latents; None: each shot in one window
@@ -48,6 +51,10 @@ class Plan:
     resident_encode: int | None = None
     resident_decode: int | None = None
     vae_in_dit: bool = True  # False: the VAE's weights leave the GPU for the DiT's phase
+    # What a tiled shot's scratch may take of system memory, in bytes, a larger one going to its
+    # file (tiling.Scratch): the planner's, from the host's memory (DESIGN.md, Memory planner,
+    # Host RAM); 0 when no pass is tiled.
+    scratch_allowance: int = 0
     # torch.compile, not built with milestone 3 (DESIGN.md, Memory planner): recorded, false, so
     # that building it later reshapes no record.
     compile_dit: bool = False
@@ -56,9 +63,10 @@ class Plan:
     @classmethod
     def recorded(cls, record: Any) -> "Plan":
         """The plan a manifest records (record), as a resume takes it: what shapes the output
-        alone, the cap, the tiles and the compile flags. Where the weights were isn't read: a
-        resume plans it again, from the memory free that day (DESIGN.md, Memory planner, A plan
-        shapes the output a little). Refused (JobError) when the record isn't a plan's."""
+        alone, the cap, the tiles and the compile flags. Where the weights were isn't read, nor
+        the scratch's allowance: a resume plans them again, from the memory free that day
+        (DESIGN.md, Memory planner, A plan shapes the output a little). Refused (JobError) when
+        the record isn't a plan's."""
 
         def tiles(name: str) -> Tiles | None:
             entry: Any = fields.get(name)
@@ -110,6 +118,7 @@ class Plan:
                 "resident_encode": self.resident_encode,
                 "resident_decode": self.resident_decode,
                 "vae_in_dit": self.vae_in_dit,
+                "scratch_allowance": self.scratch_allowance,
             },
         }
 

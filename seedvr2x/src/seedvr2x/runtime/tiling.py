@@ -56,13 +56,13 @@ CHANNELS = 3
 # A scratch's file, in the shot's unit directory: raw bfloat16, (CHANNELS, frames, H, W).
 SCRATCH = "scratch.bf16"
 
-# The bytes of a scratch kept in system memory, a larger one going to its file (Scratch): 8 GiB,
-# which holds 675 frames at 1080p (padded to 1104x1920, 12,718,080 bytes each) and 170 at 4K
-# (2192x3840, 50,503,680). PROVISIONAL: DESIGN.md gives the scratch "an allowance" of system
-# memory and no figure; the planner is to set it from the memory the host has free. Read when a
-# pass starts (shot.encode_shot, shot.decode_shot), so that a test or a script calling the CLI can
-# set it first; no option, no environment variable.
-ALLOWANCE = 8 * 2**30
+# The bytes of a scratch kept in system memory where its pass is given no allowance (Scratch), a
+# larger one going to its file: for a test or a script that calls shot.encode_shot or
+# shot.decode_shot without one. 8 GiB, which holds 675 frames at 1080p (padded to 1104x1920,
+# 12,718,080 bytes each) and 170 at 4K (2192x3840, 50,503,680). A run gives each pass its plan's
+# allowance, which the planner sets from the host's memory (planner.plan; DESIGN.md, Memory
+# planner, Host RAM).
+DEFAULT_ALLOWANCE = 8 * 2**30
 
 
 @dataclass(frozen=True)
@@ -156,13 +156,15 @@ class ScratchError(MediaError):
 class Scratch:
     """Where a tiled shot's frames wait (DESIGN.md, Pipeline step 3): a store of (3, frames, H, W)
     bfloat16 on the CPU, zeros at first. In system memory when its bytes (needed) are within
-    `allowance`, else a memory-mapped file in `directory`, the shot's unit directory (SCRATCH).
+    `allowance` (None: DEFAULT_ALLOWANCE), else a memory-mapped file in `directory`, the shot's
+    unit directory (SCRATCH).
 
     The file is derived data, never recorded: it goes when its store is closed, on success and on
     failure alike. A run killed leaves it, for the resume to discard."""
 
-    def __init__(self, directory: Path | None, allowance: int) -> None:
-        self.directory, self.allowance = directory, allowance
+    def __init__(self, directory: Path | None, allowance: int | None = None) -> None:
+        self.directory = directory
+        self.allowance = DEFAULT_ALLOWANCE if allowance is None else allowance
         self._open = False
 
     @staticmethod

@@ -13,7 +13,7 @@ Only the latents are ever whole in memory, unless a pass is tiled.
 
 A tiled pass can't stream (runtime/tiling.py; DESIGN.md, Pipeline steps 1 and 3): each tile runs
 over the whole shot, so a tiled encode keeps the shot's transformed input, and a tiled decode
-its frames until the last tile, in the shot's scratch, system memory up to tiling.ALLOWANCE, a
+its frames until the last tile, in the shot's scratch, system memory up to its allowance, a
 file beyond. The frames are still read once, as the encode's slices come, and the decode's are
 handed on in the slices a streamed decode gives, once the last tile is in: what follows a decode
 (finite, the crop, the correction, the writers) is the same either way.
@@ -198,6 +198,7 @@ def encode_shot(
     numz_padding: bool = False,
     tiles: Tiles | None = None,
     scratch: Path | None = None,
+    allowance: int | None = None,
 ) -> Tensor:
     """The VAE latent of a shot of `count` frames, read as they are needed: (T', h, w, 16)
     bfloat16 on the device, in the channel-major memory the encode gives it, which the noise
@@ -213,16 +214,16 @@ def encode_shot(
     tile by tile (tiling.encode_tiled), numz's tiled encode of it, bit for bit, the frames still
     read once, their transformed slices waiting in the shot's scratch, each tile's crop taken from
     there. scratch is the directory the scratch's file goes to when it outgrows its allowance of
-    system memory (tiling.ALLOWANCE; DESIGN.md, Pipeline, per shot, steps 1 and 3), made only
-    then, the file gone when this returns or fails; None with nowhere to put one, a larger scratch
-    then refused (tiling.ScratchError)."""
+    system memory (allowance, in bytes, the plan's; None: tiling.DEFAULT_ALLOWANCE; DESIGN.md,
+    Pipeline, per shot, steps 1 and 3), made only then, the file gone when this returns or fails;
+    None with nowhere to put one, a larger scratch then refused (tiling.ScratchError)."""
     padded = padded_length(count)
     # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
     model.set_seed(seed + ENCODE_SEED_OFFSET)
     inputs = encoder_inputs(models, read, count, target, numz_padding=numz_padding)
     if tiles is None:
         return model.encode_stream(models, inputs, padded)
-    store = tiling.Scratch(scratch, tiling.ALLOWANCE)
+    store = tiling.Scratch(scratch, allowance)
     return tiling.encode_tiled(models, inputs, padded, tiles, store)
 
 
@@ -325,6 +326,7 @@ def decode_shot(
     *,
     tiles: Tiles | None = None,
     scratch: Path | None = None,
+    allowance: int | None = None,
 ) -> None:
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in one stream,
     and write its frames as they come, write(frames) taking the output's next frames,
@@ -338,10 +340,10 @@ def decode_shot(
     the last tile is decoded: the shot's frames wait in its scratch until then, and are handed on
     in the slices a streamed decode gives, each checked, corrected and written as one of those.
     scratch is the directory the scratch's file goes to when it outgrows its allowance of system
-    memory (tiling.ALLOWANCE; DESIGN.md, Pipeline, per shot, step 3), made only then, the file
-    gone when this returns or fails; None with nowhere to put one, a larger scratch then refused
-    (tiling.ScratchError)."""
-    with _slices(models, merged, tiles, scratch) as slices:
+    memory (allowance, in bytes, the plan's; None: tiling.DEFAULT_ALLOWANCE; DESIGN.md, Pipeline,
+    per shot, step 3), made only then, the file gone when this returns or fails; None with
+    nowhere to put one, a larger scratch then refused (tiling.ScratchError)."""
+    with _slices(models, merged, tiles, scratch, allowance) as slices:
         chunks = _decoded(slices, count, output_size(target), name, first)
         if correction is not None:
             _correct(models, chunks, count, target, write, correction)
@@ -355,7 +357,7 @@ def decode_shot(
 
 @contextmanager
 def _slices(
-    models: Models, merged: Tensor, tiles: Tiles | None, scratch: Path | None
+    models: Models, merged: Tensor, tiles: Tiles | None, scratch: Path | None, allowance: int | None
 ) -> Generator[Iterator[Tensor]]:
     """The VAE's decode of the shot's latents, merged, slice by slice: each (C, t, H', W') in
     [-1, 1], unclamped, on the device; streamed (model.decode_stream), or with tiles, tile by tile
@@ -367,7 +369,7 @@ def _slices(
     if tiles is None:
         yield model.decode_stream(models, latent)
         return
-    store = tiling.Scratch(scratch, tiling.ALLOWANCE)
+    store = tiling.Scratch(scratch, allowance)
     with closing(tiling.decode_tiled(models, latent, tiles, store)) as slices:
         yield slices
 

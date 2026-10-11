@@ -42,25 +42,27 @@ OPTIONS += ["--format", "gbrp16le"]
 SEGMENTS = ["seg_000000.mkv", "seg_000001.mkv"]
 
 
-# seedvr2x's command line with every tiled pass's scratch on disk (python -c): tiling.ALLOWANCE
-# set to 0 before the run, once the command line has set the process up as it does for a user
-# (cli.main: the allocator, before torch is imported). No option of seedvr2x's does that.
+# seedvr2x's command line with every tiled pass's scratch on disk (python -c): the plan's
+# allowance of system memory for it (Plan.scratch_allowance) set to 0, where the planner allows a
+# shot this short its whole scratch. The planner imports no torch, so it is patched before the
+# command line sets the process up as it does for a user (cli.main: the allocator, before torch
+# is imported). No option of seedvr2x's does that.
 ON_DISK = """
+import dataclasses
 import sys
 
 from seedvr2x import cli
+from seedvr2x.runtime import planner
 
-run = cli._run
-
-
-def on_disk(args):
-    from seedvr2x.runtime import tiling
-
-    tiling.ALLOWANCE = 0
-    return run(args)
+plan = planner.plan
 
 
-cli._run = on_disk
+def on_disk(*job, **options):
+    made, peaks = plan(*job, **options)
+    return dataclasses.replace(made, scratch_allowance=0), peaks
+
+
+planner.plan = on_disk
 sys.exit(cli.main())
 """
 

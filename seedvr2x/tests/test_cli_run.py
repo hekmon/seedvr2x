@@ -73,12 +73,13 @@ def stand_in_encode(
     numz_padding: bool = False,
     tiles: Tiles | None = None,
     scratch: Path | None = None,
+    allowance: int | None = None,
 ) -> torch.Tensor:
     """A latent (T', 1, 1, 16) in channel-major memory, as the VAE's, saying the shot's first frame
     (channel 0), its frame count (1), the target's height and width (2, 3), and whether the frames
-    were padded as numz pads them (6: cli.NUMZ_PADDING). Untiled: the plan's tiles are the tiled
-    passes' own tests'."""
-    assert tiles is None and scratch is None
+    were padded as numz pads them (6: cli.NUMZ_PADDING). Untiled, with no scratch and nothing
+    allowed one: the plan's tiles are the tiled passes' own tests'."""
+    assert tiles is None and scratch is None and not allowance
     assert read(count).shape[0] == count
     latent = torch.zeros(16, (padded_length(count) - 1) // 4 + 1, 1, 1)
     latent[0], latent[1] = seed - SEED, count
@@ -566,6 +567,7 @@ class Steps:
         numz_padding: bool = False,
         tiles: Tiles | None = None,
         scratch: Path | None = None,
+        allowance: int | None = None,
     ) -> torch.Tensor:
         frames = read(count)
         self.read[seed - SEED] = hashlib.md5(frames.tobytes()).hexdigest()
@@ -576,6 +578,7 @@ class Steps:
             numz_padding=numz_padding,
             tiles=tiles,
             scratch=scratch,
+            allowance=allowance,
         )
         if self.poison == f"encode {seed - SEED}":
             latent[-1, 0, 0, 5] = math.nan
@@ -753,11 +756,12 @@ def test_plan_recorded_and_phases_entered(
         "resident_encode": None,
         "resident_decode": None,
         "vae_in_dit": True,
+        "scratch_allowance": 0,
         "free": FREE,
         "budget": FREE - planner.MARGIN,
-        "encode_peak": planner.encode_peak(PADDED),
+        "encode_peak": planner.encode_peak(PADDED, latents=6),
         "dit_peak": planner.dit_peak(PADDED, 4),
-        "decode_peak": planner.decode_peak(PADDED, TARGET),
+        "decode_peak": planner.decode_peak(PADDED, TARGET, latents=6),
         "bound": "encode",
         "host": planner.HOST_RESIDENT,
         "scratch": 0,
@@ -805,6 +809,18 @@ def test_plan_recorded_and_phases_entered(
     assert (
         f"{manifest}: not a plan as seedvr2x records one: its window, 3, with a shot of 6"
         " latents: a cap that a shot is longer than is 5 latents at least"
+    ) in caplog.text
+    # And tiles of which one covers the whole padded frame, which is no tiling (DESIGN.md,
+    # Pipeline, per shot, step 3): the planner makes none, and refuses the pin of one.
+    content["plan"]["window"] = 5
+    content["plan"]["decode_tiles"] = {"size": 512, "overlap": 64}
+    manifest.write_text(json.dumps(content))
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert (
+        f"{manifest}: not a plan as seedvr2x records one: its decode_tiles, of 512 px, with"
+        " frames padded to 128x128: a tile that covers the whole frame is no tiling, and an"
+        " untiled decode records none"
     ) in caplog.text
     del content["plan"]
     manifest.write_text(json.dumps(content))
@@ -886,30 +902,35 @@ def test_plan_tiles_reach_the_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, output: str
 ) -> None:
     # A plan's tiles go to each encode and decode with the shot's own directory for their
-    # scratch: among its units in an output directory; for one file, in the work directory,
-    # which a plan with tiles has without split too, gone with the run. The stand-in's frames
-    # are a tile's worth at most, which the planner never tiles: the plan is put in its place.
+    # scratch, and what the plan allows it of system memory: among its units in an output
+    # directory; for one file, in the work directory, which a plan with tiles has without split
+    # too, gone with the run. A plan put in the planner's place, with an allowance of its own,
+    # on frames its tiles don't cover (LARGER).
     from seedvr2x.runtime import run
 
-    tiled = Plan(5, Tiles(512), Tiles(1024))
+    tiled = Plan(5, Tiles(640), Tiles(512), scratch_allowance=12_345)
     plan = planner.plan
     monkeypatch.setattr(planner, "plan", lambda *job, **options: (tiled, plan(*job, **options)[1]))
     given: list[tuple[str, Tiles | None, Path | None]] = []
     work: list[bool] = []
 
-    def encode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, **options: Any) -> Any:
+    def encode(
+        *arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int, **options: Any
+    ) -> Any:
         given.append(("encode", tiles, scratch))
+        assert allowance == 12_345
         work.append((tmp_path / "one.mkv.work").is_dir())
         return steps.encode(*arguments, **options)
 
-    def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None) -> None:
+    def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int) -> None:
         given.append(("decode", tiles, scratch))
+        assert allowance == 12_345
         steps.decode(*arguments)
 
     monkeypatch.setattr(run, "encode_shot", encode)
     monkeypatch.setattr(run, "decode_shot", decode)
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, output, *JOB) == 0
+    assert upscale(tmp_path, source_path, output, *JOB, *LARGER) == 0
     # A shot's directory is named for its first frame among the units, its index for one file.
     directory = tmp_path / "out" / "resume" if output == "out" else tmp_path / "one.mkv.work"
     shots = [
@@ -920,15 +941,16 @@ def test_plan_tiles_reach_the_passes(
     if output == "one.mkv":
         kinds = ["encode", "decode"] * 3
     assert given == [
-        (kind, Tiles(512) if kind == "encode" else Tiles(1024), shots[index])
+        (kind, Tiles(640) if kind == "encode" else Tiles(512), shots[index])
         for kind, index in zip(kinds, order, strict=True)
     ]
     assert work == [output == "one.mkv"] * 3
     assert not (tmp_path / "one.mkv.work").exists()
     if output == "out":
         content = json.loads((tmp_path / "out" / "manifest.json").read_text())
-        assert content["plan"]["encode_tiles"] == {"size": 512, "overlap": 64}
-        assert content["plan"]["decode_tiles"] == {"size": 1024, "overlap": 64}
+        assert content["plan"]["encode_tiles"] == {"size": 640, "overlap": 64}
+        assert content["plan"]["decode_tiles"] == {"size": 512, "overlap": 64}
+        assert content["plan"]["memory"]["scratch_allowance"] == 12_345
 
 
 def test_plan_said(
@@ -992,6 +1014,24 @@ def test_pin_refused(
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "37") == 1
     assert "--swap-blocks 37: the DiT has 36 blocks, so from 0 to 36" in caplog.text
+    # A tile that covers the whole padded frame is no tiling (DESIGN.md, Pipeline, per shot, step
+    # 3): refused, naming 0, the untiled pass, the stand-in's frames being a tile's worth at
+    # most; the encode's first. With 0 for both the job runs, as it does without the pins.
+    for pins, kind in (
+        (("--decode-tile", "512"), "decode"),
+        (("--encode-tile", "512", "--decode-tile", "1024"), "encode"),
+    ):
+        caplog.clear()
+        assert upscale(tmp_path, source_path, "out", *JOB, *pins) == 1
+        assert (
+            f"--{kind}-tile 512: a tile of 512 px covers the whole padded frame, 128x128:"
+            f" --{kind}-tile 0 pins an untiled {kind}"
+        ) in caplog.text
+        assert steps.calls == [] and "models" not in ASKED
+        assert not (tmp_path / "out" / "manifest.json").exists()
+    untiled = ("--encode-tile", "0", "--decode-tile", "0")
+    assert upscale(tmp_path, source_path, "untiled.mkv", *JOB[:4], *untiled) == 0
+    steps.calls.clear()
     # With no block swapped, the memory that holds a window of 5 latents and not one of 6, the
     # VAE's weights away: --window 6, the longest shot in one window, is refused.
     free_memory(monkeypatch, planner.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN)
@@ -1026,7 +1066,7 @@ def test_size_and_host_memory_refused(
     there = sorted(path.name for path in tmp_path.iterdir())
     # The stand-in's frames are too small for a tile: their floor is the untiled encode's, with
     # the room a VAE pass is held to (planner.VAE_ROOM).
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = planner.encode_peak(PADDED, None, 0, latents=6) + planner.VAE_ROOM
     with monkeypatch.context() as patch:
         free_memory(patch, encode + planner.MARGIN - 1)
         assert upscale(tmp_path, source_path, "out", *JOB) == 1
@@ -1203,7 +1243,7 @@ def test_recorded_plan_no_longer_fits(
     kept = contents(tmp_path / "out")
     steps.stop = None
     steps.calls.clear()
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = planner.encode_peak(PADDED, None, 0, latents=6) + planner.VAE_ROOM
     free_memory(monkeypatch, encode + planner.MARGIN - GIB // 4)
     assert upscale(tmp_path, source_path, "out", *JOB) == 1
     assert (
@@ -1296,32 +1336,41 @@ def test_plan_without_its_record_planned_again(
     assert steps.calls == UNINTERRUPTED
 
 
-# The tile pins of the tests below, and the plan JOB then records.
-TILE_PINS = ("--encode-tile", "1344", "--decode-tile", "1024")
-TILED_PLAN = Plan(5, Tiles(1344), Tiles(1024)).record()
+# A size a tile of 512 px doesn't cover, for the tests of the tiles: --resolution 528 of source's
+# 64x48 is 704x528, padded to 704x560 (job.padded_size), which tiles of 512 px cut 2 x 2 and
+# tiles of 640 px 1 x 2. The stand-in's frames otherwise are a tile's worth at most, where every
+# tile pin is refused (test_pin_refused).
+LARGER = ("--resolution", "528")
+LARGER_TARGET = (528, 704)
+LARGER_PADDED = (560, 704)
+# The tile pins of the tests below, and the plan JOB then records at that size.
+TILE_PINS = ("--encode-tile", "640", "--decode-tile", "512")
+TILED_PLAN = Plan(5, Tiles(640), Tiles(512)).record()
 
 
 def tiled_steps(
     monkeypatch: pytest.MonkeyPatch, steps: Steps
-) -> list[tuple[str, Tiles | None, Path | None]]:
+) -> list[tuple[str, Tiles | None, Path | None, int]]:
     """Make the stand-in's encode and decode (steps) take a plan's tiles: each keeps a scratch in
     the directory the run gives it, on disk, as a tiled pass beyond its allowance does
     (tiling.Scratch), around the stand-in's own pass, untiled. Returns the list each pass adds
-    its kind, its tiles and that directory to. The tiled passes themselves are test_tiling.py's
-    and test_shot.py's."""
+    its kind, its tiles, that directory and the allowance the run gave it to. The tiled passes
+    themselves are test_tiling.py's and test_shot.py's."""
     from seedvr2x.runtime import run, tiling
 
-    given: list[tuple[str, Tiles | None, Path | None]] = []
+    given: list[tuple[str, Tiles | None, Path | None, int]] = []
 
-    def encode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, **options: Any) -> Any:
-        given.append(("encode", tiles, scratch))
+    def encode(
+        *arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int, **options: Any
+    ) -> Any:
+        given.append(("encode", tiles, scratch, allowance))
         assert scratch is not None and not (scratch / tiling.SCRATCH).exists()
         with tiling.Scratch(scratch, 0).store(1, (8, 8)):
             assert (scratch / tiling.SCRATCH).is_file()
             return steps.encode(*arguments, **options)
 
-    def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None) -> None:
-        given.append(("decode", tiles, scratch))
+    def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int) -> None:
+        given.append(("decode", tiles, scratch, allowance))
         assert scratch is not None and not (scratch / tiling.SCRATCH).exists()
         with tiling.Scratch(scratch, 0).store(1, (8, 8)):
             assert (scratch / tiling.SCRATCH).is_file()
@@ -1337,10 +1386,11 @@ def tiled_steps(
 def test_tile_pins_are_the_plan_and_no_scratch_stays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, output: str, split: bool
 ) -> None:
-    # --encode-tile and --decode-tile are the plan's tiles, which reach each pass and are
-    # recorded; and of a scratch kept on disk nothing stays once the shot is done: the resume
-    # directory goes with the job, the work directory of one file holds one shot's directory at
-    # a time and goes with the run, with split's copies beside the scratch or without.
+    # --encode-tile and --decode-tile are the plan's tiles, which reach each pass, with what
+    # the plan allows its scratch of system memory, and are recorded; and of a scratch kept on
+    # disk nothing stays once the shot is done: the resume directory goes with the job, the work
+    # directory of one file holds one shot's directory at a time and goes with the run, with
+    # split's copies beside the scratch or without. At a size the tiles don't cover (LARGER).
     given = tiled_steps(monkeypatch, steps)
     source_path = job(tmp_path, monkeypatch)
     work = tmp_path / "one.mkv.work"
@@ -1353,13 +1403,24 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
         return encode(*arguments, **options)
 
     monkeypatch.setattr(steps, "encode", looked)
-    options = (*(JOB if output == "out" else JOB[:4]), *TILE_PINS, *(SPLIT if split else ()))
-    assert upscale(tmp_path, source_path, output, *options) == 0
+    options = (*(JOB if output == "out" else JOB[:4]), *LARGER, *TILE_PINS)
+    assert upscale(tmp_path, source_path, output, *options, *(SPLIT if split else ())) == 0
     kinds = ["encode", "encode", "decode", "decode", "encode", "decode"]
     if output == "one.mkv":
         kinds = ["encode", "decode"] * 3
-    assert [(kind, tiles) for kind, tiles, _ in given] == [
-        (kind, Tiles(1344) if kind == "encode" else Tiles(1024)) for kind in kinds
+    # The planner's plan around the pins, on frames padded to 704x560: the encode's tiles 1 x
+    # 2 and the decode's 2 x 2, the scratch of the longest shot's 21 frames, and all of it
+    # allowed in the system memory the stand-in's host has; the stand-in keeps a scratch of its
+    # own, on disk, for what follows.
+    pins = Pins(5, 640, 512)
+    made = planner.plan(FREE, LARGER_TARGET, JOB_SHOTS, pins, HOST, split=split)
+    kept = planner.scratch(LARGER_PADDED, 21)
+    assert made[0] == Plan(5, Tiles(640), Tiles(512), scratch_allowance=kept)
+    assert made[1].scratch == kept == 21 * 6 * 560 * 704
+    assert planner.grid(LARGER_PADDED, Tiles(640)) == (1, 2)
+    assert planner.grid(LARGER_PADDED, Tiles(512)) == (2, 2)
+    assert [(kind, tiles, allowance) for kind, tiles, _, allowance in given] == [
+        (kind, Tiles(640) if kind == "encode" else Tiles(512), kept) for kind in kinds
     ]
     assert not work.exists() and others == ([] if output == "out" else [set()] * 3)
     if output == "out":
@@ -1371,13 +1432,12 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
             "seg_000000.mkv",
             "seg_000001.mkv",
         ]
-        # The planner's plan around the pins: tiles that cover the stand-in's frames, taken as
-        # pinned and recorded, its passes those of one tile (tiling.py), with no scratch of
-        # their own; the stand-in keeps one all the same, for what follows.
-        pins = Pins(5, 1344, 1024)
-        made = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST, split=split)
         recorded = json.loads((out / "manifest.json").read_text())["plan"]
-        assert recorded == plan_record(*made) and recorded["memory"]["scratch"] == 0
+        assert recorded == plan_record(*made)
+        assert (recorded["memory"]["scratch"], recorded["memory"]["scratch_allowance"]) == (
+            kept,
+            kept,
+        )
         assert recorded | {"memory": None} == TILED_PLAN | {"memory": None}
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(output)) == (
         ["out"] if output == "out" else ["one.mkv", "one.mkv.crc32"]
@@ -1393,15 +1453,16 @@ def test_tile_pins_are_the_jobs(
     tiled_steps(monkeypatch, steps)
     source_path = job(tmp_path, monkeypatch)
     steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "out", *JOB, *TILE_PINS)
+    larger = (*JOB, *LARGER)
+    stopped(tmp_path, source_path, "out", *larger, *TILE_PINS)
     steps.stop = None
-    text = refused(tmp_path, source_path, caplog, *JOB, *TILE_PINS[:2], "--decode-tile", "512")
-    assert "settings.decode_tile: 1024 -> 512" in text and "plan." not in text
-    text = refused(tmp_path, source_path, caplog, *JOB)
-    assert "settings.encode_tile: 1344 -> null" in text
-    assert "settings.decode_tile: 1024 -> null" in text and "plan." not in text
+    text = refused(tmp_path, source_path, caplog, *larger, *TILE_PINS[:2], "--decode-tile", "576")
+    assert "settings.decode_tile: 512 -> 576" in text and "plan." not in text
+    text = refused(tmp_path, source_path, caplog, *larger)
+    assert "settings.encode_tile: 640 -> null" in text
+    assert "settings.decode_tile: 512 -> null" in text and "plan." not in text
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, *TILE_PINS) == 0
+    assert upscale(tmp_path, source_path, "out", *larger, *TILE_PINS) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
 
 

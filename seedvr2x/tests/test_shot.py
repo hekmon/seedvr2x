@@ -347,9 +347,7 @@ def test_tiled_decode_is_corrected_as_a_streamed_one(
     assert not same_writes(tiled, written_by(stand_in, latent, count, correction=correction))
 
 
-def test_tiled_passes_keep_their_scratch_where_told(
-    stand_in: model.Models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_tiled_passes_keep_their_scratch_where_told(stand_in: model.Models, tmp_path: Path) -> None:
     count = 13
     frames, latent = shot_frames(count), shot_latent(count)
     vae = cast(Any, stand_in).runner.vae
@@ -359,19 +357,23 @@ def test_tiled_passes_keep_their_scratch_where_told(
     vae.before = lambda: seen.append(path.is_file() and mapped(path))
 
     # Within its allowance, the scratch is in system memory: nothing on disk, no directory made.
-    assert Scratch.needed(count, padded_size(LARGE)) < tiling.ALLOWANCE == 8 * 2**30
+    # The allowance is the pass's to be given, as a run gives it its plan's; without one, here
+    # for the encode, a default of 8 GiB (tiling.DEFAULT_ALLOWANCE).
+    needed = Scratch.needed(count, padded_size(LARGE))
+    assert needed < tiling.DEFAULT_ALLOWANCE == 8 * 2**30
     in_memory = encode_shot(
         stand_in, Reads(frames), count, LARGE, 42, tiles=TILES, scratch=directory
     )
-    frames_in_memory = written_by(stand_in, latent, count, tiles=TILES, scratch=directory)
+    within: dict[str, Any] = {"tiles": TILES, "scratch": directory, "allowance": needed}
+    frames_in_memory = written_by(stand_in, latent, count, **within)
     assert len(seen) == 9 * 3 * 2 and not any(seen) and not list(tmp_path.iterdir())
 
-    # Beyond it, here an allowance of 0 read when the pass starts: the file in the directory
-    # given, made with it, there through every tile's pass and every write, gone after; the
-    # directory stays, the run's to remove with the shot's units. The same bits either way.
-    monkeypatch.setattr(tiling, "ALLOWANCE", 0)
+    # Beyond it, here an allowance one byte short, then of 0: the file in the directory given,
+    # made with it, there through every tile's pass and every write, gone after; the directory
+    # stays, the run's to remove with the shot's units. The same bits either way.
     seen.clear()
-    on_disk = encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=TILES, scratch=directory)
+    beyond: dict[str, Any] = {"tiles": TILES, "scratch": directory, "allowance": needed - 1}
+    on_disk = encode_shot(stand_in, Reads(frames), count, LARGE, 42, **beyond)
     assert len(seen) == 9 * 3 and all(seen) and same(on_disk, in_memory)
     assert not list(directory.iterdir()) and not mapped(path)
     seen.clear()
@@ -382,25 +384,25 @@ def test_tiled_passes_keep_their_scratch_where_told(
         there.append(path.is_file())
         frames_on_disk.append(written)
 
-    decode_shot(stand_in, latent, count, LARGE, write, tiles=TILES, scratch=directory)
+    decode_shot(stand_in, latent, count, LARGE, write, tiles=TILES, scratch=directory, allowance=0)
     assert len(seen) == 9 * 3 and all(seen) and there == [True] * 3
     assert same_writes(frames_on_disk, frames_in_memory)
     assert not list(directory.iterdir()) and not mapped(path)
 
     # The picture within one tile: the untiled pass, which asks for no scratch, and so runs
-    # with nowhere to put one.
+    # with nowhere to put one, whatever its allowance.
     seen.clear()
-    encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=WHOLE)
-    written_by(stand_in, latent, count, tiles=WHOLE)
+    encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=WHOLE, allowance=0)
+    written_by(stand_in, latent, count, tiles=WHOLE, allowance=0)
     assert len(seen) == 3 * 2 and not any(seen)
 
     # With nowhere to put its file, a scratch beyond the allowance is refused, as a file the run
     # can't write (cli._run reports a MediaError and exits 1).
     assert issubclass(ScratchError, MediaError)
     with pytest.raises(ScratchError, match="no directory for its file"):
-        encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=TILES)
+        encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=TILES, allowance=0)
     with pytest.raises(ScratchError, match="no directory for its file"):
-        written_by(stand_in, latent, count, tiles=TILES)
+        written_by(stand_in, latent, count, tiles=TILES, allowance=0)
     assert vae.carry.memory is None
 
 
@@ -411,12 +413,11 @@ def test_tiled_decode_failing_leaves_nothing(
     # A tiled decode whose consumer fails, the writer or the correction, or one of whose tiles
     # does: its scratch's file goes at once, while the failure is still held with its traceback,
     # and the VAE's causal memory is cleared.
-    monkeypatch.setattr(tiling, "ALLOWANCE", 0)
     count = 13
     latent, vae = shot_latent(count), cast(Any, stand_in).runner.vae
     path = tmp_path / tiling.SCRATCH
     there: list[bool] = []
-    options: dict[str, Any] = {}
+    options: dict[str, Any] = {"tiles": TILES, "scratch": tmp_path, "allowance": 0}
 
     def write(frames: npt.NDArray[np.float32]) -> None:
         there.append(path.is_file() and mapped(path))
@@ -439,7 +440,7 @@ def test_tiled_decode_failing_leaves_nothing(
         monkeypatch.setattr(shot, "_copy_reader", copy_reader)
         options["correction"] = Correction(tmp_path / "input.mkv", tmp_path / "input.crc32", 28, 20)
     with pytest.raises(Failing) as raised:
-        decode_shot(stand_in, latent, count, LARGE, write, tiles=TILES, scratch=tmp_path, **options)
+        decode_shot(stand_in, latent, count, LARGE, write, **options)
     assert there == ([] if failure == "tile" else [True])
     assert not path.exists() and vae.carry.memory is None
     assert not list(tmp_path.iterdir())
@@ -447,12 +448,10 @@ def test_tiled_decode_failing_leaves_nothing(
     assert not mapped(path)
 
 
-def test_tiled_encode_failing_leaves_nothing(
-    stand_in: model.Models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_tiled_encode_failing_leaves_nothing(stand_in: model.Models, tmp_path: Path) -> None:
     # A tiled encode whose source fails while its slices are kept, or one of whose tiles does:
     # its scratch's file goes, and the VAE's causal memory is cleared.
-    monkeypatch.setattr(tiling, "ALLOWANCE", 0)
+    on_disk: dict[str, Any] = {"tiles": TILES, "scratch": tmp_path, "allowance": 0}
     count = 13
     frames, vae = shot_frames(count), cast(Any, stand_in).runner.vae
     path = tmp_path / tiling.SCRATCH
@@ -465,10 +464,10 @@ def test_tiled_encode_failing_leaves_nothing(
         return frames[:5]
 
     with pytest.raises(Failing, match="the source"):
-        encode_shot(stand_in, read, count, LARGE, 42, tiles=TILES, scratch=tmp_path)
+        encode_shot(stand_in, read, count, LARGE, 42, **on_disk)
     assert there == [True] and not path.exists()
     failing_at(vae, 4)  # the second tile's second slice
     with pytest.raises(Failing, match="pass 4"):
-        encode_shot(stand_in, Reads(frames), count, LARGE, 42, tiles=TILES, scratch=tmp_path)
+        encode_shot(stand_in, Reads(frames), count, LARGE, 42, **on_disk)
     assert not path.exists() and vae.carry.memory is None
     assert not list(tmp_path.iterdir())
