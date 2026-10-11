@@ -21,6 +21,13 @@ numz's modified copies of SeedVR's own (commit e4de8c2: projects/video_diffusion
 models/video_vae_v3/modules/attn_video_vae.py). All are under the Apache License, Version 2.0.
 That file says what was changed.
 
+It also includes, adapted in src/seedvr2x/runtime/tiling.py (encode_tiled, decode_tiled), the VAE
+tiling of ComfyUI-SeedVR2_VideoUpscaler (numz and contributors, commit 4490bd1):
+VideoAutoencoderKL's tiled_encode and tiled_decode, in
+src/models/video_vae_v3/modules/attn_video_vae.py. They are numz's own, SeedVR's file (commit
+e4de8c2: models/video_vae_v3/modules/attn_video_vae.py) leaving both unwritten, under the Apache
+License, Version 2.0. That file says what was changed.
+
 It also includes TransNetV2's official PyTorch model, src/seedvr2x/transnetv2/transnetv2_pytorch.py,
 copied unchanged from TransNetV2 (https://github.com/soCzech/TransNetV2, commit 85cef72,
 inference-pytorch/transnetv2_pytorch.py): TransNetV2, Copyright (c) 2020 Tomáš Souček, under the

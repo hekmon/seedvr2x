@@ -405,13 +405,25 @@ def encode_stream(models: Models, slices: Iterable[Tensor], frames: int) -> Tens
     Adapted from numz's vae_encode (src/core/infer.py:117) and slicing_encode
     (src/models/video_vae_v3/modules/attn_video_vae.py:1254), ByteDance's (e4de8c2) as numz
     modified them, Apache-2.0 (NOTICE). The steps are theirs: the same slices, with the same
-    causal memory states, then the posterior's mode (diffusers' DiagonalGaussianDistribution: the
-    first half of the channels), shifted and scaled. Only the input is never whole in memory."""
-    runner, vae = models.runner, models.runner.vae
-    scale = runner.config.vae.scaling_factor
-    shift = runner.config.vae.get("shifting_factor", 0.0)
+    causal memory states (encode_sliced), then the posterior's mode, shifted and scaled
+    (to_latent). Only the input is never whole in memory."""
+    encoded = list(encode_sliced(models, slices, frames))
+    return to_latent(models, torch.cat(encoded, dim=2) if len(encoded) > 1 else encoded[0])
+
+
+@torch.no_grad()
+def encode_sliced(models: Models, slices: Iterable[Tensor], frames: int) -> Iterator[Tensor]:
+    """The VAE's moments of `frames` frames (4n + 1) fed slice by slice, as encode_stream takes
+    them, each slice's as it is encoded: (1, 32, t', h, w), the posterior's mean then its
+    log-variance, the pieces numz's slicing_encode concatenates (attn_video_vae.py:1254).
+    ValueError when the slices don't follow encode_slices or aren't in the VAE's dtype.
+
+    One pass of the causal encoder, with a memory of its own from its first slice to its last,
+    cleared whatever ends it: a tiled encode makes one such pass per tile, over the tile's crop
+    of every slice (runtime/tiling.py)."""
+    vae = models.runner.vae
     sizes = encode_slices(models, frames)
-    encoded: list[Tensor] = []
+    given = 0
     try:
         for index, x in enumerate(slices):
             if index >= len(sizes) or x.shape[1] != sizes[index]:
@@ -422,20 +434,37 @@ def encode_stream(models: Models, slices: Iterable[Tensor], frames: int) -> Tens
                 state = MemoryState.DISABLED
             else:
                 state = MemoryState.INITIALIZING if index == 0 else MemoryState.ACTIVE
-            encoded.append(vae._encode(x.unsqueeze(0), memory_state=state))
-        if len(encoded) != len(sizes):
-            raise ValueError(f"{len(encoded)} slices, the VAE takes {sizes}")
+            yield vae._encode(x.unsqueeze(0), memory_state=state)
+            given += 1
+        if given != len(sizes):
+            raise ValueError(f"{given} slices, the VAE takes {sizes}")
     finally:
-        for module in vae.modules():
-            if isinstance(module, InflatedCausalConv3d) and module.memory is not None:
-                module.memory = None
-    h = torch.cat(encoded, dim=2) if len(encoded) > 1 else encoded[0]
-    mean = torch.chunk(h, 2, dim=1)[0]  # (1, 16, T', h, w)
+        _forget(vae)
+
+
+def to_latent(models: Models, moments: Tensor) -> Tensor:
+    """The latent of the VAE's moments (1, 32, T', h, w), encode_sliced's put together: the
+    posterior's mode (diffusers' DiagonalGaussianDistribution: the first half of the channels),
+    shifted and scaled as numz's vae_encode does (src/core/infer.py:186-188): (T', h, w, 16) in
+    channel-major memory (a permuted view), on the moments' device."""
+    runner = models.runner
+    scale = runner.config.vae.scaling_factor
+    shift = runner.config.vae.get("shifting_factor", 0.0)
+    mean = torch.chunk(moments, 2, dim=1)[0]  # (1, 16, T', h, w)
     if isinstance(scale, ListConfig):
         scale = torch.tensor(scale, device=mean.device, dtype=mean.dtype)
     if isinstance(shift, ListConfig):
         shift = torch.tensor(shift, device=mean.device, dtype=mean.dtype)
     return ((mean.movedim(1, -1) - shift) * scale).squeeze(0)
+
+
+def _forget(vae: Any) -> None:
+    """Clear the memory the VAE's causal convolutions keep from slice to slice, as numz's
+    slicing_encode and slicing_decode do after their last slice (attn_video_vae.py:1269-1273,
+    1293-1297)."""
+    for module in vae.modules():
+        if isinstance(module, InflatedCausalConv3d) and module.memory is not None:
+            module.memory = None
 
 
 def condition(models: Models, noise: Tensor, latent: Tensor) -> Tensor:
@@ -461,17 +490,41 @@ def decode(models: Models, latent: Tensor) -> Tensor:
     return models.runner.vae_decode([latent])[0]
 
 
+def decode_slices(models: Models, latents: int) -> list[int]:
+    """The frames of each slice the VAE decodes `latents` latents in, as its slicing_decode cuts
+    them (decode_sliced): the first latent with the next slicing_latent_min_size (1), then that
+    many at a time, the first latent giving 1 frame and every next one
+    temporal_downsample_factor (4); the latents in one piece when they are no more than
+    1 + slicing_latent_min_size."""
+    vae = models.runner.vae
+    size: int = vae.slicing_latent_min_size
+    factor: int = vae.temporal_downsample_factor
+    if not (vae.use_slicing and latents - 1 > size):
+        return [1 + (latents - 1) * factor]
+    whole, rest = divmod(latents - 1, size)
+    parts = [size] * whole + ([rest] if rest else [])
+    return [1 + parts[0] * factor, *(part * factor for part in parts[1:])]
+
+
 @torch.no_grad()
 def decode_stream(models: Models, latent: Tensor) -> Iterator[Tensor]:
     """VAE decode of latent (T', h, w, 16), slice by slice: frames (C, t, H, W) in [-1, 1],
-    unclamped, as they come.
+    unclamped, as they come, t following decode_slices.
 
     Adapted from numz's vae_decode (src/core/infer.py:203) and slicing_decode
     (src/models/video_vae_v3/modules/attn_video_vae.py:1278), ByteDance's (e4de8c2) as numz
-    modified them, Apache-2.0 (NOTICE). The steps are theirs: the same scaling, the same slices
-    (the first two latents, then one at a time) with the same causal memory states. So the frames
-    are the one-pass decode's, bit for bit; only their concatenation is left out.
+    modified them, Apache-2.0 (NOTICE). The steps are theirs: the same scaling (decoder_input),
+    the same slices (the first two latents, then one at a time) with the same causal memory
+    states (decode_sliced). So the frames are the one-pass decode's, bit for bit; only their
+    concatenation is left out.
     """
+    yield from decode_sliced(models, decoder_input(models, latent))
+
+
+def decoder_input(models: Models, latent: Tensor) -> Tensor:
+    """The VAE decoder's input from latent (T', h, w, 16): z (1, 16, T', h, w), the latent scaled
+    and shifted back as numz's vae_decode does (src/core/infer.py:233-234). ValueError unless
+    the latent is in the VAE's dtype."""
     runner, vae = models.runner, models.runner.vae
     scale = runner.config.vae.scaling_factor
     shift = runner.config.vae.get("shifting_factor", 0.0)
@@ -481,7 +534,19 @@ def decode_stream(models: Models, latent: Tensor) -> Iterator[Tensor]:
         shift = torch.tensor(shift, device=latent.device, dtype=latent.dtype)
     if next(vae.parameters()).dtype != latent.dtype:
         raise ValueError(f"latent {latent.dtype}, VAE {next(vae.parameters()).dtype}")
-    z = (latent.unsqueeze(0) / scale + shift).movedim(-1, 1)  # (1, 16, T', h, w)
+    return (latent.unsqueeze(0) / scale + shift).movedim(-1, 1)
+
+
+@torch.no_grad()
+def decode_sliced(models: Models, z: Tensor) -> Iterator[Tensor]:
+    """z (1, 16, T', h, w) (decoder_input) decoded slice by slice, as numz's slicing_decode cuts
+    it (attn_video_vae.py:1278): frames (C, t, 8h, 8w) in [-1, 1], unclamped, as they come, t
+    following decode_slices.
+
+    One pass of the causal decoder, with a memory of its own from its first slice to its last,
+    cleared when the generator ends, is closed or fails: a tiled decode makes one such pass per
+    tile, over the tile's crop of z (runtime/tiling.py)."""
+    vae = models.runner.vae
     if vae.use_slicing and (z.shape[2] - 1) > vae.slicing_latent_min_size:
         slices = z[:, :, 1:].split(split_size=vae.slicing_latent_min_size, dim=2)
         try:
@@ -490,8 +555,6 @@ def decode_stream(models: Models, latent: Tensor) -> Iterator[Tensor]:
             for z_slice in slices[1:]:
                 yield vae._decode(z_slice, memory_state=MemoryState.ACTIVE)[0]
         finally:
-            for module in vae.modules():
-                if isinstance(module, InflatedCausalConv3d) and module.memory is not None:
-                    module.memory = None
+            _forget(vae)
     else:
         yield vae._decode(z)[0]
