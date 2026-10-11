@@ -1449,10 +1449,11 @@ first pass, whose shots are its input, and before the models load:
 - **Budget:** the free memory the driver reports (`mem_get_info`) once the shot detector has
   given its own back and before the models load, minus 0.6 GiB. That covers the desktop and
   other programs without guessing.
-  - It is read with a first allocation in place (a small tensor held): a process's first
-    allocation takes 0.24 GiB that no reading before it shows, and the margin was bisected
-    against readings after it. On the 96 GB card that gives 94.24 GiB, a budget of 93.64; on
-    a card emulated at N GB, N − 1.46.
+  - It is read with a first allocation in place, and after a small convolution and a small
+    product: a process's first allocation and its libraries take 0.29 GiB that no reading
+    before them shows, the margin was bisected against readings after them, and a job whose
+    shot detector didn't run (a cut list, a resume) then reads what a new job reads. On the
+    96 GB card that gives 94.21 GiB, a budget of 93.61; on a card emulated at N GB, N − 1.49.
   - The margin holds for the DiT's phase: on nine emulated cards and the bare one, 5 to 76
     latents, 0 to 36 blocks swapped, its peak came within 0.07 GiB of the prediction.
   - It does not hold for the VAE's passes (2026-10-11): packed to the margin, three plans of
@@ -1481,7 +1482,10 @@ first pass, whose shots are its input, and before the models load:
   - The planner sets the scratch's allowance per job: half of what the host has available
     once the pinned copies are counted, and no more than the longest tiled shot needs
     (provisional, until measured on a consumer host). Too small, shots go to disk; too
-    large, the system kills the run. It is recorded for information: it shapes no bit.
+    large, the system kills the run. It is recorded for information: it shapes no bit. It
+    never takes what the process's own 2.4 GiB need, so that no job is refused for its
+    allowance; where the host's memory can't be read, said in a warning, it is the longest
+    scratch, 8 GiB at most.
 - **Per-phase peaks** (P = output megapixels, T² = a tile's area in megapixels):
   - VAE encode ≈ 1.2 + 8.8·P GiB, decode ≈ 0.8 + 16.1·P GiB (flat beyond 9 frames)
   - tiled, from 1024-px tiles: encode ≈ 1.36 + 8.66·T², decode ≈ 0.44 + 16.29·T², refitted
@@ -1520,6 +1524,13 @@ first pass, whose shots are its input, and before the models load:
       slots, to 0.001 GiB, at 1, 6 and 12 latents at 1080p and at 4K (28.316 GiB to 13.968 at
       12 latents with all 36 swapped), so that one or two swapped blocks save nothing; and
       0.467 more with the VAE away.
+    - Through a shot's windows the run keeps on the GPU the shot's whole latent and its whole
+      noise, 2.02 MiB a latent at 1080p and 8.03 at 4K, and half as much again for a one-file
+      output, whose finished windows wait there too (found by a review, 2026-10-11; a shot
+      of 48 latents in 8 windows then measured 9.57 GiB against 9.567 predicted). The planner
+      counts them, and they are to leave: the DiT's side of the rule that a pass's peak
+      mustn't grow with the shot. The noise stays drawn as today, whole and on the GPU, then
+      waits in system memory with the latent, each window's slices sent for its pass.
   - On the 96 GB card, in numz's padding (1,088 rows at 1080p): windows of 78 latents (309
     frames) at 1080p, 0.56 GiB to spare, and 19 (73 frames) at 4K; one latent more fails
     within 3 s.
@@ -1594,9 +1605,11 @@ first pass, whose shots are its input, and before the models load:
       largest output size that fits in it. A card that drives a desktop is judged by what it
       has left, and a 96 GB card half taken by another program is a 48 GB one to seedvr2x.
     - At 4K the smallest window takes 22.40 GiB of free VRAM: a peak of 21.80 GiB (21.78
-      measured) and the margin. A 16 GB card never has that. A card emulated at 24 GB, 22.54
+      measured) and the margin. A 16 GB card never has that. A card emulated at 24 GB, 22.51
       GiB free, runs it, its VAE passes in 1408- and 1088-px tiles; a quarter of a GB less is
-      refused, naming `--resolution 2144`.
+      refused, naming `--resolution 2144`. Until the run stops keeping a shot's latent and
+      noise on the GPU, that card takes 4K shots of 20 latents at most (77 frames), and of 12
+      (45 frames) with a one-file output.
     - The VAE has a floor too: its decode in 512-px tiles, with its room. At 1080p that is
       8.5 GiB of free VRAM: an 8 GB card stays out.
 - **Pins.** `--window N`, `--swap-blocks N`, `--encode-tile PX` and `--decode-tile PX` (0 for
@@ -1605,7 +1618,9 @@ first pass, whose shots are its input, and before the models load:
   fewest blocks or the largest tile. `--window N` pins the cap, 5 at least: no window longer
   than N latents, a shorter shot still one window of its own length. Two runs pinned alike
   match bit for bit. The tile pins are settings, which a resume must repeat; `--swap-blocks`
-  isn't, shaping no bit.
+  isn't, shaping no bit. Of two pins that don't fit together, `--window` is the one refused
+  while some cap fits the pinned blocks, `--swap-blocks` when none does. A tile pin above
+  2048 px is taken by its fit, with a warning: no peak is measured there.
 - **Time estimates** (for `--until`, `--plan` and progress) are measured, never constants.
   - One model per kind of unit, each a constant plus a rate: a shot's encode and a segment's
     decode by the frame, a window by the token. The DiT's time per token is flat within ±5%
@@ -1833,7 +1848,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       still resumes in its old environment. Two things rewrite it at once: a plan taken up or
       planned again (below), and a frame index made again.
     - Re-running a finished job doesn't rewrite its manifest, and makes nothing again, its
-      frame index included.
+      frame index and its plan included: no memory is read, and nothing can "no longer fit".
   - **A plan** is a job with no unit made: what `--plan FILE` leaves in a directory output,
     its manifest and its frame index (see [Shot detection](#shot-detection)).
     - The same command without `--plan` runs it, with no second first pass.
