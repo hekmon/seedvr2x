@@ -984,24 +984,27 @@ def _free_memory(device: "torch.device") -> int:
     planner's budget, less its margin (DESIGN.md, Memory planner, Budget). Read once a run, after
     the first pass, whose shot detector has given its memory back, and before the models load.
 
-    A first tensor is allocated and freed before the reading, so that no run reads before its
-    process's first allocation on the GPU, which takes 0.2363 GiB outside torch's counters
-    (253,755,392 bytes with cudaMallocAsync, 32 MiB of them the pool's first reservation) that no
-    reading before it shows: a run with a cut list, its shot detector not built, has allocated
-    nothing yet when it plans. Measured on the bare 96 GB card (2026-10-10): 94.4973 GiB free
-    with the bare context, 94.2609 with a first tensor held, 94.2746 after the shot detector ran
-    and closed; the margin was bisected against readings taken after a first allocation
-    (research/docs/planner-limits.md, The margin over free memory). The two readings after one
-    are 14 MiB apart, and the helper's own, its tensor freed and the cache emptied, isn't
-    measured yet: it puts every reading after the first allocation, and makes them no more equal
-    than that. PROVISIONAL (implementation, 2026-10-10): DESIGN.md has the reading, not what must
-    have been allocated before it."""
+    Read while a first tensor is held on the device, with no cache emptied: a process's first
+    allocation on the GPU takes 0.2363 GiB outside torch's counters (253,755,392 bytes with
+    cudaMallocAsync, 32 MiB of them the pool's first reservation), which no reading before it
+    shows, and a run with a cut list, its shot detector not built, has allocated nothing yet when
+    it plans. Emptying the cache after it gives the pool's first reservation back, which the next
+    allocation takes again. Measured on the bare 96 GB card (2026-10-10 and 11): 94.4973 GiB free
+    with the bare context; 94.4308 with a tensor allocated and freed and the cache emptied, as
+    this read at first; 94.2609 with a first tensor held; 94.2746 after the shot detector ran and
+    closed. The margin was bisected against readings taken with a first allocation in place
+    (research/docs/planner-limits.md, The margin over free memory; vram_cap.py allocates a tensor
+    and never empties the cache). The freed tensor left the two kinds of run 160 MiB apart, a run
+    with a cut list planning on memory its first allocation then takes; held, about 94.26 GiB is
+    expected with a cut list against 94.27 after the detector, 14 MiB apart, this reading as it
+    is now taken still to be measured on the card. PROVISIONAL (implementation, 2026-10-11):
+    DESIGN.md has the reading, not what must have been allocated before it."""
     import torch
 
     first = torch.empty(1, device=device)
+    free = torch.cuda.mem_get_info(device)[0]
     del first
-    torch.cuda.empty_cache()
-    return torch.cuda.mem_get_info(device)[0]
+    return free
 
 
 def _host_available(meminfo: Path = Path("/proc/meminfo")) -> int | None:

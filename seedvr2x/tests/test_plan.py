@@ -105,10 +105,11 @@ def test_no_recorded_plan() -> None:
 
 
 def test_free_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The memory free on the job's GPU as the driver reports it, read once a first tensor has
-    # been allocated on the device and freed, the allocator's cache emptied: in that order, so
-    # that no reading comes before the process's first allocation, nor counts the tensor. The
-    # tensor is gone when the cache is emptied, which gives back nothing of one still held.
+    # The memory free on the job's GPU as the driver reports it, read while a first tensor is
+    # held on the device, so that no reading comes before the process's first allocation; and
+    # the allocator's cache is never emptied, which would give back the pool's first reservation
+    # for the next allocation to take again (94.4308 GiB read that way on the bare 96 GB card,
+    # against 94.2609 with the tensor held). The tensor goes once the reading is taken.
     did: list[object] = []
     made: list[weakref.ref[torch.Tensor]] = []
     empty = torch.empty
@@ -120,17 +121,16 @@ def test_free_memory(monkeypatch: pytest.MonkeyPatch) -> None:
         return first
 
     def read(device: torch.device) -> tuple[int, int]:
-        did.append(("read", device))
+        did.append(("read", device, [ref() is not None for ref in made]))
         return 94_000_000_000, 96_000_000_000
 
     monkeypatch.setattr(torch, "empty", allocate)
-    monkeypatch.setattr(
-        torch.cuda, "empty_cache", lambda: did.append(("emptied", [ref() for ref in made]))
-    )
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: did.append("emptied"))
     monkeypatch.setattr(torch.cuda, "mem_get_info", read)
     device = torch.device("cpu")
     assert cli._free_memory(device) == 94_000_000_000  # pyright: ignore[reportPrivateUsage]
-    assert did == [("tensor", device), ("emptied", [None]), ("read", device)]
+    assert did == [("tensor", device), ("read", device, [True])]
+    assert [ref() for ref in made] == [None]
 
 
 def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

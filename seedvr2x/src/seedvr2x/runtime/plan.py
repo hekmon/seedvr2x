@@ -21,7 +21,8 @@ Phase = Literal["encode", "dit", "decode"]
 @dataclass(frozen=True)
 class Tiles:
     """A tiled VAE pass's tiles: squares of `size` output pixels a side, cut off at the picture's
-    edges, each sharing `overlap` pixels with its neighbours."""
+    edges, each sharing `overlap` pixels with its neighbours. Tiles of which one covers the
+    whole padded frame run the pass untiled (runtime/tiling.py)."""
 
     size: int
     overlap: int = OVERLAP
@@ -39,8 +40,11 @@ class Plan:
     decode_tiles: Tiles | None = None  # None: the decode streamed, untiled
     # What doesn't.
     swapped: int = 0  # the DiT's last blocks swapped, streamed through the two slots
-    # The DiT's blocks on the GPU during the VAE's encodes and decodes, the others waiting in
-    # their pinned copies (0: every block away); None: the DiT stays as its own phase has it.
+    # What of the DiT is on the GPU during the VAE's encodes and decodes, the rest waiting in
+    # its pinned copies (blockswap.Placement.enter). None: nothing moves, the DiT stays as its
+    # own phase has it, slots included. 0: nothing of its parameters. A number, up to the blocks
+    # that aren't swapped: that many of them, the first ones, with its parameters outside the
+    # blocks, the slots freed.
     resident_encode: int | None = None
     resident_decode: int | None = None
     vae_in_dit: bool = True  # False: the VAE's weights leave the GPU for the DiT's phase

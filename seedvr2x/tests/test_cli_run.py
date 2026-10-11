@@ -231,7 +231,6 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
         ASKED.append("models")
         return STAND_IN_MODELS
 
-    patch(torch.cuda, "empty_cache", lambda: None)
     patch(torch.cuda, "mem_get_info", lambda device: (FREE, TOTAL))
     patch(cli, "_free_memory", read_free)
     patch(cli, "_host_available", lambda: HOST)
@@ -846,11 +845,16 @@ def test_swap_blocks_pin_places_the_weights(
     monkeypatch.setattr(model, "load_models", load)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "36") == 0
-    assert plans == [Plan(5, swapped=36)]
+    # The planner's plan around the pin, on the memory the stand-in reports free: nothing else
+    # moves, the DiT's slots staying in the VAE's phases.
+    pins = Pins(window=5, swap_blocks=36)
+    made = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST)
+    assert plans == [made[0]] == [Plan(5, swapped=36)]
     assert steps.calls == UNINTERRUPTED
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["plan"]["memory"]["swapped_blocks"] == 36
-    assert content["plan"] | {"memory": None} == JOB_PLAN | {"memory": None}
+    assert content["plan"] == plan_record(*made)
+    assert content["plan"] | {"memory": None} == Plan(5).record() | {"memory": None}
 
 
 def test_host_short_of_memory_for_the_pinned_copies_refused(
@@ -951,9 +955,9 @@ def test_plan_said(
         "plan: no block of the DiT swapped, the VAE on the GPU in the DiT's phase; in the encode,"
         " the DiT's 36 blocks on the GPU; in the decode, the DiT's 36 blocks on the GPU",
         "plan: no system memory pinned, nothing leaving the GPU; 2.40 GiB of system memory in all",
-        "plan: encode untiled, decode untiled",
-        "plan: predicted peaks: encode 17.22 GiB, DiT 15.91 GiB, decode 16.93 GiB; the encode"
-        " bounds the plan, 76.68 GiB under the budget",
+        "plan: encode untiled, decode untiled, each held 1.50 GiB under the budget",
+        "plan: predicted peaks: encode 18.11 GiB, DiT 15.91 GiB, decode 17.73 GiB; the encode"
+        " bounds the plan, its room counted, 74.29 GiB under the budget",
         "plan: pinned: --window 5",
     ]
     caplog.clear()
@@ -988,10 +992,6 @@ def test_pin_refused(
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "37") == 1
     assert "--swap-blocks 37: the DiT has 36 blocks, so from 0 to 36" in caplog.text
-    caplog.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, "--decode-tile", "512") == 1
-    said = "--decode-tile 512: a tile of 512 px covers the whole padded frame, 128x128"
-    assert f"{said}: --decode-tile 0 pins an untiled decode" in caplog.text
     # With no block swapped, the memory that holds a window of 5 latents and not one of 6, the
     # VAE's weights away: --window 6, the longest shot in one window, is refused.
     free_memory(monkeypatch, planner.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN)
@@ -999,16 +999,18 @@ def test_pin_refused(
     pinned = ("--cuts", "cuts.txt", "--window", "6", "--swap-blocks", "0")
     assert upscale(tmp_path, source_path, "out", *pinned) == 1
     assert (
-        "--window 6: its longest window, 6 latents, takes 16.06 GiB of free VRAM with"
-        " --swap-blocks 0, and the driver reports 16.04 GiB free: the longest window that fits is"
+        "--window 6: its longest window, 6 latents, takes 16.07 GiB of free VRAM with"
+        " --swap-blocks 0, and the driver reports 16.05 GiB free: the longest window that fits is"
         " --window 5"
     ) in caplog.text
     assert steps.calls == []
     assert not (tmp_path / "out" / "manifest.json").exists()
-    # Without the pin, the planner's own cap is that one, and the job runs.
+    # Without the pin, the planner's own cap is that one, and the job runs: the 6-latent shot's
+    # two windows are 4 latents long, and no cap is under 5 with a shot longer than it.
     assert upscale(tmp_path, source_path, "out", *pinned[:2], *pinned[4:]) == 0
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["plan"]["window"] == 5 and content["plan"]["memory"]["vae_in_dit"] is False
+    assert content["plan"]["memory"]["longest_window"] == 4
     assert content["shots"][2]["windows"] == [[0, 4], [2, 6]]
 
 
@@ -1022,15 +1024,17 @@ def test_size_and_host_memory_refused(
     # before the models load, as a pin is: exit 1, nothing made, nothing written.
     source_path = job(tmp_path, monkeypatch)
     there = sorted(path.name for path in tmp_path.iterdir())
-    encode = planner.encode_peak(PADDED, None, 0, 36)
+    # The stand-in's frames are too small for a tile: their floor is the untiled encode's, with
+    # the room a VAE pass is held to (planner.VAE_ROOM).
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     with monkeypatch.context() as patch:
         free_memory(patch, encode + planner.MARGIN - 1)
         assert upscale(tmp_path, source_path, "out", *JOB) == 1
     assert (
-        "an output of 128x96 takes 3.47 GiB of free VRAM (its encode untiled, too small for a"
-        " tile, with the DiT's blocks off the GPU: a peak of 2.87 GiB, and 0.60 of margin), and"
-        " the driver reports 3.46 GiB free: the largest output that fits there is --resolution"
-        " 80, about 106x80"
+        "an output of 128x96 takes 4.87 GiB of free VRAM (its encode untiled, too small for a"
+        " tile, with the DiT off the GPU: a peak of 2.77 GiB, 1.50 of room a VAE pass is held to,"
+        " and 0.60 of margin), and the driver reports 4.86 GiB free: the largest output that fits"
+        " there is --resolution 80, about 106x80"
     ) in caplog.text
     caplog.clear()
     with monkeypatch.context() as patch:
@@ -1191,21 +1195,21 @@ def test_recorded_plan_no_longer_fits(
 ) -> None:
     # A resume whose recorded shape no longer fits the memory free stops, naming the phase and
     # the shortfall (DESIGN.md, Memory planner), nothing changed on disk; the job resumes once
-    # the memory is back. Here the untiled encode, a quarter of a GiB short with every block of
-    # the DiT away, its slots there.
+    # the memory is back. Here the untiled encode, a quarter of a GiB short with the DiT away
+    # of its peak and the room a VAE pass is held to (planner.VAE_ROOM).
     source_path = job(tmp_path, monkeypatch)
     steps.stop = "encode 4"
     stopped(tmp_path, source_path, "out", *JOB)
     kept = contents(tmp_path / "out")
     steps.stop = None
     steps.calls.clear()
-    encode = planner.encode_peak(PADDED, None, 0, 36)
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     free_memory(monkeypatch, encode + planner.MARGIN - GIB // 4)
     assert upscale(tmp_path, source_path, "out", *JOB) == 1
     assert (
         "the recorded plan no longer fits the memory free now: the encode, untiled, with the"
-        " DiT's blocks off the GPU, takes 3.47 GiB of free VRAM and the driver reports 3.21 GiB"
-        " free, 0.26 GiB short"
+        " DiT off the GPU, takes 4.87 GiB of free VRAM, 1.50 of them the room a VAE pass is held"
+        " to, and the driver reports 4.61 GiB free, 0.26 GiB short"
     ) in caplog.text
     assert contents(tmp_path / "out") == kept and steps.calls == []
     free_memory(monkeypatch, FREE)
@@ -1367,7 +1371,14 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
             "seg_000000.mkv",
             "seg_000001.mkv",
         ]
-        assert json.loads((out / "manifest.json").read_text())["plan"] == TILED_PLAN
+        # The planner's plan around the pins: tiles that cover the stand-in's frames, taken as
+        # pinned and recorded, its passes those of one tile (tiling.py), with no scratch of
+        # their own; the stand-in keeps one all the same, for what follows.
+        pins = Pins(5, 1344, 1024)
+        made = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST, split=split)
+        recorded = json.loads((out / "manifest.json").read_text())["plan"]
+        assert recorded == plan_record(*made) and recorded["memory"]["scratch"] == 0
+        assert recorded | {"memory": None} == TILED_PLAN | {"memory": None}
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(output)) == (
         ["out"] if output == "out" else ["one.mkv", "one.mkv.crc32"]
     )
@@ -1377,16 +1388,18 @@ def test_tile_pins_are_the_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The tiles shape the output: a job is resumed with the pins it was made with, and refused
-    # with others, or without.
+    # with others, or without. The pins are settings, which refuse it: a resume takes the plan's
+    # tiles as recorded, whatever is pinned (planner.plan), so the plan itself never differs.
     tiled_steps(monkeypatch, steps)
     source_path = job(tmp_path, monkeypatch)
     steps.stop = "window 4:1"
     stopped(tmp_path, source_path, "out", *JOB, *TILE_PINS)
     steps.stop = None
     text = refused(tmp_path, source_path, caplog, *JOB, *TILE_PINS[:2], "--decode-tile", "512")
-    assert "plan.decode_tiles.size: 1024 -> 512" in text
+    assert "settings.decode_tile: 1024 -> 512" in text and "plan." not in text
     text = refused(tmp_path, source_path, caplog, *JOB)
-    assert 'plan.encode_tiles: {"size": 1344, "overlap": 64} -> null' in text
+    assert "settings.encode_tile: 1344 -> null" in text
+    assert "settings.decode_tile: 1024 -> null" in text and "plan." not in text
     steps.calls.clear()
     assert upscale(tmp_path, source_path, "out", *JOB, *TILE_PINS) == 0
     assert steps.calls == ["window 4:1", "decode 4"]

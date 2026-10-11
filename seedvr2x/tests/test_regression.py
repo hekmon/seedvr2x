@@ -148,6 +148,10 @@ def models_present(*names: str) -> None:
             pytest.skip(f"{name}: not in SEEDVR2X_MODEL_DIR")
 
 
+# The tile pins of a run (cli.py): one not given is pinned untiled (bit_identical).
+TILE_PINS = ("--encode-tile", "--decode-tile")
+
+
 def bit_identical(
     tmp_path: Path,
     source: Path,
@@ -183,6 +187,10 @@ def bit_identical(
             *("--color-correction", "none"),
             # numz.mkv's format, ffv1_out.py's default: compare.py reads both masters as stored.
             *("--format", "gbrp16le"),
+            # The passes the reference was made with, pinned: untiled unless `more` pins tiles,
+            # so that a card too small for them refuses the job (DESIGN.md, Memory planner,
+            # Pins) where the planner would tile what numz ran untiled, bits that aren't its.
+            *(pin for option in TILE_PINS if option not in more for pin in (option, "0")),
             *more,
         ],
         capture_output=True,
