@@ -1049,17 +1049,37 @@ The rule: the upscale must look like its source in any given player.
      divided by the summed weights and handed on slice by slice, so colour correction and the
      writers get what a streamed decode gives them. numz's CLI sums a whole batch on the CPU
      and divides it on the GPU: its batches are short, a shot can be any length.
+     - Where each step runs changes no bit: the ramp, the multiplies, the sums and the divide
+       each give the same bits on the CPU and on the GPU, and six placements gave numz's
+       output, with its own offload and without (one card, one torch). seedvr2x keeps the one
+       that fits a shot of any length: the weights on the GPU, the sums in the scratch, the
+       divide on the GPU slice by slice.
+     - The file is allocated whole before use, so that a full disk refuses there, the units
+       kept, where a mapping written into later would kill the run. It is removed when the
+       pass ends or fails; a kill leaves it, and the resume discards it. One scratch at a
+       time: the encode's input, then the decode's sums.
+     - The allowance is the planner's to set, from the host's memory (see
+       [Memory planner](#memory-planner)). A shot that outgrows it writes its frames' bytes to
+       disk once per tiled pass: at 4K with both passes tiled, 101 MB a frame. On a Windows
+       drive seen from WSL the file is allocated at under 30 MB/s: there the docs say to keep
+       the output on the Linux side.
    - The grid and the blend are numz's, bit for bit, in v1: tiles laid from the top left
      corner, a stride of the tile's side less the overlap, a cosine ramp across the overlap on
-     the edges inside the picture, in bf16. It gives a bit-identity test against numz.
+     the edges inside the picture, in bf16. It gives a bit-identity test against numz. Built
+     on 2026-10-11: seedvr2x tiled equals numz tiled bit for bit on milestone 1's input, at a
+     1024-px decode, at a 1344-px encode with it, and at 512 px for both; a run killed in a
+     tiled encode, then in a tiled decode, resumes bit for bit.
+     - A tile that covers the whole padded frame is no tiling: such a pin is refused, naming
+       0, the untiled pass, and the planner never plans one.
      - The overlap is fixed at 64 px: the colour study's tiles after `split` and the recipes
        validated per card size ran at 64 (see [Beyond numz's `lab`](#beyond-numzs-lab)), and
        the one pair measured, 512-px decode tiles at 1080p, gained nothing at 128 (38.3 dB
        from the untiled decode both ways, [vram.md](../research/docs/vram.md#tiling)).
-     - A balanced grid, without the sliver row this one leaves (144 px at 1080p under 1024-px
-       tiles), is a later change, measured as the padding was.
+     - A balanced grid, without the sliver row this one leaves (144 px at 1080p and 272 px at
+       4K under 1024-px tiles), is a later change, measured as the padding was.
    - A tiled encode goes the same way, each tile over the whole shot: the transformed input is
-     kept in the same scratch, exact, with no seeking back into the source.
+     kept in the same scratch, exact, with no seeking back into the source. Its own sums wait
+     in system memory (0.53 MB per 1080p frame, 2.1 MB per 4K frame).
    - Streaming a tiled decode slice by slice would hold every tile's causal caches at once,
      8.05 GiB per megapixel decoded ([decode-resume.md](../research/docs/decode-resume.md)): a
      later way, for large cards.
@@ -1270,6 +1290,9 @@ shot). `split` needs neither.
     most on the flattest areas. At 4K it moves by 0.14–0.49 (4 shots: decode tiles from 1536
     down to 512 px and the two recipes, against the 2048-px decode). That is about half of what
     `lab` leaves (0.10–1.39 and 0.38–1.10).
+  - seedvr2x's own tiled passes drift alike (one clip at 1080p, 2026-10-11): 0.25 and 0.26
+    with 1024- and 512-px decode tiles, 0.45 with 512-px tiles for both passes, where its
+    flattest third moves by 0.32, above the study's 0.13–0.23 in numz's padding.
   - So colour sets no floor on tile size down to 512 px, the smallest measured: the planner's
     tiles are the largest that fit (see [Memory planner](#memory-planner)), 512 px at the
     least. At 4K it holds on flat content too (a smooth sky, near space, painted animation):
@@ -1440,6 +1463,10 @@ first pass, whose shots are its input, and before the models load:
   [BlockSwap, rewritten](#blockswap-rewritten)) and a tiled shot's scratch, up to its
   allowance. The plan counts them against the host's available memory: a job they don't fit,
   or whose copies the host won't pin, is refused before the run, naming the RAM it needs.
+  - The planner sets the scratch's allowance per job: half of what the host has available
+    once the pinned copies are counted, and no more than the longest tiled shot needs
+    (provisional, until measured on a consumer host). Too small, shots go to disk; too
+    large, the system kills the run. It is recorded for information: it shapes no bit.
 - **Per-phase peaks** (P = output megapixels, T² = a tile's area in megapixels):
   - VAE encode ≈ 1.2 + 8.8·P GiB, decode ≈ 0.8 + 16.1·P GiB (flat beyond 9 frames)
   - tiled, from 1024-px tiles: encode ≈ 1.36 + 8.66·T², decode ≈ 0.44 + 16.29·T², refitted
@@ -1448,6 +1475,19 @@ first pass, whose shots are its input, and before the models load:
     Each adds what is on the GPU before the call: the VAE's weights (0.47 GiB) and the DiT
     blocks the plan leaves there in that phase, not the shot's frames, since seedvr2x feeds the
     encode slice by slice (numz moves a batch's frames there first, 0.046 GiB per 4K frame).
+    - Measured on seedvr2x's own tiled passes (2026-10-11, 21 frames, encode and decode): 512
+      px 3.52 and 5.89 GiB, 768 px 7.08 and 11.11, 1024 px 10.47 and 17.46, 1280 px cut off at
+      1080p's 1,104 rows 13.55 and 23.34, 1536 px 21.50 and 38.73, 2048 px 37.76 and 68.51.
+      From 1024 px up the fits hold within 0.3 GiB. Below, they fall up to 0.43 GiB short (768
+      px), most of the margin: the planner takes the measured peak of every size it may
+      choose, the fits serving the tiles cut off at the picture's edges.
+    - Untiled, the fits hold in step 0's padding: at 1080p 19.36 GiB to encode against the
+      fit's 19.85, and 34.84 to decode against 34.93.
+    - A pass's peak mustn't grow with the shot. On one shot of 301 frames at 540p the tiled
+      encode's peak equalled a 21-frame shot's, and the decode's stood 0.05 GiB above: the
+      shot's latent, still on the GPU through the pass (2 MiB a latent at 1080p, 8 at 4K),
+      as the encode's sums are at its end and the untiled encode's moments through it. Each
+      is being taken off the GPU; until then the planner counts them.
   - the colour correction, counted in the decode's phase, where it runs on each decoded slice:
     0.56 GiB per 4K frame it corrects at once
     ([colour.md](../research/docs/colour.md#cost-and-what-streams)).
@@ -2093,7 +2133,8 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
    - Swapping changes no bit: the output with any number of blocks swapped, with and without
      the prefetch, equals the output with none.
    - Tiling is numz's, bit for bit: a tiled encode and decode equal numz's on milestone 1's
-     input, in numz's padding.
+     input, in numz's padding. Passed on 2026-10-11, at three pairs of tile sizes, with a kill
+     in each tiled pass resumed bit for bit.
    - Every card size passes under `vram_cap.py` emulation, each phase's predicted peak within
      a few percent of the measured one.
    - A job resumed with other memory free gives the uninterrupted run's output, bit for bit.
