@@ -59,11 +59,12 @@ def test_stand_in_planner() -> None:
     assert planner.plan(Pins()) == Plan(None)
     assert planner.plan(Pins(window=7)) == Plan(7)
     assert planner.plan(Pins(5, 0, 0, 0)) == Plan(5)
+    assert planner.plan(Pins(swap_blocks=36)) == Plan(None, swapped=36)
     assert issubclass(PlanError, JobError)  # refused as a job is, before the run
     for pins, message in [
         (Pins(encode_tile=1024), "--encode-tile 1024: the tiled passes aren't built yet"),
         (Pins(decode_tile=512), "--decode-tile 512: the tiled passes aren't built yet"),
-        (Pins(swap_blocks=36), "--swap-blocks 36: BlockSwap isn't built yet"),
+        (Pins(swap_blocks=37), "--swap-blocks 37: the DiT has 36 blocks"),
     ]:
         with pytest.raises(PlanError) as refused:
             planner.plan(pins)

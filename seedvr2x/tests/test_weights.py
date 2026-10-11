@@ -292,7 +292,12 @@ def test_load_models_by_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     from seedvr2x.runtime import model
 
     loaded: list[str] = []
-    monkeypatch.setattr(model, "_load_weights", lambda module, path, *a: loaded.append(path.name))
+
+    def load_weights(module: object, path: Path, *args: object) -> dict[str, object]:
+        loaded.append(path.name)
+        return {}  # no part away from the device (model._load_weights)
+
+    monkeypatch.setattr(model, "_load_weights", load_weights)
     write(tmp_path / "seedvr2_ema_3b_fp16.safetensors", as_dtype("7b", "F16"))
     write(tmp_path / "ema_vae_fp16.safetensors", as_dtype("vae", "F16"))
     models = model.load_models(

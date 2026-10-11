@@ -1662,7 +1662,9 @@ def test_changed_during_the_first_pass_refused(
         os.utime(directory / DIT, ns=(state.st_atime_ns, state.st_mtime_ns + 1))
         return first_pass(*args, **kwargs)
 
-    def load_models(dit: Path, vae: Path, device: Any, hashes: pull.Hashes | None = None) -> Any:
+    def load_models(
+        dit: Path, vae: Path, device: Any, hashes: pull.Hashes | None = None, plan: Any = None
+    ) -> Any:
         for path in (dit, vae):
             if hashes is not None:
                 hashes.unchanged(path)
@@ -1749,11 +1751,12 @@ def test_load_refuses_a_file_changed_since_its_hash(
 
     done: list[str] = []
 
-    def load_weights(module: object, path: Path, *args: object) -> None:
+    def load_weights(module: object, path: Path, *args: object) -> dict[str, object]:
         role = "dit" if path == dit else "vae"
         done.append(role)
         if when == "during" and role == touched:
             touch(path)
+        return {}  # no part away from the device (model._load_weights)
 
     monkeypatch.setattr(model, "_load_weights", load_weights)
     if when == "before":

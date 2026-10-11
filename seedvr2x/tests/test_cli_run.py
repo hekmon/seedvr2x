@@ -718,7 +718,7 @@ def test_plan_recorded_and_phases_entered(
     [
         (("--encode-tile", "1024"), "--encode-tile 1024: the tiled passes aren't built yet"),
         (("--decode-tile", "512"), "--decode-tile 512: the tiled passes aren't built yet"),
-        (("--swap-blocks", "36"), "--swap-blocks 36: BlockSwap isn't built yet"),
+        (("--swap-blocks", "37"), "--swap-blocks 37: the DiT has 36 blocks"),
         (("--until", "7:30"), "--until 07:30: stopping by the clock isn't built yet"),
     ],
 )
@@ -737,6 +737,54 @@ def test_pins_not_built_refused(
     assert message in caplog.text
     assert steps.calls == []
     assert not (tmp_path / "out" / "manifest.json").exists()
+
+
+def test_swap_blocks_pin_places_the_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # The pin is the plan's swapped blocks: the loader gets the plan, and places the weights by
+    # it (model.load_models); the manifest records it, for information; the units are those of
+    # the job without it.
+    from seedvr2x.runtime import model
+
+    plans: list[Any] = []
+
+    def load(*arguments: Any) -> Any:
+        plans.append(arguments[4])
+        return STAND_IN_MODELS
+
+    monkeypatch.setattr(model, "load_models", load)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "36") == 0
+    assert plans == [Plan(5, swapped=36)]
+    assert steps.calls == UNINTERRUPTED
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["plan"]["memory"]["swapped_blocks"] == 36
+    assert content["plan"] | {"memory": None} == JOB_PLAN | {"memory": None}
+
+
+def test_host_short_of_memory_for_the_pinned_copies_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The host can't hold the pinned copies of the weights the plan has away from the GPU: the
+    # load refuses, naming the RAM they take, logged without a traceback, before any unit.
+    from seedvr2x.runtime import blockswap, model
+
+    said = (
+        "the weights that leave the GPU need 15.19 GiB of host memory, pinned (36 of the DiT's"
+        " blocks), and the host has 9.50 GiB available"
+    )
+
+    def refused(*arguments: object) -> None:
+        raise blockswap.HostMemoryError(said)
+
+    monkeypatch.setattr(model, "load_models", refused)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "36") == 1
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert [record.getMessage() for record in errors] == [said]
+    assert all(record.exc_info is None for record in errors)
+    assert steps.calls == []
 
 
 @pytest.mark.parametrize("output", ["out", "one.mkv"])

@@ -594,6 +594,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.files import make_directories
     from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
     from seedvr2x.runtime import manifest
+    from seedvr2x.runtime.blockswap import HostMemoryError
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.run import run_job
     from seedvr2x.runtime.shot import CopyError, NonFinite, shot_layout
@@ -658,11 +659,13 @@ def _run(args: argparse.Namespace) -> int:
     started = time.monotonic()
     try:
         models = load_models(
-            model_files.dit.path, model_files.vae.path, identity.device, model_files.hashes
+            model_files.dit.path, model_files.vae.path, identity.device, model_files.hashes, plan
         )
-    except ModelError as error:
+    except (ModelError, HostMemoryError) as error:
         # A model file replaced since its check, during the first pass: refused as the check
-        # refuses it, or as changed since its hash.
+        # refuses it, or as changed since its hash. Or a host that can't hold the pinned copies
+        # of the weights the plan has away from the GPU: refused before the run, naming the RAM
+        # they take (DESIGN.md, BlockSwap, rewritten).
         logger.error("%s", error)
         return 1
     logger.info(

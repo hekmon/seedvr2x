@@ -27,9 +27,10 @@ from torch import Tensor
 from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 
-from seedvr2x.runtime import weights
+from seedvr2x.runtime import blockswap, weights
+from seedvr2x.runtime.blockswap import Part, Placement
 from seedvr2x.runtime.job import BLACK, padding
-from seedvr2x.runtime.plan import Phase
+from seedvr2x.runtime.plan import Phase, Plan
 from seedvr2x.runtime.pull import Hashes
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
@@ -56,21 +57,59 @@ class _DebugLog:
         logger.debug("%s", message)
 
 
+# The VAE's weights as a part that leaves the device (blockswap.Part), named for the messages.
+VAE_PART = "the VAE"
+
+
 @dataclass
 class Models:
-    """The loaded models, on one device, ready to run."""
+    """The loaded models, on one device, ready to run: every weight there, or with a plan
+    that sends some away, each phase's (enter)."""
 
     runner: Any  # VideoDiffusionInfer, untyped, its dit and vae set by load_models
     text_pos: Tensor  # (58, 5120) bfloat16: the positive text embedding, the one used at cfg 1
     text_neg: Tensor  # (64, 5120) bfloat16
     attention: str  # flash_attn_2 or sdpa
     device: torch.device
+    plan: Plan | None = None  # what the weights' places follow; None: all on the device
+    placement: Placement | None = None  # the DiT's, when the plan swaps blocks or sends it away
+    vae: Part | None = None  # the VAE's weights, when the plan sends them away
+    phase: Phase | None = None  # the phase entered last; None after the load, the parts away
 
     def enter(self, phase: Phase) -> None:
         """Before a unit of `phase`, a shot's encode, a window or a decode: put on the device
         what the plan has there in that phase, the rest waiting in its pinned copy (DESIGN.md,
         BlockSwap, rewritten, Per phase). Called before every unit, so most calls find the phase
-        entered already. Nothing moves yet: every weight stays on the device in every phase."""
+        entered already.
+
+        What leaves goes first, so that the two models' weights are never there together when
+        the plan has them apart: the VAE's before the DiT comes back, the DiT's before the
+        VAE's do. What comes back is queued, one copy per part, ahead of the unit's work: the
+        7B whole, 15.35 GiB, in 0.30 s from its pinned copies on a desktop's PCIe 5.0 link
+        (research/scripts/placement_bench.py)."""
+        if self.plan is None or phase == self.phase:
+            return
+        # Unknown until every move is done: an enter that raises half-way, the VAE gone and the
+        # DiT not back, must not pass for the phase it left.
+        self.phase = None
+        started = time.monotonic()
+        backend = blockswap.Cuda(self.device)
+        away = phase == "dit"  # the VAE's place in this phase, when it has a part
+        if self.vae is not None and away and self.vae.device is not None:
+            backend.wait(backend.compute())
+            self.vae.leave()
+            backend.trim()
+        if self.placement is not None:
+            resident = {
+                "encode": self.plan.resident_encode,
+                "dit": None,
+                "decode": self.plan.resident_decode,
+            }[phase]
+            self.placement.enter(phase, resident)
+        if self.vae is not None and not away and self.vae.device is None:
+            self.vae.enter(backend)
+        self.phase = phase
+        logger.debug("phase %s entered in %.3f s", phase, time.monotonic() - started)
 
 
 def attention_backend() -> str:
@@ -104,13 +143,24 @@ def nvidia_driver() -> str | None:
 
 
 def load_models(
-    dit_file: Path, vae_file: Path, device: torch.device, hashes: Hashes | None = None
+    dit_file: Path,
+    vae_file: Path,
+    device: torch.device,
+    hashes: Hashes | None = None,
+    plan: Plan | None = None,
 ) -> Models:
     """Build and load the DiT in the file at dit_file and the VAE in the file at vae_file, as
     pull.resolve found them, in --model-dir or in Hugging Face's cache, each checked first
     (weights.check, ModelError): the DiT is built from the config of what its file is. A file
     hashed this run (hashes) must still be the one hashed (Hashes.unchanged, ModelError), before
-    anything is built and right after its own load."""
+    anything is built and right after its own load.
+
+    Without a plan, every weight is on the device, for good. With one, the weights it has away
+    from the device in some phase, the DiT's swapped blocks among them, are read straight into
+    pinned host copies and wait there for Models.enter: a swapped DiT is never whole on the
+    device, which a 16 GB card couldn't hold (DESIGN.md, BlockSwap, rewritten). The host
+    refusing those copies, or short of the memory they take, is a blockswap.HostMemoryError,
+    which names it."""
     # numz goes by "7b" in the file name (src/core/model_configuration.py:718-720), so a renamed
     # file loads as what its name says; seedvr2x goes by the file's tensors (DESIGN.md, Weights).
     config_dir = weights.check(dit_file, "dit").config
@@ -142,7 +192,11 @@ def load_models(
     vae_model_config: Any = runner.config.vae.model
     with torch.device("meta"):
         vae = create_object(vae_model_config)
-    _load_weights(vae, vae_file, device, COMPUTE_DTYPE)
+    # The VAE's 0.47 GiB leave for the DiT's phase when the plan says so: one part.
+    vae_leaves = plan is not None and not plan.vae_in_dit
+    vae_parts = _load_weights(
+        vae, vae_file, device, COMPUTE_DTYPE, (lambda key: VAE_PART) if vae_leaves else None
+    )
     unchanged(vae_file)
     # Out of training mode, the causal convolutions keep their memory across slices
     # (causal_inflation_lib.py:242, 268). Slicing and memory limits from the config
@@ -157,7 +211,7 @@ def load_models(
     # gradient checkpointing stub (nadit.py:30-31).
     with torch.device("meta"):
         dit = create_object(runner.config.dit.model)
-    _load_weights(dit, dit_file, device, None)
+    dit_parts = _load_weights(dit, dit_file, device, None, _dit_parts(plan, len(dit.blocks)))
     unchanged(dit_file)
     dit.requires_grad_(False).eval()
     attention = attention_backend()
@@ -180,18 +234,61 @@ def load_models(
 
     text_pos = torch.load(VENDOR / "pos_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
     text_neg = torch.load(VENDOR / "neg_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
-    return Models(runner, text_pos, text_neg, attention, device)
+    models = Models(runner, text_pos, text_neg, attention, device, plan)
+    if plan is not None and (dit_parts or plan.swapped):
+        models.placement = Placement(dit, device, plan.swapped, parts=dit_parts)
+    models.vae = vae_parts.get(VAE_PART)
+    pinned = (models.placement.host_bytes if models.placement is not None else 0) + (
+        models.vae.host.bytes.numel() if models.vae is not None else 0
+    )
+    if pinned and plan is not None:
+        logger.info(
+            "%.2f GiB of host memory pinned for the weights that leave the GPU: %s; the DiT's"
+            " last %d blocks swapped",
+            pinned / blockswap.GIB,
+            blockswap.listing([*dit_parts, *vae_parts]),
+            plan.swapped,
+        )
+    return models
+
+
+def _dit_parts(plan: Plan | None, blocks: int) -> Callable[[str], str | None] | None:
+    """Which of the DiT's parameters a plan has away from the device in some phase, each by
+    its part (blockswap.dit_parts); None when all stay: the blocks it swaps, the last ones; the
+    blocks a VAE phase doesn't keep; and the parameters outside the blocks when one keeps
+    nothing."""
+    if plan is None:
+        return None
+    fixed = blocks - plan.swapped
+    residents = (plan.resident_encode, plan.resident_decode)
+    if not 0 <= plan.swapped <= blocks or any(
+        r is not None and not 0 <= r <= fixed for r in residents
+    ):
+        raise ValueError(f"a plan for another DiT than this one of {blocks} blocks: {plan}")
+    stay = min(fixed if resident is None else resident for resident in residents)
+    other = 0 in residents
+    return blockswap.dit_parts(blocks, stay, other) if stay < blocks or other else None
 
 
 def _load_weights(
-    model: torch.nn.Module, path: Path, device: torch.device, dtype: torch.dtype | None
-) -> None:
+    model: torch.nn.Module,
+    path: Path,
+    device: torch.device,
+    dtype: torch.dtype | None,
+    part_of: Callable[[str], str | None] | None = None,
+) -> dict[str, Part]:
     """Load a safetensors checkpoint into a model built on the meta device, as numz does
     (src/core/model_loader.py:547-616, 777-835): the file's dtypes, or every floating tensor cast
-    to dtype; then the buffers the checkpoint doesn't hold, still on meta, filled with zeros."""
-    state = load_file(path, device=str(device))
-    if dtype is not None:
-        state = {k: v.to(dtype) if v.is_floating_point() else v for k, v in state.items()}
+    to dtype; then the buffers the checkpoint doesn't hold, still on meta, filled with zeros.
+    With part_of, the parameters it names a part for go to that part's pinned host copy, not to
+    the device (blockswap.read): the parts are returned, by name, away from the device."""
+    parts: dict[str, Part] = {}
+    if part_of is None:
+        state = load_file(path, device=str(device))
+        if dtype is not None:
+            state = {k: v.to(dtype) if v.is_floating_point() else v for k, v in state.items()}
+    else:
+        state, parts = blockswap.read(model, path, device, dtype, part_of)
     # strict=False as numz, but the mismatches are reported, where numz ignores them silently.
     result = model.load_state_dict(state, strict=False, assign=True)
     if result.missing_keys or result.unexpected_keys:
@@ -212,6 +309,9 @@ def _load_weights(
     for name, param in model.named_parameters():
         if param.device.type == "meta":
             raise RuntimeError(f"{path.name}: no weight for {name}")
+    for part in parts.values():
+        part.adopt(model)
+    return parts
 
 
 def to_input(frames: npt.NDArray[np.float32]) -> Tensor:

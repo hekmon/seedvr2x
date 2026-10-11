@@ -49,7 +49,6 @@ def _tiles(option: str, size: int | None) -> Tiles | None:
 
 def _swapped(blocks: int | None) -> int:
     """A --swap-blocks pin's blocks; none without a pin."""
-    if blocks:
-        # Leaves with BlockSwap's commit (Models.enter, the DiT's placement).
-        raise PlanError(f"--swap-blocks {blocks}: BlockSwap isn't built yet")
+    if blocks is not None and blocks > 36:  # the blocks of the 7B, the DiT v1 runs
+        raise PlanError(f"--swap-blocks {blocks}: the DiT has 36 blocks")
     return blocks or 0
