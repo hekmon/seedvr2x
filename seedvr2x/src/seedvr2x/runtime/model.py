@@ -32,6 +32,7 @@ from seedvr2x.runtime.blockswap import Part, Placement
 from seedvr2x.runtime.job import BLACK, padding
 from seedvr2x.runtime.plan import Phase, Plan
 from seedvr2x.runtime.pull import Hashes
+from seedvr2x.runtime.weights import SLOTS
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
@@ -238,18 +239,39 @@ def load_models(
     if plan is not None and (dit_parts or plan.swapped):
         models.placement = Placement(dit, device, plan.swapped, parts=dit_parts)
     models.vae = vae_parts.get(VAE_PART)
-    pinned = (models.placement.host_bytes if models.placement is not None else 0) + (
+    _say_pinned(models, [*dit_parts, *vae_parts])
+    return models
+
+
+def _say_pinned(models: Models, parts: Iterable[str]) -> None:
+    """Log the host memory a plan's load has pinned, for the parts named, and the blocks it
+    swaps; and when it swaps one or two, that they free nothing."""
+    plan, placement = models.plan, models.placement
+    pinned = (placement.host_bytes if placement is not None else 0) + (
         models.vae.host.bytes.numel() if models.vae is not None else 0
     )
-    if pinned and plan is not None:
-        logger.info(
-            "%.2f GiB of host memory pinned for the weights that leave the GPU: %s; the DiT's"
-            " last %d blocks swapped",
-            pinned / blockswap.GIB,
-            blockswap.listing([*dit_parts, *vae_parts]),
-            plan.swapped,
+    if plan is None or not pinned:
+        return
+    swapped = {0: "none of the DiT's blocks swapped", 1: "the DiT's last block swapped"}.get(
+        plan.swapped, f"the DiT's last {plan.swapped} blocks swapped"
+    )
+    logger.info(
+        "%.2f GiB of host memory pinned for the weights that leave the GPU: %s; %s",
+        pinned / blockswap.GIB,
+        blockswap.listing(parts),
+        swapped,
+    )
+    if placement is not None and 0 < plan.swapped <= SLOTS:
+        # Taken as given, a pin being taken exactly (DESIGN.md, Memory planner): said, since it
+        # buys nothing. The planner never chooses it.
+        logger.warning(
+            "%s: that frees nothing in the DiT's phase, where swapped blocks take turns in %d"
+            " buffers on the GPU; from %d swapped blocks up, each frees %.2f GiB there",
+            swapped,
+            SLOTS,
+            SLOTS + 1,
+            placement.block_bytes / blockswap.GIB,
         )
-    return models
 
 
 def _dit_parts(plan: Plan | None, blocks: int) -> Callable[[str], str | None] | None:

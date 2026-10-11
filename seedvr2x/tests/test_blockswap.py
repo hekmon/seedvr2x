@@ -27,9 +27,10 @@ import torch
 from safetensors.torch import save_file
 from torch import Tensor
 
-from seedvr2x.runtime import blockswap, model
-from seedvr2x.runtime.blockswap import OTHER, SLOTS, HostMemoryError, Part, Placement, dit_parts
+from seedvr2x.runtime import blockswap, model, weights
+from seedvr2x.runtime.blockswap import OTHER, HostMemoryError, Part, Placement, dit_parts
 from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.weights import SLOTS
 
 CPU = torch.device("cpu")
 WIDTH = 8
@@ -313,16 +314,19 @@ def test_the_parts_of_a_dit_by_name() -> None:
     assert part_of("blocks_extra.0.weight") == OTHER
 
 
-def test_a_7b_block_is_block_bytes() -> None:
-    # By the model's shapes, in fp16, as v1's files hold it: the constant the planner plans with.
+@pytest.mark.parametrize("architecture", [weights.DIT_7B, weights.DIT_3B], ids=["7b", "3b"])
+def test_a_dit_s_blocks_are_weights_py_s(architecture: weights.Architecture) -> None:
+    # By the model's shapes, in fp16, as the files hold them: the bytes the planner plans with
+    # and the placement moves, in runtime/weights.py, which imports no torch.
     import seedvr2x.vendor
     from seedvr2x.vendor.common.config import create_object, load_config
 
     vendor = Path(seedvr2x.vendor.__file__).parent
-    config: Any = load_config(str(vendor / "configs_7b" / "main.yaml"))
+    assert architecture.config is not None
+    config: Any = load_config(str(vendor / architecture.config / "main.yaml"))
     with torch.device("meta"):
         dit = create_object(config.dit.model)
-    sizes = dict.fromkeys(range(36), 0)
+    sizes = dict.fromkeys(range(len(dit.blocks)), 0)
     other = 0
     for key, parameter in dit.named_parameters():
         match = blockswap._BLOCK.match(key)  # pyright: ignore[reportPrivateUsage]
@@ -330,13 +334,19 @@ def test_a_7b_block_is_block_bytes() -> None:
             other += 2 * parameter.numel()
         else:
             sizes[int(match[1])] += 2 * parameter.numel()
-    assert set(sizes.values()) == {blockswap.BLOCK_BYTES}
-    assert f"{blockswap.BLOCK_BYTES / blockswap.GIB:.4f}" == "0.4220"
-    assert f"{36 * blockswap.BLOCK_BYTES / blockswap.GIB:.2f}" == "15.19"
-    assert f"{other / blockswap.GIB:.3f}" == "0.155"
-    # Three buffers a block, RoPE's, which stay on the device: 0.7 MiB.
+    assert tuple(sizes.values()) == architecture.blocks and other == architecture.other
+    # Three buffers a block, RoPE's, which stay on the device.
     buffers = [key for key, _ in dit.named_buffers() if key.startswith("blocks.0.")]
     assert len(buffers) == 3 and all(".rope." in key for key in buffers)
+
+
+def test_the_7b_s_figures() -> None:
+    block = weights.DIT_7B.blocks[0]
+    assert set(weights.DIT_7B.blocks) == {453_133_312} and len(weights.DIT_7B.blocks) == 36
+    assert f"{block / blockswap.GIB:.4f}" == "0.4220"
+    assert f"{sum(weights.DIT_7B.blocks) / blockswap.GIB:.2f}" == "15.19"
+    assert f"{weights.DIT_7B.other / blockswap.GIB:.3f}" == "0.155"
+    assert weights.SLOTS == 2 == blockswap.SLOTS
 
 
 def test_hosting_moves_parameters_only() -> None:
@@ -704,14 +714,37 @@ def test_a_placement_closed_leaves_the_model_to_another() -> None:
     expected = reference(7)
     assert same(run(model, sim), expected)
     parts = placement._parts  # pyright: ignore[reportPrivateUsage]
+    trims = sim.trims
     placement.close()
-    assert sim.live() == 0 and sim.idle()
+    assert sim.live() == 0 and sim.idle() and sim.trims == trims + 1
     assert not any(block._forward_pre_hooks or block._forward_hooks for block in model.blocks)
     for swapped in (0, 2, 7):
         other = Placement(model, CPU, swapped, parts=parts, backend=sim)
         other.enter("dit")
         assert same(run(model, sim), expected), swapped
         other.close()
+
+
+def test_a_close_that_fails_can_be_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A placement is closed once everything is done, its hooks off the blocks: a close stopped
+    # half-way, here at the trim, leaves one that isn't, to close again.
+    sim = Sim()
+    model, placement = hosted(7, sim, 5)
+    placement.enter("dit")
+    trim = sim.trim
+
+    def failing() -> None:
+        raise RuntimeError("the device said no")
+
+    monkeypatch.setattr(sim, "trim", failing)
+    with pytest.raises(RuntimeError, match="the device said no"):
+        placement.close()
+    assert any(block._forward_pre_hooks for block in model.blocks)
+    monkeypatch.setattr(sim, "trim", trim)
+    placement.close()
+    assert not any(block._forward_pre_hooks or block._forward_hooks for block in model.blocks)
+    with pytest.raises(RuntimeError, match="the placement is closed"):
+        placement.enter("dit")
 
 
 def test_a_closed_placement_enters_no_phase() -> None:
@@ -813,14 +846,15 @@ def test_every_plan_s_phases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     save_file(toy(blocks, plain).state_dict(), dit_file)
     save_file(toy_vae(plain).state_dict(), vae_file)
     order = ["encode", "dit", "decode", "encode", "dit", "dit", "decode", "decode", "dit", "encode"]
-    plans = 0
+    plans: set[Plan] = set()
+    runs = 0
     for swapped in range(blocks + 1):
         fixed = blocks - swapped
         residents = [None, *range(fixed + 1)]
         for kept_encode, kept_decode, vae_in_dit, first in itertools.product(
             residents, residents, (True, False), ("encode", "dit")
         ):
-            plans += 1
+            runs += 1
             plan = Plan(
                 None,
                 swapped=swapped,
@@ -828,6 +862,7 @@ def test_every_plan_s_phases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
                 resident_decode=kept_decode,
                 vae_in_dit=vae_in_dit,
             )
+            plans.add(plan)
             sim = Sim("random-1")
             monkeypatch.setattr(blockswap, "Cuda", lambda device, sim=sim: sim)
             with torch.device("meta"):
@@ -886,7 +921,8 @@ def test_every_plan_s_phases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
                     assert torch.equal(vae_bits(vae, sim), vae_expected), (plan, phase)
             if apart:
                 assert sim.peak <= max(vae_bytes, on_device(None)), plan
-    assert plans == 360
+    # 180 plans, each entered twice: from a shot's encode first, and from a window first.
+    assert (len(plans), runs) == (180, 360)
 
 
 def test_a_phase_that_fails_to_enter_is_no_phase(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -918,3 +954,174 @@ def test_a_phase_that_fails_to_enter_is_no_phase(monkeypatch: pytest.MonkeyPatch
     assert models.phase == "decode" and sim.live() == part.size
     models.enter("dit")
     assert same(run(dit, sim), reference(4))
+
+
+def test_a_host_copy_is_a_private_mapping() -> None:
+    # One kind of mapping, the one research/scripts/pin_probe.py measured: private, anonymous,
+    # as /proc says of the copy's address; and kept out of a child process (MADV_DONTFORK, the
+    # kernel's "dc" flag), where a pinned page copied on write would leave the driver the
+    # parent's old one.
+    copy = blockswap.HostCopy(3 * 4096, pin=False)
+    address = copy.bytes.data_ptr()
+    inside = False
+    for line in Path("/proc/self/smaps").read_text().splitlines():
+        fields = line.split()
+        if "-" in fields[0] and not fields[0].endswith(":"):
+            start, end = (int(part, 16) for part in fields[0].split("-"))
+            inside = start <= address < end
+            if inside:
+                assert fields[1] == "rw-p", line
+        elif inside and fields[0] == "VmFlags:":
+            assert "dc" in fields[1:], line
+            break
+    else:
+        pytest.fail("the copy's address is in no mapping")
+
+
+@pytest.mark.parametrize("missing", ["the binding", "the call", "CUDA"])
+def test_pinning_without_torch_s_binding_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    # torch binds CUDA's runtime without documenting it: a torch without it, or without CUDA,
+    # refuses the plan as a host short of memory does, with no traceback of its own.
+    def cudart() -> Any:
+        if missing == "the binding":
+            raise AttributeError("module 'torch._C' has no attribute '_cudart'")
+        if missing == "CUDA":
+            raise AssertionError("Torch not compiled with CUDA enabled")
+        return SimpleNamespace(cudaHostUnregister=None, cudaGetErrorString=None)
+
+    monkeypatch.setattr(blockswap, "_cudart", cudart)
+    with pytest.raises(HostMemoryError, match="CUDA's cudaHostRegister isn't to be had from"):
+        blockswap.HostCopy(4096, pin=True)
+
+
+def test_a_copy_is_registered_whole_and_unregistered_when_it_goes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A stand-in for torch's binding of CUDA's runtime: the copy's address and its length in
+    # whole pages are registered; unregistered when the copy is collected, and not at exit,
+    # where CUDA is gone first.
+    calls: list[tuple[Any, ...]] = []
+
+    def register(address: int, length: int, flags: int) -> int:
+        calls.append(("on", address, length, flags))
+        return 0
+
+    cudart = SimpleNamespace(
+        cudaHostRegister=register,
+        cudaHostUnregister=lambda address: calls.append(("off", address)),
+        cudaGetErrorString=lambda code: "unused",
+    )
+    monkeypatch.setattr(blockswap, "_cudart", lambda: cudart)
+    copy = blockswap.HostCopy(4096 + 1, pin=True)
+    address = copy.bytes.data_ptr()
+    assert copy.pinned and calls == [("on", address, 2 * 4096, 0)]
+    assert copy.unregistering.alive and not copy.unregistering.atexit
+    del copy
+    gc.collect()
+    assert calls == [("on", address, 2 * 4096, 0), ("off", address)]
+
+
+def test_a_refused_registration_says_cuda_s_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    cudart = SimpleNamespace(
+        cudaHostRegister=lambda address, length, flags: 2,
+        cudaHostUnregister=lambda address: 0,
+        cudaGetErrorString=lambda code: "out of memory",
+    )
+    monkeypatch.setattr(blockswap, "_cudart", lambda: cudart)
+    with pytest.raises(HostMemoryError) as refusal:
+        blockswap.HostCopy(4096, pin=True)
+    assert str(refusal.value) == "the host refuses to pin 0.00 GiB of memory: out of memory"
+
+
+def cgroup_tree(root: Path, available_kib: int, groups: str, files: dict[str, str]) -> None:
+    (root / "proc" / "self").mkdir(parents=True)
+    (root / "proc" / "meminfo").write_text(f"MemTotal: 99 kB\nMemAvailable:   {available_kib} kB\n")
+    (root / "proc" / "self" / "cgroup").write_text(groups)
+    for name, content in files.items():
+        (root / "sys" / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / "sys" / name).write_text(content)
+
+
+def test_the_memory_available_is_a_container_s_limit_too(tmp_path: Path) -> None:
+    def available(case: str, kib: int, groups: str, files: dict[str, str]) -> int | None:
+        cgroup_tree(tmp_path / case, kib, groups, files)
+        return blockswap.available(tmp_path / case / "proc", tmp_path / case / "sys")
+
+    # No limit: what the kernel says is available.
+    assert available("free", 1000, "0::/\n", {"memory.stat": ""}) == 1000 * 1024
+    assert available("max", 1000, "0::/a\n", {"a/memory.max": "max\n"}) == 1000 * 1024
+    # A v2 group's limit, less what it holds; the nearest limit above counts as well.
+    limited = {"a/b/memory.max": "900000\n", "a/b/memory.current": "100000\n"}
+    assert available("v2", 1000, "0::/a/b\n", limited) == 800_000
+    above = {**limited, "a/memory.max": "500000\n", "a/memory.current": "150000\n"}
+    assert available("above", 1000, "0::/a/b\n", above) == 350_000
+    # A limit looser than the host's memory changes nothing; one overrun leaves nothing.
+    loose = {"a/memory.max": "9000000\n", "a/memory.current": "0\n"}
+    assert available("loose", 1000, "0::/a\n", loose) == 1000 * 1024
+    over = {"a/memory.max": "1000\n", "a/memory.current": "5000\n"}
+    assert available("over", 1000, "0::/a\n", over) == 0
+    # A group's file cache isn't memory taken: the kernel gives it back, as MemAvailable counts
+    # the host's. 900,000 allowed, 850,000 held of which 700,000 of cache: 750,000 left.
+    cached = {
+        "a/memory.max": "900000\n",
+        "a/memory.current": "850000\n",
+        "a/memory.stat": "anon 150000\nfile 700000\ninactive_file 400000\nactive_file 300000\n",
+    }
+    assert available("cache", 1000, "0::/a\n", cached) == 750_000
+    # A cache counted larger than what the group holds, the two read at different instants:
+    # nothing taken, never more left than the limit.
+    racing = {
+        "a/memory.max": "900000\n",
+        "a/memory.current": "100000\n",
+        "a/memory.stat": "inactive_file 400000\nactive_file 300000\n",
+    }
+    assert available("racing", 1000, "0::/a\n", racing) == 900_000
+    # A limit that isn't a number is no limit read: the next one counts, here the host's.
+    for text in ("", "9e5"):
+        odd = {"a/memory.max": f"{text}\n", "a/memory.current": "100000\n"}
+        assert available(f"odd {text}", 1000, "0::/a\n", odd) == 1000 * 1024
+    # memory.high is a limit as well: past it the kernel reclaims from the group and slows it.
+    high = {"a/memory.max": "max\n", "a/memory.high": "600000\n", "a/memory.current": "100000\n"}
+    assert available("high", 1000, "0::/a\n", high) == 500_000
+    # v1: the memory controller's own tree.
+    v1 = {
+        "memory/c/memory.limit_in_bytes": "700000\n",
+        "memory/c/memory.usage_in_bytes": "300001\n",
+        "memory/c/memory.stat": "total_inactive_file 200000\ntotal_active_file 100000\ncache 9\n",
+    }
+    assert available("v1", 1000, "3:cpu:/c\n7:memory:/c\n", v1) == 699_999
+    # Nothing readable: no figure, and the pinning itself refuses if it must.
+    assert blockswap.available(tmp_path / "none", tmp_path / "none") is None
+
+
+@pytest.mark.parametrize(
+    ("swapped", "said", "nothing"),
+    [
+        (1, "the DiT's last block swapped", True),
+        (2, "the DiT's last 2 blocks swapped", True),
+        (3, "the DiT's last 3 blocks swapped", False),
+    ],
+)
+def test_one_or_two_swapped_blocks_are_said_to_free_nothing(
+    caplog: pytest.LogCaptureFixture, swapped: int, said: str, nothing: bool
+) -> None:
+    sim = Sim()
+    dit = toy(7, sim)
+    placement = Placement(dit, CPU, swapped, backend=sim)
+    plan = Plan(None, swapped=swapped)
+    runner = SimpleNamespace(dit=dit, vae=None)
+    models = model.Models(runner, torch.empty(0), torch.empty(0), "none", CPU, plan, placement)
+    caplog.set_level("INFO")
+    model._say_pinned(models, [f"blocks.{7 - 1 - j}" for j in range(swapped)])  # pyright: ignore[reportPrivateUsage]
+    blocks = f"{swapped} of the DiT's blocks"
+    assert caplog.messages[0] == (
+        f"0.00 GiB of host memory pinned for the weights that leave the GPU: {blocks}; {said}"
+    )
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    expected = (
+        f"{said}: that frees nothing in the DiT's phase, where swapped blocks take turns in 2"
+        " buffers on the GPU; from 3 swapped blocks up, each frees 0.00 GiB there"
+    )
+    assert warnings == ([expected] if nothing else [])

@@ -31,6 +31,12 @@ class ModelError(JobError):
     it."""
 
 
+# The device buffers a DiT's swapped blocks stream through, one computing, one being filled
+# (runtime/blockswap.py; DESIGN.md, BlockSwap, rewritten): with a block's bytes, what a swapped
+# block frees on the GPU, and what one or two don't.
+SLOTS = 2
+
+
 @dataclass(frozen=True)
 class Architecture:
     """A model seedvr2x knows by its tensors: their count and their inventory's digest
@@ -42,6 +48,13 @@ class Architecture:
     digest: str
     config: str | None
     dtype: str = "F16"
+    # A DiT's blocks, each one's parameters in bytes at dtype, in the model's order, and its
+    # parameters outside the blocks: what the placement moves between the GPU and the host
+    # (runtime/blockswap.py) and the planner counts, by the model's shapes
+    # (tests/test_blockswap.py holds them to the vendored configs). No block, and 0, for another
+    # model.
+    blocks: tuple[int, ...] = ()
+    other: int = 0
 
 
 # A BatchNorm layer's count of the batches it trained on, num_batches_tracked, I64 in PyTorch's
@@ -55,17 +68,25 @@ COUNTER = ".num_batches_tracked"
 # 7B and sharp 7B fp16 ones the 7B's, numz's 3B fp16 and fp8 files the 3B's, numz's and seedvr2x's
 # fp16 VAE the VAE's, seedvr2x's transnetv2.safetensors TransNetV2's (read on 2026-10-09 from
 # the file pinned at hekmon/seedvr2x's c14a2bc4: 84 tensors F32 and the 6 counters I64).
+# The 7B: 36 blocks of 453,133,312 bytes in fp16 (0.4220 GiB: 226,566,656 values in 30
+# parameters), 15.19 of its 15.35 GiB; the other 0.155 GiB are emb_in, txt_in, vid_in and vid_out.
 DIT_7B = Architecture(
     "SeedVR2's 7B DiT",
     1128,
     "960321767ecf7a1aeee79faefb0dcfb00acf66d205170ab813fff5bd3d1f3b2f",
     "configs_7b",
+    blocks=(453_133_312,) * 36,
+    other=166_416_512,
 )
+# The 3B: 32 blocks, the first 10 of 317,266,944 bytes (0.295 GiB, their text and video halves
+# apart), the other 22 of 158,633,472 (0.148 GiB, shared), 6.21 of its 6.32 GiB.
 DIT_3B = Architecture(
     "SeedVR2's 3B DiT",
     635,
     "cc68bcef364ddcfa3b51f09a62e171dc9f69bb7743588c43d82aad94456801ac",
     "configs_3b",
+    blocks=(317_266_944,) * 10 + (158_633_472,) * 22,
+    other=120_345_728,
 )
 VAE = Architecture(
     "SeedVR2's VAE", 250, "090ead68b30f9e815c50f1bdd1ed9c522f669461d42888ed56cbf0e57fb863e1", None

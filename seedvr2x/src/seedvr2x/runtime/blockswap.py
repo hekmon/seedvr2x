@@ -43,18 +43,12 @@ from torch import Tensor
 
 from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.plan import Phase
+from seedvr2x.runtime.weights import SLOTS
 
 logger = logging.getLogger(__name__)
 
 GIB = 1 << 30
 
-# The device buffers the swapped blocks stream through: one computing, one being filled.
-SLOTS = 2
-# A block of the 7B in fp16, in bytes (0.4220 GiB), by the model's shapes: 226,566,656 values in
-# 30 parameters, the same in each of the 36 blocks, 15.19 of the DiT's 15.35 GiB; the other
-# 0.155 GiB are emb_in, txt_in, vid_in and vid_out. What a loaded model's parts take is measured
-# (Placement.block_bytes, device_bytes): this is for the planner, which plans before the load.
-BLOCK_BYTES = 453_133_312
 # Each parameter starts on a multiple of this in its part's bytes, as torch's CUDA allocator
 # aligns its own blocks (512 bytes): 30 parameters waste under 16 KiB of a block's 0.42 GiB.
 ALIGN = 512
@@ -69,37 +63,54 @@ class HostMemoryError(JobError):
 
 
 class HostCopy:
-    """`size` bytes of host memory, page-locked for CUDA when `pin`: an anonymous mapping of its
-    own, registered with cudaHostRegister, so that it takes its size and no more. torch's own
-    pinned allocator rounds each allocation up to a power of two: a 7B block's 0.4220 GiB took
-    0.5 GiB there, 18.0 GiB for the 36 blocks where their bytes are 15.19 (torch 2.14.1). Copies
-    from it to the device are as fast as from torch's (54.6 against 53.4 GB/s on a desktop PCIe
-    5.0 link, 18.2 from pageable memory) and return at once (0.12 ms): measured by
-    research/scripts/pin_probe.py, 2026-10-10.
+    """`size` bytes of host memory, page-locked for CUDA when `pin`: a private anonymous mapping
+    of its own, registered with cudaHostRegister, so that it takes its size and no more. torch's
+    own pinned allocator rounds each allocation up to a power of two: a 7B block's 0.4220 GiB
+    took 0.5 GiB there, 18.0 GiB for the 36 blocks where their bytes are 15.19 (torch 2.14.1).
+    Copies from it to the device are as fast as from torch's (54.6 against 53.4 GB/s on a desktop
+    PCIe 5.0 link, 18.2 from pageable memory) and return at once (0.12 ms): measured by
+    research/scripts/pin_probe.py, on such a mapping, 2026-10-10.
 
     bytes is the buffer, (size rounded up to a page,) uint8, zeros at first. Raises
-    HostMemoryError when the host refuses the mapping or its page-locking."""
+    HostMemoryError when the host refuses the mapping or its page-locking, or when this torch
+    doesn't bind CUDA's call for it (torch.cuda.cudart(), which torch binds without documenting
+    it): a refusal before the run, never a pageable copy in the pinned one's place."""
 
     def __init__(self, size: int, pin: bool) -> None:
         length = -(-max(size, 1) // mmap.PAGESIZE) * mmap.PAGESIZE
         try:
-            area = mmap.mmap(-1, length)
+            area = mmap.mmap(-1, length, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+            # Not a forked child's: the kernel would copy every pinned page for it at the fork,
+            # 15.8 GiB for a plan that keeps the models apart. seedvr2x forks nothing (its
+            # ffmpeg processes are spawned); a child that did would have no weights to read.
+            area.madvise(mmap.MADV_DONTFORK)
         except OSError as error:
             raise HostMemoryError(f"the host refuses {_gib(length)} of memory: {error}") from error
         self.bytes: Tensor = torch.frombuffer(area, dtype=torch.uint8)
         self.pinned = False
         if pin:
-            cudart = _cudart()
+            try:
+                cudart = _cudart()
+                register, unregister = cudart.cudaHostRegister, cudart.cudaHostUnregister
+                words = cudart.cudaGetErrorString
+            except (AttributeError, RuntimeError, AssertionError) as error:
+                # No binding in this torch, or no CUDA for it to bind: the error says which.
+                raise HostMemoryError(
+                    f"{_gib(length)} of host memory can't be pinned: CUDA's cudaHostRegister"
+                    f" isn't to be had from this torch ({torch.__version__}): {error}"
+                ) from error
             address: int = self.bytes.data_ptr()
-            code: Any = cudart.cudaHostRegister(address, length, 0)
+            code: Any = register(address, length, 0)
             if int(code) != 0:
                 # torch names no code but success: CUDA's own words for it.
-                why: str = cudart.cudaGetErrorString(code)
-                raise HostMemoryError(f"the host refuses to pin {_gib(length)} of memory: {why}")
+                raise HostMemoryError(
+                    f"the host refuses to pin {_gib(length)} of memory: {words(code)}"
+                )
             self.pinned = True
             # Unregistered when this object goes: the mapping itself lives as long as a tensor
             # views it. Not at exit, where CUDA is torn down first.
-            weakref.finalize(self, cudart.cudaHostUnregister, address).atexit = False
+            self.unregistering = weakref.finalize(self, unregister, address)
+            self.unregistering.atexit = False
 
 
 class Cuda:
@@ -137,8 +148,9 @@ class Cuda:
         weights have left: freed, their memory is the allocator's, not the driver's, and the
         next phase finds the device as full as before unless the allocator can make its own
         buffers of it. A card that refuses makes the allocator give it back when it must; one
-        whose driver spills into system memory never does (research/scripts/spill_probe.py).
-        PROVISIONAL (implementation, 2026-10-11; DESIGN.md's Allocator doesn't say)."""
+        whose driver spills into system memory never does (research/scripts/spill_probe.py):
+        there the driver had 5.5 GiB free in the VAE's phase after the whole DiT had left, and
+        29.3 with this, for 0.28 s (DESIGN.md, BlockSwap, rewritten, Per phase)."""
         torch.cuda.empty_cache()
 
     def wait(self, *streams: Any) -> None:
@@ -320,17 +332,62 @@ def host(
     return parts
 
 
-def available() -> int | None:
-    """The host memory available, in bytes, as the kernel estimates it (MemAvailable of
-    /proc/meminfo); None where it can't be read."""
+def available(proc: Path = Path("/proc"), cgroups: Path = Path("/sys/fs/cgroup")) -> int | None:
+    """The host memory this process can still take, in bytes: what the kernel estimates
+    available (MemAvailable of /proc/meminfo), or less in a container held to a limit, where
+    /proc/meminfo is the host's and knows nothing of it: what is left under the nearest limit
+    of its control group and of the groups above it. A group's limit is cgroup v2's memory.max
+    or memory.high (past which the kernel reclaims from it and slows it down), v1's
+    memory.limit_in_bytes; what it holds, memory.current (v1: memory.usage_in_bytes) less its
+    file cache (memory.stat's active_file and inactive_file; v1: total_ of each), which the
+    kernel gives back when asked, as MemAvailable counts the host's: a model file just hashed
+    is 16 GiB of it. None where nothing can be read. The planner counts the job's host memory
+    with it before the load (runtime/planner.py)."""
+    left: list[int] = []
     try:
-        with open("/proc/meminfo") as file:
-            for line in file:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
+        for line in (proc / "meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                left.append(int(line.split()[1]) * 1024)
     except (OSError, ValueError, IndexError):
         pass
-    return None
+    try:
+        groups = (proc / "self" / "cgroup").read_text().splitlines()
+    except OSError:
+        groups = []
+    for group in groups:
+        fields = group.split(":", 2)  # the hierarchy's number, its controllers, the group's path
+        if len(fields) != 3:
+            continue
+        controllers, path = fields[1], fields[2]
+        if controllers == "":  # v2: one hierarchy
+            directory, used, prefix = cgroups / path.lstrip("/"), "memory.current", ""
+            limits = ("memory.max", "memory.high")
+        elif "memory" in controllers.split(","):  # v1: the memory controller's own
+            directory = cgroups / "memory" / path.lstrip("/")
+            limits, used, prefix = ("memory.limit_in_bytes",), "memory.usage_in_bytes", "total_"
+        else:
+            continue
+        while True:
+            for limit in limits:
+                try:
+                    text = (directory / limit).read_text().strip()
+                    if text == "max":
+                        continue
+                    most, held = int(text), int((directory / used).read_text())
+                except (OSError, ValueError):
+                    continue  # no such file there: the root, or a group without the controller
+                cache = 0
+                try:
+                    for line in (directory / "memory.stat").read_text().splitlines():
+                        if line.split()[0] in (f"{prefix}active_file", f"{prefix}inactive_file"):
+                            cache += int(line.split()[1])
+                except (OSError, ValueError, IndexError):
+                    cache = 0  # unknown: all of what the group holds counts as taken
+                left.append(max(most - max(held - cache, 0), 0))
+            if directory in (cgroups, cgroups / "memory") or directory == directory.parent:
+                break
+            directory = directory.parent
+    return min(left) if left else None
 
 
 def _make(
@@ -557,14 +614,15 @@ class Placement:
         enters no phase again. To call before a placement is dropped while the device may
         still work: only the waits here and in enter keep a slot, or a host copy's pinning,
         from going under a copy still queued."""
-        self._closed = True
         self._wait()
         for part in self._parts.values():
             part.leave()
         self._slots = []
+        self._backend.trim()
         for hook in self._hooks:
             hook.remove()
         self._hooks = []
+        self._closed = True
 
     def _kept(self, phase: Phase, resident: int | None) -> tuple[int, bool, bool]:
         """What a phase keeps on the device: how many of the blocks that aren't swapped, whether

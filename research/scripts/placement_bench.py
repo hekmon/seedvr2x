@@ -191,11 +191,11 @@ def run_step(torch, model, models, target, length, forwards, record):
 
 def predicted(target, length, swapped, slots):
     """The DiT's peak for the guard, in GiB: the fit less the swapped blocks, but the slots."""
-    from seedvr2x.runtime import blockswap, job
+    from seedvr2x.runtime import job, weights
 
     height, width = job.padded_size(target)
     tokens = length * (height // 16) * (width // 16)
-    saved = max(swapped - slots, 0) * blockswap.BLOCK_BYTES / GIB
+    saved = max(swapped - slots, 0) * weights.DIT_7B.blocks[0] / GIB
     return FIT_GIB - saved + TOKEN_GIB * tokens
 
 
@@ -214,7 +214,7 @@ def vae_digest(torch, model, models):
 def setup(args):
     import torch
 
-    from seedvr2x.runtime import blockswap, model
+    from seedvr2x.runtime import blockswap, model, weights
 
     device = torch.device("cuda:0")
     free, total = torch.cuda.mem_get_info(device)
@@ -228,7 +228,7 @@ def setup(args):
         "total_gib": round(total / GIB, 3),
         "host_available_start_gib": round(available_gib(), 2),
         "attention": model.attention_backend(),
-        "block_bytes": blockswap.BLOCK_BYTES,
+        "block_bytes": weights.DIT_7B.blocks[0],
         "steps": [],
     }
     log(f"{results['gpu']}: {free / GIB:.2f} GiB free of {total / GIB:.2f}")

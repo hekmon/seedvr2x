@@ -26,8 +26,11 @@ import torch
 from torch import Tensor
 
 from seedvr2x.runtime import blockswap, job, model
-from seedvr2x.runtime.blockswap import BLOCK_BYTES, SLOTS, Placement, dit_parts
+from seedvr2x.runtime.blockswap import Placement, dit_parts
 from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.weights import DIT_7B, SLOTS
+
+BLOCK_BYTES = DIT_7B.blocks[0]  # a block of the 7B in fp16: 0.4220 GiB
 
 MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")
 DITS = (

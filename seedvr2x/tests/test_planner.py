@@ -95,11 +95,13 @@ def test_constants() -> None:
 
 
 def test_literals_equal_blockswaps_and_tilings() -> None:
-    # The planner imports no torch, so holds literals of what runtime/blockswap.py and
-    # runtime/tiling.py define, which do: the same figures.
-    from seedvr2x.runtime import blockswap, tilegrid
+    # The planner holds literals of what runtime/weights.py (a block of the 7B's bytes, the
+    # slots: the models' constants, which import no torch either), runtime/blockswap.py and
+    # runtime/tilegrid.py define: the same figures.
+    from seedvr2x.runtime import blockswap, tilegrid, weights
 
-    assert (planner.BLOCK, planner.SLOTS) == (blockswap.BLOCK_BYTES, blockswap.SLOTS)
+    assert (planner.BLOCK, planner.SLOTS) == (weights.DIT_7B.blocks[0], weights.SLOTS)
+    assert set(weights.DIT_7B.blocks) == {planner.BLOCK} and len(weights.DIT_7B.blocks) == 36
     assert planner.GIB == blockswap.GIB
     assert planner.SCRATCH_PIXEL == tilegrid.scratch_bytes(1, (1, 1))
 
