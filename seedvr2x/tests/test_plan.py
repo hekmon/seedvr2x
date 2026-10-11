@@ -109,36 +109,59 @@ def test_no_recorded_plan() -> None:
 
 
 def test_free_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The memory free on the job's GPU as the driver reports it, read while a first tensor is
-    # held on the device, so that no reading comes before the process's first allocation; and
+    # The memory free on the job's GPU as the driver reports it, read on one footing whatever
+    # ran before. While a first tensor is held on the device, so that no reading comes before
+    # the process's first allocation. With the results of a tiny convolution and of a tiny
+    # matrix product held beside it, both in float32 on the device, so that a run without a shot
+    # detector has loaded the libraries a detector's run leaves loaded (with the tensor alone, a
+    # card emulated at 24 GB read 22.54 GiB free after the detector and 22.56 on a resume). And
     # the allocator's cache is never emptied, which would give back the pool's first reservation
     # for the next allocation to take again (94.4308 GiB read that way on the bare 96 GB card,
-    # against 94.2609 with the tensor held). The tensor goes once the reading is taken.
+    # against 94.2609 with the tensor held). All three go once the reading is taken. On the CPU
+    # here, as the stand-in's runs take it (test_cli_run.py).
     did: list[object] = []
     made: list[weakref.ref[torch.Tensor]] = []
-    empty = torch.empty
+    empty, conv3d, mm = torch.empty, torch.nn.functional.conv3d, torch.mm
+
+    def held(what: str, result: torch.Tensor) -> torch.Tensor:
+        did.append((what, result.device, result.dtype))
+        made.append(weakref.ref(result))
+        return result
 
     def allocate(*size: int, device: torch.device) -> torch.Tensor:
-        did.append(("tensor", device))
-        first = empty(*size, device=device)
-        made.append(weakref.ref(first))
-        return first
+        return held("tensor", empty(*size, device=device))
+
+    def convolve(volume: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+        assert volume.dim() == kernel.dim() == 5
+        return held("convolution", conv3d(volume, kernel))
+
+    def multiply(one: torch.Tensor, other: torch.Tensor) -> torch.Tensor:
+        return held("product", mm(one, other))
 
     def read(device: torch.device) -> tuple[int, int]:
         did.append(("read", device, [ref() is not None for ref in made]))
         return 94_000_000_000, 96_000_000_000
 
     monkeypatch.setattr(torch, "empty", allocate)
+    monkeypatch.setattr(torch.nn.functional, "conv3d", convolve)
+    monkeypatch.setattr(torch, "mm", multiply)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: did.append("emptied"))
     monkeypatch.setattr(torch.cuda, "mem_get_info", read)
     device = torch.device("cpu")
     assert cli._free_memory(device) == 94_000_000_000  # pyright: ignore[reportPrivateUsage]
-    assert did == [("tensor", device), ("read", device, [True])]
-    assert [ref() for ref in made] == [None]
+    assert did == [
+        ("tensor", device, torch.float32),
+        ("convolution", device, torch.float32),
+        ("product", device, torch.float32),
+        ("read", device, [True, True, True]),
+    ]
+    assert [ref() for ref in made] == [None, None, None]
 
 
 def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    # The kernel's MemAvailable, in bytes; None, said at debug level, when it can't be read.
+    # The kernel's MemAvailable, in bytes; None when it can't be read, said as a warning, once:
+    # the plan then can't check the system memory it takes, nor size the scratch's allowance
+    # from the host's (planner.ALLOWANCE_UNKNOWN_HOST then bounds it).
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
     available = cli._host_available  # pyright: ignore[reportPrivateUsage]
     meminfo = tmp_path / "meminfo"
@@ -155,11 +178,18 @@ def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> Non
         caplog.clear()
         meminfo.write_text(text)
         assert available(meminfo) is None
-        assert f"{meminfo}: {reason}" in caplog.text
-        assert "the plan's system memory isn't checked" in caplog.text
+        [said] = caplog.records
+        assert said.levelno == logging.WARNING
+        assert said.getMessage().startswith(f"{meminfo}: {reason}")
+        assert said.getMessage().endswith(
+            ": the system memory available isn't known, so the plan can't check what it takes of"
+            " it, nor size from it what a tiled shot's scratch may take, which is then the shot's"
+            " whole scratch, 8 GiB at most"
+        )
     caplog.clear()
     assert available(tmp_path / "none") is None
-    assert "No such file or directory" in caplog.text
+    [said] = caplog.records
+    assert said.levelno == logging.WARNING and "No such file or directory" in said.getMessage()
 
 
 @pytest.mark.parametrize("text", ["0", "512", "576", "1024", "4096"])

@@ -588,11 +588,10 @@ def _run(args: argparse.Namespace) -> int:
                 *(directory / NAME, prior.recorded, shots, target), numz_padding=numz_padding
             )
             if complete(prior.recorded):
-                # A finished job makes nothing again (DESIGN.md, Pause and resume): its plan
-                # stays as recorded, the memory free now none of its business, nor read.
-                # PROVISIONAL (implementation, 2026-10-10): DESIGN.md has a resume plan its
-                # memory again, and doesn't say that a finished job has none to plan; refused
-                # for the memory another program holds today, it would no longer say that it is
+                # A finished job makes nothing again, and its manifest isn't rewritten
+                # (DESIGN.md, Pause and resume), its plan no more than the rest: it stays as
+                # recorded, the memory free now none of its business, nor read. Refused for the
+                # memory another program holds today, it would no longer say that it is
                 # finished.
                 plan_record = prior.recorded["plan"]
         if kept_plan is not None and plan_record is not None:
@@ -601,16 +600,23 @@ def _run(args: argparse.Namespace) -> int:
             import torch
 
             free = _free_memory(identity.device)
+            # A one-file output keeps its units in memory, a shot's windows on the GPU until
+            # its decode, which the DiT's phase is judged with (planner.DIT_WINDOWS_KEPT).
             plan, peaks = planner.plan(
                 *(free, target, shots, pins, _host_available()),
                 split=split,
                 numz_padding=numz_padding,
                 recorded=kept_plan,
+                on_disk=directory is not None,
             )
             card = torch.cuda.get_device_name(identity.device)
             said = planner.said(plan, peaks, card, target, shots, pins, numz_padding=numz_padding)
             for line in said:
                 logger.info("%s", line)
+            # A pass in tiles larger than any measured, which only a pin gives it: warned of,
+            # once per pass (planner.beyond_measured).
+            for line in planner.beyond_measured(plan):
+                logger.warning("%s", line)
             # What shapes the output, compared on a resume, and under memory what doesn't, the
             # predicted peaks with where the weights are and the scratch's allowance, for
             # information (resume.UNCOMPARED).
@@ -987,34 +993,56 @@ def _free_memory(device: "torch.device") -> int:
     planner's budget, less its margin (DESIGN.md, Memory planner, Budget). Read once a run, after
     the first pass, whose shot detector has given its memory back, and before the models load.
 
-    Read while a first tensor is held on the device, with no cache emptied: a process's first
-    allocation on the GPU takes 0.2363 GiB outside torch's counters (253,755,392 bytes with
-    cudaMallocAsync, 32 MiB of them the pool's first reservation), which no reading before it
-    shows, and a run with a cut list, its shot detector not built, has allocated nothing yet when
-    it plans. Emptying the cache after it gives the pool's first reservation back, which the next
-    allocation takes again. Measured on the bare 96 GB card (2026-10-10 and 11): 94.4973 GiB free
-    with the bare context; 94.4308 with a tensor allocated and freed and the cache emptied, as
-    this read at first; 94.2609 with a first tensor held; 94.2746 after the shot detector ran and
-    closed. The margin was bisected against readings taken with a first allocation in place
-    (research/docs/planner-limits.md, The margin over free memory; vram_cap.py allocates a tensor
-    and never empties the cache). The freed tensor left the two kinds of run 160 MiB apart, a run
-    with a cut list planning on memory its first allocation then takes; held, about 94.26 GiB is
-    expected with a cut list against 94.27 after the detector, 14 MiB apart, this reading as it
-    is now taken still to be measured on the card. PROVISIONAL (implementation, 2026-10-11):
-    DESIGN.md has the reading, not what must have been allocated before it."""
+    Read with a first allocation in place, a small tensor held on the device, and no cache
+    emptied (DESIGN.md, Memory planner, Budget): a process's first allocation on the GPU takes
+    0.2363 GiB outside torch's counters (253,755,392 bytes with cudaMallocAsync, 32 MiB of them
+    the pool's first reservation), which no reading before it shows, and a run that builds no
+    shot detector, one given a cut list or resumed from a record it trusts, has allocated
+    nothing yet when it plans. Emptying the cache after it gives the pool's first reservation
+    back, which the next allocation takes again. Measured on the bare 96 GB card (2026-10-10 and
+    11): 94.4973 GiB free with the bare context; 94.4308 with a tensor allocated and freed and
+    the cache emptied, as this read at first; 94.2609 with a first tensor held; 94.2746 after the
+    shot detector ran and closed. The margin was bisected against readings taken with a first
+    allocation in place (research/docs/planner-limits.md, The margin over free memory;
+    vram_cap.py allocates a tensor and never empties the cache). The freed tensor left the two
+    kinds of run 160 MiB apart, a run with a cut list planning on memory its first allocation
+    then takes. With the tensor held, a run reads after its shot detector 94.24 GiB on the 96 GB
+    card, and N - 1.46 on a card emulated at N GB (2026-10-11).
+
+    The tensor alone still leaves the two kinds of run apart: on a card emulated at 24 GB, a new
+    job, whose shot detector ran in the first pass, read 22.54 GiB free, and a resume of it, its
+    record trusted and no detector built, 22.56 (2026-10-11). The 0.02 GiB are what the
+    detector's run leaves loaded in the process, the libraries of its convolutions and of its
+    linear layers (cuDNN's and cuBLAS's handles and kernels, which stay until the process ends:
+    detector.Detector.close). So both read on one footing: besides the tensor, a tiny
+    convolution (conv3d) and a tiny matrix product run on the device, in float32, as the
+    detector computes, and their results are held with the tensor while the driver is read. A
+    run without a detector has then loaded what a run with one has, which the models' own load
+    brings anyway. On the CPU, the device of the tests' stand-in, they run and load nothing.
+    PROVISIONAL (implementation, 2026-10-11): the warm-up was written without a GPU; that a new
+    job and its resume then read the same figure is still to be measured on the card."""
     import torch
 
     first = torch.empty(1, device=device)
+    # The warm-up: one 3x3x3 kernel over one 3x3x3 volume, and a 2x2 matrix by itself.
+    volume = torch.zeros(1, 1, 3, 3, 3, dtype=torch.float32, device=device)
+    convolved = torch.nn.functional.conv3d(volume, volume)
+    matrix = torch.zeros(2, 2, dtype=torch.float32, device=device)
+    product = torch.mm(matrix, matrix)
     free = torch.cuda.mem_get_info(device)[0]
-    del first
+    del first, convolved, product
     return free
 
 
 def _host_available(meminfo: Path = Path("/proc/meminfo")) -> int | None:
     """The system memory available, in bytes: the kernel's MemAvailable, what new work can take
-    without swapping, which the plan's pinned copies and scratch are counted against (DESIGN.md,
-    Memory planner, Host RAM). None when it can't be read, the plan's system memory then not
-    checked, which is said at debug level."""
+    without swapping, which the plan's pinned copies and scratch are counted against, and the
+    scratch's allowance sized from (DESIGN.md, Memory planner, Host RAM). None when it can't be
+    read: the plan then can't check the system memory it takes, nor size the allowance from the
+    host's, a tiled shot's scratch allowed planner.ALLOWANCE_UNKNOWN_HOST at most. Said as a
+    warning, once a run, which reads it once (_run)."""
+    from seedvr2x.runtime.planner import ALLOWANCE_UNKNOWN_HOST, GIB
+
     try:
         for line in meminfo.read_text().splitlines():
             name, _, value = line.partition(":")
@@ -1023,7 +1051,14 @@ def _host_available(meminfo: Path = Path("/proc/meminfo")) -> int | None:
         reason = "no MemAvailable in it"
     except (OSError, ValueError, IndexError) as error:
         reason = str(error)
-    logger.debug("%s: %s; the plan's system memory isn't checked", meminfo, reason)
+    logger.warning(
+        "%s: %s: the system memory available isn't known, so the plan can't check what it takes"
+        " of it, nor size from it what a tiled shot's scratch may take, which is then the shot's"
+        " whole scratch, %d GiB at most",
+        meminfo,
+        reason,
+        ALLOWANCE_UNKNOWN_HOST // GIB,
+    )
     return None
 
 
@@ -1071,10 +1106,9 @@ def _settings(
         "seed": args.seed,
         "color_correction": args.color_correction,
         # The pins that shape the output, as asked, None when not given: the same command
-        # resumes (DESIGN.md, Pause and resume), so a resume finds them again. --swap-blocks is
-        # none of them: it shapes nothing, and a resume may change it (DESIGN.md, Memory planner:
-        # a resume plans the swapped blocks again). PROVISIONAL (implementation, 2026-10-10):
-        # DESIGN.md records the plan's shape, and doesn't say that the tile pins are settings.
+        # resumes (DESIGN.md, Pause and resume), so a resume finds them again. The tile pins
+        # are settings, which a resume must repeat; --swap-blocks isn't, shaping no bit, and a
+        # resume may change it (DESIGN.md, Memory planner, Pins).
         "window": args.window,
         "encode_tile": args.encode_tile,
         "decode_tile": args.decode_tile,

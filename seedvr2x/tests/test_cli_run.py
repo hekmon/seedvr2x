@@ -219,8 +219,9 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(torch.cuda, "reset_peak_memory_stats", lambda device: None)
     patch(torch.cuda, "max_memory_allocated", lambda device: 0)
     # The planner's budget: the free memory's reading as the command line takes it
-    # (cli._free_memory), its first tensor on the stand-in's device, the driver's figures the
-    # stand-in's; the system memory available a figure of its own, not this machine's.
+    # (cli._free_memory), its first tensor and its warm-up on the stand-in's device, the driver's
+    # figures the stand-in's; the system memory available a figure of its own, not this
+    # machine's.
     free_memory = cli._free_memory  # pyright: ignore[reportPrivateUsage]
     ASKED.clear()
 
@@ -760,7 +761,8 @@ def test_plan_recorded_and_phases_entered(
         "free": FREE,
         "budget": FREE - planner.MARGIN,
         "encode_peak": planner.encode_peak(PADDED, latents=6),
-        "dit_peak": planner.dit_peak(PADDED, 4),
+        # A window of the 6-latent shot, and the latent and the noise of its 2 other latents.
+        "dit_peak": planner.dit_peak(PADDED, 4) + planner.dit_kept(PADDED, 2),
         "decode_peak": planner.decode_peak(PADDED, TARGET, latents=6),
         "bound": "encode",
         "host": planner.HOST_RESIDENT,
@@ -835,8 +837,8 @@ def test_until_not_built_refused(
     steps: Steps,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Milestone 3's seam: --until is read, and refused until its work is built, nothing made:
-    # no unit, no manifest.
+    # --until is read, and refused until stopping by the clock is built, nothing made: no unit,
+    # no manifest.
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--until", "7:30") == 1
     assert "--until 07:30: stopping by the clock isn't built yet" in caplog.text
@@ -1091,6 +1093,40 @@ def test_size_and_host_memory_refused(
     # With the memory back, both run.
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+
+
+def test_one_file_plans_with_its_windows_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # A one-file output keeps its units in memory, a shot's windows on the GPU until its decode
+    # (units.Units): its plan is made with them counted (planner.plan's on_disk False), an output
+    # directory's without, --plan's as its run's. JOB's last shot, 6 latents in two windows of
+    # 4: the DiT's phase keeps the latent and the noise of its 2 other latents beside a window,
+    # and in memory the 4 latents of the window made.
+    asked: list[bool] = []
+    peaks: list[int] = []
+    plan = planner.plan
+
+    def planned(*arguments: Any, **options: Any) -> Any:
+        asked.append(options["on_disk"])
+        made = plan(*arguments, **options)
+        peaks.append(made[1].dit)
+        return made
+
+    monkeypatch.setattr(planner, "plan", planned)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    listed = str(tmp_path / "plan.txt")
+    assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
+    assert asked == [False, True, False]
+    window = planner.dit_peak(PADDED, 4)
+    assert peaks == [
+        window + planner.dit_kept(PADDED, 2, 4),
+        window + planner.dit_kept(PADDED, 2),
+        window + planner.dit_kept(PADDED, 2, 4),
+    ]
+    assert planner.dit_kept(PADDED, 2, 4) > planner.dit_kept(PADDED, 2) > 0
 
 
 def test_free_memory_read_once(
@@ -1464,6 +1500,43 @@ def test_tile_pins_are_the_jobs(
     steps.calls.clear()
     assert upscale(tmp_path, source_path, "out", *larger, *TILE_PINS) == 0
     assert steps.calls == ["window 4:1", "decode 4"]
+
+
+def test_tile_pin_beyond_the_measured_sizes_warned_of(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A pass pinned in tiles larger than the largest measured (planner.TILE_MAX: 2048 px, which
+    # the stand-in's frames don't reach, so 576 px here) is taken by its fit, and the log warns
+    # of it once per pass, after the plan's lines (planner.beyond_measured): of the encode's 640
+    # px, not of the decode's 512; again on the resume, which takes the tiles as recorded; and
+    # of nothing while the pins are within the sizes measured.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    tiled_steps(monkeypatch, steps)
+    source_path = job(tmp_path, monkeypatch)
+
+    def warned() -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "sizes measured" in record.getMessage()
+        ]
+
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LARGER, *TILE_PINS) == 0
+    assert warned() == [] and len(plan_lines(caplog)) == 10
+    monkeypatch.setattr(planner, "TILE_MAX", 576)
+    said = (
+        "the encode in tiles of 640 px: its predicted peak is the fit's, beyond the sizes"
+        " measured (up to 576 px), and the pass may take more"
+    )
+    caplog.clear()
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "out", *JOB, *LARGER, *TILE_PINS)
+    assert warned() == [said]
+    assert caplog.messages.index(plan_lines(caplog)[-1]) + 1 == caplog.messages.index(said)
+    steps.stop = None
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, *LARGER, *TILE_PINS) == 0
+    assert warned() == [said]
 
 
 def test_scratch_left_by_a_kill_is_discarded(

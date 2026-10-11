@@ -56,6 +56,15 @@ its environment, so that only the cache can serve them; it needs no SEEDVR2X_MOD
 skipped, saying how to fill the cache (uv run hf download, the three files, 17 GB), unless the
 run would find them there: at the pinned revision, or downloaded at another (runtime/pull.py).
 
+Every case pins the passes its reference was made with, untiled or in its tiles, but one,
+test_milestone1_unpinned: numz-7b with no tile pinned, so that a bit comparison goes through the
+planner's own choice of passes (DESIGN.md, Memory planner, Choices, 3). The plan's line in its
+log must say both passes untiled, as numz ran them, and the master and frames are numz's bit for
+bit. On a card whose plan tiles a pass it is skipped, saying that line: a card that can't run
+untiled can't make numz's untiled master (the untiled decode of these frames, padded to
+1920x1088, takes 37.09 GiB of free VRAM by the planner, the DiT off the GPU, its room and the
+margin counted).
+
 seedvr2x's own padding, the default (at least 8 rows reflected from the picture, up to a multiple
 of 16, then 16 black rows; columns alike when the width isn't a multiple of 16), is held to numz
 patched by research/scripts/numerics_patch.py with NUM_PAD=reflect>=8+black+16, which pads the
@@ -148,24 +157,26 @@ def models_present(*names: str) -> None:
             pytest.skip(f"{name}: not in SEEDVR2X_MODEL_DIR")
 
 
-# The tile pins of a run (cli.py): one not given is pinned untiled (bit_identical).
+# The tile pins of a run (cli.py): one not given is pinned untiled (upscaled), but where a case
+# leaves its passes to the planner.
 TILE_PINS = ("--encode-tile", "--decode-tile")
 
 
-def bit_identical(
+def upscaled(
     tmp_path: Path,
     source: Path,
     resolution: int,
     models: tuple[str, str] | None,
-    reference: Path,
     *more: str,
     numz_padding: bool,
+    pin_untiled: bool = True,
 ) -> str:
     """Run seedvr2x on source at resolution with the DiT and VAE files of models in
     SEEDVR2X_MODEL_DIR, or with None, its default models from Hugging Face's cache, offline
-    (HF_HUB_OFFLINE=1), in numz's padding or in its own, with the options of `more` besides;
-    compare its master and float32 frames with the reference's, <reference>.mkv and
-    <reference>_frames/, bit for bit. Returns its log."""
+    (HF_HUB_OFFLINE=1), in numz's padding or in its own, with the options of `more` besides, to
+    tmp_path's ours.mkv and frames/ (same_bits). A pass that `more` doesn't pin is pinned
+    untiled, unless pin_untiled is False, which leaves it to the planner. Returns the run's
+    log."""
     master, frames = tmp_path / "ours.mkv", tmp_path / "frames"
     environment = {name: value for name, value in os.environ.items() if name != NUMZ_PADDING}
     if numz_padding:
@@ -190,7 +201,14 @@ def bit_identical(
             # The passes the reference was made with, pinned: untiled unless `more` pins tiles,
             # so that a card too small for them refuses the job (DESIGN.md, Memory planner,
             # Pins) where the planner would tile what numz ran untiled, bits that aren't its.
-            *(pin for option in TILE_PINS if option not in more for pin in (option, "0")),
+            # None pinned for the case that leaves its passes to the planner, and looks at what
+            # it chose (test_milestone1_unpinned).
+            *(
+                pin
+                for option in TILE_PINS
+                if pin_untiled and option not in more
+                for pin in (option, "0")
+            ),
             *more,
         ],
         capture_output=True,
@@ -204,6 +222,13 @@ def bit_identical(
     assert "the shot detector scored" in run.stderr, run.stderr[-3000:]
     assert "shot detector: VRAM peak" in run.stderr, run.stderr[-3000:]
     assert "1 shot: 0 cuts detected at 0.5" in run.stderr, run.stderr[-3000:]
+    return run.stderr
+
+
+def same_bits(tmp_path: Path, reference: Path) -> None:
+    """Compare the master and float32 frames of the run made in tmp_path (upscaled) with the
+    reference's, <reference>.mkv and <reference>_frames/, bit for bit."""
+    master, frames = tmp_path / "ours.mkv", tmp_path / "frames"
     expected = (
         reference.parent / f"{reference.name}.mkv",
         reference.parent / f"{reference.name}_frames",
@@ -216,7 +241,23 @@ def bit_identical(
             check=False,
         )
         assert compare.returncode == 0, f"{kind}: {compare.stdout[-3000:]}"
-    return run.stderr
+
+
+def bit_identical(
+    tmp_path: Path,
+    source: Path,
+    resolution: int,
+    models: tuple[str, str] | None,
+    reference: Path,
+    *more: str,
+    numz_padding: bool,
+) -> str:
+    """Run seedvr2x as upscaled does, the passes `more` doesn't pin pinned untiled, and compare
+    its master and float32 frames with the reference's, bit for bit (same_bits). Returns its
+    log."""
+    log = upscaled(tmp_path, source, resolution, models, *more, numz_padding=numz_padding)
+    same_bits(tmp_path, reference)
+    return log
 
 
 @pytest.mark.parametrize(
@@ -247,6 +288,29 @@ def test_milestone1_bit_identical(tmp_path: Path, dit: str, vae: str, reference:
                 pytest.skip(f"{path}: absent; this module's docstring says how to make it")
     source = m1 / "input_rgb.mkv"
     bit_identical(tmp_path, source, 1080, (dit, vae), m1 / reference, numz_padding=True)
+
+
+def test_milestone1_unpinned(tmp_path: Path) -> None:
+    # numz-7b with no tile pinned: the passes are the planner's own choice, and the bits go
+    # through it. The plan's line of its passes (planner.said) must say both untiled, as numz
+    # ran them, and nothing pinned; on a card whose plan tiles a pass, which can't make numz's
+    # untiled master, the case is skipped, saying that line.
+    assert REFERENCE is not None
+    models_present(NUMZ_DIT, NUMZ_VAE)
+    m1 = Path(REFERENCE) / "m1"
+    models = (NUMZ_DIT, NUMZ_VAE)
+    log = upscaled(
+        tmp_path, m1 / "input_rgb.mkv", 1080, models, numz_padding=True, pin_untiled=False
+    )
+    said = [line.split("plan: ", 1)[1] for line in log.splitlines() if "plan: " in line]
+    passes = [line for line in said if line.startswith("encode ")]
+    assert len(passes) == 1 and "nothing pinned" in said, said
+    if "in tiles of" in passes[0]:
+        pytest.skip(
+            f"the plan tiles a pass on this card, and numz's master is untiled: plan: {passes[0]}"
+        )
+    assert passes[0].startswith("encode untiled, decode untiled, "), said
+    same_bits(tmp_path, m1 / "numz")
 
 
 def test_milestone1_from_the_cache(tmp_path: Path) -> None:
