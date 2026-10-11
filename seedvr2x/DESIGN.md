@@ -987,6 +987,9 @@ The rule: the upscale must look like its source in any given player.
      encode's, bit for bit.
    - Only the latents are ever whole in memory, unless the encode is tiled: each tile then
      runs over the whole shot, whose transformed input waits in the shot's scratch (step 3).
+     The latent is made in system memory, a slice at a time, and is on the GPU through the
+     DiT's windows only: an encode's peak doesn't grow with the shot (see
+     [Memory planner](#memory-planner)).
 
    Shots must start at real cuts:
    - each latent packs 4 frames (latent frames = 1 + (frames − 1)/4), so a cut inside a group
@@ -1056,14 +1059,16 @@ The rule: the upscale must look like its source in any given player.
        that fits a shot of any length: the weights on the GPU, the sums in the scratch, the
        divide on the GPU slice by slice.
      - The file is allocated whole before use, so that a full disk refuses there, the units
-       kept, where a mapping written into later would kill the run. It is removed when the
-       pass ends or fails; a kill leaves it, and the resume discards it. One scratch at a
-       time: the encode's input, then the decode's sums.
+       kept, where a mapping written into later would kill the run, and it is mapped through
+       the descriptor it was allocated by, whatever has become of its name. It is removed
+       when the pass ends or fails; a kill leaves it, and the resume discards it. One
+       scratch at a time: the encode's input, then the decode's sums.
      - The allowance is the planner's to set, from the host's memory (see
        [Memory planner](#memory-planner)). A shot that outgrows it writes its frames' bytes to
        disk once per tiled pass: at 4K with both passes tiled, 101 MB a frame. On a Windows
-       drive seen from WSL the file is allocated at under 30 MB/s: there the docs say to keep
-       the output on the Linux side.
+       drive seen from WSL the file is allocated at 29 MB/s and takes as long again to close
+       (18 s each for 509 MB, against 0.005 s and 0.06 s on ext4): there the docs say to
+       keep the output on the Linux side.
    - The grid and the blend are numz's, bit for bit, in v1: tiles laid from the top left
      corner, a stride of the tile's side less the overlap, a cosine ramp across the overlap on
      the edges inside the picture, in bf16. It gives a bit-identity test against numz. Built
@@ -1079,8 +1084,9 @@ The rule: the upscale must look like its source in any given player.
      - A balanced grid, without the sliver row this one leaves (144 px at 1080p and 272 px at
        4K under 1024-px tiles), is a later change, measured as the padding was.
    - A tiled encode goes the same way, each tile over the whole shot: the transformed input is
-     kept in the same scratch, exact, with no seeking back into the source. Its own sums wait
-     in system memory (0.53 MB per 1080p frame, 2.1 MB per 4K frame).
+     kept in the same scratch, exact, with no seeking back into the source. Its own sums,
+     of the half of the encoder's output the latent is made from, wait in system memory
+     (0.26 MB per 1080p frame, 1.05 MB per 4K frame) and are divided slice by slice.
    - Streaming a tiled decode slice by slice would hold every tile's causal caches at once,
      8.05 GiB per megapixel decoded ([decode-resume.md](../research/docs/decode-resume.md)): a
      later way, for large cards.
@@ -1486,6 +1492,11 @@ first pass, whose shots are its input, and before the models load:
     never takes what the process's own 2.4 GiB need, so that no job is refused for its
     allowance; where the host's memory can't be read, said in a warning, it is the longest
     scratch, 8 GiB at most.
+  - A shot's latent waits in system memory as well: 1.01 MiB a latent at 1080p and 4.01 at
+    4K, and as much again at an encode's end, while the buffer or the sums it is made from
+    are alive. That is 0.7 GiB for a shot of a minute at 1080p, and 28 GiB for one of ten
+    minutes at 4K. The plan is to count it for the job's longest shot, with the pinned
+    copies and ahead of the scratch's allowance: not built yet.
 - **Per-phase peaks** (P = output megapixels, T² = a tile's area in megapixels):
   - VAE encode ≈ 1.2 + 8.8·P GiB, decode ≈ 0.8 + 16.1·P GiB (flat beyond 9 frames)
   - tiled, from 1024-px tiles: encode ≈ 1.36 + 8.66·T², decode ≈ 0.44 + 16.29·T², refitted
@@ -1497,16 +1508,31 @@ first pass, whose shots are its input, and before the models load:
     - Measured on seedvr2x's own tiled passes (2026-10-11, 21 frames, encode and decode): 512
       px 3.52 and 5.89 GiB, 768 px 7.08 and 11.11, 1024 px 10.47 and 17.46, 1280 px cut off at
       1080p's 1,104 rows 13.55 and 23.34, 1536 px 21.50 and 38.73, 2048 px 37.76 and 68.51.
-      From 1024 px up the fits hold within 0.3 GiB. Below, they fall up to 0.43 GiB short (768
-      px), most of the margin: the planner takes the measured peak of every size it may
-      choose, the fits serving the tiles cut off at the picture's edges.
-    - Untiled, the fits hold in step 0's padding: at 1080p 19.36 GiB to encode against the
-      fit's 19.85, and 34.84 to decode against 34.93.
-    - A pass's peak mustn't grow with the shot. On one shot of 301 frames at 540p the tiled
-      encode's peak equalled a 21-frame shot's, and the decode's stood 0.05 GiB above: the
-      shot's latent, still on the GPU through the pass (2 MiB a latent at 1080p, 8 at 4K),
-      as the encode's sums are at its end and the untiled encode's moments through it. Each
-      is being taken off the GPU; until then the planner counts them.
+      Then every square from 512 to 2048 px in steps of 64 and the tiles cut off at 1080p's
+      1,104 rows and at 720p's 752, each tile fed alone: up to 0.03 GiB under the same tile
+      in a whole frame.
+    - The fits don't hold to the margin. From 1024 px up a decode sits 0.07 to 0.34 GiB
+      under its fit, and below up to 0.67 over it (576 px). An encode moves in steps, not
+      with the tile's area: from 0.39 GiB under its fit (1472 px) to 0.80 over (832 px). A
+      cut-off decode tile follows its area between the squares within 0.09 GiB but one, 0.30
+      over (752×896); a cut-off encode tile stands from 0.68 under that line to 0.20 over.
+    - So the planner takes the measured peak of every tile measured, the 25 squares and the
+      20 tiles cut off at those two sizes' rows, the larger where one was measured twice. A
+      cut-off tile of another size takes the larger of its fit and of the squares' line at
+      its area, and 0.3 GiB more, the most a measured one stood above that being 0.27. The
+      code holds five squares so far; the rest is being brought in. One card and one cuDNN
+      measured them all: another generation's may choose other kernels, unmeasured.
+    - Untiled, the fits hold in step 0's padding: at 1080p 19.35 GiB to encode against the
+      fit's 19.85, and 34.83 to decode against 34.93.
+    - A pass's peak doesn't grow with the shot: no VAE pass keeps anything of the shot on
+      the GPU (built on 2026-10-11). An encode takes each slice's part of the latent off the
+      GPU as it is made, a decode takes its latents from system memory slice by slice, and a
+      tiled encode sums there and divides slice by slice. At 1080p a shot of 301 frames
+      peaked where one of 21 does, to the byte, untiled and in 1024-px tiles, as did one of
+      101 frames at 4K in those tiles. A process's first VAE pass left 32 MiB allocated
+      behind it, in both processes measured, which its own peak counts; what they are isn't
+      established. Until the planner is brought onto these passes, it still counts the three
+      terms they kept there (2 to 6 MiB a latent at 1080p).
   - the colour correction, counted in the decode's phase, where it runs on each decoded slice:
     0.56 GiB per 4K frame it corrects at once
     ([colour.md](../research/docs/colour.md#cost-and-what-streams)).
@@ -2289,12 +2315,13 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   measured (about 2 GPU h on the 8 clips).
 - **The VAE's room** (see [Memory planner](#memory-planner), the budget). Why a VAE pass
   runs out of memory 1 to 1.7 GiB under the free memory, where a DiT window, which asks for
-  pieces as large, runs 0.6 under: not known. Each failing plan ran once. To measure, on the
-  VAE's passes as they stand once their own memory no longer grows with the shot: the
-  failing plans repeated; the pool emptied on entering a VAE phase and before a pass's
-  largest request; the concatenation that makes that request written into one output
-  instead; failing those, the room bisected per pass size, as the margin was. The aim is to
-  give the 1.5 GiB back to the tiles.
+  pieces as large, runs 0.6 under: not known. Each failing plan ran once. To measure, now
+  that the VAE's passes no longer grow with the shot, and once the planner prices them by
+  their measured tiles: the failing plans repeated; the pool emptied on entering a VAE
+  phase and before a pass's largest request; the concatenation that makes that request
+  written into one output instead; failing those, the room bisected per pass size, as the
+  margin was; and what the 32 MiB a process's first VAE pass leaves allocated are. The aim
+  is to give the 1.5 GiB back to the tiles.
 - **`torch.compile`, undecided** (see [Memory planner](#memory-planner)). Every figure is
   numz's, on numz's flow, and its VAE setup has a defect of its own. To measure on seedvr2x:
   - the VAE compiled with its causal convolutions in the graph and out of it, as numz meant:
