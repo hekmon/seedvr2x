@@ -1,17 +1,21 @@
 """A job's plan as the run and the manifest take it (runtime/plan.py; DESIGN.md, Memory planner),
-the pins the command line reads, and milestone 3's seam: the stand-in planner, which takes the
-pins as the plan and refuses those whose work isn't built yet (runtime/planner.py)."""
+a resume's reading of it, the pins the command line reads and the memory it finds free for the
+planner (runtime/planner.py, whose own tests are test_planner.py's)."""
 
 import argparse
 import datetime
+import logging
+import weakref
+from pathlib import Path
 
 import pytest
+import torch
 
 from seedvr2x import cli
-from seedvr2x.runtime import planner, resume
+from seedvr2x.runtime import resume
 from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.plan import OVERLAP, Plan, Tiles
-from seedvr2x.runtime.planner import Pins, PlanError
+from seedvr2x.runtime.planner import PlanError
 
 
 def test_record() -> None:
@@ -54,23 +58,104 @@ def test_record() -> None:
     ]
 
 
-def test_stand_in_planner() -> None:
-    # The pins as the plan; untiled and unswapped pins (0) are what the run does already.
-    assert planner.plan(Pins()) == Plan(None)
-    assert planner.plan(Pins(window=7)) == Plan(7)
-    assert planner.plan(Pins(5, 0, 0, 0)) == Plan(5)
-    assert planner.plan(Pins(swap_blocks=36)) == Plan(None, swapped=36)
-    # A tile pin's size is the plan's tiles, sharing 64 px, each pass's own: the pins are taken
-    # as they come, the encode tiled without the decode too, which no card's plan is.
-    assert planner.plan(Pins(encode_tile=1344, decode_tile=1024)) == Plan(
-        None, Tiles(1344, 64), Tiles(1024, 64)
-    )
-    assert planner.plan(Pins(7, 0, 512)) == Plan(7, None, Tiles(512))
-    assert planner.plan(Pins(encode_tile=512, decode_tile=0)) == Plan(None, Tiles(512))
+def test_recorded() -> None:
+    # A resume takes what shapes the output as the manifest records it, and plans the rest
+    # again: where the weights were isn't read, nor the timings.
     assert issubclass(PlanError, JobError)  # refused as a job is, before the run
-    with pytest.raises(PlanError) as refused:
-        planner.plan(Pins(swap_blocks=37))
-    assert str(refused.value) == "--swap-blocks 37: the DiT has 36 blocks"
+    plan = Plan(12, Tiles(1536), Tiles(1024, 128), 20, 0, 4, vae_in_dit=False)
+    assert Plan.recorded(plan.record()) == Plan(12, Tiles(1536), Tiles(1024, 128))
+    assert Plan.recorded(Plan(None).record()) == Plan(None)
+    record = {**Plan(7).record(), "memory": {"swapped_blocks": "all"}, "timings": {"window": 1.5}}
+    assert Plan.recorded(record) == Plan(7)
+    del record["memory"]
+    assert Plan.recorded(record) == Plan(7)
+    compiled = {**Plan(5).record(), "compile_dit": True}
+    assert Plan.recorded(compiled) == Plan(5, compile_dit=True)
+
+
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ({"window": "six"}, "its window, 'six'"),
+        ({"window": 0}, "its window, 0"),
+        ({"window": True}, "its window, True"),
+        ({"window": 5.0}, "its window, 5.0"),
+        ({"encode_tiles": 1024}, "its encode_tiles, 1024"),
+        ({"decode_tiles": {"size": 1024}}, "its decode_tiles, {'size': 1024}"),
+        (
+            {"decode_tiles": {"size": 64, "overlap": 64}},
+            "its decode_tiles, {'size': 64, 'overlap': 64}",
+        ),
+        ({"compile_vae": None}, "its compile_vae, None"),
+        ({"compile_dit": 0}, "its compile_dit, 0"),
+    ],
+)
+def test_not_a_recorded_plan(change: dict[str, object], said: str) -> None:
+    with pytest.raises(JobError) as refused:
+        Plan.recorded({**Plan(5).record(), **change})
+    assert str(refused.value) == f"not a plan as seedvr2x records one: {said}"
+
+
+def test_no_recorded_plan() -> None:
+    for record in (None, [5], "plan"):
+        with pytest.raises(JobError, match="not a plan as seedvr2x records one"):
+            Plan.recorded(record)
+    with pytest.raises(JobError, match="its compile_dit, None"):
+        Plan.recorded({"window": 5})
+
+
+def test_free_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The memory free on the job's GPU as the driver reports it, read once a first tensor has
+    # been allocated on the device and freed, the allocator's cache emptied: in that order, so
+    # that no reading comes before the process's first allocation, nor counts the tensor. The
+    # tensor is gone when the cache is emptied, which gives back nothing of one still held.
+    did: list[object] = []
+    made: list[weakref.ref[torch.Tensor]] = []
+    empty = torch.empty
+
+    def allocate(*size: int, device: torch.device) -> torch.Tensor:
+        did.append(("tensor", device))
+        first = empty(*size, device=device)
+        made.append(weakref.ref(first))
+        return first
+
+    def read(device: torch.device) -> tuple[int, int]:
+        did.append(("read", device))
+        return 94_000_000_000, 96_000_000_000
+
+    monkeypatch.setattr(torch, "empty", allocate)
+    monkeypatch.setattr(
+        torch.cuda, "empty_cache", lambda: did.append(("emptied", [ref() for ref in made]))
+    )
+    monkeypatch.setattr(torch.cuda, "mem_get_info", read)
+    device = torch.device("cpu")
+    assert cli._free_memory(device) == 94_000_000_000  # pyright: ignore[reportPrivateUsage]
+    assert did == [("tensor", device), ("emptied", [None]), ("read", device)]
+
+
+def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    # The kernel's MemAvailable, in bytes; None, said at debug level, when it can't be read.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    available = cli._host_available  # pyright: ignore[reportPrivateUsage]
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       65806340 kB\nMemAvailable:   41234567 kB\nCached: 1 kB\n")
+    assert available(meminfo) == 41_234_567 * 1024
+    found = available()  # this machine's own
+    assert found is not None and found > 0
+    assert caplog.text == ""
+    for text, reason in (
+        ("MemTotal:       65806340 kB\n", "no MemAvailable in it"),
+        ("MemAvailable:   lots kB\n", "invalid literal for int"),
+        ("MemAvailable:\n", "list index out of range"),
+    ):
+        caplog.clear()
+        meminfo.write_text(text)
+        assert available(meminfo) is None
+        assert f"{meminfo}: {reason}" in caplog.text
+        assert "the plan's system memory isn't checked" in caplog.text
+    caplog.clear()
+    assert available(tmp_path / "none") is None
+    assert "No such file or directory" in caplog.text
 
 
 @pytest.mark.parametrize("text", ["0", "512", "576", "1024", "4096"])

@@ -74,6 +74,17 @@ def planned(content: dict[str, Any]) -> bool:
         return False
 
 
+def complete(content: dict[str, Any]) -> bool:
+    """Whether the job a manifest's content records has finished every segment, a run of it then
+    making nothing (cli._run). False for a record this code can't read so, as planned is; here
+    for the same reason."""
+    segments: Any = content.get("segments")
+    try:
+        return bool(segments) and all(segment["finished"] for segment in segments)
+    except (KeyError, TypeError):
+        return False
+
+
 def read(path: Path) -> dict[str, Any]:
     """The manifest at path, as written; refused unless of a version this code reads (READ)."""
     try:

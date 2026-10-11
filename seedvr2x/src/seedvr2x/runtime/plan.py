@@ -1,10 +1,13 @@
 """A job's plan (DESIGN.md, Memory planner): what the planner chooses once for the job, the same
 for every shot, and the run follows: the cap on the DiT windows, the VAE's tiles, the DiT's
 swapped blocks and what stays on the GPU in each phase. Made by runtime/planner.py; recorded in
-the manifest (record). Nothing here imports torch: the command line plans before it does."""
+the manifest (record), and read back from it by a resume (Plan.recorded). Nothing here imports
+torch: the command line plans before it does."""
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard, cast
+
+from seedvr2x.runtime.job import JobError
 
 # The tiles' overlap, in output pixels, fixed (DESIGN.md, Pipeline, per shot, step 3): the colour
 # study's tiles after split and the recipes validated per card size ran at 64, and 512-px decode
@@ -46,6 +49,45 @@ class Plan:
     compile_dit: bool = False
     compile_vae: bool = False
 
+    @classmethod
+    def recorded(cls, record: Any) -> "Plan":
+        """The plan a manifest records (record), as a resume takes it: what shapes the output
+        alone, the cap, the tiles and the compile flags. Where the weights were isn't read: a
+        resume plans it again, from the memory free that day (DESIGN.md, Memory planner, A plan
+        shapes the output a little). Refused (JobError) when the record isn't a plan's."""
+
+        def tiles(name: str) -> Tiles | None:
+            entry: Any = fields.get(name)
+            if entry is None:
+                return None
+            if isinstance(entry, dict):
+                sides = cast(dict[str, Any], entry)
+                size: Any = sides.get("size")
+                overlap: Any = sides.get("overlap")
+                if _whole(size) and _whole(overlap) and 0 <= overlap < size:
+                    return Tiles(size, overlap)
+            raise JobError(f"not a plan as seedvr2x records one: its {name}, {entry!r}")
+
+        if not isinstance(record, dict):
+            raise JobError(f"not a plan as seedvr2x records one: {record!r}")
+        fields = cast(dict[str, Any], record)
+        window: Any = fields.get("window")
+        if window is not None and not (_whole(window) and window >= 1):
+            raise JobError(f"not a plan as seedvr2x records one: its window, {window!r}")
+        flags: list[bool] = []
+        for name in ("compile_dit", "compile_vae"):
+            flag: Any = fields.get(name)
+            if not isinstance(flag, bool):
+                raise JobError(f"not a plan as seedvr2x records one: its {name}, {flag!r}")
+            flags.append(flag)
+        return cls(
+            window,
+            tiles("encode_tiles"),
+            tiles("decode_tiles"),
+            compile_dit=flags[0],
+            compile_vae=flags[1],
+        )
+
     def record(self) -> dict[str, Any]:
         """The plan as the manifest records it: what shapes the output, compared on a resume as
         the layout is, and under `memory` what doesn't, for information (resume.UNCOMPARED)."""
@@ -66,3 +108,8 @@ class Plan:
                 "vae_in_dit": self.vae_in_dit,
             },
         }
+
+
+def _whole(value: Any) -> TypeGuard[int]:
+    """Whether a value read from a record is a whole number: an int, and no bool."""
+    return isinstance(value, int) and not isinstance(value, bool)

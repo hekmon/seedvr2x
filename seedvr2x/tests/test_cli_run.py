@@ -38,10 +38,11 @@ from test_rate import mechanism7, retagged, strayed
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.runtime import pull, weights
+from seedvr2x.runtime import planner, pull, weights
 from seedvr2x.runtime.detector import BATCH, Detector
-from seedvr2x.runtime.job import output_size, padded_size
+from seedvr2x.runtime.job import Shot, output_size, padded_size
 from seedvr2x.runtime.plan import Plan, Tiles
+from seedvr2x.runtime.planner import GIB, Peaks, Pins
 from seedvr2x.runtime.pull import Pin
 from seedvr2x.runtime.shot import decode_shot, padded_length
 
@@ -120,8 +121,23 @@ def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[tor
         yield torch.cat(planes, dim=1)
 
 
+# The memory the stand-in's GPU has free and in all, as its driver reports them
+# (torch.cuda.mem_get_info), in bytes: the 96 GB card's as numz's process found it (DESIGN.md,
+# Memory planner), which holds every plan the stand-in's frames ask for; and the system memory
+# the stand-in's host has available (cli._host_available).
+FREE, TOTAL = round(94.5 * GIB), 96 * GIB
+HOST = 64 * GIB
+# The stand-in's frames as the planner counts them: upscale's --resolution 96 of source's 64x48,
+# and its padding (job.padded_size), one tile's worth at most.
+TARGET = (96, 128)
+PADDED = (128, 128)
+
 # The phases the stand-in's models were told, in order (Models.enter), since stand_in_model.
 ENTERED: list[str] = []
+# What the stand-in was asked before a run's first unit, in order, since stand_in_model: each
+# reading of the free memory with the device it was asked for (cli._free_memory), and "models"
+# for each load (model.load_models).
+ASKED: list[object] = []
 # The stand-in's models: the CPU, and the VAE's slicing, which the encode and split's reference
 # follow (model.encode_slices).
 STAND_IN_MODELS = SimpleNamespace(
@@ -201,7 +217,25 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(torch.backends.cudnn, "version", lambda: None)
     patch(torch.cuda, "reset_peak_memory_stats", lambda device: None)
     patch(torch.cuda, "max_memory_allocated", lambda device: 0)
-    patch(model, "load_models", lambda *a: STAND_IN_MODELS)
+    # The planner's budget: the free memory's reading as the command line takes it
+    # (cli._free_memory), its first tensor on the stand-in's device, the driver's figures the
+    # stand-in's; the system memory available a figure of its own, not this machine's.
+    free_memory = cli._free_memory  # pyright: ignore[reportPrivateUsage]
+    ASKED.clear()
+
+    def read_free(device: torch.device) -> int:
+        ASKED.append(("free memory", device))
+        return free_memory(STAND_IN_MODELS.device)
+
+    def load(*arguments: object) -> object:
+        ASKED.append("models")
+        return STAND_IN_MODELS
+
+    patch(torch.cuda, "empty_cache", lambda: None)
+    patch(torch.cuda, "mem_get_info", lambda device: (FREE, TOTAL))
+    patch(cli, "_free_memory", read_free)
+    patch(cli, "_host_available", lambda: HOST)
+    patch(model, "load_models", load)
     patch(model, "nvidia_driver", lambda: "a stand-in")
     patch(model, "decode_stream", stand_in_decode_stream)
     patch(run, "encode_shot", stand_in_encode)
@@ -669,8 +703,25 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
     assert indexes(tmp_path / "one.mkv") == list(range(25))
 
 
-# The plan of JOB, as its manifest records it: the pins, nothing on the GPU moved.
-JOB_PLAN = Plan(5).record()
+# JOB's shots, and its plan on the stand-in's GPU: its cap pinned, every weight on the GPU.
+JOB_SHOTS = [Shot(0, 3), Shot(3, 4), Shot(4, 25)]
+
+
+def plan_record(plan: Plan, peaks: Peaks) -> dict[str, Any]:
+    """A plan as a manifest records it: its shape, and under memory where the weights are with
+    what it is predicted to take (cli._run)."""
+    record = plan.record()
+    record["memory"].update(peaks.record())
+    return record
+
+
+def free_memory(monkeypatch: pytest.MonkeyPatch, free: int) -> None:
+    """Have the stand-in's GPU report `free` bytes free from now on."""
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free, TOTAL))
+
+
+def plan_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [line for line in caplog.messages if line.startswith("plan: ")]
 
 
 def test_plan_recorded_and_phases_entered(
@@ -693,46 +744,87 @@ def test_plan_recorded_and_phases_entered(
     ]
     manifest = tmp_path / "out" / "manifest.json"
     content = json.loads(manifest.read_text())
-    assert content["plan"] == JOB_PLAN
+    # The planner's plan for the memory the stand-in reports free, read on its device: the cap
+    # pinned, nothing tiled, swapped or moved; the 6-latent shot's two windows of 4 the longest.
+    made = planner.plan(FREE, TARGET, JOB_SHOTS, Pins(window=5), HOST)
+    assert made[0] == Plan(5)
+    assert content["plan"] == plan_record(*made)
+    assert content["plan"]["memory"] == {
+        "swapped_blocks": 0,
+        "resident_encode": None,
+        "resident_decode": None,
+        "vae_in_dit": True,
+        "free": FREE,
+        "budget": FREE - planner.MARGIN,
+        "encode_peak": planner.encode_peak(PADDED),
+        "dit_peak": planner.dit_peak(PADDED, 4),
+        "decode_peak": planner.decode_peak(PADDED, TARGET),
+        "bound": "encode",
+        "host": planner.HOST_RESIDENT,
+        "scratch": 0,
+        "longest_window": 4,
+    }
     assert list(content).index("plan") == list(content).index("output") + 1
+    assert (content["settings"]["encode_tile"], content["settings"]["decode_tile"]) == (None, None)
     ENTERED.clear()
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
     assert ENTERED == [*(["encode", "dit", "decode"] * 2), "encode", "dit", "dit", "decode"]
-    # Pins of 0, untiled and nothing swapped, are the same job; where the weights were is no
-    # part of it; what shapes the output is.
+    # --swap-blocks shapes nothing, so is no setting: pinned at what the planner chose, or at
+    # anything else, the same job; where the weights were is no part of it, nor the timings. A
+    # finished job isn't planned again: its plan stays as recorded.
     content["plan"]["memory"] = {"swapped_blocks": 36, "vae_in_dit": False}
     content["plan"]["timings"] = {"window": 1.5}
     manifest.write_text(json.dumps(content))
-    pinned = ("--encode-tile", "0", "--decode-tile", "0", "--swap-blocks", "0")
-    assert upscale(tmp_path, source_path, "out", *JOB, *pinned) == 0
-    assert "finished already" in caplog.text
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "0") == 0
+    assert "finished already" in caplog.text and plan_lines(caplog) == []
+    assert json.loads(manifest.read_text()) == content
+    # A tile pin is a setting, which a resume must find again, though it pins what the planner
+    # chose: another job.
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, "--decode-tile", "0") == 1
+    assert "settings.decode_tile: null -> 0" in caplog.text
+    # What shapes the output is taken as recorded: another cap there lays the shots out
+    # otherwise than the job's units are.
     content["plan"]["window"] = 6
     manifest.write_text(json.dumps(content))
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *JOB) == 1
-    assert "plan.window: 6 -> 5" in caplog.text
+    assert "shots[2].windows: 2 recorded -> 1 now" in caplog.text
+    # A record that isn't a plan's is refused, the manifest named.
+    content["plan"]["window"] = "six"
+    manifest.write_text(json.dumps(content))
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert f"{manifest}: not a plan as seedvr2x records one: its window, 'six'" in caplog.text
+    # So is a cap no layout exists for, under 5 latents with a shot longer than it (the planner
+    # makes one that short for shorter shots alone), and a manifest that records no plan.
+    content["plan"]["window"] = 3
+    manifest.write_text(json.dumps(content))
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert (
+        f"{manifest}: not a plan as seedvr2x records one: its window, 3, with a shot of 6"
+        " latents: a cap that a shot is longer than is 5 latents at least"
+    ) in caplog.text
+    del content["plan"]
+    manifest.write_text(json.dumps(content))
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert f"{manifest}: not a plan as seedvr2x records one: None" in caplog.text
 
 
-@pytest.mark.parametrize(
-    ("options", "message"),
-    [
-        (("--swap-blocks", "37"), "--swap-blocks 37: the DiT has 36 blocks"),
-        (("--until", "7:30"), "--until 07:30: stopping by the clock isn't built yet"),
-    ],
-)
-def test_pins_not_built_refused(
+def test_until_not_built_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,
     caplog: pytest.LogCaptureFixture,
-    options: tuple[str, str],
-    message: str,
 ) -> None:
-    # Milestone 3's seam: the options are read, and refused until their work is built, nothing
-    # made: no unit, no manifest.
+    # Milestone 3's seam: --until is read, and refused until its work is built, nothing made:
+    # no unit, no manifest.
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "out", *JOB, *options) == 1
-    assert message in caplog.text
+    assert upscale(tmp_path, source_path, "out", *JOB, "--until", "7:30") == 1
+    assert "--until 07:30: stopping by the clock isn't built yet" in caplog.text
     assert steps.calls == []
     assert not (tmp_path / "out" / "manifest.json").exists()
 
@@ -791,11 +883,13 @@ def test_plan_tiles_reach_the_passes(
 ) -> None:
     # A plan's tiles go to each encode and decode with the shot's own directory for their
     # scratch: among its units in an output directory; for one file, in the work directory,
-    # which a plan with tiles has without split too, gone with the run.
-    from seedvr2x.runtime import planner, run
+    # which a plan with tiles has without split too, gone with the run. The stand-in's frames
+    # are a tile's worth at most, which the planner never tiles: the plan is put in its place.
+    from seedvr2x.runtime import run
 
     tiled = Plan(5, Tiles(512), Tiles(1024))
-    monkeypatch.setattr(planner, "plan", lambda pins: tiled)
+    plan = planner.plan
+    monkeypatch.setattr(planner, "plan", lambda *job, **options: (tiled, plan(*job, **options)[1]))
     given: list[tuple[str, Tiles | None, Path | None]] = []
     work: list[bool] = []
 
@@ -829,7 +923,373 @@ def test_plan_tiles_reach_the_passes(
     assert not (tmp_path / "one.mkv.work").exists()
     if output == "out":
         content = json.loads((tmp_path / "out" / "manifest.json").read_text())
-        assert content["plan"] == tiled.record()
+        assert content["plan"]["encode_tiles"] == {"size": 512, "overlap": 64}
+        assert content["plan"]["decode_tiles"] == {"size": 1024, "overlap": 64}
+
+
+def test_plan_said(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Every run logs its plan once made, a line each (planner.said), and --plan prints the same,
+    # before its counts (DESIGN.md, Memory planner, --plan).
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    pins = Pins(window=5)
+    made = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST)
+    said = planner.said(*made, "a stand-in", TARGET, JOB_SHOTS, pins)
+    assert plan_lines(caplog) == said
+    assert said == [
+        "plan: a stand-in, 94.50 GiB free, a budget of 93.90 GiB",
+        "plan: frames padded to 128x128, 64 tokens a latent",
+        "plan: 3 shots, the longest of 21 frames (6 latents)",
+        "plan: windows of 5 latents at most, the longest run 4 latents: 2 of 3 shots in one"
+        " window, 1 join",
+        "plan: no block of the DiT swapped, the VAE on the GPU in the DiT's phase; in the encode,"
+        " the DiT's 36 blocks on the GPU; in the decode, the DiT's 36 blocks on the GPU",
+        "plan: no system memory pinned, nothing leaving the GPU; 2.40 GiB of system memory in all",
+        "plan: encode untiled, decode untiled",
+        "plan: predicted peaks: encode 17.22 GiB, DiT 15.91 GiB, decode 16.93 GiB; the encode"
+        " bounds the plan, 76.68 GiB under the budget",
+        "plan: pinned: --window 5",
+    ]
+    caplog.clear()
+    plan = tmp_path / "plan.txt"
+    with monkeypatch.context() as patch:
+        from seedvr2x.runtime import model
+
+        patch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+        assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(plan)) == 0
+        assert plan_lines(caplog) == said
+        counts = next(line for line in caplog.messages if line.endswith(f"the cut list in {plan}"))
+        assert caplog.messages.index(said[-1]) < caplog.messages.index(counts)
+        # For one file too, which --plan doesn't write, nor anything but its cut list.
+        caplog.clear()
+        steps.calls.clear()
+        before = sorted(path.name for path in tmp_path.iterdir())
+        listed = tmp_path / "other.txt"
+        assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", str(listed)) == 0
+        assert plan_lines(caplog) == said and steps.calls == []
+        assert sorted(path.name for path in tmp_path.iterdir()) == sorted([*before, "other.txt"])
+        assert listed.read_text() == plan.read_text()
+
+
+def test_pin_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A pin is taken exactly or refused, never adjusted (DESIGN.md, Memory planner, Pins), the
+    # refusal naming what fits, before the models load: nothing made, no unit, no manifest.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "37") == 1
+    assert "--swap-blocks 37: the DiT has 36 blocks, so from 0 to 36" in caplog.text
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, "--decode-tile", "512") == 1
+    said = "--decode-tile 512: a tile of 512 px covers the whole padded frame, 128x128"
+    assert f"{said}: --decode-tile 0 pins an untiled decode" in caplog.text
+    # With no block swapped, the memory that holds a window of 5 latents and not one of 6, the
+    # VAE's weights away: --window 6, the longest shot in one window, is refused.
+    free_memory(monkeypatch, planner.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN)
+    caplog.clear()
+    pinned = ("--cuts", "cuts.txt", "--window", "6", "--swap-blocks", "0")
+    assert upscale(tmp_path, source_path, "out", *pinned) == 1
+    assert (
+        "--window 6: its longest window, 6 latents, takes 16.06 GiB of free VRAM with"
+        " --swap-blocks 0, and the driver reports 16.04 GiB free: the longest window that fits is"
+        " --window 5"
+    ) in caplog.text
+    assert steps.calls == []
+    assert not (tmp_path / "out" / "manifest.json").exists()
+    # Without the pin, the planner's own cap is that one, and the job runs.
+    assert upscale(tmp_path, source_path, "out", *pinned[:2], *pinned[4:]) == 0
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["plan"]["window"] == 5 and content["plan"]["memory"]["vae_in_dit"] is False
+    assert content["shots"][2]["windows"] == [[0, 4], [2, 6]]
+
+
+def test_size_and_host_memory_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A size the free memory doesn't hold, and a plan the system memory doesn't, are refused
+    # before the models load, as a pin is: exit 1, nothing made, nothing written.
+    source_path = job(tmp_path, monkeypatch)
+    there = sorted(path.name for path in tmp_path.iterdir())
+    encode = planner.encode_peak(PADDED, None, 0, 36)
+    with monkeypatch.context() as patch:
+        free_memory(patch, encode + planner.MARGIN - 1)
+        assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert (
+        "an output of 128x96 takes 3.47 GiB of free VRAM (its encode untiled, too small for a"
+        " tile, with the DiT's blocks off the GPU: a peak of 2.87 GiB, and 0.60 of margin), and"
+        " the driver reports 3.46 GiB free: the largest output that fits there is --resolution"
+        " 80, about 106x80"
+    ) in caplog.text
+    caplog.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(cli, "_host_available", lambda: 2 * GIB)
+        assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 1
+    assert (
+        "the plan takes 2.40 GiB of system memory (2.40 for the process) and 2.00 GiB are"
+        " available, 0.40 GiB short"
+    ) in caplog.text
+    assert steps.calls == [] and "models" not in ASKED
+    # But the stand-in's model files, which upscale puts there.
+    files = sorted(path.name for path in tmp_path.iterdir())
+    assert files == sorted([*there, pull.DETECTOR, "w.safetensors"])
+    # With the memory back, both run.
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+
+
+def test_free_memory_read_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # The free memory is read once a run, on the job's device, after the first pass, whose shot
+    # detector has given its memory back, and before the models load (DESIGN.md, Memory planner,
+    # Budget); a resume, which runs no first pass, reads it once too, and a finished job never.
+    first_pass = cli._first_pass  # pyright: ignore[reportPrivateUsage]
+
+    def passed(*arguments: Any) -> Any:
+        found = first_pass(*arguments)
+        ASKED.append("first pass")
+        return found
+
+    monkeypatch.setattr(cli, "_first_pass", passed)
+    source_path = job(tmp_path, monkeypatch)
+    options = JOB[2:]  # no cut list: the shot detector runs
+    steps.stop = "window 0:1"
+    stopped(tmp_path, source_path, "out", *options)
+    reading = ("free memory", torch.device("cuda", 0))
+    assert ASKED == ["first pass", reading, "models"]
+    [built] = StandInDetector.built
+    assert built.closed
+    ASKED.clear()
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert ASKED == [reading, "models"]
+    ASKED.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert ASKED == []
+
+
+def test_resumed_keeps_its_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A job that has made a unit keeps the cap its windows were laid out by, with all the memory
+    # there is: planned whole there, its longest shot would run in one window of 6 latents, as a
+    # plan is (test_plan_planned_again_whole); resumed, it keeps its cap of 5 and its two
+    # windows, and the manifest takes the day's memory with the next unit made.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    job_options = (*JOB[:2], *JOB[4:])  # JOB without its --window: the cap is the planner's
+    options = (*job_options, "--swap-blocks", "0")
+    # With no block swapped, the memory that holds a window of 5 latents and not one of 6.
+    less = planner.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN
+    free_memory(monkeypatch, less)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *options)
+    manifest = tmp_path / "out" / "manifest.json"
+    started = json.loads(manifest.read_text())
+    pins = Pins(swap_blocks=0)
+    assert started["plan"] == plan_record(*planner.plan(less, TARGET, JOB_SHOTS, pins, HOST))
+    assert (started["plan"]["window"], started["plan"]["memory"]["vae_in_dit"]) == (5, False)
+    layout = [[[0, 2]], [[0, 1]], [[0, 4], [2, 6]]]
+    assert [shot["windows"] for shot in started["shots"]] == layout
+    assert started["segments"][0]["finished"] and not started["segments"][1]["finished"]
+    free_memory(monkeypatch, FREE)
+    assert planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST)[0] == Plan(6)
+    steps.stop = "window 4:1"
+    steps.calls.clear()
+    caplog.clear()
+    stopped(tmp_path, source_path, "out", *options)
+    assert "re-planned" not in caplog.text
+    assert "plan: windows of 5 latents at most, the longest run 4 latents" in caplog.text
+    assert steps.calls == ["encode 4", "window 4:0", "window 4:1"]
+    content = json.loads(manifest.read_text())
+    again = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST, recorded=Plan(5))
+    assert again[0] == Plan(5) and content["plan"] == plan_record(*again)
+    assert content["plan"]["memory"]["free"] == FREE != started["plan"]["memory"]["free"]
+    assert content["plan"]["memory"]["vae_in_dit"] is True
+    assert [shot["windows"] for shot in content["shots"]] == layout
+    # Under another --swap-blocks it is the same job still, the pin no setting: taken, the shape
+    # as recorded, and the job finishes.
+    steps.stop = None
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *job_options, "--swap-blocks", "36") == 0
+    assert steps.calls == ["window 4:1", "decode 4"]
+    content = json.loads(manifest.read_text())
+    pins = Pins(swap_blocks=36)
+    again = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST, recorded=Plan(5))
+    assert again[0] == Plan(5, swapped=36) and content["plan"] == plan_record(*again)
+    shape = {key: value for key, value in content["plan"].items() if key != "memory"}
+    assert shape == {key: value for key, value in started["plan"].items() if key != "memory"}
+    assert [shot["windows"] for shot in content["shots"]] == layout
+    assert all(segment["finished"] for segment in content["segments"])
+    out = tmp_path / "out"
+    assert indexes(out / "seg_000000.mkv") + indexes(out / "seg_000001.mkv") == list(range(25))
+
+
+def test_resumed_with_other_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A job that has made a unit keeps its plan's shape, the cap its windows were laid out by,
+    # and plans where the weights are again from the memory free at each start (DESIGN.md,
+    # Memory planner, A plan shapes the output a little): with less, blocks are swapped that
+    # weren't, and the manifest takes the new memory with the next unit made, never before.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    options = JOB[:2]  # no --window: each shot in one window, the cap the longest's 6 latents
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *options)
+    manifest = tmp_path / "out" / "manifest.json"
+    started = json.loads(manifest.read_text())
+    assert started["plan"] == plan_record(*planner.plan(FREE, TARGET, JOB_SHOTS, Pins(), HOST))
+    assert (started["plan"]["window"], started["plan"]["memory"]["swapped_blocks"]) == (6, 0)
+    # The memory that holds the 6-latent window with 20 blocks swapped and the VAE's weights
+    # away, and neither with 19 nor with the VAE there.
+    less = planner.dit_peak(PADDED, 6, 20, vae_in_dit=False) + planner.MARGIN
+    assert planner.dit_peak(PADDED, 6, 19, vae_in_dit=False) + planner.MARGIN > less
+    assert planner.dit_peak(PADDED, 6, 20) + planner.MARGIN > less
+    free_memory(monkeypatch, less)
+    kept = contents(tmp_path / "out")
+    caplog.clear()
+    stopped(tmp_path, source_path, "out", *options)  # before a unit: the record as it was
+    assert contents(tmp_path / "out") == kept
+    assert "plan: 20 of the DiT's 36 blocks swapped" in caplog.text
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    content = json.loads(manifest.read_text())
+    again = planner.plan(less, TARGET, JOB_SHOTS, Pins(), HOST, recorded=Plan(6))
+    assert (again[0].window, again[0].swapped, again[0].vae_in_dit) == (6, 20, False)
+    assert content["plan"] == plan_record(*again)
+    shape = {key: value for key, value in content["plan"].items() if key != "memory"}
+    assert shape == {key: value for key, value in started["plan"].items() if key != "memory"}
+    assert content["plan"]["memory"]["free"] == less != started["plan"]["memory"]["free"]
+    assert [shot["windows"] for shot in content["shots"]] == [[[0, 2]], [[0, 1]], [[0, 6]]]
+    assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
+
+
+def test_recorded_plan_no_longer_fits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A resume whose recorded shape no longer fits the memory free stops, naming the phase and
+    # the shortfall (DESIGN.md, Memory planner), nothing changed on disk; the job resumes once
+    # the memory is back. Here the untiled encode, a quarter of a GiB short with every block of
+    # the DiT away, its slots there.
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    kept = contents(tmp_path / "out")
+    steps.stop = None
+    steps.calls.clear()
+    encode = planner.encode_peak(PADDED, None, 0, 36)
+    free_memory(monkeypatch, encode + planner.MARGIN - GIB // 4)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert (
+        "the recorded plan no longer fits the memory free now: the encode, untiled, with the"
+        " DiT's blocks off the GPU, takes 3.47 GiB of free VRAM and the driver reports 3.21 GiB"
+        " free, 0.26 GiB short"
+    ) in caplog.text
+    assert contents(tmp_path / "out") == kept and steps.calls == []
+    free_memory(monkeypatch, FREE)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == UNINTERRUPTED[6:]
+
+
+def test_plan_planned_again_whole(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A plan, a job that has made no unit, is planned again whole from the memory free when it
+    # is run (DESIGN.md, Memory planner: "A plan recorded with no unit made yet is made again
+    # whole"): with less, another cap and so another layout, which is no other job; what a stop
+    # left by the plan's own layout is discarded, and the manifest rewritten at once, said.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    options = (*JOB[:2], "--swap-blocks", "0")
+    assert upscale(tmp_path, source_path, "out", *options, "--plan", str(tmp_path / "p.txt")) == 0
+    out = tmp_path / "out"
+    planned = json.loads((out / "manifest.json").read_text())
+    assert planned["plan"]["window"] == 6
+    assert [shot["windows"] for shot in planned["shots"]] == [[[0, 2]], [[0, 1]], [[0, 6]]]
+    index = (out / "frame_index.bin").read_bytes()
+    # What a stop in shot 4's encode leaves.
+    left = out / "resume" / "shot_000004"
+    left.mkdir(parents=True)
+    (left / "latent.pt.partial").write_bytes(b"left")
+    # With no block swapped, the memory that holds a window of 5 latents and not one of 6.
+    less = planner.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN
+    free_memory(monkeypatch, less)
+    steps.stop = "encode 0"
+    caplog.clear()
+    stopped(tmp_path, source_path, "out", *options)  # before a unit: rewritten all the same
+    said = "re-planned, its job having made no unit yet: plan.window: 6 -> 5; the windows of 1 shot"
+    assert f"{out}: {said}; 1 leftover discarded" in caplog.text
+    content = json.loads((out / "manifest.json").read_text())
+    pins = Pins(swap_blocks=0)
+    assert content["plan"] == plan_record(*planner.plan(less, TARGET, JOB_SHOTS, pins, HOST))
+    assert content["plan"]["window"] == 5
+    assert [shot["windows"] for shot in content["shots"]] == [[[0, 2]], [[0, 1]], [[0, 4], [2, 6]]]
+    assert not any(shot["encoded"] or shot["windows_done"] for shot in content["shots"])
+    assert sorted(path.name for path in out.iterdir()) == ["frame_index.bin", "manifest.json"]
+    assert (out / "frame_index.bin").read_bytes() == index
+    # Run to its end in that memory: the new layout's windows; the same plan, nothing rewritten
+    # before its first unit.
+    steps.stop = None
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert "re-planned" not in caplog.text
+    assert steps.calls == [
+        *("encode 0", "window 0:0", "encode 3", "window 3:0", "encode 4", "window 4:0"),
+        *("window 4:1", "decode 0", "decode 3", "decode 4"),
+    ]
+    assert indexes(out / "seg_000000.mkv") == list(range(25))
+
+
+def test_plan_without_its_record_planned_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A plan whose manifest lost its `plan`, deleted by hand, is planned again whole as every
+    # plan is, whatever it recorded, and said in one line: no other job, and no KeyError.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(tmp_path / "p.txt")) == 0
+    manifest = tmp_path / "out" / "manifest.json"
+    planned = json.loads(manifest.read_text())
+    manifest.write_text(json.dumps({k: v for k, v in planned.items() if k != "plan"}))
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    [said] = [line for line in caplog.messages if "re-planned" in line]
+    assert said.startswith(
+        f"{tmp_path / 'out'}: re-planned, its job having made no unit yet: plan: "
+    )
+    assert said.endswith("; 0 leftovers discarded")
+    content = json.loads(manifest.read_text())
+    assert content["plan"] == planned["plan"]
+    assert steps.calls == UNINTERRUPTED
 
 
 # The tile pins of the tests below, and the plan JOB then records.

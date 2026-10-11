@@ -112,6 +112,10 @@ def recorded_job(path: Path, content: dict[str, Any], source: Source) -> Manifes
     shots: list[Any] = content["shots"]
     entries: list[Any] = content["segments"]
     files = [str(entry["name"]) for entry in entries]
+    # The plan as recorded, which nothing reads here: the leftovers go by the layout. One
+    # deleted by hand, or no record of a plan's, is none: its job, which has made no unit, is
+    # planned again whole whatever it recorded (cli._resume).
+    plan: Any = content.get("plan")
     job = Manifest(
         path,
         content["settings"],
@@ -125,7 +129,7 @@ def recorded_job(path: Path, content: dict[str, Any], source: Source) -> Manifes
         ],
         files,
         content["output"],
-        content["plan"],
+        cast(dict[str, Any], plan) if isinstance(plan, dict) else {},
     )
     adopt(job, content)
     return job

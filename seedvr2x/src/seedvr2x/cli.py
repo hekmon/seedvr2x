@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from seedvr2x.runtime.cuts import Cut
     from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
+    from seedvr2x.runtime.plan import Plan
     from seedvr2x.runtime.pull import ModelFile, ModelFiles
 
 # Video file names, other than Matroska's, that -o refuses: an FFV1 master is a .mkv file, and
@@ -210,12 +211,12 @@ def main(argv: list[str] | None = None) -> int:
         "--window",
         type=int,
         metavar="LATENTS",
-        help="cap on the DiT windows, in latents of 4 frames (default: the shot in one window)",
+        help="pin the cap on the DiT windows, in latents of 4 frames, 5 at least; taken exactly"
+        " or refused (default: the planner's, the longest that fits the GPU's free memory)",
     )
     # The planner's other pins (DESIGN.md, Memory planner, Pins), each fixing one choice, taken
-    # exactly or refused, never adjusted; and --until (DESIGN.md, Pause and resume, Stopping).
-    # Milestone 3's seam adds the four at once: each is refused until its work is built
-    # (planner.plan, _run).
+    # exactly or refused, never adjusted (planner.plan); and --until (DESIGN.md, Pause and
+    # resume, Stopping), refused until its work is built (_run).
     parser.add_argument(
         "--encode-tile",
         type=_tile,
@@ -436,7 +437,7 @@ def _run(args: argparse.Namespace) -> int:
         shots_from_cuts,
         target_size,
     )
-    from seedvr2x.runtime.manifest import NAME, planned, read
+    from seedvr2x.runtime.manifest import NAME, complete, planned, read
     from seedvr2x.runtime.planner import Pins
     from seedvr2x.runtime.weights import ModelError, check_models
 
@@ -574,12 +575,47 @@ def _run(args: argparse.Namespace) -> int:
             out_height,
         )
         # The job's plan (DESIGN.md, Memory planner): one for the job, made after the first pass,
-        # whose shots are its input, and before the models load.
-        plan = planner.plan(pins)
+        # whose shots are its input, and before the models load, from the memory free then. A job
+        # resumed that has made a unit keeps its plan's shape, where its joins fall and its
+        # picture is cut, and where the weights are is planned again around it; a plan, which
+        # has made none, is planned again whole (_resume).
+        split = args.color_correction == "split"
+        kept_plan = None
+        plan_record: dict[str, Any] | None = None
+        if prior is not None and not planned(prior.recorded):
+            assert directory is not None
+            kept_plan = _recorded_plan(directory / NAME, prior.recorded, shots)
+            if complete(prior.recorded):
+                # A finished job makes nothing again (DESIGN.md, Pause and resume): its plan
+                # stays as recorded, the memory free now none of its business, nor read.
+                # PROVISIONAL (implementation, 2026-10-10): DESIGN.md has a resume plan its
+                # memory again, and doesn't say that a finished job has none to plan; refused
+                # for the memory another program holds today, it would no longer say that it is
+                # finished.
+                plan_record = prior.recorded["plan"]
+        if kept_plan is not None and plan_record is not None:
+            plan = kept_plan
+        else:
+            import torch
+
+            free = _free_memory(identity.device)
+            plan, peaks = planner.plan(
+                *(free, target, shots, pins, _host_available()),
+                split=split,
+                numz_padding=numz_padding,
+                recorded=kept_plan,
+            )
+            card = torch.cuda.get_device_name(identity.device)
+            said = planner.said(plan, peaks, card, target, shots, pins, numz_padding=numz_padding)
+            for line in said:
+                logger.info("%s", line)
+            # What shapes the output, compared on a resume, and under memory what doesn't, the
+            # predicted peaks with where the weights are, for information (resume.UNCOMPARED).
+            plan_record = plan.record()
+            plan_record["memory"].update(peaks.record())
         # The work directory of a one-file output: for split's input copies, and for a tiled
         # pass's scratch (run._scratch). None for --plan, which writes nothing but its cut list
         # for one file.
-        split = args.color_correction == "split"
         tiled = plan.encode_tiles is not None or plan.decode_tiles is not None
         keeps = directory is None and (split or tiled) and args.plan is None
         work = _work(args.output) if keeps else None
@@ -623,21 +659,22 @@ def _run(args: argparse.Namespace) -> int:
                 "size": [out_width, out_height],
                 "frame_rate": str(source.frame_rate),
             },
-            plan.record(),
+            plan_record,
         )
         if prior is None and not _empty(directory):
             logger.error("%s: written to since it was checked, by another program", directory)
             return 1
         if prior is not None:
             # The job recorded there, checked whole and taken up before the models load: a plan
-            # whose cuts changed planned again (_replan).
+            # whose cuts changed, or whose shape did with the memory free, planned again
+            # (_replan).
             try:
-                _resume(record, prior)
+                replanned = _resume(record, prior)
             except JobError as error:
                 logger.error("%s", error)
                 return 1
             remaining = [index for index, done in enumerate(record.finished) if not done]
-            if not prior.replanned:
+            if not replanned:
                 # The job as recorded: what of it is written before a unit, its first pass run
                 # again or its plan taken up in another environment (a plan planned again wrote
                 # its own, _replan).
@@ -942,6 +979,64 @@ def _first_pass(
         return first_pass(declared, hashed=hashed, detector=detector)
 
 
+def _free_memory(device: "torch.device") -> int:
+    """The memory free on the job's GPU, in bytes, as the driver reports it (mem_get_info): the
+    planner's budget, less its margin (DESIGN.md, Memory planner, Budget). Read once a run, after
+    the first pass, whose shot detector has given its memory back, and before the models load.
+
+    A first tensor is allocated and freed before the reading, so that no run reads before its
+    process's first allocation on the GPU, which takes 0.2363 GiB outside torch's counters
+    (253,755,392 bytes with cudaMallocAsync, 32 MiB of them the pool's first reservation) that no
+    reading before it shows: a run with a cut list, its shot detector not built, has allocated
+    nothing yet when it plans. Measured on the bare 96 GB card (2026-10-10): 94.4973 GiB free
+    with the bare context, 94.2609 with a first tensor held, 94.2746 after the shot detector ran
+    and closed; the margin was bisected against readings taken after a first allocation
+    (research/docs/planner-limits.md, The margin over free memory). The two readings after one
+    are 14 MiB apart, and the helper's own, its tensor freed and the cache emptied, isn't
+    measured yet: it puts every reading after the first allocation, and makes them no more equal
+    than that. PROVISIONAL (implementation, 2026-10-10): DESIGN.md has the reading, not what must
+    have been allocated before it."""
+    import torch
+
+    first = torch.empty(1, device=device)
+    del first
+    torch.cuda.empty_cache()
+    return torch.cuda.mem_get_info(device)[0]
+
+
+def _host_available(meminfo: Path = Path("/proc/meminfo")) -> int | None:
+    """The system memory available, in bytes: the kernel's MemAvailable, what new work can take
+    without swapping, which the plan's pinned copies and scratch are counted against (DESIGN.md,
+    Memory planner, Host RAM). None when it can't be read, the plan's system memory then not
+    checked, which is said at debug level."""
+    try:
+        for line in meminfo.read_text().splitlines():
+            name, _, value = line.partition(":")
+            if name == "MemAvailable":
+                return int(value.split()[0]) * 1024  # in kB, the kernel's for KiB
+        reason = "no MemAvailable in it"
+    except (OSError, ValueError, IndexError) as error:
+        reason = str(error)
+    logger.debug("%s: %s; the plan's system memory isn't checked", meminfo, reason)
+    return None
+
+
+def _recorded_plan(path: Path, recorded: dict[str, Any], shots: "Sequence[Shot]") -> "Plan":
+    """The plan the manifest at path records, as a resume takes it (Plan.recorded): refused
+    (JobError), naming the manifest, when its record isn't a plan's, or when its cap is one the
+    job's shots can't be laid out by (planner.check_recorded)."""
+    from seedvr2x.runtime import planner
+    from seedvr2x.runtime.job import JobError
+    from seedvr2x.runtime.plan import Plan
+
+    try:
+        plan = Plan.recorded(recorded.get("plan"))
+        planner.check_recorded(plan, shots)
+    except JobError as error:
+        raise JobError(f"{path}: {error}") from None
+    return plan
+
+
 def _settings(
     args: argparse.Namespace, cuts: list[int], numz_padding: bool, model_files: "ModelFiles"
 ) -> dict[str, object]:
@@ -961,7 +1056,14 @@ def _settings(
         "resolution": args.resolution,
         "seed": args.seed,
         "color_correction": args.color_correction,
+        # The pins that shape the output, as asked, None when not given: the same command
+        # resumes (DESIGN.md, Pause and resume), so a resume finds them again. --swap-blocks is
+        # none of them: it shapes nothing, and a resume may change it (DESIGN.md, Memory planner:
+        # a resume plans the swapped blocks again). PROVISIONAL (implementation, 2026-10-10):
+        # DESIGN.md records the plan's shape, and doesn't say that the tile pins are settings.
         "window": args.window,
+        "encode_tile": args.encode_tile,
+        "decode_tile": args.decode_tile,
         "format": args.format,
         # How the source is cut (resume.CUT_SETTINGS): the cut list given, or none and the
         # detection's threshold, "a setting the manifest records" (DESIGN.md, Shot detection),
@@ -1244,33 +1346,47 @@ def _content(path: Path) -> dict[str, object]:
     return {"bytes": path.stat().st_size, "sha256": digest}
 
 
-def _resume(record: "Manifest", prior: _Prior) -> None:
+def _resume(record: "Manifest", prior: _Prior) -> bool:
     """Take up the job recorded beside record, checked before its first pass (_prior): refused
     (JobError) unless the rest is the job asked too, what the first pass found and the layout
     following from it; its directory must be as the manifest says. Then record the environment
     change accepted, and discard what a stop left that the manifest doesn't name
     (resume.leftovers). The manifest is written by the next unit made: a resume stopped
     before one keeps the record as it was, but for the index of a first pass run again and for
-    a plan's (_taken_up). A plan planned again (_prior) takes its new cuts and the layout they
-    give (_replan)."""
+    a plan's (_taken_up).
+
+    A plan, a job that has made no unit yet (manifest.planned), is planned again whole from the
+    memory free now (_run; DESIGN.md, Memory planner: "A plan recorded with no unit made yet is
+    made again whole"): its plan's shape may differ from the one recorded, and its shots' windows
+    with it, which is no other job. Such a plan, and one planned again for its cuts (_prior),
+    takes the new plan and layout at once (_replan): True then, the manifest rewritten; False for
+    a job taken up as it is recorded."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import planned
 
+    plan = planned(prior.recorded)
+
+    def reshaped(line: str) -> bool:
+        # A plan's shape, made again, and the windows it gives each shot.
+        return plan and (
+            resume.section(line) == "plan" or re.match(r"shots\[\d+\]\.windows\b", line) is not None
+        )
+
     def compared(line: str) -> bool:
         # The environment compared before the first pass; a plan's cuts, accepted there.
-        if resume.section(line) == "environment":
+        if resume.section(line) == "environment" or reshaped(line):
             return False
         recut = resume.setting(line) in resume.CUT_SETTINGS
         return not prior.replanned or not (recut or resume.section(line) in ("shots", "segments"))
 
-    found = [
-        line for line in resume.differences(prior.recorded, record.content()) if compared(line)
-    ]
+    differences = resume.differences(prior.recorded, record.content())
+    found = [line for line in differences if compared(line)]
     if found:
         raise _another_job(record.path, found, only_environment=False)
-    if prior.replanned:
-        _replan(record, prior)
-        return
+    shape = [line for line in differences if reshaped(line)]
+    if prior.replanned or shape:
+        _replan(record, prior, shape)
+        return True
     resume.adopt(record, prior.recorded)
     if prior.changed:
         change = resume.environment_change(prior.recorded, record.environment)
@@ -1302,6 +1418,7 @@ def _resume(record: "Manifest", prior: _Prior) -> None:
         sum(record.windows_done),
         _plural(len(discarded), "leftover"),
     )
+    return False
 
 
 def _taken_up(record: "Manifest", prior: _Prior) -> None:
@@ -1366,15 +1483,17 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
     as_recorded.write()
 
 
-def _replan(record: "Manifest", prior: _Prior) -> None:
-    """Take up a plan with other cuts (_prior): what a stop left of it, found by its own layout
-    (resume.recorded_job, resume.leftovers: anything not its own refused, never deleted), is
-    discarded, its units' directories with it, none of them the new layout's; its first pass's
-    index replaced when the pass ran again (a plan cut by a list, planned again without one, or
-    one planned again under another ffmpeg, accepted); then its manifest rewritten with the new
-    settings and layout, at once, so that the plan is the new one whether a unit follows or not,
-    in this run's environment, a change accepted recorded with it, as a plan taken up is
-    (_taken_up). PROVISIONAL, as the rule is (resume.CUT_SETTINGS)."""
+def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
+    """Take up a plan with other cuts (_prior), or whose plan the memory free now shapes
+    otherwise (_resume), `shape` the differences in its plan and its shots' windows: what a stop
+    left of it, found by its own layout (resume.recorded_job, resume.leftovers: anything not its
+    own refused, never deleted), is discarded, its units' directories with it, none of them the
+    new layout's; its first pass's index replaced when the pass ran again (a plan cut by a list,
+    planned again without one, or one planned again under another ffmpeg, accepted); then its
+    manifest rewritten with the new settings, plan and layout, at once, so that the plan is the
+    new one whether a unit follows or not, in this run's environment, a change accepted recorded
+    with it, as a plan taken up is (_taken_up). PROVISIONAL, as the rule is
+    (resume.CUT_SETTINGS)."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import STATE
 
@@ -1408,10 +1527,16 @@ def _replan(record: "Manifest", prior: _Prior) -> None:
     if prior.known is None:
         _write_index(directory, record.source)
     record.write()
+    # What changed, in one line: the cuts' settings, the plan's shape, and, the shots being the
+    # same ones, how many of them it lays out otherwise.
+    changed = [*prior.replanned, *(line for line in shape if resume.section(line) == "plan")]
+    laid_out = {line.partition("]")[0] for line in shape if resume.section(line) == "shots"}
+    if laid_out and not prior.replanned:
+        changed.append(f"the windows of {_plural(len(laid_out), 'shot')}")
     logger.info(
         "%s: re-planned, its job having made no unit yet: %s; %s discarded",
         directory,
-        "; ".join(prior.replanned),
+        "; ".join(changed),
         _plural(len(discarded), "leftover"),
     )
 
