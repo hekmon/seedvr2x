@@ -3,11 +3,15 @@ decode held bit for bit to numz's tiled_encode and tiled_decode, the vendored on
 VAE and, once, over the real one with random weights."""
 
 import errno
+import gc
 import logging
+import mmap
 import os
 import random
+import resource
 import weakref
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from functools import reduce
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +23,7 @@ import torch
 from omegaconf import OmegaConf
 from torch import Tensor
 
-from seedvr2x.runtime import model, tiling
+from seedvr2x.runtime import model, tilegrid, tiling
 from seedvr2x.runtime.plan import OVERLAP, Tiles
 from seedvr2x.runtime.tiling import Scratch, ScratchError, Tile
 from seedvr2x.vendor.common.config import create_object, load_config
@@ -244,6 +248,20 @@ def mapped(path: Path) -> bool:
     return any(str(path) in line for line in Path("/proc/self/maps").read_text().splitlines())
 
 
+def open_on(path: Path) -> list[str]:
+    """What this process's descriptors on the file at path, removed or not, are open on
+    (/proc/self/fd): nothing once a scratch there and every tensor on it are gone."""
+    found: list[str] = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            target = os.readlink(f"/proc/self/fd/{name}")
+        except OSError:  # the listing's own, closed since
+            continue
+        if target.startswith(str(path)):
+            found.append(target)
+    return found
+
+
 # The grid.
 
 
@@ -390,6 +408,9 @@ def test_scratch_needed() -> None:
     assert Scratch.needed(1, (1104, 1920)) == 3 * 1104 * 1920 * 2 == 12_718_080
     assert Scratch.needed(1, (2192, 3840)) == 50_503_680
     assert Scratch.needed(17, (64, 96)) == 17 * 3 * 64 * 96 * 2
+    # The count kept without torch, for the planner, is of the dtype the scratch is made in.
+    assert tilegrid.VALUE_BYTES == model.COMPUTE_DTYPE.itemsize == BF16.itemsize
+    assert tilegrid.scratch_bytes(17, (64, 96)) == Scratch.needed(17, (64, 96))
 
 
 def test_scratch_in_memory(tmp_path: Path) -> None:
@@ -416,6 +437,10 @@ def test_scratch_on_disk(tmp_path: Path) -> None:
         # Whole on disk from the start, its blocks allocated.
         assert path.stat().st_size == needed <= path.stat().st_blocks * 512
         assert mapped(path)
+        # The descriptor it was allocated through is closed: the mapping's own is the only one,
+        # and the mapping is the tensor's to keep, nothing else holding it.
+        assert len(open_on(path)) == 1
+        gc.collect()
         # In-place adds through the tensor reach the file.
         values = video_of(2, (7, 8))
         store[:, 1:3, 2:9, 3:11] += values
@@ -427,10 +452,13 @@ def test_scratch_on_disk(tmp_path: Path) -> None:
         assert torch.equal(on_disk, bits(expected)) and same(store, expected)
         kept = store[:, 0]
         del store
-    # Removed with the store, and unmapped with the last tensor on it.
+    # Removed with the store, and unmapped with the last tensor on it, which still reads and
+    # writes it until then; the file's blocks go with the mapping and its descriptor.
     assert not path.exists() and mapped(path)
+    kept += 1
+    assert same(kept, expected[:, 0] + 1)
     del kept
-    assert not mapped(path)
+    assert not mapped(path) and not open_on(path)
 
 
 def test_scratch_goes_on_failure(tmp_path: Path) -> None:
@@ -439,7 +467,7 @@ def test_scratch_goes_on_failure(tmp_path: Path) -> None:
     with pytest.raises(Failing), scratch.store(2, (8, 8)):
         assert path.exists()
         raise Failing
-    assert not path.exists()
+    assert not path.exists() and not mapped(path) and not open_on(path)
     with scratch.store(2, (8, 8)):  # free again
         assert path.exists()
 
@@ -464,6 +492,53 @@ def test_scratch_replaces_a_killed_runs(tmp_path: Path) -> None:
     with Scratch(tmp_path, 0).store(2, (8, 8)) as store:
         assert path.stat().st_size == Scratch.needed(2, (8, 8)) and not bits(store).any()
     assert not path.exists()
+
+
+@pytest.mark.parametrize("planted", ["link", "file"])
+def test_scratch_maps_the_file_it_allocated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
+) -> None:
+    # The scratch's name given to another file between the allocation and the mapping, a link
+    # to it or the file itself: the file allocated is mapped and written, by its descriptor,
+    # never the other.
+    directory = tmp_path / "shot"
+    path, other = directory / tiling.SCRATCH, tmp_path / "other"
+    needed = Scratch.needed(5, (16, 24))
+    theirs = b"\x55" * needed
+    other.write_bytes(theirs)
+    allocate = os.posix_fallocate
+    allocated: list[int] = []
+
+    def swapped(descriptor: int, offset: int, length: int) -> None:
+        allocate(descriptor, offset, length)
+        allocated.append(os.open(path, os.O_RDONLY))  # the file allocated, still under its name
+        path.unlink()
+        if planted == "link":
+            path.symlink_to(other)
+        else:
+            other.rename(path)
+
+    monkeypatch.setattr(os, "posix_fallocate", swapped)
+    values = video_of(5, (16, 24))
+    with Scratch(directory, 0).store(5, (16, 24)) as store:
+        monkeypatch.undo()
+        there = other if planted == "link" else path
+        assert path.is_symlink() == (planted == "link") and there.read_bytes() == theirs
+        assert not bits(store).any()
+        store += values
+        assert there.read_bytes() == theirs
+        # The file allocated, read by a descriptor of its own: no name is left to it.
+        (descriptor,) = allocated
+        status = os.fstat(descriptor)
+        assert (status.st_size, status.st_nlink) == (needed, 0)
+        written = torch.frombuffer(bytearray(os.pread(descriptor, needed, 0)), dtype=torch.int16)
+        assert torch.equal(written, bits(values).flatten()) and same(store, values)
+        os.close(descriptor)
+        del store
+    # The name goes with the store, as the scratch's own would: a link, not what it names.
+    assert not path.exists() and not path.is_symlink()
+    assert not mapped(path) and not open_on(path)
+    assert planted == "file" or other.read_bytes() == theirs
 
 
 def test_scratch_without_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -498,19 +573,44 @@ def test_scratch_without_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert not path.exists()
     monkeypatch.undo()
 
-    # A file that can't be mapped: refused, and removed.
-    def unmappable(*args: Any, **kwargs: Any) -> Tensor:
+    # A file that can't be mapped: refused, and removed, nothing left open on it.
+    def unmappable(*args: Any, **kwargs: Any) -> mmap.mmap:
         assert path.stat().st_size == needed
-        raise RuntimeError("unable to mmap")
+        raise OSError(errno.ENOMEM, os.strerror(errno.ENOMEM))
 
-    monkeypatch.setattr(torch, "from_file", unmappable)
-    with pytest.raises(ScratchError, match=f"{path}.*{needed} bytes, not mapped: unable to mmap"):
+    monkeypatch.setattr(mmap, "mmap", unmappable)
+    with pytest.raises(ScratchError, match=f"{path}.*{needed} bytes, not mapped: .*Cannot alloc"):
         with scratch.store(2, (8, 8)):
             pass
-    assert not path.exists()
+    assert not path.exists() and not open_on(path)
     monkeypatch.undo()
     with scratch.store(2, (8, 8)):  # free again
         pass
+
+
+def test_scratch_the_system_wont_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A mapping the system itself refuses: 25 GB, with the process's address space held to a
+    # gigabyte over what it has (the file left sparse, for the test's sake). A ScratchError, the
+    # file removed, and no descriptor left on it: torch.from_file, which mapped it before, kept
+    # its own open on the file, removed and allocated whole.
+    path = tmp_path / tiling.SCRATCH
+    needed = Scratch.needed(4000, (1024, 1024))
+    monkeypatch.setattr(
+        os, "posix_fallocate", lambda descriptor, offset, length: os.ftruncate(descriptor, length)
+    )
+    has = int(Path("/proc/self/statm").read_text().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    limit = has + (1 << 30)
+    if soft != resource.RLIM_INFINITY:
+        limit = min(limit, soft)
+    resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
+    try:
+        with pytest.raises(ScratchError, match=f"{needed} bytes, not mapped: .*Cannot alloc"):
+            with Scratch(tmp_path, 0).store(4000, (1024, 1024)):
+                pass
+    finally:
+        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+    assert not path.exists() and not mapped(path) and not open_on(path)
 
 
 def test_scratch_that_stays_is_said(
@@ -674,6 +774,74 @@ def test_encode_is_numz(
     assert untiled.stride() == latent.stride() and not same(untiled, reference)
 
 
+@pytest.mark.parametrize("latents", [1, 2, 3, 6])
+@pytest.mark.parametrize("size", [(11, 13), (2, 2), (1, 5), (5, 1), (1, 1)])
+def test_encode_latent_is_the_whole_batch_encodes(
+    stand_in: model.Models, latents: int, size: tuple[int, int]
+) -> None:
+    # The latent is made slice by slice, from a buffer in system memory, into storage laid out
+    # by hand: it has the values and the memory of the latent numz's runner makes of the whole
+    # batch at once, untiled and tiled, for one latent, for one slice and for more.
+    rows, columns = size
+    frames = 1 + 4 * (latents - 1)
+    video = video_of(frames, (rows * 8, columns * 8), seed=latents)
+    runner = cast(Any, stand_in).runner
+    assert not runner.encode_tiled
+    with torch.no_grad():
+        whole = model.encode(stand_in, video)
+    streamed = model.encode_stream(stand_in, iter(slices_of(stand_in, video)), frames)
+    assert streamed.shape == whole.shape == (latents, rows, columns, 16)
+    assert same(streamed, whole) and streamed.stride() == whole.stride()
+    # Channel-major storage, (16, T', h, w), behind a permuted view, on the CPU.
+    assert streamed.stride() == (rows * columns, columns, 1, latents * rows * columns)
+    assert streamed.permute(3, 0, 1, 2).is_contiguous() and streamed.device == CPU
+    assert streamed.untyped_storage().nbytes() == streamed.numel() * 2
+
+    tiles = Tiles(64, 16) if size == (11, 13) else Tiles(16, 8)
+    several = len(tiling.grid(size, tiles)) > 1
+    assert several == (max(size) > 2)
+    whole = numz_encode(stand_in, video, tiles)
+    tiled = tiling.encode_tiled(
+        stand_in, iter(slices_of(stand_in, video)), frames, tiles, Scratch(None, MEMORY)
+    )
+    assert tiled.stride() == streamed.stride() and tiled.shape == streamed.shape
+    assert tiled.device == CPU and same(tiled, streamed) != several
+    if several and (rows, latents) == (1, 1):
+        # One frame of one row of latents, which no padded frame is: numz's runner gives its
+        # tiled latent without the two, (w, 16), a squeeze of its own.
+        assert whole.shape == (columns, 16) and same(tiled.view(columns, 16), whole)
+    else:
+        assert same(tiled, whole) and tiled.stride() == whole.stride()
+
+
+def test_encode_refuses_moments_that_dont_fill_the_latent(stand_in: model.Models) -> None:
+    # The buffer the slices' means go to is sized from the frames: moments of another length or
+    # size would leave latents unwritten, or be broadcast into their place.
+    vae = vae_of(stand_in)
+    encode = vae._encode
+    video = video_of(13, (88, 104))
+    for cut, match in (
+        (lambda m: m[:, :, :0], "2 latents encoded, not 4"),
+        (lambda m: m[:, :, :, :1], r"latents 2 on encoded as \(1, 16, 1, 1, 13\) .*within 4"),
+        (lambda m: m.float(), r"latents 2 on encoded as .*float32, not .*bfloat16"),
+        (lambda m: m.repeat(1, 1, 3, 1, 1), r"latents 2 on encoded as \(1, 16, 3, 11, 13\)"),
+    ):
+
+        def other(
+            x: Tensor, memory_state: MemoryState = MemoryState.DISABLED, cut: Any = cut
+        ) -> Tensor:
+            moments = encode(x, memory_state=memory_state)
+            return moments if memory_state == MemoryState.INITIALIZING else cut(moments)
+
+        vae._encode = other
+        with pytest.raises(RuntimeError, match=match):
+            model.encode_stream(stand_in, iter(slices_of(stand_in, video)), 13)
+        assert vae.carry.memory is None
+    vae._encode = lambda x, memory_state=MemoryState.DISABLED: encode(x, memory_state)[:, :, :0]
+    with pytest.raises(RuntimeError, match="0 latents encoded, not 1"):
+        model.encode_stream(stand_in, iter(slices_of(stand_in, video[:, :1])), 1)
+
+
 @pytest.mark.parametrize("latents", [1, 2, 3, 5])
 def test_one_tile_is_the_untiled_pass(stand_in: model.Models, latents: int) -> None:
     # The picture within one tile, in both directions or cut off in one: numz runs the untiled
@@ -769,7 +937,7 @@ def test_decode_closed_early(stand_in: model.Models, tmp_path: Path) -> None:
     first = next(decoding)
     assert path.exists() and mapped(path)
     cast(Any, decoding).close()
-    assert not path.exists() and not mapped(path)
+    assert not path.exists() and not mapped(path) and not open_on(path)
     # What was handed on is a copy, still whole.
     assert first.shape == (3, 5, 88, 104) and bool(torch.isfinite(first.float()).all())
     assert vae_of(stand_in).carry.memory is None
@@ -787,7 +955,7 @@ def test_decode_failing_in_a_tile(stand_in: model.Models, tmp_path: Path, call: 
     with pytest.raises(Failing):
         list(tiling.decode_tiled(stand_in, latent_of(4, (11, 13)), Tiles(64, 16), scratch))
     assert len(vae.calls) == call and not path.exists()
-    assert vae.carry.memory is None
+    assert vae.carry.memory is None and not mapped(path) and not open_on(path)
     with scratch.store(1, (8, 8)):  # free again
         pass
 
@@ -816,7 +984,7 @@ def test_decode_failing_between_passes(
     assert vae.carry.memory is None and not path.exists()
     # The mapping goes with the failure's traceback, which holds the frames that held the store.
     del raised
-    assert not mapped(path)
+    assert not mapped(path) and not open_on(path)
 
 
 @pytest.mark.parametrize("call", [0, 3, 5])
@@ -828,17 +996,19 @@ def test_encode_failing_in_a_tile(stand_in: model.Models, tmp_path: Path, call: 
     with pytest.raises(Failing):
         tiling.encode_tiled(stand_in, slices_of(stand_in, video), 13, Tiles(64, 16), scratch)
     assert len(vae.calls) == call and not path.exists()
-    assert vae.carry.memory is None
+    assert vae.carry.memory is None and not mapped(path) and not open_on(path)
     with scratch.store(1, (8, 8)):  # free again
         pass
 
 
+@pytest.mark.parametrize("tiled", [True, False], ids=["tiled", "untiled"])
 def test_encode_hands_its_moments_on_slice_by_slice(
-    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch, tiled: bool
 ) -> None:
-    # Each slice's moments leave for the sums as they are encoded. A tile's, kept whole, would
-    # stay on the device through the next tile's pass and grow there with the shot: no pass
-    # starts with more than the slice before's still alive.
+    # Each slice's moments leave for the sums as they are encoded, and for the untiled pass's
+    # buffer. A tile's, kept whole, would stay on the device through the next tile's pass and
+    # grow there with the shot, as the untiled pass's would until its end: no pass starts with
+    # more than the slice before's still alive.
     vae = vae_of(stand_in)
     encode = vae._encode
     alive: list[weakref.ref[Tensor]] = []
@@ -853,8 +1023,174 @@ def test_encode_hands_its_moments_on_slice_by_slice(
     monkeypatch.setattr(vae, "_encode", counted)
     video = video_of(21, (88, 104))
     scratch = Scratch(None, MEMORY)
-    tiling.encode_tiled(stand_in, slices_of(stand_in, video), 21, Tiles(64, 16), scratch)
-    assert len(most) == 5 * len(tiling.grid((11, 13), Tiles(64, 16))) and max(most) == 1
+    if tiled:
+        tiling.encode_tiled(stand_in, iter(slices_of(stand_in, video)), 21, Tiles(64, 16), scratch)
+        assert len(most) == 5 * len(tiling.grid((11, 13), Tiles(64, 16)))
+    else:
+        model.encode_stream(stand_in, iter(slices_of(stand_in, video)), 21)
+        assert len(most) == 5
+    assert max(most) == 1 and not any(ref() is not None for ref in alive)
+
+
+@pytest.mark.parametrize(
+    ("tiles", "layout"),
+    [(None, 1), (Tiles(128), 1), (Tiles(64, 16), 4)],
+    ids=["untiled", "one-tile", "four-tiles"],
+)
+def test_encode_lets_its_first_slice_go(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch, tiles: Tiles | None, layout: int
+) -> None:
+    # A tiled encode reads the first slice ahead of the others, for the picture's size, and hands
+    # it back with them: no reference of its own stays. Within one tile, the untiled pass, the
+    # slice goes as the untiled pass lets it go, when the next comes, not at the pass's end; with
+    # several, it is kept in the scratch, off the device, before any tile is encoded.
+    vae = vae_of(stand_in)
+    encode = vae._encode
+    video = video_of(13, (88, 104))
+    fed: list[weakref.ref[Tensor]] = []
+    first: list[bool] = []
+
+    def slices() -> Iterator[Tensor]:
+        for piece in video.split(model.encode_slices(stand_in, 13), dim=1):
+            made = [piece.clone()]
+            fed.append(weakref.ref(made[0]))
+            yield made.pop()  # the taker's alone
+
+    def counted(x: Tensor, memory_state: MemoryState = MemoryState.DISABLED) -> Tensor:
+        first.append(fed[0]() is not None)
+        return encode(x, memory_state=memory_state)
+
+    monkeypatch.setattr(vae, "_encode", counted)
+    if tiles is None:
+        model.encode_stream(stand_in, slices(), 13)
+    else:
+        assert len(tiling.grid((11, 13), tiles)) == layout
+        tiling.encode_tiled(stand_in, slices(), 13, tiles, Scratch(None, MEMORY))
+    assert first == ([True, False, False] if layout == 1 else [False] * (3 * layout))
+    assert not any(ref() is not None for ref in fed)
+
+
+class Tainted(Tensor):
+    """A latent, and whatever torch derives from it: a view, a crop, a copy, the decoder's
+    input, each a Tainted too, as torch makes of a subclass's what it computes from one."""
+
+
+def channels_last(z: Tensor) -> bool:
+    """Whether torch reads z (1, 16, t, h, w) as channels-last memory, which the layers that take
+    it follow (a convolution's algorithm, a padding's or a concatenation's output): a
+    concatenation of z with itself is laid out so then, its channels a step of 1 apart."""
+    assert z.dim() == 5 and z.shape[1] == 16
+    return torch.cat((z, z), dim=2).stride()[1] == 1
+
+
+def permuted(latent: Tensor) -> Tensor:
+    """latent (T', h, w, 16) in channel-major memory, as an encode's."""
+    return latent.permute(3, 0, 1, 2).contiguous().permute(1, 2, 3, 0)
+
+
+@pytest.mark.parametrize("tiled", [True, False], ids=["tiled", "untiled"])
+@pytest.mark.parametrize("layout", ["channels-last", "channel-major"])
+def test_decode_takes_its_latents_slice_by_slice(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch, tiled: bool, layout: str
+) -> None:
+    # The latent stays where it is given: the decoder's input is made of one slice's latents at
+    # a time, a tile's crop of them, and when a pass starts nothing else made from the latent
+    # is alive, the slice before's input neither. Whole on the device, the latent and the
+    # decoder's input would grow there with the shot.
+    vae = vae_of(stand_in)
+    decode = vae._decode
+    tiles = Tiles(64, 16)
+    plain = latent_of(6, (11, 13))
+    plain = plain if layout == "channels-last" else permuted(plain)
+    latent = plain.as_subclass(Tainted)
+    handed: list[tuple[int, ...]] = []
+    others: list[int] = []
+
+    def counted(z: Tensor, memory_state: MemoryState = MemoryState.DISABLED) -> Tensor:
+        assert isinstance(z, Tainted)
+        handed.append(tuple(z.shape))
+        others.append(
+            sum(
+                type(found) is Tainted and found is not latent and found is not z
+                for found in gc.get_objects()
+            )
+        )
+        # The frames aren't the latent's: only what leads to the decoder's input is counted.
+        return decode(z.as_subclass(Tensor), memory_state=memory_state)
+
+    monkeypatch.setattr(vae, "_decode", counted)
+    if tiled:
+        slices = tiling.decode_tiled(stand_in, latent, tiles, Scratch(None, MEMORY))
+        crops = [(tile.rows, tile.columns) for tile in tiling.grid((11, 13), tiles)]
+    else:
+        slices = model.decode_stream(stand_in, latent)
+        crops = [(11, 13)]
+    frames = sum(decoded.shape[1] for decoded in slices)
+    assert frames == 21 and model.latent_slices(stand_in, 6) == [2, 1, 1, 1, 1]
+    assert handed == [(1, 16, t, *crop) for crop in crops for t in [2, 1, 1, 1, 1]]
+    assert others == [0] * len(handed)
+    monkeypatch.undo()
+    # The same frames as from the latent itself, which the subclass changes nothing to.
+    if tiled:
+        ours = list(tiling.decode_tiled(stand_in, latent, tiles, Scratch(None, MEMORY)))
+        theirs = numz_decode(stand_in, plain, tiles)
+    else:
+        ours = list(model.decode_stream(stand_in, latent))
+        with torch.no_grad():
+            theirs = cast(Any, stand_in).runner.vae_decode([plain])[0]
+    assert same(torch.cat(ours, dim=1).as_subclass(Tensor), theirs)
+
+
+@pytest.mark.parametrize("tiled", [True, False], ids=["tiled", "untiled"])
+@pytest.mark.parametrize("layout", ["channels-last", "channel-major"])
+@pytest.mark.parametrize("latents", [1, 2, 3, 6])
+def test_decoder_is_handed_what_numz_hands_it(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch, tiled: bool, layout: str, latents: int
+) -> None:
+    # numz scales the whole batch and hands the decoder slices of it, views but the first; we
+    # scale each slice's latents alone. The decoder is handed the same values in the same shape,
+    # read by torch in the same memory format, for a latent as the DiT gives it (its channels
+    # last) and for one in channel-major memory.
+    vae = vae_of(stand_in)
+    decode = vae._decode
+    tiles = Tiles(64, 16)
+    latent = latent_of(latents, (11, 13), seed=latents)
+    latent = latent if layout == "channels-last" else permuted(latent)
+    handed: list[tuple[Tensor, bool, tuple[int, ...] | None]] = []
+
+    def recorded(z: Tensor, memory_state: MemoryState = MemoryState.DISABLED) -> Tensor:
+        # Its strides too where numz hands the decoder a tensor of its own, a pass's first
+        # slice, a concatenation, or the untiled latents in one piece; the others are views of
+        # the whole batch's, in strides only a whole batch on the device has.
+        own = memory_state == MemoryState.INITIALIZING or (
+            memory_state == MemoryState.DISABLED and not tiled
+        )
+        handed.append((z.clone(), channels_last(z), z.stride() if own else None))
+        return decode(z, memory_state=memory_state)
+
+    monkeypatch.setattr(vae, "_decode", recorded)
+    if tiled:
+        numz_decode(stand_in, latent, tiles)
+    else:
+        with torch.no_grad():
+            cast(Any, stand_in).runner.vae_decode([latent])
+    theirs = list(handed)
+    handed.clear()
+    if tiled:
+        list(tiling.decode_tiled(stand_in, latent, tiles, Scratch(None, MEMORY)))
+    else:
+        list(model.decode_stream(stand_in, latent))
+    assert (
+        len(handed)
+        == len(theirs)
+        == (4 if tiled else 1) * len(model.latent_slices(stand_in, latents))
+    )
+    for (ours, our_format, our_strides), (their, their_format, their_strides) in zip(
+        handed, theirs, strict=True
+    ):
+        assert same(ours, their) and our_format == their_format and our_strides == their_strides
+    assert {read for _, read, _ in handed} == {layout == "channels-last"}
+    assert any(strides is not None for _, _, strides in handed) == (not tiled or latents > 2)
 
 
 def test_encode_refuses_slices_that_dont_follow(stand_in: model.Models, tmp_path: Path) -> None:
@@ -984,3 +1320,342 @@ def test_real_vae_decode_slices(real: model.Models, latents: int) -> None:
     slices = list(model.decode_stream(real, latent_of(latents, (2, 2))))
     assert [s.shape[1] for s in slices] == model.decode_slices(real, latents)
     assert sum(s.shape[1] for s in slices) == 1 + 4 * (latents - 1)
+
+
+# On a real card (pytest -m gpu): where a pass keeps what it holds. No test above can tell: their
+# device is the CPU, where "on the device" and "in system memory" are one place, and a tensor
+# moved to either is itself.
+
+MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")
+# The files tests/test_placement.py loads: model.load_models takes a DiT with the VAE.
+DITS = (
+    "seedvr2_ema_7b_fp16.safetensors",
+    "seedvr2x_ema_7b_fp16.safetensors",
+    "seedvr2x_ema_7b_sharp_fp16.safetensors",
+)
+VAES = ("ema_vae_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors")
+
+# Frames of 256x320, 32x40 latents: 40,960 bytes a latent in bfloat16 (16 channels), 81,920 for
+# its moments (32). A shot of 13 frames, 4 latents in 3 slices, and one of 141, 36 latents in 35:
+# 32 latents more. Tiles of 192 px sharing 64 lay 4 over the picture, 2 rows of 2.
+PICTURE = (256, 320)
+SHORT, LONG = 13, 141
+FOUR = Tiles(192, 64)
+# What two measures of one pass may differ by, and still be the same: 256 KiB. The smallest thing
+# of a shot's that could be on the device is one tensor of its latent's size, the latent itself,
+# the untiled encode's buffer, the tiled encode's sums or the decoder's input whole: 32 latents
+# more of it are 32 x 40,960 = 1,310,720 bytes, 1.25 MiB, 5 times this; the moments kept as numz
+# keeps them, 2.5 MiB; the latent of the long shot left there after its pass, 36 x 40,960 =
+# 1,474,560 bytes, 1.41 MiB.
+TOLERANCE = 256 << 10
+# The call of a pass, of each tile's in a tiled one, that its later calls are measured against.
+# The VAE's causal convolutions (InflatedCausalConv3d, causal_inflation_lib.py) are settled long
+# before it: each takes its memory in the pass's first call (INITIALIZING), replaces it in every
+# next one (ACTIVE) and loses it when the pass ends; under the memory limit the VAE is loaded
+# with (0.5 GiB: slicing_forward) it is a copy of its input's last frames, 2, or 1 where the
+# convolution halves time, of one size after every call. So a call starts with no memory at 0,
+# and with all of it from 1 on; the pass's own last slice is still held then, the first's 2
+# latents at 1 and 1 latent from 2 on. The card showed just that, in the bytes asked of torch's
+# allocator: an untiled encode holds 2,457,600 as call 0 starts, its first slice, 320,603,648 at
+# 1 and 320,521,728 at each of the 33 after, one latent's moments less (81,920), the same to
+# the byte in a 3-call shot. The 6 calls more are a margin nothing asks for.
+#
+# The figures are taken on those bytes (memory_stats' requested_bytes: "memory requested by
+# client code", torch/cuda/memory.py; a running count with its peak: Stat, torch/include/c10/
+# core/Allocator.h), not on memory_allocated, which counts the blocks the allocator handed out:
+# a cached block goes out whole for less than its size, and the same tensors count for more or
+# less by the blocks they land in. Measured on the card (RTX PRO 6000, torch 2.14.1), where the
+# requested bytes were the same at every settled call: the allocated ones went from 321,308,160
+# to 322,636,288 from call to call of the untiled encode, 786,432 to 2,114,560 over the
+# requested, and up to 7,338,896 over in the tiled passes; the first run's 559,104 bytes
+# between the largest allocated figures of a 3-call and a 35-call encode were that rounding, and
+# so were the 1,671,168 between the two shots' allocated peaks of the tiled decode (995,573,760
+# and 997,244,928). The allocated figures are printed beside the requested ones, which shows
+# it. They are compared instead only where the requested ones can't be taken (Use.doubt).
+SETTLED = 8
+
+
+def found(names: tuple[str, ...]) -> Path:
+    """The first of names there is in SEEDVR2X_MODEL_DIR; the test is skipped, naming them, when
+    there is none."""
+    if not MODELS:
+        pytest.skip("needs SEEDVR2X_MODEL_DIR")
+    for name in names:
+        if (Path(MODELS) / name).is_file():
+            return Path(MODELS) / name
+    pytest.skip(f"none of {', '.join(names)} in SEEDVR2X_MODEL_DIR")
+
+
+@dataclass(frozen=True)
+class Use:
+    """What a pass takes on the device beyond what was there before it, in bytes. By torch's
+    count of the blocks its allocator handed out (memory_allocated): at its peak; once it has
+    ended, its result still held (left); and as each of the VAE's calls starts, a slice's encode
+    or decode, in order, tile after tile in a tiled pass, which is what the pass holds from slice
+    to slice (allocated). By its count of the bytes asked of the allocator (memory_stats'
+    requested_bytes): as each call starts too (requested) and at its peak (requested_peak).
+
+    doubt is empty when the requested bytes can be taken, or says why they can't: torch doesn't
+    give the count (requested is then empty); it was once over the allocated bytes, before the
+    pass, at a call or after it, which what is asked for the live tensors can't be, a block being
+    no smaller than what it went out for; or reset_peak_memory_stats didn't bring its peak back
+    to what was requested then, so that the peak may be an earlier pass's."""
+
+    peak: int
+    left: int
+    allocated: tuple[int, ...]
+    requested: tuple[int, ...]
+    requested_peak: int
+    doubt: str
+
+
+def device_use[T](
+    models: model.Models, monkeypatch: pytest.MonkeyPatch, run: Callable[[], T]
+) -> tuple[T, Use]:
+    """What run, one of the VAE's passes, gives, and what it takes on the device (Use)."""
+    vae, device = models.runner.vae, models.device
+    allocated: list[int] = []
+    requested: list[int | None] = []
+
+    def asked(what: str = "current") -> int | None:
+        return torch.cuda.memory_stats(device).get(f"requested_bytes.all.{what}")
+
+    def sampled(call: Callable[..., Tensor]) -> Callable[..., Tensor]:
+        def wrapped(*args: Any, **kwargs: Any) -> Tensor:
+            allocated.append(torch.cuda.memory_allocated(device))
+            requested.append(asked())
+            return call(*args, **kwargs)
+
+        return wrapped
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vae, "_encode", sampled(vae._encode))
+        patch.setattr(vae, "_decode", sampled(vae._decode))
+        torch.cuda.synchronize(device)
+        before, asked_before = torch.cuda.memory_allocated(device), asked()
+        torch.cuda.reset_peak_memory_stats(device)
+        asked_reset = asked("peak")
+        result = run()
+        torch.cuda.synchronize(device)
+        peak, asked_peak = torch.cuda.max_memory_allocated(device), asked("peak")
+        left, asked_left = torch.cuda.memory_allocated(device), asked()
+    held = [before, *allocated, left]
+    counts = [count for count in (asked_before, *requested, asked_left) if count is not None]
+    of_calls: tuple[int, ...] = ()
+    at_peak = 0
+    if len(counts) != len(held) or asked_reset is None or asked_peak is None:
+        doubt = "torch gives no requested_bytes"
+    else:
+        of_calls = tuple(count - counts[0] for count in counts[1:-1])
+        at_peak = asked_peak - counts[0]
+        if any(count > there for count, there in zip(counts, held, strict=True)):
+            doubt = "the requested ones were over them: no count of what is live"
+        elif asked_reset != counts[0]:
+            doubt = (
+                f"resetting the peaks left the requested one at {asked_reset}, {counts[0]}"
+                " being requested then"
+            )
+        else:
+            doubt = ""
+    start = tuple(there - before for there in allocated)
+    return result, Use(peak - before, left - before, start, of_calls, at_peak, doubt)
+
+
+def runs(values: tuple[int, ...]) -> str:
+    """values in order, one that comes n times in a row said once, as value*n."""
+    said: list[list[int]] = []
+    for value in values:
+        if said and said[-1][0] == value:
+            said[-1][1] += 1
+        else:
+            said.append([value, 1])
+    return " ".join(f"{value}" if count == 1 else f"{value}*{count}" for value, count in said)
+
+
+def by_tile(values: tuple[int, ...], tiles: int) -> list[tuple[int, ...]]:
+    """A pass's values, one per call of the VAE, tile by tile: each of `tiles` tiles is as many
+    calls, one after the other."""
+    calls, rest = divmod(len(values), tiles)
+    assert rest == 0, (len(values), tiles)
+    return [values[tile * calls : (tile + 1) * calls] for tile in range(tiles)]
+
+
+def series(values: tuple[int, ...], shapes: list[tuple[int, int]]) -> str:
+    """A pass's values (by_tile) in a line (runs), each tile's named with its latents' rows and
+    columns when there are several."""
+    parts = [runs(part) for part in by_tile(values, len(shapes))]
+    if len(shapes) == 1:
+        return parts[0]
+    return " | ".join(
+        f"tile {index}, {rows}x{columns}: {part}"
+        for index, ((rows, columns), part) in enumerate(zip(shapes, parts, strict=True))
+    )
+
+
+@pytest.mark.gpu
+def test_passes_keep_nothing_of_the_shot_on_the_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The four passes over the real VAE on a card, for a short shot and a long one: the encodes'
+    # latents are in system memory, in numz's layout, the decodes' slices on the device, and the
+    # device holds the same for both shots at the pass's peak and nothing after it: nothing there
+    # grows with the shot. The peak alone may not show what a pass gathers after its first slice,
+    # the largest (5 frames against 4), when that slice sets the peak; what the device holds as
+    # each of the VAE's calls starts hides nothing behind it, and is compared like with like: the
+    # same call of both shots, the long shot's later calls with an earlier one of its own
+    # (SETTLED), and a tile with an earlier one of its size. The largest of these figures isn't
+    # compared between the shots: 35 calls have more occasions for it than 3. They are, like
+    # the peak, the bytes asked of torch's allocator where it counts them, the bytes it allocated
+    # otherwise (SETTLED): one choice for the run, said in every line and message.
+    models = model.load_models(found(DITS), found(VAES), torch.device("cuda:0"))
+    device = models.device
+    height, width = PICTURE[0] // 8, PICTURE[1] // 8
+    layout = tiling.grid((height, width), FOUR)
+    assert len(layout) == 4
+    scratch = Scratch(tmp_path, 0)  # in its file, mapped
+
+    def fed(frames: int) -> Iterator[Tensor]:
+        # The shot's input, made slice by slice: one on the device at a time.
+        generator = torch.Generator().manual_seed(frames)
+        for size in model.encode_slices(models, frames):
+            yield (torch.rand((3, size, *PICTURE), generator=generator) * 2 - 1).to(device, BF16)
+
+    def taken(slices: Iterator[Tensor]) -> list[int]:
+        frames: list[int] = []
+        for decoded in slices:
+            assert decoded.device == device and decoded.dtype == BF16
+            assert (decoded.shape[0], *decoded.shape[2:]) == (3, *PICTURE)
+            frames.append(decoded.shape[1])
+        return frames
+
+    def passes(frames: int) -> list[Use]:
+        # The untiled encode, the tiled one, the untiled decode of the first's latent, the tiled.
+        latents = 1 + (frames - 1) // 4
+        untiled, encode = device_use(
+            models, monkeypatch, lambda: model.encode_stream(models, fed(frames), frames)
+        )
+        tiled, tiled_encode = device_use(
+            models,
+            monkeypatch,
+            lambda: tiling.encode_tiled(models, fed(frames), frames, FOUR, scratch),
+        )
+        # Channel-major memory seen through a permuted view, numz's.
+        numz = torch.empty((16, latents, height, width)).permute(1, 2, 3, 0)
+        for latent in (untiled, tiled):
+            assert latent.device.type == "cpu" and latent.dtype == BF16
+            assert latent.shape == numz.shape and latent.stride() == numz.stride()
+        assert not same(untiled, tiled)  # blended
+        given, decode = device_use(
+            models, monkeypatch, lambda: taken(model.decode_stream(models, untiled))
+        )
+        tiled_given, tiled_decode = device_use(
+            models,
+            monkeypatch,
+            lambda: taken(tiling.decode_tiled(models, untiled, FOUR, scratch)),
+        )
+        assert given == tiled_given == model.decode_slices(models, latents) and sum(given) == frames
+        assert not (tmp_path / tiling.SCRATCH).exists()
+        # One figure per call of the VAE: a slice of the shot, and of each tile in a tiled pass.
+        uses = [encode, tiled_encode, decode, tiled_decode]
+        encodes, decodes = len(model.encode_slices(models, frames)), len(given)
+        calls = [encodes, len(layout) * encodes, decodes, len(layout) * decodes]
+        assert [len(use.allocated) for use in uses] == calls
+        return uses
+
+    try:
+        # Once unmeasured: what a first pass sets up on the device for good is no shot's.
+        passes(SHORT)
+        short, long = passes(SHORT), passes(LONG)
+    finally:
+        models.runner.dit = models.runner.vae = None
+        gc.collect()
+        torch.cuda.empty_cache()
+    names = ["encode", "tiled encode", "decode", "tiled decode"]
+    whole, tiles = [(height, width)], [(tile.rows, tile.columns) for tile in layout]
+    measured = list(zip(names, [whole, tiles, whole, tiles], short, long, strict=True))
+    # What the peaks and the calls' figures are compared on, for the whole run.
+    doubts = [use.doubt for use in (*short, *long) if use.doubt]
+    on, why = ("allocated", f" ({doubts[0]})") if doubts else ("requested", "")
+
+    def figures(use: Use) -> tuple[int, ...]:
+        return use.requested if on == "requested" else use.allocated
+
+    def top(use: Use) -> int:
+        return use.requested_peak if on == "requested" else use.peak
+
+    # Each pass's figures in a line per shot, said before anything is held of them: pytest shows
+    # the output of a test that fails, and of one that passes under -rP or -s.
+    for name, shapes, few, many in measured:
+        for frames, use in ((SHORT, few), (LONG, many)):
+            calls = len(use.allocated) // len(shapes)
+            peak = both = "not given by torch"
+            apart = ""
+            if use.requested:
+                peak, both = f"{use.requested_peak}", series(use.requested, shapes)
+                slack = [
+                    there - count for there, count in zip(use.allocated, use.requested, strict=True)
+                ]
+                apart = f"; allocated less requested: {min(slack)} to {max(slack)}"
+            print(
+                f"{name}, {frames} frames, compared on the {on} bytes{why}: requested peak"
+                f" {peak}; allocated peak {use.peak}, the two shots' {abs(many.peak - few.peak)}"
+                f" apart, and left {use.left}; held as each of the {calls}"
+                f" calls{' of a tile' if len(shapes) > 1 else ''} starts, requested: {both};"
+                f" allocated: {series(use.allocated, shapes)}{apart}"
+            )
+    for name, shapes, few, many in measured:
+        said = f"{name}: {on} peaks {top(few)} and {top(many)}; allocated "
+        if on == "requested":
+            said += f"peaks {few.peak} and {many.peak}, "
+        said += f"left {few.left} and {many.left}"
+        if on == "requested":
+            # The peak is this pass's: no less than what was requested as any of its calls
+            # started, and reset before it (Use.doubt).
+            for use in (few, many):
+                most = max(use.requested)
+                under = f"a peak of {use.requested_peak}, {most} as a call started: {said}"
+                assert use.requested_peak >= most, under
+        # The peaks of the two shots, on the requested bytes where they are taken. The allocated
+        # peaks aren't compared then: the allocator hands out blocks larger than what is asked,
+        # by up to 7 MiB in the tiled passes on the card, where the tiled decode's allocated
+        # peaks were 1,671,168 bytes apart and every requested figure the same. The planner's
+        # figures, measured at real sizes, are GiB, and were equal to the fourth decimal.
+        assert top(few) > TOLERANCE, said  # measured: a pass takes megabytes
+        assert abs(few.left) <= TOLERANCE and abs(many.left) <= TOLERANCE, said
+        assert abs(top(many) - top(few)) <= TOLERANCE, said
+        brief, long_run = by_tile(figures(few), len(shapes)), by_tile(figures(many), len(shapes))
+        first: dict[tuple[int, int], int] = {}
+        for index, shape in enumerate(shapes):
+            starts, later = brief[index], long_run[index]
+            said = (
+                f"{name}, tile {index} of {len(shapes)}, {shape[0]}x{shape[1]} latents, {on}"
+                f" bytes held as each call starts: over {SHORT} frames {runs(starts)}; over"
+                f" {LONG} {runs(later)}"
+            )
+            assert 0 < len(starts) <= len(later) and SETTLED < len(later) - 1, said
+            # 1. The same call of both shots, the convolutions' memory and the pass's own slices
+            # as far along in both: what a pass puts on the device of the whole shot is in every
+            # one, 1,310,720 bytes more for the long shot's 32 latents more.
+            for call, start in enumerate(starts):
+                assert abs(later[call] - start) <= TOLERANCE, f"call {call} of both shots: {said}"
+            # 2. Nothing grows along the long shot: a buffer gathering it on the device takes
+            # 40,960 bytes more a call or more, a call being one latent after the first:
+            # 286,720 by the 7th call after the settled one, over the tolerance of 262,144, and
+            # 26 x 40,960 = 1,064,960 by the last, the 34th, 4 times it; numz's moments twice
+            # that.
+            for call in range(SETTLED + 1, len(later)):
+                against = f"call {call} against call {SETTLED}: {said}"
+                assert abs(later[call] - later[SETTLED]) <= TOLERANCE, against
+            # 3. Nothing gathers from tile to tile: a tile is measured against the first of its
+            # size, whose convolutions keep as much (tiles 1 and 3 against 0 and 2 here, the
+            # grid's lower row being 16 latents high, not 24). The smallest thing a tile could
+            # leave of the long shot, its 36 latents' means or the decoder's input for them,
+            # is 36 x 16 x 16 x 24 x 2 = 442,368 bytes, 1.7 times the tolerance.
+            earlier = first.setdefault(shape, index)
+            if earlier != index:
+                against = (
+                    f"call {SETTLED} against tile {earlier}'s, {runs(long_run[earlier])}: {said}"
+                )
+                assert abs(later[SETTLED] - long_run[earlier][SETTLED]) <= TOLERANCE, against
+        # The last tile had an earlier one of its size to be measured against.
+        assert len(shapes) == 1 or first[shapes[-1]] < len(shapes) - 1, shapes

@@ -9,7 +9,12 @@ for the shot and sliced per window. Every step keeps numz's order and dtypes
 (src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives numz's one-batch
 output, bit for bit, in numz's padding (milestone 1); in seedvr2x's (DESIGN.md, Pipeline step 0),
 numz's patched to pad alike (research/scripts/numerics_patch.py, NUM_PAD=reflect>=8+black+16).
-Only the latents are ever whole in memory, unless a pass is tiled.
+Only the latents are ever whole in memory, unless a pass is tiled, and in system memory: on the
+device, the VAE's passes hold a slice's at a time, whatever the shot's length (DESIGN.md, Memory
+planner). Outside the VAE's passes, two things on the device still grow with the shot: the shot's
+latent and its noise, whole there through the DiT's windows (sample_windows); and, with a
+one-file output, the windows' outputs, which units kept in memory (runtime/units.py) leave on
+the device until the shot's decode.
 
 A tiled pass can't stream (runtime/tiling.py; DESIGN.md, Pipeline steps 1 and 3): each tile runs
 over the whole shot, so a tiled encode keeps the shot's transformed input, and a tiled decode
@@ -30,7 +35,7 @@ transform, in float32 (reference_inputs), then written: no second pass, no buffe
 
 import math
 from collections.abc import Callable, Generator, Iterator, Sequence
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -201,7 +206,7 @@ def encode_shot(
     allowance: int | None = None,
 ) -> Tensor:
     """The VAE latent of a shot of `count` frames, read as they are needed: (T', h, w, 16)
-    bfloat16 on the device, in the channel-major memory the encode gives it, which the noise
+    bfloat16 in system memory, in the channel-major memory the encode gives it, which the noise
     drawn from it depends on (model.encode). T' is 1 + (padded_length(count) - 1) / 4, and (h, w)
     the padded frames' size (job.padded_size) over 8. read(n) gives the shot's next n frames,
     (n, H, W, 3) float32 in [0, 1] at the source's size; target is the (height, width) the encode
@@ -293,12 +298,16 @@ def sample_windows(
     models: Models, latent: Tensor, layout: Sequence[tuple[int, int]], seed: int, start: int = 0
 ) -> Iterator[Tensor]:
     """The DiT's output for each window of layout from window `start` on, in order, each (t, h, w,
-    16) on the device: one Euler step per window, from the shot's latent (encode_shot).
+    16) on the device: one Euler step per window, from the shot's latent (encode_shot), which
+    comes in system memory, from its encode or from a file (units), or on the device.
 
     The noise is drawn once for the shot, on the latent's layout as numz draws it for a batch
     (generation_phases.py:663-680), and sliced per window. Nothing else draws, so a window's
     noise is the same whether the windows before it ran in this process or in an earlier one: a
     resumed shot draws it again, from a latent of the same layout."""
+    # On the device before the draw, in its own layout: numz draws on its latent there, and the
+    # CPU's generator gives other numbers than CUDA's.
+    latent = latent.to(models.device)
     if layout[-1][1] != latent.shape[0]:
         raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
     model.set_seed(seed)
@@ -328,8 +337,9 @@ def decode_shot(
     scratch: Path | None = None,
     allowance: int | None = None,
 ) -> None:
-    """Decode the shot of `count` frames whose latents are merged (merge_windows), in one stream,
-    and write its frames as they come, write(frames) taking the output's next frames,
+    """Decode the shot of `count` frames whose latents are merged (merge_windows), in system
+    memory or on the device, in one stream, and write its frames as they come, write(frames)
+    taking the output's next frames,
     (n, H', W', 3) float32 in [0, 1], the target cropped to even sides (job.output_size); each
     slice corrected first when a correction is given (_correct; DESIGN.md, Colour correction).
     Each slice decoded is checked for NaN or inf first (finite), its frames named for the job's,
@@ -362,16 +372,27 @@ def _slices(
     """The VAE's decode of the shot's latents, merged, slice by slice: each (C, t, H', W') in
     [-1, 1], unclamped, on the device; streamed (model.decode_stream), or with tiles, tile by tile
     (tiling.decode_tiled), its scratch's file in the directory scratch when it takes one. A tiled
-    decode holds its scratch until its last slice is taken: it is closed on leaving the block,
-    whatever ends it, a writer that fails or a stop, so that the scratch goes at once, not with
-    the failure's traceback, and the tile in progress clears its causal memory."""
-    latent = merged.to(models.device)
+    decode holds its scratch until its last slice is taken, and either decode the VAE's causal
+    memory, on the device: the decode is closed on leaving the block, whatever ends it, a writer
+    that fails or a stop, so that the scratch goes and the memory is cleared at once, not with
+    the failure's traceback.
+
+    The latents are decoded from system memory, a slice's alone on the device at a time
+    (model.decode_sliced): latents given on the device are copied to system memory first, in
+    their own layout, as units' files keep them; the device's stay their holder's to free."""
+    model.synchronize(merged.device)
+    latent = merged.to("cpu")
     if tiles is None:
-        yield model.decode_stream(models, latent)
-        return
-    store = tiling.Scratch(scratch, allowance)
-    with closing(tiling.decode_tiled(models, latent, tiles, store)) as slices:
+        slices = model.decode_stream(models, latent)
+    else:
+        store = tiling.Scratch(scratch, allowance)
+        slices = tiling.decode_tiled(models, latent, tiles, store)
+    try:
         yield slices
+    finally:
+        # A generator, as both decodes are; a plain iterator in their place has nothing to close.
+        if isinstance(slices, Generator):
+            slices.close()
 
 
 def _decoded(

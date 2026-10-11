@@ -181,7 +181,7 @@ def cpu_models() -> model.Models:
     vae.set_causal_slicing(**config.vae.slicing)
     runner: Any = VideoDiffusionInfer(config, cast(Any, SimpleNamespace(log=lambda *a, **k: None)))
     runner.vae = vae
-    return cast(model.Models, SimpleNamespace(runner=runner))
+    return cast(model.Models, SimpleNamespace(runner=runner, device=torch.device("cpu")))
 
 
 @pytest.mark.parametrize("count", [1, 2, 6, 13])
@@ -215,6 +215,54 @@ def test_streamed_decode_is_the_one_pass_decode(cpu_models: model.Models) -> Non
         streamed = torch.cat(list(model.decode_stream(models, latent)), dim=1)
     assert streamed.shape == one_pass.shape == (3, 13, 32, 48)
     assert torch.equal(streamed, one_pass)
+
+
+def test_noise_is_drawn_on_the_models_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The encode gives its latent in system memory, and a resumed shot's is read there: the noise
+    # is drawn from it on the models' device, where numz draws it, the CPU's generator giving
+    # other numbers than CUDA's; in the latent's own layout, which the draw follows.
+    device = torch.device("cpu")  # no other here: what is drawn from, then, not where
+    models = cast(model.Models, SimpleNamespace(device=device))
+    monkeypatch.setattr(model, "condition", lambda models, noise, latent: latent)
+    monkeypatch.setattr(model, "sample", lambda models, noise, cond: noise)
+    randn_like = torch.randn_like
+    drawn_from: list[torch.Tensor] = []
+
+    def recorded(tensor: torch.Tensor, **options: Any) -> torch.Tensor:
+        drawn_from.append(tensor)
+        return randn_like(tensor, **options)
+
+    monkeypatch.setattr(torch, "randn_like", recorded)
+    encoded = latent_of(5, (4, 6)).permute(3, 0, 1, 2).contiguous().permute(1, 2, 3, 0)
+    assert not encoded.is_contiguous()  # channel-major memory, as an encode's
+    on_device = encoded.to(device, copy=True)
+    assert on_device.stride() == encoded.stride()
+    moves: list[tuple[Any, ...]] = []
+
+    class InSystemMemory(torch.Tensor):
+        def to(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+            moves.append((*args, kwargs))
+            return on_device
+
+    layout = [(0, 3), (2, 5)]
+    given = encoded.as_subclass(InSystemMemory)
+    noise = list(shot.sample_windows(models, given, layout, 7))
+    # Moved first, to the models' device, and the draw is from what came back.
+    assert moves == [(device, {})] and len(drawn_from) == 1 and drawn_from[0] is on_device
+    assert [window.shape for window in noise] == [(3, 4, 6, 16), (3, 4, 6, 16)]
+    # A latent on the device already gives the same draw, as does the one in system memory.
+    for latent in (on_device, encoded):
+        again = list(shot.sample_windows(models, latent, layout, 7))
+        assert all(same(one, other) for one, other in zip(again, noise, strict=True))
+    assert drawn_from[1] is on_device and drawn_from[2] is encoded
+    # The draw follows the layout: the same values in contiguous memory draw other noise.
+    other = list(shot.sample_windows(models, encoded.contiguous(), layout, 7))
+    assert not same(other[0], noise[0])
+    # A window from which the run resumes draws the shot's noise again.
+    resumed = list(shot.sample_windows(models, encoded, layout, 7, 1))
+    assert len(resumed) == 1 and same(resumed[0], noise[1])
+    with pytest.raises(ValueError, match="over a latent of 5"):
+        list(shot.sample_windows(models, encoded, [(0, 3), (2, 6)], 7))
 
 
 # A shot's tiled passes through encode_shot and decode_shot, over test_tiling.py's stand-in VAE.
@@ -446,6 +494,25 @@ def test_tiled_decode_failing_leaves_nothing(
     assert not list(tmp_path.iterdir())
     del raised
     assert not mapped(path)
+
+
+def test_untiled_decode_failing_clears_its_memory(stand_in: model.Models) -> None:
+    # An untiled decode whose consumer fails is closed at once, as a tiled one is: the VAE's
+    # causal memory, on the device, is cleared while the failure is still held with its
+    # traceback, whose frames hold the pass.
+    count = 13
+    latent, vae = shot_latent(count), cast(Any, stand_in).runner.vae
+    kept: list[bool] = []
+
+    def write(frames: npt.NDArray[np.float32]) -> None:
+        kept.append(vae.carry.memory is not None)
+        raise Failing("the writer")
+
+    with pytest.raises(Failing) as raised:
+        decode_shot(stand_in, latent, count, LARGE, write)
+    assert kept == [True]  # in the middle of the pass, its memory kept
+    assert vae.carry.memory is None
+    del raised
 
 
 def test_tiled_encode_failing_leaves_nothing(stand_in: model.Models, tmp_path: Path) -> None:

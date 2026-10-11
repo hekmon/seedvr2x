@@ -400,15 +400,41 @@ def encode_slices(models: Models, frames: int) -> list[int]:
 def encode_stream(models: Models, slices: Iterable[Tensor], frames: int) -> Tensor:
     """VAE latent of a shot of `frames` frames (4n + 1) fed slice by slice: each (C, t, H, W) in
     [-1, 1] as input_transform gives it, t following encode_slices. Returns encode's latent bit
-    for bit, (T', h, w, 16) in channel-major memory.
+    for bit, (T', h, w, 16) in channel-major memory, in system memory.
 
     Adapted from numz's vae_encode (src/core/infer.py:117) and slicing_encode
     (src/models/video_vae_v3/modules/attn_video_vae.py:1254), ByteDance's (e4de8c2) as numz
     modified them, Apache-2.0 (NOTICE). The steps are theirs: the same slices, with the same
-    causal memory states (encode_sliced), then the posterior's mode, shifted and scaled
-    (to_latent). Only the input is never whole in memory."""
-    encoded = list(encode_sliced(models, slices, frames))
-    return to_latent(models, torch.cat(encoded, dim=2) if len(encoded) > 1 else encoded[0])
+    causal memory states (encode_sliced), then the posterior's mode (mode), shifted and scaled
+    (to_latent). The input is never whole in memory, and nothing on the device grows with the
+    shot: numz keeps every slice's moments there and concatenates them; each slice's mode, the
+    half the latent is made from, leaves here as it comes for its place in a buffer in system
+    memory, (1, 16, T', h, w), and the latent is made from the buffer slice by slice.
+
+    RuntimeError when the moments aren't the T' = 1 + (frames - 1) / 4 latents of one size and
+    dtype the buffer is made for."""
+    latents = 1 + (frames - 1) // models.runner.vae.temporal_downsample_factor
+    means: Tensor | None = None
+    start = 0
+    for moments in encode_sliced(models, slices, frames):
+        mean = mode(moments)
+        if means is None:
+            means = torch.empty((*mean.shape[:2], latents, *mean.shape[3:]), dtype=mean.dtype)
+        end = start + mean.shape[2]
+        expected = (*means.shape[:2], mean.shape[2], *means.shape[3:])
+        # Moments of another shape could be broadcast into their place, in another dtype
+        # rounded, and too few would leave latents unwritten.
+        if mean.shape != expected or mean.dtype != means.dtype or end > latents:
+            raise RuntimeError(
+                f"latents {start} on encoded as {tuple(mean.shape)} {mean.dtype}, not"
+                f" {expected} {means.dtype} within {latents}"
+            )
+        synchronize(models.device)
+        means[:, :, start:end] = mean.to("cpu")
+        start = end
+    if means is None or start != latents:
+        raise RuntimeError(f"{start} latents encoded, not {latents}")
+    return to_latent(models, means)
 
 
 @torch.no_grad()
@@ -442,20 +468,45 @@ def encode_sliced(models: Models, slices: Iterable[Tensor], frames: int) -> Iter
         _forget(vae)
 
 
-def to_latent(models: Models, moments: Tensor) -> Tensor:
-    """The latent of the VAE's moments (1, 32, T', h, w), encode_sliced's put together: the
-    posterior's mode (diffusers' DiagonalGaussianDistribution: the first half of the channels),
-    shifted and scaled as numz's vae_encode does (src/core/infer.py:186-188): (T', h, w, 16) in
-    channel-major memory (a permuted view), on the moments' device."""
+def mode(moments: Tensor) -> Tensor:
+    """The posterior's mode of the VAE's moments (1, 32, t', h, w), encode_sliced's: their mean,
+    the first half of the channels (diffusers' DiagonalGaussianDistribution), (1, 16, t', h, w),
+    a view. The half a latent is made from (to_latent); the log-variance is used by nothing."""
+    return torch.chunk(moments, 2, dim=1)[0]
+
+
+def to_latent(models: Models, mean: Tensor) -> Tensor:
+    """The latent of a shot's posterior mode (1, 16, T', h, w) (mode), whole in system memory:
+    shifted and scaled as numz's vae_encode does (src/core/infer.py:186-188), on the device,
+    slice by slice (latent_slices), so that nothing there grows with the shot: (T', h, w, 16) in
+    system memory.
+
+    Its memory is numz's latent's: channel-major storage, (16, T', h, w), seen through a permuted
+    view, the layout torch gives numz's expression on the whole batch, whatever T', h and w
+    (tests/test_tiling.py). The noise drawn from the latent depends on it (shot.sample_windows)."""
     runner = models.runner
     scale = runner.config.vae.scaling_factor
     shift = runner.config.vae.get("shifting_factor", 0.0)
-    mean = torch.chunk(moments, 2, dim=1)[0]  # (1, 16, T', h, w)
     if isinstance(scale, ListConfig):
-        scale = torch.tensor(scale, device=mean.device, dtype=mean.dtype)
+        scale = torch.tensor(scale, device=models.device, dtype=mean.dtype)
     if isinstance(shift, ListConfig):
-        shift = torch.tensor(shift, device=mean.device, dtype=mean.dtype)
-    return ((mean.movedim(1, -1) - shift) * scale).squeeze(0)
+        shift = torch.tensor(shift, device=models.device, dtype=mean.dtype)
+    channels, latents, height, width = mean.shape[1:]
+    storage = torch.empty((channels, latents, height, width), dtype=mean.dtype)
+    latent = storage.permute(1, 2, 3, 0)
+    start = 0
+    # PROVISIONAL: in the decode's slices, 2 latents then 1 at a time (latent_slices), as the
+    # sums of a tiled encode are divided (tiling.encode_tiled): DESIGN.md gives these trips no
+    # size. Each waits for the device once (synchronize), up to 10 ms a slice; more latents a
+    # trip would wait less often, for a constant to choose and megabytes more on the device.
+    for size in latent_slices(models, latents):
+        # A copy on the CPU too, as on any device, where to() alone gives the buffer's memory.
+        piece = mean[:, :, start : start + size].to(models.device, copy=True)
+        made = ((piece.movedim(1, -1) - shift) * scale).squeeze(0)
+        synchronize(models.device)
+        latent[start : start + size] = made.to("cpu")
+        start += size
+    return latent
 
 
 def _forget(vae: Any) -> None:
@@ -490,71 +541,118 @@ def decode(models: Models, latent: Tensor) -> Tensor:
     return models.runner.vae_decode([latent])[0]
 
 
-def decode_slices(models: Models, latents: int) -> list[int]:
-    """The frames of each slice the VAE decodes `latents` latents in, as its slicing_decode cuts
+# Every row of a latent, or every column: the whole picture, no tile's crop (decode_sliced).
+_ALL = slice(None)
+
+
+def latent_slices(models: Models, latents: int) -> list[int]:
+    """The latents of each slice the VAE decodes `latents` latents in, as its slicing_decode cuts
     them (decode_sliced): the first latent with the next slicing_latent_min_size (1), then that
-    many at a time, the first latent giving 1 frame and every next one
-    temporal_downsample_factor (4); the latents in one piece when they are no more than
-    1 + slicing_latent_min_size."""
+    many at a time; the latents in one piece when they are no more than
+    1 + slicing_latent_min_size. The slices a shot's latents go to the device in from system
+    memory: for its decode, and at its encode's end (to_latent, tiling.encode_tiled)."""
     vae = models.runner.vae
     size: int = vae.slicing_latent_min_size
-    factor: int = vae.temporal_downsample_factor
     if not (vae.use_slicing and latents - 1 > size):
-        return [1 + (latents - 1) * factor]
+        return [latents]
     whole, rest = divmod(latents - 1, size)
     parts = [size] * whole + ([rest] if rest else [])
-    return [1 + parts[0] * factor, *(part * factor for part in parts[1:])]
+    return [1 + parts[0], *parts[1:]]
+
+
+def decode_slices(models: Models, latents: int) -> list[int]:
+    """The frames of each slice the VAE decodes `latents` latents in (latent_slices), the first
+    latent giving 1 frame and every next one temporal_downsample_factor (4)."""
+    factor: int = models.runner.vae.temporal_downsample_factor
+    first, *rest = latent_slices(models, latents)
+    return [1 + (first - 1) * factor, *(part * factor for part in rest)]
 
 
 @torch.no_grad()
 def decode_stream(models: Models, latent: Tensor) -> Iterator[Tensor]:
-    """VAE decode of latent (T', h, w, 16), slice by slice: frames (C, t, H, W) in [-1, 1],
-    unclamped, as they come, t following decode_slices.
+    """VAE decode of latent (T', h, w, 16), wherever it is, a shot's in system memory, slice by
+    slice: frames (C, t, H, W) in [-1, 1], unclamped, on the device, as they come, t following
+    decode_slices.
 
     Adapted from numz's vae_decode (src/core/infer.py:203) and slicing_decode
     (src/models/video_vae_v3/modules/attn_video_vae.py:1278), ByteDance's (e4de8c2) as numz
     modified them, Apache-2.0 (NOTICE). The steps are theirs: the same scaling (decoder_input),
     the same slices (the first two latents, then one at a time) with the same causal memory
     states (decode_sliced). So the frames are the one-pass decode's, bit for bit; only their
-    concatenation is left out.
+    concatenation is left out, and the latent is never whole on the device.
     """
-    yield from decode_sliced(models, decoder_input(models, latent))
+    yield from decode_sliced(models, latent)
+
+
+def decodable(models: Models, latent: Tensor) -> None:
+    """ValueError unless latent is in the VAE's dtype, the only one it decodes."""
+    dtype = next(models.runner.vae.parameters()).dtype
+    if dtype != latent.dtype:
+        raise ValueError(f"latent {latent.dtype}, VAE {dtype}")
 
 
 def decoder_input(models: Models, latent: Tensor) -> Tensor:
     """The VAE decoder's input from latent (T', h, w, 16): z (1, 16, T', h, w), the latent scaled
-    and shifted back as numz's vae_decode does (src/core/infer.py:233-234). ValueError unless
-    the latent is in the VAE's dtype."""
-    runner, vae = models.runner, models.runner.vae
+    and shifted back as numz's vae_decode does (src/core/infer.py:233-234), on the latent's
+    device. ValueError unless the latent is in the VAE's dtype (decodable)."""
+    runner = models.runner
     scale = runner.config.vae.scaling_factor
     shift = runner.config.vae.get("shifting_factor", 0.0)
     if isinstance(scale, ListConfig):
         scale = torch.tensor(scale, device=latent.device, dtype=latent.dtype)
     if isinstance(shift, ListConfig):
         shift = torch.tensor(shift, device=latent.device, dtype=latent.dtype)
-    if next(vae.parameters()).dtype != latent.dtype:
-        raise ValueError(f"latent {latent.dtype}, VAE {next(vae.parameters()).dtype}")
+    decodable(models, latent)
     return (latent.unsqueeze(0) / scale + shift).movedim(-1, 1)
 
 
 @torch.no_grad()
-def decode_sliced(models: Models, z: Tensor) -> Iterator[Tensor]:
-    """z (1, 16, T', h, w) (decoder_input) decoded slice by slice, as numz's slicing_decode cuts
-    it (attn_video_vae.py:1278): frames (C, t, 8h, 8w) in [-1, 1], unclamped, as they come, t
-    following decode_slices.
+def decode_sliced(
+    models: Models, latent: Tensor, rows: slice = _ALL, columns: slice = _ALL
+) -> Iterator[Tensor]:
+    """latent (T', h, w, 16), or its crop to the latents' `rows` and `columns`, a tile's, decoded
+    slice by slice, as numz's slicing_decode cuts the decoder's input (attn_video_vae.py:1278):
+    frames (C, t, 8h, 8w) in [-1, 1], unclamped, on the device, as they come, t following
+    decode_slices. ValueError unless the latent is in the VAE's dtype.
+
+    The latent stays where it is, a shot's in system memory. Each slice's latents
+    (latent_slices), cropped, go to the device as their turn comes and are scaled there
+    (decoder_input): numz scales the whole batch on the device and slices that, 2 MiB a latent
+    at 1080p and 8 at 4K for the two. Scaling works element by element, so the values are the
+    same whatever the latent's memory. For a latent laid out as the DiT gives it, contiguous, or
+    as the encode does, channel-major, the decoder is also handed each slice in the memory format
+    torch read numz's in (tests/test_tiling.py), though no longer as a view of the whole
+    batch's; in another memory order, a tile's crop may be read in another format, which changes
+    nothing in the VAE as shipped, whose first convolution concatenates its input behind a
+    contiguous tensor.
 
     One pass of the causal decoder, with a memory of its own from its first slice to its last,
     cleared when the generator ends, is closed or fails: a tiled decode makes one such pass per
-    tile, over the tile's crop of z (runtime/tiling.py)."""
+    tile, over the tile's crop of the latent (runtime/tiling.py)."""
     vae = models.runner.vae
-    if vae.use_slicing and (z.shape[2] - 1) > vae.slicing_latent_min_size:
-        slices = z[:, :, 1:].split(split_size=vae.slicing_latent_min_size, dim=2)
-        try:
-            first = torch.cat((z[:, :, :1], slices[0]), dim=2)
-            yield vae._decode(first, memory_state=MemoryState.INITIALIZING)[0]
-            for z_slice in slices[1:]:
-                yield vae._decode(z_slice, memory_state=MemoryState.ACTIVE)[0]
-        finally:
-            _forget(vae)
-    else:
-        yield vae._decode(z)[0]
+    decodable(models, latent)
+    sizes = latent_slices(models, latent.shape[0])
+    if len(sizes) == 1:
+        yield vae._decode(_slice_input(models, latent[:, rows, columns]))[0]
+        return
+    try:
+        start = 0
+        for size in sizes:
+            z = _slice_input(models, latent[start : start + size, rows, columns])
+            if start == 0:
+                # numz's first slice is a concatenation, the first latent and the slice after it
+                # (attn_video_vae.py:1284): a tensor of its own, in the memory torch gives one.
+                z = torch.cat((z[:, :, :1], z[:, :, 1:]), dim=2)
+                yield vae._decode(z, memory_state=MemoryState.INITIALIZING)[0]
+            else:
+                yield vae._decode(z, memory_state=MemoryState.ACTIVE)[0]
+            start += size
+    finally:
+        _forget(vae)
+
+
+def _slice_input(models: Models, latents: Tensor) -> Tensor:
+    """The decoder's input (decoder_input) for one slice's latents, (t', h, w, 16), a view of a
+    shot's latent wherever it is: copied to the device first, in its own layout, on the CPU
+    too, where to() alone gives the latent's own memory."""
+    return decoder_input(models, latents.to(models.device, copy=True))

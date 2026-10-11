@@ -25,14 +25,21 @@ element, on numz's device, so that no value changes:
 - numz crops each tile from the batch's input, whole on the GPU; the input waits in the scratch
   here, and a tile's crop goes to the device slice by slice.
 - numz's tiles run over a batch; each runs over the whole shot here.
+- numz scales a batch's latents on the GPU and crops each tile from them there; the shot's
+  latents stay in system memory here, and a tile's crop of each slice's goes to the device as its
+  turn comes (model.decode_sliced).
+- numz sums a tile's moments whole, the mean and the log-variance, and takes the mean of the
+  quotient; only the mean is weighted and summed here, slice by slice, in system memory, which is
+  the same sum for the half that is kept, and the sums are divided, and the latent made, slice by
+  slice on the device.
+So nothing on the device grows with the shot (DESIGN.md, Memory planner).
 """
 
 import contextlib
 import logging
+import mmap
 import os
 from collections.abc import Generator, Iterable, Iterator
-from dataclasses import dataclass
-from itertools import chain
 from pathlib import Path
 
 import torch
@@ -44,17 +51,17 @@ from seedvr2x.runtime import model
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
 from seedvr2x.runtime.plan import Tiles
 
+# The grid's arithmetic, kept without torch for the planner to import (runtime/tilegrid.py): its
+# names are this module's too.
+from seedvr2x.runtime.tilegrid import CHANNELS as CHANNELS
+from seedvr2x.runtime.tilegrid import SCALE as SCALE
+from seedvr2x.runtime.tilegrid import SCRATCH as SCRATCH
+from seedvr2x.runtime.tilegrid import Tile as Tile
+from seedvr2x.runtime.tilegrid import grid as grid
+from seedvr2x.runtime.tilegrid import largest as largest
+from seedvr2x.runtime.tilegrid import latent_size, latent_tiles, scratch_bytes
+
 logger = logging.getLogger(__name__)
-
-# Output pixels per latent, each way: the VAE's spatial factor (spatial_downsample_factor, which
-# numz's tiling reads: attn_video_vae.py:1323, 1480).
-SCALE = 8
-
-# A frame's channels, as the VAE takes and gives them.
-CHANNELS = 3
-
-# A scratch's file, in the shot's unit directory: raw bfloat16, (CHANNELS, frames, H, W).
-SCRATCH = "scratch.bf16"
 
 # The bytes of a scratch kept in system memory where its pass is given no allowance (Scratch), a
 # larger one going to its file: for a test or a script that calls shot.encode_shot or
@@ -63,85 +70,6 @@ SCRATCH = "scratch.bf16"
 # allowance, which the planner sets from the host's memory (planner.plan; DESIGN.md, Memory
 # planner, Host RAM).
 DEFAULT_ALLOWANCE = 8 * 2**30
-
-
-@dataclass(frozen=True)
-class Tile:
-    """One tile of the grid, in latents: rows [top, bottom) and columns [left, right) of the
-    picture's. Its frames are SCALE times that, in output pixels."""
-
-    top: int
-    bottom: int
-    left: int
-    right: int
-
-    @property
-    def rows(self) -> int:
-        return self.bottom - self.top
-
-    @property
-    def columns(self) -> int:
-        return self.right - self.left
-
-
-def grid(latent_size: tuple[int, int], tiles: Tiles) -> list[Tile]:
-    """numz's tiles over a picture of latent_size (rows, columns) latents, in the order numz runs
-    them, row by row from the top left corner (attn_video_vae.py:1363-1371, 1526-1534): tiles of
-    tiles.size / 8 latents a side, one every side less tiles.overlap / 8, cut off at the picture's
-    edges; a tile lying whole within the overlap of the one before it is left out. One tile is the
-    whole picture: the untiled pass, as numz runs it then (:1315-1317, 1489-1491).
-
-    The encode and the decode share it: numz's tiled_encode lays it over ceil(H / 8) latent rows
-    (:1337-1338), and padded frames are multiples of 16 (job.padded_size).
-
-    ValueError unless tiles.size and tiles.overlap are multiples of 8, 0 <= overlap < size."""
-    side, overlap = _latent_tiles(tiles)
-    rows, columns = (_spans(length, side, overlap) for length in latent_size)
-    return [Tile(top, bottom, left, right) for top, bottom in rows for left, right in columns]
-
-
-def largest(padded: tuple[int, int], tiles: Tiles) -> int:
-    """The area, in output pixels, of the largest tile of the grid over frames padded to
-    (height, width) pixels (job.padded_size), cut off at the picture's edges: a 1280-px tile on a
-    1104x1920 frame is 1104 x 1280 = 1,413,120. The tile a pass's peak memory follows (DESIGN.md,
-    Memory planner)."""
-    area = max(tile.rows * tile.columns for tile in grid(_latent_size(padded), tiles))
-    return area * SCALE**2
-
-
-def _latent_tiles(tiles: Tiles) -> tuple[int, int]:
-    """A tile's side and its overlap, in latents, as numz derives them from output pixels
-    (attn_video_vae.py:1329-1332, 1486-1497)."""
-    size, overlap = tiles.size, tiles.overlap
-    if size % SCALE or overlap % SCALE or not 0 <= overlap < size:
-        raise ValueError(
-            f"tiles of {size} px sharing {overlap}: a tile's side and its overlap are multiples"
-            f" of {SCALE}, the overlap from 0 up and under the side"
-        )
-    side = size // SCALE
-    return side, min(overlap // SCALE, side - 1)
-
-
-def _latent_size(padded: tuple[int, int]) -> tuple[int, int]:
-    """The latents' (rows, columns) of frames padded to (height, width) pixels."""
-    height, width = padded
-    if height % SCALE or width % SCALE or min(height, width) < SCALE:
-        raise ValueError(f"frames of {width}x{height}: padded frames are multiples of {SCALE}")
-    return height // SCALE, width // SCALE
-
-
-def _spans(length: int, side: int, overlap: int) -> list[tuple[int, int]]:
-    """[start, end) of the tiles along `length` latents, `side` long, sharing `overlap`."""
-    if length < 1:
-        raise ValueError(f"a picture of {length} latents")
-    spans: list[tuple[int, int]] = []
-    for start in range(0, length, side - overlap):
-        end = min(start + side, length)
-        # numz: "Skip if fully within overlap of previous tiles".
-        if start > 0 and end - start <= overlap:
-            continue
-        spans.append((start, end))
-    return spans
 
 
 class ScratchError(MediaError):
@@ -160,7 +88,8 @@ class Scratch:
     unit directory (SCRATCH).
 
     The file is derived data, never recorded: it goes when its store is closed, on success and on
-    failure alike. A run killed leaves it, for the resume to discard."""
+    failure alike, a mapping the system refuses included, and nothing stays open on it. A run
+    killed leaves it, for the resume to discard."""
 
     def __init__(self, directory: Path | None, allowance: int | None = None) -> None:
         self.directory = directory
@@ -170,8 +99,9 @@ class Scratch:
     @staticmethod
     def needed(frames: int, padded: tuple[int, int]) -> int:
         """The bytes of a store of `frames` frames padded to (height, width) pixels: 12.7 MB per
-        1080p frame, padded to 1104x1920, 50.5 MB per 4K frame, padded to 2192x3840."""
-        return CHANNELS * frames * padded[0] * padded[1] * COMPUTE_DTYPE.itemsize
+        1080p frame, padded to 1104x1920, 50.5 MB per 4K frame, padded to 2192x3840
+        (tilegrid.scratch_bytes, there without torch for the planner to count with)."""
+        return scratch_bytes(frames, padded)
 
     def where(self, frames: int, padded: tuple[int, int]) -> str:
         """Where a store of that size is while it is open, for the logs: system memory, or its
@@ -197,14 +127,15 @@ class Scratch:
             if size <= self.allowance:
                 yield torch.zeros(shape, dtype=COMPUTE_DTYPE)
                 return
-            with self._file(size) as path:
-                yield _mapped(path, size).view(shape)
+            with self._file(size) as flat:
+                yield flat.view(shape)
         finally:
             self._open = False
 
     @contextlib.contextmanager
-    def _file(self, size: int) -> Generator[Path]:
-        """The scratch's file, new, `size` bytes of zeros, there while the with block runs."""
+    def _file(self, size: int) -> Generator[Tensor]:
+        """The scratch's file, new, `size` bytes of zeros, mapped (_mapped): a flat tensor, the
+        file there while the with block runs."""
         if self.directory is None:
             # PROVISIONAL: the planner refuses such a job before the run (DESIGN.md, Memory
             # planner); DESIGN.md doesn't say what the run itself does.
@@ -221,14 +152,17 @@ class Scratch:
                 # refused: it is derived data. Unlinked, never truncated, so that a process still
                 # mapping it keeps its own.
                 path.unlink(missing_ok=True)
-                with path.open("xb") as file:
+                # Read and written: the mapping is of this descriptor, and writes.
+                with path.open("x+b") as file:
                     made = True
                     # Allocated whole: a full disk fails here, not later as a SIGBUS on a page of
                     # the mapping.
                     os.posix_fallocate(file.fileno(), 0, size)
+                    # Mapped while the file allocated is still open, through its descriptor.
+                    flat = _mapped(file.fileno(), path, size)
             except OSError as error:
                 raise ScratchError(f"{path}: the shot's scratch, {size} bytes: {error}") from error
-            yield path
+            yield flat
         finally:
             # Whatever ended the block, an allocation interrupted included. A file that stays
             # changes no result: said, and the run goes on.
@@ -239,17 +173,29 @@ class Scratch:
                 logger.warning("%s: the shot's scratch, not removed: %s", path, error)
 
 
-def _mapped(path: Path, size: int) -> Tensor:
-    """The file at path, `size` bytes, as a flat tensor in COMPUTE_DTYPE: a shared mapping, so
-    that what is written through the tensor is the file's, which the system writes out and drops
-    from memory as it needs to."""
-    elements = size // COMPUTE_DTYPE.itemsize
+def _mapped(descriptor: int, path: Path, size: int) -> Tensor:
+    """The file open as `descriptor`, read and written, `size` bytes, as a flat tensor in
+    COMPUTE_DTYPE: a shared mapping, so that what is written through the tensor is the file's,
+    which the system writes out and drops from memory as it needs to.
+
+    Mapped through the descriptor itself (mmap), which is the file that was allocated, whatever
+    its name has become: by its name, path, a link put there since the allocation would be mapped
+    in its place, and another file written (tests/test_tiling.py). path is for the message.
+
+    The mapping is never closed here: the tensor's storage keeps the mapping object, which goes
+    with the last tensor on it, as does the duplicate of the descriptor it holds, the descriptor
+    given closed or not. Closed under a tensor, it would leave the tensor on memory that is no
+    longer mapped, without an error. A mapping the system refuses is a ScratchError, and leaves
+    nothing open on the file: torch.from_file, which maps a name, kept its own descriptor on it
+    then."""
     try:
-        return torch.from_file(str(path), shared=True, size=elements, dtype=COMPUTE_DTYPE)
-    except RuntimeError as error:
+        # Shared, read and written: mmap's defaults.
+        mapping = mmap.mmap(descriptor, size)
+    except OSError as error:
         raise ScratchError(
             f"{path}: the shot's scratch, {size} bytes, not mapped: {error}"
         ) from error
+    return torch.frombuffer(mapping, dtype=COMPUTE_DTYPE)
 
 
 @torch.no_grad()
@@ -258,17 +204,19 @@ def encode_tiled(
 ) -> Tensor:
     """VAE latent of a shot of `frames` frames (4n + 1) fed slice by slice, as model.encode_stream
     takes them (each (C, t, H, W) in [-1, 1], COMPUTE_DTYPE on the device, t following
-    model.encode_slices), encoded tile by tile (grid): (T', h, w, 16) in channel-major memory, on
-    the device; numz's tiled encode of the shot, bit for bit. A grid of one tile gives
-    model.encode_stream's latent, the scratch untouched.
+    model.encode_slices), encoded tile by tile (grid): (T', h, w, 16) in channel-major memory, in
+    system memory, as model.encode_stream gives it; numz's tiled encode of the shot, bit for bit.
+    A grid of one tile gives model.encode_stream's latent, the scratch untouched.
 
     The slices are first kept in the scratch as they come, on the CPU. Then each tile's crop of
     them goes through the encoder in the same slices, one pass with its own causal memory
-    (model.encode_sliced); each slice's moments are weighted on the device, moved to the CPU and
-    added to their latents' place in the sums, and the tile's weights to their sum, on the CPU
-    (attn_video_vae.py:1426-1457). After the last tile the sums are divided on the device by the
-    summed weights (:1459-1463), and the latent is made from them (model.to_latent). The moments'
-    sums are latents, small, twice the shot's latent: only the input takes the scratch, which is
+    (model.encode_sliced); the mean of each slice's moments (model.mode), the half the latent is
+    made from, is weighted on the device, moved to the CPU and added to its latents' place in the
+    sums, and the tile's weights to their sum, on the CPU (attn_video_vae.py:1426-1457). After
+    the last tile each slice of the sums (model.latent_slices) goes to the device, is divided
+    there by the summed weights (:1459-1463) and comes back, and the latent is made from them
+    (model.to_latent), slice by slice too: nothing on the device grows with the shot. The sums
+    are latents, small, the size of the shot's latent: only the input takes the scratch, which is
     closed before this returns.
 
     ValueError when the slices don't follow model.encode_slices, differ in size, or aren't in
@@ -278,19 +226,36 @@ def encode_tiled(
     first = next(slices, None)
     if first is None:
         raise ValueError(f"0 slices, the VAE takes {sizes}")
-    slices = chain((first,), slices)
     padded = (first.shape[2], first.shape[3])
-    del first  # the chain's alone now: on the device until it is kept, not until the last tile
-    if len(grid(_latent_size(padded), tiles)) == 1:
+    # Read for the picture's size, and handed back with the rest, no reference kept: the first
+    # slice leaves the device when the pass that takes it lets it go, not when the slices end.
+    slices = _handed_back(first, slices)
+    del first
+    if len(grid(latent_size(padded), tiles)) == 1:
         _untiled("encode", tiles, padded)
         return model.encode_stream(models, slices, frames)
-    sums, count = _moments(models, slices, sizes, padded, tiles, scratch)
-    sums, count = sums.to(models.device), count.to(models.device)
-    sums.div_(count.clamp(min=1e-6))
+    sums, count = _means(models, slices, sizes, padded, tiles, scratch)
+    divisor = count.to(models.device).clamp(min=1e-6)
+    start = 0
+    for size in model.latent_slices(models, sums.shape[2]):
+        # A copy on the CPU too, where to() alone gives the sums' own memory.
+        mean = sums[:, :, start : start + size].to(models.device, copy=True).div_(divisor)
+        model.synchronize(models.device)
+        sums[:, :, start : start + size] = mean.to("cpu")
+        start += size
     return model.to_latent(models, sums)
 
 
-def _moments(
+def _handed_back(first: Tensor, rest: Iterator[Tensor]) -> Iterator[Tensor]:
+    """first, then rest: a shot's slices again, once the first was read ahead of them. The first
+    is dropped here when the next is asked for, where itertools.chain would keep it until rest
+    ends."""
+    yield first
+    del first
+    yield from rest
+
+
+def _means(
     models: Models,
     slices: Iterable[Tensor],
     sizes: list[int],
@@ -298,12 +263,12 @@ def _moments(
     tiles: Tiles,
     scratch: Scratch,
 ) -> tuple[Tensor, Tensor]:
-    """The tiles' weighted moments of a shot fed in slices of `sizes` frames, summed,
-    (1, 32, T', h, w), and the summed weights, (h, w), on the CPU, in the VAE's dtype
+    """The tiles' weighted means (model.mode) of a shot fed in slices of `sizes` frames, summed,
+    (1, 16, T', h, w), and the summed weights, (h, w), on the CPU, in the VAE's dtype
     (encode_tiled). The scratch's store is open only here: nothing returned is on it."""
     frames = sum(sizes)
-    height, width = _latent_size(padded)
-    overlap = _latent_tiles(tiles)[1]
+    height, width = latent_size(padded)
+    overlap = latent_tiles(tiles)[1]
     latents = 1 + (frames - 1) // models.runner.vae.temporal_downsample_factor
     sums: Tensor | None = None
     count = torch.zeros((height, width), dtype=COMPUTE_DTYPE)
@@ -325,19 +290,24 @@ def _moments(
             place = (slice(tile.top, tile.bottom), slice(tile.left, tile.right))
             start = 0
             # Closed whatever ends the tile, which clears its causal memory at once. A slice's
-            # moments leave the device as they come: a tile's, whole, would grow there with the
-            # shot, 1 MiB a latent under 1024-px tiles, where numz's stay for a batch.
+            # mean leaves the device as it comes: a tile's moments, whole, would grow there with
+            # the shot, 1 MiB a latent under 1024-px tiles, where numz's stay for a batch.
             crops = _crops(models, inputs, tile, sizes)
             with contextlib.closing(_encoded(models, crops, tile, frames, latents)) as passes:
                 for moments in passes:
+                    # numz weights and sums the moments whole, the log-variance with the mean
+                    # (:1426-1457), and keeps the mean of the quotient (src/core/infer.py:183-184):
+                    # each channel is weighted, summed and divided alone, so the mean's are the
+                    # same.
+                    mean = model.mode(moments)
                     if sums is None:
                         # Sized by the first moments, as numz's (:1406-1419).
-                        shape = (*moments.shape[:2], latents, height, width)
-                        sums = torch.zeros(shape, dtype=moments.dtype)
-                    moments.mul_(row_weights.view(-1, 1)).mul_(column_weights)
+                        shape = (*mean.shape[:2], latents, height, width)
+                        sums = torch.zeros(shape, dtype=mean.dtype)
+                    mean.mul_(row_weights.view(-1, 1)).mul_(column_weights)
                     model.synchronize(models.device)
-                    end = start + moments.shape[2]
-                    sums[:, :, start:end, *place] += moments.to("cpu")
+                    end = start + mean.shape[2]
+                    sums[:, :, start:end, *place] += mean.to("cpu")
                     start = end
             model.synchronize(models.device)
             count[place].addcmul_(
@@ -412,14 +382,15 @@ def _crops(models: Models, inputs: Tensor, tile: Tile, sizes: list[int]) -> Iter
 def decode_tiled(
     models: Models, latent: Tensor, tiles: Tiles, scratch: Scratch
 ) -> Generator[Tensor]:
-    """VAE decode of latent (T', h, w, 16), as model.decode_stream takes it, tile by tile (grid):
-    frames (C, t, H, W) in [-1, 1], unclamped, on the device, in the slices model.decode_stream
-    gives (t following model.decode_slices), handed on once the last tile is decoded; numz's
-    tiled decode of the shot, bit for bit. A grid of one tile gives model.decode_stream's slices,
-    the scratch untouched.
+    """VAE decode of latent (T', h, w, 16), as model.decode_stream takes it, a shot's in system
+    memory, tile by tile (grid): frames (C, t, H, W) in [-1, 1], unclamped, on the device, in the
+    slices model.decode_stream gives (t following model.decode_slices), handed on once the last
+    tile is decoded; numz's tiled decode of the shot, bit for bit. A grid of one tile gives
+    model.decode_stream's slices, the scratch untouched.
 
     Each tile's crop of the latents is decoded slice by slice, one pass with its own causal
-    memory (model.decode_sliced); each slice is weighted on the device, moved to the CPU and
+    memory (model.decode_sliced), the latent staying where it is, a slice's crop alone going to
+    the device; each slice is weighted on the device, moved to the CPU and
     added to its frames' place in the scratch, and the tile's weights to their sum, on the CPU
     (attn_video_vae.py:1588-1619). After the last tile, each slice of the sums goes to the device
     and is divided there by the summed weights (:1621-1625).
@@ -432,16 +403,17 @@ def decode_tiled(
         _untiled("decode", tiles, (latent.shape[1] * SCALE, latent.shape[2] * SCALE))
         yield from model.decode_stream(models, latent)
         return
-    z = model.decoder_input(models, latent)
-    if z.dtype != COMPUTE_DTYPE:
-        raise ValueError(f"latent {z.dtype}, a tiled decode takes {COMPUTE_DTYPE}")
-    sizes = model.decode_slices(models, z.shape[2])
-    height, width = z.shape[3], z.shape[4]
+    model.decodable(models, latent)
+    if latent.dtype != COMPUTE_DTYPE:
+        raise ValueError(f"latent {latent.dtype}, a tiled decode takes {COMPUTE_DTYPE}")
+    sizes = model.decode_slices(models, latent.shape[0])
+    height, width = latent.shape[1], latent.shape[2]
     padded = (height * SCALE, width * SCALE)
-    # The decode's ramp is over the overlap in output pixels, on z's device in its dtype
-    # (:1516-1523), which the decoded frames share.
+    # The decode's ramp is over the overlap in output pixels, on the device in the dtype of the
+    # decoder's input (:1516-1523), the latent's, which the decoded frames share.
     overlap = tiles.overlap
-    ramp = _ramp(overlap, z)
+    like = torch.empty(0, device=models.device, dtype=latent.dtype)
+    ramp = _ramp(overlap, like)
     count = torch.zeros(padded, dtype=COMPUTE_DTYPE)
     with scratch.store(sum(sizes), padded) as sums:
         _tiled("decode", layout, tiles, sum(sizes), padded, scratch)
@@ -449,15 +421,14 @@ def decode_tiled(
             rows = slice(tile.top * SCALE, tile.bottom * SCALE)
             columns = slice(tile.left * SCALE, tile.right * SCALE)
             row_weights = _weights(
-                z, tile.rows * SCALE, overlap, ramp, tile.top > 0, tile.bottom < height
+                like, tile.rows * SCALE, overlap, ramp, tile.top > 0, tile.bottom < height
             )
             column_weights = _weights(
-                z, tile.columns * SCALE, overlap, ramp, tile.left > 0, tile.right < width
+                like, tile.columns * SCALE, overlap, ramp, tile.left > 0, tile.right < width
             )
-            crop = z[:, :, :, tile.top : tile.bottom, tile.left : tile.right]
             start = 0
             # Closed whatever ends the tile, which clears its causal memory at once.
-            with contextlib.closing(_decoded(models, crop, sizes)) as slices:
+            with contextlib.closing(_decoded(models, latent, tile, sizes)) as slices:
                 for decoded in slices:
                     decoded.mul_(row_weights.view(-1, 1)).mul_(column_weights)
                     model.synchronize(models.device)
@@ -477,13 +448,16 @@ def decode_tiled(
             start += size
 
 
-def _decoded(models: Models, z: Tensor, sizes: list[int]) -> Generator[Tensor]:
-    """A tile's crop of z decoded slice by slice (model.decode_sliced), each slice checked for
-    its place in the scratch: (3, t, 8h, 8w) in COMPUTE_DTYPE, t following sizes. A slice of
-    another shape could be broadcast into that place, and one in another dtype rounded."""
-    height, width = z.shape[3] * SCALE, z.shape[4] * SCALE
+def _decoded(models: Models, latent: Tensor, tile: Tile, sizes: list[int]) -> Generator[Tensor]:
+    """The tile's crop of latent (T', h, w, 16) decoded slice by slice (model.decode_sliced, the
+    crop numz takes of the decoder's input: attn_video_vae.py:1553), each slice checked for
+    its place in the scratch: (3, t, 8 rows, 8 columns) in COMPUTE_DTYPE, t following sizes. A
+    slice of another shape could be broadcast into that place, and one in another dtype
+    rounded."""
+    height, width = tile.rows * SCALE, tile.columns * SCALE
+    rows, columns = slice(tile.top, tile.bottom), slice(tile.left, tile.right)
     given = 0
-    for decoded in model.decode_sliced(models, z):
+    for decoded in model.decode_sliced(models, latent, rows, columns):
         if given == len(sizes):
             raise RuntimeError(f"more slices decoded than the {len(sizes)} of {sizes} frames")
         expected = (CHANNELS, sizes[given], height, width)

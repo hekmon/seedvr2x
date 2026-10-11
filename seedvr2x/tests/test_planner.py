@@ -97,11 +97,11 @@ def test_constants() -> None:
 def test_literals_equal_blockswaps_and_tilings() -> None:
     # The planner imports no torch, so holds literals of what runtime/blockswap.py and
     # runtime/tiling.py define, which do: the same figures.
-    from seedvr2x.runtime import blockswap, tiling
+    from seedvr2x.runtime import blockswap, tilegrid
 
     assert (planner.BLOCK, planner.SLOTS) == (blockswap.BLOCK_BYTES, blockswap.SLOTS)
     assert planner.GIB == blockswap.GIB
-    assert planner.SCRATCH_PIXEL == tiling.Scratch.needed(1, (1, 1))
+    assert planner.SCRATCH_PIXEL == tilegrid.scratch_bytes(1, (1, 1))
 
 
 def test_weights_by_the_models_shapes() -> None:
@@ -349,11 +349,11 @@ def test_grid_and_tile_area() -> None:
 
 def test_grid_is_the_tiled_passes() -> None:
     # The planner's grid, counted in pixels, is the tiled passes' own over the latents
-    # (tiling.grid), its largest tile theirs (tiling.largest), and a tile covers the frame
+    # (tilegrid.grid), its largest tile theirs (tilegrid.largest), and a tile covers the frame
     # exactly where their grid is one tile, the pass then running untiled: over padded sizes
     # from 16 px to beyond 4K, every tile the planner makes or takes up to 4096 px, at the
     # plan's overlap, and at the others the studies ran.
-    from seedvr2x.runtime import tiling
+    from seedvr2x.runtime import tilegrid
 
     sides = (16, 128, 432, 512, 528, 544, 576, 720, 1024, 1088, 1104, 1280, 1920, 2192, 3840, 4320)
     sizes = [(height, width) for height in sides for width in sides]
@@ -362,12 +362,12 @@ def test_grid_is_the_tiled_passes() -> None:
         for size in tile_sizes:
             tiles = Tiles(size, overlap)
             for padded in sizes:
-                theirs = tiling.grid((padded[0] // 8, padded[1] // 8), tiles)
+                theirs = tilegrid.grid((padded[0] // 8, padded[1] // 8), tiles)
                 rows, columns = planner.grid(padded, tiles)
                 assert len({tile.top for tile in theirs}) == rows
                 assert len({tile.left for tile in theirs}) == columns
                 assert len(theirs) == rows * columns
-                assert tiling.largest(padded, tiles) == round(
+                assert tilegrid.largest(padded, tiles) == round(
                     planner.tile_area(padded, tiles) * 1e6
                 )
                 assert planner.covers(padded, tiles) == (len(theirs) == 1)
@@ -636,11 +636,11 @@ def test_scratch() -> None:
     # The store either tiled pass opens (tiling.encode_tiled, tiling.decode_tiled): the shot's
     # frames padded to 4n + 1, of padded frames, the same for the encode's kept input and for
     # the decode's sums.
-    from seedvr2x.runtime import tiling
+    from seedvr2x.runtime import tilegrid
 
     for frames in (1, 2, 5, 298, 300, 301):
         for padded in (OURS_1080, OURS_4K, (544, 512)):
-            needed = tiling.Scratch.needed(padded_length(frames), padded)
+            needed = tilegrid.scratch_bytes(padded_length(frames), padded)
             assert planner.scratch(padded, frames) == needed
 
 
