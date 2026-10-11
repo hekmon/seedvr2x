@@ -132,7 +132,8 @@ never requires it.
   after the prototype, starting with an analysis of:
   - FlashAttention 2 and `torch.compile`'s Triton there (SDPA works everywhere)
   - the driver spilling VRAM into system memory instead of failing (numz enforces the physical
-    limit for this), which the planner must prevent
+    limit for this), which the planner must prevent. A Windows driver does it under WSL too,
+    where seedvr2x runs today (see [Allocator](#allocator))
 
 ## Terms
 
@@ -1459,7 +1460,8 @@ first pass, whose shots are its input, and before the models load:
 - **Host RAM** too. The process's peak, 16.5 GiB with 7B fp16, comes while the weights load,
   not during the shots, which stay flat (2.3–2.4 GiB resident over 6 shots). It is probably the
   weights file mapped while it is copied to the GPU; not measured further. On top come the
-  pinned host copies of what leaves the GPU (15.19 GiB for the DiT's 36 blocks, see
+  pinned host copies of what leaves the GPU (15.19 GiB for the DiT's 36 blocks, 15.81 with
+  its other parameters and the VAE's when a plan keeps the two models apart, see
   [BlockSwap, rewritten](#blockswap-rewritten)) and a tiled shot's scratch, up to its
   allowance. The plan counts them against the host's available memory: a job they don't fit,
   or whose copies the host won't pin, is refused before the run, naming the RAM it needs.
@@ -1500,8 +1502,11 @@ first pass, whose shots are its input, and before the models load:
       the GPU in its DiT phase. A swapped block takes its 0.42 GiB off, but for the two blocks
       in the slots (see [BlockSwap, rewritten](#blockswap-rewritten)), and the VAE sent away
       for the phase its 0.47 (measured on numz: 28.15 to 27.68 GiB). numz's own swap, one
-      block on the GPU at a time, saved 0.42 GiB × (S − 1) for S blocks, to 0.01 GiB;
-      seedvr2x's saving is measured with milestone 3.
+      block on the GPU at a time, saved 0.42 GiB × (S − 1) for S blocks, to 0.01 GiB.
+      seedvr2x's, measured on 2026-10-11: 0.4220 GiB a swapped block but the two in the
+      slots, to 0.001 GiB, at 1, 6 and 12 latents at 1080p and at 4K (28.316 GiB to 13.968 at
+      12 latents with all 36 swapped), so that one or two swapped blocks save nothing; and
+      0.467 more with the VAE away.
   - On the 96 GB card, in numz's padding (1,088 rows at 1080p): windows of 78 latents (309
     frames) at 1080p, 0.56 GiB to spare, and 19 (73 frames) at 4K; one latent more fails
     within 3 s.
@@ -1647,7 +1652,9 @@ numz swaps its first N blocks: each goes to the GPU for its forward pass and bac
 memory after it, synchronously, about 25 ms up and 95 ms back per block
 ([measured](../research/docs/vram.md#blockswap)). Weights never change, so:
 - one **pinned** host copy per block that leaves the GPU, host→device only (57 GB/s pinned vs
-  4 GB/s back to pageable memory): nothing is ever copied back
+  4 GB/s back to pageable memory): nothing is ever copied back. Each copy takes its bytes and
+  no more: seedvr2x maps and registers the memory itself, torch's pinned allocator rounding
+  every allocation up to a power of two (0.5 GiB for a block's 0.42)
 - the **last** S blocks are the swapped ones, so the first upload hides behind the resident
   blocks' compute
 - they stream through **two slots** on the GPU, allocated once and written in place: the
@@ -1661,25 +1668,46 @@ memory after it, synchronously, about 25 ms up and 95 ms back per block
   pinned copy. Below 48 GB at 1080p the DiT leaves for the VAE's encode and decode: an untiled
   decode takes about 35 GiB with the VAE alone (34.9–35.7 measured on numz, which has the DiT
   off the GPU in those phases), and the DiT's 15.35 GiB beside it would pass that card's
-  budget. It comes back in about 0.3 s at the pinned rate. The VAE's 0.47 GiB leave for the
-  DiT's phase the same way, when the window wants them. Once a model has left, the GPU holds
-  what the other alone would.
+  budget. It comes back in 0.30 s (measured on a desktop card, 15.35 GiB). The VAE's 0.47 GiB
+  leave for the DiT's phase the same way, when the window wants them. Once a model has left,
+  the GPU holds what the other alone would, and 0.06 GiB of RoPE's buffers and tables that
+  never move. What leaves is handed back to the driver at once, 0.3 s at most: torch's
+  allocator would keep it (5.5 GiB free of a 32 GB card after the DiT had left, 29.3 once
+  handed back).
 - **The loader** never puts a swapped DiT whole on the GPU, which a 16 GB card couldn't hold:
-  its swapped blocks go straight to their pinned copies.
+  its swapped blocks are read from the file straight into their pinned copies (0.026 GiB on
+  the GPU at such a load's peak, 16.8 GiB in the process, as a plain load).
 - **Pinned memory refused, or too little host RAM:** the job is refused before the run, naming
   the RAM it needs. A pageable copy (18–25 GB/s to the GPU, measured) is a later fallback,
   logged.
 - **The gate: swapping changes no bit** of the output, for any number of swapped blocks, with
   and without the prefetch. numz's own swap changed none
   ([models.md](../research/docs/models.md#blockswaps-free-q4_k_m-swap-the-power-cap-test)).
-  The resume rule rests on it (see [Memory planner](#memory-planner)).
+  The resume rule rests on it (see [Memory planner](#memory-planner)). Passed on 2026-10-11,
+  on the 96 GB card and on a 32 GB desktop card: 0, 3, 12 and 36 blocks swapped, with the
+  prefetch and without, at 1, 6 and 12 latents at 1080p and at 4K; a plan that keeps the two
+  models apart, as a 16 GB card too; and through the command line, the same frames with 0, 12
+  and 36 blocks swapped.
 
-Expected: most of the swap cost hidden. To measure, on a healthy card above all: its blocks
-should compute 2 to 3 times faster, which leaves the prefetch less time to hide in.
+Its cost, measured on a healthy desktop card: without the prefetch, 8.2 ms a swapped block and
+forward, about 30% on a window of one latent with all 36 swapped and 6% at 6 latents; with
+it, 2 to 10% at one latent and nothing measurable at 6.
 
 ### Allocator
 `cudaMallocAsync` stays the default (it trims its pool on a full card; `native` fragments and
 fails). Set by us, documented, overridable.
+- During a window the GPU holds more than torch's peak, the pool's slack: 2.7 to 3.7 GiB at 6
+  latents of 1080p, 3.4 on the 96 GB card at 12. Where the driver refuses a full card, the
+  pool gives it back, and the planner's margin was measured that way.
+- **A driver that gives memory it doesn't have** never makes it give it back. Seen on
+  2026-10-11 under WSL, with a Windows driver whose fallback to system memory the user had
+  turned off in its panel, which doesn't seem to reach WSL: a request for 2 GiB more than
+  was free was granted; a window over the card ran 2 to 3 times slower, then CUDA failed with
+  an out-of-memory error that no Python code can catch and the process aborted; in one run,
+  two forwards gave other bits before it. So seedvr2x looks for such a driver at startup,
+  says so, and holds itself to the memory really free by its own means; how (torch's own
+  cap, the allocator, a larger margin) is being measured on that card. Until it is built, a
+  run there must be kept well under the card by hand.
 
 ## Pause and resume
 
@@ -2131,7 +2159,7 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
    - The single-window case stays bit-identical to milestone 1.
 3. **Planner, BlockSwap and tiling.**
    - Swapping changes no bit: the output with any number of blocks swapped, with and without
-     the prefetch, equals the output with none.
+     the prefetch, equals the output with none. Passed on 2026-10-11, on both cards.
    - Tiling is numz's, bit for bit: a tiled encode and decode equal numz's on milestone 1's
      input, in numz's padding. Passed on 2026-10-11, at three pairs of tile sizes, with a kill
      in each tiled pass resumed bit for bit.
