@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from seedvr2x.media.conversion import MATRICES
+from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
 from seedvr2x.runtime.cuts import POSSIBLE, THRESHOLD
 from seedvr2x.runtime.job import MIN_SEGMENT
@@ -101,6 +102,22 @@ def main(argv: list[str] | None = None) -> int:
         " zscale (white at 940), about 100-135 GiB per hour of 1080p; gbrp16le, FFV1 master in"
         " 16-bit RGB, for precision work, tests and scoring on short samples, 540-690 GiB per hour"
         " of 1080p with colour correction; png, 16-bit PNG",
+    )
+    # DESIGN.md, Output, Writer: seedvr2x owns no encoder flags; how the output is compressed
+    # during the run is the user's own command, one run per output segment.
+    parser.add_argument(
+        "--segment-cmd",
+        metavar="CMD",
+        help="write each output segment with the command CMD, run by /bin/sh once per segment, in"
+        " place of the FFV1 writer: it reads the segment on stdin, lossless and tagged, in the"
+        " master's format (the FFV1 stream --format names, in Matroska: yuv420p10le by default,"
+        " so that an encoder converts nothing), and writes the file seedvr2x names, which {out}"
+        " stands for, quoted for the shell: --segment-cmd 'ffmpeg -i - -c:v libx265 -crf 16"
+        " {out}'. seedvr2x never parses CMD: it tries it on a few black frames before any work,"
+        " then checks its exit status and the frames its file holds, and keeps no checksums of"
+        " them. A directory -o then holds what CMD wrote, and a .mkv path is assembled from it;"
+        " a failing CMD stops the run at its segment, which the same command resumes. A setting:"
+        " another CMD is another job. Refused with --format png",
     )
     # Optional (DESIGN.md, Weights, decided 2026-10-09): without it, seedvr2x's own files come
     # from Hugging Face's cache, pulled from its repo when missing (runtime/pull.py).
@@ -313,19 +330,22 @@ def verify(argv: list[str]) -> int:
 class _Checked:
     """What verify checks: an output segment's file or PNG directory, or a one-file output; the
     pixel format of the frames as it holds them; their size; its checksums, None for a segment not
-    finished."""
+    finished; frames, for a segment command's segment (--segment-cmd), which has no checksums:
+    the frames it must hold, counted, where the others' are checked."""
 
     path: Path
     pix_fmt: str
     size: tuple[int, int]
     checksums: Path | None
     png: bool = False
+    frames: int | None = None
 
 
 def _verify(output: Path) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.checksums import check_frames, read_checksums
     from seedvr2x.media.ffmpeg import MediaError, input_args
+    from seedvr2x.media.writer import count_frames
     from seedvr2x.runtime.job import JobError
 
     try:
@@ -335,10 +355,30 @@ def _verify(output: Path) -> int:
         logger.error("%s", error)
         return 1
     wrong = unfinished = 0
+    # A segment command's output has no checksums (DESIGN.md, Output, Checksums: "`--segment-cmd`
+    # outputs only get their frame count checked"): each finished segment's frames are counted,
+    # as the writer counted them (writer.count_frames), against the manifest's. PROVISIONAL
+    # (implementation, 2026-10-10: DESIGN.md doesn't say what verify does of one).
+    counted = any(item.frames is not None for item in checked)
     for item in checked:
-        if item.checksums is None:
+        if item.checksums is None and item.frames is None:
             unfinished += 1
             logger.warning("%s: unfinished, not checked", item.path)
+            continue
+        if item.checksums is None:
+            try:
+                # Strictly: anything ffprobe reports while decoding fails the check (DESIGN.md,
+                # Output, Checksums).
+                frames = count_frames(item.path, strict=True)
+            except MediaError as error:
+                wrong += 1
+                logger.error("%s", error)
+                continue
+            if frames != item.frames:
+                wrong += 1
+                logger.error("%s: %d frames, where %d were written", item.path, frames, item.frames)
+            else:
+                logger.info("%s: its %d frames there, counted", item.path, frames)
             continue
         try:
             checksums = read_checksums(item.checksums)
@@ -364,6 +404,14 @@ def _verify(output: Path) -> int:
         counts += [f"{unfinished} unfinished"] if unfinished else []
         logger.error("%s: of %d, %s", output, len(checked), " and ".join(counts))
         return 1
+    if counted:
+        logger.info(
+            "%s: %d checked, by their frame counts alone: a --segment-cmd output has no checksums,"
+            " its frames being its encoder's",
+            output,
+            len(checked),
+        )
+        return 0
     logger.info("%s: %d checked, every frame as written", output, len(checked))
     return 0
 
@@ -380,18 +428,29 @@ def _checked(output: Path) -> list[_Checked]:
     if not (directory / NAME).is_file():
         if output.is_dir():
             raise JobError(f"{output}: no {NAME}, so not an output directory of seedvr2x")
+        # A finished file without its checksums beside it has nothing to be checked against: a
+        # --segment-cmd job's has none, and no manifest once its work directory is removed.
+        sums = _checksums_beside(output)
+        if not sums.is_file():
+            raise MediaError(
+                f"{sums}: missing, so nothing to check the frames of {output} against; a"
+                " --segment-cmd output has no checksums, its frames being its encoder's"
+            )
         # No frame read: verify decodes every one, and its report says what doesn't decode.
         stream = probe(output, first_frame=False)
         if stream.pix_fmt not in ("gbrp16le", "yuv420p10le"):
             raise MediaError(f"{output}: {stream.pix_fmt}, not a master seedvr2x writes")
-        sums = output.with_name(f"{output.name}.crc32")
         return [_Checked(output, stream.pix_fmt, (stream.width, stream.height), sums)]
     content = read(directory / NAME)
     try:
         output_format = str(content["output"]["format"])
         width, height = (int(side) for side in content["output"]["size"])
-        segments = [(str(entry["name"]), bool(entry["finished"])) for entry in content["segments"]]
-    except (KeyError, TypeError, ValueError):
+        segments = [
+            (str(entry["name"]), bool(entry["finished"]), int(entry["end"]) - int(entry["start"]))
+            for entry in content["segments"]
+        ]
+        commanded = content["settings"].get("segment_cmd") is not None
+    except (KeyError, TypeError, ValueError, AttributeError):
         raise JobError(f"{directory / NAME}: not a manifest seedvr2x wrote") from None
     if only is not None:
         segments = [segment for segment in segments if segment[0] == only]
@@ -403,10 +462,13 @@ def _checked(output: Path) -> list[_Checked]:
             directory / name,
             "rgb48be" if png else output_format,
             (width, height),
-            directory / SUMS / checksums_file(name, output_format) if finished else None,
+            None
+            if commanded or not finished
+            else directory / SUMS / checksums_file(name, output_format),
             png,
+            frames if commanded and finished else None,
         )
-        for name, finished in segments
+        for name, finished, frames in segments
     ]
 
 
@@ -428,6 +490,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.fingerprint import fingerprint
     from seedvr2x.media.source import counted, declare
+    from seedvr2x.media.writer import check_command
     from seedvr2x.runtime import memory, planner, pull
     from seedvr2x.runtime.job import (
         SHARED,
@@ -472,6 +535,14 @@ def _run(args: argparse.Namespace) -> int:
                 " the detection"
             )
         png = args.format == "png"
+        if args.segment_cmd is not None:
+            if png:
+                raise JobError(
+                    "--segment-cmd: refused with --format png: the command reads an FFV1 master's"
+                    " stream, and PNG output has none"
+                )
+            # No {out} in it, or nothing at all: it could write nowhere seedvr2x looks.
+            check_command(args.segment_cmd)
         # A .mkv path is assembled at the job's end (_assemble): what the join needs of the build
         # is asked now, not once every segment is made.
         final = _final(args.output)
@@ -521,6 +592,8 @@ def _run(args: argparse.Namespace) -> int:
             # (stop.terminable): the run's handlers come later.
             with terminable():
                 _copied(args.input, directory)
+        if args.segment_cmd is not None:
+            _trial(args, declared, output_size(target))
         # A job detecting its shots needs the record's probabilities: a plan cut by a list has
         # none, its first pass run again with the shot detector when it is planned again without
         # one (_prior), which gives the detector its frames (PROVISIONAL, implementation,
@@ -768,15 +841,28 @@ def _run(args: argparse.Namespace) -> int:
 
     def open_segment(path: Path) -> Writer:
         size = (out_width, out_height, source.frame_rate)
+        if args.segment_cmd is not None:
+            # No checksums of what the user's command writes, so none of a file before it.
+            return open_writer(args.format, path, *size, tags, command=args.segment_cmd)
         stale = _checksums_path(directory, path, args.format)
         return open_writer(args.format, path, *size, tags, stale=stale)
 
     def finished(which: int, checksums: list[int]) -> None:
         """A segment whole: its checksums written whole, then the segment recorded (DESIGN.md,
-        Output, Checksums)."""
-        path = _checksums_path(directory, paths[remaining[which]], args.format)
-        make_directories(path.parent)
-        write_checksums(path, checksums)
+        Output, Checksums); none for a segment command's, whose frames are its encoder's."""
+        if args.segment_cmd is None:
+            path = _checksums_path(directory, paths[remaining[which]], args.format)
+            make_directories(path.parent)
+            write_checksums(path, checksums)
+        elif final is not None:
+            # What the assembly needs of a file the command wrote, asked now, not at the job's
+            # end (_joinable); against the first segment finished before it.
+            done = [index for index in range(len(segments)) if units.finished(index)]
+            _joinable(
+                *(final, paths[remaining[which]], segments[remaining[which]].frames),
+                source.frame_rate,
+                (paths[done[0]], segments[done[0]].frames) if done else None,
+            )
         units.segment_finished(remaining[which])
 
     # The n-th frame written is the job's frame number(n): the segments left, in order.
@@ -808,8 +894,23 @@ def _run(args: argparse.Namespace) -> int:
             again = "" if record is None else "; removed, made again from the input on resuming"
             logger.error("%s%s; stopped: %s", error, again, _kept(record, len(segments)))
             return 1
+        except _Unjoinable as error:
+            # A segment the assembly couldn't join (_joinable): kept, the units; the same
+            # command would decode it again and write the same file.
+            done = sum(units.finished(index) for index in range(len(segments)))
+            logger.error(
+                "%s; stopped: %d of %d segments finished, and the units of the next ones kept:"
+                " the same command decodes that segment again, and meets the same refusal"
+                " unless its cause is gone",
+                error,
+                done,
+                len(segments),
+            )
+            return 1
         except MediaError as error:
-            logger.error("%s", error)
+            # A segment command failing among them (--segment-cmd): its segment unfinished, its
+            # shots' windows kept, which a resume decodes and writes again.
+            logger.error("%s; stopped: %s", error, _kept(record, len(segments)))
             return 1
         except NonFinite as error:
             logger.error("%s, so not recorded; stopped: %s", error, _kept(record, len(segments)))
@@ -915,6 +1016,121 @@ def _work_directory(output: Path) -> Path:
     return output.with_name(f"{output.name}.work")
 
 
+# The black frames a segment command is tried on (_trial): a few, quick to write and to count.
+TRIAL_FRAMES = 5
+# What the trial's temporary directory's name begins with: a space, a single quote and a dollar.
+TRIAL_PREFIX = "seedvr2x trial '$ "
+
+
+def _trial(args: argparse.Namespace, declared: "Declared", size: tuple[int, int]) -> None:
+    """Try --segment-cmd before any work, at every start: the command run once on TRIAL_FRAMES
+    black frames at the output's `size` (height, width), format, rate and tags, through the very
+    writer the run uses (writer.CommandWriter), into a temporary directory, the output's own left
+    as it is; the file named as a segment is, its suffix the muxer's cue; its frames counted, as a
+    segment's are, and, for a .mkv path, what the assembly needs of it asked (_joinable). A
+    failure refuses the job (JobError) with the writer's message.
+
+    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has the command run once per segment and
+    says nothing of a trial): a command with a typo or a missing encoder would otherwise fail
+    once the first segment's shots are encoded and sampled, GPU minutes to hours in, and the
+    command mended would then be another job (settings.segment_cmd). It costs 0.26 to 0.29 s
+    with DESIGN.md's own example, libx265 at -crf 16, at 1920x1080 in yuv420p10le, the
+    assembly's check of the file among it (measured on 2026-10-12, ffmpeg n9.0.2, 32 threads)."""
+    import tempfile
+
+    import numpy as np
+
+    from seedvr2x.media.ffmpeg import MediaError
+    from seedvr2x.media.writer import Tags, open_writer
+    from seedvr2x.runtime.job import JobError
+
+    height, width = size
+    stream = declared.stream
+    rate = stream.frame_rate if declared.rate_override is None else declared.rate_override
+    tags = Tags.of(stream, declared.conversion.matrix_tag)
+    black = np.zeros((1, height, width, 3), np.float32)
+    started = time.monotonic()
+    # SIGTERM unwinds it as Ctrl-C does, the command stopped and the directory removed
+    # (stop.terminable): the run's handlers come later.
+    # In a directory whose name the shell can't take bare, a space, a quote and a dollar in it: a
+    # command that quotes {out} itself, "{out}", where seedvr2x quotes the name it stands for,
+    # then fails here, as it would at the first segment whose path holds a space, a parenthesis
+    # or an accent (a review's finding, 2026-10-12: `cat > "{out}"` wrote in a directory named
+    # plain and was refused, "Directory nonexistent", in one named `with space`).
+    with terminable(), tempfile.TemporaryDirectory(prefix=TRIAL_PREFIX) as scratch:
+        path = Path(scratch) / "seg_000000.mkv"
+        try:
+            writing = open_writer(
+                args.format, path, width, height, rate, tags, command=args.segment_cmd
+            )
+            with writing as writer:
+                for _ in range(TRIAL_FRAMES):
+                    writer.write(black)
+            final = _final(args.output)
+            if final is not None:
+                _joinable(final, path, TRIAL_FRAMES, rate, None)
+        except MediaError as error:
+            # The count decodes what the command wrote (writer.count_frames): a codec this
+            # ffmpeg can't decode fails it, as a wrong count does.
+            raise JobError(
+                f"--segment-cmd, tried on {TRIAL_FRAMES} black frames before any work: {error}"
+                " (its file's frames are counted by decoding them, so this ffmpeg must decode"
+                " what it writes; and {out} is to be written bare, seedvr2x quoting the name"
+                " it stands for, which holds a space, a quote and a dollar here, on purpose)"
+            ) from None
+    logger.info(
+        "--segment-cmd: tried on %d black frames, %dx%d %s at %s fps, in %.1f s",
+        TRIAL_FRAMES,
+        width,
+        height,
+        args.format,
+        rate,
+        time.monotonic() - started,
+    )
+
+
+class _Unjoinable(MediaError):
+    """What a segment command wrote can't be assembled (_joinable): a failure of its own kind,
+    which the same command would meet again."""
+
+
+def _joinable(
+    final: Path,
+    path: Path,
+    frames: int,
+    frame_rate: Fraction,
+    before: tuple[Path, int] | None,
+) -> None:
+    """Refuse (MediaError) the file at path, `frames` frames a segment command just wrote for a
+    .mkv path's job, when the assembly couldn't join it into `final`: not Matroska at its
+    millisecond time base, a packet short or without a timestamp, frames off the rate's grid
+    (assembly.segment_refusal); or, `before` being the first segment finished before it, its
+    file and frames, another codec, size or pixel format than that one's, or codec headers
+    that don't decode it as its own do (assembly.joins, the assembly's own verdict): the concat
+    demuxer gives every packet the first file's. A read of its packets, and a decode of the two
+    only when their headers differ.
+
+    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has a --segment-cmd output's frame count
+    checked alone): asked of the trial's file and of each segment as it is finished, so that a
+    command whose files can't be joined is refused at its first one, not by the assembly's own
+    check once every segment is made. A directory's segments, never assembled, are asked
+    nothing."""
+    from seedvr2x.media import assembly
+
+    refusal = assembly.segment_refusal(path, frames, frame_rate)
+    if not refusal and before is not None:
+        # In the segment's own directory, the job's, where the assembly's files go.
+        differing = assembly.joins(before, (path, frames), frame_rate, path.parent)
+        refusal = differing and f"{differing}, as {before[0].name} has them"
+    if refusal:
+        raise _Unjoinable(
+            f"{path}: what the segment command wrote can't be assembled into {final}: {refusal};"
+            " give a command whose files are Matroska holding every frame at its own time, alike"
+            " from one segment to the next (another command is another job), or give -o a"
+            " directory, whose segments are joined by your own tools"
+        )
+
+
 def _copied(source: Path, directory: Path) -> None:
     """Refuse (JobError) a source whose other streams the assembly can't take, before any work
     (assembly.preflight): a stream Matroska's muxer refuses as it is, each named with ffmpeg's
@@ -999,6 +1215,8 @@ def _assemble(final: Path, record: "Manifest", paths: Sequence[Path], asked: boo
         f" {final}, once it has checked the job again (its model files, its environment, the"
         " source's other streams), no model loaded"
     )
+    # A segment command's segments have no checksums (--segment-cmd), nor the file they make.
+    summed = record.settings.get("segment_cmd") is None
     with Stop() as stop:
         stop.asked = asked
         try:
@@ -1007,10 +1225,10 @@ def _assemble(final: Path, record: "Manifest", paths: Sequence[Path], asked: boo
             started = time.monotonic()
             checksums = [
                 checksum
-                for path in paths
+                for path in (paths if summed else ())
                 for checksum in read_checksums(_checksums_path(directory, path, output_format))
             ]
-            if len(checksums) != source.frames:
+            if summed and len(checksums) != source.frames:
                 raise MediaError(
                     f"{directory}: {len(checksums)} checksums for its segments' {source.frames}"
                     " frames"
@@ -1026,7 +1244,8 @@ def _assemble(final: Path, record: "Manifest", paths: Sequence[Path], asked: boo
         except MediaError as error:
             logger.error("%s; not assembled: %s", error, kept)
             return 1
-        write_checksums(sums, checksums)
+        if summed:
+            write_checksums(sums, checksums)
         record.job_assembled(final.name, final.stat().st_size)
         logger.info(
             "wrote %s: %d frames from %s, with the source's %s and %s, assembled in %.1f s",
@@ -1495,6 +1714,12 @@ def _settings(
         "encode_tile": args.encode_tile,
         "decode_tile": args.decode_tile,
         "format": args.format,
+        # The segments' writer (DESIGN.md, Output, Writer): the user's command, as given, or
+        # None, seedvr2x's FFV1 or PNG writer. PROVISIONAL (implementation, 2026-10-10: DESIGN.md
+        # doesn't say whether a command may change): a setting like the others, another command
+        # another job, even before any segment is finished, where the units kept don't depend
+        # on it.
+        "segment_cmd": args.segment_cmd,
         # How the source is cut (resume.CUT_SETTINGS): the cut list given, or none and the
         # detection's threshold, "a setting the manifest records" (DESIGN.md, Shot detection),
         # as Python writes the float, which reads back exactly; the cuts it gives are the

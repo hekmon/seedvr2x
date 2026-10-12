@@ -306,9 +306,13 @@ def work_directory(tmp_path: Path) -> Path:
         (work / name).mkdir(parents=True)
     names = [NAME, f"{NAME}.partial", "frame_index.bin", "frame_index.bin.partial"]
     names += ["seg_000000.mkv", "seg_000001.mkv", "seg_000001.mkv.partial"]
+    # A segment command's partial file, a tiled pass's scratch, and what an assembly killed
+    # there left (files.command_partial, tiling.SCRATCH, assembly.work_file).
+    names += ["seg_000001.partial.mkv", "assembly.ffconcat", "assembly.attachment.4"]
     names += ["checksums/seg_000000.crc32", "checksums/seg_000001.crc32.partial"]
     names += [f"resume/shot_000000/{name}" for name in ("latent.pt", "window_0000.pt")]
     names += [f"resume/shot_000004/{name}" for name in ("input.mkv", "input.crc32.partial")]
+    names += ["resume/shot_000004/scratch.bf16"]
     for name in names:
         (work / name).write_bytes(b"x")
     return work

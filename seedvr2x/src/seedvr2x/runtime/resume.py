@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from seedvr2x.media.assembly import work_file
-from seedvr2x.media.files import partial_path
+from seedvr2x.media.files import command_partial, partial_path
 from seedvr2x.media.source import Source
 from seedvr2x.runtime.job import JobError, OutputSegment, Shot
 from seedvr2x.runtime.manifest import (
@@ -160,7 +160,10 @@ def clear(directory: Path, content: dict[str, Any]) -> list[str]:
     sums = {checksums_file(name, content["output"]["format"]) for name in files}
     ours = {INDEX, partial_path(directory / INDEX).name, partial_path(directory / NAME).name}
     for name in files:
-        ours.update((name, partial_path(directory / name).name))
+        # A segment command's partial file too, whether the job had one or not: the name is no
+        # one else's in a work directory.
+        partials = (partial_path(directory / name), command_partial(directory / name))
+        ours.update((name, *(partial.name for partial in partials)))
     foreign: list[str] = []
 
     def plain(entry: Path) -> bool:
@@ -242,21 +245,28 @@ def _changes(
 
 def leftovers(manifest: Manifest) -> list[Path]:
     """What a stop left in the output directory that the manifest doesn't name, to discard: the
-    partial files and directories, an unfinished segment's file and checksums, a shot's unit files
-    not recorded, the units of finished segments. Refused (JobError): a finished segment missing,
-    of another size or without its checksums, a unit recorded but missing, and anything in the
-    directory that isn't this job's, which is never deleted. A shot's input copy or its checksums
-    missing isn't refused: the copy is derived data, which the run makes again (run_job); nor is
-    the frame index (INDEX), made again with the first pass (cli._prior)."""
+    partial files and directories, a segment command's partial file among them
+    (files.command_partial), an unfinished segment's file and checksums, a shot's unit files not
+    recorded, the units of finished segments. Refused (JobError): a finished segment missing, of
+    another size or without its checksums, which a segment command's has none of
+    (settings.segment_cmd), a unit recorded but missing, and anything in the directory that isn't
+    this job's, which is never deleted. A shot's input copy or its checksums missing isn't refused:
+    the copy is derived data, which the run makes again (run_job); nor is the frame index (INDEX),
+    made again with the first pass (cli._prior)."""
     directory = manifest.path.parent
     found: list[Path] = []
     indexed = partial_path(directory / INDEX)
     names = {NAME, partial_path(manifest.path).name, STATE, SUMS, INDEX, indexed.name}
     if indexed.exists():
         found.append(indexed)
+    commanded = manifest.settings.get("segment_cmd") is not None
     for index, name in enumerate(manifest.files):
         path = directory / name
         names.update((name, partial_path(path).name))
+        if commanded:
+            names.add(command_partial(path).name)
+            if command_partial(path).exists():
+                found.append(command_partial(path))
         if manifest.finished[index]:
             if not path.exists():
                 raise JobError(f"{path}: finished, the manifest says, but missing")
@@ -296,8 +306,10 @@ def _checksum_leftovers(manifest: Manifest) -> list[Path]:
             raise JobError(f"{entry}: not this job's")
         if entry.name != name or not finished[name]:
             found.append(entry)
+    # A segment command's segments have no checksums: none written, none expected.
+    summed = manifest.settings.get("segment_cmd") is None
     for name, done in finished.items():
-        if done and not (sums / name).is_file():
+        if summed and done and not (sums / name).is_file():
             raise JobError(
                 f"{sums / name}: a finished segment's checksums, the manifest says, but missing"
             )
