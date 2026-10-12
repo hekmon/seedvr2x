@@ -257,9 +257,9 @@ def places_note(index: FrameIndex) -> list[str]:
 # the list played through. Matroska with B-frames: 0 to 2 frames before the start, the cut
 # inside 19 of 19 both ways. Without B-frames: on the start's frame, 19 of 19. A file of one
 # long GOP: within a frame of the start, 19 of 19. MPEG-TS is rough: the cut inside 14 of 19,
-# the entry beginning up to 31 frames late or 19 early. An entry stops 0 to 9 frames after its
-# stop, and VLC goes on to the next by itself. Not measured: hardware decoding, VLC's default;
-# HEVC; VLC 4.
+# the entry beginning up to 31 frames late or 19 early. An entry stops from 1 frame before its
+# stop to 9 after (design's check of the tables, 2026-10-12: -1 to +9), and VLC goes on to the
+# next by itself. Not measured: hardware decoding, VLC's default; HEVC; VLC 4.
 BEFORE = 1
 # PROVISIONAL (implementation, 2026-10-10, a question for design: how long an entry plays after
 # its cut; DESIGN.md gives its start alone): 3 seconds, the new shot seen long enough to tell it

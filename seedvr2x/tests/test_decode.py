@@ -18,6 +18,7 @@ from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion
 from seedvr2x.media.decode import Decoder, decode_command, to_float32
 from seedvr2x.media.ffmpeg import MediaError, input_args
 from seedvr2x.media.probe import probe
+from seedvr2x.media.reader import FramesLeft
 from seedvr2x.media.scan import Scan, scan
 from seedvr2x.media.source import examine
 from seedvr2x.media.writer import FFV1Writer, Tags
@@ -411,6 +412,24 @@ def test_frames_are_counted(tmp_path: Path) -> None:
     with pytest.raises(MediaError, match="more frames than the 9"):
         with dataclasses.replace(source, frames=9).decoder() as decoder:
             decoder.read(10)
+    # The end of a read with a frame left, every frame counted read: the source gave a frame
+    # more than its first pass counted, a failure of its own kind, whose message names the
+    # source and gives the way out (reader.FramesLeft; design, 2026-10-12).
+    with pytest.raises(FramesLeft) as left:
+        with dataclasses.replace(source, frames=9).decoder() as decoder:
+            decoder.read(9)
+    assert str(left.value) == (
+        f"decoding with ffmpeg: frames left after 9: {path} gave at least a frame more than the 9"
+        " the first pass counted, and the job's record holds that count, so the same command"
+        " would stop here again: run the job to another -o, whose first pass counts the frames"
+        " again"
+    )
+    # A read finished before its last frame is its caller's doing: the plain failure.
+    with pytest.raises(MediaError) as early:
+        with source.decoder() as decoder:
+            decoder.read(4)
+    assert type(early.value) is MediaError
+    assert str(early.value) == "decoding with ffmpeg: frames left after 4"
 
 
 def test_cfr_matroska_accepted(tmp_path: Path) -> None:

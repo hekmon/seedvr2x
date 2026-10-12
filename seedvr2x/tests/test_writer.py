@@ -24,6 +24,7 @@ from seedvr2x.media.writer import (
     Tags,
     open_writer,
     to_planar16,
+    to_rgb48be,
     yuv_matrix,
 )
 
@@ -180,6 +181,150 @@ def test_png_holds_no_rate(tmp_path: Path) -> None:
             writer.write(frames)
         written[rate] = [file.read_bytes() for file in sorted(directory.iterdir())]
         assert len(written[rate]) == 510 and written[rate] == written[RATE], rate
+
+
+# Matroska's elements (matroska.org's ids) that ffmpeg's muxer fills at random in every file it
+# writes, each with its size in bytes: the segment's UID, the track's, held twice, in the track
+# and in its tags' target, and the CRC-32 of each element that holds one of them (Info, Tracks,
+# Tags). 44 bytes, the only ones two runs of one command differ by (measured on ffmpeg n9.0.2,
+# 2026-10-12: 480 files).
+DRAWN = {0x73A4: 16, 0x73C5: 8, 0x63C5: 8, 0xBF: 4}
+# The elements those lie in, walked into: Segment, Info, Tracks, TrackEntry, Tags, Tag, Targets.
+HOLDING = {0x18538067, 0x1549A966, 0x1654AE6B, 0xAE, 0x1254C367, 0x7373, 0x63C0}
+
+
+def vint(data: bytes, at: int, marked: bool) -> tuple[int, int, bool]:
+    """EBML's variable-length integer at data[at], its length the leading zeros of its first
+    byte plus one: its value, with the length's marker bit for an element's id (`marked`) and
+    without it for a size; where it ends; and whether it is a size left unknown, every bit set,
+    as the segment's and the clusters' are in a stream written to a pipe."""
+    first = data[at]
+    length = 9 - first.bit_length()
+    value = first if marked else first & ((1 << (8 - length)) - 1)
+    unknown = not marked and value == (1 << (8 - length)) - 1
+    for byte in data[at + 1 : at + length]:
+        value, unknown = value << 8 | byte, unknown and byte == 0xFF
+    return value, at + length, unknown
+
+
+def without_the_drawn(data: bytes) -> bytes:
+    """A Matroska file's bytes with those ffmpeg drew at random zeroed (DRAWN), found by walking
+    the EBML tree from its start: element after element, id then size then body, into the
+    elements that hold them (HOLDING). An element of unknown size runs to its parent's end: the
+    segment on a pipe, walked into, and its clusters, where the walk ends, only clusters
+    following. Held to 44 bytes, each element found with its size."""
+    settled, found = bytearray(data), list[int]()
+
+    def walk(at: int, end: int) -> None:
+        while at < end:
+            ident, after, _ = vint(data, at, marked=True)
+            size, body, unknown = vint(data, after, marked=False)
+            if ident in DRAWN:
+                assert size == DRAWN[ident]
+                settled[body : body + size] = bytes(size)
+                found.append(ident)
+            if ident in HOLDING:
+                walk(body, end if unknown else body + size)
+            if unknown:
+                return
+            at = body + size
+
+    walk(0, len(data))
+    assert sorted(found) == sorted([0x73A4, 0x73C5, 0x63C5, 0xBF, 0xBF, 0xBF]), found
+    return bytes(settled)
+
+
+def before_the_rate_option(kind: str, rate: str, out: Path) -> list[str]:
+    """ffmpeg's command for a 32x16 output tagged BT.709 as each writer ran it before the input
+    option -r came beside -framerate (writer._planes_input, 2026-10-12): written out here, not
+    drawn from the writers, so that any option a writer gains or loses shows. `kind`: an FFV1
+    master's pixel format, "command" for the stream a segment command reads, a gbrp16le master's
+    on stdout, or "png"; `out`, the master's file, the PNG frames' directory, or where the
+    yuv420p10le master's second output, its frames' hashes, goes for a stream on stdout."""
+    ffmpeg = "ffmpeg -hide_banner -nostdin -nostats -loglevel error -y -f rawvideo".split()
+    tagged = "color_primaries=bt709:color_trc=bt709"
+    tags = "-color_primaries bt709 -color_trc bt709".split()
+    rgb = f"setparams=colorspace=gbr:range=pc:{tagged}"
+    rgb_tags = ["-colorspace", "rgb", "-color_range", "pc", *tags]
+    if kind == "png":
+        return [
+            *(*ffmpeg, "-pix_fmt", "rgb48be", "-s", "32x16", "-framerate", rate, "-i", "-"),
+            *("-map", "0:v:0", "-fps_mode", "passthrough", "-vf", rgb, *rgb_tags),
+            *("-c:v", "png", "-pix_fmt", "rgb48be", "-f", "image2", "-start_number", "0"),
+            str(out / "%06d.png"),
+        ]
+    planes = [*ffmpeg, "-pix_fmt", "gbrp16le", "-s", "32x16", "-framerate", rate, "-i", "-"]
+    ffv1 = "-c:v ffv1 -level 3 -g 1 -slices 16 -slicecrc 1 -pix_fmt {} -f matroska"
+    if kind != "yuv420p10le":
+        master = [*("-fps_mode", "passthrough", *rgb_tags), *ffv1.format("gbrp16le").split()]
+        return [
+            *planes,
+            "-map",
+            "0:v:0",
+            "-vf",
+            rgb,
+            *master,
+            "pipe:1" if kind == "command" else str(out),
+        ]
+    yuv = (
+        "zscale=threads=1:min=gbr:rin=full:m=170m:r=limited:c=left:pin=unspecified:p=unspecified"
+        ":tin=unspecified:t=unspecified:d=none:f=bilinear,format=yuv420p10le,"
+        f"setparams=colorspace=smpte170m:range=tv:chroma_location=left:{tagged}"
+    )
+    yuv_tags = "-fps_mode passthrough -colorspace smpte170m -color_range tv".split()
+    yuv_tags += ["-chroma_sample_location", "left", *tags]
+    return [
+        *(*planes, "-filter_complex", f"[0:v]{yuv},split=2[master][hashed]"),
+        *("-map", "[master]", *yuv_tags, *ffv1.format("yuv420p10le").split(), str(out)),
+        *("-map", "[hashed]", *yuv_tags, "-c:v", "rawvideo", "-pix_fmt", "yuv420p10le"),
+        *("-f", "framehash", "-hash", "crc32", str(out.with_suffix(".framehash"))),
+    ]
+
+
+@pytest.mark.parametrize("rate", ["24000/1001", "24", "25", "30000/1001", "50", "60000/1001"])
+@pytest.mark.parametrize("kind", ["gbrp16le", "yuv420p10le", "command", "png"])
+def test_files_at_the_rates_in_use_are_those_written_before_the_rate_option(
+    tmp_path: Path, kind: str, rate: str
+) -> None:
+    # The input option -r, which numbers the masters' frames right from 101 fps up
+    # (test_frames_numbered_at_the_rate), changes nothing at the six rates in use: each
+    # Matroska writer's file, an FFV1 master at gbrp16le and at yuv420p10le and the stream a
+    # segment command reads, kept as it comes, is the file of the command run before it,
+    # -framerate alone, byte for byte once the 44 bytes ffmpeg draws at random for every
+    # Matroska file are zeroed (without_the_drawn); the PNG writer's files, whose command has
+    # no -r, as they are. 30 frames at 32x16; measured so through the writers on 30 and 1,100
+    # frames, and on 3 at 1280x720 and at 1920x1080 (2026-10-12).
+    frames = frames_of(30, 32, 16)
+    written, old = tmp_path / "written.mkv", tmp_path / "old.mkv"
+    if kind == "png":
+        writer = PNGWriter(written, 32, 16, Fraction(rate), BT709)
+        old.mkdir()
+    elif kind == "command":
+        writer = CommandWriter("cat > {out}", written, "gbrp16le", 32, 16, Fraction(rate), BT709)
+    else:
+        writer = FFV1Writer(written, kind, 32, 16, Fraction(rate), BT709)
+    with writer:
+        writer.write(frames)
+    pack = to_rgb48be if kind == "png" else to_planar16
+    fed = b"".join(pack(frame).tobytes() for frame in frames)
+    # The stream on a pipe, as the segment command reads it: a file would be seeked in.
+    stream = subprocess.run(
+        before_the_rate_option(kind, rate, old), input=fed, capture_output=True, check=True
+    ).stdout
+    if kind == "png":
+        names = sorted(file.name for file in old.iterdir())
+        assert names == [f"{number:06d}.png" for number in range(30)]
+        assert [(written / name).read_bytes() for name in names] == [
+            (old / name).read_bytes() for name in names
+        ]
+        return
+    before = stream if kind == "command" else old.read_bytes()
+    assert without_the_drawn(written.read_bytes()) == without_the_drawn(before)
+    # And the frames numbered at the rate, each on its timeline to the tick.
+    millisecond = Fraction(1, 1000)
+    assert packet_times(written) == [
+        int(Fraction(k) / Fraction(rate) / millisecond + Fraction(1, 2)) for k in range(30)
+    ]
 
 
 def test_checksums_as_written(tmp_path: Path) -> None:

@@ -3312,10 +3312,19 @@ def test_environment_change_accepted(
     assert first["after"]["gpu"] == "another"
     assert (second["before"], second["after"]) == ({"gpu": "another"}, {"gpu": "a third"})
     assert second["windows_done"] == 4
-    # The job is the third GPU's now.
+    # The job is the third GPU's now. Finished, it is said finished on the first one too, its
+    # environment's difference from its manifest's said and no flag asked, where it was refused
+    # as a resume is (design, 2026-10-12; test_finished_job_in_another_environment).
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "a stand-in")
-    assert "environment.gpu" in refused(tmp_path, source_path, caplog, *JOB)
+    finished = manifest.read_bytes()
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert (
+        'nothing being made in this one: environment.gpu: "a third" -> "a stand-in"' in caplog.text
+    )
+    assert manifest.read_bytes() == finished
 
 
 def test_input_by_content(
@@ -3487,6 +3496,7 @@ def test_frames_left_after_the_last(
     monkeypatch.setattr(examined, "scan", missed)
     assert upscale(tmp_path, source(tmp_path / "in.mkv"), "one.mkv") == 1
     assert f"decoding with ffmpeg: frames left after {FRAMES - 1}" in caplog.text
+    assert f"{tmp_path / 'in.mkv'} gave at least a frame more than the {FRAMES - 1}" in caplog.text
 
 
 def understating(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3505,6 +3515,37 @@ def understating(monkeypatch: pytest.MonkeyPatch) -> None:
         return replace(found, frames=found.frames - 1, index=short)
 
     monkeypatch.setattr(examined, "scan", missed)
+
+
+def frames_left(source_path: Path, counted: int, kept: str) -> str:
+    """The one line of a run stopped at the end of a source that gave a frame more than the
+    `counted` of its first pass (reader.FramesLeft; design, 2026-10-12): what happened, the way
+    out, another -o, then what is `kept`, and never that the same command resumes."""
+    return (
+        f"decoding with ffmpeg: frames left after {counted}: {source_path} gave at least a frame"
+        f" more than the {counted} the first pass counted, and the job's record holds that count,"
+        " so the same command would stop here again: run the job to another -o, whose first pass"
+        f" counts the frames again; stopped: {kept}"
+    )
+
+
+def errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The run's errors, each message whole."""
+    return [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+
+
+def end_checks(monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
+    """From now on, each check of the source's end (Reader.finish) is recorded among the steps'
+    calls, "end checked", where it comes."""
+    from seedvr2x.media.reader import Reader
+
+    finish = Reader.finish
+
+    def checked(reader: Reader) -> None:
+        steps.calls.append("end checked")
+        finish(reader)
+
+    monkeypatch.setattr(Reader, "finish", checked)
 
 
 @pytest.mark.parametrize(
@@ -3527,19 +3568,22 @@ def test_end_of_source_checked_before_the_last_shot_is_recorded(
     # path's next run assembled a file a frame short. The same command reads the shot again and
     # fails again, for as long as the source gives that frame: no file, no "finished already".
     # With split, the shot's input copy, recorded with its latent, isn't kept either.
+    # Its one line names the source, says what happened and the way out, another -o, whose
+    # first pass counts again, then what is kept; it no longer ends "the same command resumes",
+    # which stops there again (design, 2026-10-12).
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     understating(monkeypatch)
     directory = tmp_path / ("out" if output == "out" else "one.mkv.work")
-    left = "decoding with ffmpeg: frames left after 24"
-    kept = "stopped: 1 of 2 segments finished, and the units of the next ones kept"
+    kept = "1 of 2 segments finished, and the units of the next ones kept"
     made = [*("encode 0", "window 0:0", "encode 3", "window 3:0", "decode 0", "decode 3")]
     for calls in (made, []):
         steps.calls.clear()
         caplog.clear()
         options = (*JOB, "--color-correction", correction)
         assert upscale(tmp_path, source_path, output, *options) == 1
-        assert f"{left}; {kept}" in caplog.text
+        assert errors(caplog) == [frames_left(source_path, 24, kept)]
+        assert "the same command resumes" not in caplog.text
         # The read of the last shot's frames fails, its encode given none: nothing kept of it.
         assert steps.calls == calls and sorted(steps.read) == [0, 3]
         content = json.loads((directory / "manifest.json").read_text())
@@ -3550,6 +3594,53 @@ def test_end_of_source_checked_before_the_last_shot_is_recorded(
         assert not (tmp_path / "one.mkv").exists()
         shot = directory / "resume" / "shot_000004"
         assert not (shot / "latent.pt").exists() and not (shot / "input.mkv").exists()
+
+
+@pytest.mark.parametrize("output", ["out", "one.mkv"])
+@pytest.mark.parametrize("more", [False, True])
+def test_end_of_source_checked_in_a_job_of_one_shot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    output: str,
+    more: bool,
+) -> None:
+    # A source with no cut, one shot and one segment: its one read gives the source's last
+    # frame, and the end is checked there (run.Inputs), before the encode, so before the job's
+    # only latent is recorded. A source as counted: the job finishes, every frame at its place.
+    # A source giving a frame more than the first pass counted: stopped there with the line of
+    # test_end_of_source_checked_before_the_last_shot_is_recorded, nothing made: no latent, no
+    # segment, no file; and again by the same command.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    (tmp_path / "cuts.txt").write_text("")
+    options = ("--cuts", "cuts.txt", "--window", "5")
+    directory = tmp_path / ("out" if output == "out" else "one.mkv.work")
+    end_checks(monkeypatch, steps)
+    if not more:
+        assert upscale(tmp_path, source_path, output, *options) == 0
+        made = ["encode 0", "window 0:0", "window 0:1", "decode 0"]
+        assert steps.calls == ["end checked", *made] and sorted(steps.read) == [0]
+        final = directory / "seg_000000.mkv" if output == "out" else tmp_path / output
+        assert indexes(final) == list(range(25)) and errors(caplog) == []
+        return
+    understating(monkeypatch)
+    for _ in range(2):
+        steps.calls.clear()
+        caplog.clear()
+        assert upscale(tmp_path, source_path, output, *options) == 1
+        assert steps.calls == ["end checked"] and steps.read == {}
+        kept = "0 of 1 segments finished, and the units of the next ones kept"
+        assert errors(caplog) == [frames_left(source_path, 24, kept)]
+        assert "the same command resumes" not in caplog.text
+        content = json.loads((directory / "manifest.json").read_text())
+        assert content["input"]["frames"] == 24 and len(content["shots"]) == 1
+        assert [segment["finished"] for segment in content["segments"]] == [False]
+        assert [shot["encoded"] for shot in content["shots"]] == [False]
+        assert "assembled" not in content and "finished already" not in caplog.text
+        assert not (tmp_path / "one.mkv").exists()
+        assert not (directory / "resume" / "shot_000000" / "latent.pt").exists()
 
 
 def test_package_change_recorded(
@@ -3740,6 +3831,82 @@ def test_resume_reads_through_the_index(
     assert steps.read == read
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
+
+
+@needs_x264
+@pytest.mark.parametrize("output", ["out", "one.mkv"])
+@pytest.mark.parametrize(
+    ("more", "stop"),
+    # Inside the last shot, its frames read and its latent not made; and before it, the first
+    # shot's units made: the one stop a source with a frame more allows, whose read of the last
+    # shot fails before anything in it can stop.
+    [(False, "encode 16"), (False, "decode 0"), (True, "decode 0")],
+)
+def test_end_of_source_checked_on_the_resume_of_the_last_shot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    output: str,
+    more: bool,
+    stop: str,
+) -> None:
+    # A job stopped with its last shot to read, resumed: the resume reads that shot alone, its
+    # reader opened mid-file through the frame index (test_resume_reads_through_the_index) and
+    # ended at the source's last frame, where the end is checked (run.Inputs), by the read that
+    # gives that frame, before the shot's encode. A source as counted: the job finishes, its
+    # output the uninterrupted run's. A source giving a frame more than the first pass counted
+    # (understating): the resume stops there with the line of
+    # test_end_of_source_checked_before_the_last_shot_is_recorded, which names the way out
+    # (design, 2026-10-12), the last shot not encoded, the last segment unmade, no file.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cuts.txt").write_text("16\n")
+    source_path = x264_source(tmp_path / "in.mkv")
+    whole = "whole" if output == "out" else "whole.mkv"
+    if more:
+        understating(monkeypatch)
+    else:
+        assert upscale(tmp_path, source_path, whole, *SEEKING) == 0
+    steps.stop = stop
+    stopped(tmp_path, source_path, output, *SEEKING)
+    directory = tmp_path / ("out" if output == "out" else "one.mkv.work")
+    content = json.loads((directory / "manifest.json").read_text())
+    assert [shot["encoded"] for shot in content["shots"]] == [True, False]
+    steps.stop = None
+    steps.calls.clear()
+    steps.read.clear()
+    caplog.clear()
+    end_checks(monkeypatch, steps)
+    commands = recorded_reads(monkeypatch)
+    before = ["decode 0"] if stop == "decode 0" else []
+    assert upscale(tmp_path, source_path, output, *SEEKING) == (1 if more else 0)
+    # One read, from the keyframe one before the shot's own, its frames from the shot's first.
+    [seeking] = commands
+    assert seeking[seeking.index("-ss") + 1] == "0.320000"
+    assert "select=gte(pts\\,640)," in seeking[seeking.index("-vf") + 1]
+    if not more:
+        assert steps.calls == [*before, "end checked", *SEEKING_RUN[3:]]
+        assert sorted(steps.read) == [16] and errors(caplog) == []
+        if output == "out":
+            for name in ("seg_000000.mkv", "seg_000001.mkv"):
+                assert decoded(directory / name) == decoded(tmp_path / whole / name)
+            assert contents(directory / "checksums") == contents(tmp_path / whole / "checksums")
+        else:
+            assert decoded(tmp_path / output) == decoded(tmp_path / whole)
+            assert indexes(tmp_path / output) == list(range(40))
+        return
+    assert steps.calls == [*before, "end checked"] and steps.read == {}
+    kept = "1 of 2 segments finished, and the units of the next ones kept"
+    assert errors(caplog) == [frames_left(source_path, 39, kept)]
+    assert "the same command resumes" not in caplog.text
+    content = json.loads((directory / "manifest.json").read_text())
+    assert content["input"]["frames"] == 39
+    assert [segment["finished"] for segment in content["segments"]] == [True, False]
+    assert [shot["encoded"] for shot in content["shots"]] == [True, False]
+    assert "assembled" not in content and "finished already" not in caplog.text
+    assert not (tmp_path / "one.mkv").exists()
+    assert not (directory / "resume" / "shot_000016" / "latent.pt").exists()
 
 
 @needs_x264
@@ -4236,6 +4403,13 @@ def test_file_job_with_every_segment_finished_is_assembled(
     if index == "another ffmpeg's":
         monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
         accept = ("--accept-env-change",)
+        # Not finished, its assembly the next unit, made in this environment: refused without
+        # the flag as any resume is, where a directory's finished job, which makes nothing, is
+        # taken whatever its environment (test_finished_job_in_another_environment).
+        left = contents(work)
+        text = refused(tmp_path, source_path, caplog, *options, output="one.mkv")
+        assert "Only its environment differs: --accept-env-change resumes it anyway" in text
+        assert "finished already" not in text and not final.exists() and contents(work) == left
     else:
         untrusted = spoiled(work / "frame_index.bin", index)
     passes, asked = first_passes(monkeypatch), asked_of_the_pull(monkeypatch)
@@ -4261,6 +4435,7 @@ def test_file_job_with_every_segment_finished_is_assembled(
     assert cli.main(["verify", str(final)]) == 0
 
 
+@pytest.mark.parametrize("accept", [(), ("--accept-env-change",)], ids=["unasked", "accepted"])
 @pytest.mark.parametrize("change", ["GPU", "ffmpeg"])
 def test_finished_job_in_another_environment(
     tmp_path: Path,
@@ -4268,13 +4443,17 @@ def test_finished_job_in_another_environment(
     steps: Steps,
     caplog: pytest.LogCaptureFixture,
     change: str,
+    accept: tuple[str, ...],
 ) -> None:
-    # A finished job run again in another environment: refused as a resume is, the flag named;
-    # accepted, said finished, with no first pass, under another ffmpeg too, whose pass a resume
-    # runs again, and nothing written: its manifest keeps the environment that made it, no change
-    # recorded, and its index is as it was. Which is what is said, with its trusted index (the
-    # GPU's change) as without (ffmpeg's), never that its manifest records the change "with the
-    # next unit made": a finished job makes none.
+    # A finished directory job run again in another environment is said finished whatever the
+    # environment, nothing being made (design, 2026-10-12: "no refusal, no --accept-env-change
+    # asked"; refused until then, as a resume is, the flag named): the difference said in one
+    # line, the same with the flag given and without, then "finished already", exit 0, with no
+    # first pass, under another ffmpeg too, whose pass a resume runs again, and nothing written:
+    # its manifest keeps the environment that made it, no change recorded, and its index is as
+    # it was. Which is what is said, with its trusted index (the GPU's change: cli._resume) as
+    # without (ffmpeg's: cli._finished_already), never that its manifest records the change "with
+    # the next unit made": a finished job makes none.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
@@ -4290,18 +4469,30 @@ def test_finished_job_in_another_environment(
         recorded = json.loads(files[0].read_text())["environment"]["ffmpeg"]
         monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
         differs = f'environment.ffmpeg: "{recorded}" -> "n0.0-another"'
-    text = refused(tmp_path, source_path, caplog, *JOB)
-    assert differs in text
-    assert "Only its environment differs: --accept-env-change resumes it anyway" in text
     caplog.clear()
-    assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == 0
-    assert f"{out}: finished already, its 2 segments" in caplog.text
+    assert upscale(tmp_path, source_path, "out", *JOB, *accept) == 0
+    said = [record.getMessage() for record in caplog.records]
+    stays = "its environment differs from this one and stays its manifest's, nothing being made"
+    assert said.count(f"{out}: {stays} in this one: {differs}") == 1
+    assert said[-1] == f"{out}: finished already, its 2 segments" and errors(caplog) == []
     assert passes == [] and steps.calls == [] and written_as(*files) == kept
-    said = "its environment differs from this one, as accepted, and stays its manifest's"
-    assert f"{out}: {said}, nothing being made in this one: {differs}" in caplog.text
+    assert "another job" not in caplog.text and "--accept-env-change" not in caplog.text
+    assert "as accepted" not in caplog.text
     assert "resumed in another environment" not in caplog.text
     assert "the next unit made" not in caplog.text
     assert json.loads(files[0].read_text())["environment_changes"] == []
+    # Its environment alone: another setting with it is another job, refused, the flag given
+    # or not, and no flag offered for it.
+    text = refused(tmp_path, source_path, caplog, *JOB, "--seed", "7", *accept)
+    assert "another job than the one asked" in text and "settings.seed: 42 -> 7" in text
+    assert differs in text and "Only its environment differs" not in text
+    # With --plan, which writes the job's cut list, a file made in this environment, the flag
+    # is asked as it was (PROVISIONAL, cli._prior): refused without it, nothing written.
+    text = refused(tmp_path, source_path, caplog, *JOB, "--plan", "plan.txt")
+    assert differs in text
+    assert "Only its environment differs: --accept-env-change resumes it anyway" in text
+    assert list(tmp_path.glob("plan*")) == []
+    assert passes == [] and steps.calls == [] and written_as(*files) == kept
 
 
 def test_finished_job_still_compared(
@@ -5542,11 +5733,31 @@ def test_plan_places_are_files_not_names(
                 assert f"{expected}, is {what}; it names another file" in text
                 assert playlist.stat().st_ino == kept[name][1] and not plan.exists()
             playlist.unlink()
+    # The cut list given (--cuts) likewise, compared with FILE as a file (design, 2026-10-12):
+    # --cuts list.txt --plan LIST.TXT on such a disk would replace the list by its plan, its
+    # comments lost. Refused as the list under its own name is (test_plan_file_refused), for a
+    # directory's job and a .mkv path's; another file of the same content is no such file.
+    listed = tmp_path / "cuts.txt"
+    listed.write_text("# mine\n3\n4  # a flash\n")
+    content, inode = listed.read_bytes(), listed.stat().st_ino
+    os.link(listed, plan)
+    for output in ("out", "two.mkv"):
+        options = ("--cuts", "cuts.txt", "--plan", "plan.txt")
+        text = refused(tmp_path, source_path, caplog, *options, output=output)
+        given = "the cut list given (--cuts), which it would replace, its comments lost; it names"
+        assert f"--plan plan.txt: {given} another file" in text
+        assert (plan.read_bytes(), plan.stat().st_ino) == (content, inode)
+    assert (listed.read_bytes(), listed.stat().st_ino) == (content, inode)
     assert passes == [] and not (tmp_path / "out").exists()
-    assert not (tmp_path / "one.mkv.work").exists()
+    assert not (tmp_path / "one.mkv.work").exists() and not (tmp_path / "two.mkv.work").exists()
     assert kept == {
         name: ((tmp_path / name).read_bytes(), (tmp_path / name).stat().st_ino) for name in said
     }
+    # A copy of the list is another file: its plan is written there, the list as it was.
+    plan.unlink()
+    plan.write_bytes(content)
+    assert upscale(tmp_path, source_path, "out", "--cuts", "cuts.txt", "--plan", "plan.txt") == 0
+    assert plan.read_bytes() != content and listed.read_bytes() == content
 
 
 def test_plan_of_a_cut_list(

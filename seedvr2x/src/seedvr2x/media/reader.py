@@ -140,6 +140,17 @@ class _Stalled(Exception):
     lagging its RGB by more than READ_AHEAD frames (_Run.line). The message says which."""
 
 
+class FramesLeft(MediaError):
+    """A source that gave more frames than its first pass counted, found at its end, every frame
+    counted read (Reader.finish). A failure of its own kind: the count is the job's record, which
+    the same command trusts, so that it would stop there again. Its message names the source,
+    says what happened and gives the way out, another -o, whose first pass counts again, and the
+    command line doesn't say of it that the same command resumes (cli._run; design, 2026-10-12:
+    ""frames left after N" gets its way out: what happened (the source gave a frame more than
+    its first pass counted) and what to do (the job to another -o, whose first pass counts
+    again); it no longer ends "the same command resumes"")."""
+
+
 # Each output's encoder in one thread. fftools gives every encoder an automatic thread count
 # (fftools/ffmpeg_mux_init.c:1384-1386 at n9.0.2), and rawvideo encodes in frame threads
 # (libavcodec/rawenc.c:89), as many as the CPUs, 64 at most (frame_thread_encoder.c:167-169),
@@ -616,7 +627,19 @@ class Reader:
             except _Stalled as stalled:
                 raise self._error(run, str(stalled)) from None
             if left:
-                raise self._error(run, f"frames left after {self.position}")
+                what = f"frames left after {self.position}"
+                if self.position < self.frames:
+                    # Finished before its last frame: its caller's doing, not the source's.
+                    raise self._error(run, what)
+                # One byte more is known, not how many frames: "at least".
+                raise self._error(
+                    run,
+                    f"{what}: {self.path} gave at least a frame more than the"
+                    f" {self._counted_as()}, and the job's record holds that count, so the same"
+                    " command would stop here again: run the job to another -o, whose first pass"
+                    " counts the frames again",
+                    FramesLeft,
+                )
             if status != 0:
                 raise self._error(run, f"exit status {status}")
             self._done(run)
@@ -925,9 +948,10 @@ class Reader:
         )
         self._open(target, why, start=False)
 
-    def _error(self, run: _Run, what: str) -> MediaError:
-        """ffmpeg stopped, and what to raise: what, with ffmpeg's last errors."""
+    def _error(self, run: _Run, what: str, kind: type[MediaError] = MediaError) -> MediaError:
+        """ffmpeg stopped, and what to raise, a MediaError of `kind`: what, with ffmpeg's last
+        errors."""
         run.stop()
         errors = run.errors()
         self._done(run)
-        return MediaError(f"decoding with ffmpeg: {what}" + (f": {errors}" if errors else ""))
+        return kind(f"decoding with ffmpeg: {what}" + (f": {errors}" if errors else ""))

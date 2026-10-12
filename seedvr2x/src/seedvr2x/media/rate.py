@@ -43,6 +43,18 @@ NTSC = Fraction(1000, 1001)
 # The most rates exact tries: more means a span too short to tell one rate from the next (two
 # steps over 3 ms allow any from 400 to 2,000 fps, some 19,000 of them), so none is given.
 MOST_RATES = 1000
+# The fewest timestamps exact names a rate from (design, 2026-10-12: "No rate is named under 7
+# timestamps"). Two are one step, which tells no rate from another, and lie on their own mean
+# rate's timeline always, given there before any test of the file's length: two frames 42 ms
+# apart, 24000/1001's or 24's in milliseconds, declared 25/1, were told "its timestamps run at
+# 500/21 fps (23.81), within 0 ms of that rate's timeline ... or give --frame-rate 500/21" (a
+# review's finding, 2026-10-12). And a few frames whose rounded steps happen to be equal are a
+# constant step in ticks, named their own mean rate's whatever the length, which isn't theirs:
+# [0, 8, 16] ms, 120000/1001 rounded down, 125/1. The review's figures, 17 rates rounded to the
+# nearest tick and down, 2 to 399 frames: named wrongly up to 4 frames in milliseconds, 5 in 90
+# kHz ticks, 6 in microseconds, by that path alone, never beyond: 7 is the first length at which
+# none was.
+FEWEST = 7
 
 # Matroska's reading of an NTSC rate (matroska_reading): the highest N of N * 1000/1001 looked
 # for; a second in nanoseconds, Matroska's unit for a frame's duration; and the most ffmpeg's
@@ -51,6 +63,11 @@ MOST_RATES = 1000
 MOST_NTSC = 240
 NANOSECONDS = 1_000_000_000
 FFPROBE_TERMS = 30000
+
+# The rates under and above which a Matroska stream is read by its avg_frame_rate, frames per
+# second (matroska_guessed): design's "under 6 fps or above 1,000" (2026-10-12).
+GUESSED_UNDER = 6
+GUESSED_ABOVE = 1000
 
 # The FFV1 master the remake makes, as seedvr2x writes its own (media/writer.py, FFV1Writer):
 # every frame a keyframe, each slice with its CRC.
@@ -106,18 +123,38 @@ def timeline(index: FrameIndex, rate: Fraction) -> Timeline:
     )
 
 
+def twins(declares: Fraction) -> tuple[Fraction, ...]:
+    """The NTSC twins of a rate a file declares, `declares`, frames per second: N * 1000/1001
+    for a whole number N, N for N * 1000/1001, and none for any other rate (design, 2026-10-12:
+    "The twin is N for N x 1000/1001 and N x 1000/1001 for an integer N, nothing else"):
+    24000/1001 for 24/1 and 24/1 for 24000/1001, no 24024/1000 for 24/1 nor 24000000/1002001
+    for 24000/1001, which R x 1001/1000 and R x 1000/1001 of any R gave, and none for 2997/125
+    or 47/2. A multiple of 1,000 fps alone is both, 1000/1 being 1001 * 1000/1001 too, and has
+    the two."""
+    found: list[Fraction] = []
+    if declares.denominator == 1:
+        found.append(declares * NTSC)
+    if (declares / NTSC).denominator == 1:
+        found.append(declares / NTSC)
+    return tuple(found)
+
+
 def twin(index: FrameIndex, declares: Fraction) -> Timeline | None:
-    """The NTSC twin of the rate a file declares that its frames follow, or None: `declares`
-    (frames per second) times 1000/1001 or 1001/1000, when its timeline holds every frame
-    strictly within half a frame (Timeline.holds) and has parted from the declared rate's by a
-    frame or more at the file's last frame. The one rate a refusal names that the timestamps
-    aren't exactly (media/source.py, _guided), where sptenc's rule fails: design's decision of
-    2026-10-12, "when it is the DECLARED RATE'S NTSC TWIN (R x 1000/1001 or R x 1001/1000)
-    holding every frame strictly within half a frame AND the two timelines have parted by a
-    frame or more over the file, so that one late frame of a short file is never read as a
-    rate". S9's case (research/docs/seeking.md, mechanism 7): 142,477 frames declared 24/1,
-    stepping at 24 fps with one step in 500 of 62-63 ms, no rate's exactly, within 10.9 ms of
-    24000/1001's timeline, 142 frames from 24's at their end.
+    """The NTSC twin of the rate a file declares that its frames follow, or None: a twin of
+    `declares`, frames per second (twins), when its timeline holds every frame strictly within
+    half a frame (Timeline.holds) and has parted from the declared rate's by a frame or more at
+    the file's last frame. The one rate a refusal names that the timestamps aren't exactly
+    (media/source.py, _guided), where sptenc's rule fails: design's decision of 2026-10-12,
+    "when it is the DECLARED RATE'S NTSC TWIN (R x 1000/1001 or R x 1001/1000) holding every
+    frame strictly within half a frame AND the two timelines have parted by a frame or more
+    over the file, so that one late frame of a short file is never read as a rate", the twin
+    then limited by design, the same day, to a whole number N and N * 1000/1001 (twins): R x
+    1000/1001 of any R named fifty segments of 24 frames at 24000/1001 joined 1 ms late, 1,002
+    ms apart, declared 24000/1001, "24000000/1002001 fps (23.952), within 1.3 ms", with
+    --frame-rate at it; they get sptenc's refusal now, no rate named. S9's case
+    (research/docs/seeking.md, mechanism 7): 142,477 frames declared 24/1, stepping at 24 fps
+    with one step in 500 of 62-63 ms, no rate's exactly, within 10.9 ms of 24000/1001's
+    timeline, 142 frames from 24's at their end.
 
     Parted by a frame: the last frame, k frames after the first, has its two places k |1/R -
     1/twin| seconds apart, R the declared rate, k |1 - R/twin| frames of R: k/1000 for R x
@@ -129,13 +166,13 @@ def twin(index: FrameIndex, declares: Fraction) -> Timeline | None:
     within 21.3 ms of 24/1's); from a frame apart, the last frame, within half a frame of the
     twin's place, lies half a frame from the declared rate's or more (0.4995 of one at the
     least, the twins' frames 0.1% apart): no late frame, but a file that left the timeline it
-    declares for its twin's, every frame held there on the way. The twins part from each other
-    twice as fast: one at most holds a file so."""
+    declares for its twin's, every frame held there on the way. The two twins of a multiple of
+    1,000 fps part from each other twice as fast: one at most holds a file so."""
     places, _ = _timed(index)
     if len(places) < 2:
         return None
     steps = int(places[-1] - places[0])
-    for other in (declares * NTSC, declares / NTSC):
+    for other in twins(declares):
         if steps * abs(1 - declares / other) < 1:
             continue  # under a frame apart at the last frame
         found = timeline(index, other)
@@ -168,10 +205,11 @@ def exact(index: FrameIndex) -> Timeline | None:
     frame for 353/6 fps, within 0.85 ms over 300 frames and 8.5 over 3,000 (a review's findings,
     2026-10-10).
 
+    From FEWEST timestamps, 7, and no rate under them, whatever they are (design, 2026-10-12).
     The rates tried: the frames' own mean rate, their steps over their span, given when every
     frame lies on its timeline, a constant step in ticks, whatever the rate (1000/33 fps for 33
-    ms a frame, from 3 frames; 17 ms a frame, 1000/17, lies within 0.85 ms of 353/6's timeline
-    too over 300 frames); then the rates looked for (TWELFTHS, NTSC) that the span allows, its
+    ms a frame; 17 ms a frame, 1000/17, lies within 0.85 ms of 353/6's timeline too over 300
+    frames); then the rates looked for (TWELFTHS, NTSC) that the span allows, its
     last frame within a tick of its place, when one alone holds the frames so; then the mean
     rate again, when none of them does and its timeline holds the frames so. A rate that is
     none of those, rounded to ticks, isn't always found: 24.03 fps over 1,000 frames spread
@@ -193,19 +231,7 @@ def exact(index: FrameIndex) -> Timeline | None:
     24000/1001, 18 of 48000/1001 and 60 of 120000/1001, 24/1, 575/12 and 120/1 among them, and
     one alone any more of them, up to 1,500."""
     places, pts = _timed(index)
-    # Fewer than 3 timestamps name no rate: two are one step, which tells no rate from another,
-    # and they lie on their own mean rate's timeline always, given below before any test of
-    # the file's length. Two frames 42 ms apart, 24000/1001's or 24's in milliseconds, declared
-    # 25/1, were told "its timestamps run at 500/21 fps (23.81), within 0 ms of that rate's
-    # timeline ... or give --frame-rate 500/21" (a review's finding, 2026-10-12).
-    # PROVISIONAL (implementation, 2026-10-12, a question for design: from how many frames are
-    # timestamps "a rate's exactly"?): from 3 frames up the code is as it was, a constant step
-    # in ticks its own mean rate's whatever the length, as design asked of 33 ms a frame, and a
-    # few frames whose rounded steps happen to be equal are still named a rate that isn't
-    # theirs: [0, 8, 16] ms, 120000/1001 rounded down, 125/1. The review's figures, 17 rates
-    # rounded to the nearest tick and down, 2 to 399 frames: named wrongly up to 4 frames in
-    # milliseconds, 5 in 90 kHz ticks, 6 in microseconds, by that path alone, never beyond.
-    if len(places) < 3:
+    if len(places) < FEWEST:
         return None
     ticks = int(pts[-1] - pts[0])
     steps = int(places[-1] - places[0])
@@ -297,15 +323,8 @@ def matroska_reading(declared: Fraction) -> Fraction | None:
     truncated duration when given the rate (--default-duration 0:60000/1001fps), and keeps a
     file's own when it remuxes it. Under 6, ffprobe's r_frame_rate is its guess from the
     timestamps (2/1 for 2000/1001 over 30 frames, 1000/1 for one frame): no reading, and no
-    rate to trust there. Measured on seedvr2x's own FFV1 master, 30 and 300 frames (a review's
-    finding, 2026-10-12, measured again): written at 1000/1001, 3000/1001, 4000/1001 or
-    5000/1001 fps, ffprobe gives 24000/1001, 12000/1001, 12000/1001 or 15000/1001 and seedvr2x
-    refuses it ("its timestamps run at 4000/1001 fps (3.996) ... where it declares
-    12000/1001"); at 2000/1001, 2/1, and it is read at 2/1 without a word up to 499 frames,
-    refused from 500, a frame half a frame off 2/1's timeline; above 1,000 fps likewise, 1001
-    fps read at 1000/1 and 2000 fps, given as 1000/1, refused. avg_frame_rate is the rate
-    written each time; 6000/1001, 1, 2, 5/2 and 5 fps read back as written. Left as it is, no
-    real source running at such rates ((4) below).
+    rate to trust there: such a stream is read by its avg_frame_rate (matroska_guessed), and
+    this reading is of the others.
 
     The readings taken, each computed (_av_reduce), none tabled:
 
@@ -331,11 +350,7 @@ def matroska_reading(declared: Fraction) -> Fraction | None:
     # 23017/96 and is read at it. (2) N up to 240, each measured, ffmpeg's own highest standard
     # rate (libavformat/demux.c:2287-2303); of the 751 from 250 to 1,000, 58 have a reading
     # that is a multiple of 1/12 fps. (3) 999/10, 999/5 and 999/8 are read as NTSC rates, not
-    # as the decimals they also are. (4) Under 6 fps and above 1,000 nothing is corrected, and
-    # seedvr2x's own master at N x 1000/1001 there is refused or read at another rate (the
-    # docstring's figures), against "a file either of them builds is never refused": close it
-    # by taking a Matroska stream's avg_frame_rate where r_frame_rate is outside ffmpeg's 5 to
-    # 1,000 fps and avg_frame_rate is N x 1000/1001, or say that such rates aren't read?
+    # as the decimals they also are.
     n = round(declared * 1001 / 1000)
     if not 1 <= n <= MOST_NTSC:
         return None
@@ -352,6 +367,51 @@ def matroska_reading(declared: Fraction) -> Fraction | None:
             # it read, truncated, read back.
             reading = _av_reduce(NANOSECONDS, math.floor(NANOSECONDS / reading), FFPROBE_TERMS)
     return true if declared in readings else None
+
+
+def matroska_guessed(average: Fraction | None) -> bool:
+    """Whether a Matroska stream is read by its avg_frame_rate, `average`, frames per second,
+    None when ffprobe has none, and not by its r_frame_rate: under GUESSED_UNDER fps or above
+    GUESSED_ABOVE. Design's ruling of 2026-10-12: "a Matroska stream whose rate is under 6 fps
+    or above 1,000 is read by its avg_frame_rate, so that seedvr2x's own master there is read
+    back"; media/probe.py applies it (parse).
+
+    ffmpeg's Matroska demuxer reads the frame duration as avg_frame_rate, and gives it as
+    r_frame_rate too only above 5 and under 1,000 fps (matroska_reading;
+    libavformat/matroskadec.c:3053-3055 at n9.0.2): outside, r_frame_rate is ffmpeg's guess
+    from the timestamps, one of its standard rates (libavformat/demux.c, get_std_framerate) or
+    the time base's 1000/1. Measured on seedvr2x's own FFV1 master (media/writer.py,
+    FFV1Writer), gbrp16le and yuv420p10le, 30 and 300 frames, the four alike (a review's
+    finding, 2026-10-12; measured again that day with ffmpeg n9.0.2, 19 rates): written at
+    1000/1001, 3000/1001, 4000/1001, 5000/1001 or 2997/1000 fps, ffprobe gives 24000/1001,
+    12000/1001, 12000/1001, 15000/1001 and 12000/1001, and seedvr2x refused it ("its
+    timestamps run at 4000/1001 fps (3.996) ... where it declares 12000/1001"; 2997/1000's as
+    running at 3000/1001); at 2000/1001, 2/1, read at 2/1 without a word up to 499 frames,
+    refused from 500, a frame half a frame off 2/1's timeline; at 1001 fps, 1000/1, read at
+    it; at 2000 fps, 1000/1, refused. avg_frame_rate is the rate written each time, and by it
+    every one is read back at its rate but 2000 fps, whose frames, two a millisecond,
+    Matroska's timestamps can't hold: refused still, every other frame a whole frame from its
+    place (150 of 300).
+    1/2, 1, 2, 5/2, 5, 11/2, 6000/1001, 6, 7000/1001, 999 and 1000 fps come back as written by
+    both, and are read as they were.
+
+    The bounds are design's words. Between 5 and 6 fps ffmpeg gives the same rate as both, and
+    nothing changes; at 5 itself and under, and above 1,000, r_frame_rate is the guess: a
+    master of one frame at 5 fps is given as 1000/1, and was read at it. At 1,000 itself it is
+    the guess too, and left, 1000/1 for 1, 30 and 300 frames. From 6 to 1,000 fps nothing is
+    changed."""
+    # PROVISIONAL (implementation, 2026-10-12, questions for design: what the ruling doesn't
+    # settle, the most conservative taken). (1) No avg_frame_rate (ffprobe's 0/0, or none): the
+    # stream is read by its r_frame_rate, as before, nothing said. A Matroska stream without a
+    # frame duration is so: of 16 files at 3000/1001, 2997/1000, 2 and 1/2 fps, 2 to 300
+    # frames, their duration removed (mkvpropedit v82.0), ffprobe gave no avg_frame_rate for 9
+    # and its r_frame_rate's own guess for 7; none is read otherwise than before, 30 frames at
+    # 3000/1001 refused as declaring 12000/1001. ffprobe's output doesn't tell an estimate
+    # from a duration's reading. (2) A WebM file is read by the same demuxer and named the same
+    # by ffprobe ("matroska,webm"): the same rule, as matroska_reading's (libvpx-vp9 at
+    # 3000/1001: 12000/1001 and 3000/1001, as Matroska). (3) 1,000 fps itself is left to
+    # r_frame_rate, "above 1,000".
+    return average is not None and not GUESSED_UNDER <= average <= GUESSED_ABOVE
 
 
 def _declared_by_files(rate: Fraction) -> bool:
@@ -444,7 +504,7 @@ def remake(rate: Fraction, start: Fraction) -> str:
 # The lines of a POSIX shell that list a directory's segments for ffmpeg's concat demuxer, in
 # list.txt beside them: each with its exact duration, its frames (ffprobe's count of its
 # packets) over the rate $N/$D, to the microsecond, and bare, for a remake that numbers the
-# frames itself (grid_join). Written for any name but one with an apostrophe (NAMES), and for
+# frames itself (grid_join). Written for any name but one with an apostrophe (GUARD), and for
 # sh being dash, as Debian's and Ubuntu's is (design, 2026-10-12; measured with dash 0.5.12 and
 # ffmpeg n9.0.2, and held by tests/test_rate.py, test_the_join_advised_takes_any_name):
 # - ./*.mkv, not *.mkv: a segment named -x.mkv was an option to ffprobe ("Missing argument for
@@ -465,16 +525,27 @@ LISTED = (
 )
 LISTED_BARE = 'for f in ./*.mkv; do printf "file \'%s\'\\n" "$f"; done > list.txt'
 
+# Between the list written and ffmpeg, in both commands (grid_join; design, 2026-10-12, "the
+# advised commands refuse a list holding an apostrophe in a name"): a name with an apostrophe
+# ends its line's quotes in list.txt, ffmpeg then opening another name, failing there and
+# leaving the segments before it as the join, its exit status 0: the third of 6 segments of 10
+# frames named d'e.mkv, the join and the remake each left a file of 20 frames of 60, on the
+# grid, read without a word (ffmpeg n9.0.2; a review's finding, 2026-10-12). A listed line
+# holds two apostrophes, and three with one in a name: grep finding such a line, the shell's !
+# makes it a failure and && stops there, the status 1, nothing said, ffmpeg not run and no file
+# made; list.txt stays, to be looked at (typed in sh, dash and bash: tests/test_rate.py,
+# test_the_join_advised_takes_any_name).
+GUARD = """! grep -q "'.*'.*'" list.txt"""
+
 # What those lines ask of the segments' names, said after each command that lists them
 # (grid_join). The shell gives ./*.mkv in name order, seg_10.mkv before seg_2.mkv: 12 segments
 # named seg_1.mkv to seg_12.mkv, typed so, joined as 1, 10, 11, 12, 2 to 9, every frame on the
-# grid, read without a word; and a name with an apostrophe ends its line's quotes in list.txt,
-# ffmpeg then opening another name, failing there and leaving the segments before it as the
-# join, its exit status 0 (ffmpeg n9.0.2; a review's findings, 2026-10-12).
+# grid, read without a word; and a name with an apostrophe stops the command (GUARD).
 NAMES = (
     "./*.mkv the segments' names, taken in name order, which must be the order they play in:"
     " numbers with leading zeros, as seg_000012.mkv, seg_10.mkv coming before seg_2.mkv"
-    " otherwise; check list.txt, or write it by hand; a name must hold no apostrophe"
+    " otherwise; check list.txt, or write it by hand; a name must hold no apostrophe: the"
+    " command stops on one, before ffmpeg, and makes no file"
 )
 
 # sptenc's snap (its ffmpeg/concat.go, frameGridSnap), for ffmpeg's setts bitstream filter: a
@@ -516,8 +587,13 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     rate's grid, that is read without a word: tests/test_rate.py,
     test_a_directorys_remake_takes_the_rate_typed).
 
-    Both commands list the segments by the shell's ./*.mkv (LISTED), and each says what that
-    asks of their names (NAMES)."""
+    Both commands list the segments by the shell's ./*.mkv (LISTED), stop before ffmpeg on a
+    list holding an apostrophe in a name (GUARD), and each says what that asks of their names
+    (NAMES). The directory comes after --, in cd's line and in sptenc's (design, 2026-10-12: the
+    advised commands "take a directory whose name begins with a hyphen"): `cd -dir` is refused
+    by sh, dash ("cd: Illegal option -d") and bash, and `sptenc concat -dir joined.mkv` by
+    sptenc ("flag provided but not defined: -dir"; v0.1.1 of 2026-10-02); cd -- is POSIX's, and
+    sptenc takes its directory after -- too ("Concatenating video files from -dir")."""
     # PROVISIONAL (implementation, 2026-10-12, questions for design: DESIGN.md asks for a join
     # by ffmpeg alone that holds the grid and names no command). (1) Durations and the snap, in
     # one pass, over the other join that held as widely: the plain join, then a second stream
@@ -527,7 +603,8 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     # an example where the refusal can't know it, rather than read from a segment by ffprobe,
     # which gives Matroska's 60000/1001 as 19001/317. (3) Program streams sent to the remake
     # rather than -fflags +genpts advised for them (see the docstring). (4) The segments listed
-    # by the shell's glob, its name order and the apostrophe said (NAMES), rather than sorted by
+    # by the shell's glob, its name order said (NAMES) and a name with an apostrophe stopping
+    # the command (GUARD, decided by design on 2026-10-12, as cd's -- was), rather than sorted by
     # their numbers (ls -v and sort -V are GNU's, and a listing parsed breaks on other names)
     # or escaped for the demuxer by a sed in the line, which nobody could read. (5) Where the
     # rate isn't known, N and D said before each command, in plain words, the wording ours
@@ -536,24 +613,24 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     # read (tests/test_rate.py, test_a_directorys_remake_takes_the_rate_typed).
     rate = Fraction(24000, 1001) if declares is None else declares
     snap = f"setts=pts={SNAPPED.format('PTS')}:dts={SNAPPED.format('DTS')}"
-    there = f"cd {directory} &&"
+    there = f"cd -- {directory} &&"
     setting = f"N={rate.numerator} D={rate.denominator} &&"
     if declares is None:
         # The shell's N and D in both commands, an example, said to be one before each.
         first = f", with N and D set to their frame rate, {fraction(rate)} here:"
         asked = NAMES
-        remade = f"{there} {setting} {LISTED_BARE} && ffmpeg -f concat -safe 0 -r $N/$D"
+        remade = f"{there} {setting} {LISTED_BARE} && {GUARD} && ffmpeg -f concat -safe 0 -r $N/$D"
     else:
         # The rate known: the join's N and D, said after it, and the remake's written out.
         first = ":"
         asked = f"{NAMES}; N/D their frame rate"
-        remade = f"{there} {LISTED_BARE} && ffmpeg -f concat -safe 0 -r {fraction(rate)}"
+        remade = f"{there} {LISTED_BARE} && {GUARD} && ffmpeg -f concat -safe 0 -r {fraction(rate)}"
     ways = [
         "with ffmpeg alone, each segment listed with its exact duration, its frames over the"
         f" rate, and every timestamp snapped to the grid in one stream copy{first}"
-        f" {there} {setting} {LISTED} && ffmpeg -f concat"
+        f" {there} {setting} {LISTED} && {GUARD} && ffmpeg -f concat"
         f' -safe 0 -i list.txt -c copy -bsf:v "{snap}" ../joined.mkv ({asked})',
-        f"with sptenc, for segments of its split, sptenc concat {directory} joined.mkv, which"
+        f"with sptenc, for segments of its split, sptenc concat -- {directory} joined.mkv, which"
         " snaps every timestamp to the grid",
         "where no stream copy holds, for segments that carry audio, MPEG program streams, or"
         " transport streams of a single frame, their pictures remade as an FFV1 master, numbered"

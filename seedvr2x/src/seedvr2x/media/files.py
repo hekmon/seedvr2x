@@ -1,6 +1,7 @@
 """Files written whole: each written beside its place, then renamed into it (DESIGN.md, Pause and
 resume: the manifest and the units a resume trusts)."""
 
+import contextlib
 import errno
 import hashlib
 import logging
@@ -65,10 +66,20 @@ def sha256(path: Path) -> str:
 
 
 def write_whole(path: Path, data: bytes) -> None:
-    """Write data to path, whole even after a power cut (replace_whole)."""
+    """Write data to path, whole even after a power cut (replace_whole). A failure to write its
+    partial file or to put it in place (OSError) is raised as it is, the partial file removed
+    first where there is one, so that nothing of a write that failed stays beside path (design,
+    2026-10-12; a review's finding of that day: a playlist that couldn't be put in place, a
+    directory at its name, left plan.txt.cuts.m3u8.partial beside the cut list)."""
     partial = partial_path(path)
-    partial.write_bytes(data)
-    replace_whole(partial, path)
+    try:
+        partial.write_bytes(data)
+        replace_whole(partial, path)
+    except OSError:
+        # The failure raised is the write's own, whatever the removal meets.
+        with contextlib.suppress(OSError):
+            partial.unlink()
+        raise
 
 
 def _sync(path: Path) -> None:

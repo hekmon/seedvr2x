@@ -186,7 +186,9 @@ def main(argv: list[str] | None = None) -> int:
         metavar="FILE",
         help="plan the job and stop before the upscale: the first pass, then the cut list"
         f" written to FILE, for editing and --cuts, the possible cuts (runs peaking from {POSSIBLE}"
-        " up to the threshold) commented with their probabilities and times; and the counts"
+        " up to the threshold) commented with their probabilities and times, and two playlists"
+        " for VLC beside it when the shots are detected, FILE.cuts.m3u8 of the detected cuts and"
+        " FILE.possible.m3u8 of the possible ones (none with --cuts); and the counts"
         " printed. The job's manifest and frame index are written too, in the output directory"
         " (PATH.work for a .mkv path): the same command without --plan then runs it, another"
         " --cut-threshold or --cuts plans it again, with no second decode",
@@ -758,6 +760,7 @@ def _run(args: argparse.Namespace) -> int:
 
     from seedvr2x.media.checksums import write_checksums
     from seedvr2x.media.files import make_directories
+    from seedvr2x.media.reader import FramesLeft
     from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
     from seedvr2x.runtime import manifest
     from seedvr2x.runtime.blockswap import HostMemoryError
@@ -930,6 +933,13 @@ def _run(args: argparse.Namespace) -> int:
                 len(segments),
             )
             return 1
+        except FramesLeft as error:
+            # The source's end, with a frame more than the job's record counts (run.Inputs): the
+            # same command would read the last shot again and stop here again, so its line says
+            # what is kept and not that it resumes; the way out is the error's own, another -o
+            # (design, 2026-10-12). Before MediaError, whose kind it is.
+            logger.error("%s; stopped: %s", error, _kept(record, len(segments), resumes=False))
+            return 1
         except ScratchError as error:
             # A tiled pass's scratch that can't be made, its disk full: the user's to fix
             # (tiling.ScratchError). Derived data, its file gone; the units made before it are
@@ -1066,10 +1076,17 @@ def _directory_refused(path: Path) -> str:
     # durations, on the plain join's timestamps, puts a frame that drifted half a frame on its
     # neighbour's place. A second stream copy of the plain join that counts each packet's
     # distance from the one before in frames held as widely, without the durations, for a whole
-    # second copy of the film (rate.grid_join). Typed as the message gives it, at 24000/1001 on
-    # the FFV1, H.264, HEVC and MPEG-2 Matroska segments, 128 of each, and on H.264's at 25 and
+    # second copy of the film (rate.grid_join). Typed as the message first gave it, the list by
+    # echo from *.mkv, on the GPU machine (2026-10-10), at 24000/1001 on the FFV1, H.264 (with
+    # B-frames), HEVC and MPEG-2 Matroska segments, 128 of each, and on H.264's at 25 and
     # 30000/1001: the same, and read by the first pass, where the plain join of each of those
-    # at 24000/1001 and 30000/1001 is refused.
+    # at 24000/1001 and 30000/1001 is refused. As it gives it today, the list by printf from
+    # ./*.mkv (rate.LISTED), it wasn't typed on those 128 but on the development machine, under
+    # dash 0.5.12 (2026-10-12): on 30 segments of unequal lengths each of six materials, FFV1
+    # split at 24000/1001, 25 and 30000/1001, and H.264, HEVC and MPEG-2 each encoded on its own
+    # in Matroska at 24000/1001, 813 frames, and on 29 MPEG-2 transport streams, 812: every
+    # picture in order, each frame at its place in the master (tests/test_rate.py, which types
+    # it at each run, its guard against an apostrophe and its cd -- in sh, dash and bash).
     #
     # No stream copy held on Matroska segments with audio, the video's timestamps coming out 0
     # to 84 ms apart (in MP4 with audio the video held and the audio's timestamps were changed
@@ -1091,14 +1108,17 @@ def _directory_refused(path: Path) -> str:
     )
 
 
-def _kept(record: "Manifest | None", segments: int) -> str:
-    """What a run stopped before its end keeps, of a job of `segments` output segments."""
+def _kept(record: "Manifest | None", segments: int, resumes: bool = True) -> str:
+    """What a run stopped before its end keeps, of a job of `segments` output segments; without
+    `resumes`, for a failure the same command would meet again, whose own message gives the way
+    out (reader.FramesLeft), what is kept and no more."""
     if record is None:
         return "nothing kept: one file can't resume until assembly (milestone 6)"
-    return (
+    kept = (
         f"{sum(record.finished)} of {segments} segments finished, and the units of the next ones"
-        " kept: the same command resumes"
+        " kept"
     )
+    return f"{kept}: the same command resumes" if resumes else kept
 
 
 def _final(output: Path) -> Path | None:
@@ -1943,7 +1963,9 @@ class _Prior:
 
     recorded: dict[str, Any]  # its manifest, as written
     identity: _Identity
-    changed: list[str]  # its environment's differences, accepted (--accept-env-change)
+    # Its environment's differences: accepted (--accept-env-change), or a finished directory
+    # job's, which makes nothing and asks no acceptance (_prior).
+    changed: list[str]
     known: "FirstPass | None"  # the first pass's record, unless ffmpeg or conversions changed
     # A plan planned again: its cut settings' differences (resume.CUT_SETTINGS); else none.
     replanned: list[str] = field(default_factory=list[str])
@@ -2004,11 +2026,23 @@ def _prior(
     --cut-threshold, a cut list given or another, or none, its cuts derived again from its first
     pass's record (DESIGN.md, Shot detection: another threshold gives its cuts without a second
     decode or detection), the layout and settings rewritten (_replan): DESIGN.md, Pause and
-    resume, A plan, "A run whose settings differ only in its cuts", as resume.CUT_SETTINGS says."""
+    resume, A plan, "A run whose settings differ only in its cuts", as resume.CUT_SETTINGS says.
+
+    A finished directory job, every segment made, is taken whatever its environment, with no
+    --accept-env-change (design, 2026-10-12: "A finished directory job is said finished whatever
+    the environment, nothing being made: no refusal, no --accept-env-change asked"): nothing is
+    made in this one, so no output can differ, and the difference is said (ENVIRONMENT_STAYS),
+    by _finished_already or by _resume. Its environment alone: other settings, another source
+    or, after this, another layout or plan (_resume) are another job, as before. Not a .mkv
+    path's job with every segment made and no file, which isn't finished, its assembly the next
+    unit, made in this environment: refused, or accepted and recorded, as any resume.
+    PROVISIONAL (implementation, 2026-10-12, a question for design: the decision says "nothing
+    being made", and --plan FILE on a finished job writes the job's cut list): with --plan, such
+    a job in another environment is refused without --accept-env-change, as it was."""
     from seedvr2x.media.scan import Idet
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.manifest import NAME, planned
+    from seedvr2x.runtime.manifest import NAME, complete, planned
 
     path = directory / NAME
     identity = _identity(
@@ -2024,7 +2058,8 @@ def _prior(
     recut = [line for line in found if resume.setting(line) in resume.CUT_SETTINGS]
     other = len(found) > len(changed) + len(recut)
     replanned = recut if recut and not other and planned(recorded) else []
-    if other or recut != replanned or (changed and not args.accept_env_change):
+    finished = _final(args.output) is None and complete(recorded) and args.plan is None
+    if other or recut != replanned or (changed and not args.accept_env_change and not finished):
         raise _another_job(
             path,
             found,
@@ -2147,12 +2182,13 @@ def _resume(record: "Manifest", prior: _Prior, assembles: bool = False) -> bool:
     before one keeps the record as it was, but for the index of a first pass run again and for
     a plan's (_taken_up).
 
-    A finished job makes no unit, so nothing records an environment change accepted for it, and
-    that is what is said (ENVIRONMENT_STAYS, as _finished_already says it of one without its
-    first pass's record): a directory's job with every segment finished. A .mkv path's
-    (`assembles`) with every segment finished isn't finished, its file not in place (DESIGN.md,
-    Pause and resume: "A finished file's job is finished once the file is in place"): its
-    assembly is the next unit made, which writes the manifest (_assemble).
+    A finished job makes no unit, so nothing records an environment change for it, accepted or
+    not, as it needs no acceptance (_prior), and that is what is said (ENVIRONMENT_STAYS, as
+    _finished_already says it of one without its first pass's record): a directory's job with
+    every segment finished. A .mkv path's (`assembles`) with every segment finished isn't
+    finished, its file not in place (DESIGN.md, Pause and resume: "A finished file's job is
+    finished once the file is in place"): its assembly is the next unit made, which writes the
+    manifest (_assemble).
 
     A plan, a job that has made no unit yet (manifest.planned), is planned again whole from the
     memory free now (_run; DESIGN.md, Memory planner: "A plan recorded with no unit made yet is
@@ -2293,12 +2329,14 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
 # The input record's fields a source declares, read without a decode (media/source.py, declare;
 # manifest._input): what a finished job run again is still compared by (_finished_already).
 DECLARED = ("frame_rate", "size", "sample_aspect", "read_as", "pix_fmt", "primaries", "transfer")
-# What is said of a finished job run again in another environment, accepted: its directory, then
-# the differences. No unit is made in it, so no manifest written records it (_finished_already;
-# _resume, for a finished job whose first pass's record is trusted).
+# What is said of a finished job run again in another environment: its directory, then the
+# differences. No unit is made in it, so no manifest written records it (_finished_already;
+# _resume, for a finished job whose first pass's record is trusted). The same line with
+# --accept-env-change and without, which such a job doesn't need (design, 2026-10-12; _prior):
+# "as accepted" stood after "this one" until then, the flag being asked.
 ENVIRONMENT_STAYS = (
-    "%s: its environment differs from this one, as accepted, and stays its manifest's, nothing"
-    " being made in this one: %s"
+    "%s: its environment differs from this one and stays its manifest's, nothing being made in"
+    " this one: %s"
 )
 
 
@@ -2311,14 +2349,15 @@ def _finished_already(
     untrusted: str,
 ) -> int | None:
     """A finished job run again, the record of its first pass not one to trust (_trusted, why in
-    `untrusted`): its frame index missing or damaged, or made by another ffmpeg, accepted. It is
-    said finished and nothing is made again (DESIGN.md, Pause and resume: "Re-running a finished
-    job doesn't rewrite its manifest, and makes nothing again, its frame index and its plan
-    included: no memory is read"): no first pass, no shot detector nor its file (cli._run), no
-    index, no plan nor the GPU's free memory read for one, no manifest written; its exit status,
-    0. None for any other job, which the run goes on with: one unfinished, or a finished one
-    whose record is trusted, for which no pass runs either (_prior) and no plan is made
-    (cli._run), said finished once it is compared whole (_resume).
+    `untrusted`): its frame index missing or damaged, or made by another ffmpeg, which needs no
+    acceptance (_prior; design, 2026-10-12). It is said finished and nothing is made again
+    (DESIGN.md, Pause and resume: "Re-running a finished job doesn't rewrite its manifest, and
+    makes nothing again, its frame index and its plan included: no memory is read"): no first
+    pass, no shot detector nor its file (cli._run), no index, no plan nor the GPU's free memory
+    read for one, no manifest written; its exit status, 0. None for any other job, which the run
+    goes on with: one unfinished, or a finished one whose record is trusted, for which no pass
+    runs either (_prior) and no plan is made (cli._run), said finished once it is compared whole
+    (_resume).
 
     A directory's job alone. A .mkv path's job with every segment finished isn't finished: "A
     finished file's job is finished once the file is in place: with every segment made and no
@@ -2331,8 +2370,8 @@ def _finished_already(
     (_assembled), before the index is looked at.
 
     The job is checked before this as any job resumed is before its first pass (_prior): the
-    same settings, the pins that shape its plan among them, environment and source by content, or
-    refused, an environment change accepted or refused as a resume's. Of what a resume compares
+    same settings, the pins that shape its plan among them, and source by content, or refused,
+    its environment said, never refused but with --plan (_prior). Of what a resume compares
     after its first pass (_resume), it is held to what needs no decode: what the source declares
     (DECLARED) and the output's format, size (`target`, its (height, width) before the output's
     rounding) and rate, against its record, another job when they differ (JobError), as an
@@ -2663,9 +2702,12 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
     # (_taken) and for each playlist's place, below.
     if _same(plan, args.input):
         raise JobError(f"--plan {plan}: the source; it names the cut list's file")
-    if args.cuts is not None and where == args.cuts.resolve():
+    if args.cuts is not None and _same(plan, args.cuts):
         # The plan of a cut list is that list normalised: written over it, the list's own
         # comments went, the possible cuts it kept commented and their probabilities with them.
+        # The same file by whatever name, as the source above (design, 2026-10-12: "the --cuts
+        # list compared with FILE as a file"): --cuts list.txt --plan LIST.TXT, on a disk that
+        # takes a name in any case, is that list too.
         raise JobError(
             f"--plan {plan}: the cut list given (--cuts), which it would replace, its comments"
             " lost; it names another file"

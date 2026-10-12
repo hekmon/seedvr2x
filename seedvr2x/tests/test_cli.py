@@ -62,6 +62,25 @@ def test_cuts_help_says_how_its_frames_are_counted(capsys: pytest.CaptureFixture
     )
 
 
+def test_plan_help_names_its_two_playlists(capsys: pytest.CaptureFixture[str]) -> None:
+    # --plan FILE writes two playlists beside FILE when the shots are detected, under names no
+    # option gives (cuts.playlist_path): said where --plan is read about, each with its name, and
+    # that a cut list's plan has neither (design, 2026-10-12).
+    from seedvr2x.runtime.cuts import PLAYLISTS, playlist_path
+
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    shown = " ".join(capsys.readouterr().out.split())
+    assert (
+        "commented with their probabilities and times, and two playlists for VLC beside it when"
+        " the shots are detected, FILE.cuts.m3u8 of the detected cuts and FILE.possible.m3u8 of"
+        " the possible ones (none with --cuts); and the counts printed." in shown
+    )
+    # The names said are those written.
+    for which in PLAYLISTS:
+        assert playlist_path(Path("FILE"), which).name in shown
+
+
 def test_too_small_to_pad_refused_before_the_first_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -338,23 +357,26 @@ def test_directory_refused_first(tmp_path: Path) -> None:
         assert result.stderr.endswith(advice)
         assert "with ffmpeg alone, each segment listed with its exact duration" in advice
         # The rate the shell's N and D in both commands, the join's and the remake's.
-        assert advice.count(f"cd {quoted} && N=24000 D=1001 && for f in ./*.mkv; do printf") == 2
-        said = f", with N and D set to their frame rate, 24000/1001 here: cd {quoted} && N=24000"
+        # The directory after --, so that one whose name begins with a hyphen is no option.
+        assert advice.count(f"cd -- {quoted} && N=24000 D=1001 && for f in ./*.mkv; do printf") == 2
+        said = f", with N and D set to their frame rate, 24000/1001 here: cd -- {quoted} && N=24000"
         assert advice.count(said) == 2
         assert "ffmpeg -f concat -safe 0 -r $N/$D -i list.txt -map 0:v:0" in advice
+        # Each list checked for an apostrophe in a name before ffmpeg reads it.
+        assert advice.count("""done > list.txt && ! grep -q "'.*'.*'" list.txt && ffmpeg""") == 2
         assert "-r 24000/1001" not in advice and "echo" not in advice
         # What both commands ask of the segments' names, listed by the shell's ./*.mkv.
         names = (
             "(./*.mkv the segments' names, taken in name order, which must be the order they"
             " play in: numbers with leading zeros, as seg_000012.mkv, seg_10.mkv coming before"
             " seg_2.mkv otherwise; check list.txt, or write it by hand; a name must hold no"
-            " apostrophe)"
+            " apostrophe: the command stops on one, before ffmpeg, and makes no file)"
         )
         assert advice.count(names) == 2
         assert f"../joined.mkv {names}, or with sptenc" in advice
         assert f"../remade.mkv {names}. A plain join by" in advice
         # sptenc's join an option: seedvr2x never requires sptenc.
-        assert f"sptenc concat {quoted} joined.mkv, which snaps every timestamp" in advice
+        assert f"sptenc concat -- {quoted} joined.mkv, which snaps every timestamp" in advice
         assert "-c copy joined.mkv" not in result.stderr and "drift" not in rate.grid_join()
         assert sorted(tmp_path.rglob("*")) == files
 

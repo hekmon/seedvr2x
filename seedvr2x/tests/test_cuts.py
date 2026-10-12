@@ -653,6 +653,59 @@ def test_both_playlists_written_and_said(
     assert [level for level, _ in said()] == ["ERROR", "INFO"]
 
 
+def test_a_write_that_fails_leaves_no_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # files.write_whole writes beside its place, FILE.partial, then renames: a write that fails
+    # removes that file before its error is raised, the error the write's own (design,
+    # 2026-10-12). A review's case (2026-10-12): a playlist that can't be put in place, a
+    # directory at its name, left plan.txt.cuts.m3u8.partial, 348 bytes, beside the cut list.
+    index = ntsc(4800)
+    cuts, maybe = [Cut(100, 0.5)], [Cut(12, 0.15)]
+    source, plan = tmp_path / "in.mkv", tmp_path / "plan.txt"
+    of_cuts, of_possible = tmp_path / "plan.txt.cuts.m3u8", tmp_path / "plan.txt.possible.m3u8"
+    of_cuts.mkdir()
+    assert not write_playlists(plan, index, cuts, maybe, source)
+    assert sorted(os.listdir(tmp_path)) == [of_cuts.name, of_possible.name]
+    [said] = [record.getMessage() for record in caplog.records if record.levelname == "ERROR"]
+    assert said.startswith(f"--plan {plan}: its playlist, {of_cuts}, not written: [Errno 21] Is a")
+    # The same of any file written so, whatever fails: its place a directory; no room for the
+    # partial file, some of it written; none to sync it in. An earlier file stays as it was.
+    path = tmp_path / "whole.txt"
+    files.write_whole(path, b"earlier")
+    assert sorted(os.listdir(tmp_path)) == [of_cuts.name, of_possible.name, "whole.txt"]
+    with pytest.raises(IsADirectoryError):
+        files.write_whole(of_cuts, b"new")
+    write_bytes = Path.write_bytes
+
+    def short(written: Path, data: bytes) -> int:
+        write_bytes(written, data[:1])
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(written))
+
+    def unsynced(partial: Path, written: Path, stale: Path | None = None) -> None:
+        assert partial.read_bytes() == b"new" and written == path
+        raise OSError(errno.EIO, os.strerror(errno.EIO), str(partial))
+
+    for patched, name, stand_in, number in (
+        (Path, "write_bytes", short, errno.ENOSPC),
+        (files, "replace_whole", unsynced, errno.EIO),
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(patched, name, stand_in)
+            with pytest.raises(OSError) as raised:
+                files.write_whole(path, b"new")
+        assert raised.value.errno == number and raised.value.filename == f"{path}.partial"
+        assert sorted(os.listdir(tmp_path)) == [of_cuts.name, of_possible.name, "whole.txt"]
+        assert path.read_bytes() == b"earlier"
+    # No directory to write in: nothing to remove, and the error is still the write's.
+    with pytest.raises(FileNotFoundError) as missing:
+        files.write_whole(tmp_path / "none" / "whole.txt", b"new")
+    assert missing.value.filename == str(tmp_path / "none" / "whole.txt.partial")
+    files.write_whole(path, b"new")
+    assert path.read_bytes() == b"new"
+    assert sorted(os.listdir(tmp_path)) == [of_cuts.name, of_possible.name, "whole.txt"]
+
+
 def test_header_lines_stay_comments(tmp_path: Path) -> None:
     # A name in the header holding what ends a line (as read_cuts splits them: str.splitlines)
     # is written escaped: raw, "a\n7 b.mkv" gave a second line read back as a cut at frame 7.

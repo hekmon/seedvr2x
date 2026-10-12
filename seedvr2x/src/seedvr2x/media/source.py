@@ -322,7 +322,18 @@ def declare(
             sited,
             decoded,
         )
-    if stream.ffprobe_rate is not None:
+    if stream.ffprobe_rate is not None and rate.matroska_guessed(stream.avg_frame_rate):
+        # Said once, as the reading below is (design, 2026-10-12): a Matroska stream under 6
+        # fps or above 1,000 is read by its avg_frame_rate (media/probe.py, parse).
+        logger.info(
+            "%s: declares %s fps, ffprobe's guess from the timestamps of a Matroska stream under"
+            " 6 fps or above 1,000, whose frame duration gives %s (its avg_frame_rate): read as %s",
+            path,
+            rate.fraction(stream.ffprobe_rate),
+            rate.fraction(stream.frame_rate),
+            rate.fraction(stream.frame_rate),
+        )
+    elif stream.ffprobe_rate is not None:
         # Said once, here (design's decision of 2026-10-12: "is read as that NTSC rate, said in
         # an info line"): the rate the file says is not the job's (media/probe.py, parse).
         logger.info(
@@ -424,7 +435,12 @@ def counted(declared: Declared, found: FirstPass) -> Source:
         found.idet,
     )
     declares = rate.fraction(stream.frame_rate)
-    forced = "" if source.rate_override is None else f" (--frame-rate; it declares {declares})"
+    without = "" if stream.ffprobe_rate is None else " without it"
+    forced = (
+        ""
+        if source.rate_override is None
+        else f" (--frame-rate; it {_declares(stream)} {declares}{without})"
+    )
     filled = source.filled
     logger.info(
         "%s: %d frames%s, %dx%d %s at %s fps%s, sample aspect %s (display %s), read as %s",
@@ -457,7 +473,7 @@ def _missing(source: Source, found: Filling) -> str:
     are numbered as everything after the first pass numbers them, by place."""
     index, first = source.index, found.first
     assert index is not None and first is not None
-    on = f"the rate it declares, {rate.fraction(source.frame_rate)}"
+    on = f"the rate it {_declares(source.stream)}, {rate.fraction(source.frame_rate)}"
     if source.rate_override is not None:
         on = f"the rate it is taken at, {rate.fraction(source.frame_rate)} (--frame-rate)"
     # The file's own timestamps around the hole: the frame held's and the next frame's, which
@@ -573,7 +589,7 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
         if index is None:
             return error
         if not error:
-            return _leaves(stream.frame_rate, index)
+            return _leaves(stream, index)
         if _on_grid(declared, scanned) is not None:
             return ""
         found = _guided(index, stream.frame_rate)
@@ -582,16 +598,18 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
         last = f"{_ms(scanned.shortest)} to {_ms(scanned.longest)} ms"
         if found.rate == stream.frame_rate:
             what = (
-                f"its timestamps follow {rate.said(found.rate)}, the rate it declares,"
+                f"its timestamps follow {rate.said(found.rate)}, the rate it {_declares(stream)},"
                 f" {_within(found)}, but its frames last from {last}, where a constant rate's"
                 f" lie within {_ms(TOLERANCE_US)} ms of each other"
             )
         else:
             what = (
                 f"its timestamps run at {rate.said(found.rate)}, {_within(found)}, where it"
-                f" declares {rate.fraction(stream.frame_rate)}, its frames lasting from {last}"
+                f" {_declares(stream)} {rate.fraction(stream.frame_rate)}, its frames lasting"
+                f" from {last}"
             )
-        return f"{what}: a bad file, not read on a guess: {_fixes(found.rate, index)}"
+        fixes = _fixes(found.rate, index, stream.frame_rate)
+        return f"{what}: a bad file, not read on a guess: {fixes}"
     if index is None or scanned.frames == 0:
         return "no frame decoded"
     # R replaces the declared rate, and sptenc's bound of 1 ms on the frames' durations with it:
@@ -602,7 +620,9 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
     on = rate.timeline(index, forced)
     declares = rate.fraction(stream.frame_rate)
     where = (
-        "the rate it declares" if forced == stream.frame_rate else f"where it declares {declares}"
+        f"the rate it {_declares(stream)}"
+        if forced == stream.frame_rate
+        else f"where it {_declares(stream)} {declares}"
     )
     holed = None
     if not on.holds:
@@ -639,9 +659,10 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
         # told its frames were at 24/1 "too" when given its own rate.
         change = stream.frame_rate / forced - 1
         logger.warning(
-            "%s: its frames are at the rate it declares, %s, too: taken at %s as asked, the output"
+            "%s: its frames are at the rate it %s, %s, too: taken at %s as asked, the output"
             " lasting %.3f%% %s than the source, off its other streams",
             path,
+            _declares(stream),
             rate.fraction(stream.frame_rate),
             rate.fraction(forced),
             abs(float(change)) * 100,
@@ -784,7 +805,10 @@ def _guided(index: FrameIndex, declares: Fraction) -> Timeline | None:
     it a frame or more away from the declared timeline (rate.twin), S9's case, whose timestamps
     are no rate's exactly, their long steps catching up, and lie within 10.9 ms of 24000/1001's
     timeline where it declares 24/1 (research/docs/seeking.md, mechanism 7). The twins are the
-    declared rate's under --frame-rate too (_off): the guidance says what the file is.
+    declared rate's under --frame-rate too (_off): the guidance says what the file is. A twin
+    is N x 1000/1001 for a whole number N and N for N x 1000/1001, no other (rate.twins;
+    design, 2026-10-12, after the decision below), and whichever rule names one, the refusal
+    says what else reads so (TWIN_JOIN).
 
     Design's decision of 2026-10-12: "a refusal names another rate only (a) when the timestamps
     are that rate's EXACTLY, to the time base's rounding, or (b) where sptenc's rule fails, when
@@ -809,12 +833,12 @@ def _guided(index: FrameIndex, declares: Fraction) -> Timeline | None:
     return rate.exact(index) or rate.twin(index, declares)
 
 
-def _leaves(declares: Fraction, index: FrameIndex) -> str:
+def _leaves(stream: VideoStream, index: FrameIndex) -> str:
     """Why a source that sptenc's rule passes is refused all the same, or "": seedvr2x's own test
     (DESIGN.md, Input: "or when a frame lies half a frame or more from its place on the declared
     rate's timeline, counted from the first frame"; "The second test is seedvr2x's own (decided
     2026-10-10)"). Every frame must lie strictly within half a frame of its place on the timeline
-    of the rate it declares, `declares`, as --frame-rate's frames on R's (rate.Timeline.holds);
+    of the rate it declares, `stream`'s, as --frame-rate's frames on R's (rate.Timeline.holds);
     else how many don't, from which frame, how far (_strayed), and what the file is, with its
     ways out (_way_out).
 
@@ -850,27 +874,28 @@ def _leaves(declares: Fraction, index: FrameIndex) -> str:
     # this test runs on that rate's timeline. A rate Matroska reads worse that is no NTSC
     # rate's reading, 1000000/33333 as 30/1, 1e-5 off, still leaves at frame 48,503, 27 min in,
     # as no rate's exactly.
-    on = rate.timeline(index, declares)
+    on = rate.timeline(index, stream.frame_rate)
     if on.holds:
         return ""
-    return f"{_strayed(on, index.frames)}, and {_way_out(on, index)}"
+    return f"{_strayed(on, index.frames, stream)}, and {_way_out(on, index, stream)}"
 
 
-def _strayed(on: Timeline, frames: int) -> str:
-    """How a source's `frames` frames leave the timeline of the rate it declares, `on`: how many
-    lie half a frame or more from their place there, from which frame, and how far the furthest
-    wanders, in ms and of a frame."""
+def _strayed(on: Timeline, frames: int, stream: VideoStream) -> str:
+    """How a source's `frames` frames leave the timeline of the rate it declares, `on`, `stream`'s:
+    how many lie half a frame or more from their place there, from which frame, and how far the
+    furthest wanders, in ms and of a frame."""
     lie, their = ("lies", "its") if on.off == 1 else ("lie", "their")
     return (
         f"{on.off} of its {frames} frames {lie} half a frame or more from {their} place on the"
-        f" timeline of the rate it declares, {rate.fraction(on.rate)}, from frame {on.first_off},"
-        f" up to {_ms(on.largest * 1_000_000)} ms ({float(on.largest * on.rate):.2f} of a frame)"
+        f" timeline of the rate it {_declares(stream)}, {rate.fraction(on.rate)}, from frame"
+        f" {on.first_off}, up to {_ms(on.largest * 1_000_000)} ms"
+        f" ({float(on.largest * on.rate):.2f} of a frame)"
     )
 
 
-def _way_out(on: Timeline, index: FrameIndex) -> str:
-    """What a source whose frames leave the timeline of the rate it declares, `on`, is, and its
-    ways out, as its refusal ends (_leaves, _off).
+def _way_out(on: Timeline, index: FrameIndex, stream: VideoStream) -> str:
+    """What a source whose frames leave the timeline of the rate it declares, `on`, `stream`'s,
+    is, and its ways out, as its refusal ends (_leaves, _off).
 
     Its timestamps another constant rate's exactly (rate.exact): a file declaring a rate that
     isn't its frames', named with what the declared one would have cost, the output that much
@@ -902,7 +927,8 @@ def _way_out(on: Timeline, index: FrameIndex) -> str:
             f"its output, written at that rate, would be {_cost(found.rate / declares - 1)} than"
             " its timestamps' own time, off the source's other streams: its timestamps follow"
             f" {rate.said(found.rate)} exactly, to the rounding of its time base,"
-            f" {index.time_base} s: a bad file, not read on a guess: {_fixes(found.rate, index)}"
+            f" {index.time_base} s: a bad file, not read on a guess:"
+            f" {_fixes(found.rate, index, declares)}"
         )
     command = rate.remake(declares, rate.first_time(index))
     return (
@@ -910,8 +936,9 @@ def _way_out(on: Timeline, index: FrameIndex) -> str:
         " alone drifts so, up to 1 ms a join, and timestamps alone can't tell a drifting join"
         " from a retagged file: a bad file, not read on a guess: join its segments again so that"
         f" every frame keeps its place on the frame grid, {rate.grid_join(declares=declares)};"
-        " or remake it at the rate it declares, an FFV1 master numbering its frames at that rate"
-        f" as they come, every one kept, its other streams copied ({REMAKE_COST}), with {command}"
+        f" or remake it at the rate it {_declares(stream)}, an FFV1 master numbering its frames at"
+        f" that rate as they come, every one kept, its other streams copied ({REMAKE_COST}), with"
+        f" {command}"
     )
 
 
@@ -926,13 +953,14 @@ def _cost(change: Fraction) -> str:
     return f"{percent:.{decimals}f}% {'shorter' if change < 0 else 'longer'}"
 
 
-def _exactly(found: Timeline, index: FrameIndex) -> str:
+def _exactly(found: Timeline, index: FrameIndex, declares: Fraction) -> str:
     """The rate a source's timestamps are exactly (rate.exact), as messages give it, with the
-    option that takes its frames at it."""
+    option that takes its frames at it; `declares` the rate the file declares, whose twin a
+    join reads as too (_twin_join)."""
     return (
         f"its timestamps follow {rate.said(found.rate)} exactly, to the rounding of its time"
-        f" base, {index.time_base} s: --frame-rate {rate.fraction(found.rate)} takes its frames"
-        " at that rate"
+        f" base, {index.time_base} s: {_twin_join(found.rate, declares)}--frame-rate"
+        f" {rate.fraction(found.rate)} takes its frames at that rate"
     )
 
 
@@ -974,39 +1002,83 @@ def _off(
         )
         + ": taken at that rate, frames would be dropped or doubled"
     )
+    stream = declared.stream
+    declares = stream.frame_rate
     if passes:
-        declares = declared.stream.frame_rate
         if on.rate == declares:
             # R is the rate declared: its frames are said already, the first one off and how many.
             return (
                 f"{reason}; without --frame-rate, the file is refused too, that rate being the"
-                f" one it declares, and {_way_out(on, index)}"
+                f" one it {_declares(stream)}, and {_way_out(on, index, stream)}"
             )
-        left = _leaves(declares, index)
+        left = _leaves(stream, index)
         if left:
             return f"{reason}; without --frame-rate, the file is refused too: {left}"
         reason += (
-            "; without --frame-rate, the file is read at the rate it declares,"
-            f" {rate.fraction(declares)}, whose timeline holds every frame within half a frame"
+            f"; without --frame-rate, the file is read at {_read_at(stream)}, whose timeline"
+            " holds every frame within half a frame"
         )
         exact = rate.exact(index)
         if exact is None or exact.rate == declares:
             return reason
-        return f"{reason}; {_exactly(exact, index)}"
+        return f"{reason}; {_exactly(exact, index, declares)}"
     if holed is not None:
         missing = int(holed.place[-1]) + 1 - len(holed.place)
         return (
-            f"{reason}; without --frame-rate, the file is read at the rate it declares,"
-            f" {rate.fraction(declared.stream.frame_rate)}, on whose grid its frames sit, the"
-            f" {_frames(missing)} missing there filled"
+            f"{reason}; without --frame-rate, the file is read at {_read_at(stream)}, on whose"
+            f" grid its frames sit, the {_frames(missing)} missing there filled"
         )
-    found = _guided(index, declared.stream.frame_rate)
+    found = _guided(index, declares)
     if found is None or found.rate == on.rate:
         return reason
     return (
         f"{reason}; its timestamps run at {rate.said(found.rate)}, {_within(found)}:"
-        f" {_fixes(found.rate, index)}"
+        f" {_fixes(found.rate, index, declares)}"
     )
+
+
+# What a refusal adds wherever the rate it names is an NTSC twin of the rate the file declares
+# (rate.twins), by either rule, the timestamps that rate's exactly (rate.exact) or following it
+# a frame away from the declared timeline (rate.twin), before the fixes at that rate: design's
+# ruling of 2026-10-12, "timestamps can't tell a join of one-second segments from a mislabelled
+# file (fifty segments of 24 frames at 24000/1001, one join 2 ms early, are named 24/1 and
+# offered --frame-rate 24/1). Whenever the rate a refusal names is the declared rate's twin, by
+# either rule, it adds one sentence", in its words. N frames at N x 1000/1001 fps last 1.001 s,
+# and ffmpeg's concat demuxer starts each such segment 1.000 s after the one before, a
+# millisecond early (cli._directory_refused): N frames a second, which N/1's timeline holds
+# within half a frame, 24/1's those fifty within 1.3 ms; taken at N/1, as --frame-rate N/1
+# takes them, the film is 0.1% short, off its other streams. A directory given as the source
+# is refused with the joins that keep the grid, each with its command (cli._directory_refused).
+# "otherwise" is ours, leading to the fixes of a file that is no such join.
+TWIN_JOIN = (
+    "a join of one-second segments by ffmpeg's concat demuxer reads so too, and such a file is"
+    " joined again on the frame grid (a directory given to seedvr2x says how); otherwise, "
+)
+
+
+def _twin_join(found: Fraction, declares: Fraction) -> str:
+    """TWIN_JOIN, what a refusal says before the fixes at the rate it names, `found`, when that
+    rate is an NTSC twin of the rate the file declares, `declares` (rate.twins); else ""."""
+    return TWIN_JOIN if found in rate.twins(declares) else ""
+
+
+def _declares(stream: VideoStream) -> str:
+    """What messages say a file does with its stream's rate, `stream`.frame_rate: "declares"
+    it, "the rate it declares, 24/1", "where it declares 24/1"; and "is read at" it for a
+    stream read at another rate than ffprobe gives for it (VideoStream.ffprobe_rate: a Matroska
+    stream's, media/probe.py, parse), which the file doesn't declare to ffprobe: "the rate it
+    is read at, 60000/1001", of a file that declares 19001/317, said once with both rates
+    (declare). Design, 2026-10-12: "the rate it declares" where it is the rate it is read at.
+    A stream read at the rate ffprobe gives keeps every message to the byte."""
+    return "declares" if stream.ffprobe_rate is None else "is read at"
+
+
+def _read_at(stream: VideoStream) -> str:
+    """The rate a file is read at without --frame-rate, after "the file is read at" (_off): "the
+    rate it declares, 24/1", and the rate alone, "60000/1001", for a stream read at another
+    rate than ffprobe gives for it (_declares)."""
+    said = rate.fraction(stream.frame_rate)
+    return said if stream.ffprobe_rate is not None else f"the rate it declares, {said}"
 
 
 def _within(found: Timeline | Places, whose: str = "that rate's") -> str:
@@ -1018,12 +1090,14 @@ def _within(found: Timeline | Places, whose: str = "that rate's") -> str:
     )
 
 
-def _fixes(found: Fraction, index: FrameIndex) -> str:
+def _fixes(found: Fraction, index: FrameIndex, declares: Fraction) -> str:
     """The two fixes of a file a refusal names the rate `found` for, its timestamps' exactly or
-    the NTSC twin of the one it declares (_guided, _way_out; DESIGN.md, Input): a remake at that
-    rate (rate.remake), or --frame-rate."""
+    the NTSC twin of the one it declares, `declares` (_guided, _way_out; DESIGN.md, Input): a
+    remake at that rate (rate.remake), or --frame-rate; before them, where `found` is that
+    twin, by either rule, what else reads so (_twin_join)."""
     command = rate.remake(found, rate.first_time(index))
     return (
+        f"{_twin_join(found, declares)}"
         "remake it at that rate, an FFV1 master with its other streams copied, a clean file for"
         f" every tool ({REMAKE_COST}), with {command}; or give --frame-rate {rate.fraction(found)},"
         " which takes its frames at that rate, each checked to lie within half a frame of its"
