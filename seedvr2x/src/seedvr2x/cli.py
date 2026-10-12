@@ -160,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
         metavar="FILE",
         help="cut list: the first frame of each shot but the first, one frame number per line,"
         " counted from 0, # comments, the fields after the number ignored, as --plan writes it;"
+        " frame numbers count the source's frames as seedvr2x counts them, a missing frame's"
+        " filled place among them;"
         " in place of the shot detector (default: the cuts TransNetV2 detects, see"
         " --cut-threshold)",
     )
@@ -2705,7 +2707,7 @@ def _write_plan(
     import textwrap
 
     from seedvr2x.media.files import write_whole
-    from seedvr2x.runtime.cuts import cut_list
+    from seedvr2x.runtime.cuts import cut_list, places_note
 
     if source.index is None:
         raise ValueError(f"{source.path}: no frame index to time its cuts by: a seedvr2x bug")
@@ -2733,6 +2735,7 @@ def _write_plan(
         else "Delete a line to drop a cut, add one to cut at its frame"
     )
     header += textwrap.wrap(lines, 86)
+    header += places_note(source.index)
     header += textwrap.wrap(f"{usage}, then run with --cuts FILE, this file.", 86)
     text = cut_list(header, source.index, found.cuts, found.possible)
     try:

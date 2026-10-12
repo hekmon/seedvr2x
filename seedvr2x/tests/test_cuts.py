@@ -6,6 +6,7 @@ player shows them, and its round trip through --cuts' reader (job.read_cuts); th
 possible cuts written beside it for VLC, its entries, its name and what is said of it."""
 
 import errno
+import itertools
 import logging
 import os
 import re
@@ -18,8 +19,9 @@ import numpy.typing as npt
 import pytest
 
 from seedvr2x.media import files
-from seedvr2x.media.grid import filled
+from seedvr2x.media.grid import Filling, Hole, filled
 from seedvr2x.media.index import NOPTS, FrameIndex
+from seedvr2x.runtime import cuts
 from seedvr2x.runtime.cuts import (
     POSSIBLE,
     THRESHOLD,
@@ -27,6 +29,7 @@ from seedvr2x.runtime.cuts import (
     cut_list,
     detected,
     detections,
+    places_note,
     playlist,
     playlist_path,
     possible,
@@ -247,6 +250,50 @@ def test_times_of_filled_places() -> None:
     untimed = filled(index_of([0, NOPTS, 200], Fraction(1, 1000)), [0, 1, 4], Fraction(25))
     assert [time_of(untimed, k) for k in (1, 2, 3)] == [None, None, None]
     assert time_of(untimed, 4) == Fraction(1, 5)
+
+
+def test_places_said_in_the_header(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A cut list of a source with missing frames numbers its cuts by place (media/grid.py), and
+    # its header says so, with what was filled: a list numbered by a tool counting the frames it
+    # decodes is off by the holes before each cut. Nothing for a source without a hole.
+    whole = index_of(list(range(27)))
+    assert places_note(whole) == []
+    assert cut_list([*places_note(whole)], whole, [Cut(7)]) == "7 0:00:00.280\n"
+    kept = [k for k in range(27) if k not in (5, 6)]
+    one = filled(index_of(kept), kept, Fraction(25))
+    assert places_note(one) == [
+        "Frame numbers count places, the missing frames' filled ones among them: 2 frames",
+        "missing after frame 4, 27 places for 25 frames decoded. A list numbered by a tool that",
+        "counts the decoded frames is off by the holes before each cut, its number lower by the",
+        "frames missing before it.",
+    ]
+    kept = [k for k in range(3600) if k not in (5, 100, 101, 102, 2000)]
+    several = filled(index_of(kept), kept, Fraction(25))
+    assert places_note(several) == [
+        "Frame numbers count places, the missing frames' filled ones among them: 5 frames",
+        "missing in 3 holes, the first after frame 4, 3600 places for 3595 frames decoded. A",
+        "list numbered by a tool that counts the decoded frames is off by the holes before each",
+        "cut, its number lower by the frames missing before it.",
+    ]
+    kept = [k for k in range(27) if k != 9]
+    single = " ".join(places_note(filled(index_of(kept), kept, Fraction(25))))
+    assert ": 1 frame missing after frame 8, 27 places for 26 frames decoded. " in single
+    path = tmp_path / "plan.txt"
+    path.write_text(cut_list(["of in.mkv", *places_note(several)], several, [Cut(7), Cut(2001)]))
+    assert read_cuts(path) == [7, 2001]
+    path.write_text(re.sub(r"(?m)^# (?=\d)", "", path.read_text()))
+    assert read_cuts(path) == [7, 2001]
+    # No line of it begins with a digit, whatever its figures' lengths bring to the wrap: a
+    # header line that does is refused, since uncommented with the possible cuts it would be a
+    # cut (cut_list). Figures of 1 to 9 digits each, in place of the index's own: wrapped at any
+    # space, 730 of these 6,561 notes had such a line.
+    for widths in itertools.product(range(1, 10), repeat=4):
+        missing, holes, held, places = (10 ** (width - 1) + 1 for width in widths)
+        figures = Filling(missing + places, missing, holes, Hole(held + 1, 1, held), 1)
+        monkeypatch.setattr(cuts, "filling", lambda index, figures=figures: figures)
+        note = places_note(whole)
+        assert all(len(line) <= 86 and not line[:1].isdigit() for line in note), note
+        assert f": {missing} frames missing in {holes} holes, the first after" in " ".join(note)
 
 
 def test_probabilities_to_three_decimals() -> None:

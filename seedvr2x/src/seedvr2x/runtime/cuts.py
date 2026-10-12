@@ -13,6 +13,8 @@ neighbour, from 1 frame on, and real cuts coming 1-3 frames apart in action anim
 import logging
 import math
 import os
+import re
+import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
@@ -24,6 +26,7 @@ import numpy as np
 import numpy.typing as npt
 
 from seedvr2x.media import files
+from seedvr2x.media.grid import filling
 from seedvr2x.media.index import NOPTS, FrameIndex
 
 logger = logging.getLogger(__name__)
@@ -209,6 +212,39 @@ def cut_list(
         fields.append(timecode(time_of(index, cut.frame)))
         lines.append(("# " if commented else "") + " ".join(fields))
     return "\n".join(lines) + "\n"
+
+
+def places_note(index: FrameIndex) -> list[str]:
+    """What the cut list's header says of a source with missing frames, as header lines
+    (cut_list), wrapped as cli._write_plan wraps its own, at 86 columns; none for a source
+    without a filled place, whose header stays as it was.
+
+    Such a source's index is in places (media/grid.py), and a cut's frame number is its place,
+    the missing frames' filled ones counted: the list says so where its user reads it, with how
+    many are filled, in how many holes and where the first is, and that a list numbered by a tool
+    counting the frames it decodes is off by the holes before each cut (design, 2026-10-12:
+    "FRAMES COUNT PLACES, SAID WHERE THE USER READS IT: the cut list's header when places are
+    filled"). Frames are numbered as the source's warning numbers them (source._missing)."""
+    found = filling(index)
+    first = found.first
+    if first is None:
+        return []
+    missing = f"{found.filled} frame{'' if found.filled == 1 else 's'} missing"
+    where = (
+        f"after frame {first.held}"
+        if found.holes == 1
+        else f"in {found.holes} holes, the first after frame {first.held}"
+    )
+    text = (
+        "Frame numbers count places, the missing frames' filled ones among them:"
+        f" {missing} {where}, {found.places} places for {found.decoded} frames decoded."
+        " A list numbered by a tool that counts the decoded frames is off by the holes before"
+        " each cut, its number lower by the frames missing before it."
+    )
+    # No header line may begin with a digit (cut_list): a figure stays on the line of the word
+    # before it, the space between them no place to break at.
+    lines = textwrap.wrap(re.sub(r" (?=\d)", "\x00", text), 86)
+    return [line.replace("\x00", " ") for line in lines]
 
 
 # The possible cuts' playlist (DESIGN.md, Shot detection): "an entry per possible cut starting a

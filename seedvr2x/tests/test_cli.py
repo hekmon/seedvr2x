@@ -50,6 +50,18 @@ def test_numz_padding_not_an_option(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.NUMZ_PADDING not in shown and "padding" not in shown.lower()
 
 
+def test_cuts_help_says_how_its_frames_are_counted(capsys: pytest.CaptureFixture[str]) -> None:
+    # A cut list's frame numbers are places (media/grid.py): said where --cuts is read about, a
+    # list numbered by a tool that counts decoded frames being off by the holes before each cut.
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    shown = " ".join(capsys.readouterr().out.split())
+    assert (
+        "as --plan writes it; frame numbers count the source's frames as seedvr2x counts them, a"
+        " missing frame's filled place among them; in place of the shot detector" in shown
+    )
+
+
 def test_too_small_to_pad_refused_before_the_first_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

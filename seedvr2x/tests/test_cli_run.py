@@ -5108,9 +5108,25 @@ def test_plan_and_run_of_a_source_with_missing_frames(
     assert index.probabilities[3:8].tolist() == SCRIPT[[3, 3, 3, 4, 5]].tolist()
     whole = scan(full).index
     assert whole is not None and whole.frames == 27
-    lines = plan.read_text().splitlines()
-    assert lines[0] == "# seedvr2x cut list of holes.mkv: 27 frames at 24000/1001 fps"
-    assert lines[2] == "# Found: 3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3"
+    # Its header says that its frames count places, and what was filled (cuts.places_note): a
+    # list numbered by a tool that counts decoded frames would cut at 5, 15 and 22.
+    assert plan.read_text().splitlines()[:-5] == [
+        "# seedvr2x cut list of holes.mkv: 27 frames at 24000/1001 fps",
+        f"# Shot detector: TransNetV2, {pull.DETECTOR} (SHA-256 e3b0c442), threshold 0.3",
+        "# Found: 3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3",
+        "#",
+        "# A line per cut: the frame it cuts at, the first frame of a shot, counted from zero;",
+        "# the shot detector's peak probability, on the frame before it; the time of that frame",
+        "# from the source's start, H:MM:SS.mmm, as a player shows it. seedvr2x reads the frame",
+        "# number alone. A possible cut is a commented line: checking it is a jump to its time in",
+        "# a player.",
+        "# Frame numbers count places, the missing frames' filled ones among them: 2 frames",
+        "# missing after frame 4, 27 places for 25 frames decoded. A list numbered by a tool that",
+        "# counts the decoded frames is off by the holes before each cut, its number lower by the",
+        "# frames missing before it.",
+        "# Uncomment a possible cut to keep it, delete a line to drop a cut, then run with --cuts",
+        "# FILE, this file.",
+    ]
     assert cut_lines(plan) == [
         f"7 0.899 {timecode(time_of(whole, 7))}",
         f"# 12 0.200 {timecode(time_of(whole, 12))}",
