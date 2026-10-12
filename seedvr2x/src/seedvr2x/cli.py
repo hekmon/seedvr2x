@@ -1014,33 +1014,72 @@ def _refused(error: BaseException) -> str:
 
 def _directory_refused(path: Path) -> str:
     """Why a directory is no input, and what to give instead (DESIGN.md, Input, the user's
-    decision of 2026-10-05)."""
+    decision of 2026-10-05; "The advice names a join by ffmpeg alone that holds the grid, tested
+    with that rule"): the file its segments were split from, or their join on the frame grid,
+    each way with its command (rate.grid_join), the directory in them as a shell takes it."""
+    from seedvr2x.media import rate
+
     # The source is the only gateway, so that every cut comes from seedvr2x's own detection or a
     # cut list, and every output segment from its rules, never from an outside splitter's joins:
     # of an earlier split's 411 joins, 63 scored under scdet's threshold of 10 and 14 under 4
-    # (research/docs/scene-detection.md). The joins given, checked with ffmpeg n9.0.2 on a
-    # 2,400-frame FFV1 master at 24000/1001 cut as sptenc's split cuts one (stream copy, the
-    # segment muxer, timestamps reset) into 156 Matroska segments: each gives every frame back,
-    # identical (framemd5) and in order. ffmpeg's concat demuxer starts each segment where the one
-    # before ends by its declared duration, its last timestamp plus its packets' 41 ms, where a
-    # frame lasts 41.708: 1 ms early at each of the 155 joins, the last frame 155 ms early. That
-    # is not the drift sptenc's ffmpeg/concat.go describes, of encoded segments counting their
-    # last frame for 42 ms, late. The frames stay 41 or 42 ms apart, which the first pass
-    # accepts, and the output is written at the declared rate, frame by frame, the drift warned
-    # of once a frame lies half a frame off that rate's timeline (source._strays); but a default
-    # read by ffmpeg (vfr) drops 3 of the 2,400 frames. sptenc's concat, with a duration line
-    # per segment and every timestamp snapped to the frame grid (ffmpeg/concat.go), gives the
-    # master's timestamps back, every one.
+    # (research/docs/scene-detection.md).
+    #
+    # The joins, measured with ffmpeg n9.0.2 (2026-10-10) on 320x180 masters whose pictures
+    # carry their number: 5,199 frames in 128 segments of 12 to 102 at 24000/1001, 25 and
+    # 30000/1001, and 2,517 in 120 segments of 1 to 300, 45 of them one frame, at 24000/1001.
+    # The segments: FFV1 split by stream copy, as sptenc's split cuts (the segment muxer,
+    # timestamps reset), and each encoded on its own, FFV1, H.264 (libx264: its default
+    # B-frames, preset slow, none), HEVC (libx265) and MPEG-2 (two B-frames) in Matroska, H.264
+    # and HEVC in MP4, MPEG-2 in a program and a transport stream, H.264 with AAC audio in both
+    # containers; at 25 and 30000/1001, FFV1 and H.264 alone. Each join checked for every
+    # picture in order (framemd5, and the numbers read back), every timestamp against its
+    # frame's time at the rate rounded to the time base, sptenc's rule, the timestamps' order,
+    # ffmpeg's warnings, and seedvr2x's own first pass.
+    #
+    # The plain join, ffmpeg's concat demuxer and a stream copy, starts each segment where the
+    # one before ends by its declared duration, which Matroska keeps in milliseconds: every
+    # picture in order, but at 24000/1001 0.77 ms early a join for split segments, half a frame
+    # off after 24 joins, and 0.31 ms late for segments encoded on their own, whatever the
+    # codec, after 68; at 30000/1001, 0.35 and 0.37 ms early, after 41 and 45; none at 25, a
+    # frame lasting whole milliseconds, nor from MP4 segments, whose durations are exact. A
+    # 2,400-frame FFV1 master at 24000/1001 split into 156 segments came back 1 ms early at each
+    # of the 155 joins, the last frame 155 ms early, and a default read of it by ffmpeg (vfr)
+    # dropped 3 frames. Such a join was read until 2026-10-10 and is refused since, once a frame
+    # lies half a frame off (source._leaves). The demuxer's input option -r changes nothing in
+    # a stream copy, and it takes no -framerate.
+    #
+    # The join advised, a duration line a segment and every timestamp snapped (sptenc's method,
+    # its ffmpeg/concat.go): every picture in order and every timestamp the master's, to the
+    # tick, on each Matroska and MP4 material, both sets of segments, the three rates, and on
+    # the transport streams of 12 frames and more; in MP4, across segments of one or two frames,
+    # ffmpeg warned 39 times of a decoding timestamp it then set right. Durations without the
+    # snap leave the frames of segments encoded on their own 41 to 43 ms apart at 24000/1001,
+    # and those of split ones 33 to 35 at 30000/1001, a variable rate, refused; the snap without
+    # durations, on the plain join's timestamps, puts a frame that drifted half a frame on its
+    # neighbour's place. A second stream copy of the plain join that counts each packet's
+    # distance from the one before in frames held as widely, without the durations, for a whole
+    # second copy of the film (rate.grid_join). Typed as the message gives it, at 24000/1001 on
+    # the FFV1, H.264, HEVC and MPEG-2 Matroska segments, 128 of each, and on H.264's at 25 and
+    # 30000/1001: the same, and read by the first pass, where the plain join of each of those
+    # at 24000/1001 and 30000/1001 is refused.
+    #
+    # No stream copy held on Matroska segments with audio, the video's timestamps coming out 0
+    # to 84 ms apart (in MP4 with audio the video held and the audio's timestamps were changed
+    # at 18 joins); nor on transport stream segments of a single frame, whose timestamps ffmpeg
+    # doesn't find (of two, three and four frames, on the grid: 64x48 pictures, 2026-10-12);
+    # nor on program streams, whose packets without a timestamp stop Matroska's muxer, 567 of
+    # 5,199 frames written, ffmpeg failing: -fflags +genpts joined those right, and 29 smaller
+    # ones with 1 frame of 812 out of place, so it isn't advised. The remake held on all 31
+    # materials, typed as the message gives it on the segments with audio and the single-frame
+    # transport streams, the audio left out.
     return (
         f"{path}: a directory; seedvr2x takes one video file, the source, so that every cut comes"
         " from its own detection or a cut list (--cuts), and every output segment from its rules."
-        " Give it the file the segments were split from, or join segments split losslessly back"
-        " into one file first, with ffmpeg's concat demuxer, which needs no other tool: ffmpeg -f"
-        " concat -i list.txt -c copy joined.mkv, list.txt beside them naming each in order, one"
-        " line each: file 'seg_000000.mkv'. seedvr2x reads every frame of that join, but its"
-        " timestamps drift off the frame grid, and other tools may drop frames. Segments of"
-        " sptenc's split can also be joined by sptenc, on the grid:"
-        f" sptenc concat {shlex.quote(str(path))} joined.mkv"
+        " Give it the file the segments were split from, or join the segments back into one file"
+        " first so that every frame keeps its place on the frame grid,"
+        f" {rate.grid_join(shlex.quote(str(path)))}. A plain join by ffmpeg's concat demuxer, -f"
+        " concat -c copy alone, can drift off the grid, up to 1 ms a join, and is refused once a"
+        " frame lies half a frame off its place"
     )
 
 

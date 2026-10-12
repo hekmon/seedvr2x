@@ -23,7 +23,7 @@ from test_probe import (
 )
 
 from seedvr2x import cli
-from seedvr2x.media import ffmpeg
+from seedvr2x.media import ffmpeg, rate
 from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.writer import FFV1Writer, Tags
 
@@ -292,9 +292,14 @@ sys.exit(3 if "torch" in sys.modules else status)
 
 def test_directory_refused_first(tmp_path: Path) -> None:
     # The source is the only input (DESIGN.md, Input): a directory of segments is refused before
-    # anything is done, the build's check included, saying how to join them; nothing is written,
-    # neither output, nor an output directory. The directory's name needs quoting for a shell, a
-    # space and an apostrophe, so that the sptenc command the message gives is checked quoted.
+    # anything is done, the build's check included, saying how to join them on the frame grid,
+    # the advice whole, the one a drifted join's refusal gives (rate.grid_join; what its
+    # commands give is tests/test_rate.py's): by ffmpeg alone first, then by sptenc, then the
+    # remake where no stream copy holds; nothing is written, neither output, nor an output
+    # directory. The directory's name needs quoting for a shell, a space and an apostrophe, so
+    # that the commands the message gives are checked quoted; the rate, which the refusal can't
+    # know, an example said to be one; and the plain join, the advice until 2026-10-11, said to
+    # be refused once it has drifted.
     segments = tmp_path / "the film's segments"
     segments.mkdir()
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
@@ -309,13 +314,32 @@ def test_directory_refused_first(tmp_path: Path) -> None:
         said = f"{segments}: a directory; seedvr2x takes one video file, the source, so that"
         assert said in result.stderr
         assert "its own detection or a cut list (--cuts), and every output segment" in result.stderr
-        joined = "ffmpeg -f concat -i list.txt -c copy joined.mkv, list.txt beside them naming"
-        assert joined in result.stderr
-        # sptenc's join, on the frame grid, an option: seedvr2x never requires sptenc. The path as
-        # shlex.quote gives it, one word for a shell, its apostrophe written '"'"'.
+        # The path as shlex.quote gives it, one word for a shell, its apostrophe written '"'"'.
         quoted = f"'{tmp_path}/the film'\"'\"'s segments'"
-        sptenc = f"joined by sptenc, on the grid: sptenc concat {quoted} joined.mkv"
-        assert sptenc in result.stderr
+        advice = (
+            " Give it the file the segments were split from, or join the segments back into one"
+            " file first so that every frame keeps its place on the frame grid,"
+            f" {rate.grid_join(quoted)}. A plain join by ffmpeg's concat demuxer, -f concat -c"
+            " copy alone, can drift off the grid, up to 1 ms a join, and is refused once a frame"
+            " lies half a frame off its place\n"
+        )
+        assert result.stderr.endswith(advice)
+        assert "with ffmpeg alone, each segment listed with its exact duration" in advice
+        assert f"cd {quoted} && N=24000 D=1001 && for f in *.mkv; do" in advice
+        assert "N/D their frame rate, 24000/1001 here), or with sptenc, for" in advice
+        # What both commands ask of the segments' names, listed by the shell's *.mkv.
+        names = (
+            "(*.mkv the segments' names, taken in name order, which must be the order they play"
+            " in: numbers with leading zeros, as seg_000012.mkv, seg_10.mkv coming before"
+            " seg_2.mkv otherwise; check list.txt, or write it by hand; a name must hold no"
+            " apostrophe"
+        )
+        assert advice.count(names) == 2
+        assert f"../joined.mkv {names}; N/D their" in advice
+        assert f"../remade.mkv {names}). A plain join by" in advice
+        # sptenc's join an option: seedvr2x never requires sptenc.
+        assert f"sptenc concat {quoted} joined.mkv, which snaps every timestamp" in advice
+        assert "-c copy joined.mkv" not in result.stderr and "drift" not in rate.grid_join()
         assert sorted(tmp_path.rglob("*")) == files
 
 

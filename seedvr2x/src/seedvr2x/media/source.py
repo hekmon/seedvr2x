@@ -844,16 +844,22 @@ def _way_out(on: Timeline, index: FrameIndex) -> str:
     shorter or longer than its timestamps' own time, and the two fixes at the rate named
     (_fixes; DESIGN.md, Input: "When the timestamps follow another rate").
 
-    No one rate's exactly: what a join by ffmpeg's concat demuxer gives, each segment starting
-    where the one before ends by its declared duration, about 1 ms early a join for segments
-    split by stream copy (cli._directory_refused: 155 ms over 155 joins; 24.5 ms over 29 joins
-    of 20 frames). Timestamps alone can't tell such a join from a retagged file (DESIGN.md,
+    No one rate's exactly: what a plain join by ffmpeg's concat demuxer gives, each segment
+    starting where the one before ends by its declared duration, 0.77 to 1 ms early a join at
+    24000/1001 for segments split by stream copy, 0.31 ms late for segments encoded on their own
+    (cli._directory_refused: 155 ms over 155 joins; 24.5 ms over 29 joins of 20 frames; 39 ms
+    over 127 joins of encoded segments). Timestamps alone can't tell such a join from a retagged
+    file (DESIGN.md,
     Input: "When the timestamps follow no rate exactly"): the same join every 20 or 24 frames
     lies within 1.7 and 1.3 ms of 24/1's timeline, and 24.03 fps declared 24/1, rounded to
     milliseconds, is no rate's exactly either (rate.exact), nor is a file of a few frames that
-    several rates hold so. Its ways out are a join that keeps the frame grid (rate.grid_join)
-    and the remake at the rate declared, which numbers the frames as they come, the place each
-    had before the join. --frame-rate is no way out and isn't named: no rate is the frames' own
+    several rates hold so. Its ways out are a join that keeps the frame grid (rate.grid_join,
+    its commands at the rate declared, the segments' own) and the remake at the rate declared,
+    which numbers the frames as they come, the place each had before the join: the remake of
+    such a join gave every frame back in order, on the grid, for each kind of segment whose
+    plain join was whole (cli._directory_refused's materials, 29 of 31: a program stream's
+    segments and a transport stream's of one frame joined into no whole file). --frame-rate is
+    no way out and isn't named: no rate is the frames' own
     there, and one that holds them within half a frame, as 24/1 holds those joins, would take
     frames meant for 24000/1001 at 24."""
     declares = on.rate
@@ -868,11 +874,11 @@ def _way_out(on: Timeline, index: FrameIndex) -> str:
     command = rate.remake(declares, rate.first_time(index))
     return (
         "its timestamps follow no one rate exactly: a file joined by ffmpeg's concat demuxer"
-        " drifts so, about 1 ms a join, and timestamps alone can't tell a drifting join from a"
-        " retagged file: a bad file, not read on a guess: join its segments again so that every"
-        f" frame keeps its place on the frame grid, {rate.grid_join()}; or remake it at the rate"
-        " it declares, an FFV1 master numbering its frames at that rate as they come, every one"
-        f" kept, its other streams copied ({REMAKE_COST}), with {command}"
+        " alone drifts so, up to 1 ms a join, and timestamps alone can't tell a drifting join"
+        " from a retagged file: a bad file, not read on a guess: join its segments again so that"
+        f" every frame keeps its place on the frame grid, {rate.grid_join(declares=declares)};"
+        " or remake it at the rate it declares, an FFV1 master numbering its frames at that rate"
+        f" as they come, every one kept, its other streams copied ({REMAKE_COST}), with {command}"
     )
 
 

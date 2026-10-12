@@ -31,7 +31,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import replace
 from fractions import Fraction
-from itertools import pairwise
+from itertools import accumulate, pairwise
 from pathlib import Path
 
 import numpy as np
@@ -537,23 +537,59 @@ def no_rate(declares: Fraction) -> str:
     remake at the rate it declares, the first frame at the file's start; never --frame-rate."""
     return (
         "its timestamps follow no one rate exactly: a file joined by ffmpeg's concat demuxer"
-        " drifts so, about 1 ms a join, and timestamps alone can't tell a drifting join from a"
-        " retagged file: a bad file, not read on a guess: join its segments again so that every"
-        f" frame keeps its place on the frame grid, {rate.grid_join()}; or remake it at the rate"
-        " it declares, an FFV1 master numbering its frames at that rate as they come, every one"
-        " kept, its other streams copied (lossless, so large: 0.53-0.55 MB a frame on a 1080p"
-        f" film; and a full encode), with {rate.remake(declares, Fraction(0))}"
+        " alone drifts so, up to 1 ms a join, and timestamps alone can't tell a drifting join"
+        " from a retagged file: a bad file, not read on a guess: join its segments again so that"
+        f" every frame keeps its place on the frame grid, {rate.grid_join(declares=declares)};"
+        " or remake it at the rate it declares, an FFV1 master numbering its frames at that rate"
+        " as they come, every one kept, its other streams copied (lossless, so large: 0.53-0.55"
+        " MB a frame on a 1080p film; and a full encode), with"
+        f" {rate.remake(declares, Fraction(0))}"
     )
 
 
 def test_the_join_that_keeps_the_frame_grid() -> None:
-    # The advice of a join on the frame grid, in one place (rate.grid_join): sptenc's concat,
-    # with the segments' directory when the refusal knows it.
-    assert rate.grid_join() == (
-        "with sptenc, for segments of its split, sptenc concat DIR joined.mkv, which snaps every"
-        " timestamp to the grid"
+    # The advice of a join on the frame grid, in one place (rate.grid_join), whole: by ffmpeg
+    # alone first, seedvr2x never needing sptenc, a shell's lines listing each segment with its
+    # exact duration and one stream copy snapping every timestamp; then sptenc's concat; then,
+    # where no stream copy holds, the remake of the segments' pictures. With the segments'
+    # directory and their rate when the refusal knows them, DIR and 24000/1001, said to be an
+    # example, when it doesn't. After each command that lists the segments by the shell's
+    # *.mkv, what that asks of their names: name order their playing order, and no apostrophe
+    # (test_the_join_advised_takes_the_segments_in_name_order). What the commands give is
+    # test_the_join_advised_keeps_every_frame_on_the_grid's.
+    snapped = "'if(eq({0},NOPTS),NOPTS,round(round({0}*TB*$N/$D)*$D/TB/$N))'"
+    listed = (
+        'for f in *.mkv; do echo "file \'$f\'"; echo "duration $(ffprobe -v error'
+        " -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0"
+        ' "$f" | awk -v n=$N -v d=$D \'NR==1{printf "%.6f", $1*d/n}\')"; done > list.txt'
     )
-    assert "sptenc concat 'my segments' joined.mkv" in rate.grid_join(shlex.quote("my segments"))
+    names = (
+        "*.mkv the segments' names, taken in name order, which must be the order they play in:"
+        " numbers with leading zeros, as seg_000012.mkv, seg_10.mkv coming before seg_2.mkv"
+        " otherwise; check list.txt, or write it by hand; a name must hold no apostrophe"
+    )
+    assert rate.grid_join() == (
+        "with ffmpeg alone, each segment listed with its exact duration, its frames over the"
+        " rate, and every timestamp snapped to the grid in one stream copy: cd DIR && N=24000"
+        f" D=1001 && {listed} && ffmpeg -f concat -safe 0 -i list.txt -c copy -bsf:v"
+        f' "setts=pts={snapped.format("PTS")}:dts={snapped.format("DTS")}" ../joined.mkv'
+        f" ({names}; N/D their frame rate, 24000/1001 here), or with sptenc,"
+        " for segments of its split, sptenc concat DIR joined.mkv, which snaps every timestamp"
+        " to the grid, or, where no stream copy holds, for segments that carry audio, MPEG"
+        " program streams, or transport streams of a single frame, their pictures remade as an"
+        " FFV1 master, numbered at that rate as they come, every one kept: cd DIR && for f in"
+        " *.mkv; do echo \"file '$f'\"; done > list.txt && ffmpeg -f concat -safe 0 -r"
+        " 24000/1001 -i list.txt -map 0:v:0 -c:v:0 ffv1 -level:v:0 3 -g:v:0 1 -slicecrc:v:0 1"
+        f" -fps_mode:v:0 passthrough ../remade.mkv ({names})"
+    )
+    known = rate.grid_join(shlex.quote("my segments"), Fraction(30000, 1001))
+    assert "sptenc concat 'my segments' joined.mkv" in known
+    assert known.count("cd 'my segments' && ") == 2 and "DIR" not in known
+    assert "cd 'my segments' && N=30000 D=1001 && for f in" in known
+    assert "N/D their frame rate), or with sptenc" in known and " here" not in known
+    assert known.count(f"({names}") == 2 and known.endswith(f"../remade.mkv ({names})")
+    assert "-safe 0 -r 30000/1001 -i list.txt -map 0:v:0" in known and "24000" not in known
+    assert "N=25 D=1 &&" in rate.grid_join(declares=Fraction(25))
 
 
 @needs_ffmpeg
@@ -1543,6 +1579,237 @@ def test_a_join_at_every_frame_off_the_grid_refused(tmp_path: Path) -> None:
         examine(path)
     drifted = leaves("938 of its 1530", "30, up to 21.5 ms (0.51", "24000/1001")
     assert str(refused.value) == f"{path}: {drifted}, and {no_rate(NTSC_FILM)}"
+
+
+# 30 segments of unequal lengths, 813 frames: of 24 and 48 frames first, the lengths a plain join
+# drifts fastest on at 24000/1001, where they last whole milliseconds and their lossless split
+# declares one less, 1 ms early a join and half a frame after 21 (30 segments of 1 to 47 frames
+# drifted 19.4 ms, under it); then short ones, down to a single frame.
+LENGTHS = [24, 48, 24, 24, 48, 24, 48, 24, 24, 24, 48, 24, 24, 48, 24, 24, 24, 48, 24, 48]
+LENGTHS += [24, 24, 48, 24, 1, 2, 3, 20, 7, 12]
+
+# What encodes a segment on its own, by codec, as an encoder run per segment does: two B-frames
+# between the others, always, so that every segment long enough stores its frames out of order.
+# FFV1's segments are the lossless split's own.
+ENCODERS: dict[str, tuple[str, ...]] = {
+    "ffv1": (),
+    "h264": ("-c:v", "libx264", "-crf", "18", "-x264-params", "bframes=2:b-adapt=0"),
+    "hevc": ("-c:v", "libx265", "-x265-params", "log-level=error:bframes=2:b-adapt=0"),
+    "mpeg2": ("-c:v", "mpeg2video", "-bf", "2", "-q:v", "3"),
+}
+
+
+def segments(
+    directory: Path,
+    fps: str,
+    codec: str,
+    suffix: str = "mkv",
+    lengths: Sequence[int] = LENGTHS,
+    audio: bool = False,
+) -> tuple[Path, list[str]]:
+    """A directory of segments as a refusal finds one: an FFV1 master of sum(lengths) frames at
+    `fps`, beside `directory`, split losslessly into segments of `lengths` frames (the segment
+    muxer, timestamps reset), in `directory`, each then encoded on its own with ENCODERS[codec]
+    where it has an encoder, in a `suffix` file, with a tone in AAC for `audio`. The master's
+    path, and the pictures of every segment decoded on its own, in order (pictures)."""
+    master = directory.parent / "master.mkv"
+    run(
+        *("-f", "lavfi", "-i", f"testsrc2=s=64x48:r={fps}", "-frames:v", str(sum(lengths))),
+        *("-c:v", "ffv1", "-g", "1", str(master)),
+    )
+    encoder = ENCODERS[codec]
+    split = directory if not encoder else directory.parent / "split"
+    split.mkdir()
+    run(
+        *("-i", str(master), "-map", "0:v", "-c", "copy", "-f", "segment"),
+        *("-reset_timestamps", "1", "-segment_frames"),
+        ",".join(str(cut) for cut in list(accumulate(lengths))[:-1]),
+        str(split / "seg_%06d.mkv"),
+    )
+    if not encoder:
+        return master, pictures(master)
+    directory.mkdir()
+    tone = ("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000") * audio
+    sound = ("-map", "1:a:0", "-shortest", "-c:a", "aac", "-b:a", "96k") * audio
+    seen: list[str] = []
+    for k in range(len(lengths)):
+        encoded = directory / f"seg_{k:06d}.{suffix}"
+        run(
+            *("-i", str(split / f"seg_{k:06d}.mkv"), *tone, "-map", "0:v:0", *sound),
+            *(*encoder, "-threads", "1", str(encoded)),
+        )
+        seen += pictures(encoded)
+    return master, seen
+
+
+def typed(said: str, made: str) -> None:
+    """The shell's lines a refusal `said` gives to make `made`, from their cd on, typed as
+    they are."""
+    end = said.index(made) + len(made)
+    lines = said[said.rindex("cd ", 0, end) : end]
+    result = subprocess.run(["sh", "-c", lines], stdin=subprocess.DEVNULL, capture_output=True)
+    assert result.returncode == 0, result.stderr.decode()
+
+
+def stored(path: Path) -> list[int]:
+    """The pts of the packets of path's first video stream, in the order stored."""
+    probe = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts"]
+    probed = subprocess.run(
+        [*probe, "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True
+    )
+    return [int(line.split(",")[0]) for line in probed.stdout.split()]
+
+
+def placed(index: FrameIndex | None) -> list[int]:
+    """Each frame's pts counted from the first frame's, as the frame grid is (DESIGN.md, Input:
+    "counted from the first frame")."""
+    assert index is not None
+    return (index.pts - index.pts[0]).tolist()
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("codec", "fps", "suffix", "plain"),
+    [
+        ("ffv1", "24000/1001", "mkv", "refused"),
+        ("ffv1", "25", "mkv", "holds"),
+        ("ffv1", "30000/1001", "mkv", "drifts"),
+        ("h264", "24000/1001", "mkv", "drifts"),
+        ("hevc", "24000/1001", "mkv", "drifts"),
+        ("mpeg2", "24000/1001", "mkv", "drifts"),
+        ("mpeg2", "24000/1001", "ts", "variable frame rate: frames last from 21 to 42 ms"),
+    ],
+)
+def test_the_join_advised_keeps_every_frame_on_the_grid(
+    tmp_path: Path, codec: str, fps: str, suffix: str, plain: str
+) -> None:
+    # The join by ffmpeg alone that a refusal advises (rate.grid_join), typed as the message
+    # gives it, the directory quoted for a shell, an apostrophe in it, and the rate filled in:
+    # on 30 segments of unequal lengths, some of one, two and three frames, FFV1 split
+    # losslessly, and H.264, HEVC and MPEG-2 each encoded on its own with two B-frames, their
+    # frames stored out of order, in Matroska; and MPEG-2 in transport streams, none of a single
+    # frame, the message's *.mkv their names. Every picture of every segment, in order, the
+    # file read (examine), each frame at the place it has in the master the segments were cut
+    # from, to the tick. The plain join of the same segments, ffmpeg's concat demuxer and a
+    # stream copy alone: at 24000/1001, split segments 26.5 ms early by the end, refused, its
+    # refusal naming this join at the rate it declares, the same lines but for the directory;
+    # those encoded on their own 1.25 ms late, read, and transport streams 21.6 ms early, their
+    # frames 21 to 42 ms apart, refused as a variable rate; at 30000/1001, 14.4 ms early, under
+    # half a frame, read; at 25, a frame lasting whole milliseconds, on the grid.
+    encoder = ENCODERS[codec]
+    if encoder and not has_encoder(encoder[1]):
+        pytest.skip(f"needs ffmpeg with {encoder[1]}")
+    declares = Fraction(fps)
+    lengths = [length for length in LENGTHS if length > 1 or suffix != "ts"]
+    directory = tmp_path / "the film's segments"
+    master, seen = segments(directory, fps, codec, suffix, lengths)
+    original = scan(master).index
+    assert original is not None and len(seen) == original.frames == sum(lengths)
+    quoted = shlex.quote(str(directory))
+    said = rate.grid_join(quoted, declares)
+    listed = directory / "plain.txt"
+    listed.write_text("".join(f"file 'seg_{k:06d}.{suffix}'\n" for k in range(len(lengths))))
+    alone = tmp_path / "plain.mkv"
+    run("-f", "concat", "-safe", "0", "-i", str(listed), "-c", "copy", str(alone))
+    if plain in ("holds", "drifts"):
+        assert (placed(examine(alone).index) == placed(original)) == (plain == "holds")
+    else:
+        with pytest.raises(MediaError) as refused:
+            examine(alone)
+        if plain != "refused":
+            only = "and only a constant frame rate is supported"
+            assert str(refused.value) == f"{alone}: {plain}, {only}"
+        else:
+            drifted = leaves("132 of its 813", "672, up to 26.5 ms (0.63", fps)
+            assert str(refused.value) == f"{alone}: {drifted}, and {no_rate(declares)}"
+            assert rate.grid_join(declares=declares).replace("DIR", quoted) == said
+    typed(said.replace("*.mkv", f"*.{suffix}"), "../joined.mkv")
+    joined = tmp_path / "joined.mkv"
+    assert pictures(joined) == seen
+    source = examine(joined)
+    assert (source.frames, source.frame_rate) == (sum(lengths), declares)
+    assert placed(source.index) == placed(original)
+    order = stored(joined)
+    assert (order != sorted(order)) == bool(encoder)
+
+
+@needs_ffmpeg
+def test_the_join_advised_takes_the_segments_in_name_order(tmp_path: Path) -> None:
+    # Why the message says what its commands ask of the segments' names. 12 segments of 20
+    # frames named seg_1.mkv to seg_12.mkv, the join and the remake typed as the message gives
+    # them: the shell lists them by name, seg_10, seg_11 and seg_12 before seg_2, and so are
+    # they joined, every frame on the grid, read without a word, the pictures out of order (a
+    # review's finding, 2026-10-12). Named with leading zeros, as the message says: the
+    # master's pictures, in order.
+    directory = tmp_path / "segments"
+    master, seen = segments(directory, "24000/1001", "ffv1", lengths=[20] * 12)
+    original = scan(master).index
+    assert original is not None and len(seen) == original.frames == 240
+    for k in range(12):
+        (directory / f"seg_{k:06d}.mkv").rename(directory / f"seg_{k + 1}.mkv")
+    said = rate.grid_join(shlex.quote(str(directory)), NTSC_FILM)
+    by_name = [0, 9, 10, 11, 1, 2, 3, 4, 5, 6, 7, 8]
+    shuffled = [seen[20 * k + frame] for k in by_name for frame in range(20)]
+    assert shuffled != seen and sorted(shuffled) == sorted(seen)
+    for made in ("joined.mkv", "remade.mkv"):
+        typed(said, f"../{made}")
+        assert pictures(tmp_path / made) == shuffled
+        source = examine(tmp_path / made)
+        assert (source.frames, source.frame_rate) == (240, NTSC_FILM)
+        assert placed(source.index) == placed(original)
+        (tmp_path / made).unlink()
+    for k in range(12):
+        (directory / f"seg_{k + 1}.mkv").rename(directory / f"seg_{k + 1:06d}.mkv")
+    for made in ("joined.mkv", "remade.mkv"):
+        typed(said, f"../{made}")
+        assert pictures(tmp_path / made) == seen
+        assert placed(examine(tmp_path / made).index) == placed(original)
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("codec", "suffix", "audio", "copied"),
+    [
+        ("h264", "mkv", True, "variable frame rate: frames last from 0 to 84 ms"),
+        ("mpeg2", "mpg", False, "Can't write packet with unknown timestamp"),
+        ("mpeg2", "ts", False, "its timestamps jump at frame 769, from 33.450 to 32.074 s"),
+    ],
+    ids=["audio in Matroska", "program streams", "a transport stream of one frame"],
+)
+def test_segments_no_stream_copy_holds_are_remade(
+    tmp_path: Path, codec: str, suffix: str, audio: bool, copied: str
+) -> None:
+    # The segments a refusal says no stream copy holds (rate.grid_join), the same 30, at
+    # 24000/1001: H.264 with an AAC stream in Matroska, the join advised for the others giving
+    # frames 0 to 84 ms apart, refused; MPEG-2 in program streams, whose packets without a
+    # timestamp stop Matroska's muxer, ffmpeg failing; and in transport streams, one of them a
+    # single frame, where ffmpeg finds no timestamp, the join jumping back there, refused. Their
+    # remake, typed as the message gives it, *.mkv the segments' names: every picture of every
+    # segment in order, read (examine), each frame at its place in the master they were cut
+    # from, to the tick.
+    encoder = ENCODERS[codec]
+    if not has_encoder(encoder[1]):
+        pytest.skip(f"needs ffmpeg with {encoder[1]}")
+    directory = tmp_path / "the film's segments"
+    master, seen = segments(directory, "24000/1001", codec, suffix, audio=audio)
+    original = scan(master).index
+    assert original is not None and len(seen) == original.frames == sum(LENGTHS)
+    said = rate.grid_join(shlex.quote(str(directory)), NTSC_FILM).replace("*.mkv", f"*.{suffix}")
+    joined = tmp_path / "joined.mkv"
+    if suffix == "mpg":
+        with pytest.raises(AssertionError, match=copied):
+            typed(said, "../joined.mkv")
+    else:
+        typed(said, "../joined.mkv")
+        with pytest.raises(MediaError) as refused:
+            examine(joined)
+        assert str(refused.value).startswith(f"{joined}: {copied}")
+    typed(said, "../remade.mkv")
+    remade = tmp_path / "remade.mkv"
+    assert pictures(remade) == seen
+    source = examine(remade)
+    assert (source.frames, source.frame_rate) == (sum(LENGTHS), NTSC_FILM)
+    assert placed(source.index) == placed(original)
 
 
 @needs_ffmpeg
