@@ -356,7 +356,19 @@ def _copied(
 
 class Inputs:
     """The source's frames, read in order, each checked against the frame index (Reader). A reader
-    is opened at the first frame asked, and finished once every frame is read, its count checked.
+    is opened at the first frame asked, and finished as the source's last frame is read, the
+    source's end checked there (Reader.finish: ffmpeg done, with no error and no frame more than
+    the first pass counted): by the read that gives the last frame, so before its caller records
+    anything made of it, the last shot's latent or its input copy made again, and so before that
+    shot's windows and the job's last segment. A source that fails the check leaves the last shot
+    unread: the same command reads it again, and checks again. Until 2026-10-12 the end was
+    checked once the job had run, its last segment recorded: the next run then said a
+    directory's job finished, or assembled a .mkv path's file, short of the frame the source
+    gave beyond its count (a finding of milestone 6's wiring).
+    PROVISIONAL (implementation, 2026-10-12, a question for design, which decided "the check
+    comes before the last segment is recorded"): before the last shot's latent, earlier than
+    asked. Checked between that shot's windows and its segment's record, a failed run would keep
+    the windows, and the next would decode them, never reading the source, so never checking it.
     Frames not asked for, those of shots a resume skips, are never decoded: the next frame asked
     is reached through the frame index, a reader opened there (DESIGN.md, Pause and resume). A run
     reading every shot from the source's first frame keeps one reader from the start, which seeks
@@ -395,6 +407,8 @@ class Inputs:
             if frames.shape[0] != count:
                 raise MediaError(f"{path}: the stream ended after {reader.position} frames")
             self._position += count
+            if self._position == self._source.frames:
+                self._close(finish=True)  # the source's end, before what is made of these frames
             return to_float32(frames)
 
         return read

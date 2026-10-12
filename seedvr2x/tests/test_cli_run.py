@@ -3489,6 +3489,69 @@ def test_frames_left_after_the_last(
     assert f"decoding with ffmpeg: frames left after {FRAMES - 1}" in caplog.text
 
 
+def understating(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From now on, a first pass that misses the source's last frame: its count one short, and
+    its frame index a row, so that the record is one a resume trusts. What a source that gives
+    a frame more at a read than it gave the first pass looks like to the run."""
+    from seedvr2x.media import source as examined
+
+    scan = examined.scan
+
+    def missed(path: Path, *detector: Any) -> object:
+        found = scan(path, *detector)
+        index = found.index
+        assert index is not None and index.probabilities is None
+        short = replace(index, pts=index.pts[:-1], crc32=index.crc32[:-1], error=index.error[:-1])
+        return replace(found, frames=found.frames - 1, index=short)
+
+    monkeypatch.setattr(examined, "scan", missed)
+
+
+@pytest.mark.parametrize(
+    ("output", "correction"),
+    [("out", "none"), ("one.mkv", "none"), ("out", "split")],
+)
+def test_end_of_source_checked_before_the_last_shot_is_recorded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    output: str,
+    correction: str,
+) -> None:
+    # The source's end is checked as its last frame is read (run.Inputs), before anything made
+    # of that read is recorded: the last shot's latent, so its windows and its segment. A source
+    # giving a frame more than the first pass counted fails the run there, the last shot not
+    # encoded and the last segment unfinished, where the check came after the last segment was
+    # recorded: a directory's job was then finished, the next run saying so, exit 0, and a .mkv
+    # path's next run assembled a file a frame short. The same command reads the shot again and
+    # fails again, for as long as the source gives that frame: no file, no "finished already".
+    # With split, the shot's input copy, recorded with its latent, isn't kept either.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    understating(monkeypatch)
+    directory = tmp_path / ("out" if output == "out" else "one.mkv.work")
+    left = "decoding with ffmpeg: frames left after 24"
+    kept = "stopped: 1 of 2 segments finished, and the units of the next ones kept"
+    made = [*("encode 0", "window 0:0", "encode 3", "window 3:0", "decode 0", "decode 3")]
+    for calls in (made, []):
+        steps.calls.clear()
+        caplog.clear()
+        options = (*JOB, "--color-correction", correction)
+        assert upscale(tmp_path, source_path, output, *options) == 1
+        assert f"{left}; {kept}" in caplog.text
+        # The read of the last shot's frames fails, its encode given none: nothing kept of it.
+        assert steps.calls == calls and sorted(steps.read) == [0, 3]
+        content = json.loads((directory / "manifest.json").read_text())
+        assert content["input"]["frames"] == 24
+        assert [segment["finished"] for segment in content["segments"]] == [True, False]
+        assert [shot["encoded"] for shot in content["shots"]] == [True, True, False]
+        assert "assembled" not in content and "finished already" not in caplog.text
+        assert not (tmp_path / "one.mkv").exists()
+        shot = directory / "resume" / "shot_000004"
+        assert not (shot / "latent.pt").exists() and not (shot / "input.mkv").exists()
+
+
 def test_package_change_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
