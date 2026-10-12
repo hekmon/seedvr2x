@@ -2619,8 +2619,12 @@ def _taken(args: argparse.Namespace, directory: Path | None, where: Path) -> str
     source"; the source is each one's own line in _plan_file, the cut list given being FILE's
     alone, between the two)."""
     final = _final(args.output)
-    if final is not None and where in (final.resolve(), _checksums_beside(final).resolve()):
-        return "the output" if where == final.resolve() else "the output's checksums"
+    # The same file, not the same name (_same, as _output holds the output to the source): see
+    # _plan_file's first test.
+    if final is not None and _same(where, final):
+        return "the output"
+    if final is not None and _same(where, _checksums_beside(final)):
+        return "the output's checksums"
     if directory is None and where == args.output.resolve():
         return "the output"
     if directory is not None and where.is_relative_to(directory.resolve()):
@@ -2649,7 +2653,15 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
 
     plan: Path = args.plan
     where = plan.resolve()
-    if where == args.input.resolve():
+    # The same FILE as the source, by whatever name (_same), not the same resolved name alone: a
+    # file system that takes a name in any case (macOS's default, a Windows disk under WSL) has
+    # FILM.MKV for film.mkv, two names no resolved path makes equal, and the cut list renamed
+    # into its place (files.write_whole) would replace the source, the one thing a job can't
+    # make again. Found by a review (2026-10-12), read-only on such a disk: os.path.samefile
+    # true of two spellings whose resolved paths differ. A FILE that doesn't exist yet is no
+    # file to compare: its resolved name then, as before. The same for the output's files
+    # (_taken) and for each playlist's place, below.
+    if _same(plan, args.input):
         raise JobError(f"--plan {plan}: the source; it names the cut list's file")
     if args.cuts is not None and where == args.cuts.resolve():
         # The plan of a cut list is that list normalised: written over it, the list's own
@@ -2671,7 +2683,7 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
     for which in PLAYLISTS if args.cuts is None else ():
         playlist = playlist_path(plan, which)
         there = playlist.resolve()
-        if there == args.input.resolve():
+        if _same(playlist, args.input):
             taken = "the source"
         else:
             taken = _taken(args, directory, there) or ("a directory" if playlist.is_dir() else None)

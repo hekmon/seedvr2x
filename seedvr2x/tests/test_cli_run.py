@@ -5501,6 +5501,54 @@ def test_plan_playlist_refused(
     assert source_path.read_bytes() == content
 
 
+def test_plan_places_are_files_not_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # FILE's place and each playlist's are held to the job's FILES, not to their resolved names
+    # alone (cli._same, as the output is held to the source): on a file system that takes a name
+    # in any case (macOS's default, a Windows disk under WSL), FILM.MKV is film.mkv under a name
+    # no resolved path makes equal, and the cut list renamed into its place would replace the
+    # source. Such a disk can't be made here: ANOTHER HARD LINK to the file stands in for it, one
+    # file under two names that each resolve to themselves. Refused before the first pass, each
+    # with the refusal of the file it is: the source, and a finished -o one.mkv job's file and
+    # its checksums; their bytes and inodes untouched, the other name still theirs.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    said = {
+        "in.mkv": "the source",
+        "one.mkv": "the output",
+        "one.mkv.crc32": "the output's checksums",
+    }
+    kept = {
+        name: ((tmp_path / name).read_bytes(), (tmp_path / name).stat().st_ino) for name in said
+    }
+    passes = first_passes(monkeypatch)
+    plan = tmp_path / "plan.txt"
+    for name, what in said.items():
+        # The source is every job's; the finished file and its checksums a .mkv path's own.
+        outputs = ("out", "one.mkv") if name == "in.mkv" else ("one.mkv",)
+        os.link(tmp_path / name, plan)
+        for output in outputs:
+            text = refused(tmp_path, source_path, caplog, "--plan", "plan.txt", output=output)
+            assert f"--plan plan.txt: {what}; it names the cut list's file" in text
+            assert plan.stat().st_ino == kept[name][1]
+        plan.unlink()
+        for which, cuts in (("cuts", "detected cuts"), ("possible", "possible cuts")):
+            playlist = tmp_path / f"plan.txt.{which}.m3u8"
+            os.link(tmp_path / name, playlist)
+            for output in outputs:
+                text = refused(tmp_path, source_path, caplog, "--plan", "plan.txt", output=output)
+                expected = f"--plan plan.txt: the playlist of its {cuts}, {playlist.name} beside it"
+                assert f"{expected}, is {what}; it names another file" in text
+                assert playlist.stat().st_ino == kept[name][1] and not plan.exists()
+            playlist.unlink()
+    assert passes == [] and not (tmp_path / "out").exists()
+    assert not (tmp_path / "one.mkv.work").exists()
+    assert kept == {
+        name: ((tmp_path / name).read_bytes(), (tmp_path / name).stat().st_ino) for name in said
+    }
+
+
 def test_plan_of_a_cut_list(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

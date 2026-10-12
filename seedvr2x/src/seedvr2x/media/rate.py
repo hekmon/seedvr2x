@@ -170,7 +170,7 @@ def exact(index: FrameIndex) -> Timeline | None:
 
     The rates tried: the frames' own mean rate, their steps over their span, given when every
     frame lies on its timeline, a constant step in ticks, whatever the rate (1000/33 fps for 33
-    ms a frame, at any length; 17 ms a frame, 1000/17, lies within 0.85 ms of 353/6's timeline
+    ms a frame, from 3 frames; 17 ms a frame, 1000/17, lies within 0.85 ms of 353/6's timeline
     too over 300 frames); then the rates looked for (TWELFTHS, NTSC) that the span allows, its
     last frame within a tick of its place, when one alone holds the frames so; then the mean
     rate again, when none of them does and its timeline holds the frames so. A rate that is
@@ -193,7 +193,19 @@ def exact(index: FrameIndex) -> Timeline | None:
     24000/1001, 18 of 48000/1001 and 60 of 120000/1001, 24/1, 575/12 and 120/1 among them, and
     one alone any more of them, up to 1,500."""
     places, pts = _timed(index)
-    if len(places) < 2:
+    # Fewer than 3 timestamps name no rate: two are one step, which tells no rate from another,
+    # and they lie on their own mean rate's timeline always, given below before any test of
+    # the file's length. Two frames 42 ms apart, 24000/1001's or 24's in milliseconds, declared
+    # 25/1, were told "its timestamps run at 500/21 fps (23.81), within 0 ms of that rate's
+    # timeline ... or give --frame-rate 500/21" (a review's finding, 2026-10-12).
+    # PROVISIONAL (implementation, 2026-10-12, a question for design: from how many frames are
+    # timestamps "a rate's exactly"?): from 3 frames up the code is as it was, a constant step
+    # in ticks its own mean rate's whatever the length, as design asked of 33 ms a frame, and a
+    # few frames whose rounded steps happen to be equal are still named a rate that isn't
+    # theirs: [0, 8, 16] ms, 120000/1001 rounded down, 125/1. The review's figures, 17 rates
+    # rounded to the nearest tick and down, 2 to 399 frames: named wrongly up to 4 frames in
+    # milliseconds, 5 in 90 kHz ticks, 6 in microseconds, by that path alone, never beyond.
+    if len(places) < 3:
         return None
     ticks = int(pts[-1] - pts[0])
     steps = int(places[-1] - places[0])
@@ -284,8 +296,16 @@ def matroska_reading(declared: Fraction) -> Fraction | None:
     999/10, 120000/1001 as 29011/242, 240000/1001 as 29011/121. mkvmerge writes the same
     truncated duration when given the rate (--default-duration 0:60000/1001fps), and keeps a
     file's own when it remuxes it. Under 6, ffprobe's r_frame_rate is its guess from the
-    timestamps (2/1 for 2000/1001 over 30 frames, 1000/1 for one frame): no reading, and the
-    rate is its own fraction there anyway.
+    timestamps (2/1 for 2000/1001 over 30 frames, 1000/1 for one frame): no reading, and no
+    rate to trust there. Measured on seedvr2x's own FFV1 master, 30 and 300 frames (a review's
+    finding, 2026-10-12, measured again): written at 1000/1001, 3000/1001, 4000/1001 or
+    5000/1001 fps, ffprobe gives 24000/1001, 12000/1001, 12000/1001 or 15000/1001 and seedvr2x
+    refuses it ("its timestamps run at 4000/1001 fps (3.996) ... where it declares
+    12000/1001"); at 2000/1001, 2/1, and it is read at 2/1 without a word up to 499 frames,
+    refused from 500, a frame half a frame off 2/1's timeline; above 1,000 fps likewise, 1001
+    fps read at 1000/1 and 2000 fps, given as 1000/1, refused. avg_frame_rate is the rate
+    written each time; 6000/1001, 1, 2, 5/2 and 5 fps read back as written. Left as it is, no
+    real source running at such rates ((4) below).
 
     The readings taken, each computed (_av_reduce), none tabled:
 
@@ -311,7 +331,11 @@ def matroska_reading(declared: Fraction) -> Fraction | None:
     # 23017/96 and is read at it. (2) N up to 240, each measured, ffmpeg's own highest standard
     # rate (libavformat/demux.c:2287-2303); of the 751 from 250 to 1,000, 58 have a reading
     # that is a multiple of 1/12 fps. (3) 999/10, 999/5 and 999/8 are read as NTSC rates, not
-    # as the decimals they also are.
+    # as the decimals they also are. (4) Under 6 fps and above 1,000 nothing is corrected, and
+    # seedvr2x's own master at N x 1000/1001 there is refused or read at another rate (the
+    # docstring's figures), against "a file either of them builds is never refused": close it
+    # by taking a Matroska stream's avg_frame_rate where r_frame_rate is outside ffmpeg's 5 to
+    # 1,000 fps and avg_frame_rate is N x 1000/1001, or say that such rates aren't read?
     n = round(declared * 1001 / 1000)
     if not 1 <= n <= MOST_NTSC:
         return None

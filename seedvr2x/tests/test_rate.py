@@ -509,6 +509,44 @@ def test_no_rate_named_by_half_a_frame() -> None:
     assert timing_refusal(declaring(Fraction(24), Fraction(24)), coarse) == ""
 
 
+def test_the_exact_rate_is_named_before_the_twin() -> None:
+    # Design's decision (2026-10-12) has (a) the rate the timestamps are exactly BEFORE (b) the
+    # declared rate's NTSC twin (media/source.py, _guided), and the order reversed passed every
+    # test (a review's finding, 2026-10-12): no file here had the two name different rates. One
+    # has them do so where sptenc's rule fails on timestamps that are a rate's exactly, in a
+    # time base too coarse for its 1 ms, that rate near enough the twin for the twin's timeline
+    # to hold them over the 1,001 frames it needs: 41.7 ms a frame, 10000/417 fps, in ticks of
+    # 10 ms, declared 24/1. Their own rate's timeline holds them within half a tick, their
+    # deviations spread over 0.99 of one; 24000/1001's, 41.708 ms a frame, within 13.2 ms, a
+    # third of a frame, spread over 1.81 ticks, no rate of theirs exactly, and a frame from
+    # 24/1's at the last frame: the twin's test, passed. The refusal names the exact one,
+    # without --frame-rate and with another rate given.
+    centiseconds = Fraction(1, 100)
+    scanned = scanned_at(
+        np.array([(417 * n + 50) // 100 for n in range(GUIDED)], dtype=np.int64), centiseconds
+    )
+    index = scanned.index
+    assert index is not None
+    exactly = Fraction(10000, 417)
+    found, twin = rate.exact(index), rate.twin(index, Fraction(24))
+    assert found is not None and (found.rate, found.largest) == (exactly, Fraction(5, 1000))
+    assert found.highest - found.lowest == Fraction(99, 100) * centiseconds
+    assert twin is not None and twin.rate == NTSC_FILM
+    assert round(float(twin.largest) * 1000, 1) == 13.2
+    assert round(float((twin.highest - twin.lowest) / centiseconds), 2) == 1.81
+    runs_at = (
+        "its timestamps run at 10000/417 fps (23.981), within 5 ms of that rate's timeline (0.12"
+        " of a frame)"
+    )
+    assert unfilled(declaring(Fraction(24)), scanned) == (
+        f"{runs_at}, where it declares 24/1, its frames lasting from 40 to 50 ms: a bad file, not"
+        f" read on a guess: {fixes(exactly)}"
+    )
+    said = unfilled(declaring(Fraction(24), Fraction(25)), scanned)
+    assert said.startswith("--frame-rate 25/1: frame 9 lies 20.0 ms after its place on")
+    assert said.endswith(f"{DROPPED_OR_DOUBLED}; {runs_at}: {fixes(exactly)}")
+
+
 @needs_ffmpeg
 def test_frame_rate_on_a_file_already_fine(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -745,11 +783,13 @@ def test_the_rate_timestamps_are_exactly() -> None:
     mean = rate.timeline(other, Fraction(999_000, 41_573))
     assert 1 < (mean.highest - mean.lowest) * 1000 < 1.03
     # Too little to tell: one frame, frames without a pts or on one tick, a span of a few ticks
-    # that isn't a constant step, which two frames always are; of two ticks, where the rates
-    # that put the last frame within two of its place have no bound (a division by zero).
-    for pts in ([0], [NOPTS, NOPTS], [7, 7, 7], [0, 1, 3], [0, 0, 2]):
+    # that isn't a constant step; of two ticks, where the rates that put the last frame within
+    # two of its place have no bound (a division by zero). And two timestamps, whatever they
+    # are: one step, a constant one always, which was named its own rate, 1000/1 for [5, 6]
+    # (test_two_frames_name_no_rate). From 3, a constant step is its own rate's.
+    for pts in ([0], [NOPTS, NOPTS], [7, 7, 7], [0, 1, 3], [0, 0, 2], [5, 6], [NOPTS, 5, 6]):
         assert rate.exact(indexed(pts)) is None
-    found = rate.exact(indexed([5, 6]))
+    found = rate.exact(indexed([5, 6, 7]))
     assert found is not None and found.rate == 1000
 
 
@@ -785,6 +825,36 @@ def test_no_rate_named_when_several_looked_for_hold_the_frames() -> None:
     # A constant step is still its own rate's, however short: 3 frames 21 ms apart.
     found = rate.exact(indexed([0, 21, 42]))
     assert found is not None and found.rate == Fraction(1000, 21)
+
+
+def test_two_frames_name_no_rate() -> None:
+    # Two frames 42 ms apart, what 24000/1001 and 24 fps both are in Matroska's milliseconds,
+    # declared 25/1: one step, which tells no rate from another, so no rate's exactly
+    # (rate.exact). Refused by sptenc's rule in its own words, no rate named, no --frame-rate
+    # offered, where they were told "its timestamps run at 500/21 fps (23.81), within 0 ms of
+    # that rate's timeline (0.00 of a frame), where it declares 25/1 ... or give --frame-rate
+    # 500/21", their mean rate, given before any test of the file's length (a review's finding,
+    # 2026-10-12). Declared 24/1 or 24000/1001, they are read; under --frame-rate, held to R's
+    # timeline as any file, and told no rate either.
+    two = scanned_at(np.array([0, 42], dtype=np.int64), MS)
+    index = two.index
+    assert index is not None and rate.exact(index) is None
+    assert rate.twin(index, Fraction(25)) is None
+    assert timing_refusal(declaring(Fraction(25)), two) == (
+        "the frame rate declared, 25 fps, is not the frames' own: they last 42 to 42 ms"
+    )
+    for declares in (Fraction(24), NTSC_FILM):
+        assert timing_refusal(declaring(declares), two) == ""
+    assert timing_refusal(declaring(Fraction(30), Fraction(60)), two) == (
+        "--frame-rate 60/1: frame 1 lies 25.3 ms after its place on that rate's timeline (1.520"
+        f" of a frame, half a frame being 8.3 ms): {DROPPED_OR_DOUBLED}"
+    )
+    # PROVISIONAL (rate.exact, a question for design: from how many frames?): a third frame on
+    # the same step, and the mean rate is named as before.
+    three = scanned_at(np.array([0, 42, 84], dtype=np.int64), MS)
+    assert timing_refusal(declaring(Fraction(25)), three).startswith(
+        "its timestamps run at 500/21 fps (23.81), within 0 ms of that rate's timeline"
+    )
 
 
 def strayed(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -2559,6 +2629,18 @@ def test_the_refusal_names_the_rate_the_timestamps_are_exactly(tmp_path: Path, f
         f" timeline (0.500 of a frame, half a frame being 16.7 ms), and {frames - 51} more"
         f" frames, up to {'39.7' if frames == 120 else '999.7'} ms: taken at that rate, frames"
         f" would be dropped or doubled; {runs_at} (0.00 of a frame): {fixes(exactly)}"
+    )
+
+
+@needs_ffmpeg
+def test_a_file_of_two_frames_is_refused_without_a_rate_named(tmp_path: Path) -> None:
+    # The same two frames as a file (test_two_frames_name_no_rate): 42 ms apart in Matroska,
+    # declared 25/1. sptenc's refusal, whole; no rate named, no remake, no --frame-rate.
+    path = retagged(tmp_path / "two.mkv", 25, "42*N", 2)
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    assert str(refused.value) == (
+        f"{path}: the frame rate declared, 25 fps, is not the frames' own: they last 42 to 42 ms"
     )
 
 

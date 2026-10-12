@@ -801,6 +801,11 @@ def _guided(index: FrameIndex, declares: Fraction) -> Timeline | None:
     frames at 24000/1001 joined by ffmpeg's concat demuxer, their audio outlasting them, the
     video stepping 63 ms at each join, "at 47/2 fps (23.5), within 19.7 ms", and read with
     --frame-rate 47/2, 2% off their audio (a review's finding, 2026-10-12)."""
+    # (a) before (b), the decision's order: the two name different rates of one file where a
+    # rate the timestamps are exactly lies near enough the twin for the twin's timeline to hold
+    # them too, in a time base too coarse for sptenc's 1 ms: 1,001 frames 41.7 ms apart in
+    # ticks of 10 ms, declared 24/1, are 10000/417 fps exactly, within 5 ms, and lie within
+    # 13.2 ms of 24000/1001's timeline, a frame from 24/1's at their end (tests/test_rate.py).
     return rate.exact(index) or rate.twin(index, declares)
 
 
