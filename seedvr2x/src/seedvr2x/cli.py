@@ -606,6 +606,8 @@ def _run(args: argparse.Namespace) -> int:
         detects = (
             args.cuts is None
             and trusted is None
+            # A directory's finished job runs no pass (_finished_already); a .mkv path's does.
+            and not (final is None and recorded is not None and complete(recorded))
             and (_detecting(recorded) or (recorded is not None and planned(recorded)))
         )
         # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
@@ -642,6 +644,10 @@ def _run(args: argparse.Namespace) -> int:
                 *(conversions, numz_padding, model_files),
             )
             identity = prior.identity
+            # A finished job with no first pass's record to trust: said finished, nothing made.
+            done = _finished_already(args, directory, prior, declared, target, untrusted)
+            if done is not None:
+                return done
         else:
             identity = _identity(
                 *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
@@ -792,7 +798,7 @@ def _run(args: argparse.Namespace) -> int:
             # whose cuts changed, or whose shape did with the memory free, planned again
             # (_replan).
             try:
-                replanned = _resume(record, prior)
+                replanned = _resume(record, prior, final is not None)
             except JobError as error:
                 logger.error("%s", error)
                 return 1
@@ -2058,12 +2064,12 @@ def _trusted(
     """The frame index of the first pass the manifest `recorded` in directory records, when a
     resume may trust that record (DESIGN.md, Pause and resume): made by the same ffmpeg and
     conversions (manifest.FIRST_PASS), and there as recorded (_recorded_index); else None, the
-    first pass then run again, and why, when the index is the reason, for the run to say if the
-    pass runs. Read before the model files are, so that a resume trusting it neither fetches nor
-    reads the shot detector's file, which it doesn't run, its probabilities there (cli._run);
-    whether the job is the one recorded is _prior's to say. Nothing here imports torch, which the
-    model files' check comes before (DESIGN.md, Weights, Recognised by content): runtime/resume.py
-    does, and isn't read."""
+    first pass then run again, but a finished job's (_finished_already), and why, when the index
+    is the reason, for the run to say. Read before the model files are, so that a resume trusting
+    it neither fetches nor reads the shot detector's file, which it doesn't run, its probabilities
+    there (cli._run); whether the job is the one recorded is _prior's to say. Nothing here imports
+    torch, which the model files' check comes before (DESIGN.md, Weights, Recognised by content):
+    runtime/resume.py does, and isn't read."""
     from seedvr2x.runtime.manifest import FIRST_PASS
 
     environment: Any = recorded.get("environment")
@@ -2127,7 +2133,7 @@ def _content(path: Path) -> dict[str, object]:
     return {"bytes": path.stat().st_size, "sha256": digest}
 
 
-def _resume(record: "Manifest", prior: _Prior) -> bool:
+def _resume(record: "Manifest", prior: _Prior, assembles: bool = False) -> bool:
     """Take up the job recorded beside record, checked before its first pass (_prior): refused
     (JobError) unless the rest is the job asked too, what the first pass found and the layout
     following from it; its directory must be as the manifest says. Then record the environment
@@ -2136,6 +2142,13 @@ def _resume(record: "Manifest", prior: _Prior) -> bool:
     before one keeps the record as it was, but for the index of a first pass run again and for
     a plan's (_taken_up).
 
+    A finished job makes no unit, so nothing records an environment change accepted for it, and
+    that is what is said (ENVIRONMENT_STAYS, as _finished_already says it of one without its
+    first pass's record): a directory's job with every segment finished. A .mkv path's
+    (`assembles`) with every segment finished isn't finished, its file not in place (DESIGN.md,
+    Pause and resume: "A finished file's job is finished once the file is in place"): its
+    assembly is the next unit made, which writes the manifest (_assemble).
+
     A plan, a job that has made no unit yet (manifest.planned), is planned again whole from the
     memory free now (_run; DESIGN.md, Memory planner: "A plan recorded with no unit made yet is
     made again whole"): its plan's shape may differ from the one recorded, and its shots' windows
@@ -2143,7 +2156,7 @@ def _resume(record: "Manifest", prior: _Prior) -> bool:
     takes the new plan and layout at once (_replan): True then, the manifest rewritten; False for
     a job taken up as it is recorded."""
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.manifest import planned
+    from seedvr2x.runtime.manifest import complete, planned
 
     plan = planned(prior.recorded)
 
@@ -2169,7 +2182,9 @@ def _resume(record: "Manifest", prior: _Prior) -> bool:
         _replan(record, prior, shape)
         return True
     resume.adopt(record, prior.recorded)
-    if prior.changed:
+    if prior.changed and complete(prior.recorded) and not assembles:
+        logger.info(ENVIRONMENT_STAYS, record.path.parent, "; ".join(prior.changed))
+    elif prior.changed:
         change = resume.environment_change(prior.recorded, record.environment)
         record.environment_changes.append(change)
         logger.warning(
@@ -2218,20 +2233,20 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
     2026-10-10). PROVISIONAL (implementation, 2026-10-10, for design, as the plan's form is:
     DESIGN.md has the new environment written "with the next unit made").
 
-    A job that has made units, its first pass run again (_prior):
+    A job that has made units and isn't finished, its first pass run again (_prior; a finished
+    job's isn't, and nothing of it is written: _finished_already):
 
     Its index made in the environment recorded, the recorded one being missing or damaged: at
-    once, then the manifest as recorded, naming it, so that the next run trusts the record, that
-    of a job finished already too, which makes no unit to write its manifest with. Left to the
-    next unit, a finished job kept index bytes its manifest didn't name when the pass gave others
-    (a damaged source decodes otherwise from one pass to the next: media/reader.py), and every
-    later run warned of them and ran the pass again.
+    once, then the manifest as recorded, naming it, so that the next run trusts the record, a unit
+    made after it or not. Left to the next unit, a job stopped before one kept index bytes its
+    manifest didn't name when the pass gave others (a damaged source decodes otherwise from one
+    pass to the next: media/reader.py), and every later run warned of them and ran the pass
+    again.
 
     Made in another environment, accepted (ffmpeg or its conversions changed): with the next unit
     made, whose manifest records that environment (DESIGN.md, Pause and resume), the directory
     keeping the recorded index until then: a resume stopped before a unit "still resumes in its
-    old environment", its record whole, and a job finished already, which makes none, keeps what
-    it has.
+    old environment", its record whole.
 
     PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has a resume stopped
     before a unit leave the manifest as it was, which holds but for the record of an index made
@@ -2262,6 +2277,136 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
         environment_changes=list(prior.recorded.get(resume.CHANGES, [])),
     )
     as_recorded.write()
+
+
+# The input record's fields a source declares, read without a decode (media/source.py, declare;
+# manifest._input): what a finished job run again is still compared by (_finished_already).
+DECLARED = ("frame_rate", "size", "sample_aspect", "read_as", "pix_fmt", "primaries", "transfer")
+# What is said of a finished job run again in another environment, accepted: its directory, then
+# the differences. No unit is made in it, so no manifest written records it (_finished_already;
+# _resume, for a finished job whose first pass's record is trusted).
+ENVIRONMENT_STAYS = (
+    "%s: its environment differs from this one, as accepted, and stays its manifest's, nothing"
+    " being made in this one: %s"
+)
+
+
+def _finished_already(
+    args: argparse.Namespace,
+    directory: Path,
+    prior: _Prior,
+    declared: "Declared",
+    target: tuple[int, int],
+    untrusted: str,
+) -> int | None:
+    """A finished job run again, the record of its first pass not one to trust (_trusted, why in
+    `untrusted`): its frame index missing or damaged, or made by another ffmpeg, accepted. It is
+    said finished and nothing is made again (DESIGN.md, Pause and resume: "Re-running a finished
+    job doesn't rewrite its manifest, and makes nothing again, its frame index and its plan
+    included: no memory is read"): no first pass, no shot detector nor its file (cli._run), no
+    index, no plan nor the GPU's free memory read for one, no manifest written; its exit status,
+    0. None for any other job, which the run goes on with: one unfinished, or a finished one
+    whose record is trusted, for which no pass runs either (_prior) and no plan is made
+    (cli._run), said finished once it is compared whole (_resume).
+
+    A directory's job alone. A .mkv path's job with every segment finished isn't finished: "A
+    finished file's job is finished once the file is in place: with every segment made and no
+    file yet, the same command assembles" (DESIGN.md, Pause and resume), and the assembly takes
+    the source's first timestamp and time base from the frame index (assembly.start). None for
+    it then, whatever became of its index: the run goes on as for any job resumed, its first
+    pass run again when its record isn't trusted, with the shot detector for a job that detects
+    its shots, the index written again (_taken_up), then the file assembled (cli._run). One
+    whose file is in place never comes here: its record of the assembly answers first
+    (_assembled), before the index is looked at.
+
+    The job is checked before this as any job resumed is before its first pass (_prior): the
+    same settings, the pins that shape its plan among them, environment and source by content, or
+    refused, an environment change accepted or refused as a resume's. Of what a resume compares
+    after its first pass (_resume), it is held to what needs no decode: what the source declares
+    (DECLARED) and the output's format, size (`target`, its (height, width) before the output's
+    rounding) and rate, against its record, another job when they differ (JobError), as an
+    accepted ffmpeg that reads the source otherwise makes a resume. Its frame count, the places
+    filled among them, its shots, windows, segments and plan are the record's own: the pass that
+    counts the frames and the probabilities that cut them are what isn't made again, and a
+    finished job's plan stays as recorded with an index too (cli._run). Its directory is held to
+    its manifest as a resume's is (resume.leftovers): a finished segment missing or of another
+    size, its checksums missing, or anything not the job's, refused; what a stop left, discarded.
+
+    PROVISIONAL (implementation, 2026-10-11, a question for design: DESIGN.md says a finished job
+    makes nothing again, not what it is still compared by without its index): the list above; the
+    recorded plan isn't read, where a finished job with its index is refused for one the planner
+    never makes (_recorded_plan), a manifest edited by hand.
+
+    PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has --plan FILE
+    write a job's cut list, and a finished job make nothing again): --plan FILE on such a job
+    writes nothing and fails, 1, saying why: the list is derived from the frame index and timed
+    by it, and no first pass is run to make one for a job that needs none."""
+    from seedvr2x.media.scan import Idet
+    from seedvr2x.media.source import Source
+    from seedvr2x.runtime import resume
+    from seedvr2x.runtime.job import output_size
+    from seedvr2x.runtime.manifest import NAME, complete
+
+    recorded = prior.recorded
+    if _final(args.output) is not None or prior.known is not None or not complete(recorded):
+        return None
+    entry: dict[str, Any] = recorded["input"]
+    # The source as declared now, its frames the record's count, in places, and no index: nothing
+    # reads a frame, and what the index alone says, the places filled (Source.filled), is the
+    # record's, not compared.
+    source = Source(
+        path=declared.path,
+        stream=declared.stream,
+        conversion=declared.conversion,
+        frames=entry["frames"],
+        sample_aspect=declared.sample_aspect,
+        sha256=entry["sha256"],
+        index=None,
+        rate_override=declared.rate_override,
+        idet=Idet.from_record(entry.get("idet")),
+    )
+    job = resume.recorded_job(directory / NAME, recorded, source)
+    height, width = output_size(target)
+    output = {"format": args.format, "size": [width, height], "frame_rate": str(source.frame_rate)}
+    asked = {
+        "input": {name: job.content()["input"][name] for name in DECLARED},
+        "output": output,
+    }
+    before = {
+        "input": {name: entry.get(name) for name in DECLARED},
+        "output": {name: recorded["output"].get(name) for name in output},
+    }
+    found = resume.differences(before, asked)
+    if found:
+        raise _another_job(job.path, found, only_environment=False)
+    discarded = resume.leftovers(job)
+    for path in discarded:
+        logger.debug("discarded %s", path)
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    if untrusted:
+        # Said, the directory holding less than its manifest names; left as it is.
+        logger.warning("%s: a finished job needs none, and makes nothing again", untrusted)
+    if prior.changed:
+        logger.info(ENVIRONMENT_STAYS, directory, "; ".join(prior.changed))
+    if discarded:
+        logger.info("%s: %s discarded", directory, _plural(len(discarded), "leftover"))
+    logger.info("%s: finished already, its %d segments", directory, len(job.files))
+    if args.plan is None:
+        return 0
+    logger.error(
+        "--plan %s: not written: %s is finished already, and a job's cut list is written from its"
+        " frame index, which %s and which a finished job doesn't make again: plan the source in"
+        " another output directory (-o) for its cut list",
+        args.plan,
+        directory,
+        "isn't there as its manifest records it"
+        if untrusted
+        else "another ffmpeg or other conversions than this run's made",
+    )
+    return 1
 
 
 def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:

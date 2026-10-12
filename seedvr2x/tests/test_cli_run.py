@@ -3948,24 +3948,22 @@ def another_index(monkeypatch: pytest.MonkeyPatch) -> tuple[list[Path], list[boo
     return scans, otherwise
 
 
-@pytest.mark.parametrize("stop", [None, "encode 4"])
 def test_index_made_again_named_at_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,
     caplog: pytest.LogCaptureFixture,
-    stop: str | None,
 ) -> None:
     # A first pass run again, its recorded index missing, that gives another index than the one
     # recorded: the index is written with a manifest naming it, at once, in the environment
-    # recorded, whether the job is finished already, which makes no unit to write its manifest
-    # with, or stopped before one. The next run then trusts the record, and runs no first pass;
-    # left to the next unit, every run of the finished job warned of an index its manifest didn't
-    # name and ran the pass again.
+    # recorded, the job stopped before a unit. The next run then trusts the record, and runs no
+    # first pass; left to the next unit, every run stopped before one warned of an index its
+    # manifest didn't name and ran the pass again. A finished job has none made again
+    # (test_finished_job_run_again_makes_nothing).
     scans, otherwise = another_index(monkeypatch)
     source_path = job(tmp_path, monkeypatch)
-    steps.stop = stop
-    assert upscale(tmp_path, source_path, "out", *JOB) == (0 if stop is None else 130)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
     out = tmp_path / "out"
     index, manifest = out / "frame_index.bin", out / "manifest.json"
     first, recorded = index.read_bytes(), json.loads(manifest.read_text())
@@ -3976,12 +3974,9 @@ def test_index_made_again_named_at_once(
     # Another GPU, accepted: the manifest written with the index keeps the environment recorded.
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
     caplog.set_level(logging.INFO, logger="seedvr2x")
-    assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == (
-        0 if stop is None else 130
-    )
+    stopped(tmp_path, source_path, "out", *JOB, "--accept-env-change")
     assert f"{index}: the frame index missing; the first pass runs again" in caplog.text
-    assert len(scans) == 1 and steps.calls == ([] if stop is None else ["encode 4"])
-    assert ("finished already" in caplog.text) == (stop is None)
+    assert len(scans) == 1 and steps.calls == ["encode 4"]
     data = index.read_bytes()
     assert data != first and len(data) == len(first)
     written = json.loads(manifest.read_text())
@@ -4010,9 +4005,10 @@ def test_index_of_another_ffmpeg_written_with_its_unit(
 ) -> None:
     # A first pass run again under another ffmpeg, accepted, gives an index its manifest's
     # environment didn't make: it is written with the next unit made, whose manifest records that
-    # environment, never before. A resume stopped before a unit, or a job finished already, which
-    # makes none, keeps its recorded index and its manifest as they were, and the first ffmpeg
-    # then finds its record whole, no pass run again.
+    # environment, never before. A resume stopped before a unit keeps its recorded index and its
+    # manifest as they were, and so does a job finished already, for which no pass runs again at
+    # all (cli._finished_already); the first ffmpeg then finds its record whole, no pass run
+    # again.
     scans, otherwise = another_index(monkeypatch)
     source_path = job(tmp_path, monkeypatch)
     steps.stop = stop
@@ -4026,7 +4022,7 @@ def test_index_of_another_ffmpeg_written_with_its_unit(
     scans.clear()
     caplog.set_level(logging.INFO, logger="seedvr2x")
     status = upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change")
-    assert status == (0 if stop is None else 130) and len(scans) == 1
+    assert status == (0 if stop is None else 130) and len(scans) == (0 if stop is None else 1)
     assert (index.read_bytes(), manifest.read_bytes()) == (first, recorded)
     # Back on the first ffmpeg, no change to accept: the record as it was, trusted.
     monkeypatch.setattr(ffmpeg, "check", check)
@@ -4056,6 +4052,258 @@ def test_index_of_another_ffmpeg_written_with_its_unit(
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert not scans and "the first pass as recorded" in caplog.text
+
+
+def written_as(*paths: Path) -> dict[Path, tuple[bytes, int, int] | None]:
+    """Each file as it was written: its bytes, modification time and inode, which a file written
+    again changes even with the same bytes (files.write_whole renames a new one into its place);
+    None for one that isn't there."""
+    found: dict[Path, tuple[bytes, int, int] | None] = {}
+    for path in paths:
+        status = path.stat() if path.exists() else None
+        found[path] = status and (path.read_bytes(), status.st_mtime_ns, status.st_ino)
+    return found
+
+
+def spoiled(index: Path, how: str) -> str:
+    """Leave a job's frame index intact, or make it missing, damaged (a byte flipped) or cut
+    short: why its record is then not trusted, as the run says it, "" for one intact."""
+    kept = index.read_bytes()
+    if how == "missing":
+        index.unlink()
+        return f"{index}: the frame index missing"
+    if how == "damaged":
+        index.write_bytes(kept[:100] + bytes([kept[100] ^ 1]) + kept[101:])
+        return f"{index}: not the frame index the manifest recorded, by its SHA-256"
+    if how == "cut short":
+        index.write_bytes(kept[:-1])
+        return f"{index}: {len(kept) - 1} bytes, where the manifest recorded {len(kept)}"
+    return ""
+
+
+@pytest.mark.parametrize("index", ["intact", "missing", "damaged", "cut short"])
+@pytest.mark.parametrize("cut", ["by a list", "detected"])
+def test_finished_job_run_again_makes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+    index: str,
+    cut: str,
+) -> None:
+    # A job run to its end, then run again (DESIGN.md, Pause and resume: "Re-running a finished
+    # job doesn't rewrite its manifest, and makes nothing again, its frame index and its plan
+    # included: no memory is read"): said finished, exit 0, whether its frame index is there,
+    # missing, damaged or cut short. No first pass, no shot detector built nor its file asked of
+    # the pull, no plan made nor the GPU's memory read for one, no model loaded, no unit; the
+    # manifest not written again, nor the index, by their bytes, modification time and inode: one
+    # missing stays missing, a damaged one as it is, said in a warning. What a stop left in
+    # resume/ is discarded, as a resume discards it. Another seed asked of it is still another
+    # job, refused before any first pass, nothing touched.
+    from seedvr2x.runtime import model
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    options, segments = (JOB, 2) if cut == "by a list" else (CUT, 4)
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    out = tmp_path / "out"
+    files = (out / "manifest.json", out / "frame_index.bin")
+    untrusted = spoiled(files[1], index)
+    kept = written_as(*files)
+    assert (kept[files[1]] is None) == (index == "missing")
+    (out / "resume" / "shot_000000").mkdir(parents=True)  # as a stop could leave them
+    passes, asked = first_passes(monkeypatch), asked_of_the_pull(monkeypatch)
+    StandInDetector.built.clear()
+    scripted.calls.clear()
+    caplog.clear()
+    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    monkeypatch.setattr(planner, "plan", lambda *a, **k: pytest.fail("a plan made"))
+    monkeypatch.setattr(cli, "_free_memory", lambda device: pytest.fail("the GPU's memory read"))
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert f"{out}: finished already, its {segments} segments" in caplog.text
+    assert passes == [] and StandInDetector.built == [] and asked == [False]
+    assert scripted.calls == [] and written_as(*files) == kept
+    assert not (out / "resume").exists()
+    needs_none = "a finished job needs none, and makes nothing again"
+    if index == "intact":
+        assert needs_none not in caplog.text
+    else:
+        assert f"{untrusted}: {needs_none}" in caplog.text
+    assert "the first pass runs again" not in caplog.text
+    left = contents(out)
+    text = refused(tmp_path, source_path, caplog, *options, "--seed", "7")
+    assert "another job than the one asked" in text and "settings.seed: 42 -> 7" in text
+    assert passes == [] and StandInDetector.built == [] and asked == [False, False]
+    assert written_as(*files) == kept and contents(out) == left
+
+
+@pytest.mark.parametrize("index", ["intact", "missing", "damaged", "another ffmpeg's"])
+@pytest.mark.parametrize("cut", ["by a list", "detected"])
+def test_file_job_with_every_segment_finished_is_assembled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+    index: str,
+    cut: str,
+) -> None:
+    # A .mkv path's job with every segment finished and no file yet isn't finished (DESIGN.md,
+    # Pause and resume: "A finished file's job is finished once the file is in place: with every
+    # segment made and no file yet, the same command assembles"), whatever became of its frame
+    # index, which the assembly times the file by: missing, damaged, or another ffmpeg's,
+    # accepted, the first pass runs again, once, with the shot detector for a job that detects
+    # its shots, its file asked of the pull, and the file is assembled: exit 0 with the file
+    # there, the work directory gone, no model loaded, no unit made. Never a directory's
+    # "finished already", exit 0, with no file (test_finished_job_run_again_makes_nothing).
+    from seedvr2x.runtime import model
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    options, segments = (JOB, 2) if cut == "by a list" else (CUT, 4)
+    final, work = tmp_path / "one.mkv", tmp_path / "one.mkv.work"
+    # Stopped before its assembly, as tests/test_assembled.py stops one: no room for the file.
+    with monkeypatch.context() as full:
+        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, source_path, "one.mkv", *options) == 1
+    assert f"not assembled: every segment finished, {segments} in {work}" in caplog.text
+    content = json.loads((work / "manifest.json").read_text())
+    assert all(segment["finished"] for segment in content["segments"])
+    assert "assembled" not in content and not final.exists()
+    untrusted, accept = "", ()
+    if index == "another ffmpeg's":
+        monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
+        accept = ("--accept-env-change",)
+    else:
+        untrusted = spoiled(work / "frame_index.bin", index)
+    passes, asked = first_passes(monkeypatch), asked_of_the_pull(monkeypatch)
+    StandInDetector.built.clear()
+    scripted.calls.clear()
+    caplog.clear()
+    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    assert upscale(tmp_path, source_path, "one.mkv", *options, *accept) == 0
+    assert final.is_file() and not work.exists()
+    assert f"wrote {final}: 25 frames from {segments} segments" in caplog.text
+    assert "a finished job needs none" not in caplog.text
+    again, detects = index != "intact", index != "intact" and cut == "detected"
+    assert len(passes) == again and scripted.calls == []
+    assert asked == [detects] and len(StandInDetector.built) == detects
+    if untrusted:
+        assert f"{untrusted}; the first pass runs again, which makes it" in caplog.text
+    if index == "another ffmpeg's":
+        # Its manifest, written by the assembly, the next unit made, recorded the change.
+        said = f"{work}: resumed in another environment, as accepted, which its manifest records"
+        assert f"{said} with the next unit made: environment.ffmpeg: " in caplog.text
+    # The file an uninterrupted run assembles: its frames, each saying its place.
+    assert indexes(final) == list(range(25))
+    assert cli.main(["verify", str(final)]) == 0
+
+
+@pytest.mark.parametrize("change", ["GPU", "ffmpeg"])
+def test_finished_job_in_another_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    change: str,
+) -> None:
+    # A finished job run again in another environment: refused as a resume is, the flag named;
+    # accepted, said finished, with no first pass, under another ffmpeg too, whose pass a resume
+    # runs again, and nothing written: its manifest keeps the environment that made it, no change
+    # recorded, and its index is as it was. Which is what is said, with its trusted index (the
+    # GPU's change) as without (ffmpeg's), never that its manifest records the change "with the
+    # next unit made": a finished job makes none.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    out = tmp_path / "out"
+    files = (out / "manifest.json", out / "frame_index.bin")
+    kept = written_as(*files)
+    passes = first_passes(monkeypatch)
+    steps.calls.clear()
+    if change == "GPU":
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+        differs = 'environment.gpu: "a stand-in" -> "another"'
+    else:
+        recorded = json.loads(files[0].read_text())["environment"]["ffmpeg"]
+        monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
+        differs = f'environment.ffmpeg: "{recorded}" -> "n0.0-another"'
+    text = refused(tmp_path, source_path, caplog, *JOB)
+    assert differs in text
+    assert "Only its environment differs: --accept-env-change resumes it anyway" in text
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB, "--accept-env-change") == 0
+    assert f"{out}: finished already, its 2 segments" in caplog.text
+    assert passes == [] and steps.calls == [] and written_as(*files) == kept
+    said = "its environment differs from this one, as accepted, and stays its manifest's"
+    assert f"{out}: {said}, nothing being made in this one: {differs}" in caplog.text
+    assert "resumed in another environment" not in caplog.text
+    assert "the next unit made" not in caplog.text
+    assert json.loads(files[0].read_text())["environment_changes"] == []
+
+
+def test_finished_job_still_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A finished job without its frame index is still held, with no first pass, to what needs no
+    # decode: what its source declares and the output that follows, a probe saying otherwise
+    # another job, as for a resume (test_probe_compared); and its directory to its manifest, a
+    # segment missing or another's file refused, never deleted.
+    from seedvr2x.media import source as examined
+
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    out = tmp_path / "out"
+    (out / "frame_index.bin").unlink()
+    kept = contents(out)
+    passes = first_passes(monkeypatch)
+    probe = examined.probe
+    with monkeypatch.context() as patch:
+        patch.setattr(examined, "probe", lambda path: replace(probe(path), color_primaries="bt709"))
+        text = refused(tmp_path, source_path, caplog, *JOB)
+    assert "another job than the one asked" in text and 'input.primaries: "" -> "bt709"' in text
+    with monkeypatch.context() as patch:
+        patch.setattr(examined, "probe", lambda path: replace(probe(path), width=128))
+        text = refused(tmp_path, source_path, caplog, *JOB)
+    assert "input.size[0]: 64 -> 128" in text and "output.size[0]: 128 -> 256" in text
+    (out / "notes.txt").write_text("mine")
+    assert "not this job's: notes.txt" in refused(tmp_path, source_path, caplog, *JOB)
+    (out / "notes.txt").unlink()
+    (out / "seg_000001.mkv").rename(tmp_path / "moved.mkv")
+    assert "finished, the manifest says, but missing" in refused(
+        tmp_path, source_path, caplog, *JOB
+    )
+    (tmp_path / "moved.mkv").rename(out / "seg_000001.mkv")
+    assert passes == [] and contents(out) == kept
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert passes == [] and contents(out) == kept
+
+
+@needs_x264
+def test_finished_job_with_filled_places_run_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A finished job whose source has missing frames, their places filled (its record's "filled",
+    # drawn from its frame index, and its "frames", the places), run again without that index: no
+    # pass says again what was filled, and none runs to: both are the record's own, the job said
+    # finished, its manifest as it was, never another job for what only a decode finds.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cuts.txt").write_text("12\n18\n24\n")
+    source_path, _ = holed_source(tmp_path, 40, (17, 18))
+    assert upscale(tmp_path, source_path, "out", *SEEKING) == 0
+    out = tmp_path / "out"
+    files = (out / "manifest.json", out / "frame_index.bin")
+    record = json.loads(files[0].read_text())["input"]
+    assert record["frames"] == 40 and record["filled"]["places"] == 2
+    files[1].unlink()
+    kept = written_as(*files)
+    passes = first_passes(monkeypatch)
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *SEEKING) == 0
+    assert f"{out}: finished already, its 4 segments" in caplog.text
+    assert "another job" not in caplog.text and "frames missing" not in caplog.text
+    assert passes == [] and steps.calls == [] and written_as(*files) == kept
 
 
 def test_frame_index_beside_the_manifest(
@@ -5317,7 +5565,49 @@ def test_plan_of_a_finished_job(
     said = "3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3: the cut list in"
     assert f"{said} {plan}" in caplog.text
     assert cut_lines(plan) == PLANNED
+    # The playlist of its 2 possible cuts beside it, as any detected plan's (cuts.write_playlist).
+    assert sorted(path.name for path in tmp_path.glob("plan*")) == ["plan.txt", "plan.txt.m3u8"]
     assert passes == [] and scripted.calls == [] and contents(out) == kept
+
+
+@pytest.mark.parametrize("index", ["missing", "damaged", "another ffmpeg's"])
+def test_plan_of_a_finished_job_without_its_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+    index: str,
+) -> None:
+    # --plan on a finished job whose frame index is missing, damaged, or made by another ffmpeg
+    # than the run's, accepted: the cut list is written from the index, which a finished job
+    # doesn't make again: said, FILE not written, nor the playlist of its possible cuts, exit 1,
+    # no first pass, nothing of the job touched (PROVISIONAL, cli._finished_already).
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *CUT) == 0
+    out = tmp_path / "out"
+    options: tuple[str, ...] = CUT
+    if index == "another ffmpeg's":
+        monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
+        options = (*CUT, "--accept-env-change")
+        why = "another ffmpeg or other conversions than this run's made"
+    else:
+        spoiled(out / "frame_index.bin", index)
+        why = "isn't there as its manifest records it"
+    kept = contents(out)
+    passes = first_passes(monkeypatch)
+    plan = tmp_path / "plan.txt"
+    StandInDetector.built.clear()
+    scripted.calls.clear()
+    text = refused(tmp_path, source_path, caplog, *options, "--plan", str(plan))
+    assert f"{out}: finished already, its 4 segments" in text
+    assert (
+        f"--plan {plan}: not written: {out} is finished already, and a job's cut list is written"
+        f" from its frame index, which {why} and which a finished job doesn't make again: plan the"
+        " source in another output directory (-o) for its cut list"
+    ) in text
+    assert list(tmp_path.glob("plan*")) == [] and passes == [] and StandInDetector.built == []
+    assert scripted.calls == [] and contents(out) == kept
 
 
 def test_replan_compares_what_its_first_pass_finds(
