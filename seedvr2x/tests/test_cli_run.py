@@ -781,7 +781,10 @@ def test_plan_recorded_and_phases_entered(
         "dit_peak": planner.dit_peak(PADDED, 4),
         "decode_peak": planner.decode_peak(PADDED, TARGET),
         "bound": "encode",
-        "host": planner.HOST_RESIDENT,
+        # The process's own, and the longest shot at the check of its latent: 6 latents of 3.5
+        # times their 8,192 bytes (planner.host_moments).
+        "host": planner.HOST_RESIDENT + 6 * 28_672,
+        "host_shot": 6 * 28_672,
         "scratch": 0,
         "longest_window": 4,
     }
@@ -1251,7 +1254,8 @@ def test_plan_said(
         " window, 1 join",
         "plan: no block of the DiT swapped, the VAE on the GPU in the DiT's phase; in the encode,"
         " the DiT's 36 blocks on the GPU; in the decode, the DiT's 36 blocks on the GPU",
-        "plan: no system memory pinned, nothing leaving the GPU; 2.40 GiB of system memory in all",
+        "plan: no system memory pinned, nothing leaving the GPU; 0.00 GiB for the longest shot at"
+        " the most, as its latent is checked after its encode; 2.40 GiB of system memory in all",
         "plan: encode untiled, decode untiled, each held 1.50 GiB under the budget",
         "plan: predicted peaks: encode 18.11 GiB, DiT 15.91 GiB, decode 17.73 GiB; the encode"
         " bounds the plan, its room counted, 74.29 GiB under the budget",
@@ -1377,15 +1381,20 @@ def test_one_file_plans_as_a_directory(
     # directory's does (cli._output; units.Units' in-memory ones no run of the command line's
     # keeps any more): nothing of a shot waits on the GPU either way, and the two plan alike,
     # --plan's as its run's. JOB's last shot, 6 latents in two windows of 4: the DiT's phase
-    # takes a window's peak, the shot's draw being under it.
+    # takes a window's peak, the shot's draw being under it. The plan is told which output it
+    # is, for what the run holds of a shot in system memory (planner.host_moments): never one
+    # file's, whose windows would wait there, since a .mkv path's job writes them to its work
+    # directory.
     asked: list[set[str]] = []
     backends: list[str] = []
+    one_file: list[bool] = []
     peaks: list[int] = []
     plan = planner.plan
 
     def planned(*arguments: Any, **options: Any) -> Any:
         asked.append(set(options))
         backends.append(options["attention"])
+        one_file.append(options["one_file"])
         made = plan(*arguments, **options)
         peaks.append(made[1].dit)
         return made
@@ -1396,7 +1405,8 @@ def test_one_file_plans_as_a_directory(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     listed = str(tmp_path / "plan.txt")
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
-    assert asked == [{"split", "numz_padding", "recorded", "attention"}] * 3
+    assert asked == [{"split", "numz_padding", "recorded", "attention", "one_file"}] * 3
+    assert one_file == [False, False, False]
     # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
     # here), a one-file output too, which records no environment to read it from.
     assert backends == ["flash_attn_2"] * 3

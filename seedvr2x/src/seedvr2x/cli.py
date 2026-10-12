@@ -704,7 +704,8 @@ def _run(args: argparse.Namespace) -> int:
             # but on a driver that gives memory the card doesn't have, where the run is held to
             # less (runtime/memory.py); the plan's lines and its refusals name each figure. The
             # DiT's peak by the fit of the attention backend this run takes, today's on a
-            # resume too (_attention).
+            # resume too (_attention). One output file keeps a shot's windows in system
+            # memory, which the plan counts there (planner.host_moments).
             free = memory.reading(_free_memory(identity.device))
             plan, peaks = planner.plan(
                 *(free, target, shots, pins, _host_available()),
@@ -712,6 +713,7 @@ def _run(args: argparse.Namespace) -> int:
                 numz_padding=numz_padding,
                 recorded=kept_plan,
                 attention=_attention(),
+                one_file=directory is None,
             )
             card = torch.cuda.get_device_name(identity.device)
             said = planner.said(plan, peaks, card, target, shots, pins, numz_padding=numz_padding)

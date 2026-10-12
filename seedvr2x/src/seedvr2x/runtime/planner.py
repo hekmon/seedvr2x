@@ -14,9 +14,11 @@ moment is the draw of a shot's noise, the shot's latent and noise whole on the G
 first window, counted by the two tensors' sizes (dit_draw), and the phase takes the larger of
 the two. Where the weights are in each phase, and what that takes, by what runtime/blockswap.py
 does with them, measured on seedvr2x itself (milestone 3). The tiles and their scratch by
-runtime/tilegrid.py's, the arithmetic the tiled passes run on, and what the scratch may take of
-system memory from the host's (Plan.scratch_allowance). Sizes are (height, width) in pixels;
-`padded` is the frame the model takes, the target padded (job.padded_size).
+runtime/tilegrid.py's, the arithmetic the tiled passes run on. Of system memory: the pinned
+copies of what leaves the GPU, what the run holds there of the job's longest shot at the moment
+it holds the most, by the tensors' sizes (host_moments), and what the scratch may take of what
+is left (Plan.scratch_allowance). Sizes are (height, width) in pixels; `padded` is the frame
+the model takes, the target padded (job.padded_size).
 
 Its choices, in DESIGN.md's order (plan): the window, the biggest quality lever; the fewest
 swapped blocks that hold it; the largest VAE tiles, none where the untiled pass fits. A pin is
@@ -269,8 +271,15 @@ TILE_MAX = 2048
 TILE_STEP = 64
 
 # The process's resident system memory during the shots, which stays flat: 2.3-2.4 GiB over 6
-# shots (DESIGN.md, Memory planner, Host RAM).
+# shots (DESIGN.md, Memory planner, Host RAM), short ones: what the run holds of a long shot
+# there is counted apart (host_moments).
 HOST_RESIDENT = round(2.4 * GIB)
+# What the check of a tensor's values for NaN and inf holds in system memory over a tensor it
+# reads there, an encode's latent (shot.finite: torch.isfinite, then all): the tensor's absolute
+# values, as large as it, and CHECK_MASKS masks of a byte a value, the two tests' and their
+# product. For bfloat16, 2.5 times the tensor's bytes, by torch's memory profiler on latents of
+# 40 and of 200 (torch 2.14.1, 2026-10-12; tests/test_shot.py measures it).
+CHECK_MASKS = 3
 
 # The most a scratch may take of system memory when what the host has available can't be read
 # (cli._host_available), in bytes. PROVISIONAL (implementation, 2026-10-11): DESIGN.md sets the
@@ -412,6 +421,74 @@ def dit_draw(
     position = (height // LATENT_SIDE) * (width // LATENT_SIDE)
     shot = 2 * LATENT_CHANNELS * LATENT_VALUE * position * latents
     return dit_on_gpu(None, swapped) + (VAE_WEIGHTS if vae_in_dit else 0) + shot
+
+
+# A shot's moments in system memory, in its order (host_moments).
+MOMENTS = ("encode", "check", "windows", "merge", "decode")
+
+
+def host_moments(
+    padded: tuple[int, int], latents: int, cap: int | None, one_file: bool = False
+) -> dict[str, int]:
+    """What the run holds in system memory of a shot of `latents` latents of padded frames, in
+    bytes, at each of its moments (MOMENTS), its windows capped at `cap` latents (None: one
+    window), for an output directory or for one file (one_file). The GPU keeps nothing of a
+    shot between its units (runtime/units.py, shot.sample_windows): it waits here.
+
+    By the tensors' sizes, as dit_draw counts them: a latent is (H / 8, W / 8, 16) in bfloat16,
+    half a byte a padded pixel, 1.01 MiB at 1080p, padded to 1104x1920, and 4.01 MiB at 4K,
+    padded to 2192x3840. The moments, counted in latents, a shot of L in n windows, which share
+    SHARED latents with each neighbour, L + SHARED x (n - 1) latents in all:
+    - "encode", the encode's end: the latent and the buffer it is made from, as large, the
+      posterior's mode or a tiled encode's sums (model.to_latent): 2 L;
+    - "check", the latent checked for NaN and inf where the encode left it (run._sample,
+      shot.finite): the latent, its absolute values and CHECK_MASKS masks of a byte a value:
+      3.5 L;
+    - "windows", from the noise's draw to the last window: the latent and the noise (2 L), and
+      each window's copy as it leaves the GPU, gone once written with an output directory, so
+      the longest window's there, and kept until the shot's decode with one file
+      (units.Units.save_window), so every window's by the last: 3 L + SHARED x (n - 1) then;
+    - "merge", the decode's start: the windows, read back from their files or kept, and what
+      merging them makes (shot.merge_windows): nothing for one window, which is the merged
+      latent; else the merged latent (L) and the latents mixed at a join (SHARED), and from
+      three windows on the latent merged so far, without the last window's own latents, a copy
+      the merge makes anew at each join (L - the last window's length + SHARED);
+    - "decode", through the decode: the merged latent, L.
+    The latent and the noise are gone before the merge (run._sample), and the windows after it:
+    the moments follow one another, and a shot holds the largest, never their sum. One shot at
+    a time: a segment's shots are sampled, then decoded, each one's tensors given up before the
+    next one's (run.run_job).
+
+    The moments on the CPU alone are measured, by torch's memory profiler (tests/test_shot.py,
+    2026-10-12): the check, 2.5 times the latent over it; the merge, this count to the few
+    bytes of the mix's weights, for shots of 13 to 100 latents in 1 to 33 windows; the
+    encode's end, the latent's memory beside its buffer; a window's file is written from its
+    copy and read into one tensor, nothing more allocated. The others move tensors between the
+    GPU and system memory, read from the code: a copy each (shot.moved).
+
+    Not here: a tiled pass's scratch, which the plan allows apart (Plan.scratch_allowance). It
+    is open through a tiled encode's tiles, beside the sums alone (L), and through a tiled
+    decode, beside the merged latent alone (L): never at the moment a shot holds the most."""
+    # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
+    from seedvr2x.runtime.shot import window_layout
+
+    height, width = padded
+    latent = LATENT_CHANNELS * LATENT_VALUE * (height // LATENT_SIDE) * (width // LATENT_SIDE)
+    if cap is None or cap >= latents:
+        windows = [latents]
+    else:
+        windows = [end - start for start, end in window_layout(latents, cap)]
+    kept = sum(windows)
+    merged = latents + SHARED if len(windows) > 1 else 0
+    so_far = latents - windows[-1] + SHARED if len(windows) > 2 else 0
+    shot = latent * latents
+    return {
+        "encode": 2 * shot,
+        "check": 2 * shot + CHECK_MASKS * shot // LATENT_VALUE,
+        "windows": 2 * shot + latent * (kept if one_file else max(windows)),
+        "merge": latent * (kept + merged + so_far),
+        "decode": shot,
+    }
 
 
 @cache
@@ -636,15 +713,15 @@ PHASES: tuple[Phase, ...] = ("encode", "dit", "decode")
 
 @dataclass(frozen=True)
 class Peaks:
-    """What a plan is predicted to take, in bytes but for the last two: which phase bounds it,
-    and by how much, is what --plan prints and the manifest keeps for information."""
+    """What a plan is predicted to take, in bytes where nothing else is said: which phase bounds
+    it, and by how much, is what --plan prints and the manifest keeps for information."""
 
     free: int  # the memory the plan was made in: what it may count its peaks in (Reading.counted)
     budget: int  # free - MARGIN
     encode: int  # each phase's predicted peak on the GPU
     dit: int  # the larger of the longest window's and of the longest shot's draw (dit_draw)
     decode: int
-    host: int  # the system memory the plan takes, the scratch up to its allowance
+    host: int  # the system memory the plan takes, the longest shot's and the scratch's in it
     scratch: int  # the scratch of the longest shot's tiled passes; 0 untiled
     window: int  # the longest window the job really runs, in latents
     tokens: int  # the DiT's tokens per latent
@@ -652,6 +729,10 @@ class Peaks:
     # free where that was read, and whether the run is held to the card (runtime/memory.py).
     reading: Reading
     attention: str  # the attention backend the DiT's peak is the fit of (DIT_ATTENTION)
+    # What the run holds of the longest shot in system memory at the moment it holds the most,
+    # and that moment, one of MOMENTS (host_moments): counted in `host`.
+    shot: int
+    moment: str
 
     def peak(self, phase: Phase) -> int:
         """The predicted peak of `phase`."""
@@ -674,8 +755,9 @@ class Peaks:
         latents. `free` is the memory the plan was made in; beside it, what the driver reported
         free to the process (driver_free, the same figure on a driver that refuses) and what the
         whole card had free (card_free; null where it wasn't read), and the attention backend
-        the DiT's peak was predicted for. PROVISIONAL (implementation, 2026-10-10 and 12): the
-        fields' names."""
+        the DiT's peak was predicted for. Of `host`, the system memory the plan takes, host_shot
+        is the longest shot's part (Peaks.shot). PROVISIONAL (implementation, 2026-10-10 and
+        12): the fields' names."""
         return {
             "free": self.free,
             "driver_free": self.reading.reported,
@@ -687,6 +769,7 @@ class Peaks:
             "decode_peak": self.decode,
             "bound": self.bound,
             "host": self.host,
+            "host_shot": self.shot,
             "scratch": self.scratch,
             "longest_window": self.window,
         }
@@ -705,6 +788,7 @@ class _Job:
     numz_padding: bool
     reading: Reading  # how `free` was read, for the plan's words and its record
     attention: str  # DIT_ATTENTION's
+    one_file: bool  # whether the output is one file, its windows kept in system memory
 
     @property
     def budget(self) -> int:
@@ -737,13 +821,16 @@ def plan(
     numz_padding: bool = False,
     recorded: Plan | None = None,
     attention: str = FLASH_ATTN_2,
+    one_file: bool = False,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (job.target_size), in the GPU memory it may
     count on, less MARGIN, and what it is predicted to take; refused (PlanError) when a pin can't
     be taken exactly, when no plan fits that memory, or when the plan takes more system memory
     than host_available, in bytes (None: not checked). split: whether the decode corrects
     colours; numz_padding is for tests only (cli.NUMZ_PADDING). An output directory and one file
-    plan alike: a shot's units are off the GPU in both (runtime/units.py).
+    (one_file) plan alike on the GPU: a shot's units are off it in both (runtime/units.py). They
+    differ by what the run holds of a shot in system memory, one file's windows waiting there
+    for the shot's decode (host_moments).
 
     `free` is that memory: a number of bytes, what a driver that refuses reports free; or the
     reading the run made of it (memory.Reading), whose `counted` the plan is made in, and whose
@@ -773,8 +860,9 @@ def plan(
        the largest that fit, TILE_MAX at most, each pass with its room (VAE_ROOM), the DiT
        leaving the phase before a tile shrinks; then as much of it left there as fits
        (_resident).
-    Then what a tiled shot's scratch may take of system memory, from host_available
-    (_allowance).
+    Then the system memory: what the run holds there of the job's longest shot at the moment
+    it holds the most (_shot_held), counted with the pinned copies, and what a tiled shot's
+    scratch may take of what host_available has left once both are counted (_allowance).
 
     recorded is the plan of a job resumed that has made units: what shapes the output is taken
     from it as it is, the cap, the tiles and the compile flags, and where the weights are and
@@ -782,7 +870,7 @@ def plan(
     the output a little); one with tiles of which one covers the frame is no plan's, refused
     (check_recorded). Where the weights are is planned for the backend given, a resume's too:
     FlashAttention installed since, or gone, the recorded shape is held to today's fit."""
-    job = _job(free, target, shots, split, numz_padding, attention)
+    job = _job(free, target, shots, split, numz_padding, attention, one_file)
     if pins.swap_blocks is not None and pins.swap_blocks > BLOCKS:
         raise PlanError(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {BLOCKS} blocks, so from 0 to {BLOCKS}"
@@ -818,15 +906,17 @@ def fits(
     split: bool = False,
     numz_padding: bool = False,
     attention: str = FLASH_ATTN_2,
+    one_file: bool = False,
 ) -> str | None:
     """None when every phase of `plan` fits `free` bytes of GPU memory less MARGIN, a VAE pass
     with its room (VAE_ROOM), the DiT's by the larger of its longest window and of its longest
     shot's draw (dit_draw), and the plan host_available bytes of system memory (None: not
-    checked), its scratch's allowance as the plan has it, for a job as plan() takes it; else one
-    sentence naming the first phase that doesn't and what it is short of, in GiB. ValueError for
-    a plan with tiles of which one covers the whole padded frame, which plan() never returns
-    (covers). free and attention as plan takes them."""
-    job = _job(free, target, shots, split, numz_padding, attention)
+    checked), what the run holds of the longest shot there with it (_shot_held) and its
+    scratch's allowance as the plan has it, for a job as plan() takes it; else one sentence
+    naming the first phase that doesn't and what it is short of, in GiB. ValueError for a plan
+    with tiles of which one covers the whole padded frame, which plan() never returns (covers).
+    free, attention and one_file as plan takes them."""
+    job = _job(free, target, shots, split, numz_padding, attention, one_file)
     return _unfit(job, plan, host_available)
 
 
@@ -906,12 +996,13 @@ def said(
     scratch goes to its file instead; what was pinned. DESIGN.md's list but for the times, whose
     lines come with the time estimates. The longest window the job runs is said only where it
     isn't the cap, one pinned or recorded above it. The system memory is said as a refusal for
-    it says it (_host_hundredths): the pinned copies and the allowance to the nearest hundredth
-    of a GiB, and "in all" their sum with the process's own."""
+    it says it (_host_hundredths): the pinned copies, what the run holds of the longest shot at
+    the most, with the moment it does (Peaks.shot, Peaks.moment), and the allowance to the
+    nearest hundredth of a GiB, and "in all" their sum with the process's own."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
-    job = _job(peaks.reading, target, shots, False, numz_padding, peaks.attention)
+    job = _job(peaks.reading, target, shots, False, numz_padding, peaks.attention, False)
     height, width = job.padded
     frames = Counter(shot.frames for shot in shots)
     windows = {count: len(shot_layout(count, plan.window)) for count in frames}
@@ -944,14 +1035,17 @@ def said(
         f" {_resident_said(plan.resident_encode, plan.swapped)}; in the decode,"
         f" {_resident_said(plan.resident_decode, plan.swapped)}"
     )
-    process, pinned, allowance = _host_hundredths(plan)
+    process, pinned, held, allowance = _host_hundredths(plan, peaks.shot)
     left = _left(plan, "the DiT's other parameters", "the VAE")
     if left:
         copies = f"{pinned / 100:.2f} GiB of system memory pinned for {left}"
     else:
         copies = "no system memory pinned, nothing leaving the GPU"
-    in_all = process + pinned + allowance
-    lines.append(f"{copies}; {in_all / 100:.2f} GiB of system memory in all")
+    in_all = process + pinned + held + allowance
+    lines.append(
+        f"{copies}; {held / 100:.2f} GiB for the longest shot at the most,"
+        f" {_MOMENT_SAID[peaks.moment]}; {in_all / 100:.2f} GiB of system memory in all"
+    )
     lines.append(
         f"encode {_pass_said(job, plan.encode_tiles)}, decode"
         f" {_pass_said(job, plan.decode_tiles)}, each held {_gib(VAE_ROOM)} GiB under the budget"
@@ -1016,6 +1110,7 @@ def _job(
     split: bool,
     numz_padding: bool,
     attention: str = FLASH_ATTN_2,
+    one_file: bool = False,
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
@@ -1026,7 +1121,8 @@ def _job(
     lengths = sorted({_latents(shot.frames) for shot in shots})
     frames = max(shot.frames for shot in shots)
     return _Job(
-        reading.counted, target, tuple(lengths), frames, split, numz_padding, reading, attention
+        *(reading.counted, target, tuple(lengths), frames, split, numz_padding, reading),
+        *(attention, one_file),
     )
 
 
@@ -1521,33 +1617,60 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
     """What the plan is predicted to take for the job.
 
     Its system memory: the process's own during the shots, the pinned copies of what leaves the
-    GPU, and what a tiled shot's scratch may take of it, the plan's allowance
-    (Plan.scratch_allowance). PROVISIONAL (implementation, 2026-10-10): the loader's own peak
-    while the weights load, 16.5 GiB, mostly the weights' file mapped (DESIGN.md, Memory planner,
-    Host RAM), isn't counted. PROVISIONAL (implementation, 2026-10-11): a scratch over its
-    allowance goes whole to its memory-mapped file (tiling.Scratch), and the allowance is still
-    counted, as DESIGN.md counts it, for the page cache its mapping works in. Nor is what a
-    tiled encode sums beside its scratch counted, its tiles' moments on the CPU
-    (tiling.encode_tiled): a byte per pixel of the padded frame and per latent of the shot, a
-    twenty-fourth of the scratch, 2.0 GiB for 1,001 frames at 4K. Nor a shot's latent and its
-    noise, which wait in system memory through its windows (shot.sample_windows): as much
-    again, 7.84 GiB for a shot of 1,000 latents at 4K; nor a one-file output's windows, kept
-    there until their shot's decode (units.Units): half a byte, a latent two windows share
-    counted in both."""
+    GPU, what the run holds of the job's longest shot at the moment it holds the most
+    (_shot_held), and what a tiled shot's scratch may take of it, the plan's allowance
+    (Plan.scratch_allowance): their sum. PROVISIONAL (implementation, 2026-10-12): a sum, as
+    DESIGN.md counts the allowance after the rest (Memory planner, Host RAM), though a scratch
+    is never open at the moment a shot holds the most: beside it the run holds one latent's
+    worth of the shot, a tiled encode's sums or the latent a tiled decode reads (host_moments),
+    so that the sum is over what any moment takes by the rest of the shot's part, 1.25 bytes a
+    padded pixel and a latent at least. PROVISIONAL (implementation, 2026-10-10): the loader's
+    own peak while the weights load, 16.5 GiB, mostly the weights' file mapped (DESIGN.md,
+    Memory planner, Host RAM), isn't counted. PROVISIONAL (implementation, 2026-10-11): a
+    scratch over its allowance goes whole to its memory-mapped file (tiling.Scratch), and the
+    allowance is still counted, as DESIGN.md counts it, for the page cache its mapping works
+    in."""
     latents = _longest(job.lengths, plan.window)
+    held, moment = _shot_held(job, plan)
     return Peaks(
         job.free,
         job.budget,
         _vae_peak(job, "encode", plan.encode_tiles, plan.resident_encode, plan.swapped),
         _dit_need(job, plan.window, plan.swapped, plan.vae_in_dit),
         _vae_peak(job, "decode", plan.decode_tiles, plan.resident_decode, plan.swapped),
-        HOST_RESIDENT + _pinned(plan) + plan.scratch_allowance,
+        HOST_RESIDENT + _pinned(plan) + held + plan.scratch_allowance,
         _kept(job, plan),
         latents,
         tokens(job.padded, 1),
         job.reading,
         job.attention,
+        held,
+        moment,
     )
+
+
+def _shot_held(job: _Job, plan: Plan) -> tuple[int, str]:
+    """What the run holds in system memory of the job's longest shot under the plan's cap, in
+    bytes, at the moment it holds the most, and that moment (host_moments), the first in the
+    shot's order where two hold as much: the plan counts it with the pinned copies, for the
+    longest shot alone, the run holding one shot's tensors at a time. No shorter shot holds
+    more: under a cap, the most a shot holds never falls as the shot grows
+    (tests/test_planner.py holds it).
+
+    As the run is, the check of the latent after its encode, 1.75 bytes a padded pixel and a
+    latent: 3.54 MiB a latent at 1080p (3,709,440 bytes), 14.05 at 4K (14,730,240). But under
+    a cap of 5 latents, the shortest a shot is cut by: there the merge at the decode's start
+    holds more, or with one file the last window, its windows as many latents as the merge's
+    copies or more, for most shots from 15 latents and every one from 27 (21 with one file).
+    A shot of 1,000 latents takes 3.45 GiB at 1080p, and at 4K 13.72, or 14.36 under a cap of
+    5. PROVISIONAL (implementation, 2026-10-12): counted as the run is. Of the 1.75 bytes,
+    1.25 are the check's own, and from three windows on a merge copies the shot twice over: a
+    check read slice by slice and a merge written into one tensor would leave a shot the 1 byte
+    of its latent and its noise, and its windows where they are kept; DESIGN.md decides the
+    run's steps."""
+    moments = host_moments(job.padded, job.lengths[-1], plan.window, job.one_file)
+    moment = max(MOMENTS, key=lambda moment: moments[moment])
+    return moments[moment], moment
 
 
 def _kept(job: _Job, plan: Plan) -> int:
@@ -1561,30 +1684,32 @@ def _kept(job: _Job, plan: Plan) -> int:
 def _allowance(job: _Job, plan: Plan, host_available: int | None) -> int:
     """What a tiled shot's scratch may take of system memory under the plan, in bytes
     (Plan.scratch_allowance), a larger one going to its file: half of what the host has
-    available once the pinned copies are counted, and no more than the longest tiled shot needs
-    (DESIGN.md, Memory planner, Host RAM: provisional, until measured on a consumer host); 0 when
-    no pass is tiled. It shapes no bit.
+    available once the pinned copies and what the run holds of the longest shot (_shot_held)
+    are counted, and no more than the longest tiled shot needs (DESIGN.md, Memory planner, Host
+    RAM: provisional, until measured on a consumer host); 0 when no pass is tiled. It shapes no
+    bit.
 
     PROVISIONAL (implementation, 2026-10-11), two choices DESIGN.md doesn't make. No more either
-    than what the host has left once the process's own memory is counted with the pinned copies
+    than what the host has left once the process's own memory is counted with them
     (HOST_RESIDENT), down to nothing, every scratch then going to its file: so that a job is
-    refused for the system memory the process and its pinned copies take (_unfit), never for an
-    allowance: half of what the copies leave is more than the process leaves of it where they
-    leave under 4.8 GiB. And with what the host has available unknown (None), the longest tiled
-    shot's scratch, ALLOWANCE_UNKNOWN_HOST at most."""
+    refused for the system memory the process, its pinned copies and its longest shot take
+    (_unfit), never for an allowance: half of what they leave is more than the process leaves
+    of it where they leave under 4.8 GiB. And with what the host has available unknown (None),
+    the longest tiled shot's scratch, ALLOWANCE_UNKNOWN_HOST at most."""
     kept = _kept(job, plan)
     if host_available is None:
         return min(kept, ALLOWANCE_UNKNOWN_HOST)
-    left = host_available - _pinned(plan)
+    left = host_available - _pinned(plan) - _shot_held(job, plan)[0]
     return max(0, min(kept, left // 2, left - HOST_RESIDENT))
 
 
 def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     """Why the plan doesn't fit the job's memory (fits): the first phase over the budget, a VAE
     phase judged with its room as the planner chose it (Peaks.need), or the system memory it
-    takes over what is available, the process's own, the pinned copies and the scratch's
-    allowance; None when it fits. A plan of the planner's own is never refused for its
-    allowance, which is nothing where the first two leave nothing (_allowance)."""
+    takes over what is available, the process's own, the pinned copies, what the run holds of
+    the longest shot and the scratch's allowance, each named with what it takes where that is a
+    hundredth of a GiB or more; None when it fits. A plan of the planner's own is never refused
+    for its allowance, which is nothing where the first three leave nothing (_allowance)."""
     peaks = _peaks(job, plan)
     blocks = _count(plan.swapped, "block")
     vae = "" if plan.vae_in_dit else " and the VAE off the GPU"
@@ -1612,14 +1737,17 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     if host_available is not None and peaks.host > host_available:
         # Each part as the plan's lines say it, and the total their sum as said, so that the
         # message's figures add up (_host_hundredths).
-        process, pinned, allowance = _host_hundredths(plan)
+        process, pinned, held, allowance = _host_hundredths(plan, peaks.shot)
         taken = [(process, "for the process")]
         if pinned:
             left = _left(plan, "the DiT's other parameters", "the VAE's weights")
             taken.append((pinned, f"pinned for {left} that leave the GPU"))
+        if held:
+            shot = f"{_count(job.frames, 'frame')} ({_count(job.lengths[-1], 'latent')})"
+            taken.append((held, f"for the longest shot, {shot}, {_MOMENT_SAID[peaks.moment]}"))
         if allowance:
             taken.append((allowance, "for a tiled shot's scratch"))
-        total = process + pinned + allowance
+        total = process + pinned + held + allowance
         # What is there is rounded down, and said a hundredth under the total at least: the
         # parts being rounded to the nearest, a host within 0.02 GiB of what the plan takes
         # would else read as having it.
@@ -1632,15 +1760,32 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     return None
 
 
-def _host_hundredths(plan: Plan) -> tuple[int, int, int]:
+def _host_hundredths(plan: Plan, shot: int) -> tuple[int, int, int, int]:
     """What the plan takes of system memory, as its line and a refusal for it say it (said,
     _unfit), in hundredths of a GiB: the process's own (HOST_RESIDENT), the pinned copies
-    (_pinned) and the scratch's allowance (Plan.scratch_allowance), each to the nearest, as the
-    plan's other figures are; the total either says is their sum, so that its figures add up.
+    (_pinned), what the run holds of the longest shot, `shot` bytes (Peaks.shot), and the
+    scratch's allowance (Plan.scratch_allowance), each to the nearest, as the plan's other
+    figures are; the total either says is their sum, so that its figures add up.
     One plan's pinned memory then reads the same in both, 15.81 GiB with every part of the
     weights away, DESIGN.md's figure (Memory planner, Host RAM): rounded up, as what is taken of
     the GPU's memory is, a refusal would say 15.82 where the plan's line says 15.81."""
-    return _nearest(HOST_RESIDENT), _nearest(_pinned(plan)), _nearest(plan.scratch_allowance)
+    return (
+        _nearest(HOST_RESIDENT),
+        _nearest(_pinned(plan)),
+        _nearest(shot),
+        _nearest(plan.scratch_allowance),
+    )
+
+
+# A shot's moments in system memory (MOMENTS) as the plan's line and a refusal name the one
+# that holds the most, after the shot.
+_MOMENT_SAID = {
+    "encode": "at its encode's end, its latent and the buffer it is made from",
+    "check": "as its latent is checked after its encode",
+    "windows": "at its last window, its latent and its noise beside its windows",
+    "merge": "as its decode merges its windows",
+    "decode": "through its decode, its latent",
+}
 
 
 # The attention backends as the plan's lines name them (model.load_models' own words for SDPA).

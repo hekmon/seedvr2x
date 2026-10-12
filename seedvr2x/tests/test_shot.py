@@ -1,7 +1,9 @@
 """The shot pipeline's parts on the CPU: windows, mixing weights, padding, the encoder's input
 and split's reference, streamed encode and decode; the DiT's windows over a stand-in, their one
-draw of noise and what waits where between them; and a shot's tiled encode and decode
-(runtime/tiling.py) through encode_shot and decode_shot, over test_tiling.py's stand-in VAE."""
+draw of noise and what waits where between them; a shot's tiled encode and decode
+(runtime/tiling.py) through encode_shot and decode_shot, over test_tiling.py's stand-in VAE; and
+what a shot's steps on the CPU allocate in system memory, which the planner counts
+(planner.host_moments)."""
 
 import logging
 import weakref
@@ -21,7 +23,7 @@ from test_tiling import MEMORY, Failing, StandIn, failing_at, latent_of, mapped,
 from test_units import channel_major, job
 
 from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.runtime import model, shot, tiling
+from seedvr2x.runtime import model, planner, shot, tiling, units
 from seedvr2x.runtime.job import OutputSegment, Shot, output_size, padded_size
 from seedvr2x.runtime.plan import Tiles
 from seedvr2x.runtime.shot import (
@@ -29,7 +31,9 @@ from seedvr2x.runtime.shot import (
     decode_shot,
     encode_shot,
     encoder_inputs,
+    finite,
     input_slices,
+    merge_windows,
     mix_weights,
     pad_4n1,
     padded_length,
@@ -742,3 +746,92 @@ def test_tiled_encode_failing_leaves_nothing(stand_in: model.Models, tmp_path: P
         encode_shot(stand_in, Reads(frames), count, LARGE, 42, **on_disk)
     assert not path.exists() and vae.carry.memory is None
     assert not list(tmp_path.iterdir())
+
+
+def allocated(run: Callable[[], object]) -> tuple[int, int]:
+    """(most, left): the most bytes torch allocated in system memory while run() ran, over what
+    was allocated before it, and what was left of them at its end, its result still held. By
+    torch's memory profiler, every allocation and release of its CPU allocator in order."""
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    with torch.profiler.profile(activities=activities, profile_memory=True) as profiled:
+        result = run()
+    assert profiled.profiler is not None and profiled.profiler.kineto_results is not None
+    # torch's stubs don't give a memory event's bytes.
+    recorded: list[Any] = list(profiled.profiler.kineto_results.events())
+    events = [event for event in recorded if event.name() == "[memory]"]
+    most = left = 0
+    for event in sorted(events, key=lambda event: event.start_ns()):
+        left += event.nbytes()
+        most = max(most, left)
+    del result
+    return most, left
+
+
+# The padded frame the planner's count is held to below, and its latents: (16, 24) positions.
+SMALL_PADDED = (128, 192)
+
+
+def contiguous(latents: int, seed: int = 0) -> torch.Tensor:
+    """A window as the DiT gives it, (t, 16, 24, 16) bfloat16, contiguous."""
+    return latent_of(latents, (16, 24), seed)
+
+
+def test_the_check_allocates_two_and_a_half_latents() -> None:
+    # The check of an encode's latent for NaN and inf, on the CPU, where the encode leaves it
+    # (run._sample): torch allocates the latent's absolute values, as large, and three masks of
+    # a byte a value, 2.5 times a bfloat16 latent's bytes, all given back; with the latent, the
+    # planner's "check" (planner.host_moments), whatever the latent's length and its memory.
+    for latents in (40, 200):
+        latent = contiguous(latents).permute(3, 0, 1, 2).contiguous().permute(1, 2, 3, 0)
+        assert not latent.is_contiguous() and latent.dtype == torch.bfloat16
+        most, left = allocated(lambda latent=latent: finite(latent, "a latent"))
+        assert (most, left) == (latent.nbytes + planner.CHECK_MASKS * latent.numel(), 0)
+        assert most == 2.5 * latent.nbytes
+        counted = planner.host_moments(SMALL_PADDED, latents, None)
+        assert counted["check"] == latent.nbytes + most == 3.5 * latent.nbytes
+
+
+@pytest.mark.parametrize(("latents", "cap"), [(13, 13), (48, 30), (48, 8), (100, 7), (100, 5)])
+def test_the_merge_allocates_what_the_planner_counts(latents: int, cap: int) -> None:
+    # A shot's windows merged at its decode's start (run._decode): beside the windows, torch
+    # allocates the merged latent, the 2 latents mixed at a join, and from three windows on the
+    # latent merged before the last window, made anew at each join; the planner's "merge" with
+    # the windows (planner.host_moments), to the few bytes of the mix's weights. One window is
+    # the merged latent itself: nothing.
+    layout = window_layout(latents, cap)
+    windows = [contiguous(end - start, seed) for seed, (start, end) in enumerate(layout)]
+    kept = sum(window.nbytes for window in windows)
+    one = windows[0].nbytes // (layout[0][1] - layout[0][0])
+    most, left = allocated(lambda: merge_windows(windows, layout))
+    counted = planner.host_moments(SMALL_PADDED, latents, cap)
+    assert counted["decode"] == latents * one
+    assert 0 <= kept + most - counted["merge"] <= 64
+    assert left == (0 if len(layout) == 1 else counted["decode"])
+    # And with one file, the last window holds what it counts: the latent, the noise and every
+    # window kept.
+    assert planner.host_moments(SMALL_PADDED, latents, cap, True)["windows"] == (
+        2 * latents * one + kept
+    )
+
+
+def test_a_window_s_file_allocates_the_window_alone(tmp_path: Path) -> None:
+    # A window written to its file from its copy in system memory, and read back for the decode
+    # (units.DiskUnits): torch allocates nothing to write it, and the tensor alone to read it.
+    save = units._save  # pyright: ignore[reportPrivateUsage]
+    load = units._load  # pyright: ignore[reportPrivateUsage]
+    window, path = contiguous(8), tmp_path / "window_0000.pt"
+    assert allocated(lambda: save(window, path)) == (0, 0)
+    assert allocated(lambda: load(path)) == (window.nbytes, window.nbytes)
+
+
+def test_the_encode_s_end_allocates_the_latent_beside_its_buffer(stand_in: model.Models) -> None:
+    # An encode's end (model.to_latent): the latent's own memory beside the buffer it is made
+    # from, as large, the planner's "encode" (planner.host_moments); what its slices allocate on
+    # their way, 2 latents at a time at the most, is the device's in a run, on the CPU here.
+    latents = 40
+    means = contiguous(latents).permute(3, 0, 1, 2).unsqueeze(0).contiguous()
+    one = means.nbytes // latents
+    most, left = allocated(lambda: model.to_latent(stand_in, means))
+    counted = planner.host_moments(SMALL_PADDED, latents, None)
+    assert counted["encode"] == means.nbytes + left == 2 * latents * one
+    assert left <= most <= left + 8 * one
