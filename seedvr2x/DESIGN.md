@@ -1,9 +1,9 @@
 # seedvr2x design
 
 > Status: **being built.** It holds the decisions taken and the questions still open, and the
-> code follows it: milestones 1, 2, 4 and 5 and the I/O layer have passed (see
-> [Validation milestones](#validation-milestones)). Each decision links to the measurement it
-> rests on in [../research/](../research/).
+> code follows it: milestones 1, 2, 4, 5 and 6 and the I/O layer have passed, and milestone 3
+> but for its time estimates (see [Validation milestones](#validation-milestones)). Each
+> decision links to the measurement it rests on in [../research/](../research/).
 
 ## Goal
 
@@ -77,6 +77,10 @@ never requires it.
   GiB free for one: refused, naming the free VRAM it takes and the largest size that fits
   (see [Memory planner](#memory-planner))
 - Variable frame rate sources: refused with a clear message, as sptenc does
+- A frame rate above 1,000 fps (decided on 2026-10-12, to be built): every FFV1 output is
+  Matroska, whose millisecond can't tell two such frames apart. Written today, seedvr2x's own
+  master at 2,000 fps is refused when read back, 15 of its 30 frames a whole frame off; 1,000
+  fps itself holds.
 - Sources refused in v1, each with a clear message, every reason a source has given in one
   numbered refusal:
   - HDR: the PQ (`smpte2084`) and HLG (`arib-std-b67`) transfers. The model was trained on SDR
@@ -510,8 +514,8 @@ they differ and by which metrics, and how users are guided to them. What is know
     - The cache holds only the files downloaded, each once, by its hash. It sits in
       `~/.cache/huggingface` unless `HF_HOME` (or `HF_HUB_CACHE`) puts it on another disk, and
       `HF_HUB_OFFLINE` keeps the network out. The log names it, and before a download the free
-      space of its disk is checked against the file's pinned size: too little is refused,
-      naming the directory, `HF_HOME` and `--model-dir`.
+      space of its disk is checked against the pinned sizes of every file still to fetch: too
+      little is refused, naming the directory, `HF_HOME` and `--model-dir`.
     - `--model-dir` becomes optional: given, the files are read from it by name and nothing is
       downloaded.
     - Each of seedvr2x's own files is checked against its pinned size and SHA-256 before it
@@ -597,13 +601,30 @@ from a cut list.
   rules, never from an outside splitter's joins: of an earlier split's 411 joins, 63 scored
   under scdet's threshold of 10 and 14 under 4
   ([scene-detection.md](../research/docs/scene-detection.md)). Segments split losslessly can
-  be joined back into one file: a directory given is refused, saying how. The join must keep
-  the frame grid, as `sptenc concat` does and as seedvr2x's own assembly does: a file either
-  of them builds is never refused (seedvr2x's own output, read back as a source, is part of
-  milestone 6's acceptance). ffmpeg's concat demuxer gives every frame back,
-  but its timestamps 1 ms early per join, and such a file is refused once it has drifted half
-  a frame from its declared rate's timeline, 21 joins at 24 fps (see the frame rate, below).
-  The advice names a join by ffmpeg alone that holds the grid, tested with that rule.
+  be joined back into one file: a directory given is refused, saying how. The join must keep the
+  frame grid, as seedvr2x's own assembly does and as `sptenc concat` does where it snaps: a file
+  seedvr2x's assembly builds is never refused (its own output, read back as a source, is part of
+  milestone 6's acceptance), nor a join `sptenc concat` has snapped.
+  - ffmpeg's concat demuxer alone gives every frame back, but its joins drift: at 24000/1001 in
+    Matroska, 0.77 ms early a join on segments split from one file and 0.31 ms late on segments
+    encoded on their own; 0.35 to 0.37 ms at 30000/1001; a whole millisecond where the segments
+    hold 24 or 48 frames; nothing at 25 fps nor from MP4. Such a file is refused once it has
+    drifted half a frame from its declared rate's timeline, after 21 to 68 joins on the files
+    measured (see the frame rate, below).
+  - The refusal gives three joins, each a command to copy. By ffmpeg and ffprobe alone: each
+    segment listed with its exact duration, its frames over the rate, and every timestamp
+    snapped to the grid in one stream copy, tested with that rule. By `sptenc concat`, for
+    segments of its split. And, where no stream copy holds (segments that carry audio, MPEG
+    program streams, transport streams of a single frame), the pictures remade as an FFV1
+    master, numbered at the rate as they come, every one kept. The commands take the rate from
+    two shell variables and the segments in name order, stop before ffmpeg on a name holding an
+    apostrophe, which the list can't quote (status 1, no file made), and take a directory whose
+    name begins with a hyphen.
+  - `sptenc concat` declines to snap files whose videos don't start as long after their files,
+    or files of different rates, and says so: such a join is judged as any other file. Joined by
+    the sptenc of 2026-10-11, segments with AAC audio in Matroska, or whose video starts after
+    their audio, came out off the grid and were refused, four files of 37: defects of sptenc's
+    snap, fixed in sptenc on 2026-10-12, its fix still to be run on those files.
 
 Cuts matter for quality, not only for the VAE context: see [Pipeline](#pipeline-per-shot).
 
@@ -670,15 +691,35 @@ Decoding goes through an ffmpeg pipe:
     files measured leaves it.
   - Comparing declared rates alone fails on Matroska: sptenc found a 24/30 fps mix declared
     24/1 for both.
+  - Matroska declares a frame's duration, in whole nanoseconds, and ffprobe gives it back as a
+    fraction of terms up to 30,000: 60000/1001 comes back as 19001/317, 48000/1001 as 7001/146,
+    120000/1001 as 29011/242, from an FFV1 master as from a finished file. Such a reading of N ×
+    1000/1001, N a whole number up to 240, is read as that rate, WebM alike, and an info line
+    says so (built on 2026-10-12): 86 of the 240 come back as themselves, and taken as given the
+    others ran off their grid, 0.76 ms after 4 hours at 60000/1001. MP4 holds the rate itself.
+  - Under 6 fps or above 1,000, ffprobe's rate for a Matroska stream can be its guess from the
+    timestamps instead: seedvr2x's own master written at 3000/1001 declares 12000/1001, at
+    2000/1001 2/1, a master of one frame 1000/1, and was refused when read back, or read at the
+    guess. There the stream is read at its frame duration's rate (ffprobe's `avg_frame_rate`),
+    an info line saying so where the two differ, and at ffprobe's rate where it has no frame
+    duration. So a Matroska stream is read by its frame's duration at every rate, and one whose
+    frames contradict it is a bad file like any other: 48 frames at 24 fps under a duration of
+    one second, read before at ffprobe's guess, are refused, naming 24/1.
+  - A stream read at another rate than ffprobe gives is said to declare ffprobe's rate once; the
+    rate rule's messages then say the rate it is read at (the plain refusal's own two sentences
+    still say declared: to bring in line).
   - A file whose timestamps contradict its declared rate is a bad file: refused like any
     other, never reinterpreted on seedvr2x's own (the user's decision). The case measured: a
     Blu-ray remux declared 24/1 whose frames step at 24 fps, with one frame in 500 held 62–63
     ms instead of 42, which keeps every frame within ±10.9 ms of a steady 24000/1001
     timeline, its audio's ([seeking.md](../research/docs/seeking.md), mechanism 7).
-  - The fix is the user's, and seedvr2x guides it. When the timestamps follow another rate,
-    exactly (to one tick of the file's time base) or, where sptenc's rule fails as there, one
-    of ffmpeg's standard rates within half a frame, the message gives that rate, the largest
-    deviation, and two fixes:
+  - The fix is the user's, and seedvr2x guides it. A refusal names another rate in two cases
+    only (2026-10-12): the timestamps are that rate's exactly, to one tick of the file's time
+    base, over 7 timestamps at least; or, where sptenc's rule fails as there, it is the declared
+    rate's NTSC twin, N × 1000/1001 for a whole number N and N for N × 1000/1001, nothing else,
+    once it holds every frame within half a frame and the two timelines have parted by a frame
+    or more over the file. The message then gives that rate, the largest deviation, and two
+    fixes:
     - Remake the file: an FFV1 master at that rate, the other streams copied with it, a clean
       file for every tool. ffmpeg keeps every frame doing so: on that file's first 3,000
       frames, `fps=24000/1001`, `-fps_mode cfr -r 24000/1001` and a plain retiming all gave
@@ -686,20 +727,43 @@ Decoding goes through an ffmpeg pipe:
       rate as an input option (`-r:v:0`), which numbers the frames as they come: on a file
       whose video starts 23 ms after its audio, `fps` dropped a frame and doubled another, and
       `-fps_mode cfr` doubled the first. It costs about 80 GB for that film (0.53–0.55 MB per
-      frame, against the source's 14.5 GB) and a full encode.
-    - Or `--frame-rate R`, an override like the matrix's and the sample aspect's: the frames
-      are taken at R, accepted only if every one lies within half a frame of R's timeline,
-      so none is dropped or doubled, and R is recorded as a setting. The same frames on the
-      same timeline, without the intermediate file. R is then the job's rate everywhere: the
-      writers, the segments' merge rule, the manifest.
+      frame, against the source's 14.5 GB) and a full encode. ffmpeg warns there of two
+      codecs named for the video, the copy then FFV1: it is what is meant, and the docs say
+      so.
+    - Or `--frame-rate R`, an override like the matrix's and the sample aspect's: the frames are
+      taken at R, accepted only if every one lies within half a frame of R's timeline, or sits
+      on R's grid with places left empty, by the rule of missing frames (below), so none is
+      dropped or doubled, and R is recorded as a setting. The same frames on the same timeline,
+      without the intermediate file. R is then the job's rate everywhere: the writers, the
+      segments' merge rule, the manifest.
+  - Why a rate is named so narrowly. Named by half a frame alone, as first built, a short file
+    was offered every multiple of 1/12 fps (109/12 fps for one), and by R × 1000/1001 of any R,
+    fifty one-second segments joined 1 ms late were named 24000000/1002001 fps. And a few frames
+    whose rounded steps happen to be equal were named a rate that isn't theirs: on 17 common
+    rates, up to 4 frames in milliseconds, 5 in 90 kHz ticks and 6 in microseconds, which 7
+    timestamps clear. Not every rate: 165 fps in milliseconds is still named 500/3 up to 17
+    frames, and `--frame-rate` then holds every frame to half a frame of the rate given.
+  - Anything else that sptenc's rule refuses, frames missing on the grid aside (below), keeps
+    sptenc's refusal as it is, a variable frame rate or a declared rate that isn't the frames'
+    own: no rate is named and `--frame-rate` isn't offered, a rate found by fitting being a
+    guess. `--frame-rate` still takes such a file at a rate the user knows, checked as above.
+  - The twin and a join. Timestamps can't tell a join of one-second segments by ffmpeg's concat
+    demuxer from a mislabelled file: fifty segments of 24 frames at 24000/1001, one join 2 ms
+    early, lie within 1.3 ms of 24/1's timeline and are named 24/1. So a refusal that names the
+    twin says first that such a join reads so too, and is joined again on the frame grid, as a
+    directory's refusal says how. As built it says so in both directions; decided on 2026-10-12,
+    to be built: only where the whole rate N is named by half a frame for a file declared N ×
+    1000/1001, the one way a join was seen to read. Segments at a whole rate last whole
+    milliseconds, and a Blu-ray remux declared 24/1 that runs at 24000/1001, the case this
+    guidance was made for, is no join.
   - When the timestamps follow no rate exactly, as a file joined by ffmpeg's concat demuxer
     does, timestamps alone can't tell a drifting join from a retagged file: the message says
     how far the frames wander and from which frame, and the ways out are a join that keeps the
     frame grid, or the remake at the declared rate. `--frame-rate` can't hold there.
   - Missing frames are filled, not refused (decided with the user, 2026-10-10). Frames that
     sit on the declared rate's grid with places left empty, as when a decoder drops a
-    keyframe's leading pictures (found on a Blu-ray episode: two frames at its second
-    keyframe, [seeking.md](../research/docs/seeking.md), mechanism 1), have one reading, the
+    keyframe's leading pictures (found on a Blu-ray episode: two frames right after its first
+    frame, [seeking.md](../research/docs/seeking.md), mechanism 1), have one reading, the
     one a player shows: the frame before the hole, held. seedvr2x repeats that frame in each
     empty place, says so (the frame, the hole's length, how many holes) and records it: the
     output keeps the source's length and stays with its audio. A contradicted rate has two
@@ -710,6 +774,27 @@ Decoding goes through an ffmpeg pipe:
       dropped or doubled" could no longer be checked.
     - A file whose encoder dropped repeated frames on a constant grid is read the same way,
       each drawing held as it was. The share of filled places is said, however large.
+    - The rule, as built (2026-10-11). A jump in the timestamps is refused first. No hole is
+      looked for where sptenc's rule passes: the strict test judges. Where it fails by the
+      spread of the frames' steps, or under `--frame-rate` when R's timeline doesn't hold, each
+      frame takes its nearest place counted from the first, and the file is refused when a frame
+      has no timestamp, lies exactly between two places or shares one. A step over k places must
+      last k frames to within half a frame, and to sptenc's 1 ms a place. And the steps' spans
+      must share no divisor above 1: frames at 12 fps declared 24/1 stay a contradicted rate,
+      named 12/1, not a film half missing. Anything else keeps the refusal it had.
+    - Frame numbers count places from there on, everywhere: the frame index, the shots, the
+      segments, the cut list and `--cuts`, the manifest. The cut list's header says so for a
+      source with holes: a list made by a tool that counts decoded frames is off by the frames
+      missing before each cut. A finished file and a `--segment-cmd` output get a frame for each
+      place.
+    - A warning says it on every run: the first hole, how many there are and the places filled;
+      from a tenth of the places, that an encoder dropping repeated frames leaves such a file.
+    - Kept as built: a join whose step is a whole number of frames reads as such a file does,
+      the frame before each gap held; frames missing before the first frame or after the last
+      aren't seen; and a file with holes on its declared rate's twin's grid isn't named the
+      twin: it is refused as a variable frame rate, and `--frame-rate` with the twin reads it.
+    - The episode it was decided for is read whole: 99,585 frames, two of them filled right
+      after the first.
   - The pass costs one software decode: 171 fps on an HEVC master, 730–2,360 on 1080p H.264
     (a 26 Mbit/s Blu-ray: 735 on 16 threads, about 4 min for a 2-hour film), and 204 fps on
     16 threads, 315–326 on 48, on a 4K UHD HEVC remux: at least 19–30 min for a 4-hour film
@@ -755,8 +840,11 @@ Decoding goes through an ffmpeg pipe:
     takes 0.47 ms per 1080p frame, which keeps up with the first pass on one thread.
   - The index is written once with the first pass's record, beside the manifest, which names
     it by its SHA-256; a resume trusts it as it trusts that record. It holds the shot
-    detector's probabilities too (see [Shot detection](#shot-detection)).
-  - Built on 2026-10-10 and exact on measurement's real sources: 664 targets in 21 cases,
+    detector's probabilities too (see [Shot detection](#shot-detection)). Its rows are
+    places: where frames are missing, a held row carries the frame before it, with its
+    checksum and error flag, and the file is then at version 2, which older code refuses;
+    without one it is version 1's, byte for byte.
+  - Built on 2026-10-10 and exact on measurement's real sources: 704 targets in 22 cases,
     every one at the first try but 9 in a passage of dense keyframes (8 keyframes back at
     most, 0.34 s at worst) and 2 damaged frames, read from the start. A read takes 0.15–0.27 s
     (median) on Blu-ray and web H.264, and 1.24 s on a long-GOP HEVC master, 16 s at worst.
@@ -814,10 +902,10 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
   `models/`'s script and pulled from seedvr2x's Hugging Face repo (see [Weights](#weights)).
   - It reads every frame of the first pass's decode, scaled to 48×27 as its official extraction
     scales them (ffmpeg's default scaler; another scaler is untested), on a fixed number of
-    threads, 4, so that its input doesn't depend on the CPU count. The scaled bytes were the
-    same on 1, 2, 16 and 32 threads for 10 pixel formats, and one thread, as first built,
-    capped a fast pass at about half its speed (839–897 fps against 1,811–2,213 on 1080p
-    cartoons).
+    threads, 4, so that its input doesn't depend on the CPU count. A test holds the scaled bytes
+    of 18 pixel formats to be the same on 1 thread, on 4 and on ffmpeg's own count, and one
+    thread, as first built, capped a fast pass at about half its speed (820–843 fps against
+    1,427–1,474 on 1080p cartoons).
   - It runs on the job's GPU, idle during the first pass, 4 windows a forward, and gives its
     memory back before the models load (0.56 GiB allocated at its peak, 0.66 reserved). Its
     weights (30 MB) are fetched and checked only when it runs, so not with `--cuts`.
@@ -827,6 +915,8 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
     810 fps under sustained load, 107 s per hour of source, and is then a fast pass's bound
     (723–808 fps on five films, where they decode at 807–1,126); where the decode is the
     slower, 2,200–2,500 fps. On the CPU, 490–575 fps on 16 threads, 2.5 to 3.3 min per hour.
+    Those passes had the scaler on one thread: on four, the pass with the detector on the GPU
+    ran at 779–899 fps on the five films and 1,403–1,480 on 1080p cartoons.
 - **A cut:** a detection is a run of frames whose single-frame probability (the sigmoid of
   TransNetV2's single-frame head) reaches the threshold, one per run, at its peak. The cut is
   the frame after the peak: TransNetV2 marks the outgoing shot's last frame (offset −1 on 98%
@@ -900,9 +990,17 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
     cut comes within the second. Given the list's milliseconds on its command line, VLC lands
     within 3 frames of the cut on a file with B-frames, mostly before it, which a time rounded
     up serves better than one rounded down; mpv lands on the cut frame.
-  - `--plan FILE` also writes a playlist beside the list, an entry per possible cut starting a
-    second before it, so that VLC goes from one to the next with no time to type (the user's
-    go, 2026-10-10; built and tested in VLC with the detector's follow-ups).
+  - `--plan FILE` also writes two playlists beside the list when the shots are detected,
+    `FILE.cuts.m3u8` of the detected cuts and `FILE.possible.m3u8` of the possible ones, an
+    entry a cut, from a second before it to three after, so that VLC goes from one to the next
+    with no time to type (the user's go, 2026-10-10). None is written without a cut of its kind,
+    an older one then being left and said, and none with `--cuts`. FILE and both playlists are
+    held to the same refusals, compared with the source, the cut list given and the output as
+    files, not as names. Played in VLC on 19 possible cuts: an entry starts within 3 frames of
+    its start, 20 to 26 frames before the cut on 18 of them, and stops from a frame before its
+    stop to 9 after; the cut was inside the entry on 19 of 19 in MP4 and in Matroska, on 18 of
+    19 with the MP4 played as a list, and on 14 of 19 in MPEG-TS. The detected cuts' playlist
+    wasn't played.
   - A possible cut inside a run that holds a detection isn't listed, the run being the
     detection's (0 to 7 such runs per labelled recording).
 - The milestone-1 regression's clip holds two cuts at 0.3 (0.324 and 0.388: two short shots at
@@ -1356,6 +1454,11 @@ compressed is the user's choice: afterwards, from the master, or during the run 
   tags checked by ffprobe. Our writers give a `yuv420p10le` bit-identical to its output. They
   set every tag both on the frames (`setparams`) and on the encoder: ffmpeg n9 converts frames
   whose tags differ from the encoder's.
+  And they give the rate to ffmpeg's raw input twice, as its `-framerate` and as `-r`: with the
+  first alone ffmpeg guessed the rate from 101 fps up, and seedvr2x's own masters at 120000/1001
+  and 240000/1001 were written at 120/1 and 240/1, one place skipped in 1,100 frames and the
+  file read back with a frame more (found and fixed on 2026-10-12, in the `--segment-cmd` stream
+  too). At six rates in use the files are the bytes of before, but 44 that ffmpeg draws.
 - **PNG** (16-bit) as an alternative, one directory per segment, frames numbered from
   `000000`. ffmpeg's PNG encoder writes the primaries and transfer as cICP, cHRM and gAMA
   chunks from the frame tags, and none for an untagged frame. So PNG copies the tags as the
@@ -1994,11 +2097,13 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     The NVIDIA driver is recorded through NVML for information, not compared: the math kernels
     ship with torch.
   - input, the source: path and mtime for information; the content, compared by size and
-    SHA-256 (hashed by a thread while the first pass decodes); the first pass's facts, the
-    frame index by its name, size and SHA-256, and idet's counts, for information. Also
-    compared: the pixel format it is decoded from, and the primaries and transfer the output
-    copies. An
-    accepted ffmpeg change must read and tag the source exactly as before.
+    SHA-256 (hashed by a thread while the first pass decodes); the first pass's facts: its
+    frames, counted in places, and where frames were missing what was filled (the frames
+    decoded, the holes, the places filled, the first hole and the longest), compared on a resume
+    as the frame count is; the frame index by its name, size and SHA-256, and idet's counts, for
+    information. Also compared: the pixel format it is decoded from, and the primaries and
+    transfer the output copies. An accepted ffmpeg change must read and tag the source exactly
+    as before.
   - output, shots (windows, encoded, windows done), and segments (bytes when finished)
   - plan: what shapes the output (the window cap, the tiles and their overlap, the compile
     flags), compared on resume, and what doesn't, for information (see
@@ -2013,14 +2118,18 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   fsync. A unit is recorded only once its file is whole. The manifest is at version 3 since
   2026-10-09, its input one record, the source: a change of shape bumps the version, so that
   older code refuses a newer manifest cleanly. A version-2 manifest is still read, for a
-  resume to refuse it as another job and for `seedvr2x verify` to check its segments. New fields stay additive, and a
-  manifest written by older code is refused anyway, since its `settings.code` differs.
+  resume to refuse it as another job and for `seedvr2x verify` to check its segments. New
+  fields stay additive, and a manifest written by older code is refused anyway, since its
+  `settings.code` differs. A write that fails removes its temporary file, the manifest's as
+  the frame index's, the checksums', the cut list's and the playlists'; a unit's is discarded
+  by the next run.
 - **Resuming:** the same command on the same `-o`, a directory or a file, with no `--resume`
   flag.
   - Refused, with each difference listed: any difference in settings, the source (by content),
     models or code, except progress. A moved or touched source with the same content is
     accepted, since path and mtime are information.
-  - The comparison has two stages:
+  - The comparison has two stages, and what the command line alone can refuse is refused
+    ahead of both, before the model files and the first pass:
     - Before the first pass: settings (models hashed), environment and the source's content.
       Another job is refused without any decode, and the refusal lists only these
       differences, not the layout differences that would follow from them.
@@ -2033,11 +2142,23 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     - The new environment and its `environment_changes` record are written with the next unit
       made. A resume stopped before making one leaves the manifest as it was, and the job
       still resumes in its old environment. Two things rewrite it at once: a plan taken up or
-      planned again (below), and a frame index made again.
-    - Re-running a finished job doesn't rewrite its manifest, and makes nothing again, its
-      frame index and its plan included: no memory is read, and nothing can "no longer fit".
-      A finished file's job is finished once the file is in place: with every segment made
-      and no file yet, the same command assembles.
+      planned again (below), and a frame index made again by the same ffmpeg and conversions.
+    - Re-running a finished job doesn't rewrite its manifest, and makes nothing again, its frame
+      index and its plan included: no memory is read, and nothing can "no longer fit". Its frame
+      index, kept when the job ends, may be deleted: only `--plan FILE` on the finished job
+      reads it. A finished file's job is finished once the file is in place: with every segment
+      made and no file yet, the same command assembles.
+    - A finished directory job is finished in any environment (2026-10-12): run again under
+      another GPU, stack or ffmpeg, it is said finished, nothing being made, with no refusal and
+      no flag asked. The difference is said in one line, and its manifest keeps the environment
+      that made it. It is still held to its settings, its model files, its source's content and
+      its directory. A finished file's job with every segment made and no file yet isn't
+      finished: its assembly is made in the new environment, refused without the flag as any
+      resume. Decided, to be built: `--plan FILE` on such a job asks no flag either, where it is
+      refused without one today, its list written when the frame index is trusted, by the same
+      ffmpeg and conversions; and the finished state is known before anything asks for the GPU,
+      where today such a job still wants a CUDA device and, under WSL2, asks the driver (see
+      [Allocator](#allocator)).
   - **A plan** is a job with no unit made: what `--plan FILE` leaves in an output directory
     or in a finished file's work directory, its manifest and its frame index (see
     [Shot detection](#shot-detection)).
@@ -2053,7 +2174,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     attention change doesn't run the detector again, so that a job's cuts stay its own. That
     saves a full decode per resume, about 17 min on a 2-hour HEVC master.
   - The frame index is derived data: missing or damaged on a resume, the first pass runs again
-    and writes it.
+    and writes it; a finished job makes none again.
   - The directory must hold what the manifest names and nothing of anyone else's, dotfiles
     included: anything else is refused, never deleted.
   - These are discarded: `.partial` files, an unfinished segment's file, unrecorded units, and
@@ -2080,6 +2201,11 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     so that a script tells a job stopped by the clock, to be run again, from a finished one
     (0) and from a Ctrl-C (130). The longest unit, a segment's decode, sets how early it may
     stop: `--plan` prints it.
+- **The source's end** is checked as its last frame is read, before the last shot's latent is
+  recorded (2026-10-12). A source that gives a frame more there than its first pass counted
+  stops the run. The count is the job's record, which the same command trusts and would stop on
+  again: the message names the source and says to run the job to another `-o`, whose first pass
+  counts again, and it says what is kept, not that the same command resumes.
 - Exiting frees the GPU entirely.
 - **Non-finite values** (NaN, inf) stop the run, in both colour correction modes, with a
   message naming the stage, shot, window or frames. numz writes NaN patches about 63 px wide
@@ -2227,7 +2353,8 @@ explanation.
 - how shots are found: TransNetV2, why a missed cut costs more than a false one, and for content
   it gets wrong (fast action anime first, fast camera work) `--cut-threshold`, the possible
   cuts `--plan` lists, a cut list (`--cuts`), and how to check a cut in a player (VLC takes a
-  time's whole seconds, then steps a frame a key press)
+  time's whole seconds, then steps a frame a key press; the two playlists `--plan` writes go
+  from cut to cut); frame numbers count places where a source has frames missing
 - the model: v1 runs ByteDance's 7B in fp16, the sharp 7B by default and the regular one as the
   reference every check is made against; phase 2 brings the smaller files, each with its
   measured quality
@@ -2266,10 +2393,12 @@ explanation.
 - the refused sources (VFR, HDR, interlaced, telecined, rotated, cropped, unusual pixel
   formats or matrices, timestamps that jump, tags that contradict each other),
   and what to do with each; for a rate its timestamps contradict, the two fixes and what each
-  costs (see [Input](#input))
+  costs; a directory of segments and the three joins that keep the grid; missing frames,
+  filled and said (see [Input](#input))
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
   transfer kept, square pixels)
-- resume: the same command resumes; what refuses a resume and why; `--accept-env-change`
+- resume: the same command resumes; what refuses a resume and why; `--accept-env-change`,
+  which a finished directory job never needs
 - stopping at a set time: `--until`, what it stops before, its exit code (75) for scripts that
   run a job night after night, and the longest unit `--plan` prints
 - integrity: the per-frame checksums kept with the output, and `seedvr2x verify` to check a
@@ -2324,6 +2453,13 @@ writers, and the planner needs real shot lengths.
    that a resume seeks instead of decoding from the start; the frame-rate refusal's guidance
    and `--frame-rate`; idet's warning. The milestone-1 regression stays bit-identical with the
    detector running before the models.
+   Its follow-ups, built on 2026-10-11 and 12 (see [Input](#input) and [Shot
+   detection](#shot-detection)): missing frames filled; a rate named only when it is the
+   timestamps' own or the declared rate's twin; Matroska's rates read by the frame's duration; a
+   directory's refusal with its three joins; the two playlists; a finished directory job said
+   finished in any environment; the source's end checked; the masters' rate above 100 fps. On 40
+   real sources, run before the last patch, nothing changed but the one with missing frames, now
+   read; the whole GPU suite, 32 tests, passed with them in.
 4. The planner, BlockSwap and tiling (milestone 3), then `--until`. On the 96 GB card at
    1080p, windows and the streamed decode already bound memory. The planner's inputs (budget,
    margin, the DiT's and the tiled VAE's peaks, 4K limits, measured times) are in
@@ -2396,8 +2532,8 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      and each plan refused one notch under. Then, on the stack as it stood before its merge
      with the assembly's commits: a 4K shot of 101 frames on a card emulated at 24 GB, a
      shot of 48 latents in 8 windows peaking as one-window shots do, and the whole GPU
-     suite, 32 tests. On the merged code milestone 1's regression passed; the whole suite
-     there is still to run.
+     suite, 32 tests. On the merged code the whole suite passed again, 32 tests, and once
+     more with the detector's follow-ups in.
    - On a real desktop card, an RTX 5090 under WSL2 held to its card (2026-10-12): the same
      job alone, beside a program holding 8 GiB, stopped then resumed, and with NVML silent,
      the same frames each time; each phase within 0.3 GiB of its prediction but the
@@ -2467,7 +2603,9 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
    picture's; each file read back by seedvr2x with no warning, every frame within 0.5 ms of
    its place, at 24000/1001, 25 and 30000/1001. On the GPU: 49 frames in 3 segments with 6
    other streams, stopped and resumed to the same packets, and through `--segment-cmd` with
-   libx265. Left: the whole GPU suite on it, and ffmpeg 7.1 (n9.0.2 ran everything).
+   libx265; the whole GPU suite, 32 tests, passed on it. Tests hold seedvr2x's own files to be
+   read back at their rate from 3000/1001 to 240000/1001. Left: ffmpeg 7.1 (n9.0.2 ran
+   everything).
 7. **Visual review** of long runs by the user: fast motion, where the frames inside a latent
    group can ghost (see [To measure](#to-measure)); held pictures, where a false cut's step
    would show (see [Shot detection](#shot-detection): the fallback gate); and shots' first
@@ -2499,11 +2637,6 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   Taking each frame from a run whose grid ends a group there would take 4 runs per shot, the
   grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Not
   measured (about 2 GPU h on the 8 clips).
-- **60000/1001 through Matroska.** Matroska holds a frame's duration in whole nanoseconds,
-  and ffprobe reads 60000/1001 back as 19001/317, from an FFV1 master as from a finished
-  file: seedvr2x takes that for the rate, with no warning, the two grids 0.76 ms apart after
-  4 hours. 24000/1001, 25, 30000/1001, 50 and 120 read exact. To settle with the rate's
-  rules (see [Input](#input)).
 - **The VAE's room** (see [Memory planner](#memory-planner), the budget). Why a VAE pass
   runs out of memory 1 to 1.7 GiB under the free memory, where a DiT window, which asks for
   pieces as large, runs 0.6 under: not known. Each failing plan ran once. To measure, now
