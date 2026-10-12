@@ -322,6 +322,17 @@ def declare(
             sited,
             decoded,
         )
+    if stream.ffprobe_rate is not None:
+        # Said once, here (design's decision of 2026-10-12: "is read as that NTSC rate, said in
+        # an info line"): the rate the file says is not the job's (media/probe.py, parse).
+        logger.info(
+            "%s: declares %s fps, Matroska's reading of %s (its frame duration in whole"
+            " nanoseconds): read as %s",
+            path,
+            rate.fraction(stream.ffprobe_rate),
+            rate.fraction(stream.frame_rate),
+            rate.fraction(stream.frame_rate),
+        )
     if stream.dovi is not None:
         # Said, since what Dolby Vision adds to that layer is lost.
         logger.info(
@@ -822,17 +833,18 @@ def _leaves(declares: Fraction, index: FrameIndex) -> str:
     on their own 0.31 ms late, after 68; segments of exactly 24 or 48 frames 1 ms early, after
     21. At 30000/1001, 0.35 to 0.37 ms early, 41 to 45 joins. None at 25 fps, nor from MP4
     segments."""
-    # PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has this test,
-    # Input, and "a file either of them builds is never refused", of sptenc concat and seedvr2x's
-    # own assembly): the test as written, on the rate ffprobe gives, which for a Matroska file is
-    # its frame duration in whole nanoseconds read back as the nearest fraction of terms up to
-    # 30000 (sptenc's core.SameFrameRate): 60000/1001 comes back 19001/317, 48000/1001 7001/146
-    # and 120000/1001 29011/242, 0.9, 3.0 and 3.2 ns a frame off (ffmpeg n9.0.2). Timestamps in
-    # milliseconds at those rates leave the timeline of the rate declared at frames 8,939,970,
-    # 3,335,976 and 1,161,780, 41 h, 19 h and 2 h 41 min in: such a file, sptenc's or seedvr2x's
-    # own included, is refused from there, naming the rate its timestamps are exactly, which
-    # --frame-rate takes. A rate Matroska reads worse, 1000000/33333 as 30/1, 1e-5 off, leaves at
-    # frame 48,503, 27 min in, as no rate's exactly.
+    # On the rate the stream is read at, which for a Matroska file is no longer always the one
+    # ffprobe gives: Matroska holds a frame's duration in whole nanoseconds, read back as the
+    # nearest fraction of terms up to 30000, 60000/1001 as 19001/317, 48000/1001 as 7001/146 and
+    # 120000/1001 as 29011/242, 0.9, 3.0 and 3.2 ns a frame off (ffmpeg n9.0.2), and timestamps
+    # in milliseconds at those rates left the timeline of the rate so declared at frames
+    # 8,939,970, 3,335,976 and 1,161,780, 41 h, 19 h and 2 h 41 min in, where sptenc's files and
+    # seedvr2x's own were refused, against DESIGN.md's "a file either of them builds is never
+    # refused". Settled by design (2026-10-12): such a rate is read as the NTSC rate it is the
+    # reading of, where the stream is probed (media/probe.py, parse; rate.matroska_reading), and
+    # this test runs on that rate's timeline. A rate Matroska reads worse that is no NTSC
+    # rate's reading, 1000000/33333 as 30/1, 1e-5 off, still leaves at frame 48,503, 27 min in,
+    # as no rate's exactly.
     on = rate.timeline(index, declares)
     if on.holds:
         return ""
@@ -901,8 +913,9 @@ def _way_out(on: Timeline, index: FrameIndex) -> str:
 def _cost(change: Fraction) -> str:
     """What a rate does to an output's duration, `change` its relative change, not 0, as a
     refusal gives it: in percent to 3 decimals, "0.100% shorter", "4.000% shorter", or to as
-    many as show its first two digits: "0.000038% shorter" for 120000/1001 read as Matroska
-    declares it, 29011/242 (_leaves), where 3 decimals said 0.000%."""
+    many as show its first two digits: "0.000038% shorter" for 120000/1001 declared 29011/242,
+    Matroska's reading of it, by a file in another container (_leaves), where 3 decimals said
+    0.000%."""
     percent = abs(float(change)) * 100
     decimals = max(3, 1 - math.floor(math.log10(percent)))
     return f"{percent:.{decimals}f}% {'shorter' if change < 0 else 'longer'}"

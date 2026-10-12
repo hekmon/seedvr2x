@@ -44,6 +44,14 @@ NTSC = Fraction(1000, 1001)
 # steps over 3 ms allow any from 400 to 2,000 fps, some 19,000 of them), so none is given.
 MOST_RATES = 1000
 
+# Matroska's reading of an NTSC rate (matroska_reading): the highest N of N * 1000/1001 looked
+# for; a second in nanoseconds, Matroska's unit for a frame's duration; and the most ffmpeg's
+# Matroska demuxer lets a term of the rate it reads from that duration be
+# (libavformat/matroskadec.c:3050-3051 at n9.0.2).
+MOST_NTSC = 240
+NANOSECONDS = 1_000_000_000
+FFPROBE_TERMS = 30000
+
 # The FFV1 master the remake makes, as seedvr2x writes its own (media/writer.py, FFV1Writer):
 # every frame a keyframe, each slice with its CRC.
 FFV1 = ("-c:v:0", "ffv1", "-level:v:0", "3", "-g:v:0", "1", "-slicecrc:v:0", "1")
@@ -253,6 +261,105 @@ def _numerators(
     if 2 * widest >= INT64_SAFE:
         return ticks.astype(object) * (p * n) - steps.astype(object) * (q * d), q * n
     return ticks * (p * n) - steps * (q * d), q * n
+
+
+def matroska_reading(declared: Fraction) -> Fraction | None:
+    """The NTSC rate N * 1000/1001, N a whole number from 1 to MOST_NTSC, that `declared`, the
+    rate ffprobe gives for a Matroska stream, in frames per second, is its reading of; None for
+    any other rate, an NTSC rate read back as itself included. Design's decision of 2026-10-12:
+    "A Matroska file's declared rate that is ffprobe's reading of an NTSC rate's frame duration
+    in whole nanoseconds ... is read as that NTSC rate"; media/probe.py applies it (parse).
+
+    Matroska holds no rate but a frame's duration, DefaultDuration, in whole nanoseconds.
+    ffmpeg's muxer writes it truncated, 1000000000 * den / num in integers
+    (libavformat/matroskaenc.c:1932-1936 at n9.0.2), and its demuxer reads it back as the
+    nearest fraction of terms up to 30000 (matroskadec.c:3048-3051, av_reduce), the stream's
+    avg_frame_rate, and its r_frame_rate too between 5 and 1,000 fps (matroskadec.c:3053-3055).
+    Measured with ffmpeg n9.0.2 and mkvmerge v82.0, for each N from 1 to 240 (2026-10-12; FFV1,
+    a file of one frame and one of 30; H.264 at ten of them): from N = 6 up, every rate ffprobe
+    gave, r_frame_rate and avg_frame_rate, is av_reduce's of 10^9 over the truncated duration;
+    86 of the 240 come back as themselves, N up to 30 and those above whose fraction reduces
+    (33000/1001 is 3000/91), 24000/1001 and 30000/1001 among them, and 154 as another fraction:
+    48000/1001 as 7001/146, 50000/1001 as 29021/581, 60000/1001 as 19001/317, 100000/1001 as
+    999/10, 120000/1001 as 29011/242, 240000/1001 as 29011/121. mkvmerge writes the same
+    truncated duration when given the rate (--default-duration 0:60000/1001fps), and keeps a
+    file's own when it remuxes it. Under 6, ffprobe's r_frame_rate is its guess from the
+    timestamps (2/1 for 2000/1001 over 30 frames, 1000/1 for one frame): no reading, and the
+    rate is its own fraction there anyway.
+
+    The readings taken, each computed (_av_reduce), none tabled:
+
+    - of the duration truncated, and of the duration rounded to the nearest nanosecond, which
+      no muxer measured writes and design takes all the same ("48000/1001 -> 7001/146 if the
+      muxer truncates, 26997/563 if it rounds: ... take both"): another fraction for 18 of the
+      240;
+    - and of the duration ffmpeg's muxer writes again from such a reading, a stream copy of the
+      file, as seedvr2x's assembly and sptenc's concat make of segments: the same reading for
+      all but four of the 240 (N = 160, 222, 228 and 240): 240000/1001 comes back 29011/121
+      from the file ffmpeg wrote, and 23017/96 from a stream copy of it and from every copy
+      after (measured: durations of 4,170,833, 4,170,831 and 4,170,830 ns).
+
+    A reading that is itself a rate a file declares, one of those looked for (TWELFTHS, NTSC),
+    is left as declared: of the 240, 167000/1001's alone, 1001/6 fps, a multiple of 1/12. No
+    reading is another NTSC rate, nor two rates' reading. 999/10, 999/5 and 999/8 fps, read as
+    100000/1001, 200000/1001 and 125000/1001, are none of those rates; a Matroska file at 99.9
+    fps declares 999/10 as well (10,010,010 ns), and can't be told from one at 100000/1001
+    (10,010,000 ns) by what ffprobe gives."""
+    # PROVISIONAL (implementation, 2026-10-12, questions for design: the decision names the
+    # readings of the NTSC rate's own duration, truncated or rounded). (1) The stream copy's
+    # reading is taken too: without it, seedvr2x's own finished file at 240000/1001 declares
+    # 23017/96 and is read at it. (2) N up to 240, each measured, ffmpeg's own highest standard
+    # rate (libavformat/demux.c:2287-2303); of the 751 from 250 to 1,000, 58 have a reading
+    # that is a multiple of 1/12 fps. (3) 999/10, 999/5 and 999/8 are read as NTSC rates, not
+    # as the decimals they also are.
+    n = round(declared * 1001 / 1000)
+    if not 1 <= n <= MOST_NTSC:
+        return None
+    true = n * NTSC
+    if declared == true or _declared_by_files(declared):
+        return None
+    exact = NANOSECONDS / true
+    readings: set[Fraction] = set()
+    for duration in (math.floor(exact), math.floor(exact + Fraction(1, 2))):
+        reading = _av_reduce(NANOSECONDS, duration, FFPROBE_TERMS)
+        while reading not in readings:
+            readings.add(reading)
+            # What a stream copy of the file declares: the duration ffmpeg writes from the rate
+            # it read, truncated, read back.
+            reading = _av_reduce(NANOSECONDS, math.floor(NANOSECONDS / reading), FFPROBE_TERMS)
+    return true if declared in readings else None
+
+
+def _declared_by_files(rate: Fraction) -> bool:
+    """Whether a rate is one of those looked for (TWELFTHS, NTSC): a multiple of 1/12 fps, or
+    N * 1000/1001."""
+    return (rate * TWELFTHS).denominator == 1 or (rate / NTSC).denominator == 1
+
+
+def _av_reduce(numerator: int, denominator: int, most: int) -> Fraction:
+    """numerator / denominator, both positive, as libavutil's av_reduce gives it with terms up
+    to `most` (libavutil/rational.c:35-78 at n9.0.2, line for line): itself when its terms fit,
+    else the last convergent of its continued fraction whose terms do, or the semiconvergent
+    after it when that one is nearer."""
+    divisor = math.gcd(numerator, denominator)
+    numerator, denominator = numerator // divisor, denominator // divisor
+    before, last = (0, 1), (1, 0)
+    if numerator <= most and denominator <= most:
+        return Fraction(numerator, denominator)
+    while denominator:
+        quotient = numerator // denominator
+        following = (quotient * last[0] + before[0], quotient * last[1] + before[1])
+        if following[0] > most or following[1] > most:
+            if last[0]:
+                quotient = (most - before[0]) // last[0]
+            if last[1]:
+                quotient = min(quotient, (most - before[1]) // last[1])
+            if denominator * (2 * quotient * last[1] + before[1]) > numerator * last[1]:
+                last = (quotient * last[0] + before[0], quotient * last[1] + before[1])
+            break
+        before, last = last, following
+        numerator, denominator = denominator, numerator - denominator * quotient
+    return Fraction(*last)
 
 
 def said(rate: Fraction) -> str:

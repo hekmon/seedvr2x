@@ -8,7 +8,10 @@ rate's timeline: other rates declared, refused naming the rate when the timestam
 exactly, joins by ffmpeg's concat demuxer that drift half a frame, refused as no rate's, with the
 remake that puts them back; and what stays read, constant rates to their time base's rounding at
 any length, joins that keep the frame grid or drift less, a video starting after its audio. The
-command line's run with --frame-rate is test_cli_run.py's.
+command line's run with --frame-rate is test_cli_run.py's. Matroska's reading of an NTSC rate
+(rate.matroska_reading, media/probe.py's parse): each reading taken, a stream probed read at the
+NTSC rate, its timestamps held for hours, and seedvr2x's own master and finished file read back
+at the rate they were written at.
 Missing frames (DESIGN.md, Input: "Missing frames are filled, not refused"; media/source.py's
 _on_grid and in_places): timestamps made here that sit on a rate's grid with places left empty,
 read in places, with what the source's warning says, and what stays refused, each with its
@@ -43,10 +46,12 @@ from test_index import joined_ts
 from test_probe import has_encoder
 
 from seedvr2x.media import ffmpeg, rate
+from seedvr2x.media.assembly import assemble
 from seedvr2x.media.conversion import conversion_for
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.grid import Filling, Hole, filling, places
 from seedvr2x.media.index import NOPTS, FrameIndex
+from seedvr2x.media.probe import VideoStream, parse
 from seedvr2x.media.scan import Discontinuity, Scan, scan, timing_error
 from seedvr2x.media.source import (
     Declared,
@@ -57,6 +62,7 @@ from seedvr2x.media.source import (
     in_places,
     timing_refusal,
 )
+from seedvr2x.media.writer import FFV1Writer, Tags
 
 
 def _usable() -> bool:
@@ -1064,24 +1070,246 @@ def test_half_a_frame_off_the_declared_timeline_refused_a_tick_less_read() -> No
             )
 
 
-def test_matroskas_reading_of_a_rate_holds_for_hours() -> None:
-    # PROVISIONAL (media/source.py, _leaves; a question for design). A Matroska file declares
-    # 120000/1001 as 29011/242, ffprobe's reading of its frame duration in whole nanoseconds,
-    # 3.2 ns a frame off: timestamps at 120000/1001, in milliseconds, hold that timeline for
-    # 1,161,780 frames, 2 h 41 min, read; a frame more, refused by the rule as written, naming
-    # the rate they are exactly, with what the declared one costs, said to its first digits.
-    true, declared = Fraction(120000, 1001), Fraction(29011, 242)
-    scanned = rounded(1_161_781, true, Fraction(1, 1000))
+MATROSKA = "matroska,webm"  # ffprobe's name for the container (media/probe.py, CONTAINER)
+MP4 = "mov,mp4,m4a,3gp,3g2,mj2"
+
+
+def probed(said: str, container: str | None = MATROSKA) -> VideoStream:
+    """A stream as probe reads it from a file whose stream ffprobe gives the rate `said`, in the
+    container it names so, or naming none (media/probe.py, parse): no frame read."""
+    stream = {"codec_name": "ffv1", "width": 64, "height": 48, "pix_fmt": "gbrp16le"}
+    rates = {"r_frame_rate": said, "avg_frame_rate": said}
+    named = {} if container is None else {"format": {"format_name": container}}
+    return parse(
+        Path("made.mkv"), json.dumps(named | {"streams": [stream | rates]}), first_frame=False
+    )
+
+
+def test_matroskas_readings_of_the_ntsc_rates() -> None:
+    # What ffprobe reads back from a Matroska file at N * 1000/1001 fps, as measured with ffmpeg
+    # n9.0.2 and mkvmerge v82.0 (rate.matroska_reading): the frame's duration in whole
+    # nanoseconds, truncated, read as the nearest fraction of terms up to 30000; each read as
+    # its NTSC rate, the rounded duration's reading too, and a stream copy's, which ffmpeg
+    # writes from the rate it read (240000/1001: 29011/121, then 23017/96).
+    readings = {
+        48: ("7001/146", "26997/563"),
+        50: ("29021/581",),
+        60: ("19001/317",),
+        100: ("999/10",),
+        120: ("29011/242",),
+        240: ("29011/121", "23017/96"),
+    }
+    for n, read in readings.items():
+        for said in read:
+            assert rate.matroska_reading(Fraction(said)) == Fraction(n * 1000, 1001), said
+    # The durations themselves, ffmpeg's av_reduce line for line: 60000/1001's 16,683,333 ns,
+    # 48000/1001's truncated and rounded, 240000/1001's after a stream copy; a fraction whose
+    # terms fit is itself.
+    for nanoseconds, read in (
+        (16_683_333, "19001/317"),
+        (20_854_166, "7001/146"),
+        (20_854_167, "26997/563"),
+        (4_170_831, "23017/96"),
+        (41_708_333, "24000/1001"),
+        (33_366_666, "30000/1001"),
+        (40_000_000, "25"),
+    ):
+        assert rate._av_reduce(1_000_000_000, nanoseconds, 30000) == Fraction(read)
+    # A rate read back as itself, or no NTSC rate's reading, is left: the NTSC rates up to
+    # 30000/1001 and those whose fraction reduces, whole rates, a neighbour of a reading, the
+    # decimal of 23.976 and of 47.952.
+    for said in ("24000/1001", "30000/1001", "3000/91", "25", "50", "60", "120", "1000/33"):
+        assert rate.matroska_reading(Fraction(said)) is None, said
+    for said in ("19001/318", "19002/317", "2997/125", "5994/125", "7001/147"):
+        assert rate.matroska_reading(Fraction(said)) is None, said
+    # A reading that is itself a rate files declare is left as declared: 167000/1001's, 1001/6
+    # fps, a multiple of 1/12, the one such reading of the 240. And N beyond 240, the highest
+    # measured: 241000/1001's reading, 13001/54.
+    assert rate._av_reduce(1_000_000_000, 1_001_000_000 // 167, 30000) == Fraction(1001, 6)
+    assert rate.matroska_reading(Fraction(1001, 6)) is None
+    beyond = rate._av_reduce(1_000_000_000, 1_001_000_000 // 241, 30000)
+    assert beyond == Fraction(13001, 54) and rate.matroska_reading(beyond) is None
+    # Every N of the range: its two durations' readings are read as it, or are itself, but
+    # 167's; no reading is another rate's.
+    seen: dict[Fraction, int] = {}
+    for n in range(1, rate.MOST_NTSC + 1):
+        true = Fraction(n * 1000, 1001)
+        for nanoseconds in (1_001_000_000 // n, (2_002_000_000 + n) // (2 * n)):
+            reading = rate._av_reduce(1_000_000_000, nanoseconds, 30000)
+            found = rate.matroska_reading(reading)
+            assert found == (None if reading == true or n == 167 else true), n
+            assert seen.setdefault(reading, n) == n
+    assert sum(1 for reading, n in seen.items() if reading != Fraction(n * 1000, 1001)) == 172
+
+
+def test_a_matroska_streams_reading_is_probed_as_its_ntsc_rate() -> None:
+    # Where the rate enters (media/probe.py, parse): a Matroska stream ffprobe gives 19001/317
+    # for is 60000/1001's, what ffprobe gave kept beside it; the same rate from MP4, which holds
+    # 60000/1001 as it is, or from a probe that names no container, is left as given; so is a
+    # Matroska stream's own rate.
+    stream = probed("19001/317")
+    assert (stream.frame_rate, stream.ffprobe_rate) == (Fraction(60000, 1001), Fraction(19001, 317))
+    assert stream.avg_frame_rate == Fraction(19001, 317)
+    for container in (MP4, "mpegts", None):
+        stream = probed("19001/317", container)
+        assert (stream.frame_rate, stream.ffprobe_rate) == (Fraction(19001, 317), None)
+    for said in ("24000/1001", "25/1", "60/1"):
+        stream = probed(said)
+        assert (stream.frame_rate, stream.ffprobe_rate) == (Fraction(said), None)
+
+
+@pytest.mark.parametrize(
+    ("true", "said", "left_at"),
+    [
+        ("120000/1001", "29011/242", 1_161_780),
+        ("60000/1001", "19001/317", 8_939_970),
+        ("48000/1001", "7001/146", 3_335_976),
+        ("48000/1001", "26997/563", 4_297_039),
+        ("240000/1001", "23017/96", 515_400),
+    ],
+)
+def test_matroskas_reading_of_an_ntsc_rate_is_read_as_that_rate(
+    true: str, said: str, left_at: int
+) -> None:
+    # A Matroska file declares 120000/1001 as 29011/242, ffprobe's reading of its frame duration
+    # in whole nanoseconds, 3.2 ns a frame off: timestamps at 120000/1001, in milliseconds, hold
+    # that timeline for 1,161,780 frames, 2 h 41 min, and were refused a frame further, naming
+    # the rate they are exactly. Design's decision (2026-10-12): the stream is read as the NTSC
+    # rate, which its frames hold however far in, DESIGN.md's "never refused" of a file sptenc
+    # or seedvr2x builds; that rate is the source's, the output's. The same file as ffprobe
+    # gives it from another container is refused from that frame, as before; MP4 holds the rate
+    # itself.
+    rate_read, rate_said = Fraction(true), Fraction(said)
+    scanned = rounded(left_at + 1, rate_read, MS)
+    stream = probed(said)
+    assert (stream.frame_rate, stream.ffprobe_rate) == (rate_read, rate_said)
+    in_matroska = declaring(stream.frame_rate)
+    assert timing_refusal(in_matroska, scanned) == ""
+    if left_at < 2_000_000:
+        source = counted(in_matroska, FirstPass(scanned.frames, index=scanned.index))
+        assert (source.frame_rate, source.stream.frame_rate) == (rate_read, rate_read)
+    as_given = declaring(probed(said, MP4).frame_rate)
+    refusal = timing_refusal(as_given, scanned)
+    assert refusal.startswith(
+        f"1 of its {left_at + 1} frames lies half a frame or more from its place on the timeline"
+        f" of the rate it declares, {said}, from frame {left_at}, up to "
+    )
+    if said == "29011/242":
+        # Whole: the rate its timestamps are exactly, and what the declared one costs, said to
+        # its first digits.
+        assert refusal.endswith(
+            f" up to 4.2 ms (0.50 of a frame), and {another_rate(rate_read, '0.000038% shorter')}"
+        )
     index = scanned.index
     assert index is not None
-    held = scanned_at(index.pts[:-1], Fraction(1, 1000))
-    assert timing_refusal(declaring(declared), held) == ""
-    assert timing_refusal(declaring(declared), scanned) == (
-        "1 of its 1161781 frames lies half a frame or more from its place on the timeline of the"
-        " rate it declares, 29011/242, from frame 1161780, up to 4.2 ms (0.50 of a frame), and"
-        f" {another_rate(true, '0.000038% shorter')}"
+    assert timing_refusal(as_given, scanned_at(index.pts[:-1], MS)) == ""
+
+
+def test_a_file_truly_at_a_readings_rate() -> None:
+    # A Matroska file whose frames truly run at 29011/242 fps, their timestamps that rate's to
+    # the millisecond: read as 120000/1001, it is read while every frame holds that timeline,
+    # 1,163,181 frames, 2 h 41 min, the two rates 3.8e-7 apart; a frame more, refused by the
+    # declared timeline's rule, as no rate's exactly: 29011/242 is no rate files declare, and
+    # their mean rate, rounded, holds them to no tick's spread (rate.exact). Its ways out the
+    # remake at 120000/1001, which numbers its frames as they come, every one kept; and
+    # --frame-rate 29011/242, which holds them, for who knows the file.
+    truly = Fraction(29011, 242)
+    stream = probed("29011/242")
+    assert stream.frame_rate == Fraction(120000, 1001)
+    declared = declaring(stream.frame_rate)
+    scanned = rounded(1_163_182, truly, MS)
+    index = scanned.index
+    assert index is not None
+    assert timing_refusal(declared, scanned_at(index.pts[:-1], MS)) == ""
+    assert timing_refusal(declared, scanned) == (
+        "1 of its 1163182 frames lies half a frame or more from its place on the timeline of the"
+        " rate it declares, 120000/1001, from frame 1163181, up to 4.2 ms (0.50 of a frame), and"
+        f" {no_rate(Fraction(120000, 1001))}"
     )
-    assert timing_refusal(declaring(declared, true), scanned) == ""
+    assert timing_refusal(replace(declared, rate_override=truly), scanned) == ""
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(("fps", "said"), [("60000/1001", "19001/317"), ("48000/1001", "7001/146")])
+def test_seedvr2xs_own_matroska_files_read_back_at_their_rate(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, fps: str, said: str
+) -> None:
+    # seedvr2x's FFV1 master and its finished file are Matroska files: written at 60000/1001,
+    # they declare 19001/317 to ffprobe, and were read back at it (DESIGN.md, Open questions).
+    # Read back through seedvr2x itself, each is at the rate it was written at, said in an info
+    # line with what ffprobe gave: two segments by the master's writer (media/writer.py,
+    # FFV1Writer), then their assembly with a source's other streams (media/assembly.py,
+    # assemble), a stream copy.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    written = Fraction(fps)
+    frames = np.full((30, 48, 64, 3), 0.5, np.float32)
+    segments = [(tmp_path / "seg_000000.mkv", 12), (tmp_path / "seg_000001.mkv", 18)]
+    first = 0
+    for path, count in segments:
+        with FFV1Writer(path, "gbrp16le", 64, 48, written, Tags()) as writer:
+            writer.write(frames[first : first + count])
+        first += count
+        declared = declare(path)
+        assert (declared.stream.frame_rate, declared.stream.ffprobe_rate) == (
+            written,
+            Fraction(said),
+        )
+        assert (
+            f"{path}: declares {said} fps, Matroska's reading of {fps} (its frame duration in"
+            f" whole nanoseconds): read as {fps}"
+        ) in caplog.text
+    source_path = tmp_path / "source.mkv"
+    source_frames = ("-f", "lavfi", "-i", f"testsrc2=s=64x48:r={fps}", "-frames:v", "30")
+    run(*source_frames, "-c:v", "ffv1", str(source_path))
+    source = examine(source_path)
+    assert source.index is not None and (source.frames, source.frame_rate) == (30, written)
+    work = tmp_path / "final.mkv.work"
+    work.mkdir()
+    final = tmp_path / "final.mkv"
+    assemble(final, segments, source.frame_rate, source_path, source.index, work)
+    caplog.clear()
+    back = examine(final)
+    assert streams(final)[0]["r_frame_rate"] == said
+    assert (back.frames, back.frame_rate, back.stream.ffprobe_rate) == (30, written, Fraction(said))
+    assert (
+        f"{final}: declares {said} fps, Matroska's reading of {fps} (its frame duration in whole"
+        f" nanoseconds): read as {fps}"
+    ) in caplog.text
+    # --frame-rate still overrides, the rate declared said as it is read: the whole rate
+    # beside it, which holds 30 frames within half a frame.
+    whole = Fraction(round(written))
+    forced = examine(final, frame_rate=whole)
+    assert (forced.frame_rate, forced.stream.frame_rate) == (whole, written)
+    assert f"at {whole} fps (--frame-rate; it declares {fps})" in caplog.text
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize(
+    ("fps", "written", "copied"),
+    [("120000/1001", "29011/242", "29011/242"), ("240000/1001", "29011/121", "23017/96")],
+)
+def test_a_matroska_file_and_its_stream_copy_read_at_their_ntsc_rate(
+    tmp_path: Path, fps: str, written: str, copied: str
+) -> None:
+    # A Matroska file at 120000/1001 or 240000/1001, as ffmpeg writes it from frames that hold
+    # the rate, and a stream copy of it, whose frame duration ffmpeg writes again from the rate
+    # it read: 240000/1001 declares 29011/121, its copy 23017/96 and every copy after; each
+    # read at the NTSC rate. Not media/writer.py's own master at these two rates, which isn't
+    # at them: ffmpeg guesses its rawvideo input's rate among its standard rates, 120/1 for
+    # 120000/1001, and the master declares 120/1, a place of that grid skipped every 1,000
+    # frames (reported to design, 2026-10-12).
+    first = tmp_path / "written.mkv"
+    made = ("-f", "lavfi", "-i", f"testsrc2=s=64x48:r={fps}", "-frames:v", "30")
+    run(*made, "-c:v", "ffv1", str(first))
+    files = [first]
+    for name in ("copied.mkv", "copied_again.mkv"):
+        run("-i", str(files[-1]), "-c", "copy", str(tmp_path / name))
+        files.append(tmp_path / name)
+    for path, said in zip(files, (written, copied, copied), strict=True):
+        assert streams(path)[0]["r_frame_rate"] == said
+        source = examine(path)
+        assert (source.frames, source.frame_rate) == (30, Fraction(fps))
+        assert source.stream.ffprobe_rate == Fraction(said)
 
 
 MS = Fraction(1, 1000)
@@ -2038,7 +2266,8 @@ def test_constant_rates_read(
     # 3,000 frames at each rate, FFV1: in Matroska, their timestamps rounded to the millisecond,
     # within half of one of their place on the declared rate's timeline; in MP4, whose time base
     # holds the rate, each on its tick. Read, nothing said. Matroska declares 60000/1001 as
-    # 19001/317 (media/source.py, _leaves), 2.6 microseconds off over these frames.
+    # 19001/317 to ffprobe, 2.6 microseconds off over these frames: read as 60000/1001
+    # (rate.matroska_reading), within half a millisecond as the others, which an info line says.
     path = tmp_path / f"constant.{container}"
     run(
         "-f",
@@ -2051,14 +2280,16 @@ def test_constant_rates_read(
         "ffv1",
         str(path),
     )
+    caplog.set_level(logging.INFO, logger="seedvr2x")
     source = examine(path)
-    read_as_19001_317 = (fps, container) == ("60000/1001", "mkv")
-    declares = Fraction(19001, 317) if read_as_19001_317 else Fraction(fps)
-    assert (source.frames, source.frame_rate) == (3000, declares)
+    read_from_19001_317 = (fps, container) == ("60000/1001", "mkv")
+    assert (source.frames, source.frame_rate) == (3000, Fraction(fps))
+    assert source.stream.ffprobe_rate == (Fraction(19001, 317) if read_from_19001_317 else None)
+    assert ("Matroska's reading of 60000/1001" in caplog.text) is read_from_19001_317
     index = source.index
     assert index is not None
-    on = rate.timeline(index, declares)
-    assert on.holds and on.largest <= (Fraction(503, 1_000_000) if container == "mkv" else 0)
+    on = rate.timeline(index, Fraction(fps))
+    assert on.holds and on.largest <= (Fraction(1, 2000) if container == "mkv" else 0)
     assert not strayed(caplog)
 
 

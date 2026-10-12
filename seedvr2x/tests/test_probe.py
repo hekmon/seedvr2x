@@ -21,6 +21,7 @@ import shutil
 import struct
 import subprocess
 from dataclasses import replace
+from fractions import Fraction
 from itertools import permutations
 from pathlib import Path
 from typing import Any
@@ -426,6 +427,31 @@ def test_stream_alone() -> None:
     assert (stream.pix_fmt, stream.first_frame) == ("yuv420p10le", None)
     with pytest.raises(MediaError, match="no pixel format or size found"):
         parse(Path("one.mkv"), json.dumps({"streams": [UNSIZED]}), first_frame=False)
+
+
+def test_a_matroska_streams_rate_is_read_as_the_ntsc_rate_it_is_the_reading_of() -> None:
+    # ffprobe gives a Matroska stream at 60000/1001 the rate 19001/317, its reading of the
+    # frame's duration in whole nanoseconds (media/rate.py, matroska_reading): read as
+    # 60000/1001, what ffprobe gave kept beside it, by the container ffprobe names with the
+    # stream (media/probe.py, CONTAINER), with a first frame or without (verify's read); from
+    # another container, or a probe naming none, the rate is left as given. The file's suffix
+    # says nothing.
+    read_back = DECODED | {"r_frame_rate": "19001/317", "avg_frame_rate": "19001/317"}
+    frame = FRAMES["8.2"]
+    for container, read, kept in (
+        ("matroska,webm", Fraction(60000, 1001), Fraction(19001, 317)),
+        ("mov,mp4,m4a,3gp,3g2,mj2", Fraction(19001, 317), None),
+        (None, Fraction(19001, 317), None),
+    ):
+        named = {} if container is None else {"format": {"format_name": container}}
+        alone = json.dumps(named | {"streams": [read_back]})
+        framed = json.dumps(named | {"streams": [read_back], "frames": [frame]})
+        for stream in (parse(Path("m.mp4"), alone, first_frame=False), parse(Path("m"), framed)):
+            assert (stream.frame_rate, stream.ffprobe_rate) == (read, kept)
+            assert stream.avg_frame_rate == Fraction(19001, 317)
+    matroska = {"format": {"format_name": "matroska,webm"}}
+    own = parse(Path("m.mkv"), json.dumps(matroska | {"streams": [DECODED]}), first_frame=False)
+    assert (own.frame_rate, own.ffprobe_rate) == (Fraction(24000, 1001), None)
 
 
 @pytest.mark.parametrize(

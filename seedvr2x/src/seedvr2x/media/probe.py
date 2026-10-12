@@ -9,6 +9,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast
 
+from seedvr2x.media import rate
 from seedvr2x.media.ffmpeg import MediaError
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,13 @@ UNTAGGED = frozenset({"", "unknown", "unspecified"})
 FIRST_PACKETS = 1
 MOST_PACKETS = 250
 LATER = ("-ignore_editlist", "1", "-threads", "0")
+
+# The container's name, asked with the stream: ffprobe's format_name, "matroska,webm" for a
+# Matroska or WebM file, the names of the demuxer that read it (libavformat/matroskadec.c at
+# n9.0.2), whatever the file's suffix. A Matroska stream's rate is ffprobe's reading of a frame's
+# duration in whole nanoseconds (parse, rate.matroska_reading).
+CONTAINER = ("-show_entries", "format=format_name")
+MATROSKA = "matroska"
 
 # What to do with a stream whose start doesn't decode.
 CUT_OR_ENCODE = "cut it at a keyframe, or re-encode it"
@@ -110,8 +118,10 @@ class VideoStream:
     width: int
     height: int
     pix_fmt: str
-    frame_rate: Fraction  # r_frame_rate, exact (24000/1001, not 23.976)
-    avg_frame_rate: Fraction | None  # None when ffprobe has none (0/0)
+    # r_frame_rate, exact (24000/1001, not 23.976); for a Matroska stream whose r_frame_rate is
+    # ffprobe's reading of an NTSC rate's frame duration, that NTSC rate (parse; ffprobe_rate).
+    frame_rate: Fraction
+    avg_frame_rate: Fraction | None  # None when ffprobe has none (0/0); as ffprobe gives it
     field_order: str  # "progressive", "tt", "bb", "tb", "bt", or "" (unknown)
     sample_aspect: Fraction | None  # None when undeclared (0:1)
     color_space: str  # the matrix: "bt709", "smpte170m", "gbr"...
@@ -123,6 +133,9 @@ class VideoStream:
     cropped: bool  # a crop declared by the container (MP4 clap, Matroska PixelCrop)
     dovi: DoviRecord | None  # a Dolby Vision configuration record, if declared
     first_frame: FirstFrame | None  # None when not read (probe's first_frame, verify's)
+    # r_frame_rate as ffprobe gave it, what the file says, when frame_rate is another: Matroska's
+    # reading of an NTSC rate (19001/317 for 60000/1001); None when frame_rate is ffprobe's own.
+    ffprobe_rate: Fraction | None = None
 
 
 def probe(path: Path, first_frame: bool = True) -> VideoStream:
@@ -133,8 +146,8 @@ def probe(path: Path, first_frame: bool = True) -> VideoStream:
     found no pixel format or size for, or, when `first_frame`, no frame decoded from the
     stream's first MOST_PACKETS packets."""
     if not first_frame:
-        return parse(path, _ffprobe(path, "-show_streams"), first_frame=False)
-    output = _ffprobe(path, "-show_streams", *_frames(FIRST_PACKETS))
+        return parse(path, _ffprobe(path, "-show_streams", *CONTAINER), first_frame=False)
+    output = _ffprobe(path, "-show_streams", *CONTAINER, *_frames(FIRST_PACKETS))
     probed = cast(dict[str, Any], json.loads(output))
     streams = cast(list[dict[str, Any]], probed.get("streams") or [])
     # Without a video stream, ffprobe has read the whole file for its packet: parse refuses it.
@@ -182,6 +195,17 @@ def parse(path: Path, output: str, first_frame: bool = True) -> VideoStream:
     """The first video stream of path and, when `first_frame`, its first frame, from ffprobe's
     JSON output on it (probe's commands).
 
+    A Matroska file's rate that is ffprobe's reading of an NTSC rate's frame duration in whole
+    nanoseconds is read as that NTSC rate (rate.matroska_reading; design's decision of
+    2026-10-12: "MATROSKA'S READING OF A RATE ... DECIDED: read it right ... the strict rule,
+    the output's rate and the manifest carry the true rate"): here, where the declared rate
+    enters, so that every reader after takes the true one from the stream's frame_rate, the
+    timing rule, the writers, the segments' merge rule, the manifest's input and output, and a
+    probe of seedvr2x's own master or finished file; what ffprobe gave is kept beside it
+    (ffprobe_rate), for the line that says so (media/source.py, declare). By the container
+    ffprobe names (CONTAINER), not the file's suffix; any other container's rate is left as
+    ffprobe gives it, MP4 holding 60000/1001 as it is.
+
     Raises MediaError for no video stream, one ffprobe has no decoder for or found no pixel
     format or size for, no frame when `first_frame`, or an unreadable Dolby Vision record."""
     probed = json.loads(output)
@@ -199,12 +223,15 @@ def parse(path: Path, output: str, first_frame: bool = True) -> VideoStream:
     frame_rate = _fraction(stream.get("r_frame_rate"))
     if frame_rate is None:
         raise MediaError(f"{path}: no frame rate declared")
+    container = cast(dict[str, Any], probed.get("format") or {})
+    matroska = MATROSKA in str(container.get("format_name", "")).split(",")
+    ntsc = rate.matroska_reading(frame_rate) if matroska else None
     return VideoStream(
         codec_name=_tag(stream.get("codec_name")),
         width=int(stream["width"]),
         height=int(stream["height"]),
         pix_fmt=str(stream["pix_fmt"]),
-        frame_rate=frame_rate,
+        frame_rate=frame_rate if ntsc is None else ntsc,
         avg_frame_rate=_fraction(stream.get("avg_frame_rate")),
         field_order=_tag(stream.get("field_order")),
         sample_aspect=_fraction(stream.get("sample_aspect_ratio")),
@@ -217,6 +244,7 @@ def parse(path: Path, output: str, first_frame: bool = True) -> VideoStream:
         cropped=any(d.get("side_data_type") == "Frame Cropping" for d in side_data),
         dovi=_dovi(path, records[0]) if records else None,
         first_frame=_first_frame(frames[0]) if first_frame else None,
+        ffprobe_rate=None if ntsc is None else frame_rate,
     )
 
 
