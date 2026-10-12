@@ -18,14 +18,29 @@ def partial_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.partial")
 
 
-def replace_whole(partial: Path, path: Path) -> None:
+def command_partial(path: Path) -> Path:
+    """Where a segment command writes path before it is whole (media/writer.py, CommandWriter):
+    beside it, `.partial` before its suffix, seg_000001.partial.mkv. The command's muxer picks
+    its format by the suffix: ffmpeg n9.0.2 refuses partial_path's seg_000001.mkv.partial,
+    "Unable to choose an output format" (2026-10-10)."""
+    return path.with_name(f"{path.stem}.partial{path.suffix}")
+
+
+def replace_whole(partial: Path, path: Path, stale: Path | None = None) -> None:
     """Put partial, a file or a directory of files, in path's place, whole even after a power cut:
     its data reaches the disk before the rename, and the rename before this returns. A rename
-    alone can reach the disk before the data it names, which a later resume would trust."""
+    alone can reach the disk before the data it names, which a later resume would trust.
+
+    stale, when given, is the file of the checksums of what path held before: removed once
+    partial's data is on the disk, just before the rename, so that a stop during the sync, which
+    lasts as long as the file is large, leaves the old file with its own (DESIGN.md, Output,
+    Checksums: "a run stopped before keeps the old file with its own")."""
     if partial.is_dir():
         for entry in partial.iterdir():
             _sync(entry)
     _sync(partial)
+    if stale is not None:
+        stale.unlink(missing_ok=True)
     partial.replace(path)
     _sync(path.parent)
 
