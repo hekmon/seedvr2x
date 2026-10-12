@@ -389,11 +389,33 @@ class FFV1Writer(Writer):
 
 
 def _planes_input(width: int, height: int, frame_rate: Fraction) -> list[str]:
-    """ffmpeg's command up to its input, the gbrp16le planes an FFV1 writer is fed on stdin."""
+    """ffmpeg's command up to its input, the gbrp16le planes an FFV1 writer is fed on stdin, its
+    frames numbered at frame_rate, frames per second."""
+    rate = str(frame_rate)
     return [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-y"),
         *("-f", "rawvideo", "-pix_fmt", "gbrp16le", "-s", f"{width}x{height}"),
-        *("-framerate", str(frame_rate), "-i", "-"),
+        # The rate twice. -framerate is the raw video demuxer's, which numbers its packets at it;
+        # the rate the filters get, and from them the encoder's time base and Matroska's frame
+        # duration, is still the one libavformat guesses for the stream among its standard rates
+        # once the time base is "unreliable", from 101 fps up and under 5 (n9.0.2:
+        # libavformat/demux.c:2311-2333, 2287-2303 and 2411-2442; fftools/ffmpeg_demux.c:1085):
+        # 120/1 for 120000/1001, 240/1 for 240000/1001. Such a master declared 120/1, its
+        # timestamps on that rate's grid, up to 4.49 ms off 120000/1001's timeline (2.58 ms at
+        # 240000/1001) with a place skipped at frame 500, a 17 ms step, and seedvr2x read it back
+        # as 1,101 frames for 1,100, "1 frame missing after frame 499"; at 119 fps, 9 places
+        # skipped, and at 121 two frames on one millisecond, read back as a variable rate.
+        # -r as an input option is ffmpeg's own: the decoded frames are numbered at the rate
+        # given, which the filters get as it is (fftools/ffmpeg_dec.c:399-402,
+        # ffmpeg_demux.c:1081-1083). Measured through each writer, 2026-10-12: with it, 1,100
+        # frames at 28 rates from 3 to 1,000 fps sit on their rate's timeline to the millisecond
+        # tick, Matroska's frame duration that rate's; and the files at 24000/1001, 24, 25,
+        # 30000/1001, 50 and 60000/1001 are those written without it byte for byte (30 and 1,100
+        # frames at 32x16, 3 at 1280x720 and at 1920x1080), but for the 44 bytes ffmpeg draws
+        # for every Matroska file: the segment's UID, the track's, held twice, and the three
+        # CRC-32s over them. -r alone writes the same files; -framerate stays, so that the
+        # demuxer's own packets are at the rate too, not at its default 25.
+        *("-framerate", rate, "-r", rate, "-i", "-"),
     ]
 
 
@@ -450,6 +472,10 @@ class PNGWriter(Writer):
         command = [
             *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-y"),
             *("-f", "rawvideo", "-pix_fmt", "rgb48be", "-s", f"{width}x{height}"),
+            # No -r beside -framerate, as the masters' input has (_planes_input): a PNG holds
+            # neither a rate nor a timestamp, and each frame is a file whatever time ffmpeg gives
+            # it: 1,100 files of the same bytes at 16 rates, 24000/1001 to 240000/1001 with 119
+            # and 121, with the option and without (2026-10-12).
             *("-framerate", str(frame_rate), "-i", "-", "-map", "0:v:0"),
             *("-fps_mode", "passthrough", "-vf", chain, *options),
             *("-c:v", "png", "-pix_fmt", "rgb48be", "-f", "image2"),

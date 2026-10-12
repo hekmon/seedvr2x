@@ -15,7 +15,10 @@ import pytest
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.checksums import frame_bytes
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.probe import probe
+from seedvr2x.media.source import examine
 from seedvr2x.media.writer import (
+    CommandWriter,
     FFV1Writer,
     PNGWriter,
     Tags,
@@ -102,6 +105,81 @@ def test_gbrp16le_round_trip_streamed(tmp_path: Path) -> None:
     assert (tags["color_space"], tags["color_range"]) == ("gbr", "pc")
     assert (tags["color_primaries"], tags["color_transfer"]) == ("bt709", "bt709")
     assert list(tmp_path.iterdir()) == [path]  # the temporary file renamed
+
+
+def levels(count: int, width: int, height: int) -> npt.NDArray[np.float32]:
+    """count flat frames, each of a level of its own: nothing idet takes for combing."""
+    ramp = np.linspace(0.0, 1.0, count, dtype=np.float32)
+    return np.broadcast_to(ramp[:, None, None, None], (count, height, width, 3)).copy()
+
+
+def packet_times(path: Path) -> list[int]:
+    """Each video packet's timestamp, in the stream's ticks, Matroska's milliseconds."""
+    result = subprocess.run(
+        [
+            *("ffprobe", "-v", "error", "-select_streams", "v:0"),
+            *("-show_entries", "packet=pts", "-of", "csv=p=0", str(path)),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [int(line.rstrip(",")) for line in result.stdout.split()]
+
+
+@pytest.mark.parametrize(
+    ("kind", "rate"),
+    [
+        (kind, rate)
+        for kind in ("gbrp16le", "yuv420p10le", "command")
+        for rate in (Fraction(60000, 1001), Fraction(120000, 1001), Fraction(240000, 1001))
+    ]
+    + [("gbrp16le", Fraction(119)), ("gbrp16le", Fraction(121))],
+)
+def test_frames_numbered_at_the_rate(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, kind: str, rate: Fraction
+) -> None:
+    # From 101 fps up ffmpeg guesses its raw input's rate among its standard ones, 120/1 for
+    # 120000/1001, 119 and 121, 240/1 for 240000/1001, unless the input option -r gives it
+    # (writer._planes_input): the master then declared the guess and sat on its grid, a place
+    # skipped where the two rates part by a frame, at frame 500 of 120000/1001's and 240000/1001's
+    # (seedvr2x read 1,101 frames back, one missing), nine times in 1,100 frames at 119; at 121 two
+    # frames shared a millisecond. 60000/1001 was written right, and still is. A master's file,
+    # and the stream a segment command reads, kept as it comes: every frame on its rate's
+    # timeline to the tick, the rate declared the job's, and as many frames read back as written,
+    # none missing.
+    count = 1100
+    path = tmp_path / "master.mkv"
+    if kind == "command":
+        writer = CommandWriter("cat > {out}", path, "gbrp16le", 32, 16, rate, BT709)
+    else:
+        writer = FFV1Writer(path, kind, 32, 16, rate, BT709)
+    with writer:
+        writer.write(levels(count, 32, 16))
+    millisecond = Fraction(1, 1000)
+    assert packet_times(path) == [
+        int(Fraction(k) / rate / millisecond + Fraction(1, 2)) for k in range(count)
+    ]
+    assert probe(path).frame_rate == rate
+    with caplog.at_level("WARNING", logger="seedvr2x"):
+        source = examine(path)
+    assert source.frame_rate == rate and source.frames == count and source.filled is None
+    assert "missing" not in caplog.text
+
+
+def test_png_holds_no_rate(tmp_path: Path) -> None:
+    # A PNG has neither a rate nor a timestamp: at the rates ffmpeg takes for 120/1 or 240/1
+    # (test_frames_numbered_at_the_rate), where the guess skips a place at frame 500 or gives
+    # two frames one time (121), every frame is written all the same, in files of the same bytes
+    # as at 24000/1001. The PNG writer's input has no -r.
+    frames = levels(510, 32, 16)
+    written: dict[Fraction, list[bytes]] = {}
+    for rate in (RATE, Fraction(120000, 1001), Fraction(240000, 1001), Fraction(121)):
+        directory = tmp_path / f"{rate.numerator}-{rate.denominator}"
+        with PNGWriter(directory, 32, 16, rate, BT709) as writer:
+            writer.write(frames)
+        written[rate] = [file.read_bytes() for file in sorted(directory.iterdir())]
+        assert len(written[rate]) == 510 and written[rate] == written[RATE], rate
 
 
 def test_checksums_as_written(tmp_path: Path) -> None:
