@@ -778,7 +778,8 @@ Decoding goes through an ffmpeg pipe:
 
 ffmpeg does every colour conversion, in and out: we pin its parameters rather than
 reimplementing them. A startup check refuses a build lacking any filter, encoder, decoder or
-muxer the passes use (zscale, idet and ffv1 among them), or one whose `setparams` lacks
+muxer the passes use (zscale, idet and ffv1 among them; for a finished file, the concat and
+Matroska demuxers and the `setts` bitstream filter too), or one whose `setparams` lacks
 `chroma_location` (ffmpeg 7.1 and later have it), saying which. Tests verify its conversions:
 round trip, white at 940, black at 64, chroma siting.
 
@@ -1229,10 +1230,8 @@ What `split` does, frame by frame:
       damaged temporary file never ends a multi-hour job.
   - The decode writes a shot's last frames only once its copy has been read whole and
     checked, since they may finish the output segment, which is then recorded.
-  - For `-o x.mkv`, the same files live in `<output>.work`, made and locked at the start as an
-    output directory is, so a second run to the same file is refused. It is removed when the
-    run ends, however it ends. What a killed run left there (only seedvr2x's files) is emptied
-    at the next start; anything else is refused, never deleted.
+  - For `-o x.mkv`, the same files live in the job's work directory, `<output>.work` (see
+    [Output](#output)), kept as an output directory's are until the file is assembled.
 - With `none`, nothing is copied.
 
 `split` is validated against the colour study's own implementation, frame for frame, and the
@@ -1361,13 +1360,18 @@ compressed is the user's choice: afterwards, from the master, or during the run 
   `000000`. ffmpeg's PNG encoder writes the primaries and transfer as cICP, cHRM and gAMA
   chunks from the frame tags, and none for an untagged frame. So PNG copies the tags as the
   masters do.
-- **Until assembly** (milestone 6):
-  - `-o x.mkv` writes one FFV1 master.
-  - Any other `-o` is a directory of segments plus `manifest.json`. It is either new or empty,
-    or an unfinished job's directory, which the same command resumes (see
+- **What `-o` names:**
+  - `-o x.mkv` is the finished file: the upscaled video with the source's other streams (see
+    Assembly, below). Its job runs in `x.mkv.work` beside it, a directory job in every
+    respect: made and locked at the start, so that a second run to the same file is refused,
+    resumed by the same command, and removed once the file is proven whole, anything of the
+    user's found in it left and named.
+  - Any other `-o` is a directory of segments plus `manifest.json`, never assembled. It is
+    either new or empty, or an unfinished job's directory, which the same command resumes (see
     [Pause and resume](#pause-and-resume)). One seedvr2x at a time writes it, and anything
     else found in it is refused, so another run's files never reach what sptenc reads.
-  - An `-o` with another video suffix (`.mp4`, `.mov`…) is refused.
+  - An `-o` with another video suffix (`.mp4`, `.mov`…) is refused, and so is one that names
+    the source.
 - **Output segments**, the resume units of the output, listed in a manifest:
   - **Layout, by sptenc's rule.** The detector picks the cuts, then the minimum segment length
     (5 s by default) merges each too-short segment into its shorter neighbour, on the frame
@@ -1407,14 +1411,16 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       - A resume refuses a finished segment whose checksums are missing, since they are
         written before it is recorded. It discards an unfinished segment's checksums and
         partial files, and refuses anything else there.
-    - For `-o x.mkv`, they go in `<output>.crc32` beside it. The old ones are removed only as
-      the new file replaces the old, so a run stopped before keeps the old file with its own.
+    - For `-o x.mkv`, they go in `<output>.crc32` beside it: the segments' checksums in
+      order, written once the file is in place.
     - A resume checks a finished segment's size against the manifest: cheap, and it catches a
       truncated file.
     - `seedvr2x verify` decodes and checks every frame, on demand, for instance before sptenc or
       an archive trusts the output.
       - It takes an output directory, one of its segments (checked against the directory's
-        checksums), or a one-file output.
+        checksums), or a finished file, checked by its first video stream. Every decoded
+        frame is kept as it comes (`-fps_mode passthrough`): ffmpeg's constant-rate default
+        doubled the first frame of a video that starts 23 ms after its file's start.
       - A PNG segment must hold exactly its frames, `NNNNNN.png` from 0, before any is decoded.
       - Anything ffmpeg reports while decoding fails the check.
       - It exits 1 when a frame isn't as written, when checksums are missing, and when a
@@ -1422,14 +1428,29 @@ compressed is the user's choice: afterwards, from the master, or during the run 
         `seedvr2x verify out && sptenc encode out` never hands sptenc an incomplete directory.
         Its summary says which, e.g. "of 2, 1 unfinished".
       - It needs only ffmpeg and ffprobe, not zscale: the frames are decoded as stored.
-    - `--segment-cmd` outputs only get their frame count checked: their frames are the user's
-      encoder's.
+    - `--segment-cmd` outputs have no checksums, their frames being the user's encoder's:
+      their frame counts are checked against the manifest, and `seedvr2x verify` says so.
   - **Writer.** FFV1 by default. With `--segment-cmd`, the user's command runs once per
     segment: it reads the segment, lossless and tagged, on stdin, in the master's format
     (`yuv420p10le` by default, so the encoder converts nothing), and writes the file seedvr2x
-    names, e.g. `--segment-cmd 'ffmpeg -i - -c:v libx265 -crf 16 {out}'`. seedvr2x never
-    parses the command and only checks the result's frame count. Disk use is then the
-    compressed size, and a stop keeps every finished segment.
+    names, e.g. `--segment-cmd 'ffmpeg -i - -c:v libx265 -crf 16 {out}'`. Disk use is then the
+    compressed size, and a stop keeps every finished segment. Built on 2026-10-12:
+    - The stream on stdin is Matroska holding FFV1, the master's own packets: from a pipe,
+      ffprobe reads every tag and the exact rate as it reads the master's file, with no
+      duration and millisecond timestamps. NUT loses the colour tags there, yuv4mpegpipe all
+      but the rate and the range, raw video everything.
+    - The command is run by `/bin/sh`, never parsed, in a process group of its own. `{out}` is
+      required and written bare: seedvr2x replaces it by the quoted name of a partial file,
+      a `.mkv` by its suffix, put in place once whole.
+    - Checked: the command's status, then its file's decoded frames, counted, which also
+      proves the file readable. A failure stops the run at its segment, with the command's
+      status and last lines; the same seedvr2x command resumes there, no model work done
+      again.
+    - Tried before any work, at every start, on 5 black frames of the output's size, format
+      and tags (0.3 s with libx265 at 1080p), in a directory whose name a quoted `{out}`
+      fails on.
+    - A setting the manifest records: another command is another job, so a command that may
+      need mending goes in a script the option names. Refused with PNG.
   - **Master sizes,** per hour of 1080p at 24000/1001, four times that at 4K: about 100–135
     GiB in `yuv420p10le`, the default, and 540–690 GiB in `gbrp16le` with colour correction
     (measured with `lab` in milestone 5). The corrected float32 output fills the 16 bits, tens
@@ -1439,11 +1460,55 @@ compressed is the user's choice: afterwards, from the master, or during the run 
   - **Rejected:** `--stream`, the output on stdout for a single compressor process. That
     process can't be paused, so a stopped run would leave parts to join by hand.
 - **Assembly** of the segments:
-  - **standalone:** joined into one file by stream copy, with the source's other streams
-    (audio, subtitles, chapters, attachments). The join carries sptenc's lessons: each
+  - **standalone:** joined into one Matroska file by stream copy, with the source's other
+    streams (audio, subtitles, chapters, attachments). The join carries sptenc's lessons: each
     segment's duration comes from its frame count, and timestamps are snapped to the frame
     grid. Otherwise the video drifts: 46 ms behind the audio over a 163-segment episode, in
-    sptenc's measurements.
+    sptenc's measurements. Built on 2026-10-12 (milestone 6):
+    - The job's last unit: made when the last segment is finished, or by a later run of the
+      same command, which loads no model. A stop or a failure during it keeps every segment.
+    - One ffmpeg process: its concat demuxer with a duration per segment, every packet's
+      timestamps set to the frame grid: frame k at the source's first frame's time, counted
+      from the file's start, plus k frames, rounded once to Matroska's millisecond. Packet
+      for packet the same frames written as one master, over 131 segments at 24000/1001, 25
+      and 30000/1001 and 420 at 24000/1001. A source's own Matroska may hold frames 1 ms
+      early, up to 14% of a film's: the finished file holds the grid.
+    - The other streams come out as ffmpeg's own remux of the source holds them, packets,
+      chapters, languages, titles and dispositions, the upscaled video in the source video's
+      place. They are read from two openings of the source: a plain two-input join isn't
+      interleaved (the audio 10 s ahead of the video in the file), which ffmpeg then reads
+      badly. A cover picture comes out as a one-frame video track, as in ffmpeg's remux.
+    - Proven before it is put in place, without a decode: the video's packets those the join
+      read, each at its place on the grid, and every other stream's equal to a remux of the
+      source's. A failure removes the partial and keeps the segments.
+    - Before any work, at every start, the other streams are tried: each into the Matroska
+      muxer by ffmpeg itself, then their whole remux rehearsed (2 to 3 min on a film of 33 GiB,
+      under 2 s on files up to 5 GiB). Refused there, naming the stream and the remux that
+      mends the source: a stream Matroska can't hold (MP4's `mov_text`, Blu-ray and DVD PCM,
+      CEA-608, a MOV's timecode track, an MP4's chapter track) and a stream that starts
+      before the file's start, by which the muxer would move the others. A directory output
+      takes every such source.
+    - Disk: at the end the segments and the finished file sit side by side, about twice the
+      master, with the other streams twice while they are compared. Without the room the
+      run stops, everything kept, and the same command assembles later.
+    - A `--segment-cmd` job's files are checked as the join needs them, at the trial and as
+      each segment is finished: Matroska, every frame on the grid, codec headers that are
+      the first segment's or decode its frames alike (libx265 writes its build and its
+      threads in them).
+    - Two assemblies of the same segments hold the same packets, timestamps and records, not
+      the same bytes: Matroska's identifiers differ, about a hundred bytes.
+    - Decided on 2026-10-12, to be built. A data stream Matroska can't hold (a MOV's timecode
+      track; an MP4's chapter track, its chapters copied anyway) is left out with a warning
+      naming it, audio and subtitles still refused. The job's manifest stays beside the
+      finished file (`x.mkv.manifest.json`): the same command again makes nothing, another
+      job to that file is refused, a `--segment-cmd` file's frames can be counted, and an
+      `x.mkv` with no manifest beside it is refused, where today a new job replaces it
+      without a word. Each segment's bytes are hashed when it is finished and checked at
+      the assembly, a damaged one made again, where today it would be joined and the
+      segments removed. ffmpeg's children of the assembly end with seedvr2x, where a killed
+      seedvr2x leaves its join writing. And two older defects go: the FFV1 and PNG writers
+      remove a segment's stale checksums before its new file is safe, and a relative `-o`
+      whose name holds ": " is taken by ffmpeg for a protocol.
   - **with sptenc:** the directory as it is, for `sptenc encode <dir> <out> -f <source>` (or
     `sptenc concat` for one master)
 
@@ -1816,8 +1881,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | DiT | each window's output | per window: an encoded shot resumes at its first missing window, its noise drawn again from the seed |
 | VAE decode | the output segment (FFV1, or the user's `--segment-cmd`) | per output segment: its decode and write restart whole |
 
-- **Where:** a directory output keeps the units in `<out>/resume/shot_<start>/` (`latent.pt`,
-  `window_NNNN.pt`).
+- **Where:** the units are kept in `<out>/resume/shot_<start>/` (`latent.pt`,
+  `window_NNNN.pt`), `<out>` being the output directory, or a finished file's work directory.
   - They are `torch.save` copies on the CPU, values and memory layout kept, since the noise
     depends on the latent's layout. They are loaded with `weights_only=True`, so a tampered
     file can't run code.
@@ -1827,8 +1892,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     encode or decode starts again, and a resume discards the file.
   - A latent is deleted once its windows are done, a shot's directory once its segment is
     finished, and `resume/` once the job is.
-  - `-o x.mkv` keeps its units in memory, so it isn't resumable until assembly gives it
-    segments. Ctrl-C works, but nothing is kept.
+  - `-o x.mkv` resumes as a directory does, in its work directory. Its assembly is one more
+    unit, made again whole.
 - **Order:** a segment's shots are all encoded and sampled before its decode and write, which
   reads their windows back, so units never interleave. The first frames come out later.
 - **Manifest** (`manifest.json`, version 3), the truth:
@@ -1894,7 +1959,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   older code refuses a newer manifest cleanly. A version-2 manifest is still read, for a
   resume to refuse it as another job and for `seedvr2x verify` to check its segments. New fields stay additive, and a
   manifest written by older code is refused anyway, since its `settings.code` differs.
-- **Resuming:** the same command on the same `-o` directory, with no `--resume` flag.
+- **Resuming:** the same command on the same `-o`, a directory or a file, with no `--resume`
+  flag.
   - Refused, with each difference listed: any difference in settings, the source (by content),
     models or code, except progress. A moved or touched source with the same content is
     accepted, since path and mtime are information.
@@ -1914,16 +1980,17 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       planned again (below), and a frame index made again.
     - Re-running a finished job doesn't rewrite its manifest, and makes nothing again, its
       frame index and its plan included: no memory is read, and nothing can "no longer fit".
-  - **A plan** is a job with no unit made: what `--plan FILE` leaves in a directory output,
-    its manifest and its frame index (see [Shot detection](#shot-detection)).
+      A finished file's job is finished once the file is in place: with every segment made
+      and no file yet, the same command assembles.
+  - **A plan** is a job with no unit made: what `--plan FILE` leaves in an output directory
+    or in a finished file's work directory, its manifest and its frame index (see
+    [Shot detection](#shot-detection)).
     - The same command without `--plan` runs it, with no second first pass.
     - A run whose settings differ only in its cuts (the cut list, the threshold, the
       detector's file) plans it again from its record, with no decode: the cuts are derived
       again and the manifest rewritten at once, in the run's environment. A plan cut by a list
       and planned again without one costs a first pass, no probabilities having been kept.
     - Any other difference, or a unit made, is another job, as above.
-    - `-o x.mkv` keeps no plan: FILE alone is written, until assembly makes it a directory
-      job.
   - The first pass's record is trusted, and the pass isn't run again, when the content and the
     settings are unchanged and neither `ffmpeg` nor `conversions` changed. The shot detector's
     probabilities are part of that record, though torch computes them: a torch, CUDA, GPU or
@@ -2122,8 +2189,12 @@ explanation.
   redraw. A more compressed input changes neither. Clouds and smooth gradients from compressed
   sources can still show light artefacts.
 - lossless delivery: why there are no encoder options, and how `--segment-cmd` compresses with
-  the user's own command
-- disk use: master sizes per hour, and the input copies during a run
+  the user's own command: what its stdin holds, `{out}` written bare, the trial before any
+  work, a command kept in a script
+- the finished file: its work directory, what is refused before any work and the remux that
+  mends the source, its checksums and its manifest beside it
+- disk use: master sizes per hour, the input copies during a run, and twice the master while
+  a finished file is assembled
 - GPU memory, two points:
   - nvidia-smi can show the card nearly full while a phase needs much less: the allocator keeps
     freed memory reserved, and trims it only when an allocation would fail
@@ -2206,8 +2277,8 @@ writers, and the planner needs real shot lengths.
    GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewritten)), the order of the
    planner's choices, the pins, what of a plan a resume keeps, the time model and `--until`'s
    rule. It is built without `torch.compile`, which stays open (see [To measure](#to-measure)).
-5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow. The manual sptenc
-   workflow already works without it.
+5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow: built on 2026-10-12
+   (see [Output](#output)). The manual sptenc workflow already worked without it.
 
 After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
 
@@ -2321,9 +2392,17 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      three; the decode streams and resume stays bit-identical. On milestone 1's input: ΔE of
      the low frequencies 0.131 against numz's `lab`'s 0.625, Y shift −0.007 against +0.030,
      a\*/b\* spreads 2.187/5.245 against the input's 2.161/5.212. `test_lab.py` is retired.
-6. **Assembly (standalone):** the finished file's video timestamps equal the source's, frame
-   for frame, and every other stream is copied. Given back to seedvr2x as a source, the file
-   is accepted, its frames on their grid.
+6. **Assembly (standalone):** the finished file's video timestamps are the frame grid's from
+   the source's first frame, equal to the source's to Matroska's millisecond, and every other
+   stream is copied. Given back to seedvr2x as a source, the file is accepted, its frames on
+   their grid. Passed on 2026-10-12 on the CPU and on real containers: 6 real sources joined
+   from 122 to 1,189 segments, a whole film of 178,949 frames among them, every frame on the
+   grid and at most 1 ms from the source's own time, always later, the sources' muxers
+   having rounded early; the other streams' records and chapters the source's, but a cover
+   picture's; each file read back by seedvr2x with no warning, every frame within 0.5 ms of
+   its place, at 24000/1001, 25 and 30000/1001. On the GPU: 49 frames in 3 segments with 6
+   other streams, stopped and resumed to the same packets, and through `--segment-cmd` with
+   libx265. Left: the whole GPU suite on it, and ffmpeg 7.1 (n9.0.2 ran everything).
 7. **Visual review** of long runs by the user: fast motion, where the frames inside a latent
    group can ghost (see [To measure](#to-measure)); held pictures, where a false cut's step
    would show (see [Shot detection](#shot-detection): the fallback gate); and shots' first
@@ -2355,6 +2434,11 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   Taking each frame from a run whose grid ends a group there would take 4 runs per shot, the
   grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Not
   measured (about 2 GPU h on the 8 clips).
+- **60000/1001 through Matroska.** Matroska holds a frame's duration in whole nanoseconds,
+  and ffprobe reads 60000/1001 back as 19001/317, from an FFV1 master as from a finished
+  file: seedvr2x takes that for the rate, with no warning, the two grids 0.76 ms apart after
+  4 hours. 24000/1001, 25, 30000/1001, 50 and 120 read exact. To settle with the rate's
+  rules (see [Input](#input)).
 - **The VAE's room** (see [Memory planner](#memory-planner), the budget). Why a VAE pass
   runs out of memory 1 to 1.7 GiB under the free memory, where a DiT window, which asks for
   pieces as large, runs 0.6 under: not known. Each failing plan ran once. To measure, now
