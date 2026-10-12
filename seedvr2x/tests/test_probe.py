@@ -901,6 +901,7 @@ ONE_MEANING = [
         ("color_transfer", *pair)
         for pair in permutations(("bt709", "smpte170m", "bt2020-10", "bt2020-12"), 2)
     ),
+    *(("color_primaries", *pair) for pair in permutations(("smpte170m", "smpte240m"), 2)),
 ]
 
 
@@ -928,7 +929,7 @@ def test_two_names_of_one_meaning(
     monkeypatch.setattr(sources, "probe", lambda _: probed)
     caplog.set_level(logging.INFO)
     source = counted(declare(path), FirstPass(5))
-    word = {"color_space": "matrix", "color_transfer": "transfer"}[name]
+    word = sources.COLOUR[name][0]
     said = f"{path}: {word} {declared} against {decoded} on its first frame: two names of one"
     assert f"{said} {word}, the stream's kept" in caplog.text
     written = Tags.of(source.stream, source.conversion.matrix_tag)
@@ -939,6 +940,8 @@ def test_two_names_of_one_meaning(
         caplog.clear()
         assert declare(path, "bt709").conversion.matrix == "709"
         assert "two names" not in caplog.text
+    elif name == "color_primaries":
+        assert (written.primaries, record["primaries"]) == (declared, declared)
     else:
         assert (written.transfer, record["transfer"]) == (declared, declared)
 
@@ -989,15 +992,31 @@ def test_two_names_of_one_meaning(
             "-color_primaries:v bt470bg",
             "colour_primaries=6",
         ),
-        # smpte170m and smpte240m, "functionally the same" in H.273 but not in DESIGN.md
-        # (provisional: source.SYNONYMS).
+        # smpte170m and smpte240m are one set of primaries (ONE_MEANING), and still another
+        # than BT.709's and than bt470bg's, by either name.
         (
             "color_primaries",
+            "bt709",
             "smpte170m",
+            "primaries bt709 against smpte170m",
+            "-color_primaries:v smpte170m",
+            "colour_primaries=1",
+        ),
+        (
+            "color_primaries",
             "smpte240m",
-            "primaries smpte170m against smpte240m",
+            "bt709",
+            "primaries smpte240m against bt709",
+            "-color_primaries:v bt709",
+            "colour_primaries=7",
+        ),
+        (
+            "color_primaries",
+            "bt470bg",
+            "smpte240m",
+            "primaries bt470bg against smpte240m",
             "-color_primaries:v smpte240m",
-            "colour_primaries=6",
+            "colour_primaries=5",
         ),
     ],
 )
@@ -1024,7 +1043,8 @@ def test_different_meanings_refused(
         ("vp9", {"color_primaries": "bt470bg"}, {}, ""),
         # ProRes's takes the matrix smpte170m, not bt470bg, which it sets by that other name of
         # one matrix; the transfer bt709, the other name of smpte170m's and bt2020's (SYNONYMS);
-        # no sRGB transfer, which has no other name, nor the primaries smpte240m.
+        # the primaries smpte170m, not smpte240m, which it sets by that other name of one set; no
+        # sRGB transfer, which has no other name, nor the primaries film.
         ("prores", {"color_space": "smpte170m"}, {}, "prores_metadata=colorspace=6"),
         ("prores", {"color_space": "bt470bg"}, {}, "prores_metadata=colorspace=6"),
         *(
@@ -1036,10 +1056,12 @@ def test_different_meanings_refused(
                 ("iec61966-2-1", ""),
             )
         ),
-        ("prores", {"color_primaries": "smpte240m"}, {}, ""),
+        ("prores", {"color_primaries": "smpte170m"}, {}, "prores_metadata=color_primaries=6"),
+        ("prores", {"color_primaries": "smpte240m"}, {}, "prores_metadata=color_primaries=6"),
+        ("prores", {"color_primaries": "film"}, {}, ""),
         (
             "prores",
-            {"color_space": "bt470bg", "color_primaries": "smpte240m"},
+            {"color_space": "bt470bg", "color_primaries": "film"},
             {},
             "",
         ),
@@ -1052,6 +1074,7 @@ def test_different_meanings_refused(
             {"color_transfer": "linear"},
             "hevc_metadata=transfer_characteristics=14",
         ),
+        ("hevc", {"color_primaries": "smpte240m"}, {}, "hevc_metadata=colour_primaries=7"),
         # AV1's and APV's set the four by H.273's numbers.
         (
             "av1",
@@ -1363,12 +1386,13 @@ def test_bitstream_fix(tmp_path: Path, encoder: str) -> None:
 def test_bitstream_fix_by_another_name(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, transfer: str
 ) -> None:
-    # ProRes's filter takes neither the matrix bt470bg nor the transfers smpte170m and bt2020's
-    # (media/bitstream.py). A container saying them, right, over a bitstream saying BT.709's
-    # matrix and the linear transfer: refused, the filter named with the matrix smpte170m (6) and
-    # the transfer bt709 (1), other names of what the container says (source.SYNONYMS). Its
-    # command run on the file: the frames say those, the stream still its own, no contradiction
-    # left, and the file is read by the stream's names.
+    # ProRes's filter takes neither the matrix bt470bg, nor the primaries smpte240m, nor the
+    # transfers smpte170m and bt2020's (media/bitstream.py). A container saying them, right, over
+    # a bitstream saying BT.709's matrix and primaries and the linear transfer: refused, the filter
+    # named with the matrix smpte170m (6), the primaries smpte170m (6) and the transfer bt709 (1),
+    # other names of what the container says (source.SYNONYMS). Its command run on the file: the
+    # frames say those, the stream still its own, no contradiction left, and the file is read by
+    # the stream's names.
     encoded = tmp_path / "encoded.mov"
     wrong = "colorspace=bt709:color_primaries=bt709:color_trc=linear:range=tv"
     subprocess.run(
@@ -1379,29 +1403,37 @@ def test_bitstream_fix_by_another_name(
         ],
         check=True,
     )
-    right = ("-colorspace:v", "bt470bg", "-color_primaries:v", "bt709", "-color_trc:v", transfer)
-    path = remuxed(encoded, tmp_path / "in.mkv", *right, "-color_range:v", "tv")
+    right = ("-colorspace:v", "bt470bg", "-color_primaries:v", "smpte240m")
+    path = remuxed(
+        encoded, tmp_path / "in.mkv", *right, "-color_trc:v", transfer, "-color_range:v", "tv"
+    )
     with pytest.raises(MediaError) as refused:
         declare(path)
     refusal = contradiction(
-        f"matrix bt470bg against bt709 on its first frame, transfer {transfer} against linear",
-        "-colorspace:v bt709 -color_trc:v linear",
+        "matrix bt470bg against bt709 on its first frame, primaries smpte240m against bt709,"
+        f" transfer {transfer} against linear",
+        "-colorspace:v bt709 -color_primaries:v bt709 -color_trc:v linear",
         True,
-        "prores_metadata=colorspace=6:color_trc=1",
+        "prores_metadata=colorspace=6:color_primaries=6:color_trc=1",
     )
     assert str(refused.value) == f"{path}: {refusal}"
     result = fixed(refusal, path, tmp_path / "fixed")
     stream = probe(result)
-    assert (stream.color_space, stream.color_transfer) == ("bt470bg", transfer)
+    tags = ("color_space", "color_primaries", "color_transfer")
+    assert [getattr(stream, name) for name in tags] == ["bt470bg", "smpte240m", transfer]
     frame = stream.first_frame
     assert frame is not None
-    assert (frame.color_space, frame.color_transfer) == ("smpte170m", "bt709")
+    assert [getattr(frame, name) for name in tags] == ["smpte170m", "smpte170m", "bt709"]
     caplog.set_level(logging.INFO)
     declared = declare(result)
-    assert (declared.stream.color_space, declared.stream.color_transfer) == ("bt470bg", transfer)
+    assert [getattr(declared.stream, name) for name in tags] == ["bt470bg", "smpte240m", transfer]
     assert declared.conversion.matrix == MATRICES["bt470bg"]
-    assert "matrix bt470bg against smpte170m on its first frame: two names of one" in caplog.text
-    assert f"transfer {transfer} against bt709 on its first frame: two names of one" in caplog.text
+    for said in (
+        "matrix bt470bg against smpte170m",
+        "primaries smpte240m against smpte170m",
+        f"transfer {transfer} against bt709",
+    ):
+        assert f"{said} on its first frame: two names of one" in caplog.text
 
 
 @needs_ffmpeg

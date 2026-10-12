@@ -109,13 +109,14 @@ OPTION_VALUES = {"gbr": "rgb"}
 # "functionally the same": the matrices 5 and 6 (Table 4), ffmpeg's bt470bg and smpte170m, whose
 # coefficients are equal (libavutil/csp.c:48-49 at n9.0.2; "functionally identical", pixfmt.h:707);
 # the transfers 1, 6, 14 and 15 (Table 3), its bt709, smpte170m, bt2020-10 and bt2020-12
-# (pixfmt.h:668, 673, 681-682), one function in its own tables (csp.c:445-457). The primaries
-# bt470bg and smpte170m differ (Table 2, csp.c:79-80). Provisional (DESIGN.md names the matrix's
-# and the transfer's alone): H.273's primaries 6 and 7, smpte170m and smpte240m, are "functionally
-# the same" too (Table 2; "identical", pixfmt.h:645), and still refused.
+# (pixfmt.h:668, 673, 681-682), one function in its own tables (csp.c:445-457); the primaries 6
+# and 7 (Table 2), its smpte170m and smpte240m, whose chromaticities and white point are equal
+# (csp.c:80-81; "identical", pixfmt.h:645). The primaries bt470bg and smpte170m differ (Table 2,
+# csp.c:79-80).
 SYNONYMS = {
     "color_space": frozenset({"bt470bg", "smpte170m"}),
     "color_transfer": frozenset({"bt709", "smpte170m", "bt2020-10", "bt2020-12"}),
+    "color_primaries": frozenset({"smpte170m", "smpte240m"}),
 }
 
 # The chroma location is the exception to the contradiction rule (DESIGN.md, Input): a decoder's
@@ -277,8 +278,9 @@ def declare(
     for name, (declared_as, decoded_as) in _sides(probed).items():
         settled = name == "color_space" and matrix is not None  # read as --input-matrix's
         if _one_meaning(name, declared_as, decoded_as) and not settled:
-            # Provisional (DESIGN.md doesn't say whether it is said): the conversion, the output's
-            # tags and the manifest take the stream's name (resolved), not the bitstream's.
+            # Said, as design accepted it built (2026-10-10), since the name kept shows after: the
+            # conversion, the output's tags and the manifest take the stream's name (resolved),
+            # not the bitstream's.
             logger.info(
                 "%s: %s %s against %s on its first frame: two names of one %s, the stream's kept",
                 path,

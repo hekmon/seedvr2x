@@ -176,7 +176,8 @@ def setting(
         option, values = found.options.get(name, ("", {}))
         # The container's own value where the filter takes it, so that it sets the same name;
         # else another name of its meaning: ProRes's filter takes the matrix smpte170m and not
-        # bt470bg, the transfer bt709 and neither smpte170m nor bt2020's (FILTERS).
+        # bt470bg, the transfer bt709 and neither smpte170m nor bt2020's, the primaries smpte170m
+        # and not smpte240m (FILTERS).
         same = (synonyms or {}).get(name, frozenset[str]())
         others = sorted(values[other] for other in same if other in values and value in same)
         numbers = [values[value]] if value in values else others
