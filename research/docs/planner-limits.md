@@ -10,7 +10,10 @@
 > [`scripts/bench.py`](../scripts/bench.py). numz `4490bd1`, 7B fp16 unless noted, `flash_attn_2`,
 > one GPU (RTX PRO 6000 Blackwell 96 GB, torch 2.14.1+cu130, cuDNN 9.24, flash-attn 2.8.3), default
 > `cudaMallocAsync` allocator. The GPU is power-capped and its speed drifts within minutes: DiT
-> times are normalised by a reference forward measured around every point.
+> times are normalised by a reference forward measured around every point. seedvr2x's own tiled
+> passes were measured later on the same GPU, tile by tile (2026-10-11), through
+> [`scripts/tile_peaks.py`](../scripts/tile_peaks.py), on seedvr2x's runtime, not numz's:
+> [their section](#seedvr2xs-tiled-passes-every-tiles-peak).
 
 In short (7B fp16, `flash_attn_2`; DiT forwards on random latents through numz's own code, the
 VAE and the margin through the CLI):
@@ -34,10 +37,15 @@ VAE and the margin through the CLI):
   encode-bound at +0.14 / +0.24, DiT-bound at +0.15 / +0.23 with BlockSwap and +0.21 / +0.26
   without. Below that the run fails in its bounding phase, after dozens of silent allocator
   retries; numz's VAE retry doesn't save it, the DiT doesn't retry.
+- **seedvr2x's own tiled passes, tile by tile:** the 25 square tiles from 512 to 2048 px and 20
+  tiles cut off at 1080p's and 720p's rows, an encode and a decode each. The tiled fits are no
+  upper bound there: an encode stands up to 0.797 GiB over its fit (832 px) and a decode 0.671
+  (576 px), so seedvr2x's planner takes each tile's measured peak
+  ([results](#seedvr2xs-tiled-passes-every-tiles-peak)).
 - **For seedvr2x:** budget = free memory at start − 0.6 GiB (on these cards, the validated
   "N − 2 GiB" again), DiT peaks by tokens and windows, the tiled VAE fits refitted above 1536
-  tiles, DiT time per token calibrated on the machine
-  ([What the planner should use](#what-the-planner-should-use)).
+  tiles and, on seedvr2x's own passes, each tile's measured peak in their place, DiT time per
+  token calibrated on the machine ([What the planner should use](#what-the-planner-should-use)).
 
 ## Why it matters for seedvr2x
 
@@ -326,6 +334,175 @@ check has run) and memory the allocator's pool still holds.
   only 2 allocator retries, at the first forward, exit status 1.
 - A run that fails costs only the time up to the failing phase (19–69 s here).
 
+## seedvr2x's tiled passes: every tile's peak
+
+The tiled fits above come from numz's CLI and from a few tile sizes. seedvr2x runs tiled passes
+of its own (`runtime/tiling.py`: numz's grid and blend, each tile run over the whole shot, the
+frames and the latents waiting in system memory), and its planner needs an upper bound for
+whichever tile it picks. [`tile_peaks.py`](../scripts/tile_peaks.py) measured every tile it may
+pick, on seedvr2x's own runtime (2026-10-11; the same GPU, torch 2.14.1+cu130, `cudaMallocAsync`,
+`flash_attn_2`, 7B fp16).
+
+**How measured.** The two models loaded whole, as seedvr2x loads them without a plan; a shot of
+**21 frames** of a 1080p clip (6 latents, encoded in slices of 5, 4, 4, 4 and 4 frames), the
+tiles sharing **64 px**, the scratch in system memory. A pass's peak is
+`torch.cuda.max_memory_allocated()` above `memory_allocated()` before the pass, the statistics
+reset first: the DiT's and the VAE's weights sit on the card before it and are not counted. The
+encode is `tiling.encode_tiled`, its latent returned in system memory; the decode is
+`tiling.decode_tiled` of that latent, each slice dropped as it comes. One process, the tiles in
+the tables' order, each measured once.
+
+- **The 25 squares,** 512 to 2048 px in steps of 64, each fed alone: the clip's frames resized
+  with torch (bicubic, antialias) to T rows × T + 128 columns, normalised to [−1, 1], bf16, in
+  the VAE's slices. The grid is 1 × 2, a whole T × T tile and one of T × 192.
+- **The 20 tiles cut off at the picture's edge,** through the encoder's own transform and padding
+  (`shot.encoder_inputs`): 1080p, padded to 1104 × 1920, in tiles of 1152 to 1856 px (12), and
+  720p, padded to 752 × 1280, in tiles of 768 to 1216 px (8). The grid is 1 × 2, its largest
+  tile the padded rows × T.
+- **The tree:** seedvr2x at `e6450d8` with the VAE passes that `2adcea7` then brought, before
+  that commit. By a diff of the measured tree against `ca9e6e1`: the vendored model code,
+  `runtime/job.py` (the padding) and `runtime/tilegrid.py` (the grid) are the same to the letter;
+  `runtime/tiling.py` differs in the scratch allowance's name, comment and default alone;
+  `runtime/model.py` in its imports, in `Models.enter` and in the log of a plan's load, none of
+  them in the VAE's passes; `runtime/shot.py` outside the encoder's inputs.
+
+Peaks in GiB (2³⁰ bytes) above what was allocated before the pass; Mpx is the largest tile's
+area (10⁶ pixels). The fits are taken at that area: from 1024-px tiles, encode 1.36 + 8.66 × T²
+and decode 0.44 + 16.29 × T² ([above](#tiled-vae-at-4k)); below, encode 1.7 + 8.4 × T² and
+decode 1.6 + 15.6 × T² ([vram.md](vram.md#tiling)); a cut-off tile takes the fit of its side.
+The squares' line is the straight line, by area, between the two measured squares whose areas
+are around the tile's; "the larger" is the larger of the fit and that line. The tables are
+`tile_peaks.py table`'s output.
+
+### The squares: a whole T × T tile (25)
+
+| Tile | Mpx | Encode | Encode's fit | Encode − fit | Decode | Decode's fit | Decode − fit |
+|---|---|---|---|---|---|---|---|
+| 512 | 0.2621 | 3.518 | 3.902 | −0.384 | 5.886 | 5.689 | +0.197 |
+| 576 | 0.3318 | 4.380 | 4.487 | −0.107 | 7.446 | 6.776 | +0.671 |
+| 640 | 0.4096 | 4.921 | 5.141 | −0.220 | 8.087 | 7.990 | +0.097 |
+| 704 | 0.4956 | 5.953 | 5.863 | +0.090 | 9.788 | 9.332 | +0.456 |
+| 768 | 0.5898 | 7.083 | 6.655 | +0.428 | 11.089 | 10.801 | +0.288 |
+| 832 | 0.6922 | 8.311 | 7.515 | +0.797 | 12.298 | 12.399 | −0.101 |
+| 896 | 0.8028 | 8.560 | 8.444 | +0.116 | 14.100 | 14.124 | −0.024 |
+| 960 | 0.9216 | 9.817 | 9.441 | +0.375 | 15.675 | 15.977 | −0.302 |
+| 1024 | 1.0486 | 10.459 | 10.441 | +0.019 | 17.450 | 17.521 | −0.071 |
+| 1088 | 1.1837 | 11.806 | 11.611 | +0.195 | 19.647 | 19.723 | −0.076 |
+| 1152 | 1.3271 | 13.235 | 12.853 | +0.383 | 21.950 | 22.059 | −0.108 |
+| 1216 | 1.4787 | 14.152 | 14.165 | −0.013 | 24.401 | 24.527 | −0.126 |
+| 1280 | 1.6384 | 15.673 | 15.549 | +0.125 | 26.982 | 27.130 | −0.148 |
+| 1344 | 1.8063 | 16.790 | 17.003 | −0.213 | 29.707 | 29.865 | −0.158 |
+| 1408 | 1.9825 | 18.456 | 18.528 | −0.072 | 32.568 | 32.734 | −0.166 |
+| 1472 | 2.1668 | 19.736 | 20.124 | −0.388 | 35.552 | 35.737 | −0.185 |
+| 1536 | 2.3593 | 21.496 | 21.792 | −0.295 | 38.702 | 38.873 | −0.171 |
+| 1600 | 2.5600 | 23.209 | 23.530 | −0.320 | 41.957 | 42.142 | −0.185 |
+| 1664 | 2.7689 | 25.103 | 25.339 | −0.236 | 45.302 | 45.545 | −0.243 |
+| 1728 | 2.9860 | 27.012 | 27.219 | −0.207 | 48.794 | 49.082 | −0.287 |
+| 1792 | 3.2113 | 29.003 | 29.170 | −0.166 | 52.478 | 52.751 | −0.273 |
+| 1856 | 3.4447 | 31.121 | 31.191 | −0.070 | 56.317 | 56.555 | −0.238 |
+| 1920 | 3.6864 | 33.256 | 33.284 | −0.028 | 60.165 | 60.491 | −0.327 |
+| 1984 | 3.9363 | 35.462 | 35.448 | +0.014 | 64.219 | 64.562 | −0.342 |
+| 2048 | 4.1943 | 37.756 | 37.683 | +0.073 | 68.482 | 68.765 | −0.283 |
+
+### The tiles cut off at the picture's edge: the encode (20)
+
+| Tile | Largest tile | Mpx | Encode | Fit | Measured − fit | Squares' line | Between | Measured − line | Measured − the larger |
+|---|---|---|---|---|---|---|---|---|---|
+| 1152 | 1104 × 1152 | 1.2718 | 12.684 | 12.374 | +0.311 | 12.684 | 1088 and 1152 | +0.000 | +0.000 |
+| 1216 | 1104 × 1216 | 1.3425 | 13.389 | 12.986 | +0.403 | 13.328 | 1152 and 1216 | +0.061 | +0.061 |
+| 1280 | 1104 × 1280 | 1.4131 | 13.546 | 13.598 | −0.051 | 13.756 | 1152 and 1216 | −0.209 | −0.209 |
+| 1344 | 1104 × 1344 | 1.4838 | 14.223 | 14.210 | +0.014 | 14.201 | 1216 and 1280 | +0.023 | +0.014 |
+| 1408 | 1104 × 1408 | 1.5544 | 14.901 | 14.821 | +0.079 | 14.874 | 1216 and 1280 | +0.027 | +0.027 |
+| 1472 | 1104 × 1472 | 1.6251 | 15.578 | 15.433 | +0.145 | 15.546 | 1216 and 1280 | +0.032 | +0.032 |
+| 1536 | 1104 × 1536 | 1.6957 | 16.255 | 16.045 | +0.210 | 16.055 | 1280 and 1344 | +0.201 | +0.201 |
+| 1600 | 1104 × 1600 | 1.7664 | 16.422 | 16.657 | −0.235 | 16.525 | 1280 and 1344 | −0.102 | −0.235 |
+| 1664 | 1104 × 1664 | 1.8371 | 17.079 | 17.269 | −0.190 | 17.081 | 1344 and 1408 | −0.002 | −0.190 |
+| 1728 | 1104 × 1728 | 1.9077 | 17.736 | 17.881 | −0.145 | 17.749 | 1344 and 1408 | −0.013 | −0.145 |
+| 1792 | 1104 × 1792 | 1.9784 | 18.393 | 18.493 | −0.100 | 18.418 | 1344 and 1408 | −0.025 | −0.100 |
+| 1856 | 1104 × 1856 | 2.0490 | 19.050 | 19.105 | −0.055 | 18.918 | 1408 and 1472 | +0.131 | −0.055 |
+| 768 | 752 × 768 | 0.5775 | 6.936 | 6.551 | +0.384 | 6.936 | 704 and 768 | +0.000 | +0.000 |
+| 832 | 752 × 832 | 0.6257 | 7.513 | 6.956 | +0.558 | 7.513 | 768 and 832 | +0.000 | +0.000 |
+| 896 | 752 × 896 | 0.6738 | 8.091 | 7.360 | +0.731 | 8.090 | 768 and 832 | +0.001 | +0.001 |
+| 960 | 752 × 960 | 0.7219 | 7.700 | 7.764 | −0.064 | 8.378 | 832 and 896 | −0.678 | −0.678 |
+| 1024 | 752 × 1024 | 0.7700 | 8.213 | 8.029 | +0.185 | 8.486 | 832 and 896 | −0.273 | −0.273 |
+| 1088 | 752 × 1088 | 0.8182 | 8.727 | 8.445 | +0.281 | 8.722 | 896 and 960 | +0.004 | +0.004 |
+| 1152 | 752 × 1152 | 0.8663 | 9.240 | 8.862 | +0.378 | 9.232 | 896 and 960 | +0.008 | +0.008 |
+| 1216 | 752 × 1216 | 0.9144 | 9.753 | 9.279 | +0.474 | 9.741 | 896 and 960 | +0.012 | +0.012 |
+
+### The tiles cut off at the picture's edge: the decode (20)
+
+| Tile | Largest tile | Mpx | Decode | Fit | Measured − fit | Squares' line | Between | Measured − line | Measured − the larger |
+|---|---|---|---|---|---|---|---|---|---|
+| 1152 | 1104 × 1152 | 1.2718 | 21.035 | 21.158 | −0.122 | 21.062 | 1088 and 1152 | −0.026 | −0.122 |
+| 1216 | 1104 × 1216 | 1.3425 | 22.204 | 22.309 | −0.105 | 22.198 | 1152 and 1216 | +0.006 | −0.105 |
+| 1280 | 1104 × 1280 | 1.4131 | 23.336 | 23.460 | −0.124 | 23.341 | 1152 and 1216 | −0.005 | −0.124 |
+| 1344 | 1104 × 1344 | 1.4838 | 24.503 | 24.611 | −0.108 | 24.484 | 1216 and 1280 | +0.019 | −0.108 |
+| 1408 | 1104 × 1408 | 1.5544 | 25.670 | 25.762 | −0.092 | 25.625 | 1216 and 1280 | +0.045 | −0.092 |
+| 1472 | 1104 × 1472 | 1.6251 | 26.778 | 26.913 | −0.135 | 26.767 | 1216 and 1280 | +0.011 | −0.135 |
+| 1536 | 1104 × 1536 | 1.6957 | 27.942 | 28.064 | −0.122 | 27.912 | 1280 and 1344 | +0.029 | −0.122 |
+| 1600 | 1104 × 1600 | 1.7664 | 29.060 | 29.215 | −0.154 | 29.059 | 1280 and 1344 | +0.001 | −0.154 |
+| 1664 | 1104 × 1664 | 1.8371 | 30.223 | 30.366 | −0.143 | 30.206 | 1344 and 1408 | +0.016 | −0.143 |
+| 1728 | 1104 × 1728 | 1.9077 | 31.385 | 31.517 | −0.131 | 31.354 | 1344 and 1408 | +0.031 | −0.131 |
+| 1792 | 1104 × 1792 | 1.9784 | 32.486 | 32.668 | −0.182 | 32.502 | 1344 and 1408 | −0.015 | −0.182 |
+| 1856 | 1104 × 1856 | 2.0490 | 33.646 | 33.819 | −0.172 | 33.646 | 1408 and 1472 | +0.001 | −0.172 |
+| 768 | 752 × 768 | 0.5775 | 10.859 | 10.610 | +0.249 | 10.920 | 704 and 768 | −0.061 | −0.061 |
+| 832 | 752 × 832 | 0.6257 | 11.493 | 11.360 | +0.133 | 11.512 | 768 and 832 | −0.019 | −0.019 |
+| 896 | 752 × 896 | 0.6738 | 12.377 | 12.111 | +0.266 | 12.080 | 768 and 832 | +0.296 | +0.266 |
+| 960 | 752 × 960 | 0.7219 | 12.694 | 12.862 | −0.168 | 12.782 | 832 and 896 | −0.087 | −0.168 |
+| 1024 | 752 × 1024 | 0.7700 | 13.540 | 12.984 | +0.556 | 13.566 | 832 and 896 | −0.026 | −0.026 |
+| 1088 | 752 × 1088 | 0.8182 | 14.386 | 13.768 | +0.618 | 14.304 | 896 and 960 | +0.083 | +0.083 |
+| 1152 | 752 × 1152 | 0.8663 | 14.919 | 14.552 | +0.367 | 14.942 | 896 and 960 | −0.022 | −0.022 |
+| 1216 | 752 × 1216 | 0.9144 | 15.585 | 15.336 | +0.249 | 15.580 | 896 and 960 | +0.005 | +0.005 |
+
+### Where the fits stand against them
+
+- **The fits are no upper bound.** 11 of the 25 squares' encodes and 5 of their decodes stand
+  over their fit, as do 13 and 7 of the 20 cut-off tiles'. The largest shortfalls of the
+  encode's fit: 0.797 GiB at 832 px, 0.731 at 752 × 896, 0.558 at 752 × 832, 0.474 at
+  752 × 1216, 0.428 at 768 px, 0.403 at 1104 × 1216. Of the decode's: 0.671 GiB at 576 px, 0.618
+  at 752 × 1088, 0.556 at 752 × 1024, 0.456 at 704 px.
+- **A decode follows its tile's area from 1024 px up, not below.** From 1024 px every square's
+  decode is 0.071 to 0.342 GiB under the refit and grows by 15.9 to 16.5 GiB per megapixel from
+  one square to the next (the refit's slope is 16.29); the 1080p cut-off tiles' are 0.092 to
+  0.182 under. Below 1024 px a square's decode goes from 0.302 GiB under its fit (960 px) to
+  0.671 over (576 px), growing by 8.2 to 22.4 GiB per megapixel from one square to the next.
+- **An encode moves in steps:** from 0.388 GiB under its fit (1472 px) to 0.797 over (832 px), a
+  square adding 2.2 to 12.4 GiB per megapixel to the one before it (the least from 832 to
+  896 px, the most from 512 to 576). A larger tile may take less: 752 × 960 encodes in 0.391 GiB
+  less than 752 × 896.
+- **A cut-off tile's decode lies on the squares' line,** 19 of the 20 within 0.09 GiB of it and
+  one 0.296 over (752 × 896). The encodes stand from 0.678 GiB under that line (752 × 960) to
+  0.201 over (1104 × 1536).
+- **Over the larger of its fit and of the squares' line,** a cut-off tile stands by 0.266 GiB at
+  the most for a decode (752 × 896: 12.377 for a fit of 12.111 and a line of 12.080) and by 0.201
+  for an encode (1104 × 1536).
+- **Alone or in a whole frame, the same tile.** Whole 1080p and 4K frames in tiles of 512, 768,
+  1024, 1280 (cut off: 1104 × 1280), 1536 and 2048 px, measured earlier that day by the same
+  peak over 21 frames, on the passes as they then stood, and kept to three decimals: their
+  encodes read within 0.015 GiB of the tile fed alone, their decodes 0.006 to 0.026 over it.
+  And 1024-px tiles over shots of 21 and 301 frames at 1080p and of 21 and 101 at 4K read the
+  same bytes each time, 10.4742 and 17.4499 GiB, for 10.4593 and 17.4499 fed alone: a pass's
+  peak doesn't grow with the shot.
+- **seedvr2x's planner takes the larger where a tile has two measures,** to the hundredth
+  (`runtime/planner.py`, `MEASURED`). That moves five of its 90 entries from the tables' value:
+  768 px's decode (11.11 for 11.089), 1024 px's encode and decode (10.47 for 10.459, 17.46 for
+  17.450), 1536 px's decode (38.73 for 38.702) and 2048 px's (68.51 for 68.482).
+
+### Their caveats
+
+- **Each tile was measured once, on one card,** with one driver and one cuDNN: no band from run
+  to run, and a card of another generation may choose other convolution kernels, with other
+  workspaces ([the encode's peak gave way under pressure](#the-margin-over-free-memory) on this
+  one).
+- **512 px's encode was its process's first VAE pass,** which left 32 MiB (0.031 GiB) allocated
+  behind it where every later pass left none: its peak counts them, and may be that much high.
+- **One overlap, one shot length:** 64 px and 21 frames. The cut-off tiles are 1080p's and
+  720p's alone: a tile cut off at another picture's rows has no measure.
+- **Allocated, not reserved:** the allocator's pool held more than the peaks say, up to
+  94.25 GiB of the card's 95.05 at the 1984- and 2048-px decodes (64.219 and 68.482 allocated).
+- **Times aren't in the tables:** the card is power-capped. The 45 tiles took 2,787 s in all:
+  2.96 s to encode and 6.68 s to decode at 512 px, 55.9 s and 126.4 s at 2048 px.
+
 ## What the planner should use
 
 - **Budget = the free memory read once the CUDA context exists, minus 0.6 GiB.** Runs failed with
@@ -338,7 +515,8 @@ check has run) and memory the allocator's pool still holds.
   own import-time bf16 check already takes 0.14 GiB of it.
 - **The margin covers memory outside torch's tensors, not the formulas' errors:** the predicted
   peaks must be upper bounds. The DiT's are exact with the window term; the VAE fits are within
-  ≈ 0.5 GiB up to 1536 tiles and need the refit beyond.
+  ≈ 0.5 GiB up to 1536 tiles and need the refit beyond. On seedvr2x's own tiled passes neither
+  tiled fit is one, the refit included: up to 0.797 GiB short.
 - **DiT peak = F + 127.16 KiB × tokens + 2.726 MiB × windows,** with F what the loaded model holds
   (15.87 GiB for 7B fp16 with the VAE resident; the other models differ by their weights,
   [vram.md](vram.md#practical-rules)) and the windows counted with the model's own window
@@ -356,6 +534,16 @@ check has run) and memory the allocator's pool still holds.
   frame here), so the largest tile that fits costs nothing and blends the fewest tile edges
   ([vram.md](vram.md#quality-tiled-vs-untiled-1080p-batch-9-png-output): tile size is what drives
   the tiled decode's drift).
+- **seedvr2x's tiled passes: a tile's measured peak, not its fit**
+  ([every tile's peak](#seedvr2xs-tiled-passes-every-tiles-peak)). Each of the 45 tiles measured
+  takes its own, the larger where it was measured twice, since the fits fall up to 0.797 GiB
+  short for an encode and 0.671 for a decode. A tile cut off at another picture's rows, which
+  nobody measured, takes the larger of its fit and of the line between the two squares around
+  its area, and 0.3 GiB more ([DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner)): the measured
+  cut-off tiles stand 0.266 GiB over the larger of the two at the most. Beyond 2048 px nothing
+  is measured.
+  Each adds what is on the GPU before the call, the VAE's weights and the DiT blocks left there,
+  and nothing of the shot, which seedvr2x's passes feed from system memory and keep there.
 
 ## Caveats
 
@@ -380,6 +568,8 @@ check has run) and memory the allocator's pool still holds.
 - **7B fp16 only for the DiT sweeps.** The per-window term comes from the text repetition, which
   every model has; the other models' constants (weights, per-token slope) are in
   [vram.md](vram.md#practical-rules).
+- **seedvr2x's tile peaks** have caveats of their own, each tile measured once, on this one card
+  ([their caveats](#their-caveats)).
 
 ## Reproduce
 
@@ -428,3 +618,14 @@ configurations change only the CLI arguments of the configuration table above (`
 tiles 896 / 640; `dit24`: `--dit_model seedvr2_ema_7b_fp16.safetensors --dit_offload_device cpu
 --blocks_to_swap 16`, batch 45, tiles 1344 / 1024; `dit30`: 7B fp16 without BlockSwap, batch 45,
 tiles 1024 / 1024).
+
+seedvr2x's tiled passes run with the python of seedvr2x's environment, not numz's, `run` alone
+on the GPU; `table` needs no environment:
+
+```bash
+S=/path/to/scripts; M=/path/to/models
+python $S/tile_peaks.py plan                      # the 45 tiles and their grids, no GPU
+python $S/tile_peaks.py run --dit $M/seedvr2_ema_7b_fp16.safetensors \
+  --vae $M/ema_vae_fp16.safetensors --source /path/to/clip-1080p.mkv --out tiles.jsonl
+python3 $S/tile_peaks.py table tiles.jsonl        # the section's three tables
+```
