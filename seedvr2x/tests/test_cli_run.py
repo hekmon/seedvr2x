@@ -225,7 +225,8 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     # The planner's budget: the free memory's reading as the command line takes it
     # (cli._free_memory), its first tensor and its warm-up on the stand-in's device, the driver's
     # figures the stand-in's; the system memory available a figure of its own, not this
-    # machine's.
+    # machine's; and the attention backend FlashAttention 2, whose fit the plans here are
+    # counted by, on a machine without it too (cli._attention).
     free_memory = cli._free_memory  # pyright: ignore[reportPrivateUsage]
     ASKED.clear()
 
@@ -240,6 +241,7 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(torch.cuda, "mem_get_info", lambda device: (FREE, TOTAL))
     patch(cli, "_free_memory", read_free)
     patch(cli, "_host_available", lambda: HOST)
+    patch(cli, "_attention", lambda: "flash_attn_2")
     patch(model, "load_models", load)
     patch(model, "nvidia_driver", lambda: "a stand-in")
     patch(model, "decode_stream", stand_in_decode_stream)
@@ -768,6 +770,11 @@ def test_plan_recorded_and_phases_entered(
         "vae_in_dit": True,
         "scratch_allowance": 0,
         "free": FREE,
+        # A driver that refuses: what it reports is what the plan counts on; the whole card's
+        # free memory isn't read. And the attention backend the DiT's peak is predicted for.
+        "driver_free": FREE,
+        "card_free": None,
+        "attention": "flash_attn_2",
         "budget": FREE - planner.MARGIN,
         "encode_peak": planner.encode_peak(PADDED),
         # A window of the 6-latent shot, over the shot's draw (planner.dit_draw).
@@ -926,9 +933,24 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     assert loads == [(made[0], 1)] and limits == [(FREE - memory.HELD_BACK) / TOTAL]
     assert steps.calls == UNINTERRUPTED
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
-    assert content["plan"]["memory"]["free"] == planned_in
+    # The record keeps what the plan was made in, and what the driver reported beside it; the
+    # whole card's free memory isn't read.
+    recorded = content["plan"]["memory"]
+    assert (recorded["free"], recorded["driver_free"], recorded["card_free"]) == (
+        planned_in,
+        FREE,
+        None,
+    )
     assert "the GPU's driver gives memory the card doesn't have" in caplog.text
     assert "the plan counts on 89.20 GiB of the GPU's memory, of the 94.50 GiB" in caplog.text
+    # The plan's first line names each figure, where "94.50 GiB free" alone would be taken for
+    # what the plan counts on, and "89.20 GiB free" for what the driver reports.
+    assert (
+        ", 94.50 GiB free as its driver reports it to this process (the whole card's, NVML's,"
+        " wasn't read); the run is held to the card's own memory, 5.30 GiB under that, its"
+        " driver giving more than the card has: the plan counts on 89.20 GiB, a budget of 88.60"
+        " GiB"
+    ) in caplog.text
     assert "torch held to 91.50 GiB on the GPU: the 94.50 GiB free less 3.0" in caplog.text
 
 
@@ -1032,10 +1054,12 @@ def test_a_plan_on_a_driver_that_spills_holds_nothing(
     assert upscale(tmp_path, source_path, "out", *JOB, "--plan", "plan.txt") == 0
     assert not limits and steps.calls == []
     planned_in = FREE - memory.HELD_BACK - memory.RESERVE
+    reading = memory.Reading(FREE, None, planned_in, True)
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["plan"] == plan_record(
-        *planner.plan(planned_in, TARGET, JOB_SHOTS, Pins(window=5), HOST)
+        *planner.plan(reading, TARGET, JOB_SHOTS, Pins(window=5), HOST)
     )
+    assert content["plan"]["memory"]["free"] == planned_in
     assert "the plan counts on 89.20 GiB of the GPU's memory" in caplog.text
 
 
@@ -1221,7 +1245,7 @@ def test_plan_said(
     assert plan_lines(caplog) == said
     assert said == [
         "plan: a stand-in, 94.50 GiB free, a budget of 93.90 GiB",
-        "plan: frames padded to 128x128, 64 tokens a latent",
+        "plan: frames padded to 128x128, 64 tokens a latent, attention on FlashAttention 2",
         "plan: 3 shots, the longest of 21 frames (6 latents)",
         "plan: windows of 5 latents at most, the longest run 4 latents: 2 of 3 shots in one"
         " window, 1 join",
@@ -1355,11 +1379,13 @@ def test_one_file_plans_as_a_directory(
     # --plan's as its run's. JOB's last shot, 6 latents in two windows of 4: the DiT's phase
     # takes a window's peak, the shot's draw being under it.
     asked: list[set[str]] = []
+    backends: list[str] = []
     peaks: list[int] = []
     plan = planner.plan
 
     def planned(*arguments: Any, **options: Any) -> Any:
         asked.append(set(options))
+        backends.append(options["attention"])
         made = plan(*arguments, **options)
         peaks.append(made[1].dit)
         return made
@@ -1370,7 +1396,10 @@ def test_one_file_plans_as_a_directory(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     listed = str(tmp_path / "plan.txt")
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
-    assert asked == [{"split", "numz_padding", "recorded"}] * 3
+    assert asked == [{"split", "numz_padding", "recorded", "attention"}] * 3
+    # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
+    # here), a one-file output too, which records no environment to read it from.
+    assert backends == ["flash_attn_2"] * 3
     window = planner.dit_peak(PADDED, 4)
     assert peaks == [window] * 3 and window > planner.dit_draw(PADDED, 6)
 
@@ -1567,6 +1596,49 @@ def test_resumed_with_other_memory(
     assert shape == {key: value for key, value in started["plan"].items() if key != "memory"}
     assert content["plan"]["memory"]["free"] == less != started["plan"]["memory"]["free"]
     assert [shot["windows"] for shot in content["shots"]] == [[[0, 2]], [[0, 1]], [[0, 6]]]
+    assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
+
+
+def test_resumed_on_another_attention_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The plan's memory is planned again at each start for the attention backend of that
+    # day's run (cli._attention), as for the memory free that day: a job begun with
+    # FlashAttention 2 and taken up without it keeps its shape, and where its weights are is
+    # counted by SDPA's fit, recorded with the next unit made. Here the memory that holds the
+    # 6-latent window with every weight on the GPU by FlashAttention 2's fit: by SDPA's, the
+    # VAE's weights leave the DiT's phase.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    options = JOB[:2]
+    exact = planner.dit_peak(PADDED, 6) + planner.MARGIN
+    free_memory(monkeypatch, exact)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *options)
+    manifest = tmp_path / "out" / "manifest.json"
+    started = json.loads(manifest.read_text())
+    assert started["plan"] == plan_record(*planner.plan(exact, TARGET, JOB_SHOTS, Pins(), HOST))
+    memory = started["plan"]["memory"]
+    assert (memory["attention"], memory["swapped_blocks"], memory["vae_in_dit"]) == (
+        "flash_attn_2",
+        0,
+        True,
+    )
+    monkeypatch.setattr(cli, "_attention", lambda: "sdpa")
+    steps.stop = None
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    content = json.loads(manifest.read_text())
+    again = planner.plan(exact, TARGET, JOB_SHOTS, Pins(), HOST, recorded=Plan(6), attention="sdpa")
+    assert (again[0].window, again[0].swapped, again[0].vae_in_dit) == (6, 0, False)
+    assert content["plan"] == plan_record(*again)
+    assert content["plan"]["memory"]["attention"] == "sdpa"
+    shape = {key: value for key, value in content["plan"].items() if key != "memory"}
+    assert shape == {key: value for key, value in started["plan"].items() if key != "memory"}
+    assert "tokens a latent, attention on PyTorch's SDPA" in caplog.text
     assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
 
 

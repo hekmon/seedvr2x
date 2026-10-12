@@ -19,8 +19,9 @@ from typing import Any
 
 import pytest
 
-from seedvr2x.runtime import planner, tilegrid
+from seedvr2x.runtime import planner, tilegrid, weights
 from seedvr2x.runtime.job import Shot, output_size, padded_size
+from seedvr2x.runtime.memory import Reading
 from seedvr2x.runtime.plan import Plan, Tiles
 from seedvr2x.runtime.planner import BLOCK, GIB, MARGIN, Pins, PlanError
 from seedvr2x.runtime.shot import padded_length, shot_layout
@@ -75,6 +76,12 @@ def test_constants() -> None:
     assert gib(planner.DIT_LOADED) == pytest.approx(15.871)
     assert planner.PER_TOKEN == 127.16 * 1024 and planner.PER_WINDOW == 2.726 * 1024**2
     assert (planner.BLOCKS, planner.SLOTS) == (36, 2)
+    # The blocks, the slots and the DiT's other parameters are the model's own constants
+    # (runtime/weights.py), the 7B's, the one DiT seedvr2x runs; a block is one size, which the
+    # planner counts the 36 by.
+    assert planner.DIT is weights.ACCEPTED["dit"] is weights.DIT_7B
+    assert planner.DIT.blocks == (planner.BLOCK,) * planner.BLOCKS
+    assert (planner.SLOTS, planner.DIT_OTHER) == (weights.SLOTS, weights.DIT_7B.other)
     assert f"{gib(planner.BLOCK):.4f}" == "0.4220" and f"{gib(36 * planner.BLOCK):.2f}" == "15.19"
     assert f"{gib(planner.DIT_OTHER):.3f}" == "0.155"
     assert f"{gib(planner.VAE_WEIGHTS):.4f}" == "0.4669"
@@ -96,17 +103,6 @@ def test_constants() -> None:
     assert planner.TILE_MAX == 2048 and gib(planner.VAE_ROOM) == pytest.approx(1.5)
 
 
-def test_literals_equal_blockswaps() -> None:
-    # The planner holds literals of what runtime/weights.py (a block of the 7B's bytes, the
-    # slots: the models' constants, which import no torch either) and runtime/blockswap.py
-    # define: the same figures.
-    from seedvr2x.runtime import blockswap, weights
-
-    assert (planner.BLOCK, planner.SLOTS) == (weights.DIT_7B.blocks[0], weights.SLOTS)
-    assert set(weights.DIT_7B.blocks) == {planner.BLOCK} and len(weights.DIT_7B.blocks) == 36
-    assert planner.GIB == blockswap.GIB
-
-
 IMPORTED = """
 import sys
 
@@ -121,9 +117,10 @@ print(*sorted(name for name in ("torch", "numpy", "torchvision") if name in sys.
 
 def test_imports_no_torch() -> None:
     # The command line imports the planner before its first refusals, which don't wait for torch
-    # (tests/test_cli.py): a process that has imported it, and counted a tile's peak over the
-    # tiled passes' grid (runtime/tilegrid.py), has loaded no torch. Planning a job does load
-    # it, for the shots' layouts (runtime/shot.py).
+    # (tests/test_cli.py): a process that has imported it, with the models' constants
+    # (runtime/weights.py) and the reading's type (runtime/memory.py), and counted a tile's peak
+    # over the tiled passes' grid (runtime/tilegrid.py), has loaded no torch. Planning a job
+    # does load it, for the shots' layouts (runtime/shot.py).
     result = subprocess.run(
         [sys.executable, "-c", IMPORTED], capture_output=True, text=True, check=False
     )
@@ -2604,6 +2601,11 @@ def test_peaks_record() -> None:
     made, peaks = planner.plan(our_free(24), HD, shots(76), Pins(), 64 * GIB)
     assert peaks.record() == {
         "free": our_free(24),
+        # A driver that refuses: what it reports free is what the plan was made in, and the
+        # whole card's free memory isn't read.
+        "driver_free": our_free(24),
+        "card_free": None,
+        "attention": "flash_attn_2",
         "budget": our_free(24) - MARGIN,
         "encode_peak": planner.encode_peak(OURS_1080, Tiles(1856), 0, 28),
         # The longest window's, over the shot's draw (planner.dit_draw).
@@ -2644,7 +2646,7 @@ def test_said() -> None:
     made, peaks = planner.plan(numz_free(24), *job, 64 * GIB, split=True)
     assert planner.said(made, peaks, "NVIDIA RTX PRO 6000 Blackwell", *job) == [
         "plan: NVIDIA RTX PRO 6000 Blackwell, 22.56 GiB free, a budget of 21.96 GiB",
-        "plan: frames padded to 1920x1104, 8,280 tokens a latent",
+        "plan: frames padded to 1920x1104, 8,280 tokens a latent, attention on FlashAttention 2",
         "plan: 1 shot, the longest of 301 frames (76 latents)",
         "plan: windows of 17 latents at most: 0 of 1 shot in one window, 4 joins",
         "plan: 28 of the DiT's 36 blocks swapped, the VAE off the GPU in the DiT's phase; in the"
@@ -2718,3 +2720,248 @@ def test_said() -> None:
         "plan: 3 shots, the longest of 157 frames (40 latents)",
         "plan: windows of 40 latents at most: 3 of 3 shots in one window, 0 joins",
     ]
+
+
+# What a run held to its card counts on in these tests, on a driver that gives memory the card
+# doesn't have: the free memory less 5.3 GiB, a figure of the tests' own. The module's two
+# constants (memory.HELD_BACK and memory.RESERVE) are measured, and move with their measures.
+KEPT = round(5.3 * GIB)
+
+
+def held(reported: float, card: float | None) -> Reading:
+    """The reading of a run held to the card, from figures in GiB: what the driver reports free
+    to the process, and what the whole card has free (None: not read); the plan counts on the
+    smaller, less KEPT."""
+    driver = round(reported * GIB)
+    whole = None if card is None else round(card * GIB)
+    return Reading(driver, whole, min(driver, whole or driver) - KEPT, True)
+
+
+# The memory a plan is made in, each time 22.75 GiB to count on, and how its words name it: the
+# plan's first line after the card's name, and what a refusal says is there. A driver that
+# refuses: one figure, what it reports free. A run held to the card: what the plan counts on, of
+# which figure, the driver's or the whole card's, with the other, in runtime/memory.py's own
+# words; the whole card's wasn't read, is the smaller of the two, or the larger.
+WORDS = [
+    (
+        round(22.75 * GIB),
+        "22.75 GiB free, a budget of 22.15 GiB",
+        "the driver reports 22.75 GiB free",
+    ),
+    (
+        held(28.05, None),
+        "28.05 GiB free as its driver reports it to this process (the whole card's, NVML's,"
+        " wasn't read); the run is held to the card's own memory, 5.30 GiB under that, its"
+        " driver giving more than the card has: the plan counts on 22.75 GiB, a budget of 22.15"
+        " GiB",
+        "the plan counts on 22.75 GiB of the 28.05 GiB free as its driver reports it to this"
+        " process (the whole card's, NVML's, wasn't read), the run held to the card's own memory",
+    ),
+    (
+        held(30.03, 28.05),
+        "28.05 GiB free on the whole card by NVML (its driver reports 30.03 GiB free to this"
+        " process); the run is held to the card's own memory, 5.30 GiB under that, its driver"
+        " giving more than the card has: the plan counts on 22.75 GiB, a budget of 22.15 GiB",
+        "the plan counts on 22.75 GiB of the 28.05 GiB free on the whole card by NVML (its"
+        " driver reports 30.03 GiB free to this process), the run held to the card's own memory",
+    ),
+    (
+        held(28.05, 29.20),
+        "28.05 GiB free as its driver reports it to this process (the whole card has 29.20 GiB"
+        " free by NVML); the run is held to the card's own memory, 5.30 GiB under that, its"
+        " driver giving more than the card has: the plan counts on 22.75 GiB, a budget of 22.15"
+        " GiB",
+        "the plan counts on 22.75 GiB of the 28.05 GiB free as its driver reports it to this"
+        " process (the whole card has 29.20 GiB free by NVML), the run held to the card's own"
+        " memory",
+    ),
+]
+
+
+@pytest.mark.parametrize(("free", "line", "there"), WORDS)
+def test_each_figure_of_the_free_memory_is_named(
+    free: int | Reading, line: str, there: str
+) -> None:
+    # DESIGN.md, Memory planner, Allocator: on a driver that gives memory the card doesn't have
+    # the plan counts on less than the driver reports, and "the driver reports X GiB free" of
+    # that figure would be false: the plan's first line and its five refusals name each figure
+    # for what it is, and a refusal says what would have to be freed on the card for what was
+    # asked. On a driver that refuses they say what they said.
+    is_held = isinstance(free, Reading)
+    film = shots(31)
+
+    def to_free(short: str) -> str:
+        return f"{short} GiB more would have to be freed on the card for it; " if is_held else ""
+
+    freed = ", which would have to be freed on the card" if is_held else ""
+    # The plan is the one of 22.75 GiB to count on, whatever names the figure; its record
+    # keeps that as `free`, what the driver reported and what the card had beside it.
+    made, peaks = planner.plan(free, HD, film, Pins(), None)
+    assert (made, peaks.free) == (
+        planner.plan(round(22.75 * GIB), HD, film, Pins(), None)[0],
+        24427626496,
+    )
+    said = planner.said(made, peaks, "NVIDIA GeForce RTX 5090", HD, film, Pins())
+    assert said[0] == f"plan: NVIDIA GeForce RTX 5090, {line}"
+    record = peaks.record()
+    if isinstance(free, Reading):
+        assert (record["free"], record["driver_free"], record["card_free"]) == (
+            free.counted,
+            free.reported,
+            free.card,
+        )
+    else:
+        assert (record["free"], record["driver_free"], record["card_free"]) == (free, free, None)
+        # A number is a driver that refuses, which reports the card's free memory.
+        assert planner.plan(Reading(free, None, free, False), HD, film, Pins(), None) == (
+            made,
+            peaks,
+        )
+    # --window refused, here with --swap-blocks pinned beside it.
+    assert refused(free, HD, film, Pins(swap_blocks=0, window=30), None) == (
+        "--window 30: its longest window, 17 latents, takes 33.40 GiB of free VRAM with"
+        f" --swap-blocks 0, and {there}: {to_free('10.65')}the longest window that fits is"
+        " --window 6"
+    )
+    # --swap-blocks refused.
+    assert refused(free, HD, shots(4000), Pins(swap_blocks=0), None) == (
+        "--swap-blocks 0: the noise of the longest shot, 15997 frames (4000 latents), drawn whole"
+        " on the GPU beside the shot's latent before its first window, takes 23.91 GiB of free"
+        f" VRAM with 0 blocks swapped, and {there}: {to_free('1.16')}the fewest blocks that hold"
+        " it are --swap-blocks 5"
+    )
+    # A tile pin refused.
+    assert refused(free, HD, film, Pins(decode_tile=1856), None) == (
+        "--decode-tile 1856: the decode in tiles of 1856 px takes 36.28 GiB of free VRAM, the DiT"
+        f" off the GPU, 1.50 of them the room a VAE pass is held to, and {there}:"
+        f" {to_free('13.53')}the largest tile that fits is --decode-tile 1088"
+    )
+    # A size that doesn't fit.
+    assert refused(free, (4320, 7680), shots(5), Pins(), None) == (
+        "an output of 7680x4320 takes 83.71 GiB of free VRAM (its smallest window, 5 latents, with"
+        " every block of the DiT swapped and the VAE off the GPU: a peak of 83.11 GiB, and 0.60 of"
+        f" margin), and {there}: {to_free('60.96')}the largest output that fits there is"
+        " --resolution 2160, about 3840x2160"
+    )
+    # A plan that doesn't fit, and a recorded one that no longer does: the shortfall is what
+    # would have to be freed.
+    assert planner.fits(Plan(12), free, HD, shots(12), None) == (
+        "the encode, untiled, with the DiT's 36 blocks on the GPU, takes 38.23 GiB of free VRAM,"
+        f" 1.50 of them the room a VAE pass is held to, and {there}, 15.48 GiB short{freed}"
+    )
+    recorded = Plan(31, Tiles(1856), Tiles(1088))
+    assert refused(free, HD, film, Pins(), None, recorded=recorded) == (
+        "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 31"
+        " latents with 36 blocks swapped and the VAE off the GPU, takes 33.19 GiB of free VRAM"
+        f" and {there}, 10.44 GiB short{freed}"
+    )
+
+
+# The DiT's windows under SDPA on a desktop card (an RTX 5090, 1080p in seedvr2x's padding,
+# research/scripts/hold_probe.py, 2026-10-11): latents, the DiT's blocks swapped, the largest
+# peak measured over the runs of that window (GiB, to the probe's three decimals), and the two
+# fits' predictions, FlashAttention 2's and SDPA's provisional one.
+SDPA_WINDOWS = [
+    (1, 0, 17.039, 16.955, 17.045),
+    (6, 0, 22.565, 22.215, 22.607),
+    (11, 0, 27.897, 27.316, 28.008),
+    (1, 36, 2.668, 2.607, 2.697),
+    (6, 36, 8.209, 7.867, 8.258),
+    (11, 36, 13.527, 12.967, 13.660),
+    (12, 36, 14.577, 13.971, 14.724),
+]
+
+
+def test_the_dit_s_fit_is_its_attention_backend_s() -> None:
+    # DESIGN.md, Memory planner, Per-phase peaks: "The fit is FlashAttention 2's ... Under SDPA,
+    # which a machine without a FlashAttention build runs, the DiT peaks higher: by 0.06 to 0.61
+    # GiB at 1 to 12 latents of 1080p on a desktop card, 5 to 6% of the per-token term, the same
+    # with blocks swapped ... The planner is to hold a fit per attention backend." SDPA's is
+    # PROVISIONAL until it is measured: 6% more a token and 0.03 GiB, which cover each measured
+    # window, by 0.006 GiB at the least (1 latent, no block swapped) and 0.147 at the most.
+    flash, sdpa = planner.FLASH_ATTN_2, planner.SDPA
+    assert planner.DIT_ATTENTION == {flash: (0, 1.0), sdpa: (round(0.03 * GIB), 1.06)}
+    over: list[float] = []
+    left: list[float] = []
+    for latents, swapped, measured, by_flash, by_sdpa in SDPA_WINDOWS:
+        fitted = planner.dit_peak(OURS_1080, latents, swapped)
+        assert fitted == planner.dit_peak(OURS_1080, latents, swapped, attention=flash)
+        provisional = planner.dit_peak(OURS_1080, latents, swapped, attention=sdpa)
+        assert (round(gib(fitted), 3), round(gib(provisional), 3)) == (by_flash, by_sdpa)
+        more = 0.03 * GIB + 0.06 * planner.PER_TOKEN * planner.tokens(OURS_1080, latents)
+        assert provisional - fitted == pytest.approx(more, abs=2)  # two peaks, each rounded
+        over.append(measured - gib(fitted))
+        left.append(gib(provisional) - measured)
+    assert (round(min(over), 2), round(max(over), 2)) == (0.06, 0.61)
+    assert (round(min(left), 3), round(max(left), 3)) == (0.006, 0.147)
+    # The VAE's weights away, and the draw of a shot's noise, which runs no attention, as under
+    # FlashAttention 2.
+    apart = planner.dit_peak(OURS_1080, 6, 0, False, sdpa)
+    assert planner.dit_peak(OURS_1080, 6, 0, True, sdpa) - apart == planner.VAE_WEIGHTS
+    with pytest.raises(ValueError, match="attention 'xformers': the DiT's fit is flash_attn_2's"):
+        planner.dit_peak(OURS_1080, 6, attention="xformers")
+    with pytest.raises(ValueError, match="attention 'xformers': the DiT's fit is flash_attn_2's"):
+        planner.plan(our_free(24), HD, shots(6), Pins(), None, attention="xformers")
+
+    # The plan is made for the backend the run takes. 1080p on a 24 GB card, a shot of 301
+    # frames: the same windows of 17 latents, 31 blocks swapped under SDPA for 28; the plan's
+    # second line and its record say which.
+    free, job = our_free(24), (HD, shots(76), Pins(), None)
+    made, peaks = planner.plan(free, *job)
+    assert bare(made) == Plan(17, Tiles(1856), Tiles(1088), 28, 0, 0, vae_in_dit=False)
+    other, slower = planner.plan(free, *job, attention=sdpa)
+    assert bare(other) == Plan(17, Tiles(1856), Tiles(1088), 31, 0, 0, vae_in_dit=False)
+    assert slower.dit == planner.dit_peak(OURS_1080, 17, 31, False, sdpa)
+    assert (peaks.record()["attention"], slower.record()["attention"]) == (flash, sdpa)
+    assert planner.said(other, slower, "a card", HD, shots(76), Pins())[1] == (
+        "plan: frames padded to 1920x1104, 8,280 tokens a latent, attention on PyTorch's SDPA"
+    )
+    # A window shorter where the card was full: a shot of 1,197 frames in windows of 19 latents
+    # for 20, every block swapped.
+    made, _ = planner.plan(free, HD, shots(300), Pins(), None)
+    other, _ = planner.plan(free, HD, shots(300), Pins(), None, attention=sdpa)
+    assert (made.window, made.swapped, other.window, other.swapped) == (20, 35, 19, 36)
+    # 4K's smallest window, 5 latents, takes 23.62 GiB of free VRAM by SDPA's provisional fit
+    # where FlashAttention 2's takes 22.40: a card emulated at 24 GB, 22.51 GiB free, plans 4K
+    # with FlashAttention 2 and is refused it without.
+    emulated = 24_168_824_832
+    assert planner.plan(emulated, UHD, shots(5), Pins(), None)[0].window == 5
+    assert refused(emulated, UHD, shots(5), Pins(), None, attention=sdpa).startswith(
+        "an output of 3840x2160 takes 23.62 GiB of free VRAM (its smallest window, 5 latents, with"
+        " every block of the DiT swapped and the VAE off the GPU: a peak of 23.02 GiB, and 0.60 of"
+        " margin), and the driver reports 22.50 GiB free: the largest output that fits there is"
+        " --resolution 2080, "
+    )
+
+
+def test_resumed_on_another_attention_backend() -> None:
+    # Where the weights are is planned again on every resume, from the memory free that day
+    # (DESIGN.md, Memory planner, A plan shapes the output a little), and for the attention
+    # backend of that day's run: FlashAttention installed since, or gone, the recorded shape is
+    # held to today's fit. A shape recorded with FlashAttention 2, taken up on SDPA: the same
+    # windows and tiles, three more blocks swapped; and the other way round, three fewer.
+    free, job = our_free(24), (HD, shots(76), Pins(), None)
+    shape = Plan(17, Tiles(1856), Tiles(1088))
+    with_flash = Plan(17, Tiles(1856), Tiles(1088), 28, 0, 0, vae_in_dit=False)
+    assert bare(planner.plan(free, *job, recorded=shape)[0]) == with_flash
+    resumed, peaks = planner.plan(free, *job, recorded=with_flash, attention=planner.SDPA)
+    assert bare(resumed) == replace(with_flash, swapped=31)
+    assert peaks.attention == planner.SDPA
+    back, peaks = planner.plan(free, *job, recorded=resumed, attention=planner.FLASH_ATTN_2)
+    assert (bare(back), peaks.attention) == (with_flash, planner.FLASH_ATTN_2)
+    # A shape whose windows only FlashAttention 2's fit holds on that card no longer fits there
+    # without it, and is refused as any recorded shape that no longer fits: its windows of 20
+    # latents take 23.38 GiB of free VRAM by SDPA's fit, every block swapped.
+    long = (HD, shots(300), Pins(), None)
+    recorded, _ = planner.plan(free, *long)
+    assert bare(recorded) == Plan(20, Tiles(1856), Tiles(1088), 35, 0, 0, vae_in_dit=False)
+    assert planner.fits(recorded, free, HD, shots(300), None) is None
+    assert planner.fits(recorded, free, HD, shots(300), None, attention=planner.SDPA) == (
+        "the DiT's phase, a window of 20 latents with 35 blocks swapped and the VAE off the GPU,"
+        " takes 23.80 GiB of free VRAM and the driver reports 22.57 GiB free, 1.23 GiB short"
+    )
+    assert refused(free, *long, recorded=recorded, attention=planner.SDPA) == (
+        "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 20"
+        " latents with 36 blocks swapped and the VAE off the GPU, takes 23.38 GiB of free VRAM"
+        " and the driver reports 22.57 GiB free, 0.81 GiB short"
+    )

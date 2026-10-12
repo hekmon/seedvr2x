@@ -700,14 +700,18 @@ def _run(args: argparse.Namespace) -> int:
         else:
             import torch
 
-            # Less what a driver that gives memory the card doesn't have is held back from
-            # (runtime/memory.py): all of it elsewhere.
-            free = memory.usable(_free_memory(identity.device))
+            # What the driver reports free, and what the plan may count on of it: all of it,
+            # but on a driver that gives memory the card doesn't have, where the run is held to
+            # less (runtime/memory.py); the plan's lines and its refusals name each figure. The
+            # DiT's peak by the fit of the attention backend this run takes, today's on a
+            # resume too (_attention).
+            free = memory.reading(_free_memory(identity.device))
             plan, peaks = planner.plan(
                 *(free, target, shots, pins, _host_available()),
                 split=split,
                 numz_padding=numz_padding,
                 recorded=kept_plan,
+                attention=_attention(),
             )
             card = torch.cuda.get_device_name(identity.device)
             said = planner.said(plan, peaks, card, target, shots, pins, numz_padding=numz_padding)
@@ -1618,32 +1622,43 @@ def _free_memory(device: "torch.device") -> int:
     return free
 
 
-def _host_available(meminfo: Path = Path("/proc/meminfo")) -> int | None:
-    """The system memory available, in bytes: the kernel's MemAvailable, what new work can take
-    without swapping, which the plan's pinned copies and scratch are counted against, and the
-    scratch's allowance sized from (DESIGN.md, Memory planner, Host RAM). None when it can't be
+def _attention() -> str:
+    """The attention backend this run's DiT takes: FlashAttention 2 where it imports, else
+    PyTorch's SDPA, as the loader decides it for every attention module, and warns of
+    (model.attention_backend, model.load_models). The plan's DiT peak is predicted by that
+    backend's fit (planner.DIT_ATTENTION), which a one-file output has no recorded environment
+    to read from."""
+    from seedvr2x.runtime import model
+
+    return model.attention_backend()
+
+
+def _host_available(
+    proc: Path = Path("/proc"), cgroups: Path = Path("/sys/fs/cgroup")
+) -> int | None:
+    """The system memory this process can still take, in bytes, as the placement reads it before
+    it pins a copy (blockswap.available): the kernel's MemAvailable, what new work can take
+    without swapping, or less in a container held to a limit, what is left under its control
+    group's. The plan's pinned copies and scratch are counted against it, and the scratch's
+    allowance sized from it (DESIGN.md, Memory planner, Host RAM). None when nothing can be
     read: the plan then can't check the system memory it takes, nor size the allowance from the
     host's, a tiled shot's scratch allowed planner.ALLOWANCE_UNKNOWN_HOST at most. Said as a
     warning, once a run, which reads it once (_run)."""
+    from seedvr2x.runtime import blockswap
     from seedvr2x.runtime.planner import ALLOWANCE_UNKNOWN_HOST, GIB
 
-    try:
-        for line in meminfo.read_text().splitlines():
-            name, _, value = line.partition(":")
-            if name == "MemAvailable":
-                return int(value.split()[0]) * 1024  # in kB, the kernel's for KiB
-        reason = "no MemAvailable in it"
-    except (OSError, ValueError, IndexError) as error:
-        reason = str(error)
-    logger.warning(
-        "%s: %s: the system memory available isn't known, so the plan can't check what it takes"
-        " of it, nor size from it what a tiled shot's scratch may take, which is then the shot's"
-        " whole scratch, %d GiB at most",
-        meminfo,
-        reason,
-        ALLOWANCE_UNKNOWN_HOST // GIB,
-    )
-    return None
+    available = blockswap.available(proc, cgroups)
+    if available is None:
+        logger.warning(
+            "%s: no MemAvailable read there, nor a control group's limit under %s: the system"
+            " memory available isn't known, so the plan can't check what it takes of it, nor"
+            " size from it what a tiled shot's scratch may take, which is then the shot's whole"
+            " scratch, %d GiB at most",
+            proc / "meminfo",
+            cgroups,
+            ALLOWANCE_UNKNOWN_HOST // GIB,
+        )
+    return available
 
 
 def _recorded_plan(

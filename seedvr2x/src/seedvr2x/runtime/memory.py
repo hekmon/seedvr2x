@@ -129,6 +129,31 @@ class Driver:
         )
 
 
+@dataclass(frozen=True)
+class Reading:
+    """The GPU's free memory as a plan is made in it, in bytes, each figure by its name, for
+    whoever words the plan and its refusals (runtime/planner.py) and for the manifest:
+    - reported: what the driver reports free to this process (cli._free_memory);
+    - card: what the whole card has free, other programs' memory counted; None where it isn't
+      read: on a driver that refuses, whose figure is the card's, and wherever nothing reads it;
+    - counted: what the plan may count its peaks in (usable): `reported` on a driver that
+      refuses, less on one that spills;
+    - held: whether the run holds itself to the card, its driver giving memory the card doesn't
+      have (spills)."""
+
+    reported: int
+    card: int | None
+    counted: int
+    held: bool
+
+
+def reading(free: int) -> Reading:
+    """The reading a plan is made in, of `free` bytes the driver reports free to this process:
+    what usable counts of it, said in the log as usable says it, with whether the run is held.
+    The whole card's free memory isn't read here: None."""
+    return Reading(free, None, usable(free), _spills)
+
+
 # What startup found, for the run that follows: whether the run holds itself to the card and
 # whether its allocator is torch's own; and, once hold has set it, torch's limit in bytes.
 _spills = False

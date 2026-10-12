@@ -54,6 +54,16 @@ def test_record() -> None:
     one = {"plan": plan.record()}
     other = {"plan": {**Plan(12, Tiles(1536), Tiles(1024)).record(), "timings": {"encode": 1.5}}}
     assert resume.differences(one, other) == []
+    # Nor what the plan was made in, recorded there with its predicted peaks (cli._run;
+    # planner.Peaks.record): the memory it counted on, what the driver reported free and what
+    # the whole card had, read or not, and the attention backend of that day's run.
+    read = {"free": 22 * GIB, "driver_free": 30 * GIB, "card_free": 28 * GIB, "attention": "sdpa"}
+    unread = {"free": 30 * GIB, "driver_free": 30 * GIB, "card_free": None}
+    unread["attention"] = "flash_attn_2"
+    for memory in (read, unread):
+        made = {"plan": plan.record()}
+        made["plan"]["memory"].update(memory)
+        assert resume.differences(one, made) == resume.differences(made, one) == []
     assert resume.differences(one, {"plan": Plan(12, Tiles(1536), Tiles(512)).record()}) == [
         "plan.decode_tiles.size: 1024 -> 512"
     ]
@@ -159,37 +169,60 @@ def test_free_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_host_available(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    # The kernel's MemAvailable, in bytes; None when it can't be read, said as a warning, once:
+    # What the placement reads before it pins a copy (blockswap.available, which
+    # tests/test_blockswap.py holds to the kernel's files): the kernel's MemAvailable, in bytes,
+    # or less under a container's limit; None when nothing can be read, said as a warning, once:
     # the plan then can't check the system memory it takes, nor size the scratch's allowance
     # from the host's (planner.ALLOWANCE_UNKNOWN_HOST then bounds it).
+    from seedvr2x.runtime import blockswap
+
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
     available = cli._host_available  # pyright: ignore[reportPrivateUsage]
-    meminfo = tmp_path / "meminfo"
+    proc, cgroups = tmp_path / "proc", tmp_path / "cgroup"
+    (proc / "self").mkdir(parents=True)
+    (cgroups / "job").mkdir(parents=True)
+    meminfo = proc / "meminfo"
     meminfo.write_text("MemTotal:       65806340 kB\nMemAvailable:   41234567 kB\nCached: 1 kB\n")
-    assert available(meminfo) == 41_234_567 * 1024
+    assert available(proc, cgroups) == 41_234_567 * 1024 == blockswap.available(proc, cgroups)
+    # In a container held to a limit, what is left under it: 8 GiB allowed, 3 held, 1 of them
+    # file cache, which the kernel gives back.
+    (proc / "self" / "cgroup").write_text("0::/job\n")
+    (cgroups / "job" / "memory.max").write_text(f"{8 * 1024**3}\n")
+    (cgroups / "job" / "memory.current").write_text(f"{3 * 1024**3}\n")
+    (cgroups / "job" / "memory.stat").write_text(f"active_file {1024**3}\ninactive_file 0\n")
+    assert available(proc, cgroups) == 6 * 1024**3 == blockswap.available(proc, cgroups)
     found = available()  # this machine's own
-    assert found is not None and found > 0
+    assert found is not None and found == pytest.approx(blockswap.available(), rel=0.2)
     assert caplog.text == ""
-    for text, reason in (
-        ("MemTotal:       65806340 kB\n", "no MemAvailable in it"),
-        ("MemAvailable:   lots kB\n", "invalid literal for int"),
-        ("MemAvailable:\n", "list index out of range"),
-    ):
+    # Nothing to read: no MemAvailable, and no limit.
+    for text in ("MemTotal:       65806340 kB\n", "MemAvailable:   lots kB\n", "MemAvailable:\n"):
         caplog.clear()
         meminfo.write_text(text)
-        assert available(meminfo) is None
+        (cgroups / "job" / "memory.max").write_text("max\n")
+        assert available(proc, cgroups) is None
         [said] = caplog.records
         assert said.levelno == logging.WARNING
-        assert said.getMessage().startswith(f"{meminfo}: {reason}")
-        assert said.getMessage().endswith(
-            ": the system memory available isn't known, so the plan can't check what it takes of"
-            " it, nor size from it what a tiled shot's scratch may take, which is then the shot's"
-            " whole scratch, 8 GiB at most"
+        assert said.getMessage() == (
+            f"{meminfo}: no MemAvailable read there, nor a control group's limit under"
+            f" {cgroups}: the system memory available isn't known, so the plan can't check what"
+            " it takes of it, nor size from it what a tiled shot's scratch may take, which is"
+            " then the shot's whole scratch, 8 GiB at most"
         )
     caplog.clear()
-    assert available(tmp_path / "none") is None
+    assert available(tmp_path / "none", tmp_path / "none") is None
     [said] = caplog.records
-    assert said.levelno == logging.WARNING and "No such file or directory" in said.getMessage()
+    assert said.levelno == logging.WARNING
+
+
+def test_attention_is_the_loader_s() -> None:
+    # The backend a plan is made for is the one the loader sets on every attention module of
+    # the DiT (model.attention_backend, model.load_models): FlashAttention 2 where it imports,
+    # else SDPA, by this machine's own.
+    from seedvr2x.runtime import model
+
+    attention = cli._attention  # pyright: ignore[reportPrivateUsage]
+    assert attention() == model.attention_backend()
+    assert attention() in ("flash_attn_2", "sdpa")
 
 
 @pytest.mark.parametrize("text", ["0", "512", "576", "1024", "4096"])

@@ -258,6 +258,28 @@ def test_the_limit_stays_within_the_card(monkeypatch: pytest.MonkeyPatch) -> Non
     assert memory.hold("cuda:0") == 33 * GIB and limits == [1.0]
 
 
+def test_the_reading_names_its_figures(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # What a plan is made in, for the planner's words and the manifest (memory.Reading): what
+    # the driver reports free to the process, what the whole card has free, which nothing reads
+    # here, what the plan may count on, usable's, and whether the run is held. A driver that
+    # refuses: all of what it reports, nothing said.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    startup(monkeypatch, None)
+    caplog.clear()
+    assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, None, 30 * GIB, False)
+    assert caplog.text == ""
+    # One that spills: HELD_BACK and RESERVE less, said once, as usable says it.
+    startup(monkeypatch, Card(30 * GIB, spills=True))
+    caplog.clear()
+    counted = 30 * GIB - memory.HELD_BACK - memory.RESERVE
+    assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, None, counted, True)
+    assert memory.usable(30 * GIB) == counted
+    [said, again] = caplog.messages
+    assert said == again and said.startswith("the plan counts on 24.70 GiB of the GPU's memory")
+
+
 def test_no_answer_behind_wsl_is_taken_for_a_driver_that_spills(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

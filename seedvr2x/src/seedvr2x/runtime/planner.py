@@ -34,13 +34,14 @@ tiled decode's peak (decode_peak)."""
 import math
 import mmap
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import cache
 from typing import Any
 
-from seedvr2x.runtime import tilegrid
+from seedvr2x.runtime import tilegrid, weights
 from seedvr2x.runtime.job import SHARED, JobError, Shot, check_target, output_size, padded_size
+from seedvr2x.runtime.memory import Reading
 from seedvr2x.runtime.plan import Phase, Plan, Tiles
 
 # The DiT's own window functions, the 7B's: plain Python, and the packages above them hold
@@ -81,6 +82,21 @@ PER_WINDOW = 2.726 * 1024**2
 # function for, the blocks alternating the two layouts (vendor/configs_7b/main.yaml, window and
 # window_method).
 NUM_WINDOWS = (4, 3, 3)
+# The attention backends, as the run names the one it takes (model.attention_backend), and the
+# DiT's fit under each: what it adds to DIT_LOADED, in bytes, and the factor on PER_TOKEN. The
+# fit above is FlashAttention 2's (12 latents at 1080p measured 28.316 GiB for 28.320).
+# Under SDPA, which a machine without a FlashAttention build runs, the DiT peaks higher
+# (DESIGN.md, Memory planner, Per-phase peaks). PROVISIONAL (implementation, 2026-10-12), until
+# SDPA's own fit is measured, a sweep of planner-limits.md's window lengths at 1080p and 4K on a
+# 96 GB card that follows this (DESIGN.md, To measure, The DiT's fit under SDPA): 6% more a
+# token and 0.03 GiB, which rest on one desktop card's windows at 1080p alone (an RTX 5090,
+# 2026-10-11, research/scripts/hold_probe.py): 17.039, 22.565 and 27.897 GiB at 1, 6 and 11
+# latents with no block swapped, 2.668, 8.209, 13.527 and 14.577 at 1, 6, 11 and 12 with the 36
+# swapped, the largest of each window's runs, 0.06 to 0.61 GiB over FlashAttention 2's fit;
+# they cover each of the seven, by 0.006 to 0.15 GiB (tests/test_planner.py holds it). A
+# measured fit replaces the two figures here.
+FLASH_ATTN_2, SDPA = "flash_attn_2", "sdpa"
+DIT_ATTENTION = {FLASH_ATTN_2: (0, 1.0), SDPA: (round(0.03 * GIB), 1.06)}
 
 # The VAE's weights, on the GPU in the VAE's phases, and in the DiT's unless the plan sends them
 # away for it, in bytes: 0.4669 GiB, its parameters by the model's shapes in the pipeline's
@@ -89,18 +105,19 @@ NUM_WINDOWS = (4, 3, 3)
 # 0.47 GiB: 28.15 to 27.68 GiB (Memory planner, Per-phase peaks; vram.md, Practical rules).
 VAE_WEIGHTS = 501_306_880
 
-# The DiT's blocks, and a block's parameters in bytes, 0.4220 GiB, the 36 holding 15.19 of the
-# DiT's 15.35 GiB (DESIGN.md, Memory planner, Host RAM): blockswap.BLOCK_BYTES, by the model's
-# shapes, a literal here since blockswap imports torch (tests/test_planner.py holds the two
-# equal). SLOTS: the buffers on the GPU its swapped blocks stream through (blockswap.SLOTS;
-# DESIGN.md, BlockSwap, rewritten).
-BLOCKS = 36
-BLOCK = 453_133_312
-SLOTS = 2
+# The DiT seedvr2x runs, the 7B (weights.ACCEPTED), by the model's own constants
+# (runtime/weights.py, which imports no torch; the placement moves the weights by the same): its
+# blocks, 36, and a block's parameters in bytes, 0.4220 GiB, all alike, the 36 holding 15.19 of
+# the DiT's 15.35 GiB (DESIGN.md, Memory planner, Host RAM). SLOTS: the buffers on the GPU its
+# swapped blocks stream through (DESIGN.md, BlockSwap, rewritten).
+DIT = weights.ACCEPTED["dit"]
+BLOCKS = len(DIT.blocks)
+BLOCK = DIT.blocks[0]
+SLOTS = weights.SLOTS
 # The DiT's parameters outside its blocks, emb_in, txt_in, vid_in and vid_out, in bytes: 0.155
 # GiB, by the model's shapes in fp16 (tests/test_planner.py builds the model). They leave the GPU
 # only with the last block a VAE phase keeps (dit_on_gpu).
-DIT_OTHER = 166_416_512
+DIT_OTHER = DIT.other
 # What of the DiT never leaves the GPU (runtime/blockswap.py: only parameters move): RoPE's
 # buffers with the text embeddings, 0.025 GiB, and the tables its blocks cache from them once a
 # window has run; 0.058 GiB in all, measured on seedvr2x after windows of 1 latent at 1080p
@@ -264,12 +281,14 @@ ALLOWANCE_UNKNOWN_HOST = 8 * GIB
 
 class PlanError(JobError):
     """A job the planner refuses before the run: a pin it can't take exactly, or a size that
-    doesn't fit the memory free. Its message counts in free VRAM, never in card sizes, and gives
-    what DESIGN.md has each refusal give (Memory planner: A size that doesn't fit is refused,
-    Pins, A plan shapes the output a little, Host RAM), in GiB. Of the GPU's memory, what is
-    taken is rounded up and what is there rounded down; of the system's, each part is said to
-    the nearest hundredth, as the plan's lines say it, and the total is their sum
-    (_host_hundredths)."""
+    doesn't fit the memory free. Its message counts in free VRAM, never in card sizes, and
+    names what is there for what it is (_there): what the driver reports free, or, on a run
+    held to the card, what the plan counts on, of which figure, and what would have to be freed
+    (_to_free). It gives what DESIGN.md has each refusal give (Memory planner: A size that
+    doesn't fit is refused, Pins, A plan shapes the output a little, Host RAM), in GiB. Of the
+    GPU's memory, what is taken is rounded up and what is there rounded down; of the system's,
+    each part is said to the nearest hundredth, as the plan's lines say it, and the total is
+    their sum (_host_hundredths)."""
 
 
 @dataclass(frozen=True)
@@ -309,11 +328,16 @@ def attention_windows(padded: tuple[int, int], latents: int) -> int:
 
 
 def dit_peak(
-    padded: tuple[int, int], latents: int, swapped: int = 0, vae_in_dit: bool = True
+    padded: tuple[int, int],
+    latents: int,
+    swapped: int = 0,
+    vae_in_dit: bool = True,
+    attention: str = FLASH_ATTN_2,
 ) -> int:
     """The predicted peak of the DiT's phase, in bytes: one window of `latents` latents of padded
     frames, `swapped` of the DiT's blocks swapped, the VAE's weights on the GPU meanwhile unless
-    vae_in_dit is False.
+    vae_in_dit is False, by the fit of the attention backend the run takes (DIT_ATTENTION;
+    ValueError for another name).
 
     A swapped block takes its BLOCK off the peak, but for the SLOTS on the GPU (DESIGN.md,
     BlockSwap, rewritten), so that one or two swapped blocks save nothing: measured on seedvr2x,
@@ -322,15 +346,21 @@ def dit_peak(
     2.668 with 36; milestone 3, 2026-10-11, as tests/test_placement.py measures it). numz's own
     swap, one block there at a time, saved 0.4227 GiB x (S - 1)."""
     windows = PER_WINDOW * attention_windows(padded, latents)
-    return round(_dit_least(padded, latents, swapped, vae_in_dit) + windows)
+    return round(_dit_least(padded, latents, swapped, vae_in_dit, attention) + windows)
 
 
-def _dit_least(padded: tuple[int, int], latents: int, swapped: int, vae_in_dit: bool) -> float:
+def _dit_least(
+    padded: tuple[int, int], latents: int, swapped: int, vae_in_dit: bool, attention: str
+) -> float:
     """dit_peak less its attention windows' part, in bytes: never above the peak, and counted
     without the window functions, which lay out every window of each length they are asked."""
     if not 0 <= swapped <= BLOCKS:
         raise ValueError(f"{swapped} blocks swapped of the DiT's {BLOCKS}")
-    least = DIT_LOADED + PER_TOKEN * tokens(padded, latents) - BLOCK * max(0, swapped - SLOTS)
+    if attention not in DIT_ATTENTION:
+        raise ValueError(f"attention {attention!r}: the DiT's fit is {FLASH_ATTN_2}'s or {SDPA}'s")
+    constant, factor = DIT_ATTENTION[attention]
+    per_token = PER_TOKEN * factor * tokens(padded, latents)
+    least = DIT_LOADED + constant + per_token - BLOCK * max(0, swapped - SLOTS)
     return least if vae_in_dit else least - VAE_WEIGHTS
 
 
@@ -609,7 +639,7 @@ class Peaks:
     """What a plan is predicted to take, in bytes but for the last two: which phase bounds it,
     and by how much, is what --plan prints and the manifest keeps for information."""
 
-    free: int  # the memory free on the GPU when the plan was made, as the driver reports it
+    free: int  # the memory the plan was made in: what it may count its peaks in (Reading.counted)
     budget: int  # free - MARGIN
     encode: int  # each phase's predicted peak on the GPU
     dit: int  # the larger of the longest window's and of the longest shot's draw (dit_draw)
@@ -618,6 +648,10 @@ class Peaks:
     scratch: int  # the scratch of the longest shot's tiled passes; 0 untiled
     window: int  # the longest window the job really runs, in latents
     tokens: int  # the DiT's tokens per latent
+    # How `free` was read: what the driver reported free to the process, what the whole card had
+    # free where that was read, and whether the run is held to the card (runtime/memory.py).
+    reading: Reading
+    attention: str  # the attention backend the DiT's peak is the fit of (DIT_ATTENTION)
 
     def peak(self, phase: Phase) -> int:
         """The predicted peak of `phase`."""
@@ -637,9 +671,16 @@ class Peaks:
     def record(self) -> dict[str, Any]:
         """What the manifest keeps of them beside where the weights are (Plan.record's memory),
         for information, never compared (resume.UNCOMPARED): bytes, the longest window in
-        latents. PROVISIONAL (implementation, 2026-10-10): the fields' names."""
+        latents. `free` is the memory the plan was made in; beside it, what the driver reported
+        free to the process (driver_free, the same figure on a driver that refuses) and what the
+        whole card had free (card_free; null where it wasn't read), and the attention backend
+        the DiT's peak was predicted for. PROVISIONAL (implementation, 2026-10-10 and 12): the
+        fields' names."""
         return {
             "free": self.free,
+            "driver_free": self.reading.reported,
+            "card_free": self.reading.card,
+            "attention": self.attention,
             "budget": self.budget,
             "encode_peak": self.encode,
             "dit_peak": self.dit,
@@ -653,14 +694,17 @@ class Peaks:
 
 @dataclass(frozen=True)
 class _Job:
-    """What the planner counts a job by: the memory free, its size, and its shots' lengths."""
+    """What the planner counts a job by: the memory it may count on, its size, its shots'
+    lengths, and the attention backend its DiT runs on."""
 
-    free: int  # bytes
+    free: int  # bytes: what the plan may count its peaks in (reading.counted)
     target: tuple[int, int]  # job.target_size
     lengths: tuple[int, ...]  # its shots' lengths in latents, each once, ascending
     frames: int  # its longest shot's frames
     split: bool
     numz_padding: bool
+    reading: Reading  # how `free` was read, for the plan's words and its record
+    attention: str  # DIT_ATTENTION's
 
     @property
     def budget(self) -> int:
@@ -683,7 +727,7 @@ class _Job:
 
 
 def plan(
-    free: int,
+    free: int | Reading,
     target: tuple[int, int],
     shots: Sequence[Shot],
     pins: Pins,
@@ -692,13 +736,21 @@ def plan(
     split: bool = False,
     numz_padding: bool = False,
     recorded: Plan | None = None,
+    attention: str = FLASH_ATTN_2,
 ) -> tuple[Plan, Peaks]:
-    """The plan of a job of `shots` resized to target (job.target_size), in `free` bytes of GPU
-    memory as the driver reports them, less MARGIN, and what it is predicted to take; refused
-    (PlanError) when a pin can't be taken exactly, when no plan fits that memory, or when the plan
-    takes more system memory than host_available, in bytes (None: not checked). split: whether the
-    decode corrects colours; numz_padding is for tests only (cli.NUMZ_PADDING). An output
-    directory and one file plan alike: a shot's units are off the GPU in both (runtime/units.py).
+    """The plan of a job of `shots` resized to target (job.target_size), in the GPU memory it may
+    count on, less MARGIN, and what it is predicted to take; refused (PlanError) when a pin can't
+    be taken exactly, when no plan fits that memory, or when the plan takes more system memory
+    than host_available, in bytes (None: not checked). split: whether the decode corrects
+    colours; numz_padding is for tests only (cli.NUMZ_PADDING). An output directory and one file
+    plan alike: a shot's units are off the GPU in both (runtime/units.py).
+
+    `free` is that memory: a number of bytes, what a driver that refuses reports free; or the
+    reading the run made of it (memory.Reading), whose `counted` the plan is made in, and whose
+    other figures only word the plan's first line, its refusals and its record: on a run held
+    to the card they name what the driver reports, what the whole card has free where it was
+    read, and what the plan counts on. attention: the backend the run's DiT takes
+    (model.attention_backend), whose fit the DiT's peak is predicted by (DIT_ATTENTION).
 
     The DiT's phase is judged by the larger of two moments, never their sum: the job's longest
     window (dit_peak) and its longest shot's draw of noise, the shot's latent and noise whole on
@@ -728,8 +780,9 @@ def plan(
     from it as it is, the cap, the tiles and the compile flags, and where the weights are and
     the scratch's allowance planned again around it (DESIGN.md, Memory planner, A plan shapes
     the output a little); one with tiles of which one covers the frame is no plan's, refused
-    (check_recorded)."""
-    job = _job(free, target, shots, split, numz_padding)
+    (check_recorded). Where the weights are is planned for the backend given, a resume's too:
+    FlashAttention installed since, or gone, the recorded shape is held to today's fit."""
+    job = _job(free, target, shots, split, numz_padding, attention)
     if pins.swap_blocks is not None and pins.swap_blocks > BLOCKS:
         raise PlanError(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {BLOCKS} blocks, so from 0 to {BLOCKS}"
@@ -757,13 +810,14 @@ def plan(
 
 def fits(
     plan: Plan,
-    free: int,
+    free: int | Reading,
     target: tuple[int, int],
     shots: Sequence[Shot],
     host_available: int | None,
     *,
     split: bool = False,
     numz_padding: bool = False,
+    attention: str = FLASH_ATTN_2,
 ) -> str | None:
     """None when every phase of `plan` fits `free` bytes of GPU memory less MARGIN, a VAE pass
     with its room (VAE_ROOM), the DiT's by the larger of its longest window and of its longest
@@ -771,8 +825,8 @@ def fits(
     checked), its scratch's allowance as the plan has it, for a job as plan() takes it; else one
     sentence naming the first phase that doesn't and what it is short of, in GiB. ValueError for
     a plan with tiles of which one covers the whole padded frame, which plan() never returns
-    (covers)."""
-    job = _job(free, target, shots, split, numz_padding)
+    (covers). free and attention as plan takes them."""
+    job = _job(free, target, shots, split, numz_padding, attention)
     return _unfit(job, plan, host_available)
 
 
@@ -839,10 +893,12 @@ def said(
     numz_padding: bool = False,
 ) -> list[str]:
     """The plan as --plan prints it and every run logs it (DESIGN.md, Memory planner, --plan), a
-    line each: the card (its name, `card`), its free memory and the budget; the padded size and
-    the tokens per latent; the shots and the longest; the window cap, the shots in one window and
-    the joins; the swapped blocks and what stays on the GPU in each phase; the pinned system
-    memory; the tiles and their grid, and the room the VAE's passes are held to (VAE_ROOM);
+    line each: the card (its name, `card`), its free memory and the budget, and on a run held
+    to the card each figure by its name (_card_said); the padded size, the tokens per latent and
+    the attention backend the DiT's peak is predicted for; the shots and the longest; the window
+    cap, the shots in one window and the joins; the swapped blocks and what stays on the GPU in
+    each phase; the pinned system memory; the tiles and their grid, and the room the VAE's
+    passes are held to (VAE_ROOM);
     each phase's predicted peak, without that room, and which bounds the plan, a VAE phase
     counted with its room (Peaks.bound) and said so, as the DiT's is where its peak is its
     longest shot's draw of noise, not a window's (dit_draw); the scratch of the longest tiled
@@ -855,7 +911,7 @@ def said(
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
-    job = _job(peaks.free, target, shots, False, numz_padding)
+    job = _job(peaks.reading, target, shots, False, numz_padding, peaks.attention)
     height, width = job.padded
     frames = Counter(shot.frames for shot in shots)
     windows = {count: len(shot_layout(count, plan.window)) for count in frames}
@@ -870,8 +926,9 @@ def said(
     if peaks.window != plan.window:
         cap += f", the longest run {_count(peaks.window, 'latent')}"
     lines = [
-        f"{card}, {_gib(peaks.free)} GiB free, a budget of {_gib(peaks.budget)} GiB",
-        f"frames padded to {width}x{height}, {peaks.tokens:,} tokens a latent",
+        _card_said(card, peaks),
+        f"frames padded to {width}x{height}, {peaks.tokens:,} tokens a latent, attention on"
+        f" {_ATTENTION_SAID[peaks.attention]}",
         f"{_count(len(shots), 'shot')}, the longest of {_count(job.frames, 'frame')}"
         f" ({_count(job.lengths[-1], 'latent')})",
         f"{cap}: {whole} of {_count(len(shots), 'shot')} in one window, {_count(joins, 'join')}",
@@ -902,7 +959,7 @@ def said(
     names = {"encode": "encode", "dit": "DiT's phase", "decode": "decode"}
     # The DiT's peak is its longest shot's draw where that is over its longest window's own
     # (_dit_need), said where the phase bounds the plan.
-    own = dit_peak(job.padded, peaks.window, plan.swapped, plan.vae_in_dit)
+    own = dit_peak(job.padded, peaks.window, plan.swapped, plan.vae_in_dit, peaks.attention)
     counted = "its longest shot's noise drawn whole, " if peaks.dit > own else ""
     lines.append(
         f"predicted peaks: encode {_gib(peaks.encode)} GiB, DiT {_gib(peaks.dit)} GiB, decode"
@@ -953,17 +1010,24 @@ def beyond_measured(plan: Plan) -> list[str]:
 
 
 def _job(
-    free: int,
+    free: int | Reading,
     target: tuple[int, int],
     shots: Sequence[Shot],
     split: bool,
     numz_padding: bool,
+    attention: str = FLASH_ATTN_2,
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
+    if attention not in DIT_ATTENTION:
+        raise ValueError(f"attention {attention!r}: the DiT's fit is {FLASH_ATTN_2}'s or {SDPA}'s")
+    # A number is a driver that refuses: what it reports free is the card's, and all the plan's.
+    reading = free if isinstance(free, Reading) else Reading(free, None, free, False)
     lengths = sorted({_latents(shot.frames) for shot in shots})
     frames = max(shot.frames for shot in shots)
-    return _Job(free, target, tuple(lengths), frames, split, numz_padding)
+    return _Job(
+        reading.counted, target, tuple(lengths), frames, split, numz_padding, reading, attention
+    )
 
 
 def _padded(target: tuple[int, int], numz_padding: bool) -> tuple[int, int]:
@@ -1018,15 +1082,21 @@ def _dit_need(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> int
     draw, before its first window, and nothing of it is there beside a window but the window
     (shot.sample_windows). Wherever the phase is judged, and what the plan records (_peaks):
     real memory, unlike a VAE pass's room."""
-    window = dit_peak(job.padded, _longest(job.lengths, cap), swapped, vae_in_dit)
+    window = _window_peak(job, cap, swapped, vae_in_dit)
     return max(window, _draw(job, swapped, vae_in_dit))
+
+
+def _window_peak(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> int:
+    """The peak of the job's longest window under a cap, in bytes (dit_peak), on the attention
+    backend the job runs."""
+    latents = _longest(job.lengths, cap)
+    return dit_peak(job.padded, latents, swapped, vae_in_dit, job.attention)
 
 
 def _draw_bounds(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> bool:
     """Whether the job's DiT phase under a cap takes its longest shot's draw, more than its
     longest window's peak (_dit_need): what a refusal for the phase then names (_draw_said)."""
-    window = dit_peak(job.padded, _longest(job.lengths, cap), swapped, vae_in_dit)
-    return _draw(job, swapped, vae_in_dit) > window
+    return _draw(job, swapped, vae_in_dit) > _window_peak(job, cap, swapped, vae_in_dit)
 
 
 def _draw_said(job: _Job) -> str:
@@ -1056,8 +1126,8 @@ def _longest_cap(job: _Job, swapped: int) -> int | None:
     (_draw)."""
 
     def possible(cap: int) -> bool:
-        least = _dit_least(job.padded, _longest(job.lengths, cap), swapped, vae_in_dit=False)
-        return least <= job.budget
+        latents = _longest(job.lengths, cap)
+        return _dit_least(job.padded, latents, swapped, False, job.attention) <= job.budget
 
     low, high = job.smallest, job.lengths[-1]
     if _draw(job, swapped, vae_in_dit=False) > job.budget or not possible(low):
@@ -1180,8 +1250,8 @@ def _window(job: _Job, pins: Pins) -> tuple[int, int, bool]:
         )
         raise PlanError(
             f"--window {pins.window}: its longest window, {_count(latents, 'latent')}, takes"
-            f" {_over(need)} GiB of free VRAM with {blocks}, and the driver reports"
-            f" {_under(job.free)} GiB free: the longest window that fits is --window"
+            f" {_over(need)} GiB of free VRAM with {blocks}, and {_there(job)}:"
+            f" {_to_free(job, need)}the longest window that fits is --window"
             f" {_own_cap(job, longest)}"
         )
     if pins.swap_blocks is not None:
@@ -1216,8 +1286,8 @@ def _swap_refused(job: _Job, swapped: int, cap: int | None, whose: str, fewest: 
         what = f"a window of {_count(latents, 'latent')}, {whose},"
     return (
         f"--swap-blocks {swapped}: {what} takes {_over(need)} GiB of free VRAM with"
-        f" {_count(swapped, 'block')} swapped, and the driver reports {_under(job.free)} GiB"
-        f" free: the fewest blocks that hold it are --swap-blocks {fewest}"
+        f" {_count(swapped, 'block')} swapped, and {_there(job)}: {_to_free(job, need)}the"
+        f" fewest blocks that hold it are --swap-blocks {fewest}"
     )
 
 
@@ -1291,8 +1361,7 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
     )
     raise PlanError(
         f"{option}: the {phase} {_tiles_said(tiles)} takes {_over(need)} GiB of free VRAM,"
-        f" the DiT off the GPU{_ROOM_HELD}, and the driver reports {_under(job.free)} GiB"
-        f" free: {fits}"
+        f" the DiT off the GPU{_ROOM_HELD}, and {_there(job)}: {_to_free(job, need)}{fits}"
     )
 
 
@@ -1356,7 +1425,7 @@ def _least_pass(job: _Job, phase: Phase) -> Tiles | None:
 
 def _too_large(job: _Job, phase: Phase, least: int) -> str:
     """The floor's refusal (_floor), counted in free VRAM, never in card sizes (DESIGN.md, Memory
-    planner): the free VRAM the output size takes, what the driver reports free, and the largest
+    planner): the free VRAM the output size takes, what is there for it (_there), and the largest
     output size that fits in it, by its short side, a multiple of 16, the target scaled in
     proportion and the floor checked there with the same shots. Where the DiT's phase is the
     floor by its longest shot's draw, more than its smallest window's peak (_draw_bounds), the
@@ -1406,8 +1475,8 @@ def _too_large(job: _Job, phase: Phase, least: int) -> str:
             break
     return (
         f"an output of {width}x{height} takes {total / 100:.2f} GiB of free VRAM ({how}:"
-        f" a peak of {peak / 100:.2f} GiB{held}, and {_gib(MARGIN)} of margin), and the"
-        f" driver reports {_under(job.free)} GiB free: {fitting}"
+        f" a peak of {peak / 100:.2f} GiB{held}, and {_gib(MARGIN)} of margin), and"
+        f" {_there(job)}: {_to_free(job, least + MARGIN)}{fitting}"
     )
 
 
@@ -1476,6 +1545,8 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
         _kept(job, plan),
         latents,
         tokens(job.padded, 1),
+        job.reading,
+        job.attention,
     )
 
 
@@ -1532,10 +1603,11 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     for phase in PHASES:
         need = peaks.need(phase) + MARGIN
         if need > job.free:
-            held = "" if phase == "dit" else f"{_ROOM_HELD},"
+            room = "" if phase == "dit" else f"{_ROOM_HELD},"
+            freed = ", which would have to be freed on the card" if job.reading.held else ""
             return (
-                f"{whats[phase]} takes {_over(need)} GiB of free VRAM{held} and the driver reports"
-                f" {_under(job.free)} GiB free, {_short(need, job.free)} GiB short"
+                f"{whats[phase]} takes {_over(need)} GiB of free VRAM{room} and {_there(job)},"
+                f" {_short(need, job.free)} GiB short{freed}"
             )
     if host_available is not None and peaks.host > host_available:
         # Each part as the plan's lines say it, and the total their sum as said, so that the
@@ -1569,6 +1641,76 @@ def _host_hundredths(plan: Plan) -> tuple[int, int, int]:
     weights away, DESIGN.md's figure (Memory planner, Host RAM): rounded up, as what is taken of
     the GPU's memory is, a refusal would say 15.82 where the plan's line says 15.81."""
     return _nearest(HOST_RESIDENT), _nearest(_pinned(plan)), _nearest(plan.scratch_allowance)
+
+
+# The attention backends as the plan's lines name them (model.load_models' own words for SDPA).
+_ATTENTION_SAID = {FLASH_ATTN_2: "FlashAttention 2", SDPA: "PyTorch's SDPA"}
+
+
+def _held_under(reading: Reading) -> int:
+    """The free memory a held run is held under, in bytes: the smaller of what its driver
+    reports free to the process and of what the whole card has free; the driver's figure where
+    the card's wasn't read (runtime/memory.py)."""
+    if reading.card is None:
+        return reading.reported
+    return min(reading.reported, reading.card)
+
+
+def _named(reading: Reading, said: Callable[[float], str]) -> str:
+    """Which of a held reading's figures is the free memory, in words for a line that has just
+    given it as "N GiB free", with the other figure: the words of runtime/memory.py's own log
+    lines. `said` puts a figure in GiB, as the line around it does."""
+    if reading.card is None:
+        return "as its driver reports it to this process (the whole card's, NVML's, wasn't read)"
+    if reading.card <= reading.reported:
+        reported = said(reading.reported)
+        return f"on the whole card by NVML (its driver reports {reported} GiB free to this process)"
+    return (
+        "as its driver reports it to this process (the whole card has"
+        f" {said(reading.card)} GiB free by NVML)"
+    )
+
+
+def _card_said(card: str, peaks: Peaks) -> str:
+    """The plan's first line (said): the card, its free memory and the budget. On a driver that
+    refuses, one figure, what it reports free. On a run held to the card (memory.Reading.held),
+    each figure by its name: the free memory the run is held under, the driver's or the whole
+    card's, with the other; what the run is held under it, and why; what the plan counts on,
+    which the budget and every refusal are counted from."""
+    reading = peaks.reading
+    if not reading.held:
+        return f"{card}, {_gib(peaks.free)} GiB free, a budget of {_gib(peaks.budget)} GiB"
+    free = _held_under(reading)
+    return (
+        f"{card}, {_gib(free)} GiB free {_named(reading, _gib)}; the run is held to the card's"
+        f" own memory, {_gib(free - peaks.free)} GiB under that, its driver giving more than the"
+        f" card has: the plan counts on {_gib(peaks.free)} GiB, a budget of {_gib(peaks.budget)}"
+        " GiB"
+    )
+
+
+def _there(job: _Job) -> str:
+    """What is there for the plan, as a refusal says it after what something takes: on a driver
+    that refuses, what it reports free; on a run held to the card, what the plan counts on, of
+    which figure, the driver's or the whole card's, with the other (_named). Rounded down, as
+    what is there is."""
+    reading = job.reading
+    if not reading.held:
+        return f"the driver reports {_under(job.free)} GiB free"
+    return (
+        f"the plan counts on {_under(job.free)} GiB of the {_under(_held_under(reading))} GiB"
+        f" free {_named(reading, _under)}, the run held to the card's own memory"
+    )
+
+
+def _to_free(job: _Job, need: float) -> str:
+    """What a held run's refusal says before what fits: the memory that would have to be freed
+    on the card for what was asked, `need` bytes of free VRAM, to fit what the plan counts on,
+    by the message's own figures (_short). Nothing on a driver that refuses, whose refusals say
+    what they said."""
+    if not job.reading.held:
+        return ""
+    return f"{_short(need, job.free)} GiB more would have to be freed on the card for it; "
 
 
 def _tiles_said(tiles: Tiles | None) -> str:
