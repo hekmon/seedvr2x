@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
-from seedvr2x.runtime.cuts import POSSIBLE, THRESHOLD
+from seedvr2x.runtime.cuts import POSSIBLE, THRESHOLD, playlist_path, write_playlist
 from seedvr2x.runtime.job import MIN_SEGMENT
 from seedvr2x.runtime.pull import DETECTOR, REPO
 from seedvr2x.runtime.stop import Stop, Stopped, Terminated, terminable
@@ -2412,13 +2412,39 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+def _taken(args: argparse.Namespace, directory: Path | None, where: Path) -> str | None:
+    """What of the job's the resolved path `where` would take the place of, as a refusal says it
+    (_plan_file), or None: a .mkv path's finished file or its checksums, or a place in the job's
+    directory, the output's or a .mkv path's work directory, which holds the job's own files
+    only (resume.leftovers). One test for --plan FILE and for the playlist written beside it
+    (cuts.playlist_path), so that what refuses the one refuses the other (design, 2026-10-12:
+    "the playlist is never the output file, its checksums beside it, its work directory, nor the
+    source"; the source is each one's own line in _plan_file, the cut list given being FILE's
+    alone, between the two)."""
+    final = _final(args.output)
+    if final is not None and where in (final.resolve(), _checksums_beside(final).resolve()):
+        return "the output" if where == final.resolve() else "the output's checksums"
+    if directory is None and where == args.output.resolve():
+        return "the output"
+    if directory is not None and where.is_relative_to(directory.resolve()):
+        what = "the output directory" if final is None else f"the work directory of {final}"
+        return f"in {what}, which holds the job's own files only"
+    return None
+
+
 def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
     """Refuse a --plan FILE (JobError) that would take the place of what the job reads or writes:
     the source, the cut list given (--cuts), a .mkv path's finished file or its checksums, or
     anything in the job's directory, the output's or a .mkv path's work directory, which holds
     the job's own files only (resume.leftovers); or that can't be
     written: a directory, in none, or in one that takes no new file. Before the first pass, which
-    may take an hour. PROVISIONAL (implementation, 2026-10-09), with the plan's form."""
+    may take an hour. PROVISIONAL (implementation, 2026-10-09), with the plan's form.
+
+    Likewise the playlist of its possible cuts, written beside it under its name with .m3u8
+    added (cuts.playlist_path), when the shots are detected: a cut list's plan has no possible
+    cut, and no playlist. Its place is held to FILE's own tests (_taken), for a directory's job
+    and a .mkv path's alike: it is reached by a link at the playlist's name, or is the output
+    directory itself, one named FILE.m3u8."""
     import tempfile
 
     from seedvr2x.runtime.job import JobError
@@ -2434,19 +2460,27 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
             f"--plan {plan}: the cut list given (--cuts), which it would replace, its comments"
             " lost; it names another file"
         )
-    final = _final(args.output)
-    if final is not None and where in (final.resolve(), _checksums_beside(final).resolve()):
-        what = "the output" if where == final.resolve() else "the output's checksums"
-        raise JobError(f"--plan {plan}: {what}; it names the cut list's file")
-    if directory is None and where == args.output.resolve():
-        raise JobError(f"--plan {plan}: the output; it names the cut list's file")
-    if directory is not None and where.is_relative_to(directory.resolve()):
-        what = "the output directory" if final is None else f"the work directory of {final}"
-        raise JobError(f"--plan {plan}: in {what}, which holds the job's own files only")
+    taken = _taken(args, directory, where)
+    if taken is not None:
+        # One of the output's files, which FILE isn't to name; or a place in the job's directory.
+        names = "" if taken.startswith("in ") else "; it names the cut list's file"
+        raise JobError(f"--plan {plan}: {taken}{names}")
     if plan.is_dir():
         raise JobError(f"--plan {plan}: a directory; it names the cut list's file")
     if not plan.parent.is_dir():
         raise JobError(f"--plan {plan}: no directory {plan.parent} to write it in")
+    if args.cuts is None:
+        playlist = playlist_path(plan)
+        there = playlist.resolve()
+        if there == args.input.resolve():
+            taken = "the source"
+        else:
+            taken = _taken(args, directory, there) or ("a directory" if playlist.is_dir() else None)
+        if taken is not None:
+            raise JobError(
+                f"--plan {plan}: the playlist of its possible cuts, {playlist.name} beside it, is"
+                f" {taken}; it names another file"
+            )
     # The list is written beside its place, then renamed into it (files.write_whole): a file made
     # there and removed tells now, not once the first pass has run, whether the directory takes
     # one.
@@ -2509,7 +2543,8 @@ def _write_plan(
         logger.error("--plan %s: not written: %s", args.plan, error)
         return 1
     logger.info("%s: the cut list in %s", _counts(found, shots), args.plan)
-    return 0
+    # The playlist of its possible cuts beside it, said there (cuts.write_playlist).
+    return 0 if write_playlist(args.plan, source.index, found.possible, source.path) else 1
 
 
 def _threshold(text: str) -> float:

@@ -2,16 +2,22 @@
 per run of frames reaching it, at its peak, the first of its highest frames, held to measurement's
 tnet_detections; the cut the frame after the peak, none after the last frame; the possible cuts,
 runs from 0.1 up peaking under the threshold; the cut list --plan writes, its lines, its times as a
-player shows them, and its round trip through --cuts' reader (job.read_cuts)."""
+player shows them, and its round trip through --cuts' reader (job.read_cuts); the playlist of the
+possible cuts written beside it for VLC, its entries, its name and what is said of it."""
 
+import errno
+import logging
+import os
 import re
 from fractions import Fraction
 from pathlib import Path
+from urllib.parse import unquote_to_bytes
 
 import numpy as np
 import numpy.typing as npt
 import pytest
 
+from seedvr2x.media import files
 from seedvr2x.media.grid import filled
 from seedvr2x.media.index import NOPTS, FrameIndex
 from seedvr2x.runtime.cuts import (
@@ -21,10 +27,13 @@ from seedvr2x.runtime.cuts import (
     cut_list,
     detected,
     detections,
+    playlist,
+    playlist_path,
     possible,
     probability,
     time_of,
     timecode,
+    write_playlist,
 )
 from seedvr2x.runtime.job import read_cuts
 
@@ -279,6 +288,195 @@ def test_cut_list_read_back(tmp_path: Path) -> None:
     assert listed == "4 0:00:00.160\n7 0:00:00.280\n"
     path.write_text(listed)
     assert read_cuts(path) == [4, 7]
+
+
+# The comments a playlist begins with (playlist).
+PLAYLIST_HEADER = [
+    "#EXTM3U",
+    "# seedvr2x: the possible cuts of the cut list beside this file, to check in VLC, which",
+    "# plays an entry per possible cut, from 1 s before its time to 3 s after.",
+    "# It names the source by its file name alone: it plays from the source's directory.",
+]
+
+
+def ntsc(count: int) -> FrameIndex:
+    """A frame index of `count` frames at 24000/1001, as an MP4 file times them."""
+    return index_of([k * 1001 for k in range(count)], Fraction(1, 24000))
+
+
+def test_playlist_of_the_possible_cuts() -> None:
+    # An entry per possible cut, in frame order: its title, the frame, time and probability of
+    # its line in the cut list; VLC's start, the list's time less a second, never before 0, and
+    # stop, 3 seconds after it, never past the last frame's time (200.159 s); the source's name.
+    index = ntsc(4800)
+    found = [Cut(4521, float(np.float32(0.213))), Cut(4790, 0.25), Cut(12, 0.15)]
+    text = playlist(index, found, "in.mkv")
+    assert text.splitlines() == [
+        *PLAYLIST_HEADER,
+        "#EXTINF:-1,possible cut 12 at 0:00:00.501 (0.150)",
+        "#EXTVLCOPT:start-time=0.000",
+        "#EXTVLCOPT:stop-time=3.501",
+        "in.mkv",
+        "#EXTINF:-1,possible cut 4521 at 0:03:08.564 (0.212)",
+        "#EXTVLCOPT:start-time=187.564",
+        "#EXTVLCOPT:stop-time=191.564",
+        "in.mkv",
+        "#EXTINF:-1,possible cut 4790 at 0:03:19.783 (0.250)",
+        "#EXTVLCOPT:start-time=198.783",
+        "#EXTVLCOPT:stop-time=200.159",
+        "in.mkv",
+    ]
+    assert text.endswith("\n") and text.isascii()
+    # The times are the cut list's own, its line's frame and probability with them.
+    listed = cut_list([], index, [], found).splitlines()
+    assert listed == [
+        "# 12 0.150 0:00:00.501",
+        "# 4521 0.212 0:03:08.564",
+        "# 4790 0.250 0:03:19.783",
+    ]
+    # No comment begins with a tag VLC reads, whatever its case (m3u.c:250-289); no title holds
+    # what VLC splits an artist from it by (m3u.c:388-417).
+    tags = ("extinf:", "extvlcopt:", "playlist:", "extalbumarturl:", "ext-x-")
+    assert not any(line.lstrip("# \t").lower().startswith(tags) for line in PLAYLIST_HEADER)
+    titles = [line for line in text.splitlines() if line.startswith("#EXTINF:")]
+    assert len(titles) == 3 and not any("," in t[11:] or " - " in t for t in titles)
+    # Two hours on: seconds, never H:MM:SS, which VLC's options don't read.
+    late = playlist(ntsc(172_900), [Cut(172_800, 0.2)], "in.mkv").splitlines()
+    assert late[4:7] == [
+        "#EXTINF:-1,possible cut 172800 at 2:00:07.200 (0.200)",
+        "#EXTVLCOPT:start-time=7206.200",
+        "#EXTVLCOPT:stop-time=7210.200",
+    ]
+    # A cut whose frame has no time has no entry; a stop at or before its start, which VLC
+    # ignores, playing to the file's end, is left out: times before the file's start.
+    untimed = index_of([0, 1, NOPTS, 3])
+    assert playlist(untimed, [Cut(2, 0.2)], "in.mkv").splitlines() == PLAYLIST_HEADER
+    early = index_of([0, 1, 2], start_time=1_000_000)
+    assert playlist(early, [Cut(1, 0.2)], "in.mkv").splitlines() == [
+        *PLAYLIST_HEADER,
+        "#EXTINF:-1,possible cut 1 at -0:00:00.960 (0.200)",
+        "#EXTVLCOPT:start-time=0.000",
+        "in.mkv",
+    ]
+    # None: the comments alone.
+    assert playlist(index, [], "in.mkv").splitlines() == PLAYLIST_HEADER
+
+
+def test_playlist_names_the_source_as_a_url() -> None:
+    # VLC reads an entry as a URL relative to the playlist: the name percent-encoded, every byte
+    # but a letter, a digit or one of -._~, so that a #, a %, a leading space or an accent is
+    # the name's own (measured in VLC 3.0.24: raw, "a#b.mkv" opened "a", "#start.mkv" was a
+    # comment, "50%20off.mkv" opened "50 off.mkv" and " lead.mkv" "lead.mkv").
+    index = ntsc(100)
+    for name, written in (
+        ("plain-1_2.v~3.mkv", "plain-1_2.v~3.mkv"),
+        ("with space.mkv", "with%20space.mkv"),
+        ("it's.mkv", "it%27s.mkv"),
+        ("été ñ 日本語.mkv", "%C3%A9t%C3%A9%20%C3%B1%20%E6%97%A5%E6%9C%AC%E8%AA%9E.mkv"),
+        ("a#b.mkv", "a%23b.mkv"),
+        ("#start.mkv", "%23start.mkv"),
+        ("100%.mkv", "100%25.mkv"),
+        ("50%20off.mkv", "50%2520off.mkv"),
+        (" lead.mkv", "%20lead.mkv"),
+        (
+            "[Group] Title - 01 (BD) [ABCD1234].mkv",
+            "%5BGroup%5D%20Title%20-%2001%20%28BD%29%20%5BABCD1234%5D.mkv",
+        ),
+        ("a&b=c+d;e,f!g$h@i:j?k.mkv", "a%26b%3Dc%2Bd%3Be%2Cf%21g%24h%40i%3Aj%3Fk.mkv"),
+        ("a\nb\r.mkv", "a%0Ab%0D.mkv"),
+        # A name that isn't UTF-8, as Python reads it from Linux: its own bytes.
+        ("caf\udce9.mkv", "caf%E9.mkv"),
+    ):
+        lines = playlist(index, [Cut(50, 0.2)], name).splitlines()
+        assert lines[-1] == written and len(lines) == len(PLAYLIST_HEADER) + 4
+        assert unquote_to_bytes(written) == os.fsencode(name)
+
+
+def test_playlist_path() -> None:
+    # Beside FILE, its name with .m3u8 added, whatever its suffix: never FILE itself.
+    for plan, expected in (
+        ("plan.txt", "plan.txt.m3u8"),
+        ("x.cuts", "x.cuts.m3u8"),
+        ("plan", "plan.m3u8"),
+        ("plan.m3u8", "plan.m3u8.m3u8"),
+        ("some/where/plan.txt", "some/where/plan.txt.m3u8"),
+        ("/an/absolute/plan.txt", "/an/absolute/plan.txt.m3u8"),
+        (".hidden", ".hidden.m3u8"),
+    ):
+        assert playlist_path(Path(plan)) == Path(expected) != Path(plan)
+    # A FILE without a name is refused before any playlist (cli._plan_file): no error here.
+    assert playlist_path(Path(".")) == Path(".m3u8")
+
+
+def test_playlist_written_and_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Written beside FILE, whole, an earlier one replaced, and said with what to do with it:
+    # beside the source, opened; elsewhere, moved there first.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    index = ntsc(4800)
+    found = [Cut(4521, 0.2), Cut(12, 0.15)]
+    source = tmp_path / "films" / "in 1.mkv"
+    (tmp_path / "films").mkdir()
+    (tmp_path / "plans").mkdir()
+    beside, elsewhere = tmp_path / "films" / "plan.txt", tmp_path / "plans" / "plan.txt"
+    (tmp_path / "films" / "plan.txt.m3u8").write_text("an earlier playlist")
+    said = (
+        "a playlist of the 2 possible cuts for VLC, an entry each, from 1 second before its cut"
+        " to 3 seconds after"
+    )
+    assert write_playlist(beside, index, found, source)
+    written = tmp_path / "films" / "plan.txt.m3u8"
+    assert written.read_text() == playlist(index, found, "in 1.mkv")
+    assert written.read_text().splitlines()[-1] == "in%201.mkv"
+    assert sorted(path.name for path in written.parent.iterdir()) == ["plan.txt.m3u8"]
+    assert [record.getMessage() for record in caplog.records] == [
+        f"{written}: {said}; beside the source, which it names by its file name alone: open it"
+        " in VLC"
+    ]
+    caplog.clear()
+    assert write_playlist(elsewhere, index, found[:1], source)
+    written = tmp_path / "plans" / "plan.txt.m3u8"
+    assert written.read_text() == playlist(index, found[:1], "in 1.mkv")
+    assert [record.getMessage() for record in caplog.records] == [
+        f"{written}: a playlist of the 1 possible cut for VLC, an entry each, from 1 second"
+        " before its cut to 3 seconds after; it names the source by its file name alone,"
+        " in 1.mkv: move it beside the source, then open it in VLC"
+    ]
+    # The source's directory by another path, a link's: beside it all the same.
+    caplog.clear()
+    (tmp_path / "link").symlink_to("films")
+    assert write_playlist(tmp_path / "link" / "other.txt", index, found, source)
+    assert "; beside the source, which it names by its file name alone" in caplog.text
+    # No possible cut: no playlist; one from before left as it is, and said.
+    caplog.clear()
+    assert write_playlist(tmp_path / "plans" / "none.txt", index, [], source)
+    assert not (tmp_path / "plans" / "none.txt.m3u8").exists() and caplog.records == []
+    assert write_playlist(elsewhere, index, [], source)
+    assert written.read_text() == playlist(index, found[:1], "in 1.mkv")
+    assert [(record.levelname, record.getMessage()) for record in caplog.records] == [
+        (
+            "WARNING",
+            f"{written}: left as it is: this plan has no possible cut, so no playlist; a playlist"
+            " there is an earlier plan's, its entries not this plan's",
+        )
+    ]
+    # Not written, the disk full: said, and False, the earlier one as it was.
+    caplog.clear()
+
+    def full(path: Path, data: bytes) -> None:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(files, "write_whole", full)
+    assert not write_playlist(elsewhere, index, found, source)
+    assert [(record.levelname, record.getMessage()) for record in caplog.records] == [
+        (
+            "ERROR",
+            f"--plan {elsewhere}: its playlist, {written}, not written: [Errno 28] No space left"
+            " on device",
+        )
+    ]
+    assert written.read_text() == playlist(index, found[:1], "in 1.mkv")
 
 
 def test_header_lines_stay_comments(tmp_path: Path) -> None:
