@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
-from seedvr2x.runtime.cuts import POSSIBLE, THRESHOLD, playlist_path, write_playlist
+from seedvr2x.runtime.cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
 from seedvr2x.runtime.job import MIN_SEGMENT
 from seedvr2x.runtime.pull import DETECTOR, REPO
 from seedvr2x.runtime.stop import Stop, Stopped, Terminated, terminable
@@ -2613,8 +2613,8 @@ def _taken(args: argparse.Namespace, directory: Path | None, where: Path) -> str
     """What of the job's the resolved path `where` would take the place of, as a refusal says it
     (_plan_file), or None: a .mkv path's finished file or its checksums, or a place in the job's
     directory, the output's or a .mkv path's work directory, which holds the job's own files
-    only (resume.leftovers). One test for --plan FILE and for the playlist written beside it
-    (cuts.playlist_path), so that what refuses the one refuses the other (design, 2026-10-12:
+    only (resume.leftovers). One test for --plan FILE and for each playlist written beside it
+    (cuts.playlist_path), so that what refuses the one refuses the others (design, 2026-10-12:
     "the playlist is never the output file, its checksums beside it, its work directory, nor the
     source"; the source is each one's own line in _plan_file, the cut list given being FILE's
     alone, between the two)."""
@@ -2638,11 +2638,11 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
     may take an hour. DESIGN.md has --plan "writes the detected cut list to FILE" (Memory planner)
     and names no refusal of FILE: these, accepted by design as built (2026-10-10).
 
-    Likewise the playlist of its possible cuts, written beside it under its name with .m3u8
-    added (cuts.playlist_path), when the shots are detected: a cut list's plan has no possible
-    cut, and no playlist. Its place is held to FILE's own tests (_taken), for a directory's job
-    and a .mkv path's alike: it is reached by a link at the playlist's name, or is the output
-    directory itself, one named FILE.m3u8."""
+    Likewise the two playlists, of its detected cuts and of its possible cuts, written beside it
+    under its name with .cuts.m3u8 and .possible.m3u8 added (cuts.playlist_path), when the shots
+    are detected: a cut list's plan has neither, and no playlist. Each one's place is held to
+    FILE's own tests (_taken), for a directory's job and a .mkv path's alike: it is reached by a
+    link at the playlist's name, or is the output directory itself, one named FILE.cuts.m3u8."""
     import tempfile
 
     from seedvr2x.runtime.job import JobError
@@ -2667,8 +2667,9 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
         raise JobError(f"--plan {plan}: a directory; it names the cut list's file")
     if not plan.parent.is_dir():
         raise JobError(f"--plan {plan}: no directory {plan.parent} to write it in")
-    if args.cuts is None:
-        playlist = playlist_path(plan)
+    # A cut list's plan writes no playlist.
+    for which in PLAYLISTS if args.cuts is None else ():
+        playlist = playlist_path(plan, which)
         there = playlist.resolve()
         if there == args.input.resolve():
             taken = "the source"
@@ -2676,7 +2677,7 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
             taken = _taken(args, directory, there) or ("a directory" if playlist.is_dir() else None)
         if taken is not None:
             raise JobError(
-                f"--plan {plan}: the playlist of its possible cuts, {playlist.name} beside it, is"
+                f"--plan {plan}: the playlist of its {which.cut}s, {playlist.name} beside it, is"
                 f" {taken}; it names another file"
             )
     # The list is written beside its place, then renamed into it (files.write_whole): a file made
@@ -2744,8 +2745,10 @@ def _write_plan(
         logger.error("--plan %s: not written: %s", args.plan, error)
         return 1
     logger.info("%s: the cut list in %s", _counts(found, shots), args.plan)
-    # The playlist of its possible cuts beside it, said there (cuts.write_playlist).
-    return 0 if write_playlist(args.plan, source.index, found.possible, source.path) else 1
+    # The playlists of its cuts and of its possible cuts beside it, said there
+    # (cuts.write_playlists); none for a cut list's plan, which detected neither.
+    cuts = found.cuts if detected else ()
+    return 0 if write_playlists(args.plan, source.index, cuts, found.possible, source.path) else 1
 
 
 def _threshold(text: str) -> float:

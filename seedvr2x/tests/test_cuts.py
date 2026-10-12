@@ -2,8 +2,9 @@
 per run of frames reaching it, at its peak, the first of its highest frames, held to measurement's
 tnet_detections; the cut the frame after the peak, none after the last frame; the possible cuts,
 runs from 0.1 up peaking under the threshold; the cut list --plan writes, its lines, its times as a
-player shows them, and its round trip through --cuts' reader (job.read_cuts); the playlist of the
-possible cuts written beside it for VLC, its entries, its name and what is said of it."""
+player shows them, and its round trip through --cuts' reader (job.read_cuts); the playlists of the
+detected cuts and of the possible cuts written beside it for VLC, their entries, their names and
+what is said of them."""
 
 import errno
 import itertools
@@ -23,6 +24,9 @@ from seedvr2x.media.grid import Filling, Hole, filled
 from seedvr2x.media.index import NOPTS, FrameIndex
 from seedvr2x.runtime import cuts
 from seedvr2x.runtime.cuts import (
+    OF_DETECTED,
+    OF_POSSIBLE,
+    PLAYLISTS,
     POSSIBLE,
     THRESHOLD,
     Cut,
@@ -37,6 +41,7 @@ from seedvr2x.runtime.cuts import (
     time_of,
     timecode,
     write_playlist,
+    write_playlists,
 )
 from seedvr2x.runtime.job import read_cuts
 
@@ -409,6 +414,45 @@ def test_playlist_of_the_possible_cuts() -> None:
     assert playlist(index, [], "in.mkv").splitlines() == PLAYLIST_HEADER
 
 
+def test_playlist_of_the_detected_cuts() -> None:
+    # The second playlist (design, 2026-10-12), the detected cuts': the same entries, from a
+    # second before each cut to 3 after, each titled "cut", the cut list's own line, where the
+    # other's says "possible cut"; its comments say which of the two it is.
+    index = ntsc(4800)
+    found = [Cut(4521, float(np.float32(0.9939))), Cut(12, 0.5)]
+    text = playlist(index, found, "in.mkv", OF_DETECTED)
+    assert text.splitlines() == [
+        "#EXTM3U",
+        "# seedvr2x: the detected cuts of the cut list beside this file, to check in VLC, which",
+        "# plays an entry per cut, from 1 s before its time to 3 s after.",
+        "# It names the source by its file name alone: it plays from the source's directory.",
+        "#EXTINF:-1,cut 12 at 0:00:00.501 (0.500)",
+        "#EXTVLCOPT:start-time=0.000",
+        "#EXTVLCOPT:stop-time=3.501",
+        "in.mkv",
+        "#EXTINF:-1,cut 4521 at 0:03:08.564 (0.993)",
+        "#EXTVLCOPT:start-time=187.564",
+        "#EXTVLCOPT:stop-time=191.564",
+        "in.mkv",
+    ]
+    assert text.endswith("\n") and text.isascii()
+    assert cut_list([], index, found).splitlines() == [
+        "12 0.500 0:00:00.501",
+        "4521 0.993 0:03:08.564",
+    ]
+    # But for what names its cuts, the possible cuts' playlist of the same cuts, line for line:
+    # no line of the one is the other's where it says which it is.
+    other = playlist(index, found, "in.mkv", OF_POSSIBLE)
+    assert other == playlist(index, found, "in.mkv") != text
+    assert (
+        other.replace("the possible cuts", "the detected cuts").replace("possible cut", "cut")
+        == text
+    )
+    assert not {line for line in text.splitlines() if "cut" in line} & set(other.splitlines())
+    tags = ("extinf:", "extvlcopt:", "playlist:", "extalbumarturl:", "ext-x-")
+    assert not any(line.lstrip("# \t").lower().startswith(tags) for line in text.splitlines()[1:4])
+
+
 def test_playlist_names_the_source_as_a_url() -> None:
     # VLC reads an entry as a URL relative to the playlist: the name percent-encoded, every byte
     # but a letter, a digit or one of -._~, so that a #, a %, a leading space or an accent is
@@ -440,19 +484,25 @@ def test_playlist_names_the_source_as_a_url() -> None:
 
 
 def test_playlist_path() -> None:
-    # Beside FILE, its name with .m3u8 added, whatever its suffix: never FILE itself.
+    # Beside FILE, its name with .possible.m3u8 or .cuts.m3u8 added, whatever its suffix: never
+    # FILE itself, and never each other, a name saying which playlist it is.
     for plan, expected in (
-        ("plan.txt", "plan.txt.m3u8"),
-        ("x.cuts", "x.cuts.m3u8"),
-        ("plan", "plan.m3u8"),
-        ("plan.m3u8", "plan.m3u8.m3u8"),
-        ("some/where/plan.txt", "some/where/plan.txt.m3u8"),
-        ("/an/absolute/plan.txt", "/an/absolute/plan.txt.m3u8"),
-        (".hidden", ".hidden.m3u8"),
+        ("plan.txt", "plan.txt.%s.m3u8"),
+        ("x.cuts", "x.cuts.%s.m3u8"),
+        ("plan", "plan.%s.m3u8"),
+        ("plan.m3u8", "plan.m3u8.%s.m3u8"),
+        ("plan.cuts.m3u8", "plan.cuts.m3u8.%s.m3u8"),
+        ("some/where/plan.txt", "some/where/plan.txt.%s.m3u8"),
+        ("/an/absolute/plan.txt", "/an/absolute/plan.txt.%s.m3u8"),
+        (".hidden", ".hidden.%s.m3u8"),
     ):
-        assert playlist_path(Path(plan)) == Path(expected) != Path(plan)
+        of_possible, of_detected = Path(expected % "possible"), Path(expected % "cuts")
+        assert playlist_path(Path(plan), OF_POSSIBLE) == of_possible != Path(plan)
+        assert playlist_path(Path(plan), OF_DETECTED) == of_detected != Path(plan)
+        assert len({Path(plan), *(playlist_path(Path(plan), which) for which in PLAYLISTS)}) == 3
+    assert PLAYLISTS == (OF_DETECTED, OF_POSSIBLE)
     # A FILE without a name is refused before any playlist (cli._plan_file): no error here.
-    assert playlist_path(Path(".")) == Path(".m3u8")
+    assert playlist_path(Path("."), OF_POSSIBLE) == Path(".possible.m3u8")
 
 
 def test_playlist_written_and_said(
@@ -467,23 +517,23 @@ def test_playlist_written_and_said(
     (tmp_path / "films").mkdir()
     (tmp_path / "plans").mkdir()
     beside, elsewhere = tmp_path / "films" / "plan.txt", tmp_path / "plans" / "plan.txt"
-    (tmp_path / "films" / "plan.txt.m3u8").write_text("an earlier playlist")
+    (tmp_path / "films" / "plan.txt.possible.m3u8").write_text("an earlier playlist")
     said = (
         "a playlist of the 2 possible cuts for VLC, an entry each, from 1 second before its cut"
         " to 3 seconds after"
     )
     assert write_playlist(beside, index, found, source)
-    written = tmp_path / "films" / "plan.txt.m3u8"
+    written = tmp_path / "films" / "plan.txt.possible.m3u8"
     assert written.read_text() == playlist(index, found, "in 1.mkv")
     assert written.read_text().splitlines()[-1] == "in%201.mkv"
-    assert sorted(path.name for path in written.parent.iterdir()) == ["plan.txt.m3u8"]
+    assert sorted(path.name for path in written.parent.iterdir()) == ["plan.txt.possible.m3u8"]
     assert [record.getMessage() for record in caplog.records] == [
         f"{written}: {said}; beside the source, which it names by its file name alone: open it"
         " in VLC"
     ]
     caplog.clear()
     assert write_playlist(elsewhere, index, found[:1], source)
-    written = tmp_path / "plans" / "plan.txt.m3u8"
+    written = tmp_path / "plans" / "plan.txt.possible.m3u8"
     assert written.read_text() == playlist(index, found[:1], "in 1.mkv")
     assert [record.getMessage() for record in caplog.records] == [
         f"{written}: a playlist of the 1 possible cut for VLC, an entry each, from 1 second"
@@ -498,14 +548,14 @@ def test_playlist_written_and_said(
     # No possible cut: no playlist; one from before left as it is, and said.
     caplog.clear()
     assert write_playlist(tmp_path / "plans" / "none.txt", index, [], source)
-    assert not (tmp_path / "plans" / "none.txt.m3u8").exists() and caplog.records == []
+    assert sorted(os.listdir(tmp_path / "plans")) == [written.name] and caplog.records == []
     assert write_playlist(elsewhere, index, [], source)
     assert written.read_text() == playlist(index, found[:1], "in 1.mkv")
     assert [(record.levelname, record.getMessage()) for record in caplog.records] == [
         (
             "WARNING",
-            f"{written}: left as it is: this plan has no possible cut, so no playlist; a playlist"
-            " there is an earlier plan's, its entries not this plan's",
+            f"{written}: left as it is: this plan has no possible cut, so no playlist of them; a"
+            " playlist there is an earlier plan's, its entries not this plan's",
         )
     ]
     # Not written, the disk full: said, and False, the earlier one as it was.
@@ -524,6 +574,83 @@ def test_playlist_written_and_said(
         )
     ]
     assert written.read_text() == playlist(index, found[:1], "in 1.mkv")
+
+
+def test_both_playlists_written_and_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # --plan FILE's two playlists, each under its own name, with its own cuts, said on its own
+    # line, the detected cuts' first; one without a cut isn't written, the other is, and a file
+    # at its place is left and said; neither for a plan that detected nothing.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    index = ntsc(4800)
+    cuts, maybe = [Cut(4521, 0.9), Cut(100, 0.5), Cut(7, 0.31)], [Cut(12, 0.15)]
+    source, plan = tmp_path / "in.mkv", tmp_path / "plan.txt"
+    of_cuts, of_possible = tmp_path / "plan.txt.cuts.m3u8", tmp_path / "plan.txt.possible.m3u8"
+    after = "for VLC, an entry each, from 1 second before its cut to 3 seconds after; beside the"
+    after += " source, which it names by its file name alone: open it in VLC"
+
+    def said() -> list[tuple[str, str]]:
+        found = [(record.levelname, record.getMessage()) for record in caplog.records]
+        caplog.clear()
+        return found
+
+    assert write_playlists(plan, index, cuts, maybe, source)
+    assert sorted(os.listdir(tmp_path)) == [of_cuts.name, of_possible.name]
+    assert of_cuts.read_text() == playlist(index, cuts, "in.mkv", OF_DETECTED)
+    assert of_possible.read_text() == playlist(index, maybe, "in.mkv", OF_POSSIBLE)
+    assert of_cuts.read_text().count("#EXTINF:-1,cut ") == 3
+    assert "possible" not in of_cuts.read_text() and "detected" not in of_possible.read_text()
+    assert said() == [
+        ("INFO", f"{of_cuts}: a playlist of the 3 detected cuts {after}"),
+        ("INFO", f"{of_possible}: a playlist of the 1 possible cut {after}"),
+    ]
+    # No detected cut, a film of one shot: the possible cuts' alone, the other from before left.
+    earlier = of_cuts.read_text()
+    assert write_playlists(plan, index, [], maybe, source)
+    assert of_cuts.read_text() == earlier
+    left = "there is an earlier plan's, its entries not this plan's"
+    assert said() == [
+        (
+            "WARNING",
+            f"{of_cuts}: left as it is: this plan has no detected cut, so no playlist of them; a"
+            f" playlist {left}",
+        ),
+        ("INFO", f"{of_possible}: a playlist of the 1 possible cut {after}"),
+    ]
+    # No possible cut: the detected cuts' alone.
+    earlier = of_possible.read_text()
+    assert write_playlists(plan, index, cuts[:1], [], source)
+    assert of_cuts.read_text() == playlist(index, cuts[:1], "in.mkv", OF_DETECTED)
+    assert of_possible.read_text() == earlier
+    assert said() == [
+        ("INFO", f"{of_cuts}: a playlist of the 1 detected cut {after}"),
+        (
+            "WARNING",
+            f"{of_possible}: left as it is: this plan has no possible cut, so no playlist of"
+            f" them; a playlist {left}",
+        ),
+    ]
+    # Neither, as a cut list's plan: nothing written, nothing said where no file is.
+    other = tmp_path / "other.txt"
+    assert write_playlists(other, index, [], [], source) and said() == []
+    assert sorted(os.listdir(tmp_path)) == [of_cuts.name, of_possible.name]
+    # The disk full for the first: said, False, and the second written all the same.
+    whole = files.write_whole
+
+    def full(path: Path, data: bytes) -> None:
+        if path.name.endswith(".cuts.m3u8"):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        whole(path, data)
+
+    monkeypatch.setattr(files, "write_whole", full)
+    assert not write_playlists(other, index, cuts, maybe, source)
+    assert sorted(os.listdir(tmp_path)) == [
+        "other.txt.possible.m3u8",
+        of_cuts.name,
+        of_possible.name,
+    ]
+    assert [level for level, _ in said()] == ["ERROR", "INFO"]
 
 
 def test_header_lines_stay_comments(tmp_path: Path) -> None:

@@ -5248,9 +5248,9 @@ def test_one_file_plan_kept_in_its_work_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scripted: Steps
 ) -> None:
     # -o x.mkv --plan FILE: FILE written, which replaces the one there, whole, with the
-    # playlist of its possible cuts beside it, and the job's plan left in the work directory,
-    # its manifest and frame index, as in an output directory: no unit, no file, no
-    # checksums; the models never loaded.
+    # playlists of its cuts and of its possible cuts beside it, and the job's plan left in the
+    # work directory, its manifest and frame index, as in an output directory: no unit, no file,
+    # no checksums; the models never loaded.
     from seedvr2x.runtime import model
     from seedvr2x.runtime.job import read_cuts
 
@@ -5262,7 +5262,8 @@ def test_one_file_plan_kept_in_its_work_directory(
     before = sorted(os.listdir(tmp_path))
     monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
     assert upscale(tmp_path, source_path, "one.mkv", *SPLIT, "--plan", str(plan)) == 0
-    assert sorted(os.listdir(tmp_path)) == sorted([*before, "one.mkv.work", "plan.txt.m3u8"])
+    made = ["one.mkv.work", "plan.txt.cuts.m3u8", "plan.txt.possible.m3u8"]
+    assert sorted(os.listdir(tmp_path)) == sorted([*before, *made])
     work = tmp_path / "one.mkv.work"
     assert sorted(os.listdir(work)) == ["frame_index.bin", "manifest.json"]
     assert cut_lines(plan) == PLANNED and read_cuts(plan) == [5, 15, 22]
@@ -5289,38 +5290,73 @@ PLAYLIST = [
     "in.mkv",
 ]
 PLAYLIST_SAID = "for VLC, an entry each, from 1 second before its cut to 3 seconds after"
+# The detected cuts' playlist, the second (cuts.OF_DETECTED): its comments, and its entries of
+# SCRIPT's cuts at 0.3, 5, 15 and 22.
+DETECTED_HEADER = [
+    "#EXTM3U",
+    "# seedvr2x: the detected cuts of the cut list beside this file, to check in VLC, which",
+    "# plays an entry per cut, from 1 s before its time to 3 s after.",
+    "# It names the source by its file name alone: it plays from the source's directory.",
+]
+DETECTED = [
+    "#EXTINF:-1,cut 5 at 0:00:00.200 (0.899)",
+    "#EXTVLCOPT:start-time=0.000",
+    "#EXTVLCOPT:stop-time=0.960",
+    "in.mkv",
+    "#EXTINF:-1,cut 15 at 0:00:00.600 (0.600)",
+    "#EXTVLCOPT:start-time=0.000",
+    "#EXTVLCOPT:stop-time=0.960",
+    "in.mkv",
+    "#EXTINF:-1,cut 22 at 0:00:00.880 (0.300)",
+    "#EXTVLCOPT:start-time=0.000",
+    "#EXTVLCOPT:stop-time=0.960",
+    "in.mkv",
+]
 
 
-def test_plan_writes_the_playlist_of_its_possible_cuts(
+def test_plan_writes_the_playlists_of_its_cuts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     scripted: Steps,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # --plan FILE also writes a playlist beside the list, FILE.m3u8, an entry per possible cut
-    # (DESIGN.md, Shot detection), in frame order, never a detected cut's, and says what to do
-    # with it: beside the source, open it in VLC. Planned again at 0.5 with a FILE elsewhere,
-    # the cut at 22 a possible one: its entry with the others, and the playlist to move beside
-    # the source. At 0.1, no possible cut: no playlist, the one from before left, and said. A cut
-    # list's plan has none.
+    # --plan FILE also writes two playlists beside the list (DESIGN.md, Shot detection; design,
+    # 2026-10-12), FILE.cuts.m3u8, an entry per detected cut, and FILE.possible.m3u8, an entry
+    # per possible cut, each in frame order and never the other's cuts, and says what to do with
+    # each: beside the source, open it in VLC. Planned again at 0.5 with a FILE elsewhere, the
+    # cut at 22 a possible one: its entry gone from the one, with the others in the other, and
+    # the playlists to move beside the source. At 0.1, no possible cut: no playlist of them, the
+    # one from before left, and said; at 1, no detected cut, likewise. A cut list's plan has
+    # neither.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
-    plan, playlist = tmp_path / "plan.txt", tmp_path / "plan.txt.m3u8"
+    plan = tmp_path / "plan.txt"
+    detected, playlist = tmp_path / "plan.txt.cuts.m3u8", tmp_path / "plan.txt.possible.m3u8"
     assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    assert detected.read_text().splitlines() == [*DETECTED_HEADER, *DETECTED]
     assert playlist.read_text().splitlines() == [*PLAYLIST_HEADER, *PLAYLIST]
     assert cut_lines(plan) == PLANNED
     said = [record.getMessage() for record in caplog.records]
-    assert said[-2:] == [
+    beside = "beside the source, which it names by its file name alone: open it in VLC"
+    assert said[-3:] == [
         f"3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3: the cut list in {plan}",
-        f"{playlist}: a playlist of the 2 possible cuts {PLAYLIST_SAID}; beside the source, which"
-        " it names by its file name alone: open it in VLC",
+        f"{detected}: a playlist of the 3 detected cuts {PLAYLIST_SAID}; {beside}",
+        f"{playlist}: a playlist of the 2 possible cuts {PLAYLIST_SAID}; {beside}",
     ]
-    assert sorted(path.name for path in tmp_path.glob("plan*")) == ["plan.txt", "plan.txt.m3u8"]
+    assert sorted(path.name for path in tmp_path.glob("plan*")) == [
+        "plan.txt",
+        "plan.txt.cuts.m3u8",
+        "plan.txt.possible.m3u8",
+    ]
     (tmp_path / "plans").mkdir()
     caplog.clear()
     options = (*CUT, "--cut-threshold", "0.5", "--plan", "plans/again")
     assert upscale(tmp_path, source_path, "out", *options) == 0
-    assert (tmp_path / "plans" / "again.m3u8").read_text().splitlines() == [
+    assert (tmp_path / "plans" / "again.cuts.m3u8").read_text().splitlines() == [
+        *DETECTED_HEADER,
+        *DETECTED[:8],
+    ]
+    assert (tmp_path / "plans" / "again.possible.m3u8").read_text().splitlines() == [
         *PLAYLIST_HEADER,
         *PLAYLIST,
         "#EXTINF:-1,possible cut 22 at 0:00:00.880 (0.300)",
@@ -5328,20 +5364,41 @@ def test_plan_writes_the_playlist_of_its_possible_cuts(
         "#EXTVLCOPT:stop-time=0.960",
         "in.mkv",
     ]
-    assert [record.getMessage() for record in caplog.records][-1] == (
-        f"plans/again.m3u8: a playlist of the 3 possible cuts {PLAYLIST_SAID}; it names the"
-        " source by its file name alone, in.mkv: move it beside the source, then open it in VLC"
-    )
-    assert sorted(os.listdir(tmp_path / "plans")) == ["again", "again.m3u8"]
+    move = "it names the source by its file name alone, in.mkv: move it beside the source, then"
+    assert [record.getMessage() for record in caplog.records][-2:] == [
+        f"plans/again.cuts.m3u8: a playlist of the 2 detected cuts {PLAYLIST_SAID}; {move} open"
+        " it in VLC",
+        f"plans/again.possible.m3u8: a playlist of the 3 possible cuts {PLAYLIST_SAID}; {move}"
+        " open it in VLC",
+    ]
+    assert sorted(os.listdir(tmp_path / "plans")) == [
+        "again",
+        "again.cuts.m3u8",
+        "again.possible.m3u8",
+    ]
     caplog.clear()
     options = (*CUT, "--cut-threshold", "0.1", "--plan", str(plan))
     assert upscale(tmp_path, source_path, "out", *options) == 0
     assert playlist.read_text().splitlines() == [*PLAYLIST_HEADER, *PLAYLIST]
+    assert len(detected.read_text().splitlines()) == len(DETECTED_HEADER) + 4 * 5
+    left = "a playlist there is an earlier plan's, its entries not this plan's"
     assert [(r.levelname, r.getMessage()) for r in caplog.records][-1] == (
         "WARNING",
-        f"{playlist}: left as it is: this plan has no possible cut, so no playlist; a playlist"
-        " there is an earlier plan's, its entries not this plan's",
+        f"{playlist}: left as it is: this plan has no possible cut, so no playlist of them; {left}",
     )
+    caplog.clear()
+    options = (*CUT, "--cut-threshold", "1", "--plan", str(plan))
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert len(detected.read_text().splitlines()) == len(DETECTED_HEADER) + 4 * 5
+    assert len(playlist.read_text().splitlines()) == len(PLAYLIST_HEADER) + 4 * 5
+    assert [(r.levelname, r.getMessage()) for r in caplog.records][-2:] == [
+        (
+            "WARNING",
+            f"{detected}: left as it is: this plan has no detected cut, so no playlist of them;"
+            f" {left}",
+        ),
+        ("INFO", f"{playlist}: a playlist of the 5 possible cuts {PLAYLIST_SAID}; {beside}"),
+    ]
     caplog.clear()
     options = ("--cuts", "cuts.txt", "--plan", "listed.txt")
     assert upscale(tmp_path, source_path, "out", *CUT, *options) == 0
@@ -5395,45 +5452,52 @@ def test_plan_file_refused(
 def test_plan_playlist_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The playlist of FILE's possible cuts goes beside it, as FILE.m3u8: in the place of what
-    # the job reads or writes, FILE is refused as for its own place, before the first pass,
-    # nothing made: the source; a .mkv path's finished file, its checksums, anything in its work
-    # directory; anything in an output directory, or that directory itself, one named
-    # FILE.m3u8; a directory. Each place by a link at the playlist's name, the one way there for
-    # a .mkv path's, whose names end otherwise. With --cuts, whose plan has no possible cut and
-    # no playlist, it isn't.
+    # The playlists of FILE's cuts and possible cuts go beside it, as FILE.cuts.m3u8 and
+    # FILE.possible.m3u8: with either in the place of what the job reads or writes, FILE is
+    # refused as for its own place, before the first pass, nothing made: the source; a .mkv
+    # path's finished file, its checksums, anything in its work directory; anything in an output
+    # directory, or that directory itself, one named as the playlist; a directory. Each place by
+    # a link at the playlist's name, the one way there for a .mkv path's, whose names end
+    # otherwise. With --cuts, whose plan has neither and no playlist, it isn't.
     source_path = job(tmp_path, monkeypatch)
     passes = first_passes(monkeypatch)
-    (tmp_path / "a.m3u8").symlink_to("in.mkv")
-    (tmp_path / "b.txt.m3u8").symlink_to("one.mkv")
-    (tmp_path / "c.m3u8").symlink_to("out/c")
-    (tmp_path / "d.cuts.m3u8").mkdir()
-    (tmp_path / "e.m3u8").symlink_to("one.mkv.crc32")
-    (tmp_path / "f.m3u8").symlink_to("one.mkv.work/f.m3u8")
     in_directory = "is in the output directory, which holds the job's own files only"
     work = f"is in the work directory of {tmp_path / 'one.mkv'}, which holds the job's own files"
-    for output, plan, said in (
-        ("out", "a", "a.m3u8 beside it, is the source"),
-        ("one.mkv", "a", "a.m3u8 beside it, is the source"),
-        ("one.mkv", "b.txt", "b.txt.m3u8 beside it, is the output"),
-        ("one.mkv", "e", "e.m3u8 beside it, is the output's checksums"),
-        ("one.mkv", "f", f"f.m3u8 beside it, {work} only"),
-        ("out", "c", f"c.m3u8 beside it, {in_directory}"),
-        ("p.m3u8", "p", f"p.m3u8 beside it, {in_directory}"),
-        ("out", "d.cuts", "d.cuts.m3u8 beside it, is a directory"),
-        ("one.mkv", "d.cuts", "d.cuts.m3u8 beside it, is a directory"),
-    ):
-        text = refused(tmp_path, source_path, caplog, "--plan", plan, output=output)
-        expected = f"--plan {plan}: the playlist of its possible cuts, {said}; it names another"
-        assert f"{expected} file" in text
-        assert not (tmp_path / plan).exists()
-    assert passes == [] and not (tmp_path / "out").exists() and not (tmp_path / "p.m3u8").exists()
-    assert not (tmp_path / "one.mkv").exists() and not (tmp_path / "one.mkv.work").exists()
+    for name, cuts in (("cuts", "detected cuts"), ("possible", "possible cuts")):
+        ending = f"{name}.m3u8"
+        (tmp_path / f"a.{ending}").symlink_to("in.mkv")
+        (tmp_path / f"b.txt.{ending}").symlink_to("one.mkv")
+        (tmp_path / f"c.{ending}").symlink_to("out/c")
+        (tmp_path / f"d.cuts.{ending}").mkdir()
+        (tmp_path / f"e.{ending}").symlink_to("one.mkv.crc32")
+        (tmp_path / f"f.{ending}").symlink_to(f"one.mkv.work/f.{ending}")
+        for output, plan, said in (
+            ("out", "a", f"a.{ending} beside it, is the source"),
+            ("one.mkv", "a", f"a.{ending} beside it, is the source"),
+            ("one.mkv", "b.txt", f"b.txt.{ending} beside it, is the output"),
+            ("one.mkv", "e", f"e.{ending} beside it, is the output's checksums"),
+            ("one.mkv", "f", f"f.{ending} beside it, {work} only"),
+            ("out", "c", f"c.{ending} beside it, {in_directory}"),
+            (f"p.{ending}", "p", f"p.{ending} beside it, {in_directory}"),
+            ("out", "d.cuts", f"d.cuts.{ending} beside it, is a directory"),
+            ("one.mkv", "d.cuts", f"d.cuts.{ending} beside it, is a directory"),
+        ):
+            text = refused(tmp_path, source_path, caplog, "--plan", plan, output=output)
+            expected = f"--plan {plan}: the playlist of its {cuts}, {said}; it names another"
+            assert f"{expected} file" in text
+            assert not (tmp_path / plan).exists()
+        assert passes == [] and not (tmp_path / "out").exists()
+        assert not (tmp_path / f"p.{ending}").exists()
+        assert not (tmp_path / "one.mkv").exists() and not (tmp_path / "one.mkv.work").exists()
+        # The other playlist's places are free: these names are this one's alone.
+        for path in sorted(tmp_path.glob(f"?.*{ending}")):
+            path.rmdir() if path.is_dir() else path.unlink()
     # A link to a .mkv path's own files is no obstacle to a directory's job, nor a directory's to
     # a .mkv path's: each job is held to its own places.
+    (tmp_path / "a.cuts.m3u8").symlink_to("in.mkv")
     content = source_path.read_bytes()
     assert upscale(tmp_path, source_path, "out", "--cuts", "cuts.txt", "--plan", "a") == 0
-    assert (tmp_path / "a").is_file() and (tmp_path / "a.m3u8").is_symlink()
+    assert (tmp_path / "a").is_file() and (tmp_path / "a.cuts.m3u8").is_symlink()
     assert source_path.read_bytes() == content
 
 
@@ -5650,8 +5714,13 @@ def test_plan_of_a_finished_job(
     said = "3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3: the cut list in"
     assert f"{said} {plan}" in caplog.text
     assert cut_lines(plan) == PLANNED
-    # The playlist of its 2 possible cuts beside it, as any detected plan's (cuts.write_playlist).
-    assert sorted(path.name for path in tmp_path.glob("plan*")) == ["plan.txt", "plan.txt.m3u8"]
+    # The playlists of its 3 cuts and 2 possible cuts beside it, as any detected plan's
+    # (cuts.write_playlists).
+    assert sorted(path.name for path in tmp_path.glob("plan*")) == [
+        "plan.txt",
+        "plan.txt.cuts.m3u8",
+        "plan.txt.possible.m3u8",
+    ]
     assert passes == [] and scripted.calls == [] and contents(out) == kept
 
 
@@ -5665,7 +5734,7 @@ def test_plan_of_a_finished_job_without_its_index(
 ) -> None:
     # --plan on a finished job whose frame index is missing, damaged, or made by another ffmpeg
     # than the run's, accepted: the cut list is written from the index, which a finished job
-    # doesn't make again: said, FILE not written, nor the playlist of its possible cuts, exit 1,
+    # doesn't make again: said, FILE not written, nor the playlists of its cuts, exit 1,
     # no first pass, nothing of the job touched (PROVISIONAL, cli._finished_already).
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
@@ -5771,8 +5840,8 @@ def test_plan_playlist_not_written_fails(
     scripted: Steps,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The cut list written, the disk full for its playlist: said, and the command fails, the
-    # list there.
+    # The cut list written, the disk full for its playlists: said of each, and the command
+    # fails, the list there.
     from seedvr2x.media import files
 
     write_whole = files.write_whole
@@ -5783,12 +5852,13 @@ def test_plan_playlist_not_written_fails(
         write_whole(path, data)
 
     source_path = job(tmp_path, monkeypatch)
-    plan, playlist = tmp_path / "plan.txt", tmp_path / "plan.txt.m3u8"
+    plan = tmp_path / "plan.txt"
     monkeypatch.setattr(files, "write_whole", full)
     text = refused(tmp_path, source_path, caplog, "--plan", str(plan), output="one.mkv")
-    said = f"its playlist, {playlist}, not written: [Errno 28] No space left on device"
-    assert f"--plan {plan}: {said}" in text
-    assert cut_lines(plan) == PLANNED and not playlist.exists()
+    for playlist in (tmp_path / "plan.txt.cuts.m3u8", tmp_path / "plan.txt.possible.m3u8"):
+        said = f"its playlist, {playlist}, not written: [Errno 28] No space left on device"
+        assert f"--plan {plan}: {said}" in text and not playlist.exists()
+    assert cut_lines(plan) == PLANNED
 
 
 def synthetic_clip(path: Path) -> Path:
@@ -5819,9 +5889,10 @@ def test_real_detection_playlist(
     # TransNetV2 itself, as in test_real_detection_cuts, on the synthetic clip, 280 frames at
     # 25 fps, its last at 11.16 s, planned at thresholds its cuts' peaks stay under (0.963, 0.993
     # and 0.998 here, read from the list), which makes possible cuts of them. At 0.97, the first
-    # alone: the playlist's one entry, from a second before its time, 2.92 s, to 3 seconds after.
-    # Planned again at 1, with no second pass: the three, in frame order, the last one's stop
-    # the last frame's time. The playlist printed (-rP).
+    # alone: the possible cuts' playlist's one entry, from a second before its time, 2.92 s, to
+    # 3 seconds after, and the other two the detected cuts' playlist's. Planned again at 1,
+    # with no second pass: the three possible, in frame order, the last one's stop the last
+    # frame's time, and no detected cut, that playlist left. The playlists printed (-rP).
     from test_detector import CUTS
 
     from seedvr2x.runtime import detector
@@ -5839,18 +5910,22 @@ def test_real_detection_playlist(
     caplog.set_level(logging.INFO, logger="seedvr2x")
     clip = synthetic_clip(tmp_path / "clip.mkv")
     passes = first_passes(monkeypatch)
-    plan, playlist = tmp_path / "plan.txt", tmp_path / "plan.txt.m3u8"
+    plan = tmp_path / "plan.txt"
+    detected, playlist = tmp_path / "plan.txt.cuts.m3u8", tmp_path / "plan.txt.possible.m3u8"
     times = [("1.920", "5.920"), ("5.000", "9.000"), ("7.480", "11.160")]
 
-    def entries(count: int) -> list[str]:
-        # Each possible cut's line in the list, `# <frame> <probability> <time>`, as its entry.
-        lines = [line.split() for line in cut_lines(plan) if line.startswith("# ")]
-        assert [int(line[1]) for line in lines] == CUTS[:count]
+    def entries(which: slice, possible: bool = True) -> list[str]:
+        # Each possible cut's line in the list, `# <frame> <probability> <time>`, as its entry;
+        # or each cut's, `<frame> <probability> <time>`.
+        listed = [line for line in cut_lines(plan) if line.startswith("# ") == possible]
+        lines = [line.removeprefix("# ").split() for line in listed]
+        assert [int(line[0]) for line in lines] == CUTS[which]
+        title = "possible cut" if possible else "cut"
         return [
             written
-            for (_, frame, peak, time), (start, stop) in zip(lines, times, strict=False)
+            for (frame, peak, time), (start, stop) in zip(lines, times[which], strict=True)
             for written in (
-                f"#EXTINF:-1,possible cut {frame} at {time} ({peak})",
+                f"#EXTINF:-1,{title} {frame} at {time} ({peak})",
                 f"#EXTVLCOPT:start-time={start}",
                 f"#EXTVLCOPT:stop-time={stop}",
                 "clip.mkv",
@@ -5859,18 +5934,24 @@ def test_real_detection_playlist(
 
     assert upscale(tmp_path, clip, "out", "--cut-threshold", "0.97", "--plan", str(plan)) == 0
     assert "2 cuts at 0.97 (3 shots), 1 possible cut from 0.1 up to 0.97" in caplog.text
-    assert playlist.read_text().splitlines() == [*PLAYLIST_HEADER, *entries(1)]
+    assert playlist.read_text().splitlines() == [*PLAYLIST_HEADER, *entries(slice(1))]
+    earlier = [*DETECTED_HEADER, *entries(slice(1, 3), possible=False)]
+    assert detected.read_text().splitlines() == earlier
+    assert f"{detected}: a playlist of the 2 detected cuts for VLC" in caplog.text
     assert f"{playlist}: a playlist of the 1 possible cut for VLC" in caplog.text
     assert upscale(tmp_path, clip, "out", "--cut-threshold", "1", "--plan", str(plan)) == 0
     assert len(passes) == 1
     assert "0 cuts at 1.0 (1 shot), 3 possible cuts from 0.1 up to 1.0" in caplog.text
-    assert playlist.read_text().splitlines() == [*PLAYLIST_HEADER, *entries(3)]
+    assert playlist.read_text().splitlines() == [*PLAYLIST_HEADER, *entries(slice(3))]
+    assert detected.read_text().splitlines() == earlier
+    assert f"{detected}: left as it is: this plan has no detected cut" in caplog.text
     assert [line.split()[3] for line in cut_lines(plan)] == [
         "0:00:02.920",
         "0:00:06.000",
         "0:00:08.480",
     ]
     print("\n".join(record.getMessage() for record in caplog.records))
+    print(detected.read_text())
     print(playlist.read_text())
 
 
