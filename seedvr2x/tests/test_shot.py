@@ -1,7 +1,10 @@
 """The shot pipeline's parts on the CPU: windows, mixing weights, padding, the encoder's input
-and split's reference, streamed encode and decode; and a shot's tiled encode and decode
+and split's reference, streamed encode and decode; the DiT's windows over a stand-in, their one
+draw of noise and what waits where between them; and a shot's tiled encode and decode
 (runtime/tiling.py) through encode_shot and decode_shot, over test_tiling.py's stand-in VAE."""
 
+import logging
+import weakref
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
 from itertools import pairwise
@@ -15,10 +18,11 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from test_tiling import MEMORY, Failing, StandIn, failing_at, latent_of, mapped, models_of, same
+from test_units import channel_major, job
 
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.runtime import model, shot, tiling
-from seedvr2x.runtime.job import output_size, padded_size
+from seedvr2x.runtime.job import OutputSegment, Shot, output_size, padded_size
 from seedvr2x.runtime.plan import Tiles
 from seedvr2x.runtime.shot import (
     Correction,
@@ -30,9 +34,12 @@ from seedvr2x.runtime.shot import (
     pad_4n1,
     padded_length,
     reference_inputs,
+    sample_windows,
+    shot_layout,
     window_layout,
 )
 from seedvr2x.runtime.tiling import Scratch, ScratchError
+from seedvr2x.runtime.units import DiskUnits, Units
 
 # The models as far as the encoder's input and split's reference use them: the CPU and the VAE's
 # slicing (model.encode_slices).
@@ -247,8 +254,10 @@ def test_noise_is_drawn_on_the_models_device(monkeypatch: pytest.MonkeyPatch) ->
     layout = [(0, 3), (2, 5)]
     given = encoded.as_subclass(InSystemMemory)
     noise = list(shot.sample_windows(models, given, layout, 7))
-    # Moved first, to the models' device, and the draw is from what came back.
-    assert moves == [(device, {})] and len(drawn_from) == 1 and drawn_from[0] is on_device
+    # Moved first, to the models' device, and the draw is from what came back; then back to
+    # system memory, where it waits through the windows (the one device here).
+    assert moves == [(device, {}), (device, {})]
+    assert len(drawn_from) == 1 and drawn_from[0] is on_device
     assert [window.shape for window in noise] == [(3, 4, 6, 16), (3, 4, 6, 16)]
     # A latent on the device already gives the same draw, as does the one in system memory.
     for latent in (on_device, encoded):
@@ -263,6 +272,201 @@ def test_noise_is_drawn_on_the_models_device(monkeypatch: pytest.MonkeyPatch) ->
     assert len(resumed) == 1 and same(resumed[0], noise[1])
     with pytest.raises(ValueError, match="over a latent of 5"):
         list(shot.sample_windows(models, encoded, [(0, 3), (2, 6)], 7))
+
+
+# The DiT's windows (sample_windows) over a stand-in for the DiT. Its device is the CPU, where a
+# copy to the device or back is the tensor itself: what is held here is the order of things and
+# the values each window is given.
+DEVICE = cast(model.Models, SimpleNamespace(device=torch.device("cpu")))
+# A shot of 33 frames, 9 latents, in windows of 5.
+LAYOUT = [(0, 5), (3, 7), (5, 9)]
+
+
+class Dit:
+    """A stand-in for the DiT, its output a window's noise and latent combined. Recorded: what
+    leads to a window, in order (`events`: the seed set, the draw with the shape, the strides
+    and the options of what is drawn, each window), the noise and the latent each window is
+    given (`given`), and whether gradients were enabled at the draw and in each window
+    (`grad`)."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.events: list[object] = []
+        self.given: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.grad: list[bool] = []
+        set_seed, randn_like = model.set_seed, torch.randn_like
+
+        def seeded(seed: int) -> None:
+            self.events.append(("seed", seed))
+            set_seed(seed)
+
+        def drawn(tensor: torch.Tensor, **options: Any) -> torch.Tensor:
+            self.events.append(("draw", tuple(tensor.shape), tensor.stride(), options))
+            self.grad.append(torch.is_grad_enabled())
+            return randn_like(tensor, **options)
+
+        def sample(models: object, noise: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+            self.events.append("window")
+            self.given.append((noise, cond))
+            self.grad.append(torch.is_grad_enabled())
+            return noise * 0.5 + cond
+
+        monkeypatch.setattr(model, "set_seed", seeded)
+        monkeypatch.setattr(torch, "randn_like", drawn)
+        monkeypatch.setattr(model, "condition", lambda models, noise, latent: latent)
+        monkeypatch.setattr(model, "sample", sample)
+
+
+@pytest.mark.parametrize("start", [0, 1, 2])
+def test_windows_are_slices_of_one_draw(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, start: int
+) -> None:
+    # The noise is drawn once for the shot: torch.randn_like of its whole latent, in the layout
+    # its encode gave it, right after the seed is set, when the first window is asked for and
+    # not before, whichever window that is: a shot resumed at its second or third window draws
+    # the noise an uninterrupted one drew. Each window is given its slices' values of the noise
+    # and of the latent, and the steps that compute run without gradients.
+    assert shot_layout(33, 5) == LAYOUT
+    caplog.set_level(logging.DEBUG)
+    latent = channel_major(9)
+    given = latent.clone()
+    model.set_seed(1234)
+    noise = torch.randn_like(latent, dtype=torch.bfloat16)
+    dit = Dit(monkeypatch)
+    torch.manual_seed(0)  # the generators as something else left them
+    sampled = sample_windows(DEVICE, latent, LAYOUT, 1234, start)
+    assert dit.events == []
+    outputs = [next(sampled)]
+    draw = ("draw", (9, 3, 5, 16), (15, 5, 1, 135), {"dtype": model.COMPUTE_DTYPE})
+    assert dit.events == [("seed", 1234), draw, "window"] and latent.stride() == draw[2]
+    assert torch.is_grad_enabled()
+    outputs += list(sampled)
+    assert dit.events[3:] == ["window"] * (len(LAYOUT) - start - 1)
+    assert len(dit.grad) == 1 + len(LAYOUT) - start and not any(dit.grad)
+    windows = zip(LAYOUT[start:], dit.given, outputs, strict=True)
+    for (s, e), (window_noise, window_latent), output in windows:
+        assert window_noise.dtype == model.COMPUTE_DTYPE == torch.bfloat16
+        assert torch.equal(window_noise, noise[s:e]) and torch.equal(window_latent, latent[s:e])
+        assert torch.equal(output, noise[s:e] * 0.5 + latent[s:e])
+    assert torch.equal(latent, given) and latent.stride() == given.stride()
+    assert "noise drawn" not in caplog.text  # the draw's memory is a GPU's: nothing on the CPU
+    with pytest.raises(ValueError, match="over a latent of 9"):
+        next(sample_windows(DEVICE, latent, [(0, 5), (3, 8)], 1234))
+
+
+def test_the_draw_is_logged_on_a_gpu(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # With -v, a line at each shot's draw: its latents, what the GPU has allocated then, its
+    # latent and its noise there, and the unit's peak so far, read and never reset, in GiB to 3
+    # decimals: the moment the planner bounds (planner.dit_draw), which a run on a card shows.
+    # No GPU here: a device by its name alone, the copies to it and back left out, and the
+    # driver's two figures given.
+    gpu = cast(model.Models, SimpleNamespace(device=torch.device("cuda")))
+    asked: list[str] = []
+
+    def figure(name: str, count: float) -> Callable[[torch.device], int]:
+        def read(device: torch.device) -> int:
+            asked.append(name)
+            return round(count * 2**30)
+
+        return read
+
+    monkeypatch.setattr(shot, "moved", lambda tensor, device, what: tensor)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", figure("allocated", 1.5))
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", figure("peak", 16.25))
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", figure("reset", 0))
+    caplog.set_level(logging.DEBUG, logger="seedvr2x.runtime.shot")
+    latent = channel_major(9)
+    model.set_seed(1234)
+    expected = torch.randn_like(latent, dtype=model.COMPUTE_DTYPE)
+    noise, kept = shot._drawn(gpu, latent, 1234)  # pyright: ignore[reportPrivateUsage]
+    assert torch.equal(noise, expected) and kept is latent
+    assert caplog.messages == [
+        "noise drawn for the shot's 9 latents: 1.500 GiB allocated on the GPU, its latent and its"
+        " noise there; the unit's peak so far 16.250 GiB"
+    ]
+    assert asked == ["allocated", "peak"]
+
+
+def test_windows_from_the_units_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The latent as the units give it, the copy kept in memory, the one written for a resume, or
+    # the one a resume reads back: the windows the encode's own latent gives. And that copy is
+    # the one the windows are cut from, no other being made of the latent: on the CPU, where a
+    # slice sent to the device is the slice, each window's latent is a view of the copy given.
+    latent = channel_major(9)
+    dit = Dit(monkeypatch)
+    expected = list(sample_windows(DEVICE, latent, LAYOUT, 1234))
+    disk = DiskUnits(tmp_path, job(tmp_path, [Shot(0, 33)], [OutputSegment("a", 0, 33)]))
+    in_memory = Units()
+    copies = [in_memory.save_latent(0, latent), disk.save_latent(0, latent), disk.latent(0)]
+    assert copies[0] is in_memory.latent(0) and copies[2] is not latent
+    for copy in copies:
+        assert copy is not None and copy.device.type == "cpu"
+        dit.given.clear()
+        windows = list(sample_windows(DEVICE, copy, LAYOUT, 1234))
+        for ours, theirs in zip(windows, expected, strict=True):
+            assert torch.equal(ours, theirs) and ours.stride() == theirs.stride()
+        whole = copy.untyped_storage().data_ptr()
+        assert len(dit.given) == len(LAYOUT)
+        assert all(cut.untyped_storage().data_ptr() == whole for _, cut in dit.given)
+
+
+def test_no_output_is_kept_once_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A window's output is the caller's alone once given: while the next window runs, nothing of
+    # sample_windows refers to it, so that it leaves the device as soon as the run has kept its
+    # copy, before the next window's pass. Decorated with torch.no_grad, the generator would
+    # keep it through that pass (shot.sample_windows).
+    given: list[weakref.ref[torch.Tensor]] = []
+    alive: list[bool] = []
+
+    def sample(models: object, noise: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        alive.append(any(output() is not None for output in given))
+        return noise * 0.5 + cond
+
+    monkeypatch.setattr(model, "condition", lambda models, noise, latent: latent)
+    monkeypatch.setattr(model, "sample", sample)
+    sampled = sample_windows(DEVICE, channel_major(9), LAYOUT, 1234)
+    while (output := next(sampled, None)) is not None:
+        given.append(weakref.ref(output))
+        del output
+    assert len(given) == len(LAYOUT) and alive == [False] * len(LAYOUT)
+    assert all(output() is None for output in given)
+
+
+def test_the_device_is_given_the_shot_for_its_draw_then_each_window_s_slices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # What goes to the device and what leaves it: the shot's latent whole for the noise's draw,
+    # the noise and the latent back to system memory after it, then each window's slices alone,
+    # so that the device holds nothing of the shot beside a window (shot.sample_windows). On the
+    # CPU a move is the tensor itself: the tensors here record the moves they are asked for, the
+    # shape moved and its way, by the device named: shot.CPU itself for system memory.
+    moves: list[tuple[str, tuple[int, ...]]] = []
+
+    class Recorded(torch.Tensor):
+        def to(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+            home = bool(args) and args[0] is shot.CPU
+            moves.append(("system memory" if home else "device", tuple(self.shape)))
+            return super().to(*args, **kwargs)
+
+    monkeypatch.setattr(model, "condition", lambda models, noise, latent: latent)
+    monkeypatch.setattr(model, "sample", lambda models, noise, cond: noise * 0.5 + cond)
+    assert DEVICE.device is not shot.CPU
+    latent = channel_major(9).as_subclass(Recorded)
+    whole = tuple(latent.shape)
+
+    def slices(start: int, end: int) -> list[tuple[str, tuple[int, ...]]]:
+        # A window's noise, then its latent.
+        return [("device", (end - start, *whole[1:]))] * 2
+
+    sampled = sample_windows(DEVICE, latent, LAYOUT, 1234)
+    assert moves == []  # nothing moves before the first window is asked for
+    next(sampled)
+    # The latent to the device, the noise drawn there, then both to system memory.
+    drawn = [("device", whole), ("system memory", whole), ("system memory", whole)]
+    assert moves == [*drawn, *slices(*LAYOUT[0])]
+    assert len(list(sampled)) == len(LAYOUT) - 1
+    assert moves[len(drawn) :] == [move for window in LAYOUT for move in slices(*window)]
 
 
 # A shot's tiled passes through encode_shot and decode_shot, over test_tiling.py's stand-in VAE.

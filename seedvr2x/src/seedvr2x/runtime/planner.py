@@ -7,13 +7,15 @@ Its memory model: what each phase is predicted to peak at on the GPU, in bytes. 
 the VAE's passes by the fits of research/docs/planner-limits.md and research/docs/vram.md,
 measured on numz's CLI with the 7B fp16, the one DiT seedvr2x runs (weights.ACCEPTED); a square
 tile by the peaks measured on seedvr2x's own tiled passes (MEASURED), the fits serving the tiles
-cut off at the picture's edges; and what a pass keeps on the GPU of the shot itself, which
-grows with it: a VAE pass's counted for the job's longest shot, the DiT's phase's shot by shot,
-beside the shot's longest window (dit_kept). Where the weights are in each phase, and what
-that takes, by what runtime/blockswap.py does with them, measured on seedvr2x itself (milestone
-3). The tiles and their scratch by runtime/tiling.py's, and what the scratch may take of system
-memory from the host's (Plan.scratch_allowance). Sizes are (height, width) in pixels; `padded` is
-the frame the model takes, the target padded (job.padded_size).
+cut off at the picture's edges; and what a VAE pass keeps on the GPU of the shot itself, which
+grows with it, counted for the job's longest shot. The DiT's phase keeps nothing of a shot
+beside the window it runs (shot.sample_windows); its other moment is the draw of a shot's noise,
+the shot's latent and noise whole on the GPU before its first window, counted by the two
+tensors' sizes (dit_draw), and the phase takes the larger of the two. Where the weights are in
+each phase, and what that takes, by what runtime/blockswap.py does with them, measured on
+seedvr2x itself (milestone 3). The tiles and their scratch by runtime/tiling.py's, and what the
+scratch may take of system memory from the host's (Plan.scratch_allowance). Sizes are (height,
+width) in pixels; `padded` is the frame the model takes, the target padded (job.padded_size).
 
 Its choices, in DESIGN.md's order (plan): the window, the biggest quality lever; the fewest
 swapped blocks that hold it; the largest VAE tiles, none where the untiled pass fits. A pin is
@@ -149,23 +151,16 @@ ENCODE_TILED_SUMS = 1.9
 # PROVISIONAL (implementation, 2026-10-11), until the untiled encode no longer keeps them on the
 # GPU.
 ENCODE_UNTILED_MOMENTS = 2.83
-# What the DiT's phase keeps on the GPU of a shot longer than its window, beside the window it
-# runs, in MiB per megapixel of the padded frame and per latent: the shot's latent, on the device
-# through its windows (run.run_job), and its noise, drawn whole (shot.sample_windows), each
-# window a view of both: 1 byte a padded pixel and a latent, 2.02 MiB a latent at 1080p and 8.03
-# at 4K, what DECODE_LATENT counts. Counted for the shot's latents beyond the window, whose own
-# the fit holds (DIT_LOADED: numz's batch is its whole latent). The first matrix's five
-# two-window shots peaked 0.020 to 0.043 GiB over their window's prediction, where this gives
-# 0.012 to 0.036, and its one-window shot 0.011 under (tests/test_planner.py,
-# test_first_matrix). PROVISIONAL (implementation, 2026-10-11), until the run keeps them off the
-# GPU between windows.
-DIT_LATENT = 0.954
-# What a one-file output keeps there too, its units in memory: the windows made, on the device
-# until the shot's decode (units.Units.save_window), in MiB per megapixel and per latent of
-# them, a latent two windows share counted in both: half as much, 1.01 MiB a latent at 1080p
-# and 4.02 at 4K. PROVISIONAL (implementation, 2026-10-11), until the run keeps them off the GPU
-# between windows.
-DIT_WINDOWS_KEPT = 0.477
+
+# A latent as the VAE makes it and the DiT takes it: its channels, the pixels of the padded
+# frame along a side of one of its positions (vendor/models/video_vae_v3/
+# s8_c16_t4_inflation_sd3.yaml: latent_channels 16, spatial_downsample_factor 8), and the bytes
+# of one of its values, in the pipeline's bfloat16 (model.COMPUTE_DTYPE; tests/test_planner.py
+# holds the three to tensors of that shape). What dit_draw counts a shot's latent and its noise
+# by, their sizes: literals here since runtime/model.py imports torch.
+LATENT_CHANNELS = 16
+LATENT_SIDE = 8
+LATENT_VALUE = 2
 
 # What seedvr2x's encode holds over its fit, tiled or not, in bytes: the largest excess of a
 # measured peak over the fit's in the planner's first matrix (the 96 GB card emulating smaller
@@ -324,13 +319,33 @@ def dit_on_gpu(resident: int | None, swapped: int) -> int:
     return DIT_BUFFERS + DIT_OTHER + BLOCK * resident
 
 
-def dit_kept(padded: tuple[int, int], beyond: int, made: int = 0) -> int:
-    """What the DiT's phase keeps on the GPU of a shot beside the window it runs, in bytes, which
-    dit_peak doesn't count: the latent and the noise of the shot's `beyond` latents outside that
-    window (DIT_LATENT) and, for a one-file output, the `made` latents of the windows made
-    before, a shared latent counted in both (DIT_WINDOWS_KEPT). Nothing for a shot in one
-    window."""
-    return round((DIT_LATENT * beyond + DIT_WINDOWS_KEPT * made) * MIB * _megapixels(padded))
+def dit_draw(
+    padded: tuple[int, int], latents: int, swapped: int = 0, vae_in_dit: bool = True
+) -> int:
+    """What the GPU holds when the noise of a shot of `latents` latents of padded frames is
+    drawn, in bytes: the other moment of the DiT's phase, beside a window's peak (dit_peak),
+    once per shot, before its first window, and again when a resumed run takes the shot up
+    (shot.sample_windows). The shot's latent and its noise are then whole on the GPU, where
+    the noise is drawn so that its values are the device's own; both wait in system memory
+    through the windows, of which the GPU holds one at a time.
+
+    The two tensors by their sizes, not by a fit: each (latents, H / 8, W / 8, 16) in bfloat16,
+    2 x 16 channels x 2 bytes over the 64 padded pixels of a latent position: 1 byte a padded
+    pixel and a latent, 2.02 MiB a latent at 1080p, padded to 1104x1920, and 8.03 at 4K, padded
+    to 2192x3840.
+
+    With them, the weights the DiT's phase has on the GPU, entered by then (run._sample enters
+    it before the first window is asked for): what of the DiT stays as its own phase has it
+    (dit_on_gpu's None): the blocks that aren't swapped, its other parameters and the slots,
+    which blockswap.Placement.enter allocates as the phase is entered, before any forward, the
+    first swapped blocks on their way into them; and the VAE's weights unless vae_in_dit is
+    False, model.Models.enter sending them away before the DiT's come. An upper bound by what
+    dit_on_gpu counts of the tables the DiT's blocks cache once a window has run (DIT_BUFFERS,
+    0.03 GiB of its 0.058), not there yet at a run's first draw."""
+    height, width = padded
+    position = (height // LATENT_SIDE) * (width // LATENT_SIDE)
+    shot = 2 * LATENT_CHANNELS * LATENT_VALUE * position * latents
+    return dit_on_gpu(None, swapped) + (VAE_WEIGHTS if vae_in_dit else 0) + shot
 
 
 def tile_area(padded: tuple[int, int], tiles: Tiles) -> float:
@@ -537,7 +552,7 @@ class Peaks:
     free: int  # the memory free on the GPU when the plan was made, as the driver reports it
     budget: int  # free - MARGIN
     encode: int  # each phase's predicted peak on the GPU
-    dit: int  # the window's, and what the phase keeps of its shot beside it (dit_kept)
+    dit: int  # the larger of the longest window's and of the longest shot's draw (dit_draw)
     decode: int
     host: int  # the system memory the plan takes, the scratch up to its allowance
     scratch: int  # the scratch of the longest shot's tiled passes; 0 untiled
@@ -586,7 +601,6 @@ class _Job:
     frames: int  # its longest shot's frames
     split: bool
     numz_padding: bool
-    on_disk: bool  # its units kept on disk, an output directory's; False: one file's, in memory
 
     @property
     def budget(self) -> int:
@@ -618,18 +632,19 @@ def plan(
     split: bool = False,
     numz_padding: bool = False,
     recorded: Plan | None = None,
-    on_disk: bool = True,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (job.target_size), in `free` bytes of GPU
     memory as the driver reports them, less MARGIN, and what it is predicted to take; refused
     (PlanError) when a pin can't be taken exactly, when no plan fits that memory, or when the plan
     takes more system memory than host_available, in bytes (None: not checked). split: whether the
-    decode corrects colours; numz_padding is for tests only (cli.NUMZ_PADDING). on_disk: whether
-    the job's units are kept on disk, an output directory's; False for a one-file output, whose
-    windows stay on the GPU until their shot's decode (DIT_WINDOWS_KEPT).
+    decode corrects colours; numz_padding is for tests only (cli.NUMZ_PADDING). An output
+    directory and one file plan alike: a shot's units are off the GPU in both (runtime/units.py).
 
-    The DiT's phase is judged shot by shot, the job's need the largest: a shot's longest window
-    (dit_peak) and what the phase keeps of the shot beside it (dit_kept; _dit_need).
+    The DiT's phase is judged by the larger of two moments, never their sum: the job's longest
+    window (dit_peak) and its longest shot's draw of noise, the shot's latent and noise whole on
+    the GPU before its first window (dit_draw; _dit_need). A block is swapped, or the VAE sent
+    away, for the draw as for a window; a job whose longest shot's draw doesn't fit with every
+    block swapped and the VAE away is refused, as a size that doesn't fit (_floor).
 
     A tile pinned that covers the whole padded frame is no tiling, and is refused, naming 0, the
     untiled pass (DESIGN.md, Pipeline, per shot, step 3), whatever the memory.
@@ -654,7 +669,7 @@ def plan(
     the scratch's allowance planned again around it (DESIGN.md, Memory planner, A plan shapes
     the output a little); one with tiles of which one covers the frame is no plan's, refused
     (check_recorded)."""
-    job = _job(free, target, shots, split, numz_padding, on_disk)
+    job = _job(free, target, shots, split, numz_padding)
     if pins.swap_blocks is not None and pins.swap_blocks > BLOCKS:
         raise PlanError(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {BLOCKS} blocks, so from 0 to {BLOCKS}"
@@ -689,15 +704,15 @@ def fits(
     *,
     split: bool = False,
     numz_padding: bool = False,
-    on_disk: bool = True,
 ) -> str | None:
     """None when every phase of `plan` fits `free` bytes of GPU memory less MARGIN, a VAE pass
-    with its room (VAE_ROOM), the DiT's with what it keeps of each shot (dit_kept), and the plan
-    host_available bytes of system memory (None: not checked), its scratch's allowance as the
-    plan has it, for a job as plan() takes it; else one sentence naming the first phase that
-    doesn't and what it is short of, in GiB. ValueError for a plan with tiles of which one covers
-    the whole padded frame, which plan() never returns (covers)."""
-    job = _job(free, target, shots, split, numz_padding, on_disk)
+    with its room (VAE_ROOM), the DiT's by the larger of its longest window and of its longest
+    shot's draw (dit_draw), and the plan host_available bytes of system memory (None: not
+    checked), its scratch's allowance as the plan has it, for a job as plan() takes it; else one
+    sentence naming the first phase that doesn't and what it is short of, in GiB. ValueError for
+    a plan with tiles of which one covers the whole padded frame, which plan() never returns
+    (covers)."""
+    job = _job(free, target, shots, split, numz_padding)
     return _unfit(job, plan, host_available)
 
 
@@ -756,17 +771,18 @@ def said(
     the joins; the swapped blocks and what stays on the GPU in each phase; the pinned system
     memory; the tiles and their grid, and the room the VAE's passes are held to (VAE_ROOM);
     each phase's predicted peak, without that room, and which bounds the plan, a VAE phase
-    counted with its room (Peaks.bound) and said so; the scratch of the longest tiled shot, what
-    a scratch may take of system memory (Plan.scratch_allowance) and the shots whose scratch goes
-    to its file instead; what was pinned. DESIGN.md's list but for the times, whose lines come
-    with the time estimates. The longest window the job runs is said only where it isn't the
-    cap, one pinned or recorded above it. The system memory is said as a refusal for it says it
-    (_host_hundredths): the pinned copies and the allowance to the nearest hundredth of a GiB,
-    and "in all" their sum with the process's own."""
+    counted with its room (Peaks.bound) and said so, as the DiT's is where its peak is its
+    longest shot's draw of noise, not a window's (dit_draw); the scratch of the longest tiled
+    shot, what a scratch may take of system memory (Plan.scratch_allowance) and the shots whose
+    scratch goes to its file instead; what was pinned. DESIGN.md's list but for the times, whose
+    lines come with the time estimates. The longest window the job runs is said only where it
+    isn't the cap, one pinned or recorded above it. The system memory is said as a refusal for
+    it says it (_host_hundredths): the pinned copies and the allowance to the nearest hundredth
+    of a GiB, and "in all" their sum with the process's own."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
-    job = _job(peaks.free, target, shots, False, numz_padding, True)
+    job = _job(peaks.free, target, shots, False, numz_padding)
     height, width = job.padded
     frames = Counter(shot.frames for shot in shots)
     windows = {count: len(shot_layout(count, plan.window)) for count in frames}
@@ -811,10 +827,10 @@ def said(
         f" {_pass_said(job, plan.decode_tiles)}, each held {_gib(VAE_ROOM)} GiB under the budget"
     )
     names = {"encode": "encode", "dit": "DiT's phase", "decode": "decode"}
-    # What the DiT's phase keeps of a shot beside its window (dit_kept), said where it bounds
-    # the plan: what its peak has over the longest window's own.
+    # The DiT's peak is its longest shot's draw where that is over its longest window's own
+    # (_dit_need), said where the phase bounds the plan.
     own = dit_peak(job.padded, peaks.window, plan.swapped, plan.vae_in_dit)
-    counted = "the shot's own latents counted, " if peaks.dit > own else ""
+    counted = "its longest shot's noise drawn whole, " if peaks.dit > own else ""
     lines.append(
         f"predicted peaks: encode {_gib(peaks.encode)} GiB, DiT {_gib(peaks.dit)} GiB, decode"
         f" {_gib(peaks.decode)} GiB; the {names[peaks.bound]} bounds the plan,"
@@ -869,13 +885,12 @@ def _job(
     shots: Sequence[Shot],
     split: bool,
     numz_padding: bool,
-    on_disk: bool = True,
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
     lengths = sorted({_latents(shot.frames) for shot in shots})
     frames = max(shot.frames for shot in shots)
-    return _Job(free, target, tuple(lengths), frames, split, numz_padding, on_disk)
+    return _Job(free, target, tuple(lengths), frames, split, numz_padding)
 
 
 def _padded(target: tuple[int, int], numz_padding: bool) -> tuple[int, int]:
@@ -902,54 +917,58 @@ def _longest(lengths: tuple[int, ...], cap: int | None) -> int:
     fewer windows over a shot are longer ones (tests/test_planner.py holds it)."""
     if cap is None or cap >= lengths[-1]:
         return lengths[-1]
-    return max(_windows(length, cap)[0] for length in lengths)
+    return max(_split(length, cap) for length in lengths)
 
 
 @cache
-def _windows(length: int, cap: int | None) -> tuple[int, int]:
-    """Of a shot of `length` latents under a cap (None: one window), by its balanced layout
-    (shot.window_layout): its longest window, in latents, and the latents of the windows made
-    before its last one, a latent two of them share counted in both."""
+def _split(length: int, cap: int) -> int:
+    """The longest window, in latents, of a shot of `length` latents under a cap, by its balanced
+    layout (shot.window_layout); its length when the cap holds it whole."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import window_layout
 
-    if cap is None or cap >= length:
-        return length, 0
-    sizes = [end - start for start, end in window_layout(length, cap)]
-    return max(sizes), sum(sizes[:-1])
+    if cap >= length:
+        return length
+    return max(end - start for start, end in window_layout(length, cap))
 
 
-@cache
-def _judged(
-    padded: tuple[int, int], lengths: tuple[int, ...], cap: int | None, on_disk: bool
-) -> tuple[tuple[int, int], ...]:
-    """What the DiT's phase is judged by for shots of `lengths` latents under a cap: (window,
-    bytes), a longest window of some shot, in latents, with the most the phase keeps beside it
-    of a shot that runs it (dit_kept): the shot's latents beyond that window and, units in
-    memory (on_disk False), the windows made before its last one. An upper bound for those: the
-    longest windows come first (shot.window_layout), when fewer are kept."""
-    most: dict[int, int] = {}
-    for length in lengths:
-        window, made = _windows(length, cap)
-        kept = dit_kept(padded, length - window, 0 if on_disk else made)
-        most[window] = max(most.get(window, 0), kept)
-    return tuple(most.items())
+def _draw(job: _Job, swapped: int, vae_in_dit: bool) -> int:
+    """What the GPU holds at the draw of the job's longest shot's noise, in bytes (dit_draw):
+    the job's largest, whatever the cap."""
+    return dit_draw(job.padded, job.lengths[-1], swapped, vae_in_dit)
 
 
 def _dit_need(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> int:
     """The predicted peak of the job's DiT phase under a cap, in bytes, `swapped` blocks swapped
-    and the VAE's weights there or not: the largest over its shots of the shot's longest window
-    (dit_peak) and what the phase keeps of that shot beside it (_judged). Wherever the phase is
-    judged, and what the plan records (_peaks): real memory, unlike a VAE pass's room."""
-    return max(
-        dit_peak(job.padded, window, swapped, vae_in_dit) + kept
-        for window, kept in _judged(job.padded, job.lengths, cap, job.on_disk)
+    and the VAE's weights there or not: the larger of its longest window's peak (dit_peak) and
+    of its longest shot's draw (_draw), never their sum: the shot is whole on the GPU for the
+    draw, before its first window, and nothing of it is there beside a window but the window
+    (shot.sample_windows). Wherever the phase is judged, and what the plan records (_peaks):
+    real memory, unlike a VAE pass's room."""
+    window = dit_peak(job.padded, _longest(job.lengths, cap), swapped, vae_in_dit)
+    return max(window, _draw(job, swapped, vae_in_dit))
+
+
+def _draw_bounds(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> bool:
+    """Whether the job's DiT phase under a cap takes its longest shot's draw, more than its
+    longest window's peak (_dit_need): what a refusal for the phase then names (_draw_said)."""
+    window = dit_peak(job.padded, _longest(job.lengths, cap), swapped, vae_in_dit)
+    return _draw(job, swapped, vae_in_dit) > window
+
+
+def _draw_said(job: _Job) -> str:
+    """The draw of the job's longest shot's noise as a refusal names it, where it is what takes
+    the free VRAM said (_draw_bounds): what is drawn, where and when, and the shot's length."""
+    shot = f"{_count(job.frames, 'frame')} ({_count(job.lengths[-1], 'latent')})"
+    return (
+        f"the noise of the longest shot, {shot}, drawn whole on the GPU beside the shot's latent"
+        " before its first window"
     )
 
 
 def _holds(job: _Job, cap: int | None, swapped: int) -> bool:
-    """Whether the DiT's phase holds the job's windows under a cap, `swapped` blocks swapped and
-    the VAE's weights away: all a window can ask for (_dit_need)."""
+    """Whether the DiT's phase holds the job under a cap, `swapped` blocks swapped and the VAE's
+    weights away: all its windows and its draws can ask for (_dit_need)."""
     return _dit_need(job, cap, swapped, vae_in_dit=False) <= job.budget
 
 
@@ -959,15 +978,16 @@ def _longest_cap(job: _Job, swapped: int) -> int | None:
 
     A film has thousands of shots and windows of hundreds of latents: the caps whose longest
     window is over the budget by its tokens alone are bisected away first (_longest never falls
-    as the cap rises, nor the tokens with it), the window functions and what the phase keeps of
-    each shot then asked from there down."""
+    as the cap rises, nor the tokens with it), the window functions then asked from there down.
+    None at once where the longest shot's draw is over the budget, which no cap changes
+    (_draw)."""
 
     def possible(cap: int) -> bool:
         least = _dit_least(job.padded, _longest(job.lengths, cap), swapped, vae_in_dit=False)
         return least <= job.budget
 
     low, high = job.smallest, job.lengths[-1]
-    if not possible(low):
+    if _draw(job, swapped, vae_in_dit=False) > job.budget or not possible(low):
         return None
     while low < high:
         middle = (low + high + 1) // 2
@@ -981,10 +1001,11 @@ def _longest_cap(job: _Job, swapped: int) -> int | None:
 
 
 def _fewest(job: _Job, cap: int | None) -> tuple[int, bool] | None:
-    """The fewest swapped blocks with which the DiT's phase holds the job's windows under a cap
-    (_dit_need), and whether the VAE's weights stay on the GPU meanwhile: they leave before one
-    more block is swapped. One and two swapped blocks save nothing (dit_peak), so are never
-    chosen. None when every block swapped and the VAE away don't hold them."""
+    """The fewest swapped blocks with which the DiT's phase holds the job under a cap, its
+    windows and its longest shot's draw (_dit_need), and whether the VAE's weights stay on the
+    GPU meanwhile: they leave before one more block is swapped. One and two swapped blocks save
+    nothing (dit_peak, dit_draw), so are never chosen. None when every block swapped and the
+    VAE away don't hold it."""
     for swapped in (0, *range(SLOTS + 1, BLOCKS + 1)):
         for vae_in_dit in (True, False):
             if _dit_need(job, cap, swapped, vae_in_dit) <= job.budget:
@@ -1055,11 +1076,16 @@ def _window(job: _Job, pins: Pins) -> tuple[int, int, bool]:
 
     PROVISIONAL (implementation, 2026-10-10), a choice DESIGN.md doesn't make: of two pins that
     don't fit together, --window is the one refused while some cap fits the blocks pinned,
-    --swap-blocks when none does."""
+    --swap-blocks when none does.
+
+    A --window refused is refused for its window, never for the longest shot's draw: no cap
+    changes the draw (_draw), so that where some cap fits the blocks pinned, the draw fits
+    them."""
     most = BLOCKS if pins.swap_blocks is None else pins.swap_blocks
     longest = _longest_cap(job, most)
     if longest is None:
-        # The floor holds every block swapped: a --swap-blocks that holds no window at all.
+        # The floor holds every block swapped: a --swap-blocks that holds no window at all, or
+        # not the longest shot's draw.
         cap = job.smallest
         whose = "the shortest this job can run"
         if pins.window is not None and _holds(job, pins.window, BLOCKS):
@@ -1079,10 +1105,9 @@ def _window(job: _Job, pins: Pins) -> tuple[int, int, bool]:
             if pins.swap_blocks is None
             else f"--swap-blocks {pins.swap_blocks}"
         )
-        own = _own_said(job, pins.window, most)
         raise PlanError(
             f"--window {pins.window}: its longest window, {_count(latents, 'latent')}, takes"
-            f" {_over(need)} GiB of free VRAM with {blocks}{own}, and the driver reports"
+            f" {_over(need)} GiB of free VRAM with {blocks}, and the driver reports"
             f" {_under(job.free)} GiB free: the longest window that fits is --window"
             f" {_own_cap(job, longest)}"
         )
@@ -1106,25 +1131,21 @@ def _own_cap(job: _Job, cap: int) -> int:
 
 
 def _swap_refused(job: _Job, swapped: int, cap: int | None, whose: str, fewest: int) -> str:
-    """--swap-blocks refused: the fewest blocks that hold the job's windows under a cap, its
-    longest named, the free VRAM they take that of the DiT's phase (_dit_need)."""
+    """--swap-blocks refused: the fewest blocks that hold the job's DiT phase under a cap, the
+    free VRAM said that of the phase with the blocks pinned (_dit_need), and what takes it
+    named: the cap's longest window, or the longest shot's draw where that takes more
+    (_draw_bounds)."""
     latents = _longest(job.lengths, cap)
     need = _dit_need(job, cap, swapped, vae_in_dit=False) + MARGIN
-    own = _own_said(job, cap, swapped)
+    if _draw_bounds(job, cap, swapped, vae_in_dit=False):
+        what = f"{_draw_said(job)},"
+    else:
+        what = f"a window of {_count(latents, 'latent')}, {whose},"
     return (
-        f"--swap-blocks {swapped}: a window of {_count(latents, 'latent')}, {whose}, takes"
-        f" {_over(need)} GiB of free VRAM with {_count(swapped, 'block')} swapped{own}, and the"
-        f" driver reports {_under(job.free)} GiB free: the fewest blocks that hold it are"
-        f" --swap-blocks {fewest}"
+        f"--swap-blocks {swapped}: {what} takes {_over(need)} GiB of free VRAM with"
+        f" {_count(swapped, 'block')} swapped, and the driver reports {_under(job.free)} GiB"
+        f" free: the fewest blocks that hold it are --swap-blocks {fewest}"
     )
-
-
-def _own_said(job: _Job, cap: int | None, swapped: int) -> str:
-    """What a refusal adds after the free VRAM the DiT's phase takes, where that counts what the
-    phase keeps of a shot beside its window (dit_kept); nothing where it keeps nothing."""
-    alone = dit_peak(job.padded, _longest(job.lengths, cap), swapped, vae_in_dit=False)
-    kept = _dit_need(job, cap, swapped, vae_in_dit=False) > alone
-    return ", the shot's own latents counted" if kept else ""
 
 
 def _tile_sizes(padded: tuple[int, int]) -> range:
@@ -1230,9 +1251,9 @@ def _resident(job: _Job, phase: Phase, tiles: Tiles | None, swapped: int) -> int
 def _floor(job: _Job) -> tuple[Phase, int] | None:
     """The phase that takes the most where every phase takes its least, and what it takes there,
     when that is over the budget, no plan then fitting the job (DESIGN.md, Memory planner: a size
-    that doesn't fit is refused, never degraded); else None. The least: the smallest window the
-    job can run, every block of the DiT swapped and the VAE's weights away, with what the phase
-    keeps of each shot beside its window (_dit_need); the encode and the decode each in the pass
+    that doesn't fit is refused, never degraded); else None. The least: the larger of the
+    smallest window the job can run and of its longest shot's draw, every block of the DiT
+    swapped and the VAE's weights away (_dit_need); the encode and the decode each in the pass
     that takes the least, of the job's longest shot (_least_pass), the DiT away, whatever the
     plan swaps: a phase that keeps nothing of it frees its slots too (dit_on_gpu). What a phase
     takes is its peak, and for the encode and the decode their room with it (_vae_need)."""
@@ -1264,19 +1285,21 @@ def _too_large(job: _Job, phase: Phase, least: int) -> str:
     """The floor's refusal (_floor), counted in free VRAM, never in card sizes (DESIGN.md, Memory
     planner): the free VRAM the output size takes, what the driver reports free, and the largest
     output size that fits in it, by its short side, a multiple of 16, the target scaled in
-    proportion and the floor checked there with the same shots. --resolution is named first, and
-    the size as about that: it is the target's scaled, not the source's, which the command line
-    scales, and the two can differ by 2 px (a 1920x1080 source refused at --resolution 600:
-    794x448 here, 796x448 by --resolution 448)."""
+    proportion and the floor checked there with the same shots. Where the DiT's phase is the
+    floor by its longest shot's draw, more than its smallest window's peak (_draw_bounds), the
+    message names the draw in the window's place (_draw_said); the draw takes less of a smaller
+    frame, a byte a padded pixel and a latent (dit_draw), so that the size named is one whose
+    draw fits. --resolution is named first, and the size as about that: it is the target's
+    scaled, not the source's, which the command line scales, and the two can differ by 2 px (a
+    1920x1080 source refused at --resolution 600: 794x448 here, 796x448 by --resolution 448)."""
     height, width = job.output
     if phase == "dit":
         latents = _longest(job.lengths, job.smallest)
-        how = (
-            f"its smallest window, {_count(latents, 'latent')}, with every block of the DiT"
-            " swapped and the VAE off the GPU"
-        )
-        if least > dit_peak(job.padded, latents, BLOCKS, vae_in_dit=False):
-            how += ", the shot's own latents counted"
+        if _draw_bounds(job, job.smallest, BLOCKS, vae_in_dit=False):
+            how = _draw_said(job)
+        else:
+            how = f"its smallest window, {_count(latents, 'latent')}"
+        how += ", with every block of the DiT swapped and the VAE off the GPU"
         room = 0
     else:
         tiled = _tiles_said(_least_pass(job, phase))
@@ -1364,7 +1387,11 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
     counted, as DESIGN.md counts it, for the page cache its mapping works in. Nor is what a
     tiled encode sums beside its scratch counted, its tiles' moments on the CPU
     (tiling.encode_tiled): a byte per pixel of the padded frame and per latent of the shot, a
-    twenty-fourth of the scratch, 2.0 GiB for 1,001 frames at 4K."""
+    twenty-fourth of the scratch, 2.0 GiB for 1,001 frames at 4K. Nor a shot's latent and its
+    noise, which wait in system memory through its windows (shot.sample_windows): as much
+    again, 7.84 GiB for a shot of 1,000 latents at 4K; nor a one-file output's windows, kept
+    there until their shot's decode (units.Units): half a byte, a latent two windows share
+    counted in both."""
     latents = _longest(job.lengths, plan.window)
     return Peaks(
         job.free,
@@ -1417,13 +1444,15 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     peaks = _peaks(job, plan)
     blocks = _count(plan.swapped, "block")
     vae = "" if plan.vae_in_dit else " and the VAE off the GPU"
-    alone = dit_peak(job.padded, peaks.window, plan.swapped, plan.vae_in_dit)
-    own = ", the shot's own latents counted" if peaks.dit > alone else ""
+    # The DiT's phase by what takes its peak: its longest window, or its longest shot's draw.
+    if _draw_bounds(job, plan.window, plan.swapped, plan.vae_in_dit):
+        dit = f"{_draw_said(job)},"
+    else:
+        dit = f"a window of {_count(peaks.window, 'latent')}"
     whats = {
         "encode": f"the encode, {_tiles_said(plan.encode_tiles)}, with"
         f" {_resident_said(plan.resident_encode, plan.swapped)},",
-        "dit": f"the DiT's phase, a window of {_count(peaks.window, 'latent')} with {blocks}"
-        f" swapped{vae}{own},",
+        "dit": f"the DiT's phase, {dit} with {blocks} swapped{vae},",
         "decode": f"the decode, {_tiles_said(plan.decode_tiles)}, with"
         f" {_resident_said(plan.resident_decode, plan.swapped)},",
     }

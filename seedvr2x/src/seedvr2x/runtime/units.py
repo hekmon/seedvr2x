@@ -3,7 +3,11 @@ and each window's DiT output, until the shot is decoded, and its output segment 
 for `split` (DESIGN.md, Colour correction), each shot's input copy, made during its encode.
 
 A shot's windows are only ever taken in order: the shot's latent is kept until its windows are
-all done, and they are kept until its decode."""
+all done, and they are kept until its decode.
+
+A unit is kept as a copy in system memory or in a file, never on the GPU, with its values and its
+memory layout (shot.moved): what the GPU holds mustn't grow with the shot (DESIGN.md, Memory
+planner, Per-phase peaks)."""
 
 import shutil
 from pathlib import Path
@@ -13,7 +17,7 @@ from torch import Tensor
 
 from seedvr2x.media.files import make_directories, partial_path, replace_whole
 from seedvr2x.runtime.manifest import STATE, Manifest
-from seedvr2x.runtime.model import synchronize
+from seedvr2x.runtime.shot import CPU, moved
 
 # A shot's files besides its units (DESIGN.md, Colour correction): the copy of its input frames,
 # an FFV1 gbrp16le file at the input's size, which split's reference is rebuilt from, and its
@@ -25,10 +29,11 @@ CHECKSUMS = "input.crc32"
 class Units:
     """Units kept in memory, by a run that keeps nothing once it stops: the one-file output (-o
     x.mkv), which can't resume until assembly makes it of segments (DESIGN.md, Output). A shot's
-    latent and windows stay on the device, as its steps give them, until its decode, which
-    run.run_job runs as soon as they are done. With `split`, a shot's input copy and the copy's
-    checksums go in a directory of its own under work, beside the output, gone once the shot is
-    decoded; a tiled pass's scratch goes there too (run._scratch)."""
+    latent and windows wait in system memory, copies with the values and the memory layout its
+    steps gave them (shot.moved), as DiskUnits reads them back from its files, until its decode,
+    which run.run_job runs as soon as they are done. With `split`, a shot's input copy and the
+    copy's checksums go in a directory of its own under work, beside the output, gone once the
+    shot is decoded; a tiled pass's scratch goes there too (run._scratch)."""
 
     persistent = False
 
@@ -62,25 +67,34 @@ class Units:
         return len(self._windows.get(shot, ()))
 
     def latent(self, shot: int) -> Tensor | None:
-        """Shot `shot`'s latent, when kept (encode_shot)."""
+        """Shot `shot`'s latent, when kept (encode_shot), in system memory: the one kept itself."""
         return self._latents.get(shot)
 
-    def save_latent(self, shot: int, latent: Tensor) -> None:
-        self._latents[shot] = latent
+    def save_latent(self, shot: int, latent: Tensor) -> Tensor:
+        """Keep shot `shot`'s latent, (T', h, w, 16) as its encode gives it, in system memory
+        (shot.encode_shot). Returns the one kept here, or the one written for a resume: itself, or
+        its copy in system memory were it given on the GPU, values and memory layout kept
+        (shot.moved), so that a run samples the shot's windows from it (shot.sample_windows) and
+        holds no second copy of a latent, nor reads back a file it wrote."""
+        kept = moved(latent, CPU, f"shot {shot}'s latent")
+        self._latents[shot] = kept
+        return kept
 
     def save_window(self, shot: int, window: int, sampled: Tensor) -> None:
-        """Keep window `window` of shot `shot`, the windows before it being kept already."""
+        """Keep window `window` of shot `shot`, (t, h, w, 16) as the DiT gives it, wherever it
+        is, the windows before it being kept already: its copy on the CPU, values and memory
+        layout kept (shot.moved)."""
         kept = self._windows.setdefault(shot, [])
         if window != len(kept):
             raise ValueError(f"shot {shot}: window {window} after {len(kept)}")
-        kept.append(sampled)
+        kept.append(moved(sampled, CPU, f"shot {shot}'s window {window}"))
 
     def drop_latent(self, shot: int) -> None:
         """Give up shot `shot`'s latent: its windows are all done."""
         self._latents.pop(shot, None)
 
     def take_windows(self, shot: int) -> list[Tensor]:
-        """Shot `shot`'s windows, in order, for its decode, given up here."""
+        """Shot `shot`'s windows, in order, on the CPU, for its decode, given up here."""
         return self._windows.pop(shot)
 
     def finished(self, segment: int) -> bool:
@@ -127,9 +141,10 @@ class DiskUnits(Units):
             return None
         return _load(self.shot_directory(shot) / "latent.pt")
 
-    def save_latent(self, shot: int, latent: Tensor) -> None:
-        _save(latent, self.shot_directory(shot) / "latent.pt")
+    def save_latent(self, shot: int, latent: Tensor) -> Tensor:
+        kept = _save(latent, self.shot_directory(shot) / "latent.pt")
         self.manifest.shot_encoded(shot)
+        return kept
 
     def save_window(self, shot: int, window: int, sampled: Tensor) -> None:
         _save(sampled, self.shot_directory(shot) / f"window_{window:04d}.pt")
@@ -166,15 +181,14 @@ def size(path: Path) -> int:
     return path.stat().st_size
 
 
-def _save(tensor: Tensor, path: Path) -> None:
-    synchronize(tensor.device)
-    copy = tensor.to("cpu")
-    if copy.stride() != tensor.stride():
-        raise RuntimeError(f"{path}: a CPU copy of {tuple(tensor.stride())} strides changes them")
+def _save(tensor: Tensor, path: Path) -> Tensor:
+    """Write tensor's copy on the CPU (shot.moved) whole at path, and give that copy."""
+    copy = moved(tensor, CPU, str(path))
     make_directories(path.parent)
     partial = partial_path(path)
     torch.save(copy, partial)
     replace_whole(partial, path)
+    return copy
 
 
 def _load(path: Path) -> Tensor:

@@ -18,6 +18,7 @@ import re
 import signal
 import subprocess
 import sys
+import weakref
 import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import replace
@@ -769,8 +770,8 @@ def test_plan_recorded_and_phases_entered(
         "free": FREE,
         "budget": FREE - planner.MARGIN,
         "encode_peak": planner.encode_peak(PADDED, latents=6),
-        # A window of the 6-latent shot, and the latent and the noise of its 2 other latents.
-        "dit_peak": planner.dit_peak(PADDED, 4) + planner.dit_kept(PADDED, 2),
+        # A window of the 6-latent shot, over the shot's draw (planner.dit_draw).
+        "dit_peak": planner.dit_peak(PADDED, 4),
         "decode_peak": planner.decode_peak(PADDED, TARGET, latents=6),
         "bound": "encode",
         "host": planner.HOST_RESIDENT,
@@ -1345,21 +1346,20 @@ def test_size_and_host_memory_refused(
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
 
 
-def test_one_file_plans_with_its_windows_kept(
+def test_one_file_plans_as_a_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
     # A .mkv path's job keeps its units on disk, in its work directory, as an output
-    # directory's does (cli._output): its plan is made as a directory's, no window counted on
-    # the GPU (planner.plan's on_disk True, where units.Units' in-memory ones, which no run of
-    # the command line's keeps any more, were planned with False), --plan's as its run's. JOB's
-    # last shot, 6 latents in two windows of 4: the DiT's phase keeps the latent and the noise
-    # of its 2 other latents beside a window.
-    asked: list[bool] = []
+    # directory's does (cli._output; units.Units' in-memory ones no run of the command line's
+    # keeps any more): nothing of a shot waits on the GPU either way, and the two plan alike,
+    # --plan's as its run's. JOB's last shot, 6 latents in two windows of 4: the DiT's phase
+    # takes a window's peak, the shot's draw being under it.
+    asked: list[set[str]] = []
     peaks: list[int] = []
     plan = planner.plan
 
     def planned(*arguments: Any, **options: Any) -> Any:
-        asked.append(options["on_disk"])
+        asked.append(set(options))
         made = plan(*arguments, **options)
         peaks.append(made[1].dit)
         return made
@@ -1370,10 +1370,70 @@ def test_one_file_plans_with_its_windows_kept(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     listed = str(tmp_path / "plan.txt")
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
-    assert asked == [True, True, True]
+    assert asked == [{"split", "numz_padding", "recorded"}] * 3
     window = planner.dit_peak(PADDED, 4)
-    assert peaks == [window + planner.dit_kept(PADDED, 2)] * 3
-    assert planner.dit_kept(PADDED, 2, 4) > planner.dit_kept(PADDED, 2) > 0
+    assert peaks == [window] * 3 and window > planner.dit_draw(PADDED, 6)
+
+
+@pytest.mark.usefixtures("stand_in")
+@pytest.mark.parametrize("output", ["one.mkv", "out"])
+def test_a_run_keeps_a_shot_as_its_units_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output: str
+) -> None:
+    # Between two of a shot's units a run holds the shot as its units' copies alone (run._sample;
+    # DESIGN.md, Memory planner, Per-phase peaks), for a .mkv path as for a directory. The latent
+    # its windows are sampled from is the copy the units kept or wrote, no other, nor the file
+    # read back; and a window's output is let go of once it is kept, before the next window is
+    # asked for. The stand-in's device is the CPU, where a unit's copy is the tensor itself: the
+    # helper that copies them (shot.moved) is replaced, for the units, by one that makes another
+    # tensor, as it does from a GPU.
+    from seedvr2x.runtime import run, units
+
+    copies: list[torch.Tensor] = []
+    loaded: list[str] = []
+    from_a_copy: list[bool] = []
+    outputs: list[weakref.ref[torch.Tensor]] = []
+    alive: list[bool] = []
+    moved, load = units.moved, units._load  # pyright: ignore[reportPrivateUsage]
+
+    def copied(tensor: torch.Tensor, device: torch.device, what: str) -> torch.Tensor:
+        copies.append(moved(tensor, device, what).clone())
+        return copies[-1]
+
+    def loading(path: Path) -> torch.Tensor:
+        loaded.append(path.name)
+        return load(path)
+
+    def windows(
+        models: object, latent: torch.Tensor, layout: list[tuple[int, int]], seed: int, start: int
+    ) -> Iterator[torch.Tensor]:
+        from_a_copy.append(any(latent is copy for copy in copies))
+        made = stand_in_windows(models, latent, layout, seed, start)
+        while True:
+            # Asked for a window: what was given before is the run's no more.
+            alive.append(any(output() is not None for output in outputs))
+            given = [window for window in [next(made, None)] if window is not None]
+            if not given:
+                return
+            outputs.append(weakref.ref(given[0]))
+            yield given.pop()
+
+    monkeypatch.setattr(units, "moved", copied)
+    monkeypatch.setattr(units, "_load", loading)
+    monkeypatch.setattr(run, "sample_windows", windows)
+    source_path = job(tmp_path, monkeypatch)
+    options = JOB[:4] if output == "one.mkv" else JOB
+    assert upscale(tmp_path, source_path, output, *options) == 0
+    # Three shots, four windows, the last shot's two: each shot's latent copied once, and its
+    # windows sampled from that copy; each window copied once.
+    assert from_a_copy == [True] * 3 and len(copies) == 3 + 4
+    assert len(outputs) == 4 and alive == [False] * 4
+    assert all(given() is None for given in outputs)
+    # The decode reads each window back, and no latent in a run that encoded it: a .mkv path's
+    # job as a directory's, its units in its work directory.
+    assert loaded == [f"window_{index:04d}.pt" for index in (0, 0, 0, 1)]
+    frames = tmp_path / "one.mkv" if output == "one.mkv" else tmp_path / "out" / "seg_000001.mkv"
+    assert indexes(frames) == list(range(25) if output == "one.mkv" else range(4, 25))
 
 
 def test_free_memory_read_once(

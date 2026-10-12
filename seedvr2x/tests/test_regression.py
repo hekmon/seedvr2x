@@ -58,10 +58,12 @@ run would find them there: at the pinned revision, or downloaded at another (run
 
 Every case pins the passes its reference was made with, untiled or in its tiles, but one,
 test_milestone1_unpinned: numz-7b with no tile pinned, so that a bit comparison goes through the
-planner's own choice of passes (DESIGN.md, Memory planner, Choices, 3). The plan's line in its
-log must say both passes untiled, as numz ran them, and the master and frames are numz's bit for
-bit. On a card whose plan tiles a pass it is skipped, saying that line: a card that can't run
-untiled can't make numz's untiled master (the untiled decode of these frames, padded to
+planner's own choice of passes (DESIGN.md, Memory planner, Choices, 3). The plan is made first,
+by the same command with --plan, which runs the first pass and plans, loading no model: its line
+of the passes must say both untiled, as numz ran them; the run then takes that plan, and the
+master and frames are numz's bit for bit. On a card whose plan tiles a pass, or where the plan is
+refused, the case is skipped before any run, saying that line or the refusal: a card that can't
+run untiled can't make numz's untiled master (the untiled decode of these frames, padded to
 1920x1088, takes 37.09 GiB of free VRAM by the planner, the DiT off the GPU, its room and the
 margin counted).
 
@@ -116,7 +118,9 @@ them on the CPU and divides the sums on the GPU, as runtime/tiling.py does:
 Each run's log must say those grids. A case whose reference is absent is skipped, naming the file.
 
 The run goes through the CLI in a process of its own, as a user's would: the allocator is set
-before torch is imported, which a test process importing torch first wouldn't do.
+before torch is imported, which a test process importing torch first wouldn't do. And this
+process creates no CUDA context: its memory would be taken from the free memory a run reads for
+its plan (cli._free_memory).
 """
 
 import os
@@ -162,7 +166,7 @@ def models_present(*names: str) -> None:
 TILE_PINS = ("--encode-tile", "--decode-tile")
 
 
-def upscaled(
+def command(
     tmp_path: Path,
     source: Path,
     resolution: int,
@@ -170,13 +174,13 @@ def upscaled(
     *more: str,
     numz_padding: bool,
     pin_untiled: bool = True,
-) -> str:
-    """Run seedvr2x on source at resolution with the DiT and VAE files of models in
+) -> tuple[list[str], dict[str, str]]:
+    """seedvr2x's command line on source at resolution with the DiT and VAE files of models in
     SEEDVR2X_MODEL_DIR, or with None, its default models from Hugging Face's cache, offline
     (HF_HUB_OFFLINE=1), in numz's padding or in its own, with the options of `more` besides, to
-    tmp_path's ours.mkv and frames/ (same_bits). A pass that `more` doesn't pin is pinned
-    untiled, unless pin_untiled is False, which leaves it to the planner. Returns the run's
-    log."""
+    tmp_path's ours.mkv and frames/ (same_bits); and the environment to run it in. A pass that
+    `more` doesn't pin is pinned untiled, unless pin_untiled is False, which leaves it to the
+    planner."""
     master, frames = tmp_path / "ours.mkv", tmp_path / "frames"
     environment = {name: value for name, value in os.environ.items() if name != NUMZ_PADDING}
     if numz_padding:
@@ -187,42 +191,79 @@ def upscaled(
     else:
         assert MODELS is not None
         options = ["--model-dir", MODELS, "--dit-model", models[0], "--vae-model", models[1]]
-    run = subprocess.run(
-        [
-            *(sys.executable, "-m", "seedvr2x", str(source), "-o", str(master), *options),
-            *("--resolution", str(resolution), "--seed", "42", "--dump-frames", str(frames)),
-            # The shots detected, and none found: at the default 0.3, the input is cut at 42 and
-            # 44, 3 shots where numz ran one batch (the module's docstring).
-            *("--cut-threshold", "0.5"),
-            # numz's output milestone 1 holds to, without its lab (StableSR's, not vendored).
-            *("--color-correction", "none"),
-            # numz.mkv's format, ffv1_out.py's default: compare.py reads both masters as stored.
-            *("--format", "gbrp16le"),
-            # The passes the reference was made with, pinned: untiled unless `more` pins tiles,
-            # so that a card too small for them refuses the job (DESIGN.md, Memory planner,
-            # Pins) where the planner would tile what numz ran untiled, bits that aren't its.
-            # None pinned for the case that leaves its passes to the planner, and looks at what
-            # it chose (test_milestone1_unpinned).
-            *(
-                pin
-                for option in TILE_PINS
-                if pin_untiled and option not in more
-                for pin in (option, "0")
-            ),
-            *more,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=environment,
+    arguments = [
+        *(sys.executable, "-m", "seedvr2x", str(source), "-o", str(master), *options),
+        *("--resolution", str(resolution), "--seed", "42", "--dump-frames", str(frames)),
+        # The shots detected, and none found: at the default 0.3, the input is cut at 42 and
+        # 44, 3 shots where numz ran one batch (the module's docstring).
+        *("--cut-threshold", "0.5"),
+        # numz's output milestone 1 holds to, without its lab (StableSR's, not vendored).
+        *("--color-correction", "none"),
+        # numz.mkv's format, ffv1_out.py's default: compare.py reads both masters as stored.
+        *("--format", "gbrp16le"),
+        # The passes the reference was made with, pinned: untiled unless `more` pins tiles, so
+        # that a card too small for them refuses the job (DESIGN.md, Memory planner, Pins)
+        # where the planner would tile what numz ran untiled, bits that aren't its. None pinned
+        # for the case that leaves its passes to the planner, and looks at what it chose
+        # (test_milestone1_unpinned).
+        *(
+            pin
+            for option in TILE_PINS
+            if pin_untiled and option not in more
+            for pin in (option, "0")
+        ),
+        *more,
+    ]
+    return arguments, environment
+
+
+def upscaled(
+    tmp_path: Path,
+    source: Path,
+    resolution: int,
+    models: tuple[str, str] | None,
+    *more: str,
+    numz_padding: bool,
+    pin_untiled: bool = True,
+) -> str:
+    """Run seedvr2x as command has it, to tmp_path's ours.mkv and frames/ (same_bits). Returns
+    the run's log."""
+    arguments, environment = command(
+        *(tmp_path, source, resolution, models, *more),
+        numz_padding=numz_padding,
+        pin_untiled=pin_untiled,
     )
+    run = subprocess.run(arguments, capture_output=True, text=True, check=False, env=environment)
     assert run.returncode == 0, run.stderr[-3000:]
-    # The shot detector ran in the first pass, on the GPU, and gave its memory back; no cut at
-    # 0.5, the input one shot, as numz's one batch (the module's docstring).
-    assert "the shot detector scored" in run.stderr, run.stderr[-3000:]
-    assert "shot detector: VRAM peak" in run.stderr, run.stderr[-3000:]
-    assert "1 shot: 0 cuts detected at 0.5" in run.stderr, run.stderr[-3000:]
+    detected(run.stderr)
     return run.stderr
+
+
+def detected(log: str) -> None:
+    """A run's first pass, by its log: the shot detector ran, on the GPU, and gave its memory
+    back; no cut at 0.5, the input one shot, as numz's one batch (the module's docstring)."""
+    assert "the shot detector scored" in log, log[-3000:]
+    assert "shot detector: VRAM peak" in log, log[-3000:]
+    assert "1 shot: 0 cuts detected at 0.5" in log, log[-3000:]
+
+
+def plan_lines(log: str) -> list[str]:
+    """The plan's lines in a run's log, as planner.said gives them, without their "plan: "."""
+    return [line.split("plan: ", 1)[1] for line in log.splitlines() if "plan: " in line]
+
+
+def choices(lines: list[str]) -> list[str]:
+    """A plan's lines (plan_lines) without what follows the free memory read that time: the
+    card's line, the first, and how far under the budget the plan is, the end of the peaks'
+    line. What is left is the plan: its windows, where the weights are, its passes, its
+    predicted peaks and its pins."""
+    peaks = "predicted peaks: "
+    return [line.split(";", 1)[0] if line.startswith(peaks) else line for line in lines[1:]]
+
+
+# What every refusal of the planner's for the memory a job takes says (planner.PlanError): the
+# free VRAM it takes, or the system memory.
+REFUSED = (" GiB of free VRAM", " GiB of system memory")
 
 
 def same_bits(tmp_path: Path, reference: Path) -> None:
@@ -292,24 +333,48 @@ def test_milestone1_bit_identical(tmp_path: Path, dit: str, vae: str, reference:
 
 def test_milestone1_unpinned(tmp_path: Path) -> None:
     # numz-7b with no tile pinned: the passes are the planner's own choice, and the bits go
-    # through it. The plan's line of its passes (planner.said) must say both untiled, as numz
-    # ran them, and nothing pinned; on a card whose plan tiles a pass, which can't make numz's
-    # untiled master, the case is skipped, saying that line.
+    # through it. Decided before any run, by the same command with --plan: the first pass and
+    # the plan, no model loaded, its cut list the one file written (cli.py). A card where the
+    # plan is refused, or tiles a pass, can't make numz's untiled master: the case is skipped,
+    # saying the refusal, or the plan's line of its passes (planner.said). Else that line says
+    # both untiled, as numz ran them, and nothing is pinned; the run then takes the same plan,
+    # and its bits are numz's.
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
     m1 = Path(REFERENCE) / "m1"
-    models = (NUMZ_DIT, NUMZ_VAE)
-    log = upscaled(
-        tmp_path, m1 / "input_rgb.mkv", 1080, models, numz_padding=True, pin_untiled=False
+    job = (tmp_path, m1 / "input_rgb.mkv", 1080, (NUMZ_DIT, NUMZ_VAE))
+    arguments, environment = command(*job, numz_padding=True, pin_untiled=False)
+    listed = tmp_path / "cuts.txt"
+    plan = subprocess.run(
+        [*arguments, "--plan", str(listed)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
     )
-    said = [line.split("plan: ", 1)[1] for line in log.splitlines() if "plan: " in line]
-    passes = [line for line in said if line.startswith("encode ")]
-    assert len(passes) == 1 and "nothing pinned" in said, said
+    # A plan refused: exit status 1, the refusal the log's error, after the logger's name
+    # (cli._run). Any other failure fails the case.
+    logged = [line.split(" ERROR ", 1)[1] for line in plan.stderr.splitlines() if " ERROR " in line]
+    errors = [line.split(": ", 1)[-1] for line in logged]
+    refusals = [error for error in errors if any(what in error for what in REFUSED)]
+    if plan.returncode == 1 and refusals:
+        pytest.skip(
+            "the plan is refused on this card, which can't make numz's untiled master:"
+            f" {refusals[0]}"
+        )
+    assert plan.returncode == 0, plan.stderr[-3000:]
+    detected(plan.stderr)
+    planned = plan_lines(plan.stderr)
+    passes = [line for line in planned if line.startswith("encode ")]
+    assert len(passes) == 1 and "nothing pinned" in planned, planned
     if "in tiles of" in passes[0]:
         pytest.skip(
             f"the plan tiles a pass on this card, and numz's master is untiled: plan: {passes[0]}"
         )
-    assert passes[0].startswith("encode untiled, decode untiled, "), said
+    assert passes[0].startswith("encode untiled, decode untiled, "), planned
+    assert listed.is_file() and not (tmp_path / "ours.mkv").exists()
+    log = upscaled(*job, numz_padding=True, pin_untiled=False)
+    assert choices(plan_lines(log)) == choices(planned), (plan_lines(log), planned)
     same_bits(tmp_path, m1 / "numz")
 
 

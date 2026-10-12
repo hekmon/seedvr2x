@@ -703,14 +703,11 @@ def _run(args: argparse.Namespace) -> int:
             # Less what a driver that gives memory the card doesn't have is held back from
             # (runtime/memory.py): all of it elsewhere.
             free = memory.usable(_free_memory(identity.device))
-            # A one-file output keeps its units in memory, a shot's windows on the GPU until
-            # its decode, which the DiT's phase is judged with (planner.DIT_WINDOWS_KEPT).
             plan, peaks = planner.plan(
                 *(free, target, shots, pins, _host_available()),
                 split=split,
                 numz_padding=numz_padding,
                 recorded=kept_plan,
-                on_disk=directory is not None,
             )
             card = torch.cuda.get_device_name(identity.device)
             said = planner.said(plan, peaks, card, target, shots, pins, numz_padding=numz_padding)
@@ -1590,10 +1587,10 @@ def _free_memory(device: "torch.device") -> int:
     allocation in place (research/docs/planner-limits.md, The margin over free memory;
     vram_cap.py allocates a tensor and never empties the cache). The freed tensor left the two
     kinds of run 160 MiB apart, a run with a cut list planning on memory its first allocation
-    then takes. With the tensor held, a run reads after its shot detector 94.24 GiB on the 96 GB
-    card, and N - 1.46 on a card emulated at N GB (2026-10-11).
+    then takes. With the tensor held and no more, a run read after its shot detector 94.24 GiB
+    on the 96 GB card, and N - 1.46 on a card emulated at N GB (2026-10-11).
 
-    The tensor alone still leaves the two kinds of run apart: on a card emulated at 24 GB, a new
+    The tensor alone still left the two kinds of run apart: on a card emulated at 24 GB, a new
     job, whose shot detector ran in the first pass, read 22.54 GiB free, and a resume of it, its
     record trusted and no detector built, 22.56 (2026-10-11). The 0.02 GiB are what the
     detector's run leaves loaded in the process, the libraries of its convolutions and of its
@@ -1603,8 +1600,11 @@ def _free_memory(device: "torch.device") -> int:
     detector computes, and their results are held with the tensor while the driver is read. A
     run without a detector has then loaded what a run with one has, which the models' own load
     brings anyway. On the CPU, the device of the tests' stand-in, they run and load nothing.
-    PROVISIONAL (implementation, 2026-10-11): the warm-up was written without a GPU; that a new
-    job and its resume then read the same figure is still to be measured on the card."""
+
+    With that warm-up, as this reads (measured 2026-10-11): 94.21 GiB on the 96 GB card
+    (101,159,469,056 bytes), and N - 1.49 on a card emulated at N GB (24,168,824,832 bytes at
+    24), the same to the byte for a new job, whose shot detector ran, for the same command
+    again, its record trusted and no detector built, and for a job given a cut list."""
     import torch
 
     first = torch.empty(1, device=device)

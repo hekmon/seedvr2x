@@ -157,7 +157,13 @@ def _sample(
     """Shot `index`'s encode and windows, those not kept yet; with copies, the frames the encode
     reads copied, the copy and its checksums whole before the latent is recorded, so recorded
     with it, and the copy of a shot encoded already made again if it or its checksums are
-    missing. numz_padding as run_job takes it."""
+    missing. numz_padding as run_job takes it.
+
+    Between two of the shot's units the GPU holds nothing of the shot: its latent and each
+    window's output wait in system memory or in their files (units.Units), and its noise in
+    system memory with the latent (shot.sample_windows). A unit's logged VRAM peak is then its own;
+    the first window a run makes of a shot holds the noise's draw too, the latent and the noise
+    whole on the GPU for that moment."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
     layout = shot_layout(shot.frames, plan.window)
@@ -195,7 +201,9 @@ def _sample(
                     allowance=plan.scratch_allowance,
                 )
         finite(latent, f"{name}'s encode")
-        units.save_latent(index, latent)
+        # In system memory, as its encode gives it: the one the units keep or wrote, which the
+        # windows are sampled from, as a resumed run samples them from the one read back.
+        latent = units.save_latent(index, latent)
         logger.info(
             "%s, frames %d to %d (%d), seed %d: encoded in %s",
             name,
@@ -205,8 +213,9 @@ def _sample(
             shot.seed(seed),
             _spent(models, started),
         )
-    else:
-        latent = latent.to(models.device)
+    # The latent is in system memory, the one the units keep or read back: it goes to the GPU for
+    # the noise's draw alone, with the first window made here, once the DiT's phase is entered
+    # (shot.sample_windows).
     sampled = sample_windows(models, latent, layout, shot.seed(seed), done)
     for number in range(done, len(layout)):
         _begin(stop, f"{name}'s window {number + 1}/{len(layout)}", None)
@@ -226,6 +235,9 @@ def _sample(
             end - 1,
             _spent(models, started),
         )
+        # Kept on the CPU or in its file (units.Units.save_window): the output leaves the GPU
+        # before the next window runs, so that a window's peak is its own.
+        del output
     del sampled, latent
     units.drop_latent(index)
 

@@ -5,16 +5,16 @@ The shot's frames are read as the VAE encodes them, in its slices of 4 frames, a
 encoded once. The DiT runs on windows of at most `window` latents, one window per call,
 consecutive windows sharing SHARED latents; the shared latents are mixed with cosine weights, and
 the whole shot is decoded in one stream, its frames written as they come. The noise is drawn once
-for the shot and sliced per window. Every step keeps numz's order and dtypes
-(src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives numz's one-batch
-output, bit for bit, in numz's padding (milestone 1); in seedvr2x's (DESIGN.md, Pipeline step 0),
-numz's patched to pad alike (research/scripts/numerics_patch.py, NUM_PAD=reflect>=8+black+16).
-Only the latents are ever whole in memory, unless a pass is tiled, and in system memory: on the
-device, the VAE's passes hold a slice's at a time, whatever the shot's length (DESIGN.md, Memory
-planner). Outside the VAE's passes, two things on the device still grow with the shot: the shot's
-latent and its noise, whole there through the DiT's windows (sample_windows); and, with a
-one-file output, the windows' outputs, which units kept in memory (runtime/units.py) leave on
-the device until the shot's decode.
+for the shot, on the device, and sliced per window: it waits in system memory with the latent
+between two windows, each window's slices sent to the device for its pass, so that the DiT's
+phase holds nothing of the shot there beside the window it runs. Every step keeps numz's order
+and dtypes (src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives
+numz's one-batch output, bit for bit, in numz's padding (milestone 1); in seedvr2x's (DESIGN.md,
+Pipeline step 0), numz's patched to pad alike (research/scripts/numerics_patch.py,
+NUM_PAD=reflect>=8+black+16). Only the latents and their noise are ever whole in memory, unless
+a pass is tiled, and in system memory: on the device, the VAE's passes hold a slice's at a time
+and the DiT's a window's, whatever the shot's length, but for the noise's draw, the shot's latent
+and its noise whole there for that moment (sample_windows; DESIGN.md, Memory planner).
 
 A tiled pass can't stream (runtime/tiling.py; DESIGN.md, Pipeline steps 1 and 3): each tile runs
 over the whole shot, so a tiled encode keeps the shot's transformed input, and a tiled decode
@@ -33,6 +33,7 @@ against its own frames of the reference, built from the shot's input copy throug
 transform, in float32 (reference_inputs), then written: no second pass, no buffer.
 """
 
+import logging
 import math
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
@@ -52,6 +53,11 @@ from seedvr2x.runtime import colour, model, tiling
 from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, SHARED, output_size
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
 from seedvr2x.runtime.plan import Tiles
+
+logger = logging.getLogger(__name__)
+
+GIB = 1024**3
+CPU = torch.device("cpu")
 
 # A shot's input copy read back: gbrp16le to gbrp16le, which zscale passes through unchanged.
 COPY_READ = Conversion("gbrp16le", "gbr", "full", "left")
@@ -93,6 +99,27 @@ def finite(tensor: Tensor, what: str) -> None:
     if not bool(torch.isfinite(tensor).all()):
         bad = int((~torch.isfinite(tensor)).sum())
         raise NonFinite(f"{what}: {bad} of its {tensor.numel()} values NaN or inf")
+
+
+def moved(tensor: Tensor, device: torch.device, what: str) -> Tensor:
+    """tensor on device with its values and its memory layout, its strides: itself when it is
+    there already, else a copy. The noise drawn from a latent follows the latent's layout
+    (sample_windows), and the decode is fed the windows as the DiT gave them, so neither changes
+    layout on its way to system memory or back (runtime/units.py). torch keeps the strides of a
+    tensor that is dense, as an encode's latent and a window's output are, and lays the copy of
+    any other out anew, dense in the same order of dimensions (a slice of the shot's latent
+    along time): RuntimeError then, naming `what`.
+
+    The tensor's device is polled first (model.synchronize), so that a Ctrl-C is answered while
+    it finishes what the copy waits for."""
+    model.synchronize(tensor.device)
+    copy = tensor.to(device)
+    if copy.stride() != tensor.stride():
+        raise RuntimeError(
+            f"{what}: its copy on {device} has strides {tuple(copy.stride())}, not its"
+            f" {tuple(tensor.stride())}"
+        )
+    return copy
 
 
 def window_layout(latents: int, window: int, shared: int = SHARED) -> list[tuple[int, int]]:
@@ -293,27 +320,80 @@ def _transformed(
     )
 
 
-@torch.no_grad()
 def sample_windows(
     models: Models, latent: Tensor, layout: Sequence[tuple[int, int]], seed: int, start: int = 0
 ) -> Iterator[Tensor]:
     """The DiT's output for each window of layout from window `start` on, in order, each (t, h, w,
-    16) on the device: one Euler step per window, from the shot's latent (encode_shot), which
-    comes in system memory, from its encode or from a file (units), or on the device.
+    16) on the device: one Euler step per window, from the shot's latent, (T', h, w, 16) in the
+    memory layout its encode gave it (encode_shot): in system memory, as its encode gives it and
+    the units keep it (units.Units.save_latent, units.Units.latent), or on the device.
 
-    The noise is drawn once for the shot, on the latent's layout as numz draws it for a batch
-    (generation_phases.py:663-680), and sliced per window. Nothing else draws, so a window's
-    noise is the same whether the windows before it ran in this process or in an earlier one: a
-    resumed shot draws it again, from a latent of the same layout."""
-    # On the device before the draw, in its own layout: numz draws on its latent there, and the
-    # CPU's generator gives other numbers than CUDA's.
-    latent = latent.to(models.device)
+    The noise is drawn once for the shot, when the first window is asked for, on the device and
+    on the latent's layout, as numz draws it for a batch (generation_phases.py:663-680): its
+    values follow the device, the dtype, the shape and the strides (_drawn). Nothing else draws,
+    so a window's noise is the same whether the windows before it ran in this process or in an
+    earlier one: a resumed shot draws it again, from a latent of the same layout.
+
+    The noise and the latent then wait on the CPU, and each window's slices of them go to the
+    device for its pass alone: the device holds the shot whole at the draw only, and beside a
+    window nothing of the shot but that window (DESIGN.md, Memory planner, Per-phase peaks). The
+    latent in system memory is the one given when it is given there, no copy being made; and no
+    output is kept here once it is given. So torch.no_grad is on the steps that compute
+    (_drawn, _window), not on this generator: decorating a generator, it keeps the value last
+    yielded bound while the next one is computed (torch/utils/_contextlib.py, _wrap_generator),
+    a window's output on the device through the next window's pass.
+
+    A slice sent to the device is laid out there on its own, dense, without the strides a
+    slice of the shot taken on the device would have; a one-window shot's, the whole shot, has
+    the shot's. That shapes no bit: the vendored code reads both slices by value alone before
+    anything is computed, the noise copied into a new (L, 16) tensor (na.flatten,
+    vendor/models/dit_3b/na.py:102, called at vendor/core/infer.py:356) and the latent into the
+    condition's, new too (vendor/core/infer.py:53 and 72, or 57 for a window of one latent),
+    and draws nothing."""
     if layout[-1][1] != latent.shape[0]:
         raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
-    model.set_seed(seed)
-    noise = torch.randn_like(latent, dtype=COMPUTE_DTYPE)
+    noise, latent = _drawn(models, latent, seed)
     for s, e in layout[start:]:
-        yield model.sample(models, noise[s:e], model.condition(models, noise[s:e], latent[s:e]))
+        yield _window(models, noise[s:e], latent[s:e])
+
+
+@torch.no_grad()
+def _drawn(models: Models, latent: Tensor, seed: int) -> tuple[Tensor, Tensor]:
+    """A shot's noise, drawn from seed for its whole latent, and that latent: both on the CPU,
+    (T', h, w, 16) in the latent's memory layout (moved), the noise in COMPUTE_DTYPE; the
+    latent itself when it is given there.
+
+    The draw is torch.randn_like of the latent on the device: the generator fills the tensor in
+    memory order, so that the values follow the latent's strides as well as its shape, and the
+    device's generator isn't the CPU's. A latent given on the CPU is sent to the device for it,
+    strides kept (moved). Both copies on the device are given up when this returns.
+
+    With -v, the draw is logged, on a GPU: the device then holds the latent and the noise whole
+    beside the weights of the DiT's phase, the moment the planner bounds beside a window's peak
+    (planner.dit_draw). The peak read is the unit's so far, which the run reset when it began
+    (run._started)."""
+    device = models.device
+    there = moved(latent, device, "the shot's latent")
+    model.set_seed(seed)
+    noise = torch.randn_like(there, dtype=COMPUTE_DTYPE)
+    if device.type == "cuda":
+        logger.debug(
+            "noise drawn for the shot's %d latents: %.3f GiB allocated on the GPU, its latent and"
+            " its noise there; the unit's peak so far %.3f GiB",
+            latent.shape[0],
+            torch.cuda.memory_allocated(device) / GIB,
+            torch.cuda.max_memory_allocated(device) / GIB,
+        )
+    return moved(noise, CPU, "the shot's noise"), moved(latent, CPU, "the shot's latent")
+
+
+@torch.no_grad()
+def _window(models: Models, noise: Tensor, latent: Tensor) -> Tensor:
+    """The DiT's output for one window, (t, h, w, 16) on the device, from the window's slices of
+    its shot's noise and latent, on the CPU: sent to the device for the pass, where nothing of
+    them is left when this returns but the output."""
+    noise, latent = noise.to(models.device), latent.to(models.device)
+    return model.sample(models, noise, model.condition(models, noise, latent))
 
 
 def merge_windows(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:

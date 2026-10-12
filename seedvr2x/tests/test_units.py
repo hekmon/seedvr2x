@@ -1,11 +1,13 @@
 """The resumable units (DESIGN.md, Pause and resume), on the CPU: kept on disk with their values and
 memory layout, the noise drawn again from a latent read back, windows resumed where they stopped,
 the manifest recording each unit once its file is whole, and what a finished segment kept
-removed."""
+removed; kept in memory, for a one-file output, as copies on the CPU alike; and the copy both
+make, its layout kept or refused."""
 
 import json
 import os
 import pickle
+import re
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,11 +18,11 @@ import torch
 from torch import Tensor
 
 from seedvr2x.media.source import Source
-from seedvr2x.runtime import model
+from seedvr2x.runtime import model, units
 from seedvr2x.runtime.job import OutputSegment, Shot
 from seedvr2x.runtime.manifest import Manifest
 from seedvr2x.runtime.plan import Plan
-from seedvr2x.runtime.shot import sample_windows, shot_layout
+from seedvr2x.runtime.shot import moved, sample_windows, shot_layout
 from seedvr2x.runtime.units import STATE, DiskUnits, Units
 
 
@@ -233,3 +235,72 @@ def test_in_memory_until_decoded() -> None:
     assert units.latent(0) is None and units.windows_done(0) == 2
     assert [w.shape[0] for w in units.take_windows(0)] == [4, 4]
     assert units.windows_done(0) == 0
+
+
+def test_in_memory_units_are_cpu_copies(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A one-file output's units wait on the CPU as an output directory's are read back: the copy
+    # the shared helper makes of each (shot.moved), with the values, the dtype and the strides
+    # of what was saved, a latent in the encode's channel-major layout and windows as the DiT
+    # gives them. On the CPU that copy is the tensor itself: the helper is replaced by one that
+    # copies, as it does from a GPU, so that what the units keep is told from what they were
+    # given.
+    asked: list[tuple[torch.device, str]] = []
+
+    def copied(tensor: Tensor, device: torch.device, what: str) -> Tensor:
+        asked.append((device, what))
+        return moved(tensor, device, what).clone()
+
+    monkeypatch.setattr(units, "moved", copied)
+    kept = Units()
+    latent = channel_major(6)
+    saved = [latent[:4] + 0, torch.randn(4, 3, 5, 16).to(torch.bfloat16)]
+    assert saved[0].stride() == (15, 5, 1, 60) and saved[1].is_contiguous()
+    copy = kept.save_latent(0, latent)
+    assert copy is kept.latent(0) and copy is not latent
+    for window, sampled in enumerate(saved):
+        kept.save_window(0, window, sampled)
+    cpu = torch.device("cpu")
+    assert asked == [
+        (cpu, "shot 0's latent"),
+        (cpu, "shot 0's window 0"),
+        (cpu, "shot 0's window 1"),
+    ]
+    windows = kept.take_windows(0)
+    for back, given in zip([copy, *windows], [latent, *saved], strict=True):
+        assert back is not given and back.device == cpu
+        assert torch.equal(back, given) and back.dtype == given.dtype == torch.bfloat16
+        assert back.stride() == given.stride()
+
+
+def test_saved_latent_is_the_copy_given_back(tmp_path: Path) -> None:
+    # save_latent gives the copy on the CPU that it kept or wrote, for the run to sample the
+    # shot's windows from: one copy of a latent in system memory, and no file read back.
+    latent = channel_major(9)
+    record = job(tmp_path, [Shot(0, 33)], [OutputSegment("a", 0, 33)])
+    disk, in_memory = DiskUnits(tmp_path, record), Units()
+    for kept in (in_memory.save_latent(0, latent), disk.save_latent(0, latent)):
+        assert kept.device.type == "cpu" and torch.equal(kept, latent)
+        assert kept.dtype == latent.dtype and kept.stride() == latent.stride()
+    assert in_memory.save_latent(0, latent) is in_memory.latent(0)
+    back = disk.latent(0)
+    assert back is not None and torch.equal(back, latent) and back.stride() == latent.stride()
+
+
+def test_moved_keeps_the_layout_or_refuses() -> None:
+    # shot.moved, the copy every unit goes through: the tensor itself where it is already; on
+    # another device, its strides kept, or refused. torch keeps the strides of a dense tensor,
+    # a latent in its channel-major layout, and lays out anew the copy of one that isn't, a
+    # slice of that latent along time, dense in the same order of dimensions. The other device
+    # here is torch's meta, which holds a tensor's layout without its values: torch lays a copy
+    # out by one rule whatever the device, and no test on the CPU can hold a GPU's values.
+    latent = channel_major(9)
+    cpu, meta = torch.device("cpu"), torch.device("meta")
+    assert latent.stride() == (15, 5, 1, 135)
+    assert moved(latent, cpu, "a latent") is latent
+    assert moved(latent[2:5], cpu, "a slice").stride() == latent.stride()
+    there = moved(latent, meta, "a latent")
+    assert there.device == meta and there.stride() == latent.stride()
+    assert there.shape == latent.shape and there.dtype == latent.dtype
+    refusal = "a slice: its copy on meta has strides (15, 5, 1, 45), not its (15, 5, 1, 135)"
+    with pytest.raises(RuntimeError, match=re.escape(refusal)):
+        moved(latent[2:5], meta, "a slice")
