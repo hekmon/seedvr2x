@@ -18,12 +18,34 @@ about half), w = W (one window at the cap). The clips are cut from CLIP, from it
 on, one shot each (--cut-threshold 1). A case whose JSON exists in DIR is skipped: a batch can be
 run again after an interruption. DIR/extra-cases.txt, when there, names more cases, run last.
 Results: DIR/<case>.json and .log, DIR/table.md. A case fails, which its JSON records
-("failed"), its table row says and the exit status tells, 1, when its run one notch under isn't
-refused, or is refused with other figures than the driver expects.
+("failed"), its table row says and the exit status tells, 1, when its own run fails, when its
+run one notch under isn't refused, or is refused with other figures than the driver expects; a
+resume check, when its job isn't stopped as asked, isn't refused on the lower card with its
+manifest unchanged, or doesn't finish on the higher one with the uninterrupted run's frames. A
+case or a check that raises is a failure too. The last line counts what was compared: a batch
+that compared nothing says so, and doesn't pass for one where everything was equal.
+
+What the refusal's comparison is, and isn't. "free" has a side of its own: the constants below,
+measured on the card. "takes" is the sentence seedvr2x logged against this script's own call of
+the same planner for the lower card: it holds that the command line gave the planner the job
+this script describes, and that the sentence says the planner's figure. It can't catch a
+planner whose constants are wrong: both sides would say the same wrong figure. Those are held
+by each phase's predicted peak against the measured one, the table's columns. Beside it, where
+the pinned plan keeps nothing of the DiT in the phase the refusal names, "takes" is also held
+to the peak the case's own run recorded for that phase in its manifest, on the card above, with
+the planner's room and margin (recorded): another process's figure, the planner's still.
 
 EMULATED and BARE are what seedvr2x found free on the RTX PRO 6000 this was written on
 (research/docs/planner-limits.md's N - 1.44 is numz's): they choose the clips' lengths, and are
-what a refusal one notch under is expected to say is free."""
+what a refusal one notch under is expected to say is free.
+
+On a machine whose driver gives memory the card doesn't have (behind WSL2's GPU device), where
+seedvr2x holds itself to the card, only `bare` cases run: the card's reading is taken once, at
+the start, by a process of its own, as a run takes it (seedvr2x's runtime/memory.py: what the
+driver reports, what the whole card has free, what the plan counts on), with the attention
+backend the machine runs; the clips' lengths and the predicted peaks follow them. The run one
+notch under isn't made there: vram_cap.py's ballast emulates a card for a driver that refuses,
+and a held run's refusal is another program's memory to show (the case's JSON says so)."""
 
 import argparse
 import json
@@ -61,14 +83,60 @@ UNIT = {
 # _too_large, _window, _swap_refused, _pass, _unfit).
 FIGURES = {
     "takes": re.compile(r"takes ([\d.]+) GiB of (?:free VRAM|system memory)"),
-    "free": re.compile(r"reports ([\d.]+) GiB free|and ([\d.]+) GiB are available"),
+    # On a run held to the card, what the plan counts on, which the sentence gives before the
+    # driver's own figure ("the plan counts on 22.75 GiB of the 28.05 GiB free on the whole card
+    # by NVML (its driver reports 30.03 GiB free to this process), the run held ...").
+    "free": re.compile(
+        r"the plan counts on ([\d.]+) GiB of the [\d.]+ GiB free"
+        r"|reports ([\d.]+) GiB free|and ([\d.]+) GiB are available"
+    ),
 }
 # The planner says its figures to the hundredth of a GiB, what is taken rounded up and what is
 # there rounded down: two that differ by more aren't the same figure.
 HUNDREDTH = 0.01 + 1e-9
 
 
-def free_of(card: str) -> int:
+# On a machine held to its card (machine): the bare card's reading there, seedvr2x's
+# memory.Reading, in place of BARE; and the attention backend the planner's fit is taken for,
+# FlashAttention 2 unless the machine says otherwise.
+HELD = None
+ATTENTION = "flash_attn_2"
+READING = """
+import json, torch
+from seedvr2x import cli
+from seedvr2x.runtime import memory, model
+memory.startup()
+found = memory.reading(cli._free_memory(torch.device("cuda", 0)))
+print(json.dumps([found.reported, found.card, found.counted, found.held, model.attention_backend()]))
+"""
+
+
+def machine() -> None:
+    """Where seedvr2x would hold itself to the card (behind WSL2's GPU device), take the bare
+    card's reading and the attention backend as a run does, in a process of its own, which
+    leaves nothing on the card: HELD and ATTENTION."""
+    global HELD, ATTENTION
+    from seedvr2x.runtime import memory
+
+    if not memory.paravirtual():
+        return
+    said = subprocess.run([sys.executable, "-c", READING], capture_output=True, text=True, check=True)
+    reported, card, counted, held, attention = json.loads(said.stdout.strip().splitlines()[-1])
+    if held:
+        HELD, ATTENTION = memory.Reading(reported, card, counted, held), attention
+        print(
+            f"held to the card: {reported / GIB:.2f} GiB reported, "
+            f"{'no figure' if card is None else f'{card / GIB:.2f} GiB'} on the card,"
+            f" {counted / GIB:.2f} counted on; attention {attention}",
+            flush=True,
+        )
+
+
+def free_of(card: str):
+    """What a plan is made in on `card`: bytes, or the held machine's own reading of its bare
+    card (machine)."""
+    if card == "bare" and HELD is not None:
+        return HELD
     return round((BARE if card == "bare" else float(card) - EMULATED) * GIB)
 
 
@@ -102,15 +170,55 @@ def compared(said: list[str], expected: str, free: int) -> dict:
     return {"said": theirs, "expected": ours, "mismatch": mismatch}
 
 
-def planned(free: int, target: tuple[int, int], latents: int, pins=None):
+# The phase a refusal for a pin names, by its first words (seedvr2x's runtime/planner.py:
+# _pass's for a tile pin, _window's and _swap_refused's for the DiT's phase).
+REFUSED_PHASE = (
+    (re.compile(r"--encode-tile \d+: the encode "), "encode"),
+    (re.compile(r"--decode-tile \d+: the decode "), "decode"),
+    (re.compile(r"--window \d+: its longest window|--swap-blocks \d+: a window of"), "dit"),
+)
+
+
+def recorded(said: list[str], plan: dict) -> dict | None:
+    """What the refusal one notch under says the plan takes (said, its log's error lines)
+    against the peak the case's own run recorded for the phase it names (plan, its manifest's),
+    with the room a VAE pass is held to and the margin, rounded up as the planner says what is
+    taken: {"phase", "said", "expected", "equal"}. None where the two aren't the same figure:
+    the refusal counts a VAE pass with the DiT off the GPU and the DiT's phase with the VAE's
+    weights away, and the plan that ran kept some of them there; or the refusal names no phase
+    (a draw of noise, the system memory)."""
+    from seedvr2x.runtime import planner
+
+    line = next((line for line in said if figures(line)["takes"] is not None), "")
+    phase = next((phase for pattern, phase in REFUSED_PHASE if pattern.search(line)), None)
+    memory = plan["memory"]
+    if phase is None:
+        return None
+    if phase == "dit" and memory["vae_in_dit"]:
+        return None
+    if phase != "dit" and memory[f"resident_{phase}"] != 0:
+        return None
+    need = memory[f"{phase}_peak"] + planner.MARGIN + (0 if phase == "dit" else planner.VAE_ROOM)
+    expected = math.ceil(need / GIB * 100 - 1e-6) / 100
+    takes = figures(line)["takes"]
+    return {
+        "phase": phase,
+        "said": takes,
+        "expected": expected,
+        "equal": abs(takes - expected) <= HUNDREDTH,
+    }
+
+
+def planned(free, target: tuple[int, int], latents: int, pins=None):
     from seedvr2x.runtime import planner
     from seedvr2x.runtime.job import Shot
 
     shots = [Shot(0, 4 * latents - 3)]
-    return planner.plan(free, target, shots, pins or planner.Pins(), None, split=True)
+    pins = pins or planner.Pins()
+    return planner.plan(free, target, shots, pins, None, split=True, attention=ATTENTION)
 
 
-def one_window(free: int, target: tuple[int, int]) -> int:
+def one_window(free, target: tuple[int, int]) -> int:
     """The longest shot, in latents, the planner runs in one window with `free` bytes free."""
     from seedvr2x.runtime.planner import PlanError
 
@@ -121,7 +229,7 @@ def one_window(free: int, target: tuple[int, int]) -> int:
             continue
         if peaks.record()["longest_window"] == latents:
             return latents
-    raise SystemExit(f"nothing fits {free / GIB:.2f} GiB at {target}")
+    raise SystemExit(f"nothing fits {free} at {target}")
 
 
 def clip(args, frames: int) -> Path:
@@ -213,10 +321,18 @@ def case(args, spec: str) -> dict:
     if manifest.exists():
         result["plan"] = json.loads(manifest.read_text())["plan"]
     print(f"{name}: exit {status} in {seconds:.0f} s", flush=True)
+    # The case's own run must finish: nothing is compared of one that doesn't.
+    failed = [] if status == 0 else [f"its own run: exit {status}"]
     # The same plan, pinned, on a card one notch under: the planner must refuse it, with the
     # figures the driver's own call of the planner gives for that card. Planned for one file,
     # for which --plan writes its cut list alone: one file and a directory plan alike.
-    if status == 0 and "plan" in result:
+    if status == 0 and "plan" in result and HELD is not None:
+        result["under"] = None
+        result["under_skipped"] = (
+            "a run held to its card: vram_cap.py's ballast emulates a card for a driver that"
+            " refuses; no run one notch under"
+        )
+    elif status == 0 and "plan" in result:
         plan = result["plan"]
         tiles = [plan[key]["size"] if plan[key] else 0 for key in ("encode_tiles", "decode_tiles")]
         pins = planner.Pins(plan["window"], tiles[0], tiles[1], plan["memory"]["swapped_blocks"])
@@ -247,19 +363,36 @@ def case(args, spec: str) -> dict:
             result["under"] |= {"exit": status, "said": errors[:2], "seconds": round(seconds)}
             checked = compared(errors, under[1], free_of(str(under[0])))
             result["under"]["figures"] = checked
-            failed = [] if status == 1 else [f"one notch under: exit {status}, not a refusal's 1"]
+            if status != 1:
+                failed.append(f"one notch under: exit {status}, not a refusal's 1")
             failed += [
                 f"one notch under: {figure} {checked['said'][figure]} GiB said,"
                 f" {checked['expected'][figure]} expected"
                 for figure in checked["mismatch"]
             ]
-            if failed:
-                result["failed"] = failed
+            # And against the peak this case's own run recorded for the phase refused, where
+            # the two are the same figure (recorded).
+            above = recorded(errors, plan)
+            result["under"]["recorded"] = above
+            if above is not None and not above["equal"]:
+                failed.append(
+                    f"one notch under: takes {above['said']} GiB said, {above['expected']} by"
+                    f" the {above['phase']}'s peak this case's run recorded"
+                )
             print(
                 f"{name}: one notch under ({under[0]:g} GB): exit {status};"
-                f" {'; '.join(failed) if failed else 'its figures as expected'}",
+                f" {'; '.join(failed) if failed else 'its figures as the planner gives them'}"
+                + (
+                    ""
+                    if above is None
+                    else f"; takes {above['said']} for {above['expected']} by the peak recorded"
+                ),
                 flush=True,
             )
+        else:
+            failed.append("no card one notch under refuses the pinned plan")
+    if failed:
+        result["failed"] = failed
     # The masters are big, and only their figures matter here.
     if out.is_dir():
         for path in out.glob("seg_*.mkv"):
@@ -308,6 +441,23 @@ def resume_check(args, spec: str) -> dict:
         p.name: p.read_bytes() for p in sorted((args.out / name / "checksums").glob("*.crc32"))
     }
     record["checksums"] = {"files": len(ours), "identical": bool(ours) and ours == theirs}
+    # What the check holds: stopped as asked (a Ctrl-C's 130), refused on the lower card as a
+    # recorded plan that no longer fits, its manifest unchanged, finished on the higher one with
+    # the uninterrupted run's frames.
+    failed = []
+    if record["stopped"]["exit"] != 130:
+        failed.append(f"stopped: exit {record['stopped']['exit']}, not a Ctrl-C's 130")
+    lower_said = " ".join(errors)
+    if record["lower"]["exit"] != 1 or "no longer fits the memory free now" not in lower_said:
+        failed.append(f"lower: exit {record['lower']['exit']}, not refused as no longer fitting")
+    if not unchanged:
+        failed.append("lower: the manifest changed")
+    if record["higher"]["exit"] != 0:
+        failed.append(f"higher: exit {record['higher']['exit']}")
+    if not record["checksums"]["identical"]:
+        failed.append("higher: not the uninterrupted run's frames")
+    if failed:
+        record["failed"] = failed
     if out.is_dir():
         for path in out.glob("seg_*.mkv"):
             path.unlink()
@@ -378,6 +528,9 @@ def main() -> None:
     parser.add_argument("--dry", action="store_true", help="say each case's clip, run nothing")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+    machine()
+    if HELD is not None and any(spec.split(":")[1] != "bare" for spec in args.case):
+        raise SystemExit("a machine held to its card runs `bare` cases only (the docstring)")
     if args.dry:
         for spec in args.case:
             resolution, card, mode = spec.split(":")
@@ -398,15 +551,18 @@ def main() -> None:
             )
         return
     results = []
+    raised: list[str] = []
     for spec in args.case:
         try:
             results.append(case(args, spec))
-        except Exception as error:  # a case's failure mustn't end the batch
+        except Exception as error:  # a case's failure mustn't end the batch, and fails it
+            raised.append(f"{spec}: raised {error!r}")
             print(f"{spec}: FAILED: {error!r}", flush=True)
     for spec in args.resume_check:
         try:
             resume_check(args, spec)
         except Exception as error:
+            raised.append(f"resume check {spec}: raised {error!r}")
             print(f"{spec}: resume check FAILED: {error!r}", flush=True)
     # More cases, one a line in <out>/extra-cases.txt, run after the others in the same run: the
     # file may be written while the first ones run.
@@ -416,16 +572,45 @@ def main() -> None:
             try:
                 case(args, spec)
             except Exception as error:
+                raised.append(f"{spec}: raised {error!r}")
                 print(f"{spec}: FAILED: {error!r}", flush=True)
-    done = [json.loads(path.read_text()) for path in sorted(args.out.glob("*.json"))]
-    done = [result for result in done if "units" in result]
+    every = [json.loads(path.read_text()) for path in sorted(args.out.glob("*.json"))]
+    done = [result for result in every if "units" in result]
+    resumed = [result for result in every if "stopped" in result]
     (args.out / "table.md").write_text(table(done) + "\n")
     print(table(done), flush=True)
-    failed = [
-        f"{result['case']}: {reason}" for result in done for reason in result.get("failed", [])
+    failed = raised + [
+        f"{result['case']}: {reason}"
+        for result in (*done, *resumed)
+        for reason in result.get("failed", [])
     ]
+    print(counted(done, resumed), flush=True)
     if failed:
         raise SystemExit("FAILED: " + "; ".join(failed))
+
+
+def counted(done: list[dict], resumed: list[dict]) -> str:
+    """What the batch compared, in a line, over every result in the output directory: the
+    cases, the refusals one notch under held to the planner's figures (their figures counted)
+    and, of those, to the peak the case's run recorded; the cases without such a run; the
+    phases' predicted peaks set against measured ones in the table; the resume checks."""
+    under = [result["under"] for result in done if result.get("under")]
+    figures_held = sum(len(notch["figures"]["expected"]) for notch in under if "figures" in notch)
+    above = sum(1 for notch in under if notch.get("recorded"))
+    phases = sum(
+        1
+        for result in done
+        if "plan" in result
+        for unit in result["units"].values()
+        if unit["peak"] is not None
+    )
+    return (
+        f"compared: {len(done)} cases; {len(under)} refusals one notch under against the"
+        f" planner's own figures ({figures_held} figures), {above} of them against the peak"
+        f" recorded by the run above too; {len(done) - len(under)} cases with no run one notch"
+        f" under; {phases} phases' predicted peaks beside measured ones in the table;"
+        f" {len(resumed)} resume checks"
+    )
 
 
 if __name__ == "__main__":
