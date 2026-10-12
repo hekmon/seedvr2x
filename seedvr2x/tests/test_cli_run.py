@@ -337,7 +337,8 @@ def test_one_master(tmp_path: Path) -> None:
     assert status == 0
     assert indexes(tmp_path / "one.mkv") == list(range(FRAMES))
     assert sorted(p.name for p in dump.iterdir()) == [f"frame_{i:06d}.npy" for i in range(FRAMES)]
-    assert not (tmp_path / "manifest.json").exists()
+    # The job's own files were in its work directory, gone once the file is whole.
+    assert not (tmp_path / "manifest.json").exists() and not (tmp_path / "one.mkv.work").exists()
     # Its checksums beside it, of the planes it holds; verify checks them.
     master = tmp_path / "one.mkv"
     assert checksums(tmp_path / "one.mkv.crc32") == stored(["-i", str(master)], "gbrp16le")
@@ -665,8 +666,9 @@ def job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
-    # In a directory, a segment's shots are encoded and sampled before its decode, so that its
-    # decode and write is a unit of its own; one file decodes each shot as soon as it is sampled.
+    # A segment's shots are encoded and sampled before its decode, so that its decode and write
+    # is a unit of its own; in a .mkv path's work directory as in an output directory, where the
+    # three shots are one segment's without --min-segment (5 s by default).
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == UNINTERRUPTED
@@ -706,8 +708,8 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
     steps.calls.clear()
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
     assert steps.calls == [
-        *("encode 0", "window 0:0", "decode 0", "encode 3", "window 3:0", "decode 3"),
-        *("encode 4", "window 4:0", "window 4:1", "decode 4"),
+        *("encode 0", "window 0:0", "encode 3", "window 3:0"),
+        *("encode 4", "window 4:0", "window 4:1", "decode 0", "decode 3", "decode 4"),
     ]
     assert indexes(tmp_path / "one.mkv") == list(range(25))
 
@@ -740,9 +742,9 @@ def test_plan_recorded_and_phases_entered(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The models are told each unit's phase before it (Models.enter), a segment's decodes after
-    # its shots' windows in a directory, each shot's after its own for one file; the manifest
-    # records the plan, which a resume compares but for where the weights are (DESIGN.md, Memory
-    # planner).
+    # its shots' windows, in a directory as in a .mkv path's work directory, whose three shots
+    # are one segment's without --min-segment; the manifest records the plan, which a resume
+    # compares but for where the weights are (DESIGN.md, Memory planner).
     caplog.set_level(logging.INFO)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
@@ -779,7 +781,7 @@ def test_plan_recorded_and_phases_entered(
     assert (content["settings"]["encode_tile"], content["settings"]["decode_tile"]) == (None, None)
     ENTERED.clear()
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
-    assert ENTERED == [*(["encode", "dit", "decode"] * 2), "encode", "dit", "dit", "decode"]
+    assert ENTERED == [*(["encode", "dit"] * 2), "encode", "dit", "dit", *(["decode"] * 3)]
     # --swap-blocks shapes nothing, so is no setting: pinned at what the planner chose, or at
     # anything else, the same job; where the weights were is no part of it, nor the timings. A
     # finished job isn't planned again: its plan stays as recorded.
@@ -1154,10 +1156,10 @@ def test_plan_tiles_reach_the_passes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, output: str
 ) -> None:
     # A plan's tiles go to each encode and decode with the shot's own directory for their
-    # scratch, and what the plan allows it of system memory: among its units in an output
-    # directory; for one file, in the work directory, which a plan with tiles has without split
-    # too, gone with the run. A plan put in the planner's place, with an allowance of its own,
-    # on frames its tiles don't cover (LARGER).
+    # scratch, and what the plan allows it of system memory: among its units, in an output
+    # directory or in a .mkv path's work directory, gone once its file is assembled. A plan put
+    # in the planner's place, with an allowance of its own, on frames its tiles don't cover
+    # (LARGER).
     from seedvr2x.runtime import run
 
     tiled = Plan(5, Tiles(640), Tiles(512), scratch_allowance=12_345)
@@ -1183,15 +1185,11 @@ def test_plan_tiles_reach_the_passes(
     monkeypatch.setattr(run, "decode_shot", decode)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, output, *JOB, *LARGER) == 0
-    # A shot's directory is named for its first frame among the units, its index for one file.
-    directory = tmp_path / "out" / "resume" if output == "out" else tmp_path / "one.mkv.work"
-    shots = [
-        directory / f"shot_{name:06d}" for name in ((0, 3, 4) if output == "out" else range(3))
-    ]
-    order = [0, 1, 0, 1, 2, 2] if output == "out" else [0, 0, 1, 1, 2, 2]
+    # A shot's directory is named for its first frame among the units.
+    directory = tmp_path / ("out" if output == "out" else "one.mkv.work") / "resume"
+    shots = [directory / f"shot_{name:06d}" for name in (0, 3, 4)]
+    order = [0, 1, 0, 1, 2, 2]
     kinds = ["encode", "encode", "decode", "decode", "encode", "decode"]
-    if output == "one.mkv":
-        kinds = ["encode", "decode"] * 3
     assert given == [
         (kind, Tiles(640) if kind == "encode" else Tiles(512), shots[index])
         for kind, index in zip(kinds, order, strict=True)
@@ -1244,14 +1242,16 @@ def test_plan_said(
         assert plan_lines(caplog) == said
         counts = next(line for line in caplog.messages if line.endswith(f"the cut list in {plan}"))
         assert caplog.messages.index(said[-1]) < caplog.messages.index(counts)
-        # For one file too, which --plan doesn't write, nor anything but its cut list.
+        # For a .mkv path too, which --plan doesn't write: its cut list, and the job's plan in
+        # its work directory.
         caplog.clear()
         steps.calls.clear()
         before = sorted(path.name for path in tmp_path.iterdir())
         listed = tmp_path / "other.txt"
         assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", str(listed)) == 0
         assert plan_lines(caplog) == said and steps.calls == []
-        assert sorted(path.name for path in tmp_path.iterdir()) == sorted([*before, "other.txt"])
+        made = sorted(path.name for path in tmp_path.iterdir())
+        assert made == sorted([*before, "other.txt", "other.mkv.work"])
         assert listed.read_text() == plan.read_text()
 
 
@@ -1348,11 +1348,12 @@ def test_size_and_host_memory_refused(
 def test_one_file_plans_with_its_windows_kept(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
-    # A one-file output keeps its units in memory, a shot's windows on the GPU until its decode
-    # (units.Units): its plan is made with them counted (planner.plan's on_disk False), an output
-    # directory's without, --plan's as its run's. JOB's last shot, 6 latents in two windows of
-    # 4: the DiT's phase keeps the latent and the noise of its 2 other latents beside a window,
-    # and in memory the 4 latents of the window made.
+    # A .mkv path's job keeps its units on disk, in its work directory, as an output
+    # directory's does (cli._output): its plan is made as a directory's, no window counted on
+    # the GPU (planner.plan's on_disk True, where units.Units' in-memory ones, which no run of
+    # the command line's keeps any more, were planned with False), --plan's as its run's. JOB's
+    # last shot, 6 latents in two windows of 4: the DiT's phase keeps the latent and the noise
+    # of its 2 other latents beside a window.
     asked: list[bool] = []
     peaks: list[int] = []
     plan = planner.plan
@@ -1369,13 +1370,9 @@ def test_one_file_plans_with_its_windows_kept(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     listed = str(tmp_path / "plan.txt")
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
-    assert asked == [False, True, False]
+    assert asked == [True, True, True]
     window = planner.dit_peak(PADDED, 4)
-    assert peaks == [
-        window + planner.dit_kept(PADDED, 2, 4),
-        window + planner.dit_kept(PADDED, 2),
-        window + planner.dit_kept(PADDED, 2, 4),
-    ]
+    assert peaks == [window + planner.dit_kept(PADDED, 2)] * 3
     assert planner.dit_kept(PADDED, 2, 4) > planner.dit_kept(PADDED, 2) > 0
 
 
@@ -1674,26 +1671,18 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
 ) -> None:
     # --encode-tile and --decode-tile are the plan's tiles, which reach each pass, with what
     # the plan allows its scratch of system memory, and are recorded; and of a scratch kept on
-    # disk nothing stays once the shot is done: the resume directory goes with the job, the work
-    # directory of one file holds one shot's directory at a time and goes with the run, with
-    # split's copies beside the scratch or without. At a size the tiles don't cover (LARGER).
+    # disk nothing stays once the job is done: the resume directory goes with the job, and a
+    # .mkv path's work directory, which holds it, once the file is assembled, with split's
+    # copies beside the scratch or without. At a size the tiles don't cover (LARGER).
     given = tiled_steps(monkeypatch, steps)
     source_path = job(tmp_path, monkeypatch)
     work = tmp_path / "one.mkv.work"
-    others: list[set[str]] = []
-    encode = steps.encode
-
-    def looked(*arguments: Any, **options: Any) -> Any:
-        if work.is_dir():
-            others.append({entry.name for entry in work.iterdir()} - {given[-1][2].name})  # pyright: ignore[reportOptionalMemberAccess]
-        return encode(*arguments, **options)
-
-    monkeypatch.setattr(steps, "encode", looked)
     options = (*(JOB if output == "out" else JOB[:4]), *LARGER, *TILE_PINS)
     assert upscale(tmp_path, source_path, output, *options, *(SPLIT if split else ())) == 0
     kinds = ["encode", "encode", "decode", "decode", "encode", "decode"]
     if output == "one.mkv":
-        kinds = ["encode", "decode"] * 3
+        # One segment without --min-segment: its three shots sampled before its decode.
+        kinds = [*(["encode"] * 3), *(["decode"] * 3)]
     # The planner's plan around the pins, on frames padded to 704x560: the encode's tiles 1 x
     # 2 and the decode's 2 x 2, the scratch of the longest shot's 21 frames, and all of it
     # allowed in the system memory the stand-in's host has; the stand-in keeps a scratch of its
@@ -1708,7 +1697,7 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
     assert [(kind, tiles, allowance) for kind, tiles, _, allowance in given] == [
         (kind, Tiles(640) if kind == "encode" else Tiles(512), kept) for kind in kinds
     ]
-    assert not work.exists() and others == ([] if output == "out" else [set()] * 3)
+    assert not work.exists()
     if output == "out":
         out = tmp_path / "out"
         assert sorted(p.name for p in out.iterdir()) == [
@@ -1847,15 +1836,19 @@ def test_scratch_that_cant_be_made_stops_the_run(
     options = JOB if output == "out" else JOB[:4]
     assert upscale(tmp_path, source_path, output, *options) == 1
     assert caplog.text.count(said) == 1 and "Traceback" not in caplog.text
-    assert not (tmp_path / "one.mkv.work").exists()
-    if output == "one.mkv":
-        return
-    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
-    assert [segment["finished"] for segment in content["segments"]] == [True, False]
+    # A .mkv path's units are kept in its work directory, its three shots one segment's.
+    directory = tmp_path / ("out" if output == "out" else "one.mkv.work")
+    content = json.loads((directory / "manifest.json").read_text())
+    finished = [True, False] if output == "out" else [False]
+    assert [segment["finished"] for segment in content["segments"]] == finished
     assert [shot["windows_done"] for shot in content["shots"]] == [1, 1, 2]
     monkeypatch.setattr(run, "decode_shot", decode)
     steps.calls.clear()
-    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert upscale(tmp_path, source_path, output, *options) == 0
+    if output == "one.mkv":
+        assert steps.calls == ["decode 0", "decode 3", "decode 4"]
+        assert indexes(tmp_path / "one.mkv") == list(range(25)) and not directory.exists()
+        return
     assert steps.calls == ["decode 4"]
     assert indexes(tmp_path / "out" / "seg_000001.mkv") == list(range(4, 25))
 
@@ -2059,12 +2052,26 @@ def test_non_finite_stops(
 def test_non_finite_one_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # One file keeps nothing: stopped, the master's partial file removed.
+    # A .mkv path keeps what a directory does, in its work directory: stopped, no file yet, the
+    # units before kept, and the same command resumes, then assembles.
     source_path = job(tmp_path, monkeypatch)
     steps.poison = "window 3:0"
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 1
-    assert "shot 2/3's window 1/1: " in caplog.text and "nothing kept" in caplog.text
-    assert not [path for path in tmp_path.iterdir() if path.name.startswith("one")]
+    assert "shot 2/3's window 1/1: " in caplog.text
+    assert "so not recorded; stopped: 0 of 1 segments finished" in caplog.text
+    assert "the same command resumes" in caplog.text
+    work = tmp_path / "one.mkv.work"
+    assert sorted(p.name for p in work.iterdir()) == ["frame_index.bin", "manifest.json", "resume"]
+    assert sorted(p.name for p in (work / "resume").iterdir()) == ["shot_000000", "shot_000003"]
+    assert not (tmp_path / "one.mkv").exists()
+    steps.poison = None
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    assert steps.calls == [
+        *("window 3:0", "encode 4", "window 4:0", "window 4:1"),
+        *("decode 0", "decode 3", "decode 4"),
+    ]
+    assert indexes(tmp_path / "one.mkv") == list(range(25)) and not work.exists()
 
 
 SPLIT = ("--color-correction", "split")
@@ -2295,16 +2302,25 @@ def test_split_copy_damaged(
 def test_split_copy_damaged_one_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # One file keeps nothing: stopped, the copy named, the work directory and the partial master
-    # removed.
+    # A .mkv path's copies are among its units, in its work directory: stopped, the copy named
+    # and removed, made again by the same command, which then assembles the file.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     steps.damage = "decode 4"
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 1
-    copy = tmp_path / "one.mkv.work" / "shot_000002" / "input.mkv"
+    copy = tmp_path / "one.mkv.work" / "resume" / "shot_000004" / "input.mkv"
     assert f"{copy}: the shot's input copy, not readable whole and intact: " in caplog.text
-    assert "slice CRC mismatch" in caplog.text and "on resuming" not in caplog.text
-    assert "; stopped: nothing kept" in caplog.text
-    assert not [path for path in tmp_path.iterdir() if path.name.startswith("one")]
+    assert "slice CRC mismatch" in caplog.text
+    assert "; removed, made again from the input on resuming; stopped: 0 of 1 segments" in (
+        caplog.text
+    )
+    assert not copy.exists() and not (tmp_path / "one.mkv").exists()
+    steps.damage = None
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 0
+    assert steps.calls == ["decode 0", "decode 3", "decode 4"]
+    assert "shot 3/3: input.mkv and input.crc32 missing: its input copy made again" in caplog.text
+    assert not (tmp_path / "one.mkv.work").exists()
 
 
 def test_split_copy_checked_before_its_last_frames(
@@ -2439,8 +2455,10 @@ def test_split_copy_again_interrupted(
 def test_split_one_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # One file's copies go in a work directory beside it, removed at the end, at a stop or an
-    # error. A killed run's is removed; anything else there is refused, and kept.
+    # A .mkv path's copies go among its units, in its work directory beside it, each shot's kept
+    # until its segment is finished; the directory is kept at a stop or an error, for the same
+    # command to resume, and removed once the file is assembled. Anything else there is refused,
+    # and kept.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     one, work = tmp_path / "one.mkv", tmp_path / "one.mkv.work"
@@ -2449,39 +2467,47 @@ def test_split_one_file(
     decode = steps.decode
 
     def looked(*arguments: Any, **tiled: Any) -> None:
-        seen.append(sorted(path.name for path in work.iterdir()))
+        seen.append(sorted(path.name for path in (work / "resume").iterdir()))
         decode(*arguments, **tiled)
 
     from seedvr2x.runtime import run
 
     monkeypatch.setattr(run, "decode_shot", looked)
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 0
-    assert seen == [["shot_000000"], ["shot_000001"], ["shot_000002"]]  # one shot at a time
+    # One segment without --min-segment: its three shots' copies wait for its decode.
+    assert seen == [["shot_000000", "shot_000003", "shot_000004"]] * 3
     assert not work.exists()
     out = tmp_path / "out"
     assert decoded(one) == decoded(out / "seg_000000.mkv") + decoded(out / "seg_000001.mkv")
     for stop, poison, status in (("decode 4", None, 130), (None, "decode 4", 1)):
-        one.unlink(missing_ok=True)
+        one.unlink()
         steps.stop, steps.poison = stop, poison
         assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == status
-        assert not work.exists() and not one.exists()
-    steps.stop = steps.poison = None
-    (work / "shot_000002").mkdir(parents=True)
-    # A tiled pass's scratch among them (tiling.SCRATCH), left on disk by a kill.
-    for name in ("input.mkv.partial", "input.crc32.partial", "scratch.bf16"):
-        (work / "shot_000002" / name).write_bytes(b"left")
-    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 0
-    assert "left by a run that was killed, emptied" in caplog.text and not work.exists()
-    work.mkdir()
+        assert not one.exists()
+        copies = sorted(str(path.relative_to(work)) for path in work.rglob("input.mkv"))
+        assert copies == [f"resume/shot_{start:06d}/input.mkv" for start in (0, 3, 4)]
+        steps.stop = steps.poison = None
+        assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 0
+        assert not work.exists()
+        assert decoded(one) == decoded(out / "seg_000000.mkv") + decoded(out / "seg_000001.mkv")
+    # Not this job's: refused with a manifest there, and without one; never deleted.
+    steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT)
+    steps.stop = None
     (work / "notes.txt").write_text("mine")
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 1
-    assert "not what a run of seedvr2x leaves" in caplog.text
+    assert f"{work}: not this job's: notes.txt" in caplog.text
+    (work / "manifest.json").unlink()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == 1
+    assert f"{work}: not empty, and no manifest.json to resume from; {one}'s job keeps" in (
+        caplog.text
+    )
     assert (work / "notes.txt").read_text() == "mine"
 
 
 def test_none_one_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:
-    # With none, nothing is copied (DESIGN.md, Colour correction): one file gets no work
-    # directory beside it, and no shot an input copy; each decode goes uncorrected.
+    # With none, nothing is copied (DESIGN.md, Colour correction): no shot of a .mkv path's job
+    # gets an input copy in its work directory; each decode goes uncorrected.
     source_path = job(tmp_path, monkeypatch)
     work = tmp_path / "one.mkv.work"
     seen: list[tuple[bool, list[str], object]] = []
@@ -2496,8 +2522,8 @@ def test_none_one_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: S
 
     monkeypatch.setattr(run, "decode_shot", looked)
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], "--color-correction", "none") == 0
-    assert seen == [(False, [], None)] * 3
-    assert indexes(tmp_path / "one.mkv") == list(range(25))
+    assert seen == [(True, [], None)] * 3
+    assert indexes(tmp_path / "one.mkv") == list(range(25)) and not work.exists()
 
 
 def test_split_frame_by_frame(
@@ -2708,7 +2734,7 @@ def test_verify(
 def test_one_file_checksums_kept_until_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
-    # The checksums of a one-file output go only when a new file replaces it: a run to the same
+    # The checksums of a finished file go only when a new file replaces it: a run to the same
     # file stopped before keeps the old file and its checksums.
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
@@ -2899,8 +2925,8 @@ def test_numz_padding_for_tests_only(
     assert numz["settings"] == {**ours["settings"], "numz_padding": True}
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
         assert decoded(tmp_path / "numz" / name) == decoded(tmp_path / "ours" / name)
-    # Every encode of the other paths too: one file, each shot decoded as soon as it is sampled
-    # (run_job), and split, each encode copying the frames it reads (run._sample).
+    # Every encode of the other paths too: a .mkv path's, run in its work directory and
+    # assembled, and split, each encode copying the frames it reads (run._sample).
     for output, options in (("numz.mkv", JOB[:4]), ("numz_split", (*JOB, *SPLIT))):
         steps.numz_padding.clear()
         assert upscale(tmp_path, source_path, output, *options) == 0
@@ -3075,7 +3101,7 @@ def test_first_pass_not_run_again(
     assert len(scans) == 1 and steps.calls == ["window 4:1", "decode 4"]
     # Another ffmpeg, accepted: the pass runs again.
     check = ffmpeg.check
-    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
     stopped(tmp_path, source_path, "out", *JOB, "--accept-env-change")
     assert len(scans) == 2
     # Other conversions alone, the same ffmpeg: that stop made no unit, so the record
@@ -3165,7 +3191,7 @@ def test_first_pass_compared_after_a_change(
     monkeypatch.setattr(
         examined, "scan", lambda path, *detector: replace(scan(path, *detector), frames=29)
     )
-    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
     text = refused(tmp_path, source_path, caplog, *JOB, "--accept-env-change")
     assert "input.frames: 25 -> 29" in text
     assert manifest.read_bytes() == recorded
@@ -3563,7 +3589,7 @@ def test_index_of_another_ffmpeg_written_with_its_unit(
     index, manifest = out / "frame_index.bin", out / "manifest.json"
     first, recorded = index.read_bytes(), manifest.read_bytes()
     check = ffmpeg.check
-    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
     otherwise[0] = True
     scans.clear()
     caplog.set_level(logging.INFO, logger="seedvr2x")
@@ -3582,7 +3608,7 @@ def test_index_of_another_ffmpeg_written_with_its_unit(
         return
     # The other ffmpeg again, to the job's end: the index its pass made is written with the first
     # unit, shot 4's latent, in a manifest naming it and recording that ffmpeg and the change.
-    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
     otherwise[0] = True
     steps.stop = "window 4:0"
     stopped(tmp_path, source_path, "out", *JOB, "--accept-env-change")
@@ -3604,7 +3630,8 @@ def test_frame_index_beside_the_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The index is written whole before the manifest's first write, which names it in its input
-    # record by its size and SHA-256 (manifest.INDEX); one file keeps it in memory. What an
+    # record by its size and SHA-256 (manifest.INDEX); a .mkv path's is in its work directory,
+    # gone with it once the file is assembled. What an
     # interrupted first write leaves, the index or its partial file, is no obstacle; a partial
     # file a resume finds is discarded.
     from seedvr2x.media.index import FrameIndex
@@ -4387,11 +4414,12 @@ def test_plan_taken_up_narrowly(
     assert encoded(scripted) == [5, 15, 22]
 
 
-def test_one_file_plan_writes_its_cut_list_alone(
+def test_one_file_plan_kept_in_its_work_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scripted: Steps
 ) -> None:
-    # -o x.mkv --plan FILE: nothing written but FILE, which replaces the one there, whole: no
-    # master, no checksums, no work directory for split; the models never loaded.
+    # -o x.mkv --plan FILE: FILE written, which replaces the one there, whole, and the job's plan
+    # left in the work directory, its manifest and frame index, as in an output directory: no
+    # unit, no file, no checksums; the models never loaded.
     from seedvr2x.runtime import model
     from seedvr2x.runtime.job import read_cuts
 
@@ -4402,10 +4430,10 @@ def test_one_file_plan_writes_its_cut_list_alone(
     plan.write_text("an older plan")
     before = sorted(os.listdir(tmp_path))
     monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
-    # The work directory is removed at the run's end: only its making tells.
-    monkeypatch.setattr(cli, "_work", lambda *a: pytest.fail("a work directory made"))
     assert upscale(tmp_path, source_path, "one.mkv", *SPLIT, "--plan", str(plan)) == 0
-    assert sorted(os.listdir(tmp_path)) == before
+    assert sorted(os.listdir(tmp_path)) == sorted([*before, "one.mkv.work"])
+    work = tmp_path / "one.mkv.work"
+    assert sorted(os.listdir(work)) == ["frame_index.bin", "manifest.json"]
     assert cut_lines(plan) == PLANNED and read_cuts(plan) == [5, 15, 22]
     assert scripted.calls == []
 
@@ -4420,6 +4448,13 @@ def test_plan_file_refused(
     for output, plan, said in (
         ("out", "in.mkv", "the source; it names the cut list's file"),
         ("one.mkv", "one.mkv", "the output; it names the cut list's file"),
+        ("one.mkv", "one.mkv.crc32", "the output's checksums; it names the cut list's file"),
+        (
+            "one.mkv",
+            "one.mkv.work/plan.txt",
+            f"in the work directory of {tmp_path / 'one.mkv'}, which holds the job's own files"
+            " only",
+        ),
         ("out", "out/plan.txt", "in the output directory, which holds the job's own files only"),
         ("out", "out", "in the output directory, which holds the job's own files only"),
         ("out", "missing/plan.txt", "no directory missing to write it in"),
@@ -4443,7 +4478,7 @@ def test_plan_file_refused(
         text = refused(tmp_path, source_path, caplog, "--plan", "locked/plan.txt", output="one.mkv")
         assert "--plan locked/plan.txt: no file can be written in locked: Permission denied" in text
     assert passes == [] and not (tmp_path / "out").exists()
-    assert not (tmp_path / "one.mkv").exists()
+    assert not (tmp_path / "one.mkv").exists() and not (tmp_path / "one.mkv.work").exists()
 
 
 def test_plan_of_a_cut_list(
@@ -4547,7 +4582,7 @@ def test_replanned_in_another_environment(
     index, manifest = out / "frame_index.bin", out / "manifest.json"
     kept, first = contents(out), index.read_bytes()
     check = ffmpeg.check
-    monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+    monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
     otherwise[0] = True
     scans.clear()
     again = (*CUT, "--cut-threshold", "0.5", "--plan", str(plan))
@@ -4605,7 +4640,7 @@ def test_plan_taken_up_in_another_environment(
     if how == "another GPU":
         monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
     else:
-        monkeypatch.setattr(ffmpeg, "check", lambda *options: "n0.0-another")
+        monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
     otherwise[0] = True
     scans.clear()
     caplog.set_level(logging.INFO, logger="seedvr2x")

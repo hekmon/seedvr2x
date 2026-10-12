@@ -1,5 +1,6 @@
-"""A job resumed from its output directory (DESIGN.md, Pause and resume), the manifest there being
-the truth: the job asked must be the one recorded, its settings, models, environment, input,
+"""A job resumed from its output directory, or from a .mkv path's work directory (cli._output),
+which is one (DESIGN.md, Pause and resume), the manifest there being the truth: the job asked
+must be the one recorded, its settings, models, environment, input,
 output and layout alike, but for an environment change the user accepts (--accept-env-change),
 which the manifest records, and for a plan's cuts (CUT_SETTINGS); the directory must hold what the
 manifest says, and nothing else of anyone's; what a stop left that the manifest doesn't name is
@@ -8,14 +9,24 @@ discarded."""
 import json
 import os
 import re
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
+from seedvr2x.media.assembly import work_file
 from seedvr2x.media.files import partial_path
 from seedvr2x.media.source import Source
 from seedvr2x.runtime.job import JobError, OutputSegment, Shot
-from seedvr2x.runtime.manifest import INDEX, NAME, STATE, SUMS, Manifest, checksums_file
+from seedvr2x.runtime.manifest import (
+    ASSEMBLED,
+    INDEX,
+    NAME,
+    STATE,
+    SUMS,
+    Manifest,
+    checksums_file,
+)
 from seedvr2x.runtime.tiling import SCRATCH
 from seedvr2x.runtime.units import CHECKSUMS, COPY, size
 
@@ -133,6 +144,65 @@ def recorded_job(path: Path, content: dict[str, Any], source: Source) -> Manifes
     )
     adopt(job, content)
     return job
+
+
+def clear(directory: Path, content: dict[str, Any]) -> list[str]:
+    """Remove from directory, a .mkv path's work directory, the files of the job its manifest's
+    content records, once its segments are assembled into the finished file (cli._assemble): its
+    segments, their checksums, what a stop left of its units and of its partial files, the frame
+    index; then the manifest, last, so that a removal stopped half way finds it again and is
+    finished by the next run (cli._assembled); then the directory itself. Names missing are fine.
+    Returns what is there that isn't this job's, as paths relative to directory, sorted: left as
+    it is, never deleted, the manifest and the directory then left with it, the manifest saying
+    whose it is."""
+    files = [str(entry["name"]) for entry in content["segments"]]
+    shots = {f"shot_{int(shot['start']):06d}" for shot in content["shots"]}
+    sums = {checksums_file(name, content["output"]["format"]) for name in files}
+    ours = {INDEX, partial_path(directory / INDEX).name, partial_path(directory / NAME).name}
+    for name in files:
+        ours.update((name, partial_path(directory / name).name))
+    foreign: list[str] = []
+
+    def plain(entry: Path) -> bool:
+        return entry.is_file() and not entry.is_symlink()
+
+    def emptied(entry: Path, mine: Callable[[str], bool]) -> None:
+        """Remove from entry, a directory of this job's, the plain files `mine` knows by name,
+        their partial files too, then entry itself when nothing else is left; what else it
+        holds is foreign, as entry is when it isn't a directory."""
+        if entry.is_symlink() or not entry.is_dir():
+            foreign.append(str(entry.relative_to(directory)))
+            return
+        for file in sorted(entry.iterdir()):
+            if mine(file.name.removesuffix(".partial")) and plain(file):
+                file.unlink()
+            else:
+                foreign.append(str(file.relative_to(directory)))
+        if not any(entry.iterdir()):
+            entry.rmdir()
+
+    for entry in sorted(directory.iterdir()):
+        if entry.name == NAME:
+            continue
+        if entry.name == SUMS:
+            emptied(entry, sums.__contains__)
+        elif entry.name == STATE and entry.is_dir() and not entry.is_symlink():
+            for shot in sorted(entry.iterdir()):
+                if shot.name in shots:
+                    emptied(shot, lambda name: UNIT_FILE.fullmatch(name) is not None)
+                else:
+                    foreign.append(str(shot.relative_to(directory)))
+            if not any(entry.iterdir()):
+                entry.rmdir()
+        elif (entry.name in ours or work_file(entry.name)) and plain(entry):
+            # An assembly's own files too (assembly.work_file), which it removes but when killed.
+            entry.unlink()
+        else:
+            foreign.append(entry.name)
+    if not foreign:
+        (directory / NAME).unlink(missing_ok=True)
+        directory.rmdir()
+    return sorted(foreign)
 
 
 def environment_change(recorded: dict[str, Any], environment: dict[str, Any]) -> dict[str, Any]:
@@ -287,9 +357,11 @@ def _kept(manifest: Manifest, index: int) -> set[str]:
 
 def _job(content: dict[str, Any]) -> dict[str, Any]:
     """content without the fields a resume doesn't compare (UNCOMPARED), nor the environment
-    changes accepted, which a resume carries on."""
+    changes accepted, which a resume carries on, nor the record of its assembly, how far it went
+    (manifest.ASSEMBLED)."""
     job = dict(content)
     job.pop(CHANGES, None)
+    job.pop(ASSEMBLED, None)
     for key, fields in UNCOMPARED.items():
         value: Any = content.get(key)
         if isinstance(value, dict):

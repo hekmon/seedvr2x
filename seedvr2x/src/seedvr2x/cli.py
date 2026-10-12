@@ -38,8 +38,9 @@ if TYPE_CHECKING:
     from seedvr2x.runtime.plan import Plan
     from seedvr2x.runtime.pull import ModelFile, ModelFiles
 
-# Video file names, other than Matroska's, that -o refuses: an FFV1 master is a .mkv file, and
-# anything else names the directory of the output segments, which such a name would only hide.
+# Video file names, other than Matroska's, that -o refuses: the finished file is a .mkv path, the
+# one container the output segments are assembled into (_output), and anything else names the
+# directory of the output segments, which such a name would only hide.
 VIDEO_SUFFIXES = frozenset(
     {".mp4", ".mov", ".m4v", ".avi", ".webm", ".ts", ".m2ts", ".mts", ".mxf", ".nut", ".mpg"}
 )
@@ -81,9 +82,12 @@ def main(argv: list[str] | None = None) -> int:
         "--output",
         type=Path,
         required=True,
-        help="a .mkv path: one FFV1 master; else a new or empty directory: the output segments"
-        " (FFV1 files, or PNG directories) and their manifest, the source cut at its shots,"
-        " merged to --min-segment",
+        help="a .mkv path: the finished file, the upscaled video with the source's other streams"
+        " (audio, subtitles, chapters, attachments), assembled from the output segments once"
+        " they are all done; they and the job's other files wait in PATH.work beside it, removed"
+        " once the file is whole, and the same command resumes a job stopped before. Else a new"
+        " or empty directory: the output segments (FFV1 files, or PNG directories) and their"
+        " manifest, the source cut at its shots, merged to --min-segment, never assembled",
     )
     # yuv420p10le by default (DESIGN.md, Output): what every encoder takes, converted here by
     # zscale, exactly, rather than later by sptenc's swscale (16-bit white at 943, not 940). The
@@ -165,9 +169,9 @@ def main(argv: list[str] | None = None) -> int:
         help="plan the job and stop before the upscale: the first pass, then the cut list"
         f" written to FILE, for editing and --cuts, the possible cuts (runs peaking from {POSSIBLE}"
         " up to the threshold) commented with their probabilities and times; and the counts"
-        " printed. With an output directory, the job's manifest and frame index too: the same"
-        " command without --plan then runs it, another --cut-threshold or --cuts plans it again,"
-        " with no second decode",
+        " printed. The job's manifest and frame index are written too, in the output directory"
+        " (PATH.work for a .mkv path): the same command without --plan then runs it, another"
+        " --cut-threshold or --cuts plans it again, with no second decode",
     )
     parser.add_argument("--seed", type=int, default=42)
     # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
@@ -278,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         return 143
     finally:
         _remove_work()
+        _unmake()
         _unlock()
 
 
@@ -467,7 +472,12 @@ def _run(args: argparse.Namespace) -> int:
                 " the detection"
             )
         png = args.format == "png"
-        ffmpeg_version = ffmpeg.check(("png",) if png else (), ("image2",) if png else ())
+        # A .mkv path is assembled at the job's end (_assemble): what the join needs of the build
+        # is asked now, not once every segment is made.
+        final = _final(args.output)
+        ffmpeg_version = ffmpeg.check(
+            ("png",) if png else (), ("image2",) if png else (), assembly=final is not None
+        )
         conversions = fingerprint()
         logger.info("ffmpeg %s, its conversions' fingerprint %s", ffmpeg_version, conversions[:16])
         declared = declare(args.input, args.input_matrix, args.input_sar, args.frame_rate)
@@ -498,7 +508,19 @@ def _run(args: argparse.Namespace) -> int:
         if directory is not None and (directory / NAME).is_file():
             _lock(directory)
             recorded = read(directory / NAME)
+            # A run stopped between its file put in place and its work directory removed: the
+            # removal finished, nothing started (_assembled).
+            asked = (args, cuts, numz_padding)
+            if final is not None and _assembled(*asked, final, directory, recorded):
+                return 0
             kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
+        if final is not None and directory is not None:
+            # Before any work, on a new job and on a resume: what the assembly can't take of the
+            # source's other streams would otherwise be found at the job's end, every segment
+            # made (_copied). SIGTERM unwinds it as Ctrl-C does, its ffmpeg stopped with it
+            # (stop.terminable): the run's handlers come later.
+            with terminable():
+                _copied(args.input, directory)
         # A job detecting its shots needs the record's probabilities: a plan cut by a list has
         # none, its first pass run again with the shot detector when it is planned again without
         # one (_prior), which gives the detector its frames (PROVISIONAL, implementation,
@@ -566,6 +588,8 @@ def _run(args: argparse.Namespace) -> int:
             # The source's content hashed meanwhile, for the manifest.
             found = _first_pass(declared, directory is not None, model_files, identity.device)
         source = counted(declared, found)
+        if final is not None:
+            _grid_start(source)
         found_cuts = _source_cuts(args, cuts, source)
         shots = shots_from_cuts([cut.frame for cut in found_cuts.cuts], source.frames)
         logger.info("%s: %s", _plural(len(shots), "shot"), _said(found_cuts))
@@ -676,7 +700,7 @@ def _run(args: argparse.Namespace) -> int:
             },
             plan_record,
         )
-        if prior is None and not _empty(directory):
+        if prior is None and not _empty(directory, final is not None):
             logger.error("%s: written to since it was checked, by another program", directory)
             return 1
         if prior is not None:
@@ -698,7 +722,9 @@ def _run(args: argparse.Namespace) -> int:
                 # Said for --plan too, which still writes the finished job's cut list, its plan.
                 logger.info("%s: finished already, its %d segments", directory, len(segments))
                 if args.plan is None:
-                    return 0
+                    # A .mkv path's segments, every one finished by an earlier run, are assembled
+                    # now, the models not loaded (_assemble).
+                    return 0 if final is None else _assemble(final, record, paths)
         elif args.plan is not None:
             # A new job's directory made a plan (DESIGN.md, Memory planner): its frame index and
             # manifest, no unit; the same command without --plan runs it.
@@ -813,10 +839,14 @@ def _run(args: argparse.Namespace) -> int:
     logger.info(
         "upscaled in %.1f s; wrote %s: %d frames, %s",
         time.monotonic() - started,
-        args.output,
+        directory,
         writer.written,
         args.format,
     )
+    if final is not None and record is not None:
+        # The job's last unit. A stop asked during the last segment's (Ctrl-C once) stops before
+        # it.
+        return _assemble(final, record, paths, asked=stop.asked)
     return 0
 
 
@@ -872,6 +902,257 @@ def _kept(record: "Manifest | None", segments: int) -> str:
     )
 
 
+def _final(output: Path) -> Path | None:
+    """The finished file a .mkv path names, assembled from the job's output segments once they are
+    all done (_assemble); None for a directory, whose segments are the output, never assembled
+    (DESIGN.md, Two kinds of users)."""
+    return output if output.suffix.lower() == ".mkv" else None
+
+
+def _work_directory(output: Path) -> Path:
+    """Where the job of the .mkv path `output` keeps its files until the file is assembled: beside
+    it, its name and .work (DESIGN.md, Colour correction: `<output>.work`)."""
+    return output.with_name(f"{output.name}.work")
+
+
+def _copied(source: Path, directory: Path) -> None:
+    """Refuse (JobError) a source whose other streams the assembly can't take, before any work
+    (assembly.preflight): a stream Matroska's muxer refuses as it is, each named with ffmpeg's
+    own reason and the ways out; else anything ffmpeg says of their remux, the very one the
+    assembly makes, rehearsed whole in directory, the job's work directory, which is made and
+    locked for it (_lock), as an output directory is, from the start: a second run to the same
+    file is refused before its first pass. What an assembly or a rehearsal killed there left
+    (assembly.work_file) goes first. A run refused before it writes anything there, by this
+    check or a later one, leaves nothing: the directory, when this made it, goes as main returns
+    if it is still empty (_unmake).
+
+    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has every other stream copied and says
+    nothing of one that can't be): refused before any work, the fix being the user's, a remux of
+    the source or a directory output, rather than copied without it, or converted."""
+    from seedvr2x.media import assembly
+    from seedvr2x.runtime.job import JobError
+
+    # Its own to remove (_unmake) only once the lock says so: another seedvr2x may have made
+    # it meanwhile.
+    made = not directory.exists()
+    _lock(directory)
+    if made:
+        _MADE.append(directory)
+    for left in sorted(directory.iterdir()):
+        if assembly.work_file(left.name) and left.is_file() and not left.is_symlink():
+            left.unlink()
+            logger.info("%s: left by an assembly that was stopped, removed", left)
+    refused = assembly.preflight(source, directory)
+    if refused:
+        raise JobError(refused)
+
+
+def _grid_start(source: "Source") -> None:
+    """Refuse (JobError), once the first pass has timed its frames, a source whose first video
+    frame comes before its file's start time (assembly.start): the assembly can't place its
+    frames, and refuses it (assembly.assemble); said here, before any unit is made, not after
+    the last. PROVISIONAL, as the join's refusal is (no source measured has one)."""
+    from seedvr2x.media import assembly
+    from seedvr2x.runtime.job import JobError
+
+    if source.index is None:
+        raise ValueError(f"{source.path}: no frame index to time the assembly by: a seedvr2x bug")
+    first = assembly.start(source.index)
+    if first < 0:
+        raise JobError(
+            f"{source.path}: its first video frame is {float(-first) * 1000:.3f} ms before the"
+            " file's start time, where the assembly of a .mkv path can't place it; give -o a"
+            " directory, whose segments are then muxed with the source's streams by your own"
+            " tools"
+        )
+
+
+def _assemble(final: Path, record: "Manifest", paths: Sequence[Path], asked: bool = False) -> int:
+    """Assemble the finished file `final` from the job's segments, every one finished, at `paths`
+    in record's directory, with the source's other streams (DESIGN.md, Output, Assembly), and
+    return the exit status. One unit, the job's last, run by the run that finished the last
+    segment or by a later one, which loads no model: stopped before it when a stop is asked
+    (`asked`: during the last segment's unit), finished when one is asked during it; a stop at
+    once unwinds through the join, which kills its ffmpeg and removes its partial file
+    (assembly.assemble), every segment kept for the same command to assemble.
+
+    The join proves its result before putting it in place (assembly.assemble), an old file's
+    checksums going only as it is replaced. Then, in this order, each step safe to stop after:
+    the file's checksums, the segments' one after the other, the file holding their frames as
+    they are (stream copy), written whole beside it (DESIGN.md, Output, Checksums); the
+    manifest's record of the assembly (manifest.ASSEMBLED); the work directory's removal
+    (_clear), which a run stopped during it leaves to the next (_assembled)."""
+    from seedvr2x.media import assembly
+    from seedvr2x.media.checksums import read_checksums, write_checksums
+    from seedvr2x.media.ffmpeg import MediaError
+
+    directory, source = record.path.parent, record.source
+    if source.index is None:
+        raise ValueError(f"{source.path}: no frame index to time the assembly by: a seedvr2x bug")
+    output_format = str(record.output["format"])
+    segments = [(path, part.frames) for path, part in zip(paths, record.segments, strict=True)]
+    sums = _checksums_beside(final)
+    # What the same command does then: its checks of the job first, as at any start, no model
+    # loaded and no GPU work.
+    kept = (
+        f"every segment finished, {len(segments)} in {directory}: the same command assembles"
+        f" {final}, once it has checked the job again (its model files, its environment, the"
+        " source's other streams), no model loaded"
+    )
+    with Stop() as stop:
+        stop.asked = asked
+        try:
+            stop.check()
+            stop.unit = f"the assembly of {final}"
+            started = time.monotonic()
+            checksums = [
+                checksum
+                for path in paths
+                for checksum in read_checksums(_checksums_path(directory, path, output_format))
+            ]
+            if len(checksums) != source.frames:
+                raise MediaError(
+                    f"{directory}: {len(checksums)} checksums for its segments' {source.frames}"
+                    " frames"
+                )
+            joined = assembly.assemble(
+                *(final, segments, source.frame_rate, source.path, source.index),
+                work=directory,
+                stale=sums,
+            )
+        except Stopped:
+            logger.warning("stopped before the assembly, as asked; %s", kept)
+            return 130
+        except MediaError as error:
+            logger.error("%s; not assembled: %s", error, kept)
+            return 1
+        write_checksums(sums, checksums)
+        record.job_assembled(final.name, final.stat().st_size)
+        logger.info(
+            "wrote %s: %d frames from %s, with the source's %s and %s, assembled in %.1f s",
+            final,
+            joined.frames,
+            _plural(len(segments), "segment"),
+            _plural(joined.streams - 1, "other stream"),
+            _plural(joined.chapters, "chapter"),
+            time.monotonic() - started,
+        )
+        _clear(directory, record.content())
+    return 0
+
+
+def _assembled(
+    args: argparse.Namespace,
+    cuts: list[int],
+    numz_padding: bool,
+    final: Path,
+    directory: Path,
+    recorded: dict[str, Any],
+) -> bool:
+    """Whether the job recorded in directory, the work directory of `final`, was assembled
+    already, its manifest saying so (manifest.ASSEMBLED) and the file there with the size
+    recorded: a run stopped, or killed, between the file put in place and the work directory
+    removed, or one that left the directory for what it held of someone else's. The removal is
+    then finished (_clear), and the run starts nothing: no first pass, no model. Else, the
+    record's file missing or of another size, the record is dropped and the job assembled again
+    from its segments, which a removal begun then makes a resume refuse, naming the first one
+    missing (resume.leftovers).
+
+    Only for the job asked: refused (JobError), nothing removed, when the job recorded is
+    another, as far as is told here without a hash: the source's size, and every setting the
+    command line gives (_settings without the model files; HASHED). The file there is then
+    another job's, which exit status 0 would pass for this one's (a review's finding,
+    2026-10-12: another source and seed given the same -o).
+
+    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has the work directory removed and says
+    nothing of a stop during it): the record is the cheap way to make a kill during the removal
+    of 100 GiB harmless, a directory half removed being otherwise refused by the next run. With
+    --plan, FILE isn't written, which is said: the job's first pass's record may be gone with
+    the directory, and the same command then plans a new job."""
+    from seedvr2x.runtime.job import JobError
+    from seedvr2x.runtime.manifest import ASSEMBLED
+
+    entry: Any = recorded.get(ASSEMBLED)
+    if not isinstance(entry, dict):
+        return False
+    record = cast(dict[str, Any], entry)
+    size = final.stat().st_size if final.is_file() else None
+    if record.get("name") != final.name or size != record.get("bytes"):
+        logger.warning(
+            "%s: assembled as %s, %s bytes, its manifest says, but %s: assembled again",
+            directory,
+            record.get("name"),
+            record.get("bytes"),
+            f"{final} is missing" if size is None else f"{final} holds {size}",
+        )
+        return False
+    from seedvr2x.runtime import resume
+
+    settings: Any = recorded.get("settings")
+    source: Any = recorded.get("input")
+    was = {
+        "settings": {
+            name: value
+            for name, value in cast(dict[str, Any], settings).items()
+            if name not in HASHED
+        }
+        if isinstance(settings, dict)
+        else settings,
+        "input": {"bytes": cast(dict[str, Any], source).get("bytes")}
+        if isinstance(source, dict)
+        else source,
+    }
+    now = {
+        "settings": _settings(args, cuts, numz_padding, None),
+        "input": {"bytes": args.input.stat().st_size},
+    }
+    found = resume.differences(was, now)
+    if found:
+        raise JobError(
+            f"{directory}: the work directory of another job than the one asked, which {final}"
+            " was assembled from already; it differs in:\n  "
+            + "\n  ".join(found[:20])
+            + (f"\n  and {len(found) - 20} more" if len(found) > 20 else "")
+            + f"\nNothing was removed: remove {directory}, or choose another -o"
+        )
+    logger.info("%s: assembled already, %d bytes", final, size)
+    _clear(directory, recorded)
+    if args.plan is not None:
+        logger.warning(
+            "--plan %s: not written, the job being finished and its record removed: the same"
+            " command plans a new job",
+            args.plan,
+        )
+    return True
+
+
+def _clear(directory: Path, content: dict[str, Any]) -> None:
+    """Remove the work directory of a .mkv path, its job assembled, `content` its manifest's: this
+    job's files, then the directory (resume.clear); what else is there is left, and said, as is
+    a removal the file system refuses: the file is in place, and nothing here fails the run."""
+    from seedvr2x.runtime import resume
+
+    try:
+        foreign = resume.clear(directory, content)
+    except OSError as error:
+        logger.warning(
+            "%s: not removed: %s; its job is assembled, and it is left as it is: remove it by hand",
+            directory,
+            error,
+        )
+        return
+    if foreign:
+        logger.warning(
+            "%s: not removed, holding what isn't this job's: %s%s; it is left as it is, with the"
+            " job's manifest: remove it by hand",
+            directory,
+            ", ".join(foreign[:5]),
+            f" and {len(foreign) - 5} more" if len(foreign) > 5 else "",
+        )
+    else:
+        logger.info("%s: removed, its job assembled", directory)
+
+
 def _work(output: Path) -> Path:
     """The work directory of a one-file output with split or tiles, beside it: its shots' input
     copies and their checksums, one shot at a time (DESIGN.md, Colour correction), and a tiled
@@ -912,40 +1193,72 @@ def _work(output: Path) -> Path:
 
 
 def _output(args: argparse.Namespace) -> Path | None:
-    """The directory the output segments go in, or None for one file. A .mkv path takes the
-    source's output whole, one FFV1 master. Else the output is a new or empty directory of
-    segments (DESIGN.md, Output). Until assembly (milestone 6), the .mkv path stands for the
-    one-file output, and the directory must be new or empty, which keeps another run's files out
-    of what sptenc reads (DESIGN.md, Output), or hold a job's manifest, which resume reads back
-    (resume.leftovers checks the rest)."""
+    """The directory the job's files go in: its output segments, manifest, frame index, units and
+    checksums. For a .mkv path, the finished file's (_final), its work directory beside it
+    (_work_directory), where the segments wait for their assembly; else the output itself, a
+    directory of segments (DESIGN.md, Output). Either is new or empty, which keeps another run's
+    files out of what sptenc reads or the assembly joins, or holds a job's manifest, which resume
+    reads back (resume.leftovers checks the rest); anything else is refused, never deleted.
+
+    Never None since the assembly: a .mkv path's job runs in its work directory as a directory's
+    does. The type still says so, and _run's branches for an output kept in memory still stand
+    (`directory is None`, cli._work, units.Units), dead, until milestone 3's integration, which
+    rewrites the code around them, is in."""
     from seedvr2x.runtime.job import JobError
     from seedvr2x.runtime.manifest import NAME
 
     output: Path = args.output
+    # The output naming the source itself: its file, once assembled, would replace the source,
+    # the one thing a job can't make again, and its checksums' file likewise. The same file
+    # when the name exists, by whatever path (a relative name, a linked directory); else the
+    # same place. PROVISIONAL (implementation, 2026-10-12: DESIGN.md has no such sentence;
+    # found by a review, `seedvr2x film.mkv -o film.mkv` leaving the upscale under the
+    # source's name).
+    sums = [_checksums_beside(output)] if _final(output) is not None else []
+    for written in (output, *sums):
+        if _same(written, args.input):
+            said = "the output" if written == output else f"the output's checksums, {written},"
+            raise JobError(f"{output}: {said} is the source itself; choose another -o")
+    # PROVISIONAL (implementation, 2026-10-10: DESIGN.md's Assembly names one file and no
+    # container): Matroska is the one container assembled, the segments' own (media/writer.py);
+    # the other video suffixes stay refused, as before the assembly.
     if output.suffix.lower() in VIDEO_SUFFIXES:
         raise JobError(
-            f"{output}: a video file name; an FFV1 master is a .mkv path, and the output segments"
-            " go in a directory"
+            f"{output}: a video file name; the finished file is a .mkv path, and the output"
+            " segments go in a directory"
         )
-    if output.suffix.lower() == ".mkv":
+    directory, what = output, "the output directory"
+    if _final(output) is not None:
         if output.is_dir():
-            raise JobError(f"{output}: a directory; a .mkv path names the one FFV1 master")
+            raise JobError(f"{output}: a directory; a .mkv path names the finished file")
         if args.format == "png":
             raise JobError(f"{output}: PNG output goes to a directory")
-        return None
-    if output.is_file():
+        # A file already at the path, with no work directory beside it, is no obstacle: a new
+        # job, whose file replaces it once whole (assembly.assemble), with its checksums.
+        # PROVISIONAL (implementation, 2026-10-10: DESIGN.md doesn't say; what one FFV1 master
+        # did before the assembly, kept).
+        directory, what = _work_directory(output), f"the work directory of {output}"
+        if os.path.lexists(directory) and (directory.is_symlink() or not directory.is_dir()):
+            raise JobError(
+                f"{directory}: not a directory; {output}'s job keeps its files there until the"
+                " file is assembled: remove it, or choose another -o"
+            )
+    elif output.is_file():
         raise JobError(f"{output}: a file; the output segments need a directory")
-    if args.dump_frames is not None and args.dump_frames.resolve().is_relative_to(output.resolve()):
+    dumps: Path | None = args.dump_frames
+    if dumps is not None and dumps.resolve().is_relative_to(directory.resolve()):
+        raise JobError(f"--dump-frames {dumps}: in {what}, which holds the job's own files only")
+    work = directory != output
+    if directory.is_dir() and not _empty(directory, work) and not (directory / NAME).is_file():
         raise JobError(
-            f"--dump-frames {args.dump_frames}: in the output directory, which holds the job's"
-            " own files only"
+            f"{directory}: not empty, and no {NAME} to resume from; "
+            + (
+                f"{output}'s job keeps its files there: remove it, or choose another -o"
+                if work
+                else "the output segments need a new or empty directory"
+            )
         )
-    if output.is_dir() and not _empty(output) and not (output / NAME).is_file():
-        raise JobError(
-            f"{output}: not empty, and no {NAME} to resume from; the output segments need a new"
-            " or empty directory"
-        )
-    return output
+    return directory
 
 
 def _segments(
@@ -976,14 +1289,34 @@ def _checksums_path(directory: Path | None, output: Path, output_format: str) ->
     return directory / SUMS / checksums_file(output.name, output_format)
 
 
-def _empty(directory: Path) -> bool:
+def _same(path: Path, other: Path) -> bool:
+    """Whether path and other name one file: the same file when both exist, however each is
+    spelled (os.path.samefile); else the same place, links followed."""
+    try:
+        return os.path.samefile(path, other)
+    except OSError:
+        return path.resolve() == other.resolve()
+
+
+def _checksums_beside(output: Path) -> Path:
+    """Where the checksums of the finished file `output` go: beside it, its name and .crc32
+    (DESIGN.md, Output, Checksums)."""
+    return output.with_name(f"{output.name}.crc32")
+
+
+def _empty(directory: Path, work: bool = False) -> bool:
     """Whether directory holds nothing, but what an interrupted first write of the manifest left,
     which the next write replaces: the manifest's partial file, the frame index written whole
-    before it (manifest.INDEX), or the index's partial file."""
+    before it (manifest.INDEX), or the index's partial file; and, in a .mkv path's work
+    directory (`work`), what a rehearsal of its assembly left when killed (_copied), which the
+    next start removes."""
+    from seedvr2x.media.assembly import work_file
     from seedvr2x.runtime.manifest import INDEX, NAME
 
     left = {f"{NAME}.partial", INDEX, f"{INDEX}.partial"}
-    return all(entry.name in left for entry in directory.iterdir())
+    return all(
+        entry.name in left or (work and work_file(entry.name)) for entry in directory.iterdir()
+    )
 
 
 def _write_index(directory: Path, source: "Source") -> None:
@@ -1118,22 +1451,39 @@ def _recorded_plan(
     return plan
 
 
+# The settings that record a hash, of seedvr2x's code or of a model file (_settings): those a
+# job can't be told by before its files are read.
+HASHED = ("code", "dit_model", "vae_model", "detector_model")
+
+
 def _settings(
-    args: argparse.Namespace, cuts: list[int], numz_padding: bool, model_files: "ModelFiles"
+    args: argparse.Namespace,
+    cuts: list[int],
+    numz_padding: bool,
+    model_files: "ModelFiles | None",
 ) -> dict[str, object]:
     """The settings a manifest records, those a resume must find again; numz's padding only when
-    the tests ask for it (NUMZ_PADDING), so that a user's manifest never names it."""
+    the tests ask for it (NUMZ_PADDING), so that a user's manifest never names it. Without
+    model_files, those the command line alone gives, the records that take a hash left out
+    (HASHED): what tells one job from another before any file is read (_assembled)."""
     from seedvr2x.runtime.manifest import code_sha256
 
     detects = args.cuts is None
+    hashed: dict[str, object] = {}
+    if model_files is not None:
+        hashed = {
+            "code": code_sha256(),
+            "dit_model": _model(model_files.dit, model_files),
+            "vae_model": _model(model_files.vae, model_files),
+            # The shot detector's file, as the DiT's and the VAE's, when the job detects shots:
+            # a resume with another is another job.
+            **({"detector_model": _detector_model(model_files)} if detects else {}),
+        }
+        if not set(hashed) <= set(HASHED):
+            raise ValueError(f"{sorted(set(hashed) - set(HASHED))}: not in HASHED: a seedvr2x bug")
     settings: dict[str, object] = {
         "seedvr2x": version("seedvr2x"),
-        "code": code_sha256(),
-        "dit_model": _model(model_files.dit, model_files),
-        "vae_model": _model(model_files.vae, model_files),
-        # The shot detector's file, as the DiT's and the VAE's, when the job detects shots: a
-        # resume with another is another job.
-        **({"detector_model": _detector_model(model_files)} if detects else {}),
+        **hashed,
         "resolution": args.resolution,
         "seed": args.seed,
         "color_correction": args.color_correction,
@@ -1175,18 +1525,25 @@ def _numz_padding() -> bool:
     return True
 
 
-# The output directories this process holds locked (_lock), until main returns.
+# The output directories this process holds locked (_lock), until main returns: their
+# descriptors, and the directories themselves.
 _LOCKS: list[int] = []
+_LOCKED: list[Path] = []
 
 
 def _lock(directory: Path) -> None:
     """Lock directory for this process until main returns: one seedvr2x at a time writes an
     output directory, since two would race on the manifest and discard each other's files in
     progress (resume.leftovers). The lock is the kernel's (flock), on the directory itself, so
-    no file is added, and it goes with the process, however it ends."""
+    no file is added, and it goes with the process, however it ends. Once per directory: a
+    .mkv path's work directory is locked from its start (_copied), an output directory once its
+    job is known (_run), and a second lock on the same directory, even this process's own,
+    would be refused, flock's locks being its descriptors'."""
     from seedvr2x.media.files import make_directories
     from seedvr2x.runtime.job import JobError
 
+    if directory in _LOCKED:
+        return
     make_directories(directory)
     descriptor = os.open(directory, os.O_RDONLY)
     try:
@@ -1198,6 +1555,7 @@ def _lock(directory: Path) -> None:
         # A filesystem without locks: logged, the run goes on (AGENTS.md: no silent fallback).
         logger.warning("%s: not locked (%s); let one seedvr2x at a time write it", directory, error)
     _LOCKS.append(descriptor)
+    _LOCKED.append(directory)
 
 
 # The work directories this process made (_work), removed when main returns.
@@ -1209,7 +1567,21 @@ def _remove_work() -> None:
         shutil.rmtree(_WORK.pop(), ignore_errors=True)
 
 
+# The work directories this run made for a .mkv path's job (_copied), removed as main returns
+# when still empty: a run refused before its first write leaves nothing.
+_MADE: list[Path] = []
+
+
+def _unmake() -> None:
+    import contextlib
+
+    while _MADE:
+        with contextlib.suppress(OSError):  # the job's files are there, or the directory gone
+            _MADE.pop().rmdir()
+
+
 def _unlock() -> None:
+    _LOCKED.clear()
     while _LOCKS:
         os.close(_LOCKS.pop())
 
@@ -1752,8 +2124,9 @@ def _plural(count: int, noun: str) -> str:
 
 def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
     """Refuse a --plan FILE (JobError) that would take the place of what the job reads or writes:
-    the source, the cut list given (--cuts), the one-file output or anything in the output
-    directory, which holds the job's own files only (resume.leftovers); or that can't be
+    the source, the cut list given (--cuts), a .mkv path's finished file or its checksums, or
+    anything in the job's directory, the output's or a .mkv path's work directory, which holds
+    the job's own files only (resume.leftovers); or that can't be
     written: a directory, in none, or in one that takes no new file. Before the first pass, which
     may take an hour. PROVISIONAL (implementation, 2026-10-09), with the plan's form."""
     import tempfile
@@ -1771,12 +2144,15 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
             f"--plan {plan}: the cut list given (--cuts), which it would replace, its comments"
             " lost; it names another file"
         )
+    final = _final(args.output)
+    if final is not None and where in (final.resolve(), _checksums_beside(final).resolve()):
+        what = "the output" if where == final.resolve() else "the output's checksums"
+        raise JobError(f"--plan {plan}: {what}; it names the cut list's file")
     if directory is None and where == args.output.resolve():
         raise JobError(f"--plan {plan}: the output; it names the cut list's file")
     if directory is not None and where.is_relative_to(directory.resolve()):
-        raise JobError(
-            f"--plan {plan}: in the output directory, which holds the job's own files only"
-        )
+        what = "the output directory" if final is None else f"the work directory of {final}"
+        raise JobError(f"--plan {plan}: in {what}, which holds the job's own files only")
     if plan.is_dir():
         raise JobError(f"--plan {plan}: a directory; it names the cut list's file")
     if not plan.parent.is_dir():

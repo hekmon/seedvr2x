@@ -363,8 +363,8 @@ def test_hashed_once_a_run(
 def test_not_pinned_recorded(
     tmp_path: Path, hub: Hub, hashed: list[Path], caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Not one of seedvr2x's own: run as the model check accepts it, said unpinned, hashed once,
-    # for the manifest alone; with no manifest, never.
+    # Not one of seedvr2x's own: run as the model check accepts it, said unpinned, hashed once
+    # a run, for its manifest: an output directory's, or a .mkv path's, in its work directory.
     caplog.set_level(logging.INFO)
     path = tmp_path / "w.safetensors"
     path.write_bytes(b"numz's, say")
@@ -379,7 +379,7 @@ def test_not_pinned_recorded(
     assert settings["dit_model"] == {"name": path.name, "size": 11, "sha256": digest}
     hashed.clear()
     assert upscale(tmp_path, "one.mkv", *options) == 0
-    assert [each for each in hashed if each.name == path.name] == []
+    assert [each for each in hashed if each.name == path.name] == [path]
     assert hub.calls == hub.lookups == []
 
 

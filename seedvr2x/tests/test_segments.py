@@ -299,7 +299,7 @@ def test_segment_writer_routes_frames(tmp_path: Path) -> None:
         (["-o", "file.txt"], "a file; the output segments need a directory"),
         (["-o", "out", "--min-segment", "-1"], "negative"),
         (["-o", "out.mp4"], "a video file name"),
-        (["-o", "dir.mkv"], "a .mkv path names the one FFV1 master"),
+        (["-o", "dir.mkv"], "a directory; a .mkv path names the finished file"),
         (["-o", "full"], "not empty, and no manifest.json to resume from"),
         (["-o", "out", "--resolution", "0"], "not a whole number above 0"),
         (["-o", "out", "--seed", "-1"], "--seed -1"),

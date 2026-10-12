@@ -1,12 +1,13 @@
 """The manifest of a job's output (DESIGN.md, Pause and resume): what the job is, which a resume
 must find again (its settings, models by hash, environment, input file, output, plan, shots with
 their windows, output segments), and how far it went: each shot encoded, its windows done, each
-segment finished. A unit is recorded once its file is whole, so the manifest only names whole
-files: the frame index too, written before the manifest's first write (INDEX). Written once the
-models load, or before any does when the job is planned (--plan: its plan, no unit made), then
-again after every unit; and, before a unit, with the index of a first pass a resume ran again,
-or for a plan taken up or planned again (cli._taken_up, cli._replan); always whole (a temporary
-file, synced, renamed)."""
+segment finished, and, for a .mkv path, the finished file once assembled (ASSEMBLED). It sits in
+the output directory, or in a .mkv path's work directory (cli._output). A unit is recorded once its
+file is whole, so the manifest only names whole files: the frame index too, written before the
+manifest's first write (INDEX). Written once the models load, or before any does when the job is
+planned (--plan: its plan, no unit made), then again after every unit; and, before a unit, with the
+index of a first pass a resume ran again, or for a plan taken up or planned again (cli._taken_up,
+cli._replan); always whole (a temporary file, synced, renamed)."""
 
 import hashlib
 import json
@@ -49,6 +50,12 @@ INDEX = "frame_index.bin"
 # which imports torch (runtime/units.py): the command line reads it before it checks the model
 # files, which comes before torch (cli._trusted; DESIGN.md, Weights, Recognised by content).
 FIRST_PASS = ("ffmpeg", "conversions")
+# The record of the finished file a .mkv path's segments were assembled into (cli._assemble): its
+# name and bytes, written once the file is in place, before its work directory, this manifest's,
+# is removed. How far the job went, never compared on a resume (resume.differences): it stands
+# for a stop between the two, so that the next run finishes the removal instead of refusing a
+# directory half removed (cli._assembled). An additive field, absent until then.
+ASSEMBLED = "assembled"
 
 
 def checksums_file(segment: str, output_format: str) -> str:
@@ -127,6 +134,7 @@ class Manifest:
     windows_done: list[int] = field(default_factory=list[int])  # each shot's windows kept
     finished: list[bool] = field(default_factory=list[bool])  # each segment whole
     sizes: list[int | None] = field(default_factory=list[int | None])  # finished ones' bytes
+    assembled: dict[str, Any] | None = None  # the finished file, once in place (ASSEMBLED)
     # Called once, before the manifest's next write, then dropped: it writes the frame index that
     # write names, made again by a resume in another environment (cli._taken_up).
     before_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
@@ -167,6 +175,12 @@ class Manifest:
         manifest."""
         self.finished[index] = True
         self.sizes[index] = size
+        self.write()
+
+    def job_assembled(self, name: str, size: int) -> None:
+        """Record the job's segments as assembled into the file `name`, `size` bytes, whole and
+        in place beside the manifest's directory, and write the manifest."""
+        self.assembled = {"name": name, "bytes": size}
         self.write()
 
     def segment_shots(self, index: int) -> list[int]:
@@ -217,6 +231,7 @@ class Manifest:
                     self.segments, self.files, self.finished, self.sizes, strict=True
                 )
             ],
+            **({} if self.assembled is None else {ASSEMBLED: self.assembled}),
         }
 
 

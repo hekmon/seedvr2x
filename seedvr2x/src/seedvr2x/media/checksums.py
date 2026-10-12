@@ -57,9 +57,15 @@ def check_frames(
     theirs, a count other than the checksums', ffmpeg's errors); nothing when every frame is as
     written. Read to the end, whatever it finds."""
     size = frame_bytes(pix_fmt, width, height)
+    # Each frame once, as the file holds it (-fps_mode passthrough): ffmpeg's own choice of a
+    # rate mode fills the time before a video that starts after its file, as an assembled file's
+    # does when its source's did, with a copy of its first frame. Measured on 2026-10-10, ffmpeg
+    # n9.0.2, on a file assembled from a source whose video starts 23 ms after its audio: 97
+    # frames read where the file holds 96, every checksum after the first then one frame off.
     command = [
         *("ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", *input_args),
-        *("-map", "0:v:0", "-f", "rawvideo", "-pix_fmt", pix_fmt, "-"),
+        *("-map", "0:v:0", "-fps_mode", "passthrough"),
+        *("-f", "rawvideo", "-pix_fmt", pix_fmt, "-"),
     ]
     wrong: list[int] = []
     frames = 0

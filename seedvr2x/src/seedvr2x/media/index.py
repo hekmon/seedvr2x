@@ -6,13 +6,15 @@ keyframes' timestamps, from a packet scan (media/scan.py). When the shot detecto
 pass, each frame's probability too (DESIGN.md, Shot detection: the first pass's record keeps
 TransNetV2's per-frame probabilities).
 
-One file (-o x.mkv) keeps it in memory. An output directory holds it beside the manifest, written
-once with the first pass's record, which names it by its size and SHA-256 (runtime/manifest.py);
-a resume reads it back as it trusts that record. Its format is exact and versioned: a magic line, a
-JSON line saying the version, the time base, the file's start time and each table's columns, then
-the columns' values, little-endian, column after column. The probabilities are a column of the
-frames' table, PROBABILITIES, named in the header when the detector ran: a reader takes the columns
-it knows by name and skips the others by their size, so the version stays."""
+A job's directory, the output's or a .mkv path's work directory, holds it beside the manifest,
+written once with the first pass's record, which names it by its size and SHA-256
+(runtime/manifest.py); a resume reads it back as it trusts that record, and the assembly of a .mkv
+path takes the source's first timestamp and time base from it (media/assembly.py). Its format is
+exact and versioned: a magic line, a JSON line saying the version, the time base, the file's start
+time and each table's columns, then the columns' values, little-endian, column after column. The
+probabilities are a column of the frames' table, PROBABILITIES, named in the header when the
+detector ran: a reader takes the columns it knows by name and skips the others by their size, so
+the version stays."""
 
 import json
 from dataclasses import dataclass
