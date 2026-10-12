@@ -33,8 +33,9 @@ from seedvr2x.runtime.units import CHECKSUMS, COPY, size
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
 # what is recorded for information only (DESIGN.md, Pause and resume): where an input is and when
 # it was modified, an input being its content, so that a moved input is the same; the NVIDIA
-# driver, since the math kernels ship with torch. And the frame index's file, PROVISIONAL
-# (DESIGN.md says only that the manifest names it): derived data, as an input copy is, checked
+# driver, since the math kernels ship with torch. And the frame index's file ("the frame index by
+# its name, size and SHA-256, and idet's counts, for information"; "The frame index is derived
+# data: missing or damaged on a resume, the first pass runs again and writes it"), checked
 # against its record when the first pass's record is trusted, made again with the pass otherwise
 # (cli._prior), whose new decode may hash some frames otherwise after an ffmpeg change accepted,
 # which is no other job. idet's counts likewise, information (manifest._input). And of the plan,
@@ -61,9 +62,10 @@ UNIT_FILE = re.compile(
 # detection's threshold and the shot detector's file, which a cut list drops. A plan, a job that
 # has made no unit yet (manifest.planned), is taken up with them changed, its cuts derived again
 # from the first pass's record, or taken from the new list (cli._prior, cli._replan); any other
-# difference, or a unit made, is another job's. PROVISIONAL (implementation, 2026-10-09):
-# DESIGN.md has another threshold give its cuts "without a second decode or detection", the
-# record kept in an output directory, and says not how a run reaches it; reported to design.
+# difference, or a unit made, is another job's. DESIGN.md, Pause and resume, A plan: "A run
+# whose settings differ only in its cuts (the cut list, the threshold, the detector's file)
+# plans it again from its record, with no decode", and "Any other difference, or a unit made, is
+# another job".
 CUT_SETTINGS = frozenset({"cuts", "cut_threshold", "detector_model"})
 
 

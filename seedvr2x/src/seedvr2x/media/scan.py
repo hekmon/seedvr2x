@@ -126,11 +126,13 @@ TOLERANCE_US = 1000
 # before it (ffmpeg_demux.c:228-256), shifting every timestamp after: the first pass before the
 # frame index read such a file as continuous, and with -copyts a jump is corrected no more
 # (:234). Two MPEG-TS files joined, their timestamps going from 3.44 to 1,001.4 s, were then
-# refused as a variable frame rate, "frames last from 40 to 997960 ms". PROVISIONAL
-# (implementation, 2026-10-10, a question for design: DESIGN.md's Input has the 1 ms rule alone):
-# a jump past ffmpeg's bounds, in seconds, is refused as what it is, naming the frame and both
-# times (Discontinuity), with ffmpeg's own correction as the way out, a remux, for the formats it
-# corrects (DISCONTINUOUS); a smaller one stays a variable frame rate. A step on is a jump only
+# refused as a variable frame rate, "frames last from 40 to 997960 ms". DESIGN.md, Not in the
+# first version: "timestamps that jump: a step back of more than 0.1 s, or one forward of more
+# than 10 s (ffmpeg's own bounds)", and "The message names the frame and both times, and ffmpeg's
+# remux as the way out for the formats it corrects": a jump past those bounds, in seconds, is
+# refused as what it is (Discontinuity), the remux given for the formats of DISCONTINUOUS; a
+# smaller one stays a variable frame rate. The two limits that follow are the code's, accepted by
+# design as built (2026-10-10), DESIGN.md not giving them. A step on is a jump only
 # when it is also longer than the frames' shortest step by more than the timing rule's tolerance
 # (TOLERANCE_US), the step that rule refuses as no constant rate's: at a constant rate under 0.1
 # fps every step is past ffmpeg's bound, and files at 1/15 and 1/20 fps, read before, were
@@ -165,15 +167,16 @@ FRAME = WIDTH * HEIGHT * 3
 # 50 frames (12.4 MB): a detector slower than the decode holds ffmpeg back once they wait, where
 # a 2-hour film's frames would take 672 MB at 24 fps. The detector's probabilities don't depend
 # on how its frames are pushed (runtime/detector.py: its windows run in whole batches).
-# PROVISIONAL (implementation, 2026-10-09; DESIGN.md asks for no bound).
+# Accepted by design, 2026-10-12 (DESIGN.md asks for no bound): the detector's queue, CHUNK
+# frames a read and HELD reads.
 CHUNK = 50
 HELD = 64
-# PROVISIONAL (implementation, 2026-10-09; DESIGN.md doesn't say): a first pass in which nothing
-# moves for this long, in seconds, no line from ffmpeg on any pipe, no frame read or scored, is
-# stopped and refused, never left hanging. Every pipe is drained by a thread of its own (scan), so
-# no wait of seedvr2x's can hold ffmpeg; this is for what else could, as an ffmpeg hung on its
-# input. A frame takes milliseconds to decode (DESIGN.md, Input: 171-2,360 fps), and the detector
-# a fraction of a second per read on the CPU.
+# The first pass's watchdog (DESIGN.md says nothing of one: accepted by design as built,
+# 2026-10-10): a first pass in which nothing moves for this long, in seconds, no line from ffmpeg
+# on any pipe, no frame read or scored, is stopped and refused, never left hanging. Every pipe is
+# drained by a thread of its own (scan), so no wait of seedvr2x's can hold ffmpeg; this is for
+# what else could, as an ffmpeg hung on its input. A frame takes milliseconds to decode
+# (DESIGN.md, Input: 171-2,360 fps), and the detector a fraction of a second per read on the CPU.
 WATCHDOG = 120.0
 
 
@@ -369,7 +372,9 @@ def scan(path: Path, detector: Detects | None = None) -> Scan:
                 f" {run.frames.read} frames"
             )
         # As the index's reader refuses them (index.FrameIndex.from_bytes): recorded, a NaN made
-        # the next resume refuse the index and run the pass again. A NaN fails both bounds.
+        # the next resume refuse the index and run the pass again. A NaN fails both bounds. Raised,
+        # a traceback, as the bug it would be, not a source's refusal: kept by design, 2026-10-10
+        # (DESIGN.md says nothing of it).
         outside = np.flatnonzero(~((probabilities >= 0) & (probabilities <= 1)))
         if len(outside):
             raise ValueError(
@@ -423,7 +428,8 @@ def name_error(path: Path) -> str:
     """Why a source's name is refused, or "": a line break in it. ffmpeg prints the name as it
     is, in its input's dump and in its errors: a line of the name's own making among those the
     first pass reads (MAPPING). Known from the command line: refused before anything is done with
-    the file (media/source.py, declare), and by the pass itself (scan)."""
+    the file (media/source.py, declare), and by the pass itself (scan). DESIGN.md's refused
+    sources don't list it: kept by design, 2026-10-10."""
     if "\n" in str(path) or "\r" in str(path):
         return (
             f"{str(path)!r}: a line break in its name, which ffmpeg prints as it is among the"

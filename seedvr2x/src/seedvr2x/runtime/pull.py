@@ -46,8 +46,8 @@ class Pin:
 
 
 # The shot detector's file, TransNetV2's weights (DESIGN.md, Input, Shot detection), named by
-# itself. Provisional (implementation, 2026-10-09; DESIGN.md names no option for it): with
-# --model-dir, read from that directory by this name.
+# itself, with no option of its own (design, 2026-10-10): with --model-dir, read from that
+# directory by this name (DESIGN.md, Weights: "the files are read from it by name").
 DETECTOR = "transnetv2.safetensors"
 
 # v1's files (DESIGN.md, Weights), read from REVISION on 2026-10-09 without downloading them: each

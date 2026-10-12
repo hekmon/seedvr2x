@@ -1839,6 +1839,9 @@ def _settings(
         "min_segment": str(args.min_segment),
         "input_matrix": args.input_matrix,
         "input_sar": None if args.input_sar is None else str(args.input_sar),
+        # --frame-rate's R, "recorded as a setting" (DESIGN.md, Input), as Fraction writes it:
+        # "24" for a whole rate, "24000/1001" otherwise, either read back exactly (kept by
+        # design, 2026-10-10).
         "frame_rate": None if args.frame_rate is None else str(args.frame_rate),
     }
     if numz_padding:
@@ -1998,8 +2001,8 @@ def _prior(
     asked differ from its own in how its source is cut alone (resume.CUT_SETTINGS): another
     --cut-threshold, a cut list given or another, or none, its cuts derived again from its first
     pass's record (DESIGN.md, Shot detection: another threshold gives its cuts without a second
-    decode or detection), the layout and settings rewritten (_replan). PROVISIONAL
-    (implementation, 2026-10-09, reported to design), as resume.CUT_SETTINGS says."""
+    decode or detection), the layout and settings rewritten (_replan): DESIGN.md, Pause and
+    resume, A plan, "A run whose settings differ only in its cuts", as resume.CUT_SETTINGS says."""
     from seedvr2x.media.scan import Idet
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
@@ -2081,9 +2084,9 @@ def _trusted(
     before = cast(dict[str, Any], environment)
     if any(before.get(key) != current[key] for key in FIRST_PASS):
         return None, ""
-    # PROVISIONAL (DESIGN.md has the index trusted as the first pass's record is, and says nothing
-    # of one missing or damaged): derived data, as an input copy is, never trusted unchecked, nor
-    # a reason to refuse the job: the first pass runs again and makes it.
+    # DESIGN.md, Pause and resume: "The frame index is derived data: missing or damaged on a
+    # resume, the first pass runs again and writes it": as an input copy is, never trusted
+    # unchecked, nor a reason to refuse the job.
     return _recorded_index(directory, cast(dict[str, Any], entry))
 
 
@@ -2230,8 +2233,8 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
     left to resume there, and its record then stands for what this run made and found: written
     as recorded, a plan whose pass ran again under another ffmpeg named that ffmpeg's index
     beside the first one's name, and the first ffmpeg then trusted it (a review's finding,
-    2026-10-10). PROVISIONAL (implementation, 2026-10-10, for design, as the plan's form is:
-    DESIGN.md has the new environment written "with the next unit made").
+    2026-10-10). DESIGN.md, Pause and resume: "Two things rewrite it at once: a plan taken up or
+    planned again (below), and a frame index made again".
 
     A job that has made units and isn't finished, its first pass run again (_prior; a finished
     job's isn't, and nothing of it is written: _finished_already):
@@ -2248,9 +2251,11 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
     keeping the recorded index until then: a resume stopped before a unit "still resumes in its
     old environment", its record whole.
 
-    PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has a resume stopped
-    before a unit leave the manifest as it was, which holds but for the record of an index made
-    again in the environment recorded, and for a plan's)."""
+    So DESIGN.md's rule, a resume stopped before a unit "leaves the manifest as it was", holds
+    but for its two exceptions, "a plan taken up or planned again (below), and a frame index
+    made again": the index made again in the environment recorded, as above. One made again
+    under another ffmpeg, accepted, waits for the next unit with that environment, by the rule
+    itself; DESIGN.md's sentence doesn't tell the two apart (said to design, 2026-10-12)."""
     from dataclasses import replace
 
     from seedvr2x.runtime import resume
@@ -2271,6 +2276,10 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
         record.before_write = lambda: _write_index(directory, source)
         return
     _write_index(directory, source)
+    # The environment as recorded, the first pass's own fields being the same (FIRST_PASS): a
+    # torch or GPU change accepted by this run is no part of the index's record, and is written
+    # "with the next unit made" (DESIGN.md, Pause and resume), as any resume's is (kept by
+    # design, 2026-10-10).
     as_recorded = replace(
         record,
         environment=before,
@@ -2418,7 +2427,8 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
     planned again without one, or one planned again under another ffmpeg, accepted); then its
     manifest rewritten with the new settings, plan and layout, at once, so that the plan is the
     new one whether a unit follows or not, in this run's environment, a change accepted recorded
-    with it, as a plan taken up is (_taken_up). PROVISIONAL, as the rule is
+    with it, as a plan taken up is (_taken_up). DESIGN.md, Pause and resume, A plan: "the cuts
+    are derived again and the manifest rewritten at once, in the run's environment"
     (resume.CUT_SETTINGS)."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import STATE
@@ -2519,8 +2529,9 @@ def _detector_model(model_files: "ModelFiles") -> dict[str, object]:
     else, on a resume whose first pass's record is trusted (_trusted), which runs no detector and
     so neither fetches nor reads its file, the file by its pin: the only one seedvr2x runs in that
     role (pull.check_pinned refuses any other), so the one any run of this code recorded.
-    PROVISIONAL (implementation, 2026-10-09; DESIGN.md records the models by hash): settings'
-    detector_model, by the pin on such a resume."""
+    Accepted by design, 2026-10-12 (DESIGN.md records the models by hash, and says no more of
+    this one): settings' detector_model is recorded by the pin on a resume whose record is
+    trusted."""
     from seedvr2x.runtime import pull
 
     if model_files.detector is not None:
@@ -2622,7 +2633,8 @@ def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
     anything in the job's directory, the output's or a .mkv path's work directory, which holds
     the job's own files only (resume.leftovers); or that can't be
     written: a directory, in none, or in one that takes no new file. Before the first pass, which
-    may take an hour. PROVISIONAL (implementation, 2026-10-09), with the plan's form.
+    may take an hour. DESIGN.md has --plan "writes the detected cut list to FILE" (Memory planner)
+    and names no refusal of FILE: these, accepted by design as built (2026-10-10).
 
     Likewise the playlist of its possible cuts, written beside it under its name with .m3u8
     added (cuts.playlist_path), when the shots are detected: a cut list's plan has no possible

@@ -259,7 +259,8 @@ def remake(rate: Fraction, start: Fraction) -> str:
     30 segments, up to 24.5 ms early, came out at the timestamps of the file they were split
     from, every frame in order (tests/test_rate.py, 2026-10-10).
 
-    PROVISIONAL (DESIGN.md names no command): the input option -r:v:0, which gives every frame
+    DESIGN.md, Input: "The message's command gives the rate as an input option (`-r:v:0`), which
+    numbers the frames as they come": the input option -r:v:0, which gives every frame
     decoded the next place at that rate, from 0 (fftools/ffmpeg_dec.c:398-409 at n9.0.2), so that
     no frame can be dropped or doubled, whatever its timestamp. Of the three retimings
     research/docs/seeking.md measured on S9: fps=R anchors its timeline at 0, not at the first

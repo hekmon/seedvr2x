@@ -39,14 +39,18 @@ STATE = "resume"
 SUMS = "checksums"
 # The source's frame index, beside the manifest, which names it in its input record (_input):
 # written once with the first pass's record, kept with the manifest, which a finished job's run
-# again reads too (DESIGN.md, Input; media/index.py). PROVISIONAL: the name, and the record's
-# fields, name, bytes and sha256, DESIGN.md's "names it by its SHA-256".
+# again reads too (DESIGN.md, Input; media/index.py). The record's fields, name, bytes and
+# sha256, are DESIGN.md's (Pause and resume: "the frame index by its name, size and SHA-256");
+# the name itself is the code's, accepted by design as built (2026-10-10).
 INDEX = "frame_index.bin"
 # What the first pass depends on in the environment: it runs on ffmpeg's decode alone, so that
 # its record stands through any other change accepted (DESIGN.md, Pause and resume). The shot
 # detector's probabilities, which torch computes on the GPU in that pass, stand with it: they are
-# the record's, so that a job's cuts stay its own. PROVISIONAL (implementation, 2026-10-09):
-# DESIGN.md wrote the rule before the detector ran in the pass. Here, not in runtime/resume.py,
+# the record's, so that a job's cuts stay its own (DESIGN.md, Pause and resume: "The shot
+# detector's probabilities are part of that record, though torch computes them: a torch, CUDA,
+# GPU or attention change doesn't run the detector again"). So an index made again under such a
+# change accepted, its ffmpeg the same, is written with the manifest as recorded, the change
+# with the next unit (cli._taken_up; kept by design, 2026-10-10). Here, not in runtime/resume.py,
 # which imports torch (runtime/units.py): the command line reads it before it checks the model
 # files, which comes before torch (cli._trusted; DESIGN.md, Weights, Recognised by content).
 FIRST_PASS = ("ffmpeg", "conversions")

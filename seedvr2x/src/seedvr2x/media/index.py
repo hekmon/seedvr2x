@@ -45,8 +45,10 @@ from seedvr2x.media.files import write_whole
 # gives none all the same, whose hash line would say this very number (media/scan.py, HASHED).
 NOPTS = -(2**63)
 
-# PROVISIONAL (DESIGN.md names neither the index's file nor its format): this one, exact, versioned
-# and open to more columns (the module's docstring).
+# The index's file (DESIGN.md, Input: "written once with the first pass's record, beside the
+# manifest, which names it by its SHA-256"), in a format DESIGN.md leaves to the code, accepted by
+# design as built (2026-10-10): this one, exact, versioned and open to more columns (the module's
+# docstring).
 MAGIC = b"seedvr2x frame index\n"
 VERSION = 1
 # Each table's columns, (name, numpy's dtype), the order they are written in.
@@ -55,8 +57,9 @@ KEYFRAME_COLUMNS = (("pts", "<i8"),)
 # The shot detector's probability of each frame, the sigmoid of TransNetV2's single-frame head
 # (runtime/detector.py), float32 as it computes them: a column of the frames' table, after the
 # others, only when the detector ran (absent with --cuts, whose list replaces the detection).
-# PROVISIONAL, as the format is: its name and place (DESIGN.md: "the first pass's record keeps"
-# them).
+# DESIGN.md, Shot detection: "The first pass's record keeps TransNetV2's per-frame probabilities
+# (its single-frame head), a column of the frame index"; the column's name and place are the
+# format's, accepted with it.
 PROBABILITIES = ("transnetv2", "<f4")
 # Whether each row is a held one, a place left empty that shows the frame before it again
 # (FrameIndex.held): a column of the frames' table, after the first pass's own and before the
@@ -177,8 +180,8 @@ class FrameIndex:
         at most the frame's, -1 when none is (or the frame has no pts). Defined on display order,
         the only order the index holds: a leading picture, displayed before its keyframe and
         decoded after it, belongs to the keyframe before (media/reader.py says why that holds).
-        PROVISIONAL (DESIGN.md says "n's own keyframe" and defines it not): seek_test.py's c_gop,
-        as measured."""
+        DESIGN.md, Input: "n's own keyframe is the last whose timestamp is at most n's":
+        seek_test.py's c_gop, as measured."""
         self._of_frames()
         pts = int(self.pts[frame])
         if pts == NOPTS:

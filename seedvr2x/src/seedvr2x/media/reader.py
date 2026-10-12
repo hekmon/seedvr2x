@@ -84,7 +84,8 @@ LISTED = 10
 # CRC-32 line came before its frame's RGB, 300 of 300, stdout drained freely, and no read read
 # ahead: 150 reads, and 72 with the CPUs oversubscribed 2 to 1, 36 of them with the CRC-32
 # encoder put back in 64 frame threads (2026-10-09). 24 leaves room for the pipes and this
-# process's threads: 299 MB at 1080p, 1.19 GB at 2160p, held only while a hash lags.
+# process's threads: 299 MB at 1080p, 1.19 GB at 2160p, held only while a hash lags. DESIGN.md
+# says nothing of a read-ahead: accepted by design as built, 2026-10-10.
 READ_AHEAD = 24
 
 # How long the reader waits for a frame's hash before it reads one more frame ahead, in seconds.
@@ -105,7 +106,8 @@ POLL = 0.001
 # before its first line, ffmpeg probes and seeks, S5's worst read through a seek taking 16 s in
 # all (research/docs/seeking.md). 300 s is 19 times that, for slower CPUs and disks. A stalled
 # read then fails in 5 minutes, where it hung: 13 minutes at 0% CPU on the box (2026-10-09),
-# until stopped by hand.
+# until stopped by hand. DESIGN.md says nothing of a watchdog: accepted by design as built,
+# 2026-10-10.
 STALL = 300.0
 
 
@@ -747,8 +749,8 @@ class Reader:
                     # is no entry point (in-band parameter sets, seeking.md mechanism 6) or a
                     # leading picture decoded without its references. Strict: further back.
                     raise _Mismatch(why)
-                # PROVISIONAL (the orchestrator's choice for design; DESIGN.md has the start as
-                # the last resort, counting, and says nothing of a decode that differs): from the
+                # DESIGN.md, Input: "Read from the start, a frame at its place with its timestamp
+                # is therefore taken as decoded whatever its CRC-32, with a warning": from the
                 # start, the frame at its place, counted, its pts the index's, is taken as
                 # decoded whatever its CRC-32. Frames are compared by place and pts there, never
                 # searched; a resume checks the source by its SHA-256 and the index by its own,
@@ -760,9 +762,10 @@ class Reader:
                 # the same in 12 (2026-10-09, n9.0.2, 320x240 encodes damaged as
                 # tests/test_index.py damages its own). So a source with unreported damage would
                 # otherwise fail at random, even a run reading every frame from the first. What
-                # it means: an output is bit-identical across a resume only for a source that
-                # decodes the same each time. Said at once for a read's first such frame, then
-                # counted, the rest in one line at the read's end (_sum_up).
+                # it means: an output is bit-identical across a resume only "for a source that
+                # decodes the same each time" (DESIGN.md, Pause and resume). Said at once for a
+                # read's first such frame, then counted, the rest in one line at the read's end
+                # (_sum_up).
                 self.otherwise.append(named)
                 if len(self.otherwise) == 1:
                     logger.warning(
@@ -812,9 +815,10 @@ class Reader:
         index = self._decoded
         own = index.own_keyframe(target)
         keyframe = own - self._back
-        # PROVISIONAL (DESIGN.md has the start as the last resort only): a frame before the third
-        # keyframe, which a read from the first keyframe would decode from the start anyway, and
-        # one select can't single out, which only counting finds, are read from the start at once.
+        # DESIGN.md, Input: "A frame before the third keyframe, or after one the first pass flagged
+        # as damaged, is read from the start at once": the first, which a read from the first
+        # keyframe would decode from the start anyway. So is one a select can't single out, which
+        # only counting finds (accepted by design with it, 2026-10-10; DESIGN.md doesn't name it).
         if start or own < 0 or keyframe < 1 or not index.selects(target):
             if target and not why:
                 logger.info(
@@ -884,8 +888,8 @@ class Reader:
         decoded_from = index.first_frame_from(attempt.keyframe)
         flagged = index.first_error(decoded_from, target)
         if flagged is not None:
-            # PROVISIONAL (DESIGN.md records the decoder's error report and says no more of it;
-            # such a frame "may only match from the start", seeking.md's method): there at once.
+            # DESIGN.md, Input: a frame "after one the first pass flagged as damaged, is read from
+            # the start at once" (it "may only match from the start", seeking.md's method).
             # The decoder conceals a damaged frame one way decoding from the start, another from
             # any seek: no seek gave S9's last frames again (mechanism 9), so going further back
             # would decode, over log2(keyframes) reads, about twice the frames the start does, for

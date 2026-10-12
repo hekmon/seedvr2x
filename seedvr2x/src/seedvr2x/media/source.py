@@ -139,7 +139,8 @@ SYNONYMS = {
 # option for the chroma location goes unused.
 SITING = "chroma_location"
 
-# PROVISIONAL (DESIGN.md says "finds combed frames", not how many): the share of the frames idet's
+# DESIGN.md, Not in the first version: "finds 10% of them or more combed (its multiple-frame
+# detection) in a source not declared interlaced". That 10% is the share of the frames idet's
 # multiple-frame detection finds interlaced, top or bottom field first (Idet.combed), from which a
 # source is warned of. Measured on 2026-10-09, n9.0.2, on the first 6,000 frames of every real
 # source the gate accepts (27, declared progressive or with no field order) and of 9 Blu-ray and
@@ -509,10 +510,10 @@ def combing(source: Source) -> None:
     idet = source.idet
     if idet is None or not idet.analysed or idet.combed < COMBED * idet.analysed:
         return
-    # PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has the warning
-    # for "a source declared progressive"): a source that declares no field order is warned of
-    # too, since one that declares nothing could be telecined as well, and sptenc's rule reads it
-    # as it reads a progressive one (declared_refusal).
+    # DESIGN.md, Not in the first version: the warning is for "a source not declared interlaced":
+    # one that declares no field order is warned of too, since one that declares nothing could be
+    # telecined as well, and sptenc's rule reads it as it reads a progressive one
+    # (declared_refusal).
     declared = source.stream.field_order == "progressive"
     logger.warning(
         "%s: ffmpeg's idet finds combed frames in a source %s: %d of %d (%.0f%%) interlaced by its"
@@ -614,13 +615,14 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
         # With places left empty: on the declared rate's grid as well, by the same judge.
         too = _on_grid(replace(declared, rate_override=None), scanned) is not None
     if forced != stream.frame_rate and too:
-        # PROVISIONAL (DESIGN.md has R accepted when every frame lies within half a frame of its
-        # timeline, and says nothing of a file whose frames lie on the timeline of the rate it
-        # declares as well): taken at R all the same, as asked, said, since its output then lasts
-        # another time than its source, off the source's other streams. Only a short file's
-        # frames lie on both: 24 and 24000/1001 part by half a frame within 500 frames. By the
-        # declared rate's timeline, never by sptenc's rule alone, which doesn't tell: frames at
-        # 24000/1001 last within 1 ms of 24's (_leaves), and a file of them declared 24/1 was
+        # Accepted by design, 2026-10-12 (DESIGN.md has R accepted when every frame lies within
+        # half a frame of its timeline, and says nothing of a file whose frames lie on the
+        # timeline of the rate it declares as well): --frame-rate R on a short file that also
+        # lies on its declared timeline is taken at R, as asked, and warned of, since its output
+        # then lasts another time than its source, off the source's other streams. Only a short
+        # file's frames lie on both: 24 and 24000/1001 part by half a frame within 500 frames. By
+        # the declared rate's timeline, never by sptenc's rule alone, which doesn't tell: frames
+        # at 24000/1001 last within 1 ms of 24's (_leaves), and a file of them declared 24/1 was
         # told its frames were at 24/1 "too" when given its own rate.
         change = stream.frame_rate / forced - 1
         logger.warning(
@@ -1137,8 +1139,9 @@ def _contradiction(stream: VideoStream, matrix: str | None, both_transfers: bool
     # container is, the bitstream's own fix, its codec's filter setting the bitstream's tags to the
     # container's (media/bitstream.py), or to another name of the container's meaning where the
     # filter doesn't take its own (SYNONYMS: the file is then read, the stream's name kept), named
-    # only for a filter setting each tag contradicted, the file otherwise still refused.
-    # Provisional (DESIGN.md names neither command): both write
+    # only for a filter setting each tag contradicted, the file otherwise still refused ("whose
+    # command the refusal gives when the codec's bitstream filter can set every contradicted
+    # tag"). The two commands are the code's, accepted by design as built (2026-10-10): both write
     # Matroska, which keeps each tag, where MP4 keeps none of the primaries, transfer and matrix
     # unless all three are declared (libavformat/movenc.c:2945-2948), and copy every stream but the
     # data streams (-map -0:d), which Matroska refuses (matroskaenc.c:2163-2165): -map 0 alone

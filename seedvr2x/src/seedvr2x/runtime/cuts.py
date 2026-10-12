@@ -125,8 +125,8 @@ def time_of(index: FrameIndex, frame: int) -> Fraction | None:
     still shows the frame before its hole, has the time of that place: the timestamp its row
     holds, that frame's plus the frame periods since (media/grid.py, filled).
 
-    PROVISIONAL (implementation, 2026-10-09; DESIGN.md asks for the timecode a player jumps to):
-    the file's start, not the first frame's, so that a source whose video starts after its audio
+    DESIGN.md, Shot detection: a line holds the cut's "time from the file's start": the file's
+    start, not the first frame's, so that a source whose video starts after its audio
     (by 23 ms, say, on a fixture of S9's mechanism 7: research/docs/seeking.md) gets the times a
     player shows; from the first frame, every time would be early by that much, more than half a
     frame at 24 fps, and the jump would land on the outgoing shot's last frame."""
@@ -145,18 +145,16 @@ def time_of(index: FrameIndex, frame: int) -> Fraction | None:
 def timecode(seconds: Fraction | None) -> str:
     """H:MM:SS.mmm, rounded up to the millisecond; "-" without a time.
 
-    PROVISIONAL (implementation, 2026-10-10, a question for design and the user: which player
-    checks the cuts). Rounded up, the time lies in its frame's own display, at its start or
-    within a millisecond after: a player showing the frame displayed at that time shows that
-    frame, where a time rounded down, before the frame's own, would show the one before. A seek
-    to the first frame at or after the time lands one frame late instead, wherever the frame's
-    time isn't a whole millisecond: ffmpeg -ss T -i FILE gave the next frame for 45 of the 48
-    frames of a 24000/1001 MP4 (time base 1/24000), and the frame itself for all 48 with the time
-    rounded down; on Matroska, whose times are milliseconds, the frame itself either way
-    (measured 2026-10-10, n9.0.2). mpv's seek to an absolute time is precise by default
-    (DOCS/man/options.rst:337-351 at v0.41.0, 41f6a64), and a precise seek skips the frames more
-    than 5 ms before its target, showing the first one left (player/video.c:471, 521-525): by
-    its code, the frame itself either way; not run here."""
+    DESIGN.md, Shot detection: the cut's "time from the file's start, rounded up to the
+    millisecond", for the player that checks the cuts: "The player is VLC, the user's choice
+    (2026-10-10)", which "lands within 3 frames of the cut on a file with B-frames, mostly before
+    it, which a time rounded up serves better than one rounded down; mpv lands on the cut frame".
+    Rounded up, the time lies in its frame's own display, at its start or within a millisecond
+    after. A seek to the first frame at or after the time lands one frame late instead, wherever
+    the frame's time isn't a whole millisecond: ffmpeg -ss T -i FILE gave the next frame for 45
+    of the 48 frames of a 24000/1001 MP4 (time base 1/24000), and the frame itself for all 48
+    with the time rounded down; on Matroska, whose times are milliseconds, the frame itself
+    either way (measured 2026-10-10, n9.0.2)."""
     if seconds is None:
         return "-"
     milliseconds = math.ceil(seconds * 1000)
@@ -170,9 +168,9 @@ def probability(value: float) -> str:
     that a possible cut never shows at the threshold it stays under, nor a cut under the one it
     reaches (a threshold of 3 decimals or fewer), as they are compared (_exact): 0.29999998 is
     0.299; float32's 0.7, 0.699999988, which doesn't reach 0.7, is 0.699; float32's 0.3,
-    0.300000012, which reaches 0.3, is 0.300. PROVISIONAL (implementation, 2026-10-09; DESIGN.md
-    asks for "its probability"): a peak scoring 0.9939 shows 0.993, where a rounded figure would
-    say 0.994."""
+    0.300000012, which reaches 0.3, is 0.300. DESIGN.md (Shot detection) asks for "its
+    probability" and no more; cut to 3 decimals, accepted by design as built (2026-10-10): a peak
+    scoring 0.9939 shows 0.993, where a rounded figure would say 0.994."""
     exact = Decimal(float(np.float32(value)))
     return str(exact.quantize(Decimal("0.001"), rounding=ROUND_DOWN))
 

@@ -134,7 +134,8 @@ def make(path: Path, telecined: bool) -> Path:
     ("name", "field_order", "declares"),
     [
         ("telecined.mkv", "progressive", "declared progressive"),
-        # FFV1 in NUT declares no field order: warned of too (media/source.py, PROVISIONAL).
+        # FFV1 in NUT declares no field order: warned of too (DESIGN.md, Not in the first version:
+        # "a source not declared interlaced"; media/source.py).
         ("telecined.nut", "", "that declares no field order"),
     ],
 )
@@ -162,7 +163,7 @@ def test_telecined_warned(
 
 @needs_ffmpeg
 def test_progressive_silent(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    # Every frame progressive by idet (192 of 192 with n9.0.2): no warning. The bound, PROVISIONAL,
+    # Every frame progressive by idet (192 of 192 with n9.0.2): no warning. The bound, DESIGN.md's
     # 10%, lies past the 2.1% of the worst progressive real source measured (media/source.py).
     caplog.set_level(logging.WARNING)
     source = examine(make(tmp_path / "progressive.mkv", telecined=False))

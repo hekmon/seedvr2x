@@ -39,7 +39,8 @@ HEIGHT, WIDTH = 27, 48
 # predict_frames' windows: WINDOW frames every STEP, each keeping its frames PAD to PAD + STEP - 1,
 # the first window's first PAD frames copies of the source's first.
 WINDOW, STEP, PAD = 100, 50, 25
-# Windows per forward on the GPU. Provisional (implementation, 2026-10-09; DESIGN.md doesn't say):
+# Windows per forward on the GPU (DESIGN.md, Shot detection: "It runs on the job's GPU, idle
+# during the first pass, 4 windows a forward"):
 # a forward's peak, measured on the CPU as its process's peak resident memory (2026-10-09), takes
 # about 125 MiB a window, 0.5 GiB for 4 (167 MiB for 1, 496 for 4, 1,012 for 8, 2,041 for 16),
 # little on the first pass's idle GPU, whose memory the detector gives back before the planner
@@ -253,7 +254,8 @@ def _exact(device: torch.device) -> Generator[None]:
     # ones, and a write through one API then a read through the other raises (the "mix of the
     # legacy and new APIs" RuntimeError), where these left every flag as found (measured
     # 2026-10-09, with the defaults, TF32 set on and the override). cuDNN's are torch's own
-    # scope. Provisional (implementation, 2026-10-09; DESIGN.md says deterministic, not how).
+    # scope. The flags held for a forward and put back, where DESIGN.md says nothing of them:
+    # accepted by design as built, 2026-10-10.
     matmul = torch.backends.cuda.matmul
     tf32 = bool(matmul.allow_tf32)
     if tf32:

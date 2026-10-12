@@ -299,7 +299,8 @@ def test_frame_rate_on_a_file_already_fine(
 ) -> None:
     # 48 frames at 24000/1001, declared so: --frame-rate 24000/1001 accepted, said; 24 too, its
     # frames 2 ms off 24's timeline at most, taken at 24 as asked, warned of, the output 0.1%
-    # shorter (media/source.py, PROVISIONAL); 25, 1.67 ms a frame off, refused from frame 12.
+    # shorter (media/source.py: accepted by design, 2026-10-12); 25, 1.67 ms a frame off, refused
+    # from frame 12.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     path = tmp_path / "ntsc.mkv"
     run(
