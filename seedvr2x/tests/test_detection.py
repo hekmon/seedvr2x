@@ -1,13 +1,14 @@
 """The shot detector in the first pass (media/scan.py, media/source.py's first_pass; DESIGN.md,
 Input, Shot detection): every frame the first pass decodes, scaled to 48x27 as TransNetV2's
-official extraction scales them, on one thread, fed to the detector as it comes, its
+official extraction scales them, on 4 threads, fed to the detector as it comes, its
 probabilities kept in the frame index.
 
 On the CPU, a recording stand-in in the detector's place: the frames it gets are the official
 extraction command's (ffmpeg -i F -f rawvideo -pix_fmt rgb24 -s 48x27 pipe:), byte for byte, on
-constant-rate samples, which give the same bytes with their scaler forced to 1 and 16 threads; as
-many as the index's frames, in order, each probability recorded; the scaler's filter graph on one
-thread of ffmpeg's; on a stream tagged from its 15th frame, where the graph is rebuilt, the bytes
+constant-rate samples, which give the same bytes with their scaler forced to 1, 4 and 16 threads,
+and on 18 pixel formats those of the scaler on 1 thread; as many as the index's frames, in order,
+each probability recorded; the scaler's filter graph on 4 threads of ffmpeg's, its encoder on none
+of its own; on a stream tagged from its 15th frame, where the graph is rebuilt, the bytes
 of measurement's command keeping one graph (-reinit_filter 0) and of the official one. A detector
 slow on purpose holds ffmpeg back, the pass ending with every frame once; one that stops moving
 is stopped by the watchdog, which says so at once; a thread reading one of ffmpeg's pipes that
@@ -197,9 +198,9 @@ def x264(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 @pytest.mark.parametrize("kind", ["FFV1", "x264"])
 def test_frames_as_the_official_extraction(request: pytest.FixtureRequest, kind: str) -> None:
-    # The detector's frames, the official command's byte for byte, which its scaler forced to 1
-    # thread and to 16 doesn't change; every frame the index holds, each pushed once, in order,
-    # each one's probability recorded.
+    # The detector's frames, scaled on 4 threads, the official command's byte for byte, which its
+    # scaler forced to 1 thread, to 4 and to 16 doesn't change; every frame the index holds, each
+    # pushed once, in order, each one's probability recorded.
     path: Path = request.getfixturevalue("clip" if kind == "FFV1" else "x264")
     recorder = Recorder()
     scanned = first.scan(path, recorder)
@@ -208,24 +209,77 @@ def test_frames_as_the_official_extraction(request: pytest.FixtureRequest, kind:
     reference = official(path)
     assert len(recorder.frames) == len(reference) == scanned.frames == found.frames
     assert recorder.frames.tobytes() == reference.tobytes()
-    for threads in ("1", "16"):
+    for threads in ("1", "4", "16"):
         assert official(path, "-threads", threads).tobytes() == reference.tobytes(), threads
     means = (reference.mean(axis=(1, 2, 3), dtype=np.float64) / 255).astype(np.float32)
     assert found.probabilities.dtype == np.float32
     assert found.probabilities.tobytes() == means.tobytes()
 
 
-def test_scaled_on_one_thread(clip: Path) -> None:
+# The pixel formats the scaler's thread count is held on, each with the size of its clip: planar
+# YUV at every chroma subsampling, 8, 10, 12 and 16 bits, gray, planar and packed RGB,
+# semi-planar and packed YUV; 4:2:0 at 4K, at a size that isn't 16:9 and at one no multiple of 16.
+# FFV1 holds the planar ones, and 8-bit RGB as bgr0; rawvideo in NUT the others.
+SCALED = [
+    *(("ffv1", pix_fmt, "1280x720") for pix_fmt in ("gray", "gray16le", "yuv410p", "yuv422p")),
+    *(("ffv1", pix_fmt, "1280x720") for pix_fmt in ("yuv444p", "yuv422p10le", "yuv444p10le")),
+    *(("ffv1", pix_fmt, "1280x720") for pix_fmt in ("yuv444p16le", "bgr0", "gbrp10le", "gbrp16le")),
+    ("ffv1", "yuv420p", "1920x1080"),
+    ("ffv1", "yuv420p", "720x576"),
+    ("ffv1", "yuv420p", "1438x1078"),
+    ("ffv1", "yuv420p10le", "1920x1080"),
+    ("ffv1", "yuv420p12le", "3840x2160"),
+    *(("rawvideo", pix_fmt, "1280x720") for pix_fmt in ("rgb24", "rgb48le", "nv12", "yuyv422")),
+]
+
+
+@pytest.mark.parametrize(("encoder", "pix_fmt", "size"), SCALED)
+def test_scaler_threads_change_no_byte(
+    tmp_path: Path, encoder: str, pix_fmt: str, size: str
+) -> None:
+    # The detector's input doesn't depend on its scaler's thread count (DESIGN.md, Shot
+    # detection): the first pass's frames, scaled on 4 threads, are the official command's with
+    # its scaler on 1 thread, byte for byte, on each format; and that command's on 4 threads and
+    # on ffmpeg's own count, which follows the CPUs.
+    path = tmp_path / ("clip.mkv" if encoder == "ffv1" else "clip.nut")
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=s={size}:r=25"),
+            *("-frames:v", "4", "-pix_fmt", pix_fmt, "-c:v", encoder, str(path)),
+        ],
+        check=True,
+    )
+    held = subprocess.run(
+        [
+            *("ffprobe", "-v", "error", "-select_streams", "v:0"),
+            *("-show_entries", "stream=pix_fmt", "-of", "csv=p=0", str(path)),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert held.stdout.strip() == pix_fmt  # not another one the encoder took in its place
+    recorder = Recorder()
+    assert first.scan(path, recorder).frames == 4
+    one = official(path, "-threads", "1")
+    assert len(one) == 4 and recorder.frames.tobytes() == one.tobytes()
+    assert official(path, "-threads", "4").tobytes() == one.tobytes()
+    assert official(path).tobytes() == one.tobytes()
+
+
+def test_scaled_on_four_threads(clip: Path) -> None:
     # The detector's output, the first pass's third (scan.command), its filter graph named vf#2:0
-    # by ffmpeg, which inserts the scaler there: one thread, where ffmpeg would give it one per
-    # CPU and swscale as many again (media/scan.py, _detector_output). The other graphs as ffmpeg
-    # sets them.
+    # by ffmpeg, which inserts the scaler there: 4 threads for the scaler, whatever the CPUs,
+    # where ffmpeg would give it one per CPU, 16 at most. By ffmpeg's thread names 7, the graph's
+    # own, libavfilter's 3 workers and swscale's 3; and none for its encoder, whose 4 frame
+    # threads, each free to hold a frame, would be named after the graph's thread too, 11 in all
+    # (media/scan.py, _detector_output). The other graphs as ffmpeg sets them.
     recorder = Recorder(count=True)
     first.scan(clip, recorder)
     assert recorder.threads is not None
     graphs = {name: count for name, count in recorder.threads.items() if name.startswith("vf#")}
     assert set(graphs) == {"vf#0:0", "vf#1:0", "vf#2:0"}, recorder.threads
-    assert graphs["vf#2:0"] == 1, graphs
+    assert graphs["vf#2:0"] == 7, graphs
 
 
 def test_without_detector_no_third_output(clip: Path) -> None:
@@ -237,7 +291,8 @@ def test_without_detector_no_third_output(clip: Path) -> None:
     assert with_frames[len(arguments) :] == [
         *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux"),
         *("-map_metadata", "-1", "-map_chapters", "-1"),
-        *("-threads", "1", "-s", "48x27", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:3"),
+        *("-threads", "4", "-thread_type", "slice", "-s", "48x27", "-pix_fmt", "rgb24"),
+        *("-f", "rawvideo", "pipe:3"),
     ]
     # No output takes the source's metadata, whose text ffmpeg would print among the lines the
     # pass reads (ffmpeg.NO_METADATA): each of the three.

@@ -469,23 +469,44 @@ def command(path: Path, frames: int | None = None) -> list[str]:
 
 def _detector_output(descriptor: int) -> list[str]:
     """The first pass's output of the shot detector's frames, to the pipe of file descriptor
-    descriptor: every frame decoded, scaled to WIDTH x HEIGHT rgb24 on one thread."""
+    descriptor: every frame decoded, scaled to WIDTH x HEIGHT rgb24 on 4 threads, its encoder
+    holding no frame."""
     # DESIGN.md, Shot detection: every frame of the first pass's decode, scaled to 48x27 as
-    # TransNetV2's official extraction scales them (ffmpeg's default scaler), on one thread. As
-    # measurement extracted them (research/scripts/scd_scores.py's tnet_frames and decode_cmd;
+    # TransNetV2's official extraction scales them (ffmpeg's default scaler), on a fixed number of
+    # threads, 4, so that its input doesn't depend on the CPU count. As measurement extracted
+    # them (research/scripts/scd_scores.py's tnet_frames and decode_cmd;
     # research/docs/scene-detection.md, TransNetV2): ffmpeg's output scaler, -s 48x27 -pix_fmt
     # rgb24, the official predict_video's arguments (inference/transnetv2.py at 85cef72), with
     # its default flags (bicubic); every frame passed through, measurement's choice, where the
     # official command leaves the rawvideo muxer's default, a constant rate, free to drop or
     # repeat frames by timestamp. An output of the first pass's own ffmpeg: the index's decoded
-    # frames, no second decode. One thread: fftools gives the graph of an output, where it inserts
-    # that scaler (fftools/ffmpeg_filter.c:1674-1694 at n9.0.2), the thread count of the output's
-    # own -threads (ffmpeg_mux_init.c:1371, 955-958; ffmpeg_filter.c:1284-1285, 2076-2078), which
-    # swscale takes (libavfilter/vf_scale.c:424-426): by ffmpeg's thread names, that graph then
-    # runs on its own thread alone, where it takes 63 by default on 32 CPUs and 33 with the global
-    # -filter_threads 1 (measured 2026-10-09). The bytes didn't change with the count: the same
-    # at 1, 2, 16 and 32 threads on 10 formats, gray to 12-bit 4:2:0 4K, and the official
-    # command's and measurement's on a 3,000-frame 1080p x264 file (tests/test_detection.py).
+    # frames, no second decode. Four threads: fftools gives the graph of an output, where it
+    # inserts that scaler (fftools/ffmpeg_filter.c:1674-1694 at n9.0.2), the thread count of the
+    # output's own -threads (ffmpeg_mux_init.c:1371, 955-958; ffmpeg_filter.c:1284-1285,
+    # 2076-2078), which swscale takes (libavfilter/vf_scale.c:424-426), where the official
+    # command leaves it ffmpeg's own, one more than the CPUs and 16 at most
+    # (libavutil/slicethread.c:27, 110-112). One thread, as first built, was a fast pass's
+    # bottleneck, about half its speed (DESIGN.md's figures); on a 32-CPU desktop under other
+    # load (2026-10-10, 3,000 frames of 1080p x264, a detector taking nothing, 3 runs), 756-811
+    # fps on one thread and 1,382-1,472 on 4, for 1,668-1,779 without this output; 2 gave
+    # 1,084-1,260 and 8 1,314-1,489.
+    # -threads is the encoder's count too, and rawvideo encodes in frame threads, which hold up
+    # to as many frames as they are, until more come or the stream ends (media/reader.py,
+    # ONE_THREAD; libavcodec/frame_thread_encoder.c:322-327). No reader of this pass waits for a
+    # frame on one pipe before it reads another, each pipe drained by a thread of its own (_Run),
+    # so 4 frames held would stall nothing; they are still not held: -thread_type slice leaves
+    # the encoder without frame threads (frame_thread_encoder.c:128-130), and rawvideo has no
+    # slice threads (rawenc.c:89-90), so that each frame comes out as it goes in, as it did on
+    # one thread, at the same speed (1,405-1,472 fps with the frame threads). By ffmpeg's thread
+    # names, the graph then runs on 7 threads, its own, libavfilter's 3 workers and swscale's 3
+    # (11 with the encoder's 4 frame threads, named after the graph's thread, which opens the
+    # encoder), where it takes 63 by default on 32 CPUs. The scaler's count set by its own
+    # option, in a -vf scale=48:27:threads=4 with -threads 1, gave the same bytes too, but no
+    # longer by the official command's arguments. The bytes don't change with the count: the
+    # same as the official command's at 1, 2, 4, 16 and 32 threads, and at 4 with -thread_type
+    # slice, on 19 pixel formats, gray to 16-bit 4:4:4 and packed RGB, at 6 sizes from 64x48 to
+    # 4K (2026-10-10; 18 of them at 1 and 4 threads in tests/test_detection.py), and the
+    # official command's and measurement's on a 3,000-frame 1080p x264 file (2026-10-09).
     # Measurement's decode differed in what doesn't change a frame: no -copyts, 16 decoder and
     # filter threads, -reinit_filter 0 on its DVD, where a graph rebuilt here takes the frames'
     # new tags (the same bytes on a stream tagged from its 15th frame: tests/test_detection.py).
@@ -493,7 +514,8 @@ def _detector_output(descriptor: int) -> list[str]:
     # (command; ffmpeg.NO_METADATA).
     return [
         *("-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "demux", *NO_METADATA),
-        *("-threads", "1", "-s", f"{WIDTH}x{HEIGHT}", "-pix_fmt", "rgb24"),
+        *("-threads", "4", "-thread_type", "slice"),
+        *("-s", f"{WIDTH}x{HEIGHT}", "-pix_fmt", "rgb24"),
         *("-f", "rawvideo", f"pipe:{descriptor}"),
     ]
 
