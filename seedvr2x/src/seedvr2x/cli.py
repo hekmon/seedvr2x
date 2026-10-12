@@ -1377,7 +1377,7 @@ def _work(output: Path) -> Path:
     main returns, however the run ends. What a killed run left there is removed; anything else is
     refused, never deleted."""
     from seedvr2x.runtime.job import JobError
-    from seedvr2x.runtime.tiling import SCRATCH
+    from seedvr2x.runtime.tilegrid import SCRATCH
     from seedvr2x.runtime.units import CHECKSUMS, COPY
 
     work = output.with_name(f"{output.name}.work")

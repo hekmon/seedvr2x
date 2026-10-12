@@ -769,10 +769,10 @@ def test_plan_recorded_and_phases_entered(
         "scratch_allowance": 0,
         "free": FREE,
         "budget": FREE - planner.MARGIN,
-        "encode_peak": planner.encode_peak(PADDED, latents=6),
+        "encode_peak": planner.encode_peak(PADDED),
         # A window of the 6-latent shot, over the shot's draw (planner.dit_draw).
         "dit_peak": planner.dit_peak(PADDED, 4),
-        "decode_peak": planner.decode_peak(PADDED, TARGET, latents=6),
+        "decode_peak": planner.decode_peak(PADDED, TARGET),
         "bound": "encode",
         "host": planner.HOST_RESIDENT,
         "scratch": 0,
@@ -1319,7 +1319,7 @@ def test_size_and_host_memory_refused(
     there = sorted(path.name for path in tmp_path.iterdir())
     # The stand-in's frames are too small for a tile: their floor is the untiled encode's, with
     # the room a VAE pass is held to (planner.VAE_ROOM).
-    encode = planner.encode_peak(PADDED, None, 0, latents=6) + planner.VAE_ROOM
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     with monkeypatch.context() as patch:
         free_memory(patch, encode + planner.MARGIN - 1)
         assert upscale(tmp_path, source_path, "out", *JOB) == 1
@@ -1586,7 +1586,7 @@ def test_recorded_plan_no_longer_fits(
     kept = contents(tmp_path / "out")
     steps.stop = None
     steps.calls.clear()
-    encode = planner.encode_peak(PADDED, None, 0, latents=6) + planner.VAE_ROOM
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     free_memory(monkeypatch, encode + planner.MARGIN - GIB // 4)
     assert upscale(tmp_path, source_path, "out", *JOB) == 1
     assert (
@@ -1752,8 +1752,8 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
     kept = planner.scratch(LARGER_PADDED, 21)
     assert made[0] == Plan(5, Tiles(640), Tiles(512), scratch_allowance=kept)
     assert made[1].scratch == kept == 21 * 6 * 560 * 704
-    assert planner.grid(LARGER_PADDED, Tiles(640)) == (1, 2)
-    assert planner.grid(LARGER_PADDED, Tiles(512)) == (2, 2)
+    lines = planner.said(*made, "a card", LARGER_TARGET, JOB_SHOTS, pins)
+    assert "encode in tiles of 640 px, 1 x 2, decode in tiles of 512 px, 2 x 2," in lines[6]
     assert [(kind, tiles, allowance) for kind, tiles, _, allowance in given] == [
         (kind, Tiles(640) if kind == "encode" else Tiles(512), kept) for kind in kinds
     ]

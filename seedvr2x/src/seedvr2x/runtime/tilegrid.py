@@ -1,9 +1,9 @@
 """The arithmetic of VAE tiling (DESIGN.md, Pipeline, per shot, steps 1 and 3; Memory planner):
 the tiles numz lays over a picture, the largest one's area, and the bytes of a tiled shot's
-scratch. Nothing here imports torch, nor anything that does: it is for the planner to import, and
-count with before the command line imports torch, as it does with runtime/plan.py; nothing but
-runtime/tiling.py imports it yet. runtime/tiling.py runs the passes over this grid, and gives
-every name here as its own.
+scratch. Nothing here imports torch, nor anything that does: the planner imports it
+(runtime/planner.py), and counts with it before the command line imports torch, as it does with
+runtime/plan.py. runtime/tiling.py runs the passes over this grid, and gives every name here as
+its own.
 
 The grid is numz's, bit for bit (v1): tiles laid from the top left corner, a stride of the tile's
 side less the overlap. Line references are to numz at 4490bd1
@@ -66,8 +66,9 @@ def grid(latent_size: tuple[int, int], tiles: Tiles) -> list[Tile]:
 def largest(padded: tuple[int, int], tiles: Tiles) -> int:
     """The area, in output pixels, of the largest tile of the grid over frames padded to
     (height, width) pixels (job.padded_size), cut off at the picture's edges: a 1280-px tile on a
-    1104x1920 frame is 1104 x 1280 = 1,413,120. The tile a pass's peak memory follows (DESIGN.md,
-    Memory planner)."""
+    1104x1920 frame is 1104 x 1280 = 1,413,120. The tile DESIGN.md counts a pass's peak memory by
+    (Memory planner); a shorter tile of the grid can take more, and the planner counts each of
+    the grid's shapes (planner._fit)."""
     area = max(tile.rows * tile.columns for tile in grid(latent_size(padded), tiles))
     return area * SCALE**2
 
