@@ -10,11 +10,14 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 
-from seedvr2x.media import bitstream, rate
+import numpy as np
+
+from seedvr2x.media import bitstream, grid, rate
 from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion, conversion_for
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.files import sha256
-from seedvr2x.media.index import FrameIndex
+from seedvr2x.media.grid import Filling, Places
+from seedvr2x.media.index import NOPTS, FrameIndex
 from seedvr2x.media.probe import DoviRecord, VideoStream, probe
 from seedvr2x.media.rate import Timeline
 from seedvr2x.media.reader import Reader
@@ -152,6 +155,14 @@ COMBED = Fraction(1, 10)
 # Blu-ray film (research/docs/seeking.md, mechanism 7), 80 GB against its source's 14.5 GB.
 REMAKE_COST = "lossless, so large: 0.53-0.55 MB a frame on a 1080p film; and a full encode"
 
+# The share of a source's places filled from which its warning says what such a file is (_missing;
+# DESIGN.md, Input: "A file whose encoder dropped repeated frames on a constant grid is read the
+# same way, each drawing held as it was. The share of filled places is said, however large").
+# PROVISIONAL (implementation, 2026-10-12, a question for design: DESIGN.md gives no share): a
+# tenth, where a decoder's dropped pictures are a few frames of a film (2 of 99,585 on the source
+# this was found on, research/docs/seeking.md, mechanism 1).
+DROPPED_REPEATS = Fraction(1, 10)
+
 
 @dataclass(frozen=True)
 class Declared:
@@ -169,10 +180,11 @@ class Declared:
 @dataclass(frozen=True)
 class FirstPass:
     """What the first pass found in a file: its frames, decoded and counted, at the constant rate
-    declared; its content's SHA-256, when hashed; its frame index (media/index.py); idet's counts
-    (scan.Idet)."""
+    declared, the places they leave empty on that rate's grid counted with them, each filled
+    (in_places); its content's SHA-256, when hashed; its frame index, in places (media/index.py);
+    idet's counts (scan.Idet)."""
 
-    frames: int
+    frames: int  # the places: the frames decoded and the missing ones filled
     sha256: str | None = None
     index: FrameIndex | None = None
     idet: Idet | None = None
@@ -185,10 +197,12 @@ class Source:
     path: Path
     stream: VideoStream
     conversion: Conversion
-    frames: int  # counted by the first pass
+    # Counted by the first pass, in places: the frames decoded and the missing ones filled, the
+    # frames of everything after the pass (in_places); the index's rows.
+    frames: int
     sample_aspect: Fraction  # the override, else the declared one, else 1 (square pixels)
     sha256: str | None = None  # the file's content, hashed for a manifest
-    index: FrameIndex | None = None  # the first pass's frame index, or its record's
+    index: FrameIndex | None = None  # the first pass's frame index, in places, or its record's
     rate_override: Fraction | None = None  # --frame-rate, which its first pass accepted
     idet: Idet | None = None  # idet's counts in its first pass, or its record's
 
@@ -203,6 +217,14 @@ class Source:
         rule, the manifest's output, split's input copies (DESIGN.md, Input: R replaces the
         declared rate)."""
         return self.stream.frame_rate if self.rate_override is None else self.rate_override
+
+    @property
+    def filled(self) -> Filling | None:
+        """What was filled of its rate's grid, the places its frames leave empty there
+        (grid.filling), for its warning and its record; None for a source without such a place,
+        or without an index."""
+        found = None if self.index is None else grid.filling(self.index)
+        return found if found is not None and found.filled else None
 
     def decoder(self) -> Reader:
         """A reader of every frame, from the first (reader)."""
@@ -328,10 +350,11 @@ def first_pass(
     declared: Declared, hashed: bool = False, detector: Detects | None = None
 ) -> FirstPass:
     """Decode every frame of the file once, to count, time and index them (media/scan.py), refused
-    unless at the constant rate declared, or --frame-rate's (timing_refusal); given the shot
-    detector, feed it every frame, its probabilities kept in the index; and, when `hashed`, hash
-    its content meanwhile, from another thread: the file read a second time, at the speed of the
-    disk, while ffmpeg decodes it.
+    unless at the constant rate declared, or --frame-rate's (timing_refusal), the places its
+    frames leave empty on that rate's grid then filled (in_places): the frames and the index
+    returned are in places; given the shot detector, feed it every frame, its probabilities kept
+    in the index; and, when `hashed`, hash its content meanwhile, from another thread: the file
+    read a second time, at the speed of the disk, while ffmpeg decodes it.
 
     Raises MediaError with the reason for a refusal."""
     path = declared.path
@@ -351,22 +374,31 @@ def first_pass(
     refusal = timing_refusal(declared, scanned)
     if refusal:
         raise MediaError(f"{path}: {refusal}")
+    # The grid is built here, after the judge: the scan's index and probabilities stay the
+    # decoded frames', what the detector saw and what is compared with measured arrays. The
+    # frames counted are the places: those the scan counted, and the places filled.
+    index = in_places(declared, scanned)
+    frames = scanned.frames
+    if index is not None and scanned.index is not None:
+        frames += index.frames - scanned.index.frames
     if not hashed:
-        return FirstPass(scanned.frames, index=scanned.index, idet=scanned.idet)
+        return FirstPass(frames, index=index, idet=scanned.idet)
     reader.join()
     [digest] = hashed_as
     if isinstance(digest, OSError):
         raise MediaError(f"{path}: not readable: {digest}") from digest
     if isinstance(digest, Exception):
         raise digest
-    return FirstPass(scanned.frames, digest, scanned.index, scanned.idet)
+    return FirstPass(frames, digest, index, scanned.idet)
 
 
 def counted(declared: Declared, found: FirstPass) -> Source:
     """The source declared, its frames counted and indexed by its first pass, or by the record of
-    one; warned of when idet found combed frames there (combing). Their timing is the first
-    pass's to judge (timing_refusal), never judged again here: a resume that takes the pass
-    from its record reads on at the rate recorded (DESIGN.md, Pause and resume)."""
+    one; warned of when idet found combed frames there (combing), and when places of its rate's
+    grid were left empty and filled (_missing), on every run. Their timing is the first pass's
+    to judge (timing_refusal), never judged again here: a resume that takes the pass from its
+    record reads on at the rate recorded, its index in places already (DESIGN.md, Pause and
+    resume)."""
     stream = declared.stream
     source = Source(
         declared.path,
@@ -381,10 +413,12 @@ def counted(declared: Declared, found: FirstPass) -> Source:
     )
     declares = rate.fraction(stream.frame_rate)
     forced = "" if source.rate_override is None else f" (--frame-rate; it declares {declares})"
+    filled = source.filled
     logger.info(
-        "%s: %d frames, %dx%d %s at %s fps%s, sample aspect %s (display %s), read as %s",
+        "%s: %d frames%s, %dx%d %s at %s fps%s, sample aspect %s (display %s), read as %s",
         source.path,
         source.frames,
+        "" if filled is None else f" ({filled.decoded} decoded, {filled.filled} filled)",
         stream.width,
         stream.height,
         stream.pix_fmt,
@@ -394,8 +428,77 @@ def counted(declared: Declared, found: FirstPass) -> Source:
         _ratio(source.display_aspect),
         source.conversion.describe(),
     )
+    if filled is not None:
+        logger.warning("%s: %s", source.path, _missing(source, filled))
     combing(source)
     return source
+
+
+def _missing(source: Source, found: Filling) -> str:
+    """What a source's warning says of the places its frames leave empty on its rate's grid,
+    `found` (grid.filling), each filled by the frame before it, held (DESIGN.md, Input: "Missing
+    frames are filled, not refused ... says so (the frame, the hole's length, how many holes)";
+    "The share of filled places is said, however large"): the first hole's frame and length, with
+    the timestamps on both sides of it, the file's own, in seconds, as a jump's are said
+    (scan.timing_error); how many holes and the longest; the places, the filled ones, their share
+    and the frames decoded. From DROPPED_REPEATS of the places up, what such a file is. Frames
+    are numbered as everything after the first pass numbers them, by place."""
+    index, first = source.index, found.first
+    assert index is not None and first is not None
+    on = f"the rate it declares, {rate.fraction(source.frame_rate)}"
+    if source.rate_override is not None:
+        on = f"the rate it is taken at, {rate.fraction(source.frame_rate)} (--frame-rate)"
+    # The file's own timestamps around the hole: the frame held's and the next frame's, which
+    # the index has on those frames' own rows.
+    after = first.first + first.length
+    stepped = ""
+    if after < index.frames and NOPTS not in (int(index.pts[first.held]), int(index.pts[after])):
+        before, then = (int(index.pts[row]) * index.time_base for row in (first.held, after))
+        stepped = (
+            f"its timestamps step from {float(before):.3f} to {float(then):.3f} s there,"
+            f" {first.length + 1} frames of {on}"
+        )
+    if found.holes == 1:
+        empty = (
+            f"place {first.first}"
+            if first.length == 1
+            else f"places {first.first} and {first.first + 1}"
+            if first.length == 2
+            else f"places {first.first} to {after - 1}"
+        )
+        their = "its" if first.length == 1 else "their"
+        what = (
+            f"{_frames(first.length)} missing after frame {first.held}: "
+            + (f"{stepped}, leaving" if stepped else f"its timestamps leave, at {on},")
+            + f" {empty} empty on that rate's grid; read as a player shows it, frame {first.held}"
+            f" held in {their} place"
+        )
+    else:
+        what = (
+            f"{_frames(found.filled)} missing in {found.holes} holes, the first after frame"
+            f" {first.held}, {_frames(first.length)} long"
+            + (f" ({stepped})" if stepped else "")
+            + f", the longest {_frames(found.longest)}: its timestamps leave those places empty on"
+            f" the grid of {on}; read as a player shows it, the frame before each hole held"
+            " through it"
+        )
+    share = float(found.share) * 100
+    decimals = max(1, 1 - math.floor(math.log10(share)))
+    said = (
+        f"{what}: {found.places} frames, {found.filled} of them filled ({share:.{decimals}f}%),"
+        f" {found.decoded} decoded"
+    )
+    if found.share >= DROPPED_REPEATS:
+        said += (
+            "; so large a share is what an encoder leaves that drops repeated frames, each"
+            " picture held as it was until the next"
+        )
+    return said
+
+
+def _frames(count: int) -> str:
+    """A count of frames, as messages say it: 1 frame, 2 frames."""
+    return f"{count} frame{'' if count == 1 else 's'}"
 
 
 def combing(source: Source) -> None:
@@ -440,7 +543,13 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
     that rate or --frame-rate. Then seedvr2x's own test of a file the rule passes: every frame
     strictly within half a frame of its place on the declared rate's timeline, counted from the
     first frame, or refused too (_leaves). With --frame-rate R: every frame within half a frame
-    of R's timeline (_off)."""
+    of R's timeline (_off).
+
+    Frames that sit on the rate's grid with places left empty are no refusal (_on_grid; DESIGN.md,
+    Input: "Missing frames are filled, not refused"): looked for where the rule above fails, by
+    the spread of the frames' durations without --frame-rate, by R's timeline with it, never
+    where it passes; read with those places filled (in_places), which the source's warning says
+    (counted)."""
     path, stream, index = declared.path, declared.stream, scanned.index
     error = timing_error(scanned, stream.frame_rate, stream.avg_frame_rate)
     if scanned.discontinuity is not None:
@@ -451,6 +560,8 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
             return error
         if not error:
             return _leaves(stream.frame_rate, index)
+        if _on_grid(declared, scanned) is not None:
+            return ""
         found = _guided(index)
         if found is None:
             return error
@@ -475,17 +586,34 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
     # timeline is its own, so that, taken at R, none is dropped or doubled: the bound that keeps
     # every frame once.
     on = rate.timeline(index, forced)
-    if not on.holds:
-        return _off(on, declared, index, passes=not error)
     declares = rate.fraction(stream.frame_rate)
+    where = (
+        "the rate it declares" if forced == stream.frame_rate else f"where it declares {declares}"
+    )
+    holed = None
+    if not on.holds:
+        # Frames on R's grid with places left empty are read, those places filled (_on_grid),
+        # the 1 ms bound holding the time a place there as it does without the option: R's
+        # waiver of it is for frames that hold R's timeline frame after frame, above.
+        holed = _on_grid(declared, scanned)
+        if holed is None:
+            without = _on_grid(replace(declared, rate_override=None), scanned)
+            return _off(on, declared, index, passes=not error, holed=without)
     logger.info(
         "%s: --frame-rate %s: every frame %s, %s: taken at that rate",
         path,
         rate.fraction(forced),
-        _within(on, "its"),
-        "the rate it declares" if forced == stream.frame_rate else f"where it declares {declares}",
+        _within(on, "its")
+        if holed is None
+        else _within(holed, "its place on that rate's") + ", places left empty between them",
+        where,
     )
-    if not error and forced != stream.frame_rate and rate.timeline(index, stream.frame_rate).holds:
+    if holed is None:
+        too = not error and rate.timeline(index, stream.frame_rate).holds
+    else:
+        # With places left empty: on the declared rate's grid as well, by the same judge.
+        too = _on_grid(replace(declared, rate_override=None), scanned) is not None
+    if forced != stream.frame_rate and too:
         # PROVISIONAL (DESIGN.md has R accepted when every frame lies within half a frame of its
         # timeline, and says nothing of a file whose frames lie on the timeline of the rate it
         # declares as well): taken at R all the same, as asked, said, since its output then lasts
@@ -505,6 +633,132 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
             "shorter" if change < 0 else "longer",
         )
     return ""
+
+
+def _on_grid(declared: Declared, scanned: Scan) -> Places | None:
+    """Each frame's place on the grid of the source's rate, the declared one or --frame-rate's,
+    when its frames sit on that grid with places left empty, which are then filled (in_places);
+    None otherwise, for the rule of before the places to judge the file alone (timing_refusal):
+    DESIGN.md's "Frames that sit on the declared rate's grid with places left empty ... have one
+    reading, the one a player shows: the frame before the hole, held", against "A contradicted
+    rate has two readings, which is why it is refused; so is a frame off the grid, a variable
+    frame rate" (Input). The judge of the holes, and the one place that says what a hole is.
+
+    Looked for only where the rule of before fails, so that a file read until now is read as it
+    was, and a constant cadence stays what it was: never after a jump in the timestamps
+    (scan.Discontinuity; a hole past scan.JUMP_FORWARD's 10 s is one); without --frame-rate, when
+    sptenc's rule fails by the spread of the frames' durations, shortest and longest more than
+    TOLERANCE_US apart (scan.timing_error's first test: frames every 2/R seconds declared R pass
+    it, and are refused as the contradicted rate they are, R/2 named); with --frame-rate R, when
+    a frame lies half a frame or more from R's timeline counted frame after frame
+    (rate.Timeline.holds).
+
+    Each frame's place is then the nearest on the rate's timeline, counted from the first frame
+    (grid.places), and the frames sit on the grid when all of:
+
+    - every frame has a timestamp, none lies exactly between two places, and no two share a
+      place, the places strictly increasing: each frame then lies strictly within half a frame
+      of its own place, the nearest being the one within half a frame, DESIGN.md's bound for a
+      frame's place (Input: "when a frame lies half a frame or more from its place");
+    - a step spans two places or more: else no place is empty, and the refusal is today's;
+    - the steps are the grid's own, a hole's step lasting the frames it skips: every step
+      spanning k places, 2 or more, lasts k frames of the rate to within half a frame, strictly;
+      and sptenc's rule on each step divided by the places it spans, the time a place: shortest
+      and longest within TOLERANCE_US of each other, and the rate's period within them
+      (scan.timing_error's two tests, of whole steps there), with --frame-rate R as without,
+      against R's period: R waives that bound for frames that hold its timeline counted frame
+      after frame (timing_refusal), not once places are skipped. A step of 1.5 to 2.5 frames
+      would else be a missing frame: segments joined by ffmpeg's concat demuxer alone, each
+      starting 64 ms, 1.6 frames of 25 fps, after the last frame of the one before, were read
+      under --frame-rate 25 with a frame doubled at two joins of four and none at the others,
+      and 8 real segments of 24 frames at 24000/1001 whose AAC audio lasts 1.012 s, joined so
+      (steps of 74 ms, 1.77 frames), with one at 5 joins of 7, where no frame is missing (a
+      review's findings, 2026-10-12). Nearest places alone would
+      fill a retagged file's drift, a place skipped every 1,000 frames of 24000/1001 material
+      taken at 24, by a step of one frame: ffmpeg's constant-rate judgement, and the
+      contradicted rate DESIGN.md refuses. S9's long steps, 62-63 ms where 24/1 is declared, are
+      1.5 frames, no whole number of them: refused, and guided to 24000/1001, as before
+      (research/docs/seeking.md, mechanism 7). The time a place alone would let a long hole take
+      the drift's place with it: 70 frames of 24000/1001 missing where the frames come half a
+      frame off 24/1's grid span 71 places, 41.1 ms each, within 1 ms of the others;
+    - the spans have a step that isn't a multiple of the others' common divisor: frames whose
+      every step spans a multiple of g places, g above 1, sit on the grid of R/g, a contradicted
+      rate (two readings: R/g with fewer places empty, R with more), refused as before. One
+      step that spans no multiple of g shows the grid to be R's, and the file is read, its
+      repeats filled.
+
+    PROVISIONAL (implementation, 2026-10-12, questions for design: DESIGN.md has "sit on the
+    declared rate's grid", "within half a frame" and "no two frames in one place", not the steps'
+    tests, which are the reading above. --frame-rate's waiver of the 1 ms bound is DESIGN.md's,
+    for a file that holds R's timeline; that it stops where places are skipped is ours, on
+    DESIGN.md's "--frame-rate can't hold there" of a join: frames whose steps wander more than
+    1 ms a place with a frame really missing, S9's with a hole, are then refused with the
+    option as without, and have the remake alone, which numbers the frames as they come, the
+    hole closed. That a hole's step is held to half a frame is ours. And the common divisor is
+    ours: by the rules before it alone, frames at 12 fps declared 24/1 with one of theirs
+    missing, a step of 4 places among steps of 2, and a 24 fps file given --frame-rate 48, would
+    be read with half their places filled or more, every frame doubled, where the same cadence
+    without that step is refused as a contradicted rate; it holds no further: with one step of
+    3 places among them, the frames are read at 24/1, 7 places of 14 filled, as an encoder
+    that drops repeated frames leaves a file, DESIGN.md's "however many places are filled")."""
+    index, forced = scanned.index, declared.rate_override
+    if index is None or scanned.discontinuity is not None or scanned.frames < 2:
+        return None
+    if forced is None:
+        if not scanned.durations or scanned.longest - scanned.shortest <= TOLERANCE_US:
+            return None
+    elif rate.timeline(index, forced).holds:
+        return None
+    on = declared.stream.frame_rate if forced is None else forced
+    found = grid.places(index, on)
+    if not found.timed.all() or found.tie.any():
+        return None
+    spans = np.diff(found.place)
+    # The common divisor refuses only while every step spans a multiple of it: one step that
+    # doesn't shows the grid, and the file is read, its repeats filled (pts 0, 2, 4, 6, 9, 11
+    # and 13 in 1/24 s declared 24/1: 14 places, 7 filled, where 0 to 12 by 2 is refused, 12/1
+    # named; DESIGN.md, Input: "read the same way, however many places are filled").
+    if int(spans.min()) < 1 or int(spans.max()) < 2 or int(np.gcd.reduce(spans)) != 1:
+        return None
+    steps = np.diff(index.pts)
+    # A step of `ticks` ticks of p/q seconds lasts ticks p N / (q D) frames of the rate, N/D:
+    # within half a frame of its span, strictly, when |2 ticks p N - 2 span q D| < q D, integers.
+    long = spans >= 2
+    p, q = index.time_base.numerator, index.time_base.denominator
+    exact = steps[long].astype(object) * (2 * p * on.numerator)
+    whole = spans[long].astype(object) * (2 * q * on.denominator)
+    if any(abs(int(off)) >= q * on.denominator for off in exact - whole):
+        return None
+    # The time a place, exact: each step, in ticks, over the places it spans; the shortest and
+    # the longest among those of each span. With --frame-rate too (PROVISIONAL, the docstring's):
+    # returning the places here for R read a join's step of 1.6 frames as a missing frame.
+    each: list[Fraction] = []
+    for span in np.unique(spans).tolist():
+        ticks = steps[spans == span]
+        each += [Fraction(int(ticks.min()), span), Fraction(int(ticks.max()), span)]
+    microseconds = index.time_base * 1_000_000
+    shortest, longest = min(each) * microseconds, max(each) * microseconds
+    period = Fraction(1_000_000) / on
+    if longest - shortest > TOLERANCE_US:
+        return None
+    if not shortest - TOLERANCE_US <= period <= longest + TOLERANCE_US:
+        return None
+    return found
+
+
+def in_places(declared: Declared, scanned: Scan) -> FrameIndex | None:
+    """The first pass's frame index in places (media/grid.py), for a source timing_refusal
+    accepts: the scan's own index, of the decoded frames, when they leave no place empty on the
+    rate's grid, the same object, its file the bytes of before the places; else each frame at
+    the place the judge gives it (_on_grid), every place left empty a held row, which shows the
+    frame before it again. Everything after the first pass counts in its rows: the shots, the
+    detector's probabilities, the cuts, the segments, the writers, a resume's reads (DESIGN.md,
+    Input). None when the scan has no index."""
+    index = scanned.index
+    found = _on_grid(declared, scanned)
+    if index is None or found is None:
+        return index
+    return grid.filled(index, found.place, found.rate)
 
 
 def _guided(index: FrameIndex) -> Timeline | None:
@@ -642,14 +896,18 @@ def _exactly(found: Timeline, index: FrameIndex) -> str:
     )
 
 
-def _off(on: Timeline, declared: Declared, index: FrameIndex, passes: bool) -> str:
+def _off(
+    on: Timeline, declared: Declared, index: FrameIndex, passes: bool, holed: Places | None = None
+) -> str:
     """Why --frame-rate R is refused, its frames not all within half a frame of R's timeline: the
     first one off, how far, how many. Then what the file is without the option. One sptenc's rule
     passes at the rate it declares (`passes`) and that holds that rate's timeline: read without
     the option, at that rate; and the rate its timestamps are exactly (rate.exact), when they
     are another's. One the rule passes that leaves that timeline: refused without the option
     too, with the fix that applies (_leaves, _way_out), the exact rate's when there is one. One
-    the rule refuses: the rate its refusal names (_guided), and the two fixes at it.
+    the rule refuses: read without the option all the same when its frames sit on the declared
+    rate's grid with places left empty (`holed`, their places there, _on_grid's), which is said,
+    no rate named; else the rate its refusal names (_guided), and the two fixes at it.
 
     A file the rule passes is never given a rate that holds its frames within half a frame alone
     (rate.follows), by DESIGN.md's rule (Input: a rate is named when the timestamps follow it
@@ -693,6 +951,13 @@ def _off(on: Timeline, declared: Declared, index: FrameIndex, passes: bool) -> s
         if exact is None or exact.rate == declares:
             return reason
         return f"{reason}; {_exactly(exact, index)}"
+    if holed is not None:
+        missing = int(holed.place[-1]) + 1 - len(holed.place)
+        return (
+            f"{reason}; without --frame-rate, the file is read at the rate it declares,"
+            f" {rate.fraction(declared.stream.frame_rate)}, on whose grid its frames sit, the"
+            f" {_frames(missing)} missing there filled"
+        )
     found = _guided(index)
     if found is None or found.rate == on.rate:
         return reason
@@ -702,7 +967,7 @@ def _off(on: Timeline, declared: Declared, index: FrameIndex, passes: bool) -> s
     )
 
 
-def _within(found: Timeline, whose: str = "that rate's") -> str:
+def _within(found: Timeline | Places, whose: str = "that rate's") -> str:
     """How far the frames stray from a rate's timeline, `whose`: within 10.8 ms of that rate's
     timeline (0.26 of a frame)."""
     return (

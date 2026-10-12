@@ -265,6 +265,22 @@ def _input(source: Source) -> dict[str, Any]:
         data = source.index.to_bytes()
         digest = hashlib.sha256(data).hexdigest()
         record["index"] = {"name": INDEX, "bytes": len(data), "sha256": digest}
+        filled = source.filled
+        if filled is not None and filled.first is not None:
+            # Only for a source with places left empty on its rate's grid, each filled by the
+            # frame before it, held (DESIGN.md, Input: "says so ... and records it"): "frames"
+            # above counts the places; here the frames ffmpeg decodes, the holes, the places
+            # they fill, the first one's first place with its length, and the longest's, in
+            # frames. Information drawn from the index, whose SHA-256 above holds which rows are
+            # held; a resume compares it as it compares "frames", its index's rows too. A
+            # source without a hole has the record of before the places, byte for byte.
+            record["filled"] = {
+                "decoded": filled.decoded,
+                "holes": filled.holes,
+                "places": filled.filled,
+                "first": {"frame": filled.first.first, "length": filled.first.length},
+                "longest": filled.longest,
+            }
     if source.idet is not None:
         # For information, not compared (resume.UNCOMPARED): what idet found, the warning's
         # figures (source.combing), said again by a resume trusting this record.

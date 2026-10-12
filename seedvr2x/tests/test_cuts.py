@@ -12,6 +12,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
+from seedvr2x.media.grid import filled
 from seedvr2x.media.index import NOPTS, FrameIndex
 from seedvr2x.runtime.cuts import (
     POSSIBLE,
@@ -204,6 +205,39 @@ def test_times_as_a_player_shows_them() -> None:
     # never from the lowest int64 that stands for none ("102481911520608:37:12.400").
     untimed = index_of([NOPTS, 3600, 7200], Fraction(1, 90000), start_time=None)
     assert [timecode(time_of(untimed, k)) for k in (1, 2)] == ["0:00:00.040", "0:00:00.080"]
+
+
+def test_times_of_filled_places() -> None:
+    # In an index in places (media/grid.py: missing frames filled), a frame's number is its
+    # place and its time its row's: a decoded frame's own timestamp, and for a filled place,
+    # which shows the frame before it again, the place's own time, that frame's plus the frame
+    # periods since, to the tick. Frames 0, 1, 2, 5 and 6 of 24000/1001 in milliseconds: places
+    # 3 and 4 lie 42 and 83 ms after frame 2's 83 ms. The cut list's times are the places'.
+    first = index_of([0, 42, 83, 209, 250], Fraction(1, 1000))
+    index = filled(first, [0, 1, 2, 5, 6], Fraction(24000, 1001))
+    assert index.frames == 7
+    assert [timecode(time_of(index, k)) for k in range(7)] == [
+        "0:00:00.000",
+        "0:00:00.042",
+        "0:00:00.083",
+        "0:00:00.125",
+        "0:00:00.166",
+        "0:00:00.209",
+        "0:00:00.250",
+    ]
+    assert cut_list([], index, [Cut(3), Cut(5)]) == "3 0:00:00.125\n5 0:00:00.209\n"
+    # From the first frame's time when the file declares no start: the first row is never held.
+    late = filled(index_of([3600, 7200, 18000], Fraction(1, 90000), None), [0, 1, 4], Fraction(25))
+    assert [timecode(time_of(late, k)) for k in (1, 2, 3, 4)] == [
+        "0:00:00.040",
+        "0:00:00.080",
+        "0:00:00.120",
+        "0:00:00.160",
+    ]
+    # A filled place after a frame without a timestamp has none either.
+    untimed = filled(index_of([0, NOPTS, 200], Fraction(1, 1000)), [0, 1, 4], Fraction(25))
+    assert [time_of(untimed, k) for k in (1, 2, 3)] == [None, None, None]
+    assert time_of(untimed, 4) == Fraction(1, 5)
 
 
 def test_probabilities_to_three_decimals() -> None:

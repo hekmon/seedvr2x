@@ -8,6 +8,10 @@ rate when the timestamps are its exactly, joins by ffmpeg's concat demuxer that 
 frame, refused as no rate's, with the remake that puts them back; and what stays read, constant
 rates to their time base's rounding at any length, joins that keep the frame grid or drift less,
 a video starting after its audio. The command line's run with --frame-rate is test_cli_run.py's.
+Missing frames (DESIGN.md, Input: "Missing frames are filled, not refused"; media/source.py's
+_on_grid and in_places): timestamps made here that sit on a rate's grid with places left empty,
+read in places, with what the source's warning says, and what stays refused, each with its
+message; real files with holes are tests/test_grid.py's, their runs test_cli_run.py's.
 
 Opt-in, a real source whose timestamps contradict its declared rate (S9, on the GPU box): its path
 in SEEDVR2X_RATE_SOURCE, and the rate expected, N/D, in SEEDVR2X_RATE_EXPECTED (optional). One
@@ -24,6 +28,7 @@ import random
 import shlex
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import replace
 from fractions import Fraction
 from itertools import pairwise
@@ -39,14 +44,16 @@ from test_probe import has_encoder
 from seedvr2x.media import ffmpeg, rate
 from seedvr2x.media.conversion import conversion_for
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.grid import Filling, Hole, filling, places
 from seedvr2x.media.index import NOPTS, FrameIndex
-from seedvr2x.media.scan import Scan, scan
+from seedvr2x.media.scan import Discontinuity, Scan, scan, timing_error
 from seedvr2x.media.source import (
     Declared,
     FirstPass,
     counted,
     declare,
     examine,
+    in_places,
     timing_refusal,
 )
 
@@ -821,6 +828,517 @@ def test_matroskas_reading_of_a_rate_holds_for_hours() -> None:
         f" {another_rate(true, '0.000038% shorter')}"
     )
     assert timing_refusal(declaring(declared, true), scanned) == ""
+
+
+MS = Fraction(1, 1000)
+
+
+def missing(
+    frames: int, frame_rate: Fraction, absent: Sequence[int], time_base: Fraction = MS
+) -> Scan:
+    """A first pass's findings for `frames` places at `frame_rate`, their times rounded to
+    `time_base` (rounded), without the frames `absent`, by their number: the others keep their
+    times, as the frames of a file with holes do."""
+    index = rounded(frames, frame_rate, time_base).index
+    assert index is not None
+    return scanned_at(np.delete(index.pts, list(absent)), time_base)
+
+
+def stepping(steps: Sequence[int], time_base: Fraction = MS) -> Scan:
+    """A first pass's findings for frames these steps apart, in ticks of `time_base`."""
+    return scanned_at(np.cumsum([0, *steps], dtype=np.int64), time_base)
+
+
+def filled_in(declared: Declared, scanned: Scan) -> FrameIndex:
+    """The index in places of a source the timing rule reads (source.in_places)."""
+    assert timing_refusal(declared, scanned) == ""
+    index = in_places(declared, scanned)
+    assert index is not None
+    return index
+
+
+def held_rows(index: FrameIndex) -> list[int]:
+    """The places of an index that are held rows, missing frames' filled."""
+    assert index.held is not None
+    return np.flatnonzero(index.held).tolist()
+
+
+def unfilled(declared: Declared, scanned: Scan) -> str:
+    """Why the timing rule refuses a source, which no reading in places saves: the index a
+    first pass would get of it is the scan's own."""
+    said = timing_refusal(declared, scanned)
+    assert said and in_places(declared, scanned) is scanned.index
+    return said
+
+
+def variable(shortest: int, longest: int) -> str:
+    """sptenc's refusal of frames lasting from `shortest` to `longest` ms (scan.timing_error)."""
+    return (
+        f"variable frame rate: frames last from {shortest} to {longest} ms, and only a constant"
+        " frame rate is supported"
+    )
+
+
+def test_the_frames_missing_after_the_first_are_filled(caplog: pytest.LogCaptureFixture) -> None:
+    # The source this was built for (label anime-dark; research/docs/seeking.md, mechanism 1):
+    # 99,583 frames decoded at 24000/1001 in Matroska's milliseconds, their steps 41 and 42 ms
+    # and one of 125, after the first frame: places 1 and 2 of 99,585 are empty. Refused until
+    # now as a variable frame rate; read, its index in places, the first frame held in both, and
+    # said so by the source's warning, with the figures, from a first pass and from the record
+    # of one alike (source.counted).
+    declared = declaring(NTSC_FILM)
+    scanned = missing(99_585, NTSC_FILM, [1, 2])
+    first_pass = scanned.index
+    assert first_pass is not None and scanned.frames == 99_583
+    steps = np.diff(first_pass.pts)
+    assert {step: int((steps == step).sum()) for step in (41, 42, 125)} == {
+        41: 29_044,
+        42: 70_537,
+        125: 1,
+    }
+    assert timing_error(scanned, NTSC_FILM, NTSC_FILM) == variable(41, 125)
+    assert places(first_pass, NTSC_FILM).largest < MS
+    index = filled_in(declared, scanned)
+    assert index.frames == 99_585 and held_rows(index) == [1, 2]
+    assert index.shown[:4].tolist() == [0, 0, 0, 1]
+    assert filling(index) == Filling(99_585, 2, 1, Hole(1, 2, 0), 2)
+    assert index.decoded().to_bytes() == first_pass.to_bytes()
+    warning = (
+        "made.mkv: 2 frames missing after frame 0: its timestamps step from 0.000 to 0.125 s"
+        " there, 3 frames of the rate it declares, 24000/1001, leaving places 1 and 2 empty on"
+        " that rate's grid; read as a player shows it, frame 0 held in their place: 99585 frames,"
+        " 2 of them filled (0.0020%), 99583 decoded"
+    )
+    recorded = FrameIndex.from_bytes(index.to_bytes())
+    for found in (index, recorded):
+        caplog.clear()
+        caplog.set_level(logging.INFO, logger="seedvr2x")
+        source = counted(declared, FirstPass(found.frames, index=found))
+        assert source.frames == 99_585 and source.filled == filling(index)
+        assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == [warning]
+        assert "made.mkv: 99585 frames (99583 decoded, 2 filled), 1920x1080" in caplog.text
+    # With --frame-rate at the rate it declares: the same places, the grid --frame-rate's.
+    caplog.clear()
+    forced = declaring(NTSC_FILM, NTSC_FILM)
+    assert filled_in(forced, scanned).to_bytes() == index.to_bytes()
+    assert (
+        "made.mkv: --frame-rate 24000/1001: every frame within 0.5 ms of its place on that"
+        " rate's timeline (0.01 of a frame), places left empty between them, the rate it"
+        " declares: taken at that rate"
+    ) in caplog.text
+    counted(forced, FirstPass(index.frames, index=index))
+    assert (
+        "3 frames of the rate it is taken at, 24000/1001 (--frame-rate), leaving places 1 and 2"
+        " empty on that rate's grid; read as a player shows it, frame 0 held in their place"
+    ) in caplog.text
+
+
+THIRD = (1, 2, 6, 10)  # of every 12 frames, the missing ones: holes of 2, 1 and 1
+
+
+@pytest.mark.parametrize(
+    ("frames", "frame_rate", "time_base", "absent", "said"),
+    [
+        # A hole later, of one frame.
+        (
+            2000,
+            NTSC_FILM,
+            MS,
+            [1000],
+            "1 frame missing after frame 999: its timestamps step from 41.667 to 41.750 s there,"
+            " 2 frames of the rate it declares, 24000/1001, leaving place 1000 empty on that"
+            " rate's grid; read as a player shows it, frame 999 held in its place: 2000 frames, 1"
+            " of them filled (0.050%), 1999 decoded",
+        ),
+        # One of five frames, in MP4's ticks.
+        (
+            2000,
+            NTSC_FILM,
+            Fraction(1, 24000),
+            [501, 502, 503, 504, 505],
+            "5 frames missing after frame 500: its timestamps step from 20.854 to 21.104 s there,"
+            " 6 frames of the rate it declares, 24000/1001, leaving places 501 to 505 empty on"
+            " that rate's grid; read as a player shows it, frame 500 held in their place: 2000"
+            " frames, 5 of them filled (0.25%), 1995 decoded",
+        ),
+        # Scattered holes of 1 to 3 frames.
+        (
+            2000,
+            NTSC_FILM,
+            MS,
+            [49, 50, 93, 94, 95, 97, 1500, 1998],
+            "8 frames missing in 5 holes, the first after frame 48, 2 frames long (its timestamps"
+            " step from 2.002 to 2.127 s there, 3 frames of the rate it declares, 24000/1001),"
+            " the longest 3 frames: its timestamps leave those places empty on the grid of the"
+            " rate it declares, 24000/1001; read as a player shows it, the frame before each hole"
+            " held through it: 2000 frames, 8 of them filled (0.40%), 1992 decoded",
+        ),
+        # A third of the places empty, as an encoder that drops repeated frames leaves them
+        # (DESIGN.md, Input): read the same way, the share said, and what such a file is.
+        (
+            3000,
+            NTSC_FILM,
+            MS,
+            [frame for frame in range(3000) if frame % 12 in THIRD],
+            "1000 frames missing in 750 holes, the first after frame 0, 2 frames long (its"
+            " timestamps step from 0.000 to 0.125 s there, 3 frames of the rate it declares,"
+            " 24000/1001), the longest 2 frames: its timestamps leave those places empty on the"
+            " grid of the rate it declares, 24000/1001; read as a player shows it, the frame"
+            " before each hole held through it: 3000 frames, 1000 of them filled (33.3%), 2000"
+            " decoded; so large a share is what an encoder leaves that drops repeated frames,"
+            " each picture held as it was until the next",
+        ),
+        # Steps of 2, 1, 3, 2 and 1 frames, at 25 fps in 90 kHz ticks: 4 places in 9 empty.
+        (
+            2700,
+            Fraction(25),
+            Fraction(1, 90000),
+            [frame for frame in range(2700) if frame % 9 in (1, 4, 5, 7)],
+            "1200 frames missing in 900 holes, the first after frame 0, 1 frame long (its"
+            " timestamps step from 0.000 to 0.080 s there, 2 frames of the rate it declares,"
+            " 25/1), the longest 2 frames: its timestamps leave those places empty on the grid of"
+            " the rate it declares, 25/1; read as a player shows it, the frame before each hole"
+            " held through it: 2700 frames, 1200 of them filled (44.4%), 1500 decoded; so large a"
+            " share is what an encoder leaves that drops repeated frames, each picture held as it"
+            " was until the next",
+        ),
+    ],
+    ids=["one later", "five, MP4", "scattered", "a third", "four in nine, 90 kHz"],
+)
+def test_frames_on_the_grid_with_places_left_empty_are_read_in_places(
+    caplog: pytest.LogCaptureFixture,
+    frames: int,
+    frame_rate: Fraction,
+    time_base: Fraction,
+    absent: list[int],
+    said: str,
+) -> None:
+    # Each frame decoded takes the place it had among all of them, the frames as many as the
+    # places, the frame before a hole shown through it; the same with --frame-rate at that rate;
+    # the warning gives the first hole, how many, the longest and the share.
+    scanned = missing(frames, frame_rate, absent, time_base)
+    first_pass = scanned.index
+    assert first_pass is not None and scanned.frames == frames - len(absent)
+    assert timing_error(scanned, frame_rate, frame_rate).startswith("variable frame rate: ")
+    index = filled_in(declaring(frame_rate), scanned)
+    kept = [frame for frame in range(frames) if frame not in set(absent)]
+    assert index.frames == frames and index.placed.tolist() == kept
+    assert held_rows(index) == absent
+    assert index.decoded().to_bytes() == first_pass.to_bytes()
+    assert filled_in(declaring(frame_rate, frame_rate), scanned).to_bytes() == index.to_bytes()
+    caplog.set_level(logging.WARNING, logger="seedvr2x")
+    caplog.clear()
+    source = counted(declaring(frame_rate), FirstPass(index.frames, index=index))
+    assert source.frames == frames
+    assert [record.getMessage() for record in caplog.records] == [f"made.mkv: {said}"]
+
+
+def test_what_stays_refused_with_places_left_empty() -> None:
+    # "A contradicted rate has two readings, which is why it is refused; so is a frame off the
+    # grid, a variable frame rate" (DESIGN.md, Input): each refused with the message it had
+    # before the places, and no index in places made of it.
+    film = declaring(Fraction(24))
+    # 24000/1001 declared 24/1: no step is long, so no hole is looked for, and the strict rule
+    # refuses it from the frame half a frame off, naming its rate.
+    said = unfilled(film, missing(600, NTSC_FILM, []))
+    assert said.startswith(
+        "100 of its 600 frames lie half a frame or more from their place on the timeline of the"
+        " rate it declares, 24/1, from frame 492, up to 25.3 ms (0.61 of a frame), and its"
+        " output, written at that rate, would be 0.100% shorter than its timestamps' own time,"
+        " off the source's other streams: its timestamps follow 24000/1001 fps (23.976) exactly"
+    )
+    # The same with two frames really missing: nearest places would fill the drift too, the
+    # place 24/1's grid has more by frame 492, which a step of one frame spans: 41 ms for two
+    # places, where the others last 41 to 42 a place. Refused, as a variable frame rate.
+    assert unfilled(film, missing(600, NTSC_FILM, [200, 201])) == variable(41, 125)
+    # And with 69 frames missing from the frame where the drift comes to half a frame, 492: the
+    # frames after them are a place further on 24/1's grid, 71 places for 70 frames' time, 41.1
+    # ms a place, within 1 ms of the others: refused all the same, a hole's step lasting the
+    # frames it skips to within half a frame.
+    assert unfilled(film, missing(700, NTSC_FILM, range(492, 561))) == variable(41, 2919)
+    # A jump in the timestamps is refused first, as before, places left empty or not
+    # (scan.Discontinuity): frames on the grid, two missing, in a scan that found one.
+    jump = Discontinuity(1000, Fraction(41), Fraction(1041), False)
+    said = unfilled(
+        declaring(NTSC_FILM), replace(missing(2000, NTSC_FILM, [46, 47]), discontinuity=jump)
+    )
+    assert said.startswith("its timestamps jump at frame 1000, from 41.000 to 1041.000 s: a")
+    # A short file of frames at 23 fps declared 24/1, two missing: each frame within half a
+    # frame of a place of 24's grid, and its steps 43 to 44 ms a place, within 1 ms of each
+    # other; but 24's period, 41.7 ms, isn't within them, sptenc's second test: refused.
+    assert unfilled(film, missing(10, Fraction(23), [4, 5])) == variable(43, 131)
+    # S9's timestamps (live-2; research/docs/seeking.md, mechanism 7): its steps of 62-63 ms
+    # are 1.5 frames of the 24/1 it declares, no whole number of them: refused, and guided to
+    # 24000/1001, as before.
+    said = unfilled(film, scanned_at(np.array(live2(2000), dtype=np.int64), MS))
+    assert said.startswith(
+        "its timestamps run at 24000/1001 fps (23.976), within 10.9 ms of that rate's timeline"
+        " (0.26 of a frame), where it declares 24/1, its frames lasting from 41 to 63 ms: a bad"
+        " file, not read on a guess: remake it at that rate"
+    )
+    # A true variable rate, 24 then 30 fps: two frames in one place of 24's grid.
+    assert unfilled(film, stepping([42, 41, 42] * 30 + [33, 34, 33] * 30)) == variable(33, 42)
+    # Frames at a constant 12 fps declared 24/1: their steps within 1 ms, no hole is looked
+    # for: a contradicted rate, named, with its two fixes; --frame-rate 12/1 reads them as they
+    # are, 300 frames, no place filled.
+    twelve = missing(300, Fraction(12), [])
+    said = unfilled(film, twelve)
+    assert said.startswith(
+        "its timestamps run at 12/1 fps (12), within 0.3 ms of that rate's timeline (0.00 of a"
+        " frame), where it declares 24/1, its frames lasting from 83 to 84 ms: a bad file, not"
+        " read on a guess: remake it at that rate"
+    )
+    assert "; or give --frame-rate 12/1, which takes its frames at that rate" in said
+    assert filled_in(declaring(Fraction(24), Fraction(12)), twelve) is twelve.index
+    # The same with one frame missing: every step spans 2 places of 24's grid, or 4: the
+    # frames sit on 12's grid, the contradicted rate still, never read with half its places
+    # filled (media/source.py, _on_grid, PROVISIONAL).
+    assert unfilled(film, missing(300, Fraction(12), [100])) == variable(83, 167)
+    # Steps that are no whole number of frames, at 25 fps: 1.4 then 1.6 frames, which span 1
+    # and 2 places, 56 and 32 ms a place, beside a real hole; and 1.5 frames, exactly between
+    # two places. With --frame-rate 25 too: the step of 1.6 frames is within half a frame of
+    # its 2 places, and was read as a missing frame while the option waived the time a place.
+    pal, forced = declaring(Fraction(25)), declaring(Fraction(25), Fraction(25))
+    off = stepping([40] * 10 + [56, 64] + [40] * 10 + [120] + [40] * 10)
+    assert unfilled(pal, off) == variable(40, 120)
+    assert unfilled(forced, off) == (
+        "--frame-rate 25/1: frame 12 lies 40.0 ms after its place on that rate's timeline (1.000"
+        " of a frame, half a frame being 20.0 ms), and 21 more frames, up to 120 ms: taken at"
+        " that rate, frames would be dropped or doubled"
+    )
+    assert "a bad file, not read on a guess" in unfilled(
+        pal, stepping([40] * 10 + [60] + [40] * 10)
+    )
+    # Two frames in one place, 8 ms either side of it, beside a real hole: refused, and with
+    # --frame-rate too.
+    doubled = stepping([40] * 5 + [32, 16, 32] + [40] * 5 + [120] + [40] * 5)
+    assert unfilled(pal, doubled) == variable(16, 120)
+    assert unfilled(forced, doubled).startswith(
+        "--frame-rate 25/1: frame 7 lies 32.0 ms before its place on that rate's timeline (0.800"
+        " of a frame, half a frame being 20.0 ms), and "
+    )
+    # A frame late beside a real hole, by half a frame exactly, 20 ms, or a tick less: refused
+    # either way, sptenc's 1 ms holding the time a place, and with --frame-rate 25 as without:
+    # its waiver of that bound stops where places are skipped (media/source.py, _on_grid,
+    # PROVISIONAL).
+    for late, shortest in ((20, 20), (19, 21)):
+        scanned = stepping([40] * 10 + [120] + [40] * 4 + [40 + late, 40 - late] + [40] * 10)
+        assert unfilled(pal, scanned) == variable(shortest, 120)
+        assert unfilled(forced, scanned) == (
+            "--frame-rate 25/1: frame 11 lies 80.0 ms after its place on that rate's timeline"
+            " (2.000 of a frame, half a frame being 20.0 ms), and 16 more frames, up to"
+            f" {80 + late} ms: taken at that rate, frames would be dropped or doubled"
+        )
+    # A hole's step lasts the frames it skips to within half a frame, strictly, with --frame-rate
+    # or without. At 25 fps in ticks of 0.1 ms: 20 steps of 39.5 ms leave a frame 10 ms before
+    # its place, and a step of 40.5 frames from it the next one 10 ms after its own, 40 places
+    # on, each within half a frame of its place and the step 40.5 ms a place, within 1 ms of the
+    # others: refused, by the half frame alone; a tick less, read, its 39 places filled.
+    tenth = Fraction(1, 10_000)
+    for declared in (pal, forced):
+        assert unfilled(declared, stepping([395] * 20 + [16_200] + [400] * 10, tenth))
+        index = filled_in(declared, stepping([395] * 20 + [16_199] + [400] * 10, tenth))
+        assert index.frames == 71 and held_rows(index) == list(range(21, 60))
+    # A frame exactly between two places, half a frame after one, where every step is within
+    # 1 ms a place of the others (20 steps of 40.5 ms, then one of 410 ms for 10 places):
+    # refused either way, no place being the nearest; a tick less, read, its 9 places filled.
+    for declared in (pal, forced):
+        assert unfilled(declared, stepping([405] * 20 + [4100] + [400] * 10, tenth))
+        index = filled_in(declared, stepping([405] * 20 + [4099] + [400] * 10, tenth))
+        assert index.frames == 41 and held_rows(index) == list(range(21, 30))
+
+
+def test_frame_rate_with_places_left_empty(caplog: pytest.LogCaptureFixture) -> None:
+    # --frame-rate R: frames within half a frame of R's timeline counted frame after frame are
+    # read as before, no place filled, whatever their steps: S9's, 41 to 63 ms, at 24000/1001.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    ntsc = declaring(Fraction(24), NTSC_FILM)
+    s9 = np.array(live2(2000), dtype=np.int64)
+    scanned = scanned_at(s9, MS)
+    assert filled_in(ntsc, scanned) is scanned.index
+    # A file with two frames missing that declares another rate than its timestamps', 24/1 for
+    # 24000/1001's to the millisecond: refused without the option, and read with it, on R's
+    # grid with its two places filled: the case --frame-rate reads places for.
+    holes = missing(600, NTSC_FILM, [200, 201])
+    assert unfilled(declaring(Fraction(24)), holes) == variable(41, 125)
+    index = filled_in(ntsc, holes)
+    assert index.frames == 600 and held_rows(index) == [200, 201]
+    assert (
+        "made.mkv: --frame-rate 24000/1001: every frame within 0.5 ms of its place on that"
+        " rate's timeline (0.01 of a frame), places left empty between them, where it declares"
+        " 24/1: taken at that rate"
+    ) in caplog.text
+    # S9's with two frames missing: refused. The option's waiver of the 1 ms bound stops where
+    # places are skipped, and S9's steps are 41 to 63 ms a place (media/source.py, _on_grid,
+    # PROVISIONAL): refused as before the places, the first frame off named.
+    assert unfilled(ntsc, scanned_at(np.delete(s9, [300, 301]), MS)) == (
+        "--frame-rate 24000/1001: frame 300 lies 91.5 ms after its place on that rate's timeline"
+        " (2.194 of a frame, half a frame being 20.9 ms), and 1697 more frames, up to 94.3 ms:"
+        " taken at that rate, frames would be dropped or doubled"
+    )
+    # 24000/1001 material given 24: refused as before, from the frame half a frame off; and
+    # with two frames really missing, refused too: the place 24's grid has more is spanned by a
+    # step of one frame, where a hole's step lasts the frames it skips; told that without the
+    # option it is read, its missing frames filled.
+    twenty_four = declaring(NTSC_FILM, Fraction(24))
+    assert unfilled(twenty_four, missing(600, NTSC_FILM, [])).startswith(
+        "--frame-rate 24/1: frame 492 lies 21.0 ms after its place on that rate's timeline"
+        " (0.504 of a frame, half a frame being 20.8 ms), and 99 more frames, up to 25.3 ms:"
+        " taken at that rate, frames would be dropped or doubled; without --frame-rate, the"
+        " file is read at the rate it declares, 24000/1001"
+    )
+    said = unfilled(twenty_four, holes)
+    assert said.startswith("--frame-rate 24/1: frame 200 lies 91.7 ms after its place")
+    assert said.endswith(
+        ": taken at that rate, frames would be dropped or doubled; without --frame-rate, the file"
+        " is read at the rate it declares, 24000/1001, on whose grid its frames sit, the 2 frames"
+        " missing there filled"
+    )
+    # A wrong rate on a file with one frame missing, 25 fps given 30: the same words, where the
+    # refusal ended at "dropped or doubled".
+    assert unfilled(declaring(Fraction(25), Fraction(30)), missing(250, Fraction(25), [125])) == (
+        "--frame-rate 30/1: frame 3 lies 20.0 ms after its place on that rate's timeline (0.600"
+        " of a frame, half a frame being 16.7 ms), and 245 more frames, up to 1693.3 ms: taken"
+        " at that rate, frames would be dropped or doubled; without --frame-rate, the file is"
+        " read at the rate it declares, 25/1, on whose grid its frames sit, the 1 frame missing"
+        " there filled"
+    )
+    # And with 69 frames missing from frame 492, where the drift on 24's grid comes to half a
+    # frame: 71 places for 70 frames' time, 41.1 ms a place, within 1 ms of the others: refused
+    # with the option as without, by the half frame alone.
+    said = unfilled(twenty_four, missing(700, NTSC_FILM, range(492, 561)))
+    assert said.startswith("--frame-rate 24/1: frame 492 lies 2898.0 ms after its place on that")
+    # A 24 fps file given 48: every other place of 48's grid would be empty, every frame
+    # doubled; its frames sit on 24's grid, the rate it declares: refused as before, and told
+    # so (media/source.py, _on_grid, PROVISIONAL).
+    said = unfilled(declaring(Fraction(24), Fraction(48)), missing(300, Fraction(24), []))
+    assert said.startswith("--frame-rate 48/1: frame 1 lies 21.2 ms after its place on that")
+    assert said.endswith(
+        "taken at that rate, frames would be dropped or doubled; without --frame-rate, the file"
+        " is read at the rate it declares, 24/1, whose timeline holds every frame within half a"
+        " frame"
+    )
+    # A short file whose frames, two missing, sit on both grids, the declared rate's and 24's:
+    # taken at 24 as asked, and warned of as such a file is without a hole.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    index = filled_in(twenty_four, missing(300, NTSC_FILM, [200, 201]))
+    assert index.frames == 300
+    assert (
+        "made.mkv: --frame-rate 24/1: every frame within 12.7 ms of its place on that rate's"
+        " timeline (0.30 of a frame), places left empty between them, where it declares"
+        " 24000/1001: taken at that rate"
+    ) in caplog.text
+    assert (
+        "made.mkv: its frames are at the rate it declares, 24000/1001, too: taken at 24/1 as"
+        " asked, the output lasting 0.100% shorter than the source, off its other streams"
+    ) in caplog.text
+
+
+DROPPED_OR_DOUBLED = "taken at that rate, frames would be dropped or doubled"
+
+
+def test_a_joins_step_is_no_missing_frame_with_frame_rate() -> None:
+    # Segments joined by ffmpeg's concat demuxer alone, each starting where the one before ends
+    # by its declared duration, its audio's when that outlasts the video: 5 segments of 50
+    # frames at 25 fps, in milliseconds, each 64 ms after the last frame of the one before, 1.6
+    # frames, within half a frame of 2 places. No frame is missing there: refused without
+    # --frame-rate, and with --frame-rate 25, which read it with a frame doubled at two joins
+    # of four and none at the others (252 places, 50 and 151 filled) while the option waived
+    # the time a place where places are skipped (a review's finding, 2026-10-12): 32 ms a
+    # place at a join, 40 elsewhere.
+    join = stepping(([40] * 49 + [64]) * 4 + [40] * 49)
+    assert join.frames == 250
+    assert "a bad file, not read on a guess" in unfilled(declaring(Fraction(25)), join)
+    assert unfilled(declaring(Fraction(25), Fraction(25)), join).startswith(
+        "--frame-rate 25/1: frame 50 lies 24.0 ms after its place on that rate's timeline (0.600"
+        " of a frame, half a frame being 20.0 ms), and 199 more frames, up to 96 ms:"
+        f" {DROPPED_OR_DOUBLED}"
+    )
+    # One long step among steps of 24 fps in milliseconds, S9's catch-up step, with --frame-rate
+    # 24: of 63 ms, 1.512 frames, it was read as a frame missing; refused. Of 62 ms, the frames
+    # hold 24's timeline counted frame after frame, within half a frame: read as before the
+    # places, none filled (DESIGN.md's waiver, S9's).
+    film = declaring(Fraction(24), Fraction(24))
+    assert unfilled(film, stepping([42, 41, 42] * 20 + [63] + [42, 41, 42] * 20)).startswith(
+        "--frame-rate 24/1: frame 61 lies 21.3 ms after its place on that rate's timeline (0.512"
+        " of a frame, half a frame being 20.8 ms), and 60 more frames, up to 21.7 ms:"
+        f" {DROPPED_OR_DOUBLED}"
+    )
+    caught_up = stepping([42, 41, 42] * 20 + [62] + [42, 41, 42] * 20)
+    assert filled_in(film, caught_up) is caught_up.index
+
+
+@needs_ffmpeg
+@needs_x264
+def test_a_join_of_segments_whose_audio_outlasts_them_refused_with_frame_rate(
+    tmp_path: Path,
+) -> None:
+    # The real file of that finding, made here: 8 segments of 24 frames at 24000/1001, each
+    # encoded on its own with audio that lasts 1.033 s where its video lasts 1.001 (the review's
+    # AAC of 1.012 s lasts so in Matroska; FLAC here, whose length is the samples'), joined by
+    # ffmpeg's concat demuxer alone: the video steps 74 ms at each of the 7 joins, 1.77 frames,
+    # and no frame is missing. Refused as a variable frame rate without --frame-rate, and with
+    # the rate it declares, which read it as 197 frames for 192, a frame doubled at 5 joins of
+    # 7: refused, the first frame off named.
+    listed = tmp_path / "plain.txt"
+    for k in range(8):
+        run(
+            *("-f", "lavfi", "-i", "testsrc2=s=160x90:r=24000/1001:d=1"),
+            *("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1.033"),
+            *("-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"),
+            *("-x264-params", "log-level=error", "-c:a", "flac", str(tmp_path / f"seg_{k}.mkv")),
+        )
+    listed.write_text("".join(f"file 'seg_{k}.mkv'\n" for k in range(8)))
+    path = tmp_path / "joined.mkv"
+    run("-f", "concat", "-safe", "0", "-i", str(listed), "-c", "copy", str(path))
+    index = scan(path).index
+    assert index is not None and index.frames == 192
+    steps = np.diff(np.sort(index.pts))
+    assert sorted(set(steps.tolist())) == [41, 42, 74] and int((steps == 74).sum()) == 7
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    assert str(refused.value) == f"{path}: {variable(41, 74)}"
+    with pytest.raises(MediaError) as refused:
+        examine(path, frame_rate=NTSC_FILM)
+    assert str(refused.value) == (
+        f"{path}: --frame-rate 24000/1001: frame 24 lies 32.0 ms after its place on that rate's"
+        " timeline (0.767 of a frame, half a frame being 20.9 ms), and 167 more frames, up to"
+        f" 224.5 ms: {DROPPED_OR_DOUBLED}"
+    )
+
+
+def test_one_odd_step_shows_the_grid(caplog: pytest.LogCaptureFixture) -> None:
+    # PROVISIONAL (media/source.py, _on_grid; a question for design). The common divisor
+    # refuses frames whose every step spans a multiple of it, and no others: frames every 2
+    # places of the 24/1 they declare are a contradicted rate, 12/1 named; with one step of 3
+    # places among them, their grid is 24's, and they are read as an encoder that drops
+    # repeated frames leaves a file (DESIGN.md, Input: "however many places are filled"): 14
+    # places, 7 filled, the share said.
+    film, twenty_fourth = declaring(Fraction(24)), Fraction(1, 24)
+    even = scanned_at(np.arange(0, 14, 2, dtype=np.int64), twenty_fourth)
+    assert unfilled(film, even).startswith(
+        "its timestamps run at 12/1 fps (12), within 0 ms of that rate's timeline (0.00 of a"
+        " frame), where it declares 24/1, its frames lasting from 83.3 to 83.3 ms: a bad file,"
+        " not read on a guess: remake it at that rate"
+    )
+    odd = scanned_at(np.array([0, 2, 4, 6, 9, 11, 13], dtype=np.int64), twenty_fourth)
+    index = filled_in(film, odd)
+    assert index.frames == 14 and held_rows(index) == [1, 3, 5, 7, 8, 10, 12]
+    assert filling(index) == Filling(14, 7, 6, Hole(1, 1, 0), 2)
+    caplog.set_level(logging.WARNING, logger="seedvr2x")
+    counted(film, FirstPass(index.frames, index=index))
+    (warning,) = [record.getMessage() for record in caplog.records]
+    assert warning.endswith(
+        "read as a player shows it, the frame before each hole held through it: 14 frames, 7 of"
+        " them filled (50.0%), 7 decoded; so large a share is what an encoder leaves that drops"
+        " repeated frames, each picture held as it was until the next"
+    )
+    # The same of a 24 fps file in milliseconds given --frame-rate 48, one of its steps 1.5
+    # frames, 3 places of 48's grid: refused without that step (test_frame_rate_with_places_
+    # left_empty), read with it, 7 places of 14 filled.
+    half = scanned_at(np.array([0, 42, 83, 125, 188, 229, 271], dtype=np.int64), MS)
+    index = filled_in(declaring(Fraction(24), Fraction(48)), half)
+    assert index.frames == 14 and held_rows(index) == [1, 3, 5, 7, 8, 10, 12]
 
 
 def concat_joined(master: Path, directory: Path, cuts: list[int]) -> Path:

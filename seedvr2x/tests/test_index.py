@@ -17,6 +17,7 @@ reads never wait on ffmpeg while it waits on them (media/reader.py): a hash held
 frames still to come through stdout, as the box's hang had it (2026-10-09), made on purpose; an
 ffmpeg that stalls, a fake one on PATH. Each such read runs bounded, a hang failing the test."""
 
+import hashlib
 import json
 import logging
 import os
@@ -37,7 +38,7 @@ import numpy as np
 import pytest
 from test_probe import has_encoder
 
-from seedvr2x.media import ffmpeg, index
+from seedvr2x.media import ffmpeg, grid, index
 from seedvr2x.media import reader as reading
 from seedvr2x.media.conversion import Conversion
 from seedvr2x.media.decode import Decoder
@@ -773,7 +774,8 @@ def test_index_file(tmp_path: Path) -> None:
         b"seedvr2x frame list\n" + data[len(index.MAGIC) :]: "not a frame index",
         data[:-1]: "cut short",
         data + b"\0": "1 bytes after its last column",
-        data.replace(b'"version":1', b'"version":2'): "version 2, where 1 is read",
+        data.replace(b'"version":1', b'"version":3'): "version 3, where 1 and 2 are read",
+        data.replace(b'"version":1', b'"version":true'): "version true, where 1 and 2 are read",
         data.replace(b'"<u4"', b'"<i4"'): "crc32 of type <i4, not <u4",
         data.replace(b'["error","|u1"]', b'["flag","|u1"]'): "no frames column error",
     }
@@ -825,6 +827,78 @@ def test_index_file_with_probabilities() -> None:
             FrameIndex.from_bytes(damaged_data)
     with pytest.raises(ValueError, match="9 shot probabilities for 10 frames"):
         replace(sample(), probabilities=probabilities[:9]).to_bytes()
+
+
+def test_index_file_with_held_rows() -> None:
+    # An index without a held row is written as before the places, byte for byte: version 1, its
+    # three columns, the bytes spelled out here, and their SHA-256 the one the code of before
+    # the places gave (0db0a72), with the probabilities too. With held rows (media/grid.py:
+    # places left empty, each showing the frame before it again), version 2 and a held column,
+    # after the first pass's own and before the probabilities: the same bytes again, read back
+    # exactly; what to_bytes never writes is refused.
+    first = sample()
+    header = (
+        b'{"frames":{"columns":[["pts","<i8"],["crc32","<u4"],["error","|u1"]],"rows":10},'
+        b'"keyframes":{"columns":[["pts","<i8"]],"rows":3},"start_time":1483000,'
+        b'"time_base":"1/90000","version":1}\n'
+    )
+    columns = (first.pts.astype("<i8"), first.crc32.astype("<u4"), first.error.astype("|u1"))
+    before = index.MAGIC + header + b"".join(column.tobytes() for column in columns)
+    before += first.keyframes.astype("<i8").tobytes()
+    assert first.to_bytes() == before
+    probabilities = np.linspace(0, 1, 10, dtype=np.float32)
+    scored = replace(first, probabilities=probabilities)
+    assert [hashlib.sha256(found.to_bytes()).hexdigest() for found in (first, scored)] == [
+        "da7b8d423669d69af5a5c31e7a4df8ff72d2f4b05e9eb8cebecdde4f9321a832",
+        "e319e9f091f17c157b7bb3fcae50c80996293dddadb3f52f245c79c5e0b18ebd",
+    ]
+    none_held = replace(first, held=np.zeros(10, np.bool_))
+    assert none_held.held is None and none_held.to_bytes() == before
+    assert FrameIndex.from_bytes(before).held is None
+    # Frames 0 to 9 at places 0, 1, 2, 5, 6, 7, 8, 9, 10, 12: places 3, 4 and 11 held.
+    placed = np.array([0, 1, 2, 5, 6, 7, 8, 9, 10, 12])
+    data = b""
+    for decoded in (first, scored):
+        written = grid.filled(decoded, placed, Fraction(25))
+        assert written.held is not None and written.frames == 13
+        data = written.to_bytes()
+        assert data == grid.filled(decoded, placed.copy(), Fraction(25)).to_bytes()
+        fields = json.loads(data[len(index.MAGIC) :].split(b"\n", 1)[0])
+        named = [["pts", "<i8"], ["crc32", "<u4"], ["error", "|u1"], ["held", "|u1"]]
+        if decoded.probabilities is not None:
+            named.append(["transnetv2", "<f4"])
+        assert fields["version"] == 2 and fields["frames"] == {"rows": 13, "columns": named}
+        back = FrameIndex.from_bytes(data)
+        assert back.to_bytes() == data and back.held is not None
+        for name in ("pts", "crc32", "error", "keyframes", "held"):
+            assert np.array_equal(getattr(back, name), getattr(written, name)), name
+        assert np.flatnonzero(back.held).tolist() == [3, 4, 11]
+        assert np.array_equal(back.placed, placed)
+        # Its decoded frames' index is the first pass's, to the byte.
+        assert back.decoded().to_bytes() == decoded.to_bytes()
+    # The columns' values, after the header's line: pts, crc32, error, held, each 13 rows.
+    values = data.index(b"\n", len(index.MAGIC)) + 1
+    crc32, error, held = 13 * 8, 13 * 12, 13 * 13
+
+    def changed(offset: int, value: bytes) -> bytes:
+        at = values + offset
+        return data[:at] + value + data[at + len(value) :]
+
+    refused = {
+        data.replace(b'"version":2', b'"version":1'): "a held column in version 1, which has none",
+        data.replace(b'["held","|u1"],', b""): "no frames column held",
+        data.replace(b'["held","|u1"]', b'["held","<u2"]'): "held of type <u2, not |u1",
+        changed(held + 3, b"\2"): "a held flag neither 0 nor 1",
+        changed(held, b"\1"): "its first row held, with no frame before it to show",
+        changed(held, bytes(13)): "version 2 without a held row, which version 1 holds",
+        changed(crc32 + 4 * 3, b"\xff"): "a held row's crc32 not that of the frame it shows",
+        changed(error + 11, b"\1"): "a held row's error not that of the frame it shows",
+        changed(error + 10, b"\1"): "a held row's error not that of the frame it shows",
+    }
+    assert len(refused) == 9
+    for damaged_data, said in refused.items():
+        with pytest.raises(ValueError, match=re.escape(said)):
+            FrameIndex.from_bytes(damaged_data)
 
 
 def test_keyframe_arithmetic() -> None:

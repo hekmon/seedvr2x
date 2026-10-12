@@ -3718,6 +3718,165 @@ def test_copy_made_again_through_the_index(
         assert decoded(out / name) == decoded(tmp_path / "whole" / name)
 
 
+def holed_source(directory: Path, frames: int, absent: tuple[int, ...]) -> tuple[Path, Path]:
+    """A source with missing frames, holes.mkv, and the file it was made from, full.mkv, in
+    directory (tests/test_grid.py's recipe, at the stand-in's size): `frames` frames of 64x48 at
+    24000/1001, an x264 encode with a keyframe every 8 frames and three B-frames that nothing
+    references after each I or P frame; holes.mkv its stream copy without the frames `absent`,
+    by their number, B-frames all (no multiple of 4), the others' timestamps kept."""
+    assert all(frame % 4 for frame in absent)
+    full, path = directory / "full.mkv", directory / "holes.mkv"
+    x264 = "keyint=8:min-keyint=8:open-gop=1:bframes=3:b-pyramid=none:b-adapt=0:scenecut=0"
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=24000/1001"),
+            *("-frames:v", str(frames), "-c:v", "libx264", "-preset", "veryfast"),
+            *("-x264-params", x264, "-pix_fmt", "yuv420p", str(full)),
+        ],
+        check=True,
+    )
+    drop = "st(0,round(pts*tb*24000/1001));" + "+".join(f"eq(ld(0),{frame})" for frame in absent)
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-i", str(full), "-map", "0", "-c", "copy"),
+            *("-bsf:v", f"noise=drop='{drop}'", str(path)),
+        ],
+        check=True,
+    )
+    return path, full
+
+
+def repeating(full: Path, path: Path, shown: list[int]) -> Path:
+    """A file whose frames really are full's frames `shown`, by number, in that order, one
+    after the other at 24000/1001, no place empty: full's decoded pictures, 64x48 yuv420p,
+    encoded again without loss (FFV1)."""
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(full), "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    size = 64 * 48 * 3 // 2
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", "64x48"),
+            *("-r", "24000/1001", "-i", "-", "-c:v", "ffv1", str(path)),
+        ],
+        input=b"".join(raw[frame * size : (frame + 1) * size] for frame in shown),
+        check=True,
+    )
+    return path
+
+
+# The run of a source of 40 places whose frames 17 and 18 are missing: cuts on both sides of the
+# hole, and one inside it, at 18; a segment a shot.
+HOLED_RUN = [
+    *("encode 0", "window 0:0", "decode 0", "encode 12", "window 12:0", "decode 12"),
+    *("encode 18", "window 18:0", "decode 18", "encode 24", "window 24:0", "decode 24"),
+]
+HOLED_SEGMENTS = [f"seg_{number:06d}.mkv" for number in range(4)]
+MISSING_SAID = (
+    "holes.mkv: 2 frames missing after frame 16: its timestamps step from 0.667 to 0.792 s there,"
+    " 3 frames of the rate it declares, 24000/1001, leaving places 17 and 18 empty on that rate's"
+    " grid; read as a player shows it, frame 16 held in their place: 40 frames, 2 of them filled"
+    " (5.0%), 38 decoded"
+)
+
+
+@needs_x264
+def test_missing_frames_filled_through_a_run_and_its_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A source whose frames sit on its rate's grid with two places left empty (DESIGN.md, Input:
+    # "Missing frames are filled, not refused") runs as one of as many frames as places: its
+    # shots, its segments and its record count 40, the hole's places holding the frame before
+    # it. A cut list may name a held place, the user's override: the shot then starts on the
+    # held frame's copy. The frames each encode reads, and with split the output, are those of
+    # a file where frame 16 really comes three times. Resumed after the hole, a job reads
+    # through the index in places, seeking past the hole; resumed on the shot that starts
+    # inside it, it reads the held frame for the place; either way the output is the
+    # uninterrupted run's, the warning said again, the first pass never run again.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cuts.txt").write_text("12\n18\n24\n")
+    source_path, full = holed_source(tmp_path, 40, (17, 18))
+    shown = [16 if place in (17, 18) else place for place in range(40)]
+    repeated = repeating(full, tmp_path / "repeated.mkv", shown)
+    options = (*SEEKING, *SPLIT)
+    passes = first_passes(monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *options) == 0
+    assert steps.calls == HOLED_RUN and len(passes) == 1
+    assert f"{tmp_path / MISSING_SAID}" in caplog.text
+    assert "holes.mkv: 40 frames (38 decoded, 2 filled), 64x48" in caplog.text
+    whole = tmp_path / "whole"
+    assert shots_of(whole) == [(0, 12), (12, 18), (18, 24), (24, 40)]
+    frame = 96 * 128 * 3 * 2
+    assert [len(decoded(whole / name)) // frame for name in HOLED_SEGMENTS] == [12, 6, 6, 16]
+    record = json.loads((whole / "manifest.json").read_text())["input"]
+    assert record["frames"] == 40
+    assert record["filled"] == {
+        "decoded": 38,
+        "holes": 1,
+        "places": 2,
+        "first": {"frame": 17, "length": 2},
+        "longest": 2,
+    }
+    read = dict(steps.read)
+    # The file whose frames really are repeated: the same frames read by each encode, the same
+    # output; and its record the one of before the places, nothing filled.
+    steps.read.clear()
+    assert upscale(tmp_path, repeated, "repeated", *options) == 0
+    assert steps.read == read
+    for name in HOLED_SEGMENTS:
+        assert decoded(whole / name) == decoded(tmp_path / "repeated" / name)
+    record = json.loads((tmp_path / "repeated" / "manifest.json").read_text())["input"]
+    assert list(record) == [
+        *("path", "bytes", "modified_ns", "sha256", "frames", "frame_rate", "size"),
+        *("sample_aspect", "read_as", "pix_fmt", "primaries", "transfer", "index", "idet"),
+    ]
+    assert record["frames"] == 40
+    # Its frame index the file of before the places; the one with the hole has the held rows'.
+    headers = [
+        (tmp_path / name / "frame_index.bin").read_bytes().split(b"\n")[1]
+        for name in ("repeated", "whole")
+    ]
+    assert b'"version":1' in headers[0] and b'"held"' not in headers[0]
+    assert b'"version":2' in headers[1] and b'"held"' in headers[1]
+    for stop, output in (("encode 24", "past"), ("encode 18", "inside")):
+        steps.stop = stop
+        stopped(tmp_path, source_path, output, *options)
+        passes.clear()
+        caplog.clear()
+        steps.calls.clear()
+        steps.read.clear()
+        steps.stop = None
+        commands = recorded_reads(monkeypatch)
+        assert upscale(tmp_path, source_path, output, *options) == 0
+        assert steps.calls == HOLED_RUN[HOLED_RUN.index(stop) :] and passes == []
+        assert f"{tmp_path / output}: the same input and ffmpeg, the first pass as" in caplog.text
+        assert f"{tmp_path / MISSING_SAID}" in caplog.text
+        assert steps.read == {shot: read[shot] for shot in steps.read}
+        seeking = commands[0]
+        if stop == "encode 24":
+            # Past the hole: frame 24, a keyframe, read from the keyframe before it, frame 16,
+            # at 0.667 s, selected from its own pts on, 1,001 ms.
+            assert sorted(steps.read) == [24] and len(commands) == 1
+            assert seeking[seeking.index("-ss") + 1] == "0.667000"
+            assert "select=gte(pts\\,1001)," in seeking[seeking.index("-vf") + 1]
+        else:
+            # On a held place: the frame held, 16, is read for it, from the keyframe before
+            # its own, frame 8, selected from frame 16's pts on, 667 ms.
+            assert sorted(steps.read) == [18, 24]
+            assert (
+                "holes.mkv: frame 18 is a missing frame's place, filled by frame 16, the frame"
+                " before it, held: that frame is read for it"
+            ) in caplog.text
+            assert seeking[seeking.index("-ss") + 1] == "0.334000"
+            assert "select=gte(pts\\,667)," in seeking[seeking.index("-vf") + 1]
+        for name in HOLED_SEGMENTS:
+            assert decoded(tmp_path / output / name) == decoded(whole / name)
+        assert contents(tmp_path / output / "checksums") == contents(whole / "checksums")
+
+
 @pytest.mark.parametrize("how", ["missing", "damaged", "cut short"])
 def test_index_derived_data(
     tmp_path: Path,
@@ -4591,6 +4750,64 @@ def test_plan_then_run(
     assert f"{out}: the same input and ffmpeg, {said}" in caplog.text
     assert encoded(scripted) == [0, 5, 15, 22]
     assert written(out) == list(range(25))
+
+
+@needs_x264
+def test_plan_and_run_of_a_source_with_missing_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A source of 27 places whose frames 5 and 6 are missing: the shot detector sees its 25
+    # decoded frames, SCRIPT's probabilities theirs, recorded bit for bit; on the grid they are
+    # spread so that the cuts fall at their frames' own places (media/grid.py, spread): the cut
+    # the detector finds at its frame 5, the first after the hole, is at place 7, never on a held
+    # copy of frame 4, and its later ones two places on. The cut list --plan writes counts in
+    # places, its frames and its times those of the full file's frames; the run of the plan
+    # makes 27 frames, its shots the places'.
+    from seedvr2x.media.index import FrameIndex
+    from seedvr2x.media.scan import scan
+    from seedvr2x.runtime.cuts import time_of, timecode
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.chdir(tmp_path)
+    source_path, full = holed_source(tmp_path, 27, (5, 6))
+    passes = first_passes(monkeypatch)
+    plan = tmp_path / "plan.txt"
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    assert len(passes) == 1 and scripted.calls == []
+    assert "holes.mkv: 2 frames missing after frame 4: " in caplog.text
+    out = tmp_path / "out"
+    assert shots_of(out) == [(0, 7), (7, 17), (17, 24), (24, 27)]
+    index = FrameIndex.from_bytes((out / "frame_index.bin").read_bytes())
+    assert index.frames == 27 and index.held is not None and index.probabilities is not None
+    assert np.flatnonzero(index.held).tolist() == [5, 6]
+    seen = index.decoded().probabilities
+    assert seen is not None and seen.tobytes() == SCRIPT.tobytes()
+    # Frame 4, 0.9, held through the hole: its last place takes its probability, the change to
+    # the next frame coming after it; its own and the first held take the lower of its and
+    # frame 3's, 0.4.
+    assert index.probabilities[3:8].tolist() == SCRIPT[[3, 3, 3, 4, 5]].tolist()
+    whole = scan(full).index
+    assert whole is not None and whole.frames == 27
+    lines = plan.read_text().splitlines()
+    assert lines[0] == "# seedvr2x cut list of holes.mkv: 27 frames at 24000/1001 fps"
+    assert lines[2] == "# Found: 3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3"
+    assert cut_lines(plan) == [
+        f"7 0.899 {timecode(time_of(whole, 7))}",
+        f"# 12 0.200 {timecode(time_of(whole, 12))}",
+        f"17 0.600 {timecode(time_of(whole, 17))}",
+        f"# 21 0.119 {timecode(time_of(whole, 21))}",
+        f"24 0.300 {timecode(time_of(whole, 24))}",
+    ]
+    assert timecode(time_of(whole, 7)) == "0:00:00.292"
+    passes.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *CUT) == 0
+    assert passes == [] and "holes.mkv: 2 frames missing after frame 4: " in caplog.text
+    assert encoded(scripted) == [0, 7, 17, 24]
+    assert written(out) == list(range(27))
 
 
 def test_replanned(

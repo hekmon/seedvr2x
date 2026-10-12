@@ -21,17 +21,23 @@ import pytest
 import test_stop
 from test_cli_run import (
     CUT,
+    HOLED_SEGMENTS,
     JOB,
+    MISSING_SAID,
+    SEEKING,
+    SPLIT,
     ScriptedDetector,
     Steps,
     checksums,
     encoded,
     first_passes,
+    holed_source,
     indexes,
     job,
     needs_x264,
     rate_of,
     refused,
+    repeating,
     shots_of,
     stand_in_model,
     stored,
@@ -736,6 +742,94 @@ def test_frame_rate_override_assembled_on_its_grid(
     )
     assert packets(final, 1) == packets(reference, 1)
     assert len(frames_of(final)) == 260
+
+
+def holed_film(directory: Path) -> tuple[Path, Path]:
+    """tests/test_cli_run.py's source with missing frames (holed_source: 40 places at 24000/1001,
+    frames 17 and 18 missing) with a second stream, as a film has them, holes.mkv in directory:
+    its video's packets copied, their timestamps kept, and FLAC audio from 0 for the 40 places'
+    time. Returns it and the file with every frame it was made from."""
+    made = directory / "video"
+    made.mkdir()
+    video, full = holed_source(made, 40, (17, 18))
+    path = directory / "holes.mkv"
+    seconds = str(float(Fraction(40) / Fraction(24000, 1001)))
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-i", str(video)),
+            *("-f", "lavfi", "-t", seconds, "-i", "sine=f=440:r=48000"),
+            *("-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "flac", str(path)),
+        ],
+        check=True,
+    )
+    assert video_times(path) == video_times(video)
+    return path, full
+
+
+# Each of the 40 places' time in the finished file, in milliseconds: the grid of 24000/1001 from
+# the source's first frame, at 0, a half going up, as ffmpeg rounds.
+HOLED_TIMES = [(2002 * place + 24) // 48 for place in range(40)]
+
+
+@needs_ffmpeg
+@needs_x264
+def test_missing_frames_filled_into_the_finished_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A source with two frames missing, their places filled (DESIGN.md, Input: "Missing frames
+    # are filled, not refused"), to a finished file: the job counts in places, and so does its
+    # assembly. The file holds a frame a place, 40 for the 38 the source's video has, each at
+    # its place on the rate's grid from the source's first timestamp: the 38 at the source's own
+    # times, the hole's two at the grid's, between them; a checksum a place, which verify
+    # checks; the audio as a remux of the source holds it, packet for packet, so in step. The
+    # hole's places hold the upscale of the frame held there: every frame is the one a file
+    # whose frame 16 really comes three times gives. Given back as a source, the file is read
+    # with no place to fill: its frames are the places.
+    from seedvr2x.media.index import FrameIndex
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cuts.txt").write_text("12\n18\n24\n")
+    source, full = holed_film(tmp_path)
+    options = (*SEEKING, *SPLIT)
+    assert upscale(tmp_path, source, "x.mkv", *options) == 0
+    final = tmp_path / "x.mkv"
+    assert f"{tmp_path / MISSING_SAID}" in caplog.text
+    wrote = f"wrote {final}: 40 frames from 4 segments, with the source's 1 other stream and 0"
+    assert wrote in caplog.text
+    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == ["x.mkv", "x.mkv.crc32"]
+    own, times = video_times(source), video_times(final)
+    assert len(own) == 38 and own[0] == 0
+    assert times == HOLED_TIMES
+    assert [time for place, time in enumerate(times) if place not in (17, 18)] == own
+    assert own[16:18] == [667, 792] and times[16:20] == [667, 709, 751, 792]
+    sums = checksums(tmp_path / "x.mkv.crc32")
+    assert len(sums) == 40 and frames_of(final) == sums
+    assert cli.main(["verify", str(final)]) == 0
+    reference = tmp_path / "remux.mkv"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(source), "-map", "0", "-c", "copy", str(reference)],
+        check=True,
+    )
+    assert others(final) == others(reference) and len(others(final)) == 1
+    assert packets(final, 1) == packets(reference, 1)
+    # The file whose frame 16 really comes three times, to a directory: the same 40 frames.
+    shown = [16 if place in (17, 18) else place for place in range(40)]
+    repeated = repeating(full, tmp_path / "repeated.mkv", shown)
+    assert upscale(tmp_path, repeated, "repeated", *options) == 0
+    segments = [tmp_path / "repeated" / name for name in HOLED_SEGMENTS]
+    assert sums == [crc for path in segments for crc in stored(["-i", str(path)], "gbrp16le")]
+    assert len(set(sums[16:19])) == 3  # the stand-in's frames differ, each saying its place
+    # Read back as a source: 40 frames, none held, nothing said of a missing frame.
+    caplog.clear()
+    assert upscale(tmp_path, final, "back", "--cuts", "cuts.txt", "--plan", "plan.txt") == 0
+    warned = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [record.getMessage() for record in warned] == []
+    content = json.loads((tmp_path / "back" / NAME).read_text())["input"]
+    assert (content["frames"], content["frame_rate"]) == (40, "24000/1001")
+    assert "filled" not in content
+    index = FrameIndex.read(tmp_path / "back" / "frame_index.bin")
+    assert index.frames == 40 and index.held is None
 
 
 # tests/test_stop.py's run of the stand-in in a process of its own, the join made slow, or the

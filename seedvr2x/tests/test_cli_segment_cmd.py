@@ -10,13 +10,25 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from test_assembled import FILM, film_job, held_to_the_source, needs_ffmpeg
+from test_assembled import (
+    FILM,
+    HOLED_TIMES,
+    film_job,
+    held_to_the_source,
+    holed_film,
+    needs_ffmpeg,
+    packets,
+    video_times,
+)
 from test_cli_run import (
     JOB,
+    SEEKING,
     UNINTERRUPTED,
     Steps,
     decoded,
+    indexes,
     job,
+    needs_x264,
     refused,
     stand_in_model,
     stopped,
@@ -375,6 +387,46 @@ def test_assembled_from_command_segments(
     assert len(warned) == 1 and "untagged, guessed: matrix smpte170m" in warned[0]
     content = json.loads((tmp_path / "back" / "manifest.json").read_text())
     assert (content["input"]["frames"], content["input"]["frame_rate"]) == (96, "24000/1001")
+
+
+# What a command's file holds, said by the command itself: its frames counted by ffprobe, a line
+# a file, in fed.txt where seedvr2x runs.
+COUNTED = (
+    "ffprobe -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames"
+    " -of csv=p=0 {out} >> fed.txt"
+)
+
+
+@needs_ffmpeg
+@needs_x264
+def test_missing_frames_filled_through_the_command_to_the_finished_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The source with two frames missing (tests/test_assembled.py's, with its audio), each
+    # segment written by the command, then assembled: the command is fed a frame a place, the
+    # hole's among them, its files holding 12, 6, 6 and 16 frames for the segments' places (the
+    # trial's 5 first), which seedvr2x counts them by; the finished file holds the 40, each
+    # saying its place, the stand-in's way, on the grid of the source's rate from its first
+    # timestamp; the audio in step, a remux's packets.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cuts.txt").write_text("12\n18\n24\n")
+    source, _ = holed_film(tmp_path)
+    command = f"{FFV1} && {COUNTED}"
+    assert upscale(tmp_path, source, "x.mkv", *SEEKING, "--segment-cmd", command) == 0
+    final = tmp_path / "x.mkv"
+    assert (tmp_path / "fed.txt").read_text().split() == ["5", "12", "6", "6", "16"]
+    assert f"wrote {final}: 40 frames from 4 segments, with the source's 1 other" in caplog.text
+    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == ["x.mkv"]
+    assert count_frames(final) == 40 and indexes(final) == list(range(40))
+    assert video_times(final) == HOLED_TIMES
+    assert len(video_times(source)) == 38
+    reference = tmp_path / "remux.mkv"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(source), "-map", "0", "-c", "copy", str(reference)],
+        check=True,
+    )
+    assert packets(final, 1) == packets(reference, 1)
 
 
 @needs_ffmpeg

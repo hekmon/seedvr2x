@@ -22,6 +22,16 @@ before K, and its read starts one keyframe before that one: every picture it ref
 decoded from a keyframe's start, one GOP more than its references need. Defined on display order,
 the only order the index holds, it needs no decode order.
 
+Frames are counted in places, as the index counts them (media/index.py; DESIGN.md, Input:
+"Missing frames are filled, not refused"): a read's first frame and its count are places, and so
+are the frames its messages name. All of the above is of the decoded frames, the index's own
+(FrameIndex.decoded), each read and checked once, exactly as for a source without an empty place.
+A filled place, a held row of the index, is given the frame before its hole again, the very bytes
+that frame was given as, kept for it (Reader._give). A read that starts on a filled place first
+needs the frame it shows: reached as any frame is, a seek to that decoded frame, then given for
+the place. Without a held row, a place is a frame, and nothing here differs from before the
+places.
+
 A read never waits on ffmpeg while ffmpeg waits on it. Its hashes come on pipes read by threads of
 their own; each output's encoder runs in one thread, so that no hash is held back behind frames
 still to come through stdout (read_command); while a frame's hashes lag its RGB all the same,
@@ -107,9 +117,10 @@ def listed(frames: list[int]) -> str:
 
 @dataclass(frozen=True)
 class Attempt:
-    """One ffmpeg process a read started: for frame `target`, decoding from keyframe `keyframe` (its
-    place in the index's keyframes), `back` keyframes before the target's own, or from the start
-    (keyframe None); and why, "" for a read's first."""
+    """One ffmpeg process a read started: for frame `target` (a decoded frame, named by its own
+    place), decoding from keyframe `keyframe` (its place in the index's keyframes), `back`
+    keyframes before the target's own, or from the start (keyframe None); and why, "" for a
+    read's first."""
 
     target: int
     keyframe: int | None
@@ -484,11 +495,18 @@ class Reader:
     the end. Used as a context manager, the end is checked on a normal exit, and ffmpeg is stopped
     on an exception.
 
+    `first`, `frames` and position count places, the index's rows: a filled place, a held row,
+    gives the frame before its hole again (the module's docstring), and the frames named in
+    messages, attempts and otherwise are decoded frames by their own places. A read whose last
+    place lies inside a hole stops there, and the next goes on through it.
+
     attempts lists the ffmpeg processes started, each with why. otherwise lists the frames given,
-    decoded from the start, whose CRC-32 isn't the index's (_take), in order. With md5, md5s holds
-    the MD5 of each frame given as the decoder gives it, before its conversion
+    decoded from the start, whose CRC-32 isn't the index's (_take), in order, each decoded frame
+    once, however many places show it. With md5, md5s holds the MD5 of each frame given as the
+    decoder gives it, before its conversion, one a place, a filled place's the frame's it shows
     (tests/test_seek_sources.py, against measurement's references). held is the most frames read
-    ahead at once while their hashes lagged (_Run.line), over the attempts.
+    ahead at once while their hashes lagged (_Run.line), over the attempts: frames ffmpeg gave,
+    nothing to do with the index's held rows.
 
     A read that stalls, nothing from ffmpeg for STALL seconds while the reader waits on it, or a
     frame's hashes lagging its RGB by more than READ_AHEAD frames, raises MediaError naming the
@@ -510,7 +528,7 @@ class Reader:
         self.frames = index.frames if frames is None else frames
         if not 0 <= first <= self.frames:
             raise ValueError(f"frame {first} asked, of {self.frames}")
-        self.position = first  # the frame the next read gives first
+        self.position = first  # the frame the next read gives first, a place
         self.attempts: list[Attempt] = []
         self.otherwise: list[int] = []
         self._summed_up = False  # otherwise said at the read's end (_sum_up)
@@ -521,18 +539,58 @@ class Reader:
         self._back = 1
         self._run: _Run | None = None
         self._held = 0  # held by the runs done with
+        # The decoded frames, which ffmpeg gives and every check is of, numbered among
+        # themselves: their own index, the one given when it has no held row. _wanted is the
+        # next of them to take from ffmpeg, the frame place `first` shows; _limit how many of
+        # them the read's `frames` places show, the count ffmpeg's frames are held to.
+        self._decoded = index.decoded()
+        self._wanted = self._shown(first)
+        self._limit = self._shown(self.frames - 1) + 1 if self.frames else 0
+        # The frame kept for the filled places after it (_give): its number among the decoded
+        # frames, -1 for none; its RGB as given; its MD5 when they are asked.
+        self._kept = -1
+        self._copy = bytearray()
+        self._kept_md5: str | None = None
         # A run's frames: a counted run's (from the start) by the hashes counted; another's from
         # its target on, by the order of the frames it selects.
         self._counted = False
-        self._next = first
+        self._next = self._wanted
         if first < min(self.frames, index.frames):
-            self._open(first, "", start=False)
+            if index.held is not None and index.held[first]:
+                logger.info(
+                    "%s: frame %d is a missing frame's place, filled by frame %d, the frame"
+                    " before it, held: that frame is read for it",
+                    self.path,
+                    first,
+                    self._place(self._wanted),
+                )
+            self._open(self._wanted, "", start=False)
 
     @property
     def held(self) -> int:
         """The most frames read ahead at once while their hashes lagged, over the attempts."""
         run = self._run
         return max(self._held, run.held if run is not None else 0)
+
+    def _shown(self, place: int) -> int:
+        """The decoded frame place `place` shows, its number among the decoded frames; a place
+        past the index's counted on from its last frame, a frame of its own."""
+        index = self.index
+        if index.held is None:
+            return place
+        if place < index.frames:
+            return int(index.shown[place])
+        return self._decoded.frames + place - index.frames
+
+    def _place(self, frame: int) -> int:
+        """Decoded frame `frame`'s own place, the number it goes by in every message: the frames
+        a user counts are places. A frame past the index's is counted on from its last place."""
+        index = self.index
+        if index.held is None:
+            return frame
+        if frame < self._decoded.frames:
+            return int(index.placed[frame])
+        return index.frames + frame - self._decoded.frames
 
     def read(self, count: int) -> npt.NDArray[np.uint16]:
         """The next `count` frames, (n, H, W, 3) uint16 RGB: fewer only at the end of the
@@ -610,9 +668,35 @@ class Reader:
             self.stop()
 
     def _give(self, into: memoryview) -> bool:
-        """Read the next frame into `into`, checked: False at the end of the stream. A mismatch
-        reads again (_fall_back) until the frame comes right, or raises MediaError; so does a
-        stall, ffmpeg stopped."""
+        """Read the next place's frame into `into`: False at the end of the stream. A filled
+        place, a held row of the index, is given the frame before its hole again: the bytes that
+        frame was given as, kept when it was read, and its MD5; never decoded or checked a second
+        time, the checks being of the decoded frames, each once. Any other place is given the
+        next decoded frame, checked (_frame); and so is the filled place a read starts on, whose
+        frame isn't read yet, that frame being the one the read was opened at."""
+        place = self.position
+        held = self.index.held
+        end = min(self.frames, self.index.frames)
+        filled = held is not None and place < end and bool(held[place])
+        if filled and self._kept == self._shown(place):
+            into[:] = self._copy
+            if self._kept_md5 is not None:
+                self.md5s.append(self._kept_md5)
+        else:
+            assert place >= end or self._wanted == self._shown(place), "the place's own frame next"
+            if not self._frame(into):
+                return False
+            if held is not None and place + 1 < end and held[place + 1]:
+                self._kept = self._wanted - 1
+                self._copy[:] = into
+                self._kept_md5 = self.md5s[-1] if self._md5 else None
+        self.position += 1
+        return True
+
+    def _frame(self, into: memoryview) -> bool:
+        """Read the next decoded frame into `into`, checked: False at the end of the stream. A
+        mismatch reads again (_fall_back) until the frame comes right, or raises MediaError; so
+        does a stall, ffmpeg stopped."""
         while True:
             run = self._run
             if run is None:
@@ -625,34 +709,39 @@ class Reader:
                 raise self._error(run, str(stalled)) from None
 
     def _take(self, run: _Run, into: memoryview) -> bool:
-        """The next frame of run into `into`, checked against the index (raises _Mismatch); the
-        frames its select keeps before the one wanted, a counted run's, dropped."""
+        """The next decoded frame of run into `into`, checked against the decoded frames' index
+        (raises _Mismatch); the frames its select keeps before the one wanted, a counted run's,
+        dropped. Frames are counted here among the decoded ones, and named by their places
+        (_place)."""
         while True:
-            if not run.frame(into, f"frame {self.position}'s RGB"):
-                if self.position >= min(self.frames, self.index.frames):
+            if not run.frame(into, f"frame {self._place(self._wanted)}'s RGB"):
+                if self._wanted >= min(self._limit, self._decoded.frames):
                     return False
-                raise _Mismatch(f"ffmpeg's frames end before frame {self.position}")
+                raise _Mismatch(f"ffmpeg's frames end before frame {self._place(self._wanted)}")
             frame, pts, crc = self._hashed(run)
+            named = self._place(frame)
             md5 = None
             if run.md5s is not None:
-                hashed = run.line(run.md5s, f"frame {frame}'s MD5")
+                hashed = run.line(run.md5s, f"frame {named}'s MD5")
                 if hashed is None:
-                    raise _Mismatch(f"ffmpeg's MD5s end before frame {frame}")
+                    raise _Mismatch(f"ffmpeg's MD5s end before frame {named}")
                 md5 = hashed[1]
-            if frame < self.position:
+            if frame < self._wanted:
                 continue  # kept by a counted run's select before the frame wanted
-            if self.position >= self.frames:
-                raise self._error(run, f"more frames than the {self.frames} the first pass counted")
-            if frame > self.position:
-                raise _Mismatch(f"frame {self.position} missing: the next frame is {frame}")
-            index = self.index
+            if self._wanted >= self._limit:
+                raise self._error(run, f"more frames than the {self._counted_as()}")
+            if frame > self._wanted:
+                wanted = self._place(self._wanted)
+                raise _Mismatch(f"frame {wanted} missing: the next frame is {named}")
+            index = self._decoded
             if frame >= index.frames:
-                raise self._error(run, f"frame {frame}: past the {index.frames} of the frame index")
+                past = f"past the {self.index.frames} of the frame index"
+                raise self._error(run, f"frame {named}: {past}")
             if pts != int(index.pts[frame]):
-                raise _Mismatch(f"frame {frame}: pts {pts}, where the index has {index.pts[frame]}")
+                raise _Mismatch(f"frame {named}: pts {pts}, where the index has {index.pts[frame]}")
             indexed = int(index.crc32[frame])
             if int(crc, 16) != indexed:
-                why = f"frame {frame}: CRC-32 {crc}, where the index has {indexed:08x}"
+                why = f"frame {named}: CRC-32 {crc}, where the index has {indexed:08x}"
                 if not self._counted:
                     # After a seek, the right pts can come with another picture: a keyframe that
                     # is no entry point (in-band parameter sets, seeking.md mechanism 6) or a
@@ -674,7 +763,7 @@ class Reader:
                 # it means: an output is bit-identical across a resume only for a source that
                 # decodes the same each time. Said at once for a read's first such frame, then
                 # counted, the rest in one line at the read's end (_sum_up).
-                self.otherwise.append(frame)
+                self.otherwise.append(named)
                 if len(self.otherwise) == 1:
                     logger.warning(
                         "%s: %s, decoded from the start, at its place, its pts the index's: taken"
@@ -686,16 +775,26 @@ class Reader:
                     )
             if md5 is not None:
                 self.md5s.append(md5)
-            self.position += 1
+            self._wanted += 1
             return True
 
+    def _counted_as(self) -> str:
+        """The count ffmpeg's frames are held to, as a message gives it: the first pass's, and,
+        when some of the read's places are filled, the frames decoded for them."""
+        if self._limit == self.frames:
+            return f"{self.frames} the first pass counted"
+        return (
+            f"{self._limit} the first pass decoded, {self.frames} with the missing frames'"
+            " places, filled"
+        )
+
     def _hashed(self, run: _Run) -> tuple[int, int, str]:
-        """The frame the next RGB frame of run is, with its pts and hash: the next hashed frame its
-        select keeps. Raises _Mismatch when the hashes end first."""
+        """The decoded frame the next RGB frame of run is, with its pts and hash: the next hashed
+        frame its select keeps. Raises _Mismatch when the hashes end first."""
         while True:
-            line = run.line(run.hashes, f"frame {self._next}'s CRC-32")
+            line = run.line(run.hashes, f"frame {self._place(self._next)}'s CRC-32")
             if line is None:
-                raise _Mismatch(f"ffmpeg's hashes end before frame {self.position}")
+                raise _Mismatch(f"ffmpeg's hashes end before frame {self._place(self._wanted)}")
             pts, crc = line
             frame = self._next
             if self._counted:
@@ -707,10 +806,10 @@ class Reader:
             return frame, pts, crc
 
     def _open(self, target: int, why: str, start: bool) -> None:
-        """Start the run reading from frame `target`: from the keyframe self._back before its own,
-        seeking (seek_time) and selecting its pts on; or from the start, counting (`start`, or no
-        such keyframe, or a pts select can't single out: FrameIndex.selects)."""
-        index = self.index
+        """Start the run reading from decoded frame `target`: from the keyframe self._back before
+        its own, seeking (seek_time) and selecting its pts on; or from the start, counting
+        (`start`, or no such keyframe, or a pts select can't single out: FrameIndex.selects)."""
+        index = self._decoded
         own = index.own_keyframe(target)
         keyframe = own - self._back
         # PROVISIONAL (DESIGN.md has the start as the last resort only): a frame before the third
@@ -721,7 +820,7 @@ class Reader:
                 logger.info(
                     "%s: frame %d decoded from the start of the source, counted: %s",
                     self.path,
-                    target,
+                    self._place(target),
                     "its timestamp doesn't set it apart from the frames before it"
                     if own >= 0 and keyframe >= 1
                     else "it lies before the source's third keyframe",
@@ -736,8 +835,8 @@ class Reader:
                 "%s: frame %d read through the frame index, decoded from frame %d, the keyframe"
                 " one before its own",
                 self.path,
-                target,
-                index.first_frame_from(keyframe),
+                self._place(target),
+                self._place(index.first_frame_from(keyframe)),
             )
         self._start(target, keyframe, self._back, seek, int(index.pts[target]), why, counted=False)
 
@@ -751,20 +850,20 @@ class Reader:
         why: str,
         counted: bool,
     ) -> None:
-        where = (
-            "decoding from the start"
-            if keyframe is None
-            else f"decoding from frame {self.index.first_frame_from(keyframe)}, keyframe {keyframe}"
-        )
-        label = f"{self.path}: frame {target}, attempt {len(self.attempts) + 1}, {where}"
+        named = self._place(target)
+        where = "decoding from the start"
+        if keyframe is not None:
+            first = self._place(self._decoded.first_frame_from(keyframe))
+            where = f"decoding from frame {first}, keyframe {keyframe}"
+        label = f"{self.path}: frame {named}, attempt {len(self.attempts) + 1}, {where}"
         run = _Run(self.path, self.conversion, seek, select, self._frame_bytes, self._md5, label)
         self._run, self._counted = run, counted
         self._next = 0 if counted else target
-        self.attempts.append(Attempt(target, keyframe, back, tuple(run.command), why))
+        self.attempts.append(Attempt(named, keyframe, back, tuple(run.command), why))
 
     def _fall_back(self, why: str) -> None:
-        """After a mismatch at self.position: read again from one keyframe further back, the
-        distance doubled; from the start when the first pass flagged a frame the run decoded, or
+        """After a mismatch at the decoded frame wanted: read again from one keyframe further back,
+        the distance doubled; from the start when the first pass flagged a frame the run decoded, or
         no keyframe is left. A mismatch from the start, a frame missing or extra, a pts other than
         the index's or ffmpeg ending early (a CRC-32 there is taken: _take), raises MediaError,
         naming the frame."""
@@ -774,14 +873,14 @@ class Reader:
         errors = run.errors()
         self._done(run)
         attempt = self.attempts[-1]
-        target = self.position
+        target = self._wanted
         if attempt.keyframe is None:
             raise MediaError(
                 f"{self.path}: {why}, decoded from the start, as the first pass decoded it: the"
                 " source isn't the one indexed, or its decode not the same"
                 + (f": {errors}" if errors else "")
             )
-        index = self.index
+        index = self._decoded
         decoded_from = index.first_frame_from(attempt.keyframe)
         flagged = index.first_error(decoded_from, target)
         if flagged is not None:
@@ -796,8 +895,8 @@ class Reader:
                 " again: frame %d read again from the start, counted",
                 self.path,
                 why,
-                flagged,
-                target,
+                self._place(flagged),
+                self._place(target),
             )
             self._open(target, why, start=True)
             return
@@ -808,7 +907,7 @@ class Reader:
                 "%s: %s; frame %d read again from the start, counted, the last resort",
                 self.path,
                 why,
-                target,
+                self._place(target),
             )
             self._open(target, why, start=True)
             return
@@ -816,8 +915,8 @@ class Reader:
             "%s: %s; frame %d read again from frame %d, %d keyframes before its own",
             self.path,
             why,
-            target,
-            index.first_frame_from(own - self._back),
+            self._place(target),
+            self._place(index.first_frame_from(own - self._back)),
             self._back,
         )
         self._open(target, why, start=False)

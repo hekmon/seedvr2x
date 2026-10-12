@@ -114,6 +114,10 @@ def time_of(index: FrameIndex, frame: int) -> Fraction | None:
     the stream's own zero when the file declares no start and its first frame has none either,
     as rate.first_time counts.
 
+    A frame is a place of the index, its row (media/index.py). A filled place, where a player
+    still shows the frame before its hole, has the time of that place: the timestamp its row
+    holds, that frame's plus the frame periods since (media/grid.py, filled).
+
     PROVISIONAL (implementation, 2026-10-09; DESIGN.md asks for the timecode a player jumps to):
     the file's start, not the first frame's, so that a source whose video starts after its audio
     (by 23 ms, say, on a fixture of S9's mechanism 7: research/docs/seeking.md) gets the times a
