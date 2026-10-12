@@ -76,9 +76,10 @@ class ScratchError(MediaError):
     """A scratch that can't be made: no directory to put its file in, no room for it there, or no
     mapping it; the message says which, with the bytes it takes.
 
-    PROVISIONAL: a MediaError, so that the command line reports it as a file the run can't write,
-    its message and exit status 1 (cli._run), the units made before it kept: a full disk is the
-    user's to fix, and the same command then resumes. DESIGN.md doesn't say how it is reported."""
+    PROVISIONAL: a MediaError, a file the run can't write: the command line reports its message
+    and what the run keeps, the units made before it, with exit status 1 (cli._run): a full disk
+    is the user's to fix, and the same command then resumes. DESIGN.md doesn't say how it is
+    reported."""
 
 
 class Scratch:

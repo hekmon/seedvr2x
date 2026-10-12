@@ -1367,7 +1367,8 @@ TOLERANCE = 256 << 10
 # less by the blocks they land in. Measured on the card (RTX PRO 6000, torch 2.14.1), where the
 # requested bytes were the same at every settled call: the allocated ones went from 321,308,160
 # to 322,636,288 from call to call of the untiled encode, 786,432 to 2,114,560 over the
-# requested, and up to 7,338,896 over in the tiled passes; the first run's 559,104 bytes
+# requested, and up to 9,765,504 over in the tiled passes (8,913,536 at the most in two other
+# runs of this test, a tiled pass's most 5,898,880 to 9,765,504); the first run's 559,104 bytes
 # between the largest allocated figures of a 3-call and a 35-call encode were that rounding, and
 # so were the 1,671,168 between the two shots' allocated peaks of the tiled decode (995,573,760
 # and 997,244,928). The allocated figures are printed beside the requested ones, which shows
@@ -1617,7 +1618,7 @@ def test_passes_keep_nothing_of_the_shot_on_the_device(
                 assert use.requested_peak >= most, under
         # The peaks of the two shots, on the requested bytes where they are taken. The allocated
         # peaks aren't compared then: the allocator hands out blocks larger than what is asked,
-        # by up to 7 MiB in the tiled passes on the card, where the tiled decode's allocated
+        # by up to 9.8 MB in the tiled passes on the card, where the tiled decode's allocated
         # peaks were 1,671,168 bytes apart and every requested figure the same. The planner's
         # figures, measured at real sizes, are GiB, and were equal to the fourth decimal.
         assert top(few) > TOLERANCE, said  # measured: a pass takes megabytes

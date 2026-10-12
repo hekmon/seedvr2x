@@ -59,13 +59,15 @@ run would find them there: at the pinned revision, or downloaded at another (run
 Every case pins the passes its reference was made with, untiled or in its tiles, but one,
 test_milestone1_unpinned: numz-7b with no tile pinned, so that a bit comparison goes through the
 planner's own choice of passes (DESIGN.md, Memory planner, Choices, 3). The plan is made first,
-by the same command with --plan, which runs the first pass and plans, loading no model: its line
+by the same command with --plan, which runs the first pass and plans, loading no model today
+(DESIGN.md has --plan load them for the time estimates' calibration, which isn't built): its line
 of the passes must say both untiled, as numz ran them; the run then takes that plan, and the
-master and frames are numz's bit for bit. On a card whose plan tiles a pass, or where the plan is
-refused, the case is skipped before any run, saying that line or the refusal: a card that can't
-run untiled can't make numz's untiled master (the untiled decode of these frames, padded to
-1920x1088, takes 37.09 GiB of free VRAM by the planner, the DiT off the GPU, its room and the
-margin counted).
+master and frames are numz's bit for bit. A card that can't run untiled can't make numz's untiled
+master (the untiled decode of these frames, padded to 1920x1088, takes 37.09 GiB of free VRAM by
+the planner, the DiT off the GPU, its room and the margin counted): where the driver reports
+under 40 GiB free (UNTILED_FREE), a plan that tiles a pass, or is refused, skips the case before
+any run, saying that line or the refusal. With 40 GiB or more reported, such a plan fails it: the
+plan is wrong there, or what the log says of the free memory no longer reads (reported).
 
 seedvr2x's own padding, the default (at least 8 rows reflected from the picture, up to a multiple
 of 16, then 16 black rows; columns alike when the width isn't a multiple of 16), is held to numz
@@ -124,6 +126,7 @@ its plan (cli._free_memory).
 """
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -225,9 +228,12 @@ def upscaled(
     *more: str,
     numz_padding: bool,
     pin_untiled: bool = True,
+    planned: str | None = None,
 ) -> str:
-    """Run seedvr2x as command has it, to tmp_path's ours.mkv and frames/ (same_bits). Returns
-    the run's log."""
+    """Run seedvr2x as command has it, to tmp_path's ours.mkv and frames/ (same_bits), its first
+    pass read (detected) in the log of the call that ran it: the run's own, or `planned`, the log
+    of the same command's --plan call before it, where the run says it resumes a job. Returns the
+    run's log."""
     arguments, environment = command(
         *(tmp_path, source, resolution, models, *more),
         numz_padding=numz_padding,
@@ -235,7 +241,11 @@ def upscaled(
     )
     run = subprocess.run(arguments, capture_output=True, text=True, check=False, env=environment)
     assert run.returncode == 0, run.stderr[-3000:]
-    detected(run.stderr)
+    # ours.mkv is made in ours.mkv.work, a directory's job, and --plan makes that job with its
+    # first pass (cli._run): the run after it resumes the job, and scores no frame again. Without
+    # a --plan call, or where the run doesn't say it resumes, the first pass is the run's own.
+    resumes = " seedvr2x: resuming " in run.stderr
+    detected(planned if planned is not None and resumes else run.stderr)
     return run.stderr
 
 
@@ -264,6 +274,53 @@ def choices(lines: list[str]) -> list[str]:
 # What every refusal of the planner's for the memory a job takes says (planner.PlanError): the
 # free VRAM it takes, or the system memory.
 REFUSED = (" GiB of free VRAM", " GiB of system memory")
+
+# The free memory, in GiB as the driver reports it, from which test_milestone1_unpinned holds a
+# card to numz's untiled passes: the plan takes 37.09 GiB of free VRAM for them (the module's
+# docstring), and a card of 48 GB reports 46.5 or more (cli._free_memory: N - 1.49 on a card
+# emulated at N GB).
+UNTILED_FREE = 40.0
+
+# What the driver reported free to a run, in the words of the plan's first line and of its
+# refusals, the first that is there (reported): on a run held to the card, the driver's own
+# figure, said beside the whole card's or in its place; on a driver that refuses, the one figure
+# a refusal gives, or the plan's first line (planner._card_said, planner._there).
+REPORTED = (
+    r"its driver reports ([\d.]+) GiB free to this process",
+    r"([\d.]+) GiB free as its driver reports it to this process",
+    r"the driver reports ([\d.]+) GiB free",
+    r"plan: [^\n]*, ([\d.]+) GiB free, a budget of ",
+)
+
+
+def reported(log: str) -> float | None:
+    """What the driver reported free to the run whose log this is, in GiB, as its plan's first
+    line or its refusal says it (REPORTED); None where neither does, a refusal for the system
+    memory alone."""
+    for pattern in REPORTED:
+        said = re.search(pattern, log)
+        if said is not None:
+            return float(said[1])
+    return None
+
+
+def unpinned(log: str, why: str) -> None:
+    """The unpinned case on a card whose plan can't make numz's untiled master, `why` saying
+    it, the refusal or the plan's line of its passes: skipped where the driver reported under
+    UNTILED_FREE GiB free to the --plan run whose log this is (reported), failed where it
+    reported that or more, or where the log doesn't say."""
+    free = reported(log)
+    if free is not None and free < UNTILED_FREE:
+        pytest.skip(
+            f"the driver reports {free:.2f} GiB free, under the {UNTILED_FREE:.0f} a card makes"
+            f" numz's untiled master from: {why}"
+        )
+    there = (
+        "what the driver reports free isn't in the log"
+        if free is None
+        else (f"the driver reports {free:.2f} GiB free, {UNTILED_FREE:.0f} or more")
+    )
+    pytest.fail(f"{there}, where the plan must run both passes untiled: {why}")
 
 
 def same_bits(tmp_path: Path, reference: Path) -> None:
@@ -334,11 +391,13 @@ def test_milestone1_bit_identical(tmp_path: Path, dit: str, vae: str, reference:
 def test_milestone1_unpinned(tmp_path: Path) -> None:
     # numz-7b with no tile pinned: the passes are the planner's own choice, and the bits go
     # through it. Decided before any run, by the same command with --plan: the first pass and
-    # the plan, no model loaded, its cut list the one file written (cli.py). A card where the
-    # plan is refused, or tiles a pass, can't make numz's untiled master: the case is skipped,
-    # saying the refusal, or the plan's line of its passes (planner.said). Else that line says
-    # both untiled, as numz ran them, and nothing is pinned; the run then takes the same plan,
-    # and its bits are numz's.
+    # the plan, its cut list written and no master (cli.py); --plan loads no model today. A card
+    # where the plan is refused, or tiles a pass, can't make numz's untiled master: the case is
+    # skipped where the driver reports under 40 GiB free, saying the refusal, or the plan's line
+    # of its passes (planner.said), and fails where it reports more (unpinned). Else that line
+    # says both untiled, as numz ran them, and nothing is pinned; the run then takes the same
+    # plan, and its bits are numz's. The run resumes the job the --plan call made, so its first
+    # pass is read in that call's log (upscaled).
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
     m1 = Path(REFERENCE) / "m1"
@@ -358,22 +417,17 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     errors = [line.split(": ", 1)[-1] for line in logged]
     refusals = [error for error in errors if any(what in error for what in REFUSED)]
     if plan.returncode == 1 and refusals:
-        pytest.skip(
-            "the plan is refused on this card, which can't make numz's untiled master:"
-            f" {refusals[0]}"
-        )
+        unpinned(plan.stderr, f"the plan is refused: {refusals[0]}")
     assert plan.returncode == 0, plan.stderr[-3000:]
     detected(plan.stderr)
     planned = plan_lines(plan.stderr)
     passes = [line for line in planned if line.startswith("encode ")]
     assert len(passes) == 1 and "nothing pinned" in planned, planned
     if "in tiles of" in passes[0]:
-        pytest.skip(
-            f"the plan tiles a pass on this card, and numz's master is untiled: plan: {passes[0]}"
-        )
+        unpinned(plan.stderr, f"the plan tiles a pass: plan: {passes[0]}")
     assert passes[0].startswith("encode untiled, decode untiled, "), planned
     assert listed.is_file() and not (tmp_path / "ours.mkv").exists()
-    log = upscaled(*job, numz_padding=True, pin_untiled=False)
+    log = upscaled(*job, numz_padding=True, pin_untiled=False, planned=plan.stderr)
     assert choices(plan_lines(log)) == choices(planned), (plan_lines(log), planned)
     same_bits(tmp_path, m1 / "numz")
 

@@ -1961,7 +1961,8 @@ def test_scratch_that_cant_be_made_stops_the_run(
 ) -> None:
     # A scratch's file that can't be made, on a full disk, is the user's to fix: the run says so
     # and stops, exit status 1, as for any file it can't write; the units made before are kept,
-    # and the same command resumes once there is room.
+    # and the same command resumes once there is room, which the message says, as a stop's does,
+    # for a .mkv path as for a directory.
     from seedvr2x.runtime import run
     from seedvr2x.runtime.tiling import ScratchError
 
@@ -1980,6 +1981,11 @@ def test_scratch_that_cant_be_made_stops_the_run(
     assert caplog.text.count(said) == 1 and "Traceback" not in caplog.text
     # A .mkv path's units are kept in its work directory, its three shots one segment's.
     directory = tmp_path / ("out" if output == "out" else "one.mkv.work")
+    done = "1 of 2" if output == "out" else "0 of 1"
+    kept = (
+        f"{done} segments finished, and the units of the next ones kept: the same command resumes"
+    )
+    assert f"{said}; stopped: {kept}" in caplog.messages
     content = json.loads((directory / "manifest.json").read_text())
     finished = [True, False] if output == "out" else [False]
     assert [segment["finished"] for segment in content["segments"]] == finished
@@ -2236,6 +2242,28 @@ def test_split_by_default(
     assert upscale(tmp_path, source_path, "out", *JOB, "--color-correction", "none") == 1
     assert 'settings.color_correction: "split" -> "none"' in caplog.text and steps.calls == []
     assert "settings.format" not in caplog.text
+
+
+@pytest.mark.parametrize("split", [True, False])
+def test_a_split_job_is_planned_with_its_correction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, split: bool
+) -> None:
+    # The command line hands the planner the job's colour correction: a job that corrects its
+    # colours is planned with the correction in its decode's phase, a slice of the output
+    # corrected beside an untiled decode (planner.decode_peak's split), and one that doesn't,
+    # without. The stand-in's decode is untiled, where the term adds to the peak: the plan
+    # recorded says which was counted. A tiled decode's peak is the same with and without it.
+    source_path = job(tmp_path, monkeypatch)
+    options = (*JOB, *SPLIT) if split else JOB
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["settings"]["color_correction"] == ("split" if split else "none")
+    assert content["plan"]["decode_tiles"] is None
+    plain = planner.decode_peak(PADDED, TARGET)
+    corrected = planner.decode_peak(PADDED, TARGET, split=True)
+    slice_of_frames = planner.SPLIT_FRAME_4K * planner.SLICE * 96 * 128 / planner.PIXELS_4K
+    assert corrected - plain == pytest.approx(slice_of_frames, abs=1) and corrected > plain + 2**20
+    assert content["plan"]["memory"]["decode_peak"] == (corrected if split else plain)
 
 
 def test_split_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps) -> None:

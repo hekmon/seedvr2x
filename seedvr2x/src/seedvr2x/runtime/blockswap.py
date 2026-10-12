@@ -81,7 +81,8 @@ class HostCopy:
         try:
             area = mmap.mmap(-1, length, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
             # Not a forked child's: the kernel would copy every pinned page for it at the fork,
-            # 15.8 GiB for a plan that keeps the models apart. seedvr2x forks nothing (its
+            # the 15.81 GiB pinned for a plan that keeps the two models apart (the whole DiT and
+            # the VAE, measured, milestone 3, 2026-10-11). seedvr2x forks nothing (its
             # ffmpeg processes are spawned); a child that did would have no weights to read.
             area.madvise(mmap.MADV_DONTFORK)
         except OSError as error:

@@ -294,7 +294,8 @@ class PlanError(JobError):
     names what is there for what it is (_there): what the driver reports free, or, on a run
     held to the card, what the plan counts on, of which figure, and what would have to be freed
     (_to_free). It gives what DESIGN.md has each refusal give (Memory planner: A size that
-    doesn't fit is refused, Pins, A plan shapes the output a little, Host RAM), in GiB. Of the
+    doesn't fit is refused, Pins, A plan shapes the output a little, Host RAM), in GiB; a size
+    refused for its longest shot's draw of noise, the cut that would fit it too (_cut_said). Of the
     GPU's memory, what is taken is rounded up and what is there rounded down; of the system's,
     each part is said to the nearest hundredth, as the plan's lines say it, and the total is
     their sum (_host_hundredths)."""
@@ -414,9 +415,16 @@ def dit_draw(
     (dit_on_gpu's None): the blocks that aren't swapped, its other parameters and the slots,
     which blockswap.Placement.enter allocates as the phase is entered, before any forward, the
     first swapped blocks on their way into them; and the VAE's weights unless vae_in_dit is
-    False, model.Models.enter sending them away before the DiT's come. An upper bound by what
-    dit_on_gpu counts of the tables the DiT's blocks cache once a window has run (DIT_BUFFERS,
-    0.03 GiB of its 0.058), not there yet at a run's first draw."""
+    False, model.Models.enter sending them away before the DiT's come.
+
+    Measured at a run's first draw, every block swapped and the VAE away, at 1080p
+    (2026-10-11, before placement's follow-ups): 1.149 GiB allocated for a shot of 48 latents
+    where this counts 1.152, 1.070 for 1.073 at 8 latents and 1.068 for 1.071 at 7, 0.003 GiB
+    under each time. dit_on_gpu counts the tables the DiT's blocks cache once a window has run
+    (DIT_BUFFERS, 0.03 GiB of its 0.058), which aren't there yet at a run's first draw: without
+    them the count would be 0.03 GiB over that draw, not 0.003. So about 31 MiB allocated at a
+    first draw are not accounted for here; what they are isn't known. A later shot's draw, the
+    tables there, may then stand that much over this count: not measured."""
     height, width = padded
     position = (height // LATENT_SIDE) * (width // LATENT_SIDE)
     shot = 2 * LATENT_CHANNELS * LATENT_VALUE * position * latents
@@ -855,7 +863,9 @@ def plan(
        80 latents under a cap of 76 running two of 41; the plan's cap is then that longest
        window, which lays the shots out the same (_window);
     2. the fewest swapped blocks that hold that window, the VAE leaving the DiT's phase before
-       one more block is swapped;
+       one more block is swapped; but where the plan so made takes more system memory than
+       host_available, more blocks swapped and the VAE staying, when that takes less of it
+       (_vae_kept);
     3. the VAE's tiles, the decode's then the encode's: none where the untiled pass fits, else
        the largest that fit, TILE_MAX at most, each pass with its room (VAE_ROOM), the DiT
        leaving the phase before a tile shrinks; then as much of it left there as fits
@@ -882,6 +892,25 @@ def plan(
                 f"--{phase}-tile {pin}: a tile of {pin} px covers the whole padded frame,"
                 f" {width}x{height}: --{phase}-tile 0 pins an untiled {phase}"
             )
+    made, refused = _made(job, pins, recorded, host_available)
+    if refused is not None and recorded is None:
+        refused += _window_that_runs(job, pins, made, host_available)
+    if refused is not None and recorded is not None:
+        refused = (
+            f"the recorded plan no longer fits the memory free now: {refused}"
+            f"{_pin_s_part(job, made, pins)}"
+        )
+    if refused is not None:
+        raise PlanError(refused)
+    return made, _peaks(job, made)
+
+
+def _made(
+    job: _Job, pins: Pins, recorded: Plan | None, host_available: int | None
+) -> tuple[Plan, str | None]:
+    """The job's plan around its pins, or around a recorded shape (plan), with its scratch's
+    allowance, and why it doesn't fit the memory, None when it does (_unfit). PlanError for a
+    pin that can't be taken, or a size no plan fits (_chosen, _around)."""
     if recorded is None:
         made = _chosen(job, pins)
     else:
@@ -889,11 +918,49 @@ def plan(
         made = _around(job, recorded, pins)
     made = replace(made, scratch_allowance=_allowance(job, made, host_available))
     refused = _unfit(job, made, host_available)
-    if refused is not None and recorded is not None:
-        refused = f"the recorded plan no longer fits the memory free now: {refused}"
-    if refused is not None:
-        raise PlanError(refused)
-    return made, _peaks(job, made)
+    if refused is not None and pins.swap_blocks is None:
+        # Where the system memory is what the plan is short of: more blocks swapped, the VAE's
+        # weights staying on the GPU, when that takes less of it (_vae_kept).
+        spared = _vae_kept(job, made, host_available)
+        if spared is not None:
+            again = _unfit(job, spared, host_available)
+            if again is None or _peaks(job, spared).host < _peaks(job, made).host:
+                made, refused = spared, again
+    return made, refused
+
+
+def _window_that_runs(job: _Job, pins: Pins, made: Plan, host_available: int | None) -> str:
+    """What a new job's refusal for the system memory adds: the longest --window under the
+    plan's own with which the job is planned on this host, the other pins as given, by the
+    planner's own making of each (_made); nothing where no shorter window is, or for another
+    refusal.
+
+    The choices are made for the GPU's memory, the longest window first, and the system memory
+    is checked after them: a long window may take swapped blocks, each pinned in system memory,
+    where a shorter one takes none, so that a job is refused on a host that would run it under
+    a pin. 1080p, a shot of 301 frames, 16 GiB available and 80 GiB of free VRAM: one window of
+    76 latents with 35 blocks pinned, 17.43 GiB, refused; --window 39 runs, nothing pinned.
+    PROVISIONAL (implementation, 2026-10-12): the refusal names the pin, as the others name what
+    fits; whether the planner should take such a plan by itself is DESIGN.md's to decide
+    (Memory planner, Choices: the window first)."""
+    peaks = _peaks(job, made)
+    over = any(peaks.need(phase) + MARGIN > job.free for phase in PHASES)
+    if host_available is None or over or peaks.host <= host_available or made.window is None:
+        return ""
+    ran = _longest(job.lengths, made.window)
+    for cap in range(made.window - 1, job.smallest - 1, -1):
+        # A cap under which the job runs the windows it ran under the last one tried plans the
+        # same.
+        if _longest(job.lengths, cap) == ran:
+            continue
+        ran = _longest(job.lengths, cap)
+        try:
+            _, short = _made(job, replace(pins, window=cap), None, host_available)
+        except PlanError:
+            continue
+        if short is None:
+            return f": the longest window whose plan fits it is --window {cap}"
+    return ""
 
 
 def fits(
@@ -1275,7 +1342,8 @@ def _around(job: _Job, recorded: Plan, pins: Pins) -> Plan:
     """A recorded plan's shape as it is, where the weights are planned again around it (plan): the
     fewest swapped blocks that hold its windows, or --swap-blocks' when given, and as much of the
     DiT in the VAE's phases as fits; every block swapped and none left there when it no longer
-    fits, which _unfit then says."""
+    fits, which _unfit then says, and under --swap-blocks the pin's blocks, whose part of the
+    shortfall the refusal names (_pin_s_part)."""
     cap = recorded.window
     if pins.swap_blocks is None:
         swapped, vae_in_dit = _fewest(job, cap) or (BLOCKS, False)
@@ -1384,6 +1452,69 @@ def _swap_refused(job: _Job, swapped: int, cap: int | None, whose: str, fewest: 
         f"--swap-blocks {swapped}: {what} takes {_over(need)} GiB of free VRAM with"
         f" {_count(swapped, 'block')} swapped, and {_there(job)}: {_to_free(job, need)}the"
         f" fewest blocks that hold it are --swap-blocks {fewest}"
+    )
+
+
+def _vae_kept(job: _Job, plan: Plan, host_available: int | None) -> Plan | None:
+    """The plan's shape with the VAE's weights left on the GPU in the DiT's phase and as many
+    more blocks swapped as that takes, the fewest, where the plan as made fits the GPU's memory
+    and not the system's; None where it doesn't apply: the system memory unchecked or enough,
+    a phase over the budget, the VAE's weights there already, or no count of swapped blocks
+    holding the window with them. Not chosen under --swap-blocks, taken exactly (plan).
+
+    DESIGN.md has the VAE leave the DiT's phase before one more block is swapped (Memory
+    planner, Choices, 2): a swapped block costs time at every window, the VAE's leaving a copy
+    per phase. But the VAE's weights away are 0.47 GiB more of pinned system memory, and a
+    swapped block costs none where the VAE's phases send that block away anyway, as most plans
+    of a small card do, or 0.42. PROVISIONAL (implementation, 2026-10-12): taken only where the
+    host's memory refuses the plan as DESIGN.md orders it, so that no plan moves on a host that
+    holds it; it shapes no bit. 1080p on a 24 GB card, a shot of 301 frames, 18.4 GiB
+    available: 29 blocks swapped and the VAE staying take 18.01 GiB, where 28 and the VAE away
+    take 18.47 and were refused (tests/test_planner.py)."""
+    peaks = _peaks(job, plan)
+    over = any(peaks.need(phase) + MARGIN > job.free for phase in PHASES)
+    if host_available is None or over or peaks.host <= host_available or plan.vae_in_dit:
+        return None
+    counts = range(max(plan.swapped, SLOTS) + 1, BLOCKS + 1)
+    fits = (count for count in counts if _dit_need(job, plan.window, count, True) <= job.budget)
+    swapped = next(fits, None)
+    if swapped is None:
+        return None
+    kept = replace(
+        plan,
+        swapped=swapped,
+        resident_encode=_resident(job, "encode", plan.encode_tiles, swapped),
+        resident_decode=_resident(job, "decode", plan.decode_tiles, swapped),
+        vae_in_dit=True,
+    )
+    return replace(kept, scratch_allowance=_allowance(job, kept, host_available))
+
+
+def _pin_s_part(job: _Job, plan: Plan, pins: Pins) -> str:
+    """What a resume's refusal adds where --swap-blocks is pinned and the DiT's phase is what
+    doesn't fit: the pin's part of the shortfall said, and what the recorded shape is short of
+    by itself, every block swapped and the VAE's weights away. The pin isn't refused as on a
+    new job there (_around), the shape fitting under no count of swapped blocks, and the
+    shortfall counted with the blocks it pins would pass for the shape's: a recorded window of
+    21 latents at 1080p with 22 GiB free is 1.07 GiB short, and 15.41 with --swap-blocks 0.
+    Empty elsewhere: no pin, another phase refused first, which no swapped block changes (its
+    pass with the DiT away), or the system memory."""
+    if pins.swap_blocks is None:
+        return ""
+    peaks = _peaks(job, plan)
+    first = next((phase for phase in PHASES if peaks.need(phase) + MARGIN > job.free), None)
+    if first != "dit":
+        return ""
+    least = _dit_need(job, plan.window, BLOCKS, vae_in_dit=False) + MARGIN
+    there = _hundredths(job.free, up=False)
+    short = _hundredths(least, up=True) - there
+    part = _hundredths(peaks.need("dit") + MARGIN, up=True) - there - short
+    if part <= 0 or short <= 0:
+        return ""
+    return (
+        f", {part / 100:.2f} GiB of them --swap-blocks {pins.swap_blocks}'s: with every block of"
+        f" the DiT swapped and the VAE off the GPU, the recorded plan is {short / 100:.2f} GiB"
+        " short"
     )
 
 
@@ -1529,12 +1660,17 @@ def _too_large(job: _Job, phase: Phase, least: int) -> str:
     frame, a byte a padded pixel and a latent (dit_draw), so that the size named is one whose
     draw fits. --resolution is named first, and the size as about that: it is the target's
     scaled, not the source's, which the command line scales, and the two can differ by 2 px (a
-    1920x1080 source refused at --resolution 600: 794x448 here, 796x448 by --resolution 448)."""
+    1920x1080 source refused at --resolution 600: 794x448 here, 796x448 by --resolution 448).
+    For the draw, a cut inside the shot is named beside it, a cut list's (--cuts), with the
+    longest shot that fits at the size asked (_cut_said): the draw is the one floor a shorter
+    shot lowers."""
     height, width = job.output
+    cut = ""
     if phase == "dit":
         latents = _longest(job.lengths, job.smallest)
         if _draw_bounds(job, job.smallest, BLOCKS, vae_in_dit=False):
             how = _draw_said(job)
+            cut = _cut_said(job)
         else:
             how = f"its smallest window, {_count(latents, 'latent')}"
         how += ", with every block of the DiT swapped and the VAE off the GPU"
@@ -1572,7 +1708,37 @@ def _too_large(job: _Job, phase: Phase, least: int) -> str:
     return (
         f"an output of {width}x{height} takes {total / 100:.2f} GiB of free VRAM ({how}:"
         f" a peak of {peak / 100:.2f} GiB{held}, and {_gib(MARGIN)} of margin), and"
-        f" {_there(job)}: {_to_free(job, least + MARGIN)}{fitting}"
+        f" {_there(job)}: {_to_free(job, least + MARGIN)}{fitting}{cut}"
+    )
+
+
+def _cut_said(job: _Job) -> str:
+    """What the floor's refusal for the draw of the job's longest shot adds after the output
+    size that fits (_too_large): the shot cut, by a cut list, and the longest shot whose draw
+    fits at the size asked, in frames and latents, every longer shot of the job cut to it and
+    the floor checked there. Nothing where no shot as long as the job's smallest window fits
+    (_Job.smallest): a window or a VAE pass is then over the budget, which no cut lowers, and a
+    shot shorter than that window would fit for its shorter window, not for its draw. The floor
+    never falls as the longest shot grows from there, its draw growing with it: the length is
+    bisected."""
+
+    def fits(latents: int) -> bool:
+        lengths = tuple(sorted({min(length, latents) for length in job.lengths}))
+        return _floor(replace(job, lengths=lengths, frames=4 * latents - 3)) is None
+
+    low, high = job.smallest, job.lengths[-1] - 1
+    if high < low or not fits(low):
+        return ""
+    while low < high:
+        middle = (low + high + 1) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle - 1
+    shot = f"{_count(4 * low - 3, 'frame')} ({_count(low, 'latent')})"
+    return (
+        "; or its longest shot cut, by a cut list (--cuts): at this size a shot of up to"
+        f" {shot} fits there"
     )
 
 

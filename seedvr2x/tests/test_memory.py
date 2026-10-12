@@ -300,6 +300,104 @@ def test_no_answer_behind_wsl_is_taken_for_a_driver_that_spills(
     assert memory.hold("cuda:0") == 17 * GIB and limits == [17 / 32]
 
 
+# What torch's allocator takes of its two variables, each case in a process of its own, which
+# needs no card: the variables set, and the backend torch then names.
+TORCH_READS = (
+    ({"PYTORCH_CUDA_ALLOC_CONF": ""}, "native"),
+    ({"PYTORCH_CUDA_ALLOC_CONF": "", "PYTORCH_ALLOC_CONF": "backend:cudaMallocAsync"}, "native"),
+    (
+        {"PYTORCH_CUDA_ALLOC_CONF": "backend:cudaMallocAsync", "PYTORCH_ALLOC_CONF": ""},
+        "cudaMallocAsync",
+    ),
+)
+
+
+def test_torch_takes_the_first_variable_set_even_empty() -> None:
+    # What startup's handling of an empty setting rests on (runtime/memory.py), asked of torch
+    # itself: an empty setting names no allocator, torch's own then; and the first variable set
+    # is the one read, empty or not, so that an empty PYTORCH_CUDA_ALLOC_CONF hides a
+    # PYTORCH_ALLOC_CONF that names cudaMallocAsync.
+    import subprocess
+    import sys
+
+    names = "import torch; print(torch.cuda.get_allocator_backend())"
+    kept = {name: value for name, value in os.environ.items() if name not in memory.VARIABLES}
+    for variables, backend in TORCH_READS:
+        environment = {**kept, **variables, "CUDA_VISIBLE_DEVICES": ""}
+        read = subprocess.run(
+            [sys.executable, "-c", names],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+        )
+        assert read.stdout.strip() == backend, (variables, read.stdout, read.stderr[-500:])
+
+
+@pytest.mark.parametrize(
+    ("variables", "left", "warned"),
+    [
+        # Either variable empty, alone or both: no setting, torch's own allocator by default.
+        ({"PYTORCH_CUDA_ALLOC_CONF": ""}, {"PYTORCH_CUDA_ALLOC_CONF": "backend:native"}, False),
+        ({"PYTORCH_ALLOC_CONF": ""}, {"PYTORCH_CUDA_ALLOC_CONF": "backend:native"}, False),
+        (
+            {"PYTORCH_CUDA_ALLOC_CONF": "", "PYTORCH_ALLOC_CONF": ""},
+            {"PYTORCH_CUDA_ALLOC_CONF": "backend:native"},
+            False,
+        ),
+        # An empty one beside the user's own: the user's stands, where torch can read it.
+        (
+            {"PYTORCH_CUDA_ALLOC_CONF": "", "PYTORCH_ALLOC_CONF": "backend:cudaMallocAsync"},
+            {"PYTORCH_ALLOC_CONF": "backend:cudaMallocAsync"},
+            True,
+        ),
+        (
+            {"PYTORCH_CUDA_ALLOC_CONF": "backend:cudaMallocAsync", "PYTORCH_ALLOC_CONF": ""},
+            {"PYTORCH_CUDA_ALLOC_CONF": "backend:cudaMallocAsync"},
+            True,
+        ),
+    ],
+)
+def test_an_empty_setting_is_no_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    variables: dict[str, str],
+    left: dict[str, str],
+    warned: bool,
+) -> None:
+    # An empty PYTORCH_CUDA_ALLOC_CONF or PYTORCH_ALLOC_CONF is no setting: it goes from the
+    # environment, and the run takes the other variable's allocator, or its default. On a driver
+    # that spills, the default is torch's own, held and checked before each phase; it passed
+    # for a user's own allocator, warned of by an empty name, the check off. Left there, an
+    # empty first variable would also hide the second from torch
+    # (test_torch_takes_the_first_variable_set_even_empty).
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    assert startup(monkeypatch, Card(30 * GIB, spills=True)) == "backend:native"
+    assert {name: os.environ[name] for name in memory.VARIABLES if name in os.environ} == left
+    assert ("the allocator is the environment's, " in caplog.text) == warned
+    assert "the allocator is the environment's, :" not in caplog.text
+    assert len(caplog.messages) == 2 + warned
+    held(monkeypatch, 20 * GIB)
+    memory.hold("cuda:0")
+    held(monkeypatch, GIB)  # 1 GiB free where torch may take 17 more
+    if warned:
+        memory.check("cuda:0")
+    else:
+        with pytest.raises(torch.OutOfMemoryError):
+            memory.check("cuda:0")
+    # On a driver that refuses: the default there, or the user's own, and nothing said.
+    for name in memory.VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    caplog.clear()
+    assert startup(monkeypatch, Card(30 * GIB, spills=False)) == "backend:cudaMallocAsync"
+    assert len(set(left.values())) == 1 and len(caplog.messages) == 0
+    there = {name: os.environ[name] for name in memory.VARIABLES if name in os.environ}
+    assert there == dict.fromkeys(left, "backend:cudaMallocAsync")
+
+
 @pytest.mark.parametrize(
     ("variable", "given", "warned"),
     [

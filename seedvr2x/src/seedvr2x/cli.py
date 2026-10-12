@@ -51,10 +51,10 @@ logger = logging.getLogger("seedvr2x")
 # numz's padding of the frames before the model, DivisiblePad((16, 16)), zeros up to multiples of
 # 16, in place of seedvr2x's (DESIGN.md, Pipeline step 0), for seedvr2x's GPU tests only, never a
 # user's: milestone 1's regression holds the output to numz's own with it. It runs the CLI in a
-# process of its own, the allocator being set before torch is imported (main), so an environment
-# variable reaches it, and no option shows it to users. Read once (_run), passed down as a
-# parameter, and recorded in an output directory's settings, so that a job is never resumed in
-# the other padding.
+# process of its own, the allocator being set before torch is imported (runtime/memory.py's
+# startup, from _run), so an environment variable reaches it, and no option shows it to users.
+# Read once (_run), passed down as a parameter, and recorded in an output directory's settings,
+# so that a job is never resumed in the other padding.
 NUMZ_PADDING = "SEEDVR2X_TESTS_NUMZ_PADDING"
 
 
@@ -749,6 +749,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.run import run_job
     from seedvr2x.runtime.shot import CopyError, NonFinite, shot_layout
+    from seedvr2x.runtime.tiling import ScratchError
     from seedvr2x.runtime.units import DiskUnits, Units
 
     units, record = Units(work), None
@@ -909,6 +910,12 @@ def _run(args: argparse.Namespace) -> int:
                 done,
                 len(segments),
             )
+            return 1
+        except ScratchError as error:
+            # A tiled pass's scratch that can't be made, its disk full: the user's to fix
+            # (tiling.ScratchError). Derived data, its file gone; the units made before it are
+            # kept, which the message says as a stop's does.
+            logger.error("%s; stopped: %s", error, _kept(record, len(segments)))
             return 1
         except MediaError as error:
             # A segment command failing among them (--segment-cmd): its segment unfinished, its

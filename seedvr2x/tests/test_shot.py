@@ -3,12 +3,18 @@ and split's reference, streamed encode and decode; the DiT's windows over a stan
 draw of noise and what waits where between them; a shot's tiled encode and decode
 (runtime/tiling.py) through encode_shot and decode_shot, over test_tiling.py's stand-in VAE; and
 what a shot's steps on the CPU allocate in system memory, which the planner counts
-(planner.host_moments)."""
+(planner.host_moments).
 
+One test needs a GPU (pytest -m gpu) with the 7B whole on it and a window beside (20 GiB free),
+and the weights (SEEDVR2X_MODEL_DIR: a 7B DiT in fp16 and the VAE, as tests/test_placement.py
+takes them): a shot's windows through the real DiT, held to a one-window shot's on the device."""
+
+import gc
 import logging
 import weakref
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,13 +25,25 @@ import numpy.typing as npt
 import pytest
 import torch
 from omegaconf import OmegaConf
-from test_tiling import MEMORY, Failing, StandIn, failing_at, latent_of, mapped, models_of, same
+from test_tiling import (
+    DITS,
+    MEMORY,
+    VAES,
+    Failing,
+    StandIn,
+    failing_at,
+    found,
+    latent_of,
+    mapped,
+    models_of,
+    same,
+)
 from test_units import channel_major, job
 
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.runtime import model, planner, shot, tiling, units
 from seedvr2x.runtime.job import OutputSegment, Shot, output_size, padded_size
-from seedvr2x.runtime.plan import Tiles
+from seedvr2x.runtime.plan import Plan, Tiles
 from seedvr2x.runtime.shot import (
     Correction,
     decode_shot,
@@ -827,7 +845,11 @@ def test_a_window_s_file_allocates_the_window_alone(tmp_path: Path) -> None:
 def test_the_encode_s_end_allocates_the_latent_beside_its_buffer(stand_in: model.Models) -> None:
     # An encode's end (model.to_latent): the latent's own memory beside the buffer it is made
     # from, as large, the planner's "encode" (planner.host_moments); what its slices allocate on
-    # their way, 2 latents at a time at the most, is the device's in a run, on the CPU here.
+    # their way, 2 latents at a time at the most, is the device's in a run, on the CPU here. So
+    # this holds the end to its slices too: the buffer taken whole to the device, its copy
+    # there, the shifted one and the scaled one are 3 times the latent more, which would grow
+    # there with the shot (160 latents' worth allocated for these 40, with the loop taken
+    # whole).
     latents = 40
     means = contiguous(latents).permute(3, 0, 1, 2).unsqueeze(0).contiguous()
     one = means.nbytes // latents
@@ -835,3 +857,281 @@ def test_the_encode_s_end_allocates_the_latent_beside_its_buffer(stand_in: model
     counted = planner.host_moments(SMALL_PADDED, latents, None)
     assert counted["encode"] == means.nbytes + left == 2 * latents * one
     assert left <= most <= left + 8 * one
+
+
+def test_the_tiled_encode_s_sums_are_divided_slice_by_slice(
+    stand_in: model.Models, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A tiled encode's end before its latent is made (tiling.encode_tiled): the tiles' sums go
+    # to the device to be divided by the summed weights a slice at a time, 2 latents then 1
+    # (model.latent_slices), and come back to their place: nothing there grows with the shot.
+    # The sums given whole, 40 latents', what the tiles' passes would have summed (their part
+    # is tests/test_tiling.py's), and the latent's making left out (the test above): torch
+    # allocates 3 latents' worth at the most, a slice's copy while the slice before's is let go,
+    # and the divisor, on the CPU here, the device's in a run, where the sums taken whole are
+    # 40.
+    latents, frames = 40, 157
+    height, width = SMALL_PADDED[0] // 8, SMALL_PADDED[1] // 8
+    sums = contiguous(latents).permute(3, 0, 1, 2).unsqueeze(0).contiguous()
+    expected = sums.clone()
+    one = sums.nbytes // latents
+    count = torch.full((height, width), 2.0, dtype=model.COMPUTE_DTYPE)
+    given: list[torch.Tensor] = []
+
+    def summed(*arguments: object) -> tuple[torch.Tensor, torch.Tensor]:
+        return sums, count
+
+    def made(models: model.Models, mean: torch.Tensor) -> torch.Tensor:
+        given.append(mean)
+        return mean
+
+    monkeypatch.setattr(tiling, "_means", summed)
+    monkeypatch.setattr(model, "to_latent", made)
+    sizes = model.encode_slices(stand_in, frames)
+    fed = [torch.zeros((3, size, *SMALL_PADDED), dtype=model.COMPUTE_DTYPE) for size in sizes]
+    tiles = Tiles(64, 16)
+    assert len(tiling.grid((height, width), tiles)) > 1
+    most, left = allocated(
+        lambda: tiling.encode_tiled(stand_in, iter(fed), frames, tiles, Scratch(None, MEMORY))
+    )
+    assert len(given) == 1 and given[0] is sums and torch.equal(sums, expected / 2)
+    assert model.latent_slices(stand_in, latents)[:2] == [2, 1]
+    assert 2 * one <= most <= 3 * one + count.nbytes and left == 0
+
+
+def test_a_tiled_decode_hands_its_frames_on_slice_by_slice(
+    stand_in: model.Models, tmp_path: Path
+) -> None:
+    # A tiled decode's end (tiling.decode_tiled): once its last tile is in, each slice of the
+    # sums goes to the device to be divided and handed on, 5 frames at the most, never the
+    # scratch whole, which grows with the shot. The scratch in its file, mapped, torch
+    # allocating nothing for it: what torch allocates at the most over the pass, on the CPU
+    # here, the device's in a run, is then the same to the byte for shots of 21, 81 and 161
+    # frames, under 11 frames' worth (a tile's slice as it is weighted and summed, the divisor,
+    # a slice handed on). The scratch taken whole to the device after the last tile would be 161
+    # frames' more for the longest, which no figure read as a call of the VAE starts can see
+    # (tests/test_tiling.py's test on a card): no call starts after it.
+    tiles, size = Tiles(64, 16), (11, 13)
+    frame = 3 * 88 * 104 * 2
+    assert len(tiling.grid(size, tiles)) == 4
+    taken: list[int] = []
+    for latents in (6, 21, 41):
+        latent = latent_of(latents, size)
+        frames: list[int] = []
+
+        def decoded(latent: torch.Tensor = latent, frames: list[int] = frames) -> None:
+            passed = tiling.decode_tiled(stand_in, latent, tiles, Scratch(tmp_path, 0))
+            frames.extend(handed.shape[1] for handed in passed)
+
+        most, left = allocated(decoded)
+        assert sum(frames) == 4 * latents - 3 and max(frames) == 5 and left == 0
+        assert not (tmp_path / tiling.SCRATCH).exists()
+        taken.append(most)
+    assert taken[0] == taken[1] == taken[2] and 5 * frame < taken[0] < 11 * frame
+
+
+# The shots of the windows' test on a card: 960x540, padded to 960x576, 276,480 bytes a latent in
+# bfloat16 (16 channels over 72 x 120 positions). One shot of ONE_WINDOW latents in one window,
+# and one of WINDOWED latents, 389 frames, which a cap of ONE_WINDOW lays out in MANY windows of
+# that length, sharing 2 latents with each neighbour.
+CARD_TARGET = (540, 960)
+ONE_WINDOW, MANY = 8, 16
+WINDOWED = MANY * (ONE_WINDOW - 2) + 2
+# What two measures of the device may differ by, and still be the same, in the bytes asked of
+# torch's allocator (tests/test_tiling.py says why those: SETTLED): 1 MiB. The least a run could
+# keep there of a shot from window to window is a window's output, 8 x 276,480 = 2,211,840
+# bytes, twice this; the shot's noise or its latent whole, 98 x 276,480 = 27,095,040. Where
+# torch doesn't give those bytes, the blocks its allocator handed out are compared instead,
+# which the same tensors fill by megabytes more or less (up to 9,765,504 bytes over what was
+# asked, in the VAE's tiled passes on the card): to 12 MiB then, under the noise or the latent
+# alone.
+ASKED_TOLERANCE = 1 << 20
+BLOCKS_TOLERANCE = 12 << 20
+
+
+@dataclass(frozen=True)
+class OnDevice:
+    """What the device holds over a shot's windows as the run makes them (on_the_device), in
+    bytes, each figure by torch's count of the blocks its allocator handed out
+    (memory_allocated) and by its count of the bytes asked of it (memory_stats'
+    requested_bytes; None where torch doesn't give it): as each window's unit starts; at each
+    window's peak, its output still there; and once the shot's windows are done. reset: the
+    two counts' peaks right after each unit's reset of them, which are what is held then when
+    the reset took."""
+
+    starts: tuple[tuple[int, int | None], ...]
+    peaks: tuple[tuple[int, int | None], ...]
+    left: tuple[int, int | None]
+    reset: tuple[tuple[int, int | None], ...]
+
+    def doubt(self) -> str:
+        """Why the bytes asked of the allocator can't be compared, the blocks then being; empty
+        when they can: torch gives them at every figure, never over the blocks handed out, and
+        their peak was brought back to what was asked as each unit started."""
+        figures = (*self.starts, *self.peaks, self.left, *self.reset)
+        if any(asked is None for _, asked in figures):
+            return "torch gives no requested_bytes"
+        if any(asked is not None and asked > blocks for blocks, asked in figures):
+            return "the requested bytes were over the allocated ones"
+        if any(reset[1] != start[1] for reset, start in zip(self.reset, self.starts, strict=True)):
+            return "resetting the peaks left the requested one above what was requested then"
+        return ""
+
+
+def on_the_device(
+    models: model.Models, latents: int, cap: int, monkeypatch: pytest.MonkeyPatch
+) -> OnDevice:
+    """A shot of `latents` latents at CARD_TARGET through the run's own steps for its windows
+    (run._sample over units.Units, its windows capped at `cap` latents), its encode's latent
+    given, random, in the units, in system memory in an encode's layout: what the device holds
+    over them (OnDevice). The figures are read where the run's own are: as a unit starts,
+    before the run resets the peak it logs (run._started), and as the window's output is given
+    to the units, where the run reads that peak."""
+    from seedvr2x.runtime import run
+
+    device = models.device
+    started = run._started  # pyright: ignore[reportPrivateUsage]
+    sample = run._sample  # pyright: ignore[reportPrivateUsage]
+    starts: list[tuple[int, int | None]] = []
+    peaks: list[tuple[int, int | None]] = []
+    reset: list[tuple[int, int | None]] = []
+
+    def asked(what: str = "current") -> int | None:
+        return torch.cuda.memory_stats(device).get(f"requested_bytes.all.{what}")
+
+    def starting(models: model.Models) -> float:
+        torch.cuda.synchronize(device)
+        starts.append((torch.cuda.memory_allocated(device), asked()))
+        at = started(models)
+        reset.append((torch.cuda.max_memory_allocated(device), asked("peak")))
+        return at
+
+    class Kept(Units):
+        def save_window(self, shot: int, window: int, sampled: torch.Tensor) -> None:
+            torch.cuda.synchronize(device)
+            peaks.append((torch.cuda.max_memory_allocated(device), asked("peak")))
+            super().save_window(shot, window, sampled)
+
+    height, width = padded_size(CARD_TARGET)
+    generator = torch.Generator().manual_seed(latents)
+    values = torch.randn((16, latents, height // 8, width // 8), generator=generator)
+    kept = Kept()
+    kept.save_latent(0, values.to(model.COMPUTE_DTYPE).permute(1, 2, 3, 0))
+    del values
+    frames = 4 * latents - 3
+    job_ = ([Shot(0, frames)], CARD_TARGET, 42, Plan(cap), kept, None, None, False)
+    with monkeypatch.context() as patch:
+        patch.setattr(run, "_started", starting)
+        sample(0, models, cast(Any, None), *job_)
+    torch.cuda.synchronize(device)
+    left = (torch.cuda.memory_allocated(device), asked())
+    done = kept.windows_done(0)
+    assert done == len(shot_layout(frames, cap)) == len(starts) == len(peaks) == len(reset)
+    assert kept.latent(0) is None
+    return OnDevice(tuple(starts), tuple(peaks), left, tuple(reset))
+
+
+def test_the_card_s_test_reads_the_run_s_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    # What the windows' test on a card reads the device by (on_the_device), on the CPU, over a
+    # stand-in DiT and the device's counts replaced: the run's own steps make every window of
+    # the shot, a figure is read as each starts, before the run's reset, and one as each is
+    # kept, and the shot's latent is given up. The figures are whatever the counts say: here 3
+    # more bytes held each time the device is asked, and a window's pass 100 over that.
+    Dit(monkeypatch)
+    count = iter(range(0, 10_000, 3))
+    held: dict[str, int] = {"now": 0, "peak": 0}
+    sample = model.sample
+
+    def now(device: torch.device) -> int:
+        held["now"] = next(count)
+        return held["now"]
+
+    def sampled(models: object, noise: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        held["peak"] = held["now"] + 100
+        return sample(cast(model.Models, models), noise, cond)
+
+    def reset(device: torch.device) -> None:
+        held["peak"] = held["now"]
+
+    def stats(device: torch.device) -> dict[str, int]:
+        return {
+            "requested_bytes.all.current": held["now"],
+            "requested_bytes.all.peak": held["peak"],
+        }
+
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device: None)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", now)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: held["peak"])
+    monkeypatch.setattr(torch.cuda, "memory_stats", stats)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", reset)
+    monkeypatch.setattr(model, "sample", sampled)
+    entered: list[str] = []
+    models = cast(model.Models, SimpleNamespace(device=torch.device("cpu"), enter=entered.append))
+    read = on_the_device(models, WINDOWED, ONE_WINDOW, monkeypatch)
+    assert entered == ["dit"] * MANY
+    assert [start for start, _ in read.starts] == list(range(0, 3 * MANY, 3))
+    assert read.starts == read.reset and read.doubt() == ""
+    assert read.peaks == tuple((start + 100, start + 100) for start, _ in read.starts)
+    assert read.left == (3 * MANY, 3 * MANY)
+    layout = shot_layout(4 * WINDOWED - 3, ONE_WINDOW)
+    assert [end - start for start, end in layout] == [ONE_WINDOW] * MANY
+    assert len(on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch).peaks) == 1
+
+
+@pytest.mark.gpu
+def test_a_shot_s_windows_hold_the_device_as_one_window_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The run's own steps for a shot's windows, over the real DiT on a card: a shot of 98
+    # latents in 16 windows of 8 against a shot of 8 latents in one window. Between two windows
+    # the device holds what it held before the shot, and each window peaks where the one-window
+    # shot's does: nothing of the shot waits there but the window being made, neither its
+    # latent, its noise nor a window's output (DESIGN.md, Memory planner, Per-phase peaks). A
+    # first one-window shot runs unmeasured: what a process's first window leaves on the device
+    # for good, the tables the DiT's blocks cache for a window's size, is no shot's.
+    models = model.load_models(found(DITS), found(VAES), torch.device("cuda:0"))
+    try:
+        on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch)
+        alone = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch)
+        windowed = on_the_device(models, WINDOWED, ONE_WINDOW, monkeypatch)
+        again = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch)
+    finally:
+        models.runner.dit = models.runner.vae = None
+        gc.collect()
+        torch.cuda.empty_cache()
+    layout = shot_layout(4 * WINDOWED - 3, ONE_WINDOW)
+    assert [end - start for start, end in layout] == [ONE_WINDOW] * MANY
+    assert (len(alone.peaks), len(windowed.peaks), len(again.peaks)) == (1, MANY, 1)
+    # What the figures are compared on, for the whole run, and to what.
+    doubts = [read.doubt() for read in (alone, windowed, again) if read.doubt()]
+    on, column, tolerance = ("requested", 1, ASKED_TOLERANCE)
+    if doubts:
+        on, column, tolerance = (f"allocated ({doubts[0]})", 0, BLOCKS_TOLERANCE)
+
+    def figures(read: tuple[tuple[int, int | None], ...]) -> list[int]:
+        return [cast(int, figure[column]) for figure in read]
+
+    # Said before anything is held of them: pytest shows the output of a test that fails, and of
+    # one that passes under -rP or -s.
+    for name, read in (("one window", alone), ("16 windows", windowed), ("one window", again)):
+        print(
+            f"{name}, compared on the {on} bytes: held as each window starts"
+            f" {figures(read.starts)}, left {figures((read.left,))[0]}; peaks"
+            f" {figures(read.peaks)}; allocated: starts {[blocks for blocks, _ in read.starts]},"
+            f" peaks {[blocks for blocks, _ in read.peaks]}"
+        )
+    before, peak = figures(alone.starts)[0], figures(alone.peaks)[0]
+    said = f"on the {on} bytes, {before} held before the one-window shot, its peak {peak}"
+    # A window takes gigabytes over the weights, at this size.
+    assert peak - before > 256 << 20, said
+    for name, read in (("one window", alone), ("16 windows", windowed), ("one window", again)):
+        # Between two windows, and after the last, what the device held before the shot.
+        for window, start in enumerate(figures(read.starts)):
+            held = f"{name}: {start} held as window {window} starts: {said}"
+            assert abs(start - before) <= tolerance, held
+        left = figures((read.left,))[0]
+        assert abs(left - before) <= tolerance, f"{name}: {left} left: {said}"
+        # Each window's peak, the one-window shot's.
+        for window, top in enumerate(figures(read.peaks)):
+            reached = f"{name}: window {window} peaks at {top}: {said}"
+            assert abs(top - peak) <= tolerance, reached

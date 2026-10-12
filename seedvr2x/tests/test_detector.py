@@ -396,11 +396,12 @@ with Detector(Path(sys.argv[1]), torch.device("cuda", 0)) as found:
 @pytest.mark.parametrize("allocator", ["backend:cudaMallocAsync", "backend:native"])
 def test_gpu_detector_first_on_the_gpu(untrained: Path, allocator: str) -> None:
     # The detector doesn't depend on who initialised CUDA: built first thing in a process of its
-    # own, under the command line's allocator (cli.main sets cudaMallocAsync) and under torch's
-    # own. Under cudaMallocAsync, the reset of torch's peak statistics before CUDA's
-    # initialisation raised "RuntimeError: Invalid device argument." on the GPU box
-    # (2026-10-10, runtime/detector.py), which no test saw: each initialised CUDA before it built
-    # one, as the command line's runs do. With the untrained model's weights: no file needed.
+    # own, under the command line's allocator (runtime/memory.py sets cudaMallocAsync where the
+    # driver refuses what the card can't hold) and under torch's own. Under cudaMallocAsync, the
+    # reset of torch's peak statistics before CUDA's initialisation raised "RuntimeError: Invalid
+    # device argument." on the GPU box (2026-10-10, runtime/detector.py), which no test saw:
+    # each initialised CUDA before it built one, as the command line's runs do. With the
+    # untrained model's weights: no file needed.
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA")
     environment = os.environ | {"PYTORCH_CUDA_ALLOC_CONF": allocator}

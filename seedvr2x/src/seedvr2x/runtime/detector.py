@@ -87,10 +87,10 @@ class Detector:
             # CUDA initialised first, whoever built the detector: torch initialises it at the
             # first allocation, and the reset of its statistics asks the allocator at once
             # (torch/cuda/memory.py, where memory_stats returns {} until then), which
-            # cudaMallocAsync, the command line's allocator (cli.main), refuses for a device it
-            # hasn't met: "RuntimeError: Invalid device argument." on the GPU box, a Detector
-            # built before anything else touched the GPU (2026-10-10; the command line's own
-            # runs record their environment, the GPU's, before).
+            # cudaMallocAsync, the command line's allocator (runtime/memory.py), refuses for a
+            # device it hasn't met: "RuntimeError: Invalid device argument." on the GPU box, a
+            # Detector built before anything else touched the GPU (2026-10-10; the command
+            # line's own runs record their environment, the GPU's, before).
             torch.cuda.init()
             torch.cuda.reset_peak_memory_stats(device)
         # Built on the meta device, then given memory of its own on device and the file's values:

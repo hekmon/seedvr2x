@@ -187,6 +187,14 @@ def startup() -> str:
         else:
             _spills = found.spills
             logger.log(logging.WARNING if _spills else logging.INFO, "%s", found.said())
+    # An empty setting is no setting, and goes from the environment. torch takes the first of
+    # the two variables that is set, empty or not: left there, an empty PYTORCH_CUDA_ALLOC_CONF
+    # would hide a PYTORCH_ALLOC_CONF that names an allocator, and itself names none, which is
+    # torch's own (torch 2.14.1, each case read in a process of its own: tests/test_memory.py).
+    # The other variable's setting then stands, or the default.
+    for name in VARIABLES:
+        if os.environ.get(name) == "":
+            del os.environ[name]
     given = next((os.environ[name] for name in VARIABLES if name in os.environ), None)
     chosen = NATIVE if _spills else ASYNC
     if given is None:

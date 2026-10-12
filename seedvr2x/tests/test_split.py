@@ -95,7 +95,8 @@ DRIVER = """
 import json, os, sys
 from pathlib import Path
 
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")  # as cli.main sets it
+# As a run sets it (runtime/memory.py's startup).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
 tests, scratch, report, count, height, width, *argv = sys.argv[1:]
 count, height, width = int(count), int(height), int(width)
 sys.path.insert(0, tests)
