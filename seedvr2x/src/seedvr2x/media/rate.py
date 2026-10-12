@@ -1,11 +1,12 @@
 """A source's frames against the timeline of a constant rate (DESIGN.md, Input: exact rational
-frame rate): each frame's deviation from that timeline, anchored at the first frame; the rate
-their timestamps are exactly (exact), which a refusal of a contradicted rate gives with two fixes
-(media/source.py, timing_refusal), and the warning of a file leaving its declared rate's timeline
-names; the constant rate the frames follow within half a frame (follows), that refusal's when
-they are no rate's exactly; and --frame-rate R, accepted when every frame lies within half a
-frame of R's timeline. Exact throughout: the frames' pts in their stream's time base, as the
-frame index holds them, and rates as fractions."""
+frame rate): each frame's deviation from that timeline, anchored at the first frame, every one
+within half a frame of the declared rate's or the source is refused (media/source.py,
+timing_refusal); the rate their timestamps are exactly (exact), which a refusal of a contradicted
+rate gives with two fixes; the constant rate the frames follow within half a frame (follows),
+the refusal's where sptenc's rule fails and they are no rate's exactly; the remake a refusal
+gives (remake) and the join that keeps the frame grid (grid_join); and --frame-rate R, accepted
+when every frame lies within half a frame of R's timeline. Exact throughout: the frames' pts in
+their stream's time base, as the frame index holds them, and rates as fractions."""
 
 import math
 from dataclasses import dataclass
@@ -21,14 +22,14 @@ from seedvr2x.media.index import NOPTS, FrameIndex
 # integers then, slower.
 INT64_SAFE = 2**62
 
-# PROVISIONAL (DESIGN.md says "that rate" and not how it is found): the rates a constant rate is
-# looked for among, the rates ffmpeg itself guesses a stream's r_frame_rate from
-# (libavformat/demux.c:2287-2303 at n9.0.2, get_std_framerate): every multiple of 1/12 fps, and the
-# NTSC forms N * 1000/1001; here without ffmpeg's bounds (multiples of 1/12 up to 30 fps, integers
-# up to 60, then 80, 120 and 240, six NTSC forms), so that 100 and 120000/1001 are found too. Not
-# the simplest fraction the frames allow: for S9 (142,477 frames, research/docs/seeking.md
-# mechanism 7) that is 2997/125, 23.976 exactly, a rate no file declares, where its timestamps run
-# at 24000/1001, its audio's.
+# The rates a constant rate is looked for among (DESIGN.md, Input: "or, where sptenc's rule fails
+# as there, one of ffmpeg's standard rates within half a frame"), the rates ffmpeg itself guesses
+# a stream's r_frame_rate from (libavformat/demux.c:2287-2303 at n9.0.2, get_std_framerate): every
+# multiple of 1/12 fps, and the NTSC forms N * 1000/1001; here without ffmpeg's bounds (multiples
+# of 1/12 up to 30 fps, integers up to 60, then 80, 120 and 240, six NTSC forms), so that 100 and
+# 120000/1001 are found too. Not the simplest fraction the frames allow: for S9 (142,477 frames,
+# research/docs/seeking.md mechanism 7) that is 2997/125, 23.976 exactly, a rate no file declares,
+# where its timestamps run at 24000/1001, its audio's.
 TWELFTHS = 12
 NTSC = Fraction(1000, 1001)
 # The most rates follows tries: more means a span too short to tell one rate from the next (two
@@ -124,21 +125,23 @@ def exact(index: FrameIndex) -> Timeline | None:
     None: a rate whose timeline holds every frame within half a frame, their deviations from it
     spread over one tick of the time base at most, the highest less the lowest.
 
-    PROVISIONAL (implementation, 2026-10-10, a question for design, with the warning that names
-    the rate: media/source.py, _strays). A constant rate's times, rounded to the time base's
-    ticks, each lie within half a tick of a timeline of that rate (rounded to the nearest tick,
-    a tie either way; rounded down, of one half a tick earlier): whatever the timeline's anchor,
-    their deviations from it spread over one tick at most. Measured in Matroska, whose tick is
-    1 ms (2026-10-10): frames at 24000/1001 and at 48 fps, declared 24/1 and 50/1, spread 0.96
-    and 0.83 of a tick on their own rate's timeline, within 0.5 ms of it, 600 and 3,000 frames
-    alike; 33 ms a frame, 0 on 1000/33's; 2,400 frames joined by ffmpeg's concat demuxer 1.67
-    to 2 ticks on the rate looked for nearest them (30000/1001 joined every 10 or 12 frames on
-    30/1's, within 1.0 ms; 24000/1001 every 24 or 20 on 24/1's, within 1.3 and 1.7 ms), and 2
-    to 2.6 on their own mean rate's. Half a frame, the bound a rate holds the frames within
-    (follows), took those joins for files at 30/1 and 24/1; 33 and 42 ms a frame for 91/3 and
-    143/6 fps over 120 to 300 frames, within 3.9 to 12.5 ms, rates that 3,000 frames of each
-    leave; and 17 ms a frame for 353/6 fps, within 0.85 ms over 300 frames and 8.5 over 3,000
-    (a review's findings, 2026-10-10).
+    DESIGN.md's "exactly (to one tick of the file's time base)" (Input: "When the timestamps
+    follow another rate"), the rate a refusal names (media/source.py, _guided, _leaves);
+    without one, a file that leaves its declared rate's timeline is refused as the drifting join
+    it may be ("When the timestamps follow no rate exactly"). A constant
+    rate's times, rounded to the time base's ticks, each lie within half a tick of a timeline of
+    that rate (rounded to the nearest tick, a tie either way; rounded down, of one half a tick
+    earlier): whatever the timeline's anchor, their deviations from it spread over one tick at
+    most. Measured in Matroska, whose tick is 1 ms (2026-10-10): frames at 24000/1001 and at 48
+    fps, declared 24/1 and 50/1, spread 0.96 and 0.83 of a tick on their own rate's timeline,
+    within 0.5 ms of it, 600 and 3,000 frames alike; 33 ms a frame, 0 on 1000/33's; 2,400 frames
+    joined by ffmpeg's concat demuxer 1.67 to 2 ticks on the rate looked for nearest them
+    (30000/1001 joined every 10 or 12 frames on 30/1's, within 1.0 ms; 24000/1001 every 24 or 20
+    on 24/1's, within 1.3 and 1.7 ms), and 2 to 2.6 on their own mean rate's. Half a frame, the
+    bound a rate holds the frames within (follows), took those joins for files at 30/1 and 24/1;
+    33 and 42 ms a frame for 91/3 and 143/6 fps over 120 to 300 frames, within 3.9 to 12.5 ms,
+    rates that 3,000 frames of each leave; and 17 ms a frame for 353/6 fps, within 0.85 ms over
+    300 frames and 8.5 over 3,000 (a review's findings, 2026-10-10).
 
     The rates tried: the frames' own mean rate, their steps over their span, given when every
     frame lies on its timeline, a constant step in ticks, whatever the rate (1000/33 fps for 33
@@ -249,7 +252,12 @@ def remake(rate: Fraction, start: Fraction) -> str:
     """The ffmpeg command remaking a source at `rate` (DESIGN.md, Input: "Remake the file"): its
     first video stream, the one seedvr2x reads, an FFV1 master numbering its frames at that rate,
     its other streams copied; `start`, its first frame's time after the file's start, in seconds,
-    where that frame stays, the other streams' sync with it kept.
+    where that frame stays, the other streams' sync with it kept. At the rate the timestamps
+    follow, for a file that declares another; at the rate declared, for one whose frames drift
+    off its timeline and follow no rate exactly, as a join by ffmpeg's concat demuxer does
+    (DESIGN.md, Input: "the remake at the declared rate"): 600 frames at 24000/1001 joined in
+    30 segments, up to 24.5 ms early, came out at the timestamps of the file they were split
+    from, every frame in order (tests/test_rate.py, 2026-10-10).
 
     PROVISIONAL (DESIGN.md names no command): the input option -r:v:0, which gives every frame
     decoded the next place at that rate, from 0 (fftools/ffmpeg_dec.c:398-409 at n9.0.2), so that
@@ -269,6 +277,28 @@ def remake(rate: Fraction, start: Fraction) -> str:
         words += ["-filter:v:0", f"settb=AVTB,setpts=PTS{microseconds:+d}"]
         words += ["-enc_time_base:v:0", "demux"]
     return " ".join([*words, "remade.mkv"])
+
+
+def grid_join(directory: str = "DIR") -> str:
+    """How segments are joined so that every frame keeps its place on the frame grid, as a
+    refusal advises it, each way with its command, in one place (DESIGN.md, Input: "a join that
+    keeps the frame grid"): media/source.py's, of a file whose frames drift off the timeline of
+    the rate it declares (_leaves), as those of a join by ffmpeg's concat demuxer do, about 1 ms
+    a join; `directory`, the segments', as a shell takes it, DIR for a refusal that can't know
+    it.
+
+    sptenc's concat gives its demuxer each segment's exact duration, its frames over the rate,
+    and snaps every timestamp to the grid, the nearest frame's time rounded once to the time
+    base (sptenc's ffmpeg/concat.go, frameGridSnap): a 2,400-frame master at 24000/1001 cut as
+    sptenc's split cuts one, in 156 segments, came back with its timestamps, every one
+    (cli._directory_refused)."""
+    ways: list[str] = []
+    # The ffmpeg-alone join: filled by the directory advice's commit
+    ways.append(
+        f"with sptenc, for segments of its split, sptenc concat {directory} joined.mkv, which"
+        " snaps every timestamp to the grid"
+    )
+    return ", or ".join(ways)
 
 
 def first_time(index: FrameIndex) -> Fraction:

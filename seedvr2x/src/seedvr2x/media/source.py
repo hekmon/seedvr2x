@@ -4,6 +4,7 @@ A job resumed checks its record between what the source declares and its first p
 it then trusts when nothing changed (DESIGN.md, Pause and resume)."""
 
 import logging
+import math
 import threading
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -361,8 +362,9 @@ def first_pass(
 
 def counted(declared: Declared, found: FirstPass) -> Source:
     """The source declared, its frames counted and indexed by its first pass, or by the record of
-    one; warned of when, read at the rate it declares, its frames leave that rate's timeline
-    (_strays), and when idet found combed frames there (combing)."""
+    one; warned of when idet found combed frames there (combing). Their timing is the first
+    pass's to judge (timing_refusal), never judged again here: a resume that takes the pass
+    from its record reads on at the rate recorded (DESIGN.md, Pause and resume)."""
     stream = declared.stream
     source = Source(
         declared.path,
@@ -390,12 +392,6 @@ def counted(declared: Declared, found: FirstPass) -> Source:
         _ratio(source.display_aspect),
         source.conversion.describe(),
     )
-    if source.rate_override is None:
-        # Here, not in the first pass's own check (timing_refusal): a resume that takes the pass
-        # from its record reads on at the declared rate, and says so again from the recorded
-        # index. Said by the pass alone, a job resumed read on without it (a review's finding,
-        # 2026-10-10).
-        _strays(source)
     combing(source)
     return source
 
@@ -439,17 +435,20 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
     timestamps contradict it is a bad file, refused, never reinterpreted on seedvr2x's own; when
     they are a constant rate's exactly, or else follow one within half a frame (_guided), the
     refusal gives that rate, how far they stray from its timeline, and two fixes, a remake at
-    that rate or --frame-rate. A file the rule passes is read at the rate it declares, warned of
-    when its frames leave that rate's timeline (counted, _strays). With --frame-rate R: every
-    frame within half a frame of R's timeline (_off)."""
+    that rate or --frame-rate. Then seedvr2x's own test of a file the rule passes: every frame
+    strictly within half a frame of its place on the declared rate's timeline, counted from the
+    first frame, or refused too (_leaves). With --frame-rate R: every frame within half a frame
+    of R's timeline (_off)."""
     path, stream, index = declared.path, declared.stream, scanned.index
     error = timing_error(scanned, stream.frame_rate, stream.avg_frame_rate)
     if scanned.discontinuity is not None:
         return error
     forced = declared.rate_override
     if forced is None:
-        if index is None or not error:
+        if index is None:
             return error
+        if not error:
+            return _leaves(stream.frame_rate, index)
         found = _guided(index)
         if found is None:
             return error
@@ -491,7 +490,7 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
         # another time than its source, off the source's other streams. Only a short file's
         # frames lie on both: 24 and 24000/1001 part by half a frame within 500 frames. By the
         # declared rate's timeline, never by sptenc's rule alone, which doesn't tell: frames at
-        # 24000/1001 last within 1 ms of 24's (_strays), and a file of them declared 24/1 was
+        # 24000/1001 last within 1 ms of 24's (_leaves), and a file of them declared 24/1 was
         # told its frames were at 24/1 "too" when given its own rate.
         change = stream.frame_rate / forced - 1
         logger.warning(
@@ -513,63 +512,122 @@ def _guided(index: FrameIndex) -> Timeline | None:
     rate's exactly, their long steps catching up, and lie within 10.9 ms of 24000/1001's timeline
     (research/docs/seeking.md, mechanism 7).
 
-    PROVISIONAL (implementation, 2026-10-10: DESIGN.md's Input has "its timestamps follow that
-    rate", of S9, and not how the rate is found). Half a frame's rate alone named one by the
-    file's length: 33 ms a frame declared 25/1 ran "at 91/3 fps (30.333), within 3.9 ms" over
-    120 frames, --frame-rate 91/3 then accepted, and at no rate over 3,000, refused without
-    guidance; a frame every 11 s, 6 frames, "at 1/12 fps (0.083), within 5000 ms". Exactly, they
-    are 1000/33 fps at both lengths, and 1/11 (a review's findings, 2026-10-10)."""
+    DESIGN.md's order (Input: "When the timestamps follow another rate, exactly (to one tick of
+    the file's time base) or, where sptenc's rule fails as there, one of ffmpeg's standard rates
+    within half a frame"). Half a frame's rate alone named one by the file's length: 33 ms a
+    frame declared 25/1 ran "at 91/3 fps (30.333), within 3.9 ms" over 120 frames, --frame-rate
+    91/3 then accepted, and at no rate over 3,000, refused without guidance; a frame every 11 s,
+    6 frames, "at 1/12 fps (0.083), within 5000 ms". Exactly, they are 1000/33 fps at both
+    lengths, and 1/11 (a review's findings, 2026-10-10)."""
     return rate.exact(index) or rate.follows(index)
 
 
-def _strays(source: Source) -> None:
-    """Warn of a source that passes sptenc's rule and yet leaves the timeline of the rate it
-    declares, some frame half a frame or more from its place there: how many frames, from which,
-    how far; that it is read at the rate it declares all the same, frame after frame; and, when
-    its timestamps are another constant rate's exactly (rate.exact), that rate, which
-    --frame-rate takes its frames at, and what the declared one does to the output's duration.
-    From the source's frame index, the first pass's or its record's (counted).
+def _leaves(declares: Fraction, index: FrameIndex) -> str:
+    """Why a source that sptenc's rule passes is refused all the same, or "": seedvr2x's own test
+    (DESIGN.md, Input: "or when a frame lies half a frame or more from its place on the declared
+    rate's timeline, counted from the first frame"; "The second test is seedvr2x's own (decided
+    2026-10-10)"). Every frame must lie strictly within half a frame of its place on the timeline
+    of the rate it declares, `declares`, as --frame-rate's frames on R's (rate.Timeline.holds);
+    else how many don't, from which frame, how far (_strayed), and what the file is, with its
+    ways out (_way_out).
 
     sptenc's rule bounds each frame's duration, not where the frames end up: frames at 24000/1001
     declared 24/1 last 41.7 ms, within 1 ms of 24's 41.667, yet lie half a frame off 24's timeline
     from frame 500 on, 0.1% further each frame, and frames at 48 fps declared 50/1 last 20.8 ms
-    for 20, 4%: both are read, their output written at the rate declared, 0.1% and 4% shorter
+    for 20, 4%: both were read, their output written at the rate declared, 0.1% and 4% shorter
     than their frames' own time, off the source's other streams (a review's finding, 2026-10-09).
 
-    PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md's Input has sptenc's
-    rule, "the declared rate must also match the measured durations", and accepts the joins of
-    ffmpeg's concat demuxer, "1 ms early per join, off the frame grid"): no file the rule passes
-    is refused, as before the frame index, and what is read on is said, with its reason
-    (AGENTS.md: no silent fallback). The refusal tried first, of the files whose frames followed
-    another rate within half a frame (rate.follows), refused files by their length, and the very
-    joins the refusal of a directory advises (cli._directory_refused), all read before: 2,400
-    frames at 24000/1001 joined every 20 or 24 frames, as running at 24/1; 33 ms a frame
-    declared 30/1 over 120 and 300 frames, as running at 91/3 fps, and read over 3,000 (a
-    review's findings, 2026-10-10). A rate is named only when the timestamps are that rate's to
-    their time base's rounding (rate.exact), which no join measured is but one at every frame, a
-    constant step."""
-    stream, index = source.stream, source.index
-    if index is None:
-        return
-    on = rate.timeline(index, stream.frame_rate)
+    By the declared rate's timeline alone, whatever other rate may hold the frames. The refusal
+    tried first, of the files whose frames followed another rate within half a frame
+    (rate.follows), refused files by their length and named joins a rate: 2,400 frames at
+    24000/1001 joined by ffmpeg's concat demuxer every 20 or 24 frames, as running at 24/1; 33 ms
+    a frame declared 30/1 over 120 and 300 frames, as running at 91/3 fps, and read over 3,000 (a
+    review's findings, 2026-10-10). Such files were then read and warned of, until design made the
+    rule strict: real sources hold their declared timeline, none of 34 Blu-ray, DVD and web files
+    measured leaving it (DESIGN.md), and a join by ffmpeg's concat demuxer, read until then
+    however far it drifted, is refused once a frame is half a frame off. Measured at 24000/1001
+    in Matroska: segments split by stream copy join 0.77 ms early each, half a frame after 24
+    joins; segments encoded on their own 0.31 ms late, after 68; segments of exactly 24 or 48
+    frames 1 ms early, after 21. At 30000/1001, 0.35 to 0.37 ms early, 41 to 45 joins. None at
+    25 fps, nor from MP4 segments."""
+    # PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has this test,
+    # Input, and "a file either of them builds is never refused", of sptenc concat and seedvr2x's
+    # own assembly): the test as written, on the rate ffprobe gives, which for a Matroska file is
+    # its frame duration in whole nanoseconds read back as the nearest fraction of terms up to
+    # 30000 (sptenc's core.SameFrameRate): 60000/1001 comes back 19001/317, 48000/1001 7001/146
+    # and 120000/1001 29011/242, 0.9, 3.0 and 3.2 ns a frame off (ffmpeg n9.0.2). Timestamps in
+    # milliseconds at those rates leave the timeline of the rate declared at frames 8,939,970,
+    # 3,335,976 and 1,161,780, 41 h, 19 h and 2 h 41 min in: such a file, sptenc's or seedvr2x's
+    # own included, is refused from there, naming the rate its timestamps are exactly, which
+    # --frame-rate takes. A rate Matroska reads worse, 1000000/33333 as 30/1, 1e-5 off, leaves at
+    # frame 48,503, 27 min in, as no rate's exactly.
+    on = rate.timeline(index, declares)
     if on.holds:
-        return
-    said = (
-        f"{on.off} of its {source.frames} frames half a frame or more from their place on the"
-        f" timeline of the rate it declares, {rate.fraction(stream.frame_rate)}, from frame"
-        f" {on.first_off}, up to {_ms(on.largest * 1_000_000)} ms"
-        f" ({float(on.largest * on.rate):.2f} of a frame): read at the rate it declares all the"
-        " same, frame after frame, as a file joined by ffmpeg's concat demuxer is"
+        return ""
+    return f"{_strayed(on, index.frames)}, and {_way_out(on, index)}"
+
+
+def _strayed(on: Timeline, frames: int) -> str:
+    """How a source's `frames` frames leave the timeline of the rate it declares, `on`: how many
+    lie half a frame or more from their place there, from which frame, and how far the furthest
+    wanders, in ms and of a frame."""
+    lie, their = ("lies", "its") if on.off == 1 else ("lie", "their")
+    return (
+        f"{on.off} of its {frames} frames {lie} half a frame or more from {their} place on the"
+        f" timeline of the rate it declares, {rate.fraction(on.rate)}, from frame {on.first_off},"
+        f" up to {_ms(on.largest * 1_000_000)} ms ({float(on.largest * on.rate):.2f} of a frame)"
     )
+
+
+def _way_out(on: Timeline, index: FrameIndex) -> str:
+    """What a source whose frames leave the timeline of the rate it declares, `on`, is, and its
+    ways out, as its refusal ends (_leaves, _off).
+
+    Its timestamps another constant rate's exactly (rate.exact): a file declaring a rate that
+    isn't its frames', named with what the declared one would have cost, the output that much
+    shorter or longer than its timestamps' own time, and the two fixes at the rate named
+    (_fixes; DESIGN.md, Input: "When the timestamps follow another rate").
+
+    No one rate's exactly: what a join by ffmpeg's concat demuxer gives, each segment starting
+    where the one before ends by its declared duration, about 1 ms early a join for segments
+    split by stream copy (cli._directory_refused: 155 ms over 155 joins; 24.5 ms over 29 joins
+    of 20 frames). Timestamps alone can't tell such a join from a retagged file (DESIGN.md,
+    Input: "When the timestamps follow no rate exactly"): the same join every 20 or 24 frames
+    lies within 1.7 and 1.3 ms of 24/1's timeline, and 24.03 fps declared 24/1, rounded to
+    milliseconds, is no rate's exactly either (rate.exact), nor is a file of a few frames that
+    several rates hold so. Its ways out are a join that keeps the frame grid (rate.grid_join)
+    and the remake at the rate declared, which numbers the frames as they come, the place each
+    had before the join. --frame-rate is no way out and isn't named: no rate is the frames' own
+    there, and one that holds them within half a frame, as 24/1 holds those joins, would take
+    frames meant for 24000/1001 at 24."""
+    declares = on.rate
     found = rate.exact(index)
     if found is not None:
-        change = found.rate / stream.frame_rate - 1
-        said += (
-            f"; {_exactly(found, index)}, where the rate it declares makes its output"
-            f" {abs(float(change)) * 100:.3f}% {'shorter' if change < 0 else 'longer'} than its"
-            " timestamps' own time, off the source's other streams"
+        return (
+            f"its output, written at that rate, would be {_cost(found.rate / declares - 1)} than"
+            " its timestamps' own time, off the source's other streams: its timestamps follow"
+            f" {rate.said(found.rate)} exactly, to the rounding of its time base,"
+            f" {index.time_base} s: a bad file, not read on a guess: {_fixes(found.rate, index)}"
         )
-    logger.warning("%s: %s", source.path, said)
+    command = rate.remake(declares, rate.first_time(index))
+    return (
+        "its timestamps follow no one rate exactly: a file joined by ffmpeg's concat demuxer"
+        " drifts so, about 1 ms a join, and timestamps alone can't tell a drifting join from a"
+        " retagged file: a bad file, not read on a guess: join its segments again so that every"
+        f" frame keeps its place on the frame grid, {rate.grid_join()}; or remake it at the rate"
+        " it declares, an FFV1 master numbering its frames at that rate as they come, every one"
+        f" kept, its other streams copied ({REMAKE_COST}), with {command}"
+    )
+
+
+def _cost(change: Fraction) -> str:
+    """What a rate does to an output's duration, `change` its relative change, not 0, as a
+    refusal gives it: in percent to 3 decimals, "0.100% shorter", "4.000% shorter", or to as
+    many as show its first two digits: "0.000038% shorter" for 120000/1001 read as Matroska
+    declares it, 29011/242 (_leaves), where 3 decimals said 0.000%."""
+    percent = abs(float(change)) * 100
+    decimals = max(3, 1 - math.floor(math.log10(percent)))
+    return f"{percent:.{decimals}f}% {'shorter' if change < 0 else 'longer'}"
 
 
 def _exactly(found: Timeline, index: FrameIndex) -> str:
@@ -584,18 +642,21 @@ def _exactly(found: Timeline, index: FrameIndex) -> str:
 
 def _off(on: Timeline, declared: Declared, index: FrameIndex, passes: bool) -> str:
     """Why --frame-rate R is refused, its frames not all within half a frame of R's timeline: the
-    first one off, how far, how many. Then, of a file sptenc's rule passes at the rate it
-    declares (`passes`): that it is read without the option, at that rate, frame after frame;
-    and the rate its timestamps are exactly (rate.exact), when they are another's. Of a file
+    first one off, how far, how many. Then what the file is without the option. One sptenc's rule
+    passes at the rate it declares (`passes`) and that holds that rate's timeline: read without
+    the option, at that rate; and the rate its timestamps are exactly (rate.exact), when they
+    are another's. One the rule passes that leaves that timeline: refused without the option
+    too, with the fix that applies (_leaves, _way_out), the exact rate's when there is one. One
     the rule refuses: the rate its refusal names (_guided), and the two fixes at it.
 
-    PROVISIONAL (implementation, 2026-10-10, where DESIGN.md doesn't say): a file the rule
-    passes is never given a rate that holds its frames within half a frame alone (rate.follows).
-    The join a directory's refusal advises (cli._directory_refused), 2,400 frames at 24000/1001
-    joined every 20, given the rate it declares, was told "its timestamps run at 24/1 fps (24),
-    within 1.7 ms of that rate's timeline", and --frame-rate 24/1 then read it at 24, 0.1% off,
-    without a warning, where it is read at 24000/1001 without the option (a review's finding,
-    2026-10-10)."""
+    A file the rule passes is never given a rate that holds its frames within half a frame alone
+    (rate.follows), by DESIGN.md's rule (Input: a rate is named when the timestamps follow it
+    "exactly (to one tick of the file's time base) or, where sptenc's rule fails as there, one of
+    ffmpeg's standard rates within half a frame"; "When the timestamps follow no rate exactly
+    ... `--frame-rate` can't hold there"). 2,400 frames at 24000/1001 joined by ffmpeg's concat
+    demuxer every 20, given the rate they declare, were told "its timestamps run at 24/1 fps
+    (24), within 1.7 ms of that rate's timeline", and --frame-rate 24/1 then read them at 24,
+    0.1% off, without a warning (a review's finding, 2026-10-10)."""
     half = 1000 / (2 * float(on.rate))
     by = float(on.first_off_by) * 1000
     more = on.off - 1
@@ -613,10 +674,18 @@ def _off(on: Timeline, declared: Declared, index: FrameIndex, passes: bool) -> s
     )
     if passes:
         declares = declared.stream.frame_rate
+        if on.rate == declares:
+            # R is the rate declared: its frames are said already, the first one off and how many.
+            return (
+                f"{reason}; without --frame-rate, the file is refused too, that rate being the"
+                f" one it declares, and {_way_out(on, index)}"
+            )
+        left = _leaves(declares, index)
+        if left:
+            return f"{reason}; without --frame-rate, the file is refused too: {left}"
         reason += (
             "; without --frame-rate, the file is read at the rate it declares,"
-            f" {rate.fraction(declares)}, frame after frame, whatever their place on that rate's"
-            " timeline"
+            f" {rate.fraction(declares)}, whose timeline holds every frame within half a frame"
         )
         exact = rate.exact(index)
         if exact is None or exact.rate == declares:

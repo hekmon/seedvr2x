@@ -3970,14 +3970,16 @@ def test_a_frame_decoded_otherwise_taken_and_summed_up(
         assert decoded(tmp_path / "out" / name) == decoded(tmp_path / "whole" / name)
 
 
-def test_a_drift_off_the_declared_rate_warned_of_again_on_a_resume(
+def test_a_rate_contradicted_refused_by_the_first_pass_never_by_a_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # 48 fps declared 50/1 (test_rate.retagged), 100 frames: read at the rate it declares, its
-    # frames half a frame and more off that rate's timeline from frame 12, warned of
-    # (media/source.py, _strays). A resume takes the first pass from its record, reads on at
-    # the same rate, and says so again, from the recorded index, in the same words: the
-    # warning was the first pass's alone, and a job resumed read on without it.
+    # 48 fps declared 50/1 (test_rate.retagged), 100 frames, its frames half a frame and more
+    # off the declared rate's timeline from frame 12: refused by its first pass (media/source.py,
+    # _leaves), naming the rate its timestamps are exactly and what the declared one would cost,
+    # nothing made; it was read at 50/1, and warned of by its first run and by each resume. A
+    # resume that trusts its first pass's record judges nothing again (source.counted): a job
+    # recorded with the judge held off, as one of before the rule, is resumed from its record,
+    # no pass run, nothing refused, nothing said of a timeline.
     from seedvr2x.media import source as examined
 
     scans: list[Path] = []
@@ -3992,20 +3994,25 @@ def test_a_drift_off_the_declared_rate_warned_of_again_on_a_resume(
     source_path = retagged(tmp_path / "retagged.mkv", 50, "round(N*1000/48)", 100)
     (tmp_path / "cuts.txt").write_text("12\n")
     options = ("--cuts", "cuts.txt", "--min-segment", "0.1")
-    steps.stop = "encode 12"
-    stopped(tmp_path, source_path, "out", *options)
-    first = strayed(caplog)
-    assert len(first) == 1 and len(scans) == 1
-    assert first[0].startswith(
-        f"{source_path}: 88 of its 100 frames half a frame or more from their place on the"
-        " timeline of the rate it declares, 50/1, from frame 12, up to 83 ms (4.15 of a frame):"
-    )
-    assert "its timestamps follow 48/1 fps (48) exactly" in first[0]
+    text = refused(tmp_path, source_path, caplog, *options)
+    assert (
+        f"{source_path}: 88 of its 100 frames lie half a frame or more from their place on the"
+        " timeline of the rate it declares, 50/1, from frame 12, up to 83 ms (4.15 of a frame),"
+        " and its output, written at that rate, would be 4.000% shorter than its timestamps' own"
+        " time, off the source's other streams: its timestamps follow 48/1 fps (48) exactly"
+    ) in text
+    assert "; or give --frame-rate 48/1, which takes its frames at that rate" in text
+    assert len(scans) == 1 and not (tmp_path / "out" / "manifest.json").exists()
+    with monkeypatch.context() as before_the_rule:
+        before_the_rule.setattr(examined, "timing_refusal", lambda *_: "")
+        steps.stop = "encode 12"
+        stopped(tmp_path, source_path, "out", *options)
+    assert len(scans) == 2
     caplog.clear()
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *options) == 0
-    assert len(scans) == 1  # the first pass's record trusted
-    assert strayed(caplog) == first
+    assert len(scans) == 2  # the first pass's record trusted
+    assert not strayed(caplog) and "timeline" not in caplog.text
     names = ("seg_000000.mkv", "seg_000001.mkv")
     assert indexes(tmp_path / "out" / names[0]) + indexes(tmp_path / "out" / names[1]) == list(
         range(100)
@@ -4017,7 +4024,7 @@ def test_a_drift_off_the_declared_rate_warned_of_again_on_a_resume(
     stopped(tmp_path, source_path, "at48", *options, "--frame-rate", "48")
     steps.stop = None
     assert upscale(tmp_path, source_path, "at48", *options, "--frame-rate", "48") == 0
-    assert len(scans) == 2 and not strayed(caplog)
+    assert len(scans) == 3 and not strayed(caplog)
 
 
 def rate_of(path: Path) -> str:

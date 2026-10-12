@@ -2,10 +2,12 @@
 rate; media/rate.py, media/source.py's timing_refusal): the timeline of a constant rate and its
 half-frame bound, the rate the frames follow, the refusal's guidance and its remake command, and
 --frame-rate, on indexes made here and on research/docs/seeking.md's mechanism 7 made on purpose
-(mechanism7); and the files sptenc's rule passes whose frames leave their declared rate's
-timeline, read and warned of: other rates declared, named when the timestamps are theirs exactly,
-and joins by ffmpeg's concat demuxer, which are no rate's. The command line's run with
---frame-rate is test_cli_run.py's.
+(mechanism7); and seedvr2x's own test of the files sptenc's rule passes, every frame within half
+a frame of its place on the declared rate's timeline: other rates declared, refused naming the
+rate when the timestamps are its exactly, joins by ffmpeg's concat demuxer that drift half a
+frame, refused as no rate's, with the remake that puts them back; and what stays read, constant
+rates to their time base's rounding at any length, joins that keep the frame grid or drift less,
+a video starting after its audio. The command line's run with --frame-rate is test_cli_run.py's.
 
 Opt-in, a real source whose timestamps contradict its declared rate (S9, on the GPU box): its path
 in SEEDVR2X_RATE_SOURCE, and the rate expected, N/D, in SEEDVR2X_RATE_EXPECTED (optional). One
@@ -24,18 +26,29 @@ import subprocess
 import time
 from dataclasses import replace
 from fractions import Fraction
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import pytest
+from test_conversion import UNTAGGED_HD
 from test_index import joined_ts
 from test_probe import has_encoder
 
 from seedvr2x.media import ffmpeg, rate
+from seedvr2x.media.conversion import conversion_for
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.index import NOPTS, FrameIndex
-from seedvr2x.media.scan import scan
-from seedvr2x.media.source import declare, examine, timing_refusal
+from seedvr2x.media.scan import Scan, scan
+from seedvr2x.media.source import (
+    Declared,
+    FirstPass,
+    counted,
+    declare,
+    examine,
+    timing_refusal,
+)
 
 
 def _usable() -> bool:
@@ -304,8 +317,8 @@ def test_frame_rate_on_a_file_already_fine(
     ) in caplog.text
     with pytest.raises(MediaError) as refused:
         examine(path, frame_rate=Fraction(25))
-    # Told that it is read without the option, and no other rate named: its timestamps are
-    # the declared one's.
+    # Told that it is read without the option, its frames on the declared rate's timeline, and
+    # no other rate named: its timestamps are the declared one's.
     assert str(refused.value) == (
         f"{path}: --frame-rate 25/1: frame 12 lies 21.0 ms after its place on that rate's"
         " timeline (0.525 of a frame, half a frame being 20.0 ms), and 35 more frames, up to 80"
@@ -342,12 +355,19 @@ def test_remake_keeps_every_frame(tmp_path: Path, late: int) -> None:
 
 
 def read_without(declares: str) -> str:
-    """The end of --frame-rate's refusal for a file sptenc's rule passes at the rate it declares."""
+    """The end of --frame-rate's refusal for a file read without it: one sptenc's rule passes at
+    the rate it declares, its frames on that rate's timeline."""
     return (
         "taken at that rate, frames would be dropped or doubled; without --frame-rate, the file"
-        f" is read at the rate it declares, {declares}, frame after frame, whatever their place"
-        " on that rate's timeline"
+        f" is read at the rate it declares, {declares}, whose timeline holds every frame within"
+        " half a frame"
     )
+
+
+REFUSED_WITHOUT = (
+    "taken at that rate, frames would be dropped or doubled; without --frame-rate, the file is"
+    " refused too, that rate being the one it declares, and"
+)
 
 
 def fixes(found: Fraction) -> str:
@@ -418,8 +438,8 @@ def test_the_rate_timestamps_are_exactly() -> None:
     assert rate.exact(joined) is None
     # A rate that is none of those looked for, rounded to ticks: found when its mean rate's
     # timeline holds the frames so, 41.5 ms a frame, 2000/83 fps, over 101 frames, each within
-    # half a tick; not always (rate.exact, PROVISIONAL): 24.03 fps over 1,000 frames, 1.03 ticks
-    # on its mean rate's timeline.
+    # half a tick; not always (rate.exact): 24.03 fps over 1,000 frames, 1.03 ticks on its mean
+    # rate's timeline.
     found = rate.exact(indexed([(83 * n + 1) // 2 for n in range(101)]))
     assert found is not None and (found.rate, found.largest) == (
         Fraction(2000, 83),
@@ -473,51 +493,131 @@ def test_no_rate_named_when_several_looked_for_hold_the_frames() -> None:
 
 
 def strayed(caplog: pytest.LogCaptureFixture) -> list[str]:
-    """The warnings logged of a source whose frames leave its declared rate's timeline."""
+    """What is logged, from a warning up, of frames half a frame off a rate's timeline: nothing,
+    since a source whose frames leave its declared rate's timeline is refused (media/source.py,
+    _leaves), where it was read and warned of."""
     return [
         record.getMessage()
         for record in caplog.records
-        if record.levelno == logging.WARNING and "half a frame or more" in record.getMessage()
+        if record.levelno >= logging.WARNING and "half a frame" in record.getMessage()
     ]
 
 
-READ_ON = (
-    "read at the rate it declares all the same, frame after frame, as a file joined by ffmpeg's"
-    " concat demuxer is"
-)
-
-
-def follows(found: Fraction, change: str) -> str:
-    """The warning's end for timestamps that are the rate `found`'s exactly, in milliseconds."""
+def leaves(count: str, first_off: str, declares: str) -> str:
+    """How a refusal says a file's frames leave the timeline of the rate it declares: `count` of
+    its frames, "100 of its 600", from `first_off`, the first one and the furthest, "492, up to
+    25.3 ms (0.61"."""
     return (
-        f"its timestamps follow {rate.said(found)} exactly, to the rounding of its time base,"
-        f" 1/1000 s: --frame-rate {rate.fraction(found)} takes its frames at that rate, where the"
-        f" rate it declares makes its output {change} than its timestamps' own time, off the"
-        " source's other streams"
+        f"{count} frames lie half a frame or more from their place on the timeline of the rate it"
+        f" declares, {declares}, from frame {first_off} of a frame)"
     )
+
+
+def another_rate(found: Fraction, change: str, tick: str = "1/1000") -> str:
+    """The end of the refusal of a file whose timestamps are the rate `found`'s exactly, in
+    `tick` s, and not the one it declares: what the declared one would have cost, and the two
+    fixes."""
+    return (
+        f"its output, written at that rate, would be {change} than its timestamps' own time, off"
+        f" the source's other streams: its timestamps follow {rate.said(found)} exactly, to the"
+        f" rounding of its time base, {tick} s: a bad file, not read on a guess: {fixes(found)}"
+    )
+
+
+def no_rate(declares: Fraction) -> str:
+    """The end of the refusal of a file whose timestamps are no one rate's exactly, as a join by
+    ffmpeg's concat demuxer is: its ways out a join on the frame grid (rate.grid_join) and the
+    remake at the rate it declares, the first frame at the file's start; never --frame-rate."""
+    return (
+        "its timestamps follow no one rate exactly: a file joined by ffmpeg's concat demuxer"
+        " drifts so, about 1 ms a join, and timestamps alone can't tell a drifting join from a"
+        " retagged file: a bad file, not read on a guess: join its segments again so that every"
+        f" frame keeps its place on the frame grid, {rate.grid_join()}; or remake it at the rate"
+        " it declares, an FFV1 master numbering its frames at that rate as they come, every one"
+        " kept, its other streams copied (lossless, so large: 0.53-0.55 MB a frame on a 1080p"
+        f" film; and a full encode), with {rate.remake(declares, Fraction(0))}"
+    )
+
+
+def test_the_join_that_keeps_the_frame_grid() -> None:
+    # The advice of a join on the frame grid, in one place (rate.grid_join): sptenc's concat,
+    # with the segments' directory when the refusal knows it.
+    assert rate.grid_join() == (
+        "with sptenc, for segments of its split, sptenc concat DIR joined.mkv, which snaps every"
+        " timestamp to the grid"
+    )
+    assert "sptenc concat 'my segments' joined.mkv" in rate.grid_join(shlex.quote("my segments"))
 
 
 @needs_ffmpeg
 @pytest.mark.parametrize(
-    ("declared", "times", "frames", "found", "strays", "first_off"),
+    ("declared", "times", "frames", "found", "strays", "first_off", "change"),
     [
         # 24000/1001 declared 24/1: each frame lasts 41 or 42 ms, within 1 ms of 24's 41.667, and
         # lies 0.042 ms further from 24's timeline than the one before, half a frame at 492.
-        (24, "round(N*1001/24)", 600, NTSC_FILM, "100 of its 600", "492, up to 25.3 ms (0.61"),
+        (
+            24,
+            "round(N*1001/24)",
+            600,
+            NTSC_FILM,
+            "100 of its 600",
+            "492, up to 25.3 ms (0.61",
+            "0.100% shorter",
+        ),
         # 48 fps declared 50/1: 20 or 21 ms for 20, 4%, half a frame off by frame 12.
-        (50, "round(N*1000/48)", 100, Fraction(48), "88 of its 100", "12, up to 83 ms (4.15"),
+        (
+            50,
+            "round(N*1000/48)",
+            100,
+            Fraction(48),
+            "88 of its 100",
+            "12, up to 83 ms (4.15",
+            "4.000% shorter",
+        ),
         # 33 ms a frame declared 30/1, 1000/33 fps, 1% off, a rate not looked for: half a frame
         # off by frame 50, whatever the length (refused over 120 and 300 frames as running at
         # 91/3 fps, which held them within 3.9 and 9.9 ms, and read over 3,000, said to follow
         # no constant rate).
-        (30, "33*N", 120, Fraction(1000, 33), "70 of its 120", "50, up to 39.7 ms (1.19"),
-        (30, "33*N", 300, Fraction(1000, 33), "250 of its 300", "50, up to 99.7 ms (2.99"),
-        (30, "33*N", 3000, Fraction(1000, 33), "2950 of its 3000", "50, up to 999.7 ms (29.99"),
+        (
+            30,
+            "33*N",
+            120,
+            Fraction(1000, 33),
+            "70 of its 120",
+            "50, up to 39.7 ms (1.19",
+            "1.010% longer",
+        ),
+        (
+            30,
+            "33*N",
+            300,
+            Fraction(1000, 33),
+            "250 of its 300",
+            "50, up to 99.7 ms (2.99",
+            "1.010% longer",
+        ),
+        (
+            30,
+            "33*N",
+            3000,
+            Fraction(1000, 33),
+            "2950 of its 3000",
+            "50, up to 999.7 ms (29.99",
+            "1.010% longer",
+        ),
         # 17 ms a frame declared 60/1: 1000/17, not the 353/6 that holds 300 frames too.
-        (60, "17*N", 300, Fraction(1000, 17), "275 of its 300", "25, up to 99.7 ms (5.98"),
+        (
+            60,
+            "17*N",
+            300,
+            Fraction(1000, 17),
+            "275 of its 300",
+            "25, up to 99.7 ms (5.98",
+            "1.961% shorter",
+        ),
     ],
 )
-def test_a_rate_contradicted_within_a_millisecond_read_and_warned_of(
+def test_a_rate_contradicted_within_a_millisecond_refused_naming_the_rate(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     declared: int,
@@ -526,26 +626,25 @@ def test_a_rate_contradicted_within_a_millisecond_read_and_warned_of(
     found: Fraction,
     strays: str,
     first_off: str,
+    change: str,
 ) -> None:
     # Timestamps at one rate, another declared, each frame lasting within 1 ms of the declared
-    # rate's: sptenc's rule passes, and the file is read, as before the frame index, its output
-    # written at the declared rate, 0.1% to 4% off its frames' own time. Its frames leave the
-    # declared rate's timeline, though: warned of, whole, with the rate its timestamps are
-    # exactly and what the declared one does to the output (source._strays). Given that rate,
-    # read at it without the warning, nor that of a file whose frames lie on its declared
-    # timeline too; given the one declared, refused, --frame-rate's own rule.
+    # rate's: sptenc's rule passes, and the file was read, its output written at the declared
+    # rate, 0.1% to 4% off its frames' own time. Its frames leave the declared rate's timeline:
+    # refused (source._leaves; DESIGN.md, Input), the message whole: how many frames, from
+    # which, how far, what the declared rate would have cost, the rate its timestamps are
+    # exactly and both fixes. Given that rate, read at it, nothing warned, nor of a file whose
+    # frames lie on its declared timeline too; given the one declared, refused, --frame-rate's
+    # own rule, told that it is refused without the option too, with the same rate and fixes.
     path = retagged(tmp_path / "retagged.mkv", declared, times, frames)
     caplog.set_level(logging.INFO, logger="seedvr2x")
-    source = examine(path)
-    assert (source.frames, source.frame_rate) == (frames, declared)
-    change = float(found / declared - 1) * 100
-    changed = f"{abs(change):.3f}% {'shorter' if change < 0 else 'longer'}"
-    assert strayed(caplog) == [
-        f"{path}: {strays} frames half a frame or more from their place on the timeline of the"
-        f" rate it declares, {declared}/1, from frame {first_off} of a frame): {READ_ON};"
-        f" {follows(found, changed)}"
-    ]
-    caplog.clear()
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    way_out = another_rate(found, change)
+    assert str(refused.value) == (
+        f"{path}: {leaves(strays, first_off, f'{declared}/1')}, and {way_out}"
+    )
+    assert f"; or give --frame-rate {rate.fraction(found)}, which takes" in way_out
     source = examine(path, frame_rate=found)
     assert (source.frames, source.frame_rate, source.stream.frame_rate) == (frames, found, declared)
     assert f"where it declares {declared}/1: taken at that rate" in caplog.text
@@ -555,11 +654,13 @@ def test_a_rate_contradicted_within_a_millisecond_read_and_warned_of(
         examine(path, frame_rate=Fraction(declared))
     said = str(refused.value)
     assert said.startswith(f"{path}: --frame-rate {declared}/1: frame {first} lies")
-    # Told that it is read without the option, and the rate its timestamps are exactly.
-    assert said.endswith(
-        f": {read_without(f'{declared}/1')}; its timestamps follow {rate.said(found)} exactly, to"
-        f" the rounding of its time base, 1/1000 s: --frame-rate {rate.fraction(found)} takes its"
-        " frames at that rate"
+    assert said.endswith(f": {REFUSED_WITHOUT} {way_out}")
+    # Another rate that doesn't hold them either: refused without the option too, said whole.
+    with pytest.raises(MediaError) as refused:
+        examine(path, frame_rate=Fraction(declared + 7))
+    assert str(refused.value).endswith(
+        ": taken at that rate, frames would be dropped or doubled; without --frame-rate, the"
+        f" file is refused too: {leaves(strays, first_off, f'{declared}/1')}, and {way_out}"
     )
 
 
@@ -568,13 +669,158 @@ def test_a_short_file_on_its_declared_timeline_is_not_warned_of(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     # 100 frames at 24000/1001 declared 24/1: within 4.4 ms of 24's timeline, every frame at its
-    # place there. Read, nothing said: the output's 0.1% is under half a frame.
+    # place there. Read, nothing said: the output's 0.1% is under half a frame. Given a rate
+    # that doesn't hold them, told that it is read without the option, and the rate its
+    # timestamps are exactly, which the option takes.
     path = retagged(tmp_path / "short.mkv", 24, "round(N*1001/24)", 100)
     source = examine(path)
     assert (source.frames, source.frame_rate) == (100, 24)
     index = source.index
     assert index is not None and rate.timeline(index, Fraction(24)).holds
     assert not strayed(caplog)
+    with pytest.raises(MediaError) as refused:
+        examine(path, frame_rate=Fraction(25))
+    assert str(refused.value).endswith(
+        f": {read_without('24/1')}; its timestamps follow 24000/1001 fps (23.976) exactly, to the"
+        " rounding of its time base, 1/1000 s: --frame-rate 24000/1001 takes its frames at that"
+        " rate"
+    )
+
+
+@needs_ffmpeg
+def test_a_first_pass_record_is_not_judged_again(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The timing is the first pass's to judge (source.timing_refusal), which refuses 600 frames
+    # at 24000/1001 declared 24/1. A resume that trusts the pass's record builds its source from
+    # it (source.counted), judging nothing again, as before: the same frames from a record are
+    # read at the rate recorded, and nothing is said of their timeline, the warning gone.
+    path = retagged(tmp_path / "retagged.mkv", 24, "round(N*1001/24)", 600)
+    declared = declare(path)
+    scanned = scan(path)
+    assert timing_refusal(declared, scanned).startswith("100 of its 600 frames lie half a frame")
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = counted(declared, FirstPass(scanned.frames, index=scanned.index))
+    assert (source.frames, source.frame_rate) == (600, 24)
+    assert "timeline" not in caplog.text and "600 frames, 64x48" in caplog.text
+
+
+def declaring(frame_rate: Fraction, override: Fraction | None = None) -> Declared:
+    """A source declaring `frame_rate`, as the timing rule takes one; `override` --frame-rate."""
+    stream = replace(UNTAGGED_HD, frame_rate=frame_rate, avg_frame_rate=frame_rate)
+    return Declared(Path("made.mkv"), stream, conversion_for(stream), Fraction(1), override)
+
+
+def scanned_at(pts: npt.NDArray[np.int64], time_base: Fraction) -> Scan:
+    """A first pass's findings for frames at these pts, as scan times them: its index, and the
+    shortest and longest of their durations, in microseconds."""
+    steps = np.diff(pts)
+    microseconds = time_base * 1_000_000
+    index = FrameIndex(
+        time_base, 0, pts, np.zeros(len(pts), np.uint32), np.zeros(len(pts), np.bool_), pts[:1]
+    )
+    return Scan(
+        len(pts),
+        len(steps),
+        int(steps.min()) * microseconds,
+        int(steps.max()) * microseconds,
+        index,
+    )
+
+
+def rounded(frames: int, frame_rate: Fraction, time_base: Fraction, down: bool = False) -> Scan:
+    """`frames` frames at `frame_rate`, their times rounded to `time_base`'s ticks as ffmpeg's
+    muxers round them, to the nearest, a half up, or `down`: exact integers."""
+    numerators = np.arange(frames, dtype=np.int64) * (
+        frame_rate.denominator * time_base.denominator
+    )
+    divisor = frame_rate.numerator * time_base.numerator
+    pts = numerators // divisor if down else (2 * numerators + divisor) // (2 * divisor)
+    return scanned_at(pts, time_base)
+
+
+@pytest.mark.parametrize(
+    ("true", "declared", "time_base"),
+    [
+        # Matroska's milliseconds.
+        (NTSC_FILM, NTSC_FILM, Fraction(1, 1000)),
+        (Fraction(25), Fraction(25), Fraction(1, 1000)),
+        (Fraction(30000, 1001), Fraction(30000, 1001), Fraction(1, 1000)),
+        # 60000/1001 in Matroska, which declares it 19001/317, its frame duration in whole
+        # nanoseconds read back by ffprobe: 0.9 ns a frame off, 0.18 ms over these frames.
+        (Fraction(60000, 1001), Fraction(19001, 317), Fraction(1, 1000)),
+        # MP4's time bases, which hold the rate, each frame on its tick.
+        (NTSC_FILM, NTSC_FILM, Fraction(1, 24000)),
+        (Fraction(25), Fraction(25), Fraction(1, 12800)),
+        (Fraction(60000, 1001), Fraction(60000, 1001), Fraction(1, 60000)),
+        # MPEG-TS's 90 kHz: 3,753.75 ticks a frame at 24000/1001, whole ones at the others.
+        (NTSC_FILM, NTSC_FILM, Fraction(1, 90000)),
+        (Fraction(25), Fraction(25), Fraction(1, 90000)),
+        (Fraction(30000, 1001), Fraction(30000, 1001), Fraction(1, 90000)),
+    ],
+)
+@pytest.mark.parametrize("down", [False, True], ids=["nearest", "down"])
+def test_a_constant_rate_to_its_time_bases_rounding_read_at_any_length(
+    true: Fraction, declared: Fraction, time_base: Fraction, down: bool
+) -> None:
+    # What sptenc and seedvr2x build (DESIGN.md, Input: "a file either of them builds is never
+    # refused"): a constant rate's times, each rounded once to the time base. 200,000 frames, 2
+    # h 19 min at 24000/1001: every frame within a tick of its place on the declared rate's
+    # timeline, however far in, where a drift would add up; read, with or without --frame-rate.
+    scanned = rounded(200_000, true, time_base, down)
+    assert timing_refusal(declaring(declared), scanned) == ""
+    assert timing_refusal(declaring(declared, declared), scanned) == ""
+    index = scanned.index
+    assert index is not None
+    on = rate.timeline(index, true)
+    assert on.holds and on.largest <= time_base
+
+
+def test_half_a_frame_off_the_declared_timeline_refused_a_tick_less_read() -> None:
+    # The bound itself, on a file sptenc's rule passes, 25 fps declared, its frames 40 or 41 ms
+    # apart: 20 steps of 41 ms put frame 20 and those after 20 ms after their place, half a
+    # frame exactly, refused; 19 of them, 19 ms, a tick less, read. Early alike, 39 ms steps.
+    # In 90 kHz ticks: 1,800 of them off, refused, 1,799, read.
+    for step, tick, half in ((41, 1000, 20), (39, 1000, 20), (3690, 90000, 1800)):
+        on_time = 40 * tick // 1000
+        for off, refused in ((half, True), (half - 1, False)):
+            steps = [step] * 20 + [on_time] * 40
+            steps[19] -= (half - off) * (1 if step > on_time else -1)
+            pts = np.cumsum([0, *steps], dtype=np.int64)
+            scanned = scanned_at(pts, Fraction(1, tick))
+            index = scanned.index
+            assert index is not None
+            on = rate.timeline(index, Fraction(25))
+            assert on.largest == Fraction(off, tick) and on.holds is not refused
+            said = timing_refusal(declaring(Fraction(25)), scanned)
+            if not refused:
+                assert said == ""
+                continue
+            assert said.startswith(
+                "41 of its 61 frames lie half a frame or more from their place on the timeline"
+                " of the rate it declares, 25/1, from frame 20, up to 20 ms (0.50 of a frame),"
+                " and its timestamps follow no one rate exactly: "
+            )
+
+
+def test_matroskas_reading_of_a_rate_holds_for_hours() -> None:
+    # PROVISIONAL (media/source.py, _leaves; a question for design). A Matroska file declares
+    # 120000/1001 as 29011/242, ffprobe's reading of its frame duration in whole nanoseconds,
+    # 3.2 ns a frame off: timestamps at 120000/1001, in milliseconds, hold that timeline for
+    # 1,161,780 frames, 2 h 41 min, read; a frame more, refused by the rule as written, naming
+    # the rate they are exactly, with what the declared one costs, said to its first digits.
+    true, declared = Fraction(120000, 1001), Fraction(29011, 242)
+    scanned = rounded(1_161_781, true, Fraction(1, 1000))
+    index = scanned.index
+    assert index is not None
+    held = scanned_at(index.pts[:-1], Fraction(1, 1000))
+    assert timing_refusal(declaring(declared), held) == ""
+    assert timing_refusal(declaring(declared), scanned) == (
+        "1 of its 1161781 frames lies half a frame or more from its place on the timeline of the"
+        " rate it declares, 29011/242, from frame 1161780, up to 4.2 ms (0.50 of a frame), and"
+        f" {another_rate(true, '0.000038% shorter')}"
+    )
+    assert timing_refusal(declaring(declared, true), scanned) == ""
 
 
 def concat_joined(master: Path, directory: Path, cuts: list[int]) -> Path:
@@ -591,6 +837,24 @@ def concat_joined(master: Path, directory: Path, cuts: list[int]) -> Path:
     listed.write_text("".join(f"file 'seg_{k:06d}.mkv'\n" for k in range(len(cuts) + 1)))
     path = directory / "joined.mkv"
     run("-f", "concat", "-i", str(listed), "-c", "copy", str(path))
+    return path
+
+
+def grid_joined(directory: Path, cuts: list[int], frames: int) -> Path:
+    """The segments concat_joined left in `directory`, of `frames` frames at 24000/1001 in all,
+    joined on the frame grid as sptenc's concat joins them (sptenc's ffmpeg/concat.go): a
+    duration line a segment, its frames over the rate, and every timestamp snapped to the grid,
+    the nearest frame's time rounded to the time base, by the setts bitstream filter."""
+    listed = directory / "grid.ffconcat"
+    lines = ["ffconcat version 1.0\n"]
+    for k, (first, end) in enumerate(pairwise([0, *cuts, frames])):
+        seconds = float((end - first) / NTSC_FILM)
+        lines.append(f"file 'seg_{k:06d}.mkv'\nduration {seconds:.6f}\n")
+    listed.write_text("".join(lines))
+    snapped = "'if(eq({0},NOPTS),NOPTS,round(round({0}*TB*24000/1001)*1001/TB/24000))'"
+    snap = f"setts=pts={snapped.format('PTS')}:dts={snapped.format('DTS')}"
+    path = directory / "grid.mkv"
+    run("-f", "concat", "-i", str(listed), "-c", "copy", "-bsf:v", snap, str(path))
     return path
 
 
@@ -620,7 +884,7 @@ def shot_like(seed: int) -> list[int]:
     [
         # Every 20 and every 24 frames, and cut as shots are, in 117 segments: half a frame's
         # rule took them for files at 24/1, which holds their frames within 1.7, 1.3 and 20 ms,
-        # and refused them (a review's finding for the first two); every 25, for no rate's.
+        # and refused them so (a review's finding for the first two); every 25, for no rate's.
         (
             list(range(20, 2400, 20)),
             24,
@@ -643,35 +907,37 @@ def shot_like(seed: int) -> list[int]:
     ],
     ids=["every 20 frames", "every 24", "every 25", "as shots"],
 )
-def test_concat_joins_read_and_warned_of_without_a_rate(
+def test_concat_joins_that_drift_refused_without_a_rate(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
     master: Path,
     cuts: list[int],
     half: int | None,
     strays: str,
     off: str,
 ) -> None:
-    # The join a directory's refusal gives: each join about a millisecond early, the frames
-    # drifting off the declared rate's timeline in steps, half a frame and more. Read at the rate
-    # declared, frame after frame, as before the frame index, and warned of, whole; no rate
-    # named, their timestamps being none's exactly, though a rate looked for holds some within
-    # half a frame. Given the rate it declares, refused, --frame-rate's own rule, whole: told
-    # that it is read without the option, and no rate offered, where half a frame's was, 24/1
-    # "within 1.7 ms of that rate's timeline" for the first, which --frame-rate 24/1 then read
-    # at 24, 0.1% off, unwarned (a review's finding).
+    # The join by ffmpeg's concat demuxer: each join about a millisecond early, the frames
+    # drifting off the declared rate's timeline in steps, half a frame and more. Refused
+    # (source._leaves), the message whole: how many frames, from which, how far; no rate named,
+    # their timestamps being none's exactly, though a rate looked for holds some within half a
+    # frame, 24/1, which --frame-rate would take them at, 0.1% off; its ways out the join on
+    # the frame grid and the remake at the rate declared, never --frame-rate. Given the rate it
+    # declares, refused, --frame-rate's own rule, whole: told that it is refused without the
+    # option too, with the same ways out. The same segments joined on the grid, as sptenc's
+    # concat joins them, give the master's timestamps back: read.
     path = concat_joined(master, tmp_path / "join", cuts)
     index = scan(path).index
     assert index is not None and rate.exact(index) is None
     found = rate.follows(index)
     assert (found and found.rate) == half
-    source = examine(path)
-    assert (source.frames, source.frame_rate) == (2400, NTSC_FILM)
     count, first_off = strays.split("@")
-    assert strayed(caplog) == [
-        f"{path}: {count} half a frame or more from their place on the timeline of the rate it"
-        f" declares, 24000/1001, from frame {first_off} of a frame): {READ_ON}"
-    ]
+    way_out = no_rate(NTSC_FILM)
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    said = str(refused.value)
+    assert said == (
+        f"{path}: {leaves(count.removesuffix(' frames'), first_off, '24000/1001')}, and {way_out}"
+    )
+    assert "--frame-rate" not in said and "fps (" not in said and "24/1" not in said
     with pytest.raises(MediaError) as refused:
         examine(path, frame_rate=NTSC_FILM)
     first, furthest = first_off.split(" (")[0].split(", up to ")
@@ -679,20 +945,73 @@ def test_concat_joins_read_and_warned_of_without_a_rate(
     assert str(refused.value) == (
         f"{path}: --frame-rate 24000/1001: frame {first} lies {by} ms before its place on that"
         f" rate's timeline ({share} of a frame, half a frame being 20.9 ms), and"
-        f" {int(count.split()[0]) - 1} more frames, up to {furthest}:"
-        f" {read_without('24000/1001')}"
+        f" {int(count.split()[0]) - 1} more frames, up to {furthest}: {REFUSED_WITHOUT} {way_out}"
     )
+    on_the_grid = examine(grid_joined(tmp_path / "join", cuts, 2400))
+    assert (on_the_grid.frames, on_the_grid.frame_rate) == (2400, NTSC_FILM)
+    kept, original = on_the_grid.index, scan(master).index
+    assert kept is not None and original is not None
+    assert kept.pts.tolist() == original.pts.tolist()
 
 
 @needs_ffmpeg
-def test_a_join_off_the_grid_read_at_the_rate_declared(
+def test_a_drifting_join_refused_and_its_remake_read(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # 600 frames at 24000/1001 split losslessly every 20 and joined by ffmpeg's concat demuxer,
+    # 30 segments: each join 0.85 ms early, frame 500, after 25 of them, 21.2 ms before its
+    # place, half a frame, the last frames 24.5 ms. Refused, whole: the frame, the drift, no
+    # rate named, no --frame-rate. Its remake at the rate it declares, run as given, numbers
+    # the frames as they come: every picture in order, at the timestamps of the master they
+    # were split from, read. The same frames in 18 segments, drifting 14.5 ms, or in 4, 2.5 ms,
+    # under half a frame: read, nothing said; in 4 joined on the frame grid, as sptenc's concat
+    # joins them, the master's timestamps.
+    master = tmp_path / "master.mkv"
+    run(
+        *("-f", "lavfi", "-i", "testsrc2=s=64x48:r=24000/1001", "-frames:v", "600"),
+        *("-c:v", "ffv1", "-g", "1", str(master)),
+    )
+    original = scan(master).index
+    assert original is not None
+    path = concat_joined(master, tmp_path / "join", list(range(20, 600, 20)))
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    said = str(refused.value)
+    drifted = leaves("85 of its 600", "500, up to 24.5 ms (0.59", "24000/1001")
+    assert said == f"{path}: {drifted}, and {no_rate(NTSC_FILM)}"
+    assert "--frame-rate" not in said and "fps (" not in said
+    command = said[said.index("ffmpeg -r:v:0") :]
+    assert command.startswith("ffmpeg -r:v:0 24000/1001 -i SOURCE ")
+    words = shlex.split(command)
+    words[words.index("SOURCE")] = str(path)
+    words[-1] = str(tmp_path / "remade.mkv")
+    run(*words[1:])
+    remade = tmp_path / "remade.mkv"
+    assert pictures(remade) == pictures(master) and len(pictures(master)) == 600
+    source = examine(remade)
+    assert (source.frames, source.frame_rate) == (600, NTSC_FILM)
+    assert source.index is not None and source.index.pts.tolist() == original.pts.tolist()
+    for name, cuts, drift in (
+        ("in18", list(range(20, 360, 20)), "14.5"),
+        ("in4", [150, 300, 450], "2.5"),
+    ):
+        source = examine(concat_joined(master, tmp_path / name, cuts))
+        assert (source.frames, source.frame_rate) == (600, NTSC_FILM)
+        assert source.index is not None
+        on = rate.timeline(source.index, NTSC_FILM)
+        assert on.holds and f"{float(on.largest) * 1000:.1f}" == drift
+    source = examine(grid_joined(tmp_path / "in4", [150, 300, 450], 600))
+    assert (source.frames, source.frame_rate) == (600, NTSC_FILM)
+    assert source.index is not None and source.index.pts.tolist() == original.pts.tolist()
+    assert not strayed(caplog)
+
+
+@needs_ffmpeg
+def test_a_join_at_every_frame_off_the_grid_refused(tmp_path: Path) -> None:
     # 1,530 frames at 24000/1001 split losslessly after each of the first 30 and joined by
     # ffmpeg's concat demuxer: each join 0.71 ms early, the frames from 30 on half a frame or
     # more off the declared timeline, 21.5 ms, and no other rate holding them (24/1 holds the
-    # first 996). Read at the rate declared, the drift warned of (source._strays; DESIGN.md,
-    # Input).
+    # first 996). Refused, the drift said, no rate named (source._leaves; DESIGN.md, Input).
     master = tmp_path / "master.mkv"
     run(
         *("-f", "lavfi", "-i", "testsrc2=s=64x48:r=24000/1001", "-frames:v", "1530"),
@@ -702,13 +1021,67 @@ def test_a_join_off_the_grid_read_at_the_rate_declared(
     index = scan(path).index
     assert index is not None and rate.follows(index) is None and rate.exact(index) is None
     assert rate.timeline(index, Fraction(24)).first_off == 996
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    drifted = leaves("938 of its 1530", "30, up to 21.5 ms (0.51", "24000/1001")
+    assert str(refused.value) == f"{path}: {drifted}, and {no_rate(NTSC_FILM)}"
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("container", ["mkv", "mp4"])
+@pytest.mark.parametrize("fps", ["24000/1001", "24", "25", "30000/1001", "50", "60000/1001"])
+def test_constant_rates_read(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, fps: str, container: str
+) -> None:
+    # 3,000 frames at each rate, FFV1: in Matroska, their timestamps rounded to the millisecond,
+    # within half of one of their place on the declared rate's timeline; in MP4, whose time base
+    # holds the rate, each on its tick. Read, nothing said. Matroska declares 60000/1001 as
+    # 19001/317 (media/source.py, _leaves), 2.6 microseconds off over these frames.
+    path = tmp_path / f"constant.{container}"
+    run(
+        "-f",
+        "lavfi",
+        "-i",
+        f"testsrc2=s=64x48:r={fps}",
+        "-frames:v",
+        "3000",
+        "-c:v",
+        "ffv1",
+        str(path),
+    )
     source = examine(path)
-    assert (source.frames, source.frame_rate) == (1530, NTSC_FILM)
-    assert strayed(caplog) == [
-        f"{path}: 938 of its 1530 frames half a frame or more from their place on the timeline of"
-        f" the rate it declares, 24000/1001, from frame 30, up to 21.5 ms (0.51 of a frame):"
-        f" {READ_ON}"
-    ]
+    read_as_19001_317 = (fps, container) == ("60000/1001", "mkv")
+    declares = Fraction(19001, 317) if read_as_19001_317 else Fraction(fps)
+    assert (source.frames, source.frame_rate) == (3000, declares)
+    index = source.index
+    assert index is not None
+    on = rate.timeline(index, declares)
+    assert on.holds and on.largest <= (Fraction(503, 1_000_000) if container == "mkv" else 0)
+    assert not strayed(caplog)
+
+
+@needs_ffmpeg
+def test_a_video_starting_after_its_audio_read(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 600 frames at 24000/1001 whose first is 23 ms after the file's start, where its audio
+    # begins: more than half a frame, 20.9 ms. The timeline is counted from the first frame:
+    # every frame within 0.5 ms of its place, read, nothing said.
+    path = tmp_path / "late.mkv"
+    run(
+        *("-f", "lavfi", "-i", "testsrc2=s=64x48:r=24000/1001"),
+        *("-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=26"),
+        *("-frames:v", "600", "-filter:v", "settb=1/1000,setpts='floor(N*1001/24+0.5)+23'"),
+        *("-map", "0:v", "-map", "1:a", "-c:a", "flac", "-fps_mode:v", "passthrough"),
+        *("-enc_time_base:v", "1/1000", "-c:v", "ffv1", str(path)),
+    )
+    assert [s["start_time"] for s in streams(path)] == ["0.023000", "0.000000"]
+    source = examine(path)
+    assert (source.frames, source.frame_rate) == (600, NTSC_FILM)
+    index = source.index
+    assert index is not None and int(index.pts[0]) == 23
+    assert rate.timeline(index, NTSC_FILM).largest == Fraction(1, 2000)
+    assert not strayed(caplog)
 
 
 @needs_ffmpeg

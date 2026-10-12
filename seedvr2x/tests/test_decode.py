@@ -452,9 +452,10 @@ def test_drifted_join_scanned_without_errors(
     # 24000/1001 split losslessly, one per segment, joined by ffmpeg's concat demuxer, each
     # segment starting 41 ms after the one before, where a frame lasts 41.708. From frame 30 on,
     # half a frame off the grid: no error for the first pass to report, every frame counted, and
-    # the steady 41 ms accepted: read at the rate declared, and warned of (source._strays), a
-    # join at every frame being a constant rate of its own, 1000/41 fps, named there, where
-    # joins further apart are no rate's (tests/test_rate.py).
+    # the steady 41 ms passing sptenc's rule; refused all the same, its frames leaving the
+    # declared rate's timeline (source._leaves), a join at every frame being a constant rate of
+    # its own, 1000/41 fps, named there, where joins further apart are no rate's
+    # (tests/test_rate.py); read with it.
     master, joined, listed = tmp_path / "master.mkv", tmp_path / "joined.mkv", tmp_path / "list"
     frames = 32
     run(
@@ -469,15 +470,18 @@ def test_drifted_join_scanned_without_errors(
     listed.write_text("".join(f"file 'seg_{k:06d}.mkv'\n" for k in range(frames)))
     run("-f", "concat", "-i", str(listed), "-c", "copy", str(joined))
     assert scan(joined) == Scan(frames, frames - 1, Fraction(41000), Fraction(41000))
-    source = examine(joined)
+    with pytest.raises(MediaError) as refused:
+        examine(joined)
+    assert str(refused.value).startswith(
+        f"{joined}: 2 of its 32 frames lie half a frame or more from their place on the timeline"
+        " of the rate it declares, 24000/1001, from frame 30, up to 22 ms (0.53 of a frame), and"
+        " its output, written at that rate, would be 1.728% longer than its timestamps' own"
+        " time, off the source's other streams: its timestamps follow 1000/41 fps (24.39)"
+        " exactly, to the rounding of its time base, 1/1000 s: a bad file, not read on a guess:"
+    )
+    source = examine(joined, frame_rate=Fraction(1000, 41))
     assert (source.frames, source.stream.frame_rate) == (frames, Fraction(24000, 1001))
     assert "reported errors" not in caplog.text
-    assert (
-        f"{joined}: 2 of its 32 frames half a frame or more from their place on the timeline of"
-        " the rate it declares, 24000/1001, from frame 30, up to 22 ms (0.53 of a frame): read at"
-        " the rate it declares all the same, frame after frame, as a file joined by ffmpeg's"
-        " concat demuxer is; its timestamps follow 1000/41 fps (24.39) exactly"
-    ) in caplog.text
 
 
 def test_interlaced_refused(tmp_path: Path) -> None:
