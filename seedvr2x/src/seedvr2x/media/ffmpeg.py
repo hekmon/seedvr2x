@@ -39,9 +39,19 @@ DECODERS = ("ffv1", "rawvideo")
 # first pass's idet output; rawvideo: the frames on a pipe; matroska: the FFV1 masters and the
 # input copies, whatever the output's format.
 MUXERS = ("framehash", "null", "rawvideo", "matroska")
+# What an assembly's commands use besides (media/assembly.py), asked only of a job that assembles
+# its segments into one file (check's `assembly`), as png and image2 are of a PNG output: the
+# concat demuxer, which reads the segments as one stream; the Matroska demuxer, which reads them
+# and the file assembled; the setts bitstream filter, which puts the video's timestamps on the
+# frame grid, its pts, dts and duration expressions in every ffmpeg since 7.1
+# (libavcodec/bsf/setts.c at n7.1). The Matroska and framehash muxers it writes with are MUXERS'.
+# All in any build but one configured without them, and checked for a clear message before the
+# upscale, where the join comes after it.
+ASSEMBLY_DEMUXERS = ("concat", "matroska")
+ASSEMBLY_BITSTREAM_FILTERS = ("setts",)
 # Options of those filters that older builds lack: (filter, option, the ffmpeg that brought it).
 # setparams' chroma_location tags the yuv420p10le master's frames with its chroma siting
-# (media/writer.py:247, master_filters), and so the conversions' fingerprint runs it at every
+# (media/writer.py:285, master_filters), and so the conversions' fingerprint runs it at every
 # start, whatever the output (media/fingerprint.py:90-96, _conversions). It came with ffmpeg
 # 7.1: libavfilter/vf_setparams.c:124 at n7.1, absent at n6.1 and n7.0. A build without it passed
 # the check of names, then failed the fingerprint with ffmpeg's own error (Ubuntu 24.04's 6.1.1:
@@ -103,16 +113,24 @@ def zscale(*options: str) -> str:
     return ":".join(("zscale=threads=1", *options))
 
 
-def check(output_encoders: tuple[str, ...] = (), output_muxers: tuple[str, ...] = ()) -> str:
+def check(
+    output_encoders: tuple[str, ...] = (),
+    output_muxers: tuple[str, ...] = (),
+    assembly: bool = False,
+) -> str:
     """Check the ffmpeg and ffprobe on PATH for what seedvr2x needs (FILTERS, ENCODERS, DECODERS,
-    MUXERS), the options of OPTIONS included, and for the output's own encoders and muxers (png
-    and image2 for PNG output), and return ffmpeg's version.
+    MUXERS), the options of OPTIONS included, for the output's own encoders and muxers (png
+    and image2 for PNG output), and, when `assembly`, for what joining the segments into one
+    file needs (ASSEMBLY_DEMUXERS, ASSEMBLY_BITSTREAM_FILTERS), and return ffmpeg's version.
 
     Raises MediaError naming what is missing, and which ffmpeg to get when it is zscale or an
     option of a newer ffmpeg (HOW_TO_GET)."""
     found()
     filters, encoders, decoders = _listed("-filters"), _listed("-encoders"), _listed("-decoders")
     muxers = _listed("-muxers")
+    # Asked of ffmpeg only for a job that assembles: two more of its listings.
+    demuxers = _demuxers() if assembly else set[str]()
+    bitstream_filters = _bitstream_filters() if assembly else set[str]()
     options = [
         f"the {option} option of its {name} filter (ffmpeg {since} and later have it)"
         for name, option, since in OPTIONS
@@ -124,6 +142,12 @@ def check(output_encoders: tuple[str, ...] = (), output_muxers: tuple[str, ...] 
         *(f"the {name} encoder" for name in ENCODERS + output_encoders if name not in encoders),
         *(f"the {name} decoder" for name in DECODERS if name not in decoders),
         *(f"the {name} muxer" for name in MUXERS + output_muxers if name not in muxers),
+        *(f"the {name} demuxer" for name in ASSEMBLY_DEMUXERS if assembly and name not in demuxers),
+        *(
+            f"the {name} bitstream filter"
+            for name in ASSEMBLY_BITSTREAM_FILTERS
+            if assembly and name not in bitstream_filters
+        ),
     ]
     if missing:
         raise MediaError(
@@ -145,6 +169,18 @@ def _listed(option: str) -> set[str]:
     """The names ffmpeg lists for -filters, -encoders, -decoders or -muxers: the second column
     of each line, after the flags."""
     return {fields[1] for fields in map(str.split, _run(option).splitlines()) if len(fields) > 1}
+
+
+def _demuxers() -> set[str]:
+    """The names ffmpeg lists for -demuxers, each of a demuxer of several: "matroska,webm" is
+    one line, and both names."""
+    return {name for names in _listed("-demuxers") for name in names.split(",")}
+
+
+def _bitstream_filters() -> set[str]:
+    """The names ffmpeg lists for -bsfs: one a line, under a title line ending in a colon."""
+    lines = (line.strip() for line in _run("-bsfs").splitlines())
+    return {line for line in lines if line and not line.endswith(":")}
 
 
 def _options(name: str) -> set[str]:

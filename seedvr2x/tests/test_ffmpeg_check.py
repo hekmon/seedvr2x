@@ -73,6 +73,10 @@ def setparams_help(options: tuple[str, ...]) -> list[str]:
 ENCODERS = ("ffv1", "rawvideo", "wrapped_avframe", "png")
 DECODERS = ("ffv1", "rawvideo", "h264")
 MUXERS = ("matroska", "framehash", "null", "rawvideo", "image2")
+# What an assembly asks besides (ffmpeg.ASSEMBLY_DEMUXERS, ASSEMBLY_BITSTREAM_FILTERS), each as
+# ffmpeg lists it: a demuxer of two names on one line, a bitstream filter alone on its own.
+DEMUXERS = ("concat", "matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2")
+BITSTREAM_FILTERS = ("aac_adtstoasc", "null", "setts")
 
 
 def fake_build(
@@ -83,10 +87,13 @@ def fake_build(
     ffprobe: bool = True,
     muxers: tuple[str, ...] = MUXERS,
     setparams: tuple[str, ...] = tuple(SETPARAMS),
+    demuxers: tuple[str, ...] | None = None,
+    bitstream_filters: tuple[str, ...] | None = None,
 ) -> None:
     """An ffmpeg answering -filters, -encoders, -decoders, -muxers, -version and -h
     filter=setparams as a real one lays them out (n9.0.2), header included; shell builtins only,
-    PATH holding nothing else."""
+    PATH holding nothing else. Given them, it answers -demuxers and -bsfs too; without, it fails
+    on either, as on any question it isn't given."""
     lists = {
         "-filters": ["Filters:", "  T.. = Timeline support", "  | = Source or sink filter"]
         + [f" .. {name:<16} V->V       A filter." for name in filters],
@@ -98,6 +105,13 @@ def fake_build(
         + [f"  E  {name:<16} A format." for name in muxers],
         "-version": ["ffmpeg version n0.0-fake Copyright (c) 2000-2026 the FFmpeg developers"],
     }
+    if demuxers is not None:
+        lists["-demuxers"] = [
+            *("Formats:", " D.. = Demuxing supported", " .E. = Muxing supported", " ---"),
+            *(f" D   {name:<15} A format." for name in demuxers),
+        ]
+    if bitstream_filters is not None:
+        lists["-bsfs"] = ["Bitstream filters:", *bitstream_filters]
     cases = "".join(
         f"  {option}) printf '%s\\n' {' '.join(repr(line) for line in lines)} ;;\n"
         for option, lines in lists.items()
@@ -182,7 +196,14 @@ def test_refused_before_anything(tmp_path: Path) -> None:
     # nothing written.
     build = tmp_path / "build"
     build.mkdir()
-    fake_build(build, setparams=WITHOUT_CHROMA_LOCATION)
+    # With what an assembly needs, which a .mkv path's job asks of the build too (cli._run): the
+    # option alone is missing.
+    fake_build(
+        build,
+        setparams=WITHOUT_CHROMA_LOCATION,
+        demuxers=DEMUXERS,
+        bitstream_filters=BITSTREAM_FILTERS,
+    )
     source = tmp_path / "in.mkv"
     source.write_bytes(b"")
     files = sorted(tmp_path.rglob("*"))
@@ -261,3 +282,26 @@ def test_png_encoder_and_muxer_needed_only_for_png_output(build: Path) -> None:
     assert ffmpeg.check() == "n0.0-fake"
     with pytest.raises(MediaError, match="lacks the png encoder, the image2 muxer"):
         ffmpeg.check(("png",), ("image2",))
+
+
+def test_an_assembly_asks_for_what_the_join_uses(build: Path) -> None:
+    # A job that assembles its segments into one file: the concat and Matroska demuxers and the
+    # setts bitstream filter, each refused by name when the build lacks it; a job that doesn't
+    # assemble asks ffmpeg neither listing, which this build fails on without them.
+    fake_build(build)
+    assert ffmpeg.check() == "n0.0-fake"
+    with pytest.raises(MediaError, match="ffmpeg -demuxers failed"):
+        ffmpeg.check(assembly=True)
+    fake_build(build, demuxers=DEMUXERS, bitstream_filters=BITSTREAM_FILTERS)
+    assert ffmpeg.check(assembly=True) == "n0.0-fake"
+    for demuxers, filters, missing in (
+        (without(DEMUXERS, "concat"), BITSTREAM_FILTERS, "the concat demuxer"),
+        (without(DEMUXERS, "matroska,webm"), BITSTREAM_FILTERS, "the matroska demuxer"),
+        (DEMUXERS, without(BITSTREAM_FILTERS, "setts"), "the setts bitstream filter"),
+        (("matroska",), ("null",), "the concat demuxer, the setts bitstream filter"),
+    ):
+        fake_build(build, demuxers=demuxers, bitstream_filters=filters)
+        with pytest.raises(MediaError) as refused:
+            ffmpeg.check(assembly=True)
+        assert str(refused.value) == f"{build / 'ffmpeg'} lacks {missing}."
+        assert ffmpeg.check() == "n0.0-fake"
