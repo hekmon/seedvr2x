@@ -4453,8 +4453,10 @@ def test_frame_rate_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # research/docs/seeking.md's mechanism 7 at 64x48 (test_rate.mechanism7): declared 24/1, its
-    # 260 frames within 10.8 ms of 24000/1001's timeline. Refused without --frame-rate, the
-    # refusal giving that rate; with --frame-rate 24000/1001, every frame read, in order, and that
+    # 260 frames within 10.8 ms of 24000/1001's timeline. Refused without --frame-rate: its 260
+    # frames, which the declared rate's timeline is a quarter of a frame from, get the plain
+    # refusal, and 1,001 of them the refusal giving that rate (media/rate.py, twin); with
+    # --frame-rate 24000/1001, every frame read, in order, and that
     # rate the job's everywhere (media/source.py, Source.frame_rate): each output segment
     # declares it; the segments' merge rule takes it, 0.5005 s being 12 frames at 24000/1001 and
     # 13 at 24/1, so the 12-frame first shot is a segment of its own; the manifest records it,
@@ -4477,7 +4479,11 @@ def test_frame_rate_override(
     options = ("--cuts", "cuts.txt", "--min-segment", "0.5005")
     ntsc = ("--frame-rate", "24000/1001")
     text = refused(tmp_path, source_path, caplog, *options)
-    assert "s9.mkv: its timestamps run at 24000/1001 fps (23.976), within 10.8 ms" in text
+    assert "s9.mkv: variable frame rate: frames last from 41 to 62 ms, and only a constant" in text
+    assert "its timestamps run at" not in text and "--frame-rate" not in text
+    guided = mechanism7(tmp_path / "long.mkv", size="64x48", frames=1001)
+    text = refused(tmp_path, guided, caplog, *options)
+    assert "long.mkv: its timestamps run at 24000/1001 fps (23.976), within 10.8 ms" in text
     assert "; or give --frame-rate 24000/1001, which takes its frames at that rate" in text
     assert upscale(tmp_path, source_path, "whole", *options, *ntsc) == 0
     whole = tmp_path / "whole"

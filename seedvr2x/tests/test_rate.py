@@ -1,13 +1,14 @@
 """A source's frame rate against its frames' own timestamps (DESIGN.md, Input: exact rational frame
 rate; media/rate.py, media/source.py's timing_refusal): the timeline of a constant rate and its
-half-frame bound, the rate the frames follow, the refusal's guidance and its remake command, and
---frame-rate, on indexes made here and on research/docs/seeking.md's mechanism 7 made on purpose
-(mechanism7); and seedvr2x's own test of the files sptenc's rule passes, every frame within half
-a frame of its place on the declared rate's timeline: other rates declared, refused naming the
-rate when the timestamps are its exactly, joins by ffmpeg's concat demuxer that drift half a
-frame, refused as no rate's, with the remake that puts them back; and what stays read, constant
-rates to their time base's rounding at any length, joins that keep the frame grid or drift less,
-a video starting after its audio. The command line's run with --frame-rate is test_cli_run.py's.
+half-frame bound, the declared rate's NTSC twin the frames follow, the refusal's guidance and its
+remake command, the files a refusal names no rate for, and --frame-rate, on indexes made here and
+on research/docs/seeking.md's mechanism 7 made on purpose (mechanism7); and seedvr2x's own test
+of the files sptenc's rule passes, every frame within half a frame of its place on the declared
+rate's timeline: other rates declared, refused naming the rate when the timestamps are its
+exactly, joins by ffmpeg's concat demuxer that drift half a frame, refused as no rate's, with the
+remake that puts them back; and what stays read, constant rates to their time base's rounding at
+any length, joins that keep the frame grid or drift less, a video starting after its audio. The
+command line's run with --frame-rate is test_cli_run.py's.
 Missing frames (DESIGN.md, Input: "Missing frames are filled, not refused"; media/source.py's
 _on_grid and in_places): timestamps made here that sit on a rate's grid with places left empty,
 read in places, with what the source's warning says, and what stays refused, each with its
@@ -111,8 +112,9 @@ def test_half_a_frame_is_off() -> None:
 def test_s9s_timestamps_follow_ntsc_film() -> None:
     # live-2's first 2,000 frames: within -10.71 ... +10.88 ms of 24000/1001's timeline (the
     # prep's figures), a quarter of a frame; at 24/1, frame 252 is the first beyond half a frame,
-    # 0.504 of one, and they drift 83.7 ms, 2 frames, by frame 1,999.
-    found = rate.follows(indexed(live2(2000)))
+    # 0.504 of one, and they drift 83.7 ms, 2 frames, by frame 1,999. 24000/1001 is the twin of
+    # the 24/1 they declare, the rate a refusal names (rate.twin).
+    found = rate.twin(indexed(live2(2000)), Fraction(24))
     assert found is not None and found.rate == NTSC_FILM
     assert round(float(found.lowest) * 1000, 2) == -10.71
     assert round(float(found.highest) * 1000, 2) == 10.88
@@ -121,12 +123,49 @@ def test_s9s_timestamps_follow_ntsc_film() -> None:
     assert at24.first_off == 252 and at24.first_off_by == Fraction(21, 1000)
     assert at24.highest == Fraction(251, 3000)
     # The simplest fraction within the bounds the span allows is 2997/125, 23.976 exactly, which
-    # holds the frames too; not a rate looked for (rate.TWELFTHS, rate.NTSC).
+    # holds the frames too; not a rate looked for (rate.TWELFTHS, rate.NTSC), nor a twin.
     assert rate.timeline(indexed(live2(2000)), Fraction(2997, 125)).holds
     assert Fraction(2997, 125) not in rate._rates(Fraction(23), Fraction(25))
+    # No rate's exactly, their long steps catching up; and the twin of no other rate declared.
+    assert rate.exact(indexed(live2(2000))) is None
+    assert rate.twin(indexed(live2(2000)), Fraction(25)) is None
+    assert rate.twin(indexed(live2(2000)), NTSC_FILM) is None
+
+
+def test_the_twin_is_named_once_a_frame_from_the_declared_timeline() -> None:
+    # Design's decision (2026-10-12): the declared rate's NTSC twin is named when it holds
+    # every frame within half a frame "AND the two timelines have parted by a frame or more
+    # over the file, so that one late frame of a short file is never read as a rate". The last
+    # frame, k frames after the first, has its two places k/1000 of a frame apart for R x
+    # 1000/1001: S9's shape is named from 1,001 frames on, and not over 1,000, nor over its
+    # first 260, which 24000/1001's timeline holds as well, within 10.8 ms.
+    for frames, named in ((260, False), (1000, False), (1001, True), (1002, True)):
+        index = indexed(live2(frames))
+        on = rate.timeline(index, NTSC_FILM)
+        assert on.holds and round(float(on.largest) * 1000, 1) == 10.8
+        found = rate.twin(index, Fraction(24))
+        assert (found is not None and found.rate == NTSC_FILM) is named
+    # k/1001 of a frame for R x 1001/1000, a frame from 1,002 frames on: frames at 30 fps in
+    # milliseconds, every other one 5 ms late, declared 30000/1001.
+    late = [(2000 * n + 30) // 60 + (5 if n % 2 else 0) for n in range(1002)]
+    declares = Fraction(30000, 1001)
+    assert rate.timeline(indexed(late[:1001]), Fraction(30)).holds
+    assert rate.twin(indexed(late[:1001]), declares) is None
+    found = rate.twin(indexed(late), declares)
+    assert found is not None and (found.rate, found.largest) == (30, Fraction(16, 3000))
+    # One late frame of a short file: 20 ms late in 10 at 25 fps, within 19.8 ms of
+    # 25000/1001's timeline, 0.49 of a frame, which half a frame's rule named.
+    one_late = indexed([40 * n + (20 if n == 5 else 0) for n in range(10)])
+    on = rate.timeline(one_late, Fraction(25000, 1001))
+    assert on.holds and round(float(on.largest) * 1000, 1) == 19.8
+    assert rate.twin(one_late, Fraction(25)) is None
+    # Too few frames to part at all, or none with a pts.
+    for pts in ([0], [0, 42], [NOPTS, NOPTS]):
+        assert rate.twin(indexed(pts), Fraction(24)) is None
 
 
 def test_rates_looked_for() -> None:
+    # The rates the one a file's timestamps are exactly is looked for among (rate.exact):
     # ffmpeg's own guesses, unbounded: every twelfth of a frame per second, the NTSC forms; the
     # simplest fractions first, the bounds excluded.
     found = rate._rates(Fraction(23), Fraction(25))
@@ -139,25 +178,42 @@ def test_rates_looked_for() -> None:
 
 def test_no_constant_rate_in_a_variable_one() -> None:
     # 12 frames at 24 fps, then 12 at 30, sptenc's mix (test_decode.py's), or random steps: no
-    # constant rate holds them within half a frame.
+    # rate's exactly, nor the twin of the rate declared, whichever it is: sptenc's refusal, as
+    # it was.
     mixed = [round(1000 * (n / 24 if n < 12 else 0.5 + (n - 12) / 30)) for n in range(24)]
-    assert rate.follows(indexed(mixed)) is None
     steps = random.Random(9).choices([33, 42, 50], k=200)
-    assert rate.follows(indexed([sum(steps[:n]) for n in range(200)])) is None
+    for pts, lasting in ((mixed, (33, 42)), ([sum(steps[:n]) for n in range(200)], (33, 50))):
+        assert rate.exact(indexed(pts)) is None
+        scanned = scanned_at(np.array(pts, dtype=np.int64), MS)
+        for declares in (Fraction(24), Fraction(25), Fraction(30), NTSC_FILM):
+            assert rate.twin(indexed(pts), declares) is None
+            assert timing_refusal(declaring(declares), scanned) == variable(*lasting)
     # Too few frames to tell one rate from the next, or a single frame: none.
-    assert rate.follows(indexed([0, 1])) is None
-    assert rate.follows(indexed([0])) is None
+    assert rate.exact(indexed([0, 1, 3])) is None and rate.twin(indexed([0, 1]), NTSC_FILM) is None
+    assert rate.exact(indexed([0])) is None and rate.twin(indexed([0]), NTSC_FILM) is None
 
 
-def test_jitter_follows_the_rate_declared() -> None:
+def test_jitter_around_the_rate_declared_is_named_no_rate() -> None:
     # Steps of 50 and 30 ms around 25 fps, every other frame 10 ms late: 10 ms off 25's timeline,
-    # a quarter of a frame, and 9.96 off 25000/1001's, which drifts 0.04 ms a frame, the frames'
-    # spread there 13.9 ms against 10: 25.
+    # a quarter of a frame, and 9.96 off 25000/1001's, which drifts 0.04 ms a frame. Half a
+    # frame's rule named them the rate they declare, the steadier of the two, with --frame-rate
+    # 25 as a fix; no rate's exactly, and their twin's timeline 0.1 of a frame from the declared
+    # one's at their end: sptenc's refusal as it is, no rate named, no --frame-rate offered
+    # (design's decision, 2026-10-12). The option still takes them at 25, R's timeline holding
+    # each within half a frame (DESIGN.md, Input).
     late = [40 * n + (10 if n % 2 else 0) for n in range(100)]
-    found = rate.follows(indexed(late))
-    assert found is not None and found.rate == 25 and found.largest == Fraction(1, 100)
+    on = rate.timeline(indexed(late), Fraction(25))
+    assert on.holds and on.largest == Fraction(1, 100)
     other = rate.timeline(indexed(late), Fraction(25000, 1001))
-    assert other.holds and other.largest < found.largest
+    assert other.holds and other.largest < on.largest
+    assert rate.exact(indexed(late)) is None and rate.twin(indexed(late), Fraction(25)) is None
+    scanned = scanned_at(np.array(late, dtype=np.int64), MS)
+    assert timing_refusal(declaring(Fraction(25)), scanned) == variable(30, 50)
+    assert timing_refusal(declaring(Fraction(25), Fraction(25)), scanned) == ""
+    # Over 1,100 frames the twin's timeline is a frame away and more, and no longer holds them.
+    longer = indexed([40 * n + (10 if n % 2 else 0) for n in range(1100)])
+    assert not rate.timeline(longer, Fraction(25000, 1001)).holds
+    assert rate.twin(longer, Fraction(25)) is None
 
 
 def test_exact_beyond_int64() -> None:
@@ -243,9 +299,13 @@ def pictures(path: Path) -> list[str]:
     return [line.split(",")[5].strip() for line in output.splitlines() if line[:1] == "0"]
 
 
+# The frames from which S9's shape is guided: its last frame's places on 24/1's timeline and on
+# 24000/1001's a frame apart (rate.twin). mechanism7's own 260 are a quarter of one apart.
+GUIDED = 1001
+
 GUIDANCE = (
     "its timestamps run at 24000/1001 fps (23.976), within 10.8 ms of that rate's timeline (0.26"
-    " of a frame), where it declares 24/1, its frames lasting from 41 to 62 ms: a bad file, not"
+    " of a frame), where it declares 24/1, its frames lasting from 41 to 63 ms: a bad file, not"
     " read on a guess: remake it at that rate, an FFV1 master with its other streams copied, a"
     " clean file for every tool (lossless, so large: 0.53-0.55 MB a frame on a 1080p film; and a"
     " full encode), with ffmpeg -r:v:0 24000/1001 -i SOURCE -map 0 -map -0:d -c copy -c:v:0 ffv1"
@@ -259,12 +319,20 @@ GUIDANCE = (
 @needs_ffmpeg
 @needs_x264
 def test_contradicted_rate_refused_with_guidance(tmp_path: Path) -> None:
-    # Mechanism 7: refused, as sptenc's rule refuses its 62 ms steps, the message giving the rate
-    # its timestamps follow, how far, and the two fixes (DESIGN.md, Input), whole.
-    path = mechanism7(tmp_path / "s9.mkv")
+    # Mechanism 7: refused, as sptenc's rule refuses its 62 and 63 ms steps, the message giving
+    # the rate its timestamps follow, how far, and the two fixes (DESIGN.md, Input), whole: over
+    # 1,001 frames, two long steps in them, the twin of the rate declared a frame away.
+    path = mechanism7(tmp_path / "s9.mkv", frames=GUIDED)
     with pytest.raises(MediaError) as refused:
         examine(path)
     assert str(refused.value) == f"{path}: {GUIDANCE}"
+    # Its first 260 frames, one long step in them, 24000/1001's timeline holding them as well
+    # and 24/1's a quarter of a frame from it: sptenc's refusal, no rate named, no fix (design's
+    # decision, 2026-10-12: a twin that has not parted by a frame is not named).
+    short = mechanism7(tmp_path / "short.mkv")
+    with pytest.raises(MediaError) as refused:
+        examine(short)
+    assert str(refused.value) == f"{short}: {variable(41, 62)}"
 
 
 @needs_ffmpeg
@@ -273,16 +341,16 @@ def test_frame_rate_override(tmp_path: Path) -> None:
     # --frame-rate 24000/1001: every frame within half a frame of its timeline, taken at that
     # rate, the job's from then on; 24/1: frame 252 named, 0.504 of a frame after its place, and
     # the rate its timestamps run at given with the fixes.
-    path = mechanism7(tmp_path / "s9.mkv")
+    path = mechanism7(tmp_path / "s9.mkv", frames=GUIDED)
     source = examine(path, frame_rate=NTSC_FILM)
-    assert (source.frames, source.frame_rate, source.stream.frame_rate) == (260, NTSC_FILM, 24)
+    assert (source.frames, source.frame_rate, source.stream.frame_rate) == (GUIDED, NTSC_FILM, 24)
     with pytest.raises(MediaError) as refused:
         examine(path, frame_rate=Fraction(24))
     said = str(refused.value)
     assert said.startswith(
         f"{path}: --frame-rate 24/1: frame 252 lies 21.0 ms after its place on that rate's"
-        " timeline (0.504 of a frame, half a frame being 20.8 ms), and 5 more frames, up to"
-        " 21.3 ms: taken at that rate, frames would be dropped or doubled; its timestamps run at"
+        " timeline (0.504 of a frame, half a frame being 20.8 ms), and 581 more frames, up to"
+        " 42 ms: taken at that rate, frames would be dropped or doubled; its timestamps run at"
         " 24000/1001 fps (23.976), within 10.8 ms of that rate's timeline (0.26 of a frame):"
         " remake it at that rate"
     )
@@ -291,6 +359,147 @@ def test_frame_rate_override(tmp_path: Path) -> None:
         " each checked to lie within half a frame of its timeline: the same"
         " frames on the same timeline, without the intermediate file"
     )
+    # Its first 260 frames: taken at 24000/1001 alike; 24/1 refused, and no rate named after,
+    # none being named without the option (test_contradicted_rate_refused_with_guidance).
+    short = mechanism7(tmp_path / "short.mkv")
+    assert examine(short, frame_rate=NTSC_FILM).frames == 260
+    with pytest.raises(MediaError) as refused:
+        examine(short, frame_rate=Fraction(24))
+    assert str(refused.value) == (
+        f"{short}: --frame-rate 24/1: frame 252 lies 21.0 ms after its place on that rate's"
+        " timeline (0.504 of a frame, half a frame being 20.8 ms), and 5 more frames, up to"
+        f" 21.3 ms: {DROPPED_OR_DOUBLED}"
+    )
+
+
+def test_no_rate_named_by_half_a_frame() -> None:
+    # Design's decision (2026-10-12): "a refusal names another rate only (a) when the timestamps
+    # are that rate's EXACTLY, to the time base's rounding, or (b) where sptenc's rule fails,
+    # when it is the DECLARED RATE'S NTSC TWIN ... Everything else that sptenc's rule refuses
+    # and that isn't frames missing on the grid gets the plain variable-frame-rate refusal, no
+    # rate named, no --frame-rate offered." Each file below was named one of ffmpeg's standard
+    # rates, the one that held its frames within half a frame, by its length, with --frame-rate
+    # at it as a fix, which then read it (a review's finding and design's check of it,
+    # 2026-10-12); each with its refusal now, whole, and --frame-rate's at the rate it declares,
+    # whole, no rate after it.
+
+    def at(pts: Sequence[int], time_base: Fraction = MS) -> Scan:
+        return scanned_at(np.array(pts, dtype=np.int64), time_base)
+
+    segment = [(2002 * n + 24) // 48 for n in range(24)]
+    cases: list[tuple[str, Fraction, Scan, str, str]] = [
+        # 8 segments of 24 frames at 24000/1001 joined by ffmpeg's concat demuxer, their audio
+        # outlasting them: the video steps 63 ms at each of the 7 joins. "47/2 fps (23.5),
+        # within 19.7 ms".
+        (
+            "47/2",
+            NTSC_FILM,
+            at([1022 * k + pts for k in range(8) for pts in segment]),
+            variable(41, 63),
+            "--frame-rate 24000/1001: frame 24 lies 21.0 ms after its place on that rate's"
+            " timeline (0.503 of a frame, half a frame being 20.9 ms), and 159 more frames, up"
+            " to 147.5 ms",
+        ),
+        # 7 frames at 24 fps, one step of 1.5 frames. "85/4 fps (21.25)".
+        (
+            "85/4",
+            Fraction(24),
+            stepping([42, 41, 63, 42, 41, 42]),
+            variable(41, 63),
+            "--frame-rate 24/1: frame 3 lies 21.0 ms after its place on that rate's timeline"
+            " (0.504 of a frame, half a frame being 20.8 ms), and 2 more frames, up to 21.3 ms",
+        ),
+        # 5 segments of 50 frames at 25 fps, each 64 ms after the last frame of the one before.
+        # "99/4 fps (24.75), within 19.8 ms".
+        (
+            "99/4",
+            Fraction(25),
+            stepping(([40] * 49 + [64]) * 4 + [40] * 49),
+            variable(40, 64),
+            "--frame-rate 25/1: frame 50 lies 24.0 ms after its place on that rate's timeline"
+            " (0.600 of a frame, half a frame being 20.0 ms), and 199 more frames, up to 96 ms",
+        ),
+        # 100 frames at 24 fps in milliseconds, the 50 last 21 ms late, S9's catch-up step
+        # once. "143/6 fps (23.833), within 14 ms".
+        (
+            "143/6",
+            Fraction(24),
+            at([(2000 * n + 24) // 48 + (21 if n >= 50 else 0) for n in range(100)]),
+            variable(41, 62),
+            "--frame-rate 24/1: frame 51 lies 21.0 ms after its place on that rate's timeline"
+            " (0.504 of a frame, half a frame being 20.8 ms), and 32 more frames, up to 21.3 ms",
+        ),
+        # A short file: 6 frames at 12 fps declared 24/1, one missing, in ticks of 1/24 s.
+        # "109/12 fps (9.083), within 53.5 ms".
+        (
+            "109/12",
+            Fraction(24),
+            at([0, 2, 4, 8, 10, 12], Fraction(1, 24)),
+            "variable frame rate: frames last from 83.3333 to 166.667 ms, and only a constant"
+            " frame rate is supported",
+            "--frame-rate 24/1: frame 1 lies 41.7 ms after its place on that rate's timeline"
+            " (1.000 of a frame, half a frame being 20.8 ms), and 4 more frames, up to 291.7 ms",
+        ),
+        # One frame 20 ms late in 10 at 25 fps. "25000/1001 fps (24.975), within 19.8 ms".
+        (
+            "25000/1001",
+            Fraction(25),
+            at([40 * n + (20 if n == 5 else 0) for n in range(10)]),
+            variable(20, 60),
+            "--frame-rate 25/1: frame 5 lies 20.0 ms after its place on that rate's timeline"
+            " (0.500 of a frame, half a frame being 20.0 ms)",
+        ),
+    ]
+    for was, declares, scanned, plain, given in cases:
+        assert unfilled(declaring(declares), scanned) == plain, was
+        said = unfilled(declaring(declares, declares), scanned)
+        assert said == f"{given}: {DROPPED_OR_DOUBLED}", was
+        # The rate once advised still holds every frame within half a frame, and --frame-rate
+        # takes what it is given by that bound (DESIGN.md, Input): no refusal sends there now.
+        index = scanned.index
+        assert index is not None and rate.timeline(index, Fraction(was)).holds
+        assert timing_refusal(declaring(declares, Fraction(was)), scanned) == ""
+    # S9's shape is still guided, word for word, from the frame where 24000/1001's timeline is
+    # a frame from 24/1's; a frame less, a twin that holds but has not parted by a frame, gets
+    # sptenc's refusal.
+    s9 = live2(GUIDED)
+    film = declaring(Fraction(24))
+    assert unfilled(film, at(s9)) == GUIDANCE
+    assert unfilled(film, at(s9[:-1])) == variable(41, 63)
+    assert unfilled(film, at(s9[:260])) == variable(41, 62)
+    # --frame-rate's refusal names the twin of the rate DECLARED, what the file is, never R's:
+    # S9's shape given 25 is told 24000/1001; declaring 25/1 and given 24/1, whose twin holds
+    # it, no rate, as without the option.
+    said = unfilled(declaring(Fraction(24), Fraction(25)), at(s9))
+    assert said.startswith("--frame-rate 25/1: frame 12 lies 20.0 ms after its place on")
+    assert said.endswith(
+        f"{DROPPED_OR_DOUBLED}; its timestamps run at 24000/1001 fps (23.976), within 10.8 ms of"
+        f" that rate's timeline (0.26 of a frame): {fixes(NTSC_FILM)}"
+    )
+    pal = declaring(Fraction(25))
+    assert unfilled(pal, at(s9)) == variable(41, 63)
+    assert unfilled(replace(pal, rate_override=Fraction(24)), at(s9)) == (
+        "--frame-rate 24/1: frame 252 lies 21.0 ms after its place on that rate's timeline (0.504"
+        " of a frame, half a frame being 20.8 ms), and 581 more frames, up to 42 ms:"
+        f" {DROPPED_OR_DOUBLED}"
+    )
+    # What (a) still names where sptenc's rule fails, a rate the timestamps are exactly: 12 fps
+    # declared 24/1, in ticks of 1/24 s; and the rate declared itself, in a time base too coarse
+    # for the rule's 1 ms, 24 fps in ticks of 10 ms, which --frame-rate 24/1 reads.
+    said = unfilled(film, at(range(0, 14, 2), Fraction(1, 24)))
+    assert said == (
+        "its timestamps run at 12/1 fps (12), within 0 ms of that rate's timeline (0.00 of a"
+        " frame), where it declares 24/1, its frames lasting from 83.3 to 83.3 ms: a bad file,"
+        f" not read on a guess: {fixes(Fraction(12))}"
+    )
+    coarse = at([(100 * n + 12) // 24 for n in range(300)], Fraction(1, 100))
+    assert unfilled(film, coarse) == (
+        "its timestamps follow 24/1 fps (24), the rate it declares, within 5 ms of that rate's"
+        " timeline (0.12 of a frame), but its frames last from 40 to 50 ms, where a constant"
+        " rate's lie within 1 ms of each other: a bad file, not read on a guess:"
+        f" {fixes(Fraction(24))}"
+    )
+    assert timing_refusal(declaring(Fraction(24), Fraction(24)), coarse) == ""
 
 
 @needs_ffmpeg
@@ -342,7 +551,7 @@ def test_remake_keeps_every_frame(tmp_path: Path, late: int) -> None:
     # decoded pictures' MD5s), declared 24000/1001, the audio where it was, the first frame too,
     # 23 ms after the audio's start (where fps=24000/1001 alone dropped a frame and doubled
     # another, rate.remake); and seedvr2x reads the result.
-    path = mechanism7(tmp_path / "s9.mkv", late=late, audio=True)
+    path = mechanism7(tmp_path / "s9.mkv", frames=GUIDED, late=late, audio=True)
     with pytest.raises(MediaError) as refused:
         examine(path)
     said = str(refused.value)
@@ -352,14 +561,14 @@ def test_remake_keeps_every_frame(tmp_path: Path, late: int) -> None:
     words[-1] = str(tmp_path / "remade.mkv")
     run(*words[1:])
     remade = tmp_path / "remade.mkv"
-    assert pictures(remade) == pictures(path) and len(pictures(path)) == 260
+    assert pictures(remade) == pictures(path) and len(pictures(path)) == GUIDED
     before, after = streams(path), streams(remade)
     assert [s["codec_type"] for s in after] == ["video", "audio"]
     assert after[0]["r_frame_rate"] == after[0]["avg_frame_rate"] == "24000/1001"
     assert after[0]["start_time"] == before[0]["start_time"] == f"0.{late:03d}000"
     assert after[1]["start_time"] == before[1]["start_time"] == "0.000000"
     source = examine(remade)
-    assert (source.frames, source.frame_rate) == (260, NTSC_FILM)
+    assert (source.frames, source.frame_rate) == (GUIDED, NTSC_FILM)
 
 
 def read_without(declares: str) -> str:
@@ -424,8 +633,8 @@ def test_the_rate_timestamps_are_exactly() -> None:
         steady = indexed([33 * n for n in range(frames)])
         found = rate.exact(steady)
         assert found is not None and (found.rate, found.largest) == (Fraction(1000, 33), 0)
-        half = rate.follows(steady)
-        assert (half and half.rate) == (Fraction(91, 3) if frames < 3000 else None)
+        assert rate.timeline(steady, Fraction(91, 3)).holds is (frames < 3000)
+        assert rate.twin(steady, Fraction(30)) is None
     seventeen = indexed([17 * n for n in range(300)])
     found = rate.exact(seventeen)
     assert found is not None and found.rate == Fraction(1000, 17)
@@ -436,14 +645,22 @@ def test_the_rate_timestamps_are_exactly() -> None:
     found = rate.exact(ticks)
     assert found is not None and (found.rate, found.largest) == (NTSC_FILM, 0)
     # Segments of 24 frames at 24000/1001 joined as ffmpeg's concat demuxer joins them, each
-    # starting 1,000 ms after the one before, 1 ms early: 24/1 holds them within 1.33 ms, half a
-    # frame's rate (follows), their deviations spread over 1.67 ticks; no rate's exactly.
+    # starting 1,000 ms after the one before, 1 ms early: 24/1 holds them within 1.33 ms, the
+    # rate half a frame's rule named, their deviations spread over 1.67 ticks; no rate's exactly.
+    # 24/1 is the twin of the 24000/1001 they declare, 2.4 frames away at their end: named
+    # nowhere, sptenc's rule passing their steps of 41 and 42 ms, the declared timeline's rule
+    # refusing them as no rate's (source._leaves; design's decision, 2026-10-12: the twin is
+    # named "where sptenc's rule fails").
     segment = [(2002 * n + 24) // 48 for n in range(24)]
     joined = indexed([1000 * k + pts for k in range(100) for pts in segment])
-    half = rate.follows(joined)
-    assert half is not None and (half.rate, half.largest) == (24, Fraction(4, 3000))
+    half = rate.timeline(joined, Fraction(24))
+    assert half.holds and half.largest == Fraction(4, 3000)
     assert half.highest - half.lowest == Fraction(5, 3000)
     assert rate.exact(joined) is None
+    found = rate.twin(joined, NTSC_FILM)
+    assert found is not None and found.rate == 24
+    said = timing_refusal(declaring(NTSC_FILM), scanned_at(joined.pts, MS))
+    assert said.endswith(f", and {no_rate(NTSC_FILM)}") and "24/1" not in said
     # A rate that is none of those looked for, rounded to ticks: found when its mean rate's
     # timeline holds the frames so, 41.5 ms a frame, 2000/83 fps, over 101 frames, each within
     # half a tick; not always (rate.exact): 24.03 fps over 1,000 frames, 1.03 ticks on its mean
@@ -1143,9 +1360,7 @@ def test_what_stays_refused_with_places_left_empty() -> None:
         " of a frame, half a frame being 20.0 ms), and 21 more frames, up to 120 ms: taken at"
         " that rate, frames would be dropped or doubled"
     )
-    assert "a bad file, not read on a guess" in unfilled(
-        pal, stepping([40] * 10 + [60] + [40] * 10)
-    )
+    assert unfilled(pal, stepping([40] * 10 + [60] + [40] * 10)) == variable(40, 60)
     # Two frames in one place, 8 ms either side of it, beside a real hole: refused, and with
     # --frame-rate too.
     doubled = stepping([40] * 5 + [32, 16, 32] + [40] * 5 + [120] + [40] * 5)
@@ -1285,7 +1500,7 @@ def test_a_joins_step_is_no_missing_frame_with_frame_rate() -> None:
     # place at a join, 40 elsewhere.
     join = stepping(([40] * 49 + [64]) * 4 + [40] * 49)
     assert join.frames == 250
-    assert "a bad file, not read on a guess" in unfilled(declaring(Fraction(25)), join)
+    assert unfilled(declaring(Fraction(25)), join) == variable(40, 64)
     assert unfilled(declaring(Fraction(25), Fraction(25)), join).startswith(
         "--frame-rate 25/1: frame 50 lies 24.0 ms after its place on that rate's timeline (0.600"
         " of a frame, half a frame being 20.0 ms), and 199 more frames, up to 96 ms:"
@@ -1473,8 +1688,9 @@ def test_concat_joins_that_drift_refused_without_a_rate(
     # The join by ffmpeg's concat demuxer: each join about a millisecond early, the frames
     # drifting off the declared rate's timeline in steps, half a frame and more. Refused
     # (source._leaves), the message whole: how many frames, from which, how far; no rate named,
-    # their timestamps being none's exactly, though a rate looked for holds some within half a
-    # frame, 24/1, which --frame-rate would take them at, 0.1% off; its ways out the join on
+    # their timestamps being none's exactly, though the twin of the rate they declare holds some
+    # within half a frame, 24/1, which --frame-rate would take them at, 0.1% off, a rate named
+    # only where sptenc's rule fails (source._guided), which passes these; its ways out the join on
     # the frame grid and the remake at the rate declared, never --frame-rate. Given the rate it
     # declares, refused, --frame-rate's own rule, whole: told that it is refused without the
     # option too, with the same ways out. The same segments joined on the grid, as sptenc's
@@ -1482,7 +1698,7 @@ def test_concat_joins_that_drift_refused_without_a_rate(
     path = concat_joined(master, tmp_path / "join", cuts)
     index = scan(path).index
     assert index is not None and rate.exact(index) is None
-    found = rate.follows(index)
+    found = rate.twin(index, NTSC_FILM)
     assert (found and found.rate) == half
     count, first_off = strays.split("@")
     way_out = no_rate(NTSC_FILM)
@@ -1574,7 +1790,7 @@ def test_a_join_at_every_frame_off_the_grid_refused(tmp_path: Path) -> None:
     )
     path = concat_joined(master, tmp_path / "join", list(range(1, 31)))
     index = scan(path).index
-    assert index is not None and rate.follows(index) is None and rate.exact(index) is None
+    assert index is not None and rate.twin(index, NTSC_FILM) is None and rate.exact(index) is None
     assert rate.timeline(index, Fraction(24)).first_off == 996
     with pytest.raises(MediaError) as refused:
         examine(path)
@@ -1911,8 +2127,9 @@ def test_frame_rate_on_a_rate_under_ffmpegs_jump_bound(tmp_path: Path, period: i
     assert (source.frames, source.frame_rate) == (6, exactly)
     index = source.index
     assert index is not None
-    half = rate.follows(index)
-    assert half is not None and half.rate == Fraction(1, 12)
+    found = rate.exact(index)
+    assert found is not None and found.rate == exactly
+    assert rate.timeline(index, Fraction(1, 12)).holds
 
 
 @needs_ffmpeg
@@ -1937,8 +2154,8 @@ def test_the_refusal_names_the_rate_the_timestamps_are_exactly(tmp_path: Path, f
     assert (source.frames, source.frame_rate) == (frames, exactly)
     index = source.index
     assert index is not None
-    half = rate.follows(index)
-    assert (half and half.rate) == (Fraction(91, 3) if frames == 120 else None)
+    assert rate.timeline(index, Fraction(91, 3)).holds is (frames == 120)
+    assert rate.twin(index, Fraction(25)) is None
     with pytest.raises(MediaError) as refused:
         examine(path, frame_rate=Fraction(30))
     assert str(refused.value) == (
@@ -1986,8 +2203,8 @@ def test_real_source_refused_then_taken_at_its_rate() -> None:
     assert scanned.index is not None
     refusal = timing_refusal(declared, scanned)
     print(f"{path.name}: first pass {scanned.frames} frames in {seconds:.1f} s; refused: {refusal}")
-    found = rate.follows(scanned.index)
-    assert found is not None, "no constant rate holds its frames within half a frame"
+    found = rate.twin(scanned.index, declared.stream.frame_rate)
+    assert found is not None, "its declared rate's NTSC twin doesn't hold its frames a frame away"
     assert refusal.startswith(f"its timestamps run at {rate.said(found.rate)}, within")
     if RATE_EXPECTED:
         assert found.rate == Fraction(RATE_EXPECTED)

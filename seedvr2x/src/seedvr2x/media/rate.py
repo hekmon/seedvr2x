@@ -2,11 +2,12 @@
 frame rate): each frame's deviation from that timeline, anchored at the first frame, every one
 within half a frame of the declared rate's or the source is refused (media/source.py,
 timing_refusal); the rate their timestamps are exactly (exact), which a refusal of a contradicted
-rate gives with two fixes; the constant rate the frames follow within half a frame (follows),
-the refusal's where sptenc's rule fails and they are no rate's exactly; the remake a refusal
-gives (remake) and the join that keeps the frame grid (grid_join); and --frame-rate R, accepted
-when every frame lies within half a frame of R's timeline. Exact throughout: the frames' pts in
-their stream's time base, as the frame index holds them, and rates as fractions."""
+rate gives with two fixes; the declared rate's NTSC twin (twin), the one other rate a refusal
+names, where sptenc's rule fails, once the frames have followed it a frame away from the declared
+rate's timeline; the remake a refusal gives (remake) and the join that keeps the frame grid
+(grid_join); and --frame-rate R, accepted when every frame lies within half a frame of R's
+timeline. Exact throughout: the frames' pts in their stream's time base, as the frame index holds
+them, and rates as fractions."""
 
 import math
 from dataclasses import dataclass
@@ -22,18 +23,25 @@ from seedvr2x.media.index import NOPTS, FrameIndex
 # integers then, slower.
 INT64_SAFE = 2**62
 
-# The rates a constant rate is looked for among (DESIGN.md, Input: "or, where sptenc's rule fails
-# as there, one of ffmpeg's standard rates within half a frame"), the rates ffmpeg itself guesses
-# a stream's r_frame_rate from (libavformat/demux.c:2287-2303 at n9.0.2, get_std_framerate): every
-# multiple of 1/12 fps, and the NTSC forms N * 1000/1001; here without ffmpeg's bounds (multiples
-# of 1/12 up to 30 fps, integers up to 60, then 80, 120 and 240, six NTSC forms), so that 100 and
-# 120000/1001 are found too. Not the simplest fraction the frames allow: for S9 (142,477 frames,
-# research/docs/seeking.md mechanism 7) that is 2997/125, 23.976 exactly, a rate no file declares,
-# where its timestamps run at 24000/1001, its audio's.
+# The rates a file declares, among which the rate its timestamps are exactly is looked for where
+# their rounding hides it (exact): the rates ffmpeg itself guesses a stream's r_frame_rate from
+# (libavformat/demux.c:2287-2303 at n9.0.2, get_std_framerate), every multiple of 1/12 fps and the
+# NTSC forms N * 1000/1001; here without ffmpeg's bounds (multiples of 1/12 up to 30 fps, integers
+# up to 60, then 80, 120 and 240, six NTSC forms), so that 100 and 120000/1001 are found too. The
+# list names no rate by itself: one is given only when the timestamps are its own to the time
+# base's rounding, and no other of the list's holds them so. It was also the list a rate holding
+# the frames within half a frame was looked for in, the steadiest given (follows, removed): so
+# dense a list that a file was named a rate by its length, 24000/1001 segments joined with 63 ms
+# steps "47/2 fps", six frames at 12 fps with one missing "109/12 fps", a frame 20 ms late in 10
+# at 25 fps "25000/1001 fps", each then read with the --frame-rate its refusal advised (a
+# review's finding and design's check of it, 2026-10-12). Design's decision of 2026-10-12: "a
+# refusal names another rate only (a) when the timestamps are that rate's EXACTLY, to the time
+# base's rounding, or (b) where sptenc's rule fails, when it is the DECLARED RATE'S NTSC TWIN"
+# (twin); "rate.follows' list goes".
 TWELFTHS = 12
 NTSC = Fraction(1000, 1001)
-# The most rates follows tries: more means a span too short to tell one rate from the next (two
-# frames 1 ms apart allow any from 500 to 1,500 fps, some 13,000 of them), so none is given.
+# The most rates exact tries: more means a span too short to tell one rate from the next (two
+# steps over 3 ms allow any from 400 to 2,000 fps, some 19,000 of them), so none is given.
 MOST_RATES = 1000
 
 # The FFV1 master the remake makes, as seedvr2x writes its own (media/writer.py, FFV1Writer):
@@ -90,34 +98,42 @@ def timeline(index: FrameIndex, rate: Fraction) -> Timeline:
     )
 
 
-def follows(index: FrameIndex) -> Timeline | None:
-    """The constant rate the frames follow: of the rates looked for (TWELFTHS, NTSC), those whose
-    timeline holds every frame within half a frame, the one the frames lie steadiest on, by the
-    spread of their deviations in frames, the highest less the lowest, whatever the anchor; the
-    simplest fraction on a tie. None when none does, fewer than two frames have a pts, or their
-    span allows too many rates (MOST_RATES). Not the largest deviation from the first frame's
-    place: frames 0 and 10 ms after theirs in turn, around 25 fps, lie within 10 ms of 25's
-    timeline and 9.96 ms of 25000/1001's, which drifts 0.04 ms a frame, their spread 10 and 13.9.
+def twin(index: FrameIndex, declares: Fraction) -> Timeline | None:
+    """The NTSC twin of the rate a file declares that its frames follow, or None: `declares`
+    (frames per second) times 1000/1001 or 1001/1000, when its timeline holds every frame
+    strictly within half a frame (Timeline.holds) and has parted from the declared rate's by a
+    frame or more at the file's last frame. The one rate a refusal names that the timestamps
+    aren't exactly (media/source.py, _guided), where sptenc's rule fails: design's decision of
+    2026-10-12, "when it is the DECLARED RATE'S NTSC TWIN (R x 1000/1001 or R x 1001/1000)
+    holding every frame strictly within half a frame AND the two timelines have parted by a
+    frame or more over the file, so that one late frame of a short file is never read as a
+    rate". S9's case (research/docs/seeking.md, mechanism 7): 142,477 frames declared 24/1,
+    stepping at 24 fps with one step in 500 of 62-63 ms, no rate's exactly, within 10.9 ms of
+    24000/1001's timeline, 142 frames from 24's at their end.
 
-    Only rates the frames' span allows are tried: within half a frame of its place, the last frame,
-    k frames after the first and t seconds later, bounds the rate to ((k - 1/2) / t, (k + 1/2) /
-    t)."""
-    places, pts = _timed(index)
+    Parted by a frame: the last frame, k frames after the first, has its two places k |1/R -
+    1/twin| seconds apart, R the declared rate, k |1 - R/twin| frames of R: k/1000 for R x
+    1000/1001, a frame from the 1,001st frame of a file on, and k/1001 for R x 1001/1000, from
+    the 1,002nd. A frame, since a timeline holds a frame within half a frame of its place: under
+    a frame apart, one frame can lie within half a frame of both places, and the twin's timeline
+    holding the file says nothing against the rate declared (a frame 20 ms late in 10 at 25 fps
+    lies within 19.8 ms of 25000/1001's timeline; S9's first 260 frames, one long step in them,
+    within 21.3 ms of 24/1's); from a frame apart, the last frame, within half a frame of the
+    twin's place, lies half a frame from the declared rate's or more (0.4995 of one at the
+    least, the twins' frames 0.1% apart): no late frame, but a file that left the timeline it
+    declares for its twin's, every frame held there on the way. The twins part from each other
+    twice as fast: one at most holds a file so."""
+    places, _ = _timed(index)
     if len(places) < 2:
         return None
-    span = int(pts[-1] - pts[0]) * index.time_base
     steps = int(places[-1] - places[0])
-    if span <= 0:
-        return None
-    low, high = (steps - Fraction(1, 2)) / span, (steps + Fraction(1, 2)) / span
-    if (high - low) * TWELFTHS > MOST_RATES:
-        return None
-    best: Timeline | None = None
-    for rate in _rates(low, high):
-        found = timeline(index, rate)
-        if found.holds and (best is None or _spread(found) < _spread(best)):
-            best = found
-    return best
+    for other in (declares * NTSC, declares / NTSC):
+        if steps * abs(1 - declares / other) < 1:
+            continue  # under a frame apart at the last frame
+        found = timeline(index, other)
+        if found.holds:
+            return found
+    return None
 
 
 def exact(index: FrameIndex) -> Timeline | None:
@@ -138,10 +154,11 @@ def exact(index: FrameIndex) -> Timeline | None:
     joined by ffmpeg's concat demuxer 1.67 to 2 ticks on the rate looked for nearest them
     (30000/1001 joined every 10 or 12 frames on 30/1's, within 1.0 ms; 24000/1001 every 24 or 20
     on 24/1's, within 1.3 and 1.7 ms), and 2 to 2.6 on their own mean rate's. Half a frame, the
-    bound a rate holds the frames within (follows), took those joins for files at 30/1 and 24/1;
-    33 and 42 ms a frame for 91/3 and 143/6 fps over 120 to 300 frames, within 3.9 to 12.5 ms,
-    rates that 3,000 frames of each leave; and 17 ms a frame for 353/6 fps, within 0.85 ms over
-    300 frames and 8.5 over 3,000 (a review's findings, 2026-10-10).
+    bound a rate was first looked for by among the same rates (follows, removed: TWELFTHS), took
+    those joins for files at 30/1 and 24/1; 33 and 42 ms a frame for 91/3 and 143/6 fps over
+    120 to 300 frames, within 3.9 to 12.5 ms, rates that 3,000 frames of each leave; and 17 ms a
+    frame for 353/6 fps, within 0.85 ms over 300 frames and 8.5 over 3,000 (a review's findings,
+    2026-10-10).
 
     The rates tried: the frames' own mean rate, their steps over their span, given when every
     frame lies on its timeline, a constant step in ticks, whatever the rate (1000/33 fps for 33
@@ -152,6 +169,13 @@ def exact(index: FrameIndex) -> Timeline | None:
     none of those, rounded to ticks, isn't always found: 24.03 fps over 1,000 frames spread
     1.03 ticks on its mean rate's timeline, which the rounding of the first and last frames
     tilts; no rate is then given.
+
+    The rates looked for stay, both families, where the half-frame guess went (TWELFTHS): here
+    they give a rate its name and nothing more. 600 frames of 24000/1001 in milliseconds have
+    599000/24983 fps for their mean rate, and the simplest fraction that holds them to a tick's
+    spread, 2997/125, is no rate a file declares; and the denser the list, the more short files
+    it leaves unnamed, by the rule below: without the multiples of 1/12, 18 frames of 48000/1001
+    in milliseconds would be named a rate that 575/12 fps holds as exactly.
 
     Nor is one when several of the rates looked for hold the frames so, a file too short to
     tell them apart: the one the frames lay steadiest on was given, and of 12,872 synthetic
@@ -192,11 +216,6 @@ def _rounded(found: Timeline, tick: Fraction) -> bool:
     """Whether the frames lie on a timeline as that rate's times rounded to `tick`, seconds, do
     (exact): within half a frame, their deviations spread over one tick at most."""
     return found.holds and found.highest - found.lowest <= tick
-
-
-def _spread(found: Timeline) -> Fraction:
-    """The spread of the frames' deviations from a timeline, in frames."""
-    return (found.highest - found.lowest) * found.rate
 
 
 def _rates(low: Fraction, high: Fraction) -> list[Fraction]:
