@@ -304,14 +304,14 @@ sys.exit(3 if "torch" in sys.modules else status)
 
 def test_directory_refused_first(tmp_path: Path) -> None:
     # The source is the only input (DESIGN.md, Input): a directory of segments is refused before
-    # anything is done, the build's check included, saying how to join them on the frame grid,
-    # the advice whole, the one a drifted join's refusal gives (rate.grid_join; what its
-    # commands give is tests/test_rate.py's): by ffmpeg alone first, then by sptenc, then the
-    # remake where no stream copy holds; nothing is written, neither output, nor an output
-    # directory. The directory's name needs quoting for a shell, a space and an apostrophe, so
-    # that the commands the message gives are checked quoted; the rate, which the refusal can't
-    # know, an example said to be one; and the plain join, the advice until 2026-10-11, said to
-    # be refused once it has drifted.
+    # anything is done, the build's check included, saying how to join them on the frame grid, the
+    # advice whole, the one a drifted join's refusal gives (rate.grid_join; what its commands give
+    # is tests/test_rate.py's): by ffmpeg alone first, then by sptenc, then the remake where no
+    # stream copy holds; nothing is written, neither output, nor an output directory. The
+    # directory's name needs quoting for a shell, a space and an apostrophe, so that the commands
+    # the message gives are checked quoted; the rate, which the refusal can't know, an example said
+    # to be one before each command; and the plain join, the advice until 2026-10-11, said to be
+    # refused once it has drifted.
     segments = tmp_path / "the film's segments"
     segments.mkdir()
     for name in ("seg_000000.mkv", "seg_000001.mkv"):
@@ -337,18 +337,22 @@ def test_directory_refused_first(tmp_path: Path) -> None:
         )
         assert result.stderr.endswith(advice)
         assert "with ffmpeg alone, each segment listed with its exact duration" in advice
-        assert f"cd {quoted} && N=24000 D=1001 && for f in *.mkv; do" in advice
-        assert "N/D their frame rate, 24000/1001 here), or with sptenc, for" in advice
-        # What both commands ask of the segments' names, listed by the shell's *.mkv.
+        # The rate the shell's N and D in both commands, the join's and the remake's.
+        assert advice.count(f"cd {quoted} && N=24000 D=1001 && for f in ./*.mkv; do printf") == 2
+        said = f", with N and D set to their frame rate, 24000/1001 here: cd {quoted} && N=24000"
+        assert advice.count(said) == 2
+        assert "ffmpeg -f concat -safe 0 -r $N/$D -i list.txt -map 0:v:0" in advice
+        assert "-r 24000/1001" not in advice and "echo" not in advice
+        # What both commands ask of the segments' names, listed by the shell's ./*.mkv.
         names = (
-            "(*.mkv the segments' names, taken in name order, which must be the order they play"
-            " in: numbers with leading zeros, as seg_000012.mkv, seg_10.mkv coming before"
+            "(./*.mkv the segments' names, taken in name order, which must be the order they"
+            " play in: numbers with leading zeros, as seg_000012.mkv, seg_10.mkv coming before"
             " seg_2.mkv otherwise; check list.txt, or write it by hand; a name must hold no"
-            " apostrophe"
+            " apostrophe)"
         )
         assert advice.count(names) == 2
-        assert f"../joined.mkv {names}; N/D their" in advice
-        assert f"../remade.mkv {names}). A plain join by" in advice
+        assert f"../joined.mkv {names}, or with sptenc" in advice
+        assert f"../remade.mkv {names}. A plain join by" in advice
         # sptenc's join an option: seedvr2x never requires sptenc.
         assert f"sptenc concat {quoted} joined.mkv, which snaps every timestamp" in advice
         assert "-c copy joined.mkv" not in result.stderr and "drift" not in rate.grid_join()

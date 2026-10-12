@@ -30,6 +30,7 @@ import logging
 import os
 import random
 import shlex
+import shutil
 import subprocess
 import time
 from collections.abc import Sequence
@@ -577,6 +578,69 @@ def test_remake_keeps_every_frame(tmp_path: Path, late: int) -> None:
     assert (source.frames, source.frame_rate) == (GUIDED, NTSC_FILM)
 
 
+def packets(path: Path, *streams: str) -> list[str]:
+    """The MD5 of the packets of each of path's `streams` (0:a, 0:v:1), as stored, in order."""
+    maps = [word for stream in streams for word in ("-map", stream)]
+    hashed = run("-i", str(path), *maps, "-c", "copy", "-f", "streamhash", "-hash", "md5", "-")
+    return [line.split("=")[1] for line in hashed.decode().splitlines()]
+
+
+@needs_ffmpeg
+@needs_x264
+def test_remake_copies_every_other_stream(tmp_path: Path) -> None:
+    # Why the remake's command keeps -c copy before -c:v:0 ffv1, of which ffmpeg n9.0.2 warns
+    # ("Multiple -codec/-c/-acodec/-vcodec/-scodec/-dcodec options specified for stream 0, only
+    # the last option '-codec:v:0 ffv1' will be used", what the command means). A file with two
+    # audio streams, subtitles, a font attached and a second video stream, remade as the message
+    # gives it: every picture of the first stream, and every other stream copied, packet for
+    # packet, the second video stream among them. A copy per type in its place (-c:a copy -c:s
+    # copy -c:t copy), which design asked for "if the file it makes is the same" (2026-10-12),
+    # warns of nothing and makes the same file of a source with one video stream, but leaves a
+    # second one, or an MP4's cover, to the muxer's default encoder: encoded again, lossy. No
+    # stream specifier names every video stream but the first (-c:v copy warns as -c copy does).
+    path, font, text = tmp_path / "in.mkv", tmp_path / "font.ttf", tmp_path / "text.srt"
+    font.write_bytes(bytes(range(256)) * 8)
+    text.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n")
+    tone = [
+        ("-f", "lavfi", "-i", f"sine=frequency={pitch}:sample_rate=48000") for pitch in (440, 880)
+    ]
+    run(
+        *("-f", "lavfi", "-i", "testsrc2=s=64x48:r=24", *tone[0], *tone[1], "-i", str(text)),
+        *("-f", "lavfi", "-i", "testsrc=s=32x32:r=25"),
+        *("-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s", "-map", "4:v", "-t", "1"),
+        *("-c:v:0", "libx264", "-pix_fmt", "yuv420p", "-c:v:1", "mpeg2video"),
+        *("-c:a:0", "aac", "-c:a:1", "flac", "-c:s", "srt", "-attach", str(font)),
+        *("-metadata:s:t", "mimetype=application/x-truetype-font", str(path)),
+    )
+    kinds = ["h264", "aac", "flac", "subrip", "mpeg2video", "ttf"]
+    others = ("0:a:0", "0:a:1", "0:s:0", "0:v:1")
+
+    def codecs(made: Path) -> list[str]:
+        probe = ["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0"]
+        probed = subprocess.run([*probe, str(made)], capture_output=True, text=True, check=True)
+        return [name.rstrip(",") for name in probed.stdout.split()]
+
+    def remade(command: str, name: str) -> Path:
+        words = shlex.split(command)
+        words[words.index("SOURCE")] = str(path)
+        words[-1] = str(tmp_path / name)
+        run(*words[1:])
+        return tmp_path / name
+
+    assert codecs(path) == kinds
+    command = rate.remake(NTSC_FILM, Fraction(0))
+    assert " -map 0 -map -0:d -c copy -c:v:0 ffv1 " in command
+    as_given = remade(command, "remade.mkv")
+    assert codecs(as_given) == ["ffv1", *kinds[1:]]
+    assert pictures(as_given) == pictures(path) and len(pictures(path)) == 24
+    assert packets(as_given, *others) == packets(path, *others)
+    per_type = remade(command.replace(" -c copy ", " -c:a copy -c:s copy -c:t copy "), "other.mkv")
+    again = codecs(per_type)
+    assert [*again[:4], again[5]] == ["ffv1", *kinds[1:4], "ttf"] and again[4] != "mpeg2video"
+    assert packets(per_type, *others[:3]) == packets(path, *others[:3])
+    assert packets(per_type, "0:v:1") != packets(path, "0:v:1")
+
+
 def read_without(declares: str) -> str:
     """The end of --frame-rate's refusal for a file read without it: one sptenc's rule passes at
     the rate it declares, its frames on that rate's timeline."""
@@ -772,47 +836,63 @@ def no_rate(declares: Fraction) -> str:
 
 
 def test_the_join_that_keeps_the_frame_grid() -> None:
-    # The advice of a join on the frame grid, in one place (rate.grid_join), whole: by ffmpeg
-    # alone first, seedvr2x never needing sptenc, a shell's lines listing each segment with its
-    # exact duration and one stream copy snapping every timestamp; then sptenc's concat; then,
-    # where no stream copy holds, the remake of the segments' pictures. With the segments'
-    # directory and their rate when the refusal knows them, DIR and 24000/1001, said to be an
-    # example, when it doesn't. After each command that lists the segments by the shell's
-    # *.mkv, what that asks of their names: name order their playing order, and no apostrophe
-    # (test_the_join_advised_takes_the_segments_in_name_order). What the commands give is
-    # test_the_join_advised_keeps_every_frame_on_the_grid's.
+    # The advice of a join on the frame grid, in one place (rate.grid_join), whole: by ffmpeg alone
+    # first, seedvr2x never needing sptenc, a shell's lines listing each segment with its exact
+    # duration and one stream copy snapping every timestamp; then sptenc's concat; then, where no
+    # stream copy holds, the remake of the segments' pictures. With the segments' directory and
+    # their rate when the refusal knows them, DIR and 24000/1001, said to be an example, when it
+    # doesn't: then in both commands, the shell's N and D, set at the start of each, the remake's -r
+    # $N/$D as the join's durations and snap (design, 2026-10-12; a rate known is written out in the
+    # remake, no N or D there), and said before each command, in plain words, not after it: typed as
+    # printed, the remake runs. After each command that lists the segments by the shell's ./*.mkv,
+    # what that asks of their names: name order their playing order, and no apostrophe
+    # (test_the_join_advised_takes_the_segments_in_name_order). The list's lines by printf, never
+    # echo, the names behind ./, and awk under LC_ALL=C (test_the_join_advised_takes_any_name). What
+    # the commands give is test_the_join_advised_keeps_every_frame_on_the_grid's.
     snapped = "'if(eq({0},NOPTS),NOPTS,round(round({0}*TB*$N/$D)*$D/TB/$N))'"
     listed = (
-        'for f in *.mkv; do echo "file \'$f\'"; echo "duration $(ffprobe -v error'
-        " -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0"
-        ' "$f" | awk -v n=$N -v d=$D \'NR==1{printf "%.6f", $1*d/n}\')"; done > list.txt'
+        'for f in ./*.mkv; do printf "file \'%s\'\\n" "$f"; printf "duration %s\\n" "$(ffprobe -v'
+        " error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of"
+        ' csv=p=0 "$f" | LC_ALL=C awk -v n=$N -v d=$D \'NR==1{printf "%.6f", $1*d/n}\')"; done >'
+        " list.txt"
     )
+    bare = 'for f in ./*.mkv; do printf "file \'%s\'\\n" "$f"; done > list.txt'
     names = (
-        "*.mkv the segments' names, taken in name order, which must be the order they play in:"
+        "./*.mkv the segments' names, taken in name order, which must be the order they play in:"
         " numbers with leading zeros, as seg_000012.mkv, seg_10.mkv coming before seg_2.mkv"
         " otherwise; check list.txt, or write it by hand; a name must hold no apostrophe"
     )
+    ffv1 = "-c:v:0 ffv1 -level:v:0 3 -g:v:0 1 -slicecrc:v:0 1 -fps_mode:v:0 passthrough"
     assert rate.grid_join() == (
         "with ffmpeg alone, each segment listed with its exact duration, its frames over the"
-        " rate, and every timestamp snapped to the grid in one stream copy: cd DIR && N=24000"
-        f" D=1001 && {listed} && ffmpeg -f concat -safe 0 -i list.txt -c copy -bsf:v"
+        " rate, and every timestamp snapped to the grid in one stream copy, with N and D set to"
+        f" their frame rate, 24000/1001 here: cd DIR && N=24000 D=1001 && {listed} && ffmpeg -f"
+        " concat -safe 0 -i list.txt -c copy -bsf:v"
         f' "setts=pts={snapped.format("PTS")}:dts={snapped.format("DTS")}" ../joined.mkv'
-        f" ({names}; N/D their frame rate, 24000/1001 here), or with sptenc,"
+        f" ({names}), or with sptenc,"
         " for segments of its split, sptenc concat DIR joined.mkv, which snaps every timestamp"
         " to the grid, or, where no stream copy holds, for segments that carry audio, MPEG"
         " program streams, or transport streams of a single frame, their pictures remade as an"
-        " FFV1 master, numbered at that rate as they come, every one kept: cd DIR && for f in"
-        " *.mkv; do echo \"file '$f'\"; done > list.txt && ffmpeg -f concat -safe 0 -r"
-        " 24000/1001 -i list.txt -map 0:v:0 -c:v:0 ffv1 -level:v:0 3 -g:v:0 1 -slicecrc:v:0 1"
-        f" -fps_mode:v:0 passthrough ../remade.mkv ({names})"
+        " FFV1 master, numbered at that rate as they come, every one kept, with N and D set to"
+        f" their frame rate, 24000/1001 here: cd DIR && N=24000 D=1001 && {bare} && ffmpeg -f"
+        f" concat -safe 0 -r $N/$D -i list.txt -map 0:v:0 {ffv1} ../remade.mkv ({names})"
     )
+    assert "N/D" not in rate.grid_join() and rate.grid_join().count(" here: cd DIR") == 2
+    assert "echo" not in rate.grid_join() and " for f in *.mkv" not in rate.grid_join()
+    assert rate.grid_join().count("| LC_ALL=C awk ") == rate.grid_join().count("awk") == 1
     known = rate.grid_join(shlex.quote("my segments"), Fraction(30000, 1001))
     assert "sptenc concat 'my segments' joined.mkv" in known
     assert known.count("cd 'my segments' && ") == 2 and "DIR" not in known
-    assert "cd 'my segments' && N=30000 D=1001 && for f in" in known
+    assert f"cd 'my segments' && N=30000 D=1001 && {listed} && ffmpeg -f concat" in known
     assert "N/D their frame rate), or with sptenc" in known and " here" not in known
     assert known.count(f"({names}") == 2 and known.endswith(f"../remade.mkv ({names})")
-    assert "-safe 0 -r 30000/1001 -i list.txt -map 0:v:0" in known and "24000" not in known
+    assert known.count("N/D their frame rate") == known.count("N=") == 1
+    assert "one stream copy: cd 'my segments' &&" in known and "N and D set" not in known
+    assert (
+        f"every one kept: cd 'my segments' && {bare} && ffmpeg -f concat -safe 0 -r 30000/1001 -i"
+        f" list.txt -map 0:v:0 {ffv1} ../remade.mkv ({names})" in known
+    )
+    assert "24000" not in known and "-r $N/$D" not in known
     assert "N=25 D=1 &&" in rate.grid_join(declares=Fraction(25))
 
 
@@ -2087,12 +2167,18 @@ def segments(
     return master, seen
 
 
-def typed(said: str, made: str) -> None:
+# The shells the advised commands are typed in: dash where it is installed, Debian's and
+# Ubuntu's sh, whose echo expands a backslash's escapes where bash's doesn't; else sh.
+DASH = "dash" if shutil.which("dash") else "sh"
+SHELLS = [shell for shell in ("sh", "dash", "bash") if shutil.which(shell)]
+
+
+def typed(said: str, made: str, shell: str = DASH) -> None:
     """The shell's lines a refusal `said` gives to make `made`, from their cd on, typed as
-    they are."""
+    they are, in `shell`."""
     end = said.index(made) + len(made)
     lines = said[said.rindex("cd ", 0, end) : end]
-    result = subprocess.run(["sh", "-c", lines], stdin=subprocess.DEVNULL, capture_output=True)
+    result = subprocess.run([shell, "-c", lines], stdin=subprocess.DEVNULL, capture_output=True)
     assert result.returncode == 0, result.stderr.decode()
 
 
@@ -2212,6 +2298,43 @@ def test_the_join_advised_takes_the_segments_in_name_order(tmp_path: Path) -> No
 
 
 @needs_ffmpeg
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_join_advised_takes_any_name(tmp_path: Path, shell: str) -> None:
+    # The names the listing was written for (rate.LISTED; design, 2026-10-12): a segment whose
+    # name begins with a hyphen, which listed by *.mkv is an option to ffprobe ("Missing
+    # argument for option 'a.mkv'", the join failing at its empty duration); one holding a
+    # backslash, which dash's echo expands, b\tc.mkv listed with a tab and never found; one with
+    # a space. Listed by ./*.mkv and printf, the join and the remake typed as the message gives
+    # them, in sh, dash and bash, those installed: list.txt holds each name as it is, behind
+    # ./, which the concat demuxer opens under -safe 0, and every picture comes in order, each
+    # frame at its place in the master. The names sort alike under any locale, hyphen and
+    # backslash counted or not.
+    directory = tmp_path / "segments"
+    master, seen = segments(directory, "24000/1001", "ffv1", lengths=[20] * 4)
+    original = scan(master).index
+    assert original is not None and len(seen) == original.frames == 80
+    names = ["-a.mkv", "b\\tc.mkv", "d e.mkv", "seg_000003.mkv"]
+    for k, name in enumerate(names[:3]):
+        (directory / f"seg_{k:06d}.mkv").rename(directory / name)
+    said = rate.grid_join(shlex.quote(str(directory)), NTSC_FILM)
+    for made in ("joined.mkv", "remade.mkv"):
+        typed(said, f"../{made}", shell)
+        listed = (directory / "list.txt").read_text().splitlines()
+        assert [line for line in listed if line.startswith("file ")] == [
+            "file './-a.mkv'",
+            "file './b\\tc.mkv'",
+            "file './d e.mkv'",
+            "file './seg_000003.mkv'",
+        ]
+        durations = [line for line in listed if not line.startswith("file ")]
+        assert durations == ["duration 0.834167"] * 4 * (made == "joined.mkv")
+        assert pictures(tmp_path / made) == seen
+        source = examine(tmp_path / made)
+        assert (source.frames, source.frame_rate) == (80, NTSC_FILM)
+        assert placed(source.index) == placed(original)
+
+
+@needs_ffmpeg
 @pytest.mark.parametrize(
     ("codec", "suffix", "audio", "copied"),
     [
@@ -2255,6 +2378,48 @@ def test_segments_no_stream_copy_holds_are_remade(
     source = examine(remade)
     assert (source.frames, source.frame_rate) == (sum(LENGTHS), NTSC_FILM)
     assert placed(source.index) == placed(original)
+
+
+@needs_ffmpeg
+def test_a_directorys_remake_takes_the_rate_typed(tmp_path: Path) -> None:
+    # A directory's refusal can't know its segments' rate: both its commands take it from the
+    # shell's N and D, set at the start of each, 24000/1001 an example, said to be one before
+    # each command (design, 2026-10-12). The same 30 segments at 25 fps, typed with N=25 D=1: the
+    # join
+    # and the remake each a 25 fps file, every picture in order, each frame at its place in the
+    # master. Typed as printed, the example's rate left: the join's frames last 0 to 125 ms,
+    # refused; the remake numbers the 25 fps frames at 24000/1001, every one kept, on that
+    # rate's grid, a file that is read, 4% slow, without a word: what the words before the
+    # command are for, and all a literal rate there gave, whatever was typed before it.
+    directory = tmp_path / "the film's segments"
+    master, seen = segments(directory, "25", "ffv1")
+    original = scan(master).index
+    assert original is not None and len(seen) == original.frames == sum(LENGTHS)
+    said = rate.grid_join(shlex.quote(str(directory)))
+    assert said.count("N=24000 D=1001 && for f in ./*.mkv; do printf") == 2
+    assert "-safe 0 -r $N/$D -i list.txt" in said and "-r 24000/1001" not in said
+    before = ", with N and D set to their frame rate, 24000/1001 here: cd "
+    assert said.count(before) == 2 and "N/D" not in said.replace("$N/$D", "")
+    set_right = said.replace("N=24000 D=1001", "N=25 D=1")
+    joined, remade = tmp_path / "joined.mkv", tmp_path / "remade.mkv"
+    for made in (joined, remade):
+        typed(set_right, f"../{made.name}")
+        assert pictures(made) == seen
+        source = examine(made)
+        assert (source.frames, source.frame_rate) == (sum(LENGTHS), Fraction(25))
+        assert placed(source.index) == placed(original)
+        made.unlink()
+    typed(said, "../joined.mkv")
+    with pytest.raises(MediaError) as refused:
+        examine(joined)
+    assert str(refused.value) == (
+        f"{joined}: variable frame rate: frames last from 0 to 125 ms, and only a constant frame"
+        " rate is supported"
+    )
+    typed(said, "../remade.mkv")
+    assert pictures(remade) == seen
+    source = examine(remade)
+    assert (source.frames, source.frame_rate, source.filled) == (sum(LENGTHS), NTSC_FILM, None)
 
 
 @needs_ffmpeg

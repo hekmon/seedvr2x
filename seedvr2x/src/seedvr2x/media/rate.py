@@ -398,6 +398,17 @@ def remake(rate: Fraction, start: Fraction) -> str:
     the video, its timestamps then shifted back by `start`, in microseconds (settb=AVTB), the
     encoder taking the stream's own time base, so that the shift isn't rounded to the rate's."""
     words = ["ffmpeg", "-r:v:0", fraction(rate), "-i", "SOURCE"]
+    # PROVISIONAL (implementation, 2026-10-12, a question for design: -c copy then -c:v:0 ffv1
+    # kept, of which ffmpeg n9.0.2 warns, "Multiple -codec/-c/-acodec/-vcodec/-scodec/-dcodec
+    # options specified for stream 0, only the last option '-codec:v:0 ffv1' will be used",
+    # which is what is meant). Design asked for a copy per type in its place, -c:a copy -c:s
+    # copy -c:t copy, "if the file it makes is the same": it is, byte for byte under -fflags
+    # +bitexact, and without the warning, for a source with one video stream (two audio
+    # streams, subtitles and a font attached); but a second video stream (MPEG-4) and an MP4's
+    # cover (PNG) are then left to Matroska's default encoder, encoded again as H.264, where
+    # -c copy copies them. No stream specifier names every video stream but the first: -c:v
+    # copy before -c:v:0 warns as -c copy does, and -c:v:1 copy names one more stream, not the
+    # one after (tests/test_rate.py, test_remake_copies_every_other_stream).
     words += ["-map", "0", "-map", "-0:d", "-c", "copy", *FFV1, "-fps_mode:v:0", "passthrough"]
     microseconds = round(start * 1_000_000)
     if microseconds:
@@ -409,22 +420,35 @@ def remake(rate: Fraction, start: Fraction) -> str:
 # The lines of a POSIX shell that list a directory's segments for ffmpeg's concat demuxer, in
 # list.txt beside them: each with its exact duration, its frames (ffprobe's count of its
 # packets) over the rate $N/$D, to the microsecond, and bare, for a remake that numbers the
-# frames itself (grid_join).
+# frames itself (grid_join). Written for any name but one with an apostrophe (NAMES), and for
+# sh being dash, as Debian's and Ubuntu's is (design, 2026-10-12; measured with dash 0.5.12 and
+# ffmpeg n9.0.2, and held by tests/test_rate.py, test_the_join_advised_takes_any_name):
+# - ./*.mkv, not *.mkv: a segment named -x.mkv was an option to ffprobe ("Missing argument for
+#   option 'x.mkv'"), its duration line empty, the join failing at "Line 2: invalid duration
+#   ''"; list.txt now holds file './-x.mkv', which the demuxer opens beside the list under
+#   -safe 0, the commands' own;
+# - printf, not echo: dash's echo expands a backslash's escapes, a segment named a\tb.mkv
+#   listed with a tab in its name ("Impossible to open"); the demuxer reads a backslash
+#   between apostrophes as itself;
+# - LC_ALL=C for awk, whose printf takes its decimal point from the locale (POSIX, awk,
+#   LC_NUMERIC): a comma under a French or a German one, "duration 1,001000". Not measured:
+#   gawk 5.2.1, this machine's awk, writes a point under any locale unless asked
+#   (--use-lc-numeric), and the machine has no such locale.
 LISTED = (
-    'for f in *.mkv; do echo "file \'$f\'"; echo "duration $(ffprobe -v error -select_streams'
-    ' v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0 "$f" | awk -v n=$N'
-    ' -v d=$D \'NR==1{printf "%.6f", $1*d/n}\')"; done > list.txt'
+    'for f in ./*.mkv; do printf "file \'%s\'\\n" "$f"; printf "duration %s\\n" "$(ffprobe -v'
+    " error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of csv=p=0"
+    ' "$f" | LC_ALL=C awk -v n=$N -v d=$D \'NR==1{printf "%.6f", $1*d/n}\')"; done > list.txt'
 )
-LISTED_BARE = "for f in *.mkv; do echo \"file '$f'\"; done > list.txt"
+LISTED_BARE = 'for f in ./*.mkv; do printf "file \'%s\'\\n" "$f"; done > list.txt'
 
 # What those lines ask of the segments' names, said after each command that lists them
-# (grid_join). The shell gives *.mkv in name order, seg_10.mkv before seg_2.mkv: 12 segments
+# (grid_join). The shell gives ./*.mkv in name order, seg_10.mkv before seg_2.mkv: 12 segments
 # named seg_1.mkv to seg_12.mkv, typed so, joined as 1, 10, 11, 12, 2 to 9, every frame on the
 # grid, read without a word; and a name with an apostrophe ends its line's quotes in list.txt,
 # ffmpeg then opening another name, failing there and leaving the segments before it as the
 # join, its exit status 0 (ffmpeg n9.0.2; a review's findings, 2026-10-12).
 NAMES = (
-    "*.mkv the segments' names, taken in name order, which must be the order they play in:"
+    "./*.mkv the segments' names, taken in name order, which must be the order they play in:"
     " numbers with leading zeros, as seg_000012.mkv, seg_10.mkv coming before seg_2.mkv"
     " otherwise; check list.txt, or write it by hand; a name must hold no apostrophe"
 )
@@ -442,9 +466,11 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     directory's (cli._directory_refused), and media/source.py's, of a file whose frames drift
     off the timeline of the rate it declares (_leaves), as those of a plain join by ffmpeg's
     concat demuxer do, up to 1 ms a join; `directory`, the segments', as a shell takes it, DIR
-    for a refusal that can't know it; `declares`, their frame rate, in the commands, 24000/1001
-    as an example, said to be one, for a refusal that can't know it. What each way was measured
-    to hold, and the plain join's drift, are with cli._directory_refused.
+    for a refusal that can't know it; `declares`, their frame rate, in the commands; for a
+    refusal that can't know it, both commands take it from the shell's N and D, set once at
+    their start, 24000/1001 as an example, said to be one before each command ("with N and D
+    set to their frame rate, 24000/1001 here"). What each way was measured to hold, and the
+    plain join's drift, are with cli._directory_refused.
 
     By ffmpeg alone first, seedvr2x never needing sptenc, sptenc's own method (its
     ffmpeg/concat.go) in a shell's lines: the concat demuxer given each segment's exact
@@ -459,10 +485,15 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
 
     Then sptenc's concat, the same method. Last, where no stream copy holds, the segments
     decoded and written again as an FFV1 master, the input option -r numbering their frames at
-    the rate as they come (remake), from a list without durations, the video alone.
+    the rate as they come (remake), from a list without durations, the video alone. Its rate is
+    the join's: the rate known, written out; the shell's $N/$D where the refusal can't know it,
+    the same N= and D= in it and the same words before it (design, 2026-10-12: a literal
+    24000/1001 there, typed on 25 fps segments, made a 24000/1001 file, every frame on that
+    rate's grid, that is read without a word: tests/test_rate.py,
+    test_a_directorys_remake_takes_the_rate_typed).
 
-    Both commands list the segments by the shell's *.mkv, and each says what that asks of
-    their names (NAMES)."""
+    Both commands list the segments by the shell's ./*.mkv (LISTED), and each says what that
+    asks of their names (NAMES)."""
     # PROVISIONAL (implementation, 2026-10-12, questions for design: DESIGN.md asks for a join
     # by ffmpeg alone that holds the grid and names no command). (1) Durations and the snap, in
     # one pass, over the other join that held as widely: the plain join, then a second stream
@@ -474,24 +505,36 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     # rather than -fflags +genpts advised for them (see the docstring). (4) The segments listed
     # by the shell's glob, its name order and the apostrophe said (NAMES), rather than sorted by
     # their numbers (ls -v and sort -V are GNU's, and a listing parsed breaks on other names)
-    # or escaped for the demuxer by a sed in the line, which nobody could read.
+    # or escaped for the demuxer by a sed in the line, which nobody could read. (5) Where the
+    # rate isn't known, N and D said before each command, in plain words, the wording ours
+    # (2026-10-12): said after it, the last words of a long parenthesis, they came too late for
+    # a command typed as printed, which on 25 fps segments remakes a 24000/1001 file that is
+    # read (tests/test_rate.py, test_a_directorys_remake_takes_the_rate_typed).
     rate = Fraction(24000, 1001) if declares is None else declares
-    example = "" if declares is not None else f", {fraction(rate)} here"
     snap = f"setts=pts={SNAPPED.format('PTS')}:dts={SNAPPED.format('DTS')}"
     there = f"cd {directory} &&"
+    setting = f"N={rate.numerator} D={rate.denominator} &&"
+    if declares is None:
+        # The shell's N and D in both commands, an example, said to be one before each.
+        first = f", with N and D set to their frame rate, {fraction(rate)} here:"
+        asked = NAMES
+        remade = f"{there} {setting} {LISTED_BARE} && ffmpeg -f concat -safe 0 -r $N/$D"
+    else:
+        # The rate known: the join's N and D, said after it, and the remake's written out.
+        first = ":"
+        asked = f"{NAMES}; N/D their frame rate"
+        remade = f"{there} {LISTED_BARE} && ffmpeg -f concat -safe 0 -r {fraction(rate)}"
     ways = [
         "with ffmpeg alone, each segment listed with its exact duration, its frames over the"
-        " rate, and every timestamp snapped to the grid in one stream copy:"
-        f" {there} N={rate.numerator} D={rate.denominator} && {LISTED} && ffmpeg -f concat"
-        f' -safe 0 -i list.txt -c copy -bsf:v "{snap}" ../joined.mkv ({NAMES}; N/D their'
-        f" frame rate{example})",
+        f" rate, and every timestamp snapped to the grid in one stream copy{first}"
+        f" {there} {setting} {LISTED} && ffmpeg -f concat"
+        f' -safe 0 -i list.txt -c copy -bsf:v "{snap}" ../joined.mkv ({asked})',
         f"with sptenc, for segments of its split, sptenc concat {directory} joined.mkv, which"
         " snaps every timestamp to the grid",
         "where no stream copy holds, for segments that carry audio, MPEG program streams, or"
         " transport streams of a single frame, their pictures remade as an FFV1 master, numbered"
-        f" at that rate as they come, every one kept: {there} {LISTED_BARE} && ffmpeg -f concat"
-        f" -safe 0 -r {fraction(rate)} -i list.txt -map 0:v:0 {' '.join(FFV1)} -fps_mode:v:0"
-        f" passthrough ../remade.mkv ({NAMES})",
+        f" at that rate as they come, every one kept{first} {remade} -i list.txt -map 0:v:0"
+        f" {' '.join(FFV1)} -fps_mode:v:0 passthrough ../remade.mkv ({NAMES})",
     ]
     return ", or ".join(ways[:2]) + ", or, " + ways[2]
 
