@@ -175,10 +175,9 @@ def main(argv: list[str] | None = None) -> int:
         f" ones show (default: {THRESHOLD}); refused with --cuts, whose list replaces the"
         " detection",
     )
-    # PROVISIONAL (implementation, 2026-10-09): DESIGN.md names --plan (Memory planner, Shot
-    # detection) without saying where its cut list goes: to a path given, so that --plan works
-    # with a one-file output as with a directory, and the list is the user's to edit and keep,
-    # never among the job's own files.
+    # DESIGN.md, Shot detection: "`--plan FILE` writes the detected one to FILE in the same
+    # format": to a path given, so that --plan works with a one-file output as with a directory,
+    # and the list is the user's to edit and keep, never among the job's own files.
     parser.add_argument(
         "--plan",
         type=Path,
@@ -561,7 +560,8 @@ def _run(args: argparse.Namespace) -> int:
         # The seed against the last shot known before the first pass, the cut list's, so that a
         # seed out of range is refused at once, before the model files and the first pass, whose
         # shot detector imports torch; against every shot after it (check_seed, below).
-        # PROVISIONAL (implementation, 2026-10-09; DESIGN.md doesn't order the checks).
+        # Accepted by design, 2026-10-12 (DESIGN.md doesn't order the checks): "what the command
+        # line alone can refuse is refused before the model files and the first pass".
         last = cuts[-1] if cuts else 0
         check_seed(args.seed, [Shot(last, last + 1)])
         directory = _output(args)
@@ -596,9 +596,9 @@ def _run(args: argparse.Namespace) -> int:
             _trial(args, declared, output_size(target))
         # A job detecting its shots needs the record's probabilities: a plan cut by a list has
         # none, its first pass run again with the shot detector when it is planned again without
-        # one (_prior), which gives the detector its frames (PROVISIONAL, implementation,
-        # 2026-10-09: the decode is the one way to the frames, a full pass's cost, said in the
-        # log). A cut list takes the record with or without them.
+        # one (_prior), which gives the detector its frames (DESIGN.md, Pause and resume, A plan:
+        # "A plan cut by a list and planned again without one costs a first pass, no probabilities
+        # having been kept"; said in the log). A cut list takes the record with or without them.
         reprobed = args.cuts is None and kept is not None and kept.probabilities is None
         trusted = None if reprobed else kept
         # The detector's file isn't asked for a job recorded with a cut list that has made units,
@@ -2698,8 +2698,10 @@ def _write_plan(
 ) -> int:
     """--plan's end: the cut list written to FILE, whole, an existing one replaced (files.
     write_whole), in the cut list format (cuts.cut_list), and the counts said; 0, or 1 when FILE
-    can't be written. PROVISIONAL (implementation, 2026-10-09): the header's wording, and the
-    probability and time after each cut, which --cuts ignores (DESIGN.md, Input)."""
+    can't be written. After each cut, its probability and time (DESIGN.md, Shot detection: "A
+    line holds the cut's frame, its probability, and its time from the file's start"), which
+    --cuts ignores (DESIGN.md, Input); the header's wording is the code's, the list accepted by
+    design as built (2026-10-10)."""
     import textwrap
 
     from seedvr2x.media.files import write_whole

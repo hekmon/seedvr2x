@@ -360,7 +360,8 @@ class Inputs:
     Frames not asked for, those of shots a resume skips, are never decoded: the next frame asked
     is reached through the frame index, a reader opened there (DESIGN.md, Pause and resume). A run
     reading every shot from the source's first frame keeps one reader from the start, which seeks
-    nowhere, its frames checked all the same: PROVISIONAL (DESIGN.md checks a read from frame n),
+    nowhere, its frames checked all the same (DESIGN.md, Input, has the check for a read of
+    "frames n to m"; from the first frame too, accepted by design as built, 2026-10-10):
     one code path for the run and its resume, at the cost of a CRC-32 a frame in ffmpeg, and a
     source changed under a run said: its frames' count and pts checked, a picture other than the
     first pass's taken from the start with a warning (Reader.otherwise), every such frame of the
