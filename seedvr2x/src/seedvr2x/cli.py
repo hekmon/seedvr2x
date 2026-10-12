@@ -737,6 +737,13 @@ def _run(args: argparse.Namespace) -> int:
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
+    except _out_of_memory() as error:
+        # The GPU's memory refused before the models load, where a run first works on the
+        # device: the shot detector in the first pass, or the first allocation and the warm-up
+        # the free memory is read with (_free_memory), another program holding the card. One
+        # line and status 1, as at the load and in a unit.
+        logger.error("%s, before the models loaded: nothing was run", _refused(error))
+        return 1
 
     import numpy as np
     import numpy.typing as npt
@@ -815,7 +822,11 @@ def _run(args: argparse.Namespace) -> int:
     import torch  # loaded since the job's identity: named here for the refusals below
 
     # Where the driver spills, torch refuses from here on what passes the card's free memory.
-    memory.hold(identity.device)
+    try:
+        memory.hold(identity.device)
+    except torch.OutOfMemoryError as error:
+        logger.error("%s, before the models loaded: nothing was run", _refused(error))
+        return 1
     try:
         models = load_models(
             model_files.dit.path, model_files.vae.path, identity.device, model_files.hashes, plan
@@ -961,14 +972,44 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _out_of_memory() -> tuple[type[BaseException], ...]:
+    """torch's OutOfMemoryError, for an `except` that torch's import may come after (the
+    allocator is chosen before torch is imported: memory.startup): nothing to catch while torch
+    isn't loaded, no code of its own having run."""
+    torch = sys.modules.get("torch")
+    return () if torch is None else (getattr(torch, "OutOfMemoryError"),)  # noqa: B009
+
+
+# torch's out-of-memory message, one line (c10's CUDACachingAllocator): what was asked, then the
+# card's figures as torch reads them, its own count, its limit when one is set, and advice.
+_OOM_ASKED = re.compile(r"CUDA out of memory\. Tried to allocate (\S+ \w+)\.")
+_OOM_HELD = re.compile(
+    r"Of the allocated memory (\S+ \w+) is allocated by PyTorch, and (\S+ \w+) is reserved by"
+    r" PyTorch but unallocated"
+)
+_OOM_ALLOWED = re.compile(r" (\S+ \w+) allowed;")
+
+
 def _refused(error: BaseException) -> str:
-    """The GPU's memory refused, in words: the error's first line (torch's goes on with advice
-    on its allocator's settings, which are seedvr2x's here), and whether the run was held to
-    the card by seedvr2x (runtime/memory.py)."""
+    """The GPU's memory refused, in words, and whether the run was held to the card by seedvr2x
+    (runtime/memory.py). Of torch's own message, what happened: the request, what torch held
+    and, where it is limited, its limit, each read by its own sentence. The rest of it goes: its
+    advice on the allocator's settings, which are seedvr2x's here, with its link, on the same
+    line; and "this process has 17179869184.00 GiB memory in use", which torch said of a
+    process holding 20.7 GiB under WSL2 (an RTX 5090, 2026-10-12). A message that doesn't start
+    as torch's does is given by its first line, whole: the per-unit check's (memory.check)."""
     from seedvr2x.runtime import memory
 
     held = " (held to the card's own memory: its driver gives more)" * memory.spills()
-    return f"the GPU's memory was refused{held}: {str(error).partition(chr(10))[0]}"
+    said = str(error).partition(chr(10))[0]
+    asked = _OOM_ASKED.match(said)
+    if asked is not None:
+        words = f"CUDA out of memory. Tried to allocate {asked[1]}"
+        counted, allowed = _OOM_HELD.search(said), _OOM_ALLOWED.search(said)
+        if counted is not None:
+            words += f", torch holding {counted[1]} allocated and {counted[2]} more reserved"
+        said = words + (f", {allowed[1]} allowed" if allowed is not None else "")
+    return f"the GPU's memory was refused{held}: {said}"
 
 
 def _directory_refused(path: Path) -> str:
