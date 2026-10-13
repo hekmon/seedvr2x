@@ -26,7 +26,7 @@ card's memory by its own means:
   by torch, an OutOfMemoryError that Python catches, in under a second, and the work after it
   is right;
 - the planner planning in what is left less RESERVE (usable), which that allocator needs
-  beyond what a step allocates;
+  beyond what a step allocates: the plan's budget, the planner's own margin counted in it;
 - the memory free read again before every unit (check): the run stops when what torch may
   still take no longer fits in it, other programs holding the rest of the card.
 
@@ -34,7 +34,9 @@ The memory free is, for the limit and the plan, the smaller of two readings: wha
 reports free to the process (CUDA's figure, torch's mem_get_info) and what the whole card has
 free, read through NVML (card_free), the driver's own library, nvidia-smi's, which answers
 under WSL2; for the check, the whole card's (why: check). Where NVML doesn't answer, the
-driver's figure alone for the three, under a larger margin (HELD_BACK_UNREAD), and a warning.
+driver's figure alone for the three, under a larger margin (HELD_BACK_UNREAD), and a warning;
+but once NVML has given the card's figure in a run, a check it fails at is asked again, then
+skipped with a warning, never judged on the driver's figure (check).
 
 Why two: the free memory such a driver reports is the process's own while the card has room: a
 process read 30.20 GiB free of 31.82 whether another held 8.6 GiB of the card or not, idle or at
@@ -65,22 +67,31 @@ at 6, 24.7 at 8, 27.9 at 11):
   limit 4.0 GiB under, 11 and 12 were refused in 0.3 s, the pool keeping the card at 0 free.
 - every step that ended gave the reference's bits, the slow ones too.
 
-Measured again against the card's own figure (the same probe, 2026-10-12; a desktop holding 1.8
-GiB of the card, the card's figure the smaller of the two at every reading; torch's own
-allocator; the 1080p windows' references made with the DiT's 36 blocks swapped and torch held
-4 GiB under the card, in two processes that agreed, and with the day before's; every other
-step's bits agreed between two processes):
+Measured again against the card's own figure (the same probe, 2026-10-12; a desktop holding 1.6
+to 1.8 GiB of the card, 2.7 before the first process; torch's own allocator; 326 steps of
+eleven processes, 37 of them refused. The card's figure was the smaller of the two at each of
+the 26 readings a plan or a limit was taken under; the driver's was sampled under it during 34
+of the steps. The 1080p windows' references were made with the DiT's 36 blocks swapped and
+torch held 4 GiB under the card, in two processes that agreed, and with the day before's. Of
+the 289 steps that ended, 240 gave the bits of a reference another process had made and 31
+those of an earlier step of their own process; 18, each step's first run, were held to
+nothing, the probe then writing a step's digest before it compared: 4K's windows of 1 to 4
+latents ran once each, and 1080p's of 17 and of 21 latents in one process each):
 - the models whole, torch held 1.0, 0.5 and 0.25 GiB under the card's free memory, each in two
   processes: windows of 1, 6 and 8 latents at 1080p ran at their usual speed with the
   reference's bits, 9 too under 0.5 and 0.25; 12 were refused in 0.2 to 0.4 s, and 6 and 1 ran
   right after; the card never had under 0.58 GiB free;
-- the process held 0.003 GiB of the card outside torch's count at the most, 0.016 with 36 blocks
-  swapped, but for one step's 0.102, the desktop's or its own: the 2.1 to 2.8 GiB of the day
-  before were the desktop's (HELD_BACK);
+- in nine of the eleven processes the run held 0.016 GiB of the card outside torch's count at
+  the most, 0.003 with the models whole; in the two others (1080p windows of 8 to 21 latents,
+  36 blocks swapped, held 0.25 GiB under the card's figure), 24 of the 38 steps that ended
+  read 0.019 to 0.102 GiB during the step and 30 read 0.019 to 0.058 after it, the desktop's
+  own memory having grown 14 and 37 MiB under them by nvidia-smi, the desktop's or their own:
+  the 2.1 to 2.8 GiB of the day before were the desktop's (HELD_BACK);
 - torch's allocator needed 0.2 to 0.8 GiB beyond the allocated peak of a 1080p window of 1 to
   8 latents, 3.6 of 17 and 4.5 of 4K's 5; and 3.4 to 5.3 beyond a VAE pass's (RESERVE);
 - unheld, that allocator keeps what it has used: with 36 blocks swapped it held 19.2 GiB for a
-  window of 8 latents that allocates 10.4, after windows of 1 and 6; at 12 the card had 0.2 GiB
+  window of 8 latents that allocates 10.4, after windows of 1 and 6 (14.1 with its cache
+  emptied before the window, held 4 GiB under the card's figure); at 12 the card had 0.2 GiB
   left (nvidia-smi), and the desktop's own memory on it fell from 2.73 GiB to 1.57, and stood
   at 1.81 an hour and a quarter later.
 
@@ -112,30 +123,44 @@ CUDA, NVML = "libcuda.so.1", "libnvidia-ml.so.1"
 # CUDA's result codes (cuda.h): CUDA_SUCCESS, CUDA_ERROR_OUT_OF_MEMORY. NVML's success is 0 too
 # (nvml.h: NVML_SUCCESS).
 SUCCESS, OUT_OF_MEMORY = 0, 2
-# What seedvr2x leaves of the free memory on a driver that spills, beyond the planner's own
-# margin: what the run itself holds on the card outside torch's count, from the reading its
-# limit is set on. Measured against the card's own figure (card_free), the smaller of the two at
-# every reading (research/scripts/hold_probe.py, an RTX 5090 under WSL2, driver 616.92,
-# 2026-10-12, a desktop holding 1.8 GiB of the card; 317 steps of ten processes): 0.003 GiB at
-# the most with the models whole, through windows of 1 to 9 latents at 1080p; 0.016 with the
-# DiT's 36 blocks swapped, windows and VAE passes alike, at 1080p and at 4K; and once 0.102
-# during a step and 0.058 after it (a window of 17 latents, in a process that read 0.028 at
-# its other steps, the desktop's own memory having grown 0.014 GiB under it): the card's
-# figure can't tell the run's memory from the desktop's. 0.2 GiB: the largest, rounded up.
+# What seedvr2x leaves of the free memory on a driver that spills, where the whole card's is
+# read (card_free): to what the run itself holds on the card outside torch's count, from the
+# reading its limit is set on, and to the rest of the card, a desktop's own memory moving under
+# the run. 0.5 GiB, design's figure (DESIGN.md, Allocator, decided on 2026-10-12): "a desktop
+# that wakes at night mustn't stop a job nobody will start again before morning". It was 0.2,
+# the measure's own, under which a job's checks ran with 0.16 to 0.20 GiB to spare, and 0.10
+# once, its desktop having taken 90 MiB during the load (the same RTX 5090, 2026-10-12, the
+# check judged on the card's figure).
+# The measure, against the card's own figure (research/scripts/hold_probe.py, an RTX 5090 under
+# WSL2, driver 616.92, 2026-10-12, a desktop holding 1.6 to 1.8 GiB of the card; 326 steps of
+# eleven processes, 37 of them refused, the card's figure the smaller of the two at each of the
+# 26 readings a plan or a limit was taken under): in nine of the eleven processes the run held
+# 0.016 GiB of the card outside torch's count at the most, windows and VAE passes alike, at
+# 1080p and at 4K, 36 blocks swapped, and 0.003 with the models whole, through windows of 1 to
+# 9 latents at 1080p. In the two others, 1080p windows of 8 to 21 latents with 36 blocks
+# swapped, held 0.25 GiB under the card's figure, 24 of the 38 steps that ended read 0.019 to
+# 0.102 GiB during the step and 30 read 0.019 to 0.058 after it, the desktop's own memory
+# having grown 14 and 37 MiB under them by nvidia-smi: the card's figure can't tell the run's
+# memory from the desktop's.
 # Held 1.0, 0.5 and 0.25 GiB under the card's figure alike, each in two processes: what fits
 # ran at its usual speed with the reference's bits, 12 latents were refused in 0.2 to 0.4 s
 # and the windows after them were right, the card never under 0.58 GiB free (0.27 at the
-# least in the passes run under 0.25 with 36 blocks swapped). It leaves next to NOTHING to
-# another program's growth: a desktop that takes 0.2 GiB more during a run stops it at its
-# next unit (check); what to leave for that is design's to say. It is the margin under the
+# least in the passes run under 0.25 with 36 blocks swapped). It is the margin under the
 # card's figure, read: the limit is set that far under the smaller of the two figures (hold),
 # and each unit checked against the card's alone, the driver's standing up to 0.83 GiB under
-# it near the full card with nothing behind it (check). PROVISIONAL (implementation,
-# 2026-10-12): one card, one driver, one desktop.
-HELD_BACK = round(0.2 * GIB)
+# it near the full card with nothing behind it (check). What it leaves to another program's
+# growth is that 0.5 GiB less what the run holds outside torch's count: a desktop that takes
+# more during a run stops it at its next unit (check). Run under it that evening on the same
+# card, a desktop holding 5.2 to 5.8 GiB of it: a 1080p job's checks had 0.47 to 0.50 GiB to
+# spare in two runs whose desktop stood still, and 0.73 to 1.05 in one whose desktop's own
+# memory fell by 0.44 GiB through the run (nvidia-smi), its last check 0.30 under the one
+# before it; a second program taking 2 GiB during the job's first unit stopped it at its
+# second, 1.48 GiB short, the card never under 0.9 GiB free. PROVISIONAL (design, 2026-10-12):
+# one card, one driver, one desktop.
+HELD_BACK = round(0.5 * GIB)
 # The same where the whole card's free memory isn't read (NVML silent), and the driver's figure
 # is all there is: that figure leaves the other programs' memory out until the card fills, and
-# stood 1.98 GiB over the card's at rest (the module's docstring), so that 0.2 GiB under it
+# stood 1.98 GiB over the card's at rest (the module's docstring), so that HELD_BACK under it
 # would be a limit over what the card has. Sized against the driver's figure alone, the day
 # before the card's was read (research/scripts/hold_probe.py, the same RTX 5090, 2026-10-11, a
 # desktop holding 2.7 to 4.5 GiB of it): once a run held 22 GiB or more, the driver reported 2.1
@@ -166,15 +191,19 @@ HELD_BACK_UNREAD = 3 * GIB
 # It grows with what the step works in and is no constant; this one covers the plans a 32 GB
 # card makes. The planner holds every VAE pass 1.5 GiB under its budget besides
 # (planner.VAE_ROOM), and a window not: so a plan counts on the limit less the larger of a
-# window's need, 4.5 GiB, and of a VAE pass's less that room, 5.3 - 1.5 = 3.8 (the planner's
-# own margin comes on top). The day before it was 2.3, from one window of 8 latents: with the
-# margin and the room that left a VAE pass 4.4 GiB beyond its peak, under what a decode in
-# tiles of 1088 px needs. PROVISIONAL (implementation, 2026-10-12): one card; a larger card's
-# larger windows and tiles need more, unmeasured; it follows planner.VAE_ROOM, to be raised by
-# what that room loses; and whether the planner's margin, the same need where a driver refuses,
-# should count in it (0.6 GiB less), or a held run take an allocator that needs less
-# (max_split_size_mb at 128 MiB ran the decodes in less, 2.4 to 3.7 times slower), is design's
-# to decide.
+# window's need, 4.5 GiB, and of a VAE pass's less that room, 5.3 - 1.5 = 3.8. The planner's
+# own margin (planner.MARGIN, 0.6 GiB) is counted IN it, not on top: it measures the same need
+# where a driver refuses, and with both the planner refused a window of 5 latents at 4K, the
+# smallest, beside that card's usual desktop, by 0.27 GiB (counted on the CPU, never run so
+# on the card; design, 2026-10-12; DESIGN.md, Allocator): on a held run the budget is what
+# the plan counts on (planner._Job.margin). The day before it was 2.3, from one window of 8
+# latents: with the margin and the room that left a VAE pass 4.4 GiB beyond its peak, under
+# what a decode in tiles of 1088 px needs. PROVISIONAL (implementation, 2026-10-12): one card;
+# a larger card's larger windows and tiles need more, unmeasured; it follows planner.VAE_ROOM,
+# to be raised by what that room loses; whether a held run should take an allocator that needs
+# less (max_split_size_mb at 128 MiB ran the decodes in less, 2.4 to 3.7 times slower) is
+# design's to decide, as is a room by the kind of step in this one figure's place (DESIGN.md,
+# To measure).
 RESERVE = round(4.5 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
 # allocator where the driver spills.
@@ -230,12 +259,16 @@ class Reading:
     - counted: what the plan may count its peaks in (usable): `reported` on a driver that
       refuses, less on one that spills;
     - held: whether the run holds itself to the card, its driver giving memory the card doesn't
-      have (spills)."""
+      have (spills);
+    - left: on a held run, what torch's limit leaves of the free memory (hold: HELD_BACK, or
+      HELD_BACK_UNREAD where the card's figure isn't read), the rest of what `counted` is
+      under it being RESERVE; 0 on a driver that refuses."""
 
     reported: int
     card: int | None
     counted: int
     held: bool
+    left: int = 0
 
 
 def reading(free: int) -> Reading:
@@ -244,12 +277,15 @@ def reading(free: int) -> Reading:
     one that spills, the smaller of it and of what the whole card has free now (card_free: the
     run's device is CUDA's first, the one the probe asks), less what torch is held back from
     (hold: HELD_BACK, or HELD_BACK_UNREAD under the driver's figure where the card's isn't
-    read) and RESERVE. The planner's budget is `counted` less its own margin
-    (runtime/planner.py), and its plan's first line names the figures: here they are said at
-    debug level only, with what each of the two constants is left to."""
+    read) and RESERVE. The planner's budget is `counted` less its own margin on a driver that
+    refuses, and `counted` itself on a held run, RESERVE holding that margin
+    (runtime/planner.py); its plan's first line names the figures: here they are said at debug
+    level only, with what each of the two constants is left to."""
     if not _spills:
         return Reading(free, None, free, False)
+    global _planned
     taken, card = _free(free, 0)
+    _planned = card
     counted = max(taken - _held_back(card) - RESERVE, 0)
     logger.debug(
         "the plan counts on %.2f GiB of the GPU's memory, of the %.2f GiB free %s: %.1f GiB are"
@@ -261,7 +297,7 @@ def reading(free: int) -> Reading:
         _held_back(card) / GIB,
         RESERVE / GIB,
     )
-    return Reading(free, card, counted, True)
+    return Reading(free, card, counted, True, _held_back(card))
 
 
 # What startup found, for the run that follows: whether the run holds itself to the card and
@@ -274,6 +310,13 @@ _limit: int | None = None
 # for the check's words.
 _unread = False
 _left = HELD_BACK
+# Whether NVML has given the card's free memory to this run, for its plan, its limit or a check
+# (card_free): from then on no check is judged on the driver's figure (check).
+_answered = False
+# The whole card's free memory as the run's plan was made in it (reading), in bytes; None where
+# it wasn't read then, or no plan made yet: what the limit is set from where NVML, having
+# answered, fails as the limit is set (_at_the_limit).
+_planned: int | None = None
 
 
 class _Memory(ctypes.Structure):
@@ -302,8 +345,9 @@ def startup() -> str:
     answer there (probe) is taken for a driver that spills: it is Windows', which gave what
     the card didn't have every time it was asked, and a run held for nothing loses memory, a
     run not held where it should be loses its frames."""
-    global _spills, _native, _limit, _unread, _left
-    _spills, _limit, _unread, _left = False, None, False, HELD_BACK
+    global _spills, _native, _limit, _unread, _left, _answered, _planned
+    _spills, _limit, _unread, _left, _answered = False, None, False, HELD_BACK, False
+    _planned = None
     if paravirtual():
         found = probe()
         if found is None:
@@ -373,14 +417,25 @@ def hold(device: Any) -> int | None:
     driver reports to this process and of what the whole card has (card_free); less
     HELD_BACK_UNREAD where the card's figure isn't read, the driver's alone standing over what
     the card has. More is refused, an OutOfMemoryError. Called once the plan is made and before
-    the models load. Returns the limit, in bytes; None, nothing done, on a driver that refuses."""
+    the models load. Returns the limit, in bytes; None, nothing done, on a driver that refuses.
+
+    Once NVML has given the card's figure in the run, the limit isn't set under the driver's
+    figure alone because NVML fails at this one reading (_at_the_limit): the plan, made
+    HELD_BACK and RESERVE under the card's figure, would stand closer to a limit set
+    HELD_BACK_UNREAD under the driver's than RESERVE asks, by what the driver's figure is over
+    the card's less the difference of the two constants (1.98 GiB over: 3.98 GiB under the
+    limit for 4.5; a review, 2026-10-12)."""
     global _limit, _left
     if not _spills:
         return None
     import torch
 
     reported, total = torch.cuda.mem_get_info(device)
-    free, card = _free(reported, _index(device))
+    if _answered:
+        card = _at_the_limit(_index(device))
+        free = reported if card is None else min(reported, card)
+    else:
+        free, card = _free(reported, _index(device))
     _left = _held_back(card)
     limit = torch.cuda.memory_reserved(device) + max(free - _left, 0)
     fraction = min(limit / total, 1.0)
@@ -401,7 +456,8 @@ def check(device: Any) -> None:
     """On a driver that spills, once torch is held: refuse (torch.OutOfMemoryError, as torch
     refuses what passes its limit) when what torch may still take under its limit no longer fits
     in what the whole card has free (card_free); in what the driver reports free to this
-    process, where the card's figure isn't read. Called before every unit (model.Models.enter).
+    process, where the card's figure was never read in the run. Called before every unit
+    (model.Models.enter).
 
     The limit is worth the memory free when it was set, less HELD_BACK. Other programs taking
     the card's memory since, torch at its limit would pass the card with nothing to refuse it.
@@ -436,6 +492,17 @@ def check(device: Any) -> None:
     - beside the same program, a run with 36 blocks swapped, 8 GiB at its most, read the card
       as if alone and finished, its frames right: nothing passed the card there.
 
+    Once NVML has given the card's figure in the run, to its plan, its limit or a check, a check
+    NVML fails at is never judged on the driver's figure, the very figure that stopped those
+    six runs: NVML is asked again, once, and if it fails again that check is skipped, with a
+    warning, the unit running under torch's limit alone (design, 2026-10-12; _again). Where
+    NVML has been silent since the run's start, the limit set HELD_BACK_UNREAD under the
+    driver's figure, the check stays on that figure, as the limit is.
+
+    The two figures are said rounded apart, what is free down and what the run may take up, so
+    that a refusal by a few bytes never gives one figure twice ("1.00 GiB free ... where the
+    run may still take 1.00").
+
     Nothing is checked under an allocator of the environment's, whose own slack torch doesn't
     count (startup)."""
     if not _native or _limit is None:
@@ -443,17 +510,98 @@ def check(device: Any) -> None:
     import torch
 
     reported = torch.cuda.mem_get_info(device)[0]
-    card = card_free(_index(device))
+    if _answered:
+        card = _again(_index(device))
+        if card is None:
+            return
+    else:
+        card = card_free(_index(device))
     free = reported if card is None else card
     room = _limit - torch.cuda.memory_reserved(device)
     if free < room:
         named = _named(reported, card, smaller=False)
         raise torch.OutOfMemoryError(
-            f"the GPU has {free / GIB:.2f} GiB free {named} where the run may still take"
-            f" {room / GIB:.2f}: other programs hold the rest of the card's memory, or the run's"
+            f"the GPU has {_down(free)} GiB free {named} where the run may still take"
+            f" {_up(room)}: other programs hold the rest of the card's memory, or the run's"
             f" own work took more than the {_left / GIB:.1f} GiB left to it outside torch's"
             " allocator"
         )
+
+
+def _again(index: int) -> int | None:
+    """A check's reading of the whole card's free memory, in bytes, once NVML has given it in the
+    run (check): read, and read once more when NVML fails. None when it fails twice, with a
+    warning naming both failures: the caller skips that check, and the next unit's asks again.
+    A warning at every check so skipped, each being a unit that nothing but torch's limit
+    holds. PROVISIONAL (implementation, 2026-10-12): design decided the second reading and the
+    warning, not how often a run whose NVML has gone for good repeats it."""
+    first = _read(index)
+    if isinstance(first, int):
+        return first
+    second = _read(index)
+    if isinstance(second, int):
+        logger.debug(
+            "the whole card's free memory wasn't read through NVML at first (%s): read again",
+            first,
+        )
+        return second
+    logger.warning(
+        "the whole card's free memory couldn't be read through NVML before this unit, asked"
+        " twice (%s; then %s): the unit isn't checked against the card, and runs under torch's"
+        " limit alone; what the driver reports free to this process isn't taken in its place,"
+        " which stands under the card's near a full card and would stop the run for nothing",
+        first,
+        second,
+    )
+    return None
+
+
+def _at_the_limit(index: int) -> int | None:
+    """The limit's reading of the whole card's free memory, in bytes, once NVML has given it in
+    the run (hold): read, and read once more when NVML fails, as a check's is (_again). When it
+    fails twice, the card's figure the plan was made in (reading), with a warning: the limit is
+    then set under the figure the plan counted on, never under the driver's alone. None where
+    no plan of the run had the card's figure either: the limit is then HELD_BACK_UNREAD under
+    the driver's figure, as where NVML never answered. PROVISIONAL (implementation,
+    2026-10-12): design's rule is the checks'; the limit follows it."""
+    first = _read(index)
+    if isinstance(first, int):
+        return first
+    again = _read(index)
+    if isinstance(again, int):
+        logger.debug(
+            "the whole card's free memory wasn't read through NVML at first (%s): read again",
+            first,
+        )
+        return again
+    if _planned is None:
+        logger.warning(
+            "as torch's limit was set, the whole card's free memory couldn't be read through"
+            " NVML, asked twice (%s; then %s), nor when the plan was made: the limit is set"
+            " under what the driver reports free to this process",
+            first,
+            again,
+        )
+        return None
+    logger.warning(
+        "as torch's limit was set, the whole card's free memory couldn't be read through NVML,"
+        " asked twice (%s; then %s): the limit is set from the %.2f GiB the card had free when"
+        " the plan was made, not from what the driver reports free to this process alone",
+        first,
+        again,
+        _planned / GIB,
+    )
+    return _planned
+
+
+def _down(count: int) -> str:
+    """Bytes in GiB, to 2 decimals, rounded down: what is free (check)."""
+    return f"{count * 100 // GIB / 100:.2f}"
+
+
+def _up(count: int) -> str:
+    """Bytes in GiB, to 2 decimals, rounded up: what the run may still take (check)."""
+    return f"{-(-count * 100 // GIB) / 100:.2f}"
 
 
 def _free(reported: int, index: int) -> tuple[int, int | None]:
@@ -504,6 +652,8 @@ def card_free(index: int = 0) -> int | None:
     say: no library, a call that fails, a card it doesn't know. Never raises. The reason is
     logged, as a warning the first time in a run (startup), since the run then goes by the
     driver's figure alone, and at debug level after: a check before every unit asks again.
+    A figure given is remembered for the run (_answered): its later checks read the card by
+    themselves, and say their own failures (check, _again).
 
     The card is CUDA's, found in NVML by its identifier (cuDeviceGetUuid, whose 16 bytes NVML
     writes "GPU-" and 8-4-4-4-12 hexadecimal digits), never by its index: CUDA numbers the
@@ -520,9 +670,10 @@ def card_free(index: int = 0) -> int | None:
     both there; the second is taken as the one that names the driver's share. A reading took
     10 ms (9 to 23 over three runs of 200), NVML initialised and shut down in it and no
     descriptor left open; a process's first 0.1 s, the two libraries loading in it."""
-    global _unread
+    global _unread, _answered
     reading = _read(index)
     if isinstance(reading, int):
+        _answered = True
         return reading
     logger.log(
         logging.DEBUG if _unread else logging.WARNING,

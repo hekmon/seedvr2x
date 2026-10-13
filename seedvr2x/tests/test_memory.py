@@ -35,20 +35,22 @@ def round_figures(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_the_measured_figures() -> None:
-    # 0.2 GiB left outside torch's limit under the card's own figure, 3.0 under the driver's
-    # where the card's isn't read, and 4.5 planned under the limit again: an RTX 5090's under
-    # WSL2 (runtime/memory.py, HELD_BACK, HELD_BACK_UNREAD and RESERVE, their rows there).
-    # Changed with a new measure, and the comments with them.
-    assert MEASURED == (round(0.2 * GIB), round(4.5 * GIB), 3 * GIB)
+    # 0.5 GiB left outside torch's limit under the card's own figure, design's figure where the
+    # measure's own was 0.2 (DESIGN.md, Allocator, 2026-10-12: a desktop that wakes at night
+    # mustn't stop a job); 3.0 under the driver's where the card's isn't read, and 4.5 planned
+    # under the limit again: an RTX 5090's under WSL2 (runtime/memory.py, HELD_BACK,
+    # HELD_BACK_UNREAD and RESERVE, their rows there). Changed with a new measure or a new
+    # decision, and the comments with them.
+    assert MEASURED == (round(0.5 * GIB), round(4.5 * GIB), 3 * GIB)
 
 
 def test_a_card_unread_is_held_under_a_margin_of_its_own(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The measured figures, not the tests' own: the 0.2 GiB were measured under the card's own
+    # The module's figures, not the tests' own: the 0.5 GiB are left under the card's own
     # figure; the driver's stood 1.98 GiB over it at rest (30.20 GiB reported to a process where
-    # the whole card had 28.22). Where NVML doesn't answer, 0.2 GiB under the driver's figure
-    # would be a limit 1.78 GiB over what the card has: the plan, the limit and the check take
+    # the whole card had 28.22). Where NVML doesn't answer, 0.5 GiB under the driver's figure
+    # would be a limit 1.48 GiB over what the card has: the plan, the limit and the check take
     # the margin measured under that figure alone, 3.0 GiB.
     for name, value in zip(("HELD_BACK", "RESERVE", "HELD_BACK_UNREAD"), MEASURED, strict=True):
         monkeypatch.setattr(memory, name, value)
@@ -59,12 +61,13 @@ def test_a_card_unread_is_held_under_a_margin_of_its_own(
         "read through NVML; where NVML doesn't answer, the driver's figure less 3.0 GiB"
     )
     counted = reported - 3 * GIB - round(4.5 * GIB)
-    assert memory.reading(reported) == memory.Reading(reported, None, counted, True)
+    assert memory.reading(reported) == memory.Reading(reported, None, counted, True, 3 * GIB)
     assert caplog.messages[-1].endswith("and the run is held 3.0 GiB under it")
     limits = held(monkeypatch, reported)
     limit = memory.hold("cuda:0")
     assert limit == reported - 3 * GIB and limits == [(reported - 3 * GIB) / TOTAL]
-    assert reported - 3 * GIB < card  # under what the card had, where 0.2 under stood over it
+    assert reported - 3 * GIB < card  # under what the card had, where 0.5 under stood over it
+    assert reported - round(0.5 * GIB) > card
     assert "the 30.20 GiB free less 3.0, and what it holds; free as its driver" in caplog.text
     # The run alone on its card, torch holding 22 GiB, the driver's figure 2.23 GiB under
     # torch's own count (the desktop's memory showing as the card fills): no stop.
@@ -74,22 +77,23 @@ def test_a_card_unread_is_held_under_a_margin_of_its_own(
     held(monkeypatch, reported - 22 * GIB - round(3.01 * GIB), reserved=22 * GIB)
     with pytest.raises(torch.OutOfMemoryError, match=r"more than the 3\.0 GiB left to it"):
         memory.check("cuda:0")
-    # The card read: the plan made and the limit set 0.2 GiB under the smaller of the two
+    # The card read: the plan made and the limit set 0.5 GiB under the smaller of the two
     # figures, the card's or the driver's; and each unit checked against the card's, torch
     # holding 22 GiB, whatever the driver reports to the process by then: nothing, here.
     for seen, taken in ((card, card), (round(31 * GIB), reported)):
         nvml = Nvml({NAMED: seen})
         startup(monkeypatch, Card(reported, spills=True), nvml)
-        counted = taken - round(0.2 * GIB) - round(4.5 * GIB)
-        assert memory.reading(reported) == memory.Reading(reported, seen, counted, True)
+        left = round(0.5 * GIB)
+        counted = taken - left - round(4.5 * GIB)
+        assert memory.reading(reported) == memory.Reading(reported, seen, counted, True, left)
         held(monkeypatch, reported)
-        limit = taken - round(0.2 * GIB)
+        limit = taken - left
         assert memory.hold("cuda:0") == limit
         held(monkeypatch, 0, reserved=22 * GIB)
         nvml.cards[NAMED] = limit - 22 * GIB
         memory.check("cuda:0")
         nvml.cards[NAMED] = limit - 22 * GIB - 1
-        with pytest.raises(torch.OutOfMemoryError, match=r"more than the 0\.2 GiB left to it"):
+        with pytest.raises(torch.OutOfMemoryError, match=r"more than the 0\.5 GiB left to it"):
             memory.check("cuda:0")
 
 
@@ -157,17 +161,22 @@ class Card:
 
 class Nvml:
     """A stand-in for libnvidia-ml: the cards it lists, each under its identifier as NVML
-    writes it with the bytes free on it; `failing` names a call that fails. `open` counts its
-    initialisations not yet shut down."""
+    writes it with the bytes free on it; `failing` names a call that fails, every time, or
+    `times` times then no more. `open` counts its initialisations not yet shut down."""
 
     def __init__(self, cards: dict[bytes, int], failing: str | None = None) -> None:
         self.cards, self.failing = cards, failing
+        self.times: int | None = None
         self.calls: list[str] = []
         self.open = 0
 
     def call(self, name: str) -> int | None:
         self.calls.append(name)
-        return 999 if name == self.failing else None
+        if name != self.failing or self.times == 0:
+            return None
+        if self.times is not None:
+            self.times -= 1
+        return 999
 
     def nvmlInit_v2(self) -> int:
         failed = self.call("nvmlInit")
@@ -537,7 +546,7 @@ def test_on_a_driver_that_spills_torch_is_held(
     # allocator needs beyond a peak; never under nothing. The reading names each figure for
     # the plan's own first line (runtime/planner.py); here it is said at debug level only.
     assert nvml.calls.count("nvmlInit") == 1  # the probe's, which then asked the driver
-    held_under = memory.Reading(30 * GIB, 31 * GIB, round(24.7 * GIB), True)
+    held_under = memory.Reading(30 * GIB, 31 * GIB, round(24.7 * GIB), True, 3 * GIB)
     assert memory.reading(30 * GIB) == held_under
     assert caplog.records[2].levelname == "DEBUG" and caplog.messages[2] == (
         "the plan counts on 24.70 GiB of the GPU's memory, of the 30.00 GiB free as its driver"
@@ -545,7 +554,7 @@ def test_on_a_driver_that_spills_torch_is_held(
         " left to what torch doesn't count on the card, 2.3 to what torch's own allocator holds"
         " beyond a peak"
     )
-    assert memory.reading(5 * GIB) == memory.Reading(5 * GIB, 31 * GIB, 0, True)
+    assert memory.reading(5 * GIB) == memory.Reading(5 * GIB, 31 * GIB, 0, True, 3 * GIB)
     # torch is limited to what it holds and that: a fraction of the card's memory.
     limits: list[tuple[float, Any]] = []
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (20 * GIB, 32 * GIB))
@@ -576,7 +585,8 @@ def test_the_whole_card_s_free_memory_is_taken_where_it_is_the_smaller(
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
     nvml = Nvml({NAMED: 28 * GIB})
     startup(monkeypatch, Card(30 * GIB, spills=True), nvml)
-    assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, 28 * GIB, round(22.7 * GIB), True)
+    counted = memory.Reading(30 * GIB, 28 * GIB, round(22.7 * GIB), True, 3 * GIB)
+    assert memory.reading(30 * GIB) == counted
     assert caplog.messages[-1] == (
         "the plan counts on 22.70 GiB of the GPU's memory, of the 28.00 GiB free on the whole"
         " card by NVML (its driver reports 30.00 GiB free to this process): 3.0 GiB are left to"
@@ -604,8 +614,10 @@ def test_the_whole_card_s_free_memory_is_taken_where_it_is_the_smaller(
     nvml.cards[NAMED] = GIB - 1
     with pytest.raises(torch.OutOfMemoryError) as refusal:
         memory.check("cuda:0")
+    # The two figures a byte apart, and said apart: what is free rounded down, what the run
+    # may take rounded up, where "1.00 GiB free ... may still take 1.00" gave no reason to stop.
     assert str(refusal.value) == (
-        "the GPU has 1.00 GiB free on the whole card by NVML (its driver reports 20.00 GiB free"
+        "the GPU has 0.99 GiB free on the whole card by NVML (its driver reports 20.00 GiB free"
         " to this process) where the run may still take 1.00: other programs hold the rest of"
         " the card's memory, or the run's own work took more than the 3.0 GiB left to it"
         " outside torch's allocator"
@@ -621,7 +633,7 @@ def test_the_whole_card_s_free_memory_is_taken_where_it_is_the_smaller(
     with pytest.raises(torch.OutOfMemoryError) as refusal:
         memory.check("cuda:0")
     assert str(refusal.value).startswith(
-        "the GPU has 1.00 GiB free on the whole card by NVML (its driver reports 0.00 GiB free"
+        "the GPU has 0.99 GiB free on the whole card by NVML (its driver reports 0.00 GiB free"
         " to this process) where the run may still take 1.00: other programs hold"
     )
     # Every reading opened NVML and shut it down, and none was warned of.
@@ -653,7 +665,8 @@ def test_without_nvml_the_driver_s_figure_is_taken_and_said_once(
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
     startup(monkeypatch, Card(30 * GIB, spills=True))
     caplog.clear()
-    assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, None, round(24.7 * GIB), True)
+    unread_reading = memory.Reading(30 * GIB, None, round(24.7 * GIB), True, 3 * GIB)
+    assert memory.reading(30 * GIB) == unread_reading
     unread = (
         f"the whole card's free memory can't be read through NVML ({memory.NVML}: cannot open"
         " shared object file): what the driver reports free to this process is taken alone,"
@@ -736,9 +749,16 @@ def test_the_reading_names_its_figures(
     startup(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: 28 * GIB}))
     caplog.clear()
     counted = 28 * GIB - memory.HELD_BACK - memory.RESERVE
-    assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, 28 * GIB, counted, True)
+    left = memory.HELD_BACK
+    assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, 28 * GIB, counted, True, left)
     assert memory.usable(30 * GIB) == counted
     assert caplog.text == ""
+    # What torch's limit leaves is the reading's own: the larger margin where the card's figure
+    # isn't read, for the plan's first line to say (runtime/planner.py).
+    startup(monkeypatch, Card(30 * GIB, spills=True))
+    monkeypatch.setattr(memory, "HELD_BACK_UNREAD", 4 * GIB)
+    counted = 30 * GIB - 4 * GIB - memory.RESERVE
+    assert memory.reading(30 * GIB) == memory.Reading(30 * GIB, None, counted, True, 4 * GIB)
 
 
 def test_no_answer_behind_wsl_is_taken_for_a_driver_that_spills(
@@ -929,7 +949,7 @@ def test_other_programs_filling_the_card_stop_the_run(
     with pytest.raises(torch.OutOfMemoryError) as refusal:
         memory.check("cuda:0")
     assert str(refusal.value) == (
-        "the GPU has 3.00 GiB free on the whole card by NVML (its driver reports 2.00 GiB free"
+        "the GPU has 2.99 GiB free on the whole card by NVML (its driver reports 2.00 GiB free"
         " to this process) where the run may still take 3.00: other programs hold the rest of"
         " the card's memory, or the run's own work took more than the 3.0 GiB left to it"
         " outside torch's allocator"
@@ -940,6 +960,122 @@ def test_other_programs_filling_the_card_stop_the_run(
     read = len(nvml.calls)
     memory.check("cuda:0")
     assert len(nvml.calls) == read
+
+
+def test_nvml_failing_at_a_check_is_asked_again_then_that_check_skipped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Allocator (2026-10-12): "NVML failing at one check is asked again, then that
+    # check is skipped with a warning, never judged on the driver's figure." Near a full card
+    # the driver's figure stands under the card's with nothing behind it, and judged on it six
+    # runs of six stopped for nothing (memory.check): here it reports nothing free at all.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    nvml = Nvml({NAMED: 20 * GIB})
+    startup(monkeypatch, Card(30 * GIB, spills=True), nvml)
+    held(monkeypatch, 20 * GIB, reserved=GIB)
+    assert memory.hold("cuda:0") == 18 * GIB
+    held(monkeypatch, 0, reserved=15 * GIB)  # torch may take 3 GiB more
+    nvml.cards[NAMED] = 3 * GIB
+    read, said = nvml.calls.count("nvmlInit"), len(caplog.messages)
+    memory.check("cuda:0")
+    assert nvml.calls.count("nvmlInit") == read + 1 and len(caplog.messages) == said
+    # NVML fails once: asked again, and judged on that second reading, here a card that has the
+    # room, then one that hasn't, by a byte.
+    nvml.failing, nvml.times = "nvmlDeviceGetMemoryInfo", 1
+    memory.check("cuda:0")
+    assert nvml.calls.count("nvmlInit") == read + 3
+    assert [record.levelname for record in caplog.records[said:]] == ["DEBUG"]
+    assert caplog.messages[-1] == (
+        "the whole card's free memory wasn't read through NVML at first"
+        " (nvmlDeviceGetMemoryInfo: 999): read again"
+    )
+    nvml.times, nvml.cards[NAMED] = 1, 3 * GIB - 1
+    with pytest.raises(torch.OutOfMemoryError, match=r"2\.99 GiB free on the whole card by NVML"):
+        memory.check("cuda:0")
+    # It fails twice: that check is skipped, with a warning naming both failures, and nothing is
+    # refused, on the card's figure, which isn't there, nor on the driver's, which is 0.
+    nvml.times = None
+    read, said = nvml.calls.count("nvmlInit"), len(caplog.messages)
+    memory.check("cuda:0")
+    assert nvml.calls.count("nvmlInit") == read + 2 and nvml.open == 0
+    assert [record.levelname for record in caplog.records[said:]] == ["WARNING"]
+    assert caplog.messages[-1] == (
+        "the whole card's free memory couldn't be read through NVML before this unit, asked"
+        " twice (nvmlDeviceGetMemoryInfo: 999; then nvmlDeviceGetMemoryInfo: 999): the unit"
+        " isn't checked against the card, and runs under torch's limit alone; what the driver"
+        " reports free to this process isn't taken in its place, which stands under the card's"
+        " near a full card and would stop the run for nothing"
+    )
+    # That check alone: the next one asks again, is warned again while NVML fails, and is
+    # judged on the card's figure once it answers.
+    memory.check("cuda:0")
+    assert [record.levelname for record in caplog.records[said:]] == ["WARNING"] * 2
+    nvml.failing = None
+    with pytest.raises(torch.OutOfMemoryError, match=r"2\.99 GiB free on the whole card by NVML"):
+        memory.check("cuda:0")
+    nvml.cards[NAMED] = 3 * GIB
+    memory.check("cuda:0")
+    # NVML silent since the run's start is another case, and stays as it was: the limit is set
+    # HELD_BACK_UNREAD under the driver's figure, and the check judged on that figure. A new
+    # run starts there: what NVML said to the run before is nothing to it.
+    startup(monkeypatch, Card(30 * GIB, spills=True))
+    held(monkeypatch, 20 * GIB, reserved=GIB)
+    assert memory.hold("cuda:0") == 18 * GIB
+    held(monkeypatch, 3 * GIB - 1, reserved=15 * GIB)
+    with pytest.raises(torch.OutOfMemoryError, match=r"2\.99 GiB free as its driver reports it"):
+        memory.check("cuda:0")
+    # NVML answering later in that run is taken from then on, and its failures after that are
+    # asked again and skipped as above.
+    nvml = Nvml({NAMED: 3 * GIB})
+    libraries(monkeypatch, Card(30 * GIB, spills=True), nvml)
+    held(monkeypatch, 0, reserved=15 * GIB)
+    memory.check("cuda:0")
+    nvml.failing = "nvmlInit"
+    memory.check("cuda:0")
+    assert "asked twice (nvmlInit: 999; then nvmlInit: 999)" in caplog.messages[-1]
+
+
+def test_nvml_failing_as_the_limit_is_set_leaves_the_plan_its_reserve(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # NVML gives the card's figure to the plan, then fails as torch's limit is set. The plan
+    # counts on the card's figure less HELD_BACK and RESERVE; a limit set HELD_BACK_UNREAD under
+    # the driver's figure alone, 1.98 GiB over the card's here, would leave the plan 3.98 GiB
+    # under it where RESERVE is 4.5 (a review, 2026-10-12). Once NVML has answered in the run,
+    # the limit's reading is asked again, as a check's is, and where it fails twice the limit is
+    # set from the card's figure the plan was made in, with a warning: never from the driver's
+    # figure alone.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    card, reported = 20 * GIB, 20 * GIB + round(1.98 * GIB)
+    nvml = Nvml({NAMED: card})
+    startup(monkeypatch, Card(30 * GIB, spills=True), nvml)
+    held(monkeypatch, reported)
+    found = memory.reading(reported)
+    assert (found.card, found.left) == (card, memory.HELD_BACK)
+    assert found.counted == card - memory.HELD_BACK - memory.RESERVE
+    # It fails once: asked again, and the limit set from that second reading.
+    nvml.failing, nvml.times = "nvmlDeviceGetMemoryInfo", 1
+    read, said = nvml.calls.count("nvmlInit"), len(caplog.messages)
+    assert memory.hold("cuda:0") == card - memory.HELD_BACK
+    assert nvml.calls.count("nvmlInit") == read + 2
+    assert [record.levelname for record in caplog.records[said:]] == ["DEBUG", "INFO"]
+    # It fails twice: the plan's own figure of the card, and the plan keeps its reserve.
+    nvml.times = None
+    read, said = nvml.calls.count("nvmlInit"), len(caplog.messages)
+    limit = memory.hold("cuda:0")
+    assert limit == card - memory.HELD_BACK == found.counted + memory.RESERVE
+    assert limit != reported - memory.HELD_BACK_UNREAD
+    assert nvml.calls.count("nvmlInit") == read + 2 and nvml.open == 0
+    assert [record.levelname for record in caplog.records[said:]] == ["WARNING", "INFO"]
+    assert caplog.messages[said] == (
+        "as torch's limit was set, the whole card's free memory couldn't be read through NVML,"
+        " asked twice (nvmlDeviceGetMemoryInfo: 999; then nvmlDeviceGetMemoryInfo: 999): the"
+        " limit is set from the 20.00 GiB the card had free when the plan was made, not from"
+        " what the driver reports free to this process alone"
+    )
+    # The driver's figure is still the one taken where it is the smaller of the two.
+    held(monkeypatch, 19 * GIB)
+    assert memory.hold("cuda:0") == 19 * GIB - memory.HELD_BACK
 
 
 def test_the_card_is_checked_before_every_unit(monkeypatch: pytest.MonkeyPatch) -> None:

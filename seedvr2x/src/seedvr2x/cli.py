@@ -1006,6 +1006,14 @@ _OOM_HELD = re.compile(
     r" PyTorch but unallocated"
 )
 _OOM_ALLOWED = re.compile(r" (\S+ \w+) allowed;")
+_OOM_CARD = re.compile(r"GPU \d+ has a total capacity of (\S+ \w+) of which (\S+ \w+) is free")
+# cudaMallocAsync's message, several lines (c10's CUDAMallocAsyncAllocator): its first says no
+# figure; the request, torch's own count, the card's memory and what CUDA has free of it each
+# have a line after it, and torch's limit, when one is set, two.
+_OOM_ASYNC = re.compile(
+    r"Currently allocated *: (?P<held>.+)\nRequested *: (?P<asked>.+)\n"
+    r"Device limit *: (?P<card>.+)\nFree \(according to CUDA\): (?P<free>.+)"
+)
 
 
 def _refused(error: BaseException) -> str:
@@ -1015,18 +1023,38 @@ def _refused(error: BaseException) -> str:
     advice on the allocator's settings, which are seedvr2x's here, with its link, on the same
     line; and "this process has 17179869184.00 GiB memory in use", which torch said of a
     process holding 20.7 GiB under WSL2 (an RTX 5090, 2026-10-12). A message that doesn't start
-    as torch's does is given by its first line, whole: the per-unit check's (memory.check)."""
+    as torch's does is given by its first line, whole: the per-unit check's (memory.check).
+
+    The card's memory and what the driver had free of it, torch's "GPU 0 has a total capacity
+    of 31.82 GiB of which 9.36 GiB is free", are kept on a driver that refuses, where they are
+    the card's; they go on a run held to its card, whose driver's figure isn't (it leaves other
+    programs' memory out, and stands under the card's near a full card: runtime/memory.py).
+    There too, cudaMallocAsync's message, DESIGN.md's allocator on such a driver, is read
+    beyond its first line, which says no figure: what was asked, what torch had allocated, and
+    the same two figures, from its own lines (torch 2.14.1's words under each allocator, its
+    limit refusing a request of 4 GiB: tests/test_cli_run.py)."""
     from seedvr2x.runtime import memory
 
     held = " (held to the card's own memory: its driver gives more)" * memory.spills()
-    said = str(error).partition(chr(10))[0]
+    whole = str(error)
+    said = whole.partition(chr(10))[0]
     asked = _OOM_ASKED.match(said)
     if asked is not None:
         words = f"CUDA out of memory. Tried to allocate {asked[1]}"
+        card = None if memory.spills() else _OOM_CARD.search(said)
+        if card is not None:
+            words += f", {card[2]} free of the GPU's {card[1]}"
         counted, allowed = _OOM_HELD.search(said), _OOM_ALLOWED.search(said)
         if counted is not None:
             words += f", torch holding {counted[1]} allocated and {counted[2]} more reserved"
         said = words + (f", {allowed[1]} allowed" if allowed is not None else "")
+    elif not memory.spills():
+        lines = _OOM_ASYNC.search(whole)
+        if lines is not None:
+            said += (
+                f": {lines['asked']} asked, {lines['free']} free of the GPU's {lines['card']},"
+                f" torch holding {lines['held']} allocated"
+            )
     return f"the GPU's memory was refused{held}: {said}"
 
 

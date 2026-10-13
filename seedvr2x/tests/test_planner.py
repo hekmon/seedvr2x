@@ -1368,13 +1368,20 @@ def test_a_draw_that_never_fits_is_refused() -> None:
         " frames (2660 latents) fits there"
     )
     planner.plan(free, UHD, shots(2660, 340, 40), Pins(), None)
-    # A held run's refusal says what would have to be freed first, then both.
-    kept = Reading(round(28.05 * GIB), None, free, True)
-    assert refused(kept, UHD, shots(2661), Pins(), None).endswith(
-        ": 0.01 GiB more would have to be freed on the card for it; the largest output that fits"
+    # A held run's refusal says what it is short of first, then both; it counts on the budget
+    # itself, no margin on top, and names none (memory.RESERVE holds it).
+    kept = Reading(round(28.05 * GIB), None, free - MARGIN, True, 3 * GIB)
+    held_s = refused(kept, UHD, shots(2661), Pins(), None)
+    assert "takes 21.92 GiB of free VRAM (the noise of the longest shot" in held_s
+    assert "the VAE off the GPU: a peak of 21.92 GiB), and the plan counts on 21.91 GiB" in held_s
+    assert held_s.endswith(
+        ": 0.01 GiB short; the largest output that fits"
         " there is --resolution 2144, about 3810x2144; or its longest shot cut, by a cut list"
         " (--cuts): at this size a shot of up to 10637 frames (2660 latents) fits there"
     )
+    # Counting on the very figure a driver that refuses was refused for above, by its margin: a
+    # held run plans the job.
+    planner.plan(replace(kept, counted=free), UHD, shots(2661), Pins(), None)
     # No cut is named for a size its smallest window doesn't fit, nor for a VAE pass: no
     # shorter shot lowers those.
     assert "--cuts" not in refused(free, (4320, 7680), shots(2661), Pins(), None)
@@ -3030,12 +3037,21 @@ def test_a_resume_names_the_pin_s_part_of_its_shortfall() -> None:
         " --swap-blocks 20's: with every block of the DiT swapped and the VAE off the GPU, the"
         " recorded plan is 1.07 GiB short"
     )
-    # On a run held to the card, after what would have to be freed.
-    kept = Reading(round(28.05 * GIB), None, free, True)
+    # On a run held to the card, after what would have to be freed, where memory freed on the
+    # card can give it: the whole card's figure the one the plan is held under, 17 GiB under
+    # the driver's here. The plan counts on its budget, no margin on top.
+    kept = Reading(round(45.05 * GIB), round(28.05 * GIB), free - MARGIN, True, 3 * GIB)
     assert refused(kept, *job, Pins(swap_blocks=0), None, recorded=recorded).endswith(
         ", the run held to the card's own memory, 15.41 GiB short, which would have to be freed"
         " on the card, 14.34 GiB of them --swap-blocks 0's: with every block of the DiT swapped"
         " and the VAE off the GPU, the recorded plan is 1.07 GiB short"
+    )
+    # Where it can't, the card's figure not read: what it is short of, and no more.
+    kept = Reading(round(28.05 * GIB), None, free - MARGIN, True, 3 * GIB)
+    assert refused(kept, *job, Pins(swap_blocks=0), None, recorded=recorded).endswith(
+        ", the run held to the card's own memory, 15.41 GiB short, 14.34 GiB of them"
+        " --swap-blocks 0's: with every block of the DiT swapped and the VAE off the GPU, the"
+        " recorded plan is 1.07 GiB short"
     )
     # Another phase refused first is the shape's own, whatever is pinned: no part of the pin's.
     small = refused(round(6.5 * GIB), *job, Pins(swap_blocks=0), None, recorded=recorded)
@@ -3177,91 +3193,124 @@ def test_said() -> None:
 
 
 # What a run held to its card counts on in these tests, on a driver that gives memory the card
-# doesn't have: the free memory less 5.3 GiB, a figure of the tests' own. The module's two
-# constants (memory.HELD_BACK and memory.RESERVE) are measured, and move with their measures.
-KEPT = round(5.3 * GIB)
+# doesn't have: the free memory less 5.9 GiB, figures of the tests' own: 0.8 GiB left outside
+# torch's limit, and 5.1 for what torch's own allocator needs beyond a peak, the planner's
+# margin in it. The module's two constants (memory.HELD_BACK and memory.RESERVE) are measured or
+# decided, and move with their measures.
+LEFT = round(0.8 * GIB)
+KEPT = round(5.3 * GIB) + MARGIN
 
 
 def held(reported: float, card: float | None) -> Reading:
     """The reading of a run held to the card, from figures in GiB: what the driver reports free
     to the process, and what the whole card has free (None: not read); the plan counts on the
-    smaller, less KEPT."""
+    smaller, less KEPT, LEFT of them what torch's limit leaves."""
     driver = round(reported * GIB)
     whole = None if card is None else round(card * GIB)
-    return Reading(driver, whole, min(driver, whole or driver) - KEPT, True)
+    return Reading(driver, whole, min(driver, whole or driver) - KEPT, True, LEFT)
 
 
-# The memory a plan is made in, each time 22.75 GiB to count on, and how its words name it: the
+# The memory a plan is made in, each time a budget of 22.15 GiB, and how its words name it: the
 # plan's first line after the card's name, and what a refusal says is there. A driver that
-# refuses: one figure, what it reports free. A run held to the card: what the plan counts on, of
-# which figure, the driver's or the whole card's, with the other, in runtime/memory.py's own
-# words; the whole card's wasn't read, is the smaller of the two, or the larger. Last, what the
-# driver reported, in GiB, as both say it.
+# refuses: one figure, what it reports free, 22.75 GiB, the budget the planner's margin under
+# it. A run held to the card: what the plan counts on, 22.15 GiB, which is its budget, no margin
+# on top (DESIGN.md, Allocator: the margin is counted inside what torch's allocator is left);
+# of which figure, the driver's or the whole card's, with the other, in runtime/memory.py's own
+# words; the whole card's wasn't read, is the smaller of the two, or the larger; and what
+# torch's limit leaves under it apart from what the plan leaves again, two figures that were
+# given as one. Then what the driver reported, in GiB, as both say it; and what memory freed on
+# the card could give the plan, in GiB: nothing on a driver that refuses, nor where the card's
+# figure isn't the one the plan is held under.
+HELD_LINE = (
+    "; the run is held to the card's own memory, its driver giving more than the card has:"
+    " torch is limited 0.80 GiB under that, and the plan counts on 5.10 GiB less again, what"
+    " torch's own allocator needs beyond a step's peak: a budget of 22.15 GiB"
+)
 WORDS = [
     (
         round(22.75 * GIB),
         "22.75 GiB free, a budget of 22.15 GiB",
         "the driver reports 22.75 GiB free",
         22.75,
+        0.0,
     ),
     (
         held(28.05, None),
         "28.05 GiB free as its driver reports it to this process (the whole card's, NVML's,"
-        " wasn't read); the run is held to the card's own memory, 5.30 GiB under that, its"
-        " driver giving more than the card has: the plan counts on 22.75 GiB, a budget of 22.15"
-        " GiB",
-        "the plan counts on 22.75 GiB of the 28.05 GiB free as its driver reports it to this"
+        f" wasn't read){HELD_LINE}",
+        "the plan counts on 22.15 GiB of the 28.05 GiB free as its driver reports it to this"
         " process (the whole card's, NVML's, wasn't read), the run held to the card's own memory",
         28.05,
+        0.0,
     ),
     (
         held(30.03, 28.05),
         "28.05 GiB free on the whole card by NVML (its driver reports 30.03 GiB free to this"
-        " process); the run is held to the card's own memory, 5.30 GiB under that, its driver"
-        " giving more than the card has: the plan counts on 22.75 GiB, a budget of 22.15 GiB",
-        "the plan counts on 22.75 GiB of the 28.05 GiB free on the whole card by NVML (its"
+        f" process){HELD_LINE}",
+        "the plan counts on 22.15 GiB of the 28.05 GiB free on the whole card by NVML (its"
         " driver reports 30.03 GiB free to this process), the run held to the card's own memory",
         30.03,
+        1.98,
     ),
     (
         held(28.05, 29.20),
         "28.05 GiB free as its driver reports it to this process (the whole card has 29.20 GiB"
-        " free by NVML); the run is held to the card's own memory, 5.30 GiB under that, its"
-        " driver giving more than the card has: the plan counts on 22.75 GiB, a budget of 22.15"
-        " GiB",
-        "the plan counts on 22.75 GiB of the 28.05 GiB free as its driver reports it to this"
+        f" free by NVML){HELD_LINE}",
+        "the plan counts on 22.15 GiB of the 28.05 GiB free as its driver reports it to this"
         " process (the whole card has 29.20 GiB free by NVML), the run held to the card's own"
         " memory",
         28.05,
+        0.0,
     ),
 ]
 
 
-@pytest.mark.parametrize(("free", "line", "there", "driver"), WORDS)
+@pytest.mark.parametrize(("free", "line", "there", "driver", "freeable"), WORDS)
 def test_each_figure_of_the_free_memory_is_named(
-    free: int | Reading, line: str, there: str, driver: float
+    free: int | Reading, line: str, there: str, driver: float, freeable: float
 ) -> None:
     # DESIGN.md, Memory planner, Allocator: on a driver that gives memory the card doesn't have
     # the plan counts on less than the driver reports, and "the driver reports X GiB free" of
     # that figure would be false: the plan's first line and its five refusals name each figure
     # for what it is, and a refusal says what would have to be freed on the card for what was
-    # asked. On a driver that refuses they say what they said.
+    # asked, where memory freed there can give it, and what it is short of where it can't (the
+    # card's figure not read, the driver's the smaller, or more than the two are apart). On a
+    # driver that refuses they say what they said. What something takes is said without the
+    # planner's margin on a held run, 0.60 GiB less: the plan has none there.
     is_held = isinstance(free, Reading)
     film = shots(31)
 
-    def to_free(short: str) -> str:
-        return f"{short} GiB more would have to be freed on the card for it; " if is_held else ""
+    def takes(refusing: str) -> str:
+        return refusing if not is_held else f"{(round(float(refusing) * 100) - 60) / 100:.2f}"
 
-    freed = ", which would have to be freed on the card" if is_held else ""
-    # The plan is the one of 22.75 GiB to count on, whatever names the figure; its record
-    # keeps that as `free`, what the driver reported and what the card had beside it.
+    def to_free(short: str) -> str:
+        if not is_held:
+            return ""
+        if float(short) > freeable:
+            return f"{short} GiB short; "
+        return f"{short} GiB more would have to be freed on the card for it; "
+
+    def freed(short: str) -> str:
+        return ", which would have to be freed on the card" if float(short) <= freeable else ""
+
+    margin = "" if is_held else ", and 0.60 of margin"
+    # The plan is the one of a budget of 22.15 GiB, whatever names the figure; its record keeps
+    # what the plan was made in as `free`, what the driver reported and what the card had
+    # beside it.
     made, peaks = planner.plan(free, HD, film, Pins(), None)
-    assert (made, peaks.free) == (
+    assert (made, peaks.budget) == (
         planner.plan(round(22.75 * GIB), HD, film, Pins(), None)[0],
-        24427626496,
+        24427626496 - MARGIN,
     )
+    assert peaks.free == peaks.budget + (0 if is_held else MARGIN)
     said = planner.said(made, peaks, "NVIDIA GeForce RTX 5090", HD, film, Pins())
     assert said[0] == f"plan: NVIDIA GeForce RTX 5090, {line}"
+    assert (
+        said[1:]
+        == planner.said(
+            *planner.plan(round(22.75 * GIB), HD, film, Pins(), None), "a card", HD, film, Pins()
+        )[1:]
+    )
     record = peaks.record()
     if isinstance(free, Reading):
         assert (record["free"], record["driver_free"], record["card_free"]) == (
@@ -3269,6 +3318,7 @@ def test_each_figure_of_the_free_memory_is_named(
             free.reported,
             free.card,
         )
+        assert record["budget"] == free.counted
     else:
         assert (record["free"], record["driver_free"], record["card_free"]) == (free, free, None)
         # A number is a driver that refuses, which reports the card's free memory.
@@ -3279,8 +3329,8 @@ def test_each_figure_of_the_free_memory_is_named(
     # --window refused, here with --swap-blocks pinned beside it.
     window_refused = refused(free, HD, film, Pins(swap_blocks=0, window=30), None)
     assert window_refused == (
-        "--window 30: its longest window, 17 latents, takes 33.40 GiB of free VRAM with"
-        f" --swap-blocks 0, and {there}: {to_free('10.65')}the longest window that fits is"
+        f"--window 30: its longest window, 17 latents, takes {takes('33.40')} GiB of free VRAM"
+        f" with --swap-blocks 0, and {there}: {to_free('10.65')}the longest window that fits is"
         " --window 6"
     )
     # What the driver reported is read from either, the plan's lines as a run logs them and a
@@ -3289,38 +3339,76 @@ def test_each_figure_of_the_free_memory_is_named(
     logged = "".join(f"12:00:00 INFO seedvr2x.cli: {said_line}\n" for said_line in said)
     assert test_regression.reported(logged) == driver
     assert test_regression.reported(f"12:00:00 ERROR seedvr2x.cli: {window_refused}\n") == driver
-    # --swap-blocks refused.
+    # --swap-blocks refused: 1.16 GiB short, which memory freed on the card gives where the
+    # card's figure is 1.98 GiB under the driver's.
     assert refused(free, HD, shots(4000), Pins(swap_blocks=0), None) == (
         "--swap-blocks 0: the noise of the longest shot, 15997 frames (4000 latents), drawn whole"
-        " on the GPU beside the shot's latent before its first window, takes 23.91 GiB of free"
-        f" VRAM with 0 blocks swapped, and {there}: {to_free('1.16')}the fewest blocks that hold"
-        " it are --swap-blocks 5"
+        f" on the GPU beside the shot's latent before its first window, takes {takes('23.91')}"
+        f" GiB of free VRAM with 0 blocks swapped, and {there}: {to_free('1.16')}the fewest"
+        " blocks that hold it are --swap-blocks 5"
     )
     # A tile pin refused.
     assert refused(free, HD, film, Pins(decode_tile=1856), None) == (
-        "--decode-tile 1856: the decode in tiles of 1856 px takes 36.28 GiB of free VRAM, the DiT"
-        f" off the GPU, 1.50 of them the room a VAE pass is held to, and {there}:"
+        f"--decode-tile 1856: the decode in tiles of 1856 px takes {takes('36.28')} GiB of free"
+        f" VRAM, the DiT off the GPU, 1.50 of them the room a VAE pass is held to, and {there}:"
         f" {to_free('13.53')}the largest tile that fits is --decode-tile 1088"
     )
     # A size that doesn't fit.
     assert refused(free, (4320, 7680), shots(5), Pins(), None) == (
-        "an output of 7680x4320 takes 83.71 GiB of free VRAM (its smallest window, 5 latents, with"
-        " every block of the DiT swapped and the VAE off the GPU: a peak of 83.11 GiB, and 0.60 of"
-        f" margin), and {there}: {to_free('60.96')}the largest output that fits there is"
+        f"an output of 7680x4320 takes {takes('83.71')} GiB of free VRAM (its smallest window, 5"
+        " latents, with every block of the DiT swapped and the VAE off the GPU: a peak of 83.11"
+        f" GiB{margin}), and {there}: {to_free('60.96')}the largest output that fits there is"
         " --resolution 2160, about 3840x2160"
     )
     # A plan that doesn't fit, and a recorded one that no longer does: the shortfall is what
     # would have to be freed.
     assert planner.fits(Plan(12), free, HD, shots(12), None) == (
-        "the encode, untiled, with the DiT's 36 blocks on the GPU, takes 38.23 GiB of free VRAM,"
-        f" 1.50 of them the room a VAE pass is held to, and {there}, 15.48 GiB short{freed}"
+        f"the encode, untiled, with the DiT's 36 blocks on the GPU, takes {takes('38.23')} GiB of"
+        f" free VRAM, 1.50 of them the room a VAE pass is held to, and {there}, 15.48 GiB short"
+        f"{freed('15.48')}"
     )
     recorded = Plan(31, Tiles(1856), Tiles(1088))
     assert refused(free, HD, film, Pins(), None, recorded=recorded) == (
         "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 31"
-        " latents with 36 blocks swapped and the VAE off the GPU, takes 33.19 GiB of free VRAM"
-        f" and {there}, 10.44 GiB short{freed}"
+        f" latents with 36 blocks swapped and the VAE off the GPU, takes {takes('33.19')} GiB of"
+        f" free VRAM and {there}, 10.44 GiB short{freed('10.44')}"
     )
+
+
+def test_a_held_run_takes_no_margin_on_top() -> None:
+    # DESIGN.md, Allocator (2026-10-12): "On such a driver the planner's 0.6 GiB margin is
+    # counted inside the 4.5, which measure the same need: with both, 4K's smallest window is
+    # refused on that card beside its usual desktop." What a held run counts on is its budget:
+    # a phase that takes it to the byte is planned, and one byte more refused; on a driver that
+    # refuses the margin stands over the same peak.
+    film = shots(5)
+    peak = planner.dit_peak(padded_size(HD), 5, 0, False)
+    pins = Pins(window=5, swap_blocks=0)
+
+    def on_card(counted: int) -> Reading:
+        return Reading(counted + round(5.0 * GIB), None, counted, True, round(0.5 * GIB))
+
+    made, peaks = planner.plan(on_card(peak), HD, film, pins, None)
+    assert (peaks.dit, peaks.free, peaks.budget) == (peak, peak, peak)
+    lines = planner.said(made, peaks, "a card", HD, film, pins)
+    assert sum(
+        "the DiT's phase bounds the plan, 0.00 GiB under the budget" in line for line in lines
+    )
+    assert refused(on_card(peak - 1), HD, film, pins, None).startswith("--swap-blocks 0: a window")
+    # The same peak on a driver that refuses: its margin over it, to the byte.
+    made, peaks = planner.plan(peak + MARGIN, HD, film, pins, None)
+    assert (peaks.dit, peaks.free, peaks.budget) == (peak, peak + MARGIN, peak)
+    assert refused(peak + MARGIN - 1, HD, film, pins, None).startswith("--swap-blocks 0: a window")
+    # A VAE pass keeps its room on both (planner.VAE_ROOM), which is another need: an untiled
+    # decode pinned, the DiT off the GPU.
+    tight = Pins(window=5, swap_blocks=36, decode_tile=0)
+    decode = planner.decode_peak(padded_size(HD), output_size(HD), None, 0, 36)
+    need = max(decode + planner.VAE_ROOM, planner.dit_peak(padded_size(HD), 5, 36, False))
+    assert need == decode + planner.VAE_ROOM
+    planner.plan(on_card(need), HD, film, tight, None)
+    assert refused(on_card(need - 1), HD, film, tight, None).startswith("--decode-tile 0: ")
+    planner.plan(need + MARGIN, HD, film, tight, None)
+    assert refused(need + MARGIN - 1, HD, film, tight, None).startswith("--decode-tile 0: ")
 
 
 def test_the_unpinned_case_skips_a_small_card_alone() -> None:

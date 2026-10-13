@@ -30,7 +30,7 @@ def no_driver_asked(
         monkeypatch.setattr(memory, "NVML", "libnvidia-ml.so.none-in-a-cpu-test")
         for name in memory.VARIABLES:
             monkeypatch.delenv(name, raising=False)
-    state = (("_spills", False), ("_native", False), ("_limit", None))
+    state = (("_spills", False), ("_native", False), ("_limit", None), ("_answered", False))
     for name, value in (*state, ("_unread", False), ("_left", memory.HELD_BACK)):
         monkeypatch.setattr(memory, name, value)
     yield

@@ -942,8 +942,11 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
+    # What the plan counts on is its budget, the planner's margin counted in what a held run
+    # leaves to torch's allocator: the plan of a driver that refuses and reports that margin
+    # more.
     planned_in = card - memory.HELD_BACK - memory.RESERVE
-    made = planner.plan(planned_in, TARGET, JOB_SHOTS, Pins(window=5), HOST)
+    made = planner.plan(planned_in + planner.MARGIN, TARGET, JOB_SHOTS, Pins(window=5), HOST)
     assert loads == [(made[0], 1)] and limits == [(card - memory.HELD_BACK) / TOTAL]
     assert steps.calls == UNINTERRUPTED
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
@@ -955,16 +958,19 @@ def test_a_driver_that_spills_is_planned_under_and_held(
         FREE,
         card,
     )
+    assert recorded["budget"] == planned_in
     assert "the GPU's driver gives memory the card doesn't have" in caplog.text
     # The plan's first line names each figure, where "92.50 GiB free" alone would be taken for
-    # what the plan counts on, and "87.20 GiB free" for what the driver reports; and it is the
-    # one place a run's log says them: memory's own line is for its debug level.
+    # what the plan counts on, and "87.20 GiB free" for what the driver reports; what torch's
+    # limit leaves and what the plan leaves again are said apart; and it is the one place a
+    # run's log says them: memory's own line is for its debug level.
     assert (
         ", 92.50 GiB free on the whole card by NVML (its driver reports 94.50 GiB free to this"
-        " process); the run is held to the card's own memory, 5.30 GiB under that, its driver"
-        " giving more than the card has: the plan counts on 87.20 GiB, a budget of 86.60 GiB"
+        " process); the run is held to the card's own memory, its driver giving more than the"
+        " card has: torch is limited 3.00 GiB under that, and the plan counts on 2.30 GiB less"
+        " again, what torch's own allocator needs beyond a step's peak: a budget of 87.20 GiB"
     ) in caplog.text
-    assert caplog.text.count("the plan counts on 87.20 GiB") == 1
+    assert caplog.text.count("a budget of 87.20 GiB") == 1
     assert (
         "torch held to 89.50 GiB on the GPU: the 92.50 GiB free less 3.0, and what it holds;"
         " free on the whole card by NVML (its driver reports 94.50 GiB free to this process)"
@@ -1091,7 +1097,7 @@ def test_a_plan_on_a_driver_that_spills_holds_nothing(
     assert upscale(tmp_path, source_path, "out", *JOB, "--plan", "plan.txt") == 0
     assert not limits and steps.calls == []
     planned_in = FREE - memory.HELD_BACK - memory.RESERVE
-    reading = memory.Reading(FREE, None, planned_in, True)
+    reading = memory.Reading(FREE, None, planned_in, True, memory.HELD_BACK_UNREAD)
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["plan"] == plan_record(
         *planner.plan(reading, TARGET, JOB_SHOTS, Pins(window=5), HOST)
@@ -1102,7 +1108,9 @@ def test_a_plan_on_a_driver_that_spills_holds_nothing(
     assert caplog.text.count("the whole card's free memory can't be read through NVML") == 1
     assert (
         ", 94.50 GiB free as its driver reports it to this process (the whole card's, NVML's,"
-        " wasn't read); the run is held to the card's own memory, 5.30 GiB under that"
+        " wasn't read); the run is held to the card's own memory, its driver giving more than"
+        " the card has: torch is limited 3.00 GiB under that, and the plan counts on 2.30 GiB"
+        " less again"
     ) in caplog.text
 
 
@@ -1192,12 +1200,70 @@ def test_gpu_memory_refused_before_the_load_stops_the_run(
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 1
     errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    # On a driver that refuses, the tests' own: the card's memory and what the driver had free
+    # of it are said too, which are the card's there.
     assert [record.getMessage() for record in errors] == [
-        "the GPU's memory was refused: CUDA out of memory. Tried to allocate 456.00 MiB, torch"
-        " holding 19.27 GiB allocated and 1.43 GiB more reserved, 20.98 GiB allowed, before the"
-        " models loaded: nothing was run"
+        "the GPU's memory was refused: CUDA out of memory. Tried to allocate 456.00 MiB, 9.36"
+        " GiB free of the GPU's 31.82 GiB, torch holding 19.27 GiB allocated and 1.43 GiB more"
+        " reserved, 20.98 GiB allowed, before the models loaded: nothing was run"
     ]
     assert all(record.exc_info is None for record in errors) and steps.calls == []
+
+
+# torch's own words under each allocator, its limit refusing a request of 4 GiB (torch 2.14.1,
+# an RTX 5090 under WSL2, 2026-10-12: torch limited to 1% of the card, nothing taken): its own
+# allocator's, one line, and cudaMallocAsync's, seven.
+NATIVE_REFUSED = (
+    "CUDA out of memory. Tried to allocate 4.00 GiB. GPU 0 has a total capacity of 31.82 GiB of"
+    " which 30.20 GiB is free. 325.79 MiB allowed; Of the allocated memory 0 bytes is allocated"
+    " by PyTorch, and 0 bytes is reserved by PyTorch but unallocated. If reserved but unallocated"
+    " memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid"
+    " fragmentation.  See documentation for Memory Management "
+    " (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)"
+)
+ASYNC_REFUSED = (
+    "Allocation on device 0 would exceed allowed memory. (out of memory)\n"
+    "Currently allocated     : 0 bytes\n"
+    "Requested               : 4.00 GiB\n"
+    "Device limit            : 31.82 GiB\n"
+    "Free (according to CUDA): 30.19 GiB\n"
+    "PyTorch limit (set by user-supplied memory fraction)\n"
+    "                        : 325.79 MiB"
+)
+
+
+def test_the_card_s_figures_stay_in_a_refusal_where_the_driver_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # torch's refusal names the card's memory and what the driver has free of it. On a driver
+    # that refuses a full card they are the card's, and stay in the one line, under either
+    # allocator: cudaMallocAsync, DESIGN.md's there, says them on lines of its own, with the
+    # request, where its first line alone said no figure at all.
+    from seedvr2x.runtime import memory
+
+    refused = cli._refused  # pyright: ignore[reportPrivateUsage]
+    assert not memory.spills()
+    assert refused(torch.OutOfMemoryError(NATIVE_REFUSED)) == (
+        "the GPU's memory was refused: CUDA out of memory. Tried to allocate 4.00 GiB, 30.20 GiB"
+        " free of the GPU's 31.82 GiB, torch holding 0 bytes allocated and 0 bytes more reserved,"
+        " 325.79 MiB allowed"
+    )
+    assert refused(torch.OutOfMemoryError(ASYNC_REFUSED)) == (
+        "the GPU's memory was refused: Allocation on device 0 would exceed allowed memory. (out"
+        " of memory): 4.00 GiB asked, 30.19 GiB free of the GPU's 31.82 GiB, torch holding 0"
+        " bytes allocated"
+    )
+    # On a run held to its card the driver's figure isn't the card's (it read 30.20 GiB free
+    # there beside a desktop holding 5.6 GiB of the card): neither is said, as before.
+    monkeypatch.setattr(memory, "_spills", True)
+    held = "the GPU's memory was refused (held to the card's own memory: its driver gives more): "
+    assert refused(torch.OutOfMemoryError(NATIVE_REFUSED)) == (
+        f"{held}CUDA out of memory. Tried to allocate 4.00 GiB, torch holding 0 bytes allocated"
+        " and 0 bytes more reserved, 325.79 MiB allowed"
+    )
+    assert refused(torch.OutOfMemoryError(ASYNC_REFUSED)) == (
+        f"{held}Allocation on device 0 would exceed allowed memory. (out of memory)"
+    )
 
 
 def test_a_refusal_s_words_are_one_line() -> None:

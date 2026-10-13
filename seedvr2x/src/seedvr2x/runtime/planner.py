@@ -60,7 +60,10 @@ MIB = 1024**2
 # (DESIGN.md, Memory planner, Budget): bisected on emulated cards, a run needs 0.15-0.45 GiB
 # between the free memory it starts with and the torch peak of its bounding phase, the
 # decode-bound 8 GB card the most (it failed with 0.37); 0.6 keeps 0.23 over that failure
-# (planner-limits.md, The margin over free memory).
+# (planner-limits.md, The margin over free memory). Measured where the driver refuses a full
+# card, and a driver's alone: a run held to its card, whose driver gives memory the card doesn't
+# have, counts on memory.RESERVE less already, which measures the same need under torch's own
+# allocator, and takes no margin on top (_Job.margin; DESIGN.md, Allocator, 2026-10-12).
 MARGIN = round(0.6 * GIB)
 
 # The DiT's peak (planner-limits.md, The DiT's memory: tokens plus windows): what the loaded 7B
@@ -725,7 +728,7 @@ class Peaks:
     it, and by how much, is what --plan prints and the manifest keeps for information."""
 
     free: int  # the memory the plan was made in: what it may count its peaks in (Reading.counted)
-    budget: int  # free - MARGIN
+    budget: int  # free - MARGIN; free itself on a run held to the card (_Job.margin)
     encode: int  # each phase's predicted peak on the GPU
     dit: int  # the larger of the longest window's and of the longest shot's draw (dit_draw)
     decode: int
@@ -799,8 +802,16 @@ class _Job:
     one_file: bool  # whether the output is one file, its windows kept in system memory
 
     @property
+    def margin(self) -> int:
+        """What the plan leaves of the memory it may count on, in bytes: MARGIN on a driver that
+        refuses; nothing on a run held to the card, where memory.RESERVE, taken off already,
+        measures the same need (DESIGN.md, Allocator: "the planner's 0.6 GiB margin is counted
+        inside the 4.5"): the budget is then what the plan counts on."""
+        return 0 if self.reading.held else MARGIN
+
+    @property
     def budget(self) -> int:
-        return self.free - MARGIN
+        return self.free - self.margin
 
     @property
     def padded(self) -> tuple[int, int]:
@@ -944,7 +955,7 @@ def _window_that_runs(job: _Job, pins: Pins, made: Plan, host_available: int | N
     fits; whether the planner should take such a plan by itself is DESIGN.md's to decide
     (Memory planner, Choices: the window first)."""
     peaks = _peaks(job, made)
-    over = any(peaks.need(phase) + MARGIN > job.free for phase in PHASES)
+    over = any(peaks.need(phase) + job.margin > job.free for phase in PHASES)
     if host_available is None or over or peaks.host <= host_available or made.window is None:
         return ""
     ran = _longest(job.lengths, made.window)
@@ -1406,7 +1417,7 @@ def _window(job: _Job, pins: Pins) -> tuple[int, int, bool]:
         cap = pins.window
     else:
         latents = _longest(job.lengths, pins.window)
-        need = _dit_need(job, pins.window, most, vae_in_dit=False) + MARGIN
+        need = _dit_need(job, pins.window, most, vae_in_dit=False) + job.margin
         blocks = (
             "every block of the DiT swapped"
             if pins.swap_blocks is None
@@ -1443,7 +1454,7 @@ def _swap_refused(job: _Job, swapped: int, cap: int | None, whose: str, fewest: 
     named: the cap's longest window, or the longest shot's draw where that takes more
     (_draw_bounds)."""
     latents = _longest(job.lengths, cap)
-    need = _dit_need(job, cap, swapped, vae_in_dit=False) + MARGIN
+    need = _dit_need(job, cap, swapped, vae_in_dit=False) + job.margin
     if _draw_bounds(job, cap, swapped, vae_in_dit=False):
         what = f"{_draw_said(job)},"
     else:
@@ -1472,7 +1483,7 @@ def _vae_kept(job: _Job, plan: Plan, host_available: int | None) -> Plan | None:
     available: 29 blocks swapped and the VAE staying take 18.01 GiB, where 28 and the VAE away
     take 18.47 and were refused (tests/test_planner.py)."""
     peaks = _peaks(job, plan)
-    over = any(peaks.need(phase) + MARGIN > job.free for phase in PHASES)
+    over = any(peaks.need(phase) + job.margin > job.free for phase in PHASES)
     if host_available is None or over or peaks.host <= host_available or plan.vae_in_dit:
         return None
     counts = range(max(plan.swapped, SLOTS) + 1, BLOCKS + 1)
@@ -1502,13 +1513,13 @@ def _pin_s_part(job: _Job, plan: Plan, pins: Pins) -> str:
     if pins.swap_blocks is None:
         return ""
     peaks = _peaks(job, plan)
-    first = next((phase for phase in PHASES if peaks.need(phase) + MARGIN > job.free), None)
+    first = next((phase for phase in PHASES if peaks.need(phase) + job.margin > job.free), None)
     if first != "dit":
         return ""
-    least = _dit_need(job, plan.window, BLOCKS, vae_in_dit=False) + MARGIN
+    least = _dit_need(job, plan.window, BLOCKS, vae_in_dit=False) + job.margin
     there = _hundredths(job.free, up=False)
     short = _hundredths(least, up=True) - there
-    part = _hundredths(peaks.need("dit") + MARGIN, up=True) - there - short
+    part = _hundredths(peaks.need("dit") + job.margin, up=True) - there - short
     if part <= 0 or short <= 0:
         return ""
     return (
@@ -1575,7 +1586,7 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
         return fitting[0]
     option = f"--{phase}-tile {pin}"
     tiles = Tiles(pin) if pin else None
-    need = _vae_need(job, phase, tiles, 0, swapped) + MARGIN
+    need = _vae_need(job, phase, tiles, 0, swapped) + job.margin
     if need <= job.free:
         return tiles
     # The untiled pass alone fits where a frame little larger than the smallest tile takes less
@@ -1682,10 +1693,12 @@ def _too_large(job: _Job, phase: Phase, least: int) -> str:
         how = f"its {phase} {tiled}, with the DiT off the GPU"
         room = VAE_ROOM
     # The room as what is left of the total once the peak and the margin are said, each rounded
-    # as the message has it, so that its figures add up.
-    total, peak = _hundredths(least + MARGIN, up=True), _hundredths(least - room, up=True)
-    rest = (total - peak - _hundredths(MARGIN, up=True)) / 100
+    # as the message has it, so that its figures add up. No margin on a run held to the card
+    # (_Job.margin), and none said.
+    total, peak = _hundredths(least + job.margin, up=True), _hundredths(least - room, up=True)
+    rest = (total - peak - _hundredths(job.margin, up=True)) / 100
     held = f", {rest:.2f} of room a VAE pass is held to" if room else ""
+    margin = f", and {_gib(job.margin)} of margin" if job.margin else ""
     fitting = "no output size fits there"
     target_height, target_width = job.target
     for short in range((min(job.target) - 1) // 16 * 16, 0, -16):
@@ -1707,8 +1720,8 @@ def _too_large(job: _Job, phase: Phase, least: int) -> str:
             break
     return (
         f"an output of {width}x{height} takes {total / 100:.2f} GiB of free VRAM ({how}:"
-        f" a peak of {peak / 100:.2f} GiB{held}, and {_gib(MARGIN)} of margin), and"
-        f" {_there(job)}: {_to_free(job, least + MARGIN)}{fitting}{cut}"
+        f" a peak of {peak / 100:.2f} GiB{held}{margin}), and"
+        f" {_there(job)}: {_to_free(job, least + job.margin)}{fitting}{cut}"
     )
 
 
@@ -1892,10 +1905,10 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
         f" {_resident_said(plan.resident_decode, plan.swapped)},",
     }
     for phase in PHASES:
-        need = peaks.need(phase) + MARGIN
+        need = peaks.need(phase) + job.margin
         if need > job.free:
             room = "" if phase == "dit" else f"{_ROOM_HELD},"
-            freed = ", which would have to be freed on the card" if job.reading.held else ""
+            freed = ", which would have to be freed on the card" if _freeable(job, need) else ""
             return (
                 f"{whats[phase]} takes {_over(need)} GiB of free VRAM{room} and {_there(job)},"
                 f" {_short(need, job.free)} GiB short{freed}"
@@ -1986,17 +1999,21 @@ def _card_said(card: str, peaks: Peaks) -> str:
     """The plan's first line (said): the card, its free memory and the budget. On a driver that
     refuses, one figure, what it reports free. On a run held to the card (memory.Reading.held),
     each figure by its name: the free memory the run is held under, the driver's or the whole
-    card's, with the other; what the run is held under it, and why; what the plan counts on,
-    which the budget and every refusal are counted from."""
+    card's, with the other; what torch's limit leaves of it (Reading.left), and what the plan
+    counts on less again, for what torch's own allocator needs beyond a peak (memory.RESERVE),
+    two figures that were given as one, as the hold (a review's finding, 2026-10-12); and the
+    budget, which is what the plan counts on there, no margin taken on top (_Job.margin), and
+    which every refusal is counted from."""
     reading = peaks.reading
     if not reading.held:
         return f"{card}, {_gib(peaks.free)} GiB free, a budget of {_gib(peaks.budget)} GiB"
     free = _held_under(reading)
     return (
         f"{card}, {_gib(free)} GiB free {_named(reading, _gib)}; the run is held to the card's"
-        f" own memory, {_gib(free - peaks.free)} GiB under that, its driver giving more than the"
-        f" card has: the plan counts on {_gib(peaks.free)} GiB, a budget of {_gib(peaks.budget)}"
-        " GiB"
+        f" own memory, its driver giving more than the card has: torch is limited"
+        f" {_gib(reading.left)} GiB under that, and the plan counts on"
+        f" {_gib(free - reading.left - peaks.free)} GiB less again, what torch's own allocator"
+        f" needs beyond a step's peak: a budget of {_gib(peaks.budget)} GiB"
     )
 
 
@@ -2017,11 +2034,29 @@ def _there(job: _Job) -> str:
 def _to_free(job: _Job, need: float) -> str:
     """What a held run's refusal says before what fits: the memory that would have to be freed
     on the card for what was asked, `need` bytes of free VRAM, to fit what the plan counts on,
-    by the message's own figures (_short). Nothing on a driver that refuses, whose refusals say
-    what they said."""
+    by the message's own figures (_short); where no memory freed on the card gives it
+    (_freeable), what it is short of, and no more. Nothing on a driver that refuses, whose
+    refusals say what they said."""
     if not job.reading.held:
         return ""
+    if not _freeable(job, need):
+        return f"{_short(need, job.free)} GiB short; "
     return f"{_short(need, job.free)} GiB more would have to be freed on the card for it; "
+
+
+def _freeable(job: _Job, need: float) -> bool:
+    """Whether memory freed on the card, other programs closed, can give a held run's plan the
+    `need` bytes of free VRAM it is refused for: only where the whole card's figure is the one
+    the plan was made under, the smaller of the two, and only up to the driver's, which the plan
+    is held under from there on (memory.reading). Elsewhere a refusal that said "N GiB more
+    would have to be freed on the card" gave advice nobody can follow (a review's finding,
+    2026-10-12): the driver's figure the smaller, or the card's not read, it is the process's
+    own while the card has room, and other programs' memory isn't in it; and a request 16 GiB
+    over a card that has 2 in use is short of more than the card holds."""
+    reading = job.reading
+    if not reading.held or reading.card is None or reading.card >= reading.reported:
+        return False
+    return need - job.free <= reading.reported - reading.card
 
 
 def _tiles_said(tiles: Tiles | None) -> str:
