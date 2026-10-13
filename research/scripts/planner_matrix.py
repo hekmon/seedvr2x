@@ -107,7 +107,8 @@ from seedvr2x import cli
 from seedvr2x.runtime import memory, model
 memory.startup()
 found = memory.reading(cli._free_memory(torch.device("cuda", 0)))
-print(json.dumps([found.reported, found.card, found.counted, found.held, model.attention_backend()]))
+figures = [found.reported, found.card, found.counted, found.held, found.left]
+print(json.dumps([*figures, model.attention_backend()]))
 """
 
 
@@ -121,9 +122,12 @@ def machine() -> None:
     if not memory.paravirtual():
         return
     said = subprocess.run([sys.executable, "-c", READING], capture_output=True, text=True, check=True)
-    reported, card, counted, held, attention = json.loads(said.stdout.strip().splitlines()[-1])
+    reading = json.loads(said.stdout.strip().splitlines()[-1])
+    reported, card, counted, held, left, attention = reading
     if held:
-        HELD, ATTENTION = memory.Reading(reported, card, counted, held), attention
+        # With what torch's limit leaves of the free memory (Reading.left), which the plan's
+        # first line says apart from what the plan leaves again.
+        HELD, ATTENTION = memory.Reading(reported, card, counted, held, left), attention
         print(
             f"held to the card: {reported / GIB:.2f} GiB reported, "
             f"{'no figure' if card is None else f'{card / GIB:.2f} GiB'} on the card,"
