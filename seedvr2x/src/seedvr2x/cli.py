@@ -635,17 +635,29 @@ def _run(args: argparse.Namespace) -> int:
             None if detector is None else detector.path,
         )
         pull.check_pinned(model_files)
+        # A job with every segment made takes no GPU, and is known for one here, before anything
+        # asks for it (DESIGN.md, Pause and resume: "the finished state is known before anything
+        # asks for the GPU"; Allocator: "A finished job run again asks the driver nothing"): a
+        # directory's, finished, which makes nothing; a .mkv path's, whose assembly alone is
+        # left, ffmpeg's work. Its driver isn't asked, no NVML is read, no CUDA device is
+        # wanted, and its environment is compared without the GPU (_identity). It is held to its
+        # model files as any job, checked above and hashed below, neither of which takes a GPU.
+        # But a .mkv path's whose first pass must run again with the shot detector, its frame
+        # index gone and its shots detected (`detects`): that pass takes the GPU, as any run.
+        idle = recorded is not None and complete(recorded) and not detects
         # The allocator, set before torch is imported, which the job's identity does and, for a
         # job recorded, the modules that compare it (_prior): numz's, which DESIGN.md keeps
         # (Allocator), or torch's own where the GPU's driver gives memory the card doesn't have,
         # which is asked here (runtime/memory.py), where a run first takes the GPU: one refused
         # before, for its source, its settings or its model files, asks the card nothing.
-        memory.startup()
+        if not idle:
+            memory.startup()
         if recorded is not None:
             assert directory is not None
             prior = _prior(
                 *(args, directory, recorded, trusted, cuts, declared, ffmpeg_version),
                 *(conversions, numz_padding, model_files),
+                idle=idle,
             )
             identity = prior.identity
             # A finished job with no first pass's record to trust: said finished, nothing made.
@@ -2007,15 +2019,28 @@ def _identity(
     conversions: str,
     numz_padding: bool,
     model_files: "ModelFiles",
+    made_in: dict[str, Any] | None = None,
 ) -> _Identity:
     """The job's identity, refused (JobError) without a CUDA GPU computing in bfloat16; its model
     files are checked before (weights.check_models, pull.check_pinned). The models are hashed
-    before any GPU work, each once a run (pull.Hashes)."""
+    before any GPU work, each once a run (pull.Hashes).
+
+    made_in: for a job recorded with every segment made, which takes no GPU (_run), the
+    environment its manifest records. Nothing is then asked of the GPU: no CUDA device is
+    wanted, torch.cuda isn't called, and the environment is this run's but for the GPU, its
+    driver and cuDNN's version, which are the record's own, the card that made its segments
+    (environment.current).
+    The device is still named, and used by nothing."""
     from seedvr2x.runtime.job import JobError
 
     settings = _settings(args, cuts, numz_padding, model_files) if directory is not None else {}
     import torch
 
+    if made_in is not None:
+        from seedvr2x.runtime import environment
+
+        found = environment.current(None, ffmpeg_version, conversions, made_in)
+        return _Identity(settings, torch.device("cuda", 0), found)
     if not torch.cuda.is_available():
         raise JobError("no CUDA device")
     if not torch.cuda.is_bf16_supported():
@@ -2039,6 +2064,7 @@ def _prior(
     conversions: str,
     numz_padding: bool,
     model_files: "ModelFiles",
+    idle: bool = False,
 ) -> _Prior:
     """The job recorded in directory, its manifest's content `recorded`, checked against the one
     asked before its first pass: the same settings, environment and source, the source being its
@@ -2064,17 +2090,26 @@ def _prior(
     or, after this, another layout or plan (_resume) are another job, as before. Not a .mkv
     path's job with every segment made and no file, which isn't finished, its assembly the next
     unit, made in this environment: refused, or accepted and recorded, as any resume.
-    PROVISIONAL (implementation, 2026-10-12, a question for design: the decision says "nothing
-    being made", and --plan FILE on a finished job writes the job's cut list): with --plan, such
-    a job in another environment is refused without --accept-env-change, as it was."""
+    With --plan FILE too, which writes the job's cut list and asks no flag either (design,
+    2026-10-12; refused without one until then): under another stack the list is written, the
+    manifest untouched; under another ffmpeg or other conversions it isn't, the frame index it
+    is written from not trusted there (_finished_already).
+
+    idle: the job has every segment made and takes no GPU (_run): its identity is made without
+    one (_identity), so that its GPU's name is no difference, not being asked."""
     from seedvr2x.media.scan import Idet
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import NAME, complete, planned
 
     path = directory / NAME
+    made_in: dict[str, Any] | None = None
+    if idle:
+        # Not a record of this code's, without an environment: refused below, as another job.
+        was: Any = recorded.get("environment")
+        made_in = cast(dict[str, Any], was) if isinstance(was, dict) else {}
     identity = _identity(
-        *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
+        *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files, made_in
     )
     asked = {
         "settings": identity.settings,
@@ -2086,7 +2121,7 @@ def _prior(
     recut = [line for line in found if resume.setting(line) in resume.CUT_SETTINGS]
     other = len(found) > len(changed) + len(recut)
     replanned = recut if recut and not other and planned(recorded) else []
-    finished = _final(args.output) is None and complete(recorded) and args.plan is None
+    finished = _final(args.output) is None and complete(recorded)
     if other or recut != replanned or (changed and not args.accept_env_change and not finished):
         raise _another_job(
             path,
@@ -2272,6 +2307,13 @@ def _resume(record: "Manifest", prior: _Prior, assembles: bool = False) -> bool:
             shutil.rmtree(path)
         else:
             path.unlink()
+    if complete(prior.recorded) and not assembles:
+        # A finished job resumes nothing (design, 2026-10-12): no "resuming DIR: 2 of 2 segments
+        # finished" between its environment's line and "finished already"; what was discarded
+        # is said as _finished_already says it.
+        if discarded:
+            logger.info("%s: %s discarded", record.path.parent, _plural(len(discarded), "leftover"))
+        return False
     logger.info(
         "resuming %s: %d of %d segments finished, %d of %d shots encoded, %d windows kept; %s"
         " discarded",
@@ -2399,7 +2441,7 @@ def _finished_already(
 
     The job is checked before this as any job resumed is before its first pass (_prior): the
     same settings, the pins that shape its plan among them, and source by content, or refused,
-    its environment said, never refused but with --plan (_prior). Of what a resume compares
+    its environment said, never refused, with --plan or without (_prior). Of what a resume compares
     after its first pass (_resume), it is held to what needs no decode: what the source declares
     (DECLARED) and the output's format, size (`target`, its (height, width) before the output's
     rounding) and rate, against its record, another job when they differ (JobError), as an

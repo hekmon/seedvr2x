@@ -339,6 +339,7 @@ def startup() -> str:
     NATIVE where the driver spills, ASYNC elsewhere; returned. Called where a run first takes
     the GPU (cli._run, its model files checked), so that a run refused before it, for its
     source, its settings or its model files, asks nothing: the request disturbs the card (probe).
+    Nor does a job recorded with every segment made, which takes no GPU: it isn't called for one.
 
     The driver is asked only where it can spill, behind WSL2's device: a Linux driver refuses,
     and isn't disturbed. What was found is said in the log, a warning where it spills. No

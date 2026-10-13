@@ -6,9 +6,11 @@ its encode through its windows to its decode, which writes, for each frame, the 
 the job divided by 1000: so each output frame says where it comes from. The model's own output
 is the GPU tests' (test_regression.py, test_shots.py)."""
 
+import ctypes
 import errno
 import fcntl
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -198,6 +200,8 @@ STAND_IN_DETECTOR = Pin(0, hashlib.sha256(b"").hexdigest(), "detector")
 # The shot detector and its pin as seedvr2x has them, which the stand-in replaces.
 DETECTOR_PIN = pull.PINNED[pull.DETECTOR]
 REAL_DETECTOR = Detector
+# The model files' check by their headers, which the stand-in replaces too.
+CHECK_MODELS = weights.check_models
 
 
 def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
@@ -3378,18 +3382,18 @@ def test_environment_change_accepted(
     assert first["after"]["gpu"] == "another"
     assert (second["before"], second["after"]) == ({"gpu": "another"}, {"gpu": "a third"})
     assert second["windows_done"] == 4
-    # The job is the third GPU's now. Finished, it is said finished on the first one too, its
-    # environment's difference from its manifest's said and no flag asked, where it was refused
-    # as a resume is (design, 2026-10-12; test_finished_job_in_another_environment).
+    # The job is the third GPU's now. Finished, it is said finished on the first one too, no
+    # flag asked, where it was refused as a resume is (design, 2026-10-12): and the first GPU
+    # isn't asked its name, a finished job taking none, so that nothing is said of it
+    # (test_finished_job_in_another_environment).
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "a stand-in")
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: pytest.fail("asked"))
     finished = manifest.read_bytes()
     caplog.set_level(logging.INFO, logger="seedvr2x")
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    assert (
-        'nothing being made in this one: environment.gpu: "a third" -> "a stand-in"' in caplog.text
-    )
+    assert "finished already, its 2 segments" in caplog.text
+    assert "its environment differs" not in caplog.text
     assert manifest.read_bytes() == finished
 
 
@@ -4420,6 +4424,9 @@ def test_finished_job_run_again_makes_nothing(
     assert passes == [] and StandInDetector.built == [] and asked == [False]
     assert scripted.calls == [] and written_as(*files) == kept
     assert not (out / "resume").exists()
+    # What was discarded is said, with its index as without; never that the job resumes.
+    assert re.search(rf"{re.escape(str(out))}: \d leftovers? discarded", caplog.text)
+    assert "resuming " not in caplog.text
     needs_none = "a finished job needs none, and makes nothing again"
     if index == "intact":
         assert needs_none not in caplog.text
@@ -4501,8 +4508,324 @@ def test_file_job_with_every_segment_finished_is_assembled(
     assert cli.main(["verify", str(final)]) == 0
 
 
+def nothing_asked_of_the_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """From here on, a run that asks anything of the GPU fails its test: the driver (the
+    question runtime/memory.py puts to it behind WSL2's device, which is there), the card's free
+    memory or the driver's version through NVML, either of the driver's libraries loaded, or
+    any function of torch.cuda's called, torch.cuda.is_available first, which a machine with no
+    CUDA device answers no to."""
+    from seedvr2x.runtime import memory, model
+
+    def asked(what: str) -> Callable[..., Any]:
+        return lambda *arguments, **options: pytest.fail(f"asked of the GPU: {what}")
+
+    monkeypatch.setattr(memory, "paravirtual", lambda: True)
+    for name in ("startup", "probe", "card_free", "reading", "hold", "check"):
+        monkeypatch.setattr(memory, name, asked(f"runtime.memory.{name}"))
+    monkeypatch.setattr(model, "nvidia_driver", asked("the driver's version, through NVML"))
+    monkeypatch.setattr(cli, "_free_memory", asked("the GPU's free memory"))
+    load = ctypes.CDLL
+
+    def loading(name: str, *arguments: Any, **options: Any) -> Any:
+        if name in (memory.CUDA, memory.NVML, "libnvidia-ml.so.1"):
+            pytest.fail(f"asked of the GPU: {name} loaded")
+        return load(name, *arguments, **options)
+
+    monkeypatch.setattr(ctypes, "CDLL", loading)
+    for name, value in vars(torch.cuda).items():
+        if inspect.isroutine(value) and not name.startswith("__"):
+            monkeypatch.setattr(torch.cuda, name, asked(f"torch.cuda.{name}"))
+
+
+@pytest.mark.parametrize("plan", [False, True], ids=["run again", "--plan"])
+@pytest.mark.parametrize("index", ["intact", "missing"])
+def test_a_finished_job_asks_the_gpu_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    index: str,
+    plan: bool,
+) -> None:
+    # DESIGN.md, Pause and resume: "the finished state is known before anything asks for the
+    # GPU"; Allocator: "A finished job run again asks the driver nothing." A finished directory
+    # job run again, its frame index there or not, with --plan FILE or without: said finished
+    # with nothing asked of the GPU, its driver or NVML, as on a machine with no CUDA device,
+    # which answered "no CUDA device", exit 1, until then, and under WSL2 after its driver had
+    # been asked for more memory than the card had free.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    out = tmp_path / "out"
+    files = (out / "manifest.json", out / "frame_index.bin")
+    spoiled(files[1], index)
+    kept = written_as(*files)
+    nothing_asked_of_the_gpu(monkeypatch)
+    steps.calls.clear()
+    caplog.clear()
+    listed = tmp_path / "plan.txt"
+    options = (*JOB, "--plan", str(listed)) if plan else JOB
+    # Its cut list is written from its frame index, by --plan, where that is there.
+    assert upscale(tmp_path, source_path, "out", *options) == (plan and index == "missing")
+    assert f"{out}: finished already, its 2 segments" in caplog.text
+    assert "no CUDA device" not in caplog.text and steps.calls == []
+    assert listed.is_file() == (plan and index == "intact") and written_as(*files) == kept
+    # Another job in that directory is refused as before, and asks no more.
+    text = refused(tmp_path, source_path, caplog, *options, "--seed", "7")
+    assert "another job than the one asked" in text and "settings.seed: 42 -> 7" in text
+    # A job that isn't finished takes the GPU, and is refused where there is none.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(memory_of_the_run(), "startup", lambda: "backend:cudaMallocAsync")
+    assert "no CUDA device" in refused(tmp_path, source_path, caplog, *JOB, output="new")
+
+
+# A job run again in a process of its own, every routine of torch.cuda's wrapped before
+# seedvr2x is imported: each call that isn't made from within another of them is written to the
+# file named first, with the file and line of its caller, the first frame outside torch's own
+# files. The model files pass unread.
+CALLS_OF_TORCH_CUDA = """
+import inspect
+import json
+import sys
+
+import torch
+
+calls = []
+within = []
+
+
+def watched(name, routine):
+    def asked(*arguments, **options):
+        if not within:
+            frame = sys._getframe(1)
+            while frame is not None and "/torch/" in frame.f_code.co_filename:
+                frame = frame.f_back
+            where = ("", 0) if frame is None else (frame.f_code.co_filename, frame.f_lineno)
+            calls.append([name, *where])
+        within.append(name)
+        try:
+            return routine(*arguments, **options)
+        finally:
+            within.pop()
+
+    # What torch's own modules read of a routine as they are imported (__wrapped__).
+    asked.__dict__.update(getattr(routine, "__dict__", {}))
+    return asked
+
+
+for name, value in list(vars(torch.cuda).items()):
+    if inspect.isroutine(value) and not name.startswith("__"):
+        setattr(torch.cuda, name, watched(name, value))
+assert not [name for name in sys.modules if name.split(".")[0] == "seedvr2x"]
+from seedvr2x import cli
+from seedvr2x.runtime import weights
+
+weights.check_models = lambda *a: None
+status = cli.main(sys.argv[2:])
+with open(sys.argv[1], "w") as out:
+    json.dump(calls, out)
+sys.exit(status)
+"""
+
+
+def test_a_finished_job_calls_no_torch_cuda_of_its_own_in_a_fresh_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # A finished job run again in a process of its own, as a user runs it, on a machine that
+    # shows no CUDA device: said finished, and nothing of seedvr2x's calls torch.cuda on its
+    # way. The tests above set their guard in a process that has run a job already: torch
+    # reads cuDNN's version through a first call that asks torch.cuda whether a device is
+    # there, and keeps it, so that the environment's own reading of it there
+    # (environment.current, torch.backends.cudnn.version) passed them unseen (a review,
+    # 2026-10-12). What isn't seedvr2x's is told apart by its caller's file: diffusers, which
+    # the vendored models import, asks torch.cuda.is_available once as it is imported
+    # (diffusers/utils/torch_utils.py), on this path too, the environment's packages being
+    # those of every module of seedvr2x (environment.versions).
+    source_path = job(tmp_path, monkeypatch)
+    # The job is recorded under a cuDNN that no torch answers here, which the run again must
+    # take from its record to find no difference.
+    monkeypatch.setattr(torch.backends.cudnn, "version", lambda: 1)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    out, calls = tmp_path / "out", tmp_path / "calls.json"
+    kept = written_as(out / "manifest.json")
+    assert json.loads((out / "manifest.json").read_text())["environment"]["cudnn"] == 1
+    result = subprocess.run(
+        [
+            *(sys.executable, "-c", CALLS_OF_TORCH_CUDA, str(calls)),
+            *command(tmp_path, source_path, "out", *JOB),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "CUDA_VISIBLE_DEVICES": "",
+            "HF_HOME": str(tmp_path / "hf"),
+            "HF_HUB_OFFLINE": "1",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"{out}: finished already, its 2 segments" in result.stderr
+    package = str(Path(cli.__file__).resolve().parent)
+    made: list[tuple[str, str, int]] = [tuple(call) for call in json.loads(calls.read_text())]
+    assert [call for call in made if call[1].startswith(package)] == []
+    # Its environment is the record's where it isn't read, cuDNN's version with the GPU's name.
+    assert "its environment differs" not in result.stderr
+    assert written_as(out / "manifest.json") == kept
+    # The guard saw the process: the call that isn't seedvr2x's is there.
+    others = {(name, Path(file).parent.name, Path(file).name) for name, file, _ in made}
+    assert ("is_available", "utils", "torch_utils.py") in others
+
+
+def memory_of_the_run() -> ModuleType:
+    from seedvr2x.runtime import memory
+
+    return memory
+
+
+@pytest.mark.parametrize("index", ["intact", "missing"])
+@pytest.mark.parametrize("cut", ["by a list", "detected"])
+def test_a_job_with_only_its_assembly_left_asks_the_gpu_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,
+    caplog: pytest.LogCaptureFixture,
+    index: str,
+    cut: str,
+) -> None:
+    # A .mkv path's job with every segment made and no file yet: its assembly is ffmpeg's work,
+    # and takes no GPU: the file is assembled with nothing asked of the GPU, its driver or NVML.
+    # But where its first pass runs again with the shot detector, its frame index gone and its
+    # shots detected: that pass takes the GPU, and the run asks for it as any run does.
+    from seedvr2x.runtime import memory
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    options = JOB if cut == "by a list" else CUT
+    final, work = tmp_path / "one.mkv", tmp_path / "one.mkv.work"
+    with monkeypatch.context() as full:
+        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, source_path, "one.mkv", *options) == 1
+    assert not final.exists()
+    spoiled(work / "frame_index.bin", index)
+    takes_the_gpu = index == "missing" and cut == "detected"
+    started: list[str] = []
+    if takes_the_gpu:
+        monkeypatch.setattr(memory, "startup", lambda: started.append("asked") or "backend:x")
+    else:
+        nothing_asked_of_the_gpu(monkeypatch)
+    passes = first_passes(monkeypatch)
+    StandInDetector.built.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "one.mkv", *options) == 0
+    assert final.is_file() and not work.exists() and indexes(final) == list(range(25))
+    # It resumes, its assembly left to make, and says so, where a finished job resumes nothing.
+    assert f"resuming {work}: " in caplog.text
+    assert started == ["asked"] * takes_the_gpu
+    assert len(StandInDetector.built) == takes_the_gpu and len(passes) == (index == "missing")
+
+
 @pytest.mark.parametrize("accept", [(), ("--accept-env-change",)], ids=["unasked", "accepted"])
-@pytest.mark.parametrize("change", ["GPU", "ffmpeg"])
+@pytest.mark.parametrize("change", ["GPU", "stack", "ffmpeg"])
+def test_a_job_with_only_its_assembly_left_in_another_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    change: str,
+    accept: tuple[str, ...],
+) -> None:
+    # A .mkv path's job with every segment made and its assembly left, run again in another
+    # environment. On another GPU alone: assembled, with the flag or without, nothing asked of
+    # the GPU and nothing said: such a job takes no GPU and asks for none, its name no more than
+    # the rest, and its manifest keeps the card that made its segments (environment.current).
+    # PROVISIONAL, as built: DESIGN.md has that assembly "made in the new environment, refused
+    # without the flag as any resume", and has such a job ask the driver nothing and need no
+    # GPU; the two can't both hold of another GPU, a question put to design (a review,
+    # 2026-10-12). Under another stack or another ffmpeg it is refused without the flag as any
+    # resume, nothing made; with it, the difference is said and the file assembled, the first
+    # pass run again under another ffmpeg.
+    from seedvr2x.runtime import model
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    final, work = tmp_path / "one.mkv", tmp_path / "one.mkv.work"
+    with monkeypatch.context() as full:
+        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, source_path, "one.mkv", *JOB) == 1
+    assert not final.exists()
+    kept = written_as(work / "manifest.json")
+    recorded = json.loads((work / "manifest.json").read_text())["environment"]
+    differs = ""
+    if change == "GPU":
+        # The machine's card is another one, and asking for its name fails the test.
+        assert recorded["gpu"] == "a stand-in"
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another card")
+        nothing_asked_of_the_gpu(monkeypatch)
+    elif change == "stack":
+        monkeypatch.setattr(model, "attention_backend", lambda: "another backend")
+        differs = f'environment.attention: "{recorded["attention"]}" -> "another backend"'
+    else:
+        monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
+        differs = f'environment.ffmpeg: "{recorded["ffmpeg"]}" -> "n0.0-another"'
+    passes = first_passes(monkeypatch)
+    steps.calls.clear()
+    caplog.clear()
+    status = upscale(tmp_path, source_path, "one.mkv", *JOB, *accept)
+    if change != "GPU" and not accept:
+        # Refused as any resume in another environment, the flag named, nothing made.
+        assert status == 1 and not final.exists() and written_as(work / "manifest.json") == kept
+        [said] = errors(caplog)
+        assert said.startswith(
+            f"{work / 'manifest.json'}: another job than the one asked, which differs in:"
+        )
+        assert differs in said and "--accept-env-change" in said
+        assert passes == [] and steps.calls == []
+        return
+    assert status == 0 and errors(caplog) == [] and steps.calls == []
+    assert final.is_file() and not work.exists() and indexes(final) == list(range(25))
+    assert f"resuming {work}: " in caplog.text
+    if change == "GPU":
+        assert "environment" not in caplog.text and "--accept-env-change" not in caplog.text
+        assert passes == []
+    else:
+        resumed = "resumed in another environment, as accepted, which its manifest records"
+        assert f"{work}: {resumed} with the next unit made: {differs}" in caplog.text
+        assert len(passes) == (change == "ffmpeg")
+
+
+def test_a_finished_job_is_held_to_its_model_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Pause and resume: a finished directory job "is still held to its settings, its
+    # model files, its source's content and its directory". Its model files are checked and
+    # hashed before it is said finished, as any job's before its record is compared, and
+    # neither takes a GPU: one missing is refused as a missing model file is, by the header
+    # check, exit 1, the job not said finished; another file under its name is another job.
+    # Nothing is asked of the GPU for either.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    kept = contents(tmp_path / "out")
+    nothing_asked_of_the_gpu(monkeypatch)
+    again = command(tmp_path, source_path, "out", *JOB)
+    model_file = tmp_path / "w.safetensors"
+    model_file.write_bytes(b"another file")
+    caplog.clear()
+    assert cli.main(again) == 1
+    assert "another job than the one asked" in caplog.text
+    assert "settings.dit_model.sha256: " in caplog.text and "finished already" not in caplog.text
+    model_file.unlink()
+    monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
+    caplog.clear()
+    assert cli.main(again) == 1
+    assert errors(caplog) == [f"{model_file}: {weights.MISSING}\n{model_file}: {weights.MISSING}"]
+    assert "finished already" not in caplog.text and contents(tmp_path / "out") == kept
+
+
+@pytest.mark.parametrize("accept", [(), ("--accept-env-change",)], ids=["unasked", "accepted"])
+@pytest.mark.parametrize("change", ["GPU", "stack", "ffmpeg"])
 def test_finished_job_in_another_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4517,9 +4840,13 @@ def test_finished_job_in_another_environment(
     # line, the same with the flag given and without, then "finished already", exit 0, with no
     # first pass, under another ffmpeg too, whose pass a resume runs again, and nothing written:
     # its manifest keeps the environment that made it, no change recorded, and its index is as
-    # it was. Which is what is said, with its trusted index (the GPU's change: cli._resume) as
+    # it was. Which is what is said, with its trusted index (the stack's change: cli._resume) as
     # without (ffmpeg's: cli._finished_already), never that its manifest records the change "with
-    # the next unit made": a finished job makes none.
+    # the next unit made": a finished job makes none, nor that it resumes: it resumes nothing.
+    # Another GPU alone isn't said: a finished job asks nothing of the GPU, its name no more
+    # than the rest (cli._run; environment.current), on the card that made it or on another.
+    from seedvr2x.runtime import model
+
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
@@ -4528,22 +4855,27 @@ def test_finished_job_in_another_environment(
     kept = written_as(*files)
     passes = first_passes(monkeypatch)
     steps.calls.clear()
+    recorded = json.loads(files[0].read_text())["environment"]
+    differs = ""
     if change == "GPU":
-        monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
-        differs = 'environment.gpu: "a stand-in" -> "another"'
+        monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: pytest.fail("asked"))
+        monkeypatch.setattr(model, "nvidia_driver", lambda: pytest.fail("asked"))
+    elif change == "stack":
+        monkeypatch.setattr(model, "attention_backend", lambda: "another backend")
+        differs = f'environment.attention: "{recorded["attention"]}" -> "another backend"'
     else:
-        recorded = json.loads(files[0].read_text())["environment"]["ffmpeg"]
         monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
-        differs = f'environment.ffmpeg: "{recorded}" -> "n0.0-another"'
+        differs = f'environment.ffmpeg: "{recorded["ffmpeg"]}" -> "n0.0-another"'
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *JOB, *accept) == 0
     said = [record.getMessage() for record in caplog.records]
     stays = "its environment differs from this one and stays its manifest's, nothing being made"
-    assert said.count(f"{out}: {stays} in this one: {differs}") == 1
+    assert said.count(f"{out}: {stays} in this one: {differs}") == (change != "GPU")
+    assert caplog.text.count("its environment differs") == (change != "GPU")
     assert said[-1] == f"{out}: finished already, its 2 segments" and errors(caplog) == []
     assert passes == [] and steps.calls == [] and written_as(*files) == kept
     assert "another job" not in caplog.text and "--accept-env-change" not in caplog.text
-    assert "as accepted" not in caplog.text
+    assert "as accepted" not in caplog.text and "resuming " not in caplog.text
     assert "resumed in another environment" not in caplog.text
     assert "the next unit made" not in caplog.text
     assert json.loads(files[0].read_text())["environment_changes"] == []
@@ -4552,12 +4884,24 @@ def test_finished_job_in_another_environment(
     text = refused(tmp_path, source_path, caplog, *JOB, "--seed", "7", *accept)
     assert "another job than the one asked" in text and "settings.seed: 42 -> 7" in text
     assert differs in text and "Only its environment differs" not in text
-    # With --plan, which writes the job's cut list, a file made in this environment, the flag
-    # is asked as it was (PROVISIONAL, cli._prior): refused without it, nothing written.
-    text = refused(tmp_path, source_path, caplog, *JOB, "--plan", "plan.txt")
-    assert differs in text
-    assert "Only its environment differs: --accept-env-change resumes it anyway" in text
-    assert list(tmp_path.glob("plan*")) == []
+    # With --plan FILE, which writes the job's cut list, no flag is asked either (design,
+    # 2026-10-12; refused without one until then, in words that promised a resume). Under
+    # another stack, as on another GPU, the list is written from the job's frame index, exit 0;
+    # under another ffmpeg it isn't, exit 1, that index not being one this ffmpeg made. The
+    # manifest is untouched in all three, and no line says the job resumes.
+    plan = tmp_path / "plan.txt"
+    caplog.clear()
+    status = upscale(tmp_path, source_path, "out", *JOB, "--plan", str(plan), *accept)
+    assert status == (change == "ffmpeg") and plan.is_file() == (change != "ffmpeg")
+    assert caplog.text.count(f"{stays} in this one: {differs}") == (change != "GPU")
+    assert f"{out}: finished already, its 2 segments" in caplog.text
+    assert "resuming " not in caplog.text and "--accept-env-change" not in caplog.text
+    not_written = (
+        f"--plan {plan}: not written: {out} is finished already, and a job's cut list is written"
+        " from its frame index, which another ffmpeg or other conversions than this run's made"
+    )
+    assert (not_written in caplog.text) == (change == "ffmpeg")
+    assert errors(caplog) == [] or change == "ffmpeg"
     assert passes == [] and steps.calls == [] and written_as(*files) == kept
 
 

@@ -42,23 +42,50 @@ START_HOOKS = ("_distutils_hack",)
 DOWNLOAD_ONLY = frozenset({"hf-xet"})
 
 
-def current(device: torch.device, ffmpeg_version: str, conversions: str) -> dict[str, object]:
+def current(
+    device: torch.device | None,
+    ffmpeg_version: str,
+    conversions: str,
+    made_in: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     """The environment of a run on device: torch, CUDA, cuDNN, the GPU, the attention backend and
     FlashAttention, ffmpeg and its conversions' fingerprint (media/fingerprint.py), Python and
     the versions of the distributions (versions); and the NVIDIA driver, for information only,
-    since the math kernels ship with torch."""
+    since the math kernels ship with torch.
+
+    device None: a run that takes no GPU, of a job recorded with every segment made (cli._run):
+    a finished job said finished, or a file's assembly. Nothing is asked of the GPU, torch.cuda
+    not called and NVML not loaded: the GPU, its driver and cuDNN's version are those of
+    made_in, the environment the job's manifest records, the card that made its segments, and
+    the rest is this run's. cuDNN's with them: torch reads its version through a first call
+    that asks torch.cuda whether a device is there, and its capability where one answers
+    (torch 2.14.1, torch/backends/cudnn/__init__.py, _init); the library is still compared, by
+    its distribution's version among the packages (versions). So another GPU alone is no
+    difference there, and isn't said: saying it would take asking for it. PROVISIONAL
+    (implementation, 2026-10-12), for both such jobs. DESIGN.md has a finished job run again
+    "under another GPU, stack or ffmpeg", the difference said in one line, and a file's
+    assembly "made in the new environment, refused without the flag as any resume"; and it has
+    both ask the driver nothing and need no GPU. The stack's and ffmpeg's differences are said
+    of the first and refuse the second without the flag; another GPU alone does neither: the
+    file is assembled, the manifest keeping the card that made its segments."""
     from seedvr2x.runtime import model
 
     try:
         flash_attn = metadata.version("flash_attn")
     except metadata.PackageNotFoundError:
         flash_attn = None
+    if device is None:
+        made = made_in or {}
+        gpu, driver, cudnn = made.get("gpu"), made.get("driver"), made.get("cudnn")
+    else:
+        gpu, driver = torch.cuda.get_device_name(device), model.nvidia_driver()
+        cudnn = torch.backends.cudnn.version()
     return {
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
-        "cudnn": torch.backends.cudnn.version(),
-        "gpu": torch.cuda.get_device_name(device),
-        "driver": model.nvidia_driver(),
+        "cudnn": cudnn,
+        "gpu": gpu,
+        "driver": driver,
         "attention": model.attention_backend(),
         "flash_attn": flash_attn,
         "ffmpeg": ffmpeg_version,
