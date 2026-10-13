@@ -25,15 +25,24 @@ manifest unchanged, or doesn't finish on the higher one with the uninterrupted r
 case or a check that raises is a failure too. The last line counts what was compared: a batch
 that compared nothing says so, and doesn't pass for one where everything was equal.
 
-What the refusal's comparison is, and isn't. "free" has a side of its own: the constants below,
-measured on the card. "takes" is the sentence seedvr2x logged against this script's own call of
-the same planner for the lower card: it holds that the command line gave the planner the job
-this script describes, and that the sentence says the planner's figure. It can't catch a
-planner whose constants are wrong: both sides would say the same wrong figure. Those are held
-by each phase's predicted peak against the measured one, the table's columns. Beside it, where
-the pinned plan keeps nothing of the DiT in the phase the refusal names, "takes" is also held
-to the peak the case's own run recorded for that phase in its manifest, on the card above, with
-the planner's room and margin (recorded): another process's figure, the planner's still.
+What the refusal's comparisons are, and aren't. "free" has a side of its own: the constants
+below, measured on the card. "takes" is first the sentence seedvr2x logged against this script's
+own call of the same planner for the lower card: it holds that the command line gave the planner
+the job this script describes, and that the sentence says the planner's figure. That one can't
+catch a planner whose constants are wrong: both sides would say the same wrong figure.
+
+So "takes" is also held to what the card showed (measured_takes): the peak the case's own run
+MEASURED for the phase the refusal names, the largest of its units' "VRAM peak" log lines, with
+the margin and, for a VAE pass, the room, both written here as DESIGN.md has them (MARGIN, ROOM),
+not read from the planner; no margin on a machine held to its card, whose plan takes none.
+Only where the two are the same thing: the refusal counts a VAE pass with the DiT off the GPU
+and the DiT's phase with the VAE's weights away, at the window the run ran; a plan that kept
+some of them there isn't compared, and is said so. Within a tolerance by the kind of phase,
+said with each comparison (TOLERANCE): a predicted peak is an upper bound that stands as far
+over the measure as its fit is loose. The DiT's phase and a tiled decode, whose tile's peak is
+a measured one, are held closely, to 0.10 and 0.05 GiB over; an untiled decode by its fit, and
+every encode, which the planner takes 0.4 GiB over its peak, only to 0.5 to 1.0 GiB: a constant
+wrong by less passes there, and each such line says "loosely".
 
 EMULATED and BARE are what seedvr2x found free on the RTX PRO 6000 this was written on
 (research/docs/planner-limits.md's N - 1.44 is numz's): they choose the clips' lengths, and are
@@ -94,6 +103,36 @@ FIGURES = {
 # The planner says its figures to the hundredth of a GiB, what is taken rounded up and what is
 # there rounded down: two that differ by more aren't the same figure.
 HUNDREDTH = 0.01 + 1e-9
+
+# What the plan leaves under the free memory, and the room a VAE pass is held to besides, in
+# GiB, as DESIGN.md has them (Memory planner, Budget: 0.6, and 1.5 further under the budget for
+# a VAE pass): written here, not read from seedvr2x's planner, so that a planner whose own
+# moved doesn't agree with itself (measured_takes). On a machine held to its card the plan
+# takes no margin on top, the 4.5 GiB it leaves under torch's limit measuring the same need
+# (DESIGN.md, Allocator): margin_taken.
+MARGIN = 0.6
+ROOM = 1.5
+# How far what a refusal says a phase takes may stand from the peak the case's run measured for
+# it with the margin and the room, in GiB, (under, over), by the kind of phase (measured_takes).
+# Under: both figures are said to the hundredth, the one rounded up, the other to the nearest,
+# and a tiled decode read 0.01 over its prediction in three cases of nine; over: by how much
+# the predicted peaks stood over the measured ones in the nine-case matrix on the 96 GB card
+# (2026-10-12, on an earlier tree: the planner as 7cc874f has it), and a little more:
+# - the DiT's phase: 0.00 to 0.07 GiB over, nine cases;
+# - a tiled decode: 0.01 under to 0.02 over, eight cases, its tile's peak a measured one;
+# - an untiled decode: 0.67 over, one case, its peak a fit's;
+# - a tiled encode: 0.39 to 0.41 over, six cases, the 0.4 GiB the planner takes every encode
+#   over its peak (ENCODE_EXTRA, provisional);
+# - an untiled encode: 0.30, 0.91 and 0.91 over, three cases, that and its fit.
+# The last three hold little: a constant wrong by under 0.5 to 1.0 GiB passes them.
+TOLERANCE = {
+    "DiT": (0.02, 0.10),
+    "tiled decode": (0.03, 0.05),
+    "untiled decode": (0.03, 0.75),
+    "tiled encode": (0.03, 0.50),
+    "untiled encode": (0.03, 1.00),
+}
+LOOSE = ("untiled decode", "tiled encode", "untiled encode")
 
 
 # On a machine held to its card (machine): the bare card's reading there, seedvr2x's
@@ -183,34 +222,91 @@ REFUSED_PHASE = (
 )
 
 
-def recorded(said: list[str], plan: dict) -> dict | None:
-    """What the refusal one notch under says the plan takes (said, its log's error lines)
-    against the peak the case's own run recorded for the phase it names (plan, its manifest's),
-    with the room a VAE pass is held to and the margin, rounded up as the planner says what is
-    taken: {"phase", "said", "expected", "equal"}. None where the two aren't the same figure:
-    the refusal counts a VAE pass with the DiT off the GPU and the DiT's phase with the VAE's
-    weights away, and the plan that ran kept some of them there; or the refusal names no phase
-    (a draw of noise, the system memory)."""
-    from seedvr2x.runtime import planner
+def margin_taken() -> float:
+    """The margin a plan takes on this machine, in GiB: MARGIN, or none where the run is held
+    to its card (machine)."""
+    return 0.0 if HELD is not None else MARGIN
 
+
+# The window a refusal for the DiT's phase counts, in latents (seedvr2x's runtime/planner.py:
+# _window's "its longest window, N latents,", _swap_refused's "a window of N latents,",
+# _too_large's "its smallest window, N latents,"), and the floor's words for the DiT's phase,
+# which counts every block swapped (_too_large).
+REFUSED_WINDOW = re.compile(
+    r"(?:its longest window,|its smallest window,|a window of) (\d+) latents?,"
+)
+FLOOR = "with every block of the DiT swapped and the VAE off the GPU"
+EVERY_BLOCK = 36
+
+
+def measured_takes(said: list[str], plan: dict, units: dict) -> dict:
+    """What the refusal one notch under says the plan takes (said, its log's error lines)
+    against the peak the case's own run measured for the phase it names (units, the largest of
+    the phase's "VRAM peak" log lines, to the log's hundredth of a GiB), with the margin the
+    plan took (margin_taken: none on a machine held to its card) and, for a VAE pass, the room
+    (ROOM): {"phase", "kind", "said", "peak", "margin", "expected", "over", "tolerance",
+    "within", "loose"}; or {"skipped": why} where the two aren't the same
+    thing: the refusal counts a VAE pass with the DiT off the GPU, and the DiT's phase with the
+    VAE's weights away at the window it names, a pin's or the size's smallest, and the plan
+    that ran (plan, its manifest's) kept some of them there or ran another window; or the
+    refusal names no phase the run measured (a draw of noise, the system memory)."""
     line = next((line for line in said if figures(line)["takes"] is not None), "")
     phase = next((phase for pattern, phase in REFUSED_PHASE if pattern.search(line)), None)
     memory = plan["memory"]
+    if phase is None and "its smallest window" in line and FLOOR in line:
+        # The size's floor, the DiT's smallest window: the run's own where it swapped every
+        # block and ran that window.
+        if memory["swapped_blocks"] != EVERY_BLOCK:
+            return {"skipped": "the refusal counts every block swapped, the run swapped fewer"}
+        phase = "dit"
     if phase is None:
-        return None
-    if phase == "dit" and memory["vae_in_dit"]:
-        return None
-    if phase != "dit" and memory[f"resident_{phase}"] != 0:
-        return None
-    need = memory[f"{phase}_peak"] + planner.MARGIN + (0 if phase == "dit" else planner.VAE_ROOM)
-    expected = math.ceil(need / GIB * 100 - 1e-6) / 100
+        return {"skipped": "the refusal names no phase the run measured"}
+    if phase == "dit":
+        window = REFUSED_WINDOW.search(line)
+        if memory["vae_in_dit"]:
+            return {"skipped": "the run kept the VAE's weights on the GPU in the DiT's phase"}
+        if window is None or int(window[1]) != memory["longest_window"]:
+            return {"skipped": "the refusal counts another window than the run's longest"}
+        kind = "DiT"
+    else:
+        if memory[f"resident_{phase}"] != 0:
+            return {"skipped": f"the run kept some of the DiT on the GPU in its {phase}"}
+        kind = f"{'untiled' if plan[f'{phase}_tiles'] is None else 'tiled'} {phase}"
+    peak = units[phase]["peak"]
+    if peak is None:
+        return {"skipped": f"no measured peak of the {phase} in the run's log"}
+    margin = margin_taken()
+    expected = round(peak + margin + (0 if phase == "dit" else ROOM), 2)
     takes = figures(line)["takes"]
+    over = round(takes - expected, 2)
+    under, most = TOLERANCE[kind]
     return {
         "phase": phase,
+        "kind": kind,
         "said": takes,
+        "peak": peak,
+        "margin": margin,
         "expected": expected,
-        "equal": abs(takes - expected) <= HUNDREDTH,
+        "over": over,
+        "tolerance": [under, most],
+        "within": -under - 1e-9 <= over <= most + 1e-9,
+        "loose": kind in LOOSE,
     }
+
+
+def measure_said(found: dict) -> str:
+    """measured_takes' result in a clause, for the case's line."""
+    if "skipped" in found:
+        return f"not held to a measured peak: {found['skipped']}"
+    room = "" if found["phase"] == "dit" else f" and the room, {ROOM}"
+    margin = f"the margin, {found['margin']}" if found["margin"] else "no margin (a held run)"
+    return (
+        f"takes {found['said']} GiB said for {found['expected']} by the {found['kind']}'s peak"
+        f" this case's run measured, {found['peak']}, with {margin}{room}:"
+        f" {found['over']:+.2f}, {'within' if found['within'] else 'OUTSIDE'}"
+        f" -{found['tolerance'][0]} to +{found['tolerance'][1]}"
+        f"{', held loosely (the docstring)' if found['loose'] else ''}"
+    )
 
 
 def planned(free, target: tuple[int, int], latents: int, pins=None):
@@ -374,23 +470,20 @@ def case(args, spec: str) -> dict:
                 f" {checked['expected'][figure]} expected"
                 for figure in checked["mismatch"]
             ]
-            # And against the peak this case's own run recorded for the phase refused, where
-            # the two are the same figure (recorded).
-            above = recorded(errors, plan)
-            result["under"]["recorded"] = above
-            if above is not None and not above["equal"]:
+            # And against the peak this case's own run measured for the phase refused, where
+            # the two are the same thing (measured_takes).
+            above = measured_takes(errors, plan, result["units"])
+            result["under"]["measured"] = above
+            if not above.get("within", True):
                 failed.append(
                     f"one notch under: takes {above['said']} GiB said, {above['expected']} by"
-                    f" the {above['phase']}'s peak this case's run recorded"
+                    f" the {above['kind']}'s peak this case's run measured: {above['over']:+.2f},"
+                    f" outside -{above['tolerance'][0]} to +{above['tolerance'][1]}"
                 )
             print(
                 f"{name}: one notch under ({under[0]:g} GB): exit {status};"
-                f" {'; '.join(failed) if failed else 'its figures as the planner gives them'}"
-                + (
-                    ""
-                    if above is None
-                    else f"; takes {above['said']} for {above['expected']} by the peak recorded"
-                ),
+                f" {'; '.join(failed) if failed else 'its figures as the planner gives them'};"
+                f" {measure_said(above)}",
                 flush=True,
             )
         else:
@@ -596,11 +689,13 @@ def main() -> None:
 def counted(done: list[dict], resumed: list[dict]) -> str:
     """What the batch compared, in a line, over every result in the output directory: the
     cases, the refusals one notch under held to the planner's figures (their figures counted)
-    and, of those, to the peak the case's run recorded; the cases without such a run; the
-    phases' predicted peaks set against measured ones in the table; the resume checks."""
+    and, of those, to the peak the case's run measured, closely or loosely (TOLERANCE); the
+    cases without such a run; the phases' predicted peaks set against measured ones in the
+    table; the resume checks."""
     under = [result["under"] for result in done if result.get("under")]
     figures_held = sum(len(notch["figures"]["expected"]) for notch in under if "figures" in notch)
-    above = sum(1 for notch in under if notch.get("recorded"))
+    held = [notch["measured"] for notch in under if "within" in notch.get("measured", {})]
+    loose = sum(1 for found in held if found["loose"])
     phases = sum(
         1
         for result in done
@@ -610,10 +705,10 @@ def counted(done: list[dict], resumed: list[dict]) -> str:
     )
     return (
         f"compared: {len(done)} cases; {len(under)} refusals one notch under against the"
-        f" planner's own figures ({figures_held} figures), {above} of them against the peak"
-        f" recorded by the run above too; {len(done) - len(under)} cases with no run one notch"
-        f" under; {phases} phases' predicted peaks beside measured ones in the table;"
-        f" {len(resumed)} resume checks"
+        f" planner's own figures ({figures_held} figures), {len(held)} of them against the peak"
+        f" the run above measured too, {loose} of those loosely; {len(done) - len(under)} cases"
+        f" with no run one notch under; {phases} phases' predicted peaks beside measured ones in"
+        f" the table; {len(resumed)} resume checks"
     )
 
 
