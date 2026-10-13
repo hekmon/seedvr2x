@@ -29,7 +29,9 @@ the least of each while it ran (least_free, least_card), sampled from a thread.
 The steps (--steps, in order, comma-separated):
   L      a window of L latents at --size through the DiT (placement_bench.py's forward), seeds
          42 and 43: digests against --reference (a JSON this probe wrote with --write-reference,
-         which adds the steps its file doesn't have yet and never replaces one it has)
+         which adds the steps its file doesn't have yet and never replaces one it has). A step
+         is compared with what the reference held BEFORE the step ran: its first run, which
+         makes its reference, is said "no reference yet" and never equal
   vF     a VAE decode of a latent of F latent frames at --size, streamed as the runtime does it
   dF/T   the same decode in tiles of T pixels, as the runtime tiles it (tiling.decode_tiled),
          the latent in system memory and the scratch too
@@ -51,7 +53,9 @@ The steps (--steps, in order, comma-separated):
          refused half-way leaves the DiT split: the sequence ends there.
 A line is written when a step starts, and one when it ends: torch's peak allocated and reserved
 (in GiB and in bytes), the limit it ran under, both free figures before and at the least, the
-time, the digests and whether they are the reference's; or the refusal, its kind (an
+time, the digests and whether they are the reference's (`equal`: true or false; null, with
+`reference` "no reference yet", for a step no reference held before it ran); or the refusal,
+its kind (an
 OutOfMemoryError Python caught, or another error) and its time; then, apart, what the driver,
 the card and torch say after it, which a CUDA error may refuse.
 
@@ -267,6 +271,21 @@ def main() -> int:
     def known(step: str):
         return reference.get(key(step), new_reference.get(key(step)))
 
+    def compared(step: str, digests, of=lambda kept: kept, keeps: bool = True) -> dict:
+        """Whether a step's digests are its reference's, judged against what the reference held
+        BEFORE this run of the step, which is kept only after (keep): a step's first run has
+        nothing to be equal to, and is said so. Kept first, as this probe did until 2026-10-12,
+        a first run was compared with itself, and could never be unequal: 18 of the 289 steps
+        that ended in the runs of 2026-10-12 were "equal" that way (4K's windows of 1 to 4
+        latents ran once each). `of`: what of the reference's record the digests are compared
+        with; `keeps` False: digests that are no reference's to make, a window's on one seed."""
+        before = known(step)
+        if keeps:
+            keep(step, digests)
+        if before is None:
+            return {"equal": None, "reference": "no reference yet"}
+        return {"equal": digests == of(before)}
+
     def peaks() -> dict:
         allocated = torch.cuda.max_memory_allocated(device)
         reserved = torch.cuda.max_memory_reserved(device)
@@ -285,11 +304,14 @@ def main() -> int:
                 most = now
             for name in ("peak", "peak_reserved", "peak_bytes", "peak_reserved_bytes"):
                 most[name] = max(most[name], now[name])
-        if tuple(seeds) == SEEDS:
-            keep(str(length), digests)
-        both = known(str(length))
-        equal = None if both is None else digests == [both[SEEDS.index(s)] for s in seeds]
-        return {"digests": [d[:12] for d in digests], "walls": walls, **most, "equal": equal,
+        # Both seeds' digests make a reference; one seed's is compared with its own of the two.
+        said = compared(
+            str(length),
+            digests,
+            lambda both: [both[SEEDS.index(s)] for s in seeds],
+            keeps=tuple(seeds) == SEEDS,
+        )
+        return {"digests": [d[:12] for d in digests], "walls": walls, **most, **said,
                 "latents": length}
 
     def latent_of(frames: int):
@@ -304,9 +326,7 @@ def main() -> int:
         with torch.no_grad():
             for piece in pieces:
                 digest.update(piece.float().cpu().numpy().tobytes())
-        keep(step, digest.hexdigest())
-        return {"digest": digest.hexdigest()[:12], **peaks(),
-                "equal": None if known(step) is None else digest.hexdigest() == known(step)}
+        return {"digest": digest.hexdigest()[:12], **peaks(), **compared(step, digest.hexdigest())}
 
     def vae(step: str, frames: int) -> dict:
         latent = latent_of(frames).to(device)
@@ -336,9 +356,7 @@ def main() -> int:
                 models, inputs, shot.padded_length(frames), Tiles(tile), scratch
             )
         digest = hashlib.sha256(latent.float().cpu().numpy().tobytes()).hexdigest()
-        keep(step, digest)
-        return {"digest": digest[:12], **peaks(),
-                "equal": None if known(step) is None else digest == known(step)}
+        return {"digest": digest[:12], **peaks(), **compared(step, digest)}
 
     def rehost() -> dict:
         blocks = len(dit.blocks)
