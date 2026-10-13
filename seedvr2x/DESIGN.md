@@ -1127,6 +1127,19 @@ The rule: the upscale must look like its source in any given player.
      different renderings. Milestone 2 kept the sliced scheme: it is 1.2–2.0 dB closer to the
      one-batch run at every offset to the boundaries, with the same boundary steps (see
      [Validation milestones](#validation-milestones)).
+     - It is drawn on the GPU, as numz and ByteDance draw it, and torch's CUDA generator follows
+       the card: its layout is cut by the card's count of processors, so that for one seed an
+       RTX 5090 and an RTX PRO 6000 draw other noise at a shot's size (the same on small
+       tensors, and on the CPU). The same job on the two cards gave frames 35 to 39 dB apart
+       (PSNR-Y, 66 frames), where SDPA against FlashAttention 2 on one card is 55 to 57 dB:
+       another card model is another draw, as another seed is (found on 2026-10-12).
+     - Decided on 2026-10-13 (the user's go: this commit), to be built: the noise is drawn on
+       the CPU. A seed then gives one draw on every card, a job resumed on another card keeps
+       its draw, and the DiT's phase no longer holds a shot's draw on the GPU, the bound it puts
+       on a shot's length going with it. Milestone 1's regression keeps numz's draw through a
+       mode of the tests' own, as it keeps numz's padding; the default path's references are
+       made again against numz patched to draw the same way. Whether two cards then give the
+       same frames is measured first: not known.
    - each shot's generator is seeded with the seed plus the shot's first frame index in the
      source.
      - A shot starting at frame 0 gets the plain seed, as numz's single batch does.
@@ -1641,6 +1654,32 @@ first pass, whose shots are its input, and before the models load:
     cause is found, every VAE pass is held 1.5 GiB further under the budget (provisional):
     with it the nine plans ran, once each, the least room left to a VAE peak 1.71 GiB. It
     costs tile size on every card under 48 GB (see [To measure](#to-measure)).
+    - Measured on 2026-10-13, on emulated cards with the room at 0. The two plans whose passes
+      are large fail every time (1080p on 32 GB, its decode in 1600-px tiles, three runs of
+      three; 4K on 48 GB, its decode in 1664-px tiles, two of two), at the concatenation of a
+      split convolution's pieces, the pieces and their copy both whole: the pass's own peak.
+      Emptying the pool on entering the phase, before that request or before every slice doesn't
+      save the 4K decode; the pieces written into one output allocated ahead save both, and move
+      no bit. That patch is held: its floor, an output of 2.5 GiB, is judged at each call, and a
+      pass's first slice holds 5 frames where the others hold 4, so that a mid-size pass would
+      take it on its first slice alone, its peak there unmeasured. To be built: the floor judged
+      by the pass, and the tiles' peaks measured again with it.
+    - A pass that runs can give other frames, and says nothing. Packed closer than about 1 GiB
+      to its peak, a decode ended, a little slower, with frames that are not those of the same
+      plan with room to spare, nor always the same from one run to the next: in 640-px tiles
+      none of 53 frames moved with 0.90 GiB left, 24 with 0.80 and 48 with 0.70 to 0.50 (157 s,
+      then 160 to 188); in 832-px tiles none of 85 with 1.08 and 80 with 0.89 and 0.68; in
+      1104×1152 tiles none of 149 with 0.94. One convolution of a decode, run alone: with 0.7
+      GiB or more left, its bits in 0.05 s, 0.49 GiB of workspace taken; with 0.6 to 0.2 left,
+      other bits, 8.5 times slower, no workspace; refused with 0.1; and the other bits again
+      once the memory was free, three calls of three in that process. The reading, not
+      established: cuDNN's next engine, taken without a word when the first one's workspace is
+      refused, and kept. So a room is judged by the frames against a run with room to spare, not
+      by a run's exit status and its peaks, as every plan was until now; and it can't go to 0.
+    - The room stays 1.5 GiB. In the nine plans and the three that once failed, the least it
+      leaves to a VAE pass is 2.18 GiB, and the one plan checked by its frames, 640-px tiles on
+      12 GB with 2.54 left, gave its reference's. No tile of 1472 px or more has been checked so
+      (see [To measure](#to-measure)).
   - The plan is made once, from what is free at the start: no option reserves more, and a run
     never plans again as it goes (the user's decision, 2026-10-09).
   - The margin was bisected on emulated cards: a run needs 0.15–0.45 GiB between the free
@@ -1650,8 +1689,15 @@ first pass, whose shots are its input, and before the models load:
   - Below the margin a run fails in its bounding phase, after dozens of silent allocator
     retries: it stops in one line, the units it made kept.
 - **Host RAM** too. The process's peak, 16.5 GiB with 7B fp16, comes while the weights load,
-  not during the shots, which stay flat (2.3–2.4 GiB resident over 6 shots). It is probably the
-  weights file mapped while it is copied to the GPU; not measured further. On top come the
+  not during the shots, which stay flat (2.3–2.4 GiB resident over 6 shots). It is the
+  weights' file, which safetensors maps: every page copied from it stays in the process until
+  the file's read ends, whatever the plan pins (16.5 GiB with nothing pinned, 16.8 with 6.38 GiB
+  pinned, 16.3 with the 36 blocks'; measured on 2026-10-12). It is no need: the kernel takes a
+  mapped page back when asked, and such a load ends in its usual time in a control group held to
+  16, 12, 8, 4 or 2 GiB. Decided on 2026-10-13, to be built, a patch being held: the file is
+  read at its own offsets, never mapped, the same tensors loaded, and a load peaks at what it
+  leaves (1.1, 7.5 and 16.3 GiB for those three). Once loaded, on top of the process's own
+  memory come the
   pinned host copies of what leaves the GPU (15.19 GiB for the DiT's 36 blocks, 15.81 with
   its other parameters and the VAE's when a plan keeps the two models apart, see
   [BlockSwap, rewritten](#blockswap-rewritten)) and a tiled shot's scratch, up to its
@@ -1667,24 +1713,24 @@ first pass, whose shots are its input, and before the models load:
     never takes what the process's own 2.4 GiB need, so that no job is refused for its
     allowance; where the host's memory can't be read, said in a warning, it is the longest
     scratch, 8 GiB at most.
-  - A shot waits in system memory between its units, a latent half a byte a padded pixel
-    (1.01 MiB at 1080p, 4.01 at 4K), and the plan counts what the run holds of the job's
-    longest shot at the moment it holds the most, with the pinned copies and ahead of the
-    scratch's allowance (built on 2026-10-12). For a shot of L latents: its encode's end, 2
-    L, the latent and the buffer it is made from; the check of its latent for NaN and inf,
-    3.5 L; its windows, 2 L and the window being written; its decode's start, the windows
-    and what their merge makes, about 3 L; its decode, L. The most is the check, 1.75 bytes
-    a padded pixel and a latent: 1.25 GiB for a shot of a minute at 1080p and 12.4 for ten
-    minutes, 4.95 and 49.4 at 4K. A job that doesn't fit is refused, naming each part, the
-    shot, and the longest `--window` whose plan fits where one does.
-    - To be built: the check read slice by slice and the merge made into one tensor, a shot
-      then holding 1 byte a padded pixel and a latent beside its windows; and the planner
-      taking by itself the longest window whose plan fits the host as well, where it
-      refuses and names it today.
-    - The count is the code's, held by one measure on the CPU. A job's resident memory
-      peaks elsewhere, at the load: 16 to 17 GiB in ten runs of 19 where the plan counted 9
-      to 11, the peak the first lines of this bullet describe. What it is made of is still
-      to measure.
+  - A shot waits in system memory between its units, a latent half a byte a padded pixel (1.01
+    MiB at 1080p, 4.01 at 4K), and the plan counts what the run holds of a shot at the moment it
+    holds the most, for the job's shot that holds the most, with the pinned copies and ahead of
+    the scratch's allowance (built on 2026-10-12). For a shot of L latents in n windows: its
+    encode's end, 2 L, the latent and the buffer it is made from; the check of its latent for
+    NaN and inf, read a latent at a time, L + 2.5; its windows, 2 L and the window being
+    written; its decode's start, its windows read back (L + 2 (n − 1)), the merged latent,
+    allocated once (L), and one join's mix (6); its decode, L. The most is 3 L for a shot in one
+    window, 1.5 bytes a padded pixel and a latent, and for a long shot its merge, 1 byte and the
+    latents its windows share: 0.76 GiB for a shot of a minute at 1080p in windows of 20 and 7.5
+    for ten minutes, 3.03 and 30.1 at 4K in windows of 17 (1.25, 12.4, 4.95 and 49.4 as first
+    built, the check then holding 3.5 L). A shot in fewer windows can hold more than a longer
+    one (12 latents in one window hold 36 latents' worth, 13 in two 34): the plan's line and a
+    refusal name the shot. A job that doesn't fit is refused, naming each part and the shot.
+    - Left: the windows are read back whole at the decode's start; read one at a time into the
+      merged tensor, a long shot would hold 2 L and a window.
+    - The count is the code's, held by one measure on the CPU: a long shot's resident memory
+      against it is still unmeasured.
 - **Per-phase peaks** (P = output megapixels, T² = a tile's area in megapixels):
   - VAE encode ≈ 1.2 + 8.8·P GiB, decode ≈ 0.8 + 16.1·P GiB (flat beyond 9 frames)
   - tiled, from 1024-px tiles: encode ≈ 1.36 + 8.66·T², decode ≈ 0.44 + 16.29·T², refitted
@@ -1733,16 +1779,15 @@ first pass, whose shots are its input, and before the models load:
     That fits 26 window lengths, 1–78 latents at 1080p and 1–19 at 4K, to 0.005 GiB; tokens
     alone were up to 0.83 GiB off at 4K, since each attention window repeats the 58 text
     tokens. The other models' constants are in vram.md.
-    - The fit is FlashAttention 2's: 12 latents at 1080p measured 28.316 GiB for 28.320.
-      Under SDPA, which a machine without a FlashAttention build runs, the DiT peaks higher:
-      by 0.06 to 0.61 GiB at 1 to 12 latents of 1080p on a desktop card (2026-10-11), 5 to 6%
-      of the per-token term, the same with blocks swapped. The margin is gone at 12 latents.
-      The planner holds a fit per attention backend and takes the run's (built on
-      2026-10-12): FlashAttention 2's as fitted; SDPA's provisional, 6% more a token and 0.03
-      GiB, which stood over every window measured since, by 0.004 to 0.26 GiB on 16 of an
-      RTX 5090 and by 0.03 to 0.94 on 29 of the 96 GB card (1 to 70 latents at 1080p, 1 to 17
-      at 4K). Those 29 give, as their upper bound, 4.7% more a token and 0.12 GiB: to be
-      taken in the provisional pair's place.
+    - The fit is FlashAttention 2's: 12 latents at 1080p measured 28.316 GiB for 28.320. Under
+      SDPA, which a machine without a FlashAttention build runs, the DiT peaks higher, the same
+      with blocks swapped, so the planner holds a fit per attention backend and takes the run's
+      (built on 2026-10-12). SDPA's is 4.69% more a token and 0.141 GiB, an upper bound of the
+      45 windows measured under it, each with its swapped blocks and its VAE: 29 on the 96 GB
+      card (1 to 70 latents at 1080p, 1 to 17 at 4K; 0.017 to 0.131 GiB under the bound) and 16
+      on an RTX 5090 (1 to 21 at 1080p, 1 to 5 at 4K; 0.0009 to 0.105), which reads 0.02 to 0.03
+      GiB over the first card at the same windows and sets the constant: the 29 alone give 0.124
+      GiB, which the desktop card's 4 latents of 4K pass by 0.016.
     - The 15.87 GiB hold the DiT's weights (15.35) and the VAE's (0.47), which numz keeps on
       the GPU in its DiT phase. A swapped block takes its 0.42 GiB off, but for the two blocks
       in the slots (see [BlockSwap, rewritten](#blockswap-rewritten)), and the VAE sent away
@@ -1788,6 +1833,18 @@ first pass, whose shots are its input, and before the models load:
   on the GPU for the DiT's phase and the fewest more blocks are swapped in their place, when
   that fits the host or takes less of it (0.47 GiB of pinned memory; never under
   `--swap-blocks`; provisional).
+
+  Where it still takes more than the host has, the planner takes the longest window whose plan
+  fits the host as well as the card, the other choices made again under it, and the plan's lines
+  say which window the card alone holds (built on 2026-10-12). Never under `--window`, whose
+  refusal names that window, nor on a resume, whose window is recorded. A job is refused for the
+  system memory only where no window's plan fits both. A 1080p shot of 301 frames with 80 GiB of
+  VRAM free and 16 GiB of system memory runs in two windows of 39 latents with nothing pinned,
+  where the card's own window of 76 pins 35 blocks, 17.40 GiB. Decided on 2026-10-13, to be
+  built: before the window shortens, the DiT stays on the GPU for the VAE's phases and the tiles
+  shrink, the window being the larger lever. On a grid of 144,000 plans, 828 are refused today
+  that such tiles run: short shots whose untiled VAE pass fits only with the DiT sent away, 26
+  to 36 blocks pinned.
 
   What follows from them:
   - The tiles are squares, their side a multiple of 64 px from 512 up, cut off at the
@@ -1845,9 +1902,9 @@ first pass, whose shots are its input, and before the models load:
       at 24 GB, 22.51 GiB free, runs it whatever the shot's length (101 frames run, every
       window at 21.78 GiB), its VAE passes in 1408- and 1088-px tiles; a quarter of a GB
       less is refused, naming `--resolution 2144`.
-    - Under SDPA that window takes 23.4 GiB of free VRAM (22.80 measured on the 96 GB card,
-      and the margin), 23.6 by the provisional fit: a 24 GB card is refused 4K without
-      FlashAttention 2. No window goes under 5 latents to make the room.
+    - Under SDPA that window takes 23.47 GiB of free VRAM, a peak of 22.87 GiB (22.80 measured
+      on the 96 GB card) and the margin: a 24 GB card is refused 4K without FlashAttention 2. No
+      window goes under 5 latents to make the room.
     - A shot's length is bounded by the draw of its noise alone: that card plans a 4K shot
       of 2,659 latents (10,633 frames, over 7 minutes) and a 1080p one of 10,562. Past it
       the refusal names a cut inside the shot (`--cuts`) and the longest shot that fits,
@@ -1859,7 +1916,8 @@ first pass, whose shots are its input, and before the models load:
   exactly or refused, never adjusted: the refusal names what fits, the longest window, the
   fewest blocks or the largest tile. `--window N` pins the cap, 5 at least: no window longer
   than N latents, a shorter shot still one window of its own length. Two runs pinned alike
-  match bit for bit. The tile pins are settings, which a resume must repeat; `--swap-blocks`
+  match bit for bit, while no VAE pass is short of room (see the budget, above). The tile
+  pins are settings, which a resume must repeat; `--swap-blocks`
   isn't, shaping no bit, and `--swap-blocks 1` or `2` is taken with a warning that it frees
   nothing, the two slots holding as much. Of two pins that don't fit together, `--window` is
   the one refused while some cap fits the pinned blocks, `--swap-blocks` when none does. A
@@ -1998,34 +2056,62 @@ GPU's memory refused stops a run in one line, before the models load as after.
     card. Otherwise it is asked, by one request of the free memory and 0.25 GiB, freed at
     once (1 to 2 s): refused, nothing changes; given, or no answer, the run is held. It
     says so, and the plan's first line and its refusals name each figure for what it is.
-  - Held by torch's own allocator under torch's limit: the smaller of the driver's figure
-    and of the card's, less what is left to the rest of the card, 0.2 GiB (3 GiB where NVML
-    doesn't answer, said in a warning). A window past the limit is refused in 0.2 to 0.7 s,
-    an error the run catches, where `cudaMallocAsync` went 2.06 GiB past its limit.
-  - The plan counts on 4.5 GiB less again: what torch's own allocator needs beyond a step's
-    allocated peak. The need grows with the step: 0.2, 0.6 and 0.8 GiB for 1080p windows of
-    1, 6 and 8 latents, 3.3 to 3.6 at 17 and 21, 4.5 for 4K's window of 5 (run once at that,
-    refused at 4.4), and 3.4 to 5.3 for a tiled VAE pass, which has its own room besides.
-  - Checked before every unit, on the card's own figure: when the card has less left than
-    the run may still take, another program having taken it, the run stops in one line, its
-    units kept, and the same command resumes. On the smaller of the two figures the check
-    stopped six runs of six for nothing: near a full card the driver's figure stood 0.3 to
-    0.8 GiB under what the card had free, and memory taken with it at zero was the card's,
-    at the usual speed. Within a unit nothing protects.
-  - Run so on that card: a 1080p job alone, beside a program holding 8 GiB (planned in what
-    was left, 25 blocks swapped where 5, the same frames), stopped then resumed, and with
-    NVML silent; 4K's smallest window; a program arriving mid-run stops the job at its next
-    unit. Under a light desktop the plan counted on 25.07 GiB of the 29.77 the card had
-    free, windows of up to 21 latents at 1080p.
-  - Decided on 2026-10-12, to be built. The rest of the card is left 0.5 GiB, not 0.2: the
-    checks ran with 0.16 to 0.20 GiB to spare, 0.10 once, and a desktop that wakes at night
-    mustn't stop a job nobody will start again before morning. On such a driver the
-    planner's 0.6 GiB margin is counted inside the 4.5, which measure the same need: with
-    both, 4K's smallest window is refused on that card beside its usual desktop. NVML
-    failing at one check is asked again, then that check is skipped with a warning, never
-    judged on the driver's figure. A finished job run again asks the driver nothing. And
-    one figure for every step is to give way to a room by the kind of step (see
-    [To measure](#to-measure)).
+  - Held by torch's own allocator under torch's limit: the smaller of the driver's figure and of
+    the card's, less what is left to the rest of the card, 0.5 GiB (3 GiB where NVML doesn't
+    answer, said in a warning). At 0.2, as first built, the checks ran with 0.16 to 0.20 GiB to
+    spare, 0.10 once, and a desktop that wakes at night mustn't stop a job nobody will start
+    again before morning. The limit is set a first time before the first pass, and again once
+    the plan is made. A window past the limit is refused in 0.2 to 0.7 s, an error the run
+    catches, where `cudaMallocAsync` went 2.06 GiB past its limit.
+  - The plan counts on 4.5 GiB less again, what torch's own allocator needs beyond a step's
+    allocated peak. The planner's 0.6 GiB margin is counted in it, the two measuring the same
+    need: on such a driver the budget is what the plan counts on, and the plan's first line says
+    the two figures apart. That need follows nothing a plan knows (measured on 2026-10-13, one
+    process a configuration): no function of the tokens (98,640 need 2.6 GiB at 4K, 99,360 need
+    1.2 at 1080p), no threshold (4K's window of 3 latents is refused 2.5 GiB over its peak and
+    runs with 2.4 down to 1.6), and it moves with what else is on the card (an encode in tiles
+    of 1856 px: 3.4 GiB, 5.2 with the DiT off the GPU). So one figure stays, and no room by the
+    kind of step: a bound over everything measured gives a 1080p plan 0.1 GiB back. The largest
+    need measured, 5.9 GiB for a 4K decode in tiles of 1088 px, is 0.1 under what a VAE pass is
+    left, the 4.5 and its room.
+  - Checked before every unit, on the card's own figure: when the card has less left than the
+    run may still take, another program having taken it, the run stops in one line, its units
+    kept, and the same command resumes. On the smaller of the two figures the check stopped six
+    runs of six for nothing. Within a unit nothing protects. NVML failing at a check, once it
+    has answered in the run, is asked again, then that check alone is skipped with a warning,
+    never judged on the driver's figure. To be built (found on 2026-10-13): NVML failing at the
+    plan's reading is asked again as well, and a run whose limit had to fall back on the
+    driver's figure is checked on that figure, where today nothing checks it: the plan, the
+    limit and the checks stand on one footing.
+  - The driver's figure is no figure to plan in. While the card has more than 5 to 7 GiB free it
+    is a fixed budget less the process's own use, whatever else is on the card; near a full card
+    it stood 1.2 to 2.9 GiB over the card's own beside a desktop holding 3.7 to 5.8 GiB, and 0.3
+    to 0.8 under beside one holding 1.0.
+  - Run so on that card (2026-10-11 to 13): a 1080p job alone, beside a program holding 8 GiB
+    (planned in what was left, 25 blocks swapped where 5, the same frames), stopped then
+    resumed, and with NVML silent; a program arriving mid-run stops the job at its next unit,
+    and the same command finishes with the same frames. Beside a desktop holding 4.6 to 5.8 GiB
+    of the card, the plan counted on 20.0 to 21.2 GiB of the 25.0 to 26.2 the card had free
+    (30.03 reported), and the reference job gave the frames of the days before, its checks with
+    0.47 to 0.50 GiB to spare. 4K's smallest window is refused beside such a desktop, 1.72 GiB
+    short under SDPA: it bears one of 2.9 GiB, 4.0 with FlashAttention 2, whose wheel built for
+    the 96 GB card loads on this one.
+  - Expandable segments (measured on 2026-10-13; decided, to be built, a patch being held). With
+    torch's `expandable_segments`, a step short of room slows down and runs, where the plain
+    allocator refuses it: every window measured ran down to 0.1 GiB over its peak with the
+    reference's bits, 1.8 to 4.4 times slower there, and the card is no longer filled, the
+    desktop keeping 2 to 4 GiB of it. It becomes a held run's default, the user's own setting
+    standing, the 4.5 kept: today's plans and frames. Its validation is thin, one job on the
+    patch's own code, on the one card where it can run: it lands with three runs of each job
+    there. A VAE pass under it keeps its bits down to 0.5 GiB over its peak and gives others
+    below: the frames' floor is the same question as the VAE's room (see [To
+    measure](#to-measure)).
+  - With a reserve of 2.5 GiB under those segments, 4K's smallest window planned and ran on that
+    card beside a desktop holding 3.2 GiB, four times, with the frames of a run that had room to
+    spare, in 134 to 139 s for 65.6; but every other plan packed tighter, and a job that fitted
+    ran 1.4 to 1.5 times as long. Decided on 2026-10-13 (the user's go: this commit), to be
+    built once the frames' floor is known: the plan is made with 4.5, and a smaller reserve is
+    taken only where the job would be refused otherwise, said slow in the plan's lines.
 
 ## Pause and resume
 
@@ -2149,16 +2235,23 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       reads it. A finished file's job is finished once the file is in place: with every segment
       made and no file yet, the same command assembles.
     - A finished directory job is finished in any environment (2026-10-12): run again under
-      another GPU, stack or ffmpeg, it is said finished, nothing being made, with no refusal and
-      no flag asked. The difference is said in one line, and its manifest keeps the environment
+      another stack or ffmpeg, it is said finished, nothing being made, with no refusal and no
+      flag asked. The difference is said in one line, and its manifest keeps the environment
       that made it. It is still held to its settings, its model files, its source's content and
-      its directory. A finished file's job with every segment made and no file yet isn't
-      finished: its assembly is made in the new environment, refused without the flag as any
-      resume. Decided, to be built: `--plan FILE` on such a job asks no flag either, where it is
-      refused without one today, its list written when the frame index is trusted, by the same
-      ffmpeg and conversions; and the finished state is known before anything asks for the GPU,
-      where today such a job still wants a CUDA device and, under WSL2, asks the driver (see
-      [Allocator](#allocator)).
+      its directory. `--plan FILE` on a finished directory job asks no flag either: its list is
+      written when the frame index is trusted, by the same ffmpeg and conversions, and is said
+      not written otherwise, exit 1.
+    - A job with every segment made is known before anything asks for the GPU: it needs no CUDA
+      device, asks the driver nothing and reads no NVML (see [Allocator](#allocator)), a
+      finished directory job as a file's job with its assembly alone left, unless its first pass
+      must run again with the shot detector. A library it imports asks once whether CUDA is
+      there: no context, no memory. So the GPU isn't asked its name there, and another GPU alone
+      is neither said nor refused: nothing such a job makes can depend on it, an assembly being
+      ffmpeg's work alone. A file's job with its assembly left isn't finished: under another
+      ffmpeg, conversions or stack, its assembly is refused without the flag, as any resume.
+      Decided on 2026-10-13, to be built: a finished job whose own model file isn't there is
+      held to the file's pin and fetches nothing, where today it downloads it before saying
+      finished; a file the user names must be there.
   - **A plan** is a job with no unit made: what `--plan FILE` leaves in an output directory
     or in a finished file's work directory, its manifest and its frame index (see
     [Shot detection](#shot-detection)).
@@ -2532,12 +2625,20 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      and each plan refused one notch under. Then, on the stack as it stood before its merge
      with the assembly's commits: a 4K shot of 101 frames on a card emulated at 24 GB, a
      shot of 48 latents in 8 windows peaking as one-window shots do, and the whole GPU
-     suite, 32 tests. On the merged code the whole suite passed again, 32 tests, and once
-     more with the detector's follow-ups in.
+     suite, 32 tests. On the merged code the whole suite passed again, 32 tests, once more
+     with the detector's follow-ups in, and again with the integration's own (2026-10-12),
+     the box's CPU suite then running its padding tests too, skipped there until then.
+     Every plan of these runs was judged by its exit status and its peaks; from 2026-10-13
+     a plan is judged by its frames against a run with room to spare as well (see
+     [Memory planner](#memory-planner), the budget).
    - On a real desktop card, an RTX 5090 under WSL2 held to its card (2026-10-12): the same
      job alone, beside a program holding 8 GiB, stopped then resumed, and with NVML silent,
      the same frames each time; each phase within 0.3 GiB of its prediction but the
      encodes, 0.39 to 0.91 under.
+     With the follow-up's hold (2026-10-12 and 13), beside a desktop holding 4.6 to 5.8 GiB of
+     the card: the same frames again, each phase within 0.1 GiB of its prediction but the
+     encode, 0.4 under. The 96 GB card's frames can't be held to that card's, nor its references
+     run there: the noise follows the card (see [Pipeline](#pipeline-per-shot), step 2).
    - A job resumed with other memory free gives the uninterrupted run's output, bit for bit:
      run on 2026-10-11, from 16 GB to 24 GB.
    - Time estimates within a few percent of the measured times, on a healthy card: the
@@ -2637,31 +2738,35 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   Taking each frame from a run whose grid ends a group there would take 4 runs per shot, the
   grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Not
   measured (about 2 GPU h on the 8 clips).
-- **The VAE's room** (see [Memory planner](#memory-planner), the budget). Why a VAE pass
-  runs out of memory 1 to 1.7 GiB under the free memory, where a DiT window, which asks for
-  pieces as large, runs 0.6 under: not known. Each failing plan ran once. To measure, now
-  that the VAE's passes no longer grow with the shot, and once the planner prices them by
-  their measured tiles: the failing plans repeated; the pool emptied on entering a VAE
-  phase and before a pass's largest request; the concatenation that makes that request
-  written into one output instead; failing those, the room bisected per pass size, as the
-  margin was. With it, the 0.4 GiB every encode is taken to hold over its peak, which six
-  tiled encodes on measured tiles didn't need. The aim is to give the 1.5 GiB back to the
-  tiles.
+- **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget). Where a
+  VAE pass starts giving other frames, tile size by tile size, encode and decode, against a run
+  with room to spare: between 0.80 and 0.90 GiB left for a decode in 640-px tiles, 0.89 and 1.08
+  in 832-px tiles, under 0.94 in 1104×1152 tiles; nothing for a tile of 1472 px or more, nor for
+  an encode but one, nor on a card that isn't emulated. Its cause, read in torch's source and
+  shown on a run, where today it is inferred from bits, time and memory. A way for the run to
+  see it or refuse it, since nothing logs it: torch's own count of refused allocations across a
+  unit, cuDNN's deterministic mode, a pass's time. The one-output convolution judged by the
+  pass, and the tiles' peaks under it. The 0.4 GiB every encode is taken to hold over its peak.
+  The aim stays to give back to the tiles what of the 1.5 GiB the frames don't need.
 - **The hold on a driver that gives memory the card doesn't have** (see
-  [Allocator](#allocator)). One figure covers what torch's own allocator needs beyond a
-  step's peak, and that need runs from 0.2 GiB for a short window to 5.3 for a decode: a
-  room by the kind of step, as a fit, would give a 1080p plan about 3 GiB of window back.
-  Also: the check judged by what the next unit needs, not by all the run may still take;
-  both figures on a card with nothing else on it, each step more than once (4K's window
-  rests on one run); what the driver's figure counts near a full card; and the other bits
-  seen once after a window had passed the card (tried again once: three forwards of 6 to 9
-  minutes, nothing to compare).
+  [Allocator](#allocator)). Expandable segments on the patch's own code, three runs a job, and
+  the frames' floor under them, before a smaller reserve is taken for a job refused otherwise.
+  The check judged by what the next unit needs, not by all the run may still take: on the logs
+  of 33 runs it only ever gives back, 4 of the 5 stops passing, but torch took more than that
+  need in 12 units of 93, so it wants torch's limit lowered for the unit, or its cache emptied
+  first. Both constants on a card with nothing else on it. The other bits seen once after a
+  window had passed the card. And the Windows side: a desktop took 0.44 to 0.58 GiB back and
+  forth within minutes, and gave up 455 MiB at once as the card filled.
 - **SDPA's surplus** (see [Memory planner](#memory-planner)): where the 5% more a token
   come from, FlashAttention 2 being no dependency and SDPA what most machines run; with it
   a 24 GB card is refused 4K.
-- **The load's peak in system memory:** 16 to 17 GiB resident where a plan counts 9 to 11,
-  thought to be the weights' file mapped while it is read: what a host of 16 GB makes of
-  it.
+- **The load through WSL's file bridge.** One read serves the 7B's file at 253 MB/s from an NVMe
+  drive on the Windows side, a load of 75 s; two or more at once, 480 MB/s and 42 to 43 s. A
+  patch reading each tensor in four pieces is held, level on a Linux NVMe drive; not measured on
+  a hard disk, where four streams of one file may cost seeks, and not taken until it is.
+- **The planner on a short host.** Two counts of its grid of 144,000 plans are unexplained: the
+  window fell on a larger card in 2 plans, and a count of the swap's order rose from 426 to 641
+  with the planner's own shorter window.
 - **`torch.compile`, undecided** (see [Memory planner](#memory-planner)). Every figure is
   numz's, on numz's flow, and its VAE setup has a defect of its own. To measure on seedvr2x:
   - the VAE compiled with its causal convolutions in the graph and out of it, as numz meant:
