@@ -440,8 +440,15 @@ def dit_draw(
     under each time. dit_on_gpu counts the tables the DiT's blocks cache once a window has run
     (DIT_BUFFERS, 0.03 GiB of its 0.058), which aren't there yet at a run's first draw: without
     them the count would be 0.03 GiB over that draw, not 0.003. So about 31 MiB allocated at a
-    first draw are not accounted for here; what they are isn't known. A later shot's draw, the
-    tables there, may then stand that much over this count: not measured."""
+    first draw are no tensor of the shot's nor a weight: torch's cuBLAS workspace, 33,554,432
+    bytes (32.00 MiB), which a process's first matrix product on the device takes and keeps.
+    Read from two measures, not measured at a draw: in fresh processes on the 96 GB card
+    (2026-10-12, on an earlier tree), the small product the free memory is read with
+    (cli._free_memory) left 33,554,432 bytes allocated, which clearing torch's cuBLAS
+    workspaces gave back, and nothing more was taken by the models' load or by a VAE pass after
+    it. So the workspace is there when the free memory is read, and the budget is counted
+    without it. A later shot's draw, the tables there, may stand that much over this count:
+    not measured."""
     height, width = padded
     position = (height // LATENT_SIDE) * (width // LATENT_SIDE)
     shot = 2 * LATENT_CHANNELS * LATENT_VALUE * position * latents
@@ -864,9 +871,9 @@ def plan(
     attention: str = FLASH_ATTN_2,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (job.target_size), in the GPU memory it may
-    count on, less MARGIN, and what it is predicted to take; refused (PlanError) when a pin can't
-    be taken exactly, when no plan fits that memory, or when the plan takes more system memory
-    than host_available, in bytes (None: not checked). split: whether the decode corrects
+    count on, less its margin, and what it is predicted to take; refused (PlanError) when a pin
+    can't be taken exactly, when no plan fits that memory, or when the plan takes more system
+    memory than host_available, in bytes (None: not checked). split: whether the decode corrects
     colours; numz_padding is for tests only (cli.NUMZ_PADDING). An output directory and a .mkv
     path plan alike: both jobs keep their units in a directory (runtime/units.py).
 
@@ -874,8 +881,11 @@ def plan(
     reading the run made of it (memory.Reading), whose `counted` the plan is made in, and whose
     other figures only word the plan's first line, its refusals and its record: on a run held
     to the card they name what the driver reports, what the whole card has free where it was
-    read, and what the plan counts on. attention: the backend the run's DiT takes
-    (model.attention_backend), whose fit the DiT's peak is predicted by (DIT_ATTENTION).
+    read, and what the plan counts on. The margin is MARGIN on a driver that refuses, and none
+    on a run held to the card, whose `counted` is under torch's limit by what measures the same
+    need already (_Job.margin): the budget is then all the plan counts on. attention: the
+    backend the run's DiT takes (model.attention_backend), whose fit the DiT's peak is
+    predicted by (DIT_ATTENTION).
 
     The DiT's phase is judged by the larger of two moments, never their sum: the job's longest
     window (dit_peak) and its longest shot's draw of noise, the shot's latent and noise whole on
@@ -989,7 +999,7 @@ def _window_that_runs(
     where a shorter one takes none, so that a job would be refused on a host that runs it under
     a shorter window, and refused with MORE free VRAM where it was planned with less. 1080p, a
     shot of 301 frames, 16 GiB available and 80 GiB of free VRAM: one window of 76 latents with
-    35 blocks pinned takes 17.43 GiB; two windows of 39 run, nothing pinned. The planner takes
+    35 blocks pinned takes 17.40 GiB; two windows of 39 run, nothing pinned. The planner takes
     that window by itself (plan); under --window, the refusal names it.
 
     The window given is the one the job really runs under the cap found (_own_cap), as the
@@ -1519,15 +1529,19 @@ def _vae_kept(job: _Job, plan: Plan, host_available: int | None) -> Plan | None:
     a phase over the budget, the VAE's weights there already, or no count of swapped blocks
     holding the window with them. Not chosen under --swap-blocks, taken exactly (plan).
 
-    DESIGN.md has the VAE leave the DiT's phase before one more block is swapped (Memory
-    planner, Choices, 2): a swapped block costs time at every window, the VAE's leaving a copy
-    per phase. But the VAE's weights away are 0.47 GiB more of pinned system memory, and a
-    swapped block costs none where the VAE's phases send that block away anyway, as most plans
-    of a small card do, or 0.42. PROVISIONAL (implementation, 2026-10-12): taken only where the
-    host's memory refuses the plan as DESIGN.md orders it, so that no plan moves on a host that
-    holds it; it shapes no bit. 1080p on a 24 GB card, a shot of 301 frames, 18.4 GiB
-    available: 29 blocks swapped and the VAE staying take 18.01 GiB, where 28 and the VAE away
-    take 18.47 and were refused (tests/test_planner.py)."""
+    DESIGN.md has the VAE leave the DiT's phase before a block is swapped (Memory planner,
+    Choices, 1: "the VAE off the GPU for the DiT's phase first, then as many blocks swapped as
+    it takes"): a swapped block costs time at every window, the VAE's leaving a copy per phase.
+    But the VAE's weights away are 0.47 GiB more of pinned system memory, and a swapped block
+    costs none where the VAE's phases send that block away anyway, as most plans of a small
+    card do, or 0.42. So DESIGN.md has this one too, provisional there (Choices, the paragraph
+    after 3: "Where the plan so made takes more system memory than the host has, the VAE's
+    weights stay on the GPU for the DiT's phase and the fewest more blocks are swapped in their
+    place, when that fits the host or takes less of it"): taken only where the host's memory
+    refuses the plan as the choices order it, so that no plan moves on a host that holds it; it
+    shapes no bit. 1080p on a 24 GB card, a shot of 301 frames, 18.3 GiB available: 29 blocks
+    swapped and the VAE staying take 17.92 GiB, where 28 and the VAE away take 18.38 and were
+    refused (tests/test_planner.py)."""
     peaks = _peaks(job, plan)
     over = any(peaks.need(phase) + job.margin > job.free for phase in PHASES)
     if host_available is None or over or peaks.host <= host_available or plan.vae_in_dit:

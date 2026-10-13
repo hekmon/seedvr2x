@@ -1508,6 +1508,12 @@ def test_passes_keep_nothing_of_the_shot_on_the_device(
     # compared between the shots: 35 calls have more occasions for it than 3. They are, like
     # the peak, the bytes asked of torch's allocator where it counts them, the bytes it allocated
     # otherwise (SETTLED): one choice for the run, said in every line and message.
+    # A tiled decode hands its frames on after its last tile, when no call of the VAE starts any
+    # more: what the device holds then is read as each decoded slice is handed on (taken), and
+    # held between the shots and from slice to slice. Without it the whole scratch moved to the
+    # device there passed this test, under the pass's peak and gone before the pass's end (a
+    # review's mutation, 2026-10-12): 3 x 141 x 256 x 320 x 2 = 69,304,320 bytes for the long
+    # shot against 6,389,760 for the short one.
     models = model.load_models(found(DITS), found(VAES), torch.device("cuda:0"))
     device = models.device
     height, width = PICTURE[0] // 8, PICTURE[1] // 8
@@ -1521,15 +1527,26 @@ def test_passes_keep_nothing_of_the_shot_on_the_device(
         for size in model.encode_slices(models, frames):
             yield (torch.rand((3, size, *PICTURE), generator=generator) * 2 - 1).to(device, BF16)
 
-    def taken(slices: Iterator[Tensor]) -> list[int]:
+    def held_now() -> tuple[int, int | None]:
+        torch.cuda.synchronize(device)
+        asked = torch.cuda.memory_stats(device).get("requested_bytes.all.current")
+        return torch.cuda.memory_allocated(device), asked
+
+    def taken(slices: Iterator[Tensor], handed: list[tuple[int, int | None]]) -> list[int]:
+        # handed: what the device holds as each slice is handed on, the slice among it, over
+        # what it held before the pass's first call: the allocated bytes and the requested ones.
         frames: list[int] = []
+        before, asked_before = held_now()
         for decoded in slices:
             assert decoded.device == device and decoded.dtype == BF16
             assert (decoded.shape[0], *decoded.shape[2:]) == (3, *PICTURE)
             frames.append(decoded.shape[1])
+            there, asked = held_now()
+            apart = None if asked is None or asked_before is None else asked - asked_before
+            handed.append((there - before, apart))
         return frames
 
-    def passes(frames: int) -> list[Use]:
+    def passes(frames: int) -> tuple[list[Use], list[list[tuple[int, int | None]]]]:
         # The untiled encode, the tiled one, the untiled decode of the first's latent, the tiled.
         latents = 1 + (frames - 1) // 4
         untiled, encode = device_use(
@@ -1546,14 +1563,16 @@ def test_passes_keep_nothing_of_the_shot_on_the_device(
             assert latent.device.type == "cpu" and latent.dtype == BF16
             assert latent.shape == numz.shape and latent.stride() == numz.stride()
         assert not same(untiled, tiled)  # blended
+        handed: list[list[tuple[int, int | None]]] = [[], []]
         given, decode = device_use(
-            models, monkeypatch, lambda: taken(model.decode_stream(models, untiled))
+            models, monkeypatch, lambda: taken(model.decode_stream(models, untiled), handed[0])
         )
         tiled_given, tiled_decode = device_use(
             models,
             monkeypatch,
-            lambda: taken(tiling.decode_tiled(models, untiled, FOUR, scratch)),
+            lambda: taken(tiling.decode_tiled(models, untiled, FOUR, scratch), handed[1]),
         )
+        assert [len(held) for held in handed] == [len(given), len(tiled_given)]
         assert given == tiled_given == model.decode_slices(models, latents) and sum(given) == frames
         assert not (tmp_path / tiling.SCRATCH).exists()
         # One figure per call of the VAE: a slice of the shot, and of each tile in a tiled pass.
@@ -1561,12 +1580,12 @@ def test_passes_keep_nothing_of_the_shot_on_the_device(
         encodes, decodes = len(model.encode_slices(models, frames)), len(given)
         calls = [encodes, len(layout) * encodes, decodes, len(layout) * decodes]
         assert [len(use.allocated) for use in uses] == calls
-        return uses
+        return uses, handed
 
     try:
         # Once unmeasured: what a first pass sets up on the device for good is no shot's.
         passes(SHORT)
-        short, long = passes(SHORT), passes(LONG)
+        (short, short_handed), (long, long_handed) = passes(SHORT), passes(LONG)
     finally:
         models.runner.dit = models.runner.vae = None
         gc.collect()
@@ -1660,3 +1679,29 @@ def test_passes_keep_nothing_of_the_shot_on_the_device(
                 assert abs(later[SETTLED] - long_run[earlier][SETTLED]) <= TOLERANCE, against
         # The last tile had an earlier one of its size to be measured against.
         assert len(shapes) == 1 or first[shapes[-1]] < len(shapes) - 1, shapes
+    # What the device holds as each decoded slice is handed on, on the same bytes as the rest.
+    column = 1 if on == "requested" else 0
+    decodes = zip(("decode", "tiled decode"), short_handed, long_handed, strict=True)
+    for name, few_held, many_held in decodes:
+        brief = tuple(cast(int, held[column]) for held in few_held)
+        along = tuple(cast(int, held[column]) for held in many_held)
+        said = (
+            f"{name}, {on} bytes held as each slice is handed on: over {SHORT} frames"
+            f" {runs(brief)}; over {LONG} {runs(along)}"
+        )
+        print(said)
+        assert len(brief) > 2 and len(along) > SETTLED + 1, said
+        # The slice handed on is there, megabytes of it: 5 frames, then 4.
+        assert min(brief) > TOLERANCE and min(along) > TOLERANCE, said
+        # 1. The same slice of both shots: the whole shot's frames on the device there are
+        # 62,914,560 bytes more for the long shot's 128 frames more.
+        for index, held in enumerate(brief):
+            assert abs(along[index] - held) <= TOLERANCE, f"slice {index} of both shots: {said}"
+        # 2. Nothing gathers as the slices are handed on: a slice kept there is 1,966,080 bytes
+        # more at the next one, 7 times the tolerance. The streamed decode against a settled
+        # slice, as its calls are; the tiled one, every tile decoded by then, against its
+        # second, the first of 4 frames.
+        against = SETTLED if name == "decode" else 1
+        for index in range(against + 1, len(along)):
+            gathered = f"slice {index} against slice {against}: {said}"
+            assert abs(along[index] - along[against]) <= TOLERANCE, gathered

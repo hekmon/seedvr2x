@@ -1325,15 +1325,19 @@ def test_the_draw_binds_a_long_shot() -> None:
 def test_a_draw_that_never_fits_is_refused() -> None:
     # A job whose longest shot's draw doesn't fit with every block swapped and the VAE away is
     # refused before the run, as a size that doesn't fit (planner._floor): the message names the
-    # noise, drawn whole on the GPU before the shot's first window, and the shot. 4K on a card
-    # emulated at 24 GB, 22.51 GiB free: the weights of the phase take 1.06 GiB then, and the
-    # draw is over the budget from a shot of 2,661 latents, 10,641 frames.
+    # noise, drawn whole on the GPU before the shot's first window, and the shot. 4K with 22.51
+    # GiB free: the weights of the phase take 1.06 GiB then, and the draw is over the budget
+    # from a shot of 2,661 latents, 10,641 frames. (On the bytes a card emulated at 24 GB reads,
+    # 24,168,824,832, which are 1,103,626 under these, from one of 2,660: that card plans a 4K
+    # shot of 2,659 latents, DESIGN.md's figure.)
     free = round(22.51 * GIB)
     budget = free - MARGIN
     alone = planner.dit_draw(OURS_4K, 0, 36, vae_in_dit=False)
     assert (budget - alone) // 8_417_280 == 2660
     assert planner.dit_draw(OURS_4K, 2660, 36, vae_in_dit=False) <= budget
     assert planner.dit_draw(OURS_4K, 2661, 36, vae_in_dit=False) > budget
+    card = 24_168_824_832 - MARGIN
+    assert free - 24_168_824_832 == 1_103_626 and (card - alone) // 8_417_280 == 2659
     # The VAE's passes keeping nothing of a shot on the GPU, the draw is the floor of a shot
     # that long: its encode and its decode are a short shot's.
     made, peaks = planner.plan(free, UHD, shots(2660), Pins(), None)
@@ -1974,10 +1978,11 @@ def test_floor() -> None:
     assert refused(GIB, HD, shots(40), Pins(), None).endswith(
         "and the driver reports 1.00 GiB free: no output size fits there"
     )
-    # Neither floor rises with the longest shot, no pass keeping anything of it on the GPU; nor
-    # the VAE's with the frame, while a tile of 512 px is whole in it: 8.52 GiB at 1080p for a
-    # shot of 6 latents as for one of 1,000, and at 540p. At 4K, where the DiT's smallest
-    # window is the floor, 22.40 for a shot of 5 latents as for one of 1,000.
+    # Neither floor rises with the longest shot, no pass keeping anything of it on the GPU,
+    # until the draw of the shot's noise passes it; nor the VAE's with the frame, while a tile
+    # of 512 px is whole in it: 8.52 GiB at 1080p for a shot of 6 latents as for one of 1,000,
+    # and at 540p. At 4K, where the DiT's smallest window is the floor, 22.40 for a shot of 5
+    # latents as for one of 1,000.
     for target, latents, said in (
         (HD, 6, "an output of 1920x1080 takes 8.52 GiB of free VRAM (its decode in tiles"),
         (HD, 1000, "an output of 1920x1080 takes 8.52 GiB of free VRAM (its decode in tiles"),
@@ -1986,6 +1991,13 @@ def test_floor() -> None:
         (UHD, 1000, "an output of 3840x2160 takes 22.40 GiB of free VRAM (its smallest window"),
     ):
         assert refused(4 * GIB, target, shots(latents), Pins(), None).startswith(said)
+    # The 8.52 GiB hold to a shot of 3,476 latents, 13,901 frames: from 3,477 the draw of the
+    # shot's noise is the floor, 8.53.
+    assert planner.plan(round(8.52 * GIB), HD, shots(3476), Pins(), None)[0].window == 6
+    assert refused(round(8.52 * GIB), HD, shots(3477), Pins(), None).startswith(
+        "an output of 1920x1080 takes 8.53 GiB of free VRAM (the noise of the longest shot, 13905"
+        " frames (3477 latents), drawn whole on the GPU"
+    )
     # The same pass bounds a smaller frame: 512x512, padded to 544x512, from 8.52 GiB free. Its
     # untiled decode takes more, 6.47 GiB against the tile's 6.41, and is no floor: pinned, it
     # is refused under 8.57 GiB free, naming the tile.
@@ -2437,13 +2449,13 @@ def test_host_memory() -> None:
 
 
 def test_the_vae_stays_where_the_host_is_short() -> None:
-    # DESIGN.md has the VAE's weights leave the DiT's phase before one more block is swapped
-    # (Memory planner, Choices, 2): 1080p on a 24 GB card, a shot of 301 frames, 28 blocks
-    # swapped and the VAE away. Away, its weights are pinned, 0.47 GiB of the 15.81 pinned
-    # there, every block leaving in the VAE's phases anyway. Where that plan takes more system
-    # memory than is available, the same shape with one block more swapped and the VAE staying
-    # takes 0.46 GiB less, and is the plan (planner._vae_kept): no bit moves, nor any plan on a
-    # host that holds the first.
+    # DESIGN.md has the VAE's weights leave the DiT's phase before a block is swapped (Memory
+    # planner, Choices, 1), and this in the paragraph after 3. 1080p on a 24 GB card, a shot of
+    # 301 frames: 28 blocks swapped and the VAE away. Away, its weights are pinned, 0.47 GiB of
+    # the 15.81 pinned there, every block leaving in the VAE's phases anyway. Where that plan
+    # takes more system memory than is available, the same shape with one block more swapped
+    # and the VAE staying takes 0.46 GiB less, and is the plan (planner._vae_kept): no bit
+    # moves, nor any plan on a host that holds the first.
     free, job = our_free(24), (HD, shots(76), Pins())
     pinned = 36 * paged(BLOCK) + paged(planner.DIT_OTHER) + paged(planner.VAE_WEIGHTS)
     held = 169 * 1_059_840
