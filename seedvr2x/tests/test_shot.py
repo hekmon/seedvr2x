@@ -11,6 +11,8 @@ takes them): a shot's windows through the real DiT, held to a one-window shot's 
 
 import gc
 import logging
+import math
+import re
 import weakref
 from collections.abc import Callable, Generator, Iterator
 from contextlib import contextmanager
@@ -793,28 +795,106 @@ def contiguous(latents: int, seed: int = 0) -> torch.Tensor:
     return latent_of(latents, (16, 24), seed)
 
 
-def test_the_check_allocates_two_and_a_half_latents() -> None:
+def whole_finite(tensor: torch.Tensor, what: str) -> None:
+    """shot.finite as it was until 2026-10-12, the tensor read whole: what the check by slices
+    is held to."""
+    if not bool(torch.isfinite(tensor).all()):
+        bad = int((~torch.isfinite(tensor)).sum())
+        raise shot.NonFinite(f"{what}: {bad} of its {tensor.numel()} values NaN or inf")
+
+
+def study_merge(sampled: list[torch.Tensor], layout: list[tuple[int, int]]) -> torch.Tensor:
+    """shot._merge as it was until 2026-10-12, the study's own writing (blend_patch.py,
+    latent_upscale): the latents merged so far, the mixed ones and the window's rest
+    concatenated at each join. What the merge into one tensor is held to, to the bit."""
+    merged = sampled[0].cpu()
+    for (_, previous_end), (start, _), current in zip(
+        layout, layout[1:], sampled[1:], strict=False
+    ):
+        shared = previous_end - start
+        current = current.cpu()
+        weights = torch.tensor(mix_weights(shared), dtype=torch.float32).to(current.dtype)
+        weights = weights.view(shared, *([1] * (current.dim() - 1)))
+        mixed = merged[start:previous_end] * weights + current[:shared] * (1.0 - weights)
+        merged = torch.cat([merged[:start], mixed, current[shared:]])
+    return merged
+
+
+def test_the_check_allocates_two_and_a_half_times_one_latent() -> None:
     # The check of an encode's latent for NaN and inf, on the CPU, where the encode leaves it
-    # (run._sample): torch allocates the latent's absolute values, as large, and three masks of
-    # a byte a value, 2.5 times a bfloat16 latent's bytes, all given back; with the latent, the
-    # planner's "check" (planner.host_moments), whatever the latent's length and its memory.
+    # (run._sample), reads it a latent at a time: torch allocates that latent's absolute values,
+    # as large, and three masks of a byte a value, 2.5 times one bfloat16 latent's bytes, all
+    # given back before the next; with the shot's latent, the planner's "check"
+    # (planner.host_moments), whatever the shot's length and its memory. Read whole, as it was
+    # until 2026-10-12, it allocated 2.5 times the shot's.
     for latents in (40, 200):
         latent = contiguous(latents).permute(3, 0, 1, 2).contiguous().permute(1, 2, 3, 0)
         assert not latent.is_contiguous() and latent.dtype == torch.bfloat16
+        one = latent.nbytes // latents
         most, left = allocated(lambda latent=latent: finite(latent, "a latent"))
-        assert (most, left) == (latent.nbytes + planner.CHECK_MASKS * latent.numel(), 0)
-        assert most == 2.5 * latent.nbytes
+        assert (most, left) == (one + planner.CHECK_MASKS * one // 2, 0)
+        assert most == 2.5 * one
         counted = planner.host_moments(SMALL_PADDED, latents, None)
-        assert counted["check"] == latent.nbytes + most == 3.5 * latent.nbytes
+        assert counted["check"] == latent.nbytes + most
+        whole = allocated(lambda latent=latent: whole_finite(latent, "a latent"))
+        assert whole == (2.5 * latent.nbytes, 0)
+
+
+def test_the_check_by_slices_says_what_the_whole_one_said() -> None:
+    # The check read slice by slice gives the verdict, and the words, of the check that read
+    # the tensor whole: nothing for finite values, and the count of every NaN and inf, wherever
+    # they are, in the first slice, in the last alone, in several, in all; over a latent in the
+    # encode's layout, a window, a decode's slice in float32, and tensors of one dimension, of
+    # none and of no value.
+    def said(check: Callable[[torch.Tensor, str], None], tensor: torch.Tensor) -> str | None:
+        try:
+            check(tensor, "a unit")
+        except shot.NonFinite as error:
+            return str(error)
+        return None
+
+    latent = contiguous(9).permute(3, 0, 1, 2).contiguous().permute(1, 2, 3, 0)
+    frames = torch.rand(5, 6, 8, 3)
+    line, scalar = torch.rand(7), torch.tensor(1.5)
+    none = torch.empty(0, 4, 4, 16, dtype=torch.bfloat16)
+    cases: list[tuple[torch.Tensor, list[tuple[tuple[int, ...], float]]]] = [
+        (latent, []),
+        (latent, [((0, 0, 0, 0), math.nan)]),
+        (latent, [((8, 15, 23, 15), math.inf)]),
+        (latent, [((2, 1, 1, 1), math.nan), ((2, 3, 4, 5), -math.inf), ((7, 0, 0, 3), math.inf)]),
+        (contiguous(4), [((3, 0, 0, 0), -math.inf), ((3, 0, 0, 1), math.nan)]),
+        (frames, []),
+        (frames, [((4, 5, 7, 2), math.nan)]),
+        (line, []),
+        (line, [((6,), math.inf)]),
+        (scalar, []),
+        (scalar, [((), math.nan)]),
+        (none, []),
+    ]
+    refused = 0
+    for tensor, bad in cases:
+        tensor = tensor.clone()
+        for place, value in bad:
+            tensor[place] = value
+        ours = said(finite, tensor)
+        assert ours == said(whole_finite, tensor)
+        assert (ours is None) == (not bad)
+        if bad:
+            assert ours == f"a unit: {len(bad)} of its {tensor.numel()} values NaN or inf"
+            refused += 1
+    assert refused == 7
+    everything = torch.full((3, 2, 2), math.nan)
+    assert said(finite, everything) == "a unit: 12 of its 12 values NaN or inf"
 
 
 @pytest.mark.parametrize(("latents", "cap"), [(13, 13), (48, 30), (48, 8), (100, 7), (100, 5)])
 def test_the_merge_allocates_what_the_planner_counts(latents: int, cap: int) -> None:
     # A shot's windows merged at its decode's start (run._decode): beside the windows, torch
-    # allocates the merged latent, the 2 latents mixed at a join, and from three windows on the
-    # latent merged before the last window, made anew at each join; the planner's "merge" with
-    # the windows (planner.host_moments), to the few bytes of the mix's weights. One window is
-    # the merged latent itself: nothing.
+    # allocates the merged latent, once, and at a join the two products and the sum of the 2
+    # latents mixed, given back before the next join; the planner's "merge" with the windows
+    # (planner.host_moments), to the few bytes of the mix's weights. One window is the merged
+    # latent itself: nothing. The study's own writing, the merge until 2026-10-12, made the
+    # shot's latents anew at each join: from three windows on it held them twice over.
     layout = window_layout(latents, cap)
     windows = [contiguous(end - start, seed) for seed, (start, end) in enumerate(layout)]
     kept = sum(window.nbytes for window in windows)
@@ -824,6 +904,89 @@ def test_the_merge_allocates_what_the_planner_counts(latents: int, cap: int) -> 
     assert counted["decode"] == latents * one
     assert 0 <= kept + most - counted["merge"] <= 64
     assert left == (0 if len(layout) == 1 else counted["decode"])
+    if len(layout) > 1:
+        assert 0 <= most - (latents + planner.MIXING * 2) * one <= 64
+    if len(layout) > 2:
+        before, _ = allocated(lambda: study_merge(windows, layout))
+        assert before >= (2 * latents - (layout[-1][1] - layout[-1][0])) * one > most
+
+
+@pytest.mark.parametrize(("latents", "cap"), [(13, 12), (48, 30), (48, 8), (100, 7), (100, 5)])
+def test_the_merge_into_one_tensor_is_the_study_s_to_the_bit(latents: int, cap: int) -> None:
+    # The merge written into one tensor allocated for the shot (shot._merge) gives the latents
+    # of the study's own writing, a concatenation at each join (study_merge, the merge until
+    # 2026-10-12): the same bits, inf and negative zeros among the shared latents included, the
+    # same dtype, on the CPU, dense in the windows' order of dimensions; from windows as the DiT
+    # gives them, dense, and from windows in another layout, channel-major. The windows aren't
+    # written to.
+    # A NaN mixed is a NaN in both, at the same places; its own bits, sign and payload, are the
+    # study's from dense windows, and follow the loop torch takes over the operands from others
+    # (0x7FC0 here for the study's 0xFFFF at the first join of channel-major windows). No NaN
+    # reaches a merge in a run: a window's output is checked before it is kept (run._sample).
+    layout = window_layout(latents, cap)
+    assert len(layout) > 1
+
+    def bits(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.contiguous().view(torch.int16)
+
+    for major in (False, True):
+        windows = [contiguous(end - start, seed) for seed, (start, end) in enumerate(layout)]
+        windows[0][-1, 0, 0, :4] = torch.tensor([math.nan, math.inf, -math.inf, -0.0])
+        windows[1][0, 1, 1, :4] = torch.tensor([-0.0, math.nan, 1e-30, math.inf])
+        windows[-1][1, 2, 3, 4] = -0.0
+        if major:
+            windows = [w.permute(3, 0, 1, 2).contiguous().permute(1, 2, 3, 0) for w in windows]
+            assert not windows[0].is_contiguous()
+        given = [bits(window).clone() for window in windows]
+        ours, theirs = merge_windows(windows, layout), study_merge(windows, layout)
+        assert ours.dtype == theirs.dtype == torch.bfloat16
+        assert ours.device == theirs.device == torch.device("cpu")
+        assert ours.shape == theirs.shape == (latents, 16, 24, 16)
+        assert ours.stride() == theirs.stride() and ours.is_contiguous()
+        nan = torch.isnan(theirs)
+        assert torch.equal(torch.isnan(ours), nan) and int(nan.sum()) == 2
+        assert torch.equal(bits(ours)[~nan], bits(theirs)[~nan])
+        assert major or torch.equal(bits(ours), bits(theirs))
+        assert all(torch.equal(bits(w), was) for w, was in zip(windows, given, strict=True))
+        # The shared latents were mixed, not copied: neither window's.
+        (_, first_end), (second_start, _) = layout[0], layout[1]
+        shared = bits(ours[second_start:first_end])
+        assert not torch.equal(shared, bits(windows[0][second_start:]))
+    # One window is the merged latent itself.
+    alone = contiguous(7)
+    assert merge_windows([alone], [(0, 7)]) is alone
+
+
+def test_the_merge_refuses_windows_that_aren_t_the_layout_s() -> None:
+    # The merged latents are written into a tensor allocated for the layout (shot._merge):
+    # with a window missing, the latents no window wrote would be whatever the memory held, and
+    # a window of a single latent would be repeated over its place, where the concatenation
+    # gave a short latent that the decode's frame count refused. So the windows are held to the
+    # layout first, each to its length: one missing, one more, one of another length, the
+    # first, a later one or a shot's only one, are refused, naming both.
+    layout = window_layout(48, 8)
+    windows = [contiguous(end - start, seed) for seed, (start, end) in enumerate(layout)]
+    assert merge_windows(windows, layout).shape[0] == 48
+    lengths = [end - start for start, end in layout]
+    assert lengths == [8] * 6 + [7] * 2
+    for given in (
+        windows[:-1],
+        windows[1:],
+        [*windows, contiguous(7)],
+        [*windows[:3], contiguous(1), *windows[4:]],
+        [contiguous(1), *windows[1:]],
+        [contiguous(7), *windows[1:]],
+    ):
+        said = f"windows of {[window.shape[0] for window in given]} latents for a layout of"
+        with pytest.raises(ValueError, match=re.escape(f"{said} {lengths}")):
+            merge_windows(given, layout)
+    with pytest.raises(ValueError, match=re.escape("windows of [8] latents for a layout of [7]")):
+        merge_windows([contiguous(8)], [(0, 7)])
+    with pytest.raises(ValueError, match=re.escape("windows of [8] latents for a layout of [")):
+        merge_windows(windows[:1], layout)
+    # And the merge itself takes no fewer windows than its layout has, whoever calls it.
+    with pytest.raises(ValueError, match=re.escape("zip() argument 2 is shorter")):
+        shot._merge(windows[:-1], layout)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_a_window_s_file_allocates_the_window_alone(tmp_path: Path) -> None:

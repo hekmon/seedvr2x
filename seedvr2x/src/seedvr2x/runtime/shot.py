@@ -38,6 +38,7 @@ import math
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -94,11 +95,25 @@ class NonFinite(RuntimeError):
 
 def finite(tensor: Tensor, what: str) -> None:
     """Raise NonFinite, naming `what`, unless every value of tensor is finite. The device is
-    polled first (model.synchronize), so that a Ctrl-C is answered while it works."""
+    polled first (model.synchronize), so that a Ctrl-C is answered while it works.
+
+    Read slice by slice along its first dimension, a latent or a frame at a time (_parts):
+    torch.isfinite allocates the absolute values of what it reads and three masks of a byte a
+    value, 2.5 times a bfloat16 tensor's bytes (tests/test_shot.py measures it), which a shot's
+    latent read whole, in system memory after its encode, held there beside it, the most the
+    run held of a shot (planner.host_moments)."""
     model.synchronize(tensor.device)
-    if not bool(torch.isfinite(tensor).all()):
-        bad = int((~torch.isfinite(tensor)).sum())
-        raise NonFinite(f"{what}: {bad} of its {tensor.numel()} values NaN or inf")
+    if all(bool(torch.isfinite(part).all()) for part in _parts(tensor)):
+        return
+    bad = sum(int((~torch.isfinite(part)).sum()) for part in _parts(tensor))
+    raise NonFinite(f"{what}: {bad} of its {tensor.numel()} values NaN or inf")
+
+
+def _parts(tensor: Tensor) -> Sequence[Tensor]:
+    """tensor's slices along its first dimension, views, one index each: a shot's latent by its
+    latents, a window's output likewise, a decode's slice by its frames (finite); the tensor
+    itself when it has one dimension or none."""
+    return tensor.unbind(0) if tensor.dim() > 1 else (tensor,)
 
 
 def moved(tensor: Tensor, device: torch.device, what: str) -> Tensor:
@@ -398,7 +413,14 @@ def _window(models: Models, noise: Tensor, latent: Tensor) -> Tensor:
 
 def merge_windows(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:
     """The shot's latents from its windows' DiT outputs (sample_windows): a single window's as it
-    is, else mixed where two windows share latents (_merge)."""
+    is, else mixed where two windows share latents (_merge). ValueError unless the windows are
+    the layout's, each of its length: the merged latents are written into a tensor allocated
+    for the layout, where a window missing would leave latents no window wrote, and one of a
+    single latent would be repeated over its place."""
+    lengths = [end - start for start, end in layout]
+    if [window.shape[0] for window in sampled] != lengths:
+        given = [window.shape[0] for window in sampled]
+        raise ValueError(f"windows of {given} latents for a layout of {lengths}")
     return sampled[0] if len(sampled) == 1 else _merge(sampled, layout)
 
 
@@ -598,15 +620,28 @@ def _frames(slices: Iterator[Tensor], height: int, width: int) -> Callable[[int]
 def _merge(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:
     """The windows' DiT outputs merged into the shot's latents: on the latents two windows share,
     earlier * w + later * (1 - w). The expression, bfloat16 and the CPU are the study's
-    (blend_patch.py, latent_upscale)."""
-    merged = sampled[0].cpu()
-    for (_, previous_end), (start, _), current in zip(
-        layout, layout[1:], sampled[1:], strict=False
+    (blend_patch.py, latent_upscale).
+
+    Written into one tensor, allocated once for the shot, (T', h, w, 16) dense on the CPU in the
+    windows' dtype: each window's latents copied to their place, the shared ones mixed there. The
+    values, the dtype and the memory layout are those of the study's own writing, a torch.cat
+    of the latents merged so far, the mixed ones and the window's rest at each join
+    (tests/test_shot.py holds the bits to it), which made the shot's latents anew at every join:
+    from three windows on the run then held them twice over beside the windows
+    (planner.host_moments). A latent is in two windows at the most (window_layout), so the
+    earlier window's shared latents are still as the DiT gave them when they are mixed."""
+    first = sampled[0]
+    merged = torch.empty((layout[-1][1], *first.shape[1:]), dtype=first.dtype, device=CPU)
+    merged[: layout[0][1]] = first
+    for ((_, previous_end), (start, end)), current in zip(
+        pairwise(layout), sampled[1:], strict=True
     ):
         shared = previous_end - start
         current = current.cpu()
         weights = torch.tensor(mix_weights(shared), dtype=torch.float32).to(current.dtype)
         weights = weights.view(shared, *([1] * (current.dim() - 1)))
-        mixed = merged[start:previous_end] * weights + current[:shared] * (1.0 - weights)
-        merged = torch.cat([merged[:start], mixed, current[shared:]])
+        earlier, later = merged[start:previous_end], current[:shared]
+        # Their mix unnamed, so that it is given up before the next join's is made.
+        merged[start:previous_end] = earlier * weights + later * (1.0 - weights)
+        merged[previous_end:end] = current[shared:]
     return merged

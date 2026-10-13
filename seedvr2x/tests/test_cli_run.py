@@ -785,10 +785,11 @@ def test_plan_recorded_and_phases_entered(
         "dit_peak": planner.dit_peak(PADDED, 4),
         "decode_peak": planner.decode_peak(PADDED, TARGET),
         "bound": "encode",
-        # The process's own, and the longest shot at the check of its latent: 6 latents of 3.5
-        # times their 8,192 bytes (planner.host_moments).
-        "host": planner.HOST_RESIDENT + 6 * 28_672,
-        "host_shot": 6 * 28_672,
+        # The process's own, and the longest shot as its decode merges its two windows of 4: the
+        # windows, 8 latents, the merged latent, 6, and a join's mix, 6, of 8,192 bytes each
+        # (planner.host_moments).
+        "host": planner.HOST_RESIDENT + 20 * 8_192,
+        "host_shot": 20 * 8_192,
         "scratch": 0,
         "longest_window": 4,
     }
@@ -1451,7 +1452,7 @@ def test_plan_said(
         "plan: no block of the DiT swapped, the VAE on the GPU in the DiT's phase; in the encode,"
         " the DiT's 36 blocks on the GPU; in the decode, the DiT's 36 blocks on the GPU",
         "plan: no system memory pinned, nothing leaving the GPU; 0.00 GiB for the longest shot at"
-        " the most, as its latent is checked after its encode; 2.40 GiB of system memory in all",
+        " the most, as its decode merges its windows; 2.40 GiB of system memory in all",
         "plan: encode untiled, decode untiled, each held 1.50 GiB under the budget",
         "plan: predicted peaks: encode 18.11 GiB, DiT 15.91 GiB, decode 17.73 GiB; the encode"
         " bounds the plan, its room counted, 74.29 GiB under the budget",
