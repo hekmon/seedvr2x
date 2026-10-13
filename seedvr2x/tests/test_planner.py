@@ -3646,43 +3646,105 @@ def test_the_unpinned_case_skips_a_small_card_alone() -> None:
         test_regression.unpinned(logged([host], "ERROR"), f"the plan is refused: {host}")
 
 
-# The DiT's windows under SDPA on a desktop card (an RTX 5090, 1080p in seedvr2x's padding,
-# research/scripts/hold_probe.py, 2026-10-11): latents, the DiT's blocks swapped, the largest
-# peak measured over the runs of that window (GiB, to the probe's three decimals), and the two
-# fits' predictions, FlashAttention 2's and SDPA's provisional one.
-SDPA_WINDOWS = [
-    (1, 0, 17.039, 16.955, 17.045),
-    (6, 0, 22.565, 22.215, 22.607),
-    (11, 0, 27.897, 27.316, 28.008),
-    (1, 36, 2.668, 2.607, 2.697),
-    (6, 36, 8.209, 7.867, 8.258),
-    (11, 36, 13.527, 12.967, 13.660),
-    (12, 36, 14.577, 13.971, 14.724),
+# The DiT's windows under SDPA, each the allocated peak of one forward in bytes, the largest of
+# the window's runs, in seedvr2x's padding: the padded frame's rows (1104 for 1080p, 2192 for
+# 4K), the window's latents, the DiT's blocks swapped, whether the VAE's weights were on the
+# GPU. SDPA_BOX: the sweep on the 96 GB card (2026-10-12, 29 windows, seedvr2x's own forward).
+# SDPA_DESKTOP: an RTX 5090 behind WSL2's GPU device (2026-10-11 and 12, 16 windows,
+# research/scripts/hold_probe.py), the VAE's weights on the GPU in every one.
+SDPA_BOX = [
+    (1104, 1, 0, True, 18_271_269_986),
+    (1104, 1, 36, True, 2_864_739_426),
+    (1104, 2, 0, True, 19_494_654_386),
+    (1104, 3, 0, True, 20_718_038_786),
+    (1104, 6, 0, True, 24_197_301_266),
+    (1104, 6, 36, True, 8_790_770_706),
+    (1104, 12, 0, True, 31_057_881_026),
+    (1104, 12, 12, True, 26_526_549_954),
+    (1104, 12, 36, True, 15_651_350_466),
+    (1104, 21, 0, True, 41_113_024_826),
+    (1104, 21, 36, False, 25_205_197_812),
+    (1104, 30, 0, True, 51_355_472_786),
+    (1104, 40, 0, True, 62_726_178_866),
+    (1104, 50, 0, True, 74_092_408_466),
+    (1104, 60, 0, True, 85_460_847_026),
+    (1104, 70, 0, True, 96_922_289_186),
+    (2192, 1, 0, True, 21_844_586_906),
+    (2192, 2, 0, True, 26_641_290_746),
+    (2192, 3, 0, True, 31_437_994_586),
+    (2192, 4, 0, True, 36_234_698_426),
+    (2192, 5, 36, False, 24_483_353_532),
+    (2192, 6, 0, True, 45_188_097_506),
+    (2192, 8, 0, True, 54_460_689_986),
+    (2192, 8, 36, True, 39_054_159_426),
+    (2192, 10, 0, True, 63_092_889_746),
+    (2192, 12, 0, True, 72_365_746_466),
+    (2192, 14, 0, True, 80_999_345_906),
+    (2192, 16, 0, True, 90_272_364_626),
+    (2192, 17, 0, True, 94_428_462_626),
+]
+SDPA_DESKTOP = [
+    (1104, 1, 0, True, 18_297_990_656),
+    (1104, 1, 36, True, 2_888_093_184),
+    (1104, 6, 0, True, 24_228_963_840),
+    (1104, 6, 36, True, 8_814_077_440),
+    (1104, 8, 0, True, 26_575_523_840),
+    (1104, 8, 36, True, 11_167_731_712),
+    (1104, 9, 0, True, 27_605_780_992),
+    (1104, 9, 36, True, 12_195_855_360),
+    (1104, 12, 36, True, 15_678_309_888),
+    (1104, 17, 36, True, 21_225_550_336),
+    (1104, 21, 36, True, 25_733_936_128),
+    (2192, 1, 36, True, 6_460_755_456),
+    (2192, 2, 36, True, 11_256_947_712),
+    (2192, 3, 36, True, 16_054_198_272),
+    (2192, 4, 36, True, 20_857_285_632),
+    (2192, 5, 36, True, 25_011_469_312),
 ]
 
 
 def test_the_dit_s_fit_is_its_attention_backend_s() -> None:
     # DESIGN.md, Memory planner, Per-phase peaks: "The fit is FlashAttention 2's ... Under SDPA,
-    # which a machine without a FlashAttention build runs, the DiT peaks higher: by 0.06 to 0.61
-    # GiB at 1 to 12 latents of 1080p on a desktop card, 5 to 6% of the per-token term, the same
-    # with blocks swapped ... The planner is to hold a fit per attention backend." SDPA's is
-    # PROVISIONAL until it is measured: 6% more a token and 0.03 GiB, which cover each measured
-    # window, by 0.006 GiB at the least (1 latent, no block swapped) and 0.147 at the most.
+    # which a machine without a FlashAttention build runs, the DiT peaks higher ... The planner
+    # holds a fit per attention backend and takes the run's." SDPA's: 4.69% more a token and
+    # 0.141 GiB, an upper bound of every window measured under it on two cards, 29 on the 96 GB
+    # card and 16 on a desktop card, each counted with its own swapped blocks and VAE: by 0.017
+    # to 0.131 GiB on the first, by 0.0009 to 0.105 on the second, whose 4 latents of 4K set the
+    # constant: the first card's 29 alone are bounded by 0.124 GiB, which that window passes.
     flash, sdpa = planner.FLASH_ATTN_2, planner.SDPA
-    assert planner.DIT_ATTENTION == {flash: (0, 1.0), sdpa: (round(0.03 * GIB), 1.06)}
+    assert planner.DIT_ATTENTION == {flash: (0, 1.0), sdpa: (round(0.141 * GIB), 1.0469)}
+    padded = {1104: OURS_1080, 2192: OURS_4K}
+    assert (len(SDPA_BOX), len(SDPA_DESKTOP)) == (29, 16)
+    assert {(rows, max(row[1] for row in SDPA_BOX if row[0] == rows)) for rows in padded} == {
+        (1104, 70),
+        (2192, 17),
+    }
+    left: dict[str, list[tuple[int, int, int]]] = {"box": [], "desktop": []}
     over: list[float] = []
-    left: list[float] = []
-    for latents, swapped, measured, by_flash, by_sdpa in SDPA_WINDOWS:
-        fitted = planner.dit_peak(OURS_1080, latents, swapped)
-        assert fitted == planner.dit_peak(OURS_1080, latents, swapped, attention=flash)
-        provisional = planner.dit_peak(OURS_1080, latents, swapped, attention=sdpa)
-        assert (round(gib(fitted), 3), round(gib(provisional), 3)) == (by_flash, by_sdpa)
-        more = 0.03 * GIB + 0.06 * planner.PER_TOKEN * planner.tokens(OURS_1080, latents)
-        assert provisional - fitted == pytest.approx(more, abs=2)  # two peaks, each rounded
-        over.append(measured - gib(fitted))
-        left.append(gib(provisional) - measured)
-    assert (round(min(over), 2), round(max(over), 2)) == (0.06, 0.61)
-    assert (round(min(left), 3), round(max(left), 3)) == (0.006, 0.147)
+    for card, measured in (("box", SDPA_BOX), ("desktop", SDPA_DESKTOP)):
+        for rows, latents, swapped, vae, peak in measured:
+            window = (padded[rows], latents, swapped, vae)
+            fitted = planner.dit_peak(*window)
+            assert fitted == planner.dit_peak(*window, attention=flash)
+            bound = planner.dit_peak(*window, attention=sdpa)
+            tokens = planner.tokens(padded[rows], latents)
+            more = 0.141 * GIB + 0.0469 * planner.PER_TOKEN * tokens
+            assert bound - fitted == pytest.approx(more, abs=2)  # two peaks, each rounded
+            assert bound >= peak, (card, rows, latents, swapped)
+            left[card].append((bound - peak, rows, latents))
+            over.append(gib(peak - fitted))
+    assert (round(min(over), 2), round(max(over), 2)) == (0.06, 3.31)
+    least, most = min(left["box"]), max(left["box"])
+    assert (round(gib(least[0]), 4), *least[1:]) == (0.0173, 2192, 8)
+    assert (round(gib(most[0]), 4), *most[1:]) == (0.1314, 1104, 60)
+    least, most = min(left["desktop"]), max(left["desktop"])
+    assert (round(gib(least[0]), 4), *least[1:]) == (0.0009, 2192, 4)
+    assert (round(gib(most[0]), 4), *most[1:]) == (0.1049, 1104, 1)
+    # The 96 GB card's own bound, 0.124 GiB, is under that desktop window by 0.016.
+    short = least[0] - round(0.141 * GIB) + round(0.124 * GIB)
+    assert round(gib(short), 3) == -0.016
+    # FlashAttention 2's fit is as it was: 12 latents at 1080p, 28.320 GiB.
+    assert planner.dit_peak(OURS_1080, 12) == 30_407_967_638
     # The VAE's weights away, and the draw of a shot's noise, which runs no attention, as under
     # FlashAttention 2.
     apart = planner.dit_peak(OURS_1080, 6, 0, False, sdpa)
@@ -3693,14 +3755,14 @@ def test_the_dit_s_fit_is_its_attention_backend_s() -> None:
         planner.plan(our_free(24), HD, shots(6), Pins(), None, attention="xformers")
 
     # The plan is made for the backend the run takes. 1080p on a 24 GB card, a shot of 301
-    # frames: the same windows of 17 latents, 31 blocks swapped under SDPA for 28; the plan's
+    # frames: the same windows of 17 latents, 30 blocks swapped under SDPA for 28; the plan's
     # second line and its record say which.
     free, job = our_free(24), (HD, shots(76), Pins(), None)
     made, peaks = planner.plan(free, *job)
     assert bare(made) == Plan(17, Tiles(1856), Tiles(1088), 28, 0, 0, vae_in_dit=False)
     other, slower = planner.plan(free, *job, attention=sdpa)
-    assert bare(other) == Plan(17, Tiles(1856), Tiles(1088), 31, 0, 0, vae_in_dit=False)
-    assert slower.dit == planner.dit_peak(OURS_1080, 17, 31, False, sdpa)
+    assert bare(other) == Plan(17, Tiles(1856), Tiles(1088), 30, 0, 0, vae_in_dit=False)
+    assert slower.dit == planner.dit_peak(OURS_1080, 17, 30, False, sdpa)
     assert (peaks.record()["attention"], slower.record()["attention"]) == (flash, sdpa)
     assert planner.said(other, slower, "a card", HD, shots(76), Pins())[1] == (
         "plan: frames padded to 1920x1104, 8,280 tokens a latent, attention on PyTorch's SDPA"
@@ -3710,16 +3772,17 @@ def test_the_dit_s_fit_is_its_attention_backend_s() -> None:
     made, _ = planner.plan(free, HD, shots(300), Pins(), None)
     other, _ = planner.plan(free, HD, shots(300), Pins(), None, attention=sdpa)
     assert (made.window, made.swapped, other.window, other.swapped) == (20, 35, 19, 36)
-    # 4K's smallest window, 5 latents, takes 23.62 GiB of free VRAM by SDPA's provisional fit
-    # where FlashAttention 2's takes 22.40: a card emulated at 24 GB, 22.51 GiB free, plans 4K
-    # with FlashAttention 2 and is refused it without.
+    # 4K's smallest window, 5 latents, takes 23.47 GiB of free VRAM by SDPA's fit (22.80 GiB
+    # measured on the 96 GB card, SDPA_BOX, and the margin: 23.40) where FlashAttention 2's
+    # takes 22.40: a card emulated at 24 GB, 22.51 GiB free, plans 4K with FlashAttention 2 and
+    # is refused it without. No window goes under 5 latents to make the room (DESIGN.md).
     emulated = 24_168_824_832
     assert planner.plan(emulated, UHD, shots(5), Pins(), None)[0].window == 5
     assert refused(emulated, UHD, shots(5), Pins(), None, attention=sdpa).startswith(
-        "an output of 3840x2160 takes 23.62 GiB of free VRAM (its smallest window, 5 latents, with"
-        " every block of the DiT swapped and the VAE off the GPU: a peak of 23.02 GiB, and 0.60 of"
+        "an output of 3840x2160 takes 23.47 GiB of free VRAM (its smallest window, 5 latents, with"
+        " every block of the DiT swapped and the VAE off the GPU: a peak of 22.87 GiB, and 0.60 of"
         " margin), and the driver reports 22.50 GiB free: the largest output that fits there is"
-        " --resolution 2080, "
+        " --resolution 2096, "
     )
 
 
@@ -3728,29 +3791,29 @@ def test_resumed_on_another_attention_backend() -> None:
     # (DESIGN.md, Memory planner, A plan shapes the output a little), and for the attention
     # backend of that day's run: FlashAttention installed since, or gone, the recorded shape is
     # held to today's fit. A shape recorded with FlashAttention 2, taken up on SDPA: the same
-    # windows and tiles, three more blocks swapped; and the other way round, three fewer.
+    # windows and tiles, two more blocks swapped; and the other way round, two fewer.
     free, job = our_free(24), (HD, shots(76), Pins(), None)
     shape = Plan(17, Tiles(1856), Tiles(1088))
     with_flash = Plan(17, Tiles(1856), Tiles(1088), 28, 0, 0, vae_in_dit=False)
     assert bare(planner.plan(free, *job, recorded=shape)[0]) == with_flash
     resumed, peaks = planner.plan(free, *job, recorded=with_flash, attention=planner.SDPA)
-    assert bare(resumed) == replace(with_flash, swapped=31)
+    assert bare(resumed) == replace(with_flash, swapped=30)
     assert peaks.attention == planner.SDPA
     back, peaks = planner.plan(free, *job, recorded=resumed, attention=planner.FLASH_ATTN_2)
     assert (bare(back), peaks.attention) == (with_flash, planner.FLASH_ATTN_2)
     # A shape whose windows only FlashAttention 2's fit holds on that card no longer fits there
     # without it, and is refused as any recorded shape that no longer fits: its windows of 20
-    # latents take 23.38 GiB of free VRAM by SDPA's fit, every block swapped.
+    # latents take 23.23 GiB of free VRAM by SDPA's fit, every block swapped.
     long = (HD, shots(300), Pins(), None)
     recorded, _ = planner.plan(free, *long)
     assert bare(recorded) == Plan(20, Tiles(1856), Tiles(1088), 35, 0, 0, vae_in_dit=False)
     assert fits(recorded, free, HD, shots(300), None) is None
     assert fits(recorded, free, HD, shots(300), None, attention=planner.SDPA) == (
         "the DiT's phase, a window of 20 latents with 35 blocks swapped and the VAE off the GPU,"
-        " takes 23.80 GiB of free VRAM and the driver reports 22.57 GiB free, 1.23 GiB short"
+        " takes 23.65 GiB of free VRAM and the driver reports 22.57 GiB free, 1.08 GiB short"
     )
     assert refused(free, *long, recorded=recorded, attention=planner.SDPA) == (
         "the recorded plan no longer fits the memory free now: the DiT's phase, a window of 20"
-        " latents with 36 blocks swapped and the VAE off the GPU, takes 23.38 GiB of free VRAM"
-        " and the driver reports 22.57 GiB free, 0.81 GiB short"
+        " latents with 36 blocks swapped and the VAE off the GPU, takes 23.23 GiB of free VRAM"
+        " and the driver reports 22.57 GiB free, 0.66 GiB short"
     )
