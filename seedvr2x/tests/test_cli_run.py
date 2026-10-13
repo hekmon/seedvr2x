@@ -933,6 +933,9 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     # torch is imported; the plan made in the memory free less what is held back; torch limited
     # to that before the models load. The memory free: what the whole card has, 2 GiB less here
     # than the driver reports to the process, another program's. The run itself is the same.
+    # And torch is limited a first time before anything of the run works on the GPU: its first
+    # pass, whose shot detector runs there, and the warm-up its free memory is read with, which
+    # ran before any limit existed.
     from seedvr2x.runtime import memory, model
 
     caplog.set_level(logging.INFO)
@@ -943,15 +946,32 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     monkeypatch.setattr(
         model, "load_models", lambda *a: loads.append((a[4], len(limits))) or STAND_IN_MODELS
     )
+    # The limits set by then, at the first pass and at the reading of the free memory.
+    held_at: list[tuple[str, int]] = []
+    first_pass, read_free = cli._first_pass, cli._free_memory  # pyright: ignore[reportPrivateUsage]
+
+    def passing(*arguments: Any) -> Any:
+        held_at.append(("the first pass", len(limits)))
+        return first_pass(*arguments)
+
+    def reading(device: torch.device) -> int:
+        held_at.append(("the reading", len(limits)))
+        return read_free(device)
+
+    monkeypatch.setattr(cli, "_first_pass", passing)
+    monkeypatch.setattr(cli, "_free_memory", reading)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
+    assert held_at == [("the first pass", 1), ("the reading", 1)]
     # What the plan counts on is its budget, the planner's margin counted in what a held run
     # leaves to torch's allocator: the plan of a driver that refuses and reports that margin
     # more.
     planned_in = card - memory.HELD_BACK - memory.RESERVE
     made = planner.plan(planned_in + planner.MARGIN, TARGET, JOB_SHOTS, Pins(window=5), HOST)
-    assert loads == [(made[0], 1)] and limits == [(card - memory.HELD_BACK) / TOTAL]
+    # Held twice: before the first pass, and again once the plan is made, before the models
+    # load; the stand-in's card has the same memory free both times.
+    assert loads == [(made[0], 2)] and limits == [(card - memory.HELD_BACK) / TOTAL] * 2
     assert steps.calls == UNINTERRUPTED
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     # The record keeps what the plan was made in, and beside it what the driver reported and
@@ -979,6 +999,8 @@ def test_a_driver_that_spills_is_planned_under_and_held(
         "torch held to 89.50 GiB on the GPU: the 92.50 GiB free less 3.0, and what it holds;"
         " free on the whole card by NVML (its driver reports 94.50 GiB free to this process)"
     ) in caplog.text
+    # The run's limit is said once at the level a user reads: the first is for its debug level.
+    assert caplog.text.count("torch held to ") == 1
 
 
 def test_the_user_s_allocator_stands_on_a_driver_that_spills(
@@ -988,7 +1010,7 @@ def test_the_user_s_allocator_stands_on_a_driver_that_spills(
     limits = spilling_driver(monkeypatch)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync" and len(limits) == 1
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:cudaMallocAsync" and len(limits) == 2
     said = "the allocator is the environment's, backend:cudaMallocAsync: torch's limit counts"
     assert said in caplog.text
 
@@ -1091,15 +1113,16 @@ def test_a_run_refused_for_its_model_files_asks_the_driver_nothing(
 def test_a_plan_on_a_driver_that_spills_holds_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # --plan counts in the memory a run would: the same plan as the run's; torch, which loads
-    # no model, is given no limit.
+    # --plan counts in the memory a run would: the same plan as the run's; torch is held for
+    # its first pass, as a run's is, and, loading no model, not again.
     from seedvr2x.runtime import memory
 
     caplog.set_level(logging.INFO, logger="seedvr2x")
     limits = spilling_driver(monkeypatch)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--plan", "plan.txt") == 0
-    assert not limits and steps.calls == []
+    assert limits == [(FREE - memory.HELD_BACK_UNREAD) / TOTAL] and steps.calls == []
+    assert "torch held to " not in caplog.text
     planned_in = FREE - memory.HELD_BACK - memory.RESERVE
     reading = memory.Reading(FREE, None, planned_in, True, memory.HELD_BACK_UNREAD)
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
@@ -1138,7 +1161,7 @@ def test_resumed_on_a_driver_that_spills_is_held_again(
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
-    assert limits == [(FREE - memory.HELD_BACK) / TOTAL]
+    assert limits == [(FREE - memory.HELD_BACK) / TOTAL] * 2
     planned_in = FREE - memory.HELD_BACK - memory.RESERVE
     assert json.loads(manifest.read_text())["plan"]["memory"]["free"] == planned_in
     made = [indexes(tmp_path / "out" / f"seg_{number:06d}.mkv") for number in range(2)]

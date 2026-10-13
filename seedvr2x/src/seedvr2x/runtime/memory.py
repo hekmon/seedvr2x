@@ -412,13 +412,21 @@ def usable(free: int) -> int:
     return reading(free).counted
 
 
-def hold(device: Any) -> int | None:
+def hold(device: Any, first: bool = False) -> int | None:
     """On a driver that spills, limit torch on `device` (a torch.device) to what it holds now
     and the memory free now less HELD_BACK, the memory free being the smaller of what the
     driver reports to this process and of what the whole card has (card_free); less
     HELD_BACK_UNREAD where the card's figure isn't read, the driver's alone standing over what
-    the card has. More is refused, an OutOfMemoryError. Called once the plan is made and before
-    the models load. Returns the limit, in bytes; None, nothing done, on a driver that refuses.
+    the card has. More is refused, an OutOfMemoryError. Returns the limit, in bytes; None,
+    nothing done, on a driver that refuses.
+
+    Called twice a run (cli._run). A first time (`first`) before anything of the run works on
+    the GPU: the shot detector in the first pass, 0.53 GiB at its peak, and the reading's
+    warm-up ran before any limit existed, the card's use up 1.23 GiB at the most through a
+    first pass, the process's context and libraries in it (nvidia-smi, the same RTX 5090,
+    2026-10-12). Then once the plan is made and before the models load, from the memory free
+    then, which is the limit the run's units are checked against (check). The first is said at
+    debug level, the second being the run's.
 
     Once NVML has given the card's figure in the run, the limit isn't set under the driver's
     figure alone because NVML fails at this one reading (_at_the_limit): the plan, made
@@ -442,10 +450,12 @@ def hold(device: Any) -> int | None:
     fraction = min(limit / total, 1.0)
     torch.cuda.set_per_process_memory_fraction(fraction, device)  # pyright: ignore[reportUnknownMemberType]
     _limit = limit
-    logger.info(
-        "torch held to %.2f GiB on the GPU: the %.2f GiB free less %.1f, and what it holds; free"
-        " %s",
+    logger.log(
+        logging.DEBUG if first else logging.INFO,
+        "torch held to %.2f GiB on the GPU%s: the %.2f GiB free less %.1f, and what it holds;"
+        " free %s",
         limit / GIB,
+        ", a first time, before the first pass" if first else "",
         free / GIB,
         _left / GIB,
         _named(reported, card),

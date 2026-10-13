@@ -668,6 +668,13 @@ def _run(args: argparse.Namespace) -> int:
             identity = _identity(
                 *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
             )
+        if not idle:
+            # Where the driver spills, torch is held a first time here, before anything of the
+            # run works on the GPU: the shot detector in the first pass, then the first
+            # allocation and the warm-up the free memory is read with (_free_memory), which ran
+            # before any limit existed. Held again once the plan is made, from the memory free
+            # then (below).
+            memory.hold(identity.device, first=True)
         if prior is not None and prior.known is not None:
             found = prior.known
         else:
@@ -844,7 +851,8 @@ def _run(args: argparse.Namespace) -> int:
     started = time.monotonic()
     import torch  # loaded since the job's identity: named here for the refusals below
 
-    # Where the driver spills, torch refuses from here on what passes the card's free memory.
+    # Where the driver spills, torch is held again, to the memory free now that the first pass
+    # and the plan are made, and refuses from here on what passes it.
     try:
         memory.hold(identity.device)
     except torch.OutOfMemoryError as error:
