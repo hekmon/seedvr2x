@@ -44,7 +44,8 @@ side, encode 1.36 + 8.66 A and decode 0.44 + 16.29 A; below, encode 1.7 + 8.4 A 
 
 The peaks in planner-limits.md were measured on 2026-10-11 by `run` as it then was, a driver
 with its paths written in, on seedvr2x at e6450d8 with the VAE passes that 2adcea7 brought,
-before that commit; `table` gives that section's tables from its lines. The passes it calls are
+before that commit; `table` gives that section's tables from its lines. `run` as it stands
+here has not run on a GPU: its measuring code is that driver's, moved. The passes it calls are
 the same in the seedvr2x this file came with (runtime/model.py's VAE passes, tilegrid.py's grid,
 tiling.py's two passes, shot.py's encoder inputs, job.py's padding). The allocator is
 cudaMallocAsync unless the environment names one (PYTORCH_CUDA_ALLOC_CONF), set before torch is
