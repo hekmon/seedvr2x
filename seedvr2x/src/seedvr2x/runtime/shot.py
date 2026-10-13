@@ -25,7 +25,7 @@ handed on in the slices a streamed decode gives, once the last tile is in: what 
 
 The steps are apart, as the resumable units of DESIGN.md (Pause and resume) are: the encode
 (encode_shot), each window (sample_windows), the decode (merge_windows, decode_shot). Each takes
-what the one before gives, wherever it was kept (runtime/units.py); runtime/run.py's run_job runs
+what the one before gives, as the units kept it (runtime/units.py); runtime/run.py's run_job runs
 them in order.
 
 With `split` (DESIGN.md, Colour correction), each slice of the decode is corrected as it comes out,
@@ -326,7 +326,7 @@ def sample_windows(
     """The DiT's output for each window of layout from window `start` on, in order, each (t, h, w,
     16) on the device: one Euler step per window, from the shot's latent, (T', h, w, 16) in the
     memory layout its encode gave it (encode_shot): in system memory, as its encode gives it and
-    the units keep it (units.Units.save_latent, units.Units.latent), or on the device.
+    the units give it back (units.Units.save_latent, units.Units.latent), or on the device.
 
     The noise is drawn once for the shot, when the first window is asked for, on the device and
     on the latent's layout, as numz draws it for a batch (generation_phases.py:663-680): its

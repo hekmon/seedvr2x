@@ -84,10 +84,9 @@ def run_job(
     the plan has there for it.
 
     A shot's units run in order: its encode, then its windows, each kept by `units` as it is
-    done, then its decode. With units kept on disk, a segment's shots are all encoded and sampled
-    before the first of them is decoded: the segment's decode and write is then a unit of its own,
-    and units never interleave. With nothing kept, each shot is decoded as soon as it is sampled,
-    its steps in a row, and nothing builds up.
+    done, then its decode. A segment's shots are all encoded and sampled before the first of them
+    is decoded: the segment's decode and write is then a unit of its own, and units never
+    interleave.
 
     What units kept already is skipped (DESIGN.md, Pause and resume): a finished segment; a
     shot's encode and the windows done; the input frames of what is skipped, never decoded, the
@@ -120,14 +119,10 @@ def run_job(
             if units.finished(segment):
                 continue
             sample = (models, inputs, shots, target, seed, plan, units, stop, copies)
-            if units.persistent:
-                for index in group:
-                    _sample(index, *sample, numz_padding)
-                _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write", None)
             for index in group:
-                if not units.persistent:
-                    _sample(index, *sample, numz_padding)
-                    _begin(stop, f"shot {index + 1}/{len(shots)}'s decode", None)
+                _sample(index, *sample, numz_padding)
+            _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write", None)
+            for index in group:
                 _decode(models, shots, index, target, plan, units, write, copies)
 
 
@@ -159,9 +154,9 @@ def _sample(
     with it, and the copy of a shot encoded already made again if it or its checksums are
     missing. numz_padding as run_job takes it.
 
-    Between two of the shot's units the GPU holds nothing of the shot: its latent and each
-    window's output wait in system memory or in their files (units.Units), and its noise in
-    system memory with the latent (shot.sample_windows). A unit's logged VRAM peak is then its own;
+    Between two of the shot's units the GPU holds nothing of the shot: its latent waits in
+    system memory and each window's output in its file (units.Units), and its noise in system
+    memory with the latent (shot.sample_windows). A unit's logged VRAM peak is then its own;
     the first window a run makes of a shot holds the noise's draw too, the latent and the noise
     whole on the GPU for that moment."""
     shot = shots[index]
@@ -235,8 +230,8 @@ def _sample(
             end - 1,
             _spent(models, started),
         )
-        # Kept on the CPU or in its file (units.Units.save_window): the output leaves the GPU
-        # before the next window runs, so that a window's peak is its own.
+        # Kept in its file (units.Units.save_window): the output leaves the GPU before the next
+        # window runs, so that a window's peak is its own.
         del output
     del sampled, latent
     units.drop_latent(index)
@@ -307,7 +302,6 @@ def _decode(
         units.copy_path(index).unlink(missing_ok=True)
         units.checksums_path(index).unlink(missing_ok=True)
         raise
-    units.shot_decoded(index)
     logger.info(
         "%s: decoded in %s; RAM %.2f GiB, peak %.2f GiB",
         name,
@@ -320,8 +314,7 @@ def _decode(
 def _scratch(units: Units, index: int, tiles: Tiles | None) -> Path | None:
     """Where a tiled pass of shot `index` keeps its scratch once it outgrows its allowance of
     system memory (DESIGN.md, Pipeline, per shot, step 3): the shot's own directory, among its
-    units, or in the work directory of a one-file output, which a plan with tiles has for it
-    (cli._run). None for an untiled pass, which keeps none."""
+    units. None for an untiled pass, which keeps none."""
     return None if tiles is None else units.shot_directory(index)
 
 

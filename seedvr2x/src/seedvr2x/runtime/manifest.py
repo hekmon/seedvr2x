@@ -32,7 +32,7 @@ VERSION = 3
 # than for its version alone; and so that verify still checks its segments, recorded as they
 # are now. Version 1, from before resume (7c7c90d), is refused.
 READ = (2, VERSION)
-# The directory of the units kept for a resume, beside the manifest (units.DiskUnits).
+# The directory of the units kept for a resume, beside the manifest (units.Units).
 STATE = "resume"
 # The directory of the output segments' checksums, beside them, which outlives the job
 # (media/checksums.py; DESIGN.md, Output, Checksums).

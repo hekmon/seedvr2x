@@ -301,7 +301,6 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("stopped at once (SIGTERM)")
         return 143
     finally:
-        _remove_work()
         _unmake()
         _unlock()
 
@@ -580,7 +579,7 @@ def _run(args: argparse.Namespace) -> int:
         recorded: dict[str, Any] | None = None
         kept: FrameIndex | None = None
         untrusted = ""
-        if directory is not None and (directory / NAME).is_file():
+        if (directory / NAME).is_file():
             _lock(directory)
             recorded = read(directory / NAME)
             # A run stopped between its file put in place and its work directory removed: the
@@ -589,7 +588,7 @@ def _run(args: argparse.Namespace) -> int:
             if final is not None and _assembled(*asked, final, directory, recorded):
                 return 0
             kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
-        if final is not None and directory is not None:
+        if final is not None:
             # Before any work, on a new job and on a resume: what the assembly can't take of the
             # source's other streams would otherwise be found at the job's end, every segment
             # made (_copied). SIGTERM unwinds it as Ctrl-C does, its ffmpeg stopped with it
@@ -653,7 +652,6 @@ def _run(args: argparse.Namespace) -> int:
         if not idle:
             memory.startup()
         if recorded is not None:
-            assert directory is not None
             prior = _prior(
                 *(args, directory, recorded, trusted, cuts, declared, ffmpeg_version),
                 *(conversions, numz_padding, model_files),
@@ -666,7 +664,7 @@ def _run(args: argparse.Namespace) -> int:
                 return done
         else:
             identity = _identity(
-                *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files
+                *(args, cuts, ffmpeg_version, conversions), numz_padding, model_files
             )
         if not idle:
             # Where the driver spills, torch is held a first time here, before anything of the
@@ -688,7 +686,7 @@ def _run(args: argparse.Namespace) -> int:
                     directory,
                 )
             # The source's content hashed meanwhile, for the manifest.
-            found = _first_pass(declared, directory is not None, model_files, identity.device)
+            found = _first_pass(declared, model_files, identity.device)
         source = counted(declared, found)
         if final is not None:
             _grid_start(source)
@@ -713,7 +711,6 @@ def _run(args: argparse.Namespace) -> int:
         kept_plan = None
         plan_record: dict[str, Any] | None = None
         if prior is not None and not planned(prior.recorded):
-            assert directory is not None
             kept_plan = _recorded_plan(
                 *(directory / NAME, prior.recorded, shots, target), numz_padding=numz_padding
             )
@@ -733,8 +730,7 @@ def _run(args: argparse.Namespace) -> int:
             # but on a driver that gives memory the card doesn't have, where the run is held to
             # less (runtime/memory.py); the plan's lines and its refusals name each figure. The
             # DiT's peak by the fit of the attention backend this run takes, today's on a
-            # resume too (_attention). One output file keeps a shot's windows in system
-            # memory, which the plan counts there (planner.host_moments).
+            # resume too (_attention).
             free = memory.reading(_free_memory(identity.device))
             plan, peaks = planner.plan(
                 *(free, target, shots, pins, _host_available()),
@@ -742,7 +738,6 @@ def _run(args: argparse.Namespace) -> int:
                 numz_padding=numz_padding,
                 recorded=kept_plan,
                 attention=_attention(),
-                one_file=directory is None,
             )
             card = torch.cuda.get_device_name(identity.device)
             said = planner.said(plan, peaks, card, target, shots, pins, numz_padding=numz_padding)
@@ -757,12 +752,6 @@ def _run(args: argparse.Namespace) -> int:
             # information (resume.UNCOMPARED).
             plan_record = plan.record()
             plan_record["memory"].update(peaks.record())
-        # The work directory of a one-file output: for split's input copies, and for a tiled
-        # pass's scratch (run._scratch). None for --plan, which writes nothing but its cut list
-        # for one file.
-        tiled = plan.encode_tiles is not None or plan.decode_tiles is not None
-        keeps = directory is None and (split or tiled) and args.plan is None
-        work = _work(args.output) if keeps else None
     except (MediaError, JobError) as error:
         logger.error("%s", error)
         return 1
@@ -786,64 +775,61 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.run import run_job
     from seedvr2x.runtime.shot import CopyError, NonFinite, shot_layout
-    from seedvr2x.runtime.tiling import ScratchError
-    from seedvr2x.runtime.units import DiskUnits, Units
+    from seedvr2x.runtime.units import Units
 
-    units, record = Units(work), None
     remaining = list(range(len(segments)))  # the segments to write, those not finished
-    if directory is not None:
+    try:
+        if prior is None:
+            _lock(directory)
+    except JobError as error:
+        logger.error("%s", error)
+        return 1
+    record = manifest.Manifest(
+        directory / NAME,
+        identity.settings,
+        identity.environment,
+        source,
+        shots,
+        [shot_layout(shot.frames, plan.window) for shot in shots],
+        segments,
+        [path.name for path in paths],
+        {
+            "format": args.format,
+            "size": [out_width, out_height],
+            "frame_rate": str(source.frame_rate),
+        },
+        plan_record,
+    )
+    if prior is None and not _empty(directory, final is not None):
+        logger.error("%s: written to since it was checked, by another program", directory)
+        return 1
+    if prior is not None:
+        # The job recorded there, checked whole and taken up before the models load: a plan
+        # whose cuts changed, or whose shape did with the memory free, planned again
+        # (_replan).
         try:
-            if prior is None:
-                _lock(directory)
+            replanned = _resume(record, prior, final is not None)
         except JobError as error:
             logger.error("%s", error)
             return 1
-        record = manifest.Manifest(
-            directory / NAME,
-            identity.settings,
-            identity.environment,
-            source,
-            shots,
-            [shot_layout(shot.frames, plan.window) for shot in shots],
-            segments,
-            [path.name for path in paths],
-            {
-                "format": args.format,
-                "size": [out_width, out_height],
-                "frame_rate": str(source.frame_rate),
-            },
-            plan_record,
-        )
-        if prior is None and not _empty(directory, final is not None):
-            logger.error("%s: written to since it was checked, by another program", directory)
-            return 1
-        if prior is not None:
-            # The job recorded there, checked whole and taken up before the models load: a plan
-            # whose cuts changed, or whose shape did with the memory free, planned again
-            # (_replan).
-            try:
-                replanned = _resume(record, prior, final is not None)
-            except JobError as error:
-                logger.error("%s", error)
-                return 1
-            remaining = [index for index, done in enumerate(record.finished) if not done]
-            if not replanned:
-                # The job as recorded: what of it is written before a unit, its first pass run
-                # again or its plan taken up in another environment (a plan planned again wrote
-                # its own, _replan).
-                _taken_up(record, prior)
-            if not remaining:
-                # Said for --plan too, which still writes the finished job's cut list, its plan.
-                logger.info("%s: finished already, its %d segments", directory, len(segments))
-                if args.plan is None:
-                    # A .mkv path's segments, every one finished by an earlier run, are assembled
-                    # now, the models not loaded (_assemble).
-                    return 0 if final is None else _assemble(final, record, paths)
-        elif args.plan is not None:
-            # A new job's directory made a plan (DESIGN.md, Memory planner): its frame index and
-            # manifest, no unit; the same command without --plan runs it.
-            _first_write(record, source)
-        units = DiskUnits(directory, record)
+        remaining = [index for index, done in enumerate(record.finished) if not done]
+        if not replanned:
+            # The job as recorded: what of it is written before a unit, its first pass run
+            # again or its plan taken up in another environment (a plan planned again wrote
+            # its own, _replan).
+            _taken_up(record, prior)
+        if not remaining:
+            # Said for --plan too, which still writes the finished job's cut list, its plan.
+            logger.info("%s: finished already, its %d segments", directory, len(segments))
+            if args.plan is None:
+                # A .mkv path's segments, every one finished by an earlier run, are assembled
+                # now, the models not loaded (_assemble).
+                return 0 if final is None else _assemble(final, record, paths)
+    elif args.plan is not None:
+        # A new job's directory made a plan (DESIGN.md, Memory planner): its frame index and
+        # manifest, no unit; the same command without --plan runs it.
+        _first_write(record, source)
+    units = Units(directory, record)
     if args.plan is not None:
         # No upscale: --plan prints the plan "without running the job" (DESIGN.md, Memory
         # planner), the models not loaded.
@@ -879,7 +865,7 @@ def _run(args: argparse.Namespace) -> int:
     )
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
-    if record is not None and prior is None:
+    if prior is None:
         _first_write(record, source)
     started = time.monotonic()
 
@@ -937,7 +923,7 @@ def _run(args: argparse.Namespace) -> int:
                 )
         except CopyError as error:
             # Derived data, removed (run_job): a resume makes it again.
-            again = "" if record is None else "; removed, made again from the input on resuming"
+            again = "; removed, made again from the input on resuming"
             logger.error("%s%s; stopped: %s", error, again, _kept(record, len(segments)))
             return 1
         except _Unjoinable as error:
@@ -960,15 +946,12 @@ def _run(args: argparse.Namespace) -> int:
             # (design, 2026-10-12). Before MediaError, whose kind it is.
             logger.error("%s; stopped: %s", error, _kept(record, len(segments), resumes=False))
             return 1
-        except ScratchError as error:
-            # A tiled pass's scratch that can't be made, its disk full: the user's to fix
-            # (tiling.ScratchError). Derived data, its file gone; the units made before it are
-            # kept, which the message says as a stop's does.
-            logger.error("%s; stopped: %s", error, _kept(record, len(segments)))
-            return 1
         except MediaError as error:
             # A segment command failing among them (--segment-cmd): its segment unfinished, its
-            # shots' windows kept, which a resume decodes and writes again.
+            # shots' windows kept, which a resume decodes and writes again. And a tiled pass's
+            # scratch that can't be made, its disk full: the user's to fix (tiling.ScratchError).
+            # Derived data, its file gone; the units made before it are kept, which the message
+            # says as a stop's does.
             logger.error("%s; stopped: %s", error, _kept(record, len(segments)))
             return 1
         except NonFinite as error:
@@ -986,16 +969,15 @@ def _run(args: argparse.Namespace) -> int:
                 "stopped after %s, as asked; %s", stop.unit, _kept(record, len(segments))
             )
             return 130
-    if record is not None:
-        from seedvr2x.runtime.environment import imported
+    from seedvr2x.runtime.environment import imported
 
-        # The versions recorded were derived before the models loaded: what the run has
-        # imported since must be among them, or a resume wouldn't see it change. imported()
-        # leaves out what isn't the run's, pytest or a profiler, as the record does.
-        recorded = cast(dict[str, str], identity.environment["packages"])
-        unrecorded = sorted(imported() - set(recorded))
-        if unrecorded:
-            logger.warning("not in the manifest's environment, a seedvr2x bug: %s", unrecorded)
+    # The versions recorded were derived before the models loaded: what the run has
+    # imported since must be among them, or a resume wouldn't see it change. imported()
+    # leaves out what isn't the run's, pytest or a profiler, as the record does.
+    recorded = cast(dict[str, str], identity.environment["packages"])
+    unrecorded = sorted(imported() - set(recorded))
+    if unrecorded:
+        logger.warning("not in the manifest's environment, a seedvr2x bug: %s", unrecorded)
     logger.info(
         "upscaled in %.1f s; wrote %s: %d frames, %s",
         time.monotonic() - started,
@@ -1003,7 +985,7 @@ def _run(args: argparse.Namespace) -> int:
         writer.written,
         args.format,
     )
-    if final is not None and record is not None:
+    if final is not None:
         # The job's last unit. A stop asked during the last segment's (Ctrl-C once) stops before
         # it.
         return _assemble(final, record, paths, asked=stop.asked)
@@ -1156,12 +1138,10 @@ def _directory_refused(path: Path) -> str:
     )
 
 
-def _kept(record: "Manifest | None", segments: int, resumes: bool = True) -> str:
+def _kept(record: "Manifest", segments: int, resumes: bool = True) -> str:
     """What a run stopped before its end keeps, of a job of `segments` output segments; without
     `resumes`, for a failure the same command would meet again, whose own message gives the way
     out (reader.FramesLeft), what is kept and no more."""
-    if record is None:
-        return "nothing kept: one file can't resume until assembly (milestone 6)"
     kept = (
         f"{sum(record.finished)} of {segments} segments finished, and the units of the next ones"
         " kept"
@@ -1538,57 +1518,15 @@ def _clear(directory: Path, content: dict[str, Any]) -> None:
         logger.info("%s: removed, its job assembled", directory)
 
 
-def _work(output: Path) -> Path:
-    """The work directory of a one-file output with split or tiles, beside it: its shots' input
-    copies and their checksums, one shot at a time (DESIGN.md, Colour correction), and a tiled
-    pass's scratch (DESIGN.md, Pipeline, per shot, step 3). Made and locked from the start, as an
-    output directory is (_lock), so that another run to the same file is refused; removed when
-    main returns, however the run ends. What a killed run left there is removed; anything else is
-    refused, never deleted."""
-    from seedvr2x.runtime.job import JobError
-    from seedvr2x.runtime.tilegrid import SCRATCH
-    from seedvr2x.runtime.units import CHECKSUMS, COPY
-
-    work = output.with_name(f"{output.name}.work")
-    ours = {COPY, f"{COPY}.partial", CHECKSUMS, f"{CHECKSUMS}.partial", SCRATCH}
-
-    def left(entry: Path) -> bool:
-        """Whether entry is a shot's directory, holding nothing but a run's files."""
-        return (
-            re.fullmatch(r"shot_\d{6}", entry.name) is not None
-            and entry.is_dir()
-            and not entry.is_symlink()
-            and all(f.name in ours and f.is_file() and not f.is_symlink() for f in entry.iterdir())
-        )
-
-    refused = f"{work}: not what a run of seedvr2x leaves: remove it, or choose another -o"
-    if os.path.lexists(work) and (work.is_symlink() or not work.is_dir()):
-        raise JobError(refused)
-    _lock(work)
-    _WORK.append(work)
-    entries = list(work.iterdir())
-    if not all(left(entry) for entry in entries):
-        _WORK.remove(work)
-        raise JobError(refused)
-    for entry in entries:
-        shutil.rmtree(entry)
-    if entries:
-        logger.info("%s: left by a run that was killed, emptied", work)
-    return work
-
-
-def _output(args: argparse.Namespace) -> Path | None:
+def _output(args: argparse.Namespace) -> Path:
     """The directory the job's files go in: its output segments, manifest, frame index, units and
     checksums. For a .mkv path, the finished file's (_final), its work directory beside it
     (_work_directory), where the segments wait for their assembly; else the output itself, a
     directory of segments (DESIGN.md, Output). Either is new or empty, which keeps another run's
     files out of what sptenc reads or the assembly joins, or holds a job's manifest, which resume
-    reads back (resume.leftovers checks the rest); anything else is refused, never deleted.
-
-    Never None since the assembly: a .mkv path's job runs in its work directory as a directory's
-    does. The type still says so, and _run's branches for an output kept in memory still stand
-    (`directory is None`, cli._work, units.Units), dead, until milestone 3's integration, which
-    rewrites the code around them, is in."""
+    reads back (resume.leftovers checks the rest); anything else is refused, never deleted. A
+    .mkv path's job runs in its work directory as a directory's does in its own: every job keeps
+    its units in files (units.Units), none in memory."""
     from seedvr2x.runtime.job import JobError
     from seedvr2x.runtime.manifest import NAME
 
@@ -1650,27 +1588,24 @@ def _segments(
     args: argparse.Namespace,
     source: "Source",
     shots: "Sequence[Shot]",
-    directory: Path | None,
+    directory: Path,
 ) -> "tuple[list[OutputSegment], list[Path]]":
-    """The output's segments and each one's path: one file (directory None); else the source's
+    """The output's segments and each one's path in the job's directory (_output): the source's
     shots, merged to --min-segment, and named as sptenc's split names its own (DESIGN.md,
     Output)."""
-    from seedvr2x.runtime.job import OutputSegment, merged_segments
+    from seedvr2x.runtime.job import merged_segments
 
-    if directory is None:
-        return [OutputSegment(args.output.stem, 0, source.frames)], [args.output]
     segments = merged_segments(shots, source.frames, source.frame_rate, args.min_segment)
     suffix = "" if args.format == "png" else ".mkv"
     return segments, [directory / f"{segment.name}{suffix}" for segment in segments]
 
 
-def _checksums_path(directory: Path | None, output: Path, output_format: str) -> Path:
-    """Where the checksums of the output at path `output` go: in the output directory's SUMS, or
-    beside the one-file output, its name and .crc32 (DESIGN.md, Output, Checksums)."""
+def _checksums_path(directory: Path, output: Path, output_format: str) -> Path:
+    """Where the checksums of the output segment at path `output` go: in SUMS, in the job's
+    directory (DESIGN.md, Output, Checksums); a finished file's own go beside it
+    (_checksums_beside)."""
     from seedvr2x.runtime.manifest import SUMS, checksums_file
 
-    if directory is None:
-        return output.with_name(f"{output.name}.crc32")
     return directory / SUMS / checksums_file(output.name, output_format)
 
 
@@ -1723,9 +1658,9 @@ def _first_write(record: "Manifest", source: "Source") -> None:
 
 
 def _first_pass(
-    declared: "Declared", hashed: bool, model_files: "ModelFiles", device: "torch.device"
+    declared: "Declared", model_files: "ModelFiles", device: "torch.device"
 ) -> "FirstPass":
-    """The first pass over the source, its content hashed meanwhile when `hashed`
+    """The first pass over the source, its content hashed meanwhile, for the manifest
     (source.first_pass); with the shot detector when its file was resolved (no --cuts):
     TransNetV2 on the job's device, fed every frame the pass decodes, its memory given back
     before the models load (DESIGN.md, Shot detection; Memory planner, Budget)."""
@@ -1733,9 +1668,9 @@ def _first_pass(
     from seedvr2x.runtime.detector import Detector
 
     if model_files.detector is None:
-        return first_pass(declared, hashed=hashed)
+        return first_pass(declared, hashed=True)
     with Detector(model_files.detector.path, device, hashes=model_files.hashes) as detector:
-        return first_pass(declared, hashed=hashed, detector=detector)
+        return first_pass(declared, hashed=True, detector=detector)
 
 
 def _free_memory(device: "torch.device") -> int:
@@ -1791,8 +1726,8 @@ def _attention() -> str:
     """The attention backend this run's DiT takes: FlashAttention 2 where it imports, else
     PyTorch's SDPA, as the loader decides it for every attention module, and warns of
     (model.attention_backend, model.load_models). The plan's DiT peak is predicted by that
-    backend's fit (planner.DIT_ATTENTION), which a one-file output has no recorded environment
-    to read from."""
+    backend's fit (planner.DIT_ATTENTION): today's, never a recorded environment's, which a
+    resume in another one would plan by."""
     from seedvr2x.runtime import model
 
     return model.attention_backend()
@@ -1966,15 +1901,6 @@ def _lock(directory: Path) -> None:
     _LOCKED.append(directory)
 
 
-# The work directories this process made (_work), removed when main returns.
-_WORK: list[Path] = []
-
-
-def _remove_work() -> None:
-    while _WORK:
-        shutil.rmtree(_WORK.pop(), ignore_errors=True)
-
-
 # The work directories this run made for a .mkv path's job (_copied), removed as main returns
 # when still empty: a run refused before its first write leaves nothing.
 _MADE: list[Path] = []
@@ -1997,8 +1923,8 @@ def _unlock() -> None:
 @dataclass(frozen=True)
 class _Identity:
     """What a job's output depends on besides its frames (DESIGN.md, Pause and resume): its
-    settings, the models by hash, and the environment, both recorded for an output directory's
-    manifest only; and the GPU it runs on."""
+    settings, the models by hash, and the environment, both recorded in the job's manifest; and
+    the GPU it runs on."""
 
     settings: dict[str, object]
     device: "torch.device"
@@ -2022,7 +1948,6 @@ class _Prior:
 def _identity(
     args: argparse.Namespace,
     cuts: list[int],
-    directory: Path | None,
     ffmpeg_version: str,
     conversions: str,
     numz_padding: bool,
@@ -2041,7 +1966,7 @@ def _identity(
     The device is still named, and used by nothing."""
     from seedvr2x.runtime.job import JobError
 
-    settings = _settings(args, cuts, numz_padding, model_files) if directory is not None else {}
+    settings = _settings(args, cuts, numz_padding, model_files)
     import torch
 
     if made_in is not None:
@@ -2054,8 +1979,6 @@ def _identity(
     if not torch.cuda.is_bf16_supported():
         raise JobError("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
     device = torch.device("cuda", 0)
-    if directory is None:
-        return _Identity(settings, device, {})
     from seedvr2x.runtime import environment
 
     return _Identity(settings, device, environment.current(device, ffmpeg_version, conversions))
@@ -2117,7 +2040,7 @@ def _prior(
         was: Any = recorded.get("environment")
         made_in = cast(dict[str, Any], was) if isinstance(was, dict) else {}
     identity = _identity(
-        *(args, cuts, directory, ffmpeg_version, conversions), numz_padding, model_files, made_in
+        *(args, cuts, ffmpeg_version, conversions), numz_padding, model_files, made_in
     )
     asked = {
         "settings": identity.settings,
@@ -2726,7 +2649,7 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
-def _taken(args: argparse.Namespace, directory: Path | None, where: Path) -> str | None:
+def _taken(args: argparse.Namespace, directory: Path, where: Path) -> str | None:
     """What of the job's the resolved path `where` would take the place of, as a refusal says it
     (_plan_file), or None: a .mkv path's finished file or its checksums, or a place in the job's
     directory, the output's or a .mkv path's work directory, which holds the job's own files
@@ -2742,15 +2665,13 @@ def _taken(args: argparse.Namespace, directory: Path | None, where: Path) -> str
         return "the output"
     if final is not None and _same(where, _checksums_beside(final)):
         return "the output's checksums"
-    if directory is None and where == args.output.resolve():
-        return "the output"
-    if directory is not None and where.is_relative_to(directory.resolve()):
+    if where.is_relative_to(directory.resolve()):
         what = "the output directory" if final is None else f"the work directory of {final}"
         return f"in {what}, which holds the job's own files only"
     return None
 
 
-def _plan_file(args: argparse.Namespace, directory: Path | None) -> None:
+def _plan_file(args: argparse.Namespace, directory: Path) -> None:
     """Refuse a --plan FILE (JobError) that would take the place of what the job reads or writes:
     the source, the cut list given (--cuts), a .mkv path's finished file or its checksums, or
     anything in the job's directory, the output's or a .mkv path's work directory, which holds

@@ -438,13 +438,11 @@ def dit_draw(
 MOMENTS = ("encode", "check", "windows", "merge", "decode")
 
 
-def host_moments(
-    padded: tuple[int, int], latents: int, cap: int | None, one_file: bool = False
-) -> dict[str, int]:
+def host_moments(padded: tuple[int, int], latents: int, cap: int | None) -> dict[str, int]:
     """What the run holds in system memory of a shot of `latents` latents of padded frames, in
     bytes, at each of its moments (MOMENTS), its windows capped at `cap` latents (None: one
-    window), for an output directory or for one file (one_file). The GPU keeps nothing of a
-    shot between its units (runtime/units.py, shot.sample_windows): it waits here.
+    window). The GPU keeps nothing of a shot between its units (runtime/units.py,
+    shot.sample_windows): it waits here.
 
     By the tensors' sizes, as dit_draw counts them: a latent is (H / 8, W / 8, 16) in bfloat16,
     half a byte a padded pixel, 1.01 MiB at 1080p, padded to 1104x1920, and 4.01 MiB at 4K,
@@ -456,11 +454,10 @@ def host_moments(
       shot.finite): the latent, its absolute values and CHECK_MASKS masks of a byte a value:
       3.5 L;
     - "windows", from the noise's draw to the last window: the latent and the noise (2 L), and
-      each window's copy as it leaves the GPU, gone once written with an output directory, so
-      the longest window's there, and kept until the shot's decode with one file
-      (units.Units.save_window), so every window's by the last: 3 L + SHARED x (n - 1) then;
-    - "merge", the decode's start: the windows, read back from their files or kept, and what
-      merging them makes (shot.merge_windows): nothing for one window, which is the merged
+      each window's copy as it leaves the GPU, gone once written to its file
+      (units.Units.save_window), so the longest window's there;
+    - "merge", the decode's start: the windows, read back from their files, and what merging
+      them makes (shot.merge_windows): nothing for one window, which is the merged
       latent; else the merged latent (L) and the latents mixed at a join (SHARED), and from
       three windows on the latent merged so far, without the last window's own latents, a copy
       the merge makes anew at each join (L - the last window's length + SHARED);
@@ -496,29 +493,20 @@ def host_moments(
     return {
         "encode": 2 * shot,
         "check": 2 * shot + CHECK_MASKS * shot // LATENT_VALUE,
-        "windows": 2 * shot + latent * (kept if one_file else max(windows)),
+        "windows": 2 * shot + latent * max(windows),
         "merge": latent * (kept + merged + so_far),
         "decode": shot,
     }
 
 
 @cache
-def _largest(padded: tuple[int, int], tiles: Tiles) -> tuple[int, int]:
-    """(rows, columns), in pixels, of the largest tile of a tiled pass over padded frames: the
-    square cut off at the picture's edges (DESIGN.md, Memory planner: a 1280-px tile at 1080p is
-    1104x1280). By the tiled passes' own grid (tilegrid.grid), of which it is the first tile,
-    the one tilegrid.largest gives the area of. Not always the tile that takes the most
-    (_fit)."""
-    laid = tilegrid.grid(tilegrid.latent_size(padded), tiles)
-    tile = max(laid, key=lambda tile: tile.rows * tile.columns)
-    return tile.rows * tilegrid.SCALE, tile.columns * tilegrid.SCALE
-
-
-@cache
 def _shapes(padded: tuple[int, int], tiles: Tiles) -> tuple[tuple[int, int], ...]:
     """(rows, columns), in pixels, of the tiles of a tiled pass over padded frames, each shape
     once, the largest first: the tiled passes' own grid (tilegrid.grid), whose last tile along
-    a side is the shorter one, what the stride leaves of the picture."""
+    a side is the shorter one, what the stride leaves of the picture. The first is the square
+    cut off at the picture's edges (DESIGN.md, Memory planner: a 1280-px tile at 1080p is
+    1104x1280), the one tilegrid.largest gives the area of; not always the tile that takes the
+    most (_fit)."""
     laid = tilegrid.grid(tilegrid.latent_size(padded), tiles)
     shapes = {(tile.rows * tilegrid.SCALE, tile.columns * tilegrid.SCALE) for tile in laid}
     return tuple(sorted(shapes, key=lambda shape: (-shape[0] * shape[1], shape)))
@@ -799,7 +787,6 @@ class _Job:
     numz_padding: bool
     reading: Reading  # how `free` was read, for the plan's words and its record
     attention: str  # DIT_ATTENTION's
-    one_file: bool  # whether the output is one file, its windows kept in system memory
 
     @property
     def margin(self) -> int:
@@ -840,16 +827,13 @@ def plan(
     numz_padding: bool = False,
     recorded: Plan | None = None,
     attention: str = FLASH_ATTN_2,
-    one_file: bool = False,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (job.target_size), in the GPU memory it may
     count on, less MARGIN, and what it is predicted to take; refused (PlanError) when a pin can't
     be taken exactly, when no plan fits that memory, or when the plan takes more system memory
     than host_available, in bytes (None: not checked). split: whether the decode corrects
-    colours; numz_padding is for tests only (cli.NUMZ_PADDING). An output directory and one file
-    (one_file) plan alike on the GPU: a shot's units are off it in both (runtime/units.py). They
-    differ by what the run holds of a shot in system memory, one file's windows waiting there
-    for the shot's decode (host_moments).
+    colours; numz_padding is for tests only (cli.NUMZ_PADDING). An output directory and a .mkv
+    path plan alike: both jobs keep their units in a directory (runtime/units.py).
 
     `free` is that memory: a number of bytes, what a driver that refuses reports free; or the
     reading the run made of it (memory.Reading), whose `counted` the plan is made in, and whose
@@ -891,7 +875,7 @@ def plan(
     the output a little); one with tiles of which one covers the frame is no plan's, refused
     (check_recorded). Where the weights are is planned for the backend given, a resume's too:
     FlashAttention installed since, or gone, the recorded shape is held to today's fit."""
-    job = _job(free, target, shots, split, numz_padding, attention, one_file)
+    job = _job(free, target, shots, split, numz_padding, attention)
     if pins.swap_blocks is not None and pins.swap_blocks > BLOCKS:
         raise PlanError(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {BLOCKS} blocks, so from 0 to {BLOCKS}"
@@ -972,30 +956,6 @@ def _window_that_runs(job: _Job, pins: Pins, made: Plan, host_available: int | N
         if short is None:
             return f": the longest window whose plan fits it is --window {cap}"
     return ""
-
-
-def fits(
-    plan: Plan,
-    free: int | Reading,
-    target: tuple[int, int],
-    shots: Sequence[Shot],
-    host_available: int | None,
-    *,
-    split: bool = False,
-    numz_padding: bool = False,
-    attention: str = FLASH_ATTN_2,
-    one_file: bool = False,
-) -> str | None:
-    """None when every phase of `plan` fits `free` bytes of GPU memory less MARGIN, a VAE pass
-    with its room (VAE_ROOM), the DiT's by the larger of its longest window and of its longest
-    shot's draw (dit_draw), and the plan host_available bytes of system memory (None: not
-    checked), what the run holds of the longest shot there with it (_shot_held) and its
-    scratch's allowance as the plan has it, for a job as plan() takes it; else one sentence
-    naming the first phase that doesn't and what it is short of, in GiB. ValueError for a plan
-    with tiles of which one covers the whole padded frame, which plan() never returns (covers).
-    free, attention and one_file as plan takes them."""
-    job = _job(free, target, shots, split, numz_padding, attention, one_file)
-    return _unfit(job, plan, host_available)
 
 
 def check_recorded(
@@ -1080,7 +1040,7 @@ def said(
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
-    job = _job(peaks.reading, target, shots, False, numz_padding, peaks.attention, False)
+    job = _job(peaks.reading, target, shots, False, numz_padding, peaks.attention)
     height, width = job.padded
     frames = Counter(shot.frames for shot in shots)
     windows = {count: len(shot_layout(count, plan.window)) for count in frames}
@@ -1188,7 +1148,6 @@ def _job(
     split: bool,
     numz_padding: bool,
     attention: str = FLASH_ATTN_2,
-    one_file: bool = False,
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
@@ -1200,7 +1159,7 @@ def _job(
     frames = max(shot.frames for shot in shots)
     return _Job(
         *(reading.counted, target, tuple(lengths), frames, split, numz_padding, reading),
-        *(attention, one_file),
+        attention,
     )
 
 
@@ -1839,15 +1798,14 @@ def _shot_held(job: _Job, plan: Plan) -> tuple[int, str]:
     As the run is, the check of the latent after its encode, 1.75 bytes a padded pixel and a
     latent: 3.54 MiB a latent at 1080p (3,709,440 bytes), 14.05 at 4K (14,730,240). But under
     a cap of 5 latents, the shortest a shot is cut by: there the merge at the decode's start
-    holds more, or with one file the last window, its windows as many latents as the merge's
-    copies or more, for most shots from 15 latents and every one from 27 (21 with one file).
+    holds more, for most shots from 15 latents and every one from 27.
     A shot of 1,000 latents takes 3.45 GiB at 1080p, and at 4K 13.72, or 14.36 under a cap of
     5. PROVISIONAL (implementation, 2026-10-12): counted as the run is. Of the 1.75 bytes,
     1.25 are the check's own, and from three windows on a merge copies the shot twice over: a
     check read slice by slice and a merge written into one tensor would leave a shot the 1 byte
     of its latent and its noise, and its windows where they are kept; DESIGN.md decides the
     run's steps."""
-    moments = host_moments(job.padded, job.lengths[-1], plan.window, job.one_file)
+    moments = host_moments(job.padded, job.lengths[-1], plan.window)
     moment = max(MOMENTS, key=lambda moment: moments[moment])
     return moments[moment], moment
 
@@ -1883,7 +1841,7 @@ def _allowance(job: _Job, plan: Plan, host_available: int | None) -> int:
 
 
 def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
-    """Why the plan doesn't fit the job's memory (fits): the first phase over the budget, a VAE
+    """Why the plan doesn't fit the job's memory: the first phase over the budget, a VAE
     phase judged with its room as the planner chose it (Peaks.need), or the system memory it
     takes over what is available, the process's own, the pinned copies, what the run holds of
     the longest shot and the scratch's allowance, each named with what it takes where that is a
@@ -1961,7 +1919,7 @@ def _host_hundredths(plan: Plan, shot: int) -> tuple[int, int, int, int]:
 _MOMENT_SAID = {
     "encode": "at its encode's end, its latent and the buffer it is made from",
     "check": "as its latent is checked after its encode",
-    "windows": "at its last window, its latent and its noise beside its windows",
+    "windows": "at its longest window, its latent and its noise beside the window's output",
     "merge": "as its decode merges its windows",
     "decode": "through its decode, its latent",
 }

@@ -52,7 +52,7 @@ UNCOMPARED = {
 # The manifest's record of the environment changes a resume accepted (Manifest.content).
 CHANGES = "environment_changes"
 
-# The names DiskUnits gives a shot's files, and the scratch a tiled pass keeps beside them
+# The names units.Units gives a shot's files, and the scratch a tiled pass keeps beside them
 # (tiling.SCRATCH): derived data, never recorded, so a leftover wherever a kill left it.
 UNIT_FILE = re.compile(
     rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS, SCRATCH)))}"

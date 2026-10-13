@@ -61,7 +61,7 @@ from seedvr2x.runtime.shot import (
     window_layout,
 )
 from seedvr2x.runtime.tiling import Scratch, ScratchError
-from seedvr2x.runtime.units import DiskUnits, Units
+from seedvr2x.runtime.units import Units
 
 # The models as far as the encoder's input and split's reference use them: the CPU and the VAE's
 # slicing (model.encode_slices).
@@ -411,17 +411,16 @@ def test_the_draw_is_logged_on_a_gpu(
 
 
 def test_windows_from_the_units_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The latent as the units give it, the copy kept in memory, the one written for a resume, or
-    # the one a resume reads back: the windows the encode's own latent gives. And that copy is
-    # the one the windows are cut from, no other being made of the latent: on the CPU, where a
-    # slice sent to the device is the slice, each window's latent is a view of the copy given.
+    # The latent as the units give it, the one written for a resume or the one a resume reads
+    # back: the windows the encode's own latent gives. And that copy is the one the windows are
+    # cut from, no other being made of the latent: on the CPU, where a slice sent to the device
+    # is the slice, each window's latent is a view of the copy given.
     latent = channel_major(9)
     dit = Dit(monkeypatch)
     expected = list(sample_windows(DEVICE, latent, LAYOUT, 1234))
-    disk = DiskUnits(tmp_path, job(tmp_path, [Shot(0, 33)], [OutputSegment("a", 0, 33)]))
-    in_memory = Units()
-    copies = [in_memory.save_latent(0, latent), disk.save_latent(0, latent), disk.latent(0)]
-    assert copies[0] is in_memory.latent(0) and copies[2] is not latent
+    disk = Units(tmp_path, job(tmp_path, [Shot(0, 33)], [OutputSegment("a", 0, 33)]))
+    copies = [disk.save_latent(0, latent), disk.latent(0)]
+    assert copies[0] is latent and copies[1] is not latent
     for copy in copies:
         assert copy is not None and copy.device.type == "cpu"
         dit.given.clear()
@@ -825,16 +824,11 @@ def test_the_merge_allocates_what_the_planner_counts(latents: int, cap: int) -> 
     assert counted["decode"] == latents * one
     assert 0 <= kept + most - counted["merge"] <= 64
     assert left == (0 if len(layout) == 1 else counted["decode"])
-    # And with one file, the last window holds what it counts: the latent, the noise and every
-    # window kept.
-    assert planner.host_moments(SMALL_PADDED, latents, cap, True)["windows"] == (
-        2 * latents * one + kept
-    )
 
 
 def test_a_window_s_file_allocates_the_window_alone(tmp_path: Path) -> None:
     # A window written to its file from its copy in system memory, and read back for the decode
-    # (units.DiskUnits): torch allocates nothing to write it, and the tensor alone to read it.
+    # (units.Units): torch allocates nothing to write it, and the tensor alone to read it.
     save = units._save  # pyright: ignore[reportPrivateUsage]
     load = units._load  # pyright: ignore[reportPrivateUsage]
     window, path = contiguous(8), tmp_path / "window_0000.pt"
@@ -979,12 +973,17 @@ class OnDevice:
 
 
 def on_the_device(
-    models: model.Models, latents: int, cap: int, monkeypatch: pytest.MonkeyPatch
+    models: model.Models,
+    latents: int,
+    cap: int,
+    monkeypatch: pytest.MonkeyPatch,
+    directory: Path,
 ) -> OnDevice:
     """A shot of `latents` latents at CARD_TARGET through the run's own steps for its windows
-    (run._sample over units.Units, its windows capped at `cap` latents), its encode's latent
-    given, random, in the units, in system memory in an encode's layout: what the device holds
-    over them (OnDevice). The figures are read where the run's own are: as a unit starts,
+    (run._sample over the units a run keeps, units.Units in `directory`, made here, its windows
+    capped at `cap` latents), its encode's latent given, random, to the units, in an encode's
+    layout, which the steps read back as a resumed run does: what the device holds over them
+    (OnDevice). The figures are read where the run's own are: as a unit starts,
     before the run resets the peak it logs (run._started), and as the window's output is given
     to the units, where the run reads that peak."""
     from seedvr2x.runtime import run
@@ -1015,11 +1014,13 @@ def on_the_device(
     height, width = padded_size(CARD_TARGET)
     generator = torch.Generator().manual_seed(latents)
     values = torch.randn((16, latents, height // 8, width // 8), generator=generator)
-    kept = Kept()
+    frames = 4 * latents - 3
+    shots = [Shot(0, frames)]
+    directory.mkdir()
+    kept = Kept(directory, job(directory, shots, [OutputSegment("a", 0, frames)], cap))
     kept.save_latent(0, values.to(model.COMPUTE_DTYPE).permute(1, 2, 3, 0))
     del values
-    frames = 4 * latents - 3
-    job_ = ([Shot(0, frames)], CARD_TARGET, 42, Plan(cap), kept, None, None, False)
+    job_ = (shots, CARD_TARGET, 42, Plan(cap), kept, None, None, False)
     with monkeypatch.context() as patch:
         patch.setattr(run, "_started", starting)
         sample(0, models, cast(Any, None), *job_)
@@ -1027,11 +1028,13 @@ def on_the_device(
     left = (torch.cuda.memory_allocated(device), asked())
     done = kept.windows_done(0)
     assert done == len(shot_layout(frames, cap)) == len(starts) == len(peaks) == len(reset)
-    assert kept.latent(0) is None
+    assert not (kept.shot_directory(0) / "latent.pt").exists()
     return OnDevice(tuple(starts), tuple(peaks), left, tuple(reset))
 
 
-def test_the_card_s_test_reads_the_run_s_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_card_s_test_reads_the_run_s_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # What the windows' test on a card reads the device by (on_the_device), on the CPU, over a
     # stand-in DiT and the device's counts replaced: the run's own steps make every window of
     # the shot, a figure is read as each starts, before the run's reset, and one as each is
@@ -1067,7 +1070,7 @@ def test_the_card_s_test_reads_the_run_s_windows(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(model, "sample", sampled)
     entered: list[str] = []
     models = cast(model.Models, SimpleNamespace(device=torch.device("cpu"), enter=entered.append))
-    read = on_the_device(models, WINDOWED, ONE_WINDOW, monkeypatch)
+    read = on_the_device(models, WINDOWED, ONE_WINDOW, monkeypatch, tmp_path / "windowed")
     assert entered == ["dit"] * MANY
     assert [start for start, _ in read.starts] == list(range(0, 3 * MANY, 3))
     assert read.starts == read.reset and read.doubt() == ""
@@ -1075,12 +1078,13 @@ def test_the_card_s_test_reads_the_run_s_windows(monkeypatch: pytest.MonkeyPatch
     assert read.left == (3 * MANY, 3 * MANY)
     layout = shot_layout(4 * WINDOWED - 3, ONE_WINDOW)
     assert [end - start for start, end in layout] == [ONE_WINDOW] * MANY
-    assert len(on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch).peaks) == 1
+    alone = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch, tmp_path / "alone")
+    assert len(alone.peaks) == 1
 
 
 @pytest.mark.gpu
 def test_a_shot_s_windows_hold_the_device_as_one_window_does(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The run's own steps for a shot's windows, over the real DiT on a card: a shot of 98
     # latents in 16 windows of 8 against a shot of 8 latents in one window. Between two windows
@@ -1091,10 +1095,10 @@ def test_a_shot_s_windows_hold_the_device_as_one_window_does(
     # for good, the tables the DiT's blocks cache for a window's size, is no shot's.
     models = model.load_models(found(DITS), found(VAES), torch.device("cuda:0"))
     try:
-        on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch)
-        alone = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch)
-        windowed = on_the_device(models, WINDOWED, ONE_WINDOW, monkeypatch)
-        again = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch)
+        on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch, tmp_path / "first")
+        alone = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch, tmp_path / "alone")
+        windowed = on_the_device(models, WINDOWED, ONE_WINDOW, monkeypatch, tmp_path / "windowed")
+        again = on_the_device(models, ONE_WINDOW, ONE_WINDOW, monkeypatch, tmp_path / "again")
     finally:
         models.runner.dit = models.runner.vae = None
         gc.collect()

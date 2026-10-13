@@ -1574,23 +1574,18 @@ def test_one_file_plans_as_a_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
     # A .mkv path's job keeps its units on disk, in its work directory, as an output
-    # directory's does (cli._output; units.Units' in-memory ones no run of the command line's
-    # keeps any more): nothing of a shot waits on the GPU either way, and the two plan alike,
-    # --plan's as its run's. JOB's last shot, 6 latents in two windows of 4: the DiT's phase
-    # takes a window's peak, the shot's draw being under it. The plan is told which output it
-    # is, for what the run holds of a shot in system memory (planner.host_moments): never one
-    # file's, whose windows would wait there, since a .mkv path's job writes them to its work
-    # directory.
+    # directory's does (cli._output): nothing of a shot waits on the GPU either way, and the two
+    # plan alike, --plan's as its run's, the planner told nothing of which output it is. JOB's
+    # last shot, 6 latents in two windows of 4: the DiT's phase takes a window's peak, the
+    # shot's draw being under it.
     asked: list[set[str]] = []
     backends: list[str] = []
-    one_file: list[bool] = []
     peaks: list[int] = []
     plan = planner.plan
 
     def planned(*arguments: Any, **options: Any) -> Any:
         asked.append(set(options))
         backends.append(options["attention"])
-        one_file.append(options["one_file"])
         made = plan(*arguments, **options)
         peaks.append(made[1].dit)
         return made
@@ -1601,10 +1596,9 @@ def test_one_file_plans_as_a_directory(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     listed = str(tmp_path / "plan.txt")
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
-    assert asked == [{"split", "numz_padding", "recorded", "attention", "one_file"}] * 3
-    assert one_file == [False, False, False]
+    assert asked == [{"split", "numz_padding", "recorded", "attention"}] * 3
     # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
-    # here), a one-file output too, which records no environment to read it from.
+    # here).
     assert backends == ["flash_attn_2"] * 3
     window = planner.dit_peak(PADDED, 4)
     assert peaks == [window] * 3 and window > planner.dit_draw(PADDED, 6)
