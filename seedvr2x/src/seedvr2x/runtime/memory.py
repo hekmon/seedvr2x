@@ -19,14 +19,17 @@ imported (startup): probe requests a little more memory than is free. Refused, t
 that refuses, and nothing changes. Given, it is one that spills, as is, unasked, one that
 reports more free to the process than the whole card has; and seedvr2x holds itself to the
 card's memory by its own means:
-- torch's own allocator in cudaMallocAsync's place (startup): it counts every byte it has from
-  the driver, its cache included, where cudaMallocAsync's pool keeps memory torch's limit doesn't
-  see (2.0 to 2.6 GiB of it at 11 latents at 1080p);
+- torch's own allocator in cudaMallocAsync's place (startup), its segments expandable
+  (EXPANDABLE): it counts every byte it has from the driver, its cache included, where
+  cudaMallocAsync's pool keeps memory torch's limit doesn't see (2.0 to 2.6 GiB of it at 11
+  latents at 1080p); and with expandable segments a step short of room under that limit
+  slows down where torch's allocator otherwise refuses it;
 - that allocator limited (hold) to the memory free less HELD_BACK: what passes it is refused
   by torch, an OutOfMemoryError that Python catches, in under a second, and the work after it
   is right;
-- the planner planning in what is left less RESERVE (usable), which that allocator needs
-  beyond what a step allocates: the plan's budget, the planner's own margin counted in it;
+- the planner planning in what is left less RESERVE (usable), which the plan leaves that
+  allocator beyond what a step allocates: the plan's budget, the planner's own margin counted in
+  it;
 - the memory free read again before every unit (check): the run stops when what torch may
   still take no longer fits in it, other programs holding the rest of the card.
 
@@ -175,7 +178,8 @@ HELD_BACK = round(0.5 * GIB)
 # held so, the figure never went under 1.59 GiB. PROVISIONAL (implementation, 2026-10-11): one
 # card, one driver (616.92), one desktop, 1080p and under.
 HELD_BACK_UNREAD = 3 * GIB
-# What torch's own allocator needs from the driver beyond the peak a step allocates, held as
+# What a held run's plan leaves torch's own allocator beyond the peak a step allocates. Without
+# expandable segments (EXPANDABLE), what that allocator needs from the driver there, held as
 # above: it keeps the blocks it has used, splits them for smaller requests, and gives back at
 # its limit only those that are whole again. Measured as the smallest limit a step ran under,
 # its cache emptied first, less its allocated peak, going down to the first refusal, by 0.1 GiB
@@ -207,10 +211,58 @@ HELD_BACK_UNREAD = 3 * GIB
 # less (max_split_size_mb at 128 MiB ran the decodes in less, 2.4 to 3.7 times slower) is
 # design's to decide, as is a room by the kind of step in this one figure's place (DESIGN.md,
 # To measure).
+# Measured again on 2026-10-13 (the same probe and card, a desktop holding 3.2 to 4.6 GiB of
+# it): that need is no threshold and follows no size a plan knows. 4K's window of 3 latents
+# was refused under its peak and 2.5 GiB, and ran under 2.4, 2.3 and 2.2; 98,640 tokens needed
+# 2.6 GiB at 4K where 99,360 needed 1.2 at 1080p, and 131,520 needed 1.9 where 132,480 needed
+# 3.0; and an encode in tiles of 1856 px at 1080p needed 3.4 GiB with the DiT's parts on the
+# GPU as 36 swapped blocks leave them, and 5.2 with the DiT off it, where the untiled encode,
+# larger, needed 3.8 either way. Hence expandable segments by default (EXPANDABLE), under
+# which a step with less than this figure slows down and runs, down to 0.1 GiB over its peak;
+# the figure is kept: with it every window measured there ran at its usual speed (2.5 GiB at
+# the most), and a VAE pass, left 6.0 with the planner's room, too (a decode takes 3.0 to 4.7
+# GiB beyond its peak when it is allowed them). Whether less should be planned under that
+# allocator is design's to decide.
 RESERVE = round(4.5 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
 # allocator where the driver spills.
 ASYNC, NATIVE = "backend:cudaMallocAsync", "backend:native"
+# torch's own allocator as a held run takes it by default: its segments expandable
+# (PYTORCH_CUDA_ALLOC_CONF's expandable_segments: each of the allocator's pools one range of
+# addresses, grown and given back by mapping, where its segments are otherwise allocations of
+# the driver's that it gives back only whole). Without them a step short of room is refused,
+# its cache in pieces that fit no request, and what it needs to run follows nothing a plan
+# knows (RESERVE). With them a step short of room slows down, and runs. Measured by
+# research/scripts/hold_probe.py's ladders (an RTX 5090 under WSL2, driver 616.92, torch
+# 2.14.1, 2026-10-13, a desktop holding 3.2 to 4.6 GiB of the card; every digest compared with
+# a reference's):
+# - windows of 1 to 17 latents at 1080p and of 2, 4 and 5 at 4K (36 blocks swapped) ran under
+#   their allocated peak and 0.1 GiB, with the reference's bits, and were refused under the
+#   peak itself, in 0.5 to 6.6 s; under the plain allocator those at 1080p needed 0.2 to 3.4
+#   GiB, and 4K's of 5 latents 4.5, which the card didn't have that night;
+# - they ran at their usual speed from 0.7 GiB over the peak at 6 latents, 1.7 at 12, 1.5 at
+#   14, 2.5 at 16 and 2.0 at 17 (1080p), 1.0 at 2 and 2.5 at 4 (4K), and 3 to 4 times slower
+#   at the least margin (14 s a forward of 16 latents, 41 there); 4K's window of 5, the VAE's
+#   weights away, took 22 s a forward from an emptied cache with 4.3 GiB over its peak (14 s
+#   the next one), 21 with 2.8, 22 with 2.3, 59 with 1.8 and 79 to 90 from 1.3 down to 0.1;
+# - a VAE pass at 1080p, the DiT off the GPU: an encode in tiles of 1088 px ran at its usual
+#   speed from 2.0 GiB over its peak, in tiles of 1792 px from 3.5 (14.6 s; 28 at 3.0),
+#   untiled in 18.8 s at 3.5 where 15.1 with 7.3; a decode in tiles of 1024 px in 37.7 s at
+#   4.0 where 24.9 with 9.2, in tiles of 1088 px in 37.8 s where 27.0 with 7.0; each two to
+#   four times slower from 1.0 down. They gave the reference's bits down to 0.5 GiB over the
+#   peak, and OTHER bits where they still ran under that: at 0.4 and 0.3 (the untiled encode,
+#   the decode in tiles of 1024 px), at the peak itself (the encodes in tiles), as torch's
+#   plain allocator does in the last 0.3 GiB above its refusal (the encode in tiles of 1088
+#   px: other bits at its peak and 2.0 to 1.8 GiB, refused at 1.7): a pass is never to be
+#   left that little, and RESERVE with the planner's room leaves it twelve times that;
+# - torch's limit holds as before, and its count is the card's: 0.002 to 0.027 GiB of the
+#   card outside it;
+# - a job of 66 frames at 1080p, planned alike under both: the same frames; 83.5 s where
+#   80.9; torch holding 22.1 GiB at the most at its checks where 25.2, the card never under
+#   4.27 GiB free where 0.96.
+# PROVISIONAL (implementation, 2026-10-13): one card, one driver, one version of torch; not
+# measured on a driver that refuses, where the default stays cudaMallocAsync (ASYNC).
+EXPANDABLE = f"{NATIVE},expandable_segments:True"
 # The variables torch reads that setting from. seedvr2x sets the first, and only when the user
 # has set neither: with both set, torch 2.14 takes the first and never reads the second, so a
 # default written over a user's PYTORCH_ALLOC_CONF would silence it.
@@ -314,8 +366,8 @@ def reading(free: int) -> Reading:
     counted = max(taken - _held_back(card) - RESERVE, 0)
     logger.debug(
         "the plan counts on %.2f GiB of the GPU's memory, of the %.2f GiB free %s: %.1f GiB are"
-        " left to what torch doesn't count on the card, %.1f to what torch's own allocator holds"
-        " beyond a peak",
+        " left to what torch doesn't count on the card, %.1f to what the plan leaves torch's"
+        " allocator beyond a peak",
         counted / GIB,
         taken / GIB,
         _named(free, card),
@@ -362,7 +414,7 @@ class _Memory(ctypes.Structure):
 def startup() -> str:
     """Ask the driver whether it refuses, once a run, before torch is imported, and set the
     allocator the run takes by default (VARIABLES, which the user's own setting overrides):
-    NATIVE where the driver spills, ASYNC elsewhere; returned. Called where a run first takes
+    EXPANDABLE where the driver spills, ASYNC elsewhere; returned. Called where a run first takes
     the GPU (cli._run, its model files checked), so that a run refused before it, for its
     source, its settings or its model files, asks nothing: the request disturbs the card (probe).
     Nor does a job recorded with every segment made, which takes no GPU: it isn't called for one.
@@ -395,12 +447,20 @@ def startup() -> str:
         if os.environ.get(name) == "":
             del os.environ[name]
     given = next((os.environ[name] for name in VARIABLES if name in os.environ), None)
-    chosen = NATIVE if _spills else ASYNC
+    chosen = EXPANDABLE if _spills else ASYNC
     if given is None:
         os.environ[VARIABLES[0]] = chosen
     # torch's own allocator is its default too, when the environment's setting names none.
-    _native = NATIVE in (chosen if given is None else given) or "backend:" not in (given or chosen)
+    _native, segments = _allocator(chosen if given is None else given)
     if _spills:
+        # The environment's allocator stands, and is said next where it isn't the default.
+        named = (
+            "torch's own allocator, its segments expandable, limited"
+            if segments
+            else "torch's own allocator without expandable segments, limited"
+            if _native
+            else "torch limited"
+        )
         logger.warning(
             "seedvr2x holds itself to the card there: %s to the"
             " memory free less %.1f GiB, and plans in %.1f GiB less; a run that passes the"
@@ -408,8 +468,7 @@ def startup() -> str:
             " reports free to this process, which leaves other programs' memory out while the"
             " card has room, and what the whole card has free, read through NVML; where NVML"
             " doesn't answer, the driver's figure less %.1f GiB",
-            # The environment's allocator stands, and is said next: not torch's own then.
-            "torch's own allocator, limited" if _native else "torch limited",
+            named,
             HELD_BACK / GIB,
             RESERVE / GIB,
             HELD_BACK_UNREAD / GIB,
@@ -422,7 +481,62 @@ def startup() -> str:
                 " so the card can still be passed; unset it for torch's own allocator",
                 given,
             )
+        elif not segments:
+            # The user's own setting of torch's allocator stands, without the segments a held
+            # run takes by default (EXPANDABLE): said, since a step short of room is then
+            # refused where they slow it down and run it (DESIGN.md, Allocator, decided on
+            # 2026-10-13: "a user's own backend:native without the segments is said").
+            logger.warning(
+                "the allocator is the environment's, %s: torch's own without expandable"
+                " segments, under which a step short of room is refused where they would slow it"
+                " down and run it; add expandable_segments:True to it, or unset it, for a held"
+                " run's default, %s",
+                given,
+                EXPANDABLE,
+            )
     return chosen
+
+
+def _allocator(setting: str) -> tuple[bool, bool]:
+    """How torch reads an allocator's setting (VARIABLES) as it is loaded: whether it takes its
+    own allocator, and whether that allocator's segments are expandable. Its tokens are what
+    lies between commas, colons and brackets, blanks dropped; an entry is a key, a colon and a
+    value, a bracketed list one value (roundup_power2_divisions:[256:1,512:2]). The first
+    backend stands: cudaMallocAsync where it names that, to the letter, torch's own allocator
+    otherwise; the last expandable_segments stands, True to the letter. So torch 2.14.1 read
+    them, a setting at a time in a process of its own (tests/test_memory.py, TORCH_READS:
+    "backend: native" its own allocator, "backend:cudaMallocAsync,backend:native"
+    cudaMallocAsync), and on an RTX 5090 at a first allocation (2026-10-16): "backend: native,
+    expandable_segments:True" its own allocator with the segments, "expandable_segments:True,
+    expandable_segments:False" without them, "False,True" with them. A setting torch then
+    can't run stops it at that first allocation, before any unit: a backend it doesn't know
+    ("backend:cudamallocasync"), a second one other than the first under its own allocator
+    ("backend:native,backend:cudaMallocAsync"), "true" or "1" for the segments, a list that
+    isn't of numbers; and a key or a value missing at a colon ("backend:") as it is imported.
+    Until 2026-10-16 the backend was read by a substring, so that "backend: native" passed for
+    another allocator, the run then unchecked (check), and "backend:cudaMallocAsync,backend:
+    native" for torch's own (a review)."""
+    tokens: list[str] = []
+    word = ""
+    for char in setting:
+        if char in ",:[]":
+            tokens += [word, char] if word else [char]
+            word = ""
+        elif not char.isspace():
+            word += char
+    tokens += [word] if word else []
+    backend, segments, depth = None, False, 0
+    for position, token in enumerate(tokens):
+        depth += {"[": 1, "]": -1}.get(token, 0)
+        if depth or token != ":" or not 0 < position < len(tokens) - 1:
+            continue
+        key, value = tokens[position - 1], tokens[position + 1]
+        if key == "backend" and backend is None:
+            backend = value
+        elif key == "expandable_segments":
+            segments = value == "True"
+    native = backend != ASYNC.partition(":")[2]
+    return native, native and segments
 
 
 def spills() -> bool:

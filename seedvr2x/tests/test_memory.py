@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -18,6 +19,9 @@ from seedvr2x.runtime import memory
 from seedvr2x.runtime.memory import GIB, OUT_OF_MEMORY, OVER, SUCCESS, Driver
 
 TOTAL = 32 * GIB
+# The allocator's setting a held run takes by default (memory.EXPANDABLE), spelt out: what torch
+# reads, held here to the letter.
+HELD = "backend:native,expandable_segments:True"
 # The two figures a held run plans under, as measured (runtime/memory.py's comments), read
 # before the tests put their own in their place (round_figures).
 MEASURED = (memory.HELD_BACK, memory.RESERVE, memory.HELD_BACK_UNREAD)
@@ -516,7 +520,7 @@ def test_a_driver_that_leaves_other_programs_out_is_not_asked(
     )
     # A run there is held, whether such a driver would have refused or not: held for nothing,
     # it loses memory; not held where it should be, its frames.
-    assert startup(monkeypatch, Card(30 * GIB, spills=False), nvml) == "backend:native"
+    assert startup(monkeypatch, Card(30 * GIB, spills=False), nvml) == HELD
     assert memory.spills() and "not asked for more" in caplog.messages[0]
     # The two figures within the request's extra of each other, or NVML silent: asked, as
     # before, by one request of what the driver reports and that extra.
@@ -537,20 +541,21 @@ def test_on_a_driver_that_spills_torch_is_held(
     # torch's own allocator, which counts all it holds; and said, twice a warning. The whole
     # card has more free than the driver reports to the process: the driver's figure is taken.
     nvml = Nvml({NAMED: 31 * GIB})
-    assert startup(monkeypatch, Card(30 * GIB, spills=True), nvml) == "backend:native"
-    assert memory.spills() and os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
+    assert startup(monkeypatch, Card(30 * GIB, spills=True), nvml) == HELD
+    assert memory.spills() and os.environ["PYTORCH_CUDA_ALLOC_CONF"] == HELD
     assert [record.levelname for record in caplog.records] == ["WARNING", "WARNING"]
     assert "gives memory the card doesn't have" in caplog.messages[0]
     assert caplog.messages[1] == (
-        "seedvr2x holds itself to the card there: torch's own allocator, limited to the memory"
-        " free less 3.0 GiB, and plans in 2.3 GiB less; a run that passes the limit is refused."
+        "seedvr2x holds itself to the card there: torch's own allocator, its segments expandable,"
+        " limited to the memory free less 3.0 GiB, and plans in 2.3 GiB less; a run that passes"
+        " the limit is refused."
         " The memory free is the smaller of two figures: what the driver reports free to this"
         " process, which leaves other programs' memory out while the card has room, and what"
         " the whole card has free, read through NVML; where NVML doesn't answer, the driver's"
         " figure less 3.0 GiB"
     )
-    # The planner counts its peaks in what is free less what is held back and what torch's
-    # allocator needs beyond a peak; never under nothing. The reading names each figure for
+    # The planner counts its peaks in what is free less what is held back and what it leaves
+    # torch's allocator beyond a peak; never under nothing. The reading names each figure for
     # the plan's own first line (runtime/planner.py); here it is said at debug level only.
     assert nvml.calls.count("nvmlInit") == 1  # the probe's, which then asked the driver
     held_under = memory.Reading(30 * GIB, 31 * GIB, round(24.7 * GIB), True, 3 * GIB)
@@ -558,8 +563,8 @@ def test_on_a_driver_that_spills_torch_is_held(
     assert caplog.records[2].levelname == "DEBUG" and caplog.messages[2] == (
         "the plan counts on 24.70 GiB of the GPU's memory, of the 30.00 GiB free as its driver"
         " reports it to this process (the whole card has 31.00 GiB free by NVML): 3.0 GiB are"
-        " left to what torch doesn't count on the card, 2.3 to what torch's own allocator holds"
-        " beyond a peak"
+        " left to what torch doesn't count on the card, 2.3 to what the plan leaves torch's"
+        " allocator beyond a peak"
     )
     assert memory.reading(5 * GIB) == memory.Reading(5 * GIB, 31 * GIB, 0, True, 3 * GIB)
     # torch is limited to what it holds and that: a fraction of the card's memory.
@@ -597,8 +602,8 @@ def test_the_whole_card_s_free_memory_is_taken_where_it_is_the_smaller(
     assert caplog.messages[-1] == (
         "the plan counts on 22.70 GiB of the GPU's memory, of the 28.00 GiB free on the whole"
         " card by NVML (its driver reports 30.00 GiB free to this process): 3.0 GiB are left to"
-        " what torch doesn't count on the card, 2.3 to what torch's own allocator holds beyond"
-        " a peak"
+        " what torch doesn't count on the card, 2.3 to what the plan leaves torch's allocator"
+        " beyond a peak"
     )
     # The two figures the same: the card's, which is the one that names what is there.
     nvml.cards[NAMED] = 30 * GIB
@@ -723,7 +728,7 @@ def test_without_nvml_the_driver_s_figure_is_taken_and_said_once(
         " checked on it",
         "the plan counts on 24.70 GiB of the GPU's memory, of the 30.00 GiB free as its driver"
         " reports it to this process (the whole card's, NVML's, wasn't read): 3.0 GiB are left"
-        " to what torch doesn't count on the card, 2.3 to what torch's own allocator holds"
+        " to what torch doesn't count on the card, 2.3 to what the plan leaves torch's allocator"
         " beyond a peak",
     ]
     limits = held(monkeypatch, 20 * GIB, reserved=GIB)
@@ -814,8 +819,8 @@ def test_no_answer_behind_wsl_is_taken_for_a_driver_that_spills(
     # The driver couldn't be asked, said by the probe: behind WSL2's device it is Windows',
     # which gave what the card didn't have whenever it was asked. Held: a run held for nothing
     # loses memory, one not held where it should be loses its frames.
-    assert startup(monkeypatch, Card(30 * GIB, spills=True, failing="cuInit")) == "backend:native"
-    assert memory.spills() and os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
+    assert startup(monkeypatch, Card(30 * GIB, spills=True, failing="cuInit")) == HELD
+    assert memory.spills() and os.environ["PYTORCH_CUDA_ALLOC_CONF"] == HELD
     assert "can't be asked whether it refuses: cuInit" in caplog.messages[0]
     assert caplog.messages[1] == (
         "the GPU is Windows', reached through WSL2, and its driver didn't say whether it refuses"
@@ -832,12 +837,69 @@ def test_no_answer_behind_wsl_is_taken_for_a_driver_that_spills(
 # needs no card: the variables set, and the backend torch then names.
 TORCH_READS = (
     ({"PYTORCH_CUDA_ALLOC_CONF": ""}, "native"),
+    # A held run's own default: torch's own allocator still, the setting taken whole.
+    ({"PYTORCH_CUDA_ALLOC_CONF": HELD}, "native"),
     ({"PYTORCH_CUDA_ALLOC_CONF": "", "PYTORCH_ALLOC_CONF": "backend:cudaMallocAsync"}, "native"),
     (
         {"PYTORCH_CUDA_ALLOC_CONF": "backend:cudaMallocAsync", "PYTORCH_ALLOC_CONF": ""},
         "cudaMallocAsync",
     ),
+    # Blanks dropped, a tab too; the first backend standing, cudaMallocAsync to the letter; a
+    # bracketed list one value; no backend named, torch's own (memory._allocator reads them so:
+    # test_the_allocator_is_read_as_torch_reads_it).
+    ({"PYTORCH_CUDA_ALLOC_CONF": "  "}, "native"),
+    ({"PYTORCH_CUDA_ALLOC_CONF": "backend: native"}, "native"),
+    ({"PYTORCH_CUDA_ALLOC_CONF": " backend : cudaMallocAsync "}, "cudaMallocAsync"),
+    ({"PYTORCH_CUDA_ALLOC_CONF": "backend:\tcudaMallocAsync"}, "cudaMallocAsync"),
+    ({"PYTORCH_CUDA_ALLOC_CONF": "backend:cudaMallocAsync,backend:native"}, "cudaMallocAsync"),
+    ({"PYTORCH_CUDA_ALLOC_CONF": "backend:native,backend:cudaMallocAsync"}, "native"),
+    ({"PYTORCH_CUDA_ALLOC_CONF": "backend:cudamallocasync,backend:cudaMallocAsync"}, "native"),
+    (
+        {
+            "PYTORCH_CUDA_ALLOC_CONF": "roundup_power2_divisions:[256:1,512:2],backend:"
+            "cudaMallocAsync"
+        },
+        "cudaMallocAsync",
+    ),
+    ({"PYTORCH_CUDA_ALLOC_CONF": "roundup_power2_divisions:[backend:cudaMallocAsync]"}, "native"),
+    ({"PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512"}, "native"),
 )
+
+
+def test_the_allocator_is_read_as_torch_reads_it() -> None:
+    # One reading of a setting, as torch's: whether it takes its own allocator, held to what
+    # torch itself took from each of TORCH_READS (test_torch_takes_the_first_variable_set_even_
+    # empty), and whether that allocator's segments are expandable, the last entry standing, as
+    # torch's own allocator took them on an RTX 5090 (2026-10-16). A setting read by substrings
+    # took "backend: native" for another allocator, the held run then unchecked, and
+    # "backend:cudaMallocAsync,backend:native" for torch's own (a review, 2026-10-16).
+    allocator = memory._allocator  # pyright: ignore[reportPrivateUsage]
+    for variables, backend in TORCH_READS:
+        setting = next((value for value in variables.values() if value), "")
+        if (
+            setting
+            and "PYTORCH_CUDA_ALLOC_CONF" in variables
+            and not variables["PYTORCH_CUDA_ALLOC_CONF"]
+        ):
+            continue  # the empty first variable hides the second: startup's own case
+        assert allocator(setting)[0] == (backend == "native"), (setting, backend)
+    assert allocator(memory.EXPANDABLE) == (True, True)
+    assert allocator(memory.ASYNC) == (False, False)
+    for setting, segments in (
+        ("expandable_segments:True,expandable_segments:False", False),
+        ("expandable_segments:False,expandable_segments:True", True),
+        ("max_split_size_mb:512, expandable_segments : True", True),
+        ("backend: native,expandable_segments:\tTrue", True),
+        ("roundup_power2_divisions:[256:1,512:2],expandable_segments:True", True),
+        ("roundup_power2_divisions:[expandable_segments:True]", False),
+        ("expandable_segments:true", False),
+        ("backend:cudaMallocAsync,expandable_segments:True", False),
+    ):
+        assert allocator(setting)[1] == segments, setting
+    # A key or a value missing at a colon stops torch as it is imported (torch 2.14.1: "Index
+    # out of bounds in ConfigTokenizer"): left to it, read as nothing.
+    for setting in ("backend:", ":native", "expandable_segments:"):
+        assert allocator(setting) == (True, False), setting
 
 
 def test_torch_takes_the_first_variable_set_even_empty() -> None:
@@ -845,9 +907,6 @@ def test_torch_takes_the_first_variable_set_even_empty() -> None:
     # itself: an empty setting names no allocator, torch's own then; and the first variable set
     # is the one read, empty or not, so that an empty PYTORCH_CUDA_ALLOC_CONF hides a
     # PYTORCH_ALLOC_CONF that names cudaMallocAsync.
-    import subprocess
-    import sys
-
     names = "import torch; print(torch.cuda.get_allocator_backend())"
     kept = {name: value for name, value in os.environ.items() if name not in memory.VARIABLES}
     for variables, backend in TORCH_READS:
@@ -866,11 +925,11 @@ def test_torch_takes_the_first_variable_set_even_empty() -> None:
     ("variables", "left", "warned"),
     [
         # Either variable empty, alone or both: no setting, torch's own allocator by default.
-        ({"PYTORCH_CUDA_ALLOC_CONF": ""}, {"PYTORCH_CUDA_ALLOC_CONF": "backend:native"}, False),
-        ({"PYTORCH_ALLOC_CONF": ""}, {"PYTORCH_CUDA_ALLOC_CONF": "backend:native"}, False),
+        ({"PYTORCH_CUDA_ALLOC_CONF": ""}, {"PYTORCH_CUDA_ALLOC_CONF": HELD}, False),
+        ({"PYTORCH_ALLOC_CONF": ""}, {"PYTORCH_CUDA_ALLOC_CONF": HELD}, False),
         (
             {"PYTORCH_CUDA_ALLOC_CONF": "", "PYTORCH_ALLOC_CONF": ""},
-            {"PYTORCH_CUDA_ALLOC_CONF": "backend:native"},
+            {"PYTORCH_CUDA_ALLOC_CONF": HELD},
             False,
         ),
         # An empty one beside the user's own: the user's stands, where torch can read it.
@@ -901,7 +960,7 @@ def test_an_empty_setting_is_no_setting(
     # (test_torch_takes_the_first_variable_set_even_empty).
     for name, value in variables.items():
         monkeypatch.setenv(name, value)
-    assert startup(monkeypatch, Card(30 * GIB, spills=True)) == "backend:native"
+    assert startup(monkeypatch, Card(30 * GIB, spills=True)) == HELD
     assert {name: os.environ[name] for name in memory.VARIABLES if name in os.environ} == left
     assert ("the allocator is the environment's, " in caplog.text) == warned
     assert "the allocator is the environment's, :" not in caplog.text
@@ -927,12 +986,24 @@ def test_an_empty_setting_is_no_setting(
 
 
 @pytest.mark.parametrize(
-    ("variable", "given", "warned"),
+    ("variable", "given", "kind"),
     [
-        ("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync", True),
-        ("PYTORCH_ALLOC_CONF", "backend:cudaMallocAsync", True),
-        ("PYTORCH_CUDA_ALLOC_CONF", "backend:native,max_split_size_mb:512", False),
-        ("PYTORCH_ALLOC_CONF", "max_split_size_mb:512", False),  # torch's default: its own
+        ("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync", "another"),
+        ("PYTORCH_ALLOC_CONF", "backend:cudaMallocAsync", "another"),
+        ("PYTORCH_CUDA_ALLOC_CONF", "backend:native,max_split_size_mb:512", "plain"),
+        ("PYTORCH_ALLOC_CONF", "max_split_size_mb:512", "plain"),  # torch's default: its own
+        ("PYTORCH_CUDA_ALLOC_CONF", "backend:native,expandable_segments:False", "plain"),
+        # The last of a key stands, blanks around it ignored, as torch reads it.
+        ("PYTORCH_ALLOC_CONF", "expandable_segments:True,expandable_segments:False", "plain"),
+        ("PYTORCH_ALLOC_CONF", "max_split_size_mb:512, expandable_segments : True", "segments"),
+        ("PYTORCH_CUDA_ALLOC_CONF", "backend:native,expandable_segments:True", "segments"),
+        # As torch reads them: blanks dropped, the first backend standing (a review, 2026-10-16).
+        ("PYTORCH_CUDA_ALLOC_CONF", "backend: native,expandable_segments:True", "segments"),
+        ("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync,backend:native", "another"),
+        ("PYTORCH_ALLOC_CONF", "backend:native,backend:cudaMallocAsync", "plain"),
+        ("PYTORCH_CUDA_ALLOC_CONF", " backend : native ", "plain"),
+        ("PYTORCH_CUDA_ALLOC_CONF", "backend:cudamallocasync", "plain"),
+        ("PYTORCH_CUDA_ALLOC_CONF", "  ", "plain"),
     ],
 )
 def test_the_environment_s_allocator_stands(
@@ -940,28 +1011,46 @@ def test_the_environment_s_allocator_stands(
     caplog: pytest.LogCaptureFixture,
     variable: str,
     given: str,
-    warned: bool,
+    kind: str,
 ) -> None:
     # The user's setting is left as it is, under either of the names torch reads, and nothing is
     # set beside it: with both set torch takes PYTORCH_CUDA_ALLOC_CONF, seedvr2x's default
     # written there would silence a user's PYTORCH_ALLOC_CONF. On a driver that spills, another
     # allocator than torch's own is warned of, since torch's limit holds less there, and the
     # card isn't checked before each phase: that allocator's slack would pass for another
-    # program's memory.
+    # program's memory. torch's own allocator without expandable segments, a held run's default
+    # (memory.EXPANDABLE), is warned of too, a step short of room refused under it where they
+    # slow it down and run it (DESIGN.md, Allocator, decided on 2026-10-13), and checked as the
+    # default is.
     monkeypatch.setenv(variable, given)
-    assert startup(monkeypatch, Card(30 * GIB, spills=True)) == "backend:native"
+    assert startup(monkeypatch, Card(30 * GIB, spills=True)) == HELD
     assert {name: os.environ.get(name) for name in memory.VARIABLES} == {
         name: given if name == variable else None for name in memory.VARIABLES
     }
-    said = f"the allocator is the environment's, {given}: torch's limit counts what torch has"
+    warned = kind != "segments"
+    said = {
+        "another": f"the allocator is the environment's, {given}: torch's limit counts what torch",
+        "plain": (
+            f"the allocator is the environment's, {given}: torch's own without expandable"
+            " segments, under which a step short of room is refused where they would slow it down"
+            " and run it; add expandable_segments:True to it, or unset it, for a held run's"
+            " default, backend:native,expandable_segments:True"
+        ),
+        "segments": "the allocator is the environment's",
+    }[kind]
     assert (said in caplog.text) == warned and len(caplog.messages) == 2 + warned
-    # The line before it names torch's own allocator only where the run takes it.
-    held_by = "torch limited to" if warned else "torch's own allocator, limited to"
+    # The line before it names torch's own allocator only where the run takes it, and whether
+    # its segments are expandable.
+    held_by = {
+        "another": "torch limited to",
+        "plain": "torch's own allocator without expandable segments, limited to",
+        "segments": "torch's own allocator, its segments expandable, limited to",
+    }[kind]
     assert caplog.messages[1].startswith(f"seedvr2x holds itself to the card there: {held_by}")
     limits = held(monkeypatch, 20 * GIB)
     assert memory.hold("cuda:0") == 17 * GIB and limits == [17 / 32]
     held(monkeypatch, GIB)  # 1 GiB free where torch may take 17 more
-    if warned:
+    if kind == "another":
         loaded = libraries(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: GIB}))
         memory.check("cuda:0")
         assert not loaded  # nothing checked, nothing read
@@ -1354,3 +1443,54 @@ def test_the_card_s_free_memory_is_read() -> None:
     assert 0.95 * GIB < before - after < 1.5 * GIB, lines
     assert memory.card_free(torch.cuda.device_count()) is None  # no such device of CUDA's
     del first, taken
+
+
+HELD_RUN = """
+import torch
+GIB = 1 << 30
+device = torch.device("cuda", 0)
+first = torch.ones(1, device=device)
+torch.cuda.synchronize(device)
+reserved, total = torch.cuda.memory_reserved(device), torch.cuda.mem_get_info(device)[1]
+limit = reserved + GIB
+torch.cuda.set_per_process_memory_fraction(limit / total, device)
+fits = torch.empty(GIB // 2, dtype=torch.uint8, device=device).fill_(1)
+try:
+    torch.empty(GIB, dtype=torch.uint8, device=device)
+    refused = False
+except torch.OutOfMemoryError:
+    refused = True
+del fits
+after = torch.empty(3 * GIB // 4, dtype=torch.uint8, device=device).fill_(2)
+torch.cuda.synchronize(device)
+expandable = [segment["is_expandable"] for segment in torch.cuda.memory_snapshot()]
+whole = int(after[::4096].min()) == 2 == int(after[::4096].max())  # no copy of its size
+under = torch.cuda.max_memory_reserved(device) <= limit
+backend = torch.cuda.get_allocator_backend()
+print(backend, refused, int(after[-1]), whole, under, all(expandable), len(expandable))
+"""
+
+
+@pytest.mark.gpu
+def test_a_held_run_s_allocator_keeps_torch_s_limit() -> None:
+    # The allocator a held run takes by default (memory.EXPANDABLE), in a process of its own as
+    # torch reads it when imported: torch's own, every segment of its pool expandable; a
+    # request that passes torch's limit is refused, an error Python catches, what torch holds
+    # never over the limit, and the work after the refusal is right. On a driver that refuses
+    # too: the setting is torch's, and the limit its own count.
+    environment = {
+        name: value for name, value in os.environ.items() if name not in memory.VARIABLES
+    }
+    environment[memory.VARIABLES[0]] = memory.EXPANDABLE
+    ran = subprocess.run(
+        [sys.executable, "-c", HELD_RUN],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert ran.returncode == 0, ran.stderr[-800:]
+    print(ran.stdout.strip())
+    backend, refused, last, whole, under, expandable, segments = ran.stdout.split()
+    assert (backend, refused, last, whole, under) == ("native", "True", "2", "True", "True")
+    assert expandable == "True" and int(segments) >= 1

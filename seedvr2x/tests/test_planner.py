@@ -3549,7 +3549,7 @@ def test_said() -> None:
 
 # What a run held to its card counts on in these tests, on a driver that gives memory the card
 # doesn't have: the free memory less 5.9 GiB, figures of the tests' own: 0.8 GiB left outside
-# torch's limit, and 5.1 for what torch's own allocator needs beyond a peak, the planner's
+# torch's limit, and 5.1 that the plan leaves torch's allocator beyond a peak, the planner's
 # margin in it. The module's two constants (memory.HELD_BACK and memory.RESERVE) are measured or
 # decided, and move with their measures.
 LEFT = round(0.8 * GIB)
@@ -3578,8 +3578,8 @@ def held(reported: float, card: float | None) -> Reading:
 # figure isn't the one the plan is held under.
 HELD_LINE = (
     "; the run is held to the card's own memory, its driver giving more than the card has:"
-    " torch is limited 0.80 GiB under that, and the plan counts on 5.10 GiB less again, what"
-    " torch's own allocator needs beyond a step's peak: a budget of 22.15 GiB"
+    " torch is limited 0.80 GiB under that, and the plan counts on 5.10 GiB less again, what it"
+    " leaves torch's allocator beyond a step's peak: a budget of 22.15 GiB"
 )
 WORDS = [
     (

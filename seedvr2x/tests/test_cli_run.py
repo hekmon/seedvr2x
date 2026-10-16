@@ -963,7 +963,7 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     monkeypatch.setattr(cli, "_free_memory", reading)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native,expandable_segments:True"
     assert held_at == [("the first pass", 1), ("the reading", 1)]
     # What the plan counts on is its budget, the planner's margin counted in what a held run
     # leaves to torch's allocator: the plan of a driver that refuses and reports that margin
@@ -993,7 +993,7 @@ def test_a_driver_that_spills_is_planned_under_and_held(
         ", 92.50 GiB free on the whole card by NVML (its driver reports 94.50 GiB free to this"
         " process); the run is held to the card's own memory, its driver giving more than the"
         " card has: torch is limited 3.00 GiB under that, and the plan counts on 2.30 GiB less"
-        " again, what torch's own allocator needs beyond a step's peak: a budget of 87.20 GiB"
+        " again, what it leaves torch's allocator beyond a step's peak: a budget of 87.20 GiB"
     ) in caplog.text
     assert caplog.text.count("a budget of 87.20 GiB") == 1
     assert (
@@ -1161,7 +1161,7 @@ def test_resumed_on_a_driver_that_spills_is_held_again(
     monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF")
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native"
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "backend:native,expandable_segments:True"
     assert limits == [(FREE - memory.HELD_BACK) / TOTAL] * 2
     planned_in = FREE - memory.HELD_BACK - memory.RESERVE
     assert json.loads(manifest.read_text())["plan"]["memory"]["free"] == planned_in

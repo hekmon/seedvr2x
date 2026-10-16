@@ -2262,7 +2262,7 @@ def _card_said(card: str, peaks: Peaks) -> str:
     refuses, one figure, what it reports free. On a run held to the card (memory.Reading.held),
     each figure by its name: the free memory the run is held under, the driver's or the whole
     card's, with the other; what torch's limit leaves of it (Reading.left), and what the plan
-    counts on less again, for what torch's own allocator needs beyond a peak (memory.RESERVE),
+    counts on less again, which it leaves torch's allocator beyond a peak (memory.RESERVE),
     two figures that were given as one, as the hold (a review's finding, 2026-10-12); and the
     budget, which is what the plan counts on there, no margin taken on top (_Job.margin), and
     which every refusal is counted from."""
@@ -2274,8 +2274,8 @@ def _card_said(card: str, peaks: Peaks) -> str:
         f"{card}, {_gib(free)} GiB free {_named(reading, _gib)}; the run is held to the card's"
         f" own memory, its driver giving more than the card has: torch is limited"
         f" {_gib(reading.left)} GiB under that, and the plan counts on"
-        f" {_gib(free - reading.left - peaks.free)} GiB less again, what torch's own allocator"
-        f" needs beyond a step's peak: a budget of {_gib(peaks.budget)} GiB"
+        f" {_gib(free - reading.left - peaks.free)} GiB less again, what it leaves torch's"
+        f" allocator beyond a step's peak: a budget of {_gib(peaks.budget)} GiB"
     )
 
 
