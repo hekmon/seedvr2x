@@ -249,17 +249,31 @@ def test_the_driver_is_asked() -> None:
     # it answers, in under two seconds, and leaves the card as it found it. A driver reached
     # without WSL's device refuses what the card can't hold; under WSL, Windows' driver gave it
     # (driver 616.92, 2026-10-11), and whichever it does now is said in the test's output.
+    # Asked, by one request of OVER more than it reports free, where that figure and the whole
+    # card's by NVML agree within OVER, or the card's isn't read. Not asked where it reports more
+    # than the card has by more than OVER, other programs' memory left out of its figure: taken
+    # for one that spills, the card's figure given with the answer (memory.probe). Which of the
+    # two the card is in is read here too, before the probe, and the answer held to it: a probe
+    # that asks beside another program's memory takes the card from that program.
     from seedvr2x.runtime import memory
 
     device = torch.device("cuda:0")
     torch.cuda.synchronize(device)
     before = torch.cuda.mem_get_info(device)[0]
+    card = memory._read(0)  # pyright: ignore[reportPrivateUsage]
     started = time.perf_counter()
     found = memory.probe()
     took = time.perf_counter() - started
     assert found is not None and took < 2.0, (found, took)
     print(f"{found.said()}; {took:.2f} s; WSL's GPU device: {memory.paravirtual()}")
-    assert found.asked == found.free + memory.OVER and found.total >= found.free
+    assert found.total >= found.free
+    if found.card is None:
+        assert found.asked == found.free + memory.OVER
+        # SLACK: the card's figure is read a moment before the probe's own.
+        assert not isinstance(card, int) or before <= card + memory.OVER + SLACK, (before, card)
+    else:
+        assert found.spills and found.asked == 0, found
+        assert found.free > found.card + memory.OVER, found
     if not memory.paravirtual():
         assert not found.spills
     assert abs(torch.cuda.mem_get_info(device)[0] - before) < SLACK
