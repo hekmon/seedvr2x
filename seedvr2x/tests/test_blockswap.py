@@ -14,6 +14,7 @@ The swap on a real card, the DiT's bits and the figures: tests/test_placement.py
 
 import gc
 import itertools
+import json
 import random
 import weakref
 from collections import deque
@@ -24,7 +25,8 @@ from typing import Any, cast
 
 import pytest
 import torch
-from safetensors.torch import save_file
+from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 from torch import Tensor
 
 from seedvr2x.runtime import blockswap, model, weights
@@ -401,6 +403,212 @@ def test_read_puts_the_parts_in_their_host_copies(
         assert tensor.dtype == (torch.float16 if dtype is None else dtype)
         assert torch.equal(tensor, expected[key].to(tensor.dtype)), key
     assert len(parts[OTHER].fields) == 6  # the parameters outside the blocks: no buffer
+
+
+def mappings(path: Path) -> list[str]:
+    """This process's mappings of the file at path, /proc/self/maps' lines for it."""
+    name = str(path.resolve())
+    return [line for line in Path("/proc/self/maps").read_text().splitlines() if name in line]
+
+
+@pytest.mark.parametrize("dtype", [None, torch.bfloat16])
+@pytest.mark.parametrize("with_parts", [False, True])
+def test_read_never_maps_the_file(
+    tmp_path: Path, with_parts: bool, dtype: torch.dtype | None
+) -> None:
+    # A mapped page stays in the process from the copy that reads it until the mapping goes:
+    # the 7B's 15.35 GiB at a load's peak (research/scripts/load_peak.py). The file is read.
+    sim = Sim()
+    path = tmp_path / "toy.safetensors"
+    save_file(toy(4, sim).to(torch.float16).state_dict(), path)
+    # A mapping is seen where there is one: safetensors' own, while a tensor of it lives.
+    with cast(Any, safe_open(path, framework="pt", device="cpu")) as mapped:
+        held = mapped.get_tensor("after.gain")
+        assert mappings(path)
+    del held, mapped
+    gc.collect()
+    assert not mappings(path)
+    with torch.device("meta"):
+        model = Toy(4, sim)
+    names = dit_parts(4, 1, other=True)
+    seen: list[bool] = []
+
+    def part_of(key: str) -> str | None:
+        seen.append(bool(mappings(path)))
+        return names(key) if with_parts else None
+
+    state, parts = blockswap.read(model, path, CPU, dtype, part_of, sim)
+    assert seen and not any(seen)
+    assert not mappings(path)
+    assert bool(parts) == with_parts and len(state) == len(model.state_dict())
+
+
+@pytest.mark.parametrize("dtype", [None, torch.bfloat16])
+def test_read_gives_what_safetensors_reads(tmp_path: Path, dtype: torch.dtype | None) -> None:
+    # Every dtype read, a scalar and a tensor of no value among them, in a file safetensors
+    # wrote, against safetensors' own reading of it; no part: a model loaded whole.
+    torch.manual_seed(7)
+    saved = {
+        "matrix": torch.randn(5, 3).to(torch.float16),
+        "scalar": torch.randn(()).to(torch.float16),
+        "none": torch.empty(0, 4, dtype=torch.float16),
+        "brain": torch.randn(2, 3).to(torch.bfloat16),
+        "single": torch.randn(3, 7),
+        "double": torch.randn(2, dtype=torch.float64),
+        "counter": torch.tensor(123_456_789_012, dtype=torch.int64),
+        "whole": torch.tensor([-(2**31), 2**31 - 1], dtype=torch.int32),
+        "short": torch.tensor([-(2**15), 2**15 - 1], dtype=torch.int16),
+        "tiny": torch.tensor([-128, 127], dtype=torch.int8),
+        "bytes": torch.arange(13, dtype=torch.uint8),
+        "flags": torch.tensor([True, False, True]),
+    }
+    path = tmp_path / "assorted.safetensors"
+    save_file(saved, path)
+    state, parts = blockswap.read(torch.nn.Module(), path, CPU, dtype, None)
+    expected = load_file(path)
+    assert not parts and state.keys() == expected.keys() == saved.keys()
+    for key, tensor in state.items():
+        want = expected[key]
+        if dtype is not None and want.is_floating_point():
+            want = want.to(dtype)
+        assert tensor.dtype == want.dtype and tensor.shape == want.shape, key
+        assert torch.equal(tensor, want), key
+    # Each in memory of its own: they are read through one buffer, where the next tensor's
+    # bytes replace the last's.
+    held = [tensor for tensor in state.values() if tensor.numel()]
+    assert not any(overlap(a, b) for a, b in itertools.combinations(held, 2))
+
+
+def written(path: Path, entries: dict[str, Any], data: bytes) -> Path:
+    """A safetensors file of this header and these bytes, as the format lays them."""
+    header = json.dumps(entries).encode()
+    path.write_bytes(len(header).to_bytes(8, "little") + header + data)
+    return path
+
+
+def test_read_refuses_what_it_cannot_read(tmp_path: Path) -> None:
+    # weights.check has refused such files before a job's load reads one: a file that passes
+    # it unchecked, or changes under the load, is still never read into wrong tensors.
+    module = torch.nn.Module()
+    half = {"dtype": "F16", "shape": [3], "data_offsets": [0, 6]}
+    # A dtype torch has no reading for here.
+    odd = written(tmp_path / "odd.safetensors", {"x": {**half, "dtype": "F8_E4M3"}}, bytes(6))
+    with pytest.raises(RuntimeError, match=r"^odd\.safetensors: x is F8_E4M3, which isn't read$"):
+        blockswap.read(module, odd, CPU, None, None)
+    # Data of another size than its shape's.
+    long = written(tmp_path / "long.safetensors", {"x": {**half, "data_offsets": [0, 8]}}, bytes(8))
+    with pytest.raises(RuntimeError, match=r"^long\.safetensors: x takes 8 bytes, not 6$"):
+        blockswap.read(module, long, CPU, None, None)
+    # A file cut short since its check, as it loads, in a tensor bound for the device and in
+    # a part's: refused as weights.check refuses one, in a line (cli logs a ModelError so:
+    # tests/test_cli_run.py, test_model_replaced_before_its_load), the bytes it holds and
+    # those its header gives.
+    after = {"dtype": "F16", "shape": [2], "data_offsets": [6, 10]}
+    short = written(tmp_path / "short.safetensors", {"x": half, "y": after}, bytes(8))
+    size = short.stat().st_size
+    said = f"{short}: cut short as it loaded, {size:,} of {size + 2:,} bytes; fetch it again"
+    with pytest.raises(weights.ModelError) as error:
+        blockswap.read(module, short, CPU, None, None)
+    assert str(error.value) == said
+    module.register_parameter("y", torch.nn.Parameter(torch.zeros(2, dtype=torch.float16)))
+    with pytest.raises(weights.ModelError) as error:
+        blockswap.read(module, short, CPU, None, lambda key: "part", Sim())
+    assert str(error.value) == said
+    # Cut in a tensor before the last: still the whole file's size, by its header.
+    shorter = written(tmp_path / "shorter.safetensors", {"x": half, "y": after}, bytes(4))
+    size = shorter.stat().st_size
+    with pytest.raises(weights.ModelError) as error:
+        blockswap.read(module, shorter, CPU, None, lambda key: "part", Sim())
+    assert str(error.value) == (
+        f"{shorter}: cut short as it loaded, {size:,} of {size + 6:,} bytes; fetch it again"
+    )
+    # Cut inside its header: the least it can hold, its header's length or the header's end.
+    tiny = tmp_path / "tiny.safetensors"
+    tiny.write_bytes(bytes(5))
+    with pytest.raises(weights.ModelError) as error:
+        blockswap.read(module, tiny, CPU, None, None)
+    assert (
+        str(error.value) == f"{tiny}: cut short as it loaded, 5 of at least 8 bytes; fetch it again"
+    )
+    cut = tmp_path / "cut.safetensors"
+    cut.write_bytes(short.read_bytes()[:20])
+    end = 8 + int.from_bytes(short.read_bytes()[:8], "little")
+    with pytest.raises(weights.ModelError) as error:
+        blockswap.read(module, cut, CPU, None, None)
+    assert (
+        str(error.value)
+        == f"{cut}: cut short as it loaded, 20 of at least {end:,} bytes; fetch it again"
+    )
+    # Whole, it reads: the same file with its last two bytes.
+    whole = written(tmp_path / "whole.safetensors", {"x": half, "y": after}, bytes(range(10)))
+    state, parts = blockswap.read(module, whole, CPU, None, lambda key: "part", Sim())
+    assert bytes(state["x"].view(torch.uint8)) == bytes(range(6))
+    assert bytes(state["y"].view(torch.uint8)) == bytes(range(6, 10)) and list(parts) == ["part"]
+    assert state["y"].data_ptr() == parts["part"].host.bytes.data_ptr()
+
+
+def test_read_takes_the_file_from_its_start_to_its_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each byte of the file once, in its order, the data's whatever the header's: one pass
+    # over the file, 15 GiB of which take over a minute where a file reads slowly.
+    late = {"dtype": "F16", "shape": [3], "data_offsets": [4, 10]}
+    early = {"dtype": "F16", "shape": [2], "data_offsets": [0, 4]}
+    last = {"dtype": "U8", "shape": [5], "data_offsets": [10, 15]}
+    path = written(tmp_path / "order.safetensors", {"b": late, "c": last, "a": early}, bytes(15))
+    spans: list[tuple[int, int]] = []
+    real = open
+
+    class Recorded:
+        def __init__(self, file: Any) -> None:
+            self.file = file
+
+        def __enter__(self) -> "Recorded":
+            return self
+
+        def __exit__(self, *error: object) -> None:
+            self.file.close()
+
+        def seek(self, position: int) -> int:
+            return self.file.seek(position)
+
+        def readinto(self, target: memoryview) -> int:
+            start = self.file.tell()
+            got = self.file.readinto(target)
+            spans.append((start, start + got))
+            return got
+
+    def recorded(name: Any, *args: Any, **more: Any) -> Any:
+        opened = real(name, *args, **more)
+        return Recorded(opened) if Path(name) == path else opened
+
+    monkeypatch.setattr("builtins.open", recorded)
+    module = torch.nn.Module()
+    module.register_parameter("b", torch.nn.Parameter(torch.zeros(3, dtype=torch.float16)))
+    state, _ = blockswap.read(module, path, CPU, None, lambda key: "part", Sim())
+    monkeypatch.undo()
+    assert list(state) == ["a", "b", "c"]
+    # End to end, nothing twice, nothing left: the header, the device's tensors and the
+    # part's alike.
+    assert spans[0][0] == 0 and spans[-1][1] == path.stat().st_size
+    assert all(end == start for (_, end), (start, _) in itertools.pairwise(spans))
+
+
+def test_a_model_loaded_whole_is_read_too(tmp_path: Path) -> None:
+    # model._load_weights without a part, the load of a run without a plan: the file's
+    # values, through the same read, the file never mapped; the model's parameters are the
+    # tensors read, which a mapping would be the memory of.
+    sim = Sim()
+    source = toy(3, sim).to(torch.float16)
+    path = tmp_path / "toy.safetensors"
+    save_file(source.state_dict(), path)
+    with torch.device("meta"):
+        loaded = Toy(3, sim)
+    assert model._load_weights(loaded, path, CPU, None, None) == {}  # pyright: ignore[reportPrivateUsage]
+    assert not mappings(path)
+    expected = source.state_dict()
+    for key, tensor in loaded.state_dict().items():
+        assert tensor.dtype == torch.float16 and torch.equal(tensor, expected[key]), key
 
 
 def test_too_little_host_memory_is_refused_before_anything_is_pinned(

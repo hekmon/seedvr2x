@@ -38,12 +38,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import torch
-from safetensors import safe_open
 from torch import Tensor
 
 from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.plan import Phase
-from seedvr2x.runtime.weights import SLOTS
+from seedvr2x.runtime.weights import AGAIN, SLOTS, ModelError
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +55,22 @@ ALIGN = 512
 OTHER = "other"
 
 _BLOCK = re.compile(r"blocks\.(\d+)\.")
+# torch's dtype for each of safetensors' names the loader reads (read), each held to
+# safetensors' own reading by tests/test_blockswap.py. A file seedvr2x runs holds F16 alone
+# (weights.check); the other names of weights.DTYPE_BYTES, the unsigned ones over 8 bits and
+# fp8's two, which no such file holds, are refused there rather than read untested.
+_DTYPES: dict[str, torch.dtype] = {
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "F32": torch.float32,
+    "F64": torch.float64,
+    "I64": torch.int64,
+    "I32": torch.int32,
+    "I16": torch.int16,
+    "I8": torch.int8,
+    "U8": torch.uint8,
+    "BOOL": torch.bool,
+}
 
 
 class HostMemoryError(JobError):
@@ -248,68 +263,116 @@ def read(
     path: Path,
     device: torch.device,
     dtype: torch.dtype | None,
-    part_of: Callable[[str], str | None],
+    part_of: Callable[[str], str | None] | None,
     backend: Cuda | None = None,
 ) -> tuple[dict[str, Tensor], dict[str, Part]]:
     """The tensors of the safetensors checkpoint at path, for model.load_state_dict(assign=True),
-    as model._load_weights loads them, on device, every floating one cast to dtype if given;
-    but the parameters part_of names a part for: those go to their part's host copy, pinned,
-    and never to the device whole (DESIGN.md, BlockSwap, rewritten: the loader). Returns the
-    tensors and the parts, by name, each to adopt the model once loaded. Raises HostMemoryError
-    before anything is pinned when the host has too little memory available.
+    on device, every floating one cast to dtype if given, there, as numz casts a model loaded
+    whole; but the parameters part_of names a part for, if it is given: those go to their part's
+    host copy, pinned, and never to the device whole (DESIGN.md, BlockSwap, rewritten: the
+    loader). Returns the tensors and the parts, by name, each to adopt the model once loaded.
+    Raises HostMemoryError before anything is pinned when the host has too little memory
+    available.
 
-    A part's bytes are read from the file straight into its pinned copy, by the file's own
-    offsets, when no cast is asked: copied from safetensors' mapping of the file instead, the
-    mapped pages stay in the process until the load ends, and its memory peaked at 31.4 GiB
-    with the 36 blocks pinned, 15.19 GiB of them the copies (a run's own log, 2026-10-11;
-    research/scripts/placement_bench.py's plan gives the load's peak)."""
+    The file is read, never mapped, from its start to its end, each tensor's bytes at the
+    file's own offsets: a part's straight into its pinned copy, any other tensor's into one
+    buffer the size of the largest of them, which it leaves for the device before the next is
+    read. A file cut short since weights.check passed it is a ModelError, as the check's own.
+    Mapped, as safetensors gives a file's tensors, a page stays in the process from the copy
+    that reads it until the mapping goes, at the end of the file's read: with every weight of
+    the 7B bound for the device, its file's 15.35 GiB, the process 16.5 GiB resident at the
+    load's peak where it holds 1.25 once loaded; and as much whatever a plan pins, the pinned
+    copies in the mapped pages' place: 16.8 GiB with 6.38 pinned, 16.3 with the 36 blocks'
+    15.19 (and 31.4 when the blocks' copies were made from the mapping too). Read so, the
+    three loads peak at 1.1, 7.5 and 16.3 GiB, every tensor's bytes the same (measured on
+    the 96 GB card with research/scripts/load_peak.py, 2026-10-12;
+    research/docs/load-memory.md)."""
     backend = Cuda(device) if backend is None else backend
     parameters = {name for name, _ in model.named_parameters()}
-    with cast(Any, safe_open(path, framework="pt", device="cpu")) as file, open(path, "rb") as raw:
+    with open(path, "rb") as raw:
 
-        def tensor_of(key: str) -> Tensor:
-            return cast(Tensor, file.get_tensor(key))  # mapped: no byte read yet
+        def fill(target: memoryview, at: int, whole: int | None = None) -> None:
+            # target, from the file's byte at on. weights.check has passed the file whole: one
+            # cut short since, as it loads, is refused as the check refuses one, in a line,
+            # with the bytes it holds and those it should (whole, by its header; inside the
+            # header, the least it can), rather than read into wrong tensors or a traceback.
+            raw.seek(at)
+            done = 0
+            while done < len(target):
+                got = raw.readinto(target[done:])
+                if not got:
+                    of = f"at least {at + len(target):,}" if whole is None else f"{whole:,}"
+                    raise ModelError(
+                        f"{path}: cut short as it loaded, {at + done:,} of {of} bytes; {AGAIN}"
+                    )
+                done += got
 
         # The file's layout, as safetensors lays it: the header's length, the header, the data,
         # each tensor at its offsets from the header's end. weights.check has validated it.
-        length = int.from_bytes(raw.read(8), "little")
-        header = cast("dict[str, Any]", json.loads(raw.read(length)))
-        keys = cast("list[str]", list(file.keys()))
+        size = bytearray(8)
+        fill(memoryview(size), 0)
+        length = int.from_bytes(size, "little")
+        text = bytearray(length)
+        fill(memoryview(text), 8)
+        header = cast("dict[str, Any]", json.loads(text))
+        header.pop("__metadata__", None)
+        tensors: dict[str, tuple[torch.dtype, tuple[int, ...], int, int]] = {}
+        # By their offsets: the order the bytes are in, whatever the header's.
+        for key, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
+            if entry["dtype"] not in _DTYPES:
+                raise RuntimeError(f"{path.name}: {key} is {entry['dtype']}, which isn't read")
+            found, shape = _DTYPES[entry["dtype"]], tuple(cast("list[int]", entry["shape"]))
+            start, end = cast("tuple[int, int]", tuple(entry["data_offsets"]))
+            if end - start != found.itemsize * prod(shape):
+                raise RuntimeError(
+                    f"{path.name}: {key} takes {end - start} bytes, not"
+                    f" {found.itemsize * prod(shape)}"
+                )
+            tensors[key] = (found, shape, start, end)
+        whole = 8 + length + max((end for *_, end in tensors.values()), default=0)
         layouts: dict[str, dict[str, tuple[torch.dtype, tuple[int, ...]]]] = {}
-        for key in keys:
-            name = part_of(key) if key in parameters else None
+        for key, (found, shape, _, _) in tensors.items():
+            name = part_of(key) if part_of is not None and key in parameters else None
             if name is not None:
-                tensor = tensor_of(key)
-                final = tensor.dtype if dtype is None or not tensor.is_floating_point() else dtype
-                layouts.setdefault(name, {})[key] = (final, tuple(tensor.shape))
+                final = found if dtype is None or not found.is_floating_point else dtype
+                layouts.setdefault(name, {})[key] = (final, shape)
         parts = _make(layouts, backend)
         fields = {field.key: (part, field) for part in parts.values() for field in part.fields}
+        # What isn't read straight into a pinned copy passes through here, one tensor at a
+        # time: the largest of those tensors' size. For the 7B, its largest, 108 MiB (outside
+        # the blocks), or at the most a block's largest, 72 MiB, when a plan pins the
+        # parameters outside the blocks; for the VAE, cast as it loads, 13.5 MiB (the files'
+        # headers).
+        through = [
+            end - start
+            for key, (found, _, start, end) in tensors.items()
+            if key not in fields or (dtype is not None and found.is_floating_point)
+        ]
+        staging = torch.empty(max(through, default=0), dtype=torch.uint8)
         state: dict[str, Tensor] = {}
-        for key in keys:
-            tensor = tensor_of(key)
-            recast = dtype is not None and tensor.is_floating_point()
-            if key not in fields:
-                # Cast on the device, as the whole-model load casts it: the same values.
-                state[key] = tensor.to(device).to(dtype) if recast else tensor.to(device)
+        for key, (found, shape, start, end) in tensors.items():
+            recast = dtype is not None and found.is_floating_point
+            placed = fields.get(key)
+            if placed is not None and not recast:
+                part, field = placed
+                state[key] = part.view(part.host.bytes, field)
+                target = part.host.bytes[field.offset : field.offset + field.size]
+            else:
+                target = staging[: end - start]
+            fill(memoryview(target.numpy()), 8 + length + start, whole)
+            if placed is not None and not recast:
                 continue
-            part, field = fields[key]
-            state[key] = part.view(part.host.bytes, field)
-            if recast:
-                state[key].copy_(tensor.to(device).to(dtype))
-                continue
-            start, end = cast("tuple[int, int]", tuple(header[key]["data_offsets"]))
-            if end - start != field.size:
-                raise RuntimeError(
-                    f"{path.name}: {key} takes {end - start} bytes, not {field.size}"
-                )
-            target = memoryview(part.host.bytes[field.offset : field.offset + field.size].numpy())
-            raw.seek(8 + length + start)
-            done = 0
-            while done < field.size:
-                got = raw.readinto(target[done:])
-                if not got:
-                    raise RuntimeError(f"{path.name}: cut short in {key}")
-                done += got
+            # A copy on the CPU too, where to() alone gives the buffer's own memory, which the
+            # next tensor's bytes replace. Cast on the device, as the whole-model load casts
+            # there: the same values.
+            moved = target.view(found).view(shape).to(device, copy=True)
+            moved = moved.to(dtype) if recast else moved
+            if placed is None:
+                state[key] = moved
+            else:
+                part, field = placed
+                state[key] = part.view(part.host.bytes, field)
+                state[key].copy_(moved)
     return state, parts
 
 

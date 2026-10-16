@@ -1,8 +1,9 @@
 """The DiT's placement on a real card (runtime/blockswap.py): milestone 3's first gate, swapping
 changes no bit of the DiT's output (DESIGN.md, BlockSwap, rewritten), for 0, 3, 12 and all 36
 blocks swapped, without the prefetch and with it; the DiT's peak falls by each swapped block but
-the two in the slots; a model sent away leaves the device to the other; and a plan's load never
-has a swapped DiT whole on the device.
+the two in the slots; a model sent away leaves the device to the other; a plan's load never
+has a swapped DiT whole on the device; and no load holds more system memory at its peak than it
+leaves, but the buffer its tensors are read through.
 
 Needs a GPU (pytest -m gpu) with the 7B whole on it and a window beside (18 GiB free), the
 weights (SEEDVR2X_MODEL_DIR: a 7B DiT in fp16 and the VAE, numz's files or seedvr2x's own), and
@@ -52,6 +53,11 @@ LATENTS = 2
 FORWARDS = 2
 # What the allocator's rounding and the blocks' cached RoPE tables may add to a figure.
 SLACK = 64 << 20
+# What a load's peak in system memory may pass what the load leaves resident by: the buffer its
+# tensors are read through, 108 MiB for the 7B's largest, and what torch takes and gives back
+# on the way. Read from a mapping of the file, the peak passed it by the file's bytes bound for
+# the device, 15.3 GiB of a 7B loaded whole (research/scripts/load_peak.py).
+LOAD_OVER = GIB // 2
 
 
 def found(names: tuple[str, ...]) -> Path:
@@ -96,6 +102,22 @@ def allocated(device: torch.device) -> int:
     return torch.cuda.memory_allocated(device)
 
 
+def resident(peak: bool = False) -> int:
+    """The process's resident system memory now, in bytes, or with `peak` its most since
+    measure_resident: VmRSS and VmHWM of /proc/self/status."""
+    name = "VmHWM:" if peak else "VmRSS:"
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith(name):
+            return int(line.split()[1]) * 1024
+    raise RuntimeError(f"no {name} in /proc/self/status")
+
+
+def measure_resident() -> None:
+    """Start the kernel's high-water mark of this process's resident memory again from what
+    is resident now (proc(5): 5 written to /proc/PID/clear_refs)."""
+    Path("/proc/self/clear_refs").write_text("5")
+
+
 @dataclass
 class Loaded:
     """The models loaded whole, as a run without a plan loads them, with what the placements
@@ -105,13 +127,18 @@ class Loaded:
     digests: list[str]
     peak: int
     vae: str
+    # The process's resident system memory at the load's peak, and once loaded, in bytes.
+    host_peak: int
+    host_after: int
 
 
 @pytest.fixture(scope="module")
 def loaded() -> Iterator[Loaded]:
+    measure_resident()
     models = model.load_models(found(DITS), found(VAES), torch.device("cuda:0"))
+    host_peak, host_after = resident(peak=True), resident()
     digests, peak = windows(models)
-    yield Loaded(models, digests, peak, round_trip(models))
+    yield Loaded(models, digests, peak, round_trip(models), host_peak, host_after)
     models.runner.dit = models.runner.vae = None
     gc.collect()
     torch.cuda.empty_cache()
@@ -168,6 +195,14 @@ def test_swapping_changes_no_bit_and_takes_its_blocks_off_the_peak(loaded: Loade
     assert abs(allocated(device) - away) < SLACK
 
 
+def test_a_load_s_peak_in_system_memory_is_what_it_leaves(loaded: Loaded) -> None:
+    # The models loaded whole, every weight bound for the device: the process never held the
+    # file's pages, 16.5 GiB resident at such a load's peak when it read the file through a
+    # mapping, for 1.25 once loaded (this test on that read: 16.48 for 1.22).
+    over = loaded.host_peak - loaded.host_after
+    assert over < LOAD_OVER, (loaded.host_peak / GIB, loaded.host_after / GIB)
+
+
 def test_a_plan_s_load_never_has_the_dit_whole_on_the_device(loaded: Loaded) -> None:
     # All 36 blocks swapped, the DiT away in the VAE's phases and the VAE in the DiT's: what a
     # 16 GB card runs. The first models' weights are let go first: two DiTs would pass the card.
@@ -178,9 +213,14 @@ def test_a_plan_s_load_never_has_the_dit_whole_on_the_device(loaded: Loaded) -> 
     before = allocated(device)
     torch.cuda.reset_peak_memory_stats(device)
     plan = Plan(None, swapped=36, resident_encode=0, resident_decode=0, vae_in_dit=False)
+    measure_resident()
     models = model.load_models(found(DITS), found(VAES), device, plan=plan)
+    host_peak, host_after = resident(peak=True), resident()
     placement, vae = models.placement, models.vae
     assert placement is not None and vae is not None
+    # In system memory, the pinned copies and no more: the VAE's weights, cast on the device,
+    # come from the buffer the file is read through, not from a mapping of the file.
+    assert host_peak - host_after < LOAD_OVER, (host_peak / GIB, host_after / GIB)
     # The load's peak on the device: the buffers, and the VAE's weights one tensor at a time,
     # cast there on their way to their host copy: never a block of the DiT (0.026 GiB measured).
     assert torch.cuda.max_memory_allocated(device) - before < SLACK

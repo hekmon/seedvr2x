@@ -22,7 +22,6 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from omegaconf import ListConfig, OmegaConf
-from safetensors.torch import load_file
 from torch import Tensor
 from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
@@ -307,14 +306,10 @@ def _load_weights(
     (src/core/model_loader.py:547-616, 777-835): the file's dtypes, or every floating tensor cast
     to dtype; then the buffers the checkpoint doesn't hold, still on meta, filled with zeros.
     With part_of, the parameters it names a part for go to that part's pinned host copy, not to
-    the device (blockswap.read): the parts are returned, by name, away from the device."""
-    parts: dict[str, Part] = {}
-    if part_of is None:
-        state = load_file(path, device=str(device))
-        if dtype is not None:
-            state = {k: v.to(dtype) if v.is_floating_point() else v for k, v in state.items()}
-    else:
-        state, parts = blockswap.read(model, path, device, dtype, part_of)
+    the device: the parts are returned, by name, away from the device. With or without parts,
+    the file is read by blockswap.read, which says why it is never mapped, as safetensors'
+    own load_file maps it."""
+    state, parts = blockswap.read(model, path, device, dtype, part_of)
     # strict=False as numz, but the mismatches are reported, where numz ignores them silently.
     result = model.load_state_dict(state, strict=False, assign=True)
     if result.missing_keys or result.unexpected_keys:
