@@ -156,10 +156,14 @@ class Hashes:
 @dataclass(frozen=True)
 class ModelFile:
     """A model file of the run: the name it was given (--dit-model, --vae-model; DETECTOR, the
-    shot detector's) and its path, in --model-dir or in Hugging Face's cache."""
+    shot detector's) and its path, in --model-dir or in Hugging Face's cache. `absent`: one of
+    seedvr2x's own, not in that cache and not downloaded, for a job that loads no model
+    (resolve's `download`), held to its pin (PINNED) in its place: its path is where the cache
+    would hold it, and nothing reads it."""
 
     name: str
     path: Path
+    absent: bool = False
 
 
 @dataclass(frozen=True)
@@ -182,14 +186,26 @@ class ModelFiles:
         return given
 
 
-def resolve(model_dir: Path | None, dit: str, vae: str, detector: bool = False) -> ModelFiles:
+def resolve(
+    model_dir: Path | None, dit: str, vae: str, detector: bool = False, download: bool = True
+) -> ModelFiles:
     """The run's model files, the DiT's named dit and the VAE's named vae, and with detector the
     shot detector's, DETECTOR (DESIGN.md, Weights: TransNetV2's weights with the shot detector).
     With model_dir, each is read there by its name, and nothing is downloaded: huggingface_hub
     isn't imported here. Without, each must be one of seedvr2x's own (PINNED) in its role, taken
     from Hugging Face's cache, and downloaded into it when missing, in one fetch, whose check of
     the free space counts every file it downloads. ModelError says what to do for each one
-    refused, before anything is fetched."""
+    refused, before anything is fetched.
+
+    `download` False: a job that loads no model, one with every segment made (cli._run). A file
+    of seedvr2x's own missing from the cache is then held to its pin, said in the log, and
+    neither downloaded nor read (ModelFile.absent): the job is compared with its record by the
+    pin's size and SHA-256 (cli._model), as its record has them where the file passed its pin
+    check. DESIGN.md, Pause and resume (decided on 2026-10-13): "a finished job whose own model
+    file isn't there is held to the file's pin and fetches nothing, where today it downloads it
+    before saying finished; a file the user names must be there": one in --model-dir must, and
+    is checked as any job's. Until then such a job downloaded 16.5 GB to say it was finished.
+    A file in the cache is checked as any job's, by its header and its pin."""
     if model_dir is not None:
         logger.info("model files from %s (--model-dir), nothing downloaded", model_dir)
         return ModelFiles(
@@ -219,14 +235,24 @@ def resolve(model_dir: Path | None, dit: str, vae: str, detector: bool = False) 
     if refusals:
         raise ModelError("\n".join(refusals))
     names = (dit, vae, DETECTOR) if detector else (dit, vae)
-    found = fetch({name: PINNED[name] for name in names})
-    return ModelFiles(
-        ModelFile(dit, found[dit]),
-        ModelFile(vae, found[vae]),
-        cache(),
-        Hashes(),
-        ModelFile(DETECTOR, found[DETECTOR]) if detector else None,
-    )
+    found = fetch({name: PINNED[name] for name in names}, download)
+    where = cache()
+
+    def file(name: str) -> ModelFile:
+        from huggingface_hub import file_download
+
+        if name in found:
+            return ModelFile(name, found[name])
+        logger.info(
+            "%s: not in Hugging Face's cache, and not downloaded: the job has every segment made"
+            " and loads no model; held to its pin, %s's at %s, SHA-256 %s",
+            *(name, REPO, REVISION[:8], PINNED[name].sha256),
+        )
+        # Where the library would put it (_cached), for the messages: nothing reads it.
+        folder = file_download.repo_folder_name(repo_id=REPO, repo_type="model")
+        return ModelFile(name, where / folder / "snapshots" / REVISION / name, absent=True)
+
+    return ModelFiles(file(dit), file(vae), where, Hashes(), file(DETECTOR) if detector else None)
 
 
 def cache() -> Path:
@@ -246,13 +272,14 @@ def cached(name: str) -> Path | None:
     return None if found is None else found[0]
 
 
-def fetch(pins: Mapping[str, Pin]) -> dict[str, Path]:
+def fetch(pins: Mapping[str, Pin], download: bool = True) -> dict[str, Path]:
     """The files of REPO at REVISION that pins name, by name, each from Hugging Face's cache
     (_cached), or downloaded into it, one at a time, never the repository whole (DESIGN.md,
     Weights). Before each download, the free space of the cache's disk is checked against what
     the downloads need from there on (_check_space); HF_HUB_OFFLINE refuses any. The library's log
     goes through seedvr2x's (_library_logging). ModelError says what to do when a file can't be
-    had."""
+    had. With `download` False, those the cache holds alone, nothing downloaded nor refused
+    (resolve)."""
     from huggingface_hub import constants
 
     _library_logging()
@@ -267,6 +294,8 @@ def fetch(pins: Mapping[str, Pin]) -> dict[str, Path]:
         how = "" if linked else "from another revision's download, "
         logger.info("%s: in the cache, %s%s", name, how, found[name])
     missing = [name for name in pins if name not in found]
+    if not download:
+        return found
     if missing and constants.HF_HUB_OFFLINE:
         needed = sum(pins[name].size for name in missing)
         raise ModelError(
@@ -303,6 +332,8 @@ def check_pinned(model_files: ModelFiles) -> None:
     for role, file in model_files.roles():
         first.setdefault(file, role)
     for file, role in first.items():
+        if file.absent:
+            continue  # held to its pin, as resolve said, nothing to read
         name = _pinned_name(file)
         if name is None:
             logger.info(

@@ -613,37 +613,43 @@ def _run(args: argparse.Namespace) -> int:
             and not (final is None and recorded is not None and complete(recorded))
             and (_detecting(recorded) or (recorded is not None and planned(recorded)))
         )
-        # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
-        # into it when missing, in one fetch; checked by their headers, in a second, then
-        # seedvr2x's own by their pinned size and SHA-256 (16.5 GB to read for the DiT), which the
-        # manifest's record takes: before the resume's comparison and the first pass, which
-        # decodes the whole source (DESIGN.md, Weights). The header check comes first, as
-        # DESIGN.md has it (Weights, Recognised by content); its refusal of one of seedvr2x's own
-        # files, given in its own role, says how to fetch it again, as the pin's does
-        # (pull.advice). SIGTERM, which kills the process at once until the run installs its
-        # handlers (runtime/stop.py), unwinds a download as Ctrl-C does, so that the library
-        # removes its partial file, up to 16.5 GB that no later download takes up
-        # (runtime/pull.py, at its end).
-        with terminable():
-            model_files = pull.resolve(
-                args.model_dir, args.dit_model, args.vae_model, detector=detects
-            )
-        detector = model_files.detector
-        check_models(
-            *(model_files.dit.path, model_files.vae.path, pull.advice(model_files)),
-            None if detector is None else detector.path,
-        )
-        pull.check_pinned(model_files)
         # A job with every segment made takes no GPU, and is known for one here, before anything
         # asks for it (DESIGN.md, Pause and resume: "the finished state is known before anything
         # asks for the GPU"; Allocator: "A finished job run again asks the driver nothing"): a
         # directory's, finished, which makes nothing; a .mkv path's, whose assembly alone is
         # left, ffmpeg's work. Its driver isn't asked, no NVML is read, no CUDA device is
         # wanted, and its environment is compared without the GPU (_identity). It is held to its
-        # model files as any job, checked above and hashed below, neither of which takes a GPU.
+        # model files as any job, checked and hashed below, none of which takes a GPU; but it
+        # loads none, and one of seedvr2x's own missing from Hugging Face's cache is held to its
+        # pin, not downloaded (pull.resolve; DESIGN.md, Pause and resume, decided on 2026-10-13).
         # But a .mkv path's whose first pass must run again with the shot detector, its frame
         # index gone and its shots detected (`detects`): that pass takes the GPU, as any run.
         idle = recorded is not None and complete(recorded) and not detects
+        # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
+        # into it when missing, in one fetch, but for a job with every segment made (`idle`);
+        # checked by their headers, in a second, then seedvr2x's own by their pinned size and
+        # SHA-256 (16.5 GB to read for the DiT), which the manifest's record takes: before the
+        # resume's comparison and the first pass, which decodes the whole source (DESIGN.md,
+        # Weights). The header check comes first, as DESIGN.md has it (Weights, Recognised by
+        # content); its refusal of one of seedvr2x's own files, given in its own role, says how
+        # to fetch it again, as the pin's does (pull.advice). SIGTERM, which kills the process at
+        # once until the run installs its handlers (runtime/stop.py), unwinds a download as
+        # Ctrl-C does, so that the library removes its partial file, up to 16.5 GB that no later
+        # download takes up (runtime/pull.py, at its end).
+        with terminable():
+            model_files = pull.resolve(
+                *(args.model_dir, args.dit_model, args.vae_model),
+                detector=detects,
+                download=not idle,
+            )
+        detector = model_files.detector
+        dit, vae = (
+            None if file.absent else file.path for file in (model_files.dit, model_files.vae)
+        )
+        check_models(
+            *(dit, vae, pull.advice(model_files)), None if detector is None else detector.path
+        )
+        pull.check_pinned(model_files)
         # The allocator, set before torch is imported, which the job's identity does and, for a
         # job recorded, the modules that compare it (_prior): numz's, which DESIGN.md keeps
         # (Allocator), or torch's own where the GPU's driver gives memory the card doesn't have,
@@ -1960,7 +1966,8 @@ def _identity(
 
     made_in: for a job recorded with every segment made, which takes no GPU (_run), the
     environment its manifest records. Nothing is then asked of the GPU: no CUDA device is
-    wanted, torch.cuda isn't called, and the environment is this run's but for the GPU, its
+    wanted, no torch.cuda called by seedvr2x (a library asks once, as it is imported, whether
+    CUDA is there: environment.current), and the environment is this run's but for the GPU, its
     driver and cuDNN's version, which are the record's own, the card that made its segments
     (environment.current).
     The device is still named, and used by nothing."""
@@ -2561,7 +2568,16 @@ def _another_job(
 def _model(file: "ModelFile", model_files: "ModelFiles") -> dict[str, object]:
     """A model as the manifest records it: its file's name, as given, its size and SHA-256, models
     being identified by hash (DESIGN.md, Options kept and dropped). The 7B fp16 DiT is 16.5 GB to
-    read, once a run: a file seedvr2x pins was hashed by its check already (pull.Hashes)."""
+    read, once a run: a file seedvr2x pins was hashed by its check already (pull.Hashes). One of
+    seedvr2x's own that a job with every segment made doesn't have, held to its pin
+    (pull.ModelFile.absent): the pin's size and SHA-256, those its record has where the file
+    passed its pin check, as the shot detector's is taken on a trusted resume
+    (_detector_model)."""
+    from seedvr2x.runtime import pull
+
+    if file.absent:
+        pin = pull.PINNED[file.name]
+        return {"name": file.name, "size": pin.size, "sha256": pin.sha256}
     digest = model_files.hashes.sha256(file.path)
     return {"name": file.name, "size": file.path.stat().st_size, "sha256": digest}
 

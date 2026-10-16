@@ -54,14 +54,23 @@ def current(
     since the math kernels ship with torch.
 
     device None: a run that takes no GPU, of a job recorded with every segment made (cli._run):
-    a finished job said finished, or a file's assembly. Nothing is asked of the GPU, torch.cuda
-    not called and NVML not loaded: the GPU, its driver and cuDNN's version are those of
-    made_in, the environment the job's manifest records, the card that made its segments, and
-    the rest is this run's. cuDNN's with them: torch reads its version through a first call
-    that asks torch.cuda whether a device is there, and its capability where one answers
-    (torch 2.14.1, torch/backends/cudnn/__init__.py, _init); the library is still compared, by
-    its distribution's version among the packages (versions). So another GPU alone is no
-    difference there, and isn't said: saying it would take asking for it. PROVISIONAL
+    a finished job said finished, or a file's assembly. seedvr2x asks nothing of the GPU there:
+    none of its code calls torch.cuda or loads NVML, and the GPU, its driver and cuDNN's version
+    are those of made_in, the environment the job's manifest records, the card that made its
+    segments, the rest being this run's. The process still asks once whether CUDA is there, as
+    a library is imported: no context, no memory. runtime/model.py, imported here first, as it
+    is for every job, imports the vendored VAE (its causal_inflation_lib), which imports
+    diffusers' RMSNorm, and diffusers sets its device as its utilities are imported:
+    torch.cuda.is_available, once a process (diffusers 0.40.0, utils/torch_utils.py:409 and
+    :324, through utils/peft_utils.py:26). torch 2.14.1 answers it by CUDA's cudaGetDeviceCount,
+    which initialises the driver's API (cuInit) and makes no context; NVML in its place where
+    PYTORCH_NVML_BASED_CUDA_CHECK is 1 (torch/cuda/__init__.py, is_available). The packages'
+    listing (versions) imports the vendored models too, after it. cuDNN's version is the
+    record's: torch reads it through a first call that asks torch.cuda whether a device is
+    there, and its capability where one answers (torch 2.14.1, torch/backends/cudnn/__init__.py,
+    _init); the library is still compared, by its distribution's version among the packages
+    (versions). So another GPU alone is no difference there, and isn't said: saying it would
+    take asking for it. PROVISIONAL
     (implementation, 2026-10-12), for both such jobs. DESIGN.md has a finished job run again
     "under another GPU, stack or ffmpeg", the difference said in one line, and a file's
     assembly "made in the new environment, refused without the flag as any resume"; and it has

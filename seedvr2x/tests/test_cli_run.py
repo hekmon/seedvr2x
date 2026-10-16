@@ -902,13 +902,13 @@ def test_swap_blocks_pin_places_the_weights(
 def spilling_driver(monkeypatch: pytest.MonkeyPatch, card: int | None = None) -> list[float]:
     """A driver behind WSL2's device that gives memory the card doesn't have (runtime/memory.py),
     the probe's answer a stand-in's; returns the limits torch is then given, as fractions.
-    `card`: what the whole card has free, a stand-in for NVML's reading of it (memory.card_free);
+    `card`: what the whole card has free, a stand-in for NVML's reading of it (memory._read);
     None: a machine without NVML, as conftest.py leaves every CPU test, warned of in the run."""
     from seedvr2x.runtime import memory
 
     monkeypatch.setattr(memory, "paravirtual", lambda: True)
     if card is not None:
-        monkeypatch.setattr(memory, "card_free", lambda index: card)
+        monkeypatch.setattr(memory, "_read", lambda index: card)
     monkeypatch.setattr(
         memory, "probe", lambda: memory.Driver(True, FREE + memory.OVER, FREE, TOTAL)
     )
@@ -1131,9 +1131,9 @@ def test_a_plan_on_a_driver_that_spills_holds_nothing(
         *planner.plan(reading, TARGET, JOB_SHOTS, Pins(window=5), HOST)
     )
     assert content["plan"]["memory"]["free"] == planned_in
-    # A machine without NVML (conftest.py): warned of once, and the plan's first line says
-    # which figure it had.
-    assert caplog.text.count("the whole card's free memory can't be read through NVML") == 1
+    # A machine without NVML (conftest.py): warned of once, as the plan is made, and the plan's
+    # first line says which figure it had.
+    assert caplog.text.count("the whole card's free memory couldn't be read through NVML") == 1
     assert (
         ", 94.50 GiB free as its driver reports it to this process (the whole card's, NVML's,"
         " wasn't read); the run is held to the card's own memory, its driver giving more than"
@@ -4597,11 +4597,17 @@ def test_a_finished_job_asks_the_gpu_nothing(
     assert "no CUDA device" in refused(tmp_path, source_path, caplog, *JOB, output="new")
 
 
-# A job run again in a process of its own, every routine of torch.cuda's wrapped before
-# seedvr2x is imported: each call that isn't made from within another of them is written to the
-# file named first, with the file and line of its caller, the first frame outside torch's own
-# files. The model files pass unread.
-CALLS_OF_TORCH_CUDA = """
+# A job run again in a process of its own, watched from before seedvr2x is imported: every
+# routine of torch.cuda's wrapped, each call that isn't made from within another of them written
+# with the file and line of its caller, the first frame outside torch's own files; every library
+# ctypes loads (its _dlopen, which CDLL, PyDLL and cdll all go through), with its caller's file
+# and line; every import of NVML's Python binding (pynvml); and, once the run is done, the
+# driver's libraries the process has mapped, by whatever loaded them (/proc/self/maps), each in
+# the JSON file named first. The model files pass unread, and the run is taken for one behind
+# WSL2's GPU device, where it would ask the driver.
+WATCHED_PROCESS = """
+import ctypes
+import importlib.abc
 import inspect
 import json
 import sys
@@ -4610,6 +4616,8 @@ import torch
 
 calls = []
 within = []
+loads = []
+imports = []
 
 
 def watched(name, routine):
@@ -4634,66 +4642,121 @@ def watched(name, routine):
 for name, value in list(vars(torch.cuda).items()):
     if inspect.isroutine(value) and not name.startswith("__"):
         setattr(torch.cuda, name, watched(name, value))
-assert not [name for name in sys.modules if name.split(".")[0] == "seedvr2x"]
+dlopen = ctypes._dlopen
+
+
+def loading(name, *arguments):
+    frame = sys._getframe(1)
+    while frame is not None and frame.f_code.co_filename == ctypes.__file__:
+        frame = frame.f_back
+    where = ("", 0) if frame is None else (frame.f_code.co_filename, frame.f_lineno)
+    loads.append([str(name), *where])
+    return dlopen(name, *arguments)
+
+
+ctypes._dlopen = loading
+
+
+class Binding(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] == "pynvml":
+            imports.append(name)
+        return None
+
+
+sys.meta_path.insert(0, Binding())
+assert not [name for name in sys.modules if name.split(".")[0] in ("seedvr2x", "pynvml")]
 from seedvr2x import cli
-from seedvr2x.runtime import weights
+from seedvr2x.runtime import memory, weights
 
 weights.check_models = lambda *a: None
+# Behind WSL2's GPU device, where a run asks the driver (memory.startup): on any machine, a
+# question put to it loads CUDA's library through ctypes, and no device shows to answer it.
+memory.paravirtual = lambda: True
 status = cli.main(sys.argv[2:])
+with open("/proc/self/maps") as maps:
+    mapped = sorted({line.split()[-1] for line in maps if "libcuda" in line or "nvidia-ml" in line})
 with open(sys.argv[1], "w") as out:
-    json.dump(calls, out)
+    json.dump({"calls": calls, "loads": loads, "imports": imports, "mapped": mapped}, out)
 sys.exit(status)
 """
 
 
-def test_a_finished_job_calls_no_torch_cuda_of_its_own_in_a_fresh_process(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+@pytest.mark.parametrize("output", ["out", "one.mkv"], ids=["finished", "its assembly left"])
+def test_a_job_with_every_segment_made_asks_the_gpu_nothing_in_a_fresh_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, output: str
 ) -> None:
-    # A finished job run again in a process of its own, as a user runs it, on a machine that
-    # shows no CUDA device: said finished, and nothing of seedvr2x's calls torch.cuda on its
-    # way. The tests above set their guard in a process that has run a job already: torch
-    # reads cuDNN's version through a first call that asks torch.cuda whether a device is
-    # there, and keeps it, so that the environment's own reading of it there
-    # (environment.current, torch.backends.cudnn.version) passed them unseen (a review,
-    # 2026-10-12). What isn't seedvr2x's is told apart by its caller's file: diffusers, which
-    # the vendored models import, asks torch.cuda.is_available once as it is imported
-    # (diffusers/utils/torch_utils.py), on this path too, the environment's packages being
-    # those of every module of seedvr2x (environment.versions).
+    # A job with every segment made run again in a process of its own, as a user runs it, on a
+    # machine that shows no CUDA device: a finished one said finished, a .mkv path's with its
+    # assembly alone left assembled; and nothing of seedvr2x's asks the GPU anything on its way:
+    # no routine of torch.cuda's called, neither of the driver's libraries loaded through ctypes
+    # (runtime/memory.py's probe and its card's reading, runtime/model.py's driver version),
+    # NVML's Python binding not imported, and NVML's library not mapped by anything. The tests
+    # above set their guard in a process that has run a job already: torch reads cuDNN's version
+    # through a first call that asks torch.cuda whether a device is there, and keeps it, so that
+    # the environment's own reading of it there (environment.current,
+    # torch.backends.cudnn.version) passed them unseen (a review, 2026-10-12). What isn't
+    # seedvr2x's is told apart by its caller's file: diffusers, which the vendored VAE imports
+    # through runtime/model.py, asks torch.cuda.is_available once as it is imported
+    # (diffusers/utils/torch_utils.py), which torch answers by CUDA's cudaGetDeviceCount: the
+    # driver's library mapped by CUDA's runtime where the machine has one, no context made, no
+    # NVML (environment.current). torch's NVML-based check, which would load NVML instead, is
+    # left unset.
     source_path = job(tmp_path, monkeypatch)
     # The job is recorded under a cuDNN that no torch answers here, which the run again must
     # take from its record to find no difference.
     monkeypatch.setattr(torch.backends.cudnn, "version", lambda: 1)
-    assert upscale(tmp_path, source_path, "out", *JOB) == 0
-    out, calls = tmp_path / "out", tmp_path / "calls.json"
-    kept = written_as(out / "manifest.json")
-    assert json.loads((out / "manifest.json").read_text())["environment"]["cudnn"] == 1
+    work = tmp_path / ("one.mkv.work" if output == "one.mkv" else output)
+    if output == "one.mkv":
+        with monkeypatch.context() as full:
+            full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+            assert upscale(tmp_path, source_path, output, *JOB) == 1
+        assert not (tmp_path / output).exists()
+    else:
+        assert upscale(tmp_path, source_path, output, *JOB) == 0
+    watched = tmp_path / "watched.json"
+    kept = written_as(work / "manifest.json")
+    assert json.loads((work / "manifest.json").read_text())["environment"]["cudnn"] == 1
+    environment = {
+        name: value for name, value in os.environ.items() if name != "PYTORCH_NVML_BASED_CUDA_CHECK"
+    }
     result = subprocess.run(
         [
-            *(sys.executable, "-c", CALLS_OF_TORCH_CUDA, str(calls)),
-            *command(tmp_path, source_path, "out", *JOB),
+            *(sys.executable, "-c", WATCHED_PROCESS, str(watched)),
+            *command(tmp_path, source_path, output, *JOB),
         ],
         capture_output=True,
         text=True,
         check=False,
         cwd=tmp_path,
         env={
-            **os.environ,
+            **environment,
             "CUDA_VISIBLE_DEVICES": "",
             "HF_HOME": str(tmp_path / "hf"),
             "HF_HUB_OFFLINE": "1",
         },
     )
     assert result.returncode == 0, result.stderr
-    assert f"{out}: finished already, its 2 segments" in result.stderr
+    if output == "one.mkv":
+        assert (tmp_path / output).is_file() and not work.exists()
+        assert f"wrote {tmp_path / output}: 25 frames from 2 segments" in result.stderr
+    else:
+        assert f"{work}: finished already, its 2 segments" in result.stderr
+        assert written_as(work / "manifest.json") == kept
+    seen = json.loads(watched.read_text())
     package = str(Path(cli.__file__).resolve().parent)
-    made: list[tuple[str, str, int]] = [tuple(call) for call in json.loads(calls.read_text())]
+    made: list[tuple[str, str, int]] = [tuple(call) for call in seen["calls"]]
     assert [call for call in made if call[1].startswith(package)] == []
+    driver = [load for load in seen["loads"] if "libcuda" in load[0] or "nvidia-ml" in load[0]]
+    assert driver == [] and seen["imports"] == []
+    assert [path for path in seen["mapped"] if "nvidia-ml" in path] == []
     # Its environment is the record's where it isn't read, cuDNN's version with the GPU's name.
     assert "its environment differs" not in result.stderr
-    assert written_as(out / "manifest.json") == kept
-    # The guard saw the process: the call that isn't seedvr2x's is there.
+    # The guard saw the process: the call that isn't seedvr2x's is there, and libraries loaded
+    # through ctypes.
     others = {(name, Path(file).parent.name, Path(file).name) for name, file, _ in made}
     assert ("is_available", "utils", "torch_utils.py") in others
+    assert seen["loads"] != []
 
 
 def memory_of_the_run() -> ModuleType:
@@ -5262,9 +5325,9 @@ def asked_of_the_pull(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     asked: list[bool] = []
     resolve = pull.resolve
 
-    def resolving(*arguments: Any, detector: bool = False) -> Any:
+    def resolving(*arguments: Any, detector: bool = False, **options: Any) -> Any:
         asked.append(detector)
-        return resolve(*arguments, detector=detector)
+        return resolve(*arguments, detector=detector, **options)
 
     monkeypatch.setattr(pull, "resolve", resolving)
     return asked

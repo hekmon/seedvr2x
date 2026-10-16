@@ -33,10 +33,13 @@ card's memory by its own means:
 The memory free is, for the limit and the plan, the smaller of two readings: what the driver
 reports free to the process (CUDA's figure, torch's mem_get_info) and what the whole card has
 free, read through NVML (card_free), the driver's own library, nvidia-smi's, which answers
-under WSL2; for the check, the whole card's (why: check). Where NVML doesn't answer, the
-driver's figure alone for the three, under a larger margin (HELD_BACK_UNREAD), and a warning;
-but once NVML has given the card's figure in a run, a check it fails at is asked again, then
-skipped with a warning, never judged on the driver's figure (check).
+under WSL2; for the check, the whole card's (why: check). NVML is asked again wherever it fails
+(_twice). The plan, the limit and the checks stand on one footing, the plan's (_footing; DESIGN.md,
+Allocator, decided on 2026-10-13): where NVML doesn't answer the plan's reading, the driver's
+figure alone for the three, under a larger margin (HELD_BACK_UNREAD), and a warning; where it
+does, the card's for the three, a limit whose reading NVML fails being set from the card's figure
+the plan was made in, and a check it fails at skipped with a warning, never judged on the
+driver's figure (hold, check).
 
 Why two: the free memory such a driver reports is the process's own while the card has room: a
 process read 30.20 GiB free of 31.82 whether another held 8.6 GiB of the card or not, idle or at
@@ -274,18 +277,40 @@ class Reading:
 def reading(free: int) -> Reading:
     """The reading a plan is made in, of `free` bytes the driver reports free to this process
     (cli._free_memory): on a driver that refuses, all of it, the card's own figure not read; on
-    one that spills, the smaller of it and of what the whole card has free now (card_free: the
-    run's device is CUDA's first, the one the probe asks), less what torch is held back from
-    (hold: HELD_BACK, or HELD_BACK_UNREAD under the driver's figure where the card's isn't
-    read) and RESERVE. The planner's budget is `counted` less its own margin on a driver that
-    refuses, and `counted` itself on a held run, RESERVE holding that margin
-    (runtime/planner.py); its plan's first line names the figures: here they are said at debug
-    level only, with what each of the two constants is left to."""
+    one that spills, the smaller of it and of what the whole card has free now (_twice: NVML
+    asked again where it fails; the run's device is CUDA's first, the one the probe asks), less
+    what torch is held back from (hold: HELD_BACK) and RESERVE; where NVML fails twice, the
+    driver's figure alone less HELD_BACK_UNREAD and RESERVE, with a warning. The planner's
+    budget is `counted` less its own margin on a driver that refuses, and `counted` itself on a
+    held run, RESERVE holding that margin (runtime/planner.py); its plan's first line names the
+    figures: here they are said at debug level only, with what each of the two constants is
+    left to.
+
+    The figure taken is the run's footing (_footing): torch's limit for the run's units is set on
+    it, and its units are checked on it (hold, check), so that the plan stays RESERVE under the
+    limit, and the warning says what is done. Until 2026-10-13 NVML failing here once was taken
+    for the run's answer, while the limit and the checks read the card again: the plan then
+    counted on the driver's figure less 7.5 GiB under a limit set 0.5 under the card's, and the
+    warning said the run was held 3.0 GiB under the driver's figure, which it wasn't (design's
+    check, 2026-10-13; DESIGN.md, Allocator: "NVML failing at the plan's reading is asked again
+    as well ... the plan, the limit and the checks stand on one footing")."""
     if not _spills:
         return Reading(free, None, free, False)
-    global _planned
-    taken, card = _free(free, 0)
-    _planned = card
+    global _planned, _footing
+    read = _twice(0)
+    card = read if isinstance(read, int) else None
+    if card is None:
+        logger.warning(
+            "the whole card's free memory couldn't be read through NVML as the plan was made,"
+            " asked twice (%s): what the driver reports free to this process is taken alone,"
+            " which leaves other programs' memory out while the card has room: the plan counts"
+            " on that figure, torch is held %.1f GiB under it and the run's units are checked on"
+            " it",
+            read,
+            HELD_BACK_UNREAD / GIB,
+        )
+    _footing, _planned = (DRIVER if card is None else CARD), card
+    taken = free if card is None else min(free, card)
     counted = max(taken - _held_back(card) - RESERVE, 0)
     logger.debug(
         "the plan counts on %.2f GiB of the GPU's memory, of the %.2f GiB free %s: %.1f GiB are"
@@ -305,17 +330,18 @@ def reading(free: int) -> Reading:
 _spills = False
 _native = False
 _limit: int | None = None
-# Whether NVML has already failed to give the card's free memory in this run, which is warned
-# of once (card_free); and what hold left of the free memory outside torch's limit, in bytes,
-# for the check's words.
-_unread = False
+# What hold left of the free memory outside torch's limit, in bytes, for the check's words.
 _left = HELD_BACK
-# Whether NVML has given the card's free memory to this run, for its plan, its limit or a check
-# (card_free): from then on no check is judged on the driver's figure (check).
-_answered = False
+# The figure a held run's plan, its limit and the checks before its units go by, one footing for
+# the three (DESIGN.md, Allocator, decided on 2026-10-13): CARD, the whole card's free memory by
+# NVML, or DRIVER, what the driver reports free to this process alone. Set by the plan's reading
+# (reading) and by each limit (hold): the first, before the first pass, by its own reading; the
+# run's, once the plan is made, on the plan's footing; None before either (startup).
+CARD, DRIVER = "card", "driver"
+_footing: str | None = None
 # The whole card's free memory as the run's plan was made in it (reading), in bytes; None where
-# it wasn't read then, or no plan made yet: what the limit is set from where NVML, having
-# answered, fails as the limit is set (_at_the_limit).
+# it wasn't read then, or no plan made yet: what the limit is set from where NVML, having given it
+# to the plan, fails as the limit is set (hold).
 _planned: int | None = None
 
 
@@ -346,9 +372,8 @@ def startup() -> str:
     answer there (probe) is taken for a driver that spills: it is Windows', which gave what
     the card didn't have every time it was asked, and a run held for nothing loses memory, a
     run not held where it should be loses its frames."""
-    global _spills, _native, _limit, _unread, _left, _answered, _planned
-    _spills, _limit, _unread, _left, _answered = False, None, False, HELD_BACK, False
-    _planned = None
+    global _spills, _native, _limit, _left, _footing, _planned
+    _spills, _limit, _left, _footing, _planned = False, None, HELD_BACK, None, None
     if paravirtual():
         found = probe()
         if found is None:
@@ -428,23 +453,29 @@ def hold(device: Any, first: bool = False) -> int | None:
     then, which is the limit the run's units are checked against (check). The first is said at
     debug level, the second being the run's.
 
-    Once NVML has given the card's figure in the run, the limit isn't set under the driver's
-    figure alone because NVML fails at this one reading (_at_the_limit): the plan, made
-    HELD_BACK and RESERVE under the card's figure, would stand closer to a limit set
+    The figure each limit is set under is the run's footing, which it sets (_footing; DESIGN.md,
+    Allocator: "the plan, the limit and the checks stand on one footing"): the first's, its own
+    reading of the card, NVML asked twice where it fails (_twice), the driver's figure where it
+    fails twice; the second's, the plan's (reading). Where the plan went by the driver's figure,
+    NVML isn't asked: the limit is set HELD_BACK_UNREAD under that figure, which the plan counted
+    on, as its warning says. Where the plan went by the card's, the card is read again, twice
+    where NVML fails, and where it fails twice the limit is set from the card's figure the plan
+    was made in (_planned), with a warning, never under the driver's figure alone: the plan,
+    made HELD_BACK and RESERVE under the card's figure, would stand closer to a limit set
     HELD_BACK_UNREAD under the driver's than RESERVE asks, by what the driver's figure is over
     the card's less the difference of the two constants (1.98 GiB over: 3.98 GiB under the
-    limit for 4.5; a review, 2026-10-12)."""
-    global _limit, _left
+    limit for 4.5; a review, 2026-10-12). With no plan's figure of the card either (a limit set
+    again with no plan made, which a run never does), the driver's figure, with a warning: the
+    run's units are then checked on it (check)."""
+    global _limit, _left, _footing
     if not _spills:
         return None
     import torch
 
     reported, total = torch.cuda.mem_get_info(device)
-    if _answered:
-        card = _at_the_limit(_index(device))
-        free = reported if card is None else min(reported, card)
-    else:
-        free, card = _free(reported, _index(device))
+    card = _limit_s_card(_index(device), first)
+    _footing = DRIVER if card is None else CARD
+    free = reported if card is None else min(reported, card)
     _left = _held_back(card)
     limit = torch.cuda.memory_reserved(device) + max(free - _left, 0)
     fraction = min(limit / total, 1.0)
@@ -503,12 +534,16 @@ def check(device: Any) -> None:
     - beside the same program, a run with 36 blocks swapped, 8 GiB at its most, read the card
       as if alone and finished, its frames right: nothing passed the card there.
 
-    Once NVML has given the card's figure in the run, to its plan, its limit or a check, a check
-    NVML fails at is never judged on the driver's figure, the very figure that stopped those
-    six runs: NVML is asked again, once, and if it fails again that check is skipped, with a
-    warning, the unit running under torch's limit alone (design, 2026-10-12; _again). Where
-    NVML has been silent since the run's start, the limit set HELD_BACK_UNREAD under the
-    driver's figure, the check stays on that figure, as the limit is.
+    The figure judged is the run's footing (_footing), the one its plan and its limit went by
+    (reading, hold; DESIGN.md, Allocator, decided on 2026-10-13: "the plan, the limit and the
+    checks stand on one footing"). On the card's, a check NVML fails at is never judged on the
+    driver's figure, the very figure that stopped those six runs: NVML is asked again, once
+    (_twice), and if it fails again that check is skipped, with a warning, the unit running
+    under torch's limit alone (design, 2026-10-12). On the driver's, where NVML didn't answer
+    the plan's reading, the limit set HELD_BACK_UNREAD under that figure, the check is judged on
+    that figure, NVML not asked: until 2026-10-13 a run whose NVML answered its first limit
+    alone had every check skipped, its limit set under the driver's figure, and nothing held it
+    to the card (design's check).
 
     The two figures are said rounded apart, what is free down and what the run may take up, so
     that a refusal by a few bytes never gives one figure twice ("1.00 GiB free ... where the
@@ -521,12 +556,23 @@ def check(device: Any) -> None:
     import torch
 
     reported = torch.cuda.mem_get_info(device)[0]
-    if _answered:
-        card = _again(_index(device))
-        if card is None:
+    card = None
+    if _footing == CARD:
+        read = _twice(_index(device))
+        if not isinstance(read, int):
+            # A warning at every check so skipped, each being a unit that nothing but torch's
+            # limit holds. PROVISIONAL (implementation, 2026-10-12): design decided the second
+            # reading and the warning, not how often a run whose NVML has gone for good repeats it.
+            logger.warning(
+                "the whole card's free memory couldn't be read through NVML before this unit,"
+                " asked twice (%s): the unit isn't checked against the card, and runs under"
+                " torch's limit alone; what the driver reports free to this process isn't taken"
+                " in its place, which stands under the card's near a full card and would stop the"
+                " run for nothing",
+                read,
+            )
             return
-    else:
-        card = card_free(_index(device))
+        card = read
     free = reported if card is None else card
     room = _limit - torch.cuda.memory_reserved(device)
     if free < room:
@@ -539,13 +585,13 @@ def check(device: Any) -> None:
         )
 
 
-def _again(index: int) -> int | None:
-    """A check's reading of the whole card's free memory, in bytes, once NVML has given it in the
-    run (check): read, and read once more when NVML fails. None when it fails twice, with a
-    warning naming both failures: the caller skips that check, and the next unit's asks again.
-    A warning at every check so skipped, each being a unit that nothing but torch's limit
-    holds. PROVISIONAL (implementation, 2026-10-12): design decided the second reading and the
-    warning, not how often a run whose NVML has gone for good repeats it."""
+def _twice(index: int) -> int | str:
+    """The whole card's free memory behind CUDA's device `index`, in bytes, as a held run reads it
+    for its plan, its limits and its checks (reading, hold, check): read (_read), and read once
+    more where NVML fails, said at debug level where the second reading answers (DESIGN.md,
+    Allocator: NVML failing at a check "is asked again"; at the plan's reading as well, decided
+    on 2026-10-13). Where it fails twice, both failures in words, "A; then B", for the caller's
+    warning, which says what is done without the card's figure."""
     first = _read(index)
     if isinstance(first, int):
         return first
@@ -556,50 +602,49 @@ def _again(index: int) -> int | None:
             first,
         )
         return second
-    logger.warning(
-        "the whole card's free memory couldn't be read through NVML before this unit, asked"
-        " twice (%s; then %s): the unit isn't checked against the card, and runs under torch's"
-        " limit alone; what the driver reports free to this process isn't taken in its place,"
-        " which stands under the card's near a full card and would stop the run for nothing",
-        first,
-        second,
-    )
-    return None
+    return f"{first}; then {second}"
 
 
-def _at_the_limit(index: int) -> int | None:
-    """The limit's reading of the whole card's free memory, in bytes, once NVML has given it in
-    the run (hold): read, and read once more when NVML fails, as a check's is (_again). When it
-    fails twice, the card's figure the plan was made in (reading), with a warning: the limit is
-    then set under the figure the plan counted on, never under the driver's alone. None where
-    no plan of the run had the card's figure either: the limit is then HELD_BACK_UNREAD under
-    the driver's figure, as where NVML never answered. PROVISIONAL (implementation,
-    2026-10-12): design's rule is the checks'; the limit follows it."""
-    first = _read(index)
-    if isinstance(first, int):
-        return first
-    again = _read(index)
-    if isinstance(again, int):
+def _limit_s_card(index: int, first: bool) -> int | None:
+    """The whole card's free memory a limit is set under (hold), in bytes; None where it is set
+    under the driver's figure alone. NVML isn't asked for the run's limit where the plan went by
+    the driver's figure (_footing): the limit goes by it too. Else the card is read, twice where
+    NVML fails (_twice); where it fails twice: for the first limit, before the first pass, None;
+    for the run's, the card's figure the plan was made in (_planned), or None where no plan had
+    it; each saying which figure the limit is set under, a warning but for the first limit,
+    whose own line is said at debug level (hold)."""
+    if not first and _footing == DRIVER:
+        return None
+    read = _twice(index)
+    if isinstance(read, int):
+        return read
+    if first:
+        # At debug level, as that limit's own line: the plan's reading asks again, and warns of
+        # what the run does where NVML fails there too (reading).
         logger.debug(
-            "the whole card's free memory wasn't read through NVML at first (%s): read again",
-            first,
+            "the whole card's free memory couldn't be read through NVML as torch was held a first"
+            " time, asked twice (%s): the first pass is held %.1f GiB under what the driver"
+            " reports free to this process, which leaves other programs' memory out while the"
+            " card has room",
+            read,
+            HELD_BACK_UNREAD / GIB,
         )
-        return again
+        return None
     if _planned is None:
         logger.warning(
-            "as torch's limit was set, the whole card's free memory couldn't be read through"
-            " NVML, asked twice (%s; then %s), nor when the plan was made: the limit is set"
-            " under what the driver reports free to this process",
-            first,
-            again,
+            "as torch's limit was set, the whole card's free memory couldn't be read through NVML,"
+            " asked twice (%s), nor when the plan was made: the limit is set %.1f GiB under what"
+            " the driver reports free to this process, and the run's units are checked on that"
+            " figure",
+            read,
+            HELD_BACK_UNREAD / GIB,
         )
         return None
     logger.warning(
         "as torch's limit was set, the whole card's free memory couldn't be read through NVML,"
-        " asked twice (%s; then %s): the limit is set from the %.2f GiB the card had free when"
-        " the plan was made, not from what the driver reports free to this process alone",
-        first,
-        again,
+        " asked twice (%s): the limit is set from the %.2f GiB the card had free when the plan"
+        " was made, not from what the driver reports free to this process alone",
+        read,
         _planned / GIB,
     )
     return _planned
@@ -615,26 +660,18 @@ def _up(count: int) -> str:
     return f"{-(-count * 100 // GIB) / 100:.2f}"
 
 
-def _free(reported: int, index: int) -> tuple[int, int | None]:
-    """The GPU's free memory as a held run's plan and its limit take it, in bytes, and the
-    whole card's beside it: the smaller of `reported`, what the driver reports free to this
-    process, and of what the card behind CUDA's device `index` has free (card_free); `reported`
-    where NVML doesn't say, the card's figure then None."""
-    card = card_free(index)
-    return (reported if card is None else min(reported, card)), card
-
-
 def _held_back(card: int | None) -> int:
-    """What a held run leaves of the free memory _free took, outside torch's limit, in bytes:
-    HELD_BACK where the whole card's figure was read (`card`), whichever of the two figures is
-    the smaller; HELD_BACK_UNREAD under the driver's figure alone, where it wasn't."""
+    """What a held run leaves of the free memory its plan or its limit took, outside torch's
+    limit, in bytes: HELD_BACK where the whole card's figure was read (`card`), whichever of the
+    two figures is the smaller; HELD_BACK_UNREAD under the driver's figure alone, where it
+    wasn't."""
     return HELD_BACK_UNREAD if card is None else HELD_BACK
 
 
 def _named(reported: int, card: int | None, smaller: bool = True) -> str:
     """Which of the two figures a line has just given as "N GiB free", in words, with the other
-    figure: the smaller of the two, as _free takes it (the plan's line, the limit's); or, with
-    `smaller` False, the card's wherever it is read (the check's)."""
+    figure: the smaller of the two, as the plan and the limit take it (the plan's line, the
+    limit's); or, with `smaller` False, the card's wherever it is read (the check's)."""
     if card is None:
         return "as its driver reports it to this process (the whole card's, NVML's, wasn't read)"
     if card <= reported or not smaller:
@@ -660,11 +697,10 @@ def _index(device: Any) -> int:
 def card_free(index: int = 0) -> int | None:
     """The memory free on the whole card behind CUDA's device `index`, in bytes, whichever
     programs hold the rest: NVML's figure, the one nvidia-smi prints. None when NVML doesn't
-    say: no library, a call that fails, a card it doesn't know. Never raises. The reason is
-    logged, as a warning the first time in a run (startup), since the run then goes by the
-    driver's figure alone, and at debug level after: a check before every unit asks again.
-    A figure given is remembered for the run (_answered): its later checks read the card by
-    themselves, and say their own failures (check, _again).
+    say: no library, a call that fails, a card it doesn't know; the reason at debug level.
+    Never raises. One reading, nothing remembered (research/scripts/hold_probe.py reads the card
+    so): a held run reads it through _twice, which asks again where NVML fails, and says what
+    the run does without the card's figure (reading, hold, check).
 
     The card is CUDA's, found in NVML by its identifier (cuDeviceGetUuid, whose 16 bytes NVML
     writes "GPU-" and 8-4-4-4-12 hexadecimal digits), never by its index: CUDA numbers the
@@ -681,20 +717,10 @@ def card_free(index: int = 0) -> int | None:
     both there; the second is taken as the one that names the driver's share. A reading took
     10 ms (9 to 23 over three runs of 200), NVML initialised and shut down in it and no
     descriptor left open; a process's first 0.1 s, the two libraries loading in it."""
-    global _unread, _answered
-    reading = _read(index)
-    if isinstance(reading, int):
-        _answered = True
-        return reading
-    logger.log(
-        logging.DEBUG if _unread else logging.WARNING,
-        "the whole card's free memory can't be read through NVML (%s): what the driver reports"
-        " free to this process is taken alone, which leaves other programs' memory out while the"
-        " card has room, and the run is held %.1f GiB under it",
-        reading,
-        HELD_BACK_UNREAD / GIB,
-    )
-    _unread = True
+    found = _read(index)
+    if isinstance(found, int):
+        return found
+    logger.debug("the whole card's free memory can't be read through NVML (%s)", found)
     return None
 
 

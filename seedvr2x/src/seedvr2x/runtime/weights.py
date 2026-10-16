@@ -194,7 +194,10 @@ def check(path: Path, role: Role) -> Architecture:
 
 
 def check_models(
-    dit: Path, vae: Path, advice: Mapping[Role, str] | None = None, detector: Path | None = None
+    dit: Path | None,
+    vae: Path | None,
+    advice: Mapping[Role, str] | None = None,
+    detector: Path | None = None,
 ) -> None:
     """Check the DiT file at dit, the VAE file at vae and, given, the shot detector's file at
     detector (check), in --model-dir or in Hugging Face's cache (runtime/pull.py), each accepted
@@ -202,15 +205,19 @@ def check_models(
     fetch it again when advice has it for its role (one of seedvr2x's own files, given in its own
     role: pull.advice), in place of AGAIN; how to fetch it, without "again", when it isn't there
     (MISSING), and what it is when no option named it (UNNAMED). The CLI calls it before the
-    first pass, which can take tens of minutes on a film.
+    first pass, which can take tens of minutes on a film. A DiT or a VAE given as None isn't
+    checked: one of seedvr2x's own that a job with every segment made, which loads no model,
+    holds to its pin, absent from Hugging Face's cache (pull.ModelFile.absent).
 
     The CPU tests' stand-in replaces this function (tests/test_cli_run.py, stand_in_model): for
     tests only, never a way around the check for users."""
     refusals: list[str] = []
-    files: list[tuple[str, Role, Path]] = [("DiT", "dit", dit), ("VAE", "vae", vae)]
+    files: list[tuple[str, Role, Path | None]] = [("DiT", "dit", dit), ("VAE", "vae", vae)]
     if detector is not None:
         files.append(("Shot detector", "detector", detector))
     for label, role, path in files:
+        if path is None:
+            continue
         try:
             found = check(path, role)
         except ModelError as error:

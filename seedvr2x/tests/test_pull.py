@@ -433,6 +433,64 @@ def test_downloaded_with_the_pin(
 
 @needs_ffmpeg
 @pytest.mark.usefixtures("stand_in")
+@pytest.mark.parametrize("output", ["out", "one.mkv"], ids=["finished", "its assembly left"])
+def test_a_job_with_every_segment_made_fetches_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hub: Hub,
+    pins: dict[str, Pin],
+    hashed: list[Path],
+    caplog: pytest.LogCaptureFixture,
+    output: str,
+) -> None:
+    # DESIGN.md, Pause and resume (decided on 2026-10-13): "a finished job whose own model file
+    # isn't there is held to the file's pin and fetches nothing, where today it downloads it
+    # before saying finished; a file the user names must be there". A job made from Hugging
+    # Face's cache, its DiT's file gone from it since: run again with every segment made, a
+    # directory's job finished or a .mkv path's with its assembly alone left, it asks the
+    # library for no download, neither reads nor checks the DiT's file, held to its pin, and is
+    # said finished, or assembled, exit 0, its VAE, still there, checked and hashed as any job's.
+    # A job with a unit to make in the same state fetches the file as before. (--model-dir's
+    # file missing is refused as before: test_cli_run.py, test_a_finished_job_is_held_to_its_
+    # model_files.)
+    caplog.set_level(logging.INFO)
+    options = ["--dit-model", DIT, "--vae-model", VAE]
+    if output == "one.mkv":
+        # The files downloaded by a job before, so that this one's assembly alone, made last, is
+        # refused for its room, every segment made.
+        assert upscale(tmp_path, "before", *options) == 0
+        with monkeypatch.context() as full:
+            full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+            assert upscale(tmp_path, output, *options) == 1
+    else:
+        assert upscale(tmp_path, output, *options) == 0
+    assert [call["filename"] for call in hub.calls] == [DIT, VAE]
+    hub.snapshot(DIT).unlink()
+    hub.calls.clear()
+    hashed.clear()
+    caplog.clear()
+    assert upscale(tmp_path, output, *options) == 0
+    assert hub.calls == [] and [path for path in hashed if path.name in CONTENT] == [
+        hub.snapshot(VAE)
+    ]
+    held = (
+        f"{DIT}: not in Hugging Face's cache, and not downloaded: the job has every segment made"
+        f" and loads no model; held to its pin, hekmon/seedvr2x's at {REVISION[:8]}, SHA-256"
+        f" {pins[DIT].sha256}"
+    )
+    assert held in caplog.messages
+    if output == "one.mkv":
+        assert (tmp_path / output).is_file() and not (tmp_path / "one.mkv.work").exists()
+    else:
+        assert f"{tmp_path / output}: finished already, its 1 segments" in caplog.messages
+    assert not hub.snapshot(DIT).exists()
+    # Another job, with its units to make: its DiT downloaded again, as any job's.
+    assert upscale(tmp_path, "another", *options) == 0
+    assert [call["filename"] for call in hub.calls] == [DIT] and hub.snapshot(DIT).is_file()
+
+
+@needs_ffmpeg
+@pytest.mark.usefixtures("stand_in")
 @pytest.mark.parametrize(
     ("option", "name", "listing"),
     [
