@@ -22,9 +22,10 @@ scratch may take of what is left (Plan.scratch_allowance). Sizes are (height, wi
 
 Its choices, in DESIGN.md's order (plan): the window, the biggest quality lever; the fewest
 swapped blocks that hold it; the largest VAE tiles, none where the untiled pass fits; and where
-the plan so made takes more system memory than the host has, the longest window whose plan fits
-both. A pin is taken exactly or refused, the refusal naming what fits; a size that doesn't fit is
-refused, never degraded (PlanError).
+the plan so made takes more system memory than the host has, the VAE's weights kept on the GPU
+for the DiT's phase, then the DiT kept there for the VAE's phases and their tiles shrunk, then the
+longest window whose plan fits both. A pin is taken exactly or refused, the refusal naming what
+fits; a size that doesn't fit is refused, never degraded (PlanError).
 
 Four corrections come from the planner's first two matrices on seedvr2x, emulated cards
 (tests/test_planner.py, test_first_matrix). Two are DESIGN.md's: no tile chosen above TILE_MAX
@@ -746,6 +747,19 @@ class Shortened:
 
 
 @dataclass(frozen=True)
+class Shrunk:
+    """A plan whose VAE tiles the planner shrank for the host's memory, the DiT kept on the GPU
+    in the VAE's phases (_dit_kept): the encode's and the decode's tiles the card alone would
+    have given at its window (None: untiled), what the plan with them takes of system memory and
+    what is available, in hundredths of a GiB, as its refusal would have said them (_unfit)."""
+
+    encode: Tiles | None
+    decode: Tiles | None
+    taken: int
+    available: int
+
+
+@dataclass(frozen=True)
 class Peaks:
     """What a plan is predicted to take, in bytes where nothing else is said: which phase bounds
     it, and by how much, is what --plan prints and the manifest keeps for information."""
@@ -773,6 +787,10 @@ class Peaks:
     # Where the planner took a shorter window than the card alone holds, for the host's memory:
     # what the card alone would have given, and why not (plan); else None.
     shortened: Shortened | None = None
+    # Where the planner shrank the VAE's tiles at that window for the host's memory, the DiT
+    # kept on the GPU in their phases: the tiles the card alone would have given, and why not
+    # (_dit_kept); else None.
+    shrunk: Shrunk | None = None
 
     def peak(self, phase: Phase) -> int:
         """The predicted peak of `phase`."""
@@ -797,8 +815,9 @@ class Peaks:
         whole card had free (card_free; null where it wasn't read), and the attention backend
         the DiT's peak was predicted for. Of `host`, the system memory the plan takes, host_shot
         is one shot's part, the shot that holds the most (Peaks.shot). PROVISIONAL
-        (implementation, 2026-10-10 and 12): the fields' names; and a window shortened for the
-        host's memory (Peaks.shortened) isn't recorded: the plan's lines say it."""
+        (implementation, 2026-10-10 and 12): the fields' names; and a window shortened or tiles
+        shrunk for the host's memory (Peaks.shortened, Peaks.shrunk) aren't recorded: the plan's
+        lines say them."""
         return {
             "free": self.free,
             "driver_free": self.reading.reported,
@@ -909,20 +928,25 @@ def plan(
     3. the VAE's tiles, the decode's then the encode's: none where the untiled pass fits, else
        the largest that fit, TILE_MAX at most, each pass with its room (VAE_ROOM), the DiT
        leaving the phase before a tile shrinks; then as much of it left there as fits
-       (_resident).
+       (_resident); but where the plan so made, the VAE's weights kept or not, takes more system
+       memory than host_available, the DiT kept on the GPU in the VAE's phases, a block more at
+       a time, and their tiles shrunk to keep it, the largest that fit the host too (_dit_kept;
+       design's decision of 2026-10-13); the plan's lines say which tiles the card alone gives
+       and why smaller ones are taken (Peaks.shrunk). Never a pinned pass's tiles, nor a
+       recorded plan's, which shape the output.
     Then the system memory: what the run holds there of a shot at the moment it holds the most
     (_shot_held), counted with the pinned copies, and what a tiled shot's scratch may take of
     what host_available has left once both are counted (_allowance).
 
-    Where the plan so made fits the card and takes more system memory than host_available, the
-    planner takes by itself the longest window whose plan fits both, the other choices made
-    again under it (_window_that_runs), and the plan's lines say which window the card alone
-    would have given and why a shorter one was taken (Peaks.shortened; DESIGN.md, Memory
-    planner, Choices: design's decision of 2026-10-12): a long window may take swapped blocks,
-    each pinned in system memory, where a shorter one takes none. Never under --window, a pin
-    being taken exactly or refused, its refusal naming that window; nor for a recorded plan,
-    whose window shapes the output. A job is refused for the system memory only where no
-    window's plan fits both.
+    Where the plan so made fits the card and takes more system memory than host_available, its
+    tiles shrunk as far as they go, the planner takes by itself the longest window whose plan
+    fits both, the other choices made again under it (_window_that_runs), and the plan's lines
+    say which window the card alone would have given and why a shorter one was taken
+    (Peaks.shortened; DESIGN.md, Memory planner, Choices: design's decision of 2026-10-12): a
+    long window may take swapped blocks, each pinned in system memory, where a shorter one takes
+    none. Never under --window, a pin being taken exactly or refused, its refusal naming that
+    window; nor for a recorded plan, whose window shapes the output. A job is refused for the
+    system memory only where no window's plan fits both, its tiles shrunk as far as they go.
 
     recorded is the plan of a job resumed that has made units: what shapes the output is taken
     from it as it is, the cap, the tiles and the compile flags, and where the weights are and
@@ -942,14 +966,17 @@ def plan(
                 f"--{phase}-tile {pin}: a tile of {pin} px covers the whole padded frame,"
                 f" {width}x{height}: --{phase}-tile 0 pins an untiled {phase}"
             )
-    made, refused = _made(job, pins, recorded, host_available)
+    made, refused, shrunk = _made(job, pins, recorded, host_available)
     shortened = None
+    if refused is not None and shrunk is not None:
+        # Its tiles shrunk as far as they go, which the figures said before are of.
+        refused += _shrunk_said(job, made)
     if refused is not None and recorded is None:
         shorter = _window_that_runs(job, pins, made, host_available)
         if shorter is not None and pins.window is None:
             # The planner's own choice: the longest window whose plan fits the host too.
             shortened = _short_of_host(job, made, host_available)
-            made, refused = shorter[1], None
+            (_, made, shrunk), refused = shorter, None
         elif shorter is not None:
             refused += f": the longest window whose plan fits it is --window {shorter[0]}"
     if refused is not None and recorded is not None:
@@ -959,15 +986,17 @@ def plan(
         )
     if refused is not None:
         raise PlanError(refused)
-    return made, replace(_peaks(job, made), shortened=shortened)
+    return made, replace(_peaks(job, made), shortened=shortened, shrunk=shrunk)
 
 
 def _made(
     job: _Job, pins: Pins, recorded: Plan | None, host_available: int | None
-) -> tuple[Plan, str | None]:
+) -> tuple[Plan, str | None, Shrunk | None]:
     """The job's plan around its pins, or around a recorded shape (plan), with its scratch's
-    allowance, and why it doesn't fit the memory, None when it does (_unfit). PlanError for a
-    pin that can't be taken, or a size no plan fits (_chosen, _around)."""
+    allowance; why it doesn't fit the memory, None when it does (_unfit); and where its tiles
+    were shrunk for the host's memory, the DiT kept on the GPU in the VAE's phases, the tiles
+    the card alone gives (_dit_kept), else None. PlanError for a pin that can't be taken, or a
+    size no plan fits (_chosen, _around)."""
     if recorded is None:
         made = _chosen(job, pins)
     else:
@@ -975,6 +1004,7 @@ def _made(
         made = _around(job, recorded, pins)
     made = replace(made, scratch_allowance=_allowance(job, made, host_available))
     refused = _unfit(job, made, host_available)
+    ordered = made
     if refused is not None and pins.swap_blocks is None:
         # Where the system memory is what the plan is short of: more blocks swapped, the VAE's
         # weights staying on the GPU, when that takes less of it (_vae_kept).
@@ -983,15 +1013,47 @@ def _made(
             again = _unfit(job, spared, host_available)
             if again is None or _peaks(job, spared).host < _peaks(job, made).host:
                 made, refused = spared, again
-    return made, refused
+    shrunk = None
+    if refused is not None and recorded is None:
+        # Then the DiT kept on the GPU in the VAE's phases, their tiles shrunk for it, when that
+        # takes less of it (_dit_kept); a recorded plan's tiles shape the output. From the plan
+        # with the VAE's weights kept first; and where that doesn't fit, from the plan as the
+        # choices made it too: the VAE kept swaps one or two blocks more, each pinned whatever
+        # the VAE's phases keep, so that the tiles shrunk under it may reach no plan the host
+        # holds where they reach one with the VAE away, and the window would shorten for it, or
+        # the job be refused: at 4K, shots of 23, 24, 150 and 600 frames with 63.0 GiB free and
+        # 11.22 GiB of system memory ran windows of 12 latents where 13 plan, and a 5K shot of
+        # 149 frames was refused with 43.0 GiB free where windows of 5 plan
+        # (tests/test_planner.py, test_the_vae_kept_first_costs_no_window). PROVISIONAL
+        # (implementation, 2026-10-16): DESIGN.md orders the VAE kept before the tiles, the
+        # window last; its order is kept where it fits, the plan with the VAE away taken where it
+        # alone does, or where it takes less.
+        least = None
+        for start in dict.fromkeys((made, ordered)):
+            kept = _dit_kept(job, start, host_available, pins)
+            if kept is None:
+                continue
+            if least is None or _peaks(job, kept).host < _peaks(job, least[1]).host:
+                least = start, kept
+            if _unfit(job, kept, host_available) is None:
+                least = start, kept
+                break
+        if least is not None and _peaks(job, least[1]).host < _peaks(job, made).host:
+            start, kept = least
+            shrunk = Shrunk(
+                start.encode_tiles, start.decode_tiles, *_host_short(job, start, host_available)
+            )
+            made, refused = kept, _unfit(job, kept, host_available)
+    return made, refused, shrunk
 
 
 def _window_that_runs(
     job: _Job, pins: Pins, made: Plan, host_available: int | None
-) -> tuple[int, Plan] | None:
-    """For a new job whose plan fits the card and takes more system memory than the host has:
-    the longest window under the plan's own with which the job is planned on this host, and
-    that plan, the other pins as given, by the planner's own making of each (_made); None where
+) -> tuple[int, Plan, Shrunk | None] | None:
+    """For a new job whose plan fits the card and takes more system memory than the host has,
+    its tiles shrunk as far as they go: the longest window under the plan's own with which the
+    job is planned on this host, that plan, and the tiles the card alone gives there where they
+    were shrunk, the other pins as given, by the planner's own making of each (_made); None where
     no shorter window is, or for another refusal.
 
     The choices are made for the GPU's memory, the longest window first, and the system memory
@@ -1017,22 +1079,28 @@ def _window_that_runs(
         ran = _longest(job.lengths, cap)
         own = _own_cap(job, cap)
         try:
-            shorter, short = _made(job, replace(pins, window=own), None, host_available)
+            shorter, short, shrunk = _made(job, replace(pins, window=own), None, host_available)
         except PlanError:
             continue
         if short is None:
-            return own, shorter
+            return own, shorter, shrunk
     return None
 
 
 def _short_of_host(job: _Job, made: Plan, host_available: int | None) -> Shortened:
     """What a plan the host can't hold says of itself where the planner then takes a shorter
-    window (plan): its window, the system memory it takes and what is available, as its refusal
-    would have said them (_unfit: each part to the nearest hundredth of a GiB, their sum, and
-    what is there rounded down, a hundredth under the total at least)."""
-    assert made.window is not None and host_available is not None
+    window (plan): its window, the system memory it takes and what is available (_host_short)."""
+    assert made.window is not None
+    return Shortened(made.window, *_host_short(job, made, host_available))
+
+
+def _host_short(job: _Job, made: Plan, host_available: int | None) -> tuple[int, int]:
+    """The system memory a plan the host can't hold takes and what is available, in hundredths of
+    a GiB, as its refusal would have said them (_unfit: each part to the nearest hundredth of a
+    GiB, their sum, and what is there rounded down, a hundredth under the total at least)."""
+    assert host_available is not None
     taken = sum(_host_hundredths(made, _peaks(job, made).shot))
-    return Shortened(made.window, taken, min(_hundredths(host_available, up=False), taken - 1))
+    return taken, min(_hundredths(host_available, up=False), taken - 1)
 
 
 def check_recorded(
@@ -1112,11 +1180,13 @@ def said(
     lines come with the time estimates. The longest window the job runs is said only where it
     isn't the cap, one pinned or recorded above it; and after the joins, where the planner took
     a shorter window than the card alone holds for the host's memory, that window and what its
-    plan takes of the memory available (Peaks.shortened). The system memory is said as a refusal
-    for it says it (_host_hundredths): the pinned copies, what the run holds of a shot at the
-    most, the longest unless a shorter one holds more, with the moment it does (Peaks.shot,
-    Peaks.moment, Peaks.holder), and the allowance to the nearest hundredth of a GiB, and "in
-    all" their sum with the process's own."""
+    plan takes of the memory available (Peaks.shortened); after the tiles, where it shrank them
+    for the host's memory, the DiT kept on the GPU in the VAE's phases, the tiles the card alone
+    gives at that window and what their plan takes (Peaks.shrunk). The system memory is said
+    as a refusal for it says it (_host_hundredths): the pinned copies, what the run holds of a
+    shot at the most, the longest unless a shorter one holds more, with the moment it does
+    (Peaks.shot, Peaks.moment, Peaks.holder), and the allowance to the nearest hundredth of a
+    GiB, and "in all" their sum with the process's own."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
@@ -1181,9 +1251,21 @@ def said(
         f"{copies}; {held / 100:.2f} GiB for {whose},"
         f" {_MOMENT_SAID[peaks.moment]}; {in_all / 100:.2f} GiB of system memory in all"
     )
+    # Tiles the planner shrank for the host's memory: what the card alone gives, and why it isn't
+    # taken.
+    smaller = ""
+    if peaks.shrunk is not None:
+        shrunk = peaks.shrunk
+        smaller = (
+            f"; the card alone takes the encode {_tiles_said(shrunk.encode)} and the decode"
+            f" {_tiles_said(shrunk.decode)}, whose plan takes {shrunk.taken / 100:.2f} GiB of"
+            f" system memory where {shrunk.available / 100:.2f} GiB are available: the DiT kept"
+            " on the GPU in the VAE's phases, the largest tiles whose plan fits both are taken"
+        )
     lines.append(
         f"encode {_pass_said(job, plan.encode_tiles)}, decode"
         f" {_pass_said(job, plan.decode_tiles)}, each held {_gib(VAE_ROOM)} GiB under the budget"
+        f"{smaller}"
     )
     names = {"encode": "encode", "dit": "DiT's phase", "decode": "decode"}
     # The DiT's peak is its longest shot's draw where that is over its longest window's own
@@ -1559,6 +1641,93 @@ def _vae_kept(job: _Job, plan: Plan, host_available: int | None) -> Plan | None:
         vae_in_dit=True,
     )
     return replace(kept, scratch_allowance=_allowance(job, kept, host_available))
+
+
+def _dit_kept(job: _Job, plan: Plan, host_available: int | None, pins: Pins) -> Plan | None:
+    """The plan's shape with more of the DiT kept on the GPU in the VAE's phases, their tiles
+    shrunk to keep it, where the plan as made, the VAE's weights kept for the DiT's phase where
+    that takes less (_vae_kept), fits the GPU's memory and not the system's: every block a VAE
+    phase sends away waits in a pinned copy (_pinned), and the largest tiles, chosen first,
+    send the most away (DESIGN.md, Memory planner, Choices, decided on 2026-10-13: "before the
+    window shortens, the DiT stays on the GPU for the VAE's phases and the tiles shrink, the
+    window being the larger lever"). One block more kept in both phases at a time, one block
+    fewer pinned, each pass in the largest of its tiles, from its own down, that keeps as many
+    (_keeping), up to every block the DiT's phase keeps: the first plan that fits the host is
+    taken, with the largest tiles that do; where none does, the last one made, which takes the
+    least, for the shorter windows' search and the refusal's figures (plan). None where it
+    doesn't apply: the system memory unchecked or enough, a phase over the budget, or no tile
+    under a pass's own that keeps one block more.
+
+    A pinned pass keeps its tiles, as on any host ("never under a tile pin"), the other one
+    still shrinking. The swapped blocks stay as they are, under --swap-blocks or not: each is
+    pinned whatever the VAE's phases keep. Jobs refused for the system memory with more free
+    VRAM than one that planned, short shots whose untiled VAE pass fits only with the DiT sent
+    away, 26 to 36 blocks pinned (DESIGN.md, Memory planner, Choices: 828 of a grid of 144,000
+    plans); and windows that fell as the free VRAM grew (DESIGN.md, To measure, The planner on a
+    short host): at 1440p a decode's tiles growing from 1600 to 1728 px kept one block less on
+    the GPU, which pinned 0.42 GiB more, the window then shortened for 0.01 GiB of system memory
+    (tests/test_planner.py, test_on_a_short_host_the_tiles_shrink_before_the_window).
+
+    PROVISIONAL (implementation, 2026-10-16): DESIGN.md orders the steps, not how far the tiles
+    shrink. They shrink as little as the host needs, the same count of blocks kept in both
+    phases, the largest tiles that keep it, where the smallest tiles would pin the least: tiles
+    drift in colour more as they get smaller (DESIGN.md, Memory planner, A plan shapes the
+    output a little)."""
+    peaks = _peaks(job, plan)
+    over = any(peaks.need(phase) + job.margin > job.free for phase in PHASES)
+    if host_available is None or over or peaks.host <= host_available:
+        return None
+    passes: tuple[tuple[Phase, Tiles | None, bool], ...] = (
+        ("encode", plan.encode_tiles, pins.encode_tile is not None),
+        ("decode", plan.decode_tiles, pins.decode_tile is not None),
+    )
+    least = None
+    keep = BLOCKS - _leaving(plan) + 1
+    while keep <= BLOCKS - plan.swapped:
+        chosen = [_keeping(job, *each, plan.swapped, keep) for each in passes]
+        if not all(found for found, _ in chosen):
+            break
+        (_, encode), (_, decode) = chosen
+        kept = replace(
+            plan,
+            encode_tiles=encode,
+            decode_tiles=decode,
+            resident_encode=_resident(job, "encode", encode, plan.swapped),
+            resident_decode=_resident(job, "decode", decode, plan.swapped),
+        )
+        least = replace(kept, scratch_allowance=_allowance(job, kept, host_available))
+        if _unfit(job, least, host_available) is None:
+            break
+        keep = BLOCKS - _leaving(least) + 1
+    return least
+
+
+def _keeping(
+    job: _Job, phase: Phase, tiles: Tiles | None, pinned: bool, swapped: int, keep: int
+) -> tuple[bool, Tiles | None]:
+    """Whether a pass of the job's encode or decode at or under `tiles`, in the planner's order
+    (_fitting: untiled, then the largest tiles down), keeps `keep` of the DiT's blocks on the GPU
+    or more (_resident; None, the DiT as its own phase has it, keeps every block that isn't
+    swapped), and the largest that does (_dit_kept); a pinned pass's tiles alone."""
+    passes = [tiles] if pinned else _fitting(job, phase, swapped)
+    for option in passes[passes.index(tiles) :]:
+        resident = _resident(job, phase, option, swapped)
+        if (BLOCKS - swapped if resident is None else resident) >= keep:
+            return True, option
+    return False, None
+
+
+def _shrunk_said(job: _Job, plan: Plan) -> str:
+    """What a refusal for the system memory adds where the plan's tiles were shrunk to keep the
+    DiT on the GPU in the VAE's phases and it still takes more than is there (_dit_kept): the
+    tiles its figures are of, and what of the DiT they keep."""
+    encode = _resident_said(plan.resident_encode, plan.swapped)
+    decode = _resident_said(plan.resident_decode, plan.swapped)
+    return (
+        f", its VAE's tiles shrunk to keep the DiT on the GPU: the encode"
+        f" {_tiles_said(plan.encode_tiles)}, with {encode}; the decode"
+        f" {_tiles_said(plan.decode_tiles)}, with {decode}"
+    )
 
 
 def _pin_s_part(job: _Job, plan: Plan, pins: Pins) -> str:
