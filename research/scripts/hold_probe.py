@@ -12,6 +12,8 @@ The ways (options, combined freely):
   --gc FRACTION              native only: garbage_collection_threshold
   --split MIB                native only: max_split_size_mb, the size from which the allocator
                              no longer splits a block it has cached for a smaller request
+  --conf SETTINGS            native only: more of PYTORCH_CUDA_ALLOC_CONF's settings, as they are
+                             written there (expandable_segments:True)
   --cap GIB                  torch.cuda.set_per_process_memory_fraction, as GiB the process's
                              allocator may hold beyond what it holds once the models are loaded
                              as --placement says (so: the budget of a window's work); 0: none
@@ -21,6 +23,13 @@ The ways (options, combined freely):
                              by seedvr2x's runtime/memory.py, card_free), as seedvr2x's own hold
                              takes it; CUDA's figure alone where NVML doesn't answer
   --trim                     torch.cuda.empty_cache() before every step
+  --without vae|dit          one model's weights off the GPU once loaded: the VAE's, as a plan
+                             has them during its windows (window steps only); or the DiT's,
+                             which a VAE pass doesn't need (VAE steps only, --placement 0)
+  --trace FILE               every --trace-every seconds (0.1) through the whole process, from
+                             before the models load, one JSON line: the time, both free figures
+                             and what torch has reserved, read before them and after (the three
+                             are of one moment where it has not moved), and allocated, in bytes
 
 Two free figures are read wherever one is: `free`, CUDA's, which under such a driver is the
 process's own while the card has room, and `card`, NVML's, the whole card's. A step's line has
@@ -41,17 +50,27 @@ The steps (--steps, in order, comma-separated):
   under=GIB
          the cache emptied, then torch's limit set again, GIB under the memory free now, as
          --under sets it: a ladder of holds in one process, the safest first
-  r:STEP[:FROM[:BY]]
+  r:STEP[:FROM[:BY[:FINE]]]
          what the allocator needs beyond STEP's allocated peak: STEP once under the present
          limit, for its peak; then again and again, the cache emptied before each, under a
          limit of that peak and a margin, from FROM GiB (2.4) down by BY (0.1), until it is
-         refused (a window's rungs run seed 42 alone); the present limit is set again after
+         refused (a window's rungs run seed 42 alone); with FINE, smaller than BY, down again
+         by FINE from the last margin that ran, until refused a second time; then --past
+         rungs more under the refused one whatever they do, each marked `past`: whether a
+         step refused under a limit runs under a smaller one; the present limit is set again
+         after
+  s:STEP:FROM:TO[:BY]
+         the same rungs as a scan: STEP under its peak and every margin from FROM GiB down to
+         TO by BY (0.1), each run whatever the others did, marked `scan`: where a step is
+         refused under a limit and runs under a smaller one, a ladder's first refusal is not
+         its need
   host   the DiT's parameters to pinned host copies and back whole (blockswap.host, a placement
          with nothing swapped): the sequence after which other bits were seen once. Only with
          --placement 0: under a placement the swapped blocks' parameters are their slots', and
          copying them from there would give other bits by the probe's own doing. A host step
          refused half-way leaves the DiT split: the sequence ends there.
-A line is written when a step starts, and one when it ends: torch's peak allocated and reserved
+Every line has its time (`t`, seconds since the epoch). A line is written when a step starts,
+and one when it ends: torch's peak allocated and reserved
 (in GiB and in bytes), the limit it ran under, both free figures before and at the least, the
 time, the digests and whether they are the reference's (`equal`: true or false; null, with
 `reference` "no reference yet", for a step no reference held before it ran); or the refusal,
@@ -100,9 +119,14 @@ def main() -> int:
     parser.add_argument("--allocator", choices=("async", "native"), default="async")
     parser.add_argument("--gc", type=float)
     parser.add_argument("--split", type=int)
+    parser.add_argument("--conf")
     parser.add_argument("--cap", type=float, default=0.0)
     parser.add_argument("--under", type=float)
     parser.add_argument("--trim", action="store_true")
+    parser.add_argument("--without", choices=("vae", "dit"))
+    parser.add_argument("--trace")
+    parser.add_argument("--trace-every", type=float, default=0.1)
+    parser.add_argument("--past", type=int, default=0)
     parser.add_argument("--placement", type=int, default=0)
     parser.add_argument("--size", default="1080")
     parser.add_argument("--steps", required=True)
@@ -115,6 +139,8 @@ def main() -> int:
         conf += f",garbage_collection_threshold:{args.gc}"
     if args.split is not None:
         conf += f",max_split_size_mb:{args.split}"
+    if args.conf:
+        conf += f",{args.conf}"
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = conf  # before torch, and before placement_bench
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -134,7 +160,7 @@ def main() -> int:
     out = open(args.out, "a") if args.out else None
 
     def say(record: dict) -> None:
-        line = json.dumps(record)
+        line = json.dumps({"t": round(time.time(), 3), **record})
         print(line, flush=True)
         if out:
             out.write(line + "\n")
@@ -184,16 +210,60 @@ def main() -> int:
             self.thread.join()
             self.read()
 
-    if "host" in args.steps.split(",") and args.placement:
+    class Tracer:
+        """Both free figures and torch's own count, read together every --trace-every seconds
+        from a thread, through the load and every step: what the driver's figure follows, and
+        what the process holds on the card outside torch's count, moment by moment."""
+
+        def __init__(self, path: str, every: float) -> None:
+            self.file, self.every = open(path, "a"), every
+            self.stop = threading.Event()
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
+
+        def run(self) -> None:
+            while not self.stop.is_set():
+                started = time.time()
+                try:
+                    # torch's count read before and after the two figures: where it has not
+                    # moved (`reserved` and `reserved_after` equal), the three are of one moment.
+                    before = torch.cuda.memory_reserved(device)
+                    reported = torch.cuda.mem_get_info(device)[0]
+                    line = {"t": round(started, 3), "reserved": before, "free": reported,
+                            "card": memory.card_free(0),
+                            "reserved_after": torch.cuda.memory_reserved(device),
+                            "allocated": torch.cuda.memory_allocated(device)}
+                except Exception as error:  # after a sticky error any call may raise
+                    line = {"t": round(started, 3), "error": type(error).__name__}
+                self.file.write(json.dumps(line) + "\n")
+                self.file.flush()
+                self.stop.wait(max(self.every - (time.time() - started), 0.0))
+
+        def close(self) -> None:
+            self.stop.set()
+            self.thread.join()
+            self.file.close()
+
+    steps = [step[2:].split(":")[0] if step.startswith(("r:", "s:")) else step
+             for step in args.steps.split(",")]
+    passes = [step for step in steps if step[0] in "vde"]
+    windows = [step for step in steps if step.isdigit()]
+    if "host" in steps and args.placement:
         sys.exit("hold_probe: the host step needs --placement 0 (the docstring says why)")
+    if args.without == "vae" and passes:
+        sys.exit(f"hold_probe: --without vae, and VAE steps: {passes}")
+    if args.without == "dit" and (windows or "host" in steps or args.placement):
+        sys.exit("hold_probe: --without dit takes VAE steps alone, and --placement 0")
     reference = {}
     if args.reference:
         with open(args.reference) as file:
             reference = json.load(file)
     say({"conf": conf, "cap": args.cap, "under": args.under, "trim": args.trim,
-         "placement": args.placement, "steps": args.steps, "size": args.size,
+         "placement": args.placement, "without": args.without, "steps": args.steps,
+         "size": args.size,
          "free_start": free(), "card_start": card(),
          "gpu": torch.cuda.get_device_name(device), "torch": torch.__version__})
+    tracer = Tracer(args.trace, args.trace_every) if args.trace else None
     # The command line's own reading for its plan, on its footing, and the card's right after,
     # as memory.usable takes them: where seedvr2x sets its hold, before the models load.
     planned = cli._free_memory(device)
@@ -213,6 +283,16 @@ def main() -> int:
         torch.cuda.empty_cache()
         placement = blockswap.Placement(dit, device, args.placement, parts=parts, backend=backend)
         placement.enter("dit")
+    if args.without == "vae":
+        models.runner.vae.to("cpu")
+    elif args.without == "dit":
+        models.runner.dit = dit = None
+    if args.without:
+        import gc
+
+        gc.collect()
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
     torch.cuda.synchronize(device)
     total = torch.cuda.mem_get_info(device)[1]
     # torch's limit now, in bytes of what it has reserved from the driver; None: none set.
@@ -425,40 +505,85 @@ def main() -> int:
             say({"after": step, "error": type(error).__name__, "words": words(error)})
         return record
 
-    def ladder(step: str, start: float, by: float) -> None:
+    def ladder(step: str, start: float, by: float, fine: float | None) -> None:
         """What the allocator needs beyond `step`'s allocated peak: the step under the present
-        limit, then under its peak and a margin going down, the cache emptied before each."""
+        limit, then under its peak and a margin going down, the cache emptied before each;
+        with `fine`, down again by it from the last margin that ran."""
         present = state["limit"]
         trim()
         first = attempt(step, ladder="peak")
         if not first.get("ok"):
             return
+        peak = first["peak_bytes"]
+
+        def down(margin: float, by: float) -> float | None:
+            """The rungs from `margin` down by `by` to the first refused; the last that ran."""
+            ran = None
+            while margin > -1e-9:
+                limit = peak + round(margin * gib)
+                if present is None or limit <= present:
+                    trim()
+                    limit_to(limit, ladder=step, margin=round(margin, 2))
+                    if not attempt(step, SEEDS[:1], ladder=round(margin, 2)).get("ok"):
+                        break
+                    ran = margin
+                margin -= by
+            return ran
+
+        ran, last = down(start, by), by
+        if fine is not None and fine < by and ran is not None:
+            ran, last = down(ran - fine, fine) or ran, fine
+        # Past the refusal: the rungs under the refused one, run whatever they do.
+        margin = (start if ran is None else ran) - 2 * last
+        for _ in range(args.past if ran is not None else 0):
+            if margin < -1e-9:
+                break
+            trim()
+            limit_to(peak + round(margin * gib), ladder=step, margin=round(margin, 2), past=True)
+            attempt(step, SEEDS[:1], ladder=round(margin, 2), past=True)
+            margin -= last
+        trim()
+        limit_to(present, ladder=step, restored=True)
+
+    def scan(step: str, start: float, end: float, by: float) -> None:
+        """`step` under the present limit, for its peak, then under that peak and every margin
+        from `start` down to `end`, the cache emptied before each, whatever each does."""
+        present = state["limit"]
+        trim()
+        first = attempt(step, ladder="peak", scan=True)
+        if not first.get("ok"):
+            return
         peak, margin = first["peak_bytes"], start
-        while margin > -1e-9:
+        while margin > end - 1e-9:
             limit = peak + round(margin * gib)
             if present is None or limit <= present:
                 trim()
-                limit_to(limit, ladder=step, margin=round(margin, 2))
-                if not attempt(step, SEEDS[:1], ladder=round(margin, 2)).get("ok"):
-                    break
+                limit_to(limit, ladder=step, margin=round(margin, 2), scan=True)
+                attempt(step, SEEDS[:1], ladder=round(margin, 2), scan=True)
             margin -= by
         trim()
         limit_to(present, ladder=step, restored=True)
 
     for step in args.steps.split(","):
+        if step.startswith("s:"):
+            of, start, end, by = (*step[2:].split(":"), "")[:4]
+            scan(of, float(start), float(end), float(by or 0.1))
+            continue
         if step.startswith("under="):
             trim()
             hold(float(step.partition("=")[2]))
             continue
         if step.startswith("r:"):
-            of, start, by = (*step[2:].split(":"), "", "")[:3]
-            ladder(of, float(start or 2.4), float(by or 0.1))
+            of, start, by, fine = (*step[2:].split(":"), "", "", "")[:4]
+            ladder(of, float(start or 2.4), float(by or 0.1), float(fine) if fine else None)
             continue
         record = attempt(step)
         if step == "host" and not record.get("ok"):
             say({"ended": "the host step was refused: the DiT may be split, host and device"})
             break
     say({"done": True})
+    if tracer:
+        tracer.close()
     return 0
 
 
