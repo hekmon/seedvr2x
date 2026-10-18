@@ -1086,9 +1086,9 @@ The rule: the upscale must look like its source in any given player.
      encode's, bit for bit.
    - Only the latents are ever whole in memory, unless the encode is tiled: each tile then
      runs over the whole shot, whose transformed input waits in the shot's scratch (step 3).
-     The latent is made in system memory, a slice at a time, and waits there: it goes to the
-     GPU whole for the draw of the shot's noise, then a window's slices at a time (see
-     [Memory planner](#memory-planner)).
+     The latent is made in system memory, a slice at a time, and waits there; the shot's noise
+     is drawn beside it there (built on 2026-10-16), and a window's slices of both go to the GPU
+     at a time (see [Memory planner](#memory-planner)).
 
    Shots must start at real cuts:
    - each latent packs 4 frames (latent frames = 1 + (frames − 1)/4), so a cut inside a group
@@ -1127,25 +1127,24 @@ The rule: the upscale must look like its source in any given player.
      different renderings. Milestone 2 kept the sliced scheme: it is 1.2–2.0 dB closer to the
      one-batch run at every offset to the boundaries, with the same boundary steps (see
      [Validation milestones](#validation-milestones)).
-     - It is drawn on the GPU, as numz and ByteDance draw it, and torch's CUDA generator follows
-       the card: its layout is cut by the card's count of processors, so that for one seed an
-       RTX 5090 and an RTX PRO 6000 draw other noise at a shot's size (the same on small
-       tensors, and on the CPU). The same job on the two cards gave frames 35 to 39 dB apart
-       (PSNR-Y, 66 frames), where SDPA against FlashAttention 2 on one card is 55 to 57 dB:
-       another card model is another draw, as another seed is (found on 2026-10-12).
-     - Decided on 2026-10-13 (the user's go), to be built: the noise is drawn on the CPU.
-       Measured first, on 2026-10-16: so drawn, the noise is the same on both cards, and only
-       the noise. The encode, the DiT and the decode each follow the GPU model from identical
-       inputs (the encode's latent differs on the two cards from identical input slices), and
-       one job's frames stood 54 to 57 dB apart on them (PSNR-Y, 66 frames), against 35 to 39
-       with the GPU's draw: no longer another draw, but not the same frames. One card repeats
-       itself bit for bit, and cuDNN's deterministic algorithms change no bit on either: a
-       regression stays held to its card's references. Drawn on the CPU, the noise gives a job
-       resumed on another card its draw, and leaves the GPU, the bound it puts on a shot's
-       length going with it; it costs about 10 s and 1 GiB of system memory for 1,000 latents at
-       1080p, memory the plan counts already. Milestone 1's regression keeps numz's draw through
-       a mode of the tests' own, as it keeps numz's padding; the other references are made
-       again.
+     - It is drawn on the CPU (decided on 2026-10-13, the user's go; built on 2026-10-16): by a
+       generator of the draw's own, torch's CPU one seeded with the shot's seed, in the latent's
+       shape, dtype and memory layout, then sent a window's slices at a time. Drawn on the GPU,
+       as numz and ByteDance draw it, the noise followed the card: torch's CUDA generator lays
+       its draw out by the card's count of processors, so that for one seed an RTX 5090 and an
+       RTX PRO 6000 drew other noise at a shot's size, and the same job gave frames 35 to 39 dB
+       apart (PSNR-Y, 66 frames), where SDPA against FlashAttention 2 on one card is 55 to 57 dB
+       (found on 2026-10-12). Drawn on the CPU, the noise is the same on both cards, digest for
+       digest, and only the noise: the encode, the DiT and the decode each follow the GPU model
+       from identical inputs, and one job's frames stood 54 to 57 dB apart on them (2026-10-16).
+       One card repeats itself bit for bit, and cuDNN's deterministic algorithms change no bit
+       on either: a regression stays held to its card's references. The draw takes 8.8 to 9.0 s
+       and 0.99 GiB of system memory for 1,000 latents at 1080p, 12.2 to 12.6 s and 1.42 GiB for
+       361 at 4K (a desktop's 16-core CPU), memory the plan counts already, and nothing of the
+       GPU; a job resumed on another card draws the same noise. Milestone 1's regression keeps
+       numz's draw on the GPU through a mode of the tests' own, as it keeps numz's padding, and
+       so does every GPU test held to a reference numz made; the other references were made
+       again (2026-10-16, on the RTX PRO 6000).
    - each shot's generator is seeded with the seed plus the shot's first frame index in the
      source.
      - A shot starting at frame 0 gets the plain seed, as numz's single batch does.
@@ -1666,10 +1665,23 @@ first pass, whose shots are its input, and before the models load:
       split convolution's pieces, the pieces and their copy both whole: the pass's own peak.
       Emptying the pool on entering the phase, before that request or before every slice doesn't
       save the 4K decode; the pieces written into one output allocated ahead save both, and move
-      no bit. That patch is held: its floor, an output of 2.5 GiB, is judged at each call, and a
-      pass's first slice holds 5 frames where the others hold 4, so that a mid-size pass would
-      take it on its first slice alone, its peak there unmeasured. To be built: the floor judged
-      by the pass, and the tiles' peaks measured again with it.
+      no bit. Built on 2026-10-16 and taken on 2026-10-17, the one-output convolution: its
+      floor, an output of 2.5 GiB, is judged at each convolution's own call by the output it
+      gives a slice of four frames, so that every slice of a pass takes one path at that
+      convolution (a pass's first slice holds a frame more at every convolution). It takes the
+      decodes in square tiles from 1152 px, in tiles of 1104 rows from 1216 px and untiled, the
+      encodes in square tiles from 1664 px and 4K's untiled one, and at 1440p its decodes in
+      tiles of 1472 rows and untiled, its encodes from 1472×1792 px and untiled. Measured again
+      with it on the 96 GB card by the tiles' own driver (21 frames, both codes): every pass
+      bit-identical with and without it, and its peaks 0.18 to 5.17 GiB under the planner's
+      table, the untiled 4K encode 4.48 under its fit, but for the two passes just over the
+      floor, a decode in 1152-px tiles 0.036 GiB over and one in tiles of 1104×1216 0.042 over.
+      The table is still the one measured without it. Decided on 2026-10-18, to be built: the
+      planner takes the peaks measured with it for the passes it takes, those two included, the
+      other passes' as they are. A tile's first slice, of five frames, can still ask for its
+      concatenation where the four-frame output is just under the floor: in 4K's 1600-px tiles
+      3.05 GiB, refused in a whole run with 0.67 GiB of room, loudly, never with other frames,
+      1.2 GiB or more under what the planner leaves a pass. Kept as built (2026-10-18).
     - A pass that runs can give other frames, and says nothing. Packed closer than about 1 GiB
       to its peak, a decode ended, a little slower, with frames that are not those of the same
       plan with room to spare, nor always the same from one run to the next: in 640-px tiles
@@ -1678,14 +1690,42 @@ first pass, whose shots are its input, and before the models load:
       1104×1152 tiles none of 149 with 0.94. One convolution of a decode, run alone: with 0.7
       GiB or more left, its bits in 0.05 s, 0.49 GiB of workspace taken; with 0.6 to 0.2 left,
       other bits, 8.5 times slower, no workspace; refused with 0.1; and the other bits again
-      once the memory was free, three calls of three in that process. The reading, not
-      established: cuDNN's next engine, taken without a word when the first one's workspace is
-      refused, and kept. So a room is judged by the frames against a run with room to spare, not
-      by a run's exit status and its peaks, as every plan was until now; and it can't go to 0.
-    - The room stays 1.5 GiB. In the nine plans and the three that once failed, the least it
-      leaves to a VAE pass is 2.18 GiB, and the one plan checked by its frames, 640-px tiles on
-      12 GB with 2.54 left, gave its reference's. No tile of 1472 px or more has been checked so
-      (see [To measure](#to-measure)).
+      once the memory was free, three calls of three in that process. The cause, read in torch
+      2.14.1's source and shown in cuDNN's log (2026-10-16): torch reaches cuDNN through its v8
+      frontend, by heuristics, not benchmarks; a convolution whose workspace the allocator
+      refuses is tried on cuDNN's next configurations without a word until one runs (on that
+      card engine 28, which takes no workspace), and the plan that ran is kept for that shape
+      for the process's life; under `cudaMallocAsync` torch counts no refused allocation. So a
+      room is judged by the frames against a run with room to spare, not by a run's exit status
+      and its peaks, as every plan was until 2026-10-13; and it can't go to 0.
+    - By tile size (2026-10-16 to 18, the 96 GB card, emulated cards, `cudaMallocAsync`): a pass
+      alone in a fresh process, each tile against its own run on the bare card by every frame's
+      CRC-32, an encode by its latent, the deciding cards twice. Every decode the one-output
+      convolution takes that ran, from 1104×1216 px to 4K's 2048 and 1080p's and 1440p's untiled
+      ones, keeps its frames with 0.68 to 0.97 GiB left and moves them with 0.1 less, refused
+      nowhere; its encodes keep their latent with 0.50 to 0.63, and 4K's untiled encode, the 96
+      GB card's own, kept it with 0.60 and was refused below (8.03 GiB in one request). The
+      passes it doesn't take keep the path they had: decodes from 576 to 1088 px and 1104×1152
+      keep their frames with 0.67 to 0.90 GiB (those from 1024 px refused at the concatenation
+      first), encodes their latent with 0.47 to 0.87 (4K's 1536- and 1600-px ones, 1080p's and
+      1440p's untiled ones and 1440p's other tiles refused at the concatenation first). Whole
+      runs, the encode, the windows and the decode in one process, in six tiles under the
+      one-output convolution (2026-10-17): their floor the pass alone's within 0.2 GiB either
+      way, their frames kept with 1.08 GiB or less left; near it two runs at one card didn't
+      always agree (5 of 12), where the passes alone always did. Nothing in torch shows the
+      change there; cuDNN's own log does (19 to 40 plans built over the reference's on every
+      pass that moved, none on a kept one), a library's log, no interface.
+    - Decided on 2026-10-18, to be built: the room goes from 1.5 to 1.25 GiB, the encode's 0.4
+      GiB staying. A VAE pass is then left at least 1.85 GiB beyond its predicted peak with the
+      budget's margin (2.1 today): 0.77 over the most a whole run was seen to need (1.08) and
+      0.88 over the most a pass alone needs (0.97). The 0.25 kept over the 1.0 those measures
+      allow is for what wasn't measured: whole runs in other tiles, cards not emulated, other
+      GPU generations and cuDNN builds, whose engines and workspaces are their own. On the
+      planner of 2026-10-16 it gives back a tile one step larger in 12 decodes and 7 encodes of
+      74 plans for cards of 12 to 48 GB (a room of 1.0: 17 and 17), no window or swapped block
+      moving. It is taken once the matrix's nine cases give their references' frames under it,
+      with the planner's table under the one-output convolution (above). Until then the room
+      stays 1.5 GiB: in the nine plans the least it leaves a VAE pass is 2.18 GiB.
   - The plan is made once, from what is free at the start: no option reserves more, and a run
     never plans again as it goes (the user's decision, 2026-10-09).
   - The margin was bisected on emulated cards: a run needs 0.15–0.45 GiB between the free
@@ -1803,15 +1843,13 @@ first pass, whose shots are its input, and before the models load:
       12 latents with all 36 swapped), so that one or two swapped blocks save nothing; and
       0.467 more with the VAE away.
     - Between a shot's windows the run keeps nothing of the shot on the GPU (built on
-      2026-10-12). Its noise is drawn whole on the GPU beside its latent before the first
-      window, 1 byte a padded pixel and a latent together (2.02 MiB a latent at 1080p, 8.03
-      at 4K); then both wait in system memory, each window's slices are sent for its pass,
-      and its output leaves before the next runs. The DiT's phase is judged by the larger
-      of its longest window's peak and of its longest shot's draw. A shot of 48 latents in 8
-      windows at 1080p peaked at 9.49 GiB on its windows of 8 latents and 8.40 on those of
-      7, as one-window shots of those lengths do (9.57 and 8.49 before), and at 1.15 GiB at
-      the draw, its frames unchanged. The draw could hold half, the latent never going up:
-      a later change, with a check of the noise's bits.
+      2026-10-12), and its noise is drawn in system memory (built on 2026-10-16): latent and
+      noise wait there, each window's slices are sent for its pass, and its output leaves before
+      the next runs. The DiT's phase is judged by its longest window alone. A shot of 48 latents
+      in 8 windows at 1080p peaked at 9.49 GiB on its windows of 8 latents and 8.40 on those of
+      7, as one-window shots of those lengths do (measured with the noise drawn on the GPU,
+      whose draw took 1.15 GiB there). The nine matrix plans didn't move with the draw's term
+      gone: in each the window's peak was the larger already.
   - On the 96 GB card, in numz's padding (1,088 rows at 1080p): windows of 78 latents (309
     frames) at 1080p, 0.56 GiB to spare, and 19 (73 frames) at 4K; one latent more fails
     within 3 s.
@@ -1916,10 +1954,10 @@ first pass, whose shots are its input, and before the models load:
     - Under SDPA that window takes 23.47 GiB of free VRAM, a peak of 22.87 GiB (22.80 measured
       on the 96 GB card) and the margin: a 24 GB card is refused 4K without FlashAttention 2. No
       window goes under 5 latents to make the room.
-    - A shot's length is bounded by the draw of its noise alone: that card plans a 4K shot
-      of 2,659 latents (10,633 frames, over 7 minutes) and a 1080p one of 10,562. Past it
-      the refusal names a cut inside the shot (`--cuts`) and the longest shot that fits,
-      beside the smaller `--resolution`.
+    - A shot's length no longer bounds the DiT's phase (2026-10-16): with the noise drawn in
+      system memory, that card plans a 4K shot of any length (2,661 latents and 10,000 tested),
+      and no refusal names a cut. A long shot is bounded by the host's memory alone, its refusal
+      naming the shot (see Host RAM, above).
     - The VAE has a floor too: its decode in 512-px tiles, with its room. At 1080p that is
       8.5 GiB of free VRAM: an 8 GB card stays out.
 - **Pins.** `--window N`, `--swap-blocks N`, `--encode-tile PX` and `--decode-tile PX` (0 for
@@ -2124,25 +2162,42 @@ GPU's memory refused stops a run in one line, before the models load as after.
     each of three jobs, most of them on the patch's earlier cut: the same frames wherever the
     plan was the same; in the two best-controlled pairs 1.2% and 5.3% slower under them; the
     card never under 2.1 GiB free under them, down to 0.36 under the plain allocator. A VAE pass
-    under them keeps its bits down to 0.5 GiB over its peak and gives others below: the frames'
-    floor is the same question as the VAE's room (see [To measure](#to-measure)).
-  - A desktop in use stopped 3 runs of 6 under them and none of 4 under the plain allocator. In
-    each stopped run the memory outside torch had grown 0.50 to 0.59 GiB past its level at the
-    plan, most of it before the first unit: the segments leave room on the card, and the desktop
-    took it. Under the plain allocator it grew too, by 0.36 GiB in one run, whose check had 0.14
-    GiB to spare. That goes against what the 0.5 GiB are for. Decided on 2026-10-16, to be
-    built: under the segments, a check that finds the card short re-holds torch to the card's
-    free memory less 0.5 GiB and goes on, said in a warning, as long as what the limit has lost
-    since the plan stays within the 4.5 GiB: a window is left that much less over its peak, and
-    the VAE's room, inside the budget, is never touched. Past it, under the plain allocator, or
-    on the driver's figure, the run stops as today. Every stop and every re-hold says how much
-    the memory outside torch grew against the 0.5 GiB left to it.
+    under them keeps its frames down to 0.40 GiB over its peak and loses them at 0.35 (decodes
+    alone in 832- and 1024-px tiles, the room set by torch's limit over the pass's peak,
+    2026-10-17), by the same engine change as under `cudaMallocAsync`, whole runs as the pass
+    alone; on the 96 GB card under them, three decodes kept their frames with 0.46 to 0.54 GiB
+    left, 0.30 to 0.51 less than under `cudaMallocAsync` there. Torch's count of refused
+    allocations across a pass (`num_ooms`) is 0 on every kept pass and 19 to 38 on every lost
+    one, cuDNN's refused workspaces. Decided on 2026-10-18, to be built: a held run warns where
+    that count grows in a VAE unit, its frames maybe not those of a run with more room.
+  - A desktop in use stopped 3 runs of 6 under them and none of 4 under the plain allocator, the
+    memory outside torch grown 0.50 to 0.59 GiB past its level at the plan, most of it before
+    the first unit: the segments leave room on the card, and the desktop took it. Built on
+    2026-10-16, as decided that day: under the segments, as seedvr2x reads the allocator's
+    setting, and on the card's figure, a check that finds the card short holds torch again to
+    what it holds and the card's free memory less 0.5 GiB, said in a warning, and the run goes
+    on, as long as what the limit has lost since the plan's limit stays within the 4.5 GiB, the
+    losses adding up over the run: a step is left that much less beyond its peak, and the VAE's
+    room, inside the budget, is never touched. A check never raises the limit again. Past the
+    4.5 GiB, under torch's allocator without the segments, or on the driver's figure, the run
+    stops as before. Every stop and every re-hold says how much the memory outside torch's
+    allocator grew since its limit was set, counted from the card's figure and what torch held
+    then, against the 0.5 GiB left to it. Run on that card, a program taking memory once the
+    plan's limit was set: 1.0 and 2.0 GiB held again, the same frames; 5.0 stopped, and the same
+    command, the program gone, gave them; 0.6 stopped under the plain allocator, and under the
+    segments needed nothing, the desktop having given 0.14 back. Torch is held again only where
+    the card has the 0.5 GiB free, the new limit then at or above what torch holds; with less
+    the run stops, saying so: a re-hold under what torch held left every later check passing,
+    the bound gone (a review's find). Decided on 2026-10-18, to be built: such a check gives
+    torch's cache back first and judges the card again, so that a growth larger than torch's
+    room within the 4.5 GiB is held again, as decided, not stopped.
   - With a reserve of 2.5 GiB under those segments, 4K's smallest window planned and ran on that
     card beside a desktop holding 3.2 GiB, four times, with the frames of a run that had room to
     spare, in 134 to 139 s for 65.6; but every other plan packed tighter, and a job that fitted
-    ran 1.4 to 1.5 times as long. Decided on 2026-10-13 (the user's go: this commit), to be
-    built once the frames' floor is known: the plan is made with 4.5, and a smaller reserve is
-    taken only where the job would be refused otherwise, said slow in the plan's lines.
+    ran 1.4 to 1.5 times as long. Decided on 2026-10-13 (the user's go), to be built now that
+    the frames' floor under the segments is known (above): the plan is made with 4.5, and a
+    reserve of 2.5 GiB is taken only where the job would be refused otherwise, said slow in the
+    plan's lines, the VAE's room untouched.
 
 ## Pause and resume
 
@@ -2283,9 +2338,11 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       Built on 2026-10-16: such a job, finished or with its assembly alone left, whose own model
       file isn't in Hugging Face's cache is held to the file's pin, its size and SHA-256
       compared with the record's, and fetches nothing, said in the log; a file in `--model-dir`
-      must be there, as before. To be built: a job that loads no model fetches none even where
-      its first pass must run again (its frame index and its DiT both gone, an assembly alone
-      left downloads 16.5 GB today).
+      must be there, as before. Built on 2026-10-16: a job that loads no model fetches none even
+      where its first pass must run again: a file's job with its assembly alone left, its frame
+      index gone and its shots detected, fetches the shot detector's file alone (30 MB), which
+      that pass loads, its DiT's and VAE's files held to their pins, neither downloaded nor
+      read.
   - **A plan** is a job with no unit made: what `--plan FILE` leaves in an output directory
     or in a finished file's work directory, its manifest and its frame index (see
     [Shot detection](#shot-detection)).
@@ -2671,6 +2728,11 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      compared by ffmpeg's checksum of each decoded frame and seedvr2x's own. On an emulated card
      the memory other programs hold of the card is taken off the ballast at each run's start and
      read again at its end.
+     On the code of 2026-10-16's night (the noise on the CPU, the re-hold, the one-output
+     convolution), its nine references made again with the noise drawn on the CPU: the box's CPU
+     suite, the whole GPU suite, 34 tests, and the nine cases, each with its reference's frames
+     and the day's plan, the passes the one-output convolution takes measured lower than before
+     (2026-10-17).
    - On a real desktop card, an RTX 5090 under WSL2 held to its card (2026-10-12): the same
      job alone, beside a program holding 8 GiB, stopped then resumed, and with NVML silent,
      the same frames each time; each phase within 0.3 GiB of its prediction but the
@@ -2678,7 +2740,8 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      With the follow-up's hold (2026-10-12 and 13), beside a desktop holding 4.6 to 5.8 GiB of
      the card: the same frames again, each phase within 0.1 GiB of its prediction but the
      encode, 0.4 under. The 96 GB card's frames can't be held to that card's, nor its references
-     run there: the noise follows the card (see [Pipeline](#pipeline-per-shot), step 2).
+     run there: the encode, the DiT and the decode follow the card, and the noise, drawn on the
+     CPU since 2026-10-16, no longer does (see [Pipeline](#pipeline-per-shot), step 2).
    - A job resumed with other memory free gives the uninterrupted run's output, bit for bit:
      run on 2026-10-11, from 16 GB to 24 GB.
    - Time estimates within a few percent of the measured times, on a healthy card: the
@@ -2733,7 +2796,10 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      ×6, an NTSC DVD at 4:3 and at 16:9) and on the GPU at ×2 and ×4, in one window and in
      three; the decode streams and resume stays bit-identical. On milestone 1's input: ΔE of
      the low frequencies 0.131 against numz's `lab`'s 0.625, Y shift −0.007 against +0.030,
-     a\*/b\* spreads 2.187/5.245 against the input's 2.161/5.212. `test_lab.py` is retired.
+     a\*/b\* spreads 2.187/5.245 against the input's 2.161/5.212. `test_lab.py` is retired. With
+     the noise drawn on the CPU (2026-10-16) the GPU test's run gave ΔE of the low frequencies
+     0.130, Y shift −0.006 and a\*/b\* spreads 2.188/5.246, its thresholds set from it,
+     milestone 5's tolerances kept.
 6. **Assembly (standalone):** the finished file's video timestamps are the frame grid's from
    the source's first frame, equal to the source's to Matroska's millisecond, and every other
    stream is copied. Given back to seedvr2x as a source, the file is accepted, its frames on
@@ -2778,19 +2844,20 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   Taking each frame from a run whose grid ends a group there would take 4 runs per shot, the
   grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Not
   measured (about 2 GPU h on the 8 clips).
-- **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget). Where a
-  VAE pass starts giving other frames, tile size by tile size, encode and decode, against a run
-  with room to spare: between 0.80 and 0.90 GiB left for a decode in 640-px tiles, 0.89 and 1.08
-  in 832-px tiles, under 0.94 in 1104×1152 tiles; nothing for a tile of 1472 px or more, nor for
-  an encode but one, nor on a card that isn't emulated. Its cause, read in torch's source and
-  shown on a run, where today it is inferred from bits, time and memory. A way for the run to
-  see it or refuse it, since nothing logs it: torch's own count of refused allocations across a
-  unit, cuDNN's deterministic mode, a pass's time. The one-output convolution judged by the
-  pass, and the tiles' peaks under it. The 0.4 GiB every encode is taken to hold over its peak.
-  The aim stays to give back to the tiles what of the 1.5 GiB the frames don't need.
+- **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget).
+  Measured by tile size on the 96 GB card (2026-10-16 to 18): every tile the 12 to 48 GB cards
+  take, passes alone, six of them in whole runs, three decodes under expandable segments; a room
+  of 1.25 GiB decided, its validation by the matrix's frames to run. Left: whole runs beyond
+  those six tiles, their outcome near the floor not repeatable to 0.1 GiB; a card that isn't
+  emulated; other GPU generations and cuDNN builds; torch's own allocator on that card beyond
+  its three decodes; the 512-px decode, which no plan of those cards takes; the pass's time as a
+  signal, on a card whose clock holds; the 0.4 GiB every encode is taken to hold over its peak.
+  A run sees nothing of an engine changed under `cudaMallocAsync`.
 - **The hold on a driver that gives memory the card doesn't have** (see
-  [Allocator](#allocator)). Expandable segments on the patch's own code, three runs a job, and
-  the frames' floor under them, before a smaller reserve is taken for a job refused otherwise.
+  [Allocator](#allocator)). Expandable segments on the patch's own code, three runs a job; their
+  frames' floor beyond the two decodes measured (the encodes, other tiles), and the plain
+  allocator's; the re-hold's runs at 2.0 and 5.0 GiB and the plain allocator's 0.6, run on the
+  rule's first cut, not run again on its final code.
   The check judged by what the next unit needs, not by all the run may still take: on the logs
   of 33 runs it only ever gives back, 4 of the 5 stops passing, but torch took more than that
   need in 12 units of 93, so it wants torch's limit lowered for the unit, or its cache emptied
