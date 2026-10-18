@@ -14,8 +14,8 @@
 - test_split_against_the_input: ours with split, the default, on milestone 1's input as one
   shot, scored against the input with milestone 5's metrics that apply to one window without a
   ground truth (ΔE lf, a*/b* spread, Y shift), as test_lab.py scored lab; every figure printed,
-  numz's lab's too when its output is there. Its thresholds are its first run's figures plus
-  milestone 5's tolerances.
+  numz's lab's too when its output is there. Its thresholds are its figures of 2026-10-16, the
+  noise drawn on the CPU, plus milestone 5's tolerances.
 
 Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR: numz's 7B fp16 and VAE), milestone
 1's input, m1/input_rgb.mkv in SEEDVR2X_REFERENCE_DIR (tests/test_regression.py), and, for
@@ -214,16 +214,19 @@ def test_split_is_the_study(tmp_path: Path, factor: str, windows: str) -> None:
     print(f"{factor}, {windows}: max |ours - study| {worst} (one 16-bit code: {CODE})")
 
 
-# The thresholds, set from the first run on the GPU (2026-10-09: numz's 7B fp16 and VAE, milestone
-# 1's 45 frames, seed 42), each its figure plus milestone 5's tolerance for the metric (DESIGN.md,
-# Validation milestones 5): ΔE lf 0.1307, + 0.1 ΔE; the a* and b* spreads 2.1865 and 5.2446, off
-# the input's 2.1611 and 5.2122 by 0.0254 and 0.0324, + 1% of the input's spread or 0.1 unit if
-# larger; the Y shift -0.0067 level, + 0.1 level. numz's lab on the same input, for comparison:
-# ΔE lf 0.6245, spreads 2.1528 and 5.2313, Y shift +0.0300; PSNR between the two 40.311 dB.
-DE_LF_MAX = 0.1307 + 0.1
-SPREAD_FIRST = {"a": 0.0254, "b": 0.0324}  # the first run's |spread - input's|
+# The thresholds, set from its run of 2026-10-16 on the RTX PRO 6000 (numz's 7B fp16 and VAE,
+# milestone 1's 45 frames, seed 42, the noise drawn on the CPU as seedvr2x draws it since that
+# day), each its figure plus milestone 5's tolerance for the metric (DESIGN.md, Validation
+# milestones 5): ΔE lf 0.1303, + 0.1 ΔE; the a* and b* spreads 2.1879 and 5.2462, off the input's
+# 2.1611 and 5.2122 by 0.0268 and 0.0341 (the unrounded figures'), + 1% of the input's spread or
+# 0.1 unit if larger; the Y shift -0.0063 level, + 0.1 level. Its first run's, on 2026-10-09 with
+# the noise drawn on the GPU: ΔE lf 0.1307, spreads 2.1865 and 5.2446, Y shift -0.0067. numz's lab
+# on the same input, for comparison: ΔE lf 0.6245, spreads 2.1528 and 5.2313, Y shift +0.0300;
+# PSNR between the two 40.244 dB (40.311 with the noise drawn on the GPU).
+DE_LF_MAX = 0.1303 + 0.1
+SPREAD_FIRST = {"a": 0.0268, "b": 0.0341}  # the run's |spread - input's|
 SPREAD_SHARE, SPREAD_UNITS = 0.01, 0.1  # of the input's spread, or SPREAD_UNITS if larger
-SHIFT_MAX = 0.0067 + 0.1  # 8-bit levels
+SHIFT_MAX = 0.0063 + 0.1  # 8-bit levels
 # BT.601 luma, as quality_metrics.py weighs it.
 LUMA = (0.299, 0.587, 0.114)
 # OpenCV's Gaussian kernel for sigma 4 on float images: cvRound(8 sigma + 1) | 1 = 33 taps.
