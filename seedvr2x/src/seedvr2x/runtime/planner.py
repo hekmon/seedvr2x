@@ -1902,12 +1902,17 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
     shot holds the most: beside it the run holds one latent's worth of the shot, a tiled
     encode's sums or the latent a tiled decode reads (host_moments), so that the sum is over
     what any moment takes by the rest of the shot's part, 1 byte a padded pixel and a latent at
-    least for a shot in one window. PROVISIONAL (implementation, 2026-10-10): the loader's
-    own peak while the weights load, 16.5 GiB, mostly the weights' file mapped (DESIGN.md,
-    Memory planner, Host RAM), isn't counted. PROVISIONAL (implementation, 2026-10-11): a
-    scratch over its allowance goes whole to its memory-mapped file (tiling.Scratch), and the
-    allowance is still counted, as DESIGN.md counts it, for the page cache its mapping works
-    in."""
+    least for a shot in one window. The load of the weights isn't counted apart: it reads their
+    file at its own offsets, never mapped, the parts that leave the GPU straight into their
+    pinned copies and every other tensor through one buffer the size of the largest
+    (blockswap.read), so that it peaks at what it leaves, the copies counted here and about 1.1
+    GiB of the process's own, under HOST_RESIDENT's 2.4: 1.1 GiB with nothing pinned, 7.5 with
+    6.38 GiB pinned, 16.3 with the 36 blocks' 15.19 (DESIGN.md, Memory planner, Host RAM;
+    BlockSwap, rewritten, the loader). Mapped, as until 2026-10-16, a load peaked at 16.3 to
+    16.8 GiB whatever the plan pinned, which no plan could count. PROVISIONAL (implementation,
+    2026-10-11): a scratch over its allowance goes whole to its memory-mapped file
+    (tiling.Scratch), and the allowance is still counted, as DESIGN.md counts it, for the page
+    cache its mapping works in."""
     latents = _longest(job.lengths, plan.window)
     held, moment, holder = _shot_held(job, plan)
     return Peaks(
