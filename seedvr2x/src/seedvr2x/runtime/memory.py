@@ -30,8 +30,10 @@ card's memory by its own means:
 - the planner planning in what is left less RESERVE (usable), which the plan leaves that
   allocator beyond what a step allocates: the plan's budget, the planner's own margin counted in
   it;
-- the memory free read again before every unit (check): the run stops when what torch may
-  still take no longer fits in it, other programs holding the rest of the card.
+- the memory free read again before every unit (check): when what torch may still take no
+  longer fits in it, other programs holding the rest of the card, the run stops; under
+  expandable segments torch is held again to what the card has, within RESERVE, and the run
+  goes on.
 
 The memory free is, for the limit and the plan, the smaller of two readings: what the driver
 reports free to the process (CUDA's figure, torch's mem_get_info) and what the whole card has
@@ -156,7 +158,8 @@ SUCCESS, OUT_OF_MEMORY = 0, 2
 # and each unit checked against the card's alone, the driver's standing up to 0.83 GiB under
 # it near the full card with nothing behind it (check). What it leaves to another program's
 # growth is that 0.5 GiB less what the run holds outside torch's count: a desktop that takes
-# more during a run stops it at its next unit (check). Run under it that evening on the same
+# more during a run stops it at its next unit, or under expandable segments has torch held
+# again there, within RESERVE (check). Run under it that evening on the same
 # card, a desktop holding 5.2 to 5.8 GiB of it: a 1080p job's checks had 0.47 to 0.50 GiB to
 # spare in two runs whose desktop stood still, and 0.73 to 1.05 in one whose desktop's own
 # memory fell by 0.44 GiB through the run (nvidia-smi), its last check 0.30 under the one
@@ -223,6 +226,9 @@ HELD_BACK_UNREAD = 3 * GIB
 # the most), and a VAE pass, left 6.0 with the planner's room, too (a decode takes 3.0 to 4.7
 # GiB beyond its peak when it is allowed them). Whether less should be planned under that
 # allocator is design's to decide.
+# Under those segments it is also what a check that finds the card short may take from the
+# limit, other programs having grown, before the run stops (check; DESIGN.md, Allocator,
+# decided on 2026-10-16): a step is then left less beyond its peak, never under it.
 RESERVE = round(4.5 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
 # allocator where the driver spills.
@@ -377,11 +383,21 @@ def reading(free: int) -> Reading:
     return Reading(free, card, counted, True, _held_back(card))
 
 
-# What startup found, for the run that follows: whether the run holds itself to the card and
-# whether its allocator is torch's own; and, once hold has set it, torch's limit in bytes.
+# What startup found, for the run that follows: whether the run holds itself to the card,
+# whether its allocator is torch's own, and whether that allocator's segments are expandable,
+# under which a check that finds the card short holds torch again (check); and, once hold has
+# set it, torch's limit in bytes.
 _spills = False
 _native = False
+_segments = False
 _limit: int | None = None
+# The limit set for the run's units once its plan is made (hold), in bytes: what a check that
+# holds torch again counts the limit's loss from, against RESERVE (check); None before it.
+_plan_s_limit: int | None = None
+# The figure the checks are judged on, the card's or on the driver's footing the driver's, as the
+# limit in force was set (hold, or check where it holds torch again), and what torch held then, in
+# bytes: what the memory outside torch's allocator grew since is counted from them (check).
+_base: tuple[int, int] | None = None
 # What hold left of the free memory outside torch's limit, in bytes, for the check's words.
 _left = HELD_BACK
 # The figure a held run's plan, its limit and the checks before its units go by, one footing for
@@ -424,8 +440,9 @@ def startup() -> str:
     answer there (probe) is taken for a driver that spills: it is Windows', which gave what
     the card didn't have every time it was asked, and a run held for nothing loses memory, a
     run not held where it should be loses its frames."""
-    global _spills, _native, _limit, _left, _footing, _planned
+    global _spills, _native, _segments, _limit, _left, _footing, _planned, _plan_s_limit, _base
     _spills, _limit, _left, _footing, _planned = False, None, HELD_BACK, None, None
+    _plan_s_limit, _base = None, None
     if paravirtual():
         found = probe()
         if found is None:
@@ -451,12 +468,12 @@ def startup() -> str:
     if given is None:
         os.environ[VARIABLES[0]] = chosen
     # torch's own allocator is its default too, when the environment's setting names none.
-    _native, segments = _allocator(chosen if given is None else given)
+    _native, _segments = _allocator(chosen if given is None else given)
     if _spills:
         # The environment's allocator stands, and is said next where it isn't the default.
         named = (
             "torch's own allocator, its segments expandable, limited"
-            if segments
+            if _segments
             else "torch's own allocator without expandable segments, limited"
             if _native
             else "torch limited"
@@ -481,7 +498,7 @@ def startup() -> str:
                 " so the card can still be passed; unset it for torch's own allocator",
                 given,
             )
-        elif not segments:
+        elif not _segments:
             # The user's own setting of torch's allocator stands, without the segments a held
             # run takes by default (EXPANDABLE): said, since a step short of room is then
             # refused where they slow it down and run it (DESIGN.md, Allocator, decided on
@@ -564,8 +581,9 @@ def hold(device: Any, first: bool = False) -> int | None:
     warm-up ran before any limit existed, the card's use up 1.23 GiB at the most through a
     first pass, the process's context and libraries in it (nvidia-smi, the same RTX 5090,
     2026-10-12). Then once the plan is made and before the models load, from the memory free
-    then, which is the limit the run's units are checked against (check). The first is said at
-    debug level, the second being the run's.
+    then, which is the limit the run's units are checked against, and the one a check that
+    holds torch again counts what the limit has lost from (check). The first is said at debug
+    level, the second being the run's.
 
     The figure each limit is set under is the run's footing, which it sets (_footing; DESIGN.md,
     Allocator: "the plan, the limit and the checks stand on one footing"): the first's, its own
@@ -581,7 +599,7 @@ def hold(device: Any, first: bool = False) -> int | None:
     limit for 4.5; a review, 2026-10-12). With no plan's figure of the card either (a limit set
     again with no plan made, which a run never does), the driver's figure, with a warning: the
     run's units are then checked on it (check)."""
-    global _limit, _left, _footing
+    global _limit, _left, _footing, _plan_s_limit, _base
     if not _spills:
         return None
     import torch
@@ -591,10 +609,13 @@ def hold(device: Any, first: bool = False) -> int | None:
     _footing = DRIVER if card is None else CARD
     free = reported if card is None else min(reported, card)
     _left = _held_back(card)
-    limit = torch.cuda.memory_reserved(device) + max(free - _left, 0)
+    reserved = torch.cuda.memory_reserved(device)
+    limit = reserved + max(free - _left, 0)
     fraction = min(limit / total, 1.0)
     torch.cuda.set_per_process_memory_fraction(fraction, device)  # pyright: ignore[reportUnknownMemberType]
     _limit = limit
+    _plan_s_limit = None if first else limit
+    _base = (reported if card is None else card, reserved)
     logger.log(
         logging.DEBUG if first else logging.INFO,
         "torch held to %.2f GiB on the GPU%s: the %.2f GiB free less %.1f, and what it holds;"
@@ -612,12 +633,48 @@ def check(device: Any) -> None:
     """On a driver that spills, once torch is held: refuse (torch.OutOfMemoryError, as torch
     refuses what passes its limit) when what torch may still take under its limit no longer fits
     in what the whole card has free (card_free); in what the driver reports free to this
-    process, where the card's figure was never read in the run. Called before every unit
-    (model.Models.enter).
+    process, where the card's figure was never read in the run. Under expandable segments, on
+    the card's figure, hold torch again to what the card has instead, within RESERVE (below).
+    Called before every unit (model.Models.enter).
 
     The limit is worth the memory free when it was set, less HELD_BACK. Other programs taking
     the card's memory since, torch at its limit would pass the card with nothing to refuse it.
     So the run stops, its units kept.
+
+    Under expandable segments (startup), where the card's figure is read, a check that finds the
+    card short holds torch again and the run goes on (DESIGN.md, Allocator, decided on 2026-10-16):
+    to what it holds and the card's free memory less HELD_BACK, said in a warning, as long as what
+    the limit has lost since the one set once the plan was made (hold) stays within RESERVE, what
+    that plan leaves torch's allocator beyond a step's peak. A step is then left that much less
+    beyond its peak, a step short of room slowing down under the segments where it would be refused
+    (EXPANDABLE), and the VAE's room, inside the plan's budget, is never touched. It holds torch
+    again only where the card has HELD_BACK free at that check, the new limit at or above what torch
+    holds: under it the limit would stand under torch's own reservation, every later check would
+    find the run's room under nothing and pass, the bound gone, while torch gives none of its cache
+    back between the units of a phase (a review, 2026-10-16: held again to 24.75 GiB with 25 held, a
+    program taking 4.75 more went unsaid). The run stops there instead (PROVISIONAL, implementation,
+    2026-10-16; the alternative, design's to weigh: torch's cache given back first, the card then
+    judged again). A desktop in use had stopped 3 runs of 6 under the segments and none of 4 under
+    the plain allocator, the memory outside torch having grown 0.50 to 0.59 GiB past its level at
+    the plan: the segments leave room on the card, and the desktop took it and kept it, where the
+    plain allocator filled the card and the desktop's growth was given back (an RTX 5090 under WSL2,
+    2026-10-16; DESIGN.md, Allocator). Past that bound, under torch's allocator without the
+    segments, or on the driver's figure, the run stops. A check never raises the limit again, the
+    card having more free than when torch was held (PROVISIONAL, implementation, 2026-10-16: design
+    decided the re-hold, not whether memory given back is taken again). Every stop and every re-hold
+    says what the memory outside torch's allocator grew since the limit in force was set, against
+    what that limit left it (HELD_BACK), counted from the figure judged and what torch held then
+    (_base): the check itself goes by the limit, which may have been set under the driver's figure,
+    the smaller then, the card left that much more (a review, 2026-10-16: counted from the limit,
+    the growth said fell short by that much).
+    Run so on the same card (2026-10-16, a job of 66 frames at 1080p, its window, tiles and
+    swapped blocks pinned, a second program taking memory once the plan's limit was set): under
+    the segments, with 1.0 and 2.0 GiB, torch was held again 1.00 and 2.00 GiB lower at the
+    first unit's check and the run went on, upscaled in 60.2 and 60.1 s (59.7 to 60.7 with no
+    program, earlier that day) with the frames of a run with none; with 5.0 GiB it stopped there,
+    and the same command resumed to those frames; with 0.6 GiB nothing was done, the memory
+    outside torch grown 0.47 GiB by that check, the desktop's own fallen by 0.14, every check
+    0.03 to 0.04 GiB to spare. Under the plain allocator 0.6 GiB stopped it there, 0.61 grown.
 
     On the card's figure, where it is read, and not on the smaller of the two as the limit was
     set: near the full card the driver's figure is no longer the process's own, and isn't the
@@ -661,15 +718,17 @@ def check(device: Any) -> None:
 
     The two figures are said rounded apart, what is free down and what the run may take up, so
     that a refusal by a few bytes never gives one figure twice ("1.00 GiB free ... where the
-    run may still take 1.00").
+    run may still take 1.00"); what the memory outside torch's allocator grew, and what the
+    limit has lost, up as well: a check short by a byte says 0.51 GiB grown, past the 0.5.
 
     Nothing is checked under an allocator of the environment's, whose own slack torch doesn't
     count (startup)."""
+    global _limit, _base
     if not _native or _limit is None:
         return
     import torch
 
-    reported = torch.cuda.mem_get_info(device)[0]
+    reported, total = torch.cuda.mem_get_info(device)
     card = None
     if _footing == CARD:
         read = _twice(_index(device))
@@ -688,15 +747,62 @@ def check(device: Any) -> None:
             return
         card = read
     free = reported if card is None else card
-    room = _limit - torch.cuda.memory_reserved(device)
-    if free < room:
-        named = _named(reported, card, smaller=False)
-        raise torch.OutOfMemoryError(
-            f"the GPU has {_down(free)} GiB free {named} where the run may still take"
-            f" {_up(room)}: other programs hold the rest of the card's memory, or the run's"
-            f" own work took more than the {_left / GIB:.1f} GiB left to it outside torch's"
-            " allocator"
-        )
+    reserved = torch.cuda.memory_reserved(device)
+    room = _limit - reserved
+    if free >= room:
+        return
+    # What the memory outside torch's allocator grew since the limit in force was set, other
+    # programs' or the run's own: the figure judged and what torch held then (_base), against
+    # the same two now. Counted from the limit (_left + room - free), it fell short by what the
+    # card had over the driver's figure where the limit was set under that one (a review).
+    grown = _left + room - free if _base is None else sum(_base) - free - reserved
+    named = _named(reported, card, smaller=False)
+    short = f"the GPU has {_down(free)} GiB free {named} where the run may still take {_up(room)}"
+    bound = ""
+    if card is not None and _segments and _plan_s_limit is not None:
+        limit = reserved + free - _left
+        lost = _plan_s_limit - limit
+        if free < _left:
+            # Held again there, torch would stand under what it holds, every later check pass
+            # unjudged and the bound go (a review, 2026-10-16): the run stops (PROVISIONAL).
+            bound = (
+                f": the card has less than the {_left / GIB:.1f} GiB left to the rest of it, where"
+                " torch held again would stand under what it holds"
+            )
+        elif lost > RESERVE:
+            bound = (
+                f": torch held again to what it holds and the card's free memory less"
+                f" {_left / GIB:.1f} would stand {_up(lost)} GiB under the limit set once the plan"
+                f" was made, past the {RESERVE / GIB:.1f} GiB that plan leaves torch's allocator"
+                " beyond a step's peak"
+            )
+        else:
+            fraction = min(limit / total, 1.0)
+            torch.cuda.set_per_process_memory_fraction(fraction, device)  # pyright: ignore[reportUnknownMemberType]
+            _limit, _base = limit, (free, reserved)
+            logger.warning(
+                "%s: the memory outside torch's allocator, other programs' or the run's own, grew"
+                " %s GiB on the card since torch's limit was set, past the %.1f GiB left to it;"
+                " torch held again to %.2f GiB, what it holds and the card's free memory less"
+                " %.1f: %s GiB under the limit set once the plan was made, within the %.1f GiB"
+                " that plan leaves torch's allocator beyond a step's peak, and the run goes on,"
+                " a step left that much less beyond its peak",
+                short,
+                _up(grown),
+                _left / GIB,
+                limit / GIB,
+                _left / GIB,
+                _up(lost),
+                RESERVE / GIB,
+            )
+            return
+    where = "on the card" if card is not None else "by the driver's figure"
+    raise torch.OutOfMemoryError(
+        f"{short}: other programs hold the rest of the card's memory, or the run's own work took"
+        f" more than the {_left / GIB:.1f} GiB left to it outside torch's allocator; the memory"
+        f" outside that allocator grew {_up(grown)} GiB {where} since torch's limit was set"
+        f"{bound}"
+    )
 
 
 def _twice(index: int) -> int | str:

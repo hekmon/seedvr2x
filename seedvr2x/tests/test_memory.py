@@ -32,7 +32,9 @@ def round_figures(monkeypatch: pytest.MonkeyPatch) -> None:
     """What a held run leaves outside torch's limit and what it plans under it again, at
     figures of the tests' own, 3 GiB and 2.3: the tests hold what is done with them, whatever
     a card's measure makes them; test_the_measured_figures holds the measured ones, and
-    test_a_card_unread_is_held_under_a_margin_of_its_own what each is taken under."""
+    test_a_card_unread_is_held_under_a_margin_of_its_own what each is taken under. Under these
+    a check short of room is always past what torch held again may lose (more than 3 GiB grown
+    outside its limit, 2.3 to lose): the re-hold's tests take the measured ones (measured)."""
     monkeypatch.setattr(memory, "HELD_BACK", 3 * GIB)
     monkeypatch.setattr(memory, "HELD_BACK_UNREAD", 3 * GIB)
     monkeypatch.setattr(memory, "RESERVE", round(2.3 * GIB))
@@ -99,7 +101,10 @@ def test_a_card_unread_is_held_under_a_margin_of_its_own(
         held(monkeypatch, 0, reserved=22 * GIB)
         nvml.cards[NAMED] = limit - 22 * GIB
         memory.check("cuda:0")
-        nvml.cards[NAMED] = limit - 22 * GIB - 1
+        # Short by more than torch held again may lose under the expandable segments, the 4.5
+        # GiB (test_a_check_short_of_room_holds_torch_again_under_the_segments): stopped, the
+        # margin named.
+        nvml.cards[NAMED] = limit - 22 * GIB - 4 * GIB - 1
         with pytest.raises(torch.OutOfMemoryError, match=r"more than the 0\.5 GiB left to it"):
             memory.check("cuda:0")
 
@@ -627,12 +632,17 @@ def test_the_whole_card_s_free_memory_is_taken_where_it_is_the_smaller(
     with pytest.raises(torch.OutOfMemoryError) as refusal:
         memory.check("cuda:0")
     # The two figures a byte apart, and said apart: what is free rounded down, what the run
-    # may take rounded up, where "1.00 GiB free ... may still take 1.00" gave no reason to stop.
+    # may take rounded up, where "1.00 GiB free ... may still take 1.00" gave no reason to stop;
+    # and what the memory outside torch's allocator grew, rounded up: 3 GiB and a byte, the card
+    # under the 3.0 GiB these figures leave the rest of it (round_figures), where torch held
+    # again would stand under what it holds.
     assert str(refusal.value) == (
         "the GPU has 0.99 GiB free on the whole card by NVML (its driver reports 20.00 GiB free"
         " to this process) where the run may still take 1.00: other programs hold the rest of"
         " the card's memory, or the run's own work took more than the 3.0 GiB left to it"
-        " outside torch's allocator"
+        " outside torch's allocator; the memory outside that allocator grew 3.01 GiB on the card"
+        " since torch's limit was set: the card has less than the 3.0 GiB left to the rest of it,"
+        " where torch held again would stand under what it holds"
     )
     # The driver's figure the smaller, as it is near the full card: it stops nothing. Nothing
     # reported free to the process, and 1 GiB on the card, which torch may still take: the
@@ -1088,7 +1098,9 @@ def test_other_programs_filling_the_card_stop_the_run(
         "the GPU has 2.99 GiB free on the whole card by NVML (its driver reports 2.00 GiB free"
         " to this process) where the run may still take 3.00: other programs hold the rest of"
         " the card's memory, or the run's own work took more than the 3.0 GiB left to it"
-        " outside torch's allocator"
+        " outside torch's allocator; the memory outside that allocator grew 3.01 GiB on the card"
+        " since torch's limit was set: the card has less than the 3.0 GiB left to the rest of it,"
+        " where torch held again would stand under what it holds"
     )
     # A new run asks again, and starts unheld: nothing read, of the card either, after its
     # probe.
@@ -1379,6 +1391,331 @@ def test_the_plan_the_limit_and_the_checks_stand_on_one_footing(
     assert len(warned) == len(expected) and all(
         text in message for text, message in zip(expected, warned, strict=True)
     ), warned
+
+
+def measured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The module's figures as measured (MEASURED: 0.5 GiB left outside torch's limit, 4.5 that a
+    plan leaves torch's allocator beyond a step's peak, 3.0 under the driver's figure alone), in
+    the tests' own place (round_figures), under which torch is never held again."""
+    for name, value in zip(("HELD_BACK", "RESERVE", "HELD_BACK_UNREAD"), MEASURED, strict=True):
+        monkeypatch.setattr(memory, name, value)
+
+
+def held_run(monkeypatch: pytest.MonkeyPatch, nvml: Nvml | None) -> list[float]:
+    """A run held to its card under the measured figures, its allocator the environment's or the
+    default: torch held a first time with 28 GiB free on the card, then its plan made and torch
+    held for its units with 26 GiB free on the card (`nvml` set so, or None: NVML silent, the
+    driver's figure alone), the driver reporting 30 GiB and torch holding nothing; returns the
+    limits torch is given from there on, as fractions of a 32 GiB card."""
+    measured(monkeypatch)
+    startup(monkeypatch, Card(30 * GIB, spills=True), nvml)
+    held(monkeypatch, 30 * GIB)
+    if nvml is not None:
+        nvml.cards[NAMED] = 28 * GIB
+    memory.hold("cuda:0", first=True)
+    if nvml is not None:
+        nvml.cards[NAMED] = 26 * GIB
+    memory.reading(30 * GIB)
+    limits = held(monkeypatch, 30 * GIB)
+    memory.hold("cuda:0")
+    return limits
+
+
+def test_a_check_short_of_room_holds_torch_again_under_the_segments(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Allocator (decided on 2026-10-16): "under the segments, a check that finds the
+    # card short re-holds torch to the card's free memory less 0.5 GiB and goes on, said in a
+    # warning, as long as what the limit has lost since the plan stays within the 4.5 GiB". A
+    # desktop in use had stopped 3 runs of 6 under them, the memory outside torch grown 0.50 to
+    # 0.59 GiB past its level at the plan. Here the plan's limit is 25.5 GiB, the card's 26 GiB
+    # free less 0.5, torch holding nothing: 6 GiB of the card outside torch.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    nvml = Nvml({NAMED: 26 * GIB})
+    limits = held_run(monkeypatch, nvml)
+    assert limits == [25.5 / 32]
+    # torch holding 20 GiB, the card 6 free: torch may still take 5.5, 0.5 to spare. Nothing.
+    limits = held(monkeypatch, 0, reserved=20 * GIB)
+    nvml.cards[NAMED] = 6 * GIB
+    said = len(caplog.messages)
+    memory.check("cuda:0")
+    assert limits == [] and len(caplog.messages) == said
+    # Another program takes 0.75 GiB: the card has 5.25 free where torch may still take 5.5.
+    # Held again to what torch holds and the card's free memory less 0.5, 24.75 GiB: 0.75
+    # under the plan's limit, the growth; and said, the run going on.
+    nvml.cards[NAMED] = round(5.25 * GIB)
+    memory.check("cuda:0")
+    assert limits == [24.75 / 32]
+    assert [record.levelname for record in caplog.records[said:]] == ["WARNING"]
+    assert caplog.messages[-1] == (
+        "the GPU has 5.25 GiB free on the whole card by NVML (its driver reports 0.00 GiB free to"
+        " this process) where the run may still take 5.50: the memory outside torch's allocator,"
+        " other programs' or the run's own, grew 0.75 GiB on the card since torch's limit was"
+        " set, past the 0.5 GiB left to it; torch held again to 24.75 GiB, what it holds and the"
+        " card's free memory less 0.5: 0.75 GiB under the limit set once the plan was made,"
+        " within the 4.5 GiB that plan leaves torch's allocator beyond a step's peak, and the run"
+        " goes on, a step left that much less beyond its peak"
+    )
+    # The next unit judged against that limit: torch holding 22 GiB of it may take 2.75 more,
+    # the card has 3.25, 0.5 to spare: nothing. The program gone, 4 GiB free on the card: the
+    # limit stays where it is, never raised again by a check.
+    limits = held(monkeypatch, 0, reserved=22 * GIB)
+    for free in (round(3.25 * GIB), 4 * GIB):
+        nvml.cards[NAMED] = free
+        memory.check("cuda:0")
+    assert limits == [] and len(caplog.messages) == said + 1
+    # A byte short of that limit: held again, 0.5 GiB and a byte grown since it was set, 1.25
+    # and a byte lost since the plan's.
+    nvml.cards[NAMED] = round(2.75 * GIB) - 1
+    memory.check("cuda:0")
+    assert limits == [(round(24.25 * GIB) - 1) / (32 * GIB)]
+    assert caplog.messages[-1].startswith(
+        "the GPU has 2.74 GiB free on the whole card by NVML (its driver reports 0.00 GiB free to"
+        " this process) where the run may still take 2.75: the memory outside torch's allocator,"
+        " other programs' or the run's own, grew 0.51 GiB on the card since torch's limit was"
+        " set, past the 0.5 GiB left to it; torch held again to 24.25 GiB, what it holds and the"
+        " card's free memory less 0.5: 1.26 GiB under the limit set once the plan was made,"
+    )
+    # Where the card has less than 0.5 GiB free, torch held again would stand under what it
+    # holds: the run stops (test_a_re_hold_needs_the_0_5_left_to_the_rest_of_the_card).
+    nvml.cards[NAMED] = GIB // 4
+    with pytest.raises(torch.OutOfMemoryError, match=r"grew 2\.50 GiB on the card since"):
+        memory.check("cuda:0")
+    assert len(limits) == 1
+
+
+def test_re_holds_summing_past_what_the_plan_leaves_stop_the_run(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # What the limit loses is counted from the one set once the plan was made, 25.5 GiB here,
+    # not from the first, set before the first pass (27.5), nor from the last re-hold: a run
+    # may lose 4.5 GiB of it in all, the reserve its plan left torch's allocator beyond a step's
+    # peak, and stops past that, the stop saying it.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    nvml = Nvml({NAMED: 26 * GIB})
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0, reserved=20 * GIB)
+    # 1 GiB taken by another program: held again to 24.5 GiB, 1 under the plan's limit.
+    nvml.cards[NAMED] = 5 * GIB
+    memory.check("cuda:0")
+    # 3.5 more, the card at 1.5 where torch may still take 4.5: held again to 21.0, 4.5 under
+    # the plan's limit in all, as much as the plan leaves: taken.
+    nvml.cards[NAMED] = round(1.5 * GIB)
+    memory.check("cuda:0")
+    assert limits == [24.5 / 32, 21 / 32]
+    assert "4.50 GiB under the limit set once the plan was made, within" in caplog.messages[-1]
+    # A byte more: 0.5 GiB and a byte grown since that limit, a byte past the 0.5 left to it,
+    # which held again would stand 5 GiB and a byte under the plan's: stopped, the limit as it
+    # was.
+    said = len(caplog.messages)
+    nvml.cards[NAMED] = GIB - 1
+    with pytest.raises(torch.OutOfMemoryError) as refusal:
+        memory.check("cuda:0")
+    assert limits == [24.5 / 32, 21 / 32] and len(caplog.messages) == said
+    assert str(refusal.value) == (
+        "the GPU has 0.99 GiB free on the whole card by NVML (its driver reports 0.00 GiB free to"
+        " this process) where the run may still take 1.00: other programs hold the rest of the"
+        " card's memory, or the run's own work took more than the 0.5 GiB left to it outside"
+        " torch's allocator; the memory outside that allocator grew 0.51 GiB on the card since"
+        " torch's limit was set: torch held again to what it holds and the card's free memory"
+        " less 0.5 would stand 5.01 GiB under the limit set once the plan was made, past the 4.5"
+        " GiB that plan leaves torch's allocator beyond a step's peak"
+    )
+    # A program taking 5 GiB at once, from the plan's limit: past it at the first check.
+    nvml = Nvml({NAMED: 26 * GIB})
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0, reserved=20 * GIB)
+    nvml.cards[NAMED] = GIB
+    with pytest.raises(torch.OutOfMemoryError, match=r"grew 5\.00 GiB on the card .* 5\.00 GiB"):
+        memory.check("cuda:0")
+    assert limits == []
+
+
+def test_a_re_hold_needs_the_0_5_left_to_the_rest_of_the_card(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A review (2026-10-16): held again with the card under 0.5 GiB free, torch's limit stood
+    # under what torch held, every later check passed unjudged and the bound went: the plan's
+    # limit 25.5 GiB, torch holding 25, a program taking 0.75 left the card 0.25 free and torch
+    # was held again to 24.75; the program taking 4.75 more went unsaid. The run stops there.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    nvml = Nvml({NAMED: 26 * GIB})
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0, reserved=25 * GIB)
+    nvml.cards[NAMED] = GIB // 4
+    with pytest.raises(torch.OutOfMemoryError) as refusal:
+        memory.check("cuda:0")
+    assert limits == []
+    assert str(refusal.value) == (
+        "the GPU has 0.25 GiB free on the whole card by NVML (its driver reports 0.00 GiB free to"
+        " this process) where the run may still take 0.50: other programs hold the rest of the"
+        " card's memory, or the run's own work took more than the 0.5 GiB left to it outside"
+        " torch's allocator; the memory outside that allocator grew 0.75 GiB on the card since"
+        " torch's limit was set: the card has less than the 0.5 GiB left to the rest of it, where"
+        " torch held again would stand under what it holds"
+    )
+    # Held again where the card has the 0.5 GiB, to what torch holds at the least, and each
+    # growth after it judged: held again or stopped, never passed unsaid. Torch holding 24.5
+    # GiB, a program's 0.75 leave the card 0.75 free: held again to 24.75; 0.25 more, the card
+    # at 0.5 where torch may still take 0.25: nothing; the card's last 0.5: stopped, 0.75 grown
+    # since that limit.
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0, reserved=round(24.5 * GIB))
+    nvml.cards[NAMED] = round(0.75 * GIB)
+    memory.check("cuda:0")
+    assert limits == [24.75 / 32]
+    nvml.cards[NAMED] = GIB // 2
+    memory.check("cuda:0")
+    nvml.cards[NAMED] = 0
+    with pytest.raises(
+        torch.OutOfMemoryError, match=r"grew 0\.75 GiB on the card .* less than the 0\.5 GiB"
+    ):
+        memory.check("cuda:0")
+    assert limits == [24.75 / 32]
+    # The card with the 0.5 GiB to the byte: held again to what torch holds, nothing over it.
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0, reserved=24 * GIB)
+    nvml.cards[NAMED] = GIB // 2
+    memory.check("cuda:0")
+    assert limits == [24 / 32] and "torch held again to 24.00 GiB" in caplog.messages[-1]
+
+
+def test_the_growth_is_counted_from_the_card_s_figure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The limit set under the driver's figure, the smaller then: 24 GiB reported, 26 on the
+    # card, the limit 23.5, the card left 2.5 GiB outside it. The check goes by that limit; the
+    # growth it says is the card's own, from the card's figure and what torch held as the limit
+    # was set: 3 GiB here, where counted from the limit it read 1 (a review, 2026-10-16). Under
+    # torch's allocator without the segments the run stops; under them torch is held again, 1
+    # GiB under that limit for 3 grown.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    measured(monkeypatch)
+    for setting in ("backend:native", None):
+        if setting is None:
+            monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF")
+        else:
+            monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", setting)
+        nvml = Nvml({NAMED: 26 * GIB})
+        startup(monkeypatch, Card(30 * GIB, spills=True), nvml)
+        memory.reading(30 * GIB)
+        held(monkeypatch, 24 * GIB)
+        assert memory.hold("cuda:0") == round(23.5 * GIB)
+        held(monkeypatch, 0, reserved=20 * GIB)
+        nvml.cards[NAMED] = 3 * GIB
+        if setting is not None:
+            with pytest.raises(torch.OutOfMemoryError, match=r"grew 3\.00 GiB on the card since"):
+                memory.check("cuda:0")
+            continue
+        memory.check("cuda:0")
+        assert "grew 3.00 GiB on the card since" in caplog.messages[-1]
+        assert "torch held again to 22.50 GiB" in caplog.messages[-1]
+        assert "1.00 GiB under the limit set once the plan was made" in caplog.messages[-1]
+
+
+@pytest.mark.parametrize(
+    ("setting", "again"),
+    [
+        ("backend:native", False),
+        ("backend:native,expandable_segments:False", False),
+        # torch's own allocator with the segments, as the user may write it (_allocator): as the
+        # default.
+        (" backend: native , expandable_segments:True", True),
+    ],
+)
+def test_without_the_segments_a_check_short_of_room_stops_the_run(
+    monkeypatch: pytest.MonkeyPatch, setting: str, again: bool
+) -> None:
+    # Torch's allocator without expandable segments refuses a step short of room where they
+    # slow it down and run it (memory.EXPANDABLE): torch isn't held again there, and the run
+    # stops as before, the growth said. The allocator as the run reads it, the user's own
+    # setting standing.
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", setting)
+    nvml = Nvml({NAMED: 26 * GIB})
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0, reserved=20 * GIB)
+    nvml.cards[NAMED] = round(5.25 * GIB)
+    if again:
+        memory.check("cuda:0")
+        assert limits == [24.75 / 32]
+        return
+    with pytest.raises(torch.OutOfMemoryError) as refusal:
+        memory.check("cuda:0")
+    assert limits == []
+    assert str(refusal.value) == (
+        "the GPU has 5.25 GiB free on the whole card by NVML (its driver reports 0.00 GiB free to"
+        " this process) where the run may still take 5.50: other programs hold the rest of the"
+        " card's memory, or the run's own work took more than the 0.5 GiB left to it outside"
+        " torch's allocator; the memory outside that allocator grew 0.75 GiB on the card since"
+        " torch's limit was set"
+    )
+
+
+def test_on_the_driver_s_figure_a_check_short_of_room_stops_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # NVML silent at the plan's reading: the plan, the limit and the checks on the driver's
+    # figure, 3 GiB under it (DESIGN.md, Allocator: "Past it, under the plain allocator, or on
+    # the driver's figure, the run stops as today"). The limit 27 GiB, torch holding 20 of it,
+    # the driver reporting 6.25 free: 3.75 GiB grown by that figure, within what torch held
+    # again could lose on the card's: stopped all the same, the growth said.
+    limits = held_run(monkeypatch, None)
+    assert limits == [27 / 32]
+    limits = held(monkeypatch, 7 * GIB, reserved=20 * GIB)
+    memory.check("cuda:0")
+    limits = held(monkeypatch, round(6.25 * GIB), reserved=20 * GIB)
+    with pytest.raises(torch.OutOfMemoryError) as refusal:
+        memory.check("cuda:0")
+    assert limits == []
+    assert str(refusal.value) == (
+        "the GPU has 6.25 GiB free as its driver reports it to this process (the whole card's,"
+        " NVML's, wasn't read) where the run may still take 7.00: other programs hold the rest of"
+        " the card's memory, or the run's own work took more than the 3.0 GiB left to it outside"
+        " torch's allocator; the memory outside that allocator grew 3.75 GiB by the driver's"
+        " figure since torch's limit was set"
+    )
+
+
+def test_a_check_nvml_fails_at_holds_nothing_again(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # NVML failing twice at a check under the segments: that check skipped with its warning, as
+    # before (test_nvml_failing_at_a_check_is_asked_again_then_that_check_skipped), the limit
+    # untouched, on the driver's figure no more than on the card's; the next check that reads
+    # the card short holds torch again.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    nvml = Nvml({NAMED: 26 * GIB})
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0, reserved=20 * GIB)
+    nvml.cards[NAMED] = round(5.25 * GIB)
+    nvml.failing = "nvmlDeviceGetMemoryInfo"
+    said = len(caplog.messages)
+    memory.check("cuda:0")
+    assert limits == [] and [record.levelname for record in caplog.records[said:]] == ["WARNING"]
+    assert caplog.messages[-1].startswith(
+        "the whole card's free memory couldn't be read through NVML before this unit"
+    )
+    nvml.failing = None
+    memory.check("cuda:0")
+    assert limits == [24.75 / 32] and "torch held again to 24.75 GiB" in caplog.messages[-1]
+
+
+def test_a_check_before_the_plan_s_limit_holds_nothing_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Torch held once only, before the first pass (a run checks no unit before its second
+    # limit): no limit set for the run's units to count a loss from, and a check short of room
+    # stops, as before.
+    measured(monkeypatch)
+    nvml = Nvml({NAMED: 26 * GIB})
+    startup(monkeypatch, Card(30 * GIB, spills=True), nvml)
+    held(monkeypatch, 30 * GIB)
+    memory.hold("cuda:0", first=True)
+    limits = held(monkeypatch, 0, reserved=20 * GIB)
+    nvml.cards[NAMED] = round(5.25 * GIB)
+    with pytest.raises(torch.OutOfMemoryError, match=r"grew 0\.75 GiB on the card since"):
+        memory.check("cuda:0")
+    assert limits == []
 
 
 def test_the_card_is_checked_before_every_unit(monkeypatch: pytest.MonkeyPatch) -> None:

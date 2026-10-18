@@ -31,6 +31,7 @@ def no_driver_asked(
         for name in memory.VARIABLES:
             monkeypatch.delenv(name, raising=False)
     state = (("_spills", False), ("_native", False), ("_limit", None), ("_footing", None))
-    for name, value in (*state, ("_planned", None), ("_left", memory.HELD_BACK)):
+    held = (("_segments", False), ("_plan_s_limit", None), ("_base", None))
+    for name, value in (*state, *held, ("_planned", None), ("_left", memory.HELD_BACK)):
         monkeypatch.setattr(memory, name, value)
     yield
