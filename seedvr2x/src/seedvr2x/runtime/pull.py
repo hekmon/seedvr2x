@@ -19,7 +19,7 @@ import shlex
 import shutil
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 
@@ -197,15 +197,20 @@ def resolve(
     the free space counts every file it downloads. ModelError says what to do for each one
     refused, before anything is fetched.
 
-    `download` False: a job that loads no model, one with every segment made (cli._run). A file
-    of seedvr2x's own missing from the cache is then held to its pin, said in the log, and
-    neither downloaded nor read (ModelFile.absent): the job is compared with its record by the
-    pin's size and SHA-256 (cli._model), as its record has them where the file passed its pin
-    check. DESIGN.md, Pause and resume (decided on 2026-10-13): "a finished job whose own model
-    file isn't there is held to the file's pin and fetches nothing, where today it downloads it
-    before saying finished; a file the user names must be there": one in --model-dir must, and
-    is checked as any job's. Until then such a job downloaded 16.5 GB to say it was finished.
-    A file in the cache is checked as any job's, by its header and its pin."""
+    `download` False: a job that loads no model, one with every segment made (cli._run). Its
+    DiT's or its VAE's file of seedvr2x's own missing from the cache is then held to its pin,
+    said in the log, and neither downloaded nor read (ModelFile.absent): the job is compared with
+    its record by the pin's size and SHA-256 (cli._model), as its record has them where the file
+    passed its pin check. DESIGN.md, Pause and resume (decided on 2026-10-13): "a finished job
+    whose own model file isn't there is held to the file's pin and fetches nothing, where today
+    it downloads it before saying finished; a file the user names must be there": one in
+    --model-dir must, and is checked as any job's. Until then such a job downloaded 16.5 GB to
+    say it was finished. The shot detector's, with detector, is fetched as any run's: such a
+    job's first pass runs again with the detector where its frame index is gone, and that pass
+    loads it (DESIGN.md, Pause and resume, decided on 2026-10-16: "a job that loads no model
+    fetches none even where its first pass must run again", where it downloaded the DiT's 16.5
+    GB for an assembly alone left). A file in the cache is checked as any job's, by its header
+    and its pin."""
     if model_dir is not None:
         logger.info("model files from %s (--model-dir), nothing downloaded", model_dir)
         return ModelFiles(
@@ -235,7 +240,10 @@ def resolve(
     if refusals:
         raise ModelError("\n".join(refusals))
     names = (dit, vae, DETECTOR) if detector else (dit, vae)
-    found = fetch({name: PINNED[name] for name in names}, download)
+    # The files the run loads, which it fetches: every one, or where it loads no model, the
+    # shot detector's alone, where its first pass runs.
+    loads = names if download else names[2:]
+    found = fetch({name: PINNED[name] for name in names}, loads)
     where = cache()
 
     def file(name: str) -> ModelFile:
@@ -272,14 +280,14 @@ def cached(name: str) -> Path | None:
     return None if found is None else found[0]
 
 
-def fetch(pins: Mapping[str, Pin], download: bool = True) -> dict[str, Path]:
+def fetch(pins: Mapping[str, Pin], download: Collection[str] | None = None) -> dict[str, Path]:
     """The files of REPO at REVISION that pins name, by name, each from Hugging Face's cache
     (_cached), or downloaded into it, one at a time, never the repository whole (DESIGN.md,
     Weights). Before each download, the free space of the cache's disk is checked against what
     the downloads need from there on (_check_space); HF_HUB_OFFLINE refuses any. The library's log
     goes through seedvr2x's (_library_logging). ModelError says what to do when a file can't be
-    had. With `download` False, those the cache holds alone, nothing downloaded nor refused
-    (resolve)."""
+    had. With `download`, the names of those that may be downloaded (None: every one): any other
+    the cache doesn't hold is left out, neither downloaded nor refused (resolve)."""
     from huggingface_hub import constants
 
     _library_logging()
@@ -293,9 +301,9 @@ def fetch(pins: Mapping[str, Pin], download: bool = True) -> dict[str, Path]:
         found[name], linked = hit
         how = "" if linked else "from another revision's download, "
         logger.info("%s: in the cache, %s%s", name, how, found[name])
-    missing = [name for name in pins if name not in found]
-    if not download:
-        return found
+    missing = [
+        name for name in pins if name not in found and (download is None or name in download)
+    ]
     if missing and constants.HF_HUB_OFFLINE:
         needed = sum(pins[name].size for name in missing)
         raise ModelError(
@@ -317,7 +325,7 @@ def fetch(pins: Mapping[str, Pin], download: bool = True) -> dict[str, Path]:
         left = {each: pins[each] for each in missing[index:]}
         _check_space(where, left)
         found[name] = _download(name, pins[name], where, sum(pin.size for pin in left.values()))
-    return {name: found[name] for name in pins}
+    return {name: found[name] for name in pins if name in found}
 
 
 def check_pinned(model_files: ModelFiles) -> None:

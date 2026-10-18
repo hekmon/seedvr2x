@@ -633,10 +633,15 @@ def _run(args: argparse.Namespace) -> int:
         # loads none, and one of seedvr2x's own missing from Hugging Face's cache is held to its
         # pin, not downloaded (pull.resolve; DESIGN.md, Pause and resume, decided on 2026-10-13).
         # But a .mkv path's whose first pass must run again with the shot detector, its frame
-        # index gone and its shots detected (`detects`): that pass takes the GPU, as any run.
-        idle = recorded is not None and complete(recorded) and not detects
+        # index gone and its shots detected (`detects`): that pass takes the GPU, as any run, and
+        # the detector's file, which it loads, the job still loading no model of its own (`made`;
+        # decided on 2026-10-16: "a job that loads no model fetches none even where its first
+        # pass must run again", where such a job downloaded the DiT's 16.5 GB for its assembly).
+        made = recorded is not None and complete(recorded)
+        idle = made and not detects
         # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
-        # into it when missing, in one fetch, but for a job with every segment made (`idle`);
+        # into it when missing, in one fetch, but for a job with every segment made (`made`),
+        # which fetches the shot detector's alone, where its first pass runs with it;
         # checked by their headers, in a second, then seedvr2x's own by their pinned size and
         # SHA-256 (16.5 GB to read for the DiT), which the manifest's record takes: before the
         # resume's comparison and the first pass, which decodes the whole source (DESIGN.md,
@@ -650,7 +655,7 @@ def _run(args: argparse.Namespace) -> int:
             model_files = pull.resolve(
                 *(args.model_dir, args.dit_model, args.vae_model),
                 detector=detects,
-                download=not idle,
+                download=not made,
             )
         detector = model_files.detector
         dit, vae = (

@@ -55,7 +55,7 @@ from huggingface_hub.errors import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
-from test_cli_run import STAND_IN_MODELS, source, stand_in_model
+from test_cli_run import STAND_IN_MODELS, StandInDetector, source, stand_in_model
 from test_weights import SHOTS, V1, as_dtype, transnetv2, write
 
 from seedvr2x import cli
@@ -487,6 +487,58 @@ def test_a_job_with_every_segment_made_fetches_nothing(
     # Another job, with its units to make: its DiT downloaded again, as any job's.
     assert upscale(tmp_path, "another", *options) == 0
     assert [call["filename"] for call in hub.calls] == [DIT] and hub.snapshot(DIT).is_file()
+
+
+@needs_ffmpeg
+@pytest.mark.usefixtures("stand_in")
+def test_a_job_whose_first_pass_runs_again_fetches_the_detector_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hub: Hub,
+    pins: dict[str, Pin],
+    detector_pin: Pin,
+    hashed: list[Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # DESIGN.md, Pause and resume (decided on 2026-10-16): "a job that loads no model fetches none
+    # even where its first pass must run again". A .mkv path's job, its shots detected, with
+    # every segment made and its assembly left; its frame index gone since, and its DiT's file
+    # and the shot detector's gone from Hugging Face's cache. Run again, its first pass runs
+    # again with the detector, whose file it downloads, as any run whose detector runs; the
+    # DiT's it neither downloads nor reads, held to its pin; the file is assembled, exit 0, its
+    # VAE, still there, checked and hashed as any job's. Until then it downloaded the DiT's file,
+    # 16.5 GB, for an assembly.
+    caplog.set_level(logging.INFO)
+    options = ["--dit-model", DIT, "--vae-model", VAE]
+    # The files downloaded by a job before, so that this one's assembly alone, made last, is
+    # refused for its room, every segment made.
+    assert upscale(tmp_path, "before", *options, detect=True) == 0
+    assert [call["filename"] for call in hub.calls] == [DIT, VAE, pull.DETECTOR]
+    with monkeypatch.context() as full:
+        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, "one.mkv", *options, detect=True) == 1
+    work = tmp_path / "one.mkv.work"
+    assert not (tmp_path / "one.mkv").exists()
+    (work / "frame_index.bin").unlink()
+    for name in (DIT, pull.DETECTOR):
+        hub.snapshot(name).unlink()
+    hub.calls.clear()
+    hashed.clear()
+    caplog.clear()
+    StandInDetector.built.clear()
+    assert upscale(tmp_path, "one.mkv", *options, detect=True) == 0
+    assert (tmp_path / "one.mkv").is_file() and not work.exists()
+    assert len(StandInDetector.built) == 1
+    assert [call["filename"] for call in hub.calls] == [pull.DETECTOR]
+    assert not hub.snapshot(DIT).exists() and hub.snapshot(pull.DETECTOR).is_file()
+    read = [path.name for path in hashed if path.name in (*CONTENT, pull.DETECTOR)]
+    assert sorted(read) == sorted([VAE, pull.DETECTOR])
+    held = (
+        f"{DIT}: not in Hugging Face's cache, and not downloaded: the job has every segment made"
+        f" and loads no model; held to its pin, hekmon/seedvr2x's at {REVISION[:8]}, SHA-256"
+        f" {pins[DIT].sha256}"
+    )
+    assert held in caplog.messages
 
 
 @needs_ffmpeg
