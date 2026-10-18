@@ -5,16 +5,16 @@ The shot's frames are read as the VAE encodes them, in its slices of 4 frames, a
 encoded once. The DiT runs on windows of at most `window` latents, one window per call,
 consecutive windows sharing SHARED latents; the shared latents are mixed with cosine weights, and
 the whole shot is decoded in one stream, its frames written as they come. The noise is drawn once
-for the shot, on the device, and sliced per window: it waits in system memory with the latent
-between two windows, each window's slices sent to the device for its pass, so that the DiT's
-phase holds nothing of the shot there beside the window it runs. Every step keeps numz's order
-and dtypes (src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives
-numz's one-batch output, bit for bit, in numz's padding (milestone 1); in seedvr2x's (DESIGN.md,
-Pipeline step 0), numz's patched to pad alike (research/scripts/numerics_patch.py,
-NUM_PAD=reflect>=8+black+16). Only the latents and their noise are ever whole in memory, unless
-a pass is tiled, and in system memory: on the device, the VAE's passes hold a slice's at a time
-and the DiT's a window's, whatever the shot's length, but for the noise's draw, the shot's latent
-and its noise whole there for that moment (sample_windows; DESIGN.md, Memory planner).
+for the shot, on the CPU, and sliced per window: it waits in system memory with the latent, each
+window's slices sent to the device for its pass, so that the DiT's phase holds nothing of the
+shot there beside the window it runs (DESIGN.md, Pipeline step 2). Every other step keeps numz's
+order and dtypes (src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives
+numz's one-batch output, bit for bit, in numz's padding and numz's draw, on the device (milestone
+1); in seedvr2x's padding (DESIGN.md, Pipeline step 0), numz's patched to pad alike
+(research/scripts/numerics_patch.py, NUM_PAD=reflect>=8+black+16). Only the latents and their
+noise are ever whole in memory, unless a pass is tiled, and in system memory: on the device, the
+VAE's passes hold a slice's at a time and the DiT's a window's, whatever the shot's length
+(sample_windows; DESIGN.md, Memory planner).
 
 A tiled pass can't stream (runtime/tiling.py; DESIGN.md, Pipeline steps 1 and 3): each tile runs
 over the whole shot, so a tiled encode keeps the shot's transformed input, and a tiled decode
@@ -35,6 +35,7 @@ transform, in float32 (reference_inputs), then written: no second pass, no buffe
 
 import logging
 import math
+import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -336,27 +337,35 @@ def _transformed(
 
 
 def sample_windows(
-    models: Models, latent: Tensor, layout: Sequence[tuple[int, int]], seed: int, start: int = 0
+    models: Models,
+    latent: Tensor,
+    layout: Sequence[tuple[int, int]],
+    seed: int,
+    start: int = 0,
+    *,
+    numz_draw: bool = False,
 ) -> Iterator[Tensor]:
     """The DiT's output for each window of layout from window `start` on, in order, each (t, h, w,
     16) on the device: one Euler step per window, from the shot's latent, (T', h, w, 16) in the
     memory layout its encode gave it (encode_shot): in system memory, as its encode gives it and
     the units give it back (units.Units.save_latent, units.Units.latent), or on the device.
 
-    The noise is drawn once for the shot, when the first window is asked for, on the device and
-    on the latent's layout, as numz draws it for a batch (generation_phases.py:663-680): its
-    values follow the device, the dtype, the shape and the strides (_drawn). Nothing else draws,
-    so a window's noise is the same whether the windows before it ran in this process or in an
-    earlier one: a resumed shot draws it again, from a latent of the same layout.
+    The noise is drawn once for the shot, when the first window is asked for, in system memory
+    and on the latent's layout, as numz draws it for a batch but for the device
+    (generation_phases.py:663-680): its values follow the generator, the dtype, the shape and the
+    strides (_drawn), and no card. Nothing else draws, so a window's noise is the same whether
+    the windows before it ran in this process or in an earlier one, on this card or another: a
+    resumed shot draws it again, from a latent of the same layout. numz_draw is for tests only
+    (cli.NUMZ_DRAW): the noise drawn on the device, numz's draw, which follows the card.
 
-    The noise and the latent then wait on the CPU, and each window's slices of them go to the
-    device for its pass alone: the device holds the shot whole at the draw only, and beside a
-    window nothing of the shot but that window (DESIGN.md, Memory planner, Per-phase peaks). The
-    latent in system memory is the one given when it is given there, no copy being made; and no
-    output is kept here once it is given. So torch.no_grad is on the steps that compute
-    (_drawn, _window), not on this generator: decorating a generator, it keeps the value last
-    yielded bound while the next one is computed (torch/utils/_contextlib.py, _wrap_generator),
-    a window's output on the device through the next window's pass.
+    The noise and the latent wait on the CPU, and each window's slices of them go to the device
+    for its pass alone: beside a window the device holds nothing of the shot but that window
+    (DESIGN.md, Memory planner, Per-phase peaks), and nothing of it whole, the draw included,
+    but in numz's. The latent in system memory is the one given when it is given there, no copy
+    being made; and no output is kept here once it is given. So torch.no_grad is on the steps
+    that compute (_drawn, _window), not on this generator: decorating a generator, it keeps the
+    value last yielded bound while the next one is computed (torch/utils/_contextlib.py,
+    _wrap_generator), a window's output on the device through the next window's pass.
 
     A slice sent to the device is laid out there on its own, dense, without the strides a
     slice of the shot taken on the device would have; a one-window shot's, the whole shot, has
@@ -367,39 +376,66 @@ def sample_windows(
     and draws nothing."""
     if layout[-1][1] != latent.shape[0]:
         raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
-    noise, latent = _drawn(models, latent, seed)
+    noise, latent = _drawn(models, latent, seed, numz_draw)
     for s, e in layout[start:]:
         yield _window(models, noise[s:e], latent[s:e])
 
 
 @torch.no_grad()
-def _drawn(models: Models, latent: Tensor, seed: int) -> tuple[Tensor, Tensor]:
+def _drawn(
+    models: Models, latent: Tensor, seed: int, numz_draw: bool = False
+) -> tuple[Tensor, Tensor]:
     """A shot's noise, drawn from seed for its whole latent, and that latent: both on the CPU,
     (T', h, w, 16) in the latent's memory layout (moved), the noise in COMPUTE_DTYPE; the
     latent itself when it is given there.
 
-    The draw is torch.randn_like of the latent on the device: the generator fills the tensor in
-    memory order, so that the values follow the latent's strides as well as its shape, and the
-    device's generator isn't the CPU's. A latent given on the CPU is sent to the device for it,
-    strides kept (moved). Both copies on the device are given up when this returns.
+    The draw is torch.randn_like of the latent in system memory, from a CPU generator of the
+    draw's own seeded with seed: the generator fills the tensor in memory order, so that the
+    values follow the latent's strides as well as its shape. Its own, so that nothing drawing
+    from torch's global generator between the seeding and the draw can move the noise; seeded
+    alike, it is the same stream as the global CPU generator numz seeds (model.set_seed, still
+    called, as numz's draw is preceded by it), and gives the same values (tests/test_shot.py
+    holds their digest). A latent given on the device is copied to system memory first, strides
+    kept (moved). Nothing of the draw is on the GPU, and its values are the same on every card:
+    CUDA's generator lays its draw out by the card's count of processors, so that an RTX 5090
+    and an RTX PRO 6000 drew other noise for one seed at a shot's size, as another seed would
+    (DESIGN.md, Pipeline step 2, decided on 2026-10-13). Measured on 2026-10-16 (DESIGN.md, the
+    same step), the noise then drawn from the global CPU generator, which gives the same values:
+    the same noise on an RTX 5090 and an RTX PRO 6000, digest for digest, for every shot of a
+    job; and the two machines' CPUs draw the same values (tests/test_shot.py holds their digest,
+    which both pass). This draw alone, on a desktop's 16-core CPU (torch 2.14.1, 2026-10-16, a
+    process a shape, twice each): 8.8 to 9.0 s and 0.987 GiB for 1,000 latents at 1080p, padded
+    to 1104x1920; 12.2 to 12.6 s and 1.415 GiB for 361 at 4K, padded to 2192x3840; the process's
+    peak growing by the noise's bytes alone.
 
-    With -v, the draw is logged, on a GPU: the device then holds the latent and the noise whole
-    beside the weights of the DiT's phase, the moment the planner bounds beside a window's peak
-    (planner.dit_draw). The peak read is the unit's so far, which the run reset when it began
-    (run._started)."""
-    device = models.device
-    there = moved(latent, device, "the shot's latent")
-    model.set_seed(seed)
-    noise = torch.randn_like(there, dtype=COMPUTE_DTYPE)
-    if device.type == "cuda":
-        logger.debug(
-            "noise drawn for the shot's %d latents: %.3f GiB allocated on the GPU, its latent and"
-            " its noise there; the unit's peak so far %.3f GiB",
-            latent.shape[0],
-            torch.cuda.memory_allocated(device) / GIB,
-            torch.cuda.max_memory_allocated(device) / GIB,
+    numz_draw is for tests only (cli.NUMZ_DRAW): the draw as numz makes it, torch.randn_like of
+    the latent on the device, the latent sent there for it, strides kept (moved), both copies
+    there given up when this returns. Milestone 1's regression holds the output to numz's with
+    it, as does every GPU test held to a reference numz made.
+
+    With -v, the draw is logged: where, for how many latents, its time and the noise's size."""
+    started = time.monotonic()
+    if numz_draw:
+        there = moved(latent, models.device, "the shot's latent")
+        model.set_seed(seed)
+        drawn = torch.randn_like(there, dtype=COMPUTE_DTYPE)
+        noise, latent = (
+            moved(drawn, CPU, "the shot's noise"),
+            moved(latent, CPU, "the shot's latent"),
         )
-    return moved(noise, CPU, "the shot's noise"), moved(latent, CPU, "the shot's latent")
+    else:
+        latent = moved(latent, CPU, "the shot's latent")
+        model.set_seed(seed)
+        generator = torch.Generator(device=CPU).manual_seed(seed)
+        noise = torch.randn_like(latent, dtype=COMPUTE_DTYPE, generator=generator)
+    logger.debug(
+        "noise drawn %s for the shot's %d latents in %.2f s: %.3f GiB",
+        "on the device (numz's draw)" if numz_draw else "on the CPU",
+        latent.shape[0],
+        time.monotonic() - started,
+        noise.numel() * noise.element_size() / GIB,
+    )
+    return noise, latent
 
 
 @torch.no_grad()

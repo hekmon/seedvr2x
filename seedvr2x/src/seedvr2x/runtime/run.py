@@ -72,6 +72,7 @@ def run_job(
     split: bool = False,
     *,
     numz_padding: bool = False,
+    numz_draw: bool = False,
     clock: object | None = None,
 ) -> None:
     """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
@@ -101,7 +102,8 @@ def run_job(
     its checksums with it, and the run stops there, for the next run to make it again.
 
     numz_padding is for tests only (cli.NUMZ_PADDING): each encode's frames padded as numz pads
-    them (shot.encode_shot).
+    them (shot.encode_shot). So is numz_draw (cli.NUMZ_DRAW): each shot's noise drawn on the
+    device, as numz draws it (shot.sample_windows).
 
     clock is --until's, with the time estimates each unit's cost comes from (_begin; DESIGN.md,
     Pause and resume, Stopping): not built yet, None."""
@@ -120,7 +122,7 @@ def run_job(
                 continue
             sample = (models, inputs, shots, target, seed, plan, units, stop, copies)
             for index in group:
-                _sample(index, *sample, numz_padding)
+                _sample(index, *sample, numz_padding, numz_draw)
             _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write", None)
             for index in group:
                 _decode(models, shots, index, target, plan, units, write, copies)
@@ -148,17 +150,18 @@ def _sample(
     stop: Stop | None,
     copies: Copies | None,
     numz_padding: bool,
+    numz_draw: bool,
 ) -> None:
     """Shot `index`'s encode and windows, those not kept yet; with copies, the frames the encode
     reads copied, the copy and its checksums whole before the latent is recorded, so recorded
     with it, and the copy of a shot encoded already made again if it or its checksums are
-    missing. numz_padding as run_job takes it.
+    missing. numz_padding and numz_draw as run_job takes them.
 
     Between two of the shot's units the GPU holds nothing of the shot: its latent waits in
-    system memory and each window's output in its file (units.Units), and its noise in system
-    memory with the latent (shot.sample_windows). A unit's logged VRAM peak is then its own;
-    the first window a run makes of a shot holds the noise's draw too, the latent and the noise
-    whole on the GPU for that moment."""
+    system memory and each window's output in its file (units.Units), and its noise, drawn
+    there, in system memory with the latent (shot.sample_windows). A unit's logged VRAM peak is
+    then its own; the first window a run makes of a shot takes the noise's draw's time too, on
+    the CPU."""
     shot = shots[index]
     name = f"shot {index + 1}/{len(shots)}"
     layout = shot_layout(shot.frames, plan.window)
@@ -208,10 +211,9 @@ def _sample(
             shot.seed(seed),
             _spent(models, started),
         )
-    # The latent is in system memory, the one the units keep or read back: it goes to the GPU for
-    # the noise's draw alone, with the first window made here, once the DiT's phase is entered
-    # (shot.sample_windows).
-    sampled = sample_windows(models, latent, layout, shot.seed(seed), done)
+    # The latent is in system memory, the one the units keep or read back, where the noise is
+    # drawn from it, with the first window made here (shot.sample_windows).
+    sampled = sample_windows(models, latent, layout, shot.seed(seed), done, numz_draw=numz_draw)
     for number in range(done, len(layout)):
         _begin(stop, f"{name}'s window {number + 1}/{len(layout)}", None)
         logger.debug("%s: window %d/%d", name, number + 1, len(layout))

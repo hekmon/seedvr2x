@@ -56,6 +56,15 @@ logger = logging.getLogger("seedvr2x")
 # Read once (_run), passed down as a parameter, and recorded in an output directory's settings,
 # so that a job is never resumed in the other padding.
 NUMZ_PADDING = "SEEDVR2X_TESTS_NUMZ_PADDING"
+# numz's draw of each shot's noise, on the GPU, whose generator follows the card (DESIGN.md,
+# Pipeline step 2), in place of seedvr2x's, on the CPU: for seedvr2x's GPU tests only, never a
+# user's, as NUMZ_PADDING, and read, passed down and recorded the same way, so that a job is
+# never resumed in the other draw. Milestone 1's regression holds the output to numz's own with
+# it, and every GPU test held to a reference numz made. PROVISIONAL (implementation,
+# 2026-10-16): the planner counts nothing of that draw, the shot's latent and noise whole on the
+# GPU before its first window, beside the DiT's phase's weights: 2,088,960 bytes a latent in
+# numz's padding at 1080p, 25,067,520 for milestone 1's 12 latents, by the tensors' sizes.
+NUMZ_DRAW = "SEEDVR2X_TESTS_NUMZ_DRAW"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -521,6 +530,7 @@ def _run(args: argparse.Namespace) -> int:
         if args.input.is_dir():
             raise JobError(_directory_refused(args.input))
         numz_padding = _numz_padding()
+        numz_draw = _numz_draw()
         if args.window is not None and args.window < 2 * SHARED + 1:
             raise JobError(
                 f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
@@ -584,7 +594,7 @@ def _run(args: argparse.Namespace) -> int:
             recorded = read(directory / NAME)
             # A run stopped between its file put in place and its work directory removed: the
             # removal finished, nothing started (_assembled).
-            asked = (args, cuts, numz_padding)
+            asked = (args, cuts, numz_padding, numz_draw)
             if final is not None and _assembled(*asked, final, directory, recorded):
                 return 0
             kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
@@ -660,7 +670,7 @@ def _run(args: argparse.Namespace) -> int:
         if recorded is not None:
             prior = _prior(
                 *(args, directory, recorded, trusted, cuts, declared, ffmpeg_version),
-                *(conversions, numz_padding, model_files),
+                *(conversions, numz_padding, numz_draw, model_files),
                 idle=idle,
             )
             identity = prior.identity
@@ -670,7 +680,7 @@ def _run(args: argparse.Namespace) -> int:
                 return done
         else:
             identity = _identity(
-                *(args, cuts, ffmpeg_version, conversions), numz_padding, model_files
+                *(args, cuts, ffmpeg_version, conversions), numz_padding, numz_draw, model_files
             )
         if not idle:
             # Where the driver spills, torch is held a first time here, before anything of the
@@ -926,6 +936,7 @@ def _run(args: argparse.Namespace) -> int:
                     *(models, source, shots, segments, target, args.seed, plan, units),
                     *(write, stop, args.color_correction == "split"),
                     numz_padding=numz_padding,
+                    numz_draw=numz_draw,
                 )
         except CopyError as error:
             # Derived data, removed (run_job): a resume makes it again.
@@ -1416,6 +1427,7 @@ def _assembled(
     args: argparse.Namespace,
     cuts: list[int],
     numz_padding: bool,
+    numz_draw: bool,
     final: Path,
     directory: Path,
     recorded: dict[str, Any],
@@ -1474,7 +1486,7 @@ def _assembled(
         else source,
     }
     now = {
-        "settings": _settings(args, cuts, numz_padding, None),
+        "settings": _settings(args, cuts, numz_padding, numz_draw, None),
         "input": {"bytes": args.input.stat().st_size},
     }
     found = resume.differences(was, now)
@@ -1800,12 +1812,14 @@ def _settings(
     args: argparse.Namespace,
     cuts: list[int],
     numz_padding: bool,
+    numz_draw: bool,
     model_files: "ModelFiles | None",
 ) -> dict[str, object]:
-    """The settings a manifest records, those a resume must find again; numz's padding only when
-    the tests ask for it (NUMZ_PADDING), so that a user's manifest never names it. Without
-    model_files, those the command line alone gives, the records that take a hash left out
-    (HASHED): what tells one job from another before any file is read (_assembled)."""
+    """The settings a manifest records, those a resume must find again; numz's padding and numz's
+    draw each only when the tests ask for it (NUMZ_PADDING, NUMZ_DRAW), so that a user's manifest
+    never names them. Without model_files, those the command line alone gives, the records that
+    take a hash left out (HASHED): what tells one job from another before any file is read
+    (_assembled)."""
     from seedvr2x.runtime.manifest import code_sha256
 
     detects = args.cuts is None
@@ -1857,6 +1871,8 @@ def _settings(
     }
     if numz_padding:
         settings["numz_padding"] = True
+    if numz_draw:
+        settings["numz_draw"] = True
     return settings
 
 
@@ -1871,6 +1887,22 @@ def _numz_padding() -> bool:
     if value != "1":
         raise JobError(f"{NUMZ_PADDING}={value!r}: for seedvr2x's tests only, 1 or unset")
     logger.warning("%s=1: numz's padding, for seedvr2x's tests only", NUMZ_PADDING)
+    return True
+
+
+def _numz_draw() -> bool:
+    """Whether seedvr2x's tests ask for numz's draw of the noise, on the GPU (NUMZ_DRAW=1), said
+    when they do; refused (JobError) when the variable is set to anything else."""
+    from seedvr2x.runtime.job import JobError
+
+    value = os.environ.get(NUMZ_DRAW)
+    if value is None:
+        return False
+    if value != "1":
+        raise JobError(f"{NUMZ_DRAW}={value!r}: for seedvr2x's tests only, 1 or unset")
+    logger.warning(
+        "%s=1: numz's draw of the noise, on the GPU, for seedvr2x's tests only", NUMZ_DRAW
+    )
     return True
 
 
@@ -1957,6 +1989,7 @@ def _identity(
     ffmpeg_version: str,
     conversions: str,
     numz_padding: bool,
+    numz_draw: bool,
     model_files: "ModelFiles",
     made_in: dict[str, Any] | None = None,
 ) -> _Identity:
@@ -1973,7 +2006,7 @@ def _identity(
     The device is still named, and used by nothing."""
     from seedvr2x.runtime.job import JobError
 
-    settings = _settings(args, cuts, numz_padding, model_files)
+    settings = _settings(args, cuts, numz_padding, numz_draw, model_files)
     import torch
 
     if made_in is not None:
@@ -2001,6 +2034,7 @@ def _prior(
     ffmpeg_version: str,
     conversions: str,
     numz_padding: bool,
+    numz_draw: bool,
     model_files: "ModelFiles",
     idle: bool = False,
 ) -> _Prior:
@@ -2047,7 +2081,7 @@ def _prior(
         was: Any = recorded.get("environment")
         made_in = cast(dict[str, Any], was) if isinstance(was, dict) else {}
     identity = _identity(
-        *(args, cuts, ffmpeg_version, conversions), numz_padding, model_files, made_in
+        *(args, cuts, ffmpeg_version, conversions), numz_padding, numz_draw, model_files, made_in
     )
     asked = {
         "settings": identity.settings,

@@ -1,6 +1,9 @@
 """Milestone 1 as a regression test: seedvr2x's output stays bit-identical to numz's, in numz's
 padding; and in seedvr2x's own (DESIGN.md, Pipeline step 0), to numz's with that padding patched
-in. And the VAE tiling (DESIGN.md, Pipeline step 3): seedvr2x tiled, to numz tiled.
+in. And the VAE tiling (DESIGN.md, Pipeline step 3): seedvr2x tiled, to numz tiled. Every case
+runs in numz's draw of the noise (cli.NUMZ_DRAW, for the tests only): numz drew each reference's
+noise on the GPU, whose generator follows the card, where seedvr2x draws it on the CPU (DESIGN.md,
+Pipeline step 2), so that the references hold on the card that made them.
 
 Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR) and milestone 1's reference, in
 the m1/ directory of SEEDVR2X_REFERENCE_DIR:
@@ -32,7 +35,7 @@ the m1/ directory of SEEDVR2X_REFERENCE_DIR:
   --dit_model seedvr2_ema_7b_sharp_fp16.safetensors.
 
 Each case is a run of its own, both model files named, in numz's padding (cli.NUMZ_PADDING, for
-the tests only):
+the tests only) and numz's draw:
 - numz-7b: numz's seedvr2_ema_7b_fp16.safetensors and ema_vae_fp16.safetensors, against numz.mkv;
 - ours-7b: seedvr2x's seedvr2x_ema_7b_fp16.safetensors and seedvr2x_ema_vae_fp16.safetensors,
   the same values as numz's files (DESIGN.md, Weights), so against the same reference, bit for
@@ -133,7 +136,7 @@ from pathlib import Path
 
 import pytest
 
-from seedvr2x.cli import NUMZ_PADDING
+from seedvr2x.cli import NUMZ_DRAW, NUMZ_PADDING
 from seedvr2x.runtime import pull
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -181,11 +184,14 @@ def command(
     """seedvr2x's command line on source at resolution with the DiT and VAE files of models in
     SEEDVR2X_MODEL_DIR, or with None, its default models from Hugging Face's cache, offline
     (HF_HUB_OFFLINE=1), in numz's padding or in its own, with the options of `more` besides, to
-    tmp_path's ours.mkv and frames/ (same_bits); and the environment to run it in. A pass that
+    tmp_path's ours.mkv and frames/ (same_bits); and the environment to run it in, numz's draw
+    of the noise in it whatever the padding (NUMZ_DRAW: the module's docstring). A pass that
     `more` doesn't pin is pinned untiled, unless pin_untiled is False, which leaves it to the
     planner."""
     master, frames = tmp_path / "ours.mkv", tmp_path / "frames"
-    environment = {name: value for name, value in os.environ.items() if name != NUMZ_PADDING}
+    modes = (NUMZ_PADDING, NUMZ_DRAW)
+    environment = {name: value for name, value in os.environ.items() if name not in modes}
+    environment[NUMZ_DRAW] = "1"
     if numz_padding:
         environment[NUMZ_PADDING] = "1"
     if models is None:
