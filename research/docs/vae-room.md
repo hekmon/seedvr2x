@@ -3,7 +3,8 @@
 > Status: **measured** (2026-10-13; the floor by tile size and its cause, 2026-10-16; under
 > expandable segments on a card that gives memory it doesn't have, 2026-10-17; the large tiles
 > under the one-output cure and the tiles left, 2026-10-17; whole runs in large tiles under the
-> cure, 2026-10-17) for the
+> cure, 2026-10-17; the passes the cure takes that never ran and the tiles no code ran, and
+> three tiles under torch's own allocator, 2026-10-18) for the
 > open question "The VAE's room" of
 > [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). seedvr2x's planner holds every VAE pass 1.5 GiB
 > further under its budget than a DiT window ([DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner),
@@ -15,7 +16,8 @@
 > Blackwell 96 GB, torch 2.14.1+cu130, cuDNN 9.24, flash-attn 2.8.3, `cudaMallocAsync`), 7B fp16,
 > the colour correction on (`split`), seedvr2x as it stood before the changes this study leads to.
 > One section on a second GPU (RTX 5090 under WSL2, torch's own allocator with expandable
-> segments, the room set by torch's limit), by [`scripts/held_floor.py`](../scripts/held_floor.py).
+> segments, the room set by torch's limit), by [`scripts/held_floor.py`](../scripts/held_floor.py);
+> and three tiles on the first under that allocator (2026-10-18).
 
 In short:
 
@@ -56,11 +58,21 @@ In short:
   and 1080p's untiled decode kept their frames with 0.68 to 0.97 GiB left and moved them with 0.1
   less; none was refused. Its 4K encode squares that ran (1,664 to 2,048 px) kept their latent with
   0.50 to 0.60. For the same tile a pass under the cure asks 0.20 to 4.97 GiB less free memory, its
-  peak lower. Not run under the cure: 4K's untiled encode (the 96 GB card's own 4K plan encodes
-  untiled) and the other output sizes' passes it takes (1440p's tiles cut off at its 1,472 rows,
-  its untiled decode and encode, among them). On the code without it, the tiles left: decodes of
-  768 to 960 px keep their frames with 0.72 to 0.81 GiB, the 1,088-px one is refused first (kept
-  with 0.90), and the encodes run keep their latent with 0.47 to 0.87.
+  peak lower. 4K's untiled encode and 1440p's passes under the cure ran since (next). On the code
+  without it, the tiles left: decodes of 768 to 960 px keep their frames with 0.72 to 0.81 GiB, the
+  1,088-px one is refused first (kept with 0.90), and the encodes run keep their latent with 0.47
+  to 0.87.
+- **The passes the cure takes that never ran, and the tiles no code ran**
+  ([the passes never run](#the-passes-the-one-output-cure-takes-that-never-ran-and-the-tiles-no-code-ran-2026-10-18)): under the
+  cure, 1440p's decodes keep their frames with 0.76 to 0.96 GiB left (its untiled decode the
+  most) and its encodes their latent with 0.60 to 0.63, moving them with 0.1 less. 4K's untiled
+  encode, the 96 GB card's own, keeps its latent with 0.60 and is refused below it, for 8.03 GiB
+  in one request at a group norm's concatenation or a residual sum, which the cure doesn't write
+  into one output. Where the cure takes nothing, 1440p's encodes in tiles cut off at its rows are
+  refused first (kept with 0.73 to 0.86); the decode in 576-px tiles, the encode in 832-px ones and
+  1080p's encodes in tiles of 1,104 × 1,216, × 1,344, × 1,664 and × 1,856, taken at today's room of
+  1.5 and never run before, keep theirs with 0.47 to 0.77. Not run: decodes in 512-px tiles, which
+  no card of 12 to 48 GB takes at a room of 1.0 to 1.5.
 - **In six tiles, whole runs keep their frames where the passes alone do, within 0.2 GiB either
   way** ([whole runs](#whole-runs-in-large-tiles-under-the-one-output-cure-2026-10-17)): six decode
   tiles on the cure's code (1080p's 1,104 × 1,472, 1,104 × 1,792, its untiled decode and its 832-px
@@ -75,6 +87,10 @@ In short:
   1,024-px tiles, which keep them with 0.79 and 0.75 under the 96 GB card's `cudaMallocAsync`),
   and whole runs as the passes alone. torch's own allocator counts every refused workspace there:
   `num_ooms` 0 across every pass that kept its frames, 19 to 21 across every one that lost them.
+  On the 96 GB card under the same allocator (its driver refuses, the run isn't held) three tiles
+  keep their frames with 0.46 to 0.54 GiB left, 0.30 to 0.51 less than under `cudaMallocAsync`, and
+  `num_ooms` tells there too: 0 in every pass that kept them, 20 to 38 in every one that lost
+  them ([under torch's own allocator](#under-torchs-own-allocator-with-expandable-segments)).
 - **For seedvr2x:** that cure for large outputs; the room stays until its floor is measured by
   the frames, tile size by tile size ([What follows](#what-follows-for-seedvr2x)).
 
@@ -1423,6 +1439,302 @@ Each ladder's rungs in their order: the reference's decode peak (GiB), then each
 | whole1080-832 | ref 13.824; 0.79 moved 48/53 (+20); 0.89 kept (+0); 0.89 kept (+0); 0.79 kept (+0) |
 | whole2160-2048 | ref 64.868; 0.87 kept (+0); 0.77 moved 12/17 (+19); 0.87 kept (+0); 0.77 kept (+0) |
 
+### The passes the one-output cure takes that never ran, and the tiles no code ran (2026-10-18)
+
+The passes the tail left under the cure
+([above](#the-large-tiles-under-the-one-output-cure-and-the-tiles-left-2026-10-17)): 4K's untiled
+encode, the 96 GB card's own 4K plan's (an output of 8.0 GiB a slice of four frames), and 1440p's
+passes the cure takes. Then the tiles no ladder had run on any code that the cards of 12 to 48 GB
+take at a room of 1.0, 1.25 or 1.5 GiB. All on the cure's code, passes alone, the same driver
+([`scripts/floor.py`](../scripts/floor.py), its order `rest`), one hold of the GPU's lock a rung:
+200 rungs in 33 ladders, none failed. Not run: decodes in 512-px tiles (no card of 12 to 48 GB
+takes them at those rooms, at 1080p, 1440p or 4K); 1440p's squares the cure doesn't take (1080p's
+shapes, run on 6e1be76); the output sizes other than 1080p, 1440p and 4K.
+
+#### Method as run
+
+- **1440p's tiles, from the planner.** The cure's code's planner (`vae_room.py plan`, the cases
+  RES:CARD:2w and RES:CARD:w) for the cards of 12 to 48 GB by 1 GB and the bare card, at rooms of
+  1.0, 1.25 and 1.5 GiB. 1440p's frame is padded to 1,472 × 2,560 (`job.padded_size`: 16 rows
+  reflected and 16 black), and a tile larger than 1,472 px is cut off at those rows, as 1080p's
+  at 1,104. The cure takes a pass where a slice of four frames gives an output of 2.5 GiB or more
+  at its largest full-resolution convolution (256 channels in the decode, 128 in the encode):
+  every decode tile from 1,152 px, the encodes cut off at 1,472 rows from 1,472 × 1,792, and both
+  untiled passes. At a room of 1.0 the same planner gives 1080p and 4K exactly the tail's tiles.
+- **What ran under the cure:** 4K's untiled encode; 1440p's encodes in tiles of 1,472 × 1,792 to
+  1,472 × 2,048 and untiled, its decodes in tiles of 1,472 × 1,536 to 1,472 × 1,792 and untiled,
+  and its decode squares of 1,152 to 1,472 px, 4K's shapes, which the tail ran with 17 frames,
+  here with 1440p's 53.
+- **What ran where the cure takes nothing,** on the same code: 1440p's encodes in tiles of
+  1,472 × 1,536 to 1,472 × 1,728, which no ladder had run; and the tiles no ladder had run that a
+  card takes at a room of 1.25 or 1.5 only. Those are the decode in 576-px tiles (the 12 GB card's
+  at 1.5, today's room, at 1080p, 1440p and 4K), the encode in 832-px tiles (the 13 GB card's at
+  1.5, at all three), and 1080p's encodes in tiles of 1,104 × 1,216 (18 GB at 1.5), 1,104 × 1,344
+  (19), 1,104 × 1,664 (22) and 1,104 × 1,856 (24, at 1.25 and 1.5).
+- **The shapes:** at 1080p and 4K as above (clip-53, clip-17); at 1440p clip-53 again, window 8,
+  encode tiles of 768 px, 36 blocks swapped, as 1080p's tiles cut off at its rows and its untiled
+  passes ran: 13 slices a stream. Each size's units were made once on the cure's code, on the bare
+  card at the room as shipped, the run stopped before its decode with its windows done. Each ladder's
+  reference is its own bare-card rung.
+- **The DiT off the GPU by the plan itself:** 36 of its 36 blocks swapped, its two slots and its
+  other parameters on the GPU beside the VAE's pass, as every pass alone ran. 4K's untiled encode
+  needed no more: its plan predicted 77.20 GiB, beside 94.21 free on the bare card.
+- **The ladder:** as above, started near the tail's floors under the cure, read from its records
+  (the mean least room kept of its finished ladders of the kind, and 0.05 GiB: encodes 0.60,
+  decodes 0.87), then the study's own. A rung that ran another pass than its ladder's would fail,
+  ending its ladder: another tile; for an untiled pass, a plan with tiles or other than one stream's
+  slices; a plan other than its reference's (the window, the blocks swapped, the VAE's place, the
+  pass's tiles, what of the DiT the pass keeps). None did.
+- **The order:** 4K's untiled encode; 1440p's passes the cure takes that hadn't run in any shape,
+  by the least card that takes them; its encodes the cure doesn't take; the tiles no code had run;
+  last, 1440p's squares.
+- **The run:** from 21:52 to 07:14 UTC. No other compute process was on the card at any rung
+  (nvidia-smi before each); the card's offset was 1.489 to 1.491 GiB. A rung took 36 to 427 s, for
+  information.
+
+#### 1440p's tiles by card
+
+The tiles the planner gives 1440p on the cure's code, by the cards (GB) that take them in a shot of
+two windows at the cap or of one:
+
+| pass | tile | the cure takes it | room 1.0 | room 1.25 | room 1.5 |
+|---|---|---|---|---|---|
+| decode | 576 × 576 | no | - | - | 12 |
+| decode | 640 × 640 | no | 12-13 | 12-13 | 13 |
+| decode | 704 × 704 | no | 14 | 14 | 14-15 |
+| decode | 768 × 768 | no | 15 | 15-16 | 16 |
+| decode | 832 × 832 | no | 16-17 | 17 | 17-18 |
+| decode | 896 × 896 | no | 18-19 | 18-19 | 19 |
+| decode | 960 × 960 | no | 20-21 | 20-21 | 20-21 |
+| decode | 1024 × 1024 | no | 22-23 | 22-23 | 22-23 |
+| decode | 1088 × 1088 | no | 24-25 | 24-25 | 24-26 |
+| decode | 1152 × 1152 | yes | 26-28 | 26-28 | 27-28 |
+| decode | 1216 × 1216 | yes | 29-30 | 29-30 | 29-31 |
+| decode | 1280 × 1280 | yes | 31-33 | 31-33 | 32-33 |
+| decode | 1344 × 1344 | yes | 34-36 | 34-36 | 34-36 |
+| decode | 1408 × 1408 | yes | 37-39 | 37-39 | 37-39 |
+| decode | 1472 × 1472 | yes | 40-41 | 40-41 | 40-41 |
+| decode | 1472 × 1536 | yes | 42 | 42 | 42-43 |
+| decode | 1472 × 1600 | yes | 43-44 | 43-44 | 44 |
+| decode | 1472 × 1664 | yes | 45 | 45-46 | 45-46 |
+| decode | 1472 × 1728 | yes | 46-47 | 47 | 47 |
+| decode | 1472 × 1792 | yes | 48 | 48 | 48 |
+| decode | untiled 1472 × 2560 | yes | bare | bare | bare |
+| encode | 768 × 768 | no | 12 | 12 | 12 |
+| encode | 832 × 832 | no | - | - | 13 |
+| encode | 896 × 896 | no | 13 | 13-14 | 14 |
+| encode | 960 × 960 | no | 14 | - | - |
+| encode | 1024 × 1024 | no | 15 | 15-16 | 15-16 |
+| encode | 1088 × 1088 | no | 16-17 | 17 | 17 |
+| encode | 1152 × 1152 | no | 18 | 18 | 18 |
+| encode | 1216 × 1216 | no | 19 | 19 | 19-20 |
+| encode | 1280 × 1280 | no | 20 | 20-21 | 21 |
+| encode | 1344 × 1344 | no | 21-22 | 22 | 22 |
+| encode | 1408 × 1408 | no | 23 | 23-24 | 23-24 |
+| encode | 1472 × 1472 | no | 24-25 | 25 | 25 |
+| encode | 1472 × 1536 | no | 26 | 26 | 26 |
+| encode | 1472 × 1600 | no | - | 27 | 27 |
+| encode | 1472 × 1664 | no | 27 | - | 28 |
+| encode | 1472 × 1728 | no | 28 | 28 | 29 |
+| encode | 1472 × 1792 | yes | 29 | 29 | - |
+| encode | 1472 × 1856 | yes | 30 | 30 | 30 |
+| encode | 1472 × 1920 | yes | - | 31 | 31 |
+| encode | 1472 × 1984 | yes | 31 | 32 | 32 |
+| encode | 1472 × 2048 | yes | 32-38 | 33-38 | 33-38 |
+| encode | untiled 1472 × 2560 | yes | 39-48, bare | 39-48, bare | 39-48, bare |
+
+#### The floors
+
+Room usual, GiB, the deciding cards run twice each; what moved (frames, or latents for an encode)
+and the worst PSNR-Y among them; the cuDNN frontend's plans built over the reference's in the runs
+that lost; the refusals, where and the GiB asked:
+
+| ladder | tile | cure | cards (GB) at a room of 1.0 / 1.25 / 1.5 | ref peak GiB | least room kept (runs) | most room lost (runs) | moved, worst PSNR-Y | plans over the reference's | refused at | ref pass s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| enc2160-untiled-a4 | untiled 2192 × 3840 | yes | bare / bare / bare | 72.312 | 0.599 (kept, kept) | 0.499 (refused, refused) | - | - | causal_norm_wrapper:436 (slice 3), 8.03 GiB asked; a resnet's residual sum, attn_video_vae.py:345 (slice 3), 8.03 GiB asked (torch's message) | 99.1 |
+| enc1440-1792-a4 | 1472 × 1792 | yes | 29 / 29 / - | 25.462 | 0.602 (kept, kept) | 0.500 (moved, moved) | 6/11 of 14, 67.70 dB | +40 | - | 113.3 |
+| enc1440-1856-a4 | 1472 × 1856 | yes | 30 / 30 / 30 | 26.317 | 0.610 (kept, kept) | 0.510 (moved, moved) | 7/11 of 14, 67.48 dB | +40 | - | 120.4 |
+| enc1440-1920-a4 | 1472 × 1920 | yes | - / 31 / 31 | 26.880 | 0.610 (kept, kept) | 0.510 (moved, moved) | 5/12 of 14, 67.58 dB | +20/+40 | - | 120.9 |
+| enc1440-1984-a4 | 1472 × 1984 | yes | 31 / 32 / 32 | 27.725 | 0.618 (kept, kept) | 0.519 (moved, moved) | 10/11 of 14, 67.20 dB | +20/+40 | - | 121.6 |
+| enc1440-2048-a4 | 1472 × 2048 | yes | 32-38 / 33-38 / 33-38 | 28.482 | 0.621 (kept, kept) | 0.519 (moved, moved) | 6/10 of 14, 67.13 dB | +20/+40 | - | 118.2 |
+| enc1440-untiled-a4 | untiled 1472 × 2560 | yes | 39-48, bare / 39-48, bare / 39-48, bare | 34.526 | 0.630 (kept, kept) | 0.530 (moved, moved) | 4/11 of 14, 65.77 dB | +20/+40 | - | 116.8 |
+| dec1440-1536-a4 | 1472 × 1536 | yes | 42 / 42 / 42-43 | 36.796 | 0.770 (kept, kept) | 0.670 (moved, moved) | 48 of 53, 73.63 dB | +39 | - | 248.1 |
+| dec1440-1600-a4 | 1472 × 1600 | yes | 43-44 / 43-44 / 44 | 38.218 | 0.770 (kept, kept) | 0.670 (moved, moved) | 28 of 53, 73.09 dB | +20 | - | 217.5 |
+| dec1440-1664-a4 | 1472 × 1664 | yes | 45 / 45-46 / 45-46 | 39.541 | 0.771 (kept, kept) | 0.669 (moved, moved) | 40 of 53, 72.86 dB | +40 | - | 222.7 |
+| dec1440-1728-a4 | 1472 × 1728 | yes | 46-47 / 47 / 47 | 40.934 | 0.771 (kept, kept) | 0.671 (moved, moved) | 36 of 53, 72.74 dB | +20 | - | 226.5 |
+| dec1440-1792-a4 | 1472 × 1792 | yes | 48 / 48 / 48 | 42.215 | 0.770 (kept, kept) | 0.669 (moved, moved) | 48 of 53, 72.52 dB | +38 | - | 224.8 |
+| dec1440-untiled-a4 | untiled 1472 × 2560 | yes | bare / bare / bare | 59.107 | 0.961 (kept, kept) | 0.859 (moved, moved) | 36 of 53, 72.29 dB | +20 | - | 221.2 |
+| enc1440-1536-a4 | 1472 × 1536 | no | 26 / 26 / 26 | 22.116 | 0.731 (kept, kept) | 0.630 (refused, refused) | - | - | memory_limit_conv:225 (slice 9), 2.16 GiB asked | 100.0 |
+| enc1440-1600-a4 | 1472 × 1600 | no | - / 27 / 27 | 22.974 | 0.840 (kept, kept) | 0.738 (refused, refused) | - | - | memory_limit_conv:225 (slice 10), 2.25 GiB asked | 100.5 |
+| enc1440-1664-a4 | 1472 × 1664 | no | 27 / - / 28 | 23.728 | 0.760 (kept, kept) | 0.660 (refused, refused) | - | - | memory_limit_conv:225 (slice 4), 2.34 GiB asked | 105.2 |
+| enc1440-1728-a4 | 1472 × 1728 | no | 28 / 28 / 29 | 24.582 | 0.861 (kept, kept) | 0.759 (refused, refused) | - | - | memory_limit_conv:225 (slices 10 and 8), 2.43 GiB asked | 109.3 |
+| dec1080-576-a4 | 576 × 576 | no | - / - / 12 | 8.968 | 0.770 (kept, kept) | 0.670 (moved, moved) | 48 of 53, 73.31 dB | +20 | - | 112.6 |
+| dec1440-576-a4 | 576 × 576 | no | - / - / 12 | 8.968 | 0.770 (kept, kept) | 0.670 (moved, moved) | 48 of 53, 73.71 dB | +20 | - | 197.3 |
+| dec2160-576-a4 | 576 × 576 | no | - / - / 12 | 8.968 | 0.670 (kept, kept) | 0.570 (moved, moved) | 12 of 17, 72.07 dB | +20 | - | 151.0 |
+| enc1080-832-a4 | 832 × 832 | no | - / - / 13 | 9.833 | 0.580 (kept, kept) | 0.481 (moved, moved) | 12 of 14, 68.74 dB | +20 | - | 47.8 |
+| enc1440-832-a4 | 832 × 832 | no | - / - / 13 | 9.833 | 0.579 (kept, kept) | 0.479 (moved, moved) | 12 of 14, 69.59 dB | +20 | - | 84.3 |
+| enc2160-832-a4 | 832 × 832 | no | - / - / 13 | 9.833 | 0.469 (kept, kept) | 0.370 (moved, moved) | 3 of 5, 68.86 dB | +20 | - | 61.4 |
+| enc1080-1216-a4 | 1104 × 1216 | no | - / - / 18 | 14.910 | 0.671 (kept, kept) | 0.571 (moved, moved) | 9/11 of 14, 68.43 dB | +20 | - | 50.5 |
+| enc1080-1344-a4 | 1104 × 1344 | no | - / 19 / 19 | 15.745 | 0.670 (kept, kept) | 0.571 (moved, moved) | 8/12 of 14, 67.99 dB | +20 | - | 51.0 |
+| enc1080-1664-a4 | 1104 × 1664 | no | - / 22 / 22 | 18.601 | 0.670 (kept, kept) | 0.569 (moved, moved) | 11 of 14, 66.97 dB | +20 | - | 51.3 |
+| enc1080-1856-a4 | 1104 × 1856 | no | - / 24 / 24 | 20.571 | 0.770 (kept, kept) | 0.670 (moved, moved) | 4 of 14, 66.68 dB | +20 | - | 51.8 |
+| dec1440-1152-a4 | 1152 × 1152 | yes | 26-28 / 26-28 / 27-28 | 23.507 | 0.859 (kept, kept) | 0.760 (moved, moved) | 48 of 53, 71.08 dB | +40 | - | 209.3 |
+| dec1440-1216-a4 | 1216 × 1216 | yes | 29-30 / 29-30 / 29-31 | 25.659 | 0.760 (kept, kept) | 0.660 (moved, moved) | 48 of 53, 72.24 dB | +40 | - | 211.5 |
+| dec1440-1280-a4 | 1280 × 1280 | yes | 31-33 / 31-33 / 32-33 | 27.917 | 0.959 (kept, kept) | 0.860 (moved, moved) | 48 of 53, 71.62 dB | +20 | - | 215.1 |
+| dec1440-1344-a4 | 1344 × 1344 | yes | 34-36 / 34-36 / 34-36 | 30.359 | 0.771 (kept, kept) | 0.669 (moved, moved) | 24 of 53, 73.33 dB | +40 | - | 215.6 |
+| dec1440-1408-a4 | 1408 × 1408 | yes | 37-39 / 37-39 / 37-39 | 32.835 | 0.760 (kept, kept) | 0.661 (moved, moved) | 48 of 53, 72.05 dB | +39 | - | 219.3 |
+| dec1440-1472-a4 | 1472 × 1472 | yes | 40-41 / 40-41 / 40-41 | 35.496 | 0.861 (kept, kept) | 0.759 (moved, moved) | 44/48 of 53, 73.42 dB | +19/+20 | - | 212.6 |
+
+- **Under the cure, every pass that ran kept its frames with 0.96 GiB or less.** 1440p's decodes
+  in tiles cut off at its rows kept them with 0.77 (all five), its untiled decode with 0.96, its
+  squares with 0.76 to 0.96; its encodes kept their latent with 0.60 to 0.63, the untiled one the
+  most. Each moved them with 0.1 less. Only 4K's untiled encode was refused.
+- **4K's untiled encode is refused, not moved.** It kept its latent with 0.60 GiB and with 0.50 and
+  0.40 was refused, three runs, for 8.03 GiB in one request, a whole four-frame output at full
+  resolution: at a group norm's concatenation (`causal_norm_wrapper:436`, with 0.40) and at a
+  resnet's residual sum (`attn_video_vae.py:345`, with 0.50), 64.28 GiB allocated, the pool at
+  72.7 to 72.8 GiB. The cure writes a convolution's pieces into one output; a group norm's chunks
+  still concatenate (the cure that wrote them too, [the cures](#the-cures), wasn't kept). Its
+  pass's peak above the phase's entry was 70.791 GiB, as the pass measured alone by the tiles'
+  driver with the cure (2026-10-17).
+- **Where the cure takes nothing, 1440p's encodes are refused before their latent moves.** In tiles
+  of 1,472 × 1,536 to 1,472 × 1,728 they kept it with 0.73 to 0.86 GiB and were refused with 0.1
+  less, at the concatenation the cure leaves to outputs under its size (`memory_limit_conv:225`,
+  2.16 to 2.43 GiB asked), one run of ten after a fallback.
+- **The tiles no code had run keep their frames as their neighbours do:** the 576-px decode with
+  0.77 at 1080p and 1440p and 0.67 at 4K, the 832-px encode with 0.58 at 1080p and 1440p and 0.47
+  at 4K, 1080p's encodes in tiles of 1,104 × 1,216, × 1,344 and × 1,664 with 0.67 and 1,104 × 1,856
+  with 0.77; each moved with 0.1 less, none refused.
+- **A tile's peak is its shape's; its floor moves with the clip.** 1440p's squares peaked as 4K's,
+  to the MB (23.507 to 35.496 GiB), and the 576-px decode and the 832-px encode the same at the
+  three sizes. Their floors stood up to 0.11 GiB apart between the clips: 1440p's squares (53 frames)
+  0.08 to 0.11 above 4K's (17) from 1,152 to 1,280 px, equal at 1,344, 0.03 and 0.02 below at 1,408
+  and 1,472; the 576-px decode and the 832-px encode 0.10 and 0.11 lower at 4K than at 1080p and
+  1440p.
+
+#### The untiled passes
+
+Every untiled rung that completed ran untiled (no tiles in its plan, one stream's slices); 4K's
+refused ones stopped in the third of their four slices, their plan untiled:
+
+| pass | slices (one stream's) | pass's peak above the phase's entry | the planner's untiled fit | under it | phase's peak | the plan's prediction |
+|---|---|---|---|---|---|---|
+| 4K encode | 4 (4) | 70.791 | 75.272 | 4.481 | 72.312 | 77.196 |
+| 1440p encode | 13 (13) | 33.004 | 34.361 | 1.357 | 34.526 | 36.285 |
+| 1440p decode | 13 (13) | 57.585 | 61.470 | 3.885 | 59.107 | 64.238 |
+
+#### What the run can see
+
+- **The cuDNN frontend's plans built over the reference's:** none in any of the 85 runs that kept
+  their frames, 19 to 40 in each of the 69 that moved them; one fallback built eng22 16 or 17
+  times, eng23 twice, then eng28, which ran with no workspace.
+- **torch's count of refused allocations** stayed at 0 in every run (`cudaMallocAsync`), and the
+  "recovered" lines don't separate (11 to 199 in the runs kept, 9 to 180 in those moved).
+- **The refusals** came before any fallback but in one run (1,472 × 1,600's encode with 0.64: 20
+  plans more in its tenth slice).
+
+#### Two runs at one card
+
+66 cards ran twice. Every pair gave the same outcome, and all but one the same frames: the 576-px
+decode at 1080p with 0.670 moved the same 48 frames of 53 in both runs, with other bits. Its one
+fallback (20 plans) began in the 57th slice in one run and in the 34th in the other, with 0.232 and
+0.419 GiB free before it.
+
+#### Every rung
+
+Each ladder's rungs in their order: the reference's peak (GiB), then each rung's room (usual) and
+outcome, the frames that differ and the plans built over the reference's.
+
+| ladder | rungs |
+|---|---|
+| enc2160-untiled-a4 | ref 72.312; 0.60 kept (+0); 0.40 refused (+0); 0.50 refused (+0); 0.60 kept (+0); 0.50 refused (+0) |
+| enc1440-1792-a4 | ref 25.462; 0.60 kept (+0); 0.40 moved 11/14 (+40); 0.50 moved 6/14 (+40); 0.60 kept (+0); 0.50 moved 6/14 (+40) |
+| enc1440-1856-a4 | ref 26.317; 0.61 kept (+0); 0.41 moved 11/14 (+40); 0.51 moved 7/14 (+40); 0.61 kept (+0); 0.51 moved 7/14 (+40) |
+| enc1440-1920-a4 | ref 26.880; 0.61 kept (+0); 0.41 moved 12/14 (+40); 0.51 moved 5/14 (+20); 0.61 kept (+0); 0.51 moved 5/14 (+20) |
+| enc1440-1984-a4 | ref 27.725; 0.62 kept (+0); 0.42 moved 11/14 (+40); 0.52 moved 10/14 (+20); 0.62 kept (+0); 0.52 moved 10/14 (+20) |
+| enc1440-2048-a4 | ref 28.482; 0.62 kept (+0); 0.42 moved 10/14 (+40); 0.52 moved 6/14 (+20); 0.62 kept (+0); 0.52 moved 6/14 (+20) |
+| enc1440-untiled-a4 | ref 34.526; 0.63 kept (+0); 0.43 moved 11/14 (+40); 0.53 moved 4/14 (+20); 0.63 kept (+0); 0.53 moved 4/14 (+20) |
+| dec1440-1536-a4 | ref 36.796; 0.87 kept (+0); 0.67 moved 48/53 (+39); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 48/53 (+39) |
+| dec1440-1600-a4 | ref 38.218; 0.87 kept (+0); 0.67 moved 28/53 (+20); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 28/53 (+20) |
+| dec1440-1664-a4 | ref 39.541; 0.87 kept (+0); 0.67 moved 40/53 (+40); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 40/53 (+40) |
+| dec1440-1728-a4 | ref 40.934; 0.87 kept (+0); 0.67 moved 36/53 (+20); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 36/53 (+20) |
+| dec1440-1792-a4 | ref 42.215; 0.87 kept (+0); 0.67 moved 48/53 (+38); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 48/53 (+38) |
+| dec1440-untiled-a4 | ref 59.107; 0.86 moved 36/53 (+20); 1.06 kept (+0); 0.96 kept (+0); 0.96 kept (+0); 0.86 moved 36/53 (+20) |
+| enc1440-1536-a4 | ref 22.116; 0.63 refused (-55); 0.83 kept (+0); 0.73 kept (+0); 0.73 kept (+0); 0.63 refused (-55) |
+| enc1440-1600-a4 | ref 22.974; 0.64 refused (-35); 0.84 kept (+0); 0.74 refused (-55); 0.84 kept (+0); 0.74 refused (-55) |
+| enc1440-1664-a4 | ref 23.728; 0.66 refused (-55); 0.86 kept (+0); 0.76 kept (+0); 0.76 kept (+0); 0.66 refused (-55) |
+| enc1440-1728-a4 | ref 24.582; 0.66 refused (-53); 0.86 kept (+0); 0.76 refused (-53); 0.86 kept (+0); 0.76 refused (-53) |
+| dec1080-576-a4 | ref 8.968; 0.87 kept (+0); 0.67 moved 48/53 (+20); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 48/53 (+20) |
+| dec1440-576-a4 | ref 8.968; 0.87 kept (+0); 0.67 moved 48/53 (+20); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 48/53 (+20) |
+| dec2160-576-a4 | ref 8.968; 0.87 kept (+0); 0.67 kept (+0); 0.47 moved 12/17 (+20); 0.57 moved 12/17 (+20); 0.67 kept (+0); 0.57 moved 12/17 (+20) |
+| enc1080-832-a4 | ref 9.833; 0.68 kept (+0); 0.48 moved 12/14 (+20); 0.58 kept (+0); 0.58 kept (+0); 0.48 moved 12/14 (+20) |
+| enc1440-832-a4 | ref 9.833; 0.68 kept (+0); 0.48 moved 12/14 (+20); 0.58 kept (+0); 0.58 kept (+0); 0.48 moved 12/14 (+20) |
+| enc2160-832-a4 | ref 9.833; 0.67 kept (+0); 0.47 kept (+0); 0.27 moved 3/5 (+20); 0.37 moved 3/5 (+20); 0.47 kept (+0); 0.37 moved 3/5 (+20) |
+| enc1080-1216-a4 | ref 14.910; 0.67 kept (+0); 0.47 moved 11/14 (+20); 0.57 moved 9/14 (+20); 0.67 kept (+0); 0.57 moved 9/14 (+20) |
+| enc1080-1344-a4 | ref 15.745; 0.67 kept (+0); 0.47 moved 12/14 (+20); 0.57 moved 8/14 (+20); 0.67 kept (+0); 0.57 moved 8/14 (+20) |
+| enc1080-1664-a4 | ref 18.601; 0.67 kept (+0); 0.47 moved 11/14 (+20); 0.57 moved 11/14 (+20); 0.67 kept (+0); 0.57 moved 11/14 (+20) |
+| enc1080-1856-a4 | ref 20.571; 0.67 moved 4/14 (+20); 0.87 kept (+0); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 4/14 (+20) |
+| dec1440-1152-a4 | ref 23.507; 0.86 kept (+0); 0.66 moved 48/53 (+40); 0.76 moved 48/53 (+40); 0.86 kept (+0); 0.76 moved 48/53 (+40) |
+| dec1440-1216-a4 | ref 25.659; 0.86 kept (+0); 0.66 moved 48/53 (+40); 0.76 kept (+0); 0.76 kept (+0); 0.66 moved 48/53 (+40) |
+| dec1440-1280-a4 | ref 27.917; 0.86 moved 48/53 (+20); 1.06 kept (+0); 0.96 kept (+0); 0.96 kept (+0); 0.86 moved 48/53 (+20) |
+| dec1440-1344-a4 | ref 30.359; 0.87 kept (+0); 0.67 moved 24/53 (+40); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 24/53 (+40) |
+| dec1440-1408-a4 | ref 32.835; 0.86 kept (+0); 0.66 moved 48/53 (+39); 0.76 kept (+0); 0.76 kept (+0); 0.66 moved 48/53 (+39) |
+| dec1440-1472-a4 | ref 35.496; 0.86 kept (+0); 0.66 moved 48/53 (+19); 0.76 moved 44/53 (+20); 0.86 kept (+0); 0.76 moved 44/53 (+20) |
+
+#### Under torch's own allocator with expandable segments
+
+Three decodes whose floors under `cudaMallocAsync` are above
+([the floor by tile size](#the-floor-by-tile-size-and-its-cause-2026-10-16),
+[the tail](#the-large-tiles-under-the-one-output-cure-and-the-tiles-left-2026-10-17)), passes alone
+again, on the cure's code from the 1080p and 4K units this study made there, each run's process
+given `PYTORCH_CUDA_ALLOC_CONF=backend:native,expandable_segments:True`, the allocator a held run
+takes by default: 1080p's 832-px tile, which the cure doesn't take, and 1080p's tile of
+1,104 × 1,792 and 4K's 1,600 px, which it takes. Each tile against its own reference under that
+allocator on the bare card, the ladder as above (its first ladder from 1.1 GiB, the others near
+its floor), the deciding cards run twice: 21 rungs, none failed, from 07:23 to 08:19 UTC. Not run
+under this allocator: the other tiles, the encodes, whole runs.
+
+- **What seedvr2x makes of the setting on this driver:** it asks the driver nothing (a Linux
+  driver refuses what the card can't hold; seedvr2x asks only behind WSL2's device), and its
+  default there stays `cudaMallocAsync`; the environment's setting stands, read as torch reads it:
+  torch's own allocator, its segments expandable. It says nothing of it (its words on the
+  allocator are a held run's), and doesn't hold the run: no limit set, the plan on the driver's
+  free memory less the margin (94.30 GiB free on the bare card, a budget of 93.70, where
+  `cudaMallocAsync` read the same card at 94.21). torch's own allocator ran: its counter of the
+  memory it asks the driver for moved (57 requests across the 832-px reference's decode), where
+  `cudaMallocAsync` leaves it at 0. The cards were emulated by the same ballast, the driver's own
+  allocation outside torch.
+
+| tile | the cure takes it | reference's peak, GiB | least room kept (runs) | most room lost (runs) | moved, worst PSNR-Y | num_ooms: kept / lost | under `cudaMallocAsync`, this card: kept / lost | RTX 5090, the same allocator, held: kept / lost |
+|---|---|---|---|---|---|---|---|---|
+| 1080p, 832 px | no | 13.819 | 0.490 (kept, kept) | 0.389 (moved, moved) | 48 of 53, 72.57 dB | 0 / 20 | 0.791 / 0.690 (on 6e1be76) | 0.40 / 0.35 |
+| 1,104 × 1,792 | yes | 32.802 | 0.539 (kept, kept) | 0.440 (moved, moved) | 48 of 53, 71.24 dB | 0 / 38 | 0.971 / 0.869 | - |
+| 4K, 1,600 px | yes | 41.170 | 0.460 (kept, kept) | 0.360 (moved, moved) | 12 of 17, 72.57 dB | 0 / 38 | 0.970 / 0.870 | - |
+
+- **The floor is 0.30 to 0.51 GiB lower under this allocator.** Each tile kept its frames with 0.46
+  to 0.54 GiB left, where `cudaMallocAsync` needed 0.79 to 0.97 on this card, and moved them with
+  0.1 less, refused nowhere. 832 px's 0.49 stands beside the RTX 5090's 0.40 under the same
+  allocator, held by torch's limit there. The references' peaks (torch's max allocated) were
+  `cudaMallocAsync`'s to the MB.
+- **torch counts the refusals here:** `num_ooms` was 0 across every pass that kept its frames (11)
+  and 20 or 38 across every one that lost them (7), as many as the plans the cuDNN frontend built
+  over the reference's in each: it separates without a miss, as on the RTX 5090.
+  `num_alloc_retries`, the requests torch's own allocator gave once it had freed its cache, moved
+  in both (47 to 124 kept, 84 to 153 lost), so the counters' sum doesn't separate; the cuDNN
+  frontend's plans built do (none kept, 20 or 38 lost). The "recovered" lines are
+  `cudaMallocAsync`'s and none came.
+- **Two runs at one card:** six cards ran twice, each pair alike, frames included. The card's
+  offset was 1.401 to 1.403 GiB, where it was 1.489 to 1.491 under `cudaMallocAsync`: seedvr2x read
+  the free memory 0.09 GiB higher at the plan. A rung took 134 to 203 s, for information.
+
+Each ladder's rungs in their order (as above):
+
+| ladder | rungs |
+|---|---|
+| dec1080-832-seg | ref 13.819; 1.19 kept (+0); 0.99 kept (+0); 0.79 kept (+0); 0.39 moved 48/53 (+20); 0.59 kept (+0); 0.49 kept (+0); 0.49 kept (+0); 0.39 moved 48/53 (+20) |
+| dec1080-1792-seg | ref 32.802; 0.54 kept (+0); 0.34 moved 48/53 (+38); 0.44 moved 48/53 (+38); 0.54 kept (+0); 0.44 moved 48/53 (+38) |
+| dec2160-1600-seg | ref 41.170; 0.56 kept (+0); 0.36 moved 12/17 (+38); 0.46 kept (+0); 0.46 kept (+0); 0.36 moved 12/17 (+38) |
+
 ### What follows for seedvr2x
 
 - **The room can't be 0.** At 0.6 GiB left a pass's convolutions lose their workspaces: the run
@@ -1444,11 +1756,15 @@ Each ladder's rungs in their order: the reference's decode peak (GiB), then each
   [the large tiles under the cure](#the-large-tiles-under-the-one-output-cure-and-the-tiles-left-2026-10-17).
   Every pass alone measured on this card kept its frames with 1.10 GiB or less beyond its peak.
   With the cure, every 1080p and 4K decode it takes that ran did with 0.97 or less and moved them
-  below, refused nowhere, and its 4K encode squares did with 0.60; 4K's untiled encode and the
-  other output sizes' passes it takes didn't run. Without it, the decodes it doesn't take that ran
-  (squares of 640 to 1,088 px, 1,104 × 1,152) did with 0.90 or less (from 1,024 px refused first;
-  the 512- and 576-px decodes didn't run), the encodes run with 0.87. A VAE pass is left at least
-  the room and the budget's 0.6 GiB beyond its predicted peak: 2.1 GiB with the room at 1.5.
+  below, refused nowhere, and its 4K encode squares did with 0.60. Its passes run since
+  ([the passes never run](#the-passes-the-one-output-cure-takes-that-never-ran-and-the-tiles-no-code-ran-2026-10-18)): 1440p's
+  decodes with 0.96 or less, its encodes with 0.63 or less, both moving below; 4K's untiled encode
+  with 0.60, refused below at requests the cure doesn't write into one output. Without it, the
+  decodes it doesn't take that ran (squares of 576 to 1,088 px, 1,104 × 1,152) did with 0.90 or
+  less (from 1,024 px refused first; the 512-px decode, which no card of 12 to 48 GB takes at a
+  room of 1.0 to 1.5, didn't run), the encodes run with 0.87 (1440p's tiles cut off at its rows
+  refused first). A VAE pass is left at least the room and the budget's 0.6 GiB beyond its
+  predicted peak: 2.1 GiB with the room at 1.5.
 - **Whole runs** ([six tiles on the cure's code](#whole-runs-in-large-tiles-under-the-one-output-cure-2026-10-17)) kept their
   frames with 1.08 GiB or less beyond their decode's peak, within 0.2 of the passes alone either
   way, and lost them, on some run, with 0.98 or less; near that floor two runs at one card don't
@@ -1457,18 +1773,26 @@ Each ladder's rungs in their order: the reference's decode peak (GiB), then each
   the cuDNN frontend's log does. Under torch's own allocator, a held run's, `num_ooms` across a
   unit counts each refused workspace: 0 across every pass that kept its frames, 19 to 21 across
   every one that lost them ([on an RTX 5090](#under-expandable-segments-on-an-rtx-5090-2026-10-17)),
-  a check a held run could make at no cost. The pass's time is untried as a signal: on the
+  a check a held run could make at no cost; on the 96 GB card under that allocator too (0 across
+  the passes kept, 20 to 38 across those lost), where `num_alloc_retries`, the requests given
+  once the cache was freed, moves in both. The pass's time is untried as a signal: on the
   power-capped card it drifts from run to run, and on the RTX 5090 it is deferred.
 - **On a held run** (a driver that gives memory the card doesn't have, expandable segments) the
   two tiles measured keep their frames with 0.40 GiB beyond their peak, a fifteenth of the 6.0 GiB
   a plan leaves a pass there.
+- **The floor follows the allocator:** on the 96 GB card, whose driver refuses, torch's own
+  allocator with expandable segments put three tiles' floor 0.30 to 0.51 GiB under
+  `cudaMallocAsync`'s (832 px: 0.49 kept, where `cudaMallocAsync` needed 0.79 and the RTX 5090
+  under the same allocator 0.40; [under torch's own allocator](#under-torchs-own-allocator-with-expandable-segments)).
 
 ## Caveats
 
 - **Emulated cards,** as in [planner-limits.md](planner-limits.md#caveats): a ballast on a 96 GB
   card gives the memory a smaller card leaves, not its context, its driver or its kernels.
 - **One GPU, one driver, one software stack.** The pool is the driver's
-  (`cudaMallocAsync`): another driver's may hold on to less, or to more.
+  (`cudaMallocAsync`): another driver's may hold on to less, or to more. Three tiles ran under
+  torch's own allocator with expandable segments on the same card, passes alone; the other tiles,
+  the encodes and whole runs under it, and torch's own allocator without the segments, didn't.
 - **Few repeats.** A plan ran one to three times. Where a pass fails it doesn't always fail at
   the same slice, and one that failed in the whole run ran alone: a run that passes once proves
   little, a plan that passes three times a little more.
@@ -1500,11 +1824,14 @@ Each ladder's rungs in their order: the reference's decode peak (GiB), then each
   same other frames or latent, a refusal in the same slice). One rung of the tail was
   stopped when the queue was interrupted, recorded by vae_room.py and not by the driver, and ran
   again as that card's second run. The whole runs' twelve cards run twice didn't all agree: five
-  gave two outcomes and a sixth moved other frames each time.
-- **Not run:** under the cure, 4K's untiled encode and the other output sizes' passes it takes
-  (1440p's cut-off tiles and untiled passes among them); on 6e1be76, the decodes in 512- and
-  576-px tiles; and, apart, 4K's encode squares of 768 to 1,088 px, 1080p's own shapes. Whole runs:
-  only the six tiles measured, on the cure's code.
+  gave two outcomes and a sixth moved other frames each time. Of the 66 cards the passes never run
+  ran twice, every pair gave the same outcome and all but one the same frames: the 576-px decode at
+  1080p with 0.67 moved the same 48 frames with other bits, its one fallback in another slice.
+- **Not run:** the decodes in 512-px tiles (no card of 12 to 48 GB takes them at a room of 1.0 to
+  1.5, at 1080p, 1440p or 4K); output sizes other than 1080p, 1440p and 4K; apart, 4K's encode
+  squares of 768 to 1,088 px and 1440p's squares the cure doesn't take, 1080p's own shapes. The
+  tiles first run on 2026-10-18 ran on the cure's code only, the ones it doesn't take included.
+  Whole runs: only the six tiles measured, on the cure's code.
 
 ## Reproduce
 
@@ -1541,6 +1868,26 @@ python floor.py --dir DIR2 --python PYTHON --copy SEEDVR2X --want TREE \
     --lock LOCK queue --order tail
 python floor.py --dir DIR2 --history DIR table --order tail --compact
 python floor.py --dir DIR2 --history DIR detector
+
+# the passes the cure takes that the tail didn't run, then the tiles no code ran, on the cure's code
+# (the ladders named -a4), the tail's study read only (its floors start the ladders); the study's
+# files named bx.*; the planner's tiles for a size first, no GPU (cards 12 to 48, and bare)
+python vae_room.py plan --room 1.0 --case 1440:12:2w --case 1440:12:w --case 1440:bare:w
+python floor.py --dir DIR5 --prefix bx --python PYTHON --copy SEEDVR2X --want TREE \
+    --code a4 PYTHON_A4 SEEDVR2X_A4 TREE_A4 --history DIR2 --models MODELS --clips CLIPS \
+    --lock LOCK queue --order rest
+python floor.py --dir DIR5 --prefix bx --history DIR2 table --order rest --compact
+python floor.py --dir DIR5 --prefix bx --history DIR2 detector
+
+# three decodes under torch's own allocator with expandable segments, every run of the study
+# given it, the cure's code under a label of its own (seg: its ladders aren't the cudaMallocAsync
+# ones; its units copied from seeds/a4 to seeds/seg first, or made by the queue)
+python floor.py --dir DIR5 --prefix bx2 --allocator backend:native,expandable_segments:True \
+    --python PYTHON --copy SEEDVR2X --want TREE --code seg PYTHON_A4 SEEDVR2X_A4 TREE_A4 \
+    --models MODELS --clips CLIPS --lock LOCK \
+    queue --ladders dec1080-832-seg,dec1080-1792-seg,dec2160-1600-seg
+python floor.py --dir DIR5 --prefix bx2 table --compact
+python floor.py --dir DIR5 --prefix bx2 detector
 
 # whole runs beside the passes alone: the encode, the windows and the decode in one process, the
 # decode tile pinned (one lock hold a rung); each ladder's pass alone read from floor.py's studies,

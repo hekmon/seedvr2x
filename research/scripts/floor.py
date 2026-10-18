@@ -19,14 +19,14 @@ window), so that every rung of a ladder runs the same plan on less and less free
   - an encode in tile T: a new job of the shape, stopped after its encode (--stop-after encode),
     its latent compared bit for bit.
 
-A ladder is named KINDRES-TILE[-CODE]: dec or enc, 1080 or 2160, the tile's side in pixels (a
-square, cut off at 1080p's 1,104 rows where larger) or `untiled`, the pass in one stream
-(seedvr2x's --decode-tile 0 or --encode-tile 0; a decode's copy of the units then says decode
-tile 0 and no decode tiles). An untiled rung records whether the untiled pass is what ran (the
-run's own plan has no tiles for the pass, and the pass ran one stream's slices, as many as a
-tiled pass runs a tile) and the pass's peak above what the GPU held once its phase was entered,
-against the planner's untiled fit of the padded frame (planner._fit, read once per code by the
-code's own python on the CPU: fits.json).
+A ladder is named KINDRES-TILE[-CODE]: dec or enc, 1080, 1440 or 2160, the tile's side in pixels
+(a square, cut off at the padded frame's rows where larger: 1080p's 1,104, 1440p's 1,472) or
+`untiled`, the pass in one stream (seedvr2x's --decode-tile 0 or --encode-tile 0; a decode's copy
+of the units then says decode tile 0 and no decode tiles). An untiled rung records whether the
+untiled pass is what ran (the run's own plan has no tiles for the pass, and the pass ran one
+stream's slices, as many as a tiled pass runs a tile) and the pass's peak above what the GPU held
+once its phase was entered, against the planner's untiled fit of its resolution's padded frame
+(planner._fit, read once per code and resolution by the code's own python on the CPU: fits.json).
 
 The code under study: --copy (its tree --want, its environment's --python) for a ladder named
 without a code (dec1080-768); a ladder named with one (dec2160-1216-a4) runs that code, given by
@@ -40,11 +40,13 @@ barred for the rest of the queue's run, said, and the other codes' ladders go on
 only: a ladder it began goes on from its rungs and against its reference, one it finished is
 done, and its units serve the ladders without a code where this study has none of its own.
 
-The shapes are two of planner_matrix.py's clips: 1080 = clip-53 (53 frames, window 8, tiles
-768 / 576), for the squares up to 1,088 px, the tiles cut off at 1080p's 1,104 rows and 1080p's
-untiled passes; 2160 = clip-17 (17 frames, window 5, tiles 1408 / 1088), for the squares from
-1,152 px; 36 blocks swapped (the fewest on the GPU in every phase); an empty cut list (one shot,
-no shot detector).
+The shapes are planner_matrix.py's clips: 1080 = clip-53 (53 frames, window 8, tiles 768 / 576),
+for the squares up to 1,088 px, the tiles cut off at 1080p's 1,104 rows and 1080p's untiled
+passes; 2160 = clip-17 (17 frames, window 5, tiles 1408 / 1088), for the squares from 1,152 px
+and 4K's untiled encode; 1440 = clip-53 again at 1440p (53 frames, window 8, tiles 768 / 576),
+for the tiles cut off at 1440p's 1,472 rows and 1440p's untiled passes (2026-10-18: as 1080p's
+1,104-row tiles and untiled passes were run, a pass of 13 slices); 36 blocks swapped (the fewest
+on the GPU in every phase); an empty cut list (one shot, no shot detector).
 
 A rung's room is the free memory its plan was made in (the run's own plan, vae_room.py's
 "planned") less the pass's measured peak; "usual", that free memory less the reference rung's
@@ -70,28 +72,41 @@ power-capped card a pass's time drifts from run to run: no signal there).
   rung LADDER   one rung by hand: --card CARD (bare: the reference) or --room GIB.
   queue         the ladders of --ladders (names, comma-separated) or of --order (b1: the first
                 order, of 2026-10-16, the default; tail: the order of 2026-10-17, the tiles the
-                one-output cure takes on the code named a4, then the base code's left), each rung
-                decided from the earlier ones, until the UTC time in DIR/deadline, DIR/skip (ends
-                after the rung running) or DIR/pause (waits before the next); a run is never
-                interrupted. --wait-for FILE: no rung before FILE exists. DIR/done at the end.
+                one-output cure takes on the code named a4, then the base code's left; rest: the
+                order of 2026-10-18, the passes the cure takes that the tail didn't run, on the
+                code named a4: 4K's untiled encode, then 1440p's never run in any shape by the
+                least card that takes them, then its squares), each rung decided from the earlier
+                ones, until the UTC time in
+                DIR/deadline, DIR/skip (ends after the rung running) or DIR/pause (waits before
+                the next); a run is never interrupted. --wait-for FILE: no rung before FILE
+                exists. DIR/done at the end. The queue's own lines (the ladders, the wait, each
+                ladder's start and end, each rung's reason) go to the progress file too, `#` first.
   table         per ladder and code the least room kept and the most lost, with their runs; a
                 tile on two codes side by side; the untiled passes' checks; every rung, or with
                 --compact each ladder's rungs on one line; the ladders not reached; the floors
                 against the tile's area and against the largest workspace its reference's plans
                 asked, by kind, resolution and code.
   detector      per rung, each signal that doesn't depend on the clock against its reference
-                rung's: torch's count of refused allocations, the cuDNN frontend's plans built
-                (and the slice where the extra ones were built, with the memory free before
-                it), the "recovered" lines; which separates the moved rungs from the kept ones,
-                and where, by code too; the refused rungs apart.
+                rung's: torch's count of refused allocations (and its num_ooms alone), the cuDNN
+                frontend's plans built (and the slice where the extra ones were built, with the
+                memory free before it), the "recovered" lines; which separates the moved rungs
+                from the kept ones, and where, by code too; the refused rungs apart.
 
 The study's directory (--dir): records/ (vae_room.py's record and log of each rung), work/,
 refs/ (each tile's reference output), seeds/, rungs.jsonl (a record a rung), progress (a line a
-rung), fits.json and the queue's control files. seed, rung and queue also need --python
+rung), fits.json and the queue's control files (deadline, pause, skip, done); with --prefix P,
+these seven files are P.rungs.jsonl, P.progress, P.fits.json, P.deadline, P.pause, P.skip and
+P.done, so that two studies share a directory. seed, rung and queue also need --python
 (seedvr2x's environment's python), --copy and --want (the frozen copy of seedvr2x under study
 and its tree, checked before every rung), --models, --clips (planner_matrix.py's clip-N.mkv)
 and --lock (the GPU's lock file). ffmpeg on PATH. table and detector read the study's files
-only (and --history's)."""
+only (and --history's).
+
+--allocator CONF: torch's allocator for every run of the study, its units' and its rungs', as
+seedvr2x is given it, the PYTORCH_CUDA_ALLOC_CONF of the run's process (backend:native,
+expandable_segments:True, torch's own allocator with expandable segments; 2026-10-18); without
+it the environment's, else seedvr2x's own default (cudaMallocAsync where the driver refuses what
+the card can't hold). Each rung records the setting it ran under, and the queue says it."""
 
 import argparse
 import calendar
@@ -111,9 +126,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SHAPES = {
     1080: {"clip": "clip-53.mkv", "window": 8, "encode": 768, "decode": 576, "frames": 53},
+    1440: {"clip": "clip-53.mkv", "window": 8, "encode": 768, "decode": 576, "frames": 53},
     2160: {"clip": "clip-17.mkv", "window": 5, "encode": 1408, "decode": 1088, "frames": 17},
 }
-PADDED = {1080: (1104, 1920), 2160: (2192, 3840)}
+# The frame the model takes at each output size (job.padded_size): 1080 rows take 8 reflected and
+# 16 black, 1440 and 2160 rows 16 and 16; 1920, 2560 and 3840 columns none.
+PADDED = {1080: (1104, 1920), 1440: (1472, 2560), 2160: (2192, 3840)}
 SWAPPED = 36
 ROOM = -50.0  # the planner's room in the rungs' process: no plan refused, none moved
 GIB = 1024**3
@@ -121,6 +139,7 @@ START, STEP, FINE = 1.1, 0.2, 0.1  # GiB: PROVISIONAL
 MOST_RUNGS = 12  # a ladder's rungs at the most, its reference included
 TOP, BOTTOM = 4.0, -1.0  # the rooms a ladder goes no further than
 OFFSET = 1.49  # card - free (GiB) before any rung measured it (DESIGN.md: N - 1.49)
+POLL, HEARTBEAT = 30, 1800  # seconds: --wait-for's look at its file, and its line while it waits
 FIRST = ["dec1080-640", "dec1080-1024", "dec2160-1408", "dec2160-1792", "dec2160-2048"]
 FIRST += ["dec1080-1152", "dec1080-1536", "dec1080-1856"]
 FIRST += ["enc1080-512", "enc1080-1024", "enc2160-1472", "enc2160-2048"]
@@ -146,8 +165,33 @@ TAIL += [f"dec1080-{t}" for t in (768, 896, 960, 1088)]
 TAIL += [f"enc1080-{t}" for t in (768, 896, 960, 1088, 1152, 1280, 1408, 1472, 1600, 1728, 1792)]
 TAIL += [f"enc2160-{t}" for t in (1152, 1216, 1280, 1344, 1408, 1536, 1600)]
 TAIL += [f"dec2160-{t}-a4" for t in (1664, 1728, 1792, 1856, 1920, 1984, 2048)]
-ORDERS = {"b1": LADDERS, "tail": TAIL}
-LADDER = re.compile(r"(dec|enc)(1080|2160)-(\d+|untiled)(?:-([a-z][a-z0-9]*))?")
+# The rest's order (2026-10-18): the passes the one-output cure takes that the tail didn't run, on
+# the code named a4: 4K's untiled encode (the 96 GB card's own 4K plan's); then 1440p's (its frame
+# padded to 1,472 x 2,560), from the planner's tiles on the final code for the cards of 12 to 48 GB
+# and the bare card at a room of 1.0 GiB (and at 1.25 and 1.5, as shipped, for the tiles 1.0
+# doesn't give), by the least card that takes them: the encodes in tiles of 1,472 x 1,792 (29 GB),
+# x 1,856 (30), x 1,920 (31, at 1.25 and 1.5), x 1,984 (31) and x 2,048 (32 to 38) and untiled (39
+# to 48), the decodes in tiles of 1,472 x 1,536 (42) to 1,472 x 1,792 (48) and untiled (the 96 GB
+# card's own). Then 1440p's encode tiles the cure doesn't take that no ladder ran, 1,472 x 1,536
+# (26 GB), x 1,600 (27, at 1.25 and 1.5), x 1,664 (27) and x 1,728 (28), on the same code. Then
+# the tiles no ladder ran on any code that those cards take at one of the three rooms, at each
+# output size where they do, on the same code: the decode in 576-px tiles (the 12 GB card's at 1.5,
+# today's room, at 1080p, 1440p and 4K), the encode in 832-px tiles (the 13 GB card's at 1.5), and
+# 1080p's encodes in tiles of 1,104 x 1,216 (18 GB at 1.5), x 1,344 (19), x 1,664 (22) and x 1,856
+# (24, at 1.25 and 1.5); no such card takes 512-px decode tiles at those rooms. Last, 1440p's
+# decode squares the cure takes, 1,152 (26 GB) to 1,472 px (40 to 41): 4K's shapes, which the tail
+# ran with 17 frames, here with 1440p's 53 (PROVISIONAL: what was never run in any shape first).
+# 1440p's other squares are 1080p's shapes, run on the base code, the cure taking none.
+REST = ["enc2160-untiled-a4"]
+REST += [f"enc1440-{t}-a4" for t in (1792, 1856, 1920, 1984, 2048)] + ["enc1440-untiled-a4"]
+REST += [f"dec1440-{t}-a4" for t in (1536, 1600, 1664, 1728, 1792)] + ["dec1440-untiled-a4"]
+REST += [f"enc1440-{t}-a4" for t in (1536, 1600, 1664, 1728)]
+REST += [f"dec{res}-576-a4" for res in (1080, 1440, 2160)]
+REST += [f"enc{res}-832-a4" for res in (1080, 1440, 2160)]
+REST += [f"enc1080-{t}-a4" for t in (1216, 1344, 1664, 1856)]
+REST += [f"dec1440-{t}-a4" for t in (1152, 1216, 1280, 1344, 1408, 1472)]
+ORDERS = {"b1": LADDERS, "tail": TAIL, "rest": REST}
+LADDER = re.compile(r"(dec|enc)(1080|1440|2160)-(\d+|untiled)(?:-([a-z][a-z0-9]*))?")
 PLANS = "EXECUTION_PLAN_DESCRIPTOR"  # the cuDNN frontend's line for a plan built
 PLAN_LINE = re.compile(r"EXECUTION_PLAN_DESCRIPTOR : (\S+), .*workSpaceSize: (\d+)")
 SLICE_LINE = re.compile(
@@ -168,18 +212,24 @@ PROGRESS = RUNGS = DEADLINE = PAUSE = SKIP = DONE = Path()
 MODELS = LOCK = ""
 CLIPS = Path()
 HISTORY: Path | None = None
+ALLOCATOR: str | None = None  # --allocator: PYTORCH_CUDA_ALLOC_CONF of every run, else as given
+ALLOCATOR_VARIABLE = "PYTORCH_CUDA_ALLOC_CONF"
 # The codes under study: "" the base (--python, --copy, --want), then each --code by its name.
 CODES: dict[str, dict] = {}
 
 
 def configure(args: argparse.Namespace) -> None:
     global DIR, RECORDS, WORK, REFS, SEEDS, CUTS, FITS, PROGRESS, RUNGS, DEADLINE, PAUSE, SKIP
-    global DONE, MODELS, LOCK, CLIPS, HISTORY
+    global DONE, MODELS, LOCK, CLIPS, HISTORY, ALLOCATOR
+    ALLOCATOR = getattr(args, "allocator", None)
     DIR = args.dir.resolve()
     RECORDS, WORK, REFS, SEEDS = DIR / "records", DIR / "work", DIR / "refs", DIR / "seeds"
-    CUTS, FITS = DIR / "no-cuts.txt", DIR / "fits.json"
-    PROGRESS, RUNGS = DIR / "progress", DIR / "rungs.jsonl"
-    DEADLINE, PAUSE, SKIP, DONE = DIR / "deadline", DIR / "pause", DIR / "skip", DIR / "done"
+    prefix = getattr(args, "prefix", None)
+    named = f"{prefix}." if prefix else ""
+    CUTS, FITS = DIR / "no-cuts.txt", DIR / f"{named}fits.json"
+    PROGRESS, RUNGS = DIR / f"{named}progress", DIR / f"{named}rungs.jsonl"
+    DEADLINE, PAUSE = DIR / f"{named}deadline", DIR / f"{named}pause"
+    SKIP, DONE = DIR / f"{named}skip", DIR / f"{named}done"
     MODELS, LOCK = args.models, args.lock
     CLIPS = Path(args.clips) if args.clips else Path()
     HISTORY = args.history.resolve() if args.history else None
@@ -376,18 +426,25 @@ def foreign() -> list[str]:
 
 
 def fits() -> dict:
-    """The planner's untiled fits at 1080p's padded frame, by code, in GiB (fits.json)."""
+    """The planner's untiled fits at each resolution's padded frame, by code, then resolution, in
+    GiB (fits.json)."""
     return json.loads(FITS.read_text()) if FITS.exists() else {}
 
 
+def fit_of(code: str, res: int, phase: str) -> float | None:
+    """The planner's untiled fit of the pass at that resolution on that code, GiB (fits.json)."""
+    return (fits().get(label(code)) or {}).get(str(res), {}).get(phase)
+
+
 def make_fits() -> dict:
-    """planner._fit of 1080p's padded frame untiled, the encode's (column 0) and the decode's (1):
-    a VAE pass's peak above what the GPU holds before it, as each code's planner predicts it,
-    read on the CPU by the code's own python; fits.json."""
+    """planner._fit of each resolution's padded frame untiled, the encode's (column 0) and the
+    decode's (1): a VAE pass's peak above what the GPU holds before it, as each code's planner
+    predicts it, read on the CPU by the code's own python; fits.json."""
     found: dict = {}
     script = (
-        "import json; from seedvr2x.runtime import planner; "
-        f"print(json.dumps([planner._fit({PADDED[1080]}, None, column) for column in (0, 1)]))"
+        "import json; from seedvr2x.runtime import planner; print(json.dumps({res:"
+        " [planner._fit(padded, None, column) for column in (0, 1)] for res, padded in"
+        f" {PADDED}.items()}}))"
     )
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1")
     for code, spec in CODES.items():
@@ -395,11 +452,14 @@ def make_fits() -> dict:
             [spec["python"], "-c", script], capture_output=True, text=True, env=env, cwd=DIR
         )
         try:
-            encode, decode = json.loads(said.stdout.strip().splitlines()[-1])
+            by_res = json.loads(said.stdout.strip().splitlines()[-1])
         except (IndexError, ValueError) as error:
             found[label(code)] = {"error": f"{error!r}: {said.stderr.strip()[-400:]}"}
             continue
-        found[label(code)] = {"encode": encode / GIB, "decode": decode / GIB}
+        found[label(code)] = {
+            res: {"encode": encode / GIB, "decode": decode / GIB}
+            for res, (encode, decode) in by_res.items()
+        }
     FITS.write_text(json.dumps(found, indent=1) + "\n")
     return found
 
@@ -472,7 +532,18 @@ def environment() -> dict:
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", HF_HUB_OFFLINE="1")
     env |= {"CUDNN_FRONTEND_LOG_INFO": "1", "CUDNN_FRONTEND_LOG_FILE": "stderr"}
     env.pop("CUDA_VISIBLE_DEVICES", None)
+    if ALLOCATOR is not None:
+        # The study's allocator: torch and seedvr2x take the first of torch's two variables that
+        # is set, this one first (runtime/memory.py, VARIABLES).
+        env[ALLOCATOR_VARIABLE] = ALLOCATOR
     return env
+
+
+def allocator_given() -> str | None:
+    """The allocator setting a run of the study is given (the first of torch's two variables
+    set), None for none: seedvr2x's own default then."""
+    env = environment()
+    return env.get(ALLOCATOR_VARIABLE, env.get("PYTORCH_ALLOC_CONF"))
 
 
 def tree(code: str) -> str:
@@ -556,6 +627,35 @@ def one_stream(res: int) -> int:
     return 1 + math.ceil((SHAPES[res]["frames"] - 5) / 4)
 
 
+PLAN_KEPT = ("window", "swapped", "vae_in_dit")  # a rung's plan as its reference's, with the pass's
+
+
+def another_pass(found: dict, reference: dict | None, phase: str, tile: int) -> str | None:
+    """Why a rung that ran measured another pass than its ladder's, or None: its plan's tiles for
+    the pass aren't the ladder's (untiled: the untiled pass didn't run, its plan tiled or its
+    slices not one stream's), or its plan isn't its reference's (the window, the blocks swapped,
+    the VAE in the DiT's phase, the pass's tiles and what of the DiT the pass keeps). Its frames
+    then say nothing of the ladder's floor: the rung fails, which ends the ladder (PROVISIONAL,
+    2026-10-18: every rung of a ladder runs one plan, --room and --dit-unjudged see to it)."""
+    plan = found.get("plan") or {}
+    tiles = plan.get(f"{phase}_tiles", "absent")
+    if tile == 0:
+        if not (found.get("untiled") or {}).get("ran_untiled"):
+            return f"not the untiled pass: the plan's tiles {tiles}, {found.get('slices')} slices"
+    elif not isinstance(tiles, dict) or tiles.get("size") != tile:
+        return f"not the ladder's tile: the plan's tiles {tiles}"
+    if reference is None or found.get("card") == "bare":
+        return None
+    theirs = reference.get("plan") or {}
+    keys = (*PLAN_KEPT, f"{phase}_tiles", f"resident_{phase}")
+    differ = [
+        f"{key} {plan.get(key)} for {theirs.get(key)}"
+        for key in keys
+        if plan.get(key) != theirs.get(key)
+    ]
+    return f"another plan than the reference's: {'; '.join(differ)}" if differ else None
+
+
 def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
     """One rung: run, read its record, compare it with the ladder's reference, record it."""
     kind, res, tile, code = parse(ladder)
@@ -596,6 +696,7 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
         "exit": status,
         "seconds": seconds,
         "foreign": held,
+        "allocator": allocator_given(),
         "record": str(record_path),
         "log": str(log),
     }
@@ -661,7 +762,7 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
             # Whether the untiled pass is what ran: the run's own plan has no tiles for the
             # pass, and the pass ran one stream's slices (a tiled pass runs as many a tile).
             tiles = plan.get(f"{phase}_tiles", "absent")
-            fit = fits().get(label(code), {}).get(phase)
+            fit = fit_of(code, res, phase)
             peak = found.get("pass_peak")
             found["untiled"] = {
                 "plan_tiles": tiles,
@@ -766,6 +867,12 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
                 found["outcome"] = "kept" if same else "moved"
     if reference is None and card != "bare":
         found["outcome"] = found.get("outcome", "uncompared")
+    if found.get("outcome") in ("reference", "kept", "moved"):
+        other = another_pass(found, reference, phase, tile)
+        if other is not None:
+            found["outcome"], found["why"] = "failed", other
+            if card == "bare":
+                found["ok"] = False
     shutil.rmtree(out, ignore_errors=True)
     found["ended"] = now()
     with RUNGS.open("a") as file:
@@ -795,6 +902,7 @@ def progress(r: dict) -> None:
         f" (ref {r.get('reference_plans', '-')}) recovered {detector.get('recovered')} counters"
         f" {(r.get('counters') or [None, None])[1]} | pass {r.get('pass_seconds')} s"
         f" (ref {r.get('reference_seconds', '-')}) | exit {r['exit']} | {r.get('outcome')}{extra}"
+        + (f" | why: {r['why']}" if r.get("why") else "")
     )
     with PROGRESS.open("a") as file:
         file.write(line + "\n")
@@ -883,7 +991,7 @@ def start_for(ladder: str) -> float:
     kind, _, _, code = parse(ladder)
     floors = []
     known = [r["ladder"] for r in rungs_of() if r.get("ladder")]
-    for other in dict.fromkeys([*known, *LADDERS, *TAIL]):
+    for other in dict.fromkeys([*known, *LADDERS, *TAIL, *REST]):
         if other == ladder or not LADDER.fullmatch(other):
             continue
         other_kind, _, _, other_code = parse(other)
@@ -929,41 +1037,61 @@ def stop_asked() -> str | None:
     return None
 
 
+def note(text: str) -> None:
+    """A line of the queue's own: said, and in the progress file after a `#`, between the rungs'."""
+    say(text)
+    with PROGRESS.open("a") as file:
+        file.write(f"# {now()} {text}\n")
+
+
 def queue(args: argparse.Namespace) -> int:
     order = args.ladders.split(",") if args.ladders else ORDERS[args.order]
     for ladder in order:
         code_spec(parse(ladder)[3])  # every ladder's code given, before any rung
-    say(f"queue started; ladders {order}")
+    note(f"queue started; ladders {order}")
+    given = allocator_given()
+    note(f"the runs' allocator: {given if given is not None else 'none set, seedvr2x default'}")
+    waited = time.monotonic()
+    if args.wait_for is not None and not args.wait_for.exists():
+        note(f"waiting for {args.wait_for}: no rung before it exists")
     while args.wait_for is not None and not args.wait_for.exists():
         if SKIP.exists():
             DONE.write_text(f"{now()} {SKIP.name} exists, before {args.wait_for}\n")
+            note(f"{SKIP.name} exists, before {args.wait_for}: ended")
             return 0
-        time.sleep(30)
+        time.sleep(POLL)
+        if time.monotonic() - waited >= HEARTBEAT:
+            # A line every half hour, that a reader sees the queue alive.
+            waited = time.monotonic()
+            note(f"still waiting for {args.wait_for}")
+    if args.wait_for is not None:
+        note(f"{args.wait_for} exists: the rungs begin")
     for directory in (RECORDS, WORK, REFS, SEEDS):
         directory.mkdir(parents=True, exist_ok=True)
     if any(parse(ladder)[2] == 0 for ladder in order):
-        say(f"the planner's untiled fits at 1080p, GiB: {json.dumps(make_fits())}")
+        note(f"the planner's untiled fits by code and resolution, GiB: {json.dumps(make_fits())}")
     barred: dict[str, str] = {}  # a code found other than its tree -> why
     unseeded: dict[tuple[str, int], str] = {}  # a code's units that couldn't be made -> why
     ended = "every ladder done"
     for ladder in order:
         kind, res, tile, code = parse(ladder)
         if code in barred:
-            say(f"{ladder}: skipped, the {label(code)} code barred ({barred[code]})")
+            note(f"{ladder}: skipped, the {label(code)} code barred ({barred[code]})")
             continue
         if kind == "dec" and not (seed_base(code, res) / "manifest.json").exists():
             if code and (code, res) not in unseeded:
                 # A code's units, made when a ladder first needs them; tried once a queue's run.
+                note(f"seed-{res} of the {code} code: made now, on the bare card")
                 try:
                     seed_of(res, code)
                 except (Exception, SystemExit) as error:  # said, and the queue goes on
                     unseeded[(code, res)] = repr(error)
-                    say(f"seed-{res} of the {code} code FAILED: {error!r}")
+                    note(f"seed-{res} of the {code} code FAILED: {error!r}")
             if not (seed_base(code, res) / "manifest.json").exists():
-                say(f"{ladder}: no seed for {res} on the {label(code)} code: skipped")
+                note(f"{ladder}: no seed for {res} on the {label(code)} code: skipped")
                 continue
         free_disk = shutil.disk_usage(DIR).free / 1e9
-        say(
+        note(
             f"{ladder}: begins ({tile_shape(res, tile)}, the {label(code)} code);"
             f" {free_disk:.0f} GB free on the disk"
         )
@@ -978,7 +1106,7 @@ def queue(args: argparse.Namespace) -> int:
             found = tree(code)
             if found != code_spec(code)["want"]:
                 barred[code] = f"WRONG TREE {found} in {code_spec(code)['copy']}"
-                say(
+                note(
                     f"{ladder}: {barred[code]}, wanted {code_spec(code)['want']}: the"
                     f" {label(code)} code's ladders barred"
                 )
@@ -988,11 +1116,16 @@ def queue(args: argparse.Namespace) -> int:
                 break
             card, target, reason = step
             name = name_for(ladder, card)
-            say(f"{name}: {reason}; card {card}" + ("" if target is None else f", target {target}"))
+            held = foreign()
+            note(
+                f"{name}: {reason}; card {card}"
+                + ("" if target is None else f", target {target}")
+                + f"; the card's compute processes: {held or 'none'}"
+            )
             try:
                 run_rung(ladder, card, target, name)
             except (Exception, SystemExit) as error:  # the queue goes on to the next ladder
-                say(f"{name}: THE DRIVER FAILED: {error!r}")
+                note(f"{name}: THE DRIVER FAILED: {error!r}")
                 failed = {"name": name, "ladder": ladder, "card": card, "outcome": "failed"}
                 with RUNGS.open("a") as file:
                     file.write(json.dumps(failed | {"why": repr(error), "ended": now()}) + "\n")
@@ -1005,11 +1138,11 @@ def queue(args: argparse.Namespace) -> int:
         if kind == "dec":
             copy = (SEEDS / code if code else SEEDS) / f"seed-{res}-d{tile}"
             shutil.rmtree(copy, ignore_errors=True)
-        say(f"{ladder}: done")
+        note(f"{ladder}: done")
     if barred:
         ended += f"; barred: {barred}"
     DONE.write_text(f"{now()} {ended}\n")
-    say(f"queue ended: {ended}")
+    note(f"queue ended: {ended}")
     return 0
 
 
@@ -1332,8 +1465,9 @@ REFUSALS = ("num_ooms", "num_alloc_retries", "num_oom_rejections")  # torch's, p
 def detector(args: argparse.Namespace) -> int:
     """Each rung's signals that don't depend on the clock, against its reference rung's, and which
     separate the rungs whose frames moved from those that kept them: torch's count of refused
-    allocations across the pass (memory_stats), the cuDNN frontend's plans built in the pass (its
-    log, not torch's), torch's "recovered from an allocation failure" lines; over this study's
+    allocations across the pass (memory_stats) and its num_ooms alone, the cuDNN frontend's plans
+    built in the pass (its log, not torch's), torch's "recovered from an allocation failure"
+    lines; over this study's
     rungs (--history's only as references), and by code. The pass's time is no signal here: on a
     power-capped card it drifts from run to run (benchmarking.md)."""
     every = rungs_of()
@@ -1356,7 +1490,7 @@ def detector(args: argparse.Namespace) -> int:
         " moved) | cuDNN's plans built - the reference's | where the extra plans were built |"
         " torch's recovered lines |\n|---|---|---|---|---|---|---|---|"
     )
-    signals: dict[str, list[tuple[str, int | None, float | None, int, str]]] = {}
+    signals: dict[str, list[tuple[str, int | None, float | None, int, str, int | None]]] = {}
     refused = []
     for r in every:
         ref = refs.get(r.get("ladder"))
@@ -1393,6 +1527,14 @@ def detector(args: argparse.Namespace) -> int:
             if not before or not after
             else sum((after.get(k) or 0) - (before.get(k) or 0) for k in REFUSALS)
         )
+        # num_ooms alone: torch's own allocator counts there each request it refused, where
+        # num_alloc_retries also counts those it gave once its cache was freed (its source,
+        # c10/cuda/CUDACachingAllocator.cpp); cudaMallocAsync leaves both at 0.
+        ooms = (
+            None
+            if not before or not after
+            else (after.get("num_ooms") or 0) - (before.get("num_ooms") or 0)
+        )
         differ = r.get("differ")
         recovered = (r.get("detector") or {}).get("recovered")
         if r["outcome"] == "refused":
@@ -1413,6 +1555,7 @@ def detector(args: argparse.Namespace) -> int:
                 None if extra is None else float(extra),
                 recovered or 0,
                 label(code_of(r)),
+                ooms,
             )
         )
     print(
@@ -1448,6 +1591,7 @@ def detector(args: argparse.Namespace) -> int:
 def separated(kept: list[tuple], moved: list[tuple]) -> None:
     for index, name in (
         (1, f"torch's count of refused allocations across the pass ({' + '.join(REFUSALS)})"),
+        (5, "torch's num_ooms across the pass alone (each request its own allocator refused)"),
         (2, "the cuDNN frontend's plans built in the pass over the reference's (cuDNN's log)"),
         (3, 'torch\'s "recovered from an allocation failure" lines in the pass'),
     ):
@@ -1478,6 +1622,9 @@ def separated(kept: list[tuple], moved: list[tuple]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--dir", type=Path, required=True, help="the study's directory")
+    parser.add_argument(
+        "--prefix", help="the study's own files named PREFIX.rungs.jsonl, PREFIX.progress, ..."
+    )
     parser.add_argument("--python", help="seedvr2x's environment's python, for vae_room.py")
     parser.add_argument("--copy", help="the frozen copy of seedvr2x under study")
     parser.add_argument("--want", help="its tree (git's), checked before every rung")
@@ -1489,6 +1636,9 @@ def main() -> int:
         help="another code under study, run by the ladders named with -NAME",
     )
     parser.add_argument("--history", type=Path, help="an earlier study's directory, read only")
+    parser.add_argument(
+        "--allocator", help="PYTORCH_CUDA_ALLOC_CONF for every run of the study (torch's allocator)"
+    )
     parser.add_argument("--models", help="seedvr2x's --model-dir")
     parser.add_argument("--clips", help="the directory of planner_matrix.py's clip-N.mkv")
     parser.add_argument("--lock", help="the GPU's lock file (flock)")
