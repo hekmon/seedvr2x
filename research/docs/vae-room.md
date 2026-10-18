@@ -1,6 +1,7 @@
 # The VAE's room: what a VAE pass needs between its peak and the free memory, and what cures it
 
-> Status: **measured** (2026-10-13; the floor by tile size and its cause, 2026-10-16) for the
+> Status: **measured** (2026-10-13; the floor by tile size and its cause, 2026-10-16; under
+> expandable segments on a card that gives memory it doesn't have, 2026-10-17) for the
 > open question "The VAE's room" of
 > [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). seedvr2x's planner holds every VAE pass 1.5 GiB
 > further under its budget than a DiT window ([DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner),
@@ -11,6 +12,8 @@
 > never in the product, by [`scripts/vae_room.py`](../scripts/vae_room.py). One GPU (RTX PRO 6000
 > Blackwell 96 GB, torch 2.14.1+cu130, cuDNN 9.24, flash-attn 2.8.3, `cudaMallocAsync`), 7B fp16,
 > the colour correction on (`split`), seedvr2x as it stood before the changes this study leads to.
+> One section on a second GPU (RTX 5090 under WSL2, torch's own allocator with expandable
+> segments, the room set by torch's limit), by [`scripts/held_floor.py`](../scripts/held_floor.py).
 
 In short:
 
@@ -18,9 +21,9 @@ In short:
   peak still runs, slower, with other frames than the same pass with room to spare, and not the
   same ones twice. Shown on one convolution: left too little memory, it runs 8.5 times slower
   and gives other bits, without a word, and gave the same other bits again with the memory free,
-  in the same process (three calls); another cuDNN engine taken is the reading, inferred from
-  the bits, the time and the memory, no log naming an engine
-  ([the convolution alone](#one-convolution-alone)). A decode in 640-px tiles keeps its frames
+  in the same process (three calls): another cuDNN engine taken, as torch's source and the
+  cuDNN frontend's log showed since ([the convolution alone](#one-convolution-alone),
+  [the cause](#the-cause-in-torchs-source)). A decode in 640-px tiles keeps its frames
   with 0.90 GiB left and loses them with 0.80; one in 832-px tiles keeps them with 1.08 and loses
   them with 0.89; one in tiles of 1104 × 1152 keeps them with 0.94
   ([the floors](#the-floor-is-the-frames)). **The room's floor is where the frames
@@ -44,6 +47,12 @@ In short:
   for its shape for the life of the process. torch counts no refused allocation under
   `cudaMallocAsync` (its counters 0 on every pass); the cuDNN frontend's log tells it (20 or 40
   plans more in every pass whose frames moved, none in any that kept them).
+- **Under expandable segments, where the driver gives memory the card doesn't have**
+  ([on an RTX 5090](#under-expandable-segments-on-an-rtx-5090-2026-10-17)): the same passes keep
+  their frames with 0.40 GiB beyond their peak and lose them with 0.35 (decodes in 832- and
+  1,024-px tiles, which keep them with 0.79 and 0.75 under the 96 GB card's `cudaMallocAsync`),
+  and whole runs as the passes alone. torch's own allocator counts every refused workspace there:
+  `num_ooms` 0 across every pass that kept its frames, 19 to 21 across every one that lost them.
 - **For seedvr2x:** that cure for large outputs; the room stays until its floor is measured by
   the frames, tile size by tile size ([What follows](#what-follows-for-seedvr2x)).
 
@@ -296,6 +305,7 @@ three. The reading, inferred from the bits, the time and the memory (no log name
 workspace and keeps the engine it fell back to for that convolution's shape. In a pass, the
 frames move from the first slice short of room on: a packed decode's first slice (5 frames)
 keeps the reference's frames and all the later ones differ, and the pass is slower to its end.
+(Shown since, in torch's source and the cuDNN frontend's log: [the cause](#the-cause-in-torchs-source).)
 
 ### The floor by tile size, and its cause (2026-10-16)
 
@@ -536,9 +546,10 @@ workspace, and that engine kept for the convolution's shape; the frames move fro
 Still inferred: that the refused request was the workspace (no line says it: the plan rebuilt, then
 the next ones with the same or larger workspaces, then one with none that runs, is what a refused
 workspace makes in that code, where nothing else turns on the memory left); why engine 28 gives
-other bits (cuDNN's own, closed: another order of the sums, read from the bits); and under torch's
-own allocator nothing was run here: that `num_ooms` counts these refusals is its source's, not a
-measure.
+other bits (cuDNN's own, closed: another order of the sums, read from the bits). That `num_ooms`
+counts these refusals under torch's own allocator, its source's here, was measured since on
+another card: one a refused workspace
+([under expandable segments](#under-expandable-segments-on-an-rtx-5090-2026-10-17)).
 
 #### What the run can see
 
@@ -670,7 +681,9 @@ So, on this card and its allocator:
   `num_ooms`, `num_alloc_retries` and `num_oom_rejections` stayed at 0 across every pass, those
   whose frames moved as those that kept them, and an out-of-memory observer can't be attached:
   as its source says, it counts no refusal (above, 7). Under torch's own allocator `num_ooms`
-  across a unit would count each refused workspace at no cost (its source; not shown on a card).
+  across a unit counts each refused workspace at no cost: measured on an RTX 5090 under WSL2, 0
+  across every pass that kept its frames, 19 to 21 across every one that lost them
+  ([under expandable segments](#under-expandable-segments-on-an-rtx-5090-2026-10-17)).
 - **The cuDNN frontend's log tells it without a miss:** 20 or 40 plans more than the reference's
   (one or two convolutions fallen back) in every pass whose frames moved, none in any that kept
   them. It is cuDNN's log, not a count of torch's: a run can use it only with the log written
@@ -811,6 +824,125 @@ pass's, its reference's beside them.
 | dec1080-768-c14.635-1 | 14.635 | 13.146 | 12.356 | 0.789 | 0.521 | moved | 15 of 53 | 78.53 | 310 (290) | 144 | 159.5 (156.3) | 0 |
 | dec1080-768-c14.735-1 | 14.735 | 13.245 | 12.611 | 0.634 | 0.621 | moved | 7 of 53 | 89.80 | 310 (290) | 95 | 157.6 (156.3) | 0 |
 
+### Under expandable segments, on an RTX 5090 (2026-10-17)
+
+The same floor for two of those tiles on a card whose driver gives memory the card doesn't have:
+an RTX 5090 under WSL2 (driver 616.92, torch 2.14.1+cu130, cuDNN 9.24, SDPA), where seedvr2x holds
+itself to the card under torch's own allocator with expandable segments
+([DESIGN.md](../../seedvr2x/DESIGN.md#allocator)). No ballast is refused there, so no smaller card
+can be emulated: the room is set by torch's limit
+([`scripts/held_floor.py`](../scripts/held_floor.py), `vae_room.py run --limit`). seedvr2x at
+6e1be76, its code unchanged; each card's frames judged against that card's own reference only.
+
+#### Method as run
+
+- **The 1080p shape and its units, as above:** clip-53 (the matrix's source, 53 frames from its
+  48th, cut by planner_matrix.py's own trim), window 8, encode in 768-px tiles, 36 blocks
+  swapped, one shot, run once under seedvr2x's own limit and stopped before its decode. A rung
+  is seedvr2x's resume of a copy whose manifest says decode tile T, in a process of its own, the
+  planner's room at −50 GiB and the DiT's phase unjudged: one plan on every rung, the DiT's 2
+  slots on the GPU beside the pass. The allocator: `backend:native,expandable_segments:True`,
+  seedvr2x's own default there.
+- **The room:** once seedvr2x's hold has set torch's limit (the plan made, the models not
+  loaded), torch's limit set to the tile's reference's decode peak (torch's max allocated in the
+  unit) and the room, `memory._limit` with it, never above seedvr2x's own (the card's free
+  memory less 0.5 GiB: 23.98 to 24.03 GiB): the card was never passed, 4.57 GiB free at the
+  least beside a pass so held. The reference is the same resume under seedvr2x's own limit, 10.2
+  GiB over the 832-px peak and 5.1 over the 1,024-px one.
+- **The frames:** every frame's CRC-32 against the reference's, the worst PSNR-Y where they
+  differ; refused: out of memory.
+- **The ladder:** 1.0 GiB, down by 0.2 while the frames hold, then by 0.1; the least room kept
+  and the most lost run again; then 0.35 once each.
+- **What the run could see,** the clock aside: the plans cuDNN's frontend built in the pass
+  (its log on), torch's counters across it (`num_ooms`, `num_alloc_retries`,
+  `num_oom_rejections`, `num_sync_all_streams`, `num_device_alloc`, `num_device_free`). The
+  pass's time is recorded, for information. The desktop held 6.3 to 7.2 GiB of the card
+  (nvidia-smi before and after every run), no other compute process.
+
+#### The floors
+
+The references are the 96 GB card's to the MiB: a decode peak of 13.819 GiB and 283 plans built
+in 832-px tiles, 18.971 GiB and 308 plans in 1,024-px tiles, the same engines (22, 58 and 23).
+
+| tile | least room kept (runs) | most room lost (runs) | the 96 GB card's (`cudaMallocAsync`): least kept / most lost |
+|---|---|---|---|
+| 832 × 832 | 0.40 GiB (2: kept, kept) | 0.35 (1: moved); 0.30 (2: moved, moved); 0.20 (1: moved) | 0.791 / 0.690 (moved) |
+| 1024 × 1024 | 0.40 GiB (2: kept, kept) | 0.35 (1: refused); 0.30 (2: refused, refused); 0.20 (1: refused) | 0.751 / 0.651 (refused) |
+
+Decode in 832-px tiles (reference: 27.1 s, its peak reserved 16.256 GiB, counters 0):
+
+| room GiB | outcome | frames differing (of 53) | worst PSNR-Y dB | plans built (over the reference's) | `num_ooms` | `num_alloc_retries` | pass s (times the reference's) |
+|---|---|---|---|---|---|---|---|
+| 1.00 | kept | 0 | - | 283 (+0) | 0 | 83 | 37.3 (1.38) |
+| 0.80 | kept | 0 | - | 283 (+0) | 0 | 143 | 41.1 (1.52) |
+| 0.60 | kept | 0 | - | 283 (+0) | 0 | 155 | 42.5 (1.57) |
+| 0.40 | kept, kept | 0, 0 | - | 283 (+0) | 0, 0 | 192, 192 | 41.9, 41.4 (1.55, 1.53) |
+| 0.35 | moved | 48 from the 6th | 71.34 | 303 (+20) | 20 | 220 | 42.7 (1.58) |
+| 0.30 | moved, moved | 48, 48 from the 6th | 71.34, 71.34 | 303 (+20) | 20, 20 | 208, 208 | 43.2, 42.1 (1.59, 1.55) |
+| 0.20 | moved | 48 from the 6th | 71.16 | 302 (+19) | 19 | 240 | 44.9 (1.66) |
+
+Decode in 1,024-px tiles (reference: 28.7 s, its peak reserved 22.857 GiB, `num_ooms` 0,
+`num_alloc_retries` 4):
+
+| room GiB | outcome | frames differing (of 53) | plans built | `num_ooms` | `num_alloc_retries` | pass s (times the reference's) |
+|---|---|---|---|---|---|---|
+| 1.00 | kept | 0 | 308 (+0) | 0 | 85 | 40.1 (1.40) |
+| 0.80 | kept | 0 | 308 (+0) | 0 | 97 | 42.2 (1.47) |
+| 0.60 | kept | 0 | 308 (+0) | 0 | 111 | 42.3 (1.47) |
+| 0.40 | kept, kept | 0, 0 | 308 (+0) | 0, 0 | 146, 146 | 45.9, 45.3 (1.60, 1.58) |
+| 0.35 | refused, slice 8 | - | 114, engine 28 among them | 21 | 76 | 13.0 to the refusal |
+| 0.30 | refused, refused, slice 2 | - | 100, engine 28 among them | 20, 20 | 33, 33 | 4.6, 4.2 |
+| 0.20 | refused, slice 2 | - | 100, engine 28 among them | 20 | 34 | 4.8 |
+
+- **One mechanism on both cards.** The same convolution's workspace refused (its top plan's,
+  of engine 22: 0.422 GiB in 832-px tiles, 0.738 in 1,024-px ones, as on the 96 GB card), then
+  16 more plans of that engine and 2 of engine 23 (0.755 and 1.320 GiB) refused, then engine 28,
+  with no workspace, run: in 832-px tiles 48 of 53 frames moved from the 6th, the first slice's
+  5 kept (fallen back in slice 7 at 0.35 and 0.30, the same other frames each time; in slice 2
+  at 0.20, others). In 1,024-px tiles the pass fell back too, then was refused in the same slice
+  at the concatenation of a split convolution's pieces (`memory_limit_conv:162`, 2.00 GiB asked
+  with 16.92 allocated), the 96 GB card's site.
+- **The floor 0.35 to 0.39 GiB lower than the 96 GB card's.** At the refusals torch's own
+  allocator held 0.348 GiB (slice 2) and 0.413 (slice 8) beyond what was allocated and couldn't
+  give them back (torch's message), where `cudaMallocAsync`'s pool held 2.6 to 2.7 GiB more at
+  the 96 GB card's refusals in the same tile. The 2.00 GiB request was over the limit by 0.19
+  MiB at 0.30 GiB of room, 8.99 MiB at 0.35, 102.59 MiB at 0.20.
+- **The pass's time, for information only:** under the segments every pass at a room ran 1.38 to
+  1.66 times as long as its reference from 1.0 GiB down, kept or moved, torch giving its cache back
+  to make room (`num_alloc_retries`); not tried as a signal (deferred on this card, 2026-10-16).
+
+#### What the run can see: torch's own allocator counts the refusals
+
+| across the pass | 14 runs that kept their frames | 5 that moved them | 4 refused |
+|---|---|---|---|
+| torch's `num_ooms` | 0 in every one | 19 to 20 | 20 to 21 |
+| cuDNN's plans built over the reference's | 0 | +19 to +20, engine 28 among them | engine 28 built in each, before the refusal |
+| torch's `num_alloc_retries` | 83 to 192 | 208 to 240 | 33 to 76 |
+
+(The 23 runs at a room: the rungs above and the whole runs below.) `num_ooms` counts each refused
+workspace exactly: 19 for the convolution's top plan, 16 more of its engine and 2 of engine 23;
+one more where the plan cached for that shape was refused first; one more for the run's own
+refusal. It stood at 0 in the four references and in every pass that kept its frames: under
+torch's own allocator a run can see a fallback at no cost, where `cudaMallocAsync` counts
+nothing ([above](#what-the-run-can-see)). `num_alloc_retries` doesn't separate: it counts the
+squeeze, rising as the room falls in passes that keep their frames, and 4 in the 1,024-px
+reference itself. `num_oom_rejections` stayed at 0.
+
+#### Whole runs
+
+The encode, the windows and the decode in one process, torch's limit the pass alone's reference
+peak and the room from the plan on. Their references give the passes alone's frames, CRC-32 for
+CRC-32 (decode peaks 13.824 and 18.976 GiB). In 832-px tiles (the planner's room as shipped):
+kept with 0.40 GiB twice (`num_ooms` 0), moved with 0.30 (48 frames, 71.16 dB, `num_ooms` 20).
+In 1,024-px tiles the planner refused the pinned tile at its room of 1.5 GiB beside that
+desktop, 0.01 GiB short ("the largest tile that fits is --decode-tile 960"), so they ran planned
+at −50 GiB as the rungs are: kept with 0.40 twice (`num_ooms` 0). On this allocator a whole run
+lost nothing a pass alone kept, at 0.1 GiB.
+
+So under expandable segments on that card a VAE pass keeps its frames with 0.40 GiB beyond its
+peak in tiles of 832 and 1,024 px, where a held run's plan leaves it RESERVE's 4.5 GiB and the
+room's 1.5 beyond its predicted peak (runtime/memory.py, RESERVE): 6.0 GiB.
+
 ### What follows for seedvr2x
 
 - **The room can't be 0.** At 0.6 GiB left a pass's convolutions lose their workspaces: the run
@@ -831,9 +963,14 @@ pass's, its reference's beside them.
   [its section](#the-floor-by-tile-size-and-its-cause-2026-10-16). A VAE pass is left at least
   the room and the budget's 0.6 GiB beyond its predicted peak: 2.1 GiB with the room at 1.5.
 - **A run can't see a fallback for free on `cudaMallocAsync`:** torch counts no refusal there;
-  the cuDNN frontend's log does. Under torch's own allocator, `num_ooms` across a unit would count
-  each refused workspace (its source; not measured). The pass's time is untried as a signal: on
-  the power-capped card it drifts from run to run.
+  the cuDNN frontend's log does. Under torch's own allocator, a held run's, `num_ooms` across a
+  unit counts each refused workspace: 0 across every pass that kept its frames, 19 to 21 across
+  every one that lost them ([on an RTX 5090](#under-expandable-segments-on-an-rtx-5090-2026-10-17)),
+  a check a held run could make at no cost. The pass's time is untried as a signal: on the
+  power-capped card it drifts from run to run, and on the RTX 5090 it is deferred.
+- **On a held run** (a driver that gives memory the card doesn't have, expandable segments) the
+  two tiles measured keep their frames with 0.40 GiB beyond their peak, a fifteenth of the 6.0 GiB
+  a plan leaves a pass there.
 
 ## Caveats
 
@@ -847,10 +984,15 @@ pass's, its reference's beside them.
 - **One source,** an animated film's shot, one seed. The VAE's memory doesn't depend on the
   picture; the allocator's pool is fed the same sizes whatever the content.
 - **A driver that gives memory the card doesn't have** (seedvr2x holds itself to the card there,
-  under torch's own allocator) was not measured here.
+  under torch's own allocator) was measured for two decode tiles only, 832 and 1,024 px at
+  1080p, on one RTX 5090 beside one desktop, a room run once or twice, by torch's limit rather
+  than a smaller card's free memory; the encodes, the other tiles and torch's own allocator
+  without the segments, not.
 - **Passes alone** (the floor by tile size): a whole run with the same room left lost frames a
   pass alone kept (640-px tiles: 48 of 53 moved with 0.70 GiB left in a whole run, none alone),
-  and a pass alone in a new process starts with no plan cached.
+  and a pass alone in a new process starts with no plan cached. Under expandable segments on the
+  RTX 5090 the whole runs kept and lost their frames where the passes alone did (832 and 1,024
+  px, at 0.1 GiB).
 - **The large tiles' frames' floor is unmeasured:** from 1,024 px a decode is refused first, at
   the concatenation the held one-output cure removes; for the tiles that cure takes, main's
   ladders are main's record, and their floor under the cure is to measure with it.
@@ -885,6 +1027,16 @@ python floor.py --dir DIR --python PYTHON --copy SEEDVR2X --want TREE --models M
     --clips CLIPS --lock LOCK queue
 python floor.py --dir DIR table
 python floor.py --dir DIR detector
+
+# where the driver gives memory the card doesn't have (WSL2): the floor by torch's limit, under
+# torch's own allocator with expandable segments, vae_room.py beside held_floor.py; the shape's
+# units once, the ladders and whole runs (one lock hold a run), then the tables
+python held_floor.py --dir DIR --python PYTHON --clip CLIP-53.mkv --lock LOCK --tree TREE seed
+python held_floor.py --dir DIR --python PYTHON --clip CLIP-53.mkv --lock LOCK --tree TREE \
+    ladder 832
+python held_floor.py --dir DIR --python PYTHON --clip CLIP-53.mkv --lock LOCK --tree TREE \
+    whole 832 0.4 0.3
+python held_floor.py --dir DIR table
 
 # what cudaMallocAsync lets a run see of a refused request; one convolution short of memory
 python alloc_probe.py

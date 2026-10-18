@@ -23,6 +23,12 @@ allocated, what its pool held and what the card had free. Nothing of seedvr2x is
          alone whose pinned shape must plan the same on every card (floor.py's rungs). The record
          keeps the plan as the planner made it in the process ("planned"): a resumed job's
          manifest holds its earlier plan until the run finishes its segment.
+         --limit GIB, where the driver gives memory the card doesn't have (seedvr2x holds torch
+         to the card there, runtime/memory.py's hold): torch's limit for the run's units set to
+         GIB once seedvr2x's hold has set its own, the plan made and the models not loaded yet,
+         never above it (the card is never passed), memory._limit with it so that the check
+         before each unit judges the card against the limit in force: the room a pass is left
+         where no card can be emulated (held_floor.py's rungs). The record keeps both limits.
   queue  FILE: the runs of a queue file, one hold of the GPU's lock each (`flock LOCK`), each
          one's output in --records/NAME.log. A line is `NAME | arguments of run`; a line
          `common | arguments` gives arguments every later run takes first; `#` starts a comment.
@@ -59,8 +65,9 @@ The probes (run):
   the card had free during the unit (NVML's figure, nvidia-smi's, sampled every 20 ms by a
   thread of its own), and the driver's own (cudaMemGetInfo) at its start; and torch's
   allocator counters at its start and end (memory_stats's num_ooms, num_alloc_retries,
-  num_oom_rejections, num_sync_all_streams), which torch's own allocator moves when it refuses
-  or retries a request, and cudaMallocAsync leaves at 0;
+  num_oom_rejections, num_sync_all_streams, num_device_alloc, num_device_free), which torch's
+  own allocator moves when it refuses or retries a request, or asks the driver for memory or
+  gives it back, and cudaMallocAsync leaves at 0;
 - every slice of a VAE pass (the VAE's _encode and _decode calls): the same readings at its
   start and end, in the log as `vae_room: slice` lines, so that torch's own lines about its
   retries ("[cudaMallocAsync] recovered from an allocation failure by trimming the pool and
@@ -226,10 +233,12 @@ class Probes:
         }
 
     def refusals(self) -> dict:
-        """torch's allocator counters that a refused allocation moves (memory_stats): torch's
-        own allocator counts them; cudaMallocAsync leaves every one at 0."""
+        """torch's allocator counters that a refused allocation moves (memory_stats), and those
+        of the memory it asks the driver for and gives back: torch's own allocator counts them;
+        cudaMallocAsync leaves every one at 0."""
         stats = self.torch.cuda.memory_stats()
         names = ("num_ooms", "num_alloc_retries", "num_oom_rejections", "num_sync_all_streams")
+        names += ("num_device_alloc", "num_device_free")
         return {name: stats.get(name) for name in names}
 
     def empty(self) -> None:
@@ -781,6 +790,44 @@ def set_planner(planner, args: argparse.Namespace) -> dict[str, int]:
     return rooms
 
 
+def limited(gib: float, limits: dict) -> None:
+    """seedvr2x's hold (runtime/memory.py), then, at the one made once the plan is, torch's limit
+    set to `gib` GiB in its place, never above it, memory._limit with it (--limit). Both limits
+    go in `limits`, in bytes, for the record."""
+    import torch
+
+    from seedvr2x.runtime import memory
+
+    hold = memory.hold
+
+    def held(device, first=False):
+        limit = hold(device, first)
+        if first or limit is None:
+            return limit
+        wanted = round(gib * GIB)
+        if wanted > limit:
+            raise SystemExit(
+                f"vae_room: --limit {gib} GiB is over the {limit / GIB:.4f} GiB seedvr2x's hold"
+                " set: the card could be passed"
+            )
+        total = torch.cuda.mem_get_info(device)[1]
+        torch.cuda.set_per_process_memory_fraction(wanted / total, device)
+        memory._limit = wanted
+        if hasattr(memory, "_plan_s_limit"):
+            # Where a short check holds torch again (2026-10-16 on), what that limit may lose is
+            # counted from the one set once the plan was made: this one.
+            memory._plan_s_limit = wanted
+        limits.update(asked=wanted, held=limit)
+        say(
+            f"torch's limit {wanted / GIB:.4f} GiB ({wanted} B), in place of the {limit / GIB:.4f}"
+            f" ({limit} B) seedvr2x's hold set; the card's total {total / GIB:.4f}, torch"
+            f" reserved {torch.cuda.memory_reserved(device) / GIB:.4f} now"
+        )
+        return wanted
+
+    memory.hold = held
+
+
 def launch(args: argparse.Namespace) -> int:
     started, began = time.monotonic(), now()
     out = args.work / args.name
@@ -831,6 +878,10 @@ def launch(args: argparse.Namespace) -> int:
     rooms = set_planner(planner, args)
     probes = Probes(args)
     patched = install(probes, args)
+    limits: dict = {}
+    if args.limit is not None:
+        limited(args.limit, limits)
+        patched.append(f"torch's limit {args.limit} GiB once seedvr2x's hold has set its own")
     say(
         f"in force: planner.VAE_ROOM {planner.VAE_ROOM} (shipped {shipped['VAE_ROOM']}),"
         f" the encode's room {rooms['encode']}, the decode's {rooms['decode']},"
@@ -866,6 +917,8 @@ def launch(args: argparse.Namespace) -> int:
         "output_floor": args.output_floor if "output" in args.cures else None,
         "stop_after": args.stop_after,
         "dit_unjudged": args.dit_unjudged,
+        "limit": args.limit,
+        "limits": limits or None,
         "cudnn_frontend_log": os.environ.get("CUDNN_FRONTEND_LOG_INFO"),
         "seeded": args.seed_dir is not None,
         "command": command,
@@ -1416,6 +1469,9 @@ def main() -> int:
     run.add_argument("--dit-unjudged", action="store_true")
     run.add_argument("--seed-dir", type=Path)
     run.add_argument("--keep", action="store_true")
+    run.add_argument(
+        "--limit", type=float, help="torch's limit for the run's units, GiB, on a held run"
+    )
     run.add_argument("seedvr2x", nargs=argparse.REMAINDER, help="-- then seedvr2x's arguments")
 
     lined = commands.add_parser("queue")
