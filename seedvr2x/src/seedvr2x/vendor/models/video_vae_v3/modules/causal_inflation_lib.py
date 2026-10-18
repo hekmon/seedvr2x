@@ -11,7 +11,8 @@
 # // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # // See the License for the specific language governing permissions and
 # // limitations under the License.
-# Modified for seedvr2x: no retry on OOM; no Conv3d workaround; no sequence parallelism.
+# Modified for seedvr2x: no retry on OOM; no Conv3d workaround; no sequence parallelism; a split
+# convolution's pieces written into one output where a slice of four frames makes it large.
 
 import math
 from contextlib import contextmanager
@@ -33,6 +34,23 @@ from ....common.half_precision_fixes import safe_pad_operation
 
 # seedvr2x: numz's sequence-parallel stubs removed (DESIGN.md, Vendored model code). Only
 # get_sequence_parallel_group was called, in InflatedCausalConv3d.forward, and it returned None.
+
+
+# seedvr2x: the size, in bytes, from which the output of a convolution cut in pieces is allocated
+# whole before its pieces are computed, and they are written into it (memory_limit_conv); under
+# it the pieces are concatenated once all are made, as numz does. PROVISIONAL (implementation,
+# 2026-10-13), between two measures on cards packed to the planner's margin
+# (research/docs/vae-room.md). Written into one output, which is then held through its pieces'
+# convolutions, a small tile's pass peaks higher: a decode in 640-px tiles, whose largest output
+# is 0.78 GiB, by 0.27 GiB, one in 832-px tiles (1.32) by 0.50, one in tiles of 1104 x 1152
+# (2.43) by 0.04. A large one's peaks lower, the concatenation's two copies being what it peaked
+# at: a decode in tiles of 1104 x 1600 (3.37 GiB) by 0.80 GiB, one in 1664-px tiles (5.28) by
+# 2.85. Those are the outputs of a slice of four frames, and so is what the size is held to
+# (whole_output; design, 2026-10-16, the size PROVISIONAL): judged at each call, a pass's first
+# slice, which holds one frame more than its others at every convolution (five frames where they
+# hold four, three where two, two where one), took the path where its others didn't, a decode in
+# tiles of 1104 x 1152 on its first slice alone, its largest output 3.03 GiB there by its shape.
+ONE_OUTPUT_FROM = round(2.5 * 1024**3)
 
 
 @contextmanager
@@ -72,6 +90,8 @@ class InflatedCausalConv3d(Conv3d):
     # stack (torch 2.14.1, cuDNN 9.24) the standard path gives the same output, bit for bit,
     # and the same peak memory and time (research/docs/vram.md:240-254).
 
+    # seedvr2x: head and whole, for the output's path (whole_output): the frames of this call's
+    # output that a slice of four frames doesn't give, and the path a piece's own pieces take.
     def memory_limit_conv(
         self,
         x,
@@ -79,6 +99,8 @@ class InflatedCausalConv3d(Conv3d):
         split_dim=3,
         padding=(0, 0, 0, 0, 0, 0),
         prev_cache=None,
+        head=0,
+        whole=None,
     ):
         # Compatible with no limit.
         if math.isinf(self.memory_limit):
@@ -116,6 +138,19 @@ class InflatedCausalConv3d(Conv3d):
         x = list(x.split(split_sizes, dim=split_dim))
         if prev_cache is not None:
             prev_cache = list(prev_cache.split(split_sizes, dim=split_dim))
+        # seedvr2x: where the output a slice of four frames gives is ONE_OUTPUT_FROM bytes or more
+        # (whole_output), the pieces' outputs are written into one output allocated here, before the
+        # first of them is computed, where numz concatenates them once all are made (output =
+        # torch.cat(x, split_dim)). That concatenation was a large pass's peak and its largest
+        # request, a whole tile's output asked for in one piece while the pieces, as large together,
+        # were still there: packed to the planner's margin, a 1080p decode in 1600-px tiles was
+        # refused it 3 times of 3 (3.37 GiB asked with 26.21 allocated on a card emulated at 32 GB,
+        # the allocator's pool holding 30.53 and the card full), and a 4K decode in 1664-px tiles
+        # every time (5.28 GiB with 40.55 allocated, the pool at 46.53, on 48 GB). Written so, both
+        # ran, with the frames of the concatenation where it ran (2026-10-13;
+        # research/docs/vae-room.md).
+        output = self.whole_output(x[0], shape, head, whole)
+        written = 0
         # Loop Fwd.
         cache = None
         for idx in range(len(x)):
@@ -148,19 +183,71 @@ class InflatedCausalConv3d(Conv3d):
                 )
 
             # Recursive.
-            x[idx] = self.memory_limit_conv(
+            # seedvr2x: the piece's output goes to its place in the one output and is let go,
+            # with its input, which numz's list kept the output in place of; a piece cut again
+            # takes the path its convolution's call took (whole_output).
+            piece = self.memory_limit_conv(
                 x[idx],
                 split_dim=split_dim + 1,
                 padding=padding,
-                prev_cache=cache
+                prev_cache=cache,
+                whole=output is not None,
             )
+            if output is None:
+                # A small output: kept in numz's list, for its concatenation.
+                x[idx] = piece
+            else:
+                x[idx] = None
+                length = piece.size(split_dim)
+                place = list(output.shape)
+                place[split_dim] = length
+                if (
+                    list(piece.shape) != place
+                    or piece.dtype != output.dtype
+                    or written + length > output.size(split_dim)
+                ):
+                    raise RuntimeError(
+                        f"a piece of {tuple(piece.shape)} {piece.dtype} at {written} along"
+                        f" dimension {split_dim} of an output of {tuple(output.shape)}"
+                        f" {output.dtype}"
+                    )
+                output.narrow(split_dim, written, length).copy_(piece)
+                written += length
+            del piece
 
             # Update cache.
             cache = next_cache
 
-        # seedvr2x: a direct call, without numz's retry_on_oom.
-        output = torch.cat(x, split_dim)
+        # seedvr2x: a small output is numz's concatenation, a direct call, without its
+        # retry_on_oom; a large one is whole already, and one left partly unwritten would be
+        # read as it is.
+        if output is None:
+            return torch.cat(x, split_dim)
+        if written != output.size(split_dim):
+            raise RuntimeError(
+                f"{written} of {output.size(split_dim)} written along dimension {split_dim}"
+            )
         return output
+
+    # seedvr2x: the output of a convolution cut in pieces (memory_limit_conv), allocated before
+    # its pieces are computed: uninitialised, in the input's dtype and on its device, of the shape
+    # the convolution gives the whole padded input (padded: its shape, as memory_limit_conv counts
+    # it, the cache ahead and the padding in). None where the pieces are concatenated, numz's
+    # path. Taken where the output a slice of four frames gives is ONE_OUTPUT_FROM bytes or more:
+    # this output less its head, the frames a pass's first slice, or a pass in one slice, has more
+    # than its slices of four (one, at every convolution: slicing_forward), so that every slice of
+    # a pass takes one path. A pass of one frame has no slice of four, and is concatenated
+    # (PROVISIONAL, implementation, 2026-10-16). whole, where given, is the path already chosen: a
+    # piece cut again takes its convolution's.
+    def whole_output(self, like, padded, head=0, whole=None):
+        shape = [int(padded[0]), self.out_channels]
+        for dim in range(3):
+            dilated_kernel_size = self.dilation[dim] * (self.kernel_size[dim] - 1) + 1
+            shape.append((int(padded[2 + dim]) - dilated_kernel_size) // self.stride[dim] + 1)
+        if whole is None:
+            frames = max(shape[2] - head, 0)
+            whole = math.prod(shape) // shape[2] * frames * like.element_size() >= ONE_OUTPUT_FROM
+        return like.new_empty(shape) if whole else None
 
     def forward(
         self,
@@ -246,10 +333,15 @@ class InflatedCausalConv3d(Conv3d):
                 next_cache = input[i][:, :, -cache_size:]
 
             # Conv forward for this input slice.
+            # seedvr2x: head, the output's frames a slice of four frames doesn't give, for the
+            # path of its pieces (whole_output): a pass's first slice, and a pass in one slice, the
+            # memory not active, hold one frame more than its slices of four at every
+            # convolution of the VAE, the first frame (tests/test_causal_conv.py).
             input[i] = self.memory_limit_conv(
                 input[i],
                 padding=padding,
-                prev_cache=cache
+                prev_cache=cache,
+                head=int(i == 0 and memory_state != MemoryState.ACTIVE),
             )
 
             # Update cache.
