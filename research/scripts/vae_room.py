@@ -1130,18 +1130,18 @@ def conv(args: argparse.Namespace) -> int:
 
 def tree_of(copy: Path, scratch: Path) -> str:
     """git's tree of the files in `copy` (a git repository's working directory), nothing
-    written in it: the index and any new object go to `scratch`."""
+    written in it: the index and every object go to `scratch`, each file hashed there. The
+    copy's own objects aren't an alternate of the scratch's: git freshens (sets the time of) an
+    object it finds in an alternate, as it would one it writes, and one check against a frozen
+    copy that way gave all of its 192 loose objects a new time (2026-10-17), their content and
+    the tree unchanged."""
     scratch.mkdir(parents=True, exist_ok=True)
     objects = scratch / "objects"
     objects.mkdir(exist_ok=True)
     index = scratch / "index"
     index.unlink(missing_ok=True)
-    env = dict(
-        os.environ,
-        GIT_INDEX_FILE=str(index),
-        GIT_OBJECT_DIRECTORY=str(objects),
-        GIT_ALTERNATE_OBJECT_DIRECTORIES=str(copy / ".git" / "objects"),
-    )
+    env = dict(os.environ, GIT_INDEX_FILE=str(index), GIT_OBJECT_DIRECTORY=str(objects))
+    env.pop("GIT_ALTERNATE_OBJECT_DIRECTORIES", None)
     subprocess.run(["git", "add", "-A", "."], cwd=copy, env=env, check=True)
     found = subprocess.run(
         ["git", "write-tree"], cwd=copy, env=env, check=True, capture_output=True, text=True

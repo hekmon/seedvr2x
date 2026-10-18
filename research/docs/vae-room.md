@@ -1,7 +1,8 @@
 # The VAE's room: what a VAE pass needs between its peak and the free memory, and what cures it
 
 > Status: **measured** (2026-10-13; the floor by tile size and its cause, 2026-10-16; under
-> expandable segments on a card that gives memory it doesn't have, 2026-10-17) for the
+> expandable segments on a card that gives memory it doesn't have, 2026-10-17; the large tiles
+> under the one-output cure and the tiles left, 2026-10-17) for the
 > open question "The VAE's room" of
 > [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). seedvr2x's planner holds every VAE pass 1.5 GiB
 > further under its budget than a DiT window ([DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner),
@@ -47,6 +48,18 @@ In short:
   for its shape for the life of the process. torch counts no refused allocation under
   `cudaMallocAsync` (its counters 0 on every pass); the cuDNN frontend's log tells it (20 or 40
   plans more in every pass whose frames moved, none in any that kept them).
+- **Under the one-output cure the large tiles' frames move where the code without it refused them
+  first**
+  ([the large tiles under the cure](#the-large-tiles-under-the-one-output-cure-and-the-tiles-left-2026-10-17)).
+  Every 1080p and 4K decode tile it takes that ran (26 sizes, from 1,104 × 1,216 to 4K's 2,048 px)
+  and 1080p's untiled decode kept their frames with 0.68 to 0.97 GiB left and moved them with 0.1
+  less; none was refused. Its 4K encode squares that ran (1,664 to 2,048 px) kept their latent with
+  0.50 to 0.60. For the same tile a pass under the cure asks 0.20 to 4.97 GiB less free memory, its
+  peak lower. Not run under the cure: 4K's untiled encode (the 96 GB card's own 4K plan encodes
+  untiled) and the other output sizes' passes it takes (1440p's tiles cut off at its 1,472 rows,
+  its untiled decode and encode, among them). On the code without it, the tiles left: decodes of
+  768 to 960 px keep their frames with 0.72 to 0.81 GiB, the 1,088-px one is refused first (kept
+  with 0.90), and the encodes run keep their latent with 0.47 to 0.87.
 - **Under expandable segments, where the driver gives memory the card doesn't have**
   ([on an RTX 5090](#under-expandable-segments-on-an-rtx-5090-2026-10-17)): the same passes keep
   their frames with 0.40 GiB beyond their peak and lose them with 0.35 (decodes in 832- and
@@ -396,8 +409,9 @@ Not run here: dec1080-896, dec1080-960, dec1080-1088, dec2160-1152, dec2160-1280
 - **These are main's floors.** The ladders ran seedvr2x at 6e1be76, without the held cure that
   writes a split convolution's pieces into one output. For the tiles that cure takes (decode
   squares from 1,152 px, 1,104-row tiles from 1,104 × 1,216, encode squares from 1,664, and
-  1080p's untiled decode) they stay main's record; their floor under the cure is to come from
-  ladders run with it. The tiles not run here wait for ladders of their own.
+  1080p's untiled decode) they stay main's record; their floor under the cure came since from
+  ladders run with it, and the tiles not run here from ladders of their own
+  ([below](#the-large-tiles-under-the-one-output-cure-and-the-tiles-left-2026-10-17)).
 - **A pass alone keeps its frames closer than a whole run.** The 640-px decode alone kept them
   with 0.70 GiB left and the 832-px one with 0.79, where the whole runs of the same shapes (on
   the code of 2026-10-12) lost them with 0.70 to 0.80 and with 0.89
@@ -943,6 +957,324 @@ So under expandable segments on that card a VAE pass keeps its frames with 0.40 
 peak in tiles of 832 and 1,024 px, where a held run's plan leaves it RESERVE's 4.5 GiB and the
 room's 1.5 beyond its predicted peak (runtime/memory.py, RESERVE): 6.0 GiB.
 
+### The large tiles under the one-output cure, and the tiles left (2026-10-17)
+
+The ladders the floor by tile size left: the 1080p and 4K tiles the one-output cure takes and
+1080p's untiled decode, run with the cure; and, on 6e1be76 as above, the tiles it doesn't take that
+hadn't run, those the planner gives the cards of 12 to 48 GB. The same driver
+([`scripts/floor.py`](../scripts/floor.py), a ladder's code given by its name), one hold of the
+GPU's lock a rung: 347 rungs in 57 ladders, none failed. Not run: under the cure, 4K's untiled
+encode (the 96 GB card's own 4K plan encodes untiled, an output of 8.0 GiB a slice of four frames)
+and the other output sizes' passes it takes (1440p's tiles cut off at its 1,472 rows, its untiled
+decode and encode, among them); on 6e1be76, the decodes in 512- and 576-px tiles.
+
+#### Method as run
+
+- **Two codes, a ladder's by its name.** A ladder named as above (`dec1080-896`) ran seedvr2x at
+  6e1be76, as the first ladders did. One named with `-a4` (`dec2160-1216-a4`) ran seedvr2x as
+  changed after 6e1be76 on 2026-10-17, the one-output cure in it: a split convolution's pieces
+  written into one output allocated first, where a slice of four frames makes that output 2.5 GiB or
+  more, the path chosen once a pass. That code was another frozen copy with its own environment,
+  its tree checked before every rung as the first copy's was.
+- **What ran under the cure:** the decode squares from 1,152 px (4K, 15 tiles), the tiles cut off at
+  1080p's rows from 1,104 × 1,216 (11), 1080p's untiled decode, and the encode squares from 1,664 px
+  (4K, 7). The tiles among these that the first ladders ran on 6e1be76 ran again under the cure;
+  their first ladders stay as 6e1be76's record.
+- **What ran on 6e1be76:** the decodes in 768-px tiles (the first ladders' unfinished one, its
+  deciding rungs run again), 896, 960 and 1,088 px; 1080p's untiled encode; and the encodes the
+  planner gives the cards of 12 to 48 GB: 1080p's squares of 768 to 1,088 px and its tiles of
+  1,104 × 1,152 to 1,104 × 1,792, 4K's squares of 1,152 to 1,600 px. 4K's squares of 768 to 1,088 px
+  are 1080p's own shapes and weren't run apart.
+- **Each code its own units and references.** The shapes are those above (clip-53 at 1080p,
+  clip-17 at 4K), their units made once on each code. On the cure's code the noise is drawn on the
+  CPU, so its frames are its own. Each tile's reference is its own bare-card rung on its code. The
+  room, the frames, the ladder and the signals: as above.
+- **The untiled passes as ladders:** `--decode-tile 0` (the units' copy saying decode tile 0 and no
+  decode tiles) and `--encode-tile 0`. Every untiled rung recorded two things. Whether the untiled
+  pass is what ran: its own plan had no tiles for the pass, and the pass ran one stream's 13 slices,
+  as many as a tiled pass runs a tile. And the pass's peak above what the GPU held once its phase was
+  entered, against the planner's untiled fit of 1,104 × 1,920 (`planner._fit`: 19.853 GiB for the
+  encode, 34.927 for the decode, on both codes).
+- **The order:** first the tiles the planner gives the cards of 12 to 48 GB at a room of 1.0 GiB.
+  These were the cure's decodes by the least card that takes them (1,104 × 1,216 at 26 GB to 4K's
+  1,600 px at 46 to 48), its encodes, the two untiled passes, then 6e1be76's decodes and encodes.
+  Then the cure's decodes that no such card takes (4K's 1,664 to 2,048 px).
+- **The run:** from 03:59 to 18:57 UTC. The queue was interrupted once (06:36 UTC): the rung then
+  running (4K's 1,280-px decode, 0.67 GiB of room) was stopped by SIGTERM 220 s into its pass,
+  recorded by vae_room.py (exit 143) but not by the driver. It ran again once the queue was started
+  again (07:21 UTC), as that card's second run; nothing was overwritten, and nothing else was lost.
+  No other compute process was on the card at any rung (nvidia-smi before each). The card's offset
+  was 1.489 to 1.491 GiB. A rung took 25 to 255 s, for information.
+
+#### The floors
+
+| ladder | code | tile | ref peak GiB | ref pass s | ref plans | least room kept (runs) | most room lost (runs) | done |
+|---|---|---|---|---|---|---|---|---|
+| dec1080-1216-a4 | a4 | 1104x1216 | 23.763 | 151.9 | 189 | 0.801 (2: 1: kept, 2: kept) | 0.699 (2: 1: moved, 2: moved) | yes |
+| dec2160-1152-a4 | a4 | 1152x1152 | 23.507 | 203.2 | 346 | 0.750 (2: 1: kept, 2: kept) | 0.650 (2: 1: moved, 2: moved) | yes |
+| dec1080-1280-a4 | a4 | 1104x1280 | 24.679 | 152.4 | 180 | 0.830 (2: 1: kept, 2: kept) | 0.730 (2: 1: moved, 2: moved) | yes |
+| dec1080-1344-a4 | a4 | 1104x1344 | 25.701 | 152.3 | 186 | 0.941 (2: 1: kept, 2: kept) | 0.841 (2: 1: moved, 2: moved) | yes |
+| dec2160-1216-a4 | a4 | 1216x1216 | 25.659 | 203.2 | 351 | 0.680 (2: 1: kept, 2: kept) | 0.580 (2: 1: moved, 2: moved) | yes |
+| dec1080-1408-a4 | a4 | 1104x1408 | 26.731 | 153.6 | 175 | 0.851 (2: 1: kept, 2: kept) | 0.751 (2: 1: moved, 2: moved) | yes |
+| dec1080-1472-a4 | a4 | 1104x1472 | 27.787 | 152.0 | 172 | 0.861 (2: 1: kept, 2: kept) | 0.759 (2: 1: moved, 2: moved) | yes |
+| dec2160-1280-a4 | a4 | 1280x1280 | 27.917 | 203.1 | 329 | 0.869 (2: 1: kept, 2: kept) | 0.770 (2: 1: moved, 2: moved) | yes |
+| dec1080-1536-a4 | a4 | 1104x1536 | 28.820 | 150.1 | 178 | 0.870 (2: 1: kept, 2: kept) | 0.771 (2: 1: moved, 2: moved) | yes |
+| dec1080-1600-a4 | a4 | 1104x1600 | 29.781 | 148.2 | 183 | 0.680 (2: 1: kept, 2: kept) | 0.580 (2: 1: moved, 2: moved) | yes |
+| dec1080-1664-a4 | a4 | 1104x1664 | 30.793 | 150.2 | 174 | 0.860 (2: 1: kept, 2: kept) | 0.761 (2: 1: moved, 2: moved) | yes |
+| dec2160-1344-a4 | a4 | 1344x1344 | 30.359 | 201.4 | 363 | 0.771 (2: 1: kept, 2: kept) | 0.671 (2: 1: moved, 2: moved) | yes |
+| dec1080-1728-a4 | a4 | 1104x1728 | 31.776 | 152.4 | 166 | 0.960 (2: 1: kept, 2: kept) | 0.858 (2: 1: moved, 2: moved) | yes |
+| dec1080-1792-a4 | a4 | 1104x1792 | 32.802 | 150.7 | 162 | 0.971 (2: 1: kept, 2: kept) | 0.869 (2: 1: moved, 2: moved) | yes |
+| dec2160-1408-a4 | a4 | 1408x1408 | 32.835 | 201.5 | 387 | 0.790 (2: 1: kept, 2: kept) | 0.690 (2: 1: moved, 2: moved) | yes |
+| dec1080-1856-a4 | a4 | 1104x1856 | 33.901 | 153.9 | 166 | 0.782 (2: 1: kept, 2: kept) | 0.680 (2: 1: moved, 2: moved) | yes |
+| dec2160-1472-a4 | a4 | 1472x1472 | 35.496 | 201.0 | 382 | 0.880 (2: 1: kept, 2: kept) | 0.781 (2: 1: moved, 2: moved) | yes |
+| dec2160-1536-a4 | a4 | 1536x1536 | 38.265 | 202.1 | 367 | 0.680 (2: 1: kept, 2: kept) | 0.578 (2: 1: moved, 2: moved) | yes |
+| dec2160-1600-a4 | a4 | 1600x1600 | 41.170 | 200.8 | 379 | 0.970 (2: 1: kept, 2: kept) | 0.870 (2: 1: moved, 2: moved) | yes |
+| enc2160-1664-a4 | a4 | 1664x1664 | 26.398 | 89.7 | 205 | 0.500 (2: 1: kept, 2: kept) | 0.400 (2: 1: moved, 2: moved) | yes |
+| enc2160-1728-a4 | a4 | 1728x1728 | 28.242 | 89.9 | 202 | 0.550 (2: 1: kept, 2: kept) | 0.451 (2: 1: moved, 2: moved) | yes |
+| enc2160-1792-a4 | a4 | 1792x1792 | 29.957 | 90.3 | 195 | 0.579 (2: 1: kept, 2: kept) | 0.479 (2: 1: moved, 2: moved) | yes |
+| enc2160-1856-a4 | a4 | 1856x1856 | 31.979 | 87.8 | 200 | 0.591 (2: 1: kept, 2: kept) | 0.489 (2: 1: moved, 2: moved) | yes |
+| enc2160-1920-a4 | a4 | 1920x1920 | 33.812 | 79.8 | 191 | 0.601 (2: 1: kept, 2: kept) | 0.501 (2: 1: moved, 2: moved) | yes |
+| enc2160-1984-a4 | a4 | 1984x1984 | 35.804 | 84.2 | 228 | 0.509 (2: 1: kept, 2: kept) | 0.410 (2: 1: moved, 2: moved) | yes |
+| enc2160-2048-a4 | a4 | 2048x2048 | 37.848 | 90.2 | 225 | 0.500 (2: 1: kept, 2: kept) | 0.399 (2: 1: moved, 2: moved) | yes |
+| dec1080-untiled-a4 | a4 | untiled (1104x1920) | 34.952 | 149.0 | 100 | 0.879 (2: 1: kept, 2: kept) | 0.780 (2: 1: moved, 2: moved) | yes |
+| enc1080-untiled | base | untiled (1104x1920) | 20.871 | 54.4 | 59 | 0.661 (2: 1: kept, 2: kept) | 0.561 (2: 1: refused, 2: refused) | yes |
+| dec1080-768 | base | 768x768 | 12.624 | 156.3 | 290 | 0.720 (2: 1 (history): kept, 2: kept) | 0.621 (2: 1 (history): moved, 2: moved) | yes |
+| dec1080-896 | base | 896x896 | 15.621 | 134.2 | 274 | 0.810 (2: 1: kept, 2: kept) | 0.710 (2: 1: moved, 2: moved) | yes |
+| dec1080-960 | base | 960x960 | 17.196 | 151.2 | 270 | 0.809 (2: 1: kept, 2: kept) | 0.709 (2: 1: moved, 2: moved) | yes |
+| dec1080-1088 | base | 1088x1088 | 21.169 | 159.7 | 329 | 0.901 (2: 1: kept, 2: kept) | 0.799 (2: 1: refused, 2: refused) | yes |
+| enc1080-768 | base | 768x768 | 8.604 | 60.8 | 159 | 0.670 (2: 1: kept, 2: kept) | 0.571 (2: 1: moved, 2: moved) | yes |
+| enc1080-896 | base | 896x896 | 10.081 | 68.8 | 161 | 0.580 (2: 1: kept, 2: kept) | 0.481 (2: 1: moved, 2: moved) | yes |
+| enc1080-960 | base | 960x960 | 11.338 | 70.8 | 163 | 0.470 (2: 1: kept, 2: kept) | 0.370 (2: 1: moved, 2: moved) | yes |
+| enc1080-1088 | base | 1088x1088 | 13.328 | 70.2 | 178 | 0.550 (2: 1: kept, 2: kept) | 0.451 (2: 1: moved, 2: moved) | yes |
+| enc1080-1152 | base | 1104x1152 | 14.206 | 66.7 | 102 | 0.750 (2: 1: kept, 2: kept) | 0.651 (2: 1: moved, 2: moved) | yes |
+| enc1080-1280 | base | 1104x1280 | 15.068 | 66.8 | 102 | 0.558 (2: 1: kept, 2: kept) | 0.459 (2: 1: moved, 2: moved) | yes |
+| enc1080-1408 | base | 1104x1408 | 16.422 | 67.1 | 100 | 0.659 (2: 1: kept, 2: kept) | 0.560 (2: 1: moved, 2: moved) | yes |
+| enc1080-1472 | base | 1104x1472 | 17.099 | 66.9 | 97 | 0.660 (2: 1: kept, 2: kept) | 0.560 (2: 1: moved, 2: moved) | yes |
+| enc1080-1600 | base | 1104x1600 | 17.944 | 66.5 | 100 | 0.870 (2: 1: kept, 2: kept) | 0.770 (2: 1: moved, 2: moved) | yes |
+| enc1080-1728 | base | 1104x1728 | 19.257 | 66.4 | 96 | 0.681 (2: 1: kept, 2: kept) | 0.580 (2: 1: moved, 2: moved) | yes |
+| enc1080-1792 | base | 1104x1792 | 19.914 | 62.9 | 96 | 0.691 (2: 1: kept, 2: kept) | 0.589 (2: 1: moved, 2: moved) | yes |
+| enc2160-1152 | base | 1152x1152 | 14.757 | 81.9 | 196 | 0.590 (2: 1: kept, 2: kept) | 0.491 (2: 1: moved, 2: moved) | yes |
+| enc2160-1216 | base | 1216x1216 | 15.673 | 87.7 | 190 | 0.591 (2: 1: kept, 2: kept) | 0.490 (2: 1: moved, 2: moved) | yes |
+| enc2160-1280 | base | 1280x1280 | 17.194 | 88.6 | 185 | 0.580 (2: 1: kept, 2: kept) | 0.479 (2: 1: moved, 2: moved) | yes |
+| enc2160-1344 | base | 1344x1344 | 18.312 | 88.1 | 220 | 0.680 (2: 1: kept, 2: kept) | 0.580 (2: 1: moved, 2: moved) | yes |
+| enc2160-1408 | base | 1408x1408 | 19.978 | 88.2 | 213 | 0.680 (2: 1: kept, 2: kept) | 0.580 (2: 1: moved, 2: moved) | yes |
+| enc2160-1536 | base | 1536x1536 | 23.018 | 88.8 | 211 | 0.589 (2: 1: kept, 2: kept) | 0.489 (2: 1: refused, 2: refused) | yes |
+| enc2160-1600 | base | 1600x1600 | 24.731 | 88.7 | 204 | 0.681 (2: 1: kept, 2: kept) | 0.581 (2: 1: refused, 2: refused) | yes |
+| dec2160-1664-a4 | a4 | 1664x1664 | 43.976 | 154.1 | 388 | 0.781 (2: 1: kept, 2: kept) | 0.681 (2: 1: moved, 2: moved) | yes |
+| dec2160-1728-a4 | a4 | 1728x1728 | 47.202 | 164.7 | 343 | 0.879 (2: 1: kept, 2: kept) | 0.781 (2: 1: moved, 2: moved) | yes |
+| dec2160-1792-a4 | a4 | 1792x1792 | 50.449 | 173.5 | 332 | 0.781 (2: 1: kept, 2: kept) | 0.679 (2: 1: moved, 2: moved) | yes |
+| dec2160-1856-a4 | a4 | 1856x1856 | 54.000 | 166.4 | 349 | 0.780 (2: 1: kept, 2: kept) | 0.681 (2: 1: moved, 2: moved) | yes |
+| dec2160-1920-a4 | a4 | 1920x1920 | 57.208 | 174.5 | 309 | 0.680 (2: 1: kept, 2: kept) | 0.580 (2: 1: moved, 2: moved) | yes |
+| dec2160-1984-a4 | a4 | 1984x1984 | 60.770 | 174.5 | 380 | 0.770 (2: 1: kept, 2: kept) | 0.670 (2: 1: moved, 2: moved) | yes |
+| dec2160-2048-a4 | a4 | 2048x2048 | 64.863 | 181.3 | 364 | 0.870 (2: 1: kept, 2: kept) | 0.769 (2: 1: moved, 2: moved) | yes |
+
+"base": seedvr2x at 6e1be76; "a4": with the cure. The 768-px decode's first rungs are the first
+ladders' (its reference too), marked "(history)" below.
+
+- **Under the cure, the large tiles' frames move where 6e1be76 refused them first.** All 27 decode
+  ladders under the cure moved their frames; none was refused. They kept them with 0.68 to 0.97 GiB
+  left and moved them with 0.1 less:
+  - 8 or 12 of 4K's 17 frames moved, from the 6th or the 10th: the first slice's five held;
+  - 8 to 48 of 1080p's 53 moved, from the 6th to the 46th;
+  - worst PSNR-Y 70.9 to 76.6 dB at 4K, 71.2 to 73.8 at 1080p.
+
+  On 6e1be76 every one of these tiles that ran was refused at the concatenation of a split
+  convolution's pieces, with 0.60 to 1.00 GiB left, before any frame moved. The 7 encodes under the
+  cure kept their latent with 0.50 to 0.60 GiB, and with 0.1 less moved 2 or 3 of its 5 latent
+  frames (66.3 to 69.2 dB).
+- **A tile on both codes** (the table below):
+  - under the cure the reference's peak is 0.26 to 5.14 GiB lower, the concatenation's second copy
+    gone (0.26 at 1,216 px, 5.14 at 2,048);
+  - the free memory a pass asks to keep its frames (its peak and its room) is 0.20 to 4.97 GiB less;
+  - the room alone is lower in 7 tiles of 11 and higher in 4 (4K's 2,048-px decode by 0.17,
+    1,104 × 1,344 by 0.12, × 1,728 by 0.04, × 1,536 by 0.01).
+- **6e1be76's tiles left.**
+  - Decodes in 768-, 896- and 960-px tiles kept their frames with 0.72, 0.81 and 0.81 GiB and moved
+    them with 0.1 less (7, 44 and 48 of 53 frames).
+  - In 1,088-px tiles the decode was refused at the concatenation (2.26 GiB asked) with 0.80 left,
+    before its frames moved; it kept them above, with 0.90.
+  - The 768-px ladder's deciding rungs, run again, gave the first ladders' outcomes and frames.
+  - Encodes kept their latent with 0.47 to 0.67 GiB in 1080p's squares, 0.56 to 0.87 in its
+    1,104-row tiles (1,104 × 1,600 the most) and 0.58 to 0.68 in 4K's squares of 1,152 to 1,600 px.
+    With 0.1 less they moved it: 5 to 12 of 14 latent frames at 1080p, 3 of 5 at 4K, 66.5 to
+    73.2 dB.
+  - The exception is 4K's 1,536- and 1,600-px encodes: refused at the concatenation (2.25 and 2.44
+    GiB asked) with 0.49 and 0.58 left.
+- **The untiled passes ran untiled** on every rung that ran to its end (the table below).
+  - 1080p's decode under the cure kept its frames with 0.88 GiB and moved them with 0.78 (36 of 53).
+    Its pass peaked at 33.430 GiB above what the GPU held, 1.50 under the planner's fit (34.927).
+  - 1080p's encode on 6e1be76 kept its latent with 0.66 and was refused with 0.56 and 0.46, at the
+    concatenation (2.02 GiB asked) in its third slice, after a fallback in that slice (20 plans
+    more). Its pass peaked at 19.350, 0.50 under the fit (19.853).
+  - The refused rungs stopped in their third slice of 13 ("ran untiled" false: their pass didn't
+    end); their plan was untiled.
+  - The phase's peaks, models included, were 2.20 and 0.91 GiB under the plan's predictions.
+
+The tiles on both codes (the cure's, then 6e1be76's: the first ladders' for these tiles):
+
+| tile | code | ref peak | least kept / most lost | free asked | code | ref peak | least kept / most lost | free asked |
+|---|---|---|---|---|---|---|---|---|
+| dec1080-1344 (1104x1344) | a4 | 25.701 | 0.941 / 0.841 (moved) | 26.642 | base | 26.024 | 0.821 / 0.721 (refused) | 26.845 |
+| dec2160-1216 (1216x1216) | a4 | 25.659 | 0.680 / 0.580 (moved) | 26.339 | base | 25.922 | 0.880 / 0.780 (refused) | 26.802 |
+| dec1080-1536 (1104x1536) | a4 | 28.820 | 0.870 / 0.771 (moved) | 29.691 | base | 29.463 | 0.860 / 0.761 (refused) | 30.323 |
+| dec1080-1728 (1104x1728) | a4 | 31.776 | 0.960 / 0.858 (moved) | 32.736 | base | 32.907 | 0.921 / 0.821 (refused) | 33.827 |
+| dec2160-1408 (1408x1408) | a4 | 32.835 | 0.790 / 0.690 (moved) | 33.624 | base | 34.089 | 0.980 / 0.880 (refused) | 35.070 |
+| dec1080-1856 (1104x1856) | a4 | 33.901 | 0.782 / 0.680 (moved) | 34.683 | base | 35.168 | 0.970 / 0.869 (refused) | 36.138 |
+| dec2160-1600 (1600x1600) | a4 | 41.170 | 0.970 / 0.870 (moved) | 42.140 | base | 43.479 | 0.989 / 0.890 (refused) | 44.468 |
+| enc2160-2048 (2048x2048) | a4 | 37.848 | 0.500 / 0.399 (moved) | 38.349 | base | 39.277 | 0.570 / 0.470 (refused) | 39.847 |
+| dec2160-1792 (1792x1792) | a4 | 50.449 | 0.781 / 0.679 (moved) | 51.230 | base | 53.999 | 0.959 / 0.859 (refused) | 54.958 |
+| dec2160-1920 (1920x1920) | a4 | 57.208 | 0.680 / 0.580 (moved) | 57.888 | base | 61.686 | 1.100 / 1.000 (refused) | 62.786 |
+| dec2160-2048 (2048x2048) | a4 | 64.863 | 0.870 / 0.769 (moved) | 65.734 | base | 70.004 | 0.700 / 0.601 (refused) | 70.704 |
+
+The untiled passes (GiB; "peak" the phase's, models included, against the plan's prediction; "pass peak" above what the GPU held once the phase was entered, against the planner's fit):
+
+| rung | outcome | plan's tiles | slices (one stream) | ran untiled | peak | predicted (plan) | pass peak | fit | over the fit |
+|---|---|---|---|---|---|---|---|---|---|
+| dec1080-untiled-a4-ref | reference | None | 13 (13) | True | 34.952 | 37.151 | 33.430 | 34.927 | -1.496 |
+| dec1080-untiled-a4-c37.322-1 | kept | None | 13 (13) | True | 34.952 | 37.151 | 33.430 | 34.927 | -1.496 |
+| dec1080-untiled-a4-c37.122-1 | moved | None | 13 (13) | True | 34.855 | 37.151 | 33.334 | 34.927 | -1.593 |
+| dec1080-untiled-a4-c37.222-1 | moved | None | 13 (13) | True | 34.952 | 37.151 | 33.430 | 34.927 | -1.496 |
+| dec1080-untiled-a4-c37.322-2 | kept | None | 13 (13) | True | 34.952 | 37.151 | 33.430 | 34.927 | -1.496 |
+| dec1080-untiled-a4-c37.222-2 | moved | None | 13 (13) | True | 34.952 | 37.151 | 33.430 | 34.927 | -1.496 |
+| enc1080-untiled-ref | reference | None | 13 (13) | True | 20.871 | 21.777 | 19.350 | 19.853 | -0.503 |
+| enc1080-untiled-c23.022-1 | kept | None | 13 (13) | True | 20.871 | 21.777 | 19.350 | 19.853 | -0.503 |
+| enc1080-untiled-c22.822-1 | refused | None | 2 (13) | False | 20.871 | 21.777 | 19.350 | 19.853 | -0.503 |
+| enc1080-untiled-c22.922-1 | refused | None | 2 (13) | False | 20.871 | 21.777 | 19.350 | 19.853 | -0.503 |
+| enc1080-untiled-c23.022-2 | kept | None | 13 (13) | True | 20.871 | 21.777 | 19.350 | 19.853 | -0.503 |
+| enc1080-untiled-c22.922-2 | refused | None | 2 (13) | False | 20.871 | 21.777 | 19.350 | 19.853 | -0.503 |
+
+#### What the run can see
+
+What separates the moved rungs from the kept ones, every rung of the tail (a higher figure saying moved):
+
+- torch's count of refused allocations across the pass (num_ooms + num_alloc_retries + num_oom_rejections): kept 0 to 0, moved 0 to 0: does NOT separate; over 0: 0 true positives, 0 false; 147 true negatives, 133 false
+- the cuDNN frontend's plans built in the pass over the reference's (cuDNN's log): kept 0 to 0, moved 19 to 40: SEPARATES, over 9.5 said moved: 133 true positives, 0 false; 147 true negatives, 0 false
+- torch's "recovered from an allocation failure" lines in the pass: kept 15 to 166, moved 21 to 166: does NOT separate; over 93.5: 36 true positives, 41 false; 106 true negatives, 97 false
+- the pass's time: not a signal here (its seconds are in every rung's record, for information): a power-capped card's speed drifts from run to run
+
+The codes apart: under the cure the plans built separate 87 moved rungs from 91 kept, on 6e1be76 46 from 56, neither with a miss; torch's count is 0 on both.
+
+Over the 280 rungs that kept or moved their frames (147 kept, 133 moved; 11 refused apart, all on
+6e1be76):
+
+- **The cuDNN frontend's plans built tell it without a miss again,** on both codes: 19 to 40 more
+  than the reference's in every pass whose frames moved, none in any that kept them. Each
+  convolution that fell back built the same plans: engine 22 sixteen or seventeen times, engine 23
+  twice, then engine 28 with no workspace, which ran. One convolution fell back (19 or 20 plans
+  more), or two (38 to 40).
+- **torch's count of refused allocations stayed at 0** across every pass under `cudaMallocAsync`.
+- **The "recovered" lines don't separate.**
+- **The refused rungs:** all at `memory_limit_conv:162`, the concatenation, on 6e1be76. Five of them
+  (1080p's untiled encode, 4K's 1,536-px encode) fell back in the slice refused, before the refusal.
+
+#### The floor against the tile
+
+- dec: every bracketed ladder kept its frames with 0.901 GiB (dec1080-1088) or less, over 4 ladders
+- dec, least kept against the area: 0.556 + 0.2908 x, worst miss 0.021 GiB over 4 ladders
+- dec, least kept against the workspace: 0.556 + 0.0976 x, worst miss 0.021 GiB over 4 ladders
+- dec1080: every bracketed ladder kept its frames with 0.901 GiB (dec1080-1088) or less, over 4 ladders
+- dec1080, least kept against the area: 0.556 + 0.2908 x, worst miss 0.021 GiB over 4 ladders
+- dec1080, least kept against the workspace: 0.556 + 0.0976 x, worst miss 0.021 GiB over 4 ladders
+- dec-a4: every bracketed ladder kept its frames with 0.971 GiB (dec1080-1792-a4) or less, over 27 ladders
+- dec-a4, least kept against the area: 0.853 + -0.0137 x, worst miss 0.153 GiB over 27 ladders
+- dec-a4, least kept against the workspace: 0.853 + -0.0046 x, worst miss 0.153 GiB over 27 ladders
+- dec1080-a4: every bracketed ladder kept its frames with 0.971 GiB (dec1080-1792-a4) or less, over 12 ladders
+- dec1080-a4, least kept against the area: 0.772 + 0.0493 x, worst miss 0.179 GiB over 12 ladders
+- dec1080-a4, least kept against the workspace: 0.772 + 0.0166 x, worst miss 0.179 GiB over 12 ladders
+- dec2160-a4: every bracketed ladder kept its frames with 0.970 GiB (dec2160-1600-a4) or less, over 15 ladders
+- dec2160-a4, least kept against the area: 0.775 + 0.0077 x, worst miss 0.175 GiB over 15 ladders
+- dec2160-a4, least kept against the workspace: 0.775 + 0.0026 x, worst miss 0.175 GiB over 15 ladders
+- enc: every bracketed ladder kept its frames with 0.870 GiB (enc1080-1600) or less, over 19 ladders
+- enc, least kept against the area: 0.551 + 0.0570 x, worst miss 0.218 GiB over 19 ladders
+- enc, least kept against the workspace: 0.547 + 0.0455 x, worst miss 0.218 GiB over 19 ladders
+- enc1080: every bracketed ladder kept its frames with 0.870 GiB (enc1080-1600) or less, over 12 ladders
+- enc1080, least kept against the area: 0.513 + 0.0958 x, worst miss 0.187 GiB over 12 ladders
+- enc1080, least kept against the workspace: 0.506 + 0.0775 x, worst miss 0.186 GiB over 12 ladders
+- enc2160: every bracketed ladder kept its frames with 0.681 GiB (enc2160-1600) or less, over 7 ladders
+- enc2160, least kept against the area: 0.527 + 0.0533 x, worst miss 0.064 GiB over 7 ladders
+- enc2160, least kept against the workspace: 0.527 + 0.0411 x, worst miss 0.064 GiB over 7 ladders
+- enc-a4: every bracketed ladder kept its frames with 0.601 GiB (enc2160-1920-a4) or less, over 7 ladders
+- enc-a4, least kept against the area: 0.586 + -0.0111 x, worst miss 0.056 GiB over 7 ladders
+- enc-a4, least kept against the workspace: 0.599 + -0.0133 x, worst miss 0.053 GiB over 7 ladders
+- enc2160-a4: every bracketed ladder kept its frames with 0.601 GiB (enc2160-1920-a4) or less, over 7 ladders
+- enc2160-a4, least kept against the area: 0.586 + -0.0111 x, worst miss 0.056 GiB over 7 ladders
+- enc2160-a4, least kept against the workspace: 0.599 + -0.0133 x, worst miss 0.053 GiB over 7 ladders
+
+- **Under the cure no line holds; a step bounds the floors.** The 27 decodes kept their frames with
+  0.68 to 0.97 GiB whatever the tile's area: a line, 0.853 − 0.014 GiB a megapixel, misses by up to
+  0.15. Every decode under the cure kept its frames with 0.97 GiB or less, and every encode its
+  latent with 0.60 or less.
+- **On 6e1be76:** the tail's four decodes keep to a line (0.556 + 0.291 GiB a megapixel, missing by
+  0.02; the first ladders' ten 1080p decodes gave 0.674 + 0.119, above). Its 19 encodes don't (0.47
+  to 0.87 GiB, a line missing by 0.22). Every encode measured on 6e1be76 kept its latent with
+  0.87 GiB or less.
+
+#### Every rung
+
+Each ladder's rungs in their order: the reference's peak (GiB), then each rung's room (usual) and
+outcome, the frames (an encode's latent frames) that differ, and the plans built over the
+reference's.
+
+| ladder | rungs |
+|---|---|
+| dec1080-1216-a4 | ref 23.763; 1.10 kept (+0); 0.90 kept (+0); 0.70 moved 40/53 (+40); 0.80 kept (+0); 0.80 kept (+0); 0.70 moved 40/53 (+40) |
+| dec2160-1152-a4 | ref 23.507; 0.85 kept (+0); 0.65 moved 12/17 (+40); 0.75 kept (+0); 0.75 kept (+0); 0.65 moved 12/17 (+40) |
+| dec1080-1280-a4 | ref 24.679; 0.83 kept (+0); 0.63 moved 48/53 (+38); 0.73 moved 48/53 (+19); 0.83 kept (+0); 0.73 moved 48/53 (+19) |
+| dec1080-1344-a4 | ref 25.701; 0.84 moved 32/53 (+20); 1.04 kept (+0); 0.94 kept (+0); 0.94 kept (+0); 0.84 moved 32/53 (+20) |
+| dec2160-1216-a4 | ref 25.659; 0.88 kept (+0); 0.68 kept (+0); 0.48 moved 12/17 (+38); 0.58 moved 12/17 (+39); 0.68 kept (+0); 0.58 moved 12/17 (+39) |
+| dec1080-1408-a4 | ref 26.731; 0.85 kept (+0); 0.65 moved 36/53 (+20); 0.75 moved 16/53 (+20); 0.85 kept (+0); 0.75 moved 16/53 (+20) |
+| dec1080-1472-a4 | ref 27.787; 0.86 kept (+0); 0.66 moved 44/53 (+20); 0.76 moved 8/53 (+20); 0.86 kept (+0); 0.76 moved 8/53 (+20) |
+| dec2160-1280-a4 | ref 27.917; 0.87 kept (+0); 0.67 moved 12/17 (+40); 0.77 moved 12/17 (+40); 0.87 kept (+0); 0.77 moved 12/17 (+40) |
+| dec1080-1536-a4 | ref 28.820; 0.87 kept (+0); 0.67 moved 44/53 (+20); 0.77 moved 40/53 (+20); 0.87 kept (+0); 0.77 moved 40/53 (+20) |
+| dec1080-1600-a4 | ref 29.781; 0.88 kept (+0); 0.68 kept (+0); 0.48 moved 48/53 (+38); 0.58 moved 48/53 (+39); 0.68 kept (+0); 0.58 moved 48/53 (+39) |
+| dec1080-1664-a4 | ref 30.793; 0.86 kept (+0); 0.66 moved 48/53 (+40); 0.76 moved 40/53 (+20); 0.86 kept (+0); 0.76 moved 40/53 (+20) |
+| dec2160-1344-a4 | ref 30.359; 0.87 kept (+0); 0.67 moved 8/17 (+40); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 8/17 (+40) |
+| dec1080-1728-a4 | ref 31.776; 0.86 moved 36/53 (+20); 1.06 kept (+0); 0.96 kept (+0); 0.96 kept (+0); 0.86 moved 36/53 (+20) |
+| dec1080-1792-a4 | ref 32.802; 0.87 moved 28/53 (+20); 1.07 kept (+0); 0.97 kept (+0); 0.97 kept (+0); 0.87 moved 28/53 (+20) |
+| dec2160-1408-a4 | ref 32.835; 0.89 kept (+0); 0.69 moved 12/17 (+39); 0.79 kept (+0); 0.79 kept (+0); 0.69 moved 12/17 (+39) |
+| dec1080-1856-a4 | ref 33.901; 0.88 kept (+0); 0.68 moved 40/53 (+20); 0.78 kept (+0); 0.78 kept (+0); 0.68 moved 40/53 (+20) |
+| dec2160-1472-a4 | ref 35.496; 0.88 kept (+0); 0.68 moved 12/17 (+20); 0.78 moved 12/17 (+20); 0.88 kept (+0); 0.78 moved 12/17 (+20) |
+| dec2160-1536-a4 | ref 38.265; 0.88 kept (+0); 0.68 kept (+0); 0.48 moved 12/17 (+38); 0.58 moved 12/17 (+40); 0.68 kept (+0); 0.58 moved 12/17 (+40) |
+| dec2160-1600-a4 | ref 41.170; 0.87 moved 12/17 (+20); 1.07 kept (+0); 0.97 kept (+0); 0.97 kept (+0); 0.87 moved 12/17 (+20) |
+| enc2160-1664-a4 | ref 26.398; 1.10 kept (+0); 0.90 kept (+0); 0.70 kept (+0); 0.30 moved 3/5 (+40); 0.50 kept (+0); 0.40 moved 3/5 (+40); 0.50 kept (+0); 0.40 moved 3/5 (+40) |
+| enc2160-1728-a4 | ref 28.242; 0.55 kept (+0); 0.35 moved 3/5 (+40); 0.45 moved 3/5 (+40); 0.55 kept (+0); 0.45 moved 3/5 (+40) |
+| enc2160-1792-a4 | ref 29.957; 0.58 kept (+0); 0.38 moved 3/5 (+40); 0.48 moved 3/5 (+40); 0.58 kept (+0); 0.48 moved 3/5 (+40) |
+| enc2160-1856-a4 | ref 31.979; 0.59 kept (+0); 0.39 moved 3/5 (+20); 0.49 moved 3/5 (+20); 0.59 kept (+0); 0.49 moved 3/5 (+20) |
+| enc2160-1920-a4 | ref 33.812; 0.60 kept (+0); 0.40 moved 3/5 (+20); 0.50 moved 3/5 (+20); 0.60 kept (+0); 0.50 moved 3/5 (+20) |
+| enc2160-1984-a4 | ref 35.804; 0.61 kept (+0); 0.41 moved 2/5 (+40); 0.51 kept (+0); 0.51 kept (+0); 0.41 moved 2/5 (+40) |
+| enc2160-2048-a4 | ref 37.848; 0.60 kept (+0); 0.40 moved 2/5 (+20); 0.50 kept (+0); 0.50 kept (+0); 0.40 moved 2/5 (+20) |
+| dec1080-untiled-a4 | ref 34.952; 0.88 kept (+0); 0.68 moved 48/53 (+39); 0.78 moved 36/53 (+20); 0.88 kept (+0); 0.78 moved 36/53 (+20) |
+| enc1080-untiled | ref 20.871; 0.66 kept (+0); 0.46 refused (+20); 0.56 refused (+20); 0.66 kept (+0); 0.56 refused (+20) |
+| dec1080-768 | ref 12.624; 0.92 kept (+0) (history); 0.72 kept (+0) (history); 0.52 moved 15/53 (+20) (history); 0.62 moved 7/53 (+20) (history); 0.72 kept (+0); 0.62 moved 7/53 (+20) |
+| dec1080-896 | ref 15.621; 0.91 kept (+0); 0.71 moved 44/53 (+20); 0.81 kept (+0); 0.81 kept (+0); 0.71 moved 44/53 (+20) |
+| dec1080-960 | ref 17.196; 0.91 kept (+0); 0.71 moved 48/53 (+20); 0.81 kept (+0); 0.81 kept (+0); 0.71 moved 48/53 (+20) |
+| dec1080-1088 | ref 21.169; 0.90 kept (+0); 0.70 refused (-214); 0.80 refused (-214); 0.90 kept (+0); 0.80 refused (-214) |
+| enc1080-768 | ref 8.604; 0.67 kept (+0); 0.47 moved 12/14 (+20); 0.57 moved 5/14 (+20); 0.67 kept (+0); 0.57 moved 5/14 (+20) |
+| enc1080-896 | ref 10.081; 0.68 kept (+0); 0.48 moved 5/14 (+20); 0.58 kept (+0); 0.58 kept (+0); 0.48 moved 5/14 (+20) |
+| enc1080-960 | ref 11.338; 0.67 kept (+0); 0.47 kept (+0); 0.27 moved 12/14 (+20); 0.37 moved 12/14 (+20); 0.47 kept (+0); 0.37 moved 12/14 (+20) |
+| enc1080-1088 | ref 13.328; 0.65 kept (+0); 0.45 moved 11/14 (+20); 0.55 kept (+0); 0.55 kept (+0); 0.45 moved 11/14 (+20) |
+| enc1080-1152 | ref 14.206; 0.65 moved 9/14 (+20); 0.85 kept (+0); 0.75 kept (+0); 0.75 kept (+0); 0.65 moved 9/14 (+20) |
+| enc1080-1280 | ref 15.068; 0.66 kept (+0); 0.46 moved 11/14 (+20); 0.56 kept (+0); 0.56 kept (+0); 0.46 moved 11/14 (+20) |
+| enc1080-1408 | ref 16.422; 0.66 kept (+0); 0.46 moved 11/14 (+20); 0.56 moved 11/14 (+20); 0.66 kept (+0); 0.56 moved 11/14 (+20) |
+| enc1080-1472 | ref 17.099; 0.66 kept (+0); 0.46 moved 11/14 (+20); 0.56 moved 11/14 (+20); 0.66 kept (+0); 0.56 moved 11/14 (+20) |
+| enc1080-1600 | ref 17.944; 0.67 moved 11/14 (+20); 0.87 kept (+0); 0.77 moved 5/14 (+20); 0.87 kept (+0); 0.77 moved 5/14 (+20) |
+| enc1080-1728 | ref 19.257; 0.68 kept (+0); 0.48 moved 11/14 (+20); 0.58 moved 11/14 (+20); 0.68 kept (+0); 0.58 moved 11/14 (+20) |
+| enc1080-1792 | ref 19.914; 0.69 kept (+0); 0.49 moved 11/14 (+20); 0.59 moved 8/14 (+20); 0.69 kept (+0); 0.59 moved 8/14 (+20) |
+| enc2160-1152 | ref 14.757; 0.69 kept (+0); 0.49 moved 3/5 (+20); 0.59 kept (+0); 0.59 kept (+0); 0.49 moved 3/5 (+20) |
+| enc2160-1216 | ref 15.673; 0.69 kept (+0); 0.49 moved 3/5 (+20); 0.59 kept (+0); 0.59 kept (+0); 0.49 moved 3/5 (+20) |
+| enc2160-1280 | ref 17.194; 0.68 kept (+0); 0.48 moved 3/5 (+20); 0.58 kept (+0); 0.58 kept (+0); 0.48 moved 3/5 (+20) |
+| enc2160-1344 | ref 18.312; 0.68 kept (+0); 0.48 moved 3/5 (+20); 0.58 moved 3/5 (+20); 0.68 kept (+0); 0.58 moved 3/5 (+20) |
+| enc2160-1408 | ref 19.978; 0.68 kept (+0); 0.48 moved 3/5 (+20); 0.58 moved 3/5 (+20); 0.68 kept (+0); 0.58 moved 3/5 (+20) |
+| enc2160-1536 | ref 23.018; 0.69 kept (+0); 0.49 refused (-128); 0.59 kept (+0); 0.59 kept (+0); 0.49 refused (-128) |
+| enc2160-1600 | ref 24.731; 0.68 kept (+0); 0.48 refused (-144); 0.58 refused (-144); 0.68 kept (+0); 0.58 refused (-144) |
+| dec2160-1664-a4 | ref 43.976; 0.88 kept (+0); 0.68 moved 12/17 (+40); 0.78 kept (+0); 0.78 kept (+0); 0.68 moved 12/17 (+40) |
+| dec2160-1728-a4 | ref 47.202; 0.88 kept (+0); 0.68 moved 12/17 (+38); 0.78 moved 12/17 (+38); 0.88 kept (+0); 0.78 moved 12/17 (+38) |
+| dec2160-1792-a4 | ref 50.449; 0.88 kept (+0); 0.68 moved 12/17 (+38); 0.78 kept (+0); 0.78 kept (+0); 0.68 moved 12/17 (+38) |
+| dec2160-1856-a4 | ref 54.000; 0.88 kept (+0); 0.68 moved 12/17 (+20); 0.78 kept (+0); 0.78 kept (+0); 0.68 moved 12/17 (+20) |
+| dec2160-1920-a4 | ref 57.208; 0.88 kept (+0); 0.68 kept (+0); 0.48 moved 12/17 (+38); 0.58 moved 12/17 (+39); 0.68 kept (+0); 0.58 moved 12/17 (+39) |
+| dec2160-1984-a4 | ref 60.770; 0.87 kept (+0); 0.67 moved 12/17 (+19); 0.77 kept (+0); 0.77 kept (+0); 0.67 moved 12/17 (+19) |
+| dec2160-2048-a4 | ref 64.863; 0.87 kept (+0); 0.67 moved 12/17 (+19); 0.77 moved 12/17 (+19); 0.87 kept (+0); 0.77 moved 12/17 (+19) |
+
 ### What follows for seedvr2x
 
 - **The room can't be 0.** At 0.6 GiB left a pass's convolutions lose their workspaces: the run
@@ -959,8 +1291,15 @@ room's 1.5 beyond its predicted peak (runtime/memory.py, RESERVE): 6.0 GiB.
   decode in 1472-px tiles by 0.52, a 4K one in 2048-px tiles by 5.35).
 - **The 0.4 GiB of an encode** is part of what keeps an encode's frames today: to be judged with
   the floor, not before.
-- **The floor by tile size** (2026-10-16, passes alone, on this card and allocator): see
-  [its section](#the-floor-by-tile-size-and-its-cause-2026-10-16). A VAE pass is left at least
+- **The floor by tile size** (2026-10-16 and 17, passes alone, on this card and allocator): see
+  [its section](#the-floor-by-tile-size-and-its-cause-2026-10-16) and
+  [the large tiles under the cure](#the-large-tiles-under-the-one-output-cure-and-the-tiles-left-2026-10-17).
+  Every pass alone measured on this card kept its frames with 1.10 GiB or less beyond its peak.
+  With the cure, every 1080p and 4K decode it takes that ran did with 0.97 or less and moved them
+  below, refused nowhere, and its 4K encode squares did with 0.60; 4K's untiled encode and the
+  other output sizes' passes it takes didn't run. Without it, the decodes it doesn't take that ran
+  (squares of 640 to 1,088 px, 1,104 × 1,152) did with 0.90 or less (from 1,024 px refused first;
+  the 512- and 576-px decodes didn't run), the encodes run with 0.87. A VAE pass is left at least
   the room and the budget's 0.6 GiB beyond its predicted peak: 2.1 GiB with the room at 1.5.
 - **A run can't see a fallback for free on `cudaMallocAsync`:** torch counts no refusal there;
   the cuDNN frontend's log does. Under torch's own allocator, a held run's, `num_ooms` across a
@@ -993,12 +1332,22 @@ room's 1.5 beyond its predicted peak (runtime/memory.py, RESERVE): 6.0 GiB.
   and a pass alone in a new process starts with no plan cached. Under expandable segments on the
   RTX 5090 the whole runs kept and lost their frames where the passes alone did (832 and 1,024
   px, at 0.1 GiB).
-- **The large tiles' frames' floor is unmeasured:** from 1,024 px a decode is refused first, at
-  the concatenation the held one-output cure removes; for the tiles that cure takes, main's
-  ladders are main's record, and their floor under the cure is to measure with it.
-- **A rung ran once or twice,** the deciding ones twice but the 768-px decode's (its ladder
-  unfinished: the queue was ended before they ran again); the 38 rungs that ran twice agreed
-  each time, in outcome and frames (the moved ones with the same other frames).
+- **The large tiles' frames' floor was measured under the cure** for 1080p's and 4K's tiles and
+  1080p's untiled decode, passes alone: on the code without it, from 1,024 px a decode is refused
+  first, at the concatenation the cure removes, and those ladders are that code's record.
+- **Two codes, two sets of units:** under the cure the units were made on its own code, whose
+  noise is drawn on the CPU, so its frames aren't the other code's. Each tile is judged against its
+  own code's reference; between codes only the rooms and the peaks compare, and the free memory a
+  pass asks (its peak and its room) is the fair figure.
+- **A rung ran once or twice,** the deciding ones twice, the 768-px decode's in the tail. The 38
+  rungs of the first ladders that ran twice agreed each time, in outcome and frames (the moved ones
+  with the same other frames), and so did the 114 cards the tail ran twice (the same outcome, the
+  same other frames or latent, a refusal in the same slice). One rung of the tail was
+  stopped when the queue was interrupted, recorded by vae_room.py and not by the driver, and ran
+  again as that card's second run.
+- **Not run:** under the cure, 4K's untiled encode and the other output sizes' passes it takes
+  (1440p's cut-off tiles and untiled passes among them); on 6e1be76, the decodes in 512- and
+  576-px tiles; and, apart, 4K's encode squares of 768 to 1,088 px, 1080p's own shapes.
 
 ## Reproduce
 
@@ -1027,6 +1376,14 @@ python floor.py --dir DIR --python PYTHON --copy SEEDVR2X --want TREE --models M
     --clips CLIPS --lock LOCK queue
 python floor.py --dir DIR table
 python floor.py --dir DIR detector
+
+# the tail: the tiles the one-output cure takes on a second code (its ladders named -a4, their
+# units made on it), the base code's tiles left, the untiled passes; the first study read only
+python floor.py --dir DIR2 --python PYTHON --copy SEEDVR2X --want TREE \
+    --code a4 PYTHON_A4 SEEDVR2X_A4 TREE_A4 --history DIR --models MODELS --clips CLIPS \
+    --lock LOCK queue --order tail
+python floor.py --dir DIR2 --history DIR table --order tail --compact
+python floor.py --dir DIR2 --history DIR detector
 
 # where the driver gives memory the card doesn't have (WSL2): the floor by torch's limit, under
 # torch's own allocator with expandable segments, vae_room.py beside held_floor.py; the shape's

@@ -19,20 +19,44 @@ window), so that every rung of a ladder runs the same plan on less and less free
   - an encode in tile T: a new job of the shape, stopped after its encode (--stop-after encode),
     its latent compared bit for bit.
 
+A ladder is named KINDRES-TILE[-CODE]: dec or enc, 1080 or 2160, the tile's side in pixels (a
+square, cut off at 1080p's 1,104 rows where larger) or `untiled`, the pass in one stream
+(seedvr2x's --decode-tile 0 or --encode-tile 0; a decode's copy of the units then says decode
+tile 0 and no decode tiles). An untiled rung records whether the untiled pass is what ran (the
+run's own plan has no tiles for the pass, and the pass ran one stream's slices, as many as a
+tiled pass runs a tile) and the pass's peak above what the GPU held once its phase was entered,
+against the planner's untiled fit of the padded frame (planner._fit, read once per code by the
+code's own python on the CPU: fits.json).
+
+The code under study: --copy (its tree --want, its environment's --python) for a ladder named
+without a code (dec1080-768); a ladder named with one (dec2160-1216-a4) runs that code, given by
+--code NAME PYTHON COPY TREE (another frozen copy of seedvr2x, with its own environment), from
+its own units (seeds/NAME/seed-RES: `seed RES --code NAME`, or the queue makes them when a ladder
+first needs them) and against its own references: the same tile on two codes, side by side. Each
+code's tree is checked before every rung of its ladders; a code found other than its tree is
+barred for the rest of the queue's run, said, and the other codes' ladders go on.
+
+--history DIR: an earlier study's directory (its rungs.jsonl, records/, refs/ and seeds/), read
+only: a ladder it began goes on from its rungs and against its reference, one it finished is
+done, and its units serve the ladders without a code where this study has none of its own.
+
 The shapes are two of planner_matrix.py's clips: 1080 = clip-53 (53 frames, window 8, tiles
-768 / 576), for the squares up to 1,088 px and the tiles cut off at 1080p's 1,104 rows; 2160 =
-clip-17 (17 frames, window 5, tiles 1408 / 1088), for the squares from 1,152 px; 36 blocks
-swapped (the fewest on the GPU in every phase); an empty cut list (one shot, no shot detector).
+768 / 576), for the squares up to 1,088 px, the tiles cut off at 1080p's 1,104 rows and 1080p's
+untiled passes; 2160 = clip-17 (17 frames, window 5, tiles 1408 / 1088), for the squares from
+1,152 px; 36 blocks swapped (the fewest on the GPU in every phase); an empty cut list (one shot,
+no shot detector).
 
 A rung's room is the free memory its plan was made in (the run's own plan, vae_room.py's
 "planned") less the pass's measured peak; "usual", that free memory less the reference rung's
 peak (vae-room.md's "left"), on which the ladder steps. The ladder: the reference rung, then
-START, stepping down while the frames hold or up while they don't (STEP, doubled after two cards
-one way), then the bracket halved down to FINE, then the two deciding rungs again (the least
-room that kept the frames on every run, the most that lost them on any run), each on the same
-card. A rung is kept (its frames, or latent, the reference's), moved (other frames), refused
-(the run out of memory, or another memory error) or failed (anything else, which ends the
-ladder).
+START (or the mean least room kept of the finished ladders of its kind on its code, and 0.05),
+stepping down while the frames hold or up while they don't (STEP, doubled after two cards one
+way), then the bracket halved down to FINE, then the two deciding rungs again (the least room
+that kept the frames on every run, the most that lost them on any run), each on the same card. A
+rung's card is the reference's peak, the target room and the card's offset (card less free
+memory, the median of the code's rungs so far). A rung is kept (its frames, or latent, the
+reference's), moved (other frames), refused (the run out of memory, or another memory error) or
+failed (anything else, which ends the ladder).
 
 Every rung also records what the run could see of a pass short of room: torch's allocator
 counters across the pass (its count of refused allocations), the cuDNN frontend's execution
@@ -42,26 +66,32 @@ the process, and on a workspace refused builds the next ones without a word), to
 from an allocation failure" lines; and the pass's seconds, for information only (on a
 power-capped card a pass's time drifts from run to run: no signal there).
 
-  seed RES      the shape's units, on the bare card (once).
+  seed RES      the shape's units, on the bare card (once); --code NAME: that code's.
   rung LADDER   one rung by hand: --card CARD (bare: the reference) or --room GIB.
-  queue         the ladders in LADDERS' order, each rung decided from the earlier ones, until the
-                UTC time in DIR/deadline, DIR/skip (ends after the rung running) or DIR/pause
-                (waits before the next); a run is never interrupted. DIR/done at the end.
-  table         per ladder the least room kept and the most lost, with their runs; every rung;
-                the ladders not reached; the floors against the tile's area and against the
-                largest workspace its reference's plans asked.
+  queue         the ladders of --ladders (names, comma-separated) or of --order (b1: the first
+                order, of 2026-10-16, the default; tail: the order of 2026-10-17, the tiles the
+                one-output cure takes on the code named a4, then the base code's left), each rung
+                decided from the earlier ones, until the UTC time in DIR/deadline, DIR/skip (ends
+                after the rung running) or DIR/pause (waits before the next); a run is never
+                interrupted. --wait-for FILE: no rung before FILE exists. DIR/done at the end.
+  table         per ladder and code the least room kept and the most lost, with their runs; a
+                tile on two codes side by side; the untiled passes' checks; every rung, or with
+                --compact each ladder's rungs on one line; the ladders not reached; the floors
+                against the tile's area and against the largest workspace its reference's plans
+                asked, by kind, resolution and code.
   detector      per rung, each signal that doesn't depend on the clock against its reference
                 rung's: torch's count of refused allocations, the cuDNN frontend's plans built
                 (and the slice where the extra ones were built, with the memory free before
                 it), the "recovered" lines; which separates the moved rungs from the kept ones,
-                and where; the refused rungs apart.
+                and where, by code too; the refused rungs apart.
 
 The study's directory (--dir): records/ (vae_room.py's record and log of each rung), work/,
 refs/ (each tile's reference output), seeds/, rungs.jsonl (a record a rung), progress (a line a
-rung) and the queue's control files. seed, rung and queue also need --python (seedvr2x's
-environment's python), --copy and --want (the frozen copy of seedvr2x under study and its
-tree, checked before every rung), --models, --clips (planner_matrix.py's clip-N.mkv) and --lock
-(the GPU's lock file). ffmpeg on PATH."""
+rung), fits.json and the queue's control files. seed, rung and queue also need --python
+(seedvr2x's environment's python), --copy and --want (the frozen copy of seedvr2x under study
+and its tree, checked before every rung), --models, --clips (planner_matrix.py's clip-N.mkv)
+and --lock (the GPU's lock file). ffmpeg on PATH. table and detector read the study's files
+only (and --history's)."""
 
 import argparse
 import calendar
@@ -100,6 +130,24 @@ THIRD = [f"dec1080-{t}" for t in (704, 768, 896, 960, 1088)]
 THIRD += [f"dec2160-{t}" for t in (1152, 1280, 1344, 1472, 1536, 1664, 1728, 1856, 1984)]
 THIRD += [f"dec1080-{t}" for t in (1216, 1280, 1408, 1472, 1600, 1664, 1792)]
 LADDERS = FIRST + SECOND + THIRD
+# The tail's order (2026-10-17): first the tiles the planner gives the cards of 12 to 48 GB at a
+# room of 1.0 GiB, by the least card that takes them: the decodes the one-output cure takes (on
+# the code named a4), its encodes, 1080p's untiled decode (a4) and encode (the base code), the
+# base code's decodes and encodes left (4K's encode squares of 768 to 1,088 px are 1080p's
+# shapes); then the decodes the cure takes that no such card does.
+TAIL = ["dec1080-1216-a4", "dec2160-1152-a4", "dec1080-1280-a4", "dec1080-1344-a4"]
+TAIL += ["dec2160-1216-a4", "dec1080-1408-a4", "dec1080-1472-a4", "dec2160-1280-a4"]
+TAIL += ["dec1080-1536-a4", "dec1080-1600-a4", "dec1080-1664-a4", "dec2160-1344-a4"]
+TAIL += ["dec1080-1728-a4", "dec1080-1792-a4", "dec2160-1408-a4", "dec1080-1856-a4"]
+TAIL += ["dec2160-1472-a4", "dec2160-1536-a4", "dec2160-1600-a4"]
+TAIL += [f"enc2160-{t}-a4" for t in (1664, 1728, 1792, 1856, 1920, 1984, 2048)]
+TAIL += ["dec1080-untiled-a4", "enc1080-untiled"]
+TAIL += [f"dec1080-{t}" for t in (768, 896, 960, 1088)]
+TAIL += [f"enc1080-{t}" for t in (768, 896, 960, 1088, 1152, 1280, 1408, 1472, 1600, 1728, 1792)]
+TAIL += [f"enc2160-{t}" for t in (1152, 1216, 1280, 1344, 1408, 1536, 1600)]
+TAIL += [f"dec2160-{t}-a4" for t in (1664, 1728, 1792, 1856, 1920, 1984, 2048)]
+ORDERS = {"b1": LADDERS, "tail": TAIL}
+LADDER = re.compile(r"(dec|enc)(1080|2160)-(\d+|untiled)(?:-([a-z][a-z0-9]*))?")
 PLANS = "EXECUTION_PLAN_DESCRIPTOR"  # the cuDNN frontend's line for a plan built
 PLAN_LINE = re.compile(r"EXECUTION_PLAN_DESCRIPTOR : (\S+), .*workSpaceSize: (\d+)")
 SLICE_LINE = re.compile(
@@ -115,23 +163,34 @@ MEMORY_ERROR = (
 )
 
 # The study's places, from the arguments (configure).
-DIR = RECORDS = WORK = REFS = SEEDS = CUTS = Path()
+DIR = RECORDS = WORK = REFS = SEEDS = CUTS = FITS = Path()
 PROGRESS = RUNGS = DEADLINE = PAUSE = SKIP = DONE = Path()
-PYTHON = WANT = MODELS = LOCK = ""
-COPY = CLIPS = Path()
+MODELS = LOCK = ""
+CLIPS = Path()
+HISTORY: Path | None = None
+# The codes under study: "" the base (--python, --copy, --want), then each --code by its name.
+CODES: dict[str, dict] = {}
 
 
 def configure(args: argparse.Namespace) -> None:
-    global DIR, RECORDS, WORK, REFS, SEEDS, CUTS, PROGRESS, RUNGS, DEADLINE, PAUSE, SKIP, DONE
-    global PYTHON, WANT, MODELS, LOCK, COPY, CLIPS
+    global DIR, RECORDS, WORK, REFS, SEEDS, CUTS, FITS, PROGRESS, RUNGS, DEADLINE, PAUSE, SKIP
+    global DONE, MODELS, LOCK, CLIPS, HISTORY
     DIR = args.dir.resolve()
     RECORDS, WORK, REFS, SEEDS = DIR / "records", DIR / "work", DIR / "refs", DIR / "seeds"
-    CUTS = DIR / "no-cuts.txt"
+    CUTS, FITS = DIR / "no-cuts.txt", DIR / "fits.json"
     PROGRESS, RUNGS = DIR / "progress", DIR / "rungs.jsonl"
     DEADLINE, PAUSE, SKIP, DONE = DIR / "deadline", DIR / "pause", DIR / "skip", DIR / "done"
-    PYTHON, WANT, MODELS, LOCK = args.python, args.want, args.models, args.lock
-    COPY = Path(args.copy) if args.copy else Path()
+    MODELS, LOCK = args.models, args.lock
     CLIPS = Path(args.clips) if args.clips else Path()
+    HISTORY = args.history.resolve() if args.history else None
+    CODES.clear()
+    CODES[""] = {"python": args.python, "copy": Path(args.copy or "."), "want": args.want}
+    for name, python, copy, want in args.code or []:
+        if not LADDER.fullmatch(f"dec1080-640-{name}"):
+            raise SystemExit(
+                f"--code {name}: a code's name is a lowercase letter, then letters or digits"
+            )
+        CODES[name] = {"python": python, "copy": Path(copy), "want": want}
 
 
 def needs_gpu_places(args: argparse.Namespace) -> None:
@@ -152,18 +211,43 @@ def say(text: str) -> None:
     print(f"{now()} floor: {text}", flush=True)
 
 
-def parse(ladder: str) -> tuple[str, int, int]:
-    found = re.fullmatch(r"(dec|enc)(1080|2160)-(\d+)", ladder)
+def parse(ladder: str) -> tuple[str, int, int, str]:
+    """A ladder's kind, resolution, tile (0: untiled) and code ("": the base code)."""
+    found = LADDER.fullmatch(ladder)
     if not found:
-        raise SystemExit(f"{ladder}: not a ladder (decRES-TILE or encRES-TILE)")
-    return found[1], int(found[2]), int(found[3])
+        raise SystemExit(
+            f"{ladder}: not a ladder (decRES-TILE or encRES-TILE, TILE a side or untiled, then"
+            f" -CODE for a --code)"
+        )
+    tile = 0 if found[3] == "untiled" else int(found[3])
+    return found[1], int(found[2]), tile, found[4] or ""
+
+
+def code_of(r: dict) -> str:
+    """A rung's code, by its ladder's name."""
+    try:
+        return parse(r.get("ladder", ""))[3]
+    except SystemExit:
+        return ""
+
+
+def label(code: str) -> str:
+    return code or "base"
 
 
 def tile_shape(res: int, tile: int) -> str:
     """The tile's full shape as the grid lays it (the edge tiles aside): a square, or cut off at
-    the padded frame's rows."""
-    rows, _ = PADDED[res]
+    the padded frame's rows; or the padded frame, untiled."""
+    rows, columns = PADDED[res]
+    if tile == 0:
+        return f"untiled ({rows}x{columns})"
     return f"{min(tile, rows)}x{tile}"
+
+
+def tile_area(shape: str) -> float:
+    """A tile shape's area, in megapixels (an untiled pass's, the padded frame's)."""
+    rows, columns = (int(x) for x in shape.removeprefix("untiled (").removesuffix(")").split("x"))
+    return rows * columns / 1e6
 
 
 def gib(value: float | None, digits: int = 3) -> str:
@@ -173,16 +257,47 @@ def gib(value: float | None, digits: int = 3) -> str:
 # ------------------------------------------------------------------ the records
 
 
-def rungs_of(ladder: str | None = None) -> list[dict]:
-    if not RUNGS.exists():
+_READ: dict[Path, tuple[tuple[int, int], list[dict]]] = {}
+
+
+def _read(path: Path) -> list[dict]:
+    """A JSON-lines file's records, parsed again only when the file changed."""
+    if not path.exists():
         return []
-    found = [json.loads(line) for line in RUNGS.read_text().splitlines() if line.strip()]
-    return [r for r in found if ladder is None or r["ladder"] == ladder]
+    stat = path.stat()
+    key = (stat.st_mtime_ns, stat.st_size)
+    if path not in _READ or _READ[path][0] != key:
+        lines = path.read_text().splitlines()
+        _READ[path] = (key, [json.loads(line) for line in lines if line.strip()])
+    return [dict(r) for r in _READ[path][1]]
 
 
-def offset() -> float:
-    """card - free in GiB, the median of the emulated rungs run so far (OFFSET before any)."""
-    seen = [r["card_offset"] for r in rungs_of() if r.get("card_offset") is not None]
+def rungs_of(ladder: str | None = None) -> list[dict]:
+    """--history's rungs (marked so, read only), then this study's; of one ladder or all."""
+    found = []
+    if HISTORY is not None:
+        found = [r | {"history": True} for r in _read(HISTORY / "rungs.jsonl")]
+    found += _read(RUNGS)
+    return [r for r in found if ladder is None or r.get("ladder") == ladder]
+
+
+def reference_of(ladder: str) -> dict | None:
+    return next((r for r in rungs_of(ladder) if r.get("card") == "bare" and r.get("ok")), None)
+
+
+def refs_dir(ladder: str, reference: dict | None) -> Path:
+    """Where the ladder's reference output is: --history's for a ladder it began, this study's."""
+    if reference is not None and reference.get("history") and HISTORY is not None:
+        return HISTORY / "refs" / ladder
+    return REFS / ladder
+
+
+def offset(code: str) -> float:
+    """card - free in GiB, the median of the code's last nine emulated rungs, else of every
+    code's, else OFFSET."""
+    every = [r for r in rungs_of() if r.get("card_offset") is not None]
+    seen = [r["card_offset"] for r in every if code_of(r) == code]
+    seen = seen or [r["card_offset"] for r in every]
     return round(statistics.median(seen[-9:]), 4) if seen else OFFSET
 
 
@@ -260,46 +375,97 @@ def foreign() -> list[str]:
     return [line.strip() for line in said.splitlines() if line.strip()]
 
 
+def fits() -> dict:
+    """The planner's untiled fits at 1080p's padded frame, by code, in GiB (fits.json)."""
+    return json.loads(FITS.read_text()) if FITS.exists() else {}
+
+
+def make_fits() -> dict:
+    """planner._fit of 1080p's padded frame untiled, the encode's (column 0) and the decode's (1):
+    a VAE pass's peak above what the GPU holds before it, as each code's planner predicts it,
+    read on the CPU by the code's own python; fits.json."""
+    found: dict = {}
+    script = (
+        "import json; from seedvr2x.runtime import planner; "
+        f"print(json.dumps([planner._fit({PADDED[1080]}, None, column) for column in (0, 1)]))"
+    )
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1")
+    for code, spec in CODES.items():
+        said = subprocess.run(
+            [spec["python"], "-c", script], capture_output=True, text=True, env=env, cwd=DIR
+        )
+        try:
+            encode, decode = json.loads(said.stdout.strip().splitlines()[-1])
+        except (IndexError, ValueError) as error:
+            found[label(code)] = {"error": f"{error!r}: {said.stderr.strip()[-400:]}"}
+            continue
+        found[label(code)] = {"encode": encode / GIB, "decode": decode / GIB}
+    FITS.write_text(json.dumps(found, indent=1) + "\n")
+    return found
+
+
 # ------------------------------------------------------------------ one rung
 
 
-def seed_for(res: int, tile: int) -> Path:
-    """The shape's units (seeds/seed-RES), copied once per decode tile with the manifest's decode
-    tile set to it: settings.decode_tile, the pin a resume must repeat, and plan.decode_tiles,
-    the recorded shape a resume takes."""
-    base = SEEDS / f"seed-{res}"
-    path = SEEDS / f"seed-{res}-d{tile}"
+def seed_base(code: str, res: int) -> Path:
+    """The shape's units: a code's own (seeds/NAME/seed-RES); the base code's, this study's
+    (seeds/seed-RES), else --history's."""
+    if code:
+        return SEEDS / code / f"seed-{res}"
+    own = SEEDS / f"seed-{res}"
+    if (own / "manifest.json").exists() or HISTORY is None:
+        return own
+    theirs = HISTORY / "seeds" / f"seed-{res}"
+    return theirs if (theirs / "manifest.json").exists() else own
+
+
+def seed_for(code: str, res: int, tile: int) -> Path:
+    """The shape's units, copied once per decode tile with the manifest's decode tile set to it:
+    settings.decode_tile, the pin a resume must repeat, and plan.decode_tiles, the recorded shape
+    a resume takes (none: untiled, tile 0)."""
+    base = seed_base(code, res)
+    path = (SEEDS / code if code else SEEDS) / f"seed-{res}-d{tile}"
     if path.exists():
         return path
     if not (base / "manifest.json").exists():
-        raise SystemExit(f"{base}: no seed: run `floor.py seed {res}` first")
-    partial = SEEDS / f"seed-{res}-d{tile}.partial"
+        raise SystemExit(
+            f"{base}: no seed: run `floor.py seed {res}{f' --code {code}' if code else ''}` first"
+        )
+    partial = path.with_name(f"{path.name}.partial")
+    partial.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(partial, ignore_errors=True)
     shutil.copytree(base, partial)
     manifest = partial / "manifest.json"
     content = json.loads(manifest.read_text())
     content["settings"]["decode_tile"] = tile
-    content["plan"]["decode_tiles"] = {"size": tile, "overlap": 64}
+    content["plan"]["decode_tiles"] = None if tile == 0 else {"size": tile, "overlap": 64}
     manifest.write_text(json.dumps(content, indent=2) + "\n")
     partial.rename(path)
     return path
 
 
-def command(name: str, kind: str, res: int, tile: int, card: str) -> list[str]:
+def code_spec(code: str) -> dict:
+    if code not in CODES:
+        raise SystemExit(f"a ladder of the code {code}: no --code {code} given")
+    return CODES[code]
+
+
+def command(name: str, kind: str, res: int, tile: int, code: str, card: str) -> list[str]:
     shape = SHAPES[res]
+    spec = code_spec(code)
     encode = tile if kind == "enc" else shape["encode"]
     decode = tile if kind == "dec" else shape["decode"]
-    ours = ["--name", name, "--records", str(RECORDS), "--work", str(WORK), "--tree", WANT]
+    ours = ["--name", name, "--records", str(RECORDS), "--work", str(WORK), "--tree", spec["want"]]
     ours += ["--vram-cap", str(HERE / "vram_cap.py"), "--card", card, "--room", str(ROOM)]
     ours += ["--dit-unjudged", "--keep"]
     if kind == "dec":
-        ours += ["--seed-dir", str(seed_for(res, tile))]
+        ours += ["--seed-dir", str(seed_for(code, res, tile))]
     else:
         ours += ["--stop-after", "encode"]
     theirs = [str(CLIPS / shape["clip"]), "--resolution", str(res), "--cuts", str(CUTS)]
     theirs += ["--window", str(shape["window"]), "--encode-tile", str(encode)]
     theirs += ["--decode-tile", str(decode), "--swap-blocks", str(SWAPPED), "--model-dir", MODELS]
-    return ["flock", LOCK, PYTHON, str(HERE / "vae_room.py"), "run", *ours, "--", *theirs]
+    return ["flock", LOCK, spec["python"], str(HERE / "vae_room.py"), "run", *ours, "--", *theirs]
 
 
 def environment() -> dict:
@@ -309,11 +475,12 @@ def environment() -> dict:
     return env
 
 
-def tree() -> str:
+def tree(code: str) -> str:
     sys.path.insert(0, str(HERE))
     import vae_room
 
-    return vae_room.tree_of(COPY, DIR / "tree-check")
+    scratch = DIR / ("tree-check" + (f"-{code}" if code else ""))
+    return vae_room.tree_of(code_spec(code)["copy"], scratch)
 
 
 def crcs(out: Path) -> list[str]:
@@ -383,9 +550,15 @@ def latents_compared(ours, theirs) -> dict:
     }
 
 
+def one_stream(res: int) -> int:
+    """A pass's slices in one stream of the shape's frames: the first holds five frames, the
+    others four (53 frames: 13; 17: 4). A tiled pass runs that many a tile."""
+    return 1 + math.ceil((SHAPES[res]["frames"] - 5) / 4)
+
+
 def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
     """One rung: run, read its record, compare it with the ladder's reference, record it."""
-    kind, res, tile = parse(ladder)
+    kind, res, tile, code = parse(ladder)
     phase = "decode" if kind == "dec" else "encode"
     for directory in (RECORDS, WORK, REFS, SEEDS):
         directory.mkdir(parents=True, exist_ok=True)
@@ -395,7 +568,7 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
     out = WORK / name
     shutil.rmtree(out, ignore_errors=True)
     held = foreign()
-    argv = command(name, kind, res, tile, card)
+    argv = command(name, kind, res, tile, code, card)
     log = RECORDS / f"{name}.log"
     began, started = now(), time.monotonic()
     with log.open("w") as file:
@@ -414,6 +587,8 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
         "res": res,
         "tile": tile,
         "tile_shape": tile_shape(res, tile),
+        "code": label(code),
+        "want": code_spec(code)["want"],
         "card": card,
         "target": target,
         "began": began,
@@ -444,8 +619,8 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
         found["free"] = None if free is None else free / GIB
         found["plan"] = {
             "window": plan.get("window"),
-            "encode_tiles": plan.get("encode_tiles"),
-            "decode_tiles": plan.get("decode_tiles"),
+            "encode_tiles": plan.get("encode_tiles", "absent"),
+            "decode_tiles": plan.get("decode_tiles", "absent"),
             "swapped": memory.get("swapped_blocks"),
             "resident_encode": memory.get("resident_encode"),
             "resident_decode": memory.get("resident_decode"),
@@ -465,6 +640,12 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
             found["card_free_least"] = unit.get("card_free_least", 0) / GIB
             found["counters"] = [unit.get("counters_before"), unit.get("counters_after")]
             found["unit_failed"] = unit.get("failed")
+            entered = (unit.get("entered") or {}).get("allocated")
+            if entered is not None and unit.get("peak_allocated") is not None:
+                # The pass's own peak: above what the GPU held once its phase was entered, the
+                # models placed, as planner._fit predicts a pass.
+                found["pass_peak"] = (unit["peak_allocated"] - entered) / GIB
+                found["entered_allocated"] = entered / GIB
         if record.get("oom"):
             oom = record["oom"]
             found["oom"] = {
@@ -476,12 +657,30 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
             }
         if card != "bare" and free is not None:
             found["card_offset"] = float(card) - free / GIB
+        if tile == 0:
+            # Whether the untiled pass is what ran: the run's own plan has no tiles for the
+            # pass, and the pass ran one stream's slices (a tiled pass runs as many a tile).
+            tiles = plan.get(f"{phase}_tiles", "absent")
+            fit = fits().get(label(code), {}).get(phase)
+            peak = found.get("pass_peak")
+            found["untiled"] = {
+                "plan_tiles": tiles,
+                "slices": found.get("slices"),
+                "one_stream": one_stream(res),
+                "ran_untiled": tiles is None and found.get("slices") == one_stream(res),
+                "fit": fit,
+                "pass_peak": peak,
+                "over_fit": None if fit is None or peak is None else peak - fit,
+                "predicted": found["plan"][f"{phase}_peak_predicted"],
+                "peak": found.get("peak"),
+            }
     numbered = None if unit is None else unit.get("number")
     found |= {"detector": counted(log, numbered)}
     if found.get("free") is not None and "peak" in found:
         found["room"] = found["free"] - found["peak"]
     # The outcome, against the ladder's reference.
-    reference = next((r for r in rungs_of(ladder) if r["card"] == "bare" and r.get("ok")), None)
+    reference = reference_of(ladder)
+    theirs_dir = refs_dir(ladder, reference)
     expected = 0 if kind == "dec" else 130
     ran = record is not None and status == expected and unit is not None and not unit.get("failed")
     refused = record is not None and record.get("oom") is not None
@@ -504,6 +703,8 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
         # The reference's peak: this rung's own may be missing (refused before its pass).
         found["room_usual"] = found["free"] - reference["peak"]
     if reference is not None:
+        found["reference"] = reference["name"]
+        found["reference_dir"] = str(theirs_dir)
         found["reference_seconds"] = reference.get("pass_seconds")
         found["reference_plans"] = reference["detector"]["plans"]
         found["reference_peak"] = reference.get("peak")
@@ -519,20 +720,23 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
                 shutil.copy2(path, keep / path.name)
             shutil.copytree(out / "checksums", keep / "checksums")
         elif reference is not None:
-            theirs = crcs(REFS / ladder)
+            theirs = crcs(theirs_dir)
             differ = [
                 i for i, pair in enumerate(zip(mine, theirs, strict=False)) if pair[0] != pair[1]
             ]
             differ += list(range(min(len(mine), len(theirs)), max(len(mine), len(theirs))))
             found["differ"] = differ
             found["outcome"] = "moved" if differ else "kept"
-            if differ:
+            if not theirs:
+                found["outcome"] = "failed"
+                found["why"] = f"no reference checksums in {theirs_dir}"
+            if differ and theirs:
                 found["first_differing"] = differ[0]
                 values: list[float] = []
                 try:
                     for path in sorted(out.glob("seg_*.mkv")):
                         stats = WORK / f"{name}.{path.stem}.psnr"
-                        values += psnr_y(path, REFS / ladder / path.name, stats)
+                        values += psnr_y(path, theirs_dir / path.name, stats)
                         stats.unlink(missing_ok=True)
                     found["worst_psnr_y"] = min(values[i] for i in differ if i < len(values))
                 except (OSError, ValueError, subprocess.CalledProcessError) as error:
@@ -553,9 +757,7 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
             elif reference is not None:
                 import torch
 
-                theirs = torch.load(
-                    REFS / ladder / "latent.pt", map_location="cpu", weights_only=True
-                )
+                theirs = torch.load(theirs_dir / "latent.pt", map_location="cpu", weights_only=True)
                 compared = latents_compared(latent, theirs)
                 found["latent"] = compared
                 found["frames"] = compared.get("latents")
@@ -577,14 +779,22 @@ def progress(r: dict) -> None:
     frames = "-" if differ is None else f"{len(differ)}/{r.get('frames')}"
     psnr = r.get("worst_psnr_y") or (r.get("latent") or {}).get("worst_psnr")
     detector = r.get("detector") or {}
+    untiled = r.get("untiled")
+    extra = ""
+    if untiled is not None:
+        extra = (
+            f" | untiled ran {untiled['ran_untiled']} (plan tiles {untiled['plan_tiles']}, slices"
+            f" {untiled['slices']}/{untiled['one_stream']}) pass peak {gib(untiled['pass_peak'])}"
+            f" fit {gib(untiled['fit'])} (over {gib(untiled['over_fit'])})"
+        )
     line = (
-        f"{r['ended']} | {r['ladder']} ({r['tile_shape']}) | {r['name']} | card {r['card']} |"
-        f" free {gib(r.get('free'))} peak {gib(r.get('peak'))} room {gib(r.get('room'))}"
-        f" (usual {gib(r.get('room_usual'))}) | differ {frames}"
+        f"{r['ended']} | {r['ladder']} ({r['tile_shape']}, {r.get('code')}) | {r['name']} |"
+        f" card {r['card']} | free {gib(r.get('free'))} peak {gib(r.get('peak'))} room"
+        f" {gib(r.get('room'))} (usual {gib(r.get('room_usual'))}) | differ {frames}"
         f" psnr {'-' if psnr is None else f'{psnr:.2f}'} | plans {detector.get('plans')}"
         f" (ref {r.get('reference_plans', '-')}) recovered {detector.get('recovered')} counters"
         f" {(r.get('counters') or [None, None])[1]} | pass {r.get('pass_seconds')} s"
-        f" (ref {r.get('reference_seconds', '-')}) | exit {r['exit']} | {r.get('outcome')}"
+        f" (ref {r.get('reference_seconds', '-')}) | exit {r['exit']} | {r.get('outcome')}{extra}"
     )
     with PROGRESS.open("a") as file:
         file.write(line + "\n")
@@ -628,7 +838,7 @@ def next_rung(ladder: str) -> tuple[str, float | None, str] | None:
     rungs = rungs_of(ladder)
     if any(r.get("outcome") == "failed" for r in rungs):
         return None
-    reference = next((r for r in rungs if r["card"] == "bare" and r.get("ok")), None)
+    reference = reference_of(ladder)
     if reference is None:
         if any(r["card"] == "bare" for r in rungs):
             return None  # its reference failed
@@ -637,9 +847,10 @@ def next_rung(ladder: str) -> tuple[str, float | None, str] | None:
         return None
     kept, lost, every = bracket(rungs)
     peak = reference["peak"]
+    code = parse(ladder)[3]
 
     def card_for(target: float) -> str:
-        return f"{peak + target + offset():.3f}"
+        return f"{peak + target + offset(code):.3f}"
 
     if not every:
         start = start_for(ladder)
@@ -668,11 +879,15 @@ def next_rung(ladder: str) -> tuple[str, float | None, str] | None:
 
 
 def start_for(ladder: str) -> float:
-    """Where a ladder starts: START, or near the floors found already for its kind."""
-    kind, _, _ = parse(ladder)
+    """Where a ladder starts: START, or near the floors found already for its kind on its code."""
+    kind, _, _, code = parse(ladder)
     floors = []
-    for other in LADDERS:
-        if other == ladder or not other.startswith(kind):
+    known = [r["ladder"] for r in rungs_of() if r.get("ladder")]
+    for other in dict.fromkeys([*known, *LADDERS, *TAIL]):
+        if other == ladder or not LADDER.fullmatch(other):
+            continue
+        other_kind, _, _, other_code = parse(other)
+        if other_kind != kind or other_code != code:
             continue
         kept, lost, _ = bracket(rungs_of(other))
         if kept is not None and lost is not None:
@@ -715,15 +930,43 @@ def stop_asked() -> str | None:
 
 
 def queue(args: argparse.Namespace) -> int:
-    say(f"queue started; ladders {LADDERS}")
+    order = args.ladders.split(",") if args.ladders else ORDERS[args.order]
+    for ladder in order:
+        code_spec(parse(ladder)[3])  # every ladder's code given, before any rung
+    say(f"queue started; ladders {order}")
+    while args.wait_for is not None and not args.wait_for.exists():
+        if SKIP.exists():
+            DONE.write_text(f"{now()} {SKIP.name} exists, before {args.wait_for}\n")
+            return 0
+        time.sleep(30)
+    for directory in (RECORDS, WORK, REFS, SEEDS):
+        directory.mkdir(parents=True, exist_ok=True)
+    if any(parse(ladder)[2] == 0 for ladder in order):
+        say(f"the planner's untiled fits at 1080p, GiB: {json.dumps(make_fits())}")
+    barred: dict[str, str] = {}  # a code found other than its tree -> why
+    unseeded: dict[tuple[str, int], str] = {}  # a code's units that couldn't be made -> why
     ended = "every ladder done"
-    for ladder in LADDERS:
-        kind, res, tile = parse(ladder)
-        if not (SEEDS / f"seed-{res}" / "manifest.json").exists() and kind == "dec":
-            say(f"{ladder}: no seed for {res}: skipped")
+    for ladder in order:
+        kind, res, tile, code = parse(ladder)
+        if code in barred:
+            say(f"{ladder}: skipped, the {label(code)} code barred ({barred[code]})")
             continue
+        if kind == "dec" and not (seed_base(code, res) / "manifest.json").exists():
+            if code and (code, res) not in unseeded:
+                # A code's units, made when a ladder first needs them; tried once a queue's run.
+                try:
+                    seed_of(res, code)
+                except (Exception, SystemExit) as error:  # said, and the queue goes on
+                    unseeded[(code, res)] = repr(error)
+                    say(f"seed-{res} of the {code} code FAILED: {error!r}")
+            if not (seed_base(code, res) / "manifest.json").exists():
+                say(f"{ladder}: no seed for {res} on the {label(code)} code: skipped")
+                continue
         free_disk = shutil.disk_usage(DIR).free / 1e9
-        say(f"{ladder}: begins ({tile_shape(res, tile)}); {free_disk:.0f} GB free on the disk")
+        say(
+            f"{ladder}: begins ({tile_shape(res, tile)}, the {label(code)} code);"
+            f" {free_disk:.0f} GB free on the disk"
+        )
         if free_disk < 30:
             ended = f"the disk has {free_disk:.0f} GB free"
             break
@@ -732,9 +975,13 @@ def queue(args: argparse.Namespace) -> int:
             if why is not None:
                 ended = why
                 break
-            found = tree()
-            if found != WANT:
-                ended = f"WRONG TREE {found} in {COPY}, wanted {WANT}"
+            found = tree(code)
+            if found != code_spec(code)["want"]:
+                barred[code] = f"WRONG TREE {found} in {code_spec(code)['copy']}"
+                say(
+                    f"{ladder}: {barred[code]}, wanted {code_spec(code)['want']}: the"
+                    f" {label(code)} code's ladders barred"
+                )
                 break
             step = next_rung(ladder)
             if step is None:
@@ -744,18 +991,23 @@ def queue(args: argparse.Namespace) -> int:
             say(f"{name}: {reason}; card {card}" + ("" if target is None else f", target {target}"))
             try:
                 run_rung(ladder, card, target, name)
-            except Exception as error:  # the queue goes on to the next ladder
+            except (Exception, SystemExit) as error:  # the queue goes on to the next ladder
                 say(f"{name}: THE DRIVER FAILED: {error!r}")
                 failed = {"name": name, "ladder": ladder, "card": card, "outcome": "failed"}
                 with RUNGS.open("a") as file:
-                    file.write(json.dumps(failed | {"why": repr(error)}) + "\n")
+                    file.write(json.dumps(failed | {"why": repr(error), "ended": now()}) + "\n")
                 break
         if ended != "every ladder done":
             break
+        if code in barred:
+            continue
         # The ladder's own seed copy goes once it is done.
         if kind == "dec":
-            shutil.rmtree(SEEDS / f"seed-{res}-d{tile}", ignore_errors=True)
+            copy = (SEEDS / code if code else SEEDS) / f"seed-{res}-d{tile}"
+            shutil.rmtree(copy, ignore_errors=True)
         say(f"{ladder}: done")
+    if barred:
+        ended += f"; barred: {barred}"
     DONE.write_text(f"{now()} {ended}\n")
     say(f"queue ended: {ended}")
     return 0
@@ -764,23 +1016,29 @@ def queue(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------ seeds, a rung by hand
 
 
-def seed(args: argparse.Namespace) -> int:
-    res = args.res
+def seed_of(res: int, code: str = "") -> Path:
+    """The shape's units on the code, on the bare card (the room as shipped), stopped before the
+    decode (--stop-after windows): seeds/seed-RES, a code's seeds/NAME/seed-RES."""
     shape = SHAPES[res]
-    name = f"seed-{res}"
-    for directory in (RECORDS, WORK, SEEDS):
+    spec = code_spec(code)
+    name = f"seed-{res}" + (f"-{code}" if code else "")
+    path = (SEEDS / code if code else SEEDS) / f"seed-{res}"
+    for directory in (RECORDS, WORK, path.parent):
         directory.mkdir(parents=True, exist_ok=True)
     CUTS.touch()
-    if (SEEDS / name / "manifest.json").exists():
-        say(f"{name}: there already")
-        return 0
-    ours = ["--name", name, "--records", str(RECORDS), "--work", str(WORK), "--tree", WANT]
+    if (path / "manifest.json").exists():
+        say(f"{path}: there already")
+        return path
+    found = tree(code)
+    if found != spec["want"]:
+        raise SystemExit(f"WRONG TREE {found} in {spec['copy']}, wanted {spec['want']}")
+    ours = ["--name", name, "--records", str(RECORDS), "--work", str(WORK), "--tree", spec["want"]]
     ours += ["--card", "bare", "--room", "1.5", "--stop-after", "windows", "--keep"]
     theirs = [str(CLIPS / shape["clip"]), "--resolution", str(res), "--cuts", str(CUTS)]
     theirs += ["--window", str(shape["window"]), "--encode-tile", str(shape["encode"])]
     theirs += ["--decode-tile", str(shape["decode"]), "--swap-blocks", str(SWAPPED)]
     theirs += ["--model-dir", MODELS]
-    argv = ["flock", LOCK, PYTHON, str(HERE / "vae_room.py"), "run", *ours, "--", *theirs]
+    argv = ["flock", LOCK, spec["python"], str(HERE / "vae_room.py"), "run", *ours, "--", *theirs]
     log = RECORDS / f"{name}.log"
     with log.open("w") as file:
         file.write(f"# {now()} {' '.join(argv)}\n")
@@ -788,28 +1046,34 @@ def seed(args: argparse.Namespace) -> int:
         status = subprocess.run(
             argv, stdout=file, stderr=subprocess.STDOUT, env=environment()
         ).returncode
-    content = json.loads((WORK / name / "manifest.json").read_text())
-    shots = content["shots"]
+    manifest = WORK / name / "manifest.json"
+    if not manifest.exists():
+        raise SystemExit(f"{name}: exit {status}, no manifest in {WORK / name}")
+    shots = json.loads(manifest.read_text())["shots"]
     say(f"{name}: exit {status}; shots {[(s['encoded'], s['windows_done']) for s in shots]}")
     if status != 130 or not all(s["windows_done"] == len(s["windows"]) for s in shots):
         raise SystemExit(f"{name}: not stopped before its decode with its windows done")
-    shutil.rmtree(SEEDS / name, ignore_errors=True)
-    shutil.move(str(WORK / name), str(SEEDS / name))
-    say(f"{name}: kept in {SEEDS / name}")
+    shutil.rmtree(path, ignore_errors=True)
+    shutil.move(str(WORK / name), str(path))
+    say(f"{name}: kept in {path}")
+    return path
+
+
+def seed(args: argparse.Namespace) -> int:
+    seed_of(args.res, args.seed_code or "")
     return 0
 
 
 def rung(args: argparse.Namespace) -> int:
+    code = parse(args.ladder)[3]
     if args.card is not None:
         card, target = args.card, None
     else:
-        reference = next(
-            (r for r in rungs_of(args.ladder) if r["card"] == "bare" and r.get("ok")), None
-        )
+        reference = reference_of(args.ladder)
         if reference is None:
             raise SystemExit(f"{args.ladder}: no reference rung yet (--card bare first)")
         target = args.room
-        card = f"{reference['peak'] + target + offset():.3f}"
+        card = f"{reference['peak'] + target + offset(code):.3f}"
     run_rung(args.ladder, card, target, name_for(args.ladder, card))
     return 0
 
@@ -818,13 +1082,14 @@ def rung(args: argparse.Namespace) -> int:
 
 
 def log_of(r: dict) -> Path:
-    """A rung's log in the study's directory (its record names where it was written)."""
-    return RECORDS / f"{r['name']}.log"
+    """A rung's log, in --history's records for one of its rungs, else in the study's."""
+    place = HISTORY if r.get("history") and HISTORY is not None else DIR
+    return place / "records" / f"{r['name']}.log"
 
 
 def unit_of(r: dict) -> int | None:
     """The number of the rung's pass in its run (vae_room's record), None if it has none."""
-    path = RECORDS / f"{r['name']}.json"
+    path = log_of(r).with_suffix(".json")
     if not path.exists():
         return None
     phase = "decode" if r.get("kind") == "dec" else "encode"
@@ -851,67 +1116,125 @@ def line_fit(points: list[tuple[float, float]]) -> tuple[float, float, float] | 
     return a, b, max(abs(a + b * x - y) for x, y in points)
 
 
+def ladders_shown() -> list[str]:
+    """The ladders this study ran a rung of, in the order it first did."""
+    return list(dict.fromkeys(r["ladder"] for r in _read(RUNGS) if r.get("ladder")))
+
+
+def bracket_said(group: dict | None, rungs: list[dict]) -> str:
+    if group is None:
+        return "-"
+    runs = [r for r in rungs if r.get("card") == group["card"]]
+    parts = [
+        f"{r['name'].rsplit('-', 1)[-1]}{' (history)' if r.get('history') else ''}:"
+        f" {r.get('outcome')}"
+        for r in runs
+    ]
+    return f"{group['room']:.3f} ({len(runs)}: {', '.join(parts)})"
+
+
 def table(args: argparse.Namespace) -> int:
-    every = rungs_of()
-    ladders = list(dict.fromkeys(r["ladder"] for r in every))
+    ladders = ladders_shown()
+    shown = set(ladders)
+    every = [r for r in rungs_of() if r.get("ladder") in shown]
     print(
-        "| ladder | tile | ref peak GiB | ref pass s | ref plans | least room kept (runs) |"
-        " most room lost (runs) | done |\n|---|---|---|---|---|---|---|---|"
+        "| ladder | code | tile | ref peak GiB | ref pass s | ref plans | least room kept (runs) |"
+        " most room lost (runs) | done |\n|---|---|---|---|---|---|---|---|---|"
     )
     floors = []
     for ladder in ladders:
         rungs = rungs_of(ladder)
-        reference = next((r for r in rungs if r["card"] == "bare" and r.get("ok")), None)
+        reference = reference_of(ladder)
         kept, lost, _ = bracket(rungs)
-
-        def said(group: dict | None, rungs: list[dict] = rungs) -> str:
-            if group is None:
-                return "-"
-            runs = [r for r in rungs if r.get("card") == group["card"]]
-            parts = [f"{r['name'].rsplit('-', 1)[-1]}: {r.get('outcome')}" for r in runs]
-            return f"{group['room']:.3f} ({len(runs)}: {', '.join(parts)})"
-
         done = next_rung(ladder) is None
         print(
-            f"| {ladder} | {rungs[0].get('tile_shape', '-') if rungs else '-'}"
+            f"| {ladder} | {label(parse(ladder)[3])}"
+            f" | {rungs[0].get('tile_shape', '-') if rungs else '-'}"
             f" | {gib(None if reference is None else reference.get('peak'))}"
             f" | {'-' if reference is None else reference.get('pass_seconds')}"
             f" | {'-' if reference is None else reference['detector']['plans']}"
-            f" | {said(kept)} | {said(lost)} | {'yes' if done else 'no'} |"
+            f" | {bracket_said(kept, rungs)} | {bracket_said(lost, rungs)}"
+            f" | {'yes' if done else 'no'} |"
         )
         if reference is not None and kept is not None:
-            rows, columns = (int(x) for x in rungs[0]["tile_shape"].split("x"))
             space = largest_workspace(reference)
             floors.append(
                 {
                     "ladder": ladder,
-                    "area": rows * columns / 1e6,
+                    "group": f"{ladder[:7]}{'-' + parse(ladder)[3] if parse(ladder)[3] else ''}",
+                    "area": tile_area(reference["tile_shape"]),
                     "workspace": None if space is None else space / GIB,
                     "kept": kept["room"],
                     "lost": None if lost is None else lost["room"],
                     "lost_how": None if lost is None else "/".join(sorted(set(lost["outcomes"]))),
+                    "peak": reference.get("peak"),
                 }
             )
-    reached = set(ladders)
-    print(f"\nNot reached: {', '.join(x for x in LADDERS if x not in reached) or 'none'}")
-    print(
-        "\n| rung | card | free | peak | room | room usual | outcome | frames differing | worst"
-        " PSNR | plans (ref) | recovered | pass s (ref) | exit |"
-        "\n|---|---|---|---|---|---|---|---|---|---|---|---|---|"
-    )
-    for r in every:
-        differ = r.get("differ")
-        psnr = r.get("worst_psnr_y") or (r.get("latent") or {}).get("worst_psnr")
-        detector = r.get("detector") or {}
+    beside(ladders)
+    untiled = [r for r in every if r.get("untiled") and not r.get("history")]
+    if untiled:
         print(
-            f"| {r.get('name')} | {r.get('card')} | {gib(r.get('free'))} | {gib(r.get('peak'))}"
-            f" | {gib(r.get('room'))} | {gib(r.get('room_usual'))} | {r.get('outcome')}"
-            f" | {'-' if differ is None else str(len(differ)) + ' of ' + str(r.get('frames'))}"
-            f" | {'-' if psnr is None else f'{psnr:.2f}'}"
-            f" | {detector.get('plans')} ({r.get('reference_plans', '-')})"
-            f" | {detector.get('recovered')}"
-            f" | {r.get('pass_seconds')} ({r.get('reference_seconds', '-')}) | {r.get('exit')} |"
+            "\nThe untiled passes: the plan's tiles for the pass, its slices (one stream's), the"
+            " pass's peak above what the GPU held once its phase was entered against the"
+            " planner's untiled fit, and the phase's peak against the plan's prediction (GiB):"
+            "\n\n| rung | outcome | plan's tiles | slices (one stream) | ran untiled | peak |"
+            " predicted (plan) | pass peak | fit | over the fit |"
+            "\n|---|---|---|---|---|---|---|---|---|---|"
         )
+        for r in untiled:
+            u = r["untiled"]
+            print(
+                f"| {r['name']} | {r.get('outcome')} | {u['plan_tiles']}"
+                f" | {u['slices']} ({u['one_stream']}) | {u['ran_untiled']} | {gib(u['peak'])}"
+                f" | {gib(u['predicted'])} | {gib(u['pass_peak'])} | {gib(u['fit'])}"
+                f" | {gib(u['over_fit'])} |"
+            )
+    order = ORDERS[args.order] if args.order else []
+    reached = set(ladders)
+    if order:
+        print(f"\nNot reached: {', '.join(x for x in order if x not in reached) or 'none'}")
+    if args.compact:
+        print(
+            "\nEach ladder's rungs (the reference's peak, then each rung's room usual and"
+            " outcome, with the frames that differ and the plans built over the reference's):"
+            "\n\n| ladder | rungs |\n|---|---|"
+        )
+        for ladder in ladders:
+            parts = []
+            for r in rungs_of(ladder):
+                if r.get("card") == "bare":
+                    parts.append(f"ref {gib(r.get('peak'))}")
+                    continue
+                said = f"{gib(r.get('room_usual'), 2)} {r.get('outcome')}"
+                if r.get("differ"):
+                    said += f" {len(r['differ'])}/{r.get('frames')}"
+                plans = (r.get("detector") or {}).get("plans")
+                if plans is not None and r.get("reference_plans") is not None:
+                    said += f" ({plans - r['reference_plans']:+d})"
+                parts.append(said + (" (history)" if r.get("history") else ""))
+            print(f"| {ladder} | {'; '.join(parts)} |")
+    else:
+        print(
+            "\n| rung | code | card | free | peak | room | room usual | outcome | frames differing"
+            " | worst PSNR | plans (ref) | recovered | pass s (ref) | exit |"
+            "\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+        )
+        for r in every:
+            differ = r.get("differ")
+            psnr = r.get("worst_psnr_y") or (r.get("latent") or {}).get("worst_psnr")
+            detector = r.get("detector") or {}
+            print(
+                f"| {r.get('name')}{' (history)' if r.get('history') else ''}"
+                f" | {label(code_of(r))} | {r.get('card')}"
+                f" | {gib(r.get('free'))} | {gib(r.get('peak'))}"
+                f" | {gib(r.get('room'))} | {gib(r.get('room_usual'))} | {r.get('outcome')}"
+                f" | {'-' if differ is None else str(len(differ)) + ' of ' + str(r.get('frames'))}"
+                f" | {'-' if psnr is None else f'{psnr:.2f}'}"
+                f" | {detector.get('plans')} ({r.get('reference_plans', '-')})"
+                f" | {detector.get('recovered')}"
+                f" | {r.get('pass_seconds')} ({r.get('reference_seconds', '-')})"
+                f" | {r.get('exit')} |"
+            )
     print(
         "\nThe floor against the tile (ladders with a room kept: the least kept, the most lost):"
         "\n\n| ladder | tile area Mpx | reference's largest workspace GiB | least kept |"
@@ -923,11 +1246,20 @@ def table(args: argparse.Namespace) -> int:
             f"| {f['ladder']} | {f['area']:.3f} | {gib(f['workspace'])} | {f['kept']:.3f}"
             f" | {lost} |"
         )
-    # A line through the bracketed ladders' least room kept, by kind, then by kind and
-    # resolution, against the tile's area (Mpx) and its plans' largest workspace (GiB), with its
+    # A line through the bracketed ladders' least room kept, by kind, then by kind and resolution,
+    # each by code, against the tile's area (Mpx) and its plans' largest workspace (GiB), with its
     # worst miss; and the step that bounds them, the most room any of them needed.
-    for kind in ("dec", "dec1080", "dec2160", "enc", "enc1080", "enc2160"):
-        mine = [f for f in floors if f["ladder"].startswith(kind) and f["lost"] is not None]
+    names = sorted({f["group"] for f in floors})
+    kinds = []
+    for whole in sorted({f"{name[:3]}{name[7:]}" for name in names}):
+        kinds += [whole, *(name for name in names if f"{name[:3]}{name[7:]}" == whole)]
+    for kind in kinds:
+        mine = [
+            f
+            for f in floors
+            if f["lost"] is not None
+            and (f["group"] == kind or f"{f['group'][:3]}{f['group'][7:]}" == kind)
+        ]
         if mine:
             most = max(mine, key=lambda f: f["kept"])
             print(
@@ -948,6 +1280,52 @@ def table(args: argparse.Namespace) -> int:
     return 0
 
 
+def beside(ladders: list[str]) -> None:
+    """Each tile run on a code beside the same tile on the base code (this study's or
+    --history's): the reference's peak, the least room kept and the most lost, and the free
+    memory each asks (the peak and the room kept), GiB."""
+    rows = []
+    for ladder in ladders:
+        code = parse(ladder)[3]
+        if not code:
+            continue
+        base = ladder.removesuffix(f"-{code}")
+        found = []
+        for name in (ladder, base):
+            reference = reference_of(name)
+            kept, lost, _ = bracket(rungs_of(name))
+            found.append((reference, kept, lost))
+        if found[1][0] is None:
+            continue
+        rows.append((ladder, base, found))
+    if not rows:
+        return
+    print(
+        "\nA tile on two codes (the reference's peak; least room kept / most lost, how; the free"
+        " memory it asks, the peak and the room kept), GiB:\n\n| tile | code | ref peak | least"
+        " kept / most lost | free asked | code | ref peak | least kept / most lost | free asked |"
+        "\n|---|---|---|---|---|---|---|---|---|"
+    )
+    for ladder, base, found in rows:
+        cells = []
+        for name, (reference, kept, lost) in zip((ladder, base), found, strict=True):
+            how = "-" if lost is None else "/".join(sorted(set(lost["outcomes"])))
+            asked = None if reference is None or kept is None else reference["peak"] + kept["room"]
+            bracketed = (
+                "-"
+                if kept is None or lost is None
+                else f"{kept['room']:.3f} / {lost['room']:.3f} ({how})"
+            )
+            cells += [
+                label(parse(name)[3]),
+                gib(None if reference is None else reference.get("peak")),
+                bracketed,
+                gib(asked),
+            ]
+        shape = found[1][0]["tile_shape"]
+        print(f"| {base} ({shape}) | {' | '.join(cells)} |")
+
+
 REFUSALS = ("num_ooms", "num_alloc_retries", "num_oom_rejections")  # torch's, per allocator
 
 
@@ -955,27 +1333,36 @@ def detector(args: argparse.Namespace) -> int:
     """Each rung's signals that don't depend on the clock, against its reference rung's, and which
     separate the rungs whose frames moved from those that kept them: torch's count of refused
     allocations across the pass (memory_stats), the cuDNN frontend's plans built in the pass (its
-    log, not torch's), torch's "recovered from an allocation failure" lines. The pass's time is
-    no signal here: on a power-capped card it drifts from run to run (benchmarking.md)."""
+    log, not torch's), torch's "recovered from an allocation failure" lines; over this study's
+    rungs (--history's only as references), and by code. The pass's time is no signal here: on a
+    power-capped card it drifts from run to run (benchmarking.md)."""
     every = rungs_of()
-    refs = {r["ladder"]: r for r in every if r.get("card") == "bare" and r.get("ok")}
+    # Each ladder's reference as run_rung and table take it (reference_of: its first bare rung
+    # that ran, --history's before this study's), so that a rung is judged on the one it was
+    # compared with.
+    refs = {
+        ladder: reference_of(ladder) for ladder in {r["ladder"] for r in every if r.get("ladder")}
+    }
     slices: dict[str, dict] = {}
 
     def sliced(r: dict) -> dict:
-        if r["name"] not in slices:
-            slices[r["name"]] = by_slice(log_of(r), unit_of(r))
-        return slices[r["name"]]
+        key = f"{'history:' if r.get('history') else ''}{r['name']}"
+        if key not in slices:
+            slices[key] = by_slice(log_of(r), unit_of(r))
+        return slices[key]
 
     print(
         "| rung | outcome | room usual | frames differing | torch's refused allocations (counters"
         " moved) | cuDNN's plans built - the reference's | where the extra plans were built |"
         " torch's recovered lines |\n|---|---|---|---|---|---|---|---|"
     )
-    signals: dict[str, list[tuple[str, int | None, float | None, int]]] = {}
+    signals: dict[str, list[tuple[str, int | None, float | None, int, str]]] = {}
     refused = []
     for r in every:
         ref = refs.get(r.get("ladder"))
-        if ref is None or r is ref or r.get("outcome") not in ("kept", "moved", "refused"):
+        if r.get("history") or ref is None or r.get("card") == "bare":
+            continue
+        if r.get("outcome") not in ("kept", "moved", "refused"):
             continue
         plans = (r.get("detector") or {}).get("plans")
         extra = None if plans is None else plans - ref["detector"]["plans"]
@@ -1025,6 +1412,7 @@ def detector(args: argparse.Namespace) -> int:
                 counted_refusals,
                 None if extra is None else float(extra),
                 recovered or 0,
+                label(code_of(r)),
             )
         )
     print(
@@ -1041,15 +1429,30 @@ def detector(args: argparse.Namespace) -> int:
             f" | {'-' if held is None or pool is None else f'{held / GIB:.2f} / {pool / GIB:.2f}'}"
             f" | {moved or 'none'} | {extra} | {'; '.join(places) or 'none'} |"
         )
-    print("\nWhat separates the moved rungs from the kept ones (a higher figure saying moved):\n")
-    kept, moved_rungs = signals.get("kept", []), signals.get("moved", [])
+    codes = sorted({x[4] for found in signals.values() for x in found})
+    for code in [None, *codes] if len(codes) > 1 else [None]:
+        kept = [x for x in signals.get("kept", []) if code is None or x[4] == code]
+        moved_rungs = [x for x in signals.get("moved", []) if code is None or x[4] == code]
+        print(
+            "\nWhat separates the moved rungs from the kept ones (a higher figure saying moved)"
+            f"{'' if code is None else f', the {code} code alone'}:\n"
+        )
+        separated(kept, moved_rungs)
+    print(
+        "- the pass's time: not a signal here (its seconds are in every rung's record, for"
+        " information): a power-capped card's speed drifts from run to run"
+    )
+    return 0
+
+
+def separated(kept: list[tuple], moved: list[tuple]) -> None:
     for index, name in (
         (1, f"torch's count of refused allocations across the pass ({' + '.join(REFUSALS)})"),
         (2, "the cuDNN frontend's plans built in the pass over the reference's (cuDNN's log)"),
         (3, 'torch\'s "recovered from an allocation failure" lines in the pass'),
     ):
         a = [x[index] for x in kept if x[index] is not None]
-        b = [x[index] for x in moved_rungs if x[index] is not None]
+        b = [x[index] for x in moved if x[index] is not None]
         if not a or not b:
             print(f"- {name}: kept {sorted(a)}, moved {sorted(b)}: not both seen")
             continue
@@ -1070,11 +1473,6 @@ def detector(args: argparse.Namespace) -> int:
                 f" positives, {false_positives} false; {len(a) - false_positives} true"
                 f" negatives, {false_negatives} false"
             )
-    print(
-        "- the pass's time: not a signal here (its seconds are in every rung's record, for"
-        " information): a power-capped card's speed drifts from run to run"
-    )
-    return 0
 
 
 def main() -> int:
@@ -1083,18 +1481,32 @@ def main() -> int:
     parser.add_argument("--python", help="seedvr2x's environment's python, for vae_room.py")
     parser.add_argument("--copy", help="the frozen copy of seedvr2x under study")
     parser.add_argument("--want", help="its tree (git's), checked before every rung")
+    parser.add_argument(
+        "--code",
+        nargs=4,
+        action="append",
+        metavar=("NAME", "PYTHON", "COPY", "TREE"),
+        help="another code under study, run by the ladders named with -NAME",
+    )
+    parser.add_argument("--history", type=Path, help="an earlier study's directory, read only")
     parser.add_argument("--models", help="seedvr2x's --model-dir")
     parser.add_argument("--clips", help="the directory of planner_matrix.py's clip-N.mkv")
     parser.add_argument("--lock", help="the GPU's lock file (flock)")
     commands = parser.add_subparsers(dest="command", required=True)
     seeding = commands.add_parser("seed")
     seeding.add_argument("res", type=int, choices=sorted(SHAPES))
+    seeding.add_argument("--code", dest="seed_code", help="the code's units (a --code's NAME)")
     one = commands.add_parser("rung")
     one.add_argument("ladder")
     one.add_argument("--card")
     one.add_argument("--room", type=float)
-    commands.add_parser("queue")
-    commands.add_parser("table")
+    queued = commands.add_parser("queue")
+    queued.add_argument("--order", choices=sorted(ORDERS), default="b1")
+    queued.add_argument("--ladders", help="the ladders, comma-separated, in place of --order's")
+    queued.add_argument("--wait-for", type=Path, help="no rung before this file exists")
+    tabled = commands.add_parser("table")
+    tabled.add_argument("--order", choices=sorted(ORDERS), help="say its ladders not reached")
+    tabled.add_argument("--compact", action="store_true", help="each ladder's rungs on one line")
     commands.add_parser("detector")
     args = parser.parse_args()
     configure(args)
