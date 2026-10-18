@@ -79,8 +79,12 @@ kept for the VAE's phases, which the bare card's planner chooses. A bare case's 
 card's own: its reference swaps every block instead, the room a pin gives on that card.
 --make-reference makes one (its frames kept, its record in REFS/references.json, with the room each
 phase had); one that holds is kept, but made again for other pins or another clip, and one made on
-another tree is said; --again runs a reference's shape once more against it. Compared by each frame
-decoded: ffmpeg's md5 of it (framehash), and seedvr2x's own checksums (checksums/*.crc32, each
+another tree is said; --again runs a reference's shape once more against it, and nothing for a shape
+whose reference is missing, failed, or recorded for other pins or another clip: the command's other
+shapes are made or run all the same, and the command fails at its end, naming it. A reference
+recorded as failed is never compared with: a case judged by it fails, its reference to make again.
+Compared by each
+frame decoded: ffmpeg's md5 of it (framehash), and seedvr2x's own checksums (checksums/*.crc32, each
 frame's CRC-32 as the lossless master stores it), which ffmpeg's CRC-32 of the decoded frame must
 equal; by the CRC-32s alone where the segments are gone. A case's shape is its clip's frames (their
 digest), its window and its tiles: the swapped blocks and the VAE's placement change no bit
@@ -304,7 +308,7 @@ def measured_takes(said: list[str], plan: dict, units: dict) -> dict:
     thing: the refusal counts a VAE pass with the DiT off the GPU, and the DiT's phase with the
     VAE's weights away at the window it names, a pin's or the size's smallest, and the plan
     that ran (plan, its manifest's) kept some of them there or ran another window; or the
-    refusal names no phase the run measured (a draw of noise, the system memory)."""
+    refusal names no phase the run measured (the system memory)."""
     line = next((line for line in said if figures(line)["takes"] is not None), "")
     phase = next((phase for pattern, phase in REFUSED_PHASE if pattern.search(line)), None)
     memory = plan["memory"]
@@ -667,6 +671,14 @@ def judged(
     reference = args.refs["cases"].get(name)
     if reference is None:
         return found | {"failed": f"its frames: no reference of its shape in {args.references}"}
+    if "failed" in reference:
+        # A reference whose run failed holds no frames to judge by, or ones that aren't its
+        # shape's: its record's digests and key, where it has them, aren't compared with.
+        return found | {
+            "failed": f"its frames not compared: its shape's reference in {args.references} is"
+            f" recorded as failed ({'; '.join(reference['failed'])}): that reference is to make"
+            " again"
+        }
     # A reference made before its room was recorded has it from its plan and its peaks.
     room = reference.get("room")
     if room is None and "plan" in reference and "units" in reference:
@@ -753,6 +765,15 @@ def keep_references(directory: Path, refs: dict) -> None:
     partial.replace(path)
 
 
+def not_again(name: str, spec: str, why: str) -> dict:
+    """What --again gives for a shape it runs nothing for (make_reference): said, and a record of
+    the failure, not written, so that the command's other shapes are made or run all the same and
+    the command fails at its end, naming it (main). Before, such a shape stopped the command at
+    once, and no --again after it ran either (a review's LOW-5, 2026-10-16)."""
+    print(f"{name}: nothing run again: {why}", flush=True)
+    return {"case": name, "spec": spec, "failed": [why]}
+
+
 def make_reference(args, spec: str, again: bool = False) -> dict:
     """The reference of the case spec's shape (the docstring): its clip, its plan on its card as
     case() has the planner make it, pinned on the bare card; the output kept in --out, the
@@ -761,8 +782,12 @@ def make_reference(args, spec: str, again: bool = False) -> dict:
     refs = references_of(args.out)
     name, card, target, latents, frames = shape_of(spec)
     entry = refs["cases"].get(name)
-    if again and (entry is None or "failed" in entry):
-        raise SystemExit(f"{name}: no reference to run again in {args.out / REFERENCES}")
+    if again and entry is None:
+        return not_again(name, spec, f"no reference recorded in {args.out / REFERENCES}")
+    if again and "failed" in entry:
+        failure = "; ".join(entry["failed"])
+        where = args.out / REFERENCES
+        return not_again(name, spec, f"its reference in {where} is recorded as failed ({failure})")
     plan, _ = planned(free_of(card), target, latents)
     tiles = [tile.size if tile else 0 for tile in (plan.encode_tiles, plan.decode_tiles)]
     pins = {"window": plan.window, "encode_tile": tiles[0], "decode_tile": tiles[1]}
@@ -775,9 +800,12 @@ def make_reference(args, spec: str, again: bool = False) -> dict:
     # card's planner places them. The room each phase had is recorded with the reference.
     pins["swap_blocks"] = EVERY_BLOCK if card == "bare" else plan.swapped
     source = clip(args, frames)
-    if entry is not None and "failed" not in entry and not again:
+    if entry is not None and "failed" not in entry:
         # One that holds is kept and run again, but not one made for other pins or another
-        # clip: that one is made again. One made on another tree is said.
+        # clip: that one is made again. One made on another tree is said. --again runs a shape
+        # once more against its reference only where the reference is of the shape asked, as a
+        # fresh run keeps it: else it runs nothing (the day's review's F9, 2026-10-16: run on a
+        # reference made for other pins, it compared the frames of another shape).
         asked = {"clip": clip_digest(source), "frames": frames, "window": pins["window"]}
         asked |= {"encode_tile": pins["encode_tile"], "decode_tile": pins["decode_tile"]}
         stale = [
@@ -785,16 +813,28 @@ def make_reference(args, spec: str, again: bool = False) -> dict:
             for what, was in (("pins", entry["pins"] != pins), ("key", entry.get("key") != asked))
             if was
         ]
-        if not stale:
+        if again and stale:
+            recorded = {"pins": (entry["pins"], pins), "key": (entry.get("key"), asked)}
+            differ = "; ".join(
+                f"its {what} {recorded[what][0]} for {recorded[what][1]}" for what in stale
+            )
+            return not_again(
+                name,
+                spec,
+                f"its reference isn't of the shape asked ({differ}); --make-reference {spec} makes"
+                " it again",
+            )
+        if not again and not stale:
             tree = entry.get("tree")
             other = "" if tree == args.tree else f" on tree {tree}, where this run's is {args.tree}"
             print(f"{name}: its reference made already{other}: kept", flush=True)
             return entry
-        print(
-            f"{name}: its reference's {' and '.join(stale)} aren't the ones asked"
-            f" ({entry['pins']} for {pins}): made again",
-            flush=True,
-        )
+        if not again:
+            print(
+                f"{name}: its reference's {' and '.join(stale)} aren't the ones asked"
+                f" ({entry['pins']} for {pins}): made again",
+                flush=True,
+            )
     run_name = f"ref-{name}-again-{len(entry.get('again', [])) + 1}" if again else f"ref-{name}"
     out = args.out / run_name
     # What a reference made before left, failed or stale, goes: seedvr2x would take it for a job
@@ -872,6 +912,11 @@ def self_check(args, name: str) -> dict:
     inverted (ffmpeg's lutyuv, FFV1 again, its checksums ffmpeg's), that frame alone, with a
     PSNR-Y under any a run gives (lower than 20 dB)."""
     entry = args.refs["cases"][name]
+    if "failed" in entry:
+        raise SystemExit(
+            f"{name}: its reference in {args.references} is recorded as failed"
+            f" ({'; '.join(entry['failed'])}): nothing to check"
+        )
     out = args.references.parent / entry["output"]
     itself = against(frames_of(out), entry["digests"])
     copy = args.out / f"self-check-{name}"
