@@ -19,6 +19,10 @@ allocated, what its pool held and what the card had free. Nothing of seedvr2x is
          --stop-after encode|windows asks the run's own stop before the first window or before
          the decode (exit 130), for a pass run alone; --seed-dir DIR copies a job so stopped into
          the output directory first, which the run then resumes: a decode alone.
+         --dit-unjudged leaves the DiT's phase out of the plan (its peak taken as 0), for a pass
+         alone whose pinned shape must plan the same on every card (floor.py's rungs). The record
+         keeps the plan as the planner made it in the process ("planned"): a resumed job's
+         manifest holds its earlier plan until the run finishes its segment.
   queue  FILE: the runs of a queue file, one hold of the GPU's lock each (`flock LOCK`), each
          one's output in --records/NAME.log. A line is `NAME | arguments of run`; a line
          `common | arguments` gives arguments every later run takes first; `#` starts a comment.
@@ -53,7 +57,10 @@ The probes (run):
   (max_memory_reserved: under cudaMallocAsync torch reads both from the driver's memory pool,
   its used and its reserved memory), what was allocated and reserved before, the least memory
   the card had free during the unit (NVML's figure, nvidia-smi's, sampled every 20 ms by a
-  thread of its own), and the driver's own (cudaMemGetInfo) at its start;
+  thread of its own), and the driver's own (cudaMemGetInfo) at its start; and torch's
+  allocator counters at its start and end (memory_stats's num_ooms, num_alloc_retries,
+  num_oom_rejections, num_sync_all_streams), which torch's own allocator moves when it refuses
+  or retries a request, and cudaMallocAsync leaves at 0;
 - every slice of a VAE pass (the VAE's _encode and _decode calls): the same readings at its
   start and end, in the log as `vae_room: slice` lines, so that torch's own lines about its
   retries ("[cudaMallocAsync] recovered from an allocation failure by trimming the pool and
@@ -192,6 +199,7 @@ class Probes:
         self.oom: dict | None = None
         self.emptied = {"count": 0, "seconds": 0.0}
         self.broken = 0
+        self.planned: dict | None = None  # the run's own plan, as the planner made it here
 
     def quiet(self, probe, *given):
         """A probe's own work, which must never end the run it watches: what fails is said,
@@ -216,6 +224,13 @@ class Probes:
             "driver_free": torch.cuda.mem_get_info()[0],
             "card_free": self.card.free(),
         }
+
+    def refusals(self) -> dict:
+        """torch's allocator counters that a refused allocation moves (memory_stats): torch's
+        own allocator counts them; cudaMallocAsync leaves every one at 0."""
+        stats = self.torch.cuda.memory_stats()
+        names = ("num_ooms", "num_alloc_retries", "num_oom_rejections", "num_sync_all_streams")
+        return {name: stats.get(name) for name in names}
 
     def empty(self) -> None:
         """The pool emptied, as a cure does it: the work queued waited for, then what the pool
@@ -247,6 +262,7 @@ class Probes:
             "slices": [],
             "requests": {},
             "emptied": dict(self.emptied),
+            "counters_before": self.refusals(),
         }
         self.units.append(self.unit)
         self.card.mark("unit")
@@ -269,6 +285,7 @@ class Probes:
         unit["card_free_least"] = self.card.taken("unit")
         unit["after"] = self.counters()
         unit["failed"] = failed
+        unit["counters_after"] = self.refusals()
         before = unit.pop("emptied")
         unit["emptied"] = {
             "count": self.emptied["count"] - before["count"],
@@ -438,6 +455,22 @@ def install(probes: Probes, args: argparse.Namespace) -> list[str]:
         return said
 
     running._started, running._spent = unit_started, unit_spent
+
+    # The run's own plan, as the planner makes it in this process: a resumed job's manifest
+    # keeps its earlier plan until the run finishes its segment, so that a decode refused
+    # before then leaves the seed's plan there, made on another card.
+    from seedvr2x.runtime import planner as planning
+
+    made = planning.plan
+
+    def planned_here(*given, **named):
+        plan, peaks = made(*given, **named)
+        found = plan.record()
+        found["memory"].update(peaks.record())
+        probes.planned = found
+        return plan, peaks
+
+    planning.plan = planned_here
 
     enter = model.Models.enter
 
@@ -721,6 +754,15 @@ def set_planner(planner, args: argparse.Namespace) -> dict[str, int]:
         )
     if args.encode_extra is not None:
         planner.ENCODE_EXTRA = round(args.encode_extra * GIB)
+    if getattr(args, "dit_unjudged", False):
+        # A pass alone runs no window: the DiT's phase isn't judged, its peak taken as 0, so
+        # that a pinned shape plans the same on every card (floor.py's rungs).
+        def nothing(*given, **named):
+            return 0
+
+        for name in ("dit_peak", "_dit_least", "dit_draw"):
+            if hasattr(planner, name):
+                setattr(planner, name, nothing)
     rooms = {"encode": planner.VAE_ROOM, "decode": planner.VAE_ROOM}
     for phase, given in (("encode", args.room_encode), ("decode", args.room_decode)):
         if given is not None:
@@ -751,7 +793,8 @@ def launch(args: argparse.Namespace) -> int:
         f"constants: card {args.card}, VAE_ROOM {args.room} GiB (the encode's"
         f" {args.room_encode}, the decode's {args.room_decode}), ENCODE_EXTRA"
         f" {'as shipped' if args.encode_extra is None else f'{args.encode_extra} GiB'};"
-        f" cure: {args.cure}"
+        f" cure: {args.cure}; the DiT's phase {'UNJUDGED' if args.dit_unjudged else 'judged'};"
+        f" CUDNN_FRONTEND_LOG_INFO {os.environ.get('CUDNN_FRONTEND_LOG_INFO')}"
     )
     say(f"seedvr2x {' '.join(command)} -o {out}")
     for query in (
@@ -822,10 +865,13 @@ def launch(args: argparse.Namespace) -> int:
         "request_floor": args.request_floor if "request" in args.cures else None,
         "output_floor": args.output_floor if "output" in args.cures else None,
         "stop_after": args.stop_after,
+        "dit_unjudged": args.dit_unjudged,
+        "cudnn_frontend_log": os.environ.get("CUDNN_FRONTEND_LOG_INFO"),
         "seeded": args.seed_dir is not None,
         "command": command,
         "torch": torch.__version__,
         "units": probes.units,
+        "planned": probes.planned,
         "oom": probes.oom,
         "emptied": probes.emptied,
         "plan": None,
@@ -1367,6 +1413,7 @@ def main() -> int:
         "--output-floor", type=float, default=0.0, help="cure output: only outputs this large, GiB"
     )
     run.add_argument("--stop-after", choices=("encode", "windows"))
+    run.add_argument("--dit-unjudged", action="store_true")
     run.add_argument("--seed-dir", type=Path)
     run.add_argument("--keep", action="store_true")
     run.add_argument("seedvr2x", nargs=argparse.REMAINDER, help="-- then seedvr2x's arguments")
@@ -1412,6 +1459,7 @@ def main() -> int:
     dry.add_argument("--swap-blocks", type=int)
     dry.add_argument("--encode-tile", type=int)
     dry.add_argument("--decode-tile", type=int)
+    dry.add_argument("--dit-unjudged", action="store_true")
 
     tabled = commands.add_parser("table")
     tabled.add_argument("records", type=Path, nargs="+")

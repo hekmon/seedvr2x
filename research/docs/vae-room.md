@@ -1,6 +1,7 @@
 # The VAE's room: what a VAE pass needs between its peak and the free memory, and what cures it
 
-> Status: **measured** (2026-10-13) for the open question "The VAE's room" of
+> Status: **measured** (2026-10-13; the floor by tile size and its cause, 2026-10-16) for the
+> open question "The VAE's room" of
 > [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). seedvr2x's planner holds every VAE pass 1.5 GiB
 > further under its budget than a DiT window ([DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner),
 > Budget), because passes packed to the 0.6 GiB margin ran out of memory on 2026-10-11, at one
@@ -33,6 +34,16 @@ In short:
   the request or before every slice doesn't save the 4K decode. The cure moves no bit. It takes
   0.80 to 2.85 GiB off the large passes' peaks and puts 0.04 to 0.50 on the small ones', so it is
   kept for outputs of 2.5 GiB or more.
+- **By tile size, a pass alone**
+  ([the floor by tile size](#the-floor-by-tile-size-and-its-cause-2026-10-16)): a decode in
+  tiles of 640 to 832 px keeps its frames with 0.70 to 0.82 GiB left and moves them with 0.1
+  less, an encode its latent with 0.72 at the most; from 1,024 px a decode is refused at a split
+  convolution's concatenation (0.60 to 1.00 GiB left) before its frames move, and keeps them
+  above it, with 1.10 at the most. **The cause, read in torch's source:** a convolution whose
+  workspace the allocator refuses runs another cuDNN engine, taken without a word, and keeps it
+  for its shape for the life of the process. torch counts no refused allocation under
+  `cudaMallocAsync` (its counters 0 on every pass); the cuDNN frontend's log tells it (20 or 40
+  plans more in every pass whose frames moved, none in any that kept them).
 - **For seedvr2x:** that cure for large outputs; the room stays until its floor is measured by
   the frames, tile size by tile size ([What follows](#what-follows-for-seedvr2x)).
 
@@ -286,6 +297,520 @@ workspace and keeps the engine it fell back to for that convolution's shape. In 
 frames move from the first slice short of room on: a packed decode's first slice (5 frames)
 keeps the reference's frames and all the later ones differ, and the pass is slower to its end.
 
+### The floor by tile size, and its cause (2026-10-16)
+
+The frames' floor of each VAE pass by its tile, on seedvr2x at 6e1be76 (one frozen copy, its tree
+checked before every run), by a ladder of emulated cards a tile
+([`scripts/floor.py`](../scripts/floor.py)); the cause, read in torch 2.14.1's source; and what a
+run can see of it.
+
+#### Method as run
+
+- **A pass alone, the same plan on every rung.** A rung is one run of seedvr2x's own command line
+  by `vae_room.py run`, in its own process, one hold of the GPU's lock, the planner's room at
+  −50 GiB in that process (no plan refused, none moved) and the DiT's phase unjudged
+  (`--dit-unjudged`: a pass alone runs no window), so that every rung of a ladder runs its
+  pinned shape's plan on less and less free memory: 36 blocks swapped, the DiT's slots and other
+  parameters (about 1 GiB) on the GPU beside the pass.
+- **Two shapes,** two clips of the matrix's 1080p source: 53 frames at 1080p, window 8, for the
+  decode's squares up to 1,088 px and the tiles cut off at 1080p's 1,104 rows; 17 frames at 4K,
+  window 5, for the squares from 1,152 px; an empty cut list (one shot, no shot detector).
+- **The units, made once a shape:** the shape on the bare card, stopped before its decode. A
+  decode rung is seedvr2x's resume of a copy of them whose manifest says decode tile T (the pin a
+  resume repeats, and the shape it takes): seedvr2x's code unchanged, the decode is seedvr2x's
+  in tile T. An encode rung is a new job in tile T, stopped after its encode, its latent compared
+  bit for bit.
+- **A tile's reference** is its own rung on the bare card, on the same code.
+- **The room.** A rung's card is the reference's peak, the target room and the card's offset
+  (card less free memory: 1.489 to 1.492 GiB, measured on the rungs); its room ("usual") is the
+  free memory its plan was made in (the run's own plan, which the record keeps) less the
+  reference's peak: the "left" of the sections above, what the ladder steps on.
+- **The frames.** Kept: every frame's CRC-32 (seedvr2x's checksums) the reference's; moved: how
+  many differ, from which, and the worst PSNR-Y; an encode kept only with its latent bit for
+  bit. Refused: out of memory, or another memory error.
+- **The ladder:** the reference, then 1.1 GiB (or near the floors found for its kind), steps of
+  0.2, 0.2, 0.4 then 0.8 GiB one way, then the bracket halved to 0.1 GiB; the least room kept and
+  the most lost then run again on the same cards (a card lost on any run counts as lost); 12
+  rungs at the most. A first round (decode squares of 640, 1024, 1408, 1792 and 2048 px, the
+  1,104-row tiles of 1152, 1536 and 1856, encodes of 512, 1024, 1472 and 2048), then a second,
+  then the rest in 64-px steps; the queue was stopped after its 120th rung, the tiles the
+  one-output cure takes to be laddered with it.
+- **What the run could see,** on every rung, the signals that don't depend on the clock: torch's
+  allocator counters at the pass's start and end (its count of refused allocations); the cuDNN
+  frontend's log on (`CUDNN_FRONTEND_LOG_INFO=1`, `CUDNN_FRONTEND_LOG_FILE=stderr`), which names
+  every execution plan built, its engine and its workspace; torch's "recovered from an
+  allocation failure" lines. The pass's time is recorded but not tried as a signal on this card:
+  power-capped, its speed drifts from run to run (up to 9% back to back, 40 to 60% between
+  sessions: [benchmarking.md](benchmarking.md#caveats)); it is to be tried on another card. A rung
+  took 170 to 190 s (a 1080p decode), 216 s (a 4K one), 88 s (a 1080p encode), for information.
+
+#### The floors
+
+| ladder | tile | ref peak GiB | ref pass s | ref plans | least room kept (runs) | most room lost (runs) | done |
+|---|---|---|---|---|---|---|---|
+| dec1080-640 | 640x640 | 9.609 | 156.0 | 266 | 0.701 (2: 1: kept, 2: kept) | 0.600 (2: 1: moved, 2: moved) | yes |
+| enc1080-512 | 512x512 | 5.040 | 72.5 | 152 | 0.499 (2: 1: kept, 2: kept) | 0.399 (2: 1: moved, 2: moved) | yes |
+| dec1080-1024 | 1024x1024 | 18.971 | 157.3 | 308 | 0.751 (2: 1: kept, 2: kept) | 0.651 (2: 1: refused, 2: refused) | yes |
+| dec2160-1408 | 1408x1408 | 34.089 | 202.2 | 387 | 0.980 (2: 1: kept, 2: kept) | 0.880 (2: 1: refused, 2: refused) | yes |
+| dec2160-1792 | 1792x1792 | 53.999 | 203.0 | 332 | 0.959 (2: 1: kept, 2: kept) | 0.859 (2: 1: refused, 2: refused) | yes |
+| dec2160-2048 | 2048x2048 | 70.004 | 203.9 | 364 | 0.700 (2: 1: kept, 2: kept) | 0.601 (2: 1: refused, 2: refused) | yes |
+| dec1080-1152 | 1104x1152 | 22.557 | 152.2 | 187 | 0.770 (2: 1: kept, 2: kept) | 0.671 (2: 1: refused, 2: refused) | yes |
+| dec1080-1536 | 1104x1536 | 29.463 | 151.3 | 178 | 0.860 (2: 1: kept, 2: kept) | 0.761 (2: 1: refused, 2: refused) | yes |
+| dec1080-1856 | 1104x1856 | 35.168 | 154.2 | 166 | 0.970 (2: 1: kept, 2: kept) | 0.869 (2: 1: refused, 2: refused) | yes |
+| enc1080-1024 | 1024x1024 | 11.996 | 68.5 | 175 | 0.650 (2: 1: kept, 2: kept) | 0.551 (2: 1: moved, 2: moved) | yes |
+| enc2160-1472 | 1472x1472 | 21.258 | 88.3 | 212 | 0.720 (2: 1: kept, 2: kept) | 0.620 (2: 1: moved, 2: moved) | yes |
+| enc2160-2048 | 2048x2048 | 39.277 | 92.2 | 225 | 0.570 (2: 1: kept, 2: kept) | 0.470 (2: 1: refused, 2: refused) | yes |
+| dec1080-832 | 832x832 | 13.819 | 157.1 | 283 | 0.791 (2: 1: kept, 2: kept) | 0.690 (2: 1: moved, 2: moved) | yes |
+| dec2160-1216 | 1216x1216 | 25.922 | 203.4 | 351 | 0.880 (2: 1: kept, 2: kept) | 0.780 (2: 1: refused, 2: refused) | yes |
+| dec2160-1600 | 1600x1600 | 43.479 | 202.0 | 379 | 0.989 (2: 1: kept, 2: kept) | 0.890 (2: 1: refused, 2: refused) | yes |
+| dec2160-1920 | 1920x1920 | 61.686 | 205.9 | 309 | 1.100 (2: 1: kept, 2: kept) | 1.000 (2: 1: refused, 2: refused) | yes |
+| dec1080-1344 | 1104x1344 | 26.024 | 152.5 | 186 | 0.821 (2: 1: kept, 2: kept) | 0.721 (2: 1: refused, 2: refused) | yes |
+| dec1080-1728 | 1104x1728 | 32.907 | 152.9 | 166 | 0.921 (2: 1: kept, 2: kept) | 0.821 (2: 1: refused, 2: refused) | yes |
+| dec1080-704 | 704x704 | 11.309 | 151.6 | 294 | 0.819 (2: 1: kept, 2: kept) | 0.719 (2: 1: moved, 2: moved) | yes |
+| dec1080-768 | 768x768 | 12.624 | 156.3 | 290 | 0.720 (1: 1: kept) | 0.621 (1: 1: moved) | no |
+
+"Least room kept": the least room on which every run kept the frames, above every loss; "most
+room lost": the most on which a run moved its frames or was refused; each with its runs.
+Not run here: dec1080-896, dec1080-960, dec1080-1088, dec2160-1152, dec2160-1280, dec2160-1344, dec2160-1472, dec2160-1536, dec2160-1664, dec2160-1728, dec2160-1856, dec2160-1984, dec1080-1216, dec1080-1280, dec1080-1408, dec1080-1472, dec1080-1600, dec1080-1664, dec1080-1792
+
+- **From 1,024 px a decode is refused before its frames move; smaller passes move them.** Decodes
+  in tiles of 640 to 832 px kept their frames with 0.70 to 0.82 GiB left and moved them with 0.1
+  less: 48 frames of 53 in 640- and 832-px tiles (from the sixth, the same other frames on both
+  runs), 8 in 704-px tiles (from the 46th, twice), 7 and 15 in 768-px tiles (from the first, once
+  each); worst PSNR-Y 72.8 to 89.8 dB. Every decode tile of 1,024 px or more was refused before any frame moved, at
+  the concatenation of a split convolution's pieces, 2 KiB a pixel of the tile asked in one piece
+  (2.00 GiB at 1,024 px, 8.00 at 2,048) while the pool held more than that beyond what was
+  allocated: the cure found above isn't in this code. There the floor is the refusal's (0.60 to
+  1.00 GiB left), and the frames hold above it. An encode moved its latent instead (in 512- and
+  1,024-px tiles, and 4K's 1,472), but in 4K's 2,048-px tiles, refused first.
+- **These are main's floors.** The ladders ran seedvr2x at 6e1be76, without the held cure that
+  writes a split convolution's pieces into one output. For the tiles that cure takes (decode
+  squares from 1,152 px, 1,104-row tiles from 1,104 × 1,216, encode squares from 1,664, and
+  1080p's untiled decode) they stay main's record; their floor under the cure is to come from
+  ladders run with it. The tiles not run here wait for ladders of their own.
+- **A pass alone keeps its frames closer than a whole run.** The 640-px decode alone kept them
+  with 0.70 GiB left and the 832-px one with 0.79, where the whole runs of the same shapes (on
+  the code of 2026-10-12) lost them with 0.70 to 0.80 and with 0.89
+  ([the floor is the frames](#the-floor-is-the-frames)): 0.2 to 0.3 GiB more.
+
+The floor against the tile (the least room kept; the tile's area; the largest workspace its
+reference's plans asked):
+
+| ladder | tile area Mpx | reference's largest workspace GiB | least kept | most lost |
+|---|---|---|---|---|
+| dec1080-640 | 0.410 | 1.221 | 0.701 | 0.600 (moved) |
+| enc1080-512 | 0.262 | 0.754 | 0.499 | 0.399 (moved) |
+| dec1080-1024 | 1.049 | 3.125 | 0.751 | 0.651 (refused) |
+| dec2160-1408 | 1.982 | 5.908 | 0.980 | 0.880 (refused) |
+| dec2160-1792 | 3.211 | 9.570 | 0.959 | 0.859 (refused) |
+| dec2160-2048 | 4.194 | 12.500 | 0.700 | 0.601 (refused) |
+| dec1080-1152 | 1.272 | 3.790 | 0.770 | 0.671 (refused) |
+| dec1080-1536 | 1.696 | 5.054 | 0.860 | 0.761 (refused) |
+| dec1080-1856 | 2.049 | 6.107 | 0.970 | 0.869 (refused) |
+| enc1080-1024 | 1.049 | 1.360 | 0.650 | 0.551 (moved) |
+| enc2160-1472 | 2.167 | 2.810 | 0.720 | 0.620 (moved) |
+| enc2160-2048 | 4.194 | 3.966 | 0.570 | 0.470 (refused) |
+| dec1080-832 | 0.692 | 2.063 | 0.791 | 0.690 (moved) |
+| dec2160-1216 | 1.479 | 4.407 | 0.880 | 0.780 (refused) |
+| dec2160-1600 | 2.560 | 7.629 | 0.989 | 0.890 (refused) |
+| dec2160-1920 | 3.686 | 10.986 | 1.100 | 1.000 (refused) |
+| dec1080-1344 | 1.484 | 4.422 | 0.821 | 0.721 (refused) |
+| dec1080-1728 | 1.908 | 5.685 | 0.921 | 0.821 (refused) |
+| dec1080-704 | 0.496 | 1.477 | 0.819 | 0.719 (moved) |
+| dec1080-768 | 0.590 | 1.758 | 0.720 | 0.621 (moved) |
+
+- dec: every bracketed ladder kept its frames with 1.100 GiB (dec2160-1920) or less, over 16 ladders
+- dec, least kept against the area: 0.764 + 0.0527 x, worst miss 0.284 GiB over 16 ladders
+- dec, least kept against the workspace: 0.764 + 0.0177 x, worst miss 0.284 GiB over 16 ladders
+- dec1080: every bracketed ladder kept its frames with 0.970 GiB (dec1080-1856) or less, over 10 ladders
+- dec1080, least kept against the area: 0.674 + 0.1187 x, worst miss 0.086 GiB over 10 ladders
+- dec1080, least kept against the workspace: 0.674 + 0.0398 x, worst miss 0.086 GiB over 10 ladders
+- dec2160: every bracketed ladder kept its frames with 1.100 GiB (dec2160-1920) or less, over 6 ladders
+- dec2160, least kept against the area: 1.013 + -0.0275 x, worst miss 0.197 GiB over 6 ladders
+- dec2160, least kept against the workspace: 1.013 + -0.0092 x, worst miss 0.197 GiB over 6 ladders
+- enc: every bracketed ladder kept its frames with 0.720 GiB (enc2160-1472) or less, over 4 ladders
+- enc, least kept against the area: 0.591 + 0.0097 x, worst miss 0.108 GiB over 4 ladders
+- enc, least kept against the workspace: 0.566 + 0.0196 x, worst miss 0.099 GiB over 4 ladders
+- enc1080: every bracketed ladder kept its frames with 0.650 GiB (enc1080-1024) or less, over 2 ladders
+- enc1080, least kept against the area: 0.448 + 0.1925 x, worst miss 0.000 GiB over 2 ladders
+- enc1080, least kept against the workspace: 0.310 + 0.2500 x, worst miss 0.000 GiB over 2 ladders
+- enc2160: every bracketed ladder kept its frames with 0.720 GiB (enc2160-1472) or less, over 2 ladders
+- enc2160, least kept against the area: 0.881 + -0.0742 x, worst miss 0.000 GiB over 2 ladders
+- enc2160, least kept against the workspace: 1.086 + -0.1302 x, worst miss 0.000 GiB over 2 ladders
+
+For 1080p's decodes a line holds roughly, the frames' floor of the small tiles and the refusal's
+of the large ones alike: 0.67 + 0.12 GiB a megapixel of tile, missing by up to 0.09 GiB over its
+ten tiles (640 px to 1,104 × 1,856; the 704-px tile, kept at 0.82, its worst). 4K's six don't
+follow one (a worst miss of 0.20 GiB): 0.88 GiB at 1,216 px up to 1.10 at 1,920, and 0.70 at
+2,048. What bounds them all is a step: every decode kept its frames with 1.10 GiB or less, every
+encode its latent with 0.72 or less. The largest workspace a reference's plans asked (up to 12.5
+GiB) was given at its moment in every rung that kept its frames: the floor isn't that workspace.
+
+#### The cause, in torch's source
+
+torch 2.14.1's source at its tag (file and line), with its cuDNN frontend (1.26.0, the
+submodule's commit `35fd7b0`); cuDNN 9.24 on the card (torch's `backends.cudnn.version()`
+92400).
+
+1. **The path.** A bfloat16 convolution, 2-D or 3-D, goes to cuDNN only through its v8 API, the
+   frontend: `use_cudnn` takes cuDNN for bfloat16 only where the v8 API is on
+   ([Convolution.cpp:423-427](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/Convolution.cpp#L423-L427)),
+   and the forward goes to `run_single_conv` unless `TORCH_CUDNN_V8_API_DISABLED` is set
+   ([Conv_v8.cpp:1484-1509](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/cudnn/Conv_v8.cpp#L1484-L1509),
+   [ConvUtils.h:96-105](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/ConvUtils.h#L96-L105)).
+   The dimensions only change the descriptors.
+2. **Heuristics, not benchmarks.** `benchmark` and `deterministic` come from torch's global
+   context ([Convolution.cpp:1244-1249](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/Convolution.cpp#L1244-L1249)),
+   both off by default ([Context.h:478, 496](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/Context.h#L478-L496));
+   seedvr2x sets them only inside its shot detector's forward. So a convolution takes
+   `run_single_conv`'s heuristic branch
+   ([Conv_v8.cpp:1155-1283](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/cudnn/Conv_v8.cpp#L1155-L1283)):
+   its key (the shapes, strides, padding, dtype, layout, `deterministic`, TF32, and the three
+   pointers' alignment) looked up in a cache of plans (1168-1188); missing, the heuristic's top
+   configuration (1192-1219), then all its configurations but that one (1220-1255), then cuDNN's
+   fallback list (1256-1281).
+3. **The workspace, asked of torch's allocator.** A plan runs in `run_conv_plan`, which asks the
+   process's allocator for the plan's workspace before it executes
+   ([Conv_v8.cpp:382-384](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/cudnn/Conv_v8.cpp#L382-L384)),
+   the convolution's output already allocated
+   ([ConvShared.cpp:256-259](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/cudnn/ConvShared.cpp#L256-L259)).
+4. **A refusal, swallowed.** `try_configs` builds each configuration's plan and runs it; an
+   `OutOfMemoryError` (or a cuDNN error) is caught and ignored, and the next configuration
+   tried, without a word
+   ([Conv_v8.cpp:1053-1084](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/cudnn/Conv_v8.cpp#L1053-L1084)).
+   A cached plan whose workspace is refused starts the search again from the top (1180-1188).
+5. **The plan that ran, kept.** The first plan that runs is put in the cache (1075), a cache by
+   thread, never freed (349-362), of 10,000 keys by default
+   ([257-285](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/cudnn/Conv_v8.cpp#L257-L285)):
+   every later call of the same key runs it, with room or without, for the life of the process.
+6. **`deterministic` doesn't stop it:** it only takes the nondeterministic configurations out
+   of the lists ([Conv_v8.cpp:140-168](https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/cudnn/Conv_v8.cpp#L140-L168)):
+   another engine is still taken where the first's workspace is refused.
+7. **What `cudaMallocAsync` does and counts** (the allocator seedvr2x runs on a driver that
+   refuses), in `mallocAsync`
+   ([CUDAMallocAsyncAllocator.cpp:355-413](https://github.com/pytorch/pytorch/blob/v2.14.1/c10/cuda/CUDAMallocAsyncAllocator.cpp#L355-L413)):
+   a request the driver refuses is tried once more after the stream is synchronised and the pool
+   trimmed; given then, it says "[cudaMallocAsync] recovered from an allocation failure by
+   trimming the pool and retrying" (377-379); refused again, it raises `OutOfMemoryError`,
+   without a log line and without a count. Its `memory_stats` holds only the allocated, active
+   and reserved bytes, "many stat types" left at 0 (733-828), `num_ooms` and
+   `num_alloc_retries` among them; it can't take an out-of-memory observer (692-697).
+8. **What torch's own allocator does and counts** (seedvr2x's on a driver that gives memory the
+   card doesn't have, its segments expandable), in `malloc`
+   ([CUDACachingAllocator.cpp:1721-1953](https://github.com/pytorch/pytorch/blob/v2.14.1/c10/cuda/CUDACachingAllocator.cpp#L1721-L1953)):
+   a request over torch's limit, or that the driver refuses, goes through its retries (the
+   cache freed, `num_alloc_retries` + 1 at 3853), and refused at the end counts `num_ooms` + 1
+   (1857) and calls the attached out-of-memory observers (1900-1907) before it raises.
+
+**On the card**, with the frontend's log on:
+
+- **One convolution** (`conv_probe.py`: S1's convolution alone, 1 × 256 × 6 × 160 × 640 in
+  bfloat16): with the memory free, one plan built, engine 22, a workspace of 527,826,960 bytes;
+  with 0.5 GiB left, that plan again (the cached plan's workspace refused, the search begun
+  again), 16 more of engine 22 with the same workspace and 2 of engine 23 (947,308,719 bytes),
+  then engine 28 with no workspace, which ran: other bits, in 0.46 s where it takes 0.05 with
+  room; the next call, and two with the memory free again, built no plan and gave the same other
+  bits (0.42 s).
+- **In a pass,** the rungs whose frames moved built 20 plans more than their reference in one
+  slice (40 in two, where two convolutions fell back), the same 20 as the convolution's: the usual plan's tag again (engine 22, a 0.664 GiB
+  workspace), 16 more of engine 22, 2 of engine 23 (1.189 GiB), and engine 28, no workspace; no
+  plan in any later slice. The rungs whose frames held built exactly their reference's plans.
+  The 1,024-px rungs refused at the concatenation had fallen back the same way before it
+  (engine 28 at a slice before the refusal, or in it).
+- **The convolution that fell back,** by the tensors the frontend logged before its search: in
+  640-px tiles a 3 × 3 × 3 convolution of 256 channels over one piece of a tile at full
+  resolution, a 4-frame slice's (input 1 × 256 × 6 × 217 × 642, output 1 × 256 × 4 × 215 × 640),
+  whose usual plan asks a 0.664 GiB workspace; in 1,024-px tiles its like (output
+  1 × 256 × 4 × 149 × 1024, 0.738 GiB); in the encodes, the encoder's 3 × 3 × 3 convolution of
+  128 channels at full resolution (output 1 × 128 × 4 × 512 × 512 in 512-px tiles, a workspace of
+  0.63 GiB; in 1,024-px tiles two of them, a piece of an inner tile and one of an edge tile's: two
+  fallbacks, 40 plans). Where 48 frames of 53 moved (640 and 832 px): a tile's first slice
+  holds 5 frames, its convolutions other shapes with plans of their own, made with room, and the
+  frames they give, the first five (an encode's first two latents), held; every later frame takes
+  a part of some tile run after the fallback, and moved. In 704- and 768-px tiles fewer frames
+  moved (8, from the 46th; 7 to 15, from the first): the convolution and the moment of the
+  fallback differ, and weren't read.
+
+Shown so: a workspace refused, torch's next engines tried without a word until one ran without a
+workspace, and that engine kept for the convolution's shape; the frames move from that slice on.
+Still inferred: that the refused request was the workspace (no line says it: the plan rebuilt, then
+the next ones with the same or larger workspaces, then one with none that runs, is what a refused
+workspace makes in that code, where nothing else turns on the memory left); why engine 28 gives
+other bits (cuDNN's own, closed: another order of the sums, read from the bits); and under torch's
+own allocator nothing was run here: that `num_ooms` counts these refusals is its source's, not a
+measure.
+
+#### What the run can see
+
+Every rung against its reference rung, by the signals that don't depend on the clock: torch's
+count of refused allocations across the pass (`num_ooms`, `num_alloc_retries` and
+`num_oom_rejections` moved, and what else of its counters moved), the plans the cuDNN frontend
+built more than the reference's (cuDNN's log, not torch's count; and where: the slice, the
+driver's free memory before it, the first plan built again and the last, the one that ran),
+torch's "recovered" lines:
+
+| rung | outcome | room usual | frames differing | torch's refused allocations (counters moved) | cuDNN's plans built - the reference's | where the extra plans were built | torch's recovered lines |
+|---|---|---|---|---|---|---|---|
+| dec1080-640-c11.799-1 | kept | 0.701 | 0 | 0 (none) | 0 | - | 201 |
+| enc1080-512-c7.029-1 | kept | 0.499 | 0 | 0 (none) | 0 | - | 124 |
+| dec1080-640-c11.599-1 | moved | 0.500 | 48 (from 5) | 0 (none) | 20 | slice 3 (+20, 0.296 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.664 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 219 |
+| dec1080-640-c11.699-1 | moved | 0.600 | 48 (from 5) | 0 (none) | 20 | slice 6 (+20, 0.052 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.664 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 209 |
+| dec1080-640-c11.799-2 | kept | 0.701 | 0 | 0 (none) | 0 | - | 201 |
+| dec1080-640-c11.699-2 | moved | 0.600 | 48 (from 5) | 0 (none) | 20 | slice 6 (+20, 0.052 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.664 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 209 |
+| dec1080-1024-c21.212-1 | kept | 0.751 | 0 | 0 (none) | 0 | - | 152 |
+| dec1080-1024-c21.212-2 | kept | 0.751 | 0 | 0 (none) | 0 | - | 152 |
+| dec2160-1408-c36.560-1 | kept | 0.980 | 0 | 0 (none) | 0 | - | 22 |
+| dec2160-1408-c36.560-2 | kept | 0.980 | 0 | 0 (none) | 0 | - | 22 |
+| dec2160-1792-c56.549-1 | kept | 1.060 | 0 | 0 (none) | 0 | - | 23 |
+| dec2160-1792-c56.449-1 | kept | 0.959 | 0 | 0 (none) | 0 | - | 24 |
+| dec2160-1792-c56.449-2 | kept | 0.959 | 0 | 0 (none) | 0 | - | 24 |
+| dec2160-2048-c72.394-1 | kept | 0.900 | 0 | 0 (none) | 0 | - | 17 |
+| dec2160-2048-c72.194-1 | kept | 0.700 | 0 | 0 (none) | 0 | - | 17 |
+| dec2160-2048-c72.194-2 | kept | 0.700 | 0 | 0 (none) | 0 | - | 17 |
+| dec1080-1152-c24.917-1 | kept | 0.870 | 0 | 0 (none) | 0 | - | 54 |
+| dec1080-1152-c24.817-1 | kept | 0.770 | 0 | 0 (none) | 0 | - | 55 |
+| dec1080-1152-c24.817-2 | kept | 0.770 | 0 | 0 (none) | 0 | - | 55 |
+| dec1080-1536-c31.813-1 | kept | 0.860 | 0 | 0 (none) | 0 | - | 40 |
+| dec1080-1536-c31.813-2 | kept | 0.860 | 0 | 0 (none) | 0 | - | 40 |
+| dec1080-1856-c37.727-1 | kept | 1.070 | 0 | 0 (none) | 0 | - | 35 |
+| dec1080-1856-c37.627-1 | kept | 0.970 | 0 | 0 (none) | 0 | - | 36 |
+| dec1080-1856-c37.627-2 | kept | 0.970 | 0 | 0 (none) | 0 | - | 36 |
+| enc1080-512-c6.829-1 | moved | 0.300 | 12 (from 2) | 0 (none) | 20 | slice 7 (+20, 0.027 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.629 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 7 |
+| enc1080-512-c6.929-1 | moved | 0.399 | 12 (from 2) | 0 (none) | 20 | slice 8 (+20, 0.032 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.629 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 7 |
+| enc1080-512-c7.029-2 | kept | 0.499 | 0 | 0 (none) | 0 | - | 124 |
+| enc1080-512-c6.929-2 | moved | 0.399 | 12 (from 2) | 0 (none) | 20 | slice 8 (+20, 0.032 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.629 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 7 |
+| enc1080-1024-c14.036-1 | moved | 0.551 | 4 (from 10) | 0 (none) | 40 | slice 10 (+20, 1.390 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.632 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB); slice 26 (+20, 0.171 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.790 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 161 |
+| enc1080-1024-c14.235-1 | kept | 0.750 | 0 | 0 (none) | 0 | - | 112 |
+| enc1080-1024-c14.135-1 | kept | 0.650 | 0 | 0 (none) | 0 | - | 134 |
+| enc1080-1024-c14.135-2 | kept | 0.650 | 0 | 0 (none) | 0 | - | 134 |
+| enc1080-1024-c14.036-2 | moved | 0.551 | 4 (from 10) | 0 (none) | 40 | slice 10 (+20, 1.390 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.632 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB); slice 26 (+20, 0.171 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.790 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 161 |
+| enc2160-1472-c23.368-1 | moved | 0.620 | 3 (from 2) | 0 (none) | 20 | slice 3 (+20, 1.847 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.753 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 46 |
+| enc2160-1472-c23.568-1 | kept | 0.820 | 0 | 0 (none) | 0 | - | 52 |
+| enc2160-1472-c23.468-1 | kept | 0.720 | 0 | 0 (none) | 0 | - | 60 |
+| enc2160-1472-c23.468-2 | kept | 0.720 | 0 | 0 (none) | 0 | - | 60 |
+| enc2160-1472-c23.368-2 | moved | 0.620 | 3 (from 2) | 0 (none) | 20 | slice 3 (+20, 1.847 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.753 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 46 |
+| enc2160-2048-c41.437-1 | kept | 0.669 | 0 | 0 (none) | 0 | - | 16 |
+| enc2160-2048-c41.337-1 | kept | 0.570 | 0 | 0 (none) | 0 | - | 17 |
+| enc2160-2048-c41.337-2 | kept | 0.570 | 0 | 0 (none) | 0 | - | 17 |
+| dec1080-832-c16.200-1 | kept | 0.891 | 0 | 0 (none) | 0 | - | 187 |
+| dec1080-832-c16.000-1 | moved | 0.690 | 48 (from 5) | 0 (none) | 20 | slice 8 (+20, 0.321 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.422 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 210 |
+| dec1080-832-c16.100-1 | kept | 0.791 | 0 | 0 (none) | 0 | - | 194 |
+| dec1080-832-c16.100-2 | kept | 0.791 | 0 | 0 (none) | 0 | - | 194 |
+| dec1080-832-c16.000-2 | moved | 0.690 | 48 (from 5) | 0 (none) | 20 | slice 8 (+20, 0.321 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.422 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 210 |
+| dec2160-1216-c28.292-1 | kept | 0.880 | 0 | 0 (none) | 0 | - | 48 |
+| dec2160-1216-c28.292-2 | kept | 0.880 | 0 | 0 (none) | 0 | - | 48 |
+| dec2160-1600-c46.059-1 | kept | 1.091 | 0 | 0 (none) | 0 | - | 20 |
+| dec2160-1600-c45.959-1 | kept | 0.989 | 0 | 0 (none) | 0 | - | 20 |
+| dec2160-1600-c45.959-2 | kept | 0.989 | 0 | 0 (none) | 0 | - | 20 |
+| dec2160-1920-c64.277-1 | kept | 1.100 | 0 | 0 (none) | 0 | - | 28 |
+| dec2160-1920-c64.277-2 | kept | 1.100 | 0 | 0 (none) | 0 | - | 28 |
+| dec1080-1344-c28.435-1 | kept | 0.920 | 0 | 0 (none) | 0 | - | 44 |
+| dec1080-1344-c28.335-1 | kept | 0.821 | 0 | 0 (none) | 0 | - | 51 |
+| dec1080-1344-c28.335-2 | kept | 0.821 | 0 | 0 (none) | 0 | - | 51 |
+| dec1080-1728-c35.317-1 | kept | 0.921 | 0 | 0 (none) | 0 | - | 39 |
+| dec1080-1728-c35.317-2 | kept | 0.921 | 0 | 0 (none) | 0 | - | 39 |
+| dec1080-704-c13.719-1 | kept | 0.920 | 0 | 0 (none) | 0 | - | 100 |
+| dec1080-704-c13.519-1 | moved | 0.719 | 8 (from 45) | 0 (none) | 20 | slice 25 (+20, 0.404 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.804 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 123 |
+| dec1080-704-c13.619-1 | kept | 0.819 | 0 | 0 (none) | 0 | - | 102 |
+| dec1080-704-c13.619-2 | kept | 0.819 | 0 | 0 (none) | 0 | - | 102 |
+| dec1080-704-c13.519-2 | moved | 0.719 | 8 (from 45) | 0 (none) | 20 | slice 25 (+20, 0.404 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.804 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 123 |
+| dec1080-768-c15.035-1 | kept | 0.920 | 0 | 0 (none) | 0 | - | 65 |
+| dec1080-768-c14.835-1 | kept | 0.720 | 0 | 0 (none) | 0 | - | 92 |
+| dec1080-768-c14.635-1 | moved | 0.521 | 15 (from 0) | 0 (none) | 20 | slice 1 (+20, 11.648 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.851 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 144 |
+| dec1080-768-c14.735-1 | moved | 0.621 | 7 (from 0) | 0 (none) | 20 | slice 14 (+20, 0.152 GiB free before it): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.851 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) | 95 |
+
+The refused rungs, apart:
+
+| rung | room usual | where | asked GiB | allocated / pool GiB | torch's counters moved | cuDNN's plans built - the reference's | extra plans before the refusal |
+|---|---|---|---|---|---|---|---|
+| dec1080-1024-c21.012-1 | 0.549 | memory_limit_conv:162 | 2.00 | 16.92 / 19.53 | none | -195 | slice 2 (+19, 2.085 GiB free before it): ConvFwd_eng22 x16, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=3_k13=0_k14=2_k18=0_k23=0 (0.738 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) |
+| dec1080-1024-c21.112-1 | 0.651 | memory_limit_conv:162 | 2.00 | 16.92 / 19.62 | none | -194 | slice 13 (+20): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.738 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) |
+| dec1080-1024-c21.112-2 | 0.651 | memory_limit_conv:162 | 2.00 | 16.92 / 19.62 | none | -194 | slice 13 (+20): ConvFwd_eng22 x17, ConvFwd_eng23 x2, ConvFwd_eng28 x1; first ConvFwd_eng22_k2=0_k13=1_k14=2_k18=0_k23=0 (0.738 GiB), last ConvFwd_eng28_k2=2_k3=0 (0.000 GiB) |
+| dec2160-1408-c36.360-1 | 0.781 | memory_limit_conv:162 | 3.78 | 30.31 / 34.88 | none | -301 | none |
+| dec2160-1408-c36.460-1 | 0.880 | memory_limit_conv:162 | 3.78 | 30.31 / 35.00 | none | -301 | none |
+| dec2160-1408-c36.460-2 | 0.880 | memory_limit_conv:162 | 3.78 | 30.31 / 35.00 | none | -301 | none |
+| dec2160-1792-c56.349-1 | 0.859 | memory_limit_conv:162 | 6.12 | 47.87 / 54.88 | none | -255 | none |
+| dec2160-1792-c56.349-2 | 0.859 | memory_limit_conv:162 | 6.12 | 47.87 / 54.88 | none | -255 | none |
+| dec2160-2048-c71.994-1 | 0.499 | memory_limit_conv:162 | 8.00 | 62.00 / 70.53 | none | -280 | none |
+| dec2160-2048-c72.094-1 | 0.601 | memory_limit_conv:162 | 8.00 | 62.00 / 70.62 | none | -280 | none |
+| dec2160-2048-c72.094-2 | 0.601 | memory_limit_conv:162 | 8.00 | 62.00 / 70.62 | none | -280 | none |
+| dec1080-1152-c24.717-1 | 0.671 | memory_limit_conv:162 | 2.43 | 20.12 / 23.25 | none | -90 | none |
+| dec1080-1152-c24.717-2 | 0.671 | memory_limit_conv:162 | 2.43 | 20.12 / 23.25 | none | -90 | none |
+| dec1080-1536-c31.613-1 | 0.659 | memory_limit_conv:162 | 3.23 | 26.23 / 30.12 | none | -94 | none |
+| dec1080-1536-c31.713-1 | 0.761 | memory_limit_conv:162 | 3.23 | 26.22 / 30.25 | none | -76 | none |
+| dec1080-1536-c31.713-2 | 0.761 | memory_limit_conv:162 | 3.23 | 26.22 / 30.25 | none | -76 | none |
+| dec1080-1856-c37.527-1 | 0.869 | memory_limit_conv:162 | 3.91 | 31.25 / 36.06 | none | -60 | none |
+| dec1080-1856-c37.527-2 | 0.869 | memory_limit_conv:162 | 3.91 | 31.25 / 36.06 | none | -60 | none |
+| enc2160-2048-c41.237-1 | 0.470 | memory_limit_conv:162 | 4.00 | 35.27 / 39.75 | none | -152 | none |
+| enc2160-2048-c41.237-2 | 0.470 | memory_limit_conv:162 | 4.00 | 35.27 / 39.75 | none | -152 | none |
+| dec2160-1216-c28.093-1 | 0.680 | memory_limit_conv:162 | 2.82 | 23.10 / 26.62 | none | -262 | none |
+| dec2160-1216-c28.193-1 | 0.780 | memory_limit_conv:162 | 2.82 | 23.10 / 26.72 | none | -262 | none |
+| dec2160-1216-c28.193-2 | 0.780 | memory_limit_conv:162 | 2.82 | 23.10 / 26.72 | none | -262 | none |
+| dec2160-1600-c45.859-1 | 0.890 | memory_limit_conv:162 | 4.88 | 38.60 / 44.38 | none | -295 | none |
+| dec2160-1600-c45.859-2 | 0.890 | memory_limit_conv:162 | 4.88 | 38.60 / 44.38 | none | -295 | none |
+| dec2160-1920-c64.077-1 | 0.901 | memory_limit_conv:162 | 7.03 | 54.63 / 62.59 | none | -205 | none |
+| dec2160-1920-c64.177-1 | 1.000 | memory_limit_conv:162 | 7.03 | 54.63 / 62.69 | none | -205 | none |
+| dec2160-1920-c64.177-2 | 1.000 | memory_limit_conv:162 | 7.03 | 54.63 / 62.69 | none | -205 | none |
+| dec1080-1344-c28.235-1 | 0.721 | memory_limit_conv:162 | 2.83 | 23.19 / 26.75 | none | -86 | none |
+| dec1080-1344-c28.235-2 | 0.721 | memory_limit_conv:162 | 2.83 | 23.19 / 26.75 | none | -86 | none |
+| dec1080-1728-c35.117-1 | 0.720 | memory_limit_conv:162 | 3.64 | 29.26 / 33.66 | none | -64 | none |
+| dec1080-1728-c35.217-1 | 0.821 | memory_limit_conv:162 | 3.64 | 29.26 / 33.75 | none | -64 | none |
+| dec1080-1728-c35.217-2 | 0.821 | memory_limit_conv:162 | 3.64 | 29.26 / 33.75 | none | -64 | none |
+
+What separates the moved rungs from the kept ones (a higher figure saying moved):
+
+- torch's count of refused allocations across the pass (num_ooms + num_alloc_retries + num_oom_rejections): kept 0 to 0, moved 0 to 0: does NOT separate; over 0: 0 true positives, 0 false; 51 true negatives, 16 false
+- the cuDNN frontend's plans built in the pass over the reference's (cuDNN's log): kept 0 to 0, moved 20 to 40: SEPARATES, over 10 said moved: 16 true positives, 0 false; 51 true negatives, 0 false
+- torch's "recovered from an allocation failure" lines in the pass: kept 16 to 201, moved 7 to 219: does NOT separate; over 104: 10 true positives, 12 false; 39 true negatives, 6 false
+- the pass's time: not a signal here (its seconds are in every rung's record, for information): a power-capped card's speed drifts from run to run
+
+So, on this card and its allocator:
+
+- **torch's count of refused allocations says nothing on this allocator.** Under `cudaMallocAsync`
+  `num_ooms`, `num_alloc_retries` and `num_oom_rejections` stayed at 0 across every pass, those
+  whose frames moved as those that kept them, and an out-of-memory observer can't be attached:
+  as its source says, it counts no refusal (above, 7). Under torch's own allocator `num_ooms`
+  across a unit would count each refused workspace at no cost (its source; not shown on a card).
+- **The cuDNN frontend's log tells it without a miss:** 20 or 40 plans more than the reference's
+  (one or two convolutions fallen back) in every pass whose frames moved, none in any that kept
+  them. It is cuDNN's log, not a count of torch's: a run can use it only with the log written
+  and read for each pass, and a count to compare with, or the fallback's own marks there (a run
+  of plans built for one shape, a plan built again for a shape planned already).
+- **torch's "recovered" lines don't separate:** they count the requests a trim saved, not the
+  refusals that move an engine (7 in the 512-px encodes that moved, 124 in those that kept their
+  latent).
+- **The pass's time** wasn't tried here: on this power-capped card it drifts from run to run;
+  it stays in the records, and is to be tried on another card.
+
+#### Every rung
+
+"room" is the free memory the plan was made in less the rung's own peak (a refused rung's stops
+at its refusal), "room usual" less its reference's, as above; the plans and the seconds are the
+pass's, its reference's beside them.
+
+| rung | card | free | peak | room | room usual | outcome | frames differing | worst PSNR | plans (ref) | recovered | pass s (ref) | exit |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| dec1080-640-ref | bare | 94.212 | 9.609 | 84.603 | - | reference | - | - | 266 (-) | 0 | 156.0 (-) | 0 |
+| dec1080-640-c11.799-1 | 11.799 | 10.310 | 9.609 | 0.701 | 0.701 | kept | 0 of 53 | - | 266 (266) | 201 | 157.3 (156.0) | 0 |
+| enc1080-512-ref | bare | 94.212 | 5.040 | 89.173 | - | reference | - | - | 152 (-) | 0 | 72.5 (-) | 130 |
+| enc1080-512-c7.029-1 | 7.029 | 5.538 | 5.040 | 0.499 | 0.499 | kept | 0 of 14 | - | 152 (152) | 124 | 73.1 (72.5) | 130 |
+| dec1080-640-c11.599-1 | 11.599 | 10.109 | 9.609 | 0.500 | 0.500 | moved | 48 of 53 | 73.13 | 286 (266) | 219 | 174.6 (156.0) | 0 |
+| dec1080-640-c11.699-1 | 11.699 | 10.208 | 9.609 | 0.600 | 0.600 | moved | 48 of 53 | 73.14 | 286 (266) | 209 | 173.3 (156.0) | 0 |
+| dec1080-640-c11.799-2 | 11.799 | 10.310 | 9.609 | 0.701 | 0.701 | kept | 0 of 53 | - | 266 (266) | 201 | 157.3 (156.0) | 0 |
+| dec1080-640-c11.699-2 | 11.699 | 10.208 | 9.609 | 0.600 | 0.600 | moved | 48 of 53 | 73.14 | 286 (266) | 209 | 173.3 (156.0) | 0 |
+| dec1080-1024-ref | bare | 94.212 | 18.971 | 75.241 | - | reference | - | - | 308 (-) | 0 | 157.3 (-) | 0 |
+| dec1080-1024-c21.212-1 | 21.212 | 19.722 | 18.971 | 0.751 | 0.751 | kept | 0 of 53 | - | 308 (308) | 152 | 159.1 (157.3) | 0 |
+| dec1080-1024-c21.012-1 | 21.012 | 19.520 | 18.923 | 0.597 | 0.549 | refused | - | - | 113 (308) | 21 | 16.9 (157.3) | 1 |
+| dec2160-1408-ref | bare | 94.212 | 34.089 | 60.123 | - | reference | - | - | 387 (-) | 0 | 202.2 (-) | 0 |
+| dec1080-1024-c21.112-1 | 21.112 | 19.622 | 18.971 | 0.651 | 0.651 | refused | - | - | 114 (308) | 108 | 70.3 (157.3) | 1 |
+| dec1080-1024-c21.212-2 | 21.212 | 19.722 | 18.971 | 0.751 | 0.751 | kept | 0 of 53 | - | 308 (308) | 152 | 159.2 (157.3) | 0 |
+| dec1080-1024-c21.112-2 | 21.112 | 19.622 | 18.971 | 0.651 | 0.651 | refused | - | - | 114 (308) | 108 | 70.4 (157.3) | 1 |
+| dec2160-1408-c36.360-1 | 36.360 | 34.870 | 32.193 | 2.678 | 0.781 | refused | - | - | 86 (387) | 3 | 19.7 (202.2) | 1 |
+| dec2160-1408-c36.560-1 | 36.560 | 35.070 | 34.089 | 0.980 | 0.980 | kept | 0 of 17 | - | 387 (387) | 22 | 202.4 (202.2) | 0 |
+| dec2160-1408-c36.460-1 | 36.460 | 34.970 | 32.193 | 2.777 | 0.880 | refused | - | - | 86 (387) | 3 | 19.5 (202.2) | 1 |
+| dec2160-1408-c36.560-2 | 36.560 | 35.070 | 34.089 | 0.980 | 0.980 | kept | 0 of 17 | - | 387 (387) | 22 | 202.2 (202.2) | 0 |
+| dec2160-1408-c36.460-2 | 36.460 | 34.970 | 32.193 | 2.777 | 0.880 | refused | - | - | 86 (387) | 3 | 19.6 (202.2) | 1 |
+| dec2160-1792-ref | bare | 94.212 | 53.999 | 40.213 | - | reference | - | - | 332 (-) | 0 | 203.0 (-) | 0 |
+| dec2160-1792-c56.349-1 | 56.349 | 54.859 | 50.850 | 4.008 | 0.859 | refused | - | - | 77 (332) | 3 | 32.3 (203.0) | 1 |
+| dec2160-1792-c56.549-1 | 56.549 | 55.060 | 53.999 | 1.060 | 1.060 | kept | 0 of 17 | - | 332 (332) | 23 | 204.0 (203.0) | 0 |
+| dec2160-1792-c56.449-1 | 56.449 | 54.958 | 53.999 | 0.959 | 0.959 | kept | 0 of 17 | - | 332 (332) | 24 | 204.2 (203.0) | 0 |
+| dec2160-1792-c56.449-2 | 56.449 | 54.958 | 53.999 | 0.959 | 0.959 | kept | 0 of 17 | - | 332 (332) | 24 | 204.3 (203.0) | 0 |
+| dec2160-1792-c56.349-2 | 56.349 | 54.859 | 50.850 | 4.008 | 0.859 | refused | - | - | 77 (332) | 3 | 32.5 (203.0) | 1 |
+| dec2160-2048-ref | bare | 94.212 | 70.004 | 24.208 | - | reference | - | - | 364 (-) | 0 | 203.9 (-) | 0 |
+| dec2160-2048-c72.394-1 | 72.394 | 70.904 | 70.004 | 0.900 | 0.900 | kept | 0 of 17 | - | 364 (364) | 17 | 205.0 (203.9) | 0 |
+| dec2160-2048-c72.194-1 | 72.194 | 70.704 | 70.004 | 0.700 | 0.700 | kept | 0 of 17 | - | 364 (364) | 17 | 204.8 (203.9) | 0 |
+| dec2160-2048-c71.994-1 | 71.994 | 70.503 | 65.771 | 4.732 | 0.499 | refused | - | - | 84 (364) | 3 | 42.9 (203.9) | 1 |
+| dec2160-2048-c72.094-1 | 72.094 | 70.605 | 65.771 | 4.833 | 0.601 | refused | - | - | 84 (364) | 3 | 42.9 (203.9) | 1 |
+| dec2160-2048-c72.194-2 | 72.194 | 70.704 | 70.004 | 0.700 | 0.700 | kept | 0 of 17 | - | 364 (364) | 17 | 204.3 (203.9) | 0 |
+| dec2160-2048-c72.094-2 | 72.094 | 70.605 | 65.771 | 4.833 | 0.601 | refused | - | - | 84 (364) | 3 | 42.8 (203.9) | 1 |
+| dec1080-1152-ref | bare | 94.212 | 22.557 | 71.655 | - | reference | - | - | 187 (-) | 0 | 152.2 (-) | 0 |
+| dec1080-1152-c24.917-1 | 24.917 | 23.427 | 22.557 | 0.870 | 0.870 | kept | 0 of 53 | - | 187 (187) | 54 | 153.2 (152.2) | 0 |
+| dec1080-1152-c24.717-1 | 24.717 | 23.228 | 22.557 | 0.671 | 0.671 | refused | - | - | 97 (187) | 33 | 52.7 (152.2) | 1 |
+| dec1080-1152-c24.817-1 | 24.817 | 23.327 | 22.557 | 0.770 | 0.770 | kept | 0 of 53 | - | 187 (187) | 55 | 153.2 (152.2) | 0 |
+| dec1080-1152-c24.817-2 | 24.817 | 23.327 | 22.557 | 0.770 | 0.770 | kept | 0 of 53 | - | 187 (187) | 55 | 153.2 (152.2) | 0 |
+| dec1080-1152-c24.717-2 | 24.717 | 23.228 | 22.557 | 0.671 | 0.671 | refused | - | - | 97 (187) | 33 | 52.6 (152.2) | 1 |
+| dec1080-1536-ref | bare | 94.212 | 29.463 | 64.749 | - | reference | - | - | 178 (-) | 0 | 151.3 (-) | 0 |
+| dec1080-1536-c31.813-1 | 31.813 | 30.323 | 29.463 | 0.860 | 0.860 | kept | 0 of 53 | - | 178 (178) | 40 | 152.2 (151.3) | 0 |
+| dec1080-1536-c31.613-1 | 31.613 | 30.122 | 28.166 | 1.957 | 0.659 | refused | - | - | 84 (178) | 3 | 16.8 (151.3) | 1 |
+| dec1080-1536-c31.713-1 | 31.713 | 30.224 | 29.463 | 0.761 | 0.761 | refused | - | - | 102 (178) | 7 | 25.7 (151.3) | 1 |
+| dec1080-1536-c31.813-2 | 31.813 | 30.323 | 29.463 | 0.860 | 0.860 | kept | 0 of 53 | - | 178 (178) | 40 | 152.2 (151.3) | 0 |
+| dec1080-1536-c31.713-2 | 31.713 | 30.224 | 29.463 | 0.761 | 0.761 | refused | - | - | 102 (178) | 7 | 25.7 (151.3) | 1 |
+| dec1080-1856-ref | bare | 94.212 | 35.168 | 59.044 | - | reference | - | - | 166 (-) | 0 | 154.2 (-) | 0 |
+| dec1080-1856-c37.527-1 | 37.527 | 36.036 | 35.168 | 0.869 | 0.869 | refused | - | - | 106 (166) | 16 | 64.0 (154.2) | 1 |
+| dec1080-1856-c37.727-1 | 37.727 | 36.237 | 35.168 | 1.070 | 1.070 | kept | 0 of 53 | - | 166 (166) | 35 | 155.2 (154.2) | 0 |
+| dec1080-1856-c37.627-1 | 37.627 | 36.138 | 35.168 | 0.970 | 0.970 | kept | 0 of 53 | - | 166 (166) | 36 | 155.3 (154.2) | 0 |
+| dec1080-1856-c37.627-2 | 37.627 | 36.138 | 35.168 | 0.970 | 0.970 | kept | 0 of 53 | - | 166 (166) | 36 | 155.3 (154.2) | 0 |
+| dec1080-1856-c37.527-2 | 37.527 | 36.036 | 35.168 | 0.869 | 0.869 | refused | - | - | 106 (166) | 16 | 64.1 (154.2) | 1 |
+| enc1080-512-c6.829-1 | 6.829 | 5.339 | 5.040 | 0.300 | 0.300 | moved | 12 of 14 | 67.51 | 172 (152) | 7 | 157.4 (72.5) | 130 |
+| enc1080-512-c6.929-1 | 6.929 | 5.439 | 5.040 | 0.399 | 0.399 | moved | 12 of 14 | 67.57 | 172 (152) | 7 | 156.3 (72.5) | 130 |
+| enc1080-512-c7.029-2 | 7.029 | 5.538 | 5.040 | 0.499 | 0.499 | kept | 0 of 14 | - | 152 (152) | 124 | 73.0 (72.5) | 130 |
+| enc1080-512-c6.929-2 | 6.929 | 5.439 | 5.040 | 0.399 | 0.399 | moved | 12 of 14 | 67.57 | 172 (152) | 7 | 156.1 (72.5) | 130 |
+| enc1080-1024-ref | bare | 94.212 | 11.996 | 82.217 | - | reference | - | - | 175 (-) | 0 | 68.5 (-) | 130 |
+| enc1080-1024-c14.036-1 | 14.036 | 12.546 | 11.996 | 0.551 | 0.551 | moved | 4 of 14 | 67.66 | 215 (175) | 161 | 73.2 (68.5) | 130 |
+| enc1080-1024-c14.235-1 | 14.235 | 12.745 | 11.996 | 0.750 | 0.750 | kept | 0 of 14 | - | 175 (175) | 112 | 69.3 (68.5) | 130 |
+| enc1080-1024-c14.135-1 | 14.135 | 12.646 | 11.996 | 0.650 | 0.650 | kept | 0 of 14 | - | 175 (175) | 134 | 69.4 (68.5) | 130 |
+| enc1080-1024-c14.135-2 | 14.135 | 12.646 | 11.996 | 0.650 | 0.650 | kept | 0 of 14 | - | 175 (175) | 134 | 69.3 (68.5) | 130 |
+| enc1080-1024-c14.036-2 | 14.036 | 12.546 | 11.996 | 0.551 | 0.551 | moved | 4 of 14 | 67.66 | 215 (175) | 161 | 73.0 (68.5) | 130 |
+| enc2160-1472-ref | bare | 94.212 | 21.258 | 72.954 | - | reference | - | - | 212 (-) | 0 | 88.3 (-) | 130 |
+| enc2160-1472-c23.368-1 | 23.368 | 21.878 | 21.258 | 0.620 | 0.620 | moved | 3 of 5 | 69.17 | 232 (212) | 46 | 93.6 (88.3) | 130 |
+| enc2160-1472-c23.568-1 | 23.568 | 22.077 | 21.258 | 0.820 | 0.820 | kept | 0 of 5 | - | 212 (212) | 52 | 88.9 (88.3) | 130 |
+| enc2160-1472-c23.468-1 | 23.468 | 21.978 | 21.258 | 0.720 | 0.720 | kept | 0 of 5 | - | 212 (212) | 60 | 89.0 (88.3) | 130 |
+| enc2160-1472-c23.468-2 | 23.468 | 21.978 | 21.258 | 0.720 | 0.720 | kept | 0 of 5 | - | 212 (212) | 60 | 89.1 (88.3) | 130 |
+| enc2160-1472-c23.368-2 | 23.368 | 21.878 | 21.258 | 0.620 | 0.620 | moved | 3 of 5 | 69.17 | 232 (212) | 46 | 93.6 (88.3) | 130 |
+| enc2160-2048-ref | bare | 94.212 | 39.277 | 54.935 | - | reference | - | - | 225 (-) | 0 | 92.2 (-) | 130 |
+| enc2160-2048-c41.437-1 | 41.437 | 39.946 | 39.277 | 0.669 | 0.669 | kept | 0 of 5 | - | 225 (225) | 16 | 92.6 (92.2) | 130 |
+| enc2160-2048-c41.237-1 | 41.237 | 39.747 | 39.277 | 0.470 | 0.470 | refused | - | - | 73 (225) | 4 | 28.5 (92.2) | 1 |
+| enc2160-2048-c41.337-1 | 41.337 | 39.847 | 39.277 | 0.570 | 0.570 | kept | 0 of 5 | - | 225 (225) | 17 | 92.6 (92.2) | 130 |
+| enc2160-2048-c41.337-2 | 41.337 | 39.847 | 39.277 | 0.570 | 0.570 | kept | 0 of 5 | - | 225 (225) | 17 | 92.6 (92.2) | 130 |
+| enc2160-2048-c41.237-2 | 41.237 | 39.747 | 39.277 | 0.470 | 0.470 | refused | - | - | 73 (225) | 4 | 28.5 (92.2) | 1 |
+| dec1080-832-ref | bare | 94.212 | 13.819 | 80.393 | - | reference | - | - | 283 (-) | 0 | 157.1 (-) | 0 |
+| dec1080-832-c16.200-1 | 16.200 | 14.710 | 13.819 | 0.891 | 0.891 | kept | 0 of 53 | - | 283 (283) | 187 | 158.6 (157.1) | 0 |
+| dec1080-832-c16.000-1 | 16.000 | 14.509 | 13.819 | 0.690 | 0.690 | moved | 48 of 53 | 72.83 | 303 (283) | 210 | 164.3 (157.1) | 0 |
+| dec1080-832-c16.100-1 | 16.100 | 14.611 | 13.819 | 0.791 | 0.791 | kept | 0 of 53 | - | 283 (283) | 194 | 158.8 (157.1) | 0 |
+| dec1080-832-c16.100-2 | 16.100 | 14.611 | 13.819 | 0.791 | 0.791 | kept | 0 of 53 | - | 283 (283) | 194 | 159.0 (157.1) | 0 |
+| dec1080-832-c16.000-2 | 16.000 | 14.509 | 13.819 | 0.690 | 0.690 | moved | 48 of 53 | 72.83 | 303 (283) | 210 | 164.8 (157.1) | 0 |
+| dec2160-1216-ref | bare | 94.212 | 25.922 | 68.290 | - | reference | - | - | 351 (-) | 0 | 203.4 (-) | 0 |
+| dec2160-1216-c28.292-1 | 28.292 | 26.802 | 25.922 | 0.880 | 0.880 | kept | 0 of 17 | - | 351 (351) | 48 | 204.2 (203.4) | 0 |
+| dec2160-1216-c28.093-1 | 28.093 | 26.603 | 25.342 | 1.261 | 0.680 | refused | - | - | 89 (351) | 7 | 14.8 (203.4) | 1 |
+| dec2160-1216-c28.193-1 | 28.193 | 26.702 | 25.342 | 1.361 | 0.780 | refused | - | - | 89 (351) | 7 | 14.8 (203.4) | 1 |
+| dec2160-1216-c28.292-2 | 28.292 | 26.802 | 25.922 | 0.880 | 0.880 | kept | 0 of 17 | - | 351 (351) | 48 | 204.3 (203.4) | 0 |
+| dec2160-1216-c28.193-2 | 28.193 | 26.702 | 25.342 | 1.361 | 0.780 | refused | - | - | 89 (351) | 7 | 14.9 (203.4) | 1 |
+| dec2160-1600-ref | bare | 94.212 | 43.479 | 50.733 | - | reference | - | - | 379 (-) | 0 | 202.0 (-) | 0 |
+| dec2160-1600-c45.859-1 | 45.859 | 44.368 | 40.927 | 3.441 | 0.890 | refused | - | - | 84 (379) | 2 | 25.6 (202.0) | 1 |
+| dec2160-1600-c46.059-1 | 46.059 | 44.570 | 43.479 | 1.091 | 1.091 | kept | 0 of 17 | - | 379 (379) | 20 | 202.6 (202.0) | 0 |
+| dec2160-1600-c45.959-1 | 45.959 | 44.468 | 43.479 | 0.989 | 0.989 | kept | 0 of 17 | - | 379 (379) | 20 | 202.8 (202.0) | 0 |
+| dec2160-1600-c45.959-2 | 45.959 | 44.468 | 43.479 | 0.989 | 0.989 | kept | 0 of 17 | - | 379 (379) | 20 | 202.8 (202.0) | 0 |
+| dec2160-1600-c45.859-2 | 45.859 | 44.368 | 40.927 | 3.441 | 0.890 | refused | - | - | 84 (379) | 2 | 25.7 (202.0) | 1 |
+| dec2160-1920-ref | bare | 94.212 | 61.686 | 32.526 | - | reference | - | - | 309 (-) | 0 | 205.9 (-) | 0 |
+| dec2160-1920-c64.077-1 | 64.077 | 62.587 | 61.686 | 0.901 | 0.901 | refused | - | - | 104 (309) | 7 | 58.1 (205.9) | 1 |
+| dec2160-1920-c64.277-1 | 64.277 | 62.786 | 61.686 | 1.100 | 1.100 | kept | 0 of 17 | - | 309 (309) | 28 | 207.0 (205.9) | 0 |
+| dec2160-1920-c64.177-1 | 64.177 | 62.687 | 61.686 | 1.000 | 1.000 | refused | - | - | 104 (309) | 7 | 57.8 (205.9) | 1 |
+| dec2160-1920-c64.277-2 | 64.277 | 62.786 | 61.686 | 1.100 | 1.100 | kept | 0 of 17 | - | 309 (309) | 28 | 207.3 (205.9) | 0 |
+| dec2160-1920-c64.177-2 | 64.177 | 62.687 | 61.686 | 1.000 | 1.000 | refused | - | - | 104 (309) | 7 | 58.1 (205.9) | 1 |
+| dec1080-1344-ref | bare | 94.212 | 26.024 | 68.188 | - | reference | - | - | 186 (-) | 0 | 152.5 (-) | 0 |
+| dec1080-1344-c28.435-1 | 28.435 | 26.945 | 26.024 | 0.920 | 0.920 | kept | 0 of 53 | - | 186 (186) | 44 | 153.3 (152.5) | 0 |
+| dec1080-1344-c28.235-1 | 28.235 | 26.745 | 26.024 | 0.721 | 0.721 | refused | - | - | 100 (186) | 24 | 53.9 (152.5) | 1 |
+| dec1080-1344-c28.335-1 | 28.335 | 26.845 | 26.024 | 0.821 | 0.821 | kept | 0 of 53 | - | 186 (186) | 51 | 153.5 (152.5) | 0 |
+| dec1080-1344-c28.335-2 | 28.335 | 26.845 | 26.024 | 0.821 | 0.821 | kept | 0 of 53 | - | 186 (186) | 51 | 153.5 (152.5) | 0 |
+| dec1080-1344-c28.235-2 | 28.235 | 26.745 | 26.024 | 0.721 | 0.721 | refused | - | - | 100 (186) | 24 | 53.8 (152.5) | 1 |
+| dec1080-1728-ref | bare | 94.212 | 32.907 | 61.306 | - | reference | - | - | 166 (-) | 0 | 152.9 (-) | 0 |
+| dec1080-1728-c35.317-1 | 35.317 | 33.827 | 32.907 | 0.921 | 0.921 | kept | 0 of 53 | - | 166 (166) | 39 | 154.0 (152.9) | 0 |
+| dec1080-1728-c35.117-1 | 35.117 | 33.626 | 32.907 | 0.720 | 0.720 | refused | - | - | 102 (166) | 7 | 29.1 (152.9) | 1 |
+| dec1080-1728-c35.217-1 | 35.217 | 33.728 | 32.907 | 0.821 | 0.821 | refused | - | - | 102 (166) | 13 | 49.4 (152.9) | 1 |
+| dec1080-1728-c35.317-2 | 35.317 | 33.827 | 32.907 | 0.921 | 0.921 | kept | 0 of 53 | - | 166 (166) | 39 | 154.0 (152.9) | 0 |
+| dec1080-1728-c35.217-2 | 35.217 | 33.728 | 32.907 | 0.821 | 0.821 | refused | - | - | 102 (166) | 13 | 49.4 (152.9) | 1 |
+| dec1080-704-ref | bare | 94.212 | 11.309 | 82.903 | - | reference | - | - | 294 (-) | 0 | 151.6 (-) | 0 |
+| dec1080-704-c13.719-1 | 13.719 | 12.230 | 11.309 | 0.920 | 0.920 | kept | 0 of 53 | - | 294 (294) | 100 | 152.5 (151.6) | 0 |
+| dec1080-704-c13.519-1 | 13.519 | 12.029 | 11.309 | 0.719 | 0.719 | moved | 8 of 53 | 77.50 | 314 (294) | 123 | 153.7 (151.6) | 0 |
+| dec1080-704-c13.619-1 | 13.619 | 12.128 | 11.309 | 0.819 | 0.819 | kept | 0 of 53 | - | 294 (294) | 102 | 152.3 (151.6) | 0 |
+| dec1080-704-c13.619-2 | 13.619 | 12.128 | 11.309 | 0.819 | 0.819 | kept | 0 of 53 | - | 294 (294) | 102 | 152.2 (151.6) | 0 |
+| dec1080-704-c13.519-2 | 13.519 | 12.029 | 11.309 | 0.719 | 0.719 | moved | 8 of 53 | 77.50 | 314 (294) | 123 | 153.6 (151.6) | 0 |
+| dec1080-768-ref | bare | 94.212 | 12.624 | 81.588 | - | reference | - | - | 290 (-) | 0 | 156.3 (-) | 0 |
+| dec1080-768-c15.035-1 | 15.035 | 13.544 | 12.624 | 0.920 | 0.920 | kept | 0 of 53 | - | 290 (290) | 65 | 156.9 (156.3) | 0 |
+| dec1080-768-c14.835-1 | 14.835 | 13.345 | 12.624 | 0.720 | 0.720 | kept | 0 of 53 | - | 290 (290) | 92 | 157.2 (156.3) | 0 |
+| dec1080-768-c14.635-1 | 14.635 | 13.146 | 12.356 | 0.789 | 0.521 | moved | 15 of 53 | 78.53 | 310 (290) | 144 | 159.5 (156.3) | 0 |
+| dec1080-768-c14.735-1 | 14.735 | 13.245 | 12.611 | 0.634 | 0.621 | moved | 7 of 53 | 89.80 | 310 (290) | 95 | 157.6 (156.3) | 0 |
+
 ### What follows for seedvr2x
 
 - **The room can't be 0.** At 0.6 GiB left a pass's convolutions lose their workspaces: the run
@@ -302,6 +827,13 @@ keeps the reference's frames and all the later ones differ, and the pass is slow
   decode in 1472-px tiles by 0.52, a 4K one in 2048-px tiles by 5.35).
 - **The 0.4 GiB of an encode** is part of what keeps an encode's frames today: to be judged with
   the floor, not before.
+- **The floor by tile size** (2026-10-16, passes alone, on this card and allocator): see
+  [its section](#the-floor-by-tile-size-and-its-cause-2026-10-16). A VAE pass is left at least
+  the room and the budget's 0.6 GiB beyond its predicted peak: 2.1 GiB with the room at 1.5.
+- **A run can't see a fallback for free on `cudaMallocAsync`:** torch counts no refusal there;
+  the cuDNN frontend's log does. Under torch's own allocator, `num_ooms` across a unit would count
+  each refused workspace (its source; not measured). The pass's time is untried as a signal: on
+  the power-capped card it drifts from run to run.
 
 ## Caveats
 
@@ -316,6 +848,15 @@ keeps the reference's frames and all the later ones differ, and the pass is slow
   picture; the allocator's pool is fed the same sizes whatever the content.
 - **A driver that gives memory the card doesn't have** (seedvr2x holds itself to the card there,
   under torch's own allocator) was not measured here.
+- **Passes alone** (the floor by tile size): a whole run with the same room left lost frames a
+  pass alone kept (640-px tiles: 48 of 53 moved with 0.70 GiB left in a whole run, none alone),
+  and a pass alone in a new process starts with no plan cached.
+- **The large tiles' frames' floor is unmeasured:** from 1,024 px a decode is refused first, at
+  the concatenation the held one-output cure removes; for the tiles that cure takes, main's
+  ladders are main's record, and their floor under the cure is to measure with it.
+- **A rung ran once or twice,** the deciding ones twice but the 768-px decode's (its ladder
+  unfinished: the queue was ended before they ran again); the 38 rungs that ran twice agreed
+  each time, in outcome and frames (the moved ones with the same other frames).
 
 ## Reproduce
 
@@ -335,4 +876,17 @@ python vae_room.py run --name NAME --records RECORDS --work WORK --vram-cap vram
 # a queue of runs, one hold of the lock each; then the tables
 python vae_room.py queue QUEUE.txt --records RECORDS --lock LOCK --copy SEEDVR2X --want TREE
 python vae_room.py table RECORDS
+
+# the frames' floor by tile size: a shape's units once, then the ladders (one lock hold a rung),
+# then the tables
+python floor.py --dir DIR --python PYTHON --copy SEEDVR2X --want TREE --models MODELS \
+    --clips CLIPS --lock LOCK seed 1080
+python floor.py --dir DIR --python PYTHON --copy SEEDVR2X --want TREE --models MODELS \
+    --clips CLIPS --lock LOCK queue
+python floor.py --dir DIR table
+python floor.py --dir DIR detector
+
+# what cudaMallocAsync lets a run see of a refused request; one convolution short of memory
+python alloc_probe.py
+CUDNN_FRONTEND_LOG_INFO=1 CUDNN_FRONTEND_LOG_FILE=stderr python conv_probe.py
 ```
