@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-19 11:10 CEST
+Last update: 2026-10-19 19:00 CEST
 
 ## 0. Setup
 
@@ -348,10 +348,14 @@ down to 577 MHz in some sessions). Values hold, times don't.
       not 1.10, clip A's frames in `--prepend_frames`; stitching.md: 0.52–1.05, 35.7–36.3 dB,
       37–39.6 dB, the short last latent window at 36.3 dB; vram.md: +0.02); each doc's Reproduce
       block says what waits for the GPU
-- [ ] Numerics: a shot's end padded by repeating its last frame (ByteDance) against mirroring it
-      (numz): the repeat arm on cuts.md's 29 cut shots, then the 8 clips cut to 42 and 44 frames
-      (about 1.2 GPU h); the decode's chroma kernel: Catmull-Rom, spline36 and lanczos on the 8
-      clips against the existing runs, whose inputs had bilinear chroma (about 0.5 GPU h)
+- [x] Numerics (2026-10-19, 116 runs, 7.0 GPU h on the faulty card): a shot's end padded by
+      repeating its last frame (ByteDance) beats mirroring it (numz) on the shot's last frame
+      (+3.4 dB PSNR-Y at 42 frames, two seeds; +1.3 dB on cuts.md's 31 shots alone), nothing worse
+      over the whole shot; one padded frame costs the frame before the last 1.1 dB, and a batch
+      merged across a cut changes by a seed's distance (cuts.md). The decode's chroma kernel:
+      Catmull-Rom, spline36 and lanczos leave luma within the seed band after `split` but move the
+      output's chroma away from the GT (Catmull-Rom −0.17 / −0.25 dB Cb / Cr, 5 of 8 clips each),
+      bilinear the best (numerics.md)
 - [ ] The lost records' runs, back to back on the healthy card where times matter: stitching's
       cost model, the benchmarking reference and drift, vram.md's time and memory models,
       attention.md, quality.md's and output.md's times (about 5.4 GPU h; 7 h with the numerics

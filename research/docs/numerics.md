@@ -70,6 +70,15 @@ of 3 seeds):
   slices on. `threads=1` on zscale (libavfilter's generic per-filter option) restores the
   single-slice bytes for 2.5 ms per 1080p frame
   ([The master's chroma](#the-masters-chroma-420-kernels-and-zscales-slices)).
+- **The decode's chroma kernel: bilinear gives the model's output cleaner colour.** Reading the
+  4:2:0 input with Catmull-Rom (seedvr2x's reader), spline36 or lanczos instead of bilinear
+  leaves luma within the seed band once `split` corrects (PSNR-Y, SSIM and the temporal errors on
+  8 of 8 clips; VMAF better on 2, the low-frequency colour error better on 1 and worse on 1), but
+  the output's chroma moves away from the GT, more with each sharper kernel: with Catmull-Rom and
+  `split`, PSNR-Cb −0.17 dB and PSNR-Cr −0.25 dB on average, worse on 5 of 8 clips each and
+  better on none, more ringing on 6. The same holds against GTs made with the sharper kernels.
+  One seed per kernel, a small effect
+  ([The decode's chroma](#the-decodes-chroma-the-kernel-the-models-input-is-read-with)).
 - **The resize kernel is second order:** torchvision's bicubic without antialiasing adds a
   little low-frequency colour error and flicker on 7 of 7 clips (live-slow: every metric worse).
   The sharper zimg kernels help a little on some grainy or detailed clips (lanczos on the
@@ -994,6 +1003,84 @@ checksum change with the machine's CPU count, and a 10-bit source reads off the 
 conversion. The review sheets (`chroma-<clip>.png`, [Visual review](#visual-review)) show 3
 crops per clip where the GT's colour edges are sharpest.
 
+## The decode's chroma: the kernel the model's input is read with
+
+A 4:2:0 source reaches the model as RGB: its chroma is upsampled first. seedvr2x reads with
+zscale's Catmull-Rom (bicubic, b = 0, c = 0.5; [DESIGN.md](../../seedvr2x/DESIGN.md#input)),
+while every input of this study so far was read with zscale's default, bilinear
+([`fr_clips.py`](../scripts/fr_clips.py)'s `zscale_to_rgb` sets no kernel). `fr_clips.py
+chroma` decodes a clip's x264 intermediate again with another kernel, the rest of the chain
+unchanged; on the 8 clips the inputs differ from the bilinear ones on 2.4–18.9% of the samples
+(Catmull-Rom; up to 24 levels on anime-bright, PSNR 45.5–64.4 dB over RGB), the sharper kernels
+more. The 24 runs (8 clips × Catmull-Rom, spline36, lanczos, seed 42, the default's settings,
+`--color_correction none`) dumped their raw decode, so `split:ycc:4:3` (seedvr2x's correction)
+was rendered from it as the colour study renders it
+([`colour_eval.py`](../scripts/colour_eval.py) `render`); the bilinear arm is the default's
+three seeds, whose `split` comes from the colour study's dumps of the same runs.
+[`chroma_kernels.py`](../scripts/chroma_kernels.py) `input` scores the chroma: PSNR-Cb and
+PSNR-Cr, ΔE00, ΔE00 on colour edges and ringing as for [the master's
+chroma](#the-masters-chroma-420-kernels-and-zscales-slices), against the GT, against the
+source's own 4:2:0 planes (the output brought to 4:2:0 the same way for every arm) and against
+GTs whose chroma was upsampled with Catmull-Rom or lanczos: the GT's own chroma came through
+bilinear, which could favour the bilinear arm.
+
+Checks: the catrom input is seedvr2x's reader's output, frame for frame (framemd5, 8 of 8 clips);
+bilinear re-derived equals the existing inputs (8 of 8); a bilinear run made again equals the
+default's seed-42 master, 45 of 45 frames; the colour study's dumps equal the default's masters
+sample for sample (seeds 42, 43, 1234, 8 clips); each run's dump equals its master.
+
+Each kernel against bilinear, seed 42 paired with seed 42, means over the 8 clips (range); the
+verdict counts clips beyond the default's 3-seed spread (better / worse):
+
+| | Catmull-Rom, `none` | Catmull-Rom, `split` | spline36, `split` | lanczos, `split` |
+|---|---:|---:|---:|---:|
+| PSNR-Y | −0.00 (0 / 0) | −0.02 (0 / 0) | −0.03 (0 / 0) | −0.04 (0 / 0) |
+| VMAF | −0.40 (0 / 3) | +0.08 (2 / 0) | +0.02 (2 / 0) | −0.01 (2 / 0) |
+| ΔE00 lf | +0.022 (1 / 2) | +0.003 (1 / 1) | +0.006 (1 / 1) | +0.007 (1 / 1) |
+| PSNR-Cb | −0.22 (0 / 5) | −0.17 (0 / 5) | −0.23 (0 / 5) | −0.26 (0 / 6) |
+| PSNR-Cr | −0.26 (0 / 4) | −0.25 (0 / 5) | −0.33 (0 / 7) | −0.37 (0 / 7) |
+| ΔE00 on colour edges | +0.20 (0 / 4) | +0.16 (0 / 4) | +0.21 (0 / 4) | +0.24 (0 / 4) |
+| Ringing, % of samples | +0.87 (0 / 3) | +0.37 (0 / 6) | +0.52 (0 / 6) | +0.59 (0 / 6) |
+| PSNR-Cb / Cr against the source's 4:2:0 | −0.17 / −0.22 | −0.04 / −0.11 (2, 1 / 3, 3) | −0.06 / −0.16 | −0.08 / −0.19 |
+
+- **Luma and the usual metrics hardly see the kernel once `split` corrects:** PSNR-Y, SSIM and
+  the temporal errors within the seed band on 8 of 8 clips for every kernel; VMAF within but on
+  two clips where every kernel is better (cartoon-bright +0.31 to +0.41, live-slow +0.24 to
+  +0.25); the low-frequency colour error within on 6, worse on anime-bright (+0.040 to +0.071),
+  better on cartoon-bright. LPIPS and DISTS after `split` have no seed spread of their own (seed
+  42 only); against the default's spread of the same clip without correction, LPIPS is worse on
+  anime-bright for every kernel (+0.0020 to +0.0036, against 0.0017), better on live-slow with
+  spline36 (−0.0002 against 0.0001), within elsewhere; DISTS within on 8 of 8 with Catmull-Rom
+  (lanczos: worse on anime-bright, better on cartoon-bright).
+  Without correction Catmull-Rom costs VMAF on 3 clips (−0.85 at most) and LPIPS on 3 (+0.0027 at
+  most).
+- **The output's chroma is further from the GT, the more so the sharper the kernel:** bilinear,
+  then Catmull-Rom, spline36, lanczos, on every chroma measure's mean, with and without `split`.
+  With `split`, no kernel beats bilinear on PSNR-Cb, PSNR-Cr, colour edges or ringing on any
+  clip (without correction, lanczos once: anime-sky's PSNR-Cb, +0.03 dB).
+  The largest: anime-bright on Cr and its edges (Catmull-Rom with `split`: Cb / Cr −0.39 /
+  −0.76 dB, edge ΔE00 +0.70; lanczos −0.62 / −1.16, +1.16), anime-clean on Cb (−0.40). The flat and
+  dark clips (anime-dark, anime-sky, live-vfx) hardly move. The model keeps the input's sharper
+  chroma, overshoot included, where the GT's colour edges are softer.
+- **Not the GT's bilinear chroma:** against GTs made with Catmull-Rom or lanczos the verdicts
+  stay (Catmull-Rom with `split`: PSNR-Cb and Cr worse on 5 clips each, edges on 3, ringing on 5;
+  better on none). Against the source's own 4:2:0 planes, the reference with no upsampling at
+  all, the loss shrinks (−0.04 / −0.11 dB) and splits (Cb better on 2 clips, worse on 3).
+- **`split` keeps most of it.** It takes the input's low band of colour, which the kernel
+  shapes too: the growth of ringing beyond 2 levels halves (Catmull-Rom +0.87 → +0.37 points),
+  the share beyond 0.5 level grows a little more (+0.49 → +0.63), and the PSNR-Cb/Cr loss stays
+  nearly whole.
+
+So: bilinear is the better kernel for the decode, as it is for the master's chroma, by a small
+margin on colour alone (a few tenths of a dB of chroma, edges a few percent cleaner on saturated
+animation), with no loss on luma: reading with bilinear loses no detail the metrics see.
+[DESIGN.md](../../seedvr2x/DESIGN.md#input) chose Catmull-Rom so that every interpolation feeding
+the model would be the same kernel as the resize before it (Keys' cubic); measured, that
+consistency buys nothing here, and bilinear's softer chroma edges, which DESIGN.md counts against
+it, are what the output gains from. The reader converts at the source's size, so the kernel only
+touches chroma (its luma moves by RGB rounding alone: Y' 62–71 dB between the bilinear and
+Catmull-Rom inputs).
+
 ## Live action and a bright anime
 
 Three clips from three more sources ([Clips](#clips)): live-vfx and live-slow, letterboxed live
@@ -1117,6 +1204,11 @@ the default (`max`, any frame) and, for padding, where its bottom 16 rows differ
   chroma is itself 4:2:0 upsampled with bilinear: the model's chroma detail beyond 4:2:0 can't be
   checked against any of these sources. The conversion is deterministic once on one slice;
   zscale's slice behaviour was seen with ffmpeg n9.0.2 and may change with the version.
+- **The decode's kernels ran on one seed each** (42), against the default's three-seed spread;
+  LPIPS and DISTS after `split` have no spread of their own. The inputs are this protocol's
+  (half size in Y'CbCr, x264 at CRF 20, so chroma at a quarter of the GT's size per axis): a
+  source whose chroma holds more detail, or a 4:2:0 source read at its own size, may weigh the
+  kernels differently. No visual review of these runs yet.
 - **The latent grid was measured on single 45-frame batches** at 1080p from per-frame scores
   already computed; frames 1–44 (11 groups) per clip, no 4K, no other weights.
 - **Banding has one measure, CAMBI,** whole-frame (on the sky clip, mostly bright gradients); it
@@ -1219,6 +1311,13 @@ python3 $S/chroma_kernels.py timing --src MODEL.mkv --json timing.json
 python3 $S/chroma_kernels.py summary scores/*.json --frm frm --q1 m/d1-lab --proof proof/*.json \
   --siting siting.json --threads-json threads.json --gtcheck gtcheck.json --upcheck up.json \
   --srcchroma srcchroma/*.json --timing timing.json --md summary.md
+# the decode's chroma kernel: the input read again with other kernels, then one run per kernel
+# (as the default's, with colour_dump.py for `split`), `split` rendered from its dump, the scores
+python3 $S/fr_clips.py chroma $C/anime-clean --kernels catrom,spline36,lanczos --out inputs
+python3 $S/chroma_kernels.py input --clip anime-clean-d1 --gt $C/anime-clean.gt.mkv \
+  --src $C/anime-clean.src.mkv --base DEF-S42.mkv --out cin-catrom 42 CATROM-S42.mkv --json-dir chroma/none
+python3 $S/chroma_kernels.py input-summary chroma/none --default def > chroma-none.md
+python3 $S/fr_metrics.py --summary metrics/none --default def > none.md
 # zscale's slices, standalone (ffmpeg + zimg only, e.g. for an FFmpeg report): one testsrc2 frame
 DOWN="zscale=rin=full:pin=709:tin=709:m=709:r=limited:p=709:t=709:d=none:c=left,format=yuv420p10le"
 UP="zscale=min=709:rin=limited:cin=left:pin=709:tin=709:m=gbr:r=full:p=709:t=709:d=none:f=bicubic"

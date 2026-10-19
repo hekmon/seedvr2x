@@ -8,6 +8,9 @@
   cut_metrics.py join A.mkv B.mkv ... --out AB.mkv                   # lossless concatenation
   cut_metrics.py selftest GT.mkv --cut C [--out OUT.mkv]             # ghost coefficient on known mixes
   cut_metrics.py phase RUN.json ... --base BASE.json ... [--metrics psnr_y,lpips,vmaf]  # latent grid
+  cut_metrics.py tail --pair LABEL:A.json:B.json[:FIRST[:FRAMES]] ... [--noise JSON ...] [--names mirror,repeat]
+                 [--ends 1,2,4,8] [--depth 12] [--q 0.95] [--json OUT]   # two arms by distance to a shot's end
+  cut_metrics.py tail --check                                         # the same on synthetic series
   cut_metrics.py summary JSON ...                                     # Markdown table of analyses
 
 Why: SeedVR2 packs 4 frames per latent and runs causal VAE passes and windowed DiT attention, so
@@ -74,6 +77,24 @@ group's last). Each run is compared frame by frame with its clip's baseline (--b
 the JSONs' clip; a bicubic upscale, whose own values show whether the input has a pattern of its
 own), oriented as the run's gain (> 0 = closer to the GT), then averaged per place over the frames
 after the first and over the runs; plus the gap between places 3 and 1, per run.
+
+`tail` compares two renderings of the same shots that differ at the shot's end (a batch that isn't
+4n + 1 frames long is padded there: by its end mirrored, numz, arm A, or by its last frame
+repeated, ByteDance, arm B), both scored against the same ground truth. A shot is frames FIRST to
+FIRST + FRAMES - 1 of both JSONs (default: all of them), e.g. one shot of two joined ones. Per
+metric, the difference B - A in the metric's unit, per frame by distance to the shot's last frame
+(0 = the last frame; a temporal error at the distance of its second frame, the transition into the
+shot's first frame left out), as means over the whole shot and over its last N frames (--ends),
+per shot and over the shots, and the mean over the shots at each distance (--depth of them).
+Against the seed band of the same mean: the spread (max - min) of that mean over the seeds of the
+shot's own clip, same frames, when --noise (or the arms) hold at least two seeds of it; else,
+marked ~, the --q quantile of |seed-to-seed difference| of an n-frame mean, pooled over every pair
+of seeds and every place of the n frames in the --noise groups (`analyze`'s groups and pairs).
+Verdicts: over the whole shot, numerics.md's (better or worse = B closer to or further from the
+ground truth: the 95% interval of the mean difference, a moving-block bootstrap over the frames,
+excludes 0 and the mean exceeds the band; else within); over the last N frames, where a bootstrap
+has too few frames, beyond the band or within it. --check runs it on synthetic series with known
+differences, bands and verdicts.
 
 `join` concatenates RGB masters (FFV1, same size and pixel format) into one FFV1 master of the
 same format, without any pixel conversion, and checks it by framemd5 against its parts.
@@ -224,12 +245,18 @@ def smooth(v, n, cut=None):
     return out
 
 
-def noise_band(jsons, keys, q, n_smooth=1):
-    """Per metric: the q quantile of per-frame |differences| between renderings that differ only by
-    their seed, pooled over every pair of seeds within each (clip, variant, frames) group."""
+def seed_groups(jsons):
+    """Renderings that differ only by their seed: (clip, variant, frames) -> {seed: result}."""
     groups = {}
     for r in jsons:
         groups.setdefault((r.get("clip"), r.get("variant"), r.get("frames")), {})[str(r.get("seed"))] = r
+    return groups
+
+
+def noise_band(jsons, keys, q, n_smooth=1):
+    """Per metric: the q quantile of per-frame |differences| between renderings that differ only by
+    their seed, pooled over every pair of seeds within each (clip, variant, frames) group."""
+    groups = seed_groups(jsons)
     pooled = {k: [] for k in keys}
     pairs = []
     for (clip, variant, n), by_seed in sorted(groups.items(), key=lambda kv: str(kv[0])):
@@ -632,6 +659,7 @@ def cmd_first(a):
 # ------------------------------------------------------------------ phase
 
 PHASE_KEYS = "psnr_y,lpips,vmaf"
+TAIL_ENDS = "1,2,4,8"
 
 
 def latent_pos(t, first=0):
@@ -676,6 +704,295 @@ def cmd_phase(a):
             print(f"| {clip} | {len(runs)} | " + " | ".join(df.format(float(np.nanmean(per[p]))) for p in range(4)) +
                   f" | {df.format(float(np.mean(gaps)))} ({df.format(min(gaps))}…{df.format(max(gaps))}) | " +
                   " / ".join(f.format(x) for x in bp) + " |")
+
+
+# ------------------------------------------------------------------ tail
+
+def tail_pad(n):
+    """Frames appended to a batch of n frames to reach 4n + 1 (the VAE's first latent holds 1 frame)."""
+    return (1 - n) % 4
+
+
+def frame_series(r, key):
+    """A metric's series on frames: a per-transition one at its second frame (frame 0 has none)."""
+    s = series(r, key)
+    if s is not None and BY_KEY[key][3]:
+        s = np.concatenate([[np.nan], s])
+    return s
+
+
+def finite_mean(v):
+    v = np.asarray(v, dtype=float)
+    v = v[np.isfinite(v)]
+    return float(v.mean()) if v.size else None
+
+
+def window_band(groups, key, n, q):
+    """The q quantile of |mean over n consecutive frames| of the seed-to-seed differences, pooled
+    over every pair of seeds of every group and every place of the n frames (a series shorter than
+    n: its whole mean). Returns (band, values pooled)."""
+    vals = []
+    for by_seed in groups.values():
+        seeds = sorted(by_seed)
+        for i in range(len(seeds)):
+            for j in range(i + 1, len(seeds)):
+                x, y = frame_series(by_seed[seeds[i]], key), frame_series(by_seed[seeds[j]], key)
+                if x is None or y is None:
+                    continue
+                m = min(len(x), len(y))
+                d = x[:m] - y[:m]
+                w = min(n, m)
+                vals += [abs(v) for v in (finite_mean(d[t:t + w]) for t in range(m - w + 1)) if v is not None]
+    return (float(np.quantile(vals, q)), len(vals)) if vals else (None, 0)
+
+
+def own_spread(groups, clip, key, lo, hi):
+    """The seed spread of a metric's mean over frames lo..hi-1 of a clip: max - min over the seeds
+    of a group of that clip, the largest over its groups of two seeds or more (None: no such group)."""
+    best = None
+    for (c, _, _), by_seed in groups.items():
+        if c != clip or len(by_seed) < 2:
+            continue
+        means = []
+        for r in by_seed.values():
+            s = frame_series(r, key)
+            means.append(finite_mean(s[lo:hi]) if s is not None and len(s) >= hi else None)
+        if any(m is None for m in means):
+            continue
+        best = max(best or 0.0, max(means) - min(means))
+    return best
+
+
+def boot_ci(d, block, n_boot, rng):
+    """95% interval of the mean of a per-frame difference series: a moving-block bootstrap over the
+    frames (blocks of `block` frames, neighbouring frames are correlated), as fr_metrics.py --summary."""
+    n = len(d)
+    size = min(block, n)
+    starts = rng.integers(0, n - size + 1, size=(n_boot, -(-n // size)))
+    idx = (starts[:, :, None] + np.arange(size)).reshape(n_boot, -1)[:, :n]
+    stats = d[idx].mean(axis=1)
+    return float(np.percentile(stats, 2.5)), float(np.percentile(stats, 97.5))
+
+
+def tail_stats(pairs, noise, ends, depth, q, block, n_boot):
+    """pairs: (label, result A, result B, first, frames). See the module docstring."""
+    keys = [k for k, *_ in METRICS if all(series(ra, k) is not None and series(rb, k) is not None
+                                          for _, ra, rb, _, _ in pairs)]
+    seen, jsons = set(), []
+    for r in list(noise) + [r for _, ra, rb, _, _ in pairs for r in (ra, rb)]:
+        if r["_file"] not in seen:
+            seen.add(r["_file"])
+            jsons.append(r)
+    groups = seed_groups(jsons)
+    rng = np.random.default_rng(0)
+    pooled = {}
+    wins = ["all"] + [str(n) for n in ends]
+    shots = []
+    for label, ra, rb, first, frames in pairs:
+        sh = {"label": label, "clip": ra.get("clip"), "first": first, "frames": frames, "pad": tail_pad(frames),
+              "a": ra["_file"], "b": rb["_file"], "diff": {}, "windows": {w: {} for w in wins}}
+        for k in keys:
+            d = frame_series(rb, k)[first:first + frames] - frame_series(ra, k)[first:first + frames]
+            if BY_KEY[k][3]:
+                d[0] = np.nan  # the transition into the shot's first frame is not the shot's
+            sh["diff"][k] = d[::-1].tolist()  # by distance to the last frame
+            for w in wins:
+                n = frames if w == "all" else int(w)
+                fin = d[frames - n:][np.isfinite(d[frames - n:])] if n <= frames else np.array([])
+                if not fin.size:
+                    continue
+                mean = float(fin.mean())
+                band, src = own_spread(groups, ra.get("clip"), k, first + frames - n, first + frames), "own"
+                if band is None:
+                    if (k, n) not in pooled:
+                        pooled[k, n] = window_band(groups, k, n, q)
+                    band, src = pooled[k, n][0], "pooled"
+                ci = boot_ci(fin, block, n_boot, rng) if w == "all" and fin.size > 1 else None
+                verdict = None
+                if band is not None:
+                    sure = ci is None or ci[0] > 0 or ci[1] < 0
+                    verdict = "within" if not (sure and abs(mean) > band) else \
+                        "better" if (mean > 0) == BY_KEY[k][2] else "worse"
+                sh["windows"][w][k] = {"mean": mean, "ci": ci, "band": band, "band_from": src, "verdict": verdict,
+                                       "frames": int(fin.size)}
+        shots.append(sh)
+    frame_band = {k: window_band(groups, k, 1, q) for k in keys}
+    by_dist = []
+    for e in range(depth):
+        row = {"distance": e, "metrics": {}}
+        for k in keys:
+            v = [sh["diff"][k][e] for sh in shots if e < sh["frames"] and np.isfinite(sh["diff"][k][e])]
+            if not v:
+                continue
+            b = frame_band[k][0]
+            up = [x for x in v if b is not None and abs(x) > b and (x > 0) == BY_KEY[k][2]]
+            down = [x for x in v if b is not None and abs(x) > b and (x > 0) != BY_KEY[k][2]]
+            row["metrics"][k] = {"mean": float(np.mean(v)), "shots": len(v), "better": len(up), "worse": len(down)}
+        by_dist.append(row)
+    return {"keys": keys, "q": q, "ends": ends, "block": block, "shots": shots, "by_distance": by_dist,
+            "frame_band": {k: {"band": b, "values": n} for k, (b, n) in frame_band.items()},
+            "pooled_band": {f"{k}/{n}": {"band": b, "values": c} for (k, n), (b, c) in pooled.items()},
+            "seed_groups": [f"{c}/{v} ({n} frames): s" + ", s".join(sorted(g)) for (c, v, n), g in
+                            sorted(groups.items(), key=lambda kv: str(kv[0])) if len(g) > 1]}
+
+
+def tail_report(res, names):
+    keys, shots = res["keys"], res["shots"]
+    na, nb = names
+    print(f"## `{nb}` − `{na}` by distance to the shot's last frame ({len(shots)} shots)\n")
+    print(f"Differences `{nb}` − `{na}` in each metric's unit ("
+          + ", ".join(BY_KEY[k][1] for k in keys if BY_KEY[k][2]) + ": higher is better; "
+          + ", ".join(BY_KEY[k][1] for k in keys if not BY_KEY[k][2]) + f": lower is better). **better** / **worse**: "
+          f"`{nb}` closer to / further from the ground truth, beyond the seed band of the same mean (whole shot: and "
+          f"the 95% interval of the mean, a block bootstrap over {res['block']}-frame blocks, excludes 0); no word: "
+          f"within it. Band: the spread of that mean over the seeds of the shot's own clip, same frames; marked ~: "
+          f"the {res['q']:.2f} quantile of |seed-to-seed difference| of an n-frame mean, pooled over the seed pairs. "
+          f"Seeds: {'; '.join(res['seed_groups']) or 'none (no band, no verdict)'}.\n")
+    for w in ["all"] + [str(n) for n in res["ends"]]:
+        rows = [sh for sh in shots if sh["windows"][w]]
+        if not rows:
+            continue
+        print("### " + ("Whole shot" if w == "all" else f"Last {w} frame{'s' if w != '1' else ''}") + "\n")
+        print("| Shot | Frames (padded by) | " + " | ".join(BY_KEY[k][1] for k in keys) + " |")
+        print("|---|---|" + "---|" * len(keys))
+        for sh in rows:
+            cells = []
+            for k in keys:
+                x = sh["windows"][w].get(k)
+                if not x:
+                    cells.append("–")
+                    continue
+                word = f" **{x['verdict']}**" if x["verdict"] in ("better", "worse") else ""
+                cells.append(fmt(x["mean"], BY_KEY[k][5]) + ("~" if x["band_from"] == "pooled" else "") + word)
+            print(f"| {sh['label']} | {sh['frames']} ({sh['pad']}) | " + " | ".join(cells) + " |")
+        means, counts = [], []
+        for k in keys:
+            xs = [sh["windows"][w][k] for sh in rows if k in sh["windows"][w]]
+            means.append(fmt(float(np.mean([x["mean"] for x in xs])), BY_KEY[k][5]) if xs else "–")
+            counts.append(" / ".join(str(sum(x["verdict"] == v for x in xs)) for v in ("better", "worse", "within")))
+        print(f"| mean of {len(rows)} shots | | " + " | ".join(means) + " |")
+        print("| better / worse / within | | " + " | ".join(counts) + " |\n")
+    print("### By distance to the last frame\n")
+    print("Mean over the shots that have the frame (shots: better / worse than the band of one frame, the "
+          f"{res['q']:.2f} quantile of per-frame |seed-to-seed differences|: "
+          + ", ".join(f"{BY_KEY[k][1]} {fmt(res['frame_band'][k]['band'], BY_KEY[k][5].replace('+', ''))}"
+                      for k in keys) + ").\n")
+    print("| Distance | Shots | " + " | ".join(BY_KEY[k][1] for k in keys) + " |")
+    print("|---|---|" + "---|" * len(keys))
+    for row in res["by_distance"]:
+        m = row["metrics"]
+        if not m:
+            continue
+        cells = [f"{fmt(m[k]['mean'], BY_KEY[k][5])} ({m[k]['better']} / {m[k]['worse']})" if k in m else "–"
+                 for k in keys]
+        print(f"| {row['distance']} | {max(x['shots'] for x in m.values())} | " + " | ".join(cells) + " |")
+
+
+def tail_check():
+    """`tail` on synthetic series: known differences at the end, known seed spreads."""
+    rng = np.random.default_rng(3)
+    base = {k: rng.normal(30.0 if BY_KEY[k][2] else 0.2, 0.05, 60) for k in BY_KEY}
+
+    def fake(clip, variant, seed, n, shift=0.0, bump=None, first=0, junk=0.0):
+        pf, pt = {}, {}
+        for k, v in base.items():
+            x = v[:n] + shift
+            for e, b in (bump or {}).items():
+                x[first + (bump_n or n) - 1 - e] += b
+            x[first + (bump_n or n):] += junk
+            (pt if BY_KEY[k][3] else pf)[k] = (x[1:] if BY_KEY[k][3] else x).tolist()
+        return {"clip": clip, "variant": variant, "seed": seed, "frames": n, "per_frame": pf, "per_transition": pt,
+                "_file": f"{clip}.{variant}.s{seed}"}
+
+    bump_n = None
+    seeds = [fake("c1", "def", 42, 45), fake("c1", "def", 43, 45, 0.10), fake("c1", "def", 1234, 45, -0.05)]
+    bump = {0: 1.0, 1: 0.5, 2: 0.2}
+    a1, b1 = fake("c1", "a", 42, 42), fake("c1", "b", 42, 42, bump=bump)
+    bump_n = 22  # a 22-frame shot from frame 10 of joined 60-frame series, a clip without seeds
+    a2, b2 = fake("c2", "a", 42, 60, first=10), fake("c2", "b", 42, 60, bump={0: 1.0}, first=10, junk=5.0)
+    res = tail_stats([("s1", a1, b1, 0, 42), ("s2", a2, b2, 10, 22)], seeds, [1, 2, 4, 8], 6, 0.95, 8, 500)
+    ok = True
+
+    def report(name, good, detail=""):
+        nonlocal ok
+        ok &= bool(good)
+        print(f"{'ok  ' if good else 'FAIL'} {name}{': ' + detail if detail else ''}")
+
+    s1, s2 = res["shots"]
+
+    def near(x, y):
+        return abs(x - y) < 1e-9
+
+    report("padding: 42 frames get 3, 44 get 1, 45 none, 22 get 3, 2 get 3",
+           [tail_pad(n) for n in (42, 44, 45, 22, 2, 1)] == [3, 1, 0, 3, 3, 0])
+    report("by distance: the known differences at 0, 1, 2 and none at 3, every metric",
+           all(np.allclose(s1["diff"][k][:4], [1.0, 0.5, 0.2, 0.0]) for k in res["keys"]))
+    report("a temporal error sits at its second frame; the transition into the shot's first frame is left out",
+           all(np.isnan(s1["diff"][k][41]) and np.isnan(s2["diff"][k][21]) for k in res["keys"] if BY_KEY[k][3])
+           and all(np.isfinite(s2["diff"][k][21]) for k in res["keys"] if not BY_KEY[k][3]))
+    report("a shot inside joined series: its own frames only (the frames after it differ by 5)",
+           all(near(s2["diff"][k][0], 1.0) and max(abs(x) for x in s2["diff"][k][1:21]) < 1e-9 for k in res["keys"]))
+    w = s1["windows"]
+    report("window means: whole shot 1.7 / 42 (41 transitions), last 1, 2, 4, 8 frames: 1, 0.75, 0.425, 0.2125",
+           all(near(w["all"][k]["mean"], 1.7 / (41 if BY_KEY[k][3] else 42)) and near(w["1"][k]["mean"], 1.0)
+               and near(w["2"][k]["mean"], 0.75) and near(w["4"][k]["mean"], 0.425)
+               and near(w["8"][k]["mean"], 0.2125) for k in res["keys"]))
+    report("own band: the clip's seed spread, max - min of 3 seeds (0.15), same frames",
+           all(near(w[x][k]["band"], 0.15) and w[x][k]["band_from"] == "own" for x in w for k in res["keys"]))
+    report("pooled band for a clip without seeds: the 0.95 quantile of the pairs' |differences| (0.05, 0.10, 0.15)",
+           all(near(x[k]["band"], 0.15) and x[k]["band_from"] == "pooled" for x in s2["windows"].values()
+               for k in x))
+    report("verdicts: within over the whole shot (0.04 < 0.15), beyond the band over the last 1 to 8 frames, "
+           "better where higher is better, worse where lower is",
+           all(w["all"][k]["verdict"] == "within" and all(
+               w[x][k]["verdict"] == ("better" if BY_KEY[k][2] else "worse") for x in ("1", "2", "4", "8"))
+               for k in res["keys"]))
+    report("a window longer than the shot is left out; the 22-frame shot: last frame beyond, whole shot within",
+           "8" in s2["windows"] and all(s2["windows"]["all"][k]["verdict"] == "within"
+                                        and s2["windows"]["1"][k]["verdict"] in ("better", "worse")
+                                        for k in res["keys"])
+           and not tail_stats([("s3", a1, b1, 39, 3)], seeds, [1, 4], 3, 0.95, 8, 100)["shots"][0]["windows"]["4"])
+    d0 = res["by_distance"][0]["metrics"]
+    report("pooled by distance: the mean of the two shots at 0 (1.0), both beyond the band of one frame",
+           all(near(d0[k]["mean"], 1.0) and d0[k]["shots"] == 2
+               and (d0[k]["better"], d0[k]["worse"]) == ((2, 0) if BY_KEY[k][2] else (0, 2)) for k in res["keys"]))
+    print()
+    tail_report(res, ("mirror", "repeat"))
+    print("\ntail check", "ok" if ok else "FAILED")
+    sys.exit(0 if ok else 1)
+
+
+def cmd_tail(a):
+    if a.check:
+        return tail_check()
+    if not a.pair:
+        raise SystemExit("tail: --pair LABEL:A.json:B.json[:FIRST[:FRAMES]] expected (or --check)")
+    names = tuple(a.names.split(","))
+    if len(names) != 2:
+        raise SystemExit(f"--names {a.names}: two names expected, arm A's and arm B's")
+    pairs = []
+    for spec in a.pair:
+        f = spec.split(":")
+        if not 3 <= len(f) <= 5:
+            raise SystemExit(f"--pair {spec}: LABEL:A.json:B.json[:FIRST[:FRAMES]] expected")
+        ra, rb = load(f[1]), load(f[2])
+        first = int(f[3]) if len(f) > 3 and f[3] else 0
+        frames = int(f[4]) if len(f) > 4 else min(ra["frames"], rb["frames"]) - first
+        if first < 0 or frames < 1 or first + frames > min(ra["frames"], rb["frames"]):
+            raise SystemExit(f"--pair {spec}: frames {first}..{first + frames - 1} are not in both JSONs "
+                             f"({ra['frames']} and {rb['frames']} frames)")
+        if ra.get("gt") != rb.get("gt"):
+            log(f"warning: {f[0]}: different ground truths: {ra.get('gt')} / {rb.get('gt')}")
+        pairs.append((f[0], ra, rb, first, frames))
+    ends = [int(x) for x in a.ends.split(",") if x.strip()]
+    res = tail_stats(pairs, [load(p) for p in a.noise or []], ends, a.depth, a.q, a.block, a.boot)
+    res["names"] = list(names)
+    tail_report(res, names)
+    if a.json:
+        os.makedirs(os.path.dirname(os.path.abspath(a.json)), exist_ok=True)
+        with open(a.json, "w", encoding="utf-8") as f:
+            json.dump(res, f, allow_nan=True)
+        print(f"\n-> {a.json}")
 
 
 # ------------------------------------------------------------------ summary
@@ -764,11 +1081,24 @@ def main():
                    help="fr_metrics JSON of a clip's baseline (e.g. bicubic), matched on its clip; repeatable")
     s.add_argument("--metrics", default=PHASE_KEYS, help=f"per-frame metrics (default {PHASE_KEYS})")
     s.add_argument("--first", type=int, default=0, help="index of the unit's first frame (default 0)")
+    s = sub.add_parser("tail", help="two arms of the same shots by distance to the shot's last frame")
+    s.add_argument("--pair", action="append", metavar="LABEL:A.json:B.json[:FIRST[:FRAMES]]",
+                   help="fr_metrics JSONs of a shot's two arms (B - A is reported); FIRST, FRAMES: the shot's "
+                        "frames in both (default: all)")
+    s.add_argument("--noise", nargs="+", metavar="JSON", help="fr_metrics JSONs of seed variants (the bands)")
+    s.add_argument("--names", default="mirror,repeat", help="the arms' names, A,B (default mirror,repeat)")
+    s.add_argument("--ends", default=TAIL_ENDS, help=f"last N frames averaged (default {TAIL_ENDS})")
+    s.add_argument("--depth", type=int, default=12, help="distances to the last frame listed (default 12)")
+    s.add_argument("--q", type=float, default=0.95, help="pooled band quantile (default 0.95)")
+    s.add_argument("--block", type=int, default=8, help="bootstrap block length, frames (default 8)")
+    s.add_argument("--boot", type=int, default=2000, help="bootstrap resamples (default 2000)")
+    s.add_argument("--json", help="write every figure here")
+    s.add_argument("--check", action="store_true", help="run on synthetic series with known answers")
     s = sub.add_parser("summary", help="Markdown table of analysis JSONs (files or directories)")
     s.add_argument("files", nargs="+")
     a = ap.parse_args()
     {"analyze": cmd_analyze, "compare": cmd_compare, "first": cmd_first, "join": cmd_join,
-     "selftest": cmd_selftest, "phase": cmd_phase, "summary": cmd_summary}[a.cmd](a)
+     "selftest": cmd_selftest, "phase": cmd_phase, "tail": cmd_tail, "summary": cmd_summary}[a.cmd](a)
 
 
 if __name__ == "__main__":

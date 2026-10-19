@@ -53,6 +53,18 @@ Switches (environment):
       reflect>=R+black+N: reflect at least R rows (the fewest r >= R that reach a multiple of 16;
       columns the same way, only where numz pads columns), then the same N rows (and columns) of
       zeros: at 1080p reflect>=8+black+16 is reflect+black+16 (r = 8), at 720p it reflects 16.
+  NUM_TAIL=mirror|repeat
+      The frames appended to a batch that isn't 4n + 1 frames long (the VAE's first latent holds 1
+      frame, every next one 4), trimmed after the decode (numz and ByteDance: sample[:ori_length]).
+      mirror (numz, generation_utils.py pad_video_temporal): the frames before the last one,
+      backwards: 42 frames get 40, 39, 38 (a 2-frame batch gets its last frame three times).
+      repeat (ByteDance, inference_seedvr2_7b.py cut_videos): the last frame, as many times.
+      Both pad to the same count. The patch is pad_video_temporal's append path, numz's one
+      function for it: once per batch in Phase 1 before the transform chain (ByteDance pads after
+      its own; the chain works frame by frame), once more for Phase 4's colour reference, and
+      --uniform_batch_size's padding of a short last batch to --batch_size. --prepend_frames
+      (frames before the first one) stays numz's. With --temporal_overlap every batch is padded
+      on its own. One line per batch length logs what was appended.
   NUM_ATTN=auto|fp16
       auto (numz): FlashAttentionVarlen casts q/k/v to the pipeline's compute dtype (bfloat16 when
       the GPU runs a bfloat16 cuBLAS matmul). fp16: to float16 instead (7B and 3B), with autocast
@@ -133,12 +145,14 @@ Switches (environment):
   NUM_CHECK=1
       Logs once each: the dtypes of q/k/v entering FlashAttentionVarlen and the attention kernel
       (with the autocast state), the RoPE buffers and angle table, the resize input and output,
-      the padding, the transform chain's output, the VAE encoder's input and whether it returned
-      the mode or a sample, the Conv3d workaround and TF32 flags, the DiT norms' input and output
-      dtypes, the VAE decode's autocast state and the VAE norms' input and output dtypes, the
-      decode's latent and weight dtypes and TF32 flags with the decoder output's range, and the
-      frames' dtype after Phase 3 and Phase 4. Probes that never fired are listed at exit. Reads
-      only: no numerical change and no random draw.
+      the padding, the frames appended to a batch (which source frames, checked against the
+      tensor, and whether the other NUM_TAIL would append the same), the transform chain's output,
+      the VAE encoder's input and whether it returned the mode or a sample, the Conv3d workaround
+      and TF32 flags, the DiT norms' input and output dtypes, the VAE decode's autocast state and
+      the VAE norms' input and output dtypes, the decode's latent and weight dtypes and TF32 flags
+      with the decoder output's range, and the frames' dtype after Phase 3 and Phase 4. Probes
+      that never fired are listed at exit (tail: no batch was padded). Reads only: no numerical
+      change and no random draw.
   NUM_FFMPEG       ffmpeg binary for the zimg resize (default: ffmpeg on PATH; it needs zscale)
 
 The active settings are logged in one line at startup, the patches applied at exit. Single GPU
@@ -148,7 +162,7 @@ Usage (cwd = the SeedVR2 checkout, its venv's python):
   python numerics_patch.py inference_cli.py <CLI args>
   python3 bench.py run NAME --wrap numerics_patch.py --wrap ffv1_out.py --env NUM_ROPE=fp32 \\
       --env NUM_CHECK=1 -- <CLI args> --color_correction none        # chained with ffv1_out.py
-  python numerics_patch.py --selftest    # zimg resize, 8-bit recovery, padding, labties (CPU, needs ffmpeg)
+  python numerics_patch.py --selftest    # zimg resize, 8-bit recovery, padding, tail, labties (CPU, needs ffmpeg)
 """
 import argparse
 import atexit
@@ -171,6 +185,7 @@ CHOICES = {  # the first value is numz's behaviour, the default
     "NUM_PREP": ("bf16", "fp32"),
     "NUM_RESIZE": ("tv-aa", "tv-noaa", "zimg-spline36", "zimg-lanczos"),
     "NUM_PAD": ("zero", "reflect", "replicate", "grey"),  # and black+N, reflect[>=R]+black+N: pad_extra()
+    "NUM_TAIL": ("mirror", "repeat"),
     "NUM_ATTN": ("auto", "fp16"),
     "NUM_NORM": ("fp32", "bf16"),
     "NUM_VAE_AUTOCAST": ("0", "1"),
@@ -185,8 +200,8 @@ CC_METHODS = ("lab", "wavelet", "wavelet_adaptive", "hsv", "adain")
 CC_VARIANTS = {"labties": "lab"}  # NUM_CC_EXTRA variants: the numz method each one runs, patched
 ATTN_KERNELS = ("call_flash_attn_2_varlen", "call_flash_attn_3_varlen", "call_sage_attn_2_varlen",
                 "call_sage_attn_3_varlen", "pytorch_varlen_attention")
-PROBES = ("attention", "attention kernel", "RoPE buffers", "RoPE table", "resize", "pad", "chain", "VAE encode",
-          "norm", "VAE decode", "VAE norm", "decode", "output")
+PROBES = ("attention", "attention kernel", "RoPE buffers", "RoPE table", "resize", "pad", "tail", "chain",
+          "VAE encode", "norm", "VAE decode", "VAE norm", "decode", "output")
 
 
 def log(msg):
@@ -223,6 +238,7 @@ class State:
         self.tf32, self.conv3d, self.check = o["NUM_TF32"], o["NUM_CONV3D_WA"], o["NUM_CHECK"] == "1"
         self.norm, self.vae_ac = o["NUM_NORM"], o["NUM_VAE_AUTOCAST"] == "1"
         self.decode = o["NUM_DECODE"]
+        self.tail = o["NUM_TAIL"]
         self.out32 = o["NUM_OUT32"] == "1" or self.decode != "bf16"
         self.dec_hooks = o["NUM_DECODE_HOOKS"] == "1" or (o["NUM_DECODE_HOOKS"] == "auto" and self.decode == "fp16")
         if self.vae_ac and self.decode != "bf16":
@@ -250,10 +266,13 @@ class State:
         self.vae_raw = None         # the VAE file's state dict as stored (CPU), read when the VAE is loaded
         self.vae_numz_dtype = None  # the VAE's dtype before the decode swapped its weights
         self.in_decode = None       # NUM_OUT32: numz's compute dtype while decode_all_batches runs
+        self.tail_fn = None         # NUM_TAIL: the patched pad_video_temporal
+        self.tail_padded = 0        # batches it appended frames to
 
     def summary(self):
         items = [("rope", self.rope, "fp16"), ("vae", self.vae, "mode"), ("prep", self.prep, "bf16"),
-                 ("resize", self.resize, "tv-aa"), ("pad", self.pad, "zero"), ("attn", self.attn, "auto"),
+                 ("resize", self.resize, "tv-aa"), ("pad", self.pad, "zero"), ("tail", self.tail, "mirror"),
+                 ("attn", self.attn, "auto"),
                  ("norm", self.norm, "fp32"), ("vae_autocast", "1" if self.vae_ac else "0", "0"),
                  ("decode", self.decode, "bf16"), ("out32", "1" if self.out32 else "0", "0"),
                  ("decode_hooks", "1" if self.dec_hooks else "0", "0"),
@@ -784,6 +803,9 @@ def exact_fp32(x):
 
 
 def patch_gen_phases(mod):
+    if S.tail_fn is not None and getattr(mod, "pad_video_temporal", None) is not S.tail_fn:
+        mod.pad_video_temporal = S.tail_fn  # imported by value before the patch: not seen so far
+        S.patched.append(f"{mod.__name__}.pad_video_temporal (set again: imported by value)")
     if not (S.prep == "fp32" or S.out32 or S.check):
         return
     import torch
@@ -968,7 +990,74 @@ class Probe:
         return y
 
 
+def tail_count(t, count=0):
+    """Frames numz's pad_video_temporal appends to t frames: `count`, or up to 4n + 1 when 0."""
+    if count:
+        return max(count, 0)
+    return 0 if t % 4 == 1 else ((t - 1) // 4 + 1) * 4 + 1 - t
+
+
+def tail_sources(t, n, mode):
+    """The source frame each of the n frames appended to t frames is a copy of. repeat: the last
+    one. mirror (numz, generation_utils.py:642-654): the frames before the last one, backwards
+    (t-2, t-3...); when n >= t (lines 630-640), frames t-1...1 backwards, then the last one again."""
+    if mode == "repeat":
+        return [t - 1] * n
+    if n < t:
+        return [t - 2 - j for j in range(n)]
+    return list(range(t - 1, 0, -1)) + [t - 1] * (n - t + 1)
+
+
+def tail_frames(videos, sources, dim):
+    """The frames `sources` of videos (indices along dim), in that order."""
+    import torch
+    return videos.index_select(dim, torch.as_tensor(sources, dtype=torch.long, device=videos.device))
+
+
+def patch_tail(mod):
+    """pad_video_temporal's appended frames: every batch's padding to 4n + 1 frames (Phase 1, and
+    Phase 4's colour reference) and --uniform_batch_size's. Its prepend path stays numz's."""
+    if S.tail == "mirror" and not S.check:
+        return
+    import torch
+    orig = mod.pad_video_temporal
+    sig = inspect.signature(orig)
+
+    def pad_video_temporal(*a, **k):
+        b = sig.bind(*a, **k)
+        b.apply_defaults()
+        videos, dim = b.arguments["videos"], b.arguments["temporal_dim"]
+        t = videos.size(dim)
+        n = 0 if b.arguments["prepend"] else tail_count(t, b.arguments["count"])
+        if n <= 0:
+            return orig(*a, **k)
+        if S.tail == "repeat":
+            out = torch.cat([videos, tail_frames(videos, tail_sources(t, n, "repeat"), dim)], dim=dim)
+            once(("tail", t, n), f"tail repeat: {t} -> {t + n} frames, the last frame appended {n} time"
+                 f"{'s' if n > 1 else ''} (numz mirrors frames {tail_sources(t, n, 'mirror')})")
+        else:
+            out = orig(*a, **k)
+        S.tail_padded += 1
+        if want("tail", (t, n, dim)):
+            other = "mirror" if S.tail == "repeat" else "repeat"
+            src, alt = tail_sources(t, n, S.tail), tail_sources(t, n, other)
+            got = out.narrow(dim, t, n) if out.size(dim) == t + n else None
+            good = got is not None and torch.equal(out.narrow(dim, 0, t), videos) \
+                and torch.equal(got, tail_frames(videos, src, dim))
+            alike = got is not None and torch.equal(got, tail_frames(videos, alt, dim))
+            log(f"check: tail: {S.tail}: {t} -> {out.size(dim)} frames ({n} appended, dim {dim} of {tuple(videos.shape)}, "
+                f"{dt(videos.dtype)} on {videos.device.type}); the first {t} unchanged and the appended ones = "
+                f"source frames {src}: {good}; {other} would append {alt}: "
+                f"{'the same pixels' if alike else 'other pixels'}")
+        return out
+
+    mod.pad_video_temporal = S.tail_fn = pad_video_temporal
+    if S.tail == "repeat":
+        S.patched.append(f"{mod.__name__}.pad_video_temporal (frames appended to a batch: the last frame repeated)")
+
+
 def patch_gen_utils(mod):
+    patch_tail(mod)
     if S.resize == "tv-aa" and S.pad == "zero" and not S.check:
         return
     orig = mod.prepare_video_transforms
@@ -1238,6 +1327,8 @@ def install():
 def at_exit():
     close_extras()
     log("patched: " + ("; ".join(S.patched) if S.patched else "nothing (numz defaults)"))
+    if S.tail == "repeat" and not S.tail_padded:
+        log("tail repeat: no batch was padded (every batch 4n + 1 frames long): nothing changed")
     if S.check:
         missing = [p for p in PROBES if p not in S.probed]
         log("check: no call seen for: " + ", ".join(missing) if missing else "check: every probe fired")
@@ -1379,8 +1470,94 @@ def selftest():
                  and bool((y7[..., 736:, :] == 0).all()))
         report(f"pad reflect>=8+black+16 {dt(d)}: = reflect+black+16 at 1080 rows; 16 reflected, then 16 zeros, "
                f"at 720", same and good7, str(tuple(y7.shape)))
-    # NUM_NORM=bf16 on stand-ins for numz's CustomRMSNorm / CustomLayerNorm, under CPU autocast
+    # NUM_TAIL: numz's pad_video_temporal written out (generation_utils.py:598-654), the frames it
+    # appends as tail_sources lists them, the patch on it, and ByteDance's count
     import types
+
+    def numz_tail(videos, count=0, temporal_dim=1, prepend=False, debug=None):
+        t = videos.size(temporal_dim)
+        if count == 0 and not prepend:
+            if t % 4 == 1:
+                return videos
+            count = ((t - 1) // 4 + 1) * 4 + 1 - t
+        if count <= 0:
+            return videos
+        sel = (lambda a, b: videos[a:b]) if temporal_dim == 0 else (lambda a, b: videos[:, a:b])
+        if count >= t:
+            reps = [1] * videos.dim()
+            reps[temporal_dim] = count - t + 1
+            last, rev = sel(-1, None).repeat(*reps), sel(1, None).flip(temporal_dim)
+            return torch.cat([last, rev, videos] if prepend else [videos, rev, last], dim=temporal_dim)
+        rev = (sel(1, count + 1) if prepend else sel(-count - 1, -1)).flip(temporal_dim)
+        return torch.cat([rev, videos] if prepend else [videos, rev], dim=temporal_dim)
+
+    def bytedance_count(t):  # inference_seedvr2_7b.py:178-196, cut_videos with sp_size 1
+        if t == 1 or (t > 4 and (t - 1) % 4 == 0):
+            return 0
+        return 4 - t + 1 if t <= 4 else 4 - (t - 1) % 4
+
+    report("tail: numz's count to 4n + 1 frames is ByteDance's, 1 to 40 frames",
+           all(tail_count(t) == bytedance_count(t) and (t + tail_count(t)) % 4 == 1 for t in range(1, 41)),
+           str([tail_count(t) for t in range(1, 10)]))
+    report("tail: 42 frames get 40, 39, 38 (mirror) or 41 three times (repeat); 2 frames the same either way",
+           tail_sources(42, 3, "mirror") == [40, 39, 38] and tail_sources(42, 3, "repeat") == [41] * 3
+           and tail_sources(44, 1, "mirror") == [42] and tail_sources(2, 3, "mirror") == tail_sources(2, 3, "repeat"))
+    saved = S.tail, S.check, list(S.patched), S.tail_fn, S.tail_padded, set(S.once), set(S.seen), set(S.probed)
+    good = {"sources": True, "repeat": True, "mirror": True, "prepend": True}
+    real_log, lines = log, []
+    globals()["log"] = lines.append  # one line per padded length: kept, two shown
+    for dim in (0, 1):  # TCHW (the uniform padding) and CTHW (the 4n + 1 padding)
+        for t in range(1, 14):
+            v = torch.rand((t, 3, 4, 6) if dim == 0 else (3, t, 4, 6)).to(torch.bfloat16)
+            for count in (0, 1, 2, 3, t, t + 2):
+                n = tail_count(t, count)
+                ref = numz_tail(v, count=count, temporal_dim=dim)
+                good["sources"] &= ref.size(dim) == t + n and (n == 0 or torch.equal(
+                    ref.narrow(dim, t, n), tail_frames(v, tail_sources(t, n, "mirror"), dim)))
+                for mode in ("repeat", "mirror"):
+                    S.tail, S.check = mode, mode == "mirror" and (t, count) in ((6, 0), (2, 0))  # two check lines
+                    ns = types.SimpleNamespace(__name__="selftest.core.generation_utils", pad_video_temporal=numz_tail)
+                    patch_tail(ns)
+                    got = ns.pad_video_temporal(v, count=count, temporal_dim=dim, prepend=False, debug=None)
+                    if mode == "mirror":
+                        good["mirror"] &= torch.equal(got, ref) and (ns.pad_video_temporal is numz_tail) != S.check
+                    else:
+                        last = v.narrow(dim, t - 1, 1)
+                        good["repeat"] &= (got.size(dim) == t + n and torch.equal(got.narrow(dim, 0, t), v)
+                                           and all(torch.equal(got.narrow(dim, t + j, 1), last) for j in range(n)))
+                        if count:
+                            good["prepend"] &= torch.equal(
+                                ns.pad_video_temporal(v, count=count, temporal_dim=dim, prepend=True),
+                                numz_tail(v, count=count, temporal_dim=dim, prepend=True))
+    padded = S.tail_padded - saved[4]
+    globals()["log"] = real_log
+    S.tail, S.check, S.patched[:], S.tail_fn, S.tail_padded, S.once, S.seen, S.probed = saved
+    for line in [m for m in lines if m.startswith("check: tail")][:2] + [m for m in lines if m.startswith("tail")][:1]:
+        print(f"     {line}")
+    report("tail: tail_sources lists the frames numz appends (written-out numz; 1 to 13 frames, both layouts, the "
+           "count to 4n + 1 and given counts up to past the length)", good["sources"])
+    report("tail repeat: the frames kept, the last one appended to numz's count", good["repeat"], f"{padded} paddings")
+    report("tail mirror: unpatched without NUM_CHECK, numz's output with it", good["mirror"])
+    report("tail repeat: the prepend path is numz's", good["prepend"])
+    cwd_path = os.getcwd()
+    sys.path.insert(0, cwd_path)
+    try:
+        numz_own = importlib.import_module("src.core.generation_utils").pad_video_temporal  # run from the checkout
+    except Exception as e:  # noqa: BLE001
+        report("tail vs numz's own pad_video_temporal: skipped (run from the checkout)", True, f"{type(e).__name__}")
+    else:
+        same = True
+        for dim in (0, 1):
+            for t in range(1, 14):
+                v = torch.rand((t, 3, 4, 6) if dim == 0 else (3, t, 4, 6))
+                for count in (0, 1, 2, 3, t, t + 2):
+                    for pre in ((False, True) if count else (False,)):
+                        same &= torch.equal(numz_own(v, count=count, temporal_dim=dim, prepend=pre),
+                                            numz_tail(v, count=count, temporal_dim=dim, prepend=pre))
+        report("tail vs numz's own pad_video_temporal: the written-out copy gives its output (append and prepend)", same)
+    finally:
+        sys.path.remove(cwd_path)
+    # NUM_NORM=bf16 on stand-ins for numz's CustomRMSNorm / CustomLayerNorm, under CPU autocast
 
     class RMS(torch.nn.Module):  # numz's CustomRMSNorm.forward
         def __init__(self):

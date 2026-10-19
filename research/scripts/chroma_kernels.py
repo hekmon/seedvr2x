@@ -19,6 +19,9 @@
   chroma_kernels.py summary SCORE.json ... [--frm FRM_DIR] [--q1 Q1_JSON_DIR] [--proof P.json ...]
                     [--siting S.json] [--threads-json T.json] [--gtcheck G.json ...] [--upcheck U.json ...]
                     [--srcchroma C.json ...] [--timing T.json] [--md OUT.md]
+  chroma_kernels.py input --clip NAME --gt GT.mkv --src SRC.mkv --out VARIANT SEED OUT.mkv [--out ...]
+                    --json-dir DIR [--base BASE.mkv] [--gt-kernels catrom,lanczos] [--frames N] [--threads 1]
+  chroma_kernels.py input-summary JSON_OR_DIR ... --default VARIANT [--block 8] [--boot 2000]
 
 Why: seedvr2x's default master is FFV1 yuv420p10le, converted from the 16-bit RGB frames exactly
 as ffv1_out.py does it (zscale: BT.709 matrix, limited range, chroma sited left, no dither, zscale's
@@ -125,8 +128,34 @@ fr_metrics on the round trips (one call per clip, the GT decoded once):
   fr_metrics.py GT.mkv --clip NAME --json-dir FRM --threads 16 --vmaf-threads 16 \\
     --out src 42 MODEL.mkv --out bilinear 42 DIR/NAME/model.bilinear.rgb.mkv ...  (every variant)
 
-Needs the metrics venv (numpy, opencv, scikit-image; fr_metrics.py and ffv1_out.py next to this
-file) and ffmpeg/ffprobe with zimg (n9.0.2 measured).
+`input`, the other side (docs/numerics.md, The decode's chroma): outputs of runs whose 4:2:0 input
+was brought to RGB with different chroma kernels (fr_clips.py chroma), scored for what a chroma
+kernel can move. Per frame, each output (a 16-bit RGB master, any number in lockstep):
+- against the GT, `score`'s measures: psnr_y, psnr_cb, psnr_cr, de00_s0, de00_edge, ring_share,
+  ring05_share
+- against the GT made again from --src (fr_clips.py's src.mkv) with each of --gt-kernels, by
+  fr_clips.py's own chain with its `chroma` filter (imported): psnr_cb_K, psnr_cr_K, de00_edge_K
+  (CIEDE2000 on that GT's own chroma edges, computed there only) and ring_share_K. The GT's chroma
+  was upsampled from the source's 4:2:0 with zscale's default, bilinear, which could favour the arm
+  whose input was read with bilinear; a GT upsampled with the arm's own kernel leans the other way.
+  The bilinear one is made again too and must equal the GT sample for sample, every frame, or the
+  run stops: the chain is the GT's
+- against the source's own 4:2:0 chroma, which no upsampling touched: the output through
+  ffv1_out.py's yuv420p10le chain (the default master's, the same for every arm), its Cb and Cr
+  planes against src.mkv's sample for sample (`srcchroma`'s): psnr_cb_src, psnr_cr_src
+- with --base BASE.mkv (the output of the arm the others are compared with: the default's run at
+  the same seed), how far the output is from it: psnr_y_base, psnr_cb_base, psnr_cr_base, and
+  mad_base, the mean |difference| over R, G and B in 8-bit levels (not for BASE.mkv itself)
+One JSON per output, DIR/NAME.VARIANT.sSEED.json, in fr_metrics.py's layout (clip, variant, seed,
+per_frame, means), and DIR/NAME.gt.s0.json for the GT itself (its own 4:2:0 against the source's,
+and how far each re-made GT is from it): give the measures a directory of their own.
+`input-summary`: fr_metrics.py's --summary on these JSONs (its code, imported, with these measures
+for its metrics): means, the seed band of --default (the spread of its seeds' means), and every
+other variant paired with it by seed, frame by frame, better or worse when the bootstrap interval
+excludes 0 and the difference exceeds the band; the GT's row is a reference.
+
+Needs the metrics venv (numpy, opencv, scikit-image; fr_metrics.py, ffv1_out.py and fr_clips.py next
+to this file) and ffmpeg/ffprobe with zimg (n9.0.2 measured).
 """
 import argparse
 import json
@@ -147,6 +176,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import ffv1_out as O  # noqa: E402  the chain under test
+import fr_clips as C  # `input`: the GT's own chain, its chroma filter set
 import fr_metrics as F  # noqa: E402  decoding, luma, CIELAB and CIEDE2000 as fr_metrics computes them
 
 FFMPEG, FFPROBE = F.FFMPEG, F.FFPROBE
@@ -500,17 +530,18 @@ def cmd_upcheck(a):
         json.dump(res, fh, indent=1)
 
 
-def chroma_planes(path, threads=2):
+def chroma_planes(path, threads=2, vf=None):
     """Yield the Cb, Cr planes of a 4:2:0 file (yuv420p10le or yuv420p) as float64 on the 8-bit scale, centred
-    (Cb, Cr in [-127.5, 127.5]: (code - 128 s) / (224 s) * 255)."""
+    (Cb, Cr in [-127.5, 127.5]: (code - 128 s) / (224 s) * 255). vf: an RGB master instead, through that
+    chain to yuv420p10le first (down_vf)."""
     st = F.probe(path)
-    W, H, fmt = st["width"], st["height"], st["pix_fmt"]
+    W, H, fmt = st["width"], st["height"], "yuv420p10le" if vf else st["pix_fmt"]
     s = {"yuv420p10le": 4, "yuv420p": 1}[fmt]
     dt = np.dtype("<u2") if s == 4 else np.dtype(np.uint8)
     c = (W // 2) * (H // 2)
     size = (W * H + 2 * c) * dt.itemsize
     p = subprocess.Popen([FFMPEG, "-v", "error", "-nostdin", "-threads", str(threads), "-i", path, "-map", "0:v:0",
-                          "-f", "rawvideo", "-pix_fmt", fmt, "-"], stdout=subprocess.PIPE)
+                          *(["-vf", vf] if vf else []), "-f", "rawvideo", "-pix_fmt", fmt, "-"], stdout=subprocess.PIPE)
     try:
         while True:
             buf = p.stdout.read(size)
@@ -776,6 +807,158 @@ def cmd_score(a):
                                              f"{mm['ring_src05_share']:.3f}%) p99.9 {mm['ring_src_p999']:.2f} max "
                                              f"{mm['ring_src_max']:.2f}" if "ring_src_share" in mm else ""))
     log(f"{a.clip}: {n} frames, {len(streams)} streams in {res['seconds']} s -> {a.json}")
+
+
+# ------------------------------------------------------------------ input (the decode's chroma)
+
+IN_METRICS = [  # key, title, higher is better, format: fr_metrics.py's METRICS, for its summary
+    ("psnr_y", "PSNR-Y", True, "{:.3f}"), ("psnr_cb", "PSNR-Cb", True, "{:.3f}"), ("psnr_cr", "PSNR-Cr", True, "{:.3f}"),
+    ("de00_s0", "ΔE00", False, "{:.4f}"), ("de00_edge", "edge ΔE00", False, "{:.4f}"),
+    ("ring_share", "ring %", False, "{:.3f}"), ("ring05_share", "ring>0.5 %", False, "{:.3f}"),
+    ("psnr_cb_src", "PSNR-Cb, source 4:2:0", True, "{:.3f}"), ("psnr_cr_src", "PSNR-Cr, source 4:2:0", True, "{:.3f}"),
+]
+IN_ALT = [("psnr_cb", "PSNR-Cb", True, "{:.3f}"), ("psnr_cr", "PSNR-Cr", True, "{:.3f}"),
+          ("de00_edge", "edge ΔE00", False, "{:.4f}"), ("ring_share", "ring %", False, "{:.3f}")]  # per re-made GT
+IN_BASE = [("psnr_y_base", "PSNR-Y", "{:.2f}"), ("psnr_cb_base", "PSNR-Cb", "{:.2f}"), ("psnr_cr_base", "PSNR-Cr", "{:.2f}"),
+           ("mad_base", "mean |Δ| (levels)", "{:.3f}")]
+
+
+class Remade:
+    """A GT made again from its YUV source by fr_clips.py's chain (zscale_to_rgb of the source's colour
+    plan, then gbrp16le), its chroma filter set (fr_clips.CHROMA): float32 RGB [H, W, 3] in [0, 1], as
+    F.Source reads the stored one."""
+
+    def __init__(self, src, kernel, threads=2):
+        st = C.probe(src)
+        self.W, self.H = st["width"], st["height"]
+        self.vf = f"{C.zscale_to_rgb(C.colour_plan(st), C.CHROMA[kernel])},format=gbrp16le"
+        self.proc = subprocess.Popen([FFMPEG, "-v", "error", "-nostdin", "-threads", str(threads), "-i", src,
+                                      "-map", "0:v:0", "-vf", self.vf, "-fps_mode", "passthrough", "-f", "rawvideo",
+                                      "-pix_fmt", "gbrp16le", "-"], stdout=subprocess.PIPE)
+
+    def read(self):
+        buf = self.proc.stdout.read(3 * self.W * self.H * 2)
+        if len(buf) < 3 * self.W * self.H * 2:
+            return None
+        g, b, r = np.frombuffer(buf, "<u2").reshape(3, self.H, self.W)
+        return np.ascontiguousarray(np.stack([r, g, b], axis=-1).astype(np.float32) * np.float32(1.0 / 65535))
+
+    def close(self):
+        self.proc.kill()
+        self.proc.stdout.close()
+        self.proc.wait()
+
+
+def chroma_against(s, cb, cr, lab, ref, tag=""):
+    """Cb and Cr PSNR, edge CIEDE2000 (on ref's chroma edges only) and ringing of a frame against a Ref."""
+    s["psnr_cb" + tag].append(F.psnr(mse(cb, ref.cb)))
+    s["psnr_cr" + tag].append(F.psnr(mse(cr, ref.cr)))
+    i = ref.edge_idx
+    s["de00_edge" + tag].append(float(de00(lab.reshape(-1, 3)[i], ref.lab.reshape(-1, 3)[i]).mean()))
+    s["ring_share" + tag].append(100.0 * np.count_nonzero(excursion(cb, cr, ref) > RING_T) / cb.size)
+
+
+def cmd_input(a):
+    cv2.setNumThreads(a.threads)
+    kernels = [k.strip() for k in a.gt_kernels.split(",") if k.strip()]
+    bad = [k for k in kernels if k not in C.CHROMA or k == "bilinear"]
+    if bad:
+        raise SystemExit(f"--gt-kernels {a.gt_kernels}: choose from {', '.join(k for k in C.CHROMA if k != 'bilinear')}")
+    gsrc = F.Source(a.gt, threads=a.threads)
+    outs = [F.Source(p, threads=a.threads) for _, _, p in a.out]
+    bsrc = F.Source(a.base, threads=a.threads) if a.base else None
+    for s in [*outs, *([bsrc] if bsrc else [])]:
+        if (s.W, s.H) != (gsrc.W, gsrc.H):
+            raise SystemExit(f"{s.path}: {s.W}x{s.H}, the GT is {gsrc.W}x{gsrc.H}")
+    again = Remade(a.src, "bilinear", a.threads)
+    alts = {k: Remade(a.src, k, a.threads) for k in kernels}
+    dvf = down_vf("bilinear")
+    src420, gt420 = chroma_planes(a.src), chroma_planes(a.gt, vf=dvf)
+    out420 = [chroma_planes(p, vf=dvf) for _, _, p in a.out]
+    series = [defaultdict(list) for _ in outs]
+    same = [bool(a.base) and os.path.samefile(p, a.base) for _, _, p in a.out]  # the base itself, scored too
+    gser = defaultdict(list)
+    n, t0 = 0, time.perf_counter()
+    while not (a.frames and n >= a.frames):
+        g = gsrc.read()
+        fr = [s.read() for s in outs]
+        base = bsrc.read() if bsrc else None
+        if g is None or any(f is None for f in fr) or (bsrc and base is None):
+            if g is not None or not all(f is None for f in fr) or base is not None:
+                raise SystemExit(f"frame counts differ at frame {n}")
+            break
+        by, bcb, bcr = ycc(base) if bsrc else (None, None, None)
+        if not np.array_equal(again.read(), g):
+            raise SystemExit(f"{a.gt}: frame {n} is not {a.src} through fr_clips.py's chain ({again.vf})")
+        gt = Ref(g, gt=True)
+        alt = {k: Ref(r.read(), gt=True) for k, r in alts.items()}
+        sb, sr = next(src420)
+        b, r = next(gt420)
+        gser["psnr_cb_src"].append(F.psnr(mse(b, sb)))
+        gser["psnr_cr_src"].append(F.psnr(mse(r, sr)))
+        for k, ref in alt.items():  # how far the GT is from itself made with another kernel
+            chroma_against(gser, gt.cb, gt.cr, gt.lab, ref, f"_{k}")
+        for i, x in enumerate(fr):
+            s = series[i]
+            y, cb, cr = ycc(x)
+            lab = lab_of(x)
+            s["psnr_y"].append(F.psnr(mse(y, gt.y)))
+            s["psnr_cb"].append(F.psnr(mse(cb, gt.cb)))
+            s["psnr_cr"].append(F.psnr(mse(cr, gt.cr)))
+            d0 = de00(lab, gt.lab)
+            s["de00_s0"].append(float(d0.mean()))
+            s["de00_edge"].append(float(d0.ravel()[gt.edge_idx].mean()))
+            e = excursion(cb, cr, gt)
+            s["ring_share"].append(100.0 * np.count_nonzero(e > RING_T) / e.size)
+            s["ring05_share"].append(100.0 * np.count_nonzero(e > 0.5) / e.size)
+            for k, ref in alt.items():
+                chroma_against(s, cb, cr, lab, ref, f"_{k}")
+            b, r = next(out420[i])
+            s["psnr_cb_src"].append(F.psnr(mse(b, sb)))
+            s["psnr_cr_src"].append(F.psnr(mse(r, sr)))
+            if bsrc and not same[i]:
+                for key, u, v in (("psnr_y_base", y, by), ("psnr_cb_base", cb, bcb), ("psnr_cr_base", cr, bcr)):
+                    s[key].append(F.psnr(mse(u, v)))
+                s["mad_base"].append(float(np.mean(np.abs(x - base), dtype=np.float64)) * 255)
+        n += 1
+        log(f"{a.clip}: frame {n} ({(time.perf_counter() - t0) / n:.1f} s/frame)")
+    for s in [gsrc, again, *alts.values(), *outs, *([bsrc] if bsrc else [])]:
+        s.close()
+    for gen in [src420, gt420, *out420]:
+        gen.close()
+    os.makedirs(a.json_dir, exist_ok=True)
+    common = {"clip": a.clip, "gt": os.path.abspath(a.gt), "src": os.path.abspath(a.src), "frames": n,
+              "size": [gsrc.W, gsrc.H], "gt_kernels": kernels, "gt_chain": again.vf, "gt_remade_equal_frames": n,
+              "down": dvf, "ring_threshold": RING_T}
+    rows = [("gt", "0", a.gt, gser, None)] + [(v, sd, p, series[i], None if same[i] or not a.base else a.base)
+                                             for i, (v, sd, p) in enumerate(a.out)]
+    for v, sd, p, s, base in rows:
+        res = {**common, "variant": v, "seed": sd, "out": os.path.abspath(p), "base": base and os.path.abspath(base),
+               "per_frame": {k: [round(x, 6) for x in vals] for k, vals in s.items()},
+               "means": {k: float(np.mean(vals)) for k, vals in s.items()}}
+        path = os.path.join(a.json_dir, f"{a.clip}.{v}.s{sd}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(res, fh)
+        m = res["means"]
+        print(f"{a.clip} {v} seed {sd}: " + ", ".join(f"{k} {m[k]:.4f}" for k in m) + f" -> {path}")
+    log(f"{a.clip}: {n} frames, {len(outs)} outputs in {time.perf_counter() - t0:.1f} s")
+
+
+def cmd_input_summary(a):
+    """fr_metrics.py's --summary with `input`'s measures for its metrics; then how far each variant's output
+    is from the arm it was scored with."""
+    runs = F.load(a.json)
+    kernels = sorted({k for r in runs for k in r.get("gt_kernels", [])})
+    F.METRICS = IN_METRICS + [(f"{key}_{k}", f"{title}, {k} GT", hi, f) for k in kernels for key, title, hi, f in IN_ALT]
+    F.summary(argparse.Namespace(summary=a.json, default=a.default, reference="gt", versus=None, block=a.block,
+                                 boot=a.boot))
+    print("\n## Distance to the output it was scored with\n")
+    print("Each output against its `input` call's --base: PSNR of Y', Cb and Cr between the two, and the mean "
+          "absolute difference over R, G and B (8-bit levels).\n")
+    print("\n".join(table(["Clip", "Variant", "Seed", "Against"] + [t for _, t, _ in IN_BASE], [
+        [r["clip"], r["variant"], str(r["seed"]), os.path.basename(r["base"])]
+        + [fmtv(r["means"].get(k), f) for k, _, f in IN_BASE]
+        for r in sorted(runs, key=lambda r: (r["clip"], r["variant"], str(r["seed"]))) if r.get("base")])))
 
 
 # ------------------------------------------------------------------ review
@@ -1345,6 +1528,24 @@ def main():
     s.add_argument("--rounds", type=int, default=3)
     s.add_argument("--tmp", default="/dev/shm")
     s.set_defaults(func=cmd_timing)
+    s = sub.add_parser("input", help="outputs of runs by the input's decode kernel, against the GT and the source")
+    s.add_argument("--clip", required=True)
+    s.add_argument("--gt", required=True)
+    s.add_argument("--src", required=True, help="the clip's src.mkv (fr_clips.py: the source's own 4:2:0 frames)")
+    s.add_argument("--out", nargs=3, action="append", required=True, metavar=("VARIANT", "SEED", "PATH"),
+                   help="an output to score (repeat): its variant, seed and RGB master")
+    s.add_argument("--json-dir", required=True)
+    s.add_argument("--base", help="the RGB master every output's distance is taken to (the default's run)")
+    s.add_argument("--gt-kernels", default="catrom,lanczos", help="the GT made again with these chroma kernels")
+    s.add_argument("--frames", type=int, default=0)
+    s.add_argument("--threads", type=int, default=1, help="decoder and OpenCV threads")
+    s.set_defaults(func=cmd_input)
+    s = sub.add_parser("input-summary", help="fr_metrics.py's summary tables of `input` JSONs")
+    s.add_argument("json", nargs="+", help="`input` JSONs or directories of them")
+    s.add_argument("--default", required=True, help="the variant the others are paired with (its seeds: the band)")
+    s.add_argument("--block", type=int, default=8)
+    s.add_argument("--boot", type=int, default=2000)
+    s.set_defaults(func=cmd_input_summary)
     s = sub.add_parser("summary", help="Markdown tables of score JSONs")
     s.add_argument("json", nargs="+")
     s.add_argument("--frm", help="fr_metrics JSON directory of the round-tripped model outputs")

@@ -43,6 +43,16 @@ reference is the two shots run separately, what correct shot detection gives):
   the previous shot into the short one's latent (15–20% of it shows), 6.9 / 7.1 dB at 2 frames,
   still 2.1–2.4 dB at 9. From 3 frames on, the merge costs about what a missed cut does. Alone, they are
   within 0.6 dB (bright) or 2 dB (dark) of the same frames inside a long run.
+- **A shot's end: repeat its last frame, don't mirror it.** A batch that isn't 4n + 1 frames is
+  padded, then trimmed after the decode; numz mirrors the frames before the last one, ByteDance
+  repeats the last frame. Repeating gives the shot's last frame +3.4 dB of PSNR-Y and +22 VMAF
+  points on the 8 full-reference clips cut to 42 frames (3 padded; better on 14 of 16 runs, two
+  seeds), +2.0 dB at 44 frames (1 padded) and +1.3 dB on this page's 31 shots run alone (better
+  on 20, worse on none), with a calmer end (temporal error −2.3 at 42 frames). The gain reaches
+  a few frames back; over the whole shot nothing is worse on PSNR-Y, SSIM, LPIPS, DISTS or VMAF.
+  Costs: with a single padded frame the frame before the last loses 1.1 dB (44 frames), and in a
+  batch merged across a cut the whole batch changes by about a seed's distance
+  ([details](#a-shots-end-repeating-its-last-frame-against-mirroring)).
 - **A shot's first frame, encoded alone, is the closest to the ground truth, not the worst:** on
   all eleven shots measured it beats the next eight frames by 0.04–5.5 dB of PSNR-Y, and it is
   re-rendered less (less sharp on nine of them, by 3–55%). Prepending 4 mirrored frames (one more
@@ -354,6 +364,79 @@ truth, the better of alone and merged with A in bold:
   VMAF scores the same output 12–13 points higher than as a clip of its own (B's frame run alone,
   scored both ways).
 
+### A shot's end: repeating its last frame against mirroring
+
+The VAE's first latent holds 1 frame and every next one 4, so a batch of any other length is
+padded up to 4n + 1 frames and the padding is trimmed after the decode. numz pads by mirroring:
+the frames before the last one, backwards (`generation_utils.py`, `pad_video_temporal`: frames
+0–41 get frames 40, 39, 38); where the padding is longer than the batch it repeats the last frame
+instead, so a 2-frame batch is padded the same way by both. ByteDance repeats the last frame (`inference_seedvr2_7b.py`,
+`cut_videos`). [`numerics_patch.py`](../scripts/numerics_patch.py)'s `NUM_TAIL=repeat` makes numz
+pad as ByteDance does, at the one place numz pads (its default, `mirror`, is the plain CLI bit for
+bit: a mirror run made again equals cuts.md's master, 22 of 22 frames). Both arms pad to the
+same count, so they cost the same time. The repeat arm was run on every padded batch of this
+page (45: 31 shots run alone at 22 to 60 frames, the 10 merged batches of the short-shot study,
+4 short shots of 2 and 3 frames, the two 2-frame ones identical in both arms), and on the 8 full-reference clips of question 1 cut to 42 frames (3 padded
+frames) and 44 frames (1), both arms, the 42-frame pairs at seeds 42 and 43. Seed 42 elsewhere.
+[`cut_metrics.py`](../scripts/cut_metrics.py) `tail` pairs the arms frame by frame and reports
+`repeat` − `mirror` by distance to the shot's last frame, against a seed band: the 42-frame pairs against their own two seeds at the same frames; the
+44-frame pairs against question 1's three seeds of the same clip at the same frame indices
+(45-frame runs, so not at a shot's end); this page's batches mostly against a band pooled over
+all those seed pairs.
+
+`repeat` − `mirror`, means over the shots (shots better / worse beyond the band):
+
+| Batches | Shots | PSNR-Y, last frame | VMAF, last frame | T-err, last frame | PSNR-Y, last 4 frames | PSNR-Y, whole shot |
+|---|---|---|---|---|---|---|
+| 8 clips at 42 frames (3 padded), seeds 42 and 43 | 16 | +3.40 (14 / 2) | +21.9 (15 / 0) | −2.30 (16 / 0) | +1.11 (14 / 2) | +0.16 (10 / 0) |
+| 8 clips at 44 frames (1 padded) | 8 | +2.05 (7 / 1) | +12.7 (7 / 0) | −0.41 (6 / 0) | +0.20 (5 / 1) | +0.04 (2 / 0) |
+| shots alone, 22–60 frames | 31 | +1.33 (20 / 0) | +8.3 (19 / 0) | −0.37 (11 / 0) | +0.33 (4 / 0) | +0.04 (0 / 0) |
+| merged with the previous shot | 10 | +2.16 (3 / 0) | +10.2 (3 / 0) | −4.74 (4 / 0) | +0.50 (3 / 0) | −0.06 (0 / 0) |
+| short shots, 2–3 frames | 4 | +0.10 (1 / 0) | +1.6 (0 / 0) | −0.01 (0 / 0) | | +0.04 (0 / 0) |
+
+- **Repeating mends the shot's last frame.** Mirrored, the last latent holds the shot's last
+  frame and the same motion played backwards; repeated, it holds a still. The last frame comes
+  out closer to the ground truth on the mean of every measure: PSNR-Y, SSIM, LPIPS, DISTS, VMAF, the colour
+  and both temporal errors (at 42 frames: SSIM and the temporal errors on 16 of 16 runs, VMAF 15,
+  LPIPS and DISTS 13 and 14). The two seeds agree to a few hundredths (+3.394 and +3.408 dB).
+  On this page's batches the last frame gains +1.28, +1.03 and +1.81 dB with 1, 2 and 3 padded
+  frames.
+- **The gain reaches a few frames back, then fades.** At 42 frames it is +0.44, +0.34 and +0.27
+  dB one, two and three frames back (8, 7 and 4 of 16 runs beyond the band), +0.65 dB over the
+  last 8 frames (14 of 16) and +0.16 dB over the whole shot (10 of 16, with the narrower band of
+  the same frames). On the shots alone it stops at the last frame: −0.14 dB one frame back (3
+  worse of 31), one shot worse two frames back, none from three to five. Over the whole shot
+  nothing is worse on PSNR-Y, SSIM, LPIPS, DISTS or VMAF, in any group. The low-frequency colour
+  error goes both ways (whole shot: 3 better, 4 worse of 16 at 42 frames; 4 and 2 of 31 shots
+  alone), by hundredths.
+- **One padded frame has a cost:** at 44 frames the last frame gains 2.0 dB but the one before it
+  loses 1.1 dB (6 of 8 clips worse, VMAF −5.9, colour worse on 7): the repeated last frame pulls
+  its neighbour in the same latent. Over the last two frames the gain stays (+0.47 dB, 6 better,
+  1 worse), but the low-frequency colour error is worse over the last 2 and 4 frames (+0.04 and
+  +0.05, on 4 and 5 of 8). On this page's 15 batches with one padded frame the frame before the
+  last loses less (−0.45 dB, 2 worse; VMAF −2.9, 4 worse).
+- **Merged batches change as a whole.** There the short shot ends the batch, right after a cut:
+  repeating gains on the last frames (+2.2 dB, the temporal error −4.7), and the mirrored frames
+  no longer reach back across the cut into the previous shot. But with 1 or 2 frames after the
+  cut (AB1, AB2) the whole batch moves by about a seed's distance: the two bright batches lose
+  0.58 and 0.49 dB of PSNR-Y and 3.6 and 4.6 VMAF points over the whole batch (within the pooled
+  band) while their DISTS, colour and temporal errors get better; the two dark ones gain 0.25 and
+  0.29 dB. The arms of the bright AB1 batch are 40–43 dB apart on every frame, as far as two
+  seeds. Frames 2 to 11 from the end are 0.14–0.37 dB lower on average. seedvr2x doesn't merge a
+  short shot into the previous one: such a batch only comes from a missed cut.
+- **Exceptions, clip by clip:** the sky clip (anime-sky, a slow pan over a near-flat sky): its
+  last frame loses 1.2 dB with repeat at both seeds and 0.9 dB at 44 frames, its low-frequency
+  colour error +0.44, while VMAF gains 1.2 and the temporal errors improve; also anime-grain's
+  low-frequency colour error (both seeds), anime-clean's LPIPS and DISTS at seed 42, and two of
+  the shots alone on a temporal error.
+- **The arms differ on every frame, by less than two seeds do.** The padding frames are part of
+  the batch the DiT renders, so every frame moves a little. On cartoon-bright at 42 frames the
+  two arms' masters are 49.6–52.1 dB apart (PSNR, all planes) over the first half of the shot,
+  46–48 dB over its third quarter, 35.8–44.3 dB on the 8 frames before the last and 23 dB on
+  the last; seeds 42 and 43 of the same arm are 38–42 dB apart on every frame. On anime-sky:
+  53–55 dB early, 47 dB near the end, 39 dB on the last frame, against 40–47 dB between seeds.
+  Merged across a cut, the change is seed-sized (above).
+
 ### False cuts: a continuous shot split in two
 
 Question 1's four single-shot clips (45 frames), run as 21 + 24 frames and joined, against the
@@ -549,6 +632,10 @@ The error rates per threshold come from question 3's labelled review.
   an x264 I-frame, between 0.8 dB better and 1.5 dB worse than the P-frames after it. One seed
   per prepend run; P = 8 on the three first cuts only. Run times vary by ±7% between runs and by up to 1.7× between sessions on
   the same GPU, so the cost of one latent comes from the time per computed frame.
+- **The tail padding was compared with `--color_correction none`**, one seed except the 42-frame
+  pairs (two); the 44-frame pairs and the 45 padded batches are judged against seed bands taken
+  at other frames of other runs. Its batches are single batches: a long shot split into windows
+  pads only its last window, if at all.
 - `--color_correction none`, 1080p from half-size input, 7B fp16 only. With `lab`, low-frequency
   differences between batches shrink ([quality.md](quality.md#colour-correction)).
 
@@ -589,6 +676,17 @@ python3 $J analyze m/cut-AB5.merged.s42.json --ref m/cut-AB5.aligned.s42.json --
   --noise m/*.def.s*.json m/cut-k0.aligned.s43.json --json a/cut-AB5.json > a/cut-AB5.md  # deficits, ghost
 python3 $J selftest clips/cut-k0.gt.mkv --cut 21 --out out/cut-k0-aligned.mkv   # ghost coefficient check
 python3 $J summary a/                                                           # one row per analysis
+# a shot's end: the padding to 4n + 1 frames by repeating the last frame (ByteDance) instead of mirroring
+python3 scripts/bench.py run tail-anime-clean-f42-rep-s42 --wrap scripts/numerics_patch.py \
+  --wrap scripts/ffv1_out.py --env FFV1_OUT_KEEP=0 --env NUM_TAIL=repeat --env NUM_CHECK=1 -- \
+  clips/anime-clean.d1.lr.mkv --output out/ --model_dir /path/to/models \
+  --dit_model seedvr2_ema_7b_fp16.safetensors --resolution 1080 --attention_mode flash_attn_2 \
+  --batch_size 42 --load_cap 42 --temporal_overlap 0 --color_correction none --seed 42
+python3 $M clips/anime-clean.gt.mkv --clip anime-clean-d1 --json-dir m --out f42-repeat 42 out/REP.mkv \
+  --out f42-mirror 42 out/MIR.mkv                                     # the GT's first 42 frames
+python3 $J tail --pair anime-clean:m/anime-clean-d1.f42-mirror.s42.json:m/anime-clean-d1.f42-repeat.s42.json \
+  --noise m/*.f42-mirror.s4[23].json --json a/f42.json > a/f42.md   # repeat - mirror by distance to the end
+python3 $J tail --check                                               # the same on synthetic series
 # a shot's first frame: B alone with 4 mirrored frames before it, in its batch (ffv1_out.py drops them)
 python3 scripts/bench.py run cut-k0-B-pp4 --wrap scripts/ffv1_out.py --env FFV1_OUT_KEEP=0 -- \
   clips/cut-k0-B.d1.lr.mkv --output out/ --model_dir /path/to/models --dit_model seedvr2_ema_7b_fp16.safetensors \
