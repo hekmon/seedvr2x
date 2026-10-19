@@ -192,12 +192,14 @@ Through the CLI's mp4s, the same comparison measures x264 more than attention:
   (CAMBI: ≈ 5 is "slightly annoying"). The CLI truncates to 8-bit RGB, then x264 quantises again
   at CRF 12, on dark gradients. An encode made from the master starts without the first step.
 
-`sptenc vmaf` takes the RGB masters as they are: libvmaf only accepts YUV, so ffmpeg
-auto-inserts a conversion to `yuv444p10le` on both inputs, with swscale's default matrix (BT.601;
-the log shows `csp:unknown`). Both sides get the same conversion, and the fidelity scores matched
-the BT.709 `yuv420p10le` variants (100). For a reference against an encode, write the YUV variant
-(`FFV1_OUT_PIXFMT=gbrp16le,yuv420p10le`) or encode from the master with explicit tags, so that
-both inputs carry the same matrix.
+`sptenc vmaf` took the RGB masters as they are (the sptenc of 2026-10-02): libvmaf only accepts
+YUV, so ffmpeg auto-inserted a conversion to `yuv444p10le` on both inputs, with swscale's default
+matrix (BT.601; the log shows `csp:unknown`). Both sides get the same conversion, and the fidelity
+scores matched the BT.709 `yuv420p10le` variants (100). sptenc has since been given its own
+conversion of an RGB input, with the matrix of its primaries (BT.709 here) and in limited range, as
+its log says: the fidelity is the same on these pairs (100). For a reference against an encode,
+write the YUV variant (`FFV1_OUT_PIXFMT=gbrp16le,yuv420p10le`) or encode from the master with
+explicit tags, so that both inputs carry the same matrix.
 
 ## Reproduce
 
@@ -214,4 +216,27 @@ python scripts/ffv1_out.py --verify out/ffv1-lossless/ffv1-lossless.gbrp16le.mkv
 # backends: one run per --attention_mode, then
 python scripts/ffv1_out.py --diff out/fa2/fa2.gbrp16le.mkv out/sdpa/sdpa.gbrp16le.mkv
 sptenc vmaf out/fa2/fa2.gbrp16le.mkv out/sdpa/sdpa.gbrp16le.mkv
+
+# through the CLI's mp4s: the mp4 brought to 16-bit RGB by ffmpeg's defaults, then --diff
+ffmpeg -i out/fa2/input.mp4 -pix_fmt gbrp16le -c:v ffv1 fa2-mp4.mkv
+python scripts/ffv1_out.py --diff out/fa2/fa2.gbrp16le.mkv fa2-mp4.mkv
+# the master against its mp4: the master first as the mp4's 8-bit 4:2:0, by ffmpeg's defaults
+ffmpeg -i out/fa2/fa2.gbrp16le.mkv -pix_fmt yuv420p -c:v ffv1 fa2-420.mkv
+sptenc vmaf fa2-420.mkv out/fa2/input.mp4
 ```
+
+The masters, the CLI's mp4s and PNGs and the float dumps of these runs are kept; their bench.py
+records and logs are not (they were in a temporary directory). On 2026-10-10 every figure of this
+page that the kept files hold was made again on the CPU, with the commands above: the bit-exactness
+table, the PNG table (a few lines comparing the PNGs with the float dumps), `ffprobe`'s and
+`mkvinfo`'s tags, the sizes per frame, the PSNR and VMAF of the backend pairs and of the mp4s. The
+107 values compared came out as written, two kinds of them only with the conversions ffmpeg made at
+the time: the masters' CAMBI with the masters first converted by `ffmpeg -pix_fmt yuv444p10le`
+(today's sptenc, converting them itself, gives +0.0001 / +0.001 and +0.0003 / +0.004; fidelity 100
+either way), and the mp4 rows' PSNR with the mp4 brought to 16-bit RGB by swscale's defaults
+(`-pix_fmt gbrp16le`, as above), not to 8-bit `rgb24`.
+
+What can't be made again without the GPU: the write times of the size table and the count of
+frames received and dropped, read from the lost logs (the files agree with it: 12 PNGs, 10 frames
+in the masters). The times were measured on a power-capped card
+([benchmarking.md](benchmarking.md#caveats)) and wait for a healthy one.

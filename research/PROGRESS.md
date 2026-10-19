@@ -332,8 +332,13 @@ temporal regression.
 The 2026-10-01/02 run records were lost with /tmp; every timing in vram.md, attention.md,
 benchmarking.md and stitching.md was taken with the card's power cap already active (its clocks
 down to 577 MHz in some sessions). Values hold, times don't.
-- [ ] CPU, possible now: quality.md's and stitching.md's metric tables re-made from the surviving
-      frames (about 1.25 h of CPU), vram.md's frame differences, output.md's sizes
+- [x] CPU (2026-10-10): quality.md's and stitching.md's metric tables, vram.md's frame differences
+      and output.md's file figures made again from the kept frames, with the scripts and the
+      environment of the runs (113 metric JSONs kept, minutes of CPU): 893 values compared with the
+      docs, 883 identical; 8 figures corrected, last digits or text (quality.md: 2.4× not 2.5×, 1.09
+      not 1.10, clip A's frames in `--prepend_frames`; stitching.md: 0.52–1.05, 35.7–36.3 dB,
+      37–39.6 dB, the short last latent window at 36.3 dB; vram.md: +0.02); each doc's Reproduce
+      block says what waits for the GPU
 - [ ] Numerics: a shot's end padded by repeating its last frame (ByteDance) against mirroring it
       (numz): the repeat arm on cuts.md's 29 cut shots, then the 8 clips cut to 42 and 44 frames
       (about 1.2 GPU h); the decode's chroma kernel: Catmull-Rom, spline36 and lanczos on the 8

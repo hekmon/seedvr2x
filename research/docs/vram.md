@@ -217,7 +217,7 @@ bit-identical, so every difference comes from tiling. "Decode only" keeps the sa
 | decode 512 / 128 | 38.3 dB (35.2) | 2.19 | 2.19 / 2.19 (x) | +0.04 / +0.03 | −2.2 … +0.5 |
 | decode 1024 / 128 | 43.6 dB (40.9) | 1.12 | 1.23 / 1.12 (x) | +0.04 / +0.03 | −0.8 … +0.5 |
 | encode 512 / 128 | 33.4 dB (31.2) | 3.98 | 4.01 / 3.98 (x) | 0.00 / −0.01 | −2.3 … +3.8 |
-| both 512 / 128 | 35.3 dB (32.3) | 3.05 | 3.10 / 3.04 (x) | +0.03 / +0.01 | −1.6 … +1.4 |
+| both 512 / 128 | 35.3 dB (32.3) | 3.05 | 3.10 / 3.04 (x) | +0.03 / +0.02 | −1.6 … +1.4 |
 
 Boundary = within 16 px of an interior tile edge. Gradient excess = mean |step between
 neighbouring pixels| of the tiled output minus the untiled one, in 8-bit levels.
@@ -751,6 +751,21 @@ python3 scripts/bench.py run swapprobe-1080-bs5-q4-swap36 --wrap scripts/swap_pr
   --dit_model seedvr2_ema_7b-Q4_K_M.gguf --dit_offload_device cpu --blocks_to_swap 36 \
   --resolution 1080 --batch_size 5 --load_cap 10
 ```
+
+The PNG frames of the `-png` runs are kept, with the input frames the model runs are compared
+with; the bench.py records, the probes' JSONs and the logs are not (they were in a temporary
+directory). On 2026-10-10 the two frame-difference tables
+([tiled vs untiled](#quality-tiled-vs-untiled-1080p-batch-9-png-output) and the PSNR columns of
+[Other models](#other-models)) were made again from the kept frames, on the CPU, with
+`frame_diff.py` as above: the 61 values compared came out as written but one, corrected since (the
+interior gradient excess of `both 512 / 128`: +0.02 along x, like the rest of the column; +0.01
+was the figure along y).
+
+Everything else on this page can't be made again without the GPU: every memory figure (per phase,
+the VAE's and the DiT's models, tiling, BlockSwap, offload, compile, the allocators, the emulated
+cards) and every time. The memory figures don't depend on the card's speed. The times were
+measured on a power-capped card ([benchmarking.md](benchmarking.md#caveats)) and wait for a healthy
+one.
 
 <details>
 <summary>Run names (all 7B fp16, <code>flash_attn_2</code>, <code>--color_correction none</code>,

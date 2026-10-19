@@ -46,7 +46,8 @@ How the CLI cuts a clip (`src/core/generation_phases.py`):
   4 never mix, 3 and 5 mix one frame 50/50, 8 mixes two.
 - **Colour correction comes after the blend** (Phase 4, `:1254-1262`), per write slice: the
   blended frames belong to the previous batch's slice, and `lab` pools its a\*/b\* histograms
-  over that slice, so the mix also nudges the rest of that batch slightly (≤ 3 levels measured).
+  over that slice, so the mix also nudges the rest of that batch slightly (≤ 3 levels measured
+  on clip B, 5 on clip A at K = 8).
 - **ByteDance's original has no batching at all:** `projects/inference_seedvr2_7b.py` runs the
   whole clip as one sequence, split across GPUs by sequence parallelism if needed. Batches,
   overlap and blending are the CLI's addition, to bound memory and per-call time.
@@ -122,7 +123,7 @@ relative to the frames away from boundaries (1 = as sharp):
 
 (Per-run figures: in the `stitch_metrics.py --summary` tables of the runs listed in
 [Reproduce](#reproduce). With 3–5 boundaries per run the hard-switch baseline varies between
-layouts, 0.63–1.05: compare curves within a row first.)
+layouts, 0.52–1.05: compare curves within a row first.)
 
 - **The CLI's weights barely help:** `numz` equals a hard switch at K = 2 and 4 (bug 06);
   K = 3 (one frame 50/50) and K = 8 (two mixed frames) cut the step by 38% and 44%, against 53%
@@ -146,9 +147,9 @@ layouts, 0.63–1.05: compare curves within a row first.)
   below). Whether the softer frames are visible is for the [visual review](#visual-review).
 - **Distance to the single-batch output** (PSNR vs reference): batch 1 shares the reference's
   start, encoder state and noise and stays at 41 dB; later batches are independent renderings at
-  36–37 dB, slightly lower right after a hard boundary (35.5–36.3 dB on the first 4 frames of a
+  36–37 dB, slightly lower right after a hard boundary (35.7–36.3 dB on the first 4 frames of a
   new batch at K = 0: its first latent is encoded alone, with no past context). Mixed frames are
-  *closer* to the reference (38–39.5 dB): the average of two renderings is nearer to any third.
+  *closer* to the reference (37–39.6 dB): the average of two renderings is nearer to any third.
 
 ### Clip A (motion) and `--color_correction none`
 
@@ -235,7 +236,8 @@ long shot they tend to W / (W − M) = 1.2 and 1.5.)
 - **The whole output stays close to the single-batch one:** 40.5–40.8 dB (worst frame 39–40 dB)
   against 37–38 dB for pixel batches. Most of the difference between independent pixel batches
   comes from the VAE restarts (each batch encoded and decoded alone), not from the DiT: with one
-  VAE pass, even hard DiT windows stay at 40–41 dB inside the windows.
+  VAE pass, even hard DiT windows stay at 40–41 dB inside the windows (the three full ones; the
+  last, 3 latents instead of 6, is at 36.3 dB).
 - **The 4-frame first latent of a window is not a problem in practice:** it only matters at M = 0,
   and with M ≥ 1 it is mixed away (weight ≤ 0.5).
 - Compute: the VAE runs once per frame, so the overhead is the DiT's share (≈ 23% of the
@@ -362,6 +364,23 @@ python3 scripts/stitch_metrics.py out/ob-k4/extra/linear --input seg_0001-0004.m
 python3 scripts/stitch_metrics.py --summary m/*.json    # Markdown table
 python3 scripts/stitch_metrics.py --profile m/*.json    # PSNR vs reference by offset to the boundary
 ```
+
+The runs' PNG frames and FFV1 masters are kept; their bench.py records and metric JSONs are not
+(they were in a temporary directory). On 2026-10-10 the metrics of every run and curve listed
+below were made again from the kept frames, on the CPU, with the commands above and the
+environment of the runs (40 JSONs, their `--summary` and `--profile` tables). Every cell of this
+page's tables came out as written; of the 247 values compared, four figures of the text differed
+and were corrected: the hard-switch baseline's range (0.52–1.05, K = 8 included), the first frames
+of a new batch at K = 0 (35.7–36.3 dB), the mixed frames' distance to the reference (37–39.6 dB)
+and the short last window of the latent run without shared latents (36.3 dB). Colour correction's
+nudge outside the overlap frames was measured again too, each curve against its run's main one:
+≤ 3 levels on clip B, up to 5 on clip A at K = 8, none with `--color_correction none`.
+
+What can't be made again without the GPU: the times, that is the whole [cost model](#cost-model)
+(phase times per frame, the VAE's 77% share, the measured totals) and what the page derives from
+it (the compute overhead of the latent windows, the DiT's ≈ 10% gain at batch 81). They were
+measured on a power-capped card ([benchmarking.md](benchmarking.md#caveats)) and wait for a healthy
+one. The frame counts (the Cost column) follow from the layout and hold.
 
 <details>
 <summary>Run names (7B fp16, <code>flash_attn_2</code>, 1080p, PNG + FFV1; clip B = 81 frames of

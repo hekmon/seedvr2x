@@ -10,7 +10,7 @@ In short (1080p restoration of anime, 7B fp16):
 - **The model alone drifts in colour** (+30% saturation, ±1–4 levels of brightness). The
   default `--color_correction lab` removes that drift without losing detail, and halves the
   low-frequency jumps at batch boundaries. `hsv` and `adain` are worse; `wavelet` is close.
-- **Batches are independent, so each boundary is a visible jump** on still content: ≈ 2.5× the
+- **Batches are independent, so each boundary is a visible jump** on still content: ≈ 2.4× the
   in-batch flicker at batch 21, growing with the batch size. One batch per shot avoids it.
 - **`--temporal_overlap` only cross-fades with odd values ≥ 3:** 1, 2 and 4 cost compute and
   change nothing at the boundary; 3 cuts the jump by about a third.
@@ -176,7 +176,7 @@ blocks:
 
 - **Inside a batch, held frames flicker at ≈ 0.9–1.0, twice the input's codec noise, whatever
   the batch size.** The DiT doesn't freeze a held drawing; it re-renders it with small changes.
-- **At a boundary the jump grows with the batch size:** 1.7 at batch 5, 2.3 at batch 21 (2.5×
+- **At a boundary the jump grows with the batch size:** 1.7 at batch 5, 2.3 at batch 21 (2.4×
   the in-batch flicker), 2.1× on the low-frequency measure. Larger batches give fewer but
   stronger discontinuities. One batch for the whole shot (batch 45 here) has none.
 - **Batch 1 is the steadiest on held frames** (0.81, and the lowest low-frequency change, 0.46):
@@ -261,8 +261,10 @@ frame 0) and comes out **less restored** than the others, i.e. closer to the inp
 | batch 5 | 31.42 dB | 31.41 dB | 31.04 dB | 65.1 / 66.8 |
 | batch 5, `--prepend_frames 4` | 30.95 dB | 31.44 dB | 31.03 dB | – |
 
-(On clip A, whose first frames move little, frame 0 is at 36.0 dB against 27–29 dB for the rest
-of its batch.)
+(On clip A, frame 0 is at 36.0 dB against 29.6 dB on average for the rest of its batch, but it
+doesn't stand out there: on this fast motion every fourth frame of that batch, the last of each
+latent's four, is as close to the input, 33.5–37.2 dB, and the others are at 23.8–30.0 dB
+([numerics.md](numerics.md#every-fourth-frame-the-latent-grid)).)
 
 - With 4 prepended frames, frame 0 becomes an ordinary frame (32.2 dB instead of 33.4 dB at
   batch 21). The effect is small on this content; it may matter more where the first frame
@@ -281,7 +283,7 @@ or as 21.
 | Clip B, batch 21 | Last 3 frames: PSNR in | Hold ΔY at the last boundary | Added lf at the last boundary | PSNR vs default, last 3 frames | DiT time | Total |
 |---|---|---|---|---|---|---|
 | default (3 → 5 frames) | 31.25 / 30.43 / 30.62 dB | 2.46 | 1.80 | – | 50.4 s | 212 s |
-| `--uniform_batch_size` (3 → 21) | 32.65 / 31.78 / 32.14 dB | 1.94 | 1.10 | 37.8 / 35.3 / 35.5 dB | 58.9 s | 256 s |
+| `--uniform_batch_size` (3 → 21) | 32.65 / 31.78 / 32.14 dB | 1.94 | 1.09 | 37.8 / 35.3 / 35.5 dB | 58.9 s | 256 s |
 
 - The first 42 frames are bit-identical; only the short batch changes. Its frames end up
   less altered (+1.4 dB vs input) and the jump into it is smaller (−20% on held frames, −40% on
@@ -402,6 +404,21 @@ python3 scripts/quality_metrics.py out/q-b-bs21-pp4/seg_0001-0004 --input seg_00
   --batch 21 --prepend 4 --drop-first 4 --ref out/q-b-bs21/seg_0001-0004 --json metrics/q-b-bs21-pp4.json
 python3 scripts/quality_metrics.py --summary metrics/*.json   # Markdown table
 ```
+
+The runs' PNG frames are kept; their bench.py records and metric JSONs are not (they were in a
+temporary directory). On 2026-10-10 every metric of this page was made again from the kept frames,
+on the CPU, with the commands above and the environment of the runs (the tiling table's signed and
+per-tile differences with `frame_diff.py --tile 1024 --overlap 128 --band 16`; the per-frame
+Laplacian variances of the `--prepend_frames` table with the script's functions, its JSON keeps
+only their mean). The 478 values compared came out as written here but three figures, corrected
+since: the low-frequency change at `--uniform_batch_size`'s last boundary (1.09, not 1.10), the
+boundary jump at batch 21 (2.4× the in-batch flicker, not 2.5×) and clip A's frames in
+[`--prepend_frames`](#--prepend_frames) (the rest of the batch is not at 27–29 dB).
+
+What can't be made again without the GPU: the times and Phase 4's memory (the Phase 4 columns of
+the colour tables, the DiT times of the batch table, `--uniform_batch_size`'s DiT and total
+times). They were measured on a power-capped card ([benchmarking.md](benchmarking.md#caveats)) and
+wait for a healthy one.
 
 <details>
 <summary>Run names (7B fp16, <code>flash_attn_2</code>, 1080p, PNG; clip A = <code>seg_0000</code>
