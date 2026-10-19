@@ -12,7 +12,8 @@
 > 2 ([cuts.md](cuts.md)). Tools:
 > [`scripts/scd_scores.py`](../scripts/scd_scores.py) (scores, detectors, candidates,
 > statistics, label estimates), [`scripts/scd_review.py`](../scripts/scd_review.py) (review
-> sheets and index).
+> sheets and index), [`scripts/scd_tables.py`](../scripts/scd_tables.py) (the statistics'
+> tables).
 
 In short (the statistics count detections; the estimates come from the labels):
 
@@ -159,6 +160,14 @@ scaler), and reproduce its `predict_frames` (windows of 100 frames every 50, eac
   most in probability, and give the same shots (its `predictions_to_scenes`) and the same
   detections at 0.5 (41 and 35). Our 48×27 frames are byte for byte the official extraction's
   over the first 9,000 and 53,000 frames of those sources.
+- **seedvr2x's detector gives these probabilities** (2026-10-10; its implementation's figures,
+  not measured here: [DESIGN.md](../../seedvr2x/DESIGN.md#shot-detection)). On the CPU,
+  seedvr2x's first pass gives this study's single-frame probabilities (`tnet.npz`'s `single`)
+  bit for bit on 11 single-file sources: 10 of the 11 here (anime-720, kept as segments, was
+  not run) and the native 4K short
+  ([below](#native-4k-animation-cuts-inside-fast-camera-motion)), each up to the end of its
+  analysed range. On the GPU, where seedvr2x runs it, the probabilities differ by 1.04 × 10⁻⁶
+  at most and every cut list is the CPU's.
 - **It marks the outgoing shot's last frame:** its peak sits one frame before the cut on 98% of
   the sure cuts that have one (341 of 348; 4 sure cuts have no peak within ±3 frames). Its values
   are shifted by that one frame (`--tnet-offset`, measured per source, −1 everywhere) before any
@@ -254,7 +263,7 @@ review already holds.
 | G3: TN alone | 160 | 69 | 10 | 239 | 70 |
 | G4: S or P, TN at 0.1–0.5 | 603 | 52 | 21 | 676 | 71 |
 | G5: S or P, TN under 0.1 | 1,780 | 44 | 35 | 1,859 | 152 |
-| … of which scdet alone in a burst | 932 | 2 | 1 | 935 | |
+| … of which scdet alone in a burst | 932 | 2 | 1 | 935 | 69 |
 | G6: none of them (scdet 4–10, TN 0.1–0.5, joins) | 5,974 | 160 | 100 | 6,234 | 629 |
 
 - **G1** should be cuts (round 1 checks it on a sample); **G6** holds the low scores kept to
@@ -612,6 +621,11 @@ threshold. Only the unmeasured cut share at 0.2–0.3, rising to the next band's
 the trade 0.3 was: a third round of about 40 animated rows would settle it, should a lower
 default be wanted. Native 4K animation's misses in fast camera motion are the same at 1080p.
 
+Follow-up, 2026-10-10: seedvr2x's first pass runs this detector
+([DESIGN.md](../../seedvr2x/DESIGN.md#shot-detection)). Its implementation reports this study's
+probabilities reproduced bit for bit on the CPU on 11 single-file sources, and the same cut
+lists on the GPU ([TransNetV2](#transnetv2)).
+
 - **Recommendation:** seedvr2x detects shots with TransNetV2 at p = 0.3: the official model
   (MIT; weights converted from the official TensorFlow ones), on 48×27 frames scaled as its
   official extraction scales them, a cut on the frame after its peak (it marks the outgoing
@@ -718,6 +732,7 @@ appears at 1080p, a frame scoring 0.138 at 4K and 0.154. An x264 encode of the 1
 
 ```bash
 S=scripts/scd_scores.py; R=scripts/scd_review.py; O=out/scd   # EP = one source's directory
+T=scripts/scd_tables.py
 # sptenc's own command against the all-score pass; a synthetic clip with cuts at 30, 60, 90
 python3 $S check SRC --out $O/check/one
 python3 $S check $O/check/synth/synth.mkv --out $O/check/synth --synthetic
@@ -739,6 +754,12 @@ python3 $S summary $O/EP... --md summary.md [--labels $O/review/index.csv]
 python3 $R sheets $O/EP... --out $O/review
 python3 $R extend $O/review $O/EP... --cap 30 --skip anime-dark-seg
 python3 $R index $O/review
+# the statistics' tables: every source at every threshold; per source and per hour by kind; the
+# candidates by agreement group, with the review's rows in each (a directory is shown under its
+# stats.json name, or --label NAME=LABEL; the copy scored twice stays out of the pooled ones)
+python3 $T sources $O/EP... --md sources.md
+python3 $T compact $O/EP... --skip anime-dark-seg --md compact.md
+python3 $T groups $O/EP... --skip anime-dark-seg --index $O/review/index.csv --md groups.md
 # round 1: 100 of the review's rows by agreement group and kind, blind; estimates from its labels
 python3 $R round $O/review $O/EP... --out $O/round1
 python3 $S round $O/round1 --skip dvd-sitcom --md round1.md   # the DVD: thumbnails misaligned

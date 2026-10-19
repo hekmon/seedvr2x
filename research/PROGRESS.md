@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-09 12:30 CEST
+Last update: 2026-10-19 11:10 CEST
 
 ## 0. Setup
 
@@ -250,6 +250,15 @@ temporal regression.
       episode are live-1, live-2 and dvd-sitcom in the scripts too (`scd_scores.py`'s KINDS), their
       data renamed with them; every summary, estimate and both rounds' rebuilds identical before
       and after
+- [x] The statistics' helpers in the repository (2026-10-10, `scd_tables.py sources|compact|groups`):
+      the three scratch helpers behind the doc's unlabelled statistics as one script, sources and
+      labels given as arguments. On the study's data its output equals the doc cell for cell (the
+      per-hour, per-source and agreement tables, the Sources table, 35 figures of the text) and
+      every number of the helpers' old outputs; the agreement table's one empty cell filled (69
+      first-review rows are lone scdet hits in bursts; the old helper counted 0 by a bug)
+- [x] seedvr2x's detector against this study (2026-10-10, implementation's figures): its first pass
+      gives `tnet.npz`'s single-frame probabilities bit for bit on the CPU on 11 single-file sources
+      (10 of the 11 here and the native 4K short), and the same cut lists on the GPU
 - [ ] Optional: a third labelled round at TransNetV2 0.2–0.3 (about 30 animated rows, 10 more at
       0.15–0.2; new strips for the band without another detector), should a lower default be wanted
 
