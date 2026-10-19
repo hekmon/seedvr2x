@@ -646,6 +646,17 @@ Decoding goes through an ffmpeg pipe:
     step 0's resize, so every interpolation feeding the model is the reference pipeline's.
     zscale's default, bilinear, blurs chroma edges. Sharper kernels (Spline36, Lanczos)
     pre-sharpen and ring, so they are measured options, as for the resize.
+    Measured on 2026-10-19 on numz, 8 clips, with `split`'s correction
+    ([numerics.md](../research/docs/numerics.md#the-decodes-chroma-the-kernel-the-models-input-is-read-with)):
+    against bilinear, a source read with Catmull-Rom gives an output whose luma stays within
+    the seeds' spread (VMAF higher on 2 of the 8) and whose chroma is further from the ground
+    truth: PSNR-Cb 0.17 dB and PSNR-Cr 0.25 lower on average, lower on 5 of 8 clips each and
+    higher on none, colour edges 0.16 ΔE00 further, ringing beyond 2 levels 0.37 points more.
+    Spline36 and Lanczos go further still, and so it stays against ground truths made again
+    with Catmull-Rom or Lanczos. The consistency argued above shows in no measure, and the
+    full-reference protocol's runs, colour's study among them, were fed sources read with
+    bilinear (zscale's default). The kernel is for the user's eyes, on crops of both from
+    those runs; Catmull-Rom until then.
   - primaries and transfer: the same on both sides of zscale, so never converted; no dither
   - **zscale is required.** Without it, seedvr2x refuses to run and says how to get a build
     that has it.
@@ -1082,8 +1093,9 @@ The rule: the upscale must look like its source in any given player.
    - The frames are read from ffmpeg's decoding of the source at the VAE's own pace: 5, then 4
      at a time. The first latent holds 1 frame and every next one 4, and the causal VAE works
      in those slices anyway. This is not a batch size: the shot is encoded in one pass.
-   - The padding to 4n + 1 is made from the last 4 frames read, so the latent is the one-pass
-     encode's, bit for bit.
+   - The padding to 4n + 1 is made from the frames already read (the last 4, mirrored, today;
+     the last one, repeated, once built: see below), so the latent is the one-pass encode's,
+     bit for bit.
    - Only the latents are ever whole in memory, unless the encode is tiled: each tile then
      runs over the whole shot, whose transformed input waits in the shot's scratch (step 3).
      The latent is made in system memory, a slice at a time, and waits there; the shot's noise
@@ -1110,9 +1122,27 @@ The rule: the upscale must look like its source in any given player.
    (milestone 7).
 
    A shot that isn't 4n + 1 frames long is padded, then trimmed after decoding. numz mirrors
-   the end (`generation_utils.py:642-654`); ByteDance repeats the last frame
-   (`inference_seedvr2_7b.py:182-196`). We use numz's padding for now: the choice belongs to
-   the numerics.
+   its end (`generation_utils.py:651-656`: a shot of 42 frames gets its frames 40, 39 and 38,
+   counted from 0) and repeats its last frame only where the padding is longer than the shot
+   (:635-648); ByteDance repeats the last frame (`inference_seedvr2_7b.py:178-196`). Decided
+   on 2026-10-19, to be built: the last frame repeated, as ByteDance does. The padded length
+   is the same, and the shot's end comes closer to the ground truth
+   ([cuts.md](../research/docs/cuts.md#a-shots-end-repeating-its-last-frame-against-mirroring)).
+   Measured on numz on the 96 GB card, without colour correction, repeat against mirror:
+   - 8 clips cut to 42 frames (3 padded), seeds 42 and 43: the last frame 3.4 dB higher in
+     PSNR-Y (3.39 and 3.41 by seed) and 21.9 in VMAF, beyond the seeds' spread on 7 of the 8
+     clips at both seeds; the three frames before it 0.44 to 0.27 dB higher, the whole shot
+     0.16.
+   - 1 frame padded (44 frames): the last frame 2.05 dB higher, the one before it 1.10 lower
+     (mirror's one padding frame is that one), the two together 0.47 higher.
+   - cuts.md's 31 shots run alone (22 to 60 frames): the last frame 1.33 dB higher, beyond the
+     spread on 20, lower on none.
+   - Over a whole shot, no group lower by PSNR-Y, SSIM, LPIPS, DISTS or VMAF. Against it: a
+     slow pan over a near-flat sky, its last frame 0.9 to 1.2 dB lower. A shot of 2 frames is
+     padded alike by both.
+   - As with step 0's padding, milestone 1's regression keeps numz's mirror through a mode of
+     the tests' own, and the repeat is checked bit-identical to numz patched to repeat
+     (measurement's `NUM_TAIL`), against measurement's runs of 2026-10-19.
 2. **DiT** on windows:
    - one window per shot when it fits
    - otherwise windows sharing **M = 2 latents** (8 frames). Their lengths are balanced,
@@ -2821,14 +2851,14 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
 ## Open questions
 
 ### To measure
-- **Numerics:** settled but for two items ([numerics.md](../research/docs/numerics.md)).
-  numz's choices stay (see [Vendored model code](#vendored-model-code)), its bf16 decode
-  included, and so does its resize; the padding changes (step 0 of the
-  [Pipeline](#pipeline-per-shot)). Left:
-  - the chroma kernel at decode, Catmull-Rom upsampling, which shapes what the model sees
-    (GPU runs). The master's downsampling is settled: bilinear (see [Output](#output)).
-  - a shot padded to 4n + 1 frames by mirroring its end (numz) or repeating its last frame
-    (ByteDance)
+- **Numerics:** settled but for the eyes on one item
+  ([numerics.md](../research/docs/numerics.md)). numz's choices stay (see
+  [Vendored model code](#vendored-model-code)), its bf16 decode included, and so does its
+  resize; the padding of a frame changes (step 0 of the [Pipeline](#pipeline-per-shot)), and
+  so does that of a shot's end (step 1, decided on 2026-10-19). Left: the chroma kernel at
+  decode, measured on 2026-10-19 (see [Input](#input)): bilinear brings the output's chroma
+  closest to the ground truth. Crops of both kernels from the kept runs, made on the CPU, for
+  the user's eyes. The master's downsampling is settled: bilinear (see [Output](#output)).
 - **Every fourth frame is the model's best**
   ([numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
   shot's first frame, the causal VAE packs 4 frames per latent, and the last frame of each
