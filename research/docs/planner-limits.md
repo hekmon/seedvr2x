@@ -503,6 +503,144 @@ are around the tile's; "the larger" is the larger of the fit and that line. The 
 - **Times aren't in the tables:** the card is power-capped. The 45 tiles took 2,787 s in all:
   2.96 s to encode and 6.68 s to decode at 512 px, 55.9 s and 126.4 s at 2048 px.
 
+### Under the one-output convolution (2026-10-17)
+
+The tables above are the peaks of a VAE whose split convolutions concatenate their pieces. Since
+`82cbd0d` a convolution cut in pieces allocates its whole output ahead and writes each piece into
+it (`InflatedCausalConv3d.whole_output` in the vendored `causal_inflation_lib.py`), where the
+output a slice of four frames gives is **2.5 GiB or more**, judged at each convolution's own call,
+so that every slice of a pass takes one path at that convolution. Of the tiles above, the rule
+takes these passes: the decodes in squares of 1152 to 2048 px (15), in tiles of 1104 rows × 1216
+to 1856 px (11) and untiled at 1080p; the encodes in squares of 1664 to 2048 px (7) and untiled
+at 4K (and the untiled 4K decode, which the 96 GB card cannot hold). It takes others the tables
+don't have: 1440p's tiles of 1,472 rows and its untiled passes, and tiles cut off at 4K's edges.
+
+**How measured.** The method of the section above, by
+[`one_output_peaks.py`](../scripts/one_output_peaks.py) (`tile_peaks.py`'s measure unchanged, with
+a list of steps, the outputs' digests and the path counted per convolution): the same card, torch
+2.14.1+cu130, cuDNN 92400, `flash_attn_2` 2.8.3.post1, `cudaMallocAsync`; the two models loaded
+whole (15.8386 GiB allocated, 78.4484 of 95.0512 free); 21 frames of the same 1080p clip from
+frame 48, the tiles sharing 64 px; a pass's peak above what was allocated before it. The 35 passes
+of the list were measured on **two codes**, the same steps in the same order: with the one output
+and without it. Each code ran in four processes, one hold of the card for each group of tiles
+(711 and 708 s, 796 and 792, 655 and 652, 893 and 892 s: eight holds, 2026-10-16 22:57 to
+2026-10-17 00:38 UTC, no other compute application on the card, 10 MiB used before each), the
+code with the one output first. Every process began with a 512-px pair, as 512 px was the first
+pass of the process of 2026-10-11. The untiled passes are the run's own calls
+(`model.encode_stream` of `shot.encoder_inputs`, `model.decode_stream` of its latent; 1080p
+padded to 1104 × 1920, 4K to 2192 × 3840); the DiT's weights were moved to the CPU before the
+untiled 4K encode on both codes (free memory 78.37 to 93.68 GiB: the encode's fit, 75.27 GiB,
+leaves 3.1 GiB of the 78.37 beside them), the peaks counting from what is allocated before the
+pass either way. The SHA-256 of each tile's latent and of each decoded slice was kept, with the
+convolutions that took the one output.
+
+**The tree.** With the one output: seedvr2x at `82cbd0d`; without it: its parent `c9afce4`. The
+two differ in `causal_inflation_lib.py` and `tests/test_causal_conv.py` alone (the trees of
+`seedvr2x/` without `DESIGN.md` and `AGENTS.md`, the ones the measure ran: `0a81d0a9` and
+`d045524f`).
+
+Peaks in GiB above what was allocated before the pass, from the records' bytes. "Before" is the
+planner's figure at `fbf1ee4` (`runtime/planner.py`, `MEASURED`; for an untiled pass, its fit); the
+differences are the peak with the one output less the figure, and less the peak without it. A
+decode square or encode square is named by its side, a cut-off tile by its size. The convolutions
+that took the one output, on all five slices of the pass's largest tile: **D1** =
+`decoder.up_blocks.2.upsamplers.0.conv`; **D9** = D1, `decoder.up_blocks.1.upsamplers.0.conv`,
+`decoder.up_blocks.3.resnets.{0,1,2}.conv1` and `.conv2`, and `resnets.0.conv_shortcut`; **E4** =
+`encoder.down_blocks.0.resnets.{0,1}.conv1` and `.conv2`; **E9** = E4, and
+`encoder.down_blocks.1.resnets.0.conv1`, `.conv2` and `.conv_shortcut`, and `resnets.1.conv1` and
+`.conv2`. On a square the T × T tile takes it and the T × 192 one concatenates: the two paths are
+never mixed within a tile's pass. "Equal": the latent, or the five decoded slices, has one
+SHA-256 in every run of both codes.
+
+**The decodes (27 measured)**
+
+| Tile | Before | Without | With | With − before | With − without | Convolutions | Outputs |
+|---|---|---|---|---|---|---|---|
+| 1152 | 21.950 | 21.950 | 21.986 | +0.036 | +0.036 | D1 | equal |
+| 1216 | 24.400 | 24.401 | 24.138 | −0.262 | −0.263 | D1 | equal |
+| 1280 | 26.980 | 26.982 | 26.396 | −0.584 | −0.586 | D1 | equal |
+| 1344 | 29.710 | 29.707 | 28.838 | −0.872 | −0.869 | D1 | equal |
+| 1408 | 32.570 | 32.568 | 31.313 | −1.257 | −1.255 | D1 | equal |
+| 1472 | 35.550 | 35.552 | 33.974 | −1.576 | −1.577 | D1 | equal |
+| 1536 | 38.730 | 38.702 | 36.743 | −1.987 | −1.958 | D1 | equal |
+| 1600 | 41.960 | 41.957 | 39.649 | −2.311 | −2.309 | D1 | equal |
+| 1664 | 45.300 | 45.302 | 42.455 | −2.845 | −2.847 | D9 | equal |
+| 1728 | 48.790 | 48.794 | 45.681 | −3.109 | −3.113 | D9 | equal |
+| 1792 | 52.480 | 52.478 | 48.928 | −3.552 | −3.550 | D9 | equal |
+| 1856 | 56.320 | 56.317 | 52.479 | −3.841 | −3.838 | D9 | equal |
+| 1920 | 60.160 | 60.165 | 55.687 | −4.473 | −4.478 | D9 | equal |
+| 1984 | 64.220 | 64.219 | 59.249 | −4.971 | −4.970 | D9 | equal |
+| 2048 | 68.510 | 68.482 | 63.342 | −5.168 | −5.140 | D9 | equal |
+| 1104 × 1216 | 22.200 | 22.204 | 22.242 | +0.042 | +0.037 | D1 | equal |
+| 1104 × 1280 | 23.340 | 23.336 | 23.158 | −0.182 | −0.178 | D1 | equal |
+| 1104 × 1344 | 24.500 | 24.503 | 24.180 | −0.320 | −0.323 | D1 | equal |
+| 1104 × 1408 | 25.670 | 25.670 | 25.209 | −0.461 | −0.461 | D1 | equal |
+| 1104 × 1472 | 26.780 | 26.778 | 26.266 | −0.514 | −0.512 | D1 | equal |
+| 1104 × 1536 | 27.940 | 27.942 | 27.299 | −0.641 | −0.643 | D1 | equal |
+| 1104 × 1600 | 29.060 | 29.060 | 28.259 | −0.801 | −0.801 | D1 | equal |
+| 1104 × 1664 | 30.220 | 30.223 | 29.272 | −0.948 | −0.951 | D1 | equal |
+| 1104 × 1728 | 31.390 | 31.385 | 30.254 | −1.136 | −1.131 | D1 | equal |
+| 1104 × 1792 | 32.490 | 32.486 | 31.280 | −1.210 | −1.206 | D1 | equal |
+| 1104 × 1856 | 33.650 | 33.646 | 32.380 | −1.270 | −1.267 | D1 | equal |
+| untiled 1104 × 1920 | 34.927 | 34.828 | 33.315 | −1.612 | −1.514 | D1 | equal |
+
+The untiled 4K decode (fit 136.318 GiB, the card 95.05) ran on neither code.
+
+**The encodes (8 measured)**
+
+| Tile | Before | Without | With | With − before | With − without | Convolutions | Outputs |
+|---|---|---|---|---|---|---|---|
+| 1664 | 25.100 | 25.103 | 24.877 | −0.223 | −0.226 | E4 | equal |
+| 1728 | 27.010 | 27.012 | 26.720 | −0.290 | −0.291 | E4 | equal |
+| 1792 | 29.000 | 29.003 | 28.436 | −0.564 | −0.567 | E4 | equal |
+| 1856 | 31.120 | 31.121 | 30.458 | −0.662 | −0.664 | E4 | equal |
+| 1920 | 33.260 | 33.256 | 32.291 | −0.969 | −0.965 | E4 | equal |
+| 1984 | 35.460 | 35.462 | 34.283 | −1.177 | −1.179 | E4 | equal |
+| 2048 | 37.760 | 37.756 | 36.327 | −1.433 | −1.429 | E4 | equal |
+| untiled 2192 × 3840 | 75.272 | 75.376 | 70.791 | −4.481 | −4.585 | E9 | equal |
+
+**The controls.** The 22 passes off the list (the 512-px pair, the encodes of the squares of 1152
+to 1600 px, the 11 encodes of the 1104-row tiles and the untiled 1080p encode): no convolution
+took the one output, the peak is the same to the byte with and without it, the outputs are equal,
+and they read within −0.005 to +0.003 GiB of the table's figure; the untiled 1080p encode, 19.350
+GiB on both codes, is 0.503 under its fit (19.853).
+
+**Without it, the same tiles.** The 33 tiled passes of the list read −0.028 to +0.005 GiB from
+the table's figure (the 0.028 under are the 1536-px and 2048-px decodes, where the table keeps the
+larger of two measures, to the hundredth); the untiled 1080p decode 34.828 for a fit of 34.927,
+and the untiled 4K encode **75.376 for a fit of 75.272**, 0.104 over it (the planner adds 0.4 GiB
+to every encode, `ENCODE_EXTRA`).
+
+**Determinism.** The 512-px pair ran in all eight processes: the encode's peak 3,777,345,824 B
+and the decode's 6,320,068,752 B in all eight, one latent digest (`bbec29f9…`), one digest of the
+decode (`bd9324b5…`) and one set of slice digests.
+
+**Just over the floor.** Two passes stand over their figure with the one output: the decode in
+1152-px squares (21.986 for 21.95, +0.036; a slice's largest output there 2.531 GiB) and in tiles
+of 1104 × 1216 (22.242 for 22.20, +0.042; 2.561 GiB). Each takes the path at one convolution,
+`decoder.up_blocks.2.upsamplers.0.conv`, and its peak is the higher by 0.036 and 0.037 GiB than
+without it: where the pieces were small, the output allocated ahead costs more than they did.
+Their outputs are equal. Every other pass of the list is lower, 0.18 GiB (the 1104 × 1280 decode)
+to 5.17 (the 2048-px decode) under its figure, the untiled 4K encode 4.48 under its fit.
+
+**The allocator.** `cudaMallocAsync` logged "recovered from an allocation failure by trimming the
+pool and retrying" five times in all, once in the first group with the one output (in the 2048-px
+decode, the pool's reserved peak 94.25 GiB, as on 2026-10-11), three times in the first group
+without it and once in the second: no output moved.
+
+**What the planner takes from it.** The peak with the one output, rounded up to the hundredth,
+for the passes it takes that were measured (the untiled ones keep their fits: one point each, no
+refit). Decodes in squares: 1152 21.99, 1216 24.14, 1280 26.40, 1344 28.84, 1408 31.32, 1472
+33.98, 1536 36.75, 1600 39.65, 1664 42.46, 1728 45.69, 1792 48.93, 1856 52.48, 1920 55.69, 1984
+59.25, 2048 63.35. Decodes in tiles of 1104 rows × 1216 22.25, 1280 23.16, 1344 24.18, 1408
+25.21, 1472 26.27, 1536 27.30, 1600 28.26, 1664 29.28, 1728 30.26, 1792 31.29, 1856 32.38.
+Encodes in squares: 1664 24.88, 1728 26.73, 1792 28.44, 1856 30.46, 1920 32.30, 1984 34.29, 2048
+36.33. The other passes keep their figures.
+
+**Their caveats.** Each pass was measured once on each code (the 512-px pair four times), on one
+card, with one driver and one cuDNN, as before. The tile was fed alone: the whole-frame second
+measures of 2026-10-11, up to 0.03 GiB over the tile alone, were not repeated with the one output.
+
 ## What the planner should use
 
 - **Budget = the free memory read once the CUDA context exists, minus 0.6 GiB.** Runs failed with
@@ -628,4 +766,20 @@ python $S/tile_peaks.py plan                      # the 45 tiles and their grids
 python $S/tile_peaks.py run --dit $M/seedvr2_ema_7b_fp16.safetensors \
   --vae $M/ema_vae_fp16.safetensors --source /path/to/clip-1080p.mkv --out tiles.jsonl
 python3 $S/tile_peaks.py table tiles.jsonl        # the section's three tables
+```
+
+The same tiles with and without the one-output convolution ([the subsection](#under-the-one-output-convolution-2026-10-17))
+run in two trees of seedvr2x, a group of steps in one process each, the 512-px pair first; `run`
+alone on the GPU, `measured` and `compare` need no GPU, `table` no environment:
+
+```bash
+S=/path/to/scripts; M=/path/to/models
+python $S/one_output_peaks.py measured --steps square-512,square-2048,untiled-1080p \
+  --out measured.json                             # the planner's figures for the steps
+python $S/one_output_peaks.py run --dit $M/seedvr2_ema_7b_fp16.safetensors \
+  --vae $M/ema_vae_fp16.safetensors --source /path/to/clip-1080p.mkv --first 48 \
+  --steps square-512,square-2048,square-1600,untiled-1080p --out runs/g1-with.jsonl   # tree with it
+python $S/one_output_peaks.py run ... --out runs/g1-without.jsonl                      # tree without it
+python3 $S/one_output_peaks.py table --with runs/*-with.jsonl --without runs/*-without.jsonl \
+  --measured measured.json --logs runs/*.log      # the subsection's tables
 ```
