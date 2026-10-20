@@ -1262,8 +1262,12 @@ ends its group of 4. Off by default: it costs as many times the GPU time.
 - **What.** Run s, for s from 0 to 3, is fed the shot from its frame s; frame f is taken from
   run f mod 4, where it ends its group (frames 0 to 3 each a run's own first frame, a latent
   of its own). Each run is a whole one: its plan of windows, its padded end (step 1), its
-  colour correction. Each keeps only the frames it gives, so the scratch doesn't grow, and the
-  output has the shot's frames, in their order.
+  colour correction. The earlier runs' frames wait on disk until the last run's decode puts
+  every frame in order: up to (N − 1)/N of the longest shot (three quarters with 4 runs), at
+  the 16 bits the master is written from, so no byte of it changes (12.4 MB a 1080p frame,
+  49.8 MB at 4K: 37 GB for 750 frames of a 1,000-frame 4K shot). `--plan` says it, and a job
+  whose disk can't hold it is refused at its start. Frames asked for in float
+  (`--dump-frames`) are written by the run that makes them.
 - **Measured** (2026-10-20, numz, the 8 full-reference clips, seed 42;
   [numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)): against
   one run, PSNR-Y +2.01 dB and VMAF +10.4 without correction (+1.51 and +7.85 after `split`),
@@ -1271,7 +1275,8 @@ ends its group of 4. Off by default: it costs as many times the GPU time.
   near-flat sky to +3.96 on a dark anime clip; the temporal errors lower on 8 of 8, so the
   runs, which differ as seeds do, don't flicker when mixed. Seeds 43 (8 clips) and 1234 (5)
   gave the same gain within 0.2 dB of PSNR-Y on every clip. Lower at every seed: the bottom 16
-  rows of two live-action clips (0.3 to 7.1 dB), not yet looked at. The user's eyes, blind: the
+  rows of two live-action clips (0.3 to 7.1 dB), their letterbox bars, black within 0.2 of a
+  level on average in every version: no eye sees it. The user's eyes, blind: the
   several runs' frames on 8 of 8 stills ("the sharpest, the cleanest; the other is way more
   blurry") and on 4 of 4 loops, 2 of them hard to tell in motion.
 - **Cost.** Every phase runs as many times: 4× the GPU time. A run takes the memory a single
@@ -1525,8 +1530,8 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       included. The conversion tests (see [Input](#input)) check that zscale sites the chroma
       left, as tagged.
     - The chroma is downsampled with zscale's bilinear, pinned, as `ffv1_out.py` does, on one
-      slice (see [Input](#input)). Decimation wants a low-pass, not a sharp interpolator (the
-      decode, which interpolates, uses Catmull-Rom), and the measurement agrees
+      slice (see [Input](#input)). Decimation wants a low-pass, not a sharp interpolator, and the
+      measurement agrees
       ([numerics.md](../research/docs/numerics.md#the-masters-chroma-420-kernels-and-zscales-slices)):
       - On the 8 full-reference clips, bilinear gives the lowest ΔE00 on every clip, against
         Catmull-Rom, Spline16, Spline36 and Lanczos. These lose 0.3–0.5 dB on Cb and Cr on
