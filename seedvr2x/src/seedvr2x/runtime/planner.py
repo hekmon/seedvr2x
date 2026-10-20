@@ -29,10 +29,10 @@ fits; a size that doesn't fit is refused, never degraded (PlanError).
 Four corrections come from the planner's first two matrices on seedvr2x, emulated cards
 (tests/test_planner.py, test_first_matrix). Two are DESIGN.md's: no tile chosen above TILE_MAX
 (Memory planner, What follows from them), and every VAE pass held to a room under the budget
-besides its peak (VAE_ROOM), provisional there until its cause is found (Memory planner, Budget;
-To measure, The VAE's room). PROVISIONAL (implementation, 2026-10-11), the two others:
-ENCODE_EXTRA on every encode, until the encode is refitted on seedvr2x, and split's term off a
-tiled decode's peak (decode_peak)."""
+besides its peak (VAE_ROOM), judged by the frames against a run with room to spare (Memory
+planner, Budget; To measure, The VAE's room). PROVISIONAL (implementation, 2026-10-11), the two
+others: ENCODE_EXTRA on every encode, until the encode is refitted on seedvr2x, and split's term
+off a tiled decode's peak (decode_peak)."""
 
 import math
 import mmap
@@ -262,20 +262,23 @@ LATENT_VALUE = 2
 # (MEASURED).
 ENCODE_EXTRA = round(0.4 * GIB)
 # The room every VAE pass, encode or decode, tiled or not, must leave under the budget besides
-# its predicted peak, in bytes: 2.1 GiB under the free memory with the margin. Over the
-# planner's two matrices on emulated cards (2026-10-11), a VAE pass whose peak comes close to
-# the free memory runs out of memory in memory_limit_conv's torch.cat: the device full while
-# torch holds 3.3 to 4.9 GiB less than the free memory it started with, at the pass's largest
-# request, 2.0 to 4.8 GiB. Every pass that had 1.67 GiB or more between its measured peak and
-# the free memory ran (1.67, 1.97, 3.53, 3.69, 3.8, 4.98, 9.97, 13.8, 25.6); each of the six
-# failures had 1.6 GiB or less between its predicted, or true, peak and the free memory (0.65,
-# 0.80, 0.86, 0.94, 1.09, 1.6); passes also ran with 0.63, 0.88, 1.01, 1.28 and 1.32: the band
-# between isn't safe. The first matrix's tiled decodes passed only for split's term, which
-# padded their predicted peaks then (decode_peak). PROVISIONAL, as DESIGN.md has it (Memory
-# planner, Budget: every VAE pass held 1.5 GiB further under the budget until the cause is
-# found; To measure, The VAE's room, its study): a guard, the cause isn't known; numz's margin,
-# 0.6 GiB, was bisected on passes whose largest request was 0.4 GiB (MARGIN).
-VAE_ROOM = round(1.5 * GIB)
+# its predicted peak, in bytes: 1.85 GiB under the free memory with the margin (DESIGN.md,
+# Memory planner, Budget, decided on 2026-10-18; To measure, The VAE's room). A pass packed
+# closer than about 1 GiB to its peak can run and give other frames, and say nothing: a
+# convolution whose workspace the allocator refuses runs on cuDNN's next engine, kept for the
+# process's life (vae-room.md). Judged by the frames against a run with room to spare, on the
+# 96 GB card emulating cards of 12 to 48 GB under cudaMallocAsync (2026-10-16 to 18): a pass
+# alone kept its frames with 0.97 GiB or less left (decodes 0.67 to 0.97, encodes their latent
+# with 0.87 or less), a whole run, the encode, the windows and the decode in one process, with
+# 1.08 or less (six tiles; near that floor two runs at one card didn't always agree). So 1.85
+# is 0.77 over the most a whole run was seen to need and 0.88 over the most a pass alone needs;
+# the 0.25 kept over the 1.0 those measures allow is for what wasn't measured: whole runs in
+# other tiles, cards not emulated, other GPU generations and cuDNN builds, whose engines and
+# workspaces are their own. An encode is held 0.4 GiB more besides (ENCODE_EXTRA). Before, 1.5
+# (2026-10-11), a guard while its cause wasn't known: the large passes refused at
+# memory_limit_conv's concatenation, which the one-output convolution spares most of them
+# (MEASURED).
+VAE_ROOM = round(1.25 * GIB)
 
 # The colour correction, split, on the GPU: 0.56 GiB per 3840x2160 output frame it corrects at
 # once (research/docs/colour.md, Cost and what streams), in the decode's phase, where it runs on

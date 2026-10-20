@@ -1463,9 +1463,9 @@ def test_plan_said(
         " the DiT's 36 blocks on the GPU; in the decode, the DiT's 36 blocks on the GPU",
         "plan: no system memory pinned, nothing leaving the GPU; 0.00 GiB for the longest shot at"
         " the most, as its decode merges its windows; 2.40 GiB of system memory in all",
-        "plan: encode untiled, decode untiled, each held 1.50 GiB under the budget",
+        "plan: encode untiled, decode untiled, each held 1.25 GiB under the budget",
         "plan: predicted peaks: encode 18.11 GiB, DiT 15.91 GiB, decode 17.73 GiB; the encode"
-        " bounds the plan, its room counted, 74.29 GiB under the budget",
+        " bounds the plan, its room counted, 74.54 GiB under the budget",
         "plan: pinned: --window 5",
     ]
     caplog.clear()
@@ -1559,9 +1559,9 @@ def test_size_and_host_memory_refused(
         free_memory(patch, encode + planner.MARGIN - 1)
         assert upscale(tmp_path, source_path, "out", *JOB) == 1
     assert (
-        "an output of 128x96 takes 4.87 GiB of free VRAM (its encode untiled, too small for a"
-        " tile, with the DiT off the GPU: a peak of 2.77 GiB, 1.50 of room a VAE pass is held to,"
-        " and 0.60 of margin), and the driver reports 4.86 GiB free: the largest output that fits"
+        "an output of 128x96 takes 4.62 GiB of free VRAM (its encode untiled, too small for a"
+        " tile, with the DiT off the GPU: a peak of 2.77 GiB, 1.25 of room a VAE pass is held to,"
+        " and 0.60 of margin), and the driver reports 4.61 GiB free: the largest output that fits"
         " there is --resolution 80, about 106x80"
     ) in caplog.text
     caplog.clear()
@@ -1878,8 +1878,8 @@ def test_recorded_plan_no_longer_fits(
     assert upscale(tmp_path, source_path, "out", *JOB) == 1
     assert (
         "the recorded plan no longer fits the memory free now: the encode, untiled, with the"
-        " DiT off the GPU, takes 4.87 GiB of free VRAM, 1.50 of them the room a VAE pass is held"
-        " to, and the driver reports 4.61 GiB free, 0.26 GiB short"
+        " DiT off the GPU, takes 4.62 GiB of free VRAM, 1.25 of them the room a VAE pass is held"
+        " to, and the driver reports 4.36 GiB free, 0.26 GiB short"
     ) in caplog.text
     assert contents(tmp_path / "out") == kept and steps.calls == []
     free_memory(monkeypatch, FREE)

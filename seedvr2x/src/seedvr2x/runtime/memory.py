@@ -198,34 +198,32 @@ HELD_BACK_UNREAD = 3 * GIB
 #   tiles of 1088 px (21.19), 5.3 in tiles of 1152 (22.58), and in tiles of 1280 refused with
 #   28.76 GiB allowed (24.88 allocated by then); over 17 frames at 4K, 4.8 for an encode in
 #   tiles of 1472 px (21.28) and 5.1 for a decode in tiles of 1088 (21.19).
-# It grows with what the step works in and is no constant; this one covers the plans a 32 GB
-# card makes. The planner holds every VAE pass 1.5 GiB under its budget besides
-# (planner.VAE_ROOM), and a window not: so a plan counts on the limit less the larger of a
-# window's need, 4.5 GiB, and of a VAE pass's less that room, 5.3 - 1.5 = 3.8. The planner's
-# own margin (planner.MARGIN, 0.6 GiB) is counted IN it, not on top: it measures the same need
-# where a driver refuses, and with both the planner refused a window of 5 latents at 4K, the
-# smallest, beside that card's usual desktop, by 0.27 GiB (counted on the CPU, never run so
-# on the card; design, 2026-10-12; DESIGN.md, Allocator): on a held run the budget is what
-# the plan counts on (planner._Job.margin). The day before it was 2.3, from one window of 8
-# latents: with the margin and the room that left a VAE pass 4.4 GiB beyond its peak, under
-# what a decode in tiles of 1088 px needs. PROVISIONAL (implementation, 2026-10-12): one card;
-# a larger card's larger windows and tiles need more, unmeasured; it follows planner.VAE_ROOM,
-# to be raised by what that room loses; whether a held run should take an allocator that needs
-# less (max_split_size_mb at 128 MiB ran the decodes in less, 2.4 to 3.7 times slower) is
-# design's to decide, as is a room by the kind of step in this one figure's place (DESIGN.md,
-# To measure).
-# Measured again on 2026-10-13 (the same probe and card, a desktop holding 3.2 to 4.6 GiB of
-# it): that need is no threshold and follows no size a plan knows. 4K's window of 3 latents
-# was refused under its peak and 2.5 GiB, and ran under 2.4, 2.3 and 2.2; 98,640 tokens needed
-# 2.6 GiB at 4K where 99,360 needed 1.2 at 1080p, and 131,520 needed 1.9 where 132,480 needed
-# 3.0; and an encode in tiles of 1856 px at 1080p needed 3.4 GiB with the DiT's parts on the
-# GPU as 36 swapped blocks leave them, and 5.2 with the DiT off it, where the untiled encode,
-# larger, needed 3.8 either way. Hence expandable segments by default (EXPANDABLE), under
-# which a step with less than this figure slows down and runs, down to 0.1 GiB over its peak;
-# the figure is kept: with it every window measured there ran at its usual speed (2.5 GiB at
-# the most), and a VAE pass, left 6.0 with the planner's room, too (a decode takes 3.0 to 4.7
-# GiB beyond its peak when it is allowed them). Whether less should be planned under that
-# allocator is design's to decide.
+# It grows with what the step works in and is no constant; this one covers the plans a 32 GB card
+# makes. The planner holds every VAE pass 1.25 GiB under its budget besides (planner.VAE_ROOM; 1.5
+# when this was measured), and a window not: so a plan counts on the limit less the larger of a
+# window's need, 4.5 GiB, and of a VAE pass's less that room, 5.3 - 1.25 = 4.05. The planner's own
+# margin (planner.MARGIN, 0.6 GiB) is counted IN it, not on top: it measures the same need where a
+# driver refuses, and with both the planner refused a window of 5 latents at 4K, the smallest,
+# beside that card's usual desktop, by 0.27 GiB (counted on the CPU, never run so on the card;
+# design, 2026-10-12; DESIGN.md, Allocator): on a held run the budget is what the plan counts on
+# (planner._Job.margin). The day before it was 2.3, from one window of 8 latents: with the margin
+# and the room that left a VAE pass 4.4 GiB beyond its peak, under what a decode in tiles of 1088 px
+# needs. PROVISIONAL (implementation, 2026-10-12): one card; a larger card's larger windows and
+# tiles need more, unmeasured; it follows planner.VAE_ROOM, to be raised by what that room loses;
+# whether a held run should take an allocator that needs less (max_split_size_mb at 128 MiB ran the
+# decodes in less, 2.4 to 3.7 times slower) is design's to decide, as is a room by the kind of step
+# in this one figure's place (DESIGN.md, To measure).
+# Measured again on 2026-10-13 (the same probe and card, a desktop holding 3.2 to 4.6 GiB of it):
+# that need is no threshold and follows no size a plan knows. 4K's window of 3 latents was refused
+# under its peak and 2.5 GiB, and ran under 2.4, 2.3 and 2.2; 98,640 tokens needed 2.6 GiB at 4K
+# where 99,360 needed 1.2 at 1080p, and 131,520 needed 1.9 where 132,480 needed 3.0; and an encode
+# in tiles of 1856 px at 1080p needed 3.4 GiB with the DiT's parts on the GPU as 36 swapped blocks
+# leave them, and 5.2 with the DiT off it, where the untiled encode, larger, needed 3.8 either way.
+# Hence expandable segments by default (EXPANDABLE), under which a step with less than this figure
+# slows down and runs, down to 0.1 GiB over its peak; the figure is kept: with it every window
+# measured there ran at its usual speed (2.5 GiB at the most), and a VAE pass, left 6.0 with the
+# planner's room then (1.5; 5.75 with 1.25), too (a decode takes 3.0 to 4.7 GiB beyond its peak when
+# it is allowed them). Whether less should be planned under that allocator is design's to decide.
 # Under those segments it is also what a check that finds the card short may take from the
 # limit, other programs having grown, before the run stops (check; DESIGN.md, Allocator,
 # decided on 2026-10-16): a step is then left less beyond its peak, never under it.
