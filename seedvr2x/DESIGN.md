@@ -641,22 +641,19 @@ Decoding goes through an ffmpeg pipe:
   - chroma location: left, the H.264, HEVC and MPEG-2 default. The JPEG family is
     centre-sited, and ffmpeg declares it so (MJPEG in AVI, MKV and MOV, with ffmpeg 6.1.1 and
     n9.0.2), so the tags cover it.
-  - chroma kernel: bicubic with b = 0, c = 0.5 (Catmull-Rom: zscale
-    `filter=bicubic:param_a=0:param_b=0.5`). That is Keys' cubic with a = −0.5, the kernel of
-    step 0's resize, so every interpolation feeding the model is the reference pipeline's.
-    zscale's default, bilinear, blurs chroma edges. Sharper kernels (Spline36, Lanczos)
-    pre-sharpen and ring, so they are measured options, as for the resize.
-    Measured on 2026-10-19 on numz, 8 clips, with `split`'s correction
+  - chroma kernel: bilinear, zscale's own (`filter=bilinear`, given explicitly), decided on
+    2026-10-20, to be built; Catmull-Rom (`filter=bicubic:param_a=0:param_b=0.5`, Keys' cubic
+    with a = −0.5, the kernel of step 0's resize) until then. Measured on 2026-10-19 on numz,
+    8 clips, with `split`'s correction
     ([numerics.md](../research/docs/numerics.md#the-decodes-chroma-the-kernel-the-models-input-is-read-with)):
     against bilinear, a source read with Catmull-Rom gives an output whose luma stays within
     the seeds' spread (VMAF higher on 2 of the 8) and whose chroma is further from the ground
     truth: PSNR-Cb 0.17 dB and PSNR-Cr 0.25 lower on average, lower on 5 of 8 clips each and
-    higher on none, colour edges 0.16 ΔE00 further, ringing beyond 2 levels 0.37 points more.
-    Spline36 and Lanczos go further still, and so it stays against ground truths made again
-    with Catmull-Rom or Lanczos. The consistency argued above shows in no measure, and the
-    full-reference protocol's runs, colour's study among them, were fed sources read with
-    bilinear (zscale's default). The kernel is for the user's eyes, on crops of both from
-    those runs; Catmull-Rom until then.
+    higher on none, colour edges 0.16 ΔE00 further, ringing beyond 2 levels 0.37 points more;
+    Spline36 and Lanczos further still. The user's eyes, on blind crops of both after `split`
+    (8 places on 4 clips, the two 0.5 to 1.9 levels apart on average), saw no difference on
+    any. So the measures decide: bilinear's chroma rings less, and every full-reference run,
+    colour's study and its correction among them, was fed sources read with it.
   - primaries and transfer: the same on both sides of zscale, so never converted; no dither
   - **zscale is required.** Without it, seedvr2x refuses to run and says how to get a build
     that has it.
@@ -1112,13 +1109,15 @@ The rule: the upscale must look like its source in any given player.
 
    A shot's first frame is encoded alone, the first latent holding 1 frame. It comes out closer
    to the ground truth than the next 8 frames (by 0.04–5.5 dB of PSNR-Y, on 11 shots), but
-   re-rendered less: less sharp on 9 of them, by 3–55%
-   ([cuts.md](../research/docs/cuts.md#a-shots-first-frame-prepending-mirrored-frames)).
+   re-rendered less by one measure: less sharp on 9 of them, by 3–55%, by the luma's
+   Laplacian variance against the ground truth's
+   ([cuts.md](../research/docs/cuts.md#a-shots-first-frame-prepending-mirrored-frames)), a
+   measure the user's eyes contradicted on the latent grid (see [To measure](#to-measure)).
    Prepending 4 mirrored frames, as numz's `--prepend_frames` does, gives it the next frames'
    look for one more latent per shot (2–8% more GPU time per hour of animation), at the cost of
    0.6–2.8 dB of that lead on 7 of the 11: not done. Whether its sharpness step shows right
-   after a cut, which changes the picture 40 to 120 times more, is for the user's visual review
-   (milestone 7).
+   after a cut, which changes the picture 40 to 120 times more, is for the user's eyes: blind
+   crops and loops of shots' starts with and without it, from the kept runs, then milestone 7.
 
    A shot that isn't 4n + 1 frames long is padded, then trimmed after decoding. numz mirrors
    its end (`generation_utils.py:651-656`: a shot of 42 frames gets its frames 40, 39 and 38,
@@ -1244,6 +1243,45 @@ No fallback where latent stitching can't be used, on a card too small for a wind
 latents: the size is refused (see [Memory planner](#memory-planner)). The alternative measured,
 a linear pixel cross-fade over K = 4 frames (−67% boundary jump, mixed frames ~20% softer),
 isn't built.
+
+### Several runs of a shot, an option for quality
+
+Decided on 2026-10-20 (the user, on blind stills and loops), to be built: an option that runs
+each shot several times, its latent grid shifted, and takes each frame from the run where it
+ends its group of 4. Off by default: it costs as many times the GPU time.
+- **Why.** The VAE packs a shot's first frame alone into a latent, then 4 frames per latent
+  (step 1), and one latent's 4 frames don't come out equal: the group's last is the closest
+  to the ground truth (0.8–5.0 dB of PSNR-Y over the group's second, on 8 of 8 clips by VMAF
+  and LPIPS), and on fast motion the three before it carry ghosts, line art doubled. The
+  vendored VAE's code shows why (`attn_video_vae.py`, `causal_inflation_lib.py`): its
+  encoder halves time twice with causal convolutions padded at the front, so a latent sums up
+  its group and a little before it, stamped on the group's last frame; its decoder splits the
+  latent's channels into time steps twice, then convolves causally, so the three earlier
+  frames are rebuilt back in time from a summary stamped at the group's end. The code shows
+  the wiring, not what training made of it.
+- **What.** Run s, for s from 0 to 3, is fed the shot from its frame s; frame f is taken from
+  run f mod 4, where it ends its group (frames 0 to 3 each a run's own first frame, a latent
+  of its own). Each run is a whole one: its plan of windows, its padded end (step 1), its
+  colour correction. Each keeps only the frames it gives, so the scratch doesn't grow, and the
+  output has the shot's frames, in their order.
+- **Measured** (2026-10-20, numz, the 8 full-reference clips, seed 42;
+  [numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)): against
+  one run, PSNR-Y +2.01 dB and VMAF +10.4 without correction (+1.51 and +7.85 after `split`),
+  beyond the seeds' spread on 8 of 8 clips by VMAF, from +0.06 dB on a slow pan over a
+  near-flat sky to +3.96 on a dark anime clip; the temporal errors lower on 8 of 8, so the
+  runs, which differ as seeds do, don't flicker when mixed. The user's eyes, blind: the
+  several runs' frames on 8 of 8 stills ("the sharpest, the cleanest; the other is way more
+  blurry") and on 4 of 4 loops, 2 of them hard to tell in motion.
+- **Cost.** Every phase runs as many times: 4× the GPU time. A run takes the memory a single
+  run takes. The time estimate (`--plan`, `--until`) counts the runs, and a job's units are
+  its shots' runs (see [Pause and resume](#pause-and-resume)).
+- **Two runs**, from frames 0 and 2, each frame from the run where its place is 3 or 2: half
+  the GPU time, 37–47% of the measured gain. Offered or not once the user's eyes have seen
+  it against four runs and one.
+- **The option's name**, proposed: `--runs-per-shot N` (1 by default, 4, and 2 if offered).
+- **Validated by:** each run's frames bit-identical to a single run fed the shot from that
+  frame; the output's frames by the composite's rule; the user's eyes on long runs
+  (milestone 7).
 
 ## Colour correction
 
@@ -2633,6 +2671,20 @@ explanation.
 - seeds and reproducibility: the same settings and plan (window lengths and tiles, which
   `--plan` prints) give the same output, bit for bit
 
+**Several runs of a shot, explained so that a user tries it** (the user, 2026-10-20: the cost
+must be understood, and the gain shown clearly enough that a user tries it; see
+[Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)):
+- the latent grid in plain words: the model packs 4 frames into one latent and rebuilds 3
+  of them softer than the fourth, with doubled lines on fast motion;
+- what the option does about it and what it costs on the user's own card: `--plan` gives
+  the time with one run and with several, before anything runs; the memory doesn't change;
+- what it gives, shown: a pair of stills and a short loop, one run against several, from a
+  freely licensed source, credited, with the measured gain beside them;
+- where it gains most and least: fast motion and line art the most, a slow pan over flat
+  colour hardly;
+- how to see it on the user's own video before paying for a whole film: a short extract,
+  run both ways, the commands given.
+
 ## Validation milestones
 
 The numbers name the checks, not the build order. After milestones 1 and 2 came the I/O layer:
@@ -2878,7 +2930,7 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   decode, measured on 2026-10-19 (see [Input](#input)): bilinear brings the output's chroma
   closest to the ground truth. Crops of both kernels from the kept runs, made on the CPU, for
   the user's eyes. The master's downsampling is settled: bilinear (see [Output](#output)).
-- **Every fourth frame is the closest to the ground truth**
+- **Every fourth frame is the model's best**
   ([numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
   shot's first frame, the causal VAE packs 4 frames per latent, and the last frame of each
   group comes out closest to the ground truth: on 8 of 8 clips by VMAF and LPIPS, 7 of 8 by
@@ -2889,18 +2941,13 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   1.59 with `split`, colour's (ΔE00 after a 4 px blur) from 0.50 to 0.29 and 0.12. The
   perceptual gap barely moves (LPIPS from 0.021 to 0.018): the inner frames' texture, ghosts
   included, stays the model's ([colour.md](../research/docs/colour.md#the-latent-grid)).
-  Nothing measured removes it. Closest isn't sharpest: by the luma's Laplacian variance
-  against the ground truth's, the group's last frame is less sharp than its second on 6 of 8
-  clips (clearly on 3), as a shot's first frame is less sharp than the next ones.
-  Taking each frame from the run whose grid ends a group there takes 4 runs per shot, the
-  grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Measured
-  on 2026-10-20 (numz, the 8 clips, seed 42, the grid shifted by 1 to 3 frames), against one
-  run: closer to the ground truth (PSNR-Y +2.01 dB and VMAF +10.4 without correction, +1.51
-  and +7.85 after `split`; beyond the seeds' spread on 8 of 8 clips by VMAF), the temporal
-  errors lower on 8 of 8, so no flicker by them; 2 runs give 37–47% of it. And less sharp:
-  below the 3 seeds' range on 6 of 8 clips (−14% to +5% of their mean; one seed for the
-  shifts, the sharpest of the three on 6 clips). Whether a 4× or 2× mode is worth its GPU
-  time is for the user's eyes, on blind stills and loops of both.
+  Nothing in one run removes it. By the luma's Laplacian variance against the ground truth's,
+  the group's last frame is less sharp than its second on 6 of 8 clips; the user's eyes
+  contradict that measure (below): it isn't theirs.
+  Taking each frame from the run whose grid ends a group there, 4 runs per shot, was measured
+  and seen on 2026-10-20 and is decided as an option (see
+  [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)). Left: the two
+  runs' variant for the eyes; a second seed for the shifted runs; a long run (milestone 7).
 - **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget).
   Measured by tile size on the 96 GB card (2026-10-16 to 18): every tile the 12 to 48 GB cards
   take, passes alone, six of them in whole runs, three decodes under expandable segments; a room
