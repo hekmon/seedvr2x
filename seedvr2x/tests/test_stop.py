@@ -95,6 +95,15 @@ def test_handlers_while_running() -> None:
     assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
 
 
+# Python leaves Ctrl-C ignored when it starts so, as a shell starts a job with & (its default
+# handler, KeyboardInterrupt, isn't installed then), so that test_terminable's Ctrl-C would go
+# unseen on any code: read once, as pytest starts and imports this module.
+SIGINT_IGNORED = signal.getsignal(signal.SIGINT) is signal.SIG_IGN
+
+
+@pytest.mark.skipif(
+    SIGINT_IGNORED, reason="SIGINT ignored as pytest started (a job started with &): no Ctrl-C"
+)
 def test_terminable() -> None:
     # Around the model files' fetch, before the run's handlers (cli.py): SIGTERM raised as
     # Terminated, so that a download unwinds; Ctrl-C left to Python, KeyboardInterrupt; Python's
