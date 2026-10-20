@@ -1269,7 +1269,9 @@ ends its group of 4. Off by default: it costs as many times the GPU time.
   one run, PSNR-Y +2.01 dB and VMAF +10.4 without correction (+1.51 and +7.85 after `split`),
   beyond the seeds' spread on 8 of 8 clips by VMAF, from +0.06 dB on a slow pan over a
   near-flat sky to +3.96 on a dark anime clip; the temporal errors lower on 8 of 8, so the
-  runs, which differ as seeds do, don't flicker when mixed. The user's eyes, blind: the
+  runs, which differ as seeds do, don't flicker when mixed. Seeds 43 (8 clips) and 1234 (5)
+  gave the same gain within 0.2 dB of PSNR-Y on every clip. Lower at every seed: the bottom 16
+  rows of two live-action clips (0.3 to 7.1 dB), not yet looked at. The user's eyes, blind: the
   several runs' frames on 8 of 8 stills ("the sharpest, the cleanest; the other is way more
   blurry") and on 4 of 4 loops, 2 of them hard to tell in motion.
 - **Cost.** Every phase runs as many times: 4× the GPU time. A run takes the memory a single
@@ -1278,7 +1280,8 @@ ends its group of 4. Off by default: it costs as many times the GPU time.
 - **Two runs**, from frames 0 and 2, each frame from the run where its place is 3 or 2: half
   the GPU time, 37–47% of the measured gain. Offered or not once the user's eyes have seen
   it against four runs and one.
-- **The option's name**, proposed: `--runs-per-shot N` (1 by default, 4, and 2 if offered).
+- **The option:** `--runs-per-shot N` (the user, 2026-10-20): 1 by default, 4, and 2 if
+  offered.
 - **Validated by:** each run's frames bit-identical to a single run fed the shot from that
   frame; the output's frames by the composite's rule; the user's eyes on long runs
   (milestone 7).
