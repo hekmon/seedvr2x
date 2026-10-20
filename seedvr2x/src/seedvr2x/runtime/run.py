@@ -73,6 +73,7 @@ def run_job(
     *,
     numz_padding: bool = False,
     numz_draw: bool = False,
+    numz_tail: bool = False,
     clock: object | None = None,
 ) -> None:
     """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
@@ -103,7 +104,8 @@ def run_job(
 
     numz_padding is for tests only (cli.NUMZ_PADDING): each encode's frames padded as numz pads
     them (shot.encode_shot). So is numz_draw (cli.NUMZ_DRAW): each shot's noise drawn on the
-    device, as numz draws it (shot.sample_windows).
+    device, as numz draws it (shot.sample_windows). So is numz_tail (cli.NUMZ_TAIL): each shot's
+    end padded as numz pads it, mirrored, not repeated (shot.pad_4n1).
 
     clock is --until's, with the time estimates each unit's cost comes from (_begin; DESIGN.md,
     Pause and resume, Stopping): not built yet, None."""
@@ -122,7 +124,7 @@ def run_job(
                 continue
             sample = (models, inputs, shots, target, seed, plan, units, stop, copies)
             for index in group:
-                _sample(index, *sample, numz_padding, numz_draw)
+                _sample(index, *sample, numz_padding, numz_draw, numz_tail)
             _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write", None)
             for index in group:
                 _decode(models, shots, index, target, plan, units, write, copies)
@@ -151,11 +153,12 @@ def _sample(
     copies: Copies | None,
     numz_padding: bool,
     numz_draw: bool,
+    numz_tail: bool,
 ) -> None:
     """Shot `index`'s encode and windows, those not kept yet; with copies, the frames the encode
     reads copied, the copy and its checksums whole before the latent is recorded, so recorded
     with it, and the copy of a shot encoded already made again if it or its checksums are
-    missing. numz_padding and numz_draw as run_job takes them.
+    missing. numz_padding, numz_draw and numz_tail as run_job takes them.
 
     Between two of the shot's units the GPU holds nothing of the shot: its latent waits in
     system memory and each window's output in its file (units.Units), and its noise, drawn
@@ -185,6 +188,7 @@ def _sample(
             latent = encode_shot(
                 *(models, read, shot.frames, target, shot.seed(seed)),
                 numz_padding=numz_padding,
+                numz_tail=numz_tail,
                 tiles=tiles,
                 scratch=scratch,
                 allowance=plan.scratch_allowance,
@@ -194,6 +198,7 @@ def _sample(
                 latent = encode_shot(
                     *(models, _copied(read, copy), shot.frames, target, shot.seed(seed)),
                     numz_padding=numz_padding,
+                    numz_tail=numz_tail,
                     tiles=tiles,
                     scratch=scratch,
                     allowance=plan.scratch_allowance,

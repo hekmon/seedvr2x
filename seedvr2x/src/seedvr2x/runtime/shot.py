@@ -181,19 +181,29 @@ def shot_layout(count: int, window: int | None) -> list[tuple[int, int]]:
     return window_layout(latents, window or latents)
 
 
-def pad_4n1(frames: Tensor) -> Tensor:
-    """frames (T, ...) padded at the end to 4n + 1, as numz pads a batch
-    (src/core/generation_utils.py, pad_video_temporal): the frames before the last, mirrored,
-    and the last one repeated beyond a full mirror."""
-    return torch.cat([frames, _padding(frames[-4:], frames.shape[0])])
+def pad_4n1(frames: Tensor, *, numz_tail: bool = False) -> Tensor:
+    """frames (T, ...) padded at the end to 4n + 1: the last frame repeated, 1 to 3 times, as
+    ByteDance pads (projects/inference_seedvr2_7b.py:178-196 at e4de8c2, cut_videos, at sp_size
+    1, seedvr2x's). A shot of 1 or 4n + 1 frames is not padded; one of 2, 3 or 4 is padded to 5.
+
+    numz_tail is for tests only (cli.NUMZ_TAIL): numz's own padding instead, which mirrors the
+    end (src/core/generation_utils.py:651-656 at 4490bd1, pad_video_temporal): the frames before
+    the last, mirrored, and the last one repeated beyond a full mirror (:635-648)."""
+    return torch.cat([frames, _padding(frames[-4:], frames.shape[0], numz_tail)])
 
 
-def _padding(tail: Tensor, count: int) -> Tensor:
+def _padding(tail: Tensor, count: int, numz_tail: bool = False) -> Tensor:
     """The frames pad_4n1 appends to a shot of `count` frames, from tail, its last min(count, 4)
-    frames: at most 3 are missing, so the mirror never reaches further back."""
+    frames: at most 3 are missing, so the mirror of numz_tail never reaches further back. The
+    last frame repeated by default (DESIGN.md, Pipeline step 1, decided on 2026-10-19); numz's
+    mirror (generation_utils.py:635-656 at 4490bd1) with numz_tail, so that the tests held to
+    numz's references stay numz's whatever length a reference is made again with: milestone 1's
+    are one shot of 45 frames, 4n + 1, which neither pads."""
     missing = padded_length(count) - count
     if missing == 0:
         return tail[:0]
+    if not numz_tail:
+        return tail[-1:].repeat(missing, *([1] * (tail.dim() - 1)))
     if missing >= count:
         repeated = tail[-1:].repeat(missing - count + 1, *([1] * (tail.dim() - 1)))
         return torch.cat([tail[1:].flip(0), repeated])
@@ -205,11 +215,13 @@ def input_slices(
     count: int,
     sizes: list[int],
     to_tensor: Callable[[npt.NDArray[np.float32]], Tensor] = model.to_input,
+    *,
+    numz_tail: bool = False,
 ) -> Iterator[Tensor]:
     """The `count` frames of a shot, read as they are needed, padded at the end as pad_4n1 pads
-    them, in slices of `sizes` frames (model.encode_slices): (t, H, W, 3) on the CPU, as to_tensor
-    makes them, by default float16, numz's input (model.to_input). Only the last 4 frames read are
-    kept, for the padding."""
+    them (numz_tail as it takes it), in slices of `sizes` frames (model.encode_slices): (t, H, W,
+    3) on the CPU, as to_tensor makes them, by default float16, numz's input (model.to_input).
+    Only the last 4 frames read are kept, for the padding."""
     remaining, given = count, 0
     tail: Tensor | None = None
     padding: Tensor | None = None
@@ -227,7 +239,7 @@ def input_slices(
         if real < size:
             if padding is None:
                 assert tail is not None
-                padding = _padding(tail, count)
+                padding = _padding(tail, count, numz_tail)
             parts.append(padding[given : given + size - real])
             given += size - real
         yield parts[0] if len(parts) == 1 else torch.cat(parts)
@@ -244,6 +256,7 @@ def encode_shot(
     seed: int,
     *,
     numz_padding: bool = False,
+    numz_tail: bool = False,
     tiles: Tiles | None = None,
     scratch: Path | None = None,
     allowance: int | None = None,
@@ -256,7 +269,9 @@ def encode_shot(
     resizes them to (job.target_size), through model.input_transform.
 
     numz_padding is for tests only (cli.NUMZ_PADDING): the frames padded as numz pads them
-    (model.input_transform), so that milestone 1's regression holds the output to numz's.
+    (model.input_transform), so that milestone 1's regression holds the output to numz's. So is
+    numz_tail (cli.NUMZ_TAIL): a shot's end padded as numz pads it, mirrored (pad_4n1), not
+    repeated.
 
     tiles, when the plan tiles the encode (None: one pass, streamed): the shot is then encoded
     tile by tile (tiling.encode_tiled), numz's tiled encode of it, bit for bit, the frames still
@@ -268,7 +283,9 @@ def encode_shot(
     padded = padded_length(count)
     # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
     model.set_seed(seed + ENCODE_SEED_OFFSET)
-    inputs = encoder_inputs(models, read, count, target, numz_padding=numz_padding)
+    inputs = encoder_inputs(
+        *(models, read, count, target), numz_padding=numz_padding, numz_tail=numz_tail
+    )
     if tiles is None:
         return model.encode_stream(models, inputs, padded)
     store = tiling.Scratch(scratch, allowance)
@@ -282,12 +299,16 @@ def encoder_inputs(
     target: tuple[int, int],
     *,
     numz_padding: bool = False,
+    numz_tail: bool = False,
 ) -> Iterator[Tensor]:
     """The encoder's input for a shot of `count` frames, read as they are needed (encode_shot),
     slice by slice: each (C, t, H, W) in [-1, 1], COMPUTE_DTYPE on the device, t following
-    model.encode_slices over the shot padded to 4n + 1; numz_padding as encode_shot takes it."""
+    model.encode_slices over the shot padded to 4n + 1; numz_padding and numz_tail as encode_shot
+    takes them."""
     return _transformed(
-        models, read, count, target, model.to_input, COMPUTE_DTYPE, numz_padding=numz_padding
+        *(models, read, count, target, model.to_input, COMPUTE_DTYPE),
+        numz_padding=numz_padding,
+        numz_tail=numz_tail,
     )
 
 
@@ -301,8 +322,9 @@ def reference_inputs(
     needed (_correct): the frames through the encoder's transform (model.input_transform) in
     float32, slice by slice as encoder_inputs gives the encoder's input: each (C, t, H, W) float32
     in [-1, 1] on the device (DESIGN.md, Colour correction, Numerics). Padded by default whatever
-    the encoder's padding (numz_padding): split takes each frame's picture alone, cropped as the
-    decode's frames are (_frames, _decoded), which no padding moves.
+    the encoder's padding (numz_padding) and the tail of the shot's end (numz_tail): split takes
+    each frame's picture alone, cropped as the decode's frames are (_frames, _decoded), which no
+    padding moves, nor the frames appended at the end, cropped away.
 
     Not the encoder's own input: numz's numerics cast the frames to bfloat16 before the resize
     (generation_phases.py:380-413), which rounds 89% of 8-bit codes up, +0.114 level on average,
@@ -321,6 +343,7 @@ def _transformed(
     dtype: torch.dtype,
     *,
     numz_padding: bool = False,
+    numz_tail: bool = False,
 ) -> Iterator[Tensor]:
     """The frames of a shot of `count` frames, read as they are needed, made tensors by
     to_tensor (input_slices) and through model.input_transform(target) as dtype on the device,
@@ -332,7 +355,7 @@ def _transformed(
     sizes = model.encode_slices(models, padded_length(count))
     return (
         transform(frames.permute(0, 3, 1, 2).to(models.device, dtype))
-        for frames in input_slices(read, count, sizes, to_tensor)
+        for frames in input_slices(read, count, sizes, to_tensor, numz_tail=numz_tail)
     )
 
 

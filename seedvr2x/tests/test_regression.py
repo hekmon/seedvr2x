@@ -3,7 +3,11 @@ padding; and in seedvr2x's own (DESIGN.md, Pipeline step 0), to numz's with that
 in. And the VAE tiling (DESIGN.md, Pipeline step 3): seedvr2x tiled, to numz tiled. Every case
 runs in numz's draw of the noise (cli.NUMZ_DRAW, for the tests only): numz drew each reference's
 noise on the GPU, whose generator follows the card, where seedvr2x draws it on the CPU (DESIGN.md,
-Pipeline step 2), so that the references hold on the card that made them.
+Pipeline step 2), so that the references hold on the card that made them. And in numz's tail
+(cli.NUMZ_TAIL): numz mirrors a shot's end, seedvr2x repeats its last frame by default (DESIGN.md,
+Pipeline step 1, decided on 2026-10-19). The input's 45 frames are one shot of 4n + 1 frames, which
+neither pads: the mode changes no bit of these cases, and keeps them numz's whatever input a
+reference is remade with.
 
 Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR) and milestone 1's reference, in
 the m1/ directory of SEEDVR2X_REFERENCE_DIR:
@@ -136,7 +140,7 @@ from pathlib import Path
 
 import pytest
 
-from seedvr2x.cli import NUMZ_DRAW, NUMZ_PADDING
+from seedvr2x.cli import NUMZ_DRAW, NUMZ_PADDING, NUMZ_TAIL
 from seedvr2x.runtime import pull
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -185,13 +189,14 @@ def command(
     SEEDVR2X_MODEL_DIR, or with None, its default models from Hugging Face's cache, offline
     (HF_HUB_OFFLINE=1), in numz's padding or in its own, with the options of `more` besides, to
     tmp_path's ours.mkv and frames/ (same_bits); and the environment to run it in, numz's draw
-    of the noise in it whatever the padding (NUMZ_DRAW: the module's docstring). A pass that
-    `more` doesn't pin is pinned untiled, unless pin_untiled is False, which leaves it to the
-    planner."""
+    of the noise in it whatever the padding (NUMZ_DRAW: the module's docstring), and numz's tail
+    (NUMZ_TAIL: the same). A pass that `more` doesn't pin is pinned untiled, unless pin_untiled is
+    False, which leaves it to the planner."""
     master, frames = tmp_path / "ours.mkv", tmp_path / "frames"
-    modes = (NUMZ_PADDING, NUMZ_DRAW)
+    modes = (NUMZ_PADDING, NUMZ_DRAW, NUMZ_TAIL)
     environment = {name: value for name, value in os.environ.items() if name not in modes}
     environment[NUMZ_DRAW] = "1"
+    environment[NUMZ_TAIL] = "1"
     if numz_padding:
         environment[NUMZ_PADDING] = "1"
     if models is None:

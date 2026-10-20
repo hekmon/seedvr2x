@@ -43,11 +43,13 @@ def test_module_entry_point() -> None:
 
 
 def test_numz_padding_not_an_option(capsys: pytest.CaptureFixture[str]) -> None:
-    # numz's padding is for seedvr2x's tests only (cli.NUMZ_PADDING): never in the help.
+    # numz's padding, and the tail of its padding of a shot's end, are for seedvr2x's tests only
+    # (cli.NUMZ_PADDING, cli.NUMZ_TAIL): never in the help.
     with pytest.raises(SystemExit):
         cli.main(["--help"])
     shown = capsys.readouterr().out
     assert cli.NUMZ_PADDING not in shown and "padding" not in shown.lower()
+    assert cli.NUMZ_TAIL not in shown and "mirror" not in shown.lower()
 
 
 def test_cuts_help_says_how_its_frames_are_counted(capsys: pytest.CaptureFixture[str]) -> None:

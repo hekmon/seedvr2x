@@ -114,19 +114,61 @@ def test_cosine_weights_exact_in_bfloat16() -> None:
     assert as_bf16 == [0.75, 0.25]
 
 
-@pytest.mark.parametrize(
-    ("count", "expected"),
-    [
-        (1, [0]),
-        (2, [0, 1, 1, 1, 1]),
-        (3, [0, 1, 2, 1, 0]),
-        (5, [0, 1, 2, 3, 4]),
-        (10, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 8, 7, 6]),
-    ],
-)
-def test_padding_as_numz(count: int, expected: list[int]) -> None:
+# The frames a shot of `count` frames (value = index) ends with once padded to 4n + 1, by its
+# remainder modulo 4 and for the short shots (1 to 4 frames): the last frame repeated by default
+# (DESIGN.md, Pipeline step 1, decided on 2026-10-19; ByteDance's cut_videos), the frames before
+# it mirrored in numz's tail (cli.NUMZ_TAIL; generation_utils.py:635-656 at 4490bd1), the last one
+# repeated there only beyond a full mirror (a shot of 2 frames).
+REPEATED = {
+    1: [0],
+    2: [0, 1, 1, 1, 1],
+    3: [0, 1, 2, 2, 2],
+    4: [0, 1, 2, 3, 3],
+    5: [0, 1, 2, 3, 4],
+    6: [0, 1, 2, 3, 4, 5, 5, 5, 5],
+    7: [0, 1, 2, 3, 4, 5, 6, 6, 6],
+    8: [0, 1, 2, 3, 4, 5, 6, 7, 7],
+    9: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    10: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9],
+    11: [*range(11), 10, 10],
+    12: [*range(12), 11],
+    13: list(range(13)),
+}
+MIRRORED = {
+    **REPEATED,
+    3: [0, 1, 2, 1, 0],
+    4: [0, 1, 2, 3, 2],
+    6: [0, 1, 2, 3, 4, 5, 4, 3, 2],
+    7: [0, 1, 2, 3, 4, 5, 6, 5, 4],
+    8: [0, 1, 2, 3, 4, 5, 6, 7, 6],
+    10: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 8, 7, 6],
+    11: [*range(11), 9, 8],
+    12: [*range(12), 10],
+}
+
+
+@pytest.mark.parametrize("numz_tail", [False, True], ids=["repeated", "numz-tail"])
+@pytest.mark.parametrize("count", range(1, 14))
+def test_shot_s_end_padded(count: int, numz_tail: bool) -> None:
+    # A shot of 4n + 1 or 1 frame is left as it is; of 2, 3 or 4 frames, padded to 5; else by 1
+    # to 3 frames (padded_length). Frames of (T, H, W, 3), as a shot's, and of one dimension.
+    expected = (MIRRORED if numz_tail else REPEATED)[count]
     frames = torch.arange(count).view(count, 1, 1, 1).expand(count, 2, 2, 3)
-    assert pad_4n1(frames)[:, 0, 0, 0].tolist() == expected
+    padded = pad_4n1(frames, numz_tail=numz_tail)
+    assert padded[:, 0, 0, 0].tolist() == expected
+    assert len(expected) == padded_length(count) and padded.shape[1:] == (2, 2, 3)
+    assert pad_4n1(torch.arange(count), numz_tail=numz_tail).tolist() == expected
+    assert torch.equal(padded[:count], frames)
+
+
+def test_shot_s_end_is_repeated_by_default() -> None:
+    # The default is the repeat, numz's mirror a mode of the tests' own: pad_4n1's default is the
+    # repeat, and the last frame is the one repeated, whole (not a value of it).
+    frames = torch.rand(6, 2, 3, 3, generator=torch.Generator().manual_seed(0))
+    padded = pad_4n1(frames)
+    assert padded.shape[0] == 9 and all(torch.equal(padded[i], frames[-1]) for i in (6, 7, 8))
+    mirrored = pad_4n1(frames, numz_tail=True)
+    assert [torch.equal(mirrored[6 + i], frames[4 - i]) for i in range(3)] == [True] * 3
 
 
 class Reads:
@@ -145,16 +187,18 @@ def vae_slices(frames: int) -> list[int]:
     return model.encode_slices(SLICING, frames)
 
 
+@pytest.mark.parametrize("numz_tail", [False, True], ids=["repeated", "numz-tail"])
 @pytest.mark.parametrize("count", range(1, 22))
-def test_streamed_input_is_the_padded_shot(count: int) -> None:
-    # Read in the VAE's slices (5 frames, then 4), padded at the end as pad_4n1 pads the whole.
+def test_streamed_input_is_the_padded_shot(count: int, numz_tail: bool) -> None:
+    # Read in the VAE's slices (5 frames, then 4), padded at the end as pad_4n1 pads the whole,
+    # the last frame repeated or, in numz's tail, the frames before it mirrored.
     frames = np.random.default_rng(count).random((count, 2, 3, 3), dtype=np.float32)
     reads = Reads(frames)
     sizes = vae_slices(padded_length(count))
-    slices = list(input_slices(reads, count, sizes))
+    slices = list(input_slices(reads, count, sizes, numz_tail=numz_tail))
     assert [s.shape[0] for s in slices] == sizes
     assert sum(reads.counts) == count and all(n <= 5 for n in reads.counts)
-    assert torch.equal(torch.cat(slices), pad_4n1(model.to_input(frames)))
+    assert torch.equal(torch.cat(slices), pad_4n1(model.to_input(frames), numz_tail=numz_tail))
 
 
 def test_vae_slices() -> None:
@@ -187,14 +231,30 @@ def test_reference_is_the_transform_in_float32(count: int) -> None:
 
 @pytest.mark.parametrize("count", [1, 6, 13])
 def test_encoder_input_is_numz(count: int) -> None:
-    # The encoder's input stays numz's (milestone 1): float16 frames, cast to bfloat16 before the
-    # transform (generation_phases.py:380-413).
+    # The encoder's input keeps numz's numerics (milestone 1): float16 frames, cast to bfloat16
+    # before the transform (generation_phases.py:380-413); its padded frames are seedvr2x's, the
+    # last frame repeated (at 6 frames numz mirrors 4, 3 and 2: test_encoder_input_in_numz_s_tail).
     frames = np.random.default_rng(count).random((count, *SOURCE, 3), dtype=np.float32)
     slices = list(encoder_inputs(SLICING, Reads(frames), count, TARGET))
     assert [s.shape[1] for s in slices] == vae_slices(padded_length(count))
     assert all(s.dtype == model.COMPUTE_DTYPE == torch.bfloat16 for s in slices)
     video = pad_4n1(model.to_input(frames)).permute(0, 3, 1, 2).to(torch.bfloat16)
     assert torch.equal(torch.cat(slices, dim=1), model.input_transform(TARGET)(video))
+
+
+@pytest.mark.parametrize("count", [2, 3, 6, 13])
+def test_encoder_input_in_numz_s_tail(count: int) -> None:
+    # The encoder's input with the tests' numz tail (cli.NUMZ_TAIL): the shot's end mirrored as
+    # pad_4n1 does, a different input from the default's for these shots but the 13-frame one,
+    # which needs no padding, and the 2-frame one, padded alike by both (DESIGN.md, Pipeline
+    # step 1).
+    frames = np.random.default_rng(count).random((count, *SOURCE, 3), dtype=np.float32)
+    mirrored = list(encoder_inputs(SLICING, Reads(frames), count, TARGET, numz_tail=True))
+    repeated = list(encoder_inputs(SLICING, Reads(frames), count, TARGET))
+    video = pad_4n1(model.to_input(frames), numz_tail=True).permute(0, 3, 1, 2)
+    expected = model.input_transform(TARGET)(video.to(torch.bfloat16))
+    assert torch.equal(torch.cat(mirrored, dim=1), expected)
+    assert torch.equal(torch.cat(repeated, dim=1), torch.cat(mirrored, dim=1)) == (count in (2, 13))
 
 
 @pytest.fixture(scope="module")
@@ -1270,8 +1330,9 @@ def on_the_device(
     kept = Kept(directory, job(directory, shots, [OutputSegment("a", 0, frames)], cap))
     kept.save_latent(0, values.to(model.COMPUTE_DTYPE).permute(1, 2, 3, 0))
     del values
-    # In seedvr2x's padding and its draw, on the CPU (run._sample's numz_padding, numz_draw).
-    job_ = (shots, CARD_TARGET, 42, Plan(cap), kept, None, None, False, False)
+    # In seedvr2x's padding, its tail and its draw, on the CPU (run._sample's numz_padding,
+    # numz_draw and numz_tail).
+    job_ = (shots, CARD_TARGET, 42, Plan(cap), kept, None, None, False, False, False)
     with monkeypatch.context() as patch:
         patch.setattr(run, "_started", starting)
         sample(0, models, cast(Any, None), *job_)
