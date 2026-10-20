@@ -401,6 +401,41 @@ def tile_fits(size: int, area: float) -> tuple[float, float]:
     return 1.7 + 8.4 * area, 1.6 + 15.6 * area
 
 
+# The 26 entries of planner.MEASURED that the one-output convolution (vendor/models/video_vae_v3/
+# modules/causal_inflation_lib.py, ONE_OUTPUT_FROM) changed, as the table had them before it: the
+# 2026-10-11 measure, which MEASURED kept for the passes the convolution doesn't take. The 15
+# squares from 1152 px and the 11 tiles cut off at 1,104 rows from 1216 px (encode, decode, GiB).
+BEFORE_ONE_OUTPUT = {
+    (1152, 1152): (13.24, 21.95),
+    (1216, 1216): (14.15, 24.40),
+    (1280, 1280): (15.67, 26.98),
+    (1344, 1344): (16.79, 29.71),
+    (1408, 1408): (18.46, 32.57),
+    (1472, 1472): (19.74, 35.55),
+    (1536, 1536): (21.50, 38.73),
+    (1600, 1600): (23.21, 41.96),
+    (1664, 1664): (25.10, 45.30),
+    (1728, 1728): (27.01, 48.79),
+    (1792, 1792): (29.00, 52.48),
+    (1856, 1856): (31.12, 56.32),
+    (1920, 1920): (33.26, 60.16),
+    (1984, 1984): (35.46, 64.22),
+    (2048, 2048): (37.76, 68.51),
+    # Cut off at 1080p's 1,104 rows.
+    (1104, 1216): (13.39, 22.20),
+    (1104, 1280): (13.55, 23.34),
+    (1104, 1344): (14.22, 24.50),
+    (1104, 1408): (14.90, 25.67),
+    (1104, 1472): (15.58, 26.78),
+    (1104, 1536): (16.26, 27.94),
+    (1104, 1600): (16.42, 29.06),
+    (1104, 1664): (17.08, 30.22),
+    (1104, 1728): (17.74, 31.39),
+    (1104, 1792): (18.39, 32.49),
+    (1104, 1856): (19.05, 33.65),
+}
+
+
 def test_vae_tiles_measured() -> None:
     # DESIGN.md, Memory planner, Per-phase peaks: "the planner takes the measured peak of every
     # tile measured, the 25 squares and the 20 tiles cut off at those two sizes' rows, the larger
@@ -411,15 +446,55 @@ def test_vae_tiles_measured() -> None:
     assert list(squares) == list(range(512, 2049, 64)) and len(measured) == 45
     assert [key for key in measured if key[0] == 1104] == [(1104, t) for t in range(1152, 1857, 64)]
     assert [key for key in measured if key[0] == 752] == [(752, t) for t in range(768, 1217, 64)]
-    # DESIGN.md's own: "512 px 3.52 and 5.89 GiB, 768 px 7.08 and 11.11, 1024 px 10.47 and
-    # 17.46, 1280 px cut off at 1080p's 1,104 rows 13.55 and 23.34, 1536 px 21.50 and 38.73,
-    # 2048 px 37.76 and 68.51".
+    # DESIGN.md's own, the measure of 2026-10-11: "512 px 3.52 and 5.89 GiB, 768 px 7.08 and
+    # 11.11, 1024 px 10.47 and 17.46, 1280 px cut off at 1080p's 1,104 rows 13.55 and 23.34,
+    # 1536 px 21.50 and 38.73, 2048 px 37.76 and 68.51". The table holds the first three as
+    # they are; the other three are among the 26 entries the one-output convolution changed
+    # (BEFORE_ONE_OUTPUT), and are held to the measure with it: the decode of 1280 px cut off at
+    # 1,104 rows 23.16, of 1536 px 36.75, and 36.33 and 63.35 for 2048 px.
     first = {512: (3.52, 5.89), 768: (7.08, 11.11), 1024: (10.47, 17.46)}
-    first |= {1536: (21.50, 38.73), 2048: (37.76, 68.51)}
     assert {size: squares[size] for size in first} == first
-    assert measured[1104, 1280] == (13.55, 23.34)
-    # The whole table by its sums, in GiB: the 45 encodes and the 45 decodes.
+    assert {size: BEFORE_ONE_OUTPUT[size, size] for size in (1536, 2048)} == {
+        1536: (21.50, 38.73),
+        2048: (37.76, 68.51),
+    }
+    assert {size: squares[size] for size in (1536, 2048)} == {
+        1536: (21.50, 36.75),
+        2048: (36.33, 63.35),
+    }
+    assert BEFORE_ONE_OUTPUT[1104, 1280] == (13.55, 23.34) and measured[1104, 1280] == (
+        13.55,
+        23.16,
+    )
+    # The table is the 2026-10-11 measure but for 26 entries, which the one-output convolution
+    # changed: the encodes of the squares from 1664 px (7) and the decodes of the squares from
+    # 1152 px (15) and of the tiles cut off at 1,104 rows from 1216 px (11), 33 figures. Each
+    # is under the old one (0.18 to 5.17 GiB, 5.16 by the table's hundredths) but the decodes of
+    # 1152 px, 21.95 to 21.99, and of 1104x1216, 22.20 to 22.25; and the rest of the table is as
+    # it was.
+    old = measured | BEFORE_ONE_OUTPUT
+    old_squares = {key[0]: peaks for key, peaks in old.items() if key[0] == key[1]}
+    assert len(BEFORE_ONE_OUTPUT) == 26 and all(key in measured for key in BEFORE_ONE_OUTPUT)
+    assert {key for key in measured if measured[key] != old[key]} == set(BEFORE_ONE_OUTPUT)
+    higher = {key for key, peaks in BEFORE_ONE_OUTPUT.items() if measured[key][1] > peaks[1]}
+    assert higher == {(1152, 1152), (1104, 1216)}
+    lower: list[float] = []
+    for key, (encode, decode) in BEFORE_ONE_OUTPUT.items():
+        assert measured[key][0] <= encode
+        if key not in higher:
+            assert measured[key][1] < decode
+            lower.append(decode - measured[key][1])
+        lower.append(encode - measured[key][0])
+    assert sum(1 for gap in lower if gap > 0) == 24 + 7
+    assert (round(min(gap for gap in lower if gap > 0), 2), round(max(lower), 2)) == (0.18, 5.16)
+    assert {key for key, peaks in BEFORE_ONE_OUTPUT.items() if measured[key][0] != peaks[0]} == {
+        (size, size) for size in range(1664, 2049, 64)
+    }
+    # The whole table by its sums, in GiB: the 45 encodes and the 45 decodes, then the
+    # 2026-10-11 measure's.
     encodes, decodes = zip(*measured.values(), strict=True)
+    assert (round(sum(encodes), 2), round(sum(decodes), 2)) == (686.44, 1159.17)
+    encodes, decodes = zip(*old.values(), strict=True)
     assert (round(sum(encodes), 2), round(sum(decodes), 2)) == (691.72, 1203.28)
     # A square takes its measure on a frame its squares lay whole, whatever the overlap; a
     # larger square more. On another frame the grid's last tiles are cut off, and the pass takes
@@ -449,9 +524,11 @@ def test_vae_tiles_measured() -> None:
     # "The fits don't hold to the margin. From 1024 px up a decode sits 0.07 to 0.34 GiB under
     # its fit" (0.06 by the larger of 1024 px's two measures), "and below up to 0.67 over it
     # (576 px). An encode moves in steps, not with the tile's area: from 0.39 GiB under its fit
-    # (1472 px) to 0.80 over (832 px)" (0.38 by the table's hundredths).
+    # (1472 px) to 0.80 over (832 px)" (0.38 by the table's hundredths). That is the 2026-10-11
+    # measure, before the one-output convolution (old); the fits were drawn from it, and the
+    # table with it sits under them by more (the tiles nobody measured take their fits).
     over = {size: tile_fits(size, size**2 / 1e6) for size in squares}
-    for size, peaks in squares.items():
+    for size, peaks in old_squares.items():
         over[size] = (peaks[0] - over[size][0], peaks[1] - over[size][1])
     large = [over[size][1] for size in squares if size >= 1024]
     assert (round(max(large), 2), round(min(large), 2)) == (-0.06, -0.34)
@@ -462,13 +539,14 @@ def test_vae_tiles_measured() -> None:
     assert max(encode, key=lambda size: encode[size]) == 832 and round(encode[832], 2) == 0.80
     # numz's own, which the refit was drawn from (planner-limits.md, "Tiled VAE at 4K", Encode
     # peak and Decode peak), are within 0.26 GiB of them, and vram.md's (Tiling, 4K, batch 9, one
-    # decimal) within 0.11.
+    # decimal) within 0.11: of the 2026-10-11 measure (old_squares), numz's passes not having the
+    # one-output convolution.
     numz = {1024: (10.44, 17.52), 1536: (21.45, 38.86), 2048: (37.67, 68.76)}
     for size, peaks in numz.items():
-        assert max(abs(a - b) for a, b in zip(peaks, squares[size], strict=True)) < 0.26
+        assert max(abs(a - b) for a, b in zip(peaks, old_squares[size], strict=True)) < 0.26
     rounded = {512: (3.5, 5.9), 768: (7.1, 11.1), 1024: (10.4, 17.4), 1536: (21.4, 38.7)}
     for size, peaks in rounded.items():
-        assert max(abs(a - b) for a, b in zip(peaks, squares[size], strict=True)) < 0.11
+        assert max(abs(a - b) for a, b in zip(peaks, old_squares[size], strict=True)) < 0.11
 
 
 def test_vae_tiles_nobody_measured() -> None:
@@ -510,11 +588,12 @@ def test_vae_tiles_nobody_measured() -> None:
     assert (above[752, 960, 0], above[1104, 1536, 0]) == (min(encoded), max(encoded))
 
     # A cut-off tile of another size: 1440p, padded to 1472x2560, in tiles of 1536 px, 1472x1536,
-    # takes its fits' 20.94 and 37.27 GiB, over the lines' 20.60 and 37.11, and 0.3.
+    # takes its fits' 20.94 and 37.27 GiB, over the lines' 20.60 and 35.34 (37.11 before the
+    # one-output convolution lowered the squares' decodes), and 0.3.
     assert padded_size((1440, 2560)) == (1472, 2560)
     pixels = 1472 * 1536
     fits, lines = tile_fits(1536, pixels / 1e6), between(pixels)
-    assert [round(value, 2) for value in (*fits, *lines)] == [20.94, 37.27, 20.60, 37.11]
+    assert [round(value, 2) for value in (*fits, *lines)] == [20.94, 37.27, 20.60, 35.34]
     taken = vae_fits((1472, 2560), Tiles(1536))
     assert taken == pytest.approx((fits[0] + 0.3, fits[1] + 0.3), abs=1e-8)
     assert [round(peak, 2) for peak in taken] == [21.24, 37.57]
@@ -528,7 +607,8 @@ def test_vae_tiles_nobody_measured() -> None:
     assert [round(peak, 2) for peak in vae_fits((944, 3840), Tiles(960))] == [9.96, 16.04]
     # Rows and columns aren't taken for one another: an upright 1080p, padded to 1952x1104, in
     # tiles of 1280 px, 1280 rows by 1,104 columns, isn't the 1104x1280 tile measured (13.55 and
-    # 23.34 GiB), and takes the encode's line and the decode's fit, and 0.3: 14.06 and 23.76.
+    # 23.16 GiB; 23.34 before the one-output convolution), and takes the encode's line and the
+    # decode's fit, and 0.3: 14.06 and 23.76.
     assert padded_size((1920, 1080)) == (1952, 1104)
     upright = vae_fits((1952, 1104), Tiles(1280))
     lines, fits = between(1280 * 1104), tile_fits(1280, 1.41312)
@@ -1110,16 +1190,17 @@ def test_vae_choices() -> None:
     assert round((budget - untiled[0] - room) / 1024**2, 1) == 2.6
     assert peaks.decode == untiled[0] and peaks.bound == "decode"  # the peak, without the room
     # 32 GB at 1080p: the decode in the largest tiles that fit with the DiT away, 1536 px, cut
-    # off at the picture's edges and measured so, 27.94 GiB, by 6.8 MiB, none of its blocks left
-    # beside them; the encode untiled, 17 left.
+    # off at the picture's edges and measured so, 27.30 GiB under the one-output convolution
+    # (27.94 before it, with none of its blocks left beside them), one of its blocks left beside
+    # them, by 71 MiB; the encode untiled, 17 left.
     free = our_free(32)
     budget = free - MARGIN
     made, peaks = planner.plan(free, HD, shots(12), Pins(), None)
-    assert bare(made) == Plan(12, None, Tiles(1536), 0, 17, 0)
+    assert bare(made) == Plan(12, None, Tiles(1536), 0, 17, 1)
     assert planner.decode_peak(OURS_1080, HD, Tiles(1600), 0) + room > budget
-    more = planner.decode_peak(OURS_1080, HD, Tiles(1536), 1)
+    more = planner.decode_peak(OURS_1080, HD, Tiles(1536), 2)
     assert more + room > budget >= peaks.decode + room
-    assert round((budget - peaks.decode - room) / 1024**2, 1) == 6.8
+    assert round((budget - peaks.decode - room) / 1024**2) == 71
     more = planner.encode_peak(OURS_1080, None, 18)
     assert more + room > budget >= peaks.encode + room
     # 24 GB at 1080p: the untiled encode fits with the DiT away by its peak, and not with its
@@ -1134,7 +1215,7 @@ def test_vae_choices() -> None:
     made, _ = planner.plan(our_free(48), HD, shots(21), Pins(), None, split=True)
     assert made == Plan(21, resident_decode=19)
     made, _ = planner.plan(free, HD, shots(12), Pins(), None, split=True)
-    assert bare(made) == Plan(12, None, Tiles(1536), 0, 17, 0)
+    assert bare(made) == Plan(12, None, Tiles(1536), 0, 17, 1)
     # 24 GB at 4K: both tiled, the decode's smaller, its peak about twice the encode's by the
     # megapixel; every block swapped. The DiT's two slots and its other parameters, 1.0 GiB,
     # stay beside the encode's tiles, by 90 MiB, nothing then moving for the encode, where the
@@ -1289,7 +1370,7 @@ def test_a_long_shot_plans_as_a_short_one() -> None:
 
     for card, target, plan in (
         (24, HD, Plan(5, Tiles(1856), Tiles(1088), 0, 0, 0)),
-        (32, HD, Plan(5, None, Tiles(1536), 0, 17, 0)),
+        (32, HD, Plan(5, None, Tiles(1536), 0, 17, 1)),
         (48, HD, Plan(5, resident_decode=21)),
         (24, UHD, Plan(5, Tiles(1408), Tiles(1088), 36, None, 0, vae_in_dit=False)),
         (96, UHD, Plan(5, None, Tiles(2048))),
@@ -1318,6 +1399,7 @@ def test_recipes(
     swapped: int,
     tiles: tuple[int | None, int | None],
     measured: tuple[float, float, float],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Each recipe as numz ran it, in numz's padding, on the memory its process found free: one
     # batch as one shot in one window, the DiT off the GPU in the VAE's phases, the VAE's weights
@@ -1339,10 +1421,14 @@ def test_recipes(
     # with the 0.4 GiB seedvr2x's own encode holds over the fit (planner.ENCODE_EXTRA; vram.md
     # says up to 0.9 at 1080p and 1.4 to 2.2 at 4K, over its own fits). A square tile's peak is
     # the one measured on seedvr2x (planner.MEASURED); one cut off at numz's 1,088 rows, which
-    # nobody measured, takes its rule and 0.3 GiB.
+    # nobody measured, takes its rule and 0.3 GiB. numz's passes don't have the one-output
+    # convolution: they are held to the table of 2026-10-11 (BEFORE_ONE_OUTPUT), the one the
+    # planner then had.
     alone = planner.dit_on_gpu(0, swapped)
-    fitted_encode = (planner.encode_peak(padded, encode, 0, swapped) - alone) / GIB
-    fitted_decode = (planner.decode_peak(padded, target, decode, 0, swapped) - alone) / GIB
+    with monkeypatch.context() as before:
+        before.setattr(planner, "MEASURED", planner.MEASURED | BEFORE_ONE_OUTPUT)
+        fitted_encode = (planner.encode_peak(padded, encode, 0, swapped) - alone) / GIB
+        fitted_decode = (planner.decode_peak(padded, target, decode, 0, swapped) - alone) / GIB
     assert abs(fitted_decode - measured[2]) <= 0.9
     assert 0.1 <= measured[0] - fitted_encode <= 1.1
     # It fits by the model, but for the 4K one on 32 GB: its 7 latents with every block swapped
@@ -1372,8 +1458,8 @@ def test_recipes(
         (HD, 32): Plan(12, None, Tiles(1472), 0, 18, 2),
         (HD, 48): Plan(21, resident_decode=22),
         (UHD, 24): Plan(4, Tiles(1408), Tiles(1088), 27, 2, 0, vae_in_dit=False),
-        (UHD, 32): Plan(7, Tiles(1728), Tiles(1280), 36, 0, 0, vae_in_dit=False),
-        (UHD, 48): Plan(7, Tiles(2048), Tiles(1600), 0, 13, 4),
+        (UHD, 32): Plan(7, Tiles(1728), Tiles(1280), 36, 0, None, vae_in_dit=False),
+        (UHD, 48): Plan(7, Tiles(2048), Tiles(1664), 0, 16, 3),
     }
     assert bare(made) == own[target, card]
 
@@ -1469,6 +1555,7 @@ def test_first_matrix(
     ran: Plan,
     measured: tuple[float, float, float] | None,
     again: tuple[Plan, float | None, float | None] | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The corrections drawn from the two matrices: 0.4 GiB on every encode
     # (planner.ENCODE_EXTRA) and split's term off a tiled decode's peak (planner.decode_peak),
@@ -1484,20 +1571,21 @@ def test_first_matrix(
     # - 1080p, 14.54: encode in tiles of 1024 px, decode in 768 px, one block of the DiT there
     #   in each;
     # - 1080p, 22.54: encode in tiles of 1856 px, 1 x 2, decode in 1088 px, 2 x 2, the DiT away;
-    # - 1080p, 30.54: encode untiled with 17 of the DiT's blocks, decode in 1472 px with two;
+    # - 1080p, 30.54: encode untiled with 17 of the DiT's blocks, decode in 1536 px with one;
     # - 4K, 22.54: encode in tiles of 1408 px, the DiT's slots beside them, nothing moving;
     #   decode in 1088 px, the DiT away;
-    # - 4K, 30.54: encode in tiles of 1728 px, the DiT away, decode in 1280 px with one block;
-    # - 4K, 46.54: encode in tiles of 2048 px with 13 of the DiT's blocks, decode in 1600 px
-    #   with 4.
+    # - 4K, 30.54: encode in tiles of 1728 px with one block of the DiT, decode in 1280 px with
+    #   three;
+    # - 4K, 46.54: encode in tiles of 2048 px with 16 of the DiT's blocks, decode in 1664 px
+    #   with 3.
     own = {
         (HD, 10.54): Plan(8, Tiles(768), Tiles(576), 35, 0, 0, vae_in_dit=False),
         (HD, 14.54): Plan(12, Tiles(1024), Tiles(768), 35, 1, 1, vae_in_dit=False),
         (HD, 22.54): Plan(20, Tiles(1856), Tiles(1088), 36, 0, 0, vae_in_dit=False),
-        (HD, 30.54): Plan(16, None, Tiles(1472), 7, 17, 2, vae_in_dit=False),
+        (HD, 30.54): Plan(16, None, Tiles(1536), 7, 17, 1, vae_in_dit=False),
         (UHD, 22.54): Plan(5, Tiles(1408), Tiles(1088), 36, None, 0, vae_in_dit=False),
-        (UHD, 30.54): Plan(6, Tiles(1728), Tiles(1280), 27, 0, 1, vae_in_dit=False),
-        (UHD, 46.54): Plan(7, Tiles(2048), Tiles(1600), 0, 13, 4),
+        (UHD, 30.54): Plan(6, Tiles(1728), Tiles(1280), 27, 1, 3, vae_in_dit=False),
+        (UHD, 46.54): Plan(7, Tiles(2048), Tiles(1664), 0, 16, 3),
     }
     reported, shot, padded = round(free * GIB), [Shot(0, frames)], padded_size(target)
     latents = (padded_length(frames) - 1) // 4 + 1
@@ -1521,10 +1609,14 @@ def test_first_matrix(
     assert peaks.dit == alone
 
     def vae_peaks(plan: Plan) -> tuple[float, float]:
-        """A plan's encode and decode peaks by the corrected model, in GiB."""
+        """A plan's encode and decode peaks by the corrected model, in GiB, with the table of
+        2026-10-11 (BEFORE_ONE_OUTPUT): the runs it is held to ran without the one-output
+        convolution."""
         there = (plan.resident_encode, plan.swapped), (plan.resident_decode, plan.swapped)
-        encode = planner.encode_peak(padded, plan.encode_tiles, *there[0])
-        decode = planner.decode_peak(padded, target, plan.decode_tiles, *there[1], split=True)
+        with monkeypatch.context() as before:
+            before.setattr(planner, "MEASURED", planner.MEASURED | BEFORE_ONE_OUTPUT)
+            encode = planner.encode_peak(padded, plan.encode_tiles, *there[0])
+            decode = planner.decode_peak(padded, target, plan.decode_tiles, *there[1], split=True)
         return gib(encode), gib(decode)
 
     # What a decode of those runs kept of its shot on the GPU, which no pass keeps since, in
@@ -1658,7 +1750,7 @@ def test_tile_pins() -> None:
     made, peaks = planner.plan(free, UHD, shots(5), pins, None)
     assert (made.encode_tiles, made.decode_tiles) == (Tiles(1024), Tiles(1024))
     assert refused(free, UHD, shots(5), Pins(decode_tile=2048), None) == (
-        "--decode-tile 2048: the decode in tiles of 2048 px takes 71.14 GiB of free VRAM, the"
+        "--decode-tile 2048: the decode in tiles of 2048 px takes 65.98 GiB of free VRAM, the"
         " DiT off the GPU, 1.50 of them the room a VAE pass is held to, and the driver reports"
         " 22.57 GiB free: the largest tile that fits is --decode-tile 1088"
     )
@@ -1702,7 +1794,7 @@ def test_tile_pins() -> None:
     assert refused(our_free(48), UHD, shots(5), Pins(decode_tile=2304), None) == (
         "--decode-tile 2304: the decode in tiles of 2304 px takes 85.34 GiB of free VRAM, the"
         " DiT off the GPU, 1.50 of them the room a VAE pass is held to, and the driver reports"
-        " 46.57 GiB free: the largest tile that fits is --decode-tile 1600"
+        " 46.57 GiB free: the largest tile that fits is --decode-tile 1664"
     )
     # A tile pinned where the untiled pass would fit is taken as pinned; and 0 where it fits.
     pins = Pins(encode_tile=0, decode_tile=1024)
@@ -2438,11 +2530,12 @@ def test_the_planner_takes_the_longest_window_the_host_holds() -> None:
     # With 30 GiB free every window's plan sent the DiT away in the VAE's phases, 36 blocks
     # pinned whatever the cap, and the job was refused: the DiT kept on the GPU there, their
     # tiles shrunk, before the window shortens (test_on_a_short_host_the_tiles_shrink_before_the_
-    # window), it runs windows of 21, the decode in tiles of 1344 px for the card's 1472.
+    # window), it runs windows of 21, the decode in tiles of 1344 px for the card's 1536 (1472
+    # before the one-output convolution).
     made, peaks = planner.plan(30 * GIB, *job, Pins(), host, split=True)
     assert (made.window, made.encode_tiles, made.decode_tiles) == (21, None, Tiles(1344))
     assert peaks.shortened == planner.Shortened(27, 1782, 1600)
-    assert peaks.shrunk == planner.Shrunk(None, Tiles(1472), 1734, 1600)
+    assert peaks.shrunk == planner.Shrunk(None, Tiles(1536), 1792, 1600)
     # Where no window's plan fits both, the job is refused, and nothing more is said of the
     # window: under the process's own 2.4 GiB.
     assert "and 2.00 GiB are available, " in refused(30 * GIB, *job, Pins(), 2 * GIB, split=True)
@@ -2554,9 +2647,11 @@ def test_on_a_short_host_the_tiles_shrink_before_the_window() -> None:
     assert (planned.window, planned.decode_tiles, peaks.shrunk) == (15, Tiles(1728), None)
     assert peaks.shortened == planner.Shortened(21, 1734, 1733)
     # One of the 828: 4K, a shot of 5 frames, 13.11 GiB of system memory. With 78 GiB free the
-    # decode in tiles of 2048 px keeps 15 blocks of the DiT on the GPU, and the plan fits; with
-    # 80.5 the card alone takes the encode untiled, which keeps none of the DiT, 15.92 GiB, and
-    # the job was refused, no window being shorter; the encode in tiles of 2048 px keeps it all.
+    # decode in tiles of 2048 px keeps 28 blocks of the DiT on the GPU (15 before the one-output
+    # convolution lowered its peak by 5.16 GiB), and the plan fits; with 80.5 the card alone
+    # takes the encode untiled, which keeps none of the DiT, 15.92 GiB, and the job was refused,
+    # no window being shorter; the encode in tiles of 2048 px keeps it all, the decode 34
+    # blocks (21 before).
     film, host = shots(2), round(13.11 * GIB)
     planned, peaks = planner.plan(round(78 * GIB), UHD, film, Pins(), host)
     assert (planned.encode_tiles, planned.decode_tiles, peaks.shrunk) == (
@@ -2566,7 +2661,7 @@ def test_on_a_short_host_the_tiles_shrink_before_the_window() -> None:
     )
     planned, peaks = planner.plan(round(80.5 * GIB), UHD, film, Pins(), host)
     assert (planned.encode_tiles, planned.decode_tiles) == (Tiles(2048), Tiles(2048))
-    assert (planned.resident_encode, planned.resident_decode, planned.swapped) == (None, 21, 0)
+    assert (planned.resident_encode, planned.resident_decode, planned.swapped) == (None, 34, 0)
     assert peaks.shrunk == planner.Shrunk(None, Tiles(2048), 1592, 1311)
     # 1080p on a 24 GB card, a shot of 301 frames, 8 GiB available: refused until then, every
     # window's VAE passes in tiles of 1856 and 1088 px sending the DiT away, its 36 blocks
@@ -2597,16 +2692,16 @@ def test_the_vae_kept_first_costs_no_window() -> None:
     # leaving the GPU in the VAE's phases, its 16 swapped blocks and the VAE pinned.
     made, peaks = planner.plan(67_645_735_689, UHD, film(23, 24, 150, 600), Pins(), 12_050_198_642)
     assert (made.window, made.swapped, made.vae_in_dit) == (13, 16, False)
-    assert (made.encode_tiles, made.decode_tiles) == (Tiles(2048), Tiles(1728))
+    assert (made.encode_tiles, made.decode_tiles) == (Tiles(2048), Tiles(1792))
     assert (made.resident_encode, made.resident_decode) == (None, None)
-    assert peaks.shrunk == planner.Shrunk(Tiles(2048), Tiles(1920), 1952, 1122)
+    assert peaks.shrunk == planner.Shrunk(Tiles(2048), Tiles(1920), 1515, 1122)
     # 5K, a shot of 149 frames, split, 14.32 GiB: refused with 43.0 GiB free; windows of 5 run.
     made, peaks = planner.plan(
         46_170_899_209, (2880, 5120), film(149), Pins(), 15_379_895_297, split=True
     )
     assert (made.window, made.swapped, made.vae_in_dit) == (5, 25, False)
-    assert (made.encode_tiles, made.decode_tiles) == (Tiles(1920), Tiles(1472))
-    assert peaks.shrunk == planner.Shrunk(Tiles(2048), Tiles(1536), 1751, 1432)
+    assert (made.encode_tiles, made.decode_tiles) == (Tiles(1984), Tiles(1472))
+    assert peaks.shrunk == planner.Shrunk(Tiles(2048), Tiles(1600), 1836, 1432)
     # A byte under what that plan takes but its scratch, no window's plan fits, 5 latents being
     # the smallest: the refusal says the least any tiles take there, the VAE away, its 25
     # swapped blocks and the VAE's weights pinned, where the VAE kept pins 27 blocks.
@@ -3368,7 +3463,7 @@ def test_said() -> None:
         " 17.22 GiB of system memory in all",
         "plan: encode untiled, decode in tiles of 2048 px, 2 x 2, each held 1.50 GiB under the"
         " budget",
-        "plan: predicted peaks: encode 91.54 GiB, DiT 84.72 GiB, decode 84.38 GiB; the encode"
+        "plan: predicted peaks: encode 91.54 GiB, DiT 84.72 GiB, decode 79.22 GiB; the encode"
         " bounds the plan, its room counted, 0.70 GiB under the budget",
         "plan: scratch of the longest tiled shot: 14.16 GiB; an allowance of 14.16 GiB of system"
         " memory, which holds every shot's",
@@ -3574,9 +3669,9 @@ def test_each_figure_of_the_free_memory_is_named(
     )
     # A tile pin refused.
     assert refused(free, HD, film, Pins(decode_tile=1856), None) == (
-        f"--decode-tile 1856: the decode in tiles of 1856 px takes {takes('36.28')} GiB of free"
+        f"--decode-tile 1856: the decode in tiles of 1856 px takes {takes('35.01')} GiB of free"
         f" VRAM, the DiT off the GPU, 1.50 of them the room a VAE pass is held to, and {there}:"
-        f" {to_free('13.53')}the largest tile that fits is --decode-tile 1088"
+        f" {to_free('12.26')}the largest tile that fits is --decode-tile 1088"
     )
     # A size that doesn't fit.
     assert refused(free, (4320, 7680), shots(5), Pins(), None) == (

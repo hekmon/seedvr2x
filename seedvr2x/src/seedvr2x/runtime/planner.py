@@ -162,10 +162,27 @@ REFITTED = 1024  # the tile's side the refit starts at, in pixels
 # pass. Where a tile has a second measure on file, the larger: the first whole frames in tiles
 # (512, 768, 1024, 1536 and 2048 px, and 1280 px at 1080p; 0.03 GiB over the tile alone at the
 # most), and shots of 21 to 301 frames in 1024-px tiles (10.4742 and 17.4499 GiB).
-# The fits don't hold them to the margin (DESIGN.md): from 1024 px up a square's decode is 0.06
-# to 0.34 GiB under its fit, and below up to 0.67 over it (576 px); an encode moves in steps,
-# from 0.38 GiB under its fit (1472 px) to 0.80 over (832 px). So a tile takes its measure, and
-# the fits serve the tiles nobody measured (_fit).
+# The passes the one-output convolution takes (vendor/models/video_vae_v3/modules/
+# causal_inflation_lib.py, ONE_OUTPUT_FROM) take their peak measured with it (2026-10-17;
+# DESIGN.md, Memory planner, Budget: "the planner takes the peaks measured with it for the passes
+# it takes, those two included, the other passes' as they are"; planner-limits.md, "Under the
+# one-output convolution", by research/scripts/one_output_peaks.py), rounded up to the
+# hundredth: the decodes of the squares from 1152 px and of the tiles cut off at 1,104 rows from
+# 1216 px, and the encodes of the squares from 1664 px. Its tile alone, with the same driver,
+# frames and overlap: 0.18 to 5.17 GiB under the measures above, every output bit-identical,
+# but for the two decodes just over its floor, 1152 px (21.986 GiB for 21.950 without it) and
+# 1104x1216 (22.242 for 22.204). Every other entry is the measure above; those of its passes
+# measured again beside it came within 0.005 GiB of it. Its measure is the tile alone: the four
+# entries that took a second measure's larger figure, the 2048-px encode and decode, 1536 px's
+# decode and 1104x1280's (up to 0.028 GiB over the tile alone), have no whole-frame measure with
+# it. Whole frames in those tiles under it, a pass alone (2026-10-17, the frames' floor's
+# reference runs on the bare card; vae-room.md), peaked 0.005 to 0.010 GiB under the decode's
+# prediction on this table and 0.41 under the encode's.
+# The fits don't hold them to the margin (DESIGN.md): from 1024 px up a square's decode without
+# the one-output convolution was 0.06 to 0.34 GiB under its fit, and below up to 0.67 over it
+# (576 px); an encode moves in steps, from 0.38 GiB under its fit (1472 px) to 0.80 over (832
+# px). So a tile takes its measure, and the fits serve the tiles nobody measured (_fit), whose
+# peaks under the one-output convolution no measure has.
 MEASURED = {
     (512, 512): (3.52, 5.89),
     (576, 576): (4.38, 7.45),
@@ -177,34 +194,34 @@ MEASURED = {
     (960, 960): (9.82, 15.67),
     (1024, 1024): (10.47, 17.46),
     (1088, 1088): (11.81, 19.65),
-    (1152, 1152): (13.24, 21.95),
-    (1216, 1216): (14.15, 24.40),
-    (1280, 1280): (15.67, 26.98),
-    (1344, 1344): (16.79, 29.71),
-    (1408, 1408): (18.46, 32.57),
-    (1472, 1472): (19.74, 35.55),
-    (1536, 1536): (21.50, 38.73),
-    (1600, 1600): (23.21, 41.96),
-    (1664, 1664): (25.10, 45.30),
-    (1728, 1728): (27.01, 48.79),
-    (1792, 1792): (29.00, 52.48),
-    (1856, 1856): (31.12, 56.32),
-    (1920, 1920): (33.26, 60.16),
-    (1984, 1984): (35.46, 64.22),
-    (2048, 2048): (37.76, 68.51),
+    (1152, 1152): (13.24, 21.99),
+    (1216, 1216): (14.15, 24.14),
+    (1280, 1280): (15.67, 26.40),
+    (1344, 1344): (16.79, 28.84),
+    (1408, 1408): (18.46, 31.32),
+    (1472, 1472): (19.74, 33.98),
+    (1536, 1536): (21.50, 36.75),
+    (1600, 1600): (23.21, 39.65),
+    (1664, 1664): (24.88, 42.46),
+    (1728, 1728): (26.73, 45.69),
+    (1792, 1792): (28.44, 48.93),
+    (1856, 1856): (30.46, 52.48),
+    (1920, 1920): (32.30, 55.69),
+    (1984, 1984): (34.29, 59.25),
+    (2048, 2048): (36.33, 63.35),
     # Cut off at 1080p's 1,104 rows.
     (1104, 1152): (12.68, 21.04),
-    (1104, 1216): (13.39, 22.20),
-    (1104, 1280): (13.55, 23.34),
-    (1104, 1344): (14.22, 24.50),
-    (1104, 1408): (14.90, 25.67),
-    (1104, 1472): (15.58, 26.78),
-    (1104, 1536): (16.26, 27.94),
-    (1104, 1600): (16.42, 29.06),
-    (1104, 1664): (17.08, 30.22),
-    (1104, 1728): (17.74, 31.39),
-    (1104, 1792): (18.39, 32.49),
-    (1104, 1856): (19.05, 33.65),
+    (1104, 1216): (13.39, 22.25),
+    (1104, 1280): (13.55, 23.16),
+    (1104, 1344): (14.22, 24.18),
+    (1104, 1408): (14.90, 25.21),
+    (1104, 1472): (15.58, 26.27),
+    (1104, 1536): (16.26, 27.30),
+    (1104, 1600): (16.42, 28.26),
+    (1104, 1664): (17.08, 29.28),
+    (1104, 1728): (17.74, 30.26),
+    (1104, 1792): (18.39, 31.29),
+    (1104, 1856): (19.05, 32.38),
     # Cut off at 720p's 752 rows.
     (752, 768): (6.94, 10.86),
     (752, 832): (7.51, 11.49),
