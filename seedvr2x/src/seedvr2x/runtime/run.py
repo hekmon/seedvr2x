@@ -2,6 +2,9 @@
 come (DESIGN.md, Pipeline, per shot), unit by unit (DESIGN.md, Pause and resume)."""
 
 import logging
+import math
+import mmap
+import os
 import resource
 import time
 from collections.abc import Callable, Generator, Sequence
@@ -23,7 +26,7 @@ from seedvr2x.media.files import make_directories
 from seedvr2x.media.reader import Reader, listed
 from seedvr2x.media.source import Source
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer
-from seedvr2x.runtime.job import OutputSegment, Shot
+from seedvr2x.runtime.job import OutputSegment, Run, Shot, output_size, run_of
 from seedvr2x.runtime.model import Models
 from seedvr2x.runtime.plan import Plan, Tiles
 from seedvr2x.runtime.shot import (
@@ -37,6 +40,7 @@ from seedvr2x.runtime.shot import (
     shot_layout,
 )
 from seedvr2x.runtime.stop import Stop
+from seedvr2x.runtime.tiling import ScratchError
 from seedvr2x.runtime.units import Units
 
 logger = logging.getLogger(__name__)
@@ -88,7 +92,11 @@ def run_job(
     A shot's units run in order: its encode, then its windows, each kept by `units` as it is
     done, then its decode. A segment's shots are all encoded and sampled before the first of them
     is decoded: the segment's decode and write is then a unit of its own, and units never
-    interleave.
+    interleave. With several runs a shot (units.manifest.runs_per_shot; DESIGN.md, Several runs
+    of a shot), each run is a whole run of the shot fed from its first frame, its encode and its
+    windows units of their own, in turn; the shot's decode decodes its runs in turn, each giving
+    the frames job.run_of takes from it, and writes the shot's frames in their order
+    (_decode_runs).
 
     What units kept already is skipped (DESIGN.md, Pause and resume): a finished segment; a
     shot's encode and the windows done; the input frames of what is skipped, never decoded, the
@@ -118,16 +126,23 @@ def run_job(
     ]
     if sorted(i for group in groups for i in group) != list(range(len(shots))):
         raise ValueError("the segments don't hold whole shots")
+    if list(units.manifest.shots) != list(shots):
+        raise ValueError("the units' manifest is of other shots")
     with Inputs(source) as inputs:
         for segment, group in enumerate(groups):
             if units.finished(segment):
                 continue
             sample = (models, inputs, shots, target, seed, plan, units, stop, copies)
             for index in group:
-                _sample(index, *sample, numz_padding, numz_draw, numz_tail)
+                for run in units.manifest.shot_runs(index):
+                    _sample(run, *sample, numz_padding, numz_draw, numz_tail)
             _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write", None)
             for index in group:
-                _decode(models, shots, index, target, plan, units, write, copies)
+                runs = units.manifest.shot_runs(index)
+                if len(runs) == 1:
+                    _decode(models, shots, runs[0], target, plan, units, write, copies)
+                else:
+                    _decode_runs(models, shots, index, target, plan, units, write, copies)
 
 
 def _begin(stop: Stop | None, unit: str, cost: float | None) -> None:
@@ -155,25 +170,29 @@ def _sample(
     numz_draw: bool,
     numz_tail: bool,
 ) -> None:
-    """Shot `index`'s encode and windows, those not kept yet; with copies, the frames the encode
-    reads copied, the copy and its checksums whole before the latent is recorded, so recorded
-    with it, and the copy of a shot encoded already made again if it or its checksums are
-    missing. numz_padding, numz_draw and numz_tail as run_job takes them.
+    """Run `index`'s encode and windows (units.manifest.runs), those not kept yet; with copies, the
+    frames a shot's first run's encode reads copied, the copy and its checksums whole before the
+    latent is recorded, so recorded with it, and the copy of a shot whose first run is encoded
+    already made again if it or its checksums are missing. A later run makes no copy: its
+    correction reads its shot's from its own first frame (shot.Correction's first).
+    numz_padding, numz_draw and numz_tail as run_job takes them.
 
     Between two of the shot's units the GPU holds nothing of the shot: its latent waits in
     system memory and each window's output in its file (units.Units), and its noise, drawn
     there, in system memory with the latent (shot.sample_windows). A unit's logged VRAM peak is
     then its own; the first window a run makes of a shot takes the noise's draw's time too, on
     the CPU."""
-    shot = shots[index]
-    name = f"shot {index + 1}/{len(shots)}"
-    layout = shot_layout(shot.frames, plan.window)
+    run = units.manifest.runs[index]
+    shot = Shot(run.start, run.end)  # the frames the run is fed
+    name = _name(units, shots, index)
+    layout = shot_layout(run.frames, plan.window)
     done = units.windows_done(index)
     latent = None if done == len(layout) else units.latent(index)
     encoded = done == len(layout) or latent is not None
-    if copies is not None and encoded:
+    copying = copies if run.offset == 0 else None
+    if copying is not None and encoded:
         if not (units.copy_path(index).exists() and units.checksums_path(index).exists()):
-            _copy_again(index, name, inputs, shots, units, stop, copies)
+            _copy_again(index, name, inputs, shot, units, stop, copying)
     if done == len(layout):
         return
     if latent is None:
@@ -184,9 +203,9 @@ def _sample(
         read = inputs.reader(shot)
         tiles = plan.encode_tiles
         scratch = _scratch(units, index, tiles)
-        if copies is None:
+        if copying is None:
             latent = encode_shot(
-                *(models, read, shot.frames, target, shot.seed(seed)),
+                *(models, read, shot.frames, target, run.seed(seed)),
                 numz_padding=numz_padding,
                 numz_tail=numz_tail,
                 tiles=tiles,
@@ -194,9 +213,9 @@ def _sample(
                 allowance=plan.scratch_allowance,
             )
         else:
-            with _copying(units, index, copies) as copy:
+            with _copying(units, index, copying) as copy:
                 latent = encode_shot(
-                    *(models, _copied(read, copy), shot.frames, target, shot.seed(seed)),
+                    *(models, _copied(read, copy), shot.frames, target, run.seed(seed)),
                     numz_padding=numz_padding,
                     numz_tail=numz_tail,
                     tiles=tiles,
@@ -213,12 +232,12 @@ def _sample(
             shot.start,
             shot.end - 1,
             shot.frames,
-            shot.seed(seed),
+            run.seed(seed),
             _spent(models, started),
         )
     # The latent is in system memory, the one the units keep or read back, where the noise is
     # drawn from it, with the first window made here (shot.sample_windows).
-    sampled = sample_windows(models, latent, layout, shot.seed(seed), done, numz_draw=numz_draw)
+    sampled = sample_windows(models, latent, layout, run.seed(seed), done, numz_draw=numz_draw)
     for number in range(done, len(layout)):
         _begin(stop, f"{name}'s window {number + 1}/{len(layout)}", None)
         logger.debug("%s: window %d/%d", name, number + 1, len(layout))
@@ -244,21 +263,34 @@ def _sample(
     units.drop_latent(index)
 
 
+def _name(units: Units, shots: Sequence[Shot], index: int) -> str:
+    """Run `index`'s name in the logs: its shot's, "shot 3/12", with several runs a shot the run's
+    too, "shot 3/12, run 2/4 (from its frame 1)"."""
+    manifest = units.manifest
+    shot = manifest.shot_of(index)
+    name = f"shot {shot + 1}/{len(shots)}"
+    if manifest.runs_per_shot == 1:
+        return name
+    run, runs = manifest.runs[index], manifest.shot_runs(shot)
+    # Of the shot's own runs: a shot too short for some has fewer than runs_per_shot.
+    return f"{name}, run {runs.index(index) + 1}/{len(runs)} (from its frame {run.offset})"
+
+
 def _copy_again(
     index: int,
     name: str,
     inputs: "Inputs",
-    shots: Sequence[Shot],
+    shot: Shot,
     units: Units,
     stop: Stop | None,
     copies: Copies,
 ) -> None:
-    """Make shot `index`'s input copy again, as its encode did, from the input frames it read,
+    """Make the input copy of run `index`, a shot's first run whose frames are `shot`, again, as
+    its encode did, from the input frames it read,
     reached through the frame index (Inputs): bit for bit the frames the first copy held, the
     input's content being checked (DESIGN.md, Colour correction), and each frame against the
     index, unless an environment change accepted since then changed ffmpeg or its conversions,
     the copy then being the new decode's frames (--accept-env-change)."""
-    shot = shots[index]
     _begin(stop, f"{name}'s input copy", None)
     started = time.monotonic()
     paths = (units.copy_path(index), units.checksums_path(index))
@@ -285,21 +317,21 @@ def _decode(
     write: Callable[[npt.NDArray[np.float32]], None],
     copies: Copies | None,
 ) -> None:
-    """Shot `index`'s decode, from its windows kept, its frames written as they come: with copies,
-    each slice corrected against its input copy first."""
-    shot = shots[index]
-    name = f"shot {index + 1}/{len(shots)}"
+    """Run `index`'s decode, from its windows kept, its frames written as they come: with copies,
+    each slice corrected against its shot's input copy first, from the run's first frame."""
+    run = units.manifest.runs[index]
+    name = _name(units, shots, index)
     logger.debug("%s: decoding", name)
     started = _started(models)
     models.enter("decode")
-    merged = merge_windows(units.take_windows(index), shot_layout(shot.frames, plan.window))
+    merged = merge_windows(units.take_windows(index), shot_layout(run.frames, plan.window))
     correction = None
     if copies is not None:
         paths = (units.copy_path(index), units.checksums_path(index))
-        correction = Correction(*paths, copies.width, copies.height)
+        correction = Correction(*paths, copies.width, copies.height, run.offset)
     try:
         decode_shot(
-            *(models, merged, shot.frames, target, write, name, shot.start, correction),
+            *(models, merged, run.frames, target, write, name, run.start, correction),
             tiles=plan.decode_tiles,
             scratch=_scratch(units, index, plan.decode_tiles),
             allowance=plan.scratch_allowance,
@@ -316,6 +348,172 @@ def _decode(
         _resident() / GIB,
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB,
     )
+
+
+def _decode_runs(
+    models: Models,
+    shots: Sequence[Shot],
+    index: int,
+    target: tuple[int, int],
+    plan: Plan,
+    units: Units,
+    write: Callable[[npt.NDArray[np.float32]], None],
+    copies: Copies | None,
+) -> None:
+    """Shot `index`'s decode with several runs (DESIGN.md, Several runs of a shot): its runs
+    decoded in turn (_decode), each giving the frames job.run_of takes from it. Those of every run
+    but the last are kept in the shot's file of frames (Kept, units.kept_path), as the runs give
+    them; the last run's are written as they come, each after the kept frames before it, and
+    the kept frames after its last once its decode is done: the shot's frames in their order,
+    each written once. So the file holds only the frames the earlier runs give, a frame each,
+    the shot's at the most."""
+    manifest = units.manifest
+    runs = manifest.shot_runs(index)
+    shot = shots[index]
+    count = manifest.runs_per_shot
+    taken = [run_of(count, frame) for frame in range(shot.frames)]
+    last = manifest.runs[runs[-1]].offset
+    kept = [frame for frame in range(shot.frames) if taken[frame] != last]
+    height, width = output_size(target)
+    with Kept(units.kept_path(runs[0]), kept, (height, width, 3)) as store:
+        for number in runs[:-1]:
+            run = manifest.runs[number]
+            given = _given(run, taken, store.put)
+            _decode(models, shots, number, target, plan, units, given, copies)
+        emit = _interleaved(manifest.runs[runs[-1]], taken, store, write)
+        _decode(models, shots, runs[-1], target, plan, units, emit, copies)
+        store.flush(shot.frames, write)
+
+
+def _given(
+    run: Run, taken: Sequence[int], put: Callable[[int, npt.NDArray[np.float32]], None]
+) -> Callable[[npt.NDArray[np.float32]], None]:
+    """A run's decode's write: of the frames it gives in order, (n, H', W', 3) float32, those
+    taken from it (taken[frame], the run each of the shot's frames is taken from) put in the
+    shot's kept frames, by their frame in the shot."""
+    position = run.offset
+
+    def keep(frames: npt.NDArray[np.float32]) -> None:
+        nonlocal position
+        for frame in frames:
+            if taken[position] == run.offset:
+                put(position, frame)
+            position += 1
+
+    return keep
+
+
+def _interleaved(
+    run: Run,
+    taken: Sequence[int],
+    store: "Kept",
+    write: Callable[[npt.NDArray[np.float32]], None],
+) -> Callable[[npt.NDArray[np.float32]], None]:
+    """The last run's decode's write: of the frames it gives in order, those taken from it written,
+    each after the kept frames before it (Kept.flush)."""
+    position = run.offset
+
+    def emit(frames: npt.NDArray[np.float32]) -> None:
+        nonlocal position
+        start = None  # the first of the frames given here written next, with those after it
+        for offset in range(frames.shape[0]):
+            frame = position + offset
+            if taken[frame] != run.offset:
+                if start is not None:
+                    write(frames[start:offset])
+                    start = None
+                continue
+            if store.pending(frame):
+                if start is not None:
+                    write(frames[start:offset])
+                store.flush(frame, write)
+                start = offset
+            elif start is None:
+                start = offset
+        if start is not None:
+            write(frames[start:])
+        position += frames.shape[0]
+
+    return emit
+
+
+class Kept:
+    """The frames a shot's runs but its last give (_decode_runs), `frames`, the shot's frames
+    they are, in order, each (H', W', 3) float32 as `shape`: in a file at path, allocated whole
+    before the first is put, so that a full disk refuses there, mapped through the descriptor it
+    was allocated by, removed when the block ends, on success and failure alike; a kill leaves
+    it, for the resume to discard (resume.UNIT_FILE). Float32, the frames as the decode gives
+    them to the writers, so that each is written as a single run's would be, the frame dumps'
+    float32 included, 24.9 MB a 1080p frame, 99.5 MB at 4K (job.kept_frames counts them; --plan
+    says the most a shot's file takes, planner._runs_said). A file, never system memory: a tiled
+    decode's scratch may hold the plan's allowance meanwhile (DESIGN.md, Memory planner). Its
+    pages, mapped shared, count in the process's resident memory the decode's log line gives
+    (_resident), as a tiled scratch's file does: page cache the system writes out and drops.
+    PROVISIONAL (implementation, 2026-10-20): DESIGN.md says the runs keep only the frames they
+    give, not where."""
+
+    def __init__(self, path: Path, frames: Sequence[int], shape: tuple[int, int, int]) -> None:
+        self.path, self.frames, self.shape = path, list(frames), shape
+        self._slot = {frame: slot for slot, frame in enumerate(self.frames)}
+        self._next = 0  # the slot of the next frame to write
+        self._array: npt.NDArray[np.float32] | None = None
+
+    def __enter__(self) -> Self:
+        if not self.frames:
+            return self
+        size = len(self.frames) * math.prod(self.shape) * 4
+        make_directories(self.path.parent)
+        # Derived data: a killed run's file, if the resume left it there, is replaced, unlinked
+        # rather than truncated, as tiling.Scratch replaces its own.
+        self.path.unlink(missing_ok=True)
+        try:
+            with self.path.open("x+b") as file:
+                os.posix_fallocate(file.fileno(), 0, size)
+                mapping = mmap.mmap(file.fileno(), size)
+        except OSError as error:
+            self.path.unlink(missing_ok=True)
+            raise ScratchError(
+                f"{self.path}: the frames of the shot's runs, {size} bytes: {error}"
+            ) from error
+        self._array = np.frombuffer(mapping, dtype=np.float32).reshape(
+            len(self.frames), *self.shape
+        )
+        return self
+
+    def put(self, frame: int, values: npt.NDArray[np.float32]) -> None:
+        """Keep the shot's frame `frame`, (H', W', 3) float32."""
+        assert self._array is not None
+        self._array[self._slot[frame]] = values
+
+    def pending(self, frame: int) -> bool:
+        """Whether a kept frame before `frame` is still to be written."""
+        return self._next < len(self.frames) and self.frames[self._next] < frame
+
+    def flush(self, frame: int, write: Callable[[npt.NDArray[np.float32]], None]) -> None:
+        """Write the kept frames before `frame` not written yet, in order, copies of the file's."""
+        end = self._next
+        while end < len(self.frames) and self.frames[end] < frame:
+            end += 1
+        if end > self._next:
+            assert self._array is not None
+            write(np.array(self._array[self._next : end]))
+            self._next = end
+
+    def __exit__(
+        self,
+        kind: type[BaseException] | None,
+        error: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self._array = None  # the mapping goes with its last array; copies alone were written
+        if not self.frames:
+            return
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError as failure:
+            logger.warning("%s: the frames of the shot's runs, not removed: %s", self.path, failure)
+        if error is None and self._next != len(self.frames):
+            raise RuntimeError(f"{len(self.frames) - self._next} kept frames never written")
 
 
 def _scratch(units: Units, index: int, tiles: Tiles | None) -> Path | None:
@@ -389,11 +587,10 @@ class Inputs:
     def reader(self, shot: Shot) -> Callable[[int], npt.NDArray[np.float32]]:
         """read(n), giving the next n of shot's frames, (n, H, W, 3) float32 in [0, 1], from its
         first: shots are asked for in order, a reader opened at a shot whose first frame isn't the
-        next one."""
+        next one, a later run of the shot read before it among them, through the frame index
+        (DESIGN.md, Several runs of a shot: each run fed the shot from its frame)."""
         path = self._source.path
-        if self._position > shot.start:
-            raise ValueError(f"frame {shot.start} asked, frame {self._position} is next")
-        if self._reader is None or self._position < shot.start:
+        if self._reader is None or self._position != shot.start:
             if self._reader is not None:
                 self._reader.stop()
                 self._otherwise += self._reader.otherwise
@@ -439,7 +636,9 @@ class Inputs:
             self._close(finish=error is None)
         finally:
             if self._otherwise:
-                # The run's last word on it (Reader._take): what it means for a resume.
+                # The run's last word on it (Reader._take): what it means for a resume. Each frame
+                # once, in order: with several runs a shot, each run reads its frames again.
+                self._otherwise = sorted(set(self._otherwise))
                 count = len(self._otherwise)
                 logger.warning(
                     "%s: %d frame%s in all decoded otherwise than in the first pass, read from the"

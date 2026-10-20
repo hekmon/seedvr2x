@@ -22,13 +22,15 @@ from seedvr2x.runtime.manifest import (
     ASSEMBLED,
     INDEX,
     NAME,
+    SHOT_RUNS,
     STATE,
     SUMS,
     Manifest,
     checksums_file,
+    recorded_runs,
 )
 from seedvr2x.runtime.tiling import SCRATCH
-from seedvr2x.runtime.units import CHECKSUMS, COPY, size
+from seedvr2x.runtime.units import CHECKSUMS, COPY, KEPT, run_file, size
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
 # what is recorded for information only (DESIGN.md, Pause and resume): where an input is and when
@@ -52,10 +54,13 @@ UNCOMPARED = {
 # The manifest's record of the environment changes a resume accepted (Manifest.content).
 CHANGES = "environment_changes"
 
-# The names units.Units gives a shot's files, and the scratch a tiled pass keeps beside them
-# (tiling.SCRATCH): derived data, never recorded, so a leftover wherever a kill left it.
+# The names units.Units gives a shot's files, a later run's units named for it (units.run_file),
+# and the scratch a tiled pass keeps beside them (tiling.SCRATCH) and the frames a shot's runs
+# keep for its decode (units.KEPT): derived data, never recorded, so a leftover wherever a kill
+# left it.
 UNIT_FILE = re.compile(
-    rf"latent\.pt|window_\d{{4}}\.pt|{'|'.join(map(re.escape, (COPY, CHECKSUMS, SCRATCH)))}"
+    rf"(?:run[1-3]_)?(?:latent\.pt|window_\d{{4}}\.pt)"
+    rf"|{'|'.join(map(re.escape, (COPY, CHECKSUMS, SCRATCH, KEPT)))}"
 )
 
 # The settings that say how a job's source is cut (cli._settings): the cut list given, or the
@@ -99,8 +104,14 @@ def differences(recorded: dict[str, Any], asked: dict[str, Any]) -> list[str]:
 def adopt(manifest: Manifest, recorded: dict[str, Any]) -> None:
     """Take how far the recorded job went into manifest, the same job (differences: none, but
     the environment's when accepted), and the environment changes accepted before."""
-    manifest.encoded = [shot["encoded"] for shot in recorded["shots"]]
-    manifest.windows_done = [shot["windows_done"] for shot in recorded["shots"]]
+    runs = [run for shot in recorded["shots"] for run in recorded_runs(shot)]
+    if len(runs) != len(manifest.runs):
+        raise JobError(
+            f"{manifest.path}: {len(runs)} runs recorded, for the {len(manifest.runs)} of its"
+            f" {len(manifest.shots)} shots at {manifest.runs_per_shot} a shot"
+        )
+    manifest.encoded = [run["encoded"] for run in runs]
+    manifest.windows_done = [run["windows_done"] for run in runs]
     manifest.finished = [segment["finished"] for segment in recorded["segments"]]
     manifest.sizes = [segment["bytes"] for segment in recorded["segments"]]
     manifest.environment_changes = list(recorded.get(CHANGES, []))
@@ -135,7 +146,11 @@ def recorded_job(path: Path, content: dict[str, Any], source: Source) -> Manifes
         content["environment"],
         source,
         [Shot(int(shot["start"]), int(shot["end"])) for shot in shots],
-        [[(int(first), int(end)) for first, end in shot["windows"]] for shot in shots],
+        [
+            [(int(first), int(end)) for first, end in run["windows"]]
+            for shot in shots
+            for run in recorded_runs(shot)
+        ],
         [
             OutputSegment(name.removesuffix(".mkv"), int(entry["start"]), int(entry["end"]))
             for name, entry in zip(files, entries, strict=True)
@@ -221,8 +236,14 @@ def environment_change(recorded: dict[str, Any], environment: dict[str, Any]) ->
         "before": before,
         "after": after,
         "segments_finished": sum(bool(segment["finished"]) for segment in recorded["segments"]),
-        "shots_encoded": sum(bool(shot["encoded"]) for shot in recorded["shots"]),
-        "windows_done": sum(shot["windows_done"] for shot in recorded["shots"]),
+        # With more than one run a shot, runs encoded and their windows, under the fields' names
+        # of before the option: a shot's first run is the shot's own record (manifest.SHOT_RUNS).
+        "shots_encoded": sum(
+            bool(run["encoded"]) for shot in recorded["shots"] for run in recorded_runs(shot)
+        ),
+        "windows_done": sum(
+            run["windows_done"] for shot in recorded["shots"] for run in recorded_runs(shot)
+        ),
     }
 
 
@@ -357,15 +378,19 @@ def _unit_leftovers(manifest: Manifest) -> list[Path]:
 
 
 def _kept(manifest: Manifest, index: int) -> set[str]:
-    """The unit files of shot `index` the manifest names: its latent until its windows are all
-    done, its windows done, and with `split` its input copy and the copy's checksums once
-    encoded."""
-    done = manifest.windows_done[index]
-    kept = {f"window_{window:04d}.pt" for window in range(done)}
-    if manifest.encoded[index] and done < len(manifest.layouts[index]):
-        kept.add("latent.pt")
-    if manifest.encoded[index] and manifest.split:
-        kept.update((COPY, CHECKSUMS))
+    """The unit files of shot `index` the manifest names, of each of its runs: a run's latent
+    until its windows are all done, its windows done (units.run_file); and with `split` the
+    shot's input copy and the copy's checksums once its first run is encoded, which makes
+    them."""
+    kept: set[str] = set()
+    for run in manifest.shot_runs(index):
+        offset = manifest.runs[run].offset
+        done = manifest.windows_done[run]
+        kept.update(run_file(offset, f"window_{window:04d}.pt") for window in range(done))
+        if manifest.encoded[run] and done < len(manifest.layouts[run]):
+            kept.add(run_file(offset, "latent.pt"))
+        if manifest.encoded[run] and manifest.split and offset == 0:
+            kept.update((COPY, CHECKSUMS))
     return kept
 
 
@@ -382,7 +407,27 @@ def _job(content: dict[str, Any]) -> dict[str, Any]:
             job[key] = _without(cast(dict[str, Any], value), fields)
         elif isinstance(value, list):
             job[key] = [_without(entry, fields) for entry in cast(list[dict[str, Any]], value)]
+    # A shot's later runs, how far each went likewise (manifest.SHOT_RUNS).
+    shots: Any = job.get("shots")
+    if isinstance(shots, list):
+        job["shots"] = [_runs_without(entry) for entry in cast(list[Any], shots)]
     return job
+
+
+def _runs_without(shot: Any) -> Any:
+    """A shot's record, its later runs' without how far they went (UNCOMPARED's shots fields)."""
+    if not isinstance(shot, dict):
+        return shot
+    entry = dict(cast(dict[str, Any], shot))
+    runs: Any = entry.get(SHOT_RUNS)
+    if isinstance(runs, list):
+        entry[SHOT_RUNS] = [
+            _without(cast(dict[str, Any], run), UNCOMPARED["shots"])
+            if isinstance(run, dict)
+            else run
+            for run in cast(list[Any], runs)
+        ]
+    return entry
 
 
 def _without(entry: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:

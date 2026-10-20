@@ -45,6 +45,94 @@ class Shot:
         return seed + self.start
 
 
+# The runs of a shot --runs-per-shot offers, and each one's first frame in the shot (DESIGN.md,
+# Several runs of a shot, decided on 2026-10-20): the latent grid shifted by 0 to 3 frames with
+# 4, by 0 and 2 with 2, the default one run, the grid unshifted.
+RUN_OFFSETS = {1: (0,), 2: (0, 2), 4: (0, 1, 2, 3)}
+
+# The counts --runs-per-shot takes. Two runs are built and wait for the user's eyes: "Offered or
+# not once the user's eyes have seen it against four runs and one" (DESIGN.md, Several runs of a
+# shot). PROVISIONAL (implementation, 2026-10-20): refused until then, the conservative reading.
+RUNS_OFFERED = (1, 4)
+
+# A frame's places in a run, best first (DESIGN.md, Several runs of a shot): its first frame, a
+# latent of its own (-1), then the last of a group of 4 (3), the one a latent is stamped on in the
+# VAE's causal wiring, then 2 and 0, then 1. Measurement's order (the grid study's compose.py,
+# pick: "j = 0 (own latent) first, then places 3, 2, 0, 1"; place 2 above place 0 on 5 of 8
+# clips, research/docs/numerics.md, Every fourth frame: the latent grid).
+PLACES_BEST_FIRST = (-1, 3, 2, 0, 1)
+
+
+def place(index: int) -> int:
+    """The place of a run's frame `index`, counted from the run's first: -1 for its first frame,
+    which the VAE encodes alone into a latent, else 0 to 3 in its group of 4 frames, 3 the
+    group's last (DESIGN.md, Pipeline step 1)."""
+    if index < 0:
+        raise ValueError(f"frame {index} of a run")
+    return -1 if index == 0 else (index - 1) % 4
+
+
+def run_of(runs: int, frame: int) -> int:
+    """The run a shot's frame `frame`, counted from the shot's first, is taken from with `runs`
+    runs a shot: the first frame of that run in the shot, RUN_OFFSETS's. Of the runs that hold the
+    frame, those starting at it or before, the one where its place is best (PLACES_BEST_FIRST):
+    with 4, the run frame mod 4, where the frame ends its group or is the run's first; with 2,
+    the run where its place is 3 or 2, or frame 2's own run, where it is the first. Every run's
+    first frame is its own, so a shot with a run s has it give at least that frame. The same
+    choice as measurement's composites (compose.py's pick), held to it by
+    tests/test_runs.py."""
+    if frame < 0:
+        raise ValueError(f"frame {frame} of a shot")
+    held = [offset for offset in RUN_OFFSETS[runs] if offset <= frame]
+    # The first best: no two runs give a frame one place (tests/test_runs.py), but a tie would go
+    # to the earlier run, as compose.py's does.
+    return min(held, key=lambda offset: PLACES_BEST_FIRST.index(place(frame - offset)))
+
+
+@dataclass(frozen=True)
+class Run:
+    """Run `offset` of shot: the shot fed from its frame `offset`, frames [shot.start + offset,
+    shot.end) of the source, a whole run of its own, its plan of windows, its padded end and
+    its colour correction (DESIGN.md, Several runs of a shot). Its seed is the shot's
+    (Shot.seed), as each of measurement's shifted runs took the job's seed, 42, its input a file
+    of its own starting at the shifted frame. PROVISIONAL (implementation, 2026-10-20, a
+    question for design): the shot's own seed, not the one a shot starting at the run's first
+    frame would take, its start in the source: so that the composite is measurement's, and a
+    run's output depends on the seed, the shot and the run alone."""
+
+    shot: Shot
+    offset: int
+
+    @property
+    def start(self) -> int:
+        return self.shot.start + self.offset
+
+    @property
+    def end(self) -> int:
+        return self.shot.end
+
+    @property
+    def frames(self) -> int:
+        return self.shot.end - self.start
+
+    def seed(self, seed: int) -> int:
+        """The run's seed: its shot's (Shot.seed)."""
+        return self.shot.seed(seed)
+
+
+def kept_frames(shot: Shot, runs: int) -> int:
+    """The frames of shot its runs but the last give, which wait on disk while its runs are
+    decoded in turn (runtime/run.py, Kept): none with one run."""
+    last = shot_runs(shot, runs)[-1].offset
+    return sum(run_of(runs, frame) != last for frame in range(shot.frames))
+
+
+def shot_runs(shot: Shot, runs: int) -> list[Run]:
+    """The runs of shot with `runs` runs a shot, in order: one for each of RUN_OFFSETS's first
+    frames the shot has; a shot too short to have frame s has no run s."""
+    return [Run(shot, offset) for offset in RUN_OFFSETS[runs] if offset < shot.frames]
+
+
 @dataclass(frozen=True)
 class OutputSegment:
     """Frames [start, end) of the job, the output's unit: a file of their own (FFV1) or a directory

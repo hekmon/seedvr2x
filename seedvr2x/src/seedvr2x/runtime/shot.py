@@ -69,12 +69,16 @@ COPY_READ = Conversion("gbrp16le", "gbr", "full", "left")
 class Correction:
     """What a shot's decode with `split` needs besides its latents (DESIGN.md, Colour correction):
     its input copy, the frames its encode read, width x height as the input stores them
-    (units.COPY), and their checksums (units.CHECKSUMS)."""
+    (units.COPY), and their checksums (units.CHECKSUMS); for a later run of a shot (DESIGN.md,
+    Several runs of a shot), `first`, the run's first frame in the shot, the copy being the
+    shot's, its first run's: the run is corrected against the copy's frames from there, the
+    frames a single run fed the shot from that frame would have copied."""
 
     copy: Path
     checksums: Path
     width: int
     height: int
+    first: int = 0
 
 
 class CopyError(MediaError):
@@ -596,7 +600,10 @@ def _correct(
     height, width = output_size(target)
     stages = colour.colour_stages((correction.height, correction.width), target)
     last: npt.NDArray[np.float32] | None = None
-    with _copy_reader(correction, count) as read:
+    with _copy_reader(correction, correction.first + count) as read:
+        # A later run's: the copy's frames before the run's first read, each checked, and left.
+        if correction.first:
+            read(correction.first)
         reference = _frames(reference_inputs(models, read, count, target), height, width)
         done = 0
         for chunk in chunks:

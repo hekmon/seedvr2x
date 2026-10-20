@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
+from seedvr2x.runtime import job as runtime_job
 from seedvr2x.runtime.cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
 from seedvr2x.runtime.job import MIN_SEGMENT
 from seedvr2x.runtime.pull import DETECTOR, REPO
@@ -211,6 +212,19 @@ def main(argv: list[str] | None = None) -> int:
         " --cut-threshold or --cuts plans it again, with no second decode",
     )
     parser.add_argument("--seed", type=int, default=42)
+    # An option for quality, off by default (DESIGN.md, Several runs of a shot, decided on
+    # 2026-10-20 on the user's eyes): 4 runs gave PSNR-Y +2.01 dB and VMAF +10.4 against one, on the
+    # 8 full-reference clips, for 4 times the GPU time. Its documentation is the manual's.
+    parser.add_argument(
+        "--runs-per-shot",
+        type=_runs,
+        default=1,
+        metavar="N",
+        help="run each shot N times, 1 or 4, its latent grid shifted a frame each time, and take"
+        " each frame from the run that rebuilds it best: the model rebuilds 3 frames of every 4"
+        " softer, with doubled lines on fast motion; N times the GPU time, the same memory;"
+        " --plan says it before anything runs; see the manual (default: %(default)s)",
+    )
     # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
     parser.add_argument(
         "--color-correction",
@@ -519,6 +533,7 @@ def _run(args: argparse.Namespace) -> int:
         check_target,
         output_size,
         read_cuts,
+        shot_runs,
         shots_from_cuts,
         target_size,
     )
@@ -771,7 +786,11 @@ def _run(args: argparse.Namespace) -> int:
                 attention=_attention(),
             )
             card = torch.cuda.get_device_name(identity.device)
-            said = planner.said(plan, peaks, card, target, shots, pins, numz_padding=numz_padding)
+            said = planner.said(
+                *(plan, peaks, card, target, shots, pins),
+                numz_padding=numz_padding,
+                runs_per_shot=args.runs_per_shot,
+            )
             for line in said:
                 logger.info("%s", line)
             # A pass in tiles larger than any measured, which only a pin gives it: warned of,
@@ -821,7 +840,12 @@ def _run(args: argparse.Namespace) -> int:
         identity.environment,
         source,
         shots,
-        [shot_layout(shot.frames, plan.window) for shot in shots],
+        # Each run's windows: with one run a shot, each shot's (DESIGN.md, Several runs of a shot).
+        [
+            shot_layout(run.frames, plan.window)
+            for shot in shots
+            for run in shot_runs(shot, args.runs_per_shot)
+        ],
         segments,
         [path.name for path in paths],
         {
@@ -1858,6 +1882,9 @@ def _settings(
         **hashed,
         "resolution": args.resolution,
         "seed": args.seed,
+        # How many times each shot runs (DESIGN.md, Several runs of a shot): a job is never
+        # resumed with another count.
+        "runs_per_shot": args.runs_per_shot,
         "color_correction": args.color_correction,
         # The pins that shape the output, as asked, None when not given: the same command
         # resumes (DESIGN.md, Pause and resume), so a resume finds them again. The tile pins
@@ -2324,13 +2351,14 @@ def _resume(record: "Manifest", prior: _Prior, assembles: bool = False) -> bool:
             logger.info("%s: %s discarded", record.path.parent, _plural(len(discarded), "leftover"))
         return False
     logger.info(
-        "resuming %s: %d of %d segments finished, %d of %d shots encoded, %d windows kept; %s"
+        "resuming %s: %d of %d segments finished, %d of %d %s encoded, %d windows kept; %s"
         " discarded",
         record.path.parent,
         sum(record.finished),
         len(record.finished),
         sum(record.encoded),
         len(record.encoded),
+        "shots" if record.runs_per_shot == 1 else "runs",
         sum(record.windows_done),
         _plural(len(discarded), "leftover"),
     )
@@ -2929,6 +2957,21 @@ def _until(text: str) -> datetime.time:
     if match is None or int(match[1]) > 23 or int(match[2]) > 59:
         raise argparse.ArgumentTypeError(f"{text!r}: not a time of day, HH:MM, from 00:00 to 23:59")
     return datetime.time(int(match[1]), int(match[2]))
+
+
+def _runs(text: str) -> int:
+    """--runs-per-shot's N: a count seedvr2x runs and offers (job.RUN_OFFSETS, job.RUNS_OFFERED);
+    two runs, built, refused in one line until the user's eyes have seen them (DESIGN.md, Several
+    runs of a shot)."""
+    *others, last = map(str, runtime_job.RUNS_OFFERED)
+    offered = f"{', '.join(others)} or {last}"
+    if not re.fullmatch(r"\d+", text) or int(text) not in runtime_job.RUN_OFFSETS:
+        raise argparse.ArgumentTypeError(f"{text!r}: not a count of runs a shot, {offered}")
+    if int(text) not in runtime_job.RUNS_OFFERED:
+        raise argparse.ArgumentTypeError(
+            f"{text}: not offered yet, its gain waiting for the user's eyes; {offered}"
+        )
+    return int(text)
 
 
 def _positive(text: str) -> int:

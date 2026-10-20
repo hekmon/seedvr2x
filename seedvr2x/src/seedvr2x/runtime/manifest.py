@@ -18,7 +18,7 @@ from typing import Any, cast
 
 from seedvr2x.media.files import write_whole
 from seedvr2x.media.source import Source
-from seedvr2x.runtime.job import JobError, OutputSegment, Shot
+from seedvr2x.runtime.job import RUN_OFFSETS, JobError, OutputSegment, Run, Shot, shot_runs
 
 NAME = "manifest.json"
 # 3 since the input is one record, the source's, where it was a list: a change of shape bumps the
@@ -54,6 +54,15 @@ INDEX = "frame_index.bin"
 # which imports torch (runtime/units.py): the command line reads it before it checks the model
 # files, which comes before torch (cli._trusted; DESIGN.md, Weights, Recognised by content).
 FIRST_PASS = ("ffmpeg", "conversions")
+# The setting of the runs a shot (cli._settings; DESIGN.md, Several runs of a shot): 1, the
+# default, for every manifest recorded before it, which code before it wrote (its settings.code
+# another job's anyway).
+RUNS = "runs_per_shot"
+# A shot's record of its runs after the first, with more than one run a shot: their own windows
+# and how far each went, the first run being the shot's own fields (Manifest.content). With one
+# run a shot, the shots' record is what it was before the option, byte for byte (the settings
+# gain runs_per_shot, 1).
+SHOT_RUNS = "runs"
 # The record of the finished file a .mkv path's segments were assembled into (cli._assemble): its
 # name and bytes, written once the file is in place, before its work directory, this manifest's,
 # is removed. How far the job went, never compared on a resume (resume.differences): it stands
@@ -79,7 +88,9 @@ def planned(content: dict[str, Any]) -> bool:
     shots: Any = content.get("shots")
     segments: Any = content.get("segments")
     try:
-        made = any(shot["encoded"] or shot["windows_done"] for shot in shots)
+        made = any(
+            run["encoded"] or run["windows_done"] for shot in shots for run in recorded_runs(shot)
+        )
         return not made and not any(segment["finished"] for segment in segments)
     except (KeyError, TypeError):
         return False
@@ -94,6 +105,13 @@ def complete(content: dict[str, Any]) -> bool:
         return bool(segments) and all(segment["finished"] for segment in segments)
     except (KeyError, TypeError):
         return False
+
+
+def recorded_runs(shot: Any) -> list[Any]:
+    """Of a shot's record in a manifest's content, its runs' records, each with its windows and how
+    far it went: the shot's own, the first run's, then those of SHOT_RUNS, which only a job of
+    more than one run a shot records."""
+    return [shot, *shot.get(SHOT_RUNS, [])]
 
 
 def read(path: Path) -> dict[str, Any]:
@@ -122,7 +140,9 @@ class Manifest:
     environment: dict[str, Any]  # what the output's bits depend on besides the settings
     source: Source  # the job's only input (DESIGN.md, Input)
     shots: Sequence[Shot]
-    layouts: Sequence[Sequence[tuple[int, int]]]  # each shot's DiT windows, latents [start, end)
+    # Each run's DiT windows, latents [start, end), in the order of runs: with one run a shot,
+    # each shot's.
+    layouts: Sequence[Sequence[tuple[int, int]]]
     segments: Sequence[OutputSegment]
     files: Sequence[str]  # each segment's file (FFV1) or directory (PNG), in the output
     output: dict[str, Any]
@@ -133,9 +153,9 @@ class Manifest:
     # The environment changes a resume accepted (--accept-env-change), oldest first: the units
     # made before each are the environment's before it (resume.environment_change).
     environment_changes: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
-    # How far the job went.
-    encoded: list[bool] = field(default_factory=list[bool])  # each shot's latent kept
-    windows_done: list[int] = field(default_factory=list[int])  # each shot's windows kept
+    # How far the job went, run by run (runs): with one run a shot, shot by shot.
+    encoded: list[bool] = field(default_factory=list[bool])  # each run's latent kept
+    windows_done: list[int] = field(default_factory=list[int])  # each run's windows kept
     finished: list[bool] = field(default_factory=list[bool])  # each segment whole
     sizes: list[int | None] = field(default_factory=list[int | None])  # finished ones' bytes
     assembled: dict[str, Any] | None = None  # the finished file, once in place (ASSEMBLED)
@@ -144,15 +164,36 @@ class Manifest:
     before_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        count = self.runs_per_shot
+        if count not in RUN_OFFSETS:
+            raise JobError(f"{self.path}: {count} runs a shot, where seedvr2x runs 1, 2 or 4")
+        # The job's runs, the units its encodes and windows are (DESIGN.md, Several runs of a
+        # shot): each shot's in turn, and the shot each is of.
+        self.runs: list[Run] = [run for shot in self.shots for run in shot_runs(shot, count)]
+        self.run_shots: list[int] = [
+            index for index, shot in enumerate(self.shots) for _ in shot_runs(shot, count)
+        ]
+        if len(self.layouts) != len(self.runs):
+            raise ValueError(f"{len(self.layouts)} layouts for {len(self.runs)} runs")
         if not self.encoded:
-            self.encoded = [False] * len(self.shots)
+            self.encoded = [False] * len(self.runs)
         if not self.windows_done:
-            self.windows_done = [0] * len(self.shots)
+            self.windows_done = [0] * len(self.runs)
         if not self.finished:
             self.finished = [False] * len(self.segments)
         if not self.sizes:
             self.sizes = [None] * len(self.segments)
         self._input = _input(self.source)
+
+    @property
+    def runs_per_shot(self) -> int:
+        """The runs of each shot (RUNS): 1, 2 or 4."""
+        count: Any = self.settings.get(RUNS, 1)
+        return count if isinstance(count, int) else 0
+
+    def shot_of(self, run: int) -> int:
+        """The index of the shot run `run` is of."""
+        return self.run_shots[run]
 
     @property
     def split(self) -> bool:
@@ -161,16 +202,16 @@ class Manifest:
         return self.settings.get("color_correction") == "split"
 
     def shot_encoded(self, index: int) -> None:
-        """Record shot `index`'s latent as kept, and its input copy with `split`, and write the
-        manifest."""
+        """Record run `index`'s latent as kept, and with `split` the input copy of its shot
+        with a shot's first run, which makes it, and write the manifest."""
         self.encoded[index] = True
         self.write()
 
     def window_done(self, index: int, window: int) -> None:
-        """Record window `window` of shot `index` as kept, the windows before it being kept
+        """Record window `window` of run `index` as kept, the windows before it being kept
         already, and write the manifest."""
         if window != self.windows_done[index]:
-            raise ValueError(f"shot {index}: window {window} after {self.windows_done[index]}")
+            raise ValueError(f"run {index}: window {window} after {self.windows_done[index]}")
         self.windows_done[index] = window + 1
         self.write()
 
@@ -192,6 +233,10 @@ class Manifest:
         segment = self.segments[index]
         return [i for i, shot in enumerate(self.shots) if segment.start <= shot.start < segment.end]
 
+    def shot_runs(self, index: int) -> list[int]:
+        """The runs of shot `index`, in order: their indices in runs."""
+        return [run for run, shot in enumerate(self.run_shots) if shot == index]
+
     def write(self) -> None:
         """Write the manifest, whole or not at all, even after a power cut."""
         if self.before_write is not None:
@@ -201,6 +246,16 @@ class Manifest:
 
     def content(self) -> dict[str, Any]:
         seed = self.settings["seed"]
+        shots: list[dict[str, Any]] = []
+        for index, shot in enumerate(self.shots):
+            first, *others = self.shot_runs(index)
+            entry: dict[str, Any] = {"start": shot.start, "end": shot.end, "seed": shot.seed(seed)}
+            entry.update(self._run(first))
+            if self.runs_per_shot > 1:
+                entry[SHOT_RUNS] = [
+                    {"from": self.runs[run].offset, **self._run(run)} for run in others
+                ]
+            shots.append(entry)
         return {
             "seedvr2x_manifest": VERSION,
             "settings": self.settings,
@@ -209,20 +264,7 @@ class Manifest:
             "input": self._input,
             "output": self.output,
             "plan": self.plan,
-            "shots": [
-                {
-                    "start": shot.start,
-                    "end": shot.end,
-                    "seed": shot.seed(seed),
-                    "latents": layout[-1][1],
-                    "windows": [list(window) for window in layout],
-                    "encoded": encoded,
-                    "windows_done": done,
-                }
-                for shot, layout, encoded, done in zip(
-                    self.shots, self.layouts, self.encoded, self.windows_done, strict=True
-                )
-            ],
+            "shots": shots,
             "segments": [
                 {
                     "name": name,
@@ -236,6 +278,16 @@ class Manifest:
                 )
             ],
             **({} if self.assembled is None else {ASSEMBLED: self.assembled}),
+        }
+
+    def _run(self, run: int) -> dict[str, Any]:
+        """Run `run`'s record: its latents, its windows and how far it went."""
+        layout = self.layouts[run]
+        return {
+            "latents": layout[-1][1],
+            "windows": [list(window) for window in layout],
+            "encoded": self.encoded[run],
+            "windows_done": self.windows_done[run],
         }
 
 

@@ -1316,10 +1316,10 @@ def on_the_device(
         return at
 
     class Kept(Units):
-        def save_window(self, shot: int, window: int, sampled: torch.Tensor) -> None:
+        def save_window(self, run: int, window: int, sampled: torch.Tensor) -> None:
             torch.cuda.synchronize(device)
             peaks.append((torch.cuda.max_memory_allocated(device), asked("peak")))
-            super().save_window(shot, window, sampled)
+            super().save_window(run, window, sampled)
 
     height, width = padded_size(CARD_TARGET)
     generator = torch.Generator().manual_seed(latents)
