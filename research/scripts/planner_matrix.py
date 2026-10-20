@@ -147,13 +147,13 @@ FIGURES = {
 HUNDREDTH = 0.01 + 1e-9
 
 # What the plan leaves under the free memory, and the room a VAE pass is held to besides, in
-# GiB, as DESIGN.md has them (Memory planner, Budget: 0.6, and 1.5 further under the budget for
-# a VAE pass): written here, not read from seedvr2x's planner, so that a planner whose own
-# moved doesn't agree with itself (measured_takes). On a machine held to its card the plan
-# takes no margin on top, the 4.5 GiB it leaves under torch's limit measuring the same need
-# (DESIGN.md, Allocator): margin_taken.
+# GiB, as DESIGN.md has them (Memory planner, Budget: 0.6, and 1.25 further under the budget for
+# a VAE pass, decided on 2026-10-18; 1.5 before): written here, not read from seedvr2x's planner,
+# so that a planner whose own moved doesn't agree with itself (measured_takes). On a machine
+# held to its card the plan takes no margin on top, the 4.5 GiB it leaves under torch's limit
+# measuring the same need (DESIGN.md, Allocator): margin_taken.
 MARGIN = 0.6
-ROOM = 1.5
+ROOM = 1.25
 # How far what a refusal says a phase takes may stand from the peak the case's run measured for
 # it with the margin and the room, in GiB, (under, over), by the kind of phase (measured_takes).
 # Under: both figures are said to the hundredth, the one rounded up, the other to the nearest,
