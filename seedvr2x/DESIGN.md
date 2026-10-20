@@ -1093,9 +1093,8 @@ The rule: the upscale must look like its source in any given player.
    - The frames are read from ffmpeg's decoding of the source at the VAE's own pace: 5, then 4
      at a time. The first latent holds 1 frame and every next one 4, and the causal VAE works
      in those slices anyway. This is not a batch size: the shot is encoded in one pass.
-   - The padding to 4n + 1 is made from the frames already read (the last 4, mirrored, today;
-     the last one, repeated, once built: see below), so the latent is the one-pass encode's,
-     bit for bit.
+   - The padding to 4n + 1 is made from the frames already read (the last one, repeated: see
+     below), so the latent is the one-pass encode's, bit for bit.
    - Only the latents are ever whole in memory, unless the encode is tiled: each tile then
      runs over the whole shot, whose transformed input waits in the shot's scratch (step 3).
      The latent is made in system memory, a slice at a time, and waits there; the shot's noise
@@ -1125,7 +1124,7 @@ The rule: the upscale must look like its source in any given player.
    its end (`generation_utils.py:651-656`: a shot of 42 frames gets its frames 40, 39 and 38,
    counted from 0) and repeats its last frame only where the padding is longer than the shot
    (:635-648); ByteDance repeats the last frame (`inference_seedvr2_7b.py:178-196`). Decided
-   on 2026-10-19, to be built: the last frame repeated, as ByteDance does. The padded length
+   and built on 2026-10-19: the last frame repeated, as ByteDance does. The padded length
    is the same, and the shot's end comes closer to the ground truth
    ([cuts.md](../research/docs/cuts.md#a-shots-end-repeating-its-last-frame-against-mirroring)).
    Measured on numz on the 96 GB card, without colour correction, repeat against mirror:
@@ -1141,8 +1140,9 @@ The rule: the upscale must look like its source in any given player.
      slow pan over a near-flat sky, its last frame 0.9 to 1.2 dB lower. A shot of 2 frames is
      padded alike by both.
    - As with step 0's padding, milestone 1's regression keeps numz's mirror through a mode of
-     the tests' own, and the repeat is checked bit-identical to numz patched to repeat
-     (measurement's `NUM_TAIL`), against measurement's runs of 2026-10-19.
+     the tests' own (`SEEDVR2X_TESTS_NUMZ_TAIL`). Checked on 2026-10-19 on a shot of 42 frames
+     at 1080p, all 42 frames: bit-identical to numz patched to repeat (measurement's
+     `NUM_TAIL`), and in that mode to numz itself.
 2. **DiT** on windows:
    - one window per shot when it fits
    - otherwise windows sharing **M = 2 latents** (8 frames). Their lengths are balanced,
@@ -1685,10 +1685,11 @@ first pass, whose shots are its input, and before the models load:
   - It does not hold for the VAE's passes (2026-10-11): packed to the margin, three plans of
     nine ran out of memory in a VAE pass, at one large request (2 to 5 GiB in one piece, a
     whole frame's or tile's concatenation), the GPU full while torch counted 3.3 to 5.5 GiB
-    less than it started with: the pool's slack (see [Allocator](#allocator)). Until the
-    cause is found, every VAE pass is held 1.5 GiB further under the budget (provisional):
-    with it the nine plans ran, once each, the least room left to a VAE peak 1.71 GiB. It
-    costs tile size on every card under 48 GB (see [To measure](#to-measure)).
+    less than it started with: the pool's slack (see [Allocator](#allocator)). Every VAE
+    pass is held 1.25 GiB further under the budget (1.5 from 2026-10-11 to 2026-10-19, a guard
+    while the cause wasn't known; see below): with it the nine plans ran with their references'
+    frames, the least room left to a VAE pass 1.88 GiB. It costs tile size on every card under
+    48 GB (see [To measure](#to-measure)).
     - Measured on 2026-10-13, on emulated cards with the room at 0. The two plans whose passes
       are large fail every time (1080p on 32 GB, its decode in 1600-px tiles, three runs of
       three; 4K on 48 GB, its decode in 1664-px tiles, two of two), at the concatenation of a
@@ -1706,9 +1707,13 @@ first pass, whose shots are its input, and before the models load:
       bit-identical with and without it, and its peaks 0.18 to 5.17 GiB under the planner's
       table, the untiled 4K encode 4.48 under its fit, but for the two passes just over the
       floor, a decode in 1152-px tiles 0.036 GiB over and one in tiles of 1104×1216 0.042 over.
-      The table is still the one measured without it. Decided on 2026-10-18, to be built: the
-      planner takes the peaks measured with it for the passes it takes, those two included, the
-      other passes' as they are. A tile's first slice, of five frames, can still ask for its
+      Built on 2026-10-19: the planner takes the peaks measured with it, rounded up to the
+      hundredth, for the passes it takes, those two included (21.99 GiB for the decode in
+      1152-px tiles, 22.25 in tiles of 1104×1216), the other passes' as they are, the untiled
+      passes their fits (1.61 and 4.48 GiB over their peaks with it, 1080p's decode and 4K's
+      encode). Every pass with it that a plan for the cards of 12 to 48 GB or the bare card can
+      take, at 1080p, 1440p and 4K, has a run under it that peaked under its prediction. A
+      tile's first slice, of five frames, can still ask for its
       concatenation where the four-frame output is just under the floor: in 4K's 1600-px tiles
       3.05 GiB, refused in a whole run with 0.67 GiB of room, loudly, never with other frames,
       1.2 GiB or more under what the planner leaves a pass. Kept as built (2026-10-18).
@@ -1745,17 +1750,19 @@ first pass, whose shots are its input, and before the models load:
       always agree (5 of 12), where the passes alone always did. Nothing in torch shows the
       change there; cuDNN's own log does (19 to 40 plans built over the reference's on every
       pass that moved, none on a kept one), a library's log, no interface.
-    - Decided on 2026-10-18, to be built: the room goes from 1.5 to 1.25 GiB, the encode's 0.4
-      GiB staying. A VAE pass is then left at least 1.85 GiB beyond its predicted peak with the
-      budget's margin (2.1 today): 0.77 over the most a whole run was seen to need (1.08) and
-      0.88 over the most a pass alone needs (0.97). The 0.25 kept over the 1.0 those measures
-      allow is for what wasn't measured: whole runs in other tiles, cards not emulated, other
-      GPU generations and cuDNN builds, whose engines and workspaces are their own. On the
-      planner of 2026-10-16 it gives back a tile one step larger in 12 decodes and 7 encodes of
-      74 plans for cards of 12 to 48 GB (a room of 1.0: 17 and 17), no window or swapped block
-      moving. It is taken once the matrix's nine cases give their references' frames under it,
-      with the planner's table under the one-output convolution (above). Until then the room
-      stays 1.5 GiB: in the nine plans the least it leaves a VAE pass is 2.18 GiB.
+    - Decided on 2026-10-18, built and taken on 2026-10-19: the room is 1.25 GiB, the encode's
+      0.4 GiB staying. A VAE pass is left at least 1.85 GiB beyond its predicted peak with the
+      budget's margin (2.1 with the room of 1.5): 0.77 over the most a whole run was seen to
+      need (1.08) and 0.88 over the most a pass alone needs (0.97). The 0.25 kept over the 1.0
+      those measures allow is for what wasn't measured: whole runs in other tiles, cards not
+      emulated, other GPU generations and cuDNN builds, whose engines and workspaces are their
+      own. With the table under the one-output convolution it gives back a tile one step
+      larger in 26 decodes and 14 encodes of the 74 plans for cards of 12 to 48 GB (25 and 13
+      for shots of two windows; the room alone, on the old table, 12 and 7), no window or
+      swapped block moving. The matrix's nine cases kept their references' frames under it
+      (three shapes made again: 1080p on 12 GB, its decode in 640-px tiles, on 32 GB in
+      1536-px tiles, and 4K on 48 GB in 1664-px tiles), every refusal one notch under, the
+      least room a VAE pass had 1.88 GiB, and the whole GPU suite passed on that code.
   - The plan is made once, from what is free at the start: no option reserves more, and a run
     never plans again as it goes (the user's decision, 2026-10-09).
   - The margin was bisected on emulated cards: a run needs 0.15–0.45 GiB between the free
@@ -1819,14 +1826,19 @@ first pass, whose shots are its input, and before the models load:
       1080p's 1,104 rows 13.55 and 23.34, 1536 px 21.50 and 38.73, 2048 px 37.76 and 68.51.
       Then every square from 512 to 2048 px in steps of 64 and the tiles cut off at 1080p's
       1,104 rows and at 720p's 752, each tile fed alone: up to 0.03 GiB under the same tile
-      in a whole frame.
+      in a whole frame. Under the one-output convolution (2026-10-17) the passes it takes
+      measure lower: 1536 px's decode 36.74, 2048 px's encode and decode 36.33 and 63.34; the
+      decodes of squares from 1152 px and of 1104-row tiles from 1216 px 0.18 to 5.17 GiB
+      lower but for two 0.04 higher, the encodes of squares from 1664 px 0.22 to 1.43 lower.
     - The fits don't hold to the margin. From 1024 px up a decode sits 0.07 to 0.34 GiB
       under its fit, and below up to 0.67 over it (576 px). An encode moves in steps, not
       with the tile's area: from 0.39 GiB under its fit (1472 px) to 0.80 over (832 px). A
       cut-off decode tile follows its area between the squares within 0.09 GiB but one, 0.30
       over (752×896); a cut-off encode tile stands from 0.68 under that line to 0.20 over.
     - So the planner takes the measured peak of every tile measured, the 25 squares and the
-      20 tiles cut off at those two sizes' rows, the larger where one was measured twice. A
+      20 tiles cut off at those two sizes' rows, the larger where one was measured twice, but
+      for the passes the one-output convolution takes, which take their tile's measure with it
+      (whole frames in those tiles peaked under it). A
       cut-off tile of another size takes the larger of its fit and of the squares' line at
       its area, and 0.3 GiB more, the most a measured one stood above that being 0.27. A
       tiled pass takes the most any tile of its grid takes: at 720p's rows an encode tile of
@@ -1989,7 +2001,8 @@ first pass, whose shots are its input, and before the models load:
       and no refusal names a cut. A long shot is bounded by the host's memory alone, its refusal
       naming the shot (see Host RAM, above).
     - The VAE has a floor too: its decode in 512-px tiles, with its room. At 1080p that is
-      8.5 GiB of free VRAM: an 8 GB card stays out.
+      8.27 GiB of free VRAM (8.52 with the room of 1.5): an 8 GB card stays out, offered
+      `--resolution 288`.
 - **Pins.** `--window N`, `--swap-blocks N`, `--encode-tile PX` and `--decode-tile PX` (0 for
   untiled) each fix one choice, and the planner makes the others around it. A pin is taken
   exactly or refused, never adjusted: the refusal names what fits, the longest window, the
@@ -2763,6 +2776,12 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      suite, the whole GPU suite, 34 tests, and the nine cases, each with its reference's frames
      and the day's plan, the passes the one-output convolution takes measured lower than before
      (2026-10-17).
+     On the code of 2026-10-19 (the room of 1.25 GiB, the table under the one-output
+     convolution), three of the nine references made again for their moved shapes: the box's
+     CPU suite, the nine cases with their references' frames, the whole GPU suite, 34 tests;
+     with a shot's end repeated besides, the whole suite again, and a shot of 42 frames at
+     1080p bit-identical to numz patched to repeat its last frame, and to numz itself in the
+     tests' mirror mode.
    - On a real desktop card, an RTX 5090 under WSL2 held to its card (2026-10-12): the same
      job alone, beside a program holding 8 GiB, stopped then resumed, and with NVML silent,
      the same frames each time; each phase within 0.3 GiB of its prediction but the
@@ -2859,7 +2878,7 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   decode, measured on 2026-10-19 (see [Input](#input)): bilinear brings the output's chroma
   closest to the ground truth. Crops of both kernels from the kept runs, made on the CPU, for
   the user's eyes. The master's downsampling is settled: bilinear (see [Output](#output)).
-- **Every fourth frame is the model's best**
+- **Every fourth frame is the closest to the ground truth**
   ([numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
   shot's first frame, the causal VAE packs 4 frames per latent, and the last frame of each
   group comes out closest to the ground truth: on 8 of 8 clips by VMAF and LPIPS, 7 of 8 by
@@ -2870,14 +2889,23 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   1.59 with `split`, colour's (ΔE00 after a 4 px blur) from 0.50 to 0.29 and 0.12. The
   perceptual gap barely moves (LPIPS from 0.021 to 0.018): the inner frames' texture, ghosts
   included, stays the model's ([colour.md](../research/docs/colour.md#the-latent-grid)).
-  Nothing measured removes it.
-  Taking each frame from a run whose grid ends a group there would take 4 runs per shot, the
-  grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Not
-  measured (about 2 GPU h on the 8 clips).
+  Nothing measured removes it. Closest isn't sharpest: by the luma's Laplacian variance
+  against the ground truth's, the group's last frame is less sharp than its second on 6 of 8
+  clips (clearly on 3), as a shot's first frame is less sharp than the next ones.
+  Taking each frame from the run whose grid ends a group there takes 4 runs per shot, the
+  grid shifted by 0–3 frames: 4× the GPU time, so at most a quality mode after v1. Measured
+  on 2026-10-20 (numz, the 8 clips, seed 42, the grid shifted by 1 to 3 frames), against one
+  run: closer to the ground truth (PSNR-Y +2.01 dB and VMAF +10.4 without correction, +1.51
+  and +7.85 after `split`; beyond the seeds' spread on 8 of 8 clips by VMAF), the temporal
+  errors lower on 8 of 8, so no flicker by them; 2 runs give 37–47% of it. And less sharp:
+  below the 3 seeds' range on 6 of 8 clips (−14% to +5% of their mean; one seed for the
+  shifts, the sharpest of the three on 6 clips). Whether a 4× or 2× mode is worth its GPU
+  time is for the user's eyes, on blind stills and loops of both.
 - **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget).
   Measured by tile size on the 96 GB card (2026-10-16 to 18): every tile the 12 to 48 GB cards
   take, passes alone, six of them in whole runs, three decodes under expandable segments; a room
-  of 1.25 GiB decided, its validation by the matrix's frames to run. Left: whole runs beyond
+  of 1.25 GiB decided and taken, the matrix's nine cases keeping their frames under it
+  (2026-10-19). Left: whole runs beyond
   those six tiles, their outcome near the floor not repeatable to 0.1 GiB; a card that isn't
   emulated; other GPU generations and cuDNN builds; torch's own allocator on that card beyond
   its three decodes; the 512-px decode, which no plan of those cards takes; the pass's time as a
