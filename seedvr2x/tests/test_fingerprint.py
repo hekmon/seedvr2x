@@ -32,8 +32,9 @@ def test_the_same_every_run() -> None:
 @pytest.mark.parametrize(
     ("module", "name", "value"),
     [
-        # The decode's chroma kernel, slightly off Catmull-Rom.
-        (conversion, "KERNEL", "f=bicubic:param_a=0:param_b=0.55"),
+        # The decode's chroma kernel, Catmull-Rom, the one before bilinear (2026-10-20): a job's
+        # environment read with it differs.
+        (conversion, "KERNEL", "f=bicubic:param_a=0:param_b=0.5"),
         # The yuv420p10le master's chroma kernel.
         (writer, "CHROMA_KERNEL", "f=bicubic"),
     ],

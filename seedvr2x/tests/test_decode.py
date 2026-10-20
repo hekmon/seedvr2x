@@ -300,8 +300,11 @@ def yuv_file(path: Path, data: bytes, pix_fmt: str, **tags: str) -> Path:
 
 def test_chroma_siting_is_read_and_applied(tmp_path: Path) -> None:
     # Chroma varying along x, well under the 4:2:0 limit: sited left or centre, the encode
-    # differs by half a pixel, which only the right reading undoes.
-    x = np.arange(WIDTH) * 2 * np.pi / 16
+    # differs by half a pixel, which only the right reading undoes. A period of 32 pixels: at 16,
+    # the decode's bilinear (2026-10-20) blurs it enough to bring the wrong reading's error to
+    # 1.9 times the right one's (2.5 and 1.9 by siting; 3.8 and 3.0 with Catmull-Rom); at 32, 4.1
+    # and 3.1.
+    x = np.arange(WIDTH) * 2 * np.pi / 32
     red = 0.5 + 0.3 * np.sin(x)
     blue = 0.5 - 0.3 * np.sin(x + 1)
     rgb = np.stack(np.broadcast_arrays(red, np.full(WIDTH, 0.5), blue), axis=-1)

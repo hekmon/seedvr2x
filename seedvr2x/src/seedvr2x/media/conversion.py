@@ -61,11 +61,13 @@ MATRICES = {"bt709": "709", "bt470bg": "470bg", "smpte170m": "170m", "bt2020nc":
 # The chroma locations, ffprobe's names, which are zscale's too.
 CHROMA_LOCATIONS = frozenset({"left", "center", "topleft", "top", "bottomleft", "bottom"})
 
-# Chroma upsampled with Catmull-Rom (bicubic b = 0, c = 0.5), Keys' cubic with a = -0.5: step 0's
-# kernel (NaResize, torchvision's bicubic with antialias), so every interpolation feeding the
-# model is the reference pipeline's. zscale's default, bilinear, blurs chroma edges (DESIGN.md,
-# Input).
-KERNEL = "f=bicubic:param_a=0:param_b=0.5"
+# Chroma upsampled with bilinear, zscale's own kernel, given explicitly (DESIGN.md, Input, decided
+# on 2026-10-20): against it, Catmull-Rom (bicubic b = 0, c = 0.5) gave outputs whose chroma is
+# further from the ground truth, PSNR-Cb 0.17 dB and PSNR-Cr 0.25 lower on average over the 8
+# full-reference clips, colour edges 0.16 ΔE00 further, ringing beyond 2 levels 0.37 points
+# more, the luma within the seeds' spread (numerics.md, The decode's chroma); every
+# full-reference run was fed sources read with bilinear.
+KERNEL = "f=bilinear"
 
 
 @dataclass(frozen=True)
