@@ -49,7 +49,7 @@ from seedvr2x.runtime.job import (
     JobError,
     Shot,
     check_target,
-    kept_frames,
+    kept_bytes,
     output_size,
     padded_size,
     shot_runs,
@@ -1150,11 +1150,10 @@ def _runs_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) -> 
     "4x the GPU time")."""
     runs_per_shot = QUALITY[quality]
     runs = sum(len(shot_runs(shot, runs_per_shot)) for shot in shots)
-    # The frames a shot's earlier runs give wait on disk, float32, in the shot's unit directory
+    # The frames a shot's earlier runs give wait on disk, at 16 bits, in the shot's unit directory
     # until its last run's decode (run.Kept): the most a shot keeps, said so that a user sees the
     # room it takes before anything runs.
-    height, width = output_size(target)
-    kept = max(kept_frames(shot, runs_per_shot) for shot in shots) * height * width * 3 * 4
+    kept = max(kept_bytes(shot, runs_per_shot, output_size(target)) for shot in shots)
     return (
         f"--quality {quality}: {runs_per_shot} runs a shot, {_count(runs, 'run')} in all, each"
         " frame taken from the run that rebuilds it best: about"

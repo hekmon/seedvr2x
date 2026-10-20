@@ -25,8 +25,8 @@ from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.files import make_directories
 from seedvr2x.media.reader import Reader, listed
 from seedvr2x.media.source import Source
-from seedvr2x.media.writer import FFV1Writer, Tags, Writer
-from seedvr2x.runtime.job import OutputSegment, Run, Shot, output_size, run_of
+from seedvr2x.media.writer import FFV1Writer, Tags, Writer, quantise
+from seedvr2x.runtime.job import KEPT_SAMPLE_BYTES, OutputSegment, Run, Shot, output_size, run_of
 from seedvr2x.runtime.model import Models
 from seedvr2x.runtime.plan import Plan, Tiles
 from seedvr2x.runtime.shot import (
@@ -52,6 +52,12 @@ GIB = 1024**3
 COPY_READS = 8
 
 
+# What the output's frames are written by (run_job's write): (n, H', W', 3) float32 in [0, 1] as the
+# decode gives them, or uint16, the values the writers quantise them to (writer.quantise), a shot's
+# frames kept between its runs (Kept).
+Write = Callable[[npt.NDArray[np.float32] | npt.NDArray[np.uint16]], None]
+
+
 @dataclass(frozen=True)
 class Copies:
     """split's input copies (DESIGN.md, Colour correction): the input's frame size, as stored,
@@ -71,7 +77,7 @@ def run_job(
     seed: int,
     plan: Plan,
     units: Units,
-    write: Callable[[npt.NDArray[np.float32]], None],
+    write: Write,
     stop: Stop | None = None,
     split: bool = False,
     *,
@@ -79,12 +85,18 @@ def run_job(
     numz_draw: bool = False,
     numz_tail: bool = False,
     clock: object | None = None,
+    dump: Callable[[int, npt.NDArray[np.float32]], None] | None = None,
 ) -> None:
     """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
     with its own seed (Shot.seed), its frames resized to target (job.target_size), as the job's
     plan says (runtime/plan.py): its DiT windows capped at plan.window latents, its encodes and
     decodes tiled or not; write(frames) takes the output frames as they come, (n, H', W', 3)
-    float32 in [0, 1], the segments' in turn.
+    float32 in [0, 1], the segments' in turn; with several runs a shot, a shot's frames kept
+    between its runs come as uint16, the values the writers quantise a frame to
+    (writer.quantise), which they take as they are. dump(frame, values), when given, is told each
+    of those kept frames as its run decodes it, its index in the job and its float32 values, for
+    --dump-frames (DESIGN.md, Several runs of a shot: "Frames asked for in float are written by
+    the run that makes them"); the frames write is given as float32 it isn't told.
 
     Before each unit, the models are told its phase (Models.enter), which puts on the GPU what
     the plan has there for it.
@@ -142,7 +154,7 @@ def run_job(
                 if len(runs) == 1:
                     _decode(models, shots, runs[0], target, plan, units, write, copies)
                 else:
-                    _decode_runs(models, shots, index, target, plan, units, write, copies)
+                    _decode_runs(models, shots, index, target, plan, units, write, copies, dump)
 
 
 def _begin(stop: Stop | None, unit: str, cost: float | None) -> None:
@@ -357,8 +369,9 @@ def _decode_runs(
     target: tuple[int, int],
     plan: Plan,
     units: Units,
-    write: Callable[[npt.NDArray[np.float32]], None],
+    write: Write,
     copies: Copies | None,
+    dump: Callable[[int, npt.NDArray[np.float32]], None] | None = None,
 ) -> None:
     """Shot `index`'s decode with several runs (DESIGN.md, Several runs of a shot): its runs
     decoded in turn (_decode), each giving the frames job.run_of takes from it. Those of every run
@@ -366,7 +379,7 @@ def _decode_runs(
     them; the last run's are written as they come, each after the kept frames before it, and
     the kept frames after its last once its decode is done: the shot's frames in their order,
     each written once. So the file holds only the frames the earlier runs give, a frame each,
-    the shot's at the most."""
+    the shot's at the most. dump, as run_job takes it, is told each kept frame as it is decoded."""
     manifest = units.manifest
     runs = manifest.shot_runs(index)
     shot = shots[index]
@@ -378,7 +391,7 @@ def _decode_runs(
     with Kept(units.kept_path(runs[0]), kept, (height, width, 3)) as store:
         for number in runs[:-1]:
             run = manifest.runs[number]
-            given = _given(run, taken, store.put)
+            given = _given(run, taken, store.put, shot.start, dump)
             _decode(models, shots, number, target, plan, units, given, copies)
         emit = _interleaved(manifest.runs[runs[-1]], taken, store, write)
         _decode(models, shots, runs[-1], target, plan, units, emit, copies)
@@ -386,17 +399,24 @@ def _decode_runs(
 
 
 def _given(
-    run: Run, taken: Sequence[int], put: Callable[[int, npt.NDArray[np.float32]], None]
+    run: Run,
+    taken: Sequence[int],
+    put: Callable[[int, npt.NDArray[np.float32]], None],
+    first: int = 0,
+    dump: Callable[[int, npt.NDArray[np.float32]], None] | None = None,
 ) -> Callable[[npt.NDArray[np.float32]], None]:
     """A run's decode's write: of the frames it gives in order, (n, H', W', 3) float32, those
     taken from it (taken[frame], the run each of the shot's frames is taken from) put in the
-    shot's kept frames, by their frame in the shot."""
+    shot's kept frames, by their frame in the shot, and told dump with their index in the job,
+    the shot's first frame being `first`."""
     position = run.offset
 
     def keep(frames: npt.NDArray[np.float32]) -> None:
         nonlocal position
         for frame in frames:
             if taken[position] == run.offset:
+                if dump is not None:
+                    dump(first + position, frame)
                 put(position, frame)
             position += 1
 
@@ -407,7 +427,7 @@ def _interleaved(
     run: Run,
     taken: Sequence[int],
     store: "Kept",
-    write: Callable[[npt.NDArray[np.float32]], None],
+    write: Write,
 ) -> Callable[[npt.NDArray[np.float32]], None]:
     """The last run's decode's write: of the frames it gives in order, those taken from it written,
     each after the kept frames before it (Kept.flush)."""
@@ -439,14 +459,18 @@ def _interleaved(
 
 class Kept:
     """The frames a shot's runs but its last give (_decode_runs), `frames`, the shot's frames
-    they are, in order, each (H', W', 3) float32 as `shape`: in a file at path, allocated whole
-    before the first is put, so that a full disk refuses there, mapped through the descriptor it
-    was allocated by, removed when the block ends, on success and failure alike; a kill leaves
-    it, for the resume to discard (resume.UNIT_FILE). Float32, the frames as the decode gives
-    them to the writers, so that each is written as a single run's would be, the frame dumps'
-    float32 included, 24.9 MB a 1080p frame, 99.5 MB at 4K (job.kept_frames counts them; --plan
-    says the most a shot's file takes, planner._runs_said). A file, never system memory: a tiled
-    decode's scratch may hold the plan's allowance meanwhile (DESIGN.md, Memory planner). Its
+    they are, in order, each (H', W', 3) as `shape`: in a file at path, allocated whole before the
+    first is put, so that a full disk refuses there, mapped through the descriptor it was
+    allocated by, removed when the block ends, on success and failure alike; a kill leaves it, for
+    the resume to discard (resume.UNIT_FILE). Each frame kept as the uint16 values the writers
+    quantise it to (writer.quantise), which they take as they are, so that no byte of a master
+    changes against a single run's (DESIGN.md, Several runs of a shot, the ruling of 2026-10-20:
+    "at the 16 bits the master is written from"): 12.4 MB a 1080p frame, 49.8 MB at 4K
+    (job.kept_bytes; --plan says the most a shot's file takes, planner._runs_said; the job is
+    refused at its start when its disk can't hold it). The float32 frames --dump-frames writes
+    are dumped by the run that decodes them (_given), never from here. A file, never system
+    memory: a tiled decode's scratch may hold the plan's allowance meanwhile (DESIGN.md, Memory
+    planner). Its
     pages, mapped shared, count in the process's resident memory the decode's log line gives
     (_resident), as a tiled scratch's file does: page cache the system writes out and drops.
     PROVISIONAL (implementation, 2026-10-20): DESIGN.md says the runs keep only the frames they
@@ -456,12 +480,12 @@ class Kept:
         self.path, self.frames, self.shape = path, list(frames), shape
         self._slot = {frame: slot for slot, frame in enumerate(self.frames)}
         self._next = 0  # the slot of the next frame to write
-        self._array: npt.NDArray[np.float32] | None = None
+        self._array: npt.NDArray[np.uint16] | None = None
 
     def __enter__(self) -> Self:
         if not self.frames:
             return self
-        size = len(self.frames) * math.prod(self.shape) * 4
+        size = len(self.frames) * math.prod(self.shape) * KEPT_SAMPLE_BYTES
         make_directories(self.path.parent)
         # Derived data: a killed run's file, if the resume left it there, is replaced, unlinked
         # rather than truncated, as tiling.Scratch replaces its own.
@@ -475,22 +499,22 @@ class Kept:
             raise ScratchError(
                 f"{self.path}: the frames of the shot's runs, {size} bytes: {error}"
             ) from error
-        self._array = np.frombuffer(mapping, dtype=np.float32).reshape(
-            len(self.frames), *self.shape
-        )
+        self._array = np.frombuffer(mapping, dtype=np.uint16).reshape(len(self.frames), *self.shape)
         return self
 
     def put(self, frame: int, values: npt.NDArray[np.float32]) -> None:
-        """Keep the shot's frame `frame`, (H', W', 3) float32."""
+        """Keep the shot's frame `frame`, (H', W', 3) float32 in [0, 1], as the values the writers
+        quantise it to."""
         assert self._array is not None
-        self._array[self._slot[frame]] = values
+        self._array[self._slot[frame]] = quantise(values)
 
     def pending(self, frame: int) -> bool:
         """Whether a kept frame before `frame` is still to be written."""
         return self._next < len(self.frames) and self.frames[self._next] < frame
 
-    def flush(self, frame: int, write: Callable[[npt.NDArray[np.float32]], None]) -> None:
-        """Write the kept frames before `frame` not written yet, in order, copies of the file's."""
+    def flush(self, frame: int, write: Write) -> None:
+        """Write the kept frames before `frame` not written yet, in order, copies of the file's,
+        uint16."""
         end = self._next
         while end < len(self.frames) and self.frames[end] < frame:
             end += 1

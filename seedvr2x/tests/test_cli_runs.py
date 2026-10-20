@@ -14,6 +14,7 @@ here are the rule written out again, the expected values independent of the code
 import hashlib
 import json
 import logging
+import subprocess
 from itertools import accumulate, chain
 from pathlib import Path
 from typing import Any
@@ -44,8 +45,8 @@ from seedvr2x.runtime.shot import padded_length
 
 # The output's frames as test_cli_run's stand-in gives them (gbrp16le, 128x96), in bytes.
 FRAME_BYTES = 3 * 96 * 128 * 2
-# The same, float32 and counted in the frames the runs keep for the decode (run.Kept): (H, W, 3).
-KEPT_BYTES = 96 * 128 * 3 * 4
+# The same as the runs keep them for the decode (run.Kept): (H, W, 3) at 16 bits.
+KEPT_BYTES = 96 * 128 * 3 * 2
 # The source's frames, yuv420p at 64x48.
 SOURCE_BYTES = 64 * 48 * 3 // 2
 
@@ -493,3 +494,85 @@ def test_kept_frames_removed(
         3,
         *(4 + f - taken(4, f) for f in range(21)),
     ]
+
+
+class FloatKept:
+    """run.Kept as built first (patch 57): the frames kept as float32, as the decode gives them,
+    and written so, the writers quantising them; in memory, which changes nothing of their
+    values. What the 16-bit file must equal byte for byte (design's ruling of 2026-10-20)."""
+
+    def __init__(self, path: Path, frames: list[int], shape: tuple[int, int, int]) -> None:
+        self.frames, self._kept, self._next = list(frames), dict[int, Any](), 0
+
+    def __enter__(self) -> "FloatKept":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        assert exc[0] is not None or self._next == len(self.frames)
+
+    def put(self, frame: int, values: npt.NDArray[np.float32]) -> None:
+        self._kept[frame] = np.array(values, dtype=np.float32)
+
+    def pending(self, frame: int) -> bool:
+        return self._next < len(self.frames) and self.frames[self._next] < frame
+
+    def flush(self, frame: int, write: Any) -> None:
+        end = self._next
+        while end < len(self.frames) and self.frames[end] < frame:
+            end += 1
+        if end > self._next:
+            write(np.stack([self._kept[f] for f in self.frames[self._next : end]]))
+            self._next = end
+
+
+def written_files(out: Path) -> dict[str, bytes]:
+    """Every file of a job's output directory but its manifest, by its path there: a Matroska
+    master by its video packets, byte for byte (their MD5s, in order), since the muxer gives each
+    file a random segment UID; any other file by its bytes."""
+    found: dict[str, bytes] = {}
+    for path in sorted(out.rglob("*")):
+        if not path.is_file() or path.name == "manifest.json":
+            continue
+        if path.suffix == ".mkv":
+            packets = subprocess.run(
+                [
+                    *("ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v", "-c", "copy"),
+                    *("-f", "framemd5", "-"),
+                ],
+                capture_output=True,
+                check=True,
+            ).stdout
+            found[str(path.relative_to(out))] = b"\n".join(
+                line for line in packets.splitlines() if not line.startswith(b"#")
+            )
+        else:
+            found[str(path.relative_to(out))] = path.read_bytes()
+    return found
+
+
+@pytest.mark.usefixtures("stand_in")
+@pytest.mark.parametrize("correction", ["none", "split"])
+@pytest.mark.parametrize("output_format", ["gbrp16le", "yuv420p10le", "png"])
+def test_sixteen_bit_kept_frames_change_no_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_format: str, correction: str
+) -> None:
+    # The frames kept between the runs at the 16 bits the writers quantise them to: every master
+    # and checksum file byte for byte those of the frames kept as float32 (FloatKept), in every
+    # format, the frame dumps too, written by the runs that make them (DESIGN.md, Several runs of
+    # a shot). Shots of 5, 1 and 11 frames at maximum: every place of the rule, a shot of one run.
+    original = source(tmp_path / "in.mkv", 17)
+    cuts = listed(tmp_path, "cuts.txt", "5\n6\n")
+    options = ("--cuts", cuts, "--quality", "maximum", "--format", output_format)
+    options += ("--color-correction", correction)
+    outputs: dict[str, dict[str, bytes]] = {}
+    for kept in ("sixteen", "float"):
+        with monkeypatch.context() as patch:
+            if kept == "float":
+                patch.setattr(run, "Kept", FloatKept)
+            dump = tmp_path / f"dump-{kept}"
+            assert upscale(tmp_path, original, kept, *options, "--dump-frames", str(dump)) == 0
+        outputs[kept] = written_files(tmp_path / kept)
+        outputs[f"{kept}-dump"] = written_files(dump)
+    assert outputs["sixteen"] == outputs["float"]
+    assert len(outputs["sixteen-dump"]) == 17
+    assert outputs["sixteen-dump"] == outputs["float-dump"]

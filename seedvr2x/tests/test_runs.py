@@ -21,6 +21,7 @@ import pytest
 import torch
 
 from seedvr2x.media.source import Source
+from seedvr2x.media.writer import quantise
 from seedvr2x.runtime import job, manifest, planner, resume, run
 from seedvr2x.runtime.job import (
     PLACES_BEST_FIRST,
@@ -560,15 +561,24 @@ def test_a_finished_segment_removes_every_run_s_files(tmp_path: Path) -> None:
 
 
 def frames_of(*values: int) -> npt.NDArray[np.float32]:
-    """Frames (n, 2, 3, 3) float32, each filled with its value."""
-    return np.stack([np.full((2, 3, 3), value, dtype=np.float32) for value in values])
+    """Frames (n, 2, 3, 3) float32, each filled with its value / 10, in [0, 1]."""
+    return np.stack([np.full((2, 3, 3), value / 10, dtype=np.float32) for value in values])
+
+
+def sixteen(part: npt.NDArray[np.float32] | npt.NDArray[np.uint16]) -> npt.NDArray[np.uint16]:
+    """What a writer writes of frames written: a float frame's quantised values, a kept frame's
+    own (writer.quantise)."""
+    if part.dtype == np.uint16:
+        return part.astype(np.uint16, copy=False)
+    return np.stack([quantise(frame.astype(np.float32, copy=False)) for frame in part])
 
 
 def test_kept_frames_are_allocated_whole_and_written_in_order(tmp_path: Path) -> None:
     path = tmp_path / "shot" / KEPT
-    written: list[npt.NDArray[np.float32]] = []
+    written: list[npt.NDArray[np.float32] | npt.NDArray[np.uint16]] = []
     with run.Kept(path, [1, 2, 4], (2, 3, 3)) as store:
-        assert path.stat().st_size == 3 * 2 * 3 * 3 * 4
+        # Three frames of 2 x 3 x 3 samples, at the 16 bits the writers quantise them to.
+        assert path.stat().st_size == 3 * 2 * 3 * 3 * 2
         assert not store.pending(1)
         for frame in (4, 1, 2):  # in any order they are put, only the writes are in the shot's
             store.put(frame, frames_of(frame)[0])
@@ -581,7 +591,9 @@ def test_kept_frames_are_allocated_whole_and_written_in_order(tmp_path: Path) ->
         assert not store.pending(100)
         store.flush(100, written.append)  # nothing left: no empty write
     assert [part.shape for part in written] == [(1, 2, 3, 3), (2, 2, 3, 3)]
-    assert np.array_equal(np.concatenate(written), frames_of(1, 2, 4))
+    # Kept and written as the writers' values: a float frame's, quantised.
+    assert all(part.dtype == np.uint16 for part in written)
+    assert np.array_equal(np.concatenate(written), sixteen(frames_of(1, 2, 4)))
     assert not path.exists()
 
 
@@ -629,9 +641,10 @@ def test_a_full_disk_is_a_scratch_error(tmp_path: Path, monkeypatch: pytest.Monk
 def decoded(offset: int, length: int, chunk: int) -> list[npt.NDArray[np.float32]]:
     """What the decode of the run from frame `offset` of a shot of `length` frames gives, in
     chunks of `chunk` frames: frames (n, 1, 1, 3) whose first value is the frame's index in the
-    shot and the second the run's offset, so that where a frame comes from is read in it."""
+    shot over 100 and the second the run's offset over 10, so that where a frame comes from is
+    read in it, through the 16 bits of a kept frame too."""
     frames = np.array(
-        [[[[index, offset, 0]]] for index in range(offset, length)], dtype=np.float32
+        [[[[index / 100, offset / 10, 0]]] for index in range(offset, length)], dtype=np.float32
     ).reshape(-1, 1, 1, 3)
     return [frames[start : start + chunk] for start in range(0, len(frames), chunk)]
 
@@ -648,7 +661,7 @@ def test_the_frames_come_out_in_order_each_from_its_run(
     taken = [job.run_of(runs, frame) for frame in range(length)]
     last = all_runs[-1].offset
     kept = [frame for frame in range(length) if taken[frame] != last]
-    written: list[npt.NDArray[np.float32]] = []
+    written: list[npt.NDArray[np.float32] | npt.NDArray[np.uint16]] = []
     with run.Kept(tmp_path / KEPT, kept, (1, 1, 3)) as store:
         for each in all_runs[:-1]:
             give = run._given(each, taken, store.put)  # pyright: ignore[reportPrivateUsage]
@@ -661,10 +674,13 @@ def test_the_frames_come_out_in_order_each_from_its_run(
             emit(part)
         store.flush(length, written.append)
     assert not (tmp_path / KEPT).exists()
-    out = np.concatenate(written) if written else np.empty((0, 1, 1, 3), np.float32)
+    # The last run's frames come as the decode gives them, float32; the kept ones as uint16.
+    assert {part.dtype for part in written} <= {np.dtype(np.float32), np.dtype(np.uint16)}
+    parts = [sixteen(part) for part in written]
+    out = np.concatenate(parts) if parts else np.empty((0, 1, 1, 3), np.uint16)
     assert out.shape == (length, 1, 1, 3)
-    assert out[:, 0, 0, 0].tolist() == list(range(length))
-    assert out[:, 0, 0, 1].tolist() == taken
+    assert [round(int(v) / 65535 * 100) for v in out[:, 0, 0, 0]] == list(range(length))
+    assert [round(int(v) / 65535 * 10) for v in out[:, 0, 0, 1]] == taken
     assert all(part.shape[0] > 0 for part in written)
 
 
@@ -688,8 +704,16 @@ def test_the_frames_the_earlier_runs_keep(frames: int, runs: int, kept: int) -> 
 
 
 def test_the_plan_says_the_disk_the_kept_frames_take() -> None:
-    # A shot of 1,000 frames at 1080p, 4 runs: 750 frames kept, 24,883,200 bytes each in float32
-    # (1920 x 1080 x 3 x 4), 17.38 GiB; the shorter shot keeps less.
+    # A shot of 1,000 frames at 1080p, 4 runs: 750 frames kept, 12,441,600 bytes each at 16 bits
+    # (1920 x 1080 x 3 x 2, DESIGN.md's 12.4 MB), 8.69 GiB; the shorter shot keeps less.
     said = planner._runs_said([Shot(0, 1000), Shot(1000, 1100)], (1080, 1920), "maximum")  # pyright: ignore[reportPrivateUsage]
     assert "8 runs in all" in said
-    assert "the longest shot keeps 17.38 GiB of frames on disk" in said
+    assert "the longest shot keeps 8.69 GiB of frames on disk" in said
+
+
+def test_the_kept_bytes_are_design_s() -> None:
+    # DESIGN.md, Several runs of a shot: 12.4 MB a 1080p frame, 49.8 MB at 4K, 37 GB for 750
+    # frames of a 1,000-frame 4K shot at four runs.
+    assert job.kept_bytes(Shot(0, 2), 4, (1080, 1920)) == 12_441_600  # frame 0 kept
+    assert job.kept_bytes(Shot(0, 2), 4, (2160, 3840)) == 49_766_400
+    assert job.kept_bytes(Shot(0, 1000), 4, (2160, 3840)) == 750 * 49_766_400  # 37.3 GB

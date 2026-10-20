@@ -128,6 +128,18 @@ def kept_frames(shot: Shot, runs: int) -> int:
     return sum(run_of(runs, frame) != last for frame in range(shot.frames))
 
 
+# The bytes of a sample of a frame kept between a shot's runs: the 16 bits the writers quantise a
+# frame to (writer.quantise; DESIGN.md, Several runs of a shot).
+KEPT_SAMPLE_BYTES = 2
+
+
+def kept_bytes(shot: Shot, runs: int, size: tuple[int, int]) -> int:
+    """The bytes of the frames shot keeps between its runs (kept_frames), (height, width) the
+    output's size: 12.4 MB a 1080p frame, 49.8 MB at 4K."""
+    height, width = size
+    return kept_frames(shot, runs) * height * width * 3 * KEPT_SAMPLE_BYTES
+
+
 def shot_runs(shot: Shot, runs: int) -> list[Run]:
     """The runs of shot with `runs` runs a shot, in order: one for each of RUN_OFFSETS's first
     frames the shot has; a shot too short to have frame s has no run s."""

@@ -965,12 +965,18 @@ def _run(args: argparse.Namespace) -> int:
         try:
             with SegmentWriter(outputs, open_segment, finished) as writer:
 
-                def write(frames: npt.NDArray[np.float32]) -> None:
-                    if args.dump_frames is not None:
+                def write(frames: npt.NDArray[np.float32] | npt.NDArray[np.uint16]) -> None:
+                    # Float frames dumped as written; a shot's frames kept between its runs come
+                    # as uint16 and were dumped by the run that made them (dumped, run_job).
+                    if args.dump_frames is not None and frames.dtype != np.uint16:
                         for written, frame in enumerate(frames, writer.written):
-                            path = args.dump_frames / f"frame_{number(written):06d}.npy"
-                            np.save(path, np.ascontiguousarray(frame))
+                            dumped(number(written), frame)
                     writer.write(frames)
+
+                def dumped(frame: int, values: npt.NDArray[np.float32]) -> None:
+                    assert args.dump_frames is not None
+                    path = args.dump_frames / f"frame_{frame:06d}.npy"
+                    np.save(path, np.ascontiguousarray(values))
 
                 run_job(
                     *(models, source, shots, segments, target, args.seed, plan, units),
@@ -978,6 +984,7 @@ def _run(args: argparse.Namespace) -> int:
                     numz_padding=numz_padding,
                     numz_draw=numz_draw,
                     numz_tail=numz_tail,
+                    dump=None if args.dump_frames is None else dumped,
                 )
         except CopyError as error:
             # Derived data, removed (run_job): a resume makes it again.

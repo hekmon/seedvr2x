@@ -119,24 +119,40 @@ def yuv_matrix(width: int, height: int, source: str = "") -> str:
 ZSCALE_MATRICES = {"bt709": "709", "bt470bg": "470bg", "smpte170m": "170m"}
 
 
-def to_planar16(frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
-    """(H, W, 3) float in [0, 1] to the G, B, R planes of gbrp16le, round(x * 65535)."""
-    return np.ascontiguousarray(_quantise(frame).transpose(2, 0, 1)[[1, 2, 0]])
+# A frame as the writers take it: (H, W, 3) float32 in [0, 1], or uint16 as quantise makes it
+# of one, taken as it is (runtime/run.py's Kept: a shot's frames kept between its runs).
+Frame = npt.NDArray[np.float32] | npt.NDArray[np.uint16]
 
 
-def to_rgb48be(frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
-    """(H, W, 3) float in [0, 1] to packed big-endian rgb48be, round(x * 65535): the 16-bit PNG
-    encoder's own format, so that ffmpeg converts nothing. In C order, whatever the frame's: the
-    decode's frames are views of (C, t, H, W) planes."""
-    return _quantise(frame).astype(">u2", order="C")
+def to_planar16(frame: Frame) -> npt.NDArray[np.uint16]:
+    """(H, W, 3) float in [0, 1] to the G, B, R planes of gbrp16le, round(x * 65535); uint16 as it
+    is, quantise's already."""
+    return np.ascontiguousarray(_quantised(frame).transpose(2, 0, 1)[[1, 2, 0]])
 
 
-def _quantise(frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
+def to_rgb48be(frame: Frame) -> npt.NDArray[np.uint16]:
+    """(H, W, 3) float in [0, 1] to packed big-endian rgb48be, round(x * 65535), uint16 as it is:
+    the 16-bit PNG encoder's own format, so that ffmpeg converts nothing. In C order, whatever the
+    frame's: the decode's frames are views of (C, t, H, W) planes."""
+    return _quantised(frame).astype(">u2", order="C")
+
+
+def quantise(frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
+    """(H, W, 3) float in [0, 1] to the 16-bit values every writer is fed: those of gbrp16le's
+    planes (to_planar16) and of rgb48be (to_rgb48be), which a yuv420p10le master is converted from
+    by ffmpeg (FFV1Writer) and a segment command fed (CommandWriter)."""
     # ffv1_out.py's to_planar, in float32: clipped, scaled, rounded to nearest (milestone 1).
     q = np.clip(frame, 0.0, 1.0)
     q *= 65535
     np.rint(q, out=q)
     return q.astype("<u2")
+
+
+def _quantised(frame: Frame) -> npt.NDArray[np.uint16]:
+    """frame's 16-bit values: quantise's of a float frame, a uint16 frame's own."""
+    if frame.dtype == np.uint16:
+        return frame.astype(np.uint16, copy=False)
+    return quantise(frame.astype(np.float32, copy=False))
 
 
 class Writer:
@@ -182,8 +198,9 @@ class Writer:
         )
         self._drain.start()
 
-    def write(self, frames: npt.NDArray[np.float32]) -> None:
-        """Write frames (n, H, W, 3) float32 in [0, 1]; values outside are clipped."""
+    def write(self, frames: npt.NDArray[np.float32] | npt.NDArray[np.uint16]) -> None:
+        """Write frames (n, H, W, 3) float32 in [0, 1], values outside clipped; or uint16, the
+        values quantise gives, taken as they are."""
         if frames.ndim != 4 or frames.shape[1:] != (self.height, self.width, 3):
             raise ValueError(f"frames {frames.shape}, the output is {self.width}x{self.height}")
         for frame in frames:
@@ -221,7 +238,7 @@ class Writer:
             pass
         self._discard()
 
-    def _pack(self, frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
+    def _pack(self, frame: Frame) -> npt.NDArray[np.uint16]:
         raise NotImplementedError
 
     def _finish(self) -> None:
@@ -358,7 +375,7 @@ class FFV1Writer(Writer):
                 self._hashes.unlink(missing_ok=True)
             raise
 
-    def _pack(self, frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
+    def _pack(self, frame: Frame) -> npt.NDArray[np.uint16]:
         return to_planar16(frame)
 
     def _finish(self) -> None:
@@ -486,7 +503,7 @@ class PNGWriter(Writer):
     def frame_path(self, index: int) -> Path:
         return self.directory / f"{index:06d}.png"
 
-    def _pack(self, frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
+    def _pack(self, frame: Frame) -> npt.NDArray[np.uint16]:
         return to_rgb48be(frame)
 
     def _finish(self) -> None:
@@ -712,7 +729,7 @@ class CommandWriter(Writer):
             # After the command: one still running could write the file again once removed.
             super().abort()
 
-    def _pack(self, frame: npt.NDArray[np.float32]) -> npt.NDArray[np.uint16]:
+    def _pack(self, frame: Frame) -> npt.NDArray[np.uint16]:
         return to_planar16(frame)
 
     def _finish(self) -> None:
@@ -863,8 +880,9 @@ class SegmentWriter:
         self._current: Writer | None = None
         self.written = 0
 
-    def write(self, frames: npt.NDArray[np.float32]) -> None:
-        """Write frames (n, H, W, 3) float32 in [0, 1], the next of the output."""
+    def write(self, frames: npt.NDArray[np.float32] | npt.NDArray[np.uint16]) -> None:
+        """Write frames (n, H, W, 3) float32 in [0, 1], or uint16 as quantise gives them, the next
+        of the output."""
         while frames.shape[0]:
             if self._index == len(self._segments):
                 raise ValueError(f"{frames.shape[0]} frames beyond the output's segments")
