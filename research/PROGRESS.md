@@ -170,11 +170,10 @@ temporal regression.
       ghost): numz pads a batch to 4n + 1 frames by mirroring its end, which reaches back across
       the cut
 - [x] A shot's first frame (from the design conversation): by the metrics, frame 0 is already
-      the frame closest to the ground truth (the model re-renders it least) on 8 of 8 shots;
-      prepending 4 mirrored frames gives up 0.6–2.8 dB of that lead on 6 of 8 to match the next
-      frames' sharpness (deficit −47% → −15%), P = 8 does no better; ≈ 13 s per shot, +2–8% of
-      GPU time per hour. Whether the sharpness step after a cut shows: for the user's eyes (review
-      clips ready)
+      the frame closest to the ground truth on 8 of 8 shots; prepending 4 mirrored frames gives up
+      0.6–2.8 dB of that lead on 6 of 8 to match the next frames' Laplacian sharpness (deficit
+      −47% → −15%), P = 8 does no better; ≈ 13 s per shot, +2–8% of GPU time per hour. Whether
+      the change after a cut shows: for the user's eyes (blind set, 2026-10-20)
 - [x] Three more cuts (bright anime, fast and slow live action; 21 runs): the conclusions hold.
       A miss costs 5–31 dB·frames over the next shot's first 8 frames on 4 of 6 cuts (about 0 on
       the clean anime and colour cuts), up to 12% ghost in its first frame, measurable for up to 17
@@ -348,7 +347,7 @@ down to 577 MHz in some sessions). Values hold, times don't.
       not 1.10, clip A's frames in `--prepend_frames`; stitching.md: 0.52–1.05, 35.7–36.3 dB,
       37–39.6 dB, the short last latent window at 36.3 dB; vram.md: +0.02); each doc's Reproduce
       block says what waits for the GPU
-- [x] Numerics (2026-10-19, 116 runs, 7.0 GPU h on the faulty card): a shot's end padded by
+- [x] Numerics (2026-10-19, 116 runs, 7.0 GPU h on the power-capped card): a shot's end padded by
       repeating its last frame (ByteDance) beats mirroring it (numz) on the shot's last frame
       (+3.4 dB PSNR-Y at 42 frames, two seeds; +1.3 dB on cuts.md's 31 shots alone), nothing worse
       over the whole shot; one padded frame costs the frame before the last 1.1 dB, and a batch
@@ -356,15 +355,16 @@ down to 577 MHz in some sessions). Values hold, times don't.
       Catmull-Rom, spline36 and lanczos leave luma within the seed band after `split` but move the
       output's chroma away from the GT (Catmull-Rom −0.17 / −0.25 dB Cb / Cr, 5 of 8 clips each),
       bilinear the best (numerics.md)
-- [x] The latent grid shifted (2026-10-20, 24 runs, 1.5 GPU h on the faulty card): composites
+- [x] The latent grid shifted (2026-10-20, 24 runs, 1.5 GPU h on the power-capped card): composites
       taking each frame from the run where it ends its latent group (4 runs) are closer to the
       ground truth on every full-reference measure (PSNR-Y +2.0 dB, VMAF +10.4, temporal errors
-      lower on 8 of 8 clips; 2 runs give 35-50% of it) but less sharp on 6 of 8; blind stills and
-      loops wait for the user's eyes (numerics.md)
+      lower on 8 of 8 clips; 2 runs give 37–47% of it), chosen by the user's eyes on 8 of 8 blind
+      stills and 4 of 4 loops, though less sharp on 6 of 8 by the Laplacian measure, which the eyes
+      contradicted; seeds 43 and 1234 (2026-10-20, 39 runs, 2.6 GPU h) agree clip by clip (numerics.md)
 - [ ] The lost records' runs, back to back on the healthy card where times matter: stitching's
       cost model, the benchmarking reference and drift, vram.md's time and memory models,
       attention.md, quality.md's and output.md's times (about 5.4 GPU h; 7 h with the numerics
-      items, which, like the memory figures, could run on the faulty card too, 3–4× slower)
+      items, which, like the memory figures, could run on the power-capped card too, 3–4× slower)
 
 ## Other
 

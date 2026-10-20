@@ -54,13 +54,15 @@ reference is the two shots run separately, what correct shot detection gives):
   batch merged across a cut the whole batch changes by about a seed's distance
   ([details](#a-shots-end-repeating-its-last-frame-against-mirroring)).
 - **A shot's first frame, encoded alone, is the closest to the ground truth, not the worst:** on
-  all eleven shots measured it beats the next eight frames by 0.04–5.5 dB of PSNR-Y, and it is
-  re-rendered less (less sharp on nine of them, by 3–55%). Prepending 4 mirrored frames (one more
-  latent per shot: about 13 s at 1080p, 2–8% more GPU time per hour of animation) mostly gives it
-  the next frames' look but costs it 0.6–2.8 dB of that lead on seven of eleven shots
-  ([details](#a-shots-first-frame-prepending-mirrored-frames)). Whether its sharpness step is
-  visible right after a cut, which changes the picture about 40 to 120 times more, waits for the
-  review.
+  all eleven shots measured it beats the next eight frames by 0.04–5.5 dB of PSNR-Y, and by the
+  Laplacian sharpness measure it is less sharp on nine of them, by 3–55% (a measure the eyes
+  contradicted on the latent grid, [numerics.md](numerics.md#four-runs-with-the-grid-shifted):
+  how it looks goes to the eyes). Prepending 4 mirrored frames (one more
+  latent per shot: about 13 s at 1080p, 2–8% more GPU time per hour of animation) mostly brings
+  its Laplacian sharpness to the next frames' but costs it 0.6–2.8 dB of that lead on seven of
+  eleven shots ([details](#a-shots-first-frame-prepending-mirrored-frames)). Whether the change
+  at frame 0 is visible right after a cut, which changes the picture about 40 to 120 times more,
+  goes to the eyes.
 - **For detection, a miss costs far more than a false cut:** 5–31 dB·frames of PSNR-Y over the
   next shot's first 8 frames on four of the six cuts (about 0 on the clean and colourful ones,
   whose next frames come out better in one batch, though B's first frame still loses up to
@@ -504,15 +506,20 @@ with P = 4 (→ P = 8). Sharpness = the Laplacian variance of luma relative to t
   worst: on all eleven shots it beats the next eight frames by 0.04–5.5 dB of PSNR-Y and 1–28
   VMAF points, in DISTS by up to 0.076 (within ±0.006 on four shots). Only the dark cut's frame 0
   is worse in LPIPS (+0.012). The degraded input accounts for little of it: its own first frame,
-  an x264 I-frame, is between 0.8 dB better and 1.5 dB worse than its next ones. The first
-  latent is re-rendered less: on nine shots frame 0 is 3–55% less sharp than the next frames
+  an x264 I-frame, is between 0.8 dB better and 1.5 dB worse than its next ones. By the
+  Laplacian sharpness measure, on nine shots frame 0 is 3–55% less sharp than the next frames
   (relative to the ground truth; on the colourful anime the input's first frame already is, by
   43%), with a jump of up to +39% to frame 1 (anime-grain); on the two darkest shots it is sharper.
-- **Prepending 4 frames mostly makes frame 0 an ordinary frame.** Its sharpness joins the next
-  frames' (anime-grain −47% → −15%, cartoon-bright −29% → −14%, the clean cut −14% → −2%, the
+  The eyes contradicted this measure on the latent grid
+  ([numerics.md](numerics.md#four-runs-with-the-grid-shifted)): how frame 0 looks goes to them.
+  Two of that study's eight blind stills were on frame 1, where the composite shows a run's own
+  first latent against the single run's frame at place 0: the eyes chose the first latent there
+  too.
+- **Prepending 4 frames mostly makes frame 0 an ordinary frame.** Its Laplacian sharpness joins
+  the next frames' (anime-grain −47% → −15%, cartoon-bright −29% → −14%, the clean cut −14% → −2%, the
   slow live-action cut −15% → 0%) and the jump to frame 1 shrinks where it was large (+39% → +5%,
   +24% → +14%, +16% → +7%); not on the colourful anime (−55% → −53%), and on the fast
-  live-action cut frame 0 gets softer (−3% → −14%). But frame 0 also loses much of its lead in
+  live-action cut frame 0's falls (−3% → −14%). But frame 0 also loses much of its lead in
   fidelity: 0.6–2.8 dB of PSNR-Y, 2–13 VMAF points and up to 0.039 DISTS relative to frames 1…8
   on seven of the eleven shots, beyond the seed noise (0.3 dB on the colourful anime, at its
   edge). The dark cut's frame 0, the one worse in LPIPS, gains (LPIPS 0.031, DISTS 0.011; the
@@ -529,7 +536,7 @@ with P = 4 (→ P = 8). Sharpness = the Laplacian variance of luma relative to t
 - **Masking:** on the six cuts, prepending changes frame 0 by 1.1–4.0 luma levels on average
   (mean |ΔY|), where the cut itself changes the picture by 97–152 levels; on the first three,
   frame 0's error against the ground truth is about that of frames 1…8 either way (1.6–5.9
-  levels). Whether the sharpness jump right after a cut is visible is for the review: clips of
+  levels). Whether the change at frame 0 is visible right after a cut is for the eyes: clips of
   each cut (A's last 12 frames, B's first 36) without and with prepending, side by side, and 1:1
   crops of frames 0 and 1 are prepared for it.
 - **Cost:** one latent per shot, 4 more computed frames: about 13 s per shot at 1080p (3.0–3.3 s
@@ -629,8 +636,10 @@ The error rates per threshold come from question 3's labelled review.
   merged short shots at one offset only (the cut on a latent boundary, after a 21-frame shot A),
   which decides how much of A the padding brings in (see above).
 - **A shot's first frame is judged against a ground truth the model doesn't aim at:** it
-  re-renders ([numerics.md](numerics.md)), so the full-reference metrics favour the frame it
-  re-renders least; whether its look or the next frames' is better is for the eye. Its input is
+  re-renders ([numerics.md](numerics.md)), so the full-reference metrics favour the frame
+  nearest to the ground truth, which the Laplacian measure calls less sharp; whether its look or
+  the next frames' is better is for the eye (on the latent grid the eyes chose the frames nearest
+  the ground truth). Its input is
   an x264 I-frame, between 0.8 dB better and 1.5 dB worse than the P-frames after it. One seed
   per prepend run; P = 8 on the three first cuts only. Run times vary by ±7% between runs and by up to 1.7× between sessions on
   the same GPU, so the cost of one latent comes from the time per computed frame.

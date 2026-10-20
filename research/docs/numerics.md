@@ -40,7 +40,11 @@ of 3 seeds):
   within 0.5 dB of each other; the bicubic baseline has no such pattern (0.2–0.8 dB, in no
   consistent direction). On fast motion the frames inside a group carry ghosts, doubled line art
   on the bright cartoon. `lab` keeps it
-  ([Every fourth frame](#every-fourth-frame-the-latent-grid)).
+  ([Every fourth frame](#every-fourth-frame-the-latent-grid)). Four runs of a shot with the grid
+  shifted, each frame taken from the run where it ends its group, were chosen blind by the user's
+  eyes over one run, on 8 of 8 stills and 4 of 4 loops; the measures give the same gain at three
+  seeds
+  ([Four runs with the grid shifted](#four-runs-with-the-grid-shifted)).
 - **ByteDance's numerics change little:** float32 RoPE angles, VAE posterior sampling, a
   float32 input chain, the float32 weights, bfloat16 DiT norms, a VAE decode under bfloat16
   autocast, and all of them together stay within the seed spread on all 4 animated clips for
@@ -388,27 +392,31 @@ rebuilds each group of 4 from one latent. Per frame, against the bicubic baselin
   GT on 8 of 8 shots ([cuts.md](cuts.md)), and runs whose 4-frame grids start on different frames
   differ with a period of 4 for the same reason. The period-4 pattern is the model's; nothing
   measured here removes it.
-- **The best place is not the most redrawn.** Sharpness as [cuts.md](cuts.md) measures it (the
-  Laplacian variance of luma relative to the GT's), the default without correction, 3 seeds:
-  place 3 is below place 1 on 6 of 8 clips, clearly on 3 (anime-grain −0.54, cartoon-bright
-  −0.31, live-vfx −0.07 of the GT's variance: there place 3 is the least sharp place in every
-  rendering measured, the 3 seeds and the 3 shifted runs below), by 0.03–0.07 on 3, above it on
-  anime-bright (+0.02) and anime-dark (+0.06). The run's first frame is the least sharp place on
-  6 of 8 clips (on anime-dark the sharpest). Where place 3 is the closest to the GT, it is often
-  the frame the model re-renders least.
+- **The eyes take the best place too; the sharpness measure doesn't.** Blind, the user chose the
+  composite of place-3 frames (`grid4`, below) over the single run on 8 of 8 stills, as the
+  sharper and cleaner (6 of them place 3 against another place, 2 on frame 1, a run's own first
+  latent against place 0), and on 4 of 4 loops (2 of them hard to tell). Sharpness as
+  [cuts.md](cuts.md) measures it (the Laplacian variance of luma relative to the GT's) said the
+  opposite, so it is not the eyes' sharpness and its figures are figures only: the default
+  without correction, 3 seeds, place 3 is below place 1 on 6 of 8 clips, clearly on 3
+  (anime-grain −0.54, cartoon-bright −0.31, live-vfx −0.07 of the GT's variance: there place 3
+  is the lowest place in every rendering measured, the 3 seeds and the 3 shifted runs below), by
+  0.03–0.07 on 3, above it on anime-bright (+0.02) and anime-dark (+0.06). The run's first frame
+  is the lowest place on 6 of 8 clips (on anime-dark the highest).
 
 ### Four runs with the grid shifted
 
 Each clip run again with its first s frames left out (s = 1, 2, 3: frames s to 44, the end padded
-by repeating the last frame as seedvr2x will), seed 42, the default's settings; shift 0 is the
-default's seed-42 run. A composite takes each frame from the run where it sits at its group's
-last place (`grid4`: frame f from shift f mod 4; frames 0–3 are each a run's own first latent), or,
-from shifts 0 and 2 only, from the run where its place is 3 or 2 (`grid2`, a 2× mode). The same
-composites after `split`, from each run's dump. Against the default's seed-42 run, paired frame
-by frame, the band the default's 3 seeds (box-file checks: every dump equal to its master, every
-composite frame equal to its source frame).
+by repeating the last frame as seedvr2x will), the default's settings, at seed 42 (the table),
+then at seeds 43 and 1234; shift 0 is the default's run of the same seed. A composite takes each
+frame from the run where it sits at its group's last place (`grid4`: frame f from shift f mod 4;
+frames 0–3 are each a run's own first latent), or, from shifts 0 and 2 only, from the run where
+its place is 3 or 2 (`grid2`, a 2× mode). The same composites after `split`, from each run's
+dump. Each composite is compared with the default's run of its seed, paired frame by frame; the
+band is the default's 3 seeds. Checks: every dump equals its master, sample for sample, and
+every composite frame equals its source frame.
 
-| Clip | `grid4` − default: PSNR-Y / VMAF / LPIPS / T-err | after `split`: PSNR-Y / VMAF / T-err | Sharpness: default seed 42 (3 seeds' mean) → `grid4` |
+| Clip | `grid4` − default: PSNR-Y / VMAF / LPIPS / T-err | after `split`: PSNR-Y / VMAF / T-err | Laplacian sharpness: default seed 42 (3 seeds' mean) → `grid4` |
 |---|---|---|---|
 | anime-clean | +0.73 / +5.7 / −0.002 / −0.64 | +0.48 / +4.3 / −0.49 | 6.78 (6.45) → 6.69 |
 | cartoon-bright | +2.64 / +17.0 / −0.032 / −2.80 | +2.62 / +13.6 / −2.32 | 1.63 (1.59) → 1.37 |
@@ -425,30 +433,45 @@ composite frame equal to its source frame).
   on average): mixing four runs doesn't flicker by these measures, it steadies. After `split`
   the gain stays (PSNR-Y +1.5, 5 of 8; VMAF +7.9, 7 of 8; T-err 7 of 8). Within the band in the
   table: anime-clean's LPIPS, anime-sky's PSNR-Y, and after `split` the PSNR-Y of anime-clean,
-  live-vfx and anime-sky (its −0.23 inside a 1.51 dB band). One measure goes the other way: the
-  bottom 16 rows (the padded band's edge) are worse on live-slow without correction and on
-  live-slow and live-vfx after `split` (−0.47, −0.74 dB). `grid2` gives 35–50% of the gain
-  (PSNR-Y +0.8, VMAF +4.9, T-err −0.75; after `split` +0.7, +3.5, −0.49).
-- **By sharpness, less redrawn:** `grid4` is less sharp than the seed-42 run on 7 of 8 clips and
-  below the default's 3-seed range on 6; against the 3 seeds' mean, −14% (cartoon-bright,
-  anime-grain), −9% (anime-dark, live-vfx), −7% (anime-bright), −1% (live-slow), +4% and +5%
-  (anime-clean, anime-sky). Two causes, measured on the shifted runs themselves: on
-  cartoon-bright, anime-grain and live-vfx, place 3 is the least sharp place in every rendering,
-  so a composite of place-3 frames is less sharp; on anime-bright and live-slow the shifted runs
-  are less sharp as a whole (frames 4–44: anime-bright 1.90–2.10 against the seeds' 2.21–2.52),
-  other renderings rather than other places, which one seed can't separate from the seed's own
-  spread. `grid2` is below the 3-seed range on 3 clips.
+  live-vfx and anime-sky (its −0.23 inside a 1.51 dB band). One measure goes the other way, by far
+  too little to see: the bottom 16 rows are worse on live-slow without correction (−7.1 dB) and
+  on live-slow and live-vfx after `split` (−0.47, −0.74 dB). On both clips these rows are black,
+  in the letterbox bar, 116–124 rows below the picture. On live-slow without correction every
+  version is within about 0.01 of an 8-bit level of black there (mean |ΔY| 0.010 for the single
+  run, 0.015 for `grid4`); on live-vfx after `split`, which lifts the bar a little, about 0.15
+  (0.151 and 0.166), and on live-slow after `split` 0.139 and 0.154: there the composite is
+  10–15% further from black in squared error. Without correction, live-slow's −7.1 dB is the
+  mean of per-frame dB: the single run's place-0 frames are the nearest to pure black (82 dB to
+  exact, each shifted run likewise at its own place 0) and dominate it; the composite, made of
+  place-3 frames, has none. `grid2` gives 37–47% of the
+  gain (PSNR-Y +0.8, VMAF +4.9, T-err −0.75; after `split` +0.7, +3.5, −0.49).
+- **Seeds 43 and 1234 agree, clip by clip.** Against the default's run of the same seed, `grid4`
+  gains PSNR-Y +2.02 dB, VMAF +10.3, T-err −2.01 at seed 43 (8 clips), +2.09, +10.5, −2.37 at
+  seed 1234 (5 clips: anime-clean, cartoon-bright, anime-bright, live-slow, live-vfx; seed 42 on
+  the same 5: +2.17, +10.9, −2.41); after `split`, +1.46, +7.7 and +1.64, +7.8. Each clip's gain
+  is within 0.18 dB of PSNR-Y and 0.7 of VMAF of its seed-42 gain (0.22 and 0.84 after `split`).
+  Of 416 verdicts against the band (clip by measure, both composites, both seeds), 10 differ from
+  seed 42's, each between within the band and beyond it, none from better to worse. `grid2`
+  likewise (+0.84 dB and +4.9 at seed 43, +0.88 and +4.9 at seed 1234). The bottom rows: worse
+  on live-slow without correction at every seed (−7.1, −4.8, −5.6 dB), on live-vfx after `split`
+  at every seed (−0.74, −0.71, −0.82).
+- **Sharpness, a figure only** (the Laplacian measure, which the eyes contradicted, below): `grid4`
+  is below the seed-42 run on 7 of 8 clips and below the default's 3-seed range on 6; against
+  the 3 seeds' mean, −14% (cartoon-bright, anime-grain), −9% (anime-dark, live-vfx), −7%
+  (anime-bright), −1% (live-slow), +4% and +5% (anime-clean, anime-sky). On cartoon-bright,
+  anime-grain and live-vfx place 3 is the lowest place in every rendering; on anime-bright and
+  live-slow the shifted runs are lower as a whole (frames 4–44: anime-bright 1.90–2.10 against
+  the seeds' 2.21–2.52). `grid2` is below the 3-seed range on 3 clips.
 - **The ghosts:** `grid4` takes no frame from places 0 to 2 (doubled line art shows at place 1 on
-  fast motion, frames 34 and 38 above); `grid2` takes place 2 on every other frame. Whether the
-  composite removes visible ghosts, and whether it reads as less redrawn, is for the eyes.
+  fast motion, frames 34 and 38 above); `grid2` takes place 2 on every other frame.
 
-So the measures can't decide this one: the composite moves the frames toward the GT, which the
-full-reference metrics reward, and is less sharp, which the eyes may not want (crisper lines,
-cleaner colours).
-The cost is the GPU time: 4 runs per shot for `grid4`, 2 for `grid2`. Blind stills (the
-composite against the single run, after `split`, 8 places on 4 clips where the two differ most,
-the GT apart; 2 of them on frame 1, a run's own first latent in the composite) and A | B loops
-(45 frames three times, x264 CRF 12 in MP4) wait for the user's verdict.
+The eyes decided it: blind stills (the composite against the single run, after `split`, 8 places
+on 4 clips where the two differ most, the GT apart; 2 of them on frame 1, a run's own first
+latent in the composite) and A | B loops (45 frames three times, x264 CRF 12 in MP4), the
+composite chosen on 8 of 8 stills, as the sharper and cleaner, and on 4 of 4 loops (2 of them
+hard to tell). The cost is the GPU time: 4 runs per shot for `grid4`, 2 for `grid2`, the memory
+unchanged. Whether 2 runs are worth offering goes to the eyes next (`grid2` against `grid4` and
+against the single run).
 
 ## Seed bands
 
@@ -1251,7 +1274,8 @@ the default (`max`, any frame) and, for padding, where its bottom 16 rows differ
 - **One model and one size:** 7B fp16 at 1080p (one 720p test), `flash_attn_2`; the 3B, fp8 and
   GGUF weights and 4K are not covered (`NUM_NORM=bf16` patches the 3B's norms too, unmeasured).
 - **One batch of 45 frames per clip:** batch boundaries are measured in
-  [stitching.md](stitching.md); the 4n + 1 tail padding (mirror against repeat) is not.
+  [stitching.md](stitching.md); the 4n + 1 tail padding (mirror against repeat) in
+  [cuts.md](cuts.md).
 - **Single seed per variant** (but `reflect`), judged against a 3-seed spread: a variant whose
   effect equals one seed's would not show; the padding effects reach 1.7 to 8 times the spread
   on PSNR-Y, more on VMAF and LPIPS. The 720p test has no spread of its own.
@@ -1264,10 +1288,11 @@ the default (`max`, any frame) and, for padding, where its bottom 16 rows differ
   chroma is itself 4:2:0 upsampled with bilinear: the model's chroma detail beyond 4:2:0 can't be
   checked against any of these sources. The conversion is deterministic once on one slice;
   zscale's slice behaviour was seen with ffmpeg n9.0.2 and may change with the version.
-- **The shifted grids ran on one seed** (42), against the default's three-seed spread; a
-  composite's frames come from four renderings, so its seed band would be wider than one run's,
-  and seed 42 is the sharpest of the three seeds on 6 of 8 clips. Sharpness is one measure (the
-  Laplacian variance), whole frame.
+- **The shifted grids ran on three seeds**, seed 1234 on 5 of 8 clips only, one seed for all the
+  shifts of a composite, against the default's three-seed spread; a composite's frames come from
+  four renderings, so its own seed band would be wider than one run's (each clip's gain moved by
+  at most 0.18 dB of PSNR-Y between the seeds). Sharpness is one measure
+  (the Laplacian variance), whole frame, and the eyes contradicted it.
 - **The decode's kernels ran on one seed each** (42), against the default's three-seed spread;
   LPIPS and DISTS after `split` have no spread of their own. The inputs are this protocol's
   (half size in Y'CbCr, x264 at CRF 20, so chroma at a quarter of the GT's size per axis): a
@@ -1384,6 +1409,8 @@ python3 scripts/bench.py run grid-anime-clean-d1-s1-s42 --wrap scripts/numerics_
   --env COLOUR_DUMP=dump/s1 --env FFV1_OUT_KEEP=0 -- s1.lr.mkv --output out/ --model_dir /path/to/models \
   --dit_model seedvr2_ema_7b_fp16.safetensors --resolution 1080 --attention_mode flash_attn_2 \
   --batch_size 44 --load_cap 44 --color_correction none --seed 42
+# likewise --seed 43 and --seed 1234 (names grid-<clip>-d1-s<s>-s<seed>), each against the default's
+# run of its seed
 # the composites: frame f copied losslessly from the run where it sits at a group's last place
 # (from shift f mod 4, its frame f - s), the same for the `split` renders; then fr_metrics.py against
 # the GT and --summary with the default's 3 seeds; sharpness: cut_metrics.py's lap_vars, divided by
