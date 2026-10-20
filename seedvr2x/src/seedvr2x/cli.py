@@ -742,6 +742,8 @@ def _run(args: argparse.Namespace) -> int:
         logger.info("%s: %s", _plural(len(shots), "shot"), _said(found_cuts))
         check_seed(args.seed, shots)
         segments, paths = _segments(args, source, shots, directory)
+        if prior is None or not complete(prior.recorded):
+            _room_for_kept_frames(args, directory, shots, target, prior)
         out_height, out_width = output_size(target)
         logger.info(
             "%s; output %dx%d, square pixels",
@@ -2965,6 +2967,70 @@ def _until(text: str) -> datetime.time:
     if match is None or int(match[1]) > 23 or int(match[2]) > 59:
         raise argparse.ArgumentTypeError(f"{text!r}: not a time of day, HH:MM, from 00:00 to 23:59")
     return datetime.time(int(match[1]), int(match[2]))
+
+
+def _room_for_kept_frames(
+    args: argparse.Namespace,
+    directory: Path,
+    shots: "Sequence[Shot]",
+    target: tuple[int, int],
+    prior: "_Prior | None",
+) -> None:
+    """Refuse a job of several runs a shot whose disk can't hold the frames its longest shot keeps
+    between its runs (job.kept_bytes, at 16 bits, as --plan says it; DESIGN.md, Several runs of a
+    shot: "a job whose disk can't hold it is refused at its start"), JobError naming both figures
+    and the ways out; --plan says it as a warning, running nothing. The shots of the segments a
+    resumed job has finished keep nothing again. The allocation at a shot's decode stays the last
+    guard (run.Kept). PROVISIONAL (implementation, 2026-10-20): checked as soon as the shots are
+    known, before the first pass where a resume trusts its record, right after it otherwise: the
+    first pass finds the shots and counts the frames, so before it the longest shot is unknown."""
+    from seedvr2x.runtime.job import JobError, kept_bytes, output_size
+    from seedvr2x.runtime.manifest import STATE
+    from seedvr2x.runtime.units import KEPT
+
+    gib = 1024**3
+    runs = QUALITY[args.quality]
+    if runs == 1:
+        return
+    done: list[tuple[int, int]] = []
+    if prior is not None:
+        done = [
+            (int(s["start"]), int(s["end"])) for s in prior.recorded["segments"] if s["finished"]
+        ]
+    left = [shot for shot in shots if not any(a <= shot.start < b for a, b in done)]
+    if not left:
+        return
+    size = output_size(target)
+    need = max(kept_bytes(shot, runs, size) for shot in left)
+    place = directory
+    while not place.exists():
+        place = place.parent
+    # A kill in a shot's decode leaves its kept frames' file, which the resume discards as a
+    # leftover after this check (resume.leftovers): its room counts as free.
+    left_over = sum(
+        path.stat().st_size for path in (directory / STATE).glob(f"shot_*/{KEPT}") if path.is_file()
+    )
+    free = shutil.disk_usage(place).free + left_over
+    if free >= need:
+        return
+    longest = max(left, key=lambda shot: kept_bytes(shot, runs, size))
+    lower = [
+        f"{level} keeps {max(kept_bytes(shot, count, size) for shot in left) / gib:.2f} GiB"
+        if count > 1
+        else f"{level} none"
+        for level, count in QUALITY.items()
+        if count < runs
+    ]
+    said = (
+        f"{directory}: {free / gib:.2f} GiB free on its disk, where --quality {args.quality} keeps"
+        f" up to {need / gib:.2f} GiB of frames there while a shot's runs are decoded (its"
+        f" longest shot's, {longest.frames} frames): make room there, write the output to a disk"
+        f" with room, or take a lower level ({', '.join(lower)})"
+    )
+    if args.plan is not None:
+        logger.warning("%s; a run of this plan would be refused", said)
+        return
+    raise JobError(said)
 
 
 def _positive(text: str) -> int:

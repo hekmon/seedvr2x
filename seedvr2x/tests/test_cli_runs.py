@@ -14,6 +14,7 @@ here are the rule written out again, the expected values independent of the code
 import hashlib
 import json
 import logging
+import shutil
 import subprocess
 from itertools import accumulate, chain
 from pathlib import Path
@@ -42,6 +43,7 @@ from test_cli_run import (
 from seedvr2x.runtime import job as runtime_job
 from seedvr2x.runtime import model, run
 from seedvr2x.runtime.shot import padded_length
+from seedvr2x.runtime.units import KEPT
 
 # The output's frames as test_cli_run's stand-in gives them (gbrp16le, 128x96), in bytes.
 FRAME_BYTES = 3 * 96 * 128 * 2
@@ -576,3 +578,79 @@ def test_sixteen_bit_kept_frames_change_no_byte(
     assert outputs["sixteen"] == outputs["float"]
     assert len(outputs["sixteen-dump"]) == 17
     assert outputs["sixteen-dump"] == outputs["float-dump"]
+
+
+def short_disk(patch: pytest.MonkeyPatch, free: int) -> None:
+    """The disk of the job's directory said to have `free` bytes free, through patch."""
+    real = shutil.disk_usage
+
+    def usage(path: str | Path) -> Any:
+        found = real(path)
+        return type(found)(found.total, found.used, free)
+
+    patch.setattr(shutil, "disk_usage", usage)
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_a_disk_short_of_the_kept_frames_refuses_the_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Shots of 5, 1 and 11 frames at 128x96: at maximum the 11-frame shot keeps the most, 9
+    # frames of 73,728 bytes at 16 bits (of its 11, the last run gives frames 3 and 7), 663,552
+    # bytes; enhanced keeps 6 of them (its last run gives frames 2, 5, 6, 9 and 10). One byte
+    # short: refused before the models load, nothing made; with the room, the job runs
+    # (DESIGN.md: "a job whose disk can't hold it is refused at its start").
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    original = source(tmp_path / "in.mkv", 17)
+    cuts = listed(tmp_path, "cuts.txt", "5\n6\n")
+    options = ("--cuts", cuts, "--quality", "maximum")
+    with monkeypatch.context() as patch:
+        short_disk(patch, 9 * KEPT_BYTES - 1)
+        patch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+        assert upscale(tmp_path, original, "out", *options) == 1
+        said = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR][-1]
+        assert said == (
+            f"{tmp_path / 'out'}: 0.00 GiB free on its disk, where --quality maximum keeps up to"
+            " 0.00 GiB of frames there while a shot's runs are decoded (its longest shot's, 11"
+            " frames): make room there, write the output to a disk with room, or take a lower"
+            " level (standard none, enhanced keeps 0.00 GiB)"
+        )
+        assert not (tmp_path / "out" / "resume").exists()
+        # --plan says it, and plans.
+        caplog.clear()
+        plan = str(tmp_path / "plan.txt")
+        assert upscale(tmp_path, original, "out", *options, "--plan", plan) == 0
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(m.endswith("; a run of this plan would be refused") for m in warned)
+    # Room for maximum's 9 frames, to the byte: the job runs.
+    with monkeypatch.context() as patch:
+        short_disk(patch, 9 * KEPT_BYTES)
+        assert upscale(tmp_path, original, "four", *options) == 0
+    # Enhanced keeps 6 frames, which fit where maximum's 9 don't.
+    with monkeypatch.context() as patch:
+        short_disk(patch, 6 * KEPT_BYTES)
+        assert upscale(tmp_path, original, "two", "--cuts", cuts, "--quality", "enhanced") == 0
+    # Standard keeps nothing: no room asked.
+    with monkeypatch.context() as patch:
+        short_disk(patch, 0)
+        assert upscale(tmp_path, original, "one", "--cuts", cuts) == 0
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_a_killed_decode_s_kept_frames_count_as_room(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A kill in a shot's decode leaves its runs.kept, which the resume discards after the disk
+    # check: its bytes count as free, so a disk that held the job holds its resume.
+    original = source(tmp_path / "in.mkv", 17)
+    cuts = listed(tmp_path, "cuts.txt", "5\n6\n")
+    options = ("--cuts", cuts, "--quality", "maximum")
+    # The job planned (its manifest, no unit), then the file a kill would leave put in place.
+    assert upscale(tmp_path, original, "out", *options, "--plan", str(tmp_path / "plan.txt")) == 0
+    left = tmp_path / "out" / "resume" / "shot_000006" / KEPT  # the 11-frame shot's
+    left.parent.mkdir(parents=True, exist_ok=True)
+    left.write_bytes(bytes(9 * KEPT_BYTES))
+    with monkeypatch.context() as patch:
+        short_disk(patch, 0)  # the leftover alone is the room
+        assert upscale(tmp_path, original, "out", *options) == 0
+    assert not left.exists()
