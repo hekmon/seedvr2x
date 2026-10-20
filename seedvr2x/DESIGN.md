@@ -185,6 +185,11 @@ never requires it.
 **One long-running process** handles a whole job: the models are loaded once, and the plan says
 which stay on the GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewritten)).
 
+**What it prints** (the user, 2026-10-20; to be built): a foreground process, but a long one.
+Every line starts with the time of day, then its message (`23:05:12 plan: …`); a warning adds
+`WARNING`, an error `ERROR`. The date, the milliseconds and the logger's name are for
+`--verbose`. The plan's lines teach as they go (see [Memory planner](#memory-planner)).
+
 ### Language: all Python
 Every layer is Python, in one process per job. seedvr2x stands alone; with sptenc, the two
 connect through files.
@@ -2126,6 +2131,26 @@ first pass, whose shots are its input, and before the models load:
   - each phase's predicted peak, and which one bounds the plan
   - the time per phase, the total, and the longest unit, which is how early `--until` may stop
   - what was pinned
+- **Every choice of the plan is said, at every run, in plain words** (the user, 2026-10-20:
+  most users learn seedvr2x by watching its runs and logs, not by reading the manual; to be
+  built). A run, `--plan` and a resume print the same block before the first unit, one line
+  per choice, each saying:
+  - the value, its unit in words (windows of 13 latents, 49 frames; tiles of 1024 px, a grid
+    of 2 × 2);
+  - why it was taken: the rule and its figure (the longest window that fits the budget; the
+    fewest blocks that hold it; untiled, the pass fitting);
+  - what it gives or costs, in a few words (fewer joins; slower, not worse; a slight colour
+    drift that `split` corrects);
+  - the option that changes it (`--window N`, `--decode-tile PX`, `--quality`).
+
+  Every value the planner sets is in it, those said today only under `--verbose` too: the
+  tiles' overlap, the reserve and the margin by their names and figures. So are the quality
+  level and, once built, the time. A value a resume takes from the job's record says so, and
+  why: kept, so that the output stays bit for bit. The lines stay short, one terminal line
+  where they can, two at most, in the manual's words (see [Terms](#terms)). The `plan:` lines
+  built with the planner give every value but the overlap, the reserve and the margin; they
+  say why only where a window was shortened or tiles shrunk for the host's memory, and name
+  an option only in a refusal.
 - Validated before release with `vram_cap.py` emulation, from the smallest card the 7B fp16
   reaches up to 48 GB, and on a real consumer card for what emulation doesn't show: pinned
   host memory, the transfers, a desktop's share of the card, and the times.
@@ -2687,6 +2712,9 @@ explanation.
   job's masters before trusting them
 - seeds and reproducibility: the same settings and plan (window lengths and tiles, which
   `--plan` prints) give the same output, bit for bit
+- a run's plan, as a run prints it, line by line: what each value is, why the planner took
+  it, and the option that changes it (see [Memory planner](#memory-planner)), so that the runs
+  teach and the manual explains a real run's lines
 
 **Several runs of a shot, explained so that a user tries it** (the user, 2026-10-20: the cost
 must be understood, and the gain shown clearly enough that a user tries it; see
