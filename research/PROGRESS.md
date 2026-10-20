@@ -7,7 +7,7 @@ conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](sc
 
 `[x]` done · `[~]` in progress · `[ ]` to do · `[-]` dropped (reason given)
 
-Last update: 2026-10-19 19:00 CEST
+Last update: 2026-10-20 01:40 CEST
 
 ## 0. Setup
 
@@ -356,6 +356,11 @@ down to 577 MHz in some sessions). Values hold, times don't.
       Catmull-Rom, spline36 and lanczos leave luma within the seed band after `split` but move the
       output's chroma away from the GT (Catmull-Rom −0.17 / −0.25 dB Cb / Cr, 5 of 8 clips each),
       bilinear the best (numerics.md)
+- [x] The latent grid shifted (2026-10-20, 24 runs, 1.5 GPU h on the faulty card): composites
+      taking each frame from the run where it ends its latent group (4 runs) are closer to the
+      ground truth on every full-reference measure (PSNR-Y +2.0 dB, VMAF +10.4, temporal errors
+      lower on 8 of 8 clips; 2 runs give 35-50% of it) but less sharp on 6 of 8; blind stills and
+      loops wait for the user's eyes (numerics.md)
 - [ ] The lost records' runs, back to back on the healthy card where times matter: stitching's
       cost model, the benchmarking reference and drift, vram.md's time and memory models,
       attention.md, quality.md's and output.md's times (about 5.4 GPU h; 7 h with the numerics

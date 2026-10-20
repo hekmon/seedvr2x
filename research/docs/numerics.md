@@ -387,8 +387,68 @@ rebuilds each group of 4 from one latent. Per frame, against the bicubic baselin
 - A shot's first frame, a latent of its own, is the same effect: it is the frame closest to the
   GT on 8 of 8 shots ([cuts.md](cuts.md)), and runs whose 4-frame grids start on different frames
   differ with a period of 4 for the same reason. The period-4 pattern is the model's; nothing
-  measured here removes it. Taking each frame from the run where it ends its group would take 4
-  runs with the grid shifted (4× the GPU time): not measured.
+  measured here removes it.
+- **The best place is not the most redrawn.** Sharpness as [cuts.md](cuts.md) measures it (the
+  Laplacian variance of luma relative to the GT's), the default without correction, 3 seeds:
+  place 3 is below place 1 on 6 of 8 clips, clearly on 3 (anime-grain −0.54, cartoon-bright
+  −0.31, live-vfx −0.07 of the GT's variance: there place 3 is the least sharp place in every
+  rendering measured, the 3 seeds and the 3 shifted runs below), by 0.03–0.07 on 3, above it on
+  anime-bright (+0.02) and anime-dark (+0.06). The run's first frame is the least sharp place on
+  6 of 8 clips (on anime-dark the sharpest). Where place 3 is the closest to the GT, it is often
+  the frame the model re-renders least.
+
+### Four runs with the grid shifted
+
+Each clip run again with its first s frames left out (s = 1, 2, 3: frames s to 44, the end padded
+by repeating the last frame as seedvr2x will), seed 42, the default's settings; shift 0 is the
+default's seed-42 run. A composite takes each frame from the run where it sits at its group's
+last place (`grid4`: frame f from shift f mod 4; frames 0–3 are each a run's own first latent), or,
+from shifts 0 and 2 only, from the run where its place is 3 or 2 (`grid2`, a 2× mode). The same
+composites after `split`, from each run's dump. Against the default's seed-42 run, paired frame
+by frame, the band the default's 3 seeds (box-file checks: every dump equal to its master, every
+composite frame equal to its source frame).
+
+| Clip | `grid4` − default: PSNR-Y / VMAF / LPIPS / T-err | after `split`: PSNR-Y / VMAF / T-err | Sharpness: default seed 42 (3 seeds' mean) → `grid4` |
+|---|---|---|---|
+| anime-clean | +0.73 / +5.7 / −0.002 / −0.64 | +0.48 / +4.3 / −0.49 | 6.78 (6.45) → 6.69 |
+| cartoon-bright | +2.64 / +17.0 / −0.032 / −2.80 | +2.62 / +13.6 / −2.32 | 1.63 (1.59) → 1.37 |
+| anime-bright | +2.65 / +13.2 / −0.022 / −3.38 | +2.69 / +10.6 / −2.57 | 2.51 (2.29) → 2.12 |
+| live-slow | +2.36 / +9.7 / −0.018 / −3.00 | +1.94 / +7.1 / −1.63 | 1.21 (1.20) → 1.18 |
+| live-vfx | +2.49 / +8.9 / −0.022 / −2.25 | +0.97 / +5.2 / −0.45 | 0.45 (0.46) → 0.42 |
+| anime-grain | +1.18 / +7.2 / −0.013 / −0.74 | +1.21 / +6.1 / −0.67 | 3.02 (2.88) → 2.47 |
+| anime-dark | +3.96 / +19.9 / −0.047 / −2.79 | +2.40 / +15.0 / −0.86 | 0.82 (0.80) → 0.72 |
+| anime-sky | +0.06 / +1.9 / −0.004 / −0.56 | −0.23 / +0.8 / −0.06 | 7.01 (6.77) → 7.12 |
+
+- **By the full-reference measures, a clear gain:** `grid4` is closer to the GT beyond the seed
+  band on 7 of 8 clips by PSNR-Y (+2.0 dB on average), 8 of 8 by VMAF (+10.4), 7 by LPIPS and
+  DISTS, 8 by the low-frequency colour error, and its temporal errors are lower on 8 of 8 (−2.0
+  on average): mixing four runs doesn't flicker by these measures, it steadies. After `split`
+  the gain stays (PSNR-Y +1.5, 5 of 8; VMAF +7.9, 7 of 8; T-err 7 of 8). Within the band in the
+  table: anime-clean's LPIPS, anime-sky's PSNR-Y, and after `split` the PSNR-Y of anime-clean,
+  live-vfx and anime-sky (its −0.23 inside a 1.51 dB band). One measure goes the other way: the
+  bottom 16 rows (the padded band's edge) are worse on live-slow without correction and on
+  live-slow and live-vfx after `split` (−0.47, −0.74 dB). `grid2` gives 35–50% of the gain
+  (PSNR-Y +0.8, VMAF +4.9, T-err −0.75; after `split` +0.7, +3.5, −0.49).
+- **By sharpness, less redrawn:** `grid4` is less sharp than the seed-42 run on 7 of 8 clips and
+  below the default's 3-seed range on 6; against the 3 seeds' mean, −14% (cartoon-bright,
+  anime-grain), −9% (anime-dark, live-vfx), −7% (anime-bright), −1% (live-slow), +4% and +5%
+  (anime-clean, anime-sky). Two causes, measured on the shifted runs themselves: on
+  cartoon-bright, anime-grain and live-vfx, place 3 is the least sharp place in every rendering,
+  so a composite of place-3 frames is less sharp; on anime-bright and live-slow the shifted runs
+  are less sharp as a whole (frames 4–44: anime-bright 1.90–2.10 against the seeds' 2.21–2.52),
+  other renderings rather than other places, which one seed can't separate from the seed's own
+  spread. `grid2` is below the 3-seed range on 3 clips.
+- **The ghosts:** `grid4` takes no frame from places 0 to 2 (doubled line art shows at place 1 on
+  fast motion, frames 34 and 38 above); `grid2` takes place 2 on every other frame. Whether the
+  composite removes visible ghosts, and whether it reads as less redrawn, is for the eyes.
+
+So the measures can't decide this one: the composite moves the frames toward the GT, which the
+full-reference metrics reward, and is less sharp, which the eyes may not want (crisper lines,
+cleaner colours).
+The cost is the GPU time: 4 runs per shot for `grid4`, 2 for `grid2`. Blind stills (the
+composite against the single run, after `split`, 8 places on 4 clips where the two differ most,
+the GT apart; 2 of them on frame 1, a run's own first latent in the composite) and A | B loops
+(45 frames three times, x264 CRF 12 in MP4) wait for the user's verdict.
 
 ## Seed bands
 
@@ -1204,6 +1264,10 @@ the default (`max`, any frame) and, for padding, where its bottom 16 rows differ
   chroma is itself 4:2:0 upsampled with bilinear: the model's chroma detail beyond 4:2:0 can't be
   checked against any of these sources. The conversion is deterministic once on one slice;
   zscale's slice behaviour was seen with ffmpeg n9.0.2 and may change with the version.
+- **The shifted grids ran on one seed** (42), against the default's three-seed spread; a
+  composite's frames come from four renderings, so its seed band would be wider than one run's,
+  and seed 42 is the sharpest of the three seeds on 6 of 8 clips. Sharpness is one measure (the
+  Laplacian variance), whole frame.
 - **The decode's kernels ran on one seed each** (42), against the default's three-seed spread;
   LPIPS and DISTS after `split` have no spread of their own. The inputs are this protocol's
   (half size in Y'CbCr, x264 at CRF 20, so chroma at a quarter of the GT's size per axis): a
@@ -1311,6 +1375,19 @@ python3 $S/chroma_kernels.py timing --src MODEL.mkv --json timing.json
 python3 $S/chroma_kernels.py summary scores/*.json --frm frm --q1 m/d1-lab --proof proof/*.json \
   --siting siting.json --threads-json threads.json --gtcheck gtcheck.json --upcheck up.json \
   --srcchroma srcchroma/*.json --timing timing.json --md summary.md
+# the latent grid shifted: the input from frame s (s = 1, 2, 3), each run padded by repeating its last
+# frame (NUM_TAIL=repeat) and dumped for `split`; composites taking each frame from the run where
+# it ends its group (grid4) or from shifts 0 and 2 (grid2), then fr_metrics and the sharpness
+ffmpeg -i $C/anime-clean.d1.lr.mkv -vf "trim=start_frame=1,setpts=PTS-STARTPTS" -c:v ffv1 -pix_fmt bgr0 s1.lr.mkv
+python3 scripts/bench.py run grid-anime-clean-d1-s1-s42 --wrap scripts/numerics_patch.py \
+  --wrap scripts/colour_dump.py --wrap scripts/ffv1_out.py --env NUM_TAIL=repeat --env NUM_CHECK=1 \
+  --env COLOUR_DUMP=dump/s1 --env FFV1_OUT_KEEP=0 -- s1.lr.mkv --output out/ --model_dir /path/to/models \
+  --dit_model seedvr2_ema_7b_fp16.safetensors --resolution 1080 --attention_mode flash_attn_2 \
+  --batch_size 44 --load_cap 44 --color_correction none --seed 42
+# the composites: frame f copied losslessly from the run where it sits at a group's last place
+# (from shift f mod 4, its frame f - s), the same for the `split` renders; then fr_metrics.py against
+# the GT and --summary with the default's 3 seeds; sharpness: cut_metrics.py's lap_vars, divided by
+# the GT's, by latent_pos
 # the decode's chroma kernel: the input read again with other kernels, then one run per kernel
 # (as the default's, with colour_dump.py for `split`), `split` rendered from its dump, the scores
 python3 $S/fr_clips.py chroma $C/anime-clean --kernels catrom,spline36,lanczos --out inputs
