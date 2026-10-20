@@ -1,4 +1,4 @@
-"""The command line's several runs of a shot (--runs-per-shot; DESIGN.md, Several runs of a shot,
+"""The command line's several runs of a shot (--quality; DESIGN.md, Several runs of a shot,
 an option for quality) on the CPU, the model replaced by test_cli_run.py's stand-in: which run
 each frame of the output is taken from, the composite equal to single runs of the source trimmed
 to each run's first frame, the manifest's record of the runs, a stop in a later run and its
@@ -51,22 +51,15 @@ SOURCE_BYTES = 64 * 48 * 3 // 2
 
 # The plan's line on several runs (planner._runs_said): the runs a shot, and the count in all.
 RUNS_SAID = (
-    "plan: {runs} runs a shot, {total} in all (--runs-per-shot), each frame taken from the run"
-    " that rebuilds it best: about {runs} times the GPU time of one run, which no estimate gives"
-    " yet, in the memory of one run; the longest shot keeps {kept} GiB of frames on disk, beside"
-    " the job's manifest, while its runs are decoded"
+    "plan: --quality {level}: {runs} runs a shot, {total} in all, each frame taken from the run"
+    " that rebuilds it best: about {runs} times the GPU time of standard's one run, which no"
+    " estimate gives yet, in the memory of one run; the longest shot keeps {kept} GiB of frames on"
+    " disk, beside the job's manifest, while its runs are decoded"
 )
 
-# The counts offered as built (job.RUNS_OFFERED): two runs wait for the user's eyes.
-OFFERED = runtime_job.RUNS_OFFERED
 
-
-@pytest.fixture(autouse=True)
-def two_runs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Two runs offered, as they are built, for the tests of what they do: refused until the
-    user's eyes have seen them (DESIGN.md, Several runs of a shot), which
-    test_two_runs_not_offered_yet holds."""
-    monkeypatch.setattr(runtime_job, "RUNS_OFFERED", (1, 2, 4))
+# The --quality levels by their runs a shot as the tests name them (job.QUALITY).
+LEVEL = {str(runs): level for level, runs in runtime_job.QUALITY.items()}
 
 
 def taken(runs: int, frame: int) -> int:
@@ -115,7 +108,7 @@ def test_each_frame_from_its_run(tmp_path: Path, runs: str | None, segments: str
     cuts = listed(tmp_path, "cuts.txt", "".join(f"{start}\n" for start in starts[1:-1]))
     options = ["--cuts", cuts]
     if runs is not None:
-        options += ["--runs-per-shot", runs]
+        options += ["--quality", LEVEL[runs]]
     if segments is not None:
         options += ["--min-segment", segments]
     out = tmp_path / "out"
@@ -189,7 +182,7 @@ def test_composite_equals_single_runs(
         single_reads += reads
     reads.clear()
     dump = tmp_path / "dump"
-    assert upscale(tmp_path, original, "job.mkv", *options, "--runs-per-shot", str(runs),
+    assert upscale(tmp_path, original, "job.mkv", *options, "--quality", LEVEL[str(runs)],
                    "--dump-frames", str(dump)) == 0  # fmt: skip
     assert reads == single_reads
     chosen = [taken(runs, frame) for frame in range(17)]
@@ -213,7 +206,7 @@ def stopped_job(
     in its last segment's decode, once every run is sampled: its source."""
     source_path = job(tmp_path, monkeypatch)
     steps.stop = "decode 4"
-    stopped(tmp_path, source_path, "out", *JOB, "--runs-per-shot", "4", *options)
+    stopped(tmp_path, source_path, "out", *JOB, "--quality", "maximum", *options)
     return source_path
 
 
@@ -232,9 +225,9 @@ def test_records(
     cuts = listed(tmp_path, "cuts.txt", "3\n12\n")
     options = ("--cuts", cuts, "--window", "5", "--min-segment", "0")
     steps.stop = "decode 12"
-    stopped(tmp_path, source_path, "four", *options, "--runs-per-shot", "4")
+    stopped(tmp_path, source_path, "four", *options, "--quality", "maximum")
     content = json.loads((tmp_path / "four" / "manifest.json").read_text())
-    assert content["settings"]["runs_per_shot"] == 4
+    assert content["settings"]["quality"] == "maximum"
     short, long, single = content["shots"]
     assert [(shot["start"], shot["end"]) for shot in content["shots"]] == [
         (0, 3),
@@ -253,16 +246,18 @@ def test_records(
     assert [entry["latents"] for entry in [long, *long["runs"]]] == [
         (padded_length(frames) - 1) // 4 + 1 for frames in (9, 8, 7, 6)
     ]
-    assert plan_lines(caplog)[4] == RUNS_SAID.format(runs=4, total="8 runs", kept="0.00")
+    assert plan_lines(caplog)[4] == RUNS_SAID.format(
+        level="maximum", runs=4, total="8 runs", kept="0.00"
+    )
     steps.stop = "decode 12"
-    stopped(tmp_path, source_path, "single", *options, "--runs-per-shot", "1")
+    stopped(tmp_path, source_path, "single", *options, "--quality", "standard")
     content = json.loads((tmp_path / "single" / "manifest.json").read_text())
-    assert content["settings"]["runs_per_shot"] == 1
+    assert content["settings"]["quality"] == "standard"
     assert all("runs" not in shot for shot in content["shots"])
     # Without the option, the same record.
     stopped(tmp_path, source_path, "default", *options)
     again = json.loads((tmp_path / "default" / "manifest.json").read_text())
-    assert again["settings"]["runs_per_shot"] == 1
+    assert again["settings"]["quality"] == "standard"
     assert again["shots"] == content["shots"]
 
 
@@ -295,7 +290,7 @@ def test_resumed_in_a_later_run(
     # uninterrupted job's, bit for bit. Its units are named for the run (units.run_file) while it
     # waits. Calls are named by the shot, so the stop is the nth of its name (a run's own).
     source_path = job(tmp_path, monkeypatch)
-    options = (*JOB, "--runs-per-shot", "4", "--color-correction", correction)
+    options = (*JOB, "--quality", "maximum", "--color-correction", correction)
     assert upscale(tmp_path, source_path, "whole", *options) == 0
     sampled = list(steps.calls)
     assert sampled.count(name) >= nth
@@ -339,7 +334,7 @@ def test_kept_frames_leftover_discarded(
     # whole from the windows kept, gives the uninterrupted job's output.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
-    options = (*JOB, "--runs-per-shot", "4")
+    options = (*JOB, "--quality", "maximum")
     assert upscale(tmp_path, source_path, "whole", *options) == 0
     stopped_source = stopped_job(tmp_path, monkeypatch, steps)
     assert stopped_source == source_path
@@ -374,22 +369,22 @@ def test_resumed_with_another_count_refused(
     out = tmp_path / "out"
     kept = contents(out)
     for another, said in (
-        ((), "settings.runs_per_shot: 4 -> 1"),
-        (("--runs-per-shot", "1"), "settings.runs_per_shot: 4 -> 1"),
-        (("--runs-per-shot", "2"), "settings.runs_per_shot: 4 -> 2"),
+        ((), 'settings.quality: "maximum" -> "standard"'),
+        (("--quality", "standard"), 'settings.quality: "maximum" -> "standard"'),
+        (("--quality", "enhanced"), 'settings.quality: "maximum" -> "enhanced"'),
     ):
         text = refused(tmp_path, source_path, caplog, *JOB, *another)
         assert "another job than the one asked" in text and said in text
         assert len(scans) == 1 and steps.calls == [] and contents(out) == kept
     # The same command resumes it.
-    assert upscale(tmp_path, source_path, "out", *JOB, "--runs-per-shot", "4") == 0
+    assert upscale(tmp_path, source_path, "out", *JOB, "--quality", "maximum") == 0
     assert steps.calls == ["decode 4"] * 4
     # And a job of one run, resumed with 4.
     steps.calls.clear()
     steps.stop = "decode 4"
     stopped(tmp_path, source_path, "single", *JOB)
-    assert "settings.runs_per_shot: 1 -> 4" in refused(
-        tmp_path, source_path, caplog, *JOB, "--runs-per-shot", "4", output="single"
+    assert 'settings.quality: "standard" -> "maximum"' in refused(
+        tmp_path, source_path, caplog, *JOB, "--quality", "maximum", output="single"
     )
 
 
@@ -412,7 +407,7 @@ def test_plan_says_the_runs(
         assert upscale(tmp_path, source_path, "one", *JOB, "--plan", str(tmp_path / "one.txt")) == 0
         base = plan_lines(caplog)
         caplog.clear()
-        options = [] if runs is None else ["--runs-per-shot", runs]
+        options = [] if runs is None else ["--quality", LEVEL[runs]]
         assert upscale(tmp_path, source_path, "out", *JOB, *options, "--plan", "more.txt") == 0
         lines = plan_lines(caplog)
     assert len(base) == 9 and "runs a shot" not in " ".join(base)
@@ -422,7 +417,7 @@ def test_plan_says_the_runs(
     total = {"4": "8 runs", "2": "5 runs"}[runs]
     # The stand-in's 128x96 frames keep 2.4 MB at the most (16 of the 21-frame shot's at 4 a shot),
     # 0.00 GiB as said; tests/test_runs.py holds the figure at 1080p.
-    said = RUNS_SAID.format(runs=runs, total=total, kept="0.00")
+    said = RUNS_SAID.format(level=LEVEL[runs], runs=runs, total=total, kept="0.00")
     assert lines == [*base[:4], said, *base[4:]]
     assert base[3].startswith("plan: windows of 5 latents at most")
     assert not (tmp_path / "out").joinpath("resume").exists()
@@ -437,39 +432,25 @@ def test_plan_counts_a_run(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
     cuts = listed(tmp_path, "cuts.txt")
-    options = ("--cuts", cuts, "--runs-per-shot", "4", "--plan", str(tmp_path / "plan.txt"))
+    options = ("--cuts", cuts, "--quality", "maximum", "--plan", str(tmp_path / "plan.txt"))
     assert upscale(tmp_path, source(tmp_path / "in.mkv", 1), "out", *options) == 0
-    assert plan_lines(caplog)[4] == RUNS_SAID.format(runs=4, total="1 run", kept="0.00")
+    assert plan_lines(caplog)[4] == RUNS_SAID.format(
+        level="maximum", runs=4, total="1 run", kept="0.00"
+    )
 
 
 @pytest.mark.usefixtures("stand_in")
-@pytest.mark.parametrize("given", ["3", "0", "8", "x", ""])
-def test_another_count_refused(
+@pytest.mark.parametrize("given", ["best", "4", "Maximum", ""])
+def test_another_level_refused(
     tmp_path: Path, given: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # 1, 2 and 4 are the counts built (job.RUN_OFFSETS): argparse refuses the rest, in one line.
+    # The levels' names only (job.QUALITY): a count of runs, the code's, is no level.
     with pytest.raises(SystemExit) as exited:
-        upscale(tmp_path, tmp_path / "in.mkv", "out", "--runs-per-shot", given)
+        upscale(tmp_path, tmp_path / "in.mkv", "out", "--quality", given)
     assert exited.value.code == 2
     error = capsys.readouterr().err
-    assert f"argument --runs-per-shot: {given!r}: not a count of runs a shot, 1, 2 or 4" in error
-
-
-@pytest.mark.usefixtures("stand_in")
-def test_two_runs_not_offered_yet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # Built, refused in one line until the user's eyes have seen them (DESIGN.md: "Offered or not
-    # once the user's eyes have seen it against four runs and one"); 1 and 4 taken.
-    monkeypatch.setattr(runtime_job, "RUNS_OFFERED", OFFERED)
-    assert OFFERED == (1, 4)
-    with pytest.raises(SystemExit) as exited:
-        upscale(tmp_path, tmp_path / "in.mkv", "out", "--runs-per-shot", "2")
-    assert exited.value.code == 2
-    lines = [line for line in capsys.readouterr().err.splitlines() if "--runs-per-shot" in line]
-    assert lines[-1].endswith(
-        "argument --runs-per-shot: 2: not offered yet, its gain waiting for the user's eyes; 1 or 4"
-    )
+    assert "argument --quality: invalid choice" in error
+    assert all(level in error for level in ("standard", "enhanced", "maximum"))
 
 
 def test_kept_frames_removed(
@@ -493,7 +474,7 @@ def test_kept_frames_removed(
         decode(models, merged, *arguments, **keywords)
 
     monkeypatch.setattr(run, "decode_shot", watching)
-    assert upscale(tmp_path, source_path, "out", *JOB, "--runs-per-shot", "4") == 0
+    assert upscale(tmp_path, source_path, "out", *JOB, "--quality", "maximum") == 0
     # Shot 0 (3 frames, runs from 0, 1 and 2, the last giving frame 2): frames 0 and 1 kept
     # during each of its 3 decodes; shot 3 (1 frame) one run, no store; shot 4 (21 frames, the
     # last run giving every frame of index 3 mod 4, 5 of them): 16 kept during each of its 4.

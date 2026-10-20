@@ -44,6 +44,7 @@ from typing import Any
 
 from seedvr2x.runtime import tilegrid, weights
 from seedvr2x.runtime.job import (
+    QUALITY,
     SHARED,
     JobError,
     Shot,
@@ -1140,12 +1141,14 @@ def _check_tiles(padded: tuple[int, int], recorded: Plan) -> None:
             )
 
 
-def _runs_said(shots: Sequence[Shot], target: tuple[int, int], runs_per_shot: int) -> str:
-    """The line of --plan's on several runs a shot (said): their count, how a frame is taken, and
-    the GPU time against one run's. No time is estimated yet (DESIGN.md, Memory planner, Time
+def _runs_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) -> str:
+    """The line of --plan's on a --quality level of several runs a shot (said): their count, how a
+    frame is taken, the GPU time against one run's, the standard level's, and the disk the frames
+    between the runs take. No time is estimated yet (DESIGN.md, Memory planner, Time
     estimates: not built), so the time is said as a multiple of one run's: about runs_per_shot
     times, a later run being shorter by its first frame (DESIGN.md, Several runs of a shot:
     "4x the GPU time")."""
+    runs_per_shot = QUALITY[quality]
     runs = sum(len(shot_runs(shot, runs_per_shot)) for shot in shots)
     # The frames a shot's earlier runs give wait on disk, float32, in the shot's unit directory
     # until its last run's decode (run.Kept): the most a shot keeps, said so that a user sees the
@@ -1153,9 +1156,10 @@ def _runs_said(shots: Sequence[Shot], target: tuple[int, int], runs_per_shot: in
     height, width = output_size(target)
     kept = max(kept_frames(shot, runs_per_shot) for shot in shots) * height * width * 3 * 4
     return (
-        f"{runs_per_shot} runs a shot, {_count(runs, 'run')} in all (--runs-per-shot), each frame"
-        f" taken from the run that rebuilds it best: about {runs_per_shot} times the GPU time of"
-        " one run, which no estimate gives yet, in the memory of one run; the longest shot keeps"
+        f"--quality {quality}: {runs_per_shot} runs a shot, {_count(runs, 'run')} in all, each"
+        " frame taken from the run that rebuilds it best: about"
+        f" {runs_per_shot} times the GPU time of standard's one run, which no estimate gives yet,"
+        " in the memory of one run; the longest shot keeps"
         f" {kept / 2**30:.2f} GiB of frames on disk, beside the job's manifest, while its runs are"
         " decoded"
     )
@@ -1170,13 +1174,13 @@ def said(
     pins: Pins,
     *,
     numz_padding: bool = False,
-    runs_per_shot: int = 1,
+    quality: str = "standard",
 ) -> list[str]:
     """The plan as --plan prints it and every run logs it (DESIGN.md, Memory planner, --plan), a
     line each: the card (its name, `card`), its free memory and the budget, and on a run held
     to the card each figure by its name (_card_said); the padded size, the tokens per latent and
     the attention backend the DiT's peak is predicted for; the shots and the longest; the window
-    cap, the shots in one window and the joins; with several runs a shot (runs_per_shot;
+    cap, the shots in one window and the joins; with several runs a shot (quality, its level;
     DESIGN.md, Several runs of a shot), the runs, and the GPU time against one run's, the
     memory one run's: the plan holds for every run, none longer than its shot; the swapped
     blocks and what stays on the GPU in each phase; the pinned system memory; the tiles and
@@ -1232,8 +1236,8 @@ def said(
         f"{cap}: {whole} of {_count(len(shots), 'shot')} in one window, {_count(joins, 'join')}"
         f"{alone}",
     ]
-    if runs_per_shot > 1:
-        lines.append(_runs_said(shots, target, runs_per_shot))
+    if QUALITY[quality] > 1:
+        lines.append(_runs_said(shots, target, quality))
     swapped = (
         f"{plan.swapped} of the DiT's {BLOCKS} blocks swapped"
         if plan.swapped

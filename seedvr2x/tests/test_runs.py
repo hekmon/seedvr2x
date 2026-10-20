@@ -58,6 +58,8 @@ def pick(kind: str, f: int) -> int:
 
 
 KINDS = {2: "grid2", 4: "grid4"}
+# The --quality levels by their runs a shot (job.QUALITY), as a manifest records them.
+LEVELS = {runs: level for level, runs in job.QUALITY.items()}
 LENGTHS = range(1, 61)
 
 
@@ -208,7 +210,7 @@ def job_of(
     shots = [Shot(start, start + length) for start, length in zip(starts, lengths, strict=True)]
     settings: dict[str, Any] = {"seed": 42, "window": window}
     if runs is not None:
-        settings["runs_per_shot"] = runs
+        settings["quality"] = LEVELS[runs]
     if split:
         settings["color_correction"] = "split"
     count = 1 if runs is None else runs
@@ -319,11 +321,11 @@ def test_planned_looks_at_every_run(tmp_path: Path) -> None:
     assert manifest.complete(record.content())
 
 
-def test_the_count_of_runs_is_checked(tmp_path: Path) -> None:
-    with pytest.raises(JobError, match="3 runs a shot"):
+def test_the_level_is_checked(tmp_path: Path) -> None:
+    with pytest.raises(JobError, match='quality "best", where seedvr2x has standard, enhanced and'):
         Manifest(
             tmp_path / "manifest.json",
-            {"seed": 42, "runs_per_shot": 3},
+            {"seed": 42, "quality": "best"},
             {},
             source(tmp_path, 9),
             [Shot(0, 9)],
@@ -337,7 +339,7 @@ def test_the_count_of_runs_is_checked(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="1 layouts for 2 runs"):
         Manifest(
             tmp_path / "manifest.json",
-            {"seed": 42, "runs_per_shot": 2},
+            {"seed": 42, "quality": "enhanced"},
             {},
             source(tmp_path, 9),
             [Shot(0, 9)],
@@ -396,8 +398,8 @@ def test_a_resume_with_another_count_lists_the_setting(tmp_path: Path) -> None:
     four = job_of(tmp_path, LENGTHS_OF_SHOTS, 4)
     one = job_of(tmp_path, LENGTHS_OF_SHOTS, 1)
     found = resume.differences(four.content(), one.content())
-    assert "settings.runs_per_shot: 4 -> 1" in found
-    assert resume.setting("settings.runs_per_shot: 4 -> 1") == "runs_per_shot"
+    assert 'settings.quality: "maximum" -> "standard"' in found
+    assert resume.setting('settings.quality: "maximum" -> "standard"') == "quality"
 
 
 def test_an_environment_change_counts_every_runs_units(tmp_path: Path) -> None:
@@ -688,6 +690,6 @@ def test_the_frames_the_earlier_runs_keep(frames: int, runs: int, kept: int) -> 
 def test_the_plan_says_the_disk_the_kept_frames_take() -> None:
     # A shot of 1,000 frames at 1080p, 4 runs: 750 frames kept, 24,883,200 bytes each in float32
     # (1920 x 1080 x 3 x 4), 17.38 GiB; the shorter shot keeps less.
-    said = planner._runs_said([Shot(0, 1000), Shot(1000, 1100)], (1080, 1920), 4)  # pyright: ignore[reportPrivateUsage]
+    said = planner._runs_said([Shot(0, 1000), Shot(1000, 1100)], (1080, 1920), "maximum")  # pyright: ignore[reportPrivateUsage]
     assert "8 runs in all" in said
     assert "the longest shot keeps 17.38 GiB of frames on disk" in said

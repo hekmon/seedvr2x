@@ -18,7 +18,7 @@ from typing import Any, cast
 
 from seedvr2x.media.files import write_whole
 from seedvr2x.media.source import Source
-from seedvr2x.runtime.job import RUN_OFFSETS, JobError, OutputSegment, Run, Shot, shot_runs
+from seedvr2x.runtime.job import QUALITY, JobError, OutputSegment, Run, Shot, shot_runs
 
 NAME = "manifest.json"
 # 3 since the input is one record, the source's, where it was a list: a change of shape bumps the
@@ -54,14 +54,14 @@ INDEX = "frame_index.bin"
 # which imports torch (runtime/units.py): the command line reads it before it checks the model
 # files, which comes before torch (cli._trusted; DESIGN.md, Weights, Recognised by content).
 FIRST_PASS = ("ffmpeg", "conversions")
-# The setting of the runs a shot (cli._settings; DESIGN.md, Several runs of a shot): 1, the
-# default, for every manifest recorded before it, which code before it wrote (its settings.code
-# another job's anyway).
-RUNS = "runs_per_shot"
+# The setting of the level, --quality's, which says the runs a shot (job.QUALITY; cli._settings;
+# DESIGN.md, Several runs of a shot): standard, one run, for a manifest recorded before it, which
+# code before it wrote (its settings.code another job's anyway).
+LEVEL = "quality"
 # A shot's record of its runs after the first, with more than one run a shot: their own windows
 # and how far each went, the first run being the shot's own fields (Manifest.content). With one
 # run a shot, the shots' record is what it was before the option, byte for byte (the settings
-# gain runs_per_shot, 1).
+# gain the level, standard).
 SHOT_RUNS = "runs"
 # The record of the finished file a .mkv path's segments were assembled into (cli._assemble): its
 # name and bytes, written once the file is in place, before its work directory, this manifest's,
@@ -164,9 +164,12 @@ class Manifest:
     before_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        level: Any = self.settings.get(LEVEL, "standard")
+        if level not in QUALITY:
+            *others, last = QUALITY
+            levels = f"{', '.join(others)} and {last}"
+            raise JobError(f"{self.path}: quality {json.dumps(level)}, where seedvr2x has {levels}")
         count = self.runs_per_shot
-        if count not in RUN_OFFSETS:
-            raise JobError(f"{self.path}: {count} runs a shot, where seedvr2x runs 1, 2 or 4")
         # The job's runs, the units its encodes and windows are (DESIGN.md, Several runs of a
         # shot): each shot's in turn, and the shot each is of.
         self.runs: list[Run] = [run for shot in self.shots for run in shot_runs(shot, count)]
@@ -187,9 +190,8 @@ class Manifest:
 
     @property
     def runs_per_shot(self) -> int:
-        """The runs of each shot (RUNS): 1, 2 or 4."""
-        count: Any = self.settings.get(RUNS, 1)
-        return count if isinstance(count, int) else 0
+        """The runs of each shot, its level's (LEVEL, job.QUALITY): 1, 2 or 4."""
+        return QUALITY[self.settings.get(LEVEL, "standard")]
 
     def shot_of(self, run: int) -> int:
         """The index of the shot run `run` is of."""

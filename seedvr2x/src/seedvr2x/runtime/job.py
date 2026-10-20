@@ -45,15 +45,16 @@ class Shot:
         return seed + self.start
 
 
-# The runs of a shot --runs-per-shot offers, and each one's first frame in the shot (DESIGN.md,
+# The runs of a shot --quality offers, and each one's first frame in the shot (DESIGN.md,
 # Several runs of a shot, decided on 2026-10-20): the latent grid shifted by 0 to 3 frames with
 # 4, by 0 and 2 with 2, the default one run, the grid unshifted.
 RUN_OFFSETS = {1: (0,), 2: (0, 2), 4: (0, 1, 2, 3)}
 
-# The counts --runs-per-shot takes. Two runs are built and wait for the user's eyes: "Offered or
-# not once the user's eyes have seen it against four runs and one" (DESIGN.md, Several runs of a
-# shot). PROVISIONAL (implementation, 2026-10-20): refused until then, the conservative reading.
-RUNS_OFFERED = (1, 4)
+# The levels of --quality, each with its runs a shot (DESIGN.md, Several runs of a shot: the user,
+# 2026-10-20, a name a user understands, the runs a shot being the code's): standard, the default,
+# one run; enhanced two, offered on the user's blind verdict (two runs beat one on 7 of 8 stills);
+# maximum four (four beat two on 7 of 8).
+QUALITY = {"standard": 1, "enhanced": 2, "maximum": 4}
 
 # A frame's places in a run, best first (DESIGN.md, Several runs of a shot): its first frame, a
 # latent of its own (-1), then the last of a group of 4 (3), the one a latent is stamped on in the
