@@ -1115,9 +1115,10 @@ The rule: the upscale must look like its source in any given player.
    measure the user's eyes contradicted on the latent grid (see [To measure](#to-measure)).
    Prepending 4 mirrored frames, as numz's `--prepend_frames` does, gives it the next frames'
    look for one more latent per shot (2–8% more GPU time per hour of animation), at the cost of
-   0.6–2.8 dB of that lead on 7 of the 11: not done. Whether its sharpness step shows right
-   after a cut, which changes the picture 40 to 120 times more, is for the user's eyes: blind
-   crops and loops of shots' starts with and without it, from the kept runs, then milestone 7.
+   0.6–2.8 dB of that lead on 7 of the 11: not done. Settled by the user's eyes, blind
+   (2026-10-20, 4 cuts, no colour correction on either side): in no loop across a cut does the
+   frame right after it look different from the next ones, and the first frame alone looks no
+   worse than with the 4 frames before it (better on 2 of the 4, the same on 2).
 
    A shot that isn't 4n + 1 frames long is padded, then trimmed after decoding. numz mirrors
    its end (`generation_utils.py:651-656`: a shot of 42 frames gets its frames 40, 39 and 38,
@@ -1138,6 +1139,11 @@ The rule: the upscale must look like its source in any given player.
    - Over a whole shot, no group lower by PSNR-Y, SSIM, LPIPS, DISTS or VMAF. Against it: a
      slow pan over a near-flat sky, its last frame 0.9 to 1.2 dB lower. A shot of 2 frames is
      padded alike by both.
+   - The user's eyes, blind (2026-10-20, 4 clips of 42 frames, no colour correction on either
+     side): the last frame better repeated on 3 of 4 (one "way better"), the frame before it
+     the same on 3 of 4, no difference in any loop of the shot's last second. On the slow pan
+     over a flat sky, the mirrored end picked, uncertainly: the detail it keeps could be noise
+     or the water's reflection.
    - As with step 0's padding, milestone 1's regression keeps numz's mirror through a mode of
      the tests' own (`SEEDVR2X_TESTS_NUMZ_TAIL`). Checked on 2026-10-19 on a shot of 42 frames
      at 1080p, all 42 frames: bit-identical to numz patched to repeat (measurement's
@@ -1283,10 +1289,13 @@ ends its group of 4. Off by default: it costs as many times the GPU time.
   run takes. The time estimate (`--plan`, `--until`) counts the runs, and a job's units are
   its shots' runs (see [Pause and resume](#pause-and-resume)).
 - **Two runs**, from frames 0 and 2, each frame from the run where its place is 3 or 2: half
-  the GPU time, 37–47% of the measured gain. Offered or not once the user's eyes have seen
-  it against four runs and one.
-- **The option:** `--runs-per-shot N` (the user, 2026-10-20): 1 by default, 4, and 2 if
-  offered.
+  the GPU time, 37–47% of the measured gain. Offered (the user, 2026-10-20): blind, two runs
+  beat one on 7 of 8 stills ("a bit better", the eighth too close to call) and in 1 of 2
+  loops, the other the same; four beat two on 7 of 8 stills (2 "way better", 1 the same) and
+  in 1 of 2 loops, the other the same.
+- **The option:** `--quality standard|enhanced|maximum` (the user, 2026-10-20: a name a user
+  understands, the runs a shot being the code's): `standard` by default, one run a shot;
+  `enhanced`, 2 runs; `maximum`, 4 runs.
 - **Validated by:** each run's frames bit-identical to a single run fed the shot from that
   frame; the output's frames by the composite's rule; the user's eyes on long runs
   (milestone 7).
@@ -2954,8 +2963,8 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   contradict that measure (below): it isn't theirs.
   Taking each frame from the run whose grid ends a group there, 4 runs per shot, was measured
   and seen on 2026-10-20 and is decided as an option (see
-  [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)). Left: the two
-  runs' variant for the eyes; a second seed for the shifted runs; a long run (milestone 7).
+  [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)), two runs too.
+  Left: a long run (milestone 7).
 - **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget).
   Measured by tile size on the 96 GB card (2026-10-16 to 18): every tile the 12 to 48 GB cards
   take, passes alone, six of them in whole runs, three decodes under expandable segments; a room
