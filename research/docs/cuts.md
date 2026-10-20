@@ -421,12 +421,14 @@ all those seed pairs.
   cut (AB1, AB2) the whole batch moves by about a seed's distance: the two bright batches lose
   0.58 and 0.49 dB of PSNR-Y and 3.6 and 4.6 VMAF points over the whole batch (within the pooled
   band) while their DISTS, colour and temporal errors get better; the two dark ones gain 0.25 and
-  0.29 dB. The arms of the bright AB1 batch are 40–43 dB apart on every frame, as far as two
-  seeds. Frames 2 to 11 from the end are 0.14–0.37 dB lower on average. seedvr2x doesn't merge a
+  0.29 dB. The arms of the bright AB1 batch are 40–43 dB apart on every frame but the last
+  (18.1 dB), against 50–52 dB over the first half of a single shot's 42 frames (below). Frames 2
+  to 11 from the end are 0.14–0.37 dB lower on average. seedvr2x doesn't merge a
   short shot into the previous one: such a batch only comes from a missed cut.
 - **Exceptions, clip by clip:** the sky clip (anime-sky, a slow pan over a near-flat sky): its
   last frame loses 1.2 dB with repeat at both seeds and 0.9 dB at 44 frames, its low-frequency
-  colour error +0.44, while VMAF gains 1.2 and the temporal errors improve; also anime-grain's
+  colour error +0.44, while its VMAF gains 1.2 at seed 42 (+0.9 at seed 43 and +0.05 at 44
+  frames, both within the band) and the temporal errors improve; also anime-grain's
   low-frequency colour error (both seeds), anime-clean's LPIPS and DISTS at seed 42, and two of
   the shots alone on a temporal error.
 - **The arms differ on every frame, by less than two seeds do.** The padding frames are part of
