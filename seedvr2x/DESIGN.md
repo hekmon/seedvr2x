@@ -123,7 +123,10 @@ never requires it.
     (ffmpeg's own bounds). The first pass keeps the source's timestamps, which the frame index
     needs, where ffmpeg would otherwise smooth such a jump over, as in joined MPEG-TS
     recordings. The message names the frame and both times, and ffmpeg's remux as the way out
-    for the formats it corrects.
+    for the formats it corrects. Measured on 2026-10-21
+    ([seeking.md](../research/docs/seeking.md)): a joined transport stream keeps its jump under
+    `-copyts` (995.96 s there), read as a 33-bit wrap, 2^33/90000 = 95,443.7 s later, where the
+    later piece's timestamps are lower; remuxed to MKV with `-c copy`, it comes out continuous.
 - Interlaced and telecined sources, in any version. Deinterlacing and inverse telecine are
   workflows of their own, with specialised tools and many ways to do them. Detection:
   - refused when the stream declares interlacing
@@ -870,7 +873,12 @@ Decoding goes through an ffmpeg pipe:
     a frame that no later decode gives again, flagged or not. Read from the start, a frame at
     its place with its timestamp is therefore taken as decoded whatever its CRC-32, with a
     warning; a wrong timestamp, a missing or an extra frame still fails, and seeks stay
-    strict. One decoder thread would settle it, at several times the pass's cost.
+    strict. One decoder thread settles it for H.264 and MPEG-2, not for HEVC (2026-10-21,
+    [seeking.md](../research/docs/seeking.md)): on one thread, 8 of 8 copies decoded their
+    damaged frames the same every time, and a read started at a damaged frame's keyframe, or up
+    to 3 before, gave the start's pictures on 60 of 60 reads in 5 of them; HEVC repeated on one
+    thread in none of its 3 copies. Not built: its cost to the first pass is to be measured
+    (see [To measure](#to-measure)).
   - Real open-GOP HEVC in MKV is tested (an x265 encode: one IDR, then 435 CRA, 54 leading
     pictures): frame-exact on 136 targets, 96 of them around every leading picture, at 0.21 s
     per read. A decode started exactly at a CRA outputs none of its leading pictures and says
@@ -1300,6 +1308,20 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   level on average in every version: no eye sees it. The user's eyes, blind: the
   several runs' frames on 8 of 8 stills ("the sharpest, the cleanest; the other is way more
   blurry") and on 4 of 4 loops, 2 of them hard to tell in motion.
+- **At 4K** (2026-10-21, ×2 from 1080p, the 96 GB card, seed 42, 4 live-action shots and a
+  painted animation shot): `maximum` closer to the ground truth on every measure on all 5,
+  PSNR-Y +0.09 to +1.98 dB and VMAF +1.3 to +19.1 (its 4K model), the temporal errors lower.
+  To the eyes, blind, only on the painted shot: 2 of 2 places ("sharper, way less
+  artifacts", "more natural leaf forms"). On live action `standard` was preferred on 4 of 8
+  places ("smoother", "better quality") and `maximum` on 1, the rest the same or undecided;
+  5 of 5 loops alike. At 1080p, a live-action clip's 2 places had gone to the several runs.
+  A 45-frame 4K shot took about 63 min at `maximum`, 15 at `standard`.
+- **The manual's example** (Sol Levante, 960×540 to 1080p): on two fast extracts with line
+  art, `maximum` +1.5 to +1.9 dB of PSNR-Y, VMAF +10 to +12, LPIPS −0.017 to −0.021, both
+  temporal errors lower, `enhanced` about 40% of that; on a calm one +0.16 dB. The user's pick
+  (2026-10-21): a bird across a painted wave, first its teeth, whose lines wobble at
+  `standard`, a little less at `enhanced`, and keep the original's shape at `maximum`; then
+  its feathers, which `maximum` starts to recover.
 - **Cost.** Every phase runs as many times: 4× the GPU time. A run takes the memory a single
   run takes. The time estimate (`--plan`, `--until`) counts the runs, and a job's units are
   its shots' runs (see [Pause and resume](#pause-and-resume)).
@@ -2018,7 +2040,15 @@ first pass, whose shots are its input, and before the models load:
     takes the same time whatever the tile (a 4K frame 5.3–5.6 s to encode and 11.5–12.3 s to
     decode with 1024-, 1536- or 2048-px tiles), and smaller tiles drift more in colour, though
     after `split` too little to set a floor down to 512 px, the smallest tile the planner
-    makes (see [Beyond numz's `lab`](#beyond-numzs-lab)). The encode's drift more than the
+    makes (see [Beyond numz's `lab`](#beyond-numzs-lab)). The eyes agree (2026-10-21, blind,
+    seedvr2x at 1080p on 5 clips with flat areas, `split`): tiled against untiled, with decode
+    tiles of 1024 or 512 px, encode and decode tiles of 512 px, or a 32 GB card's plan, the
+    same on 16 of 37 places, 7 for untiled and 6 for tiled by small margins ("hard to tell",
+    "a little bit"), 1 undecided (sharper against smoother), and 4 of 4 loops alike; 7 crops of
+    a flat sky couldn't be judged at all, nothing in them to recognise, the uncorrected
+    control's two among them. The worst 60×60 block moved 0.07 to 0.54 of a level and the
+    flattest third 0.03 to 0.28, where 512-px decode tiles move it 9.36 without correction.
+    The encode's drift more than the
     decode's (at 512 px, 33.4 dB from the untiled run against 38.3,
     [vram.md](../research/docs/vram.md#tiling)). The planner chooses none above 2048 px, the
     largest measured.
@@ -2769,10 +2799,22 @@ must be understood, and the gain shown clearly enough that a user tries it; see
   of them softer than the fourth, with doubled lines on fast motion;
 - what the option does about it and what it costs on the user's own card: `--plan` gives
   the time with one run and with several, before anything runs; the memory doesn't change;
-- what it gives, shown: a pair of stills and a short loop, one run against several, from a
-  freely licensed source, credited, with the measured gain beside them;
-- where it gains most and least: fast motion and line art the most, a slow pan over flat
-  colour hardly;
+- what it gives, shown: stills and a short loop, one run against several, from a freely
+  licensed source, credited, with the measured gain of `maximum` over `standard` beside them.
+  The user's pick (2026-10-21): Sol Levante's bird across a painted wave, its teeth first,
+  then its feathers (see [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)),
+  credited: "Sol Levante, Netflix and Production I.G, from Netflix's open content
+  (https://opencontent.netflix.com/), CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/). Frames of the SDR UHD master, downscaled and
+  compressed, then upscaled with seedvr2x to compare its --quality levels.";
+- what the original beside them is, said first (the user, 2026-10-21: else a reader asks why
+  the best image isn't an option): the source's own frame, downscaled to make the input, which
+  seedvr2x brings back to the original's size, so that what it restores can be set against
+  what was there. The figures are against it; a plain upscale's aren't shown beside them, the
+  full-reference metrics rewarding its blur (see what the model does at 4K, above);
+- where it gains most and least: fast motion and line art the most, at 1080p and at 4K; a
+  slow pan over flat colour hardly; live action at 4K not to the eyes, its metrics gaining
+  little;
 - how to see it on the user's own video before paying for a whole film: a short extract,
   run both ways, the commands given.
 
@@ -3030,14 +3072,21 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
 ## Open questions
 
 ### To measure
-- **Numerics:** settled but for the eyes on one item
-  ([numerics.md](../research/docs/numerics.md)). numz's choices stay (see
-  [Vendored model code](#vendored-model-code)), its bf16 decode included, and so does its
+- **Numerics:** settled ([numerics.md](../research/docs/numerics.md)). numz's choices stay
+  (see [Vendored model code](#vendored-model-code)), its bf16 decode included, and so does its
   resize; the padding of a frame changes (step 0 of the [Pipeline](#pipeline-per-shot)), and
-  so does that of a shot's end (step 1, decided on 2026-10-19). Left: the chroma kernel at
-  decode, measured on 2026-10-19 (see [Input](#input)): bilinear brings the output's chroma
-  closest to the ground truth. Crops of both kernels from the kept runs, made on the CPU, for
-  the user's eyes. The master's downsampling is settled: bilinear (see [Output](#output)).
+  so does that of a shot's end (step 1, decided on 2026-10-19). The decode's chroma kernel is
+  bilinear (2026-10-20, see [Input](#input)), and so is the master's downsampling (see
+  [Output](#output)).
+- **The first pass on one decoder thread** for H.264 and MPEG-2 sources (see
+  [Input](#input)): a damaged frame would then decode the same in every read, so that a
+  resume gives the uninterrupted run's frames there and seeks past it. To measure: what it
+  costs the first pass, against today's threads, on a 2-hour Blu-ray remux and on a DVD.
+- **`--quality` on live action at 4K** (see
+  [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)): the eyes leaned to
+  `standard` on 4 of 8 places, `maximum` on 1, where every metric favoured `maximum`; one
+  seed, 4 shots. More shots and a second seed would say whether the manual should advise
+  against it there.
 - **Every fourth frame is the model's best**
   ([numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
   shot's first frame, the causal VAE packs 4 frames per latent, and the last frame of each
