@@ -2095,9 +2095,16 @@ first pass, whose shots are its input, and before the models load:
     decode by the frame, a window by the token. The DiT's time per token is flat within ±5%
     across window lengths and resolutions, but anywhere from 0.23 to 0.45 ms on this one GPU,
     with its clock.
-  - One calibration sets them, at the job's size and tiles: 13 frames encoded and decoded, and
-    one window of 2 latents. `--plan` runs it, and so does a run given `--until`; any other
-    run takes its first units' times.
+  - One calibration sets them, at the job's size and tiles, through the job's own passes (the
+    reader, the input copy, the correction, the writer, the tiles): a warm-up first, the
+    process's first encode costing 3.4 s more and its first window 1.5 s more on an RTX 5090,
+    then each kind at two lengths, since one length can't give both the constant and the rate:
+    5 and 13 frames encoded and decoded, windows of 2 latents and of the job's longest (built
+    on 2026-10-10 on a base since left, to be ported). It counts as a first ratio of 1 among
+    the last 5, and a resumed run's first seek isn't counted. `--plan` runs it, and so does a
+    run given `--until`; any other run takes its first units' times.
+  - Each unit's progress line says the job's time left and the time of day it should end
+    (decided on 2026-10-21, to be built).
   - After every unit, each model is corrected by the median of the last 5 ratios of measured
     to predicted time, which follows a card whose speed drifts.
   - Every time figure in this document comes from a card whose faulty power reading caps its
@@ -2531,7 +2538,10 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     estimates). Units are never reordered to fill the time left. It exits 75 (`EX_TEMPFAIL`),
     so that a script tells a job stopped by the clock, to be run again, from a finished one
     (0) and from a Ctrl-C (130). The longest unit, a segment's decode, sets how early it may
-    stop: `--plan` prints it.
+    stop: `--plan` prints it. With a one-file output, the assembly is the job's last unit,
+    estimated from the masters' size. `--plan` given `--until` says whether the job ends by
+    then and, if not, the unit it would stop before (decided on 2026-10-21; the track's first
+    build refused both).
 - **The source's end** is checked as its last frame is read, before the last shot's latent is
   recorded (2026-10-12). A source that gives a frame more there than its first pass counted
   stops the run. The count is the job's record, which the same command trusts and would stop on
