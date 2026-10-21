@@ -716,6 +716,20 @@ def scratch(padded: tuple[int, int], frames: int) -> int:
     return tilegrid.scratch_bytes(padded_length(frames), padded)
 
 
+def scratch_file(
+    plan: Plan, target: tuple[int, int], frames: int, *, numz_padding: bool = False
+) -> int:
+    """What the scratch of a shot of `frames` frames takes on disk under plan, in bytes: its
+    memory-mapped file in the shot's unit directory (tiling.Scratch) where the plan tiles a pass
+    and the scratch is over the plan's allowance, as tiling.Scratch.where decides; 0 where no pass
+    is tiled or the scratch is held in system memory. The encode's and the decode's are the same
+    store, one at a time (scratch); a shot's first run is its longest (job.shot_runs)."""
+    if plan.encode_tiles is None and plan.decode_tiles is None:
+        return 0
+    size = scratch(_padded(target, numz_padding), frames)
+    return size if size > plan.scratch_allowance else 0
+
+
 # The phases, in a shot's order.
 PHASES: tuple[Phase, ...] = ("encode", "dit", "decode")
 

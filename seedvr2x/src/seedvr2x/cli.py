@@ -572,6 +572,9 @@ def _run(args: argparse.Namespace) -> int:
     # isn't run again when nothing it depends on changed (DESIGN.md, Pause and resume). The job's
     # GPU is checked before its first pass, whose shot detector runs on it.
     prior: _Prior | None = None
+    # The job's directory once it holds a plan, the record of its first pass with no unit made
+    # (DESIGN.md, Pause and resume, A plan), which a refusal then says is kept (_first_kept).
+    kept_first: Path | None = None
     try:
         # The source is the only input (DESIGN.md, Input): a directory is refused before anything
         # is done, the build's check included, so that nothing is made.
@@ -764,10 +767,7 @@ def _run(args: argparse.Namespace) -> int:
         found_cuts = _source_cuts(args, cuts, source)
         shots = shots_from_cuts([cut.frame for cut in found_cuts.cuts], source.frames)
         logger.info("%s: %s", _plural(len(shots), "shot"), _said(found_cuts))
-        check_seed(args.seed, shots)
         segments, paths = _segments(args, source, shots, directory)
-        if prior is None or not complete(prior.recorded):
-            _room_for_kept_frames(args, directory, shots, target, prior)
         out_height, out_width = output_size(target)
         logger.info(
             "%s; output %dx%d, square pixels",
@@ -775,6 +775,77 @@ def _run(args: argparse.Namespace) -> int:
             out_width,
             out_height,
         )
+        from seedvr2x.runtime import manifest
+        from seedvr2x.runtime.shot import shot_layout
+
+        def recorded_as(plan_record: dict[str, Any] | None, window: int | None) -> "Manifest":
+            """The job's record with the plan's record, its runs laid out under `window`, the
+            plan's cap; before the plan, with none, each run in one window (DESIGN.md, Pause and
+            resume, A plan: what a run refused after its first pass leaves)."""
+            return manifest.Manifest(
+                directory / NAME,
+                identity.settings,
+                identity.environment,
+                source,
+                shots,
+                # Each run's windows: with one run a shot, each shot's (DESIGN.md, Several runs
+                # of a shot).
+                [
+                    shot_layout(run.frames, window)
+                    for shot in shots
+                    for run in shot_runs(shot, QUALITY[args.quality])
+                ],
+                segments,
+                [path.name for path in paths],
+                {
+                    "format": args.format,
+                    "size": [out_width, out_height],
+                    "frame_rate": str(source.frame_rate),
+                },
+                plan_record,
+            )
+
+        # The first pass kept before anything can refuse the job (DESIGN.md, Pause and resume, A
+        # plan: "A run refused after its first pass accepted the source leaves one too, whatever
+        # refuses it (its disk, the planner, the model load)"): a new job's frame index and
+        # manifest, a plan with no plan's record yet, written as soon as the pass accepted the
+        # source, its directory made and locked then (_lock); a job recorded as a plan has its
+        # own already. Every refusal from here on says the pass is kept (_first_kept).
+        if prior is None:
+            _lock(directory)
+            if not _empty(directory, final is not None):
+                raise JobError(f"{directory}: written to since it was checked, by another program")
+            _first_write(recorded_as(None, None), source)
+            kept_first = directory
+        elif planned(prior.recorded):
+            if prior.known is None:
+                # A plan whose first pass ran again, its record not trusted (its frame index
+                # missing or damaged, ffmpeg or its conversions changed and accepted, a plan cut
+                # by a list asked without one): the new pass written at once, as a new job's is,
+                # its settings as asked, no plan's record, in this run's environment, a change
+                # accepted recorded with it (DESIGN.md, Pause and resume, A plan, decided on
+                # 2026-10-21), so that a refusal after it keeps the pass it paid for. The plan
+                # taken up or planned again rewrites it whole (_taken_up, _replan), from the
+                # record read before (prior.recorded). A plan whose record is trusted is kept as
+                # it is.
+                from seedvr2x.runtime import resume
+
+                again = recorded_as(None, None)
+                # Only where the pass found the job recorded: another source, another number of
+                # frames, is another job, refused with its record untouched (_resume).
+                if not _taken_differences(again, prior)[0]:
+                    again.environment_changes = list(prior.recorded.get(resume.CHANGES, []))
+                    if prior.changed:
+                        again.environment_changes.append(
+                            resume.environment_change(prior.recorded, again.environment)
+                        )
+                    _first_write(again, source)
+                    kept_first = directory
+            else:
+                kept_first = directory
+        # The seed against every shot, once the first pass is kept: a seed is a setting a plan
+        # takes (resume.FIRST_PASS_SETTINGS).
+        check_seed(args.seed, shots)
         # The job's plan (DESIGN.md, Memory planner): one for the job, made after the first pass,
         # whose shots are its input, and before the models load, from the memory free then. A job
         # resumed that has made a unit keeps its plan's shape, where its joins fall and its
@@ -830,15 +901,25 @@ def _run(args: argparse.Namespace) -> int:
             # information (resume.UNCOMPARED).
             plan_record = plan.record()
             plan_record["memory"].update(peaks.record())
+            if prior is None:
+                # The plan's record with the first pass's, as --plan leaves it, before anything
+                # else can refuse the job.
+                recorded_as(plan_record, plan.window).write()
+        if prior is None or not complete(prior.recorded):
+            _room_on_disk(args, directory, shots, target, prior, plan, numz_padding=numz_padding)
     except (MediaError, JobError) as error:
-        logger.error("%s", error)
+        logger.error("%s%s", error, _first_kept(kept_first))
         return 1
     except _out_of_memory() as error:
         # The GPU's memory refused before the models load, where a run first works on the
         # device: the shot detector in the first pass, or the first allocation and the warm-up
         # the free memory is read with (_free_memory), another program holding the card. One
         # line and status 1, as at the load and in a unit.
-        logger.error("%s, before the models loaded: nothing was run", _refused(error))
+        logger.error(
+            "%s, before the models loaded: nothing was run%s",
+            _refused(error),
+            _first_kept(kept_first),
+        )
         return 1
 
     import numpy as np
@@ -848,44 +929,15 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.files import make_directories
     from seedvr2x.media.reader import FramesLeft
     from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
-    from seedvr2x.runtime import manifest
     from seedvr2x.runtime.blockswap import HostMemoryError
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.run import run_job
-    from seedvr2x.runtime.shot import CopyError, NonFinite, shot_layout
+    from seedvr2x.runtime.shot import CopyError, NonFinite
     from seedvr2x.runtime.units import Units
 
     remaining = list(range(len(segments)))  # the segments to write, those not finished
-    try:
-        if prior is None:
-            _lock(directory)
-    except JobError as error:
-        logger.error("%s", error)
-        return 1
-    record = manifest.Manifest(
-        directory / NAME,
-        identity.settings,
-        identity.environment,
-        source,
-        shots,
-        # Each run's windows: with one run a shot, each shot's (DESIGN.md, Several runs of a shot).
-        [
-            shot_layout(run.frames, plan.window)
-            for shot in shots
-            for run in shot_runs(shot, QUALITY[args.quality])
-        ],
-        segments,
-        [path.name for path in paths],
-        {
-            "format": args.format,
-            "size": [out_width, out_height],
-            "frame_rate": str(source.frame_rate),
-        },
-        plan_record,
-    )
-    if prior is None and not _empty(directory, final is not None):
-        logger.error("%s: written to since it was checked, by another program", directory)
-        return 1
+    # The job's record with its plan: a new job's, written since the plan was made.
+    record = recorded_as(plan_record, plan.window)
     if prior is not None:
         # The job recorded there, checked whole and taken up before the models load: a plan
         # whose cuts changed, or whose shape did with the memory free, planned again
@@ -908,10 +960,6 @@ def _run(args: argparse.Namespace) -> int:
                 # A .mkv path's segments, every one finished by an earlier run, are assembled
                 # now, the models not loaded (_assemble).
                 return 0 if final is None else _assemble(final, record, paths)
-    elif args.plan is not None:
-        # A new job's directory made a plan (DESIGN.md, Memory planner): its frame index and
-        # manifest, no unit; the same command without --plan runs it.
-        _first_write(record, source)
     units = Units(directory, record)
     if args.plan is not None:
         # No upscale: --plan prints the plan "without running the job" (DESIGN.md, Memory
@@ -925,7 +973,11 @@ def _run(args: argparse.Namespace) -> int:
     try:
         memory.hold(identity.device)
     except torch.OutOfMemoryError as error:
-        logger.error("%s, before the models loaded: nothing was run", _refused(error))
+        logger.error(
+            "%s, before the models loaded: nothing was run%s",
+            _refused(error),
+            _first_kept(kept_first),
+        )
         return 1
     try:
         models = load_models(
@@ -936,20 +988,20 @@ def _run(args: argparse.Namespace) -> int:
         # refuses it, or as changed since its hash. Or a host that can't hold the pinned copies
         # of the weights the plan has away from the GPU: refused before the run, naming the RAM
         # they take (DESIGN.md, BlockSwap, rewritten).
-        logger.error("%s", error)
+        logger.error("%s%s", error, _first_kept(kept_first))
         return 1
     except torch.OutOfMemoryError as error:
         # The weights the plan has on the GPU don't fit there after all: other programs hold
         # the card's memory, or the plan is wrong.
-        logger.error("%s, as the models loaded: nothing was run", _refused(error))
+        logger.error(
+            "%s, as the models loaded: nothing was run%s", _refused(error), _first_kept(kept_first)
+        )
         return 1
     logger.info(
         "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
     )
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
-    if prior is None:
-        _first_write(record, source)
     started = time.monotonic()
 
     tags = Tags.of(stream, source.conversion.matrix_tag)
@@ -1743,6 +1795,19 @@ def _write_index(directory: Path, source: "Source") -> None:
     source.index.write(directory / INDEX)
 
 
+def _first_kept(directory: Path | None) -> str:
+    """What a refusal adds once the job's directory holds a plan, the record of its first pass
+    with no unit made (_run): that the pass is kept, and that a run takes it up without a second
+    decode (DESIGN.md, Pause and resume, A plan): the same command, or one whose settings differ
+    in what the pass doesn't read, the ways out a refusal names. Nothing before then."""
+    if directory is None:
+        return ""
+    return (
+        f"; the first pass is kept in {directory}: the same command takes it up, or one changing"
+        " what is named here, without decoding the source again"
+    )
+
+
 def _first_write(record: "Manifest", source: "Source") -> None:
     """A new job's first write in its directory: the frame index, whole, then the manifest naming
     it (manifest.INDEX)."""
@@ -2075,7 +2140,8 @@ class _Prior:
     # job's, which makes nothing and asks no acceptance (_prior).
     changed: list[str]
     known: "FirstPass | None"  # the first pass's record, unless ffmpeg or conversions changed
-    # A plan planned again: its cut settings' differences (resume.CUT_SETTINGS); else none.
+    # A plan planned again: its settings' differences, those a plan takes
+    # (resume.FIRST_PASS_SETTINGS); else none.
     replanned: list[str] = field(default_factory=list[str])
 
 
@@ -2146,11 +2212,15 @@ def _prior(
     detector's probabilities are the record's then, never made again.
 
     A plan, a job that has made no unit yet (manifest.planned), is planned again when the settings
-    asked differ from its own in how its source is cut alone (resume.CUT_SETTINGS): another
+    asked differ from its own in what its first pass doesn't read alone
+    (resume.FIRST_PASS_SETTINGS): how its source is cut (resume.CUT_SETTINGS), another
     --cut-threshold, a cut list given or another, or none, its cuts derived again from its first
     pass's record (DESIGN.md, Shot detection: another threshold gives its cuts without a second
-    decode or detection), the layout and settings rewritten (_replan): DESIGN.md, Pause and
-    resume, A plan, "A run whose settings differ only in its cuts", as resume.CUT_SETTINGS says.
+    decode or detection); the quality level, the pins, the resolution, the models and the rest,
+    the layout and settings rewritten (_replan): DESIGN.md, Pause and resume, A plan, "A run whose
+    settings differ in what the first pass doesn't read ... plans it again from its record too,
+    with no decode" (decided on 2026-10-21). The frame rate, which the pass reads, or the code,
+    is another job, as a unit made is.
 
     A finished directory job, every segment made, is taken whatever its environment, with no
     --accept-env-change (design, 2026-10-12: "A finished directory job is said finished whatever
@@ -2189,16 +2259,16 @@ def _prior(
     }
     found = resume.differences(resume.identity(recorded), resume.identity(asked))
     changed = [line for line in found if resume.section(line) == "environment"]
-    recut = [line for line in found if resume.setting(line) in resume.CUT_SETTINGS]
-    other = len(found) > len(changed) + len(recut)
-    replanned = recut if recut and not other and planned(recorded) else []
+    taken = [line for line in found if resume.replannable(line)]
+    other = len(found) > len(changed) + len(taken)
+    replanned = taken if taken and not other and planned(recorded) else []
     finished = _final(args.output) is None and complete(recorded)
-    if other or recut != replanned or (changed and not args.accept_env_change and not finished):
+    if other or taken != replanned or (changed and not args.accept_env_change and not finished):
         raise _another_job(
             path,
             found,
             only_environment=len(changed) == len(found),
-            units_made=bool(recut) and not other and not replanned,
+            units_made=bool(taken) and not other and not replanned,
             plan_elsewhere=bool(replanned) and bool(changed),
         )
     entry: dict[str, Any] = recorded["input"]
@@ -2307,6 +2377,41 @@ def _content(path: Path) -> dict[str, object]:
     return {"bytes": path.stat().st_size, "sha256": digest}
 
 
+def _taken_differences(record: "Manifest", prior: _Prior) -> tuple[list[str], list[str]]:
+    """How the job asked, as record holds it, differs from the one recorded (prior): the
+    differences that make it another job, and those in a plan's shape (its plan and the windows
+    it gives each run), which a plan takes (_resume). The environment was compared before the
+    first pass; a plan's settings were accepted there (_prior), with what follows from them: its
+    shots' runs and windows, its segments, the output's format and size, and how the source is
+    read (--input-matrix, --input-sar)."""
+    from seedvr2x.runtime import resume
+    from seedvr2x.runtime.manifest import planned
+
+    plan = planned(prior.recorded)
+
+    def reshaped(line: str) -> bool:
+        # A plan's shape, made again, and the windows it gives each shot.
+        return plan and (
+            resume.section(line) == "plan"
+            # A shot's first run's windows, and with several runs a shot each later run's
+            # (manifest.SHOT_RUNS).
+            or re.match(r"shots\[\d+\](?:\.runs\[\d+\])?\.windows\b", line) is not None
+        )
+
+    def compared(line: str) -> bool:
+        if resume.section(line) == "environment" or reshaped(line):
+            return False
+        follows = resume.section(line) in ("shots", "segments", "output") or line.startswith(
+            ("input.read_as:", "input.sample_aspect:")
+        )
+        return not prior.replanned or not (resume.replannable(line) or follows)
+
+    differences = resume.differences(prior.recorded, record.content())
+    return [line for line in differences if compared(line)], [
+        line for line in differences if reshaped(line)
+    ]
+
+
 def _resume(record: "Manifest", prior: _Prior, assembles: bool = False) -> bool:
     """Take up the job recorded beside record, checked before its first pass (_prior): refused
     (JobError) unless the rest is the job asked too, what the first pass found and the layout
@@ -2333,26 +2438,9 @@ def _resume(record: "Manifest", prior: _Prior, assembles: bool = False) -> bool:
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import complete, planned
 
-    plan = planned(prior.recorded)
-
-    def reshaped(line: str) -> bool:
-        # A plan's shape, made again, and the windows it gives each shot.
-        return plan and (
-            resume.section(line) == "plan" or re.match(r"shots\[\d+\]\.windows\b", line) is not None
-        )
-
-    def compared(line: str) -> bool:
-        # The environment compared before the first pass; a plan's cuts, accepted there.
-        if resume.section(line) == "environment" or reshaped(line):
-            return False
-        recut = resume.setting(line) in resume.CUT_SETTINGS
-        return not prior.replanned or not (recut or resume.section(line) in ("shots", "segments"))
-
-    differences = resume.differences(prior.recorded, record.content())
-    found = [line for line in differences if compared(line)]
+    found, shape = _taken_differences(record, prior)
     if found:
         raise _another_job(record.path, found, only_environment=False)
-    shape = [line for line in differences if reshaped(line)]
     if prior.replanned or shape:
         _replan(record, prior, shape)
         return True
@@ -2602,7 +2690,7 @@ def _finished_already(
 
 
 def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
-    """Take up a plan with other cuts (_prior), or whose plan the memory free now shapes
+    """Take up a plan with other settings (_prior), or whose plan the memory free now shapes
     otherwise (_resume), `shape` the differences in its plan and its shots' windows: what a stop
     left of it, found by its own layout (resume.recorded_job, resume.leftovers: anything not its
     own refused, never deleted), is discarded, its units' directories with it, none of them the
@@ -2611,8 +2699,8 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
     manifest rewritten with the new settings, plan and layout, at once, so that the plan is the
     new one whether a unit follows or not, in this run's environment, a change accepted recorded
     with it, as a plan taken up is (_taken_up). DESIGN.md, Pause and resume, A plan: "the cuts
-    are derived again and the manifest rewritten at once, in the run's environment"
-    (resume.CUT_SETTINGS)."""
+    are derived again and the manifest rewritten at once, in the run's environment", and any
+    other setting the first pass doesn't read likewise (resume.FIRST_PASS_SETTINGS)."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import STATE
 
@@ -2646,11 +2734,14 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
     if prior.known is None:
         _write_index(directory, record.source)
     record.write()
-    # What changed, in one line: the cuts' settings, the plan's shape, and, the shots being the
-    # same ones, how many of them it lays out otherwise.
-    changed = [*prior.replanned, *(line for line in shape if resume.section(line) == "plan")]
+    # What changed, in one line: the settings, the plan's shape, and, the shots being the same
+    # ones, how many of them it lays out otherwise. A plan recorded with no plan's record, by a
+    # run refused after its first pass (_run), has its plan made now.
+    none = prior.recorded.get("plan") is None
+    reshaped = [line for line in shape if resume.section(line) == "plan"]
+    changed = [*prior.replanned, *(["its plan made, none recorded"] if none else reshaped)]
     laid_out = {line.partition("]")[0] for line in shape if resume.section(line) == "shots"}
-    if laid_out and not prior.replanned:
+    if laid_out and not prior.replanned and not none:
         changed.append(f"the windows of {_plural(len(laid_out), 'shot')}")
     logger.info(
         "%s: re-planned, its job having made no unit yet: %s; %s discarded",
@@ -2668,9 +2759,9 @@ def _another_job(
     plan_elsewhere: bool = False,
 ) -> "JobError":
     """A resume refused, each difference listed, `where: recorded -> now`; `units_made` when the
-    cuts differ alone, which a plan would take (_prior), but the job has made units;
-    `plan_elsewhere` when a plan's cuts differ, which it takes, and its environment too, which
-    --accept-env-change takes."""
+    settings differ alone in what a plan would take (_prior, resume.FIRST_PASS_SETTINGS), but the
+    job has made units; `plan_elsewhere` when a plan's settings differ, which it takes, and its
+    environment too, which --accept-env-change takes."""
     from seedvr2x.runtime.job import JobError
 
     return JobError(
@@ -2684,13 +2775,13 @@ def _another_job(
             else ""
         )
         + (
-            "\nIts cuts change only while it is a plan, before its first unit, and it has made"
-            " some: its cuts are its own; another output directory takes new ones"
+            "\nThese settings change only while it is a plan, before its first unit, and it has"
+            " made some: its settings are its own; another output directory takes new ones"
             if units_made
             else ""
         )
         + (
-            "\nA plan, which has made no unit yet, is planned again with other cuts; its"
+            "\nA plan, which has made no unit yet, is planned again with other settings; its"
             " environment differs too: --accept-env-change takes it up anyway, its first pass"
             " run again where ffmpeg or its conversions changed"
             if plan_elsewhere
@@ -2994,63 +3085,100 @@ def _until(text: str) -> datetime.time:
     return datetime.time(int(match[1]), int(match[2]))
 
 
-def _room_for_kept_frames(
+def _room_on_disk(
     args: argparse.Namespace,
     directory: Path,
     shots: "Sequence[Shot]",
     target: tuple[int, int],
     prior: "_Prior | None",
+    plan: "Plan",
+    *,
+    numz_padding: bool,
 ) -> None:
-    """Refuse a job of several runs a shot whose disk can't hold the frames its longest shot keeps
-    between its runs (job.kept_bytes, at 16 bits, as --plan says it; DESIGN.md, Several runs of a
-    shot: "a job whose disk can't hold it is refused at its start"), JobError naming both figures
-    and the ways out; --plan says it as a warning, running nothing. The shots of the segments a
-    resumed job has finished keep nothing again. The allocation at a shot's decode stays the last
-    guard (run.Kept). PROVISIONAL (implementation, 2026-10-20): checked as soon as the shots are
-    known, before the first pass where a resume trusts its record, right after it otherwise: the
-    first pass finds the shots and counts the frames, so before it the longest shot is unknown."""
+    """Refuse a job whose disk can't hold what it writes beside its manifest at a shot's peak,
+    at every level (DESIGN.md, Several runs of a shot: "a job whose disk can't hold it is
+    refused at its start"; decided on 2026-10-21: the check counts a tiled pass's scratch file
+    too): the frames the shot keeps between its runs (job.kept_bytes, at 16 bits, as --plan says
+    them) and, where the plan tiles a pass and the shot's scratch is over its allowance in
+    system memory, the scratch's file (planner.scratch_file), both on the disk at once in its
+    last run's decode, the scratch counted at the shot's whole length, its first run's, an upper
+    bound of the last run's; the masters and segments not counted, nor a split's input copy
+    (units.COPY). JobError naming the free room, what the shot takes and each part, and the ways
+    out; --plan says it as a warning, running nothing. Checked once the plan is made, which says
+    which passes are tiled and the allowance, before the models load; the job's first pass is
+    kept by then (_first_kept). The shots of the segments a resumed job has finished write
+    nothing again. The allocations in a shot's units stay the last guard (run.Kept,
+    tiling.Scratch). What a kill left in the shots' unit directories, kept frames or a scratch,
+    which the resume discards after this check (resume.leftovers), counts as free."""
     from seedvr2x.runtime.job import JobError, kept_bytes, output_size
     from seedvr2x.runtime.manifest import STATE
+    from seedvr2x.runtime.planner import scratch_file
+    from seedvr2x.runtime.tilegrid import SCRATCH
     from seedvr2x.runtime.units import KEPT
 
     gib = 1024**3
     runs = QUALITY[args.quality]
-    if runs == 1:
-        return
     done: list[tuple[int, int]] = []
     if prior is not None:
         done = [
             (int(s["start"]), int(s["end"])) for s in prior.recorded["segments"] if s["finished"]
         ]
     left = [shot for shot in shots if not any(a <= shot.start < b for a, b in done)]
-    if not left:
-        return
     size = output_size(target)
-    need = max(kept_bytes(shot, runs, size) for shot in left)
+
+    def parts(shot: "Shot") -> tuple[int, int]:
+        """What shot keeps of its frames, and its scratch's file, in bytes."""
+        return (
+            kept_bytes(shot, runs, size),
+            scratch_file(plan, target, shot.frames, numz_padding=numz_padding),
+        )
+
+    if not left or max(sum(parts(shot)) for shot in left) == 0:
+        return
+    longest = max(left, key=lambda shot: sum(parts(shot)))
+    kept, spilled = parts(longest)
+    need = kept + spilled
     place = directory
     while not place.exists():
         place = place.parent
-    # A kill in a shot's decode leaves its kept frames' file, which the resume discards as a
-    # leftover after this check (resume.leftovers): its room counts as free.
     left_over = sum(
-        path.stat().st_size for path in (directory / STATE).glob(f"shot_*/{KEPT}") if path.is_file()
+        path.stat().st_size
+        for name in (KEPT, SCRATCH)
+        for path in (directory / STATE).glob(f"shot_*/{name}")
+        if path.is_file()
     )
     free = shutil.disk_usage(place).free + left_over
     if free >= need:
         return
-    longest = max(left, key=lambda shot: kept_bytes(shot, runs, size))
-    lower = [
-        f"{level} keeps {max(kept_bytes(shot, count, size) for shot in left) / gib:.2f} GiB"
-        if count > 1
-        else f"{level} none"
-        for level, count in QUALITY.items()
-        if count < runs
+    taken: list[str] = []
+    if kept:
+        taken.append(
+            f"{kept / gib:.2f} GiB of frames kept between its runs at --quality {args.quality}"
+        )
+    if spilled:
+        taken.append(
+            f"{spilled / gib:.2f} GiB of a tiled pass's scratch file, over the"
+            f" {plan.scratch_allowance / gib:.2f} GiB of system memory it may take"
+        )
+    ways = [
+        "make room there",
+        "write the output to a disk with room (a new job, its first pass again)",
     ]
+    if kept:
+        lower = [
+            f"{level} keeps {max(kept_bytes(shot, count, size) for shot in left) / gib:.2f} GiB"
+            if count > 1
+            else f"{level} none"
+            for level, count in QUALITY.items()
+            if count < runs
+        ]
+        ways.append(f"take a lower level ({', '.join(lower)})")
+    if spilled:
+        ways.append("free system memory, which the scratch takes first")
     said = (
-        f"{directory}: {free / gib:.2f} GiB free on its disk, where --quality {args.quality} keeps"
-        f" up to {need / gib:.2f} GiB of frames there while a shot's runs are decoded (its"
-        f" longest shot's, {longest.frames} frames): make room there, write the output to a disk"
-        f" with room, or take a lower level ({', '.join(lower)})"
+        f"{directory}: {free / gib:.2f} GiB free on its disk, where the job writes up to"
+        f" {need / gib:.2f} GiB there at a shot's peak, its shot of {longest.frames} frames:"
+        f" {' and '.join(taken)}; {', '.join(ways[:-1])} or {ways[-1]}"
     )
     if args.plan is not None:
         logger.warning("%s; a run of this plan would be refused", said)

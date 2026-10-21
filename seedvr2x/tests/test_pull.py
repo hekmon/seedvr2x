@@ -1761,8 +1761,10 @@ def test_changed_during_the_first_pass_refused(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A file of seedvr2x's own touched after its check, during the first pass: the load, given the
-    # run's hashes, finds it changed and refuses it, nothing recorded. The stand-in's load does
-    # what load_models does with them (runtime/model.py), the model built none.
+    # run's hashes, finds it changed and refuses it, no unit recorded, the first pass kept as a
+    # plan (DESIGN.md, Pause and resume, A plan), which the next run plans again, the file's new
+    # hash a setting a plan takes (resume.FIRST_PASS_SETTINGS). The stand-in's load does what
+    # load_models does with them (runtime/model.py), the model built none.
     from seedvr2x.media import source as media
 
     directory = model_dir(tmp_path)
@@ -1787,9 +1789,12 @@ def test_changed_during_the_first_pass_refused(
     assert upscale(tmp_path, "out", *options) == 1
     assert caplog.messages[-1] == (
         f"{directory / DIT}: changed since its SHA-256 was read, before its load ended: run"
-        " again, which checks it again"
+        f" again, which checks it again; the first pass is kept in {tmp_path / 'out'}: the same"
+        " command takes it up, or one changing what is named here, without decoding the source"
+        " again"
     )
-    assert not (tmp_path / "out" / "manifest.json").exists()
+    manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert manifest["plan"] is not None and not manifest["shots"][0]["encoded"]
 
 
 def test_changed_after_its_hash_refused(tmp_path: Path) -> None:

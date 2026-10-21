@@ -149,7 +149,9 @@ class Manifest:
     # The job's plan (Plan.record; DESIGN.md, Memory planner): what shapes the output, which a
     # resume must find again, and for information what doesn't (resume.UNCOMPARED). A field added
     # to the record, whose shape stays: VERSION too.
-    plan: dict[str, Any]
+    # None, before the plan is made: a run refused after its first pass leaves the record of the
+    # pass, a plan with no plan's record (cli._run).
+    plan: dict[str, Any] | None
     # The environment changes a resume accepted (--accept-env-change), oldest first: the units
     # made before each are the environment's before it (resume.environment_change).
     environment_changes: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
@@ -165,7 +167,9 @@ class Manifest:
 
     def __post_init__(self) -> None:
         level: Any = self.settings.get(LEVEL, "standard")
-        if level not in QUALITY:
+        # A hand-edited record's level may be any JSON value: a list or an object, unhashable,
+        # refused as another value is.
+        if not isinstance(level, str) or level not in QUALITY:
             *others, last = QUALITY
             levels = f"{', '.join(others)} and {last}"
             raise JobError(f"{self.path}: quality {json.dumps(level)}, where seedvr2x has {levels}")

@@ -2,9 +2,9 @@
 which is one (DESIGN.md, Pause and resume), the manifest there being the truth: the job asked
 must be the one recorded, its settings, models, environment, input,
 output and layout alike, but for an environment change the user accepts (--accept-env-change),
-which the manifest records, and for a plan's cuts (CUT_SETTINGS); the directory must hold what the
-manifest says, and nothing else of anyone's; what a stop left that the manifest doesn't name is
-discarded."""
+which the manifest records, and for a plan's settings, those its first pass doesn't read
+(FIRST_PASS_SETTINGS); the directory must hold what the manifest says, and nothing else of
+anyone's; what a stop left that the manifest doesn't name is discarded."""
 
 import json
 import os
@@ -66,12 +66,33 @@ UNIT_FILE = re.compile(
 # The settings that say how a job's source is cut (cli._settings): the cut list given, or the
 # detection's threshold and the shot detector's file, which a cut list drops. A plan, a job that
 # has made no unit yet (manifest.planned), is taken up with them changed, its cuts derived again
-# from the first pass's record, or taken from the new list (cli._prior, cli._replan); any other
-# difference, or a unit made, is another job's. DESIGN.md, Pause and resume, A plan: "A run
-# whose settings differ only in its cuts (the cut list, the threshold, the detector's file)
-# plans it again from its record, with no decode", and "Any other difference, or a unit made, is
-# another job".
+# from the first pass's record, or taken from the new list (cli._prior, cli._replan), as it is
+# with any other setting its first pass doesn't read (FIRST_PASS_SETTINGS). DESIGN.md, Pause and
+# resume, A plan: "A run whose settings differ only in its cuts (the cut list, the threshold, the
+# detector's file) plans it again from its record, with no decode". Named here for that rule,
+# which FIRST_PASS_SETTINGS's covers.
 CUT_SETTINGS = frozenset({"cuts", "cut_threshold", "detector_model"})
+
+# The settings a plan can't change (DESIGN.md, Pause and resume, A plan, decided on 2026-10-21: "A
+# difference in what the first pass reads (the source, the frame rate), in the code, or a unit
+# made, is another job"): --frame-rate's rate, which the pass judges the source's timing by and
+# fills its grid at (media/source.py: timing_refusal, in_places), and the code, seedvr2x's
+# version and its sources' hash. The pass reads nothing else of the settings: the source's
+# decode (media/scan.py's scan) takes its path alone, and the shot detector its file, a cut
+# setting (CUT_SETTINGS), pinned (pull.check_pinned). The source is the input's record, compared
+# as itself (cli._prior). Any other setting differing, a plan, a job that has made no unit yet
+# (manifest.planned), is planned again from its record, with no decode (cli._prior,
+# cli._replan): the cuts, the quality level, the pins, the resolution, the models, the colour
+# correction, the output's format, the segments' command and their least length, the input's
+# matrix and sample aspect, the seed, and the tests' numz modes.
+FIRST_PASS_SETTINGS = frozenset({"seedvr2x", "code", "frame_rate"})
+
+
+def replannable(difference: str) -> bool:
+    """Whether a difference between a plan's record and the job asked is one a plan takes,
+    planned again (FIRST_PASS_SETTINGS): a setting, any but those the first pass reads."""
+    name = setting(difference)
+    return name is not None and name not in FIRST_PASS_SETTINGS
 
 
 def identity(content: dict[str, Any]) -> dict[str, Any]:

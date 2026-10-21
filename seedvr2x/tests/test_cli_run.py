@@ -754,6 +754,15 @@ def free_memory(monkeypatch: pytest.MonkeyPatch, free: int) -> None:
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (free, TOTAL))
 
 
+def kept(directory: Path) -> str:
+    """What a refusal adds once the job's directory holds the record of its first pass, a plan
+    (cli._first_kept; DESIGN.md, Pause and resume, A plan)."""
+    return (
+        f"; the first pass is kept in {directory}: the same command takes it up, or one changing"
+        " what is named here, without decoding the source again"
+    )
+
+
 def plan_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [line for line in caplog.messages if line.startswith("plan: ")]
 
@@ -1197,7 +1206,7 @@ def test_gpu_memory_refused_at_the_load_stops_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The weights refused GPU memory as they load, the limit set before them where seedvr2x
-    # holds torch: one line, no traceback, nothing run.
+    # holds torch: one line, no traceback, nothing run, the first pass kept as a plan.
     from seedvr2x.runtime import model
 
     spilling_driver(monkeypatch)
@@ -1212,7 +1221,7 @@ def test_gpu_memory_refused_at_the_load_stops_the_run(
     assert [record.getMessage() for record in errors] == [
         "the GPU's memory was refused (held to the card's own memory: its driver gives more):"
         " CUDA out of memory. Tried to allocate 432.00 MiB, as the models loaded: nothing was"
-        " run"
+        " run" + kept(tmp_path / "out")
     ]
     assert all(record.exc_info is None for record in errors) and steps.calls == []
 
@@ -1241,7 +1250,9 @@ def test_gpu_memory_refused_before_the_load_stops_the_run(
     # Before the models load a run already works on the GPU: the shot detector in the first
     # pass, the first allocation and warm-up its free memory is read with, then torch's limit
     # where seedvr2x holds it. Memory refused at any of them, another program holding the card:
-    # the same one line and status as at the load, no traceback, nothing run.
+    # the same one line and status as at the load, no traceback, nothing run; after the first
+    # pass, at the reading, that pass kept as a plan (cli._first_kept). The first limit, held
+    # before the first pass, and the pass itself keep nothing.
     from seedvr2x.runtime import memory
 
     def refused(*arguments: object, **options: object) -> None:
@@ -1258,6 +1269,7 @@ def test_gpu_memory_refused_before_the_load_stops_the_run(
         "the GPU's memory was refused: CUDA out of memory. Tried to allocate 456.00 MiB, 9.36"
         " GiB free of the GPU's 31.82 GiB, torch holding 19.27 GiB allocated and 1.43 GiB more"
         " reserved, 20.98 GiB allowed, before the models loaded: nothing was run"
+        + (kept(tmp_path / "out") if place == "the reading" else "")
     ]
     assert all(record.exc_info is None for record in errors) and steps.calls == []
 
@@ -1380,7 +1392,8 @@ def test_host_short_of_memory_for_the_pinned_copies_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The host can't hold the pinned copies of the weights the plan has away from the GPU: the
-    # load refuses, naming the RAM they take, logged without a traceback, before any unit.
+    # load refuses, naming the RAM they take, logged without a traceback, before any unit, the
+    # first pass kept as a plan.
     from seedvr2x.runtime import blockswap, model
 
     said = (
@@ -1395,7 +1408,7 @@ def test_host_short_of_memory_for_the_pinned_copies_refused(
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "36") == 1
     errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
-    assert [record.getMessage() for record in errors] == [said]
+    assert [record.getMessage() for record in errors] == [said + kept(tmp_path / "out")]
     assert all(record.exc_info is None for record in errors)
     assert steps.calls == []
 
@@ -1526,7 +1539,9 @@ def test_pin_refused(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A pin is taken exactly or refused, never adjusted (DESIGN.md, Memory planner, Pins), the
-    # refusal naming what fits, before the models load: nothing made, no unit, no manifest.
+    # refusal naming what fits, before the models load: no unit made, the first pass kept as a
+    # plan, a manifest with no plan's record, which each command after it takes up, its pins
+    # changed (DESIGN.md, Pause and resume, A plan).
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--swap-blocks", "37") == 1
     assert "--swap-blocks 37: the DiT has 36 blocks, so from 0 to 36" in caplog.text
@@ -1544,7 +1559,7 @@ def test_pin_refused(
             f" --{kind}-tile 0 pins an untiled {kind}"
         ) in caplog.text
         assert steps.calls == [] and "models" not in ASKED
-        assert not (tmp_path / "out" / "manifest.json").exists()
+        assert json.loads((tmp_path / "out" / "manifest.json").read_text())["plan"] is None
     untiled = ("--encode-tile", "0", "--decode-tile", "0")
     assert upscale(tmp_path, source_path, "untiled.mkv", *JOB[:4], *untiled) == 0
     steps.calls.clear()
@@ -1560,7 +1575,7 @@ def test_pin_refused(
         " --window 5"
     ) in caplog.text
     assert steps.calls == []
-    assert not (tmp_path / "out" / "manifest.json").exists()
+    assert json.loads((tmp_path / "out" / "manifest.json").read_text())["plan"] is None
     # Without the pin, the planner's own cap is that one, and the job runs: the 6-latent shot's
     # two windows are 4 latents long, and no cap is under 5 with a shot longer than it.
     assert upscale(tmp_path, source_path, "out", *pinned[:2], *pinned[4:]) == 0
@@ -1577,7 +1592,9 @@ def test_size_and_host_memory_refused(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A size the free memory doesn't hold, and a plan the system memory doesn't, are refused
-    # before the models load, as a pin is: exit 1, nothing made, nothing written.
+    # before the models load, as a pin is: exit 1, no unit made, the first pass kept as a plan,
+    # its frame index and a manifest with no plan's record (DESIGN.md, Pause and resume, A plan:
+    # decided on 2026-10-21, where nothing was written before), which the same command takes up.
     source_path = job(tmp_path, monkeypatch)
     there = sorted(path.name for path in tmp_path.iterdir())
     # The stand-in's frames are too small for a tile: their floor is the untiled encode's, with
@@ -1601,9 +1618,15 @@ def test_size_and_host_memory_refused(
         " available, 0.40 GiB short"
     ) in caplog.text
     assert steps.calls == [] and "models" not in ASKED
-    # But the stand-in's model files, which upscale puts there.
+    # The stand-in's model files, which upscale puts there, and each job's plan.
     files = sorted(path.name for path in tmp_path.iterdir())
-    assert files == sorted([*there, pull.DETECTOR, "w.safetensors"])
+    assert files == sorted([*there, pull.DETECTOR, "w.safetensors", "out", "one.mkv.work"])
+    for directory in (tmp_path / "out", tmp_path / "one.mkv.work"):
+        assert sorted(path.name for path in directory.iterdir()) == [
+            "frame_index.bin",
+            "manifest.json",
+        ]
+        assert json.loads((directory / "manifest.json").read_text())["plan"] is None
     # With the memory back, both run.
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
@@ -1978,7 +2001,8 @@ def test_plan_without_its_record_planned_again(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A plan whose manifest lost its `plan`, deleted by hand, is planned again whole as every
-    # plan is, whatever it recorded, and said in one line: no other job, and no KeyError.
+    # plan is, whatever it recorded, and said in one line: no other job, and no KeyError; as a
+    # run refused after its first pass leaves one, its plan made, none recorded.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(tmp_path / "p.txt")) == 0
@@ -1988,10 +2012,10 @@ def test_plan_without_its_record_planned_again(
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     [said] = [line for line in caplog.messages if "re-planned" in line]
-    assert said.startswith(
-        f"{tmp_path / 'out'}: re-planned, its job having made no unit yet: plan: "
+    assert said == (
+        f"{tmp_path / 'out'}: re-planned, its job having made no unit yet: its plan made, none"
+        " recorded; 0 leftovers discarded"
     )
-    assert said.endswith("; 0 leftovers discarded")
     content = json.loads(manifest.read_text())
     assert content["plan"] == planned["plan"]
     assert steps.calls == UNINTERRUPTED
@@ -3492,7 +3516,8 @@ def test_model_replaced_before_its_load(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # A model file replaced after its check, during the first pass: load_models' own check
-    # refuses it, as the first one would have, logged without a traceback.
+    # refuses it, as the first one would have, logged without a traceback, the first pass kept
+    # as a plan, its plan's record with it.
     from seedvr2x.runtime import model
 
     said = "w.safetensors: SeedVR2's 3B DiT in fp16"
@@ -3503,9 +3528,9 @@ def test_model_replaced_before_its_load(
     monkeypatch.setattr(model, "load_models", replaced)
     assert upscale(tmp_path, job(tmp_path, monkeypatch), "out", *JOB) == 1
     errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
-    assert [record.getMessage() for record in errors] == [said]
+    assert [record.getMessage() for record in errors] == [said + kept(tmp_path / "out")]
     assert all(record.exc_info is None for record in errors)
-    assert not (tmp_path / "out" / "manifest.json").exists()
+    assert json.loads((tmp_path / "out" / "manifest.json").read_text())["plan"] is not None
 
 
 def test_environment_change_accepted(
@@ -5628,7 +5653,7 @@ def test_detection_or_cut_list_another_job(
         threshold, cuts = 'null -> "0.3"', "[] -> null"
     assert f"settings.cut_threshold: {threshold}" in caplog.text
     assert f"settings.cuts: {cuts}" in caplog.text
-    assert "Its cuts change only while it is a plan, before its first unit" in caplog.text
+    assert "These settings change only while it is a plan, before its first unit" in caplog.text
     assert len(StandInDetector.built) == built  # refused before any first pass
     assert asked == [first == "detected", False]
     assert "the first pass runs again" not in caplog.text
@@ -6047,21 +6072,33 @@ def test_plan_taken_up_narrowly(
     scripted: Steps,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # Only a plan's cuts change: another setting, alone or with another threshold, is another
-    # job, refused before any first pass, the plan untouched. Once a unit is made, the job's cuts
-    # are its own: another threshold or a cut list refused, saying why; the same command resumes.
+    # A plan takes any setting its first pass doesn't read (resume.FIRST_PASS_SETTINGS, decided
+    # on 2026-10-21; until then its cuts alone): another seed, alone or with another threshold,
+    # is planned again from its record, no first pass. The frame rate, which the pass reads,
+    # alone or with another threshold, is another job, refused before any first pass, the plan
+    # untouched. Once a unit is made, the job's settings are its own: another threshold or a cut
+    # list refused, saying why; the same command resumes.
     source_path = job(tmp_path, monkeypatch)
     passes = first_passes(monkeypatch)
-    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(tmp_path / "plan.txt")) == 0
+    plan = str(tmp_path / "plan.txt")
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", plan) == 0
     out = tmp_path / "out"
     kept = contents(out)
     passes.clear()
-    text = refused(tmp_path, source_path, caplog, *CUT, "--seed", "7")
-    assert "another job than the one asked" in text and "settings.seed: 42 -> 7" in text
-    assert "Its cuts change only" not in text
-    text = refused(tmp_path, source_path, caplog, *CUT, "--seed", "7", "--cut-threshold", "0.5")
-    assert "settings.seed: 42 -> 7" in text and 'settings.cut_threshold: "0.3" -> "0.5"' in text
+    text = refused(tmp_path, source_path, caplog, *CUT, "--frame-rate", "50")
+    assert "another job than the one asked" in text and 'settings.frame_rate: null -> "50"' in text
+    assert "These settings change only" not in text
+    text = refused(
+        tmp_path, source_path, caplog, *CUT, "--frame-rate", "50", "--cut-threshold", "0.5"
+    )
+    assert 'settings.frame_rate: null -> "50"' in text
+    assert 'settings.cut_threshold: "0.3" -> "0.5"' in text
     assert contents(out) == kept and passes == []
+    for seed in (("--seed", "7"), ("--seed", "7", "--cut-threshold", "0.5"), ()):
+        assert upscale(tmp_path, source_path, "out", *CUT, *seed, "--plan", plan) == 0
+        settings = json.loads((out / "manifest.json").read_text())["settings"]
+        assert settings["seed"] == (7 if seed else 42)
+    assert passes == []
     # A unit made: shot 0's latent, the stop in shot 5's encode.
     scripted.stop = "encode 5"
     stopped(tmp_path, source_path, "out", *CUT)
@@ -6072,8 +6109,11 @@ def test_plan_taken_up_narrowly(
     ):
         text = refused(tmp_path, source_path, caplog, *CUT, *other)
         assert "another job than the one asked" in text and difference in text
-        said = "Its cuts change only while it is a plan, before its first unit, and it has made"
-        assert f"{said} some: its cuts are its own; another output directory takes new ones" in text
+        said = "These settings change only while it is a plan, before its first unit, and it has"
+        assert (
+            f"{said} made some: its settings are its own; another output directory takes new ones"
+            in text
+        )
     assert contents(out) == kept and passes == []
     scripted.stop = None
     scripted.calls.clear()
@@ -6514,8 +6554,8 @@ def test_replanned_in_another_environment(
     text = refused(tmp_path, source_path, caplog, *again)
     assert "another job than the one asked" in text and "environment.ffmpeg" in text
     assert 'settings.cut_threshold: "0.3" -> "0.5"' in text
-    said = "A plan, which has made no unit yet, is planned again with other cuts; its environment"
-    assert f"{said} differs too: --accept-env-change takes it up anyway" in text
+    said = "A plan, which has made no unit yet, is planned again with other settings; its"
+    assert f"{said} environment differs too: --accept-env-change takes it up anyway" in text
     assert "Only its environment differs" not in text
     assert contents(out) == kept and scans == []
     caplog.set_level(logging.INFO, logger="seedvr2x")

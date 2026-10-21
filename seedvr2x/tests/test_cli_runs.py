@@ -430,9 +430,10 @@ def test_plan_says_the_runs(
         assert lines == base
         return
     total = {"4": 8, "2": 5}[runs]
-    others = {"4": "standard or enhanced: 1 or 2 runs", "2": "standard or maximum: 1 or 4 runs"}[
-        runs
-    ]
+    others = {
+        "4": "standard or enhanced: 1 or 2 runs",
+        "2": "standard or maximum: 1 or 4 runs",
+    }[runs]
     # The stand-in's 128x96 frames keep 2.4 MB at the most (16 of the 21-frame shot's at 4 a shot),
     # 0.00 GiB as said; tests/test_runs.py holds the figure at 1080p.
     said = RUNS_SAID.format(level=LEVEL[runs], runs=runs, total=total, kept="0.00", others=others)
@@ -515,8 +516,8 @@ def test_kept_frames_removed(
 
 
 class FloatKept:
-    """run.Kept as built first (patch 57): the frames kept as float32, as the decode gives them,
-    and written so, the writers quantising them; in memory, which changes nothing of their
+    """A stand-in for run.Kept that keeps the frames as float32, as the decode gives them, and
+    writes them so, the writers quantising them; in memory, which changes nothing of their
     values. What the 16-bit file must equal byte for byte (design's ruling of 2026-10-20)."""
 
     def __init__(self, path: Path, frames: list[int], shape: tuple[int, int, int]) -> None:
@@ -570,17 +571,21 @@ def written_files(out: Path) -> dict[str, bytes]:
 
 @pytest.mark.usefixtures("stand_in")
 @pytest.mark.parametrize("correction", ["none", "split"])
-@pytest.mark.parametrize("output_format", ["gbrp16le", "yuv420p10le", "png"])
+@pytest.mark.parametrize("output_format", ["gbrp16le", "yuv420p10le", "png", "segment-cmd"])
 def test_sixteen_bit_kept_frames_change_no_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_format: str, correction: str
 ) -> None:
     # The frames kept between the runs at the 16 bits the writers quantise them to: every master
     # and checksum file byte for byte those of the frames kept as float32 (FloatKept), in every
     # format, the frame dumps too, written by the runs that make them (DESIGN.md, Several runs of
-    # a shot). Shots of 5, 1 and 11 frames at maximum: every place of the rule, a shot of one run.
+    # a shot), and through a segment command's writer, whose stream is the master's (DESIGN.md,
+    # Output, Writer): an FFV1 encode of yuv420p10le, which its packets show. Shots of 5, 1 and 11
+    # frames at maximum: every place of the rule, a shot of one run.
     original = source(tmp_path / "in.mkv", 17)
     cuts = listed(tmp_path, "cuts.txt", "5\n6\n")
-    options = ("--cuts", cuts, "--quality", "maximum", "--format", output_format)
+    command = ("--segment-cmd", "ffmpeg -i - -c:v ffv1 {out}")
+    writer = ("yuv420p10le", *command) if output_format == "segment-cmd" else (output_format,)
+    options = ("--cuts", cuts, "--quality", "maximum", "--format", *writer)
     options += ("--color-correction", correction)
     outputs: dict[str, dict[str, bytes]] = {}
     for kept in ("sixteen", "float"):
@@ -614,8 +619,11 @@ def test_a_disk_short_of_the_kept_frames_refuses_the_job(
     # Shots of 5, 1 and 11 frames at 128x96: at maximum the 11-frame shot keeps the most, 9
     # frames of 73,728 bytes at 16 bits (of its 11, the last run gives frames 3 and 7), 663,552
     # bytes; enhanced keeps 6 of them (its last run gives frames 2, 5, 6, 9 and 10). One byte
-    # short: refused before the models load, nothing made; with the room, the job runs
-    # (DESIGN.md: "a job whose disk can't hold it is refused at its start").
+    # short: refused before the models load, no unit made, the first pass kept as a plan
+    # (DESIGN.md, Pause and resume, A plan, decided on 2026-10-21; nothing was written before);
+    # with the room, the job runs (DESIGN.md: "a job whose disk can't hold it is refused at its
+    # start"). The check counts a tiled pass's scratch file too, which the stand-in's untiled
+    # plan has none of (test_cli_plan_kept.py).
     caplog.set_level(logging.INFO, logger="seedvr2x")
     original = source(tmp_path / "in.mkv", 17)
     cuts = listed(tmp_path, "cuts.txt", "5\n6\n")
@@ -625,13 +633,18 @@ def test_a_disk_short_of_the_kept_frames_refuses_the_job(
         patch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
         assert upscale(tmp_path, original, "out", *options) == 1
         said = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR][-1]
+        out = tmp_path / "out"
         assert said == (
-            f"{tmp_path / 'out'}: 0.00 GiB free on its disk, where --quality maximum keeps up to"
-            " 0.00 GiB of frames there while a shot's runs are decoded (its longest shot's, 11"
-            " frames): make room there, write the output to a disk with room, or take a lower"
-            " level (standard none, enhanced keeps 0.00 GiB)"
+            f"{out}: 0.00 GiB free on its disk, where the job writes up to 0.00 GiB there at a"
+            " shot's peak, its shot of 11 frames: 0.00 GiB of frames kept between its runs at"
+            " --quality maximum; make room there, write the output to a disk with room (a new job,"
+            " its first pass again) or take a"
+            " lower level (standard none, enhanced keeps 0.00 GiB); the first pass is kept in"
+            f" {out}: the same command takes it up, or one changing what is named here, without"
+            " decoding the source again"
         )
-        assert not (tmp_path / "out" / "resume").exists()
+        assert not (out / "resume").exists()
+        assert sorted(path.name for path in out.iterdir()) == ["frame_index.bin", "manifest.json"]
         # --plan says it, and plans.
         caplog.clear()
         plan = str(tmp_path / "plan.txt")
