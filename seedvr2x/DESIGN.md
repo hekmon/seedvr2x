@@ -2364,10 +2364,11 @@ GPU's memory refused stops a run in one line, before the models load as after.
     2026-10-16, as decided that day: under the segments, as seedvr2x reads the allocator's
     setting, and on the card's figure, a check that finds the card short holds torch again to
     what it holds and the card's free memory less 0.5 GiB, said in a warning, and the run goes
-    on, as long as what the limit has lost since the plan's limit stays within the 4.5 GiB, the
-    losses adding up over the run: a step is left that much less beyond its peak, and the VAE's
-    room, inside the budget, is never touched. A check never raises the limit again. Past the
-    4.5 GiB, under torch's allocator without the segments, or on the driver's figure, the run
+    on, as long as what the limit has lost since the plan's limit stays within the reserve the
+    plan took (4.5 GiB, or 2.5 where it took the smaller one: decided on 2026-10-21), the losses
+    adding up over the run: a step is left that much less beyond its peak, and the VAE's room,
+    inside the budget, is never touched. A check never raises the limit again. Past that
+    reserve, under torch's allocator without the segments, or on the driver's figure, the run
     stops as before. Every stop and every re-hold says how much the memory outside torch's
     allocator grew since its limit was set, counted from the card's figure and what torch held
     then, against the 0.5 GiB left to it. Run on that card, a program taking memory once the
@@ -2389,7 +2390,12 @@ GPU's memory refused stops a run in one line, before the models load as after.
     recorded shape that no longer fits with 4.5 takes 2.5 before the resume stops. On that card
     two resumes of a 1080p job, planned 0.29 GiB under its budget, were refused 0.11 and 0.20
     GiB short within the hour, the desktop's share grown 0.4 to 0.5 GiB: `--until`'s own use,
-    night after night.
+    night after night. Only under the segments, where the 2.5 was measured (2026-10-21): under a
+    user's own setting without them, or under `cudaMallocAsync`, the job is refused with 4.5 as
+    before, the refusal saying that torch's default would run it, slower. Pins included: a
+    pinned shape refused with 4.5 runs with 2.5, its budget line saying so and naming the pin
+    that would run with 4.5, where one does. A job refused for the system memory alone is
+    planned with 2.5 too: a larger budget on the card swaps fewer blocks, and pins less memory.
 
 ## Pause and resume
 
@@ -2565,9 +2571,11 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - The frame index is derived data: missing or damaged on a resume, the first pass runs again
     and writes it; a finished job makes none again.
   - The directory must hold what the manifest names and nothing of anyone else's, dotfiles
-    included: anything else is refused, never deleted, and before anything is written there
-    (decided on 2026-10-21, to be built: a plan whose first pass ran again rewrites its record
-    first today).
+    included: anything else is refused, never deleted, and before anything is written there.
+    A recorded job's directory is judged from its record as soon as the record is read, before
+    its first pass and before a file output's remux rehearsal, seedvr2x's own files known by
+    their names; then again by the plan's layout after the pass (decided on 2026-10-21, to be
+    built: the check after the pass is built, before the pass's record is written again).
   - These are discarded: `.partial` files, an unfinished segment's file, unrecorded units, and
     the units of finished segments.
   - A recorded input copy that is missing or damaged is remade from the input, keeping the
