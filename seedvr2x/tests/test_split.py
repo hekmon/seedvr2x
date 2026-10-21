@@ -7,10 +7,14 @@
   time. Each run goes through the CLI in a process of its own, as the other GPU tests' do, the
   allocator set before torch is imported; DRIVER, the process's code, wraps colour.split there to
   hold each slice's content, reference and output against the study's split(), run on the same
-  device and on the CPU, and model.decode_stream, to hold the content split receives to the
-  VAE's decode, slice for slice, cropped as shot._decoded crops it ("on the same decode": no
-  channel moved, frame flipped or value clamped on the way, the decode going in unclamped). A
-  wrapper in the tests rather than a hook in seedvr2x: nothing of it reaches a user's run.
+  device and on the CPU, and shot._slices, to hold the content split receives to the VAE's
+  decode, slice for slice, cropped as shot._decoded crops it ("on the same decode": no channel
+  moved, frame flipped or value clamped on the way, the decode going in unclamped). shot._slices
+  is the seam both decodes share, the streamed one (model.decode_stream) and the tiled one
+  (tiling.decode_tiled), before shot._decoded and shot._correct: the test holds on any plan, the
+  decode untiled or in tiles, as a card smaller than the 96 GB one plans it (decided on
+  2026-10-21). A wrapper in the tests rather than a hook in seedvr2x: nothing of it reaches a
+  user's run.
 - test_split_against_the_input: ours with split, the default, on milestone 1's input as one
   shot, scored against the input with milestone 5's metrics that apply to one window without a
   ground truth (ΔE lf, a*/b* spread, Y shift), as test_lab.py scored lab; every figure printed,
@@ -87,12 +91,13 @@ FACTORS = {"x2": (None, 3), "x4": ("480:270", 4)}
 CODE = 1 / 65535
 
 # The code of the process each run goes through: the CLI, colour.split wrapped to hold each
-# slice against the study's split(), and model.decode_stream to keep each slice the VAE decodes,
-# cropped as shot._decoded crops it, which the content split receives must equal. Arguments: the
-# tests' directory, a scratch directory, the report's path, the shot's frames, the output's height
-# and width, then the CLI's.
+# slice against the study's split(), and shot._slices, the seam of the streamed and the tiled
+# decodes, to keep each slice the VAE decodes, cropped as shot._decoded crops it, which the
+# content split receives must equal. Arguments: the tests' directory, a scratch directory, the
+# report's path, the shot's frames, the output's height and width, then the CLI's.
 DRIVER = """
 import json, os, sys
+from contextlib import contextmanager
 from pathlib import Path
 
 # As a run sets it (runtime/memory.py's startup).
@@ -103,21 +108,22 @@ sys.path.insert(0, tests)
 from test_colour import load_study
 import torch
 from seedvr2x import cli
-from seedvr2x.runtime import colour, model
+from seedvr2x.runtime import colour, shot
 
 study = load_study(Path(scratch))
 assert study is not None
-split, stream = colour.split, model.decode_stream
+split, slices_of = colour.split, shot._slices
 decoded = []  # the decode's slices not corrected yet, (t, C, H, W) as split takes its content
 slices = []
 
 
-def kept(models, latent):
-    # Each slice as the VAE decodes it, (C, t, H', W'), cropped as shot._decoded crops it, to the
-    # shot's frames and the output's size from the top left, and copied before seedvr2x's code
-    # gets it, so that nothing done to it on the way can change what it is held to.
+def kept(slices):
+    # Each slice as the VAE decodes it, (C, t, H', W'), streamed or tiled, cropped as
+    # shot._decoded crops it, to the shot's frames and the output's size from the top left, and
+    # copied before seedvr2x's code gets it, so that nothing done to it on the way can change
+    # what it is held to.
     written = 0
-    for frames in stream(models, latent):
+    for frames in slices:
         chunk = frames.permute(1, 2, 3, 0)[: count - written, :height, :width]
         if chunk.shape[0]:
             decoded.append(chunk.permute(0, 3, 1, 2).clone())
@@ -148,8 +154,15 @@ def held(content, reference, stages):
     return ours
 
 
+@contextmanager
+def slices_kept(*arguments, **options):
+    # shot._slices, its slices kept as they go (kept); it closes the decode as it leaves.
+    with slices_of(*arguments, **options) as slices:
+        yield kept(slices)
+
+
 colour.split = held
-model.decode_stream = kept
+shot._slices = slices_kept
 status = cli.main(argv)
 Path(report).write_text(json.dumps({"status": status, "slices": slices, "left": len(decoded)}))
 """
