@@ -1286,7 +1286,8 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   first pass, see [Pause and resume](#pause-and-resume)). The check is to count all that disk
   holds at once at a shot's peak: the kept frames, and the scratch file of a tiled pass where
   the plan spills one (one at a time, step 3), at every level, so at `standard` too (decided
-  on 2026-10-21, to be built; the check built counts the kept frames). Frames asked for in
+  on 2026-10-21, to be built; the check built counts the kept frames). The input copy isn't
+  counted: FFV1, its size follows the content, as the masters' does. Frames asked for in
   float (`--dump-frames`) are written by the run that makes them.
 - **Measured** (2026-10-20, numz, the 8 full-reference clips, seed 42;
   [numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)): against
@@ -2092,17 +2093,22 @@ first pass, whose shots are its input, and before the models load:
   fits says the pin's part of what it is short of.
 - **Time estimates** (for `--until`, `--plan` and progress) are measured, never constants.
   - One model per kind of unit, each a constant plus a rate: a shot's encode and a segment's
-    decode by the frame, a window by the token. The DiT's time per token is flat within ±5%
-    across window lengths and resolutions, but anywhere from 0.23 to 0.45 ms on this one GPU,
-    with its clock.
+    decode by the frame, a window by the token. A unit also pays, measured too, the phase it
+    opens (entering the DiT's phase took 0.42 s on an RTX 5090, the encode's 0.15, the
+    decode's 0.30), and a run's first window the run's noise draw, by the token (decided on
+    2026-10-21: without them a shot's first window ran 1.5 to 2 s over its estimate, the
+    windows' median miss 10.1% where a unit varies 0.6% from run to run). The DiT's time per
+    token is flat within ±5% across window lengths and resolutions, but anywhere from 0.23 to
+    0.45 ms on this one GPU, with its clock.
   - One calibration sets them, at the job's size and tiles, through the job's own passes (the
     reader, the input copy, the correction, the writer, the tiles): a warm-up first, the
     process's first encode costing 3.4 s more and its first window 1.5 s more on an RTX 5090,
     then each kind at two lengths, since one length can't give both the constant and the rate:
     5 and 13 frames encoded and decoded, windows of 2 latents and of the job's longest (built
     on 2026-10-10 on a base since left, to be ported). It counts as a first ratio of 1 among
-    the last 5, and a resumed run's first seek isn't counted. `--plan` runs it, and so does a
-    run given `--until`; any other run takes its first units' times.
+    the last 5, and a resumed run's first seek isn't counted. Every run runs it, `--plan`
+    included, its cost said in the plan's lines (decided on 2026-10-21: a run without it could
+    say no time left before its first segment's decode, and a job of one segment never).
   - Each unit's progress line says the job's time left and the time of day it should end
     (decided on 2026-10-21, to be built).
   - After every unit, each model is corrected by the median of the last 5 ratios of measured
@@ -2341,7 +2347,11 @@ GPU's memory refused stops a run in one line, before the models load as after.
     ran 1.4 to 1.5 times as long. Decided on 2026-10-13 (the user's go), to be built now that
     the frames' floor under the segments is known (above): the plan is made with 4.5, and a
     reserve of 2.5 GiB is taken only where the job would be refused otherwise, said slow in the
-    plan's lines, the VAE's room untouched.
+    plan's lines, the VAE's room untouched. A resume's plan too (decided on 2026-10-21): a
+    recorded shape that no longer fits with 4.5 takes 2.5 before the resume stops. On that card
+    two resumes of a 1080p job, planned 0.29 GiB under its budget, were refused 0.11 and 0.20
+    GiB short within the hour, the desktop's share grown 0.4 to 0.5 GiB: `--until`'s own use,
+    night after night.
 
 ## Pause and resume
 
@@ -2493,7 +2503,9 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     leaves one too, whatever refuses it (its disk, the planner, the model load), and its
     refusal says the first pass is kept (decided on 2026-10-21, to be built: until then such
     a run writes nothing, and its first pass, about 17 min on a 2-hour HEVC master, is paid
-    again).
+    again). A plan whose first pass runs again (its frame index lost, `ffmpeg` or the
+    conversions changed and accepted, a cut list dropped) writes the new pass the same way, at
+    once, in the run's environment.
     - The same command without `--plan` runs it, with no second first pass.
     - A run whose settings differ only in its cuts (the cut list, the threshold, the
       detector's file) plans it again from its record, with no decode: the cuts are derived
