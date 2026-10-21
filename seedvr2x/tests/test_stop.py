@@ -7,6 +7,7 @@ out of its reach, else the segment being written would end early."""
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -237,7 +238,9 @@ def test_ctrl_c_once_finishes_the_unit(
 ) -> None:
     status, calls, text = upscale(job, "out", slow, (signal.SIGINT,))
     assert status == 130, text
-    assert "seedvr2x: stopping after" in text and "stopped after" in text
+    # The notice starts with the time of day, as every line does (runtime/stop.py).
+    assert re.search(r"^\d\d:\d\d:\d\d stopping after ", text, re.MULTILINE)
+    assert "stopped after" in text
     assert calls == done
     assert progress(job) == kept
     resumed_as_uninterrupted(job, resumed)

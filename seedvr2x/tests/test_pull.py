@@ -1473,8 +1473,9 @@ def test_library_log_once(tmp_path: Path) -> None:
     assert result.returncode == 1, result.stderr
     assert pull.TOKEN_ADVICE not in result.stderr
     assert result.stderr.count("another warning of the library's") == 1
-    line = r"\d{4}-\d\d-\d\d [\d:,]+ WARNING huggingface_hub\.utils\._http: another warning"
-    assert re.search(line, result.stderr), result.stderr
+    # A line without --verbose: the time of day, WARNING, the message (cli._Lines).
+    line = r"^\d\d:\d\d:\d\d WARNING another warning of the library's$"
+    assert re.search(line, result.stderr, re.MULTILINE), result.stderr
     assert "HTTP Request" not in result.stderr
     assert result.stderr.count(NO_TOKEN) == 1
     failed = "its download failed (the download stops here)"

@@ -48,6 +48,35 @@ VIDEO_SUFFIXES = frozenset(
 
 logger = logging.getLogger("seedvr2x")
 
+# What a line seedvr2x prints starts with (DESIGN.md, Architecture, What it prints): the time of
+# day, then a warning's WARNING or an error's ERROR, then the message; under --verbose, the date
+# and the milliseconds, every level's name and the logger's (_Lines).
+VERBOSE_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+class _Lines(logging.Formatter):
+    """A line as seedvr2x prints it, but under --verbose (VERBOSE_FORMAT): "23:05:12 plan: ...",
+    "23:05:12 WARNING ...", "23:05:12 ERROR ...", the time of day to the second; a level under
+    WARNING not named, a level from it up by its name (CRITICAL as itself)."""
+
+    def __init__(self) -> None:
+        super().__init__("%(asctime)s %(message)s", datefmt="%H:%M:%S")
+        self._named = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+
+    def format(self, record: logging.LogRecord) -> str:
+        if record.levelno >= logging.WARNING:
+            return self._named.format(record)
+        return super().format(record)
+
+
+def _logging(verbose: bool) -> None:
+    """seedvr2x's lines on stderr, at debug level and in VERBOSE_FORMAT under --verbose, else
+    from INFO up as _Lines has them."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(VERBOSE_FORMAT) if verbose else _Lines())
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=[handler])
+
+
 # numz's padding of the frames before the model, DivisiblePad((16, 16)), zeros up to multiples of
 # 16, in place of seedvr2x's (DESIGN.md, Pipeline step 0), for seedvr2x's GPU tests only, never a
 # user's: milestone 1's regression holds the output to numz's own with it. It runs the CLI in a
@@ -317,10 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    _logging(args.verbose)
     # A stop at once, a second Ctrl-C or SIGTERM during the run (runtime/stop.py), SIGTERM during
     # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
     # manifest says, and the same command resumes.
@@ -350,9 +376,7 @@ def verify(argv: list[str]) -> int:
         "output", type=Path, help="an output directory, one of its segments, or a one-file output"
     )
     args = parser.parse_args(argv)
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    _logging(False)
     try:
         return _verify(args.output)
     except KeyboardInterrupt:
@@ -793,6 +817,7 @@ def _run(args: argparse.Namespace) -> int:
                 *(plan, peaks, card, target, shots, pins),
                 numz_padding=numz_padding,
                 quality=args.quality,
+                recorded=kept_plan is not None,
             )
             for line in said:
                 logger.info("%s", line)

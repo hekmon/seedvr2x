@@ -1001,17 +1001,22 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     )
     assert recorded["budget"] == planned_in
     assert "the GPU's driver gives memory the card doesn't have" in caplog.text
-    # The plan's first line names each figure, where "92.50 GiB free" alone would be taken for
+    # The plan's card lines name each figure, where "92.50 GiB free" alone would be taken for
     # what the plan counts on, and "87.20 GiB free" for what the driver reports; what torch's
-    # limit leaves and what the plan leaves again are said apart; and it is the one place a
-    # run's log says them: memory's own line is for its debug level.
+    # limit leaves and what the plan leaves again, the reserve, are said apart on the budget's
+    # line; and it is the one place a run's log says them: memory's own line is for its debug
+    # level.
     assert (
-        ", 92.50 GiB free on the whole card by NVML (its driver reports 94.50 GiB free to this"
-        " process); the run is held to the card's own memory, its driver giving more than the"
-        " card has: torch is limited 3.00 GiB under that, and the plan counts on 2.30 GiB less"
-        " again, what it leaves torch's allocator beyond a step's peak: a budget of 87.20 GiB"
+        "plan: card: a stand-in, 92.50 GiB free on the whole card by NVML (its driver reports"
+        " 94.50 GiB free to this process): the run is held to the card's own memory, its driver"
+        " giving more than the card has"
     ) in caplog.text
-    assert caplog.text.count("a budget of 87.20 GiB") == 1
+    assert (
+        "plan: budget: 87.20 GiB, the 92.50 GiB free less torch's limit, 3.00 GiB under it, and the"
+        " reserve of 2.30 GiB left to torch's allocator beyond a step's peak; the margin of"
+        " 0.60 GiB is in the reserve"
+    ) in caplog.text
+    assert caplog.text.count("plan: budget: 87.20 GiB") == 1
     assert (
         "torch held to 89.50 GiB on the GPU: the 92.50 GiB free less 3.0, and what it holds;"
         " free on the whole card by NVML (its driver reports 94.50 GiB free to this process)"
@@ -1148,13 +1153,16 @@ def test_a_plan_on_a_driver_that_spills_holds_nothing(
     )
     assert content["plan"]["memory"]["free"] == planned_in
     # A machine without NVML (conftest.py): warned of once, as the plan is made, and the plan's
-    # first line says which figure it had.
+    # card line says which figure it had.
     assert caplog.text.count("the whole card's free memory couldn't be read through NVML") == 1
     assert (
         ", 94.50 GiB free as its driver reports it to this process (the whole card's, NVML's,"
-        " wasn't read); the run is held to the card's own memory, its driver giving more than"
-        " the card has: torch is limited 3.00 GiB under that, and the plan counts on 2.30 GiB"
-        " less again"
+        " wasn't read): the run is held to the card's own memory, its driver giving more than"
+        " the card has"
+    ) in caplog.text
+    assert (
+        "the 94.50 GiB free less torch's limit, 3.00 GiB under it, and the reserve of 2.30 GiB left"
+        " to torch's allocator"
     ) in caplog.text
 
 
@@ -1460,19 +1468,33 @@ def test_plan_said(
     said = planner.said(*made, "a stand-in", TARGET, JOB_SHOTS, pins)
     assert plan_lines(caplog) == said
     assert said == [
-        "plan: a stand-in, 94.50 GiB free, a budget of 93.90 GiB",
-        "plan: frames padded to 128x128, 64 tokens a latent, attention on FlashAttention 2",
-        "plan: 3 shots, the longest of 21 frames (6 latents)",
-        "plan: windows of 5 latents at most, the longest run 4 latents: 2 of 3 shots in one"
-        " window, 1 join",
-        "plan: no block of the DiT swapped, the VAE on the GPU in the DiT's phase; in the encode,"
-        " the DiT's 36 blocks on the GPU; in the decode, the DiT's 36 blocks on the GPU",
-        "plan: no system memory pinned, nothing leaving the GPU; 0.00 GiB for the longest shot at"
-        " the most, as its decode merges its windows; 2.40 GiB of system memory in all",
-        "plan: encode untiled, decode untiled, each held 1.25 GiB under the budget",
+        "plan: card: a stand-in, 94.50 GiB free, a budget of 93.90 GiB: the margin of 0.60 GiB"
+        " left to the desktop and other programs; no reserve, the driver refusing memory the card"
+        " doesn't have",
+        "plan: frames: 128x96 padded to 128x128 for the model, 64 tokens a latent",
+        "plan: attention: FlashAttention 2, which is installed",
+        "plan: shots: 3, the longest of 21 frames (6 latents)",
+        "plan: windows: 5 latents at most (17 frames), the longest run 4 latents, pinned by"
+        " --window: 2 of 3 shots in one window, 1 join; a longer window, fewer joins; --window N"
+        " caps them",
+        "plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs"
+        " 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU"
+        " time",
+        "plan: blocks swapped: none, the window fitting with the DiT whole on the GPU;"
+        " --swap-blocks N swaps some",
+        "plan: the VAE: on the GPU in the DiT's phase, the window fitting beside it",
+        "plan: the DiT in the VAE's passes: in the encode, the DiT's 36 blocks on the GPU; in the"
+        " decode, the DiT's 36 blocks on the GPU; as much as fits beside each",
+        "plan: system memory: 2.40 GiB in all; nothing pinned; 0.00 GiB for the longest shot at"
+        " the most, as its windows are merged",
+        "plan: encode: untiled, the whole frame fitting the budget; --encode-tile PX tiles it",
+        "plan: decode: untiled, the whole frame fitting the budget; --decode-tile PX tiles it",
+        "plan: the VAE's room: 1.25 GiB of the budget left free in each VAE pass, for the large"
+        " pieces of memory a pass asks for at once",
         "plan: predicted peaks: encode 18.11 GiB, DiT 15.91 GiB, decode 17.73 GiB; the encode"
         " bounds the plan, its room counted, 74.54 GiB under the budget",
-        "plan: pinned: --window 5",
+        "plan: time: no estimate yet",
+        "plan: pinned: --window 5, taken exactly",
     ]
     caplog.clear()
     plan = tmp_path / "plan.txt"
@@ -1751,7 +1773,10 @@ def test_resumed_keeps_its_cap(
     caplog.clear()
     stopped(tmp_path, source_path, "out", *options)
     assert "re-planned" not in caplog.text
-    assert "plan: windows of 5 latents at most, the longest run 4 latents" in caplog.text
+    assert (
+        "plan: windows: 5 latents at most (17 frames), the longest run 4 latents, kept from the"
+        " job's record, so that the output stays bit for bit"
+    ) in caplog.text
     assert steps.calls == ["encode 4", "window 4:0", "window 4:1"]
     content = json.loads(manifest.read_text())
     again = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST, recorded=Plan(5))
@@ -1806,7 +1831,7 @@ def test_resumed_with_other_memory(
     caplog.clear()
     stopped(tmp_path, source_path, "out", *options)  # before a unit: the record as it was
     assert contents(tmp_path / "out") == kept
-    assert "plan: 20 of the DiT's 36 blocks swapped" in caplog.text
+    assert "plan: blocks swapped: 20 of the DiT's 36" in caplog.text
     steps.stop = None
     assert upscale(tmp_path, source_path, "out", *options) == 0
     content = json.loads(manifest.read_text())
@@ -1859,7 +1884,7 @@ def test_resumed_on_another_attention_backend(
     assert content["plan"]["memory"]["attention"] == "sdpa"
     shape = {key: value for key, value in content["plan"].items() if key != "memory"}
     assert shape == {key: value for key, value in started["plan"].items() if key != "memory"}
-    assert "tokens a latent, attention on PyTorch's SDPA" in caplog.text
+    assert "plan: attention: PyTorch's SDPA, FlashAttention 2 not being installed" in caplog.text
     assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
 
 
@@ -2046,7 +2071,10 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
     assert made[0] == Plan(5, Tiles(640), Tiles(512), scratch_allowance=kept)
     assert made[1].scratch == kept == 21 * 6 * 560 * 704
     lines = planner.said(*made, "a card", LARGER_TARGET, JOB_SHOTS, pins)
-    assert "encode in tiles of 640 px, 1 x 2, decode in tiles of 512 px, 2 x 2," in lines[6]
+    encode = next(line for line in lines if line.startswith("plan: encode: "))
+    decode = next(line for line in lines if line.startswith("plan: decode: "))
+    assert encode.startswith("plan: encode: tiles of 640 px overlapping by 64, 2 across, 1 down, ")
+    assert decode.startswith("plan: decode: tiles of 512 px overlapping by 64, 2 across, 2 down, ")
     assert [(kind, tiles, allowance) for kind, tiles, _, allowance in given] == [
         (kind, Tiles(640) if kind == "encode" else Tiles(512), kept) for kind in kinds
     ]
@@ -2114,7 +2142,7 @@ def test_tile_pin_beyond_the_measured_sizes_warned_of(
         ]
 
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LARGER, *TILE_PINS) == 0
-    assert warned() == [] and len(plan_lines(caplog)) == 10
+    assert warned() == [] and len(plan_lines(caplog)) == 17  # a line a choice (planner.said)
     monkeypatch.setattr(planner, "TILE_MAX", 576)
     said = (
         "the encode in tiles of 640 px: its predicted peak is the fit's, beyond the sizes"
@@ -6870,3 +6898,23 @@ def test_real_detection_cuts(
     assert all(float(line.split()[1]) > 0.5 for line in lines)
     print("\n".join(record.getMessage() for record in caplog.records))
     print(plan.read_text())
+
+
+def test_a_line_starts_with_the_time_of_day_but_under_verbose() -> None:
+    # What seedvr2x prints (cli._Lines): the time of day, then the message; a warning's WARNING
+    # and an error's ERROR before it; no date, no milliseconds, no logger's name. Under
+    # --verbose the format is cli.VERBOSE_FORMAT, every level named, with the logger's.
+    def record(level: int) -> logging.LogRecord:
+        return logging.LogRecord("seedvr2x", level, "cli.py", 1, "the message", None, None)
+
+    lines = cli._Lines()  # pyright: ignore[reportPrivateUsage]
+    time = r"\d\d:\d\d:\d\d"
+    assert re.fullmatch(f"{time} the message", lines.format(record(logging.INFO)))
+    assert re.fullmatch(f"{time} WARNING the message", lines.format(record(logging.WARNING)))
+    assert re.fullmatch(f"{time} ERROR the message", lines.format(record(logging.ERROR)))
+    assert re.fullmatch(f"{time} CRITICAL the message", lines.format(record(logging.CRITICAL)))
+    verbose = logging.Formatter(cli.VERBOSE_FORMAT)
+    assert re.fullmatch(
+        r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} INFO seedvr2x: the message",
+        verbose.format(record(logging.INFO)),
+    )

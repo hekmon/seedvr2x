@@ -1141,27 +1141,45 @@ def _check_tiles(padded: tuple[int, int], recorded: Plan) -> None:
             )
 
 
-def _runs_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) -> str:
-    """The line of --plan's on a --quality level of several runs a shot (said): their count, how a
-    frame is taken, the GPU time against one run's, the standard level's, and the disk the frames
-    between the runs take. No time is estimated yet (DESIGN.md, Memory planner, Time
-    estimates: not built), so the time is said as a multiple of one run's: about runs_per_shot
-    times, a later run being shorter by its first frame (DESIGN.md, Several runs of a shot:
-    "4x the GPU time")."""
+def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) -> str:
+    """The plan's line of the --quality level (said), at every level, standard's too (DESIGN.md,
+    Memory planner, Every choice of the plan is said): the runs a shot and in all, how a frame
+    is taken, the GPU time against standard's one run, the memory one run's, the disk the frames
+    kept between a shot's runs take, and the levels that give or cost more. No time is estimated
+    yet (DESIGN.md, Memory planner, Time estimates: not built): the time is a multiple of one
+    run's, about runs_per_shot times, a later run being shorter by its first frame (DESIGN.md,
+    Several runs of a shot: "4x the GPU time")."""
     runs_per_shot = QUALITY[quality]
+    if runs_per_shot == 1:
+        return (
+            "quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2"
+            " or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the"
+            " GPU time"
+        )
     runs = sum(len(shot_runs(shot, runs_per_shot)) for shot in shots)
     # The frames a shot's earlier runs give wait on disk, at 16 bits, in the shot's unit directory
     # until its last run's decode (run.Kept): the most a shot keeps, said so that a user sees the
     # room it takes before anything runs.
     kept = max(kept_bytes(shot, runs_per_shot, output_size(target)) for shot in shots)
-    return (
-        f"--quality {quality}: {runs_per_shot} runs a shot, {_count(runs, 'run')} in all, each"
-        " frame taken from the run that rebuilds it best: about"
-        f" {runs_per_shot} times the GPU time of standard's one run, which no estimate gives yet,"
-        " in the memory of one run; the longest shot keeps"
-        f" {kept / 2**30:.2f} GiB of frames on disk, beside the job's manifest, while its runs are"
-        " decoded"
+    levels = [(level, count) for level, count in QUALITY.items() if level != quality]
+    others = (
+        f"{' or '.join(level for level, _ in levels)}:"
+        f" {' or '.join(str(count) for _, count in levels)} runs"
     )
+    return (
+        f"quality: {quality}, {runs_per_shot} runs a shot, {runs} in all, each frame from its best"
+        f" run: about {runs_per_shot} times standard's GPU time, one run's memory;"
+        f" {kept / 2**30:.2f} GiB of frames on disk for the longest shot; --quality {others}"
+    )
+
+
+# What a run holds of a shot at the moment it holds the most, in the plan's line of the system
+# memory (said): _MOMENT_SAID's moments, shorter, the line giving every figure beside them.
+_MOMENT_SHORT = {
+    "check": "as its latent is checked",
+    "windows": "at its longest window",
+    "merge": "as its windows are merged",
+}
 
 
 def said(
@@ -1174,86 +1192,63 @@ def said(
     *,
     numz_padding: bool = False,
     quality: str = "standard",
+    recorded: bool = False,
 ) -> list[str]:
-    """The plan as --plan prints it and every run logs it (DESIGN.md, Memory planner, --plan), a
-    line each: the card (its name, `card`), its free memory and the budget, and on a run held
-    to the card each figure by its name (_card_said); the padded size, the tokens per latent and
-    the attention backend the DiT's peak is predicted for; the shots and the longest; the window
-    cap, the shots in one window and the joins; with several runs a shot (quality, its level;
-    DESIGN.md, Several runs of a shot), the runs, and the GPU time against one run's, the
-    memory one run's: the plan holds for every run, none longer than its shot; the swapped
-    blocks and what stays on the GPU in each phase; the pinned system memory; the tiles and
-    their grid, and the room the VAE's passes are held to (VAE_ROOM);
-    each phase's predicted peak, without that room, and which bounds the plan, a VAE phase
-    counted with its room (Peaks.bound) and said so; the scratch of the longest tiled
-    shot, what a scratch may take of system memory (Plan.scratch_allowance) and the shots whose
-    scratch goes to its file instead; what was pinned. DESIGN.md's list but for the times, whose
-    lines come with the time estimates. The longest window the job runs is said only where it
-    isn't the cap, one pinned or recorded above it; and after the joins, where the planner took
-    a shorter window than the card alone holds for the host's memory, that window and what its
-    plan takes of the memory available (Peaks.shortened); after the tiles, where it shrank them
-    for the host's memory, the DiT kept on the GPU in the VAE's phases, the tiles the card alone
-    gives at that window and what their plan takes (Peaks.shrunk). The system memory is said
-    as a refusal for it says it (_host_hundredths): the pinned copies, what the run holds of a
-    shot at the most, the longest unless a shorter one holds more, with the moment it does
-    (Peaks.shot, Peaks.moment, Peaks.holder), and the allowance to the nearest hundredth of a
-    GiB, and "in all" their sum with the process's own."""
+    """The plan as --plan prints it and every run and resume logs it, before the first unit,
+    a line per choice in plain words (DESIGN.md, Memory planner, Every choice of the plan is
+    said), each opening with what it says, "plan: windows: ...": the value with its unit; why it
+    was taken, the rule and its figure; what it gives or costs; the option that changes it.
+    Every value the planner sets is in it: the card's free memory and the budget, with the
+    margin, and on a run held to the card the torch's limit and the reserve, by their names and
+    figures (_card_said, _budget_said); the padded frames and the attention backend; the shots;
+    the windows; the --quality level, at every level (_quality_said); the swapped blocks, where
+    the VAE is in the DiT's phase and what of the DiT stays in the VAE's; the system memory;
+    each VAE pass, untiled or its tiles, their overlap and grid; the room a VAE pass is held to
+    (VAE_ROOM); the scratch of the longest tiled shot; the predicted peaks and which bounds the
+    plan; the time, which no estimate gives yet; what was pinned. recorded: the plan of a job
+    resumed that has made units, whose window cap and tiles were kept from the job's record so
+    that the output stays bit for bit (plan's `recorded`): their lines say so in place of the
+    rule. A window the planner shortened for the host's memory, tiles it shrank for it, say what
+    the card alone gives and why it isn't taken (Peaks.shortened, Peaks.shrunk). The lines stay
+    short, one terminal line where they can, two at most; the manual's words."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
     job = _job(peaks.reading, target, shots, False, numz_padding, peaks.attention)
     height, width = job.padded
+    out_height, out_width = output_size(target)
     frames = Counter(shot.frames for shot in shots)
     windows = {count: len(shot_layout(count, plan.window)) for count in frames}
     whole = sum(number for count, number in frames.items() if windows[count] == 1)
     joins = sum((windows[count] - 1) * number for count, number in frames.items())
-    cap = (
-        "no cap on the windows"
-        if plan.window is None
-        else f"windows of {_count(plan.window, 'latent')} at most"
-    )
-    # The longest window run, where the cap doesn't say it: a cap pinned or recorded above it.
-    if peaks.window != plan.window:
-        cap += f", the longest run {_count(peaks.window, 'latent')}"
-    # A window the planner shortened for the host's memory: what the card alone holds, and why
-    # it isn't taken.
-    alone = ""
-    if peaks.shortened is not None:
-        short = peaks.shortened
-        alone = (
-            f"; the card alone holds windows of {_count(short.window, 'latent')}, whose plan"
-            f" takes {short.taken / 100:.2f} GiB of system memory where"
-            f" {short.available / 100:.2f} GiB are available: the longest window whose plan fits"
-            " both is taken"
-        )
-    lines = [
-        _card_said(card, peaks),
-        f"frames padded to {width}x{height}, {peaks.tokens:,} tokens a latent, attention on"
-        f" {_ATTENTION_SAID[peaks.attention]}",
-        f"{_count(len(shots), 'shot')}, the longest of {_count(job.frames, 'frame')}"
-        f" ({_count(job.lengths[-1], 'latent')})",
-        f"{cap}: {whole} of {_count(len(shots), 'shot')} in one window, {_count(joins, 'join')}"
-        f"{alone}",
-    ]
-    if QUALITY[quality] > 1:
-        lines.append(_runs_said(shots, target, quality))
-    swapped = (
-        f"{plan.swapped} of the DiT's {BLOCKS} blocks swapped"
-        if plan.swapped
-        else "no block of the DiT swapped"
-    )
-    vae = "on" if plan.vae_in_dit else "off"
+    lines = [*_card_said(card, peaks)]
     lines.append(
-        f"{swapped}, the VAE {vae} the GPU in the DiT's phase; in the encode,"
+        f"frames: {out_width}x{out_height} padded to {width}x{height} for the model,"
+        f" {peaks.tokens:,} tokens a latent"
+    )
+    if peaks.attention == FLASH_ATTN_2:
+        lines.append("attention: FlashAttention 2, which is installed")
+    else:
+        lines.append(
+            "attention: PyTorch's SDPA, FlashAttention 2 not being installed: a window takes"
+            " more memory under it"
+        )
+    lines.append(
+        f"shots: {len(shots)}, the longest of {_count(job.frames, 'frame')}"
+        f" ({_count(job.lengths[-1], 'latent')})"
+    )
+    lines.append(_windows_said(job, plan, peaks, pins, recorded, whole, joins, len(shots)))
+    lines.append(_quality_said(shots, target, quality))
+    lines.append(_swap_said(plan, pins))
+    lines.append(_vae_said(plan))
+    lines.append(
+        f"the DiT in the VAE's passes: in the encode,"
         f" {_resident_said(plan.resident_encode, plan.swapped)}; in the decode,"
-        f" {_resident_said(plan.resident_decode, plan.swapped)}"
+        f" {_resident_said(plan.resident_decode, plan.swapped)}; as much as fits beside each"
     )
     process, pinned, held, allowance = _host_hundredths(plan, peaks.shot)
     left = _left(plan, "the DiT's other parameters", "the VAE")
-    if left:
-        copies = f"{pinned / 100:.2f} GiB of system memory pinned for {left}"
-    else:
-        copies = "no system memory pinned, nothing leaving the GPU"
+    copies = f"{pinned / 100:.2f} GiB pinned for {left}" if left else "nothing pinned"
     in_all = process + pinned + held + allowance
     # The shot that holds the most: the longest, but where a shorter one in fewer windows does.
     if peaks.holder == job.lengths[-1]:
@@ -1261,31 +1256,17 @@ def said(
     else:
         whose = f"a shot of {_count(peaks.holder, 'latent')} at the most, more than the longest"
     lines.append(
-        f"{copies}; {held / 100:.2f} GiB for {whose},"
-        f" {_MOMENT_SAID[peaks.moment]}; {in_all / 100:.2f} GiB of system memory in all"
+        f"system memory: {in_all / 100:.2f} GiB in all; {copies}; {held / 100:.2f} GiB for"
+        f" {whose}, {_MOMENT_SHORT[peaks.moment]}"
     )
-    # Tiles the planner shrank for the host's memory: what the card alone gives, and why it isn't
-    # taken.
-    smaller = ""
-    if peaks.shrunk is not None:
-        shrunk = peaks.shrunk
-        smaller = (
-            f"; the card alone takes the encode {_tiles_said(shrunk.encode)} and the decode"
-            f" {_tiles_said(shrunk.decode)}, whose plan takes {shrunk.taken / 100:.2f} GiB of"
-            f" system memory where {shrunk.available / 100:.2f} GiB are available: the DiT kept"
-            " on the GPU in the VAE's phases, the largest tiles whose plan fits both are taken"
-        )
+    for phase, tiles, pin in (
+        ("encode", plan.encode_tiles, pins.encode_tile),
+        ("decode", plan.decode_tiles, pins.decode_tile),
+    ):
+        lines.append(_vae_pass_said(job, phase, tiles, pin, recorded, peaks.shrunk))
     lines.append(
-        f"encode {_pass_said(job, plan.encode_tiles)}, decode"
-        f" {_pass_said(job, plan.decode_tiles)}, each held {_gib(VAE_ROOM)} GiB under the budget"
-        f"{smaller}"
-    )
-    names = {"encode": "encode", "dit": "DiT's phase", "decode": "decode"}
-    lines.append(
-        f"predicted peaks: encode {_gib(peaks.encode)} GiB, DiT {_gib(peaks.dit)} GiB, decode"
-        f" {_gib(peaks.decode)} GiB; the {names[peaks.bound]} bounds the plan,"
-        f"{'' if peaks.bound == 'dit' else ' its room counted,'}"
-        f" {_gib(peaks.budget - peaks.need(peaks.bound))} GiB under the budget"
+        f"the VAE's room: {_gib(VAE_ROOM)} GiB of the budget left free in each VAE pass, for the"
+        " large pieces of memory a pass asks for at once"
     )
     if peaks.scratch:
         # A scratch over the allowance goes whole to its file (tiling.Scratch).
@@ -1294,15 +1275,24 @@ def said(
             number for count, number in frames.items() if scratch(job.padded, count) > allowed
         )
         where = (
-            f"over which the scratch of {over} of {_count(len(shots), 'shot')} goes whole to a"
+            f"over it, the scratch of {over} of {_count(len(shots), 'shot')} goes whole to a"
             " memory-mapped file"
             if over
             else "which holds every shot's"
         )
         lines.append(
-            f"scratch of the longest tiled shot: {_gib(peaks.scratch)} GiB; an allowance of"
-            f" {allowance / 100:.2f} GiB of system memory, {where}"
+            f"scratch: {_gib(peaks.scratch)} GiB for the longest tiled shot, what a tiled pass"
+            f" keeps between its tiles; in system memory up to an allowance of"
+            f" {allowance / 100:.2f} GiB, {where}"
         )
+    names = {"encode": "encode", "dit": "DiT's phase", "decode": "decode"}
+    lines.append(
+        f"predicted peaks: encode {_gib(peaks.encode)} GiB, DiT {_gib(peaks.dit)} GiB, decode"
+        f" {_gib(peaks.decode)} GiB; the {names[peaks.bound]} bounds the plan,"
+        f"{'' if peaks.bound == 'dit' else ' its room counted,'}"
+        f" {_gib(peaks.budget - peaks.need(peaks.bound))} GiB under the budget"
+    )
+    lines.append("time: no estimate yet")
     options = (
         ("--window", pins.window),
         ("--swap-blocks", pins.swap_blocks),
@@ -1310,8 +1300,132 @@ def said(
         ("--decode-tile", pins.decode_tile),
     )
     given = [f"{option} {value}" for option, value in options if value is not None]
-    lines.append(f"pinned: {', '.join(given)}" if given else "nothing pinned")
+    lines.append(
+        f"pinned: {', '.join(given)}, taken exactly"
+        if given
+        else "pinned: nothing; --window, --swap-blocks, --encode-tile and --decode-tile each fix"
+        " a choice"
+    )
     return [f"plan: {line}" for line in lines]
+
+
+# What the plan's lines say of a value a resume takes from the job's record (said).
+_KEPT = "kept from the job's record, so that the output stays bit for bit"
+
+
+def _windows_said(
+    job: _Job,
+    plan: Plan,
+    peaks: Peaks,
+    pins: Pins,
+    recorded: bool,
+    whole: int,
+    joins: int,
+    shots: int,
+) -> str:
+    """The plan's line of the windows (said): the cap, in latents and frames, and the longest
+    window run where the cap doesn't say it, a cap pinned or recorded above it; why: pinned,
+    kept from the record, shortened for the host's memory (Peaks.shortened), the longest shot
+    whole, or the longest window the budget holds (DESIGN.md, Memory planner, Choices, 1); the
+    shots in one window and the joins; what a longer window gives; --window."""
+    if plan.window is None:
+        cap = "no cap"
+    else:
+        cap = f"{_count(plan.window, 'latent')} at most ({_count(_frames(plan.window), 'frame')})"
+    # The longest window run, where the cap doesn't say it: a cap pinned or recorded above it.
+    if peaks.window != plan.window:
+        cap += f", the longest run {_count(peaks.window, 'latent')}"
+    if pins.window is not None:
+        why = "pinned by --window"
+    elif recorded:
+        why = _KEPT
+    elif peaks.shortened is not None:
+        short = peaks.shortened
+        why = (
+            f"shortened from {_count(short.window, 'latent')} for the host's memory (their plan"
+            f" {short.taken / 100:.2f} GiB of {short.available / 100:.2f} available)"
+        )
+    elif plan.window is not None and plan.window >= job.lengths[-1]:
+        why = "the longest shot whole, which the budget holds"
+    else:
+        why = "the longest the budget holds"
+    gives = "; a longer window, fewer joins" if joins else ""
+    return (
+        f"windows: {cap}, {why}: {whole} of {_count(shots, 'shot')} in one window,"
+        f" {_count(joins, 'join')}{gives}; --window N caps them"
+    )
+
+
+def _frames(latents: int) -> int:
+    """The frames `latents` latents hold: 1 in the first, 4 in each next (DESIGN.md, Terms)."""
+    return 4 * latents - 3
+
+
+def _swap_said(plan: Plan, pins: Pins) -> str:
+    """The plan's line of the swapped blocks (said): how many; why: pinned, none needed, the VAE
+    kept on the GPU for the host's memory (_vae_kept), or the fewest that hold the window
+    (DESIGN.md, Memory planner, Choices, 2); what it costs; --swap-blocks."""
+    if pins.swap_blocks is not None:
+        why = "pinned by --swap-blocks"
+    elif not plan.swapped:
+        why = "the window fitting with the DiT whole on the GPU"
+    elif plan.vae_in_dit:
+        why = "more than the window needs: the VAE stays on the GPU, which spares system memory"
+    else:
+        why = "the fewest that hold the window"
+    if not plan.swapped:
+        return f"blocks swapped: none, {why}; --swap-blocks N swaps some"
+    return (
+        f"blocks swapped: {plan.swapped} of the DiT's {BLOCKS}, {why}: slower, not worse;"
+        " --swap-blocks N"
+    )
+
+
+def _vae_said(plan: Plan) -> str:
+    """The plan's line of the VAE's weights in the DiT's phase (said): off the GPU, given to the
+    window, before one more block is swapped; or on it, beside the window."""
+    if plan.vae_in_dit:
+        return "the VAE: on the GPU in the DiT's phase, the window fitting beside it"
+    return (
+        f"the VAE: off the GPU in the DiT's phase, its {_gib(VAE_WEIGHTS)} GiB given to the window"
+    )
+
+
+def _vae_pass_said(
+    job: _Job,
+    phase: str,
+    tiles: Tiles | None,
+    pin: int | None,
+    recorded: bool,
+    shrunk: Shrunk | None,
+) -> str:
+    """The plan's line of a VAE pass, the encode or the decode (said): untiled, or its tiles,
+    their overlap and grid; why: pinned, kept from the record, shrunk for the host's memory
+    (Peaks.shrunk), the whole frame fitting, or the largest tiles that fit (DESIGN.md, Memory
+    planner, Choices, 3); what tiles cost; --encode-tile or --decode-tile."""
+    option = f"--{phase}-tile"
+    alone = None if shrunk is None else (shrunk.encode if phase == "encode" else shrunk.decode)
+    if pin is not None:
+        why = f"pinned by {option}"
+    elif recorded:
+        why = _KEPT
+    elif shrunk is not None and alone != tiles:
+        why = (
+            f"shrunk from {'untiled' if alone is None else f'{alone.size} px'} for the host's"
+            f" memory (that plan {shrunk.taken / 100:.2f} GiB of {shrunk.available / 100:.2f}"
+            " available)"
+        )
+    elif tiles is None:
+        why = "the whole frame fitting the budget"
+    else:
+        why = f"the whole frame not fitting the budget, the largest that do, up to {TILE_MAX} px"
+    if tiles is None:
+        return f"{phase}: untiled, {why}; {option} PX tiles it"
+    rows, columns = _grid(job.padded, tiles)
+    return (
+        f"{phase}: tiles of {tiles.size} px overlapping by {tiles.overlap}, {columns} across,"
+        f" {rows} down, {why}: a slight colour drift, which split corrects; {option} PX"
+    )
 
 
 def beyond_measured(plan: Plan) -> list[str]:
@@ -2186,26 +2300,31 @@ def _named(reading: Reading, said: Callable[[float], str]) -> str:
     )
 
 
-def _card_said(card: str, peaks: Peaks) -> str:
-    """The plan's first line (said): the card, its free memory and the budget. On a driver that
-    refuses, one figure, what it reports free. On a run held to the card (memory.Reading.held),
-    each figure by its name: the free memory the run is held under, the driver's or the whole
-    card's, with the other; what torch's limit leaves of it (Reading.left), and what the plan
-    counts on less again, which it leaves torch's allocator beyond a peak (memory.RESERVE),
-    two figures that were given as one, as the hold (a review's finding, 2026-10-12); and the
-    budget, which is what the plan counts on there, no margin taken on top (_Job.margin), and
-    which every refusal is counted from."""
+def _card_said(card: str, peaks: Peaks) -> list[str]:
+    """The plan's first lines (said): the card, its free memory and the budget, with the margin
+    and the reserve by their names and figures. On a driver that refuses, one line: what it
+    reports free, the budget that less the margin (MARGIN), and no reserve. On a run held to the
+    card (memory.Reading.held), two: the free memory the run is held under, the driver's figure
+    or the whole card's, with the other (_named); then the budget, what the plan counts on: that
+    less what torch's limit leaves under it (Reading.left) and the reserve the plan leaves
+    torch's allocator beyond a step's peak (memory.RESERVE), two figures that were once given as
+    one (a review's finding, 2026-10-12), the margin counted in the reserve (_Job.margin)."""
     reading = peaks.reading
     if not reading.held:
-        return f"{card}, {_gib(peaks.free)} GiB free, a budget of {_gib(peaks.budget)} GiB"
+        return [
+            f"card: {card}, {_gib(peaks.free)} GiB free, a budget of {_gib(peaks.budget)} GiB:"
+            f" the margin of {_gib(MARGIN)} GiB left to the desktop and other programs; no"
+            " reserve, the driver refusing memory the card doesn't have"
+        ]
     free = _held_under(reading)
-    return (
-        f"{card}, {_gib(free)} GiB free {_named(reading, _gib)}; the run is held to the card's"
-        f" own memory, its driver giving more than the card has: torch is limited"
-        f" {_gib(reading.left)} GiB under that, and the plan counts on"
-        f" {_gib(free - reading.left - peaks.free)} GiB less again, what it leaves torch's"
-        f" allocator beyond a step's peak: a budget of {_gib(peaks.budget)} GiB"
-    )
+    return [
+        f"card: {card}, {_gib(free)} GiB free {_named(reading, _gib)}: the run is held to the"
+        " card's own memory, its driver giving more than the card has",
+        f"budget: {_gib(peaks.budget)} GiB, the {_gib(free)} GiB free less torch's limit,"
+        f" {_gib(reading.left)} GiB under it, and the reserve of"
+        f" {_gib(free - reading.left - peaks.free)} GiB left to torch's allocator beyond a step's"
+        f" peak; the margin of {_gib(MARGIN)} GiB is in the reserve",
+    ]
 
 
 def _there(job: _Job) -> str:
@@ -2253,14 +2372,6 @@ def _freeable(job: _Job, need: float) -> bool:
 def _tiles_said(tiles: Tiles | None) -> str:
     """A pass as a refusal says it: untiled, or in its tiles."""
     return "untiled" if tiles is None else f"in tiles of {tiles.size} px"
-
-
-def _pass_said(job: _Job, tiles: Tiles | None) -> str:
-    """A pass as the plan's lines say it: untiled, or its tiles and their grid, rows x columns."""
-    if tiles is None:
-        return "untiled"
-    rows, columns = _grid(job.padded, tiles)
-    return f"in tiles of {tiles.size} px, {rows} x {columns}"
 
 
 def _resident_said(resident: int | None, swapped: int) -> str:

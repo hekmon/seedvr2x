@@ -706,9 +706,9 @@ def test_the_frames_the_earlier_runs_keep(frames: int, runs: int, kept: int) -> 
 def test_the_plan_says_the_disk_the_kept_frames_take() -> None:
     # A shot of 1,000 frames at 1080p, 4 runs: 750 frames kept, 12,441,600 bytes each at 16 bits
     # (1920 x 1080 x 3 x 2, DESIGN.md's 12.4 MB), 8.69 GiB; the shorter shot keeps less.
-    said = planner._runs_said([Shot(0, 1000), Shot(1000, 1100)], (1080, 1920), "maximum")  # pyright: ignore[reportPrivateUsage]
-    assert "8 runs in all" in said
-    assert "the longest shot keeps 8.69 GiB of frames on disk" in said
+    said = planner._quality_said([Shot(0, 1000), Shot(1000, 1100)], (1080, 1920), "maximum")  # pyright: ignore[reportPrivateUsage]
+    assert "4 runs a shot, 8 in all" in said
+    assert "8.69 GiB of frames on disk for the longest shot" in said
 
 
 def test_the_kept_bytes_are_design_s() -> None:

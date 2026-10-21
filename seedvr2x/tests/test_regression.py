@@ -67,8 +67,9 @@ Every case pins the passes its reference was made with, untiled or in its tiles,
 test_milestone1_unpinned: numz-7b with no tile pinned, so that a bit comparison goes through the
 planner's own choice of passes (DESIGN.md, Memory planner, Choices, 3). The plan is made first,
 by the same command with --plan, which runs the first pass and plans, loading no model today
-(DESIGN.md has --plan load them for the time estimates' calibration, which isn't built): its line
-of the passes must say both untiled, as numz ran them; the run then takes that plan, and the
+(DESIGN.md has --plan load them for the time estimates' calibration, which isn't built): its
+lines of the passes, "plan: encode: untiled, ..." and "plan: decode: untiled, ...", must say both
+untiled, as numz ran them; the run then takes that plan, and the
 master and frames are numz's bit for bit. A card that can't run untiled can't make numz's untiled
 master (the untiled decode of these frames, padded to 1920x1088, takes 37.09 GiB of free VRAM by
 the planner, the DiT off the GPU, its room and the margin counted): where the driver reports
@@ -255,8 +256,10 @@ def upscaled(
     # ours.mkv is made in ours.mkv.work, a directory's job, and --plan makes that job with its
     # first pass (cli._run): the run after it resumes the job, and scores no frame again. Without
     # a --plan call, or where the run doesn't say it resumes, the first pass is the run's own.
-    resumes = " seedvr2x: resuming " in run.stderr
-    detected(planned if planned is not None and resumes else run.stderr)
+    # (A line without --verbose starts with the time of day, "12:00:00 resuming ..."; under it, in
+    # the logger's format, "... INFO seedvr2x: resuming ...": cli.VERBOSE_FORMAT.)
+    resumes = re.search(r"^(\d\d:\d\d:\d\d|.* INFO seedvr2x:) resuming ", run.stderr, re.M)
+    detected(planned if planned is not None and resumes is not None else run.stderr)
     return run.stderr
 
 
@@ -269,17 +272,22 @@ def detected(log: str) -> None:
 
 
 def plan_lines(log: str) -> list[str]:
-    """The plan's lines in a run's log, as planner.said gives them, without their "plan: "."""
+    """The plan's lines in a run's log, as planner.said gives them, without their "plan: " (their
+    time of day, or under --verbose their date and logger, dropped with it)."""
     return [line.split("plan: ", 1)[1] for line in log.splitlines() if "plan: " in line]
 
 
 def choices(lines: list[str]) -> list[str]:
     """A plan's lines (plan_lines) without what follows the free memory read that time: the
-    card's line, the first, and how far under the budget the plan is, the end of the peaks'
-    line. What is left is the plan: its windows, where the weights are, its passes, its
-    predicted peaks and its pins."""
+    card's line and, on a run held to the card, its budget's, and how far under the budget the
+    plan is, the end of the peaks' line. What is left is the plan: its windows, where the weights
+    are, its passes, its predicted peaks and its pins."""
     peaks = "predicted peaks: "
-    return [line.split(";", 1)[0] if line.startswith(peaks) else line for line in lines[1:]]
+    return [
+        line.split(";", 1)[0] if line.startswith(peaks) else line
+        for line in lines
+        if not line.startswith(("card: ", "budget: "))
+    ]
 
 
 # What every refusal of the planner's for the memory a job takes says (planner.PlanError): the
@@ -405,8 +413,9 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     # the plan, its cut list written and no master (cli.py); --plan loads no model today. A card
     # where the plan is refused, or tiles a pass, can't make numz's untiled master: the case is
     # skipped where the driver reports under 40 GiB free, saying the refusal, or the plan's line
-    # of its passes (planner.said), and fails where it reports more (unpinned). Else that line
-    # says both untiled, as numz ran them, and nothing is pinned; the run then takes the same
+    # of the pass it tiles (planner.said), and fails where it reports more (unpinned). Else the
+    # encode's and the decode's lines say untiled, as numz ran them, and nothing is pinned; the
+    # run then takes the same
     # plan, and its bits are numz's. The run resumes the job the --plan call made, so its first
     # pass is read in that call's log (upscaled).
     assert REFERENCE is not None
@@ -424,19 +433,25 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     )
     # A plan refused: exit status 1, the refusal the log's error, after the logger's name
     # (cli._run). Any other failure fails the case.
-    logged = [line.split(" ERROR ", 1)[1] for line in plan.stderr.splitlines() if " ERROR " in line]
-    errors = [line.split(": ", 1)[-1] for line in logged]
+    # A line without --verbose is "12:00:00 ERROR message", this command's.
+    errors = [
+        found[1]
+        for line in plan.stderr.splitlines()
+        if (found := re.match(r"\d\d:\d\d:\d\d ERROR (.*)", line))
+    ]
     refusals = [error for error in errors if any(what in error for what in REFUSED)]
     if plan.returncode == 1 and refusals:
         unpinned(plan.stderr, f"the plan is refused: {refusals[0]}")
     assert plan.returncode == 0, plan.stderr[-3000:]
     detected(plan.stderr)
     planned = plan_lines(plan.stderr)
-    passes = [line for line in planned if line.startswith("encode ")]
-    assert len(passes) == 1 and "nothing pinned" in planned, planned
-    if "in tiles of" in passes[0]:
-        unpinned(plan.stderr, f"the plan tiles a pass: plan: {passes[0]}")
-    assert passes[0].startswith("encode untiled, decode untiled, "), planned
+    passes = [line for line in planned if line.startswith(("encode: ", "decode: "))]
+    assert len(passes) == 2 and any(line.startswith("pinned: nothing") for line in planned), planned
+    tiled = [line for line in passes if "tiles of" in line]
+    if tiled:
+        unpinned(plan.stderr, f"the plan tiles a pass: plan: {tiled[0]}")
+    assert passes[0].startswith("encode: untiled, "), planned
+    assert passes[1].startswith("decode: untiled, "), planned
     assert listed.is_file() and not (tmp_path / "ours.mkv").exists()
     log = upscaled(*job, numz_padding=True, pin_untiled=False, planned=plan.stderr)
     assert choices(plan_lines(log)) == choices(planned), (plan_lines(log), planned)

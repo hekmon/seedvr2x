@@ -162,8 +162,9 @@ def ctrl_c(delay: float = 0.0) -> Callable[[int], None]:
     return act
 
 
-# The notice of a first Ctrl-C (runtime/stop.py), after which a person presses it again.
-NOTICE = "seedvr2x: stopping after"
+# The notice of a first Ctrl-C (runtime/stop.py: the time of day, then the notice), after which a
+# person presses it again.
+NOTICE = " stopping after"
 
 
 def progress(directory: Path) -> tuple[list[bool], list[int], list[bool]]:
@@ -263,11 +264,13 @@ def test_tiled_interrupted_and_resumed_bit_identical(tmp_path: Path) -> None:
     status, log = upscale(tmp_path, "memory", options=TILED)
     assert status == 0, log[-3000:]
     assert f"tiled encode: {GRID}" in log and f"tiled decode: {GRID}" in log
-    assert "in system memory" in log and "scratch.bf16" not in log
+    # The tiled passes' own line (tiling._said: "its scratch, N bytes, in system memory"), not
+    # the plan's, which says where a scratch may go ("scratch: ... in system memory up to ...").
+    assert "bytes, in system memory" in log and "scratch.bf16" not in log
     status, log = upscale(tmp_path, "whole", options=TILED, on_disk=True)
     assert status == 0, log[-3000:]
     assert f"tiled encode: {GRID}" in log and f"tiled decode: {GRID}" in log
-    assert "resume/shot_000004/scratch.bf16" in log and "in system memory" not in log
+    assert "resume/shot_000004/scratch.bf16" in log and "bytes, in system memory" not in log
     listing = ["checksums", "frame_index.bin", "manifest.json", *SEGMENTS]
     assert sorted(p.name for p in (tmp_path / "whole").iterdir()) == listing
     for name in SEGMENTS:

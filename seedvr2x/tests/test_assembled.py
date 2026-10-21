@@ -8,6 +8,7 @@ finished file held to milestone 6's acceptance against the source."""
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -915,13 +916,15 @@ def test_ctrl_c_once_stops_before_the_assembly_or_lets_it_finish(film_directory:
     final, work = film_directory / "x.mkv", film_directory / "x.mkv.work"
     status, text = stopping(film_directory, "decode 77", (signal.SIGINT,))
     assert status == 130, text
-    assert "seedvr2x: stopping after segment 4/4's decode and write" in text
+    assert re.search(r"^\d\d:\d\d:\d\d stopping after segment 4/4's decode and write", text, re.M)
     assert "stopped before the assembly, as asked; every segment finished, 4 in" in text
     assert "x.mkv.work: the same command assembles x.mkv" in text
     assert listing(work) == FINISHED and not final.exists()
     status, text = stopping(film_directory, "assembly", (signal.SIGINT,))
     assert status == 0, text
-    assert "seedvr2x: stopping after the assembly of x.mkv; Ctrl-C again" in text
+    assert re.search(
+        r"^\d\d:\d\d:\d\d stopping after the assembly of x.mkv; Ctrl-C again", text, re.M
+    )
     assert "finished already, its 4 segments" in text and "CALLS \n" in text
     assert not work.exists()
     held_to_the_source(final, film_directory / "film.mkv", film_directory)

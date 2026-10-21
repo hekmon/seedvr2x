@@ -10,6 +10,7 @@ GPU polling (model.synchronize), not blocked in a copy for a whole decode slice 
 import contextlib
 import os
 import signal
+import time
 from collections.abc import Callable, Generator
 from types import FrameType, TracebackType
 from typing import Any, Self
@@ -49,8 +50,10 @@ class Stop:
             raise KeyboardInterrupt
         self.asked = True
         # A handler may run in the middle of a write to stderr, which a logging call would then
-        # enter again: written straight to the descriptor instead.
-        notice = f"\nseedvr2x: stopping after {self.unit}; Ctrl-C again stops at once\n"
+        # enter again: written straight to the descriptor instead, after the time of day, as
+        # every line seedvr2x prints starts (cli._Lines).
+        when = time.strftime("%H:%M:%S")
+        notice = f"\n{when} stopping after {self.unit}; Ctrl-C again stops at once\n"
         # stderr may be a pipe whose reader the same Ctrl-C ended (| tee): the stop goes on.
         with contextlib.suppress(OSError):
             os.write(2, notice.encode())

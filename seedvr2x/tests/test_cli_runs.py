@@ -52,13 +52,25 @@ KEPT_BYTES = 96 * 128 * 3 * 2
 # The source's frames, yuv420p at 64x48.
 SOURCE_BYTES = 64 * 48 * 3 // 2
 
-# The plan's line on several runs (planner._runs_said): the runs a shot, and the count in all.
+# The plan's line on the --quality level of several runs a shot (planner._quality_said): the
+# runs a shot, and the count in all, and the other levels.
 RUNS_SAID = (
-    "plan: --quality {level}: {runs} runs a shot, {total} in all, each frame taken from the run"
-    " that rebuilds it best: about {runs} times the GPU time of standard's one run, which no"
-    " estimate gives yet, in the memory of one run; the longest shot keeps {kept} GiB of frames on"
-    " disk, beside the job's manifest, while its runs are decoded"
+    "plan: quality: {level}, {runs} runs a shot, {total} in all, each frame from its best run:"
+    " about {runs} times standard's GPU time, one run's memory; {kept} GiB of frames on disk for"
+    " the longest shot; --quality {others}"
 )
+# What it says at the default level (the line is there at every level).
+STANDARD_SAID = (
+    "plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2"
+    " or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time"
+)
+
+
+def quality_line(lines: list[str]) -> str:
+    """The one line of the plan's lines (plan_lines) that says the --quality level."""
+    found = [line for line in lines if line.startswith("plan: quality: ")]
+    assert len(found) == 1, lines
+    return found[0]
 
 
 # The --quality levels by their runs a shot as the tests name them (job.QUALITY).
@@ -249,8 +261,8 @@ def test_records(
     assert [entry["latents"] for entry in [long, *long["runs"]]] == [
         (padded_length(frames) - 1) // 4 + 1 for frames in (9, 8, 7, 6)
     ]
-    assert plan_lines(caplog)[4] == RUNS_SAID.format(
-        level="maximum", runs=4, total="8 runs", kept="0.00"
+    assert quality_line(plan_lines(caplog)) == RUNS_SAID.format(
+        level="maximum", runs=4, total=8, kept="0.00", others="standard or enhanced: 1 or 2 runs"
     )
     steps.stop = "decode 12"
     stopped(tmp_path, source_path, "single", *options, "--quality", "standard")
@@ -399,10 +411,10 @@ def test_plan_says_the_runs(
     caplog: pytest.LogCaptureFixture,
     runs: str | None,
 ) -> None:
-    # --plan says the runs before anything runs, one line more than a job of one run a shot, which
-    # has none: after the line on the windows, the runs counted by what each shot has (JOB's shots
-    # of 3, 1 and 21 frames have 3, 1 and 4 runs at 4 a shot, 2, 1 and 2 at 2). The other lines
-    # are the one run's, the plan holding for every run. No model loads.
+    # --plan says the runs before anything runs, in its line on the quality level, which every
+    # level has, the default's too: the runs counted by what each shot has (JOB's shots of 3, 1
+    # and 21 frames have 3, 1 and 4 runs at 4 a shot, 2, 1 and 2 at 2). The other lines are the
+    # one run's, the plan holding for every run. No model loads.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     with monkeypatch.context() as patch:
@@ -413,16 +425,20 @@ def test_plan_says_the_runs(
         options = [] if runs is None else ["--quality", LEVEL[runs]]
         assert upscale(tmp_path, source_path, "out", *JOB, *options, "--plan", "more.txt") == 0
         lines = plan_lines(caplog)
-    assert len(base) == 9 and "runs a shot" not in " ".join(base)
+    assert len(base) == 16 and quality_line(base) == STANDARD_SAID
     if runs is None:
         assert lines == base
         return
-    total = {"4": "8 runs", "2": "5 runs"}[runs]
+    total = {"4": 8, "2": 5}[runs]
+    others = {"4": "standard or enhanced: 1 or 2 runs", "2": "standard or maximum: 1 or 4 runs"}[
+        runs
+    ]
     # The stand-in's 128x96 frames keep 2.4 MB at the most (16 of the 21-frame shot's at 4 a shot),
     # 0.00 GiB as said; tests/test_runs.py holds the figure at 1080p.
-    said = RUNS_SAID.format(level=LEVEL[runs], runs=runs, total=total, kept="0.00")
-    assert lines == [*base[:4], said, *base[4:]]
-    assert base[3].startswith("plan: windows of 5 latents at most")
+    said = RUNS_SAID.format(level=LEVEL[runs], runs=runs, total=total, kept="0.00", others=others)
+    assert lines == [said if line == STANDARD_SAID else line for line in base]
+    windows = next(line for line in base if line.startswith("plan: windows: "))
+    assert windows.startswith("plan: windows: 5 latents at most")
     assert not (tmp_path / "out").joinpath("resume").exists()
 
 
@@ -430,15 +446,15 @@ def test_plan_says_the_runs(
 def test_plan_counts_a_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # One run in all, said in the singular: a one-frame source has run 0 only at 4 a shot.
+    # One run in all: a one-frame source has run 0 only at 4 a shot.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
     cuts = listed(tmp_path, "cuts.txt")
     options = ("--cuts", cuts, "--quality", "maximum", "--plan", str(tmp_path / "plan.txt"))
     assert upscale(tmp_path, source(tmp_path / "in.mkv", 1), "out", *options) == 0
-    assert plan_lines(caplog)[4] == RUNS_SAID.format(
-        level="maximum", runs=4, total="1 run", kept="0.00"
+    assert quality_line(plan_lines(caplog)) == RUNS_SAID.format(
+        level="maximum", runs=4, total=1, kept="0.00", others="standard or enhanced: 1 or 2 runs"
     )
 
 
