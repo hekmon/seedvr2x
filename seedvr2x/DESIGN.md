@@ -188,10 +188,13 @@ never requires it.
 **One long-running process** handles a whole job: the models are loaded once, and the plan says
 which stay on the GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewritten)).
 
-**What it prints** (the user, 2026-10-20; to be built): a foreground process, but a long one.
-Every line starts with the time of day, then its message (`23:05:12 plan: …`); a warning adds
-`WARNING`, an error `ERROR`. The date, the milliseconds and the logger's name are for
-`--verbose`. The plan's lines teach as they go (see [Memory planner](#memory-planner)).
+**What it prints** (the user, 2026-10-20; built on 2026-10-21): a foreground process, but a
+long one. Every line starts with the time of day, then its message (`23:05:12 plan: …`); a
+warning adds `WARNING`, an error `ERROR`. The date, the milliseconds and the logger's name are
+for `--verbose`, which keeps the old format whole. Python's own warnings go through the same
+lines (decided on 2026-10-21, to be built: they print in their own form today); a download's
+progress bar keeps its own. The plan's lines teach as they go (see
+[Memory planner](#memory-planner)).
 
 ### Language: all Python
 Every layer is Python, in one process per job. seedvr2x stands alone; with sptenc, the two
@@ -1288,14 +1291,12 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   every frame in order: up to (N − 1)/N of the longest shot (three quarters with 4 runs), at
   the 16 bits the master is written from, so no byte of it changes (12.4 MB a 1080p frame,
   49.8 MB at 4K: 37 GB for 750 frames of a 1,000-frame 4K shot). `--plan` says it, and a job
-  whose disk can't hold it is refused as soon as its shots are known, before the models load:
-  before the first pass on a resume that trusts its record, right after it otherwise, a new
-  job's longest shot being known only then (built on 2026-10-20; the refusal is to keep the
-  first pass, see [Pause and resume](#pause-and-resume)). The check is to count all that disk
-  holds at once at a shot's peak: the kept frames, and the scratch file of a tiled pass where
-  the plan spills one (one at a time, step 3), at every level, so at `standard` too (decided
-  on 2026-10-21, to be built; the check built counts the kept frames). The input copy isn't
-  counted: FFV1, its size follows the content, as the masters' does. Frames asked for in
+  whose disk can't hold it is refused once its plan is made, before the models load, its first
+  pass kept (see [Pause and resume](#pause-and-resume)). The check counts what the job writes
+  beside its manifest at a shot's peak: the kept frames, and the scratch file of a tiled pass
+  where the plan puts it on disk (one at a time, step 3), at every level, so at `standard` too
+  (built on 2026-10-21). The input copy isn't counted: FFV1, its size follows the content, as
+  the masters' does. Frames asked for in
   float (`--dump-frames`) are written by the run that makes them.
 - **Measured** (2026-10-20, numz, the 8 full-reference clips, seed 42;
   [numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)): against
@@ -2176,8 +2177,9 @@ first pass, whose shots are its input, and before the models load:
       uninterrupted run.
 - `--plan FILE` prints the plan and the time estimate without running the job, after the first
   pass (the shots are the plan's input), and writes the detected cut list to FILE for editing
-  (see [Shot detection](#shot-detection)). It fetches and checks the model files as a run
-  does, and loads them, for the calibration. It prints:
+  (see [Shot detection](#shot-detection)), a plan refused included: the cuts are the first
+  pass's, kept with it (decided on 2026-10-21, to be built). It fetches and checks the model
+  files as a run does, and loads them, for the calibration. It prints:
   - the card, its free memory and the budget
   - the padded size and the tokens per latent
   - the shots and the longest one; the window cap, the shots that run in one window, the joins
@@ -2189,8 +2191,8 @@ first pass, whose shots are its input, and before the models load:
   - the time per phase, the total, and the longest unit, which is how early `--until` may stop
   - what was pinned
 - **Every choice of the plan is said, at every run, in plain words** (the user, 2026-10-20:
-  most users learn seedvr2x by watching its runs and logs, not by reading the manual; to be
-  built). A run, `--plan` and a resume print the same block before the first unit, one line
+  most users learn seedvr2x by watching its runs and logs, not by reading the manual; built on
+  2026-10-21). A run, `--plan` and a resume print the same block before the first unit, one line
   per choice, each saying:
   - the value, its unit in words (windows of 13 latents, 49 frames; tiles of 1024 px, a grid
     of 2 × 2);
@@ -2204,10 +2206,16 @@ first pass, whose shots are its input, and before the models load:
   tiles' overlap, the reserve and the margin by their names and figures. So are the quality
   level and, once built, the time. A value a resume takes from the job's record says so, and
   why: kept, so that the output stays bit for bit. The lines stay short, one terminal line
-  where they can, two at most, in the manual's words (see [Terms](#terms)). The `plan:` lines
-  built with the planner give every value but the overlap, the reserve and the margin; they
-  say why only where a window was shortened or tiles shrunk for the host's memory, and name
-  an option only in a refusal.
+  where they can, two at most, in the manual's words (see [Terms](#terms)). Each line names its
+  choice, in this order: the card, the budget (on a run held to the card), the frames, the
+  attention, the shots, the windows, the quality, the blocks swapped, the VAE, the DiT in the
+  VAE's passes, the system memory, the encode, the decode, the VAE's room, the scratch (where a
+  pass is tiled), the predicted peaks, the time, and what was pinned. On the 96 GB card at
+  1080p: "windows: 12 latents at most (45 frames), the longest shot whole, which the budget
+  holds: 3 of 3 shots in one window, 0 joins; --window N caps them"; on an RTX 5090: "decode:
+  tiles of 1088 px overlapping by 64, 2 across, 2 down, the whole frame not fitting the
+  budget, the largest that do, up to 2048 px: a slight colour drift, which split corrects;
+  --decode-tile PX".
 - Validated before release with `vram_cap.py` emulation, from the smallest card the 7B fp16
   reaches up to 48 GB, and on a real consumer card for what emulation doesn't show: pinned
   host memory, the transfers, a desktop's share of the card, and the times.
@@ -2531,11 +2539,11 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     or in a finished file's work directory, its manifest and its frame index (see
     [Shot detection](#shot-detection)). A run refused after its first pass accepted the source
     leaves one too, whatever refuses it (its disk, the planner, the model load), and its
-    refusal says the first pass is kept (decided on 2026-10-21, to be built: until then such
-    a run writes nothing, and its first pass, about 17 min on a 2-hour HEVC master, is paid
-    again). A plan whose first pass runs again (its frame index lost, `ffmpeg` or the
-    conversions changed and accepted, a cut list dropped) writes the new pass the same way, at
-    once, in the run's environment.
+    refusal says the first pass is kept, and that the same command takes it up (built on
+    2026-10-21; until then such a run wrote nothing, and its first pass, about 17 min on a
+    2-hour HEVC master, was paid again). A plan whose first pass runs again (its frame index
+    lost, `ffmpeg` or the conversions changed and accepted, a cut list dropped) writes the new
+    pass the same way, at once, in the run's environment.
     - The same command without `--plan` runs it, with no second first pass.
     - A run whose settings differ only in its cuts (the cut list, the threshold, the
       detector's file) plans it again from its record, with no decode: the cuts are derived
@@ -2543,9 +2551,10 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       and planned again without one costs a first pass, no probabilities having been kept.
     - A run whose settings differ in what the first pass doesn't read (the quality level, the
       pins, the resolution, the models, the colour correction, the output's format, the
-      segments' command) plans it again from its record too, with no decode, the manifest
-      rewritten at once (decided on 2026-10-21, to be built): every way out a refusal names
-      keeps the first pass, but another disk.
+      segments' command, the shortest segment, the input's matrix and pixel aspect, the seed)
+      plans it again from its record too, with no decode, the manifest rewritten at once
+      (built on 2026-10-21): every way out a refusal names keeps the first pass, but another
+      disk. The first pass reads the source, `--frame-rate` and the shot detector's file.
     - A difference in what the first pass reads (the source, the frame rate), in the code, or
       a unit made, is another job, as above.
   - The first pass's record is trusted, and the pass isn't run again, when the content and the
@@ -2556,7 +2565,9 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - The frame index is derived data: missing or damaged on a resume, the first pass runs again
     and writes it; a finished job makes none again.
   - The directory must hold what the manifest names and nothing of anyone else's, dotfiles
-    included: anything else is refused, never deleted.
+    included: anything else is refused, never deleted, and before anything is written there
+    (decided on 2026-10-21, to be built: a plan whose first pass ran again rewrites its record
+    first today).
   - These are discarded: `.partial` files, an unfinished segment's file, unrecorded units, and
     the units of finished segments.
   - A recorded input copy that is missing or damaged is remade from the input, keeping the
@@ -2984,15 +2995,22 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      should be, each pinning an untiled pass the card can't hold (1080p's decode takes 36.2
      to 36.7 GiB, its encode 21.76); 3 of them ran, and their frames differ from the 96 GB
      card's references, as frames from another card do; one skipped, its plan tiling a pass;
-     and `split`'s study test assumes an untiled decode. So a gate there needs references of
-     its own (decided on 2026-10-21, to be built): seedvr2x's own frames on that card, made
-     by the code the 96 GB card gated that day, whose frames there are numz's bit for bit, in
-     the regression's cases, untiled at the largest size that fits it (720p does) and at the
-     tile pairs that fit. numz itself is run there once, on milestone 1's case at 720p, as a
-     cross-check that the card gives numz's frames too; the 96 GB card's references keep the
-     full check against it. The tests take their card's references; a case no reference
-     covers on a card is skipped there, saying why. `split`'s study test takes the decoded
-     slices where both decodes hand them to the correction.
+     and `split`'s study test assumes an untiled decode. So a gate there takes references of
+     its own (built on 2026-10-21): seedvr2x's own frames on that card, made by the code the
+     96 GB card gated that day, whose frames there are numz's bit for bit, in the regression's
+     cases, untiled at 792 rows, the largest that fitted that morning, and at the tile pairs
+     that fit. numz itself, run on that card in 7 of the 8 cases with its blocks swapped and
+     its VAE offloaded, gave the same frames, 45 of 45, masters and float frames: its swap and
+     offload change no bit. The 96 GB card's references keep the full check against it. The
+     tests take their card's references; a case no reference covers on a card is skipped
+     there, saying why. `split`'s study test takes the decoded slices where both decodes hand
+     them to the correction. On the code of 2026-10-21, the whole GPU suite on that card: 31
+     passed and 3 skipped, refused by their plans 0.05 to 0.50 GiB short (milestone 1 and a
+     padding case at 792 rows, the untiled encode of a tiled case at 1080p), the desktop
+     holding up to 1.1 GiB more of the card that afternoon; one case at 792 was refused in the
+     hold where two others at 792 ran. Decided on 2026-10-21, to be built: a gate's case keeps
+     its predicted peaks at least 2 GiB under that card's budget, read with the desktop idle,
+     its references made again at the size that does.
    - A job resumed with other memory free gives the uninterrupted run's output, bit for bit:
      run on 2026-10-11, from 16 GB to 24 GB.
    - Time estimates within a few percent of the measured times, on a healthy card: the
