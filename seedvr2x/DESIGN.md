@@ -647,8 +647,11 @@ Decoding goes through an ffmpeg pipe:
     centre-sited, and ffmpeg declares it so (MJPEG in AVI, MKV and MOV, with ffmpeg 6.1.1 and
     n9.0.2), so the tags cover it.
   - chroma kernel: bilinear, zscale's own (`filter=bilinear`, given explicitly), decided on
-    2026-10-20, to be built; Catmull-Rom (`filter=bicubic:param_a=0:param_b=0.5`, Keys' cubic
-    with a = −0.5, the kernel of step 0's resize) until then. Measured on 2026-10-19 on numz,
+    2026-10-20 and built that day in place of Catmull-Rom
+    (`filter=bicubic:param_a=0:param_b=0.5`, Keys' cubic with a = −0.5, the kernel of step 0's
+    resize). A job read with Catmull-Rom isn't resumed with bilinear: the code differs, and so
+    does the conversions' fingerprint. No GPU test's reference moved, every one reading RGB.
+    Measured on 2026-10-19 on numz,
     8 clips, with `split`'s correction
     ([numerics.md](../research/docs/numerics.md#the-decodes-chroma-the-kernel-the-models-input-is-read-with)):
     against bilinear, a source read with Catmull-Rom gives an output whose luma stays within
@@ -1257,9 +1260,9 @@ isn't built.
 
 ### Several runs of a shot, an option for quality
 
-Decided on 2026-10-20 (the user, on blind stills and loops), to be built: an option that runs
-each shot several times, its latent grid shifted, and takes each frame from the run where it
-ends its group of 4. Off by default: it costs as many times the GPU time.
+Decided on 2026-10-20 (the user, on blind stills and loops) and built that day: an option that
+runs each shot several times, its latent grid shifted, and takes each frame from the run where
+it ends its group of 4. Off by default: it costs as many times the GPU time.
 - **Why.** The VAE packs a shot's first frame alone into a latent, then 4 frames per latent
   (step 1), and one latent's 4 frames don't come out equal: the group's last is the closest
   to the ground truth (0.8–5.0 dB of PSNR-Y over the group's second, on 8 of 8 clips by VMAF
@@ -1277,8 +1280,14 @@ ends its group of 4. Off by default: it costs as many times the GPU time.
   every frame in order: up to (N − 1)/N of the longest shot (three quarters with 4 runs), at
   the 16 bits the master is written from, so no byte of it changes (12.4 MB a 1080p frame,
   49.8 MB at 4K: 37 GB for 750 frames of a 1,000-frame 4K shot). `--plan` says it, and a job
-  whose disk can't hold it is refused at its start. Frames asked for in float
-  (`--dump-frames`) are written by the run that makes them.
+  whose disk can't hold it is refused as soon as its shots are known, before the models load:
+  before the first pass on a resume that trusts its record, right after it otherwise, a new
+  job's longest shot being known only then (built on 2026-10-20; the refusal is to keep the
+  first pass, see [Pause and resume](#pause-and-resume)). The check is to count all that disk
+  holds at once at a shot's peak: the kept frames, and the scratch file of a tiled pass where
+  the plan spills one (one at a time, step 3), at every level, so at `standard` too (decided
+  on 2026-10-21, to be built; the check built counts the kept frames). Frames asked for in
+  float (`--dump-frames`) are written by the run that makes them.
 - **Measured** (2026-10-20, numz, the 8 full-reference clips, seed 42;
   [numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)): against
   one run, PSNR-Y +2.01 dB and VMAF +10.4 without correction (+1.51 and +7.85 after `split`),
@@ -1301,9 +1310,14 @@ ends its group of 4. Off by default: it costs as many times the GPU time.
 - **The option:** `--quality standard|enhanced|maximum` (the user, 2026-10-20: a name a user
   understands, the runs a shot being the code's): `standard` by default, one run a shot;
   `enhanced`, 2 runs; `maximum`, 4 runs.
-- **Validated by:** each run's frames bit-identical to a single run fed the shot from that
-  frame; the output's frames by the composite's rule; the user's eyes on long runs
-  (milestone 7).
+- **Validated** on 2026-10-21. On the 96 GB card, `maximum` gave measurement's 4-run
+  composite and `enhanced` its 2-run composite, 45 of 45 frames each, bit for bit
+  (cartoon-bright at 1080p, untiled, numz's draw and padding, no correction). On an RTX 5090,
+  tiled as its plan said (encode tiles of 1856 px, decode tiles of 1088 px, 17 blocks
+  swapped), each of `maximum`'s 45 frames equal to its run alone, fed the shot from that
+  frame. Kept at 16 bits, the frames change no byte of a master, in `gbrp16le`,
+  `yuv420p10le` or PNG, with `split` or none, nor of the float frames dumped (a CPU test
+  against the frames kept in float). Left: the user's eyes on long runs (milestone 7).
 
 ## Colour correction
 
@@ -2468,18 +2482,28 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       read.
   - **A plan** is a job with no unit made: what `--plan FILE` leaves in an output directory
     or in a finished file's work directory, its manifest and its frame index (see
-    [Shot detection](#shot-detection)).
+    [Shot detection](#shot-detection)). A run refused after its first pass accepted the source
+    leaves one too, whatever refuses it (its disk, the planner, the model load), and its
+    refusal says the first pass is kept (decided on 2026-10-21, to be built: until then such
+    a run writes nothing, and its first pass, about 17 min on a 2-hour HEVC master, is paid
+    again).
     - The same command without `--plan` runs it, with no second first pass.
     - A run whose settings differ only in its cuts (the cut list, the threshold, the
       detector's file) plans it again from its record, with no decode: the cuts are derived
       again and the manifest rewritten at once, in the run's environment. A plan cut by a list
       and planned again without one costs a first pass, no probabilities having been kept.
-    - Any other difference, or a unit made, is another job, as above.
+    - A run whose settings differ in what the first pass doesn't read (the quality level, the
+      pins, the resolution, the models, the colour correction, the output's format, the
+      segments' command) plans it again from its record too, with no decode, the manifest
+      rewritten at once (decided on 2026-10-21, to be built): every way out a refusal names
+      keeps the first pass, but another disk.
+    - A difference in what the first pass reads (the source, the frame rate), in the code, or
+      a unit made, is another job, as above.
   - The first pass's record is trusted, and the pass isn't run again, when the content and the
-    settings are unchanged and neither `ffmpeg` nor `conversions` changed. The shot detector's
-    probabilities are part of that record, though torch computes them: a torch, CUDA, GPU or
-    attention change doesn't run the detector again, so that a job's cuts stay its own. That
-    saves a full decode per resume, about 17 min on a 2-hour HEVC master.
+    settings it reads are unchanged and neither `ffmpeg` nor `conversions` changed. The shot
+    detector's probabilities are part of that record, though torch computes them: a torch,
+    CUDA, GPU or attention change doesn't run the detector again, so that a job's cuts stay its
+    own. That saves a full decode per resume, about 17 min on a 2-hour HEVC master.
   - The frame index is derived data: missing or damaged on a resume, the first pass runs again
     and writes it; a finished job makes none again.
   - The directory must hold what the manifest names and nothing of anyone else's, dotfiles
@@ -2879,6 +2903,8 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      with a shot's end repeated besides, the whole suite again, and a shot of 42 frames at
      1080p bit-identical to numz patched to repeat its last frame, and to numz itself in the
      tests' mirror mode.
+     On the code of 2026-10-20 (the decode's chroma kernel bilinear, `--quality`), on
+     2026-10-21: the box's CPU suite and the whole GPU suite, 34 tests.
    - On a real desktop card, an RTX 5090 under WSL2 held to its card (2026-10-12): the same
      job alone, beside a program holding 8 GiB, stopped then resumed, and with NVML silent,
      the same frames each time; each phase within 0.3 GiB of its prediction but the
@@ -2888,6 +2914,18 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      encode, 0.4 under. The 96 GB card's frames can't be held to that card's, nor its references
      run there: the encode, the DiT and the decode follow the card, and the noise, drawn on the
      CPU since 2026-10-16, no longer does (see [Pipeline](#pipeline-per-shot), step 2).
+     As a gate of its own (2026-10-21, on the code of 2026-10-20; about 24 GB beside the
+     desktop, the plan counting on 21.7 GiB), of the 34 GPU tests: 19 passed, held to that
+     card's own runs; 7 of the regression's were refused before the models load, as they
+     should be, each pinning an untiled pass the card can't hold (1080p's decode takes 36.2
+     to 36.7 GiB, its encode 21.76); 3 of them ran, and their frames differ from the 96 GB
+     card's references, as frames from another card do; one skipped, its plan tiling a pass;
+     and `split`'s study test assumes an untiled decode. So a gate there needs references of
+     its own (decided on 2026-10-21, to be built): numz run on that card in the regression's
+     modes, untiled at the largest size that fits it (720p does) and at the tile pairs that
+     fit; the tests take their card's references; a case no reference covers on a card is
+     skipped there, saying why. `split`'s study test takes the decoded slices where both
+     decodes hand them to the correction.
    - A job resumed with other memory free gives the uninterrupted run's output, bit for bit:
      run on 2026-10-11, from 16 GB to 24 GB.
    - Time estimates within a few percent of the measured times, on a healthy card: the
