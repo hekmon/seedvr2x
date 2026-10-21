@@ -2931,11 +2931,14 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      to 36.7 GiB, its encode 21.76); 3 of them ran, and their frames differ from the 96 GB
      card's references, as frames from another card do; one skipped, its plan tiling a pass;
      and `split`'s study test assumes an untiled decode. So a gate there needs references of
-     its own (decided on 2026-10-21, to be built): numz run on that card in the regression's
-     modes, untiled at the largest size that fits it (720p does) and at the tile pairs that
-     fit; the tests take their card's references; a case no reference covers on a card is
-     skipped there, saying why. `split`'s study test takes the decoded slices where both
-     decodes hand them to the correction.
+     its own (decided on 2026-10-21, to be built): seedvr2x's own frames on that card, made
+     by the code the 96 GB card gated that day, whose frames there are numz's bit for bit, in
+     the regression's cases, untiled at the largest size that fits it (720p does) and at the
+     tile pairs that fit. numz itself is run there once, on milestone 1's case at 720p, as a
+     cross-check that the card gives numz's frames too; the 96 GB card's references keep the
+     full check against it. The tests take their card's references; a case no reference
+     covers on a card is skipped there, saying why. `split`'s study test takes the decoded
+     slices where both decodes hand them to the correction.
    - A job resumed with other memory free gives the uninterrupted run's output, bit for bit:
      run on 2026-10-11, from 16 GB to 24 GB.
    - Time estimates within a few percent of the measured times, on a healthy card: the
