@@ -288,6 +288,16 @@ temporal regression.
 - [ ] Real VOB, broadcast TS, open-GOP MPEG-2, open-GOP HEVC in MP4 and TS
 - [x] The synthetic M2TS excerpt's source (2026-10-09): S1, its 2,896 frames S1's 6,936 to 9,832
       but 9,831, md5 for md5 ([docs/seeking.md](docs/seeking.md))
+- [x] Holes, damaged frames and joined streams (2026-10-10 and 2026-10-21, CPU): no place left
+      empty on the declared rate's timeline of any source but S8 (its first access unit stored
+      twice), the M2TS excerpt (its cut) and S9 at its declared 24/1 (it runs at 24000/1001); a
+      damaged frame decodes the same every time on one decoder thread in H.264 and MPEG-2, a seek
+      from its keyframe or up to 3 before included, but not always on 16 threads (S9: 4 different
+      pictures of one frame in 12 reads; at its last damaged frame a 16-thread seek never gives the
+      start's picture) and not on one thread in HEVC, where no `err_detect` option makes it
+      repeat; a joined transport stream keeps its timestamp jump with `-copyts`, read back as a
+      33-bit wrap when the later piece's timestamps are lower, and loses it without
+      ([docs/seeking.md](docs/seeking.md))
 - [x] Doc ([docs/seeking.md](docs/seeking.md)) + decision brief (2026-10-02)
 
 ## 5. Decode resume granularity

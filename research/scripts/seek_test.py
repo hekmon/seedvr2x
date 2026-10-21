@@ -18,6 +18,16 @@ One output directory per source file (OUT). Steps, in order:
   seek_test.py ref     FILE OUT   the reference: one full decode from the start, framemd5 with
                                   the source pts (-copyts, encoder time base = the stream's)
   seek_test.py same    OUT A B    compare two reference decodes (determinism)
+  seek_test.py holes   OUT...     places left empty on the declared rate's timeline: each
+                                  reference frame at its nearest place, the holes between them,
+                                  and whether the container holds packets there (the decoder
+                                  dropped them) or none
+  seek_test.py damage  FILE OUT DST  a damaged copy of FILE: bytes overwritten inside a
+                                  P-frame's and a B-frame's packet (or --packets)
+  seek_test.py redecode FILE OUT  decode one stretch several times per decoder setting
+                                  (--opts "-threads 16" --runs 12 ...): each frame's md5 between
+                                  the runs and against the reference, the frames the decoder
+                                  reported; FILE may be a damaged copy of OUT's source
   seek_test.py targets OUT        target frames: the first and last 3, keyframes with the
                                   frames around them, open-GOP leading frames, random ones
   seek_test.py seek    FILE OUT   every method on every target: K frames' md5 against the
@@ -493,6 +503,278 @@ def cmd_same(a):
            "md5_differences": sum(x != y for x, y in zip(ma, mb))}
     jsave(res, p(a.out, f"same_{a.a}_{a.b}.json"))
     print(json.dumps(res, indent=1))
+
+
+# ----------------------------------------------------------------------------- holes
+
+def cmd_holes(a):
+    """Places left empty on the timeline of the declared rate (r_frame_rate, or --rate), anchored
+    at the first frame: every frame of the reference decode goes to its nearest place, and a
+    hole is a run of places no frame took. The packets whose pts lie inside a hole tell
+    pictures the decoder did not output (leading pictures of a keyframe) from frames the
+    container does not hold. Frames further than --tolerance-ms from their place sit on no grid
+    of that rate: what looks like holes is then another rate, or a variable one."""
+    for out in a.outs:
+        info = jload(p(out, "info.json"))
+        tb, pts, _ = read_ref(out, a.name)
+        rate = Fraction(a.rate or info["stream"]["r_frame_rate"])
+        per = 1 / (rate * tb)  # ticks per frame
+        pn, pd = per.numerator, per.denominator
+        # nearest place: floor((pts - pts_0) / per + 1/2), in integers
+        place = [(2 * (x - pts[0]) * pd + pn) // (2 * pn) for x in pts]
+        dev = max((abs((x - pts[0]) * pd - k * pn) for x, k in zip(pts, place)), default=0)
+        steps = [pts[n] - pts[n - 1] for n in range(1, len(pts))]
+        ppts, lead, keys = [], {}, sorted(info.get("key_pts", []))
+        if os.path.exists(p(out, "packets.csv")) and Fraction(info["stream"]["time_base"]) == tb:
+            ppts = sorted(q[0] for q in read_packets(p(out, "packets.csv"))
+                          if q[0] is not None and "D" not in q[5])
+            lead = {x: kp for kp, lps in info.get("leading_pts", []) for x in lps}
+        holes, lengths, doubled = [], collections.Counter(), 0
+        for n in range(1, len(pts)):
+            d = place[n] - place[n - 1]
+            if d < 1:
+                doubled += 1
+            if d <= 1:
+                continue
+            inside = ppts[bisect.bisect_right(ppts, pts[n - 1]):bisect.bisect_left(ppts, pts[n])]
+            kps = sorted({lead[x] for x in inside if x in lead})
+            lengths[d - 1] += 1
+            holes.append({
+                "after_frame": n - 1, "places": d - 1, "first_place": place[n - 1] + 1,
+                "pts": [pts[n - 1], pts[n]],
+                "time_s": round(float((pts[0] + (place[n - 1] + 1) * per) * tb), 6),
+                "packets_inside": len(inside),
+                "leading_of_keyframe_pts": kps,
+                # 1 = the file's first keyframe
+                "keyframe_number": [bisect.bisect_left(keys, kp) + 1 for kp in kps],
+                "all_leading": bool(inside) and all(x in lead for x in inside)})
+        dev_ms = float(Fraction(dev, pd) * tb * 1000)
+        on_grid = dev_ms <= a.tolerance_ms and not doubled
+        res = {
+            "name": a.name, "frames": len(pts), "rate": str(rate), "tb": str(tb),
+            "declared": [info["stream"].get("r_frame_rate"), info["stream"].get("avg_frame_rate")],
+            "places": place[-1] + 1 if place else 0,
+            "empty_places": sum(h["places"] for h in holes),
+            "holes": len(holes),
+            "hole_lengths": {str(k): v for k, v in sorted(lengths.items())},
+            "frames_on_a_taken_place": doubled,
+            "max_dev_ms": round(dev_ms, 3), "max_dev_frames": round(float(Fraction(dev, pn)), 4),
+            "tolerance_ms": a.tolerance_ms, "on_grid": on_grid,
+            "step_ms": [round(float(x * tb * 1000), 3) for x in (min(steps), max(steps))]
+            if steps else None,
+            "packets": len(ppts),
+            "holes_decoder_dropped": sum(h["packets_inside"] == h["places"] for h in holes),
+            "holes_without_packets": sum(h["packets_inside"] == 0 for h in holes),
+            "holes_all_leading": sum(h["all_leading"] for h in holes),
+            # filled: frames on the grid with places left empty; off: no grid of that rate
+            "reading": "no hole" if on_grid and not holes else "filled" if on_grid else "off",
+            "list": holes}
+        jsave(res, p(out, a.name + "_holes.json" if a.name != "ref" else "holes.json"))
+        print(f"{out}: {res['frames']} frames at {rate}, {res['places']} places, "
+              f"{len(holes)} holes {res['hole_lengths']}, {doubled} frames on a taken place, "
+              f"max {res['max_dev_ms']} ms ({res['max_dev_frames']} frame) off, steps "
+              f"{res['step_ms']} ms: {res['reading']}")
+        for h in holes[:a.show]:
+            print(f"  after frame {h['after_frame']} ({h['time_s']} s): {h['places']} places, "
+                  f"pts {h['pts'][0]} -> {h['pts'][1]}, {h['packets_inside']} packets inside, "
+                  f"leading of keyframe {h['keyframe_number']}")
+
+
+# ----------------------------------------------------------------------------- damage
+
+def payload_offset(data, off, fmt, pid):
+    """The first offset from off on that lies in the video stream's payload, away from a
+    container header: in MPEG-TS a packet of that PID carrying payload alone, in MPEG-PS a pack
+    that starts a video PES packet (2048-byte packs, as ffmpeg's vob muxer writes them)."""
+    if fmt == "mpegts":
+        base = off - off % 188
+        while True:
+            h = data[base:base + 4]
+            if h[0] != 0x47:
+                raise SystemExit("MPEG-TS packets not aligned on 188 bytes")
+            if ((h[1] & 0x1F) << 8 | h[2]) == pid and not h[1] & 0x40 and h[3] >> 4 & 3 == 1:
+                return base + 80
+            base += 188
+    if fmt == "mpeg":
+        base = off - off % 2048
+        while True:
+            if data[base:base + 4] != b"\x00\x00\x01\xba":
+                raise SystemExit("MPEG-PS packs not aligned on 2048 bytes")
+            if data[base + 14:base + 18] == b"\x00\x00\x01\xe0":
+                return base + 1000
+            base += 2048
+    return off
+
+
+def cmd_damage(a):
+    """A copy of FILE (DST) with --bytes bytes overwritten --where into chosen packets: random
+    bytes (--seed), or the file's own XORed with --xor. Without --packets (numbers in decode
+    order, from 0): the first P-frame of at least --min-p bytes from --p-at of the file on, and
+    the first B-frame of --min-b from --b-at on. A P-frame is a packet shown after every packet
+    decoded before it and not flagged a keyframe; a B-frame any other."""
+    info = jload(p(a.out, "info.json"))
+    pk = read_packets(p(a.out, "packets.csv"))
+    _, pts, _ = read_ref(a.out)
+    number = {x: n for n, x in enumerate(pts)}
+    kinds, top = [], None
+    for q in pk:
+        anchor = q[0] is not None and (top is None or q[0] > top)
+        top = q[0] if anchor else top
+        kinds.append("I" if "K" in q[5] else "P" if anchor else "B")
+    with open(a.file, "rb") as f:
+        data = bytearray(f.read())
+    fmt = info["format"]["format_name"]
+    pid = None
+    if fmt == "mpegts":  # the video PID: that of the TS packet a video packet starts in
+        h = data[pk[0][4]:pk[0][4] + 4]
+        pid = (h[1] & 0x1F) << 8 | h[2]
+    if a.packets:
+        chosen = [int(x) for x in a.packets.split(",")]
+    else:
+        chosen = []
+        for kind, at, least in (("P", a.p_at, a.min_p), ("B", a.b_at, a.min_b)):
+            chosen.append(next(i for i in range(int(len(pk) * at), len(pk))
+                               if kinds[i] == kind and pk[i][3] >= least
+                               and pk[i][4] is not None and pk[i][0] in number))
+    rng, done = random.Random(a.seed), []
+    scale = {"mpegts": Fraction(188, 184), "mpeg": Fraction(2048, 2020)}.get(fmt, 1)
+    for i in chosen:
+        q = pk[i]
+        off = payload_offset(data, q[4] + int(q[3] * scale * a.where), fmt, pid)
+        old = bytes(data[off:off + a.bytes])
+        new = bytes(x ^ int(a.xor, 16) for x in old) if a.xor \
+            else bytes(rng.randrange(256) for _ in range(a.bytes))
+        data[off:off + a.bytes] = new
+        done.append({"kind": kinds[i], "packet": i, "frame": number.get(q[0]), "pts": q[0],
+                     "packet_size": q[3], "packet_pos": q[4], "offset": off,
+                     "old": old.hex(), "new": new.hex()})
+        print(f"{kinds[i]}-frame {number.get(q[0])} (packet {i}, {q[3]} bytes): {a.bytes} bytes "
+              f"at offset {off}")
+    with open(a.dst, "wb") as f:
+        f.write(data)
+    jsave({"format": fmt, "codec": info["stream"]["codec_name"], "bytes": a.bytes,
+           "seed": a.seed, "where": a.where, "xor": a.xor, "damaged": done},
+          a.dst + ".damage.json")
+
+
+# ----------------------------------------------------------------------------- redecode
+
+DECODED_RE = re.compile(r"decoder -> pts:(-?\d+|NOPTS) ")
+ERROR_RE = re.compile(r"^.*\[(error|fatal|panic)\] ")
+
+
+def decode_once(file, opts, ss, frames):
+    """One decode as seedvr2x's first pass runs it (-copyts, the stream's time base, -debug_ts):
+    (pts, md5) of every frame, the pts of the frames the decoder reported ("corrupt decoded
+    frame", logged right before that frame's own decoder line), the error lines by message."""
+    cmd = [FFMPEG, "-hide_banner", "-nostdin", "-nostats", "-loglevel", "repeat+level+info",
+           "-debug_ts", *opts, "-copyts"]
+    if ss is not None:
+        cmd += ["-ss", ss]
+    cmd += ["-i", file, "-map", VMAP, "-fps_mode", "passthrough", "-enc_time_base:v", "demux"]
+    if frames:
+        cmd += ["-frames:v", str(frames)]
+    r = subprocess.run(cmd + ["-f", "framemd5", "-"], capture_output=True, text=True,
+                       errors="replace", check=False)
+    _, pts, md5 = parse_framemd5(r.stdout)
+    flagged, errors, pending = [], collections.Counter(), False
+    for line in r.stderr.splitlines():
+        pending = pending or "corrupt decoded frame" in line
+        m = DECODED_RE.search(line)
+        if m:
+            if pending:
+                flagged.append(num(m.group(1).replace("NOPTS", "")))
+            pending = False
+        if ERROR_RE.match(line):
+            errors[re.sub(r"-?\d+", "N", ERROR_RE.sub("", line.strip()))] += 1
+    return r.returncode, list(zip(pts, md5)), flagged, dict(errors)
+
+
+def ranges(xs):
+    """Frame numbers as ranges: 100, 102-143."""
+    out, i = [], 0
+    while i < len(xs):
+        j = i
+        while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:
+            j += 1
+        out.append(str(xs[i]) if i == j else f"{xs[i]}-{xs[j]}")
+        i = j + 1
+    return ", ".join(out) or "none"
+
+
+def cmd_redecode(a):
+    """Decode the same stretch of FILE --runs times with each --opts (decoder options): from the
+    start, or with --at N from the keyframe --gops-back before N's own, --frames frames. Per
+    setting: how many different decodes, which frames vary between runs, which differ from the
+    reference (OUT's ref.framemd5, or --ref FILE), which frames the decoder reported in how many
+    runs. FILE may be a damaged copy of the source OUT describes (damage)."""
+    info = jload(p(a.out, "info.json"))
+    if a.ref:
+        with open(a.ref) as f:
+            tb, rpts, rmd5 = parse_framemd5(f.read())
+    else:
+        tb, rpts, rmd5 = read_ref(a.out)
+    number = {x: n for n, x in enumerate(rpts)}
+    ref = dict(zip(rpts, rmd5))
+    ss = None
+    if a.at is not None:
+        keys = sorted(info["key_pts"])
+        own = bisect.bisect_right(keys, rpts[a.at]) - 1
+        start = keys[max(own - a.gops_back, 0)]
+        ss = tstr(start * tb - Fraction(info["format"].get("start_time", "0")))
+        print(f"frame {a.at}: its keyframe is frame {number.get(keys[own])}, read from frame "
+              f"{number.get(start)}")
+    res = {"at": a.at, "ss": ss, "frames": a.frames, "configs": []}
+    seen, listed = collections.defaultdict(set), set()
+    for opts, runs in zip(a.opts, a.runs):
+        outs = [decode_once(a.file, opts.split(), ss, a.frames) for _ in range(runs)]
+        every = sorted({x for o in outs for x, _ in o[1]})
+        per = {x: [dict(o[1]).get(x) for o in outs] for x in every}
+        varying = [x for x in every if len(set(per[x])) > 1]
+        off_ref = [x for x in every if any(m != ref.get(x) for m in per[x])]
+        listed.update(varying, off_ref)
+        for x in every:
+            seen[x].update(per[x])
+        whole = collections.Counter(tuple(o[1]) for o in outs)
+        flags = collections.Counter(tuple(o[2]) for o in outs)
+        cfg = {
+            "opts": opts, "runs": runs, "rc": [o[0] for o in outs],
+            "frames_out": sorted({len(o[1]) for o in outs}),
+            "distinct_decodes": len(whole),
+            "decode_counts": sorted(whole.values(), reverse=True),
+            "runs_equal_to_ref": sum(all(ref.get(x) == m for x, m in o[1]) for o in outs),
+            "frames_varying": [number.get(x, f"pts {x}") for x in varying],
+            "frames_not_ref": [number.get(x, f"pts {x}") for x in off_ref],
+            "flagged": [{"frames": [number.get(x, f"pts {x}") for x in fl], "runs": c}
+                        for fl, c in flags.most_common()],
+            "errors": [o[3] for o in outs],
+            # per frame that varies or differs: its md5 in each run (8 hex digits)
+            "per_frame": {str(number.get(x, f"pts {x}")): {
+                "counts": sorted(collections.Counter(per[x]).values(), reverse=True),
+                "ref_in_runs": sum(m == ref.get(x) for m in per[x]),
+                "md5": [m[:8] if m else None for m in per[x]]}
+                for x in sorted(set(varying) | set(off_ref))}}
+        res["configs"].append(cfg)
+        jsave(res, p(a.out, a.name + ".json"))
+        print(f"{opts} x{runs}: {cfg['frames_out']} frames, {len(whole)} different decodes "
+              f"{cfg['decode_counts']}, {cfg['runs_equal_to_ref']} equal to the reference; "
+              f"{len(varying)} frames vary: "
+              f"{ranges([x for x in cfg['frames_varying'] if isinstance(x, int)])}; "
+              f"{len(off_ref)} not the reference's: "
+              f"{ranges([x for x in cfg['frames_not_ref'] if isinstance(x, int)])}", flush=True)
+        for fl in cfg["flagged"]:
+            print(f"    reported {fl['frames']} in {fl['runs']} runs")
+        for x in varying[:a.show]:
+            d = cfg["per_frame"][str(number.get(x, f"pts {x}"))]
+            print(f"    frame {number.get(x)}: {len(d['counts'])} md5 {d['counts']}, the "
+                  f"reference's in {d['ref_in_runs']} runs")
+    # the settings against each other, on the frames that vary or differ in any of them
+    alike = [number.get(x) for x in sorted(listed) if len(seen[x]) == 1]
+    res["frames_listed"] = len(listed)
+    res["frames_alike_in_every_setting"] = alike
+    res["ref_md5"] = {str(number.get(x, f"pts {x}")): ref.get(x, "")[:8] for x in sorted(listed)}
+    jsave(res, p(a.out, a.name + ".json"))
+    print(f"every run of every setting decoded alike {len(alike)} of these {len(listed)} frames")
 
 
 # ----------------------------------------------------------------------------- targets
@@ -1083,6 +1365,37 @@ def main():
     s.add_argument("out")
     s.add_argument("a")
     s.add_argument("b")
+    s = sub.add_parser("holes")
+    s.add_argument("outs", nargs="+")
+    s.add_argument("--name", default="ref", help="the reference decode read")
+    s.add_argument("--rate", help="N/D frames per second (default: the stream's r_frame_rate)")
+    s.add_argument("--tolerance-ms", type=float, default=1.0,
+                   help="how far from its place a frame may lie and still sit on the grid")
+    s.add_argument("--show", type=int, default=10, help="holes listed per source")
+    s = sub.add_parser("damage")
+    s.add_argument("file")
+    s.add_argument("out")
+    s.add_argument("dst")
+    s.add_argument("--packets", help="comma list of packet numbers (decode order, from 0)")
+    s.add_argument("--bytes", type=int, default=8)
+    s.add_argument("--where", type=float, default=0.5, help="fraction into the packet")
+    s.add_argument("--xor", help="XOR the bytes with this hex byte instead of random ones")
+    s.add_argument("--seed", type=int, default=6)
+    s.add_argument("--p-at", type=float, default=0.35)
+    s.add_argument("--b-at", type=float, default=0.65)
+    s.add_argument("--min-p", type=int, default=2000)
+    s.add_argument("--min-b", type=int, default=400)
+    s = sub.add_parser("redecode")
+    s.add_argument("file")
+    s.add_argument("out")
+    s.add_argument("--opts", action="append", required=True, help="decoder options, repeatable")
+    s.add_argument("--runs", action="append", type=int, required=True, help="one per --opts")
+    s.add_argument("--at", type=int, help="frame number; default: decode from the start")
+    s.add_argument("--gops-back", type=int, default=2)
+    s.add_argument("--frames", type=int, default=0, help="frames read (0: to the end)")
+    s.add_argument("--ref", help="a framemd5 to compare with instead of OUT's reference")
+    s.add_argument("--show", type=int, default=5, help="varying frames listed per setting")
+    s.add_argument("--name", default="redecode")
     s = sub.add_parser("targets")
     s.add_argument("out")
     s.add_argument("--count", type=int, default=40)
@@ -1131,8 +1444,9 @@ def main():
     s.add_argument("--remux", help="a second source, stream-copied into bluray_excerpt.m2ts")
     s.add_argument("--remux-start", type=float, default=600)
     a = ap.parse_args()
-    {"info": cmd_info, "nal": cmd_nal, "ref": cmd_ref, "same": cmd_same,
-     "targets": cmd_targets, "seek": cmd_seek, "report": cmd_report,
+    {"info": cmd_info, "nal": cmd_nal, "ref": cmd_ref, "same": cmd_same, "holes": cmd_holes,
+     "damage": cmd_damage, "redecode": cmd_redecode, "targets": cmd_targets,
+     "seek": cmd_seek, "report": cmd_report,
      "keycheck": cmd_keycheck, "paramsets": cmd_paramsets, "hashcost": cmd_hashcost,
      "synth": cmd_synth}[a.cmd](a)
 

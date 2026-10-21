@@ -23,8 +23,8 @@ are read and their md5 compared with a decode from the start):
   pts can't see either.
 - **Seeking one GOP early, then selecting by pts,** was exact on 674 of 676 targets outside that
   passage (all 54 open-GOP leading pictures of a real x265 encode included), where it still
-  failed 9 of 28; the 2 others are damaged frames that no seek reproduces. Seeking 1 s early
-  missed 19 of 676.
+  failed 9 of 28; the 2 others are S9's reads of its last frames, which include its damaged frame
+  142475 (mechanism 9). Seeking 1 s early missed 19 of 676.
 - **Decoding from the start and counting** costs 1.2–3.9 min to the end of a 2-hour 1080p H.264
   source (730–2,360 fps), 17 min for a 172 Mbit/s HEVC master (171 fps). It is exact only when
   the reader counts: ffmpeg's `select` restarts its count when ffmpeg rebuilds its filter graph
@@ -34,8 +34,23 @@ are read and their md5 compared with a decode from the start):
   back, and as a last resort decode and count ([Recommended method](#recommended-method)). It
   costs 0.04 s per access on the DVD, 0.14–0.23 s on Blu-ray and web H.264, 1.3 s (median) to
   16 s (worst) on a long-GOP HEVC master. The hash costs 3.0 ms per 1080p frame and thread (md5),
-  or 0.47 ms (CRC-32). Decoding is deterministic: two full decodes, and 16 against 1 thread,
-  gave the same md5 on every frame.
+  or 0.47 ms (CRC-32). Decoding intact data is deterministic: two full decodes, and 16 against 1
+  thread, gave the same md5 on every frame of every source but S9's frame 142475.
+- **Damaged frames are not.** A frame the decoder had to conceal can come out differently with the
+  decoder's thread count and, in frame- or slice-threaded decodes, from run to run. S9's frame
+  142475 gave a different picture at 16, 4, 2 and 1 threads (101466 only at 4, 16 and slice
+  threading); in the 11 synthetic damaged copies, 16-thread decodes varied from run to run in 4
+  of 8 H.264 and MPEG-2 copies and 2 of 3 HEVC ones. On 1 thread H.264 and MPEG-2 repeated
+  exactly in all 8 copies, and in 5 of them 60 of 60 reads started at the damaged frame's
+  keyframe or up to 3 before it gave the from-start decode's frames, damaged ones included. HEVC did not repeat on 1
+  thread in any of its 3 copies, nor in 780 runs under 13 decoder option sets (2 to 16 runs of
+  60 off the commonest decode); it repeated in some copies at other thread counts.
+- **Holes:** on the timeline of the declared rate only S8 (the 2 leading pictures of its start) and
+  a cut excerpt leave places empty, of 11 real sources, 2 more web episodes, a 4K ProRes clip,
+  213 HEVC segments and the synthetic files; S9 at its declared 24/1 has 23,841 one-place holes
+  (it runs at 24000/1001: none). **A joined transport stream** keeps its timestamp jump with
+  `-copyts` (995.96 s here; 94,439.8 s when the second piece's timestamps are lower) and loses it
+  without.
 
 ## Why it matters for seedvr2x
 
@@ -74,6 +89,25 @@ intermediate, is not measured here: at the 16-bit FFV1 masters' ≈ 70 MiB per s
   -copypriorss 0`, NUT through a pipe) into a second ffmpeg and compares every decoded frame with
   the reference; `paramsets` compares every in-band SPS/PPS with the container's extradata
   (`filter_units` + `trace_headers`); `nal` prints the NAL and picture types of a few GOPs.
+- **Holes:** `holes` puts each reference frame at its nearest place on the timeline of the
+  declared rate (`r_frame_rate`, anchored at the first frame); a hole is a run of places no frame
+  took, and the packets with a pts inside it tell pictures the decoder did not output from frames
+  the container does not hold. Frames further than 1 ms from their place sit on no grid of that
+  rate.
+- **Damaged frames:** `damage` copies a file with bytes overwritten inside chosen packets (8
+  random bytes in a P- and a B-frame, or 40 bytes XORed with 0x5A in a P-frame and in the
+  packet after it). `redecode` decodes the same stretch (from the start, or from the keyframe
+  0 to 3 before a frame) many times per decoder setting, as the first pass runs it (`-copyts
+  -debug_ts`), and tells per frame how many different md5 came out, whether the clean
+  reference's or a given decode's among them, and which frames the decoder reported ("corrupt
+  decoded frame", tied to its frame by the decoder's own `-debug_ts` line). Settings: `-threads`
+  16, 4, 2 and 1 (ffmpeg's default thread type, frame threading on top of slice threading) and
+  16 with `-thread_type slice`.
+- **Joined transport stream:** two 100-frame MPEG-TS pieces (x264 320×240 25 fps, GOP 25, 2
+  B-frames, pts from 1.48 s) and the second with its timestamps 1,000 s later (`-output_ts_offset
+  1000`), concatenated byte for byte in both orders, then read with and without `-copyts` and the
+  options that could bear on it; then 8-frame seeks at 11 targets (the first two frames, frame 50,
+  the three before the join, the three after, frames 150 and 192) with four forms of `-ss`.
 
 | | Source | Frames | GOP | B-frames, open GOP | Timestamps |
 |---|---|---|---|---|---|
@@ -174,6 +208,135 @@ The reference decode, which also hashes every frame, ran at 308–339 fps on eve
 whatever its bitrate (framemd5 hashes in one thread), 181 fps on S5, 1,933 fps on S6, 338 fps on
 S11 (HEVC; with 1 decoder thread 300 fps and the same md5 on every frame).
 
+### Holes in the timeline
+
+Frames, places on the timeline of the declared rate (24000/1001, S6 30000/1001), holes, frames
+that took a place already taken, and the largest distance of a frame from its place:
+
+| Source | Frames | Places | Holes | Doubled | Largest distance |
+|---|---|---|---|---|---|
+| S1, S2, S3, S4, S5, S6, S7, S10, S11 | 178,949; 193,636; 10,501; 1,037; 178,949; 40,441; 37,327; 163,248; 34,801 | = frames | 0 | 0 | 0 to 0.71 ms (0.02 frame) |
+| S8 | 99,583 | 99,585 | 1 of 2 places, after frame 0 | 0 | 0.63 ms |
+| S9 at the declared 24/1 | 142,477 | 142,620 | 23,841 of 1 place | 23,698 | 20.7 ms (0.50 frame): off the grid |
+| S9 at 24000/1001 | 142,477 | = frames | 0 | 0 | 10.9 ms (0.26 frame) |
+| the 8 synthetic files | 2,878 | = frames | 0 | 0 | 0.5 ms (MPEG-2: 0.017 ms) |
+| the M2TS excerpt | 2,896 | 2,897 | 1 of 1 place, after frame 2,894 | 0 | 0.5 ms |
+| 2 more web H.264 episodes in MKV | 10,501 each | = frames | 0 | 0 | 0.5 ms |
+| a 4K ProRes clip at 24/1, MOV | 6,314 | = frames | 0 | 0 | 0 |
+| 213 HEVC 720p segments in MP4 | 37,393 | = frames | 0 | 0 | 4.96 ms (0.12 frame), steps 41.17–41.71 ms |
+
+The 2 web episodes, the ProRes clip and the 213 segments belong to the scene-detection study (they
+were decoded there, not in this campaign).
+
+- **S8's hole is in its first two keyframes.** The file stores its first access unit twice, as
+  packets at 0 and 125 ms with the same bytes; the two B-pictures between them (42 and 83 ms)
+  lead the second copy and refer to a frame the file doesn't have ("Frame num gap", "no
+  picture", "illegal short term buffer state detected"). The decoder, with 1 or 16 threads,
+  outputs frames at 0, 125, 167 ms…: frame 1 sits 3 places after frame 0, which is the −2 of
+  mechanism 1. With `-flags2 +showall` or `-flags +output_corrupt` the decoder outputs pictures
+  at 42 and 83 ms (not looked at further); by default it drops them. This is the only hole
+  where the container holds packets.
+- **The M2TS excerpt's hole is the cut:** its last keyframe's leading B-frame (S1's frame 9,831)
+  is left out of the file; no packet lies in the hole.
+- **The segments' frames lie up to 4.96 ms from the grid anchored at their first frame,** none
+  by more than half a frame: 209 of the 213 within the 1 ms tolerance, 4 beyond it (which the
+  tool calls off the grid), all with no hole and no doubled place. Segment timestamps at 1/24000
+  are not all on the 1001-tick grid; all 213 declare 24000/1001 (32 have another average rate).
+- **Everywhere but S8, S9 at 24/1 and the excerpt, a frame's number is its place** on the
+  declared rate's grid, within 0.71 ms (the 4 segments above excepted). S9 is off the grid at
+  24/1 and on it at 24000/1001, within a quarter frame (mechanism 7).
+
+### Damaged frames
+
+Cells: different decodes of the same stretch / runs, by the decoder's thread count (default thread
+type, frame threading on top of slice threading); "slice" is `-threads 16 -thread_type slice`.
+Every synthetic copy's damaged frames, and the frames that refer to them, came out different from
+the undamaged file's; S9 has no undamaged decode. The question here is whether they came out the
+same way each time. Where a cell is for two files, both gave it.
+
+| File and damage | 16 | slice | 4 | 2 | 1 |
+|---|---|---|---|---|---|
+| S9, frame 101466: 120 frames from the keyframe 58 frames before it | 4 / 12 | 2 / 6 | 3 / 6 | 1 / 6 | 1 / 6 |
+| S9, frame 142475: from the keyframe 91 frames before it to the end of the file (93 frames) | 1 / 12 | 2 / 6 | 1 / 6 | 1 / 6 | 1 / 6 |
+| 1080p H.264 MKV, 40 bytes XORed in a P-frame and the next P-frame, 1,200 frames | 2 / 12 | 4 / 6 | 1 / 6 | 1 / 6 | 1 / 6 |
+| 720×480 MPEG-2 in TS and in VOB, 40 bytes XORed in a B- and the next P-frame, 1,200 frames | 1 / 12 | 1 / 6 | 1 / 6 | 1 / 6 | 1 / 6 |
+| 1080p HEVC MKV, 40 bytes XORed in a P- and the next B-frame, 1,200 frames | 5 / 12 | 1 / 6 | 2 / 6 | 5 / 6 | 5 / 6 |
+| 320×240 H.264 MKV, 40 bytes XORed in a P- and the next B-frame, 200 frames | 6 / 24 | 10 / 24 | 7 / 24 | 3 / 24 | 1 / 24 |
+| 320×240 MPEG-2 VOB, 40 bytes XORed in one P-frame | 2 / 24 | 2 / 24 | 1 / 24 | 1 / 24 | 1 / 24 |
+| 320×240 HEVC MKV, 40 bytes XORed in one B-frame | 3 / 24 | 3 / 24 | 2 / 24 | 5 / 24 | 6 / 24 |
+| 1080p H.264 MKV, 8 random bytes in a P- and a B-frame, 2,100 frames | 1 / 12 | 1 / 6 | – | 1 / 6 | 1 / 3 |
+| 1080p HEVC MKV, the same | 1 / 12 | 1 / 6 | – | 3 / 6 | 3 / 3 |
+| 720×480 MPEG-2 TS, the same | 2 / 12 | 2 / 6 | – | 1 / 6 | 1 / 3 |
+| 720×480 MPEG-2 VOB, the same | 1 / 12 | 1 / 6 | – | 1 / 6 | 1 / 3 |
+
+- **S9's damaged frames.** At 101466 the decoder reported the frame in 8 of 12 runs at 16 threads
+  and in none of 6 slice-threaded ones; the 16-thread reads gave 9 times the picture of the decode
+  from the start and 3 times another one each; 2 and 1 threads gave that picture in 12 of 12
+  runs; slice threading gave 2 pictures, neither the from-start one. At 142475 each thread count
+  gave a picture of its own, the same in every run (16, 4, 2 and 1 threads: 4 different md5);
+  slice threading gave 2.
+- **One thread repeats on H.264 and MPEG-2:** 1 decode in 24 of 24 runs (the 320×240 files), 6 of 6
+  and 3 of 3 (the larger ones). MPEG-2 also repeated at 2 threads in all 5 of its files, at 4 in
+  the 3 where it was tried (the 320×240 file and both 40-byte ones), and at 16 in 3 of 5 (the
+  TS and the VOB with 40 XORed bytes, and the VOB with 8 random ones). HEVC repeated on 1 thread
+  in none of its 3 files: 6 decodes in 24 runs, 5 in 6, 3 in 3; in some it repeated at other
+  counts (the 1080p file with slice threading, 6 of 6; the 8-byte one at 16 threads, 12 of 12).
+  With the 40 XORed bytes in a P-frame, all 37 frames from the damage on differed from run to
+  run; with one damaged B-frame, only that frame. The decoder logged nothing for any HEVC damage;
+  for H.264 it reported the damaged frames with frame threading (both, in every run of 2 files
+  and in 10 of 24 runs of the third) and 1 of 2, 1 of 2 and none of 2 with slice threading.
+- **Options on 1 thread (HEVC, the 320×240 file, one damaged B-frame, frame 98; 60 runs each):**
+  the plain run gave 5 decodes (54 alike); `-err_detect` `crccheck`, `bitstream`, `buffer`,
+  `explode`, `ignore_err`, `careful`, `compliant`, `aggressive`, `-flags +output_corrupt`,
+  `-flags2 +showall`, `-flags +bitexact` and `-ec 0` gave 3 to 8 each, 2 to 16 runs of 60 away
+  from the commonest decode. Only frame 98 varied and no error was logged. This is not a race
+  between threads, since it happens on one; the cause was not looked for. An earlier 24 runs of
+  the same file and setting gave 6 decodes, 7 alike, so the rate itself varies between series.
+- **Seek against start, 1 thread:** five damaged H.264 and MPEG-2 files, decoded whole from the
+  start twice, gave the same md5 for every frame; reads of 300 frames starting at the keyframe of
+  the damaged frame and at 1, 2 and 3 keyframes before it (3 runs each, 60 reads) gave the
+  from-start decode's md5 on every frame of all 60, the damaged ones included. On S9, three
+  decodes from the start at 16 threads were identical for all 142,477 frames, and so were two
+  at 1 thread; the two settings differ at 142475 alone, where the 1-thread decode has the
+  picture of the 1-thread seek and the 16-thread one is not that of the 16-thread seek. HEVC:
+  the 1080p file's two from-start decodes differed (36 frames), so no read could match both;
+  the 320×240 file's two were identical, and of 4 positions read (3 runs each) 2 matched them in
+  3 of 3 runs, 1 in 2 of 3, 1 in none.
+
+### A joined transport stream
+
+The pieces: A (pts 1.48–5.44 s) and B (1,001.40–1,005.36 s). `forward` = A then B, `back` = B then
+A. The demuxer logs "DTS discontinuity" and "Packet corrupt" at the join in every read, and all
+200 frames come out, with the same 200 md5 (framemd5) with and without `-copyts`.
+
+| Read | forward | back |
+|---|---|---|
+| no option | first 0, last 7.96 s, every step 40 ms | the same |
+| `-copyts` | first 1.480 s, last 1,005.360 s; step of **995.96 s** into frame 100 | first 1,001.400 s, last 95,449.158 s; step of **94,439.8 s** into frame 100 |
+| `-copyts -start_at_zero` | first 0, last 1,003.88 s, same step | first 0, last 94,447.76 s, same step |
+| `-copyts` and `-fflags +igndts`, `+genpts`, `-dts_delta_threshold 1`, `-dts_error_threshold 1`, `-correct_ts_overflow 1` | as `-copyts` | as `-copyts` |
+| `-fflags +igndts`, no `-copyts` | the 100 frames of the second piece share one pts (999.92 s), 105 stderr lines | the same, at 94,443.798 s |
+| `-dts_delta_threshold 2000`, no `-copyts` | first 0, last 1,003.88 s: the jump stays | as no option |
+| the file remuxed to MKV (`-c copy`), then `-copyts` | first 0, last 7.96 s, every step 40 ms | the same |
+
+- **Without `-copyts` ffmpeg removes the jump** ("timestamp discontinuity (stream id=256):
+  995920000, new offset= -995920000"): the second piece continues the first at 40 ms.
+- **With `-copyts` the jump stays,** and in `back` the second piece's timestamps (1.48 s) fall
+  below the first's (1,005.36 s), which the demuxer reads as a 33-bit wrap: they come out 2^33/90000
+  = 95,443.7 s later, at 95,445.2 s.
+- **Seeks** (8 frames at 11 targets; exact in forward and in back): `-copyts` with `-ss pts −
+  start_time` 7 and 5; no `-copyts` with `-ss` the time the reader sees (the continuous one) 8 and
+  8; `-seek_timestamp 1 -copyts -ss pts` 0 and 0 (late by start_time × fps, 37 frames, as in
+  mechanism 5; in `back` frames 0, 1 and 50 came 100, 99 and 50 frames late, the targets from
+  frame 100 on empty); `-seek_timestamp 1 -ss pts` without `-copyts` 6 and 5. The failures of
+  that last form: frames 97 to 99 (below), frame 101 of `forward` and frames 101 and 102 of
+  `back` one or two frames early, and frame 192 empty in both.
+  - **The 3 targets in the GOP before the join** (frames 97 to 99) came out 3, 2 and 1 frames
+    late in every form, the start of the next keyframe's GOP, which is mechanism 4.
+  - **With `-copyts` the targets after the wrap were not found** in `back`: frames 102, 150 and
+    192 came back empty, 100 and 101 were exact. Without `-copyts` all five targets from frame
+    100 on were exact. Frame 192 of `forward`, in the file's last GOP, came back empty in three
+    of the four forms (all but the reader's time); this was not looked into.
 ## Failure mechanisms
 
 1. **`n / fps` is not where the frames are.** MKV stores milliseconds: S1, S7 and S10 stray up to
@@ -185,7 +348,8 @@ S11 (HEVC; with 1 decoder thread 300 fps and the same md5 on every frame).
    1013 is 998 (13 early); `n/fps` lands just after those frames: +1 on all 15 targets past the
    first join, no frame at all for the last one. S8's decoder doesn't output the two leading
    pictures of its second keyframe (and logs "illegal short term buffer state detected"), so
-   frame n is shown at about (n + 2)/fps: −2 on 33 of 40 targets, −1 on 3. S9: see 7.
+   frame n is shown at about (n + 2)/fps: −2 on 33 of 40 targets, −1 on 3 ([the hole in its
+   timeline](#holes-in-the-timeline)). S9: see 7.
 2. **MKV: ffmpeg seeks 130 ms early.** `fftools/ffmpeg_demux.c` subtracts 3/23 s from the `-ss`
    point when the demuxer doesn't seek on pts (no `AVFMT_SEEK_TO_PTS`; the Matroska demuxer lacks
    it) and a stream has a B-frame delay. Decoding starts at the keyframe before that point, so
@@ -248,10 +412,46 @@ S11 (HEVC; with 1 decoder thread 300 fps and the same md5 on every frame).
    filter graph ("video parameters changed") and `select`'s `n` starts again from 0: `d_count`
    came out 14 frames late on all 3 targets. The framemd5 reference counts at the muxer and is
    unaffected.
-9. **Damaged frames depend on where decoding starts.** S9's last frames are damaged (the full
-   decode logs "error while decoding MB", "corrupt decoded frame"). Decoding from the start
-   conceals them one way, every seek another (one frame differs, with 1 or 16 threads, from the
-   last keyframe or a GOP earlier): no seek reproduces them; decode-and-count does.
+9. **Damaged frames depend on the decoder's thread count, and on HEVC on chance.** S9 has two
+   damaged frames (101466 and 142475; the full decode logs "error while decoding MB", "corrupt
+   decoded frame"); the concealed picture is the decoder's guess ([Damaged
+   frames](#damaged-frames)).
+   - **The thread count can change the guess.** At 142475 the decode from the start at 16
+     threads (the same in three decodes) gave one picture, a seek at 16 threads another, and 4,
+     2 and 1 threads each their own, repeatable in every run; the seek at 1 thread gave the
+     from-start 1-thread picture. 101466 came out the same at 1 and 2 threads as in the 16-thread
+     decode from the start.
+   - **Frame and slice threading add chance on H.264 and MPEG-2.** 101466 came out as 4
+     different pictures in 12 reads at 16 threads (the from-start picture 9 times), and the
+     decoder reported the frame in 8 of those 12 reads. Of the 8 damaged H.264 and MPEG-2
+     synthetic copies, 4 differed from run to run at 16 threads (frame or slice threading), none
+     on 1 thread.
+   - **On 1 thread H.264 and MPEG-2 repeat, from the start and from the damaged frame's keyframe
+     or up to 3 before it:** 60 of 60 such reads gave the from-start decode, damaged frames
+     included. On S9 a 1-thread seek and two 1-thread decodes from the start gave the same
+     picture at 142475.
+   - **HEVC does not repeat on one thread:** its concealed frames changed from run to run in
+     every 1-thread series (3 to 8 different decodes in 3 to 60 runs; at other thread counts some
+     series repeated). No `-err_detect`, `-flags` or `-ec` setting tried made them repeat (13
+     sets, 780 runs), and the decoder logged no error.
+
+   Undamaged data stays deterministic ([In short](#frame-exact-access-into-long-gop-sources)):
+   hashes match whatever the thread count and start. A mismatch on a frame the first pass
+   decoded with errors may be this and not a wrong seek.
+10. **A timestamp jump inside the file: `-copyts` keeps it, the default removes it.** Two MPEG-TS
+   pieces joined byte for byte, the second's timestamps 1,000 s above the first's or below them,
+   leave a DTS jump that the demuxer logs ("DTS discontinuity", "Packet corrupt") and decodes
+   through. Without `-copyts` ffmpeg shifts the second piece to follow the first ("timestamp
+   discontinuity … new offset"): 200 frames at 40 ms steps from 0. With `-copyts` the pts keep the
+   jump: a step of 995.96 s when the second piece's timestamps are higher, and when they are
+   lower, 94,439.8 s, the demuxer taking the fall for a 33-bit wrap and adding 95,443.7 s.
+   `-start_at_zero`, `-fflags +genpts`, `-dts_delta_threshold 1`, `-dts_error_threshold 1` and
+   `-correct_ts_overflow 1` leave it; `-fflags +igndts` without `-copyts` gives the 100 frames of
+   the second piece one pts. `-ss` follows the reader's timeline: without `-copyts` it is the
+   continuous one and every target after the join was exact; with `-copyts` the targets after the
+   wrap in `back` (from its frame 102) were not found. A first pass that keeps source pts (the
+   recommended method) therefore sees the jump in a joined stream; a stream remuxed to MKV (`-c
+   copy`) carries none.
 
 ## Recommended method
 
@@ -260,7 +460,7 @@ S11 (HEVC; with 1 decoder thread 300 fps and the same md5 on every frame).
    decoder logged errors on it, plus the keyframes' pts from the packet scan (`ffprobe
    -show_entries packet=pts,flags` only demuxes). Count the frames as they arrive: never trust
    `n/fps`, a declared frame rate or ffmpeg-side counting, and keep the source pts for the output
-   timing (S9).
+   timing (S9). With `-copyts` they carry a timestamp jump inside a joined stream (mechanism 10).
 2. **Read frames n to m:** `ffmpeg -copyts -ss <pts of the keyframe before n's own keyframe −
    start_time> -i SRC -map 0:V:0 -vf "select='gte(pts,PTS_n)'" -fps_mode passthrough -frames:v
    <m−n+1> -f rawvideo pipe:1`. `-ss` is relative to start_time; no `-seek_timestamp` with
@@ -268,7 +468,9 @@ S11 (HEVC; with 1 decoder thread 300 fps and the same md5 on every frame).
 3. **Check every frame's hash** against the index. On a mismatch, read again from one keyframe
    further back, doubling each time; as a last resort, decode from the start and count. A late
    start shows up as a mismatch too: the hash covers shifts and corruption. A frame the first
-   pass decoded with errors may only match from the start (mechanism 9).
+   pass decoded with errors may match only a read at the first pass's thread count: on 1 thread
+   H.264 and MPEG-2 repeat from the damaged frame's keyframe or up to 3 before it, HEVC does not
+   (mechanism 9).
 
 - **Cost per access:** the `c_gop` times above: 0.04 s on the DVD, 0.14–0.23 s on Blu-ray and
   web H.264, 0.2 s on the 720p HEVC segment and 0.21 s (0.74 s worst) on the open-GOP x265
@@ -299,6 +501,10 @@ S11 (HEVC; with 1 decoder thread 300 fps and the same md5 on every frame).
   4 h 11 min takes at least 30 or 19 minutes.
 - **The method's own costs:** how often the hash check falls back on real sources, and the hash's
   cost inside seedvr2x's first pass, next to scene detection.
+- **Damaged frames beyond S9 and synthetic damage:** other real files with damage, an HEVC source
+  with damage, and why concealed HEVC frames change from run to run on one thread.
+- **Joined streams beyond one synthetic pair:** DVD cell and VOB boundaries and broadcast TS with
+  real discontinuities and wraps; the test used two 100-frame pieces.
 - **Not covered:** deinterlacing and telecine (S6 was read as interlaced frames, as decoded).
 - **A `keycheck` quirk:** from a file's first keyframe its "bad" result (S3, S11, synthetic MKV
   and MP4) is an artifact of its stream copy, which keeps every packet but moves every timestamp
@@ -327,6 +533,10 @@ python3 $S synth /path/to/S3.mkv out/seek/synth --remux /path/to/S1.mkv \
   --remux-start 290                  # synthetic open-GOP files from S3 + an M2TS excerpt of S1
 python3 $S hashcost                  # md5, sha1, blake2b, CRC-32, Adler-32 per 1080p frame
 python3 $S report $(ls -d out/seek/*/ | grep -v '/synth/$') out/seek/synth/*/   # Markdown tables
+python3 $S holes $(ls -d out/seek/*/ | grep -v '/synth/$') out/seek/synth/*/   # empty places
+python3 $S damage $SRC $OUT damaged.mkv --packets 1008,1009 --bytes 40 --where 0.3333334 --xor 5a
+python3 $S redecode damaged.mkv $OUT --frames 1200 --opts "-threads 16" --runs 12 \
+  --opts "-threads 16 -thread_type slice" --runs 6 --opts "-threads 1" --runs 6   # damaged frames
 ```
 
 S5 used `--count-at 0.02,0.1`; `keycheck --sample 200 --range 305:315` on S1, `--sample 60` on
@@ -341,3 +551,42 @@ the RASL run) were written by hand into a `targets.json` in a directory linked t
 `info.json`, `packets.csv` and `ref.framemd5`, then `seek --methods
 a_naive,b_pts,b_copyts,c_1s,c_gop,e_pipe --repeats 3`; the decode-and-count to the last frame:
 `seek --only-kinds last --methods d_count --count-at 0.99999 --count-repeats 3 --repeats 3`.
+
+The damaged-frame series, with `$OUT` the clean file's directory (or one linked to its
+`info.json`, `ref.framemd5` and `packets.csv`):
+
+- `damage` without `--packets` damages a P-frame from 35% of the file on and a B-frame from 65% on
+  with 8 random bytes (`--seed 6`): the 2,100-frame rows, read with `redecode --frames 2100`, 12
+  runs at 16 threads and 6 at each other setting (3 at 1 thread).
+- `damage --packets 1008,1009 --bytes 40 --where 0.3333334 --xor 5a` the 1,200-frame rows
+  (`redecode --frames 1200`, same runs).
+- The 320×240 rows are 200 frames of ffmpeg's `testsrc2` encoded with x264
+  (`keyint=48:min-keyint=24:open-gop=1:bframes=3:b-pyramid=normal`), x265 (`bframes=4`, the rest
+  alike) and `mpeg2video -b:v 1M -g 15 -bf 2` in VOB, damaged with `--packets 100,101` (H.264) or
+  `--packets 100`, `--bytes 40 --where 0.3333334 --xor 5a`, and read with `redecode --runs 24`
+  for each of `-threads 16`, `-threads 16 -thread_type slice`, 4, 2 and 1.
+- S9's windows: `redecode $SRC $OUT --at 101466 --gops-back 3 --frames 120` and `--at 142440
+  --gops-back 3 --frames 200` (the file ends after 93 frames), 12 runs at 16 threads and 6 at
+  each other setting.
+- The options on 1 thread: `redecode damaged-hevc.mkv $OUT --runs 60` once per `--opts "-threads
+  1 -err_detect crccheck"` (and `bitstream`, `buffer`, `explode`, `ignore_err`, `careful`,
+  `compliant`, `aggressive`, `-flags +output_corrupt`, `-flags2 +showall`, `-flags +bitexact`,
+  `-ec 0`, and none).
+- Seek against start: `ffmpeg -threads 1 -copyts -i damaged.mkv -map 0:V:0 -fps_mode passthrough
+  -enc_time_base:v demux -f framemd5 start.framemd5` twice, then `redecode damaged.mkv $OUT --ref
+  start.framemd5 --at N --gops-back G --frames 300 --opts "-threads 1" --runs 3` for G = 0 to 3.
+- S9 from the start on one thread: `ref $SRC $OUT --threads 1 --name ref_t1`, twice, and `cmp` the
+  framemd5 files with the 16-thread `ref`.
+
+The holes of S9 at its real rate: `holes $OUT --rate 24000/1001` (the default is the declared
+24/1).
+
+The joined streams: two 100-frame MPEG-TS pieces, `ffmpeg -f lavfi -i
+testsrc2=s=320x240:r=25 -frames:v 100 -c:v libx264 -preset veryfast -g 25 -bf 2 -f mpegts a.ts`,
+and the same with `,negate` after the source and `-output_ts_offset 1000` into `b.ts`; `cat a.ts
+b.ts > forward.ts`, `cat b.ts a.ts > back.ts`. Each file is read with `ffmpeg -hide_banner -v
+warning [OPTION] -i FILE -map 0:v:0 -fps_mode passthrough -enc_time_base:v demux -f framecrc -`
+for the options of the table, and the pts of the frames compared; for the md5 comparison and the
+seeks the same with `-f framemd5`, the seeks being `-ss` in its four forms, 8 frames each, compared
+with a full decode. The two pieces need different pictures (hence `negate`), or the md5 of a wrong
+place can equal the right one's.
