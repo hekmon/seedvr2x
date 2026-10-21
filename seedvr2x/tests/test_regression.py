@@ -127,17 +127,50 @@ them on the CPU and divides the sums on the GPU, as runtime/tiling.py does:
   numz_e512-d512_frames/, made with the six options at 512 and 64: 15 tiles each way, 3 rows of 5.
 Each run's log must say those grids. A case whose reference is absent is skipped, naming the file.
 
+Each card holds to references of its own (decided on 2026-10-21): numz drew each reference's noise
+on the card that made it, and another card's frames differ from them (3 cases ran on an RTX 5090
+and none of their 45 frames was the 96 GB card's). Another card's references are seedvr2x's own
+frames on it, made by the code the 96 GB card gated that day, whose frames there are numz's bit
+for bit (main 35435f2, its seedvr2x subset 13979c69, that of 490baf1), by the commands command()
+gives, in these cases and modes; numz itself is run there once as a cross-check (DESIGN.md,
+Validation milestones 3). A test takes its card's, by name as torch gives it (card();
+torch.cuda.get_device_name). The 96 GB card's are those above, in m1/ and m3/ (ROOT_CARD).
+Another card's are in cards/<its name>/m1/ and m3/, its name's runs of characters other than
+letters and digits each a hyphen (cards/NVIDIA-GeForce-RTX-5090/), the inputs staying m1/'s,
+with cards/<its name>/cases.json saying what each case takes there (case): "milestone1":
+{"resolution": R, "references": {"numz": NAME, "numz_sharp": NAME}} for the milestone 1 cases,
+the unpinned one and the one from the cache, which run untiled at the largest size the card's
+untiled passes fit; "padding", by each case's id, its "source", "resolution" and "reference";
+"tiled", by each case's id, its "reference", at 1080 as above; and "made", the commit and subset
+that made them. On the RTX 5090 (2026-10-21; ~21.7 GiB the plan counts on beside its desktop):
+milestone 1 at 792 (1408x792; 810 is 0.40 GiB short for the untiled decode); the padding cases
+pad1080 at 792 (1408x792 padded to 1408x816, 8 rows reflected and no column, as pad1080 at
+1080), pad720 at 720, padcols at 530 (956x530 padded to 992x560, rows and columns reflected);
+the tiled cases d1024, e1344-d1024 and e512-d512. Its numz cross-check, numz 4490bd1 through
+ffv1_out.py with its block swap (--blocks_to_swap 36 --dit_offload_device cpu
+--vae_offload_device cpu), in each of those cases but d1024, gave the same frames, 45 of 45 in
+each. A case a card has no reference for is skipped, naming the card and the reference
+missing, or, where the card can't run it, with its refusal's figures (no_reference); a case
+refused there at its run is skipped the same way: d1024 on the 5090, its untiled encode at the
+edge of what the card holds beside its desktop, runs or is refused as the desktop's share
+moves. On the 96 GB card nothing of this changes, and nothing skips: a refusal there fails the
+case.
+
 The run goes through the CLI in a process of its own, as a user's would: the allocator is set
 before torch is imported, which a test process importing torch first wouldn't do. And this
 process creates no CUDA context: its memory would be taken from the free memory a run reads for
 its plan (cli._free_memory).
 """
 
+import functools
+import json
 import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, NoReturn
 
 import pytest
 
@@ -170,6 +203,138 @@ def models_present(*names: str) -> None:
     for name in (*names, pull.DETECTOR):
         if not (Path(MODELS) / name).is_file():
             pytest.skip(f"{name}: not in SEEDVR2X_MODEL_DIR")
+
+
+# The card whose references are m1/ and m3/ of SEEDVR2X_REFERENCE_DIR, numz having made them on it
+# (the module's docstring), as torch names it (torch.cuda.get_device_name). Another card's are in
+# cards/<its name>/ beside them (card_directory), with what each case of it takes (CASES).
+ROOT_CARD = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
+CARDS = "cards"
+CASES = "cases.json"
+
+
+@functools.cache
+def card() -> str:
+    """The name of the card the runs take, device 0, as torch gives it, asked in a process of its
+    own: this one creates no CUDA context (the module's docstring)."""
+    found = subprocess.run(
+        [sys.executable, "-c", "import torch; print(torch.cuda.get_device_name(0))"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert found.returncode == 0, found.stderr[-3000:]
+    return found.stdout.strip().splitlines()[-1]
+
+
+def card_directory(name: str) -> Path:
+    """Where the references of the card `name` are: SEEDVR2X_REFERENCE_DIR itself for ROOT_CARD;
+    for another, cards/<name>/ in it, its name's runs of other characters than letters and digits
+    each a hyphen ("NVIDIA GeForce RTX 5090": cards/NVIDIA-GeForce-RTX-5090/)."""
+    assert REFERENCE is not None
+    if name == ROOT_CARD:
+        return Path(REFERENCE)
+    return Path(REFERENCE) / CARDS / re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")
+
+
+@dataclass(frozen=True)
+class Case:
+    """A case as this card runs it: its input, the resolution it is upscaled to, and its reference,
+    <reference>.mkv and <reference>_frames/."""
+
+    source: Path
+    resolution: int
+    reference: Path
+
+
+def case(kind: str, name: str, source: str, resolution: int, reference: str, where: str) -> Case:
+    """The case `name` of `kind` (milestone1, padding or tiled) on this card (card()). On
+    ROOT_CARD, as the test's parameters give it: its input in m1/, its reference in `where` (m1
+    or m3) of SEEDVR2X_REFERENCE_DIR. On another, as its directory's CASES has it (the module's
+    docstring): milestone1's resolution for all its cases; each padding case's source, resolution
+    and reference by its id; each tiled case's reference by its id, at 1080 as on ROOT_CARD; the
+    parameters for what the entry doesn't say, its reference in `where` of the card's directory.
+    The inputs are the same on every card: m1/ of SEEDVR2X_REFERENCE_DIR."""
+    assert REFERENCE is not None
+    inputs = Path(REFERENCE) / "m1"
+    directory = card_directory(card())
+    if card() == ROOT_CARD:
+        return Case(inputs / source, resolution, directory / where / reference)
+    said: Any = {}
+    if (directory / CASES).is_file():
+        said = json.loads((directory / CASES).read_text()).get(kind, {})
+    if kind == "milestone1":
+        entry: Any = {**said, "reference": said.get("references", {}).get(name, reference)}
+    else:
+        entry = said.get(name, {})
+    return Case(
+        inputs / entry.get("source", source),
+        int(entry.get("resolution", resolution)),
+        directory / where / entry.get("reference", reference),
+    )
+
+
+def refusal(log: str) -> str | None:
+    """The refusal of the planner's for the memory a job takes (REFUSED) in a run's log, its
+    error's message, or None: not the disk's (cli._room_on_disk), whose scratch's part names the
+    system memory too, and whose way out is the machine's, not the card's (a review's finding).
+    A line without --verbose is "12:00:00 ERROR message"; under it, "... ERROR seedvr2x:
+    message" (cli.VERBOSE_FORMAT)."""
+    for line in log.splitlines():
+        found = re.match(r"(?:\d\d:\d\d:\d\d|.* ERROR seedvr2x:) ?(?:ERROR )?(.*)", line)
+        if found and " ERROR " in f" {line} " and any(what in found[1] for what in REFUSED):
+            if "free on its disk" not in found[1]:
+                return found[1]
+    return None
+
+
+def no_reference(
+    tmp_path: Path, job: Case, models: tuple[str, str], *more: str, numz_padding: bool
+) -> NoReturn:
+    """Skip a case this card has no reference for: with the refusal's figures where the card
+    can't run it, its --plan refused (the planner's own words), else naming the card and the
+    reference missing. On ROOT_CARD a reference absent is skipped as before, naming it."""
+    missing = f"{job.reference}.mkv"
+    if card() == ROOT_CARD:
+        pytest.skip(f"{missing}: absent; this module's docstring says how to make it")
+    arguments, environment = command(
+        *(tmp_path, job.source, job.resolution, models, *more), numz_padding=numz_padding
+    )
+    plan = subprocess.run(
+        [*arguments, "--plan", str(tmp_path / "cuts.txt")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    refused = refusal(plan.stderr)
+    if plan.returncode == 1 and refused is not None:
+        pytest.skip(f"{card()}: the case can't run there: {refused}")
+    pytest.skip(f"{card()}: no reference for it, {missing}; this module's docstring says how")
+
+
+def referenced(
+    tmp_path: Path,
+    job: Case,
+    models: tuple[str, str],
+    *more: str,
+    numz_padding: bool,
+    required: bool = False,
+) -> None:
+    """Go on with a case only where its input and reference are there (no_reference). On
+    ROOT_CARD, a case `required` goes on whatever is there, as it always did, its comparison
+    failing where its reference is missing: milestone 1's own references, numz.mkv's, are the
+    module's; the others were skipped when absent and still are."""
+    if card() == ROOT_CARD and required:
+        return
+    if not job.source.exists():
+        pytest.skip(f"{job.source}: absent; this module's docstring says how to make it")
+    for path in (
+        job.reference.parent / f"{job.reference.name}.mkv",
+        job.reference.parent / f"{job.reference.name}_frames",
+    ):
+        if not path.exists():
+            no_reference(tmp_path, job, models, *more, numz_padding=numz_padding)
 
 
 # The tile pins of a run (cli.py): one not given is pinned untiled (upscaled), but where a case
@@ -252,6 +417,11 @@ def upscaled(
         pin_untiled=pin_untiled,
     )
     run = subprocess.run(arguments, capture_output=True, text=True, check=False, env=environment)
+    # A card other than ROOT_CARD that can't run the case: skipped with the refusal's figures
+    # (decided on 2026-10-21). On ROOT_CARD, which made the references, a refusal fails it.
+    refused = refusal(run.stderr)
+    if run.returncode == 1 and refused is not None and card() != ROOT_CARD:
+        pytest.skip(f"{card()}: the case can't run there: {refused}")
     assert run.returncode == 0, run.stderr[-3000:]
     # ours.mkv is made in ours.mkv.work, a directory's job, and --plan makes that job with its
     # first pass (cli._run): the run after it resumes the job, and scores no frame again. Without
@@ -398,13 +568,11 @@ def bit_identical(
 def test_milestone1_bit_identical(tmp_path: Path, dit: str, vae: str, reference: str) -> None:
     assert REFERENCE is not None
     models_present(dit, vae)
-    m1 = Path(REFERENCE) / "m1"
-    if reference == "numz_sharp":
-        for path in (m1 / f"{reference}.mkv", m1 / f"{reference}_frames"):
-            if not path.exists():
-                pytest.skip(f"{path}: absent; this module's docstring says how to make it")
-    source = m1 / "input_rgb.mkv"
-    bit_identical(tmp_path, source, 1080, (dit, vae), m1 / reference, numz_padding=True)
+    job = case("milestone1", reference, "input_rgb.mkv", 1080, reference, "m1")
+    referenced(tmp_path, job, (dit, vae), numz_padding=True, required=reference == "numz")
+    bit_identical(
+        tmp_path, job.source, job.resolution, (dit, vae), job.reference, numz_padding=True
+    )
 
 
 def test_milestone1_unpinned(tmp_path: Path) -> None:
@@ -420,8 +588,9 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     # pass is read in that call's log (upscaled).
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
-    m1 = Path(REFERENCE) / "m1"
-    job = (tmp_path, m1 / "input_rgb.mkv", 1080, (NUMZ_DIT, NUMZ_VAE))
+    numz = case("milestone1", "numz", "input_rgb.mkv", 1080, "numz", "m1")
+    referenced(tmp_path, numz, (NUMZ_DIT, NUMZ_VAE), numz_padding=True, required=True)
+    job = (tmp_path, numz.source, numz.resolution, (NUMZ_DIT, NUMZ_VAE))
     arguments, environment = command(*job, numz_padding=True, pin_untiled=False)
     listed = tmp_path / "cuts.txt"
     plan = subprocess.run(
@@ -440,6 +609,12 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
         if (found := re.match(r"\d\d:\d\d:\d\d ERROR (.*)", line))
     ]
     refusals = [error for error in errors if any(what in error for what in REFUSED)]
+    # Another card than ROOT_CARD, whose reference is made untiled at the size its untiled passes
+    # fit (the module's docstring): its plan there refused, or tiling a pass, skips the case,
+    # saying it; ROOT_CARD's is held to UNTILED_FREE (unpinned).
+    other = card() != ROOT_CARD
+    if plan.returncode == 1 and refusals and other:
+        pytest.skip(f"{card()}: the plan is refused: {refusals[0]}")
     if plan.returncode == 1 and refusals:
         unpinned(plan.stderr, f"the plan is refused: {refusals[0]}")
     assert plan.returncode == 0, plan.stderr[-3000:]
@@ -448,6 +623,8 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     passes = [line for line in planned if line.startswith(("encode: ", "decode: "))]
     assert len(passes) == 2 and any(line.startswith("pinned: nothing") for line in planned), planned
     tiled = [line for line in passes if "tiles of" in line]
+    if tiled and other:
+        pytest.skip(f"{card()}: the plan tiles a pass: plan: {tiled[0]}")
     if tiled:
         unpinned(plan.stderr, f"the plan tiles a pass: plan: {tiled[0]}")
     assert passes[0].startswith("encode: untiled, "), planned
@@ -455,7 +632,7 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     assert listed.is_file() and not (tmp_path / "ours.mkv").exists()
     log = upscaled(*job, numz_padding=True, pin_untiled=False, planned=plan.stderr)
     assert choices(plan_lines(log)) == choices(planned), (plan_lines(log), planned)
-    same_bits(tmp_path, m1 / "numz")
+    same_bits(tmp_path, numz.reference)
 
 
 def test_milestone1_from_the_cache(tmp_path: Path) -> None:
@@ -471,12 +648,10 @@ def test_milestone1_from_the_cache(tmp_path: Path) -> None:
                 f" GB: uv run hf download {pull.REPO} {DEFAULT_DIT} {DEFAULT_VAE} {pull.DETECTOR}"
                 f" --revision {pull.REVISION}"
             )
-    m1 = Path(REFERENCE) / "m1"
-    for path in (m1 / "numz_sharp.mkv", m1 / "numz_sharp_frames"):
-        if not path.exists():
-            pytest.skip(f"{path}: absent; this module's docstring says how to make it")
+    job = case("milestone1", "numz_sharp", "input_rgb.mkv", 1080, "numz_sharp", "m1")
+    referenced(tmp_path, job, (DEFAULT_DIT, DEFAULT_VAE), numz_padding=True)
     log = bit_identical(
-        tmp_path, m1 / "input_rgb.mkv", 1080, None, m1 / "numz_sharp", numz_padding=True
+        tmp_path, job.source, job.resolution, None, job.reference, numz_padding=True
     )
     for name in (DEFAULT_DIT, DEFAULT_VAE, pull.DETECTOR):
         assert f"{name}: in the cache, " in log
@@ -494,16 +669,15 @@ def test_milestone1_from_the_cache(tmp_path: Path) -> None:
     ],
 )
 def test_padding_bit_identical(
-    tmp_path: Path, source: str, resolution: int, reference: str
+    request: pytest.FixtureRequest, tmp_path: Path, source: str, resolution: int, reference: str
 ) -> None:
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
-    m1 = Path(REFERENCE) / "m1"
-    for path in (m1 / source, m1 / f"{reference}.mkv", m1 / f"{reference}_frames"):
-        if not path.exists():
-            pytest.skip(f"{path}: absent; this module's docstring says how to make it")
+    name = request.node.callspec.id
+    job = case("padding", name, source, resolution, reference, "m1")
     models = (NUMZ_DIT, NUMZ_VAE)
-    bit_identical(tmp_path, m1 / source, resolution, models, m1 / reference, numz_padding=False)
+    referenced(tmp_path, job, models, numz_padding=False)
+    bit_identical(tmp_path, job.source, job.resolution, models, job.reference, numz_padding=False)
 
 
 @pytest.mark.parametrize(
@@ -536,7 +710,11 @@ def test_padding_bit_identical(
     ],
 )
 def test_tiled_bit_identical(
-    tmp_path: Path, pins: tuple[str, ...], reference: str, grids: list[str]
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    pins: tuple[str, ...],
+    reference: str,
+    grids: list[str],
 ) -> None:
     # seedvr2x's tiled passes against numz's own tiling, in numz's padding (the module's
     # docstring): the whole shot under each tile here, numz's one batch there. The debug log
@@ -544,13 +722,11 @@ def test_tiled_bit_identical(
     # memory at that size (564,019,200 bytes).
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
-    source, m3 = Path(REFERENCE) / "m1" / "input_rgb.mkv", Path(REFERENCE) / "m3"
-    for path in (source, m3 / f"{reference}.mkv", m3 / f"{reference}_frames"):
-        if not path.exists():
-            pytest.skip(f"{path}: absent; this module's docstring says how to make it")
+    job = case("tiled", request.node.callspec.id, "input_rgb.mkv", 1080, reference, "m3")
     models = (NUMZ_DIT, NUMZ_VAE)
+    referenced(tmp_path, job, models, *pins, numz_padding=True)
     log = bit_identical(
-        tmp_path, source, 1080, models, m3 / reference, *pins, "-v", numz_padding=True
+        tmp_path, job.source, job.resolution, models, job.reference, *pins, "-v", numz_padding=True
     )
     said = [line.split("tiling: ", 1)[1] for line in log.splitlines() if "tiling: tiled " in line]
     assert len(said) == len(grids), said
