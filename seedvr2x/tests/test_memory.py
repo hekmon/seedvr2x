@@ -658,8 +658,9 @@ def test_the_whole_card_s_free_memory_is_taken_where_it_is_the_smaller(
         "the GPU has 0.99 GiB free on the whole card by NVML (its driver reports 0.00 GiB free"
         " to this process) where the run may still take 1.00: other programs hold"
     )
-    # Every reading opened NVML and shut it down, and none was warned of.
-    assert nvml.open == 0 and nvml.calls.count("nvmlInit") == 8  # the probe's first
+    # Every reading opened NVML and shut it down, and none was warned of. Each check that found
+    # the card short read it twice, torch's cache given back between the two (memory.check).
+    assert nvml.open == 0 and nvml.calls.count("nvmlInit") == 10  # the probe's first
     assert [record.levelname for record in caplog.records].count("WARNING") == 2
 
 
@@ -1357,7 +1358,9 @@ def test_the_plan_the_limit_and_the_checks_stand_on_one_footing(
                 memory.check("cuda:0")
         else:
             memory.check("cuda:0")
-        assert nvml.calls.count("nvmlInit") - asked == (2 if at_a_check == "answers" else 4)
+        # The check refused read the card twice, torch's cache given back between the two
+        # (memory.check); one NVML fails at is skipped at its first reading.
+        assert nvml.calls.count("nvmlInit") - asked == (3 if at_a_check == "answers" else 4)
     else:
         nvml.cards[NAMED] = 0
         held(monkeypatch, room, reserved=15 * GIB)
@@ -1591,6 +1594,134 @@ def test_tightened_moves_the_reserve_alone() -> None:
         assert tight.tight and tight.reserve == memory.RESERVE_TIGHT == round(2.5 * GIB)
     # Never under nothing.
     assert memory.tightened(memory.Reading(GIB, None, 0, True, 3 * GIB)).counted == 0
+
+
+def cached(
+    monkeypatch: pytest.MonkeyPatch, nvml: Nvml, reserved: int, allocated: int, freed: int = 0
+) -> dict[str, int]:
+    """torch's stand-in for a check, holding `reserved` bytes of which `allocated` are in use:
+    giving its cache back (empty_cache) gives the rest to the card, by NVML's figure, and
+    `freed` more besides, another program's, meanwhile; returns its state, what it holds and how
+    many times its cache was given back."""
+    import torch
+
+    state = {"reserved": reserved, "emptied": 0}
+
+    def empty_cache() -> None:
+        nvml.cards[NAMED] += state["reserved"] - allocated + freed
+        state["reserved"] = allocated
+        state["emptied"] += 1
+
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: state["reserved"])
+    monkeypatch.setattr(torch.cuda, "empty_cache", empty_cache)
+    return state
+
+
+def test_a_check_short_gives_torch_s_cache_back_first(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Allocator (decided on 2026-10-18): a check that finds the card short gives
+    # torch's cache back first and judges the card again, so that a growth larger than torch's
+    # room, within the 4.5 GiB, is held again, not stopped. The plan's limit 25.5 GiB, torch
+    # holding 25 of it, 20 in use: a program taking 0.75 GiB leaves the card 0.25 free, under the
+    # 0.5 a re-hold needs, which stopped the run (test_a_re_hold_needs_the_0_5_left_to_the_rest_
+    # of_the_card). Its cache given back, the card has 5.25 where torch may still take 5.5: held
+    # again to 24.75, the 0.75 grown.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    nvml = Nvml({NAMED: 26 * GIB})
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0)
+    state = cached(monkeypatch, nvml, 25 * GIB, 20 * GIB)
+    # With room, nothing given back.
+    nvml.cards[NAMED] = GIB
+    memory.check("cuda:0")
+    assert state["emptied"] == 0 and limits == []
+    nvml.cards[NAMED] = GIB // 4
+    memory.check("cuda:0")
+    assert state["emptied"] == 1 and limits == [24.75 / 32]
+    assert caplog.records[-1].levelname == "WARNING"
+    assert caplog.messages[-1] == (
+        "the GPU has 5.25 GiB free on the whole card by NVML (its driver reports 0.00 GiB free to"
+        " this process) where the run may still take 5.50, torch's cache of 5.00 GiB given back"
+        " first: the memory outside torch's allocator, other programs' or the run's own, grew"
+        " 0.75 GiB on the card since torch's limit was set, past the 0.5 GiB left to it; torch"
+        " held again to 24.75 GiB, what it holds and the card's free memory less 0.5: 0.75 GiB"
+        " under the limit set once the plan was made, within the 4.5 GiB that plan leaves"
+        " torch's allocator beyond a step's peak, and the run goes on, a step left that much less"
+        " beyond its peak"
+    )
+    # The card judged again with room, another program having given 1 GiB back meanwhile:
+    # nothing held again, nor warned of; said at debug level.
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0)
+    state = cached(monkeypatch, nvml, 25 * GIB, 20 * GIB, freed=GIB)
+    said = len(caplog.records)
+    nvml.cards[NAMED] = GIB // 4
+    memory.check("cuda:0")
+    assert state["emptied"] == 1 and limits == []
+    assert [record.levelname for record in caplog.records[said:]] == ["DEBUG"]
+    assert caplog.messages[-1].startswith(
+        "the card short of what the run may still take before this unit, torch's cache given back"
+        " (5.00 GiB), and judged again: 6.25 GiB free on the whole card by NVML"
+    )
+    # NVML failing at the second reading, the first having found the card short: judged on that
+    # reading and what the cache gave back, never skipped: held again as above.
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0)
+    cached(monkeypatch, nvml, 25 * GIB, 20 * GIB)
+    emptied = torch.cuda.empty_cache
+
+    def fails_after() -> None:
+        emptied()
+        nvml.failing = "nvmlDeviceGetMemoryInfo"
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", fails_after)
+    nvml.cards[NAMED] = GIB // 4
+    memory.check("cuda:0")
+    assert limits == [24.75 / 32] and "torch held again to 24.75 GiB" in caplog.messages[-1]
+    assert "couldn't be read through NVML again" in caplog.messages[-2]
+    nvml.failing = None
+    # Past the reserve, its cache given back all the same: stopped, saying so. Torch holding 20
+    # GiB, 15 in use, a program taking the card's last 6.
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0)
+    cached(monkeypatch, nvml, 20 * GIB, 15 * GIB)
+    nvml.cards[NAMED] = 0
+    with pytest.raises(torch.OutOfMemoryError) as refusal:
+        memory.check("cuda:0")
+    assert limits == [] and str(refusal.value) == (
+        "the GPU has 5.00 GiB free on the whole card by NVML (its driver reports 0.00 GiB free to"
+        " this process) where the run may still take 10.50, torch's cache of 5.00 GiB given back"
+        " first: other programs hold the rest of the card's memory, or the run's own work took"
+        " more than the 0.5 GiB left to it outside torch's allocator; the memory outside that"
+        " allocator grew 6.00 GiB on the card since torch's limit was set: torch held again to"
+        " what it holds and the card's free memory less 0.5 would stand 6.00 GiB under the limit"
+        " set once the plan was made, past the 4.5 GiB that plan leaves torch's allocator beyond"
+        " a step's peak"
+    )
+    # Nothing to give back: stopped where the card has under the 0.5 GiB, as before.
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0)
+    state = cached(monkeypatch, nvml, 25 * GIB, 25 * GIB)
+    nvml.cards[NAMED] = GIB // 4
+    with pytest.raises(torch.OutOfMemoryError, match=r"less than the 0\.5 GiB left") as refusal:
+        memory.check("cuda:0")
+    assert state["emptied"] == 1 and "given back" not in str(refusal.value)
+    # Under torch's allocator without the segments, which holds nothing again: given back, then
+    # stopped, the figures those judged after it.
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "backend:native")
+    held_run(monkeypatch, nvml)
+    limits = held(monkeypatch, 0)
+    state = cached(monkeypatch, nvml, 25 * GIB, 20 * GIB)
+    nvml.cards[NAMED] = GIB // 4
+    with pytest.raises(torch.OutOfMemoryError) as refusal:
+        memory.check("cuda:0")
+    assert state["emptied"] == 1 and limits == []
+    assert str(refusal.value).startswith(
+        "the GPU has 5.25 GiB free on the whole card by NVML (its driver reports 0.00 GiB free to"
+        " this process) where the run may still take 5.50, torch's cache of 5.00 GiB given back"
+        " first: other programs hold"
+    )
 
 
 def test_a_re_hold_needs_the_0_5_left_to_the_rest_of_the_card(

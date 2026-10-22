@@ -706,12 +706,15 @@ def check(device: Any) -> None:
     holds: under it the limit would stand under torch's own reservation, every later check would
     find the run's room under nothing and pass, the bound gone, while torch gives none of its cache
     back between the units of a phase (a review, 2026-10-16: held again to 24.75 GiB with 25 held, a
-    program taking 4.75 more went unsaid). The run stops there instead (PROVISIONAL, implementation,
-    2026-10-16; the alternative, design's to weigh: torch's cache given back first, the card then
-    judged again). A desktop in use had stopped 3 runs of 6 under the segments and none of 4 under
-    the plain allocator, the memory outside torch having grown 0.50 to 0.59 GiB past its level at
-    the plan: the segments leave room on the card, and the desktop took it and kept it, where the
-    plain allocator filled the card and the desktop's growth was given back (an RTX 5090 under WSL2,
+    program taking 4.75 more went unsaid). The run stops there instead. But a check that finds the
+    card short gives torch's cache back first (empty_cache) and judges the card again (DESIGN.md,
+    Allocator, decided on 2026-10-18): what torch holds and doesn't use goes back to the card, so
+    that a growth larger than torch's room, within the plan's reserve, finds the HELD_BACK free and
+    is held again, not stopped; the stop and the re-hold then say what the cache gave back. A
+    desktop in use had stopped 3 runs of 6 under the segments and none of 4 under the plain
+    allocator, the memory outside torch having grown 0.50 to 0.59 GiB past its level at the plan:
+    the segments leave room on the card, and the desktop took it and kept it, where the plain
+    allocator filled the card and the desktop's growth was given back (an RTX 5090 under WSL2,
     2026-10-16; DESIGN.md, Allocator). Past that bound, under torch's allocator without the
     segments, or on the driver's figure, the run stops. A check never raises the limit again, the
     card having more free than when torch was held (PROVISIONAL, implementation, 2026-10-16: design
@@ -782,28 +785,44 @@ def check(device: Any) -> None:
         return
     import torch
 
-    reported, total = torch.cuda.mem_get_info(device)
-    card = None
-    if _footing == CARD:
-        read = _twice(_index(device))
-        if not isinstance(read, int):
-            # A warning at every check so skipped, each being a unit that nothing but torch's
-            # limit holds. PROVISIONAL (implementation, 2026-10-12): design decided the second
-            # reading and the warning, not how often a run whose NVML has gone for good repeats it.
-            logger.warning(
-                "the whole card's free memory couldn't be read through NVML before this unit,"
-                " asked twice (%s): the unit isn't checked against the card, and runs under"
-                " torch's limit alone; what the driver reports free to this process isn't taken"
-                " in its place, which stands under the card's near a full card and would stop the"
-                " run for nothing",
-                read,
-            )
-            return
-        card = read
+    found = _figures(device)
+    if found is None:
+        return
+    reported, total, card = found
     free = reported if card is None else card
     reserved = torch.cuda.memory_reserved(device)
     room = _limit - reserved
     if free >= room:
+        return
+    # The card short: torch's cache given back first, and the card judged again (DESIGN.md,
+    # Allocator, decided on 2026-10-18), what torch holds and doesn't use then the card's again.
+    # The comparison above doesn't move by it, the card gaining what torch's room does; what it
+    # moves is the card's free memory, which a re-hold needs HELD_BACK of, so that a growth
+    # larger than torch's room, within the plan's reserve, is held again, not stopped. Judged
+    # again, the other programs may have moved too.
+    torch.cuda.empty_cache()
+    held = reserved
+    reserved = torch.cuda.memory_reserved(device)
+    given = max(held - reserved, 0)
+    found = _figures(device, again=True)
+    if found is None:
+        # NVML failing at the second reading, the first having found the card short: judged on
+        # that reading and what the cache gave back to the card, never skipped, the card known
+        # short (a review's finding, 2026-10-21).
+        free += given
+    else:
+        reported, total, card = found
+        free = reported if card is None else card
+    room = _limit - reserved
+    if free >= room:
+        logger.debug(
+            "the card short of what the run may still take before this unit, torch's cache given"
+            " back (%.2f GiB), and judged again: %.2f GiB free %s, the run may still take %.2f",
+            given / GIB,
+            free / GIB,
+            _named(reported, card, smaller=False),
+            room / GIB,
+        )
         return
     # What the memory outside torch's allocator grew since the limit in force was set, other
     # programs' or the run's own: the figure judged and what torch held then (_base), against
@@ -812,6 +831,9 @@ def check(device: Any) -> None:
     grown = _left + room - free if _base is None else sum(_base) - free - reserved
     named = _named(reported, card, smaller=False)
     short = f"the GPU has {_down(free)} GiB free {named} where the run may still take {_up(room)}"
+    if round(given / GIB, 2):
+        # Said where it gave anything to the hundredth: the figures are those judged after it.
+        short += f", torch's cache of {given / GIB:.2f} GiB given back first"
     bound = ""
     if card is not None and _segments and _plan_s_limit is not None:
         limit = reserved + free - _left
@@ -857,6 +879,41 @@ def check(device: Any) -> None:
         f" outside that allocator grew {_up(grown)} GiB {where} since torch's limit was set"
         f"{bound}"
     )
+
+
+def _figures(device: Any, again: bool = False) -> tuple[int, int, int | None] | None:
+    """What a check judges (check): what the driver reports free to this process and the card's
+    total (mem_get_info), and on the card's footing what the whole card has free (_twice; None
+    on the driver's footing); None where NVML fails twice on the card's footing, said in a
+    warning, the unit not checked; at debug level for the check's second reading (`again`),
+    which then judges on its first."""
+    import torch
+
+    reported, total = torch.cuda.mem_get_info(device)
+    if _footing != CARD:
+        return reported, total, None
+    read = _twice(_index(device))
+    if not isinstance(read, int) and again:
+        logger.debug(
+            "the whole card's free memory couldn't be read through NVML again, its cache given"
+            " back, asked twice (%s): judged on the first reading and what the cache gave back",
+            read,
+        )
+        return None
+    if not isinstance(read, int):
+        # A warning at every check so skipped, each being a unit that nothing but torch's
+        # limit holds. PROVISIONAL (implementation, 2026-10-12): design decided the second
+        # reading and the warning, not how often a run whose NVML has gone for good repeats it.
+        logger.warning(
+            "the whole card's free memory couldn't be read through NVML before this unit,"
+            " asked twice (%s): the unit isn't checked against the card, and runs under"
+            " torch's limit alone; what the driver reports free to this process isn't taken"
+            " in its place, which stands under the card's near a full card and would stop the"
+            " run for nothing",
+            read,
+        )
+        return None
+    return reported, total, read
 
 
 def _twice(index: int) -> int | str:
