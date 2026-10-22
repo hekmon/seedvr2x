@@ -2186,14 +2186,21 @@ first pass, whose shots are its input, and before the models load:
     the last 5, and a resumed run's first seek isn't counted. Every run runs it, `--plan`
     included, its cost said in the plan's lines (decided on 2026-10-21: a run without it could
     say no time left before its first segment's decode, and a job of one segment never).
-  - Each kind's two lengths are measured after a unit of its own kind, as most of a run's
-    units come, the first unit after a change of phase carrying the phase's term (decided on
-    2026-10-22, to be built). Measured right after a change, each step paid part of it, which
-    the fit put in the rate: at 720p on an RTX 5090 the estimate ran 18% over, a decode
-    measured at 0.247 s a frame where the run's took 0.205. An encode's second length takes
-    about 3 s at the first length's rate, on the VAE's grid of 4n + 1 frames, never fewer than
-    13, within the plan's memory: with 5 and 13 frames, the encodes' estimate at 1080p came
-    out 11.8% under and 15.3% over on two identical runs.
+  - Each kind's two lengths are measured as most of its units come in a run (decided on
+    2026-10-22, to be built):
+    - A window's and a decode's after a unit of their own kind, the first after a change of
+      phase carrying the phase's term. Measured right after a change, each step paid part of
+      it, which the fit put in the rate: at 720p on an RTX 5090 the estimate ran 18% over, a
+      decode measured at 0.247 s a frame where the run's took 0.205; measured after their own
+      kind, 5.9% under.
+    - An encode's right after a change, since a run's encodes always follow one, the change
+      then counted once, in the encode's constant. Measured after an encode, the constant lost
+      the change (0.10 s, where 0.23 and 0.66 s before), and at 1080p each encode's estimate
+      missed by a median of 17.6%, against 3.8–4.6% measured after a change.
+    - An encode's second length takes about 3 s at the first length's rate, on the VAE's grid
+      of 4n + 1 frames, never fewer than 13, within the plan's memory: with 5 and 13 frames,
+      the encodes' estimate at 1080p came out 11.8% under and 15.3% over on two identical
+      runs.
   - Each unit's progress line says the job's time left and the time of day it should end
     (decided on 2026-10-21, to be built).
   - After every unit, each model is corrected by the median of the last 5 ratios of measured
