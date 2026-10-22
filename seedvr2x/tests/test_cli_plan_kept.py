@@ -557,3 +557,94 @@ def test_a_plan_whose_first_pass_runs_again_writes_it_at_once(
     assert upscale(tmp_path, source_path, "out", *taken) == 0, errors(caplog)
     assert scans == [] and recorded(out)["plan"] is not None
     assert len(recorded(out)["environment_changes"]) == (1 if why == "ffmpeg changed" else 0)
+
+
+def test_a_plan_s_directory_holding_another_s_file_is_refused_before_any_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A directory holding anyone else's files is refused before anything is written in it
+    # (DESIGN.md, Pause and resume, A plan, decided on 2026-10-21). A plan's directory with a
+    # file of another's added, its frame index lost so that its first pass runs again: refused
+    # from its record, before that pass (cli._refuse_foreign); one added during the pass,
+    # before the pass is written (cli._first_write), by the plan's own layout (resume.
+    # leftovers). Each time nothing written there, its record as it was. The file gone, the same
+    # command takes the plan up.
+    source_path = job(tmp_path, monkeypatch)
+    out = tmp_path / "out"
+    assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(tmp_path / "p.txt")) == 0
+    (out / "frame_index.bin").unlink()
+    (out / "notes.txt").write_text("someone else's\n")
+    before = {path.name: path.read_bytes() for path in out.iterdir()}
+    scans = first_passes(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert scans == []
+    assert errors(caplog) == [f"{out}: not this job's: notes.txt"]
+    assert {path.name: path.read_bytes() for path in out.iterdir()} == before
+    (out / "notes.txt").unlink()
+    # Come during the pass: judged again before the pass is written.
+    from seedvr2x.media import source as examined
+
+    scan = examined.scan
+
+    def meanwhile(path: Path, *detector: Any) -> object:
+        (out / "notes.txt").write_text("someone else's\n")
+        return scan(path, *detector)
+
+    before.pop("notes.txt")
+    caplog.clear()
+    with monkeypatch.context() as patch:
+        patch.setattr(examined, "scan", meanwhile)
+        assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert errors(caplog) == [f"{out}: not this job's: notes.txt"]
+    assert {
+        path.name: path.read_bytes() for path in out.iterdir() if path.name != "notes.txt"
+    } == before
+    assert steps.calls == []
+    (out / "notes.txt").unlink()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0, errors(caplog)
+    assert (out / "frame_index.bin").is_file() and recorded(out)["plan"] is not None
+
+
+def test_a_mkv_path_s_work_directory_holding_another_s_file_is_refused_before_its_rehearsal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A .mkv path's job, stopped: its work directory with a file of another's added is refused
+    # from its record before the remux rehearsal (cli._copied), which writes there and removes
+    # a stopped assembly's leftovers, and before any first pass (design, 2026-10-21); nothing
+    # written or removed. An assembly's own work file is seedvr2x's, accepted by its name.
+    from seedvr2x.media import assembly
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "encode 3"
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB) == 130
+    steps.stop = None
+    work = tmp_path / "one.mkv.work"
+    (work / "notes.txt").write_text("someone else's\n")
+    # A segment command's partial file's name, the job recorded with none: another's too.
+    from seedvr2x.media.files import command_partial
+
+    stray = command_partial(work / "seg_000001.mkv").name
+    (work / stray).write_bytes(b"another's")
+    left = sorted(assembly.WORK_FILES)[0]
+    (work / left).write_bytes(b"an assembly's")
+    before = {path.name: path.read_bytes() for path in work.iterdir() if path.is_file()}
+    rehearsed: list[Path] = []
+    monkeypatch.setattr(assembly, "preflight", lambda *given: rehearsed.append(given[0]) or "")
+    scans = first_passes(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB) == 1
+    assert errors(caplog) == [f"{work}: not this job's: {', '.join(sorted(['notes.txt', stray]))}"]
+    assert rehearsed == [] and scans == []
+    assert {path.name: path.read_bytes() for path in work.iterdir() if path.is_file()} == before
+    (work / "notes.txt").unlink()
+    (work / stray).unlink()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB) == 0, errors(caplog)
+    assert rehearsed and (tmp_path / "one.mkv").is_file()

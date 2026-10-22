@@ -693,6 +693,10 @@ def _run(args: argparse.Namespace) -> int:
             asked = (args, cuts, numz_padding, numz_draw, numz_tail)
             if final is not None and _assembled(*asked, final, directory, recorded):
                 return 0
+            # Anyone else's files refused as soon as the record is read, before the first pass
+            # and a .mkv path's rehearsal, which writes there (DESIGN.md, Pause and resume,
+            # decided on 2026-10-21); a plan's layout judges again after its pass (below).
+            _refuse_foreign(directory / NAME, recorded, work=final is not None)
             kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
         if final is not None:
             # Before any work, on a new job and on a resume: what the assembly can't take of the
@@ -879,6 +883,13 @@ def _run(args: argparse.Namespace) -> int:
                 # Only where the pass found the job recorded: another source, another number of
                 # frames, is another job, refused with its record untouched (_resume).
                 if not _taken_differences(again, prior)[0]:
+                    # A directory holding anyone else's files refused before anything is written
+                    # in it (DESIGN.md, Pause and resume, A plan, decided on 2026-10-21): judged
+                    # from the record before the pass (_refuse_foreign), and again by the
+                    # plan's own layout, as its taking up judges it (resume.leftovers, _replan),
+                    # which deletes nothing, for a file come during the pass; refused, its record
+                    # and its directory stay as they were.
+                    resume.leftovers(resume.recorded_job(again.path, prior.recorded, again.source))
                     again.environment_changes = list(prior.recorded.get(resume.CHANGES, []))
                     if prior.changed:
                         again.environment_changes.append(
@@ -1821,6 +1832,64 @@ def _checksums_beside(output: Path) -> Path:
     """Where the checksums of the finished file `output` go: beside it, its name and .crc32
     (DESIGN.md, Output, Checksums)."""
     return output.with_name(f"{output.name}.crc32")
+
+
+def _refuse_foreign(path: Path, content: dict[str, Any], work: bool = False) -> None:
+    """Refuse (JobError) the directory of the manifest at path, `content` its record as read,
+    where it holds anything not this job's, judged from the record alone as soon as it is read
+    (cli._run): before the first pass, an hour of decode, and before a .mkv path's remux
+    rehearsal, which writes in its work directory and removes a stopped assembly's leftovers by
+    their names (cli._copied; DESIGN.md, Pause and resume, decided on 2026-10-21). seedvr2x's own
+    files are accepted by their names, what the run discards or takes up: the manifest, the frame
+    index and their partial files, the units' directory (STATE) and the checksums' (SUMS), each
+    segment's file recorded, finished or not, with its partial file and a segment command's, and
+    in a .mkv path's work directory (`work`) the assembly's work files (assembly.work_file).
+    Anything else is refused, nothing written or removed; what the units' and checksums'
+    directories hold is judged later, by the job's layout (leftovers). A record whose segments
+    can't be read so is left to the checks after it, which refuse it (cli._prior).
+    Here, not in runtime/resume.py, which imports torch: it runs before the allocator is chosen
+    (memory.startup). PROVISIONAL (implementation, 2026-10-21): the directory's own entries
+    alone are judged here."""
+    from seedvr2x.media.assembly import work_file
+    from seedvr2x.media.files import command_partial, partial_path
+    from seedvr2x.runtime.job import JobError
+    from seedvr2x.runtime.manifest import INDEX, NAME, STATE, SUMS
+
+    directory = path.parent
+    segments = content.get("segments")
+    if not isinstance(segments, list):
+        return
+    names = {
+        NAME,
+        partial_path(path).name,
+        STATE,
+        SUMS,
+        INDEX,
+        partial_path(directory / INDEX).name,
+    }
+    # A segment command's partial file only where the record has a command, as leftovers has it
+    # (the review, 2026-10-21).
+    settings = content.get("settings")
+    commanded = (
+        isinstance(settings, dict) and cast(dict[str, Any], settings).get("segment_cmd") is not None
+    )
+    for segment in cast(list[Any], segments):
+        name: object = (
+            cast(dict[str, Any], segment).get("name") if isinstance(segment, dict) else None
+        )
+        if not isinstance(name, str):
+            return
+        file = directory / name
+        names.update((file.name, partial_path(file).name))
+        if commanded:
+            names.add(command_partial(file).name)
+    foreign = sorted(
+        entry.name
+        for entry in directory.iterdir()
+        if entry.name not in names and not (work and work_file(entry.name))
+    )
+    if foreign:
+        raise JobError(f"{directory}: not this job's: {', '.join(foreign[:5])}")
 
 
 def _empty(directory: Path, work: bool = False) -> bool:
