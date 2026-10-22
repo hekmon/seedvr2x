@@ -141,20 +141,28 @@ with cards/<its name>/cases.json saying what each case takes there (case): "mile
 {"resolution": R, "references": {"numz": NAME, "numz_sharp": NAME}} for the milestone 1 cases,
 the unpinned one and the one from the cache, which run untiled at the largest size the card's
 untiled passes fit; "padding", by each case's id, its "source", "resolution" and "reference";
-"tiled", by each case's id, its "reference", at 1080 as above; and "made", the commit and subset
-that made them. On the RTX 5090 (2026-10-21; ~21.7 GiB the plan counts on beside its desktop):
-milestone 1 at 792 (1408x792; 810 is 0.40 GiB short for the untiled decode); the padding cases
-pad1080 at 792 (1408x792 padded to 1408x816, 8 rows reflected and no column, as pad1080 at
-1080), pad720 at 720, padcols at 530 (956x530 padded to 992x560, rows and columns reflected);
-the tiled cases d1024, e1344-d1024 and e512-d512. Its numz cross-check, numz 4490bd1 through
-ffv1_out.py with its block swap (--blocks_to_swap 36 --dit_offload_device cpu
---vae_offload_device cpu), in each of those cases but d1024, gave the same frames, 45 of 45 in
-each. A case a card has no reference for is skipped, naming the card and the reference
-missing, or, where the card can't run it, with its refusal's figures (no_reference); a case
-refused there at its run is skipped the same way: d1024 on the 5090, its untiled encode at the
-edge of what the card holds beside its desktop, runs or is refused as the desktop's share
-moves. On the 96 GB card nothing of this changes, and nothing skips: a refusal there fails the
-case.
+"tiled", by each case's id, its "reference", at 1080 as above or at its own "resolution", with
+what its debug log says of each tiled pass there, the start of each grid's line ("grids") and the
+end every one shares ("over"); and "made", the commit and subset that made them. A gate's case
+keeps 2 GiB of the card's budget (DESIGN.md, Validation, decided on 2026-10-21): on the RTX 5090
+(2026-10-22, a desktop holding 5.5 GB of the card, 20.41 GiB the plan counts on), each case at a
+size whose plan beside a second program holding 2 GiB of the card is neither refused nor made
+with the reserve of 2.5 GiB, its window and tiles the same: milestone 1 at 720 (1280x720; 756
+takes 2.5 there, 792 too, with nothing beside it); the padding cases pad1080 at 648 (1152x648
+padded to 1152x672, 8 rows reflected and no column, as pad1080 at 1080), pad720 at 576
+(1024x576 padded to 1024x608, its height already a multiple of 16, as pad720 at 720), padcols
+at 530 (956x530 padded to 992x560, rows and columns reflected); the tiled cases d1024 and
+e1344-d1024 at 864 (1536x864, a decode in 2 tiles of 1024 px, 2 across and 1 down; an encode in
+2 tiles of 1344 px likewise), e512-d512 at 1080. The references made again at a size kept
+(padcols, e512-d512) are those of 2026-10-21 frame for frame. Its numz cross-check, numz 4490bd1
+through ffv1_out.py with its block swap (--blocks_to_swap 36 --dit_offload_device cpu
+--vae_offload_device cpu): in each case but d1024 at 2026-10-21's sizes, and on milestone 1's
+case at 720, the same frames, 45 of 45 in each. A case a card has no reference for is skipped,
+naming the card and the reference missing, or, where the card can't run it, with its refusal's
+figures (no_reference); a case refused there at its run is skipped the same way, and a case
+planned there with the reserve of 2.5 GiB fails (upscaled), the card no longer leaving it the
+room its reference was made in. On the 96 GB card nothing of this changes, and nothing skips:
+a refusal there fails the case.
 
 The run goes through the CLI in a process of its own, as a user's would: the allocator is set
 before torch is imported, which a test process importing torch first wouldn't do. And this
@@ -240,11 +248,15 @@ def card_directory(name: str) -> Path:
 @dataclass(frozen=True)
 class Case:
     """A case as this card runs it: its input, the resolution it is upscaled to, and its reference,
-    <reference>.mkv and <reference>_frames/."""
+    <reference>.mkv and <reference>_frames/; for a tiled case at another size than 1080 on a card
+    other than ROOT_CARD, what its debug log says of each tiled pass there, the start of each
+    grid's line and the end every one shares (grids, over), else None: the test's own, at 1080."""
 
     source: Path
     resolution: int
     reference: Path
+    grids: tuple[str, ...] | None = None
+    over: str | None = None
 
 
 def case(kind: str, name: str, source: str, resolution: int, reference: str, where: str) -> Case:
@@ -252,7 +264,8 @@ def case(kind: str, name: str, source: str, resolution: int, reference: str, whe
     ROOT_CARD, as the test's parameters give it: its input in m1/, its reference in `where` (m1
     or m3) of SEEDVR2X_REFERENCE_DIR. On another, as its directory's CASES has it (the module's
     docstring): milestone1's resolution for all its cases; each padding case's source, resolution
-    and reference by its id; each tiled case's reference by its id, at 1080 as on ROOT_CARD; the
+    and reference by its id; each tiled case's reference by its id, at 1080 as on ROOT_CARD or at
+    its own "resolution", with its tiled passes' "grids" and what they are "over" there; the
     parameters for what the entry doesn't say, its reference in `where` of the card's directory.
     The inputs are the same on every card: m1/ of SEEDVR2X_REFERENCE_DIR."""
     assert REFERENCE is not None
@@ -267,10 +280,13 @@ def case(kind: str, name: str, source: str, resolution: int, reference: str, whe
         entry: Any = {**said, "reference": said.get("references", {}).get(name, reference)}
     else:
         entry = said.get(name, {})
+    grids = entry.get("grids")
     return Case(
         inputs / entry.get("source", source),
         int(entry.get("resolution", resolution)),
         directory / where / entry.get("reference", reference),
+        None if grids is None else tuple(str(grid) for grid in grids),
+        entry.get("over"),
     )
 
 
@@ -735,10 +751,14 @@ def test_tiled_bit_identical(
         tmp_path, job.source, job.resolution, models, job.reference, *pins, "-v", numz_padding=True
     )
     said = [line.split("tiling: ", 1)[1] for line in log.splitlines() if "tiling: tiled " in line]
+    # At 1080, or at the card's own size where its cases.json gives one, with what each tiled
+    # pass's line says there (case).
+    grids = list(job.grids) if job.grids is not None else grids
+    over = job.over or (
+        "over 45 frames padded to 1920x1088; its scratch, 564019200 bytes, in system memory"
+    )
     assert len(said) == len(grids), said
     for line, grid in zip(said, grids, strict=True):
         assert line.startswith(grid), said
-        assert line.endswith(
-            "over 45 frames padded to 1920x1088; its scratch, 564019200 bytes, in system memory"
-        ), said
+        assert line.endswith(over), said
     assert not (tmp_path / "ours.mkv.work").exists()
