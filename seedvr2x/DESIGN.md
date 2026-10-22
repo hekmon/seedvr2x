@@ -192,8 +192,8 @@ which stay on the GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewri
 long one. Every line starts with the time of day, then its message (`23:05:12 plan: …`); a
 warning adds `WARNING`, an error `ERROR`. The date, the milliseconds and the logger's name are
 for `--verbose`, which keeps the old format whole. Python's own warnings go through the same
-lines (decided on 2026-10-21, to be built: they print in their own form today); a download's
-progress bar keeps its own. The plan's lines teach as they go (see
+lines, one line each ("23:05:12 WARNING UserWarning: … (file.py:12)"; built on 2026-10-22);
+a download's progress bar keeps its own. The plan's lines teach as they go (see
 [Memory planner](#memory-planner)).
 
 ### Language: all Python
@@ -2165,7 +2165,8 @@ first pass, whose shots are its input, and before the models load:
     - What shapes the output: the window cap, the tiles and their overlap, and the two compile
       flags. A resume compares them as it does the layout, and takes them as recorded.
     - What doesn't: the swapped blocks, what stays on the GPU in each phase, the free memory,
-      the budget, the predicted peaks and the timings, recorded for information. Free memory
+      the budget and its reserve, the predicted peaks and the timings, recorded for information.
+      Free memory
       varies from one start to the next, so a resume plans these again around the recorded
       shape, from the memory free that day.
     - A resume whose recorded shape no longer fits stops, naming the phase and the shortfall.
@@ -2178,7 +2179,8 @@ first pass, whose shots are its input, and before the models load:
 - `--plan FILE` prints the plan and the time estimate without running the job, after the first
   pass (the shots are the plan's input), and writes the detected cut list to FILE for editing
   (see [Shot detection](#shot-detection)), a plan refused included: the cuts are the first
-  pass's, kept with it (decided on 2026-10-21, to be built). It fetches and checks the model
+  pass's, kept with it, the refusal saying where (built on 2026-10-22). It fetches and checks
+  the model
   files as a run does, and loads them, for the calibration. It prints:
   - the card, its free memory and the budget
   - the padded size and the tokens per latent
@@ -2356,8 +2358,12 @@ GPU's memory refused stops a run in one line, before the models load as after.
     alone; on the 96 GB card under them, three decodes kept their frames with 0.46 to 0.54 GiB
     left, 0.30 to 0.51 less than under `cudaMallocAsync` there. Torch's count of refused
     allocations across a pass (`num_ooms`) is 0 on every kept pass and 19 to 38 on every lost
-    one, cuDNN's refused workspaces. Decided on 2026-10-18, to be built: a held run warns where
-    that count grows in a VAE unit, its frames maybe not those of a run with more room.
+    one, cuDNN's refused workspaces. Built on 2026-10-22, as decided on 2026-10-18: a held run
+    under torch's own allocator warns after a shot's encode or decode where that count grew
+    during it, its frames maybe not those of a run with more room. On the RTX 5090, a decode in
+    832-px tiles squeezed to about 0.3 GiB over its peak (the reserve and the VAE's room lowered
+    by a test's driver, which no user's run reaches): the warning, 19 to 59 requests refused,
+    and 40 of 45 frames other than the same job's with room, which warned nothing.
   - A desktop in use stopped 3 runs of 6 under them and none of 4 under the plain allocator, the
     memory outside torch grown 0.50 to 0.59 GiB past its level at the plan, most of it before
     the first unit: the segments leave room on the card, and the desktop took it. Built on
@@ -2377,15 +2383,20 @@ GPU's memory refused stops a run in one line, before the models load as after.
     segments needed nothing, the desktop having given 0.14 back. Torch is held again only where
     the card has the 0.5 GiB free, the new limit then at or above what torch holds; with less
     the run stops, saying so: a re-hold under what torch held left every later check passing,
-    the bound gone (a review's find). Decided on 2026-10-18, to be built: such a check gives
-    torch's cache back first and judges the card again, so that a growth larger than torch's
-    room within the 4.5 GiB is held again, as decided, not stopped.
+    the bound gone (a review's find). Built on 2026-10-22, as decided on 2026-10-18: such a
+    check gives torch's cache back first and judges the card again (NVML failing at that second
+    reading: judged on the first and what was given back), so that a growth larger than torch's
+    room within the plan's reserve is held again, not stopped; the stop and the re-hold say what
+    the cache gave back. On that card a program taking 3.5 GiB mid-run: 19.67 GiB given back,
+    held again 4.18 GiB under the plan's limit, the run on, 1.49 times as long, the same
+    frames. On that job torch's room at a check stayed above the reserve, so the case only this
+    rule saves didn't arise; the CPU tests hold it.
   - With a reserve of 2.5 GiB under those segments, 4K's smallest window planned and ran on that
     card beside a desktop holding 3.2 GiB, four times, with the frames of a run that had room to
     spare, in 134 to 139 s for 65.6; but every other plan packed tighter, and a job that fitted
-    ran 1.4 to 1.5 times as long. Decided on 2026-10-13 (the user's go), to be built now that
-    the frames' floor under the segments is known (above): the plan is made with 4.5, and a
-    reserve of 2.5 GiB is taken only where the job would be refused otherwise, said slow in the
+    ran 1.4 to 1.5 times as long. Decided on 2026-10-13 (the user's go), built on 2026-10-22:
+    the plan is made with 4.5, and a reserve of 2.5 GiB is taken only where the job would be
+    refused otherwise, said slow in the
     plan's lines, the VAE's room untouched. A resume's plan too (decided on 2026-10-21): a
     recorded shape that no longer fits with 4.5 takes 2.5 before the resume stops. On that card
     two resumes of a 1080p job, planned 0.29 GiB under its budget, were refused 0.11 and 0.20
@@ -2394,8 +2405,14 @@ GPU's memory refused stops a run in one line, before the models load as after.
     user's own setting without them, or under `cudaMallocAsync`, the job is refused with 4.5 as
     before, the refusal saying that torch's default would run it, slower. Pins included: a
     pinned shape refused with 4.5 runs with 2.5, its budget line saying so and naming the pin
-    that would run with 4.5, where one does. A job refused for the system memory alone is
-    planned with 2.5 too: a larger budget on the card swaps fewer blocks, and pins less memory.
+    that would run with 4.5, where one does, checked by planning with it. A job refused for the
+    system memory alone is planned with 2.5 too: a larger budget on the card swaps fewer blocks,
+    and pins less memory. Refused with both, a job is refused by the 2.5 plan's figures. On the
+    RTX 5090, a 1080p job pinned to its plan's shape beside a program holding 1.3 GiB: new,
+    refused with 4.5 and run with 2.5 in 403 s against 372 with room, the same frames (its 2.5
+    plan had the budget of the roomy one); stopped, then resumed beside it, its recorded shape
+    refused with 4.5 and taken with 2.5, the same frames. So the plan's line says up to 1.5
+    times as long, not 1.4 to 1.5: by how tightly the plan packs (decided on 2026-10-22).
 
 ## Pause and resume
 
@@ -2574,8 +2591,8 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     included: anything else is refused, never deleted, and before anything is written there.
     A recorded job's directory is judged from its record as soon as the record is read, before
     its first pass and before a file output's remux rehearsal, seedvr2x's own files known by
-    their names; then again by the plan's layout after the pass (decided on 2026-10-21, to be
-    built: the check after the pass is built, before the pass's record is written again).
+    their names; then again by the plan's layout after the pass, before the pass's record is
+    written again (built on 2026-10-22).
   - These are discarded: `.partial` files, an unfinished segment's file, unrecorded units, and
     the units of finished segments.
   - A recorded input copy that is missing or damaged is remade from the input, keeping the
@@ -2987,7 +3004,10 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      1080p bit-identical to numz patched to repeat its last frame, and to numz itself in the
      tests' mirror mode.
      On the code of 2026-10-20 (the decode's chroma kernel bilinear, `--quality`), on
-     2026-10-21: the box's CPU suite and the whole GPU suite, 34 tests.
+     2026-10-21: the box's CPU suite and the whole GPU suite, 34 tests. On the code of
+     2026-10-21 (the plan said, a refused run keeping its first pass) and of 2026-10-22 (the
+     consumer card's memory rules): the same on the box, every hold proving its tree, and the
+     RTX 5090's whole suite against its own references, 34 tests on 2026-10-22.
    - On a real desktop card, an RTX 5090 under WSL2 held to its card (2026-10-12): the same
      job alone, beside a program holding 8 GiB, stopped then resumed, and with NVML silent,
      the same frames each time; each phase within 0.3 GiB of its prediction but the
@@ -3016,9 +3036,14 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      passed and 3 skipped, refused by their plans 0.05 to 0.50 GiB short (milestone 1 and a
      padding case at 792 rows, the untiled encode of a tiled case at 1080p), the desktop
      holding up to 1.1 GiB more of the card that afternoon; one case at 792 was refused in the
-     hold where two others at 792 ran. Decided on 2026-10-21, to be built: a gate's case keeps
-     its predicted peaks at least 2 GiB under that card's budget, read with the desktop idle,
-     its references made again at the size that does.
+     hold where two others at 792 ran. Decided on 2026-10-21 and built on 2026-10-22: a gate's
+     case has room for a desktop's growth, its size one whose plan beside a program holding
+     2 GiB of the card is neither refused nor made with the reserve of 2.5 GiB, and keeps its
+     window and tiles. (A plan's peaks can't stand 2 GiB under its budget: the planner swaps the
+     fewest blocks that hold its window, and fills the budget.) So milestone 1 at 720 rows, the
+     padding cases at 648, 576 and 530, the tiled cases at 864 and 1080, their references made
+     again by the code gated on 2026-10-21; numz's frames equal to them on milestone 1 at 720,
+     45 of 45; a case planned there with 2.5 fails, naming the card.
    - A job resumed with other memory free gives the uninterrupted run's output, bit for bit:
      run on 2026-10-11, from 16 GB to 24 GB.
    - Time estimates within a few percent of the measured times, on a healthy card: the
