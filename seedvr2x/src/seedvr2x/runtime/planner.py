@@ -42,7 +42,7 @@ from dataclasses import dataclass, replace
 from functools import cache
 from typing import Any
 
-from seedvr2x.runtime import tilegrid, weights
+from seedvr2x.runtime import memory, tilegrid, weights
 from seedvr2x.runtime.job import (
     QUALITY,
     SHARED,
@@ -344,7 +344,15 @@ class PlanError(JobError):
     doesn't fit is refused, Pins, A plan shapes the output a little, Host RAM), in GiB. Of the
     GPU's memory, what is taken is rounded up and what is there rounded down; of the system's,
     each part is said to the nearest hundredth, as the plan's lines say it, and the total is
-    their sum (_host_hundredths)."""
+    their sum (_host_hundredths).
+
+    `instead`: where a pin is refused, the pin its message ends with, the one that fits
+    ("--window 6"), for a plan made with the tight reserve to name in its budget line (said;
+    design, 2026-10-21); else empty."""
+
+    def __init__(self, message: str, instead: str = "") -> None:
+        super().__init__(message)
+        self.instead = instead
 
 
 @dataclass(frozen=True)
@@ -790,6 +798,11 @@ class Peaks:
     # kept on the GPU in their phases: the tiles the card alone would have given, and why not
     # (_dit_kept); else None.
     shrunk: Shrunk | None = None
+    # Where a held run's plan was made with memory.RESERVE_TIGHT, the plan with memory.RESERVE
+    # refused (plan): that refusal, for the budget's line; else None. And where that refusal was
+    # a pin's, the pin that runs with memory.RESERVE (PlanError.instead); else empty.
+    tightened: str | None = None
+    instead: str = ""
 
     def peak(self, phase: Phase) -> int:
         """The predicted peak of `phase`."""
@@ -821,6 +834,9 @@ class Peaks:
             "free": self.free,
             "driver_free": self.reading.reported,
             "card_free": self.reading.card,
+            # What a held run's plan leaves torch's allocator beyond a step's peak; null on a
+            # driver that refuses, which leaves none.
+            "reserve": self.reading.reserve if self.reading.held else None,
             "attention": self.attention,
             "budget": self.budget,
             "encode_peak": self.encode,
@@ -953,7 +969,21 @@ def plan(
     the scratch's allowance planned again around it (DESIGN.md, Memory planner, A plan shapes
     the output a little); one with tiles of which one covers the frame is no plan's, refused
     (check_recorded). Where the weights are is planned for the backend given, a resume's too:
-    FlashAttention installed since, or gone, the recorded shape is held to today's fit."""
+    FlashAttention installed since, or gone, the recorded shape is held to today's fit.
+
+    On a run held to the card, a plan so made that is refused, a new job's or a resume's recorded
+    shape, whatever refuses it, is made again with the reserve of memory.RESERVE_TIGHT in
+    memory.RESERVE's place (memory.tightened), the plan's last resort, slower, as its budget line
+    says (Peaks.tightened; DESIGN.md, Allocator, decided on 2026-10-13, for a resume's plan on
+    2026-10-21); the VAE's room is in the budget either way. Refused with it too, the job is
+    refused with that plan's figures, the closest to running, and the refusal says both reserves
+    were tried. Only under torch's own allocator with expandable segments (Reading.expandable),
+    under which a step short of room slows down and runs (DESIGN.md, Allocator: "With a reserve
+    of 2.5 GiB under those segments"): under a user's allocator without them such a step is
+    refused, in a unit, perhaps hours in, and under cudaMallocAsync nothing checks the card (a
+    review's finding, 2026-10-21; PROVISIONAL, asked to design). Never on a driver that refuses,
+    which leaves no reserve; nor for a pin that is no pin, refused before any memory is counted.
+    The reserves are memory's, read as the plan is made."""
     job = _job(free, target, shots, split, numz_padding, attention)
     if pins.swap_blocks is not None and pins.swap_blocks > BLOCKS:
         raise PlanError(
@@ -966,8 +996,76 @@ def plan(
                 f"--{phase}-tile {pin}: a tile of {pin} px covers the whole padded frame,"
                 f" {width}x{height}: --{phase}-tile 0 pins an untiled {phase}"
             )
+    try:
+        return _planned(job, pins, recorded, host_available)
+    except PlanError as error:
+        reading = job.reading
+        if not reading.held or reading.tight or memory.RESERVE_TIGHT >= reading.reserve:
+            raise
+        refused, instead = str(error), error.instead
+    tight = memory.tightened(job.reading)
+    if not job.reading.expandable:
+        # Refused with the usual reserve, as before, saying what torch's default setting would
+        # do where it would run the job (design, 2026-10-21).
+        try:
+            _planned(
+                replace(job, free=tight.counted, reading=tight), pins, recorded, host_available
+            )
+        except PlanError:
+            raise PlanError(refused, instead=instead) from None
+        raise PlanError(
+            f"{refused}; torch's own allocator with its expandable segments, a held run's default,"
+            " which the allocator's setting in the environment replaces here, would run it with"
+            f" the reserve of {_gib(memory.RESERVE_TIGHT)} GiB, slower",
+            instead=instead,
+        ) from None
+    try:
+        made, peaks = _planned(
+            replace(job, free=tight.counted, reading=tight), pins, recorded, host_available
+        )
+    except PlanError as error:
+        raise PlanError(
+            f"{error}; refused with the reserve of {_gib(memory.RESERVE)} GiB that a held run's"
+            f" plan leaves torch's allocator beyond a step's peak, and with"
+            f" {_gib(memory.RESERVE_TIGHT)},"
+            " the one it takes where that is refused, whose figures these are"
+        ) from None
+    if instead:
+        # Named only where that pin, in its place, runs with the usual reserve: another pin, or
+        # a pass the blocks it changes move, can still refuse it (the review, 2026-10-21).
+        substituted = _substituted(pins, instead)
+        try:
+            if substituted is None:
+                raise PlanError(instead)
+            _planned(job, substituted, recorded, host_available)
+        except PlanError:
+            instead = ""
+    return made, replace(peaks, tightened=refused, instead=instead)
+
+
+def _substituted(pins: Pins, instead: str) -> Pins | None:
+    """`pins` with the pin a refusal names in place of the one it refused (PlanError.instead,
+    "--window 6"); None for words that name no pin."""
+    option, _, value = instead.partition(" ")
+    field = {
+        "--window": "window",
+        "--swap-blocks": "swap_blocks",
+        "--encode-tile": "encode_tile",
+        "--decode-tile": "decode_tile",
+    }.get(option)
+    if field is None or not value.isdecimal():
+        return None
+    return replace(pins, **{field: int(value)})
+
+
+def _planned(
+    job: _Job, pins: Pins, recorded: Plan | None, host_available: int | None
+) -> tuple[Plan, Peaks]:
+    """plan's work, once the pins are checked: the plan of `job`, in the memory its reading
+    counts on, and its peaks; refused (PlanError) as plan says."""
     made, refused, shrunk = _made(job, pins, recorded, host_available)
     shortened = None
+    instead = ""
     if refused is not None and shrunk is not None:
         # Its tiles shrunk as far as they go, which the figures said before are of.
         refused += _shrunk_said(job, made)
@@ -979,13 +1077,14 @@ def plan(
             (_, made, shrunk), refused = shorter, None
         elif shorter is not None:
             refused += f": the longest window whose plan fits it is --window {shorter[0]}"
+            instead = f"--window {shorter[0]}"
     if refused is not None and recorded is not None:
         refused = (
             f"the recorded plan no longer fits the memory free now: {refused}"
             f"{_pin_s_part(job, made, pins)}"
         )
     if refused is not None:
-        raise PlanError(refused)
+        raise PlanError(refused, instead=instead)
     return made, replace(_peaks(job, made), shortened=shortened, shrunk=shrunk)
 
 
@@ -1607,7 +1706,10 @@ def _around(job: _Job, recorded: Plan, pins: Pins) -> Plan:
         if not _holds(job, cap, swapped) and fewest is not None:
             # The pin's doing, not the memory's: the recorded shape still fits with more blocks.
             # PROVISIONAL (implementation, 2026-10-10): refused as the pin is on a new job.
-            raise PlanError(_swap_refused(job, swapped, cap, "the recorded plan's", fewest[0]))
+            raise PlanError(
+                _swap_refused(job, swapped, cap, "the recorded plan's", fewest[0]),
+                instead=f"--swap-blocks {fewest[0]}",
+            )
     return replace(
         recorded,
         swapped=swapped,
@@ -1647,7 +1749,9 @@ def _window(job: _Job, pins: Pins) -> tuple[int, int, bool]:
             cap, whose = pins.window, f"--window {pins.window}'s longest"
         fewest = _fewest(job, cap)
         assert fewest is not None
-        raise PlanError(_swap_refused(job, most, cap, whose, fewest[0]))
+        raise PlanError(
+            _swap_refused(job, most, cap, whose, fewest[0]), instead=f"--swap-blocks {fewest[0]}"
+        )
     if pins.window is None:
         cap = _own_cap(job, longest)
     elif _holds(job, pins.window, most):
@@ -1664,7 +1768,8 @@ def _window(job: _Job, pins: Pins) -> tuple[int, int, bool]:
             f"--window {pins.window}: its longest window, {_count(latents, 'latent')}, takes"
             f" {_over(need)} GiB of free VRAM with {blocks}, and {_there(job)}:"
             f" {_to_free(job, need)}the longest window that fits is --window"
-            f" {_own_cap(job, longest)}"
+            f" {_own_cap(job, longest)}",
+            instead=f"--window {_own_cap(job, longest)}",
         )
     if pins.swap_blocks is not None:
         return cap, most, _dit_need(job, cap, most, vae_in_dit=True) <= job.budget
@@ -1923,7 +2028,8 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
     )
     raise PlanError(
         f"{option}: the {phase} {_tiles_said(tiles)} takes {_over(need)} GiB of free VRAM,"
-        f" the DiT off the GPU{_ROOM_HELD}, and {_there(job)}: {_to_free(job, need)}{fits}"
+        f" the DiT off the GPU{_ROOM_HELD}, and {_there(job)}: {_to_free(job, need)}{fits}",
+        instead=f"--{phase}-tile {0 if largest is None else largest}",
     )
 
 
@@ -2322,7 +2428,9 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
     or the whole card's, with the other (_named); then the budget, what the plan counts on: that
     less what torch's limit leaves under it (Reading.left) and the reserve the plan leaves
     torch's allocator beyond a step's peak (memory.RESERVE), two figures that were once given as
-    one (a review's finding, 2026-10-12), the margin counted in the reserve (_Job.margin)."""
+    one (a review's finding, 2026-10-12), the margin counted in the reserve (_Job.margin); where
+    the plan took memory.RESERVE_TIGHT, the plan with memory.RESERVE refused, that refusal and
+    the cost, slow, in the same line (Peaks.tightened)."""
     reading = peaks.reading
     if not reading.held:
         return [
@@ -2331,13 +2439,29 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
             " reserve, the driver refusing memory the card doesn't have"
         ]
     free = _held_under(reading)
-    return [
-        f"card: {card}, {_gib(free)} GiB free {_named(reading, _gib)}: the run is held to the"
-        " card's own memory, its driver giving more than the card has",
+    budget = (
         f"budget: {_gib(peaks.budget)} GiB, the {_gib(free)} GiB free less torch's limit,"
         f" {_gib(reading.left)} GiB under it, and the reserve of"
         f" {_gib(free - reading.left - peaks.free)} GiB left to torch's allocator beyond a step's"
-        f" peak; the margin of {_gib(MARGIN)} GiB is in the reserve",
+        f" peak"
+    )
+    if peaks.tightened is not None:
+        # The plan's last resort (plan; DESIGN.md, Allocator): said slow, with what refused the
+        # plan with the usual reserve.
+        tight, usual = _gib(memory.RESERVE_TIGHT), _gib(memory.RESERVE)
+        budget += (
+            f", {tight} and not {usual}, the plan with {usual} refused ({peaks.tightened}); slow: a"
+            " step short of room beyond its peak slows down where it would be refused, and a job"
+            f" that fits with {usual} runs 1.4 to 1.5 times as long with {tight}; memory freed on"
+            f" the card gives the {usual} back"
+        )
+        if peaks.instead:
+            # The pin that runs with the usual reserve, at full speed (design, 2026-10-21).
+            budget += f"; {peaks.instead} would run with the full reserve, at full speed"
+    return [
+        f"card: {card}, {_gib(free)} GiB free {_named(reading, _gib)}: the run is held to the"
+        " card's own memory, its driver giving more than the card has",
+        f"{budget}; the margin of {_gib(MARGIN)} GiB is in the reserve",
     ]
 
 

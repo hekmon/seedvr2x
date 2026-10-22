@@ -423,6 +423,12 @@ def upscaled(
     if run.returncode == 1 and refused is not None and card() != ROOT_CARD:
         pytest.skip(f"{card()}: the case can't run there: {refused}")
     assert run.returncode == 0, run.stderr[-3000:]
+    # A held run's plan made with the reserve of 2.5 GiB, the one with 4.5 refused (planner.plan):
+    # not the case its reference was made in, which keeps 2 GiB of the card's budget (DESIGN.md,
+    # Validation, decided on 2026-10-21), the card's desktop having grown.
+    budget = [line for line in plan_lines(run.stderr) if line.startswith("budget: ")]
+    tight = [line for line in budget if " and not " in line]
+    assert not tight, f"{card()}: the case was planned with the tight reserve: {tight[0]}"
     # ours.mkv is made in ours.mkv.work, a directory's job, and --plan makes that job with its
     # first pass (cli._run): the run after it resumes the job, and scores no frame again. Without
     # a --plan call, or where the run doesn't say it resumes, the first pass is the run's own.

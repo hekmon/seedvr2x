@@ -852,6 +852,9 @@ def _run(args: argparse.Namespace) -> int:
         # picture is cut, and where the weights are is planned again around it; a plan, which
         # has made none, is planned again whole (_resume).
         split = args.color_correction == "split"
+        # The reserve the plan leaves torch's allocator on a held run (memory.Reading.reserve),
+        # for the limit set once it is made (memory.hold).
+        reserve = memory.RESERVE
         kept_plan = None
         plan_record: dict[str, Any] | None = None
         if prior is not None and not planned(prior.recorded):
@@ -883,6 +886,7 @@ def _run(args: argparse.Namespace) -> int:
                 recorded=kept_plan,
                 attention=_attention(),
             )
+            reserve = peaks.reading.reserve
             card = torch.cuda.get_device_name(identity.device)
             said = planner.said(
                 *(plan, peaks, card, target, shots, pins),
@@ -969,9 +973,10 @@ def _run(args: argparse.Namespace) -> int:
     import torch  # loaded since the job's identity: named here for the refusals below
 
     # Where the driver spills, torch is held again, to the memory free now that the first pass
-    # and the plan are made, and refuses from here on what passes it.
+    # and the plan are made, and refuses from here on what passes it; a check may take from that
+    # limit what the plan's reserve leaves (memory.check).
     try:
-        memory.hold(identity.device)
+        memory.hold(identity.device, reserve=reserve)
     except torch.OutOfMemoryError as error:
         logger.error(
             "%s, before the models loaded: nothing was run%s",

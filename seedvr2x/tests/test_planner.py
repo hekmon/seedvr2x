@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 import test_regression
 
-from seedvr2x.runtime import planner, tilegrid, weights
+from seedvr2x.runtime import memory, planner, tilegrid, weights
 from seedvr2x.runtime.job import Shot, output_size, padded_size
 from seedvr2x.runtime.memory import Reading
 from seedvr2x.runtime.plan import Phase, Plan, Tiles
@@ -2839,8 +2839,10 @@ def test_the_host_s_window_is_searched_from_the_next_one_down_to_the_smallest() 
     # that counts on 8 GiB, under SDPA, 18 GiB of system memory: the card alone holds windows
     # of 6, every part of the weights pinned, 18.32 GiB; windows of 5, the smallest, plan, with
     # the VAE's weights kept on the GPU, and are taken, where the job was refused had the
-    # search stopped a window short.
-    held = Reading(13 * GIB, None, 8 * GIB, True, round(0.5 * GIB))
+    # search stopped a window short. The reading is the plan's last resort already (tight), so
+    # that what is refused is this plan's, not tried again with the reserve of 2.5 GiB
+    # (test_a_held_plan_refused_takes_the_reserve_of_2_5).
+    held = Reading(13 * GIB, None, 8 * GIB, True, round(0.5 * GIB), tight=True)
     job = (held, HD, shots(45))
     alone, _ = planner.plan(*job, Pins(), None, attention=planner.SDPA)
     made, peaks = planner.plan(*job, Pins(), 18 * GIB, attention=planner.SDPA)
@@ -3400,15 +3402,16 @@ def test_a_resume_names_the_pin_s_part_of_its_shortfall() -> None:
     )
     # On a run held to the card, after what would have to be freed, where memory freed on the
     # card can give it: the whole card's figure the one the plan is held under, 17 GiB under
-    # the driver's here. The plan counts on its budget, no margin on top.
-    kept = Reading(round(45.05 * GIB), round(28.05 * GIB), free - MARGIN, True, 3 * GIB)
+    # the driver's here. The plan counts on its budget, no margin on top. Each reading the plan's
+    # last resort already (tight): its refusal is this plan's.
+    kept = Reading(round(45.05 * GIB), round(28.05 * GIB), free - MARGIN, True, 3 * GIB, True)
     assert refused(kept, *job, Pins(swap_blocks=0), None, recorded=recorded).endswith(
         ", the run held to the card's own memory, 15.41 GiB short, which would have to be freed"
         " on the card, 14.34 GiB of them --swap-blocks 0's: with every block of the DiT swapped"
         " and the VAE off the GPU, the recorded plan is 1.07 GiB short"
     )
     # Where it can't, the card's figure not read: what it is short of, and no more.
-    kept = Reading(round(28.05 * GIB), None, free - MARGIN, True, 3 * GIB)
+    kept = Reading(round(28.05 * GIB), None, free - MARGIN, True, 3 * GIB, True)
     assert refused(kept, *job, Pins(swap_blocks=0), None, recorded=recorded).endswith(
         ", the run held to the card's own memory, 15.41 GiB short, 14.34 GiB of them"
         " --swap-blocks 0's: with every block of the DiT swapped and the VAE off the GPU, the"
@@ -3431,6 +3434,8 @@ def test_peaks_record() -> None:
         # whole card's free memory isn't read.
         "driver_free": our_free(24),
         "card_free": None,
+        # No reserve: the driver refuses memory the card doesn't have.
+        "reserve": None,
         "attention": "flash_attn_2",
         "budget": our_free(24) - MARGIN,
         "encode_peak": planner.encode_peak(OURS_1080, Tiles(1856), 1, 28),
@@ -3629,10 +3634,12 @@ KEPT = round(5.3 * GIB) + MARGIN
 def held(reported: float, card: float | None) -> Reading:
     """The reading of a run held to the card, from figures in GiB: what the driver reports free
     to the process, and what the whole card has free (None: not read); the plan counts on the
-    smaller, less KEPT, LEFT of them what torch's limit leaves."""
+    smaller, less KEPT, LEFT of them what torch's limit leaves. The plan's last resort already
+    (tight), so that its refusals are its own, not tried again with the reserve of 2.5 GiB
+    (test_a_held_plan_refused_takes_the_reserve_of_2_5)."""
     driver = round(reported * GIB)
     whole = None if card is None else round(card * GIB)
-    return Reading(driver, whole, min(driver, whole or driver) - KEPT, True, LEFT)
+    return Reading(driver, whole, min(driver, whole or driver) - KEPT, True, LEFT, tight=True)
 
 
 # The memory a plan is made in, each time a budget of 22.15 GiB, and how its words name it: the
@@ -3822,7 +3829,8 @@ def test_a_held_run_takes_no_margin_on_top() -> None:
     pins = Pins(window=5, swap_blocks=0)
 
     def on_card(counted: int) -> Reading:
-        return Reading(counted + round(5.0 * GIB), None, counted, True, round(0.5 * GIB))
+        # The plan's last resort already (tight): a byte short is refused, not planned again.
+        return Reading(counted + round(5.0 * GIB), None, counted, True, round(0.5 * GIB), True)
 
     made, peaks = planner.plan(on_card(peak), HD, film, pins, None)
     assert (peaks.dit, peaks.free, peaks.budget) == (peak, peak, peak)
@@ -3845,6 +3853,121 @@ def test_a_held_run_takes_no_margin_on_top() -> None:
     assert refused(on_card(need - 1), HD, film, tight, None).startswith("--decode-tile 0: ")
     planner.plan(need + MARGIN, HD, film, tight, None)
     assert refused(need + MARGIN - 1, HD, film, tight, None).startswith("--decode-tile 0: ")
+
+
+def test_a_held_plan_refused_takes_the_reserve_of_2_5() -> None:
+    # DESIGN.md, Allocator (decided on 2026-10-13, for a resume's plan on 2026-10-21): a held
+    # run's plan is made with the reserve of 4.5 GiB, and only where that plan would be refused,
+    # a new job's or a resume's recorded shape, with 2.5, said slow in the plan's budget line, the
+    # VAE's room untouched. 1080p, an untiled decode pinned with the DiT off the GPU: the card
+    # has 4 GiB free beyond that pass's need, its peak and its room, 1 GiB short of what the
+    # plan with 4.5 leaves under torch's limit and 1 over what 2.5 does.
+    film = shots(5)
+    pins = Pins(window=5, swap_blocks=36, decode_tile=0)
+    decode = planner.decode_peak(padded_size(HD), output_size(HD), None, 0, 36)
+    need = decode + planner.VAE_ROOM
+
+    def on_card(card: int) -> Reading:
+        # The driver reports 2 GiB more than the whole card has, as under WSL2.
+        counted = card - memory.HELD_BACK - memory.RESERVE
+        return Reading(card + 2 * GIB, card, counted, True, memory.HELD_BACK)
+
+    reading = on_card(need + 4 * GIB)
+    # The plan with 4.5, refused: what a reading already at its last resort says.
+    alone = refused(replace(reading, tight=True), HD, film, pins, None)
+    assert alone.startswith("--decode-tile 0: the decode untiled takes")
+    made, peaks = planner.plan(reading, HD, film, pins, None)
+    assert peaks.reading == memory.tightened(reading) and peaks.reading.tight
+    assert peaks.free == peaks.budget == need + GIB
+    assert peaks.reading.reserve == memory.RESERVE_TIGHT == round(2.5 * GIB)
+    assert peaks.tightened == alone and made.decode_tiles is None
+    assert peaks.record()["reserve"] == memory.RESERVE_TIGHT
+    # The VAE's room untouched: the pass is judged with it, as much of the DiT kept beside it as
+    # fits under the budget with it.
+    assert peaks.need("decode") == peaks.decode + planner.VAE_ROOM <= peaks.budget
+    card = f"{(need + 4 * GIB) / GIB:.2f}"
+    lines = planner.said(made, peaks, "a card", HD, film, pins)
+    assert lines[1] == (
+        f"plan: budget: {peaks.budget / GIB:.2f} GiB, the {card} GiB free less torch's limit, 0.50"
+        " GiB under it, and the reserve of 2.50 GiB left to torch's allocator beyond a step's"
+        f" peak, 2.50 and not 4.50, the plan with 4.50 refused ({alone}); slow: a step short of"
+        " room beyond its peak slows down where it would be refused, and a job that fits with"
+        " 4.50 runs 1.4 to 1.5 times as long with 2.50; memory freed on the card gives the 4.50"
+        " back; --decode-tile 1856 would run with the full reserve, at full speed; the margin of"
+        " 0.60 GiB is in the reserve"
+    )
+    assert peaks.instead == "--decode-tile 1856" and alone.endswith("--decode-tile 1856")
+    # Two pins short with 4.5, the window's refused first: the window that fits isn't named, the
+    # untiled decode pinned beside it being still refused with 4.5 (planner._substituted).
+    padded = padded_size(HD)
+    window = next(
+        latents
+        for latents in range(5, 80)
+        if need - GIB < planner.dit_peak(padded, latents, 36, False) <= need + GIB
+    )
+    two, longer = Pins(window=window, swap_blocks=36, decode_tile=0), shots(window)
+    made_two, peaks_two = planner.plan(reading, HD, longer, two, None)
+    assert peaks_two.reading.tight and peaks_two.instead == ""
+    assert peaks_two.tightened is not None and peaks_two.tightened.startswith(
+        f"--window {window}: "
+    )
+    assert "would run with the full reserve" not in "".join(
+        planner.said(made_two, peaks_two, "a card", HD, longer, two)
+    )
+    assert "plan: the VAE's room: 1.25 GiB of the budget left free in each VAE pass" in "".join(
+        lines
+    )
+    # With 4.5 it fits: the plan's own reserve, nothing said of the other.
+    made, peaks = planner.plan(on_card(need + 6 * GIB), HD, film, pins, None)
+    assert not peaks.reading.tight and peaks.tightened is None
+    assert peaks.record()["reserve"] == memory.RESERVE == round(4.5 * GIB)
+    lines = planner.said(made, peaks, "a card", HD, film, pins)
+    assert "not 4.50" not in lines[1] and lines[1].endswith(
+        " and the reserve of 4.50 GiB left to torch's allocator beyond a step's peak; the margin"
+        " of 0.60 GiB is in the reserve"
+    )
+    # Refused with both: by the figures of the plan with 2.5, the closest to running, saying the
+    # two were tried.
+    short = on_card(need + 2 * GIB)
+    assert refused(short, HD, film, pins, None) == (
+        refused(memory.tightened(short), HD, film, pins, None)
+        + "; refused with the reserve of 4.50 GiB that a held run's plan leaves torch's allocator"
+        " beyond a step's peak, and with 2.50, the one it takes where that is refused, whose"
+        " figures these are"
+    )
+    # 1 GiB short with 2.5, its figures rounded apart (planner._short).
+    assert "1.01 GiB more would have to be freed" in refused(short, HD, film, pins, None)
+    # A resume's recorded shape that no longer fits with 4.5 takes 2.5 before the resume stops:
+    # its shape kept, untiled, where the weights are planned again.
+    recorded = Plan(5, made.encode_tiles, None)
+    made, peaks = planner.plan(reading, HD, film, Pins(), None, recorded=recorded)
+    assert peaks.reading.tight and made.decode_tiles is None and made.window == 5
+    assert peaks.tightened is not None and peaks.tightened.startswith(
+        "the recorded plan no longer fits the memory free now: "
+    )
+    assert peaks.instead == ""
+    assert (
+        "would run with the full reserve"
+        not in planner.said(made, peaks, "a card", HD, film, Pins())[1]
+    )
+    # Nor under an allocator without expandable segments, where a step short of room is refused
+    # rather than slowed down: refused with 4.5, as before (Reading.expandable), saying that
+    # torch's default setting would run it with 2.5; where it wouldn't either, saying nothing of
+    # it (design, 2026-10-21).
+    assert refused(replace(reading, expandable=False), HD, film, pins, None) == (
+        f"{alone}; torch's own allocator with its expandable segments, a held run's default, which"
+        " the allocator's setting in the environment replaces here, would run it with the reserve"
+        " of 2.50 GiB, slower"
+    )
+    assert refused(replace(short, expandable=False), HD, film, pins, None) == refused(
+        replace(short, tight=True), HD, film, pins, None
+    )
+    # Neither on a driver that refuses, which leaves no reserve; nor for a pin that is no pin,
+    # refused before any memory is counted.
+    assert "2.50" not in refused(need + MARGIN - 1, HD, film, pins, None)
+    assert refused(reading, HD, film, Pins(swap_blocks=37), None) == (
+        "--swap-blocks 37: the DiT has 36 blocks, so from 0 to 36"
+    )
 
 
 def test_a_held_run_s_choices_for_the_host_take_no_margin_either() -> None:

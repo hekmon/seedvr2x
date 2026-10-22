@@ -807,7 +807,9 @@ def test_the_reading_names_its_figures(
     assert caplog.text == ""
     # One that spills: the smaller figure, the card's here, less HELD_BACK and RESERVE; and
     # nothing said at the level a user reads, where the plan's own first line says it
-    # (runtime/planner.py): once in a run's log, not twice. usable is the number alone.
+    # (runtime/planner.py): once in a run's log, not twice. usable is the number alone. Each start
+    # a process of its own, which finds no allocator set by the one before.
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
     startup(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: 28 * GIB}))
     caplog.clear()
     counted = 28 * GIB - memory.HELD_BACK - memory.RESERVE
@@ -1401,12 +1403,15 @@ def measured(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(memory, name, value)
 
 
-def held_run(monkeypatch: pytest.MonkeyPatch, nvml: Nvml | None) -> list[float]:
+def held_run(
+    monkeypatch: pytest.MonkeyPatch, nvml: Nvml | None, reserve: int | None = None
+) -> list[float]:
     """A run held to its card under the measured figures, its allocator the environment's or the
     default: torch held a first time with 28 GiB free on the card, then its plan made and torch
     held for its units with 26 GiB free on the card (`nvml` set so, or None: NVML silent, the
-    driver's figure alone), the driver reporting 30 GiB and torch holding nothing; returns the
-    limits torch is given from there on, as fractions of a 32 GiB card."""
+    driver's figure alone), the driver reporting 30 GiB and torch holding nothing, the plan's
+    reserve `reserve` (None: memory.RESERVE); returns the limits torch is given from there on,
+    as fractions of a 32 GiB card."""
     measured(monkeypatch)
     startup(monkeypatch, Card(30 * GIB, spills=True), nvml)
     held(monkeypatch, 30 * GIB)
@@ -1417,7 +1422,7 @@ def held_run(monkeypatch: pytest.MonkeyPatch, nvml: Nvml | None) -> list[float]:
         nvml.cards[NAMED] = 26 * GIB
     memory.reading(30 * GIB)
     limits = held(monkeypatch, 30 * GIB)
-    memory.hold("cuda:0")
+    memory.hold("cuda:0", reserve=reserve)
     return limits
 
 
@@ -1529,6 +1534,63 @@ def test_re_holds_summing_past_what_the_plan_leaves_stop_the_run(
     with pytest.raises(torch.OutOfMemoryError, match=r"grew 5\.00 GiB on the card .* 5\.00 GiB"):
         memory.check("cuda:0")
     assert limits == []
+
+
+def test_a_plan_made_with_2_5_loses_that_much_at_the_most(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A plan made with the reserve of 2.5 GiB, the one with 4.5 refused (planner.plan; DESIGN.md,
+    # Allocator): a check may take from the limit what that plan leaves torch's allocator beyond
+    # a step's peak, 2.5, and the run stops past it (PROVISIONAL, implementation, 2026-10-21).
+    # The plan's limit 25.5 GiB, torch holding 20.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    nvml = Nvml({NAMED: 26 * GIB})
+    held_run(monkeypatch, nvml, reserve=memory.RESERVE_TIGHT)
+    limits = held(monkeypatch, 0, reserved=20 * GIB)
+    # 2.5 GiB taken by another program: held again to 23.0, 2.5 under the plan's limit.
+    nvml.cards[NAMED] = round(3.5 * GIB)
+    memory.check("cuda:0")
+    assert limits == [23 / 32]
+    assert caplog.messages[-1].endswith(
+        "2.50 GiB under the limit set once the plan was made, within the 2.5 GiB that plan leaves"
+        " torch's allocator beyond a step's peak, and the run goes on, a step left that much less"
+        " beyond its peak"
+    )
+    # A byte more from the plan's limit: stopped, where the plan with 4.5 holds torch again
+    # (test_re_holds_summing_past_what_the_plan_leaves_stop_the_run).
+    for reserve, stops in ((memory.RESERVE_TIGHT, True), (None, False)):
+        held_run(monkeypatch, nvml, reserve=reserve)
+        limits = held(monkeypatch, 0, reserved=20 * GIB)
+        nvml.cards[NAMED] = round(3.5 * GIB) - 1
+        if not stops:
+            memory.check("cuda:0")
+            assert limits == [(23 * GIB - 1) / (32 * GIB)]
+            continue
+        with pytest.raises(torch.OutOfMemoryError) as refusal:
+            memory.check("cuda:0")
+        assert limits == [] and str(refusal.value).endswith(
+            "would stand 2.51 GiB under the limit set once the plan was made, past the 2.5 GiB"
+            " that plan leaves torch's allocator beyond a step's peak"
+        )
+    # A new run starts from the plan with 4.5 again (memory.startup).
+    startup(monkeypatch, Card(30 * GIB, spills=True), nvml)
+    assert memory._reserve == memory.RESERVE  # pyright: ignore[reportPrivateUsage]
+
+
+def test_tightened_moves_the_reserve_alone() -> None:
+    # The plan's last resort (planner.plan): the same figures, the reserve 2.5 GiB where 4.5,
+    # under the card's figure or the driver's alone.
+    for card, left in ((26 * GIB, memory.HELD_BACK), (None, memory.HELD_BACK_UNREAD)):
+        taken = 30 * GIB if card is None else card
+        reading = memory.Reading(30 * GIB, card, taken - left - memory.RESERVE, True, left)
+        assert not reading.tight and reading.reserve == memory.RESERVE
+        tight = memory.tightened(reading)
+        assert tight == memory.Reading(
+            30 * GIB, card, taken - left - memory.RESERVE_TIGHT, True, left, True
+        )
+        assert tight.tight and tight.reserve == memory.RESERVE_TIGHT == round(2.5 * GIB)
+    # Never under nothing.
+    assert memory.tightened(memory.Reading(GIB, None, 0, True, 3 * GIB)).counted == 0
 
 
 def test_a_re_hold_needs_the_0_5_left_to_the_rest_of_the_card(

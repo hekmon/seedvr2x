@@ -803,6 +803,8 @@ def test_plan_recorded_and_phases_entered(
         # free memory isn't read. And the attention backend the DiT's peak is predicted for.
         "driver_free": FREE,
         "card_free": None,
+        # No reserve on a driver that refuses.
+        "reserve": None,
         "attention": "flash_attn_2",
         "budget": FREE - planner.MARGIN,
         "encode_peak": planner.encode_peak(PADDED),
@@ -1200,6 +1202,104 @@ def test_resumed_on_a_driver_that_spills_is_held_again(
     assert json.loads(manifest.read_text())["plan"]["memory"]["free"] == planned_in
     made = [indexes(tmp_path / "out" / f"seg_{number:06d}.mkv") for number in range(2)]
     assert made[0] + made[1] == list(range(25))
+
+
+def test_a_held_run_refused_with_4_5_takes_2_5(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Allocator (decided on 2026-10-13, for a resume's plan on 2026-10-21): a held
+    # run's plan is made with the reserve of 4.5 GiB, and only where that plan would be refused,
+    # with 2.5, said slow in its budget line; a resume's recorded shape too, before the resume
+    # stops. The job pinned whole, its window, blocks and passes, on a card 1 GiB short of its
+    # need with 4.5 and 1 over it with 2.5: a new job, and one stopped on a driver that refuses,
+    # resumed there. The limit set once the plan is made may then lose 2.5 (memory.check).
+    from seedvr2x.runtime import memory
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    pinned = ("--swap-blocks", "0", "--encode-tile", "0", "--decode-tile", "0")
+    pins = Pins(window=5, encode_tile=0, decode_tile=0, swap_blocks=0)
+    # The least the job's plan needs: the fewest bytes a driver that refuses plans it in, less
+    # the margin, bisected.
+    low, high = 0, FREE
+    while high - low > 1:
+        middle = (low + high) // 2
+        try:
+            planner.plan(middle, TARGET, JOB_SHOTS, pins, HOST)
+            high = middle
+        except planner.PlanError:
+            low = middle
+    need = high - planner.MARGIN
+    source_path = job(tmp_path, monkeypatch)
+    # Stopped with units made, its plan's shape kept from its record on resuming.
+    steps.stop = "encode 3"
+    stopped(tmp_path, source_path, "resumed", *JOB, *pinned)
+    steps.stop = None
+    spilling_driver(monkeypatch)
+    # The measured reserve, not the tests' own 2.3, which is under 2.5.
+    monkeypatch.setattr(memory, "RESERVE", round(4.5 * GIB))
+    free = need - GIB + memory.HELD_BACK_UNREAD + memory.RESERVE
+    free_memory(monkeypatch, free)
+    # Both refused with 4.5 by the blocks pinned, the resume for its recorded window, the
+    # recorded plan's (test_planner.py's test_a_held_plan_refused_takes_the_reserve_of_2_5 has a
+    # recorded shape refused as such, unpinned).
+    for output, whose in (("out", "--window 5's longest"), ("resumed", "the recorded plan's")):
+        refused = f"--swap-blocks 0: a window of 4 latents, {whose}, takes"
+        # Each start a process of its own, which finds no allocator set.
+        monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+        caplog.clear()
+        assert upscale(tmp_path, source_path, output, *JOB, *pinned) == 0
+        assert (output == "resumed") == any(
+            line.startswith(f"resuming {tmp_path / output}") for line in caplog.messages
+        )
+        [budget] = [line for line in caplog.messages if line.startswith("plan: budget: ")]
+        assert (
+            " and the reserve of 2.50 GiB left to torch's allocator beyond a step's peak, 2.50 and"
+            f" not 4.50, the plan with 4.50 refused ({refused}"
+        ) in budget
+        assert budget.endswith(
+            "; slow: a step short of room beyond its peak slows down where it would be refused,"
+            " and a job that fits with 4.50 runs 1.4 to 1.5 times as long with 2.50; memory freed"
+            " on the card gives the 4.50 back; --swap-blocks 5 would run with the full reserve, at"
+            " full speed; the margin of 0.60 GiB is in the reserve"
+        )
+        content = json.loads((tmp_path / output / "manifest.json").read_text())
+        assert content["plan"]["memory"]["reserve"] == memory.RESERVE_TIGHT
+        assert content["plan"]["memory"]["free"] == need + GIB
+        assert memory._reserve == memory.RESERVE_TIGHT  # pyright: ignore[reportPrivateUsage]
+        made = [indexes(tmp_path / output / f"seg_{number:06d}.mkv") for number in range(2)]
+        assert made[0] + made[1] == list(range(25))
+    # 1 GiB short with 2.5 too: refused, by the figures of the plan with 2.5, both tried, the
+    # first pass kept; and with 4.5 to spare nothing is said of 2.5.
+    free_memory(monkeypatch, need - GIB + memory.HELD_BACK_UNREAD + memory.RESERVE_TIGHT)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "short", *JOB, *pinned) == 1
+    [said] = [record.message for record in caplog.records if record.levelname == "ERROR"]
+    assert said.endswith(
+        "; refused with the reserve of 4.50 GiB that a held run's plan leaves torch's allocator"
+        " beyond a step's peak, and with 2.50, the one it takes where that is refused, whose"
+        " figures these are" + kept(tmp_path / "short")
+    )
+    free_memory(monkeypatch, need + memory.HELD_BACK_UNREAD + memory.RESERVE)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "room", *JOB, *pinned) == 0
+    assert "not 4.50" not in caplog.text and "2.50" not in caplog.text
+    content = json.loads((tmp_path / "room" / "manifest.json").read_text())
+    assert content["plan"]["memory"]["reserve"] == memory.RESERVE
+    # A user's own torch allocator without expandable segments, where a step short of room is
+    # refused rather than slowed down: refused with 4.5, as before, saying that torch's default
+    # setting would run it with 2.5, slower (design, 2026-10-21).
+    free_memory(monkeypatch, free)
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "backend:native")
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "native", *JOB, *pinned) == 1
+    [said] = [record.message for record in caplog.records if record.levelname == "ERROR"]
+    assert said.startswith("--swap-blocks 0: a window of 4 latents") and said.endswith(
+        "; torch's own allocator with its expandable segments, a held run's default, which the"
+        " allocator's setting in the environment replaces here, would run it with the reserve of"
+        " 2.50 GiB, slower" + kept(tmp_path / "native")
+    )
 
 
 def test_gpu_memory_refused_at_the_load_stops_the_run(

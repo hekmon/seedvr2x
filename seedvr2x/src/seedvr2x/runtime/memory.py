@@ -29,11 +29,11 @@ card's memory by its own means:
   is right;
 - the planner planning in what is left less RESERVE (usable), which the plan leaves that
   allocator beyond what a step allocates: the plan's budget, the planner's own margin counted in
-  it;
+  it; less RESERVE_TIGHT only where a plan so made would be refused (tightened);
 - the memory free read again before every unit (check): when what torch may still take no
   longer fits in it, other programs holding the rest of the card, the run stops; under
-  expandable segments torch is held again to what the card has, within RESERVE, and the run
-  goes on.
+  expandable segments torch is held again to what the card has, within the reserve the plan
+  took, and the run goes on.
 
 The memory free is, for the limit and the plan, the smaller of two readings: what the driver
 reports free to the process (CUDA's figure, torch's mem_get_info) and what the whole card has
@@ -111,7 +111,7 @@ import ctypes
 import logging
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -228,6 +228,19 @@ HELD_BACK_UNREAD = 3 * GIB
 # limit, other programs having grown, before the run stops (check; DESIGN.md, Allocator,
 # decided on 2026-10-16): a step is then left less beyond its peak, never under it.
 RESERVE = round(4.5 * GIB)
+# The reserve a held run's plan takes where the plan made with RESERVE would be refused, a new
+# job's as a resume's recorded shape (planner.plan; DESIGN.md, Allocator, decided on 2026-10-13
+# with the user's go, for a resume's plan on 2026-10-21), and nowhere else: under expandable
+# segments a step left less than its need beyond its peak slows down and runs (EXPANDABLE). Run
+# so on the RTX 5090 under WSL2 (2026-10-13, a desktop holding 3.2 GiB of the card): 4K's
+# smallest window planned and ran with it four times, with the frames of a run that had room to
+# spare, in 134 to 139 s for 65.6; but every other plan packed tighter, and a job that fitted
+# with RESERVE ran 1.4 to 1.5 times as long with this one. So it is the plan's last resort, said
+# slow in the plan's budget line (planner._card_said). The VAE's room (planner.VAE_ROOM) is inside
+# the budget either way, never touched: a VAE pass is still left that room and more beyond its
+# predicted peak, its frames' floor under the segments, 0.40 GiB, under it (EXPANDABLE). And it
+# is what a check may take from the limit before the run stops (check, hold's `reserve`).
+RESERVE_TIGHT = round(2.5 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
 # allocator where the driver spills.
 ASYNC, NATIVE = "backend:cudaMallocAsync", "backend:native"
@@ -321,13 +334,38 @@ class Reading:
       have (spills);
     - left: on a held run, what torch's limit leaves of the free memory (hold: HELD_BACK, or
       HELD_BACK_UNREAD where the card's figure isn't read), the rest of what `counted` is
-      under it being RESERVE; 0 on a driver that refuses."""
+      under it being the reserve; 0 on a driver that refuses;
+    - tight: on a held run, whether the plan is made with RESERVE_TIGHT, the plan made with
+      RESERVE refused (tightened);
+    - expandable: on a held run, whether torch's own allocator takes it with expandable segments
+      (EXPANDABLE, startup), under which a step short of room slows down and runs where it is
+      otherwise refused: the only allocator a plan takes RESERVE_TIGHT under (planner.plan;
+      DESIGN.md, Allocator: "With a reserve of 2.5 GiB under those segments")."""
 
     reported: int
     card: int | None
     counted: int
     held: bool
     left: int = 0
+    tight: bool = False
+    expandable: bool = True
+
+    @property
+    def reserve(self) -> int:
+        """On a held run, what the plan leaves torch's allocator beyond a step's peak, in bytes:
+        RESERVE, or RESERVE_TIGHT where the reading is `tight`; meaningless on a driver that
+        refuses, which leaves none."""
+        return RESERVE_TIGHT if self.tight else RESERVE
+
+
+def tightened(reading: Reading) -> Reading:
+    """`reading`, a held run's, its plan counting on RESERVE_TIGHT less than torch's limit
+    where RESERVE: what the planner plans in where the plan made in `reading` is refused, a new
+    job's or a resume's recorded shape (planner.plan; DESIGN.md, Allocator). The free memory and
+    what torch's limit leaves under it are the reading's: only the reserve moves."""
+    taken = reading.reported if reading.card is None else min(reading.reported, reading.card)
+    counted = max(taken - reading.left - RESERVE_TIGHT, 0)
+    return replace(reading, counted=counted, tight=True)
 
 
 def reading(free: int) -> Reading:
@@ -378,7 +416,7 @@ def reading(free: int) -> Reading:
         _held_back(card) / GIB,
         RESERVE / GIB,
     )
-    return Reading(free, card, counted, True, _held_back(card))
+    return Reading(free, card, counted, True, _held_back(card), expandable=_native and _segments)
 
 
 # What startup found, for the run that follows: whether the run holds itself to the card,
@@ -398,6 +436,9 @@ _plan_s_limit: int | None = None
 _base: tuple[int, int] | None = None
 # What hold left of the free memory outside torch's limit, in bytes, for the check's words.
 _left = HELD_BACK
+# The reserve the run's plan took (Reading.reserve), in bytes, as hold was given it once the plan
+# was made: what a check may take from the limit before the run stops (check).
+_reserve = RESERVE
 # The figure a held run's plan, its limit and the checks before its units go by, one footing for
 # the three (DESIGN.md, Allocator, decided on 2026-10-13): CARD, the whole card's free memory by
 # NVML, or DRIVER, what the driver reports free to this process alone. Set by the plan's reading
@@ -439,8 +480,9 @@ def startup() -> str:
     the card didn't have every time it was asked, and a run held for nothing loses memory, a
     run not held where it should be loses its frames."""
     global _spills, _native, _segments, _limit, _left, _footing, _planned, _plan_s_limit, _base
+    global _reserve
     _spills, _limit, _left, _footing, _planned = False, None, HELD_BACK, None, None
-    _plan_s_limit, _base = None, None
+    _plan_s_limit, _base, _reserve = None, None, RESERVE
     if paravirtual():
         found = probe()
         if found is None:
@@ -476,9 +518,15 @@ def startup() -> str:
             if _native
             else "torch limited"
         )
+        # The tight reserve said where a plan can take it: under the segments (planner.plan).
+        tight = (
+            f", {RESERVE_TIGHT / GIB:.1f} where that plan would be refused, slower"
+            if _native and _segments and RESERVE_TIGHT < RESERVE
+            else ""
+        )
         logger.warning(
             "seedvr2x holds itself to the card there: %s to the"
-            " memory free less %.1f GiB, and plans in %.1f GiB less; a run that passes the"
+            " memory free less %.1f GiB, and plans in %.1f GiB less%s; a run that passes the"
             " limit is refused. The memory free is the smaller of two figures: what the driver"
             " reports free to this process, which leaves other programs' memory out while the"
             " card has room, and what the whole card has free, read through NVML; where NVML"
@@ -486,6 +534,7 @@ def startup() -> str:
             named,
             HELD_BACK / GIB,
             RESERVE / GIB,
+            tight,
             HELD_BACK_UNREAD / GIB,
         )
         if not _native:
@@ -566,7 +615,7 @@ def usable(free: int) -> int:
     return reading(free).counted
 
 
-def hold(device: Any, first: bool = False) -> int | None:
+def hold(device: Any, first: bool = False, reserve: int | None = None) -> int | None:
     """On a driver that spills, limit torch on `device` (a torch.device) to what it holds now
     and the memory free now less HELD_BACK, the memory free being the smaller of what the
     driver reports to this process and of what the whole card has (card_free); less
@@ -580,8 +629,10 @@ def hold(device: Any, first: bool = False) -> int | None:
     first pass, the process's context and libraries in it (nvidia-smi, the same RTX 5090,
     2026-10-12). Then once the plan is made and before the models load, from the memory free
     then, which is the limit the run's units are checked against, and the one a check that
-    holds torch again counts what the limit has lost from (check). The first is said at debug
-    level, the second being the run's.
+    holds torch again counts what the limit has lost from (check), within `reserve`, the one the
+    plan took (Reading.reserve: RESERVE, or RESERVE_TIGHT where a plan with RESERVE was refused;
+    None, RESERVE).
+    The first is said at debug level, the second being the run's.
 
     The figure each limit is set under is the run's footing, which it sets (_footing; DESIGN.md,
     Allocator: "the plan, the limit and the checks stand on one footing"): the first's, its own
@@ -597,7 +648,7 @@ def hold(device: Any, first: bool = False) -> int | None:
     limit for 4.5; a review, 2026-10-12). With no plan's figure of the card either (a limit set
     again with no plan made, which a run never does), the driver's figure, with a warning: the
     run's units are then checked on it (check)."""
-    global _limit, _left, _footing, _plan_s_limit, _base
+    global _limit, _left, _footing, _plan_s_limit, _base, _reserve
     if not _spills:
         return None
     import torch
@@ -613,6 +664,8 @@ def hold(device: Any, first: bool = False) -> int | None:
     torch.cuda.set_per_process_memory_fraction(fraction, device)  # pyright: ignore[reportUnknownMemberType]
     _limit = limit
     _plan_s_limit = None if first else limit
+    if not first:
+        _reserve = RESERVE if reserve is None else reserve
     _base = (reported if card is None else card, reserved)
     logger.log(
         logging.DEBUG if first else logging.INFO,
@@ -632,7 +685,8 @@ def check(device: Any) -> None:
     refuses what passes its limit) when what torch may still take under its limit no longer fits
     in what the whole card has free (card_free); in what the driver reports free to this
     process, where the card's figure was never read in the run. Under expandable segments, on
-    the card's figure, hold torch again to what the card has instead, within RESERVE (below).
+    the card's figure, hold torch again to what the card has instead, within the plan's reserve
+    (below).
     Called before every unit (model.Models.enter).
 
     The limit is worth the memory free when it was set, less HELD_BACK. Other programs taking
@@ -642,8 +696,10 @@ def check(device: Any) -> None:
     Under expandable segments (startup), where the card's figure is read, a check that finds the
     card short holds torch again and the run goes on (DESIGN.md, Allocator, decided on 2026-10-16):
     to what it holds and the card's free memory less HELD_BACK, said in a warning, as long as what
-    the limit has lost since the one set once the plan was made (hold) stays within RESERVE, what
-    that plan leaves torch's allocator beyond a step's peak. A step is then left that much less
+    the limit has lost since the one set once the plan was made (hold) stays within the reserve
+    that plan leaves torch's allocator beyond a step's peak, RESERVE, or RESERVE_TIGHT where the
+    plan took it (_reserve; PROVISIONAL, implementation, 2026-10-21: DESIGN.md names the 4.5 GiB,
+    which a plan made with 2.5 doesn't leave). A step is then left that much less
     beyond its peak, a step short of room slowing down under the segments where it would be refused
     (EXPANDABLE), and the VAE's room, inside the plan's budget, is never touched. It holds torch
     again only where the card has HELD_BACK free at that check, the new limit at or above what torch
@@ -767,11 +823,11 @@ def check(device: Any) -> None:
                 f": the card has less than the {_left / GIB:.1f} GiB left to the rest of it, where"
                 " torch held again would stand under what it holds"
             )
-        elif lost > RESERVE:
+        elif lost > _reserve:
             bound = (
                 f": torch held again to what it holds and the card's free memory less"
                 f" {_left / GIB:.1f} would stand {_up(lost)} GiB under the limit set once the plan"
-                f" was made, past the {RESERVE / GIB:.1f} GiB that plan leaves torch's allocator"
+                f" was made, past the {_reserve / GIB:.1f} GiB that plan leaves torch's allocator"
                 " beyond a step's peak"
             )
         else:
@@ -791,7 +847,7 @@ def check(device: Any) -> None:
                 limit / GIB,
                 _left / GIB,
                 _up(lost),
-                RESERVE / GIB,
+                _reserve / GIB,
             )
             return
     where = "on the card" if card is not None else "by the driver's figure"
