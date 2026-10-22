@@ -303,6 +303,64 @@ same way each time. Where a cell is for two files, both gave it.
   the 320×240 file's two were identical, and of 4 positions read (3 runs each) 2 matched them in
   3 of 3 runs, 1 in 2 of 3, 1 in none.
 
+### The first pass on one decoder thread
+
+What one decoder thread would cost seedvr2x's first pass (2026-10-21; CPU only, ffmpeg n9.0.2, a
+shared 48-core machine at load averages of 2 to 16;
+[`scripts/first_pass_threads.py`](../scripts/first_pass_threads.py)). The command is seedvr2x's own
+(`seedvr2x.media.scan.command`: every frame's CRC-32, idet, and the shot detector's 48×27 frames on a
+pipe, drained here), as it is and with `-threads 1` as an input option, the decoder's; and a decode
+alone (`-map 0:v:0 -f null -`) both ways, once each. The passes ran twice each, in the order default,
+one thread, one thread, default:
+
+| Source | Frames | Pass, default threads: s (fps) | Pass, one thread: s (fps) | × | Decode alone, default / one thread: s (fps) | × |
+|---|---|---|---|---|---|---|
+| S9 | 142,477 | 143.4, 142.7 (994, 999) | 1,023.5, 1,035.0 (139, 138) | 7.2 | 134.8 (1,057) / 932.5 (153) | 6.9 |
+| S6, DVD | 40,441 | 4.73, 4.66 (8,542, 8,683) | 17.90, 18.22 (2,260, 2,219) | 3.8 | 3.06 (13,237) / 13.05 (3,099) | 4.3 |
+
+- **On one thread the decode is the pass's slow part.** At its default threads ffmpeg spent 1,715 s of
+  CPU on S9's pass in 143 s, 12 cores' worth; on one thread less in all, 1,503–1,517 s, at 139 fps, near
+  the decoder's own 153. The pass's other work (the hashes, idet, the detector's scale) added 8 s at
+  default threads and 97 s on one.
+- **The CRC-32s:** S6's four passes gave the same CRC-32 for every frame, and S9's two one-thread
+  passes did. Against S9's default-thread passes they differ at exactly 2 frames, the two the decoder
+  reports damaged (`error while decoding MB`, `corrupt decoded frame`): 101466, a P-frame with 2,137 of
+  its 8,160 macroblocks concealed, gave 4ff72d4e and 0cc1af10 in the two default passes and b2e236d1
+  in both one-thread ones; 142475, a B-frame with 3,475 concealed, 6741e597 in both default passes and
+  bee5a9f1 in both one-thread ones. At 101466 the two default passes differ from each other, where
+  the three 16-thread decodes above were identical: the default threads' picture of it varies from
+  run to run.
+- **Against a whole first pass, a projection.** seedvr2x's logs of its first passes with TransNetV2 on
+  the GPU (2026-10-10 and 10-12, earlier code, the same machine) give S9 158.4 s and 176.6 s and S6
+  45.3 s and 38.6 s, the detector's own time 99% of each: the detector set the pace (810–906 fps on S9)
+  and the decode chain (994–999 fps here) kept up behind it. On one thread the chain, at 139 fps,
+  would set it instead: about 1,029 s for S9 against 158 s, 870 s more; S6's chain (18 s) stays under
+  the detector's 45 s. No first pass was run on one thread with the detector.
+
+S9's two damaged frames read the way seedvr2x's reader reads (`-copyts -noaccurate_seek -ss` at a
+keyframe's time after the file's start, a `select` on the target's pts), the decoder on one thread,
+from the frame's own keyframe (the last whose pts is at most the frame's) and from 1 to 3 keyframes
+before it, 3 runs each; the first frame decoded, then the CRC-32 (the start's: b2e236d1 and bee5a9f1):
+
+| Start | 101466 | 142475 |
+|---|---|---|
+| Its own keyframe | 101462: b2e236d1 ×3 | 142474: e6779f83 ×3 |
+| 1 keyframe before | 101444: b2e236d1 ×3 | 142456: bee5a9f1 ×3 |
+| 2 before | 101426: b2e236d1 ×3 | 142438: bee5a9f1 ×3 |
+| 3 before | 101408: b2e236d1 ×3 | 142420: bee5a9f1 ×3 |
+
+- **101466 gives the start's picture from every start.**
+- **142475 doesn't from its own keyframe.** It is the frame right after the file's last keyframe, an
+  IDR (`nal_unit_type` 5), decoded after that IDR and the P-frame that follows it, so it can refer to
+  nothing before the IDR; yet decoded from the IDR it comes out another way, the same in 3 runs of 3,
+  and from 1 to 3 keyframes back as from the start. Its concealed picture depends on where the
+  decode started; why, wasn't looked into. A read that starts one keyframe before a frame's own, as
+  seedvr2x's does, gets the start's picture there. The 60 reads above, on the synthetic files, matched
+  from the damaged frame's own keyframe too: a real file's damage doesn't always.
+- **seedvr2x's reads:** reader.py's `-threads 1` stands after `-map … -vf`, an output option: it sets
+  its encoders' threads, and the reads' decoder runs at ffmpeg's default. A one-thread decode takes
+  `-threads 1` before `-i`, as above.
+
 ### A joined transport stream
 
 The pieces: A (pts 1.48–5.44 s) and B (1,001.40–1,005.36 s). `forward` = A then B, `back` = B then
@@ -577,6 +635,20 @@ The damaged-frame series, with `$OUT` the clean file's directory (or one linked 
   start.framemd5 --at N --gops-back G --frames 300 --opts "-threads 1" --runs 3` for G = 0 to 3.
 - S9 from the start on one thread: `ref $SRC $OUT --threads 1 --name ref_t1`, twice, and `cmp` the
   framemd5 files with the 16-thread `ref`.
+
+The first pass on one decoder thread, per source (label `S9` or `S6`), with seedvr2x's Python as
+`$P` (the script imports seedvr2x for the command; the measurement ran the same commands through
+one-off scripts, and this one gave the same CRC-32 lists on S6's passes and the same CRC-32s on S9's
+seeks from the own keyframe and 1 back, the ones run again):
+
+```bash
+F=scripts/first_pass_threads.py; O=out/threads
+for r in "default 1" "t1 1" "t1 2" "default 2" "decode-default 1" "decode-t1 1"; do
+  $P $F run $O S9 $SRC $r; done
+$P $F compare $O S9                  # the table, and the frames whose CRC-32 differs
+$P $F seek $SRC $O/S9-t1-1.crc $O/S9-seeks.tsv --frames 101466,142475 --back 3 --runs 3
+ffmpeg -copyts -ss 5941.55 -i $SRC -map 0:v:0 -c copy -bsf:v trace_headers -f null -   # S9's last IDR
+```
 
 The holes of S9 at its real rate: `holes $OUT --rate 24000/1001` (the default is the declared
 24/1).
