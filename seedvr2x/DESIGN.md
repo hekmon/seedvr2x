@@ -880,15 +880,17 @@ Decoding goes through an ffmpeg pipe:
     [seeking.md](../research/docs/seeking.md)): on one thread, 8 of 8 copies decoded their
     damaged frames the same every time, and a read started at a damaged frame's keyframe, or up
     to 3 before, gave the start's pictures on 60 of 60 reads in 5 of them; HEVC repeated on one
-    thread in none of its 3 copies. The Blu-ray remux's last damaged frame, a B-frame just
-    after its last keyframe that refers back across it, came out another way from that
-    keyframe, the same every time, and as from the start from 1 to 3 keyframes back
-    (2026-10-22): a read starts one keyframe before a frame's own, so it holds there too.
+    thread in none of its 3 copies. A real file's damage doesn't always repeat from its own
+    keyframe (2026-10-22): the Blu-ray remux's last damaged frame, a B-frame right after its
+    last keyframe, an IDR, so referring to nothing before it, came out another way decoded
+    from that keyframe, the same every time, and as from the start from 1 to 3 keyframes
+    back. A read starts one keyframe before a frame's own, so it holds there too.
   - **One decoder thread isn't built** (decided on 2026-10-22,
-    [seeking.md](../research/docs/seeking.md)): it would make the decode the first pass's slow
-    part on HD sources. On the 2-hour Blu-ray remux (H.264, 142,477 frames), the pass's ffmpeg
-    command (the decode, the hashes and the detector's small frames) took 1,024 to 1,035 s on
-    one thread against 143 s on the default threads, 7.2 times; the shot detector, which hides
+    [seeking.md](../research/docs/seeking.md#the-first-pass-on-one-decoder-thread)): it would
+    make the decode the first pass's slow part on HD sources. On the 99-minute Blu-ray remux
+    (H.264, 142,477 frames), the pass's ffmpeg command (the decode, the hashes, idet and the
+    detector's small frames) took 1,024 to 1,035 s on one thread against 143 s on the default
+    threads, 7.2 times; the shot detector, which hides
     the decode today (the pass 158 s), would wait on it, the pass about 1,029 s (projected).
     On a DVD it costs nothing (18 s, within the detector's 45 s). For
     that, the same picture in every read at 2 frames of 142,477, on H.264 and MPEG-2 only. So
@@ -1335,9 +1337,11 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   A 45-frame 4K shot took about 63 min at `maximum`, 15 at `standard`.
 - **At 4K, more shots and a second seed** (2026-10-22, the same way: the grainy film's 4
   clips at seed 43; at seed 42, 3 clips of a digital live-action film, a face in a helmet,
-  clouds and a jet blurred all over by motion (cut into shots of 2, 42 and 1 frames), and 2
-  of an animation made in 4K, a fast tilt and a still night street): `maximum` closer to the
-  ground truth on all 9 by PSNR-Y and VMAF, from +0.06 dB and +1.7 on the grainy film's
+  clouds and a jet blurred all over by motion (cut falsely into shots of 2, 42 and 1 frames,
+  by a whip pan's blur and a jet coming in), and 2 of a grainy cel animation scanned in 4K,
+  a fast tilt and a still night street;
+  [numerics.md](../research/docs/numerics.md#more-shots-and-a-second-seed)): `maximum` closer
+  to the ground truth on all 9 by PSNR-Y and VMAF, from +0.06 dB and +1.7 on the grainy film's
   still face to +2.31 dB and +17.2 on the fast tilt; the grainy film's gains within 0.06 dB
   and 0.4 of VMAF of seed 42's. To the eyes, blind: `maximum` on 8 places of 18, `standard`
   on 4, the same on 6, 4 of them leaning to `maximum`; 3 loops of 9 to `maximum`, each seen
@@ -1353,10 +1357,11 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
     42's places, `standard` on 8 of 16, `maximum` on 3.
   - The jet blurred all over: its 2 places to `maximum` ("sharper"), the eyes not knowing what
     they showed; its loop too fast to judge.
-- **What the manual says** (decided on 2026-10-22): at 4K, `maximum` pays on animation and
-  on clean footage, more so with motion, where a paused frame shows it best; on still shots
-  it changes little, and on a grainy film `standard` was preferred more often (smoother
-  skin, less noise). `standard` stays the default.
+- **What the manual says** (decided on 2026-10-22): at 4K, `maximum` pays on animation,
+  grain and all, and on clean footage, more so with motion, where a paused frame shows it
+  best; on still shots it changes little. On the one grainy live-action film tried,
+  `standard` was preferred more often (smoother skin, less noise): one film, and the manual
+  says it as that. `standard` stays the default.
 - **The manual's example** (Sol Levante, 960×540 to 1080p): on two fast extracts with line
   art, `maximum` +1.5 to +1.9 dB of PSNR-Y, VMAF +10 to +12, LPIPS −0.017 to −0.021, both
   temporal errors lower, `enhanced` about 40% of that; on a calm one +0.16 dB. The user's pick
@@ -2181,6 +2186,14 @@ first pass, whose shots are its input, and before the models load:
     the last 5, and a resumed run's first seek isn't counted. Every run runs it, `--plan`
     included, its cost said in the plan's lines (decided on 2026-10-21: a run without it could
     say no time left before its first segment's decode, and a job of one segment never).
+  - Each kind's two lengths are measured after a unit of its own kind, as most of a run's
+    units come, the first unit after a change of phase carrying the phase's term (decided on
+    2026-10-22, to be built). Measured right after a change, each step paid part of it, which
+    the fit put in the rate: at 720p on an RTX 5090 the estimate ran 18% over, a decode
+    measured at 0.247 s a frame where the run's took 0.205. An encode's second length takes
+    about 3 s at the first length's rate, on the VAE's grid of 4n + 1 frames, never fewer than
+    13, within the plan's memory: with 5 and 13 frames, the encodes' estimate at 1080p came
+    out 11.8% under and 15.3% over on two identical runs.
   - Each unit's progress line says the job's time left and the time of day it should end
     (decided on 2026-10-21, to be built).
   - After every unit, each model is corrected by the median of the last 5 ratios of measured
