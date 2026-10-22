@@ -539,6 +539,78 @@ live action at 4K the eyes leaned to `standard` on 4 of 8 places, the measures t
 every shot, which one seed can't tell from the seed's own draw. The 4K shots are 4 of one film
 (old film grain) and 1 painted animation, no line-art shot, no clean digital live action; the
 extracts are one film's animation at 1080p. Neither says how long shots or other content fare.
+[More shots and a second seed](#more-shots-and-a-second-seed) adds a grainy cel scan, clean digital
+footage and a second seed on the live-action shots.
+
+#### More shots and a second seed
+
+Measured on 2026-10-21 and 22 as above (seedvr2x's defaults, ×2 from the d1 input, `standard`
+against `maximum`, the same code): five more [4K clips](#clips) at seed 42, `cel4k-motion` and
+`cel4k-detail` (2048 rows from 1024), `digital-cockpit`, `digital-space` and `digital-dogfight`
+(2016 from 1008), and the four `ouatia-*` again at seed 43. 18 runs: 14–17 min a clip at
+`standard`, 58–64 at `maximum`. `digital-dogfight` ran as 3 shots: the detector cut it after its
+frames 1 and 43 (probabilities 0.44 and 0.61), where the GT shows no cut, the same jet crossing on
+from frame 1 to 2 and a second one sliding in from the edge over frames 42 to 44: false cuts, on a
+whip pan's blur and a jet entering. Its shots of 2, 42 and 1 frames ran at seeds 42, 44 and 86; its
+places sit in the long one, its loop and figures span all three.
+
+| Clip | bicubic: PSNR-Y / VMAF / LPIPS / T-err lf / T-err | `standard` | `maximum` |
+|---|---|---|---|
+| cel4k-motion | 40.99 / 98.3 / 0.0631 / 0.67 / 2.37 | 27.77 / 53.2 / 0.2488 / 2.46 / 9.63 | 30.08 / 70.4 / 0.2166 / 1.39 / 7.16 |
+| cel4k-detail | 41.56 / 87.3 / 0.0787 / 0.49 / 1.27 | 34.15 / 75.6 / 0.1647 / 0.57 / 2.09 | 34.58 / 77.1 / 0.1654 / 0.53 / 1.90 |
+| digital-cockpit | 43.24 / 85.9 / 0.0849 / 0.33 / 1.41 | 36.94 / 73.0 / 0.0905 / 0.57 / 2.39 | 39.02 / 82.1 / 0.0800 / 0.40 / 1.95 |
+| digital-space | 43.38 / 82.5 / 0.1872 / 0.26 / 1.33 | 37.22 / 66.3 / 0.1905 / 0.26 / 1.70 | 37.44 / 67.3 / 0.1860 / 0.26 / 1.73 |
+| digital-dogfight | 43.83 / 85.4 / 0.2410 / 0.47 / 1.82 | 39.61 / 72.9 / 0.2476 / 0.78 / 2.82 | 40.62 / 78.8 / 0.2357 / 0.56 / 2.58 |
+| ouatia-motion, seed 43 | 35.83 / 79.8 / 0.2748 / 0.51 / 4.27 | 32.48 / 57.8 / 0.3686 / 1.19 / 6.21 | 33.07 / 65.8 / 0.3367 / 0.87 / 5.81 |
+| ouatia-dark, seed 43 | 40.52 / 84.0 / 0.2230 / 0.48 / 2.45 | 36.18 / 59.9 / 0.2584 / 0.88 / 3.59 | 37.38 / 70.5 / 0.2411 / 0.62 / 3.18 |
+| ouatia-street, seed 43 | 38.22 / 84.8 / 0.1847 / 0.48 / 2.64 | 30.83 / 56.7 / 0.2566 / 0.72 / 4.83 | 30.91 / 57.8 / 0.2540 / 0.66 / 4.76 |
+| ouatia-face, seed 43 | 41.03 / 74.3 / 0.1993 / 0.32 / 1.78 | 39.07 / 63.3 / 0.2006 / 0.33 / 2.08 | 39.13 / 65.0 / 0.1953 / 0.32 / 2.08 |
+
+- **`maximum` is closer to the GT on all 9 by PSNR-Y and VMAF:** `cel4k-motion` +2.31 dB and VMAF
+  +17.2, the cockpit +2.08 and +9.1, the dark shot +1.20 and +10.5, the dogfight +1.01 and +6.0,
+  the fast pan +0.59 and +8.1, `cel4k-detail` +0.43 and +1.5, space +0.21 and +1.0, the street
+  +0.08 and +1.1, the close-up +0.06 and +1.7. LPIPS lower on 8 (`cel4k-detail` +0.0007), T-err
+  lower on 7, equal on the close-up, +0.02 on space.
+- **Bicubic stays closer than both** by PSNR-Y and VMAF on all 9; by LPIPS `maximum` is below it on
+  4 (the dogfight, the cockpit, space and the close-up).
+- **Seed 43 against seed 42** on the four live-action shots: `maximum`'s gains agree within 0.06 dB
+  of PSNR-Y and 0.4 of VMAF (the dark shot +1.20 and +10.5 against +1.14 and +10.2, the fast pan
+  +0.59 and +8.1 against +0.61 and +8.2, the street +0.08 and +1.1 against +0.11 and +1.3, the
+  close-up +0.06 and +1.7 against +0.09 and +2.0).
+
+The eyes, blind, as before (2 places a clip on frames 4–44, now each a window that holds something
+to recognise: at least 10% of the GT window's pixels with a luma gradient of 4 levels per pixel or
+more, the nearest such window where the largest difference is flat; one loop a clip; each answered
+A, B, the same, or "?" for different with neither better), by kind of picture:
+
+- **Fast animation** (`cel4k-motion`, a fast tilt up a city's towers): `maximum` on 2 of 2, "way
+  better. [`standard`] looks like a draft"; in the loop "[`maximum`] is cleaner but I had to pause to
+  make sure".
+- **A clean digital close-up** (`digital-cockpit`): `maximum` on 2 of 2, "cleaner", "[`maximum`] has finer
+  details and more controlled details"; the loop alike.
+- **Still shots:** `cel4k-detail`'s night street the same on 2 of 2, "the car wreck is damaged but
+  intentionally so hard to tell if its looks bad because of process or artistical direction"; space the same on
+  2 of 2, each leaning to `maximum` ("might be slightly smoother"); their loops alike.
+- **The grainy film, seed 43:** `standard` on 4 places of 8, the close-up's 2 ("the skin texture is
+  smoother", "the light reflexion in the eyes is cleaner"), the fast pan's ("cleaner, less noise")
+  and the street's ("details seems more prevalent"); `maximum` on 2, the fast pan's ("details seems
+  better") and the street's ("steel structures wobble too much on [`standard`] to be realistic"); the
+  dark shot's 2 the same, each leaning to `maximum`. The loops: `maximum` on the fast pan and the dark
+  shot, each "[`maximum`] is cleaner but I had to pause to make sure"; the other two alike. With seed 42's eyes,
+  `standard` on 8 places of 16 on this film, `maximum` on 3.
+- **Motion blur all over** (`digital-dogfight`): `maximum` on 2 of 2 ("sharper", "sharper and
+  cleaner"), but "I don't know what I am looking at", and its loop "way too high motion to see
+  anything different without having to pause": not judgeable.
+
+In all: places 8 `maximum`, 4 `standard`, 6 the same, 4 of them leaning to `maximum`; loops 3
+`maximum`, each seen only once paused, 5 alike, 1 not judgeable. `maximum` pays on animation and
+clean footage, more so with motion, where a paused frame shows it best; on still shots it changes
+little; on the grainy film `standard` was preferred more often.
+
+What these can't show: one seed a clip (two on the grainy film), 45-frame shots, and one film per
+kind of picture (an old grainy film, a grainy cel scan, a digital film, a painted animation), so a
+kind's verdict may be its film's. Grain alone doesn't decide it: on the grainy cel scan `maximum`
+won the fast shot, and on the grainy film it won where `standard` made structures wobble.
 
 ## Seed bands
 
