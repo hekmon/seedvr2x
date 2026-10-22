@@ -1724,6 +1724,52 @@ def test_a_check_short_gives_torch_s_cache_back_first(
     )
 
 
+def test_a_held_run_s_vae_unit_is_watched_for_refused_allocations(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Allocator (decided on 2026-10-18): torch's count of refused allocations
+    # (num_ooms) grows by 19 to 38 on every VAE pass that lost its frames under the segments,
+    # cuDNN's workspaces refused, and stays 0 on every one that kept them. A held run under
+    # torch's own allocator warns where it grows across a unit; nothing where it doesn't, nor
+    # under another allocator, which counts none, nor on a driver that refuses, nor where the
+    # unit raises.
+    import torch
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    count = {"num_ooms": 3}
+    monkeypatch.setattr(torch.cuda, "memory_stats", lambda device: dict(count))
+
+    def unit(grows: int) -> None:
+        with memory.watched("cuda:0", "shot 2/5's decode", "frames"):
+            count["num_ooms"] += grows
+
+    for setting, held in (("backend:cudaMallocAsync", True), (None, False), (None, True)):
+        if setting is None:
+            monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+        else:
+            monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", setting)
+        startup(monkeypatch, Card(30 * GIB, spills=held))
+        caplog.clear()
+        count["num_ooms"] = 3
+        unit(0)
+        unit(19)
+        warned = [record for record in caplog.records if "refused" in record.message]
+        if setting is not None or not held:
+            assert warned == []
+            continue
+        assert [record.levelname for record in warned] == ["WARNING"]
+        assert warned[0].message == (
+            "shot 2/5's decode: torch's allocator refused 19 of its requests during it (3 to 22 in"
+            " all): where cuDNN's workspaces are refused it runs other kernels, which give other"
+            " bits: its frames may not be those of a run with more room on the card"
+        )
+    with pytest.raises(torch.OutOfMemoryError):
+        with memory.watched("cuda:0", "shot 2/5's decode", "frames"):
+            count["num_ooms"] += 1
+            raise torch.OutOfMemoryError("refused")
+    assert len([record for record in caplog.records if "refused" in record.message]) == 1
+
+
 def test_a_re_hold_needs_the_0_5_left_to_the_rest_of_the_card(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

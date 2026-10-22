@@ -1302,6 +1302,41 @@ def test_a_held_run_refused_with_4_5_takes_2_5(
     )
 
 
+def test_a_held_run_warns_where_torch_refused_allocations_in_a_vae_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Allocator (decided on 2026-10-18): a held run warns where torch's count of
+    # refused allocations (num_ooms) grows in a VAE unit, its frames maybe not those of a run
+    # with more room. The stand-in's count grows by one at every step it makes: each encode and
+    # each decode warned of, once, and no window, which isn't a VAE unit; nothing on a driver
+    # that refuses, which isn't held.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.setattr(torch.cuda, "memory_stats", lambda device: {"num_ooms": len(steps.calls)})
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "refusing", *JOB) == 0
+    assert "refused" not in caplog.text
+    spilling_driver(monkeypatch)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF")
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "held", *JOB) == 0
+    assert steps.calls == UNINTERRUPTED
+    warned = [
+        record.message for record in caplog.records if "torch's allocator refused" in record.message
+    ]
+    assert [line.partition(":")[0] for line in warned] == [
+        *("shot 1/3's encode", "shot 2/3's encode", "shot 1/3's decode", "shot 2/3's decode"),
+        *("shot 3/3's encode", "shot 3/3's decode"),
+    ]
+    # Shot 1/3's encode, the run's first step: the count from 0 to 1.
+    assert warned[0] == (
+        "shot 1/3's encode: torch's allocator refused 1 of its requests during it (0 to 1 in all):"
+        " where cuDNN's workspaces are refused it runs other kernels, which give other bits: its"
+        " latent, and the frames from it, may not be those of a run with more room on the card"
+    )
+    assert warned[2].endswith(": its frames may not be those of a run with more room on the card")
+
+
 def test_gpu_memory_refused_at_the_load_stops_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:

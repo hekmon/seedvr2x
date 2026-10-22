@@ -111,6 +111,8 @@ import ctypes
 import logging
 import os
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -601,6 +603,42 @@ def _allocator(setting: str) -> tuple[bool, bool]:
             segments = value == "True"
     native = backend != ASYNC.partition(":")[2]
     return native, native and segments
+
+
+@contextmanager
+def watched(device: Any, unit: str, output: str) -> Generator[None]:
+    """Around a VAE unit on `device`, `unit` naming it (a shot's encode, a decode), `output`
+    what it gives: on a held run under torch's own allocator, warn where torch's count of the
+    allocations it refused (memory_stats' num_ooms) grew across the unit, which then ended
+    (DESIGN.md, Allocator, decided on 2026-10-18): measured on the RTX 5090 under WSL2 under the
+    expandable segments, a VAE pass alone (2026-10-17), the count stayed 0 on every pass that
+    kept its frames and grew by 19 to 38 on every one that lost them, cuDNN's workspaces refused,
+    which cuDNN runs on without, other bits from other kernels and nothing said. A count that
+    grows says the unit ran short of room, its output maybe not that of a run with more room;
+    one that doesn't says nothing either way. Nothing elsewhere: a driver that refuses isn't
+    held, and under cudaMallocAsync, or an allocator of the environment's, torch counts no
+    refused allocation (DESIGN.md, Memory planner). Nothing said of a unit that raises: its
+    error is the run's."""
+    if not (_spills and _native):
+        yield
+        return
+    import torch
+
+    before = int(torch.cuda.memory_stats(device).get("num_ooms", 0))
+    yield
+    after = int(torch.cuda.memory_stats(device).get("num_ooms", 0))
+    if after > before:
+        # PROVISIONAL (implementation, 2026-10-21): the words, and a warning for each unit.
+        logger.warning(
+            "%s: torch's allocator refused %d of its requests during it (%d to %d in all):"
+            " where cuDNN's workspaces are refused it runs other kernels, which give other bits:"
+            " its %s may not be those of a run with more room on the card",
+            unit,
+            after - before,
+            before,
+            after,
+            output,
+        )
 
 
 def spills() -> bool:

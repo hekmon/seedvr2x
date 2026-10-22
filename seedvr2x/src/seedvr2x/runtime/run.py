@@ -26,6 +26,7 @@ from seedvr2x.media.files import make_directories
 from seedvr2x.media.reader import Reader, listed
 from seedvr2x.media.source import Source
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer, quantise
+from seedvr2x.runtime import memory
 from seedvr2x.runtime.job import KEPT_SAMPLE_BYTES, OutputSegment, Run, Shot, output_size, run_of
 from seedvr2x.runtime.model import Models
 from seedvr2x.runtime.plan import Plan, Tiles
@@ -215,25 +216,27 @@ def _sample(
         read = inputs.reader(shot)
         tiles = plan.encode_tiles
         scratch = _scratch(units, index, tiles)
-        if copying is None:
-            latent = encode_shot(
-                *(models, read, shot.frames, target, run.seed(seed)),
-                numz_padding=numz_padding,
-                numz_tail=numz_tail,
-                tiles=tiles,
-                scratch=scratch,
-                allowance=plan.scratch_allowance,
-            )
-        else:
-            with _copying(units, index, copying) as copy:
+        # A held run warns where torch refused allocations during the pass (memory.watched).
+        with memory.watched(models.device, f"{name}'s encode", "latent, and the frames from it,"):
+            if copying is None:
                 latent = encode_shot(
-                    *(models, _copied(read, copy), shot.frames, target, run.seed(seed)),
+                    *(models, read, shot.frames, target, run.seed(seed)),
                     numz_padding=numz_padding,
                     numz_tail=numz_tail,
                     tiles=tiles,
                     scratch=scratch,
                     allowance=plan.scratch_allowance,
                 )
+            else:
+                with _copying(units, index, copying) as copy:
+                    latent = encode_shot(
+                        *(models, _copied(read, copy), shot.frames, target, run.seed(seed)),
+                        numz_padding=numz_padding,
+                        numz_tail=numz_tail,
+                        tiles=tiles,
+                        scratch=scratch,
+                        allowance=plan.scratch_allowance,
+                    )
         finite(latent, f"{name}'s encode")
         # In system memory, as its encode gives it: the one the units keep or wrote, which the
         # windows are sampled from, as a resumed run samples them from the one read back.
@@ -342,12 +345,14 @@ def _decode(
         paths = (units.copy_path(index), units.checksums_path(index))
         correction = Correction(*paths, copies.width, copies.height, run.offset)
     try:
-        decode_shot(
-            *(models, merged, run.frames, target, write, name, run.start, correction),
-            tiles=plan.decode_tiles,
-            scratch=_scratch(units, index, plan.decode_tiles),
-            allowance=plan.scratch_allowance,
-        )
+        # A held run warns where torch refused allocations during the pass (memory.watched).
+        with memory.watched(models.device, f"{name}'s decode", "frames"):
+            decode_shot(
+                *(models, merged, run.frames, target, write, name, run.start, correction),
+                tiles=plan.decode_tiles,
+                scratch=_scratch(units, index, plan.decode_tiles),
+                allowance=plan.scratch_allowance,
+            )
     except CopyError:
         # Derived data: removed, the next run makes it again from the input (_sample).
         units.copy_path(index).unlink(missing_ok=True)
