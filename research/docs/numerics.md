@@ -473,6 +473,73 @@ hard to tell). The cost is the GPU time: 4 runs per shot for `grid4`, 2 for `gri
 unchanged. Whether 2 runs are worth offering goes to the eyes next (`grid2` against `grid4` and
 against the single run).
 
+### In seedvr2x: `--quality`, at 4K and in the manual's example
+
+seedvr2x builds both composites as `--quality` (`standard`, one run a shot; `enhanced`, 2 runs,
+`grid2`; `maximum`, 4 runs, `grid4`). Measured on seedvr2x itself on 2026-10-21, its defaults
+(the sharp 7B, `split`), seed 42, outputs in 16-bit RGB.
+
+**At 4K**, ×2 from the [4K clips](#clips)' d1 input (1920×1080 to 2160p), the 4 `ouatia-*` shots
+and `sollevante-painted`, 45 frames each. On the 96 GB card the plan padded the frames to
+3840×2192, one window of 12 latents, nothing swapped, the encode untiled and the decode in 2048-px
+tiles (2 × 2): a shot took about 15 min at `standard` and 63 at `maximum`. Against the GT, VMAF
+with its 4K model (the letterbox included), T-err lf and T-err as
+[defined above](#metrics-and-verdicts):
+
+| Shot | bicubic: PSNR-Y / VMAF / LPIPS / T-err lf / T-err | `standard` | `maximum` |
+|---|---|---|---|
+| sollevante-painted | 37.21 / 82.5 / 0.1325 / 0.53 / 2.91 | 27.74 / 43.0 / 0.1800 / 1.39 / 7.47 | 29.72 / 62.1 / 0.1459 / 0.83 / 5.79 |
+| ouatia-motion | 35.83 / 79.8 / 0.2748 / 0.51 / 4.27 | 32.49 / 57.7 / 0.3680 / 1.19 / 6.20 | 33.10 / 65.9 / 0.3375 / 0.87 / 5.78 |
+| ouatia-dark | 40.52 / 84.0 / 0.2230 / 0.48 / 2.45 | 36.26 / 60.4 / 0.2582 / 0.88 / 3.56 | 37.41 / 70.6 / 0.2424 / 0.62 / 3.17 |
+| ouatia-street | 38.22 / 84.8 / 0.1847 / 0.48 / 2.64 | 30.79 / 56.6 / 0.2603 / 0.72 / 4.84 | 30.90 / 57.9 / 0.2563 / 0.66 / 4.76 |
+| ouatia-face | 41.03 / 74.3 / 0.1993 / 0.32 / 1.78 | 39.13 / 63.4 / 0.1999 / 0.33 / 2.07 | 39.22 / 65.3 / 0.1947 / 0.32 / 2.07 |
+
+- **`maximum` is closer to the GT on all 5 shots:** PSNR-Y +1.98 dB and VMAF +19.1 on the
+  painted shot, +1.14 and +10.2 on the dark one, +0.61 and +8.2 on the fast pan, +0.11 and +1.3
+  on the street, +0.09 and +2.0 on the close-up; LPIPS and both temporal errors lower on all 5 (the close-up's
+  T-err by 0.003).
+- **Bicubic stays closer than both** by PSNR-Y, VMAF and T-err on every shot, and by LPIPS on 4
+  (on the close-up `maximum` is below it, 0.1947 against 0.1993), as
+  [colour.md](colour.md#4k-the-default-runs-against-bicubic) found at 4K.
+- **The eyes, blind** (10 places, 2 a shot on frames 4–44 where the two differ most, 384×384 at
+  1:1 and ×3 with the GT apart; 5 loops, the 1920×1080 window of the largest difference, A | B,
+  45 frames three times): `maximum` on the painted shot's 2 places of 2 ("sharper, way less
+  artifacts", "more natural leaf forms"); on live action `standard` on 4 places of 8
+  ("smoother", "better quality"), `maximum` on 1, the 3 others the same or undecided; the 5
+  loops alike. Frames 0–3 were left out: at `maximum` each is a shifted run's own first latent.
+  At 1080p a live-action clip's 2 places had gone to the 4 runs.
+
+**The manual's example**, at 1080p from 960×540: three 73-frame extracts of *Sol Levante*'s SDR
+UHD master, chosen on a sheet of every shot: `fast1` (frames 1855–1927, a bird across a painted
+wave, line art; seedvr2x's detector cuts it at a fade to white, 63 + 10 frames, kept so),
+`fast2` (1268–1340, a close-up pulling back fast, line art) and `calm` (3941–4013, tree
+silhouettes at sunset). The GT is the original downscaled ×1/2 to 1920×1080 (zimg bicubic b = c
+= 1/3, in YUV); the input is the GT degraded as d1 (×1/2 again, x264 CRF 20); seedvr2x brings it
+back to 1080p. VMAF with its 1080p model:
+
+| Extract | bicubic: PSNR-Y / VMAF / LPIPS / T-err lf / T-err | `standard` | `enhanced` | `maximum` |
+|---|---|---|---|---|
+| fast1 | 38.77 / 84.2 / 0.1433 / 0.57 / 2.48 | 33.08 / 66.8 / 0.1065 / 1.28 / 4.44 | 33.86 / 71.9 / 0.0979 / 1.10 / 4.02 | 35.00 / 78.6 / 0.0855 / 0.80 / 3.39 |
+| fast2 | 35.10 / 83.7 / 0.1420 / 0.59 / 3.54 | 28.49 / 67.4 / 0.0995 / 1.32 / 6.88 | 29.07 / 71.7 / 0.0908 / 1.17 / 6.47 | 29.99 / 77.5 / 0.0824 / 0.92 / 5.76 |
+| calm | 37.50 / 76.9 / 0.2021 / 0.49 / 1.87 | 33.63 / 71.2 / 0.1239 / 0.54 / 2.72 | 33.69 / 71.5 / 0.1233 / 0.57 / 2.79 | 33.79 / 72.2 / 0.1216 / 0.52 / 2.71 |
+
+- **On fast motion `maximum` gains PSNR-Y +1.5 to +1.9 dB, VMAF +10 to +12, LPIPS −0.017 to
+  −0.021**, both temporal errors lower; `enhanced` gives 39–43% of the PSNR-Y and VMAF gains
+  (37–51% over the five measures). On the calm extract
+  +0.16 dB and VMAF +1.0, `enhanced`'s temporal errors a little above `standard`'s.
+- **The user's pick for the manual** (2026-10-21, from labelled rows of crops at 1:1 and ×3 and
+  loops, on frames where the three levels differ): `fast1`'s bird, first its teeth, whose lines
+  wobble at `standard`, a little less at `enhanced`, and keep the original's shape at
+  `maximum`; then its feathers, which `maximum` starts to recover. The manual says first what
+  the GT is: the original, downscaled to make the input, then brought back by seedvr2x.
+
+What one seed and these shots don't show: every 4K run and every extract here is seed 42, and
+at 1080p the composites' gain held across seeds while the eyes' verdicts were taken at one; on
+live action at 4K the eyes leaned to `standard` on 4 of 8 places, the measures to `maximum` on
+every shot, which one seed can't tell from the seed's own draw. The 4K shots are 4 of one film
+(old film grain) and 1 painted animation, no line-art shot, no clean digital live action; the
+extracts are one film's animation at 1080p. Neither says how long shots or other content fare.
+
 ## Seed bands
 
 Spread (max − min) of the default's 3 per-seed means, `none` (`lab` within ±0.15 dB and ±0.4

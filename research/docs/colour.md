@@ -570,6 +570,51 @@ same over the GT's flattest third of blocks in brackets:
 - The encode's tiles drift more than the decode's (512-px encode tiles alone, decoded untiled,
   leave the most), as vram.md measured before correction.
 
+#### Through seedvr2x's `split`, for the eyes
+
+Measured again on seedvr2x itself once `split` was its correction (2026-10-21): the same 5 clips
+at 1080p from their d1 input, seed 42, each one shot (an empty cut list), seedvr2x's defaults
+but the tiles, pinned: decode tiles of 1024 or 512 px with the encode untiled, encode and decode
+tiles of 512 px, and a 32 GB card's plan (encode tiles of 1856 px, decode tiles of 1088). Each
+tiled output against the untiled one, both after `split`, by the measure above (the worst 60×60
+block, the GT's flattest third in brackets, 8-bit levels, means over the 45 frames), then its
+PSNR-Y against the untiled output in dB:
+
+| Encode / decode tiles | anime-sky | anime-dark | cartoon-bright | anime-clean | live-slow |
+|---|---|---|---|---|---|
+| untiled / 1024 | 0.07 (0.03), 59.2 | 0.19 (0.08), 53.9 | 0.29 (0.12), 45.7 | 0.29 (0.10), 46.1 | 0.19 (0.12), 48.0 |
+| untiled / 512 | 0.15 (0.08), 56.0 | 0.22 (0.09), 52.4 | 0.33 (0.17), 43.3 | 0.29 (0.14), 43.1 | 0.50 (0.21), 41.8 |
+| 512 / 512 | 0.31 (0.14), 49.4 | 0.25 (0.14), 46.9 | 0.53 (0.17), 40.8 | 0.45 (0.28), 39.4 | 0.54 (0.17), 40.8 |
+| 1856 / 1088 (32 GB) | 0.12 (0.05), 55.7 | 0.20 (0.09), 52.1 | 0.34 (0.16), 44.1 | 0.40 (0.22), 42.6 | 0.29 (0.14), 45.5 |
+
+- **After `split` the tiles leave a fraction of a level:** 0.07–0.54 in the worst block,
+  0.03–0.28 in the flattest third. Across one overlap zone per arm and clip (the arm's own:
+  tiles from the top left, a stride of the side less 64 px), the flattest non-black one, on the
+  frame where the difference steps most across it, the step is 0.02–0.67 of a level. The
+  control, anime-sky with no correction and 512-px decode tiles: 10.43 in the worst block, 9.36
+  in the flattest third, 37.3 dB against the untiled output, a step of 2.27 at its zone; `split`
+  takes away 98.5% of the worst block (0.15), 99% of the flattest third (0.08) and 95% of the
+  step (0.10).
+- **The encode's tiles drift more than the decode's** by PSNR-Y, on every clip: 512-px encode
+  and decode tiles are 39.4–49.4 dB from the untiled output, 512-px decode tiles alone
+  41.8–56.0 (by the flattest third not on live-slow, 0.17 against 0.21).
+- **Against the GT the tiles move PSNR-Y by less than a dB, both ways:** decode tiles alone lose
+  0.03–0.61 dB, the 32 GB plan 0.07–0.68 on 4 clips (live-slow +0.04); 512-px encode tiles gain
+  0.36–0.64 dB on 4 clips (anime-sky −0.27). One seed; not explained here.
+
+The eyes, blind (2026-10-21): 37 places, each a 384×384 window at 1:1 and ×3 with the GT apart,
+an arm against the untiled output, A and B counterbalanced, on the frame and window of each arm's
+largest flat-third drift per clip, and for the 512-px arms and the 32 GB plan also on one of the
+arm's overlap zones; and 4 loops (45 frames three times, A | B, x264 at qp 0 in 8-bit 4:2:0),
+one per clip, the 4 clips' largest flat-third drift among the 512-px arms and the 32 GB plan. The same on 16 places, untiled preferred on 7 and tiled on 6, each by a small
+margin ("hard to tell", "a little bit"), 1 undecided (sharper against smoother); 4 of 4 loops
+alike. 7 anime-sky crops couldn't be judged at all, a flat sky with nothing in it to recognise,
+the uncorrected control's two among them (a 13.3-level block, a 2.27-level step): on a crop with
+nothing recognisable even the uncorrected drift went unjudged, so the verdict rests on the 30
+places that held something. After `split`
+the tiles don't show, and the planner's rule (the largest tiles that fit, down to 512 px)
+stands.
+
 ### 4K: the default runs against bicubic
 
 DESIGN.md's open question "4K output's quality": measurement's first 4K runs, uncorrected, put
