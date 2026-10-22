@@ -11,8 +11,10 @@ import shlex
 import shutil
 import sys
 import time
+import warnings
 from bisect import bisect_right
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fractions import Fraction
 from importlib.metadata import version
@@ -75,6 +77,43 @@ def _logging(verbose: bool) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter(VERBOSE_FORMAT) if verbose else _Lines())
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=[handler])
+
+
+# The logger Python's own warnings go through (_warnings_in_lines): the standard library's name
+# for them (logging.captureWarnings).
+WARNINGS = logging.getLogger("py.warnings")
+
+
+@contextmanager
+def _warnings_in_lines() -> Generator[None]:
+    """Python's own warnings (warnings.warn: torch's, a library's, the vendored model's) through
+    seedvr2x's lines, each a line of its own, "23:05:12 WARNING UserWarning: ... (file.py:12)",
+    where Python prints its own form, two lines, the second the source's (DESIGN.md,
+    Architecture, What it prints, decided on 2026-10-21). Set in the CLI's entry points (main,
+    verify), once the lines are (_logging), and restored on the way out, so that whatever showed
+    them before shows them again: pytest's own capture of the tests' in-process runs, after the
+    run. Python's filters stand, which show a warning once a place by default. A download's
+    progress bar is no warning, and keeps its own form. PROVISIONAL (implementation, 2026-10-21):
+    the words, the category's name and the place in parentheses, as Python gives them."""
+    shown = warnings.showwarning
+
+    def show(
+        message: Warning | str,
+        category: type[Warning],
+        filename: str,
+        lineno: int,
+        file: object = None,
+        line: str | None = None,
+    ) -> None:
+        # One line, a message of several joined (the review, 2026-10-21).
+        text = " ".join(part.strip() for part in str(message).splitlines() if part.strip())
+        WARNINGS.warning("%s: %s (%s:%d)", category.__name__, text, filename, lineno)
+
+    warnings.showwarning = show
+    try:
+        yield
+    finally:
+        warnings.showwarning = shown
 
 
 # numz's padding of the frames before the model, DivisiblePad((16, 16)), zeros up to multiples of
@@ -350,17 +389,18 @@ def main(argv: list[str] | None = None) -> int:
     # A stop at once, a second Ctrl-C or SIGTERM during the run (runtime/stop.py), SIGTERM during
     # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
     # manifest says, and the same command resumes.
-    try:
-        return _run(args)
-    except KeyboardInterrupt:
-        logger.error("stopped at once (Ctrl-C)")
-        return 130
-    except Terminated:
-        logger.error("stopped at once (SIGTERM)")
-        return 143
-    finally:
-        _unmake()
-        _unlock()
+    with _warnings_in_lines():
+        try:
+            return _run(args)
+        except KeyboardInterrupt:
+            logger.error("stopped at once (Ctrl-C)")
+            return 130
+        except Terminated:
+            logger.error("stopped at once (SIGTERM)")
+            return 143
+        finally:
+            _unmake()
+            _unlock()
 
 
 def verify(argv: list[str]) -> int:
@@ -377,11 +417,12 @@ def verify(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
     _logging(False)
-    try:
-        return _verify(args.output)
-    except KeyboardInterrupt:
-        logger.error("stopped (Ctrl-C)")
-        return 130
+    with _warnings_in_lines():
+        try:
+            return _verify(args.output)
+        except KeyboardInterrupt:
+            logger.error("stopped (Ctrl-C)")
+            return 130
 
 
 @dataclass(frozen=True)

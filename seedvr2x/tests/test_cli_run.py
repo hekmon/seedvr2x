@@ -20,6 +20,7 @@ import re
 import signal
 import subprocess
 import sys
+import warnings
 import weakref
 import zlib
 from collections.abc import Callable, Iterator
@@ -7073,6 +7074,106 @@ def test_real_detection_cuts(
     assert all(float(line.split()[1]) > 0.5 for line in lines)
     print("\n".join(record.getMessage() for record in caplog.records))
     print(plan.read_text())
+
+
+# A run of the command line in a fresh interpreter whose run warns, through Python's warnings,
+# twice from one place and once from another (test_python_s_warnings_are_lines_of_seedvr2x_s).
+WARNED = """
+import sys
+import warnings
+
+from seedvr2x import cli
+
+
+def run(args):
+    for _ in range(2):
+        warnings.warn("a library's warning", UserWarning)
+    warnings.warn("another", FutureWarning)
+    return 0
+
+
+cli._run = run
+sys.exit(cli.main(sys.argv[1:]))
+"""
+
+
+def test_python_s_warnings_are_lines_of_seedvr2x_s(tmp_path: Path) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-21): Python's own warnings go
+    # through the same lines, "23:05:12 WARNING UserWarning: ...", each on one line, where Python
+    # prints two, the second the source's; once a place, as Python's filters have it. Under
+    # --verbose, in its format, under Python's name for them, py.warnings.
+    for verbose, start in (
+        (False, r"\d\d:\d\d:\d\d WARNING "),
+        (True, r"\S+ \S+ WARNING py\.warnings: "),
+    ):
+        options = ["-v"] if verbose else []
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                WARNED,
+                str(tmp_path / "in.mkv"),
+                "-o",
+                str(tmp_path / "out"),
+                *options,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        lines = result.stderr.splitlines()
+        assert [line for line in lines if "warning" in line.lower() or "another" in line] == lines
+        assert len(lines) == 2, result.stderr
+        assert re.fullmatch(f"{start}UserWarning: a library's warning \\(<string>:10\\)", lines[0])
+        assert re.fullmatch(f"{start}FutureWarning: another \\(<string>:11\\)", lines[1])
+
+
+def test_python_s_warnings_are_given_back_on_the_way_out(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Set in the CLI's entry point and restored on the way out (DESIGN.md, Architecture, What it
+    # prints): an in-process run's warnings are seedvr2x's lines during it, and pytest's own
+    # capture has them again after it, whether the run returns or raises; verify likewise.
+    shown = warnings.showwarning
+
+    def run(args: object) -> int:
+        warnings.warn("during the run", UserWarning, stacklevel=1)
+        warnings.warn("a warning\n  of two lines", UserWarning, stacklevel=1)
+        if getattr(args, "seed", None) == 7:
+            raise RuntimeError("a bug")
+        return 0
+
+    monkeypatch.setattr(cli, "_run", run)
+    caplog.set_level(logging.WARNING)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        assert cli.main(["in.mkv", "-o", "out"]) == 0
+        with pytest.raises(RuntimeError, match="a bug"):
+            cli.main(["in.mkv", "-o", "out", "--seed", "7"])
+    said = [record for record in caplog.records if record.name == "py.warnings"]
+    assert [record.levelname for record in said] == ["WARNING"] * 4
+    assert said[1].getMessage().startswith("UserWarning: a warning of two lines (")
+    assert re.fullmatch(
+        r"UserWarning: during the run \(.*test_cli_run\.py:\d+\)", said[0].getMessage()
+    )
+    assert warnings.showwarning is shown
+    with pytest.warns(UserWarning, match="after the run"):
+        warnings.warn("after the run", UserWarning, stacklevel=1)
+
+    def verified(output: Path) -> int:
+        warnings.warn("during verify", UserWarning, stacklevel=1)
+        return 0
+
+    monkeypatch.setattr(cli, "_verify", verified)
+    caplog.clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        assert cli.main(["verify", "out"]) == 0
+    assert [record.getMessage().partition(" (")[0] for record in caplog.records] == [
+        "UserWarning: during verify"
+    ]
+    assert warnings.showwarning is shown
 
 
 def test_a_line_starts_with_the_time_of_day_but_under_verbose() -> None:
