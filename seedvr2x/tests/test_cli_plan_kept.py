@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 from test_cli_run import (
+    CUT,
     JOB,
     PADDED,
     UNINTERRUPTED,
@@ -30,6 +32,7 @@ from test_cli_run import (
 )
 from test_cli_runs import KEPT_BYTES, listed, short_disk
 
+from seedvr2x import cli
 from seedvr2x.runtime import model, planner
 from seedvr2x.runtime.blockswap import HostMemoryError
 from seedvr2x.runtime.plan import Plan, Tiles
@@ -101,20 +104,74 @@ def test_a_refused_plan_leaves_one_too(
     steps: Steps,  # noqa: F811
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # --plan refused by the planner keeps the first pass as a run does, and writes no cut list:
-    # --plan again, the memory back, plans it from the record and writes the list.
+    # --plan refused by the planner keeps the first pass as a run does, and writes its cut list
+    # all the same, the refusal saying where (DESIGN.md, Memory planner, decided on 2026-10-21):
+    # --plan again, the memory back, plans it from the record and writes the same list.
     source_path = job(tmp_path, monkeypatch)
     out, listing = tmp_path / "out", tmp_path / "plan.txt"
     with monkeypatch.context() as patch:
         too_little_memory(patch)
         assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(listing)) == 1
     [said] = errors(caplog)
-    assert said.endswith(KEPT.format(directory=out)), said
-    assert recorded(out)["plan"] is None and not listing.exists()
+    assert said.endswith(
+        f"; its cut list is in {listing} all the same" + KEPT.format(directory=out)
+    ), said
+    assert said.startswith("an output of 128x96 takes"), said
+    assert recorded(out)["plan"] is None and listing.is_file()
+    refused_list = listing.read_text()
+    listing.unlink()
     scans = first_passes(monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(listing)) == 0
-    assert scans == [] and listing.is_file() and recorded(out)["plan"] is not None
+    assert scans == [] and listing.read_text() == refused_list
+    assert recorded(out)["plan"] is not None
     assert steps.calls == []
+
+
+def test_a_refused_plan_writes_its_playlists_too(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scripted: Steps,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Its shots detected: the two playlists beside the list, as a plan that runs writes them;
+    # and a refusal before the shots are known writes nothing. A refusal by the GPU's memory
+    # itself, as the free memory is read, says it too.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    listing = tmp_path / "plan.txt"
+    with monkeypatch.context() as patch:
+        too_little_memory(patch)
+        assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(listing)) == 1
+    [said] = errors(caplog)
+    assert f"; its cut list is in {listing} all the same" in said
+    assert listing.is_file() and sorted(path.name for path in tmp_path.glob("plan*")) == [
+        "plan.txt",
+        "plan.txt.cuts.m3u8",
+        "plan.txt.possible.m3u8",
+    ]
+    listed = [message for message in caplog.messages if "the cut list in" in message]
+    assert listed == [
+        f"3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3: the cut list in {listing}"
+    ]
+    for path in tmp_path.glob("plan*"):
+        path.unlink()
+    caplog.clear()
+
+    def refused(device: object) -> int:
+        raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 MiB.")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cli, "_free_memory", refused)
+        assert upscale(tmp_path, source_path, "again", *CUT, "--plan", str(listing)) == 1
+    [said] = errors(caplog)
+    assert ", before the models loaded: nothing was run; its cut list is in" in said
+    assert listing.is_file()
+    for path in tmp_path.glob("plan*"):
+        path.unlink()
+    caplog.clear()
+    # Refused before its first pass, by a seed out of range: nothing written.
+    assert upscale(tmp_path, source_path, "seed", *CUT, "--seed", "-1", "--plan", str(listing)) != 0
+    assert not any(tmp_path.glob("plan*"))
 
 
 def test_a_run_refused_at_the_model_load_leaves_a_plan(

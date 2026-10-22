@@ -616,6 +616,9 @@ def _run(args: argparse.Namespace) -> int:
     # The job's directory once it holds a plan, the record of its first pass with no unit made
     # (DESIGN.md, Pause and resume, A plan), which a refusal then says is kept (_first_kept).
     kept_first: Path | None = None
+    # What --plan's cut list is written from once the first pass has found the shots, so that a
+    # refusal after it writes the list all the same (_listed_anyway).
+    listing: _Listing | None = None
     try:
         # The source is the only input (DESIGN.md, Input): a directory is refused before anything
         # is done, the build's check included, so that nothing is made.
@@ -808,6 +811,7 @@ def _run(args: argparse.Namespace) -> int:
         found_cuts = _source_cuts(args, cuts, source)
         shots = shots_from_cuts([cut.frame for cut in found_cuts.cuts], source.frames)
         logger.info("%s: %s", _plural(len(shots), "shot"), _said(found_cuts))
+        listing = _Listing(source, found_cuts, len(shots), model_files)
         segments, paths = _segments(args, source, shots, directory)
         out_height, out_width = output_size(target)
         logger.info(
@@ -953,16 +957,19 @@ def _run(args: argparse.Namespace) -> int:
         if prior is None or not complete(prior.recorded):
             _room_on_disk(args, directory, shots, target, prior, plan, numz_padding=numz_padding)
     except (MediaError, JobError) as error:
-        logger.error("%s%s", error, _first_kept(kept_first))
+        listed = _listed_anyway(args, listing)
+        logger.error("%s%s%s", error, listed, _first_kept(kept_first))
         return 1
     except _out_of_memory() as error:
         # The GPU's memory refused before the models load, where a run first works on the
         # device: the shot detector in the first pass, or the first allocation and the warm-up
         # the free memory is read with (_free_memory), another program holding the card. One
         # line and status 1, as at the load and in a unit.
+        listed = _listed_anyway(args, listing)
         logger.error(
-            "%s, before the models loaded: nothing was run%s",
+            "%s, before the models loaded: nothing was run%s%s",
             _refused(error),
+            listed,
             _first_kept(kept_first),
         )
         return 1
@@ -990,7 +997,7 @@ def _run(args: argparse.Namespace) -> int:
         try:
             replanned = _resume(record, prior, final is not None)
         except JobError as error:
-            logger.error("%s", error)
+            logger.error("%s%s", error, _listed_anyway(args, listing))
             return 1
         remaining = [index for index, done in enumerate(record.finished) if not done]
         if not replanned:
@@ -3030,6 +3037,31 @@ def _plan_file(args: argparse.Namespace, directory: Path) -> None:
         raise JobError(
             f"--plan {plan}: no file can be written in {plan.parent}: {error.strerror}"
         ) from None
+
+
+@dataclass(frozen=True)
+class _Listing:
+    """What --plan's cut list is written from (_write_plan), once the first pass has found the
+    shots: the source, counted, its cuts, how many shots they make, the model files."""
+
+    source: "Source"
+    found: _Cuts
+    shots: int
+    model_files: "ModelFiles"
+
+
+def _listed_anyway(args: argparse.Namespace, listing: _Listing | None) -> str:
+    """--plan's cut list and playlists written all the same where the job is refused once its
+    first pass has found the shots (DESIGN.md, Memory planner, decided on 2026-10-21: "--plan on
+    a refusal still writes its cut list and playlists, the refusal saying where the list is"): by
+    the planner, the seed, the disk, the GPU's memory, or a record of another job. What the
+    refusal adds, where the list is; nothing without --plan, before the shots are known, or
+    where the list or its playlists can't be written, which _write_plan says in its own line.
+    PROVISIONAL (implementation, 2026-10-21): the words."""
+    if args.plan is None or listing is None:
+        return ""
+    status = _write_plan(args, listing.source, listing.found, listing.shots, listing.model_files)
+    return "" if status else f"; its cut list is in {args.plan} all the same"
 
 
 def _write_plan(
