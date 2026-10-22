@@ -880,8 +880,22 @@ Decoding goes through an ffmpeg pipe:
     [seeking.md](../research/docs/seeking.md)): on one thread, 8 of 8 copies decoded their
     damaged frames the same every time, and a read started at a damaged frame's keyframe, or up
     to 3 before, gave the start's pictures on 60 of 60 reads in 5 of them; HEVC repeated on one
-    thread in none of its 3 copies. Not built: its cost to the first pass is to be measured
-    (see [To measure](#to-measure)).
+    thread in none of its 3 copies. The Blu-ray remux's last damaged frame, a B-frame just
+    after its last keyframe that refers back across it, came out another way from that
+    keyframe, the same every time, and as from the start from 1 to 3 keyframes back
+    (2026-10-22): a read starts one keyframe before a frame's own, so it holds there too.
+  - **One decoder thread isn't built** (decided on 2026-10-22,
+    [seeking.md](../research/docs/seeking.md)): it would make the decode the first pass's slow
+    part on HD sources. On the 2-hour Blu-ray remux (H.264, 142,477 frames), the pass's ffmpeg
+    command (the decode, the hashes and the detector's small frames) took 1,024 to 1,035 s on
+    one thread against 143 s on the default threads, 7.2 times; the shot detector, which hides
+    the decode today (the pass 158 s), would wait on it, the pass about 1,029 s (projected).
+    On a DVD it costs nothing (18 s, within the detector's 45 s). For
+    that, the same picture in every read at 2 frames of 142,477, on H.264 and MPEG-2 only. So
+    damaged frames stay as built: read from the start and taken as decoded, with a warning,
+    and a resume is bit-identical for a source that decodes the same each time (see
+    [Pause and resume](#pause-and-resume)). The reads' `-threads 1` sets their encoders (the
+    hashes'), not their decoder, whose setting would go before `-i`.
   - Real open-GOP HEVC in MKV is tested (an x265 encode: one IDR, then 435 CRA, 54 leading
     pictures): frame-exact on 136 targets, 96 of them around every leading picture, at 0.21 s
     per read. A decode started exactly at a CRA outputs none of its leading pictures and says
@@ -1309,14 +1323,40 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   level on average in every version: no eye sees it. The user's eyes, blind: the
   several runs' frames on 8 of 8 stills ("the sharpest, the cleanest; the other is way more
   blurry") and on 4 of 4 loops, 2 of them hard to tell in motion.
-- **At 4K** (2026-10-21, ×2 from 1080p, the 96 GB card, seed 42, 4 live-action shots and a
-  painted animation shot): `maximum` closer to the ground truth on every measure on all 5,
+- **At 4K** (2026-10-21, ×2 from 1080p, the 96 GB card, seed 42, 4 shots of a grainy
+  live-action film and a painted animation shot;
+  [numerics.md](../research/docs/numerics.md#in-seedvr2x---quality-at-4k-and-in-the-manuals-example)):
+  `maximum` closer to the ground truth on every measure on all 5,
   PSNR-Y +0.09 to +1.98 dB and VMAF +1.3 to +19.1 (its 4K model), the temporal errors lower.
   To the eyes, blind, only on the painted shot: 2 of 2 places ("sharper, way less
   artifacts", "more natural leaf forms"). On live action `standard` was preferred on 4 of 8
   places ("smoother", "better quality") and `maximum` on 1, the rest the same or undecided;
   5 of 5 loops alike. At 1080p, a live-action clip's 2 places had gone to the several runs.
   A 45-frame 4K shot took about 63 min at `maximum`, 15 at `standard`.
+- **At 4K, more shots and a second seed** (2026-10-22, the same way: the grainy film's 4
+  clips at seed 43; at seed 42, 3 clips of a digital live-action film, a face in a helmet,
+  clouds and a jet blurred all over by motion (cut into shots of 2, 42 and 1 frames), and 2
+  of an animation made in 4K, a fast tilt and a still night street): `maximum` closer to the
+  ground truth on all 9 by PSNR-Y and VMAF, from +0.06 dB and +1.7 on the grainy film's
+  still face to +2.31 dB and +17.2 on the fast tilt; the grainy film's gains within 0.06 dB
+  and 0.4 of VMAF of seed 42's. To the eyes, blind: `maximum` on 8 places of 18, `standard`
+  on 4, the same on 6, 4 of them leaning to `maximum`; 3 loops of 9 to `maximum`, each seen
+  only once paused, 5 alike, 1 not judgeable. By kind of picture:
+  - The fast tilt: `maximum` on 2 of 2 places ("way better: the other looks like a draft")
+    and in its loop. The face in a helmet: 2 of 2 ("cleaner", "finer and more controlled
+    details"), its loop alike.
+  - Still shots, the night street and the clouds: the same on 4 of 4, the clouds leaning to
+    `maximum` ("might be slightly smoother"), their loops alike.
+  - The grainy film: `standard` on 4 places ("smoother skin", "the reflection in the eyes
+    cleaner", "less noise"), `maximum` on 2 ("steel structures wobble too much on the
+    other"), the same on 2, leaning to `maximum`; 2 of its 4 loops to `maximum`. With seed
+    42's places, `standard` on 8 of 16, `maximum` on 3.
+  - The jet blurred all over: its 2 places to `maximum` ("sharper"), the eyes not knowing what
+    they showed; its loop too fast to judge.
+- **What the manual says** (decided on 2026-10-22): at 4K, `maximum` pays on animation and
+  on clean footage, more so with motion, where a paused frame shows it best; on still shots
+  it changes little, and on a grainy film `standard` was preferred more often (smoother
+  skin, less noise). `standard` stays the default.
 - **The manual's example** (Sol Levante, 960×540 to 1080p): on two fast extracts with line
   art, `maximum` +1.5 to +1.9 dB of PSNR-Y, VMAF +10 to +12, LPIPS −0.017 to −0.021, both
   temporal errors lower, `enhanced` about 40% of that; on a calm one +0.16 dB. The user's pick
@@ -2048,7 +2088,8 @@ first pass, whose shots are its input, and before the models load:
     "a little bit"), 1 undecided (sharper against smoother), and 4 of 4 loops alike; 7 crops of
     a flat sky couldn't be judged at all, nothing in them to recognise, the uncorrected
     control's two among them. The worst 60×60 block moved 0.07 to 0.54 of a level and the
-    flattest third 0.03 to 0.28, where 512-px decode tiles move it 9.36 without correction.
+    flattest third 0.03 to 0.28, where 512-px decode tiles move it 9.36 without correction
+    ([colour.md](../research/docs/colour.md#through-seedvr2xs-split-for-the-eyes)).
     The encode's drift more than the
     decode's (at 512 px, 33.4 dB from the untiled run against 38.3,
     [vram.md](../research/docs/vram.md#tiling)). The planner chooses none above 2048 px, the
@@ -3129,15 +3170,6 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   so does that of a shot's end (step 1, decided on 2026-10-19). The decode's chroma kernel is
   bilinear (2026-10-20, see [Input](#input)), and so is the master's downsampling (see
   [Output](#output)).
-- **The first pass on one decoder thread** for H.264 and MPEG-2 sources (see
-  [Input](#input)): a damaged frame would then decode the same in every read, so that a
-  resume gives the uninterrupted run's frames there and seeks past it. To measure: what it
-  costs the first pass, against today's threads, on a 2-hour Blu-ray remux and on a DVD.
-- **`--quality` on live action at 4K** (see
-  [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)): the eyes leaned to
-  `standard` on 4 of 8 places, `maximum` on 1, where every metric favoured `maximum`; one
-  seed, 4 shots. More shots and a second seed would say whether the manual should advise
-  against it there.
 - **Every fourth frame is the model's best**
   ([numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
   shot's first frame, the causal VAE packs 4 frames per latent, and the last frame of each
