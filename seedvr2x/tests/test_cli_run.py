@@ -901,21 +901,6 @@ def test_plan_recorded_and_phases_entered(
     assert f"{manifest}: not a plan as seedvr2x records one: None" in caplog.text
 
 
-def test_until_not_built_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    steps: Steps,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # --until is read, and refused until stopping by the clock is built, nothing made: no unit,
-    # no manifest.
-    source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "out", *JOB, "--until", "7:30") == 1
-    assert "--until 07:30: stopping by the clock isn't built yet" in caplog.text
-    assert steps.calls == []
-    assert not (tmp_path / "out" / "manifest.json").exists()
-
-
 def test_swap_blocks_pin_places_the_weights(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
@@ -1138,7 +1123,7 @@ def test_a_run_refused_before_its_gpu_asks_the_driver_nothing(
     monkeypatch.setattr(memory, "paravirtual", lambda: True)
     monkeypatch.setattr(memory, "probe", lambda: pytest.fail("the driver was asked"))
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "out", *JOB, "--until", "7:30") == 1
+    assert upscale(tmp_path, source_path, "out", *JOB, "--cut-threshold", "0.4") == 1
     assert not any(name in os.environ for name in memory.VARIABLES)
 
 

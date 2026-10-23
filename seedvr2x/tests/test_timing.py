@@ -8,7 +8,7 @@ import os
 import tempfile
 import time
 from collections.abc import Generator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -38,6 +38,7 @@ from seedvr2x.runtime.timing import (
     spoken,
     tokens,
     units_of,
+    would_end,
 )
 
 # An encode at 2 s and 0.5 s a frame, a window at 1 s and 0.25 ms a token, a decode at 3 s and
@@ -598,6 +599,51 @@ def test_ending_in_the_local_zone() -> None:
     now = datetime(2026, 10, 21, 12, 0).astimezone()
     assert ending(now, 90 * 60) == "13:30"
     assert ending(now, 13 * 3600) == "01:00 tomorrow"
+
+
+def test_would_end_when_it_fits() -> None:
+    clock = Clock(MODELS)
+    found = would_end(clock, UNITS, START, START + timedelta(seconds=50))
+    assert found.before is None
+    assert found.at == START + timedelta(seconds=43.5)
+    assert (found.done, found.total) == (43.5, 43.5)
+    with_last = would_end(
+        clock, UNITS, START, START + timedelta(seconds=200), ("the assembly", 100.0)
+    )
+    assert with_last.before is None and with_last.at == START + timedelta(seconds=143.5)
+    assert (with_last.done, with_last.total) == (143.5, 143.5)
+
+
+@pytest.mark.parametrize(
+    ("offset", "before", "done"),
+    [
+        # The estimate alone fits, 1.15 times it does not.
+        (9.0, "the encode", 0.0),
+        (10.0, "the window", 8.5),
+        (20.0, "the decode", 10.5),
+        (10.5 + 1.15 * 33.0 - 0.01, "the decode", 10.5),
+    ],
+)
+def test_would_end_stops_before_the_first_unit_that_is_late(
+    offset: float, before: str, done: float
+) -> None:
+    found = would_end(Clock(MODELS), UNITS, START, START + timedelta(seconds=offset))
+    assert found.before == before
+    assert found.done == done and found.total == 43.5
+    assert found.at == START + timedelta(seconds=done)
+
+
+def test_would_end_counts_the_assembly_after_the_units() -> None:
+    deadline = START + timedelta(seconds=43.5 + 1.15 * 10.0 - 0.01)
+    found = would_end(Clock(MODELS), UNITS, START, deadline, ("the assembly", 10.0))
+    assert found.before == "the assembly"
+    assert found.at == START + timedelta(seconds=43.5)
+    assert (found.done, found.total) == (43.5, 53.5)
+
+
+def test_would_end_needs_an_estimate_for_every_unit() -> None:
+    with pytest.raises(ValueError, match="the encode: no estimate"):
+        would_end(Clock(), UNITS, START, START + timedelta(hours=1))
 
 
 def test_assembly_seconds() -> None:

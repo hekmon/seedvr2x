@@ -5,14 +5,18 @@ process exits, which frees the GPU, and the units kept let the same command resu
 ffmpeg's processes are started out of the terminal's reach (their own process group), so that a
 Ctrl-C reaches seedvr2x alone: ffmpeg would otherwise end its output early, and the unit in
 progress with it. Python only handles a signal between two bytecodes, so the run waits for the
-GPU polling (model.synchronize), not blocked in a copy for a whole decode slice or window."""
+GPU polling (model.synchronize), not blocked in a copy for a whole decode slice or window.
+
+--until's time stops a run too, by the clock: before a unit that wouldn't finish in time, by its
+estimate (runtime/timing.py), never inside one."""
 
 import contextlib
 import os
 import signal
 import time
 from collections.abc import Callable, Generator
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import time as day_time
 from types import FrameType, TracebackType
 from typing import Any, Self
 
@@ -20,8 +24,24 @@ from typing import Any, Self
 Handler = Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
 
 
+# What a unit's estimate is multiplied by before it is held against --until's time (DESIGN.md,
+# Pause and resume, Stopping: "the run stops when now plus 1.15 times the unit's estimate passes
+# it").
+MARGIN = 1.15
+
+
 class Stopped(Exception):
     """The run stopped between two units, as asked; every unit done is kept."""
+
+
+class Deadline(Stopped):
+    """The run stopped before a unit that wouldn't finish by --until's time (Stop.check); every
+    unit done is kept. `unit` names the one not begun, and `cost` is its estimate, in seconds,
+    None without one."""
+
+    def __init__(self, unit: str, cost: float | None) -> None:
+        super().__init__(unit, cost)
+        self.unit, self.cost = unit, cost
 
 
 class Terminated(BaseException):
@@ -32,17 +52,24 @@ class Terminated(BaseException):
 class Stop:
     """The stop asked of a run, while it runs: a context manager, which installs the handlers of
     SIGINT and SIGTERM and gives Python's back on exit. The run calls check() before each unit,
-    and names it in `unit` for the notice a Ctrl-C prints."""
+    and names it in `unit` for the notice a Ctrl-C prints. `deadline` is --until's time
+    (stop.deadline), aware; None without one."""
 
-    def __init__(self) -> None:
+    def __init__(self, deadline: datetime | None = None) -> None:
         self.asked = False
         self.unit = "the unit in progress"
+        self.deadline = deadline
         self._previous: dict[int, Handler] = {}
 
-    def check(self) -> None:
-        """Raise Stopped if a stop was asked: the unit before is done and kept."""
+    def check(self, cost: float | None = None, unit: str = "the next unit") -> None:
+        """Raise Stopped if a stop was asked: the unit before is done and kept. With a deadline,
+        raise Deadline if the unit to come, named `unit` and estimated at `cost` seconds, would
+        end after it: now plus MARGIN times its estimate. A unit nothing estimates (None) is held
+        to the time alone, so stopped once the deadline is past."""
         if self.asked:
             raise Stopped
+        if self.deadline is not None and late(now(), cost, self.deadline):
+            raise Deadline(unit, cost)
 
     def _handle(self, number: int, frame: FrameType | None) -> None:
         if number == signal.SIGTERM:
@@ -88,9 +115,37 @@ def terminable() -> Generator[None]:
         signal.signal(signal.SIGTERM, previous)
 
 
+def late(at: datetime, cost: float | None, deadline: datetime) -> bool:
+    """Whether a unit begun at `at`, estimated at `cost` seconds (None: nothing estimates it),
+    would end after deadline by --until's rule: at plus MARGIN times its estimate."""
+    return at + timedelta(seconds=MARGIN * (cost or 0.0)) > deadline
+
+
+def deadline(shown: day_time, at: datetime) -> datetime:
+    """--until's time (DESIGN.md, Pause and resume, Stopping): the next time after `at`, aware,
+    that the local clock shows `shown`, a time of day, as a full date in the local zone. Here and
+    not with the estimates (runtime/timing.py), which import torch: the command sets it as it
+    starts, before a first pass that may last past it.
+
+    By the zone's own rules (the system's, through astimezone): an hour the clock skips in spring
+    isn't shown that day, so the time is the day after's; one it shows twice in autumn counts
+    twice, the first that is still to come taken."""
+    today = at.astimezone().date()
+    instants: list[datetime] = []
+    # Two days ahead: the day after's when today's is past, and one more for a skipped hour.
+    for days in range(3):
+        for fold in (0, 1):
+            naive = datetime.combine(today + timedelta(days=days), shown).replace(fold=fold)
+            instant = naive.astimezone()
+            # A skipped time comes back from astimezone moved by the hour skipped: not shown.
+            if instant.time() == shown and instant > at:
+                instants.append(instant)
+    return min(instants)
+
+
 def now() -> datetime:
-    """The time it is, aware, in the local zone: what a job's end is said in (timing.Progress). The
-    wall clock's."""
+    """The time it is, aware, in the local zone: what a job's end is said in (timing.Progress) and
+    --until's time held against. The wall clock's, as --until's time is one of its own."""
     return datetime.now().astimezone()
 
 

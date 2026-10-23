@@ -195,12 +195,12 @@ def job_units(
 
 
 def _begin(stop: Stop | None, unit: str, cost: float | None) -> None:
-    """Before a unit: stop there if asked (Stop.check), else name it for a Ctrl-C's notice. cost
-    is the time the unit is expected to take, in seconds (runtime/timing.py), None when nothing
-    estimates it: for --until, which stops before a unit that wouldn't finish in time (DESIGN.md,
-    Pause and resume, Stopping); not built yet, so not looked at."""
+    """Before a unit: stop there if asked, or if it wouldn't finish by --until's time (Stop.check;
+    DESIGN.md, Pause and resume, Stopping), else name it for a Ctrl-C's notice. cost is the time
+    the unit is expected to take, in seconds (runtime/timing.py), None when nothing estimates
+    it."""
     if stop is not None:
-        stop.check()
+        stop.check(cost, unit)
         stop.unit = unit
 
 

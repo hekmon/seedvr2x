@@ -36,6 +36,7 @@ from typing import Literal
 from seedvr2x.runtime.job import OutputSegment, Shot, padded_size, shot_runs
 from seedvr2x.runtime.plan import Phase
 from seedvr2x.runtime.shot import padded_length, shot_layout
+from seedvr2x.runtime.stop import late
 
 logger = logging.getLogger(__name__)
 
@@ -476,3 +477,45 @@ def assembly_seconds(rate: float, masters: int, source: int) -> float:
     byte counted at the write's rate, a disk reading no slower than it writes.
     PROVISIONAL (implementation, 2026-10-21)."""
     return (3 * masters + 2 * source) / rate
+
+
+@dataclass(frozen=True)
+class Ending:
+    """When a job run from `start` would end by its estimate (would_end), or the unit it would
+    stop before under --until's rule (stop.late), `before`, None if none: at `at`, its work
+    done until then `done` seconds of `total`."""
+
+    before: str | None
+    at: datetime
+    done: float
+    total: float
+
+
+def would_end(
+    clock: Clock,
+    units: Sequence[Unit],
+    start: datetime,
+    deadline: datetime,
+    last: tuple[str, float] | None = None,
+) -> Ending:
+    """A job of units run from start, its units taking their estimates, under --until's rule:
+    each unit begun only if it ends by deadline at MARGIN times its estimate (stop.late); `last`,
+    a one-file output's assembly, its name and estimate, after them. For --plan given --until
+    (DESIGN.md, Pause and resume, Stopping: "`--plan` given `--until` says whether the job ends by
+    then and, if not, the unit it would stop before")."""
+    costs: list[tuple[str, float]] = []
+    for unit in units:
+        seconds = estimate(clock, unit)
+        if seconds is None:
+            raise ValueError(f"{unit.name}: no estimate")
+        costs.append((unit.name, seconds))
+    if last is not None:
+        costs.append(last)
+    total = sum(seconds for _, seconds in costs)
+    at, done = start, 0.0
+    for name, seconds in costs:
+        if late(at, seconds, deadline):
+            return Ending(name, at, done, total)
+        at += timedelta(seconds=seconds)
+        done += seconds
+    return Ending(None, at, done, total)

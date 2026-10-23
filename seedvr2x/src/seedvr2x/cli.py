@@ -29,7 +29,7 @@ from seedvr2x.runtime import stop as stopping
 from seedvr2x.runtime.cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
 from seedvr2x.runtime.job import MIN_SEGMENT, QUALITY
 from seedvr2x.runtime.pull import DETECTOR, REPO
-from seedvr2x.runtime.stop import Stop, Stopped, Terminated, terminable
+from seedvr2x.runtime.stop import Deadline, Stop, Stopped, Terminated, deadline, terminable
 
 if TYPE_CHECKING:
     import torch
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from seedvr2x.runtime.model import Models
     from seedvr2x.runtime.plan import Plan
     from seedvr2x.runtime.pull import ModelFile, ModelFiles
-    from seedvr2x.runtime.timing import Unit
+    from seedvr2x.runtime.timing import Clock, Unit
 
 # Video file names, other than Matroska's, that -o refuses: the finished file is a .mkv path, the
 # one container the output segments are assembled into (_output), and anything else names the
@@ -121,6 +121,11 @@ def _warnings_in_lines() -> Generator[None]:
     finally:
         warnings.showwarning = shown
 
+
+# The exit status of a run stopped by --until (DESIGN.md, Pause and resume, Stopping): sysexits.h's
+# EX_TEMPFAIL, "try again later", so that a script tells a job to run again from a finished one
+# (0) and from a Ctrl-C (130).
+EX_TEMPFAIL = 75
 
 # A master's bytes a frame before any is written, at most: its samples uncompressed, FFV1 being
 # lossless, at the bytes a sample each format takes (media/writer.py: yuv420p10le's 1.5 samples a
@@ -379,7 +384,8 @@ def main(argv: list[str] | None = None) -> int:
         type=_until,
         metavar="HH:MM",
         help="stop before the first unit that wouldn't finish by the next time the local clock"
-        " shows HH:MM, what is done kept (exit status 75): the same command resumes",
+        " shows HH:MM, by its estimate and 15%% more, what is done kept (exit status 75): the"
+        " same command resumes; with --plan, say whether the job ends by then",
     )
     parser.add_argument(
         "--accept-env-change",
@@ -630,6 +636,7 @@ def _run(args: argparse.Namespace) -> int:
     # What --plan's cut list is written from once the first pass has found the shots, so that a
     # refusal after it writes the list all the same (_listed_anyway).
     listing: _Listing | None = None
+    until: datetime.datetime | None = None
     try:
         # The source is the only input (DESIGN.md, Input): a directory is refused before anything
         # is done, the build's check included, so that nothing is made.
@@ -645,8 +652,7 @@ def _run(args: argparse.Namespace) -> int:
             )
         pins = Pins(args.window, args.encode_tile, args.decode_tile, args.swap_blocks)
         if args.until is not None:
-            # Leaves with --until's commit (run.run_job's clock).
-            raise JobError(f"--until {args.until:%H:%M}: stopping by the clock isn't built yet")
+            until = _deadline(args)
         # DESIGN.md, Shot detection: --cut-threshold "is refused with --cuts".
         if args.cuts is not None and args.cut_threshold is not None:
             raise JobError(
@@ -1031,7 +1037,7 @@ def _run(args: argparse.Namespace) -> int:
             if args.plan is None:
                 # A .mkv path's segments, every one finished by an earlier run, are assembled
                 # now, the models not loaded (_assemble).
-                return 0 if final is None else _assemble(final, record, paths)
+                return 0 if final is None else _assemble(final, record, paths, until=until)
     units = Units(directory, record)
     tags = Tags.of(stream, source.conversion.matrix_tag)
 
@@ -1053,7 +1059,7 @@ def _run(args: argparse.Namespace) -> int:
         status = _write_plan(args, source, found_cuts, len(shots), model_files)
         if not status and not remaining and final is not None:
             # Every segment made: the assembly alone is left, ffmpeg's work, no model loaded.
-            _say_assembly_left(record, final)
+            _say_assembly_left(record, final, until)
         if status or not remaining:
             return status
         loaded = _load(model_files, identity.device, plan, reserve, _first_kept(kept_first))
@@ -1074,6 +1080,11 @@ def _run(args: argparse.Namespace) -> int:
         rate = None if final is None else _disk_rate(final.parent)
         assembly = None if rate is None else _assembly_estimate(record, rate)
         _say_times(calibrated, left, args.quality, levels, loading, assembly)
+        if until is not None:
+            # Run now, after the load and the calibration it pays again.
+            start = stopping.now() + datetime.timedelta(seconds=loading + calibrated.seconds)
+            last = None if assembly is None else (f"the assembly of {final}", assembly)
+            _say_until(calibrated.clock, left, start, until, last)
         if prior is None or planned(record.content()):
             # A new job's plan, or one planned again, written before the models loaded: again,
             # with its timings, for information (DESIGN.md, Memory planner: "the timings,
@@ -1082,6 +1093,15 @@ def _run(args: argparse.Namespace) -> int:
             record.plan["timings"] = calibrated.clock.record()
             record.write()
         return 0
+    if until is not None and stopping.now() >= until:
+        # The first pass lasted past it: no model loaded for nothing, its record kept (a new
+        # job's written as the first pass accepted the source).
+        logger.warning(
+            "it is past %s (--until) already: nothing begun; %s",
+            _date(until),
+            _kept(record, len(segments)),
+        )
+        return EX_TEMPFAIL
     loaded = _load(model_files, identity.device, plan, reserve, _first_kept(kept_first))
     if loaded is None:
         return 1
@@ -1091,10 +1111,10 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.runtime.timing import Progress
 
     # The time estimates (DESIGN.md, Memory planner): every run calibrates, so that each unit's
-    # line gives the job's time left from the first unit (decided on 2026-10-21). A one-file
-    # output's assembly, the job's last unit, at the rate its disk writes at. The calibration
-    # leaves the models in the decode's phase (calibration.calibrate), where the job's units
-    # start from.
+    # line gives the job's time left from the first unit (decided on 2026-10-21), and a run given
+    # --until holds each unit's estimate against its time. A one-file output's assembly, the job's
+    # last unit, at the rate its disk writes at. The calibration leaves the models in the
+    # decode's phase (calibration.calibrate), where the job's units start from.
     rate = None if final is None else _disk_rate(final.parent)
     left = job_units(units, plan, target, numz_padding, start="decode")
     made = "nothing of the job made" + _first_kept(kept_first)
@@ -1106,6 +1126,9 @@ def _run(args: argparse.Namespace) -> int:
     clock = calibrated.clock
     assembly = None if rate is None else _assembly_estimate(record, rate)
     _say_times(calibrated, left, args.quality, None, loading, assembly, planning=False)
+    if until is not None:
+        last = None if assembly is None else (f"the assembly of {final}", assembly)
+        _say_until(clock, left, stopping.now(), until, last)
     # Recorded with the plan, for information, kept current as units are made.
     assert record.plan is not None, "a plan made"
     record.plan["timings"] = clock.record()
@@ -1150,7 +1173,7 @@ def _run(args: argparse.Namespace) -> int:
         return segments[remaining[which]].start + written - (ends[which - 1] if which else 0)
 
     outputs = [(paths[index], segments[index].frames) for index in remaining]
-    with Stop() as stop:
+    with Stop(until) as stop:
         try:
             with SegmentWriter(outputs, open_segment, finished) as writer:
 
@@ -1219,6 +1242,19 @@ def _run(args: argparse.Namespace) -> int:
             # Nothing of the unit is recorded.
             logger.error("%s; stopped: %s", _refused(error), _kept(record, len(segments)))
             return 1
+        except Deadline as late:
+            # Before Stopped, which it is: a stop by the clock has its own status, so that a
+            # script tells a job to run again from a finished one and from a Ctrl-C (DESIGN.md,
+            # Pause and resume, Stopping).
+            assert until is not None
+            logger.warning(
+                "stopped before %s, which wouldn't finish by %s (--until): %s; %s",
+                late.unit,
+                _date(until),
+                _estimated(late.cost),
+                _kept(record, len(segments)),
+            )
+            return EX_TEMPFAIL
         except Stopped:
             logger.warning(
                 "stopped after %s, as asked; %s", stop.unit, _kept(record, len(segments))
@@ -1243,8 +1279,40 @@ def _run(args: argparse.Namespace) -> int:
     if final is not None:
         # The job's last unit. A stop asked during the last segment's (Ctrl-C once) stops before
         # it.
-        return _assemble(final, record, paths, asked=stop.asked)
+        return _assemble(
+            final, record, paths, asked=stop.asked, until=until, rate=rate, probed=True
+        )
     return 0
+
+
+def _deadline(args: argparse.Namespace) -> datetime.datetime:
+    """--until's time, said as a full date (DESIGN.md, Pause and resume, Stopping: "the next time
+    the local clock shows HH:MM, logged as a full date"): from the time it is as the command
+    starts, before a first pass that may last past it. With --plan, which runs nothing, the time
+    --plan says whether the job would end by."""
+    until = deadline(args.until, stopping.now())
+    shown = f"--until {args.until:%H:%M}"
+    if args.plan is not None:
+        logger.info("%s: --plan says whether the job, run now, ends by %s", shown, _date(until))
+    else:
+        logger.info(
+            "%s: the run stops before the first unit that wouldn't finish by %s",
+            shown,
+            _date(until),
+        )
+    return until
+
+
+def _date(moment: datetime.datetime) -> str:
+    """A time as a full date in its zone, as the logs say --until's: 2026-10-11 07:00 CEST."""
+    return f"{moment:%Y-%m-%d %H:%M %Z}"
+
+
+def _estimated(cost: float | None) -> str:
+    """A unit's estimate as a stop by the clock says it."""
+    from seedvr2x.runtime.timing import spoken
+
+    return "nothing estimates it" if cost is None else f"its estimate {spoken(cost)}"
 
 
 def _disk_rate(directory: Path) -> float | None:
@@ -1256,7 +1324,8 @@ def _disk_rate(directory: Path) -> float | None:
         rate = disk_rate(directory)
     except OSError as error:
         logger.warning(
-            "%s: its disk's rate not measured (%s): the assembly isn't estimated",
+            "%s: its disk's rate not measured (%s): the assembly isn't estimated, and --until"
+            " holds it to its time alone",
             directory,
             error,
         )
@@ -1270,10 +1339,11 @@ def _disk_rate(directory: Path) -> float | None:
     return rate
 
 
-def _say_assembly_left(record: "Manifest", final: Path) -> None:
+def _say_assembly_left(record: "Manifest", final: Path, until: datetime.datetime | None) -> None:
     """--plan's time for a one-file output whose segments are all made: its assembly alone, at
-    the rate its disk writes at."""
-    from seedvr2x.runtime.timing import spoken
+    the rate its disk writes at, and with --until whether it ends by then (DESIGN.md, Pause and
+    resume, Stopping)."""
+    from seedvr2x.runtime.timing import Clock, spoken
 
     rate = _disk_rate(final.parent)
     if rate is None:
@@ -1282,6 +1352,8 @@ def _say_assembly_left(record: "Manifest", final: Path) -> None:
     logger.info(
         "time: the assembly alone is left, about %s at the rate its disk writes at", spoken(seconds)
     )
+    if until is not None:
+        _say_until(Clock(), [], stopping.now(), until, (f"the assembly of {final}", seconds))
 
 
 def _masters(record: "Manifest") -> int:
@@ -1310,6 +1382,38 @@ def _assembly_estimate(record: "Manifest", rate: float) -> float:
     from seedvr2x.runtime.timing import assembly_seconds
 
     return assembly_seconds(rate, _masters(record), record.source.path.stat().st_size)
+
+
+def _say_until(
+    clock: "Clock",
+    units: "Sequence[Unit]",
+    start: datetime.datetime,
+    until: datetime.datetime,
+    last: tuple[str, float] | None,
+) -> None:
+    """Say whether the job's units, run from start, end by --until's time under its rule
+    (timing.would_end), and if not the unit it would stop before (DESIGN.md, Pause and resume,
+    Stopping: "`--plan` given `--until` says whether the job ends by then and, if not, the unit
+    it would stop before")."""
+    from seedvr2x.runtime.timing import spoken, would_end
+
+    ending = would_end(clock, units, start, until, last)
+    if ending.before is None:
+        logger.info(
+            "--until: by its estimate the job ends by %s, at about %s",
+            _date(until),
+            f"{ending.at.astimezone():%H:%M}",
+        )
+        return
+    logger.info(
+        "--until: by its estimate the job doesn't end by %s: it would stop before %s, at about"
+        " %s, %s of its %s done; the same command then resumes",
+        _date(until),
+        ending.before,
+        f"{ending.at.astimezone():%H:%M}",
+        spoken(ending.done),
+        spoken(ending.total),
+    )
 
 
 def _out_of_memory() -> tuple[type[BaseException], ...]:
@@ -1859,14 +1963,28 @@ def _grid_start(source: "Source") -> None:
         )
 
 
-def _assemble(final: Path, record: "Manifest", paths: Sequence[Path], asked: bool = False) -> int:
+def _assemble(
+    final: Path,
+    record: "Manifest",
+    paths: Sequence[Path],
+    asked: bool = False,
+    *,
+    until: datetime.datetime | None = None,
+    rate: float | None = None,
+    probed: bool = False,
+) -> int:
     """Assemble the finished file `final` from the job's segments, every one finished, at `paths`
     in record's directory, with the source's other streams (DESIGN.md, Output, Assembly), and
     return the exit status. One unit, the job's last, run by the run that finished the last
     segment or by a later one, which loads no model: stopped before it when a stop is asked
     (`asked`: during the last segment's unit), finished when one is asked during it; a stop at
     once unwinds through the join, which kills its ffmpeg and removes its partial file
-    (assembly.assemble), every segment kept for the same command to assemble.
+    (assembly.assemble), every segment kept for the same command to assemble. Stopped before it
+    too when it wouldn't finish by --until's time (`until`), exit status 75, its estimate from the
+    masters' bytes at the rate their disk writes at (`rate`, bytes per second, measured here unless
+    the run `probed` it already, None where it couldn't; _assembly_estimate; DESIGN.md, Pause and
+    resume, Stopping: "With a one-file output, the assembly is the job's last unit, estimated from
+    the masters' size").
 
     The join proves its result before putting it in place (assembly.assemble), an old file's
     checksums going only as it is replaced. Then, in this order, each step safe to stop after:
@@ -1893,10 +2011,14 @@ def _assemble(final: Path, record: "Manifest", paths: Sequence[Path], asked: boo
     )
     # A segment command's segments have no checksums (--segment-cmd), nor the file they make.
     summed = record.settings.get("segment_cmd") is None
-    with Stop() as stop:
+    cost = None
+    if until is not None:
+        rate = rate if probed else _disk_rate(final.parent)
+        cost = None if rate is None else _assembly_estimate(record, rate)
+    with Stop(until) as stop:
         stop.asked = asked
         try:
-            stop.check()
+            stop.check(cost, f"the assembly of {final}")
             stop.unit = f"the assembly of {final}"
             started = time.monotonic()
             checksums = [
@@ -1914,6 +2036,15 @@ def _assemble(final: Path, record: "Manifest", paths: Sequence[Path], asked: boo
                 work=directory,
                 stale=sums,
             )
+        except Deadline as late:
+            assert until is not None
+            logger.warning(
+                "stopped before the assembly, which wouldn't finish by %s (--until): %s; %s",
+                _date(until),
+                _estimated(late.cost),
+                kept,
+            )
+            return EX_TEMPFAIL
         except Stopped:
             logger.warning("stopped before the assembly, as asked; %s", kept)
             return 130
