@@ -12,13 +12,17 @@ Where a run holds itself to the card, it reads the whole card's free memory thro
 (memory._read), and a CPU test that stands in for such a driver would read the machine's
 real card: for the tests not marked gpu the machine has no NVML, its library's name one that
 no loader finds, so that such a test goes by its stand-in's figure, with the warning a machine
-without NVML gets. tests/test_memory.py gives the reading a stand-in of its own."""
+without NVML gets. tests/test_memory.py gives the reading a stand-in of its own.
+
+A one-file output measures the rate its disk writes at (timing.disk_rate), 256 MiB written and
+synced: for every test, a mebibyte, so that the suite's many one-file runs don't write gigabytes.
+tests/test_timing.py holds the probe itself."""
 
 from collections.abc import Iterator
 
 import pytest
 
-from seedvr2x.runtime import memory
+from seedvr2x.runtime import memory, timing
 
 
 @pytest.fixture(autouse=True)
@@ -34,4 +38,6 @@ def no_driver_asked(
     held = (("_segments", False), ("_plan_s_limit", None), ("_base", None))
     for name, value in (*state, *held, ("_planned", None), ("_left", memory.HELD_BACK)):
         monkeypatch.setattr(memory, name, value)
+    monkeypatch.setattr(timing, "PROBE", 1024**2)
+    monkeypatch.setattr(timing, "BLOCK", 256 * 1024)
     yield

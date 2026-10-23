@@ -13,7 +13,7 @@ import sys
 import time
 import warnings
 from bisect import bisect_right
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, cast
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
+from seedvr2x.runtime import stop as stopping
 from seedvr2x.runtime.cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
 from seedvr2x.runtime.job import MIN_SEGMENT, QUALITY
 from seedvr2x.runtime.pull import DETECTOR, REPO
@@ -35,11 +36,15 @@ if TYPE_CHECKING:
 
     from seedvr2x.media.index import FrameIndex
     from seedvr2x.media.source import Declared, FirstPass, Source
+    from seedvr2x.media.writer import Writer
+    from seedvr2x.runtime.calibration import Calibrated
     from seedvr2x.runtime.cuts import Cut
     from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
+    from seedvr2x.runtime.model import Models
     from seedvr2x.runtime.plan import Plan
     from seedvr2x.runtime.pull import ModelFile, ModelFiles
+    from seedvr2x.runtime.timing import Unit
 
 # Video file names, other than Matroska's, that -o refuses: the finished file is a .mkv path, the
 # one container the output segments are assembled into (_output), and anything else names the
@@ -116,6 +121,11 @@ def _warnings_in_lines() -> Generator[None]:
     finally:
         warnings.showwarning = shown
 
+
+# A master's bytes a frame before any is written, at most: its samples uncompressed, FFV1 being
+# lossless, at the bytes a sample each format takes (media/writer.py: yuv420p10le's 1.5 samples a
+# pixel at 2 bytes, gbrp16le's 3 at 2). For a one-file output's assembly's estimate (_masters).
+RAW_BYTES = {"yuv420p10le": 3.0, "gbrp16le": 6.0}
 
 # numz's padding of the frames before the model, DivisiblePad((16, 16)), zeros up to multiples of
 # 16, in place of seedvr2x's (DESIGN.md, Pipeline step 0), for seedvr2x's GPU tests only, never a
@@ -606,7 +616,7 @@ def _run(args: argparse.Namespace) -> int:
     )
     from seedvr2x.runtime.manifest import NAME, complete, planned, read
     from seedvr2x.runtime.planner import Pins
-    from seedvr2x.runtime.weights import ModelError, check_models
+    from seedvr2x.runtime.weights import check_models
 
     # The build, the source, the target, the cut list and the model files are checked before
     # anything touches the GPU, but for a job resumed, which is first checked against its record
@@ -993,9 +1003,7 @@ def _run(args: argparse.Namespace) -> int:
     from seedvr2x.media.files import make_directories
     from seedvr2x.media.reader import FramesLeft
     from seedvr2x.media.writer import SegmentWriter, Tags, Writer, open_writer
-    from seedvr2x.runtime.blockswap import HostMemoryError
-    from seedvr2x.runtime.model import load_models
-    from seedvr2x.runtime.run import run_job
+    from seedvr2x.runtime.run import job_units, run_job
     from seedvr2x.runtime.shot import CopyError, NonFinite
     from seedvr2x.runtime.units import Units
 
@@ -1025,51 +1033,88 @@ def _run(args: argparse.Namespace) -> int:
                 # now, the models not loaded (_assemble).
                 return 0 if final is None else _assemble(final, record, paths)
     units = Units(directory, record)
+    tags = Tags.of(stream, source.conversion.matrix_tag)
+
+    def open_scratch(path: Path) -> Writer:
+        # The job's own kind of output, for the calibration's decodes (_calibrated): its master,
+        # never through a segment command, which runs on its trial's frames alone (_trial).
+        # PROVISIONAL (implementation, 2026-10-21): the command's own time, where it is slower
+        # than the decode, shows in the decodes' ratios from the first segment on.
+        size = (out_width, out_height, source.frame_rate)
+        return open_writer(args.format, path, *size, tags)
+
+    calibrating = (args, source, shots, plan, target, open_scratch, directory)
+    numz = {"numz_padding": numz_padding, "numz_draw": numz_draw, "numz_tail": numz_tail}
     if args.plan is not None:
         # No upscale: --plan prints the plan "without running the job" (DESIGN.md, Memory
-        # planner), the models not loaded.
-        return _write_plan(args, source, found_cuts, len(shots), model_files)
-    started = time.monotonic()
-    import torch  # loaded since the job's identity: named here for the refusals below
+        # planner). Its cut list first, which the first pass paid for; then the time estimate,
+        # for what is left to run, which loads the models for its calibration ("It fetches and
+        # checks the model files as a run does, and loads them, for the calibration").
+        status = _write_plan(args, source, found_cuts, len(shots), model_files)
+        if not status and not remaining and final is not None:
+            # Every segment made: the assembly alone is left, ffmpeg's work, no model loaded.
+            _say_assembly_left(record, final)
+        if status or not remaining:
+            return status
+        loaded = _load(model_files, identity.device, plan, reserve, _first_kept(kept_first))
+        if loaded is None:
+            return 1
+        models, loading = loaded
+        planned_kept = "no time estimated; the plan and its cut list are kept"
+        calibrated = _calibrated(models, *calibrating, planned_kept, **numz)
+        if calibrated is None:
+            return 1
+        left = job_units(units, plan, target, numz_padding, start="decode")
+        levels = None
+        if planned(record.content()):
+            levels = {
+                level: _level_units(shots, segments, runs, plan, target, numz_padding)
+                for level, runs in QUALITY.items()
+            }
+        rate = None if final is None else _disk_rate(final.parent)
+        assembly = None if rate is None else _assembly_estimate(record, rate)
+        _say_times(calibrated, left, args.quality, levels, loading, assembly)
+        if prior is None or planned(record.content()):
+            # A new job's plan, or one planned again, written before the models loaded: again,
+            # with its timings, for information (DESIGN.md, Memory planner: "the timings,
+            # recorded for information"); a job that has made units keeps its manifest as it is.
+            assert record.plan is not None, "a plan made"
+            record.plan["timings"] = calibrated.clock.record()
+            record.write()
+        return 0
+    loaded = _load(model_files, identity.device, plan, reserve, _first_kept(kept_first))
+    if loaded is None:
+        return 1
+    models, loading = loaded
+    import torch  # loaded with the models: named here for the refusals below
 
-    # Where the driver spills, torch is held again, to the memory free now that the first pass
-    # and the plan are made, and refuses from here on what passes it; a check may take from that
-    # limit what the plan's reserve leaves (memory.check).
-    try:
-        memory.hold(identity.device, reserve=reserve)
-    except torch.OutOfMemoryError as error:
-        logger.error(
-            "%s, before the models loaded: nothing was run%s",
-            _refused(error),
-            _first_kept(kept_first),
-        )
+    from seedvr2x.runtime.timing import Progress
+
+    # The time estimates (DESIGN.md, Memory planner): every run calibrates, so that each unit's
+    # line gives the job's time left from the first unit (decided on 2026-10-21). A one-file
+    # output's assembly, the job's last unit, at the rate its disk writes at. The calibration
+    # leaves the models in the decode's phase (calibration.calibrate), where the job's units
+    # start from.
+    rate = None if final is None else _disk_rate(final.parent)
+    left = job_units(units, plan, target, numz_padding, start="decode")
+    made = "nothing of the job made" + _first_kept(kept_first)
+    if kept_first is None and prior is not None:
+        made = _kept(record, len(segments))
+    calibrated = _calibrated(models, *calibrating, made, **numz)
+    if calibrated is None:
         return 1
-    try:
-        models = load_models(
-            model_files.dit.path, model_files.vae.path, identity.device, model_files.hashes, plan
-        )
-    except (ModelError, HostMemoryError) as error:
-        # A model file replaced since its check, during the first pass: refused as the check
-        # refuses it, or as changed since its hash. Or a host that can't hold the pinned copies
-        # of the weights the plan has away from the GPU: refused before the run, naming the RAM
-        # they take (DESIGN.md, BlockSwap, rewritten).
-        logger.error("%s%s", error, _first_kept(kept_first))
-        return 1
-    except torch.OutOfMemoryError as error:
-        # The weights the plan has on the GPU don't fit there after all: other programs hold
-        # the card's memory, or the plan is wrong.
-        logger.error(
-            "%s, as the models loaded: nothing was run%s", _refused(error), _first_kept(kept_first)
-        )
-        return 1
-    logger.info(
-        "models loaded in %.1f s, attention: %s", time.monotonic() - started, models.attention
-    )
+    clock = calibrated.clock
+    assembly = None if rate is None else _assembly_estimate(record, rate)
+    _say_times(calibrated, left, args.quality, None, loading, assembly, planning=False)
+    # Recorded with the plan, for information, kept current as units are made.
+    assert record.plan is not None, "a plan made"
+    record.plan["timings"] = clock.record()
+    extra = None if rate is None else lambda: _assembly_estimate(record, rate)
+    progress = Progress(clock, left, stopping.now, extra)
+
     if args.dump_frames is not None:
         args.dump_frames.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-
-    tags = Tags.of(stream, source.conversion.matrix_tag)
 
     def open_segment(path: Path) -> Writer:
         size = (out_width, out_height, source.frame_rate)
@@ -1128,6 +1173,7 @@ def _run(args: argparse.Namespace) -> int:
                     numz_padding=numz_padding,
                     numz_draw=numz_draw,
                     numz_tail=numz_tail,
+                    progress=progress,
                     dump=None if args.dump_frames is None else dumped,
                 )
         except CopyError as error:
@@ -1199,6 +1245,71 @@ def _run(args: argparse.Namespace) -> int:
         # it.
         return _assemble(final, record, paths, asked=stop.asked)
     return 0
+
+
+def _disk_rate(directory: Path) -> float | None:
+    """The rate the disk of a one-file output writes at, for its assembly's estimate
+    (timing.disk_rate), said at debug; None, said, where the probe can't write there."""
+    from seedvr2x.runtime.timing import PROBE, disk_rate
+
+    try:
+        rate = disk_rate(directory)
+    except OSError as error:
+        logger.warning(
+            "%s: its disk's rate not measured (%s): the assembly isn't estimated",
+            directory,
+            error,
+        )
+        return None
+    logger.debug(
+        "%s: its disk writes at %.0f MB/s (%d MiB written and synced)",
+        directory,
+        rate / 1e6,
+        PROBE // 1024**2,
+    )
+    return rate
+
+
+def _say_assembly_left(record: "Manifest", final: Path) -> None:
+    """--plan's time for a one-file output whose segments are all made: its assembly alone, at
+    the rate its disk writes at."""
+    from seedvr2x.runtime.timing import spoken
+
+    rate = _disk_rate(final.parent)
+    if rate is None:
+        return
+    seconds = _assembly_estimate(record, rate)
+    logger.info(
+        "time: the assembly alone is left, about %s at the rate its disk writes at", spoken(seconds)
+    )
+
+
+def _masters(record: "Manifest") -> int:
+    """The bytes a job's masters take, those finished as recorded, the others by the finished
+    ones' bytes a frame, or at most at their raw size (RAW_BYTES) before any is: a segment
+    command's encoder's compression is its own, a master's FFV1 the content's."""
+    sizes = [
+        (segment.frames, size)
+        for segment, size, done in zip(record.segments, record.sizes, record.finished, strict=True)
+        if done and size is not None
+    ]
+    written = sum(size for _, size in sizes)
+    frames = sum(segment.frames for segment in record.segments)
+    left = frames - sum(count for count, _ in sizes)
+    if sizes and sum(count for count, _ in sizes):
+        per_frame = written / sum(count for count, _ in sizes)
+    else:
+        width, height = record.output["size"]
+        per_frame = RAW_BYTES.get(str(record.output["format"]), 6.0) * width * height
+    return round(written + per_frame * left)
+
+
+def _assembly_estimate(record: "Manifest", rate: float) -> float:
+    """A one-file output's assembly's estimate, in seconds (timing.assembly_seconds): its masters'
+    bytes (_masters), its source's, at the rate its disk writes at."""
+    from seedvr2x.runtime.timing import assembly_seconds
+
+    return assembly_seconds(rate, _masters(record), record.source.path.stat().st_size)
 
 
 def _out_of_memory() -> tuple[type[BaseException], ...]:
@@ -1356,6 +1467,216 @@ def _kept(record: "Manifest", segments: int, resumes: bool = True) -> str:
         " kept"
     )
     return f"{kept}: the same command resumes" if resumes else kept
+
+
+def _load(
+    model_files: "ModelFiles",
+    device: "torch.device",
+    plan: "Plan",
+    reserve: int | None = None,
+    kept: str = "",
+) -> "tuple[Models, float] | None":
+    """The job's models loaded, as plan places them, and the seconds that took; None once a
+    refusal is logged, nothing run, `kept` said after it (_first_kept): the memory the driver
+    spills held first, from the memory free now that the first pass and the plan are made, the
+    plan's `reserve` (memory.hold)."""
+    import torch  # loaded since the job's identity: named here for the refusals below
+
+    from seedvr2x.runtime import memory
+    from seedvr2x.runtime.blockswap import HostMemoryError
+    from seedvr2x.runtime.model import load_models
+    from seedvr2x.runtime.weights import ModelError
+
+    started = time.monotonic()
+    # Where the driver spills, torch is held again, to the memory free now that the first pass
+    # and the plan are made, and refuses from here on what passes it; a check may take from that
+    # limit what the plan's reserve leaves (memory.check).
+    try:
+        memory.hold(device, reserve=reserve)
+    except torch.OutOfMemoryError as error:
+        logger.error("%s, before the models loaded: nothing was run%s", _refused(error), kept)
+        return None
+    try:
+        models = load_models(
+            model_files.dit.path, model_files.vae.path, device, model_files.hashes, plan
+        )
+    except (ModelError, HostMemoryError) as error:
+        # A model file replaced since its check, during the first pass: refused as the check
+        # refuses it, or as changed since its hash. Or a host that can't hold the pinned copies
+        # of the weights the plan has away from the GPU: refused before the run, naming the RAM
+        # they take (DESIGN.md, BlockSwap, rewritten).
+        logger.error("%s%s", error, kept)
+        return None
+    except torch.OutOfMemoryError as error:
+        # The weights the plan has on the GPU don't fit there after all: other programs hold
+        # the card's memory, or the plan is wrong.
+        logger.error("%s, as the models loaded: nothing was run%s", _refused(error), kept)
+        return None
+    seconds = time.monotonic() - started
+    logger.info("models loaded in %.1f s, attention: %s", seconds, models.attention)
+    return models, seconds
+
+
+def _calibrated(
+    models: "Models",
+    args: argparse.Namespace,
+    source: "Source",
+    shots: "Sequence[Shot]",
+    plan: "Plan",
+    target: tuple[int, int],
+    writer: "Callable[[Path], Writer]",
+    directory: Path,
+    kept: str,
+    **numz: bool,
+) -> "Calibrated | None":
+    """The job's time estimates calibrated (calibration.calibrate), through its own passes: the
+    source's size, its colour correction, its writer (`writer`, the job's kind of output at a
+    path), its tiles, its longest window and run, the source's first frames read through the job's
+    reader, its files on the disk of `directory`, the job's directory, beside it, not in it (a
+    kill would leave them there, where a resume refuses what its manifest doesn't name); None once
+    a failure is logged, with what is kept (`kept`). SIGTERM unwinds it, as it does the model
+    files' fetch: its scratch removed, its ffmpeg processes stopped."""
+    import numpy as np
+    import numpy.typing as npt
+    import torch
+
+    from seedvr2x.runtime.calibration import FIRST, FRAMES, calibrate
+    from seedvr2x.runtime.job import shot_runs
+    from seedvr2x.runtime.shot import NonFinite, shot_layout
+
+    runs = [run for shot in shots for run in shot_runs(shot, QUALITY[args.quality])]
+    layouts = [shot_layout(run.frames, plan.window) for run in runs]
+    longest = max(end - start for layout in layouts for start, end in layout)
+    stream = source.stream
+
+    # The source's frames from its first, as the run reads a shot's: through the job's reader,
+    # each frame checked against the frame index, one reader read on from encode to encode, as
+    # the run's reads on from shot to shot, its start paid by the calibration's warm-up (a
+    # review's finding: a reader opened for each encode put ffmpeg's start in every encode's
+    # constant); opened again at the first frame where a source shorter than the calibration's
+    # encodes ends.
+    reading: list[Any] = []  # the reader open, and the frames it has given
+    given = 0
+
+    def frames(count: int) -> npt.NDArray[np.uint16]:
+        nonlocal given
+        parts: list[npt.NDArray[np.uint16]] = []
+        while count:
+            if not reading or given == source.frames:
+                close()
+                reading.append(source.reader(0))
+                given = 0
+            part = reading[0].read(min(count, source.frames - given))
+            parts.append(part)
+            given += part.shape[0]
+            count -= part.shape[0]
+        return np.concatenate(parts)
+
+    def close() -> None:
+        if reading:
+            reading.pop().stop()
+
+    try:
+        with terminable():
+            return calibrate(
+                *(models, target, plan, longest),
+                # The encode's second length no longer than the job's longest run, which the plan
+                # was made for, nor than the source's frames left after the first two encodes: a
+                # reader opened again from the first frame inside that encode would put ffmpeg's
+                # start in its time, and in the encode's rate (a review's finding).
+                most=min(max(run.frames for run in runs), source.frames - FRAMES - FIRST),
+                source=(stream.height, stream.width),
+                frames=frames,
+                split=args.color_correction == "split",
+                writer=writer,
+                directory=directory.parent,
+                **numz,
+            )
+    except (MediaError, NonFinite) as error:
+        logger.error("%s, in the time estimates' calibration: %s", error, kept)
+    except torch.OutOfMemoryError as error:
+        logger.error("%s, in the time estimates' calibration: %s", _refused(error), kept)
+    finally:
+        close()
+    return None
+
+
+def _level_units(
+    shots: "Sequence[Shot]",
+    segments: "Sequence[OutputSegment]",
+    runs: int,
+    plan: "Plan",
+    target: tuple[int, int],
+    numz_padding: bool,
+) -> "list[Unit]":
+    """The units of a job of shots and segments with nothing made, `runs` runs a shot
+    (timing.units_of): its --quality level's."""
+    from seedvr2x.runtime.timing import tokens, units_of
+
+    per_latent = tokens(target, 1, numz_padding=numz_padding)
+    return units_of(shots, segments, runs, plan.window, per_latent)
+
+
+def _say_times(
+    calibrated: "Calibrated",
+    units: "Sequence[Unit]",
+    quality: str,
+    levels: "dict[str, list[Unit]] | None",
+    loading: float,
+    assembly: float | None = None,
+    *,
+    planning: bool = True,
+) -> None:
+    """Say the time of the job's units left by a clock just calibrated (DESIGN.md, Memory planner:
+    "the time per phase, the total, and the longest unit, which is how early --until may stop"),
+    with each --quality level's where nothing is made yet (levels), a one-file output's assembly
+    (`assembly`, seconds), and what the estimate cost: the models' load (`loading`, seconds) and
+    the calibration."""
+    from seedvr2x.runtime.timing import job_times, spoken
+
+    clock = calibrated.clock
+    times = job_times(clock, units)
+    assert times is not None, "a calibrated clock estimates every kind of unit"
+    counts = {kind: sum(unit.phase == kind for unit in units) for kind in ("encode", "window")}
+    decodes = sum(unit.phase == "decode" for unit in units)
+    logger.info(
+        "time: about %s on this GPU as it runs now: %s for %s, %s for %s, %s for the decode and"
+        " write of %s",
+        spoken(times.total),
+        spoken(times.encode),
+        _plural(counts["encode"], "encode"),
+        spoken(times.windows),
+        _plural(counts["window"], "window"),
+        spoken(times.decode),
+        _plural(decodes, "segment"),
+    )
+    if assembly is not None:
+        logger.info(
+            "time: then about %s for the assembly, at the rate its disk writes at, its masters"
+            " counted at most at their raw size until one is written",
+            spoken(assembly),
+        )
+    logger.info(
+        "time: the longest unit, %s, about %s: --until may stop up to about 1.15 times that"
+        " before its time",
+        times.unit,
+        spoken(times.longest),
+    )
+    if levels is not None:
+        said: list[str] = []
+        for level, listed in levels.items():
+            total = job_times(clock, listed)
+            assert total is not None
+            mark = " (this job's)" if level == quality else ""
+            said.append(f"{level} about {spoken(total.total)}{mark}")
+        logger.info("time at each --quality: %s", ", ".join(said))
+    again = ", which the run pays again before its first unit" if planning else ""
+    logger.info(
+        "time: estimated from a calibration of %s, the models loaded in %s%s",
+        spoken(calibrated.seconds),
+        spoken(loading),
+        again,
+    )
 
 
 def _final(output: Path) -> Path | None:

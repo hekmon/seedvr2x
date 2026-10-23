@@ -750,7 +750,12 @@ def test_tiled_bit_identical(
     log = bit_identical(
         tmp_path, job.source, job.resolution, models, job.reference, *pins, "-v", numz_padding=True
     )
-    said = [line.split("tiling: ", 1)[1] for line in log.splitlines() if "tiling: tiled " in line]
+    # The job's own passes: those of its time estimates' calibration come before, said too
+    # (calibration.calibrate, which every run makes: DESIGN.md, Memory planner, Time estimates).
+    job_lines = log.split("time estimates calibrated in", 1)[-1]
+    said = [
+        line.split("tiling: ", 1)[1] for line in job_lines.splitlines() if "tiling: tiled " in line
+    ]
     # At 1080, or at the card's own size where its cases.json gives one, with what each tiled
     # pass's line says there (case).
     grids = list(job.grids) if job.grids is not None else grids

@@ -108,7 +108,7 @@ sys.path.insert(0, tests)
 from test_colour import load_study
 import torch
 from seedvr2x import cli
-from seedvr2x.runtime import colour, shot
+from seedvr2x.runtime import calibration, colour, shot
 
 study = load_study(Path(scratch))
 assert study is not None
@@ -161,6 +161,18 @@ def slices_kept(*arguments, **options):
         yield kept(slices)
 
 
+def calibrated(*arguments, **options):
+    # The time estimates' calibration, which every run makes before its first unit (DESIGN.md,
+    # Memory planner, Time estimates), decodes and corrects slices of its own: given up, so that
+    # the test holds the job's.
+    made = calibrate(*arguments, **options)
+    decoded.clear()
+    slices.clear()
+    return made
+
+
+calibrate = calibration.calibrate
+calibration.calibrate = calibrated
 colour.split = held
 shot._slices = slices_kept
 status = cli.main(argv)

@@ -3508,7 +3508,9 @@ def test_said() -> None:
         " tiles; in system memory up to an allowance of 3.57 GiB, which holds every shot's",
         "plan: predicted peaks: encode 20.55 GiB, DiT 21.82 GiB, decode 20.17 GiB; the DiT's phase"
         " bounds the plan, 0.14 GiB under the budget",
-        "plan: time: no estimate yet",
+        "plan: time: measured, not guessed: a calibration of the job's own steps once the models"
+        " are loaded, its cost said then; it gives the job's time and each unit's time left and"
+        " end; --until HH:MM stops before a unit that wouldn't finish by then",
         "plan: pinned: nothing; --window, --swap-blocks, --encode-tile and --decode-tile each fix"
         " a choice",
     ]
@@ -3541,7 +3543,9 @@ def test_said() -> None:
         " tiles; in system memory up to an allowance of 14.16 GiB, which holds every shot's",
         "plan: predicted peaks: encode 91.54 GiB, DiT 84.72 GiB, decode 79.22 GiB; the encode"
         " bounds the plan, its room counted, 0.95 GiB under the budget",
-        "plan: time: no estimate yet",
+        "plan: time: measured, not guessed: a calibration of the job's own steps once the models"
+        " are loaded, its cost said then; it gives the job's time and each unit's time left and"
+        " end; --until HH:MM stops before a unit that wouldn't finish by then",
         "plan: pinned: --window 19, --swap-blocks 0, --encode-tile 0, --decode-tile 2048, taken"
         " exactly",
     ]

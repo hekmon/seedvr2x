@@ -414,11 +414,11 @@ def test_plan_says_the_runs(
     # --plan says the runs before anything runs, in its line on the quality level, which every
     # level has, the default's too: the runs counted by what each shot has (JOB's shots of 3, 1
     # and 21 frames have 3, 1 and 4 runs at 4 a shot, 2, 1 and 2 at 2). The other lines are the
-    # one run's, the plan holding for every run. No model loads.
+    # one run's, the plan holding for every run. The models load, for the time estimates'
+    # calibration (DESIGN.md, Memory planner), after the plan's lines.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
-    with monkeypatch.context() as patch:
-        patch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    with monkeypatch.context():
         assert upscale(tmp_path, source_path, "one", *JOB, "--plan", str(tmp_path / "one.txt")) == 0
         base = plan_lines(caplog)
         caplog.clear()
@@ -450,7 +450,6 @@ def test_plan_counts_a_run(
     # One run in all: a one-frame source has run 0 only at 4 a shot.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
     cuts = listed(tmp_path, "cuts.txt")
     options = ("--cuts", cuts, "--quality", "maximum", "--plan", str(tmp_path / "plan.txt"))
     assert upscale(tmp_path, source(tmp_path / "in.mkv", 1), "out", *options) == 0
@@ -630,6 +629,7 @@ def test_a_disk_short_of_the_kept_frames_refuses_the_job(
     options = ("--cuts", cuts, "--quality", "maximum")
     with monkeypatch.context() as patch:
         short_disk(patch, 9 * KEPT_BYTES - 1)
+        loads = model.load_models
         patch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
         assert upscale(tmp_path, original, "out", *options) == 1
         said = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR][-1]
@@ -645,7 +645,8 @@ def test_a_disk_short_of_the_kept_frames_refuses_the_job(
         )
         assert not (out / "resume").exists()
         assert sorted(path.name for path in out.iterdir()) == ["frame_index.bin", "manifest.json"]
-        # --plan says it, and plans.
+        # --plan says it, and plans, the models loaded for the time estimates' calibration.
+        patch.setattr(model, "load_models", loads)
         caplog.clear()
         plan = str(tmp_path / "plan.txt")
         assert upscale(tmp_path, original, "out", *options, "--plan", plan) == 0

@@ -42,7 +42,7 @@ from test_rate import mechanism7, retagged, strayed
 from seedvr2x import cli
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.runtime import planner, pull, weights
+from seedvr2x.runtime import calibration, planner, pull, timing, weights
 from seedvr2x.runtime.detector import BATCH, Detector
 from seedvr2x.runtime.job import Shot, output_size, padded_size
 from seedvr2x.runtime.plan import Plan, Tiles
@@ -260,6 +260,16 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(model, "decode_stream", stand_in_decode_stream)
     patch(run, "encode_shot", stand_in_encode)
     patch(run, "sample_windows", stand_in_windows)
+    # The time estimates' calibration (--plan, --until) on steps that take no time: its own steps
+    # would be the stand-in's, made beside the job's (tests/test_timing.py holds it, and
+    # tests/test_until.py its runs through the command line).
+    patch(calibration, "calibrate", stand_in_calibrate)
+
+
+def stand_in_calibrate(*arguments: object, **options: object) -> calibration.Calibrated:
+    """A calibration whose every kind and term takes no time (timing.Model(0, 0))."""
+    models = dict.fromkeys((*timing.KINDS, *timing.TERMS), timing.Model(0.0, 0.0))
+    return calibration.Calibrated(timing.Clock(models), 0.0)
 
 
 @pytest.fixture
@@ -742,6 +752,14 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
 JOB_SHOTS = [Shot(0, 3), Shot(3, 4), Shot(4, 25)]
 
 
+def untimed(recorded: dict[str, Any]) -> dict[str, Any]:
+    """A plan's record without the timings the run's calibration adds, for information (every run
+    calibrates: DESIGN.md, Memory planner, Time estimates), which it holds for every kind."""
+    if "timings" in recorded:
+        assert sorted(recorded["timings"]) == sorted([*timing.KINDS, *timing.TERMS])
+    return {key: value for key, value in recorded.items() if key != "timings"}
+
+
 def plan_record(plan: Plan, peaks: Peaks) -> dict[str, Any]:
     """A plan as a manifest records it: its shape, and under memory where the weights are with
     what it is predicted to take (cli._run)."""
@@ -792,7 +810,7 @@ def test_plan_recorded_and_phases_entered(
     # pinned, nothing tiled, swapped or moved; the 6-latent shot's two windows of 4 the longest.
     made = planner.plan(FREE, TARGET, JOB_SHOTS, Pins(window=5), HOST)
     assert made[0] == Plan(5)
-    assert content["plan"] == plan_record(*made)
+    assert untimed(content["plan"]) == plan_record(*made)
     assert content["plan"]["memory"] == {
         "swapped_blocks": 0,
         "resident_encode": None,
@@ -923,8 +941,8 @@ def test_swap_blocks_pin_places_the_weights(
     assert steps.calls == UNINTERRUPTED
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["plan"]["memory"]["swapped_blocks"] == 36
-    assert content["plan"] == plan_record(*made)
-    assert content["plan"] | {"memory": None} == Plan(5).record() | {"memory": None}
+    assert untimed(content["plan"]) == plan_record(*made)
+    assert untimed(content["plan"]) | {"memory": None} == Plan(5).record() | {"memory": None}
 
 
 def spilling_driver(monkeypatch: pytest.MonkeyPatch, card: int | None = None) -> list[float]:
@@ -1144,22 +1162,25 @@ def test_a_run_refused_for_its_model_files_asks_the_driver_nothing(
     assert not any(name in os.environ for name in memory.VARIABLES) and steps.calls == []
 
 
-def test_a_plan_on_a_driver_that_spills_holds_nothing(
+def test_a_plan_on_a_driver_that_spills_is_held_for_its_calibration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
     # --plan counts in the memory a run would: the same plan as the run's; torch is held for
-    # its first pass, as a run's is, and, loading no model, not again.
+    # its first pass, as a run's is, and again as it loads the models for the time estimates'
+    # calibration (DESIGN.md, Memory planner: --plan "loads them, for the calibration").
     from seedvr2x.runtime import memory
 
     caplog.set_level(logging.INFO, logger="seedvr2x")
     limits = spilling_driver(monkeypatch)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--plan", "plan.txt") == 0
-    assert limits == [(FREE - memory.HELD_BACK_UNREAD) / TOTAL] and steps.calls == []
-    assert "torch held to " not in caplog.text
+    assert limits == [(FREE - memory.HELD_BACK_UNREAD) / TOTAL] * 2 and steps.calls == []
+    assert "torch held to " in caplog.text
     planned_in = FREE - memory.HELD_BACK - memory.RESERVE
     reading = memory.Reading(FREE, None, planned_in, True, memory.HELD_BACK_UNREAD)
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    # And the timings the calibration gave, for information (resume.UNCOMPARED).
+    assert sorted(content["plan"].pop("timings")) == sorted([*timing.KINDS, *timing.TERMS])
     assert content["plan"] == plan_record(
         *planner.plan(reading, TARGET, JOB_SHOTS, Pins(window=5), HOST)
     )
@@ -1642,15 +1663,15 @@ def test_plan_said(
         " pieces of memory a pass asks for at once",
         "plan: predicted peaks: encode 18.11 GiB, DiT 15.91 GiB, decode 17.73 GiB; the encode"
         " bounds the plan, its room counted, 74.54 GiB under the budget",
-        "plan: time: no estimate yet",
+        "plan: time: measured, not guessed: a calibration of the job's own steps once the models"
+        " are loaded, its cost said then; it gives the job's time and each unit's time left and"
+        " end; --until HH:MM stops before a unit that wouldn't finish by then",
         "plan: pinned: --window 5, taken exactly",
     ]
     caplog.clear()
     plan = tmp_path / "plan.txt"
-    with monkeypatch.context() as patch:
-        from seedvr2x.runtime import model
-
-        patch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    with monkeypatch.context():
+        # The models load, for the time estimates' calibration (DESIGN.md, Memory planner).
         assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(plan)) == 0
         assert plan_lines(caplog) == said
         counts = next(line for line in caplog.messages if line.endswith(f"the cut list in {plan}"))
@@ -1920,7 +1941,9 @@ def test_resumed_keeps_its_cap(
     manifest = tmp_path / "out" / "manifest.json"
     started = json.loads(manifest.read_text())
     pins = Pins(swap_blocks=0)
-    assert started["plan"] == plan_record(*planner.plan(less, TARGET, JOB_SHOTS, pins, HOST))
+    assert untimed(started["plan"]) == plan_record(
+        *planner.plan(less, TARGET, JOB_SHOTS, pins, HOST)
+    )
     assert (started["plan"]["window"], started["plan"]["memory"]["vae_in_dit"]) == (5, False)
     layout = [[[0, 2]], [[0, 1]], [[0, 4], [2, 6]]]
     assert [shot["windows"] for shot in started["shots"]] == layout
@@ -1939,7 +1962,7 @@ def test_resumed_keeps_its_cap(
     assert steps.calls == ["encode 4", "window 4:0", "window 4:1"]
     content = json.loads(manifest.read_text())
     again = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST, recorded=Plan(5))
-    assert again[0] == Plan(5) and content["plan"] == plan_record(*again)
+    assert again[0] == Plan(5) and untimed(content["plan"]) == plan_record(*again)
     assert content["plan"]["memory"]["free"] == FREE != started["plan"]["memory"]["free"]
     assert content["plan"]["memory"]["vae_in_dit"] is True
     assert [shot["windows"] for shot in content["shots"]] == layout
@@ -1952,9 +1975,13 @@ def test_resumed_keeps_its_cap(
     content = json.loads(manifest.read_text())
     pins = Pins(swap_blocks=36)
     again = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST, recorded=Plan(5))
-    assert again[0] == Plan(5, swapped=36) and content["plan"] == plan_record(*again)
-    shape = {key: value for key, value in content["plan"].items() if key != "memory"}
-    assert shape == {key: value for key, value in started["plan"].items() if key != "memory"}
+    assert again[0] == Plan(5, swapped=36) and untimed(content["plan"]) == plan_record(*again)
+    shape = {
+        key: value for key, value in content["plan"].items() if key not in ("memory", "timings")
+    }
+    assert shape == {
+        key: value for key, value in started["plan"].items() if key not in ("memory", "timings")
+    }
     assert [shot["windows"] for shot in content["shots"]] == layout
     assert all(segment["finished"] for segment in content["segments"])
     out = tmp_path / "out"
@@ -1978,7 +2005,9 @@ def test_resumed_with_other_memory(
     stopped(tmp_path, source_path, "out", *options)
     manifest = tmp_path / "out" / "manifest.json"
     started = json.loads(manifest.read_text())
-    assert started["plan"] == plan_record(*planner.plan(FREE, TARGET, JOB_SHOTS, Pins(), HOST))
+    assert untimed(started["plan"]) == plan_record(
+        *planner.plan(FREE, TARGET, JOB_SHOTS, Pins(), HOST)
+    )
     assert (started["plan"]["window"], started["plan"]["memory"]["swapped_blocks"]) == (6, 0)
     # The memory that holds the 6-latent window with 20 blocks swapped and the VAE's weights
     # away, and neither with 19 nor with the VAE there.
@@ -1996,9 +2025,13 @@ def test_resumed_with_other_memory(
     content = json.loads(manifest.read_text())
     again = planner.plan(less, TARGET, JOB_SHOTS, Pins(), HOST, recorded=Plan(6))
     assert (again[0].window, again[0].swapped, again[0].vae_in_dit) == (6, 20, False)
-    assert content["plan"] == plan_record(*again)
-    shape = {key: value for key, value in content["plan"].items() if key != "memory"}
-    assert shape == {key: value for key, value in started["plan"].items() if key != "memory"}
+    assert untimed(content["plan"]) == plan_record(*again)
+    shape = {
+        key: value for key, value in content["plan"].items() if key not in ("memory", "timings")
+    }
+    assert shape == {
+        key: value for key, value in started["plan"].items() if key not in ("memory", "timings")
+    }
     assert content["plan"]["memory"]["free"] == less != started["plan"]["memory"]["free"]
     assert [shot["windows"] for shot in content["shots"]] == [[[0, 2]], [[0, 1]], [[0, 6]]]
     assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
@@ -2025,7 +2058,9 @@ def test_resumed_on_another_attention_backend(
     stopped(tmp_path, source_path, "out", *options)
     manifest = tmp_path / "out" / "manifest.json"
     started = json.loads(manifest.read_text())
-    assert started["plan"] == plan_record(*planner.plan(exact, TARGET, JOB_SHOTS, Pins(), HOST))
+    assert untimed(started["plan"]) == plan_record(
+        *planner.plan(exact, TARGET, JOB_SHOTS, Pins(), HOST)
+    )
     memory = started["plan"]["memory"]
     assert (memory["attention"], memory["swapped_blocks"], memory["vae_in_dit"]) == (
         "flash_attn_2",
@@ -2039,10 +2074,14 @@ def test_resumed_on_another_attention_backend(
     content = json.loads(manifest.read_text())
     again = planner.plan(exact, TARGET, JOB_SHOTS, Pins(), HOST, recorded=Plan(6), attention="sdpa")
     assert (again[0].window, again[0].swapped, again[0].vae_in_dit) == (6, 0, False)
-    assert content["plan"] == plan_record(*again)
+    assert untimed(content["plan"]) == plan_record(*again)
     assert content["plan"]["memory"]["attention"] == "sdpa"
-    shape = {key: value for key, value in content["plan"].items() if key != "memory"}
-    assert shape == {key: value for key, value in started["plan"].items() if key != "memory"}
+    shape = {
+        key: value for key, value in content["plan"].items() if key not in ("memory", "timings")
+    }
+    assert shape == {
+        key: value for key, value in started["plan"].items() if key not in ("memory", "timings")
+    }
     assert "plan: attention: PyTorch's SDPA, FlashAttention 2 not being installed" in caplog.text
     assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
 
@@ -2153,7 +2192,8 @@ def test_plan_without_its_record_planned_again(
         " recorded; 0 leftovers discarded"
     )
     content = json.loads(manifest.read_text())
-    assert content["plan"] == planned["plan"]
+    # But the timings --plan's calibration recorded, for information: the run calibrates none.
+    assert untimed(content["plan"]) == untimed(planned["plan"])
     assert steps.calls == UNINTERRUPTED
 
 
@@ -2249,12 +2289,12 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
             "seg_000001.mkv",
         ]
         recorded = json.loads((out / "manifest.json").read_text())["plan"]
-        assert recorded == plan_record(*made)
+        assert untimed(recorded) == plan_record(*made)
         assert (recorded["memory"]["scratch"], recorded["memory"]["scratch_allowance"]) == (
             kept,
             kept,
         )
-        assert recorded | {"memory": None} == TILED_PLAN | {"memory": None}
+        assert untimed(recorded) | {"memory": None} == TILED_PLAN | {"memory": None}
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(output)) == (
         ["out"] if output == "out" else ["one.mkv", "one.mkv.crc32"]
     )
@@ -4617,7 +4657,10 @@ def test_index_made_again_named_at_once(
     named = {"name": "frame_index.bin", "bytes": len(data)}
     assert written["input"]["index"] == named | {"sha256": hashlib.sha256(data).hexdigest()}
     assert written["environment"]["gpu"] != "another"
-    assert written == recorded | {"input": written["input"]}
+    assert written | {"plan": untimed(written["plan"])} == recorded | {
+        "input": written["input"],
+        "plan": untimed(recorded["plan"]),
+    }
     # The next run reads the record, its index as named: no first pass.
     otherwise[0] = False
     scans.clear()
@@ -6018,16 +6061,14 @@ def test_plan_then_run(
     # then the cuts and the possible ones, commented, in frame order, each with its probability
     # and time. The same command without --plan runs the plan, its first pass as recorded, never
     # run again.
-    from seedvr2x.runtime import model
     from seedvr2x.runtime.job import read_cuts
 
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     passes = first_passes(monkeypatch)
     plan = tmp_path / "plan.txt"
-    with monkeypatch.context() as patch:
-        patch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
-        assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
+    # The models load, for the time estimates' calibration (DESIGN.md, Memory planner).
+    assert upscale(tmp_path, source_path, "out", *CUT, "--plan", str(plan)) == 0
     assert len(passes) == 1 and len(StandInDetector.built) == 1 and scripted.calls == []
     out = tmp_path / "out"
     assert sorted(path.name for path in out.iterdir()) == ["frame_index.bin", "manifest.json"]
@@ -6264,7 +6305,6 @@ def test_one_file_plan_kept_in_its_work_directory(
     # playlists of its cuts and of its possible cuts beside it, and the job's plan left in the
     # work directory, its manifest and frame index, as in an output directory: no unit, no file,
     # no checksums; the models never loaded.
-    from seedvr2x.runtime import model
     from seedvr2x.runtime.job import read_cuts
 
     source_path = job(tmp_path, monkeypatch)
@@ -6273,7 +6313,7 @@ def test_one_file_plan_kept_in_its_work_directory(
     plan = tmp_path / "plan.txt"
     plan.write_text("an older plan")
     before = sorted(os.listdir(tmp_path))
-    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    # The models load, for the time estimates' calibration (DESIGN.md, Memory planner).
     assert upscale(tmp_path, source_path, "one.mkv", *SPLIT, "--plan", str(plan)) == 0
     made = ["one.mkv.work", "plan.txt.cuts.m3u8", "plan.txt.possible.m3u8"]
     assert sorted(os.listdir(tmp_path)) == sorted([*before, *made])
@@ -6327,6 +6367,14 @@ DETECTED = [
 ]
 
 
+def before_the_load(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
+    """--plan's log, level and message, before its models load for the time estimates'
+    calibration (DESIGN.md, Memory planner): its plan and cut list's lines, the time's after."""
+    said = [(r.levelname, r.getMessage()) for r in caplog.records]
+    loaded = [i for i, (_, message) in enumerate(said) if message.startswith("models loaded in")]
+    return said[: loaded[0]] if loaded else said
+
+
 def test_plan_writes_the_playlists_of_its_cuts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6351,7 +6399,9 @@ def test_plan_writes_the_playlists_of_its_cuts(
     assert cut_lines(plan) == PLANNED
     said = [record.getMessage() for record in caplog.records]
     beside = "beside the source, which it names by its file name alone: open it in VLC"
-    assert said[-3:] == [
+    # Then the time estimate's lines, its models loaded for it.
+    first = next(i for i, line in enumerate(said) if line.endswith(f"the cut list in {plan}"))
+    assert said[first : first + 3] == [
         f"3 cuts at 0.3 (4 shots), 2 possible cuts from 0.1 up to 0.3: the cut list in {plan}",
         f"{detected}: a playlist of the 3 detected cuts {PLAYLIST_SAID}; {beside}",
         f"{playlist}: a playlist of the 2 possible cuts {PLAYLIST_SAID}; {beside}",
@@ -6378,7 +6428,9 @@ def test_plan_writes_the_playlists_of_its_cuts(
         "in.mkv",
     ]
     move = "it names the source by its file name alone, in.mkv: move it beside the source, then"
-    assert [record.getMessage() for record in caplog.records][-2:] == [
+    said = [record.getMessage() for record in caplog.records]
+    first = next(i for i, line in enumerate(said) if line.startswith("plans/again.cuts.m3u8"))
+    assert said[first : first + 2] == [
         f"plans/again.cuts.m3u8: a playlist of the 2 detected cuts {PLAYLIST_SAID}; {move} open"
         " it in VLC",
         f"plans/again.possible.m3u8: a playlist of the 3 possible cuts {PLAYLIST_SAID}; {move}"
@@ -6395,7 +6447,10 @@ def test_plan_writes_the_playlists_of_its_cuts(
     assert playlist.read_text().splitlines() == [*PLAYLIST_HEADER, *PLAYLIST]
     assert len(detected.read_text().splitlines()) == len(DETECTED_HEADER) + 4 * 5
     left = "a playlist there is an earlier plan's, its entries not this plan's"
-    assert [(r.levelname, r.getMessage()) for r in caplog.records][-1] == (
+    # The plans own last word, before the time estimates lines.
+    assert [(r.levelname, r.getMessage()) for r in caplog.records if r.levelno > logging.INFO][
+        -1
+    ] == (
         "WARNING",
         f"{playlist}: left as it is: this plan has no possible cut, so no playlist of them; {left}",
     )
@@ -6404,7 +6459,7 @@ def test_plan_writes_the_playlists_of_its_cuts(
     assert upscale(tmp_path, source_path, "out", *options) == 0
     assert len(detected.read_text().splitlines()) == len(DETECTED_HEADER) + 4 * 5
     assert len(playlist.read_text().splitlines()) == len(PLAYLIST_HEADER) + 4 * 5
-    assert [(r.levelname, r.getMessage()) for r in caplog.records][-2:] == [
+    assert before_the_load(caplog)[-2:] == [
         (
             "WARNING",
             f"{detected}: left as it is: this plan has no detected cut, so no playlist of them;"

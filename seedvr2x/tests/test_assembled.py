@@ -543,15 +543,15 @@ def test_plan_kept_then_planned_again_then_run(
     # --plan FILE -o x.mkv leaves the job's plan in x.mkv.work, its manifest and frame index, no
     # unit and no file; another --cut-threshold plans it again from its record; the same command
     # without --plan then runs it, with no second first pass, and assembles the file.
-    from seedvr2x.runtime import detector, model
+    from seedvr2x.runtime import detector
 
     caplog.set_level(logging.INFO, logger="seedvr2x")
     monkeypatch.setattr(detector, "Detector", ScriptedDetector)
     source = job(tmp_path, monkeypatch)
     passes = first_passes(monkeypatch)
     final, work, plan = (tmp_path / name for name in ("x.mkv", "x.mkv.work", "plan.txt"))
-    with monkeypatch.context() as context:
-        context.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    with monkeypatch.context():
+        # The models load, for the time estimates' calibration (DESIGN.md, Memory planner).
         assert upscale(tmp_path, source, "x.mkv", *CUT, "--plan", str(plan)) == 0
         assert listing(work) == ["frame_index.bin", "manifest.json"]
         assert shots_of(work) == [(0, 5), (5, 15), (15, 22), (22, 25)]

@@ -1259,10 +1259,10 @@ def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) 
     """The plan's line of the --quality level (said), at every level, standard's too (DESIGN.md,
     Memory planner, Every choice of the plan is said): the runs a shot and in all, how a frame
     is taken, the GPU time against standard's one run, the memory one run's, the disk the frames
-    kept between a shot's runs take, and the levels that give or cost more. No time is estimated
-    yet (DESIGN.md, Memory planner, Time estimates: not built): the time is a multiple of one
-    run's, about runs_per_shot times, a later run being shorter by its first frame (DESIGN.md,
-    Several runs of a shot: "4x the GPU time")."""
+    kept between a shot's runs take, and the levels that give or cost more. The time here is a
+    multiple of one run's, about runs_per_shot times, a later run being shorter by its first frame
+    (DESIGN.md, Several runs of a shot: "4x the GPU time"): each level's time in seconds needs the
+    calibration, which comes after the plan's lines, the models loaded (cli._say_times)."""
     runs_per_shot = QUALITY[quality]
     if runs_per_shot == 1:
         return (
@@ -1319,7 +1319,8 @@ def said(
     the VAE is in the DiT's phase and what of the DiT stays in the VAE's; the system memory;
     each VAE pass, untiled or its tiles, their overlap and grid; the room a VAE pass is held to
     (VAE_ROOM); the scratch of the longest tiled shot; the predicted peaks and which bounds the
-    plan; the time, which no estimate gives yet; what was pinned. recorded: the plan of a job
+    plan; the time, estimated once the models are loaded, by the calibration every run makes
+    (DESIGN.md, Memory planner, Time estimates); what was pinned. recorded: the plan of a job
     resumed that has made units, whose window cap and tiles were kept from the job's record so
     that the output stays bit for bit (plan's `recorded`): their lines say so in place of the
     rule. A window the planner shortened for the host's memory, tiles it shrank for it, say what
@@ -1406,7 +1407,11 @@ def said(
         f"{'' if peaks.bound == 'dit' else ' its room counted,'}"
         f" {_gib(peaks.budget - peaks.need(peaks.bound))} GiB under the budget"
     )
-    lines.append("time: no estimate yet")
+    lines.append(
+        "time: measured, not guessed: a calibration of the job's own steps once the models are"
+        " loaded, its cost said then; it gives the job's time and each unit's time left and end;"
+        " --until HH:MM stops before a unit that wouldn't finish by then"
+    )
     options = (
         ("--window", pins.window),
         ("--swap-blocks", pins.swap_blocks),

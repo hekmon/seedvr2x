@@ -408,6 +408,12 @@ def sample_windows(
         yield _window(models, noise[s:e], latent[s:e])
 
 
+def draw(models: Models, latent: Tensor, seed: int, numz_draw: bool = False) -> Tensor:
+    """The noise of a shot's latent as sample_windows draws it (_drawn), on its own: for the time
+    estimates' calibration (runtime/calibration.py), which times it apart from the window."""
+    return _drawn(models, latent, seed, numz_draw)[0]
+
+
 @torch.no_grad()
 def _drawn(
     models: Models, latent: Tensor, seed: int, numz_draw: bool = False

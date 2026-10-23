@@ -12,6 +12,7 @@ import os
 import signal
 import time
 from collections.abc import Callable, Generator
+from datetime import datetime
 from types import FrameType, TracebackType
 from typing import Any, Self
 
@@ -85,6 +86,12 @@ def terminable() -> Generator[None]:
         yield
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+def now() -> datetime:
+    """The time it is, aware, in the local zone: what a job's end is said in (timing.Progress). The
+    wall clock's."""
+    return datetime.now().astimezone()
 
 
 def _terminated(number: int, frame: FrameType | None) -> None:

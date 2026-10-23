@@ -26,10 +26,11 @@ from seedvr2x.media.files import make_directories
 from seedvr2x.media.reader import Reader, listed
 from seedvr2x.media.source import Source
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer, quantise
-from seedvr2x.runtime import memory
+from seedvr2x.runtime import memory, timing
+from seedvr2x.runtime import stop as stopping
 from seedvr2x.runtime.job import KEPT_SAMPLE_BYTES, OutputSegment, Run, Shot, output_size, run_of
-from seedvr2x.runtime.model import Models
-from seedvr2x.runtime.plan import Plan, Tiles
+from seedvr2x.runtime.model import Models, synchronize
+from seedvr2x.runtime.plan import Phase, Plan, Tiles
 from seedvr2x.runtime.shot import (
     CopyError,
     Correction,
@@ -42,6 +43,7 @@ from seedvr2x.runtime.shot import (
 )
 from seedvr2x.runtime.stop import Stop
 from seedvr2x.runtime.tiling import ScratchError
+from seedvr2x.runtime.timing import ENTER, Clock, Key, Kind, Progress, run_name, tokens, units_of
 from seedvr2x.runtime.units import Units
 
 logger = logging.getLogger(__name__)
@@ -85,7 +87,7 @@ def run_job(
     numz_padding: bool = False,
     numz_draw: bool = False,
     numz_tail: bool = False,
-    clock: object | None = None,
+    progress: Progress | None = None,
     dump: Callable[[int, npt.NDArray[np.float32]], None] | None = None,
 ) -> None:
     """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
@@ -128,10 +130,14 @@ def run_job(
     device, as numz draws it (shot.sample_windows). So is numz_tail (cli.NUMZ_TAIL): each shot's
     end padded as numz pads it, mirrored, not repeated (shot.pad_4n1).
 
-    clock is --until's, with the time estimates each unit's cost comes from (_begin; DESIGN.md,
-    Pause and resume, Stopping): not built yet, None."""
-    if clock is not None:
-        raise NotImplementedError("--until isn't built yet")
+    progress holds the job's units left and the clock that says what they take (runtime/timing.py):
+    each unit's estimate is held against --until's time before it begins (_begin; DESIGN.md,
+    Pause and resume, Stopping), each part's time given to the clock once made, and each unit's
+    line says the job's time left and its end. None: a clock of the run's own, which nothing
+    calibrated and which takes its first units' times (DESIGN.md, Memory planner, Time
+    estimates), over the units job_units lists."""
+    if progress is None:
+        progress = Progress(Clock(), job_units(units, plan, target, numz_padding), stopping.now)
     stream = source.stream
     copies = Copies(stream.width, stream.height, source.frame_rate) if split else None
     groups = [
@@ -148,24 +154,122 @@ def run_job(
             sample = (models, inputs, shots, target, seed, plan, units, stop, copies)
             for index in group:
                 for run in units.manifest.shot_runs(index):
-                    _sample(run, *sample, numz_padding, numz_draw, numz_tail)
-            _begin(stop, f"segment {segment + 1}/{len(segments)}'s decode and write", None)
+                    _sample(run, *sample, numz_padding, numz_draw, numz_tail, progress)
+            key = ("decode", segment)
+            unit = f"segment {segment + 1}/{len(segments)}'s decode and write"
+            _begin(stop, unit, progress.cost(key))
+            decoding = (models, shots)
             for index in group:
                 runs = units.manifest.shot_runs(index)
                 if len(runs) == 1:
-                    _decode(models, shots, runs[0], target, plan, units, write, copies)
+                    _decode(*decoding, runs[0], target, plan, units, write, copies, progress, key)
                 else:
-                    _decode_runs(models, shots, index, target, plan, units, write, copies, dump)
+                    _decode_runs(
+                        *(*decoding, index, target, plan, units, write, copies, dump),
+                        progress=progress,
+                        key=key,
+                    )
+
+
+def job_units(
+    units: Units,
+    plan: Plan,
+    target: tuple[int, int],
+    numz_padding: bool = False,
+    *,
+    start: Phase | None = None,
+) -> list["timing.Unit"]:
+    """The units the job recorded by units.manifest has left, in the order run_job makes them
+    (timing.units_of), its windows capped as plan says, for frames resized to target, the
+    models in phase `start` before the first (None: unknown). numz_padding as run_job takes it:
+    numz's padded size, its windows' tokens."""
+    manifest = units.manifest
+    return units_of(
+        *(manifest.shots, manifest.segments, manifest.runs_per_shot, plan.window),
+        tokens(target, 1, numz_padding=numz_padding),
+        encoded=manifest.encoded,
+        windows_done=manifest.windows_done,
+        finished=manifest.finished,
+        start=start,
+    )
 
 
 def _begin(stop: Stop | None, unit: str, cost: float | None) -> None:
     """Before a unit: stop there if asked (Stop.check), else name it for a Ctrl-C's notice. cost
-    is the time the unit is expected to take, in seconds, None when nothing estimates it: for
-    --until, which stops before a unit that wouldn't finish in time (DESIGN.md, Pause and resume,
-    Stopping); not built yet, so not looked at."""
+    is the time the unit is expected to take, in seconds (runtime/timing.py), None when nothing
+    estimates it: for --until, which stops before a unit that wouldn't finish in time (DESIGN.md,
+    Pause and resume, Stopping); not built yet, so not looked at."""
     if stop is not None:
         stop.check()
         stop.unit = unit
+
+
+def _made(
+    progress: Progress,
+    key: Key,
+    kind: Kind,
+    size: int,
+    started: float,
+    unit: str,
+    counted: bool = True,
+    *,
+    entering: float = 0.0,
+    term: float = 0.0,
+    drawn: int | None = None,
+) -> str:
+    """A unit's part made, `size` frames encoded or decoded, or a window of `size` tokens: its
+    time since `started` given to the clock (Progress.made), which corrects its kind's model by
+    it, and said beside the estimate the clock had for it, to the millisecond, at debug, the
+    figures milestone 3's check of the estimates reads. Returns the job's time
+    left and its end, in plain words, for the unit's line (Progress.said). Not `counted`: the
+    time said, not given to the clock (a resumed run's first seek, _sample).
+
+    Its terms are left out of its kind's time (DESIGN.md, Memory planner, Time estimates): the
+    change of phase it opened, `entering` seconds, given to the clock apart (_enter), estimated
+    at `term` seconds; for a run's first window, its run's noise draw, `drawn` tokens, at the
+    calibration's rate, which no unit corrects. The debug line gives the kind's time and
+    estimate, then the whole part's, its terms included."""
+    whole = time.monotonic() - started
+    seconds = whole - entering
+    drawing = 0.0
+    if drawn is not None:
+        drawing = progress.clock.estimate("draw", drawn) or 0.0
+        seconds -= drawing
+        progress.skipped(key, "draw", drawn)
+    # The part's own estimate, as the clock had it before this part corrects it.
+    cost = progress.clock.estimate(kind, size)
+    estimate = "nothing" if cost is None else f"{cost:.3f} s"
+    with_terms = "nothing" if cost is None else f"{cost + term + drawing:.3f} s"
+    said = f"{unit}: {seconds:.3f} s, estimated at {estimate}; with its terms {whole:.3f} s,"
+    said += f" estimated at {with_terms}"
+    if counted:
+        progress.made(key, kind, size, seconds)
+        logger.debug("%s", said)
+    else:
+        progress.skipped(key, kind, size)
+        logger.debug("%s, not counted: its reader sought its first frame", said)
+    return progress.said()
+
+
+def _enter(models: Models, phase: Phase, progress: Progress, key: Key) -> tuple[float, float]:
+    """Put the models in `phase` (Models.enter) before unit `key`: the seconds that took, and its
+    estimate. A change of phase is a term of the unit that opens it (DESIGN.md, Memory planner,
+    Time estimates), given to the clock here where the unit lists one (timing.units_of): its
+    copies waited for. A unit listing none pays its estimate of none, its enter's time, if any,
+    left out of its kind's (_made)."""
+    listed = progress.lists(key, ENTER[phase])
+    estimate = (progress.clock.estimate(ENTER[phase], 1) or 0.0) if listed else 0.0
+    begun = time.monotonic()
+    models.enter(phase)
+    if listed:
+        # Models.enter queues the weights' copies and returns (blockswap.py: "the caller needn't
+        # wait"): waited for, so that the term holds the transfer, which the unit's work would
+        # wait for anyway (a review's finding, 2026-10-21: else the next step absorbed it).
+        synchronize(models.device)
+    seconds = time.monotonic() - begun
+    if listed:
+        progress.made(key, ENTER[phase], 1, seconds)
+    return seconds, estimate
 
 
 def _sample(
@@ -182,19 +286,30 @@ def _sample(
     numz_padding: bool,
     numz_draw: bool,
     numz_tail: bool,
+    progress: Progress | None = None,
 ) -> None:
     """Run `index`'s encode and windows (units.manifest.runs), those not kept yet; with copies, the
     frames a shot's first run's encode reads copied, the copy and its checksums whole before the
     latent is recorded, so recorded with it, and the copy of a shot whose first run is encoded
     already made again if it or its checksums are missing. A later run makes no copy: its
     correction reads its shot's from its own first frame (shot.Correction's first).
-    numz_padding, numz_draw and numz_tail as run_job takes them.
+    numz_padding, numz_draw, numz_tail and progress as run_job takes them; without progress, a
+    clock of its own, which times nothing ahead.
+
+    The process's first encode whose reader seeks to its first frame through the frame index, a
+    resumed run's, isn't given to the clock (DESIGN.md, Memory planner, Time estimates: "a
+    resumed run's first seek isn't counted"): the seek is paid once a run, where its next encodes
+    read on. PROVISIONAL (implementation, 2026-10-21): not counted is read as neither in the
+    estimate nor among the ratios that correct it. A later run of a shot seeks too (Inputs), at
+    every shot: those are counted, a part of the job's every such encode.
 
     Between two of the shot's units the GPU holds nothing of the shot: its latent waits in
     system memory and each window's output in its file (units.Units), and its noise, drawn
     there, in system memory with the latent (shot.sample_windows). A unit's logged VRAM peak is
     then its own; the first window a run makes of a shot takes the noise's draw's time too, on
     the CPU."""
+    if progress is None:
+        progress = Progress(Clock(), [], stopping.now)
     run = units.manifest.runs[index]
     shot = Shot(run.start, run.end)  # the frames the run is fed
     name = _name(units, shots, index)
@@ -209,10 +324,14 @@ def _sample(
     if done == len(layout):
         return
     if latent is None:
-        _begin(stop, f"{name}'s encode", None)
+        key = ("encode", index)
+        _begin(stop, f"{name}'s encode", progress.cost(key))
         logger.debug("%s: encoding", name)
         started = _started(models)
+        # Its change of phase timed with it: the encode's model holds it (timing.ENTER).
         models.enter("encode")
+        counted = not (progress.first_encode and inputs.seeks(shot.start))
+        progress.first_encode = False
         read = inputs.reader(shot)
         tiles = plan.encode_tiles
         scratch = _scratch(units, index, tiles)
@@ -241,35 +360,53 @@ def _sample(
         # In system memory, as its encode gives it: the one the units keep or wrote, which the
         # windows are sampled from, as a resumed run samples them from the one read back.
         latent = units.save_latent(index, latent)
+        spent = _spent(models, started)
+        left = _made(
+            *(progress, key, "encode", shot.frames, started, f"{name}'s encode", counted),
+        )
         logger.info(
-            "%s, frames %d to %d (%d), seed %d: encoded in %s",
+            "%s, frames %d to %d (%d), seed %d: encoded in %s; %s",
             name,
             shot.start,
             shot.end - 1,
             shot.frames,
             run.seed(seed),
-            _spent(models, started),
+            spent,
+            left,
         )
     # The latent is in system memory, the one the units keep or read back, where the noise is
     # drawn from it, with the first window made here (shot.sample_windows).
     sampled = sample_windows(models, latent, layout, run.seed(seed), done, numz_draw=numz_draw)
+    per_latent = tokens(target, 1, numz_padding=numz_padding)
     for number in range(done, len(layout)):
-        _begin(stop, f"{name}'s window {number + 1}/{len(layout)}", None)
+        key = ("window", index, number)
+        unit = f"{name}'s window {number + 1}/{len(layout)}"
+        _begin(stop, unit, progress.cost(key))
         logger.debug("%s: window %d/%d", name, number + 1, len(layout))
         started = _started(models)
-        models.enter("dit")
+        entering, term = _enter(models, "dit", progress, key)
         output = next(sampled)
-        finite(output, f"{name}'s window {number + 1}/{len(layout)}")
+        finite(output, unit)
         units.save_window(index, number, output)
         start, end = layout[number]
+        spent = _spent(models, started)
+        # The run's first window this process makes draws the run's noise (sample_windows).
+        drawn = layout[-1][1] * per_latent if number == done else None
+        left = _made(
+            *(progress, key, "window", (end - start) * per_latent, started, unit),
+            entering=entering,
+            term=term,
+            drawn=drawn,
+        )
         logger.info(
-            "%s: window %d/%d, latents %d to %d, in %s",
+            "%s: window %d/%d, latents %d to %d, in %s; %s",
             name,
             number + 1,
             len(layout),
             start,
             end - 1,
-            _spent(models, started),
+            spent,
+            left,
         )
         # Kept in its file (units.Units.save_window): the output leaves the GPU before the next
         # window runs, so that a window's peak is its own.
@@ -279,16 +416,13 @@ def _sample(
 
 
 def _name(units: Units, shots: Sequence[Shot], index: int) -> str:
-    """Run `index`'s name in the logs: its shot's, "shot 3/12", with several runs a shot the run's
-    too, "shot 3/12, run 2/4 (from its frame 1)"."""
+    """Run `index`'s name in the logs (timing.run_name): its shot's, "shot 3/12", with several runs
+    a shot the run's too, "shot 3/12, run 2/4 (from its frame 1)"."""
     manifest = units.manifest
     shot = manifest.shot_of(index)
-    name = f"shot {shot + 1}/{len(shots)}"
-    if manifest.runs_per_shot == 1:
-        return name
     run, runs = manifest.runs[index], manifest.shot_runs(shot)
-    # Of the shot's own runs: a shot too short for some has fewer than runs_per_shot.
-    return f"{name}, run {runs.index(index) + 1}/{len(runs)} (from its frame {run.offset})"
+    per_shot = manifest.runs_per_shot
+    return run_name(shot, len(shots), runs.index(index), len(runs), run.offset, per_shot)
 
 
 def _copy_again(
@@ -331,14 +465,17 @@ def _decode(
     units: Units,
     write: Callable[[npt.NDArray[np.float32]], None],
     copies: Copies | None,
+    progress: Progress,
+    key: Key,
 ) -> None:
     """Run `index`'s decode, from its windows kept, its frames written as they come: with copies,
-    each slice corrected against its shot's input copy first, from the run's first frame."""
+    each slice corrected against its shot's input copy first, from the run's first frame. A part
+    of unit `key`, its segment's decode and write, its time given to progress (_made)."""
     run = units.manifest.runs[index]
     name = _name(units, shots, index)
     logger.debug("%s: decoding", name)
     started = _started(models)
-    models.enter("decode")
+    entering, term = _enter(models, "decode", progress, key)
     merged = merge_windows(units.take_windows(index), shot_layout(run.frames, plan.window))
     correction = None
     if copies is not None:
@@ -358,12 +495,19 @@ def _decode(
         units.copy_path(index).unlink(missing_ok=True)
         units.checksums_path(index).unlink(missing_ok=True)
         raise
+    spent = _spent(models, started)
+    left = _made(
+        *(progress, key, "decode", run.frames, started, f"{name}'s decode"),
+        entering=entering,
+        term=term,
+    )
     logger.info(
-        "%s: decoded in %s; RAM %.2f GiB, peak %.2f GiB",
+        "%s: decoded in %s; RAM %.2f GiB, peak %.2f GiB; %s",
         name,
-        _spent(models, started),
+        spent,
         _resident() / GIB,
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024 / GIB,
+        left,
     )
 
 
@@ -377,6 +521,9 @@ def _decode_runs(
     write: Write,
     copies: Copies | None,
     dump: Callable[[int, npt.NDArray[np.float32]], None] | None = None,
+    *,
+    progress: Progress,
+    key: Key,
 ) -> None:
     """Shot `index`'s decode with several runs (DESIGN.md, Several runs of a shot): its runs
     decoded in turn (_decode), each giving the frames job.run_of takes from it. Those of every run
@@ -384,7 +531,8 @@ def _decode_runs(
     them; the last run's are written as they come, each after the kept frames before it, and
     the kept frames after its last once its decode is done: the shot's frames in their order,
     each written once. So the file holds only the frames the earlier runs give, a frame each,
-    the shot's at the most. dump, as run_job takes it, is told each kept frame as it is decoded."""
+    the shot's at the most. dump, as run_job takes it, is told each kept frame as it is decoded.
+    Each run's decode is a part of unit `key`, its segment's decode and write (_decode)."""
     manifest = units.manifest
     runs = manifest.shot_runs(index)
     shot = shots[index]
@@ -397,9 +545,9 @@ def _decode_runs(
         for number in runs[:-1]:
             run = manifest.runs[number]
             given = _given(run, taken, store.put, shot.start, dump)
-            _decode(models, shots, number, target, plan, units, given, copies)
+            _decode(models, shots, number, target, plan, units, given, copies, progress, key)
         emit = _interleaved(manifest.runs[runs[-1]], taken, store, write)
-        _decode(models, shots, runs[-1], target, plan, units, emit, copies)
+        _decode(models, shots, runs[-1], target, plan, units, emit, copies, progress, key)
         store.flush(shot.frames, write)
 
 
@@ -612,6 +760,11 @@ class Inputs:
         self._reader: Reader | None = None
         self._position = 0  # the index of the next frame the reader gives
         self._otherwise: list[int] = []  # each reader's Reader.otherwise, once it is done
+
+    def seeks(self, start: int) -> bool:
+        """Whether the reader of frames from `start` on opens there through the frame index, a
+        seek (reader): no reader giving that frame next, and not the source's first."""
+        return start != 0 and (self._reader is None or self._position != start)
 
     def reader(self, shot: Shot) -> Callable[[int], npt.NDArray[np.float32]]:
         """read(n), giving the next n of shot's frames, (n, H, W, 3) float32 in [0, 1], from its
