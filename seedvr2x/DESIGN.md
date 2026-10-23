@@ -193,7 +193,15 @@ long one. Every line starts with the time of day, then its message (`23:05:12 pl
 warning adds `WARNING`, an error `ERROR`. The date, the milliseconds and the logger's name are
 for `--verbose`, which keeps the old format whole. Python's own warnings go through the same
 lines, one line each ("23:05:12 WARNING UserWarning: … (file.py:12)"; built on 2026-10-22);
-a download's progress bar keeps its own. The plan's lines teach as they go (see
+a download's progress bar keeps its own. torch's own C++ lines, c10's log, which no Python
+warning carries, are kept out of the lines but under `--verbose` (decided on 2026-10-23, to be
+built): where the driver refuses, `cudaMallocAsync`, the default there, prints "[W1023
+00:04:28.18… CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync] recovered from an allocation
+failure by trimming the pool and retrying" each time it trims (see [Allocator](#allocator)),
+108 times in a 2-hour job on the 96 GB card, about every 8 s in its longest windows, one glued
+to the sampler's progress bar. A whole run's default output is read line by line with it,
+memory tight, on both drivers: nothing but seedvr2x's lines and a download's bar. The plan's
+lines teach as they go (see
 [Memory planner](#memory-planner)).
 
 ### Language: all Python
@@ -2170,24 +2178,38 @@ first pass, whose shots are its input, and before the models load:
   fits says the pin's part of what it is short of.
 - **Time estimates** (for `--until`, `--plan` and progress) are measured, never constants.
   - One model per kind of unit, each a constant plus a rate: a shot's encode and a segment's
-    decode by the frame, a window by the token. A unit also pays, measured too, the phase it
-    opens (entering the DiT's phase took 0.42 s on an RTX 5090, the encode's 0.15, the
-    decode's 0.30), and a run's first window the run's noise draw, by the token (decided on
-    2026-10-21: without them a shot's first window ran 1.5 to 2 s over its estimate, the
-    windows' median miss 10.1% where a unit varies 0.6% from run to run). The DiT's time per
+    decode by the frame, a window by the token. A window or a decode that opens a change of
+    phase also pays it, a term measured too (entering the DiT's phase took 0.42 s on an RTX
+    5090, the decode's 0.30); an encode, which always follows one, holds it in its constant;
+    and a run's first window pays the run's noise draw, by the token (decided on 2026-10-21:
+    without them a shot's first window ran 1.5 to 2 s over its estimate, the windows' median
+    miss 10.1% where a unit varies 0.6% from run to run; built on 2026-10-23). A change is
+    timed once the device has finished the copies it starts: the same 1080p job took 1,462 to
+    1,470 s so and 1,484 to 1,555 s without, its encodes missing by 3.8–4.6% against
+    8.1–15.6%. The DiT's time per
     token is flat within ±5% across window lengths and resolutions, but anywhere from 0.23 to
     0.45 ms on this one GPU, with its clock.
-  - One calibration sets them, at the job's size and tiles, through the job's own passes (the
-    reader, the input copy, the correction, the writer, the tiles): a warm-up first, the
-    process's first encode costing 3.4 s more and its first window 1.5 s more on an RTX 5090,
-    then each kind at two lengths, since one length can't give both the constant and the rate:
-    5 and 13 frames encoded and decoded, windows of 2 latents and of the job's longest (built
-    on 2026-10-10 on a base since left, to be ported). It counts as a first ratio of 1 among
-    the last 5, and a resumed run's first seek isn't counted. Every run runs it, `--plan`
-    included, its cost said in the plan's lines (decided on 2026-10-21: a run without it could
-    say no time left before its first segment's decode, and a job of one segment never).
+  - One calibration sets them once the models are loaded, at the job's size and tiles,
+    through the job's own passes (the reader and its index checks, the input copy, the
+    correction, the writer, the tiles), its files beside the job's directory and removed: a
+    warm-up first, at the job's largest shapes, the process's first encode costing 3.4 s more
+    and its first window 1.5 s more on an RTX 5090; then each kind at two lengths, since one
+    length can't give both the constant and the rate: encodes of 5 frames and a second length
+    (below), windows of 2 latents and of the job's longest, decodes of 5 and 13 frames; the
+    noise's draw timed alone; each term the median of the changes the steps make (built on
+    2026-10-23). It counts as a first ratio of 1 among the last 5, and a resumed run's first
+    seek isn't counted. Every run runs it, `--plan` included, its cost said in its line
+    (decided on 2026-10-21: a run without it could say no time left before its first
+    segment's decode, and a job of one segment never).
+    - It took 47–56 s at 1080p and 43–49 s at 720p on an RTX 5090: a short job pays a large
+      share (a 2-minute 720p job 49 s more). At 4K, about 930 s is predicted on the 96 GB
+      card, its clock capped (two 12-latent windows and three decodes of 13 or 5 frames most
+      of it), more on a 32 GB card with tiles and blocks swapped. To shorten at large shapes
+      (decided on 2026-10-23, to be built and measured at 4K on the RTX 5090): each kind's
+      longer length by time, as an encode's second length is, and the warm-up counted as a
+      sample where its first call's cost is small against it.
   - Each kind's two lengths are measured as most of its units come in a run (decided on
-    2026-10-22, to be built):
+    2026-10-22, built on 2026-10-23):
     - A window's and a decode's after a unit of their own kind, the first after a change of
       phase carrying the phase's term. Measured right after a change, each step paid part of
       it, which the fit put in the rate: at 720p on an RTX 5090 the estimate ran 18% over, a
@@ -2196,19 +2218,34 @@ first pass, whose shots are its input, and before the models load:
     - An encode's right after a change, since a run's encodes always follow one, the change
       then counted once, in the encode's constant. Measured after an encode, the constant lost
       the change (0.10 s, where 0.23 and 0.66 s before), and at 1080p each encode's estimate
-      missed by a median of 17.6%, against 3.8–4.6% measured after a change.
+      missed by a median of 17.6%, against 3.8–4.6% measured after a change. Built so, each
+      right after a window: a run makes a segment's encodes and windows, then its decode, so
+      a segment's first encode follows a decode and the others a window, 61% of encodes on
+      the cut lists of 12 sources (36 to 68% by source). Under a placement plan (blocks
+      swapped, the VAE away in the DiT's phase), leaving the DiT's phase costs more than
+      leaving the decode's, so the encodes that follow a decode are estimated over by the
+      difference: not measured.
     - An encode's second length takes about 3 s at the first length's rate, on the VAE's grid
-      of 4n + 1 frames, never fewer than 13, within the plan's memory: with 5 and 13 frames,
-      the encodes' estimate at 1080p came out 11.8% under and 15.3% over on two identical
-      runs.
+      of 4n + 1 frames, never fewer than 13, no longer than the job's longest run nor than the
+      source's frames left, within the plan's memory (13 at 1080p in tiles on an RTX 5090, 25
+      and 29 at 720p): with 5 and 13 frames, the encodes' estimate at 1080p came out 11.8%
+      under and 15.3% over on two identical runs.
+    - The result on an RTX 5090 (2026-10-23): each encode's estimate missed by a median of 5.2
+      and 2.0% at 1080p (17.6% after the first rule) and 2.3% at 720p (8.2%), windows and
+      decodes 1.3 to 2.4%; `--plan`'s whole job −3.6 and −1.3% at 1080p, −2.1% at 720p (+18%
+      before both rules), the corrected estimates within 1.4%. A single unit still misses by
+      up to 22 to 31%, one in 20 per phase over 1.15 times its estimate at most.
   - Each unit's progress line says the job's time left and the time of day it should end
-    (decided on 2026-10-21, to be built).
+    ("…; about 27 min 37 s left, the job ending about 19:26"; decided on 2026-10-21, built on
+    2026-10-23).
   - After every unit, each model is corrected by the median of the last 5 ratios of measured
     to predicted time, which follows a card whose speed drifts.
-  - Every time figure in this document comes from a card whose faulty power reading caps its
+  - The RTX 5090's figures come from a healthy card, its owner's overclocking profile maybe
+    on (its cores at 2.78 to 2.80 GHz under load on three days alike). Every other time
+    figure in this document comes from the 96 GB card, whose faulty power reading caps its
     clock under load (about 580 MHz, where it runs 2.6 GHz free): the values hold, but a
-    healthy card should take 2 to 3 times less, unmeasured. The times are measured again on a
-    healthy card, which milestone 3's estimates need.
+    healthy card should take 2 to 3 times less, unmeasured. Milestone 3's estimates were
+    measured on the RTX 5090 (2026-10-21 to 23).
 - **A plan shapes the output a little.** Its window lengths set where a long shot's joins
   fall, and its VAE tiles where the picture is cut. A larger card gives fewer joins and larger
   tiles, closer to the one-window, untiled run:
@@ -2251,7 +2288,8 @@ first pass, whose shots are its input, and before the models load:
     system memory and the moment it is held
   - the tiles and their grid, and the scratch of the longest tiled shot
   - each phase's predicted peak, and which one bounds the plan
-  - the time per phase, the total, and the longest unit, which is how early `--until` may stop
+  - the calibration's cost, the time per phase, the total, the longest unit, which is how early
+    `--until` may stop, and each `--quality` level's time on a job not yet run
   - what was pinned
 - **Every choice of the plan is said, at every run, in plain words** (the user, 2026-10-20:
   most users learn seedvr2x by watching its runs and logs, not by reading the manual; built on
@@ -2473,7 +2511,10 @@ GPU's memory refused stops a run in one line, before the models load as after.
     refused with 4.5 and run with 2.5 in 403 s against 372 with room, the same frames (its 2.5
     plan had the budget of the roomy one); stopped, then resumed beside it, its recorded shape
     refused with 4.5 and taken with 2.5, the same frames. So the plan's line says up to 1.5
-    times as long, not 1.4 to 1.5: by how tightly the plan packs (decided on 2026-10-22).
+    times as long, not 1.4 to 1.5: by how tightly the plan packs (decided on 2026-10-22, built
+    on 2026-10-23). The calibration, run under the job's plan and reserve, measures the job's
+    own decode: on that card a pinned 1080p job's decode estimate missed by 1.8% with 2.5 and
+    by 0.4% with 4.5.
 
 ## Pause and resume
 
@@ -2678,9 +2719,18 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     so that a script tells a job stopped by the clock, to be run again, from a finished one
     (0) and from a Ctrl-C (130). The longest unit, a segment's decode, sets how early it may
     stop: `--plan` prints it. With a one-file output, the assembly is the job's last unit,
-    estimated from the masters' size. `--plan` given `--until` says whether the job ends by
-    then and, if not, the unit it would stop before (decided on 2026-10-21; the track's first
-    build refused both).
+    estimated from the masters' and the source's sizes at the rate a 256 MiB write, flushed,
+    takes beside the output: cautious (55 s estimated where 7.2 s ran, the masters still in
+    the page cache). `--plan` given `--until` says whether the job ends by then and, if not,
+    the unit it would stop before (decided on 2026-10-21; the track's first build refused
+    both). A time the clock skips that night is the next day's, a time it shows twice the
+    first still to come; a time passed before the first unit stops the job before the models
+    load, its first pass kept. Built on 2026-10-23. With the track's earlier code, on an RTX
+    5090, a 720p job stopped by the clock 3 times and a 1080p one twice, resumed two days
+    later, wrote their uninterrupted runs' frames, segment by segment. On the final code, the
+    resume tests of the GPU suite on both cards, and on the 96 GB card, its clock drifting, a
+    2-hour job held to the clock before every unit, its frames those of the code before,
+    ending 1.2 min before its estimate.
 - **The source's end** is checked as its last frame is read, before the last shot's latent is
   recorded (2026-10-12). A source that gives a frame more there than its first pass counted
   stops the run. The count is the job's record, which the same command trusts and would stop on
@@ -3068,7 +3118,9 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
      2026-10-21: the box's CPU suite and the whole GPU suite, 34 tests. On the code of
      2026-10-21 (the plan said, a refused run keeping its first pass) and of 2026-10-22 (the
      consumer card's memory rules): the same on the box, every hold proving its tree, and the
-     RTX 5090's whole suite against its own references, 34 tests on 2026-10-22.
+     RTX 5090's whole suite against its own references, 34 tests on 2026-10-22. On the code of
+     2026-10-23 (the time estimates, `--until`): the same on both cards, every hold proving its
+     tree, and on the box a 2-hour `--until` job, its frames those of the code before.
    - On a real desktop card, an RTX 5090 under WSL2 held to its card (2026-10-12): the same
      job alone, beside a program holding 8 GiB, stopped then resumed, and with NVML silent,
      the same frames each time; each phase within 0.3 GiB of its prediction but the
