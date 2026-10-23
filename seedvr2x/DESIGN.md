@@ -1377,7 +1377,12 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   temporal errors lower, `enhanced` about 40% of that; on a calm one +0.16 dB. The user's pick
   (2026-10-21): a bird across a painted wave, first its teeth, whose lines wobble at
   `standard`, a little less at `enhanced`, and keep the original's shape at `maximum`; then
-  its feathers, which `maximum` starts to recover.
+  its feathers, which `maximum` starts to recover. The manual shows the teeth alone, in the
+  whole 384-px window the user judged, 3 times enlarged: a smaller crop of it looked worse,
+  and the feathers' detail is too small for a public demo. Its panels tell what the model
+  does: the 960×540 input first, its pixels shown as they are, then `standard`, `enhanced`
+  and `maximum`, then the original; beside the original alone, every level looked like a
+  failure (the user, 2026-10-23).
 - **Cost.** Every phase runs as many times: 4× the GPU time. A run takes the memory a single
   run takes. The time estimate (`--plan`, `--until`) counts the runs, and a job's units are
   its shots' runs (see [Pause and resume](#pause-and-resume)).
@@ -2951,8 +2956,9 @@ must be understood, and the gain shown clearly enough that a user tries it; see
 - what it gives, shown: stills, one run against several, from a freely licensed source,
   credited, with the measured gain of `maximum` over `standard` beside them (no loop: GitHub
   doesn't play a repository's video in its Markdown, 2026-10-23).
-  The user's pick (2026-10-21): Sol Levante's bird across a painted wave, its teeth first,
-  then its feathers (see [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)),
+  The user's pick (2026-10-21): Sol Levante's bird across a painted wave, its teeth, in the
+  window the user judged, the feathers left out (2026-10-23; see
+  [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)),
   credited, the title linking Netflix's open content (https://opencontent.netflix.com/):
   "Sol Levante, Netflix and Production I.G, CC BY 4.0
   (https://creativecommons.org/licenses/by/4.0/). Frames of the SDR UHD master, downscaled,
