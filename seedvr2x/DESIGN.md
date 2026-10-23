@@ -1311,7 +1311,9 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
 - **What.** Run s, for s from 0 to 3, is fed the shot from its frame s; frame f is taken from
   run f mod 4, where it ends its group (frames 0 to 3 each a run's own first frame, a latent
   of its own). Each run is a whole one: its plan of windows, its padded end (step 1), its
-  colour correction. The earlier runs' frames wait on disk until the last run's decode puts
+  colour correction, and its shot's seed, as measurement's composites took it (the code's
+  provisional choice, kept on 2026-10-23). The earlier runs' frames wait on disk until the
+  last run's decode puts
   every frame in order: up to (N − 1)/N of the longest shot (three quarters with 4 runs), at
   the 16 bits the master is written from, so no byte of it changes (12.4 MB a 1080p frame,
   49.8 MB at 4K: 37 GB for 750 frames of a 1,000-frame 4K shot). `--plan` says it, and a job
@@ -2202,12 +2204,12 @@ first pass, whose shots are its input, and before the models load:
     (decided on 2026-10-21: a run without it could say no time left before its first
     segment's decode, and a job of one segment never).
     - It took 47–56 s at 1080p and 43–49 s at 720p on an RTX 5090: a short job pays a large
-      share (a 2-minute 720p job 49 s more). At 4K, about 930 s is predicted on the 96 GB
-      card, its clock capped (two 12-latent windows and three decodes of 13 or 5 frames most
-      of it), more on a 32 GB card with tiles and blocks swapped. To shorten at large shapes
-      (decided on 2026-10-23, to be built and measured at 4K on the RTX 5090): each kind's
-      longer length by time, as an encode's second length is, and the warm-up counted as a
-      sample where its first call's cost is small against it.
+      share (a 2-minute 720p job 49 s more). Its cost follows the job's longest window, not
+      the size: 138 s on that card at 4K, its windows of 5 latents, but 826 s on the 96 GB
+      card at 1080p, a long shot's windows of 91 latents, its clock capped. To shorten
+      wherever a unit is long, at any size (decided on 2026-10-23, to be built and measured
+      on the RTX 5090): each kind's longer length by time, as an encode's second length is,
+      and the warm-up counted as a sample where its first call's cost is small against it.
   - Each kind's two lengths are measured as most of its units come in a run (decided on
     2026-10-22, built on 2026-10-23):
     - A window's and a decode's after a unit of their own kind, the first after a change of
@@ -2946,14 +2948,15 @@ must be understood, and the gain shown clearly enough that a user tries it; see
   of them softer than the fourth, with doubled lines on fast motion;
 - what the option does about it and what it costs on the user's own card: `--plan` gives
   the time with one run and with several, before anything runs; the memory doesn't change;
-- what it gives, shown: stills and a short loop, one run against several, from a freely
-  licensed source, credited, with the measured gain of `maximum` over `standard` beside them.
+- what it gives, shown: stills, one run against several, from a freely licensed source,
+  credited, with the measured gain of `maximum` over `standard` beside them (no loop: GitHub
+  doesn't play a repository's video in its Markdown, 2026-10-23).
   The user's pick (2026-10-21): Sol Levante's bird across a painted wave, its teeth first,
   then its feathers (see [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)),
-  credited: "Sol Levante, Netflix and Production I.G, from Netflix's open content
-  (https://opencontent.netflix.com/), CC BY 4.0
-  (https://creativecommons.org/licenses/by/4.0/). Frames of the SDR UHD master, downscaled and
-  compressed, then upscaled with seedvr2x to compare its --quality levels.";
+  credited, the title linking Netflix's open content (https://opencontent.netflix.com/):
+  "Sol Levante, Netflix and Production I.G, CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/). Frames of the SDR UHD master, downscaled,
+  compressed and upscaled here to compare seedvr2x's --quality levels.";
 - what the original beside them is, said first (the user, 2026-10-21: else a reader asks why
   the best image isn't an option): the source's own frame, downscaled to make the input, which
   seedvr2x brings back to the original's size, so that what it restores can be set against
