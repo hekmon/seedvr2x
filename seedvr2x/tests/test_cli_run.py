@@ -1259,7 +1259,7 @@ def test_a_held_run_refused_with_4_5_takes_2_5(
         ) in budget
         assert budget.endswith(
             "; slow: a step short of room beyond its peak slows down where it would be refused,"
-            " and a job that fits with 4.50 runs 1.4 to 1.5 times as long with 2.50; memory freed"
+            " and a job that fits with 4.50 runs up to 1.5 times as long with 2.50; memory freed"
             " on the card gives the 4.50 back; --swap-blocks 5 would run with the full reserve, at"
             " full speed; the margin of 0.60 GiB is in the reserve"
         )

@@ -981,7 +981,8 @@ def plan(
     under which a step short of room slows down and runs (DESIGN.md, Allocator: "With a reserve
     of 2.5 GiB under those segments"): under a user's allocator without them such a step is
     refused, in a unit, perhaps hours in, and under cudaMallocAsync nothing checks the card (a
-    review's finding, 2026-10-21; PROVISIONAL, asked to design). Never on a driver that refuses,
+    review's finding; DESIGN.md, Allocator, decided on 2026-10-21: "only under the segments, where
+    the 2.5 was measured"). Never on a driver that refuses,
     which leaves no reserve; nor for a pin that is no pin, refused before any memory is counted.
     The reserves are memory's, read as the plan is made."""
     job = _job(free, target, shots, split, numz_padding, attention)
@@ -2452,7 +2453,7 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
         budget += (
             f", {tight} and not {usual}, the plan with {usual} refused ({peaks.tightened}); slow: a"
             " step short of room beyond its peak slows down where it would be refused, and a job"
-            f" that fits with {usual} runs 1.4 to 1.5 times as long with {tight}; memory freed on"
+            f" that fits with {usual} runs up to 1.5 times as long with {tight}; memory freed on"
             f" the card gives the {usual} back"
         )
         if peaks.instead:

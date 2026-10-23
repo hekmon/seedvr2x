@@ -237,10 +237,13 @@ RESERVE = round(4.5 * GIB)
 # so on the RTX 5090 under WSL2 (2026-10-13, a desktop holding 3.2 GiB of the card): 4K's
 # smallest window planned and ran with it four times, with the frames of a run that had room to
 # spare, in 134 to 139 s for 65.6; but every other plan packed tighter, and a job that fitted
-# with RESERVE ran 1.4 to 1.5 times as long with this one. So it is the plan's last resort, said
-# slow in the plan's budget line (planner._card_said). The VAE's room (planner.VAE_ROOM) is inside
-# the budget either way, never touched: a VAE pass is still left that room and more beyond its
-# predicted peak, its frames' floor under the segments, 0.40 GiB, under it (EXPANDABLE). And it
+# with RESERVE ran 1.4 to 1.5 times as long with this one; a 1080p job whose plan with it had the
+# budget of a roomy run's, 1.08 times (2026-10-22). So it is the plan's last resort, said slow
+# in the plan's budget line, up to 1.5 times as long, by how tightly the plan packs
+# (planner._card_said; DESIGN.md, Allocator, decided on 2026-10-22). The VAE's room
+# (planner.VAE_ROOM) is inside the budget either way, never touched: a VAE pass is still left
+# that room and more beyond its predicted peak, its frames' floor under the segments, 0.40 GiB,
+# under it (EXPANDABLE). And it
 # is what a check may take from the limit before the run stops (check, hold's `reserve`).
 RESERVE_TIGHT = round(2.5 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
@@ -734,11 +737,11 @@ def check(device: Any) -> None:
     Under expandable segments (startup), where the card's figure is read, a check that finds the
     card short holds torch again and the run goes on (DESIGN.md, Allocator, decided on 2026-10-16):
     to what it holds and the card's free memory less HELD_BACK, said in a warning, as long as what
-    the limit has lost since the one set once the plan was made (hold) stays within the reserve
-    that plan leaves torch's allocator beyond a step's peak, RESERVE, or RESERVE_TIGHT where the
-    plan took it (_reserve; PROVISIONAL, implementation, 2026-10-21: DESIGN.md names the 4.5 GiB,
-    which a plan made with 2.5 doesn't leave). A step is then left that much less
-    beyond its peak, a step short of room slowing down under the segments where it would be refused
+    the limit has lost since the one set once the plan was made (hold) stays within the reserve that
+    plan leaves torch's allocator beyond a step's peak, RESERVE, or RESERVE_TIGHT where the plan
+    took it (_reserve; DESIGN.md, Allocator, decided on 2026-10-21: a re-hold bounded by the reserve
+    its plan took, 4.5 there cutting into the VAE's room). A step is then left that much less beyond
+    its peak, a step short of room slowing down under the segments where it would be refused
     (EXPANDABLE), and the VAE's room, inside the plan's budget, is never touched. It holds torch
     again only where the card has HELD_BACK free at that check, the new limit at or above what torch
     holds: under it the limit would stand under torch's own reservation, every later check would
@@ -761,15 +764,15 @@ def check(device: Any) -> None:
     what that limit left it (HELD_BACK), counted from the figure judged and what torch held then
     (_base): the check itself goes by the limit, which may have been set under the driver's figure,
     the smaller then, the card left that much more (a review, 2026-10-16: counted from the limit,
-    the growth said fell short by that much).
-    Run so on the same card (2026-10-16, a job of 66 frames at 1080p, its window, tiles and
-    swapped blocks pinned, a second program taking memory once the plan's limit was set): under
-    the segments, with 1.0 and 2.0 GiB, torch was held again 1.00 and 2.00 GiB lower at the
-    first unit's check and the run went on, upscaled in 60.2 and 60.1 s (59.7 to 60.7 with no
-    program, earlier that day) with the frames of a run with none; with 5.0 GiB it stopped there,
-    and the same command resumed to those frames; with 0.6 GiB nothing was done, the memory
-    outside torch grown 0.47 GiB by that check, the desktop's own fallen by 0.14, every check
-    0.03 to 0.04 GiB to spare. Under the plain allocator 0.6 GiB stopped it there, 0.61 grown.
+    the growth said fell short by that much). Run so on the same card (2026-10-16, a job of 66
+    frames at 1080p, its window, tiles and swapped blocks pinned, a second program taking memory
+    once the plan's limit was set): under the segments, with 1.0 and 2.0 GiB, torch was held again
+    1.00 and 2.00 GiB lower at the first unit's check and the run went on, upscaled in 60.2 and 60.1
+    s (59.7 to 60.7 with no program, earlier that day) with the frames of a run with none; with 5.0
+    GiB it stopped there, and the same command resumed to those frames; with 0.6 GiB nothing was
+    done, the memory outside torch grown 0.47 GiB by that check, the desktop's own fallen by 0.14,
+    every check 0.03 to 0.04 GiB to spare. Under the plain allocator 0.6 GiB stopped it there, 0.61
+    grown.
 
     On the card's figure, where it is read, and not on the smaller of the two as the limit was
     set: near the full card the driver's figure is no longer the process's own, and isn't the

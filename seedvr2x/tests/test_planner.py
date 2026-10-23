@@ -3892,7 +3892,7 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5() -> None:
         " GiB under it, and the reserve of 2.50 GiB left to torch's allocator beyond a step's"
         f" peak, 2.50 and not 4.50, the plan with 4.50 refused ({alone}); slow: a step short of"
         " room beyond its peak slows down where it would be refused, and a job that fits with"
-        " 4.50 runs 1.4 to 1.5 times as long with 2.50; memory freed on the card gives the 4.50"
+        " 4.50 runs up to 1.5 times as long with 2.50; memory freed on the card gives the 4.50"
         " back; --decode-tile 1856 would run with the full reserve, at full speed; the margin of"
         " 0.60 GiB is in the reserve"
     )

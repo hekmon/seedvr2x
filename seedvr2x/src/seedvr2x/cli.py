@@ -93,8 +93,9 @@ def _warnings_in_lines() -> Generator[None]:
     verify), once the lines are (_logging), and restored on the way out, so that whatever showed
     them before shows them again: pytest's own capture of the tests' in-process runs, after the
     run. Python's filters stand, which show a warning once a place by default. A download's
-    progress bar is no warning, and keeps its own form. PROVISIONAL (implementation, 2026-10-21):
-    the words, the category's name and the place in parentheses, as Python gives them."""
+    progress bar is no warning, and keeps its own form. The category's name and the place in
+    parentheses, as Python gives them (DESIGN.md, Architecture, What it prints, built on
+    2026-10-22)."""
     shown = warnings.showwarning
 
     def show(
