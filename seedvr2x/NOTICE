@@ -40,3 +40,11 @@ licence: predict_frames' windows (inference/transnetv2.py at that commit), rewri
 src/seedvr2x/runtime/detector.py to run on frames as they come, after the repository's
 research/scripts/scd_scores.py (tnet_predict), whose rewrite tests/test_detector.py copies to hold
 them to.
+
+The manual's example picture, images/quality-teeth.png, is made from a frame of Sol Levante,
+Netflix and Production I.G, from Netflix's open content (https://opencontent.netflix.com/), under
+the Creative Commons Attribution 4.0 International licence
+(https://creativecommons.org/licenses/by/4.0/). Changed for seedvr2x: the SDR UHD master's frame
+downscaled to 1920x1080 (the original) and again to 960x540, compressed with x264 (the input),
+upscaled back to 1080p by seedvr2x at each --quality level; the same square cut from each,
+enlarged without smoothing and labelled.
