@@ -68,6 +68,7 @@ never requires it.
 
 ### Not in the first version
 - Image inputs, ComfyUI nodes, macOS/MPS, AMD/ROCm
+- Windows itself: v0.2.0 (the user, 2026-10-24). Linux runs it, WSL2 included.
 - Multi-GPU in one process (separate processes on separate shot ranges can come later, see
   [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
@@ -2128,7 +2129,7 @@ first pass, whose shots are its input, and before the models load:
     effect ([bug 15](../research/bugs/15-compile-vae-exclusion-dead-code.md)).
     - `--compile` compiles the VAE with those convolutions left out of the graph, as numz
       meant: each pass 0.79–0.95 of plain's time, its peak 1.04–1.10 times plain's, 4 to 6
-      min of compilation per process, which the calibration pays. On a 32 GB card a whole
+      min of compilation per process, paid before the DiT loads. On a 32 GB card a whole
       1080p job's units took 10% less (880 s against 980 at plain's own tiles), so a long job
       gains about a tenth, an hour of 1080p about 2 h of 22, and a job under about 2,500
       frames loses. It is a setting, recorded as compile_vae: its frames are not plain's
@@ -2141,10 +2142,15 @@ first pass, whose shots are its input, and before the models load:
         caches and a resume with a fresh cache gave the same frames, at no measured cost;
       - the planner holding a compiled pass to 1.1 times its tile's plain peak, from its
         measured table, and choosing smaller tiles where that doesn't fit;
-      - the compiler on one thread (TORCHINDUCTOR_COMPILE_THREADS=1, unless the user sets it):
-        its default 32 workers held about 4.4 GiB of host memory besides the process (16 GiB
-        summed RSS, most of it shared), beside the pinned blocks; one thread holds 0.4 GiB and
-        costs about a minute of compilation per process;
+      - only the VAE's shapes measured compiled: encode tiles up to 1856 px or the 1080p
+        frame whole, decode tiles up to 1152 px, until the 96 GB card measures larger ones
+        (decided on 2026-10-24: the planner keeps no blind spot);
+      - the VAE compiled right after the plan, before the DiT loads (the user's idea,
+        2026-10-24): the VAE alone on the card, its shapes compiled with torch's own
+        workers, then the workers shut at once (`shutdown_compile_workers`), before the
+        DiT's blocks are pinned. The workers' 4.4 GiB of host memory (32 of them here, 16
+        GiB summed RSS, most of it shared) comes and goes while the host holds little; the
+        calibration then times the compiled passes;
       - inductor's modules imported before the environment is recorded, so that a resume
         compares the same;
       - the compile cache in the job's work directory, warm on a resume;
@@ -3055,6 +3061,11 @@ writers, and the planner needs real shot lengths.
 
 After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
 
+**v0.1.0 waits for the 96 GB card** (the user, 2026-10-24: a first version's features aren't
+half-baked). Meanwhile the RTX 5090 keeps the work going; once the card is back, everything
+is measured and tested on it, and on emulated cards of the sizes users have (see
+[To measure](#to-measure)), before the release.
+
 1. **Reproduce numz.** Passed on 2026-10-02: 45 of 45 frames bit-identical, on the FFV1
    masters and on the float32 dumps. Same settings: one batch, no tiling, `flash_attn_2`, same
    seed, numz's input preparation, colour correction off (numz's `lab` runs the StableSR code
@@ -3310,6 +3321,19 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   drive on the Windows side, a load of 75 s; two or more at once, 480 MB/s and 42 to 43 s. A
   patch reading each tensor in four pieces is held, level on a Linux NVMe drive; not measured on
   a hard disk, where four streams of one file may cost seeks, and not taken until it is.
+- **The cards v0.1.0 is tested on** (the user, 2026-10-24; once the 96 GB card is back, before
+  the release). One size per class of real cards: 8 GB (RTX 5060, 4060: the refusal, 1080p
+  taking 8.27 GiB free), 12 (RTX 5070, 4070, 3060), 16 (RTX 5080, 5070 Ti, 4080), 24 (RTX
+  4090, 3090, RTX PRO 4000: the edge of 4K), 32 (RTX 5090, RTX PRO 4500), 48 (RTX PRO 5000,
+  RTX 6000 Ada: the 1080p decode untiled from there), 72 (RTX PRO 5000's 72 GB version) and
+  96 GB (RTX PRO 6000). Each one two ways:
+  - headless, the whole card free, as the 96 GB box;
+  - with a desktop on it, a few GiB held by the graphical environment, its share able to
+    grow mid-run.
+  Two drivers in v0.1.0: Linux's own, which refuses (the 96 GB card emulates every size,
+  headless or with a desktop's share played by a program holding memory and moving it), and
+  WSL2's, which lends system memory (the RTX 5090 with its real desktop, emulating 32 GB and
+  less). Windows itself, in v0.2.0, is a third.
 - **`torch.compile` on the 96 GB card** (see [Memory planner](#memory-planner)). The study ran
   on an RTX 5090 alone: the 96 GB card died before its part
   ([compile.md](../research/docs/compile.md)). Left for it:
@@ -3319,7 +3343,12 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
     SDPA: whether its compile pays on large cards, and whether the jump at 20 latents is
     SDPA's;
   - the convolutions in the graph: 21–23% faster at 768-px tiles, but a first call 1.4 to
-    1.6 times plain's peak, its cause not isolated.
+    1.6 times plain's peak, its cause not isolated. Measured on that card, by tile and for
+    the first call and the next (the user, 2026-10-24: the planner is seedvr2x's own, no
+    blind spot in it): its speed against the convolutions left out, and its peaks, so that
+    the planner can weigh it against its other ways of making room in the VAE's passes
+    (the DiT's weights off the GPU, smaller tiles). Then it is built into the planner, made
+    an option, or left out, on those figures.
   Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
   windows, and none has fewer lengths.
 - **The sharp 7B at other upscale factors.** It is the default on crops at ×2 (see
