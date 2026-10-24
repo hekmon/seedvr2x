@@ -15,6 +15,10 @@ This product includes code adapted from:
   kernels and pads; and the steps of numz's pipeline that research/scripts/dit_probe.py,
   decode_resume.py, blend_patch.py and quality_metrics.py reproduce. Each file names what it
   follows and what it changes.
+- ComfyUI-SeedVR2_VideoUpscaler (numz and contributors), under the Apache License, Version 2.0: its
+  CIELAB conversions and histogram matching (src/utils/color_fix.py), ported in
+  research/scripts/colour_baseline.py (seedvr2x's former runtime/colour.py, kept frozen as the
+  colour study's baseline).
 - comfy-kitchen, Copyright (c) 2025 Comfy Org, under the Apache License, Version 2.0: its
   regular Hadamard rotation, rebuilt in models/ck_check.py, models/seedvr2_int8.py and
   models/gpu/ck_patch.py.

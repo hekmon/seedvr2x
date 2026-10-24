@@ -2,13 +2,14 @@
 
 > Status: **steps 0 to 5 done** (step 4: the user's eyes, 2026-10-06; step 5, baton 1 of the 4K
 > relay, 2026-10-06, with the user's eyes on its crops given the same day: the 0.25 / 0.5
-> recommendation is withdrawn); **step 6 done** (baton 2, the sharp 7B, night of
-> 2026-10-06, with the user's eyes on its crops on 2026-10-07). Step 0 (the diagnosis) ran on the CPU from
-> [numerics.md](numerics.md)'s masters; steps 1 to 3 and 5 on dumps of 7B fp16 runs (1080p, ×1.5
-> to ×4, the heavier degradation, VAE tiles, 4K on 17 shots), scored on the CPU. The study answers
-> "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab) and, with steps
-> 5 and 6, part of "4K output's quality" ([To measure](../../seedvr2x/DESIGN.md#to-measure)); its
-> decision brief is at the end.
+> recommendation is withdrawn); **step 6 done** (baton 2, the sharp 7B, night of 2026-10-06, with
+> the user's eyes on its crops on 2026-10-07); **step 7 done** (the sharp 7B at ×1.5, ×3 and ×4
+> from step 6's runs, a blind set, the user's eyes on 2026-10-24). Step 0 (the diagnosis) ran on
+> the CPU from [numerics.md](numerics.md)'s masters; steps 1 to 3 and 5 on dumps of 7B fp16 runs
+> (1080p, ×1.5 to ×4, the heavier degradation, VAE tiles, 4K on 17 shots), scored on the CPU. The
+> study answers "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab)
+> and, with steps 5 and 6, part of "4K output's quality" ([To
+> measure](../../seedvr2x/DESIGN.md#to-measure)); its decision brief is at the end.
 
 In short:
 
@@ -50,6 +51,10 @@ In short:
   keeps the thinnest cel lines sharper; a heavier degradation (d2) tames neither model, and from
   it the sharp over-renders clouds more. Recommended: the sharp 7B as the default model, with the
   split alone.
+- **The sharp stays the default at ×1.5, ×3 and ×4** (step 7, blind): the eyes see the two alike on
+  14 of 34 places and every loop, and split the rest 9 to 8 with 3 "?", by content (clean animation
+  to the sharp, flat colours and live-slow's skin leaning to the 7B), not by factor. live-vfx's
+  −3.46 dB at ×4 is nearly all one row of the letterbox (−0.20 over the picture).
 - **A float16 decode adds nothing after the correction** (within the seed band): numz's
   bfloat16 decode can stay.
 
@@ -278,8 +283,10 @@ minutes at a torch peak of 77.2 GiB, the DiT 2.3 at 64.4 GiB, the decode in 2048
 ## Step 2: the variants
 
 [`scripts/colour_variants.py`](../scripts/colour_variants.py) builds every variant on seedvr2x's
-own `runtime/colour.py`, as milestone 5 accepted it, so that a winner ports as it is. A variant
-takes one shot's decode and reference and returns RGB in [0, 1], in float32:
+own `runtime/colour.py`, as milestone 5 accepted it, so that a winner ports as it is (that file,
+kept as [`scripts/colour_baseline.py`](../scripts/colour_baseline.py) now that seedvr2x's own is
+`split`'s). A variant takes one shot's decode and reference and returns RGB in [0, 1], in
+float32:
 
 - `lab`: seedvr2x's (milestone 5): numz's split in RGB at 5 à-trous stages, then numz's
   histogram step pooled over the shot. `@f32` and `@bf16` name the reference.
@@ -1322,8 +1329,9 @@ Each model's split − bicubic (bicubic's detail in brackets):
   7B's detail (0.97 and 1.04 times at d1 and d2), PSNR-Y +1.3 and +1.2 dB and VMAF +7.3 and +7.1,
   LPIPS +0.034 and +0.035, DISTS +0.017 and +0.020.
 - **×1.5:** closer on all four scores on 3 of 3 clips (detail 0.89 of the 7B's). **×4:** detail
-  0.82; live-vfx much further (PSNR-Y −3.46 dB, VMAF −7.2, LPIPS +0.055, DISTS +0.024), the other
-  4 closer by PSNR-Y (+0.12 to +1.97 dB).
+  0.82; live-vfx much further (PSNR-Y −3.46 dB, VMAF −7.2, LPIPS +0.055, DISTS +0.024: the PSNR-Y
+  gap is nearly all one row of the letterbox, [step 7](#the-letterbox)), the other 4 closer by
+  PSNR-Y (+0.12 to +1.97 dB).
 - **Against bicubic the sharp changes nothing:** at ×2 both splits trail bicubic on PSNR-Y and
   VMAF on every clip, split LPIPS and DISTS about evenly at d1 and are ahead on 5–6 of 7 at d2; at
   ×3 and ×4 both are ahead on LPIPS and DISTS (×4: 5 of 5) and on VMAF (×4: +14 to +15); at ×1.5
@@ -1500,7 +1508,8 @@ at 1080p), the 7B on 8 (`cel4k-flat`'s lines 2, `cel4k-night` 1, `sunrise` 2, `s
   Laplacian variance and is further from the GT on every score, the eyes see a tie: sharper
   lines, fewer details.
 - **Limits:** one viewer; 1:1 crops of 1–3 windows per shot, one seed; no crops at ×1.5, ×3 or
-  ×4 (at ×4 the metrics are mixed: live-vfx 3.46 dB further from the GT with the sharp).
+  ×4 (at ×4 the metrics are mixed: live-vfx 3.46 dB further from the GT with the sharp; those
+  factors are [step 7](#step-7-the-sharp-7b-at-15-3-and-4-for-the-eyes)'s).
 
 ### What step 6 recommends
 
@@ -1519,6 +1528,200 @@ at 1080p), the 7B on 8 (`cel4k-flat`'s lines 2, `cel4k-night` 1, `sunrise` 2, `s
   dumps (CPU only); the metrics are mixed at ×4.
 - **ByteDance's warning is tested only mildly:** a heavier compression (d2) tames neither model;
   blurred or noisy inputs would need GPU runs.
+
+## Step 7: the sharp 7B at ×1.5, ×3 and ×4, for the eyes
+
+Step 6's eyes saw the two models at ×2 only (1080p from 960×540, 4K from 1920×1080), and the
+sharp 7B became seedvr2x's default on that verdict. Step 6 had also run both models to 1080p at
+×1.5, ×3 and ×4 (11 runs each, seed 42: [its table per set](#at-1080p-1)), with mixed scores at ×4
+and no crops. Step 7 puts those runs before the eyes in a blind set, on the CPU: no new run,
+the dumps and the scores are step 6's.
+
+### The scores, clip by clip
+
+The sharp − the 7B, each after its split (`ycc:4:3` at ×1.5, `ycc:4:4` at ×3 and ×4: the colour
+scale follows the factor), paired frame by frame as in step 6 (B / W: better / worse beyond the
+interval; one seed):
+
+| Factor (input) | Clip | PSNR-Y (dB) | VMAF | LPIPS | DISTS | Detail ÷ GT's: sharp (7B) | Sharp ÷ 7B |
+|---|---|---|---|---|---|---|---|
+| ×1.5 (1280×720) | anime-clean | +0.89 B | +3.43 B | −0.0235 B | −0.0091 B | 5.75 (7.17) | 0.80 |
+| | cartoon-bright | +0.73 B | +2.59 B | −0.0079 B | −0.0002 B | 1.64 (1.74) | 0.94 |
+| | live-slow | +0.23 B | +0.64 B | −0.0021 B | −0.0008 B | 1.33 (1.41) | 0.95 |
+| ×3 (640×360) | anime-clean | +0.56 B | +2.75 B | −0.0051 B | +0.0029 W | 5.62 (6.59) | 0.85 |
+| | cartoon-bright | +0.37 B | +0.36 B | −0.0030 B | +0.0020 W | 1.57 (1.62) | 0.97 |
+| | live-slow | +0.12 B | −0.22 | −0.0043 B | −0.0025 B | 1.08 (1.14) | 0.94 |
+| ×4 (480×270) | anime-clean | +0.65 B | +3.62 B | −0.0113 B | −0.0018 B | 4.65 (5.92) | 0.79 |
+| | anime-sky | +1.97 B | −1.36 W | +0.0029 | +0.0048 W | 3.83 (4.86) | 0.79 |
+| | cartoon-bright | +0.45 B | +0.10 | −0.0039 B | +0.0036 W | 1.69 (1.80) | 0.94 |
+| | live-slow | +0.12 B | −0.27 W | −0.0035 B | −0.0029 B | 1.03 (1.12) | 0.91 |
+| | live-vfx | −3.46 W | −7.20 W | +0.0546 W | +0.0237 W | 0.35 (0.50) | 0.69 |
+
+- **At ×1.5 and ×3 the sharp is the 7B a little closer to the GT:** PSNR-Y and LPIPS better on 6
+  of 6 runs, with 3–20% less fine detail (Laplacian variance); DISTS a little higher on the two
+  animated clips at ×3 (+0.0020 and +0.0029).
+- **At ×4, four clips read as at ×3:** PSNR-Y +0.12 to +1.97 dB, LPIPS better on 3, DISTS higher
+  on 2; anime-sky splits (PSNR-Y +1.97 dB, VMAF −1.36, DISTS +0.0048). Their means: PSNR-Y +0.80
+  dB, VMAF +0.52, LPIPS −0.0040, DISTS +0.0009.
+- **live-vfx at ×4 is what makes the set's means mixed:** the sharp is 3.46 dB further from the
+  GT by PSNR-Y, VMAF −7.2, LPIPS +0.055, DISTS +0.024, over the whole frame; over the picture
+  alone, PSNR-Y −0.20 dB, while LPIPS and DISTS stay worse ([the letterbox](#the-letterbox)). It
+  is the one run where both models keep
+  less fine detail than the GT, a grainy film frame (0.50 of its Laplacian variance for the 7B,
+  0.35 for the sharp, 0.01 for bicubic), and where the 7B beats bicubic by PSNR-Y (+2.38 dB) and
+  the sharp trails it (−1.08 dB). Both stay far ahead of bicubic on VMAF (+16.2 and +9.0), LPIPS
+  (−0.24 and −0.19) and DISTS (−0.15 and −0.13).
+- **Band by band, as at ×2:** the sharp's finest lightness band (below 0.7 px) has 1.75, 1.68
+  and 1.62 times the GT's RMS at ×1.5, ×3 and ×4, against the 7B's 1.87, 1.78 and 1.83, with the
+  same correlation to the GT (0.49 and 0.47, 0.45 and 0.46, 0.38 and 0.39); on the GT's flattest
+  third, 1.69, 1.79 and 1.59 against 1.93, 1.95 and 1.89. Less invented energy, no more of the
+  GT's.
+
+### The letterbox
+
+Every score in this study but ΔE00's lightness and colour parts (PSNR-Y, SSIM-Y, LPIPS, DISTS,
+ΔE00 itself, the detail, the temporal errors, VMAF) covers the letterbox bars of the three
+letterboxed clips too. On live-vfx at ×4 that is nearly all of the PSNR-Y gap: the sharp draws
+the picture's top edge one row too high, into row 139, the top bar's last (its mean luma over the
+frames 114 levels, the GT's 0.6), and that one row holds 52.7% of its frame's squared luma error
+(the 7B's bar rows 2.2%). After the split, the sharp's rows 141 and 142 sit about 6 levels below
+the GT's (148.1 and 148.8 against 154.4 and 154.2), its bright row 139 having raised their low
+band. Re-scored on the
+picture rows alone (the corrected frames cut losslessly to rows 140–939, then scored as before;
+the same masters left whole give back the stored whole-frame scores to 6·10⁻⁶ dB), the sharp −
+the 7B, after the split:
+
+| Run | PSNR-Y (dB): whole frame | Picture rows | SSIM-Y | LPIPS | DISTS | ΔE00 |
+|---|---|---|---|---|---|---|
+| live-vfx ×4 | −3.46 | −0.20 | +0.0031 | +0.0666 | +0.0242 | −0.032 |
+| live-slow ×4 | +0.12 | +0.12 | −0.0007 | −0.0053 | −0.0031 | −0.019 |
+| live-slow ×1.5, ×3 | +0.23, +0.12 | +0.23, +0.12 | | | | |
+
+(SSIM-Y to ΔE00 over the picture rows; ΔE00 before any blur.) So the bar row explains live-vfx's
+PSNR-Y, not its LPIPS and DISTS: +0.067 and +0.024 over the picture, against +0.055 and +0.024
+over the whole frame. By the perceptual scores the sharp's frame is further from the GT's grainy
+one. VMAF
+was not re-scored on the picture rows. The bars weigh little elsewhere: on every other
+letterboxed run the sharp's bar rows hold at most 5.1% of its squared error (live-vfx from d2,
+×2), and the picture-row PSNR-Y differences stay within 0.18 dB of the whole frame's (live-vfx
+at ×2: +1.36 and +1.33 dB from d1 and d2, against +1.32 and +1.15).
+
+### The blind set
+
+34 places and 11 loops, the sharp against the 7B with nothing to say which is which, made by
+[`scripts/colour_factor_set.py`](../scripts/colour_factor_set.py) on step 6's dumps:
+
+- **A place:** the same frame and window of both corrected pictures, A and B, at 1:1 and ×3
+  (nearest); the GT in a file of its own, opened after A and B are judged. The answers: A, B,
+  `same`, or `?` (they differ, neither is better).
+- **A loop per run:** the whole 1920×1080 frame, A left and B right, the 45 frames three times,
+  judged in motion; a difference seen only once paused counts with the stills.
+- **The sides** drawn at random, balanced within each factor (×1.5: 9 places, ×3: 9, ×4: 16) and
+  over the loops; the key kept apart until the verdicts.
+- **The windows:** the 22 where step 6's eyes judged the two models at ×2 (anime-sky's from d2,
+  step 4's windows), same window and frame, so that each verdict reads against its ×2 twin, and in
+  each run the window where the two corrected pictures differ most (two on live-vfx at ×4): of
+  every 384×216 window on a 24-px grid over frames 4, 13, 22, 31 and 40, inside the picture rows,
+  overlapping no ×2 window by more than a quarter, the largest mean ΔE00 between the two. Every
+  window holds something to recognise, by [measurement's
+  rule](numerics.md#more-shots-and-a-second-seed) for its blind sets (at least 10% of the GT
+  window's pixels with a luma gradient of 4 levels per pixel or more): 33 of 34 as placed.
+  anime-sky's second ×2 window (frame 2, a blurred dark shape, 0.6%) falls in the shot's opening
+  fog, so the set takes the nearest window with detail on the nearest frame that has one clear of
+  the run's other places: frame 33 at 888, 360, the sphere and drawn clouds. No clip is blurred all
+  over: anime-sky has a window with detail on 16 of its frames 4–44 (a fog dissolve, then a drawn
+  sky), every other run on all 41.
+
+The windows where the two differ most:
+
+| Run | Frame | Window (x, y) | Models' ΔE00: window (frame) | Shows |
+|---|---|---|---|---|
+| anime-clean ×1.5 | 13 | 384, 648 | 2.33 (1.20) | a facade's lattice windows, a cornice |
+| anime-clean ×3, ×4 | 4 | 408, 696 | 2.31 (1.32), 2.39 (1.42) | the same facade |
+| cartoon-bright ×1.5, ×3, ×4 | 13 | 792, 408 | 2.59 (0.96), 2.54 (1.01), 2.61 (1.05) | a character's hand with a phone, a jug, cake slices |
+| live-slow ×1.5 | 13 | 984, 144 | 2.42 (1.07) | palm fronds in motion blur before a sunlit grille |
+| live-slow ×3 | 13 | 1008, 144 | 2.40 (1.14) | the same fronds |
+| live-slow ×4 | 13 | 1032, 144 | 2.54 (1.19) | the same fronds |
+| anime-sky ×4 | 40 | 672, 336 | 1.84 (1.14) | a translucent sphere with a dark halo, on a grey sky |
+| live-vfx ×4 | 31 | 1488, 408 | 2.57 (1.44) | a cable over a ribbed panel |
+| live-vfx ×4 | 31 | 360, 384 | 2.15 (1.44) | cables, a rust patch on a torn plate |
+
+The frames matter ([the latent grid](#the-latent-grid)): the ×2 windows sit on frames 22 (the
+second frame of its group of four) and 44 (the last), anime-sky's on 44 and 33; 7 of the 12 others
+fall on frame 13, the first of its group. On cartoon-bright's, at every factor, both models bend
+the window's shapes (the phone's screen, the jug's outline) where bicubic keeps them: the two
+differ most where both redraw wrongly. On that clip, frames 1–44's mean PSNR-Y by place in the
+group (0 to 3) spans 3.4–4.9 dB, for either model, at every factor, the first place the lowest and
+the last the highest (live-slow 1.8–2.9 dB, the same order; anime-clean under 0.7 dB). A first set
+of labelled strips (GT, bicubic and the two models side by side, named) was made on the same
+windows and never shown: it was rebuilt blind.
+
+### The user's eyes
+
+Blind, on 2026-10-24, the key read after the verdicts: of 34 places the sharp looks better on 9,
+the 7B on 8, the two the same on 14, "?" on 3; the 11 loops alike in motion ("all loops are more
+or less equals, hard to tell apart when they run"). The user's summary: "overall very close to
+each others".
+
+| Factor | Places | Sharp | 7B | Same | ? | Loops |
+|---|---|---|---|---|---|---|
+| ×1.5 | 9 | 1 | 2 | 6 | 0 | 3 alike |
+| ×3 | 9 | 1 | 2 | 5 | 1 | 3 alike |
+| ×4 | 16 | 7 | 4 | 3 | 2 | 5 alike |
+
+- **Clean animation goes to the sharp, at ×4 most:** anime-clean 5 of its 9 places (×4: 3 of 3),
+  the 7B one (at ×1.5, the window where the two differ most, the facade's lattice and cornice: "a
+  bit more details"). On the facade at ×4 the 7B has "more details but they tend to wobble a bit",
+  the sharp "less details but without the too-many-bad-quality details, the image is nicer"; on the
+  window where the two differ most, "same as before, but inverted". anime-sky at ×4: the sharp on
+  the clouds ("smoother") and on the sky around the sphere ("a bit less artefact in the sky"), the
+  7B on the sphere itself, where the sharp has "too many forced details that stand out".
+- **Flat colours and live-slow's skin lean to the 7B:** on cartoon-bright and live-slow the sharp
+  wins none of the 18 places (the 7B 6, the same 10, "?" 2). cartoon-bright's flowers in a bucket,
+  one window at the three factors, go to the 7B three times ("less banding in the flat colors", "a
+  bit smoother on the flat colors", "less artefacts"); its other two windows look the same at every
+  factor (at ×4 the hand with the phone is "too bad quality to judge, might be the source": a first
+  frame of its group, where both models bend shapes). On live-slow the two faces in profile go to
+  the 7B at ×3 and ×4 ("a bit smoother", "skin is a bit cleaner"), as does the fronds window at ×4
+  ("skin a bit smoother"); the seated man is the same at ×1.5 and "?" at ×3 and ×4, where the 7B
+  "is a bit smoother".
+- **live-vfx at ×4, the run the scores put furthest from the GT** ([the letterbox](#the-letterbox):
+  LPIPS +0.067, DISTS +0.024 over the picture): the sharp on 2 places ("a bit smoother" both), the
+  same on 1 (the soldier's face, "hard to tell"), "?" on 1, the 7B on none. So the 7B's lean on
+  skin rests on live-slow alone.
+- **A window keeps its verdict across factors more than a factor keeps one:** the flowers go to the
+  7B at ×1.5, ×3 and ×4 (alike at ×2); the facade to the sharp at ×1.5 and ×4 (and at ×2), the same
+  at ×3; anime-sky's clouds to the sharp at ×2 (from d2) and ×4. The faces in profile, alike
+  leaning to the sharp at ×2 ("better homogenous skin texture"), the same at ×1.5, go to the 7B at
+  ×3 and ×4.
+
+### What step 7 recommends
+
+- **The sharp 7B stays the default at every factor, ×1.5 to ×4.** No factor separates the two: at
+  ×1.5 and ×3 they look the same on 11 of 18 places, the 7B ahead on 4 and the sharp on 2, each by
+  little in the user's words ("close", "a bit more details", "a bit smoother", "less banding in the
+  flat colors"), two of the 7B's 4 on one window (the flowers); at ×4 the sharp leads 7 to 4, but
+  on the three clips run at every factor ×4 is 3 to 3 (×1.5 and ×3: 1 to 2 each): its lead comes
+  from anime-sky and live-vfx, run at ×4 alone. The loops are alike everywhere. Nothing here
+  outweighs step 6's verdicts at ×2 and at 4K, where the eyes preferred the sharp; a DVD to 1080p
+  (×2.25) sits next to ×2.
+- **No rule by factor:** the preferences follow the content, not the factor. Clean animation goes
+  to the sharp (9 to 2 on anime-clean, anime-sky and live-vfx), flat colours and live-slow's skin
+  to the 7B (the sharp wins none of cartoon-bright's and live-slow's 18 places), and a window keeps
+  its verdict across factors. A rule by content (the 7B for flat-colour cartoons or live action)
+  would rest on three windows of two clips at 1080p, one viewer and one seed, against step 6's eyes
+  at 4K, where the sharp won the grainy film's skin, and live-vfx's face here, the same: not
+  recommended, but a thing to watch on later sets.
+- **The ×4 PSNR-Y gap is the letterbox:** live-vfx's −3.46 dB is nearly all one row of the
+  letterbox's top bar (−0.20 over the picture). LPIPS and DISTS still put the sharp further on that
+  clip (+0.067 and +0.024 over the picture), and the eyes overrule them: the sharp ahead on 2 of
+  its 4 places, the 7B on none. Clip by clip the scores did not predict the verdicts: live-slow,
+  where the sharp is closer by PSNR-Y, LPIPS and DISTS and further by SSIM-Y and VMAF at ×3 and ×4,
+  leans to the 7B; live-vfx, where it is furthest, to the sharp.
+- **For both models, the frame's place in its latent group weighs more than the model** on
+  cartoon-bright: a 3.4–4.9 dB spread of PSNR-Y, and the one place the eyes could not judge sits on
+  a group's first frame. That is the latent grid's question ([the latent grid](#the-latent-grid)),
+  not the model's.
 
 ## Decision brief
 
@@ -1661,6 +1864,21 @@ alone (A = 1); no detail scale in v1.
   shot; by eye it is the better of the two models on invented texture and level with the 7B on
   most lines.
 
+**At other upscale factors (step 7, the user's eyes, 2026-10-24).** Recommendation: the sharp 7B
+stays the default at every factor, ×1.5 to ×4; no rule by factor.
+- Blind, on 34 places and 11 loops at 1080p from 1280×720, 640×360 and 480×270: the sharp better on
+  9, the 7B on 8, the same on 14, "?" on 3, the loops alike; by factor ×1.5 1 / 2 / 6 / 0, ×3
+  1 / 2 / 5 / 1, ×4 7 / 4 / 3 / 2 (sharp / 7B / same / ?).
+- The verdicts split by content, not by factor: clean animation to the sharp (9 to 2 on
+  anime-clean, anime-sky and live-vfx), flat colours and live-slow's skin to the 7B (the sharp wins
+  none of cartoon-bright's and live-slow's 18 places: the 7B 6, the same 10, "?" 2). ×4's 7-to-4
+  lead for the sharp comes from the clips run at ×4 alone; on the three run at every factor, ×4 is
+  3 to 3. A content rule would rest on three windows of two clips, one viewer, one seed, against
+  the sharp's win on the grainy film's skin at 4K: not recommended, a thing to watch.
+- DESIGN.md's open item quotes ×4's "one clip −3.5 dB": it is nearly all one row of the letterbox's
+  top bar, which the sharp draws one row too high; over the picture, −0.20 dB, with LPIPS +0.067
+  and DISTS +0.024, and the eyes preferring the sharp on 2 of that clip's 4 places, the 7B on none.
+
 ## Caveats
 
 - **Fidelity is not quality** ([numerics.md](numerics.md#caveats)): every score but DISTS and
@@ -1699,7 +1917,15 @@ alone (A = 1); no detail scale in v1.
   1080p clips, at two only on the 5 shots of part (d); the comparison from d2 on 5 shots at one
   seed. d2 is only mildly heavier than d1 on these sources (bicubic's fine bands barely move), and
   ByteDance's heavier degradations (blur, noise) are untested. At 4K, ×2 only. The eyes on its
-  crops are one viewer's, with no crops at ×1.5, ×3 or ×4.
+  crops are one viewer's, with no crops at ×1.5, ×3 or ×4 (step 7's).
+- **Whole-frame scores include the letterbox bars** of live-slow, live-vfx and anime-grain (only
+  ΔE00's lightness and colour parts keep to the picture rows): they move the sharp − the 7B by 0.18
+  dB of PSNR-Y at most, except live-vfx at ×4, where one bar row makes nearly all of the gap (−3.46
+  dB over the whole frame, −0.20 over the picture: [step 7](#the-letterbox)).
+- **Step 7's limits:** one viewer; one seed (42); 3 clips at ×1.5 and ×3, 5 at ×4, 1080p output
+  only (4K at ×1.5–×4 untested); 2–4 windows a run, one frame each, the same windows at every
+  factor, so a window's verdict repeats more than a factor's; the windows sit on different places
+  in the latent group (frames 4, 13, 22, 31, 40, 44, 33).
 
 ## Reproduce
 
@@ -1723,8 +1949,13 @@ python3 $S/colour_diag.py histtest --clip anime-clean-d1 --gt $C/anime-clean.gt.
 Steps 1 to 3. Inputs: `colour_clips.py` makes the ×4 inputs and the d2 ones fr_clips.py didn't
 make; the dumps come from numz runs wrapped by `colour_dump.py` (numz's checkout as the working
 directory, its venv; GPU work under the shared lock); the scoring runs on the CPU, with
-`COLOUR_BASELINE` pointing at a copy of seedvr2x's `runtime/colour.py` and `MEAS_SCRIPTS` at
-fr_metrics.py, ffv1_out.py and stitch_metrics.py:
+`MEAS_SCRIPTS` pointing at fr_metrics.py, ffv1_out.py and stitch_metrics.py. The baseline (`lab`,
+and the parts the variants are built on) is
+[`scripts/colour_baseline.py`](../scripts/colour_baseline.py): seedvr2x's `runtime/colour.py` as
+the study measured against it (git blob f7ad9cc6, commits c964a4d to 18f5ba4), frozen beside the
+scripts since 68b1529 made seedvr2x's own file `split`'s. `colour_variants.py` loads it by
+default and its selftest checks it byte for byte; `COLOUR_BASELINE` names another file to load
+instead:
 
 ```bash
 S=scripts; C=/path/to/clips; D=/path/to/dumps; N=/path/to/numz
@@ -1850,4 +2081,30 @@ python3 $S/colour_crops.py --clip $c-d1 --gt $C4/$c.gt.mkv --bicubic $C4/$c.d1.b
   --ref $D/$c-d1/s42/ref_f32.pt --content 7B=$D/$c-d1/s42/decode.pt \
   --content sharp=$D/$c-d1/sh42/decode.pt --variants split:ycc:4:3 --no-stretch --per-kind 0 \
   --at 1840,700 --at 2020,430 --at-frame 22 --size 512x288 --out crops-b2/$c
+```
+
+Step 7, on step 6's ×1.5, ×3 and ×4 dumps (CPU only). The blind set: every run's split applied to
+both decodes with the 7B run's reference, the windows checked for detail against the GT, the
+sides drawn at random; the key goes to its own directory. The letterbox: each model's corrected
+frames rendered whole, cut losslessly to the picture rows (live-vfx: 800 rows from row 140), the
+GT and bicubic too, and scored as masters. The per-row figures (each row's mean luma and share of
+the squared error) come from the same corrected frames, one row at a time, by a helper not kept
+here; the spread by place in the latent group, from the score JSONs' `per_frame` PSNR-Y (frames
+1–44, place (f − 1) mod 4):
+
+```bash
+S=scripts; C=/path/to/clips; CC=/path/to/colour_clips; D=/path/to/dumps; c=live-vfx; r=$c-d1x4
+CUDA_VISIBLE_DEVICES="" python3 $S/colour_factor_set.py $D $C eyes-factors key   # 34 places, 11 loops
+python3 $S/colour_eval.py render --clip $r --gt $C/$c.gt.mkv --ref sharp=$D/$r/s42/ref_f32.pt \
+  --content s42=$D/$r/sh42/decode.pt --variants split:ycc:4:4 --out m-sharp --pix-fmt gbrp16le
+python3 $S/colour_eval.py render --clip $r --gt $C/$c.gt.mkv --ref f32=$D/$r/s42/ref_f32.pt \
+  --content s42=$D/$r/s42/decode.pt --variants split:ycc:4:4 --out m-7B --pix-fmt gbrp16le
+crop() { ffmpeg -nostdin -loglevel error -i "$1" -vf "crop=1920:800:0:140:exact=1" -c:v ffv1 -level 3 -g 1 \
+  -pix_fmt gbrp16le -colorspace rgb -color_primaries bt709 -color_trc bt709 -color_range pc "$2"; }
+mkdir -p pic; crop $C/$c.gt.mkv pic/gt.mkv; crop $CC/$c.d1x4.bicubic.mkv pic/bicubic.mkv   # colour_clips.py's
+crop m-sharp/$r.s42.split_ycc_4_4~sharp.gbrp16le.mkv pic/sharp.mkv
+crop m-7B/$r.s42.split_ycc_4_4~f32.gbrp16le.mkv pic/7B.mkv
+python3 $S/colour_eval.py score --clip $r-pic --gt pic/gt.mkv --bars 0:0 --master 7B=pic/7B.mkv \
+  --master sharp=pic/sharp.mkv --master bicubic=pic/bicubic.mkv --master-content s42 --out evpic/$r \
+  --lpips --dists-every 9
 ```

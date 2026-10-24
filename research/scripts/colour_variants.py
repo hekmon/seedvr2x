@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Colour-correction variants for the colour study (docs/colour.md, step 2), built on seedvr2x's
-runtime/colour.py so that a winner ports as it is.
+runtime/colour.py as milestone 5 accepted it (colour_baseline.py) so that a winner ports as it is.
 
   colour_variants.py selftest
   colour_variants.py bench SPEC[,SPEC...] [FRAMES]   # GPU (under the lock): time and memory per 4K frame
@@ -47,9 +47,11 @@ K = SL with A = 0 gives the reference's lightness. The colour channels are the s
 frame is still corrected alone (per_frame). low_K(d_L) is an intermediate stage of the cascade
 that gives low_SL(d_L): one cascade gives both (low_bands).
 
-The baseline is loaded from COLOUR_BASELINE (a copy of seedvr2x/src/seedvr2x/runtime/colour.py at
-the commit the study names), or from the repository next to this script.
+The baseline is colour_baseline.py, next to this script: seedvr2x/src/seedvr2x/runtime/colour.py
+as the study measured against it (`lab`), frozen there since seedvr2x's own file became split's.
+COLOUR_BASELINE names another file to load instead.
 """
+import hashlib
 import importlib.util
 import math
 import os
@@ -60,8 +62,9 @@ import torch
 import torch.nn.functional as F
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BASELINE = os.environ.get("COLOUR_BASELINE") or os.path.join(
-    HERE, "..", "..", "seedvr2x", "src", "seedvr2x", "runtime", "colour.py")
+FROZEN = os.path.join(HERE, "colour_baseline.py")
+FROZEN_BLOB = "f7ad9cc669b2742c16983de1bb5e836f2fa8aa81"  # git's name for runtime/colour.py as frozen
+BASELINE = os.environ.get("COLOUR_BASELINE") or FROZEN
 
 
 def load_baseline(path=BASELINE):
@@ -302,6 +305,12 @@ def selftest():
     base = torch.rand(t, 3, h // 8, w // 8) * 2 - 1
     ref = F.interpolate(base, size=(h, w), mode="bilinear", align_corners=False)
     content = (ref * 1.2 + 0.1 * torch.randn(t, 3, h, w)).clamp(-1.05, 1.05)
+    # the frozen baseline is still seedvr2x's file under its header, byte for byte
+    if os.path.abspath(BASELINE) == os.path.abspath(FROZEN):
+        with open(FROZEN, "rb") as f:
+            body = f.read().split(b" ----\n", 1)[1]
+        blob = hashlib.sha1(b"blob %d\0" % len(body) + body).hexdigest()
+        assert blob == FROZEN_BLOB, f"colour_baseline.py is not runtime/colour.py as frozen: {blob}"
     # low_band with 5 stages is colour.py's, bit for bit
     assert torch.equal(low_band(content, 5), C.low_band(content)), "low_band(5) != colour.low_band"
     # rgb split at 5 stages = colour.transfer, clamped
