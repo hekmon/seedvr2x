@@ -319,6 +319,16 @@ two 7Bs' smaller files (below).
   and less flicker. At ×2 to 1080p the metrics barely tell them apart
   ([colour.md](../research/docs/colour.md#step-6-the-sharp-7b-for-the-eyes)). It has the 7B's
   architecture, memory and time.
+  At ×1.5, ×3 and ×4 it stays the default, on the user's eyes again (2026-10-24, blind, 34
+  places at 1080p and 11 loops: it 9, the 7B 8, the same 14, undecided 3; every loop alike):
+  no factor separates them, nor outweighs the verdicts at ×2 and 4K, and a DVD to 1080p,
+  ×2.25, sits by ×2. The eyes followed the content instead: on a flat-colour cartoon and on
+  live-action faces the 7B was preferred on 6 of 18 places and the sharp on none ("less
+  banding in the flat colors", "skin a bit cleaner"). Two clips, one viewer, one seed: no
+  rule, a thing to watch on later sets. ×4's −3.5 dB on one clip was one row of its
+  letterbox, the sharp drawing the picture's top edge a row high: −0.20 dB over the
+  picture's rows. The colour study's scores count the bars, all but ΔE00's lightness and
+  colour parts ([colour.md](../research/docs/colour.md#what-step-7-recommends)).
 - **The regular 7B stays the reference** milestone 1 is checked with: numz's 7B fp16 file, and
   ours equal to it.
 - **Recognised by content.** A model file is checked by its own tensors, not by its name, which
@@ -3351,10 +3361,6 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
     an option, or left out, on those figures.
   Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
   windows, and none has fewer lengths.
-- **The sharp 7B at other upscale factors.** It is the default on crops at ×2 (see
-  [Weights](#weights)). At ×1.5, ×3 and ×4 the metrics are mixed (×4: PSNR-Y −0.05 dB, DISTS
-  worse on 3 of 5 clips, one clip −3.5 dB) and no eyes have looked yet: crops from the colour
-  study's runs, on the CPU.
 - **A detail scale, not in v1.** The user proposed a "detail recreation" scale for the
   over-rendering at 4K. With the sharp 7B the eyes' main complaint, invented skin texture, is
   gone, and what remains goes both ways with the content: the 7B's sharper thin cel lines, the
