@@ -2116,38 +2116,50 @@ first pass, whose shots are its input, and before the models load:
     largest measured.
   - Nothing caps a large card: the memory a 16–32 GB card spends on BlockSwap and tiles goes,
     on 96 GB and more, to longer windows.
-  - **`torch.compile` isn't built with milestone 3, and stays open** until it is measured on
-    seedvr2x itself (the user's call, 2026-10-10: numz's figures don't decide it; see
-    [To measure](#to-measure)). PyTorch's compiler turns a model's Python code into fused
-    GPU kernels the first time the model meets an input of a given shape, and compiles again
-    for each new shape. A job's frame size being fixed, the DiT's shape is its window's length
-    in latents, and the VAE's, called slice by slice, stays the same all job long. The
-    weights don't change, nor what goes in and comes out: only how the computation between
-    them runs. numz offers it for the DiT and for the VAE, measured on numz
-    ([vram.md](../research/docs/vram.md#torchcompile)):
-    - `compile_dit`: −26 to −32% of DiT time, for +0.1 to +1.4 GiB and 10–50 s of compilation.
-      numz's batches all have one length, so it compiles once and pays for itself after about
-      15 batches of 6 latents, or 5 of 12. seedvr2x's windows take every length up to the cap,
-      and each length would compile again. The DiT being a fifth of a 1080p run, the gain is
-      5–6% of a job at best. With numz's BlockSwap it gains nothing (16.0 s per batch against
-      15.5, all 36 blocks swapped), the compiled graph breaking at every swapped block.
-    - `compile_vae`: −16 to −19% of VAE time, 13–15% of a 1080p job, the VAE being four fifths
-      of it, for minutes of compilation per process. It takes about twice the VAE's working
-      memory, the intermediate pictures it computes, not its 0.47 GiB of weights (a
-      1080p decode 68.6 GiB against 34.9, an encode 33.8 against 19.7), 39 GiB more on the
-      compiling call at 4K, and leaves 5.5 GiB behind in the DiT's phase, about 5 latents of
-      window at 1080p. The cause isn't isolated
-      ([bug 14](../research/bugs/14-compile-vae-doubles-memory.md)). The suspect is numz's own
-      setup: it means to keep the VAE's causal convolutions out of the compiled graph, and its
-      exclusion never takes effect
-      ([bug 15](../research/bugs/15-compile-vae-exclusion-dead-code.md)). A compiled VAE set
-      up as meant was never measured, and the planner has no fit of a compiled VAE's peaks.
-    - Not measured: whether compiled output equals the plain one bit for bit, on which
-      milestone 1's regression and the resume rule stand; a recompilation's cost; one
-      compilation serving every window length (dynamic shapes); the DiT compiled over
-      seedvr2x's own swap.
+  - **`torch.compile`: the VAE, opt-in, in v0.1.0; the DiT, not** (decided on 2026-10-24,
+    the user, on compile-2's study on an RTX 5090,
+    [compile.md](../research/docs/compile.md); to be built). PyTorch's compiler turns a
+    model's Python code into fused GPU kernels the first time the model meets an input of a
+    given shape, and compiles again for each new shape. A job's frame size being fixed, the
+    DiT's shape is its window's length in latents, and the VAE's, called slice by slice,
+    stays the same all job long. numz's figures
+    ([vram.md](../research/docs/vram.md#torchcompile)) don't hold for seedvr2x: its compiled
+    VAE took twice its memory because its exclusion of the causal convolutions never took
+    effect ([bug 15](../research/bugs/15-compile-vae-exclusion-dead-code.md)).
+    - `--compile` compiles the VAE with those convolutions left out of the graph, as numz
+      meant: each pass 0.79–0.95 of plain's time, its peak 1.04–1.10 times plain's, 4 to 6
+      min of compilation per process, which the calibration pays. On a 32 GB card a whole
+      1080p job's units took 10% less (880 s against 980 at plain's own tiles), so a long job
+      gains about a tenth, an hour of 1080p about 2 h of 22, and a job under about 2,500
+      frames loses. It is a setting, recorded as compile_vae: its frames are not plain's
+      (51–61 dB from them, 14–17 dB closer than another seed), but the same in every process.
+    - Built with it, in the next implementation batch:
+      - inductor's deterministic mode, kept on through every trace: torch 2.14.1 resets it at
+        each trace's end (its restoring use_deterministic_algorithms sets inductor's flag too).
+        Without it, Triton's runtime autotune picks a reduction's block size by timing, so two
+        processes sum in other orders and their frames differ; with it, cold processes, warm
+        caches and a resume with a fresh cache gave the same frames, at no measured cost;
+      - the planner holding a compiled pass to 1.1 times its tile's plain peak, from its
+        measured table, and choosing smaller tiles where that doesn't fit;
+      - the compiler on one thread (TORCHINDUCTOR_COMPILE_THREADS=1, unless the user sets it):
+        its default 32 workers held about 4.4 GiB of host memory besides the process (16 GiB
+        summed RSS, most of it shared), beside the pinned blocks; one thread holds 0.4 GiB and
+        costs about a minute of compilation per process;
+      - inductor's modules imported before the environment is recorded, so that a resume
+        compares the same;
+      - the compile cache in the job's work directory, warm on a resume;
+      - `--plan` and the plan's line saying the compilation's time.
+    - The DiT isn't compiled in v0.1.0: 2–3% of a long 1080p job on a 32 GB card (the DiT is
+      a fifth of its units; compiled block by block over seedvr2x's own swap, a window takes
+      0.77–0.80 of plain's time), a loss on a short one (each new window length compiles
+      mid-job, 68–85 s at 1080p), and three memory failures not understood: a window's first
+      call from 20 latents, a new length's first call mid-job near the budget, and a resumed
+      process's leftover. The whole model compiled fails over seedvr2x's swap; one
+      compilation for every length (dynamic shapes) compiled again anyway, and ran slower.
+      Later, maybe: only the lengths that pay, PyTorch's recompile limit (8) raised, once the
+      jump is explained, on the 96 GB card too.
 
-    The plan's record keeps both flags, false, so that building it later reshapes nothing.
+    The plan's record keeps both flags: compile_vae as the user sets it, compile_dit false.
   - **A size that doesn't fit is refused, never degraded.** When the smallest window, 5
     latents, doesn't fit the DiT's phase with every block swapped, the job is refused before
     the run; no pixel cross-fade stands in (see [Pipeline](#pipeline-per-shot)).
@@ -2783,7 +2795,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--latent_noise_scale` | dropped from v1 (ByteDance uses 0; corrected version possibly later as an experiment, see bug 08) |
 | `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | replaced by shots, windows and latent stitching, chosen by the planner; `--window` pins the window cap |
 | `--blocks_to_swap`, tile sizes, offload devices | chosen by the planner; `--swap-blocks`, `--encode-tile` and `--decode-tile` pin them, exactly or refused; no offload device, the DiT's host copy being pinned memory |
-| `--compile_dit`, `--compile_vae` | not built with milestone 3, open until measured on seedvr2x: compiled, the DiT would compile again at every new window length, and numz's compiled VAE takes twice its memory |
+| `--compile_dit`, `--compile_vae` | replaced by `--compile`: the VAE compiled, opt-in (decided on 2026-10-24, to be built); the DiT not in v0.1.0 (see [Memory planner](#memory-planner)) |
 | `--cache_dit`, `--cache_vae`, `--chunk_size` | dropped: one long-running process, streaming by design |
 | `--seed` | kept (comparisons, reproducibility) |
 | `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
@@ -3036,7 +3048,8 @@ writers, and the planner needs real shot lengths.
    wait (see [Pipeline](#pipeline-per-shot), step 3), which blocks swap and what leaves the
    GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewritten)), the order of the
    planner's choices, the pins, what of a plan a resume keeps, the time model and `--until`'s
-   rule. It is built without `torch.compile`, which stays open (see [To measure](#to-measure)).
+   rule. It is built without `torch.compile`; the VAE's, opt-in, comes with the next batch
+   (decided on 2026-10-24, see [Memory planner](#memory-planner)).
 5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow: built on 2026-10-12
    (see [Output](#output)). The manual sptenc workflow already worked without it.
 
@@ -3297,24 +3310,18 @@ After v1, phase 2 brings the two 7Bs' smaller files (see [Weights](#weights)).
   drive on the Windows side, a load of 75 s; two or more at once, 480 MB/s and 42 to 43 s. A
   patch reading each tensor in four pieces is held, level on a Linux NVMe drive; not measured on
   a hard disk, where four streams of one file may cost seeks, and not taken until it is.
-- **`torch.compile`, undecided** (see [Memory planner](#memory-planner)). Every figure is
-  numz's, on numz's flow, and its VAE setup has a defect of its own. To measure on seedvr2x:
-  - the VAE compiled with its causal convolutions in the graph and out of it, as numz meant:
-    the peak, what stays allocated after, the compiling call's own peak, the gain per frame,
-    at 1080p untiled and on 4K's tiles; then a fit the planner can use
-  - compiled output against the plain one, VAE and DiT: bit for bit, or else how far against
-    the spread between seeds
-  - the DiT across window lengths: a recompilation's cost, PyTorch's limit on them, and one
-    compilation serving every length (dynamic shapes)
-  - compiling only the lengths that pay, which the first pass allows, every shot being known
-    before the DiT starts (the user's idea, 2026-10-10): a long shot's windows have at most
-    two lengths, a shorter shot is one window of its own, and a length compiled once serves
-    the whole process
-  - what another window layout would give the DiT: balanced windows spread a long shot's over
-    the lengths from about half the cap to the cap, where full windows with the last one slid
-    back to end with the shot have one length, for a few latents computed twice and joins
-    that fall elsewhere (a stitching check of its own)
-  - the DiT compiled over seedvr2x's own swap, numz's breaking the graph at every block
+- **`torch.compile` on the 96 GB card** (see [Memory planner](#memory-planner)). The study ran
+  on an RTX 5090 alone: the 96 GB card died before its part
+  ([compile.md](../research/docs/compile.md)). Left for it:
+  - the VAE untiled at 1080p and on 4K's 1536 to 2048-px tiles: which tiles a compiled VAE
+    may take on 48 to 96 GB cards;
+  - the DiT above 22 latents and in long windows (76 and more), with FlashAttention 2 and
+    SDPA: whether its compile pays on large cards, and whether the jump at 20 latents is
+    SDPA's;
+  - the convolutions in the graph: 21–23% faster at 768-px tiles, but a first call 1.4 to
+    1.6 times plain's peak, its cause not isolated.
+  Other window layouts were modelled on the 12 cut lists: none pays more than the balanced
+  windows, and none has fewer lengths.
 - **The sharp 7B at other upscale factors.** It is the default on crops at ×2 (see
   [Weights](#weights)). At ×1.5, ×3 and ×4 the metrics are mixed (×4: PSNR-Y −0.05 dB, DISTS
   worse on 3 of 5 clips, one clip −3.5 dB) and no eyes have looked yet: crops from the colour
