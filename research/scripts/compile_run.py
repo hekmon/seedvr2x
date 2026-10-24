@@ -240,6 +240,19 @@ def install(options: argparse.Namespace, recorder: Recorder) -> None:
 
     planner.plan = plan
 
+    # The VAE's predicted peaks scaled (--vae-peak-factor): a compiled VAE's peak above what is on
+    # the GPU before its pass, held to F times plain code's (docs/compile.md: excl 1.1, int 1.6),
+    # so that the planner chooses its tiles, and judges every VAE pass, by the compiled peak.
+    if options.vae_peak_factor != 1.0:
+        fit = planner._fit
+        factor = options.vae_peak_factor
+
+        def scaled(padded: Any, tiles: Any, column: int) -> float:
+            return factor * fit(padded, tiles, column)
+
+        planner._fit = scaled
+        recorder.write({"record": "vae_peak_factor", "factor": factor})
+
     # The run's units.
     started = run._started
     made = run._made
@@ -462,6 +475,12 @@ def parse(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--dit", choices=DIT_VARIANTS, default="plain")
     parser.add_argument("--dit-dynamic", action="store_true")
     parser.add_argument("--recompile-limit", type=int, default=None)
+    parser.add_argument(
+        "--vae-peak-factor",
+        type=float,
+        default=1.0,
+        help="the planner's VAE peaks (planner._fit) times F: a compiled VAE planned for",
+    )
     parser.add_argument(
         "--keep-deterministic",
         action="store_true",

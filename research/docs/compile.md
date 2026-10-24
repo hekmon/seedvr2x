@@ -36,6 +36,10 @@ In short:
   on 8 full-reference clips, the compiled DiT's frames are 51.1 to 61.3 dB (PSNR-Y) from the plain
   ones, another seed's 35.6 to 45.3 dB; against the ground truth, compiled moves PSNR-Y by 0.07 dB
   at most, another seed by up to 0.67.
+- **The VAE's `excl` compile passes design's checks for v0.1.0:** bit for bit from one cold
+  process to another and through a stop and resume, a whole job planned at 1.1 times plain's
+  peaks fitting and its units 10% faster than plain code's own plan, its compile workers 4.4 GiB
+  of host memory (none in a single thread, for 20% more compile time).
 - **Two processes compiling cold give different bits, unless inductor's deterministic mode is
   really on.** Triton picks some kernels' block sizes by timing them, and a reduction's block size
   changes its sums; torch 2.14.1 turns the mode that prevents it back off at every trace.
@@ -299,8 +303,9 @@ most; the latent 0.10 to 0.14 at most.
 ### From one process to another
 
 **Two processes compiling the same model cold give different bits** (the DiT at 540p and at
-1080p, with or without the environment variable below; the VAE at 1080p; with Python's hash seed
-fixed, at one length of two), while a process repeats its own compiled output exactly and a
+1080p, with or without the environment variable below; the VAE at 1080p, in its `excl` form, the
+one pair run without the mode, no `int` pair; with Python's hash seed fixed, at one length of
+two), while a process repeats its own compiled output exactly and a
 warm cache reproduces the process that filled it. The generated kernels are the same code; the
 difference is Triton's runtime autotuning: it times a few block sizes for each kernel on its
 first call and keeps the fastest, a choice that moves with the timing's noise (22 of 68 kernels
@@ -372,12 +377,13 @@ compiled (`blocks`, the deterministic mode, cold caches):
 | Units, encodes / windows / decodes, s | 282 / 235 / 616 | 281 / 1,029 / 591 |
 | of which compiling, in the windows | 0 | 822 |
 | The calibration's steps, s (of which compiling) | 60 (0) | 406 (286), two processes |
-| The window's estimate against its time: median, largest | −0.3%, +8.7% | −1.2%, +1,380% |
+| The window's estimate against its time: median, largest | −0.3%, +8.7% | +0.3%, +1,380% |
 
 The windows' own work took 12% less, but the job met about ten lengths its calibration hadn't
 compiled, 68 to 85 s each, and a stop and resume compiled them again in the new process (its cache
-fresh, as the test meant; about 3.7 times without what that second process compiled again):
-**the compiled short job took about four times the plain one's DiT time.**
+fresh, as the test meant): **the compiled short job took about four times the plain one's DiT
+time** (1,029 / 235 = 4.4 as run; (1,029 − 79) / 235 = 4.0 without the 79 s the resumed process
+spent compiling again the one length, 14 latents, that the stopped one had compiled).
 A unit that compiled took 68 to 85 s more than its own work, up to 15 times its estimate for a short window; the encodes' and decodes' estimates
 held as without compile (within 5%). A first run of the same compiled job ran out of memory in
 the middle, at a new length's first call (shot 13's third window: 75 compilations, 29.34 GiB
@@ -397,8 +403,10 @@ command.
   compiled kernels would be timed again, and its frames would differ from those the stopped run
   made (the rule: a resumed job's output equals an uninterrupted one's). With the mode kept on,
   a cold cache gives the same bits; a cache kept in the job's work directory would also save the
-  compilations. Not shown end to end: the one compiled job stopped by `--until` and resumed (the
-  45-s excerpt, its plan pinned, a fresh cache) ran out of memory in the resumed process, its
+  compilations. Shown end to end for the VAE's `excl` compile ([the checks](#the-vaes-checks-for-v010)):
+  stopped by `--until` and resumed with a fresh cache, the same frames. Not for the DiT: the one
+  DiT-compiled job stopped by `--until` and resumed (the 45-s excerpt, its plan pinned, a fresh
+  cache) ran out of memory in the resumed process, its
   first compiled window having left 13.24 GiB allocated where every other run's windows started
   with 2.8 to 4.5 (the size of some 26 swapped blocks' weights); seen once, the cause not
   isolated. The plan's record holds `compile_dit` and `compile_vae`, compared on resume
@@ -417,6 +425,44 @@ command.
   tiled frames: on a machine with 40 GiB for it, close to its limit. The planner's host budget
   doesn't count them.
 
+## The VAE's checks for v0.1.0
+
+Design's three checks of 2026-10-24, before the VAE's `excl` compile is built (opt-in, the
+deterministic mode kept on), on the same RTX 5090, each a process of its own:
+
+- **Bits, from one process to another: they hold.** `compile_vae.py`, `excl` at 1856 / 1088 px:
+  two cold processes, a warm one and a cold one compiling in a single thread give the same latent
+  and frames, bit for bit (SHA-256 982c49ed… and 8c620bce…), the compiled passes 0.83 to 0.88 of
+  plain. seedvr2x's own runs (`compile_run.py --vae excl --keep-deterministic`) of 2 full-reference
+  clips, the plan pinned (encode tiles 1856, decode 1088, 29 blocks swapped), in two processes with
+  cold caches and a third on a warm one: the same frames (frame MD5s equal; the files' bytes
+  differ: their container's metadata).
+- **A whole job, planned for the compiled peak: it fits, it gains 10% of its units, and it
+  resumes bit for bit.** The 45-s excerpt (1,079 frames, 14 shots), windows of 13 latents and 29
+  blocks swapped pinned in every run; `compile_run.py --vae-peak-factor 1.1` makes the planner
+  judge every VAE pass at 1.1 times its plain peak, and it chose an untiled encode and decode
+  tiles of 1088 px, where plain code's own plan, on the same card a few minutes later, took 1216:
+
+  | Run | Decode tiles px | Units s: encodes / windows / decodes, all | Calibration s (compiling) | The run s |
+  |---|---:|---|---:|---:|
+  | `excl` compiled, planned at 1.1 | 1088 | 216 / 207 / 458, 880 | 276 (238) | 1,320 |
+  | plain, the same tiles | 1088 | 254 / 206 / 535, 995 | 44 (0) | 1,212 |
+  | plain, its own plan | 1216 | 252 / 206 / 523, 980 | 43 (0) | 1,188 |
+
+  The compiled run's units took 11.6% less than plain code's at its tiles and 10.2% less than
+  plain code's own plan (encodes −14%, decodes −12%): the gain a user gets, its compilation (238
+  s, in the calibration) paid back from about 2,500 frames (some 100 s of 1080p); this 45-s job
+  took 11% longer in all, an hour of 1080p about 2.2 hours less. No unit compiled outside the
+  calibration (0.2 s), nothing ran out of memory. The same compiled job stopped by `--until`
+  (1 segment of 4 made, in shot 9) and resumed by a new process with a fresh cache made the same
+  1,079 frames as the uninterrupted one, bit for bit (frame MD5s; the files' sizes equal too).
+- **The compiler's host memory: 4.4 GiB, or none in a single thread.** `compile_mem.py` around
+  `compile_vae.py`'s cold run: with torch's default (32 workers), 37 processes, their tree's summed
+  RSS 27.7 GiB but its PSS 15.5, the workers' RSS 16.4 GiB and their PSS 4.4 (forked from the
+  compiling process, they share most of its pages); with `TORCHINDUCTOR_COMPILE_THREADS=1`, 3
+  processes, 0.38 GiB beside the main one, the tree 12.0 GiB, for 299 s of compilation against 241
+  and 249 (+20 to +24%), the bits the same.
+
 ## What's left
 
 Not measured, the 96 GB card having failed on 2026-10-23 before running them:
@@ -431,8 +477,8 @@ Not measured, the 96 GB card having failed on 2026-10-23 before running them:
 
 Not isolated: the cause of the `int` VAE's first-call peak, of the DiT's jump at 20 latents and of
 the memory a compiled window left in a resumed process. Not shown: a compiled job stopped and
-resumed to its end, its output against the same job uninterrupted (on the 5090, at a shape that
-leaves the first calls room).
+resumed to its end with the DiT compiled, its output against the same job uninterrupted (on the
+5090, at a shape that leaves the first calls room); the VAE's, shown.
 
 ## Reproduce
 
@@ -462,6 +508,12 @@ python research/scripts/compile_run.py --dit blocks --keep-deterministic --recom
     --record-flags --units-json run.jsonl -- CLIP.d1.lr.mkv -o OUT --model-dir MODELS \
     --dit-model seedvr2_ema_7b_sharp_fp16.safetensors --vae-model ema_vae_fp16.safetensors \
     --resolution 1080 --format gbrp16le --cuts EMPTY.txt --seed 42
+
+# a whole job with the VAE compiled (excl), its passes planned at 1.1 times plain's peaks, and
+# the host memory of the process and its compile workers
+python research/scripts/compile_mem.py mem.json -- python research/scripts/compile_run.py \
+    --vae excl --keep-deterministic --vae-peak-factor 1.1 --record-flags --units-json job.jsonl \
+    -- SOURCE.mkv -o OUT.mkv --model-dir MODELS --resolution 1080 --window 13 --swap-blocks 29
 
 # the outputs against each other and the ground truth, CPU
 python research/scripts/compile_bits.py --clips anime-bright,anime-clean --gt-dir CLIPS \
