@@ -1881,7 +1881,12 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       `x.mkv` with no manifest beside it is refused, where today a new job replaces it
       without a word. Each segment's bytes are hashed when it is finished and checked at
       the assembly, a damaged one made again, where today it would be joined and the
-      segments removed. ffmpeg's children of the assembly end with seedvr2x, where a killed
+      segments removed: by the run that finds it, at once, where its models are loaded, said
+      in a warning (its bytes changed since it was finished: the disk, or another program),
+      once, a segment damaged again stopping the run; a run that loaded none, the assembly
+      alone left to it, records the segment unfinished and stops with status 1, naming it,
+      the same command then making it again and assembling (2026-10-28). ffmpeg's children of
+      the assembly end with seedvr2x, where a killed
       seedvr2x leaves its join writing. And two older defects go: the FFV1 and PNG writers
       remove a segment's stale checksums before its new file is safe, and a relative `-o`
       whose name holds ": " is taken by ffmpeg for a protocol.
@@ -2401,7 +2406,12 @@ first pass, whose shots are its input, and before the models load:
         from its first. The manifest's `environment_changes` says when, the shape before and
         after, and what was made. From there the output isn't the uninterrupted run's bit for
         bit: smaller tiles drift slightly in colour, which `split` corrects for the most part.
-        Without the flag the refusal names it, a third way out.
+        Without the flag the refusal names it, a third way out. The new shape is written
+        with the next unit made, as a new environment is, both then: a run stopped before one
+        leaves the manifest as it was, nothing discarded, and the next start plans from the
+        memory free then, the recorded shape kept where it fits again. `--plan` with the flag
+        says the shape it would take and the windows it would make again, and writes nothing
+        of the job, its cut list aside (2026-10-28).
     - This rests on swapping changing no bit of the output, milestone 3's first gate (see
       [BlockSwap, rewritten](#blockswap-rewritten)). Run on 2026-10-11: a job stopped on a
       card emulated at 16 GB was refused on 10 GB, its manifest untouched, and finished on 24
