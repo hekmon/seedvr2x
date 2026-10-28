@@ -84,7 +84,9 @@ never requires it.
 - A frame rate above 1,000 fps (decided on 2026-10-12, to be built): every FFV1 output is
   Matroska, whose millisecond can't tell two such frames apart. Written today, seedvr2x's own
   master at 2,000 fps is refused when read back, 15 of its 30 frames a whole frame off; 1,000
-  fps itself holds.
+  fps itself holds. Refused once, before the first pass, whatever gives the rate the job would
+  write at: the one declared, the one Matroska's frames are read at, or `--frame-rate`
+  (2026-10-28).
 - Sources refused in v1, each with a clear message, every reason a source has given in one
   numbered refusal:
   - HDR: the PQ (`smpte2084`) and HLG (`arib-std-b67`) transfers. The model was trained on SDR
@@ -219,6 +221,8 @@ rest to mend (decided on 2026-10-28, to be built):
   start, resumes included: a line each, the manual explaining;
 - the plan's budget line where the reserve of 2.5 GiB is taken, 851 characters, the refused
   plan's whole refusal inside it: the two lines a plan's line may take;
+- a refusal's advised command, a remake or a join, on a line of its own, so that it can be
+  copied whole (the join refusals run to 2.6 KB);
 - the silences of a start: about a minute before the models' checks at every start of a
   one-file job, and 6 min on an 18.5 GB source, its remux rehearsed (see
   [Output](#output)): a line says what is read, and for about how long;
@@ -814,8 +818,9 @@ Decoding goes through an ffmpeg pipe:
     early, lie within 1.3 ms of 24/1's timeline and are named 24/1. So a refusal that names the
     twin says first that such a join reads so too, and is joined again on the frame grid, as a
     directory's refusal says how. As built it says so in both directions; decided on 2026-10-12,
-    to be built: only where the whole rate N is named by half a frame for a file declared N ×
-    1000/1001, the one way a join was seen to read. Segments at a whole rate last whole
+    to be built: only where the twin rule names the whole rate N for a file declared N ×
+    1000/1001, never the exact rule, the one way a join was seen to read (worded so on
+    2026-10-28). Segments at a whole rate last whole
     milliseconds, and a Blu-ray remux declared 24/1 that runs at 24000/1001, the case this
     guidance was made for, is no join.
   - When the timestamps follow no rate exactly, as a file joined by ffmpeg's concat demuxer
@@ -1107,6 +1112,9 @@ The rule: the upscale must look like its source in any given player.
   - A gamut conversion is a grading choice, for the user's own tools.
 - **Shape:** the declared sample aspect is honoured (with an override for broken tags), and the
   output has square pixels at the source's display aspect.
+  - The masters and a `--segment-cmd`'s stdin declare no sample aspect: square by omission, as
+    every reader tried takes it. Declared 1:1, every FFV1 packet would change for nothing
+    (kept on 2026-10-28).
   - Players honour the sample aspect. numz ignores it (OpenCV), so its upscale of a 16:9 DVD
     comes out 16% too narrow (NTSC) or 30% too narrow (PAL).
   - The ITU-R BT.601 question of 704 or 720 active pixels (≈ 2%) is left to the stream's
@@ -1781,7 +1789,9 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       ffprobe reads every tag and the exact rate as it reads the master's file, with no
       duration and millisecond timestamps. NUT loses the colour tags there, yuv4mpegpipe all
       but the rate and the range, raw video everything.
-    - The command is run by `/bin/sh`, never parsed, in a process group of its own. `{out}` is
+    - The command is run by `/bin/sh`, never parsed, in a process group of its own, which a
+      stop sends SIGTERM, then SIGKILL to what is left of it after 2 s (kept on 2026-10-28).
+      `{out}` is
       required and written bare: seedvr2x replaces it by the quoted name of a partial file,
       a `.mkv` by its suffix, put in place once whole.
     - Checked: the command's status, then its file's decoded frames, counted, which also
@@ -1826,7 +1836,11 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       adds one to every file it writes). ffmpeg's remux makes it a one-frame video track
       instead, which players list as a second video, and so did the finished file until then:
       the picture is taken out of the remux and attached again, and checked against the
-      source's. Another container's cover, an MP4's, is attached the same way.
+      source's. Another container's cover, an MP4's, is attached the same way, and so is the
+      cover of the remake a refusal advises (see [Input](#input)), which made it a video track
+      too. Another stream more than 1 s ahead of the video in the finished file is warned of,
+      not refused: a source's audio that starts late or has gaps leads there, the file whole
+      (kept on 2026-10-28).
     - Proven before it is put in place, without a decode: the video's packets those the join
       read, each at its place on the grid, and every other stream's equal to a remux of the
       source's. A failure removes the partial and keeps the segments.
@@ -1835,8 +1849,9 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       under 2 s on files up to 5 GiB). Refused there, naming the stream and the remux that
       mends the source: a stream Matroska can't hold (MP4's `mov_text`, Blu-ray and DVD PCM,
       CEA-608, a MOV's timecode track, an MP4's chapter track) and a stream that starts
-      before the file's start, by which the muxer would move the others. A directory output
-      takes every such source.
+      before the file's start, by which the muxer would move the others. A source whose first
+      video frame comes before the file's start is refused too, before any unit: no real file
+      has shown one (kept on 2026-10-28). A directory output takes every such source.
       - Met on 2026-10-23 (milestone 7, on WSL2): a Blu-ray rip of 18.5 GB was read for 6 min
         with nothing said, then refused for ffmpeg's warning that it couldn't estimate the
         rate of the source's cover picture, a stream of one frame, which the remux the
