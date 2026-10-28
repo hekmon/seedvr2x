@@ -1,9 +1,10 @@
 # seedvr2x design
 
 > Status: **being built.** It holds the decisions taken and the questions still open, and the
-> code follows it: milestones 1, 2, 4, 5 and 6 and the I/O layer have passed, and milestone 3
-> but for its time estimates (see [Validation milestones](#validation-milestones)). Each
-> decision links to the measurement it rests on in [../research/](../research/).
+> code follows it: milestones 1, 2, 4, 5, 6 and 7 and the I/O layer have passed, and
+> milestone 3 but for its time estimates (see
+> [Validation milestones](#validation-milestones)). Each decision links to the measurement it
+> rests on in [../research/](../research/).
 
 ## Goal
 
@@ -69,6 +70,8 @@ never requires it.
 ### Not in the first version
 - Image inputs, ComfyUI nodes, macOS/MPS, AMD/ROCm
 - Windows itself: v0.2.0 (the user, 2026-10-24). Linux runs it, WSL2 included.
+- A job's work directory away from its output file (the user asked, on 2026-10-24, for the
+  scratch on one disk and the file on another): its masters live there, as large as the file.
 - Multi-GPU in one process (separate processes on separate shot ranges can come later, see
   [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
@@ -204,6 +207,24 @@ to the sampler's progress bar. A whole run's default output is read line by line
 memory tight, on both drivers: nothing but seedvr2x's lines and a download's bar. The plan's
 lines teach as they go (see
 [Memory planner](#memory-planner)).
+
+Milestone 7's four nights on an RTX 5090 under WSL2 (2026-10-24 to 27), read so, found the
+rest to mend (decided on 2026-10-28, to be built):
+- the sampler's progress bar, one per window, 848 lines in a night, printed by the vendored
+  sampler's tqdm, which nothing turns off: gone, as torch's lines;
+- the calibration's own working ("time estimates: the decode's two lengths, 5 in 3.093 s, 13
+  in 8.520 s, give no line with a constant of 0 or more and a rate above 0 …"): under
+  `--verbose`;
+- the two warnings of a driver that lends system memory, 501 and 521 characters at every
+  start, resumes included: a line each, the manual explaining;
+- the plan's budget line where the reserve of 2.5 GiB is taken, 851 characters, the refused
+  plan's whole refusal inside it: the two lines a plan's line may take;
+- the silences of a start: about a minute before the models' checks at every start of a
+  one-file job, and 6 min on an 18.5 GB source, its remux rehearsed (see
+  [Output](#output)): a line says what is read, and for about how long;
+- lines that carry the time of day alone: the night the clocks went back, 02:00 to 02:59
+  came twice. A run says the date in a line when it changes, and the clock's change when the
+  clock moves.
 
 ### Language: all Python
 Every layer is Python, in one process per job. seedvr2x stands alone; with sptenc, the two
@@ -1412,7 +1433,8 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   swapped), each of `maximum`'s 45 frames equal to its run alone, fed the shot from that
   frame. Kept at 16 bits, the frames change no byte of a master, in `gbrp16le`,
   `yuv420p10le` or PNG, with `split` or none, nor of the float frames dumped (a CPU test
-  against the frames kept in float). Left: the user's eyes on long runs (milestone 7).
+  against the frames kept in float). Milestone 7's long runs were `standard` alone
+  (2026-10-28): left, the user's eyes on a long run at a level above it.
 
 ## Colour correction
 
@@ -1773,8 +1795,10 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       need mending goes in a script the option names. Refused with PNG.
   - **Master sizes,** per hour of 1080p at 24000/1001, four times that at 4K: about 100–135
     GiB in `yuv420p10le`, the default, and 540–690 GiB in `gbrp16le` with colour correction
-    (measured with `lab` in milestone 5). The corrected float32 output fills the 16 bits, tens
-    of thousands of distinct codes in a frame against 300–400 in numz's bf16 output, whose
+    (measured with `lab` in milestone 5; with `split` in milestone 7, 98.8 GiB an hour on an
+    anime episode and 104.8 on a live-action film). The corrected float32 output fills the 16
+    bits, tens of thousands of distinct codes in a frame against 300–400 in numz's bf16
+    output, whose
     `gbrp16le` masters took 250–350 GiB ([output.md](../research/docs/output.md) measured 2.97
     MiB per frame). Rounding ours to bf16 would save 34–43%, for 8 significant bits.
   - **Rejected:** `--stream`, the output on stdout for a single compressor process. That
@@ -1797,7 +1821,12 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       chapters, languages, titles and dispositions, the upscaled video in the source video's
       place. They are read from two openings of the source: a plain two-input join isn't
       interleaved (the audio 10 s ahead of the video in the file), which ffmpeg then reads
-      badly. A cover picture comes out as a one-frame video track, as in ffmpeg's remux.
+      badly. A cover picture comes out as Matroska holds one, attached to the file, its file
+      name, type and bytes the source's (decided on 2026-10-28, the user, to be built: MakeMKV
+      adds one to every file it writes). ffmpeg's remux makes it a one-frame video track
+      instead, which players list as a second video, and so did the finished file until then:
+      the picture is taken out of the remux and attached again, and checked against the
+      source's. Another container's cover, an MP4's, is attached the same way.
     - Proven before it is put in place, without a decode: the video's packets those the join
       read, each at its place on the grid, and every other stream's equal to a remux of the
       source's. A failure removes the partial and keeps the segments.
@@ -1808,6 +1837,15 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       CEA-608, a MOV's timecode track, an MP4's chapter track) and a stream that starts
       before the file's start, by which the muxer would move the others. A directory output
       takes every such source.
+      - Met on 2026-10-23 (milestone 7, on WSL2): a Blu-ray rip of 18.5 GB was read for 6 min
+        with nothing said, then refused for ffmpeg's warning that it couldn't estimate the
+        rate of the source's cover picture, a stream of one frame, which the remux the
+        refusal advises keeps. Decided on 2026-10-28, to be built: that warning, for a cover
+        picture, is tolerated as the codec parameters' are, the picture attached to the
+        finished file as above; a line says what the rehearsal reads before it does; and
+        its result is recorded with the first pass's, a resume trusting it for the same
+        content and `ffmpeg`, where every start of a one-file job paid it again (66 s on a
+        7.5 GB source).
     - Disk: at the end the segments and the finished file sit side by side, about twice the
       master, with the other streams twice while they are compared. Without the room the
       run stops, everything kept, and the same command assembles later.
@@ -2270,6 +2308,24 @@ first pass, whose shots are its input, and before the models load:
       decodes 1.3 to 2.4%; `--plan`'s whole job −3.6 and −1.3% at 1080p, −2.1% at 720p (+18%
       before both rules), the corrected estimates within 1.4%. A single unit still misses by
       up to 22 to 31%, one in 20 per phase over 1.15 times its estimate at most.
+    - Over long runs beside a desktop (milestone 7, an RTX 5090 under WSL2, 2026-10-24 to
+      27), by the wall clock: an anime episode's units, 11 h 33 min at its start, took
+      10 h 54 min; a film's first 32 min, 12 h 0 min at its first start, took 14 h 52 min
+      over three nights, its two resumes planned with the reserve of 2.5 GiB for want of free
+      memory, a slower plan, their decodes calibrated at 0.72 and 0.73 s a frame where the
+      first night's had 0.53. Each resume said its own time again; the last ran 10% under it.
+      What slowed those calibrations, the plans or the desktop's use of the card then,
+      nothing there separates. `--until` stopped each night 19 and 75 s before its hour, the
+      night the clocks went back included.
+  - **One clock** (decided on 2026-10-28, to be built). The run timed its units by its own
+    clock, Python's monotonic one, and said its ends and checked `--until` by the wall's.
+    Under WSL2 the two parted: the VM's clock ran at 0.90 to 0.91 of the wall clock every
+    day but the last (a 5-min sleep took 333 s by the wall, and Windows' file times agree
+    with the wall), so every duration printed came out a tenth short, every "ending about"
+    early by a tenth of the time left (at 02:02 one said 04:49; the episode ended at 05:05),
+    and `--until`'s margin of 1.15 stood at 1.035. The run keeps timing its units by its own
+    clock, steady, and says them, its ends and `--until`'s check in the wall clock's time,
+    by the ratio of the two it measures as it goes.
   - Each unit's progress line says the job's time left and the time of day it should end
     ("…; about 27 min 37 s left, the job ending about 19:26"; decided on 2026-10-21, built on
     2026-10-23).
@@ -2304,6 +2360,22 @@ first pass, whose shots are its input, and before the models load:
       shape, from the memory free that day.
     - A resume whose recorded shape no longer fits stops, naming the phase and the shortfall.
       A plan recorded with no unit made yet is made again whole.
+      - Met on 2026-10-27, milestone 7's third night on an RTX 5090 beside its desktop: a
+        1080p job planned with its encode untiled, resumed a second time, was refused 2.84
+        GiB short (the encode taking 22.03 GiB, 19.19 counted free), the desktop's share of
+        the card grown from 3.2–4.8 GiB to 9.0, programs closed to the tray keeping theirs.
+        With them quit, 4.0 GiB, it finished. 3 min 45 s had passed first: the remux
+        rehearsed (66 s), the model files hashed (2 min), then the source (36 s).
+      - Decided on 2026-10-28, to be built: the refusal says first that the job is kept and
+        the same command resumes it; then the phase and what it lacks, in GiB; then how to
+        free it: quit the programs using the GPU, those closed to the tray too, the manual
+        saying how to see them on each system. NVML's and the driver's readings and both
+        reserves go under `--verbose`.
+      - And as soon as the record is read, before the rehearsal and the hashes, the room is
+        read through NVML: where the recorded shape doesn't fit, a warning says so at once,
+        with what to free while the files are checked, and for about how long. The check
+        that refuses stays where it is, the memory moving meanwhile, so that no memory
+        refusal hides the others (another job, a model file, the source).
     - This rests on swapping changing no bit of the output, milestone 3's first gate (see
       [BlockSwap, rewritten](#blockswap-rewritten)). Run on 2026-10-11: a job stopped on a
       card emulated at 16 GB was refused on 10 GB, its manifest untouched, and finished on 24
@@ -2322,6 +2394,12 @@ first pass, whose shots are its input, and before the models load:
   - the swapped blocks and the pinned host memory, with the longest shot's part of the
     system memory and the moment it is held
   - the tiles and their grid, and the scratch of the longest tiled shot
+  - the disk the job takes beside its output: its masters, about 100–135 GiB an hour of
+    1080p in `yuv420p10le` (see [Output](#output)), twice that while a file is assembled,
+    against what its disk has free; a run says it too, warning where they won't fit, since
+    the disk may be cleared as the job runs (decided on 2026-10-28, to be built: a whole
+    film's `--plan` said only its assembly's time, where its disk had 85 GiB free for about
+    200 GiB of masters)
   - each phase's predicted peak, and which one bounds the plan
   - the calibration's cost, the time per phase, the total, the longest unit, which is how early
     `--until` may stop, and each `--quality` level's time on a job not yet run
@@ -2942,12 +3020,16 @@ explanation.
 - the finished file: its work directory, what is refused before any work and the remux that
   mends the source, its checksums and its manifest beside it
 - disk use: master sizes per hour, the input copies during a run, and twice the master while
-  a finished file is assembled
+  a finished file is assembled, in its work directory beside it; a long tiled shot's scratch
+  (a film's credits, one shot of 8,055 frames: 95 GiB at 1080p)
 - GPU memory, two points:
   - nvidia-smi can show the card nearly full while a phase needs much less: the allocator keeps
     freed memory reserved, and trims it only when an allocation would fail
   - which phase sets the peak: the DiT through the window length, the VAE through the frame
     size, which is why 4K needs tiled decoding
+  - what else holds the card, and how to see it: Windows' Task Manager, its Details tab and
+    its "Dedicated GPU memory" column, where programs closed to the tray keep theirs;
+    nvidia-smi on Linux
 - what a small card asks of the host and can't run: pinned RAM for the DiT's swapped blocks
   (15.19 GiB with all 36), a tiled shot's scratch, and the sizes refused for want of free
   VRAM, counted from what is free at the start, not from the card's size (4K: 22.4 GiB)
@@ -2963,7 +3045,10 @@ explanation.
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
   transfer kept, square pixels)
 - resume: the same command resumes; what refuses a resume and why; `--accept-env-change`,
-  which a finished directory job never needs
+  which a finished directory job never needs; a resume short of the card's memory, what to
+  free, the job kept
+- the default size, 1080 rows: a 1080p source comes out at its own size, redrawn, not
+  enlarged
 - stopping at a set time: `--until`, what it stops before, its exit code (75) for scripts that
   run a job night after night, and the longest unit `--plan` prints
 - integrity: the per-frame checksums kept with the output, and `seedvr2x verify` to check a
@@ -3275,6 +3360,20 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
    group can ghost (see [To measure](#to-measure)); held pictures, where a false cut's step
    would show (see [Shot detection](#shot-detection): the fallback gate); and shots' first
    frames, re-rendered less than the next ones (see [Pipeline](#pipeline-per-shot), step 1).
+   Passed on 2026-10-28, on an RTX 5090 under WSL2 beside its desktop, with seedvr2x's
+   defaults at `standard`, two 1080p Blu-ray sources upscaled at their own size, a redraw: an
+   anime episode, 37,327 frames in 561 shots, in one night, and a live-action film's first 32
+   min, 46,036 frames in 599 shots, over three, stopped twice by `--until` and resumed, each
+   file with its source's audio, subtitles and chapters. The user watched both against their
+   sources through playlists of each kind: 12 runs of fast motion inside a shot, spread over
+   each; 18 and 20 held pictures beside a detected cut, those whose two sides look alike
+   first; 12 shot starts. No ghost, no false cut's step, no weak start, and nothing of
+   seedvr2x's own (cuts, windows, joins, tiles, colour, resume) was seen. The live action
+   couldn't be told from its source. On the anime, the model's own weak spot, the smallest
+   details meant to be sharp: small faces in motion looked redrawn, kanji moving in the
+   credits showed artefacts, and the source's faint noise in flat colours came out a little
+   blockier. A pristine source leaves a same-size redraw little to repair: the model's use,
+   an old or damaged source, wasn't run.
 
 ## Open questions
 
@@ -3302,7 +3401,8 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   Taking each frame from the run whose grid ends a group there, 4 runs per shot, was measured
   and seen on 2026-10-20 and is decided as an option (see
   [Several runs of a shot](#several-runs-of-a-shot-an-option-for-quality)), two runs too.
-  Left: a long run (milestone 7).
+  Milestone 7 (2026-10-28): over two long runs at `standard`, the user saw no ghost on the
+  fast motion of 12 places in each.
 - **The VAE's room, by the frames** (see [Memory planner](#memory-planner), the budget).
   Measured by tile size on the 96 GB card (2026-10-16 to 18): every tile the 12 to 48 GB cards
   take, passes alone, six of them in whole runs, three decodes under expandable segments; a room
