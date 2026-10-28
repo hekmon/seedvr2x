@@ -2376,6 +2376,14 @@ first pass, whose shots are its input, and before the models load:
         with what to free while the files are checked, and for about how long. The check
         that refuses stays where it is, the memory moving meanwhile, so that no memory
         refusal hides the others (another job, a model file, the source).
+      - With `--accept-env-change`, a recorded shape that no longer fits is planned again for
+        what is left, from the memory free then, as a new GPU is taken (decided on
+        2026-10-28, the user's go, to be built). What still fits of it is kept, and what is
+        made: a shot whose windows were begun under a cap that no longer fits makes them again
+        from its first. The manifest's `environment_changes` says when, the shape before and
+        after, and what was made. From there the output isn't the uninterrupted run's bit for
+        bit: smaller tiles drift slightly in colour, which `split` corrects for the most part.
+        Without the flag the refusal names it, a third way out.
     - This rests on swapping changing no bit of the output, milestone 3's first gate (see
       [BlockSwap, rewritten](#blockswap-rewritten)). Run on 2026-10-11: a job stopped on a
       card emulated at 16 GB was refused on 10 GB, its manifest untouched, and finished on 24
@@ -2740,7 +2748,9 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
   - Environment differences are refused too, unless `--accept-env-change` is given. When they
     are the only differences, the refusal names the flag. A different GPU, stack or ffmpeg only
     breaks bit-identity across the resume, not the upscale's correctness, and refusing
-    outright would throw away tens of GPU hours over an upgrade.
+    outright would throw away tens of GPU hours over an upgrade. The flag also takes a
+    recorded shape the memory free no longer holds, planned again for what is left (see
+    [Memory planner](#memory-planner), decided on 2026-10-28).
     - The new environment and its `environment_changes` record are written with the next unit
       made. A resume stopped before making one leaves the manifest as it was, and the job
       still resumes in its old environment. Two things rewrite it at once: a plan taken up or
@@ -3044,9 +3054,24 @@ explanation.
   filled and said (see [Input](#input))
 - colour and shape: what the output is tagged with and why (BT.709 at HD, primaries and
   transfer kept, square pixels)
-- resume: the same command resumes; what refuses a resume and why; `--accept-env-change`,
-  which a finished directory job never needs; a resume short of the card's memory, what to
-  free, the job kept
+- resume: the same command resumes; what refuses a resume and why; a resume short of the
+  card's memory, what to free, the job kept
+- `--accept-env-change`, in the README as in the manual (the user, 2026-10-28), plainly:
+  - why it is there: a job of tens of GPU hours kept through an upgrade, onto another card, or
+    on a card that no longer has the memory its plan took;
+  - why it isn't the default: a resume otherwise gives the uninterrupted run's output bit for
+    bit, and the flag gives that up for the job;
+  - what changes, and the risks: the frames made after the change differ from the
+    uninterrupted run's, as another card's do, or as smaller tiles and shorter windows do (a
+    slight colour drift, which `split` corrects for the most part); a shot's windows begun in a
+    shape that no longer fits are made again from its first; a change of shape falls between
+    shots; the output can't be made again bit for bit, not even by the same command on
+    another directory; `seedvr2x verify` checks the masters' integrity, not their identity to
+    another run;
+  - what to expect: the manifest records each change, when, before and after, and what was
+    already made;
+  - when not to use it: where an output must be made again bit for bit; and a finished
+    directory job never needs it.
 - the default size, 1080 rows: a 1080p source comes out at its own size, redrawn, not
   enlarged
 - stopping at a set time: `--until`, what it stops before, its exit code (75) for scripts that
