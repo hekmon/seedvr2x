@@ -1790,7 +1790,10 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       duration and millisecond timestamps. NUT loses the colour tags there, yuv4mpegpipe all
       but the rate and the range, raw video everything.
     - The command is run by `/bin/sh`, never parsed, in a process group of its own, which a
-      stop sends SIGTERM, then SIGKILL to what is left of it after 2 s (kept on 2026-10-28).
+      stop sends SIGTERM, then SIGKILL to what is left of it after 5 s, a line saying so
+      meanwhile and that Ctrl-C again kills it at once (decided on 2026-10-28, the user, to be
+      built: 2 s as built, short for a command flushing to a slow disk; 5 s stays within the
+      10 s a container's stop gives the whole process).
       `{out}` is
       required and written bare: seedvr2x replaces it by the quoted name of a partial file,
       a `.mkv` by its suffix, put in place once whole.
