@@ -72,6 +72,11 @@ never requires it.
 - Windows itself: v0.2.0 (the user, 2026-10-24). Linux runs it, WSL2 included.
 - A job's work directory away from its output file (the user asked, on 2026-10-24, for the
   scratch on one disk and the file on another): its masters live there, as large as the file.
+- Machines whose CPU and GPU share one memory: NVIDIA's DGX Spark (128 GB for both), Apple's M
+  chips. The planner counts the card's free memory and the host's as two pools, one there, and
+  swaps blocks between them, a copy within the same memory there. They need a planner of one
+  pool, nothing swapped or pinned, the model and the scratch drawing on it alike, and the stack
+  built for an ARM CPU. Later, on a DGX Spark, which the user means to get (2026-10-29).
 - Multi-GPU in one process (separate processes on separate shot ranges can come later, see
   [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
