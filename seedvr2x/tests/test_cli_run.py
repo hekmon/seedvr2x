@@ -2224,7 +2224,7 @@ def test_a_resume_short_of_memory_is_planned_again_with_accept_env_change(
     words = error.getMessage().split("\n")
     assert words[1].startswith("the DiT's phase lacks ") and words[-1] == THIRD_WAY
     assert contents(out) == kept and steps.calls == []
-    # With it: planned again, said in one warning, the manifest rewritten at once.
+    # With it: planned again, said in one warning, the manifest written with the first unit made.
     steps.stop = "window 57:2"
     caplog.clear()
     stopped(tmp_path, source_path, "out", *options, "--accept-env-change")
@@ -2313,9 +2313,10 @@ def test_an_environment_change_accepted_with_a_shape_planned_again_is_recorded_w
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,
 ) -> None:
-    # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md writes an environment change with the next unit
-    # made and a shape planned again "at once", and says nothing of the two together): both are
-    # recorded at once, the environment's entry first, the run's environment with them.
+    # Design's ruling of 2026-10-28 (every shape planned again of a job with units made): the
+    # environment change and the shape are both written with the next unit made, the
+    # environment's entry first, the run's environment with them. A unit made: the stop is at the
+    # second window.
     source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
     options = ("--cuts", "cuts.txt")
     free_memory(monkeypatch, wide)
@@ -2323,7 +2324,7 @@ def test_an_environment_change_accepted_with_a_shape_planned_again_is_recorded_w
     stopped(tmp_path, source_path, "out", *options)
     free_memory(monkeypatch, narrow)
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
-    steps.stop = "window 57:0"
+    steps.stop = "window 57:1"
     stopped(tmp_path, source_path, "out", *options, "--accept-env-change")
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["environment"]["gpu"] == "another" and content["plan"]["window"] == 7
@@ -2331,6 +2332,96 @@ def test_an_environment_change_accepted_with_a_shape_planned_again_is_recorded_w
     assert environment["before"] == {"gpu": "a stand-in"} and "plan" not in environment["before"]
     assert shape["before"] == {"plan": {"window": 9}} and shape["after"] == {"plan": {"window": 7}}
     assert environment["windows_done"] == shape["windows_done"] == 3
+
+
+def test_a_shape_planned_again_and_stopped_before_a_unit_leaves_the_job_as_it_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Design's ruling of 2026-10-28 (DESIGN.md, Memory planner, A plan shapes the output a
+    # little): the new shape is written with the next unit made, as the new environment is. A run
+    # stopped before one (Ctrl-C once, before the first unit) leaves the manifest as it was and
+    # every window file, the begun ones included; the next start, the memory freed, keeps the
+    # recorded shape and so the uninterrupted run's bits. Both entries, the environment's and
+    # the shape's, are tried too.
+    from seedvr2x.runtime.stop import Stop, Stopped
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    steps.stop = None
+    out, manifest = tmp_path / "out", tmp_path / "out" / "manifest.json"
+    kept = contents(out)
+    assert "resume/shot_000057/window_0000.pt" in kept
+    free_memory(monkeypatch, narrow)
+
+    def check(self: Stop, cost: float | None = None, unit: str = "the next unit") -> None:
+        raise Stopped
+
+    with monkeypatch.context() as asked:
+        asked.setattr(Stop, "check", check)
+        for gpu in ("a stand-in", "another"):
+            asked.setattr(torch.cuda, "get_device_name", lambda device, gpu=gpu: gpu)
+            steps.calls.clear()
+            caplog.clear()
+            assert upscale(tmp_path, source_path, "out", *options, "--accept-env-change") == 130
+            (said,) = [m for m in caplog.messages if "planned again for what is left" in m]
+            assert "and written with the next unit made" in said
+            assert "window cap 9 latents -> 7 latents" in said
+            # Nothing written, nothing discarded: the manifest and every window file as they were.
+            assert steps.calls == [] and contents(out) == kept
+    # The memory freed overnight: the next start, without the flag, keeps the recorded shape.
+    free_memory(monkeypatch, wide)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert steps.calls == ["window 57:1", "decode 0", "decode 57"]
+    assert "planned again" not in caplog.text
+    finished = json.loads(manifest.read_text())
+    assert finished["plan"]["window"] == 9 and finished["environment_changes"] == []
+    assert all("window_cap" not in shot for shot in finished["shots"])
+    assert indexes(out / "seg_000000.mkv") == list(range(114))
+
+
+def test_a_shape_planned_again_discards_its_windows_only_as_its_record_is_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+) -> None:
+    # The order that keeps the manifest true (cli._reshape): the begun window made again is
+    # still there, named by the manifest, until the first unit's file is about to be kept; the
+    # new record is then written, and the window discarded, before that file, which has its name.
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    steps.stop = None
+    out, manifest = tmp_path / "out", tmp_path / "out" / "manifest.json"
+    window = out / "resume" / "shot_000057" / "window_0000.pt"
+    old = json.loads(manifest.read_text())
+    assert old["shots"][1]["windows_done"] == 1 and window.is_file()
+    free_memory(monkeypatch, narrow)
+    from seedvr2x.runtime import units
+
+    saved = units._save  # pyright: ignore[reportPrivateUsage]
+    seen: list[tuple[int, int, bool]] = []
+
+    def watched(tensor: torch.Tensor, path: Path) -> torch.Tensor:
+        if path == window:
+            now = json.loads(manifest.read_text())
+            # Just before the made-again window is kept: the new record is on disk and the old
+            # file gone.
+            seen.append((now["plan"]["window"], now["shots"][1]["windows_done"], path.exists()))
+        return saved(tensor, path)
+
+    monkeypatch.setattr(units, "_save", watched)
+    assert upscale(tmp_path, source_path, "out", *options, "--accept-env-change") == 0
+    assert seen == [(7, 0, False)]
 
 
 def test_plan_looks_at_a_shape_planned_again_and_writes_nothing(
@@ -2375,6 +2466,41 @@ def test_plan_looks_at_a_shape_planned_again_and_writes_nothing(
     # The same command without --plan then does it.
     assert upscale(tmp_path, source_path, "out", *options, "--accept-env-change") == 0
     assert steps.calls == ["window 57:0", "window 57:1", "window 57:2", "decode 0", "decode 57"]
+
+
+def test_plan_without_the_flag_on_a_job_short_of_memory_says_the_refusal_a_run_gives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Design's ruling of 2026-10-28: --plan with --accept-env-change is as built (it looks, test
+    # above); without the flag it gives the refusal a run gives, the flag named in it, adding where
+    # its cut list is (written as for any job), and writes nothing of the job.
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    steps.stop = None
+    steps.calls.clear()
+    free_memory(monkeypatch, narrow)
+    kept = contents(tmp_path / "out")
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 1
+    (run_error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    caplog.clear()
+    listing = tmp_path / "listed.txt"
+    assert upscale(tmp_path, source_path, "out", *options, "--plan", str(listing)) == 1
+    (plan_error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    said = plan_error.getMessage()
+    assert said.startswith(run_error.getMessage())
+    assert (
+        said.removeprefix(run_error.getMessage()) == f"; its cut list is in {listing} all the same"
+    )
+    assert run_error.getMessage().split("\n")[-1] == THIRD_WAY
+    assert "--accept-env-change" in plan_error.getMessage()
+    assert contents(tmp_path / "out") == kept and steps.calls == []
 
 
 def test_the_colour_drift_of_smaller_tiles_is_said_where_a_tile_changed(
@@ -2517,7 +2643,8 @@ def test_a_resume_short_of_memory_is_warned_of_before_the_checks(
     warned = [m for m in caplog.messages if "does not hold the recorded plan" in m]
     assert warned == [
         "the card's free memory, read now, does not hold the recorded plan: the encode lacks 0.26"
-        " GiB of the card's memory\n"
+        " GiB of the card's memory; this is an early reading, the check that counts comes once the"
+        " files are checked\n"
         f"to free it, {cli.FREE_THE_CARD}; the checks now running take about {minutes} min,"
         " within which to free it"
     ]
@@ -2556,7 +2683,8 @@ def test_the_early_warning_given_accept_env_change_says_what_the_plan_then_does(
     warned = [m for m in caplog.messages if "does not hold the recorded plan" in m]
     assert warned == [
         "the card's free memory, read now, does not hold the recorded plan: the encode lacks 0.26"
-        " GiB of the card's memory\n"
+        " GiB of the card's memory; this is an early reading, the check that counts comes once the"
+        " files are checked\n"
         "the rest of the job is planned again for the memory free if it is still short at the"
         " plan (--accept-env-change), unless it is freed meanwhile, within the checks now running"
         f" (about 2 min): to free it, {cli.FREE_THE_CARD}"

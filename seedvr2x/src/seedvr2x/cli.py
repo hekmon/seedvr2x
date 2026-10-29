@@ -1294,119 +1294,141 @@ def _run(args: argparse.Namespace) -> int:
         stale = _checksums_path(directory, path, args.format)
         return open_writer(args.format, path, *size, tags, stale=stale)
 
-    def finished(which: int, checksums: list[int]) -> None:
-        """A segment whole: its checksums written whole, then the segment recorded (DESIGN.md,
-        Output, Checksums); none for a segment command's, whose frames are its encoder's."""
-        if args.segment_cmd is None:
-            path = _checksums_path(directory, paths[remaining[which]], args.format)
-            make_directories(path.parent)
-            write_checksums(path, checksums)
-        elif final is not None:
-            # What the assembly needs of a file the command wrote, asked now, not at the job's
-            # end (_joinable); against the first segment finished before it.
-            done = [index for index in range(len(segments)) if units.finished(index)]
-            _joinable(
-                *(final, paths[remaining[which]], segments[remaining[which]].frames),
-                source.frame_rate,
-                (paths[done[0]], segments[done[0]].frames) if done else None,
-            )
-        units.segment_finished(remaining[which])
+    def make(remaining: list[int], progress: Progress, after: str | None = None) -> _Outcome:
+        """Make the segments `remaining`, those not finished, in order, each unit checked against
+        the stop asked (Ctrl-C once, --until). The outcome's status is the exit status where the
+        run stops or fails, the job kept; None where they are all made. `after` names the unit
+        a Ctrl-C was asked during before this pass began, the segments' bytes read again at the
+        assembly (_assemble): the pass then stops before its first unit, as one asked during the
+        unit before it would."""
 
-    # The n-th frame written is the job's frame number(n): the segments left, in order.
-    ends = list(accumulate(segments[index].frames for index in remaining))
-
-    def number(written: int) -> int:
-        which = bisect_right(ends, written)
-        return segments[remaining[which]].start + written - (ends[which - 1] if which else 0)
-
-    outputs = [(paths[index], segments[index].frames) for index in remaining]
-    with Stop(until) as stop:
-        try:
-            with SegmentWriter(outputs, open_segment, finished) as writer:
-
-                def write(frames: npt.NDArray[np.float32] | npt.NDArray[np.uint16]) -> None:
-                    # Float frames dumped as written; a shot's frames kept between its runs come
-                    # as uint16 and were dumped by the run that made them (dumped, run_job).
-                    if args.dump_frames is not None and frames.dtype != np.uint16:
-                        for written, frame in enumerate(frames, writer.written):
-                            dumped(number(written), frame)
-                    writer.write(frames)
-
-                def dumped(frame: int, values: npt.NDArray[np.float32]) -> None:
-                    assert args.dump_frames is not None
-                    path = args.dump_frames / f"frame_{frame:06d}.npy"
-                    np.save(path, np.ascontiguousarray(values))
-
-                run_job(
-                    *(models, source, shots, segments, target, args.seed, plan, units),
-                    *(write, stop, args.color_correction == "split"),
-                    numz_padding=numz_padding,
-                    numz_draw=numz_draw,
-                    numz_tail=numz_tail,
-                    progress=progress,
-                    dump=None if args.dump_frames is None else dumped,
+        def finished(which: int, checksums: list[int]) -> None:
+            """A segment whole: its checksums written whole, then the segment recorded (DESIGN.md,
+            Output, Checksums); none for a segment command's, whose frames are its encoder's."""
+            if args.segment_cmd is None:
+                path = _checksums_path(directory, paths[remaining[which]], args.format)
+                make_directories(path.parent)
+                write_checksums(path, checksums)
+            elif final is not None:
+                # What the assembly needs of a file the command wrote, asked now, not at the job's
+                # end (_joinable); against the first segment finished before it.
+                done = [index for index in range(len(segments)) if units.finished(index)]
+                _joinable(
+                    *(final, paths[remaining[which]], segments[remaining[which]].frames),
+                    source.frame_rate,
+                    (paths[done[0]], segments[done[0]].frames) if done else None,
                 )
-        except CopyError as error:
-            # Derived data, removed (run_job): a resume makes it again.
-            again = "; removed, made again from the input on resuming"
-            logger.error("%s%s; stopped: %s", error, again, _kept(record, len(segments)))
-            return 1
-        except _Unjoinable as error:
-            # A segment the assembly couldn't join (_joinable): kept, the units; the same
-            # command would decode it again and write the same file.
-            done = sum(units.finished(index) for index in range(len(segments)))
-            logger.error(
-                "%s; stopped: %d of %d segments finished, and the units of the next ones kept:"
-                " the same command decodes that segment again, and meets the same refusal"
-                " unless its cause is gone",
-                error,
-                done,
-                len(segments),
-            )
-            return 1
-        except FramesLeft as error:
-            # The source's end, with a frame more than the job's record counts (run.Inputs): the
-            # same command would read the last shot again and stop here again, so its line says
-            # what is kept and not that it resumes; the way out is the error's own, another -o
-            # (design, 2026-10-12). Before MediaError, whose kind it is.
-            logger.error("%s; stopped: %s", error, _kept(record, len(segments), resumes=False))
-            return 1
-        except MediaError as error:
-            # A segment command failing among them (--segment-cmd): its segment unfinished, its
-            # shots' windows kept, which a resume decodes and writes again. And a tiled pass's
-            # scratch that can't be made, its disk full: the user's to fix (tiling.ScratchError).
-            # Derived data, its file gone; the units made before it are kept, which the message
-            # says as a stop's does.
-            logger.error("%s; stopped: %s", error, _kept(record, len(segments)))
-            return 1
-        except NonFinite as error:
-            logger.error("%s, so not recorded; stopped: %s", error, _kept(record, len(segments)))
-            return 1
-        except torch.OutOfMemoryError as error:
-            # The plan passed the GPU's memory: refused by the driver, or by torch where
-            # seedvr2x holds it under a driver that would give system memory instead
-            # (runtime/memory.py), which also refuses when other programs fill the card.
-            # Nothing of the unit is recorded.
-            logger.error("%s; stopped: %s", _refused(error), _kept(record, len(segments)))
-            return 1
-        except Deadline as late:
-            # Before Stopped, which it is: a stop by the clock has its own status, so that a
-            # script tells a job to run again from a finished one and from a Ctrl-C (DESIGN.md,
-            # Pause and resume, Stopping).
-            assert until is not None
-            logger.warning(
-                "stopped before %s, which wouldn't finish by %s (--until): %s; %s",
-                late.unit,
-                _date(until),
-                _estimated(late.cost),
-                _kept(record, len(segments)),
-            )
-            return EX_TEMPFAIL
-        except Stopped:
-            logger.warning(
-                "stopped after %s, as asked; %s", stop.unit, _kept(record, len(segments))
-            )
-            return 130
+            units.segment_finished(remaining[which])
+
+        # The n-th frame written is the job's frame number(n): the segments left, in order.
+        ends = list(accumulate(segments[index].frames for index in remaining))
+
+        def number(written: int) -> int:
+            which = bisect_right(ends, written)
+            return segments[remaining[which]].start + written - (ends[which - 1] if which else 0)
+
+        outputs = [(paths[index], segments[index].frames) for index in remaining]
+        with Stop(until) as stop:
+            if after is not None:
+                # Carried over from the assembly's own Stop, which the signal reached: this pass's
+                # is a fresh one, and would make the whole segment before the assembly's check
+                # saw it (review of 2026-10-28).
+                stop.asked, stop.unit = True, after
+            try:
+                with SegmentWriter(outputs, open_segment, finished) as writer:
+
+                    def write(frames: npt.NDArray[np.float32] | npt.NDArray[np.uint16]) -> None:
+                        # Float frames dumped as written; a shot's frames kept between its runs come
+                        # as uint16 and were dumped by the run that made them (dumped, run_job).
+                        if args.dump_frames is not None and frames.dtype != np.uint16:
+                            for written, frame in enumerate(frames, writer.written):
+                                dumped(number(written), frame)
+                        writer.write(frames)
+
+                    def dumped(frame: int, values: npt.NDArray[np.float32]) -> None:
+                        assert args.dump_frames is not None
+                        path = args.dump_frames / f"frame_{frame:06d}.npy"
+                        np.save(path, np.ascontiguousarray(values))
+
+                    run_job(
+                        *(models, source, shots, segments, target, args.seed, plan, units),
+                        *(write, stop, args.color_correction == "split"),
+                        numz_padding=numz_padding,
+                        numz_draw=numz_draw,
+                        numz_tail=numz_tail,
+                        progress=progress,
+                        dump=None if args.dump_frames is None else dumped,
+                    )
+                written = writer.written
+            except CopyError as error:
+                # Derived data, removed (run_job): a resume makes it again.
+                again = "; removed, made again from the input on resuming"
+                logger.error("%s%s; stopped: %s", error, again, _kept(record, len(segments)))
+                return _Outcome(1)
+            except _Unjoinable as error:
+                # A segment the assembly couldn't join (_joinable): kept, the units; the same
+                # command would decode it again and write the same file.
+                done = sum(units.finished(index) for index in range(len(segments)))
+                logger.error(
+                    "%s; stopped: %d of %d segments finished, and the units of the next ones kept:"
+                    " the same command decodes that segment again, and meets the same refusal"
+                    " unless its cause is gone",
+                    error,
+                    done,
+                    len(segments),
+                )
+                return _Outcome(1)
+            except FramesLeft as error:
+                # The source's end, with a frame more than the job's record counts (run.Inputs): the
+                # same command would read the last shot again and stop here again, so its line says
+                # what is kept and not that it resumes; the way out is the error's own, another -o
+                # (design, 2026-10-12). Before MediaError, whose kind it is.
+                logger.error("%s; stopped: %s", error, _kept(record, len(segments), resumes=False))
+                return _Outcome(1)
+            except MediaError as error:
+                # A segment command failing among them (--segment-cmd): its segment unfinished,
+                # its shots' windows kept, which a resume decodes and writes again. And a tiled
+                # pass's scratch that can't be made, its disk full: the user's to fix
+                # (tiling.ScratchError). Derived data, its file gone; the units made before it
+                # are kept, which the message says as a stop's does.
+                logger.error("%s; stopped: %s", error, _kept(record, len(segments)))
+                return _Outcome(1)
+            except NonFinite as error:
+                logger.error(
+                    "%s, so not recorded; stopped: %s", error, _kept(record, len(segments))
+                )
+                return _Outcome(1)
+            except torch.OutOfMemoryError as error:
+                # The plan passed the GPU's memory: refused by the driver, or by torch where
+                # seedvr2x holds it under a driver that would give system memory instead
+                # (runtime/memory.py), which also refuses when other programs fill the card.
+                # Nothing of the unit is recorded.
+                logger.error("%s; stopped: %s", _refused(error), _kept(record, len(segments)))
+                return _Outcome(1)
+            except Deadline as late:
+                # Before Stopped, which it is: a stop by the clock has its own status, so that a
+                # script tells a job to run again from a finished one and from a Ctrl-C (DESIGN.md,
+                # Pause and resume, Stopping).
+                assert until is not None
+                logger.warning(
+                    "stopped before %s, which wouldn't finish by %s (--until): %s; %s",
+                    late.unit,
+                    _date(until),
+                    _estimated(late.cost),
+                    _kept(record, len(segments)),
+                )
+                return _Outcome(EX_TEMPFAIL)
+            except Stopped:
+                logger.warning(
+                    "stopped after %s, as asked; %s", stop.unit, _kept(record, len(segments))
+                )
+                return _Outcome(130)
+            asked = stop.asked
+        return _Outcome(None, asked, written)
+
+    outcome = make(remaining, progress)
+    if outcome.status is not None:
+        return outcome.status
     from seedvr2x.runtime.environment import imported
 
     # The versions recorded were derived before the models loaded: what the run has
@@ -1420,16 +1442,41 @@ def _run(args: argparse.Namespace) -> int:
         "upscaled in %.1f s; wrote %s: %d frames, %s",
         time.monotonic() - started,
         directory,
-        writer.written,
+        outcome.written,
         args.format,
     )
     if final is not None:
+
+        def remake_damaged(damaged: list[int], asked: bool) -> _Outcome:
+            # The segments found damaged at the assembly, recorded unfinished (_remake): their
+            # units made again by this run, its models loaded (DESIGN.md, Output, Assembly,
+            # decided on 2026-10-28).
+            left = job_units(units, plan, target, numz_padding, start="decode")
+            said = "the check of the segments' bytes" if asked else None
+            return make(damaged, Progress(clock, left, stopping.now, extra), after=said)
+
         # The job's last unit. A stop asked during the last segment's (Ctrl-C once) stops before
         # it.
         return _assemble(
-            final, record, paths, asked=stop.asked, until=until, rate=rate, probed=True
+            *(final, record, paths),
+            asked=outcome.asked,
+            until=until,
+            rate=rate,
+            probed=True,
+            remake=remake_damaged,
         )
     return 0
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    """What a pass over the segments to make came to (_run): the exit status where it stopped or
+    failed, None where they are all made; whether a stop was asked during the last unit (Ctrl-C
+    once: the assembly is then not begun); the frames written."""
+
+    status: int | None
+    asked: bool = False
+    written: int = 0
 
 
 def _deadline(args: argparse.Namespace) -> datetime.datetime:
@@ -2193,6 +2240,7 @@ def _assemble(
     until: datetime.datetime | None = None,
     rate: float | None = None,
     probed: bool = False,
+    remake: Callable[[list[int], bool], _Outcome] | None = None,
 ) -> int:
     """Assemble the finished file `final` from the job's segments, every one finished, at `paths`
     in record's directory, with the source's other streams (DESIGN.md, Output, Assembly), and
@@ -2223,7 +2271,13 @@ def _assemble(
 
     First, before the join reads them, every segment's bytes are hashed again and held to the
     SHA-256 recorded when it was finished (_damaged; DESIGN.md, Output, Assembly, decided on
-    2026-10-12): a damaged one stops the run, nothing assembled, exit status 1 (_remake)."""
+    2026-10-12). A run that loaded no model (`remake` None), the assembly alone left to it, records
+    a damaged one unfinished and stops, nothing assembled, exit status 1 (_remake): the same
+    command then makes it again and assembles. The run that made the last segment, its models
+    loaded, `remake` the function that makes segments again, makes the damaged ones again at once,
+    then assembles (decided on 2026-10-28: "an unattended job should end there, not on status 1
+    with the models to load again for one segment"): said in a warning, once; a segment damaged
+    again stops the run with status 1, naming it."""
     from seedvr2x.media import assembly
     from seedvr2x.media.checksums import read_checksums, write_checksums
     from seedvr2x.media.ffmpeg import MediaError
@@ -2257,9 +2311,26 @@ def _assemble(
             started = time.monotonic()
             logger.info("%s", _checking_said(paths, rate))
             damaged = _damaged(record, paths)
-            if damaged:
+            if damaged and remake is None:
                 _remake(record, paths, damaged, final)
                 return 1
+            if damaged and remake is not None:
+                _remake(record, paths, damaged, final, loaded=True)
+                # A Ctrl-C asked so far (during the hash check) stops the remake before its first
+                # unit, whose own message says the job is kept.
+                remade = remake(damaged, stop.asked)
+                if remade.status is not None:
+                    return remade.status
+                # Once: the segments made again are held to the hash recorded as they were
+                # finished, and one that differs stops the run.
+                again = _damaged(record, paths, damaged)
+                if again:
+                    _remake(record, paths, again, final, twice=True)
+                    return 1
+                stop.asked = stop.asked or remade.asked
+                stop.unit = f"the assembly of {final}"
+                stop.check(cost, f"the assembly of {final}")
+                started = time.monotonic()  # the line's time is the join's alone
             checksums = [
                 checksum
                 for path in (paths if summed else ())
@@ -2334,18 +2405,22 @@ def _checking_said(paths: Sequence[Path], rate: float | None) -> str:
     return said if rate is None else f"{said}, about {spoken(total / rate)}"
 
 
-def _damaged(record: "Manifest", paths: Sequence[Path]) -> list[int]:
+def _damaged(
+    record: "Manifest", paths: Sequence[Path], only: Sequence[int] | None = None
+) -> list[int]:
     """The segments of a job, every one finished, whose bytes are no longer those recorded when
     it was finished (DESIGN.md, Output, Assembly, decided on 2026-10-12: "Each segment's bytes
     are hashed when it is finished and checked at the assembly"): their SHA-256 read again, one
     read of the masters. A segment missing is damaged too. One with no hash recorded, which a
     code change refusing the resume should make impossible (settings.code), is said and not
-    checked."""
+    checked. `only` the segments to read, those made again by the run that found them damaged."""
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.runtime.units import digest
 
     found: list[int] = []
     for index, path in enumerate(paths):
+        if only is not None and index not in only:
+            continue
         recorded = record.hashes[index]
         if recorded is None:
             logger.warning("%s: no SHA-256 recorded for this segment: not checked", path)
@@ -2363,16 +2438,31 @@ def _damaged(record: "Manifest", paths: Sequence[Path]) -> list[int]:
     return found
 
 
-def _remake(record: "Manifest", paths: Sequence[Path], damaged: list[int], final: Path) -> None:
-    """Set the damaged segments (_damaged) back to unfinished: nothing is assembled. Each is
-    recorded as not finished, its shots' runs as not begun (their units went with it:
-    Manifest.segment_damaged), then its file and checksums removed, as a resume removes an
-    unfinished segment's (resume.leftovers); the other segments are kept. The error names each
-    one, its frames, and says the same command makes it again, then assembles.
+def _remake(
+    record: "Manifest",
+    paths: Sequence[Path],
+    damaged: list[int],
+    final: Path,
+    *,
+    loaded: bool = False,
+    twice: bool = False,
+) -> None:
+    """Set the damaged segments (_damaged) back to unfinished. Each is recorded as not finished,
+    its shots' runs as not begun (their units went with it: Manifest.segment_damaged), then its
+    file and checksums removed, as a resume removes an unfinished segment's
+    (resume.leftovers); the other segments are kept. DESIGN.md, Output, Assembly (decided on
+    2026-10-28):
+    - by default, for a run that loaded no model, nothing is assembled: the error names each
+      segment, its frames, and says the same command makes it again, then assembles;
+    - `loaded`, the run that made the last segment, its models loaded: each segment is named in a
+      warning, "its bytes changed since it was finished: the disk or another program is to
+      suspect", and the caller makes it again at once (_assemble);
+    - `twice`, a segment found damaged again once made again by that run: named, the run stops
+      (status 1), the next start makes it again.
 
-    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "a damaged one made again", not by which
-    run): the run that finds it stops, and the next run of the same command makes it: the run
-    that assembles may have loaded no model."""
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "a damaged one made again", then
+    "an unattended job should end there"): a run with no model loaded doesn't load them for one
+    segment, as design ruled; its damaged segments are made again by the next start."""
     directory = record.path.parent
     summed = record.settings.get("segment_cmd") is None
     for index in damaged:
@@ -2391,20 +2481,36 @@ def _remake(record: "Manifest", paths: Sequence[Path], damaged: list[int], final
         except OSError as error:
             # Recorded unfinished already: the resume discards what is left (resume.leftovers).
             logger.warning("%s: not removed: %s; the same command removes it", path, error)
+        frames = f"frames {segment.start} to {segment.end - 1} of the job"
+        if loaded:
+            logger.warning(
+                "%s: its bytes changed since it was finished (%s): the disk or another program is"
+                " to suspect; made again now",
+                path,
+                frames,
+            )
+        elif twice:
+            logger.error(
+                "%s: damaged again, its bytes changed once more after this run made it again (%s)"
+                "; nothing assembled. It is recorded as unfinished and removed",
+                path,
+                frames,
+            )
+        else:
+            logger.error(
+                "%s: damaged, its bytes are not those recorded when it was finished (%s);"
+                " nothing assembled. It is recorded as unfinished and removed",
+                path,
+                frames,
+            )
+    if not loaded:
         logger.error(
-            "%s: damaged, its bytes are not those recorded when it was finished (frames %d to %d"
-            " of the job); nothing assembled. It is recorded as unfinished and removed",
-            path,
-            segment.start,
-            segment.end - 1,
+            "%s damaged, none assembled into %s: the same command makes %s again, its shots"
+            " encoded, sampled and decoded again, then assembles; the other segments are kept",
+            _plural(len(damaged), "segment"),
+            final,
+            "it" if len(damaged) == 1 else "them",
         )
-    logger.error(
-        "%s damaged, none assembled into %s: the same command makes %s again, its shots encoded,"
-        " sampled and decoded again, then assembles; the other segments are kept",
-        _plural(len(damaged), "segment"),
-        final,
-        "it" if len(damaged) == 1 else "them",
-    )
 
 
 def _assembled(
@@ -2915,7 +3021,8 @@ def _early_memory(
             )
         logger.warning(
             "the card's free memory, read now, does not hold the recorded plan: %s lacks %s GiB of"
-            " the card's memory\n" + then,
+            " the card's memory; this is an early reading, the check that counts comes once the"
+            " files are checked\n" + then,
             short.what,
             short.short,
             *((minutes, FREE_THE_CARD) if args.accept_env_change else (FREE_THE_CARD, minutes)),
@@ -3592,10 +3699,10 @@ def _resume(
     a job taken up as it is recorded.
 
     A job that has made units, `reshaped` the shape recorded and planned again for the memory free
-    (_run; --accept-env-change), is taken up in its new shape, and rewritten at once (_reshape):
-    True. `looking` (--plan): the new shape is only taken in memory, for the plan to print; nothing
-    is written and nothing discarded. A job recorded after a shape was planned again, with runs by
-    their own caps, is laid out by them first (resume.own_windows)."""
+    (_run; --accept-env-change), is taken up in its new shape, written with the next unit made
+    (_reshape): True. `looking` (--plan): the new shape is only taken in memory, for the plan to
+    print; nothing is written and nothing discarded. A job recorded after a shape was planned
+    again, with runs by their own caps, is laid out by them first (resume.own_windows)."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import complete, planned
 
@@ -3974,19 +4081,20 @@ def _reshape(record: "Manifest", prior: _Prior, old: "Plan", looking: bool = Fal
     """Take up a job that has made units, its shape `old` planned again for the memory free now
     (_run; --accept-env-change; DESIGN.md, Memory planner, A plan shapes the output a little,
     decided on 2026-10-28): what still fits of the shape is kept and what is made, per run
-    (resume.reshape), the manifest rewritten at once with the new plan, the runs' layouts and the
-    change recorded (resume.shape_change), the environment's with it when it changed too: at once
-    like a plan's, in this run's environment, and not with the next unit. What a stop left is
-    discarded, as for any resume (resume.leftovers), with the windows of the runs made again, and
-    after the manifest is written: a manifest naming windows whose files are gone would be
-    refused, one not naming files that are there is only cleaned.
+    (resume.reshape). The new plan, the runs' layouts and the change recorded (resume.shape_change)
+    are written with the next unit made, as an environment change is, both then when it changed
+    too: decided by design on 2026-10-28, for every shape planned again of a job with units made
+    ("A plan taken up or planned again" written at once stays for a job with no unit made). A
+    run stopped before a unit leaves the manifest as it was and nothing discarded, a shot's begun
+    windows included, and the next start plans from the memory free then: a desktop that frees
+    its memory overnight keeps the recorded shape, so the uninterrupted run's bits.
 
-    PROVISIONAL (impl-v010, 2026-10-28): DESIGN.md writes an environment change "with the next unit
-    made" and a shape planned again at once, and says nothing of the two at one start. Both are
-    written at once, in this run's environment, the environment's entry first and the shape's
-    after it: a manifest of the old environment and the new shape would need the first pass's
-    index (_taken_up) written in two minds, and the units of the old environment are told by the
-    entries' counts either way."""
+    What a stop left that the record before doesn't name is discarded now, as for any resume
+    (resume.leftovers). The windows of the runs made again are named by that record and not by
+    the new one: they go when the new record is written (Manifest.after_write), which Units
+    writes before the first file a unit keeps (Units.settle), a made-again window having the
+    name of the one it replaces. So a manifest never names a window whose file is gone, nor a
+    file of the new shape stands under a manifest of the old."""
     from seedvr2x.runtime import resume
 
     directory = record.path.parent
@@ -4030,37 +4138,60 @@ def _reshape(record: "Manifest", prior: _Prior, old: "Plan", looking: bool = Fal
             drift,
         )
         return
+    # What the record before names is kept until the new one is written; what it doesn't name,
+    # a stop's leftovers, goes now as for any resume (resume.leftovers).
+    unnamed = set(resume.leftovers(resume.recorded_job(record.path, prior.recorded, record.source)))
     discarded = resume.leftovers(record)
+    for path in discarded:
+        if path in unnamed:
+            _discard(path)
+    held = [path for path in discarded if path not in unnamed]
     record.environment_changes = list(prior.recorded.get(resume.CHANGES, []))
     if prior.changed:
         record.environment_changes.append(
             resume.environment_change(prior.recorded, record.environment)
         )
         logger.warning(
-            "%s: resumed in another environment, as accepted, which its manifest records at"
-            " once, with its new shape: %s",
+            "%s: resumed in another environment, as accepted, which its manifest records with the"
+            " next unit made, with its new shape: %s",
             directory,
             "; ".join(prior.changed),
         )
     record.environment_changes.append(change)
     if prior.known is None:
-        _write_index(directory, record.source)
-    record.write()
-    for path in discarded:
-        logger.debug("discarded %s", path)
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+        # The recorded index missing or damaged: made again with the manifest that names it.
+        record.before_write = lambda: _write_index(directory, record.source)
+
+    def discard() -> None:
+        for path in held:
+            _discard(path)
+
+    record.after_write = discard
     logger.warning(
         "%s: its recorded shape no longer fits the memory free; planned again for what is left,"
-        " as --accept-env-change takes: %s\n%s\n%s\n%s",
+        " as --accept-env-change takes, and written with the next unit made (a run stopped before"
+        " one keeps the manifest as it is, and the next start plans from the memory free then):"
+        " %s\n%s\n%s\n%s",
         directory,
         shape,
         kept,
         made,
         drift,
     )
+
+
+def _discard(path: Path) -> None:
+    """Remove a leftover (resume.leftovers), a file or a directory."""
+    logger.debug("discarded %s", path)
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            # A window the run itself removed first, as a held one that vanished: nothing to do
+            # (review of 2026-10-28).
+            logger.debug("%s: already gone", path)
 
 
 def _plan_of(record: dict[str, Any]) -> "Plan":

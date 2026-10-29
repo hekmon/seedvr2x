@@ -209,6 +209,12 @@ class Manifest:
     # Called once, before the manifest's next write, then dropped: it writes the frame index that
     # write names, made again by a resume in another environment (cli._taken_up).
     before_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    # Called once, after the manifest's next write, then dropped: it discards the files the
+    # manifest before that write named and this one doesn't, the windows of a shape planned again
+    # (cli._reshape), which only then are unnamed. Units writes the manifest before the first file
+    # it keeps (Units.settle), so that no file of the new shape is ever under a manifest that
+    # names the old.
+    after_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         level: Any = self.settings.get(LEVEL, "standard")
@@ -323,6 +329,9 @@ class Manifest:
             self.before_write()
             self.before_write = None
         write_content(self.path, self.content())
+        if self.after_write is not None:
+            self.after_write()
+            self.after_write = None
 
     def content(self) -> dict[str, Any]:
         seed = self.settings["seed"]

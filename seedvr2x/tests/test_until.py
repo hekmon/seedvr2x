@@ -394,6 +394,48 @@ def test_plan_of_maximum_counts_the_runs(
     assert clocked.calibrated == [((96, 128), Plan(WINDOW), 4)]
 
 
+def test_the_deadline_passing_during_the_hash_check_stops_the_segments_made_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clocked: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Review of 2026-10-28: a segment found damaged by the assembly's hash check is made again
+    # under the same --until: here the check ends past it (the clock moved), so the run stops
+    # before the first unit made again, exit 75, nothing made, the segment recorded unfinished and
+    # the job kept; the next start makes it again and assembles.
+    from seedvr2x.runtime.units import Units
+
+    caplog.set_level(logging.INFO)
+    made: Steps = clocked.steps
+    source_path = job(tmp_path, monkeypatch)
+    work = tmp_path / "out.mkv.work"
+    finished, checked = Units.segment_finished, cli._damaged  # pyright: ignore[reportPrivateUsage]
+
+    def damaging(self: Units, segment: int) -> None:
+        finished(self, segment)
+        if segment == 1:  # the last: the first one's bytes change
+            [first] = work.glob("seg_000000.*")
+            data = bytearray(first.read_bytes())
+            data[len(data) // 2] ^= 0xFF
+            first.write_bytes(bytes(data))
+
+    def late(*arguments: Any) -> Any:
+        clocked.elapsed += 3 * 3600  # the hash check takes hours: --until's time is past
+        return checked(*arguments)
+
+    monkeypatch.setattr(Units, "segment_finished", damaging)
+    monkeypatch.setattr(cli, "_damaged", late)
+    assert upscale(tmp_path, source_path, "out.mkv", *JOB, *until(clocked, 120)) == cli.EX_TEMPFAIL
+    assert made.calls == UNINTERRUPTED and not (tmp_path / "out.mkv").exists()
+    assert "(--until)" in caplog.text and "made again now" in caplog.text
+    assert progress(work)[0] == [False, True]
+    monkeypatch.setattr(cli, "_damaged", checked)
+    made.calls.clear()
+    assert upscale(tmp_path, source_path, "out.mkv", *JOB) == 0
+    assert made.calls == UNINTERRUPTED[:6] and (tmp_path / "out.mkv").exists()
+
+
 def test_assembly_is_the_job_s_last_unit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

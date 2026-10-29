@@ -255,7 +255,9 @@ RESERVE_TIGHT = round(2.5 * GIB)
 # libraries in it" (hold, the same RTX 5090 under WSL2, nvidia-smi, 2026-10-12). It is the larger
 # figure of those the code records (0.24 GiB for the first allocation, 0.29 with the warm-up on the
 # 96 GB card), so that the early reading errs towards warning of a shape the later check would
-# accept, never towards saying "fits" where it refuses.
+# accept, never towards saying "fits" where it refuses. To be measured on the RTX 5090 at the
+# release gate (design, 2026-10-28): until then the figure is the most the code has seen, and the
+# warning it feeds says it is an early reading (cli._early_memory).
 CONTEXT = round(1.23 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
 # allocator where the driver spills.

@@ -65,6 +65,16 @@ class Units:
         self.directory, self.manifest = directory, manifest
         self.root = directory / STATE
 
+    def settle(self) -> None:
+        """Write the manifest now if a write is held back for the units' first file
+        (Manifest.after_write): a job resumed in a shape planned again for the memory free keeps
+        its record as it was until a unit is made (DESIGN.md, Memory planner, decided on
+        2026-10-28), and the first file a unit keeps may be one the record before names (a window
+        made again has the name of the one it replaces): the new record is written, and the files
+        it no longer names discarded, before that file is."""
+        if self.manifest.after_write is not None:
+            self.manifest.write()
+
     def shot_directory(self, run: int) -> Path:
         """Where the files of run `run`'s shot go: its runs' units, its input copy and the copy's
         checksums, a tiled pass's scratch, and the frames its runs keep (KEPT)."""
@@ -101,6 +111,7 @@ class Units:
         memory were it given on the GPU, values and memory layout kept (shot.moved), so that a
         run samples its windows from it (shot.sample_windows) and holds no second copy of a
         latent, nor reads back a file it wrote."""
+        self.settle()
         kept = _save(latent, self._unit(run, "latent.pt"))
         self.manifest.shot_encoded(run)
         return kept
@@ -109,6 +120,7 @@ class Units:
         """Keep window `window` of run `run`, (t, h, w, 16) as the DiT gives it, wherever it
         is: written from its copy on the CPU, values and memory layout kept (shot.moved), which
         is given up once the file is whole."""
+        self.settle()
         _save(sampled, self._unit(run, f"window_{window:04d}.pt"))
         self.manifest.window_done(run, window)
 

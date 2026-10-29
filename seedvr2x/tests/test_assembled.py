@@ -503,6 +503,212 @@ def test_a_damaged_segment_is_made_again_then_the_file_assembled(
     assert cli.main(["verify", str(final)]) == 0
 
 
+def flip_during_the_run(
+    monkeypatch: pytest.MonkeyPatch, work: Path, flips: dict[tuple[int, int], int]
+) -> list[tuple[int, int]]:
+    """Have a byte of a finished segment changed while the run is still going, as a disk or
+    another program would: `flips` maps (segment, n) to the segment damaged just after the n-th
+    time that segment is recorded finished. Returns the (segment, n) finished so far, in order."""
+    from seedvr2x.runtime.units import Units
+
+    finished = Units.segment_finished
+    seen: list[tuple[int, int]] = []
+
+    def flipping(self: Units, segment: int) -> None:
+        finished(self, segment)
+        seen.append((segment, sum(1 for done, _ in seen if done == segment) + 1))
+        if seen[-1] in flips:
+            flip_middle_byte(work / f"seg_{flips[seen[-1]]:06d}.mkv")
+
+    monkeypatch.setattr(Units, "segment_finished", flipping)
+    return seen
+
+
+@needs_ffmpeg
+def test_a_segment_damaged_during_the_run_is_made_again_by_it_then_the_file_assembled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Output, Assembly (decided on 2026-10-28): the run that made the last segment, its
+    # models loaded, makes a segment it finds damaged at the assembly again at once, then
+    # assembles, and says so in a warning (the disk or another program is to suspect). One byte of
+    # the second segment flipped while the fourth is being made: the same run encodes, samples and
+    # decodes its shot again, assembles, exit 0, the file of the uninterrupted run's frames.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "whole.mkv", *FILM) == 0
+    uninterrupted = list(steps.calls)
+    steps.calls.clear()
+    work = tmp_path / "x.mkv.work"
+    seen = flip_during_the_run(monkeypatch, work, {(2, 1): 1})
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    # The segments finished in order, the second again after the fourth.
+    assert seen == [(0, 1), (1, 1), (2, 1), (3, 1), (1, 2)]
+    assert steps.calls == [*uninterrupted, "encode 30", "window 30:0", "decode 30"]
+    segment = work / "seg_000001.mkv"
+    [warned] = [r for r in caplog.records if "its bytes changed since it was finished" in r.message]
+    assert warned.levelname == "WARNING"
+    assert warned.getMessage() == (
+        f"{segment}: its bytes changed since it was finished (frames 30 to 49 of the job): the"
+        " disk or another program is to suspect; made again now"
+    )
+    # Said once, and no stop: nothing at error level, no "none assembled".
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert "none assembled" not in caplog.text and not work.exists()
+    same_file(tmp_path / "x.mkv", tmp_path / "whole.mkv")
+    assert (tmp_path / "x.mkv.crc32").read_bytes() == (tmp_path / "whole.mkv.crc32").read_bytes()
+    held_to_the_source(tmp_path / "x.mkv", source, tmp_path)
+    assert cli.main(["verify", str(tmp_path / "x.mkv")]) == 0
+
+
+@needs_ffmpeg
+def test_a_segment_damaged_again_after_it_was_made_again_stops_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Only once: the segment made again by the run is damaged again before the assembly: exit 1,
+    # naming it, nothing assembled, the segment recorded unfinished with its file gone, the others
+    # kept; the next start (a run with models loaded, the file unchanged) makes it again and
+    # assembles.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "whole.mkv", *FILM) == 0
+    uninterrupted = list(steps.calls)
+    steps.calls.clear()
+    work = tmp_path / "x.mkv.work"
+    flips = {(2, 1): 1, (1, 2): 1}
+    with monkeypatch.context() as damaging:
+        flip_during_the_run(damaging, work, flips)
+        caplog.clear()
+        assert upscale(tmp_path, source, "x.mkv", *FILM) == 1
+    # Made again once, not twice.
+    assert steps.calls == [*uninterrupted, "encode 30", "window 30:0", "decode 30"]
+    segment = work / "seg_000001.mkv"
+    assert len([m for m in caplog.messages if "made again now" in m]) == 1
+    again, summary = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert "the same command makes it again" in summary.getMessage()
+    assert again.getMessage().startswith(f"{segment}: damaged again, its bytes changed once more")
+    assert "(frames 30 to 49 of the job); nothing assembled" in again.getMessage()
+    assert not (tmp_path / "x.mkv").exists() and not segment.exists()
+    after = json.loads((work / NAME).read_text())["segments"]
+    assert [entry["finished"] for entry in after] == [True, False, True, True]
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert steps.calls == ["encode 30", "window 30:0", "decode 30"] and not work.exists()
+    assert "damaged, its bytes" not in caplog.text and "damaged again" not in caplog.text
+    same_file(tmp_path / "x.mkv", tmp_path / "whole.mkv")
+
+
+@pytest.mark.parametrize("how", ["ctrl-c twice", "ctrl-c once"])
+@needs_ffmpeg
+def test_a_stop_during_the_segments_made_again_keeps_the_job_for_the_next_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    how: str,
+) -> None:
+    # The segments made again are units like any: stopped at once (a second Ctrl-C, here the
+    # stand-in's) inside the decode, or between two units (Ctrl-C once, the stop checked before
+    # each), the run leaves the job as a stop does, nothing assembled, the shot's windows kept; the
+    # next start finishes the segment and assembles, the damage not found again.
+    from seedvr2x.runtime.stop import Stop, Stopped
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "whole.mkv", *FILM) == 0
+    steps.calls.clear()
+    work = tmp_path / "x.mkv.work"
+    from seedvr2x.runtime.units import Units
+
+    flipped = False
+    last: list[int] = []
+    finished = Units.segment_finished
+
+    def damaging(self: Units, segment: int) -> None:
+        nonlocal flipped
+        finished(self, segment)
+        if segment == 2 and not flipped:
+            flipped = True
+            flip_middle_byte(work / "seg_000001.mkv")
+            if how == "ctrl-c twice":
+                steps.stop = "decode 30"
+        if segment == 3:
+            last.append(segment)
+
+    def check(self: Stop, cost: float | None = None, unit: str = "the next unit") -> None:
+        # Ctrl-C once, asked after the last segment: the assembly's own check passes (the stop
+        # asked is held against a unit begun), the first unit made again is stopped before.
+        if last and "assembly" not in unit:
+            raise Stopped
+
+    with monkeypatch.context() as stopping:
+        stopping.setattr(Units, "segment_finished", damaging)
+        if how == "ctrl-c once":
+            stopping.setattr(Stop, "check", check)
+        caplog.clear()
+        status = upscale(tmp_path, source, "x.mkv", *FILM)
+    assert status == 130 and not (tmp_path / "x.mkv").exists()
+    assert len([m for m in caplog.messages if "made again now" in m]) == 1
+    assert "none assembled" not in caplog.text
+    segments = json.loads((work / NAME).read_text())["segments"]
+    assert [entry["finished"] for entry in segments] == [True, False, True, True]
+    if how == "ctrl-c twice":
+        assert steps.calls[-3:] == ["encode 30", "window 30:0", "decode 30"]
+        assert (work / "resume" / "shot_000030" / "window_0000.pt").is_file()
+    steps.stop = None
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert "damaged, its bytes" not in caplog.text and "made again now" not in caplog.text
+    assert steps.calls == (
+        ["decode 30"] if how == "ctrl-c twice" else ["encode 30", "window 30:0", "decode 30"]
+    )
+    same_file(tmp_path / "x.mkv", tmp_path / "whole.mkv")
+    assert not work.exists()
+
+
+@needs_ffmpeg
+def test_a_ctrl_c_during_the_hash_check_stops_before_the_first_unit_made_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review of 2026-10-28: a Ctrl-C once, the real flag, asked while the segments' bytes are read
+    # again (the assembly's own Stop gets it) reaches the segments made again: stopped before the
+    # first unit, none made, exit 130, the damaged segment recorded unfinished and the job kept;
+    # the next start makes the segment and assembles.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "whole.mkv", *FILM) == 0
+    uninterrupted = list(steps.calls)
+    steps.calls.clear()
+    work = tmp_path / "x.mkv.work"
+    checked = cli._damaged  # pyright: ignore[reportPrivateUsage]
+    sent: list[bool] = []
+
+    def interrupted(*arguments: Any) -> Any:
+        if not sent:
+            sent.append(True)
+            os.kill(os.getpid(), signal.SIGINT)
+        return checked(*arguments)
+
+    with monkeypatch.context() as stopping:
+        flip_during_the_run(stopping, work, {(2, 1): 1})
+        stopping.setattr(cli, "_damaged", interrupted)
+        caplog.clear()
+        assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
+    assert steps.calls == uninterrupted and not (tmp_path / "x.mkv").exists()
+    [stopped] = [m for m in caplog.messages if m.startswith("stopped after")]
+    assert stopped.startswith("stopped after the check of the segments' bytes, as asked; ")
+    assert "none assembled" not in caplog.text and "stopped before the assembly" not in caplog.text
+    segments = json.loads((work / NAME).read_text())["segments"]
+    assert [entry["finished"] for entry in segments] == [True, False, True, True]
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert steps.calls == ["encode 30", "window 30:0", "decode 30"] and not work.exists()
+    same_file(tmp_path / "x.mkv", tmp_path / "whole.mkv")
+
+
 @needs_ffmpeg
 def test_assembly_failed_keeps_everything_then_assembles_without_the_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
