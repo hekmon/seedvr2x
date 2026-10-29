@@ -22,6 +22,7 @@ from seedvr2x.runtime.manifest import (
     ASSEMBLED,
     INDEX,
     NAME,
+    REHEARSAL,
     SHOT_RUNS,
     STATE,
     SUMS,
@@ -40,13 +41,14 @@ from seedvr2x.runtime.units import CHECKSUMS, COPY, KEPT, run_file, size
 # data: missing or damaged on a resume, the first pass runs again and writes it"), checked
 # against its record when the first pass's record is trusted, made again with the pass otherwise
 # (cli._prior), whose new decode may hash some frames otherwise after an ffmpeg change accepted,
-# which is no other job. idet's counts likewise, information (manifest._input). And of the plan,
-# what doesn't shape the output (DESIGN.md, Memory planner): where the weights are (Plan.record's
-# memory), and its timings, which the time estimates will record.
+# which is no other job. idet's counts likewise, information (manifest._input), and the remux
+# rehearsal's record (manifest.REHEARSAL), which a resume reads to trust, not to compare. And of
+# the plan, what doesn't shape the output (DESIGN.md, Memory planner): where the weights are
+# (Plan.record's memory), and its timings, which the time estimates will record.
 UNCOMPARED = {
     "shots": ("encoded", "windows_done"),
     "segments": ("finished", "bytes", "sha256"),
-    "input": ("path", "modified_ns", "index", "idet"),
+    "input": ("path", "modified_ns", "index", "idet", REHEARSAL),
     "environment": ("driver",),
     "plan": ("memory", "timings"),
 }

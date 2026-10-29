@@ -1052,10 +1052,86 @@ def moved(source: Path, found: Layout, starts: Mapping[int, Fraction]) -> str:
     )
 
 
+# The part of the source a timed read takes to estimate the rehearsal's duration (reading_said):
+# 64 MiB, a second or so at the 50 MB/s a Blu-ray rip read through WSL's mount of a Windows disk
+# went at (milestone 7, 2026-10-23: 18.5 GB in 6 min 12 s), and 0.1 s or less at the 114 MB/s of a
+# 7.5 GB source read from a local disk (66 s).
+SAMPLE = 64 * 2**20
+
+
+def reading_said(source: Path) -> str:
+    """What the rehearsal (rehearse) reads before it does, and for about how long, as one line
+    for the log: the whole source, once, by ffmpeg. DESIGN.md, Output, Assembly, decided on
+    2026-10-28: "a line says what the rehearsal reads before it does".
+
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md leaves the line's wording, and the way its
+    duration is known, open): the duration is the source's size over the speed of a timed read
+    of SAMPLE bytes from its middle, plain file reads, the range dropped from the page cache
+    first where the system lets it, so that a file read a moment ago isn't timed from memory
+    (posix_fadvise: a mount that ignores it, WSL's, may still answer from memory, the figure then
+    short). The remux itself reads the whole source and writes the other streams, so the figure
+    is a floor; the line says "about". A read that fails is said with its reason, and no
+    duration given."""
+    size = source.stat().st_size
+    what = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
+    what += f" its {size / 2**30:.1f} GiB"
+    try:
+        seconds = _read_seconds(source, size)
+    except OSError as error:
+        return f"{what}, for a time not estimated ({error})"
+    if seconds < 10:
+        return f"{what}, a few seconds"
+    if seconds < 90:
+        return f"{what}, about {round(seconds / 5) * 5} s"
+    return f"{what}, about {round(seconds / 60)} min"
+
+
+def _read_seconds(source: Path, size: int) -> float:
+    """The seconds to read `size` bytes of source at the speed of a timed read of SAMPLE of them
+    (reading_said)."""
+    length = min(size, SAMPLE)
+    if length == 0:
+        return 0.0
+    offset = (size - length) // 2
+    with source.open("rb", buffering=0) as handle:
+        try:
+            os.posix_fadvise(handle.fileno(), offset, length, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError) as error:
+            # The figure may then be a read from memory, short: said in the log, never silently.
+            logger.debug("%s: its sample not dropped from the page cache: %s", source, error)
+        handle.seek(offset)
+        started = time.monotonic()
+        left = length
+        while left > 0:
+            chunk = handle.read(min(left, 4 * 2**20))
+            if not chunk:
+                break
+            left -= len(chunk)
+        elapsed = time.monotonic() - started
+    read = length - left
+    if read == 0:
+        raise OSError("nothing read")
+    return elapsed * size / read
+
+
+def left_out_said(source: Path) -> None:
+    """Say, as a warning, what the finished file leaves out of the source's data streams
+    (left_out_warning), or nothing when it leaves out none: the part of preflight that a start
+    trusting its rehearsal's record (cli._run) still runs, the per-stream trial (left_out) alone,
+    a header each, well under a second."""
+    source = _absolute(source)
+    whole = layout(source)
+    warning = left_out_warning(source, left_out(source, whole), len(whole.chapters))
+    if warning:
+        logger.warning("%s", warning)
+
+
 def preflight(source: Path, work: Path) -> str:
     """Why a one-file output can't take the source's other streams, or "": the streams Matroska
-    refuses (unmuxable, unmuxable_refusal), else what ffmpeg says of their remux (rehearse). For
-    the start of a job, before its first pass.
+    refuses (unmuxable, unmuxable_refusal), else what ffmpeg says of their remux (rehearse), said
+    first with what it reads and for about how long (reading_said). For the start of a job,
+    before its first pass; a resume whose record holds a passed rehearsal of the same content
+    runs left_out_said alone (cli._copied).
 
     The data streams Matroska can't hold are no refusal: left out of the finished file, they are
     warned of, once, as the refusal would be said, whenever this runs (left_out_warning).
@@ -1071,6 +1147,7 @@ def preflight(source: Path, work: Path) -> str:
     warning = left_out_warning(source, found, len(layout(source).chapters))
     if warning:
         logger.warning("%s", warning)
+    logger.info("%s", reading_said(source))
     return rehearse(source, work)
 
 

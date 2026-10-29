@@ -1689,3 +1689,163 @@ def test_sigterm_during_the_rehearsal_stops_its_ffmpeg(film_directory: Path) -> 
     assert "stopped at once (SIGTERM)" in text and time.monotonic() - started < 30
     assert joining(film_directory) == []
     assert not [path.name for path in film_directory.iterdir() if path.name.startswith("x.mkv")]
+
+
+# The remux rehearsal said, recorded with the first pass's, and trusted by a resume (DESIGN.md,
+# Output, Assembly, "Met on 2026-10-23", decided on 2026-10-28).
+def rehearsals(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The lines logged at each rehearsal (assembly.rehearse) from now on, as it starts: the log
+    so far, one entry a rehearsal, so that a test sees what was said before it read the source."""
+    from seedvr2x.media import assembly
+
+    seen: list[str] = []
+    rehearse = assembly.rehearse
+
+    def spy(source: Path, work: Path) -> str:
+        seen.append(caplog.text)
+        return rehearse(source, work)
+
+    monkeypatch.setattr(assembly, "rehearse", spy)
+    return seen
+
+
+@needs_ffmpeg
+def test_a_new_jobs_rehearsal_is_said_before_it_reads_and_recorded_with_the_first_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    seen = rehearsals(monkeypatch, caplog)
+    steps.stop = "encode 30"
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
+    work = tmp_path / "x.mkv.work"
+    [before] = seen
+    line = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading its"
+    assert line in before and before.index(line) > before.index("ffmpeg ")
+    assert "the first pass" not in before
+    # Recorded in the input's record, with the first pass's: the ffmpeg and conversions it ran
+    # under; the manifest is that of a stopped run, units made.
+    content = json.loads((work / NAME).read_text())
+    ffmpeg_version = ffmpeg.check(assembly=True)
+    [conversions] = {content["environment"]["conversions"]}
+    assert content["input"]["rehearsal"] == {
+        "passed": True,
+        "ffmpeg": ffmpeg_version,
+        "conversions": conversions,
+    }
+    assert content["input"]["rehearsal"]["ffmpeg"] == content["environment"]["ffmpeg"]
+
+
+@needs_ffmpeg
+def test_a_resume_trusts_the_recorded_rehearsal_and_runs_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    seen = rehearsals(monkeypatch, caplog)
+    steps.stop = "encode 30"
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
+    assert len(seen) == 1
+    recorded = (tmp_path / "x.mkv.work" / NAME).read_text()
+    steps.stop = None
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert len(seen) == 1
+    assert "the assembly's rehearsal trusted from the job's record" in caplog.text
+    assert "the assembly rehearsed" not in caplog.text
+    # The same content compared before: the trusting line comes after the input's SHA-256.
+    assert caplog.text.index("SHA-256") < caplog.text.index("rehearsal trusted")
+    assert json.loads(recorded)["input"]["rehearsal"]["passed"] is True
+    held_to_the_source(tmp_path / "x.mkv", source, tmp_path)
+    # The manifest left beside the finished file holds the rehearsal too.
+    beside = json.loads((tmp_path / "x.mkv.manifest.json").read_text())
+    assert beside["input"]["rehearsal"]["passed"] is True
+
+
+@needs_ffmpeg
+def test_a_resume_under_another_ffmpeg_accepted_rehearses_again_and_records_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    seen = rehearsals(monkeypatch, caplog)
+    steps.stop = "encode 30"
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
+    check = ffmpeg.check
+    monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
+    steps.stop = "encode 50"
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM, "--accept-env-change") == 130
+    assert len(seen) == 2
+    assert "not one of this ffmpeg: run again" in caplog.text
+    assert "the assembly rehearsal trusted" not in caplog.text
+    content = json.loads((tmp_path / "x.mkv.work" / NAME).read_text())
+    assert content["input"]["rehearsal"]["ffmpeg"] == "n0.0-another"
+    # Back on that ffmpeg, the record is its own: trusted.
+    steps.stop = None
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM, "--accept-env-change") == 0
+    assert len(seen) == 2 and "rehearsal trusted from the job's record" in caplog.text
+    ffmpeg.check = check  # monkeypatch restores it
+
+
+@needs_ffmpeg
+def test_a_resume_with_no_rehearsal_recorded_is_refused_by_it_after_the_content_is_compared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    from seedvr2x.media import assembly
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    steps.stop = "encode 30"
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
+    path = tmp_path / "x.mkv.work" / NAME
+    content = json.loads(path.read_text())
+    del content["input"]["rehearsal"]
+    path.write_text(json.dumps(content))
+    kept = path.read_bytes()
+    # A rehearsal that would refuse the source now (a stream made unmuxable is not feasible
+    # without changing its content, which is another job): replaced by one that refuses.
+    monkeypatch.setattr(assembly, "rehearse", lambda *given: "the remux says no")
+    steps.stop = None
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert "no rehearsal of the assembly in the job's record: run now" in text
+    assert "the remux says no" in text
+    # After the input's content was compared (its SHA-256 is hashed by the comparison), not
+    # before the model files and the comparison, as it was.
+    assert text.index("SHA-256") < text.index("the remux says no")
+    assert path.read_bytes() == kept
+    # Another content under the same record: another job, refused by the comparison, the
+    # rehearsal not run.
+    ran: list[Path] = []
+    monkeypatch.setattr(assembly, "rehearse", lambda *given: ran.append(given[0]) or "")
+    other = film(tmp_path / "other.mkv", frames=97)
+    text = refused(tmp_path, other, caplog, *FILM, output="x.mkv")
+    assert "another job than the one asked" in text and ran == []
+
+
+@needs_ffmpeg
+def test_a_trusting_resume_still_says_the_data_streams_left_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The warning of a start (assembly.preflight) is recomputed, a header a stream, where the
+    # rehearsal is trusted (cli._rehearsed): a MOV with a timecode track.
+    from seedvr2x.media import assembly
+
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = tmp_path / "in.mov"
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),
+            *("-frames:v", "25", "-c:v", "mpeg4", "-timecode", "01:00:00:00", str(source)),
+        ],
+        check=True,
+    )
+    version, conversions = "n1", "abc"
+    recorded = {"input": {"rehearsal": {"passed": True, "ffmpeg": version, "conversions": "abc"}}}
+    monkeypatch.setattr(assembly, "rehearse", lambda *given: pytest.fail("the rehearsal ran"))
+    cli._rehearsed(source, tmp_path, recorded, version, conversions)  # pyright: ignore[reportPrivateUsage]
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warned) == 1 and "left out of the finished file" in warned[0]
+    assert "rehearsal trusted from the job's record" in caplog.text

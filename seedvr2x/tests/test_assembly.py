@@ -2100,3 +2100,51 @@ def test_no_segment_is_an_error(tmp_path: Path, jobs: Callable[..., Job]) -> Non
             index,
             tmp_path,
         )
+
+
+def test_the_line_before_the_rehearsal_says_what_it_reads_and_for_about_how_long(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DESIGN.md, Output, Assembly, decided on 2026-10-28: "a line says what the rehearsal reads
+    # before it does". The duration is the source's size over a timed read of a sample of it
+    # (assembly.reading_said): a few seconds under ten, seconds to the nearest five up to ninety,
+    # minutes after; a read that fails is said with its reason, no duration invented.
+    source = tmp_path / "in.mkv"
+    source.write_bytes(bytes(3 * 2**20))
+    head = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
+    assert assembly.reading_said(source) == f"{head} its 0.0 GiB, a few seconds"
+    seconds = iter([9.9, 10.0, 66.0, 89.0, 372.0, 5400.0])
+    monkeypatch.setattr(assembly, "_read_seconds", lambda *given: next(seconds))
+    said = [assembly.reading_said(source).removeprefix(f"{head} its 0.0 GiB, ") for _ in range(6)]
+    assert said == [
+        *("a few seconds", "about 10 s", "about 65 s", "about 90 s", "about 6 min"),
+        "about 90 min",
+    ]
+
+    def unreadable(*given: object) -> float:
+        raise OSError("Input/output error")
+
+    monkeypatch.setattr(assembly, "_read_seconds", unreadable)
+    assert assembly.reading_said(source).endswith(
+        "its 0.0 GiB, for a time not estimated (Input/output error)"
+    )
+
+
+def test_the_estimate_reads_a_sample_of_the_middle_and_scales_to_the_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The sample is read from the middle of the source, SAMPLE bytes at most; the time it took is
+    # scaled to the whole size. A clock that counts 2 s for the sample of a file 10 times larger
+    # gives 20 s; the whole of a smaller file is its own sample.
+    source = tmp_path / "in.bin"
+    size = 10 * assembly.SAMPLE
+    with source.open("wb") as handle:
+        handle.truncate(size)
+    ticks = iter([100.0, 102.0])
+    monkeypatch.setattr(assembly.time, "monotonic", lambda: next(ticks))
+    assert assembly._read_seconds(source, size) == pytest.approx(20.0)  # pyright: ignore[reportPrivateUsage]
+    small = tmp_path / "small.bin"
+    small.write_bytes(bytes(1000))
+    ticks = iter([5.0, 6.5])
+    monkeypatch.setattr(assembly.time, "monotonic", lambda: next(ticks))
+    assert assembly._read_seconds(small, 1000) == pytest.approx(1.5)  # pyright: ignore[reportPrivateUsage]

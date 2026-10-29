@@ -760,13 +760,22 @@ def _run(args: argparse.Namespace) -> int:
             kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
         elif beside is not None and beside.is_file():
             recorded, finished_file = read(beside), True
+        # The remux rehearsal of a .mkv path's job, recorded with its first pass's
+        # (manifest.REHEARSAL); None for a directory's.
+        rehearsal: dict[str, Any] | None = None
         if final is not None and not finished_file:
             # Before any work, on a new job and on a resume: what the assembly can't take of the
             # source's other streams would otherwise be found at the job's end, every segment
             # made (_copied). SIGTERM unwinds it as Ctrl-C does, its ffmpeg stopped with it
-            # (stop.terminable): the run's handlers come later.
+            # (stop.terminable): the run's handlers come later. Decided on 2026-10-28 (DESIGN.md,
+            # Output, Assembly): a new job rehearses here, before its first pass; a resume
+            # rehearses only once its input is known for the same content (_prior, below),
+            # and trusts the record's rehearsal when it holds one for the same ffmpeg
+            # (_rehearsed), where every start of a one-file job read the whole source again.
             with terminable():
-                _copied(args.input, directory)
+                _work(directory)
+                if recorded is None:
+                    rehearsal = _copied(args.input, directory, ffmpeg_version, conversions)
         if args.segment_cmd is not None and not finished_file:
             _trial(args, declared, output_size(target))
         # A job detecting its shots needs the record's probabilities: a plan cut by a list has
@@ -851,6 +860,15 @@ def _run(args: argparse.Namespace) -> int:
             done = _finished_already(args, directory, prior, declared, target, untrusted)
             if done is not None:
                 return done
+            if final is not None:
+                # A resume's rehearsal, here and not at the record's reading: the content is
+                # compared (_prior), so that the record's rehearsal stands for this input
+                # (DESIGN.md, Output, Assembly, decided on 2026-10-28). One refused by it comes
+                # after the settings, environment and input comparison, before any first pass.
+                with terminable():
+                    rehearsal = _rehearsed(
+                        args.input, directory, prior.recorded, ffmpeg_version, conversions
+                    )
         else:
             identity = _identity(
                 *(args, cuts, ffmpeg_version, conversions),
@@ -920,6 +938,7 @@ def _run(args: argparse.Namespace) -> int:
                     "frame_rate": str(source.frame_rate),
                 },
                 plan_record,
+                rehearsal=rehearsal,
             )
 
         # The first pass kept before anything can refuse the job (DESIGN.md, Pause and resume, A
@@ -1974,22 +1993,14 @@ def _joinable(
         )
 
 
-def _copied(source: Path, directory: Path) -> None:
-    """Refuse (JobError) a source whose other streams the assembly can't take, before any work
-    (assembly.preflight): a stream Matroska's muxer refuses as it is, each named with ffmpeg's
-    own reason and the ways out; else anything ffmpeg says of their remux, the very one the
-    assembly makes, rehearsed whole in directory, the job's work directory, which is made and
-    locked for it (_lock), as an output directory is, from the start: a second run to the same
-    file is refused before its first pass. What an assembly or a rehearsal killed there left
-    (assembly.work_file) goes first. A run refused before it writes anything there, by this
-    check or a later one, leaves nothing: the directory, when this made it, goes as main returns
-    if it is still empty (_unmake).
-
-    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has every other stream copied and says
-    nothing of one that can't be): refused before any work, the fix being the user's, a remux of
-    the source or a directory output, rather than copied without it, or converted."""
+def _work(directory: Path) -> None:
+    """Make and lock directory, a .mkv path's work directory, before anything is written there
+    (_lock), as an output directory is, from the start: a second run to the same file is refused
+    before its first pass. What an assembly or a rehearsal killed there left (assembly.work_file)
+    goes first. A run refused before it writes anything there, by the rehearsal (_copied) or a
+    later check, leaves nothing: the directory, when this made it, goes as main returns if it is
+    still empty (_unmake)."""
     from seedvr2x.media import assembly
-    from seedvr2x.runtime.job import JobError
 
     # Its own to remove (_unmake) only once the lock says so: another seedvr2x may have made
     # it meanwhile.
@@ -2001,9 +2012,71 @@ def _copied(source: Path, directory: Path) -> None:
         if assembly.work_file(left.name) and left.is_file() and not left.is_symlink():
             left.unlink()
             logger.info("%s: left by an assembly that was stopped, removed", left)
+
+
+def _copied(source: Path, directory: Path, ffmpeg_version: str, conversions: str) -> dict[str, Any]:
+    """Refuse (JobError) a source whose other streams the assembly can't take, before any work
+    (assembly.preflight): a stream Matroska's muxer refuses as it is, each named with ffmpeg's
+    own reason and the ways out; else anything ffmpeg says of their remux, the very one the
+    assembly makes, rehearsed whole in directory, the job's work directory (_work), after a line
+    saying what it reads and for about how long. Returns the rehearsal's record, passed, under
+    this ffmpeg and these conversions, for the manifest to hold with the first pass's
+    (manifest.REHEARSAL).
+
+    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has every other stream copied and says
+    nothing of one that can't be): refused before any work, the fix being the user's, a remux of
+    the source or a directory output, rather than copied without it, or converted."""
+    from seedvr2x.media import assembly
+    from seedvr2x.runtime.job import JobError
+
     refused = assembly.preflight(source, directory)
     if refused:
         raise JobError(refused)
+    return {"passed": True, "ffmpeg": ffmpeg_version, "conversions": conversions}
+
+
+def _rehearsed(
+    source: Path,
+    directory: Path,
+    recorded: dict[str, Any],
+    ffmpeg_version: str,
+    conversions: str,
+) -> dict[str, Any]:
+    """A resume's rehearsal of the source's other streams (_copied), once its input is known for
+    the one recorded (_prior): not run when the manifest `recorded` holds a passed one under this
+    ffmpeg and these conversions, the same content having passed it (DESIGN.md, Output, Assembly,
+    decided on 2026-10-28: "a resume trusting it for the same content and `ffmpeg`"), said in
+    one line; run, and returned for the manifest, otherwise (a record without one, a
+    record of another ffmpeg accepted, or hand-edited).
+
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says nothing of the warning of the data
+    streams left out, which every start says): said at a trusting start too, recomputed by the
+    per-stream trial of the data streams alone (assembly.left_out_said), a header each, rather
+    than recorded, so that the record keeps to what DESIGN.md names."""
+    from seedvr2x.media import assembly
+    from seedvr2x.runtime.manifest import REHEARSAL
+
+    passed = {"passed": True, "ffmpeg": ffmpeg_version, "conversions": conversions}
+    entry: Any = None
+    if isinstance(recorded.get("input"), dict):
+        entry = cast(dict[str, Any], recorded["input"]).get(REHEARSAL)
+    if entry == passed:
+        logger.info(
+            "%s: the assembly's rehearsal trusted from the job's record: the same input, under"
+            " ffmpeg %s",
+            source,
+            ffmpeg_version,
+        )
+        assembly.left_out_said(source)
+        return passed
+    if entry is None:
+        logger.info("%s: no rehearsal of the assembly in the job's record: run now", source)
+    else:
+        logger.info(
+            "%s: the job's record of the assembly's rehearsal is not one of this ffmpeg: run again",
+            source,
+        )
+    return _copied(source, directory, ffmpeg_version, conversions)
 
 
 def _grid_start(source: "Source") -> None:
@@ -2509,7 +2582,7 @@ def _refuse_foreign(path: Path, content: dict[str, Any], work: bool = False) -> 
     where it holds anything not this job's, judged from the record alone as soon as it is read
     (cli._run): before the first pass, an hour of decode, and before a .mkv path's remux
     rehearsal, which writes in its work directory and removes a stopped assembly's leftovers by
-    their names (cli._copied; DESIGN.md, Pause and resume, decided on 2026-10-21). seedvr2x's own
+    their names (cli._work; DESIGN.md, Pause and resume, decided on 2026-10-21). seedvr2x's own
     files are accepted by their names, what the run discards or takes up: the manifest, the frame
     index and their partial files, the units' directory (STATE) and the checksums' (SUMS), each
     segment's file recorded, finished or not, with its partial file and a segment command's, and
@@ -2566,7 +2639,7 @@ def _empty(directory: Path, work: bool = False) -> bool:
     """Whether directory holds nothing, but what an interrupted first write of the manifest left,
     which the next write replaces: the manifest's partial file, the frame index written whole
     before it (manifest.INDEX), or the index's partial file; and, in a .mkv path's work
-    directory (`work`), what a rehearsal of its assembly left when killed (_copied), which the
+    directory (`work`), what a rehearsal of its assembly left when killed (_work), which the
     next start removes."""
     from seedvr2x.media.assembly import work_file
     from seedvr2x.runtime.manifest import INDEX, NAME
@@ -2870,7 +2943,7 @@ def _lock(directory: Path) -> None:
     output directory, since two would race on the manifest and discard each other's files in
     progress (resume.leftovers). The lock is the kernel's (flock), on the directory itself, so
     no file is added, and it goes with the process, however it ends. Once per directory: a
-    .mkv path's work directory is locked from its start (_copied), an output directory once its
+    .mkv path's work directory is locked from its start (_work), an output directory once its
     job is known (_run), and a second lock on the same directory, even this process's own,
     would be refused, flock's locks being its descriptors'."""
     from seedvr2x.media.files import make_directories
@@ -2892,7 +2965,7 @@ def _lock(directory: Path) -> None:
     _LOCKED.append(directory)
 
 
-# The work directories this run made for a .mkv path's job (_copied), removed as main returns
+# The work directories this run made for a .mkv path's job (_work), removed as main returns
 # when still empty: a run refused before its first write leaves nothing.
 _MADE: list[Path] = []
 

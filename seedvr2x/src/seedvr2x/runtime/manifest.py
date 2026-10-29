@@ -69,6 +69,15 @@ SHOT_RUNS = "runs"
 # for a stop between the two, so that the next run finishes the removal instead of refusing a
 # directory half removed (cli._assembled). An additive field, absent until then.
 ASSEMBLED = "assembled"
+# The input's record of the remux rehearsal a .mkv path's job makes of the source's other streams
+# before its first pass (assembly.preflight; cli._copied), once it passed: {"passed": true,
+# "ffmpeg": the version it ran under, "conversions": the fingerprint}. A resume that finds the
+# same content (cli._prior compares the input's size and SHA-256) and the same two trusts it and
+# rehearses nothing (DESIGN.md, Output, Assembly, "Met on 2026-10-23", decided on 2026-10-28: "its
+# result is recorded with the first pass's, a resume trusting it for the same content and
+# `ffmpeg`"). Additive, no version bump: a record without it is rehearsed again; information for
+# a resume's comparison (resume.UNCOMPARED), the content it stands for being compared as the input.
+REHEARSAL = "rehearsal"
 
 
 def write_content(path: Path, content: dict[str, Any]) -> None:
@@ -173,6 +182,9 @@ class Manifest:
     # to resume (settings.code) anyway.
     hashes: list[str | None] = field(default_factory=list[str | None])
     assembled: dict[str, Any] | None = None  # the finished file, once in place (ASSEMBLED)
+    # The remux rehearsal of a .mkv path's job, passed (REHEARSAL), recorded with the first pass's
+    # in the input's record; None for a directory's job, which makes none.
+    rehearsal: dict[str, Any] | None = None
     # Called once, before the manifest's next write, then dropped: it writes the frame index that
     # write names, made again by a resume in another environment (cli._taken_up).
     before_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
@@ -204,7 +216,7 @@ class Manifest:
             self.sizes = [None] * len(self.segments)
         if not self.hashes:
             self.hashes = [None] * len(self.segments)
-        self._input = _input(self.source)
+        self._input = _input(self.source, self.rehearsal)
 
     @property
     def runs_per_shot(self) -> int:
@@ -333,7 +345,7 @@ class Manifest:
         }
 
 
-def _input(source: Source) -> dict[str, Any]:
+def _input(source: Source, rehearsal: dict[str, Any] | None = None) -> dict[str, Any]:
     """The source as the manifest records it: the file itself (where it is, its size and
     modification time, read when the job starts, and its content's SHA-256) and what the first
     pass found in it, idet's counts included; with its frame index, the index's file, INDEX, by
@@ -379,6 +391,8 @@ def _input(source: Source) -> dict[str, Any]:
                 "first": {"frame": filled.first.first, "length": filled.first.length},
                 "longest": filled.longest,
             }
+    if rehearsal is not None:
+        record[REHEARSAL] = rehearsal
     if source.idet is not None:
         # For information, not compared (resume.UNCOMPARED): what idet found, the warning's
         # figures (source.combing), said again by a resume trusting this record.

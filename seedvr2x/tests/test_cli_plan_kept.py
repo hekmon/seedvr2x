@@ -617,9 +617,10 @@ def test_a_mkv_path_s_work_directory_holding_another_s_file_is_refused_before_it
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A .mkv path's job, stopped: its work directory with a file of another's added is refused
-    # from its record before the remux rehearsal (cli._copied), which writes there and removes
-    # a stopped assembly's leftovers, and before any first pass (design, 2026-10-21); nothing
-    # written or removed. An assembly's own work file is seedvr2x's, accepted by its name.
+    # from its record before the remux rehearsal (cli._copied) and the work directory's cleaning
+    # (cli._work), which write there and remove a stopped assembly's leftovers, and before any
+    # first pass (design, 2026-10-21); nothing written or removed. An assembly's own work file is
+    # seedvr2x's, accepted by its name.
     from seedvr2x.media import assembly
 
     source_path = job(tmp_path, monkeypatch)
@@ -647,4 +648,8 @@ def test_a_mkv_path_s_work_directory_holding_another_s_file_is_refused_before_it
     (work / "notes.txt").unlink()
     (work / stray).unlink()
     assert upscale(tmp_path, source_path, "one.mkv", *JOB) == 0, errors(caplog)
-    assert rehearsed and (tmp_path / "one.mkv").is_file()
+    # The record holds the passed rehearsal of this input and ffmpeg: a resume trusts it and runs
+    # none (DESIGN.md, Output, Assembly, decided on 2026-10-28), the assembly's own leftover removed
+    # all the same (cli._work).
+    assert rehearsed == [] and (tmp_path / "one.mkv").is_file()
+    assert not (work / left).exists()
