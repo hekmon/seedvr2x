@@ -1289,6 +1289,80 @@ def joining(directory: Path) -> list[str]:
     return found
 
 
+def children_of(parent: int) -> dict[int, str]:
+    """The processes whose parent is `parent`, by pid, with their command lines (Linux's /proc)."""
+    found: dict[int, str] = {}
+    for entry in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            # After the command's name, in brackets: state, then the parent's pid.
+            fields = entry.read_text().rsplit(")", 1)[1].split()
+            if int(fields[1]) == parent:
+                command = (entry.parent / "cmdline").read_bytes().replace(b"\0", b" ")
+                found[int(entry.parent.name)] = command.decode(errors="replace")
+        except (OSError, IndexError, ValueError):  # gone meanwhile
+            continue
+    return found
+
+
+def alive(pid: int) -> bool:
+    """Whether the process `pid` runs: a zombie, ended and not yet reaped, does not."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ends_with_us", [True, False], ids=["with_us", "control_without"])
+def test_a_killed_run_leaves_none_of_its_assemblys_ffmpeg(
+    film_directory: Path, ends_with_us: bool
+) -> None:
+    # DESIGN.md, Output, Assembly (decided on 2026-10-12): ffmpeg's children of the assembly end
+    # with seedvr2x. The join (slowed to the source's pace, STOPPING) running, seedvr2x is
+    # SIGKILLed, alone, not its group: its ffmpeg, in a group of its own, is gone within seconds.
+    # The control, the helper replaced by none, shows the test would see one left.
+    driver = STOPPING.replace(
+        "subprocess.Popen = slow_join",
+        "subprocess.Popen = slow_join"
+        + (
+            ""
+            if ends_with_us
+            else "\nimport seedvr2x.media.assembly as a\na.ends_with_us = lambda: None"
+        ),
+    )
+    process = subprocess.Popen(
+        [
+            *(sys.executable, "-c", driver, str(test_stop.TESTS), "assembly"),
+            *("film.mkv", "-o", "x.mkv", "--model-dir", ".", "--dit-model", "w.safetensors"),
+            *("--vae-model", "w.safetensors", "--resolution", "96", "--seed", "42", *FILM),
+            *("--color-correction", "none", "--format", "gbrp16le"),
+        ],
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=film_directory,
+        start_new_session=True,
+        env={**os.environ, "HF_HOME": str(film_directory / "hf"), "HF_HUB_OFFLINE": "1"},
+    )
+    assert process.stderr is not None
+    left: dict[int, str] = {}
+    try:
+        for line in process.stderr:
+            if line.startswith("IN assembly"):
+                left = {pid: c for pid, c in children_of(process.pid).items() if "concat" in c}
+                break
+        assert len(left) == 1, left
+        process.kill()
+        process.wait(timeout=30)
+        time.sleep(1.5)
+        assert [pid for pid in left if alive(pid)] == ([] if ends_with_us else list(left))
+    finally:
+        for pid in left:
+            if alive(pid):
+                os.kill(pid, signal.SIGKILL)
+        process.stderr.close()
+    assert not (film_directory / "x.mkv").exists()
+
+
 @pytest.fixture
 def film_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     film_job(tmp_path, monkeypatch)

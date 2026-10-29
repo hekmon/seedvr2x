@@ -1,7 +1,13 @@
-"""The ffmpeg build seedvr2x runs with, checked once at startup (DESIGN.md, Input)."""
+"""The ffmpeg build seedvr2x runs with, checked once at startup (DESIGN.md, Input), and what the
+assembly starts its children with, to end with seedvr2x (ends_with_us)."""
 
+import ctypes
+import functools
+import os
 import shutil
+import signal
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 # What seedvr2x's own ffmpeg commands use, every one checked, so that a build lacking one is
@@ -73,6 +79,40 @@ HOW_TO_GET = (
 
 class MediaError(RuntimeError):
     """A source seedvr2x refuses, or a failure of ffmpeg or ffprobe; the message says which."""
+
+
+# prctl's option that has the kernel send the calling process a signal when its parent ends
+# (linux/prctl.h).
+PR_SET_PDEATHSIG = 1
+
+
+@functools.cache
+def _libc() -> ctypes.CDLL:
+    """The C library, opened once and before any fork, so that a child only calls into it."""
+    return ctypes.CDLL(None, use_errno=True)
+
+
+def ends_with_us() -> Callable[[], None]:
+    """A `preexec_fn` for a child of the assembly (media/assembly.py) that has it killed (SIGKILL)
+    when seedvr2x dies: DESIGN.md, Output, Assembly (decided on 2026-10-12): "ffmpeg's children
+    of the assembly end with seedvr2x, where a killed seedvr2x leaves its join writing". Their
+    own process groups keep them out of the terminal's reach (DESIGN.md, Pause and resume,
+    Stopping), so nothing but this ends them when seedvr2x is killed.
+
+    prctl(PR_SET_PDEATHSIG) fires when the thread that forked ends, not the process: the callers
+    fork from seedvr2x's main thread, which is the process's life. It is set after the fork, so
+    a parent that died in between is not seen by the kernel: the child checks, and ends itself.
+    Linux only (DESIGN.md: Linux first); no other system is run, so no fallback."""
+    libc = _libc()
+    parent = os.getpid()
+
+    def prepare() -> None:
+        if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+        if os.getppid() != parent:
+            os._exit(1)  # the parent ended before the signal was set
+
+    return prepare
 
 
 # No output takes the source's metadata or chapters, which fftools copies to every output by

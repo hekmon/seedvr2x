@@ -48,7 +48,7 @@ from typing import IO, Any, cast
 import numpy as np
 import numpy.typing as npt
 
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.ffmpeg import MediaError, ends_with_us
 from seedvr2x.media.files import partial_path, replace_whole
 from seedvr2x.media.index import NOPTS, FrameIndex
 
@@ -593,6 +593,7 @@ def _decoded(path: Path) -> list[str]:
             stderr=log,
             text=True,
             process_group=0,
+            preexec_fn=ends_with_us(),
         )
         assert process.stdout is not None
         try:
@@ -646,6 +647,7 @@ def segment_refusal(path: Path, frames: int, frame_rate: Fraction) -> str:
         text=True,
         check=False,
         process_group=0,
+        preexec_fn=ends_with_us(),
     )
     if result.returncode != 0:
         raise MediaError(f"{path}: ffprobe failed reading its packets: {result.stderr.strip()}")
@@ -1542,7 +1544,12 @@ def _read_packets(path: Path, video: int | None) -> tuple[dict[int, _Packets], i
     with tempfile.TemporaryFile() as log:
         # In a process group of its own, as the writers' ffmpeg (media/writer.py).
         process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=log, text=True, process_group=0
+            command,
+            stdout=subprocess.PIPE,
+            stderr=log,
+            text=True,
+            process_group=0,
+            preexec_fn=ends_with_us(),
         )
         assert process.stdout is not None
         try:
@@ -1597,6 +1604,7 @@ def _ffprobe(path: Path, *options: str) -> dict[str, Any]:
         text=True,
         check=False,
         process_group=0,
+        preexec_fn=ends_with_us(),
     )
     if result.returncode != 0:
         raise MediaError(f"{path}: ffprobe failed: {result.stderr.strip()}")
@@ -1620,7 +1628,8 @@ def _strict(command: Sequence[str], doing: str) -> None:
 def _run(command: Sequence[str]) -> tuple[int, list[str]]:
     """Run an ffmpeg command to its end: its exit status and the lines it printed. In a process
     group of its own, out of reach of the terminal's Ctrl-C (runtime/stop.py); killed when the
-    caller's thread raises, a stop among them."""
+    caller's thread raises, a stop among them; and when seedvr2x itself is killed
+    (ffmpeg.ends_with_us)."""
     # ffmpeg's messages go to a file, which it never waits on (media/checksums.py).
     with tempfile.TemporaryFile() as log:
         process = subprocess.Popen(
@@ -1629,6 +1638,7 @@ def _run(command: Sequence[str]) -> tuple[int, list[str]]:
             stdout=subprocess.DEVNULL,
             stderr=log,
             process_group=0,
+            preexec_fn=ends_with_us(),
         )
         try:
             status = process.wait()
