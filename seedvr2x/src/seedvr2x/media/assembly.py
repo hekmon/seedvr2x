@@ -691,18 +691,83 @@ def unmuxable(source: Path) -> list[Unmuxable]:
     source = _absolute(source)
     found: list[Unmuxable] = []
     for stream in _others(source, layout(source)):
-        command = [
-            *(*FFMPEG, "-i", str(source), "-map", f"0:{stream.index}", "-c", "copy"),
-            *("-t", "0", "-f", "matroska", os.devnull),
-        ]
-        status, lines = _run(command)
-        if status == 0:
-            continue
-        errors = [PREFIX.sub("", line) for line in lines if "[error]" in line]
-        said = [error for error in errors if not error.startswith(NO_HEADER)] or errors or lines
-        reason = " / ".join(said) or f"exit status {status}"
-        found.append(Unmuxable(stream.index, stream.kind, stream.codec, reason))
+        refused = _refusal(source, stream)
+        if refused is not None:
+            found.append(refused)
     return found
+
+
+def _refusal(source: Path, stream: Stream) -> Unmuxable | None:
+    """Matroska's muxer's verdict on one stream of the source (unmuxable), None when it takes
+    it."""
+    command = [
+        *(*FFMPEG, "-i", str(source), "-map", f"0:{stream.index}", "-c", "copy"),
+        *("-t", "0", "-f", "matroska", os.devnull),
+    ]
+    status, lines = _run(command)
+    if status == 0:
+        return None
+    errors = [PREFIX.sub("", line) for line in lines if "[error]" in line]
+    said = [error for error in errors if not error.startswith(NO_HEADER)] or errors or lines
+    reason = " / ".join(said) or f"exit status {status}"
+    return Unmuxable(stream.index, stream.kind, stream.codec, reason)
+
+
+def left_out(source: Path, found: Layout) -> list[Unmuxable]:
+    """The data streams of the source, `found` its layout, that Matroska can't hold, in the file's
+    order: the ones the finished file leaves out (assemble). Decided on 2026-10-12 (DESIGN.md,
+    Output, Assembly): a MOV's timecode track, an MP4's chapter track, an MPEG-TS data stream;
+    audio, subtitles and the rest Matroska refuses stay refused (unmuxable_refusal). Asked of
+    ffmpeg's muxer again wherever the streams are used (the assembly runs in a later process
+    than the preflight), the data streams alone, one header each: no record to carry."""
+    gone: list[Unmuxable] = []
+    for stream in _others(source, found):
+        if stream.kind == "data":
+            refused = _refusal(source, stream)
+            if refused is not None:
+                gone.append(refused)
+    return gone
+
+
+def without(found: Layout, gone: Sequence[Unmuxable]) -> Layout:
+    """The layout `found` without the streams `gone` (left_out), the others keeping their
+    indexes in the source: every use of the source's other streams (the remux the assembly
+    compares with, the join, the checks) then leaves them out."""
+    out = {stream.index for stream in gone}
+    return replace(found, streams=tuple(s for s in found.streams if s.index not in out))
+
+
+def _kept(source: Path) -> tuple[Layout, list[Unmuxable]]:
+    """The source's layout without the data streams the finished file leaves out (left_out,
+    without), and those streams."""
+    found = layout(source)
+    gone = left_out(source, found)
+    return without(found, gone), gone
+
+
+def left_out_warning(source: Path, gone: Sequence[Unmuxable], chapters: int) -> str:
+    """What is said, once and at the start of a job, of the data streams left out of the finished
+    file (left_out), or "" without any: each one named with ffmpeg's reason, and, when the source
+    has chapters, that they are copied all the same (ffmpeg reads an MP4's chapter track as the
+    file's chapters, and the chapters are copied from the source whatever streams are)."""
+    if not gone:
+        return ""
+    several = len(gone) > 1
+    plural = "s" if chapters != 1 else ""
+    kept = f"; its {chapters} chapter{plural} are copied all the same" if chapters else ""
+    return (
+        f"{source}: Matroska can't hold {'some' if several else 'one'} of its data streams,"
+        f" {'which are' if several else 'which is'} left out of the finished file: {_named(gone)}"
+        f"{kept}"
+    )
+
+
+def _named(streams: Sequence[Unmuxable]) -> str:
+    return "; ".join(
+        f"stream {stream.index} ({stream.kind}{', ' + stream.codec if stream.codec else ''}):"
+        f' ffmpeg says "{stream.reason}"'
+        for stream in streams
+    )
 
 
 # The way out of each stream Matroska refuses that was tested (tests/test_assembly.py), by its
@@ -721,17 +786,22 @@ CONVERSIONS = {
 def unmuxable_refusal(source: Path, found: Sequence[Unmuxable]) -> str:
     """The refusal of a one-file output for a source with streams Matroska can't hold (unmuxable),
     every one named with ffmpeg's reason, and the ways out, the user's: a remux of the source
-    that converts or leaves out each, given in its place, or a directory output.
+    that converts or leaves out each, given in its place, or a directory output. "" when `found`
+    holds data streams alone: those are left out of the finished file (left_out), not refused.
 
-    PROVISIONAL (implementation, 2026-10-10: DESIGN.md's Assembly has the source's other streams
-    copied, and nothing of one that can't be): refused before any work, never dropped in
-    silence."""
-    named = "; ".join(
-        f"stream {stream.index} ({stream.kind}{', ' + stream.codec if stream.codec else ''}):"
-        f' ffmpeg says "{stream.reason}"'
-        for stream in found
-    )
-    several = len(found) > 1
+    DESIGN.md (Output, Assembly): audio, subtitles and the other streams Matroska can't hold are
+    refused before any work, never dropped in silence; a data stream is left out with a warning,
+    decided on 2026-10-12. Where both occur, the refusal names the refused alone.
+
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md leaves open whether the remux a refusal
+    advises still leaves the data streams out): it does, as before. A plain `-map 0` remux
+    fails on them ("Only audio, video, and subtitles are supported for Matroska."), and what
+    is left out there is not warned of again."""
+    refused = [stream for stream in found if stream.kind != "data"]
+    if not refused:
+        return ""
+    named = _named(refused)
+    several = len(refused) > 1
     options: list[str] = []
     notes: list[str] = []
     left_out = [stream.index for stream in found if stream.codec not in CONVERSIONS]
@@ -777,7 +847,7 @@ def rehearse(source: Path, work: Path) -> str:
     Raises MediaError when ffprobe fails on the source, or it has no video stream."""
     source, work = _absolute(source), _absolute(work)
     try:
-        found = layout(source)
+        found, _ = _kept(source)
         _, _, starts = _reference(source, found, work)
     except MediaError as error:
         return (
@@ -856,11 +926,22 @@ def moved(source: Path, found: Layout, starts: Mapping[int, Fraction]) -> str:
 def preflight(source: Path, work: Path) -> str:
     """Why a one-file output can't take the source's other streams, or "": the streams Matroska
     refuses (unmuxable, unmuxable_refusal), else what ffmpeg says of their remux (rehearse). For
-    the start of a job, before its first pass."""
+    the start of a job, before its first pass.
+
+    The data streams Matroska can't hold are no refusal: left out of the finished file, they are
+    warned of, once, as the refusal would be said, whenever this runs (left_out_warning).
+
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "a warning naming it" and not where, nor
+    whether the end of the assembly says it again): said here, at the start of every run of the
+    job, and not as a separate warning at the end, whose line counts the streams it left out."""
     source, work = _absolute(source), _absolute(work)
     found = unmuxable(source)
-    if found:
-        return unmuxable_refusal(source, found)
+    refusal = unmuxable_refusal(source, found)
+    if refusal:
+        return refusal
+    warning = left_out_warning(source, found, len(layout(source).chapters))
+    if warning:
+        logger.warning("%s", warning)
     return rehearse(source, work)
 
 
@@ -935,10 +1016,10 @@ def assemble(
         # What a join killed there left, up to the job's size: gone before the room is read,
         # which it would be counted against.
         partial.unlink(missing_ok=True)
-        source_layout = layout(source)
+        source_layout, gone = _kept(source)  # refuses a source without a video
         attached = {
             stream.index: work / f"{ATTACHED}{stream.index}"
-            for stream in _others(source, source_layout)  # refuses a source without a video
+            for stream in source_layout.others
             if stream.kind == "attachment"
         }
         shared, tags, firsts = _signatures(segments, frame_rate, work)
@@ -973,13 +1054,18 @@ def assemble(
         *(joined - began, done - joined, ahead / 1000),
     )
     logger.info(
-        "%s: assembled, %d frames of %d segments with %d other streams and %d chapters of %s,"
+        "%s: assembled, %d frames of %d segments with %d other streams%s and %d chapters of %s,"
         " %.2f GiB: joined in %.1f s, checked by its packets in %.1f s; the other streams at"
         " most %.2f s ahead of the video in the file",
         output,
         total,
         len(segments),
         len(source_layout.streams) - 1,
+        (
+            f" (its data streams {', '.join(str(stream.index) for stream in gone)} left out)"
+            if gone
+            else ""
+        ),
         len(source_layout.chapters),
         source,
         size / 2**30,

@@ -1061,7 +1061,7 @@ def made(directory: Path, kind: str) -> Path:
                     2, "data", "", "Only audio, video, and subtitles are supported for Matroska."
                 )
             ],
-            "ffmpeg -i SOURCE -map 0 -c copy -map -0:2 remuxed.mkv (stream 2 left out)",
+            "",
         ),
         (
             "chapter track",
@@ -1073,7 +1073,7 @@ def made(directory: Path, kind: str) -> Path:
                     "Only audio, video, and subtitles are supported for Matroska.",
                 )
             ],
-            "ffmpeg -i SOURCE -map 0 -c copy -map -0:2 remuxed.mkv (stream 2 left out)",
+            "",
         ),
         (
             "captions",
@@ -1102,16 +1102,34 @@ def made(directory: Path, kind: str) -> Path:
     ],
 )
 def test_what_matroska_cant_take(
-    tmp_path: Path, kind: str, refused: list[Unmuxable], advised: str
+    tmp_path: Path,
+    kind: str,
+    refused: list[Unmuxable],
+    advised: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # By ffmpeg's own verdict, each stream alone: the stream, its kind, its codec and ffmpeg's
-    # words; and the remux the refusal gives is one Matroska takes whole.
+    # words; and the remux the refusal gives is one Matroska takes whole. A data stream is no
+    # refusal (DESIGN.md, Output, Assembly, decided on 2026-10-12): left out, and warned of.
     source = made(tmp_path, kind)
     work = workdir(tmp_path)
     found = assembly.unmuxable(source)
     assert found == refused
     if not refused:
         assert assembly.preflight(source, work) == ""
+        return
+    if refused[0].kind == "data":
+        with caplog.at_level(logging.WARNING, logger="seedvr2x.media.assembly"):
+            assert assembly.preflight(source, work) == ""
+        assert assembly.unmuxable_refusal(source, found) == "" and advised == ""
+        [warned] = [record.getMessage() for record in caplog.records]
+        assert warned.startswith(f"{source}: Matroska can't hold one of its data streams, which")
+        assert f"stream 2 (data{', bin_data' if kind == 'chapter track' else ''}): ffmpeg says" in (
+            warned
+        )
+        assert "is left out of the finished file" in warned
+        # The chapters of the source are copied all the same, said where it has some.
+        assert ("its 3 chapters are copied all the same" in warned) == (kind == "chapter track")
         return
     said = assembly.preflight(source, work)
     assert said == assembly.unmuxable_refusal(source, found)
@@ -1153,8 +1171,13 @@ def test_several_streams_refused_at_once(tmp_path: Path) -> None:
     kinds = {stream.codec or stream.kind: stream.index for stream in found}
     assert set(kinds) == {"mov_text", "data"}
     said = assembly.unmuxable_refusal(source, found)
-    assert "Matroska can't hold some of its streams as they are" in said
-    command = said.partition("without them: ")[2].partition(" (")[0]
+    # The refusal names the stream it refuses alone, the data stream being left out (PROVISIONAL
+    # in unmuxable_refusal: the remux it advises leaves that one out too).
+    assert "Matroska can't hold one of its streams as it is" in said
+    assert f"stream {kinds['mov_text']} (subtitle, mov_text)" in said
+    assert f"stream {kinds['data']} (data" not in said.partition("ffmpeg -i")[0]
+    command = said.partition("without it: ")[2].partition(" (")[0]
+    assert f"-map -0:{kinds['data']}" in command and f"-c:{kinds['mov_text']} srt" in command
     remux = tmp_path / "remuxed.mkv"
     loose(
         *shlex.split(
@@ -1165,6 +1188,86 @@ def test_several_streams_refused_at_once(tmp_path: Path) -> None:
     )
     assert [s["codec_name"] for s in streams(remux)] == ["mpeg4", "aac", "subrip"]
     assert assembly.preflight(remux, workdir(tmp_path)) == ""
+
+
+def data_source(directory: Path, job: Job, kind: str) -> Path:
+    """A source for the job holding a data stream Matroska can't take, after its MPEG-4 video and
+    its AAC audio: "timecode", a MOV's timecode track; "chapters", an MP4 with three chapters,
+    whose chapter track ffmpeg writes as a data stream (made's "chapter track")."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "meta.txt").write_text(METADATA)
+    seconds = float(job.frames / job.frame_rate)
+    source = directory / ("a.mov" if kind == "timecode" else "a.mp4")
+    loose(
+        *("-f", "lavfi", "-i", f"color=c=gray:s={WIDTH}x{HEIGHT}:r={job.frame_rate}"),
+        *(*sine(440, seconds + 0.1), "-i", str(directory / "meta.txt")),
+        *("-map", "0:v", "-map", "1:a", "-frames:v", str(job.frames), "-c:v", "mpeg4"),
+        *("-c:a", "aac", *(("-timecode", "01:00:00:00") if kind == "timecode" else ())),
+        *("-map_chapters", "-1" if kind == "timecode" else "2", str(source)),
+    )
+    return source
+
+
+@pytest.mark.parametrize("kind", ["timecode", "chapters"])
+def test_a_data_stream_is_left_out_with_a_warning(
+    tmp_path: Path, jobs: Callable[..., Job], caplog: pytest.LogCaptureFixture, kind: str
+) -> None:
+    # DESIGN.md (Output, Assembly, decided on 2026-10-12): a MOV's timecode track and an MP4's
+    # chapter track, which Matroska can't hold, are left out of the finished file with a warning
+    # at the start, said once; every other stream, the video's place and the chapters are what a
+    # remux of the source without it holds.
+    job = jobs()
+    source = data_source(tmp_path / "source", job, kind)
+    own = streams(source)
+    [gone] = [place for place, stream in enumerate(own) if stream["codec_type"] == "data"]
+    assert [s["codec_type"] for s in own].count("data") == 1
+    work = workdir(tmp_path)
+    with caplog.at_level(logging.INFO, logger="seedvr2x.media.assembly"):
+        assert assembly.preflight(source, work) == ""
+        output = assembled(tmp_path, job, source)
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warned) == 1
+    assert f"stream {gone} (data" in warned[0] and "left out of the finished file" in warned[0]
+    # The final line counts the other streams written, and says which it left out.
+    [done] = [r.getMessage() for r in caplog.records if ": assembled, " in r.getMessage()]
+    assert f"with 1 other streams (its data streams {gone} left out) and " in done
+    written = streams(output)
+    kept = [stream["codec_type"] for stream in own if stream["codec_type"] != "data"]
+    assert [stream["codec_type"] for stream in written] == kept == ["video", "audio"]
+    remux = remuxed(source, "-map", f"-0:{gone}")
+    assert [s["codec_type"] for s in streams(remux)] == kept
+    assert shown(output) == [int(p) for p in grid(job.frames, job.frame_rate, Fraction(0))]
+    assert shown(output) == shown(remux)
+    assert packets(output)[1] == packets(remux)[1]
+    assert chapters(output) == chapters(remux) == chapters(source)
+    assert len(chapters(output)) == (3 if kind == "chapters" else 0)
+    assert written[1]["tags"] == streams(remux)[1]["tags"]
+    assert written[1]["disposition"] == streams(remux)[1]["disposition"]
+    # The assembly rehearses and compares against the same remux: nothing left in the work
+    # directory, and the question asked of the finished file (no data stream) is a clean one.
+    assert assembly.preflight(output, work) == ""
+    assert assembly.unmuxable(output) == []
+
+
+def test_a_data_stream_beside_one_refused_is_not_named(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A mov_text subtitle and a timecode track: refused for the subtitle alone; the data stream
+    # isn't warned of (the job stops), and the remux the refusal advises leaves it out.
+    (tmp_path / "subs.srt").write_text(SUBTITLES)
+    source = tmp_path / "a.mov"
+    loose(
+        *("-f", "lavfi", "-i", f"color=c=gray:s={WIDTH}x{HEIGHT}:r=25:d=2", *sine(440, 2)),
+        *("-i", str(tmp_path / "subs.srt"), "-map", "0:v", "-map", "1:a", "-map", "2:s"),
+        *("-c:v", "mpeg4", "-c:a", "aac", "-c:s", "mov_text", "-timecode", "01:00:00:00"),
+        *("-t", "2", str(source)),
+    )
+    work = workdir(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="seedvr2x.media.assembly"):
+        said = assembly.preflight(source, work)
+    assert said.startswith(f"{source}: Matroska can't hold one of its streams as it is: stream 2 (")
+    assert "mov_text" in said and "(data" not in said.partition("ffmpeg -i")[0]
+    assert "-map -0:3" in said and "-c:2 srt" in said and not caplog.records
 
 
 @pytest.mark.parametrize("kind", ["cover in MP4", "cover in Matroska"])

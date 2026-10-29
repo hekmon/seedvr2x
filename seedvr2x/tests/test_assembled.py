@@ -894,6 +894,37 @@ def test_stream_matroska_cannot_take_refused_before_any_work(
 
 
 @needs_ffmpeg
+def test_a_data_stream_matroska_cannot_take_is_left_out_and_warned_of(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A MOV with a timecode track, a data stream Matroska can't hold (DESIGN.md, Output,
+    # Assembly, decided on 2026-10-12): the job runs, the warning is said once at its start,
+    # and the finished file holds the video alone, every frame.
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = tmp_path / "in.mov"
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),
+            *("-frames:v", "25", "-c:v", "mpeg4", "-timecode", "01:00:00:00", str(source)),
+        ],
+        check=True,
+    )
+    assert upscale(tmp_path, source, "x.mkv") == 0
+    final = tmp_path / "x.mkv"
+    warned = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "seedvr2x.media.assembly"
+    ]
+    assert len(warned) == 1 and "left out of the finished file" in warned[0]
+    assert warned[0].startswith(f"{source}: Matroska can't hold one of its data streams, which")
+    assert indexes(final) == list(range(25))
+    assert [s["codec_type"] for s in probed(final, "-show_streams")["streams"]] == ["video"]
+    assert "with 0 other streams (its data streams 1 left out) and 0 chapters" in caplog.text
+
+
+@needs_ffmpeg
 def test_work_directory_refusals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
