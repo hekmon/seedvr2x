@@ -29,6 +29,7 @@ late: measured on an MPEG-TS source starting at 1.4734 s, the file then declares
 What the join needs of the segments (Signature, segment_refusal) and of the source (unmuxable,
 rehearse) can be asked before any work, so that no refusal comes after the upscale."""
 
+import filecmp
 import hashlib
 import json
 import logging
@@ -39,7 +40,7 @@ import subprocess
 import tempfile
 import time
 from array import array
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
@@ -68,6 +69,9 @@ PAIR = "assembly.pair.mkv"
 PAIR_LIST = "assembly.pair.ffconcat"
 WORK_FILES = (LIST, READ, OTHERS, PAIR, PAIR_LIST)
 ATTACHED = "assembly.attachment."
+# And what the check of a cover picture writes there: the picture as the finished file holds it,
+# a file named PICTURE and its stream's index in the finished file (work_file).
+PICTURE = "assembly.picture."
 
 # The hash of each packet's data, ffmpeg's own (libavutil/hash.c), as its framehash muxer and
 # ffprobe's -show_data_hash compute it: MurmurHash3, 128 bits, the fastest of them. Measured on
@@ -120,6 +124,18 @@ TOLERATED = (
     re.compile(r"\[in#[02](/\S+)? @ 0x[0-9a-f]+\] \[warning\] stream \d+, timescale not set"),
     re.compile(r"\[aist#[02]:\d+/\S+ @ 0x[0-9a-f]+\] \[warning\] Guessed Channel Layout: .*"),
 )
+# And, for a cover picture alone, ffmpeg's note that a stream of one frame has no rate to
+# estimate (libavformat/demux.c, avformat_find_stream_info: "not enough frames to estimate rate;
+# consider increasing probesize"), printed when the probe of a source reaches its probesize
+# before some other stream has its codec parameters (two PGS tracks with no packet in the
+# window, a Blu-ray rip's; an audio track whose first packet comes late, tests/test_assembly.py).
+# Decided on 2026-10-28 (DESIGN.md, Output, Assembly, "Met on 2026-10-23"): tolerated for a cover
+# picture, the picture being attached whole, its bytes compared; for any other stream it fails
+# the run as before, the stream being the one the message numbers (_complaints).
+NO_RATE = re.compile(
+    r"\[in#[02](/\S+)? @ 0x[0-9a-f]+\] \[warning\] Stream #(\d+): not enough frames to estimate"
+    r" rate; consider increasing probesize"
+)
 # A message's prefix at -loglevel level+warning: its contexts, then its level.
 PREFIX = re.compile(r"^(\[[^\]]* @ 0x[0-9a-f]+\] )*\[(warning|error|fatal|panic)\] ")
 # The muxer's second message when it refuses a stream, which says nothing of why: the first does.
@@ -153,6 +169,10 @@ class Stream:
     # Its start time as ffprobe declares it, the first of its timestamps, in seconds; None when
     # it declares none (an attachment, a stream no packet of which was read).
     start: Fraction | None = None
+    # A cover picture of the source, turned into the attachment the finished file holds it as
+    # (_pictured): its kind is then "attachment", its tags the file name and type it is attached
+    # with, its index still the source's.
+    picture: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,8 +281,9 @@ def _absolute(path: Path) -> Path:
 
 def work_file(name: str) -> bool:
     """Whether a file of this name in a work directory is one assemble writes there."""
-    return name in WORK_FILES or (
-        name.startswith(ATTACHED) and name.removeprefix(ATTACHED).isdecimal()
+    return name in WORK_FILES or any(
+        name.startswith(prefix) and name.removeprefix(prefix).isdecimal()
+        for prefix in (ATTACHED, PICTURE)
     )
 
 
@@ -692,8 +713,11 @@ def unmuxable(source: Path) -> list[Unmuxable]:
     Raises MediaError when ffprobe fails on the source, or it has no video stream."""
     source = _absolute(source)
     found: list[Unmuxable] = []
-    for stream in _others(source, layout(source)):
-        refused = _refusal(source, stream)
+    whole = layout(source)
+    for stream in _others(source, whole):
+        # A cover picture isn't muxed as a track: it is attached (_pictured), whatever the
+        # muxer says of a one-frame video track.
+        refused = _unnamed(stream) if _is_picture(stream, whole.video) else _refusal(source, stream)
         if refused is not None:
             found.append(refused)
     return found
@@ -741,10 +765,113 @@ def without(found: Layout, gone: Sequence[Unmuxable]) -> Layout:
 
 def _kept(source: Path) -> tuple[Layout, list[Unmuxable]]:
     """The source's layout without the data streams the finished file leaves out (left_out,
-    without), and those streams."""
+    without), its cover pictures turned into attachments (_pictured), and those streams."""
     found = layout(source)
     gone = left_out(source, found)
-    return without(found, gone), gone
+    return _pictured(without(found, gone)), gone
+
+
+# The file extension and the MIME type a cover picture is attached with, by its codec, when its
+# source gives no file name or type: an MP4's cover (a covr atom) has neither, a Matroska
+# attachment has both. PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "its file name, type and
+# bytes the source's" and names no default for a container that has none): cover.jpg and
+# cover.png, a second one cover_2.jpg; any other codec (an MP4 may hold a BMP) is refused
+# (_unnamed) rather than attached under a type seedvr2x doesn't know.
+COVERS = {"mjpeg": ("jpg", "image/jpeg"), "png": ("png", "image/png")}
+
+
+def _is_picture(stream: Stream, video: Stream) -> bool:
+    """Whether a stream of the source is a cover picture, a picture attached to the file as
+    ffmpeg's demuxers show one: a video stream of one frame, disposition attached_pic, that is
+    not the video seedvr2x reads (DESIGN.md, Output, Assembly, decided on 2026-10-28).
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "a cover picture"): attached_pic alone;
+    the other dispositions of NOT_A_VIDEOS (timed_thumbnails, still_image) stay tracks, as
+    ffmpeg's remux copies them."""
+    return stream.kind == "video" and "attached_pic" in stream.dispositions and stream is not video
+
+
+def _unnamed(stream: Stream) -> Unmuxable | None:
+    """The refusal of a cover picture that can't be attached, or None: the source gives no file
+    name or no type for it and its codec is none of COVERS' (the refusal's remedy, a remux
+    without it, is unmuxable_refusal's)."""
+    if stream.codec in COVERS or ("filename" in stream.tags and "mimetype" in stream.tags):
+        return None
+    return Unmuxable(
+        stream.index,
+        stream.kind,
+        stream.codec,
+        f"a cover picture of codec {stream.codec or 'unknown'} with no file name or type of its"
+        " own: seedvr2x names those of a JPEG and a PNG only",
+    )
+
+
+def _pictured(found: Layout) -> Layout:
+    """The layout `found` with each cover picture turned into an attachment (Stream.picture),
+    the stream it is attached as: its file name and type the source's tags (a Matroska
+    attachment's, ffmpeg's demuxer showing them as "filename" and "mimetype"), else COVERS'; the
+    index its own in the source, which the picture is read from (_attachments).
+
+    ffmpeg's remux makes a cover a one-frame video track, "V_MJPEG", which players list as a
+    second video; Matroska holds a cover as an attachment, which MakeMKV writes for every file
+    (DESIGN.md, Output, Assembly, decided on 2026-10-28, the user)."""
+    video = found.video
+    streams: list[Stream] = []
+    unnamed = 0
+    for stream in found.streams:
+        if not _is_picture(stream, video):
+            streams.append(stream)
+            continue
+        refused = _unnamed(stream)
+        if refused is not None:
+            raise MediaError(f"stream {stream.index}: {refused.reason}")
+        extension, kind = COVERS.get(stream.codec, ("", ""))
+        name = stream.tags.get("filename")
+        if name is None:
+            unnamed += 1
+            name = "cover" if unnamed == 1 else f"cover_{unnamed}"
+            name = f"{name}.{extension}"
+        tags = {**stream.tags, "filename": name, "mimetype": stream.tags.get("mimetype", kind)}
+        streams.append(
+            replace(
+                stream,
+                kind="attachment",
+                tags=tags,
+                dispositions=(),
+                extradata="",
+                start=None,
+                picture=True,
+            )
+        )
+    return replace(found, streams=tuple(streams))
+
+
+def covers(source: Path) -> tuple[tuple[Stream, ...], int]:
+    """The cover pictures of the source, as the finished file attaches them (_pictured: kind
+    "attachment", tags the file name and type, index the source's), and how many other
+    attachments (fonts) it has, for the remake a refusal advises (media/rate.py, remake). Those
+    seedvr2x can name only (_unnamed): a picture it can't is left to the remake's `-map 0`.
+
+    Raises MediaError when ffprobe fails on the source."""
+    found = layout(_absolute(source))
+    video = next((stream for stream in found.streams if stream.kind == "video"), None)
+    if video is None:
+        return (), 0
+    named = replace(
+        found,
+        streams=tuple(
+            stream
+            for stream in found.streams
+            if not _is_picture(stream, video) or _unnamed(stream) is None
+        ),
+    )
+    streams = _pictured(named).streams
+    pictures = tuple(stream for stream in streams if stream.picture)
+    return pictures, sum(1 for stream in streams if stream.kind == "attachment") - len(pictures)
+
+
+def _pictures(found: Layout) -> frozenset[int]:
+    """The indexes, in the source, of the cover pictures of `found` (_pictured)."""
+    return frozenset(stream.index for stream in found.streams if stream.picture)
 
 
 def left_out_warning(source: Path, gone: Sequence[Unmuxable], chapters: int) -> str:
@@ -978,7 +1105,9 @@ def assemble(
       segment has too, or decodes the same under (joins);
     - every other stream's packets are those of a remux of the source's other streams alone,
       made first: as many, each with its timestamps, duration, size, flags and data hash; an
-      attachment's content is the source's;
+      attachment's content is the source's; a cover picture is attached, with the source's file
+      name and type and its bytes, read back and compared with the source's (_check_picture;
+      DESIGN.md, Output, Assembly, decided on 2026-10-28);
     - its chapters are the source's, as many, at the source's times less its start time.
     Then renamed into place (files.replace_whole). A file at output is whole and checked, or the
     one that was there before.
@@ -987,6 +1116,9 @@ def assemble(
     their own, out of the terminal's reach (runtime/stop.py); any exception raised in that
     thread, Stopped, Terminated or KeyboardInterrupt among them, kills them, removes the partial
     file and the work files, and leaves what output held.
+
+    The work directory also takes the source's attachments and cover pictures, written out to be
+    attached, and the pictures read back from the file.
 
     Disk: the file takes the segments' size again, and the other streams', where output goes:
     checked first (os.statvfs, _room); an FFV1 output so needs twice its size until the caller
@@ -1029,18 +1161,18 @@ def assemble(
         _room(output, video_size, 0, len(segments))
         reference, reference_size, _ = _reference(source, source_layout, work)
         _room(output, video_size, reference_size, len(segments))
-        _attachments(source, attached)
+        _attachments(source, source_layout, attached)
         # As bytes, the file system's: a name the locale's encoding can't hold is no error.
         listed.write_bytes(os.fsencode(concat_list(segments, frame_rate, firsts)))
         command = _join(
             *(source, source_layout, listed, shared, tags, attached),
             *(snap(frame_rate, first, total), partial, read),
         )
-        _strict(command, f"{output}: joining its segments")
+        _strict(command, f"{output}: joining its segments", _pictures(source_layout))
         joined = time.monotonic()
         ahead = _check(
             *(partial, segments, grid(total, frame_rate, first), read, shared),
-            *(source_layout, reference),
+            *(source_layout, reference, work, attached),
         )
         size = partial.stat().st_size
         replace_whole(partial, output, stale=stale)
@@ -1049,6 +1181,8 @@ def assemble(
         raise
     finally:
         for path in (listed, read, others, work / PAIR, work / PAIR_LIST, *attached.values()):
+            path.unlink(missing_ok=True)
+        for path in work.glob(f"{PICTURE}*"):
             path.unlink(missing_ok=True)
     done = time.monotonic()
     result = Assembled(
@@ -1088,14 +1222,16 @@ def assemble(
 
 
 def _written(streams: Sequence[Stream]) -> list[Stream]:
-    """The streams mapped into a Matroska file, in the order a read of it gives them: its
-    tracks first, then its attachments, each in the order mapped (libavformat/matroskadec.c
-    reads the tracks, then the attachments). A Matroska source has them so already, and no
-    other container has attachments, but as pictures, video streams to ffmpeg: a cover, which
-    Matroska's muxer writes as a track of one frame, as ffmpeg's remux does, only a stream of
-    the attachment type becoming an attachment (matroskaenc.c, mkv_write_track)."""
+    """The streams of a Matroska file, in the order a read of it gives them: its tracks first,
+    then its attachments, each in the order attached (libavformat/matroskadec.c reads the
+    tracks, then the attachments). The source's own attachments, fonts, come first, then its
+    cover pictures (Stream.picture): ffmpeg's muxer writes a stream of the attachment type as
+    an attachment, and a cover that is a video stream to ffmpeg as a track of one frame
+    (matroskaenc.c, mkv_write_track), which is why a cover is attached from its file instead
+    (_pictured, _join)."""
     tracks = [stream for stream in streams if stream.kind != "attachment"]
-    return tracks + [stream for stream in streams if stream.kind == "attachment"]
+    fonts = [stream for stream in streams if stream.kind == "attachment" and not stream.picture]
+    return tracks + fonts + [stream for stream in streams if stream.picture]
 
 
 def _others(source: Path, found: Layout) -> tuple[Stream, ...]:
@@ -1210,7 +1346,9 @@ def _reference(
     the stream's index in the source, that remux's size in bytes, and where it has each stream
     start, as ffprobe declares it of the remux, in seconds (moved): the other streams alone,
     copied to a file in work, read back, and removed. Nothing, 0 and nothing for a source whose
-    other streams hold no packet (none, or attachments alone).
+    other streams hold no packet (none, or attachments alone). Without the source's cover
+    pictures, which the finished file attaches (_pictured): the remux would make them video
+    tracks of one frame (DESIGN.md, Output, Assembly, decided on 2026-10-28).
 
     To a file, not a pipe: Matroska's muxer completes a header at the end, ADTS AAC's from
     MPEG-TS among them, and refuses the stream on an output it can't seek (unmuxable).
@@ -1219,11 +1357,12 @@ def _reference(
     streams = _others(source, found)
     if not any(stream.kind != "attachment" for stream in streams):
         return {}, 0, {}
+    streams = tuple(stream for stream in streams if not stream.picture)
     remux = work / OTHERS
     maps = [word for stream in streams for word in ("-map", f"0:{stream.index}")]
     command = [*FFMPEG, "-i", str(source), *maps, "-c", "copy", "-f", "matroska", str(remux)]
     try:
-        _strict(command, f"{source}: remuxing its other streams into Matroska")
+        _strict(command, f"{source}: remuxing its other streams into Matroska", _pictures(found))
         packets, _ = _read_packets(remux, None)
         size = remux.stat().st_size
         held = layout(remux).streams
@@ -1243,25 +1382,48 @@ def _reference(
     )
 
 
-def _attachments(source: Path, attached: Mapping[int, Path]) -> None:
-    """Write each attachment of the source to its file, `attached` by the stream's index: ffmpeg's
-    -dump_attachment, an option of the input, which wants an output all the same ("At least one
-    output file must be specified", exit 1, the files written): the first video packet, copied
-    nowhere. Nothing to do without attachments.
+def _attachments(source: Path, found: Layout, attached: Mapping[int, Path]) -> None:
+    """Write each attachment of the source to its file, `attached` by the stream's index, `found`
+    its layout (_pictured). A font: ffmpeg's -dump_attachment, an option of the input, which
+    wants an output all the same ("At least one output file must be specified", exit 1, the
+    files written): the first video packet, copied nowhere. A cover picture, a stream of one
+    packet to ffmpeg: that packet, whole, copied to a file by the data muxer, the bytes of the
+    attachment (a Matroska file's, compared with mkvextract's by hand on 2026-10-28) or of the
+    MP4's covr atom. Nothing to do without attachments.
 
-    Raises MediaError for anything ffmpeg prints (TOLERATED apart), or a failure."""
+    Raises MediaError for anything ffmpeg prints (TOLERATED and NO_RATE's cover pictures
+    apart), or a failure."""
     if not attached:
         return
+    pictures = _pictures(found)
     dumps = [
         word
         for index, path in attached.items()
+        if index not in pictures
         for word in (f"-dump_attachment:{index}", str(path))
+    ]
+    copies = [
+        word
+        for index, path in attached.items()
+        if index in pictures
+        for word in ("-map", f"0:{index}", "-c", "copy", "-f", "data", str(path))
     ]
     command = [
         *(*FFMPEG, *dumps, "-i", str(source), "-map", "0:v:0", "-c", "copy"),
-        *("-frames:v", "1", "-f", "null", "-"),
+        *("-frames:v", "1", "-f", "null", "-", *copies),
     ]
-    _strict(command, f"{source}: reading its attachments")
+    _strict(command, f"{source}: reading its attachments", pictures)
+
+
+def _picture(path: Path, index: int, copy: Path) -> None:
+    """Write the picture that is stream `index` of the finished file `path`, attached, to `copy`:
+    its one packet's bytes (_attachments).
+
+    Raises MediaError for anything ffmpeg prints, or a failure."""
+    command = [
+        *(*FFMPEG, "-i", str(path), "-map", f"0:{index}", "-c", "copy", "-f", "data", str(copy)),
+    ]
+    _strict(command, f"{path}: reading back its attached picture {index}")
 
 
 def _join(
@@ -1300,6 +1462,9 @@ def _join(
       its file (-attach, _attachments), a stream no input feeds, with the source's tags for it,
       its name and MIME type among them, which Matroska's muxer requires. With both: 0.10 s, as
       ffmpeg's own remux of the source. Without audio, the other streams come from input 0.
+    - A cover picture is an attachment too (_pictured), attached after the source's own, from
+      the file its one packet was copied to: mapped from the source, ffmpeg's muxer would make
+      it a track of one frame (DESIGN.md, Output, Assembly, decided on 2026-10-28).
     - The streams are mapped in the order a read of the file gives them back (_written): the
       source's, the video in its video's place.
     - Each other stream's own tags and dispositions are copied by default. The video's are the
@@ -1357,10 +1522,15 @@ def _check(
     shared: Signature,
     source: Layout,
     reference: Mapping[int, _Packets],
+    work: Path,
+    attached: Mapping[int, Path],
 ) -> int:
     """Check the file the join wrote, by a read of its packets (assemble): MediaError naming the
     stream and the first packet that differs. Returns how far another stream's packets run
-    ahead of the video's in the file's order, at most, in milliseconds (_read_packets)."""
+    ahead of the video's in the file's order, at most, in milliseconds (_read_packets). `work`
+    and `attached`: the work directory, and the source's attachments written there, by their
+    stream's index in the source (_attachments), which the file's cover pictures are read back
+    against."""
     found = layout(partial)
     if len(found.streams) != len(source.streams):
         raise MediaError(
@@ -1385,6 +1555,9 @@ def _check(
             f" {stream.codec or 'no codec'})"
         )
         held = found.streams[position]
+        if stream.picture:
+            _check_picture(said, stream, held, partial, position, work, attached[stream.index])
+            continue
         if held.kind != stream.kind:
             raise MediaError(f"{said}: {held.kind} in the file")
         if stream.kind == "attachment":
@@ -1394,6 +1567,31 @@ def _check(
         _check_other(said, reference.get(stream.index, _Packets()), packets.get(position))
     _check_chapters(partial, source, found)
     return ahead
+
+
+def _check_picture(
+    said: str, stream: Stream, held: Stream, partial: Path, position: int, work: Path, picture: Path
+) -> None:
+    """A cover picture of the source (Stream.picture) against what the file holds at `position`:
+    an attachment, which ffmpeg's demuxer shows as a video stream with the disposition
+    attached_pic, its file name and type the source's (`stream`'s tags, _pictured), its bytes
+    those of `picture`, the source's, read back from the file. MediaError otherwise
+    (DESIGN.md, Output, Assembly, decided on 2026-10-28: "checked against the source's")."""
+    if held.kind != "video" or "attached_pic" not in held.dispositions:
+        raise MediaError(
+            f"{said}: {held.kind} in the file, where the picture is attached (ffprobe shows an"
+            " attached picture as a video stream with the disposition attached_pic)"
+        )
+    for key in ("filename", "mimetype"):
+        if held.tags.get(key) != stream.tags[key]:
+            raise MediaError(
+                f"{said}: attached with the {key} {held.tags.get(key)!r}, where the source's is"
+                f" {stream.tags[key]!r}"
+            )
+    copy = work / f"{PICTURE}{position}"
+    _picture(partial, position, copy)
+    if not filecmp.cmp(picture, copy, shallow=False):
+        raise MediaError(f"{said}: not the source's picture, by its bytes")
 
 
 def _check_video(
@@ -1611,11 +1809,12 @@ def _ffprobe(path: Path, *options: str) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(result.stdout))
 
 
-def _strict(command: Sequence[str], doing: str) -> None:
+def _strict(command: Sequence[str], doing: str, pictures: Collection[int] = ()) -> None:
     """Run an ffmpeg command to its end, strictly: MediaError for a failure, or for anything it
-    prints (_complaints), `doing` saying what it was at."""
+    prints (_complaints, `pictures` the indexes of the source's cover pictures), `doing` saying
+    what it was at."""
     status, lines = _run(command)
-    complaints = _complaints(lines)
+    complaints = _complaints(lines, pictures)
     if status != 0 or complaints:
         said = " / ".join((complaints or lines)[-5:])
         raise MediaError(
@@ -1656,7 +1855,16 @@ def _said(log: IO[bytes]) -> list[str]:
     return [line for line in lines if line]
 
 
-def _complaints(lines: Sequence[str]) -> list[str]:
+def _complaints(lines: Sequence[str], pictures: Collection[int] = ()) -> list[str]:
     """The lines ffmpeg printed that fail a strict run: every one but those of TOLERATED, each
-    matched whole."""
-    return [line for line in lines if not any(known.fullmatch(line) for known in TOLERATED)]
+    matched whole, and NO_RATE's note for a stream that is one of the source's cover pictures
+    (`pictures`, their indexes in the source), whichever input of the command opens the source:
+    the same note for any other stream stays a complaint."""
+
+    def known(line: str) -> bool:
+        if any(pattern.fullmatch(line) for pattern in TOLERATED):
+            return True
+        noted = NO_RATE.fullmatch(line)
+        return noted is not None and int(noted.group(2)) in pictures
+
+    return [line for line in lines if not known(line)]

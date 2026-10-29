@@ -10,6 +10,8 @@ timeline. Exact throughout: the frames' pts in their stream's time base, as the 
 them, and rates as fractions."""
 
 import math
+import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
@@ -17,6 +19,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from seedvr2x.media.assembly import Stream
 from seedvr2x.media.index import NOPTS, FrameIndex
 
 # Beyond it, a deviation's numerator could overflow numpy's int64 (_numerators): Python's exact
@@ -458,7 +461,9 @@ def fraction(rate: Fraction) -> str:
     return f"{rate.numerator}/{rate.denominator}"
 
 
-def remake(rate: Fraction, start: Fraction) -> str:
+def remake(
+    rate: Fraction, start: Fraction, covers: Sequence[Stream] = (), attachments: int = 0
+) -> str:
     """The ffmpeg command remaking a source at `rate` (DESIGN.md, Input: "Remake the file"): its
     first video stream, the one seedvr2x reads, an FFV1 master numbering its frames at that rate,
     its other streams copied; `start`, its first frame's time after the file's start, in seconds,
@@ -480,7 +485,22 @@ def remake(rate: Fraction, start: Fraction) -> str:
     settb and setpts=N kept every frame but declared the stream's 24/1 again, the rate a filter
     graph takes from its input. Neither -r:v:0 nor setpts=N keeps the first frame's time: 0 for
     the video, its timestamps then shifted back by `start`, in microseconds (settb=AVTB), the
-    encoder taking the stream's own time base, so that the shift isn't rounded to the rate's."""
+    encoder taking the stream's own time base, so that the shift isn't rounded to the rate's.
+
+    A source with a cover picture (`covers`, assembly.covers: the pictures as the assembly
+    attaches them, `attachments` the number of its other attachments): ffmpeg's remux makes a
+    cover a one-frame video track, which players list as a second video, as the finished file
+    did (DESIGN.md, Output, Assembly, decided on 2026-10-28: "so is the cover of the remake a
+    refusal advises, which made it a video track too"). One command can't take the picture out
+    of a file and attach it to the remake, so two: the first copies each picture to a file in
+    the directory it is run in, the second leaves them out of the remake and attaches them
+    again, with the source's file name and type, after the source's own attachments (the
+    attachment's number in the output, -metadata:s:t:N). The text then holds both, each on a
+    line of its own, after the words that say why. PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md
+    asks for the picture attached and names no layout): that layout, and the picture's file in
+    the directory run in named cover.jpg, cover_2.png by position and codec, not by the source's
+    name, which a tag may fill with anything. A source without a cover picture gets the
+    command alone, byte for byte as before."""
     words = ["ffmpeg", "-r:v:0", fraction(rate), "-i", "SOURCE"]
     # PROVISIONAL (implementation, 2026-10-12, a question for design: -c copy then -c:v:0 ffv1
     # kept, of which ffmpeg n9.0.2 warns, "Multiple -codec/-c/-acodec/-vcodec/-scodec/-dcodec
@@ -493,12 +513,38 @@ def remake(rate: Fraction, start: Fraction) -> str:
     # -c copy copies them. No stream specifier names every video stream but the first: -c:v
     # copy before -c:v:0 warns as -c copy does, and -c:v:1 copy names one more stream, not the
     # one after (tests/test_rate.py, test_remake_copies_every_other_stream).
-    words += ["-map", "0", "-map", "-0:d", "-c", "copy", *FFV1, "-fps_mode:v:0", "passthrough"]
+    words += ["-map", "0", "-map", "-0:d"]
+    words += [word for cover in covers for word in ("-map", f"-0:{cover.index}")]
+    words += ["-c", "copy", *FFV1, "-fps_mode:v:0", "passthrough"]
     microseconds = round(start * 1_000_000)
     if microseconds:
         words += ["-filter:v:0", f"settb=AVTB,setpts=PTS{microseconds:+d}"]
         words += ["-enc_time_base:v:0", "demux"]
-    return " ".join([*words, "remade.mkv"])
+    if not covers:
+        return " ".join([*words, "remade.mkv"])
+    files = [_cover_file(number, cover) for number, cover in enumerate(covers, 1)]
+    extract = ["ffmpeg", "-i", "SOURCE"]
+    for cover, file in zip(covers, files, strict=True):
+        extract += ["-map", f"0:{cover.index}", "-c", "copy", "-f", "data", file]
+    for number, (cover, file) in enumerate(zip(covers, files, strict=True), attachments):
+        words += ["-attach", file]
+        for key in ("mimetype", "filename"):
+            words += [f"-metadata:s:t:{number}", shlex.quote(f"{key}={cover.tags[key]}")]
+    return (
+        "two commands, the first taking the cover picture out of the file and the second leaving"
+        " it out of the remake, which would make it a second video track, to attach it to the"
+        " remake as the file attaches it:\n"
+        + " ".join(extract)
+        + "\n"
+        + " ".join([*words, "remade.mkv"])
+    )
+
+
+def _cover_file(number: int, cover: Stream) -> str:
+    """The file a cover picture is copied to in the remake's first command (remake): cover.jpg,
+    cover_2.png, by its number and its codec's extension."""
+    extension = {"mjpeg": "jpg", "png": "png"}.get(cover.codec, "bin")
+    return f"cover.{extension}" if number == 1 else f"cover_{number}.{extension}"
 
 
 # The lines of a POSIX shell that list a directory's segments for ffmpeg's concat demuxer, in

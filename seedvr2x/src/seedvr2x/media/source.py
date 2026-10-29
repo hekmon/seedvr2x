@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from seedvr2x.media import bitstream, grid, rate
+from seedvr2x.media import assembly, bitstream, grid, rate
 from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion, conversion_for
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.files import sha256
@@ -612,7 +612,7 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
         if index is None:
             return error
         if not error:
-            return _leaves(stream, index)
+            return _leaves(path, stream, index)
         if _on_grid(declared, scanned) is not None:
             return ""
         guided = _guided(index, stream.frame_rate)
@@ -632,7 +632,7 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
                 f" {_declares(stream)} {rate.fraction(stream.frame_rate)}, its frames lasting"
                 f" from {last}"
             )
-        fixes = _fixes(found.rate, index, stream.frame_rate, twinned)
+        fixes = _fixes(path, found.rate, index, stream.frame_rate, twinned)
         return f"{what}: a bad file, not read on a guess: {fixes}"
     if index is None or scanned.frames == 0:
         return "no frame decoded"
@@ -862,7 +862,7 @@ def _guided(index: FrameIndex, declares: Fraction) -> tuple[Timeline, bool] | No
     return None if twin is None else (twin, True)
 
 
-def _leaves(stream: VideoStream, index: FrameIndex) -> str:
+def _leaves(path: Path, stream: VideoStream, index: FrameIndex) -> str:
     """Why a source that sptenc's rule passes is refused all the same, or "": seedvr2x's own test
     (DESIGN.md, Input: "or when a frame lies half a frame or more from its place on the declared
     rate's timeline, counted from the first frame"; "The second test is seedvr2x's own (decided
@@ -906,7 +906,7 @@ def _leaves(stream: VideoStream, index: FrameIndex) -> str:
     on = rate.timeline(index, stream.frame_rate)
     if on.holds:
         return ""
-    return f"{_strayed(on, index.frames, stream)}, and {_way_out(on, index, stream)}"
+    return f"{_strayed(on, index.frames, stream)}, and {_way_out(path, on, index, stream)}"
 
 
 def _strayed(on: Timeline, frames: int, stream: VideoStream) -> str:
@@ -922,7 +922,7 @@ def _strayed(on: Timeline, frames: int, stream: VideoStream) -> str:
     )
 
 
-def _way_out(on: Timeline, index: FrameIndex, stream: VideoStream) -> str:
+def _way_out(path: Path, on: Timeline, index: FrameIndex, stream: VideoStream) -> str:
     """What a source whose frames leave the timeline of the rate it declares, `on`, `stream`'s,
     is, and its ways out, as its refusal ends (_leaves, _off).
 
@@ -957,9 +957,9 @@ def _way_out(on: Timeline, index: FrameIndex, stream: VideoStream) -> str:
             " its timestamps' own time, off the source's other streams: its timestamps follow"
             f" {rate.said(found.rate)} exactly, to the rounding of its time base,"
             f" {index.time_base} s: a bad file, not read on a guess:"
-            f" {_fixes(found.rate, index, declares)}"
+            f" {_fixes(path, found.rate, index, declares)}"
         )
-    command = rate.remake(declares, rate.first_time(index))
+    command = rate.remake(declares, rate.first_time(index), *_covers(path))
     return (
         "its timestamps follow no one rate exactly: a file joined by ffmpeg's concat demuxer"
         " alone drifts so, up to 1 ms a join, and timestamps alone can't tell a drifting join"
@@ -1038,9 +1038,9 @@ def _off(
             # R is the rate declared: its frames are said already, the first one off and how many.
             return (
                 f"{reason}; without --frame-rate, the file is refused too, that rate being the"
-                f" one it {_declares(stream)}, and {_way_out(on, index, stream)}"
+                f" one it {_declares(stream)}, and {_way_out(declared.path, on, index, stream)}"
             )
-        left = _leaves(stream, index)
+        left = _leaves(declared.path, stream, index)
         if left:
             return f"{reason}; without --frame-rate, the file is refused too: {left}"
         reason += (
@@ -1063,7 +1063,7 @@ def _off(
     found, twinned = guided
     return (
         f"{reason}; its timestamps run at {rate.said(found.rate)}, {_within(found)}:"
-        f" {_fixes(found.rate, index, declares, twinned)}"
+        f" {_fixes(declared.path, found.rate, index, declares, twinned)}"
     )
 
 
@@ -1117,12 +1117,14 @@ def _within(found: Timeline | Places, whose: str = "that rate's") -> str:
     )
 
 
-def _fixes(found: Fraction, index: FrameIndex, declares: Fraction, twinned: bool = False) -> str:
+def _fixes(
+    path: Path, found: Fraction, index: FrameIndex, declares: Fraction, twinned: bool = False
+) -> str:
     """The two fixes of a file a refusal names the rate `found` for, its timestamps' exactly or
     the NTSC twin of the one it declares, `declares` (_guided, _way_out; DESIGN.md, Input): a
     remake at that rate (rate.remake), or --frame-rate; before them, where the twin rule named
     `found` (`twinned`), what else reads so (_twin_join)."""
-    command = rate.remake(found, rate.first_time(index))
+    command = rate.remake(found, rate.first_time(index), *_covers(path))
     return (
         f"{_twin_join(found, declares, twinned)}"
         "remake it at that rate, an FFV1 master with its other streams copied, a clean file for"
@@ -1130,6 +1132,18 @@ def _fixes(found: Fraction, index: FrameIndex, declares: Fraction, twinned: bool
         " which takes its frames at that rate, each checked to lie within half a frame of its"
         " timeline: the same frames on the same timeline, without the intermediate file"
     )
+
+
+def _covers(path: Path) -> tuple[tuple[assembly.Stream, ...], int]:
+    """The source's cover pictures and its other attachments, for the remake a refusal advises
+    (rate.remake; assembly.covers). Read only when a refusal is worded. If the source can't be
+    read now, though it was a moment ago, the remake is advised without them, and the warning
+    says why (a remake of the file as it is would make a cover a second video track)."""
+    try:
+        return assembly.covers(path)
+    except MediaError as error:
+        logger.warning("%s: its cover pictures not read for the advised remake: %s", path, error)
+        return (), 0
 
 
 def _ms(microseconds: Fraction | int) -> str:

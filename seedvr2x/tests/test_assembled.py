@@ -991,6 +991,54 @@ def test_a_data_stream_matroska_cannot_take_is_left_out_and_warned_of(
 
 
 @needs_ffmpeg
+def test_a_cover_picture_is_attached_to_the_finished_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # A Matroska source with a cover.jpg attached, as MakeMKV writes one (DESIGN.md, Output,
+    # Assembly, decided on 2026-10-28): the job runs, and the finished file holds the one video,
+    # the cover attached under its name and type with its bytes, not a second video track.
+    monkeypatch.chdir(tmp_path)
+    cover = tmp_path / "cover.jpg"
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=64x64"),
+            *("-frames:v", "1", str(cover)),
+        ],
+        check=True,
+    )
+    source = tmp_path / "in.mkv"
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),
+            *("-frames:v", "25", "-c:v", "mpeg4", "-attach", str(cover)),
+            *("-metadata:s:t:0", "mimetype=image/jpeg", "-metadata:s:t:0", "filename=cover.jpg"),
+            str(source),
+        ],
+        check=True,
+    )
+    assert upscale(tmp_path, source, "x.mkv") == 0
+    final = tmp_path / "x.mkv"
+    found = probed(
+        final,
+        "-show_entries",
+        "stream=index,codec_type,codec_name:stream_disposition=attached_pic:stream_tags",
+    )["streams"]
+    assert [(s["codec_type"], s["disposition"]["attached_pic"]) for s in found] == [
+        ("video", 0),
+        ("video", 1),
+    ]
+    assert found[1]["tags"] == {"filename": "cover.jpg", "mimetype": "image/jpeg"}
+    kept = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(final), "-map", "0:1", "-c", "copy", "-f", "data", "-"],
+        capture_output=True,
+        check=True,
+    )
+    assert kept.stdout == cover.read_bytes()
+    assert indexes(final) == list(range(25))
+    assert not (tmp_path / "x.mkv.work").exists()
+
+
+@needs_ffmpeg
 def test_work_directory_refusals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:

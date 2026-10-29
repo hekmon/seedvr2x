@@ -39,6 +39,7 @@ from dataclasses import replace
 from fractions import Fraction
 from itertools import accumulate, pairwise
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -81,6 +82,17 @@ needs_ffmpeg = pytest.mark.skipif(
 needs_x264 = pytest.mark.skipif(not has_encoder("libx264"), reason="needs ffmpeg with libx264")
 
 NTSC_FILM = Fraction(24000, 1001)
+
+
+@pytest.fixture(autouse=True)
+def no_covers_in_a_file_that_isnt_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refusals worded here for a Declared at a path no file is at (Path("made.mkv")) ask
+    for the source's cover pictures, for the remake they advise (media/source.py, _covers): none
+    in a file that isn't there. A file that is gets its own."""
+    from seedvr2x.media import assembly
+
+    real = assembly.covers
+    monkeypatch.setattr(assembly, "covers", lambda path: real(path) if path.exists() else ((), 0))
 
 
 def indexed(pts: list[int], time_base: Fraction = Fraction(1, 1000)) -> FrameIndex:
@@ -761,6 +773,86 @@ def test_remake_keeps_every_frame(tmp_path: Path, late: int) -> None:
     assert after[1]["start_time"] == before[1]["start_time"] == "0.000000"
     source = examine(remade)
     assert (source.frames, source.frame_rate) == (GUIDED, NTSC_FILM)
+
+
+@needs_ffmpeg
+@needs_x264
+def test_the_remake_attaches_the_cover_it_does_not_keep_as_a_video_track(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A source with a cover picture attached, as MakeMKV writes one, and a font: ffmpeg's remux
+    # makes the cover a one-frame video track, a second video for players, as the finished file
+    # did. The refusal gives two commands (DESIGN.md, Output, Assembly, decided on 2026-10-28:
+    # "so is the cover of the remake a refusal advises"): the first copies the picture to a file,
+    # the second leaves it out of the remake and attaches it again, after the font, under the
+    # source's name and type (here front.jpg, where the file copied is cover.jpg). Run as given.
+    base = mechanism7(tmp_path / "s9.mkv", frames=GUIDED, audio=True)
+    cover, font = tmp_path / "front.jpg", tmp_path / "font.ttf"
+    run("-f", "lavfi", "-i", "testsrc2=s=64x64", "-frames:v", "1", str(cover))
+    font.write_bytes(bytes(range(256)) * 4)
+    path = tmp_path / "s9covered.mkv"
+    run(
+        *("-i", str(base), "-map", "0", "-c", "copy"),
+        *("-attach", str(font), "-metadata:s:t:0", "mimetype=application/x-truetype-font"),
+        *("-metadata:s:t:0", "filename=font.ttf", "-attach", str(cover)),
+        *("-metadata:s:t:1", "mimetype=image/jpeg", "-metadata:s:t:1", "filename=front.jpg"),
+        str(path),
+    )
+
+    def probed(file: Path) -> list[dict[str, Any]]:
+        entries = "stream=index,codec_type,codec_name:stream_disposition=attached_pic:stream_tags"
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", entries, "-of", "json", str(file)],
+            capture_output=True,
+            check=True,
+        )
+        return json.loads(result.stdout)["streams"]
+
+    assert [(s["codec_name"], s["disposition"]["attached_pic"]) for s in probed(path)] == [
+        ("h264", 0),
+        ("flac", 0),
+        ("ttf", 0),
+        ("mjpeg", 1),
+    ]
+    with pytest.raises(MediaError) as refused:
+        examine(path)
+    said = str(refused.value)
+    [extract, remake] = [line for line in said.split("\n") if line.startswith("ffmpeg ")]
+    assert "two commands, the first taking the cover picture out of the file" in said
+    assert extract == "ffmpeg -i SOURCE -map 0:3 -c copy -f data cover.jpg"
+    remake = remake[: remake.index(" remade.mkv") + len(" remade.mkv")]
+    assert " -map 0 -map -0:d -map -0:3 -c copy -c:v:0 ffv1 " in remake
+    assert remake.endswith(
+        " -attach cover.jpg -metadata:s:t:1 mimetype=image/jpeg"
+        " -metadata:s:t:1 filename=front.jpg remade.mkv"
+    )
+    work = tmp_path / "cwd"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    for line in (extract, remake):
+        words = shlex.split(line)
+        words[words.index("SOURCE")] = str(path)
+        run(*words[1:])
+    assert (work / "cover.jpg").read_bytes() == cover.read_bytes()
+    remade = work / "remade.mkv"
+    found = probed(remade)
+    assert [(s["codec_name"], s["disposition"]["attached_pic"]) for s in found] == [
+        ("ffv1", 0),
+        ("flac", 0),
+        ("ttf", 0),
+        ("mjpeg", 1),
+    ]
+    assert found[3]["tags"] == {"filename": "front.jpg", "mimetype": "image/jpeg"}
+    assert found[2]["tags"] == {"filename": "font.ttf", "mimetype": "application/x-truetype-font"}
+    kept = run("-i", str(remade), "-map", "0:3", "-c", "copy", "-f", "data", "-")
+    assert kept == cover.read_bytes()
+    assert pictures(remade) == pictures(path) and len(pictures(path)) == GUIDED
+
+
+def test_a_source_without_a_cover_gets_the_remake_alone() -> None:
+    # No cover: the command as it was, one line, whatever the other arguments say.
+    assert rate.remake(NTSC_FILM, Fraction(0), (), 3) == rate.remake(NTSC_FILM, Fraction(0))
+    assert "\n" not in rate.remake(NTSC_FILM, Fraction(23, 1000), (), 1)
 
 
 def packets(path: Path, *streams: str) -> list[str]:

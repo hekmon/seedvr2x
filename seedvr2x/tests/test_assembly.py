@@ -1284,6 +1284,280 @@ def test_a_cover_is_copied(tmp_path: Path, jobs: Callable[..., Job], kind: str) 
     [cover], [theirs] = packets(output)[2], packets(source)[2]
     assert cover[3:] == theirs[3:]
     assert first_video(output) == 0 and numbers(output) == list(range(job.frames))
+    # As an attachment, not a video track: ffprobe lists an attached picture as a video stream
+    # with the disposition attached_pic, where the remux's track has none (DESIGN.md, Output,
+    # Assembly, decided on 2026-10-28). One video track, the upscaled one.
+    assert (
+        written[2]["disposition"] == ["attached_pic"]
+        and "attached_pic" not in own[0]["disposition"]
+    )
+    assert written[2]["tags"] == {"filename": "cover.png", "mimetype": "image/png"}
+
+
+def picture_bytes(path: Path, stream: int) -> bytes:
+    """The bytes of the picture that is stream `stream` of path: its one packet, whole."""
+    result = subprocess.run(
+        [
+            *("ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-i", str(path)),
+            *("-map", f"0:{stream}", "-c", "copy", "-f", "data", "-"),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def covered(directory: Path, job: Job) -> tuple[Path, bytes]:
+    """A Matroska source for the job as MakeMKV writes one: its video the job's master, FLAC
+    audio, a cover.jpg attached BEFORE a font, the source's order of attachments. With the
+    cover's bytes."""
+    directory.mkdir(parents=True, exist_ok=True)
+    cover, font = directory / "cover.jpg", directory / "font.ttf"
+    loose("-f", "lavfi", "-i", "testsrc2=s=64x64", "-frames:v", "1", str(cover))
+    font.write_bytes(random.Random(9).randbytes(2000))
+    source = directory / "covered.mkv"
+    seconds = float(job.frames / job.frame_rate)
+    loose(
+        *("-i", str(job.master), *sine(440, seconds), "-map", "0:v", "-map", "1:a"),
+        *("-c:v", "copy", "-c:a", "flac"),
+        *("-attach", str(cover), "-metadata:s:t:0", "mimetype=image/jpeg"),
+        *("-metadata:s:t:0", "filename=cover.jpg", "-attach", str(font)),
+        *("-metadata:s:t:1", "mimetype=application/x-truetype-font"),
+        *("-metadata:s:t:1", "filename=font.ttf", str(source)),
+    )
+    return source, cover.read_bytes()
+
+
+def test_a_matroska_cover_is_attached_not_a_second_video(
+    tmp_path: Path, jobs: Callable[..., Job]
+) -> None:
+    # MakeMKV adds a cover.jpg to every file it writes. ffmpeg's remux makes it a one-frame
+    # video track (V_MJPEG, no disposition), which players list as a second video: the
+    # finished file attaches it as it came, with the source's name, type and bytes, after the
+    # source's own attachment, the font (DESIGN.md, Output, Assembly, decided on 2026-10-28).
+    job = jobs()
+    source, jpeg = covered(tmp_path / "source", job)
+    own = streams(source)
+    assert [s["codec_name"] for s in own] == ["ffv1", "flac", "mjpeg", "ttf"]
+    output = assembled(tmp_path, job, source)
+    written = streams(output)
+    tracks = [s for s in written if s["codec_type"] == "video" and not s["disposition"]]
+    assert len(tracks) == 1 and tracks[0]["index"] == 0
+    assert [s["codec_name"] for s in written] == ["ffv1", "flac", "ttf", "mjpeg"]
+    assert written[3]["disposition"] == ["attached_pic"]
+    assert written[3]["tags"] == {"filename": "cover.jpg", "mimetype": "image/jpeg"}
+    assert picture_bytes(output, 3) == jpeg == picture_bytes(source, 2)
+    # The font as before: its name, type and content.
+    assert written[2]["tags"] == {"filename": "font.ttf", "mimetype": "application/x-truetype-font"}
+    kept, wrote = assembly.layout(source).streams, assembly.layout(output).streams
+    assert wrote[2].extradata == kept[3].extradata
+    assert numbers(output) == list(range(job.frames))
+
+
+def test_an_mp4_cover_is_attached_under_a_name_of_ours(
+    tmp_path: Path, jobs: Callable[..., Job]
+) -> None:
+    # An MP4's cover (a covr atom) has no file name or type: PROVISIONAL, cover.jpg and
+    # image/jpeg for a JPEG (impl-v010, 2026-10-28: DESIGN.md names none).
+    job = jobs()
+    directory = tmp_path / "source"
+    directory.mkdir()
+    cover = directory / "cover.jpg"
+    loose("-f", "lavfi", "-i", "testsrc2=s=64x64", "-frames:v", "1", str(cover))
+    source = directory / "a.mp4"
+    loose(
+        *("-f", "lavfi", "-i", f"color=c=gray:s={WIDTH}x{HEIGHT}:r=25:d=2", *sine(440, 2)),
+        *("-i", str(cover), "-map", "0:v", "-map", "1:a", "-map", "2:v", "-c:v:0", "mpeg4"),
+        *("-c:a", "aac", "-c:v:1", "copy", "-disposition:v:1", "attached_pic", str(source)),
+    )
+    own = streams(source)
+    assert own[2]["disposition"] == ["attached_pic"] and "filename" not in own[2]["tags"]
+    output = assembled(tmp_path, job, source)
+    written = streams(output)
+    assert [s["codec_name"] for s in written] == ["ffv1", "aac", "mjpeg"]
+    assert written[2]["disposition"] == ["attached_pic"]
+    assert "attached_pic" not in written[0]["disposition"]
+    assert written[2]["tags"] == {"filename": "cover.jpg", "mimetype": "image/jpeg"}
+    assert picture_bytes(output, 2) == cover.read_bytes() == picture_bytes(source, 2)
+
+
+def stream_of(name: str, index: int, codec: str, tags: dict[str, str] | None = None) -> Any:
+    """A cover picture's stream as ffprobe declares it, or a video's (`name` "video")."""
+    flags = () if name == "video" else ("attached_pic",)
+    return assembly.Stream(index, "video", codec, tags or {}, flags, "")
+
+
+def test_covers_are_named_in_order_and_others_refused() -> None:
+    # Pictures that give a name keep it; the others are cover.jpg, cover_2.png: PROVISIONAL.
+    found = assembly.Layout(
+        (
+            stream_of("video", 0, "h264"),
+            stream_of("cover", 1, "mjpeg"),
+            stream_of("cover", 2, "png"),
+            stream_of("cover", 3, "mjpeg", {"filename": "front.jpg", "mimetype": "image/jpeg"}),
+        ),
+        (),
+        None,
+    )
+    named = [(s.index, s.tags, s.kind, s.picture) for s in assembly._pictured(found).streams[1:]]  # pyright: ignore[reportPrivateUsage]
+    assert named == [
+        (1, {"filename": "cover.jpg", "mimetype": "image/jpeg"}, "attachment", True),
+        (2, {"filename": "cover_2.png", "mimetype": "image/png"}, "attachment", True),
+        (3, {"filename": "front.jpg", "mimetype": "image/jpeg"}, "attachment", True),
+    ]
+    # A codec seedvr2x names no type for, in a source that names none: refused.
+    odd = assembly.Layout((stream_of("video", 0, "h264"), stream_of("cover", 1, "bmp")), (), None)
+    refused = assembly._unnamed(odd.streams[1])  # pyright: ignore[reportPrivateUsage]
+    assert refused is not None and "a cover picture of codec bmp" in refused.reason
+    with pytest.raises(MediaError, match="a cover picture of codec bmp"):
+        assembly._pictured(odd)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_an_mp4_cover_of_a_type_we_cant_name_is_refused(tmp_path: Path) -> None:
+    # A BMP in an MP4's covr atom: no file name or type in the source, none of ours for the
+    # codec (PROVISIONAL): refused before any work, with the remux that leaves it out.
+    cover = tmp_path / "cover.bmp"
+    loose("-f", "lavfi", "-i", "testsrc2=s=64x64", "-frames:v", "1", str(cover))
+    source = tmp_path / "a.mp4"
+    loose(
+        *("-f", "lavfi", "-i", f"color=c=gray:s={WIDTH}x{HEIGHT}:r=25:d=1", "-i", str(cover)),
+        *("-map", "0", "-map", "1", "-c:v:0", "mpeg4", "-c:v:1", "copy"),
+        *("-disposition:v:1", "attached_pic", str(source)),
+    )
+    found = assembly.unmuxable(source)
+    assert [(s.index, s.codec) for s in found] == [(1, "bmp")]
+    said = assembly.preflight(source, workdir(tmp_path))
+    assert "a cover picture of codec bmp with no file name or type of its own" in said
+    assert "ffmpeg -i SOURCE -map 0 -c copy -map -0:1 remuxed.mkv (stream 1 left out)" in said
+
+
+def test_the_first_video_is_no_cover() -> None:
+    # A source whose first video stream is flagged attached_pic is still the video seedvr2x
+    # reads: only the others are covers.
+    found = assembly.Layout((stream_of("cover", 0, "mjpeg"),), (), None)
+    assert assembly._pictured(found).streams == found.streams  # pyright: ignore[reportPrivateUsage]
+
+
+def unrated(directory: Path) -> Path:
+    """A Matroska source for which ffmpeg says of its cover picture that it can't estimate its
+    rate: ffmpeg probes further only while some stream lacks its codec parameters, here a second
+    MP3 track whose first packet comes at 0.65 s, past the first 5 MB of video, where the probe
+    gives up at its probesize (5 MB), the cover's rate not estimated. The real case is a Blu-ray
+    rip's two PGS tracks with no packet in the window (DESIGN.md, Output, Assembly, "Met on
+    2026-10-23"). About 7 MB, 0.7 s of noise. (A late MP3 track alone would be refused by the
+    rehearsal for moving the others: assembly.moved.)"""
+    directory.mkdir(parents=True, exist_ok=True)
+    cover = directory / "cover.jpg"
+    loose("-f", "lavfi", "-i", "testsrc2=s=64x64", "-frames:v", "1", str(cover))
+    source = directory / "unrated.mkv"
+    loose(
+        *("-f", "lavfi", "-i", "testsrc2=s=640x480:r=25:d=0.7,noise=alls=100:allf=t+u"),
+        *("-f", "lavfi", "-i", "sine=d=0.7"),
+        *("-itsoffset", "0.65", "-f", "lavfi", "-i", "sine=f=880:d=0.05"),
+        *("-map", "0", "-map", "1", "-map", "2", "-c:v", "mpeg4", "-q:v", "2"),
+        *("-c:a", "libmp3lame"),
+        *("-attach", str(cover), "-metadata:s:t:0", "mimetype=image/jpeg"),
+        *("-metadata:s:t:0", "filename=cover.jpg", str(source)),
+    )
+    return source
+
+
+NO_RATE = re.compile(r"\[in#0\S* @ 0x[0-9a-f]+\] \[warning\] Stream #(\d+): not enough frames")
+
+
+def test_a_covers_unestimated_rate_is_tolerated_and_no_other_streams(
+    tmp_path: Path, jobs: Callable[..., Job]
+) -> None:
+    # ffmpeg's note that a stream of one frame has no rate to estimate (DESIGN.md, Output,
+    # Assembly, "Met on 2026-10-23", decided on 2026-10-28): tolerated for the source's cover
+    # picture, the stream the message numbers, and for no other stream.
+    source = unrated(tmp_path / "source")
+    plain = subprocess.run(
+        [
+            *("ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "level+warning", "-y"),
+            *("-i", str(source), "-map", "0", "-c", "copy", "-f", "matroska", os.devnull),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # The fixture proves itself: ffmpeg does print it, for the cover.
+    noted = [NO_RATE.search(line) for line in plain.stderr.splitlines()]
+    [cover] = [int(found.group(1)) for found in noted if found]
+    kinds = {s.index: s for s in assembly.layout(source).streams}
+    assert kinds[cover].kind == "video" and kinds[cover].dispositions == ("attached_pic",)
+    assert size_of(source) > 5_000_000
+    # The preflight, which rehearses the very remux the assembly makes, accepts it...
+    work = workdir(tmp_path)
+    assert assembly.preflight(source, work) == ""
+    assert not list(work.iterdir())
+    # ... and the assembly too, the cover attached.
+    job = jobs()
+    output = tmp_path / "out.mkv"
+    assemble(output, job.segments, job.frame_rate, source, indexed(source), work)
+    written = streams(output)
+    assert [s["codec_name"] for s in written] == ["ffv1", "mp3", "mp3", "mjpeg"]
+    assert written[3]["disposition"] == ["attached_pic"]
+    assert picture_bytes(output, 3) == (tmp_path / "source" / "cover.jpg").read_bytes()
+    # The same note for another stream, or from another input than the source's, stays a
+    # complaint, as does anything else.
+    line = "[in#0/matroska,webm @ 0x5fd716b70f40] [warning] Stream #{}: not enough frames to"
+    line += " estimate rate; consider increasing probesize"
+    complaints = assembly._complaints  # pyright: ignore[reportPrivateUsage]
+    assert complaints([line.format(cover)], {cover}) == []
+    assert complaints([line.format(cover)], set()) == [line.format(cover)]
+    assert complaints([line.format(cover + 1)], {cover}) == [line.format(cover + 1)]
+    assert complaints([line.format(cover).replace("in#0", "in#1")], {cover}) != []
+    assert complaints([line.format(cover).replace("in#0", "in#2")], {cover}) == []
+    assert complaints([line.format(cover) + " now"], {cover}) != []
+
+
+def size_of(path: Path) -> int:
+    return path.stat().st_size
+
+
+COVER_DAMAGE = {
+    "the picture's bytes": (
+        lambda data, jpeg: data.replace(jpeg, jpeg[:-40] + b"\x00" + jpeg[-39:]),
+        "by its bytes",
+    ),
+    "its file name": (
+        lambda data, jpeg: data.replace(b"cover.jpg", b"cover.jpx"),
+        "the filename 'cover.jpx', where",
+    ),
+}
+
+
+@pytest.mark.parametrize("damage", list(COVER_DAMAGE))
+def test_a_cover_that_differs_is_never_put_in_place(
+    tmp_path: Path, jobs: Callable[..., Job], monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    # The file the join wrote, its attached picture changed before the check: refused naming
+    # the stream, the segments kept (they are the caller's), the output as it was.
+    job = jobs()
+    source, jpeg = covered(tmp_path / "source", job)
+    output = tmp_path / "out.mkv"
+    output.write_bytes(b"the file before")
+    change, said = COVER_DAMAGE[damage]
+    strict = assembly._strict  # pyright: ignore[reportPrivateUsage]
+
+    def then_damaged(command: list[str], doing: str, *pictures: Any) -> None:
+        strict(command, doing, *pictures)
+        if "joining" in doing:
+            path = partial_path(output)
+            data = path.read_bytes()
+            assert jpeg in data
+            path.write_bytes(change(data, jpeg))
+
+    monkeypatch.setattr(assembly, "_strict", then_damaged)
+    work = workdir(tmp_path)
+    with pytest.raises(
+        MediaError, match=rf"stream 3 \(the source's stream \d, attachment, mjpeg\).*{said}"
+    ):
+        assemble(output, job.segments, job.frame_rate, source, indexed(source), work)
+    assert output.read_bytes() == b"the file before"
+    assert not partial_path(output).exists() and not list(work.iterdir())
+    assert all(path.exists() for path, _ in job.segments)
 
 
 def earlier(path: Path, stream: int, packet: int, by: int) -> None:
@@ -1549,8 +1823,8 @@ def test_a_damaged_result_is_never_put_in_place(
     change, said = DAMAGE[damage]
     strict = assembly._strict  # pyright: ignore[reportPrivateUsage]
 
-    def then_damaged(command: list[str], doing: str) -> None:
-        strict(command, doing)
+    def then_damaged(command: list[str], doing: str, *pictures: Any) -> None:
+        strict(command, doing, *pictures)
         if "joining" in doing:
             change(partial_path(output))
 
@@ -1801,8 +2075,15 @@ def test_a_stop_kills_the_join_and_removes_the_partial(
         *("assembly.ffconcat", "assembly.framehash", "assembly.others.mkv"),
         *("assembly.pair.mkv", "assembly.pair.ffconcat"),
     }
-    assert all(map(assembly.work_file, [*WORK_FILES, "assembly.attachment.5"]))
-    assert not any(map(assembly.work_file, ["seg_000000.mkv", "assembly.attachment.x"]))
+    assert all(
+        map(assembly.work_file, [*WORK_FILES, "assembly.attachment.5", "assembly.picture.3"])
+    )
+    assert not any(
+        map(
+            assembly.work_file,
+            ["seg_000000.mkv", "assembly.attachment.x", "assembly.picture.x", "assembly.picture."],
+        )
+    )
 
 
 def test_no_segment_is_an_error(tmp_path: Path, jobs: Callable[..., Job]) -> None:
