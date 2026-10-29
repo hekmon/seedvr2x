@@ -86,12 +86,13 @@ never requires it.
   GiB free for one: refused, naming the free VRAM it takes and the largest size that fits
   (see [Memory planner](#memory-planner))
 - Variable frame rate sources: refused with a clear message, as sptenc does
-- A frame rate above 1,000 fps (decided on 2026-10-12, to be built): every FFV1 output is
-  Matroska, whose millisecond can't tell two such frames apart. Written today, seedvr2x's own
+- A frame rate above 1,000 fps (decided on 2026-10-12, built on 2026-10-29): every FFV1
+  output is Matroska, whose millisecond can't tell two such frames apart. Written today,
+  seedvr2x's own
   master at 2,000 fps is refused when read back, 15 of its 30 frames a whole frame off; 1,000
   fps itself holds. Refused once, before the first pass, whatever gives the rate the job would
   write at: the one declared, the one Matroska's frames are read at, or `--frame-rate`
-  (2026-10-28).
+  (2026-10-28), which is refused above it on the command line, before the file is read.
 - Sources refused in v1, each with a clear message, every reason a source has given in one
   numbered refusal:
   - HDR: the PQ (`smpte2084`) and HLG (`arib-std-b67`) transfers. The model was trained on SDR
@@ -143,7 +144,7 @@ never requires it.
   - refused when the stream declares interlacing
   - a warning when ffmpeg's `idet`, run on every frame of the first pass, finds 10% of them or
     more combed (its multiple-frame detection) in a source not declared interlaced, as
-    hard-telecined sources often are. Measured: at most 2.1% on 35 real progressive sources'
+    hard-telecined sources often are. Measured: at most 2.1% on 36 real progressive sources'
     first 6,000 frames and 0.09% over 7 whole films and episodes, against 88% on a telecined
     DVD (97% over the whole). Its counts go in the manifest, for information.
 - Windows: Linux first, since inference is mostly a Linux world. Windows is a best-effort port
@@ -227,7 +228,9 @@ rest to mend (decided on 2026-10-28, to be built):
 - the plan's budget line where the reserve of 2.5 GiB is taken, 851 characters, the refused
   plan's whole refusal inside it: the two lines a plan's line may take;
 - a refusal's advised command, a remake or a join, on a line of its own, so that it can be
-  copied whole (the join refusals run to 2.6 KB);
+  copied whole (the join refusals run to 2.6 KB): built on 2026-10-29 for the joins, the
+  remakes and the assembly's remuxes, a message's time on its first line alone; the tags'
+  remux and the remux of timestamps that wrap still to come;
 - the silences of a start: about a minute before the models' checks at every start of a
   one-file job, and 6 min on an 18.5 GB source, its remux rehearsed (see
   [Output](#output)): a line says what is read, and for about how long;
@@ -778,7 +781,7 @@ Decoding goes through an ffmpeg pipe:
     one second, read before at ffprobe's guess, are refused, naming 24/1.
   - A stream read at another rate than ffprobe gives is said to declare ffprobe's rate once; the
     rate rule's messages then say the rate it is read at (the plain refusal's own two sentences
-    still say declared: to bring in line).
+    too, since 2026-10-29).
   - A file whose timestamps contradict its declared rate is a bad file: refused like any
     other, never reinterpreted on seedvr2x's own (the user's decision). The case measured: a
     Blu-ray remux declared 24/1 whose frames step at 24 fps, with one frame in 500 held 62–63
@@ -822,9 +825,9 @@ Decoding goes through an ffmpeg pipe:
     demuxer from a mislabelled file: fifty segments of 24 frames at 24000/1001, one join 2 ms
     early, lie within 1.3 ms of 24/1's timeline and are named 24/1. So a refusal that names the
     twin says first that such a join reads so too, and is joined again on the frame grid, as a
-    directory's refusal says how. As built it says so in both directions; decided on 2026-10-12,
-    to be built: only where the twin rule names the whole rate N for a file declared N ×
-    1000/1001, never the exact rule, the one way a join was seen to read (worded so on
+    directory's refusal says how. It said so in both directions until 2026-10-29; since then
+    only where the twin rule names the whole rate N for a file declared N × 1000/1001, never
+    the exact rule, the one way a join was seen to read (decided on 2026-10-12, worded so on
     2026-10-28). Segments at a whole rate last whole
     milliseconds, and a Blu-ray remux declared 24/1 that runs at 24000/1001, the case this
     guidance was made for, is no join.
@@ -1796,9 +1799,10 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       but the rate and the range, raw video everything.
     - The command is run by `/bin/sh`, never parsed, in a process group of its own, which a
       stop sends SIGTERM, then SIGKILL to what is left of it after 5 s, a line saying so
-      meanwhile and that Ctrl-C again kills it at once (decided on 2026-10-28, the user, to be
-      built: 2 s as built, short for a command flushing to a slow disk; 5 s stays within the
-      10 s a container's stop gives the whole process).
+      meanwhile and that Ctrl-C again kills it at once (decided on 2026-10-28, the user; built
+      on 2026-10-29, the line 0.2 s after SIGTERM where the command still runs). 2 s before,
+      short for a command flushing to a slow disk; 5 s stays within the 10 s a container's
+      stop gives the whole process.
       `{out}` is
       required and written bare: seedvr2x replaces it by the quoted name of a partial file,
       a `.mkv` by its suffix, put in place once whole.
@@ -1840,13 +1844,19 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       place. They are read from two openings of the source: a plain two-input join isn't
       interleaved (the audio 10 s ahead of the video in the file), which ffmpeg then reads
       badly. A cover picture comes out as Matroska holds one, attached to the file, its file
-      name, type and bytes the source's (decided on 2026-10-28, the user, to be built: MakeMKV
-      adds one to every file it writes). ffmpeg's remux makes it a one-frame video track
+      name, type and bytes the source's (decided on 2026-10-28, the user: MakeMKV adds one to
+      every file it writes; built on 2026-10-29). ffmpeg's remux makes it a one-frame video
+      track
       instead, which players list as a second video, and so did the finished file until then:
       the picture is taken out of the remux and attached again, and checked against the
       source's. Another container's cover, an MP4's, is attached the same way, and so is the
       cover of the remake a refusal advises (see [Input](#input)), which made it a video track
-      too. Another stream more than 1 s ahead of the video in the finished file is warned of,
+      too. As built: its bytes are its stream's one packet, read back from the finished file
+      and compared by name, type and bytes, a difference failing the assembly; an MP4's cover
+      is named cover.jpg or cover.png by its codec, a second one cover_2, one of another codec
+      without a file name and type of its own refused with the remux that leaves it out; the
+      advised remake takes the picture out in a command of its own first. Another stream more
+      than 1 s ahead of the video in the finished file is warned of,
       not refused: a source's audio that starts late or has gaps leads there, the file whole
       (kept on 2026-10-28).
     - Proven before it is put in place, without a decode: the video's packets those the join
@@ -1856,19 +1866,21 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       muxer by ffmpeg itself, then their whole remux rehearsed (2 to 3 min on a film of 33 GiB,
       under 2 s on files up to 5 GiB). Refused there, naming the stream and the remux that
       mends the source: a stream Matroska can't hold (MP4's `mov_text`, Blu-ray and DVD PCM,
-      CEA-608, a MOV's timecode track, an MP4's chapter track) and a stream that starts
+      CEA-608; a data stream is left out instead, below) and a stream that starts
       before the file's start, by which the muxer would move the others. A source whose first
       video frame comes before the file's start is refused too, before any unit: no real file
       has shown one (kept on 2026-10-28). A directory output takes every such source.
       - Met on 2026-10-23 (milestone 7, on WSL2): a Blu-ray rip of 18.5 GB was read for 6 min
         with nothing said, then refused for ffmpeg's warning that it couldn't estimate the
         rate of the source's cover picture, a stream of one frame, which the remux the
-        refusal advises keeps. Decided on 2026-10-28, to be built: that warning, for a cover
-        picture, is tolerated as the codec parameters' are, the picture attached to the
-        finished file as above; a line says what the rehearsal reads before it does; and
-        its result is recorded with the first pass's, a resume trusting it for the same
-        content and `ffmpeg`, where every start of a one-file job paid it again (66 s on a
-        7.5 GB source).
+        refusal advises keeps. Decided on 2026-10-28, built on 2026-10-29: that warning, for
+        a cover's stream alone, is tolerated as the codec parameters' are, the picture
+        attached to the finished file as above; a line says what the rehearsal reads and for
+        at least how long, timed on a read of 64 MiB, before it does; and its result is
+        recorded with the first pass's, with the `ffmpeg` and conversions it ran with, a
+        resume trusting it once the source's content is compared, for the same `ffmpeg` and
+        conversions, where every start of a one-file job paid it again (66 s on a 7.5 GB
+        source).
     - Disk: at the end the segments and the finished file sit side by side, about twice the
       master, with the other streams twice while they are compared. Without the room the
       run stops, everything kept, and the same command assembles later.
@@ -1878,23 +1890,39 @@ compressed is the user's choice: afterwards, from the master, or during the run 
       threads in them).
     - Two assemblies of the same segments hold the same packets, timestamps and records, not
       the same bytes: Matroska's identifiers differ, about a hundred bytes.
-    - Decided on 2026-10-12, to be built. A data stream Matroska can't hold (a MOV's timecode
-      track; an MP4's chapter track, its chapters copied anyway) is left out with a warning
-      naming it, audio and subtitles still refused. The job's manifest stays beside the
-      finished file (`x.mkv.manifest.json`): the same command again makes nothing, another
-      job to that file is refused, a `--segment-cmd` file's frames can be counted, and an
-      `x.mkv` with no manifest beside it is refused, where today a new job replaces it
-      without a word. Each segment's bytes are hashed when it is finished and checked at
-      the assembly, a damaged one made again, where today it would be joined and the
-      segments removed: by the run that finds it, at once, where its models are loaded, said
-      in a warning (its bytes changed since it was finished: the disk, or another program),
-      once, a segment damaged again stopping the run; a run that loaded none, the assembly
-      alone left to it, records the segment unfinished and stops with status 1, naming it,
-      the same command then making it again and assembling (2026-10-28). ffmpeg's children of
-      the assembly end with seedvr2x, where a killed
-      seedvr2x leaves its join writing. And two older defects go: the FFV1 and PNG writers
-      remove a segment's stale checksums before its new file is safe, and a relative `-o`
-      whose name holds ": " is taken by ffmpeg for a protocol.
+    - Built on 2026-10-29, as decided on 2026-10-12:
+      - A data stream Matroska can't hold (a MOV's timecode track, an MP4's chapter track, an
+        MPEG-TS data stream) is left out of the finished file: a warning at every start names
+        it and ffmpeg's reason, the source's chapters being copied all the same, and the
+        assembly's last line says what was left out. Audio and subtitles are still refused,
+        their refusal's remux leaving the data streams out.
+      - The job's manifest stays beside the finished file (`x.mkv.manifest.json`), written
+        whole after its checksums, before the work directory goes. The same command again
+        makes nothing, the file held to the size recorded; another job to that file is
+        refused; an `x.mkv` with no manifest beside it, a link included, is refused before any
+        work, nothing replaced, where a new job used to replace it without a word (while a
+        job's work directory holds its manifest, the name is that job's); `seedvr2x verify`
+        counts a `--segment-cmd` file's frames against it. A stop between any two of the end
+        steps is finished by the next run, a test for each.
+      - Each segment's SHA-256 is recorded when it is finished, and every segment's is checked
+        again before the join, said in a line, `--until` counting it as one more read of the
+        masters. A damaged or missing one is recorded unfinished and its shots made again, by
+        the run that finds it, at once, where its models are loaded, said in a warning (its
+        bytes changed since it was finished: the disk, or another program), once, a segment
+        damaged again stopping the run with status 1; a run that loaded none, the assembly
+        alone left to it, stops with status 1, naming it, the same command then making it
+        again and assembling (2026-10-28). Such segments used to be joined and removed. A
+        finished segment found missing or of another size at a start is still refused there,
+        as before; decided on 2026-10-29, to be built: made again the same way, said in the
+        same warning, where a refusal left a job of tens of GPU hours to the user's hands.
+      - The assembly's ffmpeg and ffprobe end with seedvr2x (Linux's PR_SET_PDEATHSIG), where a
+        killed seedvr2x left its join writing. The others end on their pipes (an encoder at
+        its input's end, a decoder at its next write); decided on 2026-10-29, to be built:
+        every ffmpeg and ffprobe seedvr2x starts ends with it the same way, the user's
+        `--segment-cmd` aside, which ends at its input's end, its file discarded.
+      - The FFV1 and PNG writers remove a segment's old checksums only once its new file's data
+        is on the disk; every name handed to ffmpeg and ffprobe is absolute or begins with
+        `./`, so that a relative `-o` holding ": " is no longer taken for a protocol.
   - **with sptenc:** the directory as it is, for `sptenc encode <dir> <out> -f <source>` (or
     `sptenc concat` for one master)
 
@@ -2353,7 +2381,10 @@ first pass, whose shots are its input, and before the models load:
     early by a tenth of the time left (at 02:02 one said 04:49; the episode ended at 05:05),
     and `--until`'s margin of 1.15 stood at 1.035. The run keeps timing its units by its own
     clock, steady, and says them, its ends and `--until`'s check in the wall clock's time,
-    by the ratio of the two it measures as it goes.
+    by the ratio of the two it measures as it goes. On 2026-10-29 they parted the other way on
+    that machine, the run's own durations 2 to 10% longer than the wall clock's, which stepped
+    back now and then (progress bars timed by it read negative times): the ratio is measured
+    both ways, and a step of the wall clock is never a unit's time.
   - Each unit's progress line says the job's time left and the time of day it should end
     ("…; about 27 min 37 s left, the job ending about 19:26"; decided on 2026-10-21, built on
     2026-10-23).
@@ -2394,19 +2425,30 @@ first pass, whose shots are its input, and before the models load:
         the card grown from 3.2–4.8 GiB to 9.0, programs closed to the tray keeping theirs.
         With them quit, 4.0 GiB, it finished. 3 min 45 s had passed first: the remux
         rehearsed (66 s), the model files hashed (2 min), then the source (36 s).
-      - Decided on 2026-10-28, to be built: the refusal says first that the job is kept and
-        the same command resumes it; then the phase and what it lacks, in GiB; then how to
-        free it: quit the programs using the GPU, those closed to the tray too, the manual
-        saying how to see them on each system. NVML's and the driver's readings and both
-        reserves go under `--verbose`.
+      - Decided on 2026-10-28, built on 2026-10-29: the refusal says first that the job is kept
+        and the same command resumes it; then the phase and what it lacks, in GiB; then how to
+        free it: quit the programs using the GPU, those closed to the tray too, the manual's
+        "GPU memory" saying how to see them on each system; then `--accept-env-change`, the
+        third way out. Where quitting programs can't free enough, it says the job needs a
+        card with more memory free. NVML's and the driver's readings and both reserves are
+        said under `--verbose`.
       - And as soon as the record is read, before the rehearsal and the hashes, the room is
         read through NVML: where the recorded shape doesn't fit, a warning says so at once,
         with what to free while the files are checked, and for about how long. The check
         that refuses stays where it is, the memory moving meanwhile, so that no memory
-        refusal hides the others (another job, a model file, the source).
+        refusal hides the others (another job, a model file, the source). Built on
+        2026-10-29, by NVML and the driver's API, no CUDA context made, before torch is
+        imported; the warning says it is an early reading, and how long the checks ahead take
+        (to be built: from the source's size, and where quitting programs can't free enough,
+        saying so as the refusal does). It counts seedvr2x's own context as 1.23
+        GiB, the rise once measured through a first pass; the RTX 5090 measured 0.67 on a
+        resume under WSL2 (the bare context 0.49, the probe and warm-up 0.18 more), the same
+        to 0.01 GiB three times: 0.75 from the next batch (decided on 2026-10-29), provisional
+        until the 96 GB card measures Linux's driver.
       - With `--accept-env-change`, a recorded shape that no longer fits is planned again for
         what is left, from the memory free then, as a new GPU is taken (decided on
-        2026-10-28, the user's go, to be built). What still fits of it is kept, and what is
+        2026-10-28, the user's go; built on 2026-10-29). What still fits of it is kept, and
+        what is
         made: a shot whose windows were begun under a cap that no longer fits makes them again
         from its first. The manifest's `environment_changes` says when, the shape before and
         after, and what was made. From there the output isn't the uninterrupted run's bit for
@@ -2416,7 +2458,16 @@ first pass, whose shots are its input, and before the models load:
         leaves the manifest as it was, nothing discarded, and the next start plans from the
         memory free then, the recorded shape kept where it fits again. `--plan` with the flag
         says the shape it would take and the windows it would make again, and writes nothing
-        of the job, its cut list aside (2026-10-28).
+        of the job, its cut list aside (2026-10-28). As built: the planner pins the recorded
+        window cap and tiles, then releases the part of the refusing phase, up to three times
+        (where the host refuses: the decode's tiles, then the encode's, then the window); a
+        shot whose windows are all done keeps their layout, recorded as its own cap where it
+        differs (`window_cap`, the manifest still at version 3); a shot with none done is laid
+        out anew. Run on 2026-10-29 on the RTX 5090 beside a program holding 12 GiB of it: a
+        job of 16 segments, stopped by `--until` after 8, refused three times without the
+        flag, its early warning each time 0.1 s in; with it, planned again (windows of 12
+        latents to 7, the encode untiled to tiles of 832 px, the decode's tiles of 1152 px to
+        640), its 8 segments, 8 encoded shots and 8 windows kept, finished and verified.
     - This rests on swapping changing no bit of the output, milestone 3's first gate (see
       [BlockSwap, rewritten](#blockswap-rewritten)). Run on 2026-10-11: a job stopped on a
       card emulated at 16 GB was refused on 10 GB, its manifest untouched, and finished on 24
@@ -2783,7 +2834,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     breaks bit-identity across the resume, not the upscale's correctness, and refusing
     outright would throw away tens of GPU hours over an upgrade. The flag also takes a
     recorded shape the memory free no longer holds, planned again for what is left (see
-    [Memory planner](#memory-planner), decided on 2026-10-28).
+    [Memory planner](#memory-planner), decided on 2026-10-28, built on 2026-10-29).
     - The new environment and its `environment_changes` record are written with the next unit
       made. A resume stopped before making one leaves the manifest as it was, and the job
       still resumes in its old environment. Two things rewrite it at once: a plan taken up or
