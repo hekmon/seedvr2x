@@ -325,6 +325,32 @@ def test_every_reason_in_one_refusal(changes: dict[str, Any], refusal: str) -> N
     assert declared_refusal(stream(**changes)) == refusal
 
 
+def test_a_frame_rate_above_1000_is_a_reason_among_the_others() -> None:
+    # DESIGN.md, Input, Not in the first version: "A frame rate above 1,000 fps ... Refused once,
+    # before the first pass", the stream's own among the reasons of one numbered refusal ("every
+    # reason a source has given in one numbered refusal"); --frame-rate replaces the stream's
+    # rate, so that its own is no reason then, and 1,000 fps itself holds.
+    why = (
+        "not supported: its frames written to Matroska, whose timestamps count milliseconds,"
+        " couldn't be told apart"
+    )
+    declares = "frame rate above 1,000 fps, the rate it declares, 2000/1: " + why
+    fast = stream(frame_rate=Fraction(2000))
+    assert declared_refusal(fast) == declares
+    both = declared_refusal(stream(frame_rate=Fraction(2000), field_order="tt", cropped=True))
+    assert both == (
+        "3 reasons: (1) interlaced (field order tt): not supported; (2) cropped by its container:"
+        f" not supported; (3) {declares}"
+    )
+    read = stream(frame_rate=Fraction(2000), ffprobe_rate=Fraction(1000))
+    assert declared_refusal(read) == declares.replace("it declares", "it is read at")
+    assert declared_refusal(fast, frame_rate=Fraction(25)) == ""
+    assert declared_refusal(stream(frame_rate=Fraction(1000))) == ""
+    assert declared_refusal(stream(frame_rate=Fraction(1000001, 1000))).startswith(
+        "frame rate above 1,000 fps, the rate it declares, 1000001/1000"
+    )
+
+
 @pytest.mark.parametrize(
     "changes",
     [
@@ -379,3 +405,31 @@ TICK = Fraction(1_000_000, 90_000)
 def test_timing(scanned: Scan, avg_frame_rate: Fraction | None, reason: str) -> None:
     error = timing_error(scanned, NTSC_FILM, avg_frame_rate)
     assert reason in error if reason else error == ""
+
+
+def test_timing_error_says_the_rate_a_stream_is_read_at() -> None:
+    # DESIGN.md, Input: "A stream read at another rate than ffprobe gives is said to declare
+    # ffprobe's rate once; the rate rule's messages then say the rate it is read at (the plain
+    # refusal's own two sentences still say declared: to bring in line)". `read_at` changes the
+    # two sentences about the rate, and nothing else of a message; without it, to the byte.
+    wrong = timed(100, 99, 40000, 40000)
+    assert timing_error(wrong, NTSC_FILM, NTSC_FILM) == (
+        "the frame rate declared, 24000/1001 fps, is not the frames' own: they last 40 to 40 ms"
+    )
+    assert timing_error(wrong, NTSC_FILM, NTSC_FILM, read_at=True) == (
+        "the frame rate it is read at, 24000/1001 fps, is not the frames' own: they last 40 to"
+        " 40 ms"
+    )
+    one = timed(1, 0, 0, 0)
+    assert timing_error(one, Fraction(24), None) == (
+        "the frame rate can't be checked (no frame times) and the declared ones differ: 24 and"
+        " none fps"
+    )
+    assert timing_error(one, Fraction(24), None, read_at=True) == (
+        "the frame rate can't be checked (no frame times) and the rate it is read at and the"
+        " average one differ: 24 and none fps"
+    )
+    for scanned in (timed(100, 98, 33333, 41667), timed(0, 0, 0, 0), timed(100, 99, 41000, 42000)):
+        assert timing_error(scanned, NTSC_FILM, NTSC_FILM, read_at=True) == timing_error(
+            scanned, NTSC_FILM, NTSC_FILM
+        )

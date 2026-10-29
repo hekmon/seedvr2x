@@ -357,9 +357,10 @@ def pictures(path: Path) -> list[str]:
 # 24000/1001's a frame apart (rate.twin). mechanism7's own 260 are a quarter of one apart.
 GUIDED = 1001
 
-# What a refusal says before its fixes wherever the rate it names is an NTSC twin of the rate
-# declared (media/source.py, TWIN_JOIN; design's ruling of 2026-10-12, in its words, and
-# "otherwise").
+# What a refusal says before its fixes where the twin rule names a whole rate N for a file
+# declared N x 1000/1001 (media/source.py, TWIN_JOIN; design's ruling of 2026-10-12, worded on
+# 2026-10-28, and "otherwise"): never the exact rule, nor a file declared N that runs at N x
+# 1000/1001.
 TWIN_JOIN = (
     "a join of one-second segments by ffmpeg's concat demuxer reads so too, and such a file is"
     " joined again on the frame grid (a directory given to seedvr2x says how); otherwise, "
@@ -368,9 +369,7 @@ TWIN_JOIN = (
 GUIDANCE = (
     "its timestamps run at 24000/1001 fps (23.976), within 10.8 ms of that rate's timeline (0.26"
     " of a frame), where it declares 24/1, its frames lasting from 41 to 63 ms: a bad file, not"
-    " read on a guess: a join of one-second segments by ffmpeg's concat demuxer reads so too, and"
-    " such a file is joined again on the frame grid (a directory given to seedvr2x says how);"
-    " otherwise, remake it at that rate, an FFV1 master with its other streams copied, a"
+    " read on a guess: remake it at that rate, an FFV1 master with its other streams copied, a"
     " clean file for every tool (lossless, so large: 0.53-0.55 MB a frame on a 1080p film; and a"
     " full encode), with ffmpeg -r:v:0 24000/1001 -i SOURCE -map 0 -map -0:d -c copy -c:v:0 ffv1"
     " -level:v:0 3 -g:v:0 1 -slicecrc:v:0 1 -fps_mode:v:0 passthrough remade.mkv; or give"
@@ -385,8 +384,9 @@ GUIDANCE = (
 def test_contradicted_rate_refused_with_guidance(tmp_path: Path) -> None:
     # Mechanism 7: refused, as sptenc's rule refuses its 62 and 63 ms steps, the message giving
     # the rate its timestamps follow, how far, and the two fixes (DESIGN.md, Input), whole: over
-    # 1,001 frames, two long steps in them, the twin of the rate declared a frame away, and so
-    # what else reads as that twin before the fixes (TWIN_JOIN).
+    # 1,001 frames, two long steps in them, the twin of the rate declared a frame away; 24 fps
+    # declared, its twin 24000/1001 no whole rate, so nothing said of a join (TWIN_JOIN; design,
+    # 2026-10-28: "a Blu-ray remux declared 24/1 that runs at 24000/1001 ... is no join").
     path = mechanism7(tmp_path / "s9.mkv", frames=GUIDED)
     with pytest.raises(MediaError) as refused:
         examine(path)
@@ -417,7 +417,7 @@ def test_frame_rate_override(tmp_path: Path) -> None:
         " timeline (0.504 of a frame, half a frame being 20.8 ms), and 581 more frames, up to"
         " 42 ms: taken at that rate, frames would be dropped or doubled; its timestamps run at"
         " 24000/1001 fps (23.976), within 10.8 ms of that rate's timeline (0.26 of a frame):"
-        f" {TWIN_JOIN}remake it at that rate"
+        " remake it at that rate"
     )
     assert said.endswith(
         "or give --frame-rate 24000/1001, which takes its frames at that rate,"
@@ -539,7 +539,7 @@ def test_no_rate_named_by_half_a_frame() -> None:
     assert said.startswith("--frame-rate 25/1: frame 12 lies 20.0 ms after its place on")
     assert said.endswith(
         f"{DROPPED_OR_DOUBLED}; its timestamps run at 24000/1001 fps (23.976), within 10.8 ms of"
-        f" that rate's timeline (0.26 of a frame): {fixes(NTSC_FILM, joined=True)}"
+        f" that rate's timeline (0.26 of a frame): {fixes(NTSC_FILM)}"
     )
     pal = declaring(Fraction(25))
     assert unfilled(pal, at(s9)) == variable(41, 63)
@@ -588,12 +588,12 @@ def test_a_refusal_naming_the_declared_rates_twin_says_what_a_join_reads_as() ->
     )
     # (b) "timestamps can't tell a join of one-second segments from a mislabelled file (fifty
     # segments of 24 frames at 24000/1001, one join 2 ms early, are named 24/1 and offered
-    # --frame-rate 24/1). Whenever the rate a refusal names is the declared rate's twin, by
-    # either rule, it adds one sentence": those fifty, each 1,000 ms after the one before, as
-    # ffmpeg's concat demuxer joins them, and 999 once: 24/1, the twin of the 24000/1001 they
-    # declare, holds them within 1.3 ms, 1.2 frames from the declared timeline at their end,
-    # named by the twin's rule; the sentence before the two fixes, whole, and after
-    # --frame-rate's refusal alike.
+    # --frame-rate 24/1)", the sentence added (design, 2026-10-12; 2026-10-28: only where the
+    # twin rule names the whole rate N for a file declared N x 1000/1001, never the exact
+    # rule): those fifty, each 1,000 ms after the one before, as ffmpeg's concat demuxer joins
+    # them, and 999 once: 24/1, the twin of the 24000/1001 they declare, holds them within 1.3
+    # ms, 1.2 frames from the declared timeline at their end, named by the twin's rule; the
+    # sentence before the two fixes, whole, and after --frame-rate's refusal alike.
     starts = [1000 * k - (1 if k >= 25 else 0) for k in range(50)]
     early = at([start + pts for start in starts for pts in segment])
     index = early.index
@@ -611,29 +611,30 @@ def test_a_refusal_naming_the_declared_rates_twin_says_what_a_join_reads_as() ->
         f" {DROPPED_OR_DOUBLED}; {runs_at} of a frame): {fixes(Fraction(24), joined=True)}"
     )
     # By the other rule, the timestamps that twin's exactly, where sptenc's rule fails: 24 fps
-    # in ticks of 10 ms, declared 24000/1001.
+    # in ticks of 10 ms, declared 24000/1001; the exact rule, the one way a join was never seen
+    # to read, says nothing of one.
     coarse = at([(100 * n + 12) // 24 for n in range(300)], Fraction(1, 100))
     assert unfilled(film, coarse) == (
         "its timestamps run at 24/1 fps (24), within 5 ms of that rate's timeline (0.12 of a"
         " frame), where it declares 24000/1001, its frames lasting from 40 to 50 ms: a bad file,"
-        f" not read on a guess: {fixes(Fraction(24), joined=True)}"
+        f" not read on a guess: {fixes(Fraction(24))}"
     )
     # And where it passes: 600 frames at 24000/1001 declared 24/1, refused for leaving the
     # declared timeline (source._leaves), without the option and with it; 100 of them, read
     # without it, told their rate under --frame-rate 25 (source._exactly).
     whole = declaring(Fraction(24))
     retagged_film = at([round(n * 1001 / 24) for n in range(600)])
-    way_out = another_rate(NTSC_FILM, "0.100% shorter", joined=True)
+    way_out = another_rate(NTSC_FILM, "0.100% shorter")
     assert unfilled(whole, retagged_film) == (
         f"{leaves('99 of its 600', '495, up to 25.3 ms (0.61', '24/1')}, and {way_out}"
     )
     for given in (Fraction(24), Fraction(25)):
         said = unfilled(replace(whole, rate_override=given), retagged_film)
-        assert said.endswith(f" {way_out}") and said.count(TWIN_JOIN) == 1
+        assert said.endswith(f" {way_out}") and "a join of" not in said
     said = timing_refusal(replace(whole, rate_override=Fraction(25)), at(retagged_film_pts(100)))
     assert said.endswith(
         f": {read_without('24/1')}; its timestamps follow 24000/1001 fps (23.976) exactly, to the"
-        f" rounding of its time base, 1/1000 s: {TWIN_JOIN}--frame-rate 24000/1001 takes its"
+        f" rounding of its time base, 1/1000 s: --frame-rate 24000/1001 takes its"
         " frames at that rate"
     )
     # A rate named that is no twin of the one declared has no such sentence: 48 fps declared
@@ -843,8 +844,8 @@ REFUSED_WITHOUT = (
 
 def fixes(found: Fraction, joined: bool = False) -> str:
     """The two fixes a refusal gives for timestamps that run at `found`, the first frame at the
-    file's start; `joined`, after what else reads so, for a rate that is an NTSC twin of the
-    one declared (TWIN_JOIN)."""
+    file's start; `joined`, after what else reads so, for a whole rate the twin rule names for a
+    file declared at its x 1000/1001 (TWIN_JOIN)."""
     return (
         f"{TWIN_JOIN if joined else ''}"
         "remake it at that rate, an FFV1 master with its other streams copied, a clean file for"
@@ -1051,15 +1052,15 @@ def leaves(count: str, first_off: str, declares: str) -> str:
     )
 
 
-def another_rate(found: Fraction, change: str, tick: str = "1/1000", joined: bool = False) -> str:
+def another_rate(found: Fraction, change: str, tick: str = "1/1000") -> str:
     """The end of the refusal of a file whose timestamps are the rate `found`'s exactly, in
     `tick` s, and not the one it declares: what the declared one would have cost, and the two
-    fixes, `joined` as fixes takes it."""
+    fixes, without a join's sentence (the exact rule names the rate, TWIN_JOIN)."""
     return (
         f"its output, written at that rate, would be {change} than its timestamps' own time, off"
         f" the source's other streams: its timestamps follow {rate.said(found)} exactly, to the"
         f" rounding of its time base, {tick} s: a bad file, not read on a guess:"
-        f" {fixes(found, joined)}"
+        f" {fixes(found)}"
     )
 
 
@@ -1238,10 +1239,10 @@ def test_a_rate_contradicted_within_a_millisecond_refused_naming_the_rate(
     with pytest.raises(MediaError) as refused:
         examine(path)
     # 24000/1001 is the twin of the 24/1 declared, the one case here: named by the timestamps
-    # being its exactly, and what else reads so said before its fixes (TWIN_JOIN; design,
-    # 2026-10-12: "by either rule"); 48 for 50/1, 1000/33 and 1000/17 are no twins.
-    way_out = another_rate(found, change, joined=found == NTSC_FILM)
-    assert (TWIN_JOIN in way_out) is (declared == 24)
+    # being its exactly, and a file declared 24/1 that runs at 24000/1001 is no join, nothing
+    # said of one (TWIN_JOIN; design, 2026-10-28); 48 for 50/1, 1000/33 and 1000/17 are no twins.
+    way_out = another_rate(found, change)
+    assert "a join of" not in way_out
     assert str(refused.value) == (
         f"{path}: {leaves(strays, first_off, f'{declared}/1')}, and {way_out}"
     )
@@ -1283,7 +1284,7 @@ def test_a_short_file_on_its_declared_timeline_is_not_warned_of(
         examine(path, frame_rate=Fraction(25))
     assert str(refused.value).endswith(
         f": {read_without('24/1')}; its timestamps follow 24000/1001 fps (23.976) exactly, to the"
-        f" rounding of its time base, 1/1000 s: {TWIN_JOIN}--frame-rate 24000/1001 takes its"
+        f" rounding of its time base, 1/1000 s: --frame-rate 24000/1001 takes its"
         " frames at that rate"
     )
 
@@ -1799,10 +1800,9 @@ def test_seedvr2xs_own_matroska_files_read_back_at_their_rate(
 @pytest.mark.parametrize(
     ("fps", "said", "pix_fmt"),
     [
-        *((fps, said, "gbrp16le") for fps, said in GUESSED.items() if fps != "2000/1"),
+        *((fps, said, "gbrp16le") for fps, said in GUESSED.items() if Fraction(fps) <= 1000),
         *((fps, fps, "gbrp16le") for fps in AS_WRITTEN),
         ("3000/1001", "12000/1001", "yuv420p10le"),
-        ("1001/1", "1000/1", "yuv420p10le"),
     ],
 )
 def test_seedvr2xs_own_master_under_6_fps_or_above_1000_reads_back_at_its_rate(
@@ -1811,10 +1811,11 @@ def test_seedvr2xs_own_master_under_6_fps_or_above_1000_reads_back_at_its_rate(
     # Design's ruling (2026-10-12), over the rates measured (rate.matroska_guessed): seedvr2x's
     # own master (media/writer.py, FFV1Writer) written under 6 fps or above 1,000 declares
     # ffprobe's guess from its timestamps, 12000/1001 for 3000/1001 and for 2997/1000, and was
-    # refused, or read at another rate, 2/1 for 2000/1001 and 1000/1 for 1001; read by its
-    # avg_frame_rate, each comes back at the rate written, said in an info line with what
-    # ffprobe gave. The rates ffprobe gives back as written are read as they were, without a
-    # line.
+    # refused, or read at another rate, 2/1 for 2000/1001; read by its avg_frame_rate, each
+    # comes back at the rate written, said in an info line with what ffprobe gave. The rates
+    # ffprobe gives back as written are read as they were, without a line. Above 1,000 fps
+    # (1001/1 and 2000/1 here) none is written back: refused whole, by the rate
+    # (test_a_frame_rate_above_1000_is_refused_once_before_the_first_pass).
     caplog.set_level(logging.INFO, logger="seedvr2x")
     written = Fraction(fps)
     path = tmp_path / "master.mkv"
@@ -1837,14 +1838,82 @@ def test_seedvr2xs_own_master_under_6_fps_or_above_1000_reads_back_at_its_rate(
     assert declare(single).stream.frame_rate == written
 
 
+ABOVE = (
+    "frame rate above 1,000 fps, the rate it {does}, {fps}: not supported: its frames written to"
+    " Matroska, whose timestamps count milliseconds, couldn't be told apart"
+)
+
+
 @needs_ffmpeg
-def test_seedvr2xs_own_master_at_2000_fps_is_refused_for_matroskas_milliseconds(
-    tmp_path: Path,
+@needs_x264
+def test_a_frame_rate_above_1000_is_refused_once_before_the_first_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # DESIGN.md, Input, Not in the first version (decided on 2026-10-12, worded on 2026-10-28):
+    # "A frame rate above 1,000 fps: every FFV1 output is Matroska, whose millisecond can't tell
+    # two such frames apart. Written today, seedvr2x's own master at 2,000 fps is refused when
+    # read back, 15 of its 30 frames a whole frame off; 1,000 fps itself holds. Refused once,
+    # before the first pass, whatever gives the rate the job would write at: the one declared,
+    # the one Matroska's frames are read at, or --frame-rate". The first pass is replaced by a
+    # failure: declare refuses before it, examine too.
+    def no_pass(*arguments: object, **options: object) -> None:
+        raise AssertionError("the first pass ran")
+
+    monkeypatch.setattr("seedvr2x.media.source.scan", no_pass)
+    # The rate declared: an MPEG-4 clip in MP4 declares the rate it was written at.
+    declared = tmp_path / "declared.mp4"
+    made = ("-f", "lavfi", "-i", "testsrc2=s=64x48:r=2000", "-frames:v", "30")
+    run(*made, "-c:v", "mpeg4", "-video_track_timescale", "90000", str(declared))
+    [stream] = streams(declared)
+    assert stream["r_frame_rate"] == "2000/1"
+    for call in (declare, examine):
+        with pytest.raises(MediaError) as refused:
+            call(declared)
+        assert str(refused.value) == f"{declared}: " + ABOVE.format(does="declares", fps="2000/1")
+    # The rate Matroska's frames are read at (VideoStream.frame_rate): seedvr2x's own master at
+    # 2,000 fps, which declares 1000/1 to ffprobe and was refused when read back for 15 of its
+    # 30 frames a whole frame off, and one at 1001 fps, 1000/1 to ffprobe as well.
+    for fps in ("2000/1", "1001/1"):
+        path = tmp_path / f"master_{fps.split('/')[0]}.mkv"
+        with FFV1Writer(path, "gbrp16le", 64, 48, Fraction(fps), Tags()) as writer:
+            writer.write(np.full((30, 48, 64, 3), 0.5, np.float32))
+        [stream] = streams(path)
+        assert (stream["r_frame_rate"], stream["avg_frame_rate"]) == ("1000/1", fps)
+        for call in (declare, examine):
+            with pytest.raises(MediaError) as refused:
+                call(path)
+            assert str(refused.value) == f"{path}: " + ABOVE.format(does="is read at", fps=fps)
+    # --frame-rate's: the rate the job writes at, whatever the clip declares, refused from the
+    # command line alone, the clip's own reasons unread.
+    pal = tmp_path / "pal.mp4"
+    run("-f", "lavfi", "-i", "testsrc2=s=64x48:r=25", "-frames:v", "30", "-c:v", "mpeg4", str(pal))
+    for call in (declare, examine):
+        with pytest.raises(MediaError) as refused:
+            call(pal, frame_rate=Fraction(2000))
+        assert str(refused.value) == (
+            "--frame-rate 2000/1: above 1,000 fps: not supported: its frames written to Matroska,"
+            " whose timestamps count milliseconds, couldn't be told apart"
+        )
+    # A source declared above 1,000 and given a rate to write at is judged by that rate: the
+    # option replaces the one the job would write at.
+    assert declare(declared, frame_rate=Fraction(25)).rate_override == 25
+    # 1,000 fps itself holds: declared, and as --frame-rate's.
+    assert declare(pal, frame_rate=Fraction(1000)).rate_override == 1000
+    fastest = tmp_path / "fastest.mp4"
+    at_1000 = ("-f", "lavfi", "-i", "testsrc2=s=64x48:r=1000", "-frames:v", "30")
+    run(*at_1000, "-c:v", "mpeg4", "-video_track_timescale", "90000", str(fastest))
+    assert declare(fastest).stream.frame_rate == 1000
+
+
+@needs_ffmpeg
+def test_seedvr2xs_own_master_at_2000_fps_is_refused_for_its_rate(tmp_path: Path) -> None:
     # What reading by avg_frame_rate doesn't give back: a master written at 2000 fps, two
     # frames a millisecond, Matroska's tick. Given as 1000/1 by ffprobe and refused at it, 28
-    # of its 30 frames off; read at 2000/1, the rate written, every other frame lies a whole
-    # frame from its place, and it is refused still, for its timestamps, no longer its rate.
+    # of its 30 frames off; read at 2000/1, the rate written, every other frame lay a whole
+    # frame from its place, and it was refused for its timestamps. Now refused for its rate,
+    # before the first pass (DESIGN.md, Input: "A frame rate above 1,000 fps"; the test above
+    # holds the message). 1,000 fps itself holds, and reads back whole (the test of the rates
+    # written, AS_WRITTEN).
     path = tmp_path / "master.mkv"
     with FFV1Writer(path, "gbrp16le", 64, 48, Fraction(2000), Tags()) as writer:
         writer.write(np.full((30, 48, 64, 3), 0.5, np.float32))
@@ -1852,10 +1921,7 @@ def test_seedvr2xs_own_master_at_2000_fps_is_refused_for_matroskas_milliseconds(
     assert (stream["r_frame_rate"], stream["avg_frame_rate"]) == ("1000/1", "2000/1")
     with pytest.raises(MediaError) as refused:
         examine(path)
-    assert str(refused.value).startswith(
-        f"{path}: 15 of its 30 frames lie half a frame or more from their place on the timeline"
-        " of the rate it is read at, 2000/1, from frame 1, up to 0.5 ms (1.00 of a frame), and"
-    )
+    assert str(refused.value).startswith(f"{path}: frame rate above 1,000 fps, the rate it is read")
 
 
 @needs_ffmpeg
@@ -2132,7 +2198,7 @@ def test_what_stays_refused_with_places_left_empty() -> None:
     assert said.startswith(
         "its timestamps run at 24000/1001 fps (23.976), within 10.9 ms of that rate's timeline"
         " (0.26 of a frame), where it declares 24/1, its frames lasting from 41 to 63 ms: a bad"
-        f" file, not read on a guess: {TWIN_JOIN}remake it at that rate"
+        " file, not read on a guess: remake it at that rate"
     )
     # A true variable rate, 24 then 30 fps: two frames in one place of 24's grid.
     assert unfilled(film, stepping([42, 41, 42] * 30 + [33, 34, 33] * 30)) == variable(33, 42)
@@ -3069,13 +3135,16 @@ def test_frame_rate_on_a_rate_under_ffmpegs_jump_bound(tmp_path: Path, period: i
     # seventh of those every 11 s is half a frame off it.
     assert rate.timeline(indexed([period * 1000 * n for n in range(6)]), Fraction(1, 12)).holds
     assert rate.timeline(index, Fraction(1, 12)).holds is (period == 12)
-    # Its first 6 frames: no rate named, by sptenc's rule alone.
+    # Its first 6 frames: no rate named, by sptenc's rule alone, whose sentence says the rate a
+    # stream read at another rate than ffprobe gives is read at (scan.timing_error; DESIGN.md,
+    # Input: "the rate rule's messages then say the rate it is read at").
     short = retagged(tmp_path / "short.mkv", 1, f"{period}000*N", 6)
     with pytest.raises(MediaError) as refused:
         examine(short)
+    said_as = "it is read at" if period == 12 else "declared"
     assert str(refused.value) == (
-        f"{short}: the frame rate declared, 1 fps, is not the frames' own: they last {period}000"
-        f" to {period}000 ms"
+        f"{short}: the frame rate {said_as}, 1 fps, is not the frames' own: they last"
+        f" {period}000 to {period}000 ms"
     )
     # The same frames as ffmpeg writes them at that rate, their frame duration 12 s: the file
     # declares 1000/1 to ffprobe, the time base's, and was refused for it, "where it declares

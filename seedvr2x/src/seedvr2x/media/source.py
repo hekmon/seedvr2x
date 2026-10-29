@@ -29,6 +29,16 @@ logger = logging.getLogger(__name__)
 # a to d in 16.16 fixed point). The third row, a translation, changes no pixel.
 IDENTITY = (65536, 0, 0, 0, 65536, 0)
 
+# The highest frame rate seedvr2x writes, frames per second: every FFV1 output is Matroska,
+# whose timestamps count milliseconds, so that above 1,000 fps two frames can't be told apart
+# (DESIGN.md, Input, Not in the first version: "A frame rate above 1,000 fps", decided on
+# 2026-10-12, worded on 2026-10-28). Measured then: seedvr2x's own master at 2,000 fps, read back,
+# had 15 of its 30 frames a whole frame off; 1,000 fps itself holds.
+MOST_FPS = 1000
+FINER_THAN_MATROSKA = (
+    "its frames written to Matroska, whose timestamps count milliseconds, couldn't be told apart"
+)
+
 # HDR's transfers, ffprobe's names (libavutil/pixdesc.c:3317, 3319 at n9.0.2), refused in v1; why,
 # and how to get an SDR upscale (DESIGN.md, Not in the first version).
 HDR = {"smpte2084": "PQ", "arib-std-b67": "HLG"}
@@ -273,6 +283,17 @@ def declare(
     against its frames by the first pass (timing_refusal).
 
     Raises MediaError with the reason for a refusal."""
+    if frame_rate is not None and frame_rate > MOST_FPS:
+        # The rate the job would write at is --frame-rate's, whatever the source declares:
+        # refused from the command line alone, before the file is probed. PROVISIONAL (impl-v010,
+        # 2026-10-28: DESIGN.md says "whatever gives the rate" is refused once, before the first
+        # pass, and doesn't say whether --frame-rate's refusal joins the numbered list of a
+        # source's reasons): apart from it, as a command-line refusal, the source's own reasons
+        # unread until the option is fixed.
+        raise MediaError(
+            f"--frame-rate {rate.fraction(frame_rate)}: above {MOST_FPS:,} fps: not supported:"
+            f" {FINER_THAN_MATROSKA}"
+        )
     # A name the first pass refuses (scan.name_error), refused here, first: the command line
     # checks what a source declares before it fetches, checks and hashes the model files, and
     # the pass ran after them, a 17 GB pull and a 16.5 GB hash before a refusal its name alone
@@ -282,7 +303,7 @@ def declare(
         raise MediaError(named)
     probed = probe(path)
     try:
-        refusal = declared_refusal(probed, matrix)
+        refusal = declared_refusal(probed, matrix, frame_rate)
         if refusal:
             raise MediaError(refusal)
         stream = resolved(probed)
@@ -581,7 +602,9 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
     where it passes; read with those places filled (in_places), which the source's warning says
     (counted)."""
     path, stream, index = declared.path, declared.stream, scanned.index
-    error = timing_error(scanned, stream.frame_rate, stream.avg_frame_rate)
+    error = timing_error(
+        scanned, stream.frame_rate, stream.avg_frame_rate, read_at=stream.ffprobe_rate is not None
+    )
     if scanned.discontinuity is not None:
         return error
     forced = declared.rate_override
@@ -592,9 +615,10 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
             return _leaves(stream, index)
         if _on_grid(declared, scanned) is not None:
             return ""
-        found = _guided(index, stream.frame_rate)
-        if found is None:
+        guided = _guided(index, stream.frame_rate)
+        if guided is None:
             return error
+        found, twinned = guided
         last = f"{_ms(scanned.shortest)} to {_ms(scanned.longest)} ms"
         if found.rate == stream.frame_rate:
             what = (
@@ -608,7 +632,7 @@ def timing_refusal(declared: Declared, scanned: Scan) -> str:
                 f" {_declares(stream)} {rate.fraction(stream.frame_rate)}, its frames lasting"
                 f" from {last}"
             )
-        fixes = _fixes(found.rate, index, stream.frame_rate)
+        fixes = _fixes(found.rate, index, stream.frame_rate, twinned)
         return f"{what}: a bad file, not read on a guess: {fixes}"
     if index is None or scanned.frames == 0:
         return "no frame decoded"
@@ -797,9 +821,10 @@ def in_places(declared: Declared, scanned: Scan) -> FrameIndex | None:
     return grid.filled(index, found.place, found.rate)
 
 
-def _guided(index: FrameIndex, declares: Fraction) -> Timeline | None:
+def _guided(index: FrameIndex, declares: Fraction) -> tuple[Timeline, bool] | None:
     """The rate a refusal names for a file sptenc's rule refuses at the rate it declares,
-    `declares`, None without one: the rate its timestamps are exactly (rate.exact), whatever it
+    `declares`, None without one, with whether the twin rule named it (rate.twin, not rate.exact):
+    the rate its timestamps are exactly (rate.exact), whatever it
     is, the declared one included, in a time base too coarse for sptenc's 1 ms (24 fps in 10 ms
     ticks steps 40 and 50 ms); else the declared rate's NTSC twin, once the frames have followed
     it a frame or more away from the declared timeline (rate.twin), S9's case, whose timestamps
@@ -807,8 +832,8 @@ def _guided(index: FrameIndex, declares: Fraction) -> Timeline | None:
     timeline where it declares 24/1 (research/docs/seeking.md, mechanism 7). The twins are the
     declared rate's under --frame-rate too (_off): the guidance says what the file is. A twin
     is N x 1000/1001 for a whole number N and N for N x 1000/1001, no other (rate.twins;
-    design, 2026-10-12, after the decision below), and whichever rule names one, the refusal
-    says what else reads so (TWIN_JOIN).
+    design, 2026-10-12, after the decision below), and the refusal says what else reads so
+    where the twin rule names one (TWIN_JOIN).
 
     Design's decision of 2026-10-12: "a refusal names another rate only (a) when the timestamps
     are that rate's EXACTLY, to the time base's rounding, or (b) where sptenc's rule fails, when
@@ -830,7 +855,11 @@ def _guided(index: FrameIndex, declares: Fraction) -> Timeline | None:
     # them too, in a time base too coarse for sptenc's 1 ms: 1,001 frames 41.7 ms apart in
     # ticks of 10 ms, declared 24/1, are 10000/417 fps exactly, within 5 ms, and lie within
     # 13.2 ms of 24000/1001's timeline, a frame from 24/1's at their end (tests/test_rate.py).
-    return rate.exact(index) or rate.twin(index, declares)
+    exact = rate.exact(index)
+    if exact is not None:
+        return exact, False
+    twin = rate.twin(index, declares)
+    return None if twin is None else (twin, True)
 
 
 def _leaves(stream: VideoStream, index: FrameIndex) -> str:
@@ -953,13 +982,13 @@ def _cost(change: Fraction) -> str:
     return f"{percent:.{decimals}f}% {'shorter' if change < 0 else 'longer'}"
 
 
-def _exactly(found: Timeline, index: FrameIndex, declares: Fraction) -> str:
+def _exactly(found: Timeline, index: FrameIndex) -> str:
     """The rate a source's timestamps are exactly (rate.exact), as messages give it, with the
-    option that takes its frames at it; `declares` the rate the file declares, whose twin a
-    join reads as too (_twin_join)."""
+    option that takes its frames at it. Named by the exact rule, never the twin rule, it says
+    nothing of a join (_twin_join)."""
     return (
         f"its timestamps follow {rate.said(found.rate)} exactly, to the rounding of its time"
-        f" base, {index.time_base} s: {_twin_join(found.rate, declares)}--frame-rate"
+        f" base, {index.time_base} s: --frame-rate"
         f" {rate.fraction(found.rate)} takes its frames at that rate"
     )
 
@@ -1021,45 +1050,43 @@ def _off(
         exact = rate.exact(index)
         if exact is None or exact.rate == declares:
             return reason
-        return f"{reason}; {_exactly(exact, index, declares)}"
+        return f"{reason}; {_exactly(exact, index)}"
     if holed is not None:
         missing = int(holed.place[-1]) + 1 - len(holed.place)
         return (
             f"{reason}; without --frame-rate, the file is read at {_read_at(stream)}, on whose"
             f" grid its frames sit, the {_frames(missing)} missing there filled"
         )
-    found = _guided(index, declares)
-    if found is None or found.rate == on.rate:
+    guided = _guided(index, declares)
+    if guided is None or guided[0].rate == on.rate:
         return reason
+    found, twinned = guided
     return (
         f"{reason}; its timestamps run at {rate.said(found.rate)}, {_within(found)}:"
-        f" {_fixes(found.rate, index, declares)}"
+        f" {_fixes(found.rate, index, declares, twinned)}"
     )
 
 
-# What a refusal adds wherever the rate it names is an NTSC twin of the rate the file declares
-# (rate.twins), by either rule, the timestamps that rate's exactly (rate.exact) or following it
-# a frame away from the declared timeline (rate.twin), before the fixes at that rate: design's
-# ruling of 2026-10-12, "timestamps can't tell a join of one-second segments from a mislabelled
-# file (fifty segments of 24 frames at 24000/1001, one join 2 ms early, are named 24/1 and
-# offered --frame-rate 24/1). Whenever the rate a refusal names is the declared rate's twin, by
-# either rule, it adds one sentence", in its words. N frames at N x 1000/1001 fps last 1.001 s,
-# and ffmpeg's concat demuxer starts each such segment 1.000 s after the one before, a
-# millisecond early (cli._directory_refused): N frames a second, which N/1's timeline holds
-# within half a frame, 24/1's those fifty within 1.3 ms; taken at N/1, as --frame-rate N/1
-# takes them, the film is 0.1% short, off its other streams. A directory given as the source
-# is refused with the joins that keep the grid, each with its command (cli._directory_refused).
-# "otherwise" is ours, leading to the fixes of a file that is no such join.
+# What a refusal adds where the twin rule names a whole rate N for a file declared N x 1000/1001
+# (rate.twin), before the fixes at N: DESIGN.md, Input, "The twin and a join" (decided on
+# 2026-10-12, worded on 2026-10-28), "only where the twin rule names the whole rate N for a file
+# declared N x 1000/1001, never the exact rule, the one way a join was seen to read". N frames at
+# N x 1000/1001 fps last 1.001 s, and ffmpeg's concat demuxer starts each such segment 1.000 s
+# after the one before, a millisecond early (cli._directory_refused): N frames a second, which
+# N/1's timeline holds, 24/1's fifty segments within 1.3 ms. Segments at a whole rate last whole
+# milliseconds and join whole: a file declared 24/1 that runs at 24000/1001, a Blu-ray remux, is
+# no join. "otherwise" is ours, leading to the fixes of a file that is no such join.
 TWIN_JOIN = (
     "a join of one-second segments by ffmpeg's concat demuxer reads so too, and such a file is"
     " joined again on the frame grid (a directory given to seedvr2x says how); otherwise, "
 )
 
 
-def _twin_join(found: Fraction, declares: Fraction) -> str:
-    """TWIN_JOIN, what a refusal says before the fixes at the rate it names, `found`, when that
-    rate is an NTSC twin of the rate the file declares, `declares` (rate.twins); else ""."""
-    return TWIN_JOIN if found in rate.twins(declares) else ""
+def _twin_join(found: Fraction, declares: Fraction, twinned: bool) -> str:
+    """TWIN_JOIN, what a refusal says before the fixes at the rate it names, `found`, when the
+    twin rule named it (`twinned`), it is a whole number and the file declares it x 1000/1001
+    (`declares`); else ""."""
+    return TWIN_JOIN if twinned and found.denominator == 1 and declares == found * rate.NTSC else ""
 
 
 def _declares(stream: VideoStream) -> str:
@@ -1090,14 +1117,14 @@ def _within(found: Timeline | Places, whose: str = "that rate's") -> str:
     )
 
 
-def _fixes(found: Fraction, index: FrameIndex, declares: Fraction) -> str:
+def _fixes(found: Fraction, index: FrameIndex, declares: Fraction, twinned: bool = False) -> str:
     """The two fixes of a file a refusal names the rate `found` for, its timestamps' exactly or
     the NTSC twin of the one it declares, `declares` (_guided, _way_out; DESIGN.md, Input): a
-    remake at that rate (rate.remake), or --frame-rate; before them, where `found` is that
-    twin, by either rule, what else reads so (_twin_join)."""
+    remake at that rate (rate.remake), or --frame-rate; before them, where the twin rule named
+    `found` (`twinned`), what else reads so (_twin_join)."""
     command = rate.remake(found, rate.first_time(index))
     return (
-        f"{_twin_join(found, declares)}"
+        f"{_twin_join(found, declares, twinned)}"
         "remake it at that rate, an FFV1 master with its other streams copied, a clean file for"
         f" every tool ({REMAKE_COST}), with {command}; or give --frame-rate {rate.fraction(found)},"
         " which takes its frames at that rate, each checked to lie within half a frame of its"
@@ -1111,12 +1138,16 @@ def _ms(microseconds: Fraction | int) -> str:
     return f"{float(microseconds) / 1000:.1f}".removesuffix(".0")
 
 
-def declared_refusal(stream: VideoStream, matrix: str | None = None) -> str:
+def declared_refusal(
+    stream: VideoStream, matrix: str | None = None, frame_rate: Fraction | None = None
+) -> str:
     """Why a stream is refused for what it declares and its first frame carries, every such reason
     in one, numbered when there are several, or "": interlacing; HDR, Dolby Vision unless over an
     SDR base layer; colour tags its first frame contradicts in meaning (SYNONYMS), the matrix's but
     when `matrix` (--input-matrix) settles it, the chroma location's never (SITING); a rotation or
-    flip; a declared crop (DESIGN.md, Input, Not in the first version)."""
+    flip; a declared crop; a frame rate above MOST_FPS, the stream's own (declared, or Matroska's
+    reading of it: VideoStream.frame_rate), unless `frame_rate` (--frame-rate) replaces it, whose
+    refusal is the command line's (declare) (DESIGN.md, Input, Not in the first version)."""
     # Every declared reason at once, so that dealing with one doesn't end on another of them
     # (conversion_for's refusals, parse's and the first pass's come apart): interlacing first,
     # refused in every version; then what the pixels are, and the tags saying how to read them;
@@ -1139,6 +1170,11 @@ def declared_refusal(stream: VideoStream, matrix: str | None = None) -> str:
     if stream.cropped:
         # ffmpeg applies the crop on decode, while ffprobe declares the uncropped size.
         reasons.append("cropped by its container: not supported")
+    if frame_rate is None and stream.frame_rate > MOST_FPS:
+        reasons.append(
+            f"frame rate above {MOST_FPS:,} fps, the rate it {_declares(stream)},"
+            f" {rate.fraction(stream.frame_rate)}: not supported: {FINER_THAN_MATROSKA}"
+        )
     if len(reasons) < 2:
         return "".join(reasons)
     # Numbered, since a reason can hold "; " itself (TONE_MAP's).

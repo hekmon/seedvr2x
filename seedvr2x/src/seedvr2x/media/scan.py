@@ -959,13 +959,24 @@ def _lines_into(stream: IO[str], lines: list[str]) -> None:
     lines.extend(line.strip() for line in stream if line.strip())
 
 
-def timing_error(scanned: Scan, frame_rate: Fraction, avg_frame_rate: Fraction | None) -> str:
+def timing_error(
+    scanned: Scan,
+    frame_rate: Fraction,
+    avg_frame_rate: Fraction | None,
+    read_at: bool = False,
+) -> str:
     """Why the frames' timing is refused, or "" when they have the constant rate declared.
 
     With frame times measured (sptenc's rule), the shortest and longest must be within
     TOLERANCE_US, and the declared rate within them, since the output is written at that rate.
     Without (a single frame, no timestamps), the declared rates are compared, as sptenc does. A
-    jump in the timestamps (Discontinuity) is refused first, as what it is."""
+    jump in the timestamps (Discontinuity) is refused first, as what it is. `read_at`: the stream
+    is read at another rate than ffprobe gives (VideoStream.ffprobe_rate), which the file doesn't
+    declare: the two sentences about the rate say "the rate it is read at", as the rate rule's
+    messages do (DESIGN.md, Input: "A stream read at another rate than ffprobe gives is said to
+    declare ffprobe's rate once; the rate rule's messages then say the rate it is read at (the
+    plain refusal's own two sentences still say declared: to bring in line)"). Every other
+    stream's message is unchanged."""
     if scanned.frames == 0:
         return "no frame decoded"
     jump = scanned.discontinuity
@@ -991,14 +1002,16 @@ def timing_error(scanned: Scan, frame_rate: Fraction, avg_frame_rate: Fraction |
             )
         period = Fraction(1_000_000) / frame_rate
         if not scanned.shortest - TOLERANCE_US <= period <= scanned.longest + TOLERANCE_US:
+            which = "it is read at" if read_at else "declared"
             return (
-                f"the frame rate declared, {frame_rate} fps, is not the frames' own: they last"
+                f"the frame rate {which}, {frame_rate} fps, is not the frames' own: they last"
                 f" {shortest:g} to {longest:g} ms"
             )
         return ""
     if avg_frame_rate is None or abs(frame_rate - avg_frame_rate) > Fraction(1, 1000):
+        which = "the rate it is read at and the average one" if read_at else "the declared ones"
         return (
-            f"the frame rate can't be checked (no frame times) and the declared ones differ:"
+            f"the frame rate can't be checked (no frame times) and {which} differ:"
             f" {frame_rate} and {avg_frame_rate or 'none'} fps"
         )
     return ""
