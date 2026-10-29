@@ -15,6 +15,7 @@ A unit is kept in a file, written from a copy in system memory, never from the G
 tensor, with its values and its memory layout (shot.moved): what the GPU holds mustn't grow with
 the shot (DESIGN.md, Memory planner, Per-phase peaks)."""
 
+import hashlib
 import shutil
 from pathlib import Path
 
@@ -129,7 +130,8 @@ class Units:
 
     def segment_finished(self, segment: int) -> None:
         """Record segment `segment` as finished, then remove what its shots kept."""
-        self.manifest.segment_finished(segment, size(self.directory / self.manifest.files[segment]))
+        path = self.directory / self.manifest.files[segment]
+        self.manifest.segment_finished(segment, size(path), digest(path))
         for shot in self.manifest.segment_shots(segment):
             start = self.manifest.shots[shot].start
             shutil.rmtree(self.root / f"shot_{start:06d}", ignore_errors=True)
@@ -159,3 +161,31 @@ def _load(path: Path) -> Tensor:
     if not isinstance(tensor, Tensor):
         raise RuntimeError(f"{path}: not a tensor")
     return tensor
+
+
+# What a segment's hash is read in: the masters are 100 to 135 GiB an hour of 1080p, so one
+# read of them is the cost (DESIGN.md, Output, Assembly, decided on 2026-10-12).
+CHUNK = 4 * 1024**2
+
+
+def digest(path: Path) -> str:
+    """The SHA-256, in hex, of a segment's bytes (DESIGN.md, Output, Assembly, decided on
+    2026-10-12: "Each segment's bytes are hashed when it is finished and checked at the
+    assembly"): a file's content; a PNG segment's directory, over its files in name order, each
+    as its name in UTF-8, a zero byte, its size in 8 bytes (big endian) and its content.
+
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md doesn't say how a directory is hashed): the
+    names and sizes frame the files, so that moving bytes between two neighbours changes the hash,
+    which a plain concatenation would not."""
+    hasher = hashlib.sha256()
+    framed = path.is_dir()
+    files = sorted(path.iterdir(), key=lambda entry: entry.name) if framed else [path]
+    buffer = bytearray(CHUNK)
+    view = memoryview(buffer)
+    for file in files:
+        if framed:
+            hasher.update(file.name.encode() + b"\0" + file.stat().st_size.to_bytes(8, "big"))
+        with file.open("rb", buffering=0) as handle:
+            while count := handle.readinto(buffer):
+                hasher.update(view[:count])
+    return hasher.hexdigest()

@@ -5,6 +5,7 @@ Validation milestones, 6). The join itself is tests/test_assembly.py's; here, wh
 line does with it: when it assembles, what a stop or a failure keeps, what it refuses, and the
 finished file held to milestone 6's acceptance against the source."""
 
+import hashlib
 import json
 import logging
 import os
@@ -427,6 +428,71 @@ def test_stopped_then_resumed_assembles_the_same_file(
     assert final.stat().st_size == (tmp_path / "whole.mkv").stat().st_size
     assert (tmp_path / "x.mkv.crc32").read_bytes() == (tmp_path / "whole.mkv.crc32").read_bytes()
     held_to_the_source(final, source, tmp_path)
+
+
+def flip_middle_byte(path: Path) -> None:
+    """One byte of the file's middle changed, its size the same."""
+    data = bytearray(path.read_bytes())
+    data[len(data) // 2] ^= 0xFF
+    path.write_bytes(bytes(data))
+
+
+@needs_ffmpeg
+def test_a_damaged_segment_is_made_again_then_the_file_assembled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Output, Assembly (decided on 2026-10-12): each segment's bytes are hashed when
+    # it is finished and checked at the assembly. Every segment finished and the assembly refused
+    # (no room), one byte of the second segment's middle flipped, its size the same: the same
+    # command finds it damaged, assembles nothing (exit 1), names it and its frames, records it
+    # unfinished with its file and checksums gone, the others untouched; the next run makes it
+    # again from its shots (encode, windows and decode of the shots it holds), then assembles a
+    # file with the frames of the uninterrupted run's.
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "whole.mkv", *FILM) == 0
+    steps.calls.clear()
+    final, work = tmp_path / "x.mkv", tmp_path / "x.mkv.work"
+    with monkeypatch.context() as full:
+        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, source, "x.mkv", *FILM) == 1
+    recorded = json.loads((work / NAME).read_text())["segments"]
+    segment = work / "seg_000001.mkv"
+    assert all(re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) for entry in recorded)
+    assert len({entry["sha256"] for entry in recorded}) == 4
+    assert recorded[1]["sha256"] == hashlib.sha256(segment.read_bytes()).hexdigest()
+    size = segment.stat().st_size
+    flip_middle_byte(segment)
+    assert segment.stat().st_size == size
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 1
+    assert steps.calls == [] and not final.exists()
+    assert f"{segment}: damaged, its bytes are not those recorded when it was finished" in (
+        caplog.text
+    )
+    assert "(frames 30 to 49 of the job); nothing assembled" in caplog.text
+    assert "1 segment damaged, none assembled" in caplog.text
+    assert "the same command makes it again, its shots encoded, sampled and decoded again" in (
+        caplog.text
+    )
+    assert [r.levelname for r in caplog.records if "segment damaged" in r.getMessage()] == ["ERROR"]
+    after = json.loads((work / NAME).read_text())["segments"]
+    assert [entry["finished"] for entry in after] == [True, False, True, True]
+    assert [(entry["bytes"], entry["sha256"]) for entry in after][1] == (None, None)
+    assert [entry for index, entry in enumerate(after) if index != 1] == [
+        entry for index, entry in enumerate(recorded) if index != 1
+    ]
+    assert not segment.exists() and not (work / "checksums" / "seg_000001.crc32").exists()
+    assert "resume" not in listing(work)
+    # The next run: the segment's shots again, nothing else, then the join.
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert "segment damaged" not in caplog.text and not work.exists()
+    assert steps.calls == ["encode 30", "window 30:0", "decode 30"]
+    same_file(final, tmp_path / "whole.mkv")
+    assert (tmp_path / "x.mkv.crc32").read_bytes() == (tmp_path / "whole.mkv.crc32").read_bytes()
+    held_to_the_source(final, source, tmp_path)
+    assert cli.main(["verify", str(final)]) == 0
 
 
 @needs_ffmpeg

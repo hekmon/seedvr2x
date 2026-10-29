@@ -4,10 +4,13 @@ the manifest records, tried before any work, its segments without checksums, wha
 command or a stop keeps and how the same command resumes, and `seedvr2x verify` on such an output.
 The writer itself, and the stream the command reads, are tests/test_segment_cmd.py's."""
 
+import hashlib
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_assembled import (
@@ -128,6 +131,10 @@ def test_directory_of_command_segments(
     assert content["settings"]["segment_cmd"] == command
     assert [(s["finished"], s["bytes"]) for s in content["segments"]] == [
         (True, (out / name).stat().st_size) for name in SEGMENTS
+    ]
+    # The hash of each file the command wrote, recorded beside its bytes.
+    assert [s["sha256"] for s in content["segments"]] == [
+        hashlib.sha256((out / name).read_bytes()).hexdigest() for name in SEGMENTS
     ]
     assert "--segment-cmd: tried on 5 black frames, 128x96 yuv420p10le at 25 fps" in caplog.text
     # verify counts each segment's frames, and says that it checked nothing else.
@@ -415,6 +422,40 @@ def test_assembled_from_command_segments(
     assert len(warned) == 1 and "untagged, guessed: matrix smpte170m" in warned[0]
     content = json.loads((tmp_path / "back" / "manifest.json").read_text())
     assert (content["input"]["frames"], content["input"]["frame_rate"]) == (96, "24000/1001")
+
+
+@needs_ffmpeg
+def test_a_damaged_command_segment_is_made_again_then_assembled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A segment the command wrote, damaged between the last segment and the assembly (one byte
+    # flipped, same size): the assembly refused as an FFV1 job's is (test_assembled.py), the
+    # command run again for that segment alone by the next run, which assembles.
+    source = film_job(tmp_path, monkeypatch)
+    options = (*FILM, "--segment-cmd", MPEG4)
+    work = tmp_path / "x.mkv.work"
+    with monkeypatch.context() as full:
+        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, source, "x.mkv", *options) == 1
+    recorded = json.loads((work / "manifest.json").read_text())["segments"]
+    segment = work / "seg_000002.mkv"
+    assert recorded[2]["sha256"] == hashlib.sha256(segment.read_bytes()).hexdigest()
+    kept = segment.read_bytes()
+    damaged = bytearray(kept)
+    damaged[len(damaged) // 2] ^= 0xFF
+    segment.write_bytes(bytes(damaged))
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *options) == 1
+    assert "(frames 50 to 76 of the job); nothing assembled" in caplog.text
+    assert not segment.exists() and not (tmp_path / "x.mkv").exists()
+    content = json.loads((work / "manifest.json").read_text())["segments"]
+    assert [s["finished"] for s in content] == [True, True, False, True]
+    assert steps.calls == []
+    assert upscale(tmp_path, source, "x.mkv", *options) == 0
+    assert steps.calls == ["encode 50", "window 50:0", "decode 50"]
+    assert not work.exists() and count_frames(tmp_path / "x.mkv") == 96
+    held_to_the_source(tmp_path / "x.mkv", source, tmp_path)
 
 
 # What a command's file holds, said by the command itself: its frames counted by ffprobe, a line

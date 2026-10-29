@@ -168,6 +168,10 @@ class Manifest:
     windows_done: list[int] = field(default_factory=list[int])  # each run's windows kept
     finished: list[bool] = field(default_factory=list[bool])  # each segment whole
     sizes: list[int | None] = field(default_factory=list[int | None])  # finished ones' bytes
+    # Finished ones' SHA-256 (units.digest), read back at the assembly (cli._intact): None for a
+    # segment not finished, or recorded by code before the field, which a code change refuses
+    # to resume (settings.code) anyway.
+    hashes: list[str | None] = field(default_factory=list[str | None])
     assembled: dict[str, Any] | None = None  # the finished file, once in place (ASSEMBLED)
     # Called once, before the manifest's next write, then dropped: it writes the frame index that
     # write names, made again by a resume in another environment (cli._taken_up).
@@ -198,6 +202,8 @@ class Manifest:
             self.finished = [False] * len(self.segments)
         if not self.sizes:
             self.sizes = [None] * len(self.segments)
+        if not self.hashes:
+            self.hashes = [None] * len(self.segments)
         self._input = _input(self.source)
 
     @property
@@ -229,11 +235,27 @@ class Manifest:
         self.windows_done[index] = window + 1
         self.write()
 
-    def segment_finished(self, index: int, size: int) -> None:
-        """Record segment `index` as finished, whole and checked, `size` bytes, and write the
-        manifest."""
+    def segment_finished(self, index: int, size: int, sha256: str) -> None:
+        """Record segment `index` as finished, whole and checked, `size` bytes of SHA-256
+        `sha256`, and write the manifest."""
         self.finished[index] = True
         self.sizes[index] = size
+        self.hashes[index] = sha256
+        self.write()
+
+    def segment_damaged(self, index: int) -> None:
+        """Record segment `index`, finished, as not finished again, its bytes no longer its
+        record's (cli._intact; DESIGN.md, Output, Assembly, decided on 2026-10-12: "a damaged one
+        made again"), and write the manifest. Its shots' units went when it was finished, so
+        its runs are recorded as not begun: the next run encodes, samples and decodes them
+        again."""
+        self.finished[index] = False
+        self.sizes[index] = None
+        self.hashes[index] = None
+        for shot in self.segment_shots(index):
+            for run in self.shot_runs(shot):
+                self.encoded[run] = False
+                self.windows_done[run] = 0
         self.write()
 
     def job_assembled(self, name: str, size: int) -> None:
@@ -286,9 +308,15 @@ class Manifest:
                     "end": segment.end,
                     "finished": done,
                     "bytes": size,
+                    "sha256": digest,
                 }
-                for segment, name, done, size in zip(
-                    self.segments, self.files, self.finished, self.sizes, strict=True
+                for segment, name, done, size, digest in zip(
+                    self.segments,
+                    self.files,
+                    self.finished,
+                    self.sizes,
+                    self.hashes,
+                    strict=True,
                 )
             ],
             **({} if self.assembled is None else {ASSEMBLED: self.assembled}),

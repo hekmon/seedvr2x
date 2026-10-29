@@ -318,7 +318,7 @@ def test_planned_looks_at_every_run(tmp_path: Path) -> None:
     # complete() looks at the segments alone.
     record.shot_encoded(8)
     assert not manifest.complete(record.content())
-    record.segment_finished(0, 10)
+    record.segment_finished(0, 10, "b" * 64)
     assert manifest.complete(record.content())
 
 

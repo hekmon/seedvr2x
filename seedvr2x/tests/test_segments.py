@@ -184,7 +184,7 @@ def test_manifest(tmp_path: Path) -> None:
     record = written_manifest(tmp_path)
     record.shot_encoded(0)
     record.window_done(0, 0)
-    record.segment_finished(0, 1234)
+    record.segment_finished(0, 1234, "a" * 64)
     content = json.loads((tmp_path / "manifest.json").read_text())
     assert content["seedvr2x_manifest"] == 3
     assert re.fullmatch(r"[0-9a-f]{64}", code_sha256()) and code_sha256() == code_sha256()

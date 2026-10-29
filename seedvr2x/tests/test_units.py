@@ -3,6 +3,7 @@ memory layout, the noise drawn again from a latent read back, windows resumed wh
 the manifest recording each unit once its file is whole, and what a finished segment kept
 removed; each written from a copy on the CPU; and that copy, its layout kept or refused."""
 
+import hashlib
 import json
 import os
 import pickle
@@ -221,6 +222,73 @@ def test_finished_segment_removes_its_shots_only(tmp_path: Path) -> None:
     assert record.finished == [True, False] and record.sizes == [9, None]
     units.segment_finished(1)
     assert not (tmp_path / STATE).exists()
+
+
+def test_a_segment_is_hashed_when_finished_and_set_back_when_damaged(tmp_path: Path) -> None:
+    # DESIGN.md, Output, Assembly (decided on 2026-10-12): the segment's bytes hashed as it is
+    # finished (a file's SHA-256, a directory's over its files' names, sizes and bytes in name
+    # order); damaged, it is recorded as unfinished with its shots' runs not begun, the other
+    # segment untouched.
+    shots = [Shot(0, 5), Shot(5, 9), Shot(9, 13)]
+    record = job(tmp_path, shots, [OutputSegment("a", 0, 9), OutputSegment("b", 9, 13)])
+    units = Units(tmp_path, record)
+    for index in range(3):
+        units.save_latent(index, channel_major(2))
+        units.save_window(index, 0, channel_major(2))
+    units.segment_finished(0)
+    units.segment_finished(1)
+    assert record.hashes == [hashlib.sha256(b"x" * n).hexdigest() for n in (9, 4)]
+    record.segment_damaged(0)
+    assert (record.finished, record.sizes, record.hashes[0]) == ([False, True], [None, 4], None)
+    assert record.hashes[1] is not None
+    assert (record.encoded, record.windows_done) == ([False, False, True], [0, 0, 1])
+    content = json.loads((tmp_path / "manifest.json").read_text())
+    assert [(s["finished"], s["bytes"], s["sha256"]) for s in content["segments"]] == [
+        (False, None, None),
+        (True, 4, record.hashes[1]),
+    ]
+
+
+def test_a_record_without_hashes_is_taken_up_and_compared_nowhere(tmp_path: Path) -> None:
+    # A finished segment's hash is part of its record, compared at no resume (resume.UNCOMPARED):
+    # a record with none (older code's, which a code change refuses anyway) is read, not crashed
+    # on, and a record with and one without differ in nothing.
+    from seedvr2x.runtime import resume
+
+    record = job(tmp_path, [Shot(0, 9)], [OutputSegment("a", 0, 9)])
+    Units(tmp_path, record).save_latent(0, channel_major(3))
+    Units(tmp_path, record).save_window(0, 0, channel_major(3))
+    Units(tmp_path, record).segment_finished(0)
+    with_hash = record.content()
+    without = json.loads(json.dumps(with_hash))
+    del without["segments"][0]["sha256"]
+    assert resume.differences(without, with_hash) == []
+    again = job(tmp_path, [Shot(0, 9)], [OutputSegment("a", 0, 9)])
+    resume.adopt(again, without)
+    assert (again.finished, again.hashes) == ([True], [None])
+
+
+def test_a_directorys_hash_frames_its_files(tmp_path: Path) -> None:
+    # Bytes moved from one file to its neighbour change the hash, as do a file renamed and a
+    # byte flipped; a file's is its content's SHA-256.
+    one, other = tmp_path / "one", tmp_path / "other"
+    one.mkdir()
+    other.mkdir()
+    (one / "a").write_bytes(b"ab")
+    (one / "b").write_bytes(b"c")
+    (other / "a").write_bytes(b"a")
+    (other / "b").write_bytes(b"bc")
+    assert units.digest(one) != units.digest(other)
+    first = units.digest(one)
+    (one / "b").rename(one / "c")
+    assert units.digest(one) != first
+    (one / "c").rename(one / "b")
+    assert units.digest(one) == first
+    (one / "b").write_bytes(b"d")
+    assert units.digest(one) != first
+    big = tmp_path / "big"
+    big.write_bytes(b"0123456789" * (units.CHUNK // 5))  # several chunks, the last partial
+    assert units.digest(big) == hashlib.sha256(big.read_bytes()).hexdigest()
 
 
 def test_units_are_written_from_cpu_copies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2061,7 +2061,11 @@ def _assemble(
     - the work directory's removal (_clear), its manifest last (resume.clear).
     A run stopped after the file, its checksums or the record assembles again; one stopped after
     the record, or during the removal, leaves the rest to the next (_assembled, _finished_file),
-    which starts nothing."""
+    which starts nothing.
+
+    First, before the join reads them, every segment's bytes are hashed again and held to the
+    SHA-256 recorded when it was finished (_damaged; DESIGN.md, Output, Assembly, decided on
+    2026-10-12): a damaged one stops the run, nothing assembled, exit status 1 (_remake)."""
     from seedvr2x.media import assembly
     from seedvr2x.media.checksums import read_checksums, write_checksums
     from seedvr2x.media.ffmpeg import MediaError
@@ -2091,6 +2095,10 @@ def _assemble(
             stop.check(cost, f"the assembly of {final}")
             stop.unit = f"the assembly of {final}"
             started = time.monotonic()
+            damaged = _damaged(record, paths)
+            if damaged:
+                _remake(record, paths, damaged, final)
+                return 1
             checksums = [
                 checksum
                 for path in (paths if summed else ())
@@ -2147,6 +2155,79 @@ def _assemble(
             return 1
         _clear(directory, record.content())
     return 0
+
+
+def _damaged(record: "Manifest", paths: Sequence[Path]) -> list[int]:
+    """The segments of a job, every one finished, whose bytes are no longer those recorded when
+    it was finished (DESIGN.md, Output, Assembly, decided on 2026-10-12: "Each segment's bytes
+    are hashed when it is finished and checked at the assembly"): their SHA-256 read again, one
+    read of the masters. A segment missing is damaged too. One with no hash recorded, which a
+    code change refusing the resume should make impossible (settings.code), is said and not
+    checked."""
+    from seedvr2x.media.ffmpeg import MediaError
+    from seedvr2x.runtime.units import digest
+
+    found: list[int] = []
+    for index, path in enumerate(paths):
+        recorded = record.hashes[index]
+        if recorded is None:
+            logger.warning("%s: no SHA-256 recorded for this segment: not checked", path)
+            continue
+        try:
+            now = digest(path)
+        except FileNotFoundError:
+            found.append(index)
+            continue
+        except OSError as error:
+            raise MediaError(f"{path}: not read to check its bytes: {error}") from None
+        logger.debug("%s: SHA-256 %s", path, "as recorded" if now == recorded else "differs")
+        if now != recorded:
+            found.append(index)
+    return found
+
+
+def _remake(record: "Manifest", paths: Sequence[Path], damaged: list[int], final: Path) -> None:
+    """Set the damaged segments (_damaged) back to unfinished: nothing is assembled. Each is
+    recorded as not finished, its shots' runs as not begun (their units went with it:
+    Manifest.segment_damaged), then its file and checksums removed, as a resume removes an
+    unfinished segment's (resume.leftovers); the other segments are kept. The error names each
+    one, its frames, and says the same command makes it again, then assembles.
+
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "a damaged one made again", not by which
+    run): the run that finds it stops, and the next run of the same command makes it: the run
+    that assembles may have loaded no model."""
+    directory = record.path.parent
+    summed = record.settings.get("segment_cmd") is None
+    for index in damaged:
+        record.segment_damaged(index)
+    for index in damaged:
+        path = paths[index]
+        segment = record.segments[index]
+        sums = _checksums_path(directory, path, str(record.output["format"]))
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+            if summed:
+                sums.unlink(missing_ok=True)
+        except OSError as error:
+            # Recorded unfinished already: the resume discards what is left (resume.leftovers).
+            logger.warning("%s: not removed: %s; the same command removes it", path, error)
+        logger.error(
+            "%s: damaged, its bytes are not those recorded when it was finished (frames %d to %d"
+            " of the job); nothing assembled. It is recorded as unfinished and removed",
+            path,
+            segment.start,
+            segment.end - 1,
+        )
+    logger.error(
+        "%s damaged, none assembled into %s: the same command makes %s again, its shots encoded,"
+        " sampled and decoded again, then assembles; the other segments are kept",
+        _plural(len(damaged), "segment"),
+        final,
+        "it" if len(damaged) == 1 else "them",
+    )
 
 
 def _assembled(

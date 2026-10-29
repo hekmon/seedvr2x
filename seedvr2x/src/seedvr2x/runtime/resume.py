@@ -45,7 +45,7 @@ from seedvr2x.runtime.units import CHECKSUMS, COPY, KEPT, run_file, size
 # memory), and its timings, which the time estimates will record.
 UNCOMPARED = {
     "shots": ("encoded", "windows_done"),
-    "segments": ("finished", "bytes"),
+    "segments": ("finished", "bytes", "sha256"),
     "input": ("path", "modified_ns", "index", "idet"),
     "environment": ("driver",),
     "plan": ("memory", "timings"),
@@ -135,6 +135,8 @@ def adopt(manifest: Manifest, recorded: dict[str, Any]) -> None:
     manifest.windows_done = [run["windows_done"] for run in runs]
     manifest.finished = [segment["finished"] for segment in recorded["segments"]]
     manifest.sizes = [segment["bytes"] for segment in recorded["segments"]]
+    # Absent from a record written before the field: a code change, refused as another job.
+    manifest.hashes = [segment.get("sha256") for segment in recorded["segments"]]
     manifest.environment_changes = list(recorded.get(CHANGES, []))
 
 

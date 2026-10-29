@@ -419,6 +419,17 @@ def test_png_segments(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         *("--cuts", str(tmp_path / "cuts.txt"), "--min-segment", "0", "--format", "png"),
     )
     assert status == 0
+    # Each segment's hash, recorded when it was finished (DESIGN.md, Output, Assembly, decided
+    # on 2026-10-12): a directory's, over its files in name order, each as name, a zero byte, size
+    # in 8 bytes (big endian) and bytes (units.digest).
+    recorded = json.loads((tmp_path / "png" / "manifest.json").read_text())["segments"]
+    for entry in recorded:
+        expected = hashlib.sha256()
+        for file in sorted((tmp_path / "png" / entry["name"]).iterdir()):
+            expected.update(file.name.encode() + b"\0" + file.stat().st_size.to_bytes(8, "big"))
+            expected.update(file.read_bytes())
+        assert entry["sha256"] == expected.hexdigest()
+    assert len({entry["sha256"] for entry in recorded}) == 2
     for name, frames in (("seg_000000", range(4)), ("seg_000001", range(4, 9))):
         pngs = sorted((tmp_path / "png" / name).iterdir())
         assert [p.name for p in pngs] == [f"{i:06d}.png" for i in range(len(frames))]
