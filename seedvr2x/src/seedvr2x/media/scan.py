@@ -22,7 +22,7 @@ from typing import IO, Any, Protocol, cast
 import numpy as np
 import numpy.typing as npt
 
-from seedvr2x.media.ffmpeg import NO_METADATA, MediaError, input_args
+from seedvr2x.media.ffmpeg import NO_METADATA, MediaError, argument, input_args
 from seedvr2x.media.index import NOPTS, FrameIndex
 
 logger = logging.getLogger(__name__)
@@ -914,7 +914,7 @@ def packets(path: Path) -> _Packets:
     command = [
         *("ffprobe", "-v", "error", "-select_streams", "v:0"),
         *("-show_entries", "packet=pts,flags:format=start_time,format_name"),
-        *("-of", "compact", str(path)),
+        *("-of", "compact", argument(path)),
     ]
     with subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace"

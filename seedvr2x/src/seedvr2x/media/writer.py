@@ -37,7 +37,7 @@ from typing import IO, Self
 import numpy as np
 import numpy.typing as npt
 
-from seedvr2x.media.ffmpeg import MediaError, zscale
+from seedvr2x.media.ffmpeg import MediaError, argument, zscale
 from seedvr2x.media.files import command_partial, partial_path, replace_whole
 from seedvr2x.media.probe import VideoStream
 
@@ -59,10 +59,20 @@ OUT = "{out}"
 # reads 1,000 bytes, and with one that reads nothing, 2026-10-10). ffmpeg ignores SIGPIPE, so no
 # signal ends it there.
 BROKEN_PIPE = -errno.EPIPE & 0xFF
-# The seconds a segment command is left to end on SIGTERM before SIGKILL (CommandWriter).
-# PROVISIONAL (implementation, 2026-10-10: DESIGN.md has no figure; nothing it writes is kept, so
-# the wait only serves a command that must pass the signal on or remove its own scratch).
-STOP_GRACE = 2.0
+# The seconds a segment command is left to end on SIGTERM before SIGKILL (CommandWriter._stop):
+# DESIGN.md, Output, Writer, decided on 2026-10-28 (the user): 5, where 2 as built was short for a
+# command flushing to a slow disk, and 5 stays within the 10 s a container's stop gives the whole
+# process.
+STOP_GRACE = 5.0
+# How long after SIGTERM a command still running is said to be, on stderr, to be left STOP_GRACE
+# seconds: a command that obeys SIGTERM at once prints nothing. PROVISIONAL (impl-v010,
+# 2026-10-28: DESIGN.md says "a line saying so meanwhile" and no delay).
+STOP_NOTICE_AFTER = 0.2
+# The seconds CommandWriter._broken waits for ffmpeg, or the command, to end by itself after a
+# broken pipe, so that the status reported is its own. Not a stop. PROVISIONAL (implementation,
+# 2026-10-10; impl-v010, 2026-10-28: DESIGN.md has no figure and the stop's moved to 5 s, this
+# stays 2 s).
+BROKEN_GRACE = 2.0
 # What is kept of a segment command's output for the message of its failure: its last lines,
 # each cut to as many bytes.
 TAIL_LINES = 20
@@ -359,13 +369,13 @@ class FFV1Writer(Writer):
             hashed = [
                 *("-map", "[hashed]", "-fps_mode", "passthrough", *options),
                 *("-c:v", "rawvideo", "-pix_fmt", pix_fmt),
-                *("-f", "framehash", "-hash", "crc32", str(self._hashes)),
+                *("-f", "framehash", "-hash", "crc32", argument(self._hashes)),
             ]
         command = [
             *_planes_input(width, height, frame_rate),
             *graph,
             *_ffv1_matroska(pix_fmt, slices, options),
-            str(self._partial),
+            argument(self._partial),
             *hashed,
         ]
         try:
@@ -395,9 +405,10 @@ class FFV1Writer(Writer):
                 raise MediaError(
                     f"{self.path}: {len(self.checksums)} frames hashed, {self.written} written"
                 )
-        if self._stale is not None:
-            self._stale.unlink(missing_ok=True)
-        replace_whole(self._partial, self.path)
+        # The old file's checksums go once the new file's data is on the disk
+        # (files.replace_whole), not before: a stop during the sync leaves the old file with its
+        # own (DESIGN.md, Output, Assembly, decided on 2026-10-12).
+        replace_whole(self._partial, self.path, stale=self._stale)
 
     def _discard(self) -> None:
         self._partial.unlink(missing_ok=True)
@@ -496,7 +507,7 @@ class PNGWriter(Writer):
             *("-framerate", str(frame_rate), "-i", "-", "-map", "0:v:0"),
             *("-fps_mode", "passthrough", "-vf", chain, *options),
             *("-c:v", "png", "-pix_fmt", "rgb48be", "-f", "image2"),
-            *("-start_number", str(start), str(self._partial / "%06d.png")),
+            *("-start_number", str(start), argument(self._partial / "%06d.png")),
         ]
         super().__init__(command, directory, width, height)
 
@@ -515,9 +526,8 @@ class PNGWriter(Writer):
         if missing:
             self._discard()
             raise MediaError(f"{self.directory}: {len(missing)} PNG missing, from {missing[0]}")
-        if self._stale is not None:  # as FFV1Writer's
-            self._stale.unlink(missing_ok=True)
-        replace_whole(self._partial, self.directory)
+        # As FFV1Writer's: the old checksums go once the frames are on the disk.
+        replace_whole(self._partial, self.directory, stale=self._stale)
 
     def _discard(self) -> None:
         shutil.rmtree(self._partial, ignore_errors=True)
@@ -777,29 +787,38 @@ class CommandWriter(Writer):
             os.waitid(os.P_PID, self._shell.pid, os.WEXITED | os.WNOWAIT)
         return status
 
-    def _over(self, seconds: float) -> None:
+    def _over(self, seconds: float) -> bool:
         """Wait `seconds` at most for the command to be over: its shell ended, and its output
-        closed by every process that held it, those the shell started among them."""
+        closed by every process that held it, those the shell started among them. Whether it is."""
         deadline = time.monotonic() + seconds
         while self._status() is None or self._output.is_alive():
             if time.monotonic() >= deadline:
-                break
+                return False
             time.sleep(0.01)
+        return True
 
     def _stop(self) -> None:
         """Stop the shell and whatever it started that stayed in its group: SIGTERM, then SIGKILL
-        once they are over, or after STOP_GRACE seconds.
+        once they are over, or after STOP_GRACE seconds; a line on stderr, when they are still
+        running STOP_NOTICE_AFTER seconds after SIGTERM, says so. A Ctrl-C meanwhile, which raises
+        KeyboardInterrupt here (runtime/stop.py: a second one is a stop at once), goes to the
+        SIGKILL below: the group is killed at once, and the shell reaped.
 
         Not SIGKILL at once, as ffmpeg gets: nothing the command writes is kept either, but the
         command is the user's, and may be a script with scratch of its own to remove or the
         client of an encoder running elsewhere (a container, another machine), which a signal it
-        can't catch would leave behind. PROVISIONAL (implementation, 2026-10-10: DESIGN.md's
-        "stops at once" names no signal)."""
+        can't catch would leave behind (DESIGN.md, Output, Writer)."""
         if self._shell.returncode is not None:
             return  # reaped, by close() or a first abort()
         try:
             self._signal(signal.SIGTERM)
-            self._over(STOP_GRACE)
+            notice = min(STOP_NOTICE_AFTER, STOP_GRACE)
+            if not self._over(notice):
+                _say(
+                    f"the segment command was sent SIGTERM: it has {STOP_GRACE:g} s to end before"
+                    " SIGKILL; Ctrl-C again kills it at once"
+                )
+                self._over(STOP_GRACE - notice)
         finally:
             self._signal(signal.SIGKILL)
             self._shell.wait()
@@ -810,15 +829,15 @@ class CommandWriter(Writer):
 
     def _broken(self) -> MediaError:
         # ffmpeg no longer reads: it failed, or the command no longer reads it. Each is left
-        # STOP_GRACE seconds to end by itself, so that the status reported is its own and not the
+        # BROKEN_GRACE seconds to end by itself, so that the status reported is its own and not the
         # signal of abort().
         try:
-            status = self._process.wait(timeout=STOP_GRACE)
+            status = self._process.wait(timeout=BROKEN_GRACE)
         except subprocess.TimeoutExpired:
             return super()._broken()
         if status != BROKEN_PIPE:
             return Writer._error(self, f"exit status {status}")
-        self._over(STOP_GRACE)
+        self._over(BROKEN_GRACE)
         ended = self._status()
         how = "stopped reading its input" if ended is None else _ending(ended)
         return self._refused(
@@ -844,10 +863,19 @@ class CommandWriter(Writer):
         return MediaError(message)
 
 
+def _say(text: str) -> None:
+    """A line on stderr, after the time of day, as runtime/stop.py's notice and every line
+    seedvr2x prints: written straight to the descriptor, since a stop can run while a signal is
+    being handled, in the middle of a write that a logging call would enter again. A stderr
+    that is gone (a pipe whose reader the same Ctrl-C ended) loses it, and the stop goes on."""
+    with contextlib.suppress(OSError):
+        os.write(2, f"\n{time.strftime('%H:%M:%S')} {text}\n".encode())
+
+
 def _word(path: Path) -> str:
-    """path as one word of a shell command, which no command reads as an option."""
-    name = str(path)
-    return shlex.quote(f"./{name}" if name.startswith("-") else name)
+    """path as one word of a shell command, which no command reads as an option, nor ffmpeg, if
+    the command runs it, as a protocol's name (ffmpeg.argument)."""
+    return shlex.quote(argument(path))
 
 
 def _ending(status: int) -> str:
@@ -963,7 +991,7 @@ def count_packets(path: Path) -> int:
     result = subprocess.run(
         [
             *("ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets"),
-            *("-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", str(path)),
+            *("-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", argument(path)),
         ],
         capture_output=True,
         text=True,
@@ -1000,7 +1028,7 @@ def count_frames(path: Path, strict: bool = False) -> int:
         [
             *("ffprobe", "-v", "error", "-threads", "0", "-select_streams", "v:0"),
             *("-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"),
-            *("-i", str(path)),  # by -i: a name the command was given as ./-x is no option here
+            *("-i", argument(path)),
         ],
         capture_output=True,
         text=True,

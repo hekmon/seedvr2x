@@ -7,9 +7,11 @@ import itertools
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import subprocess
+import threading
 import time
 import wave
 import zlib
@@ -38,6 +40,7 @@ from seedvr2x.media.writer import (
     count_frames,
     open_writer,
 )
+from seedvr2x.runtime.stop import Stop
 
 
 def _usable() -> bool:
@@ -527,17 +530,20 @@ def test_groups_of_their_own(tmp_path: Path) -> None:
     assert gone(shell)
 
 
-def test_stop_is_sigterm_first(tmp_path: Path) -> None:
+def test_stop_is_sigterm_first(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
     # A command with something of its own to undo gets the time to: SIGTERM, which it catches,
-    # and the stop waits no longer than it takes.
+    # and the stop waits no longer than it takes, saying nothing: a command that ends at once on
+    # SIGTERM prints no line.
     undone = tmp_path / "undone"
     command = f"trap 'echo yes > {undone}; exit 143' TERM; {TELL}; wait # {{out}}"
     writer, shell, _ = started(tmp_path, command)
+    capfd.readouterr()
     start = time.monotonic()
     writer.abort()
-    assert time.monotonic() - start < writer_module.STOP_GRACE
+    assert time.monotonic() - start < writer_module.STOP_NOTICE_AFTER + 1
     assert undone.read_text() == "yes\n"
     assert gone(shell)
+    assert capfd.readouterr().err == ""
 
 
 def test_stop_is_sigkill_in_the_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -549,6 +555,54 @@ def test_stop_is_sigkill_in_the_end(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert 0.3 <= time.monotonic() - start < 3
     assert gone(shell) and child not in members(shell)
     assert list(writer.path.parent.iterdir()) == []
+
+
+# What the stop says while it waits: the time of day, then the line (DESIGN.md, Output, Writer).
+NOTICE = re.compile(
+    r"\n\d\d:\d\d:\d\d the segment command was sent SIGTERM: it has 5 s to end before SIGKILL;"
+    r" Ctrl-C again kills it at once\n"
+)
+
+
+def test_stop_gives_a_command_5_s_and_says_so(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # DESIGN.md, Output, Writer, decided on 2026-10-28: SIGTERM, then SIGKILL after 5 s (2 as
+    # built), a line saying so meanwhile. A command that ignores SIGTERM, its child with it.
+    assert writer_module.STOP_GRACE == 5.0
+    writer, shell, child = started(tmp_path, f"trap '' TERM; {TELL}; cat > {{out}}; wait")
+    capfd.readouterr()
+    start = time.monotonic()
+    writer.abort()
+    elapsed = time.monotonic() - start
+    assert 4.5 <= elapsed < 8
+    assert gone(shell) and child not in members(shell)
+    assert list(writer.path.parent.iterdir()) == []
+    assert NOTICE.fullmatch(capfd.readouterr().err)
+
+
+def test_ctrl_c_again_kills_the_command_at_once(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # The run's handler (runtime/stop.py) raises KeyboardInterrupt at a Ctrl-C after the first,
+    # here during the 5 s wait: the group is killed at once, the shell reaped, nothing left.
+    writer, shell, child = started(tmp_path, f"trap '' TERM; {TELL}; cat > {{out}}; wait")
+    capfd.readouterr()
+    with Stop() as stop:
+        stop.asked = True  # the first Ctrl-C, which let the segment finish and then stopped
+        timer = threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGINT))
+        start = time.monotonic()
+        timer.start()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                writer.abort()
+        finally:
+            timer.cancel()
+    # 1 s of the timer's, then at once: well under the 5 s grace.
+    assert time.monotonic() - start < 2.5
+    assert gone(shell, 1.0) and child not in members(shell)
+    assert list(writer.path.parent.iterdir()) == []
+    assert NOTICE.fullmatch(capfd.readouterr().err)
 
 
 class _Interrupted(BaseException):

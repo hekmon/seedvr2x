@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from seedvr2x.media import rate
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.ffmpeg import MediaError, argument
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +185,10 @@ def _frames(packets: int) -> tuple[str, ...]:
 def _ffprobe(path: Path, *options: str) -> str:
     """ffprobe's JSON for the first video stream of path, with `options`."""
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", *options, "-of", "json", str(path)],
+        [
+            *("ffprobe", "-v", "error", "-select_streams", "v:0", *options),
+            *("-of", "json", argument(path)),
+        ],
         capture_output=True,
         text=True,
         check=False,

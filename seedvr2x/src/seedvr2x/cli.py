@@ -462,7 +462,7 @@ class _Checked:
 def _verify(output: Path) -> int:
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.checksums import check_frames, read_checksums
-    from seedvr2x.media.ffmpeg import MediaError, input_args
+    from seedvr2x.media.ffmpeg import MediaError, argument, input_args
     from seedvr2x.media.writer import count_frames
     from seedvr2x.runtime.job import JobError
 
@@ -505,7 +505,7 @@ def _verify(output: Path) -> int:
                 # PNG frames numbered from 0 (writer.PNGWriter), the first one required.
                 pattern = ["-start_number", "0", "-start_number_range", "1"]
                 reading = (
-                    ["-f", "image2", *pattern, "-i", str(item.path / "%06d.png")]
+                    ["-f", "image2", *pattern, "-i", argument(item.path / "%06d.png")]
                     if item.png
                     else input_args(item.path)
                 )

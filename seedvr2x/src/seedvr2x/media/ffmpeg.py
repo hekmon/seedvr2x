@@ -127,11 +127,25 @@ def ends_with_us() -> Callable[[], None]:
 NO_METADATA = ("-map_metadata", "-1", "-map_chapters", "-1")
 
 
+def argument(path: Path) -> str:
+    """path as one word of an ffmpeg or ffprobe command line, a name they take as a file's
+    whatever it holds: a relative name gets `./`. They take what comes before a name's first colon
+    for a protocol when it is made of letters, digits, `+`, `-` and `.`: a relative `x: y/a.mkv` is
+    refused, "Protocol not found" (ffmpeg and ffprobe n9.0.2, 2026-10-28; media/assembly.py,
+    _absolute, found the same of `Film: 2.mkv` on 2026-10-12), where the same name after `./` is a
+    file's. A name beginning with `-` is an option to ffmpeg as its last word, "Unrecognized
+    option". An absolute name begins with a slash: neither. Only the name on the command line
+    changes, so the bytes written are the same, and the messages say the path as the user gave it
+    (DESIGN.md, Output, Assembly, decided on 2026-10-12: "a relative `-o` whose name holds ": " is
+    taken by ffmpeg for a protocol" goes)."""
+    return str(path) if path.is_absolute() else f"./{path}"
+
+
 def input_args(path: Path) -> list[str]:
     """ffmpeg's input options for a source, the same for every pass over it. Nothing rotates the
     frames behind our back: a rotated source is refused (DESIGN.md, Not in the first version),
     and ffmpeg's rotation would swap the width and height the reader expects."""
-    return ["-noautorotate", "-i", str(path)]
+    return ["-noautorotate", "-i", argument(path)]
 
 
 # Every zscale runs on one slice (DESIGN.md, Input; research/docs/numerics.md, The master's

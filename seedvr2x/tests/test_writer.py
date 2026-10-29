@@ -12,9 +12,9 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from seedvr2x.media import ffmpeg
-from seedvr2x.media.checksums import frame_bytes
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media import ffmpeg, files
+from seedvr2x.media.checksums import check_frames, frame_bytes
+from seedvr2x.media.ffmpeg import MediaError, argument, input_args
 from seedvr2x.media.probe import probe
 from seedvr2x.media.source import examine
 from seedvr2x.media.writer import (
@@ -22,6 +22,8 @@ from seedvr2x.media.writer import (
     FFV1Writer,
     PNGWriter,
     Tags,
+    count_frames,
+    count_packets,
     open_writer,
     to_planar16,
     to_rgb48be,
@@ -391,6 +393,104 @@ def test_stale_checksums_removed_when_replaced(tmp_path: Path) -> None:
     with FFV1Writer(tmp_path / "m.mkv", "gbrp16le", 64, 16, RATE, BT709, stale=stale) as writer:
         writer.write(frames_of(1, 64, 16))
     assert not stale.exists()
+
+
+@pytest.mark.parametrize("kind", ["gbrp16le", "yuv420p10le", "png"])
+def test_stale_checksums_stay_until_the_new_file_is_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    # The old file's checksums go once the new file's data is on the disk (files.replace_whole),
+    # not before it: a sync that fails, or a stop during it, leaves them with the old file, which
+    # they describe (DESIGN.md, Output, Assembly, decided on 2026-10-12). Once the new file is in
+    # place they are gone.
+    path = tmp_path / ("png" if kind == "png" else "m.mkv")
+    stale = tmp_path / "m.crc32"
+    stale.write_text("00000000\n")
+    if kind != "png":
+        path.write_bytes(b"the file before")
+    partial = files.partial_path(path)
+    sync = files._sync  # pyright: ignore[reportPrivateUsage]
+    seen: list[bool] = []
+
+    def failing(synced: Path) -> None:
+        if synced == partial:
+            seen.append(stale.exists())
+            raise OSError(5, "input/output error")
+        sync(synced)
+
+    def writer() -> FFV1Writer | PNGWriter:
+        if kind == "png":
+            return PNGWriter(path, 32, 16, RATE, BT709, stale=stale)
+        return FFV1Writer(path, kind, 32, 16, RATE, BT709, stale=stale)
+
+    monkeypatch.setattr(files, "_sync", failing)
+    with pytest.raises(OSError, match="input/output error"), writer() as failed:
+        failed.write(frames_of(2, 32, 16))
+    assert seen == [True] and stale.read_text() == "00000000\n"
+    if kind != "png":
+        assert path.read_bytes() == b"the file before"
+    monkeypatch.setattr(files, "_sync", sync)
+    path.unlink(missing_ok=True)
+    with writer() as written:
+        written.write(frames_of(2, 32, 16))
+    assert not stale.exists() and path.exists()
+
+
+# A relative name whose directory holds ": " (or begins with "-") is a file's for ffmpeg and
+# ffprobe: they take "x: y/seg.mkv" for a protocol "x", and "-x" for an option (ffmpeg.argument).
+AWKWARD = ["x: y", "-lead: ing"]
+
+
+def test_argument_is_never_a_protocol_nor_an_option() -> None:
+    assert argument(Path("x: y/seg.mkv")) == "./x: y/seg.mkv"
+    assert argument(Path("-s.mkv")) == "./-s.mkv"
+    assert argument(Path("../a: b.mkv")) == "./../a: b.mkv"
+    assert argument(Path("/a: b/seg.mkv")) == "/a: b/seg.mkv"
+
+
+@pytest.mark.parametrize("directory", AWKWARD)
+@pytest.mark.parametrize("pix_fmt", ["gbrp16le", "yuv420p10le"])
+def test_ffv1_to_a_relative_name_holding_a_colon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str, pix_fmt: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = Path(directory) / "seg.mkv"
+    with FFV1Writer(path, pix_fmt, 64, 16, RATE, BT709) as writer:
+        writer.write(frames_of(3, 64, 16))
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [directory]
+    assert [entry.name for entry in (tmp_path / directory).iterdir()] == ["seg.mkv"]
+    # What reads it back, by the same name: ffprobe's packet count and probe, ffmpeg's decode.
+    assert count_packets(path) == count_frames(path) == 3
+    assert probe(path).width == 64
+    assert check_frames(input_args(path), pix_fmt, 64, 16, writer.checksums) == []
+
+
+@pytest.mark.parametrize("directory", AWKWARD)
+def test_png_to_a_relative_name_holding_a_colon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = Path(directory) / "png"
+    with PNGWriter(path, 32, 16, RATE, BT709) as writer:
+        writer.write(frames_of(2, 32, 16))
+    assert sorted(entry.name for entry in path.iterdir()) == ["000000.png", "000001.png"]
+    # verify's pattern, as cli._verify gives it.
+    reading = ["-f", "image2", "-start_number", "0", "-i", argument(path / "%06d.png")]
+    assert check_frames(reading, "rgb48be", 32, 16, writer.checksums) == []
+
+
+@pytest.mark.parametrize("directory", AWKWARD)
+def test_command_to_a_relative_name_holding_a_colon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory: str
+) -> None:
+    # {out} reaches the command as the name it writes, which its own ffmpeg takes for a file's.
+    monkeypatch.chdir(tmp_path)
+    path = Path(directory) / "seg.mkv"
+    command = "ffmpeg -v error -f matroska -i - -c copy -f matroska {out}"
+    with CommandWriter(command, path, "gbrp16le", 64, 16, RATE, BT709) as writer:
+        writer.write(frames_of(3, 64, 16))
+    assert [entry.name for entry in (tmp_path / directory).iterdir()] == ["seg.mkv"]
+    assert count_frames(path) == 3
 
 
 def test_yuv_white_black_and_primaries(tmp_path: Path) -> None:
