@@ -187,12 +187,13 @@ uv run pytest
   `seek_test.py`'s outputs for it (its docstring says the list's format), and skips without it.
 - The shot detector in the first pass (`media/scan.py`) is held by `tests/test_detection.py`, a
   recording stand-in in its place: its frames are the official extraction command's byte for
-  byte, every frame of the index once, its scaler's graph on one thread of ffmpeg's (counted by
-  the names ffmpeg gives its threads, `/proc`), a slow detector holding ffmpeg back, one that
-  stops moving stopped by the watchdog, a thread reading one of ffmpeg's pipes that raises
-  stopping the pass at once, the detector's queue full or not; and the detector itself, on the
-  untrained model's weights, its
-  probabilities recorded bit for bit. The CLI's runs on the CPU take a stand-in detector with
+  byte, on 18 pixel formats whatever the official command's scaler threads (1, 4, or ffmpeg's
+  own count), every frame of the index once, its scaler's graph on 4 threads of ffmpeg's and its
+  encoder on none (counted by the names ffmpeg gives its threads, `/proc`), a slow detector
+  holding ffmpeg back, one that stops moving stopped by the watchdog, a thread reading one of
+  ffmpeg's pipes that raises stopping the pass at once, the detector's queue full or not; and
+  the detector itself, on the untrained model's weights, its probabilities recorded bit for
+  bit. The CLI's runs on the CPU take a stand-in detector with
   the stand-in model (`tests/test_cli_run.py`'s `StandInDetector`, each frame's probability its
   mean value): its file an empty `transnetv2.safetensors` beside the stand-in's model files,
   pinned so in place of TransNetV2's weights, which the pin's check then checks.
@@ -204,15 +205,71 @@ uv run pytest
   `tests/test_cli_run.py`, a `ScriptedDetector` giving chosen probabilities in place of the
   stand-in's, about 0.25 on its clips, which cut nothing at 0.3; with `SEEDVR2X_MODEL_DIR`,
   TransNetV2 itself cuts `tests/test_detector.py`'s synthetic clip at its cuts through the CLI.
-- A source's rate against its frames' timestamps (`media/rate.py`), the refusal's guidance and
-  `--frame-rate` are held by `tests/test_rate.py` to `seeking.md`'s mechanism 7 made on purpose,
-  S9's timestamps (`mechanism7`); the warning of a file sptenc's rule passes whose frames leave
-  its declared rate's timeline, to rates contradicted within its 1 ms (24000/1001 declared 24/1,
-  48 declared 50/1, 33 ms a frame declared 30/1), read and warned of with the rate their
-  timestamps are exactly, and to joins by ffmpeg's concat demuxer, warned of without one; and by
-  `tests/test_cli_run.py` to a run. Opt-in, a real source:
-  `SEEDVR2X_RATE_SOURCE` names it, `SEEDVR2X_RATE_EXPECTED` the rate its timestamps follow (N/D);
-  one first pass, then the rule without and with `--frame-rate` (its docstring says how).
+  The playlists `--plan` writes beside the list for VLC, `FILE.cuts.m3u8` and
+  `FILE.possible.m3u8`, are held by `tests/test_cuts.py` (entries, names, what is said of them)
+  and by `tests/test_cli_run.py` (written, left from an earlier threshold and said so, refused
+  when they would take the place of a file the job reads or writes).
+- A source's rate against its frames' timestamps (`media/rate.py`, `media/source.py`'s
+  `timing_refusal`) is held by `tests/test_rate.py` to `seeking.md`'s mechanism 7 made on purpose,
+  S9's timestamps (`mechanism7`), and to indexes made there. A file whose timestamps contradict
+  its declared rate is refused, never read on a guess: the guidance names the rate the timestamps
+  are exactly, or the declared rate's NTSC twin they follow (N for N x 1000/1001, nothing
+  else), and its two fixes, a remake (its command, a cover picture attached as the finished file
+  holds it) and `--frame-rate`; the join sentence is said only where the twin rule alone names N
+  for a file declared N x 1000/1001. Files with no rate to name get sptenc's refusal as it is.
+  Other rates declared are held to seedvr2x's own test of what sptenc's rule passes (rates
+  contradicted within its 1 ms: 24000/1001 declared 24/1, 48 declared 50/1, 33 ms a frame
+  declared 30/1; joins by ffmpeg's concat demuxer that drift half a frame, refused with the
+  remake that puts them back), and what stays read (constant rates to their time base's
+  rounding, joins that keep the frame grid, a video starting after its audio). A source
+  declared or read at more than 1,000 fps is refused once before the first pass, `--frame-rate`
+  too, the master written at 2,000 fps included; 1,000 itself holds. Matroska's readings of the
+  NTSC rates are held to files written there. Frames missing on the grid are filled, not
+  refused: timestamps made there that sit on a rate's grid with places left empty, read in
+  places, with what the source's warning says, and what stays refused. The command line's runs
+  are `tests/test_cli_run.py`'s. Opt-in, a real source: `SEEDVR2X_RATE_SOURCE` names it,
+  `SEEDVR2X_RATE_EXPECTED` the rate its timestamps follow (N/D); one first pass, then the rule
+  without and with `--frame-rate` (its docstring says how).
+- Missing frames filled, places and the frame index (`media/grid.py`, `media/index.py`,
+  `media/reader.py`): `tests/test_grid.py` holds each decoded frame's nearest place on a rate's
+  timeline, the index in places (held rows, maps, what was filled), the detector's probabilities
+  and the cuts at the places, and the reads through it, on files with holes made on purpose
+  (packets dropped by the noise bitstream filter, the others' timestamps kept) held to the
+  frames of the file they were made from; `tests/test_cli_run.py` runs such a source through
+  a run, its resumes and a finished job run again.
+- A job run again once finished (`tests/test_cli_run.py`) makes nothing: said finished, exit 0,
+  with no first pass, detector, plan, memory read, model or unit, its manifest and index
+  untouched (whether the index is there, missing, damaged or cut short), still held to its
+  settings, model files, source and directory, and to its environment (accepted or refused).
+  A `.mkv` path's finished file keeps its own manifest beside it (`tests/test_assembled.py`): the
+  same command makes nothing, another job or a changed file is refused, `--plan` writes nothing,
+  and a stop after each of the end steps (file, checksums, work record, manifest beside it,
+  removal) is finished by the next run, whose frames are the uninterrupted run's.
+- The assembly (`media/assembly.py`) is held by `tests/test_assembly.py` to ffmpeg's own remux of
+  the source and to the source's packets: data streams Matroska can't hold left out with one
+  warning, a refusal naming the other streams alone; a cover picture attached to the finished
+  file, not a second video track, and checked there by bytes, name and type; ffmpeg's note that
+  a cover has no rate to estimate tolerated for the cover alone, its fixture (`unrated`) a
+  source whose late MP3 track makes ffmpeg's probe stop short, which the test checks ffmpeg
+  does print; the rehearsal's line and its estimate from a timed read. `tests/test_assembled.py`
+  holds what the command line does with it: a segment's hash recorded when it is finished
+  (`tests/test_units.py`, `tests/test_cli_segment_cmd.py` for a command's), a damaged one made
+  again before the join; the rehearsal said before it reads, recorded, trusted by a resume under
+  the same ffmpeg and run again under another; the assembly's ffmpeg processes ending with a
+  killed seedvr2x (a control variant without the helper, where ffmpeg survives).
+- The writers: `tests/test_writer.py` holds the stale checksums, removed only once the new file
+  is safe, and relative names holding `": "` or a leading `-` never taken by ffmpeg for a
+  protocol or an option (`media/ffmpeg.argument`), for FFV1 and PNG; `tests/test_segment_cmd.py`
+  the segment command's stop, 5 s between SIGTERM and SIGKILL with a line saying so, a second
+  Ctrl-C killing it at once.
+- A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
+  phase a refusal names, a recorded shape planned again releasing that part, planning importing
+  no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),
+  `tests/test_units.py` and `tests/test_timing.py` (each run's windows decided, kept or made
+  again, from the layouts the manifest records) and `tests/test_cli_run.py`: the refusal naming
+  `--accept-env-change`, the warning given before the checks, the re-plan under the flag
+  (`planner.PER_TOKEN` multiplied, so that the DiT phase refuses at the stand-in's size), the
+  segments and latents kept, `--plan` looking and writing nothing.
 
 ## Comments and documents
 
