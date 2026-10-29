@@ -19,7 +19,7 @@ from torch import Tensor
 
 from seedvr2x.media.source import Source
 from seedvr2x.runtime import model, units
-from seedvr2x.runtime.job import OutputSegment, Shot
+from seedvr2x.runtime.job import QUALITY, OutputSegment, Shot, shot_runs
 from seedvr2x.runtime.manifest import Manifest
 from seedvr2x.runtime.plan import Plan
 from seedvr2x.runtime.shot import moved, sample_windows, shot_layout
@@ -36,7 +36,11 @@ def channel_major(latents: int, seed: int = 0) -> Tensor:
 
 
 def job(
-    tmp_path: Path, shots: list[Shot], segments: list[OutputSegment], window: int = 5
+    tmp_path: Path,
+    shots: list[Shot],
+    segments: list[OutputSegment],
+    window: int = 5,
+    quality: str = "standard",
 ) -> Manifest:
     source = SimpleNamespace(
         path=tmp_path / "in.mkv",
@@ -60,11 +64,15 @@ def job(
         (tmp_path / f"{segment.name}.mkv").write_bytes(b"x" * segment.frames)
     return Manifest(
         tmp_path / "manifest.json",
-        {"seed": 42, "window": window},
+        {"seed": 42, "window": window, "quality": quality},
         {},
         cast(Source, source),
         shots,
-        [shot_layout(shot.frames, window) for shot in shots],
+        [
+            shot_layout(run.frames, window)
+            for shot in shots
+            for run in shot_runs(shot, QUALITY[quality])
+        ],
         segments,
         [f"{segment.name}.mkv" for segment in segments],
         {},
@@ -247,6 +255,115 @@ def test_a_segment_is_hashed_when_finished_and_set_back_when_damaged(tmp_path: P
         (False, None, None),
         (True, 4, record.hashes[1]),
     ]
+
+
+# Four shots for the tests of a shape planned again (resume.reshape): 15, 15, 15 and 2 latents,
+# one segment. Made under windows of 9 latents, two windows of the long ones; planned again for 7.
+LONG = [Shot(0, 57), Shot(57, 114), Shot(114, 171), Shot(171, 176)]
+
+
+def test_a_shape_planned_again_decides_each_run_s_windows(tmp_path: Path) -> None:
+    # resume.reshape (DESIGN.md, Memory planner, A plan shapes the output a little, decided on
+    # 2026-10-28): a run with every window done is kept by its layout and records its own cap; one
+    # with none done is laid out by the new plan; one with some done under another layout makes
+    # them again from its first; one with some done under the new plan's layout keeps them.
+    from seedvr2x.runtime import resume
+
+    segment = [OutputSegment("a", 0, 176)]
+    old = job(tmp_path, LONG, segment, 9)
+    old.encoded = [True, True, True, True]
+    old.windows_done = [2, 1, 0, 1]
+    recorded = json.loads(json.dumps(old.content()))
+    new = job(tmp_path, LONG, segment, 7)
+    counts = resume.reshape(new, recorded)
+    assert (counts.windows_kept, counts.windows_discarded) == (3, 1)
+    assert (counts.runs_kept, counts.runs_laid_out) == (1, 1)
+    assert new.window_caps == [9, None, None, None]
+    assert [list(layout) for layout in new.layouts] == [
+        shot_layout(57, 9),
+        shot_layout(57, 7),
+        shot_layout(57, 7),
+        shot_layout(5, 7),
+    ]
+    assert new.windows_done == [2, 0, 0, 1] and new.encoded == [True] * 4
+    # The record keeps the cap of the run kept as made, and none for the others; the next resume
+    # lays the job out by it again, from the record alone.
+    again = json.loads(json.dumps(new.content()))
+    assert [shot.get("window_cap") for shot in again["shots"]] == [9, None, None, None]
+    asked = job(tmp_path, LONG, segment, 7)
+    resume.own_windows(asked, again)
+    assert asked.window_caps == new.window_caps and list(asked.layouts) == list(new.layouts)
+    assert resume.differences(again, asked.content()) == []
+    # The change as it is recorded: the parts that changed, before and after, and how far it went.
+    change = resume.shape_change(recorded, Plan(9), Plan(7, None, None), counts)
+    assert change["before"] == {"plan": {"window": 9}} and change["after"] == {
+        "plan": {"window": 7}
+    }
+    assert (change["windows_done"], change["windows_kept"], change["windows_discarded"]) == (
+        4,
+        3,
+        1,
+    )
+
+
+def test_a_shape_planned_again_reads_each_run_of_a_shot(tmp_path: Path) -> None:
+    # With more than one run a shot (DESIGN.md, Several runs of a shot) each run is decided on its
+    # own, a later run's record under the shot's `runs`: here the second run, whose windows are
+    # all done, is kept by its own cap, the first, begun, made again.
+    from seedvr2x.runtime import resume
+
+    segment = [OutputSegment("a", 0, 57)]
+    old = job(tmp_path, LONG[:1], segment, 9, "enhanced")
+    old.encoded, old.windows_done = [True, True], [1, 2]
+    recorded = json.loads(json.dumps(old.content()))
+    new = job(tmp_path, LONG[:1], segment, 7, "enhanced")
+    counts = resume.reshape(new, recorded)
+    assert (counts.windows_kept, counts.windows_discarded) == (2, 1)
+    assert new.window_caps == [None, 9] and new.windows_done == [0, 2]
+    (shot,) = json.loads(json.dumps(new.content()))["shots"]
+    assert "window_cap" not in shot and shot["runs"][0]["window_cap"] == 9
+    again = job(tmp_path, LONG[:1], segment, 7, "enhanced")
+    resume.own_windows(again, json.loads(json.dumps(new.content())))
+    assert again.window_caps == [None, 9] and list(again.layouts) == list(new.layouts)
+
+
+def test_a_cap_no_layout_comes_of_is_refused(tmp_path: Path) -> None:
+    from seedvr2x.runtime import resume
+    from seedvr2x.runtime.job import JobError
+
+    segment = [OutputSegment("a", 0, 176)]
+    for cap in (3, 0, True, "9"):
+        recorded = json.loads(json.dumps(job(tmp_path, LONG, segment, 7).content()))
+        recorded["shots"][0]["window_cap"] = cap
+        with pytest.raises(JobError, match="window cap"):
+            resume.own_windows(job(tmp_path, LONG, segment, 7), recorded)
+
+
+def test_a_cap_that_does_not_give_the_windows_recorded_is_another_job(tmp_path: Path) -> None:
+    # The record's windows are compared with the layout its cap gives: a cap edited, or a layout,
+    # shows as a difference in the shot's windows, which a resume refuses (cli._taken_differences).
+    from seedvr2x.runtime import resume
+
+    segment = [OutputSegment("a", 0, 176)]
+    recorded = json.loads(json.dumps(job(tmp_path, LONG, segment, 7).content()))
+    recorded["shots"][0]["window_cap"] = 9
+    asked = job(tmp_path, LONG, segment, 7)
+    resume.own_windows(asked, recorded)
+    found = resume.differences(recorded, asked.content())
+    assert [line.split(":")[0] for line in found] == ["shots[0].windows"]
+
+
+def test_a_run_kept_by_its_own_cap_is_laid_out_by_the_plan_when_made_again(tmp_path: Path) -> None:
+    # A finished segment found damaged is made again (Manifest.segment_damaged): its runs under the
+    # job's plan, not the cap they were kept by, which may no longer fit.
+    record = job(tmp_path, LONG[:1], [OutputSegment("a", 0, 57)], 7)
+    record.layouts, record.window_caps = [shot_layout(57, 9)], [9]
+    record.write()
+    assert json.loads((tmp_path / "manifest.json").read_text())["shots"][0]["window_cap"] == 9
+    record.segment_damaged(0)
+    assert record.window_caps == [None] and list(record.layouts[0]) == shot_layout(57, 7)
+    written = json.loads((tmp_path / "manifest.json").read_text())["shots"][0]
+    assert "window_cap" not in written and len(written["windows"]) == 3
 
 
 def test_a_record_without_hashes_is_taken_up_and_compared_nowhere(tmp_path: Path) -> None:

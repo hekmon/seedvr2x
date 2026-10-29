@@ -24,7 +24,7 @@ from seedvr2x.runtime import memory, planner, tilegrid, weights
 from seedvr2x.runtime.job import Shot, output_size, padded_size
 from seedvr2x.runtime.memory import Reading
 from seedvr2x.runtime.plan import Phase, Plan, Tiles
-from seedvr2x.runtime.planner import BLOCK, GIB, MARGIN, Pins, PlanError
+from seedvr2x.runtime.planner import BLOCK, GIB, MARGIN, Peaks, Pins, PlanError
 from seedvr2x.runtime.shot import padded_length, shot_layout
 
 # numz's padded sizes, multiples of 16 (planner-limits.md's tables), and seedvr2x's own
@@ -896,6 +896,9 @@ def test_no_pass_grows_with_the_shot() -> None:
 # than the tiled one (test_floor).
 HD, UHD = (1080, 1920), (2160, 3840)
 SMALL = (512, 512)
+
+
+NO_PINS = Pins()
 
 
 def shots(*latents: int) -> list[Shot]:
@@ -4041,6 +4044,76 @@ def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
         planner.plan(flat, HD, film, Pins(swap_blocks=36), None, recorded=shape)
     assert stuck.value.shortfall is not None and not stuck.value.shortfall.freeable
     assert stuck.value.shortfall.short == held.value.shortfall.short
+
+
+def test_a_refusal_names_the_phase_that_does_not_fit() -> None:
+    # PlanError.phase, for plan_again to know which part of a shape to release: the phase over
+    # the budget in the order the plan judges them, "host" for the system's memory, and for a
+    # pin the pass or the window it refuses; empty for a pin that is no pin.
+    def phase_of(free: int, pins: Pins = NO_PINS, host: int | None = None, **options: Any) -> str:
+        with pytest.raises(PlanError) as error:
+            planner.plan(free, HD, shots(76), pins, host, **options)
+        return error.value.phase
+
+    shape = Plan(17, Tiles(1856), Tiles(1088))
+    assert phase_of(our_free(16), recorded=shape) == "encode"
+    assert phase_of(our_free(16), recorded=Plan(20, Tiles(768), Tiles(640))) == "dit"
+    assert phase_of(round(21.99 * GIB), recorded=shape) == "decode"
+    assert phase_of(our_free(24), host=8 * GIB, recorded=shape) == "host"
+    assert phase_of(our_free(16), Pins(decode_tile=0)) == "decode"
+    assert phase_of(our_free(16), Pins(window=30)) == "dit"
+    assert phase_of(our_free(96), Pins(swap_blocks=37)) == ""
+
+
+def test_a_recorded_shape_planned_again_releases_the_part_the_refusal_names() -> None:
+    # plan_again (DESIGN.md, Memory planner, A plan shapes the output a little, decided on
+    # 2026-10-28, with --accept-env-change): what still fits of the recorded shape is kept; the
+    # part of the phase that doesn't fit is released to the planner, one at a time, at most three
+    # rounds; the command line's own pins stay pinned.
+    def again(
+        free: int | Reading, recorded: Plan, pins: Pins = NO_PINS, host: int | None = None
+    ) -> tuple[Plan, Peaks]:
+        with pytest.raises(PlanError) as refused:
+            planner.plan(free, HD, shots(76), pins, host, recorded=recorded)
+        return planner.plan_again(
+            free, HD, shots(76), pins, host, recorded=recorded, refused=refused.value
+        )
+
+    def shape(made: Plan) -> tuple[int | None, Tiles | None, Tiles | None]:
+        return made.window, made.encode_tiles, made.decode_tiles
+
+    # The encode alone doesn't fit, 0.06 GiB short untiled: its tiles are the planner's, the
+    # window and the decode's tiles as recorded.
+    untiled = Plan(17, None, Tiles(1088))
+    made, _ = again(our_free(24), untiled)
+    assert shape(made) == (17, Tiles(1856), Tiles(1088))
+    # The DiT's phase doesn't fit: the cap is the planner's, the tiles recorded kept.
+    made, _ = again(our_free(16), Plan(20, Tiles(768), Tiles(640)))
+    assert shape(made) == (12, Tiles(768), Tiles(640))
+    # The encode refused first, then the DiT's phase, then the decode, one part each round.
+    made, _ = again(our_free(16), Plan(17, Tiles(1856), Tiles(1088)))
+    assert shape(made) == (12, Tiles(1024), Tiles(768))
+    # The system's memory: the tiles go before the window (the planner's own order).
+    made, _ = again(our_free(24), Plan(17, Tiles(1856), Tiles(1088)), host=8 * GIB)
+    assert shape(made) == (10, Tiles(896), Tiles(640))
+    # What the command line pins is kept: the refusal given back, the shape untouched, whatever
+    # else would fit.
+    for pins in (Pins(window=20), Pins(swap_blocks=36, window=20)):
+        with pytest.raises(PlanError) as pinned:
+            again(our_free(16), Plan(20, Tiles(768), Tiles(640)), pins)
+        assert pinned.value.phase == "dit" and pinned.value.shortfall is not None
+    with pytest.raises(PlanError) as tiles:
+        again(our_free(16), Plan(17, Tiles(1856), Tiles(1088)), Pins(encode_tile=1856))
+    assert tiles.value.phase == "encode" and tiles.value.shortfall is not None
+    # A pin on one part leaves the others to be released: here the window is the user's, the
+    # encode's tiles are released and the decode's are not needed.
+    made, _ = again(our_free(24), untiled, Pins(window=17))
+    assert shape(made) == (17, Tiles(1856), Tiles(1088))
+    # Nothing fits whatever is released: the last round's refusal, a new job's (no shortfall: it
+    # has no recorded shape to keep).
+    with pytest.raises(PlanError) as nothing:
+        again(our_free(8), Plan(17, None, None))
+    assert nothing.value.shortfall is None and nothing.value.phase == "decode"
 
 
 def test_a_held_run_s_choices_for_the_host_take_no_margin_either() -> None:

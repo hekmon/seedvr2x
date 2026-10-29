@@ -206,6 +206,7 @@ def units_of(
     windows_done: Sequence[int] | None = None,
     finished: Sequence[bool] | None = None,
     start: Phase | None = None,
+    layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
 ) -> list[Unit]:
     """The units a job has left, in the order the run makes them (run.run_job): its shots, each
     run `per_shot` times (job.shot_runs), their windows capped at `window` latents
@@ -218,7 +219,11 @@ def units_of(
     of phase it opens, where the unit before it is of another phase (the first unit's against
     `start`, the phase the models are in, None for one unknown), and a run's first window left,
     its run's noise draw, by the tokens of the run's whole latent (shot.sample_windows draws it
-    with that window)."""
+    with that window).
+
+    layouts: each run's windows as the job records them, in the order of runs, where a resume
+    planned again for the memory free (--accept-env-change) left runs by the cap they were made
+    under; else they are laid out by `window`."""
     units: list[Unit] = []
     run = 0  # the runs' index across the job, as the manifest's
     for number, segment in enumerate(segments):
@@ -229,7 +234,7 @@ def units_of(
             runs = shot_runs(shots[index], per_shot)
             for position, each in enumerate(runs):
                 name = run_name(index, len(shots), position, len(runs), each.offset, per_shot)
-                layout = shot_layout(each.frames, window)
+                layout = shot_layout(each.frames, window) if layouts is None else layouts[run]
                 done = 0 if windows_done is None else windows_done[run]
                 if done < len(layout) and not (encoded is not None and encoded[run]):
                     units.append(

@@ -18,7 +18,15 @@ from typing import Any, cast
 
 from seedvr2x.media.files import write_whole
 from seedvr2x.media.source import Source
-from seedvr2x.runtime.job import QUALITY, JobError, OutputSegment, Run, Shot, shot_runs
+from seedvr2x.runtime.job import (
+    QUALITY,
+    JobError,
+    OutputSegment,
+    Run,
+    Shot,
+    shot_runs,
+    window_layout,
+)
 
 NAME = "manifest.json"
 # 3 since the input is one record, the source's, where it was a list: a change of shape bumps the
@@ -78,6 +86,15 @@ ASSEMBLED = "assembled"
 # `ffmpeg`"). Additive, no version bump: a record without it is rehearsed again; information for
 # a resume's comparison (resume.UNCOMPARED), the content it stands for being compared as the input.
 REHEARSAL = "rehearsal"
+# A run's own window cap, recorded only where its windows are not those of the job's plan: a run
+# kept as it was made when a resume planned the rest again for the memory free (--accept-env-change;
+# DESIGN.md, Memory planner, A plan shapes the output a little, decided on 2026-10-28), its windows
+# laid out by a cap the plan no longer holds. Additive, no version bump: a reader of version 3
+# takes the field for an unknown one and, laying the run out by the job's plan, finds the windows
+# recorded differ, and refuses the job as another, as it does for a plan changed (the version
+# bumps only where older code would misread a field, which this one it can't: DESIGN.md, Pause and
+# resume, Manifest). A job never planned again records none, byte for byte as before.
+WINDOW_CAP = "window_cap"
 
 
 def write_content(path: Path, content: dict[str, Any]) -> None:
@@ -185,6 +202,10 @@ class Manifest:
     # The remux rehearsal of a .mkv path's job, passed (REHEARSAL), recorded with the first pass's
     # in the input's record; None for a directory's job, which makes none.
     rehearsal: dict[str, Any] | None = None
+    # Each run's own window cap (WINDOW_CAP), None where its windows are the job's plan's: with
+    # layouts, those windows laid out by the cap (job.window_layout), and by the plan's window
+    # when it is None. In the order of runs.
+    window_caps: list[int | None] = field(default_factory=list[int | None])
     # Called once, before the manifest's next write, then dropped: it writes the frame index that
     # write names, made again by a resume in another environment (cli._taken_up).
     before_write: Callable[[], None] | None = field(default=None, repr=False, compare=False)
@@ -206,6 +227,8 @@ class Manifest:
         ]
         if len(self.layouts) != len(self.runs):
             raise ValueError(f"{len(self.layouts)} layouts for {len(self.runs)} runs")
+        if not self.window_caps:
+            self.window_caps = [None] * len(self.runs)
         if not self.encoded:
             self.encoded = [False] * len(self.runs)
         if not self.windows_done:
@@ -264,10 +287,19 @@ class Manifest:
         self.finished[index] = False
         self.sizes[index] = None
         self.hashes[index] = None
+        window: Any = (self.plan or {}).get("window")
         for shot in self.segment_shots(index):
             for run in self.shot_runs(shot):
                 self.encoded[run] = False
                 self.windows_done[run] = 0
+                if self.window_caps[run] is not None:
+                    # Made again under the job's plan, not the cap it was made under before the
+                    # plan was made again for the memory free: that cap may no longer fit.
+                    latents = self.layouts[run][-1][1]
+                    layouts = list(self.layouts)
+                    layouts[run] = window_layout(latents, window or latents)
+                    self.layouts = layouts
+                    self.window_caps[run] = None
         self.write()
 
     def job_assembled(self, name: str, size: int) -> None:
@@ -337,12 +369,15 @@ class Manifest:
     def _run(self, run: int) -> dict[str, Any]:
         """Run `run`'s record: its latents, its windows and how far it went."""
         layout = self.layouts[run]
-        return {
+        record: dict[str, Any] = {
             "latents": layout[-1][1],
             "windows": [list(window) for window in layout],
             "encoded": self.encoded[run],
             "windows_done": self.windows_done[run],
         }
+        if self.window_caps[run] is not None:
+            record[WINDOW_CAP] = self.window_caps[run]
+        return record
 
 
 def _input(source: Source, rehearsal: dict[str, Any] | None = None) -> dict[str, Any]:

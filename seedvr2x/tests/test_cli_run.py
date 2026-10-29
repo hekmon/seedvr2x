@@ -48,7 +48,7 @@ from seedvr2x.runtime.job import Shot, output_size, padded_size
 from seedvr2x.runtime.plan import Plan, Tiles
 from seedvr2x.runtime.planner import GIB, Peaks, Pins
 from seedvr2x.runtime.pull import Pin
-from seedvr2x.runtime.shot import decode_shot, padded_length
+from seedvr2x.runtime.shot import decode_shot, padded_length, shot_layout
 
 
 def _usable() -> bool:
@@ -736,6 +736,12 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
         (True, 1),
         (True, 1),
         (True, 2),
+    ]
+    # A job never planned again records no cap of a run's own (manifest.WINDOW_CAP), and each
+    # run's windows are the plan's cap's: the record as it was before the field.
+    assert all("window_cap" not in shot for shot in content["shots"])
+    assert [shot["windows"] for shot in content["shots"]] == [
+        [list(window) for window in shot_layout(frames, 5)] for frames in (3, 1, 21)
     ]
     assert [s["bytes"] for s in content["segments"]] == [
         (out / name).stat().st_size for name in ("seg_000000.mkv", "seg_000001.mkv")
@@ -2082,6 +2088,14 @@ def test_resumed_on_another_attention_backend(
     assert indexes(tmp_path / "out" / "seg_000000.mkv") == list(range(25))
 
 
+# The refusal's third way out, where --accept-env-change was not given (cli._kept_refusal;
+# DESIGN.md, Memory planner, A plan shapes the output a little, decided on 2026-10-28).
+THIRD_WAY = (
+    "or run it again with --accept-env-change, which plans the rest of the job again for the"
+    " memory free now, its output from there no longer the uninterrupted run's bit for bit"
+)
+
+
 def test_recorded_plan_no_longer_fits(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2111,6 +2125,7 @@ def test_recorded_plan_no_longer_fits(
         "the job is kept, nothing is lost, and the same command resumes it",
         "the encode lacks 0.26 GiB of the card's memory",
         f"to free it, {cli.FREE_THE_CARD}",
+        THIRD_WAY,
     ]
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *JOB) == 1
@@ -2150,10 +2165,273 @@ def test_a_recorded_plan_that_falls_short_of_the_systems_memory_is_kept_too(
     monkeypatch.setattr(cli, "_host_available", lambda: 1)
     caplog.clear()
     assert upscale(tmp_path, source_path, "out", *options) == 1
-    first, second = caplog.messages[-1].split("\n")
+    first, second, third = caplog.messages[-1].split("\n")
     assert first == "the job is kept, nothing is lost, and the same command resumes it"
     assert second.startswith("the recorded plan no longer fits the memory free now: the plan takes")
     assert "system memory" in second and "quit the programs" not in caplog.text
+    assert third == THIRD_WAY
+
+
+def long_shots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, int, int]:
+    """Two shots of 57 frames, 15 latents each, and a job's two memories: where the DiT's phase
+    holds windows of 9 latents (the shots in two windows) with every block swapped, and where it
+    holds 7 (three windows). Each latent takes about 1.6 GiB there, the planner's per-token figure
+    patched for it, the stand-in's frames being tiny: the encode and the decode fit both."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cuts.txt").write_text("57\n")
+    monkeypatch.setattr(planner, "PER_TOKEN", planner.PER_TOKEN * 200)
+
+    def holds(latents: int) -> int:
+        return planner.dit_peak(PADDED, latents, planner.BLOCKS, False) + planner.MARGIN
+
+    return source(tmp_path / "in.mkv", 114), holds(9), holds(7)
+
+
+def test_a_resume_short_of_memory_is_planned_again_with_accept_env_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # DESIGN.md, Memory planner, A plan shapes the output a little (decided on 2026-10-28): with
+    # --accept-env-change a recorded shape that no longer fits is planned again for what is left.
+    # A job stopped inside its second shot's windows, its first shot's done under a cap of 9
+    # latents, resumed on memory that holds 7: refused without the flag, the refusal naming it;
+    # with it, the first shot is kept as made, by its own layout, the second made again from its
+    # first window under the new cap, and a stop and a resume after that need no flag.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    out, manifest = tmp_path / "out", tmp_path / "out" / "manifest.json"
+    started = json.loads(manifest.read_text())
+    assert started["plan"]["window"] == 9
+    assert [(s["windows"], s["windows_done"]) for s in started["shots"]] == [
+        ([[0, 9], [7, 15]], 2),
+        ([[0, 9], [7, 15]], 1),
+    ]
+    assert all("window_cap" not in shot for shot in started["shots"])
+    # Refused without the flag, the third way out named, nothing changed.
+    free_memory(monkeypatch, narrow)
+    kept = contents(out)
+    steps.stop = None
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 1
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    words = error.getMessage().split("\n")
+    assert words[1].startswith("the DiT's phase lacks ") and words[-1] == THIRD_WAY
+    assert contents(out) == kept and steps.calls == []
+    # With it: planned again, said in one warning, the manifest rewritten at once.
+    steps.stop = "window 57:2"
+    caplog.clear()
+    stopped(tmp_path, source_path, "out", *options, "--accept-env-change")
+    assert steps.calls == ["window 57:0", "window 57:1", "window 57:2"]
+    (said,) = [m for m in caplog.messages if "planned again for what is left" in m]
+    assert "window cap 9 latents -> 7 latents" in said
+    assert "kept: 0 segments finished, 2 runs encoded, 2 windows made and kept as they were" in said
+    assert "made again, from their first: 1 window of runs begun under a window cap" in said
+    # Only the window cap changed: the colour drift of smaller tiles is not claimed.
+    assert said.endswith("from here the output is not the uninterrupted run's bit for bit")
+    assert "tiles" not in said.split("\n")[-1] and "split" not in said
+    changed = json.loads(manifest.read_text())
+    assert changed["plan"]["window"] == 7
+    first, second = changed["shots"]
+    # The first shot kept as made, by its own layout and cap; the second laid out by the new cap.
+    assert (first["windows"], first["window_cap"], first["windows_done"]) == (
+        [[0, 9], [7, 15]],
+        9,
+        2,
+    )
+    assert (
+        second["windows"] == [list(w) for w in shot_layout(57, 7)] and len(second["windows"]) == 3
+    )
+    assert (second["encoded"], second["windows_done"]) == (True, 2) and "window_cap" not in second
+    (entry,) = changed["environment_changes"]
+    assert entry["before"] == {"plan": {"window": 9}} and entry["after"] == {"plan": {"window": 7}}
+    assert [entry[k] for k in ("segments_finished", "shots_encoded", "windows_done")] == [0, 2, 3]
+    assert (entry["windows_kept"], entry["windows_discarded"]) == (2, 1)
+    assert not (out / "resume" / "shot_000000" / "window_0002.pt").exists()
+    # A second resume takes the new shape as recorded and the mixed layouts as they are: no flag.
+    steps.stop = None
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    assert steps.calls == ["window 57:2", "decode 0", "decode 57"]
+    assert indexes(out / "seg_000000.mkv") == list(range(114))
+    finished = json.loads(manifest.read_text())
+    assert finished["shots"][0]["window_cap"] == 9 and finished["environment_changes"] == [entry]
+    # Finished already, nothing made.
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0 and steps.calls == []
+
+
+def test_a_finished_segment_and_a_latent_are_kept_when_a_shape_is_planned_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The kept units, byte for byte: a finished segment untouched, a shot begun under the old cap
+    # made again from its first window, its latent kept (no second encode).
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt", "--min-segment", "0")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    out = tmp_path / "out"
+    first_segment = (out / "seg_000000.mkv").read_bytes()
+    before = json.loads((out / "manifest.json").read_text())
+    assert [s["finished"] for s in before["segments"]] == [True, False]
+    free_memory(monkeypatch, narrow)
+    steps.stop = None
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *options, "--accept-env-change") == 0
+    assert steps.calls == ["window 57:0", "window 57:1", "window 57:2", "decode 57"]
+    assert (out / "seg_000000.mkv").read_bytes() == first_segment
+    after = json.loads((out / "manifest.json").read_text())
+    assert after["segments"][0] == before["segments"][0]
+    (entry,) = after["environment_changes"]
+    assert [entry[k] for k in ("segments_finished", "shots_encoded", "windows_done")] == [1, 2, 3]
+    assert (entry["windows_kept"], entry["windows_discarded"]) == (2, 1)
+    assert indexes(out / "seg_000001.mkv") == list(range(57, 114))
+    assert cli.main(["verify", str(out)]) == 0
+
+
+def test_an_environment_change_accepted_with_a_shape_planned_again_is_recorded_with_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+) -> None:
+    # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md writes an environment change with the next unit
+    # made and a shape planned again "at once", and says nothing of the two together): both are
+    # recorded at once, the environment's entry first, the run's environment with them.
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    free_memory(monkeypatch, narrow)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another")
+    steps.stop = "window 57:0"
+    stopped(tmp_path, source_path, "out", *options, "--accept-env-change")
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["environment"]["gpu"] == "another" and content["plan"]["window"] == 7
+    environment, shape = content["environment_changes"]
+    assert environment["before"] == {"gpu": "a stand-in"} and "plan" not in environment["before"]
+    assert shape["before"] == {"plan": {"window": 9}} and shape["after"] == {"plan": {"window": 7}}
+    assert environment["windows_done"] == shape["windows_done"] == 3
+
+
+def test_plan_looks_at_a_shape_planned_again_and_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md is silent on --plan here): --plan runs nothing
+    # and never destroys made work, so with --accept-env-change on a job short of memory it says
+    # what a run would do, in one warning, and rewrites no manifest nor discards any window. Its
+    # cut list is written as for any job.
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    free_memory(monkeypatch, narrow)
+    steps.stop = None
+    steps.calls.clear()
+    kept = contents(tmp_path / "out")
+    caplog.clear()
+    listing = tmp_path / "listed.txt"
+    status = upscale(
+        tmp_path, source_path, "out", *options, "--accept-env-change", "--plan", str(listing)
+    )
+    assert status == 0 and steps.calls == []
+    assert contents(tmp_path / "out") == kept
+    cuts = [line.split()[0] for line in listing.read_text().splitlines() if line[:1].isdigit()]
+    assert cuts == ["57"]
+    (said,) = [m for m in caplog.messages if "a run of the same command with" in m]
+    assert said.split("\n")[1:] == [
+        "it would keep: 0 segments finished, 2 runs encoded, 2 windows made and kept as they were",
+        "it would make again: 1 window of runs begun under a window cap that no longer fits",
+        "from here the output is not the uninterrupted run's bit for bit",
+        "nothing was written, nothing was discarded",
+    ]
+    assert (
+        "--accept-env-change plans the rest of the job again for it: window cap 9 latents -> 7"
+        in said
+    )
+    # The same command without --plan then does it.
+    assert upscale(tmp_path, source_path, "out", *options, "--accept-env-change") == 0
+    assert steps.calls == ["window 57:0", "window 57:1", "window 57:2", "decode 0", "decode 57"]
+
+
+def test_the_colour_drift_of_smaller_tiles_is_said_where_a_tile_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Looked at with --plan, the decode's tiles made smaller by the planner (replaced here: the
+    # stand-in runs no tiled pass): the sentence on colour is said, only then.
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    free_memory(monkeypatch, narrow)
+    again = planner.plan_again
+
+    def tiled(*job: Any, **named: Any) -> tuple[Plan, Peaks]:
+        made, peaks = again(*job, **named)
+        return replace(made, decode_tiles=Tiles(128)), peaks
+
+    monkeypatch.setattr(planner, "plan_again", tiled)
+    caplog.clear()
+    listing = tmp_path / "listed.txt"
+    assert (
+        upscale(
+            tmp_path, source_path, "out", *options, "--accept-env-change", "--plan", str(listing)
+        )
+        == 0
+    )
+    (said,) = [m for m in caplog.messages if "a run of the same command with" in m]
+    assert "decode none -> tiles of 128 px" in said
+    assert said.split("\n")[-2] == (
+        "from here the output is not the uninterrupted run's bit for bit: smaller tiles drift"
+        " slightly in colour, which --color-correction split corrects for the most part"
+    )
+
+
+def test_a_shape_the_command_line_pins_is_not_planned_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A pin is a setting: --window kept as given, so that a cap that no longer fits is refused
+    # even with --accept-env-change, the refusal saying the shape was planned again and the job
+    # is kept, nothing changed on disk.
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt", "--window", "9")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "out", *options)
+    kept = contents(tmp_path / "out")
+    free_memory(monkeypatch, narrow)
+    steps.stop = None
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options, "--accept-env-change") == 1
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    words = error.getMessage().split("\n")
+    assert words[0] == "the job is kept, nothing is lost, and the same command resumes it"
+    assert words[1].startswith("its shape planned again for the memory free now")
+    assert "does not fit" in words[1] and words[-1] == f"to free it, {cli.FREE_THE_CARD}"
+    assert contents(tmp_path / "out") == kept and steps.calls == []
 
 
 def early_card(monkeypatch: pytest.MonkeyPatch, free: int | None) -> list[int]:
@@ -2256,6 +2534,7 @@ def test_a_shortfall_no_programs_cure_says_so() -> None:
         "the decode lacks 1.01 GiB of the card's memory",
         "quitting programs does not free that much on this card: the job needs a card with more"
         " memory free",
+        THIRD_WAY,
     ]
 
 

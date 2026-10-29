@@ -289,6 +289,20 @@ def test_units_of_one_run_a_shot() -> None:
     assert units[0].name == f"{run_name(0, 3, 0, 1, 0, 1)}'s encode"
 
 
+def test_units_of_takes_each_run_s_windows_from_the_layouts_given() -> None:
+    # A job whose shape was planned again for the memory free keeps runs by the windows they
+    # were made under (manifest.layouts): the units are listed by them, not by the plan's cap.
+    layouts = [shot_layout(shot.frames, 5) for shot in SHOTS]
+    assert units_of(SHOTS, SEGMENTS, 1, 5, 100, layouts=layouts) == units_of(
+        SHOTS, SEGMENTS, 1, 5, 100
+    )
+    layouts[2] = [(0, 6)]
+    units = units_of(SHOTS, SEGMENTS, 1, 99, 100, layouts=layouts)
+    windows = [unit for unit in units if unit.key[0] == "window" and unit.key[1] == 2]
+    assert [unit.name for unit in windows] == ["shot 3/3's window 1/1"]
+    assert ("window", 600) in windows[0].parts
+
+
 def test_units_of_the_first_unit_pays_against_the_start_phase() -> None:
     # The models' phase as the run finds them: a first unit pays unless they are in its phase.
     # The purpose was the first encode's term; an encode has none now (its change is in its

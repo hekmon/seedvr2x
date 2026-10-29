@@ -39,7 +39,6 @@ from seedvr2x.runtime.shot import (
     finite,
     merge_windows,
     sample_windows,
-    shot_layout,
 )
 from seedvr2x.runtime.stop import Stop
 from seedvr2x.runtime.tiling import ScratchError
@@ -92,14 +91,16 @@ def run_job(
 ) -> None:
     """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
     with its own seed (Shot.seed), its frames resized to target (job.target_size), as the job's
-    plan says (runtime/plan.py): its DiT windows capped at plan.window latents, its encodes and
-    decodes tiled or not; write(frames) takes the output frames as they come, (n, H', W', 3)
-    float32 in [0, 1], the segments' in turn; with several runs a shot, a shot's frames kept
-    between its runs come as uint16, the values the writers quantise a frame to
-    (writer.quantise), which they take as they are. dump(frame, values), when given, is told each
-    of those kept frames as its run decodes it, its index in the job and its float32 values, for
-    --dump-frames (DESIGN.md, Several runs of a shot: "Frames asked for in float are written by
-    the run that makes them"); the frames write is given as float32 it isn't told.
+    plan says (runtime/plan.py): its DiT windows capped at plan.window latents, or laid out as
+    the manifest records a run's (units.manifest.layouts: a run kept by its own cap when the plan
+    was made again for the memory free), its encodes and decodes tiled or not; write(frames) takes
+    the output frames as they come, (n, H', W', 3) float32 in [0, 1], the segments' in turn; with
+    several runs a shot, a shot's frames kept between its runs come as uint16, the values the
+    writers quantise a frame to (writer.quantise), which they take as they are. dump(frame,
+    values), when given, is told each of those kept frames as its run decodes it, its index in
+    the job and its float32 values, for --dump-frames (DESIGN.md, Several runs of a shot: "Frames
+    asked for in float are written by the run that makes them"); the frames write is given as
+    float32 it isn't told.
 
     Before each unit, the models are told its phase (Models.enter), which puts on the GPU what
     the plan has there for it.
@@ -191,6 +192,7 @@ def job_units(
         windows_done=manifest.windows_done,
         finished=manifest.finished,
         start=start,
+        layouts=manifest.layouts,
     )
 
 
@@ -313,7 +315,10 @@ def _sample(
     run = units.manifest.runs[index]
     shot = Shot(run.start, run.end)  # the frames the run is fed
     name = _name(units, shots, index)
-    layout = shot_layout(run.frames, plan.window)
+    # The run's windows as the record has them, which are the plan's cap's for a job never
+    # planned again for the memory free (DESIGN.md, Memory planner, A plan shapes the output a
+    # little: a run kept as made keeps its own).
+    layout = units.manifest.layouts[index]
     done = units.windows_done(index)
     latent = None if done == len(layout) else units.latent(index)
     encoded = done == len(layout) or latent is not None
@@ -476,7 +481,7 @@ def _decode(
     logger.debug("%s: decoding", name)
     started = _started(models)
     entering, term = _enter(models, "decode", progress, key)
-    merged = merge_windows(units.take_windows(index), shot_layout(run.frames, plan.window))
+    merged = merge_windows(units.take_windows(index), units.manifest.layouts[index])
     correction = None
     if copies is not None:
         paths = (units.copy_path(index), units.checksums_path(index))

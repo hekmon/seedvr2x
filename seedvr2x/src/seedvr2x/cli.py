@@ -1014,6 +1014,9 @@ def _run(args: argparse.Namespace) -> int:
         # for the limit set once it is made (memory.hold).
         reserve = memory.RESERVE
         kept_plan = None
+        # The recorded shape a resume planned again, no longer fitting the memory free, with
+        # --accept-env-change (_resume, _reshape); else None.
+        reshaped: Plan | None = None
         plan_record: dict[str, Any] | None = None
         if prior is not None and not planned(prior.recorded):
             kept_plan = _recorded_plan(
@@ -1037,13 +1040,15 @@ def _run(args: argparse.Namespace) -> int:
             # DiT's peak by the fit of the attention backend this run takes, today's on a
             # resume too (_attention).
             free = memory.reading(_free_memory(identity.device))
+            host = _host_available()
+            attention = _attention()
             try:
                 plan, peaks = planner.plan(
-                    *(free, target, shots, pins, _host_available()),
+                    *(free, target, shots, pins, host),
                     split=split,
                     numz_padding=numz_padding,
                     recorded=kept_plan,
-                    attention=_attention(),
+                    attention=attention,
                 )
             except planner.PlanError as error:
                 if kept_plan is None or error.shortfall is None:
@@ -1052,14 +1057,34 @@ def _run(args: argparse.Namespace) -> int:
                 # under --verbose (DESIGN.md, Memory planner, A plan shapes the output a
                 # little, decided on 2026-10-28).
                 logger.debug("%s", error)
-                raise JobError(_kept_refusal(error)) from None
+                if not args.accept_env_change:
+                    raise JobError(_kept_refusal(error)) from None
+                # With --accept-env-change, planned again for what is left (same place).
+                try:
+                    plan, peaks = planner.plan_again(
+                        *(free, target, shots, pins, host),
+                        recorded=kept_plan,
+                        refused=error,
+                        split=split,
+                        numz_padding=numz_padding,
+                        attention=attention,
+                    )
+                except planner.PlanError as again:
+                    logger.debug("%s", again)
+                    raise JobError(_replan_refusal(again)) from None
+                if (plan.window, plan.encode_tiles, plan.decode_tiles) != (
+                    kept_plan.window,
+                    kept_plan.encode_tiles,
+                    kept_plan.decode_tiles,
+                ):
+                    reshaped = kept_plan
             reserve = peaks.reading.reserve
             card = torch.cuda.get_device_name(identity.device)
             said = planner.said(
                 *(plan, peaks, card, target, shots, pins),
                 numz_padding=numz_padding,
                 quality=args.quality,
-                recorded=kept_plan is not None,
+                recorded=kept_plan is not None and reshaped is None,
             )
             for line in said:
                 logger.info("%s", line)
@@ -1115,7 +1140,7 @@ def _run(args: argparse.Namespace) -> int:
         # whose cuts changed, or whose shape did with the memory free, planned again
         # (_replan).
         try:
-            replanned = _resume(record, prior, final is not None)
+            replanned = _resume(record, prior, final is not None, reshaped, args.plan is not None)
         except JobError as error:
             logger.error("%s%s", error, _listed_anyway(args, listing))
             return 1
@@ -2745,8 +2770,29 @@ def _kept_refusal(error: "PlanError") -> str:
                 "quitting programs does not free that much on this card: the job needs a card"
                 " with more memory free"
             )
-    # The third way out, --accept-env-change planning the rest again (DESIGN.md, same place), is
-    # a line more here (B1-4b).
+    # The third way out (DESIGN.md, same place: "Without the flag the refusal names it").
+    lines.append(
+        "or run it again with --accept-env-change, which plans the rest of the job again for the"
+        " memory free now, its output from there no longer the uninterrupted run's bit for bit"
+    )
+    return "\n".join(lines)
+
+
+def _replan_refusal(error: "PlanError") -> str:
+    """The words of a refusal of a resume whose shape --accept-env-change planned again for the
+    memory free (planner.plan_again), which that memory still doesn't hold: that the job is kept
+    and the same command resumes it, what the plan still lacks as the planner words it, and how
+    to free it where the card's memory is what lacks. The pins on the command line are kept (a
+    pin is a setting), and the planner's refusal names what a pin lacks. PROVISIONAL (impl-v010,
+    2026-10-28: DESIGN.md says "refused as any plan the memory can't hold"): the planner's own
+    sentence, its figures with it, as DESIGN.md's refusal of a new job has them."""
+    lines = [
+        "the job is kept, nothing is lost, and the same command resumes it",
+        "its shape planned again for the memory free now, as --accept-env-change takes, still does"
+        f" not fit: {error}",
+    ]
+    if error.phase != "host":
+        lines.append(f"to free it, {FREE_THE_CARD}")
     return "\n".join(lines)
 
 
@@ -3419,13 +3465,17 @@ def _content(path: Path) -> dict[str, object]:
     return {"bytes": path.stat().st_size, "sha256": digest}
 
 
-def _taken_differences(record: "Manifest", prior: _Prior) -> tuple[list[str], list[str]]:
+def _taken_differences(
+    record: "Manifest", prior: _Prior, reshaping: bool = False
+) -> tuple[list[str], list[str]]:
     """How the job asked, as record holds it, differs from the one recorded (prior): the
     differences that make it another job, and those in a plan's shape (its plan and the windows
-    it gives each run), which a plan takes (_resume). The environment was compared before the
-    first pass; a plan's settings were accepted there (_prior), with what follows from them: its
-    shots' runs and windows, its segments, the output's format and size, and how the source is
-    read (--input-matrix, --input-sar)."""
+    it gives each run), which a plan takes (_resume). So does a job that has made units, when its
+    shape is planned again for the memory free (`reshaping`; _reshape): the plan's window cap and
+    tiles, and each run's windows and own cap, no other part of the plan. The environment was
+    compared before the first pass; a plan's settings were accepted there (_prior), with what
+    follows from them: its shots' runs and windows, its segments, the output's format and size,
+    and how the source is read (--input-matrix, --input-sar)."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import planned
 
@@ -3433,11 +3483,19 @@ def _taken_differences(record: "Manifest", prior: _Prior) -> tuple[list[str], li
 
     def reshaped(line: str) -> bool:
         # A plan's shape, made again, and the windows it gives each shot.
-        return plan and (
-            resume.section(line) == "plan"
-            # A shot's first run's windows, and with several runs a shot each later run's
-            # (manifest.SHOT_RUNS).
-            or re.match(r"shots\[\d+\](?:\.runs\[\d+\])?\.windows\b", line) is not None
+        if plan:
+            return (
+                resume.section(line) == "plan"
+                # A shot's first run's windows, and with several runs a shot each later run's
+                # (manifest.SHOT_RUNS).
+                or re.match(r"shots\[\d+\](?:\.runs\[\d+\])?\.windows\b", line) is not None
+            )
+        # A job with units made, its shape made again: what shapes the output alone (the
+        # compile flags stay as recorded), and the layouts and caps of the runs.
+        return reshaping and (
+            re.match(r"plan\.(?:window|encode_tiles|decode_tiles)\b", line) is not None
+            or re.match(r"shots\[\d+\](?:\.runs\[\d+\])?\.(?:windows|window_cap)\b", line)
+            is not None
         )
 
     def compared(line: str) -> bool:
@@ -3454,7 +3512,13 @@ def _taken_differences(record: "Manifest", prior: _Prior) -> tuple[list[str], li
     ]
 
 
-def _resume(record: "Manifest", prior: _Prior, assembles: bool = False) -> bool:
+def _resume(
+    record: "Manifest",
+    prior: _Prior,
+    assembles: bool = False,
+    reshaped: "Plan | None" = None,
+    looking: bool = False,
+) -> bool:
     """Take up the job recorded beside record, checked before its first pass (_prior): refused
     (JobError) unless the rest is the job asked too, what the first pass found and the layout
     following from it; its directory must be as the manifest says. Then record the environment
@@ -3476,13 +3540,24 @@ def _resume(record: "Manifest", prior: _Prior, assembles: bool = False) -> bool:
     made again whole"): its plan's shape may differ from the one recorded, and its shots' windows
     with it, which is no other job. Such a plan, and one planned again for its cuts (_prior),
     takes the new plan and layout at once (_replan): True then, the manifest rewritten; False for
-    a job taken up as it is recorded."""
+    a job taken up as it is recorded.
+
+    A job that has made units, `reshaped` the shape recorded and planned again for the memory free
+    (_run; --accept-env-change), is taken up in its new shape, and rewritten at once (_reshape):
+    True. `looking` (--plan): the new shape is only taken in memory, for the plan to print; nothing
+    is written and nothing discarded. A job recorded after a shape was planned again, with runs by
+    their own caps, is laid out by them first (resume.own_windows)."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import complete, planned
 
-    found, shape = _taken_differences(record, prior)
+    if reshaped is None:
+        resume.own_windows(record, prior.recorded)
+    found, shape = _taken_differences(record, prior, reshaped is not None)
     if found:
         raise _another_job(record.path, found, only_environment=False)
+    if reshaped is not None:
+        _reshape(record, prior, reshaped, looking)
+        return True
     if prior.replanned or shape:
         _replan(record, prior, shape)
         return True
@@ -3817,6 +3892,118 @@ def _finished_file(
         final,
     )
     return 1
+
+
+def _reshape(record: "Manifest", prior: _Prior, old: "Plan", looking: bool = False) -> None:
+    """Take up a job that has made units, its shape `old` planned again for the memory free now
+    (_run; --accept-env-change; DESIGN.md, Memory planner, A plan shapes the output a little,
+    decided on 2026-10-28): what still fits of the shape is kept and what is made, per run
+    (resume.reshape), the manifest rewritten at once with the new plan, the runs' layouts and the
+    change recorded (resume.shape_change), the environment's with it when it changed too: at once
+    like a plan's, in this run's environment, and not with the next unit. What a stop left is
+    discarded, as for any resume (resume.leftovers), with the windows of the runs made again, and
+    after the manifest is written: a manifest naming windows whose files are gone would be
+    refused, one not naming files that are there is only cleaned.
+
+    PROVISIONAL (impl-v010, 2026-10-28): DESIGN.md writes an environment change "with the next unit
+    made" and a shape planned again at once, and says nothing of the two at one start. Both are
+    written at once, in this run's environment, the environment's entry first and the shape's
+    after it: a manifest of the old environment and the new shape would need the first pass's
+    index (_taken_up) written in two minds, and the units of the old environment are told by the
+    entries' counts either way."""
+    from seedvr2x.runtime import resume
+
+    directory = record.path.parent
+    counts = resume.reshape(record, prior.recorded)
+    new = record.plan or {}
+    change = resume.shape_change(prior.recorded, old, _plan_of(new), counts)
+    shape = ", ".join(
+        f"{SHAPE_PARTS[name]} {_part_said(change['before']['plan'][name])} ->"
+        f" {_part_said(change['after']['plan'][name])}"
+        for name in change["after"]["plan"]
+    )
+    kept = (
+        f"kept: {_plural(change['segments_finished'], 'segment')} finished,"
+        f" {_plural(change['shots_encoded'], 'run')} encoded,"
+        f" {_plural(counts.windows_kept, 'window')} made and kept as they were"
+    )
+    made = (
+        f"made again, from their first: {_plural(counts.windows_discarded, 'window')} of runs begun"
+        " under a window cap that no longer fits"
+    )
+    # Smaller tiles drift in colour (DESIGN.md, Memory planner, A plan shapes the output a little);
+    # a window cap alone changes the joins, which the sentence doesn't claim to correct.
+    drift = "from here the output is not the uninterrupted run's bit for bit"
+    if "encode_tiles" in change["after"]["plan"] or "decode_tiles" in change["after"]["plan"]:
+        drift += (
+            ": smaller tiles drift slightly in colour, which --color-correction split corrects"
+            " for the most part"
+        )
+    if looking:
+        # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md is silent on --plan): a plan only looks
+        # (DESIGN.md, Memory planner: "--plan ... without running the job"), so the manifest is
+        # not rewritten and no window discarded; the plan prints what a run would do.
+        logger.warning(
+            "%s: its recorded shape no longer fits the memory free: a run of the same command with"
+            " --accept-env-change plans the rest of the job again for it: %s\nit would keep: %s\n"
+            "it would make again: %s\n%s\nnothing was written, nothing was discarded",
+            directory,
+            shape,
+            kept.removeprefix("kept: "),
+            made.removeprefix("made again, from their first: "),
+            drift,
+        )
+        return
+    discarded = resume.leftovers(record)
+    record.environment_changes = list(prior.recorded.get(resume.CHANGES, []))
+    if prior.changed:
+        record.environment_changes.append(
+            resume.environment_change(prior.recorded, record.environment)
+        )
+        logger.warning(
+            "%s: resumed in another environment, as accepted, which its manifest records at"
+            " once, with its new shape: %s",
+            directory,
+            "; ".join(prior.changed),
+        )
+    record.environment_changes.append(change)
+    if prior.known is None:
+        _write_index(directory, record.source)
+    record.write()
+    for path in discarded:
+        logger.debug("discarded %s", path)
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    logger.warning(
+        "%s: its recorded shape no longer fits the memory free; planned again for what is left,"
+        " as --accept-env-change takes: %s\n%s\n%s\n%s",
+        directory,
+        shape,
+        kept,
+        made,
+        drift,
+    )
+
+
+def _plan_of(record: dict[str, Any]) -> "Plan":
+    """The plan a manifest's plan record (Plan.record) holds, as a resume takes it."""
+    from seedvr2x.runtime.plan import Plan
+
+    return Plan.recorded(record)
+
+
+# The parts of a shape (Plan.record) as a log line names them.
+SHAPE_PARTS = {"window": "window cap", "encode_tiles": "encode", "decode_tiles": "decode"}
+
+
+def _part_said(value: Any) -> str:
+    """A part of a shape as a log line says it: a window cap in latents, a tile's side in pixels,
+    "none" for a pass untiled."""
+    if isinstance(value, dict):
+        return f"tiles of {cast(dict[str, int], value)['size']} px"
+    return "none" if value is None else f"{value} latents"
 
 
 def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:

@@ -10,6 +10,7 @@ import json
 import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -17,7 +18,7 @@ from typing import Any, cast
 from seedvr2x.media.assembly import work_file
 from seedvr2x.media.files import command_partial, partial_path
 from seedvr2x.media.source import Source
-from seedvr2x.runtime.job import JobError, OutputSegment, Shot
+from seedvr2x.runtime.job import JobError, OutputSegment, Shot, window_layout
 from seedvr2x.runtime.manifest import (
     ASSEMBLED,
     INDEX,
@@ -26,10 +27,12 @@ from seedvr2x.runtime.manifest import (
     SHOT_RUNS,
     STATE,
     SUMS,
+    WINDOW_CAP,
     Manifest,
     checksums_file,
     recorded_runs,
 )
+from seedvr2x.runtime.plan import Plan
 from seedvr2x.runtime.tiling import SCRATCH
 from seedvr2x.runtime.units import CHECKSUMS, COPY, KEPT, run_file, size
 
@@ -185,6 +188,7 @@ def recorded_job(path: Path, content: dict[str, Any], source: Source) -> Manifes
         cast(dict[str, Any], plan) if isinstance(plan, dict) else {},
     )
     adopt(job, content)
+    own_windows(job, content)
     return job
 
 
@@ -260,15 +264,119 @@ def environment_change(recorded: dict[str, Any], environment: dict[str, Any]) ->
         "accepted": datetime.now().astimezone().isoformat(timespec="seconds"),
         "before": before,
         "after": after,
+        **_made(recorded),
+    }
+
+
+def _made(recorded: dict[str, Any]) -> dict[str, int]:
+    """How far a recorded job had gone: its segments finished, its runs encoded and its windows
+    done. With more than one run a shot, runs encoded and their windows, under the fields' names
+    of before the option: a shot's first run is the shot's own record (manifest.SHOT_RUNS)."""
+    return {
         "segments_finished": sum(bool(segment["finished"]) for segment in recorded["segments"]),
-        # With more than one run a shot, runs encoded and their windows, under the fields' names
-        # of before the option: a shot's first run is the shot's own record (manifest.SHOT_RUNS).
         "shots_encoded": sum(
             bool(run["encoded"]) for shot in recorded["shots"] for run in recorded_runs(shot)
         ),
         "windows_done": sum(
             run["windows_done"] for shot in recorded["shots"] for run in recorded_runs(shot)
         ),
+    }
+
+
+@dataclass
+class Reshaped:
+    """What a job resumed with its shape planned again for the memory free kept and what it made
+    again (reshape): the windows of the runs it kept as made, those it discards, and the runs
+    whose windows are laid out again, begun or not."""
+
+    windows_kept: int = 0
+    windows_discarded: int = 0
+    runs_kept: int = 0  # runs whose windows were all done: kept by their own layout
+    runs_laid_out: int = 0  # runs whose windows begun under another cap are made again
+
+
+def own_windows(manifest: Manifest, recorded: dict[str, Any]) -> None:
+    """Lay out each run of manifest, a job asked, by the window cap its record gives it
+    (manifest.WINDOW_CAP), where it has one: a job resumed after its shape was planned again for
+    the memory free keeps runs by the cap they were made under (reshape), whose windows the job's
+    plan no longer lays out. A job never planned again records no cap, and nothing is changed;
+    the resume's comparison then checks the layout as it always did. Refused (JobError) a cap no
+    layout comes of."""
+    runs = [run for shot in recorded["shots"] for run in recorded_runs(shot)]
+    if len(runs) != len(manifest.runs):
+        return  # adopt names the difference
+    layouts = list(manifest.layouts)
+    for index, run in enumerate(runs):
+        cap: Any = run.get(WINDOW_CAP)
+        if cap is None:
+            continue
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+            raise JobError(f"{manifest.path}: not a window cap seedvr2x records: {cap!r}")
+        latents = layouts[index][-1][1]
+        try:
+            layouts[index] = window_layout(latents, cap)
+        except ValueError as error:
+            raise JobError(f"{manifest.path}: a window cap of {cap}: {error}") from None
+        manifest.window_caps[index] = cap
+    manifest.layouts = layouts
+
+
+def reshape(manifest: Manifest, recorded: dict[str, Any]) -> Reshaped:
+    """Take how far the recorded job went into manifest, a job asked whose plan is a new shape of
+    the one recorded, planned again for the memory free (--accept-env-change; DESIGN.md, Memory
+    planner, A plan shapes the output a little, decided on 2026-10-28), and decide each run's
+    windows: manifest's layouts are the new plan's. Per run:
+    - every window done: kept, by the layout it was made under, which it records as its own cap
+      (manifest.WINDOW_CAP) where it isn't the new plan's; its decode merges its windows by it;
+    - none done: laid out by the new plan, nothing to discard;
+    - some done, under the new plan's layout: kept;
+    - some done, under another: its windows discarded, made again from its first, by the new
+      layout; its latent stays, kept while its windows aren't all done (run._sample).
+    A latent encoded stays whatever tiles made it, and a segment finished is kept (adopt)."""
+    adopt(manifest, recorded)
+    counts = Reshaped()
+    layouts = list(manifest.layouts)
+    for index, entry in enumerate(run for shot in recorded["shots"] for run in recorded_runs(shot)):
+        was = [(int(first), int(end)) for first, end in entry["windows"]]
+        now = list(layouts[index])
+        done: int = entry["windows_done"]
+        if done == len(was) and was != now:
+            # The cap it was made under is its longest window: a layout is the same under any cap
+            # from its longest window up (planner._own_cap).
+            cap = max(end - first for first, end in was)
+            if window_layout(was[-1][1], cap) != was:
+                raise JobError(f"{manifest.path}: a layout seedvr2x lays out for no cap: {was}")
+            layouts[index], manifest.window_caps[index] = was, cap
+            counts.runs_kept += 1
+            counts.windows_kept += done
+        elif done == len(was) or (done and was == now):
+            counts.windows_kept += done
+        elif done:
+            manifest.windows_done[index] = 0
+            counts.windows_discarded += done
+            counts.runs_laid_out += 1
+    manifest.layouts = layouts
+    return counts
+
+
+def shape_change(
+    recorded: dict[str, Any], old: Plan, new: Plan, counts: Reshaped
+) -> dict[str, Any]:
+    """The record of a resume whose shape was planned again for the memory free, accepted
+    (--accept-env-change): when, the parts of the shape that changed with their values before and
+    after (the window cap, the encode's tiles, the decode's), how far the job had gone, and what
+    was kept and what made again of its windows (DESIGN.md, Pause and resume, Manifest:
+    `environment_changes` says "when, each field that changed with its values before and after,
+    and how many segments, shots and windows were already made")."""
+    was, now = old.record(), new.record()
+    parts = [name for name in ("window", "encode_tiles", "decode_tiles") if was[name] != now[name]]
+    return {
+        "accepted": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "before": {"plan": {name: was[name] for name in parts}},
+        "after": {"plan": {name: now[name] for name in parts}},
+        **_made(recorded),
+        "windows_kept": counts.windows_kept,
+        "windows_discarded": counts.windows_discarded,
     }
 
 
