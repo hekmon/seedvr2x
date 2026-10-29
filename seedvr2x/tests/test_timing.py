@@ -661,8 +661,9 @@ def test_would_end_needs_an_estimate_for_every_unit() -> None:
 
 
 def test_assembly_seconds() -> None:
-    # The masters read, written and read back, the source read twice: (3 x 1000 + 2 x 500) / 100.
-    assert assembly_seconds(100.0, 1000, 500) == 40.0
+    # The masters hashed, read, written and read back, the source read twice:
+    # (4 x 1000 + 2 x 500) / 100.
+    assert assembly_seconds(100.0, 1000, 500) == 50.0
     assert assembly_seconds(50.0, 0, 0) == 0.0
 
 

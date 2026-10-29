@@ -2124,18 +2124,20 @@ def test_the_line_before_the_rehearsal_says_what_it_reads_and_for_about_how_long
 ) -> None:
     # DESIGN.md, Output, Assembly, decided on 2026-10-28: "a line says what the rehearsal reads
     # before it does". The duration is the source's size over a timed read of a sample of it
-    # (assembly.reading_said): a few seconds under ten, seconds to the nearest five up to ninety,
-    # minutes after; a read that fails is said with its reason, no duration invented.
+    # (assembly.reading_said): at least a few seconds under ten, at least about seconds to the
+    # nearest five up to ninety, minutes after (a floor: the remux writes too, and a sample read
+    # from the cache is fast; review, 2026-10-28); a read that fails is said with its reason, no
+    # duration invented.
     source = tmp_path / "in.mkv"
     source.write_bytes(bytes(3 * 2**20))
     head = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
-    assert assembly.reading_said(source) == f"{head} its 0.0 GiB, a few seconds"
+    assert assembly.reading_said(source) == f"{head} its 0.0 GiB, at least a few seconds"
     seconds = iter([9.9, 10.0, 66.0, 89.0, 372.0, 5400.0])
     monkeypatch.setattr(assembly, "_read_seconds", lambda *given: next(seconds))
     said = [assembly.reading_said(source).removeprefix(f"{head} its 0.0 GiB, ") for _ in range(6)]
     assert said == [
-        *("a few seconds", "about 10 s", "about 65 s", "about 90 s", "about 6 min"),
-        "about 90 min",
+        *("at least a few seconds", "at least about 10 s", "at least about 65 s"),
+        *("at least about 90 s", "at least about 6 min", "at least about 90 min"),
     ]
 
     def unreadable(*given: object) -> float:

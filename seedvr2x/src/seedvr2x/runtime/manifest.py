@@ -194,7 +194,7 @@ class Manifest:
     windows_done: list[int] = field(default_factory=list[int])  # each run's windows kept
     finished: list[bool] = field(default_factory=list[bool])  # each segment whole
     sizes: list[int | None] = field(default_factory=list[int | None])  # finished ones' bytes
-    # Finished ones' SHA-256 (units.digest), read back at the assembly (cli._intact): None for a
+    # Finished ones' SHA-256 (units.digest), read back at the assembly (cli._damaged): None for a
     # segment not finished, or recorded by code before the field, which a code change refuses
     # to resume (settings.code) anyway.
     hashes: list[str | None] = field(default_factory=list[str | None])
@@ -280,7 +280,7 @@ class Manifest:
 
     def segment_damaged(self, index: int) -> None:
         """Record segment `index`, finished, as not finished again, its bytes no longer its
-        record's (cli._intact; DESIGN.md, Output, Assembly, decided on 2026-10-12: "a damaged one
+        record's (cli._damaged; DESIGN.md, Output, Assembly, decided on 2026-10-12: "a damaged one
         made again"), and write the manifest. Its shots' units went when it was finished, so
         its runs are recorded as not begun: the next run encodes, samples and decodes them
         again."""

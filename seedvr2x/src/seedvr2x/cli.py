@@ -14,7 +14,7 @@ import time
 import warnings
 from bisect import bisect_right
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from fractions import Fraction
 from importlib.metadata import version
@@ -1096,6 +1096,9 @@ def _run(args: argparse.Namespace) -> int:
                 numz_padding=numz_padding,
                 quality=args.quality,
                 recorded=kept_plan is not None and reshaped is None,
+                layouts=None
+                if prior is None
+                else _own_layouts(recorded_as(None, plan.window), prior, reshaped),
             )
             for line in said:
                 logger.info("%s", line)
@@ -2244,12 +2247,15 @@ def _assemble(
     if until is not None:
         rate = rate if probed else _disk_rate(final.parent)
         cost = None if rate is None else _assembly_estimate(record, rate)
+    elif not probed:
+        rate = None  # not measured: the check's line then gives the bytes alone
     with Stop(until) as stop:
         stop.asked = asked
         try:
             stop.check(cost, f"the assembly of {final}")
             stop.unit = f"the assembly of {final}"
             started = time.monotonic()
+            logger.info("%s", _checking_said(paths, rate))
             damaged = _damaged(record, paths)
             if damaged:
                 _remake(record, paths, damaged, final)
@@ -2310,6 +2316,22 @@ def _assemble(
             return 1
         _clear(directory, record.content())
     return 0
+
+
+def _checking_said(paths: Sequence[Path], rate: float | None) -> str:
+    """The line said before the segments' bytes are hashed again (_damaged), which reads every
+    master once: how many, their bytes, and for about how long where the disk's rate is known
+    (`rate`, bytes per second; the assembly's estimate counts this read, timing.assembly_seconds),
+    the bytes alone where it isn't. Said because that read is silent otherwise, 30 to 70 minutes
+    on the masters of a two-hour film on a slow disk (review of the assembly, 2026-10-28)."""
+    from seedvr2x.runtime.timing import spoken
+
+    total = 0
+    for path in paths:
+        with suppress(OSError):  # a missing segment is found by _damaged
+            total += path.stat().st_size
+    said = f"checking the bytes of {_plural(len(paths), 'segment')}, {total / 1024**3:.2f} GiB"
+    return said if rate is None else f"{said}, about {spoken(total / rate)}"
 
 
 def _damaged(record: "Manifest", paths: Sequence[Path]) -> list[int]:
@@ -2878,14 +2900,25 @@ def _early_memory(
             return
         logger.debug("before the checks, NVML's %.2f GiB free: %s", card / memory.GIB, error)
         minutes = max(1, math.ceil(_checks_ahead(args, rehearses) / 60))
+        # With --accept-env-change, a resume still short at the plan is planned again for the
+        # memory free (DESIGN.md, Memory planner, decided on 2026-10-28), not refused: the second
+        # line says that, and no more than the freeing the user can still do meanwhile.
+        if args.accept_env_change:
+            then = (
+                "the rest of the job is planned again for the memory free if it is still short at"
+                " the plan (--accept-env-change), unless it is freed meanwhile, within the"
+                " checks now running (about %d min): to free it, %s"
+            )
+        else:
+            then = (
+                "to free it, %s; the checks now running take about %d min, within which to free it"
+            )
         logger.warning(
             "the card's free memory, read now, does not hold the recorded plan: %s lacks %s GiB of"
-            " the card's memory\nto free it, %s; the checks now running take about %d min, within"
-            " which to free it",
+            " the card's memory\n" + then,
             short.what,
             short.short,
-            FREE_THE_CARD,
-            minutes,
+            *((minutes, FREE_THE_CARD) if args.accept_env_change else (FREE_THE_CARD, minutes)),
         )
     except (JobError, KeyError, TypeError, ValueError) as error:
         logger.debug("the recorded plan isn't judged before the checks: %s", error)
@@ -3875,10 +3908,14 @@ def _finished_file(
 
     recorded = prior.recorded
     made: Any = recorded.get(ASSEMBLED)
+    # The way out: a file in its place is refused with no manifest beside it (_output), so
+    # the advice names both where the file exists, the manifest alone where it is missing
+    # (review of the finished-file refusals, 2026-10-28: the manifest alone took two runs).
+    remove = f"{final.name} and {beside.name}" if os.path.lexists(final) else beside.name
     if not complete(recorded) or not isinstance(made, dict):
         raise JobError(
             f"{beside}: not the manifest of a finished file, a record of its assembly missing:"
-            f" {final} is not replaced; remove {beside.name} to make the file again, or choose"
+            f" {final} is not replaced; remove {remove} to make the file again, or choose"
             " another -o"
         )
     _declared_job(args, beside, recorded, declared, target)
@@ -3887,7 +3924,7 @@ def _finished_file(
     if size != expected:
         raise JobError(
             f"{final} {'is missing' if size is None else f'holds {size} bytes'}, its manifest"
-            f" {beside.name} beside it says {expected}: not replaced; remove {beside.name} to"
+            f" {beside.name} beside it says {expected}: not replaced; remove {remove} to"
             " make the file again, or choose another -o"
         )
     if prior.changed:
@@ -3908,6 +3945,29 @@ def _finished_file(
         final,
     )
     return 1
+
+
+def _own_layouts(
+    probe: "Manifest", prior: "_Prior | None", reshaped: "Plan | None"
+) -> list[list[tuple[int, int]]] | None:
+    """Each shot's windows where a resumed job holds runs of a window cap of their own, else None:
+    the job laid out as _resume will lay it out (resume.reshape for a shape planned again,
+    `reshaped`, else resume.own_windows), on `probe`, a record of this run's plan that is never
+    written, so that the plan's windows line counts the windows the job will run (planner.said).
+    A shot's windows are its first run's, which covers the whole shot."""
+    from seedvr2x.runtime import resume
+    from seedvr2x.runtime.manifest import planned
+
+    if prior is None or planned(prior.recorded):
+        return None
+    if reshaped is None:
+        resume.own_windows(probe, prior.recorded)
+    else:
+        resume.reshape(probe, prior.recorded)
+    if all(cap is None for cap in probe.window_caps):
+        return None
+    first = {shot: run for run, shot in reversed(list(enumerate(probe.run_shots)))}
+    return [[*probe.layouts[first[shot]]] for shot in range(len(probe.shots))]
 
 
 def _reshape(record: "Manifest", prior: _Prior, old: "Plan", looking: bool = False) -> None:

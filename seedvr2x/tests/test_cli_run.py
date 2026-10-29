@@ -2236,6 +2236,11 @@ def test_a_resume_short_of_memory_is_planned_again_with_accept_env_change(
     # Only the window cap changed: the colour drift of smaller tiles is not claimed.
     assert said.endswith("from here the output is not the uninterrupted run's bit for bit")
     assert "tiles" not in said.split("\n")[-1] and "split" not in said
+    # The plan's windows line counts the windows the job runs, the first shot's two under its own
+    # cap of 9 and the second's three under 7: 0 of 2 shots in one window and 3 joins, where the
+    # new plan's cap alone would count 4 (review, 2026-10-28).
+    (line,) = [m for m in caplog.messages if m.startswith("plan: windows: ")]
+    assert ": 0 of 2 shots in one window, 3 joins; " in line
     changed = json.loads(manifest.read_text())
     assert changed["plan"]["window"] == 7
     first, second = changed["shots"]
@@ -2259,6 +2264,9 @@ def test_a_resume_short_of_memory_is_planned_again_with_accept_env_change(
     steps.calls.clear()
     assert upscale(tmp_path, source_path, "out", *options) == 0
     assert steps.calls == ["window 57:2", "decode 0", "decode 57"]
+    # The next resume counts the same from the layouts it holds, and says the record kept.
+    (line,) = [m for m in caplog.messages if m.startswith("plan: windows: ")][-1:]
+    assert ": 0 of 2 shots in one window, 3 joins; " in line
     assert indexes(out / "seg_000000.mkv") == list(range(114))
     finished = json.loads(manifest.read_text())
     assert finished["shots"][0]["window_cap"] == 9 and finished["environment_changes"] == [entry]
@@ -2521,6 +2529,38 @@ def test_a_resume_short_of_memory_is_warned_of_before_the_checks(
     # The job goes on from where it stopped (a .mkv path's segments are the whole job's, not
     # --min-segment's).
     assert steps.calls[0] == "encode 4" and steps.calls[-1].startswith("decode")
+
+
+def test_the_early_warning_given_accept_env_change_says_what_the_plan_then_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # With --accept-env-change a resume still short at the plan is planned again for the memory
+    # free, not refused: the early warning's second line says so (one line), still how to free
+    # the card meanwhile and for about how long; its first line is the same.
+    source_path = job(tmp_path, monkeypatch)
+    options = (*JOB[:4], "--accept-env-change")
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *options)
+    steps.stop = None
+    steps.calls.clear()
+    from seedvr2x.runtime import memory
+
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    early_card(monkeypatch, encode + planner.MARGIN - GIB // 4 + memory.CONTEXT)
+    mark_checks(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    warned = [m for m in caplog.messages if "does not hold the recorded plan" in m]
+    assert warned == [
+        "the card's free memory, read now, does not hold the recorded plan: the encode lacks 0.26"
+        " GiB of the card's memory\n"
+        "the rest of the job is planned again for the memory free if it is still short at the"
+        " plan (--accept-env-change), unless it is freed meanwhile, within the checks now running"
+        f" (about 2 min): to free it, {cli.FREE_THE_CARD}"
+    ]
 
 
 def test_a_shortfall_no_programs_cure_says_so() -> None:

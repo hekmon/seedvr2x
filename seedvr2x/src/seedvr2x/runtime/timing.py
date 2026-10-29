@@ -476,12 +476,15 @@ def disk_rate(directory: Path) -> float:
 def assembly_seconds(rate: float, masters: int, source: int) -> float:
     """A one-file output's assembly (media/assembly.assemble), in seconds, at the disk's rate
     (disk_rate, bytes per second), from the bytes its masters take, `masters`, and the source's,
-    `source`: the join reads the masters and writes them out, a stream copy, and the check
-    reads the file back, three times the masters' bytes; the source is read twice, once for its
-    other streams alone (the reference the result is checked against), once by the join. Every
-    byte counted at the write's rate, a disk reading no slower than it writes.
-    PROVISIONAL (implementation, 2026-10-21)."""
-    return (3 * masters + 2 * source) / rate
+    `source`: the masters are read by the hash check that precedes the join (cli._damaged),
+    read again by the join, which writes them out, a stream copy, and the check reads the file
+    back, four times the masters' bytes; the source is read twice, once for its other streams
+    alone (the reference the result is checked against), once by the join. Every byte counted
+    at the write's rate, a disk reading no slower than it writes.
+    PROVISIONAL (implementation, 2026-10-21; the hash check's read added 2026-10-28, review of
+    the assembly's silent hashing: 30 to 70 minutes of it on a long film's masters on a slow
+    disk)."""
+    return (4 * masters + 2 * source) / rate
 
 
 @dataclass(frozen=True)

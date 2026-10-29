@@ -425,9 +425,9 @@ def test_assembly_is_the_job_s_last_unit(
     work = tmp_path / "out.mkv.work"
     assert progress(work)[0] == [True, True]
     assert not (tmp_path / "out.mkv").exists()
-    # Its estimate: the masters' bytes three times and the source's twice, at the disk's rate.
+    # Its estimate: the masters' bytes four times and the source's twice, at the disk's rate.
     masters = sum(segment["bytes"] for segment in manifest(work)["segments"])
-    cost = (3 * masters + 2 * source_path.stat().st_size) / RATE
+    cost = (4 * masters + 2 * source_path.stat().st_size) / RATE
     assert cost * MARGIN > 60  # more than the minute the segments left
     assert (
         f"stopped before the assembly, which wouldn't finish by {date(deadline)} (--until):"
@@ -451,6 +451,12 @@ def test_assembly_is_the_job_s_last_unit(
     ASKED.clear()
     later = clocked.now() + timedelta(minutes=60)
     assert upscale(tmp_path, source_path, "out.mkv", *JOB, "--until", f"{later:%H:%M}") == 0
+    # The masters' hash check, which reads them once more, is said first with its time, from the
+    # rate the estimate uses (cli._checking_said; review of the assembly, 2026-10-28).
+    assert (
+        f"checking the bytes of 2 segments, {masters / 1024**3:.2f} GiB,"
+        f" about {spoken(masters / RATE)}"
+    ) in caplog.messages
     assert made.calls == [] and "models" not in ASKED
     assert (tmp_path / "out.mkv").exists() and not work.exists()
 
@@ -757,20 +763,20 @@ def test_plan_of_the_assembly_alone(
     )
     work = tmp_path / "out.mkv.work"
     masters = sum(segment["bytes"] for segment in manifest(work)["segments"])
-    cost = (3 * masters + 2 * source_path.stat().st_size) / RATE
+    cost = (4 * masters + 2 * source_path.stat().st_size) / RATE
     ASKED.clear()
     clocked.calibrated.clear()
     clocked.steps.calls.clear()
     caplog.clear()
     options = (*JOB, "--plan", "plan.txt")
-    # Time enough: the assembly ends 3 min 48 s after the clock's 22:10, at 22:13:48.
+    # Time enough: the assembly ends 4 min 28 s after the clock's 22:10, at 22:14:28.
     far = clocked.now() + timedelta(minutes=60)
     assert upscale(tmp_path, source_path, "out.mkv", *options, "--until", f"{far:%H:%M}") == 0
     assert (
         f"time: the assembly alone is left, about {spoken(cost)} at the rate its disk writes at"
     ) in caplog.text
-    assert f"--until: by its estimate the job ends by {date(far)}, at about 22:13" in caplog.text
-    # Not enough: begun now, it would end at 22:14:22 with the 15% more, after 22:13.
+    assert f"--until: by its estimate the job ends by {date(far)}, at about 22:14" in caplog.text
+    # Not enough: begun now, it would end at 22:15:08 with the 15% more, after 22:13.
     caplog.clear()
     near = clocked.now() + timedelta(minutes=3)
     assert upscale(tmp_path, source_path, "out.mkv", *options, "--until", f"{near:%H:%M}") == 0

@@ -1433,6 +1433,7 @@ def said(
     numz_padding: bool = False,
     quality: str = "standard",
     recorded: bool = False,
+    layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
 ) -> list[str]:
     """The plan as --plan prints it and every run and resume logs it, before the first unit,
     a line per choice in plain words (DESIGN.md, Memory planner, Every choice of the plan is
@@ -1451,7 +1452,14 @@ def said(
     that the output stays bit for bit (plan's `recorded`): their lines say so in place of the
     rule. A window the planner shortened for the host's memory, tiles it shrank for it, say what
     the card alone gives and why it isn't taken (Peaks.shortened, Peaks.shrunk). The lines stay
-    short, one terminal line where they can, two at most; the manual's words."""
+    short, one terminal line where they can, two at most; the manual's words.
+
+    layouts: each shot's windows (latents [start, end)) where a job holds runs of its own window
+    cap, made under a cap the plan no longer lays out (manifest.WINDOW_CAP; a shape planned again
+    for the memory free, DESIGN.md, Memory planner, decided on 2026-10-28): the line's shots in
+    one window and its joins are counted from them, not by the plan's cap, which they would
+    otherwise misstate (review of the plan's lines, 2026-10-28). None for every other job, whose
+    line is the plan's alone."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
@@ -1459,9 +1467,13 @@ def said(
     height, width = job.padded
     out_height, out_width = output_size(target)
     frames = Counter(shot.frames for shot in shots)
-    windows = {count: len(shot_layout(count, plan.window)) for count in frames}
-    whole = sum(number for count, number in frames.items() if windows[count] == 1)
-    joins = sum((windows[count] - 1) * number for count, number in frames.items())
+    if layouts is None:
+        windows = {count: len(shot_layout(count, plan.window)) for count in frames}
+        whole = sum(number for count, number in frames.items() if windows[count] == 1)
+        joins = sum((windows[count] - 1) * number for count, number in frames.items())
+    else:
+        whole = sum(1 for layout in layouts if len(layout) == 1)
+        joins = sum(len(layout) - 1 for layout in layouts)
     lines = [*_card_said(card, peaks)]
     lines.append(
         f"frames: {out_width}x{out_height} padded to {width}x{height} for the model,"

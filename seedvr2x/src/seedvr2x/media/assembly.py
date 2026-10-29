@@ -1075,9 +1075,10 @@ def reading_said(source: Path) -> str:
     of SAMPLE bytes from its middle, plain file reads, the range dropped from the page cache
     first where the system lets it, so that a file read a moment ago isn't timed from memory
     (posix_fadvise: a mount that ignores it, WSL's, may still answer from memory, the figure then
-    short). The remux itself reads the whole source and writes the other streams, so the figure
-    is a floor; the line says "about". A read that fails is said with its reason, and no
-    duration given."""
+    short: on a resume the source was hashed just before, so likely cached). The remux itself
+    reads the whole source and writes the other streams, so the figure is a floor: the line
+    says "at least" (review of the assembly, 2026-10-28: "a few seconds" given for minutes). A
+    read that fails is said with its reason, and no duration given."""
     size = source.stat().st_size
     what = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
     what += f" its {size / 2**30:.1f} GiB"
@@ -1086,10 +1087,10 @@ def reading_said(source: Path) -> str:
     except OSError as error:
         return f"{what}, for a time not estimated ({error})"
     if seconds < 10:
-        return f"{what}, a few seconds"
+        return f"{what}, at least a few seconds"
     if seconds < 90:
-        return f"{what}, about {round(seconds / 5) * 5} s"
-    return f"{what}, about {round(seconds / 60)} min"
+        return f"{what}, at least about {round(seconds / 5) * 5} s"
+    return f"{what}, at least about {round(seconds / 60)} min"
 
 
 def _read_seconds(source: Path, size: int) -> float:

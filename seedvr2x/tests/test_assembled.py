@@ -448,6 +448,7 @@ def test_a_damaged_segment_is_made_again_then_the_file_assembled(
     # unfinished with its file and checksums gone, the others untouched; the next run makes it
     # again from its shots (encode, windows and decode of the shots it holds), then assembles a
     # file with the frames of the uninterrupted run's.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
     source = film_job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source, "whole.mkv", *FILM) == 0
     steps.calls.clear()
@@ -467,6 +468,13 @@ def test_a_damaged_segment_is_made_again_then_the_file_assembled(
     caplog.clear()
     assert upscale(tmp_path, source, "x.mkv", *FILM) == 1
     assert steps.calls == [] and not final.exists()
+    # The hashing reads every master once, silent otherwise: one line says it first (review of
+    # the assembly, 2026-10-28), with the bytes alone where no --until measured the disk's rate.
+    [checking] = [m for m in caplog.messages if m.startswith("checking the bytes of")]
+    assert re.fullmatch(r"checking the bytes of 4 segments, \d+\.\d\d GiB", checking)
+    assert caplog.messages.index(checking) < next(
+        i for i, m in enumerate(caplog.messages) if "damaged, its bytes" in m
+    )
     assert f"{segment}: damaged, its bytes are not those recorded when it was finished" in (
         caplog.text
     )
@@ -776,13 +784,24 @@ def test_a_finished_file_missing_or_changed_is_not_replaced(
     assert f"{final} holds {len(whole) - 1} bytes, its manifest x.mkv.manifest.json beside it" in (
         text
     )
-    assert f"says {len(whole)}: not replaced; remove x.mkv.manifest.json to make the file" in text
+    assert f"says {len(whole)}: not replaced; remove x.mkv and x.mkv.manifest.json to make" in text
     assert final.read_bytes() == whole[:-1] and record.read_bytes() == kept
     final.unlink()
     text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
     assert f"{final} is missing, its manifest x.mkv.manifest.json beside it says" in text
+    assert "not replaced; remove x.mkv.manifest.json to make the file" in text  # the record alone
     assert not final.exists() and record.read_bytes() == kept and passes == []
-    # The record removed, the file's name is free: a new job makes it again.
+    # The record alone removed, the truncated file in its place, the next run refuses a file
+    # with no manifest: the advice with the file in place names both, and followed to the letter
+    # the next run makes a new job and the file (review, 2026-10-28).
+    final.write_bytes(whole[:-1])
+    record.unlink()
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert "a file with no x.mkv.manifest.json beside it: not replaced" in text
+    record.write_bytes(kept)
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert "remove x.mkv and x.mkv.manifest.json to make the file" in text
+    final.unlink()
     record.unlink()
     assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
     assert final.stat().st_size == len(whole) and record.is_file()
