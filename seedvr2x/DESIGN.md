@@ -238,6 +238,26 @@ rest to mend (decided on 2026-10-28, to be built):
   came twice. A run says the date in a line when it changes, and the clock's change when the
   clock moves.
 
+A whole default run read on the RTX 5090 on 2026-10-29 left lines a user can't read, mended in
+the same batch (decided on 2026-10-29): what a user does nothing with goes under `--verbose`,
+and the plan's lines stay, in plain words:
+- the conversions' fingerprint, every run's first line: under `--verbose`;
+- the calibration's figures, each kind's constant and rate: under `--verbose`, its line saying
+  what it is for and how long it took;
+- the rehearsal says what it is for: the source's other streams (audio, subtitles, a cover)
+  copied once ahead, so that one the finished file can't take is found then, not after the
+  night's work;
+- the assembly's time: about how long joining the segments will take, its rate and its count
+  of the masters under `--verbose`;
+- the memory line: what the run holds to and why, what is free less the margin, the driver's
+  own figure under `--verbose` (its warnings already say what it lends);
+- the shots' line: the cuts found, and the places the detector is less sure of, which
+  `--plan` lists, the threshold said as `--cut-threshold`'s;
+- the plan's lines for the VAE's room, the DiT in the VAE's passes and the scratch: each in
+  the manual's words, what it is for first, its figure after;
+- a duration said before the run has measured its clock's ratio comes from the wall clock, as
+  the lines' times do: "models loaded in 88.2 s" was said for 79 s.
+
 ### Language: all Python
 Every layer is Python, in one process per job. seedvr2x stands alone; with sptenc, the two
 connect through files.
@@ -2270,6 +2290,14 @@ first pass, whose shots are its input, and before the models load:
       jump is explained, on the 96 GB card too.
 
     The plan's record keeps both flags: compile_vae as the user sets it, compile_dit false.
+    A job that `--compile` can't run within the shapes measured compiled is refused, never run
+    plain in its place (decided on 2026-10-29): a pin beyond them, or no compiled plan fitting
+    where a plain one would. The refusal names the pass and the shapes measured, and advises
+    the same command without `--compile`, or with the pin within them, each on a line of its
+    own; the first pass is kept, as after any refusal, and `--plan` says the same. The modules
+    `--compile` brings in (inductor's) count in the environment only between two runs that
+    both compile: a plan switched to or from `--compile` is planned again from its record, as
+    for a pin, with no flag asked.
   - **A size that doesn't fit is refused, never degraded.** When the smallest window, 5
     latents, doesn't fit the DiT's phase with every block swapped, the job is refused before
     the run; no pixel cross-fade stands in (see [Pipeline](#pipeline-per-shot)).
@@ -2324,7 +2352,7 @@ first pass, whose shots are its input, and before the models load:
     warm-up first, at the job's largest shapes, the process's first encode costing 3.4 s more
     and its first window 1.5 s more on an RTX 5090; then each kind at two lengths, since one
     length can't give both the constant and the rate: encodes of 5 frames and a second length
-    (below), windows of 2 latents and of the job's longest, decodes of 5 and 13 frames; the
+    (below), windows of 2 latents and a longer length, decodes of 5 and 13 frames; the
     noise's draw timed alone; each term the median of the changes the steps make (built on
     2026-10-23). It counts as a first ratio of 1 among the last 5, and a resumed run's first
     seek isn't counted. Every run runs it, `--plan` included, its cost said in its line
@@ -2333,10 +2361,20 @@ first pass, whose shots are its input, and before the models load:
     - It took 47–56 s at 1080p and 43–49 s at 720p on an RTX 5090: a short job pays a large
       share (a 2-minute 720p job 49 s more). Its cost follows the job's longest window, not
       the size: 138 s on that card at 4K, its windows of 5 latents, but 826 s on the 96 GB
-      card at 1080p, a long shot's windows of 91 latents, its clock capped. To shorten
-      wherever a unit is long, at any size (decided on 2026-10-23, to be built and measured
-      on the RTX 5090): each kind's longer length by time, as an encode's second length is,
-      and the warm-up counted as a sample where its first call's cost is small against it.
+      card at 1080p, a long shot's windows of 91 latents, its clock capped. Shortened where a
+      unit is long (decided on 2026-10-23, built on 2026-10-29):
+      - a window's longer length by time, about 3 s, as an encode's second length is, but
+        never under the job's longest or 30 latents, whichever is less: the DiT's attention
+        window grows up to 30 latents, so a shorter sample misses a long window's rate, and
+        on the RTX 5090 a 5-latent one put the encodes 10% high, an encode's sample
+        following it;
+      - the warm-up counted as the longer sample where its first call's cost is under 5% of
+        it, the encode's less that cost;
+      - decodes kept at 5 and 13 frames: `split`'s correction needs an encode of the decode's
+        length, which would cost more than it saves.
+      So the saving is in windows over 30 latents, about half their cost (on the 96 GB card's
+      91, two long calls become one); none at 4K on the RTX 5090 (160 s against 159), where
+      a minute of video takes over an hour, the calibration about 3% of it.
   - Each kind's two lengths are measured as most of its units come in a run (decided on
     2026-10-22, built on 2026-10-23):
     - A window's and a decode's after a unit of their own kind, the first after a change of
@@ -2353,7 +2391,10 @@ first pass, whose shots are its input, and before the models load:
       the cut lists of 12 sources (36 to 68% by source). Under a placement plan (blocks
       swapped, the VAE away in the DiT's phase), leaving the DiT's phase costs more than
       leaving the decode's, so the encodes that follow a decode are estimated over by the
-      difference: not measured.
+      difference: measured on 2026-10-29 on the RTX 5090 (a 1080p job twice, 14 to 31 blocks
+      swapped), 1.6–1.9% over in total, 0.8–1.3 s a unit, within a unit's scatter (a median
+      of 2.9%) and on `--until`'s safe side. `--quality maximum`'s encodes came out 1.6%
+      under, its whole job 2.8%. Neither has a term of its own.
     - An encode's second length takes about 3 s at the first length's rate, on the VAE's grid
       of 4n + 1 frames, never fewer than 13, no longer than the job's longest run nor than the
       source's frames left, within the plan's memory (13 at 1080p in tiles on an RTX 5090, 25
@@ -2851,6 +2892,13 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       its directory. `--plan FILE` on a finished directory job asks no flag either: its list is
       written when the frame index is trusted, by the same ffmpeg and conversions, and is said
       not written otherwise, exit 1.
+    - A finished job, a file's or a directory's, compares its model files and its source by
+      size and modification time with its record, and reads neither where both match
+      (decided on 2026-10-29): it says it is finished at once, where the models' SHA-256
+      alone took 84 s on the RTX 5090. A file whose size or time differs is hashed as before,
+      said before it starts; the record keeps each model file's size and time beside its
+      SHA-256. A job with anything left to make, its assembly included, hashes them at every
+      start: what it makes depends on their bytes.
     - A job with every segment made is known before anything asks for the GPU: it needs no CUDA
       device, asks the driver nothing and reads no NVML (see [Allocator](#allocator)), a
       finished directory job as a file's job with its assembly alone left, unless its first pass
