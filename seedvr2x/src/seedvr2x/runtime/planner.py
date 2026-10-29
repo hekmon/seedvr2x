@@ -568,8 +568,9 @@ def _shapes(padded: tuple[int, int], tiles: Tiles) -> tuple[tuple[int, int], ...
 def _grid(padded: tuple[int, int], tiles: Tiles) -> tuple[int, int]:
     """(rows, columns) of the tiles of a tiled pass over padded frames, as the plan's lines say
     them: the tiled passes' own grid, counted (tilegrid.grid; numz's, DESIGN.md, Pipeline, per
-    shot, step 3). 2160x3840 takes 3 x 5 tiles of 1024 px overlapping by 128, and 2 x 2 of 2048
-    (planner-limits.md, Tiled VAE at 4K); a side the tile covers takes one."""
+    shot, step 3). 2160x3840 takes 3 x 4 tiles of 1024 px and 2 x 2 of 2048, overlapping by
+    plan.OVERLAP, 64 (planner-limits.md, Tiled VAE at 4K, measured it at 128: 3 x 5 of 1024); a
+    side the tile covers takes one."""
     laid = tilegrid.grid(tilegrid.latent_size(padded), tiles)
     return len({tile.top for tile in laid}), len({tile.left for tile in laid})
 

@@ -58,9 +58,10 @@ def colour_stages(source: tuple[int, int], target: tuple[int, int]) -> int:
     (source_height, source_width), (height, width) = source, target
     squared = Fraction(height, source_height) * Fraction(width, source_width)
     # Checked at x1.5, x2, x3 and x4, interpolated between (x2.25, 480p to 1080p): DESIGN.md,
-    # Colour correction. PROVISIONAL from x5.66 on: 5 stages (sigma 13 px) are the same rule,
-    # untested. The stages' own sigmas, √((4^k - 1)/6) (1.58, 3.24, 6.52, 13.06 px), would put
-    # the nearest's boundaries at x1.41, x2.87 and x5.77: DESIGN.md's formula decides.
+    # Colour correction ("above x5.66 it gives 5 stages, untested"). From x5.66 on: 5 stages
+    # (sigma 13 px) are the same rule, untested. The stages' own sigmas, √((4^k - 1)/6) (1.58,
+    # 3.24, 6.52, 13.06 px), would put the nearest's boundaries at x1.41, x2.87 and x5.77:
+    # DESIGN.md's formula decides.
     stages = COLOUR_STAGES_MIN
     while squared >= Fraction(2) ** (2 * stages - 3):
         stages += 1

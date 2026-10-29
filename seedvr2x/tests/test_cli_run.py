@@ -6011,7 +6011,7 @@ def test_a_rate_contradicted_refused_by_the_first_pass_never_by_a_resume(
         " and its output, written at that rate, would be 4.000% shorter than its timestamps' own"
         " time, off the source's other streams: its timestamps follow 48/1 fps (48) exactly"
     ) in text
-    assert "; or give --frame-rate 48/1, which takes its frames at that rate" in text
+    assert "\nor give --frame-rate 48/1, which takes its frames at that rate" in text
     assert len(scans) == 1 and not (tmp_path / "out" / "manifest.json").exists()
     with monkeypatch.context() as before_the_rule:
         before_the_rule.setattr(examined, "timing_refusal", lambda *_: "")
@@ -6087,7 +6087,7 @@ def test_frame_rate_override(
     guided = mechanism7(tmp_path / "long.mkv", size="64x48", frames=1001)
     text = refused(tmp_path, guided, caplog, *options)
     assert "long.mkv: its timestamps run at 24000/1001 fps (23.976), within 10.8 ms" in text
-    assert "; or give --frame-rate 24000/1001, which takes its frames at that rate" in text
+    assert "\nor give --frame-rate 24000/1001, which takes its frames at that rate" in text
     assert upscale(tmp_path, source_path, "whole", *options, *ntsc) == 0
     whole = tmp_path / "whole"
     names = ("seg_000000.mkv", "seg_000001.mkv")

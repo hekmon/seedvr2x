@@ -27,7 +27,7 @@ from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
 from seedvr2x.runtime import stop as stopping
 from seedvr2x.runtime.cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
-from seedvr2x.runtime.job import MIN_SEGMENT, QUALITY
+from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, MIN_SEGMENT, QUALITY, SEED_LIMIT
 from seedvr2x.runtime.pull import DETECTOR, REPO
 from seedvr2x.runtime.stop import Deadline, Stop, Stopped, Terminated, deadline, terminable
 
@@ -252,7 +252,8 @@ def main(argv: list[str] | None = None) -> int:
         "--resolution",
         type=_positive,
         default=1080,
-        help="short side of the output, square pixels at the source's display aspect",
+        help="short side of the output, square pixels at the source's display aspect"
+        " (default: %(default)s)",
     )
     # Without it, the shot detector runs in the first pass, its probabilities recorded, and the
     # cuts derive from them and --cut-threshold (DESIGN.md, Shot detection).
@@ -295,7 +296,17 @@ def main(argv: list[str] | None = None) -> int:
         " (PATH.work for a .mkv path): the same command without --plan then runs it, another"
         " --cut-threshold or --cuts plans it again, with no second decode",
     )
-    parser.add_argument("--seed", type=int, default=42)
+    # The range job.check_seed enforces, once the shots are known: each shot is seeded with the
+    # seed plus its first frame, its encode with ENCODE_SEED_OFFSET more, all under numz's limit.
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="the seed of the model's noise (default: %(default)s): each shot is seeded with it"
+        f" plus the shot's first frame, and its encode with {ENCODE_SEED_OFFSET:,} more, so it is"
+        f" from 0 up to {SEED_LIMIT - 1 - ENCODE_SEED_OFFSET:,} less the first frame of the"
+        " source's last shot, refused otherwise, naming that bound for the source",
+    )
     # Several runs of a shot, an option for quality (DESIGN.md, decided on 2026-10-20 on the user's
     # eyes, named for its users): 4 runs gave PSNR-Y +2.01 dB and VMAF +10.4 against one, on the 8
     # full-reference clips, for 4 times the GPU time; 2 runs half the time, 37-47% of the gain. Its
@@ -357,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     # The planner's other pins (DESIGN.md, Memory planner, Pins), each fixing one choice, taken
     # exactly or refused, never adjusted (planner.plan). Then --until (DESIGN.md, Pause and
-    # resume, Stopping), the one option still refused until its work is built (_run).
+    # resume, Stopping).
     parser.add_argument(
         "--encode-tile",
         type=_tile,
@@ -1155,12 +1166,14 @@ def _run(args: argparse.Namespace) -> int:
             # .mkv path's job isn't finished until its file is in place (DESIGN.md, Pause and
             # resume: "A finished file's job is finished once the file is in place").
             if final is None:
-                logger.info("%s: finished already, its %d segments", directory, len(segments))
+                logger.info(
+                    "%s: finished already, its %s", directory, _plural(len(segments), "segment")
+                )
             else:
                 logger.info(
-                    "%s: every segment made, its %d segments: %s",
+                    "%s: every segment made, its %s: %s",
                     directory,
-                    len(segments),
+                    _plural(len(segments), "segment"),
                     f"{final} is not assembled yet"
                     if args.plan is not None
                     else f"assembling {final}",
@@ -1619,7 +1632,8 @@ def _directory_refused(path: Path) -> str:
     """Why a directory is no input, and what to give instead (DESIGN.md, Input, the user's
     decision of 2026-10-05; "The advice names a join by ffmpeg alone that holds the grid, tested
     with that rule"): the file its segments were split from, or their join on the frame grid,
-    each way with its command (rate.grid_join), the directory in them as a shell takes it."""
+    each way with its command (rate.grid_join), the directory in them as a shell takes it, every
+    command on a line of its own (DESIGN.md, What it prints)."""
     from seedvr2x.media import rate
 
     # The source is the only gateway, so that every cut comes from seedvr2x's own detection or a
@@ -1686,10 +1700,10 @@ def _directory_refused(path: Path) -> str:
         f"{path}: a directory; seedvr2x takes one video file, the source, so that every cut comes"
         " from its own detection or a cut list (--cuts), and every output segment from its rules."
         " Give it the file the segments were split from, or join the segments back into one file"
-        " first so that every frame keeps its place on the frame grid,"
-        f" {rate.grid_join(shlex.quote(str(path)))}. A plain join by ffmpeg's concat demuxer, -f"
-        " concat -c copy alone, can drift off the grid, up to 1 ms a join, and is refused once a"
-        " frame lies half a frame off its place"
+        " first so that every frame keeps its place on the frame grid:\n"
+        f"{rate.grid_join(shlex.quote(str(path)))}\n"
+        "A plain join by ffmpeg's concat demuxer, -f concat -c copy alone, can drift off the"
+        " grid, up to 1 ms a join, and is refused once a frame lies half a frame off its place"
     )
 
 
@@ -1941,12 +1955,12 @@ def _trial(args: argparse.Namespace, declared: "Declared", size: tuple[int, int]
     segment's are, and, for a .mkv path, what the assembly needs of it asked (_joinable). A
     failure refuses the job (JobError) with the writer's message.
 
-    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has the command run once per segment and
-    says nothing of a trial): a command with a typo or a missing encoder would otherwise fail
-    once the first segment's shots are encoded and sampled, GPU minutes to hours in, and the
-    command mended would then be another job (settings.segment_cmd). It costs 0.26 to 0.29 s
-    with DESIGN.md's own example, libx265 at -crf 16, at 1920x1080 in yuv420p10le, the
-    assembly's check of the file among it (measured on 2026-10-12, ffmpeg n9.0.2, 32 threads)."""
+    DESIGN.md, Output, Writer (built on 2026-10-12): tried before any work, at every start, on 5
+    black frames. A command with a typo or a missing encoder would otherwise fail once the first
+    segment's shots are encoded and sampled, GPU minutes to hours in, and the command mended
+    would then be another job (settings.segment_cmd). It costs 0.26 to 0.29 s with DESIGN.md's
+    own example, libx265 at -crf 16, at 1920x1080 in yuv420p10le, the assembly's check of the
+    file among it (measured on 2026-10-12, ffmpeg n9.0.2, 32 threads)."""
     import tempfile
 
     import numpy as np
@@ -2021,8 +2035,8 @@ def _joinable(
     demuxer gives every packet the first file's. A read of its packets, and a decode of the two
     only when their headers differ.
 
-    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has a --segment-cmd output's frame count
-    checked alone): asked of the trial's file and of each segment as it is finished, so that a
+    DESIGN.md, Output, Assembly (decided on 2026-10-12): "A `--segment-cmd` job's files are
+    checked as the join needs them, at the trial and as each segment is finished", so that a
     command whose files can't be joined is refused at its first one, not by the assembly's own
     check once every segment is made. A directory's segments, never assembled, are asked
     nothing."""
@@ -2065,16 +2079,18 @@ def _work(directory: Path) -> None:
 
 def _copied(source: Path, directory: Path, ffmpeg_version: str, conversions: str) -> dict[str, Any]:
     """Refuse (JobError) a source whose other streams the assembly can't take, before any work
-    (assembly.preflight): a stream Matroska's muxer refuses as it is, each named with ffmpeg's
-    own reason and the ways out; else anything ffmpeg says of their remux, the very one the
-    assembly makes, rehearsed whole in directory, the job's work directory (_work), after a line
-    saying what it reads and for about how long. Returns the rehearsal's record, passed, under
-    this ffmpeg and these conversions, for the manifest to hold with the first pass's
-    (manifest.REHEARSAL).
+    (assembly.preflight): an audio or subtitle stream Matroska's muxer refuses as it is, a stream
+    that starts before the file's start, each named with ffmpeg's own reason and the ways out;
+    else anything ffmpeg says of their remux, the very one the assembly makes, rehearsed whole
+    in directory, the job's work directory (_work), after a line saying what it reads and for
+    about how long. A data stream Matroska can't hold is no refusal: it is left out of the
+    finished file and warned of, naming it (DESIGN.md, Output, Assembly, decided on
+    2026-10-12). Returns the rehearsal's record, passed, under this ffmpeg and these conversions,
+    for the manifest to hold with the first pass's (manifest.REHEARSAL).
 
-    PROVISIONAL (implementation, 2026-10-10: DESIGN.md has every other stream copied and says
-    nothing of one that can't be): refused before any work, the fix being the user's, a remux of
-    the source or a directory output, rather than copied without it, or converted."""
+    What is refused is refused before any work, the fix being the user's, a remux of the source
+    or a directory output, rather than copied without it, or converted (DESIGN.md, Output,
+    Assembly, "Before any work, at every start")."""
     from seedvr2x.media import assembly
     from seedvr2x.runtime.job import JobError
 
@@ -2148,7 +2164,8 @@ def _grid_start(source: "Source") -> None:
     """Refuse (JobError), once the first pass has timed its frames, a source whose first video
     frame comes before its file's start time (assembly.start): the assembly can't place its
     frames, and refuses it (assembly.assemble); said here, before any unit is made, not after
-    the last. PROVISIONAL, as the join's refusal is (no source measured has one)."""
+    the last (DESIGN.md, Output, Assembly, "Before any work": no real file has shown one, kept on
+    2026-10-28)."""
     from seedvr2x.media import assembly
     from seedvr2x.runtime.job import JobError
 
@@ -2521,9 +2538,9 @@ def _output(args: argparse.Namespace) -> Path:
     # The output naming the source itself: its file, once assembled, would replace the source,
     # the one thing a job can't make again, and its checksums' file and its manifest likewise.
     # The same file when the name exists, by whatever path (a relative name, a linked directory);
-    # else the same place. PROVISIONAL (implementation, 2026-10-12: DESIGN.md has no such
-    # sentence; found by a review, `seedvr2x film.mkv -o film.mkv` leaving the upscale under the
-    # source's name).
+    # else the same place (DESIGN.md, Output, What -o names, decided on 2026-10-12: an -o "that
+    # names the source" is refused; found by a review, `seedvr2x film.mkv -o film.mkv` leaving
+    # the upscale under the source's name).
     named = {output: "the output"}
     if _final(output) is not None:
         named[_checksums_beside(output)] = "the output's checksums"
@@ -2532,9 +2549,8 @@ def _output(args: argparse.Namespace) -> Path:
         if _same(written, args.input):
             said = said if written == output else f"{said}, {written},"
             raise JobError(f"{output}: {said} is the source itself; choose another -o")
-    # PROVISIONAL (implementation, 2026-10-10: DESIGN.md's Assembly names one file and no
-    # container): Matroska is the one container assembled, the segments' own (media/writer.py);
-    # the other video suffixes stay refused, as before the assembly.
+    # Matroska is the one container assembled, the segments' own (media/writer.py); the other
+    # video suffixes stay refused (DESIGN.md, Output, What -o names, decided on 2026-10-12).
     if output.suffix.lower() in VIDEO_SUFFIXES:
         raise JobError(
             f"{output}: a video file name; the finished file is a .mkv path, and the output"
@@ -3075,10 +3091,10 @@ def _settings(
         "decode_tile": args.decode_tile,
         "format": args.format,
         # The segments' writer (DESIGN.md, Output, Writer): the user's command, as given, or
-        # None, seedvr2x's FFV1 or PNG writer. PROVISIONAL (implementation, 2026-10-10: DESIGN.md
-        # doesn't say whether a command may change): a setting like the others, another command
-        # another job, even before any segment is finished, where the units kept don't depend
-        # on it.
+        # None, seedvr2x's FFV1 or PNG writer. A setting the manifest records, another command
+        # another job (DESIGN.md, Output, Writer, decided on 2026-10-12); a plan with no unit
+        # made takes another command, planned again for it (Pause and resume, A plan, and
+        # resume.FIRST_PASS_SETTINGS), the units kept not depending on it.
         "segment_cmd": args.segment_cmd,
         # How the source is cut (resume.CUT_SETTINGS): the cut list given, or none and the
         # detection's threshold, "a setting the manifest records" (DESIGN.md, Shot detection),
@@ -3780,15 +3796,15 @@ def _finished_already(
     its manifest as a resume's is (resume.leftovers): a finished segment missing or of another
     size, its checksums missing, or anything not the job's, refused; what a stop left, discarded.
 
-    PROVISIONAL (implementation, 2026-10-11, a question for design: DESIGN.md says a finished job
-    makes nothing again, not what it is still compared by without its index): the list above; the
-    recorded plan isn't read, where a finished job with its index is refused for one the planner
-    never makes (_recorded_plan), a manifest edited by hand.
+    What it is still compared by without its index is kept as built by design on 2026-10-28
+    (the questions of 2026-10-11, DESIGN.md silent): the list above; the recorded plan isn't
+    read, where a finished job with its index is refused for one the planner never makes
+    (_recorded_plan), a manifest edited by hand.
 
-    PROVISIONAL (implementation, 2026-10-10, a question for design: DESIGN.md has --plan FILE
-    write a job's cut list, and a finished job make nothing again): --plan FILE on such a job
-    writes nothing and fails, 1, saying why: the list is derived from the frame index and timed
-    by it, and no first pass is run to make one for a job that needs none."""
+    --plan FILE on such a job, its index not trusted, writes nothing and fails, 1, saying why
+    (DESIGN.md, Pause and resume: its list "is said not written otherwise, exit 1"): the list
+    is derived from the frame index and timed by it, and no first pass is run to make one for
+    a job that needs none."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import NAME, complete
 
@@ -3810,7 +3826,7 @@ def _finished_already(
         logger.info(ENVIRONMENT_STAYS, directory, "; ".join(prior.changed))
     if discarded:
         logger.info("%s: %s discarded", directory, _plural(len(discarded), "leftover"))
-    logger.info("%s: finished already, its %d segments", directory, len(job.files))
+    logger.info("%s: finished already, its %s", directory, _plural(len(job.files), "segment"))
     if args.plan is None:
         return 0
     logger.error(

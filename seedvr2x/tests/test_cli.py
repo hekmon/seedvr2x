@@ -64,6 +64,27 @@ def test_cuts_help_says_how_its_frames_are_counted(capsys: pytest.CaptureFixture
     )
 
 
+def test_seed_and_resolution_help_show_their_defaults(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # --seed said what it seeds, its default and the range job.check_seed enforces; --resolution
+    # its default, as the other options' helps show theirs (next-batch item 14, wording).
+    from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, SEED_LIMIT
+
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    shown = " ".join(capsys.readouterr().out.split())
+    assert "square pixels at the source's display aspect (default: 1080)" in shown
+    bound = f"{SEED_LIMIT - 1 - ENCODE_SEED_OFFSET:,}"
+    assert bound == "4,293,967,295"
+    assert (
+        "the seed of the model's noise (default: 42): each shot is seeded with it plus the shot's"
+        f" first frame, and its encode with {ENCODE_SEED_OFFSET:,} more, so it is from 0 up to"
+        f" {bound} less the first frame of the source's last shot, refused otherwise, naming that"
+        " bound for the source" in shown
+    )
+
+
 def test_plan_help_names_its_two_playlists(capsys: pytest.CaptureFixture[str]) -> None:
     # --plan FILE writes two playlists beside FILE when the shots are detected, under names no
     # option gives (cuts.playlist_path): said where --plan is read about, each with its name, and
@@ -351,17 +372,20 @@ def test_directory_refused_first(tmp_path: Path) -> None:
         quoted = f"'{tmp_path}/the film'\"'\"'s segments'"
         advice = (
             " Give it the file the segments were split from, or join the segments back into one"
-            " file first so that every frame keeps its place on the frame grid,"
-            f" {rate.grid_join(quoted)}. A plain join by ffmpeg's concat demuxer, -f concat -c"
-            " copy alone, can drift off the grid, up to 1 ms a join, and is refused once a frame"
-            " lies half a frame off its place\n"
+            " file first so that every frame keeps its place on the frame grid:\n"
+            f"{rate.grid_join(quoted)}\n"
+            "A plain join by ffmpeg's concat demuxer, -f concat -c copy alone, can drift off the"
+            " grid, up to 1 ms a join, and is refused once a frame lies half a frame off its"
+            " place\n"
         )
         assert result.stderr.endswith(advice)
         assert "with ffmpeg alone, each segment listed with its exact duration" in advice
         # The rate the shell's N and D in both commands, the join's and the remake's.
         # The directory after --, so that one whose name begins with a hyphen is no option.
         assert advice.count(f"cd -- {quoted} && N=24000 D=1001 && for f in ./*.mkv; do printf") == 2
-        said = f", with N and D set to their frame rate, 24000/1001 here: cd -- {quoted} && N=24000"
+        said = (
+            f", with N and D set to their frame rate, 24000/1001 here:\ncd -- {quoted} && N=24000"
+        )
         assert advice.count(said) == 2
         assert "ffmpeg -f concat -safe 0 -r $N/$D -i list.txt -map 0:v:0" in advice
         # Each list checked for an apostrophe in a name before ffmpeg reads it.
@@ -375,10 +399,20 @@ def test_directory_refused_first(tmp_path: Path) -> None:
             " apostrophe: the command stops on one, before ffmpeg, and makes no file)"
         )
         assert advice.count(names) == 2
-        assert f"../joined.mkv {names}, or with sptenc" in advice
-        assert f"../remade.mkv {names}. A plain join by" in advice
-        # sptenc's join an option: seedvr2x never requires sptenc.
-        assert f"sptenc concat -- {quoted} joined.mkv, which snaps every timestamp" in advice
+        assert f"../joined.mkv\n{names}\nor with sptenc" in advice
+        assert f"../remade.mkv\n{names}\nA plain join by" in advice
+        # sptenc's join an option: seedvr2x never requires sptenc. Each command is a line of its
+        # own, nothing before it and nothing after (DESIGN.md, What it prints), so that it can be
+        # copied whole.
+        assert (
+            f"which snaps every timestamp to the grid:\nsptenc concat -- {quoted} joined.mkv\nor,"
+            in advice
+        )
+        commands = [
+            line for line in advice.splitlines() if line.startswith(("cd -- ", "sptenc concat -- "))
+        ]
+        assert len(commands) == 3
+        assert all(line.endswith(".mkv") for line in commands)
         assert "-c copy joined.mkv" not in result.stderr and "drift" not in rate.grid_join()
         assert sorted(tmp_path.rglob("*")) == files
 

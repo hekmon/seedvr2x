@@ -745,10 +745,11 @@ class Inputs:
     checked once the job had run, its last segment recorded: the next run then said a
     directory's job finished, or assembled a .mkv path's file, short of the frame the source
     gave beyond its count (a finding of milestone 6's wiring).
-    PROVISIONAL (implementation, 2026-10-12, a question for design, which decided "the check
-    comes before the last segment is recorded"): before the last shot's latent, earlier than
-    asked. Checked between that shot's windows and its segment's record, a failed run would keep
-    the windows, and the next would decode them, never reading the source, so never checking it.
+    DESIGN.md, Pause and resume (decided on 2026-10-12): the end "checked as its last frame is
+    read, before the last shot's latent is recorded", earlier than first asked ("before the last
+    segment is recorded"). Checked between that shot's windows and its segment's record, a failed
+    run would keep the windows, and the next would decode them, never reading the source, so
+    never checking it.
     Frames not asked for, those of shots a resume skips, are never decoded: the next frame asked
     is reached through the frame index, a reader opened there (DESIGN.md, Pause and resume). A run
     reading every shot from the source's first frame keeps one reader from the start, which seeks

@@ -67,9 +67,9 @@ PROBABILITIES = ("transnetv2", "<f4")
 # not a column a reader may skip: a reader of VERSION alone, skipping it, would take each held
 # row for a decoded frame, its count one more than ffmpeg's frames at every filled place, and
 # must refuse the file instead. It does, by the version ("version 2, where 1 is read"), a resume
-# then running the first pass again (cli._recorded_index). PROVISIONAL (implementation,
-# 2026-10-10/11, a question for design: the index's format is seedvr2x's own, DESIGN.md naming
-# neither its file nor its versions): two versions written, by what the index holds, rather than
+# then running the first pass again (cli._recorded_index). DESIGN.md, Input, frame-exact reading
+# ("Its rows are places ... the file is then at version 2, which older code refuses; without one
+# it is version 1's, byte for byte"): two versions written, by what the index holds, rather than
 # every file moved to the new one. An index without a held row is then written as before the
 # places, byte for byte: read back from a job of before, it is recorded again by the size and
 # SHA-256 its file has (runtime/manifest.py), and nothing changes for the sources read so far.

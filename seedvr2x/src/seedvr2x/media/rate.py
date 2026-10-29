@@ -347,7 +347,8 @@ def matroska_reading(declared: Fraction) -> Fraction | None:
     100000/1001, 200000/1001 and 125000/1001, are none of those rates; a Matroska file at 99.9
     fps declares 999/10 as well (10,010,010 ns), and can't be told from one at 100000/1001
     (10,010,000 ns) by what ffprobe gives."""
-    # PROVISIONAL (implementation, 2026-10-12, questions for design: the decision names the
+    # Kept as built by design on 2026-10-28 (the questions of 2026-10-12; DESIGN.md, Input, the
+    # frame rate, built on 2026-10-12: "N a whole number up to 240", the decision naming the
     # readings of the NTSC rate's own duration, truncated or rounded). (1) The stream copy's
     # reading is taken too: without it, seedvr2x's own finished file at 240000/1001 declares
     # 23017/96 and is read at it. (2) N up to 240, each measured, ffmpeg's own highest standard
@@ -403,8 +404,9 @@ def matroska_guessed(average: Fraction | None) -> bool:
     master of one frame at 5 fps is given as 1000/1, and was read at it. At 1,000 itself it is
     the guess too, and left, 1000/1 for 1, 30 and 300 frames. From 6 to 1,000 fps nothing is
     changed."""
-    # PROVISIONAL (implementation, 2026-10-12, questions for design: what the ruling doesn't
-    # settle, the most conservative taken). (1) No avg_frame_rate (ffprobe's 0/0, or none): the
+    # DESIGN.md, Input, the frame rate ("Under 6 fps or above 1,000", decided on 2026-10-12);
+    # what the ruling doesn't settle, the most conservative taken, kept as built by design on
+    # 2026-10-28 (the questions of 2026-10-12). (1) No avg_frame_rate (ffprobe's 0/0, or none): the
     # stream is read by its r_frame_rate, as before, nothing said. A Matroska stream without a
     # frame duration is so: of 16 files at 3000/1001, 2997/1000, 2 and 1/2 fps, 2 to 300
     # frames, their duration removed (mkvpropedit v82.0), ffprobe gave no avg_frame_rate for 9
@@ -502,10 +504,11 @@ def remake(
     name, which a tag may fill with anything. A source without a cover picture gets the
     command alone, byte for byte as before."""
     words = ["ffmpeg", "-r:v:0", fraction(rate), "-i", "SOURCE"]
-    # PROVISIONAL (implementation, 2026-10-12, a question for design: -c copy then -c:v:0 ffv1
-    # kept, of which ffmpeg n9.0.2 warns, "Multiple -codec/-c/-acodec/-vcodec/-scodec/-dcodec
-    # options specified for stream 0, only the last option '-codec:v:0 ffv1' will be used",
-    # which is what is meant). Design asked for a copy per type in its place, -c:a copy -c:s
+    # -c copy then -c:v:0 ffv1, kept (DESIGN.md, Input, the frame rate: ffmpeg "warns there of
+    # two codecs named for the video, the copy then FFV1: it is what is meant"; kept as built by
+    # design on 2026-10-28): ffmpeg n9.0.2 warns, "Multiple -codec/-c/-acodec/-vcodec/-scodec/
+    # -dcodec options specified for stream 0, only the last option '-codec:v:0 ffv1' will be
+    # used", which is what is meant. Design asked for a copy per type in its place, -c:a copy -c:s
     # copy -c:t copy, "if the file it makes is the same": it is, byte for byte under -fflags
     # +bitexact, and without the warning, for a source with one video stream (two audio
     # streams, subtitles and a font attached); but a second video stream (MPEG-4) and an MP4's
@@ -640,8 +643,8 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     by sh, dash ("cd: Illegal option -d") and bash, and `sptenc concat -dir joined.mkv` by
     sptenc ("flag provided but not defined: -dir"; v0.1.1 of 2026-10-02); cd -- is POSIX's, and
     sptenc takes its directory after -- too ("Concatenating video files from -dir")."""
-    # PROVISIONAL (implementation, 2026-10-12, questions for design: DESIGN.md asks for a join
-    # by ffmpeg alone that holds the grid and names no command). (1) Durations and the snap, in
+    # DESIGN.md, Input, directory input (the refusal's three joins, kept as built by design on
+    # 2026-10-28, the questions of 2026-10-12). (1) Durations and the snap, in
     # one pass, over the other join that held as widely: the plain join, then a second stream
     # copy counting each packet's distance from the one before in frames (setts with a time
     # base of one frame), two commands and no ffprobe, but a whole second copy of the film, and
@@ -671,19 +674,33 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
         first = ":"
         asked = f"{NAMES}; N/D their frame rate"
         remade = f"{there} {LISTED_BARE} && {GUARD} && ffmpeg -f concat -safe 0 -r {fraction(rate)}"
+    # Each command alone on its line, the words before it ending in a colon and what it asks
+    # after it in parentheses, so that a line copied whole is the command and nothing else
+    # (DESIGN.md, What it prints: a refusal's advised command "on a line of its own"). The log's
+    # time of day is on a message's first line only: the later lines start where they start.
     ways = [
         "with ffmpeg alone, each segment listed with its exact duration, its frames over the"
-        f" rate, and every timestamp snapped to the grid in one stream copy{first}"
-        f" {there} {setting} {LISTED} && {GUARD} && ffmpeg -f concat"
-        f' -safe 0 -i list.txt -c copy -bsf:v "{snap}" ../joined.mkv ({asked})',
-        f"with sptenc, for segments of its split, sptenc concat -- {directory} joined.mkv, which"
-        " snaps every timestamp to the grid",
-        "where no stream copy holds, for segments that carry audio, MPEG program streams, or"
+        f" rate, and every timestamp snapped to the grid in one stream copy{first}\n"
+        f"{there} {setting} {LISTED} && {GUARD} && ffmpeg -f concat"
+        f' -safe 0 -i list.txt -c copy -bsf:v "{snap}" ../joined.mkv\n({asked})',
+        "or with sptenc, for segments of its split, which snaps every timestamp to the grid:\n"
+        f"sptenc concat -- {directory} joined.mkv",
+        "or, where no stream copy holds, for segments that carry audio, MPEG program streams, or"
         " transport streams of a single frame, their pictures remade as an FFV1 master, numbered"
-        f" at that rate as they come, every one kept{first} {remade} -i list.txt -map 0:v:0"
-        f" {' '.join(FFV1)} -fps_mode:v:0 passthrough ../remade.mkv ({NAMES})",
+        f" at that rate as they come, every one kept{first}\n"
+        f"{remade} -i list.txt -map 0:v:0 {' '.join(FFV1)} -fps_mode:v:0 passthrough"
+        f" ../remade.mkv\n({NAMES})",
     ]
-    return ", or ".join(ways[:2]) + ", or, " + ways[2]
+    return "\n".join(ways)
+
+
+def alone(command: str) -> str:
+    """A remake (remake) as the end of a sentence, its command on a line of its own: "this
+    command:" and a new line before it; the text of a source with a cover picture, which already
+    leads its two commands so, as it is. Whatever follows the command goes on a line after it
+    (DESIGN.md, What it prints: a refusal's advised command "on a line of its own, so that it
+    can be copied whole")."""
+    return command if "\n" in command else f"this command:\n{command}"
 
 
 def first_time(index: FrameIndex) -> Fraction:

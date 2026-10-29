@@ -70,13 +70,12 @@ def current(
     there, and its capability where one answers (torch 2.14.1, torch/backends/cudnn/__init__.py,
     _init); the library is still compared, by its distribution's version among the packages
     (versions). So another GPU alone is no difference there, and isn't said: saying it would
-    take asking for it. PROVISIONAL
-    (implementation, 2026-10-12), for both such jobs. DESIGN.md has a finished job run again
-    "under another GPU, stack or ffmpeg", the difference said in one line, and a file's
-    assembly "made in the new environment, refused without the flag as any resume"; and it has
-    both ask the driver nothing and need no GPU. The stack's and ffmpeg's differences are said
-    of the first and refuse the second without the flag; another GPU alone does neither: the
-    file is assembled, the manifest keeping the card that made its segments."""
+    take asking for it. That is DESIGN.md's, Pause and resume (decided on 2026-10-12), for both
+    such jobs: another GPU alone is "neither said nor refused: nothing such a job makes can
+    depend on it", both asking the driver nothing and needing no GPU. The stack's and ffmpeg's
+    differences are said of the first and refuse the second without the flag; another GPU alone
+    does neither: the file is assembled, the manifest keeping the card that made its
+    segments."""
     from seedvr2x.runtime import model
 
     try:

@@ -527,6 +527,23 @@ def test_several_hundred_segments(tmp_path: Path, jobs: Callable[..., Job]) -> N
     assert packets(output) == packets(job.master)
 
 
+def test_the_final_line_counts_in_the_singular(
+    tmp_path: Path, jobs: Callable[..., Job], caplog: pytest.LogCaptureFixture
+) -> None:
+    # One segment, one stream, no chapter: "assembled, 6 frames of 1 segment with 0 other streams
+    # and 0 chapters", not "1 segments" (next-batch item 14, wording).
+    job = jobs("24000/1001", 1)
+    with caplog.at_level(logging.INFO, logger="seedvr2x.media.assembly"):
+        assembled(tmp_path, job, job.master)
+    [done] = [r.getMessage() for r in caplog.records if ": assembled, " in r.getMessage()]
+    assert f"assembled, {job.frames} frame" in done
+    assert f" of 1 segment with 0 other streams and 0 chapters of {job.master}," in done
+    assert "1 segments" not in done and "1 frames" not in done
+
+    assert assembly._counted(1, "chapter") == "1 chapter"  # pyright: ignore[reportPrivateUsage]
+    assert assembly._counted(2, "other stream") == "2 other streams"  # pyright: ignore[reportPrivateUsage]
+
+
 def test_without_the_snap_the_timestamps_would_be_off(
     tmp_path: Path, jobs: Callable[..., Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1051,7 +1068,7 @@ def made(directory: Path, kind: str) -> Path:
                     2, "subtitle", "mov_text", "Subtitle codec mov_text (94213) is not supported."
                 )
             ],
-            "ffmpeg -i SOURCE -map 0 -c copy -c:2 srt remuxed.mkv (stream 2: -c:2 srt converts it"
+            "ffmpeg -i SOURCE -map 0 -c copy -c:2 srt remuxed.mkv\n(stream 2: -c:2 srt converts it"
             " to SubRip, its text and times kept, its styling and placement lost)",
         ),
         (
@@ -1082,18 +1099,18 @@ def made(directory: Path, kind: str) -> Path:
                     2, "subtitle", "eia_608", "Subtitle codec eia_608 (94218) is not supported."
                 )
             ],
-            "ffmpeg -i SOURCE -map 0 -c copy -map -0:2 remuxed.mkv (stream 2 left out)",
+            "ffmpeg -i SOURCE -map 0 -c copy -map -0:2 remuxed.mkv\n(stream 2 left out)",
         ),
         (
             "pcm_bluray",
             [Unmuxable(1, "audio", "pcm_bluray", "No wav codec tag found for codec pcm_bluray")],
-            "ffmpeg -i SOURCE -map 0 -c copy -c:1 pcm_s24le remuxed.mkv (stream 1: -c:1 pcm_s24le"
+            "ffmpeg -i SOURCE -map 0 -c copy -c:1 pcm_s24le remuxed.mkv\n(stream 1: -c:1 pcm_s24le"
             " rewraps its samples as they are, nothing lost)",
         ),
         (
             "pcm_dvd",
             [Unmuxable(1, "audio", "pcm_dvd", "No wav codec tag found for codec pcm_dvd")],
-            "ffmpeg -i SOURCE -map 0 -c copy -map -0:1 remuxed.mkv (stream 1 left out)",
+            "ffmpeg -i SOURCE -map 0 -c copy -map -0:1 remuxed.mkv\n(stream 1 left out)",
         ),
         ("cover in MP4", [], ""),
         ("cover in Matroska", [], ""),
@@ -1141,7 +1158,7 @@ def test_what_matroska_cant_take(
         # don't all carry a timestamp ("Can't write packet with unknown timestamp"), which ffmpeg
         # makes up when asked (-fflags +genpts): another matter than the stream refused.
         return
-    command = advised.partition(" (")[0].replace("SOURCE", shlex.quote(str(source)))
+    command = advised.partition("\n")[0].replace("SOURCE", shlex.quote(str(source)))
     remux = tmp_path / "remuxed.mkv"
     loose(*shlex.split(command.replace("remuxed.mkv", shlex.quote(str(remux))))[1:])
     assert assembly.preflight(remux, work) == ""
@@ -1176,7 +1193,7 @@ def test_several_streams_refused_at_once(tmp_path: Path) -> None:
     assert "Matroska can't hold one of its streams as it is" in said
     assert f"stream {kinds['mov_text']} (subtitle, mov_text)" in said
     assert f"stream {kinds['data']} (data" not in said.partition("ffmpeg -i")[0]
-    command = said.partition("without it: ")[2].partition(" (")[0]
+    command = said.partition("without it:\n")[2].partition("\n")[0]
     assert f"-map -0:{kinds['data']}" in command and f"-c:{kinds['mov_text']} srt" in command
     remux = tmp_path / "remuxed.mkv"
     loose(
@@ -1230,7 +1247,7 @@ def test_a_data_stream_is_left_out_with_a_warning(
     assert f"stream {gone} (data" in warned[0] and "left out of the finished file" in warned[0]
     # The final line counts the other streams written, and says which it left out.
     [done] = [r.getMessage() for r in caplog.records if ": assembled, " in r.getMessage()]
-    assert f"with 1 other streams (its data streams {gone} left out) and " in done
+    assert f"with 1 other stream (its data streams {gone} left out) and " in done
     written = streams(output)
     kept = [stream["codec_type"] for stream in own if stream["codec_type"] != "data"]
     assert [stream["codec_type"] for stream in written] == kept == ["video", "audio"]
@@ -1428,7 +1445,7 @@ def test_an_mp4_cover_of_a_type_we_cant_name_is_refused(tmp_path: Path) -> None:
     assert [(s.index, s.codec) for s in found] == [(1, "bmp")]
     said = assembly.preflight(source, workdir(tmp_path))
     assert "a cover picture of codec bmp with no file name or type of its own" in said
-    assert "ffmpeg -i SOURCE -map 0 -c copy -map -0:1 remuxed.mkv (stream 1 left out)" in said
+    assert "ffmpeg -i SOURCE -map 0 -c copy -map -0:1 remuxed.mkv\n(stream 1 left out)" in said
 
 
 def test_the_first_video_is_no_cover() -> None:

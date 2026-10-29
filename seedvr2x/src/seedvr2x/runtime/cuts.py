@@ -261,9 +261,9 @@ def places_note(index: FrameIndex) -> list[str]:
 # stop to 9 after (design's check of the tables, 2026-10-12: -1 to +9), and VLC goes on to the
 # next by itself. Not measured: hardware decoding, VLC's default; HEVC; VLC 4.
 BEFORE = 1
-# PROVISIONAL (implementation, 2026-10-10, a question for design: how long an entry plays after
-# its cut; DESIGN.md gives its start alone): 3 seconds, the new shot seen long enough to tell it
-# from the one before, an entry 4 seconds in all, 250 of them, an hour of animation's, 17 minutes.
+# DESIGN.md, Shot detection: an entry runs "from a second before it to three after" (the user's
+# go, 2026-10-10): 3 seconds, the new shot seen long enough to tell it from the one before, an
+# entry 4 seconds in all, 250 of them, an hour of animation's, 17 minutes.
 AFTER = 3
 # VLC 3.0.24 reads a .m3u8 file as UTF-8 (modules/demux/playlist/m3u.c:93-95), and Windows opens
 # it with VLC as it does .m3u (the installer's file types); these are ASCII, read the same under
@@ -285,11 +285,10 @@ class Playlist:
     title: str
 
 
-# PROVISIONAL (implementation, 2026-10-12, a question for design: the two names, DESIGN.md
-# saying "beside the list" and design asking only that they can't be taken for each other):
-# FILE.possible.m3u8 and FILE.cuts.m3u8, each named by what it lists, over FILE.m3u8 kept for
-# the possible cuts' beside a FILE.cuts.m3u8: a name that says nothing is the one taken for the
-# other, and no user has a FILE.m3u8 yet, the first playlist landing with the second.
+# FILE.possible.m3u8 and FILE.cuts.m3u8 (DESIGN.md, Shot detection, --plan FILE; kept as built by
+# design on 2026-10-28), each named by what it lists, over FILE.m3u8 kept for the possible cuts'
+# beside a FILE.cuts.m3u8: a name that says nothing is the one taken for the other, and no user
+# has a FILE.m3u8 yet, the first playlist landing with the second.
 OF_POSSIBLE = Playlist("possible", "possible cut", "possible cut")
 OF_DETECTED = Playlist("cuts", "detected cut", "cut")
 # In the order they are written and said, the cut list's own: its cuts, then the possible ones.
@@ -342,8 +341,8 @@ def playlist(
     9); and the source, by `source_name`, its file name alone, which VLC looks for beside the
     playlist, wherever it is started from: so the playlist plays from the source's directory, on
     Windows as on Linux, where a path of the machine seedvr2x ran on names nothing on another.
-    PROVISIONAL (implementation, 2026-10-10, a question for design: the title's words and the
-    name alone, DESIGN.md saying neither).
+    The title's words and the name alone are kept as built by design on 2026-10-28 (the
+    questions of 2026-10-12), DESIGN.md saying neither.
 
     VLC reads an entry as a URL relative to the playlist's own (modules/demux/playlist/
     playlist.c:141-202), so the name is written as one, every byte but RFC 3986's unreserved
@@ -383,10 +382,10 @@ def write_playlist(
     False when it can't be written, said, the cut list being written.
 
     No playlist, and True, without a cut of its own, a cut list's plan among them: nothing was
-    to be written. A file at its place is then left as it is, and said: PROVISIONAL
-    (implementation, 2026-10-10, a question for design: left or removed), an earlier plan's
-    playlist there listing cuts this plan doesn't have, but seedvr2x removes no file it didn't
-    write in this run, nor reads this one to tell whose it is."""
+    to be written. A file at its place is then left as it is, and said (DESIGN.md, Shot
+    detection: "an older one then being left and said"), an earlier plan's playlist there listing
+    cuts this plan doesn't have, but seedvr2x removes no file it didn't write in this run, nor
+    reads this one to tell whose it is."""
     path = playlist_path(plan, which)
     count = len(_entries(index, cuts))
     if not count:

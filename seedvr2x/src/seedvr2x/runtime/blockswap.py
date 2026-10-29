@@ -84,7 +84,9 @@ class HostCopy:
     took 0.5 GiB there, 18.0 GiB for the 36 blocks where their bytes are 15.19 (torch 2.14.1).
     Copies from it to the device are as fast as from torch's (54.6 against 53.4 GB/s on a desktop
     PCIe 5.0 link, 18.2 from pageable memory) and return at once (0.12 ms): measured by
-    research/scripts/pin_probe.py, on such a mapping, 2026-10-10.
+    research/scripts/pin_probe.py, on such a mapping, 2026-10-10, on an RTX 5090 under WSL.
+    DESIGN.md's 57 GB/s pinned and 25 pageable (BlockSwap, rewritten) are research/docs/vram.md's,
+    standalone copies on the 96 GB card's PCIe 5.0 x16 link: another machine, the same ratio.
 
     bytes is the buffer, (size rounded up to a page,) uint8, zeros at first. Raises
     HostMemoryError when the host refuses the mapping or its page-locking, or when this torch

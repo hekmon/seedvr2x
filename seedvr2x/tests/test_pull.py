@@ -482,7 +482,7 @@ def test_a_job_with_every_segment_made_fetches_nothing(
     if output == "one.mkv":
         assert (tmp_path / output).is_file() and not (tmp_path / "one.mkv.work").exists()
     else:
-        assert f"{tmp_path / output}: finished already, its 1 segments" in caplog.messages
+        assert f"{tmp_path / output}: finished already, its 1 segment" in caplog.messages
     assert not hub.snapshot(DIT).exists()
     # Another job, with its units to make: its DiT downloaded again, as any job's.
     assert upscale(tmp_path, "another", *options) == 0

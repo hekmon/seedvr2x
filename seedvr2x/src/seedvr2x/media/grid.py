@@ -179,16 +179,16 @@ def _ticks(
     """`periods` frame periods of `rate` (each 0 or more), in ticks of time_base, exact, then
     rounded to the nearest tick, half a tick up.
 
-    PROVISIONAL (implementation, 2026-10-10/11, a question for design: DESIGN.md has the frame
-    before the hole held, and gives a filled place no time): ffmpeg's own rounding of a
-    timestamp to a time base, to the nearest and halfway away from zero (av_rescale_q,
+    Kept as built by design on 2026-10-28 (the questions of 2026-10-12; DESIGN.md, Input, the frame
+    rate, has the frame before the hole held and gives a filled place no time): ffmpeg's own
+    rounding of a timestamp to a time base, to the nearest and halfway away from zero (av_rescale_q,
     AV_ROUND_NEAR_INF: libavutil/mathematics.c:142-144, mathematics.h:135 at n9.0.2), which its
-    muxers' packets get (fftools/ffmpeg_mux.c:158, libavcodec/packet.c:538-546): the pts the
-    missing frame would have in a file ffmpeg wrote at that rate, were the frame before it on
-    its own tick. Counted from the frame held, not from the first frame: the place's time then
-    follows the frames around it, as a player holding that frame has it, whatever the file's
-    rounding or drift since its start. At 24000/1001 in Matroska's milliseconds, the places
-    after a frame lie 42, 83, 125 ms after it, and the twelfth 501, from 500.5."""
+    muxers' packets get (fftools/ffmpeg_mux.c:158, libavcodec/packet.c:538-546): the pts the missing
+    frame would have in a file ffmpeg wrote at that rate, were the frame before it on its own tick.
+    Counted from the frame held, not from the first frame: the place's time then follows the frames
+    around it, as a player holding that frame has it, whatever the file's rounding or drift since
+    its start. At 24000/1001 in Matroska's milliseconds, the places after a frame lie 42, 83,
+    125 ms after it, and the twelfth 501, from 500.5."""
     # A period is `numerator` / `denominator` ticks: (d / n) / (p / q).
     numerator = time_base.denominator * rate.denominator
     denominator = time_base.numerator * rate.numerator

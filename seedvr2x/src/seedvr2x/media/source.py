@@ -169,9 +169,9 @@ REMAKE_COST = "lossless, so large: 0.53-0.55 MB a frame on a 1080p film; and a f
 # The share of a source's places filled from which its warning says what such a file is (_missing;
 # DESIGN.md, Input: "A file whose encoder dropped repeated frames on a constant grid is read the
 # same way, each drawing held as it was. The share of filled places is said, however large").
-# PROVISIONAL (implementation, 2026-10-12, a question for design: DESIGN.md gives no share): a
-# tenth, where a decoder's dropped pictures are a few frames of a film (2 of 99,585 on the source
-# this was found on, research/docs/seeking.md, mechanism 1).
+# A tenth (DESIGN.md, Input, the frame rate, decided on 2026-10-12: "from a tenth of the places"),
+# where a decoder's dropped pictures are a few frames of a film (2 of 99,585 on the source this
+# was found on, research/docs/seeking.md, mechanism 1).
 DROPPED_REPEATS = Fraction(1, 10)
 
 
@@ -747,15 +747,15 @@ def _on_grid(declared: Declared, scanned: Scan) -> Places | None:
       step that spans no multiple of g shows the grid to be R's, and the file is read, its
       repeats filled.
 
-    PROVISIONAL (implementation, 2026-10-12, questions for design: DESIGN.md has "sit on the
-    declared rate's grid", "within half a frame" and "no two frames in one place", not the steps'
-    tests, which are the reading above. --frame-rate's waiver of the 1 ms bound is DESIGN.md's,
-    for a file that holds R's timeline; that it stops where places are skipped is ours, on
-    DESIGN.md's "--frame-rate can't hold there" of a join: frames whose steps wander more than
-    1 ms a place with a frame really missing, S9's with a hole, are then refused with the
+    Kept as built by design on 2026-10-28 (the questions of 2026-10-12), DESIGN.md, Input, the
+    frame rate, "Missing frames are filled" (decided on 2026-10-10; "The rule, as built",
+    2026-10-11, states the steps' tests as the reading above). --frame-rate's waiver of the
+    1 ms bound is for a file that holds R's timeline; that it stops where places are skipped
+    is on DESIGN.md's "--frame-rate can't hold there" of a join: frames whose steps wander more
+    than 1 ms a place with a frame really missing, S9's with a hole, are then refused with the
     option as without, and have the remake alone, which numbers the frames as they come, the
-    hole closed. That a hole's step is held to half a frame is ours. And the common divisor is
-    ours: by the rules before it alone, frames at 12 fps declared 24/1 with one of theirs
+    hole closed. A hole's step is held to half a frame, and the spans share no divisor above
+    1: by the rules before it alone, frames at 12 fps declared 24/1 with one of theirs
     missing, a step of 4 places among steps of 2, and a 24 fps file given --frame-rate 48, would
     be read with half their places filled or more, every frame doubled, where the same cadence
     without that step is refused as a contradicted rate; it holds no further: with one step of
@@ -790,7 +790,7 @@ def _on_grid(declared: Declared, scanned: Scan) -> Places | None:
     if any(abs(int(off)) >= q * on.denominator for off in exact - whole):
         return None
     # The time a place, exact: each step, in ticks, over the places it spans; the shortest and
-    # the longest among those of each span. With --frame-rate too (PROVISIONAL, the docstring's):
+    # the longest among those of each span. With --frame-rate too (kept as built, the docstring's):
     # returning the places here for R read a join's step of 1.6 frames as a missing frame.
     each: list[Fraction] = []
     for span in np.unique(spans).tolist():
@@ -964,10 +964,10 @@ def _way_out(path: Path, on: Timeline, index: FrameIndex, stream: VideoStream) -
         "its timestamps follow no one rate exactly: a file joined by ffmpeg's concat demuxer"
         " alone drifts so, up to 1 ms a join, and timestamps alone can't tell a drifting join"
         " from a retagged file: a bad file, not read on a guess: join its segments again so that"
-        f" every frame keeps its place on the frame grid, {rate.grid_join(declares=declares)};"
-        f" or remake it at the rate it {_declares(stream)}, an FFV1 master numbering its frames at"
+        f" every frame keeps its place on the frame grid:\n{rate.grid_join(declares=declares)}\n"
+        f"or remake it at the rate it {_declares(stream)}, an FFV1 master numbering its frames at"
         f" that rate as they come, every one kept, its other streams copied ({REMAKE_COST}), with"
-        f" {command}"
+        f" {rate.alone(command)}"
     )
 
 
@@ -1128,7 +1128,8 @@ def _fixes(
     return (
         f"{_twin_join(found, declares, twinned)}"
         "remake it at that rate, an FFV1 master with its other streams copied, a clean file for"
-        f" every tool ({REMAKE_COST}), with {command}; or give --frame-rate {rate.fraction(found)},"
+        f" every tool ({REMAKE_COST}), with {rate.alone(command)}\n"
+        f"or give --frame-rate {rate.fraction(found)},"
         " which takes its frames at that rate, each checked to lie within half a frame of its"
         " timeline: the same frames on the same timeline, without the intermediate file"
     )

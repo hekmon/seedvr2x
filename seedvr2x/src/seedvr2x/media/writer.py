@@ -658,9 +658,9 @@ class CommandWriter(Writer):
         # with status 0 (2026-10-10), the old file left as it was. Removed, not written over: a
         # command of that run still writing it then keeps a file of its own, without a name.
         self._partial.unlink(missing_ok=True)
-        # PROVISIONAL (implementation, 2026-10-10: DESIGN.md says "the file seedvr2x names" and
-        # its example writes {out} bare): every {out} replaced, quoted, as GNU parallel replaces
-        # {}; nothing else of the command is read.
+        # DESIGN.md, Output, Writer (built on 2026-10-12): `{out}` is written bare and replaced
+        # by the quoted name of the partial file. Every {out} is replaced, as GNU parallel
+        # replaces {}; nothing else of the command is read.
         self._run = command.replace(OUT, _word(self._partial))
         self._tail = _Tail()
         self._output = threading.Thread(target=self._read_output, daemon=True)
@@ -1010,14 +1010,14 @@ def count_frames(path: Path, strict: bool = False) -> int:
     fails `seedvr2x verify`'s check of a master (DESIGN.md, Output, Checksums: "Anything ffmpeg
     reports while decoding fails the check").
 
-    PROVISIONAL (implementation, 2026-10-10: DESIGN.md says "only checks the result's frame
-    count", not how): decoded frames, not packets. A packet isn't a frame in every codec and
-    container, and the decode also shows that the file reads to its end: of a file cut at 56%,
-    ffprobe counts 168 frames of 300 and exits 0. The price is a decoder for whatever the command
-    wrote, and the decode's time. Measured on 2026-10-10 (ffmpeg n9.0.2, a Ryzen 9 9950X3D, 32
-    threads), 300 frames of 1080p: a noisy libx265 -crf 16 (68 Mb/s) in 2.1-2.8 s, a clean one
-    (12 Mb/s) in 1.0 s, mpeg4 -q:v 2 -bf 2 (97 Mb/s) in 0.3 s; their packets in 0.01-0.02 s.
-    That is with -threads 0: ffprobe otherwise decodes on one thread (it leaves libavcodec's
+    Decoded frames, not packets (DESIGN.md, Output, Writer, built on 2026-10-12: "its file's
+    decoded frames, counted, which also proves the file readable"). A packet isn't a frame in
+    every codec and container, and the decode also shows that the file reads to its end: of a file
+    cut at 56%, ffprobe counts 168 frames of 300 and exits 0. The price is a decoder for whatever
+    the command wrote, and the decode's time. Measured on 2026-10-10 (ffmpeg n9.0.2, a Ryzen 9
+    9950X3D, 32 threads), 300 frames of 1080p: a noisy libx265 -crf 16 (68 Mb/s) in 2.1-2.8 s, a
+    clean one (12 Mb/s) in 1.0 s, mpeg4 -q:v 2 -bf 2 (97 Mb/s) in 0.3 s; their packets in 0.01-0.02
+    s. That is with -threads 0: ffprobe otherwise decodes on one thread (it leaves libavcodec's
     default, where ffmpeg asks for all: fftools/ffprobe.c sets `threads` for -show_log only) and
     takes 11.4-12.2 s, 2.1-2.3 s and 1.5-2.1 s. Against about 4 s of GPU time per 1080p frame
     (media/ffmpeg.py), 0.2% of the noisy segment's time, and 1% on one thread.

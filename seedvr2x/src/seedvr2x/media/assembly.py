@@ -271,6 +271,12 @@ class _Packets:
 INTERLEAVED = 1.0
 
 
+def _counted(count: int, noun: str) -> str:
+    """`count` and its noun, plural unless the count is 1 (cli._plural's rule: this module
+    can't import the CLI)."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
 def _absolute(path: Path) -> Path:
     """path as ffmpeg and ffprobe must be given it, absolute: they take what comes before the
     first colon of a name for a protocol, and a relative `Film: 2.mkv` is refused, "Protocol not
@@ -951,8 +957,8 @@ def unmuxable_refusal(source: Path, found: Sequence[Unmuxable]) -> str:
         f"{source}: Matroska can't hold {'some' if several else 'one'} of its streams as"
         f" {'they are' if several else 'it is'}: {named}: the one-file output takes every other"
         " stream of the source, and seedvr2x drops none in silence. Give it a remux of the"
-        f" source without {'them' if several else 'it'}: {command} remuxed.mkv"
-        f" ({'; '.join(notes)}); or give -o a directory, whose segments are then muxed with"
+        f" source without {'them' if several else 'it'}:\n{command} remuxed.mkv\n"
+        f"({'; '.join(notes)}); or give -o a directory, whose segments are then muxed with"
         " the source's streams by your own tools"
     )
 
@@ -982,8 +988,8 @@ def rehearse(source: Path, work: Path) -> str:
         return (
             f"{error}: the one-file output takes the source's other streams as an ffmpeg remux"
             " holds them, and takes nothing ffmpeg warns of. Give it a remux of the source,"
-            " which ffmpeg corrects as it writes: ffmpeg -i SOURCE -map 0 -c copy remuxed.mkv;"
-            " or give -o a directory, whose segments are then muxed with the source's streams"
+            " which ffmpeg corrects as it writes:\nffmpeg -i SOURCE -map 0 -c copy remuxed.mkv\n"
+            "or give -o a directory, whose segments are then muxed with the source's streams"
             " by your own tools"
         )
     return moved(source, found, starts)
@@ -1013,9 +1019,9 @@ def moved(source: Path, found: Layout, starts: Mapping[int, Fraction]) -> str:
     those whose start ffprobe declares: one stream alone off its place is no move of the
     muxer's, and is left to the assembly's own check.
 
-    PROVISIONAL (implementation, 2026-10-12: DESIGN.md has every other stream copied, and the
-    video's timestamps the source's): refused before any work. The other way, placing the video
-    with the move, as ffmpeg's own remux holds it, is design's to decide."""
+    Refused before any work, with the remux that mends the source (DESIGN.md, Output, Assembly,
+    "Before any work, at every start": a stream that starts before the file's start, by which
+    the muxer would move the others, decided on 2026-10-12, kept as built on 2026-10-28)."""
     begins = Fraction(found.start_time or 0) * MICROSECOND
     expected = {
         stream.index: stream.start - begins
@@ -1046,8 +1052,8 @@ def moved(source: Path, found: Layout, starts: Mapping[int, Fraction]) -> str:
         f" time, {float(begins):.3f} s: Matroska's timestamps start at 0, so ffmpeg's muxer moves"
         f" every stream {float(move):.3f} s later, the upscaled video off its frame grid with"
         " them, and the one-file output couldn't be assembled. Give it a remux of the source"
-        f" without that stream: ffmpeg -i SOURCE -map 0 -map -0:{early} -c copy without.mkv (a"
-        " plain remux keeps the stream, and its start); or give -o a directory, whose segments"
+        f" without that stream:\nffmpeg -i SOURCE -map 0 -map -0:{early} -c copy without.mkv\n"
+        "(a plain remux keeps the stream, and its start); or give -o a directory, whose segments"
         " are then muxed with the source's streams by your own tools"
     )
 
@@ -1267,19 +1273,19 @@ def assemble(
         *(joined - began, done - joined, ahead / 1000),
     )
     logger.info(
-        "%s: assembled, %d frames of %d segments with %d other streams%s and %d chapters of %s,"
+        "%s: assembled, %s of %s with %s%s and %s of %s,"
         " %.2f GiB: joined in %.1f s, checked by its packets in %.1f s; the other streams at"
         " most %.2f s ahead of the video in the file",
         output,
-        total,
-        len(segments),
-        len(source_layout.streams) - 1,
+        _counted(total, "frame"),
+        _counted(len(segments), "segment"),
+        _counted(len(source_layout.streams) - 1, "other stream"),
         (
             f" (its data streams {', '.join(str(stream.index) for stream in gone)} left out)"
             if gone
             else ""
         ),
-        len(source_layout.chapters),
+        _counted(len(source_layout.chapters), "chapter"),
         source,
         size / 2**30,
         result.joined,

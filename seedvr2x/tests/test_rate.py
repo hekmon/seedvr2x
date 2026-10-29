@@ -383,10 +383,11 @@ GUIDANCE = (
     " of a frame), where it declares 24/1, its frames lasting from 41 to 63 ms: a bad file, not"
     " read on a guess: remake it at that rate, an FFV1 master with its other streams copied, a"
     " clean file for every tool (lossless, so large: 0.53-0.55 MB a frame on a 1080p film; and a"
-    " full encode), with ffmpeg -r:v:0 24000/1001 -i SOURCE -map 0 -map -0:d -c copy -c:v:0 ffv1"
-    " -level:v:0 3 -g:v:0 1 -slicecrc:v:0 1 -fps_mode:v:0 passthrough remade.mkv; or give"
-    " --frame-rate 24000/1001, which takes its frames at that rate, each checked to lie within"
-    " half a frame of its timeline: the same frames on the same timeline, without the"
+    " full encode), with this command:\n"
+    "ffmpeg -r:v:0 24000/1001 -i SOURCE -map 0 -map -0:d -c copy -c:v:0 ffv1"
+    " -level:v:0 3 -g:v:0 1 -slicecrc:v:0 1 -fps_mode:v:0 passthrough remade.mkv\n"
+    "or give --frame-rate 24000/1001, which takes its frames at that rate, each checked to lie"
+    " within half a frame of its timeline: the same frames on the same timeline, without the"
     " intermediate file"
 )
 
@@ -942,7 +943,7 @@ def fixes(found: Fraction, joined: bool = False) -> str:
         f"{TWIN_JOIN if joined else ''}"
         "remake it at that rate, an FFV1 master with its other streams copied, a clean file for"
         " every tool (lossless, so large: 0.53-0.55 MB a frame on a 1080p film; and a full"
-        f" encode), with {rate.remake(found, Fraction(0))}; or give --frame-rate"
+        f" encode), with this command:\n{rate.remake(found, Fraction(0))}\nor give --frame-rate"
         f" {rate.fraction(found)}, which takes its frames at that rate, each checked to lie within"
         " half a frame of its timeline: the same frames on the same timeline, without the"
         " intermediate file"
@@ -1164,11 +1165,11 @@ def no_rate(declares: Fraction) -> str:
         "its timestamps follow no one rate exactly: a file joined by ffmpeg's concat demuxer"
         " alone drifts so, up to 1 ms a join, and timestamps alone can't tell a drifting join"
         " from a retagged file: a bad file, not read on a guess: join its segments again so that"
-        f" every frame keeps its place on the frame grid, {rate.grid_join(declares=declares)};"
-        " or remake it at the rate it declares, an FFV1 master numbering its frames at that rate"
+        f" every frame keeps its place on the frame grid:\n{rate.grid_join(declares=declares)}\n"
+        "or remake it at the rate it declares, an FFV1 master numbering its frames at that rate"
         " as they come, every one kept, its other streams copied (lossless, so large: 0.53-0.55"
-        " MB a frame on a 1080p film; and a full encode), with"
-        f" {rate.remake(declares, Fraction(0))}"
+        " MB a frame on a 1080p film; and a full encode), with this command:\n"
+        f"{rate.remake(declares, Fraction(0))}"
     )
 
 
@@ -1205,35 +1206,50 @@ def test_the_join_that_keeps_the_frame_grid() -> None:
     )
     guard = """! grep -q "'.*'.*'" list.txt"""
     ffv1 = "-c:v:0 ffv1 -level:v:0 3 -g:v:0 1 -slicecrc:v:0 1 -fps_mode:v:0 passthrough"
+    # Each command on a line of its own, the words that lead to it ending in a colon above it and
+    # what it asks of the names in parentheses below it (DESIGN.md, What it prints: "a refusal's
+    # advised command, a remake or a join, on a line of its own, so that it can be copied
+    # whole").
     assert rate.grid_join() == (
         "with ffmpeg alone, each segment listed with its exact duration, its frames over the"
         " rate, and every timestamp snapped to the grid in one stream copy, with N and D set to"
-        f" their frame rate, 24000/1001 here: cd -- DIR && N=24000 D=1001 && {listed} && {guard}"
+        f" their frame rate, 24000/1001 here:\ncd -- DIR && N=24000 D=1001 && {listed} && {guard}"
         " && ffmpeg -f concat -safe 0 -i list.txt -c copy -bsf:v"
         f' "setts=pts={snapped.format("PTS")}:dts={snapped.format("DTS")}" ../joined.mkv'
-        f" ({names}), or with sptenc,"
-        " for segments of its split, sptenc concat -- DIR joined.mkv, which snaps every timestamp"
-        " to the grid, or, where no stream copy holds, for segments that carry audio, MPEG"
+        f"\n({names})\nor with sptenc,"
+        " for segments of its split, which snaps every timestamp to the grid:\n"
+        "sptenc concat -- DIR joined.mkv\n"
+        "or, where no stream copy holds, for segments that carry audio, MPEG"
         " program streams, or transport streams of a single frame, their pictures remade as an"
         " FFV1 master, numbered at that rate as they come, every one kept, with N and D set to"
-        f" their frame rate, 24000/1001 here: cd -- DIR && N=24000 D=1001 && {bare} && {guard} &&"
-        f" ffmpeg -f concat -safe 0 -r $N/$D -i list.txt -map 0:v:0 {ffv1} ../remade.mkv ({names})"
+        f" their frame rate, 24000/1001 here:\ncd -- DIR && N=24000 D=1001 && {bare} && {guard} &&"
+        f" ffmpeg -f concat -safe 0 -r $N/$D -i list.txt -map 0:v:0 {ffv1} ../remade.mkv\n({names})"
     )
-    assert "N/D" not in rate.grid_join() and rate.grid_join().count(" here: cd -- DIR") == 2
+    assert "N/D" not in rate.grid_join() and rate.grid_join().count(" here:\ncd -- DIR") == 2
     assert rate.grid_join().count(f"done > list.txt && {guard} && ffmpeg -f concat") == 2
+    # A line is a command or the words about it, never both: the log puts its time on the first
+    # line only, so that a command line copied is the command.
+    lines = rate.grid_join().splitlines()
+    commands = [line for line in lines if line.startswith(("cd -- ", "sptenc concat -- "))]
+    assert [line.split()[-1].rsplit("/", 1)[-1] for line in commands] == [
+        "joined.mkv",
+        "joined.mkv",
+        "remade.mkv",
+    ]
+    assert not any("ffmpeg -f concat" in line for line in lines if line not in commands)
     assert "echo" not in rate.grid_join() and " for f in *.mkv" not in rate.grid_join()
     assert rate.grid_join().count("| LC_ALL=C awk ") == rate.grid_join().count("awk") == 1
     known = rate.grid_join(shlex.quote("my segments"), Fraction(30000, 1001))
     assert "sptenc concat -- 'my segments' joined.mkv" in known
     assert known.count("cd -- 'my segments' && ") == 2 and "DIR" not in known
     assert f"cd -- 'my segments' && N=30000 D=1001 && {listed} && {guard} && ffmpeg -f" in known
-    assert "N/D their frame rate), or with sptenc" in known and " here" not in known
-    assert known.count(f"({names}") == 2 and known.endswith(f"../remade.mkv ({names})")
+    assert "N/D their frame rate)\nor with sptenc" in known and " here" not in known
+    assert known.count(f"({names}") == 2 and known.endswith(f"../remade.mkv\n({names})")
     assert known.count("N/D their frame rate") == known.count("N=") == 1
-    assert "one stream copy: cd -- 'my segments' &&" in known and "N and D set" not in known
+    assert "one stream copy:\ncd -- 'my segments' &&" in known and "N and D set" not in known
     assert (
-        f"every one kept: cd -- 'my segments' && {bare} && {guard} && ffmpeg -f concat -safe 0 -r"
-        f" 30000/1001 -i list.txt -map 0:v:0 {ffv1} ../remade.mkv ({names})" in known
+        f"every one kept:\ncd -- 'my segments' && {bare} && {guard} && ffmpeg -f concat -safe 0 -r"
+        f" 30000/1001 -i list.txt -map 0:v:0 {ffv1} ../remade.mkv\n({names})" in known
     )
     assert "24000" not in known and "-r $N/$D" not in known
     assert "N=25 D=1 &&" in rate.grid_join(declares=Fraction(25))
@@ -1338,7 +1354,7 @@ def test_a_rate_contradicted_within_a_millisecond_refused_naming_the_rate(
     assert str(refused.value) == (
         f"{path}: {leaves(strays, first_off, f'{declared}/1')}, and {way_out}"
     )
-    assert f"; or give --frame-rate {rate.fraction(found)}, which takes" in way_out
+    assert f"\nor give --frame-rate {rate.fraction(found)}, which takes" in way_out
     source = examine(path, frame_rate=found)
     assert (source.frames, source.frame_rate, source.stream.frame_rate) == (frames, found, declared)
     assert f"where it declares {declared}/1: taken at that rate" in caplog.text
@@ -2304,7 +2320,7 @@ def test_what_stays_refused_with_places_left_empty() -> None:
         " frame), where it declares 24/1, its frames lasting from 83 to 84 ms: a bad file, not"
         " read on a guess: remake it at that rate"
     )
-    assert "; or give --frame-rate 12/1, which takes its frames at that rate" in said
+    assert "\nor give --frame-rate 12/1, which takes its frames at that rate" in said
     assert filled_in(declaring(Fraction(24), Fraction(12)), twelve) is twelve.index
     # The same with one frame missing: every step spans 2 places of 24's grid, or 4: the
     # frames sit on 12's grid, the contradicted rate still, never read with half its places
@@ -3086,7 +3102,7 @@ def test_a_directorys_remake_takes_the_rate_typed(tmp_path: Path) -> None:
     said = rate.grid_join(shlex.quote(str(directory)))
     assert said.count("N=24000 D=1001 && for f in ./*.mkv; do printf") == 2
     assert "-safe 0 -r $N/$D -i list.txt" in said and "-r 24000/1001" not in said
-    before = ", with N and D set to their frame rate, 24000/1001 here: cd "
+    before = ", with N and D set to their frame rate, 24000/1001 here:\ncd "
     assert said.count(before) == 2 and "N/D" not in said.replace("$N/$D", "")
     set_right = said.replace("N=24000 D=1001", "N=25 D=1")
     joined, remade = tmp_path / "joined.mkv", tmp_path / "remade.mkv"
