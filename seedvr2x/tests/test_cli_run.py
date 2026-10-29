@@ -2281,7 +2281,7 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
         )
         assert untimed(recorded) | {"memory": None} == TILED_PLAN | {"memory": None}
     assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(output)) == (
-        ["out"] if output == "out" else ["one.mkv", "one.mkv.crc32"]
+        ["out"] if output == "out" else ["one.mkv", "one.mkv.crc32", "one.mkv.manifest.json"]
     )
 
 
@@ -3074,7 +3074,10 @@ def test_split_one_file(
     out = tmp_path / "out"
     assert decoded(one) == decoded(out / "seg_000000.mkv") + decoded(out / "seg_000001.mkv")
     for stop, poison, status in (("decode 4", None, 130), (None, "decode 4", 1)):
+        # A new job to the file: the file and the manifest beside it removed, the same command
+        # on a finished file making nothing (DESIGN.md, Output, Assembly, decided on 2026-10-12).
         one.unlink()
+        (tmp_path / "one.mkv.manifest.json").unlink()
         steps.stop, steps.poison = stop, poison
         assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT) == status
         assert not one.exists()
@@ -3085,6 +3088,8 @@ def test_split_one_file(
         assert not work.exists()
         assert decoded(one) == decoded(out / "seg_000000.mkv") + decoded(out / "seg_000001.mkv")
     # Not this job's: refused with a manifest there, and without one; never deleted.
+    one.unlink()
+    (tmp_path / "one.mkv.manifest.json").unlink()
     steps.stop = "decode 4"
     stopped(tmp_path, source_path, "one.mkv", *JOB[:4], *SPLIT)
     steps.stop = None
@@ -3329,12 +3334,18 @@ def test_one_file_checksums_kept_until_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
     # The checksums of a finished file go only when a new file replaces it: a run to the same
-    # file stopped before keeps the old file and its checksums.
+    # file stopped before keeps the old file and its checksums. The old file here is the one a
+    # run killed after putting it in place left, its job's work directory beside it: a file with
+    # no manifest at all is refused, and the same command on a finished file makes nothing
+    # (DESIGN.md, Output, Assembly, decided on 2026-10-12).
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    assert upscale(tmp_path, source_path, "whole.mkv", *JOB[:4]) == 0
     master, sums = tmp_path / "one.mkv", tmp_path / "one.mkv.crc32"
-    before = (master.read_bytes(), sums.read_bytes())
     steps.stop = "decode 4"
+    stopped(tmp_path, source_path, "one.mkv", *JOB[:4])
+    master.write_bytes((tmp_path / "whole.mkv").read_bytes())
+    sums.write_bytes((tmp_path / "whole.mkv.crc32").read_bytes())
+    before = (master.read_bytes(), sums.read_bytes())
     stopped(tmp_path, source_path, "one.mkv", *JOB[:4])
     assert (master.read_bytes(), sums.read_bytes()) == before
     assert cli.main(["verify", str(master)]) == 0

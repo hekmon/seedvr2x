@@ -423,8 +423,10 @@ def main(argv: list[str] | None = None) -> int:
 def verify(argv: list[str]) -> int:
     """seedvr2x verify: decode a job's output and check every frame against the checksums written
     with it (DESIGN.md, Output, Checksums): an output directory's segments, one of them, or a
-    one-file output. Exit status 1 when a frame isn't as written, checksums are missing, or a
-    segment isn't finished: the output isn't to be trusted whole yet."""
+    one-file output; a --segment-cmd one-file output, its manifest beside it and no checksums, has
+    its frames counted against the manifest's (_counted_beside). Exit status 1 when a frame isn't
+    as written, checksums are missing, or a segment isn't finished: the output isn't to be
+    trusted whole yet."""
     parser = argparse.ArgumentParser(
         prog="seedvr2x verify",
         description="Check every frame of a job's output against the checksums written with it.",
@@ -541,6 +543,9 @@ def _checked(output: Path) -> list[_Checked]:
     from seedvr2x.runtime.manifest import NAME, SUMS, checksums_file, read
 
     directory, only = (output, None) if output.is_dir() else (output.parent, output.name)
+    kept = _manifest_beside(output)
+    if not output.is_dir() and kept.is_file() and not _checksums_beside(output).is_file():
+        return [_counted_beside(output, kept)]
     if not (directory / NAME).is_file():
         if output.is_dir():
             raise JobError(f"{output}: no {NAME}, so not an output directory of seedvr2x")
@@ -588,6 +593,30 @@ def _checked(output: Path) -> list[_Checked]:
     ]
 
 
+def _counted_beside(output: Path, record: Path) -> _Checked:
+    """What verify checks of a finished file with its manifest beside it (_manifest_beside) and no
+    checksums, a --segment-cmd job's (DESIGN.md, Output, Assembly, decided on 2026-10-12: "a
+    `--segment-cmd` file's frames can be counted"): the file's frames, counted, against the
+    job's, the segments' together."""
+    from seedvr2x.media.probe import probe
+    from seedvr2x.runtime.job import JobError
+    from seedvr2x.runtime.manifest import read
+
+    content = read(record)
+    try:
+        frames = sum(int(entry["end"]) - int(entry["start"]) for entry in content["segments"])
+        commanded = content["settings"].get("segment_cmd") is not None
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise JobError(f"{record}: not a manifest seedvr2x wrote") from None
+    if not commanded:
+        raise JobError(
+            f"{_checksums_beside(output)}: missing, so nothing to check the frames of {output}"
+            " against"
+        )
+    stream = probe(output, first_frame=False)
+    return _Checked(output, stream.pix_fmt, (stream.width, stream.height), None, frames=frames)
+
+
 def _png_listing(directory: Path, count: int) -> list[str]:
     """What is wrong with a PNG segment's files, before its frames are decoded: each of its
     `count` frames there, NNNNNN.png from 0, and nothing else."""
@@ -620,7 +649,7 @@ def _run(args: argparse.Namespace) -> int:
         shots_from_cuts,
         target_size,
     )
-    from seedvr2x.runtime.manifest import NAME, complete, planned, read
+    from seedvr2x.runtime.manifest import ASSEMBLED, NAME, complete, planned, read
     from seedvr2x.runtime.planner import Pins
     from seedvr2x.runtime.weights import check_models
 
@@ -702,9 +731,23 @@ def _run(args: argparse.Namespace) -> int:
         recorded: dict[str, Any] | None = None
         kept: FrameIndex | None = None
         untrusted = ""
+        # A finished file's job: its manifest beside the file, no work manifest (DESIGN.md,
+        # Output, Assembly, decided on 2026-10-12). Held to its record as a finished directory
+        # job is, and makes nothing (_finished_file).
+        beside = None if final is None else _manifest_beside(final)
+        finished_file = False
         if (directory / NAME).is_file():
             _lock(directory)
             recorded = read(directory / NAME)
+            if beside is not None and beside.is_file() and ASSEMBLED not in recorded:
+                # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md doesn't say; no run makes this
+                # state, the manifest beside the file being written after the work manifest
+                # records the assembly): refused, nothing touched.
+                raise JobError(
+                    f"{beside} beside {final}, and {directory / NAME} with no record of the"
+                    " assembly: two jobs' records, which no run makes; remove the one that isn't"
+                    " the job's"
+                )
             # A run stopped between its file put in place and its work directory removed: the
             # removal finished, nothing started (_assembled).
             asked = (args, cuts, numz_padding, numz_draw, numz_tail)
@@ -715,14 +758,16 @@ def _run(args: argparse.Namespace) -> int:
             # decided on 2026-10-21); a plan's layout judges again after its pass (below).
             _refuse_foreign(directory / NAME, recorded, work=final is not None)
             kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
-        if final is not None:
+        elif beside is not None and beside.is_file():
+            recorded, finished_file = read(beside), True
+        if final is not None and not finished_file:
             # Before any work, on a new job and on a resume: what the assembly can't take of the
             # source's other streams would otherwise be found at the job's end, every segment
             # made (_copied). SIGTERM unwinds it as Ctrl-C does, its ffmpeg stopped with it
             # (stop.terminable): the run's handlers come later.
             with terminable():
                 _copied(args.input, directory)
-        if args.segment_cmd is not None:
+        if args.segment_cmd is not None and not finished_file:
             _trial(args, declared, output_size(target))
         # A job detecting its shots needs the record's probabilities: a plan cut by a list has
         # none, its first pass run again with the shot detector when it is planned again without
@@ -736,6 +781,8 @@ def _run(args: argparse.Namespace) -> int:
         detects = (
             args.cuts is None
             and trusted is None
+            # A finished file's job makes nothing, no first pass (_finished_file).
+            and not finished_file
             # A directory's finished job runs no pass (_finished_already); a .mkv path's does.
             and not (final is None and recorded is not None and complete(recorded))
             and (_detecting(recorded) or (recorded is not None and planned(recorded)))
@@ -794,8 +841,12 @@ def _run(args: argparse.Namespace) -> int:
                 *(args, directory, recorded, trusted, cuts, declared, ffmpeg_version),
                 *(conversions, numz_padding, numz_draw, numz_tail, model_files),
                 idle=idle,
+                beside=beside if finished_file else None,
             )
             identity = prior.identity
+            if finished_file:
+                assert final is not None and beside is not None
+                return _finished_file(args, final, directory, beside, prior, declared, target)
             # A finished job with no first pass's record to trust: said finished, nothing made.
             done = _finished_already(args, directory, prior, declared, target, untrusted)
             if done is not None:
@@ -1032,8 +1083,20 @@ def _run(args: argparse.Namespace) -> int:
             # its own, _replan).
             _taken_up(record, prior)
         if not remaining:
-            # Said for --plan too, which still writes the finished job's cut list, its plan.
-            logger.info("%s: finished already, its %d segments", directory, len(segments))
+            # Said for --plan too, which still writes the finished job's cut list, its plan. A
+            # .mkv path's job isn't finished until its file is in place (DESIGN.md, Pause and
+            # resume: "A finished file's job is finished once the file is in place").
+            if final is None:
+                logger.info("%s: finished already, its %d segments", directory, len(segments))
+            else:
+                logger.info(
+                    "%s: every segment made, its %d segments: %s",
+                    directory,
+                    len(segments),
+                    f"{final} is not assembled yet"
+                    if args.plan is not None
+                    else f"assembling {final}",
+                )
             if args.plan is None:
                 # A .mkv path's segments, every one finished by an earlier run, are assembled
                 # now, the models not loaded (_assemble).
@@ -1987,11 +2050,18 @@ def _assemble(
     the masters' size").
 
     The join proves its result before putting it in place (assembly.assemble), an old file's
-    checksums going only as it is replaced. Then, in this order, each step safe to stop after:
-    the file's checksums, the segments' one after the other, the file holding their frames as
-    they are (stream copy), written whole beside it (DESIGN.md, Output, Checksums); the
-    manifest's record of the assembly (manifest.ASSEMBLED); the work directory's removal
-    (_clear), which a run stopped during it leaves to the next (_assembled)."""
+    checksums going only as it is replaced. Then, in this order, each step safe to stop after
+    (DESIGN.md, Output, Assembly, decided on 2026-10-12):
+    - the file's checksums, the segments' one after the other, the file holding their frames as
+      they are (stream copy), written whole beside it (DESIGN.md, Output, Checksums), none for a
+      --segment-cmd job;
+    - the work manifest's record of the assembly (manifest.ASSEMBLED);
+    - the job's manifest beside the file (_manifest_beside), the work manifest's content whole,
+      the record of the assembly with it: "The job's manifest stays beside the finished file";
+    - the work directory's removal (_clear), its manifest last (resume.clear).
+    A run stopped after the file, its checksums or the record assembles again; one stopped after
+    the record, or during the removal, leaves the rest to the next (_assembled, _finished_file),
+    which starts nothing."""
     from seedvr2x.media import assembly
     from seedvr2x.media.checksums import read_checksums, write_checksums
     from seedvr2x.media.ffmpeg import MediaError
@@ -2063,6 +2133,18 @@ def _assemble(
             _plural(joined.chapters, "chapter"),
             time.monotonic() - started,
         )
+        try:
+            _write_beside(final, record.content())
+        except OSError as error:
+            # The file is in place and recorded in the work directory: the same command writes
+            # the manifest beside it and removes the directory (_assembled).
+            logger.error(
+                "%s: not written: %s; %s is assembled, and the same command writes it",
+                _manifest_beside(final),
+                error,
+                final,
+            )
+            return 1
         _clear(directory, record.content())
     return 0
 
@@ -2080,11 +2162,13 @@ def _assembled(
     """Whether the job recorded in directory, the work directory of `final`, was assembled
     already, its manifest saying so (manifest.ASSEMBLED) and the file there with the size
     recorded: a run stopped, or killed, between the file put in place and the work directory
-    removed, or one that left the directory for what it held of someone else's. The removal is
-    then finished (_clear), and the run starts nothing: no first pass, no model. Else, the
-    record's file missing or of another size, the record is dropped and the job assembled again
-    from its segments, which a removal begun then makes a resume refuse, naming the first one
-    missing (resume.leftovers).
+    removed, or one that left the directory for what it held of someone else's. The manifest
+    beside the file is written first where it is missing (a kill between the record and it:
+    _manifest_beside; DESIGN.md, Output, Assembly, decided on 2026-10-12), then the removal
+    finished (_clear), and the run starts nothing: no first pass, no model. Else, the record's
+    file missing or of another size, the record is dropped and the job assembled again from its
+    segments, which a removal begun then makes a resume refuse, naming the first one missing
+    (resume.leftovers).
 
     Only for the job asked: refused (JobError), nothing removed, when the job recorded is
     another, as far as is told here without a hash: the source's size, and every setting the
@@ -2096,7 +2180,7 @@ def _assembled(
     nothing of a stop during it): the record is the cheap way to make a kill during the removal
     of 100 GiB harmless, a directory half removed being otherwise refused by the next run. With
     --plan, FILE isn't written, which is said: the job's first pass's record may be gone with
-    the directory, and the same command then plans a new job."""
+    the directory, and the manifest beside the file then holds the job (_finished_file)."""
     from seedvr2x.runtime.job import JobError
     from seedvr2x.runtime.manifest import ASSEMBLED
 
@@ -2144,11 +2228,23 @@ def _assembled(
             + f"\nNothing was removed: remove {directory}, or choose another -o"
         )
     logger.info("%s: assembled already, %d bytes", final, size)
+    beside = _manifest_beside(final)
+    if not beside.exists():
+        # A run killed between the record of the assembly and the manifest beside the file
+        # (_assemble's steps): written from the work directory's, before it goes.
+        try:
+            _write_beside(final, recorded)
+        except OSError as error:
+            raise JobError(
+                f"{beside}: not written: {error}; {final} is assembled, and the work directory"
+                " kept for the same command to write it"
+            ) from None
+        logger.info("%s: written, from the manifest in %s", beside, directory)
     _clear(directory, recorded)
     if args.plan is not None:
         logger.warning(
-            "--plan %s: not written, the job being finished and its record removed: the same"
-            " command plans a new job",
+            "--plan %s: not written, the job being finished and its work directory removed: its"
+            " frame index, which a cut list is drawn from, is gone with it",
             args.plan,
         )
     return True
@@ -2157,7 +2253,8 @@ def _assembled(
 def _clear(directory: Path, content: dict[str, Any]) -> None:
     """Remove the work directory of a .mkv path, its job assembled, `content` its manifest's: this
     job's files, then the directory (resume.clear); what else is there is left, and said, as is
-    a removal the file system refuses: the file is in place, and nothing here fails the run."""
+    a removal the file system refuses: the file is in place, and its job's manifest beside it
+    (_write_beside) before this, so nothing here fails the run."""
     from seedvr2x.runtime import resume
 
     try:
@@ -2189,21 +2286,32 @@ def _output(args: argparse.Namespace) -> Path:
     files out of what sptenc reads or the assembly joins, or holds a job's manifest, which resume
     reads back (resume.leftovers checks the rest); anything else is refused, never deleted. A
     .mkv path's job runs in its work directory as a directory's does in its own: every job keeps
-    its units in files (units.Units), none in memory."""
+    its units in files (units.Units), none in memory.
+
+    A .mkv path already a file (or a link to one) is no obstacle only to the job that made it:
+    its manifest beside it (_manifest_beside), or its work directory's, a run having been killed
+    before the manifest was written beside it (DESIGN.md, Output, Assembly, decided on
+    2026-10-12: "an `x.mkv` with no manifest beside it is refused, where today a new job replaces
+    it without a word"). Refused before anything is written, the file untouched. A work directory
+    with no manifest is the removal's leftover of a finished job when the manifest beside the file
+    is there (_run finishes it), else refused when not empty."""
     from seedvr2x.runtime.job import JobError
     from seedvr2x.runtime.manifest import NAME
 
     output: Path = args.output
     # The output naming the source itself: its file, once assembled, would replace the source,
-    # the one thing a job can't make again, and its checksums' file likewise. The same file
-    # when the name exists, by whatever path (a relative name, a linked directory); else the
-    # same place. PROVISIONAL (implementation, 2026-10-12: DESIGN.md has no such sentence;
-    # found by a review, `seedvr2x film.mkv -o film.mkv` leaving the upscale under the
+    # the one thing a job can't make again, and its checksums' file and its manifest likewise.
+    # The same file when the name exists, by whatever path (a relative name, a linked directory);
+    # else the same place. PROVISIONAL (implementation, 2026-10-12: DESIGN.md has no such
+    # sentence; found by a review, `seedvr2x film.mkv -o film.mkv` leaving the upscale under the
     # source's name).
-    sums = [_checksums_beside(output)] if _final(output) is not None else []
-    for written in (output, *sums):
+    named = {output: "the output"}
+    if _final(output) is not None:
+        named[_checksums_beside(output)] = "the output's checksums"
+        named[_manifest_beside(output)] = "the output's manifest"
+    for written, said in named.items():
         if _same(written, args.input):
-            said = "the output" if written == output else f"the output's checksums, {written},"
+            said = said if written == output else f"{said}, {written},"
             raise JobError(f"{output}: {said} is the source itself; choose another -o")
     # PROVISIONAL (implementation, 2026-10-10: DESIGN.md's Assembly names one file and no
     # container): Matroska is the one container assembled, the segments' own (media/writer.py);
@@ -2214,20 +2322,26 @@ def _output(args: argparse.Namespace) -> Path:
             " segments go in a directory"
         )
     directory, what = output, "the output directory"
+    finished = False
     if _final(output) is not None:
         if output.is_dir():
             raise JobError(f"{output}: a directory; a .mkv path names the finished file")
         if args.format == "png":
             raise JobError(f"{output}: PNG output goes to a directory")
-        # A file already at the path, with no work directory beside it, is no obstacle: a new
-        # job, whose file replaces it once whole (assembly.assemble), with its checksums.
-        # PROVISIONAL (implementation, 2026-10-10: DESIGN.md doesn't say; what one FFV1 master
-        # did before the assembly, kept).
         directory, what = _work_directory(output), f"the work directory of {output}"
         if os.path.lexists(directory) and (directory.is_symlink() or not directory.is_dir()):
             raise JobError(
                 f"{directory}: not a directory; {output}'s job keeps its files there until the"
                 " file is assembled: remove it, or choose another -o"
+            )
+        record = _manifest_beside(output)
+        if os.path.lexists(record) and not record.is_file():
+            raise JobError(f"{record}: not a file; it holds {output}'s job: remove it")
+        finished = record.is_file()
+        if os.path.lexists(output) and not finished and not (directory / NAME).is_file():
+            raise JobError(
+                f"{output}: a file with no {record.name} beside it: not replaced; remove it, or"
+                " choose another -o"
             )
     elif output.is_file():
         raise JobError(f"{output}: a file; the output segments need a directory")
@@ -2235,7 +2349,12 @@ def _output(args: argparse.Namespace) -> Path:
     if dumps is not None and dumps.resolve().is_relative_to(directory.resolve()):
         raise JobError(f"--dump-frames {dumps}: in {what}, which holds the job's own files only")
     work = directory != output
-    if directory.is_dir() and not _empty(directory, work) and not (directory / NAME).is_file():
+    if (
+        directory.is_dir()
+        and not _empty(directory, work)
+        and not (directory / NAME).is_file()
+        and not finished
+    ):
         raise JobError(
             f"{directory}: not empty, and no {NAME} to resume from; "
             + (
@@ -2285,6 +2404,23 @@ def _checksums_beside(output: Path) -> Path:
     """Where the checksums of the finished file `output` go: beside it, its name and .crc32
     (DESIGN.md, Output, Checksums)."""
     return output.with_name(f"{output.name}.crc32")
+
+
+def _manifest_beside(output: Path) -> Path:
+    """Where the manifest of the finished file `output` stays: beside it, its name and
+    .manifest.json (DESIGN.md, Output, Assembly, decided on 2026-10-12: "The job's manifest stays
+    beside the finished file (`x.mkv.manifest.json`)"). PROVISIONAL (impl-v010, 2026-10-28: the
+    suffix is the text's own example, x.mkv.manifest.json)."""
+    return output.with_name(f"{output.name}.manifest.json")
+
+
+def _write_beside(final: Path, content: dict[str, Any]) -> None:
+    """Write the job's manifest beside the finished file `final` (_manifest_beside): its content
+    whole, the record of the assembly with it, written as every manifest is (manifest.
+    write_content)."""
+    from seedvr2x.runtime.manifest import write_content
+
+    write_content(_manifest_beside(final), content)
 
 
 def _refuse_foreign(path: Path, content: dict[str, Any], work: bool = False) -> None:
@@ -2776,6 +2912,7 @@ def _prior(
     numz_tail: bool,
     model_files: "ModelFiles",
     idle: bool = False,
+    beside: Path | None = None,
 ) -> _Prior:
     """The job recorded in directory, its manifest's content `recorded`, checked against the one
     asked before its first pass: the same settings, environment and source, the source being its
@@ -2804,20 +2941,27 @@ def _prior(
     by _finished_already or by _resume. Its environment alone: other settings, another source
     or, after this, another layout or plan (_resume) are another job, as before. Not a .mkv
     path's job with every segment made and no file, which isn't finished, its assembly the next
-    unit, made in this environment: refused, or accepted and recorded, as any resume.
+    unit, made in this environment: refused, or accepted and recorded, as any resume; but the
+    job of a finished file, its manifest beside it (`beside`, _finished_file), which is finished
+    as a directory's is.
     With --plan FILE too, which writes the job's cut list and asks no flag either (design,
     2026-10-12; refused without one until then): under another stack the list is written, the
     manifest untouched; under another ffmpeg or other conversions it isn't, the frame index it
     is written from not trusted there (_finished_already).
 
     idle: the job has every segment made and takes no GPU (_run): its identity is made without
-    one (_identity), so that its GPU's name is no difference, not being asked."""
+    one (_identity), so that its GPU's name is no difference, not being asked.
+
+    beside: the manifest beside a finished file (_manifest_beside), where `recorded` was read
+    from it and not from a work directory: its job is finished as a directory's is, in any
+    environment (DESIGN.md, Pause and resume: "A finished file's job is finished once the file is
+    in place"), the first pass no part of it (_finished_file)."""
     from seedvr2x.media.scan import Idet
     from seedvr2x.media.source import FirstPass
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import NAME, complete, planned
 
-    path = directory / NAME
+    path = directory / NAME if beside is None else beside
     made_in: dict[str, Any] | None = None
     if idle:
         # Not a record of this code's, without an environment: refused below, as another job.
@@ -2837,7 +2981,7 @@ def _prior(
     taken = [line for line in found if resume.replannable(line)]
     other = len(found) > len(changed) + len(taken)
     replanned = taken if taken and not other and planned(recorded) else []
-    finished = _final(args.output) is None and complete(recorded)
+    finished = (_final(args.output) is None or beside is not None) and complete(recorded)
     if other or taken != replanned or (changed and not args.accept_env_change and not finished):
         raise _another_job(
             path,
@@ -3145,6 +3289,56 @@ ENVIRONMENT_STAYS = (
 )
 
 
+def _declared_job(
+    args: argparse.Namespace,
+    path: Path,
+    recorded: dict[str, Any],
+    declared: "Declared",
+    target: tuple[int, int],
+) -> "Manifest":
+    """The finished job the manifest at `path` records, `recorded` its content, as Manifest holds
+    it, held to what a resume compares after its first pass that needs no decode (_resume): what
+    the source declares now (DECLARED) and the output's format, size (`target`, its (height,
+    width) before the output's rounding) and rate, against its record; another job when they
+    differ (JobError, _another_job), the record untouched. Its frame count is the record's, the
+    source's frames in places, no index being read (_finished_already, _finished_file)."""
+    from seedvr2x.media.scan import Idet
+    from seedvr2x.media.source import Source
+    from seedvr2x.runtime import resume
+    from seedvr2x.runtime.job import output_size
+
+    entry: dict[str, Any] = recorded["input"]
+    # The source as declared now, its frames the record's count, in places, and no index: nothing
+    # reads a frame, and what the index alone says, the places filled (Source.filled), is the
+    # record's, not compared.
+    source = Source(
+        path=declared.path,
+        stream=declared.stream,
+        conversion=declared.conversion,
+        frames=entry["frames"],
+        sample_aspect=declared.sample_aspect,
+        sha256=entry["sha256"],
+        index=None,
+        rate_override=declared.rate_override,
+        idet=Idet.from_record(entry.get("idet")),
+    )
+    job = resume.recorded_job(path, recorded, source)
+    height, width = output_size(target)
+    output = {"format": args.format, "size": [width, height], "frame_rate": str(source.frame_rate)}
+    asked = {
+        "input": {name: job.content()["input"][name] for name in DECLARED},
+        "output": output,
+    }
+    before = {
+        "input": {name: entry.get(name) for name in DECLARED},
+        "output": {name: recorded["output"].get(name) for name in output},
+    }
+    found = resume.differences(before, asked)
+    if found:
+        raise _another_job(path, found, only_environment=False)
+    return job
+
+
 def _finished_already(
     args: argparse.Namespace,
     directory: Path,
@@ -3172,7 +3366,8 @@ def _finished_already(
     pass run again when its record isn't trusted, with the shot detector for a job that detects
     its shots, the index written again (_taken_up), then the file assembled (cli._run). One
     whose file is in place never comes here: its record of the assembly answers first
-    (_assembled), before the index is looked at.
+    (_assembled), before the index is looked at; and one whose file is in place and work
+    directory gone has its manifest beside the file, which holds it finished (_finished_file).
 
     The job is checked before this as any job resumed is before its first pass (_prior): the
     same settings, the pins that shape its plan among them, and source by content, or refused,
@@ -3196,44 +3391,13 @@ def _finished_already(
     write a job's cut list, and a finished job make nothing again): --plan FILE on such a job
     writes nothing and fails, 1, saying why: the list is derived from the frame index and timed
     by it, and no first pass is run to make one for a job that needs none."""
-    from seedvr2x.media.scan import Idet
-    from seedvr2x.media.source import Source
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.job import output_size
     from seedvr2x.runtime.manifest import NAME, complete
 
     recorded = prior.recorded
     if _final(args.output) is not None or prior.known is not None or not complete(recorded):
         return None
-    entry: dict[str, Any] = recorded["input"]
-    # The source as declared now, its frames the record's count, in places, and no index: nothing
-    # reads a frame, and what the index alone says, the places filled (Source.filled), is the
-    # record's, not compared.
-    source = Source(
-        path=declared.path,
-        stream=declared.stream,
-        conversion=declared.conversion,
-        frames=entry["frames"],
-        sample_aspect=declared.sample_aspect,
-        sha256=entry["sha256"],
-        index=None,
-        rate_override=declared.rate_override,
-        idet=Idet.from_record(entry.get("idet")),
-    )
-    job = resume.recorded_job(directory / NAME, recorded, source)
-    height, width = output_size(target)
-    output = {"format": args.format, "size": [width, height], "frame_rate": str(source.frame_rate)}
-    asked = {
-        "input": {name: job.content()["input"][name] for name in DECLARED},
-        "output": output,
-    }
-    before = {
-        "input": {name: entry.get(name) for name in DECLARED},
-        "output": {name: recorded["output"].get(name) for name in output},
-    }
-    found = resume.differences(before, asked)
-    if found:
-        raise _another_job(job.path, found, only_environment=False)
+    job = _declared_job(args, directory / NAME, recorded, declared, target)
     discarded = resume.leftovers(job)
     for path in discarded:
         logger.debug("discarded %s", path)
@@ -3260,6 +3424,74 @@ def _finished_already(
         "isn't there as its manifest records it"
         if untrusted
         else "another ffmpeg or other conversions than this run's made",
+    )
+    return 1
+
+
+def _finished_file(
+    args: argparse.Namespace,
+    final: Path,
+    directory: Path,
+    beside: Path,
+    prior: _Prior,
+    declared: "Declared",
+    target: tuple[int, int],
+) -> int:
+    """A finished file's job run again: its manifest beside the file (`beside`, _manifest_beside)
+    and no work manifest. Said finished and nothing is made (DESIGN.md, Output, Assembly, decided
+    on 2026-10-12: "the same command again makes nothing, another job to that file is refused"):
+    no first pass, no rehearsal of the assembly, no trial of --segment-cmd, no model, no GPU
+    (cli._run), and no manifest written. Its exit status, 0; with --plan FILE, 1, FILE not
+    written, the cut list being drawn from a frame index that no longer exists.
+
+    Held as a finished directory job is (_declared_job, _prior): its settings, model files by
+    hash, the source's content, what the source declares and the output's format, size and rate,
+    or refused (JobError) as another job, nothing touched; its environment said in one line
+    (ENVIRONMENT_STAYS), never refused. The file is held to its record: there, with the bytes the
+    record of the assembly (manifest.ASSEMBLED) says, else refused, neither the file nor the
+    record removed. A work directory left (a removal killed after its manifest went, _clear) is
+    removed from the record beside the file first.
+
+    PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says the file is checked by nothing but its
+    manifest): the file's size against the record, the one test that needs no read of it, where
+    exit status 0 would otherwise pass for a file that was changed or truncated since. Nor does it
+    say how a record with no assembly's record, edited by hand, is read: refused."""
+    from seedvr2x.runtime.job import JobError
+    from seedvr2x.runtime.manifest import ASSEMBLED, complete
+
+    recorded = prior.recorded
+    made: Any = recorded.get(ASSEMBLED)
+    if not complete(recorded) or not isinstance(made, dict):
+        raise JobError(
+            f"{beside}: not the manifest of a finished file, a record of its assembly missing:"
+            f" {final} is not replaced; remove {beside.name} to make the file again, or choose"
+            " another -o"
+        )
+    _declared_job(args, beside, recorded, declared, target)
+    expected = cast(dict[str, Any], made).get("bytes")
+    size = final.stat().st_size if final.is_file() else None
+    if size != expected:
+        raise JobError(
+            f"{final} {'is missing' if size is None else f'holds {size} bytes'}, its manifest"
+            f" {beside.name} beside it says {expected}: not replaced; remove {beside.name} to"
+            " make the file again, or choose another -o"
+        )
+    if prior.changed:
+        logger.info(ENVIRONMENT_STAYS, final, "; ".join(prior.changed))
+    if directory.is_dir():
+        # What a removal killed after the work manifest went left, finished from this record.
+        _lock(directory)
+        _clear(directory, recorded)
+    frames = recorded["input"]["frames"]
+    logger.info("%s: finished already, its %d frames", final, frames)
+    if args.plan is None:
+        return 0
+    logger.error(
+        "--plan %s: not written: %s is finished already, and a job's cut list is written from its"
+        " frame index, which a finished file's job no longer has: plan the source in another"
+        " output (-o) for its cut list",
+        args.plan,
+        final,
     )
     return 1
 
@@ -3467,7 +3699,8 @@ def _plural(count: int, noun: str) -> str:
 
 def _taken(args: argparse.Namespace, directory: Path, where: Path) -> str | None:
     """What of the job's the resolved path `where` would take the place of, as a refusal says it
-    (_plan_file), or None: a .mkv path's finished file or its checksums, or a place in the job's
+    (_plan_file), or None: a .mkv path's finished file, its checksums or its manifest, or a place
+    in the job's
     directory, the output's or a .mkv path's work directory, which holds the job's own files
     only (resume.leftovers). One test for --plan FILE and for each playlist written beside it
     (cuts.playlist_path), so that what refuses the one refuses the others (design, 2026-10-12:
@@ -3481,6 +3714,8 @@ def _taken(args: argparse.Namespace, directory: Path, where: Path) -> str | None
         return "the output"
     if final is not None and _same(where, _checksums_beside(final)):
         return "the output's checksums"
+    if final is not None and _same(where, _manifest_beside(final)):
+        return "the output's manifest"
     if where.is_relative_to(directory.resolve()):
         what = "the output directory" if final is None else f"the work directory of {final}"
         return f"in {what}, which holds the job's own files only"

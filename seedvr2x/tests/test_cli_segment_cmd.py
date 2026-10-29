@@ -364,21 +364,49 @@ def test_assembled_from_command_segments(
     # -o x.mkv with a command writing B-frames, on the film with its other streams: assembled
     # from what the command wrote, milestone 6's acceptance as an FFV1 job's (the video's
     # timestamps the source's, frame for frame in presentation order, every other stream
-    # copied); no checksums beside it, those of an older file there gone as it is replaced;
-    # verify says it has none; given back as a source, accepted.
+    # copied); no checksums beside it, those of an older file there gone as it is replaced; its
+    # manifest beside it, from which verify counts its frames (DESIGN.md, Output, Assembly,
+    # decided on 2026-10-12: "a `--segment-cmd` file's frames can be counted"), exit 1 where
+    # they differ from the manifest's; the same command again makes nothing, the command not
+    # even tried; given back as a source, accepted.
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source = film_job(tmp_path, monkeypatch)
     final, sums = tmp_path / "x.mkv", tmp_path / "x.mkv.crc32"
+    record = tmp_path / "x.mkv.manifest.json"
+    # The job stopped in its last segment, so that an older file and its checksums at the path
+    # have a work directory beside them (a file with no manifest at all is refused).
+    steps.stop = "encode 77"
+    assert upscale(tmp_path, source, "x.mkv", *FILM, "--segment-cmd", MPEG4) == 130
+    steps.stop = None
     final.write_bytes(b"an older file")
     sums.write_bytes(b"its checksums")
     assert upscale(tmp_path, source, "x.mkv", *FILM, "--segment-cmd", MPEG4) == 0
-    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == ["x.mkv"]
+    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == ["x.mkv", record.name]
     assert codec(final) == "mpeg4,1" and count_frames(final) == 96
     held_to_the_source(final, source, tmp_path)
     caplog.clear()
-    assert cli.main(["verify", str(final)]) == 1
-    assert f"{sums}: missing, so nothing to check the frames of {final} against; a" in caplog.text
-    assert "--segment-cmd output has no checksums" in caplog.text
+    assert cli.main(["verify", str(final)]) == 0
+    assert f"{final}: its 96 frames there, counted" in caplog.text
+    assert f"{final}: 1 checked, by their frame counts alone: a --segment-cmd output has no" in (
+        caplog.text
+    )
+    # The manifest's count differs from the file's: exit 1, saying so; on a copy of the pair.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "y.mkv").write_bytes(final.read_bytes())
+    edited = json.loads(record.read_text())
+    edited["segments"][-1]["end"] += 1
+    (other / "y.mkv.manifest.json").write_text(json.dumps(edited))
+    caplog.clear()
+    assert cli.main(["verify", str(other / "y.mkv")]) == 1
+    assert f"{other / 'y.mkv'}: 96 frames, where 97 were written" in caplog.text
+    # The same command again: finished, the command not tried, nothing touched.
+    monkeypatch.setattr(cli, "_trial", lambda *a: pytest.fail("the command was tried"))
+    before = (final.read_bytes(), record.read_bytes(), final.stat().st_mtime_ns)
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM, "--segment-cmd", MPEG4) == 0
+    assert f"{final}: finished already, its 96 frames" in caplog.text
+    assert (final.read_bytes(), record.read_bytes(), final.stat().st_mtime_ns) == before
     caplog.clear()
     assert upscale(tmp_path, final, "back", "--cuts", "cuts.txt", "--plan", "plan.txt") == 0
     # No warning of its timestamps: the one there is of its matrix, which this command's encoder,
@@ -417,7 +445,7 @@ def test_missing_frames_filled_through_the_command_to_the_finished_file(
     final = tmp_path / "x.mkv"
     assert (tmp_path / "fed.txt").read_text().split() == ["5", "12", "6", "6", "16"]
     assert f"wrote {final}: 40 frames from 4 segments, with the source's 1 other" in caplog.text
-    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == ["x.mkv"]
+    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == ["x.mkv", "x.mkv.manifest.json"]
     assert count_frames(final) == 40 and indexes(final) == list(range(40))
     assert video_times(final) == HOLED_TIMES
     assert len(video_times(source)) == 38

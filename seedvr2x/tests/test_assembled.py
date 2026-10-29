@@ -260,7 +260,7 @@ def test_assembled_with_the_sources_other_streams(
     assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
     final = tmp_path / "x.mkv"
     listed = sorted(path.name for path in tmp_path.iterdir() if path.name.startswith("x.mkv"))
-    assert listed == ["x.mkv", "x.mkv.crc32"]
+    assert listed == ["x.mkv", "x.mkv.crc32", "x.mkv.manifest.json"]
     assert f"wrote {final}: 96 frames from 4 segments, with the source's 4 other streams and 2" in (
         caplog.text
     )
@@ -443,10 +443,16 @@ def test_assembly_failed_keeps_everything_then_assembles_without_the_models(
 
     source = film_job(tmp_path, monkeypatch)
     final, sums, work = (tmp_path / name for name in ("x.mkv", "x.mkv.crc32", "x.mkv.work"))
-    final.write_bytes(b"an older file")
-    sums.write_bytes(b"its checksums")
     with monkeypatch.context() as full:
         full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, source, "x.mkv", *FILM) == 1
+        # An older file at the path with its checksums, which this job's work directory, its
+        # manifest there, doesn't refuse (DESIGN.md, Output, Assembly, decided on 2026-10-12: a
+        # file with no manifest at all is refused, at a new job's start): a first run having
+        # failed, the second finds them and fails alike. Until the first run, none were there.
+        final.write_bytes(b"an older file")
+        sums.write_bytes(b"its checksums")
+        caplog.clear()
         assert upscale(tmp_path, source, "x.mkv", *FILM) == 1
     assert f"{final}: 0.00 GiB more free space needed in {tmp_path} to assemble it" in caplog.text
     assert "the same command assembles them once there is room; not assembled: every segment" in (
@@ -514,9 +520,11 @@ def test_removal_finished_by_the_next_run(
     assert passes == [] and steps.calls == [] and not work.exists()
     assert final.read_bytes() == assembled
     # The record with another file at the path, or none: dropped, and the job assembled again
-    # from its segments, the models not loaded. The job is made again first, whole, a file at
-    # the path with no work directory being no obstacle to a new one.
+    # from its segments, the models not loaded. The job is made again first, whole: the file and
+    # the manifest beside it removed, as the refusal of a file with no manifest says to do.
     for other in (b"another file", None):
+        final.unlink()
+        (tmp_path / "x.mkv.manifest.json").unlink()
         with monkeypatch.context() as context:
             context.setattr(resume, "clear", stopped_at_once)
             assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
@@ -565,6 +573,288 @@ def test_plan_kept_then_planned_again_then_run(
     assert len(passes) == 1 and encoded(steps) == [0, 5, 15]
     assert indexes(final) == list(range(25)) and not work.exists()
     assert cli.main(["verify", str(final)]) == 0
+
+
+def beside_manifest(directory: Path) -> dict[str, Any]:
+    return json.loads((directory / "x.mkv.manifest.json").read_text())
+
+
+def untouched(directory: Path, *names: str) -> dict[str, tuple[bytes, int]]:
+    """The bytes and modification time of each file named, to compare after a run that must
+    touch none."""
+    return {
+        name: ((directory / name).read_bytes(), (directory / name).stat().st_mtime_ns)
+        for name in names
+    }
+
+
+@needs_ffmpeg
+def test_the_finished_files_manifest_stays_beside_it_and_the_same_command_makes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Output, Assembly (decided on 2026-10-12): the job's manifest stays beside the
+    # finished file, the record of its assembly in it, whole; the same command again makes
+    # nothing: no first pass, no model, no rehearsal, the file, its checksums and its manifest
+    # untouched to the byte and the nanosecond.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    final = tmp_path / "x.mkv"
+    recorded = beside_manifest(tmp_path)
+    assert recorded["assembled"] == {"name": "x.mkv", "bytes": final.stat().st_size}
+    assert all(segment["finished"] for segment in recorded["segments"])
+    assert recorded["input"]["frames"] == 96
+    names = ("x.mkv", "x.mkv.crc32", "x.mkv.manifest.json")
+    before = untouched(tmp_path, *names)
+    there = listing(tmp_path)
+    passes = first_passes(monkeypatch)
+    from seedvr2x.media import assembly
+    from seedvr2x.runtime import model
+
+    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    monkeypatch.setattr(assembly, "preflight", lambda *a: pytest.fail("the rehearsal ran"))
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert f"{final}: finished already, its 96 frames" in caplog.text
+    assert "environment differs" not in caplog.text
+    assert passes == [] and steps.calls == []
+    assert untouched(tmp_path, *names) == before and listing(tmp_path) == there
+    # Under another ffmpeg: said in one line, never refused, the manifest as it was.
+    edited = beside_manifest(tmp_path)
+    edited["environment"]["ffmpeg"] = "n0.0"
+    (tmp_path / "x.mkv.manifest.json").write_text(json.dumps(edited, indent=2) + "\n")
+    before = untouched(tmp_path, *names)
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert f"{final}: its environment differs from this one and stays its manifest's" in (
+        caplog.text
+    )
+    assert "ffmpeg" in caplog.text and f"{final}: finished already" in caplog.text
+    assert untouched(tmp_path, *names) == before and passes == []
+    # verify reads the checksums beside the file, as before.
+    assert cli.main(["verify", str(final)]) == 0
+
+
+@needs_ffmpeg
+def test_another_job_to_a_finished_file_refused_and_nothing_touched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    names = ("x.mkv", "x.mkv.crc32", "x.mkv.manifest.json")
+    before, there = untouched(tmp_path, *names), listing(tmp_path)
+    passes = first_passes(monkeypatch)
+    steps.calls.clear()
+    # Another seed; another source, the same size of command line.
+    text = refused(tmp_path, source, caplog, *FILM, "--seed", "7", output="x.mkv")
+    manifest = f"{tmp_path / 'x.mkv.manifest.json'}: another job than the one asked"
+    assert manifest in text and "settings.seed: 42 -> 7" in text
+    other = film(tmp_path / "other.mkv", rate="25/1")
+    there = listing(tmp_path)
+    text = refused(tmp_path, other, caplog, *FILM, output="x.mkv")
+    assert manifest in text and "input." in text
+    assert passes == [] and steps.calls == []
+    assert untouched(tmp_path, *names) == before and listing(tmp_path) == there
+
+
+@needs_ffmpeg
+def test_a_file_with_no_manifest_beside_it_refused_before_any_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Output, Assembly: "an x.mkv with no manifest beside it is refused, where today a
+    # new job replaces it without a word": a file, then a link to one; neither is touched, no
+    # work directory is made, no first pass run.
+    source = film_job(tmp_path, monkeypatch)
+    passes = first_passes(monkeypatch)
+    final = tmp_path / "x.mkv"
+    final.write_bytes(b"the user's own file")
+    before = untouched(tmp_path, "x.mkv")
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert f"{final}: a file with no x.mkv.manifest.json beside it: not replaced; remove it" in (
+        text
+    )
+    there = listing(tmp_path)  # the models' stand-in files, written by the command's helper
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert untouched(tmp_path, "x.mkv") == before and listing(tmp_path) == there
+    final.unlink()
+    target = tmp_path / "elsewhere.bin"
+    target.write_bytes(b"the user's file, linked")
+    final.symlink_to(target)
+    there = listing(tmp_path)
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert "a file with no x.mkv.manifest.json beside it: not replaced" in text
+    assert final.is_symlink() and final.resolve() == target.resolve()
+    assert target.read_bytes() == b"the user's file, linked" and listing(tmp_path) == there
+    # A link whose target is missing is a file's name taken all the same.
+    target.unlink()
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert "a file with no x.mkv.manifest.json beside it: not replaced" in text
+    assert passes == [] and steps.calls == [] and not (tmp_path / "x.mkv.work").exists()
+
+
+@needs_ffmpeg
+def test_a_finished_file_missing_or_changed_is_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The manifest beside the file says its bytes: the file missing or of another size is
+    # refused, neither the file nor the record removed; the way out is the record's removal.
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    final, record = tmp_path / "x.mkv", tmp_path / "x.mkv.manifest.json"
+    whole = final.read_bytes()
+    kept = record.read_bytes()
+    passes = first_passes(monkeypatch)
+    final.write_bytes(whole[:-1])
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert f"{final} holds {len(whole) - 1} bytes, its manifest x.mkv.manifest.json beside it" in (
+        text
+    )
+    assert f"says {len(whole)}: not replaced; remove x.mkv.manifest.json to make the file" in text
+    assert final.read_bytes() == whole[:-1] and record.read_bytes() == kept
+    final.unlink()
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert f"{final} is missing, its manifest x.mkv.manifest.json beside it says" in text
+    assert not final.exists() and record.read_bytes() == kept and passes == []
+    # The record removed, the file's name is free: a new job makes it again.
+    record.unlink()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert final.stat().st_size == len(whole) and record.is_file()
+
+
+@needs_ffmpeg
+def test_plan_on_a_finished_file_writes_nothing_and_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # No frame index is left to draw a cut list from: FILE not written, exit 1, said. FILE naming
+    # the manifest beside the file is refused as the file and its checksums are.
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    names = ("x.mkv", "x.mkv.crc32", "x.mkv.manifest.json")
+    before, there = untouched(tmp_path, *names), listing(tmp_path)
+    plan = tmp_path / "plan.txt"
+    passes = first_passes(monkeypatch)
+    text = refused(tmp_path, source, caplog, *FILM, "--plan", str(plan), output="x.mkv")
+    assert f"--plan {plan}: not written: {tmp_path / 'x.mkv'} is finished already" in text
+    assert not plan.exists() and listing(tmp_path) == there and passes == []
+    assert untouched(tmp_path, *names) == before
+    record = tmp_path / "x.mkv.manifest.json"
+    text = refused(tmp_path, source, caplog, *FILM, "--plan", str(record), output="x.mkv")
+    assert f"--plan {record}: the output's manifest; it names the cut list's file" in text
+    assert untouched(tmp_path, *names) == before
+
+
+KILLED = ("a", "b", "c", "d", "e")
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("kill", KILLED)
+def test_every_stop_between_the_end_steps_is_finished_by_the_next_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    kill: str,
+) -> None:
+    # The end steps (cli._assemble): (a) the file in place, (b) its checksums, (c) the record of
+    # the assembly in the work manifest, (d) the manifest beside the file, (e) the work directory
+    # removed, its manifest last. A run killed after each, the step that follows made to raise;
+    # the same command then ends with the file whole, its checksums, the manifest beside it and
+    # no work directory, the file's frames the uninterrupted run's, no model loaded.
+    from seedvr2x.media import checksums
+    from seedvr2x.runtime import manifest, model
+
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "whole.mkv", *FILM) == 0
+    whole = tmp_path / "whole.mkv"
+    final, work = tmp_path / "x.mkv", tmp_path / "x.mkv.work"
+
+    def killed(*arguments: object, **options: object) -> None:
+        raise KeyboardInterrupt
+
+    def killed_removal(directory: Path, content: dict[str, Any]) -> list[str]:
+        # After the work manifest went, and a segment with it.
+        (directory / NAME).unlink()
+        (directory / "seg_000000.mkv").unlink()
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as stopping:
+        if kill == "a":
+            # The file's own, the segments' having been written before.
+            write = checksums.write_checksums
+
+            def killed_sums(path: Path, sums: Any) -> None:
+                if path.name == "x.mkv.crc32":
+                    raise KeyboardInterrupt
+                write(path, sums)
+
+            stopping.setattr(checksums, "write_checksums", killed_sums)
+        elif kill == "b":
+            stopping.setattr(manifest.Manifest, "job_assembled", killed)
+        elif kill == "c":
+            stopping.setattr(cli, "_write_beside", killed)
+        elif kill == "d":
+            stopping.setattr(cli, "_clear", killed)
+        else:
+            stopping.setattr(resume, "clear", killed_removal)
+        assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
+    record = tmp_path / "x.mkv.manifest.json"
+    # What the killed run left: the file in place from (a); its checksums from (b); the record of
+    # the assembly in the work manifest from (c), the manifest beside the file from (d).
+    assert final.is_file()
+    assert (tmp_path / "x.mkv.crc32").exists() == (kill != "a")
+    assert work.is_dir()
+    assert (NAME in listing(work)) == (kill != "e")
+    if kill != "e":
+        assert ("assembled" in json.loads((work / NAME).read_text())) == (kill in "cd")
+    assert record.exists() == (kill in "de")
+    passes = first_passes(monkeypatch)
+    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    text = caplog.text
+    # What the second run did: assembled again after (a) and (b); finished the removal after
+    # (c) and (d), writing the manifest beside the file first after (c); said the job finished
+    # after (e), its work directory's leftovers removed from the manifest beside the file.
+    assembled_again = f"wrote {final}: 96 frames" in text
+    assert assembled_again == (kill in "ab")
+    assert (f"{final}: assembled already" in text) == (kill in "cd")
+    assert (f"{record}: written, from the manifest in {work}" in text) == (kill == "c")
+    assert (f"{final}: finished already, its 96 frames" in text) == (kill == "e")
+    assert f"{work}: removed, its job assembled" in text
+    assert passes == [] and steps.calls == []
+    assert not work.exists()
+    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == [
+        *("x.mkv", "x.mkv.crc32", "x.mkv.manifest.json")
+    ]
+    assert frames_of(final) == frames_of(whole)
+    assert (tmp_path / "x.mkv.crc32").read_bytes() == (tmp_path / "whole.mkv.crc32").read_bytes()
+    assert beside_manifest(tmp_path)["assembled"] == {
+        "name": "x.mkv",
+        "bytes": final.stat().st_size,
+    }
+    held_to_the_source(final, source, tmp_path)
+    assert cli.main(["verify", str(final)]) == 0
+
+
+@needs_ffmpeg
+def test_both_manifests_with_no_record_of_the_assembly_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # PROVISIONAL (impl-v010, 2026-10-28): the manifest beside the file together with a work
+    # manifest that doesn't record the assembly: no run makes it; refused, naming both.
+    source = film_job(tmp_path, monkeypatch)
+    steps.stop = "encode 30"
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
+    work = tmp_path / "x.mkv.work"
+    (tmp_path / "x.mkv.manifest.json").write_text((work / NAME).read_text())
+    before = listing(tmp_path)
+    steps.stop = None
+    text = refused(tmp_path, source, caplog, *FILM, output="x.mkv")
+    assert "x.mkv.manifest.json beside" in text and "with no record of the assembly" in text
+    assert listing(tmp_path) == before
 
 
 def mov_text(path: Path) -> Path:
@@ -798,7 +1088,9 @@ def test_missing_frames_filled_into_the_finished_file(
     assert f"{tmp_path / MISSING_SAID}" in caplog.text
     wrote = f"wrote {final}: 40 frames from 4 segments, with the source's 1 other stream and 0"
     assert wrote in caplog.text
-    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == ["x.mkv", "x.mkv.crc32"]
+    assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == [
+        *("x.mkv", "x.mkv.crc32", "x.mkv.manifest.json")
+    ]
     own, times = video_times(source), video_times(final)
     assert len(own) == 38 and own[0] == 0
     assert times == HOLED_TIMES
@@ -925,7 +1217,10 @@ def test_ctrl_c_once_stops_before_the_assembly_or_lets_it_finish(film_directory:
     assert re.search(
         r"^\d\d:\d\d:\d\d stopping after the assembly of x.mkv; Ctrl-C again", text, re.M
     )
-    assert "finished already, its 4 segments" in text and "CALLS \n" in text
+    # Its segments all made, the file not yet in place: not "finished already" (DESIGN.md, Pause
+    # and resume: "A finished file's job is finished once the file is in place").
+    assert "every segment made, its 4 segments: assembling" in text and "CALLS \n" in text
+    assert "finished already" not in text
     assert not work.exists()
     held_to_the_source(final, film_directory / "film.mkv", film_directory)
 
@@ -945,6 +1240,10 @@ def test_stopped_at_once_during_the_assembly(
     # with it, no partial file left, an older file at the path as it was, the work directory
     # whole; the same command then assembles.
     final, work = film_directory / "x.mkv", film_directory / "x.mkv.work"
+    # The job made first and stopped before its assembly, so that the older file at the path has
+    # a job's work directory beside it, not a new job to refuse (DESIGN.md, Output, Assembly,
+    # decided on 2026-10-12: a file with no manifest is refused at a new job's start).
+    assert stopping(film_directory, "decode 77", (signal.SIGINT,))[0] == 130
     final.write_bytes(b"an older file")
     started = time.monotonic()
     found, text = stopping(film_directory, "assembly", signals)

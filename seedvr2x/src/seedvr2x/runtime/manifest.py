@@ -71,6 +71,14 @@ SHOT_RUNS = "runs"
 ASSEMBLED = "assembled"
 
 
+def write_content(path: Path, content: dict[str, Any]) -> None:
+    """Write a manifest's content to path, whole or not at all, even after a power cut: a
+    temporary file, fsync, rename, then a directory fsync (media.files.write_whole). The job's
+    manifest after every unit (Manifest.write), and its copy beside a finished file (cli.
+    _assemble; DESIGN.md, Output, Assembly, decided on 2026-10-12)."""
+    write_whole(path, (json.dumps(content, indent=2) + "\n").encode())
+
+
 def checksums_file(segment: str, output_format: str) -> str:
     """The name, in SUMS, of the checksums of the output segment named `segment`: an FFV1 file's
     name without the .mkv seedvr2x gives it, or a PNG directory's name, as it is; then .crc32.
@@ -248,7 +256,7 @@ class Manifest:
         if self.before_write is not None:
             self.before_write()
             self.before_write = None
-        write_whole(self.path, (json.dumps(self.content(), indent=2) + "\n").encode())
+        write_content(self.path, self.content())
 
     def content(self) -> dict[str, Any]:
         seed = self.settings["seed"]
