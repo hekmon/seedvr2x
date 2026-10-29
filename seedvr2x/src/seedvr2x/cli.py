@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from seedvr2x.runtime.manifest import Manifest
     from seedvr2x.runtime.model import Models
     from seedvr2x.runtime.plan import Plan
+    from seedvr2x.runtime.planner import Pins, PlanError
     from seedvr2x.runtime.pull import ModelFile, ModelFiles
     from seedvr2x.runtime.timing import Clock, Unit
 
@@ -758,6 +759,20 @@ def _run(args: argparse.Namespace) -> int:
             # decided on 2026-10-21); a plan's layout judges again after its pass (below).
             _refuse_foreign(directory / NAME, recorded, work=final is not None)
             kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
+            if not planned(recorded) and not complete(recorded):
+                # A resume that will plan its recorded shape in the memory free: said at once
+                # if the card, read through NVML, doesn't hold it, before the rehearsal and the
+                # hashes (DESIGN.md, Memory planner, A plan shapes the output a little). A plan
+                # is planned whole, and a finished job (a .mkv path's with its assembly alone
+                # left too) asks the card nothing.
+                # A one-file job's rehearsal counted where its record doesn't vouch for it
+                # (_rehearsed, which runs after the hashes).
+                rehearses = final is not None and not _rehearsal_trusted(
+                    recorded, ffmpeg_version, conversions
+                )
+                _early_memory(
+                    args, recorded, target, pins, numz_padding=numz_padding, rehearses=rehearses
+                )
         elif beside is not None and beside.is_file():
             recorded, finished_file = read(beside), True
         # The remux rehearsal of a .mkv path's job, recorded with its first pass's
@@ -1022,13 +1037,22 @@ def _run(args: argparse.Namespace) -> int:
             # DiT's peak by the fit of the attention backend this run takes, today's on a
             # resume too (_attention).
             free = memory.reading(_free_memory(identity.device))
-            plan, peaks = planner.plan(
-                *(free, target, shots, pins, _host_available()),
-                split=split,
-                numz_padding=numz_padding,
-                recorded=kept_plan,
-                attention=_attention(),
-            )
+            try:
+                plan, peaks = planner.plan(
+                    *(free, target, shots, pins, _host_available()),
+                    split=split,
+                    numz_padding=numz_padding,
+                    recorded=kept_plan,
+                    attention=_attention(),
+                )
+            except planner.PlanError as error:
+                if kept_plan is None or error.shortfall is None:
+                    raise
+                # A resume's recorded shape that no longer fits: the words first, the figures
+                # under --verbose (DESIGN.md, Memory planner, A plan shapes the output a
+                # little, decided on 2026-10-28).
+                logger.debug("%s", error)
+                raise JobError(_kept_refusal(error)) from None
             reserve = peaks.reading.reserve
             card = torch.cuda.get_device_name(identity.device)
             said = planner.said(
@@ -2032,7 +2056,23 @@ def _copied(source: Path, directory: Path, ffmpeg_version: str, conversions: str
     refused = assembly.preflight(source, directory)
     if refused:
         raise JobError(refused)
+    return _passed(ffmpeg_version, conversions)
+
+
+def _passed(ffmpeg_version: str, conversions: str) -> dict[str, Any]:
+    """The record of a rehearsal passed under this ffmpeg and these conversions
+    (manifest.REHEARSAL)."""
     return {"passed": True, "ffmpeg": ffmpeg_version, "conversions": conversions}
+
+
+def _rehearsal_trusted(recorded: dict[str, Any], ffmpeg_version: str, conversions: str) -> bool:
+    """Whether the manifest `recorded` holds a rehearsal a resume takes as it is (_rehearsed)."""
+    from seedvr2x.runtime.manifest import REHEARSAL
+
+    entry: Any = recorded.get("input")
+    return isinstance(entry, dict) and cast(dict[str, Any], entry).get(REHEARSAL) == _passed(
+        ffmpeg_version, conversions
+    )
 
 
 def _rehearsed(
@@ -2056,7 +2096,7 @@ def _rehearsed(
     from seedvr2x.media import assembly
     from seedvr2x.runtime.manifest import REHEARSAL
 
-    passed = {"passed": True, "ffmpeg": ffmpeg_version, "conversions": conversions}
+    passed = _passed(ffmpeg_version, conversions)
     entry: Any = None
     if isinstance(recorded.get("input"), dict):
         entry = cast(dict[str, Any], recorded["input"]).get(REHEARSAL)
@@ -2658,6 +2698,135 @@ def _write_index(directory: Path, source: "Source") -> None:
     if source.index is None:
         raise ValueError(f"{source.path}: no frame index to write")
     source.index.write(directory / INDEX)
+
+
+# How to free the card's memory, as a resume's refusal and its early warning say it (DESIGN.md,
+# Memory planner, A plan shapes the output a little, decided on 2026-10-28: "quit the programs
+# using the GPU, those closed to the tray too, the manual saying how to see them on each system").
+# PROVISIONAL (impl-v010, 2026-10-28: the manual's text is design's to give): the line points to
+# the manual's "GPU memory" section by name, where nvidia-smi and the Task Manager are already
+# named; design may name another.
+FREE_THE_CARD = (
+    "quit the programs using the GPU, those closed to the system tray too (the manual's"
+    ' "GPU memory" section says how to see them on each system)'
+)
+# What the checks that come before a resume's plan take, in seconds, for the early warning to say
+# for how long the memory can be freed. PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives the
+# night's figures, not a rate): milestone 7's third night on an RTX 5090, 2026-10-27, "the remux
+# rehearsed (66 s), the model files hashed (2 min), then the source (36 s)" (DESIGN.md, Memory
+# planner, A plan shapes the output a little), the source then 26 GB: 0.72 GB/s. The rehearsal is
+# a one-file output's alone (_copied). The models are the same files whatever the job.
+CHECK_REHEARSAL, CHECK_MODELS, CHECK_SOURCE_RATE = 66, 120, 26e9 / 36
+
+
+def _kept_refusal(error: "PlanError") -> str:
+    """The words of a resume's refusal for want of memory (PlanError.shortfall), in the order
+    DESIGN.md has them (Memory planner, A plan shapes the output a little, decided on 2026-10-28):
+    that the job is kept and the same command resumes it; the phase that doesn't fit and what
+    it lacks, in GiB; how to free it. The figures (the reading, the budget, both reserves) are
+    the error's message, said under --verbose by the caller."""
+    short = error.shortfall
+    assert short is not None
+    lines = ["the job is kept, nothing is lost, and the same command resumes it"]
+    if short.host:
+        # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md words the card's memory alone): the
+        # system's memory falls short, which quitting the GPU's programs doesn't cure and whose
+        # figures are the cure's, so they stay in the refusal, whole.
+        lines.append(str(error))
+    else:
+        lines.append(f"{short.what} lacks {short.short} GiB of the card's memory")
+        if short.freeable:
+            lines.append(f"to free it, {FREE_THE_CARD}")
+        else:
+            # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives the way out for programs
+            # alone): where no memory freed on the card gives it (planner._freeable), advice to
+            # quit programs would be advice nobody can follow (a review's find, 2026-10-12).
+            lines.append(
+                "quitting programs does not free that much on this card: the job needs a card"
+                " with more memory free"
+            )
+    # The third way out, --accept-env-change planning the rest again (DESIGN.md, same place), is
+    # a line more here (B1-4b).
+    return "\n".join(lines)
+
+
+def _checks_ahead(args: argparse.Namespace, rehearses: bool) -> int:
+    """The seconds the checks that come before a resume's plan take, for the early warning: the
+    models' hashes, the source's, and a one-file output's remux rehearsal where it runs, its
+    record not trusted (`rehearses`; _rehearsed) (CHECK_*)."""
+    try:
+        source = args.input.stat().st_size
+    except OSError:
+        source = 0
+    return round(CHECK_MODELS + source / CHECK_SOURCE_RATE + (CHECK_REHEARSAL if rehearses else 0))
+
+
+def _early_memory(
+    args: argparse.Namespace,
+    recorded: dict[str, Any],
+    target: tuple[int, int],
+    pins: "Pins",
+    *,
+    numz_padding: bool,
+    rehearses: bool,
+) -> None:
+    """Warn at once, as soon as a resume's record is read, where the memory free on the card
+    doesn't hold its recorded shape, so that it can be freed while the files are checked (DESIGN.md,
+    Memory planner, A plan shapes the output a little, decided on 2026-10-28). The card is read
+    through NVML alone (memory.card_free; memory.early takes this process's CUDA context off it):
+    no torch, no CUDA context, no GPU probe (memory.startup). The planner's own arithmetic judges
+    the record's shot, plan and pins, the system memory and the weights' placement as it will
+    later, but for the system memory, unread before torch (blockswap.available), and the attention
+    backend, which FlashAttention 2's presence tells (importlib, not imported). The refusal stays
+    at the plan, later, the memory moving meanwhile; this never refuses, and says in a debug line
+    where it judged nothing. PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md says "NVML only"
+    and no more): the host's memory unchecked here, the attention by find_spec."""
+    from importlib.util import find_spec
+
+    from seedvr2x.runtime import memory, planner
+    from seedvr2x.runtime.job import JobError, Shot
+    from seedvr2x.runtime.plan import Plan
+
+    card = memory.card_free()
+    if card is None:
+        logger.debug(
+            "the memory free on the card isn't read through NVML: not judged before the checks"
+        )
+        return
+    try:
+        known = Plan.recorded(recorded.get("plan"))
+        shots = [Shot(int(shot["start"]), int(shot["end"])) for shot in recorded["shots"]]
+        planner.check_recorded(known, shots, target, numz_padding=numz_padding)
+        attention = planner.FLASH_ATTN_2 if find_spec("flash_attn") else planner.SDPA
+        planner.plan(
+            memory.early(card),
+            target,
+            shots,
+            pins,
+            None,
+            split=args.color_correction == "split",
+            numz_padding=numz_padding,
+            recorded=known,
+            attention=attention,
+        )
+    except planner.PlanError as error:
+        short = error.shortfall
+        if short is None:
+            logger.debug("the recorded plan isn't judged before the checks: %s", error)
+            return
+        logger.debug("before the checks, NVML's %.2f GiB free: %s", card / memory.GIB, error)
+        minutes = max(1, math.ceil(_checks_ahead(args, rehearses) / 60))
+        logger.warning(
+            "the card's free memory, read now, does not hold the recorded plan: %s lacks %s GiB of"
+            " the card's memory\nto free it, %s; the checks now running take about %d min, within"
+            " which to free it",
+            short.what,
+            short.short,
+            FREE_THE_CARD,
+            minutes,
+        )
+    except (JobError, KeyError, TypeError, ValueError) as error:
+        logger.debug("the recorded plan isn't judged before the checks: %s", error)
 
 
 def _first_kept(directory: Path | None) -> str:

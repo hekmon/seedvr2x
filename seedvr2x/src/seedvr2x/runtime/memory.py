@@ -246,6 +246,17 @@ RESERVE = round(4.5 * GIB)
 # under it (EXPANDABLE). And it
 # is what a check may take from the limit before the run stops (check, hold's `reserve`).
 RESERVE_TIGHT = round(2.5 * GIB)
+# What this process's own CUDA context and libraries will hold of the card once torch has made them,
+# in bytes, for the reading a resume takes through NVML before any of that exists (early): the plan
+# is made in the free memory read with the context, the warm-up and the first allocation already on
+# the card (cli._free_memory), so the earlier reading, taken without them, counts them off.
+# PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives no figure, and the code none for a context
+# alone): 1.23 GiB, the most the card's use rose through a first pass, "the process's context and
+# libraries in it" (hold, the same RTX 5090 under WSL2, nvidia-smi, 2026-10-12). It is the larger
+# figure of those the code records (0.24 GiB for the first allocation, 0.29 with the warm-up on the
+# 96 GB card), so that the early reading errs towards warning of a shape the later check would
+# accept, never towards saying "fits" where it refuses.
+CONTEXT = round(1.23 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
 # allocator where the driver spills.
 ASYNC, NATIVE = "backend:cudaMallocAsync", "backend:native"
@@ -422,6 +433,27 @@ def reading(free: int) -> Reading:
         RESERVE / GIB,
     )
     return Reading(free, card, counted, True, _held_back(card), expandable=_native and _segments)
+
+
+def early(card: int) -> Reading:
+    """The reading a plan would be made in for a resume, from `card`, what the whole card has
+    free by NVML (card_free), taken before torch is imported and so before any CUDA context of
+    this process is on the card: CONTEXT less, which the later reading has already counted. The
+    allocator is not chosen yet (startup) and the driver not asked: behind WSL2's device the run
+    is taken for held, as startup takes a driver that doesn't answer, the free memory the
+    driver reports to the process counted as the card's (the smaller of the two figures, as
+    reading takes it), torch's own allocator with expandable segments unless the environment's
+    setting says otherwise (_allocator, as startup reads it); elsewhere the driver refuses and
+    its figure is the card's. Nothing is remembered and nothing is logged: the module's state is
+    startup's, and a run's own reading comes later (DESIGN.md, Memory planner, A plan shapes the
+    output a little, decided on 2026-10-28: "the room is read through NVML ... NVML only")."""
+    free = max(card - CONTEXT, 0)
+    if not paravirtual():
+        return Reading(free, None, free, False)
+    given = next((os.environ[name] for name in VARIABLES if os.environ.get(name)), None)
+    native, segments = _allocator(EXPANDABLE if given is None else given)
+    counted = max(free - HELD_BACK - RESERVE, 0)
+    return Reading(free, free, counted, True, HELD_BACK, expandable=native and segments)
 
 
 # What startup found, for the run that follows: whether the run holds itself to the card,

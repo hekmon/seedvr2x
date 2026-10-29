@@ -107,11 +107,18 @@ def test_constants() -> None:
 IMPORTED = """
 import sys
 
-from seedvr2x.runtime import planner
-from seedvr2x.runtime.plan import Tiles
+from seedvr2x.runtime import memory, planner
+from seedvr2x.runtime.job import Shot
+from seedvr2x.runtime.plan import Plan, Tiles
 
 padded = (1104, 1920)
 assert planner.encode_peak(padded, Tiles(1024)) > planner.encode_peak(padded, Tiles(512))
+# A resume's early look at the card plans its recorded shape before torch is imported
+# (cli._early_memory): the shots' layouts (runtime/job.py) need none.
+made, _ = planner.plan(
+    memory.early(96 << 30), (1080, 1920), [Shot(0, 300)], planner.Pins(), None, recorded=Plan(8)
+)
+assert made.window == 8
 print(*sorted(name for name in ("torch", "numpy", "torchvision") if name in sys.modules))
 """
 
@@ -120,8 +127,9 @@ def test_imports_no_torch() -> None:
     # The command line imports the planner before its first refusals, which don't wait for torch
     # (tests/test_cli.py): a process that has imported it, with the models' constants
     # (runtime/weights.py) and the reading's type (runtime/memory.py), and counted a tile's peak
-    # over the tiled passes' grid (runtime/tilegrid.py), has loaded no torch. Planning a job
-    # does load it, for the shots' layouts (runtime/shot.py).
+    # over the tiled passes' grid (runtime/tilegrid.py), has loaded no torch, nor has planning a
+    # recorded shape in a reading taken before it (memory.early): the shots' layouts are
+    # runtime/job.py's.
     result = subprocess.run(
         [sys.executable, "-c", IMPORTED], capture_output=True, text=True, check=False
     )
@@ -3972,6 +3980,67 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5() -> None:
     assert refused(reading, HD, film, Pins(swap_blocks=37), None) == (
         "--swap-blocks 37: the DiT has 36 blocks, so from 0 to 36"
     )
+
+
+def test_a_recorded_shape_refused_says_what_it_falls_short_of_apart() -> None:
+    # A resume's refusal for want of memory carries what it is short of in parts, for the command
+    # line to word first with the figures apart (PlanError.shortfall; DESIGN.md, Memory planner, A
+    # plan shapes the output a little, decided on 2026-10-28): the phase, the GiB, whether
+    # programs closed on the card give it back. The message stays the figures' sentence.
+    job = (HD, shots(76), Pins(), None)
+    recorded = Plan(17, Tiles(1856), Tiles(1088))
+
+    def refusal(free: int | Reading, **options: Any) -> PlanError:
+        with pytest.raises(PlanError) as error:
+            planner.plan(free, *job, **options)
+        return error.value
+
+    # A driver that refuses: the encode, 7.26 GiB short, which closing programs gives back.
+    error = refusal(our_free(16), recorded=recorded)
+    assert error.shortfall == planner.Shortfall("the encode", "7.26", freeable=True)
+    assert "7.26 GiB short" in str(error)
+    assert refusal(our_free(16), recorded=Plan(20, Tiles(768), Tiles(640))).shortfall == (
+        planner.Shortfall("the DiT's phase", "4.48")
+    )
+    assert refusal(round(21.99 * GIB), recorded=recorded).shortfall == (
+        planner.Shortfall("the decode", "0.04")
+    )
+    # The system's memory, not the card's.
+    with pytest.raises(PlanError) as hosted:
+        planner.plan(our_free(24), HD, shots(76), Pins(), 8 * GIB, recorded=recorded)
+    assert hosted.value.shortfall == planner.Shortfall("", "", host=True)
+    # A new job's refusal and a pin's carry none: the plan has no recorded shape to keep.
+    with pytest.raises(PlanError) as untiled:
+        planner.plan(our_free(16), HD, shots(76), Pins(decode_tile=0), None)
+    assert untiled.value.shortfall is None
+    with pytest.raises(PlanError) as pinned:
+        planner.plan(our_free(24), HD, shots(76), Pins(swap_blocks=3), None, recorded=recorded)
+    assert pinned.value.shortfall is None and pinned.value.instead == "--swap-blocks 28"
+    # A run held to the card: the closest to running, the plan with 2.5, its figures; and whether
+    # memory freed on the card gives it back (planner._freeable): the card's figure the smaller,
+    # up to the driver's.
+    film = shots(5)
+    decode = planner.decode_peak(padded_size(HD), output_size(HD), None, 0, 36)
+    need = decode + planner.VAE_ROOM
+    shape = Plan(5, None, None)
+
+    def on_card(card: int, driver: int) -> Reading:
+        counted = card - memory.HELD_BACK - memory.RESERVE
+        return Reading(driver, card, counted, True, memory.HELD_BACK)
+
+    # Short by 1 GiB with 2.5: the driver reports 2 GiB more than the card has, so that memory
+    # freed on the card gives it back.
+    short = on_card(need + memory.HELD_BACK + memory.RESERVE_TIGHT - GIB, need + 3 * GIB)
+    with pytest.raises(PlanError) as held:
+        planner.plan(short, HD, film, Pins(swap_blocks=36), None, recorded=shape)
+    assert held.value.shortfall is not None and not held.value.shortfall.host
+    assert held.value.shortfall == planner.Shortfall("the decode", "1.01", freeable=True)
+    # The driver reporting no more than the card has: nothing freed gives it.
+    flat = on_card(short.card or 0, short.card or 0)
+    with pytest.raises(PlanError) as stuck:
+        planner.plan(flat, HD, film, Pins(swap_blocks=36), None, recorded=shape)
+    assert stuck.value.shortfall is not None and not stuck.value.shortfall.freeable
+    assert stuck.value.shortfall.short == held.value.shortfall.short
 
 
 def test_a_held_run_s_choices_for_the_host_take_no_margin_either() -> None:

@@ -2091,7 +2091,9 @@ def test_recorded_plan_no_longer_fits(
     # A resume whose recorded shape no longer fits the memory free stops, naming the phase and
     # the shortfall (DESIGN.md, Memory planner), nothing changed on disk; the job resumes once
     # the memory is back. Here the untiled encode, a quarter of a GiB short with the DiT away
-    # of its peak and the room a VAE pass is held to (planner.VAE_ROOM).
+    # of its peak and the room a VAE pass is held to (planner.VAE_ROOM). Decided on 2026-10-28:
+    # the refusal says first that the job is kept and the same command resumes it, then the phase
+    # and what it lacks, then how to free it; the figures go under --verbose (a debug line).
     source_path = job(tmp_path, monkeypatch)
     steps.stop = "encode 4"
     stopped(tmp_path, source_path, "out", *JOB)
@@ -2100,16 +2102,227 @@ def test_recorded_plan_no_longer_fits(
     steps.calls.clear()
     encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     free_memory(monkeypatch, encode + planner.MARGIN - GIB // 4)
-    assert upscale(tmp_path, source_path, "out", *JOB) == 1
-    assert (
+    figures = (
         "the recorded plan no longer fits the memory free now: the encode, untiled, with the"
         " DiT off the GPU, takes 4.62 GiB of free VRAM, 1.25 of them the room a VAE pass is held"
         " to, and the driver reports 4.36 GiB free, 0.26 GiB short"
-    ) in caplog.text
+    )
+    words = [
+        "the job is kept, nothing is lost, and the same command resumes it",
+        "the encode lacks 0.26 GiB of the card's memory",
+        f"to free it, {cli.FREE_THE_CARD}",
+    ]
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    (error,) = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert error.getMessage().split("\n") == words
+    # Not the figures, which a default run never says: no debug line is let through.
+    assert figures not in caplog.text and "NVML" not in error.getMessage()
     assert contents(tmp_path / "out") == kept and steps.calls == []
+    # Under --verbose, which sets the level to debug, the figures are said, in a line of their own.
+    caplog.clear()
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    (debug,) = [record for record in caplog.records if record.getMessage() == figures]
+    assert debug.levelno == logging.DEBUG
+    (error,) = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert error.getMessage().split("\n") == words and figures not in error.getMessage()
+    caplog.set_level(logging.WARNING, logger="seedvr2x")
     free_memory(monkeypatch, FREE)
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert steps.calls == UNINTERRUPTED[6:]
+
+
+def test_a_recorded_plan_that_falls_short_of_the_systems_memory_is_kept_too(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # PROVISIONAL (impl-v010, 2026-10-28): DESIGN.md words the shortfall of the card's memory; the
+    # system's own (planner, Host RAM) says the job is kept, then its figures in full, nothing
+    # about the GPU's programs, whose quitting doesn't cure it.
+    source_path = job(tmp_path, monkeypatch)
+    options = (*JOB[:4], "--swap-blocks", "36")
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *options)
+    steps.stop = None
+    monkeypatch.setattr(cli, "_host_available", lambda: 1)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 1
+    first, second = caplog.messages[-1].split("\n")
+    assert first == "the job is kept, nothing is lost, and the same command resumes it"
+    assert second.startswith("the recorded plan no longer fits the memory free now: the plan takes")
+    assert "system memory" in second and "quit the programs" not in caplog.text
+
+
+def early_card(monkeypatch: pytest.MonkeyPatch, free: int | None) -> list[int]:
+    """Have NVML, behind memory.card_free, report `free` bytes free on the whole card from now on;
+    returns the devices it is asked for, in order. None: a machine without it (conftest.py)."""
+    from seedvr2x.runtime import memory
+
+    asked: list[int] = []
+
+    def read(index: int) -> int | str:
+        asked.append(index)
+        return "no NVML on this machine" if free is None else free
+
+    monkeypatch.setattr(memory, "_read", read)
+    return asked
+
+
+def mark_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Have the checks that come after a resume's record is read say so in the log when they run:
+    a one-file output's rehearsal (cli._copied), the model files' hashes (pull.check_pinned) and
+    the GPU's probe (memory.startup), which the early reading must not move."""
+    from seedvr2x.runtime import memory
+
+    log = logging.getLogger("seedvr2x")
+    started = memory.startup
+    copied, pinned = cli._copied, pull.check_pinned  # pyright: ignore[reportPrivateUsage]
+
+    def rehearsed(*arguments: Any) -> None:
+        log.warning("MARK the rehearsal")
+        copied(*arguments)
+
+    def hashed(*arguments: Any) -> None:
+        log.warning("MARK the hashes")
+        pinned(*arguments)
+
+    def probed() -> str:
+        log.warning("MARK the probe")
+        return started()
+
+    monkeypatch.setattr(cli, "_copied", rehearsed)
+    monkeypatch.setattr(pull, "check_pinned", hashed)
+    monkeypatch.setattr(memory, "startup", probed)
+
+
+@pytest.mark.parametrize(("output", "minutes"), [("out", 2), ("one.mkv", 2)])
+def test_a_resume_short_of_memory_is_warned_of_before_the_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    output: str,
+    minutes: int,
+) -> None:
+    # DESIGN.md, Memory planner, A plan shapes the output a little (decided on 2026-10-28): as
+    # soon as the record is read, before the rehearsal and the hashes, the room is read through
+    # NVML alone; where the recorded shape doesn't fit, a warning says so at once, what to free,
+    # and for about how long (the models' 2 min, a one-file output's 66 s more: memory's
+    # CHECK_*). The check that refuses stays at the plan: the memory moved meanwhile here, and
+    # the job goes on.
+    source_path = job(tmp_path, monkeypatch)
+    options = JOB[:4]
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, output, *options)
+    steps.stop = None
+    steps.calls.clear()
+    from seedvr2x.runtime import memory
+
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    # Short by a quarter of a GiB by NVML, this process's CUDA context counted off it.
+    asked = early_card(monkeypatch, encode + planner.MARGIN - GIB // 4 + memory.CONTEXT)
+    mark_checks(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, output, *options) == 0
+    assert asked == [0]
+    warned = [m for m in caplog.messages if "does not hold the recorded plan" in m]
+    assert warned == [
+        "the card's free memory, read now, does not hold the recorded plan: the encode lacks 0.26"
+        " GiB of the card's memory\n"
+        f"to free it, {cli.FREE_THE_CARD}; the checks now running take about {minutes} min,"
+        " within which to free it"
+    ]
+    marks = [m for m in caplog.messages if m.startswith("MARK")]
+    # A one-file job's resume takes its rehearsal from its record, after the hashes
+    # (cli._rehearsed), and counts none in its time.
+    assert marks == ["MARK the hashes", "MARK the probe"]
+    assert caplog.messages.index(warned[0]) < caplog.messages.index(marks[0])
+    # The job goes on from where it stopped (a .mkv path's segments are the whole job's, not
+    # --min-segment's).
+    assert steps.calls[0] == "encode 4" and steps.calls[-1].startswith("decode")
+
+
+def test_a_shortfall_no_programs_cure_says_so() -> None:
+    # PROVISIONAL (impl-v010, 2026-10-28): where no memory freed on the card gives a held run's
+    # shape its memory (planner._freeable), the refusal does not send the user to quit programs.
+    error = planner.PlanError(
+        "the figures", shortfall=planner.Shortfall("the decode", "1.01", freeable=False)
+    )
+    assert cli._kept_refusal(error).split("\n") == [  # pyright: ignore[reportPrivateUsage]
+        "the job is kept, nothing is lost, and the same command resumes it",
+        "the decode lacks 1.01 GiB of the card's memory",
+        "quitting programs does not free that much on this card: the job needs a card with more"
+        " memory free",
+    ]
+
+
+def test_a_resume_warned_of_is_refused_at_its_place_after_the_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The warning is no refusal: the memory still short where the plan is made, after the hashes
+    # and the first pass's comparison, the job is refused there, its refusal as ever.
+    from seedvr2x.runtime import memory
+
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    steps.stop = None
+    steps.calls.clear()
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    short = encode + planner.MARGIN - GIB // 4
+    free_memory(monkeypatch, short)
+    early_card(monkeypatch, short + memory.CONTEXT)
+    mark_checks(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    messages = caplog.messages
+    warned = next(i for i, m in enumerate(messages) if "does not hold the recorded plan" in m)
+    hashed = messages.index("MARK the hashes")
+    refused_at = next(i for i, m in enumerate(messages) if m.startswith("the job is kept"))
+    assert warned < hashed < refused_at and steps.calls == []
+
+
+def test_nothing_is_said_early_where_the_recorded_shape_fits_or_nothing_is_judged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # No early warning where NVML reads room for the shape, where it reads nothing (a debug
+    # line says so), for a new job, a plan (planned whole, no shape recorded) and a finished job
+    # (which asks the card nothing): the card is read for none of the last three.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    short = early_card(monkeypatch, 1 * GIB)  # a card far too small, were it read
+    listed = tmp_path / "plan.txt"
+    # A new job and a plan: nothing recorded to hold to.
+    assert upscale(tmp_path, source_path, "planned", *JOB, "--plan", str(listed)) == 0
+    assert upscale(tmp_path, source_path, "planned", *JOB) == 0
+    assert upscale(tmp_path, source_path, "new", *JOB) == 0
+    # A finished job.
+    assert upscale(tmp_path, source_path, "new", *JOB) == 0
+    assert short == [] and "does not hold the recorded plan" not in caplog.text
+    # A resume with room by NVML, then without NVML.
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    steps.stop = None
+    roomy = early_card(monkeypatch, FREE)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert roomy == [0] and "does not hold the recorded plan" not in caplog.text
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "again", *JOB)
+    steps.stop = None
+    early_card(monkeypatch, None)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "again", *JOB) == 0
+    assert "does not hold the recorded plan" not in caplog.text
+    assert "isn't read through NVML: not judged before the checks" in caplog.text
 
 
 def test_plan_planned_again_whole(

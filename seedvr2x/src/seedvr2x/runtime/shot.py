@@ -52,7 +52,12 @@ from seedvr2x.media.conversion import Conversion
 from seedvr2x.media.decode import Decoder, to_float32
 from seedvr2x.media.ffmpeg import MediaError, input_args
 from seedvr2x.runtime import colour, model, tiling
-from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, SHARED, output_size
+from seedvr2x.runtime.job import (
+    ENCODE_SEED_OFFSET,
+    output_size,
+    padded_length,
+    window_layout,
+)
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
 from seedvr2x.runtime.plan import Tiles
 
@@ -142,40 +147,10 @@ def moved(tensor: Tensor, device: torch.device, what: str) -> Tensor:
     return copy
 
 
-def window_layout(latents: int, window: int, shared: int = SHARED) -> list[tuple[int, int]]:
-    """[start, end) of the windows over a shot of `latents` latents: as few windows as `window`
-    allows, their lengths balanced (differing by at most 1, the longer first), consecutive ones
-    sharing `shared` latents (DESIGN.md, Pipeline step 2)."""
-    if latents <= window:
-        return [(0, latents)]
-    if window < 2 * shared + 1:
-        raise ValueError(
-            f"windows of {window} latents leave none of their own with {shared} shared"
-        )
-    count = math.ceil((latents - shared) / (window - shared))
-    base, longer = divmod(latents + (count - 1) * shared, count)
-    layout: list[tuple[int, int]] = []
-    start = 0
-    for index in range(count):
-        length = base + 1 if index < longer else base
-        layout.append((start, start + length))
-        start += length - shared
-    # A latent is in at most two windows: a window is at least as long as the two zones it
-    # shares with its neighbours.
-    assert layout[-1][1] == latents and base >= 2 * shared
-    return layout
-
-
 def mix_weights(shared: int) -> list[float]:
     """The earlier window's weights on the latents two windows share: cosine, 0.75 then 0.25 for
     2, the curve the stitching study measured (blend_patch.py, weights)."""
     return [0.5 + 0.5 * math.cos(math.pi * i / (shared + 1)) for i in range(1, shared + 1)]
-
-
-def padded_length(count: int) -> int:
-    """The frames of a shot of `count` frames once padded to 4n + 1: the VAE packs 4 frames per
-    latent after the first."""
-    return count + (-count + 1) % 4
 
 
 def shot_layout(count: int, window: int | None) -> list[tuple[int, int]]:

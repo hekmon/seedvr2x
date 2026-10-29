@@ -1596,6 +1596,42 @@ def test_tightened_moves_the_reserve_alone() -> None:
     assert memory.tightened(memory.Reading(GIB, None, 0, True, 3 * GIB)).counted == 0
 
 
+def test_the_early_reading_counts_off_this_process_s_context(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A resume's first look at the card (memory.early; DESIGN.md, Memory planner, A plan shapes
+    # the output a little, decided on 2026-10-28), through NVML before torch and so before this
+    # process's CUDA context is on the card: that context off the figure, which the later reading
+    # has counted; the module's state, startup's, untouched, and nothing logged.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    assert memory.CONTEXT == round(1.23 * GIB)
+    state = (memory._spills, memory._native, memory._segments, memory._limit)  # pyright: ignore[reportPrivateUsage]
+    free = 28 * GIB - memory.CONTEXT
+    # A driver that refuses (no WSL2 device): its figure is the card's, nothing held.
+    assert memory.early(28 * GIB) == memory.Reading(free, None, free, False)
+    # Behind WSL2's device, taken for held as startup takes a driver that doesn't answer: the card's
+    # figure less what torch is held back from and the reserve, torch's own allocator with
+    # its segments by default.
+    monkeypatch.setattr(memory, "paravirtual", lambda: True)
+    counted = free - memory.HELD_BACK - memory.RESERVE
+    held = memory.Reading(free, free, counted, True, memory.HELD_BACK, expandable=True)
+    assert memory.early(28 * GIB) == held
+    # The environment's allocator stands, as startup reads it: cudaMallocAsync or torch's own
+    # without the segments are not expandable; an empty setting is none.
+    for setting, expandable in (
+        ("backend:cudaMallocAsync", False),
+        ("backend:native", False),
+        ("backend:native,expandable_segments:True", True),
+        ("", True),
+    ):
+        monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", setting)
+        assert memory.early(28 * GIB).expandable is expandable, setting
+    # Never under nothing.
+    assert memory.early(GIB) == memory.Reading(0, 0, 0, True, memory.HELD_BACK, expandable=True)
+    assert state == (memory._spills, memory._native, memory._segments, memory._limit)  # pyright: ignore[reportPrivateUsage]
+    assert caplog.messages == []
+
+
 def cached(
     monkeypatch: pytest.MonkeyPatch, nvml: Nvml, reserved: int, allocated: int, freed: int = 0
 ) -> dict[str, int]:

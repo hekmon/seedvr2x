@@ -351,3 +351,36 @@ def check_target(target: tuple[int, int], resolution: int) -> None:
             f" up to a multiple of {MULTIPLE}, and columns alike: it takes 17 rows and 16"
             " columns at least"
         )
+
+
+# window_layout and padded_length live here, in plain Python, and shot.py (torch) imports them:
+# the planner's arithmetic needs them before torch is imported (impl-v010, 2026-10-28: a resume's
+# early reading of the card, cli._early_memory, runs before the allocator is chosen).
+def window_layout(latents: int, window: int, shared: int = SHARED) -> list[tuple[int, int]]:
+    """[start, end) of the windows over a shot of `latents` latents: as few windows as `window`
+    allows, their lengths balanced (differing by at most 1, the longer first), consecutive ones
+    sharing `shared` latents (DESIGN.md, Pipeline step 2)."""
+    if latents <= window:
+        return [(0, latents)]
+    if window < 2 * shared + 1:
+        raise ValueError(
+            f"windows of {window} latents leave none of their own with {shared} shared"
+        )
+    count = math.ceil((latents - shared) / (window - shared))
+    base, longer = divmod(latents + (count - 1) * shared, count)
+    layout: list[tuple[int, int]] = []
+    start = 0
+    for index in range(count):
+        length = base + 1 if index < longer else base
+        layout.append((start, start + length))
+        start += length - shared
+    # A latent is in at most two windows: a window is at least as long as the two zones it
+    # shares with its neighbours.
+    assert layout[-1][1] == latents and base >= 2 * shared
+    return layout
+
+
+def padded_length(count: int) -> int:
+    """The frames of a shot of `count` frames once padded to 4n + 1: the VAE packs 4 frames per
+    latent after the first."""
+    return count + (-count + 1) % 4

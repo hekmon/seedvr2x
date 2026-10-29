@@ -51,8 +51,10 @@ from seedvr2x.runtime.job import (
     check_target,
     kept_bytes,
     output_size,
+    padded_length,
     padded_size,
     shot_runs,
+    window_layout,
 )
 from seedvr2x.runtime.memory import Reading
 from seedvr2x.runtime.plan import Phase, Plan, Tiles
@@ -348,11 +350,37 @@ class PlanError(JobError):
 
     `instead`: where a pin is refused, the pin its message ends with, the one that fits
     ("--window 6"), for a plan made with the tight reserve to name in its budget line (said;
-    design, 2026-10-21); else empty."""
+    design, 2026-10-21); else empty.
 
-    def __init__(self, message: str, instead: str = "") -> None:
+    `shortfall`: where a resume's recorded shape no longer fits the memory free, what it is
+    short of, for whoever words that refusal in plain words with the figures apart
+    (cli._kept_refusal; DESIGN.md, Memory planner, A plan shapes the output a little, decided
+    on 2026-10-28); else None. The message stays the figures' full sentence."""
+
+    def __init__(
+        self, message: str, instead: str = "", shortfall: "Shortfall | None" = None
+    ) -> None:
         super().__init__(message)
         self.instead = instead
+        self.shortfall = shortfall
+
+
+@dataclass(frozen=True)
+class Shortfall:
+    """What a recorded shape is short of, as a refusal says it first (PlanError.shortfall):
+    - what: the phase that doesn't fit, in words ("the encode", "the DiT's phase", "the
+      decode"), or "" where it is the system's memory that falls short (host);
+    - short: how much, in GiB to 2 decimals as the message's figures say it (_short), for the
+      GPU's memory;
+    - host: the system's memory is what falls short, not the GPU's;
+    - freeable: whether programs closed on the card give the shape its memory back (_freeable),
+      or a driver that refuses reports what they leave free; False where the card, whole, has
+      no more to give a run held to it."""
+
+    what: str
+    short: str
+    host: bool = False
+    freeable: bool = True
 
 
 @dataclass(frozen=True)
@@ -496,9 +524,6 @@ def host_moments(padded: tuple[int, int], latents: int, cap: int | None) -> dict
     Not here: a tiled pass's scratch, which the plan allows apart (Plan.scratch_allowance). It
     is open through a tiled encode's tiles, beside the sums alone (L), and through a tiled
     decode, beside the merged latent alone (L): never at the moment a shot holds the most."""
-    # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
-    from seedvr2x.runtime.shot import window_layout
-
     height, width = padded
     latent = LATENT_CHANNELS * LATENT_VALUE * (height // LATENT_SIDE) * (width // LATENT_SIDE)
     if cap is None or cap >= latents:
@@ -716,11 +741,8 @@ def scratch(padded: tuple[int, int], frames: int) -> int:
     """The scratch of a tiled pass over a shot of `frames` frames of padded frames, in bytes
     (tilegrid.scratch_bytes: 3 channels in bfloat16, 12.7 MB per 1080p frame and 50.5 MB per 4K
     frame; DESIGN.md, Pipeline, per shot, step 3), the shot padded to 4n + 1 as the VAE takes it
-    (shot.padded_length). The tiled encode's, its input kept, and the tiled decode's, its frames
+    (job.padded_length). The tiled encode's, its input kept, and the tiled decode's, its frames
     summed, are the same store (tiling.Scratch), one at a time."""
-    # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
-    from seedvr2x.runtime.shot import padded_length
-
     return tilegrid.scratch_bytes(padded_length(frames), padded)
 
 
@@ -1003,7 +1025,7 @@ def plan(
         reading = job.reading
         if not reading.held or reading.tight or memory.RESERVE_TIGHT >= reading.reserve:
             raise
-        refused, instead = str(error), error.instead
+        refused, instead, shortfall = str(error), error.instead, error.shortfall
     tight = memory.tightened(job.reading)
     if not job.reading.expandable:
         # Refused with the usual reserve, as before, saying what torch's default setting would
@@ -1013,12 +1035,13 @@ def plan(
                 replace(job, free=tight.counted, reading=tight), pins, recorded, host_available
             )
         except PlanError:
-            raise PlanError(refused, instead=instead) from None
+            raise PlanError(refused, instead=instead, shortfall=shortfall) from None
         raise PlanError(
             f"{refused}; torch's own allocator with its expandable segments, a held run's default,"
             " which the allocator's setting in the environment replaces here, would run it with"
             f" the reserve of {_gib(memory.RESERVE_TIGHT)} GiB, slower",
             instead=instead,
+            shortfall=shortfall,
         ) from None
     try:
         made, peaks = _planned(
@@ -1029,7 +1052,8 @@ def plan(
             f"{error}; refused with the reserve of {_gib(memory.RESERVE)} GiB that a held run's"
             f" plan leaves torch's allocator beyond a step's peak, and with"
             f" {_gib(memory.RESERVE_TIGHT)},"
-            " the one it takes where that is refused, whose figures these are"
+            " the one it takes where that is refused, whose figures these are",
+            shortfall=error.shortfall,
         ) from None
     if instead:
         # Named only where that pin, in its place, runs with the usual reserve: another pin, or
@@ -1079,13 +1103,15 @@ def _planned(
         elif shorter is not None:
             refused += f": the longest window whose plan fits it is --window {shorter[0]}"
             instead = f"--window {shorter[0]}"
+    shortfall = None
     if refused is not None and recorded is not None:
+        shortfall = _shortfall(job, made, host_available)
         refused = (
             f"the recorded plan no longer fits the memory free now: {refused}"
             f"{_pin_s_part(job, made, pins)}"
         )
     if refused is not None:
-        raise PlanError(refused, instead=instead)
+        raise PlanError(refused, instead=instead, shortfall=shortfall)
     return made, replace(_peaks(job, made), shortened=shortened, shrunk=shrunk)
 
 
@@ -1213,7 +1239,7 @@ def check_recorded(
     """Refuse (PlanError) a recorded plan that the planner makes for no job of `shots` resized to
     target (job.target_size; numz_padding as plan takes it), which Plan.recorded, with neither,
     can't tell from one it does:
-    - a cap no layout exists for (shot.window_layout): one under 2 * SHARED + 1 latents that a
+    - a cap no layout exists for (job.window_layout): one under 2 * SHARED + 1 latents that a
       shot is longer than. The planner makes a cap that short only for a job whose longest shot
       is as short, each shot then one window (_Job.smallest), so that record was edited;
     - tiles of which one covers the whole padded frame, which is no tiling (covers): the planner
@@ -1593,17 +1619,14 @@ def _padded(target: tuple[int, int], numz_padding: bool) -> tuple[int, int]:
 
 
 def _latents(frames: int) -> int:
-    """The latents of a shot of `frames` frames, padded to 4n + 1 (shot.padded_length)."""
-    # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
-    from seedvr2x.runtime.shot import padded_length
-
+    """The latents of a shot of `frames` frames, padded to 4n + 1 (job.padded_length)."""
     return (padded_length(frames) - 1) // 4 + 1
 
 
 @cache
 def _longest(lengths: tuple[int, ...], cap: int | None) -> int:
     """The longest window, in latents, that shots of `lengths` latents really run under a cap
-    (None: each in one window): the longest of their balanced layouts' (shot.window_layout),
+    (None: each in one window): the longest of their balanced layouts' (job.window_layout),
     which is the cap only where a shot's length makes it so. It never falls as the cap rises:
     fewer windows over a shot are longer ones (tests/test_planner.py holds it)."""
     if cap is None or cap >= lengths[-1]:
@@ -1614,10 +1637,7 @@ def _longest(lengths: tuple[int, ...], cap: int | None) -> int:
 @cache
 def _split(length: int, cap: int) -> int:
     """The longest window, in latents, of a shot of `length` latents under a cap, by its balanced
-    layout (shot.window_layout); its length when the cap holds it whole."""
-    # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
-    from seedvr2x.runtime.shot import window_layout
-
+    layout (job.window_layout); its length when the cap holds it whole."""
     if cap >= length:
         return length
     return max(end - start for start, end in window_layout(length, cap))
@@ -2369,6 +2389,23 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
             f"the plan takes {total / 100:.2f} GiB of system memory ({said}) and"
             f" {there / 100:.2f} GiB are available, {(total - there) / 100:.2f} GiB short"
         )
+    return None
+
+
+def _shortfall(job: _Job, plan: Plan, host_available: int | None) -> Shortfall | None:
+    """What `plan` is short of, as _unfit finds it (the same order: the first phase over the
+    budget, then the system memory), in the parts a refusal words apart (Shortfall); None where
+    it fits."""
+    peaks = _peaks(job, plan)
+    names = {"encode": "the encode", "dit": "the DiT's phase", "decode": "the decode"}
+    for phase in PHASES:
+        need = peaks.need(phase) + job.margin
+        if need > job.free:
+            # A driver that refuses reports what other programs leave: closing them gives it back.
+            freeable = not job.reading.held or _freeable(job, need)
+            return Shortfall(names[phase], _short(need, job.free), freeable=freeable)
+    if host_available is not None and peaks.host > host_available:
+        return Shortfall("", "", host=True)
     return None
 
 
