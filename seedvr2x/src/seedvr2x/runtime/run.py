@@ -27,7 +27,7 @@ from seedvr2x.media.files import make_directories
 from seedvr2x.media.reader import Reader, listed
 from seedvr2x.media.source import Source
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer, quantise
-from seedvr2x.runtime import memory, timing
+from seedvr2x.runtime import compiling, memory, timing
 from seedvr2x.runtime import stop as stopping
 from seedvr2x.runtime.job import KEPT_SAMPLE_BYTES, OutputSegment, Run, Shot, output_size, run_of
 from seedvr2x.runtime.model import Models, synchronize
@@ -233,6 +233,8 @@ def _made(
     calibration's rate, which no unit corrects. The debug line gives the kind's time and
     estimate, then the whole part's, its terms included."""
     whole = time.monotonic() - started
+    # A compiled VAE's pass that compiled again is said, named (compiling.report_late).
+    compiling.report_late(unit)
     seconds = whole - entering
     drawing = 0.0
     if drawn is not None:

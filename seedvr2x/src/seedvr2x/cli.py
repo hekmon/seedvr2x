@@ -1263,7 +1263,7 @@ def _run(args: argparse.Namespace) -> int:
             # The job as recorded: what of it is written before a unit, its first pass run
             # again or its plan taken up in another environment (a plan planned again wrote
             # its own, _replan).
-            _taken_up(record, prior)
+            _taken_up(record, prior, looking=args.plan is not None, remade=remade)
         if not remaining:
             # Said for --plan too, which still writes the finished job's cut list, its plan. A
             # .mkv path's job isn't finished until its file is in place (DESIGN.md, Pause and
@@ -3989,7 +3989,12 @@ def _resume(
     return False
 
 
-def _taken_up(record: "Manifest", prior: _Prior) -> None:
+def _taken_up(
+    record: "Manifest",
+    prior: _Prior,
+    looking: bool = False,
+    remade: Sequence[tuple[int, str]] = (),
+) -> None:
     """What a job taken up as it is recorded (_resume) writes before any unit: nothing, unless its
     first pass ran again or it is a plan taken up in another environment. The frame index is
     written only with a manifest that names it and records the environment it was made in
@@ -4024,11 +4029,17 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
     but for its two exceptions, "a plan taken up or planned again (below), and a frame index
     made again": the index made again in the environment recorded, as above. One made again
     under another ffmpeg, accepted, waits for the next unit with that environment, by the rule
-    itself; DESIGN.md's sentence doesn't tell the two apart (said to design, 2026-10-12)."""
+    itself; DESIGN.md's sentence doesn't tell the two apart (said to design, 2026-10-12).
+
+    `looking` (--plan) with `remade`, the segments found changed at the start (_resume): the
+    record written is the segments' and their runs' as the manifest on disk has them, finished,
+    with their bytes and hash, not the unfinished a run sets them back to: a plan makes no
+    decision a run takes (the review of 2026-10-29, LOW 3); a real run then finds the segment
+    changed again and makes it, with its warning."""
     from dataclasses import replace
 
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.manifest import FIRST_PASS, planned
+    from seedvr2x.runtime.manifest import FIRST_PASS, planned, read
 
     directory = record.path.parent
     source = record.source
@@ -4054,6 +4065,16 @@ def _taken_up(record: "Manifest", prior: _Prior) -> None:
         environment=before,
         environment_changes=list(prior.recorded.get(resume.CHANGES, [])),
     )
+    if looking and remade:
+        # Copies, so that the record the plan goes on with (its units counted) is not touched.
+        written = read(record.path)
+        as_recorded = replace(
+            as_recorded,
+            layouts=list(as_recorded.layouts),
+            window_caps=list(as_recorded.window_caps),
+        )
+        resume.own_windows(as_recorded, written)
+        resume.adopt(as_recorded, written)
     as_recorded.write()
 
 

@@ -1254,13 +1254,27 @@ def window_counts(steady: Steady) -> list[int]:
     return [call[1][0][1] for call in steady.called if call[0] == "window"]
 
 
+def test_the_calibration_says_a_compilation_after_the_warm_up_naming_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A compiled VAE's calibration runs its encodes and decodes at the job's size: a compilation
+    # there is the calibration's, not the first unit's (compiling.report_late).
+    steady = Steady(monkeypatch)
+    said: list[str] = []
+    monkeypatch.setattr(calibration.compiling, "report_late", lambda where: said.append(where) or 0)
+    calibrate(steady.models, TARGET, Plan(9), 9)
+    assert said == ["the calibration"]
+
+
 def test_a_window_s_longer_length_by_time(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # A job whose longest window is 40 latents (8.4 s here, the 2-latent window 0.8 s): the
     # warm-up at 40 isn't long enough for its first call to be small against it (1.5 s of 8.4),
     # so the longer length is the longest that takes about 3 s by the line through the 2-latent
-    # window and the warm-up: 2 + (3 - 0.8) / 0.2 = 13 latents, not 40.
+    # window and the warm-up: 2 + (3 - 0.8) / 0.2 = 13 latents, not 40, but never fewer than the
+    # 30 latents after which the vendored attention window stops growing with the window's length
+    # (calibration.ATTENTION; vendor/models/dit_7b/window.py:35): 30. (Before 2026-10-29: 13.)
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
     steady = Heavy(monkeypatch)
     found = calibrate(steady.models, TARGET, Plan(9), 40)
@@ -1269,8 +1283,8 @@ def test_a_window_s_longer_length_by_time(
     assert wanted == 13
     # The two between the encodes, the warm-up at the longest, the 2-latent window and the
     # longer one.
-    assert window_counts(steady) == [2, 2, 40, 2, 13]
-    assert any("window's longer length, 13 latents of the job's 40" in m for m in caplog.messages)
+    assert window_counts(steady) == [2, 2, 40, 2, calibration.ATTENTION] == [2, 2, 40, 2, 30]
+    assert any("window's longer length, 30 latents of the job's 40" in m for m in caplog.messages)
     # The fit stays right: a constant of 0.4 s and 0.2 s a latent, the draw taken out.
     record = cast(dict[str, float], found.clock.record()["window"])
     assert record["constant"] == pytest.approx(0.4)
@@ -1281,17 +1295,25 @@ def test_a_window_s_longer_length_is_the_job_s_longest_where_it_takes_no_more(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The short job, as before: 9 latents, the line giving more than 9 (the existing expectations
-    # of test_calibration), and one the line would leave under LONGER latents, 5 here.
+    # of test_calibration), and one the line would leave under ATTENTION latents (30), which the
+    # vendored attention window grows with up to there (vendor/models/dit_7b/window.py:35).
     steady = Heavy(monkeypatch)
     calibrate(steady.models, TARGET, Plan(9), 9)
     assert window_counts(steady) == [2, 2, 9, 2, 9]
     steady.called.clear()
-    # Slow windows (1 s and 1 s a latent): 3 s is 4 latents by the line, never fewer than 5.
+    # Slow windows (1 s and 1 s a latent): 3 s is 4 latents by the line, never fewer than the
+    # job's longest where that is under 30: 20 (before 2026-10-29: 5).
     monkeypatch.setattr(steady, "windowing", lambda latents: 1.0 + 1.0 * latents)
     calibrate(steady.models, TARGET, Plan(9), 20)
-    assert window_counts(steady) == [2, 2, 20, 2, calibration.LONGER]
+    assert window_counts(steady) == [2, 2, 20, 2, 20]
     steady.called.clear()
-    # And a job whose longest is under LONGER: its own.
+    # Windows of 0.5 s and 0.5 s a latent, the longest 40 (20.5 s: the warm-up's first call is
+    # not small against it): 3 s is 5 latents by the line; the longer length is 30.
+    monkeypatch.setattr(steady, "windowing", lambda latents: 0.5 + 0.5 * latents)
+    calibrate(steady.models, TARGET, Plan(9), 40)
+    assert window_counts(steady) == [2, 2, 40, 2, calibration.ATTENTION]
+    steady.called.clear()
+    # And a job whose longest is under 5: its own.
     calibrate(steady.models, TARGET, Plan(9), 4)
     assert window_counts(steady) == [2, 2, 4, 2, 4]
 
@@ -1358,15 +1380,16 @@ def test_the_encode_s_warm_up_is_not_counted_where_its_first_call_is_not_small(
 def test_the_calibration_takes_less_where_a_unit_is_long(monkeypatch: pytest.MonkeyPatch) -> None:
     # Windows of 0.4 s and 0.2 s a latent, the job's longest 40 latents: the calibration's windows
     # summed (the stand-in's seconds), against what it took with the longest measured again, as
-    # before this rule: two calls of 40 latents (8.4 s each) where there is one and a 13-latent
-    # one (3 s). The warm-up counted, at 400 latents (80.4 s), saves a call of it altogether.
-    for longest, kept in ((40, [2, 2, 40, 2, 13]), (400, [2, 2, 400, 2])):
+    # before this rule: two calls of 40 latents (8.4 s each) where there is one and a 30-latent
+    # one (6.4 s: never fewer, since 2026-10-29, than the attention window's 30; 13 latents, 3 s,
+    # before). The warm-up counted, at 400 latents (80.4 s), saves a call of it altogether.
+    for longest, kept in ((40, [2, 2, 40, 2, 30]), (400, [2, 2, 400, 2])):
         steady = Heavy(monkeypatch)
         found = calibrate(steady.models, TARGET, Plan(9), longest)
         assert window_counts(steady) == kept
         before = [2, 2, longest, 2, longest]
         saved = steady.windowing(longest) - (steady.windowing(kept[-1]) if len(kept) == 5 else 0)
-        assert saved > 3
+        assert saved > 1.5
         assert sum(steady.windowing(n) for n in before) - sum(
             steady.windowing(n) for n in kept
         ) == pytest.approx(saved)

@@ -144,6 +144,53 @@ def shutdown_workers() -> None:
     pinned (compile.md, "The VAE's checks for v0.1.0"; DESIGN.md, same section)."""
     module: Any = importlib.import_module("torch._inductor.async_compile")
     module.shutdown_compile_workers()
+    # Any compilation after this one runs in this process: torch starts its pool again on the
+    # next compile (async_compile.py: get_compile_threads() > 1 asks for one), and the workers
+    # it starts would be back, with their host memory, beside the DiT's pinned blocks (the
+    # review of 2026-10-29, LOW 5). A compilation after the warm-up is said (report_late).
+    config: Any = importlib.import_module("torch._inductor.config")
+    config.compile_threads = 1
+
+
+# The count of frames torch._dynamo had started to compile when the warm-up ended, None where the
+# VAE isn't compiled. torch 2.14.1 counts one in counters["frames"]["total"] each time dynamo
+# converts a frame, which happens on a cache miss alone (_dynamo/convert_frame.py:2331): a
+# frame the warm-up compiled, found again, isn't counted.
+_warmed: list[int | None] = [None]
+
+
+def frames_compiled() -> int:
+    """The frames torch._dynamo has started to compile in this process."""
+    utils: Any = importlib.import_module("torch._dynamo.utils")
+    return int(utils.counters["frames"]["total"])
+
+
+def report_late(where: str) -> int:
+    """Say at WARNING any compilation since the warm-up ended, or since the last such saying,
+    naming the pass `where` (a unit's part: "shot 2's decode"), and return how many frames it
+    was. A job whose VAE is compiled expects none: the warm-up compiled every shape the plan's
+    passes meet (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0"; warm),
+    and a pass that compiled one more ran its first call slowly, in this process (shutdown_workers
+    left the compile threads at 1). Nothing is said, and 0 returned, without a warm-up.
+
+    PROVISIONAL (impl-v010, 2026-10-29: the review asks that it be said; DESIGN.md doesn't say
+    when): checked after each part of a unit, and after the calibration, so that the pass is
+    named; a job-end check would not name it."""
+    before = _warmed[0]
+    if before is None:
+        return 0
+    now = frames_compiled()
+    if now <= before:
+        return 0
+    _warmed[0] = now
+    logger.warning(
+        "%s: the compiler compiled %d more %s after the warm-up: the warm-up missed a shape this"
+        " pass meets, so its first call took the compilation's time",
+        where,
+        now - before,
+        "frame" if now - before == 1 else "frames",
+    )
+    return now - before
 
 
 @contextmanager
@@ -199,6 +246,7 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
         vae.decoder = torch.compile(vae.decoder, **SETTINGS)
         with _on_the_device(models):
             warm(models, compilation.shapes)
+        _warmed[0] = frames_compiled()
     except torch.OutOfMemoryError:
         raise  # the command line's own refusal for the card's memory
     except (RuntimeError, OSError, ImportError) as error:

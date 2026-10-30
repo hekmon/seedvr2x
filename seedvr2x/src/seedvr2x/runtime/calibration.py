@@ -25,7 +25,7 @@ from seedvr2x.clock import wall
 from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.decode import to_float32
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer
-from seedvr2x.runtime import planner, run
+from seedvr2x.runtime import compiling, planner, run
 from seedvr2x.runtime.job import padded_size
 from seedvr2x.runtime.model import Models, synchronize
 from seedvr2x.runtime.plan import Phase, Plan
@@ -66,12 +66,13 @@ FIRST_WINDOW = 1.5
 # under this share of it, 5%.
 SMALL = 0.05
 
-# The fewest latents a window's longer length is shortened to by time (_longer_window), the
-# SHORT latents' ratio to it that the encode's 13 frames have to its 5 (2.6, here 2.5). PROVISIONAL
-# (impl-v010, 2026-10-29: DESIGN.md leaves open how far apart a window's two lengths must be to
-# fit a constant and a rate): the encode's ratio; at 4K, where the job's longest window is 5
-# latents, nothing is shortened.
-LONGER = 5
+# The latents after which a window's attention window stops growing with its length: the vendored
+# DiT's time window is ceil(min(t, 30) / 4) latents (vendor/models/dit_7b/window.py:35, with the 4
+# of vendor/configs_7b/main.yaml:32), so a window's time is not a straight line in its length up
+# to there, and a line through the 2-latent window and a window of 5 latents under-predicts the
+# longer ones (the review of 2026-10-29, MEDIUM 2). The longer window (_longer_window) is never
+# shorter than this, or than the job's longest where that is fewer.
+ATTENTION = 30
 
 # The rate its input copies are written at, which is no part of their frames.
 RATE = Fraction(25)
@@ -335,9 +336,12 @@ def calibrate(
             decoded_first = decode(1, first, FIRST, write)
             decoded = decode(0, warm, FRAMES, write)
             # The DiT's phase entered three times by the steps, each from the encode's, as a run's
-            # windows enter it but a resumed run's first; the decode's once: entered again from the
-            # DiT's, alone, the change into the DiT's phase from the decode's not counted. The
-            # models left in the decode's phase, where the job's units start.
+            # windows enter it but a resumed run's first; twice, not three, where the encode's
+            # warm-up is counted as the second length (above): the window and the encode of
+            # that length are not made (the review of 2026-10-29, LOW 4). The decode's once:
+            # entered again from the DiT's, alone, the change into the DiT's phase from the
+            # decode's not counted. The models left in the decode's phase, where the job's units
+            # start.
             enter("dit", counted=False)
             enter("decode")
             # A window less its own draw, which the units count apart.
@@ -362,6 +366,7 @@ def calibrate(
             with writer(scratch / "output") as output:
                 fitted = measure(output.write)
     seconds = time.monotonic() - started
+    compiling.report_late("the calibration")
     said: tuple[tuple[str, Kind, int, str], ...] = (
         ("an encode, its change of phase in its constant,", "encode", 1, "s a frame"),
         ("a window", "window", 1000, "ms a token"),
@@ -456,7 +461,9 @@ def _small(first_call: float, seconds: float) -> bool:
 def _longer_window(short_seconds: float, longest: int, warmed: float) -> int:
     """A window's longer length by time, in latents (calibrate), the encode's rule
     (_second_length): the longest that takes about SECONDS, no more than the job's `longest`, and
-    never fewer than LONGER (or `longest` if fewer). Its time is predicted by the line through the
+    never fewer than ATTENTION latents (or `longest` if fewer): the vendored attention window grows
+    with the window's length up to there (vendor/models/dit_7b/window.py:35), which a line through
+    two short lengths under-predicts. Its time is predicted by the line through the
     SHORT latents' window, `short_seconds`, and the warm-up's window of `longest`, `warmed`, whose
     slope leaves a window's constant out of its rate (the constant is a third of a 2-latent window
     at 540p: _fit's note), as one latent's time would not. A warm-up first at its size runs over,
@@ -467,4 +474,4 @@ def _longer_window(short_seconds: float, longest: int, warmed: float) -> int:
         wanted = SHORT + (SECONDS - short_seconds) / slope
     else:
         wanted = SECONDS * SHORT / short_seconds if short_seconds > 0 else longest
-    return min(longest, max(LONGER, round(wanted)))
+    return min(longest, max(ATTENTION, round(wanted)))

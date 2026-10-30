@@ -195,8 +195,22 @@ def unfinish_changed(content: dict[str, Any], directory: Path) -> list[tuple[int
                 continue
             except OSError as error:
                 raise JobError(f"{path}: not read to check its size: {error}") from None
+            missing: list[str] = []
+            if path.is_dir():
+                # A PNG segment's directory: its frames are NNNNNN.png from 0, `end - start` of
+                # them (cli._png_listing). A name that is none of them is somebody else's
+                # (Thumbs.db, .DS_Store): the job is not made again over it, the checks after
+                # refuse it as before (resume.leftovers); a frame missing or of another size is
+                # the segment changed, made again (the review of 2026-10-29, LOW 7).
+                names = {child.name for child in path.iterdir()}
+                expected = {f"{frame:06d}.png" for frame in range(entry["end"] - entry["start"])}
+                if names - expected:
+                    continue
+                missing = sorted(expected - names)
             if now != entry["bytes"]:
                 found.append((index, f"{now} bytes, where {entry['bytes']} were recorded"))
+            elif missing:
+                found.append((index, f"{len(missing)} PNG missing, from {missing[0]}"))
         plan: Any = content.get("plan")
         window: int | None = (
             cast(dict[str, Any], plan).get("window") if isinstance(plan, dict) else None

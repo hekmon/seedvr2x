@@ -75,6 +75,52 @@ def test_the_ratio_is_the_walls_over_the_runs(drift: float) -> None:
     assert pace.wall(100.0) == pytest.approx(100.0 * drift)
 
 
+def test_a_duration_said_at_150_s_after_the_import_is_converted() -> None:
+    # The RTX 5090 run of 2026-10-29: "SHA-256 ... in 99.8 s" in the run's clock where the log's
+    # times gave 91 s, the ratio held at 1.0 for the first 600 s. At MIN_SPAN (120 s) it is
+    # measured: 150 s in, a duration is in the wall's seconds already.
+    readers = Readers(0.91)
+    pace = readers.pace()
+    readers.tick(75.0)
+    assert pace.wall(99.8) == 99.8  # 75 s in: too early
+    readers.tick(75.0)
+    assert pace.wall(99.8) == pytest.approx(99.8 * 0.91)
+    assert pace.wall(99.8) == pytest.approx(90.8, abs=0.1)
+
+
+@pytest.mark.parametrize("drift", [0.9, 1.1])
+def test_a_first_reading_after_a_long_first_pass_is_no_step(
+    drift: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The review of 2026-10-29: a first reading 1,500 s after the import (a 4K first pass), the
+    # run's clock at `drift` of the wall's, was 167 s off 1.0 and taken for a step, the anchor
+    # moved and 1.0 kept. No ratio measured yet, the gap's own ratio (1.11 or 0.91) is inside
+    # BAND: no step, the ratio measured.
+    caplog.set_level(logging.DEBUG, logger=clock.__name__)
+    readers = Readers(1 / drift)
+    pace = readers.pace()
+    readers.tick(1_500.0)
+    assert pace.ratio() == pytest.approx(1 / drift)
+    assert "stepped" not in caplog.text
+
+
+@pytest.mark.parametrize("hour", [3600.0, -3600.0])
+def test_an_hour_is_a_step_before_any_ratio_is_measured(
+    hour: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=clock.__name__)
+    readers = Readers(1.0)
+    pace = readers.pace()
+    readers.tick(100.0)
+    readers.step(hour)
+    assert pace.ratio() == 1.0
+    assert f"the wall clock stepped by {hour:+.0f} s" in caplog.text
+    # Re-anchored there: the hour is in no ratio, and the measure that follows is the clocks'.
+    readers.drift = 0.9
+    readers.tick(150.0)
+    assert pace.ratio() == pytest.approx(0.9)
+
+
 def test_the_measure_of_2026_10_29() -> None:
     readers = Readers(1_539 / 1_692)
     pace = readers.pace()
@@ -93,7 +139,7 @@ def test_the_ratio_is_said_at_debug_when_it_moves(caplog: pytest.LogCaptureFixtu
         readers.tick(100.0)
         pace.ratio()
     said = [r.getMessage() for r in caplog.records if r.getMessage().startswith("the clocks:")]
-    assert said == ["the clocks: the run's own clock at 1.100 of the wall's, over 600 s"]
+    assert said == ["the clocks: the run's own clock at 1.100 of the wall's, over 200 s"]
     # Every later reading is within 1% of it: said no more.
     for _ in range(5):
         readers.tick(100.0)

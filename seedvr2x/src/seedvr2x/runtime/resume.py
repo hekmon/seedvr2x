@@ -239,7 +239,13 @@ def clear(directory: Path, content: dict[str, Any]) -> list[str]:
             continue
         if entry.name == SUMS:
             emptied(entry, sums.__contains__)
-        elif entry.name == COMPILE_CACHE and entry.is_dir() and not entry.is_symlink():
+        elif (
+            entry.name == COMPILE_CACHE
+            and content["settings"].get("compile_vae") is True
+            and entry.is_dir()
+            and not entry.is_symlink()
+        ):
+            # Only the cache of a job that asked for --compile is this job's (leftovers).
             shutil.rmtree(entry)
         elif entry.name == STATE and entry.is_dir() and not entry.is_symlink():
             for shot in sorted(entry.iterdir()):
@@ -422,10 +428,12 @@ def leftovers(manifest: Manifest) -> list[Path]:
     found: list[Path] = []
     indexed = partial_path(directory / INDEX)
     names = {NAME, partial_path(manifest.path).name, STATE, SUMS, INDEX, indexed.name}
-    # The compile cache is the job's own when it is a directory of its own, kept as it is (a
-    # resume warms its compilation from it); a link or a file by that name is not.
+    # The compile cache is the job's own when it was asked for (settings.compile_vae) and is a
+    # directory of its own, kept as it is (a resume warms its compilation from it); a link or a
+    # file by that name is not, nor is any by that name in the directory of a job that asked for
+    # no compile: foreign as any unknown name, never deleted (the review of 2026-10-29, LOW 6).
     cache = directory / COMPILE_CACHE
-    if os.path.lexists(cache):
+    if os.path.lexists(cache) and manifest.settings.get("compile_vae") is True:
         if cache.is_symlink() or not cache.is_dir():
             raise JobError(f"{cache}: not this job's")
         names.add(COMPILE_CACHE)

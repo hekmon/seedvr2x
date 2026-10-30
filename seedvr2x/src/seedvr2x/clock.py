@@ -26,12 +26,15 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
-# The monotonic time that must pass before the ratio is trusted: a step of the wall clock of 2 s
-# moves it then by 0.33%, under the 0.4% that a say of "about" hides. Before it, and after a
-# wall-clock step until it is passed again, the last ratio is held (1.0 at first).
-# PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the span open; the figure keeps a
-# 2 s step of the wall clock, as seen on 2026-10-29, under 0.4% of the ratio).
-MIN_SPAN = 600.0
+# The monotonic time that must pass before the ratio is trusted: a step of the wall clock of
+# 2.6 s moves it then by 2%, against the 10% drift left uncorrected in every duration said before
+# (the first 600 s of a run were said in the run's own clock: "SHA-256 ... in 99.8 s" where the
+# log's times gave 91 s). Before it, and after a wall-clock step until it is passed again, the
+# last ratio is held (1.0 at first).
+# PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the span open; measured on 2026-10-29 on
+# the RTX 5090 host: the wall clock steps by at most 2.6 s against Windows' clock between readings
+# 60 s apart, so 2% at 120 s).
+MIN_SPAN = 120.0
 # The ratios that are believed. Outside it the clocks are not just drifting: the measure is
 # said at debug and not used (1.0). The VM's drift measured was 0.90 to 1.10.
 # PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the band open).
@@ -63,6 +66,7 @@ class Pace:
         self._anchor = (monotonic(), wall_clock())
         self._last = self._anchor
         self._ratio = 1.0
+        self._measured = False  # a ratio inside BAND has been measured
         self._said = 1.0
 
     def ratio(self) -> float:
@@ -76,7 +80,15 @@ class Pace:
         if span > 0:
             expected = span * self._ratio
             step = (wall - last_wall) - expected
-            if abs(step) > STEP_FLOOR + STEP_SHARE * expected:
+            # While no ratio is measured (1.0 held), a long first gap is no step unless its own
+            # ratio is outside BAND: a first reading 20 min and more after the import (a 4K
+            # first pass) is held against 1.0 and a 10% drift is 2 min off it; read for a step,
+            # it was re-anchored and the ratio kept at 1.0 ("the wall clock stepped by +167 s",
+            # found by the review of 2026-10-29). A change of an hour is outside BAND for
+            # any gap shorter than the change itself (an hour forward, two back).
+            gap_ratio = (wall - last_wall) / span
+            unmeasured_drift = not self._measured and BAND[0] <= gap_ratio <= BAND[1]
+            if abs(step) > STEP_FLOOR + STEP_SHARE * expected and not unmeasured_drift:
                 # Said at INFO: a step of a minute and more is the time set or the machine
                 # resumed from sleep, which a time of day below it must be read with (DESIGN.md,
                 # Architecture, What it prints, decided on 2026-10-28; built on 2026-10-29).
@@ -98,6 +110,7 @@ class Pace:
             measured = (wall - self._anchor[1]) / since
             if BAND[0] <= measured <= BAND[1]:
                 self._ratio = measured
+                self._measured = True
             else:
                 logger.debug(
                     "the clocks measured %.3f over %.0f s, outside %.1f to %.1f: not used",
@@ -106,6 +119,7 @@ class Pace:
                     *BAND,
                 )
                 self._ratio = 1.0
+                self._measured = False
             if abs(self._ratio - self._said) > SAID_MOVE * self._said:
                 self._said = self._ratio
                 logger.debug(

@@ -23,7 +23,7 @@ import torch
 from omegaconf import OmegaConf
 from test_planner import HD, UHD, our_free, shots
 
-from seedvr2x.runtime import compiling, model, planner
+from seedvr2x.runtime import compiling, model, planner, resume
 from seedvr2x.runtime.job import JobError, Shot, output_size, padded_size
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
 from seedvr2x.runtime.plan import Compilation, Plan, Shapes, Tiles
@@ -517,11 +517,90 @@ def test_the_compile_workers_are_shut_through_torchs_own_function(
     module: Any = pytest.importorskip("torch._inductor.async_compile")
     assert callable(module.shutdown_compile_workers)
     called: list[str] = []
+    config: Any = pytest.importorskip("torch._inductor.config")
+    monkeypatch.setattr(config, "compile_threads", 8)  # put back by monkeypatch
     monkeypatch.setattr(module, "shutdown_compile_workers", lambda: called.append("shut"))
     compiling.shutdown_workers()
     assert called == ["shut"]
+    # Any compile after it runs in this process, no pool started again (the review of
+    # 2026-10-29, LOW 5): torch asks for a pool when compile_threads is over 1.
+    assert config.compile_threads == 1
     monkeypatch.undo()
+    monkeypatch.setattr(config, "compile_threads", 8)
     compiling.shutdown_workers()  # no pool started: nothing to do
+    assert config.compile_threads == 1
+
+
+def test_the_compile_threads_are_one_after_the_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, undo_global_state: None
+) -> None:
+    # A compile after the warm-up must not bring the workers back (compile_vae's own shutdown is
+    # replaced by the Recorder's, so the real one is called here, with torch's shut replaced).
+    config: Any = pytest.importorskip("torch._inductor.config")
+    monkeypatch.setattr(config, "compile_threads", 8)
+    module: Any = pytest.importorskip("torch._inductor.async_compile")
+    monkeypatch.setattr(module, "shutdown_compile_workers", lambda: None)
+    compiling.shutdown_workers()
+    from torch._inductor.async_compile import get_compile_threads  # pyright: ignore
+
+    assert get_compile_threads() == 1
+
+
+@pytest.fixture
+def frames(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    """torch._dynamo's count of frames compiled as the test sets it (put back), and the
+    compilation module's warm-up mark cleared."""
+    utils: Any = pytest.importorskip("torch._dynamo.utils")
+    monkeypatch.setitem(utils.counters["frames"], "total", 10)
+    monkeypatch.setattr(compiling, "_warmed", [None])
+    yield utils.counters["frames"]
+
+
+def test_a_compilation_after_the_warm_up_is_said_at_warning_naming_the_pass(
+    frames: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=compiling.__name__)
+    # No warm-up (the VAE not compiled): nothing said, whatever dynamo counts.
+    frames["total"] = 99
+    assert compiling.report_late("shot 0's encode") == 0 and not caplog.records
+    # The warm-up ends at 10 frames compiled.
+    frames["total"] = 10
+    compiling._warmed[0] = compiling.frames_compiled()  # pyright: ignore[reportPrivateUsage]
+    assert compiling.report_late("shot 0's encode") == 0 and not caplog.records
+    frames["total"] = 12
+    assert compiling.report_late("shot 1's decode") == 2
+    [record] = caplog.records
+    assert record.levelname == "WARNING"
+    assert record.getMessage().startswith("shot 1's decode: the compiler compiled 2 more frames")
+    # Said once: the next pass compiles nothing more, the one after one frame.
+    caplog.clear()
+    assert compiling.report_late("shot 2's encode") == 0 and not caplog.records
+    frames["total"] = 13
+    assert compiling.report_late("shot 2's decode") == 1
+    assert "compiled 1 more frame after" in caplog.text
+
+
+def test_the_run_names_the_unit_that_compiled_after_the_warm_up(
+    frames: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    # run._made, after each part of a unit, checks (and calibration's end does): through the real
+    # function with a progress stand-in.
+    from seedvr2x.runtime import run
+
+    caplog.set_level(logging.WARNING, logger=compiling.__name__)
+    compiling._warmed[0] = 10  # pyright: ignore[reportPrivateUsage]
+    progress: Any = SimpleNamespace(
+        clock=SimpleNamespace(estimate=lambda kind, size: None),
+        made=lambda *given: None,
+        skipped=lambda *given: None,
+        said=lambda: "left",
+    )
+    run._made(progress, ("encode", 0), "encode", 5, 0.0, "shot 0's encode")  # pyright: ignore
+    assert not caplog.records
+    frames["total"] = 11
+    run._made(progress, ("decode", 0), "decode", 5, 0.0, "shot 0's decode")  # pyright: ignore
+    [record] = caplog.records
+    assert record.getMessage().startswith("shot 0's decode: the compiler compiled 1 more frame")
 
 
 def test_the_cache_is_the_jobs_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1127,6 +1206,38 @@ def test_the_cache_is_the_jobs_own_and_stays_where_the_job_does(
     # A one-file output: its work directory, cache included, is removed with the assembly.
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LARGER, "--compile") == 0
     assert (tmp_path / "one.mkv").is_file() and not (tmp_path / "one.mkv.work").exists()
+
+
+def test_a_compile_cache_is_the_jobs_own_only_when_the_job_asked_for_the_compile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The review of 2026-10-29 (LOW 6): a directory called compile-cache in a job that asked for
+    # no --compile (settings.compile_vae false) is foreign as any unknown name: refused at a
+    # resume and left in a .mkv path's work directory when it is cleaned, never deleted; the
+    # asked job's own is kept and removed (the test above).
+    Loads(monkeypatch)
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "window 4:1"
+    stopped(tmp_path, source_path, "plain", *JOB)
+    foreign = tmp_path / "plain" / "compile-cache"
+    foreign.mkdir()
+    (foreign / "mine.txt").write_text("someone else's")
+    steps.stop = None
+    text = refused(tmp_path, source_path, caplog, *JOB, output="plain")
+    assert "not this job's: compile-cache" in text
+    assert (foreign / "mine.txt").read_text() == "someone else's"
+    # The clean-up of a work directory (resume.clear), on the manifest of the stopped job.
+    content = json.loads((tmp_path / "plain" / "manifest.json").read_text())
+    assert content["settings"]["compile_vae"] is False
+    assert resume.clear(tmp_path / "plain", content) == ["compile-cache"]
+    assert (foreign / "mine.txt").read_text() == "someone else's"
+    # The same directory in a job that asked for --compile is its own cache, removed whole.
+    content["settings"]["compile_vae"] = True
+    assert resume.clear(tmp_path / "plain", content) == []
+    assert not foreign.exists()
 
 
 def test_a_vae_that_does_not_compile_refuses_the_job_before_anything_runs(

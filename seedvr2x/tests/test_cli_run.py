@@ -6338,6 +6338,94 @@ def test_plan_says_a_finished_segment_would_be_made_again_and_writes_nothing(
     assert decoded(out / "seg_000001.mkv") == decoded(whole / "seg_000001.mkv")
 
 
+def test_a_finished_png_segment_is_made_again_for_a_frame_gone_or_changed_not_for_a_foreign_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The review of 2026-10-29 (LOW 7): a finished PNG segment's directory holding a name that is
+    # none of its frames (Thumbs.db, .DS_Store) is somebody else's: refused as before, nothing
+    # made again, nothing removed; a frame missing, or of another size, is the segment changed.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    png = (*JOB, "--format", "png")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *png) == 0
+    assert upscale(tmp_path, source_path, "out", *png) == 0
+    steps.calls.clear()
+    out, whole = tmp_path / "out", tmp_path / "whole"
+    segment = out / "seg_000001"
+    assert sorted(p.name for p in segment.iterdir()) == [f"{i:06d}.png" for i in range(21)]
+    # A foreign name: refused, as it was.
+    (segment / "Thumbs.db").write_bytes(b"x" * 100)
+    kept = contents(out)
+    text = refused(tmp_path, source_path, caplog, *png)
+    assert "its bytes changed" not in text and steps.calls == []
+    assert "seg_000001" in text and contents(out) == kept
+    # The same with its size hidden by a frame gone: the foreign name still decides.
+    (segment / "000003.png").unlink()
+    kept = contents(out)
+    text = refused(tmp_path, source_path, caplog, *png)
+    assert "its bytes changed" not in text and steps.calls == [] and contents(out) == kept
+    (segment / "Thumbs.db").unlink()
+    # A frame missing: made again.
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *png) == 0
+    assert [m for m in caplog.messages if "its bytes changed" in m] == [
+        f"{segment}: its bytes changed since it was finished (frames 4 to 24 of the job:"
+        f" {_png_bytes_said(whole / 'seg_000001')}): the disk or another program is to"
+        " suspect; made again now"
+    ]
+    assert steps.calls == ["encode 4", "window 4:0", "window 4:1", "decode 4"]
+    assert contents(segment) == contents(whole / "seg_000001")
+    # A frame of another size: made again too.
+    steps.calls.clear()
+    frame = segment / "000005.png"
+    frame.write_bytes(frame.read_bytes()[:-1])
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *png) == 0
+    assert len([m for m in caplog.messages if "its bytes changed" in m]) == 1
+    assert steps.calls == ["encode 4", "window 4:0", "window 4:1", "decode 4"]
+    assert contents(segment) == contents(whole / "seg_000001")
+
+
+def _png_bytes_said(whole: Path) -> str:
+    """What a run says of a PNG segment missing frame 3: its bytes, where the record's were."""
+    recorded = sum(p.stat().st_size for p in whole.iterdir())
+    now = recorded - (whole / "000003.png").stat().st_size
+    return f"{now} bytes, where {recorded} were recorded"
+
+
+def test_plan_with_a_segment_gone_and_its_index_missing_records_the_segment_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The review of 2026-10-29 (LOW 3): --plan on a job whose finished segment is gone and whose
+    # frame index is missing runs the first pass again, and _taken_up writes the index and the
+    # manifest naming it. The segment found changed was written as unfinished by it, a plan that
+    # looks making the decision a run takes: the manifest keeps it recorded finished (its bytes
+    # and hash as they were, its runs encoded), and a real run then makes it again, with the
+    # warning.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path, out, whole = finished_pair(tmp_path, monkeypatch, steps)
+    before = json.loads((out / "manifest.json").read_text())
+    found = spoil_segment(out / "seg_000001.mkv", "deleted")
+    (out / "frame_index.bin").unlink()
+    caplog.clear()
+    listing = tmp_path / "listed.txt"
+    assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(listing)) == 0
+    assert steps.calls == [] and (out / "frame_index.bin").is_file()
+    assert any("it would be made again by a run" in m for m in caplog.messages)
+    after = json.loads((out / "manifest.json").read_text())
+    assert after["segments"] == before["segments"]
+    assert after["shots"] == before["shots"]
+    assert after["segments"][1]["finished"] is True
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert [m for m in caplog.messages if "its bytes changed" in m] == [
+        f"{out / 'seg_000001.mkv'}: its bytes changed since it was finished (frames 4 to 24 of the"
+        f" job: {found}): the disk or another program is to suspect; made again now"
+    ]
+    assert steps.calls == ["encode 4", "window 4:0", "window 4:1", "decode 4"]
+    assert decoded(out / "seg_000001.mkv") == decoded(whole / "seg_000001.mkv")
+
+
 def test_a_finished_segment_s_missing_checksums_are_still_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
