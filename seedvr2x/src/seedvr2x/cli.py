@@ -22,7 +22,7 @@ from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from seedvr2x.clock import wall
+from seedvr2x.clock import sample, spent, wall
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
@@ -113,11 +113,21 @@ def _offset(seconds: int) -> str:
     return f"{sign}{minutes // 60:02d}:{minutes % 60:02d}"
 
 
+def _sampled(record: logging.LogRecord) -> bool:
+    """A logging filter that lets every line through and reads both clocks (clock.sample)."""
+    sample()
+    return True
+
+
 def _logging(verbose: bool) -> None:
     """seedvr2x's lines on stderr, at debug level and in VERBOSE_FORMAT under --verbose, else
     from INFO up as _Lines has them."""
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter(VERBOSE_FORMAT) if verbose else _Lines())
+    # A reading of both clocks at every line, so that a duration said before the run has measured
+    # its clock's ratio is the wall clock's own, as the lines' times are (clock.py; DESIGN.md,
+    # Architecture, What it prints, decided on 2026-10-29).
+    handler.addFilter(_sampled)
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=[handler])
 
 
@@ -786,7 +796,13 @@ def _run(args: argparse.Namespace) -> int:
             ("png",) if png else (), ("image2",) if png else (), assembly=final is not None
         )
         conversions = fingerprint()
-        logger.info("ffmpeg %s, its conversions' fingerprint %s", ffmpeg_version, conversions[:16])
+        # The fingerprint is for a resume to compare, not for a reader: under --verbose (DESIGN.md,
+        # Architecture, What it prints, decided on 2026-10-29: "the conversions' fingerprint,
+        # every run's first line: under --verbose").
+        # PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the ffmpeg version in the default
+        # line open): it stays, as the one fact of the line a user can give with a bug report.
+        logger.info("ffmpeg %s", ffmpeg_version)
+        logger.debug("ffmpeg's conversions' fingerprint %s", conversions[:16])
         declared = declare(args.input, args.input_matrix, args.input_sar, args.frame_rate)
         # The size the frames are resized to, from what the source declares; refused, before the
         # first pass, when too small to pad (job.check_target).
@@ -1344,6 +1360,8 @@ def _run(args: argparse.Namespace) -> int:
         rate = None if final is None else _disk_rate(final.parent)
         assembly = None if rate is None else _assembly_estimate(record, rate)
         _say_times(calibrated, left, args.quality, levels, loading, assembly, compilation)
+        if rate is not None:
+            _say_assembly_basis(record, rate)
         if until is not None:
             # Run now, after the load and the calibration it pays again.
             start = stopping.now() + datetime.timedelta(seconds=wall(loading + calibrated.seconds))
@@ -1392,6 +1410,8 @@ def _run(args: argparse.Namespace) -> int:
     clock = calibrated.clock
     assembly = None if rate is None else _assembly_estimate(record, rate)
     _say_times(calibrated, left, args.quality, None, loading, assembly, compilation, planning=False)
+    if rate is not None:
+        _say_assembly_basis(record, rate)
     if until is not None:
         last = None if assembly is None else (f"the assembly of {final}", assembly)
         _say_until(clock, left, stopping.now(), until, last)
@@ -1559,7 +1579,7 @@ def _run(args: argparse.Namespace) -> int:
         logger.warning("not in the manifest's environment, a seedvr2x bug: %s", unrecorded)
     logger.info(
         "upscaled in %.1f s; wrote %s: %d frames, %s",
-        wall(time.monotonic() - started),
+        spent(time.monotonic() - started),
         directory,
         outcome.written,
         args.format,
@@ -1663,10 +1683,13 @@ def _say_assembly_left(record: "Manifest", final: Path, until: datetime.datetime
     if rate is None:
         return
     seconds = _assembly_estimate(record, rate)
+    # The rate and the masters' count are for --verbose (design's ruling of 2026-10-29: what a user
+    # does nothing with goes under --verbose), as the job's own assembly line has them.
     logger.info(
-        "time: the assembly alone is left, about %s at the rate its disk writes at",
+        "time: the assembly alone is left, about %s to join the segments into the finished file",
         spoken(wall(seconds)),
     )
+    _say_assembly_basis(record, rate)
     if until is not None:
         _say_until(Clock(), [], stopping.now(), until, (f"the assembly of {final}", seconds))
 
@@ -1689,6 +1712,20 @@ def _masters(record: "Manifest") -> int:
         width, height = record.output["size"]
         per_frame = RAW_BYTES.get(str(record.output["format"]), 6.0) * width * height
     return round(written + per_frame * left)
+
+
+def _say_assembly_basis(record: "Manifest", rate: float) -> None:
+    """What the assembly's time is counted from, at debug (under --verbose): the rate its disk
+    writes at and the bytes of its masters, those finished as recorded, the others at most at
+    their raw size until one is written (_masters)."""
+    from seedvr2x.media.files import size_said
+
+    logger.debug(
+        "time: the assembly counted at the rate its disk writes at, %s/s, its masters counted at"
+        " most at their raw size until one is written: %s",
+        size_said(round(rate)),
+        size_said(_masters(record)),
+    )
 
 
 def _assembly_estimate(record: "Manifest", rate: float) -> float:
@@ -1942,7 +1979,7 @@ def _load(
         logger.error("%s, as the models loaded: nothing was run%s", _refused(error), kept)
         return None
     seconds = time.monotonic() - started
-    logger.info("models loaded in %.1f s, attention: %s", wall(seconds), models.attention)
+    logger.info("models loaded in %.1f s, attention: %s", spent(seconds), models.attention)
     return models, seconds
 
 
@@ -2084,9 +2121,10 @@ def _say_times(
         _plural(decodes, "segment"),
     )
     if assembly is not None:
+        # How long, at every run; the rate and the count of the masters under --verbose, in
+        # _say_assembly_basis (DESIGN.md, Architecture, What it prints, decided on 2026-10-29).
         logger.info(
-            "time: then about %s for the assembly, at the rate its disk writes at, its masters"
-            " counted at most at their raw size until one is written",
+            "time: then about %s to join the segments into the finished file",
             spoken(wall(assembly)),
         )
     logger.info(
@@ -2198,7 +2236,7 @@ def _trial(args: argparse.Namespace, declared: "Declared", size: tuple[int, int]
         height,
         args.format,
         rate,
-        wall(time.monotonic() - started),
+        spent(time.monotonic() - started),
     )
 
 
@@ -2509,7 +2547,7 @@ def _assemble(
             _plural(len(segments), "segment"),
             joined.others,
             _plural(joined.chapters, "chapter"),
-            wall(time.monotonic() - started),
+            spent(time.monotonic() - started),
         )
         try:
             _write_beside(final, record.content())
@@ -3882,7 +3920,7 @@ def _content(path: Path, vouching: dict[str, Any] | None = None) -> dict[str, ob
         logger.info("%s: reading its %s to check its SHA-256, %s", path, size, how_long)
     started = time.monotonic()
     digest = sha256(path)
-    logger.info("%s: SHA-256 %s, in %.1f s", path, digest, wall(time.monotonic() - started))
+    logger.info("%s: SHA-256 %s, in %.1f s", path, digest, spent(time.monotonic() - started))
     return {"bytes": path.stat().st_size, "sha256": digest}
 
 
@@ -4720,16 +4758,25 @@ def _source_cuts(args: argparse.Namespace, listed: list[int], source: "Source") 
 
 
 def _said(found: _Cuts) -> str:
-    """How the shots were found, as a run's log says it: "61 cuts detected at 0.3, and 39
-    possible cuts from 0.1 up to 0.3, which --plan lists", or "3 cuts from the cut list
-    cuts.txt"."""
+    """How the shots were found, as a run's log says it: "61 cuts detected at --cut-threshold
+    0.3, and 39 possible cuts (where the detector is less sure) from 0.1 up to 0.3, which --plan
+    lists", or "3 cuts from the cut list cuts.txt".
+
+    PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md, What it prints, says "the cuts found, and the
+    places the detector is less sure of, which `--plan` lists, the threshold said as
+    `--cut-threshold`'s" and leaves the words open): "possible cuts" is the name --plan's counts
+    and the playlists give them, "where the detector is less sure" says what they are, and the
+    threshold is named by its option."""
     if found.threshold is None:
         return f"{_plural(len(found.cuts), 'cut')} from the cut list {found.listed}"
-    said = f"{_plural(len(found.cuts), 'cut')} detected at {found.threshold}"
+    said = f"{_plural(len(found.cuts), 'cut')} detected at --cut-threshold {found.threshold}"
     if float(found.threshold) <= POSSIBLE:
         return said
     possible = _plural(len(found.possible), "possible cut")
-    return f"{said}, and {possible} from {POSSIBLE} up to {found.threshold}, which --plan lists"
+    return (
+        f"{said}, and {possible} (where the detector is less sure) from {POSSIBLE} up to"
+        f" {found.threshold}, which --plan lists"
+    )
 
 
 def _counts(found: _Cuts, shots: int) -> str:

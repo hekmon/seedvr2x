@@ -31,7 +31,7 @@ from typing import Any
 
 import torch
 
-from seedvr2x.clock import wall
+from seedvr2x.clock import spent
 from seedvr2x.runtime import blockswap, model
 from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
@@ -263,7 +263,7 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
     finally:
         shutdown_workers()
     compilation.seconds = time.monotonic() - started
-    logger.info("the VAE compiled in %s", spoken(wall(compilation.seconds)))
+    logger.info("the VAE compiled in %s", spoken(spent(compilation.seconds)))
 
 
 def _shapes_said(shapes: Shapes) -> str:

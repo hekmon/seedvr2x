@@ -1991,7 +1991,11 @@ def test_a_new_jobs_rehearsal_is_said_before_it_reads_and_recorded_with_the_firs
     assert upscale(tmp_path, source, "x.mkv", *FILM) == 130
     work = tmp_path / "x.mkv.work"
     [before] = seen
-    line = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading its"
+    line = (
+        f"{source}: the source's other streams (audio, subtitles, a cover) copied once ahead, so"
+        f" that one the finished file can't take is found now, not after the night's work;"
+        f" reading its"
+    )
     assert line in before and before.index(line) > before.index("ffmpeg ")
     assert "the first pass" not in before
     # Recorded in the input's record, with the first pass's: the ffmpeg and conversions it ran
@@ -2023,7 +2027,7 @@ def test_a_resume_trusts_the_recorded_rehearsal_and_runs_none(
     assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
     assert len(seen) == 1
     assert "the assembly's rehearsal trusted from the job's record" in caplog.text
-    assert "the assembly rehearsed" not in caplog.text
+    assert "copied once ahead" not in caplog.text
     # The same content compared before: the trusting line comes after the input's SHA-256.
     assert caplog.text.index("SHA-256") < caplog.text.index("rehearsal trusted")
     assert json.loads(recorded)["input"]["rehearsal"]["passed"] is True

@@ -812,6 +812,49 @@ def without_disk(lines: list[str]) -> list[str]:
     return [line for line in lines if not line.startswith("plan: disk: ")]
 
 
+def test_what_a_user_does_nothing_with_is_said_under_verbose_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-29): the conversions'
+    # fingerprint is a debug line, the ffmpeg version staying in the first line; the assembly's
+    # time says how long joining the segments takes, its rate and the count of its masters at debug.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    records = [(record.levelname, record.getMessage()) for record in caplog.records]
+    [(level, first)] = [r for r in records if r[1].startswith("ffmpeg ")]
+    assert level == "INFO" and "fingerprint" not in first and "conversions" not in first
+    [(level, fingerprint)] = [r for r in records if "conversions' fingerprint" in r[1]]
+    assert level == "DEBUG" and re.fullmatch(
+        r"ffmpeg's conversions' fingerprint [0-9a-f]{16}", fingerprint
+    )
+    joined = [r for r in records if r[1].startswith("time: then about ")]
+    assert [
+        (level, text.endswith(" to join the segments into the finished file"))
+        for level, text in joined
+    ] == [("INFO", True)]
+    [(level, basis)] = [
+        r for r in records if r[1].startswith("time: the assembly counted at the rate")
+    ]
+    assert level == "DEBUG"
+    assert re.fullmatch(
+        r"time: the assembly counted at the rate its disk writes at, [\d.]+ \w+/s, its masters"
+        r" counted at most at their raw size until one is written: [\d.]+ \w+",
+        basis,
+    )
+    # At the default level, none of the two debug lines.
+    caplog.clear()
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    (tmp_path / "one.mkv").unlink()
+    (tmp_path / "one.mkv.manifest.json").unlink()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4]) == 0
+    assert "fingerprint" not in caplog.text and "assembly counted" not in caplog.text
+    assert "time: then about " in caplog.text
+
+
 def test_plan_recorded_and_phases_entered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1059,8 +1102,8 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     ) in caplog.text
     assert caplog.text.count("plan: budget: 87.20 GiB") == 1
     assert (
-        "torch held to 89.50 GiB on the GPU: the 92.50 GiB free less 3.0, and what it holds;"
-        " free on the whole card by NVML (its driver reports 94.50 GiB free to this process)"
+        "torch held to 89.50 GiB on the GPU: the 92.50 GiB free on the whole card, less 3.0 GiB,"
+        " and what it holds"
     ) in caplog.text
     # The run's limit is said once at the level a user reads: the first is for its debug level.
     assert caplog.text.count("torch held to ") == 1
@@ -1675,14 +1718,15 @@ def test_plan_said(
         "plan: blocks swapped: none, the window fitting with the DiT whole on the GPU;"
         " --swap-blocks N swaps some",
         "plan: the VAE: on the GPU in the DiT's phase, the window fitting beside it",
-        "plan: the DiT in the VAE's passes: in the encode, the DiT's 36 blocks on the GPU; in the"
-        " decode, the DiT's 36 blocks on the GPU; as much as fits beside each",
+        "plan: the DiT in the VAE's passes: which model stays on the GPU in which phase, as much"
+        " of the DiT as fits beside each: in the encode, the DiT's 36 blocks on the GPU; in the"
+        " decode, the DiT's 36 blocks on the GPU",
         "plan: system memory: 2.40 GiB in all; nothing pinned; 0.00 GiB for the longest shot at"
         " the most, as its windows are merged",
         "plan: encode: untiled, the whole frame fitting the budget; --encode-tile PX tiles it",
         "plan: decode: untiled, the whole frame fitting the budget; --decode-tile PX tiles it",
-        "plan: the VAE's room: 1.25 GiB of the budget left free in each VAE pass, for the large"
-        " pieces of memory a pass asks for at once",
+        "plan: the VAE's room: what each VAE pass leaves free, for the large pieces of memory a"
+        " pass asks for at once: 1.25 GiB of the budget",
         "plan: predicted peaks: encode 18.11 GiB, DiT 15.91 GiB, decode 17.73 GiB; the encode"
         " bounds the plan, its room counted, 74.54 GiB under the budget",
         "plan: time: measured, not guessed: a calibration of the job's own steps once the models"
@@ -7334,15 +7378,30 @@ def encoded(steps: Steps) -> list[int]:
 @pytest.mark.parametrize(
     ("threshold", "recorded", "bounds", "said"),
     [
-        (None, "0.3", [0, 5, 15, 22, 25], "4 shots: 3 cuts detected at 0.3, and 2 possible cuts"),
-        ("0.5", "0.5", [0, 5, 15, 25], "3 shots: 2 cuts detected at 0.5, and 3 possible cuts"),
+        (
+            None,
+            "0.3",
+            [0, 5, 15, 22, 25],
+            "4 shots: 3 cuts detected at --cut-threshold 0.3, and 2 possible cuts",
+        ),
+        (
+            "0.5",
+            "0.5",
+            [0, 5, 15, 25],
+            "3 shots: 2 cuts detected at --cut-threshold 0.5, and 3 possible cuts",
+        ),
         (
             "0.15",
             "0.15",
             [0, 5, 10, 15, 22, 25],
-            "5 shots: 4 cuts detected at 0.15, and 1 possible",
+            "5 shots: 4 cuts detected at --cut-threshold 0.15, and 1 possible",
         ),
-        ("1", "1.0", [0, 25], "1 shot: 0 cuts detected at 1.0, and 5 possible cuts"),
+        (
+            "1",
+            "1.0",
+            [0, 25],
+            "1 shot: 0 cuts detected at --cut-threshold 1.0, and 5 possible cuts",
+        ),
     ],
 )
 def test_cuts_detected(
@@ -8288,7 +8347,7 @@ def test_no_possible_cuts_at_their_floor_or_under(
     options = (*CUT, "--cut-threshold", threshold, "--plan", str(plan))
     assert upscale(tmp_path, source_path, "out", *options) == 0
     said = [record.getMessage() for record in caplog.records]
-    assert f"6 shots: 5 cuts detected at {threshold}" in said  # the whole message
+    assert f"6 shots: 5 cuts detected at --cut-threshold {threshold}" in said  # the whole message
     counts = f"5 cuts at {threshold} (6 shots), no possible cuts at a threshold of 0.1 or under"
     assert f"{counts}: the cut list in {plan}" in said
     assert f"# Found: {counts}" in plan.read_text().splitlines()
@@ -8467,7 +8526,10 @@ def test_real_detection_cuts(
     assert upscale(tmp_path, clip, "out", "--plan", str(plan)) == 0
     bounds = [0, *CUTS, 280]
     assert shots_of(tmp_path / "out") == list(pairwise(bounds))
-    said = "4 shots: 3 cuts detected at 0.3, and 0 possible cuts from 0.1 up to 0.3"
+    said = (
+        "4 shots: 3 cuts detected at --cut-threshold 0.3, and 0 possible cuts (where the detector"
+        " is less sure) from 0.1 up to 0.3"
+    )
     assert said in caplog.text
     assert "3 cuts at 0.3 (4 shots), 0 possible cuts from 0.1 up to 0.3" in caplog.text
     assert read_cuts(plan) == CUTS

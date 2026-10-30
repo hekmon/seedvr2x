@@ -460,7 +460,7 @@ def detected(log: str) -> None:
     back; no cut at 0.5, the input one shot, as numz's one batch (the module's docstring)."""
     assert "the shot detector scored" in log, log[-3000:]
     assert "shot detector: VRAM peak" in log, log[-3000:]
-    assert "1 shot: 0 cuts detected at 0.5" in log, log[-3000:]
+    assert "1 shot: 0 cuts detected at --cut-threshold 0.5" in log, log[-3000:]
 
 
 def plan_lines(log: str) -> list[str]:
@@ -752,7 +752,7 @@ def test_tiled_bit_identical(
     )
     # The job's own passes: those of its time estimates' calibration come before, said too
     # (calibration.calibrate, which every run makes: DESIGN.md, Memory planner, Time estimates).
-    job_lines = log.split("time estimates calibrated in", 1)[-1]
+    job_lines = log.split("time estimates: the job's own steps timed once, in", 1)[-1]
     said = [
         line.split("tiling: ", 1)[1] for line in job_lines.splitlines() if "tiling: tiled " in line
     ]

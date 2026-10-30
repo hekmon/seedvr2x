@@ -2524,8 +2524,9 @@ def test_the_vae_stays_where_the_host_is_short() -> None:
         "plan: the VAE: on the GPU in the DiT's phase, the window fitting beside it"
     )
     assert said_line(said, "the DiT in the VAE's passes") == (
-        "plan: the DiT in the VAE's passes: in the encode, 1 of the DiT's blocks on the GPU; in"
-        " the decode, the DiT off the GPU; as much as fits beside each"
+        "plan: the DiT in the VAE's passes: which model stays on the GPU in which phase, as much"
+        " of the DiT as fits beside each: in the encode, 1 of the DiT's blocks on the GPU; in"
+        " the decode, the DiT off the GPU"
     )
     assert said_line(said, "system memory") == (
         "plan: system memory: 18.39 GiB in all; 15.35 GiB pinned for 36 blocks and the DiT's other"
@@ -2952,19 +2953,22 @@ def test_scratch_allowance() -> None:
     # 5, 76 and 17 latents, the one over 3.01 GiB.
     made, peaks = planner.plan(free, HD, film, Pins(), 64 * GIB)
     assert said_line(planner.said(made, peaks, "a card", HD, film, Pins()), "scratch") == (
-        "plan: scratch: 3.57 GiB for the longest tiled shot, what a tiled pass keeps between its"
-        " tiles; in system memory up to an allowance of 3.57 GiB, which holds every shot's"
+        "plan: scratch: what a tiled pass keeps of the shot's frames between its tiles: 3.57 GiB"
+        " for the longest tiled shot; in system memory up to an allowance of"
+        " 3.57 GiB, which holds every shot's"
     )
     made, peaks = planner.plan(free, HD, film, Pins(), 22 * GIB)
     assert said_line(planner.said(made, peaks, "a card", HD, film, Pins()), "scratch") == (
-        "plan: scratch: 3.57 GiB for the longest tiled shot, what a tiled pass keeps between its"
-        " tiles; in system memory up to an allowance of 3.01 GiB, over it, the scratch of 1 of 3"
+        "plan: scratch: what a tiled pass keeps of the shot's frames between its tiles: 3.57 GiB"
+        " for the longest tiled shot; in system memory up to an allowance of"
+        " 3.01 GiB, over it, the scratch of 1 of 3"
         " shots goes whole to a memory-mapped file"
     )
     made, peaks = planner.plan(free, HD, film, Pins(), planner.HOST_RESIDENT + pinned + held)
     assert said_line(planner.said(made, peaks, "a card", HD, film, Pins()), "scratch") == (
-        "plan: scratch: 3.57 GiB for the longest tiled shot, what a tiled pass keeps between its"
-        " tiles; in system memory up to an allowance of 0.00 GiB, over it, the scratch of 3 of 3"
+        "plan: scratch: what a tiled pass keeps of the shot's frames between its tiles: 3.57 GiB"
+        " for the longest tiled shot; in system memory up to an allowance of"
+        " 0.00 GiB, over it, the scratch of 3 of 3"
         " shots goes whole to a memory-mapped file"
     )
     # A plan from elsewhere is judged with the allowance it has (fits), said with the rest.
@@ -2984,8 +2988,9 @@ def test_scratch_allowance() -> None:
         " parameters and the VAE; 0.17 GiB for the longest shot at the most, at its longest window"
     )
     assert said_line(said, "scratch") == (
-        "plan: scratch: 3.57 GiB for the longest tiled shot, what a tiled pass keeps between its"
-        " tiles; in system memory up to an allowance of 6.00 GiB, which holds every shot's"
+        "plan: scratch: what a tiled pass keeps of the shot's frames between its tiles: 3.57 GiB"
+        " for the longest tiled shot; in system memory up to an allowance of"
+        " 6.00 GiB, which holds every shot's"
     )
 
 
@@ -3543,8 +3548,9 @@ def test_said() -> None:
         "plan: blocks swapped: 28 of the DiT's 36, the fewest that hold the window: slower, not"
         " worse; --swap-blocks N",
         "plan: the VAE: off the GPU in the DiT's phase, its 0.47 GiB given to the window",
-        "plan: the DiT in the VAE's passes: in the encode, 1 of the DiT's blocks on the GPU; in"
-        " the decode, the DiT off the GPU; as much as fits beside each",
+        "plan: the DiT in the VAE's passes: which model stays on the GPU in which phase, as much"
+        " of the DiT as fits beside each: in the encode, 1 of the DiT's blocks on the GPU; in"
+        " the decode, the DiT off the GPU",
         "plan: system memory: 21.95 GiB in all; 15.81 GiB pinned for 36 blocks, the DiT's other"
         " parameters and the VAE; 0.17 GiB for the longest shot at the most, at its longest window",
         "plan: encode: tiles of 1856 px overlapping by 64, 2 across, 1 down, the whole frame not"
@@ -3553,10 +3559,11 @@ def test_said() -> None:
         "plan: decode: tiles of 1088 px overlapping by 64, 2 across, 2 down, the whole frame not"
         " fitting the budget, the largest that do, up to 2048 px: a slight colour drift, which"
         " split corrects; --decode-tile PX",
-        "plan: the VAE's room: 1.25 GiB of the budget left free in each VAE pass, for the large"
-        " pieces of memory a pass asks for at once",
-        "plan: scratch: 3.57 GiB for the longest tiled shot, what a tiled pass keeps between its"
-        " tiles; in system memory up to an allowance of 3.57 GiB, which holds every shot's",
+        "plan: the VAE's room: what each VAE pass leaves free, for the large pieces of memory a"
+        " pass asks for at once: 1.25 GiB of the budget",
+        "plan: scratch: what a tiled pass keeps of the shot's frames between its tiles: 3.57 GiB"
+        " for the longest tiled shot; in system memory up to an allowance of"
+        " 3.57 GiB, which holds every shot's",
         "plan: predicted peaks: encode 20.55 GiB, DiT 21.82 GiB, decode 20.17 GiB; the DiT's phase"
         " bounds the plan, 0.14 GiB under the budget",
         "plan: time: measured, not guessed: a calibration of the job's own steps once the models"
@@ -3581,17 +3588,19 @@ def test_said() -> None:
         " time",
         "plan: blocks swapped: none, pinned by --swap-blocks; --swap-blocks N swaps some",
         "plan: the VAE: on the GPU in the DiT's phase, the window fitting beside it",
-        "plan: the DiT in the VAE's passes: in the encode, the DiT's 36 blocks on the GPU; in the"
-        " decode, the DiT's 36 blocks on the GPU; as much as fits beside each",
+        "plan: the DiT in the VAE's passes: which model stays on the GPU in which phase, as much"
+        " of the DiT as fits beside each: in the encode, the DiT's 36 blocks on the GPU; in the"
+        " decode, the DiT's 36 blocks on the GPU",
         "plan: system memory: 17.22 GiB in all; nothing pinned; 0.66 GiB for the longest shot at"
         " the most, at its longest window",
         "plan: encode: untiled, pinned by --encode-tile; --encode-tile PX tiles it",
         "plan: decode: tiles of 2048 px overlapping by 64, 2 across, 2 down, pinned by"
         " --decode-tile: a slight colour drift, which split corrects; --decode-tile PX",
-        "plan: the VAE's room: 1.25 GiB of the budget left free in each VAE pass, for the large"
-        " pieces of memory a pass asks for at once",
-        "plan: scratch: 14.16 GiB for the longest tiled shot, what a tiled pass keeps between its"
-        " tiles; in system memory up to an allowance of 14.16 GiB, which holds every shot's",
+        "plan: the VAE's room: what each VAE pass leaves free, for the large pieces of memory a"
+        " pass asks for at once: 1.25 GiB of the budget",
+        "plan: scratch: what a tiled pass keeps of the shot's frames between its tiles: 14.16 GiB"
+        " for the longest tiled shot; in system memory up to an allowance of"
+        " 14.16 GiB, which holds every shot's",
         "plan: predicted peaks: encode 91.54 GiB, DiT 84.72 GiB, decode 79.22 GiB; the encode"
         " bounds the plan, its room counted, 0.95 GiB under the budget",
         "plan: time: measured, not guessed: a calibration of the job's own steps once the models"
@@ -3613,12 +3622,11 @@ def test_said() -> None:
     said = planner.said(replace(made, swapped=35), peaks, "a card", *job)
     assert said_line(said, "the DiT in the VAE's passes").endswith(
         "in the encode, the DiT's 1 unswapped block and its 2 slots on the GPU; in the decode,"
-        " the DiT's 1 unswapped block and its 2 slots on the GPU; as much as fits beside each"
+        " the DiT's 1 unswapped block and its 2 slots on the GPU"
     )
     said = planner.said(replace(made, swapped=36), peaks, "a card", *job)
     assert said_line(said, "the DiT in the VAE's passes").endswith(
-        "in the encode, the DiT's 2 slots on the GPU; in the decode, the DiT's 2 slots on the GPU;"
-        " as much as fits beside each"
+        "in the encode, the DiT's 2 slots on the GPU; in the decode, the DiT's 2 slots on the GPU"
     )
     away = replace(made, swapped=20, resident_encode=16, resident_decode=0)
     said = planner.said(away, peaks, "a card", *job)
@@ -3626,8 +3634,9 @@ def test_said() -> None:
         "plan: the VAE: on the GPU in the DiT's phase, the window fitting beside it"
     )
     assert said_line(said, "the DiT in the VAE's passes") == (
-        "plan: the DiT in the VAE's passes: in the encode, 16 of the DiT's blocks on the GPU; in"
-        " the decode, the DiT off the GPU; as much as fits beside each"
+        "plan: the DiT in the VAE's passes: which model stays on the GPU in which phase, as much"
+        " of the DiT as fits beside each: in the encode, 16 of the DiT's blocks on the GPU; in"
+        " the decode, the DiT off the GPU"
     )
     assert said_line(said, "system memory") == (
         "plan: system memory: 17.87 GiB in all; 15.35 GiB pinned for 36 blocks and the DiT's other"
@@ -3982,9 +3991,7 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5(caplog: pytest.LogCaptureF
     assert "would run with the full reserve" not in "".join(
         planner.said(made_two, peaks_two, "a card", HD, longer, two)
     )
-    assert "plan: the VAE's room: 1.25 GiB of the budget left free in each VAE pass" in "".join(
-        lines
-    )
+    assert "plan: the VAE's room: what each VAE pass leaves free" in "".join(lines)
     # With 4.5 it fits: the plan's own reserve, nothing said of the other.
     made, peaks = planner.plan(on_card(need + 6 * GIB), HD, film, pins, None)
     assert not peaks.reading.tight and peaks.tightened is None

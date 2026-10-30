@@ -22,6 +22,7 @@ from typing import IO, Any, Protocol, cast
 import numpy as np
 import numpy.typing as npt
 
+from seedvr2x.clock import spent as span_seconds
 from seedvr2x.clock import wall
 from seedvr2x.media.ffmpeg import NO_METADATA, MediaError, argument, ends_with_us, input_args
 from seedvr2x.media.index import NOPTS, FrameIndex
@@ -384,7 +385,7 @@ def scan(path: Path, detector: Detects | None = None) -> Scan:
                 f" {float(probabilities[outside[0]])}, outside [0, 1]"
             )
         # Said in the wall clock's seconds, the frame rates by them too (clock.py).
-        elapsed = wall(time.monotonic() - started)
+        elapsed = span_seconds(time.monotonic() - started)
         spent = wall(run.spent)
         logger.info(
             "%s: the shot detector scored %d frames in %.1f s of its own (%.0f fps), during a first"

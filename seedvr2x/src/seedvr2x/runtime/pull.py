@@ -23,7 +23,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 
-from seedvr2x.clock import wall
+from seedvr2x.clock import spent, wall
 from seedvr2x.media import files
 from seedvr2x.runtime.weights import ModelError, Role
 
@@ -161,7 +161,7 @@ class Hashes:
             started = time.monotonic()
             digest = files.sha256(path)
             logger.info(
-                "%s: SHA-256 %s, in %.1f s", path.name, digest, wall(time.monotonic() - started)
+                "%s: SHA-256 %s, in %.1f s", path.name, digest, spent(time.monotonic() - started)
             )
             self._read[path] = (digest, state)
         return self._read[path][0]
@@ -698,7 +698,7 @@ def _download(name: str, pin: Pin, where: Path, needed: int) -> Path:
         raise ModelError(
             f"{name}: its download failed ({_words(error)}): {CHECK_ENDPOINT}"
         ) from None
-    logger.info("%s: downloaded in %.0f s, %s", name, wall(time.monotonic() - started), path)
+    logger.info("%s: downloaded in %.0f s, %s", name, spent(time.monotonic() - started), path)
     return Path(path)
 
 

@@ -21,7 +21,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from seedvr2x.clock import wall
+from seedvr2x.clock import spent
 from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.decode import to_float32
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer
@@ -372,10 +372,17 @@ def calibrate(
         ("a window", "window", 1000, "ms a token"),
         ("a decode", "decode", 1, "s a frame"),
     )
+    # What it is for and how long it took at every run; the figures, each kind's constant and
+    # rate, under --verbose (DESIGN.md, Architecture, What it prints, decided on 2026-10-29: "the
+    # calibration's figures ... under --verbose, its line saying what it is for and how long it
+    # took").
     logger.info(
-        "time estimates calibrated in %.1f s, encodes of %d and %d frames: %s; entering the DiT's"
+        "time estimates: the job's own steps timed once, in %.1f s, for the time left and --until",
+        spent(seconds),
+    )
+    logger.debug(
+        "time estimates calibrated, encodes of %d and %d frames: %s; entering the DiT's"
         " phase and the decode %.2f and %.2f s; the noise's draw %.2f us a token",
-        wall(seconds),
         FIRST,
         lengths[0],
         "; ".join(

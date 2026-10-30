@@ -1121,7 +1121,15 @@ def reading_said(source: Path) -> str:
     says "at least" (review of the assembly, 2026-10-28: "a few seconds" given for minutes). A
     read that fails is said with its reason, and no duration given."""
     size = source.stat().st_size
-    what = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
+    # What the rehearsal is for first, then what it reads (DESIGN.md, Architecture, What it
+    # prints, decided on 2026-10-29: "the source's other streams (audio, subtitles, a cover)
+    # copied once ahead, so that one the finished file can't take is found then, not after the
+    # night's work").
+    what = (
+        f"{source}: the source's other streams (audio, subtitles, a cover) copied once ahead, so"
+        f" that one the finished file can't take is found now, not after the night's work;"
+        f" reading"
+    )
     what += f" its {size_said(size)}"
     try:
         # Measured by the run's clock, said by the wall's (clock.py).

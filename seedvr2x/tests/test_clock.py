@@ -417,7 +417,110 @@ def test_the_assemblys_reading_time_is_said_in_the_walls_seconds(
     source = tmp_path / "in.mkv"
     source.write_bytes(b"")
     monkeypatch.setattr(assembly, "_read_seconds", lambda *given: 60.0)
-    head = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
+    head = (
+        f"{source}: the source's other streams (audio, subtitles, a cover) copied once ahead, so"
+        f" that one the finished file can't take is found now, not after the night's work;"
+        f" reading"
+    )
     assert assembly.reading_said(source) == f"{head} its 0 KiB, at least about 60 s"
     paced(0.9)
     assert assembly.reading_said(source) == f"{head} its 0 KiB, at least about 55 s"
+
+
+def sampled(readers: Readers, pace: Pace, *spans: float) -> None:
+    """The run's clock moving through `spans`, a reading of both at the end of each, as a line
+    logged makes one (clock.sample)."""
+    for span in spans:
+        readers.tick(span)
+        pace.sample()
+
+
+def test_a_span_said_before_the_ratio_is_measured_is_the_walls_own() -> None:
+    # "models loaded in 88.2 s" was said for 79 s by the lines' times (2026-10-29): the run's
+    # clock 10% fast against the wall's, 90 s in, no ratio yet (MIN_SPAN is 120 s).
+    readers = Readers(0.9)
+    pace = readers.pace()
+    sampled(readers, pace, 10.0)  # a line logged where the span begins
+    sampled(readers, pace, 80.0)
+    assert pace.wall(80.0) == 80.0  # the ratio is held at 1.0
+    assert pace.spent(80.0) == pytest.approx(72.0)  # the wall's seconds over the span
+    # The start between two readings: the clocks run evenly between them.
+    assert pace.spent(85.0) == pytest.approx(85.0 * 0.9)
+
+
+def test_a_span_said_after_the_ratio_is_measured_is_converted_by_it() -> None:
+    readers, pace = measured(0.9)
+    assert pace.spent(80.0) == pytest.approx(72.0) == pace.wall(80.0)
+    # The ratio, not the span's own seconds: a step inside the span doesn't count in it.
+    readers.tick(10.0)
+    readers.step(2.0)
+    assert pace.spent(10.0) == pytest.approx(9.0, abs=0.05)  # not 11
+
+
+def test_a_span_that_began_before_every_reading_is_said_in_the_runs_own() -> None:
+    readers = Readers(0.9)
+    pace = readers.pace()
+    sampled(readers, pace, 50.0)
+    assert pace.spent(60.0) == 60.0  # began 10 s before the anchor
+
+
+@pytest.mark.parametrize(("step", "said"), [(2.0, 74.0), (-3.0, 69.0), (-45.0, 80.0)])
+def test_a_step_of_the_wall_inside_a_span_never_makes_it_negative_or_absurd(
+    step: float, said: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A step of 2 s goes in the span's seconds whole (under STEP_FLOOR); one that leaves the wall's
+    # seconds outside BAND of the run's (-45 s of 80) is no measure of the span: its own seconds,
+    # said at debug.
+    caplog.set_level(logging.DEBUG, logger=clock.__name__)
+    readers = Readers(0.9)
+    pace = readers.pace()
+    sampled(readers, pace, 10.0, 40.0)
+    readers.step(step)
+    sampled(readers, pace, 40.0)
+    assert pace.spent(80.0) == pytest.approx(said)
+    assert (said == 80.0) == ("outside 0.5 to 2.0" in caplog.text)
+
+
+@pytest.mark.parametrize("hour", [3600.0, -3600.0])
+def test_an_hour_set_inside_a_span_leaves_the_runs_own_seconds(
+    hour: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Seen as a step (ratio): the readings from before it are dropped, so the span is said in the
+    # run's own seconds, not in an hour more or less.
+    caplog.set_level(logging.INFO, logger=clock.__name__)
+    readers = Readers(1.0)
+    pace = readers.pace()
+    sampled(readers, pace, 10.0, 30.0)
+    readers.step(hour)
+    readers.tick(40.0)
+    assert pace.spent(70.0) == 70.0
+    assert "the wall clock stepped" in caplog.text
+    assert 0 < pace.spent(30.0) <= 60.0
+
+
+def test_a_duration_is_never_negative_whatever_the_wall_does() -> None:
+    readers = Readers(1.0)
+    pace = readers.pace()
+    sampled(readers, pace, 10.0)
+    readers.step(-5.0)
+    sampled(readers, pace, 3.0)
+    assert pace.spent(3.0) == 3.0
+    assert pace.spent(0.0) == 0.0
+
+
+def test_every_line_logged_is_a_reading(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The logging handler's filter (cli._logging) lets the line through and reads both clocks,
+    # so that the start of a span is among the readings.
+    from seedvr2x import cli
+
+    readers = Readers(0.9)
+    pace = readers.pace()
+    monkeypatch.setattr(clock, "pace", pace)
+    record = logging.LogRecord("seedvr2x", logging.INFO, __file__, 1, "a line", (), None)
+    readers.tick(30.0)
+    assert cli._sampled(record)  # pyright: ignore[reportPrivateUsage]
+    readers.tick(60.0)
+    assert clock.spent(60.0) == pytest.approx(54.0)
+    handler_filters = logging.StreamHandler()
+    handler_filters.addFilter(cli._sampled)  # pyright: ignore[reportPrivateUsage]
+    assert handler_filters.filter(record)

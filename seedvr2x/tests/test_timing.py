@@ -5,6 +5,7 @@ own."""
 
 import logging
 import os
+import re
 import tempfile
 import time
 from collections.abc import Generator
@@ -1018,7 +1019,7 @@ def test_the_encode_s_second_length_by_time(
 ) -> None:
     # A quick encode (0.25 s for 5 frames, 0.05 s a frame) is measured again at about 3 s: 60
     # frames, 61 on the VAE's grid of 4n + 1, which the fit then takes with the 5.
-    caplog.set_level(logging.INFO, logger="seedvr2x")
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")  # the calibration's figures: --verbose
     steady = Quick(monkeypatch)
     found = calibrate(steady.models, TARGET, Plan(9), 9)
     assert encode_counts(steady) == [13, 5, 61]
@@ -1031,12 +1032,33 @@ def test_the_encode_s_second_length_by_time(
     assert second_length_said(caplog, 61)
 
 
+def test_the_calibration_says_what_it_is_for_and_its_figures_under_verbose(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-29): the line every run reads
+    # says what the calibration is for and how long it took; each kind's constant and rate are
+    # a debug line.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    calibrate(Quick(monkeypatch).models, TARGET, Plan(9), 9)
+    said = [(record.levelname, record.getMessage()) for record in caplog.records]
+    [(level, line)] = [item for item in said if item[1].startswith("time estimates: the job's")]
+    assert level == "INFO"
+    assert re.fullmatch(
+        r"time estimates: the job's own steps timed once, in \d+\.\d s, for the time left and"
+        r" --until",
+        line,
+    )
+    [(level, figures)] = [item for item in said if item[1].startswith("time estimates calibrated")]
+    assert level == "DEBUG" and "s a frame" in figures and "ms a token" in figures
+    assert not any(" s a frame" in text for level, text in said if level == "INFO")
+
+
 def test_the_encode_s_second_length_within_the_job_s_longest_run(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The plan was made for the job's longest run: no encode longer, 30 frames giving 29; and
     # never fewer than 13, whatever a run of 10 frames would allow.
-    caplog.set_level(logging.INFO, logger="seedvr2x")
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")  # the calibration's figures: --verbose
     steady = Quick(monkeypatch)
     calibrate(steady.models, TARGET, Plan(9), 9, most=30)
     assert encode_counts(steady) == [13, 5, 29]

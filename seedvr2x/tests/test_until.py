@@ -686,7 +686,7 @@ def test_plan_runs_the_calibration_through_the_job_s_steps(
     # a run's encodes follow one; the windows' warm-up, 2 latents and the longest (4 here); the
     # decodes' warm-up and two lengths; none of them a unit of the job, which --plan leaves as a
     # plan, nothing made.
-    caplog.set_level(logging.INFO, logger="seedvr2x")
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")  # the calibration's figures: --verbose
     monkeypatch.setattr(calibration, "calibrate", CALIBRATE)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, "--plan", "plan.txt") == 0
@@ -700,7 +700,10 @@ def test_plan_runs_the_calibration_through_the_job_s_steps(
     # 25 - 13 - 5 = 7 (SHOTS), under the job's longest run, 21 frames, and under the thousands of
     # frames 3 s of a stand-in's millisecond encode would be: the floor, 13 frames.
     assert any("encodes of 5 and 13 frames" in line for line in caplog.messages)
-    assert any(line.startswith("time estimates calibrated in ") for line in caplog.messages)
+    assert any(
+        line.startswith("time estimates: the job's own steps timed once, in ")
+        for line in caplog.messages
+    )
     assert any(line.startswith("time: about ") for line in caplog.messages)
     assert progress(tmp_path / "out") == ([False] * 2, [0] * 3)
 
@@ -860,7 +863,8 @@ def test_plan_of_the_assembly_alone(
     far = clocked.now() + timedelta(minutes=60)
     assert upscale(tmp_path, source_path, "out.mkv", *options, "--until", f"{far:%H:%M}") == 0
     assert (
-        f"time: the assembly alone is left, about {spoken(cost)} at the rate its disk writes at"
+        f"time: the assembly alone is left, about {spoken(cost)} to join the segments into the"
+        " finished file"
     ) in caplog.text
     assert f"--until: by its estimate the job ends by {date(far)}, at about 22:14" in caplog.text
     # Not enough: begun now, it would end at 22:15:08 with the 15% more, after 22:13.

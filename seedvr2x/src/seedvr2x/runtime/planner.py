@@ -1768,10 +1768,14 @@ def said(
     lines.append(_quality_said(shots, target, quality))
     lines.append(_swap_said(plan, pins))
     lines.append(_vae_said(plan))
+    # The three lines below say what they are for first, in the manual's words, then their
+    # figures (DESIGN.md, What it prints, decided on 2026-10-29: "each in the manual's words,
+    # what it is for first, its figure after").
     lines.append(
-        f"the DiT in the VAE's passes: in the encode,"
+        "the DiT in the VAE's passes: which model stays on the GPU in which phase, as much of the"
+        f" DiT as fits beside each: in the encode,"
         f" {_resident_said(plan.resident_encode, plan.swapped)}; in the decode,"
-        f" {_resident_said(plan.resident_decode, plan.swapped)}; as much as fits beside each"
+        f" {_resident_said(plan.resident_decode, plan.swapped)}"
     )
     process, pinned, held, allowance = _host_hundredths(plan, peaks.shot)
     left = _left(plan, "the DiT's other parameters", "the VAE")
@@ -1792,8 +1796,8 @@ def said(
     ):
         lines.append(_vae_pass_said(job, phase, tiles, pin, recorded, peaks.shrunk))
     lines.append(
-        f"the VAE's room: {_gib(VAE_ROOM)} GiB of the budget left free in each VAE pass, for the"
-        " large pieces of memory a pass asks for at once"
+        "the VAE's room: what each VAE pass leaves free, for the large pieces of memory a pass"
+        f" asks for at once: {_gib(VAE_ROOM)} GiB of the budget"
     )
     if peaks.scratch:
         # A scratch over the allowance goes whole to its file (tiling.Scratch).
@@ -1808,9 +1812,9 @@ def said(
             else "which holds every shot's"
         )
         lines.append(
-            f"scratch: {_gib(peaks.scratch)} GiB for the longest tiled shot, what a tiled pass"
-            f" keeps between its tiles; in system memory up to an allowance of"
-            f" {allowance / 100:.2f} GiB, {where}"
+            "scratch: what a tiled pass keeps of the shot's frames between its tiles:"
+            f" {_gib(peaks.scratch)} GiB for the longest tiled shot; in system memory up to an"
+            f" allowance of {allowance / 100:.2f} GiB, {where}"
         )
     if disk is not None:
         lines.append(disk)

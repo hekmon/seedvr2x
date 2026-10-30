@@ -792,15 +792,22 @@ def hold(device: Any, first: bool = False, reserve: int | None = None) -> int | 
     if not first:
         _reserve = RESERVE if reserve is None else reserve
     _base = (reported if card is None else card, reserved)
+    # What the run holds to and why, at every run; the driver's own figure under --verbose, first
+    # (DESIGN.md, Architecture, What it prints, decided on 2026-10-29: "the memory line: what the
+    # run holds to and why, what is free less the margin, the driver's own figure under
+    # --verbose").
+    logger.debug("free memory read: %s", _read_figures(reported, card))
     logger.log(
         logging.DEBUG if first else logging.INFO,
-        "torch held to %.2f GiB on the GPU%s: the %.2f GiB free less %.1f, and what it holds;"
-        " free %s",
+        "torch held to %.2f GiB on the GPU%s: the %.2f GiB free %s, less %.1f GiB, and what it"
+        " holds",
         limit / GIB,
         ", a first time, before the first pass" if first else "",
         free / GIB,
+        "as its driver reports it to this process"
+        if card is None or reported < card
+        else "on the whole card",
         _left / GIB,
-        _named(reported, card),
     )
     return limit
 
@@ -1122,6 +1129,21 @@ def _held_back(card: int | None) -> int:
     two figures is the smaller; HELD_BACK_UNREAD under the driver's figure alone, where it
     wasn't."""
     return HELD_BACK_UNREAD if card is None else HELD_BACK
+
+
+def _read_figures(reported: int, card: int | None) -> str:
+    """The two readings of the free memory, in words, for the debug line of the limit: what the
+    driver reports free to this process, and what the whole card has by NVML (the smaller is
+    taken)."""
+    if card is None:
+        return (
+            f"the driver reports {reported / GIB:.2f} GiB free to this process; the whole card's,"
+            " by NVML, wasn't read"
+        )
+    return (
+        f"the driver reports {reported / GIB:.2f} GiB free to this process, the whole card"
+        f" {card / GIB:.2f} GiB by NVML: the smaller is taken"
+    )
 
 
 def _named(reported: int, card: int | None, smaller: bool = True) -> str:

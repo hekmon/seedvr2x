@@ -2179,7 +2179,11 @@ def test_the_line_before_the_rehearsal_says_what_it_reads_and_for_about_how_long
     # a read that fails is said with its reason, no duration invented.
     source = tmp_path / "in.mkv"
     source.write_bytes(bytes(3 * 2**20))
-    head = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
+    head = (
+        f"{source}: the source's other streams (audio, subtitles, a cover) copied once ahead, so"
+        f" that one the finished file can't take is found now, not after the night's work;"
+        f" reading"
+    )
     assert assembly.reading_said(source) == f"{head} its 3 MiB, under a second"
     seconds = iter([0.4, 9.9, 10.0, 66.0, 89.0, 372.0, 5400.0])
     monkeypatch.setattr(assembly, "_read_seconds", lambda *given: next(seconds))
