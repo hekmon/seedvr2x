@@ -449,8 +449,9 @@ def main(argv: list[str] | None = None) -> int:
         " of compilation at every start, paid before the DiT loads, its cache kept in the job's"
         " directory; its frames are not plain code's (51 to 61 dB from them) but the same in every"
         " process; a setting, a resume repeats it; only the shapes measured are compiled (encode"
-        " tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152 px), the job"
-        " running without it, said, where its plan falls outside them or doesn't fit",
+        " tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152 px): a job whose"
+        " pins fall outside them, or with no compiled plan that fits where a plain one would, is"
+        " refused, never run without it",
     )
     parser.add_argument(
         "--until",
@@ -1096,7 +1097,9 @@ def _run(args: argparse.Namespace) -> int:
                     again.environment_changes = list(prior.recorded.get(resume.CHANGES, []))
                     if prior.changed:
                         again.environment_changes.append(
-                            resume.environment_change(prior.recorded, again.environment)
+                            resume.environment_change(
+                                prior.recorded, again.environment, again.settings
+                            )
                         )
                     _first_write(again, source)
                     kept_first = directory
@@ -1195,14 +1198,9 @@ def _run(args: argparse.Namespace) -> int:
                 if prior is None
                 else _own_layouts(recorded_as(None, plan.window), prior, reshaped),
                 disk=room.line(),
-                compile_asked=args.compile,
             )
             for line in said:
                 logger.info("%s", line)
-            if peaks.compile_dropped is not None:
-                # --compile asked and left out of a new job's plan: its frames are plain code's,
-                # never silently (planner.plan).
-                logger.warning("--compile is not used for this job: %s", peaks.compile_dropped)
             # A pass in tiles larger than any measured, which only a pin gives it: warned of,
             # once per pass (planner.beyond_measured).
             for line in planner.beyond_measured(plan):
@@ -3408,8 +3406,8 @@ def _settings(
         "encode_tile": args.encode_tile,
         "decode_tile": args.decode_tile,
         # --compile as asked, which a resume repeats: the compiled VAE's frames are not plain
-        # code's (DESIGN.md, Memory planner). The plan records what the job runs (Plan.
-        # compile_vae), false where the planner left it out (planner.plan).
+        # code's (DESIGN.md, Memory planner). The plan records the same (Plan.compile_vae): a job
+        # that can't be compiled is refused (planner.plan).
         "compile_vae": args.compile,
         "format": args.format,
         # The segments' writer (DESIGN.md, Output, Writer): the user's command, as given, or
@@ -4011,7 +4009,7 @@ def _resume(
     if prior.changed and complete(prior.recorded) and not assembles:
         logger.info(ENVIRONMENT_STAYS, record.path.parent, "; ".join(prior.changed))
     elif prior.changed:
-        change = resume.environment_change(prior.recorded, record.environment)
+        change = resume.environment_change(prior.recorded, record.environment, record.settings)
         record.environment_changes.append(change)
         logger.warning(
             "%s: resumed in another environment, as accepted, which its manifest records %s: %s",
@@ -4463,7 +4461,7 @@ def _reshape(record: "Manifest", prior: _Prior, old: "Plan", looking: bool = Fal
     record.environment_changes = list(prior.recorded.get(resume.CHANGES, []))
     if prior.changed:
         record.environment_changes.append(
-            resume.environment_change(prior.recorded, record.environment)
+            resume.environment_change(prior.recorded, record.environment, record.settings)
         )
         logger.warning(
             "%s: resumed in another environment, as accepted, which its manifest records with the"
@@ -4540,11 +4538,25 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
     are derived again and the manifest rewritten at once, in the run's environment", and any
     other setting the first pass doesn't read likewise (resume.FIRST_PASS_SETTINGS)."""
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.manifest import STATE
+    from seedvr2x.runtime.manifest import COMPILE_CACHE, STATE
 
     directory = record.path.parent
     planned = resume.recorded_job(record.path, prior.recorded, record.source)
     discarded = resume.leftovers(planned)
+    # The compile cache of a plan that compiled (--compile --plan loads the models, and compiles)
+    # is the recorded job's own, judged by its settings (leftovers); a plan taken up plain no
+    # longer is, and a plain job's directory refuses a cache as it does any name that isn't its
+    # own: derived data, removed with the plan it belonged to (as resume.clear removes it),
+    # PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md has the cache in the job's directory and says
+    # nothing of a plan switched from --compile).
+    cache = directory / COMPILE_CACHE
+    if (
+        resume.compiles(prior.recorded)
+        and not resume.compiles(record.content())
+        and cache.is_dir()
+        and not cache.is_symlink()
+    ):
+        discarded.append(cache)
     for path in discarded:
         logger.debug("discarded %s", path)
         if path.is_dir():
@@ -4561,7 +4573,7 @@ def _replan(record: "Manifest", prior: _Prior, shape: list[str]) -> None:
     record.environment_changes = list(prior.recorded.get(resume.CHANGES, []))
     if prior.changed:
         record.environment_changes.append(
-            resume.environment_change(prior.recorded, record.environment)
+            resume.environment_change(prior.recorded, record.environment, record.settings)
         )
         logger.warning(
             "%s: planned again in another environment, as accepted, which its manifest records"

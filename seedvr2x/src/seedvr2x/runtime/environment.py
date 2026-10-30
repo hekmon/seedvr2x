@@ -94,9 +94,10 @@ def current(
     (import_inductor), so that the packages recorded are those the compilation will have
     imported, at a start and at a resume alike. PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md
     has them imported "before the environment is recorded, so that a resume compares the same",
-    and doesn't say for which jobs): only with --compile, so that no other job's record moves;
-    the cost is that --compile is also a difference of the environment (jinja2, markupsafe,
-    networkx, setuptools), which a plan changing it takes up with --accept-env-change."""
+    and doesn't say for which jobs): only with --compile, so that no other job's record moves.
+    What they add (jinja2, markupsafe, networkx, setuptools: resume.INDUCTOR_PACKAGES) counts in
+    a resume's comparison only between two jobs that both compile (DESIGN.md, decided on
+    2026-10-29), so a plan switched to or from --compile needs no --accept-env-change."""
     from seedvr2x.runtime import model
 
     if compiling:

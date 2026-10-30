@@ -58,8 +58,9 @@ class Plan:
     scratch_allowance: int = 0
     # torch.compile (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0; the
     # DiT, not", decided on 2026-10-24): the VAE compiled with --compile, its causal
-    # convolutions left out of the graph (runtime/compiling.py); a job that runs plain code
-    # records false whatever was asked (planner.plan). The DiT is never compiled in v0.1.0:
+    # convolutions left out of the graph (runtime/compiling.py), always as the user set it
+    # (planner.plan refuses a job it can't run compiled, decided on 2026-10-29). The DiT is never
+    # compiled in v0.1.0:
     # compile_dit stays recorded, false. What the output's bits depend on, so a resume takes it
     # as recorded.
     compile_dit: bool = False

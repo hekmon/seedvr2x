@@ -104,6 +104,15 @@ def replannable(difference: str) -> bool:
     return name is not None and name not in FIRST_PASS_SETTINGS
 
 
+# The distributions a compilation brings into a run besides the run's own (environment.INDUCTOR,
+# environment.import_inductor), measured on torch 2.14.1: tests/test_compile.py holds this set to
+# what the import adds. DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in" (decided on
+# 2026-10-29): they count in the environment "only between two runs that both compile". A job
+# compiled brings them into its record and one that isn't doesn't, so a plan switched to or from
+# --compile differs by them alone, and is planned again with no flag asked (cli._prior).
+INDUCTOR_PACKAGES = frozenset({"jinja2", "markupsafe", "networkx", "setuptools"})
+
+
 def identity(content: dict[str, Any]) -> dict[str, Any]:
     """Of a job's manifest content, what a resume compares before the first pass: the settings,
     the environment, and the source's content, its size and SHA-256. The first pass's record is
@@ -142,8 +151,36 @@ def differences(recorded: dict[str, Any], asked: dict[str, Any]) -> list[str]:
     """What differs between the job recorded and the job asked, both as Manifest.content gives
     them, how far they went aside: one line each, `where: recorded -> now`."""
     found: list[str] = []
-    _compare(_job(recorded), _job(json.loads(json.dumps(asked))), "", found)
+    one, other = _job(recorded), _job(json.loads(json.dumps(asked)))
+    if not (compiles(recorded) and compiles(asked)):
+        one, other = _without_inductor(one), _without_inductor(other)
+    _compare(one, other, "", found)
     return found
+
+
+def compiles(content: dict[str, Any]) -> bool:
+    """Whether a job's content, recorded or asked, has the VAE compiled (settings.compile_vae,
+    --compile as given: a plan's plan.compile_vae is the same whenever it is made, planner.plan)."""
+    settings: Any = content.get("settings")
+    return isinstance(settings, dict) and cast(dict[str, Any], settings).get("compile_vae") is True
+
+
+def _without_inductor(content: dict[str, Any]) -> dict[str, Any]:
+    """content without INDUCTOR_PACKAGES among its environment's packages: what a compilation
+    imports counts only between two jobs that both compile (differences, environment_change)."""
+    environment: Any = content.get("environment")
+    if not isinstance(environment, dict):
+        return content
+    record = cast(dict[str, Any], environment)
+    packages: Any = record.get("packages")
+    if not isinstance(packages, dict):
+        return content
+    kept = {
+        name: version
+        for name, version in cast(dict[str, Any], packages).items()
+        if name not in INDUCTOR_PACKAGES
+    }
+    return {**content, "environment": {**record, "packages": kept}}
 
 
 def adopt(manifest: Manifest, recorded: dict[str, Any]) -> None:
@@ -282,12 +319,21 @@ def clear(directory: Path, content: dict[str, Any]) -> list[str]:
     return sorted(foreign)
 
 
-def environment_change(recorded: dict[str, Any], environment: dict[str, Any]) -> dict[str, Any]:
+def environment_change(
+    recorded: dict[str, Any], environment: dict[str, Any], settings: dict[str, Any]
+) -> dict[str, Any]:
     """The record of a resume in another environment, accepted (--accept-env-change): when, what
-    changed (the driver too, for information; of the packages, those changed), and how far the
-    job had gone, in units made in the environment before (a run takes them in one order:
-    segments, then their shots, then each shot's windows)."""
-    before, after = _changes(recorded["environment"], json.loads(json.dumps(environment)))
+    changed (the driver too, for information; of the packages, those changed, but what a
+    compilation imports unless both jobs compile: `settings` are the job asked's, INDUCTOR_
+    PACKAGES), and how far the job had gone, in units made in the environment before (a run
+    takes them in one order: segments, then their shots, then each shot's windows)."""
+    old = {"settings": recorded.get("settings"), "environment": recorded["environment"]}
+    new = json.loads(json.dumps({"settings": settings, "environment": environment}))
+    if not (compiles(old) and compiles(new)):
+        old, new = _without_inductor(old), _without_inductor(new)
+    before, after = _changes(
+        cast(dict[str, Any], old["environment"]), cast(dict[str, Any], new["environment"])
+    )
     return {
         "accepted": datetime.now().astimezone().isoformat(timespec="seconds"),
         "before": before,

@@ -949,9 +949,6 @@ class Peaks:
     # a pin's, the pin that runs with memory.RESERVE (PlanError.instead); else empty.
     tightened: str | None = None
     instead: str = ""
-    # Where --compile was asked and the job is planned without it (plan): why, in plain words,
-    # for the plan's line and the log; else None.
-    compile_dropped: str | None = None
 
     def peak(self, phase: Phase) -> int:
         """The predicted peak of `phase`."""
@@ -1143,16 +1140,15 @@ def plan(
     (encode_peak), so that the tiles are chosen smaller where it doesn't fit, and only passes
     within the shapes measured compiled are made or taken (in_compile_range): the encode's tiles
     up to COMPILE_ENCODE_TILE_MAX px or the 1080p frame whole, the decode's up to
-    COMPILE_DECODE_TILE_MAX px. Where no such plan fits, or a pin gives a pass beyond them, the
-    job is planned without it, never silently: Peaks.compile_dropped says why, the plan's
-    compile_vae is false, and the plan's lines and the log say it. PROVISIONAL (impl-v010,
-    2026-10-29: DESIGN.md has only the measured shapes compiled, and the plan's record keeping
-    compile_vae "as the user sets it"; it doesn't say what a job outside those shapes gets): the
-    job runs plain code, and its record says so, compile_vae false, its frames being plain
-    code's whatever was asked; the setting asked is the manifest's own (cli._settings). A
-    recorded plan keeps its own compile_vae, whatever is asked (the units made are what they
-    are), and is never planned without it; compile_fixed is the same for a plan planned again
-    around a recorded shape (plan_again)."""
+    COMPILE_DECODE_TILE_MAX px. Where a pin gives a pass beyond them, or no compiled plan fits
+    where a plain one would, the job is refused, never run plain in its place (DESIGN.md, same
+    section, decided on 2026-10-29): the refusal names the pass and the shapes measured and
+    advises, each on a line of its own, the same command without --compile and, for a pin, the
+    pin within them (_compile_refusal). A job no plain plan fits is refused as it was, whatever
+    --compile asked. The plan's compile_vae is the setting's, always. A recorded plan keeps its
+    own compile_vae, whatever is asked (the units made are what they are), and is refused as
+    any recorded shape; compile_fixed is the same for a plan planned again around a recorded
+    shape (plan_again), and for the compiled plan itself, whose refusal is _compile_refusal's."""
     if recorded is not None:
         compile_vae, compile_fixed = recorded.compile_vae, True
     if compile_vae and not compile_fixed:
@@ -1171,22 +1167,11 @@ def plan(
                 compile_fixed=True,
             )
         except PlanError as refused:
-            # The plain job, or its own refusal: a job that fits no card plain is refused as it
-            # was, whatever --compile asked.
-            plain, peaks = plan(
-                free,
-                target,
-                shots,
-                pins,
-                host_available,
-                split=split,
-                numz_padding=numz_padding,
-                recorded=None,
-                attention=attention,
-                compile_vae=False,
-                compile_fixed=True,
-            )
-            return plain, replace(peaks, compile_dropped=str(refused))
+            raise _compile_refusal(
+                refused,
+                (free, target, shots, pins, host_available),
+                dict(split=split, numz_padding=numz_padding, attention=attention),
+            ) from None
     job = _job(free, target, shots, split, numz_padding, attention, compile_vae)
     if pins.swap_blocks is not None and pins.swap_blocks > BLOCKS:
         raise PlanError(
@@ -1341,6 +1326,93 @@ def plan_again(
 def _tile_pin(tiles: Tiles | None) -> int:
     """The pin that makes a pass's tiles as recorded: their side, 0 for the untiled pass."""
     return 0 if tiles is None else tiles.size
+
+
+def _compile_refusal(
+    refused: PlanError,
+    job: tuple[int | Reading, tuple[int, int], Sequence[Shot], Pins, int | None],
+    options: dict[str, Any],
+) -> PlanError:
+    """The refusal of a job --compile can't run: the compiled plan's `refused`, where a plain
+    plan of the same job fits, with the shapes measured and the advice, each on a line of its own
+    (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in", decided on 2026-10-29): the same
+    command without --compile and, for a tile pinned, the pin within the shapes that the planner
+    takes (the untiled pass if it is within them, else the largest tile that fits). `job` is plan's
+    free, target, shots, pins and host_available, `options` its split, numz_padding and attention.
+    A job no plain plan fits is refused as it was, whatever --compile asked: the plain plan's
+    refusal.
+
+    PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says the refusal "names the pass and the shapes
+    measured" and doesn't word the lines): the compiled plan's own sentence, which names the
+    pass and its tiles, then the shapes measured where it doesn't say them, then the two pieces
+    of advice."""
+    free, target, shots, pins, host_available = job
+    try:
+        plan(*job[:5], recorded=None, compile_vae=False, compile_fixed=True, **options)
+    except PlanError as plain:
+        return plain
+    padded = _job(free, target, shots, **options, compile_vae=True).padded
+    lines = [str(refused)]
+    named = ("encode", "decode") if refused.phase not in ("encode", "decode") else (refused.phase,)
+    if not all(_compile_range_said(phase) in lines[0] for phase in named):
+        lines.append(
+            "--compile compiles only the shapes measured: "
+            + "; ".join(_compile_range_said(phase) for phase in ("encode", "decode"))
+        )
+    lines.append("The same command without --compile fits")
+    pinned: dict[Phase, int | None] = {"encode": pins.encode_tile, "decode": pins.decode_tile}
+    # The pins refused: a tile beyond the shapes, or the pass the refusal names.
+    bad: list[Phase] = [
+        phase
+        for phase, pin in pinned.items()
+        if pin is not None
+        and (phase == refused.phase or not in_compile_range(padded, phase, _pin_tiles(pin)))
+    ]
+    current: Pins = pins
+    for index, phase in enumerate(bad):
+        later = bad[index + 1 :]
+        for candidate in _within(padded, phase):
+            substituted = _with_tile(current, phase, candidate)
+            try:
+                plan(
+                    free,
+                    target,
+                    shots,
+                    substituted,
+                    host_available,
+                    recorded=None,
+                    compile_vae=True,
+                    compile_fixed=True,
+                    **options,
+                )
+            except PlanError as again:
+                # Another pin still beyond the shapes, to be replaced in its turn, refuses it.
+                if again.phase not in later:
+                    continue
+            lines.append(
+                f"The same command with --{phase}-tile {candidate} fits, within the shapes measured"
+            )
+            current = substituted
+            break
+    return PlanError("\n".join(lines), instead=refused.instead, phase=refused.phase)
+
+
+def _with_tile(pins: Pins, phase: Phase, pin: int) -> Pins:
+    """`pins` with the tile pin of a VAE phase set."""
+    return replace(pins, encode_tile=pin) if phase == "encode" else replace(pins, decode_tile=pin)
+
+
+def _pin_tiles(pin: int) -> Tiles | None:
+    """The tiles a tile pin gives: none for 0, the untiled pass."""
+    return Tiles(pin) if pin else None
+
+
+def _within(padded: tuple[int, int], phase: Phase) -> list[int]:
+    """The tile pins within the shapes measured compiled (in_compile_range), in the planner's
+    own order: 0, the untiled pass, if it is within them, then the tiles it makes (_tile_sizes),
+    the largest first."""
+    pins = [0, *_tile_sizes(padded)]
+    return [pin for pin in pins if in_compile_range(padded, phase, _pin_tiles(pin))]
 
 
 def _substituted(pins: Pins, instead: str) -> Pins | None:
@@ -1626,7 +1698,6 @@ def said(
     recorded: bool = False,
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
     disk: str | None = None,
-    compile_asked: bool = False,
 ) -> list[str]:
     """The plan as --plan prints it and every run and resume logs it, before the first unit,
     a line per choice in plain words (DESIGN.md, Memory planner, Every choice of the plan is
@@ -1641,7 +1712,7 @@ def said(
     (VAE_ROOM); the scratch of the longest tiled shot; the disk the job takes (disk.py); the
     predicted peaks and which bounds the plan; with --compile, the VAE compiled, its passes held
     to COMPILE_PEAK times their plain peaks, and the compilation's time, paid before the DiT
-    loads, or why the job runs without it; the time, estimated once the models are loaded, by
+    loads; the time, estimated once the models are loaded, by
     the calibration every run makes (DESIGN.md, Memory planner, Time estimates); what was
     pinned. recorded: the plan of a job resumed that has made units, whose window cap and tiles
     were kept from the job's record so that the output stays bit for bit (plan's `recorded`):
@@ -1661,9 +1732,8 @@ def said(
     disk.py, DESIGN.md, Memory planner, decided on 2026-10-28), after the scratch's and before the
     predicted peaks, as DESIGN.md lists it; None says none.
 
-    compile_asked: --compile was given. The plan then has a line of the compiled VAE, or, where
-    the job is planned without it (Peaks.compile_dropped, or a record's plan made so), a line
-    saying that and why; no line without the option."""
+    The line of the compiled VAE is the plan's own (plan.compile_vae, the setting's, always: a
+    job outside the shapes measured is refused, plan)."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
@@ -1758,12 +1828,6 @@ def said(
             f" plain peak, in the shapes measured only; compiling it takes about {minutes} per"
             " process, paid before the DiT loads, at every start and resume, its cache kept in"
             " the job's directory"
-        )
-    elif compile_asked:
-        why = peaks.compile_dropped or "the job's record was made without it"
-        lines.append(
-            f"compile: --compile is not used for this job: {why}; it runs without it, the VAE's"
-            " plain code and frames, no compilation"
         )
     lines.append(
         "time: measured, not guessed: a calibration of the job's own steps once the models are"
@@ -2408,11 +2472,16 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
     # The untiled pass alone fits where a frame little larger than the smallest tile takes less
     # untiled than in that tile (_least_pass).
     largest = next((fit.size for fit in fitting if fit is not None), None)
-    fits = (
-        f"no tile fits, the untiled {phase} does, --{phase}-tile 0"
-        if largest is None
-        else f"the largest tile that fits is --{phase}-tile {largest}"
-    )
+    # With the VAE compiled, the untiled pass is named only where it is within the shapes
+    # measured (in_compile_range): a refusal never advises a pin the compiled plan refuses.
+    if largest is None:
+        fits = (
+            f"no tile within the shapes measured fits ({_compile_range_said(phase)})"
+            if job.compile_vae and not in_compile_range(job.padded, phase, None)
+            else f"no tile fits, the untiled {phase} does, --{phase}-tile 0"
+        )
+    else:
+        fits = f"the largest tile that fits is --{phase}-tile {largest}"
     raise PlanError(
         f"{option}: the {phase} {_tiles_said(tiles)} takes {_over(need)} GiB of free VRAM,"
         f" the DiT off the GPU{_ROOM_HELD}, and {_there(job)}: {_to_free(job, need)}{fits}",

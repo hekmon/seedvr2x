@@ -100,7 +100,7 @@ def test_a_plan_with_the_vae_compiled_chooses_smaller_tiles_where_1_1_times_does
     smaller = 0
     for card in range(18, 49, 2):
         (plain, _), (compiled, peaks) = plain_and_compiled(our_free(card), HD)
-        assert compiled.compile_vae and not plain.compile_vae and not peaks.compile_dropped
+        assert compiled.compile_vae and not plain.compile_vae
         assert planner.in_compile_range(padded_size(HD), "encode", compiled.encode_tiles)
         assert planner.in_compile_range(padded_size(HD), "decode", compiled.decode_tiles)
         for phase in ("encode", "decode"):
@@ -147,8 +147,8 @@ def test_a_compiled_decode_is_always_tiled_and_in_the_measured_range() -> None:
     assert compiled.encode_tiles is None
     assert compiled.decode_tiles is not None and compiled.decode_tiles.size == 1152
     # 4K is beyond the frame measured: the encode is tiled too, up to 1856 px.
-    (plain, _), (compiled, peaks) = plain_and_compiled(our_free(96), UHD)
-    assert compiled.compile_vae and peaks.compile_dropped is None
+    (plain, _), (compiled, _) = plain_and_compiled(our_free(96), UHD)
+    assert compiled.compile_vae
     assert compiled.encode_tiles is not None and compiled.encode_tiles.size <= 1856
     assert compiled.decode_tiles is not None and compiled.decode_tiles.size <= 1152
     assert plain.decode_tiles is None or plain.decode_tiles.size > compiled.decode_tiles.size
@@ -171,43 +171,86 @@ def test_the_range_is_the_1080p_frame_as_a_whole_not_its_area() -> None:
     assert inside((1104, 1920), "dit", None)
 
 
-def test_a_pass_pinned_beyond_the_measured_range_leaves_the_compilation_out_said() -> None:
+def refusal(
+    free: int, target: tuple[int, int], pins: Pins, lengths: tuple[int, ...] = (76,)
+) -> str:
+    """The message of a job refused compiled where the plain plan is made."""
+    planner.plan(free, target, shots(*lengths), pins, None)
+    with pytest.raises(PlanError) as refused:
+        planner.plan(free, target, shots(*lengths), pins, None, compile_vae=True)
+    return str(refused.value)
+
+
+def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() -> None:
     # A pin is taken exactly: a decode tile of 1280 px, an untiled decode, an encode tile of 1920,
-    # an untiled encode at 4K. The job runs without --compile, said (Peaks.compile_dropped), its
-    # plan recorded plain, the pinned pass as pinned.
+    # an untiled encode at 4K. The job is refused, never run plain (DESIGN.md, decided on
+    # 2026-10-29): the pass, its tiles and the shapes measured, then the advice, each on a line of
+    # its own: the same command without --compile, and the pin within the shapes.
     free = our_free(96)
-    for pins, target, where in (
-        (Pins(decode_tile=1280), HD, "decode"),
-        (Pins(decode_tile=0), HD, "decode"),
-        (Pins(encode_tile=1920), UHD, "encode"),
+    for pins, target, phase, pin, where, within in (
+        (Pins(decode_tile=1280), HD, "decode", 1280, "in tiles of 1280 px", 1152),
+        (Pins(decode_tile=0), HD, "decode", 0, "untiled", 1152),
+        (Pins(encode_tile=1920), UHD, "encode", 1920, "in tiles of 1920 px", 1856),
+        (Pins(encode_tile=0), UHD, "encode", 0, "untiled", 1856),
     ):
-        made, peaks = planner.plan(free, target, shots(76), pins, None, compile_vae=True)
-        assert not made.compile_vae
-        assert peaks.compile_dropped is not None
-        assert "beyond the shapes measured" in peaks.compile_dropped and where in str(pins)
-        pinned, _ = planner.plan(free, target, shots(76), pins, None)
-        assert replace(made, scratch_allowance=0) == replace(pinned, scratch_allowance=0)
-    made, peaks = planner.plan(free, UHD, shots(76), Pins(encode_tile=0), None, compile_vae=True)
-    assert made.encode_tiles is None and not made.compile_vae
-    assert (
-        peaks.compile_dropped is not None and "beyond the shapes measured" in peaks.compile_dropped
-    )
+        lines = refusal(free, target, pins).split("\n")
+        assert lines[0].startswith(
+            f"--{phase}-tile {pin}: the VAE compiled has the {phase} {where} beyond the shapes"
+        )
+        assert planner._compile_range_said(phase) in lines[0]  # pyright: ignore[reportPrivateUsage]
+        assert lines[1:] == [
+            "The same command without --compile fits",
+            f"The same command with --{phase}-tile {within} fits, within the shapes measured",
+        ]
+    # Both passes pinned beyond them: the refusal names the first the planner meets, the advice
+    # both pins.
+    lines = refusal(free, UHD, Pins(encode_tile=1920, decode_tile=1280)).split("\n")
+    assert lines[-2:] == [
+        "The same command with --encode-tile 1856 fits, within the shapes measured",
+        "The same command with --decode-tile 1152 fits, within the shapes measured",
+    ]
     # A pass pinned within the range is taken, compiled.
-    made, peaks = planner.plan(
+    made, _ = planner.plan(
         free, HD, shots(76), Pins(encode_tile=1024, decode_tile=1024), None, compile_vae=True
     )
-    assert made.compile_vae and peaks.compile_dropped is None
+    assert made.compile_vae
     assert (made.encode_tiles, made.decode_tiles) == (Tiles(1024), Tiles(1024))
 
 
-def test_a_frame_too_small_for_a_tile_has_no_compiled_decode() -> None:
+def test_a_4k_job_pinned_untiled_is_refused_on_every_card_that_holds_it() -> None:
+    # 4K is beyond the 1080p frame whole, so an untiled encode is a pin beyond the shapes
+    # whatever the card; the pin advised fits that card, compiled.
+    for card in (96, 88):
+        lines = refusal(our_free(card), UHD, Pins(encode_tile=0)).split("\n")
+        assert lines[0].startswith("--encode-tile 0: the VAE compiled has the encode untiled")
+        advised = int(lines[-1].split("--encode-tile ")[1].split(" ")[0])
+        made, _ = planner.plan(
+            our_free(card), UHD, shots(76), Pins(encode_tile=advised), None, compile_vae=True
+        )
+        assert made.compile_vae and made.encode_tiles == Tiles(advised)
+
+
+def test_a_pin_in_the_range_that_fits_plain_and_not_compiled_is_refused_with_its_advice() -> None:
+    # The compiled pass is held to 1.1 times the plain peak: on this card a pinned decode tile
+    # fits plain and not compiled (the HD job, 25 GB). The refusal gives the plan's own sentence,
+    # the shapes measured (which it doesn't say), the same command without --compile, and the
+    # largest tile that fits compiled.
+    lines = refusal(our_free(25), HD, Pins(decode_tile=1152)).split("\n")
+    assert lines[0].startswith("--decode-tile 1152: the decode in tiles of 1152 px takes ")
+    measured = [planner._compile_range_said(phase) for phase in ("encode", "decode")]  # pyright: ignore[reportPrivateUsage]
+    assert lines[1] == "--compile compiles only the shapes measured: " + "; ".join(measured)
+    assert lines[2:] == [
+        "The same command without --compile fits",
+        "The same command with --decode-tile 1024 fits, within the shapes measured",
+    ]
+
+
+def test_a_frame_too_small_for_a_tile_has_no_compiled_decode_and_is_refused() -> None:
     # A decode can't be untiled compiled, and a frame under 576 px a side has no tile to make
-    # (planner._tile_sizes): the job runs plain, and says why.
-    made, peaks = planner.plan(our_free(96), (96, 128), shots(3), Pins(), None, compile_vae=True)
-    assert not made.compile_vae
-    assert peaks.compile_dropped is not None and "no decode pass within the shapes" in (
-        peaks.compile_dropped
-    )
+    # (planner._tile_sizes): refused, with no pin to advise.
+    lines = refusal(our_free(96), (96, 128), Pins(), (3,)).split("\n")
+    assert lines[0].startswith("the VAE compiled has no decode pass within the shapes measured")
+    assert lines[1:] == ["The same command without --compile fits"]
 
 
 def test_a_job_that_fits_no_card_plain_is_refused_as_it_was() -> None:
@@ -226,17 +269,15 @@ def test_a_recorded_plan_keeps_its_own_compile_flag() -> None:
     free = our_free(48)
     recorded = Plan(17, Tiles(1088), Tiles(1024), compile_vae=True)
     for asked in (False, True):
-        made, peaks = planner.plan(
+        made, _ = planner.plan(
             free, HD, shots(76), Pins(), None, recorded=recorded, compile_vae=asked
         )
-        assert made.compile_vae and peaks.compile_dropped is None
+        assert made.compile_vae
         assert (made.window, made.encode_tiles, made.decode_tiles) == (17, Tiles(1088), Tiles(1024))
     plain = replace(recorded, compile_vae=False)
     for asked in (False, True):
-        made, peaks = planner.plan(
-            free, HD, shots(76), Pins(), None, recorded=plain, compile_vae=asked
-        )
-        assert not made.compile_vae and peaks.compile_dropped is None
+        made, _ = planner.plan(free, HD, shots(76), Pins(), None, recorded=plain, compile_vae=asked)
+        assert not made.compile_vae
     # Its peaks are the compiled ones: a card the plain shape fits and the compiled doesn't.
     assert planner.decode_peak(
         padded_size(HD), output_size(HD), Tiles(1024), compiled=True
@@ -266,10 +307,10 @@ def test_a_plan_planned_again_keeps_the_recorded_compile_flag() -> None:
     job = (our_free(48), HD, shots(76), Pins(), None)
     with pytest.raises(PlanError) as refused:
         planner.plan(round(12 * GIB), HD, shots(76), Pins(), None, recorded=recorded)
-    made, peaks = planner.plan_again(
+    made, _ = planner.plan_again(
         round(26 * GIB), *job[1:], recorded=recorded, refused=refused.value
     )
-    assert made.compile_vae and peaks.compile_dropped is None
+    assert made.compile_vae
 
 
 def test_the_calibrations_passes_are_among_the_kinds_warmed() -> None:
@@ -316,7 +357,7 @@ def test_the_shapes_warmed_are_the_plans_passes_at_the_slice_kinds_of_the_job() 
 # ----------------------------------------------------------------------------- the plan's words
 
 
-def lines(plan: Plan, peaks: planner.Peaks, *, asked: bool, target: tuple[int, int] = HD) -> str:
+def lines(plan: Plan, peaks: planner.Peaks, *, target: tuple[int, int] = HD) -> str:
     return "\n".join(
         planner.said(
             plan,
@@ -325,7 +366,6 @@ def lines(plan: Plan, peaks: planner.Peaks, *, asked: bool, target: tuple[int, i
             target,
             shots(76),
             Pins(),
-            compile_asked=asked,
             numz_padding=False,
         )
     )
@@ -334,7 +374,7 @@ def lines(plan: Plan, peaks: planner.Peaks, *, asked: bool, target: tuple[int, i
 def test_the_plan_says_the_compilation_and_its_time() -> None:
     free = our_free(96)
     made, peaks = planner.plan(free, HD, shots(76), Pins(), None, compile_vae=True)
-    said = lines(made, peaks, asked=True)
+    said = lines(made, peaks)
     assert (
         "plan: compile: the VAE compiled (--compile), each pass held to 1.1 times its plain peak,"
         " in the shapes measured only; compiling it takes about 4 to 6 min per process, paid"
@@ -343,18 +383,7 @@ def test_the_plan_says_the_compilation_and_its_time() -> None:
     )
     # No line without the option, and none where the plan is plain and nothing was asked.
     plain, plain_peaks = planner.plan(free, HD, shots(76), Pins(), None)
-    assert "compile" not in lines(plain, plain_peaks, asked=False)
-
-
-def test_the_plan_says_why_the_job_runs_without_it() -> None:
-    free = our_free(96)
-    made, peaks = planner.plan(free, HD, shots(76), Pins(decode_tile=1280), None, compile_vae=True)
-    said = lines(made, peaks, asked=True)
-    assert "plan: compile: --compile is not used for this job: --decode-tile 1280: " in said
-    assert "it runs without it, the VAE's plain code and frames, no compilation" in said
-    # A job resumed whose record was made plain says it too.
-    plain, plain_peaks = planner.plan(free, HD, shots(76), Pins(), None, recorded=made)
-    assert "the job's record was made without it" in lines(plain, plain_peaks, asked=True)
+    assert "compile" not in lines(plain, plain_peaks)
 
 
 # ----------------------------------------------------------------------------- keep_deterministic
@@ -903,7 +932,7 @@ def test_inductors_modules_are_imported_before_the_environment_is_recorded() -> 
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     added = json.loads(result.stdout.strip())
-    assert {"jinja2", "markupsafe", "networkx", "setuptools"} <= set(added)
+    assert set(added) == resume.INDUCTOR_PACKAGES
 
 
 def test_nothing_a_compilation_imports_is_missing_from_the_record(
@@ -1093,35 +1122,56 @@ def test_a_resume_with_the_other_value_is_another_job(
         )
 
 
-def test_a_job_planned_without_it_says_so_and_resumes_so(
+def test_a_job_outside_the_shapes_measured_is_refused_never_run_plain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,  # noqa: F811
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The stand-in's frames, 128x96 padded, are too small for a decode tile, and an untiled
-    # decode is no compiled decode: the job runs plain, recorded so (compile_vae false, the
-    # setting asked, true), warned of and said in the plan's lines; and resumed with the same
-    # command it runs plain still, the record's, said again.
+    # decode is no compiled decode: the job is refused (DESIGN.md, Memory planner, decided on
+    # 2026-10-29), nothing loaded or run, the first pass kept as after any refusal, with the
+    # advice; --plan gives the same refusal, and the same command without --compile takes the
+    # first pass up.
     loads = Loads(monkeypatch)
     caplog.set_level(logging.INFO)
     source_path = job(tmp_path, monkeypatch)
-    steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "out", *JOB, "--compile")
-    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any(
-        w.startswith("--compile is not used for this job: the VAE compiled has no decode pass")
-        for w in warned
-    )
-    assert "plan: compile: --compile is not used for this job: " in caplog.text
-    out = manifest_of(tmp_path / "out")
-    assert (out["settings"]["compile_vae"], out["plan"]["compile_vae"]) == (True, False)
-    assert loads.given[0][5] is None
+    text = refused(tmp_path, source_path, caplog, *JOB, "--compile")
+    assert "the VAE compiled has no decode pass within the shapes measured" in text
+    assert "\nThe same command without --compile fits; the first pass is kept in " in text
+    assert "--compile is not used" not in text
+    assert loads.given == [] and steps.calls == []
+    out = tmp_path / "out"
+    assert (out / "manifest.json").is_file() and manifest_of(out)["settings"]["compile_vae"] is True
+    assert manifest_of(out).get("plan") is None
+    # The same refusal for --plan, whose first pass is the one kept.
+    asked = refused(tmp_path, source_path, caplog, *JOB, "--compile", "--plan", "p.txt")
+    assert "the VAE compiled has no decode pass within the shapes measured" in asked
+    assert "\nThe same command without --compile fits; " in asked
+    assert "the first pass is kept in " in asked and loads.given == []
     caplog.clear()
-    steps.stop = None
-    assert upscale(tmp_path, source_path, "out", *JOB, "--compile") == 0
-    assert "the job's record was made without it" in caplog.text
-    assert loads.given[1][5] is None
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert "the first pass as recorded" in caplog.text
+    assert manifest_of(out)["plan"]["compile_vae"] is False
+
+
+def test_a_pin_beyond_the_shapes_measured_is_refused_by_the_command_with_its_advice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An untiled decode pinned is beyond the shapes whatever the frame (a decode compiled is
+    # always tiled): on the stand-in's 704x560 frames, refused naming the pass, the tiles and the
+    # shapes, with the advice on a line of its own each.
+    loads = Loads(monkeypatch)
+    source_path = job(tmp_path, monkeypatch)
+    text = refused(tmp_path, source_path, caplog, *JOB, *LARGER, "--compile", "--decode-tile", "0")
+    assert "--decode-tile 0: the VAE compiled has the decode untiled beyond the shapes" in text
+    assert "(decode tiles up to 1152 px, never untiled)\n" in text
+    assert "\nThe same command without --compile fits\n" in text
+    assert "\nThe same command with --decode-tile 640 fits, within the shapes measured;" in text
+    assert loads.given == []
 
 
 def test_plan_says_the_compilations_time_and_the_estimate_counts_it_once(
@@ -1277,40 +1327,143 @@ def test_inductors_modules_are_imported_before_the_environment_is_read_with_the_
     assert "inductor" not in events
 
 
-def test_a_plan_with_no_unit_made_is_planned_again_for_the_other_value(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    steps: Steps,  # noqa: F811
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # --compile is a setting a plan takes up changed (resume.FIRST_PASS_SETTINGS): a job that
-    # made no unit yet, only planned (--plan), is planned again with it, the first pass kept.
-    # The environment recorded with the flag has the packages a compilation imports (inductor's
-    # modules, imported before it is recorded), which the plain one hasn't: the change is the
-    # environment's too, and --accept-env-change takes it up, as for any other (PROVISIONAL,
-    # environment.current: DESIGN.md imports them, and doesn't say for which jobs).
-    loads = Loads(monkeypatch)
-    accepting_tiles(monkeypatch, steps)
-    # What a process has imported depends on the tests run before in it: the packages the
-    # compilation brings are stood in for by one the import adds to the versions recorded.
+@pytest.fixture
+def inductor_modules(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Inductor's modules stood in for: what a process has imported depends on the tests run
+    before in it, and a real process starts with none of them, so a run with --compile adds one
+    to the versions recorded (one of resume.INDUCTOR_PACKAGES, networkx) and a plain one doesn't.
+    The list is the process's imports: cleared before each run a test makes, a process of its
+    own."""
     imported: list[str] = []
     versions = environment.versions
     monkeypatch.setattr(environment, "import_inductor", lambda: imported.append("inductor"))
     monkeypatch.setattr(
         environment,
         "versions",
-        lambda: {**versions(), **({"an-inductor-dependency": "1.0"} if imported else {})},
+        lambda: {**versions(), **({"networkx": "1.0"} if imported else {})},
     )
+    return imported
+
+
+def test_a_plan_with_no_unit_made_is_planned_again_for_the_other_value_with_no_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+    inductor_modules: list[str],
+) -> None:
+    # --compile is a setting a plan takes up changed (resume.FIRST_PASS_SETTINGS): a job that
+    # made no unit yet, only planned (--plan), is planned again with it, the first pass kept. The
+    # environment recorded with the flag has the packages a compilation imports (inductor's
+    # modules, imported before it is recorded), which the plain one hasn't, and they count only
+    # between two runs that both compile (DESIGN.md, decided on 2026-10-29): no
+    # --accept-env-change is asked, to or from --compile, and none is recorded.
+    loads = Loads(monkeypatch)
+    accepting_tiles(monkeypatch, steps)
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "out", *JOB, *LARGER, "--plan", "p.txt") == 0
-    assert manifest_of(tmp_path / "out")["plan"]["compile_vae"] is False
-    text = refused(tmp_path, source_path, caplog, *JOB, *LARGER, "--compile")
-    assert "settings.compile_vae: false -> true" in text
-    assert "environment.packages.an-inductor-dependency" in text and "--accept-env-change" in text
-    assert (
-        upscale(tmp_path, source_path, "out", *JOB, *LARGER, "--compile", "--accept-env-change")
-        == 0
-    )
-    out = manifest_of(tmp_path / "out")
+    out_dir = tmp_path / "out"
+    options = (*JOB, *LARGER)
+    inductor_modules.clear()
+    assert upscale(tmp_path, source_path, "out", *options, "--plan", "p.txt") == 0
+    assert manifest_of(out_dir)["plan"]["compile_vae"] is False
+    assert "networkx" not in manifest_of(out_dir)["environment"]["packages"]
+    # Plain to compiled: a plan with no unit made, planned again.
+    inductor_modules.clear()
+    assert upscale(tmp_path, source_path, "out", *options, "--compile", "--plan", "p.txt") == 0
+    planned = manifest_of(out_dir)
+    assert (planned["settings"]["compile_vae"], planned["plan"]["compile_vae"]) == (True, True)
+    assert planned["environment"]["packages"]["networkx"] == "1.0"
+    assert planned.get("environment_changes", []) == []
+    assert (out_dir / "compile-cache" / "entry.bin").is_file()  # the calibration compiled
+    # Compiled to plain, again with no flag, and to compiled once more, then run.
+    inductor_modules.clear()
+    assert upscale(tmp_path, source_path, "out", *options, "--plan", "p.txt") == 0
+    again = manifest_of(out_dir)
+    assert (again["settings"]["compile_vae"], again["plan"]["compile_vae"]) == (False, False)
+    assert "networkx" not in again["environment"]["packages"]
+    assert again.get("environment_changes", []) == []
+    # The cache belonged to the plan that compiled: gone with it, not a foreign name in a plain
+    # job's directory (cli._replan, PROVISIONAL).
+    assert not (out_dir / "compile-cache").exists()
+    inductor_modules.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options, "--compile") == 0
+    out = manifest_of(out_dir)
     assert (out["settings"]["compile_vae"], out["plan"]["compile_vae"]) == (True, True)
+    assert out.get("environment_changes", []) == []
+    assert "another environment" not in caplog.text and "--accept-env-change" not in caplog.text
     assert loads.given[-1][5] is not None
+
+
+def test_a_job_with_units_made_toggled_is_another_jobs_settings_not_its_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+    inductor_modules: list[str],
+) -> None:
+    # Units made keep the setting they have: --compile toggled is another job's refusal as for any
+    # setting, listing the setting alone, not the packages a compilation imports.
+    Loads(monkeypatch)
+    accepting_tiles(monkeypatch, steps)
+    source_path = job(tmp_path, monkeypatch)
+    for first, second in (("--compile", None), (None, "--compile")):
+        output = f"out{first}{second}".replace("-", "")
+        steps.stop = "window 4:1"
+        inductor_modules.clear()
+        stopped(tmp_path, source_path, output, *JOB, *LARGER, *([first] if first else []))
+        inductor_modules.clear()
+        text = refused(
+            tmp_path,
+            source_path,
+            caplog,
+            *JOB,
+            *LARGER,
+            *([second] if second else []),
+            output=output,
+        )
+        assert "another job than the one asked" in text and "settings.compile_vae" in text
+        assert "environment.packages" not in text and "networkx" not in text
+        assert "Only its environment differs" not in text
+
+
+def test_the_environments_comparison_counts_inductors_modules_only_between_compiled_jobs() -> None:
+    # resume.differences and resume.environment_change: the packages a compilation imports
+    # (INDUCTOR_PACKAGES) are left out of both sides unless both jobs have the VAE compiled; any
+    # other package, and those packages between two compiled jobs, count.
+    def content(compiled: bool, packages: dict[str, str]) -> dict[str, Any]:
+        return {
+            "settings": {"compile_vae": compiled, "seed": 1},
+            "environment": {"torch": "2.14.1", "packages": packages},
+            "segments": [],
+            "shots": [],
+        }
+
+    base = {"torch": "2.14.1", "numpy": "2.0"}
+    brought = {name: "1.0" for name in resume.INDUCTOR_PACKAGES}
+    plain, compiled = content(False, base), content(True, {**base, **brought})
+    # Plain to compiled or back: the setting alone differs, never the packages.
+    assert resume.differences(plain, compiled) == ["settings.compile_vae: false -> true"]
+    assert resume.differences(compiled, plain) == ["settings.compile_vae: true -> false"]
+    assert resume.differences(plain, content(False, base)) == []
+    # Between two compiled jobs they count, one changed or one missing.
+    for name in sorted(resume.INDUCTOR_PACKAGES):
+        changed = content(True, {**base, **brought, name: "2.0"})
+        assert resume.differences(compiled, changed) == [
+            f'environment.packages.{name}: "1.0" -> "2.0"'
+        ]
+        missing = content(True, {**base, **{n: v for n, v in brought.items() if n != name}})
+        assert resume.differences(compiled, missing) == [
+            f'environment.packages.{name}: "1.0" -> null'
+        ]
+    # Any other package counts whatever the settings.
+    other = content(False, {**base, "numpy": "2.1"})
+    assert resume.differences(plain, other) == ['environment.packages.numpy: "2.0" -> "2.1"']
+    # The record of an accepted change leaves them out in the same cases.
+    mixed = content(True, {**base, **brought, "numpy": "2.1"})
+    change = resume.environment_change(plain, mixed["environment"], mixed["settings"])
+    assert change["before"] == {"packages": {"numpy": "2.0"}}
+    assert change["after"] == {"packages": {"numpy": "2.1"}}
+    changed = content(True, {**base, **brought, "jinja2": "2.0"})
+    shown = resume.environment_change(compiled, changed["environment"], changed["settings"])
+    assert shown["before"] == {"packages": {"jinja2": "1.0"}}

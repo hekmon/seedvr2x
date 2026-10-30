@@ -410,7 +410,7 @@ def test_an_environment_change_counts_every_runs_units(tmp_path: Path) -> None:
     record.window_done(9, 0)
     record.window_done(9, 1)
     record.window_done(1, 0)
-    change = resume.environment_change(record.content(), {"gpu": "another GPU"})
+    change = resume.environment_change(record.content(), {"gpu": "another GPU"}, record.settings)
     assert change["shots_encoded"] == 4
     assert change["windows_done"] == 3
     assert change["segments_finished"] == 0
