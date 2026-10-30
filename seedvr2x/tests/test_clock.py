@@ -468,9 +468,8 @@ def test_a_span_that_began_before_every_reading_is_said_in_the_runs_own() -> Non
 def test_a_step_of_the_wall_inside_a_span_never_makes_it_negative_or_absurd(
     step: float, said: float, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A step of 2 s goes in the span's seconds whole (under STEP_FLOOR); one that leaves the wall's
-    # seconds outside BAND of the run's (-45 s of 80) is no measure of the span: its own seconds,
-    # said at debug.
+    # A step of 2 s goes in the span's seconds whole (within SPAN_BAND); one that leaves the wall's
+    # seconds outside it (-45 s of 80) is no measure of the span: its own seconds, said at debug.
     caplog.set_level(logging.DEBUG, logger=clock.__name__)
     readers = Readers(0.9)
     pace = readers.pace()
@@ -478,7 +477,7 @@ def test_a_step_of_the_wall_inside_a_span_never_makes_it_negative_or_absurd(
     readers.step(step)
     sampled(readers, pace, 40.0)
     assert pace.spent(80.0) == pytest.approx(said)
-    assert (said == 80.0) == ("outside 0.5 to 2.0" in caplog.text)
+    assert (said == 80.0) == ("outside 0.8 to 1.2" in caplog.text)
 
 
 @pytest.mark.parametrize("hour", [3600.0, -3600.0])
@@ -524,3 +523,48 @@ def test_every_line_logged_is_a_reading(monkeypatch: pytest.MonkeyPatch) -> None
     handler_filters = logging.StreamHandler()
     handler_filters.addFilter(cli._sampled)  # pyright: ignore[reportPrivateUsage]
     assert handler_filters.filter(record)
+
+
+@pytest.mark.parametrize("verbose", [True, False])
+def test_the_handler_the_cli_installs_samples_the_clocks(
+    verbose: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real cli._logging, as the CLI calls it with and without --verbose: the handler it puts
+    # on the root logger carries the sampling filter, and a line through it is a reading.
+    from seedvr2x import cli
+
+    readers = Readers(0.9)
+    pace = readers.pace()
+    monkeypatch.setattr(clock, "pace", pace)
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    root.handlers.clear()  # basicConfig does nothing where the root has handlers (pytest's own)
+    try:
+        cli._logging(verbose)  # pyright: ignore[reportPrivateUsage]
+        installed = list(root.handlers)
+        assert len(installed) == 1
+        assert cli._sampled in installed[0].filters  # pyright: ignore[reportPrivateUsage]
+        assert root.level == (logging.DEBUG if verbose else logging.INFO)
+        record = logging.LogRecord("seedvr2x", logging.INFO, __file__, 1, "a line", (), None)
+        readers.tick(30.0)
+        assert installed[0].filter(record)
+        readers.tick(60.0)
+        assert clock.spent(60.0) == pytest.approx(54.0)
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
+
+
+def test_a_wall_step_of_59_s_inside_a_60_s_span_is_not_the_spans_seconds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Under STEP_FLOOR, so no step is spotted, but 119 s of a 60 s span is outside SPAN_BAND: said
+    # in the run's own seconds, at debug.
+    caplog.set_level(logging.DEBUG, logger=clock.__name__)
+    readers = Readers(1.0)
+    pace = readers.pace()
+    sampled(readers, pace, 10.0, 25.0)
+    readers.step(59.0)
+    sampled(readers, pace, 25.0)
+    assert pace.spent(60.0) == 60.0
+    assert "outside 0.8 to 1.2" in caplog.text

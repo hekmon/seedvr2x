@@ -3897,17 +3897,23 @@ def _content(path: Path, vouching: dict[str, Any] | None = None) -> dict[str, ob
     """The source's content, as a resume compares it: its size and SHA-256. A hash that takes
     long is named first, what is read and for about how long (_long_read).
 
-    `vouching`, the input of a finished job's record (_prior): where the file's size and
-    modification time, in nanoseconds (manifest._input), are those recorded, the record's size and
-    SHA-256 are taken and the file is not read (DESIGN.md, Pause and resume, decided on
-    2026-10-29); where either differs, or the record has no time, it is hashed as before."""
+    `vouching`, the input of a finished job's record (_prior): where the file is at the path
+    recorded (resolved, manifest._input) and its size and modification time, in nanoseconds, are
+    those recorded, the record's size and SHA-256 are taken and the file is not read (DESIGN.md,
+    Pause and resume, decided on 2026-10-29); where either differs, or the record has no time, or
+    the file is at another path, it is hashed as before.
+
+    PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "by size and modification time"): the
+    path must be the recorded one, so that another file at another path, a copy made with its
+    time kept (cp -p) among them, never passes unread."""
     from seedvr2x.media.files import sha256
 
     if vouching is not None:
         status = path.stat()
         digest: Any = vouching.get("sha256")
         if (
-            type(vouching.get("bytes")) is int
+            vouching.get("path") == str(path.resolve())
+            and type(vouching.get("bytes")) is int
             and vouching.get("bytes") == status.st_size
             and type(vouching.get("modified_ns")) is int
             and vouching.get("modified_ns") == status.st_mtime_ns

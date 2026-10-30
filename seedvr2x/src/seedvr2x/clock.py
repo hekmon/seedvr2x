@@ -54,6 +54,13 @@ BAND = (0.5, 2.0)
 # for a step.
 STEP_FLOOR = 60.0
 STEP_SHARE = 0.05
+# A span's own seconds by the wall clock are believed inside this band of the run's: tighter than
+# BAND, which guards a ratio over a long time, because a step of the wall clock inside a short
+# span would otherwise pass (+59 s in a 60 s span doubles it, under STEP_FLOOR) and the drift
+# measured is 0.90 to 1.10.
+# PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says a duration comes from the wall clock before
+# the ratio is measured and leaves the guard open).
+SPAN_BAND = (0.8, 1.25)
 # The ratio is said at debug each time it moves by more than this share from the last said.
 SAID_MOVE = 0.01
 # The readings kept while no ratio is measured, to find where a span began (Pace.spent): the
@@ -67,7 +74,12 @@ class Pace:
     """The run's clock against the wall's: wall(seconds) says a duration the run measured, in the
     wall clock's seconds. `monotonic` and `wall_clock` (the epoch time in seconds) are the two
     readers, injected by the tests. Every reading is made when something is said, which a unit's
-    end does at the least (cli, runtime/run.py); no thread."""
+    end does at the least (cli, runtime/run.py), and by the sampling filter of every line logged
+    (sample), so from any thread that logs: the scanner's and the reader's watchdog as well as the
+    main one. That is safe without a lock because a reading only appends to the list of readings
+    or drops its oldest (single list operations, atomic under the GIL), and spent works on one
+    copy of the list taken at its start (a reading made by another thread meanwhile is simply
+    not in it; a clear by ratio() leaves the copy whole)."""
 
     def __init__(
         self,
@@ -171,37 +183,38 @@ class Pace:
         clock: now's reading less the wall's at the span's start, found between the readings kept
         (sample, ratio), the clocks running evenly between two. Where the start is before every
         reading kept (the span began before the anchor, or the wall clock stepped since), or the
-        wall's seconds are outside BAND of the run's (a step inside the span, absurd or
+        wall's seconds are outside SPAN_BAND of the run's (a step inside the span, absurd or
         negative), the run's own seconds, said at debug.
 
         PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says a duration comes from the wall clock
-        before the ratio is measured and leaves the guard open): BAND, as for the ratio; a step of
-        the wall clock inside a span, under STEP_FLOOR, goes into its seconds whole (2 s at the
-        most, seen on 2026-10-29)."""
+        before the ratio is measured and leaves the guard open): SPAN_BAND, tighter than the
+        ratio's BAND; a step of the wall clock inside a span, within that band (2 s at the most
+        seen on 2026-10-29), goes into its seconds whole."""
         ratio = self.ratio()
         if self._measured or seconds <= 0:
             return seconds * ratio
-        mono, wall = self._history[-1] if self._history else (self._monotonic(), self._wall())
+        history = list(self._history)  # one snapshot: other threads log, and sample, meanwhile
+        mono, wall = history[-1] if history else (self._monotonic(), self._wall())
         started = mono - seconds
-        after = bisect_right([reading[0] for reading in self._history], started)
-        if after == 0 or after == len(self._history):
+        after = bisect_right([reading[0] for reading in history], started)
+        if after == 0 or after == len(history):
             logger.debug(
                 "no reading of the clocks from before a span of %.1f s: said in the run's own",
                 seconds,
             )
             return seconds
-        (before_mono, before_wall), (next_mono, next_wall) = self._history[after - 1 : after + 1]
+        (before_mono, before_wall), (next_mono, next_wall) = history[after - 1 : after + 1]
         began = before_wall + (next_wall - before_wall) * (started - before_mono) / (
             next_mono - before_mono
         )
         walled = wall - began
-        if not BAND[0] * seconds <= walled <= BAND[1] * seconds:
+        if not SPAN_BAND[0] * seconds <= walled <= SPAN_BAND[1] * seconds:
             logger.debug(
                 "a span of %.1f s of the run's clock was %.1f s by the wall's, outside %.1f to %.1f"
                 " of it: said in the run's own",
                 seconds,
                 walled,
-                *BAND,
+                *SPAN_BAND,
             )
             return seconds
         return walled

@@ -17,6 +17,7 @@ import math
 import os
 import platform
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -6296,6 +6297,29 @@ def test_a_finished_job_with_another_file_of_the_same_size_and_a_new_time_is_ref
     assert "another job than the one asked" in caplog.text and field in caplog.text
     assert "finished already" not in caplog.text and finished.written() == kept
     assert finished.reads == [changed]
+
+
+def test_a_copy_of_the_source_elsewhere_with_the_same_size_and_time_is_hashed(
+    tmp_path: Path, finished: Finished, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The source is vouched for by size and time only where it is at the path recorded: another
+    # file elsewhere with the same size and the same time (os.utime) is read, found the same
+    # content here, and the job said finished (PROVISIONAL, cli._content).
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    copy = elsewhere / finished.source.name
+    shutil.copyfile(finished.source, copy)
+    status = finished.source.stat()
+    os.utime(copy, ns=(status.st_atime_ns, status.st_mtime_ns))
+    assert copy.stat().st_size == status.st_size and copy.stat().st_mtime_ns == status.st_mtime_ns
+    caplog.clear()
+    assert run_again(tmp_path, replace(finished, source=copy)) == 0
+    assert finished.said in caplog.text and finished.reads == [copy]
+    # At the recorded path, the same file is not read.
+    caplog.clear()
+    assert run_again(tmp_path, finished) == 0
+    assert finished.reads == []
 
 
 @pytest.mark.parametrize("lacks", ["model time", "source time"])

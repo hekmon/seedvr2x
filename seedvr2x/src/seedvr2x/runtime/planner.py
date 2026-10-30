@@ -1344,8 +1344,9 @@ def _compile_refusal(
 
     PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says the refusal "names the pass and the shapes
     measured" and doesn't word the lines): the compiled plan's own sentence, which names the
-    pass and its tiles, then the shapes measured where it doesn't say them, then the two pieces
-    of advice."""
+    pass and its tiles, a line for each other pass pinned beyond the shapes (the plan stops at
+    the first it meets), then the shapes measured where none says them, then the two pieces of
+    advice."""
     free, target, shots, pins, host_available = job
     try:
         plan(*job[:5], recorded=None, compile_vae=False, compile_fixed=True, **options)
@@ -1353,8 +1354,22 @@ def _compile_refusal(
         return plain
     padded = _job(free, target, shots, **options, compile_vae=True).padded
     lines = [str(refused)]
+    # The plan refuses at the first pass it meets: each other pass pinned beyond the shapes is
+    # named too, in the same words, so that the advice below is no surprise for the second.
+    others: tuple[tuple[Phase, int | None], ...] = (
+        ("encode", pins.encode_tile),
+        ("decode", pins.decode_tile),
+    )
+    for phase, pin in others:
+        if pin is not None and phase != refused.phase:
+            tiles = _pin_tiles(pin)
+            if not in_compile_range(padded, phase, tiles):
+                lines.append(
+                    f"--{phase}-tile {pin}: the VAE compiled has the {phase} {_tiles_said(tiles)}"
+                    f" beyond the shapes measured ({_compile_range_said(phase)})"
+                )
     named = ("encode", "decode") if refused.phase not in ("encode", "decode") else (refused.phase,)
-    if not all(_compile_range_said(phase) in lines[0] for phase in named):
+    if not all(_compile_range_said(phase) in "\n".join(lines) for phase in named):
         lines.append(
             "--compile compiles only the shapes measured: "
             + "; ".join(_compile_range_said(phase) for phase in ("encode", "decode"))

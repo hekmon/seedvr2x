@@ -202,8 +202,19 @@ def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() ->
             "The same command without --compile fits",
             f"The same command with --{phase}-tile {within} fits, within the shapes measured",
         ]
-    # Both passes pinned beyond them: the refusal names the first the planner meets, the advice
-    # both pins.
+    # Both passes pinned beyond them: the plan stops at the first it meets (the decode), and the
+    # refusal names the other pass too, on a line of its own, then gives the advice for both pins.
+    lines = refusal(free, UHD, Pins(encode_tile=2048, decode_tile=1280)).split("\n")
+    assert lines[0].startswith("--decode-tile 1280: the VAE compiled has the decode in tiles of")
+    assert lines[1] == (
+        "--encode-tile 2048: the VAE compiled has the encode in tiles of 2048 px beyond the shapes"
+        f" measured ({planner._compile_range_said('encode')})"  # pyright: ignore[reportPrivateUsage]
+    )
+    assert lines[2:] == [
+        "The same command without --compile fits",
+        "The same command with --encode-tile 1856 fits, within the shapes measured",
+        "The same command with --decode-tile 1152 fits, within the shapes measured",
+    ]
     lines = refusal(free, UHD, Pins(encode_tile=1920, decode_tile=1280)).split("\n")
     assert lines[-2:] == [
         "The same command with --encode-tile 1856 fits, within the shapes measured",
