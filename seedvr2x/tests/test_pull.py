@@ -334,6 +334,35 @@ def test_pinned_hashed_once(
     assert said in caplog.messages
 
 
+def test_a_file_vouched_for_by_size_and_time_is_not_read(
+    tmp_path: Path, pins: dict[str, Pin], hashed: list[Path]
+) -> None:
+    # DESIGN.md, Pause and resume (decided on 2026-10-29): a finished job takes the SHA-256 its
+    # record holds for a file whose size and modification time (nanoseconds) are the record's,
+    # and reads nothing; the time it gives back is the record's. Either differing, the file is
+    # not vouched for and is hashed when asked, as before.
+    path = model_dir(tmp_path) / VAE
+    status = path.stat()
+    digest = pins[VAE].sha256
+    for size, time_ns in ((status.st_size + 1, status.st_mtime_ns), (status.st_size, 1)):
+        refused = pull.Hashes()
+        assert not refused.vouch(path, size, time_ns, "0" * 64)
+        assert refused.sha256(path) == digest and hashed == [path]
+        hashed.clear()
+    vouched = pull.Hashes()
+    assert vouched.vouch(path, status.st_size, status.st_mtime_ns, digest)
+    pull.check_pin(VAE, path, pins[VAE], vouched, None)
+    assert vouched.sha256(path) == digest and hashed == []
+    assert vouched.mtime_ns(path) == status.st_mtime_ns
+    # Held as hashed: a file changed before its load is refused (Hashes.unchanged).
+    vouched.unchanged(path)
+    os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns + 10**9))
+    with pytest.raises(pull.ModelError, match="changed since its SHA-256 was read"):
+        vouched.unchanged(path)
+    # A file that is gone is not vouched for.
+    assert not pull.Hashes().vouch(tmp_path / "gone", 1, 1, digest)
+
+
 def test_a_long_hash_is_named_before_it_starts(
     tmp_path: Path,
     pins: dict[str, Pin],
@@ -390,7 +419,13 @@ def test_hashed_once_a_run(
     assert [path for path in hashed if path.name in CONTENT] == [paths[DIT], paths[VAE]]
     settings = json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]
     for key, name in (("dit_model", DIT), ("vae_model", VAE)):
-        assert settings[key] == {"name": name, "size": pins[name].size, "sha256": pins[name].sha256}
+        assert settings[key] == {
+            "name": name,
+            "size": pins[name].size,
+            "sha256": pins[name].sha256,
+            # The file's time beside its size and hash (DESIGN.md, Pause and resume, 2026-10-29).
+            "mtime_ns": paths[name].stat().st_mtime_ns,
+        }
     assert (hub.calls == []) == (where == "model-dir")
 
 
@@ -412,7 +447,12 @@ def test_not_pinned_recorded(
     settings = json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]
     digest = hashlib.sha256(b"numz's, say").hexdigest()
     assert settings["dit_model"] == settings["vae_model"]
-    assert settings["dit_model"] == {"name": path.name, "size": 11, "sha256": digest}
+    assert settings["dit_model"] == {
+        "name": path.name,
+        "size": 11,
+        "sha256": digest,
+        "mtime_ns": path.stat().st_mtime_ns,
+    }
     hashed.clear()
     assert upscale(tmp_path, "one.mkv", *options) == 0
     assert [each for each in hashed if each.name == path.name] == [path]
@@ -506,9 +546,12 @@ def test_a_job_with_every_segment_made_fetches_nothing(
     hashed.clear()
     caplog.clear()
     assert upscale(tmp_path, output, *options) == 0
-    assert hub.calls == [] and [path for path in hashed if path.name in CONTENT] == [
-        hub.snapshot(VAE)
-    ]
+    # The VAE, still there, is hashed as any job's where the job has its assembly left; a finished
+    # job compares it by size and time with its record and reads it not (DESIGN.md, Pause and
+    # resume, decided on 2026-10-29).
+    assert hub.calls == [] and [path for path in hashed if path.name in CONTENT] == (
+        [] if output == "out" else [hub.snapshot(VAE)]
+    )
     held = (
         f"{DIT}: not in Hugging Face's cache, and not downloaded: the job has every segment made"
         f" and loads no model; held to its pin, hekmon/seedvr2x's at {REVISION[:8]}, SHA-256"

@@ -25,7 +25,7 @@ import warnings
 import weakref
 import zlib
 from collections.abc import Callable, Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from fractions import Fraction
 from itertools import accumulate, pairwise
@@ -751,6 +751,8 @@ def test_units_in_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: 
         "name": "w.safetensors",
         "size": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        # Beside the size and the hash, the file's time: a finished job compares by it.
+        "mtime_ns": (tmp_path / "w.safetensors").stat().st_mtime_ns,
     }
     assert content["environment"]["gpu"] == "a stand-in"
     assert content["environment"]["python"].startswith("CPython 3.")
@@ -6088,6 +6090,218 @@ def test_a_finished_job_is_held_to_its_model_files(
     assert "finished already" not in caplog.text and contents(tmp_path / "out") == kept
 
 
+def touch(path: Path, seconds: int = 5) -> None:
+    """The file at path with its modification time moved on by `seconds`, its bytes as they were."""
+    status = path.stat()
+    os.utime(path, ns=(status.st_atime_ns, status.st_mtime_ns + seconds * 10**9))
+
+
+def reads_of_files(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """The files read to be hashed (media.files.sha256) from here on, in order."""
+    from seedvr2x.media import files
+
+    read: list[Path] = []
+    real = files.sha256
+
+    def counting(path: Path) -> str:
+        read.append(Path(path))
+        return real(path)
+
+    monkeypatch.setattr(files, "sha256", counting)
+    return read
+
+
+@dataclass(frozen=True)
+class Finished:
+    """A job run to its end, for the tests of what a finished job reads (the `finished` fixture):
+    its source, its model file, its manifest, the files it keeps that a run must not write again,
+    the line that says it finished, and the files read to be hashed from here on."""
+
+    source: Path
+    model: Path
+    manifest: Path
+    kept: tuple[Path, ...]
+    said: str
+    reads: list[Path]
+
+    def written(self) -> dict[Path, tuple[bytes, int, int] | None]:
+        return written_as(self.manifest, *self.kept)
+
+
+@pytest.fixture(params=["directory", "file"])
+def finished(
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> Finished:
+    """A job run to its end with a model file that has content, an output directory's or a .mkv
+    path's (its manifest beside the file), then everything that could load a model failing, and
+    the files read to be hashed counted."""
+    from seedvr2x.runtime import model
+
+    source_path = job(tmp_path, monkeypatch)
+    model_file = tmp_path / "w.safetensors"
+    model_file.write_bytes(b"model bytes")
+    if request.param == "directory":
+        out = tmp_path / "out"
+        found = ("out", out / "manifest.json", (out / "frame_index.bin",))
+        said = f"{out}: finished already, its 2 segments"
+    else:
+        final = tmp_path / "one.mkv"
+        found = ("one.mkv", tmp_path / "one.mkv.manifest.json", (final,))
+        said = f"{final}: finished already, its 25 frames"
+    assert upscale(tmp_path, source_path, found[0], *JOB) == 0
+    assert found[1].is_file() and not (tmp_path / "one.mkv.work").exists()
+    monkeypatch.setattr(model, "load_models", lambda *a: pytest.fail("the models loaded"))
+    return Finished(source_path, model_file, found[1], found[2], said, reads_of_files(monkeypatch))
+
+
+def run_again(tmp_path: Path, run: Finished, *options: str) -> int:
+    """The finished job's command again, the files read to be hashed counted from here."""
+    run.reads.clear()
+    output = "one.mkv" if run.manifest.name.startswith("one.mkv") else "out"
+    return upscale(tmp_path, run.source, output, *JOB, *options)
+
+
+def test_a_finished_job_records_its_model_files_time_and_reads_nothing_where_it_matches(
+    tmp_path: Path, finished: Finished, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Pause and resume (decided on 2026-10-29): the manifest keeps each model file's
+    # size and time beside its SHA-256 (the source's size and time it kept already, in
+    # nanoseconds); a finished job, a directory's or a file's, compares its model files and its
+    # source by them and reads neither where both match: said finished at once, nothing written
+    # again.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    content = json.loads(finished.manifest.read_text())
+    digest = hashlib.sha256(b"model bytes").hexdigest()
+    for role in ("dit_model", "vae_model"):
+        assert content["settings"][role] == {
+            "name": "w.safetensors",
+            "size": 11,
+            "sha256": digest,
+            "mtime_ns": finished.model.stat().st_mtime_ns,
+        }
+    assert content["input"]["modified_ns"] == finished.source.stat().st_mtime_ns
+    assert content["seedvr2x_manifest"] == 3
+    kept = finished.written()
+    caplog.clear()
+    assert run_again(tmp_path, finished) == 0
+    assert finished.reads == [] and finished.said in caplog.text
+    assert "reading its" not in caplog.text and "SHA-256 " not in caplog.text
+    assert finished.written() == kept
+    # A job asked another seed is another job as before, the files still not read for it.
+    caplog.clear()
+    assert run_again(tmp_path, finished, "--seed", "7") == 1
+    assert finished.reads == [] and "settings.seed: 42 -> 7" in caplog.text
+
+
+@pytest.mark.parametrize("what", ["models", "source", "both"])
+def test_a_finished_job_hashes_a_file_touched_and_is_said_finished_when_the_content_is_the_same(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    finished: Finished,
+    caplog: pytest.LogCaptureFixture,
+    what: str,
+) -> None:
+    # A file whose time differs is hashed as before, the line before it saying what is read and
+    # for about how long (the rate set here so that 11 bytes take long enough to be said), then
+    # compared as today: the same content, so finished. Only the file touched is read, the models
+    # once for both roles.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    monkeypatch.setattr(pull, "HASH_SECONDS_PER_BYTE", 10.0)
+    touched = {
+        "models": [finished.model],
+        "source": [finished.source],
+        "both": [finished.model, finished.source],
+    }
+    for path in touched[what]:
+        touch(path)
+    kept = finished.written()
+    caplog.clear()
+    assert run_again(tmp_path, finished) == 0
+    assert finished.said in caplog.text and finished.reads == touched[what]
+    messages = caplog.messages
+    if finished.model in finished.reads:
+        digest = hashlib.sha256(b"model bytes").hexdigest()
+        said = [i for i, line in enumerate(messages) if line.startswith("w.safetensors: reading")]
+        read = [i for i, line in enumerate(messages) if f"w.safetensors: SHA-256 {digest}" in line]
+        assert len(said) == 1 == len(read) and said[0] < read[0]
+    if finished.source in finished.reads:
+        digest = hashlib.sha256(finished.source.read_bytes()).hexdigest()
+        assert any(line.startswith(f"{finished.source}: SHA-256 {digest}") for line in messages)
+    assert finished.written() == kept
+
+
+@pytest.mark.parametrize("what", ["models", "source"])
+def test_a_finished_job_with_another_file_of_the_same_size_and_a_new_time_is_refused(
+    tmp_path: Path, finished: Finished, caplog: pytest.LogCaptureFixture, what: str
+) -> None:
+    # Another file of the same size, touched: hashed, then refused as another job as today, what
+    # the job keeps untouched.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    if what == "models":
+        finished.model.write_bytes(b"other bytes")
+        field, changed = "settings.dit_model.sha256", finished.model
+    else:
+        data = bytearray(finished.source.read_bytes())
+        data[len(data) // 2] ^= 1
+        finished.source.write_bytes(bytes(data))
+        field, changed = "input.sha256", finished.source
+    touch(changed)
+    kept = finished.written()
+    caplog.clear()
+    assert run_again(tmp_path, finished) == 1
+    assert "another job than the one asked" in caplog.text and field in caplog.text
+    assert "finished already" not in caplog.text and finished.written() == kept
+    assert finished.reads == [changed]
+
+
+@pytest.mark.parametrize("lacks", ["model time", "source time"])
+def test_a_finished_job_whose_record_has_no_time_is_hashed_as_before(
+    tmp_path: Path, finished: Finished, caplog: pytest.LogCaptureFixture, lacks: str
+) -> None:
+    # A manifest written before the models' times were kept (the field is additive, version 3):
+    # nothing to compare by, so the file is hashed as before, and the job still finished.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    content = json.loads(finished.manifest.read_text())
+    if lacks == "model time":
+        for role in ("dit_model", "vae_model"):
+            del content["settings"][role]["mtime_ns"]
+    else:
+        del content["input"]["modified_ns"]
+    finished.manifest.write_text(json.dumps(content, indent=2) + "\n")
+    caplog.clear()
+    assert run_again(tmp_path, finished) == 0
+    assert finished.said in caplog.text
+    assert finished.reads == [finished.model if lacks == "model time" else finished.source]
+
+
+def test_a_job_with_its_assembly_left_hashes_its_files_as_before(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A job with anything left to make, its assembly included, hashes its model files and its
+    # source at every start, their size and time as recorded: what it makes depends on their bytes
+    # (DESIGN.md, Pause and resume, decided on 2026-10-29). A .mkv path's job with every segment
+    # made and no file.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    model_file = tmp_path / "w.safetensors"
+    model_file.write_bytes(b"model bytes")
+    with monkeypatch.context() as full:
+        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, source_path, "one.mkv", *JOB) == 1
+    final, work = tmp_path / "one.mkv", tmp_path / "one.mkv.work"
+    assert not final.exists() and work.is_dir()
+    record = json.loads((work / "manifest.json").read_text())
+    assert record["settings"]["dit_model"]["mtime_ns"] == model_file.stat().st_mtime_ns
+    reads = reads_of_files(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "one.mkv", *JOB) == 0
+    assert final.is_file() and "finished already" not in caplog.text
+    assert model_file in reads and source_path in reads
+
+
 @pytest.mark.parametrize("accept", [(), ("--accept-env-change",)], ids=["unasked", "accepted"])
 @pytest.mark.parametrize("change", ["GPU", "stack", "ffmpeg"])
 def test_finished_job_in_another_environment(
@@ -6884,6 +7098,7 @@ def test_shot_probabilities_recorded_then_trusted(
         "name": pull.DETECTOR,
         "size": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "mtime_ns": (tmp_path / pull.DETECTOR).stat().st_mtime_ns,
     }
     assert (content["settings"]["cut_threshold"], content["settings"]["cuts"]) == ("0.3", None)
     assert [(shot["start"], shot["end"]) for shot in content["shots"]] == [(0, 25)]

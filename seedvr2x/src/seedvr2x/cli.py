@@ -938,6 +938,12 @@ def _run(args: argparse.Namespace) -> int:
         check_models(
             *(dit, vae, pull.advice(model_files)), None if detector is None else detector.path
         )
+        if recorded is not None and (final is None or finished_file) and complete(recorded):
+            # A finished job (every segment made and, for a .mkv path, its file in place:
+            # finished_file) holds its model files to its record by size and time, and reads none
+            # where both match; one with anything left to make, its assembly included, hashes
+            # them (DESIGN.md, Pause and resume, decided on 2026-10-29).
+            _vouch_models(model_files, recorded)
         pull.check_pinned(model_files)
         # The allocator, set before torch is imported, which the job's identity does and, for a
         # job recorded, the modules that compare it (_prior): numz's, which DESIGN.md keeps
@@ -3675,17 +3681,22 @@ def _prior(
         *(args, cuts, ffmpeg_version, conversions),
         *(numz_padding, numz_draw, numz_tail, model_files, made_in),
     )
+    finished = (_final(args.output) is None or beside is not None) and complete(recorded)
+    was_input: Any = recorded["input"]
     asked = {
         "settings": identity.settings,
         "environment": identity.environment,
-        "input": _content(declared.path),
+        # A finished job's source is compared by size and time first (_content).
+        "input": _content(
+            declared.path,
+            cast(dict[str, Any], was_input) if finished and isinstance(was_input, dict) else None,
+        ),
     }
     found = resume.differences(resume.identity(recorded), resume.identity(asked))
     changed = [line for line in found if resume.section(line) == "environment"]
     taken = [line for line in found if resume.replannable(line)]
     other = len(found) > len(changed) + len(taken)
     replanned = taken if taken and not other and planned(recorded) else []
-    finished = (_final(args.output) is None or beside is not None) and complete(recorded)
     if other or taken != replanned or (changed and not args.accept_env_change and not finished):
         raise _another_job(
             path,
@@ -3811,11 +3822,63 @@ def _long_read(path: Path) -> tuple[str, str]:
     return size, taking(seconds) if seconds >= HASH_SAID_FROM else ""
 
 
-def _content(path: Path) -> dict[str, object]:
+def _vouch_models(model_files: "ModelFiles", recorded: dict[str, Any]) -> None:
+    """For a finished job (_run), take the SHA-256 its record holds for each model file whose size
+    and modification time are those recorded beside it (pull.Hashes.vouch), so that neither the
+    pin's check (pull.check_pinned) nor the job's identity (_model) reads the file: the DiT's
+    16.5 GB took 84 s to hash on the RTX 5090. A file by another name than the record's, or of
+    another size or time, or from a record that has no time (written before it was kept), is
+    hashed as before, said before it starts (pull.Hashes.sha256). The record is not rewritten
+    (a finished job's manifest never is), so a touched file is hashed at every start."""
+    from seedvr2x.runtime import pull
+
+    settings: Any = recorded.get("settings")
+    if not isinstance(settings, dict):
+        return
+    for _, file in model_files.roles():
+        if file.absent:
+            continue
+        for key in ("dit_model", "vae_model", "detector_model"):
+            entry: Any = cast(dict[str, Any], settings).get(key)
+            if not isinstance(entry, dict):
+                continue
+            entry = cast(dict[str, Any], entry)
+            size, time_ns, digest = entry.get("size"), entry.get(pull.TIMES), entry.get("sha256")
+            if (
+                entry.get("name") == file.name
+                and type(size) is int
+                and type(time_ns) is int
+                and isinstance(digest, str)
+                and model_files.hashes.vouch(file.path, size, time_ns, digest)
+            ):
+                logger.debug(
+                    "%s: size and modification time as recorded: SHA-256 not read", file.name
+                )
+                break
+
+
+def _content(path: Path, vouching: dict[str, Any] | None = None) -> dict[str, object]:
     """The source's content, as a resume compares it: its size and SHA-256. A hash that takes
-    long is named first, what is read and for about how long (_long_read)."""
+    long is named first, what is read and for about how long (_long_read).
+
+    `vouching`, the input of a finished job's record (_prior): where the file's size and
+    modification time, in nanoseconds (manifest._input), are those recorded, the record's size and
+    SHA-256 are taken and the file is not read (DESIGN.md, Pause and resume, decided on
+    2026-10-29); where either differs, or the record has no time, it is hashed as before."""
     from seedvr2x.media.files import sha256
 
+    if vouching is not None:
+        status = path.stat()
+        digest: Any = vouching.get("sha256")
+        if (
+            type(vouching.get("bytes")) is int
+            and vouching.get("bytes") == status.st_size
+            and type(vouching.get("modified_ns")) is int
+            and vouching.get("modified_ns") == status.st_mtime_ns
+            and isinstance(digest, str)
+        ):
+            logger.debug("%s: size and modification time as recorded: SHA-256 not read", path)
+            return {"bytes": status.st_size, "sha256": digest}
     size, how_long = _long_read(path)
     if how_long:
         logger.info("%s: reading its %s to check its SHA-256, %s", path, size, how_long)
@@ -4572,14 +4635,24 @@ def _model(file: "ModelFile", model_files: "ModelFiles") -> dict[str, object]:
     seedvr2x's own that a job with every segment made doesn't have, held to its pin
     (pull.ModelFile.absent): the pin's size and SHA-256, those its record has where the file
     passed its pin check, as the shot detector's is taken on a trusted resume
-    (_detector_model)."""
+    (_detector_model).
+
+    Its modification time, in nanoseconds, is recorded beside the size and the SHA-256 (decided on
+    2026-10-29, DESIGN.md, Pause and resume): a finished job run again compares the file by size
+    and time with it and reads nothing where both match (_vouch_models). Not compared as a
+    setting (pull.TIMES), and absent for a file held to its pin, which nothing stat'ed."""
     from seedvr2x.runtime import pull
 
     if file.absent:
         pin = pull.PINNED[file.name]
         return {"name": file.name, "size": pin.size, "sha256": pin.sha256}
     digest = model_files.hashes.sha256(file.path)
-    return {"name": file.name, "size": file.path.stat().st_size, "sha256": digest}
+    return {
+        "name": file.name,
+        "size": file.path.stat().st_size,
+        "sha256": digest,
+        pull.TIMES: model_files.hashes.mtime_ns(file.path),
+    }
 
 
 def _detector_model(model_files: "ModelFiles") -> dict[str, object]:

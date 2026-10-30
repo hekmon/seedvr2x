@@ -36,6 +36,7 @@ from seedvr2x.runtime.manifest import (
     size,
 )
 from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.pull import TIMES
 from seedvr2x.runtime.tiling import SCRATCH
 from seedvr2x.runtime.units import CHECKSUMS, COPY, KEPT, run_file
 
@@ -116,10 +117,25 @@ def identity(content: dict[str, Any]) -> dict[str, Any]:
         entry = cast(dict[str, Any], recorded)
         source = {"bytes": entry.get("bytes"), "sha256": entry.get("sha256")}
     return {
-        "settings": content.get("settings"),
+        "settings": unstamped(content.get("settings")),
         "environment": content.get("environment"),
         "input": source,
     }
+
+
+def unstamped(settings: Any) -> Any:
+    """The settings without the modification time recorded beside each model file's size and
+    SHA-256 (pull.TIMES): information, as the input's is (UNCOMPARED), which a finished job
+    compares the file by, to skip its hash (cli._vouch_models), and a resume doesn't compare as a
+    setting: a model file touched and of the same content is the same model (DESIGN.md, Pause and
+    resume, decided on 2026-10-29: "A file whose size or time differs is hashed as before")."""
+    if not isinstance(settings, dict):
+        return settings
+    kept = dict(cast(dict[str, Any], settings))
+    for name, value in kept.items():
+        if name.endswith("_model") and isinstance(value, dict):
+            kept[name] = _without(cast(dict[str, Any], value), (TIMES,))
+    return kept
 
 
 def differences(recorded: dict[str, Any], asked: dict[str, Any]) -> list[str]:
@@ -558,6 +574,8 @@ def _job(content: dict[str, Any]) -> dict[str, Any]:
     job = dict(content)
     job.pop(CHANGES, None)
     job.pop(ASSEMBLED, None)
+    if "settings" in job:
+        job["settings"] = unstamped(job["settings"])
     for key, fields in UNCOMPARED.items():
         value: Any = content.get(key)
         if isinstance(value, dict):

@@ -114,6 +114,13 @@ CHECK_ENDPOINT = f"check HF_ENDPOINT, if set, and any proxy on the way to the Hu
 TOKEN_ADVICE = "You are sending unauthenticated requests to the HF Hub"
 
 
+# The field of a model's record (cli._model) holding its file's modification time in nanoseconds,
+# beside its size and SHA-256: a finished job compares the file by size and time with it and reads
+# nothing where both match (Hashes.vouch; DESIGN.md, Pause and resume, decided on 2026-10-29).
+# Information a resume doesn't compare as a setting (resume.unstamped), a touched file of
+# the same content being the same model.
+TIMES = "mtime_ns"
+
 # The time to hash a model file a run says before it starts (Hashes.sha256), per byte: the DiT's
 # 16,479,335,080 bytes took 84 s on the RTX 5090 machine's disk on 2026-10-29 (impl-v010's list
 # from its real jobs). A figure of one disk, the line saying "about": a faster disk finishes
@@ -158,6 +165,29 @@ class Hashes:
             )
             self._read[path] = (digest, state)
         return self._read[path][0]
+
+    def vouch(self, path: Path, size: int, mtime_ns: int, sha256: str) -> bool:
+        """Take the SHA-256 a finished job's record holds for the file at path, and read nothing,
+        when the file's size and modification time (nanoseconds) are those the record gives
+        beside it: True. Else False, the file hashed when asked (sha256), as before. DESIGN.md,
+        Pause and resume, decided on 2026-10-29: a finished job compares its model files by size
+        and time with its record, where the DiT's SHA-256 alone took 84 s on the RTX 5090. The
+        file is then held as hashed (unchanged), so its load finds it again as it does one read."""
+        if path in self._read:
+            return True
+        try:
+            state = _state(path)
+        except OSError:
+            return False
+        if state[2] != size or state[3] != mtime_ns:
+            return False
+        self._read[path] = (sha256, state)
+        return True
+
+    def mtime_ns(self, path: Path) -> int:
+        """The modification time, in nanoseconds, of the file at path as it was when its SHA-256
+        was read (sha256) or vouched for (vouch): what the manifest records beside the hash."""
+        return self._read[path][1][3]
 
     def unchanged(self, path: Path) -> None:
         """Refuse (ModelError) the file at path if it was hashed this run and isn't that file any
