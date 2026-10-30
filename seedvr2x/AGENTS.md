@@ -125,6 +125,10 @@ uv run pytest
 - `uv run pytest` runs on the CPU, needs no model and is quick. Tests that need ffmpeg skip
   without a build seedvr2x accepts (see [Environment](#environment)).
 - `uv run pytest -m gpu` runs the tests that need CUDA, never selected by default.
+- Edit nothing under `src/` while a test run is going: a job's
+  settings record a hash of the package's files (`manifest.code_sha256`), so a file changed
+  between a test's first run and its resume makes the resume another job, and the failure looks
+  like a bug in resume.
 - Tests that need the model weights read their directory from `SEEDVR2X_MODEL_DIR`, and skip
   without it. It holds numz's files and seedvr2x's own side by side (links will do): the GPU
   tests run numz's 7B fp16 and VAE, the weights their references were made with, and the
@@ -256,7 +260,54 @@ uv run pytest
   (`tests/test_units.py`, `tests/test_cli_segment_cmd.py` for a command's), a damaged one made
   again before the join; the rehearsal said before it reads, recorded, trusted by a resume under
   the same ffmpeg and run again under another; the assembly's ffmpeg processes ending with a
-  killed seedvr2x (a control variant without the helper, where ffmpeg survives).
+  killed seedvr2x (a control variant without the helper, where ffmpeg survives); a finished
+  segment found missing or of another size at a start made again, every segment finished and the
+  assembly refused for room included, then the file assembled (the start's side in
+  `tests/test_cli_run.py`: the segments changed told once, a PNG segment, `--plan` saying it and
+  writing nothing).
+- Every ffmpeg and ffprobe seedvr2x starts ends with it (`media/ffmpeg.py`'s `ends_with_us`),
+  held for all of them by `tests/test_ends_with_us.py`: a static scan of `src/` (every process
+  started passes the hook, the segment command's shell alone excepted, and nothing else starts
+  one), a child process per kind of site (the startup check, probes, fingerprint, packet count
+  and the rest) with a fake ffmpeg and ffprobe on `PATH` that only wait, SIGKILLed alone, and its
+  control with the hook replaced by none in that site's module, where they stay, the reader's and
+  the writer's real ffmpeg (skipped without a build seedvr2x accepts), and the segment command's
+  shell, left running by a kill, as DESIGN.md has it. `/proc` tells the processes left, so Linux
+  only.
+- The one clock (`clock.py`): `tests/test_clock.py` holds it on fake monotonic and wall readers,
+  nothing sleeping (`Readers`, `Pace`): the ratio of the wall to the run's clock before and after
+  its minimum span, steps of the wall told from drift (a few seconds either way, an hour set, a
+  VM asleep, a long unit), the band outside which a ratio is not used, and every duration
+  printed (time left, the end, `--until`, time spent, the assembly's reading) said in the wall's
+  seconds.
+  `tests/conftest.py`'s autouse fixture `one_to_one_clock` replaces the clock's readers by a
+  frozen pair, so that every other test sees a ratio of 1.0: a long session's real drift would
+  leak into their expected durations.
+- `tests/test_disk.py` holds the disk a job takes beside its output (`runtime/disk.py`): the
+  estimate of the masters at 1080p, at 4K and at an odd size, from the segments a resume has
+  written, a segment command's unknown and then measured, the room free to a user, and the line
+  among `--plan`'s and a run's warning, which never refuses.
+- `--compile` is held on the CPU by `tests/test_compile.py` (`runtime/compiling.py`, the
+  planner's compiled passes): the plan holding a compiled pass to 1.1 times its tile's plain peak
+  and to the measured range of shapes, the shapes warmed, the order of the load with fakes (the
+  VAE compiled before the DiT loads, the compile workers shut before its blocks), the VAE's
+  exclusion of the causal convolutions from the graph, inductor's deterministic mode kept on, the
+  flag recorded and a resume with the other value another job, the cache in the job's own
+  directory, and a compilation after the warm-up said at warning. Compiled for real only on a
+  tiny module, in a subprocess so that no state of inductor stays in the suite (two tests, skipped
+  without a C++ compiler); the VAE's compile on a GPU is not in the default suite.
+- The default output (DESIGN.md, Architecture, What it prints): `tests/test_cli.py` holds
+  `TORCH_CPP_LOG_LEVEL` set before torch is imported (seen by a finder at each import, in a
+  subprocess) and the user's own value winning, and the early reading of the card in a
+  subprocess that must import no torch; `tests/test_model.py` the sampler's progress bars off
+  but under `--verbose`, and a download's kept; `tests/test_cli_run.py` the lines saying the date
+  or the zone's offset changed; `tests/test_timing.py` the calibration's working at debug and a
+  duration under a second said so.
+- The calibration's measured lengths (`runtime/calibration.py`): `tests/test_timing.py`'s
+  stand-ins `Steady`, `Heavy` (slow windows, and the first calls costing what the calibration's
+  constants say) and `SlowEncode` (slow encodes) give the times, and the tests hold the longer
+  window's length by time, never under the attention window's 30 latents or over the job's
+  longest, and the warm-up counted as a sample where its first call is small against it.
 - The writers: `tests/test_writer.py` holds the stale checksums, removed only once the new file
   is safe, and relative names holding `": "` or a leading `-` never taken by ffmpeg for a
   protocol or an option (`media/ffmpeg.argument`), for FFV1 and PNG; `tests/test_segment_cmd.py`
