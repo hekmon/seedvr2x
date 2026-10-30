@@ -42,6 +42,15 @@ VERSION = 3
 READ = (2, VERSION)
 # The directory of the units kept for a resume, beside the manifest (units.Units).
 STATE = "resume"
+# The job's compile cache, beside the manifest, when the VAE is compiled (--compile; DESIGN.md,
+# Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0": "the compile cache in the job's
+# work directory, warm on a resume"): inductor's and Triton's, under torch's own names, a tree
+# of files seedvr2x names no further (runtime/compiling.use_cache). The job's own name, so that
+# a resume and the checks of the directory (resume.leftovers, cli._refuse_foreign) don't take it
+# for anyone else's. PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says where, not for how
+# long): removed with a .mkv path's work directory when its file is assembled (resume.clear),
+# kept in an output directory until the user removes it; never a segment, and not listed as one.
+COMPILE_CACHE = "compile-cache"
 # The directory of the output segments' checksums, beside them, which outlives the job
 # (media/checksums.py; DESIGN.md, Output, Checksums).
 SUMS = "checksums"

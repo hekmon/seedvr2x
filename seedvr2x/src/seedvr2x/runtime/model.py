@@ -31,7 +31,7 @@ from tqdm import tqdm
 from seedvr2x.runtime import blockswap, memory, weights
 from seedvr2x.runtime.blockswap import Part, Placement
 from seedvr2x.runtime.job import BLACK, padding
-from seedvr2x.runtime.plan import Phase, Plan
+from seedvr2x.runtime.plan import Compilation, Phase, Plan
 from seedvr2x.runtime.pull import Hashes
 from seedvr2x.runtime.weights import SLOTS
 from seedvr2x.vendor.common.config import create_object, load_config
@@ -168,6 +168,7 @@ def load_models(
     device: torch.device,
     hashes: Hashes | None = None,
     plan: Plan | None = None,
+    compilation: Compilation | None = None,
 ) -> Models:
     """Build and load the DiT in the file at dit_file and the VAE in the file at vae_file, as
     pull.resolve found them, in --model-dir or in Hugging Face's cache, each checked first
@@ -180,7 +181,13 @@ def load_models(
     pinned host copies and wait there for Models.enter: a swapped DiT is never whole on the
     device, which a 16 GB card couldn't hold (DESIGN.md, BlockSwap, rewritten). The host
     refusing those copies, or short of the memory they take, is a blockswap.HostMemoryError,
-    which names it."""
+    which names it.
+
+    With a plan that has compile_vae and its compilation (planner.compile_shapes), the VAE is
+    compiled and warmed right after it is loaded, before the DiT is read: alone on the card, its
+    shapes compiled with torch's own workers, which are shut before the DiT's blocks are read
+    into their pinned copies (runtime/compiling.py; DESIGN.md, Memory planner, "torch.compile:
+    the VAE, opt-in, in v0.1.0"). compilation.seconds says how long that took."""
     # numz goes by "7b" in the file name (src/core/model_configuration.py:718-720), so a renamed
     # file loads as what its name says; seedvr2x goes by the file's tensors (DESIGN.md, Weights).
     sampler_bars(logger.isEnabledFor(logging.DEBUG))
@@ -227,6 +234,22 @@ def load_models(
     vae.set_memory_limit(**runner.config.vae.memory_limit)
     runner.vae = vae
 
+    # The models, as far as the VAE alone: what compiles it (compiling.compile_vae) runs its
+    # passes through the run's own functions, which take them. The text embeddings are read here
+    # for it, the DiT's place in them filled below.
+    text_pos = torch.load(VENDOR / "pos_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
+    text_neg = torch.load(VENDOR / "neg_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
+    models = Models(runner, text_pos, text_neg, attention_backend(), device, plan)
+    models.vae = vae_parts.get(VAE_PART)
+    if plan is not None and plan.compile_vae:
+        if compilation is None:
+            raise ValueError("a plan with compile_vae, and nothing to compile the VAE with")
+        # The VAE compiled before the DiT is read: it alone is on the card, and torch's compile
+        # workers, shut at its end, hold none of the host memory the DiT's pinned copies take.
+        from seedvr2x.runtime import compiling
+
+        compiling.compile_vae(models, compilation)
+
     # The DiT keeps its weights' dtype (the override is commented out at model_configuration.py:
     # 1048-1052). numz leaves it in training mode, which changes nothing: its only use is a
     # gradient checkpointing stub (nadit.py:30-31).
@@ -253,12 +276,8 @@ def load_models(
     runner.config.diffusion.timesteps.sampling.steps = 1
     runner.configure_diffusion(device=device, dtype=COMPUTE_DTYPE)
 
-    text_pos = torch.load(VENDOR / "pos_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
-    text_neg = torch.load(VENDOR / "neg_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
-    models = Models(runner, text_pos, text_neg, attention, device, plan)
     if plan is not None and (dit_parts or plan.swapped):
         models.placement = Placement(dit, device, plan.swapped, parts=dit_parts)
-    models.vae = vae_parts.get(VAE_PART)
     _say_pinned(models, [*dit_parts, *vae_parts])
     return models
 

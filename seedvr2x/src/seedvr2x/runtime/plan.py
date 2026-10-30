@@ -6,6 +6,7 @@ it by a resume (Plan.recorded). Nothing here imports torch: the command line pla
 does."""
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, TypeGuard, cast
 
 from seedvr2x.runtime.job import JobError
@@ -55,8 +56,12 @@ class Plan:
     # file (tiling.Scratch): the planner's, from the host's memory (DESIGN.md, Memory planner,
     # Host RAM); 0 when no pass is tiled.
     scratch_allowance: int = 0
-    # torch.compile, not built with milestone 3 (DESIGN.md, Memory planner): recorded, false, so
-    # that building it later reshapes no record.
+    # torch.compile (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0; the
+    # DiT, not", decided on 2026-10-24): the VAE compiled with --compile, its causal
+    # convolutions left out of the graph (runtime/compiling.py); a job that runs plain code
+    # records false whatever was asked (planner.plan). The DiT is never compiled in v0.1.0:
+    # compile_dit stays recorded, false. What the output's bits depend on, so a resume takes it
+    # as recorded.
     compile_dit: bool = False
     compile_vae: bool = False
 
@@ -121,6 +126,32 @@ class Plan:
                 "scratch_allowance": self.scratch_allowance,
             },
         }
+
+
+@dataclass(frozen=True)
+class Shapes:
+    """The shapes a compiled VAE is warmed with (planner.compile_shapes), each (rows, columns) in
+    pixels of the padded frames, `padded` being their size (job.padded_size): the encoder's input,
+    one per distinct tile of the plan's encode (the whole frame untiled), and the decoder's
+    output, likewise for the decode; `latents`, the shots' lengths the slices are warmed at, in
+    latents, 1, 2 or planner.COMPILE_LATENTS (3), the shortest of each kind the job runs."""
+
+    padded: tuple[int, int]  # the padded frame (job.padded_size), (rows, columns)
+    encode: tuple[tuple[int, int], ...]
+    decode: tuple[tuple[int, int], ...]
+    latents: tuple[int, ...]
+
+
+@dataclass
+class Compilation:
+    """What model.load_models compiles the VAE with, once the plan has compile_vae
+    (runtime/compiling.py): the shapes to warm, the job's compile cache (a directory under the
+    job's own, manifest.COMPILE_CACHE), and, set by the load, the seconds the compilation took
+    in the run's own clock, 0.0 until then and where nothing is compiled."""
+
+    shapes: Shapes
+    cache: Path
+    seconds: float = 0.0
 
 
 def _whole(value: Any) -> TypeGuard[int]:

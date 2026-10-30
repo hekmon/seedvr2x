@@ -1834,7 +1834,9 @@ def test_one_file_plans_as_a_directory(
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     listed = str(tmp_path / "plan.txt")
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
-    assert asked == [{"split", "numz_padding", "recorded", "attention"}] * 3
+    # --compile's setting is asked of the planner for every job (planner.plan's compile_vae),
+    # which is no output's own: the three alike.
+    assert asked == [{"split", "numz_padding", "recorded", "attention", "compile_vae"}] * 3
     # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
     # here).
     assert backends == ["flash_attn_2"] * 3

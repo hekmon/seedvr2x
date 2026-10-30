@@ -9,6 +9,7 @@ anyone's; what a stop left that the manifest doesn't name is discarded."""
 import json
 import os
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +22,7 @@ from seedvr2x.media.source import Source
 from seedvr2x.runtime.job import JobError, OutputSegment, Shot, window_layout
 from seedvr2x.runtime.manifest import (
     ASSEMBLED,
+    COMPILE_CACHE,
     INDEX,
     NAME,
     REHEARSAL,
@@ -197,7 +199,8 @@ def clear(directory: Path, content: dict[str, Any]) -> list[str]:
     """Remove from directory, a .mkv path's work directory, the files of the job its manifest's
     content records, once its segments are assembled into the finished file (cli._assemble): its
     segments, their checksums, what a stop left of its units and of its partial files, the frame
-    index; then the manifest, last, so that a removal stopped half way finds it again and is
+    index and the compile cache (COMPILE_CACHE, a tree of torch's files, removed whole); then
+    the manifest, last, so that a removal stopped half way finds it again and is
     finished by the next run (cli._assembled); then the directory itself. Names missing are fine.
     Returns what is there that isn't this job's, as paths relative to directory, sorted: left as
     it is, never deleted, the manifest and the directory then left with it, the manifest saying
@@ -236,6 +239,8 @@ def clear(directory: Path, content: dict[str, Any]) -> list[str]:
             continue
         if entry.name == SUMS:
             emptied(entry, sums.__contains__)
+        elif entry.name == COMPILE_CACHE and entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
         elif entry.name == STATE and entry.is_dir() and not entry.is_symlink():
             for shot in sorted(entry.iterdir()):
                 if shot.name in shots:
@@ -417,6 +422,13 @@ def leftovers(manifest: Manifest) -> list[Path]:
     found: list[Path] = []
     indexed = partial_path(directory / INDEX)
     names = {NAME, partial_path(manifest.path).name, STATE, SUMS, INDEX, indexed.name}
+    # The compile cache is the job's own when it is a directory of its own, kept as it is (a
+    # resume warms its compilation from it); a link or a file by that name is not.
+    cache = directory / COMPILE_CACHE
+    if os.path.lexists(cache):
+        if cache.is_symlink() or not cache.is_dir():
+            raise JobError(f"{cache}: not this job's")
+        names.add(COMPILE_CACHE)
     if indexed.exists():
         found.append(indexed)
     commanded = manifest.settings.get("segment_cmd") is not None

@@ -1817,7 +1817,12 @@ def test_changed_during_the_first_pass_refused(
         return first_pass(*args, **kwargs)
 
     def load_models(
-        dit: Path, vae: Path, device: Any, hashes: pull.Hashes | None = None, plan: Any = None
+        dit: Path,
+        vae: Path,
+        device: Any,
+        hashes: pull.Hashes | None = None,
+        plan: Any = None,
+        compilation: Any = None,
     ) -> Any:
         for path in (dit, vae):
             if hashes is not None:

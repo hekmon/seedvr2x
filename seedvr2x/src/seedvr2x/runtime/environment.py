@@ -40,6 +40,17 @@ START_HOOKS = ("_distutils_hack",)
 # vendored model imports diffusers, which imports it. Provisional (implementation, 2026-10-09):
 # DESIGN.md's environment doesn't say.
 DOWNLOAD_ONLY = frozenset({"hf-xet"})
+# What torch.compile imports with inductor, triton and the extension builder, the first time it
+# compiles a model (--compile): see import_inductor.
+INDUCTOR = (
+    "torch._dynamo",
+    "torch._inductor.compile_fx",
+    "torch._inductor.async_compile",
+    "torch._inductor.codecache",
+    "torch._inductor.runtime.triton_heuristics",
+    "torch.utils.cpp_extension",
+    "triton",
+)
 
 
 def current(
@@ -47,6 +58,8 @@ def current(
     ffmpeg_version: str,
     conversions: str,
     made_in: Mapping[str, object] | None = None,
+    *,
+    compiling: bool = False,
 ) -> dict[str, object]:
     """The environment of a run on device: torch, CUDA, cuDNN, the GPU, the attention backend and
     FlashAttention, ffmpeg and its conversions' fingerprint (media/fingerprint.py), Python and
@@ -75,9 +88,19 @@ def current(
     depend on it", both asking the driver nothing and needing no GPU. The stack's and ffmpeg's
     differences are said of the first and refuse the second without the flag; another GPU alone
     does neither: the file is assembled, the manifest keeping the card that made its
-    segments."""
+    segments.
+
+    compiling: the job compiles the VAE (--compile): inductor's modules are imported first
+    (import_inductor), so that the packages recorded are those the compilation will have
+    imported, at a start and at a resume alike. PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md
+    has them imported "before the environment is recorded, so that a resume compares the same",
+    and doesn't say for which jobs): only with --compile, so that no other job's record moves;
+    the cost is that --compile is also a difference of the environment (jinja2, markupsafe,
+    networkx, setuptools), which a plan changing it takes up with --accept-env-change."""
     from seedvr2x.runtime import model
 
+    if compiling:
+        import_inductor()
     try:
         flash_attn = metadata.version("flash_attn")
     except metadata.PackageNotFoundError:
@@ -101,6 +124,23 @@ def current(
         "python": f"{platform.python_implementation()} {platform.python_version()}",
         "packages": versions(),
     }
+
+
+def import_inductor() -> None:
+    """Import what a compilation imports, the modules of INDUCTOR: torch.compile brings in, by
+    its first model, distributions the run otherwise never loads (sympy's dependencies, jinja2
+    and markupsafe, networkx, filelock, packaging, setuptools through the extension builder,
+    triton: measured on a small module compiled on the CPU, torch 2.14.1). Imported after the
+    environment is recorded, they would be a distribution of the run missing from its record, a
+    seedvr2x bug the end of the run says (cli._run); imported before, a job and its resume record
+    the same packages. A module that is not installed is skipped: triton is a requirement of
+    torch on Linux, and the compilation would fail on its own where it is missing."""
+    for name in INDUCTOR:
+        try:
+            importlib.import_module(name)
+        except ModuleNotFoundError as error:
+            if error.name is None or not name.startswith(error.name):
+                raise
 
 
 def versions() -> dict[str, str]:

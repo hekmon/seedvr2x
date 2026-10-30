@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
     from seedvr2x.runtime.model import Models
-    from seedvr2x.runtime.plan import Plan
+    from seedvr2x.runtime.plan import Compilation, Plan
     from seedvr2x.runtime.planner import Pins, PlanError
     from seedvr2x.runtime.pull import ModelFile, ModelFiles
     from seedvr2x.runtime.timing import Clock, Unit
@@ -438,6 +438,19 @@ def main(argv: list[str] | None = None) -> int:
         help="pin the DiT's swapped blocks: its last N wait in system memory and stream through"
         " the GPU, their memory left to the windows; 0 keeps every block on the GPU; taken"
         " exactly or refused",
+    )
+    # The VAE compiled, opt-in (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in
+    # v0.1.0; the DiT, not", decided on 2026-10-24): a setting, its frames not plain code's.
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="compile the VAE with torch.compile, its causal convolutions left out of the graph:"
+        " about a tenth less time on a long job (a job under about 2,500 frames loses), 4 to 6 min"
+        " of compilation at every start, paid before the DiT loads, its cache kept in the job's"
+        " directory; its frames are not plain code's (51 to 61 dB from them) but the same in every"
+        " process; a setting, a resume repeats it; only the shapes measured are compiled (encode"
+        " tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152 px), the job"
+        " running without it, said, where its plan falls outside them or doesn't fit",
     )
     parser.add_argument(
         "--until",
@@ -1131,6 +1144,7 @@ def _run(args: argparse.Namespace) -> int:
                     numz_padding=numz_padding,
                     recorded=kept_plan,
                     attention=attention,
+                    compile_vae=args.compile,
                 )
             except planner.PlanError as error:
                 if kept_plan is None or error.shortfall is None:
@@ -1175,9 +1189,14 @@ def _run(args: argparse.Namespace) -> int:
                 if prior is None
                 else _own_layouts(recorded_as(None, plan.window), prior, reshaped),
                 disk=room.line(),
+                compile_asked=args.compile,
             )
             for line in said:
                 logger.info("%s", line)
+            if peaks.compile_dropped is not None:
+                # --compile asked and left out of a new job's plan: its frames are plain code's,
+                # never silently (planner.plan).
+                logger.warning("--compile is not used for this job: %s", peaks.compile_dropped)
             # A pass in tiles larger than any measured, which only a pin gives it: warned of,
             # once per pass (planner.beyond_measured).
             for line in planner.beyond_measured(plan):
@@ -1268,6 +1287,17 @@ def _run(args: argparse.Namespace) -> int:
                 return 0 if final is None else _assemble(final, record, paths, until=until)
     units = Units(directory, record)
     tags = Tags.of(stream, source.conversion.matrix_tag)
+    # The VAE compiled, as the plan has it (--compile, planner.plan): its shapes from the plan,
+    # its cache in the job's directory (manifest.COMPILE_CACHE), compiled as the models load.
+    compilation = None
+    if plan.compile_vae:
+        from seedvr2x.runtime.manifest import COMPILE_CACHE
+        from seedvr2x.runtime.plan import Compilation
+
+        shapes = planner.compile_shapes(
+            plan, target, shots, QUALITY[args.quality], numz_padding=numz_padding
+        )
+        compilation = Compilation(shapes, directory / COMPILE_CACHE)
 
     def open_scratch(path: Path) -> Writer:
         # The job's own kind of output, for the calibration's decodes (_calibrated): its master,
@@ -1290,7 +1320,9 @@ def _run(args: argparse.Namespace) -> int:
             _say_assembly_left(record, final, until)
         if status or not remaining:
             return status
-        loaded = _load(model_files, identity.device, plan, reserve, _first_kept(kept_first))
+        loaded = _load(
+            model_files, identity.device, plan, reserve, _first_kept(kept_first), compilation
+        )
         if loaded is None:
             return 1
         models, loading = loaded
@@ -1307,7 +1339,7 @@ def _run(args: argparse.Namespace) -> int:
             }
         rate = None if final is None else _disk_rate(final.parent)
         assembly = None if rate is None else _assembly_estimate(record, rate)
-        _say_times(calibrated, left, args.quality, levels, loading, assembly)
+        _say_times(calibrated, left, args.quality, levels, loading, assembly, compilation)
         if until is not None:
             # Run now, after the load and the calibration it pays again.
             start = stopping.now() + datetime.timedelta(seconds=wall(loading + calibrated.seconds))
@@ -1330,7 +1362,9 @@ def _run(args: argparse.Namespace) -> int:
             _kept(record, len(segments)),
         )
         return EX_TEMPFAIL
-    loaded = _load(model_files, identity.device, plan, reserve, _first_kept(kept_first))
+    loaded = _load(
+        model_files, identity.device, plan, reserve, _first_kept(kept_first), compilation
+    )
     if loaded is None:
         return 1
     models, loading = loaded
@@ -1353,7 +1387,7 @@ def _run(args: argparse.Namespace) -> int:
         return 1
     clock = calibrated.clock
     assembly = None if rate is None else _assembly_estimate(record, rate)
-    _say_times(calibrated, left, args.quality, None, loading, assembly, planning=False)
+    _say_times(calibrated, left, args.quality, None, loading, assembly, compilation, planning=False)
     if until is not None:
         last = None if assembly is None else (f"the assembly of {final}", assembly)
         _say_until(clock, left, stopping.now(), until, last)
@@ -1857,15 +1891,18 @@ def _load(
     plan: "Plan",
     reserve: int | None = None,
     kept: str = "",
+    compilation: "Compilation | None" = None,
 ) -> "tuple[Models, float] | None":
-    """The job's models loaded, as plan places them, and the seconds that took; None once a
-    refusal is logged, nothing run, `kept` said after it (_first_kept): the memory the driver
-    spills held first, from the memory free now that the first pass and the plan are made, the
-    plan's `reserve` (memory.hold)."""
+    """The job's models loaded, as plan places them, and the seconds that took, the VAE's
+    compilation among them where the plan has one (`compilation`, which the load fills in with
+    its seconds); None once a refusal is logged, nothing run, `kept` said after it
+    (_first_kept): the memory the driver spills held first, from the memory free now that the
+    first pass and the plan are made, the plan's `reserve` (memory.hold)."""
     import torch  # loaded since the job's identity: named here for the refusals below
 
     from seedvr2x.runtime import memory
     from seedvr2x.runtime.blockswap import HostMemoryError
+    from seedvr2x.runtime.compiling import CompileError
     from seedvr2x.runtime.model import load_models
     from seedvr2x.runtime.weights import ModelError
 
@@ -1880,13 +1917,19 @@ def _load(
         return None
     try:
         models = load_models(
-            model_files.dit.path, model_files.vae.path, device, model_files.hashes, plan
+            model_files.dit.path,
+            model_files.vae.path,
+            device,
+            model_files.hashes,
+            plan,
+            compilation,
         )
-    except (ModelError, HostMemoryError) as error:
+    except (ModelError, HostMemoryError, CompileError) as error:
         # A model file replaced since its check, during the first pass: refused as the check
         # refuses it, or as changed since its hash. Or a host that can't hold the pinned copies
         # of the weights the plan has away from the GPU: refused before the run, naming the RAM
-        # they take (DESIGN.md, BlockSwap, rewritten).
+        # they take (DESIGN.md, BlockSwap, rewritten). Or a VAE that did not compile
+        # (--compile), refused as it is, never run plain in its place.
         logger.error("%s%s", error, kept)
         return None
     except torch.OutOfMemoryError as error:
@@ -2006,6 +2049,7 @@ def _say_times(
     levels: "dict[str, list[Unit]] | None",
     loading: float,
     assembly: float | None = None,
+    compilation: "Compilation | None" = None,
     *,
     planning: bool = True,
 ) -> None:
@@ -2013,7 +2057,10 @@ def _say_times(
     "the time per phase, the total, and the longest unit, which is how early --until may stop"),
     with each --quality level's where nothing is made yet (levels), a one-file output's assembly
     (`assembly`, seconds), and what the estimate cost: the models' load (`loading`, seconds) and
-    the calibration."""
+    the calibration. The VAE's compilation (`compilation`) is part of the load, paid once in a
+    process, before the DiT loads: said as the part of it that it was, never added to it, and the
+    run that follows pays it again in its own load (a resume pays it again at its start,
+    DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0")."""
     from seedvr2x.runtime.timing import job_times, spoken
 
     clock = calibrated.clock
@@ -2053,10 +2100,14 @@ def _say_times(
             said.append(f"{level} about {spoken(wall(total.total))}{mark}")
         logger.info("time at each --quality: %s", ", ".join(said))
     again = ", which the run pays again before its first unit" if planning else ""
+    compiled = ""
+    if compilation is not None and compilation.seconds > 0:
+        compiled = f", {spoken(wall(compilation.seconds))} of it compiling the VAE"
     logger.info(
-        "time: estimated from a calibration of %s, the models loaded in %s%s",
+        "time: estimated from a calibration of %s, the models loaded in %s%s%s",
         spoken(wall(calibrated.seconds)),
         spoken(wall(loading)),
+        compiled,
         again,
     )
 
@@ -2887,19 +2938,20 @@ def _refuse_foreign(path: Path, content: dict[str, Any], work: bool = False) -> 
     rehearsal, which writes in its work directory and removes a stopped assembly's leftovers by
     their names (cli._work; DESIGN.md, Pause and resume, decided on 2026-10-21). seedvr2x's own
     files are accepted by their names, what the run discards or takes up: the manifest, the frame
-    index and their partial files, the units' directory (STATE) and the checksums' (SUMS), each
-    segment's file recorded, finished or not, with its partial file and a segment command's, and
-    in a .mkv path's work directory (`work`) the assembly's work files (assembly.work_file).
-    Anything else is refused, nothing written or removed; what the units' and checksums'
-    directories hold is judged later, by the job's layout (leftovers). A record whose segments
-    can't be read so is left to the checks after it, which refuse it (cli._prior).
+    index and their partial files, the units' directory (STATE), the checksums' (SUMS) and the
+    compile cache (COMPILE_CACHE), each segment's file recorded, finished or not, with its
+    partial file and a segment command's, and in a .mkv path's work directory (`work`) the
+    assembly's work files (assembly.work_file). Anything else is refused, nothing written or
+    removed; what the units' and checksums' directories hold is judged later, by the job's
+    layout (leftovers). A record whose segments can't be read so is left to the checks after it,
+    which refuse it (cli._prior).
     Here, not in runtime/resume.py, which imports torch: it runs before the allocator is chosen
     (memory.startup). PROVISIONAL (implementation, 2026-10-21): the directory's own entries
     alone are judged here."""
     from seedvr2x.media.assembly import work_file
     from seedvr2x.media.files import command_partial, partial_path
     from seedvr2x.runtime.job import JobError
-    from seedvr2x.runtime.manifest import INDEX, NAME, STATE, SUMS
+    from seedvr2x.runtime.manifest import COMPILE_CACHE, INDEX, NAME, STATE, SUMS
 
     directory = path.parent
     segments = content.get("segments")
@@ -2911,6 +2963,7 @@ def _refuse_foreign(path: Path, content: dict[str, Any], work: bool = False) -> 
         STATE,
         SUMS,
         INDEX,
+        COMPILE_CACHE,
         partial_path(directory / INDEX).name,
     }
     # A segment command's partial file only where the record has a command, as leftovers has it
@@ -3348,6 +3401,10 @@ def _settings(
         "window": args.window,
         "encode_tile": args.encode_tile,
         "decode_tile": args.decode_tile,
+        # --compile as asked, which a resume repeats: the compiled VAE's frames are not plain
+        # code's (DESIGN.md, Memory planner). The plan records what the job runs (Plan.
+        # compile_vae), false where the planner left it out (planner.plan).
+        "compile_vae": args.compile,
         "format": args.format,
         # The segments' writer (DESIGN.md, Output, Writer): the user's command, as given, or
         # None, seedvr2x's FFV1 or PNG writer. A setting the manifest records, another command
@@ -3530,7 +3587,9 @@ def _identity(
     if made_in is not None:
         from seedvr2x.runtime import environment
 
-        found = environment.current(None, ffmpeg_version, conversions, made_in)
+        found = environment.current(
+            None, ffmpeg_version, conversions, made_in, compiling=args.compile
+        )
         return _Identity(settings, torch.device("cuda", 0), found)
     if not torch.cuda.is_available():
         raise JobError("no CUDA device")
@@ -3539,7 +3598,8 @@ def _identity(
     device = torch.device("cuda", 0)
     from seedvr2x.runtime import environment
 
-    return _Identity(settings, device, environment.current(device, ffmpeg_version, conversions))
+    found = environment.current(device, ffmpeg_version, conversions, compiling=args.compile)
+    return _Identity(settings, device, found)
 
 
 def _prior(

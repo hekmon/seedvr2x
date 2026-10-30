@@ -58,7 +58,7 @@ from seedvr2x.runtime.job import (
     window_layout,
 )
 from seedvr2x.runtime.memory import Reading
-from seedvr2x.runtime.plan import Phase, Plan, Tiles
+from seedvr2x.runtime.plan import Phase, Plan, Shapes, Tiles
 
 # The DiT's own window functions, the 7B's: plain Python, and the packages above them hold
 # nothing, so importing them brings in no torch.
@@ -317,6 +317,47 @@ TILE_MIN = 512
 TILE_MAX = 2048
 TILE_STEP = 64
 
+# --compile, the VAE compiled with its causal convolutions left out of the graph (DESIGN.md,
+# Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0; the DiT, not", decided on
+# 2026-10-24; research/docs/compile.md). A compiled pass is held to COMPILE_PEAK times its tile's
+# plain peak above what is on the GPU before it (the fit the planner takes the tile's peak by,
+# _fit): the study's compiled passes, first calls included, peaked 1.09 to 1.10 times the plain
+# encode and 1.04 to 1.06 times the plain decode, one clip, 21 frames, 1080p and 4K, and a whole
+# job planned at 1.1 ran with no pass out of memory (compile.md, "A fit the planner can use",
+# "A whole job, planned for the compiled peak"). The study scaled the fit alone, and so is it
+# here: ENCODE_EXTRA, the encode's margin on the fit, and the VAE's weights are not scaled.
+COMPILE_PEAK = 1.1
+# Only the shapes measured are compiled, until the 96 GB card measures larger ones (DESIGN.md,
+# decided on 2026-10-24: "the planner keeps no blind spot"): encode tiles up to 1856 px or the
+# 1080p frame whole, decode tiles up to 1152 px. The encode's whole frame is read as the padded
+# 1080p frame's two sides at most, rows and columns each (padded_size(1080x1920) = 1104x1920),
+# and not as its area, the narrower reading of "the 1080p frame": a frame of its area with
+# another shape is not the one measured. PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "the
+# 1080p frame whole" and doesn't say what is as large as it); and an untiled decode is outside
+# the range, "decode tiles up to 1152 px" naming tiles alone: the study's decodes were all in
+# tiles (compile.md, the VAE's tables).
+COMPILE_ENCODE_TILE_MAX = 1856
+COMPILE_ENCODE_WHOLE = (1104, 1920)
+COMPILE_DECODE_TILE_MAX = 1152
+# The compilation's time, per process, said by --plan and the plan's line: 4 to 6 min on an RTX
+# 5090 (DESIGN.md, same section), paid before the DiT loads. Said as the range, before anything
+# is compiled; the estimates that follow count the seconds the load measured, the compilation's
+# among them, once (cli._say_times): there is no figure to sum before the load. PROVISIONAL
+# (impl-v010, 2026-10-29: DESIGN.md gives the range, measured on one card).
+COMPILE_MIN = 4 * 60
+COMPILE_MAX = 6 * 60
+# The slices a compiled shape is warmed with are the shot's: one of 1 or 2 latents is a single
+# slice, the encode's and the decode's memory state off, one of 3 or more has a first slice and
+# the next ones (model.encode_slices, model.latent_slices), so that 3 latents show every kind
+# (compile_shapes).
+COMPILE_LATENTS = 3
+# The kinds the time estimates' calibration meets besides the job's own (runtime/calibration.py,
+# FIRST and FRAMES): an encode and a decode of 5 frames, 2 latents, one slice, and of 13 frames,
+# 4 latents, a first slice and next ones (kind 3). Compiled with the rest, so that the
+# calibration, which times its passes, never pays for a compilation: it would put it into the
+# models of the encode and the decode (tests/test_compile.py holds them to the calibration's).
+COMPILE_CALIBRATED = (2, 3)
+
 # The process's resident system memory during the shots, which stays flat: 2.3-2.4 GiB over 6
 # shots (DESIGN.md, Memory planner, Host RAM), short ones: what the run holds of a long shot
 # there is counted apart (host_moments).
@@ -555,6 +596,42 @@ def host_moments(padded: tuple[int, int], latents: int, cap: int | None) -> dict
     }
 
 
+def compile_shapes(
+    plan: Plan,
+    target: tuple[int, int],
+    shots: Sequence[Shot],
+    runs: int,
+    *,
+    numz_padding: bool = False,
+) -> Shapes:
+    """The shapes the plan's VAE passes meet, for the compiled VAE to be warmed with before the
+    DiT loads (runtime/compiling.py): one per distinct tile of each pass (_shapes), the whole
+    padded frame untiled, and the slice kinds of the job's runs, `runs` a shot (job.QUALITY):
+    a run of 1 latent is a slice of 1 frame, of 2 a slice of 5, of 3 or more a first slice of 5
+    and the next ones of 4 (model.encode_slices, model.latent_slices), so that the shortest of
+    each kind, up to COMPILE_LATENTS, shows them all. A compiled pass compiles once for each
+    shape, for each of these (DESIGN.md: "a warm call per shape the plan uses ... at the job's
+    slice lengths"), so that no unit of the run compiles; and the calibration's own
+    (COMPILE_CALIBRATED), which times the passes right after, a job whose shots are all long
+    meeting the 2 latents of its 5-frame passes there only."""
+    padded = _padded(target, numz_padding)
+
+    def cut(tiles: Tiles | None) -> tuple[tuple[int, int], ...]:
+        return (padded,) if tiles is None else _shapes(padded, tiles)
+
+    latents = sorted(
+        {
+            *COMPILE_CALIBRATED,
+            *(
+                min(_latents(run.frames), COMPILE_LATENTS)
+                for shot in shots
+                for run in shot_runs(shot, runs)
+            ),
+        }
+    )
+    return Shapes(padded, cut(plan.encode_tiles), cut(plan.decode_tiles), tuple(latents))
+
+
 @cache
 def _shapes(padded: tuple[int, int], tiles: Tiles) -> tuple[tuple[int, int], ...]:
     """(rows, columns), in pixels, of the tiles of a tiled pass over padded frames, each shape
@@ -583,6 +660,7 @@ def encode_peak(
     tiles: Tiles | None = None,
     resident: int | None = None,
     swapped: int = 0,
+    compiled: bool = False,
 ) -> int:
     """The predicted peak of the VAE's encode of padded frames, in bytes: its peak untiled
     (tiles None) or the most a tile of its grid takes (_fit), above what is on the GPU before
@@ -595,9 +673,12 @@ def encode_peak(
     slice by slice, where numz moves a batch's there first, 0.046 GiB per 4K frame. Nor the room
     every VAE pass is held to (VAE_ROOM), which the planner judges it by and no peak holds.
 
+    compiled: the VAE compiled (--compile): the tile's peak above the weights is COMPILE_PEAK
+    times its plain one.
+
     ValueError for tiles of which one covers the whole padded frame, which is no tiling
     (covers)."""
-    above = _fit(padded, tiles, 0)
+    above = _fit(padded, tiles, 0) * (COMPILE_PEAK if compiled else 1.0)
     return round(above) + ENCODE_EXTRA + VAE_WEIGHTS + dit_on_gpu(resident, swapped)
 
 
@@ -608,6 +689,7 @@ def decode_peak(
     resident: int | None = None,
     swapped: int = 0,
     split: bool = False,
+    compiled: bool = False,
 ) -> int:
     """The predicted peak of the VAE's decode of padded frames, in bytes, its peak above what is
     on the GPU before the call as encode_peak has the encode's (without ENCODE_EXTRA, the
@@ -630,7 +712,9 @@ def decode_peak(
     fit alone was then 0.13 GiB under its measured peak, the small tiles' fit that much short
     there (the predictions as the planner made them then, by the fits and the five squares
     measured; tests/test_planner.py, test_first_matrix)."""
-    fit = _fit(padded, tiles, 1)
+    # compiled: the tile's peak is COMPILE_PEAK times its plain one (encode_peak); the correction's
+    # term, a pass of its own on the GPU, is not compiled.
+    fit = _fit(padded, tiles, 1) * (COMPILE_PEAK if compiled else 1.0)
     corrected = SPLIT_FRAME_4K * SLICE * output[0] * output[1] / PIXELS_4K if split else 0
     above = fit + corrected if tiles is None else max(fit, corrected)
     return round(above) + VAE_WEIGHTS + dit_on_gpu(resident, swapped)
@@ -742,6 +826,32 @@ def _line(pixels: int, column: int) -> float:
     return low + share * (high - low)
 
 
+def in_compile_range(padded: tuple[int, int], phase: Phase, tiles: Tiles | None) -> bool:
+    """Whether a VAE pass over padded frames is within the shapes measured compiled (COMPILE_*,
+    DESIGN.md, Memory planner, decided on 2026-10-24): the encode's tiles up to
+    COMPILE_ENCODE_TILE_MAX px, or untiled where the padded frame is no larger than the 1080p
+    frame's, rows and columns each; the decode's tiles up to COMPILE_DECODE_TILE_MAX px, never
+    untiled. The DiT's phase is no pass of the VAE: always within."""
+    if phase == "encode":
+        if tiles is None:
+            return padded[0] <= COMPILE_ENCODE_WHOLE[0] and padded[1] <= COMPILE_ENCODE_WHOLE[1]
+        return tiles.size <= COMPILE_ENCODE_TILE_MAX
+    if phase == "decode":
+        return tiles is not None and tiles.size <= COMPILE_DECODE_TILE_MAX
+    return True
+
+
+def _compile_range_said(phase: str) -> str:
+    """The shapes measured compiled for a VAE pass, in words (in_compile_range)."""
+    if phase == "encode":
+        rows, columns = COMPILE_ENCODE_WHOLE
+        return (
+            f"encode tiles up to {COMPILE_ENCODE_TILE_MAX} px, or untiled on a frame padded to"
+            f" {columns}x{rows} at most"
+        )
+    return f"decode tiles up to {COMPILE_DECODE_TILE_MAX} px, never untiled"
+
+
 def covers(padded: tuple[int, int], tiles: Tiles) -> bool:
     """Whether one tile covers the whole padded frame, its grid one tile, which is no tiling
     (DESIGN.md, Pipeline, per shot, step 3): a pin of one is refused, naming 0, the untiled pass
@@ -839,6 +949,9 @@ class Peaks:
     # a pin's, the pin that runs with memory.RESERVE (PlanError.instead); else empty.
     tightened: str | None = None
     instead: str = ""
+    # Where --compile was asked and the job is planned without it (plan): why, in plain words,
+    # for the plan's line and the log; else None.
+    compile_dropped: str | None = None
 
     def peak(self, phase: Phase) -> int:
         """The predicted peak of `phase`."""
@@ -899,6 +1012,7 @@ class _Job:
     numz_padding: bool
     reading: Reading  # how `free` was read, for the plan's words and its record
     attention: str  # DIT_ATTENTION's
+    compile_vae: bool = False  # the VAE compiled (--compile): its passes at COMPILE_PEAK
 
     @property
     def margin(self) -> int:
@@ -939,6 +1053,8 @@ def plan(
     numz_padding: bool = False,
     recorded: Plan | None = None,
     attention: str = FLASH_ATTN_2,
+    compile_vae: bool = False,
+    compile_fixed: bool = False,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (job.target_size), in the GPU memory it may
     count on, less its margin, and what it is predicted to take; refused (PlanError) when a pin
@@ -1020,8 +1136,58 @@ def plan(
     review's finding; DESIGN.md, Allocator, decided on 2026-10-21: "only under the segments, where
     the 2.5 was measured"). Never on a driver that refuses,
     which leaves no reserve; nor for a pin that is no pin, refused before any memory is counted.
-    The reserves are memory's, read as the plan is made."""
-    job = _job(free, target, shots, split, numz_padding, attention)
+    The reserves are memory's, read as the plan is made.
+
+    compile_vae: --compile, the VAE compiled (DESIGN.md, Memory planner, "torch.compile: the
+    VAE, opt-in, in v0.1.0"): each VAE pass is held to COMPILE_PEAK times its tile's plain peak
+    (encode_peak), so that the tiles are chosen smaller where it doesn't fit, and only passes
+    within the shapes measured compiled are made or taken (in_compile_range): the encode's tiles
+    up to COMPILE_ENCODE_TILE_MAX px or the 1080p frame whole, the decode's up to
+    COMPILE_DECODE_TILE_MAX px. Where no such plan fits, or a pin gives a pass beyond them, the
+    job is planned without it, never silently: Peaks.compile_dropped says why, the plan's
+    compile_vae is false, and the plan's lines and the log say it. PROVISIONAL (impl-v010,
+    2026-10-29: DESIGN.md has only the measured shapes compiled, and the plan's record keeping
+    compile_vae "as the user sets it"; it doesn't say what a job outside those shapes gets): the
+    job runs plain code, and its record says so, compile_vae false, its frames being plain
+    code's whatever was asked; the setting asked is the manifest's own (cli._settings). A
+    recorded plan keeps its own compile_vae, whatever is asked (the units made are what they
+    are), and is never planned without it; compile_fixed is the same for a plan planned again
+    around a recorded shape (plan_again)."""
+    if recorded is not None:
+        compile_vae, compile_fixed = recorded.compile_vae, True
+    if compile_vae and not compile_fixed:
+        try:
+            return plan(
+                free,
+                target,
+                shots,
+                pins,
+                host_available,
+                split=split,
+                numz_padding=numz_padding,
+                recorded=None,
+                attention=attention,
+                compile_vae=True,
+                compile_fixed=True,
+            )
+        except PlanError as refused:
+            # The plain job, or its own refusal: a job that fits no card plain is refused as it
+            # was, whatever --compile asked.
+            plain, peaks = plan(
+                free,
+                target,
+                shots,
+                pins,
+                host_available,
+                split=split,
+                numz_padding=numz_padding,
+                recorded=None,
+                attention=attention,
+                compile_vae=False,
+                compile_fixed=True,
+            )
+            return plain, replace(peaks, compile_dropped=str(refused))
+    job = _job(free, target, shots, split, numz_padding, attention, compile_vae)
     if pins.swap_blocks is not None and pins.swap_blocks > BLOCKS:
         raise PlanError(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {BLOCKS} blocks, so from 0 to {BLOCKS}"
@@ -1164,6 +1330,8 @@ def plan_again(
                 split=split,
                 numz_padding=numz_padding,
                 attention=attention,
+                compile_vae=recorded.compile_vae,
+                compile_fixed=True,
             )
         except PlanError as again:
             error = again
@@ -1371,7 +1539,10 @@ def _check_tiles(padded: tuple[int, int], recorded: Plan) -> None:
     DESIGN.md doesn't say what such a record gets; refused here, in tilegrid.grid's own words,
     which the tiled passes would raise for it."""
     height, width = padded
-    passes = (("encode", recorded.encode_tiles), ("decode", recorded.decode_tiles))
+    passes: tuple[tuple[Phase, Tiles | None], ...] = (
+        ("encode", recorded.encode_tiles),
+        ("decode", recorded.decode_tiles),
+    )
     for phase, tiles in passes:
         if tiles is None:
             continue
@@ -1387,6 +1558,18 @@ def _check_tiles(padded: tuple[int, int], recorded: Plan) -> None:
                 f" frames padded to {width}x{height}: a tile that covers the whole frame is no"
                 f" tiling, and an untiled {phase} records none"
             )
+    if recorded.compile_vae:
+        # A plan the planner makes with the VAE compiled has no pass beyond the shapes measured
+        # (in_compile_range): a record that has one was edited, and its peaks are no one's.
+        # PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md doesn't say what such a record gets):
+        # refused as the covering tile is, in the same words.
+        for phase, tiles in passes:
+            if not in_compile_range(padded, phase, tiles):
+                raise PlanError(
+                    f"not a plan as seedvr2x records one: its compile_vae is true and its"
+                    f" {phase} {_tiles_said(tiles)}, beyond the shapes measured compiled"
+                    f" ({_compile_range_said(phase)})"
+                )
 
 
 def _quality_said(shots: Sequence[Shot], target: tuple[int, int], quality: str) -> str:
@@ -1443,6 +1626,7 @@ def said(
     recorded: bool = False,
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
     disk: str | None = None,
+    compile_asked: bool = False,
 ) -> list[str]:
     """The plan as --plan prints it and every run and resume logs it, before the first unit,
     a line per choice in plain words (DESIGN.md, Memory planner, Every choice of the plan is
@@ -1455,7 +1639,9 @@ def said(
     the VAE is in the DiT's phase and what of the DiT stays in the VAE's; the system memory;
     each VAE pass, untiled or its tiles, their overlap and grid; the room a VAE pass is held to
     (VAE_ROOM); the scratch of the longest tiled shot; the disk the job takes (disk.py); the
-    predicted peaks and which bounds the plan; the time, estimated once the models are loaded, by
+    predicted peaks and which bounds the plan; with --compile, the VAE compiled, its passes held
+    to COMPILE_PEAK times their plain peaks, and the compilation's time, paid before the DiT
+    loads, or why the job runs without it; the time, estimated once the models are loaded, by
     the calibration every run makes (DESIGN.md, Memory planner, Time estimates); what was
     pinned. recorded: the plan of a job resumed that has made units, whose window cap and tiles
     were kept from the job's record so that the output stays bit for bit (plan's `recorded`):
@@ -1473,11 +1659,15 @@ def said(
 
     disk: the line of the disk the job takes beside its output against what is free (runtime/
     disk.py, DESIGN.md, Memory planner, decided on 2026-10-28), after the scratch's and before the
-    predicted peaks, as DESIGN.md lists it; None says none."""
+    predicted peaks, as DESIGN.md lists it; None says none.
+
+    compile_asked: --compile was given. The plan then has a line of the compiled VAE, or, where
+    the job is planned without it (Peaks.compile_dropped, or a record's plan made so), a line
+    saying that and why; no line without the option."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
-    job = _job(peaks.reading, target, shots, False, numz_padding, peaks.attention)
+    job = _job(peaks.reading, target, shots, False, numz_padding, peaks.attention, plan.compile_vae)
     height, width = job.padded
     out_height, out_width = output_size(target)
     frames = Counter(shot.frames for shot in shots)
@@ -1561,6 +1751,20 @@ def said(
         f"{'' if peaks.bound == 'dit' else ' its room counted,'}"
         f" {_gib(peaks.budget - peaks.need(peaks.bound))} GiB under the budget"
     )
+    if plan.compile_vae:
+        minutes = f"{COMPILE_MIN // 60} to {COMPILE_MAX // 60} min"
+        lines.append(
+            f"compile: the VAE compiled (--compile), each pass held to {COMPILE_PEAK} times its"
+            f" plain peak, in the shapes measured only; compiling it takes about {minutes} per"
+            " process, paid before the DiT loads, at every start and resume, its cache kept in"
+            " the job's directory"
+        )
+    elif compile_asked:
+        why = peaks.compile_dropped or "the job's record was made without it"
+        lines.append(
+            f"compile: --compile is not used for this job: {why}; it runs without it, the VAE's"
+            " plain code and frames, no compilation"
+        )
     lines.append(
         "time: measured, not guessed: a calibration of the job's own steps once the models are"
         " loaded, its cost said then; it gives the job's time and each unit's time left and end;"
@@ -1723,6 +1927,7 @@ def _job(
     split: bool,
     numz_padding: bool,
     attention: str = FLASH_ATTN_2,
+    compile_vae: bool = False,
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
@@ -1735,6 +1940,7 @@ def _job(
     return _Job(
         *(reading.counted, target, tuple(lengths), frames, split, numz_padding, reading),
         attention,
+        compile_vae,
     )
 
 
@@ -1841,6 +2047,7 @@ def _chosen(job: _Job, pins: Pins) -> Plan:
         _resident(job, "encode", encode, swapped),
         _resident(job, "decode", decode, swapped),
         vae_in_dit,
+        compile_vae=job.compile_vae,
     )
 
 
@@ -2130,8 +2337,8 @@ def _vae_peak(
     """The predicted peak of the job's encode or decode (encode_peak, decode_peak), whatever
     its shots' lengths: no VAE pass keeps anything of the shot on the GPU."""
     if phase == "encode":
-        return encode_peak(job.padded, tiles, resident, swapped)
-    return decode_peak(job.padded, job.output, tiles, resident, swapped, job.split)
+        return encode_peak(job.padded, tiles, resident, swapped, job.compile_vae)
+    return decode_peak(job.padded, job.output, tiles, resident, swapped, job.split, job.compile_vae)
 
 
 def _vae_need(
@@ -2150,7 +2357,14 @@ def _fitting(job: _Job, phase: Phase, swapped: int) -> list[Tiles | None]:
     (_vae_need). `swapped` changes nothing to it: a phase that keeps nothing of the DiT frees
     its slots too (dit_on_gpu)."""
     passes = (None, *(Tiles(size) for size in _tile_sizes(job.padded)))
-    return [tiles for tiles in passes if _vae_need(job, phase, tiles, 0, swapped) <= job.budget]
+    return [
+        tiles
+        for tiles in passes
+        if _vae_need(job, phase, tiles, 0, swapped) <= job.budget
+        # With the VAE compiled, only the passes within the shapes measured (in_compile_range):
+        # the largest tiles that fit and are measured, smaller where the compiled peak needs it.
+        and (not job.compile_vae or in_compile_range(job.padded, phase, tiles))
+    ]
 
 
 def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | None:
@@ -2169,9 +2383,25 @@ def _pass(job: _Job, phase: Phase, pin: int | None, swapped: int) -> Tiles | Non
     once per pass (beyond_measured)."""
     fitting = _fitting(job, phase, swapped)
     if pin is None:
+        if not fitting:
+            # Only with the VAE compiled: the passes within the shapes measured don't fit (the
+            # untiled pass or the smallest tile may, outside them), or the frame is too small
+            # for a tile and its pass can't be untiled.
+            raise PlanError(
+                f"the VAE compiled has no {phase} pass within the shapes measured"
+                f" ({_compile_range_said(phase)}) that fits the free VRAM at {COMPILE_PEAK} times"
+                " its plain peak",
+                phase=phase,
+            )
         return fitting[0]
     option = f"--{phase}-tile {pin}"
     tiles = Tiles(pin) if pin else None
+    if job.compile_vae and not in_compile_range(job.padded, phase, tiles):
+        raise PlanError(
+            f"{option}: the VAE compiled has the {phase} {_tiles_said(tiles)} beyond the shapes"
+            f" measured ({_compile_range_said(phase)})",
+            phase=phase,
+        )
     need = _vae_need(job, phase, tiles, 0, swapped) + job.margin
     if need <= job.free:
         return tiles
