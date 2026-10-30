@@ -803,6 +803,12 @@ def plan_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [line for line in caplog.messages if line.startswith("plan: ")]
 
 
+def without_disk(lines: list[str]) -> list[str]:
+    """The plan's lines but the disk's (disk.Disk.line), which says what the test's own disk has
+    free: the figure of the machine the test runs on."""
+    return [line for line in lines if not line.startswith("plan: disk: ")]
+
+
 def test_plan_recorded_and_phases_entered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1638,7 +1644,12 @@ def test_plan_said(
     pins = Pins(window=5)
     made = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST)
     said = planner.said(*made, "a stand-in", TARGET, JOB_SHOTS, pins)
-    assert plan_lines(caplog) == said
+    # The disk's line (DESIGN.md, Memory planner, decided on 2026-10-28), after the scratch's
+    # place and before the predicted peaks, its words and figures held by tests/test_disk.py:
+    # its free room is this machine's, so the lines are compared without it.
+    assert without_disk(plan_lines(caplog)) == said
+    disk_at = [line.startswith("plan: disk: ") for line in plan_lines(caplog)].index(True)
+    assert plan_lines(caplog)[disk_at + 1].startswith("plan: predicted peaks: ")
     assert said == [
         "plan: card: a stand-in, 94.50 GiB free, a budget of 93.90 GiB: the margin of 0.60 GiB"
         " left to the desktop and other programs; no reserve, the driver refusing memory the card"
@@ -1675,7 +1686,7 @@ def test_plan_said(
     with monkeypatch.context():
         # The models load, for the time estimates' calibration (DESIGN.md, Memory planner).
         assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(plan)) == 0
-        assert plan_lines(caplog) == said
+        assert without_disk(plan_lines(caplog)) == said
         counts = next(line for line in caplog.messages if line.endswith(f"the cut list in {plan}"))
         assert caplog.messages.index(said[-1]) < caplog.messages.index(counts)
         # For a .mkv path too, which --plan doesn't write: its cut list, and the job's plan in
@@ -1685,7 +1696,7 @@ def test_plan_said(
         before = sorted(path.name for path in tmp_path.iterdir())
         listed = tmp_path / "other.txt"
         assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", str(listed)) == 0
-        assert plan_lines(caplog) == said and steps.calls == []
+        assert without_disk(plan_lines(caplog)) == said and steps.calls == []
         made = sorted(path.name for path in tmp_path.iterdir())
         assert made == sorted([*before, "other.txt", "other.mkv.work"])
         assert listed.read_text() == plan.read_text()
@@ -3137,7 +3148,9 @@ def test_tile_pin_beyond_the_measured_sizes_warned_of(
         ]
 
     assert upscale(tmp_path, source_path, "one.mkv", *JOB[:4], *LARGER, *TILE_PINS) == 0
-    assert warned() == [] and len(plan_lines(caplog)) == 17  # a line a choice (planner.said)
+    assert (
+        warned() == [] and len(plan_lines(caplog)) == 18
+    )  # a line a choice (planner.said), the disk's too
     monkeypatch.setattr(planner, "TILE_MAX", 576)
     said = (
         "the encode in tiles of 640 px: its predicted peak is the fit's, beyond the sizes"

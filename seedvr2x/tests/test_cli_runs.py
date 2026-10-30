@@ -38,6 +38,7 @@ from test_cli_run import (
     steps,  # noqa: F401
     stopped,
     upscale,
+    without_disk,
 )
 
 from seedvr2x.runtime import job as runtime_job
@@ -420,11 +421,11 @@ def test_plan_says_the_runs(
     source_path = job(tmp_path, monkeypatch)
     with monkeypatch.context():
         assert upscale(tmp_path, source_path, "one", *JOB, "--plan", str(tmp_path / "one.txt")) == 0
-        base = plan_lines(caplog)
+        base = without_disk(plan_lines(caplog))
         caplog.clear()
         options = [] if runs is None else ["--quality", LEVEL[runs]]
         assert upscale(tmp_path, source_path, "out", *JOB, *options, "--plan", "more.txt") == 0
-        lines = plan_lines(caplog)
+        lines = without_disk(plan_lines(caplog))
     assert len(base) == 16 and quality_line(base) == STANDARD_SAID
     if runs is None:
         assert lines == base

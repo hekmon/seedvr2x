@@ -1434,6 +1434,7 @@ def said(
     quality: str = "standard",
     recorded: bool = False,
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
+    disk: str | None = None,
 ) -> list[str]:
     """The plan as --plan prints it and every run and resume logs it, before the first unit,
     a line per choice in plain words (DESIGN.md, Memory planner, Every choice of the plan is
@@ -1445,21 +1446,26 @@ def said(
     the windows; the --quality level, at every level (_quality_said); the swapped blocks, where
     the VAE is in the DiT's phase and what of the DiT stays in the VAE's; the system memory;
     each VAE pass, untiled or its tiles, their overlap and grid; the room a VAE pass is held to
-    (VAE_ROOM); the scratch of the longest tiled shot; the predicted peaks and which bounds the
-    plan; the time, estimated once the models are loaded, by the calibration every run makes
-    (DESIGN.md, Memory planner, Time estimates); what was pinned. recorded: the plan of a job
-    resumed that has made units, whose window cap and tiles were kept from the job's record so
-    that the output stays bit for bit (plan's `recorded`): their lines say so in place of the
-    rule. A window the planner shortened for the host's memory, tiles it shrank for it, say what
-    the card alone gives and why it isn't taken (Peaks.shortened, Peaks.shrunk). The lines stay
-    short, one terminal line where they can, two at most; the manual's words.
+    (VAE_ROOM); the scratch of the longest tiled shot; the disk the job takes (disk.py); the
+    predicted peaks and which bounds the plan; the time, estimated once the models are loaded, by
+    the calibration every run makes (DESIGN.md, Memory planner, Time estimates); what was
+    pinned. recorded: the plan of a job resumed that has made units, whose window cap and tiles
+    were kept from the job's record so that the output stays bit for bit (plan's `recorded`):
+    their lines say so in place of the rule. A window the planner shortened for the host's
+    memory, tiles it shrank for it, say what the card alone gives and why it isn't taken
+    (Peaks.shortened, Peaks.shrunk). The lines stay short, one terminal line where they can, two
+    at most; the manual's words.
 
     layouts: each shot's windows (latents [start, end)) where a job holds runs of its own window
     cap, made under a cap the plan no longer lays out (manifest.WINDOW_CAP; a shape planned again
     for the memory free, DESIGN.md, Memory planner, decided on 2026-10-28): the line's shots in
     one window and its joins are counted from them, not by the plan's cap, which they would
     otherwise misstate (review of the plan's lines, 2026-10-28). None for every other job, whose
-    line is the plan's alone."""
+    line is the plan's alone.
+
+    disk: the line of the disk the job takes beside its output against what is free (runtime/
+    disk.py, DESIGN.md, Memory planner, decided on 2026-10-28), after the scratch's and before the
+    predicted peaks, as DESIGN.md lists it; None says none."""
     # runtime/shot.py imports torch, which this module's import mustn't (the module's docstring).
     from seedvr2x.runtime.shot import shot_layout
 
@@ -1538,6 +1544,8 @@ def said(
             f" keeps between its tiles; in system memory up to an allowance of"
             f" {allowance / 100:.2f} GiB, {where}"
         )
+    if disk is not None:
+        lines.append(disk)
     names = {"encode": "encode", "dit": "DiT's phase", "decode": "decode"}
     lines.append(
         f"predicted peaks: encode {_gib(peaks.encode)} GiB, DiT {_gib(peaks.dit)} GiB, decode"

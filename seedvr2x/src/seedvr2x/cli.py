@@ -28,6 +28,7 @@ from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
 from seedvr2x.runtime import stop as stopping
 from seedvr2x.runtime.cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
+from seedvr2x.runtime.disk import RAW_BYTES
 from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, MIN_SEGMENT, QUALITY, SEED_LIMIT
 from seedvr2x.runtime.pull import DETECTOR, REPO
 from seedvr2x.runtime.stop import Deadline, Stop, Stopped, Terminated, deadline, terminable
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from seedvr2x.media.writer import Writer
     from seedvr2x.runtime.calibration import Calibrated
     from seedvr2x.runtime.cuts import Cut
+    from seedvr2x.runtime.disk import Disk
     from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
     from seedvr2x.runtime.model import Models
@@ -128,11 +130,6 @@ def _warnings_in_lines() -> Generator[None]:
 # EX_TEMPFAIL, "try again later", so that a script tells a job to run again from a finished one
 # (0) and from a Ctrl-C (130).
 EX_TEMPFAIL = 75
-
-# A master's bytes a frame before any is written, at most: its samples uncompressed, FFV1 being
-# lossless, at the bytes a sample each format takes (media/writer.py: yuv420p10le's 1.5 samples a
-# pixel at 2 bytes, gbrp16le's 3 at 2). For a one-file output's assembly's estimate (_masters).
-RAW_BYTES = {"yuv420p10le": 3.0, "gbrp16le": 6.0}
 
 # numz's padding of the frames before the model, DivisiblePad((16, 16)), zeros up to multiples of
 # 16, in place of seedvr2x's (DESIGN.md, Pipeline step 0), for seedvr2x's GPU tests only, never a
@@ -1105,6 +1102,10 @@ def _run(args: argparse.Namespace) -> int:
                     reshaped = kept_plan
             reserve = peaks.reading.reserve
             card = torch.cuda.get_device_name(identity.device)
+            # The disk the job takes beside its output, against what its disk has free (DESIGN.md,
+            # Memory planner, decided on 2026-10-28): its line among the plan's, its warning after
+            # them, where it won't fit; never a refusal (disk.Disk).
+            room = _disk(args, directory, segments, prior, target, final)
             said = planner.said(
                 *(plan, peaks, card, target, shots, pins),
                 numz_padding=numz_padding,
@@ -1113,6 +1114,7 @@ def _run(args: argparse.Namespace) -> int:
                 layouts=None
                 if prior is None
                 else _own_layouts(recorded_as(None, plan.window), prior, reshaped),
+                disk=room.line(),
             )
             for line in said:
                 logger.info("%s", line)
@@ -1120,6 +1122,9 @@ def _run(args: argparse.Namespace) -> int:
             # once per pass (planner.beyond_measured).
             for line in planner.beyond_measured(plan):
                 logger.warning("%s", line)
+            short = room.warning(args.output)
+            if short is not None:
+                logger.warning("%s", short)
             # What shapes the output, compared on a resume, and under memory what doesn't, the
             # predicted peaks with where the weights are and the scratch's allowance, for
             # information (resume.UNCOMPARED).
@@ -1570,7 +1575,7 @@ def _say_assembly_left(record: "Manifest", final: Path, until: datetime.datetime
 
 def _masters(record: "Manifest") -> int:
     """The bytes a job's masters take, those finished as recorded, the others by the finished
-    ones' bytes a frame, or at most at their raw size (RAW_BYTES) before any is: a segment
+    ones' bytes a frame, or at most at their raw size (disk.RAW_BYTES) before any is: a segment
     command's encoder's compression is its own, a master's FFV1 the content's."""
     sizes = [
         (segment.frames, size)
@@ -4815,6 +4820,37 @@ def _room_on_disk(
         logger.warning("%s; a run of this plan would be refused", said)
         return
     raise JobError(said)
+
+
+def _disk(
+    args: argparse.Namespace,
+    directory: Path,
+    segments: "Sequence[OutputSegment]",
+    prior: "_Prior | None",
+    target: tuple[int, int],
+    final: Path | None,
+) -> "Disk":
+    """The disk of the job in `directory` (disk.reading): its output segments, the bytes of those a
+    resumed job has finished from its record, the output's size, a segment command's files or
+    not, a one-file output's assembly or not."""
+    from seedvr2x.runtime.disk import reading
+    from seedvr2x.runtime.job import output_size
+
+    taken: dict[tuple[int, int], int | None] = {}
+    if prior is not None:
+        taken = {
+            (int(s["start"]), int(s["end"])): s["bytes"]
+            for s in prior.recorded["segments"]
+            if s["finished"]
+        }
+    return reading(
+        directory,
+        [(s.start, s.end, taken.get((s.start, s.end))) for s in segments],
+        args.format,
+        output_size(target),
+        commanded=args.segment_cmd is not None,
+        assembled=final is not None,
+    )
 
 
 def _positive(text: str) -> int:
