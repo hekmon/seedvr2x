@@ -435,6 +435,12 @@ def spoken(seconds: float) -> str:
     return f"{hours // 24} d {hours % 24} h"
 
 
+def taking(seconds: float) -> str:
+    """How long something takes as the logs say it before it starts: "about 42 s", "about 12 min
+    5 s", and "under a second" where it is, not "about 0 s" (decided on 2026-10-29)."""
+    return "under a second" if seconds < 1 else f"about {spoken(seconds)}"
+
+
 def ending(now: datetime, seconds: float) -> str:
     """The time of day `seconds` after now, as the logs say a job's end: "07:42" today, "07:42
     tomorrow", "07:42 on Fri 23 Oct" later; to the minute, rounded up; in the local zone, as its

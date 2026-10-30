@@ -334,6 +334,42 @@ def test_pinned_hashed_once(
     assert said in caplog.messages
 
 
+def test_a_long_hash_is_named_before_it_starts(
+    tmp_path: Path,
+    pins: dict[str, Pin],
+    hashed: list[Path],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-28, built on 2026-10-29): the
+    # silences of a start are named. A hash that takes about HASH_SAID_FROM seconds or more,
+    # at pull.HASH_SECONDS_PER_BYTE (the DiT's 84 s for its 16.5 GB, 2026-10-29), is announced by
+    # a line saying what is read and for about how long, before the read; a short one is not.
+    caplog.set_level(logging.INFO)
+    directory = model_dir(tmp_path)
+    hashes = pull.Hashes()
+    hashes.sha256(directory / VAE)
+    assert not [m for m in caplog.messages if "to check its SHA-256" in m]
+    # The rate itself: 84 s for the real DiT's size, at the real pin.
+    assert pull.HASH_SECONDS_PER_BYTE * 16_479_335_080 == pytest.approx(84.0)
+    size = (directory / DIT).stat().st_size
+    monkeypatch.setattr(pull, "HASH_SECONDS_PER_BYTE", 84.0 / size)
+    caplog.clear()
+    assert hashes.sha256(directory / DIT) == pins[DIT].sha256
+    said = [m for m in caplog.messages if "to check its SHA-256" in m]
+    assert said == [
+        f"{DIT}: reading its {size / 1024:.0f} KiB to check its SHA-256, about 1 min 24 s"
+    ]
+    # Before the line that gives the hash and the time it took.
+    assert caplog.messages.index(said[0]) < next(
+        i for i, m in enumerate(caplog.messages) if m.startswith(f"{DIT}: SHA-256 ")
+    )
+    # Read once: the second call says nothing.
+    caplog.clear()
+    hashes.sha256(directory / DIT)
+    assert not caplog.messages
+
+
 @needs_ffmpeg
 @pytest.mark.usefixtures("stand_in")
 @pytest.mark.parametrize("where", ["model-dir", "cache"])

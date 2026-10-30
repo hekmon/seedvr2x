@@ -709,6 +709,33 @@ def test_fit(measures: list[tuple[int, float]], constant: float, rate: float) ->
     assert (model.constant, model.rate) == (pytest.approx(constant), pytest.approx(rate))
 
 
+def test_the_calibration_s_working_is_a_debug_line(caplog: pytest.LogCaptureFixture) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-28, built on 2026-10-29): a
+    # fit whose two lengths give no line with a constant of 0 or more and a rate above 0 says so
+    # under --verbose only; the calibration's result line is another, and stays at INFO.
+    fit = calibration._fit  # pyright: ignore[reportPrivateUsage]
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    fit([(5, 2.0), (13, 6.5)], "the decode")
+    assert not caplog.records
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    fit([(5, 2.0), (13, 6.5)], "the decode")
+    [record] = caplog.records
+    assert record.levelname == "DEBUG"
+    assert record.getMessage() == (
+        "time estimates: the decode's two lengths, 5 in 2.000 s, 13 in 6.500 s, give no line with a"
+        " constant of 0 or more and a rate above 0: its longest alone taken, a rate without a"
+        " constant"
+    )
+
+
+def test_a_time_taken_is_about_or_under_a_second() -> None:
+    # "about 0 s" said nothing (2026-10-29's list from a real job): under a second, said so.
+    assert timing.taking(0.4) == "under a second"
+    assert timing.taking(0.99) == "under a second"
+    assert timing.taking(1.0) == "about 1 s"
+    assert timing.taking(84.0) == "about 1 min 24 s"
+
+
 TARGET = (48, 64)
 PER_LATENT = tokens(TARGET, 1)
 # What the fake models take to enter a phase the first time, the noise's draw a token.

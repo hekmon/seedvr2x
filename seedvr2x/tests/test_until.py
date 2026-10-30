@@ -36,6 +36,7 @@ from test_cli_run import (
 from test_clock import measured
 
 from seedvr2x import cli, clock
+from seedvr2x.media.files import size_said
 from seedvr2x.runtime import calibration, run, timing
 from seedvr2x.runtime import stop as stop_module
 from seedvr2x.runtime.plan import Plan
@@ -541,8 +542,7 @@ def test_assembly_is_the_job_s_last_unit(
     # The masters' hash check, which reads them once more, is said first with its time, from the
     # rate the estimate uses (cli._checking_said; review of the assembly, 2026-10-28).
     assert (
-        f"checking the bytes of 2 segments, {masters / 1024**3:.2f} GiB,"
-        f" about {spoken(masters / RATE)}"
+        f"checking the bytes of 2 segments, {size_said(masters, 2)}, about {spoken(masters / RATE)}"
     ) in caplog.messages
     assert made.calls == [] and "models" not in ASKED
     assert (tmp_path / "out.mkv").exists() and not work.exists()

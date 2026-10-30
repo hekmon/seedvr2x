@@ -114,6 +114,19 @@ CHECK_ENDPOINT = f"check HF_ENDPOINT, if set, and any proxy on the way to the Hu
 TOKEN_ADVICE = "You are sending unauthenticated requests to the HF Hub"
 
 
+# The time to hash a model file a run says before it starts (Hashes.sha256), per byte: the DiT's
+# 16,479,335,080 bytes took 84 s on the RTX 5090 machine's disk on 2026-10-29 (impl-v010's list
+# from its real jobs). A figure of one disk, the line saying "about": a faster disk finishes
+# sooner, a slower one later, and the hash's own "in N s" line follows with the measure.
+# PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md asks "a line says what is read, and for about how
+# long" and leaves the rate open).
+HASH_SECONDS_PER_BYTE = 84 / PINNED["seedvr2x_ema_7b_fp16.safetensors"].size
+# The estimate under which no line is said: a hash that short is no silence worth a line.
+# PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the bound open; 5 s keeps the VAE's
+# 0.5 GB and the shot detector's 30 MB, about 3 s and 0.2 s at that rate, quiet).
+HASH_SAID_FROM = 5.0
+
+
 class Hashes:
     """The SHA-256 of the run's model files, each read once (16.5 GB for the DiT, tens of seconds:
     the pinned check and the manifest's record take the same), with each file as it was then, its
@@ -126,6 +139,18 @@ class Hashes:
         """The SHA-256 of the file at path, in hex, read the first time only, its time logged."""
         if path not in self._read:
             state = _state(path)
+            # The silence named before it starts (DESIGN.md, Architecture, What it prints,
+            # decided on 2026-10-28; built on 2026-10-29): what is read, and for about how long.
+            expected = wall(state[2] * HASH_SECONDS_PER_BYTE)
+            if expected >= HASH_SAID_FROM:
+                from seedvr2x.runtime.timing import taking
+
+                logger.info(
+                    "%s: reading its %s to check its SHA-256, %s",
+                    path.name,
+                    files.size_said(state[2]),
+                    taking(expected),
+                )
             started = time.monotonic()
             digest = files.sha256(path)
             logger.info(

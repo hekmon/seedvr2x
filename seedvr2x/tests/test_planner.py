@@ -9,6 +9,7 @@ longest window whatever the shots' lengths, the system memory, and a resume's pl
 recorded shape. On the CPU, no weights: the models are built on the meta device where their
 shapes are counted."""
 
+import logging
 import re
 import subprocess
 import sys
@@ -3909,7 +3910,7 @@ def test_a_held_run_takes_no_margin_on_top() -> None:
     assert refused(need + MARGIN - 1, HD, film, tight, None).startswith("--decode-tile 0: ")
 
 
-def test_a_held_plan_refused_takes_the_reserve_of_2_5() -> None:
+def test_a_held_plan_refused_takes_the_reserve_of_2_5(caplog: pytest.LogCaptureFixture) -> None:
     # DESIGN.md, Allocator (decided on 2026-10-13, for a resume's plan on 2026-10-21): a held
     # run's plan is made with the reserve of 4.5 GiB, and only where that plan would be refused,
     # a new job's or a resume's recorded shape, with 2.5, said slow in the plan's budget line, the
@@ -3930,7 +3931,13 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5() -> None:
     # The plan with 4.5, refused: what a reading already at its last resort says.
     alone = refused(replace(reading, tight=True), HD, film, pins, None)
     assert alone.startswith("--decode-tile 0: the decode untiled takes")
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
     made, peaks = planner.plan(reading, HD, film, pins, None)
+    # The refusal of the plan with 4.5, which the budget's lines leave out, is said at debug.
+    assert [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"] == [
+        f"the plan with the reserve of 4.50 GiB was refused: {alone}"
+    ]
+    caplog.set_level(logging.INFO, logger="seedvr2x")
     assert peaks.reading == memory.tightened(reading) and peaks.reading.tight
     assert peaks.free == peaks.budget == need + GIB
     assert peaks.reading.reserve == memory.RESERVE_TIGHT == round(2.5 * GIB)
@@ -3941,15 +3948,22 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5() -> None:
     assert peaks.need("decode") == peaks.decode + planner.VAE_ROOM <= peaks.budget
     card = f"{(need + 4 * GIB) / GIB:.2f}"
     lines = planner.said(made, peaks, "a card", HD, film, pins)
+    # The budget takes two lines (DESIGN.md, Architecture, What it prints, decided on
+    # 2026-10-28, built on 2026-10-29): its figures, as for any held plan, then the reserve of
+    # 2.5 and what it costs, the refused plan's refusal not in either but said at debug.
     assert lines[1] == (
         f"plan: budget: {peaks.budget / GIB:.2f} GiB, the {card} GiB free less torch's limit, 0.50"
         " GiB under it, and the reserve of 2.50 GiB left to torch's allocator beyond a step's"
-        f" peak, 2.50 and not 4.50, the plan with 4.50 refused ({alone}); slow: a step short of"
-        " room beyond its peak slows down where it would be refused, and a job that fits with"
-        " 4.50 runs up to 1.5 times as long with 2.50; memory freed on the card gives the 4.50"
-        " back; --decode-tile 1856 would run with the full reserve, at full speed; the margin of"
-        " 0.60 GiB is in the reserve"
+        " peak; the margin of 0.60 GiB is in the reserve"
     )
+    assert lines[2] == (
+        "plan: reserve: 2.50 GiB and not 4.50, the plan with 4.50 having been refused (--verbose"
+        " says why); slow: a step short of room beyond its peak slows down where it would be"
+        " refused, and a job that fits with 4.50 runs up to 1.5 times as long with 2.50; memory"
+        " freed on the card gives the 4.50 back; --decode-tile 1856 would run with the full"
+        " reserve, at full speed"
+    )
+    assert alone not in "".join(lines) and len("".join(lines[:3])) < 900
     assert peaks.instead == "--decode-tile 1856" and alone.endswith("--decode-tile 1856")
     # Two pins short with 4.5, the window's refused first: the window that fits isn't named, the
     # untiled decode pinned beside it being still refused with 4.5 (planner._substituted).
@@ -4000,9 +4014,8 @@ def test_a_held_plan_refused_takes_the_reserve_of_2_5() -> None:
         "the recorded plan no longer fits the memory free now: "
     )
     assert peaks.instead == ""
-    assert (
-        "would run with the full reserve"
-        not in planner.said(made, peaks, "a card", HD, film, Pins())[1]
+    assert "would run with the full reserve" not in "".join(
+        planner.said(made, peaks, "a card", HD, film, Pins())
     )
     # Nor under an allocator without expandable segments, where a step short of room is refused
     # rather than slowed down: refused with 4.5, as before (Reading.expandable), saying that

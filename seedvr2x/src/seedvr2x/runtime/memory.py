@@ -302,6 +302,14 @@ EXPANDABLE = f"{NATIVE},expandable_segments:True"
 VARIABLES = ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
 
 
+# The first warning of a driver that lends system memory, as a line (Driver.said is the whole
+# finding, said at debug). PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the words open).
+LENDS = (
+    "the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that"
+    " passes the card slows down, then fails without an error to catch"
+)
+
+
 @dataclass(frozen=True)
 class Driver:
     """What the probe found: whether the driver gives memory the card doesn't have (spills), and
@@ -557,7 +565,14 @@ def startup() -> str:
             )
         else:
             _spills = found.spills
-            logger.log(logging.WARNING if _spills else logging.INFO, "%s", found.said())
+            if _spills:
+                # A line, the whole finding at debug (DESIGN.md, Architecture, What it prints,
+                # decided on 2026-10-28; built on 2026-10-29: 501 characters at every start,
+                # resumes included).
+                logger.warning("%s", LENDS)
+                logger.debug("%s", found.said())
+            else:
+                logger.info("%s", found.said())
     # An empty setting is no setting, and goes from the environment. torch takes the first of
     # the two variables that is set, empty or not: left there, an empty PYTORCH_CUDA_ALLOC_CONF
     # would hide a PYTORCH_ALLOC_CONF that names an allocator, and itself names none, which is
@@ -587,7 +602,18 @@ def startup() -> str:
             if _native and _segments and RESERVE_TIGHT < RESERVE
             else ""
         )
+        # The warning is a line, the whole text at debug, in the driver's warning's way (above);
+        # the figures it keeps are the two the user can act on.
+        # PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md asks "a line each, the manual
+        # explaining" and leaves the words open).
         logger.warning(
+            "seedvr2x holds itself to the card's own memory there: torch limited to the memory"
+            ' free less %.1f GiB, and the plan in %.1f GiB less; the manual\'s "Under WSL2"'
+            " section says why",
+            HELD_BACK / GIB,
+            RESERVE / GIB,
+        )
+        logger.debug(
             "seedvr2x holds itself to the card there: %s to the"
             " memory free less %.1f GiB, and plans in %.1f GiB less%s; a run that passes the"
             " limit is refused. The memory free is the smaller of two figures: what the driver"

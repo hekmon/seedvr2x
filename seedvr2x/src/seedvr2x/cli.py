@@ -68,16 +68,49 @@ VERBOSE_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 class _Lines(logging.Formatter):
     """A line as seedvr2x prints it, but under --verbose (VERBOSE_FORMAT): "23:05:12 plan: ...",
     "23:05:12 WARNING ...", "23:05:12 ERROR ...", the time of day to the second; a level under
-    WARNING not named, a level from it up by its name (CRITICAL as itself)."""
+    WARNING not named, a level from it up by its name (CRITICAL as itself).
+
+    The time of day alone says nothing of the day or of the zone: the night the clocks went back,
+    02:00 to 02:59 came twice. So a line of the log that finds the date changed since the one
+    before it, or the local zone's offset from UTC, is preceded by a line saying so (DESIGN.md,
+    Architecture, What it prints, decided on 2026-10-28; built on 2026-10-29). The first line
+    says nothing: there is nothing to have changed from.
+
+    PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves open where the change is looked for):
+    at each line logged, by the line's own time, so that a unit of 30 minutes crossing midnight
+    is said at its end, before the line that ends it, with that line's time of day; no thread
+    watches the clock in between."""
 
     def __init__(self) -> None:
         super().__init__("%(asctime)s %(message)s", datefmt="%H:%M:%S")
         self._named = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+        # The date (year, month, day) and the offset from UTC, in seconds, of the line before.
+        self._seen: tuple[tuple[int, int, int], int] | None = None
 
     def format(self, record: logging.LogRecord) -> str:
+        local = time.localtime(record.created)
+        day, offset = (local.tm_year, local.tm_mon, local.tm_mday), local.tm_gmtoff
+        before, self._seen = self._seen, (day, offset)
+        said = ""
+        if before is not None:
+            stamp = time.strftime("%H:%M:%S", local)
+            if offset != before[1]:
+                said += (
+                    f"{stamp} the clocks changed: the local time is now UTC{_offset(offset)}"
+                    f" (it was UTC{_offset(before[1])}), the times of day below in the new one\n"
+                )
+            if day != before[0]:
+                said += f"{stamp} the date is now {time.strftime('%a %d %b %Y', local)}\n"
         if record.levelno >= logging.WARNING:
-            return self._named.format(record)
-        return super().format(record)
+            return said + self._named.format(record)
+        return said + super().format(record)
+
+
+def _offset(seconds: int) -> str:
+    """A zone's offset from UTC as "+01:00" (to the minute)."""
+    sign = "-" if seconds < 0 else "+"
+    minutes = abs(seconds) // 60
+    return f"{sign}{minutes // 60:02d}:{minutes % 60:02d}"
 
 
 def _logging(verbose: bool) -> None:
@@ -86,6 +119,23 @@ def _logging(verbose: bool) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter(VERBOSE_FORMAT) if verbose else _Lines())
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=[handler])
+
+
+def _torch_lines(verbose: bool) -> None:
+    """torch's own C++ lines, c10's log, out of the default output (DESIGN.md, Architecture, What
+    it prints, decided on 2026-10-23; built on 2026-10-29): where the driver refuses,
+    cudaMallocAsync prints "[W1023 00:04:28.18… CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync]
+    recovered from an allocation failure by trimming the pool and retrying" each time it trims,
+    108 times in a 2-hour job, no Python warning carrying them. c10 reads TORCH_CPP_LOG_LEVEL once,
+    as torch is imported (libc10: INFO, WARNING, ERROR or FATAL, or 0 to 3): ERROR keeps a
+    warning out and an error in. So it is set here, at the command line's entry, before anything
+    imports torch: seedvr2x.cli imports none (tests/test_cli.py holds it so), and the first
+    import is the run's own, from memory.startup's neighbours (model, run, detector), in `_run`.
+    Under --verbose the variable is left alone, c10's default (warnings shown). The user's own
+    setting wins in both: a variable already set is never overwritten, and a process running
+    with it set shows what they chose."""
+    if not verbose:
+        os.environ.setdefault("TORCH_CPP_LOG_LEVEL", "ERROR")
 
 
 # The logger Python's own warnings go through (_warnings_in_lines): the standard library's name
@@ -413,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     args = parser.parse_args(argv)
     _logging(args.verbose)
+    _torch_lines(args.verbose)
     # A stop at once, a second Ctrl-C or SIGTERM during the run (runtime/stop.py), SIGTERM during
     # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
     # manifest says, and the same command resumes.
@@ -931,6 +982,15 @@ def _run(args: argparse.Namespace) -> int:
                     directory,
                 )
             # The source's content hashed meanwhile, for the manifest.
+            size, how_long = _long_read(declared.path)
+            logger.info(
+                "%s: the first pass decodes its %s once, every frame, to count, time and index"
+                " them%s, and hashes the file meanwhile%s",
+                declared.path,
+                size,
+                " and find the shots" if model_files.detector is not None else "",
+                f", at least {how_long}" if how_long else "",
+            )
             found = _first_pass(declared, model_files, identity.device)
         source = counted(declared, found)
         if final is not None:
@@ -2388,11 +2448,11 @@ def _assemble(
             write_checksums(sums, checksums)
         record.job_assembled(final.name, final.stat().st_size)
         logger.info(
-            "wrote %s: %d frames from %s, with the source's %s and %s, assembled in %.1f s",
+            "wrote %s: %d frames from %s, with %s, and %s, assembled in %.1f s",
             final,
             joined.frames,
             _plural(len(segments), "segment"),
-            _plural(joined.streams - 1, "other stream"),
+            joined.others,
             _plural(joined.chapters, "chapter"),
             wall(time.monotonic() - started),
         )
@@ -2418,14 +2478,15 @@ def _checking_said(paths: Sequence[Path], rate: float | None) -> str:
     (`rate`, bytes per second; the assembly's estimate counts this read, timing.assembly_seconds),
     the bytes alone where it isn't. Said because that read is silent otherwise, 30 to 70 minutes
     on the masters of a two-hour film on a slow disk (review of the assembly, 2026-10-28)."""
-    from seedvr2x.runtime.timing import spoken
+    from seedvr2x.media.files import size_said
+    from seedvr2x.runtime.timing import taking
 
     total = 0
     for path in paths:
         with suppress(OSError):  # a missing segment is found by _damaged
             total += path.stat().st_size
-    said = f"checking the bytes of {_plural(len(paths), 'segment')}, {total / 1024**3:.2f} GiB"
-    return said if rate is None else f"{said}, about {spoken(wall(total / rate))}"
+    said = f"checking the bytes of {_plural(len(paths), 'segment')}, {size_said(total, 2)}"
+    return said if rate is None else f"{said}, {taking(wall(total / rate))}"
 
 
 def _damaged(
@@ -3669,10 +3730,35 @@ def _recorded_index(directory: Path, entry: dict[str, Any]) -> "tuple[FrameIndex
     return index, ""
 
 
+def _long_read(path: Path) -> tuple[str, str]:
+    """The source's size and the time to read it once, both as the logs say them before a long
+    read (DESIGN.md, Architecture, What it prints, decided on 2026-10-28; built on 2026-10-29):
+    ("12.3 GiB", "about 4 min 10 s"), the time "" where the file can't be sampled or reads in
+    under pull.HASH_SAID_FROM seconds, which is no silence worth a line. The time of a sample of
+    the file read at the disk's speed (assembly.timed_read), a floor where a cache answers.
+    PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the estimate's way open): the same
+    sample the rehearsal's line uses."""
+    from seedvr2x.media import assembly
+    from seedvr2x.media.files import size_said
+    from seedvr2x.runtime.pull import HASH_SAID_FROM
+    from seedvr2x.runtime.timing import taking
+
+    size = size_said(path.stat().st_size)
+    try:
+        seconds = wall(assembly.timed_read(path))
+    except OSError:
+        return size, ""
+    return size, taking(seconds) if seconds >= HASH_SAID_FROM else ""
+
+
 def _content(path: Path) -> dict[str, object]:
-    """The source's content, as a resume compares it: its size and SHA-256."""
+    """The source's content, as a resume compares it: its size and SHA-256. A hash that takes
+    long is named first, what is read and for about how long (_long_read)."""
     from seedvr2x.media.files import sha256
 
+    size, how_long = _long_read(path)
+    if how_long:
+        logger.info("%s: reading its %s to check its SHA-256, %s", path, size, how_long)
     started = time.monotonic()
     digest = sha256(path)
     logger.info("%s: SHA-256 %s, in %.1f s", path, digest, wall(time.monotonic() - started))

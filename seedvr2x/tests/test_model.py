@@ -2,6 +2,7 @@
 driver's version is read from NVML."""
 
 import ctypes
+import logging
 import subprocess
 import sys
 
@@ -104,3 +105,71 @@ def test_nvidia_driver(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptur
     monkeypatch.setattr(ctypes, "CDLL", missing)
     assert model.nvidia_driver() is None
     assert caplog.text.count("the NVIDIA driver's version is unknown") == 3
+
+
+def sampler_bar() -> object:
+    """The progress bar the vendored sampler builds for a window, as its own method builds it."""
+    from types import SimpleNamespace
+
+    from seedvr2x.vendor.common.diffusion.samplers.base import Sampler
+
+    sampler = SimpleNamespace(timesteps=range(4), return_endpoint=True)
+    return Sampler.get_progress_bar(sampler)  # pyright: ignore[reportArgumentType]
+
+
+def test_the_samplers_bars_are_out_of_the_default_output_but_not_a_download_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-28, built on 2026-10-29): the
+    # vendored sampler's tqdm, one bar a window (848 lines in a night), is off but under
+    # --verbose; vendor/ is never edited, so model.sampler_bars replaces the name its module
+    # builds the bar with. A download's bar (huggingface_hub's own tqdm) keeps its own.
+    from huggingface_hub.utils import tqdm as download_bar
+
+    from seedvr2x.runtime import model
+    from seedvr2x.vendor.common.diffusion.samplers import base
+
+    monkeypatch.setattr(base, "tqdm", base.tqdm)  # restored after the test
+    model.sampler_bars(False)
+    quiet = sampler_bar()
+    assert quiet.disable is True  # pyright: ignore[reportAttributeAccessIssue]
+    model.sampler_bars(True)
+    shown = sampler_bar()
+    assert shown.disable is False  # pyright: ignore[reportAttributeAccessIssue]
+    assert shown.desc == "SimpleNamespace"  # pyright: ignore[reportAttributeAccessIssue]
+    shown.close()  # pyright: ignore[reportAttributeAccessIssue]
+    # Silenced from outside: tqdm itself is untouched, and a download's bar is shown.
+    model.sampler_bars(False)
+    import tqdm
+
+    assert tqdm.tqdm.__module__ == "tqdm.std"
+    downloading = download_bar(total=1, name="test")
+    try:
+        assert downloading.disable is False
+    finally:
+        downloading.close()
+
+
+def test_the_models_load_sets_the_samplers_bars_by_the_log_level(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: pytest.TempPathFactory,
+) -> None:
+    # model.load_models decides on every load: shown at the debug level (--verbose), off else.
+    # The file is missing, which it finds after that decision.
+    from pathlib import Path
+
+    import torch
+
+    from seedvr2x.runtime import model
+    from seedvr2x.runtime.weights import ModelError
+
+    seen: list[bool] = []
+    monkeypatch.setattr(model, "sampler_bars", seen.append)
+    absent = Path(str(tmp_path)) / "absent.safetensors"
+    for level, shown in ((logging.DEBUG, True), (logging.INFO, False)):
+        caplog.set_level(level, logger="seedvr2x")
+        with pytest.raises((ModelError, OSError)):
+            model.load_models(absent, absent, torch.device("cpu"))
+        assert seen[-1] is shown
+    assert len(seen) == 2

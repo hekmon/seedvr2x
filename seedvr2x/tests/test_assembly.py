@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 from test_probe import has_encoder
 
-from seedvr2x.media import assembly, ffmpeg, rate
+from seedvr2x.media import assembly, ffmpeg, files, rate
 from seedvr2x.media.assembly import (
     LIST,
     WORK_FILES,
@@ -530,14 +530,15 @@ def test_several_hundred_segments(tmp_path: Path, jobs: Callable[..., Job]) -> N
 def test_the_final_line_counts_in_the_singular(
     tmp_path: Path, jobs: Callable[..., Job], caplog: pytest.LogCaptureFixture
 ) -> None:
-    # One segment, one stream, no chapter: "assembled, 6 frames of 1 segment with 0 other streams
-    # and 0 chapters", not "1 segments" (next-batch item 14, wording).
+    # One segment, one stream, no chapter: "assembled, 6 frames of 1 segment with no other stream
+    # and 0 chapters", not "1 segments" (next-batch item 14, wording; the other streams named by
+    # kind, 2026-10-29).
     job = jobs("24000/1001", 1)
     with caplog.at_level(logging.INFO, logger="seedvr2x.media.assembly"):
         assembled(tmp_path, job, job.master)
     [done] = [r.getMessage() for r in caplog.records if ": assembled, " in r.getMessage()]
     assert f"assembled, {job.frames} frame" in done
-    assert f" of 1 segment with 0 other streams and 0 chapters of {job.master}," in done
+    assert f" of 1 segment with no other stream, and 0 chapters of {job.master}," in done
     assert "1 segments" not in done and "1 frames" not in done
 
     assert assembly._counted(1, "chapter") == "1 chapter"  # pyright: ignore[reportPrivateUsage]
@@ -1247,7 +1248,7 @@ def test_a_data_stream_is_left_out_with_a_warning(
     assert f"stream {gone} (data" in warned[0] and "left out of the finished file" in warned[0]
     # The final line counts the other streams written, and says which it left out.
     [done] = [r.getMessage() for r in caplog.records if ": assembled, " in r.getMessage()]
-    assert f"with 1 other stream (its data streams {gone} left out) and " in done
+    assert f"with its audio (its data streams {gone} left out), and " in done
     written = streams(output)
     kept = [stream["codec_type"] for stream in own if stream["codec_type"] != "data"]
     assert [stream["codec_type"] for stream in written] == kept == ["video", "audio"]
@@ -2119,23 +2120,72 @@ def test_no_segment_is_an_error(tmp_path: Path, jobs: Callable[..., Job]) -> Non
         )
 
 
+def kind_stream(kind: str, picture: bool = False) -> assembly.Stream:
+    return assembly.Stream(0, kind, "x", {}, (), "", picture=picture)
+
+
+def test_the_other_streams_are_named_by_kind() -> None:
+    # The final lines of an assembly counted "2 other streams" for an audio and a cover picture
+    # together (2026-10-29's list from a real job): named by kind. Every kind one stream: "its
+    # audio and its cover picture"; else each counted, a cover picture alone "a cover picture".
+    said = assembly.others_said
+    assert said([]) == "no other stream"
+    assert said([kind_stream("audio")]) == "its audio"
+    assert said([kind_stream("audio"), kind_stream("attachment", True)]) == (
+        "its audio and its cover picture"
+    )
+    assert said(
+        [kind_stream("audio"), kind_stream("subtitle"), kind_stream("attachment", True)]
+    ) == ("its audio, its subtitles and its cover picture")
+    assert (
+        said(
+            [
+                *(kind_stream("audio"), kind_stream("audio"), kind_stream("subtitle")),
+                kind_stream("attachment", True),
+            ]
+        )
+        == "2 audio streams, 1 subtitle stream and a cover picture"
+    )
+    assert said([kind_stream("attachment"), kind_stream("attachment")]) == "2 attachments"
+    assert said([kind_stream("attachment"), kind_stream("attachment", True)]) == (
+        "its attachment and its cover picture"
+    )
+    assert said([kind_stream("attachment", True)] * 2 + [kind_stream("audio")]) == (
+        "1 audio stream and 2 cover pictures"
+    )
+
+
+def test_sizes_are_said_in_mib_under_a_tenth_of_a_gib() -> None:
+    # "reading its 0.0 GiB" and "checking the bytes of 1 segment, 0.04 GiB" said nothing
+    # (2026-10-29's list): MiB under 0.1 GiB, KiB under 1 MiB.
+    size = files.size_said
+    assert size(16_479_335_080) == "15.3 GiB"
+    assert size(16_479_335_080, 2) == "15.35 GiB"
+    assert size(int(0.04 * 2**30), 2) == "41 MiB"
+    assert size(int(0.1 * 2**30) + 1, 2) == "0.10 GiB"
+    assert size(3 * 2**20) == "3 MiB"
+    assert size(12 * 2**10) == "12 KiB"
+    assert size(0) == "0 KiB"
+
+
 def test_the_line_before_the_rehearsal_says_what_it_reads_and_for_about_how_long(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # DESIGN.md, Output, Assembly, decided on 2026-10-28: "a line says what the rehearsal reads
     # before it does". The duration is the source's size over a timed read of a sample of it
-    # (assembly.reading_said): at least a few seconds under ten, at least about seconds to the
-    # nearest five up to ninety, minutes after (a floor: the remux writes too, and a sample read
-    # from the cache is fast; review, 2026-10-28); a read that fails is said with its reason, no
-    # duration invented.
+    # (assembly.reading_said): "under a second" under one (decided on 2026-10-29), at least a few
+    # seconds under ten, at least about seconds to the nearest five up to ninety, minutes after (a
+    # floor: the remux writes too, and a sample read from the cache is fast; review, 2026-10-28);
+    # a read that fails is said with its reason, no duration invented.
     source = tmp_path / "in.mkv"
     source.write_bytes(bytes(3 * 2**20))
     head = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
-    assert assembly.reading_said(source) == f"{head} its 0.0 GiB, at least a few seconds"
-    seconds = iter([9.9, 10.0, 66.0, 89.0, 372.0, 5400.0])
+    assert assembly.reading_said(source) == f"{head} its 3 MiB, under a second"
+    seconds = iter([0.4, 9.9, 10.0, 66.0, 89.0, 372.0, 5400.0])
     monkeypatch.setattr(assembly, "_read_seconds", lambda *given: next(seconds))
-    said = [assembly.reading_said(source).removeprefix(f"{head} its 0.0 GiB, ") for _ in range(6)]
+    said = [assembly.reading_said(source).removeprefix(f"{head} its 3 MiB, ") for _ in range(7)]
     assert said == [
+        "under a second",
         *("at least a few seconds", "at least about 10 s", "at least about 65 s"),
         *("at least about 90 s", "at least about 6 min", "at least about 90 min"),
     ]
@@ -2145,7 +2195,7 @@ def test_the_line_before_the_rehearsal_says_what_it_reads_and_for_about_how_long
 
     monkeypatch.setattr(assembly, "_read_seconds", unreadable)
     assert assembly.reading_said(source).endswith(
-        "its 0.0 GiB, for a time not estimated (Input/output error)"
+        "its 3 MiB, for a time not estimated (Input/output error)"
     )
 
 

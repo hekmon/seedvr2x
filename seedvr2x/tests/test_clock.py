@@ -155,6 +155,26 @@ def test_the_wall_set_by_an_hour_measures_again_and_keeps_the_ratio(
     assert pace.ratio() == pytest.approx(0.91)
 
 
+def test_a_step_of_the_wall_is_said_at_info(caplog: pytest.LogCaptureFixture) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-28, built on 2026-10-29): the
+    # clock's own re-anchor is a line of the default output, not a debug line: a time of day
+    # below it follows the stepped clock.
+    caplog.set_level(logging.INFO, logger=clock.__name__)
+    readers, pace = measured(1.0)
+    readers.tick(100.0)
+    readers.step(3600.0)
+    pace.ratio()
+    [record] = [r for r in caplog.records if "stepped" in r.getMessage()]
+    assert record.levelname == "INFO"
+    assert record.getMessage().startswith("the wall clock stepped by +3600 s (over 100 s")
+    # A step of two seconds either way is no line: it is the wall clock's own small steps.
+    caplog.clear()
+    readers.tick(100.0)
+    readers.step(2.0)
+    pace.ratio()
+    assert not caplog.records
+
+
 def test_a_vm_asleep_is_a_step_of_the_wall(caplog: pytest.LogCaptureFixture) -> None:
     # The VM resumed from sleep: the run's clock stood still, the wall went on for 8 hours.
     caplog.set_level(logging.DEBUG, logger=clock.__name__)
@@ -352,6 +372,6 @@ def test_the_assemblys_reading_time_is_said_in_the_walls_seconds(
     source.write_bytes(b"")
     monkeypatch.setattr(assembly, "_read_seconds", lambda *given: 60.0)
     head = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
-    assert assembly.reading_said(source) == f"{head} its 0.0 GiB, at least about 60 s"
+    assert assembly.reading_said(source) == f"{head} its 0 KiB, at least about 60 s"
     paced(0.9)
-    assert assembly.reading_said(source) == f"{head} its 0.0 GiB, at least about 55 s"
+    assert assembly.reading_said(source) == f"{head} its 0 KiB, at least about 55 s"

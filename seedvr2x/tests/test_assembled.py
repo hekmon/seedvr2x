@@ -262,9 +262,11 @@ def test_assembled_with_the_sources_other_streams(
     final = tmp_path / "x.mkv"
     listed = sorted(path.name for path in tmp_path.iterdir() if path.name.startswith("x.mkv"))
     assert listed == ["x.mkv", "x.mkv.crc32", "x.mkv.manifest.json"]
-    assert f"wrote {final}: 96 frames from 4 segments, with the source's 4 other streams and 2" in (
-        caplog.text
-    )
+    # The other streams named by kind (2026-10-29): two audio, a subtitle, the font attached.
+    assert (
+        f"wrote {final}: 96 frames from 4 segments, with 2 audio streams, 1 subtitle stream and"
+        " 1 attachment, and 2"
+    ) in caplog.text
     assert f"{tmp_path / 'x.mkv.work'}: removed, its job assembled" in caplog.text
     held_to_the_source(final, source, tmp_path)
     # The same job to a directory: its segments, never assembled, hold the same frames, and the
@@ -471,7 +473,7 @@ def test_a_damaged_segment_is_made_again_then_the_file_assembled(
     # The hashing reads every master once, silent otherwise: one line says it first (review of
     # the assembly, 2026-10-28), with the bytes alone where no --until measured the disk's rate.
     [checking] = [m for m in caplog.messages if m.startswith("checking the bytes of")]
-    assert re.fullmatch(r"checking the bytes of 4 segments, \d+\.\d\d GiB", checking)
+    assert re.fullmatch(r"checking the bytes of 4 segments, \d+ (K|M)iB", checking)
     assert caplog.messages.index(checking) < next(
         i for i, m in enumerate(caplog.messages) if "damaged, its bytes" in m
     )
@@ -1256,7 +1258,7 @@ def test_a_data_stream_matroska_cannot_take_is_left_out_and_warned_of(
     assert warned[0].startswith(f"{source}: Matroska can't hold one of its data streams, which")
     assert indexes(final) == list(range(25))
     assert [s["codec_type"] for s in probed(final, "-show_streams")["streams"]] == ["video"]
-    assert "with 0 other streams (its data streams 1 left out) and 0 chapters" in caplog.text
+    assert "with no other stream (its data streams 1 left out), and 0 chapters" in caplog.text
 
 
 @needs_ffmpeg
@@ -1500,7 +1502,7 @@ def test_missing_frames_filled_into_the_finished_file(
     assert upscale(tmp_path, source, "x.mkv", *options) == 0
     final = tmp_path / "x.mkv"
     assert f"{tmp_path / MISSING_SAID}" in caplog.text
-    wrote = f"wrote {final}: 40 frames from 4 segments, with the source's 1 other stream and 0"
+    wrote = f"wrote {final}: 40 frames from 4 segments, with its audio, and 0"
     assert wrote in caplog.text
     assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == [
         *("x.mkv", "x.mkv.crc32", "x.mkv.manifest.json")

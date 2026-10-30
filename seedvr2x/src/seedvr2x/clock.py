@@ -77,12 +77,15 @@ class Pace:
             expected = span * self._ratio
             step = (wall - last_wall) - expected
             if abs(step) > STEP_FLOOR + STEP_SHARE * expected:
-                logger.debug(
-                    "the wall clock stepped by %+.0f s (over %.0f s of the run's clock): the"
-                    " clocks measured again from here, the ratio %.3f held",
+                # Said at INFO: a step of a minute and more is the time set or the machine
+                # resumed from sleep, which a time of day below it must be read with (DESIGN.md,
+                # Architecture, What it prints, decided on 2026-10-28; built on 2026-10-29).
+                logger.info(
+                    "the wall clock stepped by %+.0f s (over %.0f s of the run's clock), the time"
+                    " set or the machine resumed from sleep: the times of day below follow it,"
+                    " and the clocks are measured against each other again from here",
                     step,
                     span,
-                    self._ratio,
                 )
                 self._anchor = (mono, wall)
             self._last = (mono, wall)

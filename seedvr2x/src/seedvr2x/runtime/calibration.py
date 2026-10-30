@@ -420,7 +420,10 @@ def _fit(measures: Sequence[tuple[int, float]], kind: str = "a kind") -> Model:
         constant = quick - rate * short
         if rate > 0 and constant >= 0:
             return Model(constant, rate)
-        logger.info(
+        # The calibration's working, not its result: at debug, under --verbose (DESIGN.md,
+        # Architecture, What it prints, decided on 2026-10-28; built on 2026-10-29). The result
+        # line (calibrate's) says the constants in any case.
+        logger.debug(
             "time estimates: %s's two lengths, %s, give no line with a constant of 0 or more and"
             " a rate above 0: its longest alone taken, a rate without a constant",
             kind,

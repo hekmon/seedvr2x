@@ -40,6 +40,7 @@ import subprocess
 import tempfile
 import time
 from array import array
+from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
@@ -51,7 +52,7 @@ import numpy.typing as npt
 
 from seedvr2x.clock import wall
 from seedvr2x.media.ffmpeg import MediaError, ends_with_us
-from seedvr2x.media.files import partial_path, replace_whole
+from seedvr2x.media.files import partial_path, replace_whole, size_said
 from seedvr2x.media.index import NOPTS, FrameIndex
 
 logger = logging.getLogger(__name__)
@@ -243,6 +244,8 @@ class Assembled:
     # How far another stream's packets run ahead of the video's in the file's order, at most, in
     # seconds, by their timestamps: the file's interleaving (INTERLEAVED).
     ahead: float
+    # The source's other streams by kind, in words (others_said), for the lines that count them.
+    others: str = ""
 
 
 @dataclass
@@ -276,6 +279,43 @@ def _counted(count: int, noun: str) -> str:
     """`count` and its noun, plural unless the count is 1 (cli._plural's rule: this module
     can't import the CLI)."""
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+# The other streams of a file by kind, as others_said names them: the kind, its words alone, and
+# its noun in the singular and in the plural. A cover picture is an attachment of the finished
+# file (Stream.picture) but a picture to its user, and counted apart from the attachments.
+_KINDS = (
+    ("audio", "audio", "audio stream", "audio streams"),
+    ("subtitle", "subtitles", "subtitle stream", "subtitle streams"),
+    ("video", "other video", "other video stream", "other video streams"),
+    ("data", "data", "data stream", "data streams"),
+    ("attachment", "attachment", "attachment", "attachments"),
+    ("picture", "cover picture", "cover picture", "cover pictures"),
+)
+
+
+def others_said(others: Sequence[Stream]) -> str:
+    """The other streams of a file named by kind, for the lines that say what an assembly
+    joined (decided on 2026-10-29, from a job's real run: "with 2 other streams" counted the
+    audio and the cover picture together): "no other stream"; "its audio and its cover picture"
+    where every kind present is one stream; else each kind counted, "2 audio streams, 1 subtitle
+    stream and a cover picture"."""
+    counts = Counter("picture" if stream.picture else stream.kind for stream in others)
+    present = [
+        (words, one, many, counts[kind]) for kind, words, one, many in _KINDS if counts[kind]
+    ]
+    if not present:
+        return "no other stream"
+    if all(count == 1 for *_, count in present):
+        parts = [f"its {words}" for words, *_ in present]
+    else:
+        parts = [
+            "a cover picture"
+            if one == "cover picture" and count == 1
+            else f"{count} {one if count == 1 else many}"
+            for _, one, many, count in present
+        ]
+    return parts[0] if len(parts) == 1 else f"{', '.join(parts[:-1])} and {parts[-1]}"
 
 
 def _absolute(path: Path) -> Path:
@@ -1082,17 +1122,31 @@ def reading_said(source: Path) -> str:
     read that fails is said with its reason, and no duration given."""
     size = source.stat().st_size
     what = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
-    what += f" its {size / 2**30:.1f} GiB"
+    what += f" its {size_said(size)}"
     try:
         # Measured by the run's clock, said by the wall's (clock.py).
         seconds = wall(_read_seconds(source, size))
     except OSError as error:
         return f"{what}, for a time not estimated ({error})"
+    # PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "under a second" for a time under one and
+    # leaves the rest open): a read that short is said as it is, not as a floor of "a few
+    # seconds", which a source of megabytes would then overstate; the line stays, since it also
+    # says what is read.
+    if seconds < 1:
+        return f"{what}, under a second"
     if seconds < 10:
         return f"{what}, at least a few seconds"
     if seconds < 90:
         return f"{what}, at least about {round(seconds / 5) * 5} s"
     return f"{what}, at least about {round(seconds / 60)} min"
+
+
+def timed_read(source: Path) -> float:
+    """The seconds, of the run's clock, to read the whole of `source` once, from a timed read of
+    SAMPLE bytes of it (_read_seconds, whose caveats stand: a floor where the page cache answers).
+    OSError where the file can't be read. For the lines that name a long read before it starts
+    (cli._long_read)."""
+    return _read_seconds(source, source.stat().st_size)
 
 
 def _read_seconds(source: Path, size: int) -> float:
@@ -1274,15 +1328,16 @@ def assemble(
     result = Assembled(
         *(total, size, len(source_layout.streams), len(source_layout.chapters)),
         *(joined - began, done - joined, ahead / 1000),
+        others_said(source_layout.others),
     )
     logger.info(
-        "%s: assembled, %s of %s with %s%s and %s of %s,"
-        " %.2f GiB: joined in %.1f s, checked by its packets in %.1f s; the other streams at"
+        "%s: assembled, %s of %s with %s%s, and %s of %s,"
+        " %s: joined in %.1f s, checked by its packets in %.1f s; the other streams at"
         " most %.2f s ahead of the video in the file",
         output,
         _counted(total, "frame"),
         _counted(len(segments), "segment"),
-        _counted(len(source_layout.streams) - 1, "other stream"),
+        result.others,
         (
             f" (its data streams {', '.join(str(stream.index) for stream in gone)} left out)"
             if gone
@@ -1290,7 +1345,7 @@ def assemble(
         ),
         _counted(len(source_layout.chapters), "chapter"),
         source,
-        size / 2**30,
+        size_said(size, 2),
         wall(result.joined),
         wall(result.checked),
         result.ahead,

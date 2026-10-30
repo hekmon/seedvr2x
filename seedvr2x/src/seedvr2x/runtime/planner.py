@@ -34,6 +34,7 @@ planner, Budget; To measure, The VAE's room). PROVISIONAL (implementation, 2026-
 others: ENCODE_EXTRA on every encode, until the encode is refitted on seedvr2x, and split's term
 off a tiled decode's peak (decode_peak)."""
 
+import logging
 import math
 import mmap
 from collections import Counter
@@ -65,6 +66,8 @@ from seedvr2x.vendor.models.dit_7b.window import (
     make_720Pwindows_bysize,
     make_shifted_720Pwindows_bysize,
 )
+
+logger = logging.getLogger(__name__)
 
 GIB = 1024**3
 MIB = 1024**2
@@ -1079,6 +1082,11 @@ def plan(
             _planned(job, substituted, recorded, host_available)
         except PlanError:
             instead = ""
+    # The refusal the budget's second line names: said whole at debug, not in the line (DESIGN.md,
+    # Architecture, What it prints, decided on 2026-10-28).
+    logger.debug(
+        "the plan with the reserve of %s GiB was refused: %s", _gib(memory.RESERVE), refused
+    )
     return made, replace(peaks, tightened=refused, instead=instead)
 
 
@@ -2610,7 +2618,7 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
     torch's allocator beyond a step's peak (memory.RESERVE), two figures that were once given as
     one (a review's finding, 2026-10-12), the margin counted in the reserve (_Job.margin); where
     the plan took memory.RESERVE_TIGHT, the plan with memory.RESERVE refused, that refusal and
-    the cost, slow, in the same line (Peaks.tightened)."""
+    the cost, slow, in a second line (Peaks.tightened)."""
     reading = peaks.reading
     # An early reading (memory.early) says what NVML read and what was counted off it, never
     # "its driver reports", which it did not ask.
@@ -2631,27 +2639,34 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
         f"budget: {_gib(peaks.budget)} GiB, the {_gib(free)} GiB free less torch's limit,"
         f" {_gib(reading.left)} GiB under it, and the reserve of"
         f" {_gib(free - reading.left - peaks.free)} GiB left to torch's allocator beyond a step's"
-        f" peak"
+        f" peak; the margin of {_gib(MARGIN)} GiB is in the reserve"
     )
-    if peaks.tightened is not None:
-        # The plan's last resort (plan; DESIGN.md, Allocator): said slow, with what refused the
-        # plan with the usual reserve.
-        tight, usual = _gib(memory.RESERVE_TIGHT), _gib(memory.RESERVE)
-        budget += (
-            f", {tight} and not {usual}, the plan with {usual} refused ({peaks.tightened}); slow: a"
-            " step short of room beyond its peak slows down where it would be refused, and a job"
-            f" that fits with {usual} runs up to 1.5 times as long with {tight}; memory freed on"
-            f" the card gives the {usual} back"
-        )
-        if peaks.instead:
-            # The pin that runs with the usual reserve, at full speed (design, 2026-10-21).
-            budget += f"; {peaks.instead} would run with the full reserve, at full speed"
-    return [
+    lines = [
         f"card: {card}, {_gib(free)} GiB free"
         f" {_named(reading, _gib) if early is None else f'({early})'}: the run is held to the"
         " card's own memory, its driver giving more than the card has",
-        f"{budget}; the margin of {_gib(MARGIN)} GiB is in the reserve",
+        budget,
     ]
+    if peaks.tightened is not None:
+        # The plan's last resort (plan; DESIGN.md, Allocator): said slow, on a line of its own,
+        # the budget's second (DESIGN.md, Architecture, What it prints, decided on 2026-10-28:
+        # the budget's line took 851 characters with the usual reserve's refusal inside it, which
+        # plan() now says at debug). PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "the two
+        # lines a plan's line may take" and leaves the split open): the figures in the first, the
+        # reserve of 2.5, its cost and the pin that runs at full speed in the second, so that the
+        # first reads as any held plan's does.
+        tight, usual = _gib(memory.RESERVE_TIGHT), _gib(memory.RESERVE)
+        reserve = (
+            f"reserve: {tight} GiB and not {usual}, the plan with {usual} having been refused"
+            " (--verbose says why); slow: a step short of room beyond its peak slows down where"
+            f" it would be refused, and a job that fits with {usual} runs up to 1.5 times as"
+            f" long with {tight}; memory freed on the card gives the {usual} back"
+        )
+        if peaks.instead:
+            # The pin that runs with the usual reserve, at full speed (design, 2026-10-21).
+            reserve += f"; {peaks.instead} would run with the full reserve, at full speed"
+        lines.append(reserve)
+    return lines
 
 
 def _early_said(reading: Reading, said: Callable[[float], str]) -> str:

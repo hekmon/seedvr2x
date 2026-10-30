@@ -11,6 +11,7 @@ through typed functions.
 # pyright: basic
 
 import ctypes
+import functools
 import logging
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -25,6 +26,7 @@ from omegaconf import ListConfig, OmegaConf
 from torch import Tensor
 from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
+from tqdm import tqdm
 
 from seedvr2x.runtime import blockswap, memory, weights
 from seedvr2x.runtime.blockswap import Part, Placement
@@ -55,6 +57,20 @@ class _DebugLog:
 
     def log(self, message: str, *args: Any, **kwargs: Any) -> None:
         logger.debug("%s", message)
+
+
+def sampler_bars(shown: bool) -> None:
+    """Show the vendored sampler's progress bar, one per window ("EulerSampler: 100%|...",
+    printed by tqdm in samplers/base.py), under --verbose only, and silence it otherwise: 848
+    lines in a night on milestone 7 (DESIGN.md, Architecture, What it prints, decided on
+    2026-10-28; built on 2026-10-29). Done from outside, on the module's own `tqdm` name, since
+    vendor/ is numz's tree path for path and never edited here (AGENTS.md); TQDM_DISABLE would
+    reach every tqdm in the process, a download's bar among them (huggingface_hub's, which keeps
+    its own), where this one name reaches the sampler's alone. Called with each load of the
+    models, so that the last call's setting stands."""
+    from seedvr2x.vendor.common.diffusion.samplers import base
+
+    base.tqdm = functools.partial(tqdm, disable=not shown)
 
 
 # The VAE's weights as a part that leaves the device (blockswap.Part), named for the messages.
@@ -167,6 +183,7 @@ def load_models(
     which names it."""
     # numz goes by "7b" in the file name (src/core/model_configuration.py:718-720), so a renamed
     # file loads as what its name says; seedvr2x goes by the file's tensors (DESIGN.md, Weights).
+    sampler_bars(logger.isEnabledFor(logging.DEBUG))
     config_dir = weights.check(dit_file, "dit").config
     weights.check(vae_file, "vae")
 

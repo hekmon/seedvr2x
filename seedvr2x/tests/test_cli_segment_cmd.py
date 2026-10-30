@@ -503,7 +503,7 @@ def test_missing_frames_filled_through_the_command_to_the_finished_file(
     assert upscale(tmp_path, source, "x.mkv", *SEEKING, "--segment-cmd", command) == 0
     final = tmp_path / "x.mkv"
     assert (tmp_path / "fed.txt").read_text().split() == ["5", "12", "6", "6", "16"]
-    assert f"wrote {final}: 40 frames from 4 segments, with the source's 1 other" in caplog.text
+    assert f"wrote {final}: 40 frames from 4 segments, with its audio, and 0" in caplog.text
     assert sorted(path.name for path in tmp_path.glob("x.mkv*")) == ["x.mkv", "x.mkv.manifest.json"]
     assert count_frames(final) == 40 and indexes(final) == list(range(40))
     assert video_times(final) == HOLED_TIMES

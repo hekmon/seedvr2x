@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 from fractions import Fraction
@@ -503,3 +504,123 @@ def test_the_early_reading_of_the_card_imports_no_torch(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert "does not hold the recorded plan" in result.stderr
     assert result.stdout.strip() == ""
+
+
+# A run's entry as a process sees it: the value of TORCH_CPP_LOG_LEVEL at each import of torch,
+# recorded by a finder in front of the import system, then the command line run on a source that
+# isn't there (refused before any model), then torch imported by hand.
+C10_LEVEL = """
+import importlib.abc
+import os
+import sys
+
+seen = []
+
+
+class Finder(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name == "torch":
+            seen.append(os.environ.get("TORCH_CPP_LOG_LEVEL"))
+        return None
+
+
+sys.meta_path.insert(0, Finder())
+from seedvr2x import cli
+
+print("imported", seen)
+status = cli.main(sys.argv[1:])
+print("status", status, "during", seen)
+import torch
+
+print("at torch", seen)
+"""
+
+
+@pytest.mark.parametrize(
+    ("flags", "given", "expected"),
+    [
+        # Default: c10's warnings (the allocator's "recovered from an allocation failure") out.
+        ([], None, "ERROR"),
+        # --verbose leaves c10 at its own default, warnings shown.
+        (["--verbose"], None, None),
+        # The user's own setting wins, with or without --verbose.
+        ([], "INFO", "INFO"),
+        (["--verbose"], "WARNING", "WARNING"),
+    ],
+)
+def test_torch_s_c_plus_plus_lines_are_out_of_the_default_output_but_not_under_verbose(
+    tmp_path: Path, flags: list[str], given: str | None, expected: str | None
+) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-23, built on 2026-10-29): c10
+    # reads TORCH_CPP_LOG_LEVEL as torch is imported, and the lines of its log, which no Python
+    # warning carries ("[W1023 ... CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync]
+    # recovered from an allocation failure by trimming the pool and retrying"), are kept out by
+    # ERROR. The command line sets it before anything imports torch, and nothing does before:
+    # the finder sees the value at the first import, and no import in between.
+    environment = {k: v for k, v in os.environ.items() if k != "TORCH_CPP_LOG_LEVEL"}
+    if given is not None:
+        environment["TORCH_CPP_LOG_LEVEL"] = given
+    result = subprocess.run(
+        [
+            *(sys.executable, "-c", C10_LEVEL, str(tmp_path / "absent.mkv")),
+            *("-o", str(tmp_path / "out.mkv"), *flags),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"imported {[]}\n" in result.stdout and f"during {[]}\n" in result.stdout
+    assert f"at torch {[expected]}\n" in result.stdout
+
+
+def test_the_line_before_the_masters_are_checked_says_tiny_sizes_and_times_as_they_are(
+    tmp_path: Path,
+) -> None:
+    # "checking the bytes of 1 segment, 0.04 GiB, about 0 s" said nothing (2026-10-29's list from a
+    # real job): 41 MiB, under a second. A size from 0.1 GiB stays in GiB, a time from a second
+    # "about N s"; with no disk rate, the bytes alone.
+    said = cli._checking_said  # pyright: ignore[reportPrivateUsage]
+    small = tmp_path / "small.mkv"
+    with small.open("wb") as handle:
+        handle.truncate(41 * 2**20)
+    big = tmp_path / "big.mkv"
+    with big.open("wb") as handle:
+        handle.truncate(3 * 2**30)
+    rate = 100 * 2**20
+    assert said([small], rate) == "checking the bytes of 1 segment, 41 MiB, under a second"
+    assert said([small], None) == "checking the bytes of 1 segment, 41 MiB"
+    assert said([small, big], rate) == ("checking the bytes of 2 segments, 3.04 GiB, about 31 s")
+
+
+def test_a_long_read_of_the_source_is_named_before_it_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-28, built on 2026-10-29): the
+    # source's SHA-256, read by a resume (cli._content) and on a finished job, is named before it
+    # starts when it takes long: what is read and for about how long, from a timed sample of
+    # the file (assembly.timed_read). Under five seconds it is no silence worth a line.
+    from seedvr2x.media import assembly
+
+    source = tmp_path / "source.mkv"
+    source.write_bytes(bytes(3 * 2**20))
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    long_read = cli._long_read  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(assembly, "timed_read", lambda path: 124.0)
+    assert long_read(source) == ("3 MiB", "about 2 min 4 s")
+    cli._content(source)  # pyright: ignore[reportPrivateUsage]
+    assert f"{source}: reading its 3 MiB to check its SHA-256, about 2 min 4 s" in caplog.messages
+    [read, done] = [m for m in caplog.messages if "SHA-256" in m]
+    assert read.endswith("about 2 min 4 s") and ", in " in done
+    monkeypatch.setattr(assembly, "timed_read", lambda path: 4.9)
+    assert long_read(source) == ("3 MiB", "")
+    caplog.clear()
+    cli._content(source)  # pyright: ignore[reportPrivateUsage]
+    assert [m for m in caplog.messages if "to check its SHA-256" in m] == []
+
+    def unreadable(path: Path) -> float:
+        raise OSError("Input/output error")
+
+    monkeypatch.setattr(assembly, "timed_read", unreadable)
+    assert long_read(source) == ("3 MiB", "")

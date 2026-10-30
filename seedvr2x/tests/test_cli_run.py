@@ -20,12 +20,13 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import warnings
 import weakref
 import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from fractions import Fraction
 from itertools import accumulate, pairwise
 from pathlib import Path
@@ -1038,7 +1039,7 @@ def test_a_driver_that_spills_is_planned_under_and_held(
         card,
     )
     assert recorded["budget"] == planned_in
-    assert "the GPU's driver gives memory the card doesn't have" in caplog.text
+    assert memory.LENDS in caplog.text
     # The plan's card lines name each figure, where "92.50 GiB free" alone would be taken for
     # what the plan counts on, and "87.20 GiB free" for what the driver reports; what torch's
     # limit leaves and what the plan leaves again, the reserve, are said apart on the budget's
@@ -1281,16 +1282,22 @@ def test_a_held_run_refused_with_4_5_takes_2_5(
         assert (output == "resumed") == any(
             line.startswith(f"resuming {tmp_path / output}") for line in caplog.messages
         )
+        # The budget takes two lines (DESIGN.md, Architecture, What it prints, built on
+        # 2026-10-29): its figures, then the reserve of 2.5 and what it costs, the refusal of
+        # the plan with 4.5 said at debug only.
         [budget] = [line for line in caplog.messages if line.startswith("plan: budget: ")]
-        assert (
-            " and the reserve of 2.50 GiB left to torch's allocator beyond a step's peak, 2.50 and"
-            f" not 4.50, the plan with 4.50 refused ({refused}"
-        ) in budget
+        [reserve] = [line for line in caplog.messages if line.startswith("plan: reserve: ")]
         assert budget.endswith(
+            " and the reserve of 2.50 GiB left to torch's allocator beyond a step's peak; the"
+            " margin of 0.60 GiB is in the reserve"
+        )
+        assert refused not in budget + reserve
+        assert reserve.startswith("plan: reserve: 2.50 GiB and not 4.50, the plan with 4.50 having")
+        assert reserve.endswith(
             "; slow: a step short of room beyond its peak slows down where it would be refused,"
             " and a job that fits with 4.50 runs up to 1.5 times as long with 2.50; memory freed"
             " on the card gives the 4.50 back; --swap-blocks 5 would run with the full reserve, at"
-            " full speed; the margin of 0.60 GiB is in the reserve"
+            " full speed"
         )
         content = json.loads((tmp_path / output / "manifest.json").read_text())
         assert content["plan"]["memory"]["reserve"] == memory.RESERVE_TIGHT
@@ -8284,3 +8291,73 @@ def test_a_line_starts_with_the_time_of_day_but_under_verbose() -> None:
         r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} INFO seedvr2x: the message",
         verbose.format(record(logging.INFO)),
     )
+
+
+def test_a_line_says_when_the_date_or_the_clocks_change_but_not_under_verbose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-28, built on 2026-10-29): the
+    # time of day alone is ambiguous the night the clocks go back (02:00 to 02:59 come twice), so
+    # the date changing and the local zone's offset from UTC changing are each said in a line of
+    # their own, before the line logged after the change (cli._Lines: checked at each line
+    # logged). A fake clock: the records' own times, in Europe/Paris, from 2026-10-24 23:59 to
+    # 2026-10-25 02:30 the second time through, the night the clocks went back at 03:00.
+    from datetime import UTC
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setenv("TZ", "Europe/Paris")
+    time.tzset()
+    try:
+        paris = ZoneInfo("Europe/Paris")
+
+        def line(lines: logging.Formatter, when: datetime, text: str) -> str:
+            made = logging.LogRecord("seedvr2x", logging.INFO, "cli.py", 1, text, None, None)
+            made.created = when.timestamp()
+            return lines.format(made)
+
+        lines = cli._Lines()  # pyright: ignore[reportPrivateUsage]
+        first = datetime(2026, 10, 24, 23, 59, 58, tzinfo=paris)
+        # The first line says nothing: nothing to have changed from.
+        assert line(lines, first, "unit 1") == "23:59:58 unit 1"
+        assert line(lines, first.replace(second=59), "unit 2") == "23:59:59 unit 2"
+        # Past midnight: the date, before the line that notices it, with that line's time.
+        after = datetime(2026, 10, 25, 0, 0, 3, tzinfo=paris)
+        assert (
+            line(lines, after, "unit 3")
+            == "00:00:03 the date is now Sun 25 Oct 2026\n00:00:03 unit 3"
+        )
+        assert line(lines, after.replace(second=4), "unit 4") == "00:00:04 unit 4"
+        # 02:30 of the first pass (UTC+2), then of the second (UTC+1, fold=1): the offset said
+        # once, the date not again, and the line after it not at all.
+        before = datetime(2026, 10, 25, 2, 30, tzinfo=paris, fold=0)
+        again = datetime(2026, 10, 25, 2, 30, tzinfo=paris, fold=1)
+        assert before.utcoffset() != again.utcoffset()
+        assert line(lines, before, "unit 5") == "02:30:00 unit 5"
+        assert line(lines, again, "unit 6") == (
+            "02:30:00 the clocks changed: the local time is now UTC+01:00 (it was UTC+02:00), the"
+            " times of day below in the new one\n02:30:00 unit 6"
+        )
+        assert line(lines, again.replace(minute=31), "unit 7") == "02:31:00 unit 7"
+        # A warning keeps WARNING on its own line, the change's line before it plain.
+        night = datetime(2026, 10, 26, 0, 1, tzinfo=paris)
+        made = logging.LogRecord("seedvr2x", logging.WARNING, "cli.py", 1, "careful", None, None)
+        made.created = night.timestamp()
+        assert lines.format(made) == (
+            "00:01:00 the date is now Mon 26 Oct 2026\n00:01:00 WARNING careful"
+        )
+        # The spring: the clocks forward, UTC+1 to UTC+2.
+        spring = datetime(2026, 3, 29, 1, 59, tzinfo=paris)
+        lines = cli._Lines()  # pyright: ignore[reportPrivateUsage]
+        assert line(lines, spring, "a") == "01:59:00 a"
+        past = datetime(2026, 3, 29, 3, 1, tzinfo=paris)
+        assert past.astimezone(UTC) - spring.astimezone(UTC) == timedelta(minutes=2)
+        assert line(lines, past, "b") == (
+            "03:01:00 the clocks changed: the local time is now UTC+02:00 (it was UTC+01:00), the"
+            " times of day below in the new one\n03:01:00 b"
+        )
+        # --verbose keeps the old format whole: the date is in every line, nothing added.
+        verbose = logging.Formatter(cli.VERBOSE_FORMAT)
+        assert line(verbose, after, "x").count("\n") == 0
+    finally:
+        monkeypatch.undo()
+        time.tzset()

@@ -14,6 +14,20 @@ logger = logging.getLogger(__name__)
 _UNSYNCED: list[Path] = []
 
 
+# Under it, a size is said in MiB (size_said): 0.1 GiB.
+TINY = 2**30 // 10
+
+
+def size_said(count: int, places: int = 1) -> str:
+    """A size as the logs say it before a long read: "16.5 GiB" to `places` decimals, and "41 MiB"
+    under 0.1 GiB, where "0.0 GiB" says nothing (decided on 2026-10-29); "12 KiB" under 1 MiB."""
+    if count < 2**20:
+        return f"{count / 2**10:.0f} KiB"
+    if count < TINY:
+        return f"{count / 2**20:.0f} MiB"
+    return f"{count / 2**30:.{places}f} GiB"
+
+
 def partial_path(path: Path) -> Path:
     """Where path is written before it is whole: beside it, named path.partial."""
     return path.with_name(f"{path.name}.partial")

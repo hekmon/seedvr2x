@@ -60,12 +60,13 @@ def test_a_card_unread_is_held_under_a_margin_of_its_own(
     # the margin measured under that figure alone, 3.0 GiB.
     for name, value in zip(("HELD_BACK", "RESERVE", "HELD_BACK_UNREAD"), MEASURED, strict=True):
         monkeypatch.setattr(memory, name, value)
-    caplog.set_level(logging.INFO, logger="seedvr2x")
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")  # the whole warning is said at debug
     reported, card = round(30.2 * GIB), round(28.22 * GIB)
     startup(monkeypatch, Card(reported, spills=True))
     assert caplog.messages[-1].endswith(
         "read through NVML; where NVML doesn't answer, the driver's figure less 3.0 GiB"
     )
+    caplog.set_level(logging.INFO, logger="seedvr2x")
     counted = reported - 3 * GIB - round(4.5 * GIB)
     assert memory.reading(reported) == memory.Reading(reported, None, counted, True, 3 * GIB)
     assert caplog.messages[-1].endswith(
@@ -514,6 +515,7 @@ def test_a_driver_that_leaves_other_programs_out_is_not_asked(
     # probe). Its own figure says what it is: taken for one that spills, and not asked.
     card, nvml = Card(30 * GIB, spills=True), Nvml({NAMED: 20 * GIB})
     libraries(monkeypatch, card, nvml)
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
     found = memory.probe()
     assert found == Driver(True, 0, 30 * GIB, TOTAL, 20 * GIB)
     assert "cuMemAlloc" not in card.calls and card.calls[-1] == "cuCtxDestroy"
@@ -526,7 +528,9 @@ def test_a_driver_that_leaves_other_programs_out_is_not_asked(
     # A run there is held, whether such a driver would have refused or not: held for nothing,
     # it loses memory; not held where it should be, its frames.
     assert startup(monkeypatch, Card(30 * GIB, spills=False), nvml) == HELD
-    assert memory.spills() and "not asked for more" in caplog.messages[0]
+    # The warning is the line (memory.LENDS); the finding whole, with that, is the debug line.
+    assert memory.spills() and caplog.messages[0] == memory.LENDS
+    assert "not asked for more" in caplog.messages[1] and caplog.records[1].levelname == "DEBUG"
     # The two figures within the request's extra of each other, or NVML silent: asked, as
     # before, by one request of what the driver reports and that extra.
     for free in (30 * GIB - OVER, 30 * GIB, 31 * GIB, None):
@@ -548,9 +552,18 @@ def test_on_a_driver_that_spills_torch_is_held(
     nvml = Nvml({NAMED: 31 * GIB})
     assert startup(monkeypatch, Card(30 * GIB, spills=True), nvml) == HELD
     assert memory.spills() and os.environ["PYTORCH_CUDA_ALLOC_CONF"] == HELD
-    assert [record.levelname for record in caplog.records] == ["WARNING", "WARNING"]
-    assert "gives memory the card doesn't have" in caplog.messages[0]
-    assert caplog.messages[1] == (
+    # Each warning is a line, and the whole text of each is said at debug after it (decided on
+    # 2026-10-28, built on 2026-10-29).
+    assert [record.levelname for record in caplog.records] == [
+        *("WARNING", "DEBUG", "WARNING", "DEBUG")
+    ]
+    assert caplog.messages[0] == memory.LENDS
+    assert "gives memory the card doesn't have" in caplog.messages[1]
+    assert caplog.messages[2] == (
+        "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
+        ' less 3.0 GiB, and the plan in 2.3 GiB less; the manual\'s "Under WSL2" section says why'
+    )
+    assert caplog.messages[3] == (
         "seedvr2x holds itself to the card there: torch's own allocator, its segments expandable,"
         " limited to the memory free less 3.0 GiB, and plans in 2.3 GiB less; a run that passes"
         " the limit is refused."
@@ -565,7 +578,7 @@ def test_on_a_driver_that_spills_torch_is_held(
     assert nvml.calls.count("nvmlInit") == 1  # the probe's, which then asked the driver
     held_under = memory.Reading(30 * GIB, 31 * GIB, round(24.7 * GIB), True, 3 * GIB)
     assert memory.reading(30 * GIB) == held_under
-    assert caplog.records[2].levelname == "DEBUG" and caplog.messages[2] == (
+    assert caplog.records[4].levelname == "DEBUG" and caplog.messages[4] == (
         "the plan counts on 24.70 GiB of the GPU's memory, of the 30.00 GiB free as its driver"
         " reports it to this process (the whole card has 31.00 GiB free by NVML): 3.0 GiB are"
         " left to what torch doesn't count on the card, 2.3 to what the plan leaves torch's"
@@ -588,7 +601,8 @@ def test_on_a_driver_that_spills_torch_is_held(
         " free as its driver reports it to this process (the whole card has 31.00 GiB free by"
         " NVML)"
     )
-    assert len(caplog.messages) == 5 and nvml.open == 0
+    # The two warnings' whole texts (debug) are two of the records.
+    assert len(caplog.messages) == 5 + 2 and nvml.open == 0
 
 
 def test_the_whole_card_s_free_memory_is_taken_where_it_is_the_smaller(
@@ -840,7 +854,7 @@ def test_no_answer_behind_wsl_is_taken_for_a_driver_that_spills(
         " what the card can't hold: taken for one that gives system memory in its place, as"
         " that driver did whenever it was asked"
     )
-    assert caplog.messages[2].startswith("seedvr2x holds itself to the card there")
+    assert caplog.messages[2].startswith("seedvr2x holds itself to the card's own memory there")
     assert memory.usable(30 * GIB) == round(24.7 * GIB)
     limits = held(monkeypatch, 20 * GIB)
     assert memory.hold("cuda:0") == 17 * GIB and limits == [17 / 32]
@@ -1036,6 +1050,7 @@ def test_the_environment_s_allocator_stands(
     # slow it down and run it (DESIGN.md, Allocator, decided on 2026-10-13), and checked as the
     # default is.
     monkeypatch.setenv(variable, given)
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")  # the whole texts are debug lines
     assert startup(monkeypatch, Card(30 * GIB, spills=True)) == HELD
     assert {name: os.environ.get(name) for name in memory.VARIABLES} == {
         name: given if name == variable else None for name in memory.VARIABLES
@@ -1051,7 +1066,8 @@ def test_the_environment_s_allocator_stands(
         ),
         "segments": "the allocator is the environment's",
     }[kind]
-    assert (said in caplog.text) == warned and len(caplog.messages) == 2 + warned
+    warnings_said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert (said in caplog.text) == warned and len(warnings_said) == 2 + warned
     # The line before it names torch's own allocator only where the run takes it, and whether
     # its segments are expandable.
     held_by = {
@@ -1059,7 +1075,11 @@ def test_the_environment_s_allocator_stands(
         "plain": "torch's own allocator without expandable segments, limited to",
         "segments": "torch's own allocator, its segments expandable, limited to",
     }[kind]
-    assert caplog.messages[1].startswith(f"seedvr2x holds itself to the card there: {held_by}")
+    [whole] = [
+        m for m in caplog.messages if m.startswith("seedvr2x holds itself to the card there")
+    ]
+    assert whole.startswith(f"seedvr2x holds itself to the card there: {held_by}")
+    assert warnings_said[1].startswith("seedvr2x holds itself to the card's own memory there")
     limits = held(monkeypatch, 20 * GIB)
     assert memory.hold("cuda:0") == 17 * GIB and limits == [17 / 32]
     held(monkeypatch, GIB)  # 1 GiB free where torch may take 17 more
@@ -1073,7 +1093,8 @@ def test_the_environment_s_allocator_stands(
     # On a driver that refuses the setting stands as well, and nothing is said of it.
     caplog.clear()
     assert startup(monkeypatch, Card(30 * GIB, spills=False)) == "backend:cudaMallocAsync"
-    assert os.environ[variable] == given and len(caplog.messages) == 0
+    assert os.environ[variable] == given
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
 
 
 def test_other_programs_filling_the_card_stop_the_run(
@@ -2133,3 +2154,17 @@ def test_a_held_run_s_allocator_keeps_torch_s_limit() -> None:
     backend, refused, last, whole, under, expandable, segments = ran.stdout.split()
     assert (backend, refused, last, whole, under) == ("native", "True", "2", "True", "True")
     assert expandable == "True" and int(segments) >= 1
+
+
+def test_a_driver_that_spills_is_warned_of_in_a_line_each_at_every_start(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Architecture, What it prints (decided on 2026-10-28, built on 2026-10-29): the
+    # two warnings (501 and 521 characters at every start, resumes included) are a line each, short
+    # and plain, and point to the manual; without --verbose nothing else is said of them.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    assert startup(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: 20 * GIB})) == HELD
+    assert [r.levelname for r in caplog.records] == ["WARNING", "WARNING"]
+    assert caplog.messages[0] == memory.LENDS
+    assert "Under WSL2" in caplog.messages[1]
+    assert all(len(message) < 220 for message in caplog.messages)
