@@ -137,6 +137,45 @@ def test_imports_no_torch() -> None:
     assert result.stdout.strip() == ""
 
 
+def test_an_early_reading_refusal_says_nvml_s_figure_and_the_context_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A resume's early look at the card (memory.early; DESIGN.md, Memory planner, A resume whose
+    # recorded shape no longer fits, 2026-10-29) is NVML's figure less the CUDA context this
+    # process is yet to make: its refusal, said at debug level, names those two figures, never
+    # "its driver reports" a figure that was computed, and no driver was asked. Behind WSL2's
+    # device (held) and where the driver refuses (not held). A later reading's words are as ever.
+    shot = [Shot(0, 300)]
+    said = "NVML's 5.00 GiB free on the whole card, less 0.75 GiB counted for this process's CUDA"
+    for held in (False, True):
+        monkeypatch.setattr(memory, "paravirtual", lambda held=held: held)
+        with pytest.raises(PlanError) as refused:
+            planner.plan(memory.early(5 * GIB), HD, shot, Pins(), None, recorded=Plan(8))
+        words = str(refused.value)
+        assert said in words and "driver" not in words, words
+        # Quitting programs gives the shape its memory back: an early reading cannot tell otherwise
+        # (planner._freeable), the driver's figure unread.
+        assert refused.value.shortfall is not None and refused.value.shortfall.freeable
+        # What programs hold by NVML is the most quitting them gives back (memory.card_state):
+        # the shape 18 to 21 GiB short with 1 GiB held is out of their reach, with 40 GiB not.
+        for used, cure in ((None, True), (GIB, False), (40 * GIB, True)):
+            with pytest.raises(PlanError) as cured:
+                planner.plan(memory.early(5 * GIB, used), HD, shot, Pins(), None, recorded=Plan(8))
+            assert cured.value.shortfall is not None
+            assert cured.value.shortfall.freeable is cure, (held, used)
+    # The plan's own lines, were they said, name them too (_card_said).
+    for held in (False, True):
+        monkeypatch.setattr(memory, "paravirtual", lambda held=held: held)
+        made, peaks = planner.plan(memory.early(96 * GIB), HD, shot, Pins(), None, recorded=Plan(8))
+        first = planner.said(made, peaks, "a card", HD, shot, Pins())[0]
+        assert "NVML's 96.00 GiB free on the whole card, less 0.75 GiB" in first
+        assert "driver reports" not in first
+    # A run's own reading keeps the words it had.
+    with pytest.raises(PlanError) as later:
+        planner.plan(Reading(5 * GIB, None, 5 * GIB, False), HD, shot, Pins(), None)
+    assert "the driver reports 5.00 GiB free" in str(later.value)
+
+
 def test_weights_by_the_models_shapes() -> None:
     # The parts of the weights as the 7B and the VAE are built, on the meta device, in their 2
     # bytes a value: a block and the DiT's other parameters by their values; the VAE as its part

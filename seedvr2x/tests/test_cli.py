@@ -449,3 +449,57 @@ def test_verify_reads_no_frame_to_probe(tmp_path: Path, caplog: pytest.LogCaptur
     assert cli.main(["verify", str(master)]) == 1
     assert f"{master}: 9 frames, where 260 were written" in caplog.text
     assert "no frame decoded" not in caplog.text
+
+
+# A resume's early look at the card (memory.card_state, cli._early_memory): NVML's reading replaced,
+# as the tests of tests/test_cli_run.py replace it, a card too small for the recorded shape.
+EARLY_READING = """
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+from seedvr2x import cli
+from seedvr2x.runtime import memory, planner
+
+logging.basicConfig(stream=sys.stderr, format="%(levelname)s %(message)s")
+memory._read_all = lambda index: (4 << 30, 10 << 30)
+assert memory.card_free() == 4 << 30
+assert memory.card_state() == (4 << 30, 10 << 30)
+recorded = {
+    "plan": {
+        "window": 8,
+        "encode_tiles": None,
+        "decode_tiles": None,
+        "compile_dit": False,
+        "compile_vae": False,
+    },
+    "shots": [{"start": 0, "end": 300}],
+}
+args = argparse.Namespace(
+    color_correction="split", accept_env_change=False, input=Path(sys.argv[1])
+)
+cli._early_memory(
+    args, recorded, (1080, 1920), planner.Pins(), numz_padding=False, rehearses=False
+)
+print(*sorted(name for name in ("torch", "torchvision") if name in sys.modules))
+"""
+
+
+def test_the_early_reading_of_the_card_imports_no_torch(tmp_path: Path) -> None:
+    # DESIGN.md, Memory planner, A plan shapes the output a little (decided on 2026-10-28): the
+    # room is read through NVML before torch is imported, no CUDA context of ours made on the
+    # card: a process that reads the card (memory.card_free, memory.card_state) and judges a
+    # recorded shape in the reading (cli._early_memory, which warns here) has loaded no torch.
+    # The warning is checked said, so that the path was run to its end.
+    source = tmp_path / "source.mkv"
+    source.write_bytes(b"x" * 1000)
+    result = subprocess.run(
+        [sys.executable, "-c", EARLY_READING, str(source)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "does not hold the recorded plan" in result.stderr
+    assert result.stdout.strip() == ""

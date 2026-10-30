@@ -1604,17 +1604,26 @@ def test_the_early_reading_counts_off_this_process_s_context(
     # process's CUDA context is on the card: that context off the figure, which the later reading
     # has counted; the module's state, startup's, untouched, and nothing logged.
     caplog.set_level(logging.DEBUG, logger="seedvr2x")
-    assert memory.CONTEXT == round(1.23 * GIB)
+    # 0.67 GiB measured on an RTX 5090 under WSL2 (2026-10-29) plus 0.08 (DESIGN.md, Memory
+    # planner, A resume whose recorded shape no longer fits); 1.23 until then.
+    assert memory.CONTEXT == round(0.75 * GIB)
     state = (memory._spills, memory._native, memory._segments, memory._limit)  # pyright: ignore[reportPrivateUsage]
     free = 28 * GIB - memory.CONTEXT
     # A driver that refuses (no WSL2 device): its figure is the card's, nothing held.
-    assert memory.early(28 * GIB) == memory.Reading(free, None, free, False)
+    refusing = memory.Reading(free, None, free, False, nvml=28 * GIB)
+    assert memory.early(28 * GIB) == refusing
+    # The reading says it is early, and what was counted off NVML's figure.
+    assert (
+        refusing.context == memory.CONTEXT and memory.Reading(free, None, free, False).context == 0
+    )
     # Behind WSL2's device, taken for held as startup takes a driver that doesn't answer: the card's
     # figure less what torch is held back from and the reserve, torch's own allocator with
     # its segments by default.
     monkeypatch.setattr(memory, "paravirtual", lambda: True)
     counted = free - memory.HELD_BACK - memory.RESERVE
-    held = memory.Reading(free, free, counted, True, memory.HELD_BACK, expandable=True)
+    held = memory.Reading(
+        free, free, counted, True, memory.HELD_BACK, expandable=True, nvml=28 * GIB
+    )
     assert memory.early(28 * GIB) == held
     # The environment's allocator stands, as startup reads it: cudaMallocAsync or torch's own
     # without the segments are not expandable; an empty setting is none.
@@ -1626,10 +1635,28 @@ def test_the_early_reading_counts_off_this_process_s_context(
     ):
         monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", setting)
         assert memory.early(28 * GIB).expandable is expandable, setting
+    # What programs hold of the card by NVML rides on the reading (card_state).
+    assert memory.early(28 * GIB, 4 * GIB).nvml_used == 4 * GIB and refusing.nvml_used is None
     # Never under nothing.
-    assert memory.early(GIB) == memory.Reading(0, 0, 0, True, memory.HELD_BACK, expandable=True)
+    # A card with less free than the context counted (1 GiB while CONTEXT was 1.23).
+    least = memory.Reading(0, 0, 0, True, memory.HELD_BACK, expandable=True, nvml=GIB // 2)
+    assert memory.early(GIB // 2) == least and least.context == GIB // 2
     assert state == (memory._spills, memory._native, memory._segments, memory._limit)  # pyright: ignore[reportPrivateUsage]
     assert caplog.messages == []
+
+
+def test_card_state_reads_what_is_free_and_what_programs_hold(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # card_free's reading with nvmlMemory_v2_t's `used` beside it (the driver's own `reserved`
+    # not in it), for a resume's early reading; card_free itself is the free memory alone.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    monkeypatch.setattr(memory, "_read_all", lambda index: (28 * GIB, 3 * GIB))
+    assert memory.card_state() == (28 * GIB, 3 * GIB) and memory.card_free() == 28 * GIB
+    monkeypatch.setattr(memory, "_read_all", lambda index: "no such library")
+    caplog.clear()
+    assert memory.card_state() is None and memory.card_free() is None
+    assert len([m for m in caplog.messages if "no such library" in m]) == 2
 
 
 def cached(

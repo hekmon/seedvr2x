@@ -2518,8 +2518,9 @@ def _shortfall(job: _Job, plan: Plan, host_available: int | None) -> Shortfall |
         return Shortfall("", "", host=True)
     if phase:
         need = _peaks(job, plan).need(phase) + job.margin
-        # A driver that refuses reports what other programs leave: closing them gives it back.
-        freeable = not job.reading.held or _freeable(job, need)
+        # A driver that refuses reports what other programs leave: closing them gives it back; an
+        # early reading, held or not, judges it by what they hold by NVML (_freeable).
+        freeable = (not job.reading.held and job.reading.nvml is None) or _freeable(job, need)
         return Shortfall(names[phase], _short(need, job.free), freeable=freeable)
     return None
 
@@ -2603,9 +2604,17 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
     the plan took memory.RESERVE_TIGHT, the plan with memory.RESERVE refused, that refusal and
     the cost, slow, in the same line (Peaks.tightened)."""
     reading = peaks.reading
+    # An early reading (memory.early) says what NVML read and what was counted off it, never
+    # "its driver reports", which it did not ask.
+    early = None if reading.nvml is None else _early_said(reading, _gib)
     if not reading.held:
+        free_said = (
+            f"{_gib(peaks.free)} GiB free"
+            if early is None
+            else f"{early}, {_gib(peaks.free)} GiB left"
+        )
         return [
-            f"card: {card}, {_gib(peaks.free)} GiB free, a budget of {_gib(peaks.budget)} GiB:"
+            f"card: {card}, {free_said}, a budget of {_gib(peaks.budget)} GiB:"
             f" the margin of {_gib(MARGIN)} GiB left to the desktop and other programs; no"
             " reserve, the driver refusing memory the card doesn't have"
         ]
@@ -2630,10 +2639,22 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
             # The pin that runs with the usual reserve, at full speed (design, 2026-10-21).
             budget += f"; {peaks.instead} would run with the full reserve, at full speed"
     return [
-        f"card: {card}, {_gib(free)} GiB free {_named(reading, _gib)}: the run is held to the"
+        f"card: {card}, {_gib(free)} GiB free"
+        f" {_named(reading, _gib) if early is None else f'({early})'}: the run is held to the"
         " card's own memory, its driver giving more than the card has",
         f"{budget}; the margin of {_gib(MARGIN)} GiB is in the reserve",
     ]
+
+
+def _early_said(reading: Reading, said: Callable[[float], str]) -> str:
+    """An early reading's figures in words (memory.early): what NVML reads free on the whole card
+    and what is counted off it for the CUDA context this process is yet to make. `said` puts a
+    figure in GiB, as the line around it does."""
+    assert reading.nvml is not None
+    return (
+        f"NVML's {said(reading.nvml)} GiB free on the whole card, less {said(reading.context)} GiB"
+        " counted for this process's CUDA context to come"
+    )
 
 
 def _there(job: _Job) -> str:
@@ -2642,6 +2663,12 @@ def _there(job: _Job) -> str:
     which figure, the driver's or the whole card's, with the other (_named). Rounded down, as
     what is there is."""
     reading = job.reading
+    if reading.nvml is not None:
+        # An early reading (memory.early): NVML's figure and the context counted off it, not a
+        # driver's report, which no process of ours has yet been given.
+        if not reading.held:
+            return f"{_early_said(reading, _under)}, leaves {_under(job.free)} GiB"
+        return f"the plan counts on {_under(job.free)} GiB of {_early_said(reading, _under)}"
     if not reading.held:
         return f"the driver reports {_under(job.free)} GiB free"
     return (
@@ -2673,6 +2700,13 @@ def _freeable(job: _Job, need: float) -> bool:
     own while the card has room, and other programs' memory isn't in it; and a request 16 GiB
     over a card that has 2 in use is short of more than the card holds."""
     reading = job.reading
+    if reading.nvml is not None:
+        # PROVISIONAL (impl-v010, 2026-10-29: the refusal's rule with NVML's used for the driver's
+        # figure, which an early reading hasn't asked): what quitting programs can give back is
+        # what they hold of the card by NVML (memory.card_state), there being no CUDA context of
+        # ours on it yet, as a held run's is what the driver reports free beyond the card's; where
+        # used wasn't read, the early reading cannot tell, and does not say it.
+        return reading.nvml_used is None or need - job.free <= reading.nvml_used
     if not reading.held or reading.card is None or reading.card >= reading.reported:
         return False
     return need - job.free <= reading.reported - reading.card

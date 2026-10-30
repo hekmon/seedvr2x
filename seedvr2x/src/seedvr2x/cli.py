@@ -2879,13 +2879,28 @@ FREE_THE_CARD = (
     "quit the programs using the GPU, those closed to the system tray too (the manual's"
     ' "GPU memory" section says how to see them on each system)'
 )
-# What the checks that come before a resume's plan take, in seconds, for the early warning to say
-# for how long the memory can be freed. PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives the
-# night's figures, not a rate): milestone 7's third night on an RTX 5090, 2026-10-27, "the remux
-# rehearsed (66 s), the model files hashed (2 min), then the source (36 s)" (DESIGN.md, Memory
-# planner, A plan shapes the output a little), the source then 26 GB: 0.72 GB/s. The rehearsal is
-# a one-file output's alone (_copied). The models are the same files whatever the job.
-CHECK_REHEARSAL, CHECK_MODELS, CHECK_SOURCE_RATE = 66, 120, 26e9 / 36
+# What the checks that come before a resume's plan take, for the early warning to say for how long
+# the memory can be freed: the model files' hashes, 120 s whatever the job (seconds), and the
+# source's hash and a one-file output's remux rehearsal, both by the source's size, at the rates of
+# milestone 7's third night on an RTX 5090, 2026-10-27, whose source was a 7.49 GB file: hashed in
+# 36 s and rehearsed in 66 s (DESIGN.md, Memory planner, A resume whose recorded shape no longer
+# fits, as design worded it on 2026-10-29), in bytes a second. The rehearsal is a one-file
+# output's alone (_copied). PROVISIONAL (impl-v010, 2026-10-29: rates of one night's disk, not a
+# timed read). Until 2026-10-29 the source was taken for 26 GB, 3.5 times what that night's was.
+CHECK_MODELS = 120
+CHECK_SOURCE_RATE, CHECK_REHEARSAL_RATE = 7.49e9 / 36, 7.49e9 / 66
+
+
+# What a refusal, and the early warning, say where no memory freed on the card gives the shape
+# what it lacks (planner._freeable). PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives the way
+# out for programs alone): advice to quit programs would be advice nobody can follow (a review's
+# find, 2026-10-12). DESIGN.md, Memory planner, A plan shapes the output a little (decided on
+# 2026-10-28): "Where quitting programs can't free enough, it says the job needs a card with more
+# memory free."
+NOT_FREEABLE = (
+    "quitting programs does not free that much on this card: the job needs a card with more"
+    " memory free"
+)
 
 
 def _kept_refusal(error: "PlanError") -> str:
@@ -2907,13 +2922,7 @@ def _kept_refusal(error: "PlanError") -> str:
         if short.freeable:
             lines.append(f"to free it, {FREE_THE_CARD}")
         else:
-            # PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives the way out for programs
-            # alone): where no memory freed on the card gives it (planner._freeable), advice to
-            # quit programs would be advice nobody can follow (a review's find, 2026-10-12).
-            lines.append(
-                "quitting programs does not free that much on this card: the job needs a card"
-                " with more memory free"
-            )
+            lines.append(NOT_FREEABLE)
     # The third way out (DESIGN.md, same place: "Without the flag the refusal names it").
     lines.append(
         "or run it again with --accept-env-change, which plans the rest of the job again for the"
@@ -2943,12 +2952,13 @@ def _replan_refusal(error: "PlanError") -> str:
 def _checks_ahead(args: argparse.Namespace, rehearses: bool) -> int:
     """The seconds the checks that come before a resume's plan take, for the early warning: the
     models' hashes, the source's, and a one-file output's remux rehearsal where it runs, its
-    record not trusted (`rehearses`; _rehearsed) (CHECK_*)."""
+    record not trusted (`rehearses`; _rehearsed), the last two by the source's size (CHECK_*)."""
     try:
         source = args.input.stat().st_size
     except OSError:
         source = 0
-    return round(CHECK_MODELS + source / CHECK_SOURCE_RATE + (CHECK_REHEARSAL if rehearses else 0))
+    rehearsal = source / CHECK_REHEARSAL_RATE if rehearses else 0
+    return round(CHECK_MODELS + source / CHECK_SOURCE_RATE + rehearsal)
 
 
 def _early_memory(
@@ -2963,7 +2973,7 @@ def _early_memory(
     """Warn at once, as soon as a resume's record is read, where the memory free on the card
     doesn't hold its recorded shape, so that it can be freed while the files are checked (DESIGN.md,
     Memory planner, A plan shapes the output a little, decided on 2026-10-28). The card is read
-    through NVML alone (memory.card_free; memory.early takes this process's CUDA context off it):
+    through NVML alone (memory.card_state; memory.early takes this process's CUDA context off it):
     no torch, no CUDA context, no GPU probe (memory.startup). The planner's own arithmetic judges
     the record's shot, plan and pins, the system memory and the weights' placement as it will
     later, but for the system memory, unread before torch (blockswap.available), and the attention
@@ -2977,8 +2987,8 @@ def _early_memory(
     from seedvr2x.runtime.job import JobError, Shot
     from seedvr2x.runtime.plan import Plan
 
-    card = memory.card_free()
-    if card is None:
+    state = memory.card_state()
+    if state is None:
         logger.debug(
             "the memory free on the card isn't read through NVML: not judged before the checks"
         )
@@ -2989,7 +2999,7 @@ def _early_memory(
         planner.check_recorded(known, shots, target, numz_padding=numz_padding)
         attention = planner.FLASH_ATTN_2 if find_spec("flash_attn") else planner.SDPA
         planner.plan(
-            memory.early(card),
+            memory.early(*state),
             target,
             shots,
             pins,
@@ -3004,28 +3014,43 @@ def _early_memory(
         if short is None:
             logger.debug("the recorded plan isn't judged before the checks: %s", error)
             return
-        logger.debug("before the checks, NVML's %.2f GiB free: %s", card / memory.GIB, error)
-        minutes = max(1, math.ceil(_checks_ahead(args, rehearses) / 60))
+        # The error's words say what NVML read and the context counted off it (planner._there).
+        logger.debug("before the checks: %s", error)
         # With --accept-env-change, a resume still short at the plan is planned again for the
         # memory free (DESIGN.md, Memory planner, decided on 2026-10-28), not refused: the second
-        # line says that, and no more than the freeing the user can still do meanwhile.
-        if args.accept_env_change:
+        # line says that, and no more than the freeing the user can still do meanwhile. Where
+        # quitting programs can't free enough (planner._freeable), the line says what the refusal
+        # would (_kept_refusal), with no advice to free the card and no minutes to do it in.
+        if not short.freeable:
             then = (
                 "the rest of the job is planned again for the memory free if it is still short at"
-                " the plan (--accept-env-change), unless it is freed meanwhile, within the"
-                " checks now running (about %d min): to free it, %s"
+                " the plan (--accept-env-change); %s"
+                if args.accept_env_change
+                else "%s"
             )
+            freeing: tuple[object, ...] = (NOT_FREEABLE,)
         else:
-            then = (
-                "to free it, %s; the checks now running take about %d min, within which to free it"
-            )
+            minutes = max(1, math.ceil(_checks_ahead(args, rehearses) / 60))
+            if args.accept_env_change:
+                then = (
+                    "the rest of the job is planned again for the memory free if it is still short"
+                    " at the plan (--accept-env-change), unless it is freed meanwhile, within the"
+                    " checks now running (about %d min): to free it, %s"
+                )
+                freeing = (minutes, FREE_THE_CARD)
+            else:
+                then = (
+                    "to free it, %s; the checks now running take about %d min, within which to"
+                    " free it"
+                )
+                freeing = (FREE_THE_CARD, minutes)
         logger.warning(
             "the card's free memory, read now, does not hold the recorded plan: %s lacks %s GiB of"
             " the card's memory; this is an early reading, the check that counts comes once the"
             " files are checked\n" + then,
             short.what,
             short.short,
-            *((minutes, FREE_THE_CARD) if args.accept_env_change else (FREE_THE_CARD, minutes)),
+            *freeing,
         )
     except (JobError, KeyError, TypeError, ValueError) as error:
         logger.debug("the recorded plan isn't judged before the checks: %s", error)

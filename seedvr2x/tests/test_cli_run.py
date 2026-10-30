@@ -2568,18 +2568,21 @@ def test_a_shape_the_command_line_pins_is_not_planned_again(
     assert contents(tmp_path / "out") == kept and steps.calls == []
 
 
-def early_card(monkeypatch: pytest.MonkeyPatch, free: int | None) -> list[int]:
-    """Have NVML, behind memory.card_free, report `free` bytes free on the whole card from now on;
-    returns the devices it is asked for, in order. None: a machine without it (conftest.py)."""
+def early_card(
+    monkeypatch: pytest.MonkeyPatch, free: int | None, used: int = 10 * GIB
+) -> list[int]:
+    """Have NVML, behind memory.card_state, report `free` bytes free on the whole card and `used`
+    held by programs from now on; returns the devices it is asked for, in order. None: a machine
+    without it (conftest.py). `used` is large by default: whatever the shape lacks can be freed."""
     from seedvr2x.runtime import memory
 
     asked: list[int] = []
 
-    def read(index: int) -> int | str:
+    def read(index: int) -> tuple[int, int] | str:
         asked.append(index)
-        return "no NVML on this machine" if free is None else free
+        return "no NVML on this machine" if free is None else (free, used)
 
-    monkeypatch.setattr(memory, "_read", read)
+    monkeypatch.setattr(memory, "_read_all", read)
     return asked
 
 
@@ -2689,6 +2692,142 @@ def test_the_early_warning_given_accept_env_change_says_what_the_plan_then_does(
         " plan (--accept-env-change), unless it is freed meanwhile, within the checks now running"
         f" (about 2 min): to free it, {cli.FREE_THE_CARD}"
     ]
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_the_early_warning_s_debug_line_says_nvml_s_reading_and_the_context_counted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    held: bool,
+) -> None:
+    # The early reading is NVML's figure less the context this process is yet to make: its debug
+    # line says those two, and never that "its driver reports" a figure computed here (DESIGN.md,
+    # Memory planner, A resume whose recorded shape no longer fits, 2026-10-29), where the driver
+    # refuses and behind WSL2's device alike.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    source_path = job(tmp_path, monkeypatch)
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *JOB)
+    steps.stop = None
+    from seedvr2x.runtime import memory
+
+    real = memory.early
+
+    def early(*arguments: Any) -> Any:
+        with monkeypatch.context() as patched:
+            patched.setattr(memory, "paravirtual", lambda: held)
+            return real(*arguments)
+
+    monkeypatch.setattr(memory, "early", early)
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    nvml = encode + planner.MARGIN - GIB // 4 + memory.CONTEXT + (3 * GIB if held else 0)
+    early_card(monkeypatch, nvml)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    [line] = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and r.getMessage().startswith("before the checks")
+    ]
+    assert re.search(
+        r"NVML's \d+\.\d\d GiB free on the whole card, less 0\.75 GiB counted for this process's"
+        r" CUDA context to come",
+        line,
+    ), line
+    assert "its driver reports" not in line and "the driver reports" not in line
+
+
+@pytest.mark.parametrize(
+    ("rehearses", "source", "seconds"),
+    [
+        # The models' hashes alone, whatever the job: 2 min.
+        (False, 0, 120),
+        (True, 0, 120),
+        (False, 1_000_000, 120),
+        # Milestone 7's third night, a 7.49 GB source: hashed in 36 s, rehearsed in 66 s.
+        (False, 7_490_000_000, 120 + 36),
+        (True, 7_490_000_000, 120 + 36 + 66),
+        # A source of 26 GB, 3.5 times that one: both scale, the models' time doesn't.
+        (False, 26_000_000_000, 120 + 125),
+        (True, 26_000_000_000, 120 + 125 + 229),
+    ],
+)
+def test_the_checks_ahead_scale_with_the_source_s_size(
+    tmp_path: Path, rehearses: bool, source: int, seconds: int
+) -> None:
+    # The early warning's minutes (cli._checks_ahead; DESIGN.md, Memory planner, A resume whose
+    # recorded shape no longer fits, 2026-10-29): the source's hash and the remux rehearsal, where
+    # it runs, by the source's size at the rates of milestone 7's third night, the models' 2 min
+    # not. A sparse file stands for the source.
+    path = tmp_path / "source.mkv"
+    with path.open("wb") as written:
+        written.truncate(source)
+    args = SimpleNamespace(input=path)
+    assert cli._checks_ahead(args, rehearses) == seconds  # pyright: ignore[reportPrivateUsage, reportArgumentType]
+
+
+@pytest.mark.parametrize("accept", [False, True])
+@pytest.mark.parametrize("held", [False, True])
+@pytest.mark.parametrize("cure", [False, True])
+def test_the_early_warning_says_what_the_refusal_would_where_no_programs_cure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    accept: bool,
+    held: bool,
+    cure: bool,
+) -> None:
+    # DESIGN.md, Memory planner, A resume whose recorded shape no longer fits (2026-10-29): where
+    # quitting programs can't free enough, the early warning says what the refusal would, that
+    # the job needs a card with more memory free, instead of the advice to free the card and the
+    # minutes to do it in. An early reading takes what quitting programs can give back for what
+    # they hold of the card by NVML (planner._freeable): short by 0.26 GiB (1.7 held), with 4 GiB
+    # held by programs the advice stands; with 0.1 GiB it doesn't. Through the real path.
+    source_path = job(tmp_path, monkeypatch)
+    options = (*JOB[:4], *(["--accept-env-change"] if accept else []))
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, "out", *options)
+    steps.stop = None
+    steps.calls.clear()
+    from seedvr2x.runtime import memory
+
+    real = memory.early
+    monkeypatch.setattr(memory, "early", lambda *a: _with_paravirtual(monkeypatch, held, real, *a))
+    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    nvml = encode + planner.MARGIN - GIB // 4 + memory.CONTEXT + (3 * GIB if held else 0)
+    early_card(monkeypatch, nvml, 4 * GIB if cure else GIB // 10)
+    mark_checks(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    [warned] = [m for m in caplog.messages if "does not hold the recorded plan" in m]
+    first, second = warned.split("\n")
+    assert first.endswith("the check that counts comes once the files are checked")
+    if cure:
+        assert cli.FREE_THE_CARD in second and "min" in second and cli.NOT_FREEABLE not in second
+    elif accept:
+        assert second == (
+            "the rest of the job is planned again for the memory free if it is still short at the"
+            f" plan (--accept-env-change); {cli.NOT_FREEABLE}"
+        )
+    else:
+        assert second == cli.NOT_FREEABLE
+    if not cure:
+        assert "min" not in second and cli.FREE_THE_CARD not in second
+
+
+def _with_paravirtual(
+    monkeypatch: pytest.MonkeyPatch, held: bool, real: Callable[..., Any], *arguments: Any
+) -> Any:
+    """memory.early as behind WSL2's device (`held`) or where the driver refuses, for this call
+    alone, the run's own probe left as the test has it."""
+    from seedvr2x.runtime import memory
+
+    with monkeypatch.context() as patched:
+        patched.setattr(memory, "paravirtual", lambda: held)
+        return real(*arguments)
 
 
 def test_a_shortfall_no_programs_cure_says_so() -> None:

@@ -250,15 +250,13 @@ RESERVE_TIGHT = round(2.5 * GIB)
 # in bytes, for the reading a resume takes through NVML before any of that exists (early): the plan
 # is made in the free memory read with the context, the warm-up and the first allocation already on
 # the card (cli._free_memory), so the earlier reading, taken without them, counts them off.
-# PROVISIONAL (impl-v010, 2026-10-28: DESIGN.md gives no figure, and the code none for a context
-# alone): 1.23 GiB, the most the card's use rose through a first pass, "the process's context and
-# libraries in it" (hold, the same RTX 5090 under WSL2, nvidia-smi, 2026-10-12). It is the larger
-# figure of those the code records (0.24 GiB for the first allocation, 0.29 with the warm-up on the
-# 96 GB card), so that the early reading errs towards warning of a shape the later check would
-# accept, never towards saying "fits" where it refuses. To be measured on the RTX 5090 at the
-# release gate (design, 2026-10-28): until then the figure is the most the code has seen, and the
-# warning it feeds says it is an early reading (cli._early_memory).
-CONTEXT = round(1.23 * GIB)
+# Measured on an RTX 5090 under WSL2 on 2026-10-29 (torch 2.14.1+cu130): the card's free memory
+# fell 0.67 GiB from no CUDA context of ours to the check that refuses, on a resume (NVML's 16.32
+# GiB free before the checks, 15.65 at the check), the same to 0.01 GiB in three runs; 0.08 GiB
+# are added to it (DESIGN.md, Memory planner, A resume whose recorded shape no longer fits,
+# decided on 2026-10-29). PROVISIONAL (design, 2026-10-29: until the 96 GB card measures Linux's
+# own driver). The warning it feeds says it is an early reading (cli._early_memory).
+CONTEXT = round(0.75 * GIB)
 # The allocator's setting by the driver: DESIGN.md's default (Allocator), and torch's own
 # allocator where the driver spills.
 ASYNC, NATIVE = "backend:cudaMallocAsync", "backend:native"
@@ -358,7 +356,13 @@ class Reading:
     - expandable: on a held run, whether torch's own allocator takes it with expandable segments
       (EXPANDABLE, startup), under which a step short of room slows down and runs where it is
       otherwise refused: the only allocator a plan takes RESERVE_TIGHT under (planner.plan;
-      DESIGN.md, Allocator: "With a reserve of 2.5 GiB under those segments")."""
+      DESIGN.md, Allocator: "With a reserve of 2.5 GiB under those segments");
+    - nvml: on an early reading only (early), what the whole card has free by NVML before this
+      process has a CUDA context on it, in bytes; `reported` and `card` are then that figure less
+      CONTEXT, so that the plan's words (planner._there) say what was read and what was counted
+      off it; None on a run's own reading;
+    - nvml_used: on an early reading, what programs hold of the card by NVML (card_state), the
+      most that quitting them can give back (planner._freeable); None where not read."""
 
     reported: int
     card: int | None
@@ -367,6 +371,15 @@ class Reading:
     left: int = 0
     tight: bool = False
     expandable: bool = True
+    nvml: int | None = None
+    nvml_used: int | None = None
+
+    @property
+    def context(self) -> int:
+        """On an early reading (`nvml` set), what was taken off NVML's figure for the CUDA
+        context this process is yet to make, in bytes: CONTEXT, or the whole figure where it is
+        less (early); 0 on a run's own reading, which has the context on the card already."""
+        return 0 if self.nvml is None else self.nvml - self.reported
 
     @property
     def reserve(self) -> int:
@@ -437,10 +450,12 @@ def reading(free: int) -> Reading:
     return Reading(free, card, counted, True, _held_back(card), expandable=_native and _segments)
 
 
-def early(card: int) -> Reading:
+def early(card: int, used: int | None = None) -> Reading:
     """The reading a plan would be made in for a resume, from `card`, what the whole card has
     free by NVML (card_free), taken before torch is imported and so before any CUDA context of
-    this process is on the card: CONTEXT less, which the later reading has already counted. The
+    this process is on the card: CONTEXT less, which the later reading has already counted, and the
+    figure NVML gave kept in the reading (`nvml`) for the plan's words to say it, with what
+    programs hold (`used`, card_state) for the freeing it counts on. The
     allocator is not chosen yet (startup) and the driver not asked: behind WSL2's device the run
     is taken for held, as startup takes a driver that doesn't answer, the free memory the
     driver reports to the process counted as the card's (the smaller of the two figures, as
@@ -451,11 +466,20 @@ def early(card: int) -> Reading:
     output a little, decided on 2026-10-28: "the room is read through NVML ... NVML only")."""
     free = max(card - CONTEXT, 0)
     if not paravirtual():
-        return Reading(free, None, free, False)
+        return Reading(free, None, free, False, nvml=card, nvml_used=used)
     given = next((os.environ[name] for name in VARIABLES if os.environ.get(name)), None)
     native, segments = _allocator(EXPANDABLE if given is None else given)
     counted = max(free - HELD_BACK - RESERVE, 0)
-    return Reading(free, free, counted, True, HELD_BACK, expandable=native and segments)
+    return Reading(
+        free,
+        free,
+        counted,
+        True,
+        HELD_BACK,
+        expandable=native and segments,
+        nvml=card,
+        nvml_used=used,
+    )
 
 
 # What startup found, for the run that follows: whether the run holds itself to the card,
@@ -1130,8 +1154,28 @@ def card_free(index: int = 0) -> int | None:
     return None
 
 
+def card_state(index: int = 0) -> tuple[int, int] | None:
+    """What card_free reads, with what programs hold of the card by NVML (`used`, the driver's
+    own share, `reserved`, not counted): (free, used) in bytes, for the early reading of a
+    resume, which has no CUDA context of ours on the card yet (early). None when NVML doesn't
+    say, the reason at debug level. Never raises; one reading, nothing remembered."""
+    found = _read_all(index)
+    if isinstance(found, tuple):
+        return found
+    logger.debug("the whole card's free memory can't be read through NVML (%s)", found)
+    return None
+
+
 def _read(index: int) -> int | str:
     """card_free's reading: the bytes free on the card behind CUDA's device `index`, or why
+    NVML gave none, in words (_read_all's, the free memory alone)."""
+    found = _read_all(index)
+    return found if isinstance(found, str) else found[0]
+
+
+def _read_all(index: int) -> tuple[int, int] | str:
+    """NVML's reading of the card behind CUDA's device `index`: the bytes free and the bytes
+    programs hold (nvmlMemory_v2_t's `used`, without what the driver keeps: `reserved`), or why
     NVML gave none, in words. NVML is loaded first, so that a machine without it asks CUDA
     nothing; initialised only once CUDA has named the card, and shut down whatever follows."""
     try:
@@ -1157,7 +1201,7 @@ def _read(index: int) -> int | str:
             status = nvml.nvmlDeviceGetMemoryInfo_v2(handle, ctypes.byref(memory))
             if status != SUCCESS:
                 return f"nvmlDeviceGetMemoryInfo: {status}"
-            return int(memory.free)
+            return int(memory.free), int(memory.used)
         finally:
             nvml.nvmlShutdown()
     except (OSError, AttributeError) as error:
