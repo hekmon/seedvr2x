@@ -11,7 +11,7 @@ from collections.abc import Generator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import pytest
@@ -734,6 +734,8 @@ class Steady:
         self.models: Any = SimpleNamespace(device=torch.device("cpu"), enter=self.enter)
         self.phase: str | None = None
         self.changes = dict.fromkeys(ENTERING, 0)
+        monkeypatch.setattr(calibration, "FIRST_ENCODE", self.first_calls["encode"])
+        monkeypatch.setattr(calibration, "FIRST_WINDOW", self.first_calls["window"])
         monkeypatch.setattr(calibration, "draw", self.draw)
         monkeypatch.setattr(run, "encode_shot", self.encode)
         monkeypatch.setattr(run, "sample_windows", self.windows)
@@ -757,8 +759,16 @@ class Steady:
         """What an encode of `count` frames takes, in seconds, the first's extra apart."""
         return 1.0 + 0.5 * count
 
+    # What the first call of each kind costs more: the calibration is told (FIRST_ENCODE and
+    # FIRST_WINDOW), as it knows the real card's, so that a warm-up taken as a sample is exact.
+    first_calls: ClassVar[dict[str, float]] = {"encode": 100.0, "window": 100.0, "decode": 100.0}
+
+    def windowing(self, latents: int) -> float:
+        """What a window of `latents` takes, in seconds, its noise's draw included."""
+        return 1.0 + (0.0001 + DRAWING) * latents * PER_LATENT
+
     def took(self, kind: str, seconds: float) -> None:
-        self.at += seconds + (100.0 if kind in self.first else 0.0)
+        self.at += seconds + (self.first_calls[kind] if kind in self.first else 0.0)
         self.first.discard(kind)
 
     def encode(
@@ -776,9 +786,8 @@ class Steady:
     ) -> Any:
         assert models is self.models
         self.called.append(("window", layout))
-        tokens_made = (layout[0][1] - layout[0][0]) * PER_LATENT
         # The first window of a run draws its noise (shot.sample_windows).
-        self.took("window", 1.0 + (0.0001 + DRAWING) * tokens_made)
+        self.took("window", self.windowing(layout[0][1] - layout[0][0]))
         yield latent
 
     def decode(
@@ -1201,3 +1210,137 @@ def test_calibration_removes_its_directory_when_a_step_fails(
     with pytest.raises(RuntimeError, match="out of memory"):
         calibrate(steady.models, TARGET, Plan(9), 9)
     assert list(tmp_path.iterdir()) == []
+
+
+class Heavy(Steady):
+    """A Steady whose windows are slow: 0.4 s and 0.2 s a latent, and whose first calls cost what
+    the calibration's constants say (calibration.FIRST_ENCODE and FIRST_WINDOW), so that a
+    warm-up taken as a sample is exact."""
+
+    first_calls: ClassVar[dict[str, float]] = {"encode": 3.4, "window": 1.5, "decode": 3.4}
+
+    def windowing(self, latents: int) -> float:
+        return 0.4 + 0.2 * latents + DRAWING * latents * PER_LATENT
+
+
+def window_counts(steady: Steady) -> list[int]:
+    return [call[1][0][1] for call in steady.called if call[0] == "window"]
+
+
+def test_a_window_s_longer_length_by_time(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A job whose longest window is 40 latents (8.4 s here, the 2-latent window 0.8 s): the
+    # warm-up at 40 isn't long enough for its first call to be small against it (1.5 s of 8.4),
+    # so the longer length is the longest that takes about 3 s by the line through the 2-latent
+    # window and the warm-up: 2 + (3 - 0.8) / 0.2 = 13 latents, not 40.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    steady = Heavy(monkeypatch)
+    found = calibrate(steady.models, TARGET, Plan(9), 40)
+    slope = 0.2 + DRAWING * PER_LATENT
+    wanted = round(SHORT + (calibration.SECONDS - steady.windowing(SHORT)) / slope)
+    assert wanted == 13
+    # The two between the encodes, the warm-up at the longest, the 2-latent window and the
+    # longer one.
+    assert window_counts(steady) == [2, 2, 40, 2, 13]
+    assert any("window's longer length, 13 latents of the job's 40" in m for m in caplog.messages)
+    # The fit stays right: a constant of 0.4 s and 0.2 s a latent, the draw taken out.
+    record = cast(dict[str, float], found.clock.record()["window"])
+    assert record["constant"] == pytest.approx(0.4)
+    assert record["rate"] == pytest.approx(0.2 / PER_LATENT)
+
+
+def test_a_window_s_longer_length_is_the_job_s_longest_where_it_takes_no_more(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The short job, as before: 9 latents, the line giving more than 9 (the existing expectations
+    # of test_calibration), and one the line would leave under LONGER latents, 5 here.
+    steady = Heavy(monkeypatch)
+    calibrate(steady.models, TARGET, Plan(9), 9)
+    assert window_counts(steady) == [2, 2, 9, 2, 9]
+    steady.called.clear()
+    # Slow windows (1 s and 1 s a latent): 3 s is 4 latents by the line, never fewer than 5.
+    monkeypatch.setattr(steady, "windowing", lambda latents: 1.0 + 1.0 * latents)
+    calibrate(steady.models, TARGET, Plan(9), 20)
+    assert window_counts(steady) == [2, 2, 20, 2, calibration.LONGER]
+    steady.called.clear()
+    # And a job whose longest is under LONGER: its own.
+    calibrate(steady.models, TARGET, Plan(9), 4)
+    assert window_counts(steady) == [2, 2, 4, 2, 4]
+
+
+def test_the_window_s_warm_up_is_counted_where_its_first_call_is_small(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 91 latents take 18.6 s at 0.2 s a latent: 1.5 s of first call isn't under 5% of it. At
+    # 400 latents, 80.4 s, it is: the warm-up is the longer length's sample, the longest not
+    # measured again, and the fit is as right as with the second measure.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    steady = Heavy(monkeypatch)
+    calibrate(steady.models, TARGET, Plan(9), 91)
+    assert window_counts(steady).count(91) == 1 and not any(
+        "are the warm-up's" in m for m in caplog.messages
+    )
+    steady = Heavy(monkeypatch)
+    found = calibrate(steady.models, TARGET, Plan(9), 400)
+    assert window_counts(steady) == [2, 2, 400, 2]
+    assert any("window's 400 latents are the warm-up's" in m for m in caplog.messages)
+    record = cast(dict[str, float], found.clock.record()["window"])
+    assert record["constant"] == pytest.approx(0.4)
+    assert record["rate"] == pytest.approx(0.2 / PER_LATENT)
+
+
+class SlowEncode(Heavy):
+    """A Heavy whose encodes take 10 s a frame, so that the warm-up's 13 frames take 130 s."""
+
+    def encoding(self, count: int) -> float:
+        return 10.0 * count
+
+
+def test_the_encode_s_warm_up_is_counted_where_its_first_call_is_small(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 5 frames take 50 s: 3 s are under 13 frames, so the second length is 13, the warm-up's:
+    # 3.4 s of first call are under 5% of its 133.4 s. It is the sample, less that cost, its
+    # change of phase (0.9 s, the first length's) added: the encode of 13 frames is not made
+    # again, nor the window before it.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    steady = SlowEncode(monkeypatch)
+    found = calibrate(steady.models, TARGET, Plan(9), 9)
+    assert encode_counts(steady) == [13, 5]
+    assert window_counts(steady) == [2, 9, 2, 9]
+    assert any("the encode's 13 frames are the warm-up's" in m for m in caplog.messages)
+    record = cast(dict[str, float], found.clock.record()["encode"])
+    assert record["constant"] == pytest.approx(0.9)
+    assert record["rate"] == pytest.approx(10.0)
+
+
+def test_the_encode_s_warm_up_is_not_counted_where_its_first_call_is_not_small(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Steady's encode of 13 frames takes 7.5 s: 3.4 s are not small against it, nor against a
+    # second length longer than the warm-up's.
+    steady = Heavy(monkeypatch)
+    calibrate(steady.models, TARGET, Plan(9), 9)
+    assert encode_counts(steady) == [13, 5, 13]
+    steady = Quick(monkeypatch)
+    calibrate(steady.models, TARGET, Plan(9), 9)
+    assert encode_counts(steady) == [13, 5, 61]
+
+
+def test_the_calibration_takes_less_where_a_unit_is_long(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Windows of 0.4 s and 0.2 s a latent, the job's longest 40 latents: the calibration's windows
+    # summed (the stand-in's seconds), against what it took with the longest measured again, as
+    # before this rule: two calls of 40 latents (8.4 s each) where there is one and a 13-latent
+    # one (3 s). The warm-up counted, at 400 latents (80.4 s), saves a call of it altogether.
+    for longest, kept in ((40, [2, 2, 40, 2, 13]), (400, [2, 2, 400, 2])):
+        steady = Heavy(monkeypatch)
+        found = calibrate(steady.models, TARGET, Plan(9), longest)
+        assert window_counts(steady) == kept
+        before = [2, 2, longest, 2, longest]
+        saved = steady.windowing(longest) - (steady.windowing(kept[-1]) if len(kept) == 5 else 0)
+        assert saved > 3
+        assert sum(steady.windowing(n) for n in before) - sum(
+            steady.windowing(n) for n in kept
+        ) == pytest.approx(saved)
+        assert found.seconds == pytest.approx(steady.at - steady.start)

@@ -53,6 +53,26 @@ SECONDS = 3.0
 # Its short window, in latents (DESIGN.md: "windows of 2 latents and of the job's longest").
 SHORT = 2
 
+# What a process's first encode and first window cost more than the next ones, in seconds, on an
+# RTX 5090 at 540p (DESIGN.md, Time estimates, measured 2026-10-23: 3.4 s and 1.5 s). The code
+# doesn't measure them: they say whether a warm-up's call is long enough for them to be small
+# against it (_small), and the encode's warm-up, the process's first encode, is counted less its
+# own. No figure is known for a decode's first call, whose warm-up is never counted.
+FIRST_ENCODE = 3.4
+FIRST_WINDOW = 1.5
+
+# PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "where its first call's cost is small against
+# it" and leaves the share open): a first call's cost is small against a warm-up's call when it is
+# under this share of it, 5%.
+SMALL = 0.05
+
+# The fewest latents a window's longer length is shortened to by time (_longer_window), the
+# SHORT latents' ratio to it that the encode's 13 frames have to its 5 (2.6, here 2.5). PROVISIONAL
+# (impl-v010, 2026-10-29: DESIGN.md leaves open how far apart a window's two lengths must be to
+# fit a constant and a rate): the encode's ratio; at 4K, where the job's longest window is 5
+# latents, nothing is shortened.
+LONGER = 5
+
 # The rate its input copies are written at, which is no part of their frames.
 RATE = Fraction(25)
 
@@ -104,7 +124,14 @@ def calibrate(
     Each kind at two lengths, which tell its constant from its rate (_fit): FIRST frames then
     about SECONDS' worth encoded (_second_length), at least FRAMES and no more than `most`, the
     job's longest run in frames, which its plan was made for; FIRST then FRAMES decoded; a
-    window of SHORT latents and one of `longest`. One length spreads the constant over its every
+    window of SHORT latents and a longer one, the longest that takes about SECONDS and no longer
+    than `longest` (_longer_window), or `longest` itself where its warm-up, as long, is counted
+    as the sample (_small; DESIGN.md: "each kind's longer length by time, ... and the warm-up
+    counted as a sample where its first call's cost is small against it", decided on
+    2026-10-23); the encode's warm-up too where its second length is its own. A decode's two
+    lengths stay FIRST and FRAMES: its input copy, which the correction reads whole, has the
+    frames of an encode (shot._copy_reader), so a decode of another length would take an encode
+    of its own. One length spreads the constant over its every
     frame or token: a window's is a third of a 2-latent window at 540p (0.2 s of 0.6), which
     would put 30% on a 16-latent one, and an encode's is a frame and a half's time at 432p
     (0.05 s; RTX 5090, 2026-10-10), 13% on a long shot's.
@@ -236,7 +263,7 @@ def calibrate(
             # size: on an RTX 5090 at 1080p (2026-10-21), a job's windows came out 10-15% under
             # the estimate of a calibration warmed up on its 2-latent window alone. Each kind's
             # warm-up right before its measured steps.
-            warm, _, _ = encode(0, FRAMES)
+            warm, _, warmed = encode(0, FRAMES)
             short = min(SHORT, longest)
             between = warm[:short].contiguous()
             # Each encode measured after a window, its change of phase timed with it, as most of
@@ -249,15 +276,30 @@ def calibrate(
             first, encoded_first, stepped_first = encode(1, FIRST)
             second = _second_length(stepped_first / FIRST, most, fits)
             lengths.append(second)
-            window(between)
-            _, encoded, _ = encode(2, second)
+            if second == FRAMES and _small(FIRST_ENCODE, warmed):
+                # The warm-up is the second length's own, its first-call cost long gone from a
+                # call that long (decided on 2026-10-23: "the warm-up counted as a sample where
+                # its first call's cost is small against it"): its steps less that cost, and the
+                # change of phase the first length paid, which the warm-up, after no window,
+                # didn't take as a run's encodes do (the phases' matching, decided on 2026-10-22).
+                encoded = warmed - FIRST_ENCODE + (encoded_first - stepped_first)
+                logger.debug(
+                    "calibration: the encode's %d frames are the warm-up's, %.1f s less %.1f s of"
+                    " first call, its change of phase added",
+                    second,
+                    warmed,
+                    FIRST_ENCODE,
+                )
+            else:
+                window(between)
+                _, encoded, _ = encode(2, second)
             # The windows and the decodes each after a step of their own kind, as most of the
             # run's are, the first of a kind after a change of phase paying its term besides
             # (timing.units_of; decided on 2026-10-22: measured each after a change of phase, at
             # 720p on an RTX 5090, a decode came out at 0.247 s a frame, where the job's own took
             # 0.205, and --plan said 18% over).
             repeated = torch.cat([warm] * -(-longest // warm.shape[0]))
-            window(repeated[:longest].contiguous())
+            warmed_window = window(repeated[:longest].contiguous())
             # The noise's draw, timed alone on the longest window's latent: a run's first window
             # draws its whole run's (shot.sample_windows), about 1 us a token on a desktop's CPU
             # (shot._drawn's figure), which a window of the calibration pays for its own tokens.
@@ -267,8 +309,27 @@ def calibrate(
             sizes = [short]
             timed = [window(repeated[:short].contiguous())]
             if longest != short:
-                sizes.append(longest)
-                timed.append(window(repeated[:longest].contiguous()))
+                # The longer window: the warm-up's own where that call is long enough for its
+                # cost to be small against it (the process's first window was the unmeasured
+                # one before the encodes, so nothing is taken out of it), else the longest that
+                # takes about SECONDS (decided on 2026-10-23).
+                if _small(FIRST_WINDOW, warmed_window):
+                    size, seconds = longest, warmed_window
+                    logger.debug(
+                        "calibration: the window's %d latents are the warm-up's, %.1f s",
+                        size,
+                        seconds,
+                    )
+                else:
+                    size = _longer_window(timed[0], longest, warmed_window)
+                    logger.debug(
+                        "calibration: the window's longer length, %d latents of the job's %d, by"
+                        " time (%.1f s for %d, %.1f s for %d)",
+                        *(size, longest, timed[0], short, warmed_window, longest),
+                    )
+                    seconds = window(repeated[:size].contiguous())
+                sizes.append(size)
+                timed.append(seconds)
             # The warm-up's shot decoded twice: its 13 frames are the decode's largest.
             decode(0, warm, FRAMES, write)
             decoded_first = decode(1, first, FIRST, write)
@@ -381,3 +442,26 @@ def _second_length(per_frame: float, most: int | None, fits: Callable[[int], boo
     while count > FRAMES and not fits(count):
         count -= 4
     return max(count, FRAMES)
+
+
+def _small(first_call: float, seconds: float) -> bool:
+    """Whether a process's first call's extra cost, `first_call` seconds, is small against a
+    warm-up's call of `seconds` (SMALL of it, or less)."""
+    return first_call < SMALL * seconds
+
+
+def _longer_window(short_seconds: float, longest: int, warmed: float) -> int:
+    """A window's longer length by time, in latents (calibrate), the encode's rule
+    (_second_length): the longest that takes about SECONDS, no more than the job's `longest`, and
+    never fewer than LONGER (or `longest` if fewer). Its time is predicted by the line through the
+    SHORT latents' window, `short_seconds`, and the warm-up's window of `longest`, `warmed`, whose
+    slope leaves a window's constant out of its rate (the constant is a third of a 2-latent window
+    at 540p: _fit's note), as one latent's time would not. A warm-up first at its size runs over,
+    so the length comes out short, never long. Where the line is flat or down, the SHORT latents'
+    time a latent is the rate."""
+    slope = (warmed - short_seconds) / (longest - SHORT)
+    if slope > 0:
+        wanted = SHORT + (SECONDS - short_seconds) / slope
+    else:
+        wanted = SECONDS * SHORT / short_seconds if short_seconds > 0 else longest
+    return min(longest, max(LONGER, round(wanted)))
