@@ -19,6 +19,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from seedvr2x.clock import wall
 from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.decode import to_float32
 from seedvr2x.media.ffmpeg import MediaError
@@ -457,7 +458,7 @@ def _copy_again(
         "%s: %s missing: its input copy made again from the input in %.1f s",
         name,
         missing,
-        time.monotonic() - started,
+        wall(time.monotonic() - started),
     )
 
 
@@ -845,9 +846,10 @@ def _started(models: Models) -> float:
 
 
 def _spent(models: Models, started: float) -> str:
-    """The time since started and the VRAM peak since, as the logs give them."""
+    """The time since started, said in the wall clock's seconds (clock.wall), and the VRAM peak
+    since, as the logs give them."""
     peak = torch.cuda.max_memory_allocated(models.device) / GIB
-    return f"{time.monotonic() - started:.1f} s, VRAM peak {peak:.2f} GiB"
+    return f"{wall(time.monotonic() - started):.1f} s, VRAM peak {peak:.2f} GiB"
 
 
 def _resident() -> int:

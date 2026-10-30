@@ -22,6 +22,7 @@ from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from seedvr2x.clock import wall
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
@@ -1244,7 +1245,7 @@ def _run(args: argparse.Namespace) -> int:
         _say_times(calibrated, left, args.quality, levels, loading, assembly)
         if until is not None:
             # Run now, after the load and the calibration it pays again.
-            start = stopping.now() + datetime.timedelta(seconds=loading + calibrated.seconds)
+            start = stopping.now() + datetime.timedelta(seconds=wall(loading + calibrated.seconds))
             last = None if assembly is None else (f"the assembly of {final}", assembly)
             _say_until(calibrated.clock, left, start, until, last)
         if prior is None or planned(record.content()):
@@ -1455,7 +1456,7 @@ def _run(args: argparse.Namespace) -> int:
         logger.warning("not in the manifest's environment, a seedvr2x bug: %s", unrecorded)
     logger.info(
         "upscaled in %.1f s; wrote %s: %d frames, %s",
-        time.monotonic() - started,
+        wall(time.monotonic() - started),
         directory,
         outcome.written,
         args.format,
@@ -1518,7 +1519,8 @@ def _date(moment: datetime.datetime) -> str:
 
 
 def _estimated(cost: float | None) -> str:
-    """A unit's estimate as a stop by the clock says it."""
+    """A unit's estimate as a stop by the clock says it: `cost` is Deadline's, already in the wall
+    clock's seconds."""
     from seedvr2x.runtime.timing import spoken
 
     return "nothing estimates it" if cost is None else f"its estimate {spoken(cost)}"
@@ -1559,7 +1561,8 @@ def _say_assembly_left(record: "Manifest", final: Path, until: datetime.datetime
         return
     seconds = _assembly_estimate(record, rate)
     logger.info(
-        "time: the assembly alone is left, about %s at the rate its disk writes at", spoken(seconds)
+        "time: the assembly alone is left, about %s at the rate its disk writes at",
+        spoken(wall(seconds)),
     )
     if until is not None:
         _say_until(Clock(), [], stopping.now(), until, (f"the assembly of {final}", seconds))
@@ -1827,7 +1830,7 @@ def _load(
         logger.error("%s, as the models loaded: nothing was run%s", _refused(error), kept)
         return None
     seconds = time.monotonic() - started
-    logger.info("models loaded in %.1f s, attention: %s", seconds, models.attention)
+    logger.info("models loaded in %.1f s, attention: %s", wall(seconds), models.attention)
     return models, seconds
 
 
@@ -1956,25 +1959,25 @@ def _say_times(
     logger.info(
         "time: about %s on this GPU as it runs now: %s for %s, %s for %s, %s for the decode and"
         " write of %s",
-        spoken(times.total),
-        spoken(times.encode),
+        spoken(wall(times.total)),
+        spoken(wall(times.encode)),
         _plural(counts["encode"], "encode"),
-        spoken(times.windows),
+        spoken(wall(times.windows)),
         _plural(counts["window"], "window"),
-        spoken(times.decode),
+        spoken(wall(times.decode)),
         _plural(decodes, "segment"),
     )
     if assembly is not None:
         logger.info(
             "time: then about %s for the assembly, at the rate its disk writes at, its masters"
             " counted at most at their raw size until one is written",
-            spoken(assembly),
+            spoken(wall(assembly)),
         )
     logger.info(
         "time: the longest unit, %s, about %s: --until may stop up to about 1.15 times that"
         " before its time",
         times.unit,
-        spoken(times.longest),
+        spoken(wall(times.longest)),
     )
     if levels is not None:
         said: list[str] = []
@@ -1982,13 +1985,13 @@ def _say_times(
             total = job_times(clock, listed)
             assert total is not None
             mark = " (this job's)" if level == quality else ""
-            said.append(f"{level} about {spoken(total.total)}{mark}")
+            said.append(f"{level} about {spoken(wall(total.total))}{mark}")
         logger.info("time at each --quality: %s", ", ".join(said))
     again = ", which the run pays again before its first unit" if planning else ""
     logger.info(
         "time: estimated from a calibration of %s, the models loaded in %s%s",
-        spoken(calibrated.seconds),
-        spoken(loading),
+        spoken(wall(calibrated.seconds)),
+        spoken(wall(loading)),
         again,
     )
 
@@ -2075,7 +2078,7 @@ def _trial(args: argparse.Namespace, declared: "Declared", size: tuple[int, int]
         height,
         args.format,
         rate,
-        time.monotonic() - started,
+        wall(time.monotonic() - started),
     )
 
 
@@ -2386,7 +2389,7 @@ def _assemble(
             _plural(len(segments), "segment"),
             _plural(joined.streams - 1, "other stream"),
             _plural(joined.chapters, "chapter"),
-            time.monotonic() - started,
+            wall(time.monotonic() - started),
         )
         try:
             _write_beside(final, record.content())
@@ -2417,7 +2420,7 @@ def _checking_said(paths: Sequence[Path], rate: float | None) -> str:
         with suppress(OSError):  # a missing segment is found by _damaged
             total += path.stat().st_size
     said = f"checking the bytes of {_plural(len(paths), 'segment')}, {total / 1024**3:.2f} GiB"
-    return said if rate is None else f"{said}, about {spoken(total / rate)}"
+    return said if rate is None else f"{said}, about {spoken(wall(total / rate))}"
 
 
 def _damaged(
@@ -3667,7 +3670,7 @@ def _content(path: Path) -> dict[str, object]:
 
     started = time.monotonic()
     digest = sha256(path)
-    logger.info("%s: SHA-256 %s, in %.1f s", path, digest, time.monotonic() - started)
+    logger.info("%s: SHA-256 %s, in %.1f s", path, digest, wall(time.monotonic() - started))
     return {"bytes": path.stat().st_size, "sha256": digest}
 
 

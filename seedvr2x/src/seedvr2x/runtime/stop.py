@@ -8,7 +8,8 @@ progress with it. Python only handles a signal between two bytecodes, so the run
 GPU polling (model.synchronize), not blocked in a copy for a whole decode slice or window.
 
 --until's time stops a run too, by the clock: before a unit that wouldn't finish in time, by its
-estimate (runtime/timing.py), never inside one."""
+estimate (runtime/timing.py), never inside one. The estimate is in the run's own clock, steady,
+and is held against --until's time as the wall clock shows it (clock.py: One clock)."""
 
 import contextlib
 import os
@@ -19,6 +20,8 @@ from datetime import datetime, timedelta
 from datetime import time as day_time
 from types import FrameType, TracebackType
 from typing import Any, Self
+
+from seedvr2x.clock import wall
 
 # What signal.signal takes and gives back.
 Handler = Callable[[int, FrameType | None], Any] | int | signal.Handlers | None
@@ -36,8 +39,8 @@ class Stopped(Exception):
 
 class Deadline(Stopped):
     """The run stopped before a unit that wouldn't finish by --until's time (Stop.check); every
-    unit done is kept. `unit` names the one not begun, and `cost` is its estimate, in seconds,
-    None without one."""
+    unit done is kept. `unit` names the one not begun, and `cost` is its estimate, in the wall
+    clock's seconds (Stop.check), None without one."""
 
     def __init__(self, unit: str, cost: float | None) -> None:
         super().__init__(unit, cost)
@@ -63,13 +66,16 @@ class Stop:
 
     def check(self, cost: float | None = None, unit: str = "the next unit") -> None:
         """Raise Stopped if a stop was asked: the unit before is done and kept. With a deadline,
-        raise Deadline if the unit to come, named `unit` and estimated at `cost` seconds, would
-        end after it: now plus MARGIN times its estimate. A unit nothing estimates (None) is held
-        to the time alone, so stopped once the deadline is past."""
+        raise Deadline if the unit to come, named `unit` and estimated at `cost` seconds of the
+        run's clock, would end after it: now plus MARGIN times its estimate, said in the wall
+        clock's seconds (clock.wall), which `until` is read by. A unit nothing estimates (None) is
+        held to the time alone, so stopped once the deadline is past."""
         if self.asked:
             raise Stopped
-        if self.deadline is not None and late(now(), cost, self.deadline):
-            raise Deadline(unit, cost)
+        if self.deadline is not None:
+            said = None if cost is None else wall(cost)
+            if late(now(), said, self.deadline):
+                raise Deadline(unit, said)
 
     def _handle(self, number: int, frame: FrameType | None) -> None:
         if number == signal.SIGTERM:

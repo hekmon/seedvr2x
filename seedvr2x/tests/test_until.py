@@ -33,8 +33,9 @@ from test_cli_run import (
     steps,  # noqa: F401
     upscale,
 )
+from test_clock import measured
 
-from seedvr2x import cli
+from seedvr2x import cli, clock
 from seedvr2x.runtime import calibration, run, timing
 from seedvr2x.runtime import stop as stop_module
 from seedvr2x.runtime.plan import Plan
@@ -242,6 +243,50 @@ def test_stops_before_the_first_unit_that_would_end_late(
     assert clocked.elapsed == 4 * STEP
     assert progress(tmp_path / "out") == ([False, False], [1, 1, 0])
     assert [shot["encoded"] for shot in manifest(tmp_path / "out")["shots"]] == [True, True, False]
+
+
+@pytest.mark.parametrize(
+    ("ratio", "minutes", "begun"),
+    [
+        # The run's clock twice the wall's: the unit at 3 steps, estimated 60 s, is 120 s by the
+        # wall, and 180 + 1.15 * 120 passes 300 (at 1.0 it fits, the existing test above).
+        (2.0, 5, 3),
+        # Half: the segment's decode at 4 steps, estimated 120 s, is 60 s by the wall, and
+        # 240 + 1.15 * 60 fits in 360 (at 1.0 it ends at 378 and is not begun).
+        (0.5, 6, 6),
+    ],
+)
+def test_stops_by_the_wall_clock_not_the_runs_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    clocked: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+    ratio: float,
+    minutes: int,
+    begun: int,
+) -> None:
+    # clock.py (DESIGN.md, Time estimates: One clock): the estimates are the run's clock's
+    # seconds, said and held against --until's time in the wall's.
+    caplog.set_level(logging.INFO)
+    monkeypatch.setattr(clock, "pace", measured(ratio, every=20.0)[1])
+    made: Steps = clocked.steps
+    source_path = job(tmp_path, monkeypatch)
+    deadline = START + timedelta(minutes=minutes)
+    assert (
+        upscale(tmp_path, source_path, "out", *JOB, "--until", f"{deadline:%H:%M}")
+        == cli.EX_TEMPFAIL
+    )
+    assert made.calls == UNINTERRUPTED[:begun]
+    # Every unit begun fitted by the wall's seconds; the second decode of a segment's unit is a
+    # part of the first's.
+    for name, at in clocked.begins:
+        if name in UNITS:
+            assert at + timedelta(seconds=MARGIN * STEP * UNITS[name] * ratio) <= deadline
+    stopped = UNINTERRUPTED[begun]
+    assert clocked.now() + timedelta(seconds=MARGIN * STEP * UNITS[stopped] * ratio) > deadline
+    # Said in the wall's seconds, with the time left the progress lines give.
+    assert "stopped before" in caplog.text
+    assert f"its estimate {spoken(STEP * UNITS[stopped] * ratio)};" in caplog.text
 
 
 def test_night_after_night(

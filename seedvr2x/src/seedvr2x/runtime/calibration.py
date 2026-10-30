@@ -21,6 +21,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from seedvr2x.clock import wall
 from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.decode import to_float32
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer
@@ -308,7 +309,7 @@ def calibrate(
     logger.info(
         "time estimates calibrated in %.1f s, encodes of %d and %d frames: %s; entering the DiT's"
         " phase and the decode %.2f and %.2f s; the noise's draw %.2f us a token",
-        seconds,
+        wall(seconds),
         FIRST,
         lengths[0],
         "; ".join(

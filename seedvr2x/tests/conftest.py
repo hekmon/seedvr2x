@@ -16,12 +16,18 @@ without NVML gets. tests/test_memory.py gives the reading a stand-in of its own.
 
 A one-file output measures the rate its disk writes at (timing.disk_rate), 256 MiB written and
 synced: for every test, a mebibyte, so that the suite's many one-file runs don't write gigabytes.
-tests/test_timing.py holds the probe itself."""
+tests/test_timing.py holds the probe itself.
+
+What a test says it measured is in the wall clock's seconds by the ratio of the run's clock to the
+wall's (clock.py): the machine's own would drift a long session's expectations (WSL2's
+runs 10% away), so every test has a ratio of 1.0, frozen clocks, unless it sets another
+(tests/test_clock.py)."""
 
 from collections.abc import Iterator
 
 import pytest
 
+from seedvr2x import clock
 from seedvr2x.runtime import memory, timing
 
 
@@ -41,3 +47,8 @@ def no_driver_asked(
     monkeypatch.setattr(timing, "PROBE", 1024**2)
     monkeypatch.setattr(timing, "BLOCK", 256 * 1024)
     yield
+
+
+@pytest.fixture(autouse=True)
+def one_to_one_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(clock, "pace", clock.Pace(lambda: 0.0, lambda: 0.0))

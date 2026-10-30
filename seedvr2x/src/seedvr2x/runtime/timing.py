@@ -33,6 +33,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
+from seedvr2x.clock import wall
 from seedvr2x.runtime.job import OutputSegment, Shot, padded_size, shot_runs
 from seedvr2x.runtime.plan import Phase
 from seedvr2x.runtime.shot import padded_length, shot_layout
@@ -412,6 +413,9 @@ class Progress:
             what = {"encode": "an encode", "window": "a window", "decode": "a decode"}
             first = what[missing[0]] if missing else "the assembly"
             return f"the job's time left known once {first} is timed"
+        # The estimates are in the run's clock: said in the wall's, as the time of day is
+        # (DESIGN.md, Time estimates: One clock).
+        seconds = wall(seconds)
         now = self.now()
         return f"about {spoken(seconds)} left, the job ending about {ending(now, seconds)}"
 
@@ -510,15 +514,16 @@ def would_end(
     each unit begun only if it ends by deadline at MARGIN times its estimate (stop.late); `last`,
     a one-file output's assembly, its name and estimate, after them. For --plan given --until
     (DESIGN.md, Pause and resume, Stopping: "`--plan` given `--until` says whether the job ends by
-    then and, if not, the unit it would stop before")."""
+    then and, if not, the unit it would stop before"). The estimates are in the run's clock, and
+    the Ending in the wall clock's seconds (clock.wall), as the run says them."""
     costs: list[tuple[str, float]] = []
     for unit in units:
         seconds = estimate(clock, unit)
         if seconds is None:
             raise ValueError(f"{unit.name}: no estimate")
-        costs.append((unit.name, seconds))
+        costs.append((unit.name, wall(seconds)))
     if last is not None:
-        costs.append(last)
+        costs.append((last[0], wall(last[1])))
     total = sum(seconds for _, seconds in costs)
     at, done = start, 0.0
     for name, seconds in costs:

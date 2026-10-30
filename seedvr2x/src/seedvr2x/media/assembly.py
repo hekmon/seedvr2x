@@ -49,6 +49,7 @@ from typing import IO, Any, cast
 import numpy as np
 import numpy.typing as npt
 
+from seedvr2x.clock import wall
 from seedvr2x.media.ffmpeg import MediaError, ends_with_us
 from seedvr2x.media.files import partial_path, replace_whole
 from seedvr2x.media.index import NOPTS, FrameIndex
@@ -1083,7 +1084,8 @@ def reading_said(source: Path) -> str:
     what = f"{source}: the assembly rehearsed: the source's other streams remuxed once, reading"
     what += f" its {size / 2**30:.1f} GiB"
     try:
-        seconds = _read_seconds(source, size)
+        # Measured by the run's clock, said by the wall's (clock.py).
+        seconds = wall(_read_seconds(source, size))
     except OSError as error:
         return f"{what}, for a time not estimated ({error})"
     if seconds < 10:
@@ -1289,8 +1291,8 @@ def assemble(
         _counted(len(source_layout.chapters), "chapter"),
         source,
         size / 2**30,
-        result.joined,
-        result.checked,
+        wall(result.joined),
+        wall(result.checked),
         result.ahead,
     )
     if result.ahead > INTERLEAVED:
