@@ -661,7 +661,14 @@ def _run(args: argparse.Namespace) -> int:
         shots_from_cuts,
         target_size,
     )
-    from seedvr2x.runtime.manifest import ASSEMBLED, NAME, complete, planned, read
+    from seedvr2x.runtime.manifest import (
+        ASSEMBLED,
+        NAME,
+        complete,
+        planned,
+        read,
+        unfinish_changed,
+    )
     from seedvr2x.runtime.planner import Pins
     from seedvr2x.runtime.weights import check_models
 
@@ -741,6 +748,7 @@ def _run(args: argparse.Namespace) -> int:
         # recorded with a cut list and asked without one, another job, refused below (_prior)
         # before any first pass: its refusal neither fetches nor hashes a file it wouldn't run.
         recorded: dict[str, Any] | None = None
+        remade: list[tuple[int, str]] = []
         kept: FrameIndex | None = None
         untrusted = ""
         # A finished file's job: its manifest beside the file, no work manifest (DESIGN.md,
@@ -769,6 +777,11 @@ def _run(args: argparse.Namespace) -> int:
             # and a .mkv path's rehearsal, which writes there (DESIGN.md, Pause and resume,
             # decided on 2026-10-21); a plan's layout judges again after its pass (below).
             _refuse_foreign(directory / NAME, recorded, work=final is not None)
+            # A finished segment missing or of another size is made again (DESIGN.md, Output,
+            # Assembly, decided on 2026-10-29), so the job is no longer finished from here on:
+            # it loads its models and plans for the memory free (_resume says it, once the job
+            # is known for the one asked).
+            remade = unfinish_changed(recorded, directory)
             kept, untrusted = _trusted(directory, recorded, ffmpeg_version, conversions)
             if not planned(recorded) and not complete(recorded):
                 # A resume that will plan its recorded shape in the memory free: said at once
@@ -1154,7 +1167,9 @@ def _run(args: argparse.Namespace) -> int:
         # whose cuts changed, or whose shape did with the memory free, planned again
         # (_replan).
         try:
-            replanned = _resume(record, prior, final is not None, reshaped, args.plan is not None)
+            replanned = _resume(
+                record, prior, final is not None, reshaped, args.plan is not None, remade
+            )
         except JobError as error:
             logger.error("%s%s", error, _listed_anyway(args, listing))
             return 1
@@ -2483,12 +2498,7 @@ def _remake(
             logger.warning("%s: not removed: %s; the same command removes it", path, error)
         frames = f"frames {segment.start} to {segment.end - 1} of the job"
         if loaded:
-            logger.warning(
-                "%s: its bytes changed since it was finished (%s): the disk or another program is"
-                " to suspect; made again now",
-                path,
-                frames,
-            )
+            _bytes_changed(path, frames)
         elif twice:
             logger.error(
                 "%s: damaged again, its bytes changed once more after this run made it again (%s)"
@@ -2511,6 +2521,21 @@ def _remake(
             final,
             "it" if len(damaged) == 1 else "them",
         )
+
+
+def _bytes_changed(path: Path, detail: str, again: str = "made again now") -> None:
+    """The warning of a finished segment whose bytes are no longer those recorded, said in the
+    same words wherever the run finds it (DESIGN.md, Output, Assembly, decided on 2026-10-28 and
+    2026-10-29): at the assembly (_remake), where it is hashed, or at a start (_resume), where it
+    is missing or of another size. `detail` says which segment's frames and, at a start, what was
+    found; `again` what becomes of it."""
+    logger.warning(
+        "%s: its bytes changed since it was finished (%s): the disk or another program is to"
+        " suspect; %s",
+        path,
+        detail,
+        again,
+    )
 
 
 def _assembled(
@@ -3699,6 +3724,7 @@ def _resume(
     assembles: bool = False,
     reshaped: "Plan | None" = None,
     looking: bool = False,
+    remade: Sequence[tuple[int, str]] = (),
 ) -> bool:
     """Take up the job recorded beside record, checked before its first pass (_prior): refused
     (JobError) unless the rest is the job asked too, what the first pass found and the layout
@@ -3727,7 +3753,19 @@ def _resume(
     (_run; --accept-env-change), is taken up in its new shape, written with the next unit made
     (_reshape): True. `looking` (--plan): the new shape is only taken in memory, for the plan to
     print; nothing is written and nothing discarded. A job recorded after a shape was planned
-    again, with runs by their own caps, is laid out by them first (resume.own_windows)."""
+    again, with runs by their own caps, is laid out by them first (resume.own_windows).
+
+    `remade`, the segments recorded finished whose file was missing or of another size at the
+    start, set back to unfinished in the record read (manifest.unfinish_changed, _run), each with
+    what was found: said in a warning, once, once the job is known for the one asked, then made
+    as any unfinished segment, its file and checksums discarded with the other leftovers
+    (DESIGN.md, Output, Assembly, decided on 2026-10-29). With `looking` (--plan), which runs
+    nothing, they are said as what a run would do, and neither the file nor its checksums are
+    discarded.
+
+    PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md doesn't say what --plan says of such a
+    segment): the same warning, ending "it would be made again by a run", its units counted in
+    the estimate, and its file left where it is."""
     from seedvr2x.runtime import resume
     from seedvr2x.runtime.manifest import complete, planned
 
@@ -3736,6 +3774,16 @@ def _resume(
     found, shape = _taken_differences(record, prior, reshaped is not None)
     if found:
         raise _another_job(record.path, found, only_environment=False)
+    held: set[Path] = set()
+    for index, what in remade:
+        path = record.path.parent / record.files[index]
+        segment = record.segments[index]
+        _bytes_changed(
+            path,
+            f"frames {segment.start} to {segment.end - 1} of the job: {what}",
+            "it would be made again by a run" if looking else "made again now",
+        )
+        held.update((path, _checksums_path(record.path.parent, path, str(record.output["format"]))))
     if reshaped is not None:
         _reshape(record, prior, reshaped, looking)
         return True
@@ -3757,7 +3805,8 @@ def _resume(
             else "with the next unit made",
             "; ".join(prior.changed),
         )
-    discarded = resume.leftovers(record)
+    # A plan looks: the files of the segments it would make again stay as they are.
+    discarded = [path for path in resume.leftovers(record) if not (looking and path in held)]
     for path in discarded:
         logger.debug("discarded %s", path)
         if path.is_dir():
@@ -3958,8 +4007,10 @@ def _finished_already(
     filled among them, its shots, windows, segments and plan are the record's own: the pass that
     counts the frames and the probabilities that cut them are what isn't made again, and a
     finished job's plan stays as recorded with an index too (cli._run). Its directory is held to
-    its manifest as a resume's is (resume.leftovers): a finished segment missing or of another
-    size, its checksums missing, or anything not the job's, refused; what a stop left, discarded.
+    its manifest as a resume's is (resume.leftovers): a finished segment's checksums missing, or
+    anything not the job's, refused; what a stop left, discarded. A finished segment missing or of
+    another size no longer reaches it: the job isn't finished then, and is made again (_run,
+    manifest.unfinish_changed).
 
     What it is still compared by without its index is kept as built by design on 2026-10-28
     (the questions of 2026-10-11, DESIGN.md silent): the list above; the recorded plan isn't

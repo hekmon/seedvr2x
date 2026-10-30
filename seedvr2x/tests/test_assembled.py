@@ -503,6 +503,50 @@ def test_a_damaged_segment_is_made_again_then_the_file_assembled(
     assert cli.main(["verify", str(final)]) == 0
 
 
+@pytest.mark.parametrize("how", ["deleted", "truncated"])
+@needs_ffmpeg
+def test_a_finished_segment_missing_or_changed_at_a_start_is_made_again_then_the_file_assembled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    how: str,
+) -> None:
+    # DESIGN.md, Output, Assembly (decided on 2026-10-29): every segment finished and the assembly
+    # refused (no room), one segment then deleted or cut short: the same command, which used to
+    # be refused at its start, says it in the assembly's warning, makes the segment's shots again
+    # (the job loads its models for them) and assembles a file of the uninterrupted run's frames.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source = film_job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "whole.mkv", *FILM) == 0
+    steps.calls.clear()
+    final, work = tmp_path / "x.mkv", tmp_path / "x.mkv.work"
+    with monkeypatch.context() as full:
+        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
+        assert upscale(tmp_path, source, "x.mkv", *FILM) == 1
+    segment = work / "seg_000001.mkv"
+    recorded = segment.stat().st_size
+    if how == "deleted":
+        segment.unlink()
+        found = "missing"
+    else:
+        segment.write_bytes(segment.read_bytes()[:-1])
+        found = f"{recorded - 1} bytes, where {recorded} were recorded"
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source, "x.mkv", *FILM) == 0
+    assert [m for m in caplog.messages if "its bytes changed" in m] == [
+        f"{segment}: its bytes changed since it was finished (frames 30 to 49 of the job: {found}):"
+        " the disk or another program is to suspect; made again now"
+    ]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert steps.calls == ["encode 30", "window 30:0", "decode 30"] and not work.exists()
+    same_file(final, tmp_path / "whole.mkv")
+    assert (tmp_path / "x.mkv.crc32").read_bytes() == (tmp_path / "whole.mkv.crc32").read_bytes()
+    held_to_the_source(final, source, tmp_path)
+    assert cli.main(["verify", str(final)]) == 0
+
+
 def flip_during_the_run(
     monkeypatch: pytest.MonkeyPatch, work: Path, flips: dict[tuple[int, int], int]
 ) -> list[tuple[int, int]]:

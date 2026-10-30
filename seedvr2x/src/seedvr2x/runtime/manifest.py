@@ -148,6 +148,71 @@ def recorded_runs(shot: Any) -> list[Any]:
     return [shot, *shot.get(SHOT_RUNS, [])]
 
 
+def size(path: Path) -> int:
+    """The bytes of a file, or of a directory's files (a PNG segment)."""
+    if path.is_dir():
+        return sum(entry.stat().st_size for entry in path.iterdir())
+    return path.stat().st_size
+
+
+def unfinish_changed(content: dict[str, Any], directory: Path) -> list[tuple[int, str]]:
+    """Set back to unfinished, in a manifest's content as read, each segment recorded finished
+    whose file in `directory` is missing or of another size than its record: what the run then
+    makes again, as one found damaged at the assembly is (Manifest.segment_damaged). DESIGN.md,
+    Output, Assembly (decided on 2026-10-29): "A finished segment found missing or of another
+    size at a start ... made again the same way, said in the same warning". Done on the content
+    as read, before anything decides from it, so that a job whose segment is gone is no longer
+    finished: it loads its models, plans its memory and counts the segment's units, where it
+    used to be refused (resume.leftovers) or said finished (cli._finished_already). Nothing is
+    written or removed here: the manifest is written by the next unit made, and the segment's
+    file and checksums, if any, are discarded as an unfinished segment's are, so that a stop
+    anywhere finds the same state at the next start, a finished segment missing or changed again.
+
+    Returns each segment so set back, its index and what was found: "missing", or its bytes and
+    the record's. A record this code can't read so is left as it is (planned, complete: refused
+    by the checks after, cli._prior)."""
+    try:
+        segments: list[Any] = content["segments"]
+        shots: list[Any] = content["shots"]
+        found: list[tuple[int, str]] = []
+        for index, entry in enumerate(segments):
+            if not entry["finished"]:
+                continue
+            path = directory / str(entry["name"])
+            try:
+                now = size(path)
+            except FileNotFoundError:
+                found.append((index, "missing"))
+                continue
+            except OSError as error:
+                raise JobError(f"{path}: not read to check its size: {error}") from None
+            if now != entry["bytes"]:
+                found.append((index, f"{now} bytes, where {entry['bytes']} were recorded"))
+        plan: Any = content.get("plan")
+        window: int | None = (
+            cast(dict[str, Any], plan).get("window") if isinstance(plan, dict) else None
+        )
+        for index, _ in found:
+            entry = segments[index]
+            entry["finished"], entry["bytes"], entry["sha256"] = False, None, None
+            for shot in shots:
+                if not entry["start"] <= shot["start"] < entry["end"]:
+                    continue
+                for run in recorded_runs(shot):
+                    run["encoded"], run["windows_done"] = False, 0
+                    if WINDOW_CAP in run:
+                        # Made again under the job's plan, not the cap it was made under before
+                        # the plan was made again for the memory free (segment_damaged).
+                        del run[WINDOW_CAP]
+                        run["windows"] = [
+                            list(one)
+                            for one in window_layout(run["latents"], window or run["latents"])
+                        ]
+        return found
+    except (KeyError, TypeError, AttributeError):
+        return []
+
+
 def read(path: Path) -> dict[str, Any]:
     """The manifest at path, as written; refused unless of a version this code reads (READ)."""
     try:

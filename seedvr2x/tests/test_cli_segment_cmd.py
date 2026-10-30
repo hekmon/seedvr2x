@@ -149,9 +149,27 @@ def test_directory_of_command_segments(
     assert cli.main(["verify", str(out)]) == 1
     assert f"{out / 'seg_000001.mkv'}: 4 frames, where 21 were written" in caplog.text
     assert f"{out}: of 2, 1 not as written" in caplog.text
-    # Finished already: the resume takes its segments without their checksums, by their sizes.
-    assert upscale(tmp_path, source_path, "out", *options) == 1
-    assert "bytes, where the manifest recorded" in caplog.text
+    # The resume takes its segments without their checksums, by their sizes: one of another size
+    # is made again (DESIGN.md, Output, Assembly, decided on 2026-10-29), by the command, where it
+    # used to be refused, and the segment is the command's output once more, recorded as such.
+    caplog.clear()
+    steps.calls.clear()
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    size = (out / "seg_000000.mkv").stat().st_size
+    assert (
+        f"{out / 'seg_000001.mkv'}: its bytes changed since it was finished (frames 4 to 24 of"
+        f" the job: {size} bytes, where {content['segments'][1]['bytes']} were recorded): the disk"
+        " or another program is to suspect; made again now"
+    ) in caplog.text
+    assert steps.calls == ["encode 4", "window 4:0", "window 4:1", "decode 4"]
+    assert [count_frames(out / name) for name in SEGMENTS] == [4, 21]
+    assert [codec(out / name) for name in SEGMENTS] == [found] * 2
+    assert not (out / "checksums").exists()
+    again = json.loads((out / "manifest.json").read_text())["segments"]
+    assert [(s["finished"], s["bytes"]) for s in again] == [
+        (True, (out / name).stat().st_size) for name in SEGMENTS
+    ]
+    assert cli.main(["verify", str(out)]) == 0
 
 
 def test_without_a_command_the_setting_says_so(

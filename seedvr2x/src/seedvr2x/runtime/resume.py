@@ -31,10 +31,11 @@ from seedvr2x.runtime.manifest import (
     Manifest,
     checksums_file,
     recorded_runs,
+    size,
 )
 from seedvr2x.runtime.plan import Plan
 from seedvr2x.runtime.tiling import SCRATCH
-from seedvr2x.runtime.units import CHECKSUMS, COPY, KEPT, run_file, size
+from seedvr2x.runtime.units import CHECKSUMS, COPY, KEPT, run_file
 
 # The fields a resume reads and doesn't compare: how far the job went, in its shots and segments;
 # what is recorded for information only (DESIGN.md, Pause and resume): where an input is and when
@@ -406,9 +407,12 @@ def leftovers(manifest: Manifest) -> list[Path]:
     recorded, the units of finished segments. Refused (JobError): a finished segment missing, of
     another size or without its checksums, which a segment command's has none of
     (settings.segment_cmd), a unit recorded but missing, and anything in the directory that isn't
-    this job's, which is never deleted. A shot's input copy or its checksums missing isn't refused:
-    the copy is derived data, which the run makes again (run_job); nor is the frame index (INDEX),
-    made again with the first pass (cli._prior)."""
+    this job's, which is never deleted. A run never gives it a finished segment missing or of
+    another size: the record is set back first (manifest.unfinish_changed; DESIGN.md, Output,
+    Assembly, decided on 2026-10-29), the file left to be discarded as an unfinished segment's
+    is. A shot's input copy or its checksums missing isn't refused: the copy is derived data,
+    which the run makes again (run_job); nor is the frame index (INDEX), made again with the
+    first pass (cli._prior)."""
     directory = manifest.path.parent
     found: list[Path] = []
     indexed = partial_path(directory / INDEX)

@@ -23,7 +23,7 @@ import torch
 from torch import Tensor
 
 from seedvr2x.media.files import make_directories, partial_path, replace_whole
-from seedvr2x.runtime.manifest import STATE, Manifest
+from seedvr2x.runtime.manifest import STATE, Manifest, size
 from seedvr2x.runtime.shot import CPU, moved
 
 # A shot's files besides its units (DESIGN.md, Colour correction): the copy of its input frames,
@@ -149,13 +149,6 @@ class Units:
             shutil.rmtree(self.root / f"shot_{start:06d}", ignore_errors=True)
         if all(self.manifest.finished) and self.root.is_dir() and not any(self.root.iterdir()):
             self.root.rmdir()
-
-
-def size(path: Path) -> int:
-    """The bytes of a file, or of a directory's files (a PNG segment)."""
-    if path.is_dir():
-        return sum(entry.stat().st_size for entry in path.iterdir())
-    return path.stat().st_size
 
 
 def _save(tensor: Tensor, path: Path) -> Tensor:

@@ -4292,12 +4292,8 @@ def test_another_job_refused(
     (out / "resume" / "shot_000004" / "notes.txt").write_text("mine")
     assert "shot_000004/notes.txt: not this job's" in refused(tmp_path, source_path, caplog, *JOB)
     (out / "resume" / "shot_000004" / "notes.txt").unlink()
-    # Missing what the manifest names.
-    (out / "seg_000000.mkv").rename(tmp_path / "moved.mkv")
-    assert "finished, the manifest says, but missing" in refused(
-        tmp_path, source_path, caplog, *JOB
-    )
-    (tmp_path / "moved.mkv").rename(out / "seg_000000.mkv")
+    # Missing what the manifest names (a finished segment missing is no longer refused: made
+    # again, test_a_finished_segment_missing_or_changed_is_made_again_at_a_start).
     window = out / "resume" / "shot_000004" / "window_0000.pt"
     window.rename(tmp_path / "window.pt")
     assert "kept, the manifest says, but missing" in refused(tmp_path, source_path, caplog, *JOB)
@@ -6156,8 +6152,8 @@ def test_finished_job_still_compared(
 ) -> None:
     # A finished job without its frame index is still held, with no first pass, to what needs no
     # decode: what its source declares and the output that follows, a probe saying otherwise
-    # another job, as for a resume (test_probe_compared); and its directory to its manifest, a
-    # segment missing or another's file refused, never deleted.
+    # another job, as for a resume (test_probe_compared); and its directory to its manifest,
+    # another's file refused, never deleted.
     from seedvr2x.media import source as examined
 
     source_path = job(tmp_path, monkeypatch)
@@ -6178,14 +6174,234 @@ def test_finished_job_still_compared(
     (out / "notes.txt").write_text("mine")
     assert "not this job's: notes.txt" in refused(tmp_path, source_path, caplog, *JOB)
     (out / "notes.txt").unlink()
-    (out / "seg_000001.mkv").rename(tmp_path / "moved.mkv")
-    assert "finished, the manifest says, but missing" in refused(
-        tmp_path, source_path, caplog, *JOB
-    )
-    (tmp_path / "moved.mkv").rename(out / "seg_000001.mkv")
     assert passes == [] and contents(out) == kept
     assert upscale(tmp_path, source_path, "out", *JOB) == 0
     assert passes == [] and contents(out) == kept
+
+
+def finished_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> tuple[Path, Path, Path]:
+    """A finished job, `out`, and the same job finished beside it, `whole`, which stays as the
+    uninterrupted run's: the source, `out` and `whole`. The steps' calls are cleared."""
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "whole", *JOB) == 0
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    steps.calls.clear()
+    return source_path, tmp_path / "out", tmp_path / "whole"
+
+
+def spoil_segment(path: Path, how: str) -> str:
+    """Delete the finished segment at path, or cut it short (another size): what a run then finds,
+    as it says it."""
+    recorded = path.stat().st_size
+    if how == "deleted":
+        path.unlink()
+        return "missing"
+    path.write_bytes(path.read_bytes()[:-1])
+    return f"{recorded - 1} bytes, where {recorded} were recorded"
+
+
+@pytest.mark.parametrize("segment", [0, 1])
+@pytest.mark.parametrize("how", ["deleted", "truncated"])
+def test_a_finished_segment_missing_or_changed_is_made_again_at_a_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    how: str,
+    segment: int,
+) -> None:
+    # DESIGN.md, Output, Assembly (decided on 2026-10-29): a finished segment found missing or of
+    # another size at a start is recorded unfinished and made again, in the warning the assembly
+    # gives a segment whose hash changed, where it used to be refused (resume.leftovers). The
+    # job was finished, so it loads its models for the one segment: its shots' units only, and
+    # the frames of the uninterrupted run's, the manifest and the checksums as they were.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path, out, whole = finished_pair(tmp_path, monkeypatch, steps)
+    name = f"seg_{segment:06d}.mkv"
+    before = json.loads((out / "manifest.json").read_text())["segments"]
+    found = spoil_segment(out / name, how)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    frames = ("frames 0 to 3", "frames 4 to 24")[segment]
+    assert [m for m in caplog.messages if "its bytes changed" in m] == [
+        f"{out / name}: its bytes changed since it was finished ({frames} of the job: {found}):"
+        " the disk or another program is to suspect; made again now"
+    ]
+    assert [r.levelname for r in caplog.records if "its bytes changed" in r.getMessage()] == [
+        "WARNING"
+    ]
+    assert errors(caplog) == [] and "finished already" not in caplog.text
+    assert steps.calls == (
+        ["encode 0", "window 0:0", "encode 3", "window 3:0", "decode 0", "decode 3"]
+        if segment == 0
+        else ["encode 4", "window 4:0", "window 4:1", "decode 4"]
+    )
+    # The record as it was, but for the hash of the file: a Matroska file carries a unique
+    # identifier of its own, so two writes of the same frames differ in bytes, not in size.
+    after = json.loads((out / "manifest.json").read_text())["segments"]
+    assert [{**entry, "sha256": None} for entry in after] == [
+        {**entry, "sha256": None} for entry in before
+    ]
+    assert after[segment]["sha256"] == hashlib.sha256((out / name).read_bytes()).hexdigest()
+    assert decoded(out / name) == decoded(whole / name)
+    assert contents(out / "checksums") == contents(whole / "checksums")
+    assert sorted(p.name for p in out.iterdir()) == sorted(p.name for p in whole.iterdir())
+    # Finished again: the same command makes nothing.
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == [] and "its bytes changed" not in caplog.text
+
+
+def test_a_finished_segment_changed_is_said_once_and_the_others_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Both segments gone: each named once, both made again, nothing of the job left finished
+    # between; the frames are the uninterrupted run's.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path, out, whole = finished_pair(tmp_path, monkeypatch, steps)
+    spoil_segment(out / "seg_000000.mkv", "deleted")
+    spoil_segment(out / "seg_000001.mkv", "truncated")
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert len([m for m in caplog.messages if "its bytes changed" in m]) == 2
+    assert steps.calls == UNINTERRUPTED
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        assert decoded(out / name) == decoded(whole / name)
+
+
+def test_a_finished_segment_changed_with_the_wrong_job_is_refused_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Another job's directory is refused before anything is made again, and said before any
+    # segment: nothing written, nothing removed, no warning of a segment made again.
+    source_path, out, _ = finished_pair(tmp_path, monkeypatch, steps)
+    spoil_segment(out / "seg_000001.mkv", "truncated")
+    kept = contents(out)
+    text = refused(tmp_path, source_path, caplog, *JOB[:3], "6", *JOB[4:])
+    assert "another job than the one asked" in text and "its bytes changed" not in text
+    (out / "notes.txt").write_text("mine")
+    kept = contents(out)
+    assert "not this job's: notes.txt" in refused(tmp_path, source_path, caplog, *JOB)
+    assert "its bytes changed" not in caplog.text and contents(out) == kept
+    assert steps.calls == []
+
+
+def test_plan_says_a_finished_segment_would_be_made_again_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md doesn't say what --plan says): the same warning,
+    # ending "it would be made again by a run"; the segment's units are in the estimate; the
+    # manifest and every file as they were (a cut list is written as for any job); the same
+    # command without --plan then makes it.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path, out, whole = finished_pair(tmp_path, monkeypatch, steps)
+    found = spoil_segment(out / "seg_000001.mkv", "truncated")
+    kept = contents(out)
+    caplog.clear()
+    listing = tmp_path / "listed.txt"
+    assert upscale(tmp_path, source_path, "out", *JOB, "--plan", str(listing)) == 0
+    assert steps.calls == [] and contents(out) == kept and listing.is_file()
+    assert [m for m in caplog.messages if "its bytes changed" in m] == [
+        f"{out / 'seg_000001.mkv'}: its bytes changed since it was finished (frames 4 to 24 of the"
+        f" job: {found}): the disk or another program is to suspect; it would be made again by a"
+        " run"
+    ]
+    (estimate,) = [m for m in caplog.messages if m.startswith("time: about")]
+    assert "for 1 encode, " in estimate and "the decode and write of 1 segment" in estimate
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls == ["encode 4", "window 4:0", "window 4:1", "decode 4"]
+    assert decoded(out / "seg_000001.mkv") == decoded(whole / "seg_000001.mkv")
+
+
+def test_a_finished_segment_s_missing_checksums_are_still_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md names a segment missing or of another size alone: its checksums missing, the
+    # segment there as recorded, is refused as before, and nothing is made.
+    source_path, out, _ = finished_pair(tmp_path, monkeypatch, steps)
+    (out / "checksums" / "seg_000001.crc32").unlink()
+    kept = contents(out)
+    text = refused(tmp_path, source_path, caplog, *JOB)
+    assert (
+        "seg_000001.crc32: a finished segment's checksums, the manifest says, but missing" in text
+    )
+    assert contents(out) == kept and steps.calls == []
+
+
+@pytest.mark.parametrize("how", ["deleted", "truncated"])
+@pytest.mark.parametrize("stop", ["encode 4", "window 4:1", "decode 4"])
+def test_a_stop_after_a_finished_segment_was_found_changed_leaves_a_start_that_makes_it_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    how: str,
+    stop: str,
+) -> None:
+    # No state refuses a start: stopped (the stand-in's second Ctrl-C) at the first unit of the
+    # segment made again, in the middle of its windows or in its decode, the manifest is as the
+    # run left it (written with a unit, not before), and the same command finishes the job, the
+    # frames the uninterrupted run's. Before any unit the manifest still says the segment finished
+    # and the file is gone or cut, which the next start finds again.
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    source_path, out, whole = finished_pair(tmp_path, monkeypatch, steps)
+    spoil_segment(out / "seg_000001.mkv", how)
+    steps.stop = stop
+    before = json.loads((out / "manifest.json").read_text())["segments"]
+    stopped(tmp_path, source_path, "out", *JOB)
+    after = json.loads((out / "manifest.json").read_text())["segments"]
+    if stop == "encode 4":
+        assert after == before
+    else:
+        assert [entry["finished"] for entry in after] == [True, False]
+    steps.stop = None
+    steps.calls.clear()
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert errors(caplog) == []
+    assert (stop == "encode 4") == ("its bytes changed" in caplog.text)
+    assert (
+        steps.calls
+        == {
+            "encode 4": ["encode 4", "window 4:0", "window 4:1", "decode 4"],
+            "window 4:1": ["window 4:1", "decode 4"],
+            "decode 4": ["decode 4"],
+        }[stop]
+    )
+    assert decoded(out / "seg_000001.mkv") == decoded(whole / "seg_000001.mkv")
+    final = json.loads((out / "manifest.json").read_text())["segments"]
+    assert [entry["finished"] for entry in final] == [True, True]
+    assert [entry["bytes"] for entry in final] == [entry["bytes"] for entry in before]
+
+
+def test_a_finished_segment_found_changed_resets_its_runs_under_the_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # manifest.unfinish_changed on a record read: the segment unfinished, no bytes and no hash,
+    # its shots' runs not begun, a run made under its own cap (a shape planned again for the
+    # memory free) laid out by the plan's window again, the other segment untouched; nothing
+    # written; a record it can't read left as it is.
+    from seedvr2x.runtime.manifest import WINDOW_CAP, unfinish_changed
+
+    _, out, _ = finished_pair(tmp_path, monkeypatch, steps)
+    recorded = json.loads((out / "manifest.json").read_text())
+    shot = recorded["shots"][2]
+    planned = [[0, 4], [2, 6]]
+    assert shot["windows"] == planned and shot["windows_done"] == 2
+    shot[WINDOW_CAP], shot["windows"] = 6, [[0, 6]]
+    untouched = json.loads(json.dumps(recorded["segments"][0]))
+    (out / "seg_000001.mkv").unlink()
+    assert unfinish_changed(recorded, out) == [(1, "missing")]
+    assert recorded["segments"][0] == untouched
+    assert recorded["segments"][1]["finished"] is False
+    assert (recorded["segments"][1]["bytes"], recorded["segments"][1]["sha256"]) == (None, None)
+    assert (shot["encoded"], shot["windows_done"], WINDOW_CAP in shot) == (False, 0, False)
+    assert shot["windows"] == planned
+    assert [s["encoded"] for s in recorded["shots"][:2]] == [True, True]
+    assert unfinish_changed({"segments": "unreadable"}, out) == []
 
 
 @needs_x264
