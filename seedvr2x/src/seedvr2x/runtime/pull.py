@@ -332,8 +332,9 @@ def check_pinned(model_files: ModelFiles) -> None:
     """Check each of seedvr2x's own files among the run's against its pin (check_pin), by the name
     it was given, wherever it is read from: a file of --model-dir named like one of seedvr2x's own
     is checked as one, its refusal saying how to fetch it again only when given in the pinned
-    file's own role (advice). Every file refused is said at once (ModelError, a line each). A file
-    seedvr2x doesn't pin is said so in the log, and runs as the header check accepted it."""
+    file's own role (advice). Every file refused is said at once (ModelError, a line each, and
+    another for the command a cache's refusal advises). A file seedvr2x doesn't pin is said so in
+    the log, and runs as the header check accepted it."""
     refusals: list[str] = []
     # Each file once, in the first role it was given.
     first: dict[ModelFile, Role] = {}
@@ -430,9 +431,12 @@ def _again(name: str, path: Path, cache: Path | None) -> str:
     command = shlex.join(
         ["hf", "download", REPO, name, "--revision", REVISION, "--cache-dir", str(cache)]
     )
+    # The command on a line of its own, at the message's end, so that it can be copied whole
+    # (DESIGN.md, What it prints: a refusal's advised command "on a line of its own", decided on
+    # 2026-10-29 for this one).
     return (
         f"remove {path.resolve()}, which the next run downloads again, or download it again with"
-        f" huggingface_hub's command: {command} --force-download"
+        f" huggingface_hub's command:\n{command} --force-download"
     )
 
 

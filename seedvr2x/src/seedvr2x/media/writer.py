@@ -37,7 +37,7 @@ from typing import IO, Self
 import numpy as np
 import numpy.typing as npt
 
-from seedvr2x.media.ffmpeg import MediaError, argument, zscale
+from seedvr2x.media.ffmpeg import MediaError, argument, ends_with_us, zscale
 from seedvr2x.media.files import command_partial, partial_path, replace_whole
 from seedvr2x.media.probe import VideoStream
 
@@ -198,6 +198,7 @@ class Writer:
             stdout=stdout,
             stderr=subprocess.PIPE,
             process_group=0,
+            preexec_fn=ends_with_us(),
         )
         assert self._process.stdin is not None and self._process.stderr is not None
         self._stdin = self._process.stdin
@@ -602,7 +603,8 @@ def check_command(command: str) -> None:
     if OUT not in command:
         raise MediaError(
             f"the segment command doesn't name {OUT}, the file it must write: {command!r}; write"
-            f" {OUT} where its output's name goes, e.g. ffmpeg -i - -c:v libx265 -crf 16 {OUT}"
+            f" {OUT} where its output's name goes, for example:\n"
+            f"ffmpeg -i - -c:v libx265 -crf 16 {OUT}"
         )
 
 
@@ -997,6 +999,7 @@ def count_packets(path: Path) -> int:
         text=True,
         check=False,
         process_group=0,  # as the writers' ffmpeg: it checks the segment being finished
+        preexec_fn=ends_with_us(),
     )
     if result.returncode != 0:
         raise MediaError(f"{path}: ffprobe failed: {result.stderr.strip()}")
@@ -1035,6 +1038,7 @@ def count_frames(path: Path, strict: bool = False) -> int:
         errors="replace",
         check=False,
         process_group=0,  # as count_packets'
+        preexec_fn=ends_with_us(),
     )
     # The last lines only: a decoder that fails says so at every frame.
     lines = [line.strip()[:TAIL_WIDTH] for line in result.stderr.splitlines() if line.strip()]

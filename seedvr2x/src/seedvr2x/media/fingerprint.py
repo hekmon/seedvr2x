@@ -14,7 +14,7 @@ import numpy as np
 
 from seedvr2x.media.conversion import Conversion
 from seedvr2x.media.decode import decode_output
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.ffmpeg import MediaError, ends_with_us
 from seedvr2x.media.writer import Tags, master_filters, png_filters
 
 # The decode's conversions run: the most common source first, then each depth, chroma
@@ -71,7 +71,9 @@ def fingerprint() -> str:
             command += ["-i", str(frame)]
         for index, (_, output) in enumerate(conversions):
             command += ["-map", f"{index}:v:0", *output, str(directory / f"{index}.out")]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=False, preexec_fn=ends_with_us()
+        )
         if result.returncode != 0:
             raise MediaError(
                 f"ffmpeg failed the startup check's test conversions: {result.stderr.strip()}"

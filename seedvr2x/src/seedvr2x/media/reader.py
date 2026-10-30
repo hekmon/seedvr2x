@@ -61,7 +61,7 @@ import numpy as np
 import numpy.typing as npt
 
 from seedvr2x.media.conversion import Conversion
-from seedvr2x.media.ffmpeg import NO_METADATA, MediaError, input_args
+from seedvr2x.media.ffmpeg import NO_METADATA, MediaError, ends_with_us, input_args
 from seedvr2x.media.index import FrameIndex
 
 logger = logging.getLogger(__name__)
@@ -283,6 +283,7 @@ class _Run:
                 stderr=self._log,
                 pass_fds=[write for _, write in pipes],
                 process_group=0,
+                preexec_fn=ends_with_us(),
             )
         except BaseException:
             for read, write in pipes:

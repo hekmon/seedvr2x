@@ -232,7 +232,7 @@ def from_the_cache(name: str, path: Path, cache: Path) -> str:
     )
     return (
         f"remove {path.resolve()}, which the next run downloads again, or download it again with"
-        f" huggingface_hub's command: {command}"
+        f" huggingface_hub's command:\n{command}"
     )
 
 
@@ -707,8 +707,10 @@ def test_detector_header_refusal_says_how_to_fetch_again(
         else f"fetch it again from {url(pull.DETECTOR)}, {INTO_MODEL_DIR}"
     )
     lines = str(error.value).splitlines()
-    assert len(lines) == 3
-    assert lines[-1] == (
+    # The cache's command is on a line of its own (DESIGN.md, What it prints, 2026-10-29): the
+    # refusal takes two lines there, the second the command.
+    assert len(lines) == (6 if directory is None else 3)
+    assert "\n".join(lines[-1 - (directory is None) :]) == (
         f"{path}: neither safetensors, GGUF nor a PyTorch checkpoint: {SHOTS}; {again}"
     )
 
@@ -1685,10 +1687,13 @@ def test_header_refusal_says_how_to_fetch_again(
     hub.served[VAE] = (100).to_bytes(8, "little") + b"{"
     assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
     dit, vae = hub.snapshot(DIT), hub.snapshot(VAE)
+    # Each refusal's command on a line of its own: two lines each.
     assert caplog.messages[-1].splitlines() == [
-        f"{dit}: {other}: {V1}; {from_the_cache(DIT, dit, hub.cache)}",
-        f"{vae}: cut short inside its header, 9 bytes of at least 108;"
-        f" {from_the_cache(VAE, vae, hub.cache)}",
+        *f"{dit}: {other}: {V1}; {from_the_cache(DIT, dit, hub.cache)}".splitlines(),
+        *(
+            f"{vae}: cut short inside its header, 9 bytes of at least 108;"
+            f" {from_the_cache(VAE, vae, hub.cache)}"
+        ).splitlines(),
     ]
     assert not (tmp_path / "out").exists()
 

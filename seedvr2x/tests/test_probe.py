@@ -712,19 +712,24 @@ def contradiction(said: str, options: str, matrix: bool, fix: str = "") -> str:
     codec's bitstream filter with its options, when it has one setting each (media/bitstream.py):
     then each way out says which side it takes for right."""
     remux = (
-        "correct its container's tags with a remux, to its frames' with ffmpeg -i SOURCE -map 0"
-        f" -map -0:d -c copy {options} retagged.mkv or with mkvpropedit on a Matroska file"
+        "correct its container's tags with a remux, to its frames', with this command:\n"
+        f"ffmpeg -i SOURCE -map 0 -map -0:d -c copy {options} retagged.mkv\n"
+        "or with mkvpropedit on a Matroska file"
     )
     ways = (
         f"if its frames are right, {remux}; if its container is right, correct its bitstream's to"
-        f" its container's with ffmpeg -i SOURCE -map 0 -map -0:d -c copy -bsf:v:0 {fix} fixed.mkv"
+        " its container's with this command:\n"
+        f"ffmpeg -i SOURCE -map 0 -map -0:d -c copy -bsf:v:0 {fix} fixed.mkv\n"
         if fix
         else remux
     )
-    override = f"{'; ' if fix else ', '}or give the matrix with --input-matrix" if matrix else ""
+    # Each command on a line of its own (DESIGN.md, What it prints, 2026-10-29): after the second
+    # way's, the matrix clause starts a line; a reason ending with that command ends with a new
+    # line, which the refusal's end strips (the reasons' join takes it for the line's end).
+    override = f"{'' if fix else ', '}or give the matrix with --input-matrix" if matrix else ""
     return (
         f"its colour tags contradicted: {said}: a bad file, not read on a guess: {ways}{override}"
-    )
+    ).rstrip("\n")
 
 
 def hevc(*options: str) -> str:
@@ -855,6 +860,42 @@ def test_conversion_of_the_tags_resolved(
         "limited range",
         "chroma sited left",
     )
+
+
+def test_the_tags_remuxes_are_each_alone_on_a_line() -> None:
+    # DESIGN.md, What it prints (decided on 2026-10-29): a refusal's advised command on a line of
+    # its own, so that it can be copied whole; the words before it end in a colon, and what
+    # follows starts the next line. Here with both ways (a bitstream filter sets the range), and
+    # another reason numbered after the second command, which starts its own line.
+    cropped = {"side_data_list": [{"side_data_type": "Frame Cropping"}]}
+    probed = parse(
+        Path("in.mkv"),
+        output(
+            STREAM | {"field_order": "tt", "color_range": "pc"} | cropped | BT709,
+            UNTAGGED | {"color_range": "tv"},
+        ),
+    )
+    lines = declared_refusal(probed).splitlines()
+    commands = [line for line in lines if line.startswith("ffmpeg ")]
+    assert [line.split()[-1] for line in commands] == ["retagged.mkv", "fixed.mkv"]
+    first, second = (lines.index(line) for line in commands)
+    assert lines[first - 1].endswith("to its frames', with this command:")
+    assert lines[first + 1].startswith("or with mkvpropedit on a Matroska file; if its container")
+    assert lines[second - 1].endswith(
+        "correct its bitstream's to its container's with this command:"
+    )
+    assert lines[second + 1].startswith("(3) cropped by its container")
+    # Alone, the refusal ends with the command; with the matrix to settle, the clause after it.
+    tags = parse(
+        Path("in.mkv"),
+        output(STREAM | {"color_range": "pc"} | BT709, UNTAGGED | {"color_range": "tv"}),
+    )
+    assert declared_refusal(tags).splitlines()[-1].startswith("ffmpeg -i SOURCE")
+    matrix = parse(
+        Path("in.mkv"),
+        output(STREAM | BT709 | {"color_space": "bt470bg"}, UNTAGGED | {"color_space": "bt709"}),
+    )
+    assert declared_refusal(matrix).splitlines()[-1] == "or give the matrix with --input-matrix"
 
 
 def test_contradiction_among_the_other_reasons() -> None:

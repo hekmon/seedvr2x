@@ -1191,10 +1191,14 @@ def declared_refusal(
             f" {rate.fraction(stream.frame_rate)}: not supported: {FINER_THAN_MATROSKA}"
         )
     if len(reasons) < 2:
-        return "".join(reasons)
-    # Numbered, since a reason can hold "; " itself (TONE_MAP's).
-    listed = "; ".join(f"({number}) {reason}" for number, reason in enumerate(reasons, 1))
-    return f"{len(reasons)} reasons: {listed}"
+        return "".join(reasons).rstrip("\n")
+    # Numbered, since a reason can hold "; " itself (TONE_MAP's). One that ends with a command,
+    # on a line of its own (_contradiction), ends with a new line: the next starts there, with no
+    # "; " after the command.
+    listed = ""
+    for number, reason in enumerate(reasons, 1):
+        listed += ("" if number == 1 or listed.endswith("\n") else "; ") + f"({number}) {reason}"
+    return f"{len(reasons)} reasons: {listed.rstrip(chr(10))}"
 
 
 def _pixels(stream: VideoStream) -> tuple[str, bool]:
@@ -1314,16 +1318,23 @@ def _contradiction(stream: VideoStream, matrix: str | None, both_transfers: bool
         f"{COLOUR[name][1]} {OPTION_VALUES.get(decoded, decoded)}"
         for name, (_, decoded) in found.items()
     )
+    # Each command on a line of its own, the words before it ending in a colon and what follows
+    # it on the next line, so that a line copied whole is the command and nothing else (DESIGN.md,
+    # What it prints: a refusal's advised command "on a line of its own", decided on 2026-10-29
+    # for the tags' remux). A reason ending with a command ends with a new line, which the reasons
+    # joined (declared_refusal) take for the end of the line the next one starts on.
     remux = (
-        "correct its container's tags with a remux, to its frames' with ffmpeg -i SOURCE -map 0"
-        f" -map -0:d -c copy {options} retagged.mkv or with mkvpropedit on a Matroska file"
+        "correct its container's tags with a remux, to its frames', with this command:\n"
+        f"ffmpeg -i SOURCE -map 0 -map -0:d -c copy {options} retagged.mkv\n"
+        "or with mkvpropedit on a Matroska file"
     )
     fix = bitstream.setting(
         stream.codec_name, {name: declared for name, (declared, _) in found.items()}, SYNONYMS
     )
     ways = (
         f"if its frames are right, {remux}; if its container is right, correct its bitstream's to"
-        f" its container's with ffmpeg -i SOURCE -map 0 -map -0:d -c copy -bsf:v:0 {fix} fixed.mkv"
+        " its container's with this command:\n"
+        f"ffmpeg -i SOURCE -map 0 -map -0:d -c copy -bsf:v:0 {fix} fixed.mkv\n"
         if fix
         else remux
     )
@@ -1333,7 +1344,9 @@ def _contradiction(stream: VideoStream, matrix: str | None, both_transfers: bool
     pixel_format = PIXEL_FORMATS.get(stream.pix_fmt)
     rgb = pixel_format is not None and pixel_format.family == "rgb"
     matrix_way = "color_space" in found and not rgb
-    separator = "; " if fix else ", "  # a third clause after the two ways', as they are parted
+    # A third clause after the two ways': after the second's command, on a line of its own; after
+    # the remux's words alone, parted by a comma.
+    separator = "" if fix else ", "
     override = f"{separator}or give the matrix with --input-matrix" if matrix_way else ""
     return (
         f"its colour tags contradicted: {', '.join(said)}: a bad file, not read on a guess: {ways}"

@@ -699,6 +699,17 @@ def test_command_checked() -> None:
     check_command(COPY)
 
 
+def test_command_refusal_gives_its_example_on_a_line_of_its_own() -> None:
+    # DESIGN.md, What it prints (decided on 2026-10-29): an advised command on a line of its own,
+    # at the message's end, so that it can be copied whole.
+    with pytest.raises(MediaError) as refused:
+        check_command("ffmpeg -i - -c:v libx265 out.mkv")
+    lines = str(refused.value).splitlines()
+    assert len(lines) == 2 and lines[0].endswith("where its output's name goes, for example:")
+    assert lines[1] == "ffmpeg -i - -c:v libx265 -crf 16 {out}"
+    check_command(lines[1])
+
+
 def test_command_checked_before_anything_runs(tmp_path: Path) -> None:
     command = f"cat > '{tmp_path}/out.mkv'"
     with pytest.raises(MediaError, match=r"doesn't name \{out\}"):

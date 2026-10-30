@@ -22,7 +22,7 @@ from typing import IO, Any, Protocol, cast
 import numpy as np
 import numpy.typing as npt
 
-from seedvr2x.media.ffmpeg import NO_METADATA, MediaError, argument, input_args
+from seedvr2x.media.ffmpeg import NO_METADATA, MediaError, argument, ends_with_us, input_args
 from seedvr2x.media.index import NOPTS, FrameIndex
 
 logger = logging.getLogger(__name__)
@@ -311,6 +311,7 @@ def scan(path: Path, detector: Detects | None = None) -> Scan:
             text=True,
             errors="replace",
             pass_fds=() if pipe is None else (pipe[1],),
+            preexec_fn=ends_with_us(),
         )
     except BaseException:
         if pipe is not None:
@@ -917,7 +918,12 @@ def packets(path: Path) -> _Packets:
         *("-of", "compact", argument(path)),
     ]
     with subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace"
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        preexec_fn=ends_with_us(),
     ) as process:
         assert process.stdout is not None and process.stderr is not None
         errors: list[str] = []
@@ -975,8 +981,8 @@ def timing_error(
     declare: the two sentences about the rate say "the rate it is read at", as the rate rule's
     messages do (DESIGN.md, Input: "A stream read at another rate than ffprobe gives is said to
     declare ffprobe's rate once; the rate rule's messages then say the rate it is read at (the
-    plain refusal's own two sentences still say declared: to bring in line)"). Every other
-    stream's message is unchanged."""
+    plain refusal's own two sentences too, since 2026-10-29)"). Every other stream's message is
+    unchanged."""
     if scanned.frames == 0:
         return "no frame decoded"
     jump = scanned.discontinuity
@@ -984,8 +990,8 @@ def timing_error(
         # The remux as the colour tags' (media/source.py): every stream but the data streams,
         # which Matroska refuses and MPEG-TS files often carry.
         way = (
-            ", which ffmpeg takes out when it remuxes the file, every frame kept: ffmpeg -i SOURCE"
-            " -map 0 -map -0:d -c copy fixed.mkv"
+            ", which ffmpeg takes out when it remuxes the file, every frame kept, with this"
+            " command:\nffmpeg -i SOURCE -map 0 -map -0:d -c copy fixed.mkv"
             if jump.remux
             else ", and only a constant frame rate is supported"
         )

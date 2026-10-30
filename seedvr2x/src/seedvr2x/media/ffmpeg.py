@@ -93,16 +93,19 @@ def _libc() -> ctypes.CDLL:
 
 
 def ends_with_us() -> Callable[[], None]:
-    """A `preexec_fn` for a child of the assembly (media/assembly.py) that has it killed (SIGKILL)
-    when seedvr2x dies: DESIGN.md, Output, Assembly (decided on 2026-10-12): "ffmpeg's children
-    of the assembly end with seedvr2x, where a killed seedvr2x leaves its join writing". Their
-    own process groups keep them out of the terminal's reach (DESIGN.md, Pause and resume,
-    Stopping), so nothing but this ends them when seedvr2x is killed.
+    """A `preexec_fn` for every ffmpeg and ffprobe seedvr2x starts, which has it killed (SIGKILL)
+    when seedvr2x dies: DESIGN.md, Output, Assembly (decided on 2026-10-12 for the assembly's:
+    "ffmpeg's children of the assembly end with seedvr2x, where a killed seedvr2x leaves its join
+    writing"; on 2026-10-29 for all of them). Their own process groups keep them out of the
+    terminal's reach (DESIGN.md, Pause and resume, Stopping), so nothing but this ends them when
+    seedvr2x is killed. Not the user's `--segment-cmd` (media/writer.py, CommandWriter), which
+    ends at its input's end (DESIGN.md, same place).
 
-    prctl(PR_SET_PDEATHSIG) fires when the thread that forked ends, not the process: the callers
-    fork from seedvr2x's main thread, which is the process's life. It is set after the fork, so
-    a parent that died in between is not seen by the kernel: the child checks, and ends itself.
-    Linux only (DESIGN.md: Linux first); no other system is run, so no fallback."""
+    prctl(PR_SET_PDEATHSIG) fires when the thread that forked ends, not the process: every
+    caller forks from seedvr2x's main thread, which is the process's life, or from a thread that
+    waits for its child (media/scan.py, packets, run beside the decode). It is set after the
+    fork, so a parent that died in between is not seen by the kernel: the child checks, and ends
+    itself. Linux only (DESIGN.md: Linux first); no other system is run, so no fallback."""
     libc = _libc()
     parent = os.getpid()
 
@@ -249,7 +252,11 @@ def _options(name: str) -> set[str]:
 
 def _run(*options: str) -> str:
     result = subprocess.run(
-        ["ffmpeg", "-hide_banner", *options], capture_output=True, text=True, check=False
+        ["ffmpeg", "-hide_banner", *options],
+        capture_output=True,
+        text=True,
+        check=False,
+        preexec_fn=ends_with_us(),
     )
     if result.returncode != 0:
         raise MediaError(f"ffmpeg {' '.join(options)} failed: {result.stderr.strip()}")

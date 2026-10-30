@@ -1255,8 +1255,8 @@ def test_a_timestamp_jump_refused_with_its_remux(
     remux = "ffmpeg -i SOURCE -map 0 -map -0:d -c copy fixed.mkv"
     assert str(refused.value) == (
         f"{path}: its timestamps jump at frame 50, from {before:.3f} to {after:.3f} s: a"
-        " discontinuity, which ffmpeg takes out when it remuxes the file, every frame kept:"
-        f" {remux}"
+        " discontinuity, which ffmpeg takes out when it remuxes the file, every frame kept, with"
+        f" this command:\n{remux}"
     )
     command = [str(path) if word == "SOURCE" else word for word in remux.split()]
     subprocess.run(command, cwd=tmp_path, check=True, capture_output=True)

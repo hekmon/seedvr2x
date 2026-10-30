@@ -11,7 +11,7 @@ from collections import deque
 from collections.abc import Sequence
 from pathlib import Path
 
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.ffmpeg import MediaError, ends_with_us
 from seedvr2x.media.files import write_whole
 
 _LINE = re.compile(r"[0-9a-f]{8}")
@@ -72,7 +72,13 @@ def check_frames(
     found: list[str] = []
     # ffmpeg's errors go to a file, which it never waits on; what it reports fails the check.
     with tempfile.TemporaryFile() as log:
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log, process_group=0)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=log,
+            process_group=0,
+            preexec_fn=ends_with_us(),
+        )
         assert process.stdout is not None
         with process.stdout as frames_read:
             while frame := frames_read.read(size):

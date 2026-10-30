@@ -14,7 +14,7 @@ import numpy as np
 import numpy.typing as npt
 
 from seedvr2x.media.conversion import Conversion
-from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.media.ffmpeg import MediaError, ends_with_us
 
 
 def decode_command(
@@ -95,6 +95,7 @@ class Decoder:
             stdout=subprocess.PIPE,
             stderr=self._log,
             process_group=0,
+            preexec_fn=ends_with_us(),
         )
         assert self._process.stdout is not None
         # Buffered, as Popen opens it by default.

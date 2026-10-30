@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from seedvr2x.media import rate
-from seedvr2x.media.ffmpeg import MediaError, argument
+from seedvr2x.media.ffmpeg import MediaError, argument, ends_with_us
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +192,7 @@ def _ffprobe(path: Path, *options: str) -> str:
         capture_output=True,
         text=True,
         check=False,
+        preexec_fn=ends_with_us(),
     )
     if result.returncode != 0:
         raise MediaError(f"{path}: ffprobe failed: {result.stderr.strip()}")

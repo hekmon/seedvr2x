@@ -267,11 +267,12 @@ HLG = f"HDR, transfer arib-std-b67 (HLG): not supported: {WHY_HLG}; {TONE_MAP}"
             {"color_transfer": "smpte2084", "first_frame": first("arib-std-b67")},
             f"2 reasons: (1) {PQ}; (2) its colour tags contradicted: transfer smpte2084 against"
             " arib-std-b67 on its first frame: a bad file, not read on a guess: if its frames are"
-            " right, correct its container's tags with a remux, to its frames' with ffmpeg -i"
-            " SOURCE -map 0 -map -0:d -c copy -color_trc:v arib-std-b67 retagged.mkv or with"
-            " mkvpropedit on a Matroska file; if its container is right, correct its bitstream's"
-            " to its container's with ffmpeg -i SOURCE -map 0 -map -0:d -c copy -bsf:v:0"
-            " h264_metadata=transfer_characteristics=16 fixed.mkv",
+            " right, correct its container's tags with a remux, to its frames', with this"
+            " command:\nffmpeg -i SOURCE -map 0 -map -0:d -c copy -color_trc:v arib-std-b67"
+            " retagged.mkv\nor with mkvpropedit on a Matroska file; if its container is right,"
+            " correct its bitstream's to its container's with this command:\nffmpeg -i SOURCE"
+            " -map 0 -map -0:d -c copy -bsf:v:0 h264_metadata=transfer_characteristics=16"
+            " fixed.mkv",
         ),
         # An HDR transfer over Dolby Vision's metadata without a record, which adds nothing.
         ({"color_transfer": "arib-std-b67", "first_frame": first("arib-std-b67", True)}, HLG),
@@ -410,7 +411,7 @@ def test_timing(scanned: Scan, avg_frame_rate: Fraction | None, reason: str) -> 
 def test_timing_error_says_the_rate_a_stream_is_read_at() -> None:
     # DESIGN.md, Input: "A stream read at another rate than ffprobe gives is said to declare
     # ffprobe's rate once; the rate rule's messages then say the rate it is read at (the plain
-    # refusal's own two sentences still say declared: to bring in line)". `read_at` changes the
+    # refusal's own two sentences too, since 2026-10-29)". `read_at` changes the
     # two sentences about the rate, and nothing else of a message; without it, to the byte.
     wrong = timed(100, 99, 40000, 40000)
     assert timing_error(wrong, NTSC_FILM, NTSC_FILM) == (
