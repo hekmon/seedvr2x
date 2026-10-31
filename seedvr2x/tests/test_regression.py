@@ -69,8 +69,10 @@ planner's own choice of passes (DESIGN.md, Memory planner, Choices, 3). The plan
 by the same command with --plan, which runs the first pass and plans, loading no model today
 (DESIGN.md has --plan load them for the time estimates' calibration, which isn't built): its
 lines of the passes, "plan: encode: untiled, ..." and "plan: decode: untiled, ...", must say both
-untiled, as numz ran them; the run then takes that plan, and the
-master and frames are numz's bit for bit. A card that can't run untiled can't make numz's untiled
+untiled, as numz ran them; the run then makes a plan of its own (each
+call's held to the planner's for the free memory that call read, not to the other's: the desktop
+moves it), and the master and frames are numz's bit for bit. A card that can't run untiled
+can't make numz's untiled
 master (the untiled decode of these frames, padded to 1920x1088, takes 37.09 GiB of free VRAM by
 the planner, the DiT off the GPU, its room and the margin counted): where the driver reports
 under 40 GiB free (UNTILED_FREE), a plan that tiles a pass, or is refused, skips the case before
@@ -176,14 +178,19 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, NoReturn
 
 import pytest
 
 from seedvr2x.cli import NUMZ_DRAW, NUMZ_PADDING, NUMZ_TAIL
-from seedvr2x.runtime import pull
+from seedvr2x.runtime import memory, planner, pull
+from seedvr2x.runtime.job import Shot, target_size
+from seedvr2x.runtime.manifest import NAME
 
 PROJECT = Path(__file__).resolve().parents[1]
 MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")
@@ -516,12 +523,13 @@ def reported(log: str) -> float | None:
     return None
 
 
-def unpinned(log: str, why: str) -> None:
+def unpinned(log: str, why: str, free: float | None = None) -> None:
     """The unpinned case on a card whose plan can't make numz's untiled master, `why` saying
     it, the refusal or the plan's line of its passes: skipped where the driver reported under
     UNTILED_FREE GiB free to the --plan run whose log this is (reported), failed where it
-    reported that or more, or where the log doesn't say."""
-    free = reported(log)
+    reported that or more, or where the log doesn't say. `free`, in GiB, is that figure where
+    the caller has it from the call's own record (Free), not from the log's words."""
+    free = reported(log) if free is None else free
     if free is not None and free < UNTILED_FREE:
         pytest.skip(
             f"the driver reports {free:.2f} GiB free, under the {UNTILED_FREE:.0f} a card makes"
@@ -533,6 +541,299 @@ def unpinned(log: str, why: str) -> None:
         else (f"the driver reports {free:.2f} GiB free, {UNTILED_FREE:.0f} or more")
     )
     pytest.fail(f"{there}, where the plan must run both passes untiled: {why}")
+
+
+@dataclass(frozen=True)
+class Free:
+    """The free memory a call's plan was made in, as that call read it, in bytes: what the driver
+    reported to the process, what the whole card had by NVML (None where it was not read), and
+    whether the run was held to the card (memory.Reading). `exact`: read from the job's manifest,
+    to the byte; else from a log, which says GiB to two decimals (logged_free)."""
+
+    reported: int
+    card: int | None
+    held: bool
+    exact: bool = True
+
+    def said(self, counted: int | None = None) -> str:
+        """In words, GiB to two decimals, for a failure's message."""
+        card = "not read" if self.card is None else f"{self.card / memory.GIB:.2f} GiB"
+        more = "" if counted is None else f", counted {counted / memory.GIB:.2f} GiB"
+        return f"reported {self.reported / memory.GIB:.2f} GiB, card {card}{more}"
+
+
+def recorded_free(record: dict[str, Any]) -> Free:
+    """The free memory a plan was made in, from the manifest's plan record, its "memory" part
+    (planner.Peaks.record): the driver's figure, the card's, and a reserve only on a held run."""
+    return Free(record["driver_free"], record["card_free"], record["reserve"] is not None)
+
+
+def gib(figure: str) -> int:
+    """A log's figure in GiB, to bytes."""
+    return round(float(figure) * memory.GIB)
+
+
+# The line memory.reading logs at debug level, which --verbose shows: what the plan counts on, of
+# the free memory it was made under (the smaller of two figures) and which figure that is, with
+# the other (memory._named).
+PLAN_COUNTS = re.compile(
+    r"the plan counts on [\d.]+ GiB of the GPU's memory, of the ([\d.]+) GiB free (.*?):"
+    r" [\d.]+ GiB are left to what torch"
+)
+THE_CARD_SMALLER = re.compile(
+    r"on the whole card by NVML \(its driver reports ([\d.]+) GiB free to this process\)"
+)
+THE_DRIVER_SMALLER = re.compile(
+    r"as its driver reports it to this process \(the whole card has ([\d.]+) GiB free by NVML\)"
+)
+THE_CARD_UNREAD = "as its driver reports it to this process (the whole card's, NVML's, wasn't read)"
+
+
+def logged_free(log: str) -> Free | None:
+    """The free memory a run's plan was made in, from its --verbose log (PLAN_COUNTS; two
+    decimals of GiB), the run's manifest being removed with its work directory once the file is
+    assembled. On a driver that refuses, memory.reading logs nothing: the plan's card line, "N GiB
+    free, a budget of". None where the log says neither."""
+    found = PLAN_COUNTS.search(log)
+    if found is not None:
+        taken, named = gib(found[1]), found[2]
+        if card := THE_CARD_SMALLER.fullmatch(named):
+            return Free(gib(card[1]), taken, True, exact=False)
+        if reported := THE_DRIVER_SMALLER.fullmatch(named):
+            return Free(taken, gib(reported[1]), True, exact=False)
+        if named == THE_CARD_UNREAD:
+            return Free(taken, None, True, exact=False)
+        return None
+    refuses = re.search(r"plan: card: [^\n]*?, ([\d.]+) GiB free, a budget of ", log)
+    return None if refuses is None else Free(gib(refuses[1]), None, False, exact=False)
+
+
+@dataclass(frozen=True)
+class Inputs:
+    """What a job's plan is made from besides the memory, read from the manifest --plan left
+    (recorded_inputs): the target size, the shots and the attention backend the plan was
+    predicted for."""
+
+    target: tuple[int, int]
+    shots: tuple[Shot, ...]
+    attention: str
+
+
+def recorded_inputs(content: dict[str, Any]) -> tuple[Inputs, Free]:
+    """The inputs of the plan a manifest's content records, with the free memory it was made in:
+    the target from the input's size and sample aspect at the setting's resolution (cli._run, job.
+    target_size), the shots as recorded, the attention backend of the plan's record."""
+    source, settings = content["input"], content["settings"]
+    width, height = source["size"]
+    target = target_size(width, height, Fraction(source["sample_aspect"]), settings["resolution"])
+    shots = tuple(Shot(shot["start"], shot["end"]) for shot in content["shots"])
+    memory_record = content["plan"]["memory"]
+    return Inputs(target, shots, memory_record["attention"]), recorded_free(memory_record)
+
+
+def readings(free: Free, monkeypatch: pytest.MonkeyPatch) -> list[memory.Reading]:
+    """The readings the planner is given for `free`, made by memory.reading itself (its driver
+    and NVML replaced by free's figures, restored by monkeypatch): the first for the figures as
+    they are; for a log's (not exact), then those that two decimals of GiB leave possible, each
+    figure up or down half a hundredth, which the plan must hold within."""
+    half = 0 if free.exact else round(0.005 * memory.GIB)
+    shifts = (0,) if free.exact else (0, -half, half)
+    found: list[memory.Reading] = []
+    for by_driver in shifts:
+        for by_card in shifts if free.card is not None else (0,):
+            card = None if free.card is None else free.card + by_card
+            monkeypatch.setattr(memory, "_spills", free.held)
+            monkeypatch.setattr(memory, "_native", True)
+            monkeypatch.setattr(memory, "_segments", True)
+            monkeypatch.setattr(memory, "_footing", None)
+            monkeypatch.setattr(memory, "_planned", None)
+            monkeypatch.setattr(
+                memory, "_twice", lambda index, card=card: "not read" if card is None else card
+            )
+            found.append(memory.reading(free.reported + by_driver))
+    return found
+
+
+def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> list[str]:
+    """The plan lines (plan_lines, choices) the planner makes for `reading` and the job's
+    inputs: nothing pinned, the decode splitting no colours (the command's --color-correction
+    none), numz's padding, `host` the system memory available. The disk's line is not compared:
+    it follows the disk. A refusal is one line, "refused: ...", which no run's plan equals."""
+    try:
+        made, peaks = planner.plan(
+            reading,
+            inputs.target,
+            inputs.shots,
+            planner.Pins(),
+            host,
+            numz_padding=True,
+            attention=inputs.attention,
+        )
+    except planner.PlanError as error:
+        return [f"refused: {error}"]
+    said = planner.said(
+        made, peaks, "a card", inputs.target, inputs.shots, planner.Pins(), numz_padding=True
+    )
+    return compared(plan_lines("\n".join(said)))
+
+
+def compared(lines: list[str]) -> list[str]:
+    """A plan's lines as two plans are compared: choices, without the disk's line."""
+    return [line for line in choices(lines) if not line.startswith("disk: ")]
+
+
+def line_of(lines: list[str], start: str) -> str:
+    """The first of a plan's lines that starts with `start`, or a note that there is none."""
+    return next((line for line in lines if line.startswith(start)), f"(no line {start!r})")
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A call's plan against the planner's for the call's own reading (compare_with_planner)."""
+
+    call: str
+    reading: str
+    logged: tuple[str, str]  # the call's windows line and blocks-swapped line
+    planner: tuple[str, str]  # the planner's, for the reading as given
+    agrees: bool
+
+
+def compare_with_planner(
+    call: str,
+    log: str,
+    free: Free,
+    inputs: Inputs,
+    host: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Verdict:
+    """Whether the plan lines in `log` are those the planner makes for `free`, the reading that
+    call planned in: for a reading from a log, for any of the readings its two decimals leave
+    possible (readings). Not compared with another call's plan: the desktop's memory moves
+    between two calls, and a plan that follows it is right (decided by design on 2026-10-30)."""
+    logged = compared(plan_lines(log))
+    options = readings(free, monkeypatch)
+    made = [planner_says(reading, inputs, host) for reading in options]
+    first = made[0]
+
+    def pair(lines: list[str]) -> tuple[str, str]:
+        return line_of(lines, "windows: "), line_of(lines, "blocks swapped: ")
+
+    return Verdict(
+        call,
+        free.said(options[0].counted),
+        pair(logged),
+        pair(first),
+        agrees=logged in made,
+    )
+
+
+def assert_planned_as_read(verdicts: list[Verdict]) -> None:
+    """Fail unless each call's plan is the planner's for its own reading, saying each call's
+    reading, windows and blocks swapped, and what the planner makes of it."""
+    if all(verdict.agrees for verdict in verdicts):
+        return
+    pytest.fail(
+        "a call's plan is not the planner's for the reading that call made:\n"
+        + "\n".join(
+            f"{verdict.call}: {'as the planner makes it' if verdict.agrees else 'NOT'}; read"
+            f" {verdict.reading}; logged [{verdict.logged[0]}] [{verdict.logged[1]}]; the planner"
+            f" makes [{verdict.planner[0]}] [{verdict.planner[1]}]"
+            for verdict in verdicts
+        )
+    )
+
+
+def work_of(tmp_path: Path) -> Path:
+    """The work directory of the job the tests' command makes for tmp_path's ours.mkv
+    (cli._work_directory), where its manifest is."""
+    return tmp_path / "ours.mkv.work"
+
+
+def host_available() -> int | None:
+    """The system memory available now, as the plan reads it (cli._host_available), in bytes."""
+    from seedvr2x.runtime import blockswap
+
+    return blockswap.available()
+
+
+# Two readings of the free memory taken back to back are the same to the byte on a steady card
+# (cli._free_memory: the same for a new job and a resume), the log saying them to 0.01 GiB; the
+# tolerance takes that rounding twice over, so that a few MiB of the driver's own figure do not
+# fail the test. PROVISIONAL (impl-v010, 2026-10-30: design asks the readings equal, a gap a bug,
+# and leaves the tolerance open).
+READING_TOLERANCE = round(0.02 * memory.GIB)
+# How far the card's other programs may move between the calls (other_programs) for the card to be
+# steady: the same figure. A desktop moving more is why the readings differ, not seedvr2x.
+# PROVISIONAL (impl-v010, 2026-10-30): the same.
+STEADY = READING_TOLERANCE
+
+
+def other_programs(settle: float = 15.0) -> int:
+    """What the card's programs hold of it by NVML (memory.card_state), in bytes, once it stops
+    moving: read every half second until two readings are within 8 MiB, at most `settle`
+    seconds. Taken where no process of ours has the card (this one makes no CUDA context, and the
+    calls are over), so that it is the other programs'. Skips the test where NVML says nothing:
+    a steady card can't be told."""
+    previous = None
+    deadline = time.monotonic() + settle
+    while True:
+        state = memory.card_state()
+        if state is None:
+            pytest.skip("NVML doesn't answer: a steady card can't be told")
+        used = state[1]
+        if previous is not None and abs(used - previous) <= 8 << 20:
+            return used
+        if time.monotonic() >= deadline:
+            return used
+        previous = used
+        time.sleep(0.5)
+
+
+def run_until_planned(
+    arguments: list[str],
+    environment: dict[str, str],
+    marker: str = "plan: pinned: ",
+    wait: float = 3600,
+) -> tuple[str, int | None]:
+    """Run a command that logs to stderr and stop it once a line holds `marker`, the plan's last
+    line by default (planner.said): the run has read its free memory and planned, the models not
+    yet loaded. Returns its stderr to there and its exit status, None where it was stopped
+    here. A command that ends first, a refusal, returns its whole stderr and its status."""
+    process = subprocess.Popen(
+        arguments,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    seen: list[str] = []
+    stop = threading.Event()
+
+    def read() -> None:
+        assert process.stderr is not None
+        for line in process.stderr:
+            seen.append(line)
+            if marker in line:
+                stop.set()
+        stop.set()
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    stop.wait(wait)
+    try:
+        # A command that ended (the stream closed) is reaped at once; one that logged the marker
+        # is still running.
+        status = process.wait(0.5)
+    except subprocess.TimeoutExpired:
+        status = None
+        process.terminate()
+        try:
+            process.wait(60)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+    reader.join(30)
+    return "".join(seen), status
 
 
 def same_bits(tmp_path: Path, reference: Path) -> None:
@@ -598,7 +899,7 @@ def test_milestone1_bit_identical(tmp_path: Path, dit: str, vae: str, reference:
     )
 
 
-def test_milestone1_unpinned(tmp_path: Path) -> None:
+def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # numz-7b with no tile pinned: the passes are the planner's own choice, and the bits go
     # through it. Decided before any run, by the same command with --plan: the first pass and
     # the plan, its cut list written and no master (cli.py); --plan loads no model today. A card
@@ -606,9 +907,15 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     # skipped where the driver reports under 40 GiB free, saying the refusal, or the plan's line
     # of the pass it tiles (planner.said), and fails where it reports more (unpinned). Else the
     # encode's and the decode's lines say untiled, as numz ran them, and nothing is pinned; the
-    # run then takes the same
-    # plan, and its bits are numz's. The run resumes the job the --plan call made, so its first
-    # pass is read in that call's log (upscaled).
+    # run then makes a plan of its own, and its bits are numz's. The run resumes the job the
+    # --plan call made, so its first pass is read in that call's log (upscaled).
+    # The two calls are not compared with each other: a desktop that drives the card moves its
+    # free memory between them (0.3 GiB on an RTX 5090 under WSL2, 5 blocks swapped in one call
+    # and 4 in the other), and a plan that follows it is right. Each call's plan is compared with
+    # the planner's for the reading that call made (compare_with_planner): the --plan call's from
+    # the manifest it leaves (exact), the run's from its --verbose log, its manifest being gone
+    # with its work directory once the file is assembled (design, 2026-10-30). That the two calls
+    # read the same memory on a steady card is test_plan_and_run_read_the_same_free_memory.
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
     numz = case("milestone1", "numz", "input_rgb.mkv", 1080, "numz", "m1")
@@ -616,6 +923,7 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     job = (tmp_path, numz.source, numz.resolution, (NUMZ_DIT, NUMZ_VAE))
     arguments, environment = command(*job, numz_padding=True, pin_untiled=False)
     listed = tmp_path / "cuts.txt"
+    host_planned = host_available()
     plan = subprocess.run(
         [*arguments, "--plan", str(listed)],
         capture_output=True,
@@ -634,7 +942,8 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     refusals = [error for error in errors if any(what in error for what in REFUSED)]
     # Another card than ROOT_CARD, whose reference is made untiled at the size its untiled passes
     # fit (the module's docstring): its plan there refused, or tiling a pass, skips the case,
-    # saying it; ROOT_CARD's is held to UNTILED_FREE (unpinned).
+    # saying it; ROOT_CARD's is held to UNTILED_FREE (unpinned). A refusal records no reading:
+    # its figure is the one its words give (reported).
     other = card() != ROOT_CARD
     if plan.returncode == 1 and refusals and other:
         pytest.skip(f"{card()}: the plan is refused: {refusals[0]}")
@@ -645,17 +954,107 @@ def test_milestone1_unpinned(tmp_path: Path) -> None:
     planned = plan_lines(plan.stderr)
     passes = [line for line in planned if line.startswith(("encode: ", "decode: "))]
     assert len(passes) == 2 and any(line.startswith("pinned: nothing") for line in planned), planned
+    # The --plan call's reading and the inputs of its plan, from the manifest it left, read
+    # before the run, whose plan may write it again.
+    inputs, free_planned = recorded_inputs(json.loads((work_of(tmp_path) / NAME).read_text()))
     tiled = [line for line in passes if "tiles of" in line]
     if tiled and other:
         pytest.skip(f"{card()}: the plan tiles a pass: plan: {tiled[0]}")
     if tiled:
-        unpinned(plan.stderr, f"the plan tiles a pass: plan: {tiled[0]}")
+        unpinned(
+            plan.stderr,
+            f"the plan tiles a pass: plan: {tiled[0]}",
+            free_planned.reported / memory.GIB,
+        )
     assert passes[0].startswith("encode: untiled, "), planned
     assert passes[1].startswith("decode: untiled, "), planned
     assert listed.is_file() and not (tmp_path / "ours.mkv").exists()
-    log = upscaled(*job, numz_padding=True, pin_untiled=False, planned=plan.stderr)
-    assert choices(plan_lines(log)) == choices(planned), (plan_lines(log), planned)
+    host_ran = host_available()
+    log = upscaled(*job, "-v", numz_padding=True, pin_untiled=False, planned=plan.stderr)
+    free_ran = logged_free(log)
+    assert free_ran is not None, f"no free memory read in the run's --verbose log: {log[-3000:]}"
+    assert_planned_as_read(
+        [
+            compare_with_planner(
+                "--plan", plan.stderr, free_planned, inputs, host_planned, monkeypatch
+            ),
+            compare_with_planner("the run", log, free_ran, inputs, host_ran, monkeypatch),
+        ]
+    )
+    # The run's own passes: the card it planned for may hold less than the --plan call's did.
+    ran = plan_lines(log)
+    run_passes = [line for line in ran if line.startswith(("encode: ", "decode: "))]
+    assert len(run_passes) == 2 and any(line.startswith("pinned: nothing") for line in ran), ran
+    run_tiled = [line for line in run_passes if "tiles of" in line]
+    if run_tiled and other:
+        pytest.skip(f"{card()}: the run's plan tiles a pass: plan: {run_tiled[0]}")
+    if run_tiled:
+        unpinned(
+            log,
+            f"the run's plan tiles a pass: plan: {run_tiled[0]}",
+            free_ran.reported / memory.GIB,
+        )
     same_bits(tmp_path, numz.reference)
+
+
+def test_plan_and_run_read_the_same_free_memory(tmp_path: Path) -> None:
+    # The free memory --plan reads and the run reads, back to back on the same case, are the same
+    # figure: both read it once the first pass is done and before any model loads, with a first
+    # allocation and a warm-up in place (cli._free_memory), the same to the byte for a new job
+    # and a resume (its docstring). A gap is a bug. The run is stopped as soon as it has planned,
+    # its models never loaded: its reading is read in its --verbose log (logged_free), the --plan
+    # call's in the manifest it leaves, copied before the run. The test cannot make the desktop
+    # steady: the other programs' memory on the card (NVML's used, with none of our processes on
+    # it) is read before the first call, between the two and after the second; where the readings
+    # differ and that memory moved by more than STEADY, the desktop moved, not seedvr2x, and the
+    # test skips, saying the figures. (Design's check, baton 3, 2026-10-30.)
+    assert REFERENCE is not None
+    models_present(NUMZ_DIT, NUMZ_VAE)
+    numz = case("milestone1", "numz", "input_rgb.mkv", 1080, "numz", "m1")
+    if not numz.source.exists():
+        pytest.skip(f"{numz.source}: absent; this module's docstring says how to make it")
+    arguments, environment = command(
+        tmp_path,
+        numz.source,
+        numz.resolution,
+        (NUMZ_DIT, NUMZ_VAE),
+        numz_padding=True,
+        pin_untiled=False,
+    )
+    before = other_programs()
+    plan = subprocess.run(
+        [*arguments, "--plan", str(tmp_path / "cuts.txt")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=environment,
+    )
+    if plan.returncode == 1 and (refused := refusal(plan.stderr)) is not None:
+        pytest.skip(f"{card()}: the case can't run there: {refused}")
+    assert plan.returncode == 0, plan.stderr[-3000:]
+    _, free_planned = recorded_inputs(json.loads((work_of(tmp_path) / NAME).read_text()))
+    between = other_programs()
+    log, status = run_until_planned([*arguments, "-v"], environment)
+    after = other_programs()
+    assert status is None, f"the run ended before its plan was made: {log[-3000:]}"
+    free_ran = logged_free(log)
+    assert free_ran is not None, f"no free memory read in the run's --verbose log: {log[-3000:]}"
+    gaps = [abs(free_ran.reported - free_planned.reported)]
+    if free_ran.card is not None and free_planned.card is not None:
+        gaps.append(abs(free_ran.card - free_planned.card))
+    same = (free_ran.card is None) == (free_planned.card is None) and max(gaps) <= READING_TOLERANCE
+    if same:
+        return
+    moved = max(abs(between - before), abs(after - between))
+    figures = (
+        f"--plan read {free_planned.said()}, the run {free_ran.said()}; the card's other"
+        f" programs held {before / memory.GIB:.2f}, {between / memory.GIB:.2f} and"
+        f" {after / memory.GIB:.2f} GiB before the first call, between the two and after the"
+        f" second"
+    )
+    if moved > STEADY:
+        pytest.skip(f"the desktop moved, not seedvr2x: {figures}")
+    pytest.fail(f"the card was steady and the two calls read other memory: {figures}")
 
 
 def test_milestone1_from_the_cache(tmp_path: Path) -> None:
