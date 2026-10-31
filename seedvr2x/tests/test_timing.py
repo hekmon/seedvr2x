@@ -758,6 +758,8 @@ class Steady:
         self.first = {"encode", "window", "decode"}
         self.called: list[tuple[Any, ...]] = []
         self.entered: list[str] = []
+        # What each decode's latent was: its shape, whether it was dense, its dtype.
+        self.latents: list[tuple[tuple[int, ...], bool, torch.dtype]] = []
         self.corrections: list[tuple[Correction, bool, list[int]]] = []
         self.models: Any = SimpleNamespace(device=torch.device("cpu"), enter=self.enter)
         self.phase: str | None = None
@@ -807,7 +809,9 @@ class Steady:
         assert frames.dtype == np.float32 and frames.shape[0] == count
         self.called.append(("encode", count, frames.shape[1:3], target, o))
         self.took("encode", self.encoding(count))
-        return torch.zeros((count - 1) // 4 + 1, 2, 3, 16)
+        # The encode's latent as model.to_latent leaves it: (16, T', h, w) storage seen as
+        # (T', h, w, 16), not contiguous.
+        return torch.zeros((16, (count - 1) // 4 + 1, 2, 3)).permute(1, 2, 3, 0)
 
     def windows(
         self, models: Any, latent: torch.Tensor, layout: list[tuple[int, int]], seed: int, **o: Any
@@ -832,6 +836,7 @@ class Steady:
     ) -> None:
         assert models is self.models and target == TARGET
         self.called.append(("decode", latent.shape[0], count, o))
+        self.latents.append((tuple(latent.shape), latent.is_contiguous(), latent.dtype))
         if correction is not None:
             # The shot's own copy and its checksums, as a run's decode finds them.
             sums = read_checksums(correction.checksums)
@@ -860,6 +865,49 @@ class Quick(Steady):
 
 def untiled(**more: Any) -> dict[str, Any]:
     return {"numz_padding": False, "numz_tail": False, "tiles": None, "scratch": None, **more}
+
+
+def test_the_calibrations_decodes_take_the_latent_in_the_dits_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The compiler's guards read the latent's strides, and a run's decodes take the DiT's output,
+    # (T', h, w, 16) dense (shot.merge_windows): the encode's channel-major latent, handed on as
+    # it is, would be a layout of its own for a compiled decoder (design's ruling of 2026-10-30,
+    # baton 3).
+    steady = Steady(monkeypatch)
+    calibrate(steady.models, TARGET, Plan(9), 9)
+    # The 13 frames' 4 latents, the 5 frames' 2, the 13 again: of the encode's shape, dense, and
+    # in the dtype the encode gave.
+    assert steady.latents == [
+        ((4, 2, 3, 16), True, torch.float32),
+        ((2, 2, 3, 16), True, torch.float32),
+        ((4, 2, 3, 16), True, torch.float32),
+    ]
+
+
+def test_a_dense_latent_is_handed_to_the_decode_as_it_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A latent already in the DiT's layout is not copied: the decode gets the very tensor.
+    steady = Steady(monkeypatch)
+    seen: list[torch.Tensor] = []
+    dense = torch.zeros((4, 2, 3, 16))
+    encoded = steady.encode
+
+    def encode(*args: Any, **kwargs: Any) -> torch.Tensor:
+        encoded(*args, **kwargs)
+        return dense
+
+    monkeypatch.setattr(run, "encode_shot", encode)
+    decoded = steady.decode
+
+    def decode(models: Any, latent: torch.Tensor, *args: Any, **kwargs: Any) -> None:
+        seen.append(latent)
+        decoded(models, latent, *args, **kwargs)
+
+    monkeypatch.setattr(run, "decode_shot", decode)
+    calibrate(steady.models, TARGET, Plan(9), 9)
+    assert seen and all(latent is dense for latent in seen)
 
 
 def test_calibration(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -245,6 +245,20 @@ def calibrate(
             return time.monotonic() - begun
 
         def decode(shot: int, latent: torch.Tensor, count: int, write: Write) -> float:
+            # The latent in the DiT's layout, (T', h, w, 16) dense, as a run's decodes take it
+            # (shot.merge_windows; design's ruling of 2026-10-30, baton 3), not the encode's
+            # channel-major one (model.to_latent): the compiler's guards read the latent's
+            # strides, so a decoder compiled for one layout compiles again for the other (RTX
+            # 5090, 1080p, 2026-10-31: in the dense layout the decoder's warm-up 236 s, in the
+            # channel-major one 1 graph a call, about 5 s), and --compile warms the layout the
+            # run meets (compiling.warm).
+            # Made before the decode's span begins, so that the span is the decode's alone. A
+            # latent is 1.01 MiB at 1080p (a padded 1104x1920 frame is 138x240 latents of 16
+            # bfloat16 channels): the 13 frames' 4 are 4.0 MiB, the 5 frames' 2 are 2.0 MiB, a
+            # transient copy beside the window copies this function already makes (windows of
+            # up to `longest` latents). Only the values' memory moves: the calibration's decoded
+            # frames go to a scratch output of their own, never to the job's.
+            latent = latent.contiguous()
             enter("decode")
             begun = time.monotonic()
             where = scratch / f"shot_{shot}"

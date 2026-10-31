@@ -746,10 +746,11 @@ def small_shapes(*lengths: int) -> Shapes:
     return planner.compile_shapes(plan, SMALL, shots(*lengths), 1)
 
 
-def runs_calls(vae_models: Models, shapes: Shapes, latents: int, *, channels_last: bool) -> None:
+def runs_calls(vae_models: Models, shapes: Shapes, latents: int) -> None:
     """What the run's own passes call for a shot of `latents` latents: the encode over each tile's
     crops, slice by slice (model.encode_sliced), the decode over each tile's crop of a latent
-    laid out as the DiT gives it (channels last, dense) or as the encode does (channel-major)."""
+    laid out as the DiT gives it (channels last, dense), as the calibration's decodes take it
+    too (calibration.calibrate)."""
     rows, columns = shapes.padded
     frames = 4 * (latents - 1) + 1
     for tile_rows, tile_columns in shapes.encode:
@@ -760,10 +761,7 @@ def runs_calls(vae_models: Models, shapes: Shapes, latents: int, *, channels_las
         for _ in model.encode_sliced(vae_models, crops, frames):
             pass
     height, width = rows // 8, columns // 8
-    if channels_last:
-        latent = torch.zeros((latents, height, width, 16), dtype=COMPUTE_DTYPE)
-    else:
-        latent = torch.zeros((16, latents, height, width), dtype=COMPUTE_DTYPE).permute(1, 2, 3, 0)
+    latent = torch.zeros((latents, height, width, 16), dtype=COMPUTE_DTYPE)
     for tile_rows, tile_columns in shapes.decode:
         top, left = slice(0, tile_rows // 8), slice(0, tile_columns // 8)
         for _ in model.decode_sliced(vae_models, latent, top, left):
@@ -774,7 +772,7 @@ def test_a_shot_of_one_latent_is_warmed_with_the_kinds_of_a_job_that_has_one() -
     # The job of 2026-10-30's finding, shots of 1 latent among longer ones: a shot of 1 latent
     # is one slice of 1 frame, and its decode one of 1 latent, both warmed.
     shapes = small_shapes(1, 2, 12)
-    assert shapes.latents == (1, 2, 3) and shapes.run == (1, 2, 3)
+    assert shapes.latents == (1, 2, 3)
     fake = FakeVAE()
     compiling.warm(fake_models(fake), shapes)
     first = shapes.encode[0]
@@ -786,15 +784,16 @@ def test_a_shot_of_one_latent_is_warmed_with_the_kinds_of_a_job_that_has_one() -
 def test_every_kind_the_run_calls_is_warmed_for_every_shot_length() -> None:
     # Against the run's own slicing (model.encode_sliced, model.decode_sliced), the shot lengths
     # 1 to 64 latents, each alone in a job: whatever the run calls of the compiled VAE, the
-    # warm-up has called, the decoder's latent as the DiT gives it; and, for the calibration's
-    # lengths (2 and 3 latents), as the encode gives it. No length shows a kind of its own at the
-    # end of a shot (planner.compile_shapes).
+    # warm-up has called, the decoder's latent as the DiT gives it. The calibration's lengths (2
+    # and 3 latents) the same, their decodes taking the latent in the DiT's layout too
+    # (calibration.calibrate). No length shows a kind of its own at the end of a shot
+    # (planner.compile_shapes).
     for latents in range(1, 65):
         shapes = small_shapes(latents)
         warm = FakeVAE()
         compiling.warm(fake_models(warm), shapes)
         ran = FakeVAE()
-        runs_calls(fake_models(ran), shapes, latents, channels_last=True)
+        runs_calls(fake_models(ran), shapes, latents)
         assert set(ran.calls) <= set(warm.calls), latents
         assert set(ran.decoded) <= set(warm.decoded), latents
     for latents in planner.COMPILE_CALIBRATED:
@@ -802,36 +801,39 @@ def test_every_kind_the_run_calls_is_warmed_for_every_shot_length() -> None:
         warm = FakeVAE()
         compiling.warm(fake_models(warm), shapes)
         calibration = FakeVAE()
-        runs_calls(fake_models(calibration), shapes, latents, channels_last=False)
+        runs_calls(fake_models(calibration), shapes, latents)
         assert set(calibration.calls) <= set(warm.calls), latents
         assert set(calibration.decoded) <= set(warm.decoded), latents
-        assert not any(channels_last for _, _, channels_last in calibration.decoded)
 
 
-def test_the_decoders_latent_is_warmed_in_the_layout_of_the_dit_and_of_the_encode() -> None:
+def test_the_decoders_latent_is_warmed_in_the_layout_of_the_dit_alone() -> None:
     # The finding of 2026-10-30: 12 recompiles of the decoder in the run, the guards on the
-    # latent's stride, after a warm-up with the encode's channel-major layout alone.
+    # latent's stride, after a warm-up with the encode's channel-major layout alone; the ruling of
+    # baton 3 after it: one layout, the DiT's, for the run's decodes and the calibration's.
     shapes = small_shapes(40)
-    assert shapes.run == (3,) and shapes.calibrated == planner.COMPILE_CALIBRATED
+    assert shapes.latents == planner.COMPILE_CALIBRATED == (2, 3)
     fake = FakeVAE()
     compiling.warm(fake_models(fake), shapes)
-    ran = {(shape[2], state) for shape, state, last in fake.decoded if last}
-    calibrated = {(shape[2], state) for shape, state, last in fake.decoded if not last}
-    # The shots' own: a first slice of 2 latents, the next ones of 1. The calibration's: its
-    # 5-frame pass (2 latents, one slice) and its 13-frame one (a first slice of 2, then 1).
-    assert ran == {(2, "INITIALIZING"), (1, "ACTIVE")}
-    assert calibrated == {(2, "DISABLED"), (2, "INITIALIZING"), (1, "ACTIVE")}
+    assert fake.decoded and all(dense for _, _, dense in fake.decoded)
+    # The shots' own (3 latents: a first slice of 2, the next ones of 1) and the calibration's:
+    # its 5-frame pass (2 latents, one slice) and its 13-frame one (3 and 4 latents' slices).
+    assert {(shape[2], state) for shape, state, _ in fake.decoded} == {
+        (2, "DISABLED"),
+        (2, "INITIALIZING"),
+        (1, "ACTIVE"),
+    }
+    # Each (shape, kind) once: a second layout would call the decoder again with the same ones.
+    assert len(fake.decoded) == len(set(fake.decoded))
 
 
-def test_the_layouts_differ_in_the_stride_the_compilers_guards_read() -> None:
-    # What the warm-up's two latents are to the decoder: dense channels last, or channel-major.
-    dense = compiling._latent(3, 4, 4, False)  # pyright: ignore[reportPrivateUsage]
-    channel_major = compiling._latent(3, 4, 4, True)  # pyright: ignore[reportPrivateUsage]
+def test_the_warm_up_latent_is_dense_channels_last() -> None:
+    # What the warm-up's latent is to the decoder: the DiT's (T', h, w, 16), contiguous, its
+    # channel stride 1, where the encode's (model.to_latent) is a permuted view of (16, T', h, w).
+    dense = compiling._latent(3, 4, 4)  # pyright: ignore[reportPrivateUsage]
+    channel_major = torch.zeros((16, 3, 4, 4), dtype=COMPUTE_DTYPE).permute(1, 2, 3, 0)
     assert dense.shape == channel_major.shape == (3, 4, 4, 16)
     assert dense.is_contiguous() and not channel_major.is_contiguous()
-    assert (
-        dense.permute(3, 0, 1, 2).stride(0) == 1 and channel_major.permute(3, 0, 1, 2).stride(0) > 1
-    )
+    assert dense.stride(3) == 1 and channel_major.stride(3) > 1
 
 
 def test_the_entries_counted_are_the_distinct_calls_warm_makes() -> None:
@@ -876,7 +878,7 @@ def test_the_recompile_limit_is_numzs_and_raised_when_the_warm_up_needs_more(
     # 70 distinct tiles to decode at 2 kinds each (the first slice and the next ones) is 140
     # entries of the decoder's forward, over numz's 128 less the margin.
     many = tuple((8 * rows, 64) for rows in range(1, 71))
-    shapes = Shapes((8 * 70, 64), (), many, (3,), (), (3,))
+    shapes = Shapes((8 * 70, 64), (), many, (3,))
     fake = FakeVAE()
     assert compiling.entries(fake_models(fake), shapes) == 140
     load(shapes)

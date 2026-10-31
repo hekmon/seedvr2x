@@ -306,30 +306,23 @@ def _kinds(sizes: list[int]) -> set[tuple[int, str]]:
     }
 
 
-def _decode_passes(shapes: Shapes) -> tuple[tuple[tuple[int, ...], bool], ...]:
-    """The decoder's latent layouts and the lengths each is warmed at: (lengths, channel_major),
-    the DiT's first (the shots' own), then the encode's (the calibration's)."""
-    ran = shapes.latents if shapes.run is None else shapes.run
-    return (tuple(ran), False), (tuple(shapes.calibrated), True)
-
-
 def entries(models: Models, shapes: Shapes) -> int:
     """The most entries the warm-up makes in the cache of one compiled function: a graph for
-    each shape and each kind of call the passes make of it (a slice's size and memory state,
-    and for the decoder its latent's layout), the count torch's recompile limit must hold for
-    the run to find every one. The kinds are those of the run's own slicing (model.encode_slices,
-    model.latent_slices); tests/test_compile.py holds the count to the calls warm makes."""
+    each shape and each kind of call the passes make of it (a slice's size and memory state),
+    the count torch's recompile limit must hold for the run to find every one. The decoder's
+    latent has the one layout, the DiT's (warm), so that its layout is no kind of call. The
+    kinds are those of the run's own slicing (model.encode_slices, model.latent_slices);
+    tests/test_compile.py holds the count to the calls warm makes."""
     factor = 4
     encode = {
         kind
         for latents in shapes.latents
         for kind in _kinds(model.encode_slices(models, factor * (latents - 1) + 1))
     }
-    decode = sum(
-        len({kind for latents in lengths for kind in _kinds(model.latent_slices(models, latents))})
-        for lengths, _ in _decode_passes(shapes)
-    )
-    return max(len(shapes.encode) * len(encode), len(shapes.decode) * decode)
+    decode = {
+        kind for latents in shapes.latents for kind in _kinds(model.latent_slices(models, latents))
+    }
+    return max(len(shapes.encode) * len(encode), len(shapes.decode) * len(decode))
 
 
 @torch.no_grad()
@@ -347,23 +340,28 @@ def warm(models: Models, shapes: Shapes) -> None:
     `shapes.latents` is one of 4 * (n - 1) + 1 frames, its slices those of model.encode_slices
     and model.latent_slices.
 
-    The decoder's latent is warmed in both memory layouts it is handed (Shapes): a shot's, the
-    DiT's output, (T', h, w, 16) dense, merged or not (shot.merge_windows), which the run's
-    decodes take, and the encode's, channel-major (model.to_latent), which the calibration's
-    do. The compiler's guards tell them apart by the latent's strides: on 2026-10-30 a 1080p
-    job of three shots, warmed with the encode's alone, compiled 12 more graphs in its decodes
-    (TORCH_LOGS=recompiles: 12 recompiles of the decoder's forward, attn_video_vae.py:968, each
-    a guard on the 'sample' stride, the channel's 1 where the warm-up had T'hw), 4 in the
-    first shot's and 8 in the second's, none in the calibration's.
+    The decoder's latent is warmed in one memory layout, the DiT's: (T', h, w, 16) dense, what
+    the run's decodes take (shot.merge_windows), and the calibration's too since design's ruling
+    of 2026-10-30 (baton 3), which hands decode_shot the encode's latent made dense
+    (calibration.calibrate). The compiler's guards tell layouts apart by the latent's strides.
+    On 2026-10-30 a 1080p job of three shots, warmed with the encode's layout alone, the
+    channel-major one (model.to_latent), compiled 12 more graphs in its decodes (TORCH_LOGS=
+    recompiles: 12 recompiles of the decoder's forward, attn_video_vae.py:968, each a guard on
+    the 'sample' stride, the channel's 1 where the warm-up had T'hw), 4 in the first shot's and
+    8 in the second's, none in the calibration's. A warm-up of both layouts, which followed,
+    cost 236 s for the dense one (4 tiles' shapes, 3 kinds of slice) and about 5 s for the
+    channel-major one (1 graph a call), of a warm-up of 359 s and 535 graphs, the encode's
+    included (RTX 5090, 1080p, 2026-10-31); the ruling keeps the dense one alone. The lengths are
+    the union of the shots' and the calibration's (Shapes.latents).
 
     Not whole shots' worth of work: a slice is 4 or 5 frames of a tile.
 
     PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "a warm call per shape", not with what):
     zeros, in the memory the run's inputs have as far as the code shows (a tile's crop copied to
-    the device is contiguous; the decoder's latent in both layouts above). The DiT's layout is
-    read from the stride of the run that missed it, not from the model's code; whether they
-    match the run's own inputs for the compiler's guards is for a GPU run to show: no unit of
-    the run may compile (report_late, after each part of a unit)."""
+    the device is contiguous; the decoder's latent dense, as above). The DiT's layout is read
+    from the stride of the run that missed it, not from the model's code; whether they match the
+    run's own inputs for the compiler's guards is for a GPU run to show: no unit of the run may
+    compile (report_late, after each part of a unit)."""
     padded_rows, padded_columns = shapes.padded
     latent_rows, latent_columns = padded_rows // SCALE, padded_columns // SCALE
     for latents in shapes.latents:
@@ -376,20 +374,16 @@ def warm(models: Models, shapes: Shapes) -> None:
             for moments in model.encode_sliced(models, crops, frames):
                 del moments
             model.synchronize(models.device)
-    for lengths, channel_major in _decode_passes(shapes):
-        for latents in lengths:
-            latent = _latent(latents, latent_rows, latent_columns, channel_major)
-            for rows, columns in shapes.decode:
-                top, left = slice(0, rows // SCALE), slice(0, columns // SCALE)
-                for decoded in model.decode_sliced(models, latent, top, left):
-                    del decoded
-                model.synchronize(models.device)
+    for latents in shapes.latents:
+        latent = _latent(latents, latent_rows, latent_columns)
+        for rows, columns in shapes.decode:
+            top, left = slice(0, rows // SCALE), slice(0, columns // SCALE)
+            for decoded in model.decode_sliced(models, latent, top, left):
+                del decoded
+            model.synchronize(models.device)
 
 
-def _latent(latents: int, rows: int, columns: int, channel_major: bool) -> torch.Tensor:
-    """Zeros for a shot's latent (T', h, w, 16) in system memory: dense as the DiT gives it and
-    shot.merge_windows keeps it, or channel-major as the encode does (model.to_latent), its view
-    permuted."""
-    if channel_major:
-        return torch.zeros((16, latents, rows, columns), dtype=COMPUTE_DTYPE).permute(1, 2, 3, 0)
+def _latent(latents: int, rows: int, columns: int) -> torch.Tensor:
+    """Zeros for a shot's latent (T', h, w, 16) in system memory, dense as the DiT gives it and
+    shot.merge_windows keeps it."""
     return torch.zeros((latents, rows, columns, 16), dtype=COMPUTE_DTYPE)
