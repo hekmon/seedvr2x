@@ -3099,7 +3099,13 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--cache_dit`, `--cache_vae`, `--chunk_size` | dropped: one long-running process, streaming by design |
 | `--seed` | kept (comparisons, reproducibility) |
 | `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
-| `--resolution`, `--max_resolution` | kept |
+| `--resolution` | kept: the output's short side, 1080 by default, numz's |
+| `--max_resolution` | dropped from v0.1.0 (2026-10-31; said kept here, never built): the short side is the one size asked, and a size that doesn't fit is refused, naming the largest that does |
+| `--skip_first_frames`, `--load_cap` | dropped (2026-10-31): no option takes part of a source; the part wanted is cut first, and that file is the source. `--until` stops a job at a set time, which is not that |
+| `--swap_io_components` | dropped (2026-10-31): `--swap-blocks` swaps whole blocks; the DiT's other parameters (0.16 GiB) leave the GPU with the model when the plan sends it away for the VAE's passes, where numz's option left every unswapped block on the GPU through the decode ([bug 12](../research/bugs/12-swap-io-dit-leak.md)) |
+| `--tile_debug` | dropped (2026-10-31): the plan's lines say each pass's tiles, their size, overlap and count |
+| `--compile_backend`, `--compile_mode`, `--compile_fullgraph`, `--compile_dynamic`, `--compile_dynamo_cache_size_limit`, `--compile_dynamo_recompile_limit` | dropped (2026-10-31): `--compile` takes no tuning: numz's settings (inductor in its default mode, not full-graph, static shapes), inductor's deterministic mode kept on, and the recompile limits raised to hold every shape the job meets, numz's 128 being too few at 4K |
+| `--debug` | replaced by `-v`, `--verbose` (2026-10-31) |
 | `--dit_model`, `--model_dir` | kept, the sharp 7B by default; the files come from seedvr2x's own Hugging Face repo, pinned by revision and SHA-256, `--model_dir` holding a local copy; no silent deletion (bug 22) |
 | `--cuda_device` | one device per process |
 
