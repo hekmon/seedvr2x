@@ -92,6 +92,19 @@ def _libc() -> ctypes.CDLL:
     return ctypes.CDLL(None, use_errno=True)
 
 
+@functools.cache
+def _prctl() -> Callable[..., int]:
+    """libc's prctl, looked up and typed once, in the parent. ctypes resolves a library's
+    attribute lazily (dlsym, a new function object, a cache set on the library): all of it
+    allocates, which a child of a multi-threaded process (seedvr2x forks with other threads
+    alive) must not do between its fork and its exec, where only async-signal-safe work is safe.
+    Design's ruling, baton 3 of v0.1.0 (2026-10-30): resolve it in the parent, before any fork."""
+    function = _libc().prctl
+    function.argtypes = (ctypes.c_int, ctypes.c_ulong)
+    function.restype = ctypes.c_int
+    return function
+
+
 def ends_with_us() -> Callable[[], None]:
     """A `preexec_fn` for every ffmpeg and ffprobe seedvr2x starts, which has it killed (SIGKILL)
     when seedvr2x dies: DESIGN.md, Output, Assembly (decided on 2026-10-12 for the assembly's:
@@ -105,12 +118,18 @@ def ends_with_us() -> Callable[[], None]:
     caller forks from seedvr2x's main thread, which is the process's life, or from a thread that
     waits for its child (media/scan.py, packets, run beside the decode). It is set after the
     fork, so a parent that died in between is not seen by the kernel: the child checks, and ends
-    itself. Linux only (DESIGN.md: Linux first); no other system is run, so no fallback."""
-    libc = _libc()
+    itself. Linux only (DESIGN.md: Linux first); no other system is run, so no fallback.
+
+    The function is resolved here, in the parent, and `prepare` only calls the function object
+    it closes over: the child of a multi-threaded process does async-signal-safe work alone,
+    and ctypes' lazy attribute lookup allocates (_prctl; design, baton 3, 2026-10-30). The
+    signal's number is taken here too, for the same reason."""
+    prctl = _prctl()
+    kill = int(signal.SIGKILL)
     parent = os.getpid()
 
     def prepare() -> None:
-        if libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL) != 0:
+        if prctl(PR_SET_PDEATHSIG, kill) != 0:
             raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
         if os.getppid() != parent:
             os._exit(1)  # the parent ended before the signal was set

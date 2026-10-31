@@ -12,6 +12,7 @@ seedvr2x accepts). Linux's /proc tells the processes left."""
 
 import ast
 import contextlib
+import ctypes
 import os
 import signal
 import subprocess
@@ -42,7 +43,74 @@ needs_ffmpeg = pytest.mark.skipif(
 
 # Every call that starts a process, in the standard library: seedvr2x uses subprocess alone.
 SPAWNS = {"Popen", "run", "call", "check_call", "check_output"}
-OTHER_SPAWNS = {"system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp"}
+# subprocess's other starters, which the scan refuses to import by name (a call on the module is
+# refused whatever its name: see scan).
+OTHER_SUBPROCESS = {"getoutput", "getstatusoutput"}
+# os's, by family so that a name added later is caught too: spawn* (spawnl ... spawnvpe), exec*
+# (execl ... execvpe), posix_spawn and posix_spawnp, fork and forkpty, and system and popen.
+OS_FAMILIES = ("spawn", "exec", "posix_spawn", "fork")
+OS_NAMES = {"system", "popen"}
+
+
+def starts_a_process(name: str) -> bool:
+    """Whether os.<name> starts a process or replaces the one running."""
+    return name in OS_NAMES or name.startswith(OS_FAMILIES)
+
+
+class Scan:
+    """What `scan` found in one source: the starts that pass the hook, those that don't, and the
+    sites that break a rule (each as 'file:line: why')."""
+
+    def __init__(self) -> None:
+        self.hooked: list[str] = []
+        self.unhooked: list[str] = []
+        self.violations: list[str] = []
+
+
+def scan(tree: ast.AST, name: str) -> Scan:
+    """The scan of the source `tree`, read from the file `name`, for the process it starts.
+    subprocess is imported plainly, and used as `subprocess.<starter>(...)`, each with the
+    hook; os starts nothing. An alias (`import os as x`) or a name imported from either would
+    hide a start from this scan, so each is refused."""
+    found = Scan()
+    for node in ast.walk(tree):
+        where = f"{name}:{getattr(node, 'lineno', 0)}"
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in {"subprocess", "os"} and alias.asname is not None:
+                    found.violations.append(f"{where}: import {alias.name} as {alias.asname}")
+        elif isinstance(node, ast.ImportFrom) and node.module in {"subprocess", "os"}:
+            for alias in node.names:
+                if alias.name == "*" or (
+                    alias.name in SPAWNS | OTHER_SUBPROCESS
+                    if node.module == "subprocess"
+                    else starts_a_process(alias.name)
+                ):
+                    found.violations.append(f"{where}: from {node.module} import {alias.name}")
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+            and starts_a_process(node.attr)
+        ):
+            found.violations.append(f"{where}: os.{node.attr}")
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        owner = node.func.value
+        if not (isinstance(owner, ast.Name) and owner.id == "subprocess"):
+            continue
+        if node.func.attr not in SPAWNS:
+            found.violations.append(f"{where}: subprocess.{node.func.attr}")
+            continue
+        hooked = any(
+            keyword.arg == "preexec_fn"
+            and isinstance(keyword.value, ast.Call)
+            and isinstance(keyword.value.func, ast.Name)
+            and keyword.value.func.id == "ends_with_us"
+            for keyword in node.keywords
+        )
+        (found.hooked if hooked else found.unhooked).append(where)
+    return found
 
 
 def sources() -> list[Path]:
@@ -58,38 +126,129 @@ def test_every_process_started_passes_the_hook_but_the_segment_commands_shell() 
     # DESIGN.md, Output, Assembly (2026-10-29): "every ffmpeg and ffprobe seedvr2x starts ends
     # with it the same way, the user's --segment-cmd aside". A scan of the source, so that a
     # site added later without the hook fails here.
+    hooked: list[str] = []
     without: list[str] = []
+    violations: list[str] = []
     for path in sources():
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module in {"subprocess", "os"}:
-                names = {alias.name for alias in node.names}
-                assert not names & (SPAWNS | OTHER_SPAWNS), (path, node.lineno)
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-                continue
-            owner = node.func.value
-            if not isinstance(owner, ast.Name):
-                continue
-            where = f"{path.relative_to(SOURCE)}:{node.lineno}"
-            assert not (owner.id == "os" and node.func.attr in OTHER_SPAWNS), where
-            assert not (owner.id == "subprocess" and node.func.attr not in SPAWNS), where
-            if owner.id != "subprocess" or node.func.attr not in SPAWNS:
-                continue
-            hooks = [
-                keyword.value
-                for keyword in node.keywords
-                if keyword.arg == "preexec_fn"
-                and isinstance(keyword.value, ast.Call)
-                and isinstance(keyword.value.func, ast.Name)
-                and keyword.value.func.id == "ends_with_us"
-            ]
-            if not hooks:
-                without.append(where)
+        found = scan(ast.parse(path.read_text()), str(path.relative_to(SOURCE)))
+        hooked += found.hooked
+        without += found.unhooked
+        violations += found.violations
+    assert not violations, violations
+    # 16 sites pass the hook today; a new one is counted here, so that it is added on purpose.
+    assert len(hooked) == 16, hooked
     assert len(without) == 1 and without[0].startswith("media/writer.py:"), without
     # That one is the shell the user's command runs in.
     shell = int(without[0].split(":")[1])
     lines = (SOURCE / "media" / "writer.py").read_text().splitlines()
     assert '"/bin/sh"' in " ".join(lines[shell - 1 : shell + 3]), lines[shell - 1 : shell + 3]
+
+
+# One snippet per rule of the scan: each is flagged (design, baton 3, 2026-10-30: the scan
+# catches an aliased import and os's starters).
+FLAGGED = {
+    "subprocess aliased": "import subprocess as sp\nsp.run(['x'])",
+    "os aliased": "import os as operating\noperating.execv('/bin/x', ['x'])",
+    "from subprocess import run": "from subprocess import run\nrun(['x'])",
+    "from subprocess import Popen as P": "from subprocess import Popen as P\nP(['x'])",
+    "from subprocess import getoutput": "from subprocess import getoutput",
+    "from subprocess import *": "from subprocess import *",
+    "from os import spawnvp": "from os import spawnvp",
+    "from os import execlp": "from os import execlp",
+    "from os import posix_spawnp": "from os import posix_spawnp",
+    "from os import system": "from os import system",
+    "from os import a future exec name": "from os import execvz",
+    "os.spawnlpe": "import os\nos.spawnlpe(os.P_WAIT, 'x', 'x', {})",
+    "os.spawnv": "import os\nos.spawnv(os.P_WAIT, '/bin/x', ['x'])",
+    "os.execve": "import os\nos.execve('/bin/x', ['x'], {})",
+    "os.execvpe": "import os\nos.execvpe('x', ['x'], {})",
+    "os.posix_spawn": "import os\nos.posix_spawn('/bin/x', ['x'], {})",
+    "os.posix_spawnp": "import os\nos.posix_spawnp('x', ['x'], {})",
+    "os.system": "import os\nos.system('x')",
+    "os.popen": "import os\nos.popen('x')",
+    "os.fork": "import os\nos.fork()",
+    "os.forkpty": "import os\nos.forkpty()",
+    "subprocess.getoutput": "import subprocess\nsubprocess.getoutput('x')",
+}
+
+
+@pytest.mark.parametrize("rule", FLAGGED)
+def test_the_scan_flags_what_could_hide_a_start(rule: str) -> None:
+    # Each rule shown on a small source: without it, the real scan above would pass a site
+    # that starts a process without the hook.
+    found = scan(ast.parse(FLAGGED[rule]), "synthetic.py")
+    assert found.violations, rule
+    assert all(violation.startswith("synthetic.py:") for violation in found.violations)
+
+
+def test_the_scan_counts_the_hooked_and_the_unhooked_starts_and_leaves_plain_uses_alone() -> None:
+    source = textwrap.dedent(
+        """
+        import os
+        import subprocess
+        from subprocess import PIPE
+        from os import getpid
+        subprocess.Popen(["x"], preexec_fn=ends_with_us())
+        subprocess.run(["x"], preexec_fn=other())
+        subprocess.check_output(["x"])
+        os.getpid()
+        os._exit(1)
+        """
+    )
+    found = scan(ast.parse(source), "synthetic.py")
+    assert found.violations == []
+    assert found.hooked == ["synthetic.py:6"]
+    assert found.unhooked == ["synthetic.py:7", "synthetic.py:8"]
+
+
+class Recorder:
+    """A stand-in for the C library that notes every attribute looked up on it."""
+
+    def __init__(self) -> None:
+        self.looked_up: list[str] = []
+        self.calls: list[tuple[int, int]] = []
+
+    def __getattr__(self, name: str) -> object:
+        self.looked_up.append(name)
+        return self
+
+    def __call__(self, option: int, argument: int) -> int:
+        self.calls.append((option, argument))
+        return 0
+
+
+def test_prctl_is_resolved_in_the_parent_before_any_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Design, baton 3 (2026-10-30): ctypes' lazy attribute lookup allocates, which the child of
+    # a multi-threaded process must not do between its fork and its exec. ends_with_us looks
+    # prctl up, once, itself; the hook it returns calls the function it holds and looks nothing
+    # up on the library.
+    recorder = Recorder()
+    monkeypatch.setattr(ffmpeg, "_libc", lambda: recorder)
+    # Run in the parent, the hook would see its own parent (the shell) as the one that ended.
+    monkeypatch.setattr(os, "getppid", os.getpid)
+    ffmpeg._prctl.cache_clear()  # pyright: ignore[reportPrivateUsage]
+    try:
+        prepare = ffmpeg.ends_with_us()
+        assert recorder.looked_up == ["prctl"]
+        prepare()  # the child's part, run here
+        assert recorder.looked_up == ["prctl"]
+        assert recorder.calls == [(ffmpeg.PR_SET_PDEATHSIG, int(signal.SIGKILL))]
+    finally:
+        ffmpeg._prctl.cache_clear()  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_hook_holds_the_typed_c_function_not_the_library() -> None:
+    # The real library: the function cached, typed, and the only ctypes object the hook closes
+    # over (a CDLL there would look its attributes up again in the child).
+    ffmpeg._prctl.cache_clear()  # pyright: ignore[reportPrivateUsage]
+    prepare = ffmpeg.ends_with_us()
+    assert ffmpeg._prctl.cache_info().currsize == 1  # pyright: ignore[reportPrivateUsage]
+    function = ffmpeg._prctl()  # pyright: ignore[reportPrivateUsage]
+    assert function.argtypes == (ctypes.c_int, ctypes.c_ulong)  # pyright: ignore[reportFunctionMemberAccess]
+    assert function.restype is ctypes.c_int  # pyright: ignore[reportFunctionMemberAccess]
+    cells = [cell.cell_contents for cell in prepare.__closure__ or ()]
+    assert function in cells
+    assert not any(isinstance(cell, ctypes.CDLL) for cell in cells), cells
 
 
 def alive(pid: int) -> bool:
