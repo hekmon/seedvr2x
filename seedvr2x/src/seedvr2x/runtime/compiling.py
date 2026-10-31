@@ -11,12 +11,13 @@ are pinned.
 
 What is compiled is the study's `excl` variant (research/scripts/compile_vae.py: install_vae):
 the encoder and the decoder each through torch.compile (inductor, mode default, fullgraph off,
-dynamic shapes off, the recompile limit numz sets, 128), with every causal convolution left out of
-the graph. numz means that exclusion and never gets it (research/bugs/15-compile-vae-
-exclusion-dead-code.md: it sets an attribute torch never reads); without it the compiled VAE took
-twice its memory. Here the convolutions' forward is wrapped by torch.compiler.disable, which
-dynamo does read, and they run as plain code between the compiled pieces: each pass 0.79 to 0.95
-of plain code's time, its peak 1.04 to 1.10 times (planner.COMPILE_PEAK).
+dynamic shapes off, the recompile limits raised past any warm-up, RECOMPILE_LIMIT), with every
+causal convolution left out of the graph. numz means that exclusion and never gets it
+(research/bugs/15-compile-vae-exclusion-dead-code.md: it sets an attribute torch never reads);
+without it the compiled VAE took twice its memory. Here the convolutions' forward is wrapped by
+torch.compiler.disable, which dynamo does read, and they run as plain code between the compiled
+pieces: each pass 0.79 to 0.95 of plain code's time, its peak 1.04 to 1.10 times
+(planner.COMPILE_PEAK).
 
 The model code is not edited: the vendored VAE is wrapped from outside, as the study did."""
 
@@ -39,23 +40,30 @@ from seedvr2x.runtime.plan import Compilation, Shapes
 from seedvr2x.runtime.tilegrid import SCALE
 from seedvr2x.runtime.timing import spoken
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
-from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
 
 logger = logging.getLogger(__name__)
 
 # numz's torch.compile settings for the VAE (src/core/model_configuration.py:1307-1315 at
 # 4490bd1, inference_cli.py:1455-1466; research/scripts/compile_vae.py:138, NUMZ_SETTINGS): the
-# study measured these. Its dynamo cache limit 64 and recompile limit 128 are one setting in this
-# torch, so 128 holds (compile_vae.py:137).
+# study measured these. Its recompile limit, 128, is not kept: see RECOMPILE_LIMIT.
 SETTINGS: dict[str, Any] = {
     "backend": "inductor",
     "mode": "default",
     "fullgraph": False,
     "dynamic": False,
 }
-RECOMPILE_LIMIT = 128
-# What the recompile limit keeps above the entries the warm-up makes of a function (entries).
-RECOMPILE_MARGIN = 16
+# PROVISIONAL (impl-v010, 2026-10-31: DESIGN.md says nothing of the recompile limits). torch
+# 2.14.1 applies recompile_limit per code object (torch/_dynamo/cache_size.py:178-197,
+# convert_frame.py ~2000), and with the causal convolutions left out the VAE's blocks run as
+# frames of their own whose code objects every ResnetBlock3D of the encoder and the decoder
+# shares, so that one code object holds the entries of all of them: measured on 2026-10-31
+# (1080p, 6 shapes) one reached 125 against numz's 128 (attn_video_vae.py:300, forward), and a 4K
+# job or one more shape passes it, after which torch runs that frame eagerly and silently. The
+# limits are so high that no warm-up reaches them (an entry is small, and nothing else is
+# compiled in v0.1.0), never under what the process has already set, and a hit during the
+# warm-up is a refusal (fail_on_recompile_limit_hit, in compile_vae).
+RECOMPILE_LIMIT = 1024
+ACCUMULATED_RECOMPILE_LIMIT = 8192
 
 
 class CompileError(JobError):
@@ -232,24 +240,20 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
     use_cache(compilation.cache)
     keep_deterministic()
     convolutions = exclude_causal_convolutions(vae)
-    # numz's recompile limit for the VAE (RECOMPILE_LIMIT), raised for the process: nothing else
-    # is compiled in v0.1.0 (the DiT is not), and torch's own, 8 (torch 2.14.1,
-    # torch/_dynamo/config.py: recompile_limit, which cache_size_limit aliases), is under the
-    # entries a plan needs. Raised past numz's when the warm-up itself needs more (entries).
-    limit: Any = importlib.import_module("torch._dynamo.config")
-    needed = entries(models, compilation.shapes)
-    # PROVISIONAL (impl-v010, 2026-10-30: DESIGN.md says nothing of a limit): the warm-up's
-    # entries per compiled function and a margin of RECOMPILE_MARGIN, never under numz's 128.
-    wanted = max(RECOMPILE_LIMIT, needed + RECOMPILE_MARGIN)
-    if limit.recompile_limit < wanted:
-        limit.recompile_limit = wanted
+    dynamo: Any = importlib.import_module("torch._dynamo.config")
+    exc: Any = importlib.import_module("torch._dynamo.exc")
+    # recompile_limit and accumulated_recompile_limit (cache_size_limit and accumulated_cache_
+    # size_limit are their aliases, torch 2.14.1, _dynamo/config.py:121-149).
+    dynamo.recompile_limit = max(dynamo.recompile_limit, RECOMPILE_LIMIT)
+    dynamo.accumulated_recompile_limit = max(
+        dynamo.accumulated_recompile_limit, ACCUMULATED_RECOMPILE_LIMIT
+    )
+    fail_before = dynamo.fail_on_recompile_limit_hit
     logger.debug(
-        "the compiler's recompile limit is %d: the warm-up needs %d entries of a function, with"
-        " a margin of %d, numz's %d the least",
-        limit.recompile_limit,
-        needed,
-        RECOMPILE_MARGIN,
-        RECOMPILE_LIMIT,
+        "the compiler's recompile limit is %d per code object and %d for all, raised past any"
+        " warm-up (numz's is 128); a hit during the warm-up is a refusal",
+        dynamo.recompile_limit,
+        dynamo.accumulated_recompile_limit,
     )
     logger.info(
         "compiling the VAE (--compile): its encoder and decoder, %d causal convolutions left out"
@@ -261,11 +265,21 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
     try:
         vae.encoder = torch.compile(vae.encoder, **SETTINGS)
         vae.decoder = torch.compile(vae.decoder, **SETTINGS)
+        dynamo.fail_on_recompile_limit_hit = True
         with _on_the_device(models):
             warm(models, compilation.shapes)
         _warmed[0] = frames_compiled()
     except torch.OutOfMemoryError:
         raise  # the command line's own refusal for the card's memory
+    except exc.FailOnRecompileLimitHit as error:
+        # An Exception, not a RuntimeError. Past the warm-up torch only warns of a hit and runs
+        # the frame eagerly (report_late reports the late graphs), so the warm-up is where a
+        # limit that is too low is found.
+        raise CompileError(
+            "--compile: the compiler's recompile limit was reached while compiling the VAE, which"
+            " would have left part of it uncompiled; nothing was run, the same command without"
+            " --compile runs the plain VAE"
+        ) from error
     except (RuntimeError, OSError, ImportError) as error:
         # Inductor's and Triton's failures are RuntimeErrors of several kinds (a compiler
         # missing, a kernel that doesn't build); torch's own words first, one line of them. Never
@@ -278,6 +292,7 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
             " was run, the same command without --compile runs the plain VAE"
         ) from error
     finally:
+        dynamo.fail_on_recompile_limit_hit = fail_before
         shutdown_workers()
     compilation.seconds = time.monotonic() - started
     logger.info("the VAE compiled in %s", spoken(spent(compilation.seconds)))
@@ -293,36 +308,6 @@ def _shapes_said(shapes: Shapes) -> str:
         f"warmed at the encode's {each(shapes.encode)} and the decode's {each(shapes.decode)},"
         f" shots of {', '.join(str(each) for each in shapes.latents)} latents or more"
     )
-
-
-def _kinds(sizes: list[int]) -> set[tuple[int, str]]:
-    """The (slice size, memory state) calls of a pass cut in `sizes` (model.encode_slices,
-    model.latent_slices): one slice has no memory (DISABLED), else the first initialises it
-    and the next ones use it (model.encode_sliced, model.decode_sliced)."""
-    if len(sizes) == 1:
-        return {(sizes[0], MemoryState.DISABLED.name)}
-    return {(sizes[0], MemoryState.INITIALIZING.name)} | {
-        (size, MemoryState.ACTIVE.name) for size in sizes[1:]
-    }
-
-
-def entries(models: Models, shapes: Shapes) -> int:
-    """The most entries the warm-up makes in the cache of one compiled function: a graph for
-    each shape and each kind of call the passes make of it (a slice's size and memory state),
-    the count torch's recompile limit must hold for the run to find every one. The decoder's
-    latent has the one layout, the DiT's (warm), so that its layout is no kind of call. The
-    kinds are those of the run's own slicing (model.encode_slices, model.latent_slices);
-    tests/test_compile.py holds the count to the calls warm makes."""
-    factor = 4
-    encode = {
-        kind
-        for latents in shapes.latents
-        for kind in _kinds(model.encode_slices(models, factor * (latents - 1) + 1))
-    }
-    decode = {
-        kind for latents in shapes.latents for kind in _kinds(model.latent_slices(models, latents))
-    }
-    return max(len(shapes.encode) * len(encode), len(shapes.decode) * len(decode))
 
 
 @torch.no_grad()
@@ -351,8 +336,10 @@ def warm(models: Models, shapes: Shapes) -> None:
     8 in the second's, none in the calibration's. A warm-up of both layouts, which followed,
     cost 236 s for the dense one (4 tiles' shapes, 3 kinds of slice) and about 5 s for the
     channel-major one (1 graph a call), of a warm-up of 359 s and 535 graphs, the encode's
-    included (RTX 5090, 1080p, 2026-10-31); the ruling keeps the dense one alone. The lengths are
-    the union of the shots' and the calibration's (Shapes.latents).
+    included (RTX 5090, 1080p, 2026-10-31, tree 7dd60993: measured on the warm-up of the two
+    layouts); the ruling keeps the dense one alone, which drops the channel-major pass, about 5 s
+    and its graphs, and the GPU gate measures the one-layout warm-up again. The lengths are the
+    union of the shots' and the calibration's (Shapes.latents).
 
     Not whole shots' worth of work: a slice is 4 or 5 frames of a tile.
 

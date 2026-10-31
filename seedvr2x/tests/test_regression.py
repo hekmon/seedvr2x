@@ -977,8 +977,7 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         [
             compare_with_planner(
                 "--plan", plan.stderr, free_planned, inputs, host_planned, monkeypatch
-            ),
-            compare_with_planner("the run", log, free_ran, inputs, host_ran, monkeypatch),
+            )
         ]
     )
     # The run's own passes: the card it planned for may hold less than the --plan call's did.
@@ -994,6 +993,11 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             f"the run's plan tiles a pass: plan: {run_tiled[0]}",
             free_ran.reported / memory.GIB,
         )
+    # After the run's tiling check: a run that tiles where --plan did not skips or fails as
+    # unpinned() says, not on the planner comparison (review of baton 3, 2026-10-31).
+    assert_planned_as_read(
+        [compare_with_planner("the run", log, free_ran, inputs, host_ran, monkeypatch)]
+    )
     same_bits(tmp_path, numz.reference)
 
 

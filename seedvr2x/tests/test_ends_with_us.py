@@ -46,6 +46,29 @@ SPAWNS = {"Popen", "run", "call", "check_call", "check_output"}
 # subprocess's other starters, which the scan refuses to import by name (a call on the module is
 # refused whatever its name: see scan).
 OTHER_SUBPROCESS = {"getoutput", "getstatusoutput"}
+# subprocess's names that start nothing: exceptions, the result type and the pipe constants.
+SUBPROCESS_SAFE = {
+    "CalledProcessError",
+    "CompletedProcess",
+    "TimeoutExpired",
+    "SubprocessError",
+    "PIPE",
+    "DEVNULL",
+    "STDOUT",
+}
+# Other standard-library ways to start a process, by module: asyncio's and pty's by name, and
+# multiprocessing (which forks or spawns Python processes) whole.
+OTHER_STARTERS = {
+    "asyncio": {"create_subprocess_exec", "create_subprocess_shell"},
+    "pty": {"spawn", "fork"},
+}
+WATCHED_MODULES = {"subprocess", "os", *OTHER_STARTERS}
+
+
+def is_multiprocessing(module: str | None) -> bool:
+    return module is not None and module.split(".")[0] == "multiprocessing"
+
+
 # os's, by family so that a name added later is caught too: spawn* (spawnl ... spawnvpe), exec*
 # (execl ... execvpe), posix_spawn and posix_spawnp, fork and forkpty, and system and popen.
 OS_FAMILIES = ("spawn", "exec", "posix_spawn", "fork")
@@ -71,33 +94,53 @@ def scan(tree: ast.AST, name: str) -> Scan:
     """The scan of the source `tree`, read from the file `name`, for the process it starts.
     subprocess is imported plainly, and used as `subprocess.<starter>(...)`, each with the
     hook; os starts nothing. An alias (`import os as x`) or a name imported from either would
-    hide a start from this scan, so each is refused."""
+    hide a start from this scan, so each is refused; so is a starter that is not called where it
+    is named (`run = subprocess.run`, `functools.partial(subprocess.Popen, ...)`), the module
+    itself bound or passed (`s = subprocess`), and asyncio's, pty's and multiprocessing's ways
+    to start a process (OTHER_STARTERS)."""
     found = Scan()
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    owners = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
     for node in ast.walk(tree):
         where = f"{name}:{getattr(node, 'lineno', 0)}"
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name in {"subprocess", "os"} and alias.asname is not None:
+                if alias.name in WATCHED_MODULES and alias.asname is not None:
                     found.violations.append(f"{where}: import {alias.name} as {alias.asname}")
-        elif isinstance(node, ast.ImportFrom) and node.module in {"subprocess", "os"}:
-            for alias in node.names:
-                if alias.name == "*" or (
-                    alias.name in SPAWNS | OTHER_SUBPROCESS
-                    if node.module == "subprocess"
-                    else starts_a_process(alias.name)
-                ):
-                    found.violations.append(f"{where}: from {node.module} import {alias.name}")
-        elif (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "os"
-            and starts_a_process(node.attr)
-        ):
-            found.violations.append(f"{where}: os.{node.attr}")
+                elif is_multiprocessing(alias.name):
+                    found.violations.append(f"{where}: import {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if is_multiprocessing(node.module):
+                found.violations.append(f"{where}: from {node.module} import ...")
+            elif node.module in OTHER_STARTERS:
+                for alias in node.names:
+                    if alias.name == "*" or alias.name in OTHER_STARTERS[node.module]:
+                        found.violations.append(f"{where}: from {node.module} import {alias.name}")
+            elif node.module in {"subprocess", "os"}:
+                for alias in node.names:
+                    if alias.name == "*" or (
+                        alias.name in SPAWNS | OTHER_SUBPROCESS
+                        if node.module == "subprocess"
+                        else starts_a_process(alias.name)
+                    ):
+                        found.violations.append(f"{where}: from {node.module} import {alias.name}")
+        elif isinstance(node, ast.Name):
+            if node.id in {"subprocess", "os"} and id(node) not in owners:
+                found.violations.append(f"{where}: the module {node.id} itself, not an attribute")
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            module, attribute = node.value.id, node.attr
+            if module == "os" and starts_a_process(attribute):
+                found.violations.append(f"{where}: os.{attribute}")
+            elif module in OTHER_STARTERS and attribute in OTHER_STARTERS[module]:
+                found.violations.append(f"{where}: {module}.{attribute}")
+            elif module == "subprocess" and attribute in SPAWNS and id(node) not in called:
+                found.violations.append(f"{where}: subprocess.{attribute} not called")
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
         owner = node.func.value
         if not (isinstance(owner, ast.Name) and owner.id == "subprocess"):
+            continue
+        if node.func.attr in SUBPROCESS_SAFE:
             continue
         if node.func.attr not in SPAWNS:
             found.violations.append(f"{where}: subprocess.{node.func.attr}")
@@ -169,6 +212,26 @@ FLAGGED = {
     "os.fork": "import os\nos.fork()",
     "os.forkpty": "import os\nos.forkpty()",
     "subprocess.getoutput": "import subprocess\nsubprocess.getoutput('x')",
+    # Review of baton 3 (2026-10-31): a starter named without being called, the module bound or
+    # passed, and the other modules' ways to start a process.
+    "subprocess.run bound": "import subprocess\nrun = subprocess.run\nrun(['x'])",
+    "subprocess.Popen in a partial": (
+        "import functools\nimport subprocess\nfunctools.partial(subprocess.Popen, ['x'])"
+    ),
+    "subprocess annotated": "import subprocess\nprocess: subprocess.Popen[str]",
+    "the subprocess module bound": "import subprocess\ns = subprocess\ns.run(['x'])",
+    "the os module passed": "import os\nuse(os)",
+    "import multiprocessing": "import multiprocessing",
+    "import multiprocessing.pool": "import multiprocessing.pool",
+    "from multiprocessing import Process": "from multiprocessing import Process",
+    "from multiprocessing.pool import Pool": "from multiprocessing.pool import Pool",
+    "from asyncio import create_subprocess_exec": ("from asyncio import create_subprocess_exec"),
+    "asyncio.create_subprocess_shell": "import asyncio\nasyncio.create_subprocess_shell('x')",
+    "asyncio.create_subprocess_exec": "import asyncio\nasyncio.create_subprocess_exec('x')",
+    "from pty import spawn": "from pty import spawn",
+    "pty.spawn": "import pty\npty.spawn(['x'])",
+    "pty.fork": "import pty\npty.fork()",
+    "pty aliased": "import pty as terminal\nterminal.fork()",
 }
 
 
@@ -199,6 +262,29 @@ def test_the_scan_counts_the_hooked_and_the_unhooked_starts_and_leaves_plain_use
     assert found.violations == []
     assert found.hooked == ["synthetic.py:6"]
     assert found.unhooked == ["synthetic.py:7", "synthetic.py:8"]
+
+
+def test_the_scan_allows_subprocesss_names_that_start_nothing() -> None:
+    # Exceptions, the result type and the pipe constants, as attributes, called and imported.
+    source = textwrap.dedent(
+        """
+        import subprocess
+        from subprocess import CalledProcessError, DEVNULL, PIPE, STDOUT
+        from subprocess import CompletedProcess, SubprocessError, TimeoutExpired
+        try:
+            subprocess.Popen(["x"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, preexec_fn=ends_with_us())
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+        except subprocess.SubprocessError:
+            raise subprocess.CalledProcessError(1, "x")
+        done = subprocess.CompletedProcess(["x"], 0)
+        """
+    )
+    found = scan(ast.parse(source), "synthetic.py")
+    assert found.violations == []
+    assert found.hooked == ["synthetic.py:6"]
+    assert found.unhooked == []
 
 
 class Recorder:

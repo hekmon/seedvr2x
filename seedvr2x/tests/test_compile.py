@@ -22,6 +22,7 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 from test_planner import HD, UHD, our_free, shots
+from torch._dynamo.exc import FailOnRecompileLimitHit
 
 from seedvr2x.runtime import compiling, model, planner, resume
 from seedvr2x.runtime.job import JobError, Shot, output_size, padded_size
@@ -446,11 +447,25 @@ def test_an_unreadable_mountinfo_is_linuxs_disk_said_at_debug(
     assert planner.on_windows_drive(Path("/mnt/d/job"), "garbage\n\n - \n") is False
 
 
-def compile_line(cache: Path | None, monkeypatch: pytest.MonkeyPatch, *, drive: bool) -> str:
+def compile_line(
+    cache: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    drive: bool,
+    recorded: bool = False,
+) -> str:
     monkeypatch.setattr(planner, "on_windows_drive", lambda path: drive)
     made, peaks = planner.plan(our_free(96), HD, shots(76), Pins(), None, compile_vae=True)
     said = planner.said(
-        made, peaks, "a card", HD, shots(76), Pins(), numz_padding=False, compile_cache=cache
+        made,
+        peaks,
+        "a card",
+        HD,
+        shots(76),
+        Pins(),
+        numz_padding=False,
+        compile_cache=cache,
+        recorded=recorded,
     )
     [line] = [line for line in said if line.startswith("plan: compile: ")]
     return line
@@ -480,8 +495,8 @@ def test_the_plans_line_says_the_time_of_this_job_on_this_disk(
     if warm:
         (cache / "inductor").mkdir(parents=True)
         (cache / "inductor" / "kernel").write_bytes(b"x")
-    line = compile_line(cache, monkeypatch, drive=drive)
-    why = ", the job's directory on a Windows drive, slower for the cache's many small files"
+    line = compile_line(cache, monkeypatch, drive=drive, recorded=warm)
+    why = ", on a Windows drive"
     assert (
         f"compiling it takes {words} (measured on an RTX 5090's host{why if drive else ''}), paid"
         in line
@@ -493,12 +508,44 @@ def test_the_plans_line_says_the_time_of_this_job_on_this_disk(
     assert "\n" not in line
 
 
+def test_the_windows_drive_line_is_short_and_its_reason_is_said_at_debug(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review of baton 3 (2026-10-31): the line grew to 418 characters; the figures and "on a
+    # Windows drive" stay, the cache's many small files go to --verbose.
+    caplog.set_level(logging.DEBUG, logger=planner.__name__)
+    cache = tmp_path / "compile-cache"
+    on_linux = compile_line(cache, monkeypatch, drive=False)
+    on_drive = compile_line(cache, monkeypatch, drive=True)
+    assert "many small files" not in on_drive and "on a Windows drive" in on_drive
+    assert len(on_drive) - len(on_linux) < 40
+    assert len(on_drive) < 360
+    assert "the compile cache's many small files" in caplog.text
+
+
+def test_a_cache_only_a_recorded_plan_kept_as_it_is_finds_warm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A resume re-planned (other tiles, other graphs) and a first start killed while compiling,
+    # with no plan recorded, find a non-empty cache that does not hold their graphs: the new
+    # job's figure (review of baton 3, 2026-10-31). The recorded plan kept as it is: the
+    # resume's.
+    cache = tmp_path / "compile-cache"
+    (cache / "inductor").mkdir(parents=True)
+    (cache / "inductor" / "kernel").write_bytes(b"x")
+    kept = compile_line(cache, monkeypatch, drive=False, recorded=True)
+    assert "about 1 min 30 s for this resume, its cache warm" in kept
+    for drive in (False, True):
+        other = compile_line(cache, monkeypatch, drive=drive, recorded=False)
+        assert "for this new job" in other and "for this resume" not in other
+
+
 def test_a_cache_missing_or_empty_is_a_new_job_and_none_asked_is_linuxs_new_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "empty").mkdir()
     for cache in (tmp_path / "absent", tmp_path / "empty", None):
-        assert "for this new job" in compile_line(cache, monkeypatch, drive=False)
+        assert "for this new job" in compile_line(cache, monkeypatch, drive=False, recorded=True)
 
 
 # ----------------------------------------------------------------------------- keep_deterministic
@@ -940,54 +987,83 @@ def test_the_warm_up_latent_is_dense_channels_last() -> None:
     assert dense.stride(3) == 1 and channel_major.stride(3) > 1
 
 
-def test_the_entries_counted_are_the_distinct_calls_warm_makes() -> None:
-    for lengths in ((12,), (1, 2, 12), (40, 76)):
-        shapes = small_shapes(*lengths)
-        fake = FakeVAE()
-        models = fake_models(fake)
-        compiling.warm(models, shapes)
-        encodes = {call[1:] for call in fake.calls if call[0] == "encode"}
-        decodes = set(fake.decoded)
-        counted = compiling.entries(models, shapes)
-        assert counted == max(len(encodes), len(decodes)), lengths
-
-
-def test_the_recompile_limit_is_numzs_and_raised_when_the_warm_up_needs_more(
+def test_the_recompile_limits_are_raised_past_any_warm_up_and_never_lowered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     undo_global_state: None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The entries of a function: torch's own limit, 8, is under any plan's; numz's 128 is the
-    # least, the warm-up's entries and a margin the most when they are more.
+    # The review of baton 3 (2026-10-31): torch 2.14.1 applies recompile_limit per code object,
+    # and the VAE's blocks share theirs (one reached 125 against 128 on a 1080p job of 6 shapes);
+    # a limit that no warm-up reaches, 1024 and 8192 in all, where torch's own are 8 and 256.
     caplog.set_level(logging.DEBUG, logger=compiling.__name__)
-    limits: list[int] = []
+    dynamo = torch._dynamo.config
+    assert (compiling.RECOMPILE_LIMIT, compiling.ACCUMULATED_RECOMPILE_LIMIT) == (1024, 8192)
 
-    def load(shapes: Shapes) -> None:
+    def load() -> tuple[int, int]:
         Recorder(monkeypatch)
-        torch._dynamo.config.recompile_limit = 8
         model.load_models(
             Path("dit.safetensors"),
             Path("vae.safetensors"),
             torch.device("cpu"),
             None,
             Plan(5, compile_vae=True),
-            Compilation(shapes, tmp_path / "cache"),
+            Compilation(small_shapes(12), tmp_path / "cache"),
         )
-        limits.append(torch._dynamo.config.recompile_limit)
+        return dynamo.recompile_limit, dynamo.accumulated_recompile_limit
 
-    load(small_shapes(12))
-    assert limits == [compiling.RECOMPILE_LIMIT]
-    assert "recompile limit is 128: the warm-up needs " in caplog.text
-    # 70 distinct tiles to decode at 2 kinds each (the first slice and the next ones) is 140
-    # entries of the decoder's forward, over numz's 128 less the margin.
-    many = tuple((8 * rows, 64) for rows in range(1, 71))
-    shapes = Shapes((8 * 70, 64), (), many, (3,))
-    fake = FakeVAE()
-    assert compiling.entries(fake_models(fake), shapes) == 140
-    load(shapes)
-    assert limits[-1] == 140 + compiling.RECOMPILE_MARGIN
-    assert f"recompile limit is {limits[-1]}: the warm-up needs 140" in caplog.text
+    dynamo.recompile_limit, dynamo.accumulated_recompile_limit = 8, 256
+    assert load() == (1024, 8192)
+    assert "recompile limit is 1024 per code object and 8192 for all" in caplog.text
+    # A limit the process already set higher is kept.
+    dynamo.recompile_limit, dynamo.accumulated_recompile_limit = 4096, 100000
+    assert load() == (4096, 100000)
+    assert "recompile limit is 4096 per code object and 100000 for all" in caplog.text
+
+
+@pytest.mark.parametrize("before", [False, True])
+def test_a_limit_hit_in_the_warm_up_is_a_refusal_and_the_setting_goes_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, undo_global_state: None, before: bool
+) -> None:
+    # fail_on_recompile_limit_hit is on during the warm-up, where torch would run the frame
+    # eagerly and say nothing; torch's FailOnRecompileLimitHit is an Exception, not a
+    # RuntimeError, and becomes the job's refusal naming the limit and the way out. Afterwards the
+    # setting is as it was (a hit in the run is torch's warning, report_late reports the graphs).
+    recorder = Recorder(monkeypatch)
+    dynamo = torch._dynamo.config
+    seen: list[bool] = []
+    dynamo.fail_on_recompile_limit_hit = before
+
+    def warm(models: Models, shapes: Shapes) -> None:
+        seen.append(dynamo.fail_on_recompile_limit_hit)
+
+    monkeypatch.setattr(compiling, "warm", warm)
+
+    def load() -> None:
+        model.load_models(
+            Path("dit.safetensors"),
+            Path("vae.safetensors"),
+            torch.device("cpu"),
+            None,
+            Plan(5, compile_vae=True),
+            Compilation(Shapes((128, 128), (), (), ()), tmp_path / "cache"),
+        )
+
+    load()
+    assert seen == [True] and dynamo.fail_on_recompile_limit_hit is before
+
+    def hit(models: Models, shapes: Shapes) -> None:
+        raise FailOnRecompileLimitHit("Hard failure due to fail_on_recompile")
+
+    assert not issubclass(FailOnRecompileLimitHit, RuntimeError)
+    monkeypatch.setattr(compiling, "warm", hit)
+    with pytest.raises(compiling.CompileError) as error:
+        load()
+    assert isinstance(error.value, JobError)
+    assert "recompile limit" in str(error.value)
+    assert "the same command without --compile" in str(error.value)
+    assert dynamo.fail_on_recompile_limit_hit is before
+    assert recorder.events[-1] == "workers shut"
 
 
 # ----------------------------------------------------------------------------- the order
@@ -1030,9 +1106,8 @@ class Recorder:
 @pytest.fixture
 def undo_global_state(inductor_state: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "unset")
-    monkeypatch.setattr(
-        torch._dynamo.config, "recompile_limit", torch._dynamo.config.recompile_limit
-    )
+    for name in ("recompile_limit", "accumulated_recompile_limit", "fail_on_recompile_limit_hit"):
+        monkeypatch.setattr(torch._dynamo.config, name, getattr(torch._dynamo.config, name))
 
 
 def test_the_vae_is_compiled_before_the_dit_loads_and_the_workers_shut_before_its_blocks(

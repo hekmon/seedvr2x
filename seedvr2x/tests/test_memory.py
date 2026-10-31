@@ -23,8 +23,10 @@ TOTAL = 32 * GIB
 # reads, held here to the letter.
 HELD = "backend:native,expandable_segments:True"
 # The two warnings of a driver that spills, written out whole (not built from memory's constants:
-# a change of wording or figure must fail the tests that compare them; HELD_BACK 3.0 GiB, RESERVE
-# 2.3 GiB). impl-v010, 2026-10-31.
+# a change of wording or figure must fail the tests that compare them). HOLDS_LINE carries the
+# figures of the autouse round_figures fixture, HELD_BACK 3.0 GiB and RESERVE 2.3 GiB, not the
+# shipped 0.5 and 4.5: SHIPPED_HOLDS_LINE is the shipped one, held by its own test. impl-v010,
+# 2026-10-31.
 LENDS_LINE = (
     "the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that"
     " passes the card slows down, then fails without an error to catch"
@@ -32,6 +34,10 @@ LENDS_LINE = (
 HOLDS_LINE = (
     "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
     ' less 3.0 GiB, and the plan in 2.3 GiB less; the manual\'s "Under WSL2" section says why'
+)
+SHIPPED_HOLDS_LINE = (
+    "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
+    ' less 0.5 GiB, and the plan in 4.5 GiB less; the manual\'s "Under WSL2" section says why'
 )
 # The two figures a held run plans under, as measured (runtime/memory.py's comments), read
 # before the tests put their own in their place (round_figures).
@@ -2199,6 +2205,18 @@ def test_a_held_run_s_allocator_keeps_torch_s_limit() -> None:
     backend, refused, last, whole, under, expandable, segments = ran.stdout.split()
     assert (backend, refused, last, whole, under) == ("native", "True", "2", "True", "True")
     assert expandable == "True" and int(segments) >= 1
+
+
+def test_the_shipped_holds_line_says_the_shipped_figures(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The autouse round_figures fixture's patch undone (MEASURED, read before it): the line the
+    # user reads says 0.5 GiB outside torch's limit and 4.5 GiB under it.
+    for name, value in zip(("HELD_BACK", "RESERVE", "HELD_BACK_UNREAD"), MEASURED, strict=True):
+        monkeypatch.setattr(memory, name, value)
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    assert startup(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: 20 * GIB})) == HELD
+    assert caplog.messages == [LENDS_LINE, SHIPPED_HOLDS_LINE]
 
 
 def test_a_driver_that_spills_is_warned_of_in_a_line_each_at_every_start(

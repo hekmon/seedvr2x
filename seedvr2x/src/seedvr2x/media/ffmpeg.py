@@ -96,9 +96,13 @@ def _libc() -> ctypes.CDLL:
 def _prctl() -> Callable[..., int]:
     """libc's prctl, looked up and typed once, in the parent. ctypes resolves a library's
     attribute lazily (dlsym, a new function object, a cache set on the library): all of it
-    allocates, which a child of a multi-threaded process (seedvr2x forks with other threads
-    alive) must not do between its fork and its exec, where only async-signal-safe work is safe.
-    Design's ruling, baton 3 of v0.1.0 (2026-10-30): resolve it in the parent, before any fork."""
+    allocates and takes locks, which a child of a multi-threaded process (seedvr2x forks with
+    other threads alive) should not do between its fork and its exec, where a lock another
+    thread held at the fork stays held for ever. Resolving it here, in the parent, removes from
+    the child the dlsym lookup, the loader's lock and the CDLL attribute cache; the call itself
+    still converts its arguments into new objects, which no ctypes call avoids, and Python's
+    preexec_fn runs Python code that allocates anyway. Design's ruling, baton 3 of v0.1.0
+    (2026-10-30): resolve it in the parent, before any fork."""
     function = _libc().prctl
     function.argtypes = (ctypes.c_int, ctypes.c_ulong)
     function.restype = ctypes.c_int
@@ -121,8 +125,9 @@ def ends_with_us() -> Callable[[], None]:
     itself. Linux only (DESIGN.md: Linux first); no other system is run, so no fallback.
 
     The function is resolved here, in the parent, and `prepare` only calls the function object
-    it closes over: the child of a multi-threaded process does async-signal-safe work alone,
-    and ctypes' lazy attribute lookup allocates (_prctl; design, baton 3, 2026-10-30). The
+    it closes over: that removes from the child the dlsym lookup, the loader's lock and the
+    CDLL attribute cache, which ctypes' lazy attribute lookup would use there (_prctl; design,
+    baton 3, 2026-10-30); not all allocation, which a Python preexec_fn cannot avoid. The
     signal's number is taken here too, for the same reason."""
     prctl = _prctl()
     kill = int(signal.SIGKILL)

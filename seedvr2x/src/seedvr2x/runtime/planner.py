@@ -346,9 +346,12 @@ COMPILE_DECODE_TILE_MAX = 1152
 # under WSL2, paid before the DiT loads (DESIGN.md, Memory planner, --compile, decided on
 # 2026-10-30: "the plan's line says the times measured, a new job's and a resume's"). Measured on
 # 2026-10-31 on an RTX 5090 with an AMD Ryzen 9 9950X3D under WSL2, a 1080p job (encode tiles of
-# 2 shapes, decode tiles of 4, 535 graphs): on ext4 a new job took 4 min 0 s and a resume 1 min
-# 31 s; with the job's directory on a Windows drive (a 9p mount, "aname=drvfs"), a new job 6 min
-# 23 s (6 min 47 s to 6 min 54 s on 2026-10-29 and 2026-10-30) and a resume 1 min 54 s: the same
+# 2 shapes, decode tiles of 4, 535 graphs; tree 7dd60993, whose warm-up made both memory layouts
+# of the decoder's latent, where the one-layout warm-up that followed drops the channel-major
+# pass, about 5 s and its graphs, and the GPU gate measures these figures again): on ext4 a new
+# job took 4 min 0 s and a resume 1 min 31 s; with the job's directory on a Windows drive (a 9p
+# mount, "aname=drvfs"), a new job 6 min 23 s (6 min 47 s to 6 min 54 s on 2026-10-29 and
+# 2026-10-30) and a resume 1 min 54 s: the same
 # graphs, the difference the compile cache's 8,327 small files (362 MB) written to and read back
 # from that drive. A resume's floor is dynamo tracing every graph again (about 77 s of its 84 s
 # warm-up), which no cache keeps. Said in the rounded figures. The estimates that follow count
@@ -1772,25 +1775,29 @@ def _minutes_said(seconds: int) -> str:
     return f"{minutes} min" + (f" {rest} s" if rest else "")
 
 
-def _compile_time_said(cache: Path | None) -> str:
-    """The compilation's time for this job (COMPILE_NEW and the others): a resume's where its
-    compile cache is there and holds something (the cache is warm), a new job's otherwise, and
-    the other case's after it; the Windows drive's figures, and why they are longer, where the
-    cache's directory is on one (on_windows_drive)."""
+def _compile_time_said(cache: Path | None, recorded: bool) -> str:
+    """The compilation's time for this job (COMPILE_NEW and the others): a resume's where the job
+    is a resume whose recorded plan is kept as it is (`recorded`: same tiles, same shapes) and
+    its compile cache is there and holds something (the cache is warm), a new job's otherwise,
+    and the other case's after it; the Windows drive's figures where the cache's directory is on
+    one (on_windows_drive), why they are longer at debug. A resume planned again (other tiles,
+    other graphs) or a first start killed while compiling, whose plan was never recorded, finds
+    a cache that doesn't hold its graphs: the new job's figure."""
     drive = cache is not None and on_windows_drive(cache)
     new, resume = (
         (COMPILE_NEW_DRIVE, COMPILE_RESUME_DRIVE) if drive else (COMPILE_NEW, COMPILE_RESUME)
     )
     try:
-        warm = cache is not None and cache.is_dir() and any(cache.iterdir())
+        warm = recorded and cache is not None and cache.is_dir() and any(cache.iterdir())
     except OSError as error:
         logger.debug("%s not listed (%s): the compile cache taken as cold", cache, error)
         warm = False
-    why = (
-        ", the job's directory on a Windows drive, slower for the cache's many small files"
-        if drive
-        else ""
-    )
+    if drive:
+        logger.debug(
+            "the job's directory is on a Windows drive: the compile cache's many small files,"
+            " written to and read back from it, make the compilation slower"
+        )
+    why = ", on a Windows drive" if drive else ""
     figures = (
         f"about {_minutes_said(resume)} for this resume, its cache warm, about"
         f" {_minutes_said(new)} for a new job"
@@ -1850,8 +1857,8 @@ def said(
     predicted peaks, as DESIGN.md lists it; None says none.
 
     compile_cache: the compile cache's directory (manifest.COMPILE_CACHE in the job's), whose
-    state and disk the compilation's time depends on (_compile_time_said); None says a new job
-    on Linux's own disk.
+    state and disk the compilation's time depends on (_compile_time_said), warm only where
+    `recorded` too; None says a new job on Linux's own disk.
 
     The line of the compiled VAE is the plan's own (plan.compile_vae, the setting's, always: a
     job outside the shapes measured is refused, plan)."""
@@ -1947,9 +1954,10 @@ def said(
         f" {_gib(peaks.budget - peaks.need(peaks.bound))} GiB under the budget"
     )
     if plan.compile_vae:
+        compiling = _compile_time_said(compile_cache, recorded)
         lines.append(
             f"compile: the VAE compiled (--compile), each pass held to {COMPILE_PEAK} times its"
-            f" plain peak, in the shapes measured only; {_compile_time_said(compile_cache)}, paid"
+            f" plain peak, in the shapes measured only; {compiling}, paid"
             " before the DiT loads, at every start and resume, its cache kept in the job's"
             " directory"
         )
