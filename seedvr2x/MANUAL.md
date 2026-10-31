@@ -5,8 +5,8 @@ explains what would otherwise surprise you, with the reason and the measurement 
 point. [DESIGN.md](DESIGN.md) holds every decision in full, and
 [../research/docs/](../research/docs/) the measurements, linked where a figure comes from.
 
-> **Version 0.1.0.** This manual describes seedvr2x as it is built. The few points decided
-> but not built yet are marked *not built yet*, each where it is said.
+> **Version 0.1.0.** This manual describes seedvr2x as it is built. What comes in a later
+> version is said so where it comes up.
 
 What surprises a newcomer most:
 
@@ -63,6 +63,7 @@ What surprises a newcomer most:
 - [Colour and shape of the output](#colour-and-shape-of-the-output)
 - [Resume](#resume)
 - [Stopping at a set time](#stopping-at-a-set-time)
+- [Compiling the VAE: `--compile`](#compiling-the-vae---compile)
 - [Integrity](#integrity)
 - [Seeds and reproducibility](#seeds-and-reproducibility)
 - [Reading a run](#reading-a-run)
@@ -111,7 +112,7 @@ What surprises a newcomer most:
 - **The 96 GB card:** the card seedvr2x was developed on, whose clock a fault caps under load:
   a healthy card should take 2 to 3 times less, which isn't measured. The RTX 5090's times are
   a healthy card's.
-- **Calibration:** a minute or so of the job's own work, timed once the models are loaded, from
+- **Calibration:** a minute or two of the job's own work, timed once the models are loaded, from
   which seedvr2x estimates the time of every unit and of the whole job.
 
 ## Colour correction
@@ -310,10 +311,13 @@ memory allows.
 
 | numz option | seedvr2x |
 |---|---|
-| `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | gone: shots, windows and the mixing of shared latents replace them, sized by the planner; `--window` caps the windows |
+| `input` (a video, an image or a directory) | one video file only: images aren't supported in version 0.1.0, and a directory is refused, with the three ways to join its segments back into one file ([the two workflows](#the-two-workflows)) |
+| `--output` | `-o`, required: a `.mkv` path gives the finished file, another video suffix being refused; any other path is a directory of output segments, new or empty, or an unfinished job's, which the same command resumes ([the two workflows](#the-two-workflows)); there is no default `output/` directory |
+| `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | gone: shots, windows and the mixing of shared latents replace them, sized by the planner; `--window` caps the windows, in latents: a batch of 4n + 1 frames is a window of n + 1 latents, so `--batch_size 49` is `--window 13` |
 | `--chunk_size`, `--cache_dit`, `--cache_vae` | gone: one process for the whole job, streaming |
+| `--vae_encode_tiled`, `--vae_decode_tiled`, `--vae_encode_tile_overlap`, `--vae_decode_tile_overlap` | no switch: each pass is tiled when its untiled run doesn't fit the card, in the largest tiles that do, with an overlap fixed at 64 px (numz's default is 128); `--encode-tile 0` and `--decode-tile 0` pin an untiled pass ([GPU memory](#fixing-a-choice-yourself)) |
 | `--blocks_to_swap`, the tile sizes, the offload devices | chosen by the planner; `--swap-blocks`, `--encode-tile` and `--decode-tile` fix them, exactly or refused; no offload device to name |
-| `--compile_dit`, `--compile_vae` | not in version 1: `torch.compile` is being measured on seedvr2x itself *(not built yet)*. Compiled, the DiT would compile again at every new window length, and numz's compiled VAE takes twice its memory |
+| `--compile_dit`, `--compile_vae` | `--compile`, the VAE alone, opt-in ([compiling the VAE](#compiling-the-vae---compile)): numz's compiled VAE takes twice its memory, its exclusion of the causal convolutions never taking effect, and the DiT isn't compiled in version 0.1.0, which would compile again at every new window length |
 | `--attention_mode` | gone: FlashAttention 2 when installed, else PyTorch's SDPA, logged |
 | `--color_correction` | `--color-correction`: `split` by default, or `none`; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` are gone |
 | `--input_noise_scale` | gone: numz's own addition, which only degrades |
@@ -321,7 +325,7 @@ memory allows.
 | `--seed` | `--seed`, kept |
 | `--resolution`, `--max_resolution` | `--resolution`, the output's short side; nothing stands for `--max_resolution` today |
 | `--output_format`, `--video_backend`, `--10bit` | `--format`: FFV1 masters (`yuv420p10le` by default, `gbrp16le`) or 16-bit PNG |
-| `--dit_model`, `--model_dir` | `--dit-model` and `--model-dir`, the sharp 7B by default; the files come from seedvr2x's own Hugging Face repository, pinned; no model file is ever deleted |
+| `--dit_model`, `--model_dir` | `--dit-model` and `--model-dir`, the sharp 7B by default; version 0.1.0 runs the two 7Bs in float16 only, any 3B, GGUF or fp8 file refused; the files come from seedvr2x's own Hugging Face repository, pinned; no model file is ever deleted |
 | `--cuda_device` | one device per process |
 
 ## The two workflows
@@ -336,7 +340,7 @@ master to make first. They differ only at the end.
   frame grid, so the video keeps the source's timeline, frame for frame. Joined carelessly, the
   video drifts: 46 ms behind the audio over a 163-segment episode, in sptenc's measurements.
   [The finished file](#the-finished-file) says how it is made and checked.
-- **The source in, a directory of segments out.** Any `-o` that isn't a `.mkv` path is a
+- **The source in, a directory of segments out.** Any `-o` that isn't a video file's name is a
   directory, new or empty, or an unfinished job's, which the same command resumes: the output
   segments, their checksums and the job's record ([the files of a job](#the-files-of-a-job)).
   It is what `sptenc encode <dir> <out> -f <source>` takes, or `sptenc concat` for one master.
@@ -773,15 +777,23 @@ directory beside it, `film.1080p.mkv.work`, a job directory in every respect
 run to the same file is refused, and resumed by the same command.
 
 **Refused before any work.** The finished file takes every other stream of the source, and
-drops or converts none in silence. So at every start, before the first pass, seedvr2x tries
-each of the source's other streams into Matroska with ffmpeg itself, then rehearses their whole
-remux (2 to 3 minutes on a film of 33 GiB, under 2 s on files up to 5 GiB). It refuses, naming
-the stream and giving the remux that mends the source:
+drops or converts none in silence, a data stream aside (below). So at every start, before the
+first pass, seedvr2x tries each of the source's other streams into Matroska with ffmpeg itself,
+then rehearses their whole remux, which would otherwise fail only at the job's end, every
+segment made. A line says what it reads, and for at least how long:
 
-- a stream Matroska can't hold: MP4's `mov_text` subtitles (the remux converts them to SubRip,
-  their text and times kept, their styling lost), Blu-ray PCM (rewrapped as it is, nothing
-  lost), DVD PCM, CEA-608 captions, a MOV's timecode track, an MP4's chapter track, an MPEG-TS
-  data stream (left out by the remux);
+```
+03:34:13 clip.mkv: the source's other streams (audio, subtitles, a cover) copied once ahead, so that one the finished file can't take is found now, not after the night's work; reading its 12 MiB, under a second
+```
+
+It takes 2 to 3 minutes on a film of 33 GiB, and 6 minutes on a Blu-ray rip of
+18.5 GB read through WSL2. Its result is kept in the job's record with the ffmpeg it ran with,
+so that a resume under the same ffmpeg doesn't pay it again. It refuses, naming the stream and
+giving the remux that mends the source:
+
+- an audio, subtitle or caption stream Matroska can't hold: MP4's `mov_text` subtitles (the
+  remux converts them to SubRip, their text and times kept, their styling lost), Blu-ray PCM
+  (rewrapped as it is, nothing lost), DVD PCM, CEA-608 captions;
 - anything ffmpeg warns of in that remux;
 - a stream that starts before the file's start, by which Matroska's muxer would move every other
   stream, the video off its grid with them;
@@ -790,8 +802,21 @@ the stream and giving the remux that mends the source:
 A directory output takes every such source: its segments are then muxed with the source's
 streams by your own tools.
 
-*Not built yet:* a data stream Matroska can't hold (a timecode track, an MP4's chapter track) left
-out with a warning naming it, instead of refused.
+**A data stream Matroska can't hold** (a MOV's timecode track, an MP4's chapter track, an MPEG-TS
+data stream) is left out of the finished file instead, with a warning at every start that names
+it and gives ffmpeg's reason. The source's chapters are copied all the same, and the assembly's
+line says what was left out. Captured from the tests, on a MOV with a timecode track:
+
+```
+WARNING film.mov: Matroska can't hold one of its data streams, which is left out of the finished file: stream 1 (data): ffmpeg says "Only audio, video, and subtitles are supported for Matroska."
+```
+
+**A cover picture** (MakeMKV adds one to every file it writes) is attached to the finished file as
+Matroska holds one, its file name, type and bytes the source's, and checked against the source's
+once the file is written. An MP4's cover is attached the same way, as `cover.jpg` or `cover.png`;
+one neither JPEG nor PNG, with no file name and type of its own, is refused, with the remux that
+leaves it out.
+ffmpeg's own remux would turn it into a second video track of one frame, which players list.
 
 **The assembly** is the job's last unit, made once the last segment is finished, or by a later
 run of the same command, which loads no model. One ffmpeg process joins the segments by stream
@@ -801,28 +826,58 @@ source's start time, as ffmpeg's own remux writes them. The other streams come a
 holds them: packets, chapters, languages, titles, dispositions, attachments, the video in the
 source video's place.
 
+**The segments' bytes are checked first.** Each segment's SHA-256 is recorded when it is
+finished, and every one is read again before the join, said in a line, since that read is
+otherwise silent: on a slow disk, half an hour or more for a two-hour film's masters. A
+segment damaged or missing since (the disk, or another program) is recorded unfinished, and the
+run that finds it makes it again at once, its shots encoded, upscaled and decoded again, with a
+warning that ends `its bytes changed since it was finished (…): the disk or another program is
+to suspect; made again now`. Damaged a second time, the run stops (exit 1). A run that has
+loaded no model, the assembly alone left to it, stops instead (exit 1), naming the segment: the
+same command then makes it again and assembles. A finished segment found missing or of another
+size at a start is made again the same way, said in the same warning.
+
 **Proven before it is put in place,** without a decode: each video packet is the one the join
 read, at its place on the grid, with the first segment's codec headers; every other stream's
 packets equal a remux of the source's; the attachments and the chapters are the source's. A
 failure removes the partial file and keeps the segments. Then, each step safe to stop after:
 the file put in place, its checksums written beside it (`film.1080p.mkv.crc32`, one per frame),
-the work directory removed. Its lines:
+the job's manifest beside it (`film.1080p.mkv.manifest.json`), the work directory removed. Its
+lines, on a clip with an audio track and a cover:
 
 ```
-05:45:58 bird.1080p.mkv: assembled, 73 frames of 1 segments with 0 other streams and 0 chapters of bird-540.mkv, 0.10 GiB: joined in 0.7 s, checked by its packets in 0.5 s; the other streams at most 0.00 s ahead of the video in the file
-05:45:58 wrote bird.1080p.mkv: 73 frames from 1 segment, with the source's 0 other streams and 0 chapters, assembled in 1.1 s
-05:45:58 bird.1080p.mkv.work: removed, its job assembled
+03:38:47 checking the bytes of 1 segment, 45 MiB, under a second
+03:38:49 clip.1080p.mkv: assembled, 45 frames of 1 segment with its audio and its cover picture, and 0 chapters of clip.mkv, 45 MiB: joined in 0.7 s, checked by its packets in 0.5 s; the other streams at most 0.04 s ahead of the video in the file
+03:38:49 wrote clip.1080p.mkv: 45 frames from 1 segment, with its audio and its cover picture, and 0 chapters, assembled in 1.4 s
+03:38:49 clip.1080p.mkv.work: removed, its job assembled
 ```
 
-*Not built yet:* the job's manifest kept beside the finished file (`film.1080p.mkv.manifest.json`),
-so that the same command again makes nothing and another job to that file is refused. Today
-only the file and its checksums remain, and a new job to the same name replaces the file once
-its own is whole.
+**No ffmpeg is left behind.** Every ffmpeg and ffprobe seedvr2x starts ends with it, however
+seedvr2x ends, a kill included: the kernel ends them (Linux's `PR_SET_PDEATHSIG`), so a killed
+run leaves no join writing. Your `--segment-cmd` is the exception: it ends at its input's end,
+its file discarded.
 
-**Disk:** while it is assembled, the segments and the file sit side by side, about twice the
-master, and the other streams twice more while they are compared. Without the room the run
-stops before the join, saying how much more it needs, every segment kept, and the same command
-assembles later.
+**Then the job is finished, and says so.** The manifest beside the file is its record. The same
+command again makes nothing: it compares the model files and the source with that record by
+size and modification time, reads neither where both match, and says so within seconds (3 s on
+an RTX 5090, where checking the three model files takes about 85 s):
+
+```
+03:38:54 clip.1080p.mkv: finished already, its 45 frames
+```
+
+A model file or a source whose size or time differs is hashed again first; one whose content
+changed, or another setting, makes it another job, refused. Another job to that name is refused,
+and a `.mkv` that has no manifest beside it is never replaced. To make a finished file again,
+with other settings, remove both the file and its manifest, or choose another `-o`.
+Run in another environment, a finished file says the difference in one line, makes nothing and
+keeps its record, no flag asked.
+
+**Disk:** while it is assembled, the segments and the file sit side by side, the masters in the
+work directory beside the file, about twice the master, and the other streams twice more while
+they are compared. The plan's `disk:` line says it at the start ([disk use](#disk-use)). Without
+the room the run stops before the join, saying how much more it needs, every segment kept, and
+the same command assembles later.
 
 ## Disk use
 
@@ -846,19 +901,37 @@ thousands of distinct values in a frame.
   window's output, removed once the shot's segment is finished.
 - **A tiled shot's scratch:** 12.7 MB per 1080p frame and 50.5 MB per 4K frame, in system
   memory up to an allowance, then whole in a file (`scratch.bf16`), for the one shot being
-  encoded or decoded. The plan's `scratch:` line says which.
+  encoded or decoded. The plan's `scratch:` line says which. A long shot makes it big: a film's
+  end credits, one shot of 8,055 frames, take 95 GiB of it at 1080p.
 - **With `--quality enhanced` or `maximum`,** the earlier runs' frames, for the shot being made:
   up to half of it or three quarters, 12.4 MB a 1080p frame and 49.8 MB a 4K frame
   ([what it costs](#what-it-costs)).
-- **While a finished file is assembled,** the segments and the file side by side: about twice
-  the master ([the finished file](#the-finished-file)).
+- **While a finished file is assembled,** the segments and the file side by side, on the
+  file's own disk: the masters wait in its work directory, `film.1080p.mkv.work`, beside it.
+  About twice the master ([the finished file](#the-finished-file)).
+
+**Said before the run.** The plan's `disk:` line, in `--plan` and at every run's start, gives
+the masters the job will write, twice that while a file is assembled, against the free space
+of their disk, here a finished file's and a directory job's:
+
+```
+03:35:43 plan: disk: the masters at most 72 MiB, twice that, 144 MiB, while the file is assembled, and the source's other streams; 84 GiB free on its disk, enough
+02:39:43 plan: disk: the masters at most 184 MiB in the output directory; 86 GiB free on its disk, enough
+```
+
+Until a first segment is written, the masters are counted at their largest, 135 GiB an hour of
+1080p in `yuv420p10le`; after, from the segments written. Where they won't fit, the line ends
+with how much is short, and a warning follows, never a refusal: the disk may be cleared as the
+job runs. Short of room at the assembly, the run stops there, every segment kept. With
+`--segment-cmd`, until a first segment is finished, the line gives the free space alone, your
+encoder deciding the size; then it counts from the segments written.
 
 **Checked before the run.** Once the plan is made, before the models load, the job's disk is
-checked against what it writes beside its manifest at its largest shot's peak: the frames kept
-between runs and a scratch file. Short of room, the job is refused, saying how much each part
-takes and the ways out (make room, another disk, a lower `--quality`, free system memory for
-the scratch), its first pass kept; `--plan` only warns. The masters, the segments and the
-input copies aren't counted: their size follows the content.
+also checked against what it writes beside its manifest at its largest shot's peak: the frames
+kept between runs and a scratch file. Short of that room, the job is refused, saying how much
+each part takes and the ways out (make room, another disk, a lower `--quality`, free system
+memory for the scratch), its first pass kept; `--plan` only warns. The input copies aren't
+counted: their size follows the content.
 
 **Once:** 17 GB of model files in Hugging Face's cache ([README](README.md#model-files)).
 
@@ -874,14 +947,30 @@ PyTorch's native one fragments and fails; [under WSL2](#under-wsl2) it is PyTorc
 expandable segments. seedvr2x sets it through `PYTORCH_CUDA_ALLOC_CONF` unless you have set
 that variable or `PYTORCH_ALLOC_CONF` (an empty one counts as unset).
 
+### What else holds the card
+
+The plan counts what is free when the job starts, and every resume counts again: what other
+programs hold of the card is the job's to lose. A resume refused for want of the card's memory
+names this section. To see what holds it:
+
+- **On Windows, WSL2 included:** Task Manager's Details tab, with its "Dedicated GPU memory"
+  column (right-click a column's header, then Select columns, to add it), sorted by it. A
+  program closed to the system tray is still running and keeps its share: quit it from the tray.
+- **On Linux:** `nvidia-smi`, whose process list gives each program's memory on the card.
+
+On an RTX 5090 driving a Windows desktop, the desktop's share grew from 3.2–4.8 GiB to 9.0
+over a few days, programs closed to the tray keeping theirs; with them quit, it went back to
+4.0 GiB.
+
 ### Which phase sets the peak
 
 A shot goes through three phases, and each has its own peak
 ([vram.md](../research/docs/vram.md)):
 
-- **The DiT's peak follows the window's length:** 15.9 GiB of weights, the DiT's and the VAE's, plus about 1 GiB per
-  latent at 1080p and four times that per latent at 4K. This is where a card's memory turns
-  into quality: a longer window means fewer joins in a long shot.
+- **The DiT's peak follows the window's length:** 15.9 GiB for the two models' weights on the
+  card (the DiT's alone are 15.35 GiB), plus about 1 GiB per latent at 1080p and four times that
+  per latent at 4K. This is where a card's memory turns into quality: a longer window means
+  fewer joins in a long shot.
 - **The VAE's peak follows the frame's size, not the shot's length,** since it works through
   the frames 4 at a time and keeps nothing of the shot on the GPU: about 19 GiB to encode and
   35 GiB to decode at 1080p, and four times as much at 4K, about 134 GiB for the decode. No card
@@ -1003,9 +1092,9 @@ more of the rest of the machine.
   never change.
 - **A tiled shot's scratch,** up to its allowance in system memory: 12.7 MB per 1080p frame,
   50.5 MB per 4K frame. The allowance is half of what the host has left once the pinned copies
-  and the shot are counted, and no more than the longest tiled shot needs; past it, a shot's scratch goes
-  whole to a file on the job's disk. Where the host's memory can't be read, said in a warning,
-  it is the longest shot's whole scratch, 8 GiB at most.
+  and the shot are counted, and no more than the longest tiled shot needs; past it, a shot's
+  scratch goes whole to a file on the job's disk. Where the host's memory can't be read, said in
+  a warning, it is the longest shot's whole scratch, 8 GiB at most.
 - **The process itself:** 2.3 to 2.5 GiB once the weights are loaded, flat whatever the job's
   length. The weights are read straight into place, never mapped: a load peaks at 1.1 GiB with
   nothing pinned, 7.5 with 6.38 GiB pinned, 16.3 with the 36 blocks'.
@@ -1019,7 +1108,7 @@ counted from what is free at the start, not from the card's size. 4K takes 22.40
 
 **What to expect:**
 
-- A 16 GB card can't hold the model's 15.35 GiB of weights: it swaps every block.
+- A 16 GB card can't hold the DiT's 15.35 GiB of weights: it swaps every block.
 - Below 48 GB, a 1080p decode only fits tiled; at 4K every card tiles it, the 96 GB one
   included.
 - These cards also compute more slowly: an RTX 5080 has 84 compute units (SMs) where the
@@ -1040,8 +1129,11 @@ can catch, and the process aborts. So there, seedvr2x holds itself to the card, 
 its start:
 
 ```
-WARNING the GPU's driver gives memory the card doesn't have (...): system memory in its place, as Windows' driver does, under WSL2 too whatever NVIDIA's "CUDA - Sysmem Fallback Policy" says. ...
+03:35:41 WARNING the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that passes the card slows down, then fails without an error to catch
+03:35:41 WARNING seedvr2x holds itself to the card's own memory there: torch limited to the memory free less 0.5 GiB, and the plan in 4.5 GiB less; the manual's "Under WSL2" section says why
 ```
+
+`--verbose` gives each in full, with the driver's own figures.
 
 - **It reads the whole card's free memory** through NVML, the driver's own figure being the
   process's, not the card's. PyTorch is limited to that, less 0.5 GiB left to the rest of the
@@ -1052,17 +1144,20 @@ WARNING the GPU's driver gives memory the card doesn't have (...): system memory
   nvidia-smi shows free: on an RTX 5090 beside a desktop holding 4.6 to 5.8 GiB of the card,
   the plan counted on 20.0 to 21.2 GiB of the 25.0 to 26.2 free. The plan's first two lines give
   each figure.
-- **Where a job would be refused with 4.5, it takes 2.5,** said in its `budget:` line: a step
+- **Where a job would be refused with 4.5, it takes 2.5,** said in a `reserve:` line under its
+  `budget:` line: a step
   short of room then slows down rather than being refused, and a job that fits with 4.5 runs up
   to 1.5 times as long with 2.5. It takes the same frames. A resume whose recorded plan no
   longer fits with 4.5 takes 2.5 too, before it stops. This holds under PyTorch's own allocator
   with expandable segments, seedvr2x's default there; under an allocator of your own the job is
   refused with 4.5, the refusal saying so. With 2.5, an RTX 5090 ran 4K's smallest window
   beside a desktop holding 3.2 GiB. Its plan of the Sol Levante example at 4K, without
-  FlashAttention 2, says it so:
+  FlashAttention 2, said it so, run by a build before 0.1.0: here its figures in 0.1.0's two
+  lines, where that build gave them in one:
 
   ```
-  06:02:17 plan: budget: 24.19 GiB, the 27.19 GiB free less torch's limit, 0.50 GiB under it, and the reserve of 2.50 GiB left to torch's allocator beyond a step's peak, 2.50 and not 4.50, the plan with 4.50 refused (an output of 3840x2160 takes 22.87 GiB of free VRAM (its smallest window, 5 latents, with every block of the DiT swapped and the VAE off the GPU: a peak of 22.87 GiB), and the plan counts on 22.19 GiB of the 27.19 GiB free on the whole card by NVML (its driver reports 30.02 GiB free to this process), the run held to the card's own memory: 0.68 GiB more would have to be freed on the card for it; the largest output that fits there is --resolution 2112, about 3754x2112); slow: a step short of room beyond its peak slows down where it would be refused, and a job that fits with 4.50 runs up to 1.5 times as long with 2.50; memory freed on the card gives the 4.50 back; the margin of 0.60 GiB is in the reserve
+  06:02:17 plan: budget: 24.19 GiB, the 27.19 GiB free less torch's limit, 0.50 GiB under it, and the reserve of 2.50 GiB left to torch's allocator beyond a step's peak; the margin of 0.60 GiB is in the reserve
+  06:02:17 plan: reserve: 2.50 GiB and not 4.50, the plan with 4.50 having been refused (--verbose says why); slow: a step short of room beyond its peak slows down where it would be refused, and a job that fits with 4.50 runs up to 1.5 times as long with 2.50; memory freed on the card gives the 4.50 back
   06:02:17 plan: windows: 5 latents at most (17 frames), the longest the budget holds: 8 of 62 shots in one window, 471 joins; a longer window, fewer joins; --window N caps them
   ```
 
@@ -1080,7 +1175,7 @@ WARNING the GPU's driver gives memory the card doesn't have (...): system memory
 
   Under WSL2, the Linux floor's 0.6 GiB margin goes, and the 0.5 GiB left to the card and the
   reserve come on top. The RTX 5090 above had 27.19 GiB free: 0.68 short of full speed at 4K
-  under SDPA, as its line says, and 1.32 over what it needs to run.
+  under SDPA, as `--verbose` says, and 1.32 over what it needs to run.
 - **Each unit checks the card first.** When another program has taken memory since the plan,
   the run gives PyTorch's cache back, and, within the reserve the plan took, holds itself again
   to what is left, says so in a warning, and goes on. Past that, it stops in one line, its units
@@ -1092,6 +1187,11 @@ WARNING the GPU's driver gives memory the card doesn't have (...): system memory
   frames being maybe not those of a run with more room.
 - **One seedvr2x per card:** each plans from what is free when it starts, and the other's
   growth would stop it.
+- **The model cache on Linux's own disk,** where it has room (`HF_HOME` or `HF_HUB_CACHE`
+  pointing into WSL2's own file system): each start's check reads the 16.5 GB DiT whole, and its
+  load reads it again, and a Windows drive's mount is the slow way in, as it is for a tiled
+  pass's scratch file and the compile cache. Not measured for the models themselves. The
+  trade-off is the room: 17 GB inside WSL2's virtual disk.
 
 ## Why zscale is required
 
@@ -1140,6 +1240,7 @@ ERROR SolLevante_HDR10_r2020_ST2084_UHD_24fps_1000nit.mov: HDR, transfer smpte20
 | **Dolby Vision metadata on the frames, with no record saying what the base layer is** | A base layer is never guessed. | Read the file it came from, if that has the record (ffmpeg keeps it when it remuxes to Matroska). Or, if you know the base layer is SDR, drop the metadata: `-c copy -bsf:v dovi_rpu=strip=1`. |
 | **Interlaced,** declared by the stream | Deinterlacing is a workflow of its own, with specialised tools and many ways to do it. Refused in every version. | Deinterlace it first, with a tool made for it. |
 | **A variable frame rate:** frames whose durations differ by more than 1 ms | The output is written at one exact rate, frame for frame. | Make it constant first, with your own tools. If the frames follow one rate and the file is merely wrong about it, see [below](#a-frame-rate-its-timestamps-contradict). |
+| **A frame rate above 1,000 fps,** declared, read, or given by `--frame-rate` | Every FFV1 output is Matroska, whose timestamps count milliseconds: two frames closer than that can't be told apart. A master written at 2,000 fps came back with 15 of its 30 frames a whole frame off; 1,000 fps itself holds. Refused before the first pass, and `--frame-rate` above it on the command line. | None in version 1. |
 | **Timestamps that jump:** a step back of more than 0.1 s, or forward of more than 10 s and longer than the frames' shortest step | A discontinuity, as in joined MPEG-TS recordings. seedvr2x keeps the source's timestamps, which its frame index needs, where ffmpeg would smooth the jump over. | For the formats ffmpeg corrects (MPEG-TS and MPEG-PS among them), a remux takes it out, every frame kept: the message gives the command, `ffmpeg -i SOURCE -map 0 -map -0:d -c copy fixed.mkv`. |
 | **Colour tags that contradict each other:** the container says one thing, the first frame another, with different meanings | A bad file: either reading could be wrong, and seedvr2x doesn't guess. Two names of one meaning (`bt470bg` and `smpte170m`, one matrix) are no contradiction. | If the frames are right, correct the container's tags with a remux, or `mkvpropedit` on Matroska. If the container is right, correct the bitstream's: the message gives ffmpeg's command when the codec has a filter for it (H.264, HEVC, AV1, VP9, MPEG-2, ProRes, APV). For a YUV source's matrix, `--input-matrix` settles it. |
 | **A rotation or a flip** in the display matrix, as phone and camera files have | Not read in version 1; a later version may process the frames as stored and carry the rotation over. | Apply the rotation with your own tools first. |
@@ -1260,10 +1361,16 @@ One rule decides all of it: the upscale must look like its source, in any player
   pixels at the source's display aspect: a 720×480 DVD at 16:9 gives 1920×1080. numz's CLI
   ignores the sample aspect, so its upscale of a 16:9 DVD comes out 16% too narrow (NTSC) or
   30% (PAL). `--input-sar` corrects a wrong or missing tag.
-- **Size.** `--resolution` is the output's short side, 1080 by default. The model works on
-  frames padded to multiples of 16, and the padding is trimmed: the output is the size asked.
-  seedvr2x pads with rows mirrored from the picture, then black ones, where numz pads with
-  black alone, which costs the bottom 16 rows of its output 3–10 dB
+- **Size.** `--resolution` is the output's short side, a portrait source's too, 1080 by default:
+  numz's default, kept, and a size every card the planner aims at runs (from 8.3 GiB free, where
+  4K takes 22.4). A 1080p source given the default comes out at its own size, redrawn rather
+  than enlarged. On two 1080p Blu-ray sources at their own size, judged by eye, a live-action
+  film couldn't be told from its source; on an anime episode, small faces in motion looked
+  redrawn and moving credits' kanji showed artefacts. A clean source leaves a same-size redraw
+  little to repair: the model is made for old or damaged ones. The model works on frames padded
+  to multiples of 16, and the padding is trimmed: the output is the size asked. seedvr2x pads
+  with rows mirrored from the picture, then black ones, where numz pads with black alone, which
+  costs the bottom 16 rows of its output 3–10 dB
   ([numerics.md](../research/docs/numerics.md#reflectblack16)).
 - **PNG** carries the primaries and transfer too, as the chunks ffmpeg's PNG encoder writes
   from the tags, and none for an untagged source.
@@ -1291,11 +1398,12 @@ are skipped, and the log says what was found:
 resuming film.segments: 3 of 12 segments finished, 14 of 20 shots encoded, 9 windows kept; 2 leftovers discarded
 ```
 
-A finished directory job run again says `film.segments: finished already, its 12 segments`,
-and makes nothing. A finished file keeps no record once its work directory is gone: the same
-command run again is a new job, made whole, which replaces the file once its own is whole
-(*not built yet:* the manifest kept beside the file, [the finished file](#the-finished-file)).
-Only a run stopped after the file was put in place, and before its work directory went, says
+A finished job run again says so within seconds and makes nothing:
+`film.segments: finished already, its 12 segments`, or, for a finished file, whose manifest
+stays beside it, `film.1080p.mkv: finished already, its 45 frames`
+([the finished file](#the-finished-file)). It compares the model files and the source with its
+record by size and modification time, and hashes only one that differs. A run stopped after
+the file was put in place, and before its work directory went, says
 `film.1080p.mkv: assembled already, …` and finishes the clean-up.
 
 **A directory holds one job.** The same command is that job; anything else is another job,
@@ -1312,12 +1420,15 @@ What is compared:
 - **the settings:** every option that shapes the output (`--quality`, `--window` and the tile
   pins, `--segment-cmd` and `--min-segment` among them, `--swap-blocks` not), the model files by
   their SHA-256, and seedvr2x's own code. Any change to the code refuses a resume: update
-  seedvr2x between jobs, not during one.
+  seedvr2x between jobs, not during one. A finished job run by another version is another job
+  too, refused. The code is known by its files: a job begun before an update is resumed by the
+  code it began with (note the commit with `git rev-parse HEAD` before a long job, and
+  `git checkout` it, then `uv sync`, to finish one).
 - **the source,** by its content: its size and SHA-256. A source that was moved or re-dated is
   the same source.
-- **the environment:** the GPU, PyTorch, CUDA and cuDNN, the attention backend, ffmpeg and a
-  fingerprint of its conversions, Python and its packages' versions. The NVIDIA driver is
-  recorded but not compared.
+- **the environment:** the GPU, PyTorch, CUDA and cuDNN, the attention backend and
+  FlashAttention, ffmpeg and a fingerprint of its conversions, Python and its packages'
+  versions. The NVIDIA driver is recorded but not compared.
 
 It is that strict because a resume promises the uninterrupted run's output, bit for bit, and
 each of these can change bits. Among what may change from one run of a job to the next:
@@ -1337,12 +1448,8 @@ says so (`the first pass is kept in film.segments: the same command takes it up,
 what is named here, without decoding the source again`), and the first pass, 17 minutes on a
 2-hour HEVC master, isn't paid twice.
 
-**`--accept-env-change`.** When the environment is all that differs, the refusal says so and
-names this option. Another GPU, another PyTorch or another ffmpeg only breaks the bit-identity
-across the resume, not the upscale's correctness, and refusing outright would throw away tens
-of GPU hours over an upgrade. The change is written in the job's record: what changed, when,
-and how much was made before it. A finished directory job needs no flag in another
-environment: it makes nothing, says the difference in one line, and keeps its own record.
+When the environment is all that differs, the refusal says so and names `--accept-env-change`
+([below](#--accept-env-change)).
 
 **What a resume doesn't do again:**
 
@@ -1358,8 +1465,9 @@ environment: it makes nothing, says the difference in one line, and keeps its ow
 **The plan across a resume.** A resumed job keeps what shapes its output, the window cap and
 the tiles, and plans the rest again from the memory free that day: the swapped blocks, what
 stays on the GPU. Its plan's lines say so (`kept from the job's record, so that the output
-stays bit for bit`). If what it recorded no longer fits, it stops and names the phase and the
-shortfall; [under WSL2](#under-wsl2) it first tries the reserve of 2.5 GiB.
+stays bit for bit`). If what it recorded no longer fits, it says so early and stops before the
+models load, the job kept ([below](#a-resume-short-of-the-cards-memory)); [under
+WSL2](#under-wsl2) it first tries the reserve of 2.5 GiB.
 
 **The directory is the job's.** It must hold what the job's record names and nothing else,
 dotfiles included: a file from anywhere else is refused before anything is written there, never
@@ -1375,6 +1483,94 @@ and during a segment's decode, by Ctrl-C once and twice, and resumed after each.
 equalled the uninterrupted run's, bit for bit. Jobs stopped by `--until` and resumed two days
 later did too. This holds for a source that decodes the same each time; a damaged one may not.
 
+### A resume short of the card's memory
+
+A resumed job keeps the shape its record took, its window cap and its tiles, so that its output
+stays the uninterrupted run's. If the memory free that day no longer holds that shape, another
+program having taken part of the card since, the job can't go on as it is.
+
+- **Said early.** As soon as the job's record is read, before the model files, the source and
+  the other streams are checked, the card is read, and a warning says what is missing while
+  there is time to free it. On an RTX 5090 beside a program holding 12 GiB of it, 0.1 s in
+  (from a slightly older build; 0.1.0 counts its own share of the card 0.48 GiB lower, so it
+  would print that much less):
+
+  ```
+  03:07:12 WARNING the card's free memory, read now, does not hold the recorded plan: the encode lacks 9.95 GiB of the card's memory; this is an early reading, the check that counts comes once the files are checked
+  to free it, quit the programs using the GPU, those closed to the system tray too (the manual's "GPU memory" section says how to see them on each system); the checks now running take about 2 min, within which to free it
+  ```
+
+  The checks take minutes on a large source, which the warning estimates from its size. It is
+  an early reading, counting ahead the memory seedvr2x itself will take, and the check that
+  counts comes once the files are checked. Where quitting programs can't free that much on this
+  card, the warning says instead that the job needs a card with more memory free.
+- **Refused in plain words** if the memory is still short when the plan is made (exit 1):
+
+  ```
+  03:08:36 ERROR the job is kept, nothing is lost, and the same command resumes it
+  the encode lacks 9.38 GiB of the card's memory
+  to free it, quit the programs using the GPU, those closed to the system tray too (the manual's "GPU memory" section says how to see them on each system)
+  or run it again with --accept-env-change, which plans the rest of the job again for the memory free now, its output from there no longer the uninterrupted run's bit for bit
+  ```
+
+  `--verbose` adds the planner's figures. The ways out: free the memory and run the same
+  command, which keeps the output bit for bit ([what else holds the
+  card](#what-else-holds-the-card)); or `--accept-env-change`, which plans the rest again for
+  this card's memory free, or takes the job to another card with more of it, another GPU being
+  another environment.
+
+### `--accept-env-change`
+
+A resume promises the uninterrupted run's output, bit for bit, so what would break that is
+refused by default. `--accept-env-change` gives that promise up for the job, to keep tens of GPU
+hours through an upgrade, onto another card, or on a card that no longer has the memory its
+plan took. Its two uses:
+
+- **Another environment:** the GPU, PyTorch, CUDA and cuDNN, the attention backend and
+  FlashAttention, ffmpeg and its conversions' fingerprint, Python and its packages. Where they
+  are all that differs, the refusal lists them and ends `Only its environment differs:
+  --accept-env-change resumes it anyway, though its output then differs from an uninterrupted
+  run's`. With the flag the job goes on; where ffmpeg or its conversions changed, its first pass
+  runs again. Not covered: seedvr2x's own code, a model file, the source or a setting, each of
+  which makes another job, refused with or without it.
+- **A recorded shape the memory free no longer holds**
+  ([above](#a-resume-short-of-the-cards-memory)). The rest of the job is planned again for what
+  is free now, as for a new card. What was made is kept; a shot whose windows were begun under a
+  cap that no longer fits makes them again from its first. The same RTX 5090, the program still
+  holding 12 GiB, with the flag:
+
+  ```
+  03:12:49 WARNING film.1080p: its recorded shape no longer fits the memory free; planned again for what is left, as --accept-env-change takes, and written with the next unit made (a run stopped before one keeps the manifest as it is, and the next start plans from the memory free then): window cap 12 latents -> 7 latents, encode none -> tiles of 832 px, decode tiles of 1152 px -> tiles of 640 px
+  kept: 8 segments finished, 8 runs encoded, 8 windows made and kept as they were
+  made again, from their first: 0 windows of runs begun under a window cap that no longer fits
+  from here the output is not the uninterrupted run's bit for bit: smaller tiles drift slightly in colour, which --color-correction split corrects for the most part
+  ```
+
+  The job, stopped after 8 of its 16 segments, finished so, and `seedvr2x verify` passed.
+
+**What changes, and the risks.** From the change on, the frames are not the uninterrupted run's:
+they differ as another card's or another PyTorch's do, or as shorter windows and smaller tiles do
+(more joins, and a slight colour drift that `split` corrects for the most part). The upscale is
+as correct. A shot keeps what was made of it, its encode and its windows where all were done,
+and the rest of it is made in the new shape. Nothing can make that
+output again bit for bit, not even the same command on another directory, and
+`seedvr2x verify` checks that the files are as written, not that they equal another run.
+
+**What to expect.** The job's record keeps each change, in its `environment_changes`: when, each
+value before and after, and what was already made. The flag is needed once: from the next unit
+made, the new environment or shape is the job's own, and the next nights resume without it,
+which is also why a script shouldn't pass it every night, accepting changes it never sees. A
+change is written with the next unit made:
+a run stopped before one leaves the record as it was, and the next start plans again from the
+memory free then, the recorded shape kept where it fits again. `--plan` with the flag says the
+shape it would take and what it would make again, and writes nothing of the job.
+
+**When not to use it:** where an output must be made again bit for bit, and wherever freeing
+the card's memory is enough. A finished job never needs it: run in another environment, it says
+the difference in one line and makes nothing. A file's job with every segment made and its
+assembly alone left isn't finished: under another PyTorch, ffmpeg or conversions it needs the
+flag, as any resume; another GPU alone is no change to it, its assembly being ffmpeg's work.
+
 ### Stopping
 
 - **Ctrl-C, once,** finishes the unit in progress, then stops (exit 130). seedvr2x says which
@@ -1388,7 +1584,11 @@ later did too. This holds for a source that decodes the same each time; a damage
 - **Ctrl-C twice, or SIGTERM,** stops at once (`ERROR stopped at once (Ctrl-C)`, exit 130, or
   `(SIGTERM)`, 143). Only the unit in progress is lost. Before the first unit (the first pass,
   the model load, the calibration), a single Ctrl-C stops at once.
-- Either way the GPU is freed entirely, and the same command resumes.
+- **With `--segment-cmd`,** a stop at once ends your command too: its process group gets SIGTERM,
+  then SIGKILL after 5 s, with a line meanwhile, `the segment command was sent SIGTERM: it has 5 s
+  to end before SIGKILL; Ctrl-C again kills it at once`. Its file is discarded. A single Ctrl-C
+  lets it finish its segment.
+- Either way the GPU is freed entirely, no ffmpeg is left running, and the same command resumes.
 - **A value that isn't a number** (NaN, infinity) coming out of the model stops the run, with
   a message naming the stage, the shot and the window or frames. Such a unit is never saved,
   and never written to a master.
@@ -1412,6 +1612,11 @@ uv run seedvr2x film.mkv -o film.1080p.mkv --until 07:30
   file, the assembly is the job's last unit, estimated from the masters' size at the rate the
   output's disk writes at: cautiously (55 s estimated where 7.2 s ran).
 - **How early it may stop** is set by the longest unit, which `--plan` names with its time.
+- **What each start costs,** a resume's included, before its first unit: the model files' check
+  (about 85 s on an RTX 5090 through WSL2), the source's (36 s for a 7.5 GB file; a finished
+  job reads neither), the models' load (about 80 s), the calibration (a minute or two), and with
+  `--compile` its compilation ([compiling the VAE](#compiling-the-vae---compile)). A night starts
+  its first unit a few minutes after the command.
 - **A time already past** once the first pass is done stops the job before the models load,
   its first pass kept.
 - **With `--plan`,** it says whether the job, run now, ends by then, and if not, the unit it
@@ -1422,7 +1627,7 @@ uv run seedvr2x film.mkv -o film.1080p.mkv --until 07:30
   ```bash
   uv run seedvr2x film.mkv -o film.1080p.mkv --until 07:30 2>&1 | tee -a film.log
   case ${PIPESTATUS[0]} in
-    0)  echo "finished: don't run it again, it would start over" ;;
+    0)  echo "finished: run again, it says so and makes nothing" ;;
     75) echo "stopped by the clock: the same command goes on tonight" ;;
     *)  echo "stopped or refused: read the log" ;;
   esac
@@ -1431,25 +1636,93 @@ uv run seedvr2x film.mkv -o film.1080p.mkv --until 07:30
 ### The time estimates
 
 **Measured, never constants.** Once the models are loaded, every run times a calibration, a
-little of the job's own work at its size, with its tiles and its plan: a warm-up, then encodes
-of 5 frames and of about 3 seconds' worth, windows of 2 latents and of the job's longest,
-decodes of 5 and 13 frames, and the changes between phases. Its files go beside the job's and
+little of the job's own work at its size, with its tiles and its plan: a warm-up at the job's
+largest shapes, then encodes of 5 frames and of about 3 seconds' worth, windows of 2 latents and
+of about 3 seconds' worth (never shorter than the job's longest or 30 latents, whichever is
+less: the DiT's attention grows with the window up to there), decodes of 5 and 13 frames, and
+the changes between phases. Its files go beside the job's and
 are removed. From it each kind of unit gets a constant and a rate (per frame for an encode or a
 decode, per token for a window), and after every unit each estimate is corrected by the median
 of the last 5 ratios of measured to estimated time, which follows a card whose speed drifts: on
 one card the DiT's time per token moved between 0.23 and 0.45 ms.
 
-- **Its cost** is said in the line `time: estimated from a calibration of …`: 47–56 s at 1080p
-  and 43–49 s at 720p on an RTX 5090. It grows with the job's longest window, which it runs:
-  on the 96 GB card, whose clock is capped, a 1080p job with windows of 91 latents calibrated
-  in 13 min 45 s, where the RTX 5090, at 4K with windows of 5 latents, took 2 min 18 s.
-  *Not built yet:* a calibration shortened wherever a unit is long, at any size; these figures
-  are to be measured again then. `--plan` pays it too, and the run pays it again.
+- **Its cost** is said as it ends, `time estimates: the job's own steps timed once, in 65.7 s,
+  for the time left and --until`, and again in the line `time: estimated from a calibration
+  of …`. On an RTX 5090: 65.7 s at 1080p with windows of 21 latents, 155.7 s at 4K with windows
+  of 5, 44.9 s on a 45-frame clip at 1080p. Windows over 30 latents are sampled shorter, which
+  saves about half their share: on the 96 GB card, whose clock is capped, a 1080p job with
+  windows of 91 latents calibrated in 13 min 46 s before that rule, not measured since.
+  `--plan` pays it too, and the run pays it again. `--verbose` adds its figures, each kind's
+  constant and rate.
 - **How close:** on an RTX 5090, each unit's estimate missed by a median of 1.3 to 5.2% by kind,
   and `--plan`'s whole job by −1.3 to −3.6%. A single unit can still miss by 22 to 31%; one in
   20 per phase at most ran over 1.15 times its estimate, the margin `--until` takes.
 - **Each unit's line** ends with the job's time left and the time of day it should end:
   `about 1 h 12 min left, the job ending about 07:42`.
+- **One clock.** The run times its units by its own steady clock, and says every duration, time
+  left, ending and `--until`'s check in the wall clock's time, by the ratio of the two clocks it
+  measures as it goes. Under WSL2 they part, by up to a tenth either way: on one machine the
+  run's own clock ran at 0.90 to 0.91 of the wall's for days, then 1.10 of it one night. A step
+  of the wall clock, the time set or the machine woken from sleep, is said in a line and never
+  counted as a unit's time. A long job also says the date when it changes, and the new offset
+  when the clocks change: the lines' times of day alone would repeat an hour the night the
+  clocks go back.
+
+## Compiling the VAE: `--compile`
+
+`--compile` compiles the VAE with PyTorch's compiler, `torch.compile`, which turns its encoder
+and decoder into fused GPU kernels for the shapes the job meets. Its causal convolutions stay out
+of the graph, as numz meant them to; numz's exclusion never took effect, which is why its compiled
+VAE took twice its memory ([bug 15](../research/bugs/15-compile-vae-exclusion-dead-code.md)). The
+DiT isn't compiled in version 0.1.0: it would save 2–3% of a long job, and compile again,
+mid-job, at every new window length. Off by default.
+
+- **What it gains.** Each VAE pass takes 0.79 to 0.95 of plain code's time, its memory peak 1.04
+  to 1.10 times plain's, which the plan counts. The VAE being most of a job's time, a whole 1080p
+  job's units took a tenth less on an RTX 5090: 880 s against 980, its encodes 14% and its
+  decodes 12% faster ([compile.md](../research/docs/compile.md)). An hour of 1080p saves about
+  2 hours of some 22.
+- **What it costs: a compilation at every start**, a resume's included, after the plan and
+  before the DiT loads. On an RTX 5090 at 1080p it took about 6 min 50 s for a new job, and
+  1 min 54 s on a resume, whose compile cache waits in the job's directory (`compile-cache/`).
+  `--plan` pays it too, to calibrate the compiled passes. Its lines, on a new directory job:
+
+  ```
+  02:39:46 compiling the VAE (--compile): its encoder and decoder, 62 causal convolutions left out of the graph, warmed at the encode's 1856x1104, 128x1104 and the decode's 1088x1088, 896x1088, 1088x80, 896x80, shots of 2, 3 latents or more; the cache in film.segments/compile-cache
+  02:46:37 the VAE compiled in 6 min 52 s
+  02:48:49 time: estimated from a calibration of 54 s, the models loaded in 8 min 12 s, 6 min 52 s of it compiling the VAE
+  ```
+
+  The plan's `compile:` line still gives the study's figure, about 4 to 6 minutes; the run's own
+  lines say what it took.
+- **Who gains, who loses.** The units save about 0.093 s per 1080p frame (100 s over 1,079
+  frames). A job under about 4,400 frames loses (3 minutes of video at 24 frames a second), and
+  each resume adds about 1,200 frames to that; a film run night after night gains a tenth of its
+  time. Measured at 1080p only.
+- **Its frames are not plain code's,** but they are the same in every process, a resume's
+  included. The VAE alone, compiled against plain on the same latent, gave frames 59.0 to
+  61.8 dB apart, 2 to 9 levels at most, and the encode's latent 0.10 to 0.14 apart at most
+  ([compile.md](../research/docs/compile.md)); a whole job's frames, the DiT carrying that
+  latent, aren't measured yet. So `--compile` is a setting of the
+  job, recorded: a job that has made units can't be resumed with it switched, which is another
+  job; a plan that has made none is planned again either way.
+- **Only the shapes measured compiled:** encode tiles up to 1856 px, or the 1080p frame whole;
+  decode tiles up to 1152 px, never untiled, until larger ones are measured. So with it, the
+  decode is tiled even on a card that would decode the frame whole, and at 4K in tiles no larger
+  than 1152 px: the slight colour drift of tiles, which `split` corrects for the most part, and a
+  tiled pass's scratch ([disk use](#disk-use)). A job outside them
+  is refused, never run plain in its place: a tile pin beyond them, or a card where no compiled
+  plan fits where a plain one would. The refusal names the pass and the shapes, and gives the
+  ways out; here, from the planner, for `--decode-tile 1600` at 1080p:
+
+  ```
+  --decode-tile 1600: the VAE compiled has the decode in tiles of 1600 px beyond the shapes measured (decode tiles up to 1152 px, never untiled)
+  The same command without --compile fits
+  The same command with --decode-tile 1152 fits, within the shapes measured
+  ```
+
+- **A compilation that fails** stops the run before the DiT loads, nothing run: the same command
+  without `--compile` runs the plain VAE.
 
 ## Integrity
 
@@ -1475,12 +1748,14 @@ A master is the product, and a lossless file can be damaged without anything say
 
   Its last line says `film.segments: 12 checked, every frame as written` (exit 0), or which
   were not: `ERROR film.segments: of 12, 1 not as written and 1 unfinished` (exit 1).
-- **A resume** checks each finished segment's size against the job's record: cheap, and it
-  catches a file cut short.
+- **Every start** checks each finished segment's size against the job's record, which is cheap,
+  and makes again one that is missing or of another size, said in a warning. A finished file's
+  assembly first reads every segment again against the SHA-256 recorded when it was finished
+  ([the finished file](#the-finished-file)).
 - **`--segment-cmd` outputs** have no checksums, their frames being your encoder's: `verify`
   decodes each segment and counts its frames against the job's record, and says so in its last
   line (`12 checked, by their frame counts alone`). A finished file made with a command has
-  none either, and `verify` refuses it, saying so.
+  none either: `verify` counts its frames against the manifest beside it.
 
 The same care goes to what the job reads: the model files are checked by size and SHA-256
 before every run ([README](README.md#model-files)), and the input copies frame by frame
@@ -1517,87 +1792,104 @@ it.
 
 Most of seedvr2x is learnt by watching it run: each run says what it checks, what it plans and
 why, and how long it has left. This section reads a real one, from seedvr2x 0.1.0 on an RTX
-5090, a 32 GB card driving a Windows desktop, under WSL2, without FlashAttention 2. It plans
-the 960×540 copy of Sol Levante (the short of [the example](#an-example-sol-levante), 6,314
-frames) to 1080p:
+5090, a 32 GB card driving a Windows desktop, under WSL2, with FlashAttention 2. Another program
+held 13 GiB of the card, which left the plan little room. The source is a short clip, 45 frames
+of 960×540 at 24000/1001 frames per second with a FLAC audio track and a cover picture,
+upscaled to a finished file at 1080p; then the same command is run again:
 
 ```
-uv run seedvr2x sollevante-540.mkv -o sollevante.1080p.mkv --plan sollevante.cuts.txt --until 07:30
+uv run seedvr2x clip.mkv -o clip.1080p.mkv
 ```
 
 Here paths are shown as in the default cache, and a few lines that repeat another's form are
-left out; nothing else is changed.
+left out; nothing else is changed. A longer job prints the same lines, more of them.
 
 ### The lines
 
 Every line starts with the time of day, then its message; a warning adds `WARNING`, an error
-`ERROR`, and the last line of a refused or failed run says why. The lines go to the terminal,
-on standard error, and nowhere else: to keep them, `2>&1 | tee -a film.log`. Python's own warnings come the
-same way, one line each (`05:15:19 WARNING UserWarning: … (file.py:10)`). `--verbose` adds
-debug lines, and gives every line its date, milliseconds, level and source.
+`ERROR`, and the last line of a refused or failed run says why. The lines go to the terminal, on
+standard error, and nowhere else: to keep them, `2>&1 | tee -a film.log`. Python's own warnings
+come the same way, one line each (`05:15:19 WARNING UserWarning: … (file.py:10)`). A line says
+the date when it changes, and the new offset when the clocks change.
 
-*Not built yet:* two kinds of lines aren't seedvr2x's, and are to go under `--verbose`. The
-model's sampler prints a progress bar per window (`EulerSampler: 100%|██████████| 1/1
-[00:07<00:00,  7.68s/it]`), and PyTorch's allocator, on Linux, a line each time it trims its
-pool to make room (`[W1023 03:24:11.423298250 CUDAMallocAsyncAllocator.cpp:377]
-[cudaMallocAsync] recovered from an allocation failure by trimming the pool and retrying.`),
-every few seconds in a long window packed to the budget. Both are harmless: the window goes on.
+`--verbose` adds debug lines, and gives every line its date, milliseconds, level and source.
+Among them: ffmpeg's conversions' fingerprint, the calibration's figures, the assembly time's
+disk rate and masters' size, the driver's own memory figures, and a refusal's full figures. It
+also shows two kinds of lines that aren't seedvr2x's, kept out of the default output: the
+model's sampler's progress bar, one per window (`EulerSampler: 100%|██████████| 1/1
+[00:07<00:00,  7.68s/it]`), and PyTorch's own lines from its C++ code, such as its allocator's
+on Linux each time it trims its pool to make room (`[W1023 03:24:11.423298250
+CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync] recovered from an allocation failure by
+trimming the pool and retrying.`), every few seconds in a long window packed to the budget.
+Both are harmless. A `TORCH_CPP_LOG_LEVEL` of your own decides PyTorch's lines; a download's
+progress bar shows either way.
 
 ### Before the plan
 
 ```
-05:35:30 --until 07:30: --plan says whether the job, run now, ends by 2026-10-23 07:30 CEST
-05:35:30 ffmpeg n9.0.2-22-g46d8f462ee-20261001, its conversions' fingerprint 61538a32827c1631
-05:35:30 hekmon/seedvr2x at c14a2bc4, in Hugging Face's cache, ~/.cache/huggingface/hub
-05:35:30 seedvr2x_ema_7b_sharp_fp16.safetensors: in the cache, ~/.cache/huggingface/hub/models--hekmon--seedvr2x/snapshots/c14a2bc4…/seedvr2x_ema_7b_sharp_fp16.safetensors
-05:35:30 DiT seedvr2x_ema_7b_sharp_fp16.safetensors: SeedVR2's 7B DiT in fp16
-05:35:30 VAE seedvr2x_ema_vae_fp16.safetensors: SeedVR2's VAE in fp16
-05:35:30 Shot detector transnetv2.safetensors: TransNetV2 in fp32
-05:37:23 seedvr2x_ema_7b_sharp_fp16.safetensors: SHA-256 5eb47fdee4b620765573a697b6f82442234e7dc7aa0beeb3ba72fc63b917a817, in 101.8 s
-05:37:23 seedvr2x_ema_7b_sharp_fp16.safetensors: its size and SHA-256 as seedvr2x pins them, hekmon/seedvr2x at c14a2bc4
-05:37:26 WARNING the GPU's driver gives memory the card doesn't have (it reports 30.20 GiB free to this process where the whole card has 27.38 by NVML, other programs' memory left out: not asked for more, which would push theirs off the card): system memory in its place, as Windows' driver does, under WSL2 too whatever NVIDIA's "CUDA - Sysmem Fallback Policy" says. Nothing there refuses a run that passes the card: it would slow down, then fail without an error to catch, what it made last not to be trusted
-05:37:26 WARNING seedvr2x holds itself to the card there: torch's own allocator, its segments expandable, limited to the memory free less 0.5 GiB, and plans in 4.5 GiB less, 2.5 where that plan would be refused, slower; a run that passes the limit is refused. The memory free is the smaller of two figures: what the driver reports free to this process, which leaves other programs' memory out while the card has room, and what the whole card has free, read through NVML; where NVML doesn't answer, the driver's figure less 3.0 GiB
-05:37:30 shot detector: TransNetV2 (transnetv2.safetensors) on cuda:0, 4 windows of 100 frames per forward
-05:37:34 sollevante-540.mkv: the shot detector scored 6314 frames in 2.5 s of its own (2506 fps), during a first pass of 3.4 s (1863 fps)
-05:37:34 shot detector: VRAM peak 0.56 GiB, given back (0 MiB still reserved by torch)
-05:37:34 sollevante-540.mkv: 6314 frames, 960x540 yuv420p at 24 fps, sample aspect 1:1 (display 16:9), read as YUV bt709, limited range, chroma left
-05:37:34 62 shots: 61 cuts detected at 0.3, and 40 possible cuts from 0.1 up to 0.3, which --plan lists
-05:37:34 24 output segments; output 1920x1080, square pixels
+03:34:13 ffmpeg n9.0.2-22-g46d8f462ee-20261001
+03:34:13 clip.mkv: the source's other streams (audio, subtitles, a cover) copied once ahead, so that one the finished file can't take is found now, not after the night's work; reading its 12 MiB, under a second
+03:34:13 hekmon/seedvr2x at c14a2bc4, in Hugging Face's cache, ~/.cache/huggingface/hub
+03:34:13 seedvr2x_ema_7b_sharp_fp16.safetensors: in the cache, ~/.cache/huggingface/hub/models--hekmon--seedvr2x/snapshots/c14a2bc4…/seedvr2x_ema_7b_sharp_fp16.safetensors
+03:34:13 DiT seedvr2x_ema_7b_sharp_fp16.safetensors: SeedVR2's 7B DiT in fp16
+03:34:13 VAE seedvr2x_ema_vae_fp16.safetensors: SeedVR2's VAE in fp16
+03:34:13 Shot detector transnetv2.safetensors: TransNetV2 in fp32
+03:34:15 seedvr2x_ema_7b_sharp_fp16.safetensors: reading its 15.3 GiB to check its SHA-256, about 1 min 24 s
+03:35:38 seedvr2x_ema_7b_sharp_fp16.safetensors: SHA-256 5eb47fdee4b620765573a697b6f82442234e7dc7aa0beeb3ba72fc63b917a817, in 82.6 s
+03:35:38 seedvr2x_ema_7b_sharp_fp16.safetensors: its size and SHA-256 as seedvr2x pins them, hekmon/seedvr2x at c14a2bc4
+03:35:41 WARNING the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that passes the card slows down, then fails without an error to catch
+03:35:41 WARNING seedvr2x holds itself to the card's own memory there: torch limited to the memory free less 0.5 GiB, and the plan in 4.5 GiB less; the manual's "Under WSL2" section says why
+03:35:41 clip.mkv: the first pass decodes its 12 MiB once, every frame, to count, time and index them and find the shots, and hashes the file meanwhile
+03:35:42 shot detector: TransNetV2 (transnetv2.safetensors) on cuda:0, 4 windows of 100 frames per forward
+03:35:43 clip.mkv: the shot detector scored 45 frames in 1.1 s of its own (41 fps), during a first pass of 1.4 s (33 fps)
+03:35:43 shot detector: VRAM peak 0.15 GiB, given back (0 MiB still reserved by torch)
+03:35:43 clip.mkv: 45 frames, 960x540 bgr0 at 24000/1001 fps, sample aspect 1:1 (display 16:9), read as RGB
+03:35:43 3 shots: 2 cuts detected at --cut-threshold 0.3, and 1 possible cut (where the detector is less sure) from 0.1 up to 0.3, which --plan lists
+03:35:43 1 output segment; output 1920x1080, square pixels
 ```
 
 - **ffmpeg** is checked at every start, and its conversions are fingerprinted: a resume compares
-  the fingerprint ([why zscale is required](#why-zscale-is-required)).
-- **The model files** are found, recognised by their tensors, then hashed: each run reads the
-  16.5 GB DiT whole to check its SHA-256, here 102 s from a Windows disk seen through WSL2, 7 s
-  from the 96 GB card's local disk. The first run downloads them instead (`not in the cache,
+  the fingerprint, which `--verbose` prints ([why zscale is required](#why-zscale-is-required)).
+- **The source's other streams** are copied once ahead, for a finished file only: what the file
+  can't take is found before the night's work, not at its end ([the finished
+  file](#the-finished-file)).
+- **The model files** are found, recognised by their tensors, then hashed: a run with anything
+  left to make reads the 16.5 GB DiT whole to check its SHA-256, saying first for about how long,
+  here 82.6 s of the three files' 85 s, from a Windows disk seen through WSL2; 7 s from the 96 GB
+  card's local disk. The VAE's
+  and the detector's take seconds. The first run downloads them instead (`not in the cache,
   downloading 16.5 GB from hekmon/seedvr2x at c14a2bc4`).
 - **The two warnings** are [WSL2's](#under-wsl2): a Linux driver gives instead one line saying
   it refuses what the card can't hold.
-- **The first pass** decodes every frame, scores it for cuts, and says what the source is and
-  how it is read. 960×540 goes fast; a 1080p film runs at 700 to 800 frames a second.
-- **The shots and the segments:** 62 shots, merged into 24 segments of 5 seconds or more.
+- **The first pass** says what it reads first, then decodes every frame, scores it for cuts, and
+  says what the source is and how it is read: here an RGB source. A 1080p film runs at 700 to
+  800 frames a second.
+- **The shots and the segments:** 3 shots, from 2 cuts and a possible one that `--plan` would
+  list, and 1 segment, the clip being under 5 seconds.
 
 ### The plan, line by line
 
 ```
-05:37:34 plan: card: NVIDIA GeForce RTX 5090, 27.20 GiB free on the whole card by NVML (its driver reports 30.03 GiB free to this process): the run is held to the card's own memory, its driver giving more than the card has
-05:37:34 plan: budget: 22.20 GiB, the 27.20 GiB free less torch's limit, 0.50 GiB under it, and the reserve of 4.50 GiB left to torch's allocator beyond a step's peak; the margin of 0.60 GiB is in the reserve
-05:37:34 plan: frames: 1920x1080 padded to 1920x1104 for the model, 8,280 tokens a latent
-05:37:34 plan: attention: PyTorch's SDPA, FlashAttention 2 not being installed: a window takes more memory under it
-05:37:34 plan: shots: 62, the longest of 1782 frames (447 latents)
-05:37:34 plan: windows: 19 latents at most (73 frames), the longest the budget holds: 40 of 62 shots in one window, 60 joins; a longer window, fewer joins; --window N caps them
-05:37:34 plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time
-05:37:34 plan: blocks swapped: 35 of the DiT's 36, the fewest that hold the window: slower, not worse; --swap-blocks N
-05:37:34 plan: the VAE: off the GPU in the DiT's phase, its 0.47 GiB given to the window
-05:37:34 plan: the DiT in the VAE's passes: in the encode, the DiT off the GPU; in the decode, 1 of the DiT's blocks on the GPU; as much as fits beside each
-05:37:34 plan: system memory: 27.69 GiB in all; 15.81 GiB pinned for 36 blocks, the DiT's other parameters and the VAE; 0.94 GiB for the longest shot at the most, as its windows are merged
-05:37:34 plan: encode: untiled, the whole frame fitting the budget; --encode-tile PX tiles it
-05:37:34 plan: decode: tiles of 1088 px overlapping by 64, 2 across, 2 down, the whole frame not fitting the budget, the largest that do, up to 2048 px: a slight colour drift, which split corrects; --decode-tile PX
-05:37:34 plan: the VAE's room: 1.25 GiB of the budget left free in each VAE pass, for the large pieces of memory a pass asks for at once
-05:37:34 plan: scratch: 21.14 GiB for the longest tiled shot, what a tiled pass keeps between its tiles; in system memory up to an allowance of 8.54 GiB, over it, the scratch of 1 of 62 shots goes whole to a memory-mapped file
-05:37:34 plan: predicted peaks: encode 20.78 GiB, DiT 21.99 GiB, decode 20.75 GiB; the encode bounds the plan, its room counted, 0.17 GiB under the budget
-05:37:34 plan: time: measured, not guessed: a calibration of the job's own steps once the models are loaded, its cost said then; it gives the job's time and each unit's time left and end; --until HH:MM stops before a unit that wouldn't finish by then
-05:37:34 plan: pinned: nothing; --window, --swap-blocks, --encode-tile and --decode-tile each fix a choice
+03:35:43 plan: card: NVIDIA GeForce RTX 5090, 14.91 GiB free on the whole card by NVML (its driver reports 30.03 GiB free to this process): the run is held to the card's own memory, its driver giving more than the card has
+03:35:43 plan: budget: 9.91 GiB, the 14.91 GiB free less torch's limit, 0.50 GiB under it, and the reserve of 4.50 GiB left to torch's allocator beyond a step's peak; the margin of 0.60 GiB is in the reserve
+03:35:43 plan: frames: 1920x1080 padded to 1920x1104 for the model, 8,280 tokens a latent
+03:35:43 plan: attention: FlashAttention 2, which is installed
+03:35:43 plan: shots: 3, the longest of 42 frames (12 latents)
+03:35:43 plan: windows: 7 latents at most (25 frames), the longest the budget holds: 2 of 3 shots in one window, 1 join; a longer window, fewer joins; --window N caps them
+03:35:43 plan: quality: standard, the default, one run a shot; --quality enhanced or maximum runs 2 or 4 and takes each frame from the one that rebuilds it best, for 2 or 4 times the GPU time
+03:35:43 plan: blocks swapped: 33 of the DiT's 36, the fewest that hold the window: slower, not worse; --swap-blocks N
+03:35:43 plan: the VAE: off the GPU in the DiT's phase, its 0.47 GiB given to the window
+03:35:43 plan: the DiT in the VAE's passes: which model stays on the GPU in which phase, as much of the DiT as fits beside each: in the encode, 1 of the DiT's blocks on the GPU; in the decode, the DiT off the GPU
+03:35:43 plan: system memory: 18.77 GiB in all; 15.81 GiB pinned for 36 blocks, the DiT's other parameters and the VAE; 0.03 GiB for the longest shot at the most, as its windows are merged
+03:35:43 plan: encode: tiles of 768 px overlapping by 64, 3 across, 2 down, the whole frame not fitting the budget, the largest that do, up to 2048 px: a slight colour drift, which split corrects; --encode-tile PX
+03:35:43 plan: decode: tiles of 640 px overlapping by 64, 4 across, 2 down, the whole frame not fitting the budget, the largest that do, up to 2048 px: a slight colour drift, which split corrects; --decode-tile PX
+03:35:43 plan: the VAE's room: what each VAE pass leaves free, for the large pieces of memory a pass asks for at once: 1.25 GiB of the budget
+03:35:43 plan: scratch: what a tiled pass keeps of the shot's frames between its tiles: 0.53 GiB for the longest tiled shot; in system memory up to an allowance of 0.53 GiB, which holds every shot's
+03:35:43 plan: disk: the masters at most 72 MiB, twice that, 144 MiB, while the file is assembled, and the source's other streams; 84 GiB free on its disk, enough
+03:35:43 plan: predicted peaks: encode 8.58 GiB, DiT 9.67 GiB, decode 8.61 GiB; the decode bounds the plan, its room counted, 0.04 GiB under the budget
+03:35:43 plan: time: measured, not guessed: a calibration of the job's own steps once the models are loaded, its cost said then; it gives the job's time and each unit's time left and end; --until HH:MM stops before a unit that wouldn't finish by then
+03:35:43 plan: pinned: nothing; --window, --swap-blocks, --encode-tile and --decode-tile each fix a choice
+03:35:43 torch held to 14.45 GiB on the GPU: the 14.91 GiB free on the whole card, less 0.5 GiB, and what it holds
 ```
 
 Every run prints this block before its first unit, a resume too, whose kept choices say
@@ -1605,32 +1897,40 @@ Every run prints this block before its first unit, a resume too, whose kept choi
 why it was taken, what it costs, and the option that changes it ([GPU memory](#gpu-memory)):
 
 - **card** and **budget:** what the plan counts on. Under WSL2, the whole card's free memory
-  (27.20 GiB, the desktop holding the rest), less 0.5 GiB left to the card and the 4.5 GiB
-  reserve: 22.20 GiB. On Linux it is one line, the free memory less the 0.6 GiB margin.
+  (14.91 GiB here, the other program and the desktop holding the rest), less 0.5 GiB left to the
+  card and the 4.5 GiB reserve: 9.91 GiB. On Linux it is one line, the free memory less the
+  0.6 GiB margin.
 - **frames:** the model works on frames padded to multiples of 16 (the padding is trimmed);
   a latent of this size is 8,280 tokens, what a window's memory and time go by.
-- **attention:** without FlashAttention 2, PyTorch's own, which takes a little more memory a
-  window.
-- **shots:** the longest decides the windows. Here a 1,782-frame shot, 74 seconds.
-- **windows:** the longest window the budget holds, 19 latents: the biggest lever on quality.
-  40 shots fit whole; the 22 others run in windows of 19 latents or fewer, 60 joins in all.
+- **attention:** FlashAttention 2; without it, PyTorch's own SDPA, which takes a little more
+  memory a window.
+- **shots:** the longest decides the windows: here 42 frames, 12 latents.
+- **windows:** the longest window the budget holds, 7 latents: the biggest lever on quality.
+  The two short shots fit whole; the long one runs in two windows, 1 join.
 - **quality:** the level, and what the others would cost ([several runs of a
   shot](#several-runs-of-a-shot---quality)).
-- **blocks swapped:** 35 of the DiT's 36 wait in system memory, so that the window gets their
+- **blocks swapped:** 33 of the DiT's 36 wait in system memory, so that the window gets their
   room. Slower, not worse: swapping changes no bit.
 - **the VAE** and **the DiT in the VAE's passes:** which model stays on the GPU in which phase.
-- **system memory:** 27.69 GiB of the host, 15.81 pinned. A host short of it gets another plan,
+- **system memory:** 18.77 GiB of the host, 15.81 pinned. A host short of it gets another plan,
   or a refusal naming each part ([small cards](#small-cards)).
 - **encode** and **decode:** untiled where the whole frame fits, else the largest tiles that
-  do. 1088-px tiles, 2 by 2, for this decode.
+  do: with 9.91 GiB, both passes tiled.
 - **the VAE's room:** what each VAE pass leaves free ([the plan](#the-plan)).
 - **scratch:** a tiled pass keeps the shot's frames between its tiles: in system memory up to
-  an allowance, here 8.54 GiB, and past it in a file beside the job, for the one long shot.
-- **predicted peaks:** each phase's, and which one bounds the plan: here the encode, 0.17 GiB
+  an allowance, and past it in a file beside the job. Here every shot's fits in memory.
+- **disk:** the masters the job will write, twice that while the file is assembled, against the
+  free space of their disk ([disk use](#disk-use)).
+- **predicted peaks:** each phase's, and which one bounds the plan: here the decode, 0.04 GiB
   under the budget.
+- **time:** the times come once the calibration has run.
 - **pinned:** what you fixed. Nothing here.
+- **torch held to:** under WSL2, the limit PyTorch is held to, past which a step is refused
+  rather than lent the system's memory.
 
-The same job on the 96 GB card, FlashAttention 2 installed, under Linux, plans otherwise:
+A longer job on the 96 GB card, FlashAttention 2 installed, under Linux, plans otherwise: the
+960×540 copy of Sol Levante (the short of [the example](#an-example-sol-levante), 6,314 frames
+in 62 shots) to 1080p, planned by a build before 0.1.0, these lines worded as 0.1.0 words them:
 
 ```
 03:23:11 plan: card: NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 94.21 GiB free, a budget of 93.61 GiB: the margin of 0.60 GiB left to the desktop and other programs; no reserve, the driver refusing memory the card doesn't have
@@ -1642,87 +1942,102 @@ The same job on the 96 GB card, FlashAttention 2 installed, under Linux, plans o
 03:23:11 plan: predicted peaks: encode 21.78 GiB, DiT 93.39 GiB, decode 37.15 GiB; the DiT's phase bounds the plan, 0.22 GiB under the budget
 ```
 
-Its windows are almost 5 times as long, 5 joins against 60, and nothing is tiled; it swaps
-every block too, to give the longest shot windows of 91 latents. Its clock being capped by a
-fault, it estimated the job at about 9 hours, its calibration alone taking 13 min 45 s:
-
-```
-03:36:59 time: about 8 h 58 min on this GPU as it runs now: 2 h 13 min for 62 encodes, 1 h 43 min for 67 windows, 5 h 2 min for the decode and write of 24 segments
-03:36:59 --until: by its estimate the job doesn't end by 2026-10-23 07:30 UTC: it would stop before segment 14/24's decode and write, at about 07:25, 3 h 34 min of its 8 h 58 min done; the same command then resumes
-```
+Its windows are 91 latents long, 5 joins in all, where the RTX 5090, beside its desktop, planned
+the same job in windows of 19 latents, 60 joins; and nothing is tiled; it swaps every block, to
+give the longest shot windows of 91 latents.
 
 ### The time
 
 ```
-05:39:01 WARNING FlashAttention 2 is not installed: attention runs on PyTorch's SDPA
-05:39:01 15.81 GiB of host memory pinned for the weights that leave the GPU: 36 of the DiT's blocks, the DiT's other parameters, the VAE; the DiT's last 35 blocks swapped
-05:39:01 models loaded in 76.8 s, attention: sdpa
-05:40:00 time estimates calibrated in 54.7 s, encodes of 5 and 13 frames: an encode, its change of phase in its constant, 0.43 s and 0.196 s a frame; a window 0.28 s and 0.072 ms a token; a decode 0.10 s and 0.479 s a frame; entering the DiT's phase and the decode 0.46 and 0.28 s; the noise's draw 0.19 us a token
+03:37:03 15.81 GiB of host memory pinned for the weights that leave the GPU: 36 of the DiT's blocks, the DiT's other parameters, the VAE; the DiT's last 33 blocks swapped
+03:37:03 models loaded in 80.3 s, attention: flash_attn_2
+03:37:50 time estimates: the job's own steps timed once, in 44.9 s, for the time left and --until
+03:37:50 time: about 57 s on this GPU as it runs now: 14 s for 3 encodes, 14 s for 4 windows, 29 s for the decode and write of 1 segment
+03:37:50 time: then about 6 s to join the segments into the finished file
+03:37:50 time: the longest unit, segment 1/1's decode and write, about 29 s: --until may stop up to about 1.15 times that before its time
+03:37:50 time: estimated from a calibration of 45 s, the models loaded in 1 min 20 s
+```
+
+- **The models load,** the pinned memory with them, then **the calibration** times the job's own
+  steps ([the time estimates](#the-time-estimates)): 45 s here.
+- **The job's time,** by phase, then the assembly's, estimated cautiously.
+- **The longest unit,** the segment's decode here: how early `--until` may stop.
+
+`--plan` says more, before a job has made a unit: each `--quality` level's time, and with
+`--until` whether the job ends by then. The Sol Levante short, 4.4 minutes, planned to 1080p on
+that RTX 5090 by a build before 0.1.0, beside its desktop, without FlashAttention 2,
+`--until 07:30`, its assembly line left out (0.1.0 words it otherwise):
+
+```
 05:40:01 time: about 1 h 31 min on this GPU as it runs now: 21 min 19 s for 62 encodes, 18 min 44 s for 122 windows, 51 min 22 s for the decode and write of 24 segments
-05:40:01 time: then about 9 min 26 s for the assembly, at the rate its disk writes at, its masters counted at most at their raw size until one is written
 05:40:01 time: the longest unit, segment 24/24's decode and write, about 14 min 16 s: --until may stop up to about 1.15 times that before its time
 05:40:01 time at each --quality: standard about 1 h 31 min (this job's), enhanced about 3 h 1 min, maximum about 6 h 0 min
 05:40:01 time: estimated from a calibration of 55 s, the models loaded in 1 min 17 s, which the run pays again before its first unit
 05:40:01 --until: by its estimate the job ends by 2026-10-23 07:30 CEST, at about 07:23
 ```
 
-- **The models load,** the pinned memory with them, then **the calibration** times the job's own
-  steps ([the time estimates](#the-time-estimates)): 55 s here.
-- **The job's time,** by phase: for a 4.4-minute short at 1080p, about an hour and a half on
-  this card, the decode the longest phase. Then the assembly, estimated cautiously.
-- **The longest unit,** the last segment's decode here: how early `--until` may stop.
-- **Each level's time,** before a job has made a unit: 3 h for `enhanced`, 6 h for `maximum`.
-- **The verdict of `--until`,** given `--plan`: this job ends by 07:30, at about 07:23.
+About an hour and a half on that card, the decode the longest phase; 3 h for `enhanced`, 6 h for
+`maximum`; and the verdict of `--until`: this job ends by 07:30, at about 07:23. The 96 GB card,
+its clock capped by a fault, estimated it at about 9 hours, its calibration alone taking 13 min
+46 s, before windows over 30 latents were sampled shorter:
+
+```
+03:36:59 time: about 8 h 58 min on this GPU as it runs now: 2 h 13 min for 62 encodes, 1 h 43 min for 67 windows, 5 h 2 min for the decode and write of 24 segments
+03:36:59 --until: by its estimate the job doesn't end by 2026-10-23 07:30 UTC: it would stop before segment 14/24's decode and write, at about 07:25, 3 h 34 min of its 8 h 58 min done; the same command then resumes
+```
 
 ### Each unit
 
-A run prints the same plan and time lines, then a line per unit. Here is a whole run of the
-bird's 73 frames ([the example](#an-example-sol-levante)), two shots in one segment, to a
-finished file, on the same card:
-
 ```
-uv run seedvr2x bird-540.mkv -o bird.1080p.mkv
-```
-
-```
-05:44:38 time: about 1 min 10 s on this GPU as it runs now: 18 s for 2 encodes, 14 s for 2 windows, 38 s for the decode and write of 1 segment
-05:44:38 time: then about 6 s for the assembly, at the rate its disk writes at, its masters counted at most at their raw size until one is written
-05:44:38 time: the longest unit, segment 1/1's decode and write, about 38 s: --until may stop up to about 1.15 times that before its time
-05:44:38 time: estimated from a calibration of 53 s, the models loaded in 1 min 48 s
-05:44:56 shot 1/2, frames 0 to 62 (63), seed 42: encoded in 14.2 s, VRAM peak 19.88 GiB; about 1 min 2 s left, the job ending about 05:46
-05:45:08 shot 1/2: window 1/1, latents 0 to 16, in 11.6 s, VRAM peak 21.80 GiB; about 51 s left, the job ending about 05:46
-05:45:11 shot 2/2, frames 63 to 72 (10), seed 105: encoded in 3.6 s, VRAM peak 19.88 GiB; about 48 s left, the job ending about 05:46
-05:45:15 shot 2/2: window 1/1, latents 0 to 3, in 3.4 s, VRAM peak 8.16 GiB; about 44 s left, the job ending about 05:47
-05:45:50 shot 1/2: decoded in 31.3 s, VRAM peak 20.75 GiB; RAM 18.00 GiB, peak 19.09 GiB; about 12 s left, the job ending about 05:47
-05:45:56 shot 2/2: decoded in 6.8 s, VRAM peak 20.75 GiB; RAM 18.04 GiB, peak 19.09 GiB; about 1 s left, the job ending about 05:46
-05:45:56 upscaled in 70.9 s; wrote bird.1080p.mkv.work: 73 frames, yuv420p10le
-05:45:58 bird.1080p.mkv: assembled, 73 frames of 1 segments with 0 other streams and 0 chapters of bird-540.mkv, 0.10 GiB: joined in 0.7 s, checked by its packets in 0.5 s; the other streams at most 0.00 s ahead of the video in the file
-05:45:58 wrote bird.1080p.mkv: 73 frames from 1 segment, with the source's 0 other streams and 0 chapters, assembled in 1.1 s
-05:45:58 bird.1080p.mkv.work: removed, its job assembled
+03:38:01 shot 1/3, frames 0 to 41 (42), seed 42: encoded in 11.3 s, VRAM peak 8.19 GiB; about 51 s left, the job ending about 03:39
+03:38:07 shot 1/3: window 1/2, latents 0 to 6, in 5.9 s, VRAM peak 9.67 GiB; about 46 s left, the job ending about 03:39
+03:38:12 shot 1/3: window 2/2, latents 5 to 11, in 5.3 s, VRAM peak 9.67 GiB; about 40 s left, the job ending about 03:39
+03:38:14 shot 2/3, frames 42 to 43 (2), seed 84: encoded in 1.7 s, VRAM peak 7.04 GiB; about 39 s left, the job ending about 03:39
+03:38:16 shot 2/3: window 1/1, latents 0 to 1, in 2.0 s, VRAM peak 4.50 GiB; about 37 s left, the job ending about 03:39
+03:38:17 shot 3/3, frames 44 to 44 (1), seed 86: encoded in 0.7 s, VRAM peak 3.36 GiB; about 36 s left, the job ending about 03:39
+03:38:18 shot 3/3: window 1/1, latents 0 to 0, in 1.3 s, VRAM peak 3.41 GiB; about 35 s left, the job ending about 03:39
+03:38:43 shot 1/3: decoded in 24.9 s, VRAM peak 8.61 GiB; RAM 18.04 GiB, peak 18.86 GiB; about 9 s left, the job ending about 03:39
+03:38:46 shot 2/3: decoded in 2.7 s, VRAM peak 6.25 GiB; RAM 18.02 GiB, peak 18.86 GiB; about 7 s left, the job ending about 03:39
+03:38:47 shot 3/3: decoded in 1.4 s, VRAM peak 3.03 GiB; RAM 18.04 GiB, peak 18.86 GiB; about 1 s left, the job ending about 03:39
+03:38:47 upscaled in 57.3 s; wrote clip.1080p.mkv.work: 45 frames, yuv420p10le
+03:38:47 checking the bytes of 1 segment, 45 MiB, under a second
+03:38:49 clip.1080p.mkv: assembled, 45 frames of 1 segment with its audio and its cover picture, and 0 chapters of clip.mkv, 45 MiB: joined in 0.7 s, checked by its packets in 0.5 s; the other streams at most 0.04 s ahead of the video in the file
+03:38:49 wrote clip.1080p.mkv: 45 frames from 1 segment, with its audio and its cover picture, and 0 chapters, assembled in 1.4 s
+03:38:49 clip.1080p.mkv.work: removed, its job assembled
 ```
 
 - **Each shot's encode** names its frames and its seed (the seed plus the shot's first frame,
   [seeds](#seeds-and-reproducibility)), its time and the GPU memory it peaked at, then the
   job's time left and the time of day it should end, corrected after every unit.
-- **Each window** names its latents. A shot of 17 latents fits one window here; a longer shot
-  runs `window 1/3`, `window 2/3`… With `--quality`, each run is named too:
+- **Each window** names its latents. The 12-latent shot runs as `window 1/2` and `window 2/2`,
+  sharing 2 latents. With `--quality`, each run is named too:
   `shot 1/2, run 2/4 (from its frame 1)`.
 - **The decode** comes once every shot of the segment is encoded and upscaled, a line per shot:
   the frames come out late, then all at once. `RAM` is the process's system memory, the
   pinned copies included.
 - **The VRAM peaks** are what to read beside nvidia-smi ([GPU memory](#what-nvidia-smi-shows)):
   none over the plan's prediction.
-- **The assembly** joins the segments, checks the file by its packets, puts it in place and
-  removes the work directory ([the finished file](#the-finished-file)). The whole run took 70.9 s
-  for 1 min 10 s estimated, after 1 min 48 s of model load and 53 s of calibration: on a short
-  job, those two weigh most.
+- **The assembly** checks the segments' bytes, joins them with the audio and the cover, checks
+  the file by its packets, puts it in place with its manifest beside it, and removes the work
+  directory ([the finished file](#the-finished-file)). The whole run took 57.3 s for about 57 s
+  estimated, after 1 min 20 s of model load and 45 s of calibration: on a short job, those two
+  weigh most.
 
-On the 96 GB card, its clock capped, the same run took 393.7 s, its decode untiled
-(`VRAM peak 49.30 GiB`) and nothing pinned: `RAM 2.56 GiB`, against 18.00 GiB on the RTX 5090,
-whose pinned copies count there.
+The same command again, the job finished:
 
-`seedvr2x verify bird.1080p.mkv` then checks every frame against the checksums written beside
-it:
+```
+03:38:51 ffmpeg n9.0.2-22-g46d8f462ee-20261001
+03:38:51 hekmon/seedvr2x at c14a2bc4, in Hugging Face's cache, ~/.cache/huggingface/hub
+03:38:51 seedvr2x_ema_7b_sharp_fp16.safetensors: in the cache, ~/.cache/huggingface/hub/models--hekmon--seedvr2x/snapshots/c14a2bc4…/seedvr2x_ema_7b_sharp_fp16.safetensors
+03:38:51 seedvr2x_ema_7b_sharp_fp16.safetensors: its size and SHA-256 as seedvr2x pins them, hekmon/seedvr2x at c14a2bc4
+03:38:54 clip.1080p.mkv: finished already, its 45 frames
+```
+
+The model files and the source have the size and the time the record holds, so nothing is read
+or hashed: 3 s, where checking the model files took 85 s.
+
+`seedvr2x verify` then checks every frame against the checksums written beside the file; on
+another finished file, the 73 frames of the bird of [the example](#an-example-sol-levante):
 
 ```
 05:46:04 bird.1080p.mkv: every frame as written
@@ -1731,7 +2046,9 @@ it:
 
 ## Options
 
-`uv run seedvr2x --help` is the reference for what the installed version takes.
+`uv run seedvr2x --help` is the reference for what the installed version takes. For
+`--compile`'s figures, this manual's are newer than its help's: the help's text comes from the
+study, the manual's from the runs since.
 
 **Input and output**
 
@@ -1762,6 +2079,7 @@ it:
 | `--seed SEED` | The seed, 42 by default ([seeds](#seeds-and-reproducibility)). |
 | `--quality LEVEL` | `standard` (the default), `enhanced` or `maximum`: each shot run 1, 2 or 4 times ([several runs of a shot](#several-runs-of-a-shot---quality)). |
 | `--color-correction {split,none}` | `split` by default ([colour correction](#colour-correction)). |
+| `--compile` | Compile the VAE: about a tenth less time on a long job, minutes of compilation at every start, its frames not plain code's; a setting of the job ([compiling the VAE](#compiling-the-vae---compile)). |
 
 **What the source says of itself, when it is missing or wrong**
 
@@ -1786,7 +2104,7 @@ Each is taken exactly or refused; without them, the planner chooses.
 | Option | What it does |
 |---|---|
 | `--until HH:MM` | Stop before the first unit that wouldn't finish by then, exit 75 ([stopping at a set time](#stopping-at-a-set-time)). With `--plan`, say whether the job ends by then. |
-| `--accept-env-change` | Resume a job whose environment changed ([resume](#resume)). |
+| `--accept-env-change` | Resume a job whose environment changed, or whose recorded shape no longer fits the card's memory free, its output from there no longer the uninterrupted run's bit for bit ([`--accept-env-change`](#--accept-env-change)). |
 | `--dump-frames DIR` | Also save every output frame as a float32 `frame_NNNNNN.npy` file, for measurements. Refused inside the job's directory. |
 | `-v`, `--verbose` | Debug lines, each with its date, level and source ([reading a run](#the-lines)). |
 | `--version`, `-h`, `--help` | The version; the help. |
@@ -1800,12 +2118,12 @@ CUDA's own `CUDA_VISIBLE_DEVICES` chooses which, and separate jobs run on separa
 
 | Code | Meaning |
 |---|---|
-| 0 | The job is finished, by this run or an earlier one; or a plan written by `--plan`. For `verify`: every frame as written. |
-| 1 | Refused or failed: the last log line says why. Also `--plan` on a finished directory job, which makes no cut list, or a cut list `--plan` couldn't write. For `verify`: a frame not as written, checksums missing, a segment unfinished, or no output to check. |
+| 0 | The job is finished, by this run or an earlier one (`finished already`); or a plan written by `--plan`, a finished directory job's cut list included; or `--plan` on a file's job with its assembly alone left, its cut list written and the assembly's time said. For `verify`: every frame as written. |
+| 1 | Refused or failed: the last log line says why. Also `--plan` on a finished file's job, or on a finished directory job whose frame index isn't trusted, which make no cut list; or a cut list `--plan` couldn't write. For `verify`: a frame not as written, checksums missing, a segment unfinished, or no output to check. |
 | 2 | An unknown option, a missing argument, or a value of the wrong form (`--until 7h30`, `--frame-rate 23.976`). |
 | 75 | Stopped by `--until`, to be run again. |
 | 130 | Stopped by Ctrl-C. |
-| 143 | Stopped by SIGTERM. |
+| 143 | Stopped by SIGTERM, at once. |
 
 ## The files of a job
 
@@ -1821,6 +2139,7 @@ film.segments/
   manifest.json            the job's record: settings, environment, source, plan, shots, segments
   frame_index.bin          the first pass's record: each frame's timestamp, checksum and
                            probability of a cut
+  compile-cache/           with --compile, the VAE's compiled kernels, for a resume
   resume/                  saved work, removed as the segments finish
     shot_000123/           a shot, named by its first frame
       latent.pt
@@ -1837,12 +2156,14 @@ film.segments/
 - Every file is written under a `.partial` name and renamed when whole (a segment command's
   file under `seg_000000.partial.mkv`, keeping the suffix its muxer goes by).
 - When the job is finished, the segments, `checksums/`, `manifest.json` and `frame_index.bin`
-  remain. sptenc reads the `.mkv` files alone.
+  remain, and `compile-cache/` with `--compile`, for you to remove. sptenc reads the `.mkv`
+  files alone.
 
 A finished file, `film.1080p.mkv`, has its job in `film.1080p.mkv.work` beside it, laid out as
-above, until the file is whole. Then only `film.1080p.mkv` and `film.1080p.mkv.crc32` remain
-(no `.crc32` with `--segment-cmd`). A work directory that holds anything else is left as it is,
-with its manifest, and named.
+above, until the file is whole. Then `film.1080p.mkv`, `film.1080p.mkv.crc32` (none with
+`--segment-cmd`) and the job's manifest, `film.1080p.mkv.manifest.json`, remain: the record by
+which the same command knows the job is finished. A work directory that holds anything else is
+left as it is, with its manifest, and named.
 
 ## Environment variables
 
@@ -1851,5 +2172,7 @@ with its manifest, and named.
 | `HF_HOME`, `HF_HUB_CACHE` | Where Hugging Face's cache is: `HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`. The model files go there. |
 | `HF_HUB_OFFLINE=1` | Keeps the network out: the model files are taken from the cache, and a missing one is refused. |
 | `HF_HUB_DISABLE_TELEMETRY` | Set to `1` by seedvr2x unless you have set it. |
+| `TORCH_CPP_LOG_LEVEL` | PyTorch's lines from its C++ code: set to `ERROR` by seedvr2x unless `--verbose` is given, so that they stay out of the default output; a value of your own is kept ([the lines](#the-lines)). |
+| `TORCHINDUCTOR_CACHE_DIR` | PyTorch's compile cache: under `--compile`, replaced by the job's own `compile-cache/` ([compiling the VAE](#compiling-the-vae---compile)). |
 | `PYTORCH_CUDA_ALLOC_CONF`, `PYTORCH_ALLOC_CONF` | PyTorch's allocator. Unless you set one, seedvr2x sets the first: `backend:cudaMallocAsync`, or `backend:native,expandable_segments:True` [under WSL2](#under-wsl2) ([GPU memory](#what-nvidia-smi-shows)). |
 | `CUDA_VISIBLE_DEVICES` | CUDA's own: which card the job sees. |

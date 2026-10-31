@@ -6,8 +6,8 @@ gives back its upscale as a lossless, correctly tagged master, or as a finished 
 source's audio and subtitles.
 
 > **Version 0.1.0.** [DESIGN.md](DESIGN.md) is the specification, and this README and the
-> [manual](MANUAL.md) describe version 1 as it is built. The few points decided but not built
-> yet are listed under [Status](#status).
+> [manual](MANUAL.md) describe version 1 as it is built. What comes in later versions is listed
+> under [Status](#status).
 
 SeedVR2 is ByteDance Seed's one-step diffusion model for video restoration. seedvr2x runs
 ByteDance's model code, as
@@ -31,7 +31,8 @@ is won or lost.
   ([colour.md](../research/docs/colour.md)).
 - **It stops and resumes.** Every piece of work is saved as it is made. The same command
   resumes a stopped job, and the result is the uninterrupted run's, bit for bit. `--until 07:30`
-  stops cleanly before a set time.
+  stops cleanly before a set time. Run once the job is finished, the same command says so at
+  once and makes nothing.
 - **It fits your GPU without tuning, and says how.** A planner sizes the work from the memory
   free on the card: how many frames the model takes at once, how much of the model waits in
   system memory, how the picture is tiled. Every run prints its plan, a line per choice with
@@ -87,7 +88,8 @@ Both start from the source, one video file, and differ only at the end.
   PyTorch's CUDA 13.0 build among them.
 - **Disk space**: 17 GB for the model files, downloaded once, and room for the output. A
   lossless master takes about 100–135 GiB per hour of 1080p, and four times that at 4K; a
-  finished file needs about twice that while it is assembled ([disk use](MANUAL.md#disk-use)).
+  finished file needs about twice that while it is assembled, beside it. `--plan` and every run
+  say how much the job will take against the disk's free space ([disk use](MANUAL.md#disk-use)).
 - **FlashAttention 2 is optional.** seedvr2x uses it when it is installed, else PyTorch's own
   attention (SDPA), and logs which one runs. It buys no speed: on numz's CLI the backends gave
   the same DiT time within 1.5% ([attention.md](../research/docs/attention.md)). Their outputs
@@ -122,15 +124,20 @@ uv run seedvr2x film.mkv -o film.1080p.mkv
 ```
 
 The output's short side is 1080 pixels by default (`--resolution`), with square pixels at the
-source's display aspect. The first run downloads the model files (17 GB). Then:
+source's display aspect: a 1080p source comes out at its own size, redrawn rather than
+enlarged ([colour and shape](MANUAL.md#colour-and-shape-of-the-output)). The first run downloads
+the model files (17 GB). Then:
 
-1. A first pass decodes the whole source: it counts the frames, checks the frame rate against
-   them, and finds the cuts. It takes minutes, up to an hour for a long 4K film; the upscale
-   takes hours or days.
-2. The plan is made and printed, a line per choice; the models load; a calibration, about a
-   minute at 1080p, measures the job's own steps. From then on each line says the time left
-   and when the job should end ([reading a run](MANUAL.md#reading-a-run)). The log goes to the
-   terminal (standard error) only: keep it with `2>&1 | tee -a film.log`.
+1. The source's other streams (audio, subtitles, a cover) are copied once, ahead, so that one the
+   finished file can't take is found at once rather than after the night's work. A first pass
+   then decodes the whole source: it counts the frames, checks the frame rate against them, and
+   finds the cuts. It takes minutes, up to an hour for a long 4K film; the upscale takes hours
+   or days.
+2. The plan is made and printed, a line per choice, the disk the job will take among them; the
+   models load; a calibration, about a minute at 1080p and two and a half at 4K, measures the
+   job's own steps. From then on each line says the time left and when the job should end
+   ([reading a run](MANUAL.md#reading-a-run)). The log goes to the terminal (standard error)
+   only: keep it with `2>&1 | tee -a film.log`.
 3. Each shot is upscaled, and its frames are written as they come out.
 4. The pieces are joined into `film.1080p.mkv`, with the source's other streams, and checked
    before it is put in place. Until then the job waits in `film.1080p.mkv.work`.
@@ -150,15 +157,57 @@ evening; stopped by the clock, it exits with 75:
 uv run seedvr2x film.mkv -o film.1080p.mkv --until 07:30
 ```
 
-Exit status 0 means finished: stop running the command then. Run again once the file is
-written, it starts the job over and replaces the file (the record kept beside the file, which
-would prevent it, is *not built yet*).
+Exit status 0 means finished. Run again then, the same command says
+`film.1080p.mkv: finished already` within seconds and makes nothing: the job's record stays
+beside the file, `film.1080p.mkv.manifest.json`, and another job to that name is refused.
 
 For crisper frames at 4 times the GPU time, `--quality maximum`; `enhanced` takes twice the
-time.
+time. On a long job, `--compile` saves about a tenth of the GPU time, for minutes of
+compilation at each start: a short job loses ([the manual](MANUAL.md#compiling-the-vae---compile)
+says where the line falls).
 
 Ctrl-C, once, also stops cleanly: it finishes the piece of work in progress first. The same
 command resumes.
+
+### When a resume is refused: `--accept-env-change`
+
+A resume promises the uninterrupted run's output, bit for bit. So the same command refuses to
+go on when something that changes bits has changed since the job began, and says what. Two
+such refusals name `--accept-env-change` as a way out:
+
+```
+uv run seedvr2x film.mkv -o film.1080p.mkv --accept-env-change
+```
+
+- **The environment changed:** another GPU, another PyTorch, CUDA or ffmpeg, an upgraded
+  package. The NVIDIA driver isn't compared: updating it is no change. Without the flag, a job
+  of tens of GPU hours would be lost to an upgrade or to a new card.
+- **The card no longer has the memory the job's plan took,** another program holding part of
+  it. The job's windows and tiles, which its record keeps so that its output stays the same,
+  no longer fit. The refusal says the job is kept, what it lacks, and the ways out: quit what
+  holds the card ([GPU memory](MANUAL.md#what-else-holds-the-card)) and run the same command,
+  the output kept bit for bit; or the flag, by which the rest of the job is planned again for
+  the memory free now, with shorter windows or smaller tiles, or on another card with more of
+  it.
+
+With the flag, what was made is kept, and the change is written in the job's record: what
+changed, when, and how much was made before it. It is needed once: from there the new
+environment, or the new windows and tiles, are the job's own, so a nightly script shouldn't
+pass it every night. What it gives up: from there the frames are not the uninterrupted run's,
+as another card's aren't. The upscale is as correct; with smaller tiles the colour drifts
+slightly, which the colour correction mostly removes. A shot keeps its encode, and its
+windows where all were done; windows begun under a cap that no longer fits are made again from
+the shot's first. Nobody, the same command included, can make that output again bit for bit, and
+`seedvr2x verify` checks that the files are as written, not that they equal another run.
+
+It is not the default because the bit-for-bit promise is the point of a resume: leave it off
+where an output must be made again exactly, and prefer freeing the card's memory when that is
+possible. It doesn't cover seedvr2x itself: another version of its code is another job, refused
+with or without the flag, so update seedvr2x between jobs, or finish a job with the commit it
+began with (`git rev-parse HEAD` before it, `git checkout` and `uv sync` after an update). A
+finished job needs no flag: run in another environment, it says the difference and makes nothing
+(a file's job with only its assembly left isn't finished yet, and needs it under another PyTorch
+or ffmpeg). The manual has the details ([resume](MANUAL.md#--accept-env-change)).
 
 ### The source in, a directory of segments out, for sptenc
 
@@ -291,20 +340,14 @@ file is made from, and what was changed.
 
 ## Status
 
-Version 0.1.0 is version 1 of [DESIGN.md](DESIGN.md), built and held by the tests on a 96 GB
-card and on an RTX 5090: the first pass and its shot detector, the pipeline per shot with its
-windows, `--quality`, the colour correction, the memory planner with BlockSwap and VAE tiling,
-the time estimates and `--until`, resume, the lossless masters and their checksums, the
-finished file's assembly, `--segment-cmd`, and `seedvr2x verify`.
-
-Decided, not built yet:
-
-- PyTorch's own lines (its allocator's warnings) and the sampler's progress bars kept out of the
-  default output, under `--verbose`.
-- A calibration shortened wherever a unit is long: with long windows it takes minutes today.
-- For a finished file: the job's manifest kept beside it, and a data stream Matroska can't hold
-  left out with a warning instead of refused.
-- `torch.compile`, being measured on seedvr2x itself.
+Version 0.1.0 is version 1 of [DESIGN.md](DESIGN.md), built and held by the tests on an RTX
+5090, and on a 96 GB card until 2026-10-23: every item built since was checked on the RTX 5090
+alone, the 96 GB card being away for repair, and v0.1.0 waits for its checks on it. Built: the
+first pass and its shot detector, the pipeline per shot with its windows, `--quality`, the
+colour correction, the memory planner with BlockSwap and VAE tiling, the time estimates and
+`--until`, resume and `--accept-env-change`, the lossless masters and their checksums, the
+finished file's assembly and its record beside it, `--segment-cmd`, `--compile` (the VAE alone),
+and `seedvr2x verify`.
 
 Later versions: HDR, the smaller model files of [Which file to use](#which-file-to-use), and
 Windows itself.
