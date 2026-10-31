@@ -210,7 +210,7 @@ class Pace:
         walled = wall - began
         if not SPAN_BAND[0] * seconds <= walled <= SPAN_BAND[1] * seconds:
             logger.debug(
-                "a span of %.1f s of the run's clock was %.1f s by the wall's, outside %.1f to %.1f"
+                "a span of %.1f s of the run's clock was %.1f s by the wall's, outside %g to %g"
                 " of it: said in the run's own",
                 seconds,
                 walled,

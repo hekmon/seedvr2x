@@ -22,6 +22,17 @@ TOTAL = 32 * GIB
 # The allocator's setting a held run takes by default (memory.EXPANDABLE), spelt out: what torch
 # reads, held here to the letter.
 HELD = "backend:native,expandable_segments:True"
+# The two warnings of a driver that spills, written out whole (not built from memory's constants:
+# a change of wording or figure must fail the tests that compare them; HELD_BACK 3.0 GiB, RESERVE
+# 2.3 GiB). impl-v010, 2026-10-31.
+LENDS_LINE = (
+    "the GPU's driver lends system memory where the card is full (WSL2, Windows): a run that"
+    " passes the card slows down, then fails without an error to catch"
+)
+HOLDS_LINE = (
+    "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
+    ' less 3.0 GiB, and the plan in 2.3 GiB less; the manual\'s "Under WSL2" section says why'
+)
 # The two figures a held run plans under, as measured (runtime/memory.py's comments), read
 # before the tests put their own in their place (round_figures).
 MEASURED = (memory.HELD_BACK, memory.RESERVE, memory.HELD_BACK_UNREAD)
@@ -532,7 +543,7 @@ def test_a_driver_that_leaves_other_programs_out_is_not_asked(
     # it loses memory; not held where it should be, its frames.
     assert startup(monkeypatch, Card(30 * GIB, spills=False), nvml) == HELD
     # The warning is the line (memory.LENDS); the finding whole, with that, is the debug line.
-    assert memory.spills() and caplog.messages[0] == memory.LENDS
+    assert memory.spills() and caplog.messages[0] == LENDS_LINE
     assert "not asked for more" in caplog.messages[1] and caplog.records[1].levelname == "DEBUG"
     # The two figures within the request's extra of each other, or NVML silent: asked, as
     # before, by one request of what the driver reports and that extra.
@@ -560,12 +571,9 @@ def test_on_a_driver_that_spills_torch_is_held(
     assert [record.levelname for record in caplog.records] == [
         *("WARNING", "DEBUG", "WARNING", "DEBUG")
     ]
-    assert caplog.messages[0] == memory.LENDS
+    assert caplog.messages[0] == LENDS_LINE
     assert "gives memory the card doesn't have" in caplog.messages[1]
-    assert caplog.messages[2] == (
-        "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
-        ' less 3.0 GiB, and the plan in 2.3 GiB less; the manual\'s "Under WSL2" section says why'
-    )
+    assert caplog.messages[2] == HOLDS_LINE
     assert caplog.messages[3] == (
         "seedvr2x holds itself to the card there: torch's own allocator, its segments expandable,"
         " limited to the memory free less 3.0 GiB, and plans in 2.3 GiB less; a run that passes"
@@ -2202,6 +2210,6 @@ def test_a_driver_that_spills_is_warned_of_in_a_line_each_at_every_start(
     caplog.set_level(logging.INFO, logger="seedvr2x")
     assert startup(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: 20 * GIB})) == HELD
     assert [r.levelname for r in caplog.records] == ["WARNING", "WARNING"]
-    assert caplog.messages[0] == memory.LENDS
-    assert "Under WSL2" in caplog.messages[1]
+    assert caplog.messages[0] == LENDS_LINE
+    assert caplog.messages[1] == HOLDS_LINE
     assert all(len(message) < 220 for message in caplog.messages)

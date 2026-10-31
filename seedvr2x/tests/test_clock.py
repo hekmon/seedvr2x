@@ -477,7 +477,7 @@ def test_a_step_of_the_wall_inside_a_span_never_makes_it_negative_or_absurd(
     readers.step(step)
     sampled(readers, pace, 40.0)
     assert pace.spent(80.0) == pytest.approx(said)
-    assert (said == 80.0) == ("outside 0.8 to 1.2" in caplog.text)
+    assert (said == 80.0) == ("outside 0.8 to 1.25 of it" in caplog.text)
 
 
 @pytest.mark.parametrize("hour", [3600.0, -3600.0])
@@ -567,4 +567,4 @@ def test_a_wall_step_of_59_s_inside_a_60_s_span_is_not_the_spans_seconds(
     readers.step(59.0)
     sampled(readers, pace, 25.0)
     assert pace.spent(60.0) == 60.0
-    assert "outside 0.8 to 1.2" in caplog.text
+    assert "outside 0.8 to 1.25 of it" in caplog.text
