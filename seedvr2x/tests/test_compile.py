@@ -52,12 +52,14 @@ def plain_and_compiled(
 
 def test_constants() -> None:
     # DESIGN.md, same section: a compiled pass 1.04 to 1.10 times plain's peak, held to 1.1; encode
-    # tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152 px; compilation 4 to 6
-    # min per process, counted at the upper end. The 1080p frame padded is 1104x1920.
+    # tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152 px; compilation,
+    # measured on 2026-10-31: a new job 4 min and a resume 1 min 30 s on Linux's disk, 6 min 30 s
+    # and 2 min on a Windows drive. The 1080p frame padded is 1104x1920.
     assert planner.COMPILE_PEAK == 1.1
     assert (planner.COMPILE_ENCODE_TILE_MAX, planner.COMPILE_DECODE_TILE_MAX) == (1856, 1152)
     assert planner.COMPILE_ENCODE_WHOLE == padded_size(HD) == (1104, 1920)
-    assert (planner.COMPILE_MIN, planner.COMPILE_MAX) == (4 * 60, 6 * 60)
+    assert (planner.COMPILE_NEW, planner.COMPILE_RESUME) == (240, 90)
+    assert (planner.COMPILE_NEW_DRIVE, planner.COMPILE_RESUME_DRIVE) == (390, 120)
 
 
 def test_a_compiled_pass_peaks_at_1_1_times_the_tiles_plain_peak() -> None:
@@ -388,13 +390,115 @@ def test_the_plan_says_the_compilation_and_its_time() -> None:
     said = lines(made, peaks)
     assert (
         "plan: compile: the VAE compiled (--compile), each pass held to 1.1 times its plain peak,"
-        " in the shapes measured only; compiling it takes about 4 to 6 min per process, paid"
-        " before the DiT loads, at every start and resume, its cache kept in the job's directory"
-        in said
+        " in the shapes measured only; compiling it takes about 4 min for this new job, about 1 min"
+        " 30 s on a resume, its cache warm (measured on an RTX 5090's host), paid before the DiT"
+        " loads, at every start and resume, its cache kept in the job's directory" in said
     )
     # No line without the option, and none where the plan is plain and nothing was asked.
     plain, plain_peaks = planner.plan(free, HD, shots(76), Pins(), None)
     assert "compile" not in lines(plain, plain_peaks)
+
+
+# What /proc/self/mountinfo says (proc(5)): id, parent, device, root, mount point, options,
+# optional fields, " - ", fstype, source, super options. A host with Linux's own disk as /, a
+# Windows drive mounted in /mnt/d by WSL2 (a 9p mount whose super options say aname=drvfs), a
+# drive mounted by the older drvfs type, a Linux disk nested in the drive, and a space escaped.
+MOUNTINFO = r"""22 1 8:16 / / rw,relatime - ext4 /dev/sdd rw,discard
+23 22 0:20 / /mnt/c rw,noatime - 9p C:\ rw,dirsync,aname=drvfs;path=C:\;uid=1000
+24 22 0:21 / /mnt/d rw,noatime - 9p D:\ rw,dirsync,aname=drvfs;path=D:\;uid=1000
+25 24 8:32 / /mnt/d/linux rw,relatime - ext4 /dev/sde rw
+26 22 0:22 / /mnt/old rw,noatime - drvfs E:\ rw,uid=1000
+27 22 0:23 / /mnt/with\040space rw,noatime - 9p F:\ rw,aname=drvfs;path=F:\
+28 22 0:24 / /mnt/plain9p rw,noatime - 9p share rw,trans=virtio
+"""
+
+
+@pytest.mark.parametrize(
+    ("path", "drive"),
+    [
+        ("/home/job/compile-cache", False),
+        ("/mnt/d/Video/job/compile-cache", True),
+        ("/mnt/c", True),
+        ("/mnt/d/linux/job/compile-cache", False),
+        ("/mnt/dd/job", False),
+        ("/mnt/old/job", True),
+        ("/mnt/with space/job", True),
+        ("/mnt/plain9p/job", False),
+    ],
+)
+def test_a_windows_drive_is_the_longest_mount_point_that_says_drvfs(path: str, drive: bool) -> None:
+    # The longest mount point that is a prefix of the path decides (a Linux disk nested in the
+    # drive is Linux's; /mnt/dd is not under /mnt/d); a 9p mount counts only with aname=drvfs.
+    assert planner.on_windows_drive(Path(path), MOUNTINFO) is drive
+
+
+def test_an_unreadable_mountinfo_is_linuxs_disk_said_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def refuse(self: Path, *args: Any, **kwargs: Any) -> str:
+        raise PermissionError("no")
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+    caplog.set_level(logging.DEBUG)
+    assert planner.on_windows_drive(Path("/mnt/d/job")) is False
+    assert "mountinfo unreadable" in caplog.text
+    # Lines that are not mounts are passed over.
+    assert planner.on_windows_drive(Path("/mnt/d/job"), "garbage\n\n - \n") is False
+
+
+def compile_line(cache: Path | None, monkeypatch: pytest.MonkeyPatch, *, drive: bool) -> str:
+    monkeypatch.setattr(planner, "on_windows_drive", lambda path: drive)
+    made, peaks = planner.plan(our_free(96), HD, shots(76), Pins(), None, compile_vae=True)
+    said = planner.said(
+        made, peaks, "a card", HD, shots(76), Pins(), numz_padding=False, compile_cache=cache
+    )
+    [line] = [line for line in said if line.startswith("plan: compile: ")]
+    return line
+
+
+@pytest.mark.parametrize(
+    ("warm", "drive", "words"),
+    [
+        (
+            False,
+            False,
+            "about 4 min for this new job, about 1 min 30 s on a resume, its cache warm",
+        ),
+        (
+            True,
+            False,
+            "about 1 min 30 s for this resume, its cache warm, about 4 min for a new job",
+        ),
+        (False, True, "about 6 min 30 s for this new job, about 2 min on a resume, its cache warm"),
+        (True, True, "about 2 min for this resume, its cache warm, about 6 min 30 s for a new job"),
+    ],
+)
+def test_the_plans_line_says_the_time_of_this_job_on_this_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm: bool, drive: bool, words: str
+) -> None:
+    cache = tmp_path / "compile-cache"
+    if warm:
+        (cache / "inductor").mkdir(parents=True)
+        (cache / "inductor" / "kernel").write_bytes(b"x")
+    line = compile_line(cache, monkeypatch, drive=drive)
+    why = ", the job's directory on a Windows drive, slower for the cache's many small files"
+    assert (
+        f"compiling it takes {words} (measured on an RTX 5090's host{why if drive else ''}), paid"
+        in line
+    )
+    assert (
+        "before the DiT loads, at every start and resume, its cache kept in the job's directory"
+        in line
+    )
+    assert "\n" not in line
+
+
+def test_a_cache_missing_or_empty_is_a_new_job_and_none_asked_is_linuxs_new_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "empty").mkdir()
+    for cache in (tmp_path / "absent", tmp_path / "empty", None):
+        assert "for this new job" in compile_line(cache, monkeypatch, drive=False)
 
 
 # ----------------------------------------------------------------------------- keep_deterministic
@@ -1344,14 +1448,16 @@ def test_plan_says_the_compilations_time_and_the_estimate_counts_it_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # --plan loads the models for its calibration, so compiles the VAE as a run does: the plan's
-    # line says 4 to 6 min per process, and the time of the load, which the compilation is part
-    # of, says its share of it, once, in the load's own seconds.
+    # line says the new job's time (4 min on Linux's disk, whatever disk the test's directory is
+    # on), and the time of the load, which the compilation is part of, says its share of it,
+    # once, in the load's own seconds.
+    monkeypatch.setattr(planner, "on_windows_drive", lambda path: False)
     Loads(monkeypatch, seconds=300.0)
     accepting_tiles(monkeypatch, steps)
     caplog.set_level(logging.INFO)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, *LARGER, "--compile", "--plan", "p.txt") == 0
-    assert "compiling it takes about 4 to 6 min per process, paid before the DiT loads" in (
+    assert "compiling it takes about 4 min for this new job, about 1 min 30 s on a resume" in (
         caplog.text
     )
     [load] = [r.getMessage() for r in caplog.records if "the models loaded in" in r.getMessage()]

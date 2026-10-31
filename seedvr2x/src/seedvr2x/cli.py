@@ -455,13 +455,14 @@ def main(argv: list[str] | None = None) -> int:
         "--compile",
         action="store_true",
         help="compile the VAE with torch.compile, its causal convolutions left out of the graph:"
-        " about a tenth less time on a long job (a job under about 2,500 frames loses), 4 to 6 min"
-        " of compilation at every start, paid before the DiT loads, its cache kept in the job's"
-        " directory; its frames are not plain code's (51 to 61 dB from them) but the same in every"
-        " process; a setting, a resume repeats it; only the shapes measured are compiled (encode"
-        " tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152 px): a job whose"
-        " pins fall outside them, or with no compiled plan that fits where a plain one would, is"
-        " refused, never run without it",
+        " about a tenth less time on a long job (a job under about 2,500 frames loses), about 4 min"
+        " of compilation for a new job and 1 min 30 s on a resume (6 min 30 s and 2 min with the"
+        " job's directory on a Windows drive under WSL2), paid before the DiT loads, its cache"
+        " kept in the job's directory; its frames are not plain code's (51 to 61 dB from them) but"
+        " the same in every process; a setting, a resume repeats it; only the shapes measured are"
+        " compiled (encode tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152"
+        " px): a job whose pins fall outside them, or with no compiled plan that fits where a plain"
+        " one would, is refused, never run without it",
     )
     parser.add_argument(
         "--until",
@@ -1205,6 +1206,10 @@ def _run(args: argparse.Namespace) -> int:
             # Memory planner, decided on 2026-10-28): its line among the plan's, its warning after
             # them, where it won't fit; never a refusal (disk.Disk).
             room = _disk(args, directory, segments, prior, target, final)
+            # The compile cache decides the compilation's time the plan's line says: warm on a
+            # resume, and its disk (planner._compile_time_said).
+            from seedvr2x.runtime.manifest import COMPILE_CACHE
+
             said = planner.said(
                 *(plan, peaks, card, target, shots, pins),
                 numz_padding=numz_padding,
@@ -1214,6 +1219,7 @@ def _run(args: argparse.Namespace) -> int:
                 if prior is None
                 else _own_layouts(recorded_as(None, plan.window), prior, reshaped),
                 disk=room.line(),
+                compile_cache=directory / COMPILE_CACHE,
             )
             for number, line in enumerate(said):
                 logger.info("%s", line)

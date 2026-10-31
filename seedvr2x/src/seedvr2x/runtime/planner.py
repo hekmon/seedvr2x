@@ -37,10 +37,12 @@ off a tiled decode's peak (decode_peak)."""
 import logging
 import math
 import mmap
+import re
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import cache
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from seedvr2x.runtime import memory, tilegrid, weights
@@ -339,13 +341,24 @@ COMPILE_PEAK = 1.1
 COMPILE_ENCODE_TILE_MAX = 1856
 COMPILE_ENCODE_WHOLE = (1104, 1920)
 COMPILE_DECODE_TILE_MAX = 1152
-# The compilation's time, per process, said by --plan and the plan's line: 4 to 6 min on an RTX
-# 5090 (DESIGN.md, same section), paid before the DiT loads. Said as the range, before anything
-# is compiled; the estimates that follow count the seconds the load measured, the compilation's
-# among them, once (cli._say_times): there is no figure to sum before the load. PROVISIONAL
-# (impl-v010, 2026-10-29: DESIGN.md gives the range, measured on one card).
-COMPILE_MIN = 4 * 60
-COMPILE_MAX = 6 * 60
+# The compilation's time, per process, said by --plan and the plan's line: a new job's and a
+# resume's (its cache warm), for the job's directory on Linux's own disk and on a Windows drive
+# under WSL2, paid before the DiT loads (DESIGN.md, Memory planner, --compile, decided on
+# 2026-10-30: "the plan's line says the times measured, a new job's and a resume's"). Measured on
+# 2026-10-31 on an RTX 5090 with an AMD Ryzen 9 9950X3D under WSL2, a 1080p job (encode tiles of
+# 2 shapes, decode tiles of 4, 535 graphs): on ext4 a new job took 4 min 0 s and a resume 1 min
+# 31 s; with the job's directory on a Windows drive (a 9p mount, "aname=drvfs"), a new job 6 min
+# 23 s (6 min 47 s to 6 min 54 s on 2026-10-29 and 2026-10-30) and a resume 1 min 54 s: the same
+# graphs, the difference the compile cache's 8,327 small files (362 MB) written to and read back
+# from that drive. A resume's floor is dynamo tracing every graph again (about 77 s of its 84 s
+# warm-up), which no cache keeps. Said in the rounded figures. The estimates that follow count
+# the seconds the load measured, the compilation's among them, once (cli._say_times): there is
+# no figure to sum before the load. PROVISIONAL (impl-v010, 2026-10-31: measured on one host;
+# the 96 GB box measures next, inductor being CPU work).
+COMPILE_NEW = 4 * 60
+COMPILE_RESUME = 90
+COMPILE_NEW_DRIVE = 6 * 60 + 30
+COMPILE_RESUME_DRIVE = 2 * 60
 # The slices a compiled shape is warmed with are the shot's: one of 1 or 2 latents is a single
 # slice, the encode's and the decode's memory state off, one of 3 or more has a first slice and
 # the next ones (model.encode_slices, model.latent_slices), so that 3 latents show every kind
@@ -1707,6 +1720,87 @@ _MOMENT_SHORT = {
 }
 
 
+def _escaped(field: str) -> str:
+    """A mountinfo field with its octal escapes (\\040 for a space) undone (proc(5))."""
+    return re.sub(r"\\([0-7]{3})", lambda found: chr(int(found.group(1), 8)), field)
+
+
+def on_windows_drive(path: Path, mountinfo: str | None = None) -> bool:
+    """Whether `path` lies on a Windows drive under WSL2: the longest mount point that is a
+    prefix of its resolved path, in /proc/self/mountinfo (or the text given), is a 9p mount whose
+    super options say "aname=drvfs", or a drvfs one. Never fails the run: an unreadable
+    mountinfo says no, with the reason at debug, so that the figures are Linux's disk's
+    (DESIGN.md, Memory planner, --compile, decided on 2026-10-30; the ruling of baton 3,
+    2026-10-30)."""
+    if mountinfo is None:
+        try:
+            mountinfo = Path("/proc/self/mountinfo").read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            logger.debug(
+                "mountinfo unreadable (%s): the compile cache taken as on Linux's disk", error
+            )
+            return False
+    try:
+        where = PurePosixPath(path.resolve())
+    except (OSError, RuntimeError) as error:
+        logger.debug(
+            "%s not resolved (%s): the compile cache taken as on Linux's disk", path, error
+        )
+        return False
+    best: tuple[int, bool] | None = None
+    for line in mountinfo.splitlines():
+        head, separator, tail = line.partition(" - ")
+        fields, rest = head.split(), tail.split()
+        # Mount point is the fifth field; after the separator: fstype, source, super options.
+        if not separator or len(fields) < 5 or len(rest) < 3:
+            continue
+        mount = PurePosixPath(_escaped(fields[4]))
+        if mount != where and mount not in where.parents:
+            continue
+        # WSL2 writes the options as "aname=drvfs;path=C:\;uid=1000,...": split at both.
+        drive = rest[0] == "drvfs" or (
+            rest[0] == "9p" and "aname=drvfs" in re.split(r"[,;]", rest[2])
+        )
+        if best is None or len(mount.parts) >= best[0]:
+            best = (len(mount.parts), drive)
+    return best is not None and best[1]
+
+
+def _minutes_said(seconds: int) -> str:
+    """A rounded duration as the plan's line says it: "4 min", "1 min 30 s"."""
+    minutes, rest = divmod(seconds, 60)
+    return f"{minutes} min" + (f" {rest} s" if rest else "")
+
+
+def _compile_time_said(cache: Path | None) -> str:
+    """The compilation's time for this job (COMPILE_NEW and the others): a resume's where its
+    compile cache is there and holds something (the cache is warm), a new job's otherwise, and
+    the other case's after it; the Windows drive's figures, and why they are longer, where the
+    cache's directory is on one (on_windows_drive)."""
+    drive = cache is not None and on_windows_drive(cache)
+    new, resume = (
+        (COMPILE_NEW_DRIVE, COMPILE_RESUME_DRIVE) if drive else (COMPILE_NEW, COMPILE_RESUME)
+    )
+    try:
+        warm = cache is not None and cache.is_dir() and any(cache.iterdir())
+    except OSError as error:
+        logger.debug("%s not listed (%s): the compile cache taken as cold", cache, error)
+        warm = False
+    why = (
+        ", the job's directory on a Windows drive, slower for the cache's many small files"
+        if drive
+        else ""
+    )
+    figures = (
+        f"about {_minutes_said(resume)} for this resume, its cache warm, about"
+        f" {_minutes_said(new)} for a new job"
+        if warm
+        else f"about {_minutes_said(new)} for this new job, about {_minutes_said(resume)} on a"
+        " resume, its cache warm"
+    )
+    return f"compiling it takes {figures} (measured on an RTX 5090's host{why})"
+
+
 def said(
     plan: Plan,
     peaks: Peaks,
@@ -1720,6 +1814,7 @@ def said(
     recorded: bool = False,
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
     disk: str | None = None,
+    compile_cache: Path | None = None,
 ) -> list[str]:
     """The plan as --plan prints it and every run and resume logs it, before the first unit,
     a line per choice in plain words (DESIGN.md, Memory planner, Every choice of the plan is
@@ -1753,6 +1848,10 @@ def said(
     disk: the line of the disk the job takes beside its output against what is free (runtime/
     disk.py, DESIGN.md, Memory planner, decided on 2026-10-28), after the scratch's and before the
     predicted peaks, as DESIGN.md lists it; None says none.
+
+    compile_cache: the compile cache's directory (manifest.COMPILE_CACHE in the job's), whose
+    state and disk the compilation's time depends on (_compile_time_said); None says a new job
+    on Linux's own disk.
 
     The line of the compiled VAE is the plan's own (plan.compile_vae, the setting's, always: a
     job outside the shapes measured is refused, plan)."""
@@ -1848,12 +1947,11 @@ def said(
         f" {_gib(peaks.budget - peaks.need(peaks.bound))} GiB under the budget"
     )
     if plan.compile_vae:
-        minutes = f"{COMPILE_MIN // 60} to {COMPILE_MAX // 60} min"
         lines.append(
             f"compile: the VAE compiled (--compile), each pass held to {COMPILE_PEAK} times its"
-            f" plain peak, in the shapes measured only; compiling it takes about {minutes} per"
-            " process, paid before the DiT loads, at every start and resume, its cache kept in"
-            " the job's directory"
+            f" plain peak, in the shapes measured only; {_compile_time_said(compile_cache)}, paid"
+            " before the DiT loads, at every start and resume, its cache kept in the job's"
+            " directory"
         )
     lines.append(
         "time: measured, not guessed: a calibration of the job's own steps once the models are"
