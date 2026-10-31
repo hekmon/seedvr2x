@@ -252,7 +252,8 @@ under `--verbose`, and the plan's lines stay, in plain words:
 - the assembly's time: about how long joining the segments will take, its rate and its count
   of the masters under `--verbose`;
 - the memory line: what the run holds to and why, what is free less the margin, the driver's
-  own figure under `--verbose` (its warnings already say what it lends);
+  own figure under `--verbose` (its warnings already say what it lends), as on the plan's card
+  line since 2026-10-31;
 - the shots' line: the cuts found, and the places the detector is less sure of, which
   `--plan` lists, the threshold said as `--cut-threshold`'s;
 - the plan's lines for the VAE's room, the DiT in the VAE's passes and the scratch: each in
@@ -2259,12 +2260,17 @@ first pass, whose shots are its input, and before the models load:
     - `--compile` compiles the VAE with those convolutions left out of the graph, as numz
       meant: each pass 0.79–0.95 of plain's time, its peak 1.04–1.10 times plain's, 4 to 6
       min of compilation per process in the study (238 s for its 1080p job), paid before the
-      DiT loads. Built, it took 6 min 47 s to 6 min 54 s for a new job on the RTX 5090 at
-      1080p, and 1 min 54 s on a resume, its cache warm. On a 32 GB card a whole 1080p job's
-      units took 10% less (880 s against 980 at plain's own tiles), so a long job gains about
-      a tenth, an hour of 1080p about 2 h of 22, and a job under about 2,500 frames loses with
-      the study's 238 s: its units saved 100 s over 1,079 frames, 0.093 s a frame, so about
-      4,400 frames with 6 min 50 s, and about 1,200 more for each resume's 1 min 54 s.
+      DiT loads. Built (2026-10-31), a new 1080p job compiles in 4 min 0 s on the RTX 5090's
+      machine with its directory on Linux's own disk, 1 min 31 s on a resume, its cache warm,
+      and in 6 min 23–27 s and 1 min 49 s on a Windows drive under WSL2, where the cache's
+      8,327 small files are written through the drive's mount; a 4K job's 8 shapes took 8 min
+      42 s there. The study's 238 s had one shape fewer, its encode untiled, its cache on
+      Linux's disk. On a 32 GB card a whole 1080p job's units took 10% less (880 s against 980
+      at plain's own tiles), so a long job gains about a tenth, an hour of 1080p about 2 h of
+      22: its units saved 100 s over 1,079 frames, 0.093 s a frame. So a job under about 2,600
+      frames loses on Linux's disk, about 1,000 more for each resume, and under about 4,200 on
+      a Windows drive, about 1,300 more for each resume (the plan line's 4 min and 1 min 30 s,
+      6 min 30 s and 2 min).
       It is a setting, recorded as compile_vae: its frames are not plain's, but the same in
       every process. The VAE alone, compiled against plain on the same latent, gave frames
       59.0–61.8 dB apart (2 to 9 levels at most), the encode's latent 0.10–0.14 apart at most
@@ -2298,14 +2304,26 @@ first pass, whose shots are its input, and before the models load:
         the job deleted by hand, on the disk with the least room; the plan's line says the
         drive's time;
       - `--plan` and the plan's line saying the compilation's time;
-      - the decoder warmed in the layout the run hands it its latent in, the DiT's, as well as
-        the encode's, which the calibration's decodes take: warmed in the encode's alone, an
-        RTX 5090 run compiled 12 graphs in its decodes, after the warm-up (built on
-        2026-10-30, held for the next gate).
-      Decided on 2026-10-30, for the next batch: the calibration's decodes take the latent in
-      the DiT's layout too, so that they time the run's own decode, and one layout is
-      compiled; the warm-up compiles what the job meets and no more, brought toward the
-      study's 238 s; the plan's line says the times measured, a new job's and a resume's.
+      - the decoder warmed in the layout the run hands it its latent in, the DiT's, dense, the
+        calibration's decodes handed it too, so that they time the run's own decode (built on
+        2026-10-31): warmed in the encode's channel-major layout alone, an RTX 5090 run had
+        compiled 12 graphs in its decodes, after the warm-up. At 1080p the calibration's decode
+        then read 0.497 s a frame against 0.528, one calibration each, the job's decodes
+        estimated 0.4% over where they had been 1.4% under;
+      - numz's recompile limit, 128, raised to 1024 and the accumulated one to 8192, never
+        lowered, and a hit during the warm-up refused, nothing run (built on 2026-10-31,
+        provisional until the 96 GB card's larger shapes): torch 2.14.1 counts the limit per
+        code object, and with the causal convolutions out of the graph every ResnetBlock3D's
+        frames share one. Warmed in two layouts at 4K, one reached 127 entries and hit it, its
+        other shapes then running plain without a word.
+      Nothing of the warm-up could go (2026-10-31): every graph is one the job meets, each tile
+      shape, interior and edges, at each kind of slice its shots and its calibration call (a
+      shot of one slice, a first slice, the next ones). Its time is the cache's drive (above):
+      the plan's line says the drive's figures, a new job's and a resume's, provisional until
+      the 96 GB box measures them, inductor's compilation being the CPU's work. Those are a
+      1080p job's 6 tile shapes: a 4K job's 8 took 8 min 42 s where its line said 6 min 30 s,
+      about 65 s a shape both times. Decided on 2026-10-31, for the next batch: the line counts
+      the job's own shapes.
     - The DiT isn't compiled in v0.1.0: 2–3% of a long 1080p job on a 32 GB card (the DiT is
       a fifth of its units; compiled block by block over seedvr2x's own swap, a window takes
       0.77–0.80 of plain's time), a loss on a short one (each new window length compiles
@@ -2435,7 +2453,10 @@ first pass, whose shots are its input, and before the models load:
       and 2.0% at 1080p (17.6% after the first rule) and 2.3% at 720p (8.2%), windows and
       decodes 1.3 to 2.4%; `--plan`'s whole job −3.6 and −1.3% at 1080p, −2.1% at 720p (+18%
       before both rules), the corrected estimates within 1.4%. A single unit still misses by
-      up to 22 to 31%, one in 20 per phase over 1.15 times its estimate at most.
+      up to 22 to 31%, one in 20 per phase over 1.15 times its estimate at most. On 2026-10-31,
+      the same card, plain: `--plan`'s time against the run's own by the wall clock, −2.6% at
+      1080p (20 shots, the units' measured seconds 2.5% under the wall's span: what passes
+      between units) and +0.1% at 4K (115 frames), each kind within 4.4% of its units.
     - Over long runs beside a desktop (milestone 7, an RTX 5090 under WSL2, 2026-10-24 to
       27), by the wall clock: an anime episode's units, 11 h 33 min at its start, took
       10 h 54 min; a film's first 32 min, 12 h 0 min at its first start, took 14 h 52 min
