@@ -613,23 +613,35 @@ def compile_shapes(
     shape, for each of these (DESIGN.md: "a warm call per shape the plan uses ... at the job's
     slice lengths"), so that no unit of the run compiles; and the calibration's own
     (COMPILE_CALIBRATED), which times the passes right after, a job whose shots are all long
-    meeting the 2 latents of its 5-frame passes there only."""
+    meeting the 2 latents of its 5-frame passes there only.
+
+    A shot's last slice is no kind of its own: its frames are 4n + 1 and its latents whole, so
+    that the cut leaves no rest (model.encode_slices, model.latent_slices), and every slice
+    after the first is of one size, whatever the shot's length (tests/test_compile.py holds
+    lengths 1 to 64 to the run's own slicing). The decoder's latent comes in two memory
+    layouts, the shot's (the DiT's) and the calibration's (the encode's): `run` and `calibrated`
+    are the lengths each is warmed at (plan.Shapes)."""
     padded = _padded(target, numz_padding)
 
     def cut(tiles: Tiles | None) -> tuple[tuple[int, int], ...]:
         return (padded,) if tiles is None else _shapes(padded, tiles)
 
-    latents = sorted(
+    ran = sorted(
         {
-            *COMPILE_CALIBRATED,
-            *(
-                min(_latents(run.frames), COMPILE_LATENTS)
-                for shot in shots
-                for run in shot_runs(shot, runs)
-            ),
+            min(_latents(run.frames), COMPILE_LATENTS)
+            for shot in shots
+            for run in shot_runs(shot, runs)
         }
     )
-    return Shapes(padded, cut(plan.encode_tiles), cut(plan.decode_tiles), tuple(latents))
+    latents = sorted({*COMPILE_CALIBRATED, *ran})
+    return Shapes(
+        padded,
+        cut(plan.encode_tiles),
+        cut(plan.decode_tiles),
+        tuple(latents),
+        COMPILE_CALIBRATED,
+        tuple(ran),
+    )
 
 
 @cache

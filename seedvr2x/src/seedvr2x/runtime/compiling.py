@@ -39,6 +39,7 @@ from seedvr2x.runtime.plan import Compilation, Shapes
 from seedvr2x.runtime.tilegrid import SCALE
 from seedvr2x.runtime.timing import spoken
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
+from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,8 @@ SETTINGS: dict[str, Any] = {
     "dynamic": False,
 }
 RECOMPILE_LIMIT = 128
+# What the recompile limit keeps above the entries the warm-up makes of a function (entries).
+RECOMPILE_MARGIN = 16
 
 
 class CompileError(JobError):
@@ -152,22 +155,24 @@ def shutdown_workers() -> None:
     config.compile_threads = 1
 
 
-# The count of frames torch._dynamo had started to compile when the warm-up ended, None where the
+# The count of graphs torch._dynamo had started to compile when the warm-up ended, None where the
 # VAE isn't compiled. torch 2.14.1 counts one in counters["frames"]["total"] each time dynamo
 # converts a frame, which happens on a cache miss alone (_dynamo/convert_frame.py:2331): a
-# frame the warm-up compiled, found again, isn't counted.
+# graph the warm-up compiled, found again, isn't counted. Said as graphs, not frames, which the
+# user would read as video frames (2026-10-30, the RTX 5090 run: "compiled 4 more frames").
 _warmed: list[int | None] = [None]
 
 
 def frames_compiled() -> int:
-    """The frames torch._dynamo has started to compile in this process."""
+    """The graphs torch._dynamo has started to compile in this process (its frames: one graph, or
+    one piece between two graph breaks, each)."""
     utils: Any = importlib.import_module("torch._dynamo.utils")
     return int(utils.counters["frames"]["total"])
 
 
 def report_late(where: str) -> int:
     """Say at WARNING any compilation since the warm-up ended, or since the last such saying,
-    naming the pass `where` (a unit's part: "shot 2's decode"), and return how many frames it
+    naming the pass `where` (a unit's part: "shot 2's decode"), and return how many graphs it
     was. A job whose VAE is compiled expects none: the warm-up compiled every shape the plan's
     passes meet (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0"; warm),
     and a pass that compiled one more ran its first call slowly, in this process (shutdown_workers
@@ -184,11 +189,11 @@ def report_late(where: str) -> int:
         return 0
     _warmed[0] = now
     logger.warning(
-        "%s: the compiler compiled %d more %s after the warm-up: the warm-up missed a shape this"
-        " pass meets, so its first call took the compilation's time",
+        "%s: the compiler compiled %d more %s after the warm-up: the warm-up missed a shape or a"
+        " memory layout this pass meets, so its first call took the compilation's time",
         where,
         now - before,
-        "frame" if now - before == 1 else "frames",
+        "graph" if now - before == 1 else "graphs",
     )
     return now - before
 
@@ -228,12 +233,24 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
     keep_deterministic()
     convolutions = exclude_causal_convolutions(vae)
     # numz's recompile limit for the VAE (RECOMPILE_LIMIT), raised for the process: nothing else
-    # is compiled in v0.1.0 (the DiT is not), and torch's own, 8, is under the shapes a plan
-    # meets: the study's `excl` compiled 500 to 800 graphs a run, at 250 to 330 graph breaks,
-    # one per piece between two convolutions and shape (research/docs/compile.md, the VAE).
+    # is compiled in v0.1.0 (the DiT is not), and torch's own, 8 (torch 2.14.1,
+    # torch/_dynamo/config.py: recompile_limit, which cache_size_limit aliases), is under the
+    # entries a plan needs. Raised past numz's when the warm-up itself needs more (entries).
     limit: Any = importlib.import_module("torch._dynamo.config")
-    if limit.recompile_limit < RECOMPILE_LIMIT:
-        limit.recompile_limit = RECOMPILE_LIMIT
+    needed = entries(models, compilation.shapes)
+    # PROVISIONAL (impl-v010, 2026-10-30: DESIGN.md says nothing of a limit): the warm-up's
+    # entries per compiled function and a margin of RECOMPILE_MARGIN, never under numz's 128.
+    wanted = max(RECOMPILE_LIMIT, needed + RECOMPILE_MARGIN)
+    if limit.recompile_limit < wanted:
+        limit.recompile_limit = wanted
+    logger.debug(
+        "the compiler's recompile limit is %d: the warm-up needs %d entries of a function, with"
+        " a margin of %d, numz's %d the least",
+        limit.recompile_limit,
+        needed,
+        RECOMPILE_MARGIN,
+        RECOMPILE_LIMIT,
+    )
     logger.info(
         "compiling the VAE (--compile): its encoder and decoder, %d causal convolutions left out"
         " of the graph, %s; the cache in %s",
@@ -278,6 +295,43 @@ def _shapes_said(shapes: Shapes) -> str:
     )
 
 
+def _kinds(sizes: list[int]) -> set[tuple[int, str]]:
+    """The (slice size, memory state) calls of a pass cut in `sizes` (model.encode_slices,
+    model.latent_slices): one slice has no memory (DISABLED), else the first initialises it
+    and the next ones use it (model.encode_sliced, model.decode_sliced)."""
+    if len(sizes) == 1:
+        return {(sizes[0], MemoryState.DISABLED.name)}
+    return {(sizes[0], MemoryState.INITIALIZING.name)} | {
+        (size, MemoryState.ACTIVE.name) for size in sizes[1:]
+    }
+
+
+def _decode_passes(shapes: Shapes) -> tuple[tuple[tuple[int, ...], bool], ...]:
+    """The decoder's latent layouts and the lengths each is warmed at: (lengths, channel_major),
+    the DiT's first (the shots' own), then the encode's (the calibration's)."""
+    ran = shapes.latents if shapes.run is None else shapes.run
+    return (tuple(ran), False), (tuple(shapes.calibrated), True)
+
+
+def entries(models: Models, shapes: Shapes) -> int:
+    """The most entries the warm-up makes in the cache of one compiled function: a graph for
+    each shape and each kind of call the passes make of it (a slice's size and memory state,
+    and for the decoder its latent's layout), the count torch's recompile limit must hold for
+    the run to find every one. The kinds are those of the run's own slicing (model.encode_slices,
+    model.latent_slices); tests/test_compile.py holds the count to the calls warm makes."""
+    factor = 4
+    encode = {
+        kind
+        for latents in shapes.latents
+        for kind in _kinds(model.encode_slices(models, factor * (latents - 1) + 1))
+    }
+    decode = sum(
+        len({kind for latents in lengths for kind in _kinds(model.latent_slices(models, latents))})
+        for lengths, _ in _decode_passes(shapes)
+    )
+    return max(len(shapes.encode) * len(encode), len(shapes.decode) * decode)
+
+
 @torch.no_grad()
 def warm(models: Models, shapes: Shapes) -> None:
     """A warm call of every shape the plan's VAE passes meet, at every slice kind the job's shots
@@ -289,19 +343,27 @@ def warm(models: Models, shapes: Shapes) -> None:
     model.decode_sliced), fed zeros: the encode with a tile's crop as the tiled encode hands it
     (tiling._crops), a contiguous (3, t, rows, columns) tensor on the device in the VAE's dtype,
     t following model.encode_slices; the decode with the crop of a latent of the whole padded
-    frame, as the tiled decode takes it (tiling._decoded), its memory the encode's
-    (model.to_latent), so that the decoder is handed each slice in the memory it meets in the
-    run. A shot of `n` latents in `shapes.latents` is one of 4 * (n - 1) + 1 frames, its slices
-    those of model.encode_slices and model.latent_slices.
+    frame, as the tiled decode takes it (tiling._decoded). A shot of `n` latents in
+    `shapes.latents` is one of 4 * (n - 1) + 1 frames, its slices those of model.encode_slices
+    and model.latent_slices.
+
+    The decoder's latent is warmed in both memory layouts it is handed (Shapes): a shot's, the
+    DiT's output, (T', h, w, 16) dense, merged or not (shot.merge_windows), which the run's
+    decodes take, and the encode's, channel-major (model.to_latent), which the calibration's
+    do. The compiler's guards tell them apart by the latent's strides: on 2026-10-30 a 1080p
+    job of three shots, warmed with the encode's alone, compiled 12 more graphs in its decodes
+    (TORCH_LOGS=recompiles: 12 recompiles of the decoder's forward, attn_video_vae.py:968, each
+    a guard on the 'sample' stride, the channel's 1 where the warm-up had T'hw), 4 in the
+    first shot's and 8 in the second's, none in the calibration's.
 
     Not whole shots' worth of work: a slice is 4 or 5 frames of a tile.
 
     PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "a warm call per shape", not with what):
     zeros, in the memory the run's inputs have as far as the code shows (a tile's crop copied to
-    the device is contiguous; the decoder's latent is the encode's channel-major one, cropped
-    from the whole padded frame's, as tiling._decoded crops it). Whether they match the run's
-    own inputs for the compiler's guards is for a GPU run to show: no unit of the run may
-    compile (torch._dynamo.utils.counters, after the first unit)."""
+    the device is contiguous; the decoder's latent in both layouts above). The DiT's layout is
+    read from the stride of the run that missed it, not from the model's code; whether they
+    match the run's own inputs for the compiler's guards is for a GPU run to show: no unit of
+    the run may compile (report_late, after each part of a unit)."""
     padded_rows, padded_columns = shapes.padded
     latent_rows, latent_columns = padded_rows // SCALE, padded_columns // SCALE
     for latents in shapes.latents:
@@ -314,10 +376,20 @@ def warm(models: Models, shapes: Shapes) -> None:
             for moments in model.encode_sliced(models, crops, frames):
                 del moments
             model.synchronize(models.device)
-        storage = torch.zeros((16, latents, latent_rows, latent_columns), dtype=COMPUTE_DTYPE)
-        latent = storage.permute(1, 2, 3, 0)
-        for rows, columns in shapes.decode:
-            top, left = slice(0, rows // SCALE), slice(0, columns // SCALE)
-            for decoded in model.decode_sliced(models, latent, top, left):
-                del decoded
-            model.synchronize(models.device)
+    for lengths, channel_major in _decode_passes(shapes):
+        for latents in lengths:
+            latent = _latent(latents, latent_rows, latent_columns, channel_major)
+            for rows, columns in shapes.decode:
+                top, left = slice(0, rows // SCALE), slice(0, columns // SCALE)
+                for decoded in model.decode_sliced(models, latent, top, left):
+                    del decoded
+                model.synchronize(models.device)
+
+
+def _latent(latents: int, rows: int, columns: int, channel_major: bool) -> torch.Tensor:
+    """Zeros for a shot's latent (T', h, w, 16) in system memory: dense as the DiT gives it and
+    shot.merge_windows keeps it, or channel-major as the encode does (model.to_latent), its view
+    permuted."""
+    if channel_major:
+        return torch.zeros((16, latents, rows, columns), dtype=COMPUTE_DTYPE).permute(1, 2, 3, 0)
+    return torch.zeros((latents, rows, columns, 16), dtype=COMPUTE_DTYPE)

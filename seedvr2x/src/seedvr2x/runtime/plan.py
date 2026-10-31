@@ -135,12 +135,19 @@ class Shapes:
     pixels of the padded frames, `padded` being their size (job.padded_size): the encoder's input,
     one per distinct tile of the plan's encode (the whole frame untiled), and the decoder's
     output, likewise for the decode; `latents`, the shots' lengths the slices are warmed at, in
-    latents, 1, 2 or planner.COMPILE_LATENTS (3), the shortest of each kind the job runs."""
+    latents, 1, 2 or planner.COMPILE_LATENTS (3), the shortest of each kind the job runs.
+
+    The decoder is called with its latent in two memory layouts, which its guards tell apart
+    (compiling.warm; 2026-10-30): the DiT's, a shot's own, at the lengths of `run`; and the
+    encode's, which the calibration's decodes meet, at those of `calibrated`. None for `run`:
+    every one of `latents`, the lengths of a Shapes made by hand."""
 
     padded: tuple[int, int]  # the padded frame (job.padded_size), (rows, columns)
     encode: tuple[tuple[int, int], ...]
     decode: tuple[tuple[int, int], ...]
     latents: tuple[int, ...]
+    calibrated: tuple[int, ...] = ()  # the calibration's lengths, its decodes' layout the encode's
+    run: tuple[int, ...] | None = None  # the shots' lengths, their decodes' layout the DiT's
 
 
 @dataclass
