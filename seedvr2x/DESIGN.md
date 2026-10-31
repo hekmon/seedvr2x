@@ -1,10 +1,10 @@
 # seedvr2x design
 
 > Status: **being built.** It holds the decisions taken and the questions still open, and the
-> code follows it: milestones 1, 2, 4, 5, 6 and 7 and the I/O layer have passed, and
-> milestone 3 but for its time estimates (see
-> [Validation milestones](#validation-milestones)). Each decision links to the measurement it
-> rests on in [../research/](../research/).
+> code follows it: milestones 1 to 7 and the I/O layer have passed, milestone 3's time
+> estimates on an RTX 5090 (2026-10-30), the 96 GB card measuring them again when it is back,
+> before v0.1.0 (see [Validation milestones](#validation-milestones)). Each decision links to
+> the measurement it rests on in [../research/](../research/).
 
 ## Goal
 
@@ -2263,9 +2263,14 @@ first pass, whose shots are its input, and before the models load:
       1080p, and 1 min 54 s on a resume, its cache warm. On a 32 GB card a whole 1080p job's
       units took 10% less (880 s against 980 at plain's own tiles), so a long job gains about
       a tenth, an hour of 1080p about 2 h of 22, and a job under about 2,500 frames loses with
-      the study's 238 s (about 4,300 with 6 min 50 s, and about 1,200 more for each resume).
-      It is a setting, recorded as compile_vae: its frames are not plain's
-      (51–61 dB from them, 14–17 dB closer than another seed), but the same in every process.
+      the study's 238 s: its units saved 100 s over 1,079 frames, 0.093 s a frame, so about
+      4,400 frames with 6 min 50 s, and about 1,200 more for each resume's 1 min 54 s.
+      It is a setting, recorded as compile_vae: its frames are not plain's, but the same in
+      every process. The VAE alone, compiled against plain on the same latent, gave frames
+      59.0–61.8 dB apart (2 to 9 levels at most), the encode's latent 0.10–0.14 apart at most
+      ([compile.md](../research/docs/compile.md)); a whole job's frames, the DiT carrying
+      that latent, aren't measured yet (the 51–61 dB said here until 2026-10-31 were the
+      compiled DiT's).
     - Built with it (2026-10-30):
       - inductor's deterministic mode, kept on through every trace: torch 2.14.1 resets it at
         each trace's end (its restoring use_deterministic_algorithms sets inductor's flag too).
@@ -2285,7 +2290,13 @@ first pass, whose shots are its input, and before the models load:
         calibration then times the compiled passes;
       - inductor's modules imported before the environment is recorded, so that a resume
         compares the same;
-      - the compile cache in the job's work directory, warm on a resume;
+      - the compile cache in the job's work directory, warm on a resume. Kept there under
+        WSL2 too (decided on 2026-10-31), where a job on a Windows drive compiles longer than
+        on Linux's own disk (6 min 23 s against 4 min 0 s for a new job, 1 min 54 s against 1
+        min 31 s on a resume, on the RTX 5090's machine): the cache's 8,327 small files cost
+        that through the drive's mount, but a second place for a job's files would outlive
+        the job deleted by hand, on the disk with the least room; the plan's line says the
+        drive's time;
       - `--plan` and the plan's line saying the compilation's time;
       - the decoder warmed in the layout the run hands it its latent in, the DiT's, as well as
         the encode's, which the calibration's decodes take: warmed in the encode's alone, an
@@ -2375,10 +2386,12 @@ first pass, whose shots are its input, and before the models load:
     seek isn't counted. Every run runs it, `--plan` included, its cost said in its line
     (decided on 2026-10-21: a run without it could say no time left before its first
     segment's decode, and a job of one segment never).
-    - It took 47–56 s at 1080p and 43–49 s at 720p on an RTX 5090: a short job pays a large
-      share (a 2-minute 720p job 49 s more). Its cost follows the job's longest window, not
-      the size: 138 s on that card at 4K, its windows of 5 latents, but 826 s on the 96 GB
-      card at 1080p, a long shot's windows of 91 latents, its clock capped. Shortened where a
+    - It took 47–56 s at 1080p and 43–49 s at 720p on an RTX 5090 on 2026-10-23 (63–68 s
+      at 1080p on 2026-10-29, 65.7 s since, below): a short job pays a large share (a
+      2-minute 720p job 49 s more). Its cost follows the job's longest window, not the size:
+      138 s on that card at 4K then (155.7 to 160 s since), its windows of 5 latents, but
+      826 s on the 96 GB card at 1080p, a long shot's windows of 91 latents, its clock
+      capped. Shortened where a
       unit is long (decided on 2026-10-23, built on 2026-10-30):
       - a window's longer length by time, about 3 s, as an encode's second length is, but
         never under the job's longest or 30 latents, whichever is less: the DiT's attention
@@ -2551,8 +2564,9 @@ first pass, whose shots are its input, and before the models load:
     system memory and the moment it is held
   - the tiles and their grid, and the scratch of the longest tiled shot
   - the disk the job takes beside its output: its masters, about 100–135 GiB an hour of
-    1080p in `yuv420p10le` (see [Output](#output)), twice that while a file is assembled,
-    against what its disk has free; a run says it too, warning where they won't fit, since
+    1080p in `yuv420p10le` (98.8 on milestone 7's anime; see [Output](#output)), twice that
+    while a file is assembled, against what its disk has free; a run says it too, warning
+    where they won't fit, since
     the disk may be cleared as the job runs (decided on 2026-10-28, built on 2026-10-30: a
     whole film's `--plan` said only its assembly's time, where its disk had 85 GiB free for
     about 200 GiB of masters; now "plan: disk: the masters at most 186 GiB, twice that, 372
@@ -2576,9 +2590,10 @@ first pass, whose shots are its input, and before the models load:
 
   Every value the planner sets is in it, those said today only under `--verbose` too: the
   tiles' overlap, the reserve and the margin by their names and figures. So are the quality
-  level and, once built, the time. A value a resume takes from the job's record says so, and
-  why: kept, so that the output stays bit for bit. The lines stay short, one terminal line
-  where they can, two at most, in the manual's words (see [Terms](#terms)). Each line names its
+  level and the time (built on 2026-10-23). A value a resume takes from the job's record says
+  so, and why: kept, so that the output stays bit for bit. The lines stay short, one terminal
+  line where they can, two at most, in the manual's words (see [Terms](#terms)). Each line
+  names its
   choice, in this order: the card, the budget (on a run held to the card), the frames, the
   attention, the shots, the windows, the quality, the blocks swapped, the VAE, the DiT in the
   VAE's passes, the system memory, the encode, the decode, the VAE's room, the scratch (where a
@@ -3224,16 +3239,18 @@ explanation.
   - what changes, and the risks: the frames made after the change differ from the
     uninterrupted run's, as another card's do, or as smaller tiles and shorter windows do (a
     slight colour drift, which `split` corrects for the most part); a shot's windows begun in a
-    shape that no longer fits are made again from its first; a change of shape falls between
-    shots; the output can't be made again bit for bit, not even by the same command on
+    shape that no longer fits are made again from its first; a shot keeps what was made of it,
+    its encode and its windows where all were done, the rest of it made in the new shape; the
+    output can't be made again bit for bit, not even by the same command on
     another directory; `seedvr2x verify` checks the masters' integrity, not their identity to
     another run;
   - what to expect: the manifest records each change, when, before and after, and what was
     already made;
   - when not to use it: where an output must be made again bit for bit; and a finished
     directory job never needs it.
-- the default size, 1080 rows: a 1080p source comes out at its own size, redrawn, not
-  enlarged
+- the default size, a short side of 1080, numz's default kept: a 1080p source comes out at
+  its own size, redrawn, not enlarged; a size the cards the planner aims at all run (from 8.3
+  GiB of free VRAM, the VAE's floor), where 4K's smallest window takes 22.4 GiB
 - stopping at a set time: `--until`, what it stops before, its exit code (75) for scripts that
   run a job night after night, and the longest unit `--plan` prints
 - integrity: the per-frame checksums kept with the output, and `seedvr2x verify` to check a
@@ -3334,7 +3351,7 @@ writers, and the planner needs real shot lengths.
    wait (see [Pipeline](#pipeline-per-shot), step 3), which blocks swap and what leaves the
    GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewritten)), the order of the
    planner's choices, the pins, what of a plan a resume keeps, the time model and `--until`'s
-   rule. It is built without `torch.compile`; the VAE's, opt-in, comes with the next batch
+   rule. It was built without `torch.compile`; the VAE's, opt-in, came on 2026-10-30
    (decided on 2026-10-24, see [Memory planner](#memory-planner)).
 5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow: built on 2026-10-12
    (see [Output](#output)). The manual sptenc workflow already worked without it.
