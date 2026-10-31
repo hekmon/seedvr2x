@@ -163,6 +163,17 @@ uv run pytest
   `SEEDVR2X_MODEL_DIR`. The other GPU tests' runs give a cut list, empty for one shot. Its
   references, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its
   docstring.
+- `test_milestone1_unpinned` (same file) pins no tile: its two calls, `--plan` then the run, are
+  each compared with the plan the planner makes for the free memory that call recorded itself
+  (`compare_with_planner`; the `--plan` call's reading from its manifest, the run's from its
+  `--verbose` log), never with each other: a desktop that drives the card moves its free memory
+  between them, and a plan that follows it is right. `test_plan_and_run_read_the_same_free_memory`
+  holds the two readings to one figure, back to back, the run stopped once it has planned, and
+  skips, saying the figures, where the other programs' memory on the card moved between them. Its
+  name lacks `milestone1`: a gate that selects by `-k milestone1` doesn't run it, so the gate's
+  hold names it. `tests/test_regression_unpinned.py` holds the helpers on the CPU, on synthetic
+  inputs: a reading found in a log or a manifest, the planner's plan rebuilt for it, the
+  comparison and its failure message (each call's reading, windows and blocks), the run stopped.
 - numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
   cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`cli.NUMZ_PADDING`),
   which an output directory's manifest records, so that a job is never resumed in the other
@@ -245,6 +256,13 @@ uv run pytest
   with no first pass, detector, plan, memory read, model or unit, its manifest and index
   untouched (whether the index is there, missing, damaged or cut short), still held to its
   settings, model files, source and directory, and to its environment (accepted or refused).
+  The files are known by size and modification time (`st_mtime_ns`), recorded beside their
+  SHA-256 (the `Finished` fixture; `tests/test_pull.py` for the model files): read where both
+  match, nothing; hashed where one differs, the job said finished if the content is the same and
+  refused if another file has the same size and a new time; a source vouched for only at its
+  recorded path (a copy elsewhere with the same size and time is hashed); a record without the
+  time hashed as before; a job with anything left to make, its assembly included, hashing
+  everything at each start.
   A `.mkv` path's finished file keeps its own manifest beside it (`tests/test_assembled.py`): the
   same command makes nothing, another job or a changed file is refused, `--plan` writes nothing,
   and a stop after each of the end steps (file, checksums, work record, manifest beside it,
@@ -266,9 +284,14 @@ uv run pytest
   `tests/test_cli_run.py`: the segments changed told once, a PNG segment, `--plan` saying it and
   writing nothing).
 - Every ffmpeg and ffprobe seedvr2x starts ends with it (`media/ffmpeg.py`'s `ends_with_us`),
-  held for all of them by `tests/test_ends_with_us.py`: a static scan of `src/` (every process
-  started passes the hook, the segment command's shell alone excepted, and nothing else starts
-  one), a child process per kind of site (the startup check, probes, fingerprint, packet count
+  held for all of them by `tests/test_ends_with_us.py`: a static scan of `src/`, a function
+  (`scan`) held on its own to synthetic sources, one proof per rule (an aliased `subprocess` or
+  `os`, a name imported from either, `os`'s starters by family, `spawn*`, `exec*`, `posix_spawn*`,
+  `fork*`, `system` and `popen`), and one counting the hooked and unhooked starts and leaving plain
+  uses alone; on `src/` it finds no violation, 16 starts with the hook (a new one is counted on
+  purpose) and one without, the segment command's shell; `prctl` resolved in the parent before
+  any fork, the hook holding the typed C function and no `CDLL` (a lookup in the child would
+  allocate); a child process per kind of site (the startup check, probes, fingerprint, packet count
   and the rest) with a fake ffmpeg and ffprobe on `PATH` that only wait, SIGKILLed alone, and its
   control with the hook replaced by none in that site's module, where they stay, the reader's and
   the writer's real ffmpeg (skipped without a build seedvr2x accepts), and the segment command's
@@ -279,7 +302,10 @@ uv run pytest
   its minimum span, steps of the wall told from drift (a few seconds either way, an hour set, a
   VM asleep, a long unit), the band outside which a ratio is not used, and every duration
   printed (time left, the end, `--until`, time spent, the assembly's reading) said in the wall's
-  seconds.
+  seconds. A span said before the ratio is measured is the wall's own seconds over it, from the
+  readings taken at each line logged (`cli._sampled`, the handler's filter, tested where
+  `cli._logging` installs it, with and without `--verbose`); a step of the wall inside a span, or
+  wall seconds outside 0.8 to 1.25 of the span's own, leave the run's own seconds, said at debug.
   `tests/conftest.py`'s autouse fixture `one_to_one_clock` replaces the clock's readers by a
   frozen pair, so that every other test sees a ratio of 1.0: a long session's real drift would
   leak into their expected durations.
@@ -289,25 +315,45 @@ uv run pytest
   among `--plan`'s and a run's warning, which never refuses.
 - `--compile` is held on the CPU by `tests/test_compile.py` (`runtime/compiling.py`, the
   planner's compiled passes): the plan holding a compiled pass to 1.1 times its tile's plain peak
-  and to the measured range of shapes, the shapes warmed, the order of the load with fakes (the
+  and to the measured range of shapes, the shapes warmed (the decoder's latent in one layout, the
+  DiT's, dense channels last, for the run's decodes and the calibration's: the run's own calls,
+  shots of 1 to 64 latents, are compared with the warm-up's), the order of the load with fakes (the
   VAE compiled before the DiT loads, the compile workers shut before its blocks), the VAE's
   exclusion of the causal convolutions from the graph, inductor's deterministic mode kept on, the
   flag recorded and a resume with the other value another job, the cache in the job's own
-  directory, and a compilation after the warm-up said at warning. Compiled for real only on a
-  tiny module, in a subprocess so that no state of inductor stays in the suite (two tests, skipped
-  without a C++ compiler); the VAE's compile on a GPU is not in the default suite.
+  directory, and a compilation after the warm-up said at warning. A job outside the shapes
+  measured (a pin beyond them, a frame too small for a tile, an untiled decode) is refused, never
+  run plain, the refusal naming the pass, its tiles and the shapes, then its advice; a plan with
+  no unit made is planned again for the other value of `--compile` without a flag, and units made
+  make it another job's settings; inductor's modules count in the environment's comparison only
+  between two compiled jobs. The plan's compile line gives the time by kind of job (new, or a
+  resume with the cache warm) and by disk: a Windows drive is found in `/proc/self/mountinfo`, the
+  longest mount point deciding, a 9p mount counting only with `aname=drvfs`. Compiled for real
+  only on a tiny module, in a subprocess so that no state of inductor stays in the suite (two
+  tests, skipped without a C++ compiler); the VAE's compile on a GPU is not in the default suite.
 - The default output (DESIGN.md, Architecture, What it prints): `tests/test_cli.py` holds
   `TORCH_CPP_LOG_LEVEL` set before torch is imported (seen by a finder at each import, in a
   subprocess) and the user's own value winning, and the early reading of the card in a
   subprocess that must import no torch; `tests/test_model.py` the sampler's progress bars off
   but under `--verbose`, and a download's kept; `tests/test_cli_run.py` the lines saying the date
-  or the zone's offset changed; `tests/test_timing.py` the calibration's working at debug and a
-  duration under a second said so.
+  or the zone's offset changed, and what a user does nothing with (the conversions' fingerprint,
+  the assembly's rate and count) at debug; `tests/test_timing.py` the calibration's working at
+  debug and a duration under a second said so, its line saying what it is for;
+  `tests/test_assembly.py` and `tests/test_assembled.py` the rehearsal's line saying the same.
+  The card line leaves the driver's figure where NVML's is the smaller to a debug record beside
+  it (`tests/test_planner.py`; `tests/test_cli_run.py`'s
+  `test_the_drivers_figure_is_said_under_verbose`).
+  The spilling driver's two warnings are written out whole in `tests/test_memory.py`
+  (`LENDS_LINE`, `HOLDS_LINE`), not built from `memory`'s constants, so that a change of wording
+  fails the tests that compare them.
 - The calibration's measured lengths (`runtime/calibration.py`): `tests/test_timing.py`'s
   stand-ins `Steady`, `Heavy` (slow windows, and the first calls costing what the calibration's
   constants say) and `SlowEncode` (slow encodes) give the times, and the tests hold the longer
   window's length by time, never under the attention window's 30 latents or over the job's
-  longest, and the warm-up counted as a sample where its first call is small against it.
+  longest, and the warm-up counted as a sample where its first call is small against it. The
+  calibration's decodes take the latent in the DiT's layout, `(T', h, w, 16)` dense, whatever the
+  encode gave (`Steady` hands on the encode's channel-major view) and a dense one uncopied: a
+  compiled decoder's guards read the strides.
 - The writers: `tests/test_writer.py` holds the stale checksums, removed only once the new file
   is safe, and relative names holding `": "` or a leading `-` never taken by ffmpeg for a
   protocol or an option (`media/ffmpeg.argument`), for FFV1 and PNG; `tests/test_segment_cmd.py`
@@ -321,6 +367,10 @@ uv run pytest
   `--accept-env-change`, the warning given before the checks, the re-plan under the flag
   (`planner.PER_TOKEN` multiplied, so that the DiT phase refuses at the stand-in's size), the
   segments and latents kept, `--plan` looking and writing nothing.
+- Met running the suite from a worktree: `git read-tree -u --reset` empties the `upstream/`
+  submodule directories (link them again); `--compile`'s cache on a Windows drive under WSL2
+  costs minutes, so compile times are measured with the job on Linux's disk; `--until` takes
+  a time of day to the minute, so a test that stops a run inside a shot needs a shot of minutes.
 
 ## Comments and documents
 
