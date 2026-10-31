@@ -3748,8 +3748,7 @@ WORDS = [
     ),
     (
         held(30.03, 28.05),
-        "28.05 GiB free on the whole card by NVML (its driver reports 30.03 GiB free to this"
-        f" process){HELD_LINE}",
+        f"28.05 GiB free on the whole card by NVML{HELD_LINE}",
         "the plan counts on 22.15 GiB of the 28.05 GiB free on the whole card by NVML (its"
         " driver reports 30.03 GiB free to this process), the run held to the card's own memory",
         30.03,
@@ -3766,6 +3765,50 @@ WORDS = [
         0.0,
     ),
 ]
+
+
+def test_the_card_line_leaves_the_drivers_figure_to_its_debug_record() -> None:
+    # Design's ruling, baton 3, 2026-10-30: the card line keeps NVML's free memory and why the
+    # run is held; "its driver reports N GiB free to this process" is a debug record
+    # (card_detail), under --verbose. Held with NVML's figure the smaller: the line lacks the
+    # driver's, the record has it. Elsewhere the line is the free memory itself and no record
+    # is: the driver's figure the smaller (it stays in the line), the card's not read, a driver
+    # that refuses.
+    film = shots(31)
+    held_to_card = {
+        "smaller": held(30.03, 28.05),
+        "driver": held(28.05, 29.20),
+        "unread": held(28.05, None),
+    }
+    said: dict[str, str] = {}
+    detail: dict[str, str | None] = {}
+    for name, reading in held_to_card.items():
+        made, peaks = planner.plan(reading, HD, film, Pins(), None)
+        said[name] = planner.said(made, peaks, "a card", HD, film, Pins())[0]
+        detail[name] = planner.card_detail(peaks)
+    assert (
+        said["smaller"]
+        == f"plan: card: a card, 28.05 GiB free on the whole card by NVML{HELD_LINE}"
+    )
+    assert detail["smaller"] == (
+        "plan: card: the GPU's driver reports 30.03 GiB free to this process, which the run isn't"
+        " held to: the whole card has 28.05 GiB free by NVML"
+    )
+    # The other branch, the driver's figure the smaller, is the free memory: unchanged.
+    assert said["driver"] == (
+        "plan: card: a card, 28.05 GiB free as its driver reports it to this process (the whole"
+        f" card has 29.20 GiB free by NVML){HELD_LINE}"
+    )
+    assert said["unread"] == (
+        "plan: card: a card, 28.05 GiB free as its driver reports it to this process (the whole"
+        f" card's, NVML's, wasn't read){HELD_LINE}"
+    )
+    assert detail["driver"] is None and detail["unread"] is None
+    # A driver that refuses has no such record, nor does an early reading.
+    made, peaks = planner.plan(round(22.75 * GIB), HD, film, Pins(), None)
+    assert planner.card_detail(peaks) is None
+    made, peaks = planner.plan(memory.early(96 * GIB), HD, film, Pins(), None, recorded=Plan(8))
+    assert planner.card_detail(peaks) is None
 
 
 @pytest.mark.parametrize(("free", "line", "there", "driver", "freeable"), WORDS)
@@ -3842,8 +3885,13 @@ def test_each_figure_of_the_free_memory_is_named(
     # What the driver reported is read from either, the plan's lines as a run logs them and a
     # refusal, by the regression's unpinned case, which a small card alone skips
     # (tests/test_regression.py, reported).
+    # The card line leaves the driver's figure out where NVML's is the smaller (design's ruling,
+    # baton 3, 2026-10-30): the debug record next to it (card_detail) carries it.
+    detail = planner.card_detail(peaks)
     logged = "".join(f"12:00:00 {row}\n" for row in said)
-    assert test_regression.reported(logged) == driver
+    assert test_regression.reported(logged) == (None if detail is not None else driver)
+    if detail is not None:
+        assert test_regression.reported(f"12:00:00 DEBUG {detail}\n") == driver
     assert test_regression.reported(f"12:00:00 ERROR {window_refused}\n") == driver
     # --swap-blocks refused, on a resume whose recorded window the blocks pinned don't hold:
     # 1.69 GiB short, which memory freed on the card gives where the card's figure is 1.98 GiB

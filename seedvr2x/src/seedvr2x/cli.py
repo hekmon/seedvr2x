@@ -1215,8 +1215,12 @@ def _run(args: argparse.Namespace) -> int:
                 else _own_layouts(recorded_as(None, plan.window), prior, reshaped),
                 disk=room.line(),
             )
-            for line in said:
+            for number, line in enumerate(said):
                 logger.info("%s", line)
+                # The card line's other figure, the driver's, at debug right after it (design's
+                # ruling, baton 3, 2026-10-30), so that --verbose reads the two together.
+                if number == 0 and (detail := planner.card_detail(peaks)) is not None:
+                    logger.debug("%s", detail)
             # A pass in tiles larger than any measured, which only a pin gives it: warned of,
             # once per pass (planner.beyond_measured).
             for line in planner.beyond_measured(plan):

@@ -2923,18 +2923,45 @@ def _held_under(reading: Reading) -> int:
     return min(reading.reported, reading.card)
 
 
-def _named(reading: Reading, said: Callable[[float], str]) -> str:
+def _named(reading: Reading, said: Callable[[float], str], driver: bool = True) -> str:
     """Which of a held reading's figures is the free memory, in words for a line that has just
     given it as "N GiB free", with the other figure: the words of runtime/memory.py's own log
-    lines. `said` puts a figure in GiB, as the line around it does."""
+    lines. `said` puts a figure in GiB, as the line around it does.
+
+    driver: whether the driver's figure, where the whole card's, NVML's, is the smaller and so
+    the free memory, is said beside it. The plan's card line leaves it out (design's ruling,
+    baton 3, 2026-10-30: "its driver reports N GiB free to this process" under --verbose; the
+    line keeps NVML's free and why the run is held), and card_detail says it at debug; a refusal
+    (_there) keeps it."""
     if reading.card is None:
         return "as its driver reports it to this process (the whole card's, NVML's, wasn't read)"
     if reading.card <= reading.reported:
+        if not driver:
+            return "on the whole card by NVML"
         reported = said(reading.reported)
         return f"on the whole card by NVML (its driver reports {reported} GiB free to this process)"
     return (
         "as its driver reports it to this process (the whole card has"
         f" {said(reading.card)} GiB free by NVML)"
+    )
+
+
+def card_detail(peaks: Peaks) -> str | None:
+    """The driver's figure the plan's card line no longer carries (design's ruling, baton 3,
+    2026-10-30: under --verbose), as the debug record the caller logs right after that line
+    (cli, "plan: " in front, as said gives the lines): on a held run whose whole-card figure,
+    NVML's, is the smaller, the one the line names, what the driver reports free to this process
+    and that the run isn't held to it. None elsewhere: where the driver's figure is the free
+    memory the line gives, the card's not read, or an early reading (memory.early), which asked
+    the driver nothing."""
+    reading = peaks.reading
+    if not reading.held or reading.nvml is not None:
+        return None
+    if reading.card is None or reading.card > reading.reported:
+        return None
+    return (
+        f"plan: card: the GPU's driver reports {_gib(reading.reported)} GiB free to this process,"
+        f" which the run isn't held to: the whole card has {_gib(reading.card)} GiB free by NVML"
     )
 
 
@@ -2971,10 +2998,10 @@ def _card_said(card: str, peaks: Peaks) -> list[str]:
         f" {_gib(free - reading.left - peaks.free)} GiB left to torch's allocator beyond a step's"
         f" peak; the margin of {_gib(MARGIN)} GiB is in the reserve"
     )
+    named = _named(reading, _gib, driver=False) if early is None else f"({early})"
     lines = [
-        f"card: {card}, {_gib(free)} GiB free"
-        f" {_named(reading, _gib) if early is None else f'({early})'}: the run is held to the"
-        " card's own memory, its driver giving more than the card has",
+        f"card: {card}, {_gib(free)} GiB free {named}: the run is held to the card's own memory,"
+        " its driver giving more than the card has",
         budget,
     ]
     if peaks.tightened is not None:

@@ -1092,10 +1092,12 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     # line; and it is the one place a run's log says them: memory's own line is for its debug
     # level.
     assert (
-        "plan: card: a stand-in, 92.50 GiB free on the whole card by NVML (its driver reports"
-        " 94.50 GiB free to this process): the run is held to the card's own memory, its driver"
-        " giving more than the card has"
+        "plan: card: a stand-in, 92.50 GiB free on the whole card by NVML: the run is held to the"
+        " card's own memory, its driver giving more than the card has"
     ) in caplog.text
+    # The driver's figure is no longer in it (design's ruling, baton 3, 2026-10-30): under
+    # --verbose only (test_the_drivers_figure_is_said_under_verbose).
+    assert "its driver reports" not in caplog.text
     assert (
         "plan: budget: 87.20 GiB, the 92.50 GiB free less torch's limit, 3.00 GiB under it, and the"
         " reserve of 2.30 GiB left to torch's allocator beyond a step's peak; the margin of"
@@ -1108,6 +1110,35 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     ) in caplog.text
     # The run's limit is said once at the level a user reads: the first is for its debug level.
     assert caplog.text.count("torch held to ") == 1
+
+
+def test_the_drivers_figure_is_said_under_verbose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Design's ruling, baton 3, 2026-10-30: the plan's card line keeps NVML's free memory and why
+    # the run is held, and "its driver reports N GiB free to this process" goes under --verbose:
+    # a debug record right after the line, which the run logs at INFO without it. The whole card
+    # has 2 GiB less free than the driver reports, as under WSL2.
+    from seedvr2x.runtime import model
+
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    spilling_driver(monkeypatch, FREE - 2 * GIB)
+    monkeypatch.setattr(model, "load_models", lambda *a: STAND_IN_MODELS)
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    records = [(r.levelname, r.getMessage()) for r in caplog.records]
+    at = next(i for i, (_, text) in enumerate(records) if text.startswith("plan: card: "))
+    level, card = records[at]
+    assert level == "INFO" and "driver reports" not in card
+    assert records[at + 1] == (
+        "DEBUG",
+        "plan: card: the GPU's driver reports 94.50 GiB free to this process, which the run"
+        " isn't held to: the whole card has 92.50 GiB free by NVML",
+    )
+    assert not any(
+        "its driver reports" in text for level, text in records if text.startswith("plan: ")
+    )
 
 
 def test_the_user_s_allocator_stands_on_a_driver_that_spills(

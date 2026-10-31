@@ -494,10 +494,11 @@ UNTILED_FREE = 40.0
 
 # What the driver reported free to a run, in the words of the plan's first line and of its
 # refusals, the first that is there (reported): on a run held to the card, the driver's own
-# figure, said beside the whole card's or in its place; on a driver that refuses, the one figure
+# figure, said beside the whole card's (at debug, under --verbose: planner.card_detail) or in
+# its place; on a driver that refuses, the one figure
 # a refusal gives, or the plan's first line (planner._card_said, planner._there).
 REPORTED = (
-    r"its driver reports ([\d.]+) GiB free to this process",
+    r"driver reports ([\d.]+) GiB free to this process",
     r"([\d.]+) GiB free as its driver reports it to this process",
     r"the driver reports ([\d.]+) GiB free",
     r"plan: [^\n]*, ([\d.]+) GiB free, a budget of ",
