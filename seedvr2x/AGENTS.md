@@ -164,16 +164,25 @@ uv run pytest
   references, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its
   docstring.
 - `test_milestone1_unpinned` (same file) pins no tile: its two calls, `--plan` then the run, are
-  each compared with the plan the planner makes for the free memory that call recorded itself
-  (`compare_with_planner`; the `--plan` call's reading from its manifest, the run's from its
-  `--verbose` log), never with each other: a desktop that drives the card moves its free memory
-  between them, and a plan that follows it is right. `test_plan_and_run_read_the_same_free_memory`
-  holds the two readings to one figure, back to back, the run stopped once it has planned, and
-  skips, saying the figures, where the other programs' memory on the card moved between them. Its
+  each compared with the plan the planner makes for the memory that call recorded itself
+  (`compare_with_planner`), never with each other: a desktop that drives the card moves its free
+  memory between them, and a plan that follows it is right.
+  `test_plan_and_run_read_the_same_free_memory` holds the two readings to one figure, back to
+  back, the run stopped once it has planned, and skips, saying the figures, where the other
+  programs' memory on the card moved between them. Its
   name lacks `milestone1`: a gate that selects by `-k milestone1` doesn't run it, so the gate's
-  hold names it. `tests/test_regression_unpinned.py` holds the helpers on the CPU, on synthetic
-  inputs: a reading found in a log or a manifest, the planner's plan rebuilt for it, the
-  comparison and its failure message (each call's reading, windows and blocks), the run stopped.
+  hold names it. Both calls run with `-v`: the free memory is the `--plan` call's from its
+  manifest and the run's from its log; the system memory available is each call's own, from its
+  log, in bytes (`logged_host`: a plan bound by it moves at steps of a few MiB, which two decimals
+  of GiB can't rebuild); the disk line is compared by its masters (size at most, assembled or
+  not, rebuilt from the manifest by `recorded_disk`), without the free space and the verdict
+  after it. The run's comparison comes after its tiling check, so that a run that tiles where
+  `--plan` did not skips or fails as `unpinned()` says. `tests/test_regression_unpinned.py` holds
+  the helpers on the CPU, on synthetic inputs: a reading found in a log or a manifest, the
+  host's reading found in a log or said unread, the planner's plan rebuilt for them (a plan bound
+  by the system memory from the logged bytes), the disk line compared by its masters alone and
+  rebuilt from a manifest, errors found with and without `--verbose`, the comparison and its
+  failure message (each call's reading, windows, blocks and disk masters), the run stopped.
 - numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
   cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`cli.NUMZ_PADDING`),
   which an output directory's manifest records, so that a job is never resumed in the other
@@ -287,8 +296,11 @@ uv run pytest
   held for all of them by `tests/test_ends_with_us.py`: a static scan of `src/`, a function
   (`scan`) held on its own to synthetic sources, one proof per rule (an aliased `subprocess` or
   `os`, a name imported from either, `os`'s starters by family, `spawn*`, `exec*`, `posix_spawn*`,
-  `fork*`, `system` and `popen`), and one counting the hooked and unhooked starts and leaving plain
-  uses alone; on `src/` it finds no violation, 16 starts with the hook (a new one is counted on
+  `fork*`, `system` and `popen`; a starter named without being called, bound or in a
+  `functools.partial`; the `subprocess` or `os` module itself bound or passed; asyncio's and pty's
+  starters by name; multiprocessing whole), one leaving subprocess's exceptions, result type and
+  pipe constants alone, and one counting the hooked and unhooked starts and leaving plain uses
+  alone; on `src/` it finds no violation, 16 starts with the hook (a new one is counted on
   purpose) and one without, the segment command's shell; `prctl` resolved in the parent before
   any fork, the hook holding the typed C function and no `CDLL` (a lookup in the child would
   allocate); a child process per kind of site (the startup check, probes, fingerprint, packet count
@@ -321,15 +333,23 @@ uv run pytest
   VAE compiled before the DiT loads, the compile workers shut before its blocks), the VAE's
   exclusion of the causal convolutions from the graph, inductor's deterministic mode kept on, the
   flag recorded and a resume with the other value another job, the cache in the job's own
-  directory, and a compilation after the warm-up said at warning. A job outside the shapes
+  directory, and a graph compiled, or tried, after the warm-up said at warning. The recompile
+  limits (per code object and for all) are raised past any warm-up and a higher one the process
+  set is kept; a limit hit in the warm-up is a refusal naming the way out, with
+  `fail_on_recompile_limit_hit` on and `suppress_errors` off while it runs (torch calls them
+  incompatible), both as they were afterwards, on the refusal too. A job outside the shapes
   measured (a pin beyond them, a frame too small for a tile, an untiled decode) is refused, never
   run plain, the refusal naming the pass, its tiles and the shapes, then its advice; a plan with
   no unit made is planned again for the other value of `--compile` without a flag, and units made
   make it another job's settings; inductor's modules count in the environment's comparison only
-  between two compiled jobs. The plan's compile line gives the time by kind of job (new, or a
-  resume with the cache warm) and by disk: a Windows drive is found in `/proc/self/mountinfo`, the
-  longest mount point deciding, a 9p mount counting only with `aname=drvfs`. Compiled for real
-  only on a tiny module, in a subprocess so that no state of inductor stays in the suite (two
+  between two compiled jobs. The plan's compile line gives the time by the shapes the warm-up
+  compiles (an untiled pass is one, never counted by tiles), by kind of job (new, or a resume
+  with the cache warm, found so only where the recorded plan is kept as it is: a re-planned
+  resume or a start killed while compiling is a new job's figure) and by disk, the line saying
+  only "on a Windows drive" and the cache's many small files at debug. A Windows drive is found
+  in `/proc/self/mountinfo`, the longest mount point deciding, a 9p mount counting only with
+  `aname=drvfs`. Compiled for real only on a tiny module, in a subprocess so that no state of
+  inductor stays in the suite (two
   tests, skipped without a C++ compiler); the VAE's compile on a GPU is not in the default suite.
 - The default output (DESIGN.md, Architecture, What it prints): `tests/test_cli.py` holds
   `TORCH_CPP_LOG_LEVEL` set before torch is imported (seen by a finder at each import, in a
@@ -340,12 +360,19 @@ uv run pytest
   the assembly's rate and count) at debug; `tests/test_timing.py` the calibration's working at
   debug and a duration under a second said so, its line saying what it is for;
   `tests/test_assembly.py` and `tests/test_assembled.py` the rehearsal's line saying the same.
+  The help texts are `tests/test_cli.py`'s: `--compile`'s with no figure in it (no digit, dB, min
+  or px; its four points asserted in words), `--accept-env-change`'s naming both its uses, and the
+  main help naming `seedvr2x verify`. The system memory the plan counts on is said at debug alone
+  by `--plan` and by a run, or that none was read, and is not recorded in the manifest
+  (`tests/test_cli_run.py`'s `test_the_system_memory_the_plan_counts_on_is_logged_at_debug`).
   The card line leaves the driver's figure where NVML's is the smaller to a debug record beside
   it (`tests/test_planner.py`; `tests/test_cli_run.py`'s
   `test_the_drivers_figure_is_said_under_verbose`).
   The spilling driver's two warnings are written out whole in `tests/test_memory.py`
   (`LENDS_LINE`, `HOLDS_LINE`), not built from `memory`'s constants, so that a change of wording
-  fails the tests that compare them.
+  fails the tests that compare them. `HOLDS_LINE` carries the autouse `round_figures` fixture's
+  figures, so `SHIPPED_HOLDS_LINE` is the line with the shipped ones, held by
+  `test_the_shipped_holds_line_says_the_shipped_figures`.
 - The calibration's measured lengths (`runtime/calibration.py`): `tests/test_timing.py`'s
   stand-ins `Steady`, `Heavy` (slow windows, and the first calls costing what the calibration's
   constants say) and `SlowEncode` (slow encodes) give the times, and the tests hold the longer
