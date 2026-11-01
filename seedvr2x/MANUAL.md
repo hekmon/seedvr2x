@@ -323,7 +323,13 @@ memory allows.
 | `--input_noise_scale` | gone: numz's own addition, which only degrades |
 | `--latent_noise_scale` | gone from version 1: ByteDance uses 0 |
 | `--seed` | `--seed`, kept |
-| `--resolution`, `--max_resolution` | `--resolution`, the output's short side; nothing stands for `--max_resolution` today |
+| `--resolution` | `--resolution`, the output's short side, 1080 by default, numz's |
+| `--max_resolution` | dropped from version 0.1.0: the short side is the one size asked, and a size that doesn't fit is refused, naming the largest that does |
+| `--skip_first_frames`, `--load_cap` | gone: no option takes part of a source; cut the part you want with ffmpeg first and give that file as the source. `--until` stops a job at a set time, which is not the same ([stopping at a set time](#stopping-at-a-set-time)) |
+| `--swap_io_components` | gone: `--swap-blocks` swaps whole blocks only; the DiT's other parameters (0.16 GiB) leave the GPU with the model when the plan sends it away for the VAE's passes, where numz's option left every unswapped block on the GPU through the decode ([bug 12](../research/bugs/12-swap-io-dit-leak.md)) |
+| `--tile_debug` | gone: in place of numz's picture of the tiles, the plan's lines say each pass's tiles, their size, overlap and count ([the plan, line by line](#the-plan-line-by-line)) |
+| `--compile_backend`, `--compile_mode`, `--compile_fullgraph`, `--compile_dynamic`, `--compile_dynamo_cache_size_limit`, `--compile_dynamo_recompile_limit` | gone: `--compile` takes no tuning. It keeps numz's settings (inductor in its default mode, not full-graph, static shapes), with inductor's deterministic mode kept on and the recompile limits raised to hold every shape the job meets, numz's 128 being too few at 4K ([compiling the VAE](#compiling-the-vae---compile)) |
+| `--debug` | `-v`, `--verbose` ([the lines](#the-lines)) |
 | `--output_format`, `--video_backend`, `--10bit` | `--format`: FFV1 masters (`yuv420p10le` by default, `gbrp16le`) or 16-bit PNG |
 | `--dit_model`, `--model_dir` | `--dit-model` and `--model-dir`, the sharp 7B by default; version 0.1.0 runs the two 7Bs in float16 only, any 3B, GGUF or fp8 file refused; the files come from seedvr2x's own Hugging Face repository, pinned; no model file is ever deleted |
 | `--cuda_device` | one device per process |
@@ -1655,8 +1661,9 @@ one card the DiT's time per token moved between 0.23 and 0.45 ms.
   `--plan` pays it too, and the run pays it again. `--verbose` adds its figures, each kind's
   constant and rate.
 - **How close:** on an RTX 5090, each unit's estimate missed by a median of 1.3 to 5.2% by kind,
-  and `--plan`'s whole job by −1.3 to −3.6%. A single unit can still miss by 22 to 31%; one in
-  20 per phase at most ran over 1.15 times its estimate, the margin `--until` takes.
+  and `--plan`'s whole job by −1.3 to −3.6%; by the wall clock, on 2026-10-31, `--plan`'s time
+  against the run's was −2.6% at 1080p and +0.1% at 4K. A single unit can still miss by 22 to
+  31%; one in 20 per phase at most ran over 1.15 times its estimate, the margin `--until` takes.
 - **Each unit's line** ends with the job's time left and the time of day it should end:
   `about 1 h 12 min left, the job ending about 07:42`.
 - **One clock.** The run times its units by its own steady clock, and says every duration, time
@@ -1683,29 +1690,51 @@ mid-job, at every new window length. Off by default.
   decodes 12% faster ([compile.md](../research/docs/compile.md)). An hour of 1080p saves about
   2 hours of some 22.
 - **What it costs: a compilation at every start**, a resume's included, after the plan and
-  before the DiT loads. On an RTX 5090 at 1080p it took about 6 min 50 s for a new job, and
-  1 min 54 s on a resume, whose compile cache waits in the job's directory (`compile-cache/`).
-  `--plan` pays it too, to calibrate the compiled passes. Its lines, on a new directory job:
+  before the DiT loads, its cache kept in the job's directory (`compile-cache/`) for a resume.
+  On an RTX 5090 at 1080p, a new job compiled in 4 min 0 s with its directory on Linux's own
+  disk, and a resume in 1 min 31 s. Under WSL2 with the directory on a Windows drive, the
+  cache's thousands of small files go through the drive's mount: 6 min 23 s to 6 min 27 s for a
+  new job, 1 min 49 s for a resume, and 8 min 38 s to 8 min 42 s for a new 4K job. `--plan` pays
+  it too, to calibrate the compiled passes.
+- **The plan's `compile:` line says how long,** from the job's own tile shapes and its drive:
+  about 40 s a shape for a new job and 15 s on a resume on Linux's own disk, 65 s and 20 s on a
+  Windows drive. The 1080p job measured had 6 shapes, the 4K one 8: on Linux's disk, 4 min for a
+  new job and 1 min 30 s for a resume for 6 shapes, 5 min 20 s and 2 min for 8 shapes. These
+  rates were measured on the RTX 5090's host; the compilation is the CPU's work, so another
+  machine's may differ: they are provisional until more are measured. Here is a new 1080p job on
+  a Windows drive, for which the line said 6 min 30 s. The Windows drive's rates were fitted on
+  this job and the 4K one (Linux's on one 1080p job), so this checks the fit, not another
+  machine:
 
   ```
-  02:39:46 compiling the VAE (--compile): its encoder and decoder, 62 causal convolutions left out of the graph, warmed at the encode's 1856x1104, 128x1104 and the decode's 1088x1088, 896x1088, 1088x80, 896x80, shots of 2, 3 latents or more; the cache in film.segments/compile-cache
-  02:46:37 the VAE compiled in 6 min 52 s
-  02:48:49 time: estimated from a calibration of 54 s, the models loaded in 8 min 12 s, 6 min 52 s of it compiling the VAE
+  03:55:15 plan: compile: the VAE compiled (--compile), each pass held to 1.1 times its plain peak, in the shapes measured only; compiling its 6 shapes takes about 6 min 30 s for this new job, about 2 min on a resume, its cache warm (measured on an RTX 5090's host, on a Windows drive), paid before the DiT loads, at every start and resume, its cache kept in the job's directory
+  03:55:17 compiling the VAE (--compile): its encoder and decoder, 62 causal convolutions left out of the graph, warmed at the encode's 1664x1104, 320x1104 and the decode's 1024x1024, 960x1024, 1024x144, 960x144, shots of 2, 3 latents or more; the cache in film.segments/compile-cache
+  04:01:44 the VAE compiled in 6 min 27 s
+  04:04:10 time: estimated from a calibration of 49 s, the models loaded in 8 min 7 s, 6 min 28 s of it compiling the VAE
   ```
 
-  The plan's `compile:` line still gives the study's figure, about 4 to 6 minutes; the run's own
-  lines say what it took.
-- **Who gains, who loses.** The units save about 0.093 s per 1080p frame (100 s over 1,079
-  frames). A job under about 4,400 frames loses (3 minutes of video at 24 frames a second), and
-  each resume adds about 1,200 frames to that; a film run night after night gains a tenth of its
-  time. Measured at 1080p only.
+- **Who gains, who loses.** At 1080p, a job of 6 shapes, the units save about 0.093 s a frame
+  (100 s over 1,079 frames), and a job gains once that has paid for its compilation at the plan
+  line's times. With the job's directory on Linux's own disk, a job under about 2,600 frames
+  loses (under 2 minutes of video at 24 frames a second), and each resume adds about 1,000
+  frames to that; on a Windows drive, about 4,200 frames, and about 1,300 a resume. A film run
+  night after night gains a tenth of its time. At 4K the units' saving per frame isn't measured:
+  these figures are 1080p's.
 - **Its frames are not plain code's,** but they are the same in every process, a resume's
-  included. The VAE alone, compiled against plain on the same latent, gave frames 59.0 to
+  included. Measured on whole 1080p jobs, three excerpts of about 100 frames (two of live
+  action, one of anime), plain code pinned to the compiled plan's tiles, window and blocks: the
+  frames under `--compile` came out 54 to 61 dB from plain code's (medians 54.9, 55.1 and 60.3),
+  where another seed's came out 34 to 46 dB from them, frame by frame, on these clips. By the
+  medians, the compiled frames sit 17 to 20 dB closer to plain code's than another seed's do.
+  The VAE alone, compiled against plain on the same latent in the study, gave frames 59.0 to
   61.8 dB apart, 2 to 9 levels at most, and the encode's latent 0.10 to 0.14 apart at most
-  ([compile.md](../research/docs/compile.md)); a whole job's frames, the DiT carrying that
-  latent, aren't measured yet. So `--compile` is a setting of the
-  job, recorded: a job that has made units can't be resumed with it switched, which is another
-  job; a plan that has made none is planned again either way.
+  ([compile.md](../research/docs/compile.md)). Against that range, the whole jobs' medians sit 4
+  to 7 dB lower on the live action and inside it on the anime; the likely reading is the DiT
+  carrying the encode's small difference on, though the VAE alone wasn't measured on these
+  jobs. On the live clips the largest differences sit in the frame's top-left corner, far from
+  the tiles' seams, where the largest difference between two seeds sits too. So `--compile`
+  is a setting of the job, recorded: a job that has made units can't be resumed with it
+  switched, which is another job; a plan that has made none is planned again either way.
 - **Only the shapes measured compiled:** encode tiles up to 1856 px, or the 1080p frame whole;
   decode tiles up to 1152 px, never untiled, until larger ones are measured. So with it, the
   decode is tiled even on a card that would decode the frame whole, and at 4K in tiles no larger
@@ -1722,7 +1751,10 @@ mid-job, at every new window length. Off by default.
   ```
 
 - **A compilation that fails** stops the run before the DiT loads, nothing run: the same command
-  without `--compile` runs the plain VAE.
+  without `--compile` runs the plain VAE. So does a compilation that reaches PyTorch's recompile
+  limit, which would leave part of the VAE uncompiled: `--compile: the compiler's recompile
+  limit was reached while compiling the VAE, which would have left part of it uncompiled;
+  nothing was run, the same command without --compile runs the plain VAE`.
 
 ## Integrity
 
@@ -1802,7 +1834,9 @@ uv run seedvr2x clip.mkv -o clip.1080p.mkv
 ```
 
 Here paths are shown as in the default cache, and a few lines that repeat another's form are
-left out; nothing else is changed. A longer job prints the same lines, more of them.
+left out; the plan's card line is shown as 0.1.0 prints it: the run printed the driver's own
+figure in it too, which 0.1.0 prints only under `--verbose`. Nothing else is changed. A longer
+job prints the same lines, more of them.
 
 ### The lines
 
@@ -1814,15 +1848,15 @@ the date when it changes, and the new offset when the clocks change.
 
 `--verbose` adds debug lines, and gives every line its date, milliseconds, level and source.
 Among them: ffmpeg's conversions' fingerprint, the calibration's figures, the assembly time's
-disk rate and masters' size, the driver's own memory figures, and a refusal's full figures. It
-also shows two kinds of lines that aren't seedvr2x's, kept out of the default output: the
-model's sampler's progress bar, one per window (`EulerSampler: 100%|██████████| 1/1
-[00:07<00:00,  7.68s/it]`), and PyTorch's own lines from its C++ code, such as its allocator's
-on Linux each time it trims its pool to make room (`[W1023 03:24:11.423298250
+disk rate and masters' size, the driver's own memory figures, the system memory the plan counts
+on, and a refusal's full figures. It also shows two kinds of lines that aren't seedvr2x's, kept
+out of the default output: the model's sampler's progress bar, one per window (`EulerSampler:
+100%|██████████| 1/1 [00:07<00:00,  7.68s/it]`), and PyTorch's own lines from its C++ code, such
+as its allocator's on Linux each time it trims its pool to make room (`[W1023 03:24:11.423298250
 CUDAMallocAsyncAllocator.cpp:377] [cudaMallocAsync] recovered from an allocation failure by
-trimming the pool and retrying.`), every few seconds in a long window packed to the budget.
-Both are harmless. A `TORCH_CPP_LOG_LEVEL` of your own decides PyTorch's lines; a download's
-progress bar shows either way.
+trimming the pool and retrying.`), every few seconds in a long window packed to the budget. Both
+are harmless. A `TORCH_CPP_LOG_LEVEL` of your own decides PyTorch's lines; a download's progress
+bar shows either way.
 
 ### Before the plan
 
@@ -1854,11 +1888,11 @@ progress bar shows either way.
   can't take is found before the night's work, not at its end ([the finished
   file](#the-finished-file)).
 - **The model files** are found, recognised by their tensors, then hashed: a run with anything
-  left to make reads the 16.5 GB DiT whole to check its SHA-256, saying first for about how long,
-  here 82.6 s of the three files' 85 s, from a Windows disk seen through WSL2; 7 s from the 96 GB
-  card's local disk. The VAE's
-  and the detector's take seconds. The first run downloads them instead (`not in the cache,
-  downloading 16.5 GB from hekmon/seedvr2x at c14a2bc4`).
+  left to make reads the 16.5 GB DiT whole to check its SHA-256, saying first for about how
+  long, here 82.6 s of the three files' 85 s, from a Windows disk seen through WSL2; 7 s from
+  the 96 GB card's local disk. The VAE's and the detector's take seconds. The first run
+  downloads them instead (`not in the cache, downloading 16.5 GB from hekmon/seedvr2x at
+  c14a2bc4`).
 - **The two warnings** are [WSL2's](#under-wsl2): a Linux driver gives instead one line saying
   it refuses what the card can't hold.
 - **The first pass** says what it reads first, then decodes every frame, scores it for cuts, and
@@ -1869,8 +1903,10 @@ progress bar shows either way.
 
 ### The plan, line by line
 
+This run's plan, its card line as 0.1.0 prints it:
+
 ```
-03:35:43 plan: card: NVIDIA GeForce RTX 5090, 14.91 GiB free on the whole card by NVML (its driver reports 30.03 GiB free to this process): the run is held to the card's own memory, its driver giving more than the card has
+03:35:43 plan: card: NVIDIA GeForce RTX 5090, 14.91 GiB free on the whole card by NVML: the run is held to the card's own memory, its driver giving more than the card has
 03:35:43 plan: budget: 9.91 GiB, the 14.91 GiB free less torch's limit, 0.50 GiB under it, and the reserve of 4.50 GiB left to torch's allocator beyond a step's peak; the margin of 0.60 GiB is in the reserve
 03:35:43 plan: frames: 1920x1080 padded to 1920x1104 for the model, 8,280 tokens a latent
 03:35:43 plan: attention: FlashAttention 2, which is installed
@@ -1898,8 +1934,9 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
 
 - **card** and **budget:** what the plan counts on. Under WSL2, the whole card's free memory
   (14.91 GiB here, the other program and the desktop holding the rest), less 0.5 GiB left to the
-  card and the 4.5 GiB reserve: 9.91 GiB. On Linux it is one line, the free memory less the
-  0.6 GiB margin.
+  card and the 4.5 GiB reserve: 9.91 GiB. On Linux it is one line, the free memory less the 0.6
+  GiB margin. `--verbose` puts a line after the card's with the driver's own figure, which the
+  run isn't held to.
 - **frames:** the model works on frames padded to multiples of 16 (the padding is trimmed);
   a latent of this size is 8,280 tokens, what a window's memory and time go by.
 - **attention:** FlashAttention 2; without it, PyTorch's own SDPA, which takes a little more
@@ -2046,9 +2083,8 @@ another finished file, the 73 frames of the bird of [the example](#an-example-so
 
 ## Options
 
-`uv run seedvr2x --help` is the reference for what the installed version takes. For
-`--compile`'s figures, this manual's are newer than its help's: the help's text comes from the
-study, the manual's from the runs since.
+`uv run seedvr2x --help` is the reference for what the installed version takes; for figures,
+this manual is.
 
 **Input and output**
 
