@@ -54,13 +54,14 @@ def plain_and_compiled(
 def test_constants() -> None:
     # DESIGN.md, same section: a compiled pass 1.04 to 1.10 times plain's peak, held to 1.1; encode
     # tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152 px; compilation,
-    # measured on 2026-10-31: a new job 4 min and a resume 1 min 30 s on Linux's disk, 6 min 30 s
-    # and 2 min on a Windows drive. The 1080p frame padded is 1104x1920.
+    # measured on 2026-10-31 and fitted a shape (1080p's 6 shapes and 4K's 8 on one host): 40 s
+    # a new job and 15 s a resume on Linux's disk, 65 s and 20 s on a Windows drive. The 1080p
+    # frame padded is 1104x1920.
     assert planner.COMPILE_PEAK == 1.1
     assert (planner.COMPILE_ENCODE_TILE_MAX, planner.COMPILE_DECODE_TILE_MAX) == (1856, 1152)
     assert planner.COMPILE_ENCODE_WHOLE == padded_size(HD) == (1104, 1920)
-    assert (planner.COMPILE_NEW, planner.COMPILE_RESUME) == (240, 90)
-    assert (planner.COMPILE_NEW_DRIVE, planner.COMPILE_RESUME_DRIVE) == (390, 120)
+    assert (planner.COMPILE_SHAPE_NEW, planner.COMPILE_SHAPE_RESUME) == (40, 15)
+    assert (planner.COMPILE_SHAPE_NEW_DRIVE, planner.COMPILE_SHAPE_RESUME_DRIVE) == (65, 20)
 
 
 def test_a_compiled_pass_peaks_at_1_1_times_the_tiles_plain_peak() -> None:
@@ -391,9 +392,9 @@ def test_the_plan_says_the_compilation_and_its_time() -> None:
     said = lines(made, peaks)
     assert (
         "plan: compile: the VAE compiled (--compile), each pass held to 1.1 times its plain peak,"
-        " in the shapes measured only; compiling it takes about 4 min for this new job, about 1 min"
-        " 30 s on a resume, its cache warm (measured on an RTX 5090's host), paid before the DiT"
-        " loads, at every start and resume, its cache kept in the job's directory" in said
+        " in the shapes measured only; compiling its 3 shapes takes about 2 min for this new job,"
+        " about 45 s on a resume, its cache warm (measured on an RTX 5090's host), paid before the"
+        " DiT loads, at every start and resume, its cache kept in the job's directory" in said
     )
     # No line without the option, and none where the plan is plain and nothing was asked.
     plain, plain_peaks = planner.plan(free, HD, shots(76), Pins(), None)
@@ -447,20 +448,31 @@ def test_an_unreadable_mountinfo_is_linuxs_disk_said_at_debug(
     assert planner.on_windows_drive(Path("/mnt/d/job"), "garbage\n\n - \n") is False
 
 
+# The tiles of the job the compilation was measured on at 1080p: the encode's 2 shapes and the
+# decode's 4 (research/docs/compile.md), 6 in all.
+MEASURED_1080P = (Tiles(1280), Tiles(1088))
+
+
 def compile_line(
     cache: Path | None,
     monkeypatch: pytest.MonkeyPatch,
     *,
     drive: bool,
     recorded: bool = False,
+    target: tuple[int, int] = HD,
+    tiles: tuple[Tiles | None, Tiles | None] | None = None,
 ) -> str:
+    """The plan's compile line of a 96 GB card's plan of `target`, its tiles those of `tiles`
+    where given (the plan's own otherwise)."""
     monkeypatch.setattr(planner, "on_windows_drive", lambda path: drive)
-    made, peaks = planner.plan(our_free(96), HD, shots(76), Pins(), None, compile_vae=True)
+    made, peaks = planner.plan(our_free(96), target, shots(76), Pins(), None, compile_vae=True)
+    if tiles is not None:
+        made = replace(made, encode_tiles=tiles[0], decode_tiles=tiles[1])
     said = planner.said(
         made,
         peaks,
         "a card",
-        HD,
+        target,
         shots(76),
         Pins(),
         numz_padding=False,
@@ -491,21 +503,61 @@ def compile_line(
 def test_the_plans_line_says_the_time_of_this_job_on_this_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm: bool, drive: bool, words: str
 ) -> None:
+    # 1080p as measured: 6 shapes, 240 s and 90 s a job and a resume on Linux's disk, 390 s and
+    # 120 s on a Windows drive.
     cache = tmp_path / "compile-cache"
     if warm:
         (cache / "inductor").mkdir(parents=True)
         (cache / "inductor" / "kernel").write_bytes(b"x")
-    line = compile_line(cache, monkeypatch, drive=drive, recorded=warm)
+    line = compile_line(cache, monkeypatch, drive=drive, recorded=warm, tiles=MEASURED_1080P)
     why = ", on a Windows drive"
     assert (
-        f"compiling it takes {words} (measured on an RTX 5090's host{why if drive else ''}), paid"
-        in line
+        f"compiling its 6 shapes takes {words}"
+        f" (measured on an RTX 5090's host{why if drive else ''}), paid" in line
     )
     assert (
         "before the DiT loads, at every start and resume, its cache kept in the job's directory"
         in line
     )
     assert "\n" not in line
+
+
+@pytest.mark.parametrize(
+    ("drive", "new", "resume"),
+    [(False, "5 min 20 s", "2 min"), (True, "8 min 40 s", "2 min 40 s")],
+)
+def test_the_plans_line_at_4k_counts_its_8_shapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drive: bool, new: str, resume: str
+) -> None:
+    # The 4K job measured: 4 encode shapes and 4 decode (the plan's own tiles at 4K on 96 GB),
+    # 8 x 40 s and 8 x 15 s on Linux's disk, 8 x 65 s (520 s, 8 min 40 s; 521 s measured) and
+    # 8 x 20 s on a Windows drive.
+    cache = tmp_path / "compile-cache"
+    line = compile_line(cache, monkeypatch, drive=drive, target=UHD)
+    assert f"compiling its 8 shapes takes about {new} for this new job, about {resume} on a" in line
+    cache.mkdir()
+    (cache / "kernel").write_bytes(b"x")
+    line = compile_line(cache, monkeypatch, drive=drive, recorded=True, target=UHD)
+    assert f"about {resume} for this resume, its cache warm, about {new} for a new job" in line
+
+
+def test_the_plans_line_counts_the_shapes_the_warm_up_compiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An untiled pass is one shape, the frame: 2 in all for both passes untiled (80 s new, 30 s a
+    # resume, "30 s" under a minute), one tiled and one not 1 + 2. Never the number of tiles.
+    cache = tmp_path / "compile-cache"
+    line = compile_line(cache, monkeypatch, drive=False, tiles=(None, None))
+    assert "compiling its 2 shapes takes about 1 min 20 s for this new job, about 30 s on a" in line
+    line = compile_line(cache, monkeypatch, drive=False, tiles=(None, Tiles(1088)))
+    assert (
+        "compiling its 5 shapes takes about 3 min 20 s for this new job, about 1 min 15 s" in line
+    )
+    one = replace(Plan(17, None, None), compile_vae=True)
+    assert len(planner.compile_shapes(one, HD, shots(76), 1).encode) == 1
+    assert planner._minutes_said(15) == "15 s"  # pyright: ignore[reportPrivateUsage]
+    assert planner._minutes_said(60) == "1 min"  # pyright: ignore[reportPrivateUsage]
+    assert planner._minutes_said(75) == "1 min 15 s"  # pyright: ignore[reportPrivateUsage]
 
 
 def test_the_windows_drive_line_is_short_and_its_reason_is_said_at_debug(
@@ -519,7 +571,8 @@ def test_the_windows_drive_line_is_short_and_its_reason_is_said_at_debug(
     on_drive = compile_line(cache, monkeypatch, drive=True)
     assert "many small files" not in on_drive and "on a Windows drive" in on_drive
     assert len(on_drive) - len(on_linux) < 40
-    assert len(on_drive) < 360
+    # Under 360 until the line said its shapes' count ("its 3 shapes", baton 4 item a).
+    assert len(on_drive) < 380
     assert "the compile cache's many small files" in caplog.text
 
 
@@ -533,7 +586,7 @@ def test_a_cache_only_a_recorded_plan_kept_as_it_is_finds_warm(
     cache = tmp_path / "compile-cache"
     (cache / "inductor").mkdir(parents=True)
     (cache / "inductor" / "kernel").write_bytes(b"x")
-    kept = compile_line(cache, monkeypatch, drive=False, recorded=True)
+    kept = compile_line(cache, monkeypatch, drive=False, recorded=True, tiles=MEASURED_1080P)
     assert "about 1 min 30 s for this resume, its cache warm" in kept
     for drive in (False, True):
         other = compile_line(cache, monkeypatch, drive=drive, recorded=False)
@@ -1523,16 +1576,16 @@ def test_plan_says_the_compilations_time_and_the_estimate_counts_it_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     # --plan loads the models for its calibration, so compiles the VAE as a run does: the plan's
-    # line says the new job's time (4 min on Linux's disk, whatever disk the test's directory is
-    # on), and the time of the load, which the compilation is part of, says its share of it,
-    # once, in the load's own seconds.
+    # line says the new job's time from its shapes (3 here, 40 s each: 2 min on Linux's disk,
+    # whatever disk the test's directory is on), and the time of the load, which the compilation
+    # is part of, says its share of it, once, in the load's own seconds.
     monkeypatch.setattr(planner, "on_windows_drive", lambda path: False)
     Loads(monkeypatch, seconds=300.0)
     accepting_tiles(monkeypatch, steps)
     caplog.set_level(logging.INFO)
     source_path = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source_path, "out", *JOB, *LARGER, "--compile", "--plan", "p.txt") == 0
-    assert "compiling it takes about 4 min for this new job, about 1 min 30 s on a resume" in (
+    assert "compiling its 3 shapes takes about 2 min for this new job, about 45 s on a resume" in (
         caplog.text
     )
     [load] = [r.getMessage() for r in caplog.records if "the models loaded in" in r.getMessage()]

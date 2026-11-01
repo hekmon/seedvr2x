@@ -341,27 +341,34 @@ COMPILE_PEAK = 1.1
 COMPILE_ENCODE_TILE_MAX = 1856
 COMPILE_ENCODE_WHOLE = (1104, 1920)
 COMPILE_DECODE_TILE_MAX = 1152
-# The compilation's time, per process, said by --plan and the plan's line: a new job's and a
-# resume's (its cache warm), for the job's directory on Linux's own disk and on a Windows drive
-# under WSL2, paid before the DiT loads (DESIGN.md, Memory planner, --compile, decided on
-# 2026-10-30: "the plan's line says the times measured, a new job's and a resume's"). Measured on
-# 2026-10-31 on an RTX 5090 with an AMD Ryzen 9 9950X3D under WSL2, a 1080p job (encode tiles of
-# 2 shapes, decode tiles of 4, 535 graphs; tree 7dd60993, whose warm-up made both memory layouts
-# of the decoder's latent, where the one-layout warm-up that followed drops the channel-major
-# pass, about 5 s and its graphs, and the GPU gate measures these figures again): on ext4 a new
-# job took 4 min 0 s and a resume 1 min 31 s; with the job's directory on a Windows drive (a 9p
-# mount, "aname=drvfs"), a new job 6 min 23 s (6 min 47 s to 6 min 54 s on 2026-10-29 and
-# 2026-10-30) and a resume 1 min 54 s: the same
-# graphs, the difference the compile cache's 8,327 small files (362 MB) written to and read back
-# from that drive. A resume's floor is dynamo tracing every graph again (about 77 s of its 84 s
-# warm-up), which no cache keeps. Said in the rounded figures. The estimates that follow count
-# the seconds the load measured, the compilation's among them, once (cli._say_times): there is
-# no figure to sum before the load. PROVISIONAL (impl-v010, 2026-10-31: measured on one host;
-# the 96 GB box measures next, inductor being CPU work).
-COMPILE_NEW = 4 * 60
-COMPILE_RESUME = 90
-COMPILE_NEW_DRIVE = 6 * 60 + 30
-COMPILE_RESUME_DRIVE = 2 * 60
+# The compilation's time, said by --plan and the plan's line: a new job's and a resume's (its
+# cache warm), for the job's directory on Linux's own disk and on a Windows drive under WSL2, paid
+# before the DiT loads (DESIGN.md, Memory planner, --compile, decided on 2026-10-30: "the plan's
+# line says the times measured, a new job's and a resume's"), counted in seconds a shape: the
+# shapes the warm-up compiles, the encode's and the decode's tile shapes, interior and edges, each
+# at every slice kind (compile_shapes; design's ruling of baton 4, 2026-10-31, after the 4K job's
+# 8 shapes took 8 min 42 s where the 1080p job's 6 shapes, 6 min 23 s to 6 min 28 s, had set the
+# total at 6 min 30 s for any job). Measured on 2026-10-31 on an RTX 5090 with an AMD Ryzen 9
+# 9950X3D under WSL2, 1080p (encode tiles of 2 shapes, decode tiles of 4, 535 graphs) and 4K
+# (4 and 4): with the job's directory on a Windows drive (D:, a 9p mount, "aname=drvfs"; code
+# subset b514b336) a new job took 383 to 388 s at 1080p (6 shapes) and 521 s at 4K (8): 64.5 to
+# 65.1 s a shape, and a resume 109 s at 1080p: 18 s a shape; on ext4 (code subset 113640f7,
+# whose warm-up made both memory layouts of the decoder's latent, where the one-layout warm-up
+# that followed drops the channel-major pass, about 5 s and its graphs, and the GPU gate measures
+# these figures again) a new job took 240 s at 1080p: 40 s a shape, and a resume 91 s: 15 s a
+# shape. The same graphs on both disks, the difference the compile cache's 8,327 small files
+# (362 MB) written to and read back from the drive. A resume's floor is dynamo tracing every
+# graph again (about 77 s of its 84 s warm-up), which no cache keeps. The figures here are
+# whole seconds a shape, fitted on 1080p's 6 shapes and 4K's 8 on one host: 1080p says 4 min and
+# 1 min 30 s on ext4, 6 min 30 s and 2 min on the drive; 4K 5 min 20 s and 2 min on ext4, 8 min
+# 40 s and 2 min 40 s on the drive. The estimates that follow count the seconds
+# the load measured, the compilation's among them, once (cli._say_times): there is no figure to
+# sum before the load. PROVISIONAL (impl-v010, 2026-10-31: fitted on one host; the 96 GB box
+# measures next, inductor being CPU work).
+COMPILE_SHAPE_NEW = 40
+COMPILE_SHAPE_RESUME = 15
+COMPILE_SHAPE_NEW_DRIVE = 65
+COMPILE_SHAPE_RESUME_DRIVE = 20
 # The slices a compiled shape is warmed with are the shot's: one of 1 or 2 latents is a single
 # slice, the encode's and the decode's memory state off, one of 3 or more has a first slice and
 # the next ones (model.encode_slices, model.latent_slices), so that 3 latents show every kind
@@ -1770,23 +1777,31 @@ def on_windows_drive(path: Path, mountinfo: str | None = None) -> bool:
 
 
 def _minutes_said(seconds: int) -> str:
-    """A rounded duration as the plan's line says it: "4 min", "1 min 30 s"."""
+    """A duration in whole seconds as the plan's line says it, to the second as it is given (the
+    compile times are multiples of 5 s): "4 min", "1 min 30 s", "45 s" under a minute."""
     minutes, rest = divmod(seconds, 60)
+    if not minutes:
+        return f"{rest} s"
     return f"{minutes} min" + (f" {rest} s" if rest else "")
 
 
-def _compile_time_said(cache: Path | None, recorded: bool) -> str:
-    """The compilation's time for this job (COMPILE_NEW and the others): a resume's where the job
-    is a resume whose recorded plan is kept as it is (`recorded`: same tiles, same shapes) and
-    its compile cache is there and holds something (the cache is warm), a new job's otherwise,
+def _compile_time_said(cache: Path | None, recorded: bool, shapes: int) -> str:
+    """The compilation's time for this job, counted from the `shapes` its warm-up compiles
+    (COMPILE_SHAPE_NEW and the others, in whole seconds a shape, said to the second by
+    _minutes_said: 8 shapes on a drive, 8 min 40 s): a resume's where the job is a resume whose
+    recorded plan is kept as it is (`recorded`: same tiles, same shapes) and its compile cache is
+    there and holds something (the cache is warm), a new job's otherwise,
     and the other case's after it; the Windows drive's figures where the cache's directory is on
     one (on_windows_drive), why they are longer at debug. A resume planned again (other tiles,
     other graphs) or a first start killed while compiling, whose plan was never recorded, finds
     a cache that doesn't hold its graphs: the new job's figure."""
     drive = cache is not None and on_windows_drive(cache)
     new, resume = (
-        (COMPILE_NEW_DRIVE, COMPILE_RESUME_DRIVE) if drive else (COMPILE_NEW, COMPILE_RESUME)
+        (COMPILE_SHAPE_NEW_DRIVE, COMPILE_SHAPE_RESUME_DRIVE)
+        if drive
+        else (COMPILE_SHAPE_NEW, COMPILE_SHAPE_RESUME)
     )
+    new, resume = new * shapes, resume * shapes
     try:
         warm = recorded and cache is not None and cache.is_dir() and any(cache.iterdir())
     except OSError as error:
@@ -1805,7 +1820,10 @@ def _compile_time_said(cache: Path | None, recorded: bool) -> str:
         else f"about {_minutes_said(new)} for this new job, about {_minutes_said(resume)} on a"
         " resume, its cache warm"
     )
-    return f"compiling it takes {figures} (measured on an RTX 5090's host{why})"
+    return (
+        f"compiling its {_count(shapes, 'shape')} takes {figures}"
+        f" (measured on an RTX 5090's host{why})"
+    )
 
 
 def said(
@@ -1857,7 +1875,8 @@ def said(
     predicted peaks, as DESIGN.md lists it; None says none.
 
     compile_cache: the compile cache's directory (manifest.COMPILE_CACHE in the job's), whose
-    state and disk the compilation's time depends on (_compile_time_said), warm only where
+    state and disk the compilation's time depends on (_compile_time_said, which counts the
+    plan's compile_shapes), warm only where
     `recorded` too; None says a new job on Linux's own disk.
 
     The line of the compiled VAE is the plan's own (plan.compile_vae, the setting's, always: a
@@ -1954,7 +1973,10 @@ def said(
         f" {_gib(peaks.budget - peaks.need(peaks.bound))} GiB under the budget"
     )
     if plan.compile_vae:
-        compiling = _compile_time_said(compile_cache, recorded)
+        shapes = compile_shapes(plan, target, shots, QUALITY[quality], numz_padding=numz_padding)
+        compiling = _compile_time_said(
+            compile_cache, recorded, len(shapes.encode) + len(shapes.decode)
+        )
         lines.append(
             f"compile: the VAE compiled (--compile), each pass held to {COMPILE_PEAK} times its"
             f" plain peak, in the shapes measured only; {compiling}, paid"
