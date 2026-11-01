@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from fractions import Fraction
@@ -103,6 +104,60 @@ def test_plan_help_names_its_two_playlists(capsys: pytest.CaptureFixture[str]) -
     # The names said are those written.
     for which in PLAYLISTS:
         assert playlist_path(Path("FILE"), which).name in shown
+
+
+def _option_help(shown: str, option: str) -> str:
+    """One option's help as --help prints it, from its flag to the next option's, on one line."""
+    after = shown.split(f"\n  {option} ", 1)[1]
+    return " ".join(after.split("\n  -", 1)[0].split())
+
+
+def test_compile_help_says_what_it_gives_and_costs_with_no_figure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # --compile's help leaves the figures that drift (minutes, tile sizes, the compiled DiT's dB)
+    # to the plan's line and the manual (design, 2026-10-31, baton 4 item b): its four points in
+    # words.
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    text = _option_help(capsys.readouterr().out, "--compile")
+    assert not re.search(r"\d|\bdB\b|\bmin\b|\bpx\b", text)
+    for words in (
+        "about a tenth less time on a long job, and a short one loses (the manual says from how"
+        " many frames)",
+        "paid before the DiT loads, at a new job's start and at each resume (the plan's line says"
+        " how long), its cache kept in the job's directory",
+        "not plain code's, but the same in every process",
+        "a setting, which a resume repeats",
+        "only the shapes measured are compiled: a job outside them is refused, never run plain in"
+        " its place",
+    ):
+        assert words in text
+
+
+def test_accept_env_change_help_names_both_its_uses(capsys: pytest.CaptureFixture[str]) -> None:
+    # The flag also takes a resume whose recorded shape no longer fits the memory free, planned
+    # again for what is left (_run, planner.plan_again); its first use's words are kept.
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    text = _option_help(capsys.readouterr().out, "--accept-env-change")
+    assert "resume a job whose environment changed (the GPU, Python, torch" in text
+    assert (
+        "also resume a job whose recorded shape no longer fits the memory free, planned again for"
+        " what is left" in text
+    )
+
+
+def test_main_help_names_verify(capsys: pytest.CaptureFixture[str]) -> None:
+    # `seedvr2x verify` is dispatched by hand before the parser (main), so the main help says
+    # of it what it checks and where its own help is.
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    shown = " ".join(capsys.readouterr().out.split())
+    assert (
+        "seedvr2x verify OUTPUT checks every frame of a job's output against the checksums"
+        " written with it (seedvr2x verify --help)" in shown
+    )
 
 
 def test_too_small_to_pad_refused_before_the_first_pass(
@@ -512,6 +567,7 @@ def test_the_early_reading_of_the_card_imports_no_torch(tmp_path: Path) -> None:
 C10_LEVEL = """
 import importlib.abc
 import os
+import re
 import sys
 
 seen = []

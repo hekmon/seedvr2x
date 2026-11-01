@@ -235,6 +235,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="seedvr2x",
         description="SeedVR2 video upscaler for long runs.",
+        epilog="seedvr2x verify OUTPUT checks every frame of a job's output against the checksums"
+        " written with it (seedvr2x verify --help)",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
     parser.add_argument("input", type=Path, help="the source, one video file")
@@ -455,14 +457,12 @@ def main(argv: list[str] | None = None) -> int:
         "--compile",
         action="store_true",
         help="compile the VAE with torch.compile, its causal convolutions left out of the graph:"
-        " about a tenth less time on a long job (a job under about 2,500 frames loses), about 4 min"
-        " of compilation for a new job and 1 min 30 s on a resume (6 min 30 s and 2 min with the"
-        " job's directory on a Windows drive under WSL2), paid before the DiT loads, its cache"
-        " kept in the job's directory; its frames are not plain code's (51 to 61 dB from them) but"
-        " the same in every process; a setting, a resume repeats it; only the shapes measured are"
-        " compiled (encode tiles up to 1856 px or the 1080p frame whole, decode tiles up to 1152"
-        " px): a job whose pins fall outside them, or with no compiled plan that fits where a plain"
-        " one would, is refused, never run without it",
+        " about a tenth less time on a long job, and a short one loses (the manual says from how"
+        " many frames); the compilation is paid before the DiT loads, at a new job's start and at"
+        " each resume (the plan's line says how long), its cache kept in the job's directory; its"
+        " frames are not plain code's, but the same in every process; a setting, which a resume"
+        " repeats; only the shapes measured are compiled: a job outside them is refused, never"
+        " run plain in its place",
     )
     parser.add_argument(
         "--until",
@@ -477,7 +477,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="resume a job whose environment changed (the GPU, Python, torch or another package,"
         " ffmpeg or its conversions), recorded in its manifest: the output then differs from an"
-        " uninterrupted run's",
+        " uninterrupted run's; also resume a job whose recorded shape no longer fits the memory"
+        " free, planned again for what is left, its output from there no longer the uninterrupted"
+        " run's either",
     )
     parser.add_argument(
         "--dump-frames",
