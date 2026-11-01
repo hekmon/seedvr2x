@@ -188,6 +188,69 @@ never requires it.
   sptenc's rule. It is the unit of output and of decode resume.
 - **Unit:** a piece of saved work for resume: a shot's encode, a window, a segment's decode.
 
+## Repository and apps
+
+Decided with the user on 2026-11-01, before v0.1.0, while the repository's paths aren't public.
+One library and thin apps, in the repository `hekmon/seedvr2x`:
+
+```
+seedvr2x/                the repository
+  README.md              the front page, short, linking to the rest
+  DESIGN.md AGENTS.md LICENSE NOTICE
+  core/                  the library: import seedvr2x (distribution seedvr2x-core)
+  apps/
+    cli/                 the seedvr2x command: video (long runs), image, verify
+    imgserver/           an HTTP server for images only
+    comfyui/             ComfyUI's nodes, after v0.1.0
+  research/  models/  upstream/
+```
+
+- **core/** holds what every app needs: the model code, the model files' pull and check, the
+  DiT's placement and BlockSwap, the VAE's tiling, the memory model, the colour correction. It
+  declares version ranges, not exact pins, so that it can run in another program's environment
+  (ComfyUI's, with its own torch).
+- **Each app is its own uv project, with its own lock**, `core/` by path, so that an app's
+  environment changes for its own reasons only. The CLI's is the one every job records and
+  checks on a resume: no image server's dependency moves it. The exact pins held today
+  (milestone 1 compares with numz's environment) are the CLI's. The library's tests run in the
+  CLI's environment: the most complete app, with every dependency, and the one shipped. The
+  image server's lock holds the same versions of what they share, a test checking it.
+- **The CLI:** `seedvr2x` keeps its command and options. `seedvr2x image` upscales one image
+  through the library's own image path: the same models, files, tiling and colour correction,
+  none of the long-run machinery (shots, windows, segments, jobs, resume, calibration,
+  masters). A still is one latent at sizes video rarely reaches (8K outputs): the image path is
+  measured before it ships, the planner keeping no blind spot.
+- **The image server, `apps/imgserver/`:** images only, hence its name (a "server" would promise
+  every CLI feature over HTTP). Python, the models in its own process, loaded once and kept on
+  the GPU. Every parameter in the request's headers, the image's bytes as the body both ways,
+  its format said by Content-Type in the request and in the response. Linux first. Its details
+  are decided when it is designed. Considered for v0.1.0 (the user, 2026-11-01).
+- **ComfyUI's nodes, after v0.1.0:** in this repository, where ComfyUI's own install (its
+  Manager, its registry) finds them. Only the bare minimum ComfyUI needs to find and import them
+  sits at the root, a `pyproject.toml` and an `__init__.py`, commented so: the `__init__.py`
+  only imports the nodes from `apps/comfyui/`, where all their code is. Real files, not
+  symbolic links, which Git on Windows checks out as text files. A light version, on purpose:
+  ComfyUI's own model and memory management, no cut detection (the frames given are one shot,
+  in sliding windows), no ffmpeg (ComfyUI's video nodes load and save). The full features stay
+  the CLI's, to which the nodes point. They need Windows and macOS: the library must then import
+  and run there, its Linux-only parts kept to the apps.
+- **The front README:** short. A paragraph each for what seedvr2x does, its apps, and our own
+  model files (better quality, fewer errors, linking to [models/README.md](../models/README.md)),
+  then links to the apps' READMEs, the manual and `research/README.md`, where the research
+  table it holds today moves.
+
+In steps:
+1. Before the 96 GB card's batch, a plain move with no change of behaviour. Today's package goes
+   into `core/` whole, its import name kept; `apps/cli/` holds the `seedvr2x` command, its
+   pyproject and its lock, resolving to the same versions; the README and the manual go to
+   `apps/cli/`, DESIGN.md and AGENTS.md to the root; links, tests, tools and scripts follow.
+   The whole GPU suite runs on the RTX 5090 on exactly that code before it is pushed.
+2. The image path in the library and `seedvr2x image`, then the image server if v0.1.0 takes
+   it, each measured on the 96 GB card.
+3. After v0.1.0: the video-only code (`cli.py`, `media/`, jobs, resume, the cuts and their
+   detector) moves from `core/` to `apps/cli/`, the planner split into the library's memory
+   model and the CLI's video plan; then ComfyUI's nodes.
+
 ## Architecture
 
 | Layer | Contents | Origin |
