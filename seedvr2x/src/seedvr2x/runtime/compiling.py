@@ -277,8 +277,9 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
     try:
         vae.encoder = torch.compile(vae.encoder, **SETTINGS)
         vae.decoder = torch.compile(vae.decoder, **SETTINGS)
-        # Not both: with suppress_errors on, torch raises an AssertionError at the first compiled
-        # call (_dynamo/eval_frame.py:1766-1771), and would swallow the limit hit's exception
+        # Not both: torch.compile refuses the two together (check_for_incompatible_configs,
+        # _dynamo/eval_frame.py:1767-1771, called at 1844), so they are flipped after it; and
+        # suppress_errors would swallow the limit hit's exception
         # where it ran the frame eagerly (convert_frame.py:2415). A user's TORCHDYNAMO_SUPPRESS_
         # ERRORS=1 holds outside the warm-up alone, and is put back after it.
         dynamo.suppress_errors = False

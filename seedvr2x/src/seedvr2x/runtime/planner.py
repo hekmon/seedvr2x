@@ -349,15 +349,18 @@ COMPILE_DECODE_TILE_MAX = 1152
 # at every slice kind (compile_shapes; design's ruling of baton 4, 2026-10-31, after the 4K job's
 # 8 shapes took 8 min 42 s where the 1080p job's 6 shapes, 6 min 23 s to 6 min 28 s, had set the
 # total at 6 min 30 s for any job). Measured on 2026-10-31 on an RTX 5090 with an AMD Ryzen 9
-# 9950X3D under WSL2, 1080p (encode tiles of 2 shapes, decode tiles of 4, 535 graphs) and 4K
+# 9950X3D under WSL2, 1080p (encode tiles of 2 shapes, decode tiles of 4) and 4K
 # (4 and 4): with the job's directory on a Windows drive (D:, a 9p mount, "aname=drvfs"; code
 # subset b514b336) a new job took 383 to 388 s at 1080p (6 shapes) and 521 s at 4K (8): 64.5 to
 # 65.1 s a shape, and a resume 109 s at 1080p: 18 s a shape; on ext4 (code subset 113640f7,
 # whose warm-up made both memory layouts of the decoder's latent, where the one-layout warm-up
 # that followed drops the channel-major pass, about 5 s and its graphs, and the GPU gate measures
 # these figures again) a new job took 240 s at 1080p: 40 s a shape, and a resume 91 s: 15 s a
-# shape. The same graphs on both disks, the difference the compile cache's 8,327 small files
-# (362 MB) written to and read back from the drive. A resume's floor is dynamo tracing every
+# shape. The same graphs on both disks (535 on 113640f7), the difference the compile cache's
+# small files (8,273, 359.5 MB, in the final 1080p jobs' caches) written to and read back from
+# the drive. Each shape is warmed at the slice kinds of shots of 2 and of 3 latents or more, as
+# every job measured was; a job with a shot of 1 latent adds a third kind, which these figures
+# don't count. A resume's floor is dynamo tracing every
 # graph again (about 77 s of its 84 s warm-up), which no cache keeps. The figures here are
 # whole seconds a shape, fitted on 1080p's 6 shapes and 4K's 8 on one host: 1080p says 4 min and
 # 1 min 30 s on ext4, 6 min 30 s and 2 min on the drive; 4K 5 min 20 s and 2 min on ext4, 8 min

@@ -448,9 +448,9 @@ def test_an_unreadable_mountinfo_is_linuxs_disk_said_at_debug(
     assert planner.on_windows_drive(Path("/mnt/d/job"), "garbage\n\n - \n") is False
 
 
-# The tiles of the job the compilation was measured on at 1080p: the encode's 2 shapes and the
-# decode's 4 (research/docs/compile.md), 6 in all.
-MEASURED_1080P = (Tiles(1280), Tiles(1088))
+# The tiles of the 1080p jobs the compilation was measured on (the RTX 5090, 2026-10-31: encode
+# tiles of 1728, decode tiles of 1024): the encode's 2 shapes and the decode's 4, 6 in all.
+MEASURED_1080P = (Tiles(1728), Tiles(1024))
 
 
 def compile_line(
@@ -529,7 +529,8 @@ def test_the_plans_line_says_the_time_of_this_job_on_this_disk(
 def test_the_plans_line_at_4k_counts_its_8_shapes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, drive: bool, new: str, resume: str
 ) -> None:
-    # The 4K job measured: 4 encode shapes and 4 decode (the plan's own tiles at 4K on 96 GB),
+    # 4K: the 96 GB card's own plan, 4 encode shapes and 4 decode, as the job measured on the RTX
+    # 5090 had with its tiles of 1344 and 1024,
     # 8 x 40 s and 8 x 15 s on Linux's disk, 8 x 65 s (520 s, 8 min 40 s; 521 s measured) and
     # 8 x 20 s on a Windows drive.
     cache = tmp_path / "compile-cache"

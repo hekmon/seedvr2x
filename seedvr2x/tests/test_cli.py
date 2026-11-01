@@ -567,7 +567,6 @@ def test_the_early_reading_of_the_card_imports_no_torch(tmp_path: Path) -> None:
 C10_LEVEL = """
 import importlib.abc
 import os
-import re
 import sys
 
 seen = []
