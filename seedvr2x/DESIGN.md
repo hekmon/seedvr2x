@@ -2263,7 +2263,7 @@ first pass, whose shots are its input, and before the models load:
       DiT loads. Built (2026-10-31), a new 1080p job compiles in 4 min 0 s on the RTX 5090's
       machine with its directory on Linux's own disk, 1 min 31 s on a resume, its cache warm,
       and in 6 min 23–27 s and 1 min 49 s on a Windows drive under WSL2, where the cache's
-      8,327 small files are written through the drive's mount; a 4K job's 8 shapes took 8 min
+      8,273 small files are written through the drive's mount; a 4K job's 8 shapes took 8 min
       42 s there. The study's 238 s had one shape fewer, its encode untiled, its cache on
       Linux's disk. On a 32 GB card a whole 1080p job's units took 10% less (880 s against 980
       at plain's own tiles), so a long job gains about a tenth, an hour of 1080p about 2 h of
@@ -2278,10 +2278,11 @@ first pass, whose shots are its input, and before the models load:
       were the compiled DiT's. A whole job's frames, measured on 2026-11-01 on the RTX 5090
       (three 1080p excerpts of about 100 frames, two live action and one anime, plain code
       pinned to the compiled plan's tiles, window and blocks): 54–61 dB from plain code's
-      (medians 54.9, 55.1 and 60.3), where another seed is 34–46 dB. The DiT carrying the
-      encode's difference costs about 5 dB on the live action and none on the anime. The live
-      clips' largest differences sit in the frame's top-left corner, far from the tiles'
-      seams, where the two seeds' single largest one sits too.
+      (medians 54.9, 55.1 and 60.3), where another seed is 34–46 dB. That is 4–7 dB under the
+      VAE alone's range on the live clips' medians and inside it on the anime's, the DiT
+      carrying the encode's difference through a whole job; the VAE alone was measured in the
+      study, not on these jobs. The live clips' largest differences sit in the frame's top-left
+      corner, far from the tiles' seams, where the two seeds' single largest one sits too.
     - Built with it (2026-10-30):
       - inductor's deterministic mode, kept on through every trace: torch 2.14.1 resets it at
         each trace's end (its restoring use_deterministic_algorithms sets inductor's flag too).
@@ -2303,8 +2304,8 @@ first pass, whose shots are its input, and before the models load:
         compares the same;
       - the compile cache in the job's work directory, warm on a resume. Kept there under
         WSL2 too (decided on 2026-10-31), where a job on a Windows drive compiles longer than
-        on Linux's own disk (6 min 23 s against 4 min 0 s for a new job, 1 min 54 s against 1
-        min 31 s on a resume, on the RTX 5090's machine): the cache's 8,327 small files cost
+        on Linux's own disk (6 min 23 s against 4 min 0 s for a new job, 1 min 49 s against 1
+        min 31 s on a resume, on the RTX 5090's machine): the cache's 8,273 small files cost
         that through the drive's mount, but a second place for a job's files would outlive
         the job deleted by hand, on the disk with the least room; the plan's line says the
         drive's time;
@@ -2330,11 +2331,11 @@ first pass, whose shots are its input, and before the models load:
       the 96 GB box measures them, inductor's compilation being the CPU's work. Those are a
       1080p job's 6 tile shapes: a 4K job's 8 took 8 min 42 s where its line said 6 min 30 s,
       about 65 s a shape both times. Since 2026-11-01 the line counts the job's own shapes
-      (decided on 2026-10-31): about 40 s a shape for a new job and 15 s on a resume on
-      Linux's disk, 65 and 20 s on a Windows drive, fitted on those two jobs, provisional until
-      the 96 GB box measures. Replayed on those same two jobs, it said 6 min 30 s for 6 shapes
-      and 8 min 40 s for 8, where the compilations took 6 min 27 s and 8 min 38 s: a check of
-      the fit, not of another host, disk or set of shapes.
+      (decided on 2026-10-31): about 65 s a shape for a new job and 20 s on a resume on a
+      Windows drive, fitted on those two jobs, and 40 and 15 s on Linux's disk, fitted on one
+      1080p job; provisional until the 96 GB box measures. Replayed on those same two jobs, it
+      said 6 min 30 s for 6 shapes and 8 min 40 s for 8, where the compilations took 6 min 27 s
+      and 8 min 38 s: a check of the fit, not of another host, disk or set of shapes.
     - The DiT isn't compiled in v0.1.0: 2–3% of a long 1080p job on a 32 GB card (the DiT is
       a fifth of its units; compiled block by block over seedvr2x's own swap, a window takes
       0.77–0.80 of plain's time), a loss on a short one (each new window length compiles
@@ -2416,12 +2417,13 @@ first pass, whose shots are its input, and before the models load:
     (decided on 2026-10-21: a run without it could say no time left before its first
     segment's decode, and a job of one segment never).
     - It took 47–56 s at 1080p and 43–49 s at 720p on an RTX 5090 on 2026-10-23 (63–68 s
-      at 1080p on 2026-10-29, 65.7 s since, below): a short job pays a large share (a
-      2-minute 720p job 49 s more). Its cost follows the job's longest window, not the size:
-      138 s on that card at 4K then (155.7 to 160 s since), its windows of 5 latents, but
-      826 s on the 96 GB card at 1080p, a long shot's windows of 91 latents, its clock
-      capped. Shortened where a
-      unit is long (decided on 2026-10-23, built on 2026-10-30):
+      at 1080p on 2026-10-29; since, 65.7 s with windows of 21 latents, the card 28.4 GiB
+      free, and 57.3–60.0 s with windows of 19, 26.7 GiB free; below): a short job pays a
+      large share (a 2-minute 720p job 49 s more). Its cost follows the job's longest
+      window, not the size: 138 s on that card at 4K then (144 to 160 s since), its windows
+      of 5 latents, but 826 s on the 96 GB card at 1080p, a long shot's windows of 91
+      latents, its clock capped. Shortened where a unit is long (decided on 2026-10-23,
+      built on 2026-10-30):
       - a window's longer length by time, about 3 s, as an encode's second length is, but
         never under the job's longest or 30 latents, whichever is less: the DiT's attention
         window grows up to 30 latents, so a shorter sample misses a long window's rate, and
@@ -2432,9 +2434,9 @@ first pass, whose shots are its input, and before the models load:
       - decodes kept at 5 and 13 frames: `split`'s correction needs an encode of the decode's
         length, which would cost more than it saves.
       So the saving is in windows over 30 latents, about half their cost (on the 96 GB card's
-      91, two long calls become one); none on the RTX 5090, at 1080p (65.7 s, its windows of
-      21) nor at 4K (155.7 s, its windows of 5), where a minute of video takes over an hour,
-      the calibration about 3% of it.
+      91, two long calls become one); none on the RTX 5090, at 1080p (57–66 s, its windows
+      of 19 to 21) nor at 4K (144–160 s, its windows of 5), where a minute of video takes
+      over an hour, the calibration about 3% of it.
   - Each kind's two lengths are measured as most of its units come in a run (decided on
     2026-10-22, built on 2026-10-23):
     - A window's and a decode's after a unit of their own kind, the first after a change of
