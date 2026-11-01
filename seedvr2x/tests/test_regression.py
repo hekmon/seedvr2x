@@ -188,7 +188,7 @@ from typing import Any, NoReturn
 import pytest
 
 from seedvr2x.cli import NUMZ_DRAW, NUMZ_PADDING, NUMZ_TAIL
-from seedvr2x.runtime import memory, planner, pull
+from seedvr2x.runtime import disk, memory, planner, pull
 from seedvr2x.runtime.job import Shot, target_size
 from seedvr2x.runtime.manifest import NAME
 
@@ -470,6 +470,23 @@ def detected(log: str) -> None:
     assert "1 shot: 0 cuts detected at --cut-threshold 0.5" in log, log[-3000:]
 
 
+def errors_of(log: str) -> list[str]:
+    """The messages of a log's errors, as the command logs them: without --verbose a line is
+    "12:00:00 ERROR message"; under it, in the logger's format, "2026-10-31 12:00:00,123 ERROR
+    seedvr2x: message" (cli.VERBOSE_FORMAT)."""
+    return [
+        found[1] or found[2]
+        for line in log.splitlines()
+        if (
+            found := re.match(
+                r"(?:\d\d:\d\d:\d\d ERROR (.*)"
+                r"|\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} ERROR [\w.]+: (.*))",
+                line,
+            )
+        )
+    ]
+
+
 def plan_lines(log: str) -> list[str]:
     """The plan's lines in a run's log, as planner.said gives them, without their "plan: " (their
     time of day, or under --verbose their date and logger, dropped with it)."""
@@ -608,6 +625,28 @@ def logged_free(log: str) -> Free | None:
     return None if refuses is None else Free(gib(refuses[1]), None, False, exact=False)
 
 
+# The line cli._run logs at debug beside memory.reading's, the system memory available the plan
+# was made with (cli._host_available), in GiB and in bytes; or that nothing was read.
+HOST_COUNTS = re.compile(
+    r"the plan counts on [\d.]+ GiB \((\d+) bytes\) of system memory available"
+)
+HOST_UNREAD = "the system memory available was not read: the plan counts on none"
+
+
+def logged_host(log: str) -> int | None:
+    """The system memory available a run's plan was made with, exactly, in bytes, from its
+    --verbose log (HOST_COUNTS: not two decimals of GiB, which a plan bound by the system memory,
+    moving at steps of a few MiB, cannot be rebuilt from), or None where the log says it was not
+    read (HOST_UNREAD). Fails where it says neither: a call whose host reading is unknown can't
+    have its plan rebuilt."""
+    found = HOST_COUNTS.search(log)
+    if found is not None:
+        return int(found[1])
+    if HOST_UNREAD in log:
+        return None
+    pytest.fail(f"no system memory reading in the call's --verbose log: {log[-3000:]}")
+
+
 @dataclass(frozen=True)
 class Inputs:
     """What a job's plan is made from besides the memory, read from the manifest --plan left
@@ -617,18 +656,43 @@ class Inputs:
     target: tuple[int, int]
     shots: tuple[Shot, ...]
     attention: str
+    # The disk line the plan is given (disk.Disk.line), for the job's masters; its free space,
+    # which compared() drops, is nothing here. None: no disk line (the CPU tests of the rest).
+    disk: str | None = None
+
+
+def recorded_disk(content: dict[str, Any]) -> str | None:
+    """The disk line of a manifest's job as the run says it (cli._disk, disk.reading, Disk.line)
+    with nothing free there: its segments and the bytes of those finished, the output's format and
+    size, a segment command's files or not, the file assembled (the tests' output is a .mkv).
+    None where the content records no output or segments (the CPU tests' synthetic content)."""
+    if "output" not in content or "segments" not in content:
+        return None
+    width, height = content["output"]["size"]
+    segments = content["segments"]
+    taken = [entry["bytes"] if entry["finished"] else None for entry in segments]
+    masters = disk.masters(
+        [entry["end"] - entry["start"] for entry in segments],
+        taken,
+        content["output"]["format"],
+        (height, width),
+        content["settings"].get("segment_cmd") is not None,
+    )
+    return disk.Disk(masters, 0, True).line()
 
 
 def recorded_inputs(content: dict[str, Any]) -> tuple[Inputs, Free]:
     """The inputs of the plan a manifest's content records, with the free memory it was made in:
     the target from the input's size and sample aspect at the setting's resolution (cli._run, job.
-    target_size), the shots as recorded, the attention backend of the plan's record."""
+    target_size), the shots as recorded, the attention backend of the plan's record, the disk
+    line of its masters (recorded_disk)."""
     source, settings = content["input"], content["settings"]
     width, height = source["size"]
     target = target_size(width, height, Fraction(source["sample_aspect"]), settings["resolution"])
     shots = tuple(Shot(shot["start"], shot["end"]) for shot in content["shots"])
     memory_record = content["plan"]["memory"]
-    return Inputs(target, shots, memory_record["attention"]), recorded_free(memory_record)
+    inputs = Inputs(target, shots, memory_record["attention"], recorded_disk(content))
+    return inputs, recorded_free(memory_record)
 
 
 def readings(free: Free, monkeypatch: pytest.MonkeyPatch) -> list[memory.Reading]:
@@ -657,8 +721,9 @@ def readings(free: Free, monkeypatch: pytest.MonkeyPatch) -> list[memory.Reading
 def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> list[str]:
     """The plan lines (plan_lines, choices) the planner makes for `reading` and the job's
     inputs: nothing pinned, the decode splitting no colours (the command's --color-correction
-    none), numz's padding, `host` the system memory available. The disk's line is not compared:
-    it follows the disk. A refusal is one line, "refused: ...", which no run's plan equals."""
+    none), numz's padding, `host` the system memory available, the disk's line given for the
+    job's masters (compared keeps that part and drops the free space, which follows the disk). A
+    refusal is one line, "refused: ...", which no run's plan equals."""
     try:
         made, peaks = planner.plan(
             reading,
@@ -672,14 +737,30 @@ def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> l
     except planner.PlanError as error:
         return [f"refused: {error}"]
     said = planner.said(
-        made, peaks, "a card", inputs.target, inputs.shots, planner.Pins(), numz_padding=True
+        made,
+        peaks,
+        "a card",
+        inputs.target,
+        inputs.shots,
+        planner.Pins(),
+        numz_padding=True,
+        disk=inputs.disk,
     )
     return compared(plan_lines("\n".join(said)))
 
 
+# What a disk line (disk.Disk.line) says of the disk beside the masters: the free space, always
+# the line's last part, and the verdict after it. The masters' part before it is the job's.
+FREE_ON_DISK = re.compile(r"; [^;]*free on its disk.*$")
+
+
 def compared(lines: list[str]) -> list[str]:
-    """A plan's lines as two plans are compared: choices, without the disk's line."""
-    return [line for line in choices(lines) if not line.startswith("disk: ")]
+    """A plan's lines as two plans are compared: choices, the disk's line kept to its masters'
+    part (the job's: how many bytes at most, whether the file is assembled), without the free
+    space and the verdict after it, which follow the disk (design, baton 4, 2026-10-31)."""
+    return [
+        FREE_ON_DISK.sub("", line) if line.startswith("disk: ") else line for line in choices(lines)
+    ]
 
 
 def line_of(lines: list[str], start: str) -> str:
@@ -693,8 +774,8 @@ class Verdict:
 
     call: str
     reading: str
-    logged: tuple[str, str]  # the call's windows line and blocks-swapped line
-    planner: tuple[str, str]  # the planner's, for the reading as given
+    logged: tuple[str, str, str]  # the call's windows, blocks-swapped and disk (masters) lines
+    planner: tuple[str, str, str]  # the planner's, for the reading as given
     agrees: bool
 
 
@@ -708,15 +789,20 @@ def compare_with_planner(
 ) -> Verdict:
     """Whether the plan lines in `log` are those the planner makes for `free`, the reading that
     call planned in: for a reading from a log, for any of the readings its two decimals leave
-    possible (readings). Not compared with another call's plan: the desktop's memory moves
+    possible (readings), and `host`, the system memory available that call planned with
+    (logged_host, exact). Not compared with another call's plan: the desktop's memory moves
     between two calls, and a plan that follows it is right (decided by design on 2026-10-30)."""
     logged = compared(plan_lines(log))
     options = readings(free, monkeypatch)
     made = [planner_says(reading, inputs, host) for reading in options]
     first = made[0]
 
-    def pair(lines: list[str]) -> tuple[str, str]:
-        return line_of(lines, "windows: "), line_of(lines, "blocks swapped: ")
+    def pair(lines: list[str]) -> tuple[str, str, str]:
+        return (
+            line_of(lines, "windows: "),
+            line_of(lines, "blocks swapped: "),
+            line_of(lines, "disk: "),
+        )
 
     return Verdict(
         call,
@@ -727,17 +813,22 @@ def compare_with_planner(
     )
 
 
+def _bracketed(lines: tuple[str, ...]) -> str:
+    """Lines each in brackets, for a failure's message."""
+    return " ".join(f"[{line}]" for line in lines)
+
+
 def assert_planned_as_read(verdicts: list[Verdict]) -> None:
     """Fail unless each call's plan is the planner's for its own reading, saying each call's
-    reading, windows and blocks swapped, and what the planner makes of it."""
+    reading, windows, blocks swapped and disk's masters, and what the planner makes of it."""
     if all(verdict.agrees for verdict in verdicts):
         return
     pytest.fail(
         "a call's plan is not the planner's for the reading that call made:\n"
         + "\n".join(
             f"{verdict.call}: {'as the planner makes it' if verdict.agrees else 'NOT'}; read"
-            f" {verdict.reading}; logged [{verdict.logged[0]}] [{verdict.logged[1]}]; the planner"
-            f" makes [{verdict.planner[0]}] [{verdict.planner[1]}]"
+            f" {verdict.reading}; logged {_bracketed(verdict.logged)}; the planner makes"
+            f" {_bracketed(verdict.planner)}"
             for verdict in verdicts
         )
     )
@@ -747,13 +838,6 @@ def work_of(tmp_path: Path) -> Path:
     """The work directory of the job the tests' command makes for tmp_path's ours.mkv
     (cli._work_directory), where its manifest is."""
     return tmp_path / "ours.mkv.work"
-
-
-def host_available() -> int | None:
-    """The system memory available now, as the plan reads it (cli._host_available), in bytes."""
-    from seedvr2x.runtime import blockswap
-
-    return blockswap.available()
 
 
 # Two readings of the free memory taken back to back are the same to the byte on a steady card
@@ -916,6 +1000,9 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # the manifest it leaves (exact), the run's from its --verbose log, its manifest being gone
     # with its work directory once the file is assembled (design, 2026-10-30). That the two calls
     # read the same memory on a steady card is test_plan_and_run_read_the_same_free_memory.
+    # The disk line's masters (its first part: their size at most, assembled or not) are compared
+    # too, rebuilt from the manifest's output and segments (recorded_disk); its free space, and
+    # the verdict after it, follow the disk and are not (compared; design, baton 4, 2026-10-31).
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
     numz = case("milestone1", "numz", "input_rgb.mkv", 1080, "numz", "m1")
@@ -923,23 +1010,17 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     job = (tmp_path, numz.source, numz.resolution, (NUMZ_DIT, NUMZ_VAE))
     arguments, environment = command(*job, numz_padding=True, pin_untiled=False)
     listed = tmp_path / "cuts.txt"
-    host_planned = host_available()
     plan = subprocess.run(
-        [*arguments, "--plan", str(listed)],
+        [*arguments, "-v", "--plan", str(listed)],
         capture_output=True,
         text=True,
         check=False,
         env=environment,
     )
-    # A plan refused: exit status 1, the refusal the log's error, after the logger's name
-    # (cli._run). Any other failure fails the case.
-    # A line without --verbose is "12:00:00 ERROR message", this command's.
-    errors = [
-        found[1]
-        for line in plan.stderr.splitlines()
-        if (found := re.match(r"\d\d:\d\d:\d\d ERROR (.*)", line))
-    ]
-    refusals = [error for error in errors if any(what in error for what in REFUSED)]
+    # A plan refused: exit status 1, the refusal the log's error (cli._run). Any other failure
+    # fails the case. The call runs with -v, so that its log holds the system memory it planned
+    # with (logged_host) as the run's does: its lines are the logger's (errors_of).
+    refusals = [error for error in errors_of(plan.stderr) if any(w in error for w in REFUSED)]
     # Another card than ROOT_CARD, whose reference is made untiled at the size its untiled passes
     # fit (the module's docstring): its plan there refused, or tiling a pass, skips the case,
     # saying it; ROOT_CARD's is held to UNTILED_FREE (unpinned). A refusal records no reading:
@@ -969,14 +1050,14 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert passes[0].startswith("encode: untiled, "), planned
     assert passes[1].startswith("decode: untiled, "), planned
     assert listed.is_file() and not (tmp_path / "ours.mkv").exists()
-    host_ran = host_available()
     log = upscaled(*job, "-v", numz_padding=True, pin_untiled=False, planned=plan.stderr)
     free_ran = logged_free(log)
     assert free_ran is not None, f"no free memory read in the run's --verbose log: {log[-3000:]}"
     assert_planned_as_read(
         [
             compare_with_planner(
-                "--plan", plan.stderr, free_planned, inputs, host_planned, monkeypatch
+                *("--plan", plan.stderr, free_planned, inputs, logged_host(plan.stderr)),
+                monkeypatch=monkeypatch,
             )
         ]
     )
@@ -996,7 +1077,12 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # After the run's tiling check: a run that tiles where --plan did not skips or fails as
     # unpinned() says, not on the planner comparison (review of baton 3, 2026-10-31).
     assert_planned_as_read(
-        [compare_with_planner("the run", log, free_ran, inputs, host_ran, monkeypatch)]
+        [
+            compare_with_planner(
+                *("the run", log, free_ran, inputs, logged_host(log)),
+                monkeypatch=monkeypatch,
+            )
+        ]
     )
     same_bits(tmp_path, numz.reference)
 

@@ -856,6 +856,39 @@ def test_what_a_user_does_nothing_with_is_said_under_verbose_only(
     assert "time: then about " in caplog.text
 
 
+def test_the_system_memory_the_plan_counts_on_is_logged_at_debug(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Design, baton 4, 2026-10-31, item d: each call's host reading from its own log, as the GPU's
+    # (tests/test_regression.py logged_host). --plan and the run both read it; at debug alone; the
+    # manifest's record is unchanged.
+    source_path = job(tmp_path, monkeypatch)
+    caplog.set_level(logging.INFO, logger="seedvr2x")
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert "of system memory available" not in caplog.text
+    caplog.clear()
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    assert upscale(tmp_path, source_path, "plan.mkv", *JOB[:4], "--plan", "plan.txt") == 0
+    said = [record for record in caplog.records if "system memory available" in record.getMessage()]
+    assert [(record.levelname, record.getMessage()) for record in said] == [
+        (
+            "DEBUG",
+            f"the plan counts on {HOST / GIB:.2f} GiB ({HOST} bytes) of system memory available",
+        )
+    ]
+    assert "host_available" not in json.dumps(
+        json.loads((tmp_path / "plan.mkv.work" / "manifest.json").read_text())["plan"]
+    )
+    # Nothing read: said as that, once the warning has said why.
+    caplog.clear()
+    monkeypatch.setattr(cli, "_host_available", lambda: None)
+    assert upscale(tmp_path, source_path, "none.mkv", *JOB[:4]) == 0
+    assert "the system memory available was not read: the plan counts on none" in caplog.text
+
+
 def test_plan_recorded_and_phases_entered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -815,13 +815,15 @@ def test_a_compilation_after_the_warm_up_is_said_at_warning_naming_the_pass(
     assert compiling.report_late("shot 1's decode") == 2
     [record] = caplog.records
     assert record.levelname == "WARNING"
-    assert record.getMessage().startswith("shot 1's decode: the compiler compiled 2 more graphs")
+    assert record.getMessage().startswith(
+        "shot 1's decode: the compiler compiled, or tried to compile, 2 more graphs"
+    )
     # Said once: the next pass compiles nothing more, the one after one frame.
     caplog.clear()
     assert compiling.report_late("shot 2's encode") == 0 and not caplog.records
     frames["total"] = 13
     assert compiling.report_late("shot 2's decode") == 1
-    assert "compiled 1 more graph after" in caplog.text
+    assert "compiled, or tried to compile, 1 more graph after" in caplog.text
 
 
 def test_the_run_names_the_unit_that_compiled_after_the_warm_up(
@@ -844,7 +846,9 @@ def test_the_run_names_the_unit_that_compiled_after_the_warm_up(
     frames["total"] = 11
     run._made(progress, ("decode", 0), "decode", 5, 0.0, "shot 0's decode")  # pyright: ignore
     [record] = caplog.records
-    assert record.getMessage().startswith("shot 0's decode: the compiler compiled 1 more graph")
+    assert record.getMessage().startswith(
+        "shot 0's decode: the compiler compiled, or tried to compile, 1 more graph"
+    )
 
 
 def test_the_cache_is_the_jobs_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1040,6 +1044,12 @@ def test_the_warm_up_latent_is_dense_channels_last() -> None:
     assert dense.stride(3) == 1 and channel_major.stride(3) > 1
 
 
+LIMITS_SAID = (
+    "recompile limit is %d for a code object's entries guarding on the same objects and %d for"
+    " all of a code object's entries across its regions"
+)
+
+
 def test_the_recompile_limits_are_raised_past_any_warm_up_and_never_lowered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1067,28 +1077,37 @@ def test_the_recompile_limits_are_raised_past_any_warm_up_and_never_lowered(
 
     dynamo.recompile_limit, dynamo.accumulated_recompile_limit = 8, 256
     assert load() == (1024, 8192)
-    assert "recompile limit is 1024 per code object and 8192 for all" in caplog.text
+    assert LIMITS_SAID % (1024, 8192) in caplog.text
     # A limit the process already set higher is kept.
     dynamo.recompile_limit, dynamo.accumulated_recompile_limit = 4096, 100000
     assert load() == (4096, 100000)
-    assert "recompile limit is 4096 per code object and 100000 for all" in caplog.text
+    assert LIMITS_SAID % (4096, 100000) in caplog.text
 
 
+@pytest.mark.parametrize("suppressing", [False, True])
 @pytest.mark.parametrize("before", [False, True])
 def test_a_limit_hit_in_the_warm_up_is_a_refusal_and_the_setting_goes_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, undo_global_state: None, before: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    undo_global_state: None,
+    before: bool,
+    suppressing: bool,
 ) -> None:
     # fail_on_recompile_limit_hit is on during the warm-up, where torch would run the frame
     # eagerly and say nothing; torch's FailOnRecompileLimitHit is an Exception, not a
     # RuntimeError, and becomes the job's refusal naming the limit and the way out. Afterwards the
     # setting is as it was (a hit in the run is torch's warning, report_late reports the graphs).
+    # suppress_errors (TORCHDYNAMO_SUPPRESS_ERRORS) set beforehand would swallow the exception in
+    # convert_frame and torch calls the two incompatible: it is off during the warm-up, and as it
+    # was after.
     recorder = Recorder(monkeypatch)
     dynamo = torch._dynamo.config
-    seen: list[bool] = []
+    seen: list[tuple[bool, bool]] = []
     dynamo.fail_on_recompile_limit_hit = before
+    dynamo.suppress_errors = suppressing
 
     def warm(models: Models, shapes: Shapes) -> None:
-        seen.append(dynamo.fail_on_recompile_limit_hit)
+        seen.append((dynamo.fail_on_recompile_limit_hit, dynamo.suppress_errors))
 
     monkeypatch.setattr(compiling, "warm", warm)
 
@@ -1103,7 +1122,8 @@ def test_a_limit_hit_in_the_warm_up_is_a_refusal_and_the_setting_goes_back(
         )
 
     load()
-    assert seen == [True] and dynamo.fail_on_recompile_limit_hit is before
+    assert seen == [(True, False)]
+    assert dynamo.fail_on_recompile_limit_hit is before and dynamo.suppress_errors is suppressing
 
     def hit(models: Models, shapes: Shapes) -> None:
         raise FailOnRecompileLimitHit("Hard failure due to fail_on_recompile")
@@ -1115,7 +1135,7 @@ def test_a_limit_hit_in_the_warm_up_is_a_refusal_and_the_setting_goes_back(
     assert isinstance(error.value, JobError)
     assert "recompile limit" in str(error.value)
     assert "the same command without --compile" in str(error.value)
-    assert dynamo.fail_on_recompile_limit_hit is before
+    assert dynamo.fail_on_recompile_limit_hit is before and dynamo.suppress_errors is suppressing
     assert recorder.events[-1] == "workers shut"
 
 
@@ -1159,7 +1179,12 @@ class Recorder:
 @pytest.fixture
 def undo_global_state(inductor_state: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TORCHINDUCTOR_CACHE_DIR", "unset")
-    for name in ("recompile_limit", "accumulated_recompile_limit", "fail_on_recompile_limit_hit"):
+    for name in (
+        "recompile_limit",
+        "accumulated_recompile_limit",
+        "fail_on_recompile_limit_hit",
+        "suppress_errors",
+    ):
         monkeypatch.setattr(torch._dynamo.config, name, getattr(torch._dynamo.config, name))
 
 

@@ -1164,6 +1164,21 @@ def _run(args: argparse.Namespace) -> int:
             # resume too (_attention).
             free = memory.reading(_free_memory(identity.device))
             host = _host_available()
+            # The system memory the plan is made with, beside memory.reading's GPU line, so that
+            # each call's plan can be rebuilt from its own log (design, baton 4, 2026-10-31, item
+            # d: the host's reading from the call's own log, as the GPU's). Not in the manifest's
+            # record: a resume compares records. --plan and the run take this path alike. The
+            # bytes beside the GiB: the plan's lines say the host's figure to 0.01 GiB and a plan
+            # bound by the system memory moves at steps of a few MiB, so that two decimals could
+            # not rebuild it (impl-v010, 2026-10-31, found by a sweep that missed such a step).
+            if host is None:
+                logger.debug("the system memory available was not read: the plan counts on none")
+            else:
+                logger.debug(
+                    "the plan counts on %.2f GiB (%d bytes) of system memory available",
+                    host / memory.GIB,
+                    host,
+                )
             attention = _attention()
             try:
                 plan, peaks = planner.plan(

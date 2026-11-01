@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 import test_regression as reg
 
-from seedvr2x.runtime import memory, planner
+from seedvr2x.runtime import disk, memory, planner
 from seedvr2x.runtime.job import Shot
 
 GIB = memory.GIB
@@ -23,15 +23,22 @@ def inputs() -> reg.Inputs:
     return reg.Inputs(HD, SHOTS, planner.FLASH_ATTN_2)
 
 
-def plan_log(free: reg.Free, monkeypatch: pytest.MonkeyPatch, host: int | None = None) -> str:
+def plan_log(
+    free: reg.Free,
+    monkeypatch: pytest.MonkeyPatch,
+    host: int | None = None,
+    room: str | None = None,
+) -> str:
     """The lines a run logs for a reading: memory.reading's debug line and the plan's lines
     (planner.said), as the command's --verbose log has them, the plan's with a time and a
-    logger in front."""
+    logger in front, and `room`, if given, the run's disk line."""
     reading = reg.readings(free, monkeypatch)[0]
     made, peaks = planner.plan(
         reading, HD, SHOTS, planner.Pins(), host, numz_padding=True, attention=planner.FLASH_ATTN_2
     )
-    said = planner.said(made, peaks, "a card", HD, SHOTS, planner.Pins(), numz_padding=True)
+    said = planner.said(
+        made, peaks, "a card", HD, SHOTS, planner.Pins(), numz_padding=True, disk=room
+    )
     return "\n".join(f"2026-10-30 12:00:00 INFO seedvr2x: {line}" for line in said)
 
 
@@ -262,3 +269,242 @@ def test_unpinned_takes_the_figure_it_is_given() -> None:
         reg.unpinned("a log that says nothing", "why", 24.8)
     with pytest.raises(pytest.fail.Exception, match=r"reports 45.00 GiB free"):
         reg.unpinned("a log that says nothing", "why", 45.0)
+
+
+# ------------------------------------------------------------------- the disk line's masters
+
+OUT = (2160, 3840)
+
+
+def masters_line(
+    free: int,
+    *,
+    sizes: tuple[int | None, ...] = (None, None),
+    assembled: bool = True,
+    commanded: bool = False,
+    format: str = "gbrp16le",
+) -> str:
+    """The disk line a run logs (disk.Disk.line) for a job of two segments of 20 and 25 frames,
+    `sizes` the bytes of those finished, with `free` bytes free on its disk."""
+    found = disk.masters([20, 25], list(sizes), format, OUT, commanded)
+    return disk.Disk(found, free, assembled).line()
+
+
+def manifest(**more: Any) -> dict[str, Any]:
+    """The part of a manifest the disk line is made from (cli._disk), with the job's other
+    records of test_a_reading_and_the_inputs_are_read_from_a_manifest's shape."""
+    return {
+        "output": {"format": "gbrp16le", "size": [OUT[1], OUT[0]]},
+        "settings": {"resolution": 1080},
+        "segments": [
+            {"start": 0, "end": 20, "finished": False, "bytes": None},
+            {"start": 20, "end": 45, "finished": False, "bytes": None},
+        ],
+    } | more
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        masters_line(500 * GIB),
+        masters_line(1 << 20),  # short: the verdict follows the free space
+        masters_line(500 * GIB, assembled=False),
+        masters_line(500 * GIB, commanded=True),
+        masters_line(500 * GIB, sizes=(3 * GIB, None)),
+        masters_line(500 * GIB, sizes=(3 * GIB, 4 * GIB), assembled=False),
+    ],
+)
+def test_a_disk_line_is_compared_by_its_masters_alone(line: str) -> None:
+    kept = reg.compared([line])
+    [masters] = kept
+    assert masters.startswith("disk: the masters")
+    assert "free on its disk" not in masters and "short" not in masters and "enough" not in masters
+    # Nothing but the free space and the verdict is gone: the same job on another disk compares
+    # equal, whatever is free there.
+    assert line.startswith(masters)
+    other = line.replace("500 GiB free", "9.0 GiB free").replace("1 MiB free", "700 GiB free")
+    assert reg.compared([other]) == kept
+
+
+def test_a_disk_line_with_other_masters_compares_otherwise() -> None:
+    # The masters' size, whether the file is assembled and a command's files are the job's.
+    lines = [
+        masters_line(500 * GIB),
+        masters_line(500 * GIB, assembled=False),
+        masters_line(500 * GIB, commanded=True),
+        masters_line(500 * GIB, format="yuv420p10le"),
+        masters_line(500 * GIB, sizes=(3 * GIB, None)),
+    ]
+    compared = [reg.compared([line])[0] for line in lines]
+    assert len(set(compared)) == len(lines), compared
+    # Other lines than the disk's are as choices leaves them.
+    others = ["windows: 1 window", "card: 24 GiB free", "pinned: nothing"]
+    assert reg.compared(others) == ["windows: 1 window", "pinned: nothing"]
+
+
+def test_the_disk_line_a_manifest_records_is_the_runs_without_its_free_space() -> None:
+    recorded = reg.recorded_disk(manifest())
+    assert recorded is not None
+    assert reg.compared([recorded]) == reg.compared([masters_line(500 * GIB)])
+    # A segment command's files, and the bytes of the segments a resume finished.
+    commanded = reg.recorded_disk(manifest(settings={"segment_cmd": "x"}))
+    assert commanded is not None and "not known before one is written" in commanded
+    done = manifest()
+    done["segments"][0] |= {"finished": True, "bytes": 3 * GIB}
+    resumed = reg.recorded_disk(done)
+    assert resumed is not None
+    assert reg.compared([resumed]) == reg.compared([masters_line(1 << 30, sizes=(3 * GIB, None))])
+    # No record of an output: no line (the other tests' synthetic content).
+    assert reg.recorded_disk({"settings": {}}) is None
+
+
+def test_the_inputs_carry_the_disk_line_of_the_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    free = READINGS["card"]
+    reading = reg.readings(free, monkeypatch)[0]
+    made, peaks = planner.plan(
+        reading, HD, SHOTS, planner.Pins(), None, numz_padding=True, attention=planner.SDPA
+    )
+    content: dict[str, Any] = {
+        "input": {"size": [960, 540], "sample_aspect": "1"},
+        "shots": [{"start": 0, "end": 45, "seed": 42}],
+        "plan": made.record() | {"memory": made.record()["memory"] | peaks.record()},
+    } | manifest()
+    found, _ = reg.recorded_inputs(content)
+    assert found.disk == reg.recorded_disk(content) and found.disk is not None
+    assert found.disk.startswith("disk: the masters")
+
+
+def test_a_plan_with_the_jobs_masters_agrees_on_whatever_disk_it_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    free = READINGS["card"]
+    wanted = disk.Disk(disk.masters([45], [None], "gbrp16le", OUT, False), 0, True).line()
+    for room in (500 << 30, 2 << 20):  # the disk has room, and is short
+        log = plan_log(free, monkeypatch, room=masters_line(room, sizes=(None, None)))
+        # The log's job is two segments of 20 and 25 frames: 45 frames in all, as `wanted`'s.
+        with_disk = reg.Inputs(HD, SHOTS, planner.FLASH_ATTN_2, wanted)
+        verdict = reg.compare_with_planner("run", log, free, with_disk, None, monkeypatch)
+        assert verdict.agrees, verdict
+
+
+def test_a_plan_with_other_masters_than_the_jobs_fails_saying_the_disk_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    free = READINGS["card"]
+    wanted = disk.Disk(disk.masters([45], [None], "gbrp16le", OUT, False), 0, True).line()
+    for log_room in (
+        masters_line(500 * GIB, format="yuv420p10le"),  # another format
+        masters_line(500 * GIB, assembled=False),  # another assembly
+        None,  # no disk line at all
+    ):
+        log = plan_log(free, monkeypatch, room=log_room)
+        with_disk = reg.Inputs(HD, SHOTS, planner.FLASH_ATTN_2, wanted)
+        verdict = reg.compare_with_planner("the run", log, free, with_disk, None, monkeypatch)
+        assert not verdict.agrees
+        with pytest.raises(pytest.fail.Exception) as failed:
+            reg.assert_planned_as_read([verdict])
+        assert "disk: the masters" in str(failed.value) or "(no line 'disk: ')" in str(failed.value)
+
+
+# ------------------------------------------------------------ the host's reading, from the log
+
+DEBUG_PREFIX = "2026-10-31 12:00:00,123 DEBUG seedvr2x: "
+
+
+def test_the_host_reading_is_found_in_a_verbose_log() -> None:
+    # The line cli._run logs (tests/test_cli_run.py holds its words), in the logger's format.
+    log = host_line(20164055531) + "\n"
+    assert "18.78 GiB (20164055531 bytes) of system memory available" in log
+    assert reg.logged_host(log) == 20164055531
+    unread = f"{DEBUG_PREFIX}{reg.HOST_UNREAD}\n"
+    assert reg.logged_host(unread) is None
+    # A log with neither can't have its plan rebuilt: the call fails, saying so.
+    with pytest.raises(pytest.fail.Exception, match="no system memory reading"):
+        reg.logged_host("12:00:00 INFO a log of no plan\n")
+
+
+def host_line(host: int) -> str:
+    return (
+        f"{DEBUG_PREFIX}the plan counts on {host / GIB:.2f} GiB ({host} bytes) of system memory"
+        " available"
+    )
+
+
+def test_a_plan_bound_by_the_system_memory_is_rebuilt_from_the_logged_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A plan bound by the system memory moves at steps of a few MiB, and its lines say the host's
+    # figure to 0.01 GiB: two decimals of GiB rebuilt it wrongly near a step (found by a sweep of
+    # +-0.005 GiB that missed one). Found: the smallest host with a plan other than the one below
+    # it, to the byte; the bytes of the log rebuild each side of it.
+    free = READINGS["driver"]
+
+    def blocks(host: int) -> str:
+        lines = reg.planner_says(reg.readings(free, monkeypatch)[0], inputs(), host)
+        return reg.line_of(lines, "blocks")
+
+    low, high = 10 * GIB, 60 * GIB
+    assert blocks(low) != blocks(high)
+    while high - low > 1:
+        middle = (low + high) // 2
+        low, high = (middle, high) if blocks(middle) == blocks(low) else (low, middle)
+    step = high
+    assert blocks(step - 1) != blocks(step)
+    for exact in (step - 1, step):
+        log = host_line(exact) + "\n" + plan_log(free, monkeypatch, exact)
+        host = reg.logged_host(log)
+        assert host == exact
+        assert reg.compare_with_planner("run", log, free, inputs(), host, monkeypatch).agrees
+    # A host the other side of the step than the one the plan was made with does not agree.
+    log = plan_log(free, monkeypatch, step - 1)
+    assert not reg.compare_with_planner("run", log, free, inputs(), step, monkeypatch).agrees
+    # A host not read is rebuilt as the planner makes it without one.
+    assert reg.compare_with_planner(
+        "run", plan_log(free, monkeypatch, None), free, inputs(), None, monkeypatch
+    ).agrees
+
+
+def test_errors_are_found_with_and_without_verbose() -> None:
+    plain = "12:00:00 INFO a line\n12:00:01 ERROR the plan takes 40 GiB of free VRAM\n"
+    verbose = (
+        "2026-10-31 12:00:00,001 INFO seedvr2x: a line\n"
+        "2026-10-31 12:00:01,002 ERROR seedvr2x: the plan takes 40 GiB of free VRAM\n"
+        "2026-10-31 12:00:01,003 ERROR seedvr2x.cli: and: a second\n"
+    )
+    assert reg.errors_of(plain) == ["the plan takes 40 GiB of free VRAM"]
+    assert reg.errors_of(verbose) == ["the plan takes 40 GiB of free VRAM", "and: a second"]
+    assert reg.errors_of("12:00:00 INFO a line\n") == []
+
+
+def test_a_verbose_plan_log_still_parses(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The --plan call runs with -v now: its log carries the debug lines and the logger's format,
+    # as the run's has. Its first pass, plan lines, free memory and host are all read.
+    free = READINGS["card"]
+    log = "\n".join(
+        [
+            "2026-10-31 12:00:00,001 INFO seedvr2x: the shot detector scored 45 frames",
+            "2026-10-31 12:00:00,002 INFO seedvr2x: shot detector: VRAM peak 0.30 GiB",
+            "2026-10-31 12:00:00,003 INFO seedvr2x: 1 shot: 0 cuts detected at --cut-threshold 0.5",
+            host_line(round(31.5 * GIB)),
+            logged(free, monkeypatch, caplog),
+        ]
+    )
+    reg.detected(log)
+    assert reg.logged_host(log) == round(31.5 * GIB)
+    assert reg.logged_free(log) is not None
+    assert reg.reported(log) == pytest.approx(30.0, abs=0.01)
+    lines = reg.plan_lines(log)
+    assert any(line.startswith("encode: ") for line in lines)
+    assert any(line.startswith("pinned: ") for line in lines)
+    # The rebuilt plan agrees with it, host and all.
+    verdict = reg.compare_with_planner(
+        "--plan",
+        log,
+        free,
+        inputs(),
+        reg.logged_host(log),
+        monkeypatch,
+    )
+    assert verdict.agrees, verdict

@@ -186,6 +186,11 @@ def report_late(where: str) -> int:
     and a pass that compiled one more ran its first call slowly, in this process (shutdown_workers
     left the compile threads at 1). Nothing is said, and 0 returned, without a warm-up.
 
+    The count is torch's attempts, not its successes: counters["frames"]["total"] is raised
+    before the recompile limit is checked (torch 2.14.1, _dynamo/convert_frame.py:2331, then
+    :2000), so a frame that hit the limit after the warm-up, which torch runs eagerly with a
+    warning of its own, is counted as one tried; hence "compiled, or tried to compile".
+
     PROVISIONAL (impl-v010, 2026-10-29: the review asks that it be said; DESIGN.md doesn't say
     when): checked after each part of a unit, and after the calibration, so that the pass is
     named; a job-end check would not name it."""
@@ -197,8 +202,9 @@ def report_late(where: str) -> int:
         return 0
     _warmed[0] = now
     logger.warning(
-        "%s: the compiler compiled %d more %s after the warm-up: the warm-up missed a shape or a"
-        " memory layout this pass meets, so its first call took the compilation's time",
+        "%s: the compiler compiled, or tried to compile, %d more %s after the warm-up: the warm-up"
+        " missed a shape or a memory layout this pass meets, so its first call took the"
+        " compilation's time",
         where,
         now - before,
         "graph" if now - before == 1 else "graphs",
@@ -249,8 +255,14 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
         dynamo.accumulated_recompile_limit, ACCUMULATED_RECOMPILE_LIMIT
     )
     fail_before = dynamo.fail_on_recompile_limit_hit
+    suppress_before = dynamo.suppress_errors
+    # recompile_limit counts a code object's entries that guard on the same objects by identity
+    # (the VAE's blocks share one code object, so they share its count); accumulated_recompile_
+    # limit counts all of a code object's entries across its regions (torch 2.14.1,
+    # _dynamo/cache_size.py:90-103, 178-197): both are per code object.
     logger.debug(
-        "the compiler's recompile limit is %d per code object and %d for all, raised past any"
+        "the compiler's recompile limit is %d for a code object's entries guarding on the same"
+        " objects and %d for all of a code object's entries across its regions, raised past any"
         " warm-up (numz's is 128); a hit during the warm-up is a refusal",
         dynamo.recompile_limit,
         dynamo.accumulated_recompile_limit,
@@ -265,6 +277,11 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
     try:
         vae.encoder = torch.compile(vae.encoder, **SETTINGS)
         vae.decoder = torch.compile(vae.decoder, **SETTINGS)
+        # Not both: with suppress_errors on, torch raises an AssertionError at the first compiled
+        # call (_dynamo/eval_frame.py:1766-1771), and would swallow the limit hit's exception
+        # where it ran the frame eagerly (convert_frame.py:2415). A user's TORCHDYNAMO_SUPPRESS_
+        # ERRORS=1 holds outside the warm-up alone, and is put back after it.
+        dynamo.suppress_errors = False
         dynamo.fail_on_recompile_limit_hit = True
         with _on_the_device(models):
             warm(models, compilation.shapes)
@@ -293,6 +310,7 @@ def compile_vae(models: Models, compilation: Compilation) -> None:
         ) from error
     finally:
         dynamo.fail_on_recompile_limit_hit = fail_before
+        dynamo.suppress_errors = suppress_before
         shutdown_workers()
     compilation.seconds = time.monotonic() - started
     logger.info("the VAE compiled in %s", spoken(spent(compilation.seconds)))
@@ -336,10 +354,11 @@ def warm(models: Models, shapes: Shapes) -> None:
     8 in the second's, none in the calibration's. A warm-up of both layouts, which followed,
     cost 236 s for the dense one (4 tiles' shapes, 3 kinds of slice) and about 5 s for the
     channel-major one (1 graph a call), of a warm-up of 359 s and 535 graphs, the encode's
-    included (RTX 5090, 1080p, 2026-10-31, tree 7dd60993: measured on the warm-up of the two
-    layouts); the ruling keeps the dense one alone, which drops the channel-major pass, about 5 s
-    and its graphs, and the GPU gate measures the one-layout warm-up again. The lengths are the
-    union of the shots' and the calibration's (Shapes.latents).
+    included (RTX 5090, 1080p, 2026-10-31, the code subset 113640f7, whose patch on e080c5a
+    history holds: measured on the warm-up of the two layouts); the ruling keeps the dense one
+    alone, which drops the channel-major pass, about 5 s and its graphs, and the GPU gate
+    measures the one-layout warm-up again. The lengths are the union of the shots' and the
+    calibration's (Shapes.latents).
 
     Not whole shots' worth of work: a slice is 4 or 5 frames of a tile.
 
