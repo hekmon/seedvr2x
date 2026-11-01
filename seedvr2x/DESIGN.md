@@ -2274,9 +2274,14 @@ first pass, whose shots are its input, and before the models load:
       It is a setting, recorded as compile_vae: its frames are not plain's, but the same in
       every process. The VAE alone, compiled against plain on the same latent, gave frames
       59.0–61.8 dB apart (2 to 9 levels at most), the encode's latent 0.10–0.14 apart at most
-      ([compile.md](../research/docs/compile.md)); a whole job's frames, the DiT carrying
-      that latent, aren't measured yet (the 51–61 dB said here until 2026-10-31 were the
-      compiled DiT's).
+      ([compile.md](../research/docs/compile.md)); the 51–61 dB said here until 2026-10-31
+      were the compiled DiT's. A whole job's frames, measured on 2026-11-01 on the RTX 5090
+      (three 1080p excerpts of about 100 frames, two live action and one anime, plain code
+      pinned to the compiled plan's tiles, window and blocks): 54–61 dB from plain code's
+      (medians 54.9, 55.1 and 60.3), where another seed is 34–46 dB. The DiT carrying the
+      encode's difference costs about 5 dB on the live action and none on the anime. The live
+      clips' largest differences sit in the frame's top-left corner, far from the tiles'
+      seams, where the two seeds' single largest one sits too.
     - Built with it (2026-10-30):
       - inductor's deterministic mode, kept on through every trace: torch 2.14.1 resets it at
         each trace's end (its restoring use_deterministic_algorithms sets inductor's flag too).
@@ -2304,6 +2309,8 @@ first pass, whose shots are its input, and before the models load:
         the job deleted by hand, on the disk with the least room; the plan's line says the
         drive's time;
       - `--plan` and the plan's line saying the compilation's time;
+      - its `--help` with no figure that drifts (2026-11-01): what it gives and costs, the
+        times left to the plan's line, the break-even to the manual;
       - the decoder warmed in the layout the run hands it its latent in, the DiT's, dense, the
         calibration's decodes handed it too, so that they time the run's own decode (built on
         2026-10-31): warmed in the encode's channel-major layout alone, an RTX 5090 run had
@@ -2322,8 +2329,12 @@ first pass, whose shots are its input, and before the models load:
       the plan's line says the drive's figures, a new job's and a resume's, provisional until
       the 96 GB box measures them, inductor's compilation being the CPU's work. Those are a
       1080p job's 6 tile shapes: a 4K job's 8 took 8 min 42 s where its line said 6 min 30 s,
-      about 65 s a shape both times. Decided on 2026-10-31, for the next batch: the line counts
-      the job's own shapes.
+      about 65 s a shape both times. Since 2026-11-01 the line counts the job's own shapes
+      (decided on 2026-10-31): about 40 s a shape for a new job and 15 s on a resume on
+      Linux's disk, 65 and 20 s on a Windows drive, fitted on those two jobs, provisional until
+      the 96 GB box measures. Replayed on those same two jobs, it said 6 min 30 s for 6 shapes
+      and 8 min 40 s for 8, where the compilations took 6 min 27 s and 8 min 38 s: a check of
+      the fit, not of another host, disk or set of shapes.
     - The DiT isn't compiled in v0.1.0: 2–3% of a long 1080p job on a 32 GB card (the DiT is
       a fifth of its units; compiled block by block over seedvr2x's own swap, a window takes
       0.77–0.80 of plain's time), a loss on a short one (each new window length compiles
