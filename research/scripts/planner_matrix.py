@@ -53,7 +53,7 @@ what a refusal one notch under is expected to say is free.
 
 On a machine whose driver gives memory the card doesn't have (behind WSL2's GPU device), where
 seedvr2x holds itself to the card, only `bare` cases run: the card's reading is taken once, at
-the start, by a process of its own, as a run takes it (seedvr2x's runtime/memory.py: what the
+the start, by a process of its own, as a run takes it (seedvr2x's seedvr2x/memory.py: what the
 driver reports, what the whole card has free, what the plan counts on), with the attention
 backend the machine runs; the clips' lengths and the predicted peaks follow them. The run one
 notch under isn't made there: vram_cap.py's ballast emulates a card for a driver that refuses,
@@ -111,7 +111,7 @@ from pathlib import Path
 
 GIB = 1024**3
 # What seedvr2x reads free on a card emulated at N GB, N - EMULATED, and on the bare 96 GB card,
-# in GiB, a first allocation and its warm-up in place (seedvr2x's cli._free_memory; measured
+# in GiB, a first allocation and its warm-up in place (seedvr2x's main._free_memory; measured
 # 2026-10-11: 24,168,824,832 bytes on a card emulated at 24 GB and 101,159,469,056 on the bare
 # one, the same to the byte for a new job, the same command again and a job given a cut list):
 # N - 1.49 and 94.21. To choose the clip's length, and for the free memory a refusal one notch
@@ -130,7 +130,7 @@ UNIT = {
 
 
 # What a refusal of the planner's says the plan takes, and what it says is there, in GiB: of
-# the GPU's memory or of the system's, whichever refusal it is (seedvr2x's runtime/planner.py:
+# the GPU's memory or of the system's, whichever refusal it is (seedvr2x's planner.py:
 # _too_large, _window, _swap_refused, _pass, _unfit).
 FIGURES = {
     "takes": re.compile(r"takes ([\d.]+) GiB of (?:free VRAM|system memory)"),
@@ -181,7 +181,7 @@ LOOSE = ("untiled decode", "tiled encode", "untiled encode")
 OTHER = 0.3
 PROBE = (
     "import json, torch\n"
-    "from seedvr2x import cli\n"
+    "import main as cli\n"
     "print(json.dumps(cli._free_memory(torch.device('cuda', 0))))\n"
 )
 REFERENCES = "references.json"
@@ -199,8 +199,8 @@ HELD = None
 ATTENTION = "flash_attn_2"
 READING = """
 import json, torch
-from seedvr2x import cli
-from seedvr2x.runtime import memory, model
+import main as cli
+from seedvr2x import memory, model
 memory.startup()
 found = memory.reading(cli._free_memory(torch.device("cuda", 0)))
 figures = [found.reported, found.card, found.counted, found.held, found.left]
@@ -213,7 +213,7 @@ def machine() -> None:
     card's reading and the attention backend as a run does, in a process of its own, which
     leaves nothing on the card: HELD and ATTENTION."""
     global HELD, ATTENTION
-    from seedvr2x.runtime import memory
+    from seedvr2x import memory
 
     if not memory.paravirtual():
         return
@@ -272,7 +272,7 @@ def compared(said: list[str], expected: str, free: int) -> dict:
     return {"said": theirs, "expected": ours, "mismatch": mismatch}
 
 
-# The phase a refusal for a pin names, by its first words (seedvr2x's runtime/planner.py:
+# The phase a refusal for a pin names, by its first words (seedvr2x's planner.py:
 # _pass's for a tile pin, _window's and _swap_refused's for the DiT's phase).
 REFUSED_PHASE = (
     (re.compile(r"--encode-tile \d+: the encode "), "encode"),
@@ -287,7 +287,7 @@ def margin_taken() -> float:
     return 0.0 if HELD is not None else MARGIN
 
 
-# The window a refusal for the DiT's phase counts, in latents (seedvr2x's runtime/planner.py:
+# The window a refusal for the DiT's phase counts, in latents (seedvr2x's planner.py:
 # _window's "its longest window, N latents,", _swap_refused's "a window of N latents,",
 # _too_large's "its smallest window, N latents,"), and the floor's words for the DiT's phase,
 # which counts every block swapped (_too_large).
@@ -369,8 +369,8 @@ def measure_said(found: dict) -> str:
 
 
 def planned(free, target: tuple[int, int], latents: int, pins=None):
-    from seedvr2x.runtime import planner
-    from seedvr2x.runtime.job import Shot
+    import planner
+    from job import Shot
 
     shots = [Shot(0, 4 * latents - 3)]
     pins = pins or planner.Pins()
@@ -379,7 +379,7 @@ def planned(free, target: tuple[int, int], latents: int, pins=None):
 
 def one_window(free, target: tuple[int, int]) -> int:
     """The longest shot, in latents, the planner runs in one window with `free` bytes free."""
-    from seedvr2x.runtime.planner import PlanError
+    from planner import PlanError
 
     for latents in range(160, 0, -1):
         try:
@@ -418,7 +418,7 @@ def foreign() -> tuple[int, list[str]]:
 
 
 def probe(args, card: str, other: float) -> int:
-    """What seedvr2x reads free (cli._free_memory), in bytes, on `card` emulated with vram_cap's
+    """What seedvr2x reads free (main._free_memory), in bytes, on `card` emulated with vram_cap's
     other at `other` GiB, in a process of its own, which leaves nothing on the card."""
     path = args.out / "free_probe.py"
     path.write_text(PROBE)
@@ -953,7 +953,7 @@ def self_check(args, name: str) -> dict:
 
 
 def case(args, spec: str) -> dict:
-    from seedvr2x.runtime import planner
+    import planner
 
     resolution, card, mode = spec.split(":")
     name = f"{resolution}-{card}-{mode}"

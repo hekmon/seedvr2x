@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The VAE's room (seedvr2x, milestone 3): what a VAE pass needs between its peak and the memory
 free, and what cures it. seedvr2x's planner holds every VAE pass a room further under its budget
-(runtime/planner.py, VAE_ROOM), because passes packed to the margin ran out of memory at one large
+(planner.py, VAE_ROOM), because passes packed to the margin ran out of memory at one large
 request while the allocator's pool held more than was asked. This script runs seedvr2x's own
 command line on cards emulated by vram_cap.py's ballast, in a process where the planner's room
 (and ENCODE_EXTRA) is set as a study needs before the plan is made, with a cure applied by a patch
@@ -24,7 +24,7 @@ allocated, what its pool held and what the card had free. Nothing of seedvr2x is
          keeps the plan as the planner made it in the process ("planned"): a resumed job's
          manifest holds its earlier plan until the run finishes its segment.
          --limit GIB, where the driver gives memory the card doesn't have (seedvr2x holds torch
-         to the card there, runtime/memory.py's hold): torch's limit for the run's units set to
+         to the card there, seedvr2x/memory.py's hold): torch's limit for the run's units set to
          GIB once seedvr2x's hold has set its own, the plan made and the models not loaded yet,
          never above it (the card is never passed), memory._limit with it so that the check
          before each unit judges the card against the limit in force: the room a pass is left
@@ -443,8 +443,9 @@ def install(probes: Probes, args: argparse.Namespace) -> list[str]:
     """Patch this process: the probes, the cure and the stop asked. What was patched, in words."""
     import torch
 
-    from seedvr2x.runtime import model
-    from seedvr2x.runtime import run as running
+    import run as running
+
+    from seedvr2x import model
     from seedvr2x.vendor.models.video_vae_v3.modules import attn_video_vae, causal_inflation_lib
 
     done = []
@@ -468,7 +469,7 @@ def install(probes: Probes, args: argparse.Namespace) -> list[str]:
     # The run's own plan, as the planner makes it in this process: a resumed job's manifest
     # keeps its earlier plan until the run finishes its segment, so that a decode refused
     # before then leaves the seed's plan there, made on another card.
-    from seedvr2x.runtime import planner as planning
+    import planner as planning
 
     made = planning.plan
 
@@ -750,28 +751,33 @@ def normed_into_one(probes: Probes, library):
 
 
 def set_planner(planner, args: argparse.Namespace) -> dict[str, int]:
-    """The planner's constants as a run or a dry run asks them, set in this process: VAE_ROOM
-    (--room) and ENCODE_EXTRA (--encode-extra), in GiB. With --room-encode or --room-decode, a
-    room by the pass: the two functions the planner judges a VAE pass by, _vae_need and
-    Peaks.need, then take the pass's own room where they take VAE_ROOM. The rooms in force, in
-    bytes, by phase."""
+    """The constants as a run or a dry run asks them, set in this process: VAE_ROOM (--room; the
+    planner's) and ENCODE_EXTRA (--encode-extra; seedvr2x/peaks.py's), in GiB. With --room-encode
+    or --room-decode, a room by the pass: the two functions the planner judges a VAE pass by,
+    _vae_need and Peaks.need, then take the pass's own room where they take VAE_ROOM. The rooms in
+    force, in bytes, by phase."""
     planner.VAE_ROOM = round(args.room * GIB)
     if hasattr(planner, "_ROOM_HELD"):
         # A refusal's words for the room, made when the module was imported, where it has them.
         planner._ROOM_HELD = (
             f", {planner.VAE_ROOM / GIB:.2f} of them the room a VAE pass is held to"
         )
+    from seedvr2x import peaks
+
     if args.encode_extra is not None:
-        planner.ENCODE_EXTRA = round(args.encode_extra * GIB)
+        peaks.ENCODE_EXTRA = round(args.encode_extra * GIB)  # the library's, read by its fit
     if getattr(args, "dit_unjudged", False):
         # A pass alone runs no window: the DiT's phase isn't judged, its peak taken as 0, so
         # that a pinned shape plans the same on every card (floor.py's rungs).
         def nothing(*given, **named):
             return 0
 
-        for name in ("dit_peak", "_dit_least", "dit_draw"):
-            if hasattr(planner, name):
-                setattr(planner, name, nothing)
+        # The library's two functions the planner judges the DiT by (planner._dit_need and
+        # _holds call peaks.dit_peak and peaks.dit_least through the module).
+        for name in ("dit_peak", "dit_least"):
+            if not hasattr(peaks, name):
+                raise SystemExit(f"vae_room: peaks.py has no {name}: --dit-unjudged is stale")
+            setattr(peaks, name, nothing)
     rooms = {"encode": planner.VAE_ROOM, "decode": planner.VAE_ROOM}
     for phase, given in (("encode", args.room_encode), ("decode", args.room_decode)):
         if given is not None:
@@ -791,12 +797,12 @@ def set_planner(planner, args: argparse.Namespace) -> dict[str, int]:
 
 
 def limited(gib: float, limits: dict) -> None:
-    """seedvr2x's hold (runtime/memory.py), then, at the one made once the plan is, torch's limit
+    """seedvr2x's hold (seedvr2x/memory.py), then, at the one made once the plan is, torch's limit
     set to `gib` GiB in its place, never above it, memory._limit with it (--limit). Both limits
     go in `limits`, in bytes, for the record."""
     import torch
 
-    from seedvr2x.runtime import memory
+    from seedvr2x import memory
 
     hold = memory.hold
 
@@ -871,10 +877,12 @@ def launch(args: argparse.Namespace) -> int:
 
     import torch
 
-    from seedvr2x import cli
-    from seedvr2x.runtime import planner
+    import main as cli  # the CLI's module, flat at apps/seedvr2x/
+    import planner
 
-    shipped = {"VAE_ROOM": planner.VAE_ROOM, "ENCODE_EXTRA": planner.ENCODE_EXTRA}
+    from seedvr2x import peaks
+
+    shipped = {"VAE_ROOM": planner.VAE_ROOM, "ENCODE_EXTRA": peaks.ENCODE_EXTRA}
     rooms = set_planner(planner, args)
     probes = Probes(args)
     patched = install(probes, args)
@@ -885,7 +893,7 @@ def launch(args: argparse.Namespace) -> int:
     say(
         f"in force: planner.VAE_ROOM {planner.VAE_ROOM} (shipped {shipped['VAE_ROOM']}),"
         f" the encode's room {rooms['encode']}, the decode's {rooms['decode']},"
-        f" planner.ENCODE_EXTRA {planner.ENCODE_EXTRA} (shipped {shipped['ENCODE_EXTRA']});"
+        f" peaks.ENCODE_EXTRA {peaks.ENCODE_EXTRA} (shipped {shipped['ENCODE_EXTRA']});"
         f" patched: {'; '.join(patched) or 'nothing but the probes'}; torch {torch.__version__},"
         f" allocator {os.environ['PYTORCH_CUDA_ALLOC_CONF']}"
     )
@@ -911,7 +919,7 @@ def launch(args: argparse.Namespace) -> int:
         "card": args.card,
         "room": args.room,
         "rooms": {phase: room / GIB for phase, room in rooms.items()},
-        "encode_extra": planner.ENCODE_EXTRA / GIB,
+        "encode_extra": peaks.ENCODE_EXTRA / GIB,
         "cure": args.cure,
         "request_floor": args.request_floor if "request" in args.cures else None,
         "output_floor": args.output_floor if "output" in args.cures else None,
@@ -1260,7 +1268,10 @@ def case_of(driver, spec: str) -> tuple[tuple[int, int], str, int]:
 
 def planned(args: argparse.Namespace) -> int:
     driver = matrix()
-    from seedvr2x.runtime import planner, tilegrid
+    import planner
+
+    from seedvr2x import tilegrid
+    from seedvr2x.peaks import MEASURED
 
     rooms = set_planner(planner, args)
     pins = planner.Pins(args.window, args.encode_tile, args.decode_tile, args.swap_blocks)
@@ -1295,7 +1306,7 @@ def planned(args: argparse.Namespace) -> int:
                 laid = tilegrid.grid(tilegrid.latent_size(padded), tiles)
                 each = sorted({(t.rows * 8, t.columns * 8) for t in laid}, reverse=True)
                 shapes = f"{tiles.size} px " + " ".join(
-                    f"{rows}x{columns}{'' if (rows, columns) in planner.MEASURED else '*'}"
+                    f"{rows}x{columns}{'' if (rows, columns) in MEASURED else '*'}"
                     for rows, columns in each
                 )
             peak = found[f"{phase}_peak"]
@@ -1455,7 +1466,7 @@ def main() -> int:
     run.add_argument("--room", type=float, required=True, help="planner.VAE_ROOM, GiB")
     run.add_argument("--room-encode", type=float, help="the encode's own room, GiB")
     run.add_argument("--room-decode", type=float, help="the decode's own room, GiB")
-    run.add_argument("--encode-extra", type=float, help="planner.ENCODE_EXTRA, GiB")
+    run.add_argument("--encode-extra", type=float, help="peaks.ENCODE_EXTRA, GiB")
     run.add_argument(
         "--cure",
         default="none",

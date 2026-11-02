@@ -13,9 +13,9 @@ the records and the GPU synchronisations at the unit's ends: the output is seedv
 for bit.
 
 How it hooks seedvr2x, never editing it (everything is patched at run time, in this process):
-- seedvr2x's CLI sets the allocator (runtime/memory.py: startup) before torch is imported, so
+- seedvr2x's CLI sets the allocator (seedvr2x/memory.py: startup) before torch is imported, so
   the wrapper imports nothing of torch before it: it wraps memory.startup, and installs its
-  patches right after the original returns, then calls cli.main(argv) unchanged.
+  patches right after the original returns, then calls the CLI's main.main(argv) unchanged.
 - model.load_models: the models returned, install_vae(models.runner.vae, ...) and
   install_dit(models.runner.dit, ...) are applied to them (the CLI imports load_models at the call,
   from the module, so the module's attribute is the only binding that matters; every other
@@ -27,7 +27,7 @@ How it hooks seedvr2x, never editing it (everything is patched at run time, in t
   clock corrects its model with the unit (Progress.made). A decode part of a shot with several runs
   gives one record per run, under the same segment key.
 - planner.plan (with --record-flags): the plan returned has compile_dit and compile_vae true for
-  what is compiled (runtime/plan.py records them, false, "kept so building it later reshapes
+  what is compiled (plan.py records them, false, "kept so building it later reshapes
   nothing"). Nothing else in seedvr2x reads them.
 - run.encode_shot, run.sample_windows and run.decode_shot, which the calibration calls through the
   module (calibration.py: run.encode_shot...) and the run calls as its own globals: inside
@@ -145,7 +145,10 @@ def install(options: argparse.Namespace, recorder: Recorder) -> None:
     """Patch seedvr2x's modules (called once torch may be imported)."""
     import torch
     import torch._dynamo.utils as dynamo
-    from seedvr2x.runtime import calibration, model, planner, run
+    import calibration
+    import planner
+    import run
+    from seedvr2x import model, peaks
 
     dynamo.set_compilation_metrics_limit(1_000_000)
     recorder.dynamo = dynamo
@@ -244,13 +247,13 @@ def install(options: argparse.Namespace, recorder: Recorder) -> None:
     # the GPU before its pass, held to F times plain code's (docs/compile.md: excl 1.1, int 1.6),
     # so that the planner chooses its tiles, and judges every VAE pass, by the compiled peak.
     if options.vae_peak_factor != 1.0:
-        fit = planner._fit
+        fit = peaks._fit
         factor = options.vae_peak_factor
 
         def scaled(padded: Any, tiles: Any, column: int) -> float:
             return factor * fit(padded, tiles, column)
 
-        planner._fit = scaled
+        peaks._fit = scaled
         recorder.write({"record": "vae_peak_factor", "factor": factor})
 
     # The run's units.
@@ -479,7 +482,7 @@ def parse(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         "--vae-peak-factor",
         type=float,
         default=1.0,
-        help="the planner's VAE peaks (planner._fit) times F: a compiled VAE planned for",
+        help="the planner's VAE peaks (peaks._fit) times F: a compiled VAE planned for",
     )
     parser.add_argument(
         "--keep-deterministic",
@@ -505,7 +508,7 @@ def main() -> int:
     recorder = Recorder(options.units_json)
     # No torch yet: seedvr2x sets the allocator in memory.startup before importing it; the
     # patches follow the original startup, whatever it returns.
-    from seedvr2x.runtime import memory
+    from seedvr2x import memory
 
     startup = memory.startup
 
@@ -515,7 +518,7 @@ def main() -> int:
         return found
 
     memory.startup = patched
-    from seedvr2x import cli
+    import main as cli  # the CLI's module, flat at apps/seedvr2x/
 
     begun = time.monotonic()
     status = 1

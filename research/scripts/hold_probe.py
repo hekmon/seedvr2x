@@ -20,7 +20,7 @@ The ways (options, combined freely):
   --under GIB                the same cap, given as GiB under the memory free at that moment (a
                              margin): the smaller of what the driver reports free to the process
                              (CUDA's figure) and of what the whole card has free (NVML's, read
-                             by seedvr2x's runtime/memory.py, card_free), as seedvr2x's own hold
+                             by seedvr2x's seedvr2x/memory.py, card_free), as seedvr2x's own hold
                              takes it; CUDA's figure alone where NVML doesn't answer
   --trim                     torch.cuda.empty_cache() before every step
   --without vae|dit          one model's weights off the GPU once loaded: the VAE's, as a plan
@@ -151,9 +151,13 @@ def main() -> int:
     import placement_bench as bench
     import torch
 
-    from seedvr2x import cli
-    from seedvr2x.runtime import blockswap, job, memory, model, shot, tiling
-    from seedvr2x.runtime.plan import Tiles
+    import main as cli  # the CLI's module, flat at apps/seedvr2x/
+    import shot
+    from scratch import Scratch
+
+    from seedvr2x import blockswap, memory, model, tiling
+    from seedvr2x.frames import padded_length, padded_size
+    from seedvr2x.passes import Tiles
 
     gib = bench.GIB
     device = torch.device("cuda:0")
@@ -326,7 +330,7 @@ def main() -> int:
          "reserved": round(held / gib, 3), "reserved_bytes": held, "free": free(),
          "card": card()})
     target = bench.parse_size(args.size)
-    height, width = job.padded_size(target)
+    height, width = padded_size(target)
     # A reference being written keeps what its file has already: other sizes' steps, and this
     # size's from an earlier run, which a later run never replaces (a reference is what a run
     # known to be right gave; a step run again is compared with it instead).
@@ -415,7 +419,7 @@ def main() -> int:
 
     def decode_tiled(step: str, frames: int, tile: int) -> dict:
         latent = latent_of(frames)
-        scratch = tiling.Scratch(None, 2**40)  # always in system memory
+        scratch = Scratch(None, 2**40)  # always in system memory
         torch.cuda.reset_peak_memory_stats(device)
         return decoded(step, tiling.decode_tiled(models, latent, Tiles(tile), scratch))
 
@@ -428,12 +432,12 @@ def main() -> int:
             position[0] += count
             return source[position[0] - count : position[0]]
 
-        scratch = tiling.Scratch(None, 2**40)
+        scratch = Scratch(None, 2**40)
         torch.cuda.reset_peak_memory_stats(device)
         with torch.no_grad():
             inputs = shot.encoder_inputs(models, read, frames, target)
             latent = tiling.encode_tiled(
-                models, inputs, shot.padded_length(frames), Tiles(tile), scratch
+                models, inputs, padded_length(frames), Tiles(tile), scratch
             )
         digest = hashlib.sha256(latent.float().cpu().numpy().tobytes()).hexdigest()
         return {"digest": digest[:12], **peaks(), **compared(step, digest)}

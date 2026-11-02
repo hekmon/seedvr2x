@@ -3,14 +3,15 @@
 from outside it, and whether another way of reading the weights' file takes less for the same
 tensors.
 
-seedvr2x's loader as measured (runtime/model.py, _load_weights, at 0393413) read a weights file two
-ways: a tensor bound for the device came from safetensors' mapping of the file and was copied to
-the device from it; a tensor of a part that leaves the device (runtime/blockswap.py: a swapped
-block, the VAE) was read at the file's own offsets straight into its part's pinned host copy. A
-mapped page stays in the process once read, until the mapping goes: the question was what that
-makes of a job's resident memory, and what a host short of memory makes of it
-(docs/load-memory.md). On a tree whose loader no longer reads a whole model through safetensors'
-load_file, `load` measures that loader as it is, and the other readers are refused.
+seedvr2x's loader as measured (runtime/model.py, _load_weights, at 0393413; now core/seedvr2x/
+model.py) read a weights file two ways: a tensor bound for the device came from safetensors'
+mapping of the file and was copied to the device from it; a tensor of a part that leaves the
+device (runtime/blockswap.py, now core/seedvr2x/blockswap.py: a swapped block, the VAE) was read
+at the file's own offsets straight into its part's pinned host copy. A mapped page stays in the
+process once read, until the mapping goes: the question was what that makes of a job's resident
+memory, and what a host short of memory makes of it (docs/load-memory.md). On a tree whose loader
+no longer reads a whole model through safetensors' load_file, `load` measures that loader as it
+is, and the other readers are refused.
 
   watch   --out SAMPLES.tsv [--interval S] [--rollup S] [--give-up S] -- COMMAND ...
           Runs COMMAND, and samples it from outside every S seconds (0.05): /proc/PID/status
@@ -468,13 +469,14 @@ def digests(torch, models):
 
 def load(args):
     mark("start")
-    from seedvr2x.runtime import memory
+    from seedvr2x import memory
 
     allocator = memory.startup()
     import torch
 
-    from seedvr2x.runtime import blockswap, model
-    from seedvr2x.runtime.plan import Plan
+    from plan import Plan
+
+    from seedvr2x import blockswap, model
 
     device = torch.device("cuda:0")
     plan = None
@@ -501,7 +503,8 @@ def load(args):
     torch.zeros(1, device=device)
     mark("held")
     started = time.perf_counter()
-    models = model.load_models(Path(args.dit), Path(args.vae), device, None, plan)
+    model_plan = plan.model_plan if plan is not None else None
+    models = model.load_models(Path(args.dit), Path(args.vae), device, None, model_plan)
     seconds = time.perf_counter() - started
     mark("loaded")
     pinned = (models.placement.host_bytes if models.placement is not None else 0) + (

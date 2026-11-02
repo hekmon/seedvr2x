@@ -61,12 +61,12 @@ own code paths:
 - [`scripts/compile_dit.py`](../scripts/compile_dit.py): one window's step as the pipeline makes
   it (seedvr2x's noise draw, condition and Euler step, `model.sample`), at a size and a length in
   latents, with seedvr2x's BlockSwap (`--swap N`, a Plan with N blocks swapped, the hooks of
-  `runtime/blockswap.py`); plain and compiled steps in turn in one process, so that times compare
+  `seedvr2x/blockswap.py`); plain and compiled steps in turn in one process, so that times compare
   as ratios of neighbours. Per step: GPU time, torch's peak allocated, the compilations (frames,
   seconds, recompilations and graph breaks with their reasons, cache entries per code object) and
   the output's SHA-256.
 - [`scripts/compile_vae.py`](../scripts/compile_vae.py): seedvr2x's encode and decode of a clip's
-  frames, untiled or tiled (`runtime/tiling.py`), the latent kept in system memory as the pipeline
+  frames, untiled or tiled (`seedvr2x/tiling.py`), the latent kept in system memory as the pipeline
   keeps it; passes plain (A) and compiled (B) in turn, the first A a warm-up (the first plain pass
   also sets up cuDNN). Per pass: time per frame, the peak above what is allocated before it (the
   VAE's 0.47 GiB of weights), per tile, the compiling pass's own peak, what is left allocated, the
@@ -254,7 +254,7 @@ of compilation; `int` out of memory.
   compiled): the compiled VAE leaves nothing behind for the DiT's phase, where numz's left 5.5 GiB.
 - **A fit the planner can use** (`int` with the deterministic mode, 512 to 896 px, and `excl`, 1024
   px to untiled and 4K's 1536 and 1152): the compiled pass's peak above the weights against the
-  same tile's plain peak, the planner's own table (`MEASURED` in `runtime/planner.py`). `int`'s
+  same tile's plain peak, the planner's own table (`MEASURED` in `seedvr2x/peaks.py`). `int`'s
   first call 1.45, 1.52, 1.44 and 1.40 times the plain encode, 1.49, 1.56, 1.55 and 1.58 times the
   plain decode, its later calls 1.06 to 1.22 and 1.12 to 1.40: **a compiled `int` pass is held to
   1.6 times its plain peak** (the decode's ratio grows with the tile, to be measured beyond 896
@@ -410,7 +410,7 @@ command.
   first compiled window having left 13.24 GiB allocated where every other run's windows started
   with 2.8 to 4.5 (the size of some 26 swapped blocks' weights); seen once, the cause not
   isolated. The plan's record holds `compile_dit` and `compile_vae`, compared on resume
-  (`runtime/resume.py`): a job started plain and resumed compiled is another job, refused; a job
+  (`resume.py`): a job started plain and resumed compiled is another job, refused; a job
   recorded compiled resumes as recorded.
 - **The environment's record.** Compiling imports `jinja2`, `markupsafe` and `networkx` (Inductor's
   code generation) after seedvr2x has recorded the packages a job ran with: seedvr2x then warns of

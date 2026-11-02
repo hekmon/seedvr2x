@@ -51,7 +51,7 @@ usage() {
 usage: m5_run.sh m1|rest
 Environment, every variable required, paths absolute (the runs cd into the checkouts):
   M5_OUT       where the runs go: numz/, ours/, logs/
-  M5_SEEDVR2X  seedvr2x's project directory (its .venv), at the commit to run
+  M5_SEEDVR2X  seedvr2x's project directory (its .venv; apps/seedvr2x/ since the split), at the commit to run
   M5_NUMZ      numz's checkout at 4490bd1 (its .venv)
   M5_SCRIPTS   research/scripts: bench.py, ffv1_out.py, blend_patch.py
   M5_MODELS    the model directory: seedvr2_ema_7b_fp16.safetensors and numz's VAE
@@ -139,7 +139,7 @@ ours() {  # name input cc [seedvr2x options]; inside a hold
     echo "== ours $name ($cc) $(date -u +%FT%TZ); load $(cat /proc/loadavg)"
     sampler "$master.work" > "$OUT/logs/ours-$name.sizes" &
     local spid=$!
-    (cd "$SX" && $TIMED .venv/bin/python -m seedvr2x "$input" -o "$master" \
+    (cd "$SX" && $TIMED .venv/bin/seedvr2x "$input" -o "$master" \
         --model-dir "$MODELS" --dit-model seedvr2_ema_7b_fp16.safetensors --resolution 1080 \
         --seed 42 --color-correction "$cc" "$@") > "$OUT/logs/ours-$name.log" 2>&1
     local status=$?

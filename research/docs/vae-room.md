@@ -983,7 +983,7 @@ lost nothing a pass alone kept, at 0.1 GiB.
 
 So under expandable segments on that card a VAE pass keeps its frames with 0.40 GiB beyond its
 peak in tiles of 832 and 1,024 px, where a held run's plan leaves it RESERVE's 4.5 GiB and the
-room's 1.5 beyond its predicted peak (runtime/memory.py, RESERVE): 6.0 GiB.
+room's 1.5 beyond its predicted peak (seedvr2x/memory.py, RESERVE): 6.0 GiB.
 
 ### The large tiles under the one-output cure, and the tiles left (2026-10-17)
 

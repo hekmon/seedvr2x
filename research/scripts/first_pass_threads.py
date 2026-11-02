@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """seedvr2x's first pass on one decoder thread against ffmpeg's default threads (CPU only).
 
-The first pass's ffmpeg command is seedvr2x's own (`seedvr2x.media.scan.command`, the shot detector's
-48x27 output on fd 3, drained here), run as is or with `-threads 1` as an input option, the decoder's
+The first pass's ffmpeg command is seedvr2x's own (`media.scan.command` of the CLI, the shot
+detector's 48x27 output on fd 3, drained here), run as is or with `-threads 1` as an input option, the decoder's
 (placed just before `-noautorotate -i SRC`, where seedvr2x's input options begin); and a decode alone
 (`-map 0:v:0 -f null -`) both ways. Per run: wall time, user and system CPU (the child's rusage), the
 thread count 2 s in, the load average at start and end, and the CRC-32 of every frame (the pass's own
@@ -38,7 +38,7 @@ def build(src, mode):
         thr = ["-threads", "1"] if mode.endswith("t1") else []
         return ["ffmpeg", "-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", *thr,
                 "-noautorotate", "-i", src, "-map", "0:v:0", "-f", "null", "-"]
-    from seedvr2x.media.scan import command
+    from media.scan import command
 
     cmd = command(Path(src), 3)
     if mode == "t1":

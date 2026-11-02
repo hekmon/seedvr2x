@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Placement probe for seedvr2x: what its BlockSwap (runtime/blockswap.py) changes, takes and costs.
+"""Placement probe for seedvr2x: what its BlockSwap (seedvr2x/blockswap.py) changes, takes and costs.
 
 seedvr2x swaps the DiT's last S blocks through two device buffers, from pinned host copies, with
 or without a prefetch on a side stream, and sends the DiT and the VAE away between phases
@@ -13,7 +13,7 @@ drawn from a seeded CPU generator, goes to the device; the seed is set, the nois
 condition built, then model.sample runs one Euler step under bfloat16 autocast. Its output is
 known by the SHA-256 of its bytes; forward i of a step takes seed 42 + i.
 
-  matrix  the models loaded whole (runtime/model.py, load_models, no plan), then, in one process:
+  matrix  the models loaded whole (seedvr2x/model.py, load_models, no plan), then, in one process:
           "loaded", the DiT as loaded; then every parameter of the DiT given a pinned host copy
           (blockswap.host) and, for each S of --swapped, the placement without the prefetch
           ("sync") and with it ("prefetch"), S = 0 being the DiT restored whole from its copies.
@@ -25,9 +25,9 @@ known by the SHA-256 of its bytes; forward i of a step takes seed 42 + i.
           between two placements, and the table gives each step's least time over the rounds.
           With --verify-slots, one more pass at the largest S compares every slot with its host
           copy before its block runs (Placement's verify).
-  plan    the models loaded through a plan (load_models(plan=Plan(...))): S blocks swapped, the
-          blocks a VAE phase keeps (--resident, 0: the DiT away), the VAE away in the DiT's phase
-          (--vae-away). Measures the load (time, the device's peak, the host memory pinned), then
+  plan    the models loaded through a plan (load_models(model_plan=Plan(...).model_plan)): S
+          blocks swapped, the blocks a VAE phase keeps (--resident, 0: the DiT away), the VAE
+          away in the DiT's phase (--vae-away). Measures the load (time, the device's peak, the host memory pinned), then
           each phase's memory and the time to enter it, over --cycles cycles of encode, dit,
           decode, with the forwards of --lengths in the DiT's phase, and a small VAE encode and
           decode in the VAE's. --reference names a matrix's results: the digests must be its own.
@@ -35,10 +35,10 @@ known by the SHA-256 of its bytes; forward i of a step takes seed 42 + i.
           Run it under vram_cap.py for a smaller card.
   table   RESULTS.json [...]   a compact Markdown summary per file
 
-SIZE = 720 | 1080 | 2160 (16:9 output) or WxH, padded as seedvr2x pads it (runtime/job.py,
+SIZE = 720 | 1080 | 2160 (16:9 output) or WxH, padded as seedvr2x pads it (seedvr2x/frames.py,
 padded_size: 1920x1080 to 1920x1104, a latent of 138 x 240, 8,280 tokens).
 
-The CLI's allocator default (PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync, cli.py) is applied
+The CLI's allocator default (PYTORCH_CUDA_ALLOC_CONF=backend:cudaMallocAsync, main.py) is applied
 before torch is imported.
 
 Usage (seedvr2x's venv python; under the GPU's lock):
@@ -126,7 +126,7 @@ class FreeSampler:
 
 def make_latent(torch, dtype, length, h, w):
     """The latent of a window of `length` latents: (length, h, w, 16) in channel-major memory, as
-    the encode gives it (runtime/model.py, encode_stream), from a seeded CPU generator."""
+    the encode gives it (seedvr2x/model.py, encode_stream), from a seeded CPU generator."""
     generator = torch.Generator().manual_seed(1000003 * length + 1009 * h + w)
     values = torch.randn((16, length, h, w), generator=generator, dtype=torch.float32)
     return values.to(dtype).permute(1, 2, 3, 0)
@@ -165,9 +165,9 @@ def one_forward(torch, model, models, latent_cpu, seed):
 def run_step(torch, model, models, target, length, forwards, record):
     """`forwards` forwards of one length at one size, after a warm-up one: record gets the
     digests (the warm-up's first), the peak, the times."""
-    from seedvr2x.runtime import job
+    from seedvr2x.frames import padded_size
 
-    height, width = job.padded_size(target)
+    height, width = padded_size(target)
     latent = make_latent(torch, model.COMPUTE_DTYPE, length, height // 8, width // 8)
     with FreeSampler(torch, models.device) as sampler:
         runs = [one_forward(torch, model, models, latent, 42 + i) for i in range(forwards + 1)]
@@ -191,9 +191,10 @@ def run_step(torch, model, models, target, length, forwards, record):
 
 def predicted(target, length, swapped, slots):
     """The DiT's peak for the guard, in GiB: the fit less the swapped blocks, but the slots."""
-    from seedvr2x.runtime import job, weights
+    from seedvr2x import weights
+    from seedvr2x.frames import padded_size
 
-    height, width = job.padded_size(target)
+    height, width = padded_size(target)
     tokens = length * (height // 16) * (width // 16)
     saved = max(swapped - slots, 0) * weights.DIT_7B.blocks[0] / GIB
     return FIT_GIB - saved + TOKEN_GIB * tokens
@@ -214,7 +215,7 @@ def vae_digest(torch, model, models):
 def setup(args):
     import torch
 
-    from seedvr2x.runtime import blockswap, model, weights
+    from seedvr2x import blockswap, model, weights
 
     device = torch.device("cuda:0")
     free, total = torch.cuda.mem_get_info(device)
@@ -353,7 +354,7 @@ def cmd_matrix(args):
 def cmd_plan(args):
     from pathlib import Path
 
-    from seedvr2x.runtime.plan import Plan
+    from plan import Plan
 
     torch, blockswap, model, device, results = setup(args)
     if args.no_trim:
@@ -375,7 +376,7 @@ def cmd_plan(args):
     torch.cuda.reset_peak_memory_stats(device)
     before, started = rss_gib(), time.perf_counter()
     with FreeSampler(torch, device) as sampler:
-        models = model.load_models(Path(args.dit), Path(args.vae), device, plan=plan)
+        models = model.load_models(Path(args.dit), Path(args.vae), device, model_plan=plan.model_plan)
         torch.cuda.synchronize(device)
     placement = models.placement
     pinned = (placement.host_bytes if placement else 0) + (

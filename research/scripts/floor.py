@@ -26,7 +26,7 @@ of the units then says decode tile 0 and no decode tiles). An untiled rung recor
 untiled pass is what ran (the run's own plan has no tiles for the pass, and the pass ran one
 stream's slices, as many as a tiled pass runs a tile) and the pass's peak above what the GPU held
 once its phase was entered, against the planner's untiled fit of its resolution's padded frame
-(planner._fit, read once per code and resolution by the code's own python on the CPU: fits.json).
+(seedvr2x/peaks.py, _fit, read once per code and resolution by the code's own python on the CPU: fits.json).
 
 The code under study: --copy (its tree --want, its environment's --python) for a ladder named
 without a code (dec1080-768); a ladder named with one (dec2160-1216-a4) runs that code, given by
@@ -437,13 +437,13 @@ def fit_of(code: str, res: int, phase: str) -> float | None:
 
 
 def make_fits() -> dict:
-    """planner._fit of each resolution's padded frame untiled, the encode's (column 0) and the
+    """peaks._fit of each resolution's padded frame untiled, the encode's (column 0) and the
     decode's (1): a VAE pass's peak above what the GPU holds before it, as each code's planner
     predicts it, read on the CPU by the code's own python; fits.json."""
     found: dict = {}
     script = (
-        "import json; from seedvr2x.runtime import planner; print(json.dumps({res:"
-        " [planner._fit(padded, None, column) for column in (0, 1)] for res, padded in"
+        "import json; from seedvr2x import peaks; print(json.dumps({res:"
+        " [peaks._fit(padded, None, column) for column in (0, 1)] for res, padded in"
         f" {PADDED}.items()}}))"
     )
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1")
@@ -534,7 +534,7 @@ def environment() -> dict:
     env.pop("CUDA_VISIBLE_DEVICES", None)
     if ALLOCATOR is not None:
         # The study's allocator: torch and seedvr2x take the first of torch's two variables that
-        # is set, this one first (runtime/memory.py, VARIABLES).
+        # is set, this one first (seedvr2x/memory.py, VARIABLES).
         env[ALLOCATOR_VARIABLE] = ALLOCATOR
     return env
 
@@ -744,7 +744,7 @@ def run_rung(ladder: str, card: str, target: float | None, name: str) -> dict:
             entered = (unit.get("entered") or {}).get("allocated")
             if entered is not None and unit.get("peak_allocated") is not None:
                 # The pass's own peak: above what the GPU held once its phase was entered, the
-                # models placed, as planner._fit predicts a pass.
+                # models placed, as peaks._fit predicts a pass.
                 found["pass_peak"] = (unit["peak_allocated"] - entered) / GIB
                 found["entered_allocated"] = entered / GIB
         if record.get("oom"):

@@ -11,11 +11,11 @@ every parameter is a flag or a key of a JSON file, so that the tables are made a
 parameter is measured.
 
 A shot of n frames is padded to 4k + 1 frames and makes (padded - 1) / 4 + 1 latents
-(runtime/shot.py: padded_length, shot_layout). A shot no longer than the cap, the most latents a
-window may hold, is ONE window of its own length, in every layout. A longer shot is cut into
+(seedvr2x/frames.py: padded_length; shot.py: shot_layout). A shot no longer than the cap, the
+most latents a window may hold, is ONE window of its own length, in every layout. A longer shot is cut into
 ceil((latents - SHARED) / (cap - SHARED)) windows, the same count in the three layouts:
 
-  balanced         seedvr2x's own (runtime/shot.py, window_layout, copied here): the windows'
+  balanced         seedvr2x's own (job.py, window_layout, copied here): the windows'
                    lengths balanced, differing by at most 1, consecutive windows sharing SHARED
                    latents (2). The lengths depend on the shot's.
   full-short-last  windows of exactly `cap` latents every cap - SHARED, the last one holding what
@@ -66,7 +66,7 @@ Subcommands:
   cuts    LABEL=FILE [...] --out CUTS.json [--threshold 0.3] [--key single]
           [--range LABEL=START:END ...] [--fps LABEL=N/D ...]
           the cut lists: per source, the frames of each shot, cut by seedvr2x's rule
-          (runtime/cuts.py, reimplemented here) from per-frame probability files (.npz, its
+          (cuts.py, reimplemented here) from per-frame probability files (.npz, its
           array --key; or .npy). --range keeps frames START to END - 1 of a file holding more;
           --fps is only for the durations printed.
   tables  CUTS.json [...] [--caps 5,13,19,27,76] [--model MODEL.json] [model flags]
@@ -76,8 +76,8 @@ Subcommands:
           MODEL.json holds any of the model's keys (the flags' names, underscored); a flag wins.
   check   LABEL=FILE [...] [--threshold 0.3] [--key single] [--range ...] [--caps ...]
           the copies against seedvr2x's own functions on the same data: the cuts against
-          runtime/cuts.py's detected, padded_length and the balanced layout against
-          runtime/shot.py's, on every shot and cap and on every length up to the longest shot.
+          cuts.py's detected, frames.py's padded_length and the balanced layout against
+          job.py's and shot.py's, on every shot and cap and on every length up to the longest shot.
           Needs seedvr2x importable: run it with the python of seedvr2x's own environment.
 
 A cut list file is JSON: {"threshold": 0.3, "sources": {LABEL: {"frames": N, "fps": "N/D",
@@ -102,7 +102,7 @@ from itertools import pairwise
 
 import numpy as np
 
-SHARED = 2  # core/src/seedvr2x/runtime/job.py: the latents two consecutive windows share
+SHARED = 2  # apps/seedvr2x/job.py: the latents two consecutive windows share
 LAYOUTS = ("balanced", "full-short-last", "slid-back")
 STRATEGIES = ("every", "pay", "dynamic", "none")
 CAPS = "5,13,19,27,76"  # what 24 GB to 96 GB cards fit at 1080p
@@ -129,7 +129,7 @@ MODEL = {
 
 def detected_cuts(probabilities, threshold):
     """The first frame of each shot but the first, by seedvr2x's rule
-    (core/src/seedvr2x/runtime/cuts.py: detected, _exact, _runs): one detection per run of
+    (apps/seedvr2x/cuts.py: detected, _exact, _runs): one detection per run of
     frames whose probability reaches the threshold, at the first of its highest frames, the cut
     being the frame after; none after a peak on the last frame. The values are compared as
     recorded, float32, each widened to the double of its exact value."""
@@ -144,19 +144,19 @@ def detected_cuts(probabilities, threshold):
 
 
 def padded_length(count):
-    """The frames of a shot of `count` frames once padded to 4n + 1 (runtime/shot.py,
+    """The frames of a shot of `count` frames once padded to 4n + 1 (seedvr2x/frames.py,
     padded_length)."""
     return count + (-count + 1) % 4
 
 
 def latents_of(count):
-    """The latents of a shot of `count` frames (runtime/shot.py, shot_layout)."""
+    """The latents of a shot of `count` frames (shot.py, shot_layout)."""
     return (padded_length(count) - 1) // 4 + 1
 
 
 def balanced(latents, window, shared=SHARED):
     """seedvr2x's layout, [start, end) of each window: a copy of
-    core/src/seedvr2x/runtime/shot.py's window_layout (`check` holds it to the original)."""
+    apps/seedvr2x/job.py's window_layout (`check` holds it to the original)."""
     if latents <= window:
         return [(0, latents)]
     if window < 2 * shared + 1:
@@ -415,23 +415,25 @@ def cmd_cuts(args):
 
 def cmd_check(args):
     try:
-        from seedvr2x.runtime import cuts as their_cuts
-        from seedvr2x.runtime import job as their_job
-        from seedvr2x.runtime import shot as their_shot
+        import cuts as their_cuts
+        import job as their_job
+        import shot as their_shot
+
+        from seedvr2x import frames as their_frames
     except ImportError as error:
         sys.exit(f"seedvr2x isn't importable ({error}): run check with seedvr2x's own environment")
     caps = [int(x) for x in args.caps.split(",")]
     failures = 0
     if their_job.SHARED != SHARED:
         failures += 1
-        print(f"FAIL SHARED: {SHARED} here, {their_job.SHARED} in runtime/job.py")
+        print(f"FAIL SHARED: {SHARED} here, {their_job.SHARED} in job.py")
     longest = 0
     for label, (values, _) in read_sources(args).items():
         mine = detected_cuts(values, args.threshold)
         theirs = [cut.frame for cut in their_cuts.detected(values, args.threshold)]
         shots = shots_of(len(values), mine)
         longest = max(longest, max(latents_of(count) for count in shots))
-        padded = sum(padded_length(count) != their_shot.padded_length(count) for count in set(shots))
+        padded = sum(padded_length(count) != their_frames.padded_length(count) for count in set(shots))
         layouts = sum(
             balanced(latents_of(count), cap) != their_shot.shot_layout(count, cap)
             for count in set(shots) for cap in caps
@@ -439,10 +441,10 @@ def cmd_check(args):
         ok = mine == theirs and not padded and not layouts
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} {label}: {len(values)} frames, cuts {len(mine)} here, {len(theirs)} "
-              f"by runtime/cuts.py, {'identical' if mine == theirs else 'DIFFERENT'}; {len(set(shots))} distinct "
+              f"by cuts.py, {'identical' if mine == theirs else 'DIFFERENT'}; {len(set(shots))} distinct "
               f"shot lengths x {len(caps)} caps: padded_length differs on {padded}, the layout on {layouts}")
     differing = sum(
-        balanced(latents, cap) != their_shot.window_layout(latents, cap)
+        balanced(latents, cap) != their_job.window_layout(latents, cap)
         for latents in range(1, longest + 1) for cap in caps
     )
     failures += bool(differing)

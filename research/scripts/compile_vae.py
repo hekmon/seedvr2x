@@ -73,7 +73,7 @@ Subcommands:
            backend eager and fullgraph on a small VAE with no graph break
 
 The allocator is chosen as seedvr2x's CLI chooses it, before torch is imported
-(runtime/memory.startup: cudaMallocAsync, or expandable segments where the driver spills, as
+(seedvr2x/memory.py, startup: cudaMallocAsync, or expandable segments where the driver spills, as
 WSL2's does), unless PYTORCH_CUDA_ALLOC_CONF is set. ffmpeg and ffprobe on PATH for --clip. The
 GPU is one job's at a time: run under the shared GPU lock.
 
@@ -109,7 +109,7 @@ def _choose_allocator():
     (it asks the driver whether it refuses what the card can't hold), unless the environment has
     a setting; cudaMallocAsync, the CLI's default, where seedvr2x can't be imported yet."""
     try:
-        from seedvr2x.runtime import memory
+        from seedvr2x import memory
 
         memory.startup()
     except Exception as error:  # noqa: BLE001 - the harness runs anywhere the venv does
@@ -737,15 +737,19 @@ class Bench:
 
     def __init__(self, models, frames, target, meter, encode_tiles=None, decode_tiles=None,
                  scratch=None):
-        from seedvr2x.runtime import job, model, shot, tilegrid, tiling
+        import shot
+
+        from seedvr2x import frames as sizes
+        from seedvr2x import model, tilegrid, tiling
 
         self.model, self.shot, self.tiling, self.tilegrid = model, shot, tiling, tilegrid
+        self.sizes = sizes
         self.models = models
         self.vae = models.runner.vae
         self.frames = frames
         self.target = target
-        self.output = job.output_size(target)
-        self.padded = job.padded_size(target)
+        self.output = self.sizes.output_size(target)
+        self.padded = self.sizes.padded_size(target)
         self.meter = meter
         self.encode_tiles = encode_tiles
         self.decode_tiles = decode_tiles
@@ -801,7 +805,7 @@ class Bench:
     def encode(self, count):
         """The latent of the clip's first `count` frames, on the CPU as shot.encode_shot gave
         it (tiled with encode_tiles)."""
-        padded = self.shot.padded_length(count)
+        padded = self.sizes.padded_length(count)
         read = reader(self.frames[:count])
         return self.phase(
             "encode", padded,
@@ -817,13 +821,15 @@ class Bench:
         clamped to [0, 1] and moved to the CPU as it comes, as shot.decode_shot does: (count, H,
         W, 3) float32. Tiled with decode_tiles."""
         height, width = self.output
-        padded = self.shot.padded_length(count)
+        padded = self.sizes.padded_length(count)
 
         def body():
             if self.decode_tiles is None:
                 slices = self.model.decode_stream(self.models, latent)
             else:
-                store = self.tiling.Scratch(self.scratch, self.allowance)
+                from scratch import Scratch
+
+                store = Scratch(self.scratch, self.allowance)
                 slices = self.tiling.decode_tiled(self.models, latent, self.decode_tiles, store)
             chunks = []
             written = 0
@@ -1047,7 +1053,7 @@ def versions():
 def run(args):
     if torch is None:
         sys.exit("compile_vae: run needs torch (seedvr2x's venv)")
-    from seedvr2x.runtime import plan as plan_module
+    from seedvr2x.passes import Tiles
 
     target = parse_size(args.size, "--size")
     shots = [int(v) for v in args.shots.split(",")] if args.shots else []
@@ -1058,7 +1064,7 @@ def run(args):
     if args.frames % 4 != 1 or any(n % 4 != 1 for n in shots):
         sys.exit("compile_vae: --frames and --shots are 4n + 1")
     tiles = {
-        name: plan_module.Tiles(size, args.overlap) if size else None
+        name: Tiles(size, args.overlap) if size else None
         for name, size in (("encode", args.encode_tile), ("decode", args.decode_tile))
     }
 
@@ -1121,7 +1127,8 @@ def run(args):
         f" {gib(results['memory']['at_start']['total'])} GiB; allocator"
         f" {results['versions']['allocator']}")
 
-    from seedvr2x.runtime import job, memory, model
+    from seedvr2x import memory, model
+    from seedvr2x.frames import padded_size
     from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
 
     results["versions"]["driver_spills"] = memory.spills()
@@ -1142,7 +1149,7 @@ def run(args):
     results["memory"]["weights_allocated"] = weights
     results["memory"]["vae_bytes"] = vae_bytes
     results["memory"]["other_allocated"] = weights - vae_bytes
-    results["padded"] = list(job.padded_size(target))
+    results["padded"] = list(padded_size(target))
     log(f"models loaded in {time.perf_counter() - started:.1f} s; DiT dropped: {gib(weights)} GiB"
         f" allocated (the VAE's weights {gib(vae_bytes)}, the rest {weights - vae_bytes} bytes),"
         f" free {gib(device_memory()['free'])} GiB; target {target}, padded {results['padded']},"
@@ -1382,7 +1389,7 @@ def small_vae():
     """The VAE as load_models builds it, random weights, float32, on the CPU, its limits low
     enough for a small input to be split as a 1080p one is at the shipped 0.5 GiB."""
     from omegaconf import OmegaConf
-    from seedvr2x.runtime import model
+    from seedvr2x import model
     from seedvr2x.vendor.common.config import create_object, load_config
 
     torch.manual_seed(0)
@@ -1670,7 +1677,7 @@ def main():
     r.add_argument("--decode-tile", type=int, default=0, metavar="PX",
                    help="tiling.decode_tiled with tiles of PX pixels (0: untiled)")
     r.add_argument("--overlap", type=int, default=None, metavar="PX",
-                   help="the tiles' overlap (default: runtime/plan.py's OVERLAP)")
+                   help="the tiles' overlap (default: seedvr2x/passes.py's OVERLAP)")
     r.add_argument("--scratch", type=Path, metavar="DIR",
                    help="the tiled passes' scratch in a file there (default: system memory)")
     r.add_argument("--mode", default="default")
@@ -1692,7 +1699,7 @@ def main():
     args = parser.parse_args()
     if args.command == "run":
         if args.overlap is None:
-            from seedvr2x.runtime.plan import OVERLAP
+            from seedvr2x.passes import OVERLAP
 
             args.overlap = OVERLAP
         run(args)

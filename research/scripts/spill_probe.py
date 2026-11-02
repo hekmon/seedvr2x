@@ -41,14 +41,14 @@ def main() -> int:
 
     import torch
 
-    from seedvr2x.runtime import job, model
+    from seedvr2x import frames, model
 
     device = torch.device("cuda:0")
     free, total = torch.cuda.mem_get_info(device)
     print(f"free {free / bench.GIB:.2f} GiB of {total / bench.GIB:.2f}", flush=True)
     models = model.load_models(Path(args.dit), Path(args.vae), device)
     target = (1080, 1920)
-    height, width = job.padded_size(target)
+    height, width = frames.padded_size(target)
 
     def windows(label: str, length: int, count: int, trim: bool = False) -> list[str]:
         latent = bench.make_latent(torch, model.COMPUTE_DTYPE, length, height // 8, width // 8)

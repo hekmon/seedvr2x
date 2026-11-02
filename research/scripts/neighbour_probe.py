@@ -15,7 +15,7 @@ Two roles, each a process of its own, to run side by side:
 nvidia-smi --query-gpu=memory.used beside them gives the whole card's use. To see the figures
 fall as the card fills, run a holder beside a seedvr2x run that takes the rest: seedvr2x reads
 the card's free memory before every unit there, and stops when what it may still take no
-longer fits (seedvr2x's runtime/memory.py, check).
+longer fits (seedvr2x's seedvr2x/memory.py, check).
 
 Measured on an RTX 5090 under WSL2 (driver 616.92, 2026-10-11, 30.20 GiB read free at rest):
 the watcher read 30.20 GiB while the holder held 8 GiB, idle or active, and 26.08 once it had

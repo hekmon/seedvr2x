@@ -7,12 +7,12 @@ InflatedCausalConv3d.whole_output) a convolution allocates its whole output ahea
 piece into it: it takes that path where the output a slice of four frames gives is 2.5 GiB or
 more (ONE_OUTPUT_FROM), judged at each convolution's own call. This script runs tile_peaks.py's
 measure, unchanged, on both versions of the code and sets the two side by side, with the planner's
-figure for each pass (runtime/planner.py, MEASURED, and _fit for an untiled pass). The measure is
+figure for each pass (seedvr2x/peaks.py, MEASURED, and _fit for an untiled pass). The measure is
 tile_peaks.py's: torch's max_memory_allocated above memory_allocated before the pass, the peak
 statistics reset first, the DiT's and the VAE's weights on the card before it and not counted;
 tiling.encode_tiled, its latent returned in system memory, then tiling.decode_tiled of that
 latent; 21 frames of the source from --first, the tiles sharing 64 px; the two models loaded whole
-(runtime/model.py, load_models, no plan); cudaMallocAsync unless the environment names an
+(seedvr2x/model.py, load_models, no plan); cudaMallocAsync unless the environment names an
 allocator (PYTORCH_CUDA_ALLOC_CONF), set before torch is imported. See tile_peaks.py's docstring
 for the squares (a T x T tile and a T x 192 one, fed on frames of T rows by T + 128 columns) and
 the tiles cut off at the picture's edge (1080p padded to 1104 x 1920, 720p to 752 x 1280).
@@ -22,7 +22,7 @@ Beyond tile_peaks.py, `run` takes:
          cutoff-720p-T, untiled-1080p or untiled-2160p. An untiled step is the untiled encode and
          decode as a run calls them (shot.encode_shot and shot.decode_shot without tiles):
          model.encode_stream of shot.encoder_inputs, then model.decode_stream of its latent. Each
-         untiled pass is measured only where the planner's own fit for it (planner._fit: the
+         untiled pass is measured only where the planner's own fit for it (peaks._fit: the
          larger of the untiled and the small tiles' fits at the padded frame's area) leaves
          --reserve GiB of the free memory; else it is skipped and said. Without --steps, the
          order of tile_peaks.py: every square, then every cut-off tile.
@@ -43,7 +43,7 @@ code with it and on the code without it: the two codes differ in that convolutio
 
 Other subcommands:
   measured   --steps STEP,... --out measured.json: the planner's figure for each step's two
-         passes, from the seedvr2x it imports (MEASURED where a tile has one, planner._fit for
+         passes, from the seedvr2x it imports (MEASURED where a tile has one, peaks._fit for
          an untiled pass), and whether the pass is one the one-output convolution takes by the
          rule above (the records' key a4_list): decodes in squares from 1152 px, in 1104-row
          tiles from 1216 px and untiled at 1080p and 4K; encodes in squares from 1664 px and
@@ -98,7 +98,7 @@ from functools import partial
 from pathlib import Path
 
 GIB = 2**30
-OVERLAP = 64  # the pixels two tiles share: seedvr2x's default (runtime/plan.py, OVERLAP)
+OVERLAP = 64  # the pixels two tiles share: seedvr2x's default (seedvr2x/passes.py, OVERLAP)
 FRAMES = 21
 SQUARES = list(range(512, 2049, 64))
 # The tiles cut off at the picture's edge: a name, the output's (rows, columns), the tiles' sides.
@@ -118,7 +118,7 @@ TINY_UNTILED = {"1080p": (48, 160), "2160p": (96, 160)}
 REFITTED = 1024
 FITS = ((1.36, 8.66), (0.44, 16.29))
 FITS_SMALL = ((1.7, 8.4), (1.6, 15.6))
-# The untiled fits, the planner's (runtime/planner.py, ENCODE_UNTILED, DECODE_UNTILED): an untiled
+# The untiled fits, the planner's (seedvr2x/peaks.py, ENCODE_UNTILED, DECODE_UNTILED): an untiled
 # pass takes the larger of its own and of the small tiles' at the padded frame's area (_fit).
 FITS_UNTILED = ((1.2, 8.8), (0.8, 16.1))
 PASSES = ("encode", "decode")
@@ -134,7 +134,7 @@ def fits(side: int, pixels: int) -> tuple[float, float]:
 
 def untiled_fits(pixels: int) -> tuple[float, float]:
     """The untiled encode's and decode's fitted peaks for padded frames of `pixels` pixels, in
-    GiB, as the planner takes them (planner._fit with no tiles)."""
+    GiB, as the planner takes them (peaks._fit with no tiles)."""
     area = pixels / 1e6
     return tuple(max(c + s * area for c, s in (FITS_UNTILED[i], FITS_SMALL[i])) for i in range(2))  # type: ignore[return-value]
 
@@ -174,9 +174,13 @@ def run(args: argparse.Namespace) -> int:
     import numpy as np
     import torch
 
+    import shot
+    from scratch import Scratch
+
     import seedvr2x
-    from seedvr2x.runtime import job, model, shot, tiling
-    from seedvr2x.runtime.plan import Tiles
+    from seedvr2x import model, tiling
+    from seedvr2x.frames import padded_length, padded_size
+    from seedvr2x.passes import Tiles
     from seedvr2x.vendor.models.video_vae_v3.modules import causal_inflation_lib as cil
 
     torch.set_grad_enabled(False)
@@ -434,17 +438,17 @@ def run(args: argparse.Namespace) -> int:
         def encode():
             inputs = (x.to(device) for x in slices)
             return tiling.encode_tiled(
-                models, inputs, count, tiles, tiling.Scratch(None, allowance)
+                models, inputs, count, tiles, Scratch(None, allowance)
             )
 
         def decode(latent):
-            return tiling.decode_tiled(models, latent, tiles, tiling.Scratch(None, allowance))
+            return tiling.decode_tiled(models, latent, tiles, Scratch(None, allowance))
 
         passes(record, encode, decode)
 
     def cutoff(res: str, target: tuple[int, int], side: int) -> None:
         tiles = Tiles(side, overlap)
-        padded = job.padded_size(target)
+        padded = padded_size(target)
         record = {"part": "T2", "kind": "cutoff", "res": res, "target": list(target)}
         record.update(frames=count, **geometry(padded, tiles))
         record["as_expected"] = record["grid"] == "1x2" and record["largest_tile"] == [
@@ -457,16 +461,16 @@ def run(args: argparse.Namespace) -> int:
 
         def encode():
             inputs = shot.encoder_inputs(models, reader(frames), count, target)
-            scratch = tiling.Scratch(None, allowance)
-            return tiling.encode_tiled(models, inputs, shot.padded_length(count), tiles, scratch)
+            scratch = Scratch(None, allowance)
+            return tiling.encode_tiled(models, inputs, padded_length(count), tiles, scratch)
 
         def decode(latent):
-            return tiling.decode_tiled(models, latent, tiles, tiling.Scratch(None, allowance))
+            return tiling.decode_tiled(models, latent, tiles, Scratch(None, allowance))
 
         passes(record, encode, decode)
 
     def untiled(res: str, target: tuple[int, int]) -> None:
-        padded = job.padded_size(target)
+        padded = padded_size(target)
         pixels = padded[0] * padded[1]
         record = {"part": "T2", "kind": "untiled", "res": res, "target": list(target)}
         record.update(frames=count, padded=list(padded), tile=0, overlap=0, tiles=1, grid="1x1")
@@ -500,7 +504,7 @@ def run(args: argparse.Namespace) -> int:
 
         def encode():
             inputs = shot.encoder_inputs(models, reader(frames), count, target)
-            return model.encode_stream(models, inputs, shot.padded_length(count))
+            return model.encode_stream(models, inputs, padded_length(count))
 
         def decode(latent):
             return model.decode_stream(models, latent)
@@ -593,8 +597,8 @@ def run(args: argparse.Namespace) -> int:
 
 
 def geometry(padded: tuple[int, int], tiles) -> dict:
-    """The grid seedvr2x lays over frames padded to (rows, columns) pixels (runtime/tilegrid.py)."""
-    from seedvr2x.runtime import tilegrid
+    """The grid seedvr2x lays over frames padded to (rows, columns) pixels (seedvr2x/tilegrid.py)."""
+    from seedvr2x import tilegrid
 
     layout = tilegrid.grid(tilegrid.latent_size(padded), tiles)
     rows = sorted({(t.top, t.bottom) for t in layout})
@@ -619,27 +623,28 @@ def measured(args: argparse.Namespace) -> int:
     """The planner's figure for each step's two passes, in GiB, from the tree it imports: a
     measured tile's MEASURED, an untiled pass's _fit (no tiles); and whether the pass is one the
     one-output convolution takes."""
-    from seedvr2x.runtime import job, planner
+    from seedvr2x import peaks
+    from seedvr2x.frames import padded_size
 
-    out = {"planner": planner.__file__, "steps": {}}
+    out = {"peaks": peaks.__file__, "steps": {}}
     for kind, res, side in parse_steps(args.steps):
         name = step_name(kind, res, side)
         if kind == "square":
             key = (side, side)
         elif kind == "cutoff":
-            key = (job.padded_size(dict((r, t) for r, t, _ in CUTOFFS)[res])[0], side)
+            key = (padded_size(dict((r, t) for r, t, _ in CUTOFFS)[res])[0], side)
         else:
             key = None
         if key is not None:
-            figures = list(planner.MEASURED[key]) if key in planner.MEASURED else [None, None]
-            source = "MEASURED" if key in planner.MEASURED else "none"
+            figures = list(peaks.MEASURED[key]) if key in peaks.MEASURED else [None, None]
+            source = "MEASURED" if key in peaks.MEASURED else "none"
             padded = list(key)
         else:
-            padded = list(job.padded_size(UNTILED[res]))
+            padded = list(padded_size(UNTILED[res]))
             figures = [
-                round(planner._fit(tuple(padded), None, column) / GIB, 4) for column in (0, 1)
+                round(peaks._fit(tuple(padded), None, column) / GIB, 4) for column in (0, 1)
             ]
-            source = "planner._fit untiled"
+            source = "peaks._fit untiled"
         out["steps"][name] = {
             "key": padded,
             "figures": figures,

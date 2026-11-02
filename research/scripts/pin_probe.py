@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinned-memory probe for seedvr2x's BlockSwap (runtime/blockswap.py, HostCopy): what torch's
+"""Pinned-memory probe for seedvr2x's BlockSwap (seedvr2x/blockswap.py, HostCopy): what torch's
 pinned allocator takes for a buffer the size of a 7B block, whether a buffer of the exact size,
 mapped and registered with cudaHostRegister, copies to the device as fast, and what a driver does
 with a request for more device memory than is free.

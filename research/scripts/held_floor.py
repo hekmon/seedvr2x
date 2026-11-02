@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The frames' floor of a VAE decode pass by tile size where the GPU's driver gives memory the card
 doesn't have (Windows', WSL2 included), so that seedvr2x holds torch to the card under torch's own
-allocator with expandable segments (runtime/memory.py: hold, EXPANDABLE). floor.py emulates
+allocator with expandable segments (seedvr2x/memory.py: hold, EXPANDABLE). floor.py emulates
 smaller cards with vram_cap.py's ballast on a driver that refuses; on a driver that gives memory
 the card doesn't have no ballast is refused, so the room is set by torch's limit instead
 (vae_room.py --limit): torch held to the pass's peak and a room, the card itself left as it is,

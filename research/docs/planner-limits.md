@@ -337,7 +337,7 @@ check has run) and memory the allocator's pool still holds.
 ## seedvr2x's tiled passes: every tile's peak
 
 The tiled fits above come from numz's CLI and from a few tile sizes. seedvr2x runs tiled passes
-of its own (`runtime/tiling.py`: numz's grid and blend, each tile run over the whole shot, the
+of its own (`seedvr2x/tiling.py`: numz's grid and blend, each tile run over the whole shot, the
 frames and the latents waiting in system memory), and its planner needs an upper bound for
 whichever tile it picks. [`tile_peaks.py`](../scripts/tile_peaks.py) measured every tile it may
 pick, on seedvr2x's own runtime (2026-10-11; the same GPU, torch 2.14.1+cu130, `cudaMallocAsync`,
@@ -484,7 +484,7 @@ are around the tile's; "the larger" is the larger of the fit and that line. The 
   same bytes each time, 10.4742 and 17.4499 GiB, for 10.4593 and 17.4499 fed alone: a pass's
   peak doesn't grow with the shot.
 - **seedvr2x's planner takes the larger where a tile has two measures,** to the hundredth
-  (`runtime/planner.py`, `MEASURED`). That moves five of its 90 entries from the tables' value:
+  (`seedvr2x/peaks.py`, `MEASURED`). That moves five of its 90 entries from the tables' value:
   768 px's decode (11.11 for 11.089), 1024 px's encode and decode (10.47 for 10.459, 17.46 for
   17.450), 1536 px's decode (38.73 for 38.702) and 2048 px's (68.51 for 68.482).
 

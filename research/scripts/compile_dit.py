@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """DiT compile probe for seedvr2x: what torch.compile gives and costs across window lengths.
 
-seedvr2x runs its DiT on windows of a shot's latents (runtime/shot.py, sample_windows): a window's
+seedvr2x runs its DiT on windows of a shot's latents (shot.py, sample_windows): a window's
 length L, in latents, takes every value up to a cap, where numz's batches had one length. This
 probe measures, on seedvr2x's own runtime, what compiling the DiT gives and costs per length,
 whether one compilation can serve every length, whether it works over seedvr2x's BlockSwap, and
@@ -10,12 +10,12 @@ whether the output keeps its bits.
 One step is what sample_windows does for one window, on random latents of a given output size
 and L latents (not an encoded video: N(0, 1) values, which the DiT's timing and memory do not
 depend on): a latent (L, h, w, 16) bfloat16 in channel-major memory, as the encode gives it, drawn
-from a seeded CPU generator (the same for every variant), goes through shot.draw (the shot's
+from a seeded CPU generator (the same for every variant), goes through sampling.draw (the shot's
 noise, on the CPU, from the seed), both go to the device, the "sr" condition is built
 (model.condition), then model.sample runs one Euler step under bfloat16 autocast; the output goes
-back to the CPU. That is shot._window's body, with the sample timed alone. Before each step,
+back to the CPU. That is sampling.window's body, with the sample timed alone. Before each step,
 models.enter("dit") is called as the pipeline does. The models are loaded as the CLI loads them
-(runtime/model.py, load_models), the allocator chosen as the CLI chooses it (runtime/memory.py,
+(seedvr2x/model.py, load_models), the allocator chosen as the CLI chooses it (seedvr2x/memory.py,
 startup, before torch is imported), and the attention backend it reports is recorded.
 
 Variants (--variant, or the names of --seq), put on the DiT between steps of one process:
@@ -25,7 +25,7 @@ Variants (--variant, or the names of --seq), put on the DiT between steps of one
           runs as the runner's DiT
   blocks  each block of dit.blocks compiled on its own forward, the rest of the DiT plain. The
           class's forward is compiled once and bound to every block (types.MethodType), as the
-          block's own `forward`: BlockSwap's forward hooks (runtime/blockswap.py, registered on
+          block's own `forward`: BlockSwap's forward hooks (seedvr2x/blockswap.py, registered on
           the blocks) run in Module.__call__, OUTSIDE the compiled code, where
           torch.compile(block) or block.compile() would trace them. Whether that one compiled
           function serves all the blocks is read from the cache entries per code object.
@@ -86,7 +86,7 @@ Subcommands:
          the files compared with the first's (a swapped run against an unswapped one).
 
 SIZE = 270 | 540 | 720 | 1080 | 2160 (16:9 output) or HxW (rows, then columns), padded as
-seedvr2x pads it (runtime/job.py, padded_size: 1080x1920 to 1104x1920, a latent of 138 x 240,
+seedvr2x pads it (seedvr2x/frames.py, padded_size: 1080x1920 to 1104x1920, a latent of 138 x 240,
 8,280 tokens).
 
 Environment: TORCHINDUCTOR_CACHE_DIR must name the on-disk cache's directory when a compiled
@@ -440,7 +440,7 @@ def main_entries(entries):
 # ---------------------------------------------------------------- attention backend
 
 def force_attention(backend):
-    """The vendor modules' FlashAttention 2 flags (what runtime/model.py's attention_backend reads)
+    """The vendor modules' FlashAttention 2 flags (what seedvr2x/model.py's attention_backend reads)
     put False for sdpa, before the load; flash_attn_2 only where they are true."""
     from seedvr2x.vendor.models.dit_3b import attention as attention_3b
     from seedvr2x.vendor.models.dit_7b import attention as attention_7b
@@ -562,15 +562,15 @@ def install_dit(dit, variant, *, dynamic=None, mode="default", recompile_limit=N
 
 def make_latent(torch, dtype, length, h, w):
     """The latent of a window of `length` latents: (length, h, w, 16) in channel-major memory, as
-    the encode gives it (runtime/model.py, encode_stream), from a seeded CPU generator."""
+    the encode gives it (seedvr2x/model.py, encode_stream), from a seeded CPU generator."""
     generator = torch.Generator().manual_seed(1000003 * length + 1009 * h + w)
     values = torch.randn((16, length, h, w), generator=generator, dtype=torch.float32)
     return values.to(dtype).permute(1, 2, 3, 0)
 
 
-def one_step(torch, model, shot, models, module, latent_cpu, seed):
-    """shot._window's body for one window, on `module` as the runner's DiT, with the
-    noise from shot.draw, the sample timed alone: the measurements and the output on the CPU."""
+def one_step(torch, model, sampling, models, module, latent_cpu, seed):
+    """sampling.window's body for one window, on `module` as the runner's DiT, with the
+    noise from sampling.draw, the sample timed alone: the measurements and the output on the CPU."""
     device = models.device
     models.runner.dit = module
     models.enter("dit")
@@ -579,7 +579,7 @@ def one_step(torch, model, shot, models, module, latent_cpu, seed):
     rec = {"alloc_before_gib": torch.cuda.memory_allocated(device) / GIB}
     marks = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
     with torch.no_grad():
-        noise_cpu = shot.draw(models, latent_cpu, seed)
+        noise_cpu = sampling.draw(models, latent_cpu, seed)
         latent, noise = latent_cpu.to(device), noise_cpu.to(device)
         cond = model.condition(models, noise, latent)
         torch.cuda.synchronize(device)
@@ -676,14 +676,15 @@ def cmd_run(args):
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("seedvr2x").setLevel(logging.INFO)
     # The allocator as the CLI chooses it, once, before torch is imported (cli._run).
-    from seedvr2x.runtime import memory
+    from seedvr2x import memory
     if "torch" in sys.modules:
         sys.exit("compile_dit: torch was imported before the allocator was chosen")
     allocator = memory.startup()
     alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF")
 
     import torch
-    from seedvr2x.runtime import job, model, shot
+    from seedvr2x import model, sampling
+    from seedvr2x.frames import padded_size
 
     keep_deterministic(torch, args.keep_deterministic)
     force_attention(args.attention)
@@ -705,11 +706,11 @@ def cmd_run(args):
         f"(PYTORCH_CUDA_ALLOC_CONF={alloc_conf})")
     plan = None
     if args.swap:
-        from seedvr2x.runtime.plan import Plan
-        plan = Plan(None, swapped=args.swap)
+        from plan import Plan
+        plan = Plan(None, swapped=args.swap).model_plan
     started = time.perf_counter()
     model_dir = pathlib.Path(os.path.abspath(args.model_dir))
-    models = model.load_models(model_dir / args.dit_model, model_dir / args.vae_model, device, plan=plan)
+    models = model.load_models(model_dir / args.dit_model, model_dir / args.vae_model, device, model_plan=plan)
     torch.cuda.synchronize(device)
     load_s = time.perf_counter() - started
     free1, _ = torch.cuda.mem_get_info(device)
@@ -733,7 +734,7 @@ def cmd_run(args):
         triton_version = None
     res = {
         "argv": [os.path.basename(sys.argv[0]), *sys.argv[1:]], "t_start": time.time(), "cmd": args.cmd,
-        "size": list(target), "padded": list(job.padded_size(target)), "lengths": lengths,
+        "size": list(target), "padded": list(padded_size(target)), "lengths": lengths,
         "seq": seq, "seq_next": seq_next, "passes": args.passes, "seed": args.seed,
         "variant": variant, "dynamic": dynamic, "mark_dynamic": args.mark_dynamic, "mode": args.mode,
         "recompile_limit_arg": args.recompile_limit, "swap": args.swap, "backend": args.backend,
@@ -806,7 +807,7 @@ def cmd_run(args):
         return handles[name].module
 
     def step(role, size, length, name, pass_index=0):
-        padded = job.padded_size(size)
+        padded = padded_size(size)
         h, w = padded[0] // 8, padded[1] // 8
         rec = {"seq": len(res["steps"]), "role": role, "pass": pass_index, "size": list(size), "L": length,
                "tokens": length * (h // 2) * (w // 2), "variant": name, "t": round(time.time(), 2)}
@@ -819,7 +820,7 @@ def cmd_run(args):
         before, before_reasons, host = events.snapshot(), events.reason_counts(), host_stats()
         frames.take()
         try:
-            measured, out = one_step(torch, model, shot, models, module, latent, args.seed)
+            measured, out = one_step(torch, model, sampling, models, module, latent, args.seed)
         except Exception as e:  # (a variant that doesn't compile is a result)
             models.runner.dit = dit
             rec["error"] = f"{type(e).__name__}: {short(str(e), 900)}"

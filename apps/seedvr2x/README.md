@@ -314,16 +314,16 @@ it has the same memory and time ([the model](MANUAL.md#the-model)).
 
 ## Credits and licence
 
-seedvr2x is under the Apache License 2.0 ([LICENSE](LICENSE)). [NOTICE](../../core/NOTICE) credits what it
-includes:
+seedvr2x is under the Apache License 2.0 ([LICENSE](LICENSE)). [NOTICE](NOTICE) and the library's
+([core/NOTICE](../../core/NOTICE)) credit what it includes:
 
-- **SeedVR2's model code**, vendored in `core/src/seedvr2x/vendor/`: ByteDance Seed's
+- **SeedVR2's model code**, vendored in `core/seedvr2x/vendor/`: ByteDance Seed's
   [SeedVR](https://github.com/ByteDance-Seed/SeedVR), as modified by
   [numz's ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler),
   both Apache-2.0. The files changed for seedvr2x say so under their original header.
 - **The shot detector, TransNetV2** (Tomáš Souček, MIT,
   [soCzech/TransNetV2](https://github.com/soCzech/TransNetV2)): its official PyTorch model,
-  vendored unchanged in `core/src/seedvr2x/transnetv2/` with its licence, and its official weights
+  vendored unchanged in `core/seedvr2x/transnetv2/` with its licence, and its official weights
   converted to PyTorch by its own script, `transnetv2.safetensors` in seedvr2x's Hugging Face
   repository.
 - **The colour correction's wavelet split** is StableSR's method, whose code is under a

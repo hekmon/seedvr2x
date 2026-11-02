@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Tile probe for seedvr2x: what each tile of its tiled VAE passes takes of the GPU's memory.
 
-seedvr2x's tiled encode and decode (runtime/tiling.py) run one tile at a time over the whole
+seedvr2x's tiled encode and decode (seedvr2x/tiling.py) run one tile at a time over the whole
 shot, the frames and the latents waiting in system memory: a pass peaks at its largest tile, and
-the memory planner takes that tile's measured peak where it has one (runtime/planner.py,
+the memory planner takes that tile's measured peak where it has one (seedvr2x/peaks.py,
 MEASURED). This probe measures those peaks on seedvr2x's own runtime, the two models loaded whole
-(runtime/model.py, load_models, no plan), over a shot of 21 frames, the tiles sharing 64 px, the
+(seedvr2x/model.py, load_models, no plan), over a shot of 21 frames, the tiles sharing 64 px, the
 scratch in system memory.
 
 A pass's peak is torch's max_memory_allocated above memory_allocated before the pass, the peak
@@ -72,7 +72,7 @@ from itertools import pairwise
 from pathlib import Path
 
 GIB = 2**30
-OVERLAP = 64  # the pixels two tiles share: seedvr2x's default (runtime/plan.py, OVERLAP)
+OVERLAP = 64  # the pixels two tiles share: seedvr2x's default (seedvr2x/passes.py, OVERLAP)
 FRAMES = 21
 SQUARES = list(range(512, 2049, 64))
 # The tiles cut off at the picture's edge: a name, the output's (rows, columns), the tiles' sides.
@@ -110,8 +110,12 @@ def run(args: argparse.Namespace) -> int:
 
     import numpy as np
     import torch
-    from seedvr2x.runtime import job, model, shot, tiling
-    from seedvr2x.runtime.plan import Tiles
+    import shot
+    from scratch import Scratch
+
+    from seedvr2x import model, tiling
+    from seedvr2x.frames import padded_length, padded_size
+    from seedvr2x.passes import Tiles
 
     torch.set_grad_enabled(False)
     started = time.time()
@@ -294,17 +298,17 @@ def run(args: argparse.Namespace) -> int:
         def encode():
             inputs = (x.to(device) for x in slices)
             return tiling.encode_tiled(
-                models, inputs, count, tiles, tiling.Scratch(None, allowance)
+                models, inputs, count, tiles, Scratch(None, allowance)
             )
 
         def decode(latent):
-            return tiling.decode_tiled(models, latent, tiles, tiling.Scratch(None, allowance))
+            return tiling.decode_tiled(models, latent, tiles, Scratch(None, allowance))
 
         passes(record, encode, decode)
 
     def cutoff(res: str, target: tuple[int, int], side: int) -> None:
         tiles = Tiles(side, overlap)
-        padded = job.padded_size(target)
+        padded = padded_size(target)
         record = {"part": "T2", "kind": "cutoff", "res": res, "target": list(target)}
         record.update(frames=count, **geometry(padded, tiles))
         record["as_expected"] = record["grid"] == "1x2" and record["largest_tile"] == [
@@ -316,11 +320,11 @@ def run(args: argparse.Namespace) -> int:
 
         def encode():
             inputs = shot.encoder_inputs(models, reader(frames), count, target)
-            scratch = tiling.Scratch(None, allowance)
-            return tiling.encode_tiled(models, inputs, shot.padded_length(count), tiles, scratch)
+            scratch = Scratch(None, allowance)
+            return tiling.encode_tiled(models, inputs, padded_length(count), tiles, scratch)
 
         def decode(latent):
-            return tiling.decode_tiled(models, latent, tiles, tiling.Scratch(None, allowance))
+            return tiling.decode_tiled(models, latent, tiles, Scratch(None, allowance))
 
         passes(record, encode, decode)
 
@@ -376,8 +380,8 @@ def run(args: argparse.Namespace) -> int:
 
 
 def geometry(padded: tuple[int, int], tiles) -> dict:
-    """The grid seedvr2x lays over frames padded to (rows, columns) pixels (runtime/tilegrid.py)."""
-    from seedvr2x.runtime import tilegrid
+    """The grid seedvr2x lays over frames padded to (rows, columns) pixels (seedvr2x/tilegrid.py)."""
+    from seedvr2x import tilegrid
 
     layout = tilegrid.grid(tilegrid.latent_size(padded), tiles)
     rows = sorted({(t.top, t.bottom) for t in layout})
@@ -399,12 +403,12 @@ def geometry(padded: tuple[int, int], tiles) -> dict:
 
 
 def plan(args: argparse.Namespace) -> int:
-    from seedvr2x.runtime import job
-    from seedvr2x.runtime.plan import Tiles
+    from seedvr2x.frames import padded_size
+    from seedvr2x.passes import Tiles
 
     cases = [("square", None, (side, side + 2 * OVERLAP), side, [side, side]) for side in SQUARES]
     for res, target, sides in CUTOFFS:
-        padded = job.padded_size(target)
+        padded = padded_size(target)
         cases += [(f"cut off, {res}", target, padded, side, [padded[0], side]) for side in sides]
     header = ["tile", "kind", "frames padded to", "grid", "tiles", "largest tile", "Mpx"]
     rows, odd = [], 0

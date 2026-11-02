@@ -308,7 +308,7 @@ same way each time. Where a cell is for two files, both gave it.
 What one decoder thread would cost seedvr2x's first pass (2026-10-21; CPU only, ffmpeg n9.0.2, a
 shared 48-core machine at load averages of 2 to 16;
 [`scripts/first_pass_threads.py`](../scripts/first_pass_threads.py)). The command is seedvr2x's own
-(`seedvr2x.media.scan.command`: every frame's CRC-32, idet, and the shot detector's 48×27 frames on a
+(`media.scan.command` of the CLI: every frame's CRC-32, idet, and the shot detector's 48×27 frames on a
 pipe, drained here), as it is and with `-threads 1` as an input option, the decoder's; and a decode
 alone (`-map 0:v:0 -f null -`) both ways, once each. The passes ran twice each, in the order default,
 one thread, one thread, default:

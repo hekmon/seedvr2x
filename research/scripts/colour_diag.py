@@ -39,7 +39,7 @@ D65), as fr_metrics.py does:
   The `none` output takes the low bands of the bicubic baseline, which stands in for the
   encoder's input. In Y'CbCr (BT.709 matrix on the gamma-encoded RGB, full range: linear, so
   equal scales are the plain RGB split), Y' takes the low band of sL stages, Cb and Cr that of
-  sC stages. The low band is runtime/colour.py's: à-trous stages of the 3x3 binomial kernel,
+  sC stages. The low band is seedvr2x/colour.py's: à-trous stages of the 3x3 binomial kernel,
   taps 2^stage px apart, edges replicated at each stage: 5 stages are a sigma of 13.1 px, 4:
   6.5, 3: 3.2, 2: 1.6, 1: 0.7. (5, 5) is numz's `wavelet` (lab without its histogram step), on
   the clamped bfloat16 master. No histogram step here.
@@ -198,7 +198,7 @@ def luma8(rgb):
 
 
 def low_bands(x, stages=5):
-    """runtime/colour.py's low band of each channel of x (H, W, C) float32 after 1..stages à-trous
+    """seedvr2x/colour.py's low band of each channel of x (H, W, C) float32 after 1..stages à-trous
     stages: the 3x3 binomial kernel, taps 2^stage px apart (at most min(H, W) // 8), edges
     replicated at each stage. {stage: (H, W, C)}."""
     out = {}

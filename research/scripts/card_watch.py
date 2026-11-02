@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Card watch for seedvr2x: what a card holds, second by second, while nothing of ours runs on
 it or beside a run: the movement of a desktop's own memory, which a run held to the card's
-memory has to leave room for (seedvr2x's runtime/memory.py: HELD_BACK), told apart from what
+memory has to leave room for (seedvr2x's seedvr2x/memory.py: HELD_BACK), told apart from what
 the run itself holds.
 
 Two records, each line stamped by the clock of whoever wrote it:

@@ -13,45 +13,58 @@ missing is settled in DESIGN.md first, not changed in passing.
 
 ```
 AGENTS.md DESIGN.md README.md LICENSE NOTICE
-core/                    the library: distribution seedvr2x-core, import seedvr2x
+core/                    the library: distribution seedvr2x-core, import seedvr2x (uv_build)
   pyproject.toml .python-version LICENSE NOTICE
-  src/seedvr2x/
-    cli.py __main__.py   CLI layer: options, logging
-    media/               I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
-    model.py weights.py pull.py blockswap.py tiling.py tilegrid.py compiling.py colour.py
-    memory.py detector.py   the library's bricks: models, placement, tiling, colour, memory, the
-                         shot detector (clock.py, frames.py, passes.py, peaks.py, sampling.py ...)
-    runtime/             the CLI's runtime: the pipeline per shot, then stitching, planner,
-                         resume (the bricks above were here until the library went flat)
+  seedvr2x/              no src/ folder: the package sits at core/seedvr2x/
+    model.py weights.py pull.py blockswap.py sampling.py tiling.py tilegrid.py compiling.py
+    colour.py memory.py detector.py      the bricks: models and their files, placement, sampling,
+                         the VAE passes, colour, the memory model, the shot detector
+    frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share
     vendor/              model layer, vendored from numz (below)
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
-  tests/
+  tests/                 the library's, with library_fixtures.py, stand_ins.py and conftest.py
   tools/vendor.py        copy, diff and check of the vendored code
   tools/compare.py       two runs' outputs compared bit for bit
-apps/seedvr2x/           the seedvr2x command: distribution seedvr2x
-  pyproject.toml uv.lock .python-version LICENSE
+apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools), flat: its
+                         modules at the app's root, no package folder
+  main.py                options, logging (the script `seedvr2x = "main:main"`)
+  shot run cuts planner plan job manifest resume units scratch environment calibration timing
+  stop disk .py          the pipeline per shot, then stitching, planner, a job's plan, saving and
+                         resume, its environment record
+  media/                 I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
+  tests/                 the CLI's, with levels.py and conftest.py
+  pyproject.toml uv.lock .python-version LICENSE NOTICE
   README.md MANUAL.md images/
 research/ models/ upstream/
 ```
 
-The layers are DESIGN.md's (Architecture), the layout its Repository and apps. Two uv projects:
-`core/` declares the library's dependencies as ranges; `apps/seedvr2x/` is the command's, with the
-exact pins, the lock and the dev tools, and installs `core/` by path, editable. Its environment
-is the one shipped, and the one the library is checked and tested in. The command's code,
-`cli.py` and the video-only code, stays in `core/` until DESIGN.md's step 3: `apps/seedvr2x/` has
-no module of its own yet. The scripts in `research/` stay standalone.
+The layers are DESIGN.md's (Architecture), the layout its Repository and apps (step 2): the
+library is bricks that import nothing of the CLI, the CLI assembles them
+(`core/tests/test_library.py` holds the rule). Two uv projects: `core/` declares the library's
+dependencies as ranges; `apps/seedvr2x/` is the command's, with the exact pins, the lock and the
+dev tools, and installs `core/` by path, editable. Its environment is the one shipped, and the one
+the library is checked and tested in. The build backends differ: `core/` is built by uv_build, a
+folder package; the CLI by setuptools, which lists each top-level module (`py-modules`,
+`packages`), and `apps/seedvr2x/tests/test_names.py` holds the list to the files and to
+`manifest.MODULES`, and each name to its own file in the environment, so that no dependency's
+`run` or `media` shadows ours. The scripts in `research/` stay standalone.
 
-- The CLI, from `apps/seedvr2x/`: `uv sync`, then `uv run seedvr2x --help`.
-- The checks and the tests, from `core/`, in the CLI's environment: `uv run --project
-  ../apps/seedvr2x` before each command ([Checks](#checks)).
+- The CLI, from `apps/seedvr2x/`: `uv sync`, then `uv run seedvr2x --help`. There is no
+  `python -m seedvr2x`: the tests start the venv's `seedvr2x` script.
+- The checks and the tests, in the CLI's environment: from `apps/seedvr2x/` as written in
+  [Checks](#checks), from `core/` with `uv run --project ../apps/seedvr2x` before each command.
 - No environment of `core/`'s own: its pyproject says `managed = false`, so that a plain
   `uv run` there makes no lock or environment from the ranges, which wouldn't be the one shipped.
-- Paths below are `core/`'s (`src/`, `tests/`, `tools/`) unless they say otherwise; README.md
-  and MANUAL.md are `apps/seedvr2x/`'s.
+- Paths below are relative to the package they name: a library module is `seedvr2x/X.py` (in
+  `core/`), a CLI module `X.py` or `media/X.py` (in `apps/seedvr2x/`), `tools/` is `core/`'s, and
+  `tests/` is the directory of the package the test is for ([Tests](#tests)). README.md and
+  MANUAL.md are `apps/seedvr2x/`'s.
+- The loggers: the library's are `seedvr2x.<module>`, the CLI's `cli.<module>` (`cli.main`,
+  `cli.media.reader`).
 
 ## The vendored model layer
 
-`src/seedvr2x/vendor/` holds the model code: ByteDance's SeedVR (`e4de8c2`) as modified by numz
+`core/seedvr2x/vendor/` holds the model code: ByteDance's SeedVR (`e4de8c2`) as modified by numz
 (`4490bd1`), under Apache-2.0. [provenance.md](research/docs/provenance.md) says what each file
 is and what numz changed in it.
 
@@ -80,7 +93,8 @@ is and what numz changed in it.
 
 ## The vendored TransNetV2
 
-`src/seedvr2x/transnetv2/` holds the shot detector's model (DESIGN.md, Shot detection):
+`core/seedvr2x/transnetv2/` holds the shot detector's model (DESIGN.md, Shot detection), a
+brick of the library:
 TransNetV2's official PyTorch code (github.com/soCzech/TransNetV2 at `85cef72`, MIT),
 `inference-pytorch/transnetv2_pytorch.py` as `transnetv2_pytorch.py`, with TransNetV2's `LICENSE`
 beside it; the `__init__.py` is seedvr2x's.
@@ -94,12 +108,16 @@ beside it; the `__init__.py` is seedvr2x's.
   the locked torch unchanged; a change would be marked as `vendor/`'s are, its pin changed with it.
 - `seedvr2x/detector.py` builds it, loads seedvr2x's `transnetv2.safetensors` into it (pinned in
   `seedvr2x/pull.py`, made by `models/transnetv2_weights.py`) and runs measurement's windows on
-  it. `core/`'s NOTICE and `apps/seedvr2x/`'s README.md credit it.
+  frames pushed to it; the CLI's `media/scan.py` feeds it the frames and `cuts.py` draws the cuts
+  from its probabilities. Its licence is the library's: `core/`'s pyproject says "Apache-2.0 AND
+  MIT" and ships `transnetv2/LICENSE`; `core/`'s NOTICE and `apps/seedvr2x/`'s README.md credit
+  it.
 
 ## Environment
 
 - The CLI's uv project, on Python 3.13: `uv sync` in `apps/seedvr2x/` creates
   `apps/seedvr2x/.venv` with the locked versions, `core/` installed editable, and the dev tools.
+  The scripts of `research/` that import seedvr2x run with its `bin/python`.
 - Its dependencies are pinned to the versions of the numz environment milestone 1 is compared
   with, so that the comparison differs by code only: torch and torchvision (CUDA 13.0 builds, from
   PyTorch's index), diffusers, rotary-embedding-torch and the rest. Bump one on purpose, and run
@@ -109,7 +127,7 @@ beside it; the `__init__.py` is seedvr2x's.
   seedvr2x's own model files from its repo at the pinned revision, into Hugging Face's cache
   (`seedvr2x/pull.py`). seedvr2x imports it to look in the cache on every run without
   `--model-dir`, which reads the files from a directory instead; diffusers, which the vendored
-  model imports, brings it into every run anyway. Its telemetry is off: `cli.main` sets
+  model imports, brings it into every run anyway. Its telemetry is off: `main.main` sets
   `HF_HUB_DISABLE_TELEMETRY` before either import, unless the user has. hf_xet, its Xet
   downloader, seedvr2x never imports: its import writes a log file under `HF_HOME`.
 - ffmpeg and ffprobe on PATH, 7.1 or later (for setparams' chroma_location), with zscale
@@ -119,50 +137,78 @@ beside it; the `__init__.py` is seedvr2x's.
 - **FlashAttention 2 is not a dependency.** PyPI only has its source, a long CUDA build, and
   seedvr2x runs without it: it uses FA2 when installed, else PyTorch's SDPA, and logs which one
   runs. To use it, build a wheel for your GPU ([setup_env.sh](research/scripts/setup_env.sh),
-  [environment.md](research/docs/environment.md)) and install it into the venv with
-  `uv pip install --no-deps <wheel>`. `uv run` keeps it, but `uv sync` removes what the lock
-  doesn't list: install it again after a sync, or sync with `--inexact`.
+  [environment.md](research/docs/environment.md)) and install it into `apps/seedvr2x/.venv` with `uv
+  pip install --no-deps <wheel>` (from `apps/seedvr2x/`). `uv run` keeps it, but `uv sync` removes
+  what the lock doesn't list: install it again after a sync, or sync with `--inexact`.
 
 ## Checks
 
-From `core/`:
+From `core/`, in the CLI's environment:
 
 ```
 uv run --project ../apps/seedvr2x ruff format --check
 uv run --project ../apps/seedvr2x ruff check
 uv run --project ../apps/seedvr2x pyright
+uv run --project ../apps/seedvr2x tools/vendor.py check
 uv run --project ../apps/seedvr2x pytest
 ```
 
-- ruff: line length 100, rules E, F, W, I, B, UP and RUF. The vendored code, `vendor/` and
-  `transnetv2/`, is excluded from formatting and from that lint. `tools/vendor.py check`
+From `apps/seedvr2x/`:
+
+```
+uv run ruff format --check
+uv run ruff check
+uv run pyright
+uv run pytest
+```
+
+- ruff: line length 100, rules E, F, W, I, B, UP and RUF, set in each pyproject. The vendored
+  code, `seedvr2x/vendor/` and `seedvr2x/transnetv2/`, is excluded from formatting and from that
+  lint (`core/`'s pyproject). `tools/vendor.py check`
   lints `vendor/` for errors only (syntax errors, undefined names), and reports those that numz's
   own files don't have: numz has some already, false positives and a bug in a class nothing
-  builds. `transnetv2/` is held to its pinned bytes (`tests/test_detector.py`).
-- pyright: strict on `src/seedvr2x`, standard on the tests and tools. The vendored code is
-  excluded: the tests show that it imports and runs.
+  builds. `transnetv2/` is held to its pinned bytes (`core/tests/test_detector.py`). The CLI's ruff
+  counts `seedvr2x` as first-party, so that its imports sort with its own modules.
+- pyright: strict on `seedvr2x` in `core/` and on the CLI's modules (`*.py`, `media/`) in
+  `apps/seedvr2x/`, standard on the tests and tools. The vendored code is excluded: the tests show
+  that it imports and runs. The CLI's pyright reads the library as source and the library's test
+  helpers (`extraPaths`).
 
 ## Tests
 
 - `pytest` (as in [Checks](#checks)) runs on the CPU, needs no model and is quick. Tests that
   need ffmpeg skip without a build seedvr2x accepts (see [Environment](#environment)).
-- `pytest -m gpu` runs the tests that need CUDA, never selected by default.
-- Edit nothing under `src/` while a test run is going: a job's
-  settings record a hash of the package's files (`manifest.code_sha256`), so a file changed
-  between a test's first run and its resume makes the resume another job, and the failure looks
-  like a bug in resume.
-- Tests that need the model weights read their directory from `SEEDVR2X_MODEL_DIR`, and skip
-  without it. It holds numz's files and seedvr2x's own side by side (links will do): the GPU
-  tests run numz's 7B fp16 and VAE, the weights their references were made with, and the
-  regression seedvr2x's own as well, and the shot detector's, `transnetv2.safetensors`. With it,
-  the CPU suite also checks every known model file there by its header
-  (`tests/test_weights.py`), and runs the shot detector on TransNetV2's weights
-  (`tests/test_detector.py`: the cuts of a synthetic clip, and measurement's own run reproduced
-  bit for bit; `tests/test_detection.py`: the first pass recording the module's probabilities
-  bit for bit); without, the detector's windows run on the untrained model's weights, written by
-  the test.
+- `pytest -m gpu` runs the tests that need CUDA, never selected by default; run it in each
+  directory.
+- **Where a test file sits.** `tests/test_x.py` is in the directory of the package it tests:
+  `core/tests/` for the library's, `apps/seedvr2x/tests/` for the CLI's. File names are unique
+  across the two, a helper being imported by name. A file that held both halves is two: the
+  library's, and its `_cli` half beside the command (`test_pull_cli.py`, `test_weights_cli.py`,
+  `test_compile_cli.py`, `test_detector_cli.py`, `test_padding_cli.py`), which use the
+  library's half's helpers and say so in their docstring. The helpers both directories use
+  are `core/tests/`'s (`library_fixtures.py`, `stand_ins.py`, the fixtures `conftest.py` imports
+  from the first); the CLI's pytest puts `../../core/tests` on its `pythonpath`.
+- The rule between them: `core/tests/test_library.py` holds that no library file imports the
+  CLI (a scan and a fresh process); `apps/seedvr2x/tests/test_names.py` holds the CLI's top-level
+  names to its files, the standard library's and what else the environment provides (see
+  [Layout](#layout)).
+- Edit nothing under `core/seedvr2x/` or `apps/seedvr2x/` while a test run is going: a job's
+  settings record a hash of both packages' files (`manifest.code_sha256`, the library's
+  `seedvr2x/<path>` and the CLI's `cli/<path>`), so a file changed between a test's first run and
+  its resume makes the resume another job, and the failure looks like a bug in resume.
+- Tests that need the model weights read their directory from `SEEDVR2X_MODEL_DIR`, and skip without
+  it. It holds numz's files and seedvr2x's own side by side (links will do): the GPU tests run
+  numz's 7B fp16 and VAE, the weights their references were made with, and the regression seedvr2x's
+  own as well, and the shot detector's, `transnetv2.safetensors`. With it, the CPU suite also checks
+  every known model file there by its header (`tests/test_weights.py`; `test_weights_cli.py` has the
+  command line refuse a model, saying what the file is), and runs the shot detector on TransNetV2's
+  weights (`tests/test_detector.py`: the windows, and measurement's own run reproduced bit for bit;
+  `test_detector_cli.py`: the cuts of a synthetic clip; `tests/test_detection.py`: the first pass
+  recording the module's probabilities bit for bit); without, the detector's windows run on the
+  untrained model's weights, written by the test.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
-  huggingface_hub's two calls replaced, and the pins to the revision itself: `SHA256SUMS`, a few
+  huggingface_hub's two calls replaced, and the pins to the revision itself;
+  `test_pull_cli.py` holds what the command line does over it. The pins: `SHA256SUMS`, a few
   kilobytes, downloaded into a temporary `HF_HOME` behind a link, and the sizes read from the
   Hub's API, skipped offline (no network to huggingface.co, or `HF_HUB_OFFLINE` set). A test
   that runs seedvr2x in a process of its own gives it its own `HF_HOME` and `HF_HUB_OFFLINE=1`,
@@ -206,19 +252,19 @@ uv run --project ../apps/seedvr2x pytest
   rebuilt from a manifest, errors found with and without `--verbose`, the comparison and its
   failure message (each call's reading, windows, blocks and disk masters), the run stopped.
 - numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
-  cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`cli.NUMZ_PADDING`),
+  cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`main.NUMZ_PADDING`),
   which an output directory's manifest records, so that a job is never resumed in the other
   padding. `test_regression.py`'s padding cases and the other GPU tests run in the default
   padding.
-- `split`, the colour correction, is held to the colour study's own `split()`
-  (`research/scripts/colour_variants.py`): on the CPU by `tests/test_colour.py`, on the GPU
-  in the pipeline by `tests/test_split.py`, at x2 and x4, in one window and in three, within one
-  16-bit code. Both load the study's script with its baseline `colour.py` from the repository
-  (the baseline from git), or from `SEEDVR2X_COLOUR_STUDY` (the directory holding
-  `colour_variants.py`) and `COLOUR_BASELINE` (that `colour.py`) on a copy of `core/` alone,
-  and skip without them; one of the two set without the other fails. `tests/test_split.py` also
-  scores `split` against milestone 1's input with milestone 5's metrics, its thresholds its first
-  run's figures (2026-10-09) plus milestone 5's tolerances.
+- `split`, the colour correction (`seedvr2x/colour.py`), is held to the colour study's own `split()`
+  (`research/scripts/colour_variants.py`): on the CPU by `tests/test_colour.py` (`core/tests/`), on
+  the GPU in the pipeline by `tests/test_split.py` (the CLI's), at x2 and x4, in one window and in
+  three, within one 16-bit code. Both load the study's script with its baseline `colour.py` from the
+  repository (the baseline from git), or from `SEEDVR2X_COLOUR_STUDY` (the directory holding
+  `colour_variants.py`) and `COLOUR_BASELINE` (that `colour.py`) on a copy of `core/` alone, and
+  skip without them; one of the two set without the other fails. `tests/test_split.py` also scores
+  `split` against milestone 1's input with milestone 5's metrics, its thresholds its first run's
+  figures (2026-10-09) plus milestone 5's tolerances.
 - The frame index and the reads through it (`media/index.py`, `media/reader.py`) are held by
   `tests/test_index.py` to full decodes of files it makes, the kinds of
   `research/scripts/seek_test.py`'s `synth` and three of `seeking.md`'s failure mechanisms
@@ -243,14 +289,14 @@ uv run --project ../apps/seedvr2x pytest
   the stand-in model (`tests/test_cli_run.py`'s `StandInDetector`, each frame's probability its
   mean value): its file an empty `transnetv2.safetensors` beside the stand-in's model files,
   pinned so in place of TransNetV2's weights, which the pin's check then checks.
-- The cuts drawn from the probabilities (`runtime/cuts.py`) are held by `tests/test_cuts.py` to
+- The cuts drawn from the probabilities (`cuts.py`) are held by `tests/test_cuts.py` to
   measurement's own detection (`research/scripts/scd_scores.py`'s `tnet_detections`, copied
   there, on the float32 values read as float64, as its analysis reads them), the possible cuts
   and the cut list `--plan` writes with them, read back by `--cuts`. The CLI's
   (`--cut-threshold`, `--plan`, a plan planned again or taken up in another environment) by
   `tests/test_cli_run.py`, a `ScriptedDetector` giving chosen probabilities in place of the
   stand-in's, about 0.25 on its clips, which cut nothing at 0.3; with `SEEDVR2X_MODEL_DIR`,
-  TransNetV2 itself cuts `tests/test_detector.py`'s synthetic clip at its cuts through the CLI.
+  TransNetV2 itself cuts `test_detector_cli.py`'s synthetic clip at its cuts through the CLI.
   The playlists `--plan` writes beside the list for VLC, `FILE.cuts.m3u8` and
   `FILE.possible.m3u8`, are held by `tests/test_cuts.py` (entries, names, what is said of them)
   and by `tests/test_cli_run.py` (written, left from an earlier threshold and said so, refused
@@ -314,65 +360,66 @@ uv run --project ../apps/seedvr2x pytest
   assembly refused for room included, then the file assembled (the start's side in
   `tests/test_cli_run.py`: the segments changed told once, a PNG segment, `--plan` saying it and
   writing nothing).
-- Every ffmpeg and ffprobe seedvr2x starts ends with it (`media/ffmpeg.py`'s `ends_with_us`),
-  held for all of them by `tests/test_ends_with_us.py`: a static scan of `src/`, a function
-  (`scan`) held on its own to synthetic sources, one proof per rule (an aliased `subprocess` or
-  `os`, a name imported from either, `os`'s starters by family, `spawn*`, `exec*`, `posix_spawn*`,
-  `fork*`, `system` and `popen`; a starter named without being called, bound or in a
-  `functools.partial`; the `subprocess` or `os` module itself bound or passed; asyncio's and pty's
-  starters by name; multiprocessing whole), one leaving subprocess's exceptions, result type and
-  pipe constants alone, and one counting the hooked and unhooked starts and leaving plain uses
-  alone; on `src/` it finds no violation, 16 starts with the hook (a new one is counted on
-  purpose) and one without, the segment command's shell; `prctl` resolved in the parent before
-  any fork, the hook holding the typed C function and no `CDLL` (a lookup in the child would
-  allocate); a child process per kind of site (the startup check, probes, fingerprint, packet count
-  and the rest) with a fake ffmpeg and ffprobe on `PATH` that only wait, SIGKILLed alone, and its
-  control with the hook replaced by none in that site's module, where they stay, the reader's and
-  the writer's real ffmpeg (skipped without a build seedvr2x accepts), and the segment command's
-  shell, left running by a kill, as DESIGN.md has it. `/proc` tells the processes left, so Linux
-  only.
-- The one clock (`clock.py`): `tests/test_clock.py` holds it on fake monotonic and wall readers,
-  nothing sleeping (`Readers`, `Pace`): the ratio of the wall to the run's clock before and after
-  its minimum span, steps of the wall told from drift (a few seconds either way, an hour set, a
-  VM asleep, a long unit), the band outside which a ratio is not used, and every duration
-  printed (time left, the end, `--until`, time spent, the assembly's reading) said in the wall's
-  seconds. A span said before the ratio is measured is the wall's own seconds over it, from the
-  readings taken at each line logged (`cli._sampled`, the handler's filter, tested where
-  `cli._logging` installs it, with and without `--verbose`); a step of the wall inside a span, or
-  wall seconds outside 0.8 to 1.25 of the span's own, leave the run's own seconds, said at debug.
-  `tests/conftest.py`'s autouse fixture `one_to_one_clock` replaces the clock's readers by a
-  frozen pair, so that every other test sees a ratio of 1.0: a long session's real drift would
-  leak into their expected durations.
-- `tests/test_disk.py` holds the disk a job takes beside its output (`runtime/disk.py`): the
+- Every ffmpeg and ffprobe seedvr2x starts ends with it (`media/ffmpeg.py`'s `ends_with_us`), held
+  for all of them by `tests/test_ends_with_us.py`: a static scan of the CLI's files
+  (`apps/seedvr2x/`), a function (`scan`) held on its own to synthetic sources, one proof per rule
+  (an aliased `subprocess` or `os`, a name imported from either, `os`'s starters by family,
+  `spawn*`, `exec*`, `posix_spawn*`, `fork*`, `system` and `popen`; a starter named without being
+  called, bound or in a `functools.partial`; the `subprocess` or `os` module itself bound or passed;
+  asyncio's and pty's starters by name; multiprocessing whole), one leaving subprocess's exceptions,
+  result type and pipe constants alone, and one counting the hooked and unhooked starts and leaving
+  plain uses alone; on the CLI's files it finds no violation, 16 starts with the hook (a new one is
+  counted on purpose) and one without, the segment command's shell, and on the library's
+  (`core/seedvr2x/`, the vendored code left out) none at all, the processes being the CLI's; `prctl`
+  resolved in the parent before any fork, the hook holding the typed C function and no `CDLL` (a
+  lookup in the child would allocate); a child process per kind of site (the startup check, probes,
+  fingerprint, packet count and the rest) with a fake ffmpeg and ffprobe on `PATH` that only wait,
+  SIGKILLed alone, and its control with the hook replaced by none in that site's module, where they
+  stay, the reader's and the writer's real ffmpeg (skipped without a build seedvr2x accepts), and
+  the segment command's shell, left running by a kill, as DESIGN.md has it. `/proc` tells the
+  processes left, so Linux only.
+- The one clock (`seedvr2x/clock.py`): `tests/test_clock.py` holds it on fake monotonic and wall
+  readers, nothing sleeping (`Readers`, `Pace`): the ratio of the wall to the run's clock before and
+  after its minimum span, steps of the wall told from drift (a few seconds either way, an hour set,
+  a VM asleep, a long unit), the band outside which a ratio is not used, and every duration printed
+  (time left, the end, `--until`, time spent, the assembly's reading) said in the wall's seconds. A
+  span said before the ratio is measured is the wall's own seconds over it, from the readings taken
+  at each line logged (`main._sampled`, the handler's filter, tested where `main._logging` installs
+  it, with and without `--verbose`); a step of the wall inside a span, or wall seconds outside 0.8
+  to 1.25 of the span's own, leave the run's own seconds, said at debug. The autouse fixture
+  `one_to_one_clock` (`core/tests/library_fixtures.py`, imported by each directory's `conftest.py`)
+  replaces the clock's readers by a frozen pair, so that every other test sees a ratio of 1.0: a
+  long session's real drift would leak into their expected durations.
+- `tests/test_disk.py` holds the disk a job takes beside its output (`disk.py`): the
   estimate of the masters at 1080p, at 4K and at an odd size, from the segments a resume has
   written, a segment command's unknown and then measured, the room free to a user, and the line
   among `--plan`'s and a run's warning, which never refuses.
-- `--compile` is held on the CPU by `tests/test_compile.py` (`seedvr2x/compiling.py`, the
-  planner's compiled passes): the plan holding a compiled pass to 1.1 times its tile's plain peak
-  and to the measured range of shapes, the shapes warmed (the decoder's latent in one layout, the
-  DiT's, dense channels last, for the run's decodes and the calibration's: the run's own calls,
-  shots of 1 to 64 latents, are compared with the warm-up's), the order of the load with fakes (the
-  VAE compiled before the DiT loads, the compile workers shut before its blocks), the VAE's
-  exclusion of the causal convolutions from the graph, inductor's deterministic mode kept on, the
-  flag recorded and a resume with the other value another job, the cache in the job's own
-  directory, and a graph compiled, or tried, after the warm-up said at warning. The recompile
-  limits (per code object and for all) are raised past any warm-up and a higher one the process
-  set is kept; a limit hit in the warm-up is a refusal naming the way out, with
+- `--compile` is held on the CPU by `tests/test_compile.py` (`seedvr2x/compiling.py`, `peaks.py`'s
+  range of shapes) for the library's side and by `test_compile_cli.py` (`planner.py`'s compiled
+  passes, the job's plan and record) for the CLI's: the plan holding a compiled pass to 1.1 times
+  its tile's plain peak and to the measured range of shapes, the shapes warmed (the decoder's latent
+  in one layout, the DiT's, dense channels last, for the run's decodes and the calibration's: the
+  run's own calls, shots of 1 to 64 latents, are compared with the warm-up's), the order of the load
+  with fakes (the VAE compiled before the DiT loads, the compile workers shut before its blocks),
+  the VAE's exclusion of the causal convolutions from the graph, inductor's deterministic mode kept
+  on, the flag recorded and a resume with the other value another job, the cache in the job's own
+  directory, and a graph compiled, or tried, after the warm-up said at warning. The recompile limits
+  (per code object and for all) are raised past any warm-up and a higher one the process set is
+  kept; a limit hit in the warm-up is a refusal naming the way out, with
   `fail_on_recompile_limit_hit` on and `suppress_errors` off while it runs (torch calls them
-  incompatible), both as they were afterwards, on the refusal too. A job outside the shapes
-  measured (a pin beyond them, a frame too small for a tile, an untiled decode) is refused, never
-  run plain, the refusal naming the pass, its tiles and the shapes, then its advice; a plan with
-  no unit made is planned again for the other value of `--compile` without a flag, and units made
-  make it another job's settings; inductor's modules count in the environment's comparison only
-  between two compiled jobs. The plan's compile line gives the time by the shapes the warm-up
-  compiles (an untiled pass is one, never counted by tiles), by kind of job (new, or a resume
-  with the cache warm, found so only where the recorded plan is kept as it is: a re-planned
-  resume or a start killed while compiling is a new job's figure) and by disk, the line saying
-  only "on a Windows drive" and the cache's many small files at debug. A Windows drive is found
-  in `/proc/self/mountinfo`, the longest mount point deciding, a 9p mount counting only with
-  `aname=drvfs`. Compiled for real only on a tiny module, in a subprocess so that no state of
-  inductor stays in the suite (two
-  tests, skipped without a C++ compiler); the VAE's compile on a GPU is not in the default suite.
+  incompatible), both as they were afterwards, on the refusal too. A job outside the shapes measured
+  (a pin beyond them, a frame too small for a tile, an untiled decode) is refused, never run plain,
+  the refusal naming the pass, its tiles and the shapes, then its advice; a plan with no unit made
+  is planned again for the other value of `--compile` without a flag, and units made make it another
+  job's settings; inductor's modules count in the environment's comparison only between two compiled
+  jobs. The plan's compile line gives the time by the shapes the warm-up compiles (an untiled pass
+  is one, never counted by tiles), by kind of job (new, or a resume with the cache warm, found so
+  only where the recorded plan is kept as it is: a re-planned resume or a start killed while
+  compiling is a new job's figure) and by disk, the line saying only "on a Windows drive" and the
+  cache's many small files at debug. A Windows drive is found in `/proc/self/mountinfo`, the longest
+  mount point deciding, a 9p mount counting only with `aname=drvfs`. Compiled for real only on a
+  tiny module, in a subprocess so that no state of inductor stays in the suite (two tests, skipped
+  without a C++ compiler); the VAE's compile on a GPU is not in the default suite.
 - The default output (DESIGN.md, Architecture, What it prints): `tests/test_cli.py` holds
   `TORCH_CPP_LOG_LEVEL` set before torch is imported (seen by a finder at each import, in a
   subprocess) and the user's own value winning, and the early reading of the card in a
@@ -395,7 +442,7 @@ uv run --project ../apps/seedvr2x pytest
   fails the tests that compare them. `HOLDS_LINE` carries the autouse `round_figures` fixture's
   figures, so `SHIPPED_HOLDS_LINE` is the line with the shipped ones, held by
   `test_the_shipped_holds_line_says_the_shipped_figures`.
-- The calibration's measured lengths (`runtime/calibration.py`): `tests/test_timing.py`'s
+- The calibration's measured lengths (`calibration.py`): `tests/test_timing.py`'s
   stand-ins `Steady`, `Heavy` (slow windows, and the first calls costing what the calibration's
   constants say) and `SlowEncode` (slow encodes) give the times, and the tests hold the longer
   window's length by time, never under the attention window's 30 latents or over the job's
@@ -414,7 +461,7 @@ uv run --project ../apps/seedvr2x pytest
   `tests/test_units.py` and `tests/test_timing.py` (each run's windows decided, kept or made
   again, from the layouts the manifest records) and `tests/test_cli_run.py`: the refusal naming
   `--accept-env-change`, the warning given before the checks, the re-plan under the flag
-  (`planner.PER_TOKEN` multiplied, so that the DiT phase refuses at the stand-in's size), the
+  (`peaks.PER_TOKEN` multiplied, so that the DiT phase refuses at the stand-in's size), the
   segments and latents kept, `--plan` looking and writing nothing.
 - Met running the suite from a worktree: `git read-tree -u --reset` empties the `upstream/`
   submodule directories (link them again); `--compile`'s cache on a Windows drive under WSL2

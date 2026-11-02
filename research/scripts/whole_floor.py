@@ -15,7 +15,7 @@ what of the DiT the VAE's phases keep, the VAE in the DiT's phase); the decode t
 cuDNN frontend's log on (CUDNN_FRONTEND_LOG_INFO=1: the execution plans built, by unit). In the
 rung's process this script adds two probes to vae_room.py's (`run`): the md5 of the shot's
 latent once its encode has kept it, and of each window the DiT gave once kept, read back on the
-CPU from the files seedvr2x writes (runtime/units.py, Units.save_latent and save_window), which a
+CPU from the files seedvr2x writes (units.py, Units.save_latent and save_window), which a
 finished job removes: a rung whose latent and windows are the reference's moved no frame but by
 its decode.
 
@@ -166,7 +166,7 @@ def probed_run(argv: list[str]) -> int:
 
     def install(probes, args) -> list[str]:
         done = installed(probes, args)
-        from seedvr2x.runtime import units
+        import units
 
         save_latent, save_window = units.Units.save_latent, units.Units.save_window
 
@@ -303,13 +303,13 @@ class Study:
             shutil.rmtree(scratch, ignore_errors=True)
 
     def fit(self) -> float | None:
-        """The planner's untiled decode fit of 1080p's padded frame (planner._fit), GiB, read once
+        """The planner's untiled decode fit of 1080p's padded frame (seedvr2x/peaks.py, _fit), GiB, read once
         by the code's own python on the CPU (fits.json)."""
         path = self.dir / "fits.json"
         if not path.exists():
             script = (
-                "import json; from seedvr2x.runtime import planner; "
-                f"print(json.dumps(planner._fit({PADDED[1080]}, None, 1)))"
+                "import json; from seedvr2x import peaks; "
+                f"print(json.dumps(peaks._fit({PADDED[1080]}, None, 1)))"
             )
             env = dict(os.environ, CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1")
             said = subprocess.run(
