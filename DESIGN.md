@@ -4,7 +4,7 @@
 > code follows it: milestones 1 to 7 and the I/O layer have passed, milestone 3's time
 > estimates on an RTX 5090 (2026-10-30), the 96 GB card measuring them again when it is back,
 > before v0.1.0 (see [Validation milestones](#validation-milestones)). Each decision links to
-> the measurement it rests on in [../research/](research/).
+> the measurement it rests on in [research/](research/).
 
 ## Goal
 
@@ -245,11 +245,29 @@ In steps:
    pyproject and its lock, resolving to the same versions; the README and the manual go to
    `apps/cli/`, DESIGN.md and AGENTS.md to the root; links, tests, tools and scripts follow.
    The whole GPU suite runs on the RTX 5090 on exactly that code before it is pushed.
+   Built on 2026-11-02 and gated so:
+   - the lock's 65 packages as they were;
+   - a job's code hash taken by the package's own paths, so that a move alone keeps it;
+   - the environment record read from `seedvr2x-core`'s requirements, the same whether the
+     CLI is installed editable, not editable, or not at all;
+   - `core/` unmanaged by uv (`managed = false`): its checks and tests run from it, in the
+     CLI's environment;
+   - the CLI requires `seedvr2x-core` with no version until the release, which pins the
+     version both are released at.
+   The library's ranges as built, lower bounds the CLI's pins and upper ones the next major,
+   admit minors nothing has tested. They become the tested minor series
+   (`diffusers>=0.40.0,<0.41` and so on) with the next gated change, and widen as other
+   environments are tested (ComfyUI's).
 2. The image path in the library and `seedvr2x image`, then the image server if v0.1.0 takes
-   it, each measured on the 96 GB card.
+   it, each measured on the 96 GB card. Where the CLI isn't installed (the image server's
+   environment), the library reads its own version, not the CLI's (`--version` and a job's
+   settings read the CLI's today).
 3. After v0.1.0: the video-only code (`cli.py`, `media/`, jobs, resume, the cuts and their
    detector) moves from `core/` to `apps/cli/`, the planner split into the library's memory
-   model and the CLI's video plan; then ComfyUI's nodes.
+   model and the CLI's video plan; then ComfyUI's nodes. The CLI's own modules take another
+   import name than the library's (`seedvr2x_cli`): a second `seedvr2x/` on the path would hide
+   the first. Its licence becomes "Apache-2.0 AND MIT", the detector's TransNetV2 model moving
+   with it.
 
 ## Architecture
 
