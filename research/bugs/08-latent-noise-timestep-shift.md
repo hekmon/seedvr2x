@@ -119,7 +119,8 @@ either way.
   2.2: t = 0.65 instead of 0.20). The strength doesn't follow the batch size as designed.
 - Workaround: divide the scale. To get the intended t at 1080p batch 5, use s' = t / (shift −
   (shift − 1)·t) with shift = 4.98, e.g. s = 0.1 (t = 0.12) → s' ≈ 0.027. Or leave it at 0: on
-  our content it only degraded the output ([quality.md](../docs/quality.md#noise-scales)).
+  the study's content it only degraded the output
+  ([quality.md](../docs/quality.md#noise-scales)).
 
 ## Possible fix
 

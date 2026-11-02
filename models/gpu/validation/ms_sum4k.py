@@ -8,13 +8,15 @@ pairing, verdicts, guards and cells: the same rules), on slice B's shots and sou
 
   ms_sum4k.py [--out $VAL_STATE/sum]
 
-Sources: the 7B fp16 at seeds 42 and 43 = colour's own 4K scores where colour has them (eval-b1/<cd>: score, s42
-and s43; vmaf-b1/<cd>: split VMAF + CAMBI, s42 and s43; vmaf-b2/<cd>: none VMAF + CAMBI, s42; bands/<cd>.json: s42),
-ours for the rest, the same commands (gpu/vmaf/7b/<cd>: s43 none and split; gpu/bands/7b/<cd>-s43.json;
-gpu/diff/7b/<cd>.s43.txt); a label's = gpu/eval/<label>/<cd>, gpu/vmaf/<label>/<cd>, gpu/bands/<label>/<cd>.json,
-gpu/diff/<label>/<cd>.s42.txt, gpu/fr/<label>/<cd> (fr_metrics.py, only while score/FR4_ON exists). The sharp 7B's
-files (sh-*) are not this script's since S9 (2026-10-07): their slice B runs on the sharp's own 5 two-seed shots,
-against the sharp fp16 with its own 2-seed band: ms_sum4ksh.py (4k-sh-*.md).
+Sources: the 7B fp16 at seeds 42 and 43 = colour's own 4K scores where colour has them
+(eval-b1/<cd>: score, s42 and s43; vmaf-b1/<cd>: split VMAF + CAMBI, s42 and s43; vmaf-b2/<cd>: none
+VMAF + CAMBI, s42; bands/<cd>.json: s42), this slice's for the rest, the same commands
+(gpu/vmaf/7b/<cd>: s43 none and split; gpu/bands/7b/<cd>-s43.json; gpu/diff/7b/<cd>.s43.txt); a
+label's = gpu/eval/<label>/<cd>, gpu/vmaf/<label>/<cd>, gpu/bands/<label>/<cd>.json,
+gpu/diff/<label>/<cd>.s42.txt, gpu/fr/<label>/<cd> (fr_metrics.py, only while score/FR4_ON exists).
+The sharp 7B's files (sh-*) are not this script's since S9 (2026-10-07): their slice B runs on the
+sharp's own 5 two-seed shots, against the sharp fp16 with its own 2-seed band: ms_sum4ksh.py
+(4k-sh-*.md).
 Verdicts (ms_sum.py's): the label's frames minus the 7B's at seed 42; B / W when colour_eval's 95% moving-block
 bootstrap interval excludes 0 AND |mean| exceeds the band = the 7B fp16's spread over the seeds it has (42, 43);
 Laplacian up / down the same; band energy (no interval): |file - 7B at s42| beyond the 7B's 2-seed spread, either

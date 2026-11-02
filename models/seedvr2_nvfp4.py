@@ -26,8 +26,8 @@ saturated at +-6): formats_study.py's search. comfy-kitchen decodes any block sc
 the file as it is: `<layer>.weight` (uint8 [N, K/2], two codes per byte, the even value's in the
 high nibble, the sign in bit 3), `<layer>.weight_scale` (E4M3 [N, K/16], in cuBLAS's 128x4 tiles),
 `<layer>.weight_scale_2` (float32, s2) and the marker `<layer>.comfy_quant`, {"format": "nvfp4"},
-as Comfy-Org's SeedVR2 files mark theirs. Every other tensor is our fp16 file's: the master rounded
-to the nearest float16.
+as Comfy-Org's SeedVR2 files mark theirs. Every other tensor is as in seedvr2x's fp16 file: the
+master rounded to the nearest float16.
 
     uv run models/seedvr2_nvfp4.py [--masters DIR]... [--cache DIR] [--fp16 DIR] [--out DIR]
                                    [FILE...]
@@ -36,9 +36,9 @@ to the nearest float16.
   worst, beside that of comfy-kitchen's own quantizer (TensorCoreNVFP4Layout.quantize, the max's
   scales), whose codes and scales are counted against the search's first candidate; every tensor
   read back with the safetensors library, and comfy-kitchen's QuantizedTensor, built from the
-  file's tensors as a loader would, dequantized bit for bit to our reconstruction; with --fp16,
-  every 16-bit tensor byte for byte our fp16 file's; the output's SHA-256 pinned in OUTPUTS. A file
-  failing a check is deleted.
+  file's tensors as a loader would, dequantized bit for bit to the script's reconstruction; with
+  --fp16, every 16-bit tensor byte for byte as in seedvr2x's fp16 file; the output's SHA-256 pinned
+  in OUTPUTS. A file failing a check is deleted.
 - The output, in --out (default models/dist): not uploaded before GPU runs validate it (DESIGN.md,
   Weights).
 """
@@ -93,7 +93,7 @@ MIDPOINTS = (
     (5.0, False),
 )
 MARKER = json.dumps({"format": "nvfp4"}).encode()
-SOURCES = {  # our NVFP4 file: the fp16 file of ours it shares its master and 16-bit tensors with
+SOURCES = {  # seedvr2x's NVFP4 file: the fp16 file it shares its master and 16-bit tensors with
     "seedvr2x_ema_7b_nvfp4.safetensors": "seedvr2x_ema_7b_fp16.safetensors",
     "seedvr2x_ema_7b_sharp_nvfp4.safetensors": "seedvr2x_ema_7b_sharp_fp16.safetensors",
 }
@@ -219,7 +219,8 @@ def build(name: str, a: argparse.Namespace) -> None:
             w = sd[k].contiguous()
             q, c, s2, top = quantize(w)
             errors[k] = rel(decode(q, c, s2), w)
-            # comfy-kitchen's own quantizer, each block's scale from its max: our first candidate
+            # comfy-kitchen's own quantizer, each block's scale from its max: the search's first
+            # candidate
             cq, cp = TensorCoreNVFP4Layout.quantize(w)
             if not torch.equal(cp.scale, s2):
                 raise SystemExit(f"{k}: comfy-kitchen's s2 {float(cp.scale)}, ours {float(s2)}")

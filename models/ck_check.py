@@ -11,8 +11,8 @@
 # [tool.uv.sources]
 # torch = { index = "pytorch-cpu" }
 # ///
-"""Our quantized safetensors files through comfy-kitchen, on the CPU: the load test of DESIGN.md's
-phase 2 for the layouts seedvr2x's runtime will run.
+"""seedvr2x's quantized safetensors files through comfy-kitchen, on the CPU: the load test of
+DESIGN.md's phase 2 for the layouts seedvr2x's runtime will run.
 
     CUDA_VISIBLE_DEVICES= uv run models/ck_check.py FILE.safetensors...
 
@@ -24,9 +24,9 @@ comfy-kitchen (Comfy-Org, Apache-2.0) at 0.2.37 (its eager backend: no GPU neede
   (TensorCoreNVFP4Layout: two E2M1 codes per byte, an E4M3 scale per 16 values in cuBLAS's 128x4
   tiles, and `<layer>.weight_scale_2`, one float32 scale);
 - comfy-kitchen's QuantizedTensor built from the file's raw tensors, as a loader would, dequantized
-  to float32: for fp8, equal bit for bit to our own reconstruction q x s; for int8, (q x s) x H per
-  256 columns, H comfy-kitchen's rotation (its own inverse), equal to float32's precision, the
-  rotation's sums possibly running in another order; for NVFP4, each code's E2M1 value (the even
+  to float32: for fp8, equal bit for bit to the script's own reconstruction q x s; for int8, (q x s)
+  x H per 256 columns, H comfy-kitchen's rotation (its own inverse), equal to float32's precision,
+  the rotation's sums possibly running in another order; for NVFP4, each code's E2M1 value (the even
   value's code in the high nibble) times its block's scale, un-swizzled (comfy-kitchen's
   from_blocked), times the float32 scale, equal bit for bit;
 - for one layer, F.linear with a float input through comfy-kitchen's dispatch, against F.linear
@@ -62,7 +62,7 @@ E2M1 = torch.tensor(
 
 
 def weight(f, layer: str, fmt: dict) -> tuple[QuantizedTensor, torch.Tensor]:
-    """comfy-kitchen's tensor for a layer, and our own float32 reconstruction of it."""
+    """comfy-kitchen's tensor for a layer, and the script's own float32 reconstruction of it."""
     q, s = f.get_tensor(f"{layer}.weight"), f.get_tensor(f"{layer}.weight_scale").float()
     if fmt == {"format": "float8_e4m3fn"}:
         qt = QuantizedTensor(

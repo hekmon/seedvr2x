@@ -4,20 +4,21 @@
 # sollevante-painted, sollevante-line, sollevante-action, sollevante-dark, digital-sunrise, digital-space.
 #   bash $VAL_GLUE/make_jobs_b.sh LABEL >> $VAL_STATE/gpu/jobs.tsv   (the orchestrator appends)
 #   bash $VAL_GLUE/make_jobs_b.sh --list                                       (the label table)
-# Each line is make_jobs_a.sh's line for that label (our wrapper ck_patch.py and its environment, CK_PATCH_MODE,
-# CK_PATCH_EXPECT=288, the model directory, PYTHONPATH, bench.py run model-<id> --overwrite, the dump checks),
-# with the shot's 4K input and numz's flags = the 7B fp16 s42 reference run's of that shot, in its order (colour's
-# dumps/<shot>-d1/s42/meta.json): --resolution 2160 (sollevante-*) or 2016 (digital-*) --attention_mode
-# flash_attn_2 --batch_size N --load_cap N (N = the shot's frames: 45, sollevante-dark 41) --color_correction none
-# --debug --seed 42 --vae_decode_tiled --vae_decode_tile_size 2048 --vae_decode_tile_overlap 64 (encode untiled);
-# only --dit_model, --model_dir, --output, the dump dir and our wrapper change.
+# Each line is make_jobs_a.sh's line for that label (the wrapper ck_patch.py and its environment,
+# CK_PATCH_MODE, CK_PATCH_EXPECT=288, the model directory, PYTHONPATH, bench.py run model-<id>
+# --overwrite, the dump checks), with the shot's 4K input and numz's flags = the 7B fp16 s42
+# reference run's of that shot, in its order (colour's dumps/<shot>-d1/s42/meta.json): --resolution
+# 2160 (sollevante-*) or 2016 (digital-*) --attention_mode flash_attn_2 --batch_size N --load_cap N
+# (N = the shot's frames: 45, sollevante-dark 41) --color_correction none --debug --seed 42
+# --vae_decode_tiled --vae_decode_tile_size 2048 --vae_decode_tile_overlap 64 (encode untiled); only
+# --dit_model, --model_dir, --output, the dump dir and the wrapper change.
 # Ids b-<shot>-d1-<label>; dumps $M/gpu/dumps/<shot>-d1/<label>-s42/ (decode.pt, latents.pt, meta.json;
 # COLOUR_DUMP_INPUTS=0: the inputs are the 7B s42's enc_bf16/ref_f32); numz's outputs $M/gpu/out/<id>/.
 # Each command removes the dump's files first and checks decode.pt and latents.pt after the run.
 # All or nothing: no line is printed (exit 1) when the label's file or a shot's input is missing (dyn, sh-dyn
 # before their build); exit 2 on an unknown label. A new label = one more line in TABLE.
-# S6 (2026-10-07): q4ki (seedvr2x_ema_7b_Q4_K_imatrix.gguf, S5's control of dyn: every matrix Q4_K with the same
-# importance) and sh-q4ki (the sharp's) added, our GGUF like q4k and dyn.
+# S6 (2026-10-07): q4ki (seedvr2x_ema_7b_Q4_K_imatrix.gguf, S5's control of dyn: every matrix Q4_K
+# with the same importance) and sh-q4ki (the sharp's) added, seedvr2x's GGUF like q4k and dyn.
 # S9 (2026-10-07): the sharp 7B's files (labels sh-*) print 5 lines, on the 5 4K shots that have two SHARP fp16 seeds
 # (colour's dumps/<shot>-d1/sh42 and sh43), in this order: digital-cockpit, ouatia-face, digital-space,
 # sollevante-painted, cel4k-detail; numz's flags = the sharp 7B fp16 sh42 run's of that shot, in its order (colour's
@@ -34,7 +35,8 @@ digital-sunrise:2016:45 digital-space:2016:45"
 SHOTS_SH="digital-cockpit:2016:45 ouatia-face:2160:45 digital-space:2016:45 sollevante-painted:2160:45
 cel4k-detail:2048:45"
 TILES="--vae_decode_tiled --vae_decode_tile_size 2048 --vae_decode_tile_overlap 64"
-# label  file  mode   (mode: a CK_PATCH_MODE; - our GGUF, numz's own GGUF loader; numz: numz's own file, no ck_patch)
+# label  file  mode   (mode: a CK_PATCH_MODE; - seedvr2x's GGUF, numz's own GGUF loader; numz:
+# numz's own file, no ck_patch)
 TABLE="fp8a16 seedvr2x_ema_7b_fp8_scaled.safetensors w8a16
 fp8a8 seedvr2x_ema_7b_fp8_scaled.safetensors w8a8
 q4k seedvr2x_ema_7b_Q4_K.gguf -

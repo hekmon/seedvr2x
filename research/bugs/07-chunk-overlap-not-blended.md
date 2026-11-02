@@ -29,7 +29,7 @@ python inference_cli.py input.mp4 --output out/ --output_format png --model_dir 
 - Actual (from the code): chunk 2 is computed from input frames 39–83; its first 3 output frames
   are dropped and frame 42 starts a new, independent reconstruction. On held frames the jump at
   frame 42 should be the size of a batch boundary without overlap (≈ 2.3 levels at batch 21 on
-  our clip B, against ≈ 1.5 with a real 3-frame blend between batches). Not run.
+  the study's clip B, against ≈ 1.5 with a real 3-frame blend between batches). Not run.
 
 ## Root cause
 

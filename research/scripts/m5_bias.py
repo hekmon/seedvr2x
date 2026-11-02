@@ -7,8 +7,8 @@ of every frame, for both paths; a resize keeps the mean.
 
   m5_bias.py INPUT.mkv...     (numpy + torch; ffmpeg on PATH; CPU only)
 
-Historical: the record of milestone 5's diagnosis (2026-10-04), kept to re-run it: ours as first
-built (seedvr2x 27ce6ba) took numz's encoder input as lab's reference, so its output came out
+Historical: the record of milestone 5's diagnosis (2026-10-04), kept to re-run it: the first build
+(seedvr2x 27ce6ba) took numz's encoder input as lab's reference, so its output came out
 brighter than numz's by each input's own bias; this predicts it from the inputs' codes (milestone
 1's, clip B's, the full-reference clips' d1), against which the measured differences were set:
 DESIGN.md, Colour correction ("by 0.10–0.16 level, as predicted from their codes"),

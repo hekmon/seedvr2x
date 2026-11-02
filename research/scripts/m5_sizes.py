@@ -11,13 +11,13 @@ per frame, the 16-bit codes its first frame uses, and re-encodes with seedvr2x's
   m5_sizes.py MASTER...      (numpy, ffmpeg/ffprobe on PATH; CPU only)
 
 Historical: the record of how milestone 5 measured the masters' sizes (2026-10-04), kept to re-run
-it, on m5_run.sh's and m5_run3b.sh's gbrp16le masters (ours with lab or none, numz's): the
-figures in DESIGN.md, Output (master sizes: gbrp16le with colour correction 2.0-2.5
-times numz's lab, tens of thousands of codes in a frame against 300-400 in numz's bf16 output,
-rounding ours to bf16 saving 34-43%) and Colour correction. The writer options and the
-yuv420p10le chain are seedvr2x's media/writer.py's at eca0ff1 (zscale on ffmpeg's default
-slices: seedvr2x runs it on one since). seedvr2x's `--color-correction lab` went with 68b1529,
-when split replaced lab. It calls no research script.
+it, on m5_run.sh's and m5_run3b.sh's gbrp16le masters (seedvr2x's with lab or none, numz's): the
+figures in DESIGN.md, Output (master sizes: gbrp16le with colour correction 2.0-2.5 times numz's
+lab, tens of thousands of codes in a frame against 300-400 in numz's bf16 output, rounding
+seedvr2x's to bf16 saving 34-43%) and Colour correction. The writer options and the yuv420p10le
+chain are seedvr2x's media/writer.py's at eca0ff1 (zscale on ffmpeg's default slices: seedvr2x runs
+it on one since). seedvr2x's `--color-correction lab` went with 68b1529, when split replaced lab. It
+calls no research script.
 """
 import json
 import math

@@ -898,7 +898,7 @@ def execute(cmd, pipe, c):
 
 
 def classify(out, n, c):
-    """Compare the frames we got with the reference at n.. -> (status, shift, foreign)."""
+    """Compare the frames read with the reference at n.. -> (status, shift, foreign)."""
     R = c.R
     want = min(c.k, len(R) - n)
     if not out:
@@ -1101,7 +1101,7 @@ def cmd_keycheck(a):
               f"decode errors {len(errs)}", flush=True)
     bad_keys = [r for r in rows if r["bad_from_k"]]
     pred = None
-    if os.path.exists(p(a.out, "paramsets.json")):  # its prediction against what we saw
+    if os.path.exists(p(a.out, "paramsets.json")):  # its prediction against what was seen
         unsafe = set(jload(p(a.out, "paramsets.json"))["unsafe_keyframe_pts"])
         pred = collections.Counter(
             ("predicted unsafe" if r["key_pts"] in unsafe else "predicted safe") + ", " +

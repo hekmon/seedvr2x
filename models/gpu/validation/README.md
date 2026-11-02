@@ -23,7 +23,7 @@ by hand: pair4g.py, pair3b.py, floor_report.py, remake_all.sh, the crops, the co
 ```
 
 The runs themselves are numz's CLI at `4490bd1` through `bench.py`, wrapped by colour's
-`colour_dump.py` (the latents and the decode) and, for our safetensors files, by
+`colour_dump.py` (the latents and the decode) and, for seedvr2x's safetensors files, by
 [`../ck_patch.py`](../ck_patch.py) (comfy-kitchen's layers); GGUF files through numz's own loader.
 
 ## The scripts
@@ -32,7 +32,7 @@ The runs themselves are numz's CLI at `4490bd1` through `bench.py`, wrapped by c
 |---|---|---|
 | `runner.sh` | the GPU queue: `jobs.tsv`'s lines in file order, read again before each job, one job per hold of the GPU lock; inside the hold, no other compute process may run and `$VAL_DISK` must have 60 GB free, and the GPU's clock is logged; then a done or failed marker, `gpu-jobs.csv`; `STOP` between jobs; no start past `CUTOFF` without `GO_PAST_0845`; never exits on an empty queue | `bash $VAL_GLUE/runner.sh 2>&1 \| tee -a $VAL_STATE/85-runner.log`, in a terminal of its own |
 | `status.sh` | the queue at a glance: counts, the running job, the last clock, an ETA | `bash $VAL_GLUE/status.sh` |
-| `make_jobs_a.sh` | tier 1's lines (1080p, the 8 d1 clips): without an argument slice A's 52, else each label's; the float16 reference runs' flags, our wrapper and its mode or numz's GGUF loader, the dump | `bash $VAL_GLUE/make_jobs_a.sh LABEL >> $VAL_STATE/gpu/jobs.tsv`; `--list` |
+| `make_jobs_a.sh` | tier 1's lines (1080p, the 8 d1 clips): without an argument slice A's 52, else each label's; the float16 reference runs' flags, seedvr2x's wrapper and its mode or numz's GGUF loader, the dump | `bash $VAL_GLUE/make_jobs_a.sh LABEL >> $VAL_STATE/gpu/jobs.tsv`; `--list` |
 | `make_jobs_b.sh` | slice B's lines (4K): the 7B's labels on its 6 shots, the sharp's on its 5, each shot's own flags, VAE decode in tiles | `bash $VAL_GLUE/make_jobs_b.sh LABEL >> $VAL_STATE/gpu/jobs.tsv` |
 | `smoke_one.sh`, `smoke_jobs.txt` | the smoke test: one run per line of `smoke_jobs.txt` (tag, file, mode, numz's extra arguments) on anime-clean, in ck_patch's check mode; `DRY=1`: the command line and guards, no GPU | per line: `mkdir -p ${VAL_GPU_LOCK%/*} && flock $VAL_GPU_LOCK bash -c 'bash $VAL_GLUE/smoke_one.sh TAG FILE MODE [ARGS]'` |
 | `smoke_check.py` | the smoke's checks: `report` (each run's backends, operations and per-layer figures from its `ck_patch.json`, its decode against the 7B float16's, BlockSwap's bit for bit); `equal DIR DIR` | `$METRICS_PY $VAL_GLUE/smoke_check.py report` |
@@ -41,7 +41,7 @@ The runs themselves are numz's CLI at `4490bd1` through `bench.py`, wrapped by c
 | `gpustats.py` | the GPU over the runs: clocks and clock-event reasons under load from the sampler, durations per label, failures | `$METRICS_PY $VAL_GLUE/gpustats.py` |
 | `ms_env.sh`, `ms_env2.sh` | the pool's settings, sourced: the paths from glue.env, colour's per-clip bars and band rows, the shots, threads | |
 | `ms_pool2.sh` | the CPU pool: the job list every 20 s, ready jobs started in order within `NMAX` slots (a 4K job takes 2) and 60 GB of memory after the running jobs' expected peaks; the summaries re-made after any job ends; `STOP` ends it once its jobs are done | `bash $VAL_GLUE/ms_pool2.sh 2>&1 \| tee -a $VAL_STATE/95-pool.log`, in a terminal of its own |
-| `ms_jobs2.sh` | the job list (prints only): each done marker's sc, vm, bd, fr jobs with colour.md's commands, the float16 models' reference jobs, our Q4_K against numz's Q4_K_M, the 3B's inputs and page; each job's state (done, failed, running, ready, wait, blocked) | `bash $VAL_GLUE/ms_jobs2.sh`; `MS_DRY_GPUDONE=DIR` lists from other markers |
+| `ms_jobs2.sh` | the job list (prints only): each done marker's sc, vm, bd, fr jobs with colour.md's commands, the float16 models' reference jobs, seedvr2x's Q4_K against numz's Q4_K_M, the 3B's inputs and page; each job's state (done, failed, running, ready, wait, blocked) | `bash $VAL_GLUE/ms_jobs2.sh`; `MS_DRY_GPUDONE=DIR` lists from other markers |
 | `ms_job.sh` | one pool job, in a session of its own, on cores 0-31 at nice 19: its log, its peak memory, its marker, a line in `times.tsv` | started by the pool |
 | `ms_status2.sh` | the pool at a glance: jobs by state, running, failed, times by kind, memory, the pages | `bash $VAL_GLUE/ms_status2.sh -q` |
 | `ms_vmafcheck.py` | a VMAF JSON is whole: every frame finite, VMAF v1's 4K model from 2160 rows or 3840 columns up, else its 1080p one | called by the vm jobs |
@@ -49,8 +49,8 @@ The runs themselves are numz's CLI at `4490bd1` through `bench.py`, wrapped by c
 | `ms_sum.py` | 1080p: each file's frames paired with its float16 model's at seed 42 (colour_eval.py's series and bootstrap), the guards per kind of source, the strict and calibrated rules with the floor: `<label>.md`, `00-overview.md`, `7b-band.md`, `sharp-band.md`, `validation.md` | the pool; `$METRICS_PY $VAL_GLUE/ms_sum.py [--out DIR]` |
 | `ms_sum4k.py`, `ms_sum4ksh.py` | the same at 4K, the 7B's files and the sharp's, against two-seed bands with the floor: `4k-*.md`, `4k-sh-*.md` | the pool |
 | `ms_floor.py` | the floor: a minimum spread per metric, one unit of the resolution it is printed at, where the seeds agree closer than that; at 4K since 2026-10-08 (S16), at 1080p too since S23 (one rule for both resolutions), in both rules and every multiple, a multiple of the floor marked † (imported by the summaries and the pairings) | |
-| `pair4g.py` | the 4 GB files against our Q4_K (or `--base`), 1080p: cell by cell against the 7B fp16's 3-seed spread or its floor, detail and band energy, the distance between the files | `$METRICS_PY $VAL_GLUE/pair4g.py`; `--base q4ki --labels dyn --name pair-dyn-q4ki.md` |
-| `pair3b.py` | the 3B (ours from the current weights, numz's from the first) against the sharp 7B's dynamic GGUF, the sharp and the 7B, against the GT, their differences against the sharp's 3-seed spread or its floor; `--test`: stand-in labels | the pool, once both 3B labels are scored |
+| `pair4g.py` | the 4 GB files against seedvr2x's Q4_K (or `--base`), 1080p: cell by cell against the 7B fp16's 3-seed spread or its floor, detail and band energy, the distance between the files | `$METRICS_PY $VAL_GLUE/pair4g.py`; `--base q4ki --labels dyn --name pair-dyn-q4ki.md` |
+| `pair3b.py` | the 3B (seedvr2x's from the current weights, numz's from the first) against the sharp 7B's dynamic GGUF, the sharp and the 7B, against the GT, their differences against the sharp's 3-seed spread or its floor; `--test`: stand-in labels | the pool, once both 3B labels are scored |
 | `floor_report.py` | which verdicts and rows the floor changes: at 4K (the 7B's, the sharp's), at 1080p | `$METRICS_PY $VAL_GLUE/floor_report.py 4k\|4ksh\|1080` |
 | `remake_all.sh` | every page again, after a pool summary in progress | `bash $VAL_GLUE/remake_all.sh [all]` |
 | `ms_crops.py`, `ms_crops4k.py` | strips for the eyes (GT, bicubic, float16, each file) at colour's windows, cut by colour_crops.py: `$VAL_DATA/gpu/crops/<name>/`; `ms_crops.py --refs` names the float16 panels itself (`7B fp16`, `sharp fp16`), and captions the 3B's labels in words (3B current, 3B first) | `$METRICS_PY $VAL_GLUE/ms_crops.py --labels ... --name ... [--refs ...]`; the 3B's: `--refs "sharp fp16" --labels sh-dyn,3b-cur,3b-first --name crops-3b` |
@@ -65,7 +65,7 @@ Each script's header says more: its inputs, outputs and rules.
 
 Every path these scripts use is an environment variable, and `glue.env.example` names them all,
 each with what it holds: this folder and the repository's scripts, numz's checkout and models,
-the clips, colour's outputs, the metrics environment, ffmpeg, our model directory and
+the clips, colour's outputs, the metrics environment, ffmpeg, seedvr2x's model directory and
 comfy-kitchen, and two roots for what the runs write: `VAL_DATA` (big files) and `VAL_STATE`
 (markers, logs, pages), laid out as on the box. Copy it, fill it in, source it; a script refuses
 to run, naming the first variable it needs that is unset.
@@ -110,15 +110,19 @@ Then the floor went to 1080p too (S23, 2026-10-08): `ms_sum.py`, `ms_floor.py`, 
 `pair3b.py` and `floor_report.py` took the same edit here and on the box, proved the same way
 (the box's values substituted back give the box's new files byte for byte, the syntax trees
 unchanged by ruff; with the box's values the summaries, the pairings and the floor report give
-the box versions' pages, all but the stamped line).
+the box versions' pages, all but the stamped line). On 2026-11-02 their comments and docstrings
+were reworded in the project's voice, their code unchanged (the syntax trees once docstrings are
+blanked, the shell scripts' code lines): the relation to the box's copies above now holds for
+the code, and the outputs, which the strings they print make, are the same.
 Left on the box: the first pool (`ms_jobs.sh`, `ms_pool.sh`, `ms_status.sh`; `ms_jobs2.sh` keeps
 their lines word for word), tests and one-off helpers (estimates, reorders, crops loops).
 
 ## Credits
 
-Our code. It calls this repository's [research/scripts](../../../research/scripts):
-`colour_dump.py`, `colour_eval.py`, `colour_bands.py`, `colour_crops.py`
-([colour.md](../../../research/docs/colour.md#reproduce)), `bench.py`, `fr_metrics.py`,
-`ffv1_out.py`; it runs numz's SeedVR2 CLI (numz/ComfyUI-SeedVR2_VideoUpscaler at `4490bd1`,
-Apache-2.0), unchanged, through `bench.py` and our wrapper `../ck_patch.py`, which uses
-comfy-kitchen (Apache-2.0); ffmpeg with libvmaf scores. No third-party code is copied here.
+The code here is seedvr2x's. It calls this repository's
+[research/scripts](../../../research/scripts): `colour_dump.py`, `colour_eval.py`,
+`colour_bands.py`, `colour_crops.py` ([colour.md](../../../research/docs/colour.md#reproduce)),
+`bench.py`, `fr_metrics.py`, `ffv1_out.py`; it runs numz's SeedVR2 CLI
+(numz/ComfyUI-SeedVR2_VideoUpscaler at `4490bd1`, Apache-2.0), unchanged, through `bench.py` and
+seedvr2x's wrapper `../ck_patch.py`, which uses comfy-kitchen (Apache-2.0); ffmpeg with libvmaf
+scores. No third-party code is copied here.

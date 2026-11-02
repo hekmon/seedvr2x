@@ -24,21 +24,23 @@
 # Slice B (4K, the 6 shots $SHOTS_B, GPU ids b-<shot>-d1-<label>, dumps $GD/<shot>-d1/<label>-s42/decode.pt):
 # colour's batch-A and baton-2 4K settings: GT and bicubic from $C4, --bars 0:0, whole frames, N = 8 (T4), the
 # shot's frames (sollevante-dark 41) in the VMAF check.
-# The 7B fp16's own (label 7b, ref tag f32 = colour's): r7m-<cd> renders its s42 masters (kept: every distance
-# is to its none master) and VMAFs them into $VMD/7b-check (to compare with colour's); 1080p: seeds 43 and 1234
-# scored, VMAF'd, distance to s42, scanned as a file's run (r7s-, r7v-, r7b-, r7f-): its 3-seed spread; its s42
-# scores are colour's (eval-b2, vmaf-b2, bands-b2). 4K: its s42 and s43 scores are colour's (eval-b1), its s42 VMAF
-# too (vmaf-b1 split, vmaf-b2 none), its s42 bands (bands/<shot>-d1.json), its s43 split VMAF (vmaf-b1); ours:
-# r7v-<shot>-d1-s43 (s43 none + split VMAF + CAMBI into $VMD/7b, distance to s42), r7b-<shot>-d1-s43 (bands): its
-# 2-seed spread. Read by ms_sum.py (1080p) and ms_sum4k.py (4K).
+# The 7B fp16's own (label 7b, ref tag f32 = colour's): r7m-<cd> renders its s42 masters (kept:
+# every distance is to its none master) and VMAFs them into $VMD/7b-check (to compare with
+# colour's); 1080p: seeds 43 and 1234 scored, VMAF'd, distance to s42, scanned as a file's run
+# (r7s-, r7v-, r7b-, r7f-): its 3-seed spread; its s42 scores are colour's (eval-b2, vmaf-b2,
+# bands-b2). 4K: its s42 and s43 scores are colour's (eval-b1), its s42 VMAF too (vmaf-b1 split,
+# vmaf-b2 none), its s42 bands (bands/<shot>-d1.json), its s43 split VMAF (vmaf-b1); made here:
+# r7v-<shot>-d1-s43 (s43 none + split VMAF + CAMBI into $VMD/7b, distance to s42), r7b-<shot>-d1-s43
+# (bands): its 2-seed spread. Read by ms_sum.py (1080p) and ms_sum4k.py (4K).
 # The sharp 7B's files (labels sh-*): the same jobs, but their distance is to the sharp 7B fp16's s42 none master
 # (rshm-<cd> renders it once from colour's sh42 decode, rshf- its fr_metrics), and the summaries pair them with the
 # sharp's s42 scores (colour's eval-b2 ~sharp, at 1080p and 4K).
-# The sharp 7B fp16's own seeds 43 and 1234 at 1080p (S8, 2026-10-07): our GPU runs a-<clip>-d1-sharp-s<seed> (dumps
-# $GD/<clip>-d1/sharp-s<seed>/decode.pt; not a file's run: kept out of section 2), scored, VMAF'd, distance to the
-# sharp's s42 none master, scanned, as the 7B's seeds (rshs-, rshv-, rshb-, rshf-<cd>-s<seed>; label sharp, ref tag
-# sharp; their none masters deleted by fr as the 7B's seeds'): with colour's sh42, the sharp's own 3-seed spread,
-# ms_sum.py's band for the sh-* labels once scored.
+# The sharp 7B fp16's own seeds 43 and 1234 at 1080p (S8, 2026-10-07): the GPU runs
+# a-<clip>-d1-sharp-s<seed> (dumps $GD/<clip>-d1/sharp-s<seed>/decode.pt; not a file's run: kept out
+# of section 2), scored, VMAF'd, distance to the sharp's s42 none master, scanned, as the 7B's seeds
+# (rshs-, rshv-, rshb-, rshf-<cd>-s<seed>; label sharp, ref tag sharp; their none masters deleted by
+# fr as the 7B's seeds'): with colour's sh42, the sharp's own 3-seed spread, ms_sum.py's band for
+# the sh-* labels once scored.
 # S9 (2026-10-07): slice B of the sharp's files: the sh-* labels' 4K runs land on the sharp's 5 two-seed shots
 # $SHOTS_SH (GPU ids b-<shot>-d1-sh-<file>), scored with colour's baton-2 4K commands (the first film: --bars 42:42,
 # bands rows 64:2096: ms_env2.sh); section 3d: the sharp 7B fp16's own 4K references on those shots: its s42 masters
@@ -66,7 +68,7 @@ FRM="$PY $MEAS/fr_metrics.py"
 ctx1() { GTD=$CLIPS TH=$T NF=45 K4="" FRX=$FR; }               # slice A's settings
 ctx4() { GTD=$C4 TH=$T4 NF=${NFR[$1]:-45} K4=4 FRX=$FR4; }     # slice B's settings for shot $1
 
-job() {  # id kind needs; the command in CMD; needs: g:<gpu id> d:<our job id> f:<path>
+job() {  # id kind needs; the command in CMD; needs: g:<gpu id> d:<job id> f:<path>
   local id=$1 kind=$2 needs=$3 s why="" n
   if [ -e "$SC/done/$id" ]; then s=done
   elif [ -e "$SC/failed/$id" ]; then s=failed
@@ -190,8 +192,9 @@ for c in $SHOTS_B; do
   FRJOBS+="r7f-$cd-s42|$cd|7b|f32|s42|d:r7m-$cd|4"$'\n'
 done
 while read -r _ src L c dec res; do unit "$src" "$L" "$c" "$dec" "$res"; done < <(grep ' 4$' <<< "$units" | sort -n -k1,1 -s)
-# 3. the 7B fp16's other seeds: 1080p 43 and 1234 (its 3-seed spread), then 4K 43 (its 2-seed spread: the score
-# is colour's eval-b1, the split VMAF colour's vmaf-b1; the none VMAF, the distance and the bands are ours)
+# 3. the 7B fp16's other seeds: 1080p 43 and 1234 (its 3-seed spread), then 4K 43 (its 2-seed
+# spread: the score is colour's eval-b1, the split VMAF colour's vmaf-b1; the none VMAF, the
+# distance and the bands are made here)
 ctx1
 for s in 43 1234; do
   for c in $CLIPS_A; do
@@ -239,7 +242,7 @@ for c in $SHOTS_SH; do
   vm_cmd $cd sharp sharp s43 $dec $VMD/sharp/$cd; job rshv-$cd-s43 vm4 "f:$dec d:rshm-$cd"
   FRJOBS+="rshf-$cd-s43|$cd|sharp|sharp|s43|d:rshv-$cd-s43|4"$'\n'
 done
-# 4. our Q4_K against numz's Q4_K_M: the distance between their none masters (1080p)
+# 4. seedvr2x's Q4_K against numz's Q4_K_M: the distance between their none masters (1080p)
 for c in $NQ4KM_CLIPS; do
   cd=$c-d1
   CMD="mkdir -p $DFD/x && $FFD '$MD/q4k/$cd.s42.none~q4k.gbrp16le.mkv' '$MD/nq4km/$cd.s42.none~nq4km.gbrp16le.mkv' > '$DFD/x/$cd.q4k-nq4km.txt.tmp' && mv -f '$DFD/x/$cd.q4k-nq4km.txt.tmp' '$DFD/x/$cd.q4k-nq4km.txt' && cat '$DFD/x/$cd.q4k-nq4km.txt'"

@@ -18,8 +18,9 @@ fp16", checked against colour's sharp panel of the same window): GT | bicubic | 
   ms_crops.py --labels sh-fp8a16,sh-fp8a8,sh-int8,sh-q80,sh-q4k,sh-q4ki,sh-dyn,sh-nv4a16,sh-nv4a4 --name crops-a-sharp
 (a mixed list shows both references: 7B fp16, then sharp fp16).
 S17 (2026-10-08): --refs sets the reference panels by hand ('7B fp16', 'sharp fp16'; default: as above); a label
-in CAPTION is captioned in words: 3b-cur "3B current" (the SeedVR2 3B from ByteDance's current 3B weights, our
-float16), 3b-first "3B first" (numz's 3B fp16: the first 3B weights). The 3B beside the sharp 7B and its 4 GB file:
+in CAPTION is captioned in words: 3b-cur "3B current" (the SeedVR2 3B from ByteDance's current 3B
+weights, in seedvr2x's float16), 3b-first "3B first" (numz's 3B fp16: the first 3B weights). The 3B
+beside the sharp 7B and its 4 GB file:
   ms_crops.py --refs "sharp fp16" --labels sh-dyn,3b-cur,3b-first --name crops-3b
 """
 

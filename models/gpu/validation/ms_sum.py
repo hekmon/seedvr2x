@@ -5,12 +5,13 @@ per clip and metric, then PASS / FAIL per guard and kind of source; one Markdown
 
   ms_sum.py [--out $VAL_STATE/sum] [--t4 $COLOUR_OUT/sum-b2/T4-1080p.md]
 
-Sources: the 7B fp16 at seed 42 = colour's own scores (eval-b2/<cd>, vmaf-b2/<cd>, bands-b2/<cd>-7b.json: what
-colour's T4 paired the sharp 7B with); its seeds 43 and 1234 = ours, the same commands (gpu/eval/7b, gpu/vmaf/7b,
-gpu/bands/7b); a label's = gpu/eval/<label>, gpu/vmaf/<label>, gpu/bands/<label> (ref tag = the label, content
-s42); fr_metrics.py's JSONs gpu/fr/<label>/<cd> (7B: gpu/fr/7b). JSONs of one clip merged as colour_eval.py
-summary merges them (per variant@ref and content, score's and vmaf's series together, the later file's on a
-series both hold).
+Sources: the 7B fp16 at seed 42 = colour's own scores (eval-b2/<cd>, vmaf-b2/<cd>,
+bands-b2/<cd>-7b.json: what colour's T4 paired the sharp 7B with); its seeds 43 and 1234 = this
+slice's, the same commands (gpu/eval/7b, gpu/vmaf/7b, gpu/bands/7b); a label's = gpu/eval/<label>,
+gpu/vmaf/<label>, gpu/bands/<label> (ref tag = the label, content s42); fr_metrics.py's JSONs
+gpu/fr/<label>/<cd> (7B: gpu/fr/7b). JSONs of one clip merged as colour_eval.py summary merges them
+(per variant@ref and content, score's and vmaf's series together, the later file's on a series both
+hold).
 Pairing: colour_eval.py summary --baseline <variant>@f32 on a view holding one clip's label and 7B JSONs,
 replicated in-process with colour_eval's own series() and boot(): the label's frames minus the 7B's at the seeds
 both hold (42), mean, 95% moving-block bootstrap interval (blocks of 8, 2000 draws, rng seed 1 drawn in colour_eval's
@@ -29,21 +30,24 @@ Two rules, both reported (since 2026-10-07 07:15): strict (the above) and calibr
 also exceeds K x the spread, K = KCAL[number of seeds in the spread] (2.7 for 3, 10.9 for 2): the multiple a further
 fp16 seed exceeds with 5% probability per clip-variant (S4's Monte Carlo, Gaussian seed scatter, both directions).
 Every W / up / down cell shows its multiple of the spread.
-The sharp's files (sh-*, since S8 2026-10-07 11:40): paired with the sharp 7B fp16 at seed 42; their band = the
-sharp 7B fp16's OWN 3-seed spread (seed 42 = colour's sh42, 43 and 1234 = ours: gpu/eval/sharp, gpu/vmaf/sharp,
-gpu/bands/sharp/<cd>-s<seed>.json, gpu/fr/sharp, gpu/diff/sharp), per clip-variant and per source (scores + VMAF,
-DISTS 45f, band energy) where all 3 seeds are scored, the 7B fp16's 3-seed spread elsewhere (column Band; each
-sh-* page and the overview say which); the sharp's own band: sharp-band.md.
-The 3B (labels 3b-*, S16 2026-10-08: 3b-cur = our seedvr2x_ema_3b_fp16 from ByteDance's current 3B weights, 3b-first =
-numz's seedvr2_ema_3b_fp16, the first weights): scored and paired as any file, against the 7B fp16 and its band; the
-3B has no seed band of its own: its page and overview row say so (informative only); the 3B against the sharp's 4 GB
-pick: pair3b.py -> 3b-00-overview.md. Nothing else changed (verdicts, other pages: as before S16).
-S23 (2026-10-08, design's decision of 10:20): the floor at 1080p too, one rule for both resolutions (ms_floor.py, as
-ms_sum4k.py and ms_sum4ksh.py since S16): the spread used = max(the 3-seed spread, one unit of the resolution the
-metric is printed at), in both rules and every printed multiple (a multiple of the floor carries a †); main() applies
-it to every label's label_data() (3b-* and valsharp included) and to our Q4_K against numz's Q4_K_M (x_md); not
-label_data() itself (imported by the 4K summaries, the pairings and floor_report.py), nor the validation's colour
-mode (band 0) or the band pages (the seeds' own spreads).
+The sharp's files (sh-*, since S8 2026-10-07 11:40): paired with the sharp 7B fp16 at seed 42; their
+band = the sharp 7B fp16's OWN 3-seed spread (seed 42 = colour's sh42, 43 and 1234 = this slice's:
+gpu/eval/sharp, gpu/vmaf/sharp, gpu/bands/sharp/<cd>-s<seed>.json, gpu/fr/sharp, gpu/diff/sharp),
+per clip-variant and per source (scores + VMAF, DISTS 45f, band energy) where all 3 seeds are
+scored, the 7B fp16's 3-seed spread elsewhere (column Band; each sh-* page and the overview say
+which); the sharp's own band: sharp-band.md.
+The 3B (labels 3b-*, S16 2026-10-08: 3b-cur = seedvr2x_ema_3b_fp16 from ByteDance's current 3B
+weights, 3b-first = numz's seedvr2_ema_3b_fp16, the first weights): scored and paired as any file,
+against the 7B fp16 and its band; the 3B has no seed band of its own: its page and overview row say
+so (informative only); the 3B against the sharp's 4 GB pick: pair3b.py -> 3b-00-overview.md. Nothing
+else changed (verdicts, other pages: as before S16).
+S23 (2026-10-08, design's decision of 10:20): the floor at 1080p too, one rule for both resolutions
+(ms_floor.py, as ms_sum4k.py and ms_sum4ksh.py since S16): the spread used = max(the 3-seed spread,
+one unit of the resolution the metric is printed at), in both rules and every printed multiple (a
+multiple of the floor carries a †); main() applies it to every label's label_data() (3b-* and
+valsharp included) and to seedvr2x's Q4_K against numz's Q4_K_M (x_md); not label_data() itself
+(imported by the 4K summaries, the pairings and floor_report.py), nor the validation's colour mode
+(band 0) or the band pages (the seeds' own spreads).
 """
 
 import argparse
@@ -436,7 +440,7 @@ def bands_7b(cd):
 
 
 def bands_sharp(cd):
-    """The sharp 7B fp16's own scans (S8): seed 42 colour's (bands-b2), 43 and 1234 ours."""
+    """The sharp 7B fp16's own scans (S8): seed 42 colour's (bands-b2), 43 and 1234 this slice's."""
     return {
         "s42": load_json(f"{O}/bands-b2/{cd}-sharp.json"),
         "s43": load_json(f"{G}/bands/sharp/{cd}-s43.json"),
@@ -479,11 +483,12 @@ def cell(k, e, mode="tag"):
 
 
 def ref_of(L):
-    """The reference model a label is paired with: (ref tag, name, fr/masters label). The sharp 7B's files (sh-*)
-    against the sharp 7B fp16 at seed 42 (colour's sh42 scores: eval-b2 ~sharp, vmaf-b2), every other file against
-    the 7B fp16. The band: the 7B fp16's 3-seed spread; for the sharp's files the sharp 7B fp16's own 3-seed
-    spread (colour's sh42, our s43 and s1234; S8) per clip-variant and source where its 3 seeds are scored, the
-    7B's until then (label_data's bandsrc)."""
+    """The reference model a label is paired with: (ref tag, name, fr/masters label). The sharp 7B's
+    files (sh-*) against the sharp 7B fp16 at seed 42 (colour's sh42 scores: eval-b2 ~sharp,
+    vmaf-b2), every other file against the 7B fp16. The band: the 7B fp16's 3-seed spread; for the
+    sharp's files the sharp 7B fp16's own 3-seed spread (colour's sh42, this slice's s43 and s1234;
+    S8) per clip-variant and source where its 3 seeds are scored, the 7B's until then (label_data's
+    bandsrc)."""
     return ("sharp", "sharp 7B fp16", "sharp") if L.startswith("sh-") else ("f32", "7B fp16", "7b")
 
 
@@ -504,7 +509,7 @@ def label_data(L, gl):
             b7 = {"s42": load_json(f"{O}/bands-b2/{cd}-sharp.json"), "_7b": b7}
         sb = (
             bands_sharp(cd) if rt == "sharp" else {}
-        )  # the sharp fp16's own 3 scans, once ours exist (S8)
+        )  # the sharp fp16's own 3 scans, once this slice's seeds 43 and 1234 exist (S8)
         bL = load_json(f"{G}/bands/{L}/{cd}.json")
         gt_lap = None
         try:
@@ -1119,8 +1124,8 @@ def band_md(clip_bys, who="7b"):
 
 
 def x_md(clip_bys, gl=None):
-    """Our Q4_K against numz's Q4_K_M, paired at seed 42, the 7B fp16's 3-seed spread as the band (S23: or its
-    floor; detail's from the GT's Laplacian, gl)."""
+    """seedvr2x's Q4_K against numz's Q4_K_M, paired at seed 42, the 7B fp16's 3-seed spread as the
+    band (S23: or its floor; detail's from the GT's Laplacian, gl)."""
     lines = [
         "## Our Q4_K − numz's Q4_K_M (paired at seed 42; band: the 7B fp16's 3-seed spread or its floor)",
         "",
@@ -1231,7 +1236,7 @@ def validation_md(t4path, gl):
         f"Generated {stamp()}.",
         "",
     ]
-    # 1. our JSONs against colour's: same decode, reference and commands -> the same series
+    # 1. this slice's JSONs against colour's: same decode, reference and commands -> the same series
     rows, bad = [], 0
     for c in CLIPS_A:
         cd = f"{c}-d1"
@@ -1309,7 +1314,8 @@ def validation_md(t4path, gl):
         "",
     ]
     lines += table(["Clip", "Var", "JSON", "Series", "Result"], rows)
-    # 2. colour's T4 cells (sharp - 7B, d1) against ours in colour mode (band 0: the 7B at seed 42 only)
+    # 2. colour's T4 cells (sharp - 7B, d1) against this script's own in colour mode (band 0: the 7B
+    #    at seed 42 only)
     t4 = parse_t4(t4path)
     agree = total = 0
     diffs = []

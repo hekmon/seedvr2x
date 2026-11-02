@@ -127,12 +127,12 @@ a cut when it reaches the threshold. sptenc runs it as
 reads each detection's frame index from the metadata filter's counter; its 5-second minimum
 segment length acts later, on its segments, not on the detection.
 
-Our pass runs the same chain with every key printed for every frame (`lavfi.scd.mafd`, `.score`,
-`.time`), video only, so that any threshold can be read back. `check` reproduces sptenc's
-detections exactly: on cartoon-1, sptenc's own command and our pass give the same 56 frames at
-T = 10 with the same printed scores; on a synthetic clip with hard cuts at frames 30, 60 and 90,
-exactly those three (scores 24.9, 22.9, 17.8; at most 2.8 elsewhere). Its candidates are its
-local maxima from 4 up.
+The study's pass runs the same chain with every key printed for every frame (`lavfi.scd.mafd`,
+`.score`, `.time`), video only, so that any threshold can be read back. `check` reproduces
+sptenc's detections exactly: on cartoon-1, sptenc's own command and the study's pass give the
+same 56 frames at T = 10 with the same printed scores; on a synthetic clip with hard cuts at
+frames 30, 60 and 90, exactly those three (scores 24.9, 22.9, 17.8; at most 2.8 elsewhere). Its
+candidates are its local maxima from 4 up.
 
 ### PySceneDetect
 
@@ -141,25 +141,26 @@ PySceneDetect 0.7.1's AdaptiveDetector (adaptive threshold 3.0, window 2, minimu
 their defaults, including a **minimum scene length of 15 frames**. They get the frames its OpenCV
 backend would (swscale, the matrix and range the stream declares, BT.601 when it declares none),
 downscaled as its SceneManager does by default (to 256 px on the longer side). `pysd-check` runs
-its own pipeline beside ours: identical cuts on cartoon-1 (55 and 55), an anime segment and the
-synthetic clip, and identical frames, pixel for pixel. Its cuts fall on scdet's frame (offset 0)
-on 777 of the 780 scdet peaks ≥ 30 they share; the other 3, a frame later, are on the 720p
-episode.
+its own pipeline beside the study's: identical cuts on cartoon-1 (55 and 55), an anime segment
+and the synthetic clip, and identical frames, pixel for pixel. Its cuts fall on scdet's frame
+(offset 0) on 777 of the 780 scdet peaks ≥ 30 they share; the other 3, a frame later, are on the
+720p episode.
 
 ### TransNetV2
 
 TransNetV2 (github.com/soCzech/TransNetV2, commit `85cef72`, MIT licence) is a convolutional
-network trained to find shot boundaries. We run its official PyTorch model on the CPU, with the
-weights its own `convert_weights.py` converts from the official TensorFlow ones (sha256
+network trained to find shot boundaries. The study runs its official PyTorch model on the CPU,
+with the weights its own `convert_weights.py` converts from the official TensorFlow ones (sha256
 `eed5336d…`), on 48×27 RGB frames scaled as the official extraction scales them (ffmpeg's own
-scaler), and reproduce its `predict_frames` (windows of 100 frames every 50, each keeping frames
-25–74). Every frame gets a probability; a detection is a run of frames at or above p, at its peak.
+scaler), and reproduces its `predict_frames` (windows of 100 frames every 50, each keeping
+frames 25–74). Every frame gets a probability; a detection is a run of frames at or above p, at
+its peak.
 
-- **Our port matches the official model:** on 1,000 random frames and on two 3,000-frame
-  excerpts (anime-bright, live-1), the official TensorFlow model and ours differ by 5.1 × 10⁻⁷ at
-  most in probability, and give the same shots (its `predictions_to_scenes`) and the same
-  detections at 0.5 (41 and 35). Our 48×27 frames are byte for byte the official extraction's
-  over the first 9,000 and 53,000 frames of those sources.
+- **The study's port matches the official model:** on 1,000 random frames and on two 3,000-frame
+  excerpts (anime-bright, live-1), the official TensorFlow model and the study's differ by 5.1 ×
+  10⁻⁷ at most in probability, and give the same shots (its `predictions_to_scenes`) and the
+  same detections at 0.5 (41 and 35). The study's 48×27 frames are byte for byte the official
+  extraction's over the first 9,000 and 53,000 frames of those sources.
 - **seedvr2x's detector gives these probabilities** (2026-10-10; its implementation's figures,
   not measured here: [DESIGN.md](../../DESIGN.md#shot-detection)). On the CPU,
   seedvr2x's first pass gives this study's single-frame probabilities (`tnet.npz`'s `single`)
@@ -285,7 +286,7 @@ running, two runs in opposite orders:
 |---|---|---:|---:|
 | decode alone (video stream, null output) | 50.8 / 50.8 s | 1.96 min | 17.3 min |
 | scdet, sptenc's chain (video only) | 51.4 / 51.6 s | 1.98 min | 17.7 min |
-| scdet, every key printed (our pass) | 51.3 / 51.8 s | 1.99 min | 17.8 min |
+| scdet, every key printed (the study's pass) | 51.3 / 51.8 s | 1.99 min | 17.8 min |
 | PySceneDetect, both detectors | 59.4 / 58.8 s | 2.28 min | 26.0 min |
 | TransNetV2 | 110.9 / 112.2 s | 4.30 min | 58.4 min |
 | … its decode to 48×27 + inference | 52.4 + 57.7 / 52.5 + 59.0 s | 2.02 + 2.25 min | |
@@ -337,7 +338,7 @@ running, two runs in opposite orders:
   aligned). `scd_review.py` now keeps one graph wherever the score pass did. Any frame count
   ffmpeg keeps restarts with a rebuilt graph.
 - **TransNetV2's official extraction** (`-f rawvideo`, no frame-rate option) leaves ffmpeg free to
-  drop or repeat frames by timestamp; ours passes every decoded frame through (`-fps_mode
+  drop or repeat frames by timestamp; the study's passes every decoded frame through (`-fps_mode
   passthrough`), and gives the official bytes on the checked excerpts.
 
 ## The review

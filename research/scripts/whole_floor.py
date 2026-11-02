@@ -802,7 +802,8 @@ def differing(mine: list[str], theirs: list[str]) -> list[int]:
 
 
 def psnr_y(ours: Path, theirs: Path, stats: Path) -> list[float]:
-    """Each frame's PSNR-Y of ours against theirs, by ffmpeg's psnr filter (planner_matrix's)."""
+    """Each frame's PSNR-Y of the run's video against the reference's, by ffmpeg's psnr filter
+    (planner_matrix's)."""
     lavfi = f"[0:v][1:v]psnr=stats_file='{stats}'"
     subprocess.run(
         [

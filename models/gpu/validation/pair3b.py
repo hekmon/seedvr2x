@@ -6,10 +6,10 @@ seed 42, the 8 d1 clips).
       [--dyn sh-dyn] [--out $VAL_STATE/sum] [--name 3b-00-overview] [--work $VAL_STATE/s16/pair3b-work]
       [--test]
 
-Labels (the pool's): 3b-cur = our seedvr2x_ema_3b_fp16.safetensors (ByteDance's current 3B weights), 3b-first =
-numz's seedvr2_ema_3b_fp16.safetensors (the first 3B weights), sh-dyn = the sharp 7B's dynamic GGUF (the 4 GB tier's
-pick); for scale the sharp 7B fp16 (colour's sh42) and the 7B fp16 (colour's s42). --test: stand-ins (e.g. --cur
-sh-q4k --first sh-q4ki), said on the page.
+Labels (the pool's): 3b-cur = the seedvr2x_ema_3b_fp16.safetensors file (ByteDance's current 3B
+weights), 3b-first = numz's seedvr2_ema_3b_fp16.safetensors (the first 3B weights), sh-dyn = the
+sharp 7B's dynamic GGUF (the 4 GB tier's pick); for scale the sharp 7B fp16 (colour's sh42) and the
+7B fp16 (colour's s42). --test: stand-ins (e.g. --cur sh-q4k --first sh-q4ki), said on the page.
 Read only on the pool's outputs (gpu/eval, gpu/vmaf, gpu/fr, gpu/bands, gpu/masters) and colour's (eval-b2, vmaf-b2,
 bands-b2); ms_sum.py's own functions (imported, unchanged: loading, merging, pairing, bootstrap, bands):
  1. against the GT, per clip and variant (none, split:ycc:4:3): every guard and fidelity metric of the five (the run
@@ -18,7 +18,7 @@ bands-b2); ms_sum.py's own functions (imported, unchanged: loading, merging, pai
     interval, blocks of 8, 2000 draws; none for the finest band, degenerate for DISTS 5f): 3b-cur − 3b-first,
     3b-cur − sh-dyn, 3b-first − sh-dyn; B / W = A better / worse beyond the sharp 7B fp16's 3-seed spread with the
     interval excluding 0 (ms_sum's strict rule; detail ↑ / ↓), the difference's multiples of the sharp's 3-seed
-    spread (colour's sh42, our s43, s1234: its own band) and of the 7B fp16's (for scale);
+    spread (colour's sh42, this slice's s43, s1234: its own band) and of the 7B fp16's (for scale);
  3. per pair and variant, the clips where each side is closer to the GT (PSNR-Y, LPIPS, DISTS 45f), bands less
     (CAMBI added), flickers less (T-err, T-err lf), has more detail;
  4. decode-to-decode distances: RGB PSNR between the 16-bit none masters (ffv1_out.py --diff, cached in WORK/diff).

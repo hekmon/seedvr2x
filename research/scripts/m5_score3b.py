@@ -12,7 +12,7 @@ it (cv2, the 8-bit RGB file both runs read).
   m5_score3b.py psnr A.mkv B.mkv [--json F]     PSNR of A against B, 8-bit scale, from the masters
   m5_score3b.py verdict NAME --ours Q.json --numz Q.json [--fr-ours F.json --fr-numz F.json]
                       [--stitch-ours S.json --stitch-numz S.json] [--psnr P.json]
-                      one Markdown row per metric: ours against numz, with the milestone's
+                      one Markdown row per metric: seedvr2x's against numz's, with the milestone's
                       tolerances
 
 Historical: the record of milestone 5's step 3b scoring (2026-10-04), kept to re-run it: what
@@ -144,7 +144,7 @@ def load(path):
 
 
 def verdict(argv):
-    """Milestone 5's rule: ours at least as good as numz on every metric, a difference below the
+    """Milestone 5's rule: seedvr2x at least as good as numz on every metric, a difference below the
     tolerance counting as equal (DESIGN.md, Validation milestones 5), with the two rules sharpened
     on 2026-10-04: an a*/b* spread is its distance to the input's, in CIELAB units, within 1% of
     the input's spread or 0.1 unit if larger; the boundary steps that decide are the excess over

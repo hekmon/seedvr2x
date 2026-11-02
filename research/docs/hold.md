@@ -268,7 +268,7 @@ refused, and a run is judged by its frames.
 
 ## What a run holds of the card outside torch's count, and the desktop's own movement
 
-**The desktop alone.** 56.5 minutes with nothing of ours on the card, at night (3,391 readings
+**The desktop alone.** 56.5 minutes with no seedvr2x run on the card, at night (3,391 readings
 by NVML): its used memory stayed between 4,378 and 4,474 MiB, 4,378 at the start and 4,384 at
 the end; 118 steps of 1 MiB or more (125 an hour), as many up as down, 1.4 MiB at the median;
 one of 95 MiB up, given back within the minute. Within 1, 5 or 15 minutes it rose by 96 MiB at

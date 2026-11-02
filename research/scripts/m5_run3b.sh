@@ -1,10 +1,10 @@
 #!/bin/bash
-# Milestone 5's step 3b: ours' side again (DESIGN.md, Validation milestones 5), lab's
-# reference now built in float32 (DESIGN.md, Colour correction, Numerics), on every
-# material: milestone 1's input, clip B, clip B in 6:2 windows, the 8 full-reference clips. Same
-# options as m5_run.sh's ours runs (one batch, seed 42, 1080p, the 7B fp16), the master format
-# named. Each run in its own hold of the GPU lock, the nvidia-smi check inside (m5_run.sh's hold
-# and release). m5_score3b.sh scores the masters (ours3b/<name>.mkv).
+# Milestone 5's step 3b: seedvr2x's side again (DESIGN.md, Validation milestones 5), lab's reference
+# now built in float32 (DESIGN.md, Colour correction, Numerics), on every material: milestone 1's
+# input, clip B, clip B in 6:2 windows, the 8 full-reference clips. Same options as m5_run.sh's
+# seedvr2x runs (one batch, seed 42, 1080p, the 7B fp16), the master format named. Each run in its
+# own hold of the GPU lock, the nvidia-smi check inside (m5_run.sh's hold and release).
+# m5_score3b.sh scores the masters (ours3b/<name>.mkv).
 #
 # Historical: the record of what ran on 2026-10-04 (06:04-08:39Z), kept to re-run it: seedvr2x at
 # eca0ff1, the commit that made lab's reference float32; 11 of 11 materials passed. seedvr2x's

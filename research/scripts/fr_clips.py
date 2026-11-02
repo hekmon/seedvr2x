@@ -138,7 +138,7 @@ scores: ffmpeg's scdet, as sptenc runs it (on the decoded source format; score
 
 `verify` checks (a) that cv2.VideoCapture, run by the given Python (the SeedVR2 venv's: cv2 only,
 no torch), reads every *.lr.mkv bit-exactly as ffmpeg decodes it (decoded as stored, repacked by
-numpy: no swscale on our side), (b) with --source, that frames S..S+N-1 of the source (frame hashes
+numpy: no swscale involved), (b) with --source, that frames S..S+N-1 of the source (frame hashes
 of a plain decode, frames counted by the muxer, no filter but the clip's --src-crop; murmur3, as md5
 cannot keep up with a 4K decode) are src.mkv's frames (hdr.mkv's with --tonemap), (c) the frame
 count of every file, and

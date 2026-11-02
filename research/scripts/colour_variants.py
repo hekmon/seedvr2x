@@ -10,8 +10,8 @@ Every variant takes content (T, 3, H, W), the VAE's decode in [-1, 1], unclamped
 (T, 3, H, W) float32 in [0, 1]. A variant is named by a spec string:
 
   none                         the decode alone, brought to [0, 1]
-  lab                          our lab, colour.correct: the split in RGB at 5 stages, then numz's
-                               histogram step pooled over the shot
+  lab                          seedvr2x's lab, colour.correct: the split in RGB at 5 stages, then
+                               numz's histogram step pooled over the shot
   split:SPACE:SL:SC[:EXTRA...] the split: lightness takes the reference's low band below SL à-trous
                                stages, colour below SC stages, the rest from the content. SPACE:
                                rgb (one scale, SL = SC: numz's wavelet at 5), ycc (BT.709 Y'CbCr on
@@ -34,9 +34,9 @@ The à-trous low band of S stages is colour.low_band with S stages instead of 5 
 are Y' and (Cb, Cr) in ycc, L* and (a*, b*) in lab, L and (a, b) in ok. All in float32, on the
 tensors' device.
 
-The detail strength (ours). With c and r the content and the reference in the split's space and
-d = r - c, the split's lightness is c_L + low_SL(d_L). ds<K>_<A> adds (1 - A) * hp_K(d_L), with
-hp_K(x) = x - low_K(x) and K <= SL:
+The detail strength (this study's own). With c and r the content and the reference in the split's
+space and d = r - c, the split's lightness is c_L + low_SL(d_L). ds<K>_<A> adds (1 - A) * hp_K(d_L),
+with hp_K(x) = x - low_K(x) and K <= SL:
 
   L = c_L + low_SL(d_L) + (1 - A) * (d_L - low_K(d_L))
 
@@ -318,7 +318,7 @@ def selftest():
     # ycc at equal scales = rgb (linear transform), to float32 rounding
     d = (split(content, ref, "ycc", 4, 4) - split(content, ref, "rgb", 4, 4)).abs().max().item()
     assert d < 1e-5, f"ycc:4:4 vs rgb:4:4 {d}"
-    # split:...:hist at 5 stages in rgb = our lab
+    # split:...:hist at 5 stages in rgb = seedvr2x's lab
     assert torch.allclose(apply("split:rgb:5:5:hist", content, ref), apply("lab", content, ref), atol=1e-6)
     # OKLab: white -> (1, 0, 0), black -> 0, round trip
     white = torch.ones(1, 3, 1, 1)

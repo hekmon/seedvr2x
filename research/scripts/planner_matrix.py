@@ -621,8 +621,8 @@ def against(ours: dict, theirs: dict) -> dict:
 
 
 def psnr_y(ours: Path, theirs: Path, stats: Path) -> list[float]:
-    """Each frame's PSNR-Y of the video ours against theirs, in frame order, by ffmpeg's psnr
-    filter, its stats kept at stats; inf where the luma is the same."""
+    """Each frame's PSNR-Y of the run's video against the reference's, in frame order, by ffmpeg's
+    psnr filter, its stats kept at stats; inf where the luma is the same."""
     assert "'" not in str(stats), stats
     subprocess.run(
         [
@@ -636,8 +636,8 @@ def psnr_y(ours: Path, theirs: Path, stats: Path) -> list[float]:
 
 
 def worst_psnr(ours: Path, theirs: Path, differ: list[int], stats: Path) -> float | None:
-    """The least PSNR-Y over the frames that differ, the segments of the job at ours against
-    those of the same names at theirs, in order; None where either's segments are gone."""
+    """The least PSNR-Y over the frames that differ, the segments of the job's output against those
+    of the same names in the reference's, in order; None where either's segments are gone."""
     segments = sorted(path.name for path in ours.glob("seg_*.mkv"))
     if not segments or segments != sorted(path.name for path in theirs.glob("seg_*.mkv")):
         return None

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Our quantized DiT files (models/FORMATS.md) in numz's SeedVR2 CLI, through comfy-kitchen's
-layers, and our own model directory, patched in at import (numz's checkout unchanged).
+"""seedvr2x's quantized DiT files (models/FORMATS.md) in numz's SeedVR2 CLI, through comfy-kitchen's
+layers, and seedvr2x's own model directory, patched in at import (numz's checkout unchanged).
 
     cd NUMZ && PYTHONPATH=PYLIB CK_PATCH_MODE=MODE python [WRAPPER.py ...] ck_patch.py \\
         inference_cli.py ARGS --model_dir DIR --dit_model FILE
@@ -35,7 +35,7 @@ and numz's --dit_model takes a registry name or a file of ./models/SEEDVR2 under
    runs unchanged. Markers name the layout: {"format": "float8_e4m3fn"} (TensorCoreFP8Layout),
    {"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": G} (TensorWiseINT8Layout,
    rotated), {"format": "nvfp4"} (TensorCoreNVFP4Layout); one format per file. Only marked layers
-   change (in our files the 288 block matrices): vid_in, whose weight is the model's first
+   change (in seedvr2x's files the 288 block matrices): vid_in, whose weight is the model's first
    parameter and so drives numz's CompatibleDiT and Phase 2's autocast, the norms and RoPE stay
    numz's.
 3. CKLinear keeps its tensors as plain buffers and builds comfy-kitchen's QuantizedTensor at each
@@ -77,7 +77,7 @@ CK_PATCH_MODE (required when the file carries markers, refused when it carries n
   elements, each through comfy-kitchen's own quantize with the scale comfy-kitchen's formula gives
   for the WHOLE tensor (quantize_x): its values bit for bit wherever its kernel is right. Below,
   from_float as it is.
-CK_PATCH_EXPECT=N    abort unless exactly N layers become CKLinear (288 for our 7B files).
+CK_PATCH_EXPECT=N    abort unless exactly N layers become CKLinear (288 for seedvr2x's 7B files).
 CK_PATCH_LOG=PATH    a JSON report at exit: files, format, mode, layers, comfy-kitchen's version
                      and backends, the compute dtypes met, the check mode's results.
 CK_PATCH_CHECK=1     the check mode (a smoke test's, nothing otherwise): at each CKLinear's first
@@ -289,7 +289,7 @@ def registry_names() -> set | None:
 
 
 def resolve(name: str) -> str:
-    """The path numz will load for --dit_model NAME (after our model directory patch)."""
+    """The path numz will load for --dit_model NAME (after the model directory patch)."""
     reg = registry_names() or set()
     if S.model_dir and name not in reg and os.path.isfile(os.path.join(S.model_dir, name)):
         return os.path.join(S.model_dir, name)

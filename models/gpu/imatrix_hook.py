@@ -23,10 +23,11 @@ after it: chainable with colour_dump.py and ck_patch.py, in any order).
 What it collects. Once numz has loaded the DiT (_load_model_weights, model type "DiT"), a forward
 pre-hook on each of the 288 attention and MLP matrices of the blocks (blocks.N.attn.proj_qkv.{vid,txt},
 blocks.N.attn.proj_out.{vid,txt}, blocks.N.mlp.{vid,txt}.proj_in, blocks.N.mlp.{vid,txt}.proj_out,
-N = 0..35: the matrices our GGUF files quantize) adds, at every DiT forward of the run, the input's
-sum of squares per input channel, sum over tokens of x[t, k]^2 (float64, on the input's device), and
-the input's token count. The importance of channel k is then in_sum2[k] / counts, the mean of x_k^2,
-llama.cpp's imatrix (tools/imatrix, MIT), which ggml's quantizers take per column of a row.
+N = 0..35: the matrices seedvr2x's GGUF files quantize) adds, at every DiT forward of the run, the
+input's sum of squares per input channel, sum over tokens of x[t, k]^2 (float64, on the input's
+device), and the input's token count. The importance of channel k is then in_sum2[k] / counts, the
+mean of x_k^2, llama.cpp's imatrix (tools/imatrix, MIT), which ggml's quantizers take per column of
+a row.
 - Only the fp16 DiT through numz's own path: the DiT file must be a .safetensors whose 288 block
   matrices are F16, without comfy-kitchen markers, and each hooked module must be a plain
   torch.nn.Linear with a float16 weight (not numz's GGUFQuantizedLinear, not ck_patch's CKLinear):

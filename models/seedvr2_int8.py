@@ -23,16 +23,16 @@ to [-128, 127]. `<layer>.weight` (int8), `<layer>.weight_scale` (float32 [rows, 
 `<layer>.comfy_quant`, {"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256},
 as Comfy-Org's SeedVR2 files mark theirs. At run time comfy-kitchen rotates each input the same way
 before quantizing it to int8 per token, so (x H)(W H)^T = x W^T needs no un-rotation. Every other
-tensor is our fp16 file's: the master rounded to the nearest float16.
+tensor is as in seedvr2x's fp16 file: the master rounded to the nearest float16.
 
     uv run models/seedvr2_int8.py [--masters DIR]... [--cache DIR] [--fp16 DIR] [--out DIR]
                                   [FILE...]
 
 - The checks: each matrix's error against the master once un-rotated (relative, ||W_hat - W|| /
-  ||W||), median and worst; our codes and scales against comfy-kitchen's own quantizer on the CPU
-  (torch.ops.comfy_kitchen.quantize_int8_convrot_weight), share equal; every tensor read back with
-  the safetensors library; with --fp16, every 16-bit tensor byte for byte our fp16 file's; the
-  output's SHA-256 pinned in OUTPUTS. A file failing a check is deleted.
+  ||W||), median and worst; seedvr2x's codes and scales against comfy-kitchen's own quantizer on the
+  CPU (torch.ops.comfy_kitchen.quantize_int8_convrot_weight), share equal; every tensor read back
+  with the safetensors library; with --fp16, every 16-bit tensor byte for byte as in seedvr2x's fp16
+  file; the output's SHA-256 pinned in OUTPUTS. A file failing a check is deleted.
 - The output, in --out (default models/dist): not uploaded before GPU runs validate it (DESIGN.md,
   Weights).
 """
@@ -71,7 +71,7 @@ GROUP = 256
 MARKER = json.dumps(
     {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": GROUP}
 ).encode()
-SOURCES = {  # our int8 file: the fp16 file of ours it shares its master and its 16-bit tensors with
+SOURCES = {  # seedvr2x's int8 file: the fp16 file it shares its master and its 16-bit tensors with
     "seedvr2x_ema_7b_int8_convrot.safetensors": "seedvr2x_ema_7b_fp16.safetensors",
     "seedvr2x_ema_7b_sharp_int8_convrot.safetensors": "seedvr2x_ema_7b_sharp_fp16.safetensors",
 }

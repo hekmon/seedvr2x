@@ -17,8 +17,8 @@ float8_e4m3fn with one float32 scale each, in comfy-kitchen's FP8 layout: `<laye
 values W x (1 / s) rounded to the nearest E4M3 (ties to even, clamped to +-448), and
 `<layer>.weight_scale`, s = max|W| / 448, so that the weight is weight x weight_scale. Each such
 layer is marked by `<layer>.comfy_quant`, the UTF-8 JSON {"format": "float8_e4m3fn"} as uint8, as
-Comfy-Org's SeedVR2 files mark theirs. Every other tensor is our fp16 file's: the master rounded
-to the nearest float16. Why one scale per tensor, and what a cast without scale loses:
+Comfy-Org's SeedVR2 files mark theirs. Every other tensor is as in seedvr2x's fp16 file: the master
+rounded to the nearest float16. Why one scale per tensor, and what a cast without scale loses:
 models/FORMATS.md.
 
     uv run models/seedvr2_fp8.py [--masters DIR]... [--cache DIR] [--fp16 DIR] [--out DIR]
@@ -28,8 +28,8 @@ models/FORMATS.md.
   --masters directory has them, else downloaded into --cache.
 - The checks: each fp8 matrix's error against the master (relative, ||W_hat - W|| / ||W||), its
   median and worst printed; every tensor read back with the safetensors library; with --fp16,
-  every 16-bit tensor byte for byte our fp16 file's; the output's SHA-256 pinned in OUTPUTS. A file
-  failing a check is deleted.
+  every 16-bit tensor byte for byte as in seedvr2x's fp16 file; the output's SHA-256 pinned in
+  OUTPUTS. A file failing a check is deleted.
 - The output, in --out (default models/dist): not uploaded before GPU runs validate it (DESIGN.md,
   Weights).
 """
@@ -64,7 +64,7 @@ BLOCK = re.compile(
 )
 E4M3_MAX = 448.0
 MARKER = json.dumps({"format": "float8_e4m3fn"}).encode()
-SOURCES = {  # our fp8 file: the fp16 file of ours it shares its master and its 16-bit tensors with
+SOURCES = {  # seedvr2x's fp8 file: the fp16 file it shares its master and its 16-bit tensors with
     "seedvr2x_ema_7b_fp8_scaled.safetensors": "seedvr2x_ema_7b_fp16.safetensors",
     "seedvr2x_ema_7b_sharp_fp8_scaled.safetensors": "seedvr2x_ema_7b_sharp_fp16.safetensors",
 }

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Model conversation, S16 (2026-10-08): the 4K floor (design's decision of 2026-10-07 23:55), for ms_sum4k.py (the
-7B's slice B) and ms_sum4ksh.py (the sharp's slice B). S23 (2026-10-08, design's decision of 10:20): at 1080p too, one
-rule for both resolutions: ms_sum.py (3-seed bands: every label's data and our Q4_K against numz's Q4_K_M), pair4g.py
-and pair3b.py (their differences against a 3-seed band).
+"""Model conversation, S16 (2026-10-08): the 4K floor (design's decision of 2026-10-07 23:55), for
+ms_sum4k.py (the 7B's slice B) and ms_sum4ksh.py (the sharp's slice B). S23 (2026-10-08, design's
+decision of 10:20): at 1080p too, one rule for both resolutions: ms_sum.py (3-seed bands: every
+label's data and seedvr2x's Q4_K against numz's Q4_K_M), pair4g.py and pair3b.py (their differences
+against a 3-seed band).
 
 At 4K the band is two seeds; where the two agree to the resolution a metric is printed at, their spread is ~0 and any
 difference becomes a huge multiple of it (the sharp's ouatia-face ΔE00 lf: a spread near 0.00001, fp8 W8A8's +0.001

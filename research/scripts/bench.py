@@ -291,7 +291,7 @@ def parse_log(path, anchor=None):
     rec = {"args": {}, "platform": {}, "input": {}, "generation": {}, "events": [],
            "checkpoints": [], "phase_runs": [], "batches": {}, "chunks": None}
     cur_phase = None          # phase run dict currently open
-    after_done = None         # phase run whose "complete" line we just saw (for └─ lines)
+    after_done = None         # phase run whose "complete" line was just seen (for └─ lines)
     pending_label = None      # memory checkpoint label awaiting its VRAM/RAM lines
     in_args = False
     plat, inp, gen = rec["platform"], rec["input"], rec["generation"]

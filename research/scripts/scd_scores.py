@@ -5,9 +5,9 @@ second opinions from PySceneDetect and TransNetV2, review candidates and statist
   scd_scores.py check SOURCE --out DIR [--synthetic]  # sptenc's own command vs the all-score pass
   scd_scores.py score SOURCE --out DIR [--no-reinit]  # one scdet pass: every frame's score
   scd_scores.py pysd --out DIR [--range A:B]          # AdaptiveDetector + ContentDetector
-  scd_scores.py pysd-check FILE --out DIR             # our PySceneDetect loop vs its own pipeline
+  scd_scores.py pysd-check FILE --out DIR             # PySceneDetect loop here vs its own pipeline
   scd_scores.py tnet --out DIR [--threads 16]         # TransNetV2's probabilities, every frame
-  scd_scores.py tnet-check FILE --out DIR             # our TransNetV2 run vs the official TF one
+  scd_scores.py tnet-check FILE --out DIR             # TransNetV2 run here vs the official TF one
   scd_scores.py analyse --out DIR [--name NAME]       # candidates, auto-classes, stats per threshold
   scd_scores.py activity --out DIR [--window 25]      # where a film is busiest (to pick a chunk)
   scd_scores.py compare REF OTHER [--md OUT.md]       # one video scored twice (original vs segments)
@@ -41,18 +41,17 @@ filtergraph, which restarts the metadata filter's frame counter, setpts' start a
 reopens the print file; sptenc's command then numbers every later frame from 0 again.
 --no-reinit adds -reinit_filter 0 so that one filtergraph sees every frame.
 
-pysd: PySceneDetect's AdaptiveDetector and ContentDetector with their defaults, fed the same
-decoded frames as BGR, converted as its OpenCV backend converts them (swscale, bicubic flags,
-the matrix and range the stream declares, BT.601 when it declares none: pysd-check found
-OpenCV's frames and ours identical), then downscaled as its SceneManager does by default (to
-max(width, height) = 256 px, cv2.INTER_LINEAR). --range restricts the analysis to a chunk
-(frames, or [H:]MM:SS[.s] / s times); the detectors start --warmup frames before it. Writes
-DIR/pysd.json (cut frames per detector) and DIR/pysd_content_val.npy (ContentDetector's
-content_val per frame).
+pysd: PySceneDetect's AdaptiveDetector and ContentDetector with their defaults, fed the same decoded
+frames as BGR, converted as its OpenCV backend converts them (swscale, bicubic flags, the matrix and
+range the stream declares, BT.601 when it declares none: pysd-check found OpenCV's frames and the
+script's identical), then downscaled as its SceneManager does by default (to max(width, height) =
+256 px, cv2.INTER_LINEAR). --range restricts the analysis to a chunk (frames, or [H:]MM:SS[.s] / s
+times); the detectors start --warmup frames before it. Writes DIR/pysd.json (cut frames per
+detector) and DIR/pysd_content_val.npy (ContentDetector's content_val per frame).
 
-pysd-check: on one file, our PySceneDetect loop against PySceneDetect's own pipeline
+pysd-check: on one file, the script's PySceneDetect loop against PySceneDetect's own pipeline
 (open_video, OpenCV backend, SceneManager): cut lists per detector, plus the pixel difference
-between OpenCV's decoded frames and ours.
+between OpenCV's decoded frames and the script's.
 
 tnet: TransNetV2 (github.com/soCzech/TransNetV2, MIT), a network trained to find shot
 boundaries, on CPU: the official PyTorch model, imported from a checkout of the official
@@ -72,12 +71,12 @@ weights_sha256, decode_seconds, inference_seconds, threads, and meta (JSON: comm
 CPU seconds, the decode command).
 
 tnet-check: the same frames through the official TF model (inference/transnetv2.py's
-TransNetV2.predict_frames with the TF weights of --tf-weights) and through ours: first --random
-random frames, then --frames frames of FILE from --start, decoded as tnet decodes them (and
-compared byte for byte with the official extraction's own command); per run, the largest
-absolute differences of both outputs, and whether the official predictions_to_scenes at 0.5 and
-our detections at 0.5 are identical. Also our model with --batch windows per forward against
-one at a time (the official way).
+TransNetV2.predict_frames with the TF weights of --tf-weights) and through the script's PyTorch run:
+first --random random frames, then --frames frames of FILE from --start, decoded as tnet decodes
+them (and compared byte for byte with the official extraction's own command); per run, the largest
+absolute differences of both outputs, and whether the official predictions_to_scenes at 0.5 and the
+script's detections at 0.5 are identical. Also the PyTorch model with --batch windows per forward
+against one at a time (the official way).
 
 analyse: candidates = scdet local maxima (score >= 4, above the previous frame and not below the
 next) + PySceneDetect detections + segment joins, merged within +-1 frame. "sure" = scdet >= 30
@@ -94,7 +93,7 @@ analyse with DIR/tnet.npz adds TransNetV2. Alignment: on the sure cuts that are 
 maxima, the frame of TransNetV2's single-frame peak within +-3 frames minus the cut's frame
 (its official predictions_to_scenes ends a shot on its positive frame, so -1 is expected: it
 marks the last frame of the outgoing shot); the modal offset (or --tnet-offset) aligns its
-values: an aligned value at frame f is TransNetV2's for a cut at f in our convention. Its
+values: an aligned value at frame f is TransNetV2's for a cut at f in the script's convention. Its
 local peaks >= 0.1 (aligned) become candidates where no candidate of the old population lies
 within +-1 frame; a candidate belongs to the old population iff scdet_lm, adaptive, content or
 join is set, and those keep their frame and columns byte for byte. Three columns end
@@ -732,7 +731,7 @@ def cmd_pysd_check(a):
     src = describe_source(a.source)
     src["frames"] = None
     res = {"file": a.source}
-    # frames: OpenCV's decode vs ours (matrix from the stream's tags, or forced)
+    # frames: OpenCV's decode vs the script's (matrix from the stream's tags, or forced)
     cap = cv2.VideoCapture(a.source)
     ref = []
     while len(ref) < a.frames:
@@ -749,7 +748,7 @@ def cmd_pysd_check(a):
             "frames": len(diffs), "mean_abs": float(np.mean([d.mean() for d in diffs])),
             "max_abs": int(max(d.max() for d in diffs)),
             "share_differing": float(np.mean([(d > 0).mean() for d in diffs]))}
-    # cut lists: our loop vs PySceneDetect's own pipeline
+    # cut lists: the script's loop vs PySceneDetect's own pipeline
     ours, _, info = run_pysd(src, 0, None, a.threads, a.matrix)
     res["ours"] = {**info, "cuts": ours}
     own = {}
@@ -932,7 +931,7 @@ def tnet_official_extraction(path, n, threads):
 
 
 def tnet_compare(official, model, frames, batch):
-    """The same frames through the official TF predict_frames and ours."""
+    """The same frames through the official TF predict_frames and the PyTorch model."""
     t0 = time.time()
     tf_one, tf_all = official.predict_frames(frames)
     t_tf = time.time() - t0
@@ -1236,8 +1235,8 @@ def load_tnet(d):
 
 
 def tnet_align(x, off, n):
-    """TransNetV2's values in our convention (n frames): index f holds its value of frame f + off,
-    NaN where it has none."""
+    """TransNetV2's values in the script's convention (n frames): index f holds its value of frame f
+    + off, NaN where it has none."""
     y = np.full(n, np.nan)
     lo, hi = max(0, -off), min(n, len(x) - off)
     if hi > lo:

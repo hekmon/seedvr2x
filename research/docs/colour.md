@@ -904,10 +904,10 @@ shots), and the one at which the output's fine bands meet the GT's RMS (range ov
 
 ### The detail strength
 
-`split:ycc:4:3:ds<K>_<A>` (`colour_variants.py`, ours) adds (1 − A) · hp_K(d) to the split's
-lightness, with d = reference − decode in Y' and hp_K(x) = x − low_K(x), the part of x finer than
-K à-trous stages (K ≤ 4). Colour stays the split's, and each frame is still corrected alone.
-A = 1 is the split; A = 0 takes that band from the reference.
+`split:ycc:4:3:ds<K>_<A>` (`colour_variants.py`, seedvr2x's own) adds (1 − A) · hp_K(d) to the
+split's lightness, with d = reference − decode in Y' and hp_K(x) = x − low_K(x), the part of x
+finer than K à-trous stages (K ≤ 4). Colour stays the split's, and each frame is still corrected
+alone. A = 1 is the split; A = 0 takes that band from the reference.
 
 - **At K = 4 it is a blend of two lightnesses.** With c and r the decode's and the reference's Y',
   the split's lightness is L_split = hp_4(c) + low_4(r), so L_ref − L_split = hp_4(r) − hp_4(c) =

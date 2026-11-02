@@ -8,10 +8,11 @@
 > not run at 4K ([Slice B](#slice-b-4k)); the 3B checked at 1080p against the sharp 7B's 4 GB
 > file ([The 3B](#the-3b-at-1080p)); the user's eyes given on the 7B's 1080p crops, the sharp's
 > 4K crops and the 3B's (both 3Bs worse than the 4 GB file), two other sets left as optional.
-> numz's SeedVR2 at `4490bd1` ran our safetensors files through [`gpu/ck_patch.py`](gpu/ck_patch.py)
-> (comfy-kitchen 0.2.37's layers) and our GGUF files through its own loader; colour.md's tools
-> scored them ([colour.md](../research/docs/colour.md#reproduce)). What each format does to the
-> weights: [FORMATS.md](FORMATS.md). The GPU has a power-cap fault: no speed is measured here.
+> numz's SeedVR2 at `4490bd1` ran seedvr2x's safetensors files through
+> [`gpu/ck_patch.py`](gpu/ck_patch.py) (comfy-kitchen 0.2.37's layers) and seedvr2x's GGUF files
+> through its own loader; colour.md's tools scored them
+> ([colour.md](../research/docs/colour.md#reproduce)). What each format does to the weights:
+> [FORMATS.md](FORMATS.md). The GPU has a power-cap fault: no speed is measured here.
 
 In short (each file against its own model's float16 output at the same seed, 1080p, 8 clips of
 45 frames, a ×2 upscale of a mildly degraded input; judged against how much the float16 model's
@@ -33,9 +34,10 @@ own seeds differ):
   around ([below](#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)).
 - **At 4 bits, a file moves the output about as much as a seed does** (37.3 to 44.2 dB), and
   where it departs shows a pattern:
-  - the 7B's Q4_K (ours, the same as numz's Q4_K_M on video too) is softer: fine detail 16% lower
-    on one anime clip, lower on live action, within the calibrated line (2.68 times the spread at
-    worst); the full-reference scores put it closer to the source (PSNR-Y +0.30 dB);
+  - the 7B's Q4_K (seedvr2x's, the same as numz's Q4_K_M on video too) is softer: fine detail
+    16% lower on one anime clip, lower on live action, within the calibrated line (2.68 times
+    the spread at worst); the full-reference scores put it closer to the source (PSNR-Y
+    +0.30 dB);
   - the 7B's dynamic GGUF stays the closest of the 4 GB files to float16 (44.2 dB, 0.8 to 3.3 dB
     closer than Q4_K on every clip) and keeps the detail Q4_K loses on that anime clip, but the
     cartoon clip's DISTS goes past the line (3.0 times the spread); at 4K, the one 4-bit file of
@@ -81,24 +83,26 @@ own seeds differ):
 
 - **numz's CLI at `4490bd1`**, one batch of 45 frames, `flash_attn_2`, `--color_correction
   none`, seed 42: the float16 reference runs' flags (colour's dumps, [colour.md](../research/docs/colour.md),
-  steps 1 and 6), only `--dit_model`, `--model_dir`, the output and our wrapper changing. Each run
-  dumps its latents and its decode ([`colour_dump.py`](../research/scripts/colour_dump.py)); the
-  encoder input and the float32 reference of the colour correction are the float16 run's (the
-  sharp 7B's equal the 7B's bit for bit, colour.md step 6).
+  steps 1 and 6), only `--dit_model`, `--model_dir`, the output and seedvr2x's wrapper changing.
+  Each run dumps its latents and its decode
+  ([`colour_dump.py`](../research/scripts/colour_dump.py)); the encoder input and the float32
+  reference of the colour correction are the float16 run's (the sharp 7B's equal the 7B's bit
+  for bit, colour.md step 6).
 - **[`gpu/ck_patch.py`](gpu/ck_patch.py)**, a wrapper patching numz's modules at import (numz's
-  checkout unchanged): `--dit_model` takes the files of `--model_dir` (a directory of links to our
-  14 files, our 3B and numz's VAE); each layer marked by a `comfy_quant` tensor becomes a CKLinear
-  holding the file's tensors, numz's own loader loading the rest; CKLinear keeps them as buffers
-  (moved as any buffer, never cast), computes with autocast off in the dtype numz's autocast would
-  give (bfloat16). Modes: fp8 `w8a16` (dequantized, a 16-bit multiply) or `w8a8` (the input
-  quantized per tensor at run time, torch's scaled_mm); `int8` (comfy-kitchen rotates the input and
-  quantizes it per token); NVFP4 `w4a4` (the input in NVFP4, cuBLASLt's FP4 multiply) or `w4a16`. In
-  `w8a8`, `int8` and `w4a4`, any dequantization of a comfy-kitchen tensor during the multiply aborts
-  the run: comfy-kitchen falls back to dequantizing when its kernel fails, some of its handlers
-  without a word. In `w8a8` and `w4a4`, an input of more than 2^31 − 1 elements is quantized in row
-  chunks, at the scale comfy-kitchen gives the whole tensor: its quantizers index in 32 bits
-  ([below](#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)). GGUF files go through numz's own GGUF
-  loader, untouched.
+  checkout unchanged): `--dit_model` takes the files of `--model_dir` (a directory of links to
+  seedvr2x's 14 files, seedvr2x's 3B and numz's VAE); each layer marked by a `comfy_quant`
+  tensor becomes a CKLinear holding the file's tensors, numz's own loader loading the rest;
+  CKLinear keeps them as buffers (moved as any buffer, never cast), computes with autocast off
+  in the dtype numz's autocast would give (bfloat16). Modes: fp8 `w8a16` (dequantized, a 16-bit
+  multiply) or `w8a8` (the input quantized per tensor at run time, torch's scaled_mm); `int8`
+  (comfy-kitchen rotates the input and quantizes it per token); NVFP4 `w4a4` (the input in
+  NVFP4, cuBLASLt's FP4 multiply) or `w4a16`. In `w8a8`, `int8` and `w4a4`, any dequantization
+  of a comfy-kitchen tensor during the multiply aborts the run: comfy-kitchen falls back to
+  dequantizing when its kernel fails, some of its handlers without a word. In `w8a8` and `w4a4`,
+  an input of more than 2^31 − 1 elements is quantized in row chunks, at the scale comfy-kitchen
+  gives the whole tensor: its quantizers index in 32 bits
+  ([below](#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)). GGUF files go through numz's own
+  GGUF loader, untouched.
 - **First on the CPU** ([`gpu/ck_patch_test.py`](gpu/ck_patch_test.py)): the wrapper chain and its
   guards through numz's CLI (each refusal exits with status 3), each format loaded into numz's 7B
   (288 CKLinear holding the file's tensors bit for bit, every other parameter and buffer the
@@ -108,8 +112,8 @@ own seeds differ):
 
 anime-clean (below), the 7B's files in every mode, with `CK_PATCH_CHECK=1`: at each layer's first
 forward, on up to 16,384 rows of its real input, in float32, y the layer's output as run,
-y_deq = x W_deq^T + b (the file's tensors decoded by our own code, not comfy-kitchen's) and
-y_16 = x W16^T + b (the float16 file's tensor):
+y_deq = x W_deq^T + b (the file's tensors decoded by seedvr2x's own code, not comfy-kitchen's)
+and y_16 = x W16^T + b (the float16 file's tensor):
 
 - **kernel** ||y - y_deq|| / ||y_deq||: the kernel and the rounding of the activations;
 - **total** ||y - y_16|| / ||y_16||: the whole format against float16, on real activations;
@@ -145,8 +149,9 @@ load, the 840 tensors kept in 16 bits must equal the float16 file's. Then:
   7B's: colour's runs; the sharp's: colour's `sh42`). **The band:** that float16 model's spread
   over 3 seeds (42, 43, 1234: max − min of the per-seed means), per clip, variant and score, or
   the floor where that is larger ([below](#the-guards-and-two-rules)); the 7B's seeds 43 and 1234
-  are colour's runs, the sharp's ours. The sharp's spread is wider on most scores (median over the
-  clips: LPIPS 1.78 times the 7B's, DISTS 1.3 to 1.5, VMAF 1.25, PSNR-Y 1.14).
+  are colour's runs, the sharp's are this validation's own. The sharp's spread is wider on most
+  scores (median over the clips: LPIPS 1.78 times the 7B's, DISTS 1.3 to 1.5, VMAF 1.25, PSNR-Y
+  1.14).
 - **The pipeline checked:** colour's sharp decodes scored through it give colour's own JSONs,
   series for series (56 of 56 comparisons), and colour's table of the sharp against the 7B, cell
   for cell (240 of 240); at 4K, 28 of 28 for the 7B's shots and 22 of 22 for the sharp's.
@@ -226,23 +231,25 @@ says how its types are chosen. Here, the importance:
 - **The files:** the dynamic one and its control, every matrix Q4_K with the same importance,
   built from the fp32 masters (`seedvr2_gguf_dyn.py`), read by numz's own loader
   ([`numz_gguf_check.py`](numz_gguf_check.py): 288 GGUF linears, one layer's forward equal to
-  F.linear's), run as our static GGUF files are. Three builds, the same tensors byte for byte:
-  the runs read the first, whose metadata held the importance file's path; a second named it by
-  its name and SHA-256 only; the pinned files, the third, are built from the importance files
-  merged again from the same runs, without the paths and times their metadata had held (the same
-  sums, bit for bit): only the importance's SHA-256 in the GGUF metadata (`seedvr2x.imatrix`)
-  changed. The second and third builds, each made twice, gave the same bytes.
+  F.linear's), run as seedvr2x's static GGUF files are. Three builds, the same tensors byte for
+  byte: the runs read the first, whose metadata held the importance file's path; a second named
+  it by its name and SHA-256 only; the pinned files, the third, are built from the importance
+  files merged again from the same runs, without the paths and times their metadata had held
+  (the same sums, bit for bit): only the importance's SHA-256 in the GGUF metadata
+  (`seedvr2x.imatrix`) changed. The second and third builds, each made twice, gave the same
+  bytes.
 
 ### The 3B
 
 Design's question: does the 3B from ByteDance's current weights differ from the first one, and
 does it beat the sharp 7B's 4 GB file?
 
-- **Two 3B files in float16:** ours, from the 3B's current master (`ByteDance-Seed/SeedVR2-3B` at
-  `37255ff`), rounded by [`seedvr2_fp16_3b.py`](seedvr2_fp16_3b.py) as `seedvr2_fp16.py` rounds
-  (research, not uploaded); and numz's, the first 3B weights (`e2bc8d4`, which ByteDance replaced
-  on 2025-06-22: [FORMATS.md](FORMATS.md#numzs-files-against-bytedances-masters)). numz takes
-  its 3B's configuration for either, by the file's name; ours goes through ck_patch.py's model
+- **Two 3B files in float16:** seedvr2x's, from the 3B's current master
+  (`ByteDance-Seed/SeedVR2-3B` at `37255ff`), rounded by
+  [`seedvr2_fp16_3b.py`](seedvr2_fp16_3b.py) as `seedvr2_fp16.py` rounds (research, not
+  uploaded); and numz's, the first 3B weights (`e2bc8d4`, which ByteDance replaced on
+  2025-06-22: [FORMATS.md](FORMATS.md#numzs-files-against-bytedances-masters)). numz takes its
+  3B's configuration for either, by the file's name; seedvr2x's goes through ck_patch.py's model
   directory with no layer marked (numz's own loader), numz's from its own.
 - **Tier 1's runs:** the 8 d1 clips at seed 42, 1080p, the 7B runs' setup, scored against the GT
   as every file. Their encoder input and colour reference are the 7B's, MD5 for MD5 (anime-clean,
@@ -325,8 +332,8 @@ the ground truth with `split:ycc:4:3`, the file's minus the float16's (+: closer
   float16's 6.04 (its seeds 5.42 to 6.12), live-slow's 1.15 against 1.22; and it lands closer to
   the source on most full-reference scores (without correction: PSNR-Y +0.41 to +0.69 dB beyond
   the band on 4 clips, ΔE00 lf lower on all 8, flicker lower on 6). numz's Q4_K_M does the same
-  (paired with ours: within the band on nearly every score, 48 to 57 dB apart), a little further
-  on live-slow (2.91 times).
+  (paired with seedvr2x's: within the band on nearly every score, 48 to 57 dB apart), a little
+  further on live-slow (2.91 times).
 - **NVFP4 W4A4** rounds every activation to 4 bits: DISTS +0.0086 on the cartoon clip (11.8
   times the band), +0.0080 on anime-bright (3.6 times); further from float16 than a seed on 6 of
   8 clips.
@@ -383,7 +390,7 @@ clip, the 7B's 4-bit files, and its float16's own seeds for scale:
 | | the 7B | the sharp 7B |
 |---|---|---|
 | Types of the 288 matrices | Q3_K 17, Q4_K 203, Q5_K 68 | Q3_K 17, Q4_K 204, Q5_K 67 |
-| Size against our Q4_K's | −1,252,288 bytes | −1,178,560 bytes |
+| Size against seedvr2x's Q4_K's | −1,252,288 bytes | −1,178,560 bytes |
 | dB to float16: dynamic / control / Q4_K | 44.15 / 43.74 / 42.87 | 42.48 / 42.05 / 41.43 |
 | Cells past the calibrated line: dynamic / control / Q4_K | 2 / 6 / 0 | 4 / 2 / 9 |
 | At 4K (the 7B: 6 shots; the sharp: 5): dB to float16, dynamic / control / Q4_K; cells past the calibrated line | 44.34 / not run / not run; 0 | 43.31 / 42.75 / 41.96; 0 / 0 / 2 |
@@ -561,8 +568,8 @@ colour with the correction); its NVFP4 W4A4 on live-vfx's colour with the correc
 2.95×†), still past it; live-vfx's finest band for the sharp's Q4_K (1.55× and 1.54× → 1.52×† and
 1.51×†), Q4_K with importance (2.29× and 2.28× → 2.25×† and 2.24×†) and dynamic GGUF (2.28× and
 2.27× → 2.24×† and 2.23×†), and the 7B's int8 on live-slow's DISTS on every frame with the
-correction (2.49× → 1.28×†), each still past the strict line. Our Q4_K against numz's Q4_K_M and
-the 4 GB files against each other change in multiples only, no cell's verdict.
+correction (2.49× → 1.28×†), each still past the strict line. seedvr2x's Q4_K against numz's
+Q4_K_M and the 4 GB files against each other change in multiples only, no cell's verdict.
 
 ### fp8 W8A8 at 4K: comfy-kitchen's 32-bit indices
 
@@ -602,9 +609,9 @@ digital-space too (numz's warning of a NaN cast in all three runs), where it ran
   largest of 4,777,574,400 elements, and no warning of a NaN cast. Its quality:
   [the 7B's 4K table](#4k-the-7b).
 - **Beyond this repository:** any runtime that quantizes a layer's input through comfy-kitchen
-  0.2.37's CUDA kernels meets it (comfy-kitchen is ComfyUI's kernel library): with our fp8 and
-  NVFP4 files in W8A8 or W4A4, from a 3840×2160 batch of 41 frames. An upstream report is
-  pending: [its text](../research/bugs/comfy-kitchen-32-bit-quantizer-indices.md), with the
+  0.2.37's CUDA kernels meets it (comfy-kitchen is ComfyUI's kernel library): with seedvr2x's
+  fp8 and NVFP4 files in W8A8 or W4A4, from a 3840×2160 batch of 41 frames. An upstream report
+  is pending: [its text](../research/bugs/comfy-kitchen-32-bit-quantizer-indices.md), with the
   measurements and comfy-kitchen's code.
 
 ### The 3B, at 1080p
@@ -616,7 +623,7 @@ over the GT's, tells the redraw's texture, not a closeness):
 
 | File | Size | PSNR-Y | VMAF | LPIPS | DISTS | T-err | Detail |
 |---|---|---|---|---|---|---|---|
-| 3B, current weights (ours, float16) | 6.8 GB | 30.68 | 68.68 | 0.1619 | 0.1308 | 5.816 | 3.81 |
+| 3B, current weights (seedvr2x's, float16) | 6.8 GB | 30.68 | 68.68 | 0.1619 | 0.1308 | 5.816 | 3.81 |
 | 3B, first weights (numz's float16) | 6.8 GB | 31.41 | 71.77 | 0.1442 | 0.1199 | 5.295 | 2.96 |
 | the sharp 7B, dynamic GGUF | 4.8 GB | 32.20 | 74.79 | 0.1237 | 0.1070 | 5.033 | 2.55 |
 | the sharp 7B, float16 | 16.5 GB | 32.27 | 74.92 | 0.1230 | 0.1054 | 5.017 | 2.54 |
@@ -730,7 +737,7 @@ them (its GPU queue and scoring pool):
 S=research/scripts; M=models; N=/path/to/numz; PY=$N/.venv/bin/python; P=/path/to/pylib; MD=/path/to/modeldir
 C=/path/to/clips; R=/path/to/colour-dumps; D=/path/to/dumps; O=/path/to/out; I=/path/to/imatrix
 F16=/path/to/seedvr2x_ema_7b_fp16.safetensors     # numz's arguments and the dump paths: absolute (numz's cwd)
-# comfy-kitchen for numz's interpreter, outside its venv; the model directory: links to our files and numz's VAE
+# comfy-kitchen for numz's interpreter, outside its venv; the model directory: links to seedvr2x's files and numz's VAE
 uv pip install --python $PY --target $P --no-deps comfy-kitchen==0.2.37
 ln -s /path/to/phase2/seedvr2x_ema_7b*.safetensors /path/to/phase2/seedvr2x_ema_7b*.gguf \
   /path/to/phase2-dyn/seedvr2x_ema_7b*.gguf /path/to/numz-models/ema_vae_fp16.safetensors $MD/
@@ -756,7 +763,7 @@ $PY $S/bench.py run model-a-anime-clean-d1-sharp-s43 --seedvr2-dir $N --wrap $S/
   --output $O/sharp-s43/ --model_dir /path/to/numz-models --dit_model seedvr2_ema_7b_sharp_fp16.safetensors \
   --resolution 1080 --attention_mode flash_attn_2 --batch_size 45 --load_cap 45 --color_correction none \
   --debug --seed 43
-# the 3B: ours from its current master (linked into $MD), run as a GGUF file is (ck_patch.py, no mode); numz's
+# the 3B: seedvr2x's from its current master (linked into $MD), run as a GGUF file is (ck_patch.py, no mode); numz's
 # seedvr2_ema_3b_fp16.safetensors as the sharp's seeds above; both at seed 42, COLOUR_DUMP_INPUTS=1 on anime-clean
 uv run $M/seedvr2_fp16_3b.py --out /path/to/3b --masters /path/to/bytedance-3b --reference /path/to/numz-models
 # the importance: 4 calibration runs per model, then merged; the dynamic GGUF and its control; numz's loader

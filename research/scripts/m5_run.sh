@@ -1,18 +1,19 @@
 #!/bin/bash
 # Milestone 5's GPU runs (DESIGN.md, Validation milestones 5: seedvr2x's lab against
 # numz's lab, one batch = one shot), one stage at a time:
-#   m1    numz's lab on milestone 1's input, then ours lab/none/lab/none on it in ONE lock hold
-#   rest  clip B (numz's lab, the cost hold, numz + STITCH_LATENT 6:2 with lab, ours --window 6
-#         with lab), then each full-reference clip (numz's lab, ours lab)
+#   m1    numz's lab on milestone 1's input, then seedvr2x's lab/none/lab/none on it in ONE
+#         lock hold
+#   rest  clip B (numz's lab, the cost hold, numz + STITCH_LATENT 6:2 with lab, seedvr2x --window 6
+#         with lab), then each full-reference clip (numz's lab, seedvr2x's lab)
 #
 # Historical: the record of what ran on 2026-10-03/04, kept to re-run it. seedvr2x's
 # `--color-correction lab` went with 68b1529, when split replaced lab.
 # - numz's side, the masters every verdict compares with: numz 4490bd1 through research/scripts'
 #   bench.py and ffv1_out.py (16-bit RGB masters), --color_correction lab, one batch per material;
 #   clip B in 6:2 windows through blend_patch.py (STITCH_LATENT=6:2, STITCH_CURVE=cosine).
-# - ours' side as first run: seedvr2x at 27ce6ba, lab's reference the encoder's bf16 input (4 of
-#   11 materials passed). m5_run3b.sh ran ours' side again at eca0ff1, the float32 reference
-#   (step 3b, 11 of 11); this script run at eca0ff1 gives step 3b's ours too.
+# - seedvr2x's side as first run: seedvr2x at 27ce6ba, lab's reference the encoder's bf16 input (4
+#   of 11 materials passed). m5_run3b.sh ran seedvr2x's side again at eca0ff1, the float32 reference
+#   (step 3b, 11 of 11); this script run at eca0ff1 gives step 3b's seedvr2x side too.
 # - lab's cost: lab, none, lab, none back to back in one hold of the GPU lock, on milestone 1's
 #   input and on clip B: each unit's time and VRAM peak from seedvr2x's log, the wall time and
 #   peak RSS (/usr/bin/time -v), the lab work directory's file sizes sampled every 0.5 s; read by

@@ -199,7 +199,7 @@ def crcs(out: Path) -> list[str]:
 
 
 def psnr_y(ours: Path, reference: Path, stats: Path) -> list[float]:
-    """Each frame's PSNR-Y of ours against the reference's, by ffmpeg's psnr filter."""
+    """Each frame's PSNR-Y of the run's video against the reference's, by ffmpeg's psnr filter."""
     subprocess.run(
         [
             *("ffmpeg", "-v", "error", "-i", str(ours), "-i", str(reference), "-lavfi"),

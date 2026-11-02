@@ -102,7 +102,7 @@ SHOT = {  # the shot, colour's baton-1 verdict (crops-b2's README)
         "style kept; A = 0.25 too close to the washed-out GT",
     ),
 }
-WHAT = {  # what each window shows (crops-b2's README; sollevante-dark's: ours)
+WHAT = {  # what each window shows (crops-b2's README; sollevante-dark's: this script's)
     "sollevante-painted-at-f22-x1340-y1000": "painted standing stone (vertical brush texture), mist, bush",
     "sollevante-painted-at-f22-x2580-y500": "character in profile: hair, face tattoo, hood; painted branches behind",
     "sollevante-painted-diff-f42-x120-y150": "painted foliage (leaves against light), top-left corner",

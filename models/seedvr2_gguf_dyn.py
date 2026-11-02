@@ -11,8 +11,8 @@
 # torch = { index = "pytorch-cpu" }
 # ///
 """SeedVR2's dynamic GGUF file for seedvr2x: one ggml type per matrix, chosen and quantized with an
-importance matrix, under the size of our uniform Q4_K file; and that Q4_K quantized with the same
-importance, the control that tells the importance's own effect from the mix's.
+importance matrix, under the size of seedvr2x's uniform Q4_K file; and that Q4_K quantized with the
+same importance, the control that tells the importance's own effect from the mix's.
 
     uv run models/seedvr2_gguf_dyn.py [--model 7b|sharp] [--imatrix FILE|ones] [--imatrices DIR]...
         [--types Q3_K,...] [--masters DIR]... [--cache DIR] [--work DIR] [--static FILE] [--out DIR]
@@ -21,13 +21,13 @@ importance, the control that tells the importance's own effect from the mix's.
 - The importance: models/gpu/imatrix_hook.py's file (several runs' merged by it): per matrix and
   input channel k, imp_k = in_sum2_k / counts, the mean of x_k^2 over the calibration runs' tokens
   (llama.cpp's imatrix), collected on numz's fp16 file of the same model. By default --model's own,
-  pinned in IMATRICES: ours, uploaded to hekmon/seedvr2x on Hugging Face at IMATRIX_REVISION with
-  the files made from it; read where an --imatrices directory has it, never moved, else downloaded
-  into --cache (default ~/.cache/seedvr2x-models), and refused unless its size and SHA-256 are the
-  pinned ones, before the master is read. It keeps its name: the outputs' metadata name it by name
-  and SHA-256. --imatrix FILE: another importance file, read as it is (OUTPUTS pins the outputs of
-  the pinned ones only). `ones` (every imp_k = 1) is a placeholder for tests: ggml does NOT treat
-  it as no importance (below).
+  pinned in IMATRICES: seedvr2x's, uploaded to hekmon/seedvr2x on Hugging Face at IMATRIX_REVISION
+  with the files made from it; read where an --imatrices directory has it, never moved, else
+  downloaded into --cache (default ~/.cache/seedvr2x-models), and refused unless its size and
+  SHA-256 are the pinned ones, before the master is read. It keeps its name: the outputs' metadata
+  name it by name and SHA-256. --imatrix FILE: another importance file, read as it is (OUTPUTS pins
+  the outputs of the pinned ones only). `ones` (every imp_k = 1) is a placeholder for tests: ggml
+  does NOT treat it as no importance (below).
 - Each of the 288 attention and MLP matrices of the blocks, from the float32 master, quantized by
   ggml's own ggml_quantize_chunk WITH the importance (llama.cpp at seedvr2_gguf.py's LLAMA_CPP, MIT,
   the same build), to each candidate type (default Q3_K, Q4_K, Q5_K, Q6_K, Q8_0: types numz's GGUF
@@ -36,32 +36,33 @@ importance, the control that tells the importance's own effect from the mix's.
       e = sqrt(sum_k imp_k ||dW[:, k]||^2 / sum_k imp_k ||W[:, k]||^2),
   dW = W_hat - W, column k the weights input channel k meets: with uncorrelated channels, e^2 is
   E||dW x||^2 / E||W x||^2, the layer's output error relative to its output on the calibration's
-  inputs. Also, as the reference, Q4_K without importance: our static file (with --static, its bytes
-  are checked equal, tensor by tensor).
+  inputs. Also, as the reference, Q4_K without importance: seedvr2x's static file (with --static,
+  its bytes are checked equal, tensor by tensor).
 - The choice: one type per matrix minimising sum_i e_i^2 over the 288 under a byte budget, the
-  288 matrices' bytes in our uniform Q4_K less --margin (1 MiB, for the metadata: the file stays
-  within our Q4_K's size): a greedy over each matrix's lower convex hull of (bytes, e^2), steepest
-  e^2 saved per byte first, ties broken by name; deterministic. The last block's text attention
-  output projection and MLP (blocks.35.attn.proj_out.txt, blocks.35.mlp.txt.proj_in, .proj_out)
-  count for nothing: NaDiT.forward keeps only the video tokens after the blocks, so nothing reads
-  their output (proven bit for bit by models/gpu/imatrix_hook_test.py); they get the cheapest type.
-  Limits: per-layer statistics; every layer's relative error weighs the same whatever its effect
-  on the video; errors taken as additive, with no interaction through the network; channels taken
-  as uncorrelated; the calibration's clips only. No end-to-end sensitivity: GPU runs judge the file.
+  288 matrices' bytes in seedvr2x's uniform Q4_K less --margin (1 MiB, for the metadata: the file
+  stays within the uniform Q4_K's size): a greedy over each matrix's lower convex hull of (bytes,
+  e^2), steepest e^2 saved per byte first, ties broken by name; deterministic. The last block's text
+  attention output projection and MLP (blocks.35.attn.proj_out.txt, blocks.35.mlp.txt.proj_in,
+  .proj_out) count for nothing: NaDiT.forward keeps only the video tokens after the blocks, so
+  nothing reads their output (proven bit for bit by models/gpu/imatrix_hook_test.py); they get the
+  cheapest type. Limits: per-layer statistics; every layer's relative error weighs the same whatever
+  its effect on the video; errors taken as additive, with no interaction through the network;
+  channels taken as uncorrelated; the calibration's clips only. No end-to-end sensitivity: GPU runs
+  judge the file.
 - The files, in --out: seedvr2x_ema_7b_dyn.gguf (the choice) and seedvr2x_ema_7b_Q4_K_imatrix.gguf
-  (every matrix Q4_K, with the importance), written as seedvr2_gguf.py writes ours: gguf-py's
+  (every matrix Q4_K, with the importance), written as seedvr2_gguf.py writes its files: gguf-py's
   writer, city96's conventions (the state dict's names, shapes reversed, general.architecture
-  "seedvr"), every other tensor our fp16 file's value (the master rounded to the nearest float16),
-  the metadata saying what was done and from what: the importance file by its name and SHA-256,
-  its runs, the calibration clips by name; no path and no time, so that the same inputs give the
-  same bytes wherever they are read from.
-- The checks, as for our static files: every quantized tensor decoded by ggml and by gguf-py, bit
-  for bit; its errors against the master (median, worst), beside our static Q4_K's; the file read
-  back by gguf-py's reader (names, types, shapes, every byte; no metadata value holding a path or
-  a time); its size against our Q4_K's; the second quantization of each chosen matrix equal to
-  the first; the SHA-256 against the one OUTPUTS pins for that importance file (both outputs of
-  each pinned importance file; another importance's printed, not checked). numz's own loader:
-  models/numz_gguf_check.py, in numz's environment. A file failing a check is deleted.
+  "seedvr"), every other tensor as in seedvr2x's fp16 file (the master rounded to the nearest
+  float16), the metadata saying what was done and from what: the importance file by its name and
+  SHA-256, its runs, the calibration clips by name; no path and no time, so that the same inputs
+  give the same bytes wherever they are read from.
+- The checks, as for seedvr2x's static files: every quantized tensor decoded by ggml and by gguf-py,
+  bit for bit; its errors against the master (median, worst), beside seedvr2x's static Q4_K's; the
+  file read back by gguf-py's reader (names, types, shapes, every byte; no metadata value holding a
+  path or a time); its size against seedvr2x's Q4_K's; the second quantization of each chosen matrix
+  equal to the first; the SHA-256 against the one OUTPUTS pins for that importance file (both
+  outputs of each pinned importance file; another importance's printed, not checked). numz's own
+  loader: models/numz_gguf_check.py, in numz's environment. A file failing a check is deleted.
 - --only REGEX: only the matching block matrices (the choice under their own Q4_K bytes), nothing
   written; --probe: on them, each type quantized with no importance, with ones and with the
   importance, bytes compared and errors given. --table FILE: the per-matrix measures of an earlier
@@ -105,7 +106,8 @@ IMATRIX_FORMAT = "seedvr2x-imatrix-1"
 IMATRIX_META = ("file", "inputs", "kind", "model", "numz_commit", "runs", "sha256", "zero_channels")
 HOST_PATH = re.compile(r"(?:^|[\s\"'\[(,=])~?/(?!/)")  # an absolute or home path; not a URL's // nor a relative path
 TIME = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
-MODELS = {  # --model: our fp16 file (its master), the fp16 file the importance must come from
+# --model: seedvr2x's fp16 file (its master), the fp16 file the importance must come from
+MODELS = {
     "7b": ("seedvr2x_ema_7b_fp16.safetensors", "seedvr2_ema_7b_fp16.safetensors", "seedvr2x_ema_7b"),
     "sharp": ("seedvr2x_ema_7b_sharp_fp16.safetensors", "seedvr2_ema_7b_sharp_fp16.safetensors",
               "seedvr2x_ema_7b_sharp"),
@@ -114,9 +116,10 @@ DEAD = re.compile(r"^blocks\.35\.(attn\.proj_out\.txt|mlp\.txt\.proj_(in|out))\.
 STATIC_Q4K = {"7b": ("seedvr2x_ema_7b_Q4_K.gguf", 4758307552), "sharp": ("seedvr2x_ema_7b_sharp_Q4_K.gguf", 4758307584)}
 
 # The importance files, by --model: models/gpu/imatrix_hook.py's runs of numz's fp16 file on 4 calibration clips,
-# merged, with no path and no time in their metadata; uploaded to our Hugging Face repo, IMATRIX_REPO, with the files
-# made from them. Without --imatrix, --model's is read where an --imatrices directory has it, else downloaded from
-# IMATRIX_REPO at IMATRIX_REVISION into --cache; refused unless it has this size and SHA-256.
+# merged, with no path and no time in their metadata; uploaded to seedvr2x's Hugging Face repo,
+# IMATRIX_REPO, with the files made from them. Without --imatrix, --model's is read where an
+# --imatrices directory has it, else downloaded from IMATRIX_REPO at IMATRIX_REVISION into --cache;
+# refused unless it has this size and SHA-256.
 IMATRIX_REPO = "hekmon/seedvr2x"
 IMATRIX_REVISION = "c14a2bc4aab04cf38ad9b0d324014c4213f07048"  # the upload of 2026-10-08
 IMATRICES = {  # --model: (name, size, SHA-256)

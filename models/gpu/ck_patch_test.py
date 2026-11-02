@@ -10,17 +10,17 @@ references. Re-runnable; nothing is written but OUT and the scratch directory.
 
 NUMZ is numz's checkout at 4490bd1 with its environment, PYLIB the directory holding comfy-kitchen
 0.2.37. The inputs, every path absolute (numz runs in NUMZ, and the paths it resolves are compared
-with them): --model-dir our model directory (links to phase 2's files and to numz's VAE), --phase2
-the directory of phase 2's files it links to, --fp16 our seedvr2x_ema_7b_fp16.safetensors,
---numz-models numz's model directory (its ema_vae_fp16.safetensors, the VAE the model directory
-links to), --colour-dump research/scripts/colour_dump.py, --clip a clip for numz's CLI
+with them): --model-dir seedvr2x's model directory (links to phase 2's files and to numz's VAE),
+--phase2 the directory of phase 2's files it links to, --fp16 the seedvr2x_ema_7b_fp16.safetensors
+file, --numz-models numz's model directory (its ema_vae_fp16.safetensors, the VAE the model
+directory links to), --colour-dump research/scripts/colour_dump.py, --clip a clip for numz's CLI
 (anime-clean.d1.lr.mkv; the runs stop before inference), --scratch the runs' logs and outputs.
 - cli: python colour_dump.py ck_patch.py inference_cli.py ARGS in a subprocess, CK_PATCH_DRYRUN=1
-  (it stops once numz has built the DiT's and the VAE's structures, before any weight is read): our
-  fp8, NVFP4 and GGUF names in the model directory pass numz's argument parser and resolve to our
-  files, the 7B's configuration chosen, the VAE our directory's (numz's file); then the guards, each
-  a run that must stop with exit status 3: no mode, a wrong mode, a mode for a GGUF file,
-  --compile_dit, two GPUs, CK_PATCH_EXPECT wrong.
+  (it stops once numz has built the DiT's and the VAE's structures, before any weight is read):
+  seedvr2x's fp8, NVFP4 and GGUF names in the model directory pass numz's argument parser and
+  resolve to seedvr2x's files, the 7B's configuration chosen, the VAE the model directory's (numz's
+  file); then the guards, each a run that must stop with exit status 3: no mode, a wrong mode, a
+  mode for a GGUF file, --compile_dit, two GPUs, CK_PATCH_EXPECT wrong.
 - load: in this process, the finder installed before numz's modules are imported: the registry's
   names resolve as without the patch; then each comfy-kitchen file (fp8, INT8, NVFP4) into numz's 7B
   on the meta device through numz's _load_model_weights on the CPU, against the fp16 file through the

@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Project | comfy-kitchen (Comfy-Org, Apache-2.0), its CUDA backend: `backends/cuda/ops/per_tensor_quantize.cu`, `quantize_nvfp4.cu` (not numz) |
-| Severity | wrong output: from 2^32 values in one tensor, fp8's output is mostly never written (an all-NaN video in our runs), NVFP4's is silently wrong |
+| Severity | wrong output: from 2^32 values in one tensor, fp8's output is mostly never written (an all-NaN video in seedvr2x's runs), NVFP4's is silently wrong |
 | Status | measured on the GPU, and read in the code; **not filed yet** |
 | Version | comfy-kitchen 0.2.37 (tag `v0.2.37`, `be003b7`), torch 2.14.1+cu130, an RTX PRO 6000 Blackwell (sm_120) |
 | Workaround | keep each quantized tensor under 2^32 values, or quantize it in row chunks at the scale of the whole tensor |

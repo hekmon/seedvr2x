@@ -291,7 +291,7 @@ without overlap); `--uniform_batch_size` pads it to the full batch instead.
    ([bug 07](../bugs/07-chunk-overlap-not-blended.md)); context frames alone remove only a quarter
    of the jump.
 
-### Our own CLI (seedvr2x)
+### seedvr2x
 
 1. **Scene-aligned processing.** Detect cuts, process shot by shot; never let a window straddle a
    cut (a cut resets everything anyway).

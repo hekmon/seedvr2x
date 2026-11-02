@@ -1,9 +1,10 @@
 #!/bin/bash
-# Model conversation, slice A scoring: one job of the CPU pool (as colour's b2_cpu_job.sh, our paths and cores).
-# ms_pool.sh starts it with setsid: its own session, so the pool's exit (Ctrl-C included) never reaches it, and a
-# later pool adopts it (running/<id> with a live pid). Writes running/<id> ("pid kind start"), runs the job on
-# cores 0-31 at nice 19 into logs/<id>.log, samples its session's RSS every 5 s (peak MB in peak/<id>), then
-# done/<id> or failed/<id>, a line in times.tsv (id kind start end seconds peak-MB status), removes running/<id>.
+# Model conversation, slice A scoring: one job of the CPU pool (as colour's b2_cpu_job.sh, with this
+# slice's paths and cores). ms_pool.sh starts it with setsid: its own session, so the pool's exit
+# (Ctrl-C included) never reaches it, and a later pool adopts it (running/<id> with a live pid).
+# Writes running/<id> ("pid kind start"), runs the job on cores 0-31 at nice 19 into logs/<id>.log,
+# samples its session's RSS every 5 s (peak MB in peak/<id>), then done/<id> or failed/<id>, a line
+# in times.tsv (id kind start end seconds peak-MB status), removes running/<id>.
 # Usage: ms_job.sh ID KIND COMMAND
 for v in VAL_STATE; do [ -n "${!v:-}" ] || { echo "${0##*/}: $v is unset: source your glue.env (models/gpu/validation/glue.env.example)" >&2; exit 2; }; done
 id=$1 kind=$2 cmd=$3

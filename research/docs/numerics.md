@@ -115,10 +115,10 @@ of 3 seeds):
 
 seedvr2x vendors the model code and rewrites the runtime around it
 ([DESIGN.md](../../DESIGN.md#vendored-model-code)): every numerics choice and the whole
-input preparation become ours. numz and ByteDance's reference differ in RoPE precision, the
-casts of the input frames, the VAE's posterior mode against a sample, the weights' dtype, the
-DiT norms' output dtype, the VAE decode's autocast, the resize kernel, and padding (numz)
-against cropping (ByteDance) to multiples of 16. DESIGN.md
+input preparation become seedvr2x's own. numz and ByteDance's reference differ in RoPE
+precision, the casts of the input frames, the VAE's posterior mode against a sample, the
+weights' dtype, the DiT norms' output dtype, the VAE decode's autocast, the resize kernel, and
+padding (numz) against cropping (ByteDance) to multiples of 16. DESIGN.md
 asks which of these matter. A difference only counts here if it moves the output closer to the
 source than a change of seed does.
 

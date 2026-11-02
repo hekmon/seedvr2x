@@ -4,10 +4,10 @@ CPU, from the test's own functions (M5_SEEDVR2X's tests/test_lab.py): the PSNR a
 lab master, whole and per frame, and the test's scores of both, to set its PSNR floor and comments.
 
     M5_SEEDVR2X=SEEDVR2X CUDA_VISIBLE_DEVICES= nice -n 19 SEEDVR2X/.venv/bin/python \
-      m5_lab_fig.py OURS.mkv M1_DIR
+      m5_lab_fig.py OUT.mkv M1_DIR
 
 M5_SEEDVR2X, required: seedvr2x's project directory at eca0ff1, whose tests/test_lab.py this
-imports (with its venv's python). OURS.mkv: ours' lab master of milestone 1's input
+imports (with its venv's python). OUT.mkv: seedvr2x's lab master of milestone 1's input
 (m5_run3b.sh's ours3b/m1.mkv); M1_DIR: the directory of milestone 1's input_rgb.mkv and numz's lab
 master, numz_lab.mkv (m5_run.sh m1).
 

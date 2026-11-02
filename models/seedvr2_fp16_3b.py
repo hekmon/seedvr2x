@@ -25,7 +25,7 @@ read back with the safetensors library, bit for bit.
 - The master: seedvr2_ema_3b.pth of ByteDance-Seed/SeedVR2-3B at REVISION, checked by its
   SHA-256, read where a --masters directory has it, never moved; else downloaded into --cache.
 - numz's 3B fp16 file (numz/SeedVR2_comfyUI at seedvr2_fp16.py's NUMZ_REVISION, checked by
-  SHA-256), from a --reference directory or downloaded into --cache: ours must hold its tensor
+  SHA-256), from a --reference directory or downloaded into --cache: seedvr2x's must hold its tensor
   names, dtypes and shapes, in its order at its offsets; the share of values equal to it is
   printed, not required (other weights). --no-reference skips it.
 - --first, the method's control, instead: the same rounding of the 3B's first master (FIRST, at

@@ -420,10 +420,11 @@ A. The demuxer logs "DTS discontinuity" and "Packet corrupt" at the join in ever
    `mov_seek_stream`). A leading picture's seek lands on the keyframe after it, the decoder drops
    the picture, and the output starts 1–3 frames late: every `b_pts` miss in MP4 was a frame
    shown just before a keyframe. mov.c's guard (`can_seek_to_key_sample`) only covers HEVC
-   samples the file lists as open (a `sync` sample group); our x265 MP4 still missed 6 of 20.
-   The decoder's side, on real open-GOP HEVC (S11's `keycheck`, all 436 keyframes): a decode
-   started at a CRA outputs none of its RASL pictures (54 of 54), logs nothing at `-v error`,
-   and every later frame is exact. The pictures go missing; they never come out wrong.
+   samples the file lists as open (a `sync` sample group); the study's own x265 MP4 still missed
+   6 of 20. The decoder's side, on real open-GOP HEVC (S11's `keycheck`, all 436 keyframes): a
+   decode started at a CRA outputs none of its RASL pictures (54 of 54), logs nothing at
+   `-v error`, and every later frame is exact. The pictures go missing; they never come out
+   wrong.
 4. **TS and PS have no index.** `mpegts.c` and `mpeg.c` only provide `read_timestamp`: ffmpeg
    bisects on timestamps read from the stream, and decoding started at the next keyframe after
    the position found. The shifts are the rest of the GOP (e.g. +43 = 48 − 5 frames past the

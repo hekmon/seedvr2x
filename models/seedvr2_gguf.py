@@ -15,10 +15,10 @@
 The 288 attention and MLP matrices of the blocks (99% of the weights) are quantized straight from
 the float32 master by ggml's own function, ggml_quantize_chunk (llama.cpp at LLAMA_CPP, MIT, built
 here from source, no importance matrix): Q4_K, the type of every quantized tensor in numz's Q4_K_M
-file, or Q8_0. Every other tensor is our fp16 file's: the master rounded to the nearest float16.
-gguf-py writes the file in city96's conventions, which numz's loader reads: the state dict's
-names, each shape reversed (GGUF's order), general.architecture "seedvr" as in numz's own SeedVR2
-GGUF files.
+file, or Q8_0. Every other tensor is as in seedvr2x's fp16 file: the master rounded to the nearest
+float16. gguf-py writes the file in city96's conventions, which numz's loader reads: the state
+dict's names, each shape reversed (GGUF's order), general.architecture "seedvr" as in numz's own
+SeedVR2 GGUF files.
 
     uv run models/seedvr2_gguf.py [--masters DIR]... [--cache DIR] [--work DIR] [--numz DIR]
                                   [--out DIR] [FILE...]
@@ -29,7 +29,7 @@ GGUF files.
 - The checks: every quantized tensor decoded by ggml (dequantize_row_*) and by gguf-py's own
   decoder, which must agree bit for bit; its error against the master (relative,
   ||W_hat - W|| / ||W||), median and worst; for Q4_K, numz's Q4_K_M file's error on the same
-  tensors beside ours (the file found in --numz, else downloaded into --cache); the file read
+  tensors beside seedvr2x's (the file found in --numz, else downloaded into --cache); the file read
   back by gguf-py's reader (names, shapes, types, every byte as written); the output's SHA-256
   pinned in OUTPUTS. A file failing a check is deleted.
 - The output, in --out (default models/dist): not uploaded before GPU runs validate it (DESIGN.md,
@@ -68,7 +68,7 @@ NUMZ_REVISION = "ac66d6d98fa49975d893b58c55bff7677191c862"  # main since 2025-11
 
 
 class Output(NamedTuple):
-    fp16: str  # our fp16 file of the same master (seedvr2_fp16.py's FILES)
+    fp16: str  # seedvr2x's fp16 file of the same master (seedvr2_fp16.py's FILES)
     qtype: Q
     file_type: gguf.LlamaFileType
     numz: str | None  # numz's GGUF file of the same model and type, to compare errors with

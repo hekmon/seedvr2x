@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""S6 (model conversation, 2026-10-07): the 4 GB files against our static Q4_K (label q4k), slice A tier 1.
+"""S6 (model conversation, 2026-10-07): the 4 GB files against seedvr2x's static Q4_K (label q4k),
+slice A tier 1.
 
   $METRICS_PY $VAL_GLUE/pair4g.py [--labels dyn,q4ki,nv4a16,nv4a4,nq4km]
       [--out $VAL_STATE/s6/sum]

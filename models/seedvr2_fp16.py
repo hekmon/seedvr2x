@@ -14,7 +14,7 @@
 
 Every tensor of a master is rounded to the nearest float16, ties to even, under the same name and
 shape; nothing else changes. numz's fp16 files hold the same values (DESIGN.md, Weights), and the
-check holds ours equal to them, element for element.
+check holds seedvr2x's files equal to them, element for element.
 
     uv run models/seedvr2_fp16.py [--masters DIR]... [--reference DIR]... [--cache DIR]
                                   [--out DIR] [--no-reference] [FILE...]
@@ -32,8 +32,8 @@ check holds ours equal to them, element for element.
   check is deleted.
 
 The files are named seedvr2x_*, not as numz's: numz's downloader deletes a file named like one of
-its own whose SHA-256 differs (src/utils/downloads.py:216-235 at 4490bd1), and ours differ from
-numz's by their header, which holds the metadata.
+its own whose SHA-256 differs (src/utils/downloads.py:216-235 at 4490bd1), and seedvr2x's differ
+from numz's by their header, which holds the metadata.
 """
 
 from __future__ import annotations
@@ -196,7 +196,7 @@ def read_back(path: Path, sd: dict[str, torch.Tensor], md: dict[str, str]) -> No
 
 
 def compare(ours: Path, ref: Path) -> dict[str, object]:
-    """Ours against numz's file: names, dtypes and shapes, and each tensor's bytes."""
+    """seedvr2x's file against numz's: names, dtypes and shapes, and each tensor's bytes."""
     ho, so = read_header(ours)
     hr, sr = read_header(ref)
     ho.pop("__metadata__", None)

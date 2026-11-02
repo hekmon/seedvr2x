@@ -1,4 +1,5 @@
-"""Our GGUF files through numz's own GGUF loader, on the CPU: the load test of DESIGN.md's phase 2.
+"""seedvr2x's GGUF files through numz's own GGUF loader, on the CPU: the load test of DESIGN.md's
+phase 2.
 
 Run with numz's environment, not uv (it imports numz's code), CUDA hidden:
 

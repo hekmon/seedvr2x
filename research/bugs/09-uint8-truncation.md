@@ -47,7 +47,7 @@ The values come from a bfloat16 `final_video` (`src/core/generation_phases.py:87
 to float32 at `inference_cli.py:1009-1010`. In [0.5, 1) bf16 values are k/256, so `x * 255`
 = k − k/256 has a fractional part above 0.5: rounding and truncation both give k − 1. Below 0.5
 the bf16 grid is finer than 1/255, and truncation is on average 0.5 level below rounding. Dark
-content (our anime clips: mean L\* 14–20) is almost entirely in that range.
+content (the study's anime clips: mean L\* 14–20) is almost entirely in that range.
 
 ## Impact
 

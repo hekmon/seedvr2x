@@ -11,12 +11,13 @@ shots, kinds, sources and band.
 
 Shots and kinds: digital (digital-cockpit, digital-space), first film (ouatia-face), Sol Levante
 (sollevante-painted), cel (cel4k-detail).
-Sources: the sharp 7B fp16 at seeds 42 and 43 = colour's own 4K scores (eval-b2/<cd>: score, sh42 and sh43, ref tag
-sharp; vmaf-b2/<cd>: VMAF + CAMBI, s42 none and split, s43 split; bands-b2/<cd>-sharp.json, <cd>-sharp-s43.json),
-ours for the rest, the same commands (gpu/vmaf/sharp/<cd>: s43 none and split, rshv-; gpu/diff/sharp/<cd>.s43.txt:
-s43 against s42; gpu/fr/sharp/<cd>: fr_metrics.py of both seeds, rshf-); a label's = gpu/eval/<label>/<cd>,
-gpu/vmaf/<label>/<cd>, gpu/bands/<label>/<cd>.json, gpu/diff/<label>/<cd>.s42.txt (to the sharp's s42 none
-master, rshm-), gpu/fr/<label>/<cd> (only while score/FR4_ON exists).
+Sources: the sharp 7B fp16 at seeds 42 and 43 = colour's own 4K scores (eval-b2/<cd>: score, sh42
+and sh43, ref tag sharp; vmaf-b2/<cd>: VMAF + CAMBI, s42 none and split, s43 split;
+bands-b2/<cd>-sharp.json, <cd>-sharp-s43.json), this slice's for the rest, the same commands
+(gpu/vmaf/sharp/<cd>: s43 none and split, rshv-; gpu/diff/sharp/<cd>.s43.txt: s43 against s42;
+gpu/fr/sharp/<cd>: fr_metrics.py of both seeds, rshf-); a label's = gpu/eval/<label>/<cd>,
+gpu/vmaf/<label>/<cd>, gpu/bands/<label>/<cd>.json, gpu/diff/<label>/<cd>.s42.txt (to the sharp's
+s42 none master, rshm-), gpu/fr/<label>/<cd> (only while score/FR4_ON exists).
 Verdicts (ms_sum.py's): the label's frames minus the sharp's at seed 42; B / W when colour_eval's 95% moving-block
 bootstrap interval excludes 0 AND |mean| exceeds the band = the sharp 7B fp16's spread over its 2 seeds (42, 43; one
 seed scored: band 0, said per cell by the seeds behind it); Laplacian up / down the same; band energy (no interval):
@@ -322,8 +323,9 @@ def spread(r, k):
 
 
 def band_md(clip_bys):
-    """The sharp fp16's own 2-seed spread per shot; on the 2 shots the 7B has 2 seeds at 4K too (digital-space,
-    sollevante-painted: colour's eval-b1 / vmaf-b1 / vmaf-b2, ours gpu/vmaf/7b), the sharp's spread over the 7B's."""
+    """The sharp fp16's own 2-seed spread per shot; on the 2 shots the 7B has 2 seeds at 4K too
+    (digital-space, sollevante-painted: colour's eval-b1 / vmaf-b1 / vmaf-b2, this slice's
+    gpu/vmaf/7b), the sharp's spread over the 7B's."""
     lines = [
         "# The sharp 7B fp16's own band at 4K: its 2-seed spread per shot (seeds 42, 43)",
         "",
@@ -463,8 +465,9 @@ def cmp_bands(a, b):
 
 
 def validation_md(labels):
-    """sh-val43 = colour's sharp sh43 decode of sollevante-painted scored as a file, against colour's own JSONs of it;
-    then our sharp references' VMAF (rshm s42 renders, rshv s43 renders) against colour's, on the 5 shots."""
+    """sh-val43 = colour's sharp sh43 decode of sollevante-painted scored as a file, against
+    colour's own JSONs of it; then this slice's sharp references' VMAF (rshm s42 renders, rshv s43
+    renders) against colour's, on the 5 shots."""
     lines = [
         "# Validation of the sharp's 4K pipeline (slice B of the sh-* files) against colour's 4K JSONs",
         "",

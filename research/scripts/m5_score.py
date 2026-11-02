@@ -12,11 +12,11 @@ it (cv2, the 8-bit RGB file both runs read).
   m5_score.py psnr A.mkv B.mkv [--json F]     PSNR of A against B, 8-bit scale, from the masters
   m5_score.py verdict NAME --ours Q.json --numz Q.json [--fr-ours F.json --fr-numz F.json]
                       [--stitch-ours S.json --stitch-numz S.json] [--psnr P.json]
-                      one Markdown row per metric: ours against numz, with the milestone's
+                      one Markdown row per metric: seedvr2x's against numz's, with the milestone's
                       tolerances
 
 Historical: the record of milestone 5's first scoring (2026-10-04), kept to re-run it: what
-m5_score.sh ran, numz's masters against ours as first run (seedvr2x 27ce6ba, lab's bf16
+m5_score.sh ran, numz's masters against seedvr2x's as first run (seedvr2x 27ce6ba, lab's bf16
 reference; 4 of 11 materials passed). Its verdict has the rules as first written: an a*/b*
 spread is its percent off the input's, within 1%; all four boundary steps decide, the raw ones
 too. m5_score3b.py is this file with the rules as sharpened on 2026-10-04, for step 3b; the
@@ -146,7 +146,7 @@ def load(path):
 
 
 def verdict(argv):
-    """Milestone 5's rule: ours at least as good as numz on every metric, a difference below the
+    """Milestone 5's rule: seedvr2x at least as good as numz on every metric, a difference below the
     tolerance counting as equal (DESIGN.md, Validation milestones 5)."""
     import argparse
 

@@ -118,4 +118,4 @@ Two routes for reusing it (see [`DESIGN.md`](../../DESIGN.md)):
   has no tiling.
 - **numz's model files, vendored:** stub or replace the four runtime functions above and drop
   the rest of `src/core` and `src/optimization`. `VideoDiffusionInfer` (`src/core/infer.py`) is
-  the natural seam for our own orchestration.
+  the natural seam for seedvr2x's own orchestration.
