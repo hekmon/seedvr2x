@@ -581,6 +581,13 @@ two 7Bs' smaller files (below), their int8 files first:
     peaks in int8 (windows, swaps, FA2 and SDPA), the rows at a time (1,024 frees 0.28 GiB),
     the weight's transposed view in `torch._int_mm`, and seedvr2x's linear against
     comfy-kitchen's on the model's own activations, whose figures replace the synthetic ones.
+  - Measured on the default model only (the user, 2026-11-02): the sharp 7B stays the default,
+    and int8 changes only its format, to `seedvr2x_ema_7b_sharp_int8_convrot.safetensors`,
+    where checks (a)-(c), run on that file against the sharp 7B's float16, hold. The regular
+    7B's int8 file has the same memory and speed by construction (the same architecture and
+    arithmetic), and its quality is the model card's (both 7Bs, 1080p and 4K). Every
+    measurement but int8's own stays in float16: milestone 1's regression, the regular 7B its
+    reference and the sharp 7B beside it, and seedvr2x's own quality figures, on the sharp 7B.
   - TF32: the rotation is a float32 matmul, so TF32 in cuBLAS would change its codes far
     beyond those figures. It is off by default and seedvr2x never sets it, but
     `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` forces it: the pass after the card's measurements makes
