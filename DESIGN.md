@@ -199,14 +199,21 @@ seedvr2x/                the repository
   DESIGN.md AGENTS.md LICENSE NOTICE
   core/                  the library: import seedvr2x (distribution seedvr2x-core)
   apps/
-    cli/                 the seedvr2x command: video (long runs), image, verify
+    seedvr2x/            the seedvr2x command: video (long runs), image, verify
     imgserver/           an HTTP server for images only
     comfyui/             ComfyUI's nodes, after v0.1.0
   research/  models/  upstream/
 ```
 
-- **core/** holds what every app needs: the model code, the model files' pull and check, the
-  DiT's placement and BlockSwap, the VAE's tiling, the memory model, the colour correction. It
+- **core/** is the library, a collection of bricks that can be assembled together; an **app**,
+  one of many, is a pipeline that assembles them into a workflow, the value it brings the user
+  (the user, 2026-11-02). The bricks, each one step of a SeedVR2 upscale: the model code and its
+  loading, the model files' pull and check, the DiT's placement and BlockSwap, its sampling of
+  latents, a VAE pass and its tiling, the VAE's compilation, the colour correction, and the
+  memory model that says what each brick takes. The workflows are the apps': the CLI's for long
+  videos (shots, windows, segments, a job's plan, saving and resume), the image server's,
+  ComfyUI's nodes. No workflow, nor any part of one, sits in the library: a part two apps would
+  share is discussed when it appears. The library is not the CLI stripped of its command. It
   declares version ranges, not exact pins, so that it can run in another program's environment
   (ComfyUI's, with its own torch).
 - **Each app is its own uv project, with its own lock**, `core/` by path, so that an app's
@@ -215,11 +222,11 @@ seedvr2x/                the repository
   (milestone 1 compares with numz's environment) are the CLI's. The library's tests run in the
   CLI's environment: the most complete app, with every dependency, and the one shipped. The
   image server's lock holds the same versions of what they share, a test checking it.
-- **The CLI:** `seedvr2x` keeps its command and options. `seedvr2x image` upscales one image
-  through the library's own image path: the same models, files, tiling and colour correction,
-  none of the long-run machinery (shots, windows, segments, jobs, resume, calibration,
-  masters). A still is one latent at sizes video rarely reaches (8K outputs): the image path is
-  measured before it ships, the planner keeping no blind spot.
+- **The CLI:** `seedvr2x` keeps its command and options. `seedvr2x image` upscales one image by
+  assembling the library's bricks: the same models, files, tiling and colour correction, none
+  of the long-run machinery (shots, windows, segments, jobs, resume, calibration, masters). A
+  still is one latent at sizes video rarely reaches (8K outputs): the image upscale is measured
+  before it ships, the planner keeping no blind spot.
 - **The image server, `apps/imgserver/`:** images only, hence its name (a "server" would promise
   every CLI feature over HTTP). Python, the models in its own process, loaded once and kept on
   the GPU. Every parameter in the request's headers, the image's bytes as the body both ways,
@@ -258,16 +265,51 @@ In steps:
    admit minors nothing has tested. They become the tested minor series
    (`diffusers>=0.40.0,<0.41` and so on) with the next gated change, and widen as other
    environments are tested (ComfyUI's).
-2. The image path in the library and `seedvr2x image`, then the image server if v0.1.0 takes
-   it, each measured on the 96 GB card. Where the CLI isn't installed (the image server's
-   environment), the library reads its own version, not the CLI's (`--version` and a job's
-   settings read the CLI's today).
-3. After v0.1.0: the video-only code (`cli.py`, `media/`, jobs, resume, the cuts and their
-   detector) moves from `core/` to `apps/cli/`, the planner split into the library's memory
-   model and the CLI's video plan; then ComfyUI's nodes. The CLI's own modules take another
-   import name than the library's (`seedvr2x_cli`): a second `seedvr2x/` on the path would hide
-   the first. Its licence becomes "Apache-2.0 AND MIT", the detector's TransNetV2 model moving
-   with it.
+   A first stage only: it left the whole package, `cli.py` included, in `core/`, and no code in
+   `apps/cli/`. That is not the layout agreed (the user, 2026-11-02); step 2 makes it.
+2. The split, now, before the 96 GB card's batch (the user, 2026-11-02). The rule: `core/`
+   holds the bricks, each one step of an upscale; the CLI's app holds its pipeline, which
+   assembles them for long videos, and everything of a job: its plan, saving and resume.
+   - The apps are named after their programs: `apps/cli/` becomes `apps/seedvr2x/`, beside
+     `apps/imgserver/` and, after v0.1.0, `apps/comfyui/`.
+   - No `src/` folder: each project holds its package's folder directly, the one level Python
+     needs to install the `seedvr2x` command, named after the import name.
+   - `core/seedvr2x/`, the library: the model code (`vendor/`) and its loading (`model.py`); the
+     model files' pull and check (`weights.py`, `pull.py`); the DiT's placement and BlockSwap
+     (`blockswap.py`) and its sampling of latents, wherever that sits today; a VAE pass and its
+     tiling (`tiling.py`, `tilegrid.py`) and the VAE's compilation (`compiling.py`); the colour
+     correction (`colour.py`); the memory model (`memory.py`, and from `planner.py` what each
+     brick takes for its shapes: the DiT's, the encode's and the decode's peaks, the tokens,
+     the host's needs, the compiled range).
+   - `apps/seedvr2x/seedvr2x_cli/`, the CLI: the command (`main.py`, today's `cli.py`, and
+     `__main__.py`); the I/O (`media/`); the pipeline per shot (`shot.py`, `run.py`) and the
+     shots' cuts (`cuts.py`, `detector.py`, `transnetv2/`); the plan from `planner.py` (the
+     windows, tiles and swapped blocks a job takes, its segments, quality and lines); a job,
+     its saving and its resume (`manifest.py`, `resume.py`, `units.py`, what a job holds of
+     `job.py`, the environment record it keeps and checks on a resume, `environment.py`, and
+     its code identity); time (`calibration.py`, `timing.py`, `stop.py`, `--until`); the disk
+     line (`disk.py`).
+   - What both use is placed by the map below: the clock, the frame's padding and target size,
+     the plan's and the tiles' types.
+   - The CLI's own modules take another import name, `seedvr2x_cli`: `seedvr2x` is the
+     library's, which the image server and ComfyUI's nodes import, and two `seedvr2x/` on the
+     path would hide one another. The CLI's licence becomes "Apache-2.0 AND MIT", TransNetV2's
+     model moving with the detector.
+   - The library imports nothing of the CLI's, a test holding it. Where it does today, the
+     shared part moves into the library (the types a brick needs), or the CLI hands it in (the
+     tiled pass's scratch files, the models' check's time said ahead, the compile cache's
+     place).
+   - A job's code identity, the CLI's, covers both packages' files: a change to either refuses
+     an older job's resume, as a change to the one package does today.
+   - The tests split the same way, `core/tests/` and `apps/seedvr2x/tests/`, all run in the
+     CLI's environment.
+   - Where each module, and each part of `planner.py`, goes is mapped first and agreed with
+     the user before any code moves. No behaviour changes. The whole GPU suite runs on the
+     result before it is pushed: on the 96 GB card if it is back, else on the RTX 5090.
+3. The image upscale: `seedvr2x image`, then the image server if v0.1.0 takes it, each
+   assembling the library's bricks for one image itself (an assembly the two would share is
+   discussed then, as above), measured on the 96 GB card.
+4. After v0.1.0: ComfyUI's nodes, assembling the same bricks.
 
 ## Architecture
 
