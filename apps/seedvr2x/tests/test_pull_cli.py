@@ -128,7 +128,11 @@ def test_help(capsys: pytest.CaptureFixture[str]) -> None:
         " the network out). Either way, seedvr2x's own files are checked by their pinned size and"
         " SHA-256" in text
     )
-    assert "without --model-dir, seedvr2x_ema_7b_fp16.safetensors or the default" in text
+    assert (
+        "without --model-dir, seedvr2x_ema_7b_fp16.safetensors,"
+        " seedvr2x_ema_7b_int8_convrot.safetensors, seedvr2x_ema_7b_sharp_int8_convrot.safetensors"
+        " or the default" in text
+    )
 
 
 @needs_ffmpeg

@@ -115,6 +115,38 @@ def test_a_reading_and_the_inputs_are_read_from_a_manifest(monkeypatch: pytest.M
     assert reg.recorded_inputs(content)[1] == READINGS["refuses"]
 
 
+def test_the_dit_s_format_is_read_from_a_manifest_and_fp16_where_none_is_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The DiT's format the plan was predicted for (Peaks.record's dit_format): the plan made
+    # again for it, int8's by int8's figures; a manifest from before int8, which records none,
+    # read as fp16, whose plans it held.
+    reading = reg.readings(READINGS["card"], monkeypatch)[0]
+    base: dict[str, Any] = {
+        "input": {"size": [960, 540], "sample_aspect": "1"},
+        "settings": {"resolution": 1080},
+        "shots": [{"start": 0, "end": 45, "seed": 42}],
+    }
+    for dit_model, name in ((peaks.FP16, "fp16"), (peaks.INT8, "int8")):
+        made, predicted = planner.plan(
+            *(reading, HD, SHOTS, planner.Pins(), None),
+            numz_padding=True,
+            attention=peaks.SDPA,
+            dit_model=dit_model,
+        )
+        record = made.record()
+        record["memory"].update(predicted.record())
+        assert record["memory"]["dit_format"] == name
+        found, _ = reg.recorded_inputs(base | {"plan": record})
+        assert found == reg.Inputs(HD, SHOTS, peaks.SDPA, dit_model=dit_model)
+        said = planner.said(made, predicted, "a card", HD, SHOTS, planner.Pins(), numz_padding=True)
+        assert reg.planner_says(reading, found, None) == reg.compared(
+            reg.plan_lines("\n".join(said))
+        )
+    del record["memory"]["dit_format"]
+    assert reg.recorded_inputs(base | {"plan": record})[0].dit_model == peaks.FP16
+
+
 def test_the_readings_are_those_memory_makes(monkeypatch: pytest.MonkeyPatch) -> None:
     # memory.reading's own arithmetic, the tests' stand-ins for the driver and NVML restored.
     held = reg.readings(READINGS["card"], monkeypatch)

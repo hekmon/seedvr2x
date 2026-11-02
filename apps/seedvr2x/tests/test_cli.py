@@ -590,7 +590,11 @@ recorded = {
     "shots": [{"start": 0, "end": 300}],
 }
 args = argparse.Namespace(
-    color_correction="split", accept_env_change=False, input=Path(sys.argv[1])
+    color_correction="split",
+    accept_env_change=False,
+    input=Path(sys.argv[1]),
+    model_dir=Path(sys.argv[2]),
+    dit_model=sys.argv[3],
 )
 cli._early_memory(
     args, recorded, (1080, 1920), planner.Pins(), numz_padding=False, rehearses=False
@@ -604,11 +608,16 @@ def test_the_early_reading_of_the_card_imports_no_torch(tmp_path: Path) -> None:
     # room is read through NVML before torch is imported, no CUDA context of ours made on the
     # card: a process that reads the card (memory.card_free, memory.card_state) and judges a
     # recorded shape in the reading (cli._early_memory, which warns here) has loaded no torch.
-    # The warning is checked said, so that the path was run to its end.
+    # The warning is checked said, so that the path was run to its end. The DiT's file, whose
+    # header says the figures of its format, is read there too, without torch: a synthetic 7B in
+    # fp16 in --model-dir.
+    from test_weights import accepted_models
+
     source = tmp_path / "source.mkv"
     source.write_bytes(b"x" * 1000)
+    dit = accepted_models(tmp_path)[1]
     result = subprocess.run(
-        [sys.executable, "-c", EARLY_READING, str(source)],
+        [sys.executable, "-c", EARLY_READING, str(source), str(tmp_path), dit],
         capture_output=True,
         text=True,
         check=False,

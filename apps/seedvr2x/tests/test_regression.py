@@ -192,8 +192,9 @@ import planner
 from job import Shot
 from main import NUMZ_DRAW, NUMZ_PADDING, NUMZ_TAIL
 from manifest import NAME
-from seedvr2x import memory, pull
+from seedvr2x import memory, peaks, pull
 from seedvr2x.frames import target_size
+from seedvr2x.weights import Architecture
 
 # core/tools/compare.py: the repository is three levels up (apps/seedvr2x/tests/).
 COMPARE = Path(__file__).resolve().parents[3] / "core" / "tools" / "compare.py"
@@ -656,8 +657,8 @@ def logged_host(log: str) -> int | None:
 @dataclass(frozen=True)
 class Inputs:
     """What a job's plan is made from besides the memory, read from the manifest --plan left
-    (recorded_inputs): the target size, the shots and the attention backend the plan was
-    predicted for."""
+    (recorded_inputs): the target size, the shots, and the attention backend and the DiT's
+    format the plan was predicted for."""
 
     target: tuple[int, int]
     shots: tuple[Shot, ...]
@@ -665,6 +666,8 @@ class Inputs:
     # The disk line the plan is given (disk.Disk.line), for the job's masters; its free space,
     # which compared() drops, is nothing here. None: no disk line (the CPU tests of the rest).
     disk: str | None = None
+    # The DiT's format (planner.recorded_dit_model): fp16, the milestone-1 runs', by default.
+    dit_model: Architecture = peaks.FP16
 
 
 def recorded_disk(content: dict[str, Any]) -> str | None:
@@ -690,14 +693,21 @@ def recorded_disk(content: dict[str, Any]) -> str | None:
 def recorded_inputs(content: dict[str, Any]) -> tuple[Inputs, Free]:
     """The inputs of the plan a manifest's content records, with the free memory it was made in:
     the target from the input's size and sample aspect at the setting's resolution (cli._run, job.
-    target_size), the shots as recorded, the attention backend of the plan's record, the disk
-    line of its masters (recorded_disk)."""
+    target_size), the shots as recorded, the attention backend and the DiT's format of the plan's
+    record (fp16 where it names none, planner.recorded_dit_model), the disk line of its masters
+    (recorded_disk)."""
     source, settings = content["input"], content["settings"]
     width, height = source["size"]
     target = target_size(width, height, Fraction(source["sample_aspect"]), settings["resolution"])
     shots = tuple(Shot(shot["start"], shot["end"]) for shot in content["shots"])
     memory_record = content["plan"]["memory"]
-    inputs = Inputs(target, shots, memory_record["attention"], recorded_disk(content))
+    inputs = Inputs(
+        target,
+        shots,
+        memory_record["attention"],
+        recorded_disk(content),
+        planner.recorded_dit_model(memory_record),
+    )
     return inputs, recorded_free(memory_record)
 
 
@@ -739,6 +749,7 @@ def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> l
             host,
             numz_padding=True,
             attention=inputs.attention,
+            dit_model=inputs.dit_model,
         )
     except planner.PlanError as error:
         return [f"refused: {error}"]

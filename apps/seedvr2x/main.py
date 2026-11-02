@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from seedvr2x.model import Models
     from seedvr2x.passes import Compilation
     from seedvr2x.pull import ModelFile, ModelFiles
+    from seedvr2x.weights import Architecture
     from timing import Clock, Unit
 
 # Video file names, other than Matroska's, that -o refuses: the finished file is a .mkv path, the
@@ -298,12 +299,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     # The sharp 7B by default, on the user's eyes: preferred or alike on 67 of 75 windows
     # (DESIGN.md, Weights). A file is recognised by its tensors, not its name (seedvr2x/weights.py).
+    # float16 stays the default, int8 an option, until seedvr2x's own runs decide (DESIGN.md,
+    # Weights, "int8 before v0.1.0 is tagged").
     parser.add_argument(
         "--dit-model",
         default="seedvr2x_ema_7b_sharp_fp16.safetensors",
-        help="the DiT's file: SeedVR2's 7B DiT, regular or sharp, in fp16, recognised by its"
-        " tensors; without --model-dir, seedvr2x_ema_7b_fp16.safetensors or the default"
-        " (default: %(default)s, the sharp 7B)",
+        help="the DiT's file: SeedVR2's 7B DiT, regular or sharp, in fp16 or in int8 (seedvr2x's"
+        " int8 files: half the DiT's weights, multiplied in 8 bits), recognised by its tensors;"
+        " without --model-dir, seedvr2x_ema_7b_fp16.safetensors,"
+        " seedvr2x_ema_7b_int8_convrot.safetensors,"
+        " seedvr2x_ema_7b_sharp_int8_convrot.safetensors or the default (default: %(default)s,"
+        " the sharp 7B)",
     )
     parser.add_argument(
         "--vae-model",
@@ -1183,6 +1189,10 @@ def _run(args: argparse.Namespace) -> int:
                     host,
                 )
             attention = _attention()
+            # The DiT's figures by its file's format, fp16's or int8's (peaks.DITS): a plan
+            # made loads the models, so its file is there.
+            assert dit is not None, "a plan made loads its models"
+            dit_model = _dit_model(dit)
             try:
                 plan, peaks = planner.plan(
                     *(free, target, shots, pins, host),
@@ -1191,6 +1201,7 @@ def _run(args: argparse.Namespace) -> int:
                     recorded=kept_plan,
                     attention=attention,
                     compile_vae=args.compile,
+                    dit_model=dit_model,
                 )
             except planner.PlanError as error:
                 if kept_plan is None or error.shortfall is None:
@@ -1210,6 +1221,7 @@ def _run(args: argparse.Namespace) -> int:
                         split=split,
                         numz_padding=numz_padding,
                         attention=attention,
+                        dit_model=dit_model,
                     )
                 except planner.PlanError as again:
                     logger.debug("%s", again)
@@ -3216,6 +3228,14 @@ def _early_memory(
         shots = [Shot(int(shot["start"]), int(shot["end"])) for shot in recorded["shots"]]
         planner.check_recorded(known, shots, target, numz_padding=numz_padding)
         attention = peaks.FLASH_ATTN_2 if find_spec("flash_attn") else peaks.SDPA
+        dit_model = _early_dit_model(args)
+        if dit_model is None:
+            logger.debug(
+                "the recorded plan isn't judged before the checks: the DiT's file, which says"
+                " the figures of its format, isn't there, or isn't a DiT seedvr2x runs: the"
+                " checks say which"
+            )
+            return
         planner.plan(
             memory.early(*state),
             target,
@@ -3226,6 +3246,7 @@ def _early_memory(
             numz_padding=numz_padding,
             recorded=known,
             attention=attention,
+            dit_model=dit_model,
         )
     except planner.PlanError as error:
         short = error.shortfall
@@ -3358,6 +3379,35 @@ def _free_memory(device: "torch.device") -> int:
     free = torch.cuda.mem_get_info(device)[0]
     del first, convolved, product
     return free
+
+
+def _dit_model(path: Path) -> "Architecture":
+    """The architecture of the DiT's file at path, one of the DiT's formats the plan counts by
+    (peaks.DITS: fp16, int8), by its header, as weights.check_models has checked it: a second's
+    read. The CPU tests' stand-in replaces it, its model file empty."""
+    from seedvr2x import weights
+
+    return weights.check(path, "dit")
+
+
+def _early_dit_model(args: argparse.Namespace) -> "Architecture | None":
+    """The DiT's architecture for the early judgement of a resume's memory (_early_memory), by
+    its file's header where the file is there to read before the checks: in --model-dir, or in
+    Hugging Face's cache for one of seedvr2x's own (pull.cached); None where it isn't, or is
+    refused, which the checks then say."""
+    from seedvr2x import pull
+    from seedvr2x.weights import ModelError
+
+    try:
+        if args.model_dir is not None:
+            path: Path | None = args.model_dir / args.dit_model
+        elif args.dit_model in pull.PINNED:
+            path = pull.cached(args.dit_model)
+        else:
+            path = None
+        return None if path is None else _dit_model(path)
+    except ModelError:
+        return None
 
 
 def _attention() -> str:

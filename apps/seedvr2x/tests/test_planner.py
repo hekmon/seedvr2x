@@ -188,9 +188,14 @@ def test_weights_by_the_models_shapes() -> None:
     assert (sum(block), sum(other)) == (peaks.BLOCK, peaks.DIT_OTHER)
     assert laid_out(weights) == peaks.VAE_WEIGHTS
     plan = Plan(5, swapped=36, resident_encode=0, vae_in_dit=False)
-    pinned = planner._pinned(plan)  # pyright: ignore[reportPrivateUsage]
+    pinned = planner._pinned(plan, peaks.FP16)  # pyright: ignore[reportPrivateUsage]
     assert pinned == 36 * paged(laid_out(block)) + paged(laid_out(other)) + paged(laid_out(weights))
     assert f"{gib(pinned):.2f}" == "15.81"
+    # In int8, by the int8 file's header (weights.DIT_7B_INT8): 8.23 GiB.
+    quantised = planner._pinned(plan, peaks.INT8)  # pyright: ignore[reportPrivateUsage]
+    int8_block = peaks.block_bytes(peaks.INT8)
+    assert quantised == 36 * paged(int8_block) + paged(peaks.DIT_OTHER) + paged(peaks.VAE_WEIGHTS)
+    assert f"{gib(quantised):.2f}" == "8.23"
 
 
 def test_out_of_memory_rows() -> None:
@@ -2655,9 +2660,11 @@ def test_pinned_is_the_loaders() -> None:
         blocks = len(parts - {blockswap.OTHER})
         other = blockswap.OTHER in parts
         assert leaving(plan) == blocks, plan
-        expected = blocks * paged(BLOCK) + other * paged(peaks.DIT_OTHER)
-        expected += 0 if plan.vae_in_dit else paged(peaks.VAE_WEIGHTS)
-        assert pinned(plan) == expected, plan
+        for dit_model in peaks.DITS:
+            expected = blocks * paged(peaks.block_bytes(dit_model))
+            expected += other * paged(peaks.DIT_OTHER)
+            expected += 0 if plan.vae_in_dit else paged(peaks.VAE_WEIGHTS)
+            assert pinned(plan, dit_model) == expected, plan
         kinds.add((blocks > 0, other, plan.vae_in_dit))
     assert len(plans) > 150 and len(kinds) == 6  # no other parameters pinned without a block
 
@@ -2917,6 +2924,8 @@ def test_peaks_record() -> None:
         # No reserve: the driver refuses memory the card doesn't have.
         "reserve": None,
         "attention": "flash_attn_2",
+        # The DiT's format the peaks were predicted for: the default's, fp16.
+        "dit_format": "fp16",
         "budget": our_free(24) - MARGIN,
         "encode_peak": peaks.encode_peak(OURS_1080, Tiles(1856), 1, 28),
         # The longest window's.
@@ -2951,6 +2960,72 @@ def test_peaks_record() -> None:
         "vae_in_dit",
         "scratch_allowance",
     }
+
+
+def test_an_int8_dit_plans_by_its_own_figures() -> None:
+    # The DiT of seedvr2x's int8 files (peaks.INT8): its phase by its own weights and the W8A8
+    # path's buffers (peaks.dit_peak), its blocks' pinned copies and its VAE phases' share by its
+    # blocks' bytes; on cards of 16 to 48 GB at 1080p, a shot of 301 frames, a window as long as
+    # fp16's or longer, with fewer blocks swapped or as few, every predicted peak under the
+    # budget, and its line saying int8. The int8 figures beyond the weights are provisional
+    # (peaks.INT8_*).
+    job = (HD, shots(76), Pins(), 64 * GIB)
+    for card in (16, 24, 32, 48):
+        fp16, fp16_peaks = planner.plan(our_free(card), *job, split=True)
+        int8, int8_peaks = planner.plan(our_free(card), *job, split=True, dit_model=peaks.INT8)
+        assert int8_peaks.dit_model == peaks.INT8 and fp16_peaks.dit_model == peaks.FP16
+        # The record keeps the format by its name, read back as the format itself; a record
+        # from before int8, with none, as fp16 (planner.recorded_dit_model).
+        for predicted, name in ((fp16_peaks, "fp16"), (int8_peaks, "int8")):
+            record = predicted.record()
+            assert record["dit_format"] == name
+            assert planner.recorded_dit_model(record) == predicted.dit_model
+        assert int8_peaks.window >= fp16_peaks.window and int8.swapped <= fp16.swapped, card
+        assert int8_peaks.dit == peaks.dit_peak(
+            planner._padded(HD, False),  # pyright: ignore[reportPrivateUsage]
+            int8_peaks.window,
+            int8.swapped,
+            int8.vae_in_dit,
+            dit_model=peaks.INT8,
+        )
+        assert max(int8_peaks.need(phase) for phase in ("encode", "dit", "decode")) <= (
+            int8_peaks.budget
+        )
+        pinned = planner._pinned(int8, peaks.INT8)  # pyright: ignore[reportPrivateUsage]
+        assert int8_peaks.host == (
+            planner.HOST_RESIDENT + pinned + int8_peaks.shot + int8.scratch_allowance
+        )
+    assert planner.recorded_dit_model({"attention": "sdpa"}) == peaks.FP16
+    with pytest.raises(KeyError):
+        planner.recorded_dit_model({"dit_format": "fp8"})
+    # On 24 GB, windows of 17 latents either way, every block swapped holding no longer one: the
+    # DiT's phase then holds the slots and the tokens, which int8 shrinks little. fp16 swaps 28
+    # blocks for them and keeps one in the encode, none in the decode, 15.81 GiB pinned for every
+    # part of the weights; int8 swaps 20 and keeps 2 and 1, 7.86 GiB pinned for 35 blocks and the
+    # VAE.
+    fp16_24, fp16_24_peaks = planner.plan(our_free(24), *job, split=True)
+    int8_24, int8_24_peaks = planner.plan(our_free(24), *job, split=True, dit_model=peaks.INT8)
+    assert (fp16_24_peaks.window, int8_24_peaks.window) == (17, 17)
+    assert (fp16_24.swapped, int8_24.swapped) == (28, 20)
+    blocks = (
+        planner._pinned(fp16_24, peaks.FP16),  # pyright: ignore[reportPrivateUsage]
+        planner._pinned(int8_24, peaks.INT8),  # pyright: ignore[reportPrivateUsage]
+    )
+    assert [f"{gib(pinned):.2f}" for pinned in blocks] == ["15.81", "7.86"]
+    assert (int8_24.resident_encode, int8_24.resident_decode) == (2, 1)
+    said = planner.said(int8_24, int8_24_peaks, "a card", *job[:3])
+    assert said_line(said, "DiT") == (
+        "plan: DiT: its weights in int8, 7.76 GiB, half of fp16's; a window's memory counted as"
+        " fp16's plus 0.41 GiB for int8's buffers until int8's own is measured; --dit-model names"
+        " the file"
+    )
+    # A recorded plan planned again around its shape, and a resume's refusal, in int8's figures.
+    recorded = replace(bare(int8_24), swapped=0, resident_encode=None, resident_decode=None)
+    again, _ = planner.plan(our_free(24), *job, split=True, recorded=recorded, dit_model=peaks.INT8)
+    assert bare(again) == bare(int8_24)
+    # Another architecture has no figures to plan by.
+    with pytest.raises(ValueError, match="the DiT's figures are for its fp16 and int8 files"):
+        planner.plan(our_free(24), *job, dit_model=weights.DIT_3B)
 
 
 def test_said() -> None:
@@ -3004,7 +3079,9 @@ def test_said() -> None:
     pins = Pins(window=19, swap_blocks=0, encode_tile=0, decode_tile=2048)
     made, peaks = planner.plan(round(94.34 * GIB), UHD, shots(76), pins, 64 * GIB, split=True)
     said = planner.said(made, peaks, "a card", UHD, shots(76), pins)
-    assert said[4:] == [
+    # From the windows' line on: the card's, the frames', the attention's and the shots' before it.
+    windows = next(i for i, line in enumerate(said) if line.startswith("plan: windows:"))
+    assert said[windows:] == [
         "plan: windows: 19 latents at most (73 frames), the longest run 17 latents, pinned by"
         " --window: 0 of 1 shot in one window, 4 joins; a longer window, fewer joins; --window N"
         " caps them",

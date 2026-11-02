@@ -248,8 +248,9 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     # The planner's budget: the free memory's reading as the command line takes it
     # (cli._free_memory), its first tensor and its warm-up on the stand-in's device, the driver's
     # figures the stand-in's; the system memory available a figure of its own, not this
-    # machine's; and the attention backend FlashAttention 2, whose fit the plans here are
-    # counted by, on a machine without it too (cli._attention).
+    # machine's; the attention backend FlashAttention 2, whose fit the plans here are counted
+    # by, on a machine without it too (cli._attention); and the DiT's file's format fp16, the
+    # stand-in's file empty (cli._dit_model; test_int8_cli.py runs an int8 one).
     free_memory = cli._free_memory  # pyright: ignore[reportPrivateUsage]
     ASKED.clear()
 
@@ -265,6 +266,7 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(cli, "_free_memory", read_free)
     patch(cli, "_host_available", lambda: HOST)
     patch(cli, "_attention", lambda: "flash_attn_2")
+    patch(cli, "_dit_model", lambda path: peaks.FP16)
     patch(model, "load_models", load)
     patch(model, "nvidia_driver", lambda: "a stand-in")
     patch(model, "decode_stream", stand_in_decode_stream)
@@ -936,6 +938,7 @@ def test_plan_recorded_and_phases_entered(
         # No reserve on a driver that refuses.
         "reserve": None,
         "attention": "flash_attn_2",
+        "dit_format": "fp16",
         "budget": FREE - planner.MARGIN,
         "encode_peak": peaks.encode_peak(PADDED),
         # A window of the 6-latent shot.
@@ -1958,7 +1961,10 @@ def test_one_file_plans_as_a_directory(
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
     # --compile's setting is asked of the planner for every job (planner.plan's compile_vae),
     # which is no output's own: the three alike.
-    assert asked == [{"split", "numz_padding", "recorded", "attention", "compile_vae"}] * 3
+    assert (
+        asked
+        == [{"split", "numz_padding", "recorded", "attention", "compile_vae", "dit_model"}] * 3
+    )
     # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
     # here).
     assert backends == ["flash_attn_2"] * 3

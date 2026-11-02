@@ -6,9 +6,10 @@ which don't wait for torch (tests/test_cli.py).
 Its memory model, the bricks' (peaks.py; the constants named below are its): what each phase is
 predicted to peak at on the GPU, in bytes. The DiT's and the VAE's passes by the fits of
 research/docs/planner-limits.md and research/docs/vram.md, measured on numz's CLI with the 7B
-fp16, the one DiT seedvr2x runs (weights.ACCEPTED); a tile by the peak measured on seedvr2x's own
-tiled passes (MEASURED), the fits serving the tiles cut off at the picture's edges at a size
-nobody measured. No VAE pass keeps anything of the shot on
+fp16 (peaks.FP16), and the DiT of seedvr2x's int8 files by its own weights and the fp16 fit's
+other terms, provisional (peaks.INT8, the job's dit_model); a tile by the peak measured on
+seedvr2x's own tiled passes (MEASURED), the fits serving the tiles cut off at the picture's edges
+at a size nobody measured. No VAE pass keeps anything of the shot on
 the GPU (shot.py, seedvr2x/tiling.py), and none is counted by its shot's length. Nor is
 the DiT's phase, judged by its longest window alone: it keeps nothing of a shot beside the
 window it runs, the shot's noise drawn in system memory (shot.sample_windows; DESIGN.md,
@@ -61,6 +62,7 @@ from seedvr2x.errors import Refusal
 from seedvr2x.frames import check_target, output_size, padded_length, padded_size
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Phase, Shapes, Tiles
+from seedvr2x.weights import Architecture
 
 logger = logging.getLogger("cli.planner")
 
@@ -426,6 +428,10 @@ class Peaks:
     # a pin's, the pin that runs with memory.RESERVE (PlanError.instead); else empty.
     tightened: str | None = None
     instead: str = ""
+    # The DiT's file's format the peaks were predicted for (peaks.DITS), which the plan's lines
+    # say and the record keeps by its name (DIT_FORMATS), for information: the job's record
+    # names the file itself (settings.dit_model), which a resume compares.
+    dit_model: Architecture = peaks.FP16
 
     def peak(self, phase: Phase) -> int:
         """The predicted peak of `phase`."""
@@ -447,8 +453,10 @@ class Peaks:
         for information, never compared (resume.UNCOMPARED): bytes, the longest window in
         latents. `free` is the memory the plan was made in; beside it, what the driver reported
         free to the process (driver_free, the same figure on a driver that refuses) and what the
-        whole card had free (card_free; null where it wasn't read), and the attention backend
-        the DiT's peak was predicted for. Of `host`, the system memory the plan takes, host_shot
+        whole card had free (card_free; null where it wasn't read), the attention backend the
+        DiT's peak was predicted for, and the format of the DiT's file the peaks were predicted
+        for (dit_format, DIT_FORMATS' name, read back by recorded_dit_model). Of `host`, the
+        system memory the plan takes, host_shot
         is one shot's part, the shot that holds the most (Peaks.shot). PROVISIONAL
         (implementation, 2026-10-10 and 12): the fields' names; and a window shortened or tiles
         shrunk for the host's memory (Peaks.shortened, Peaks.shrunk) aren't recorded: the plan's
@@ -461,6 +469,7 @@ class Peaks:
             # driver that refuses, which leaves none.
             "reserve": self.reading.reserve if self.reading.held else None,
             "attention": self.attention,
+            "dit_format": _format_name(self.dit_model),
             "budget": self.budget,
             "encode_peak": self.encode,
             "dit_peak": self.dit,
@@ -473,10 +482,28 @@ class Peaks:
         }
 
 
+# The DiT's formats by the name a plan's record gives them (Peaks.record's dit_format): fp16's
+# and int8's, peaks.DITS.
+DIT_FORMATS: dict[str, Architecture] = {"fp16": peaks.FP16, "int8": peaks.INT8}
+
+
+def _format_name(dit_model: Architecture) -> str:
+    """The name of dit_model's format in a plan's record (DIT_FORMATS)."""
+    return next(name for name, known in DIT_FORMATS.items() if known == dit_model)
+
+
+def recorded_dit_model(memory_record: dict[str, Any]) -> Architecture:
+    """The DiT's format a plan's record says its peaks were predicted for (Peaks.record's
+    dit_format), for whoever makes the plan again from a manifest: fp16 where the record has
+    none, a manifest from before int8, whose plans were all fp16's. KeyError for a name
+    DIT_FORMATS doesn't know."""
+    return DIT_FORMATS[memory_record.get("dit_format", "fp16")]
+
+
 @dataclass(frozen=True)
 class _Job:
     """What the planner counts a job by: the memory it may count on, its size, its shots'
-    lengths, and the attention backend its DiT runs on."""
+    lengths, the attention backend its DiT runs on, and its DiT's file's format."""
 
     free: int  # bytes: what the plan may count its peaks in (reading.counted)
     target: tuple[int, int]  # frames.target_size
@@ -487,6 +514,9 @@ class _Job:
     reading: Reading  # how `free` was read, for the plan's words and its record
     attention: str  # DIT_ATTENTION's
     compile_vae: bool = False  # the VAE compiled (--compile): its passes at COMPILE_PEAK
+    # The DiT's file's format, whose figures its phase and its weights' places are counted by
+    # (peaks.DITS): fp16's, or int8's.
+    dit_model: Architecture = peaks.FP16
 
     @property
     def margin(self) -> int:
@@ -529,6 +559,7 @@ def plan(
     attention: str = peaks.FLASH_ATTN_2,
     compile_vae: bool = False,
     compile_fixed: bool = False,
+    dit_model: Architecture = peaks.FP16,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job of `shots` resized to target (frames.target_size), in the GPU memory it may
     count on, less its margin, and what it is predicted to take; refused (PlanError) when a pin
@@ -642,14 +673,17 @@ def plan(
                 attention=attention,
                 compile_vae=True,
                 compile_fixed=True,
+                dit_model=dit_model,
             )
         except PlanError as refused:
             raise _compile_refusal(
                 refused,
                 (free, target, shots, pins, host_available),
-                dict(split=split, numz_padding=numz_padding, attention=attention),
+                dict(
+                    split=split, numz_padding=numz_padding, attention=attention, dit_model=dit_model
+                ),
             ) from None
-    job = _job(free, target, shots, split, numz_padding, attention, compile_vae)
+    job = _job(free, target, shots, split, numz_padding, attention, compile_vae, dit_model)
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
         raise PlanError(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {peaks.BLOCKS} blocks, so from 0 to"
@@ -746,6 +780,7 @@ def plan_again(
     split: bool = False,
     numz_padding: bool = False,
     attention: str = peaks.FLASH_ATTN_2,
+    dit_model: Architecture = peaks.FP16,
 ) -> tuple[Plan, Peaks]:
     """The plan of a job resumed whose recorded shape no longer fits the memory free (`refused`,
     plan's refusal of `recorded`), planned again for what is left (DESIGN.md, Memory planner, A
@@ -795,6 +830,7 @@ def plan_again(
                 attention=attention,
                 compile_vae=recorded.compile_vae,
                 compile_fixed=True,
+                dit_model=dit_model,
             )
         except PlanError as again:
             error = again
@@ -816,7 +852,8 @@ def _compile_refusal(
     (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in", decided on 2026-10-29): the same
     command without --compile and, for a tile pinned, the pin within the shapes that the planner
     takes (the untiled pass if it is within them, else the largest tile that fits). `job` is plan's
-    free, target, shots, pins and host_available, `options` its split, numz_padding and attention.
+    free, target, shots, pins and host_available, `options` its split, numz_padding, attention and
+    dit_model.
     A job no plain plan fits is refused as it was, whatever --compile asked: the plain plan's
     refusal.
 
@@ -1066,7 +1103,7 @@ def _host_short(job: _Job, made: Plan, host_available: int | None) -> tuple[int,
     a GiB, as its refusal would have said them (_unfit: each part to the nearest hundredth of a
     GiB, their sum, and what is there rounded down, a hundredth under the total at least)."""
     assert host_available is not None
-    taken = sum(_host_hundredths(made, _peaks(job, made).shot))
+    taken = sum(_host_hundredths(made, _peaks(job, made).shot, job.dit_model))
     return taken, min(_hundredths(host_available, up=False), taken - 1)
 
 
@@ -1333,7 +1370,9 @@ def said(
     from shot import shot_layout
 
     job = _job(
-        predicted.reading, target, shots, False, numz_padding, predicted.attention, plan.compile_vae
+        *(predicted.reading, target, shots, False, numz_padding, predicted.attention),
+        plan.compile_vae,
+        predicted.dit_model,
     )
     height, width = job.padded
     out_height, out_width = output_size(target)
@@ -1357,6 +1396,8 @@ def said(
             "attention: PyTorch's SDPA, FlashAttention 2 not being installed: a window takes"
             " more memory under it"
         )
+    if job.dit_model == peaks.INT8:
+        lines.append(_int8_said())
     lines.append(
         f"shots: {len(shots)}, the longest of {_count(job.frames, 'frame')}"
         f" ({_count(job.lengths[-1], 'latent')})"
@@ -1374,7 +1415,7 @@ def said(
         f" {_resident_said(plan.resident_encode, plan.swapped)}; in the decode,"
         f" {_resident_said(plan.resident_decode, plan.swapped)}"
     )
-    process, pinned, held, allowance = _host_hundredths(plan, predicted.shot)
+    process, pinned, held, allowance = _host_hundredths(plan, predicted.shot, job.dit_model)
     left = _left(plan, "the DiT's other parameters", "the VAE")
     copies = f"{pinned / 100:.2f} GiB pinned for {left}" if left else "nothing pinned"
     in_all = process + pinned + held + allowance
@@ -1452,6 +1493,18 @@ def said(
         " a choice"
     )
     return [f"plan: {line}" for line in lines]
+
+
+def _int8_said() -> str:
+    """The plan's line of a DiT in int8 (said): its weights' bytes, by its header (peaks.INT8),
+    and that a window's memory beside them is counted as fp16's plus the int8 path's buffers
+    (peaks.INT8_BUFFERS), provisional until int8's own is measured (peaks.INT8_*). A DiT in fp16,
+    the default, has no line of its own: weights.check_models' line names it."""
+    return (
+        f"DiT: its weights in int8, {_gib(peaks.weights_bytes(peaks.INT8))} GiB, half of fp16's;"
+        f" a window's memory counted as fp16's plus {_gib(peaks.INT8_BUFFERS)} GiB for int8's"
+        " buffers until int8's own is measured; --dit-model names the file"
+    )
 
 
 # What the plan's lines say of a value a resume takes from the job's record (said).
@@ -1600,6 +1653,7 @@ def _job(
     numz_padding: bool,
     attention: str = peaks.FLASH_ATTN_2,
     compile_vae: bool = False,
+    dit_model: Architecture = peaks.FP16,
 ) -> _Job:
     if not shots:
         raise ValueError("a job without a shot")
@@ -1607,6 +1661,8 @@ def _job(
         raise ValueError(
             f"attention {attention!r}: the DiT's fit is {peaks.FLASH_ATTN_2}'s or {peaks.SDPA}'s"
         )
+    if dit_model not in peaks.DITS:
+        raise ValueError(f"{dit_model.name}: the DiT's figures are for its fp16 and int8 files")
     # A number is a driver that refuses: what it reports free is the card's, and all the plan's.
     reading = free if isinstance(free, Reading) else Reading(free, None, free, False)
     lengths = sorted({_latents(shot.frames) for shot in shots})
@@ -1615,6 +1671,7 @@ def _job(
         *(reading.counted, target, tuple(lengths), frames, split, numz_padding, reading),
         attention,
         compile_vae,
+        dit_model,
     )
 
 
@@ -1658,7 +1715,7 @@ def _dit_need(job: _Job, cap: int | None, swapped: int, vae_in_dit: bool) -> int
     system memory (shot.sample_windows). Wherever the phase is judged, and what the plan records
     (_peaks): real memory, unlike a VAE pass's room."""
     latents = _longest(job.lengths, cap)
-    return peaks.dit_peak(job.padded, latents, swapped, vae_in_dit, job.attention)
+    return peaks.dit_peak(job.padded, latents, swapped, vae_in_dit, job.attention, job.dit_model)
 
 
 def _holds(job: _Job, cap: int | None, swapped: int) -> bool:
@@ -1677,7 +1734,8 @@ def _longest_cap(job: _Job, swapped: int) -> int | None:
 
     def possible(cap: int) -> bool:
         latents = _longest(job.lengths, cap)
-        return peaks.dit_least(job.padded, latents, swapped, False, job.attention) <= job.budget
+        least = peaks.dit_least(job.padded, latents, swapped, False, job.attention, job.dit_model)
+        return least <= job.budget
 
     low, high = job.smallest, job.lengths[-1]
     if not possible(low):
@@ -2011,9 +2069,11 @@ def _vae_peak(
     """The predicted peak of the job's encode or decode (encode_peak, decode_peak), whatever
     its shots' lengths: no VAE pass keeps anything of the shot on the GPU."""
     if phase == "encode":
-        return peaks.encode_peak(job.padded, tiles, resident, swapped, job.compile_vae)
+        return peaks.encode_peak(
+            job.padded, tiles, resident, swapped, job.compile_vae, job.dit_model
+        )
     return peaks.decode_peak(
-        job.padded, job.output, tiles, resident, swapped, job.split, job.compile_vae
+        job.padded, job.output, tiles, resident, swapped, job.split, job.compile_vae, job.dit_model
     )
 
 
@@ -2227,16 +2287,17 @@ def _residents(plan: Plan) -> tuple[int | None, int | None]:
     return plan.resident_encode, plan.resident_decode
 
 
-def _pinned(plan: Plan) -> int:
+def _pinned(plan: Plan, dit_model: Architecture) -> int:
     """The pinned system memory of the plan, in bytes: a copy of each part of the weights that
     leaves the GPU in some phase, of its own size rounded up to a page (blockswap.HostCopy;
     DESIGN.md, BlockSwap, rewritten), as the loader makes them (model.load_models: the parts of
     blockswap.dit_parts, and the VAE): each block of the DiT that is swapped or that a VAE phase
     doesn't keep; the DiT's other parameters when a VAE phase keeps nothing of it; the VAE's
-    weights when they leave the DiT's phase. 15.19 GiB for the 36 blocks, 15.35 with the other
-    parameters, 15.81 with the VAE (measured, milestone 3, 2026-10-11)."""
-    parts = [peaks.BLOCK] * _leaving(plan)
-    parts += [peaks.DIT_OTHER] if 0 in _residents(plan) else []
+    weights when they leave the DiT's phase; the DiT's in the format of its file (dit_model).
+    In fp16, 15.19 GiB for the 36 blocks, 15.35 with the other parameters, 15.81 with the VAE
+    (measured, milestone 3, 2026-10-11); in int8, by its headers, 7.61, 7.76 and 8.23."""
+    parts = [peaks.block_bytes(dit_model)] * _leaving(plan)
+    parts += [peaks.other_bytes(dit_model)] if 0 in _residents(plan) else []
     parts += [] if plan.vae_in_dit else [peaks.VAE_WEIGHTS]
     return sum(-(-part // mmap.PAGESIZE) * mmap.PAGESIZE for part in parts)
 
@@ -2282,7 +2343,7 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
         _vae_peak(job, "encode", plan.encode_tiles, plan.resident_encode, plan.swapped),
         _dit_need(job, plan.window, plan.swapped, plan.vae_in_dit),
         _vae_peak(job, "decode", plan.decode_tiles, plan.resident_decode, plan.swapped),
-        HOST_RESIDENT + _pinned(plan) + held + plan.scratch_allowance,
+        HOST_RESIDENT + _pinned(plan, job.dit_model) + held + plan.scratch_allowance,
         _kept(job, plan),
         latents,
         peaks.tokens(job.padded, 1),
@@ -2291,6 +2352,7 @@ def _peaks(job: _Job, plan: Plan) -> Peaks:
         held,
         moment,
         holder,
+        dit_model=job.dit_model,
     )
 
 
@@ -2370,7 +2432,7 @@ def _allowance(job: _Job, plan: Plan, host_available: int | None) -> int:
     kept = _kept(job, plan)
     if host_available is None:
         return min(kept, ALLOWANCE_UNKNOWN_HOST)
-    left = host_available - _pinned(plan) - _shot_held(job, plan)[0]
+    left = host_available - _pinned(plan, job.dit_model) - _shot_held(job, plan)[0]
     return max(0, min(kept, left // 2, left - HOST_RESIDENT))
 
 
@@ -2405,7 +2467,7 @@ def _unfit(job: _Job, plan: Plan, host_available: int | None) -> str | None:
     if host_available is not None and peaks.host > host_available:
         # Each part as the plan's lines say it, and the total their sum as said, so that the
         # message's figures add up (_host_hundredths).
-        process, pinned, held, allowance = _host_hundredths(plan, peaks.shot)
+        process, pinned, held, allowance = _host_hundredths(plan, peaks.shot, job.dit_model)
         taken = [(process, "for the process")]
         if pinned:
             left = _left(plan, "the DiT's other parameters", "the VAE's weights")
@@ -2465,7 +2527,7 @@ def _refusing(job: _Job, plan: Plan, host_available: int | None) -> Phase | Lite
     return ""
 
 
-def _host_hundredths(plan: Plan, shot: int) -> tuple[int, int, int, int]:
+def _host_hundredths(plan: Plan, shot: int, dit_model: Architecture) -> tuple[int, int, int, int]:
     """What the plan takes of system memory, as its line and a refusal for it say it (said,
     _unfit), in hundredths of a GiB: the process's own (HOST_RESIDENT), the pinned copies
     (_pinned), what the run holds of a shot at the most, `shot` bytes (Peaks.shot), and the
@@ -2476,7 +2538,7 @@ def _host_hundredths(plan: Plan, shot: int) -> tuple[int, int, int, int]:
     the GPU's memory is, a refusal would say 15.82 where the plan's line says 15.81."""
     return (
         _nearest(HOST_RESIDENT),
-        _nearest(_pinned(plan)),
+        _nearest(_pinned(plan, dit_model)),
         _nearest(shot),
         _nearest(plan.scratch_allowance),
     )
