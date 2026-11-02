@@ -13,14 +13,14 @@ Usage, from core/, in the CLI's environment:
   uv run --project ../apps/seedvr2x tools/vendor.py diff [--bytedance] [--raw] [--full] [PATH...]
   uv run --project ../apps/seedvr2x tools/vendor.py check [--numz DIR]
 
-copy refuses to overwrite a file that differs from numz unless --force: those are our changes.
-diff compares vendor/ with numz, or with ByteDance (--bytedance), whose absolute imports are first
-rewritten in numz's relative form unless --raw, so that the import style isn't reported as a
-change, and lists the numz files dropped on purpose. check verifies that a file carries the marker
-exactly when it differs from numz, that the original header is kept above it, that binary files
-are untouched, that no dropped file is back, that every relative import resolves inside vendor/,
-which keeps numz's runtime out, and that ruff finds no syntax error or undefined name that numz's
-own files don't have.
+copy refuses to overwrite a file that differs from numz unless --force: those are seedvr2x's
+changes. diff compares vendor/ with numz, or with ByteDance (--bytedance), whose absolute imports
+are first rewritten in numz's relative form unless --raw, so that the import style isn't reported as
+a change, and lists the numz files dropped on purpose. check verifies that a file carries the marker
+exactly when it differs from numz, that the original header is kept above it, that binary files are
+untouched, that no dropped file is back, that every relative import resolves inside vendor/, which
+keeps numz's runtime out, and that ruff finds no syntax error or undefined name that numz's own
+files don't have.
 """
 
 import argparse
@@ -346,8 +346,8 @@ def unresolved_imports(source: str, vendor_file: str) -> Iterator[str]:
 
 
 def lint_findings(root: Path) -> Counter[tuple[str, str, str]]:
-    """ruff's error findings under root, by file, rule and message: line numbers, which our edits
-    shift, are left out."""
+    """ruff's error findings under root, by file, rule and message: line numbers, which seedvr2x's
+    edits shift, are left out."""
     ruff = [sys.executable, "-m", "ruff", "check", "--isolated", "--exit-zero"]
     result = subprocess.run(
         [*ruff, "--select", LINT_RULES, "--output-format", "json", str(root)],
@@ -426,7 +426,7 @@ def main() -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     copy = commands.add_parser("copy", help="write numz's files into vendor/")
     copy.add_argument("--numz", type=Path, default=NUMZ, help="numz repository (git)")
-    copy.add_argument("--force", action="store_true", help="overwrite our changes too")
+    copy.add_argument("--force", action="store_true", help="overwrite seedvr2x's changes too")
     diff = commands.add_parser("diff", help="compare vendor/ with numz or ByteDance")
     diff.add_argument("--bytedance", action="store_true", help="compare with ByteDance")
     diff.add_argument("--raw", action="store_true", help="keep ByteDance's absolute imports")

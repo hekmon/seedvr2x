@@ -276,7 +276,7 @@ def test_importing_the_whole_library_loads_nothing_of_the_cli() -> None:
     assert set(names) <= set(loaded)
     assert loaded["seedvr2x"] is not None and Path(loaded["seedvr2x"]).is_relative_to(CORE)
     # The CLI's files are the app's root modules and packages; the app's directory holds its
-    # environment too (apps/seedvr2x/.venv), whose files are none of ours.
+    # environment too (apps/seedvr2x/.venv), whose files are none of the CLI's.
     ours = [
         name
         for name, file in loaded.items()

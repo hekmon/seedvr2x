@@ -240,8 +240,8 @@ def cases() -> Iterator[tuple[str, tuple[int, int], int]]:
 def test_split_is_the_study(
     study: ModuleType, name: str, target: tuple[int, int], stages: int, kind: str
 ) -> None:
-    # Ours against the study's split() on the same frames, `split:ycc:4:SC`, SC the stages the rule
-    # gives at the factor (FACTORS): within one 16-bit code, bit for bit in fact.
+    # seedvr2x's split() against the study's split() on the same frames, `split:ycc:4:SC`, SC the
+    # stages the rule gives at the factor (FACTORS): within one 16-bit code, bit for bit in fact.
     source = FACTORS[name][0]
     assert colour.colour_stages(source, target) == stages
     content, reference = frames_for(kind, target, seed=len(name) + target[1])

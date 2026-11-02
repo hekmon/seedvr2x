@@ -605,7 +605,7 @@ print(*sorted(name for name in ("torch", "torchvision") if name in sys.modules))
 
 def test_the_early_reading_of_the_card_imports_no_torch(tmp_path: Path) -> None:
     # DESIGN.md, Memory planner, A plan shapes the output a little (decided on 2026-10-28): the
-    # room is read through NVML before torch is imported, no CUDA context of ours made on the
+    # room is read through NVML before torch is imported, no seedvr2x CUDA context made on the
     # card: a process that reads the card (memory.card_free, memory.card_state) and judges a
     # recorded shape in the reading (cli._early_memory, which warns here) has loaded no torch.
     # The warning is checked said, so that the path was run to its end. The DiT's file, whose

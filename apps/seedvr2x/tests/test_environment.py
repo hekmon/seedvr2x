@@ -117,7 +117,7 @@ def test_the_record_is_the_commands_requirements() -> None:
 
 def test_the_editable_finder_is_not_recorded() -> None:
     # setuptools' editable install (the CLI's, apps/seedvr2x/) imports a finder module at every
-    # start from a .pth; it belongs to the distribution seedvr2x, one of our own (in this
+    # start from a .pth; it belongs to the distribution seedvr2x, one of the project's own (in this
     # install, its RECORD names the file and the metadata no top-level module for it: no provider).
     finders = [name for name in sys.modules if name.startswith("__editable___seedvr2x_")]
     if not finders:

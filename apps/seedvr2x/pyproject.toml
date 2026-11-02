@@ -88,8 +88,8 @@ target-version = "py313"
 select = ["E", "F", "W", "I", "B", "UP", "RUF"]
 
 [tool.ruff.lint.isort]
-# The library is installed beside the third-party packages, but it is ours: its imports sit with
-# the CLI's own modules, as they did when it was one package.
+# The library is installed beside the third-party packages, but it is seedvr2x's own: its imports
+# sit with the CLI's own modules, as they did when it was one package.
 known-first-party = ["seedvr2x"]
 
 [tool.ruff.format]

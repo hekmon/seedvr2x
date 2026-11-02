@@ -1434,7 +1434,7 @@ def test_covers_are_named_in_order_and_others_refused() -> None:
 
 
 def test_an_mp4_cover_of_a_type_we_cant_name_is_refused(tmp_path: Path) -> None:
-    # A BMP in an MP4's covr atom: no file name or type in the source, none of ours for the
+    # A BMP in an MP4's covr atom: no file name or type in the source, none of seedvr2x's for the
     # codec (PROVISIONAL): refused before any work, with the remux that leaves it out.
     cover = tmp_path / "cover.bmp"
     loose("-f", "lavfi", "-i", "testsrc2=s=64x64", "-frames:v", "1", str(cover))

@@ -1075,7 +1075,7 @@ def _off(
 # after the one before, a millisecond early (main._directory_refused): N frames a second, which
 # N/1's timeline holds, 24/1's fifty segments within 1.3 ms. Segments at a whole rate last whole
 # milliseconds and join whole: a file declared 24/1 that runs at 24000/1001, a Blu-ray remux, is
-# no join. "otherwise" is ours, leading to the fixes of a file that is no such join.
+# no join. "otherwise" is seedvr2x's own, leading to the fixes of a file that is no such join.
 TWIN_JOIN = (
     "a join of one-second segments by ffmpeg's concat demuxer reads so too, and such a file is"
     " joined again on the frame grid (a directory given to seedvr2x says how); otherwise, "

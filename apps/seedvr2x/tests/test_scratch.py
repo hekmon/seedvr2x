@@ -391,8 +391,8 @@ def test_decode_failing_in_a_tile(stand_in: model.Models, tmp_path: Path, call: 
 def test_decode_failing_between_passes(
     stand_in: model.Models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A failure of ours, between a tile's passes, as a Ctrl-C raised while the device is polled:
-    # the tile's pass is closed, which clears its memory at once, and the scratch goes.
+    # A failure of seedvr2x's own, between a tile's passes, as a Ctrl-C raised while the device is
+    # polled: the tile's pass is closed, which clears its memory at once, and the scratch goes.
     vae, path = vae_of(stand_in), tmp_path / tilegrid.SCRATCH
     polls: list[bool] = []
 

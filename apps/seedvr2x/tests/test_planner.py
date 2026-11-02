@@ -445,9 +445,9 @@ def test_design_windows(
 ) -> None:
     # DESIGN.md's figures are the fit's with the VAE's weights in the DiT's phase, each of the 15
     # found again with the memory numz's process found free (design), and with seedvr2x's own
-    # reading (ours) but for one. The planner, its blocks pinned alike, sends the VAE's 0.47 GiB
-    # away when the window wants them (its first choice): at 1080p, where a latent takes 1.0
-    # GiB, one latent more on every card; at 4K one more on 16 and 24 GB, 3 and 5.
+    # reading (the figure after it) but for one. The planner, its blocks pinned alike, sends the
+    # VAE's 0.47 GiB away when the window wants them (its first choice): at 1080p, where a latent
+    # takes 1.0 GiB, one latent more on every card; at 4K one more on 16 and 24 GB, 3 and 5.
     pins = Pins(swap_blocks=swapped)
     for free, fit in ((numz_free(card), design), (our_free(card), ours)):
         assert by_the_fit(free, target, swapped) == fit

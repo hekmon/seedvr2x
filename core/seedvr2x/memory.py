@@ -251,7 +251,7 @@ RESERVE_TIGHT = round(2.5 * GIB)
 # is made in the free memory read with the context, the warm-up and the first allocation already on
 # the card (main._free_memory), so the earlier reading, taken without them, counts them off.
 # Measured on an RTX 5090 under WSL2 on 2026-10-29 (torch 2.14.1+cu130): the card's free memory
-# fell 0.67 GiB from no CUDA context of ours to the check that refuses, on a resume (NVML's 16.32
+# fell 0.67 GiB from no seedvr2x CUDA context to the check that refuses, on a resume (NVML's 16.32
 # GiB free before the checks, 15.65 at the check), the same to 0.01 GiB in three runs; 0.08 GiB
 # are added to it (DESIGN.md, Memory planner, A resume whose recorded shape no longer fits,
 # decided on 2026-10-29). PROVISIONAL (design, 2026-10-29: until the 96 GB card measures Linux's
@@ -1205,7 +1205,7 @@ def card_free(index: int = 0) -> int | None:
 def card_state(index: int = 0) -> tuple[int, int] | None:
     """What card_free reads, with what programs hold of the card by NVML (`used`, the driver's
     own share, `reserved`, not counted): (free, used) in bytes, for the early reading of a
-    resume, which has no CUDA context of ours on the card yet (early). None when NVML doesn't
+    resume, which has no seedvr2x CUDA context on the card yet (early). None when NVML doesn't
     say, the reason at debug level. Never raises; one reading, nothing remembered."""
     found = _read_all(index)
     if isinstance(found, tuple):

@@ -2688,7 +2688,7 @@ def _there(job: _Job) -> str:
     reading = job.reading
     if reading.nvml is not None:
         # An early reading (memory.early): NVML's figure and the context counted off it, not a
-        # driver's report, which no process of ours has yet been given.
+        # driver's report, which no seedvr2x process has yet been given.
         if not reading.held:
             return f"{_early_said(reading, _under)}, leaves {_under(job.free)} GiB"
         return f"the plan counts on {_under(job.free)} GiB of {_early_said(reading, _under)}"
@@ -2726,9 +2726,9 @@ def _freeable(job: _Job, need: float) -> bool:
     if reading.nvml is not None:
         # PROVISIONAL (impl-v010, 2026-10-29: the refusal's rule with NVML's used for the driver's
         # figure, which an early reading hasn't asked): what quitting programs can give back is
-        # what they hold of the card by NVML (memory.card_state), there being no CUDA context of
-        # ours on it yet, as a held run's is what the driver reports free beyond the card's; where
-        # used wasn't read, the early reading cannot tell, and does not say it.
+        # what they hold of the card by NVML (memory.card_state), there being no seedvr2x CUDA
+        # context on it yet, as a held run's is what the driver reports free beyond the card's;
+        # where used wasn't read, the early reading cannot tell, and does not say it.
         return reading.nvml_used is None or need - job.free <= reading.nvml_used
     if not reading.held or reading.card is None or reading.card >= reading.reported:
         return False

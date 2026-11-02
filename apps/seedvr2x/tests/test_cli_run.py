@@ -6061,7 +6061,7 @@ def test_a_job_with_every_segment_made_asks_the_gpu_nothing_in_a_fresh_process(
         assert f"{work}: finished already, its 2 segments" in result.stderr
         assert written_as(work / "manifest.json") == kept
     seen = json.loads(watched.read_text())
-    # Nothing of ours: the library's package and the CLI's files, the app's root less the
+    # Nothing of seedvr2x's own: the library's package and the CLI's files, the app's root less the
     # environment inside it (apps/seedvr2x/.venv holds torch's, which this guard must see).
     import seedvr2x
 

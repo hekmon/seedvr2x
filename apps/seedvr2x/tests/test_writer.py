@@ -517,7 +517,7 @@ def test_yuv_white_black_and_primaries(tmp_path: Path) -> None:
 def test_yuv_equals_ffv1_out(tmp_path: Path) -> None:
     # The yuv420p10le master of research/scripts/ffv1_out.py (FORMATS, Writer: lines 61-129),
     # validated in research/docs/output.md, from the same 16-bit planes. Its zscale on one slice
-    # too, as ours (threads=1, since 2026-10-05): 720 rows make up to 11 slices.
+    # too, as seedvr2x's (threads=1, since 2026-10-05): 720 rows make up to 11 slices.
     frames = frames_of(3, 1280, 720)
     ours = tmp_path / "ours.mkv"
     with FFV1Writer(ours, "yuv420p10le", 1280, 720, RATE, BT709) as writer:

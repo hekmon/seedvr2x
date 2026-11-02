@@ -656,7 +656,7 @@ def grid_join(directory: str = "DIR", declares: Fraction | None = None) -> str:
     # the command (GUARD, decided by design on 2026-10-12, as cd's -- was), rather than sorted by
     # their numbers (ls -v and sort -V are GNU's, and a listing parsed breaks on other names)
     # or escaped for the demuxer by a sed in the line, which nobody could read. (5) Where the
-    # rate isn't known, N and D said before each command, in plain words, the wording ours
+    # rate isn't known, N and D said before each command, in plain words, the wording seedvr2x's own
     # (2026-10-12): said after it, the last words of a long parenthesis, they came too late for
     # a command typed as printed, which on 25 fps segments remakes a 24000/1001 file that is
     # read (tests/test_rate.py, test_a_directorys_remake_takes_the_rate_typed).

@@ -170,8 +170,8 @@ def argument(path: Path) -> str:
 
 def input_args(path: Path) -> list[str]:
     """ffmpeg's input options for a source, the same for every pass over it. Nothing rotates the
-    frames behind our back: a rotated source is refused (DESIGN.md, Not in the first version),
-    and ffmpeg's rotation would swap the width and height the reader expects."""
+    frames behind seedvr2x's back: a rotated source is refused (DESIGN.md, Not in the first
+    version), and ffmpeg's rotation would swap the width and height the reader expects."""
     return ["-noautorotate", "-i", argument(path)]
 
 

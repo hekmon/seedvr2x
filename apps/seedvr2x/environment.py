@@ -213,8 +213,8 @@ def _providers() -> Mapping[str, list[str]]:
 def _declared() -> frozenset[str]:
     """The distributions the CLI's distribution requires and flash-attn, and their requirements,
     through the extras each asks: read once, as _providers. The library's among them, seedvr2x-core,
-    and so its own requirements; our own two distributions (OWN) are left out, their files being
-    hashed by settings.code."""
+    and so its own requirements; seedvr2x's own two distributions (OWN) are left out, their files
+    being hashed by settings.code."""
     return frozenset(_required([*(metadata.requires(DISTRIBUTION) or []), *UNDECLARED]) - OWN)
 
 

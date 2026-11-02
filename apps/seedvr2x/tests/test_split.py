@@ -15,7 +15,7 @@
   decode untiled or in tiles, as a card smaller than the 96 GB one plans it (decided on
   2026-10-21). A wrapper in the tests rather than a hook in seedvr2x: nothing of it reaches a
   user's run.
-- test_split_against_the_input: ours with split, the default, on milestone 1's input as one
+- test_split_against_the_input: seedvr2x with split, the default, on milestone 1's input as one
   shot, scored against the input with milestone 5's metrics that apply to one window without a
   ground truth (ΔE lf, a*/b* spread, Y shift), as test_lab.py scored lab; every figure printed,
   numz's lab's too when its output is there. Its thresholds are its figures of 2026-10-16, the

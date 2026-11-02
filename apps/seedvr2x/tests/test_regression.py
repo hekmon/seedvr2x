@@ -11,11 +11,11 @@ reference is remade with.
 
 Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR) and milestone 1's reference, in
 the m1/ directory of SEEDVR2X_REFERENCE_DIR:
-- input_rgb.mkv: 45 frames of 8-bit RGB FFV1 at 960x540, read alike by numz (OpenCV) and by us:
-  frames 48-92 of SEGMENT, a 1920x1080 yuv420p FFV1 segment of an animated episode (limited
-  range, chroma left, no colour tags, 23.976 fps, 377 frames; its first 26 black, then a fade-in
-  to about frame 50), BT.709 limited range to full-range RGB, its chroma upsampled and the
-  picture brought to 960x540 by zimg's spline36, with ffmpeg n9.0.2:
+- input_rgb.mkv: 45 frames of 8-bit RGB FFV1 at 960x540, read alike by numz (OpenCV) and by
+  seedvr2x: frames 48-92 of SEGMENT, a 1920x1080 yuv420p FFV1 segment of an animated episode
+  (limited range, chroma left, no colour tags, 23.976 fps, 377 frames; its first 26 black, then a
+  fade-in to about frame 50), BT.709 limited range to full-range RGB, its chroma upsampled and
+  the picture brought to 960x540 by zimg's spline36, with ffmpeg n9.0.2:
 
     VF=trim=start_frame=48:end_frame=93,setpts=PTS-STARTPTS
     VF=$VF,zscale=w=960:h=540:filter=spline36:matrixin=709:transferin=709:primariesin=709
@@ -872,7 +872,7 @@ STEADY = READING_TOLERANCE
 def other_programs(settle: float = 15.0) -> int:
     """What the card's programs hold of it by NVML (memory.card_state), in bytes, once it stops
     moving: read every half second until two readings are within 8 MiB, at most `settle`
-    seconds. Taken where no process of ours has the card (this one makes no CUDA context, and the
+    seconds. Taken where no seedvr2x process has the card (this one makes no CUDA context, and the
     calls are over), so that it is the other programs'. Skips the test where NVML says nothing:
     a steady card can't be told."""
     previous = None
@@ -1111,8 +1111,8 @@ def test_plan_and_run_read_the_same_free_memory(tmp_path: Path) -> None:
     # and a resume (its docstring). A gap is a bug. The run is stopped as soon as it has planned,
     # its models never loaded: its reading is read in its --verbose log (logged_free), the --plan
     # call's in the manifest it leaves, copied before the run. The test cannot make the desktop
-    # steady: the other programs' memory on the card (NVML's used, with none of our processes on
-    # it) is read before the first call, between the two and after the second; where the readings
+    # steady: the other programs' memory on the card (NVML's used, with none of seedvr2x's processes
+    # on it) is read before the first call, between the two and after the second; where the readings
     # differ and that memory moved by more than STEADY, the desktop moved, not seedvr2x, and the
     # test skips, saying the figures. (Design's check, baton 3, 2026-10-30.)
     assert REFERENCE is not None

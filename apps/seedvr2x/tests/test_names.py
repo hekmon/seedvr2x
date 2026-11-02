@@ -8,7 +8,7 @@ global to the environment, where a package folder's would not be. That is held, 
 - in this environment, each name resolves to the CLI's own file, and nothing else provides it:
   no directory on sys.path has another module of the name, and no other installed distribution
   claims it, so that a dependency that brings a `run` or a `media` fails here, never replaces
-  ours silently. (The CLI is never installed into a shared Python.)"""
+  the CLI's own silently. (The CLI is never installed into a shared Python.)"""
 
 import importlib.machinery
 import importlib.metadata
@@ -25,7 +25,7 @@ NAMES = (*manifest.MODULES, *manifest.PACKAGES)
 
 def own_files(name: str, app: Path) -> set[Path]:
     """The CLI's own file for a module `name` at the app's root `app`: its module, or its
-    package's folder and __init__. Nothing else under the app is ours: the environment the CLI
+    package's folder and __init__. Nothing else under the app is the CLI's: the environment the CLI
     ships in is apps/seedvr2x/.venv, and a dependency's module in its site-packages sits under
     the app's root too."""
     app = app.resolve()
@@ -105,7 +105,7 @@ def test_a_second_provider_is_found(tmp_path: Path) -> None:
     # Nor does a path that has none of the names.
     assert foreign_providers("run", [str(tmp_path / "nowhere")], APP) == []
     # A dependency's module in the app's own environment is found: the venv sits under the
-    # app's root, and only the app's own file is ours.
+    # app's root, and only the app's own file is the CLI's.
     app = tmp_path / "app"
     site = app / ".venv" / "lib" / "site-packages"
     site.mkdir(parents=True)

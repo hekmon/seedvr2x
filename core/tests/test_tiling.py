@@ -308,7 +308,7 @@ def numz_grids(latent_size: tuple[int, int], tiles: Tiles) -> tuple[list[Tile], 
 
 
 def check_grid(latent_size: tuple[int, int], tiles: Tiles) -> list[Tile]:
-    """Our grid held to the tiles numz runs, the encode's and the decode's."""
+    """seedvr2x's grid held to the tiles numz runs, the encode's and the decode's."""
     ours = tiling.grid(latent_size, tiles)
     encode, decode = numz_grids(latent_size, tiles)
     whole = Tile(0, latent_size[0], 0, latent_size[1])
@@ -618,7 +618,7 @@ def test_encode_refuses_moments_that_dont_fill_the_latent(stand_in: model.Models
 @pytest.mark.parametrize("latents", [1, 2, 3, 5])
 def test_one_tile_is_the_untiled_pass(stand_in: model.Models, latents: int) -> None:
     # The picture within one tile, in both directions or cut off in one: numz runs the untiled
-    # pass, and so do we, the store untouched: this one could only refuse.
+    # pass, and so does seedvr2x, the store untouched: this one could only refuse.
     untouched = Refusing()
     frames = 1 + 4 * (latents - 1)
     for rows, columns, size in ((6, 9, 72), (9, 6, 72), (9, 9, 72), (4, 5, 1024)):
@@ -814,10 +814,10 @@ def test_decode_takes_its_latents_slice_by_slice(
 def test_decoder_is_handed_what_numz_hands_it(
     stand_in: model.Models, monkeypatch: pytest.MonkeyPatch, tiled: bool, layout: str, latents: int
 ) -> None:
-    # numz scales the whole batch and hands the decoder slices of it, views but the first; we
-    # scale each slice's latents alone. The decoder is handed the same values in the same shape,
-    # read by torch in the same memory format, for a latent as the DiT gives it (its channels
-    # last) and for one in channel-major memory.
+    # numz scales the whole batch and hands the decoder slices of it, views but the first; seedvr2x
+    # scales each slice's latents alone. The decoder is handed the same values in the same shape,
+    # read by torch in the same memory format, for a latent as the DiT gives it (its channels last)
+    # and for one in channel-major memory.
     vae = vae_of(stand_in)
     decode = vae._decode
     tiles = Tiles(64, 16)
@@ -961,8 +961,8 @@ def test_real_vae_tiled_is_numz(real: model.Models) -> None:
     video = video_of(9, (48, 64))
     given = video.clone()
     reference = numz_encode(real, video, tiles)
-    # numz crops its tiles from the input itself, and we from its copy in the scratch: the same
-    # only if the encoder leaves its input as it was.
+    # numz crops its tiles from the input itself, and seedvr2x from its copy in the scratch: the
+    # same only if the encoder leaves its input as it was.
     assert same(video, given)
     latent = tiling.encode_tiled(real, slices_of(real, video), 9, tiles, tiling.InMemory())
     assert latent.shape == (3, 6, 8, 16) and latent.stride() == reference.stride()
