@@ -2,7 +2,7 @@
 
 > Status: **measured** with [`scripts/decode_resume.py`](../scripts/decode_resume.py) through
 > numz's own runner, encode and decode functions (`4490bd1`, 7B config, bf16), for the open
-> question "decode resume granularity" of [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). One
+> question "decode resume granularity" of [DESIGN.md](../../DESIGN.md#to-measure). One
 > clip, one GPU (RTX PRO 6000 Blackwell, torch 2.14.1+cu130, cuDNN 9.24). Timings are
 > indicative: the GPU is power-capped and drifts between sessions.
 
@@ -26,7 +26,7 @@ before latent s and is compared with the uninterrupted one-pass decode):
 
 ## Why it matters for seedvr2x
 
-[DESIGN.md](../../seedvr2x/DESIGN.md#pause-and-resume) saves the VAE decode as output segments and
+[DESIGN.md](../../DESIGN.md#pause-and-resume) saves the VAE decode as output segments and
 resumes per output segment ("its decode and write restart, the DiT latents are kept"), "finer,
 per sub-segment with warm-up latents, if that proves bit-identical"; a resume must be bit-identical
 to an uninterrupted run. A restarted decode is a fresh causal decode: its convolutions start from

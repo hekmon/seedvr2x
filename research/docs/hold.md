@@ -1,7 +1,7 @@
 # The hold on a driver that spills: what torch's allocator needs beyond a peak, what a run holds outside torch's count, what the driver's figure counts
 
 > Status: **measured** for the open question "The hold on a driver that gives memory the card
-> doesn't have" of [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure), on one card: an RTX 5090
+> doesn't have" of [DESIGN.md](../../DESIGN.md#to-measure), on one card: an RTX 5090
 > (32 GB) under WSL2, Windows driver 616.92, torch 2.14.1+cu130, attention on PyTorch's SDPA,
 > the 7B fp16 and the VAE, seedvr2x's own runtime (2026-10-12 and 13). Through
 > [`scripts/hold_probe.py`](../scripts/hold_probe.py) (one process, one way of holding, a
@@ -14,7 +14,7 @@
 
 Windows' driver gives system memory where the card has none left, under WSL2 too, and a step
 that passes the card slows down, then fails where nothing can catch it. seedvr2x holds itself
-to the card there ([DESIGN.md](../../seedvr2x/DESIGN.md#allocator)): torch's own allocator
+to the card there ([DESIGN.md](../../DESIGN.md#allocator)): torch's own allocator
 under a limit, the free memory less 0.5 GiB, and a plan that counts on 4.5 GiB less again,
 "what torch's own allocator needs beyond a step's allocated peak". That one figure was sized on
 the largest step measured; this asks what the need follows, step by step, so that a plan could

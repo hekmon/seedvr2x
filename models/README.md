@@ -1,7 +1,7 @@
 # models
 
 The scripts that make the files of seedvr2x's Hugging Face repository,
-[hekmon/seedvr2x](https://huggingface.co/hekmon/seedvr2x) ([DESIGN.md](../seedvr2x/DESIGN.md#weights),
+[hekmon/seedvr2x](https://huggingface.co/hekmon/seedvr2x) ([DESIGN.md](../DESIGN.md#weights),
 Weights). Each runs on its own, on a CPU, its dependencies inline (`uv run models/<script>.py`:
 seedvr2x stays the repository's only uv project). Each pins its inputs (URL, revision, SHA-256),
 runs its check, and writes into `models/dist/`, which git ignores; the upload is one directory

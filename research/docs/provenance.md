@@ -113,7 +113,7 @@ Third-party dependencies of the model layer: torch, diffusers (VAE base classes,
 timestep embedding), einops, rotary_embedding_torch, omegaconf; flash_attn and sageattention are
 optional.
 
-Two routes for reusing it (see [`seedvr2x/DESIGN.md`](../../seedvr2x/DESIGN.md)):
+Two routes for reusing it (see [`DESIGN.md`](../../DESIGN.md)):
 - **ByteDance's code as is:** needs flash_attn, Apex, absolute `common.`/`models.` imports, and
   has no tiling.
 - **numz's model files, vendored:** stub or replace the four runtime functions above and drop

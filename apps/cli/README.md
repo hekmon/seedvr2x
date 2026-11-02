@@ -5,7 +5,7 @@ episodes and films, on one GPU, as a job that stops and resumes. It takes one vi
 gives back its upscale as a lossless, correctly tagged master, or as a finished file with the
 source's audio and subtitles.
 
-> **Version 0.1.0.** [DESIGN.md](DESIGN.md) is the specification, and this README and the
+> **Version 0.1.0.** [DESIGN.md](../../DESIGN.md) is the specification, and this README and the
 > [manual](MANUAL.md) describe version 1 as it is built. What comes in later versions is listed
 > under [Status](#status).
 
@@ -14,13 +14,13 @@ ByteDance's model code, as
 [numz's ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
 modified it, and replaces what surrounds the model: reading and writing video, cutting it into
 pieces, fitting the GPU's memory. That is where nearly all of the
-[26 bugs](../research/bugs/README.md) our research found in numz's CLI live, and where a long run
+[26 bugs](../../research/bugs/README.md) our research found in numz's CLI live, and where a long run
 is won or lost.
 
 - **Shot by shot.** seedvr2x finds the cuts itself and upscales each shot on its own, from cut
   to cut. Nothing crosses a cut, and no batch boundary is left inside a shot: a long shot runs
   in overlapping windows, blended before the frames are rebuilt, which removes 80% of a
-  boundary's jump without softening anything ([stitching.md](../research/docs/stitching.md)).
+  boundary's jump without softening anything ([stitching.md](../../research/docs/stitching.md)).
 - **A lossless master.** FFV1, 10-bit 4:2:0 by default, written from the model's float frames
   with no 8-bit step, tagged so that it looks like its source in any player, each frame with a
   checksum. seedvr2x has no encoder options: you compress the master your own way, afterwards,
@@ -28,7 +28,7 @@ is won or lost.
 - **Colours corrected against the source.** The model shifts colours. seedvr2x's own
   correction, `split`, takes the source's coarse colour and brightness and keeps the model's
   detail: a lower colour error than numz's `lab` at every scale, and less flicker
-  ([colour.md](../research/docs/colour.md)).
+  ([colour.md](../../research/docs/colour.md)).
 - **It stops and resumes.** Every piece of work is saved as it is made. The same command
   resumes a stopped job, and the result is the uninterrupted run's, bit for bit. `--until 07:30`
   stops cleanly before a set time. Run once the job is finished, the same command says so at
@@ -92,12 +92,12 @@ Both start from the source, one video file, and differ only at the end.
   say how much the job will take against the disk's free space ([disk use](MANUAL.md#disk-use)).
 - **FlashAttention 2 is optional.** seedvr2x uses it when it is installed, else PyTorch's own
   attention (SDPA), and logs which one runs. It buys no speed: on numz's CLI the backends gave
-  the same DiT time within 1.5% ([attention.md](../research/docs/attention.md)). Their outputs
+  the same DiT time within 1.5% ([attention.md](../../research/docs/attention.md)). Their outputs
   differ slightly (55–56 dB apart), so a job is resumed with the backend it started with.
   PyPI only has FlashAttention's source, a long CUDA build:
-  [setup_env.sh](../research/scripts/setup_env.sh) builds a wheel for your GPU, for Blackwell
+  [setup_env.sh](../../research/scripts/setup_env.sh) builds a wheel for your GPU, for Blackwell
   cards unless its `ARCH` says otherwise
-  ([environment.md](../research/docs/environment.md)), installed with
+  ([environment.md](../../research/docs/environment.md)), installed with
   `uv pip install --no-deps <wheel>`. `uv sync` removes what its lock doesn't list: install the
   wheel again after a sync, or sync with `--inexact`.
 
@@ -105,13 +105,13 @@ Both start from the source, one video file, and differ only at the end.
 
 ```
 git clone https://github.com/hekmon/seedvr2x.git
-cd seedvr2x/seedvr2x
+cd seedvr2x/apps/cli
 uv sync
 uv run seedvr2x --version
 ```
 
 `uv run seedvr2x` runs it from that directory. From anywhere else, name the project:
-`uv run --project /path/to/seedvr2x/seedvr2x seedvr2x …`.
+`uv run --project /path/to/seedvr2x/apps/cli seedvr2x …`.
 
 ## Quick start
 
@@ -249,7 +249,7 @@ same command without `--plan` then runs the job as planned, with no second first
 seedvr2x's model files come from its own Hugging Face repository,
 [hekmon/seedvr2x](https://huggingface.co/hekmon/seedvr2x), at a revision pinned in the code.
 They are ByteDance's SeedVR2 weights and TransNetV2's, each converted by a script of
-[../models/](../models/) that pins its inputs and checks its output: unofficial conversions,
+[../../models/](../../models/) that pins its inputs and checks its output: unofficial conversions,
 neither ByteDance's files nor TransNetV2's authors'.
 
 A run downloads only the files it uses, one by one, never the repository whole (122 GB):
@@ -291,15 +291,15 @@ it has the same memory and time ([the model](MANUAL.md#the-model)).
   both 7Bs, each measured against the float16 model on video; seedvr2x will run them in a later
   phase. The [model card](https://huggingface.co/hekmon/seedvr2x) has their tables: what each
   gives up, its speed, its error per weight, and other repositories' files against ours, with
-  each file's SHA-256, origin and change. [FORMATS.md](../models/FORMATS.md) holds the formats
-  and [VALIDATION.md](../models/VALIDATION.md) the runs.
+  each file's SHA-256, origin and change. [FORMATS.md](../../models/FORMATS.md) holds the formats
+  and [VALIDATION.md](../../models/VALIDATION.md) the runs.
 - **Other repositories' files.** numz's float16 7B files hold the same values as ours, only
   their header differs: version 1 runs them, given with `--model-dir` and `--dit-model`, the log
   saying such a file isn't one of the pinned ones and the job's record keeping its SHA-256.
   Comfy-Org's float16 7B is refused, for the text embeddings it holds beside the model's
   tensors.
 - **No 3B,** now or later: neither 3B in float16 (6.8 GB) comes as close to the source as the
-  sharp 7B's 4.8 GB dynamic GGUF ([VALIDATION.md](../models/VALIDATION.md)).
+  sharp 7B's 4.8 GB dynamic GGUF ([VALIDATION.md](../../models/VALIDATION.md)).
 
 ## Documentation
 
@@ -308,22 +308,22 @@ it has the same memory and time ([the model](MANUAL.md#the-model)).
   picture, several runs of a shot (`--quality`), the finished file, disk and memory, the refused
   sources and what to do with each, resume and `--until`, integrity, a real run read line by
   line, and every option.
-- [DESIGN.md](DESIGN.md): what is built and why, with the measurement behind each decision.
-- [AGENTS.md](AGENTS.md): how to work on the code.
-- [../research/](../research/): the measurements.
+- [DESIGN.md](../../DESIGN.md): what is built and why, with the measurement behind each decision.
+- [AGENTS.md](../../AGENTS.md): how to work on the code.
+- [../../research/](../../research/): the measurements.
 
 ## Credits and licence
 
-seedvr2x is under the Apache License 2.0 ([LICENSE](LICENSE)). [NOTICE](NOTICE) credits what it
+seedvr2x is under the Apache License 2.0 ([LICENSE](LICENSE)). [NOTICE](../../core/NOTICE) credits what it
 includes:
 
-- **SeedVR2's model code**, vendored in `src/seedvr2x/vendor/`: ByteDance Seed's
+- **SeedVR2's model code**, vendored in `core/src/seedvr2x/vendor/`: ByteDance Seed's
   [SeedVR](https://github.com/ByteDance-Seed/SeedVR), as modified by
   [numz's ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler),
   both Apache-2.0. The files changed for seedvr2x say so under their original header.
 - **The shot detector, TransNetV2** (Tomáš Souček, MIT,
   [soCzech/TransNetV2](https://github.com/soCzech/TransNetV2)): its official PyTorch model,
-  vendored unchanged in `src/seedvr2x/transnetv2/` with its licence, and its official weights
+  vendored unchanged in `core/src/seedvr2x/transnetv2/` with its licence, and its official weights
   converted to PyTorch by its own script, `transnetv2.safetensors` in seedvr2x's Hugging Face
   repository.
 - **The colour correction's wavelet split** is StableSR's method, whose code is under a
@@ -340,7 +340,7 @@ file is made from, and what was changed.
 
 ## Status
 
-Version 0.1.0 is version 1 of [DESIGN.md](DESIGN.md), built and held by the tests on an RTX
+Version 0.1.0 is version 1 of [DESIGN.md](../../DESIGN.md), built and held by the tests on an RTX
 5090, and on a 96 GB card until 2026-10-23: every item built since was checked on the RTX 5090
 alone, the 96 GB card being away for repair, and v0.1.0 waits for its checks on it. Built: the
 first pass and its shot detector, the pipeline per shot with its windows, `--quality`, the

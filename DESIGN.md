@@ -4,7 +4,7 @@
 > code follows it: milestones 1 to 7 and the I/O layer have passed, milestone 3's time
 > estimates on an RTX 5090 (2026-10-30), the 96 GB card measuring them again when it is back,
 > before v0.1.0 (see [Validation milestones](#validation-milestones)). Each decision links to
-> the measurement it rests on in [../research/](../research/).
+> the measurement it rests on in [../research/](research/).
 
 ## Goal
 
@@ -14,7 +14,7 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
   upscale, the source's style kept. The user's eyes judge the look. Full-reference metrics,
   which reward a copy of the ground truth's own blur and grain, guard against damage: colour
   drift, flicker, banding, artefacts
-  ([colour.md](../research/docs/colour.md#the-users-eyes)).
+  ([colour.md](research/docs/colour.md#the-users-eyes)).
 - has no visible seams inside a shot
 - fits the GPU it runs on without the user tuning memory options. It is developed on a 96 GB
   card, but made for consumer cards of 16–32 GB as well, where the planner, BlockSwap and
@@ -41,7 +41,7 @@ upscaled today. HDR comes in a later version (see
 [Not in the first version](#not-in-the-first-version)).
 
 It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of the
-[26 bugs](../research/bugs/README.md) live). It keeps ByteDance's model code.
+[26 bugs](research/bugs/README.md) live). It keeps ByteDance's model code.
 
 ### Two kinds of users, both first-class
 - **Standalone, the regular workflow:** a video file in, an upscaled file out, with ffmpeg as
@@ -54,7 +54,7 @@ It replaces numz's orchestration and I/O (about 14.6k lines, where nearly all of
   audio and subtitles back from the source. It stays lossless up to sptenc's encode, and its
   users bring the disk space.
   - seedvr2x takes the source itself because shot detection is the biggest quality lever
-    outside the model ([cuts.md](../research/docs/cuts.md)). sptenc's split merges scenes
+    outside the model ([cuts.md](research/docs/cuts.md)). sptenc's split merges scenes
     shorter than 5 s into their neighbours, which suits encoding but hides real cuts inside its
     segments, and a cut the model doesn't see is its costliest error. seedvr2x keeps every cut
     for the model's shots and merges only its output segments, by sptenc's rule.
@@ -136,7 +136,7 @@ never requires it.
     needs, where ffmpeg would otherwise smooth such a jump over, as in joined MPEG-TS
     recordings. The message names the frame and both times, and ffmpeg's remux as the way out
     for the formats it corrects. Measured on 2026-10-21
-    ([seeking.md](../research/docs/seeking.md)): a joined transport stream keeps its jump under
+    ([seeking.md](research/docs/seeking.md)): a joined transport stream keeps its jump under
     `-copyts` (995.96 s there), read as a 33-bit wrap, 2^33/90000 = 95,443.7 s later, where the
     later piece's timestamps are lower; remuxed to MKV with `-c copy`, it comes out continuous.
 - Interlaced and telecined sources, in any version. Deinterlacing and inverse telecine are
@@ -167,7 +167,7 @@ never requires it.
     overlap by 2 latents (8 frames), and the overlapping latents are mixed before decoding, so
     the joins don't show.
   - The length comes from the GPU's memory, through the per-token model in
-    [vram.md](../research/docs/vram.md): 16 GiB of weights plus about 1 GiB per latent at
+    [vram.md](research/docs/vram.md): 16 GiB of weights plus about 1 GiB per latent at
     1080p with the 7B fp16 model, and four times that per latent at 4K. With every block on
     the GPU and the VAE away, as the planner has it (see [Memory planner](#memory-planner)):
     - At 1080p: 6 latents (21 frames) on a 24 GB card, 14 (53 frames) on a 32 GB card, 76
@@ -182,7 +182,7 @@ never requires it.
     decode needs ≈ 134 GiB, so 4K needs tiled decoding, about 18 GiB with 1024-px tiles. The
     planner sizes the two separately: window length for the DiT, tile size for the VAE.
   - Not to be confused with the DiT's **attention windows**: the space-time tiles its
-    attention works in inside one pass ([attention.md](../research/docs/attention.md)), which
+    attention works in inside one pass ([attention.md](research/docs/attention.md)), which
     `na.unconcat_coalesce` counts.
 - **Output segment:** an output file. It holds one or more whole shots, at least 5 s long by
   sptenc's rule. It is the unit of output and of decode resume.
@@ -235,7 +235,7 @@ seedvr2x/                the repository
   the CLI's, to which the nodes point. They need Windows and macOS: the library must then import
   and run there, its Linux-only parts kept to the apps.
 - **The front README:** short. A paragraph each for what seedvr2x does, its apps, and our own
-  model files (better quality, fewer errors, linking to [models/README.md](../models/README.md)),
+  model files (better quality, fewer errors, linking to [models/README.md](models/README.md)),
   then links to the apps' READMEs, the manual and `research/README.md`, where the research
   table it holds today moves.
 
@@ -351,7 +351,7 @@ connect through files.
   - One Python process per segment. Each one reloads the models, and with compilation (see
     [Memory planner](#memory-planner)) recompiles them: 10–50 s of DiT compilation, and
     108.5 s for the first compiled VAE encode batch against 4.79 s steady
-    ([vram.md](../research/docs/vram.md#torchcompile)). That's 27–136 min of DiT compilation
+    ([vram.md](research/docs/vram.md#torchcompile)). That's 27–136 min of DiT compilation
     alone over a 163-segment episode, and no stitching across joins.
   - An upscale stage inside sptenc: the same protocol, plus changes in sptenc's package `main`.
 
@@ -366,7 +366,7 @@ connect through files.
     way (see step 0).
   - the configs and `pos_emb.pt`/`neg_emb.pt`
 
-  About 11k lines ([provenance](../research/docs/provenance.md)).
+  About 11k lines ([provenance](research/docs/provenance.md)).
 - The submodules stay untouched. A script (`tools/vendor.py diff`) diffs our copy against numz
   and ByteDance, so every change stays visible.
 - Changes made in our copy, each one checked bit-identical to numz by the milestone-1
@@ -378,13 +378,13 @@ connect through files.
   - **Logging:** `VideoDiffusionInfer` logs through numz's `Debug` object, which our runtime
     supplies as a logging adapter.
   - **Attention:** FlashAttention 2 when installed, else SDPA; any other mode is an error
-    ([why](../research/docs/attention.md)).
+    ([why](research/docs/attention.md)).
   - **Conv3d:** numz's workaround is removed. It called `torch.cudnn_convolution` directly,
     because plain Conv3d takes ≈ 3× the memory with torch ≥ 2.9 and cuDNN ≥ 9.10.2
-    ([environment.md](../research/docs/environment.md)).
+    ([environment.md](research/docs/environment.md)).
     - On the pinned stack (torch 2.14.1, cuDNN 9.24), the standard path gives bit-identical
       output, the same peaks (encode 19.03 GiB, decode 34.49 GiB on 21 frames at 1080p) and the
-      same time. [vram.md](../research/docs/vram.md#other-knobs) found the same memory and time.
+      same time. [vram.md](research/docs/vram.md#other-knobs) found the same memory and time.
     - The bug depends on the torch and cuDNN versions. The stack therefore stays pinned
       (`uv.lock`), and any upgrade of torch or cuDNN re-runs the regression test and this
       memory check.
@@ -407,7 +407,7 @@ connect through files.
     bf16 cast
   - VAE encode takes the posterior mode
 
-  Measured since ([numerics.md](../research/docs/numerics.md)): none of ByteDance's choices
+  Measured since ([numerics.md](research/docs/numerics.md)): none of ByteDance's choices
   moves the output beyond the spread between seeds, alone or all together (float32 RoPE angles,
   a float32 input chain, the fp32 weights, posterior sampling, bf16 DiT norms, the decode under
   bf16 autocast, fp16 attention), on 4 animated clips and every metric (PSNR-Y within 0.14 dB,
@@ -421,7 +421,7 @@ connect through files.
   4.4% more decode time), but colour correction replaces that band with the input's: after it,
   float16 moves ΔE00 by 0.01 at most, 0.002 after a 4 px blur, within the spread between seeds
   on 5 to 8 of the 8 clips for every score
-  ([colour.md](../research/docs/colour.md#a-float16-decode)). So no float16 decode, and no
+  ([colour.md](research/docs/colour.md#a-float16-decode)). So no float16 decode, and no
   overflow fallback to go with it.
 - Licence: Apache-2.0. We keep the copyright headers, add a NOTICE, and mark modified files.
   The StableSR-derived colour code (`color_fix.py`, non-commercial licence) is **not**
@@ -438,7 +438,7 @@ two 7Bs' smaller files (below).
   shots, against the 7B's 3.4–7.3, the same kind of texture, and on the first film 1.0 against
   2.0. No guard gets worse: the same banding and colour after the split, fewer colour fringes
   and less flicker. At ×2 to 1080p the metrics barely tell them apart
-  ([colour.md](../research/docs/colour.md#step-6-the-sharp-7b-for-the-eyes)). It has the 7B's
+  ([colour.md](research/docs/colour.md#step-6-the-sharp-7b-for-the-eyes)). It has the 7B's
   architecture, memory and time.
   At ×1.5, ×3 and ×4 it stays the default, on the user's eyes again (2026-10-24, blind, 34
   places at 1080p and 11 loops: it 9, the 7B 8, the same 14, undecided 3; every loop alike):
@@ -449,7 +449,7 @@ two 7Bs' smaller files (below).
   rule, a thing to watch on later sets. ×4's −3.5 dB on one clip was one row of its
   letterbox, the sharp drawing the picture's top edge a row high: −0.20 dB over the
   picture's rows. The colour study's scores count the bars, all but ΔE00's lightness and
-  colour parts ([colour.md](../research/docs/colour.md#what-step-7-recommends)).
+  colour parts ([colour.md](research/docs/colour.md#what-step-7-recommends)).
 - **The regular 7B stays the reference** milestone 1 is checked with: numz's 7B fp16 file, and
   ours equal to it.
 - **Recognised by content.** A model file is checked by its own tensors, not by its name, which
@@ -462,7 +462,7 @@ two 7Bs' smaller files (below).
   take 15.35 GiB. Milestone 3 measures how small a card that reaches, 16 GB being the aim:
   there every block is swapped, its weights in pinned host RAM (about 15 GiB of it). numz's
   Q4_K_M, every block swapped, ran 1080p in batches of 13 latents on an emulated 16 GB card,
-  and of 5 on an 8 GB one ([vram.md](../research/docs/vram.md#recipe-per-card-size-validated)):
+  and of 5 on an 8 GB one ([vram.md](research/docs/vram.md#recipe-per-card-size-validated)):
   phase 2's smaller files make small cards lighter on memory, host RAM and transfers.
 
 #### Phase 2: the other models
@@ -476,7 +476,7 @@ they differ and by which metrics, and how users are guided to them. What is know
     `src/optimization/compatibility.py`), its GGUF dequantisation (`gguf_dequant.py` and
     `gguf_ops.py` there, adapted from city96's ComfyUI-GGUF, Apache-2.0) with the `gguf`
     library (llama.cpp's, MIT), the 3B's cache quirk, and the planner's constants per model
-    ([vram.md](../research/docs/vram.md)).
+    ([vram.md](research/docs/vram.md)).
 - **Comfy-Org's own repo** (`Comfy-Org/SeedVR2` on Hugging Face, apache-2.0, "repackaged
   model files for ComfyUI") ships the 3B, 7B and sharp 7B in fp16, fp8 (a plain cast, like
   numz's), MXFP8, INT8 W8A8 with a rotation, and NVFP4 (the 7B 4.76 GB); its VAE is numz's file.
@@ -489,11 +489,11 @@ they differ and by which metrics, and how users are guided to them. What is know
   again, which would differ on 0.28% of the values. The 3B's is cast the same way, from
   ByteDance's first 3B weights: ByteDance replaced the 3B's master on 2025-06-22, and numz's 3B
   files, fp16 included, are the earlier one's (635 of 635 tensors). Every 3B figure in
-  models.md ran those first weights ([FORMATS.md](../models/FORMATS.md)). The Q4_K_M file
+  models.md ran those first weights ([FORMATS.md](models/FORMATS.md)). The Q4_K_M file
   quantises only the 288 attention and MLP matrices of the blocks, 8 per block, 99% of the
   weights, with a scale every 32 weights. Its other 840 tensors, the 6 matrices outside the
   blocks included, are the fp16 file's byte for byte
-  ([models.md](../research/docs/models.md)). That is why it measures closer to the source than
+  ([models.md](research/docs/models.md)). That is why it measures closer to the source than
   fp8: a cast without a scale puts a median 36% of a matrix's weights in E4M3's subnormal range,
   all of the timestep embedding's (15.5% error per weight) and 70–100% of the last blocks' text
   matrices' (up to 16.7%), where one scale per tensor gives 2.65%. One of those 6,
@@ -501,10 +501,10 @@ they differ and by which metrics, and how users are guided to them. What is know
 - **RoPE's frequencies are constants of the architecture,** never trained, yet the fp8 files
   hold them rounded: up to 6% off in the 7B's blocks 0–34, and in the 3B's, the 5 lowest of 21
   at zero and others up to 41% off. numz runs the 7B's file on block 35's fp16 values in every
-  block anyway, through [bug 24](../research/bugs/24-rope-wrapper-late-binding.md). Any file
+  block anyway, through [bug 24](research/bugs/24-rope-wrapper-late-binding.md). Any file
   seedvr2x runs takes the fp16 files' values.
 - **What the measurements found**
-  ([models.md](../research/docs/models.md): 4 animated clips, a ×2 upscale of a mild
+  ([models.md](research/docs/models.md): 4 animated clips, a ×2 upscale of a mild
   degradation, against the ground truth):
   - Q4_K_M is as close to the source as fp16, or closer (PSNR-Y +0.11 to +0.49 dB, one seed),
     with a DiT peak of 17.2 GiB against 28.2 at 45 frames of 1080p, for 2–3% more DiT time.
@@ -531,7 +531,7 @@ they differ and by which metrics, and how users are guided to them. What is know
   source on every mean, flickers more and draws more fine texture. Neither 3B in fp16 (6.8 GB)
   comes as close to the source as the sharp 7B's dynamic GGUF (4.8 GB): PSNR-Y 30.7 and 31.4 dB
   against its 32.2, DISTS 0.131 and 0.120 against 0.107, and the user's eyes find both
-  systematically worse ([VALIDATION.md](../models/VALIDATION.md)). Small cards get the sharp
+  systematically worse ([VALIDATION.md](models/VALIDATION.md)). Small cards get the sharp
   7B's 4 GB file.
 - **Sources: ByteDance's fp32 releases,** the masters: `seedvr2_ema_7b.pth` and
   `seedvr2_ema_7b_sharp.pth` (33 GB each), `seedvr2_ema_3b.pth` (13.6 GB), `ema_vae.pth`.
@@ -540,7 +540,7 @@ they differ and by which metrics, and how users are guided to them. What is know
     rounding boundary of the smaller format. For the reference itself, the 7B's fp32 weights in
     place of numz's fp16 file move the output by 0.38 8-bit levels on average, against 1.90
     for another seed: within the seed spread on every metric
-    ([numerics.md](../research/docs/numerics.md#results)).
+    ([numerics.md](research/docs/numerics.md#results)).
   - Converting from the master costs nothing more, so every file seedvr2x makes starts there.
 - **Files of our own,** made by `models/`'s scripts from the fp32 masters, the small tensors and
   RoPE's frequencies kept in 16 bits, as in the Q4_K_M file. They are prepared ahead of phase 2,
@@ -548,7 +548,7 @@ they differ and by which metrics, and how users are guided to them. What is know
   next steps, and uploaded with v1's files, every format of both 7Bs, each with its measured
   quality (the user's choice, 2026-10-07):
   - Made, for the 7B and the sharp 7B, reproducible byte for byte, the 840 tensors outside the
-    288 block matrices our fp16 file's ([FORMATS.md](../models/FORMATS.md); error per weight,
+    288 block matrices our fp16 file's ([FORMATS.md](models/FORMATS.md); error per weight,
     median and worst):
   - fp8: the 288 block matrices in `e4m3fn` with one float32 scale per tensor (max |W| / 448),
     in comfy-kitchen's layout (weight and weight scale): 2.65% (2.67%); a scale per row gains
@@ -587,12 +587,12 @@ they differ and by which metrics, and how users are guided to them. What is know
       whole tensor's scale, bit-identical below the limit, until a fixed comfy-kitchen: at 4K
       the validation's fp8 W8A8 and NVFP4 W4A4 runs went through it with no NaN. The report
       upstream is the user's
-      ([comfy-kitchen-32-bit-quantizer-indices.md](../research/bugs/comfy-kitchen-32-bit-quantizer-indices.md)).
+      ([comfy-kitchen-32-bit-quantizer-indices.md](research/bugs/comfy-kitchen-32-bit-quantizer-indices.md)).
     - Phase 2's runtime starts with INT8 W8A8: the closest 8-bit file after Q8_0, the fastest
       8-bit multiply on GeForce cards from RTX 20, and comfy-kitchen's cheapest activation
       quantizer, fused, per token.
   - **Validated on the GPU** (numz with comfy-kitchen's layers for our safetensors files, its
-    own loader for the GGUF ones; [VALIDATION.md](../models/VALIDATION.md)), each file against
+    own loader for the GGUF ones; [VALIDATION.md](models/VALIDATION.md)), each file against
     its own model's float16 output at the same seed, at 1080p on 8 clips and at 4K on 5 shots
     for every file of the sharp 7B, on 6 for the 7B's (fp8 multiplied in 8 bits on 2; its Q4_K
     files and NVFP4 not yet):
@@ -701,7 +701,7 @@ they differ and by which metrics, and how users are guided to them. What is know
       matrices), and comfy-kitchen's kernels are matrix multiplies too.
     - In the decoder's last stages, the activations are the picture taking shape, so their
       precision becomes the picture's. In bf16, 8 significant bits, near-white values already
-      sit on 8-bit steps ([numerics.md](../research/docs/numerics.md#vae-decode-precision));
+      sit on 8-bit steps ([numerics.md](research/docs/numerics.md#vae-decode-precision));
       fp8 keeps 4 significant bits, NVFP4 2. The latent itself is untouched: its rendering
       into pixels is what would lose precision. In the encoder, the latent itself would.
   - The VAE's memory is activations, about 34 GiB for an untiled 1080p decode: tiling is the
@@ -751,7 +751,7 @@ from a cut list.
   gateway, so every cut and every output segment comes from seedvr2x's own detection and
   rules, never from an outside splitter's joins: of an earlier split's 411 joins, 63 scored
   under scdet's threshold of 10 and 14 under 4
-  ([scene-detection.md](../research/docs/scene-detection.md)). Segments split losslessly can
+  ([scene-detection.md](research/docs/scene-detection.md)). Segments split losslessly can
   be joined back into one file: a directory given is refused, saying how. The join must keep the
   frame grid, as seedvr2x's own assembly does and as `sptenc concat` does where it snaps: a file
   seedvr2x's assembly builds is never refused (its own output, read back as a source, is part of
@@ -799,7 +799,7 @@ Decoding goes through an ffmpeg pipe:
     does the conversions' fingerprint. No GPU test's reference moved, every one reading RGB.
     Measured on 2026-10-19 on numz,
     8 clips, with `split`'s correction
-    ([numerics.md](../research/docs/numerics.md#the-decodes-chroma-the-kernel-the-models-input-is-read-with)):
+    ([numerics.md](research/docs/numerics.md#the-decodes-chroma-the-kernel-the-models-input-is-read-with)):
     against bilinear, a source read with Catmull-Rom gives an output whose luma stays within
     the seeds' spread (VMAF higher on 2 of the 8) and whose chroma is further from the ground
     truth: PSNR-Cb 0.17 dB and PSNR-Cr 0.25 lower on average, lower on 5 of 8 clips each and
@@ -874,7 +874,7 @@ Decoding goes through an ffmpeg pipe:
     other, never reinterpreted on seedvr2x's own (the user's decision). The case measured: a
     Blu-ray remux declared 24/1 whose frames step at 24 fps, with one frame in 500 held 62–63
     ms instead of 42, which keeps every frame within ±10.9 ms of a steady 24000/1001
-    timeline, its audio's ([seeking.md](../research/docs/seeking.md), mechanism 7).
+    timeline, its audio's ([seeking.md](research/docs/seeking.md), mechanism 7).
   - The fix is the user's, and seedvr2x guides it. A refusal names another rate in two cases
     only (2026-10-12): the timestamps are that rate's exactly, to one tick of the file's time
     base, over 7 timestamps at least; or, where sptenc's rule fails as there, it is the declared
@@ -926,7 +926,7 @@ Decoding goes through an ffmpeg pipe:
   - Missing frames are filled, not refused (decided with the user, 2026-10-10). Frames that
     sit on the declared rate's grid with places left empty, as when a decoder drops a
     keyframe's leading pictures (found on a Blu-ray episode: two frames right after its first
-    frame, [seeking.md](../research/docs/seeking.md), mechanism 1), have one reading, the
+    frame, [seeking.md](research/docs/seeking.md), mechanism 1), have one reading, the
     one a player shows: the frame before the hole, held. seedvr2x repeats that frame in each
     empty place, says so (the frame, the hole's length, how many holes) and records it: the
     output keeps the source's length and stays with its audio. A contradicted rate has two
@@ -961,8 +961,8 @@ Decoding goes through an ffmpeg pipe:
   - The pass costs one software decode: 171 fps on an HEVC master, 730–2,360 on 1080p H.264
     (a 26 Mbit/s Blu-ray: 735 on 16 threads, about 4 min for a 2-hour film), and 204 fps on
     16 threads, 315–326 on 48, on a 4K UHD HEVC remux: at least 19–30 min for a 4-hour film
-    ([seeking.md](../research/docs/seeking.md),
-    [scene-detection.md](../research/docs/scene-detection.md)). The shot detector and idet
+    ([seeking.md](research/docs/seeking.md),
+    [scene-detection.md](research/docs/scene-detection.md)). The shot detector and idet
     join it (see [Shot detection](#shot-detection)).
   - Built on 2026-10-10 as one ffmpeg process that keeps the source's timestamps (`-copyts`),
     each of its jobs an output of its own: the frames' CRC-32 for the index (ffmpeg's
@@ -981,7 +981,7 @@ Decoding goes through an ffmpeg pipe:
 - interlacing: refused when the field order is neither progressive nor unknown (sptenc's
   rule)
 - frame-exact reading from any frame, through an index the first pass builds
-  ([seeking.md](../research/docs/seeking.md)):
+  ([seeking.md](research/docs/seeking.md)):
   - The first pass, which decodes every frame anyway, records each frame's timestamp, a CRC-32
     of the decoded picture and whether the decoder reported an error on it, plus the keyframes'
     timestamps from a packet scan. Frames are counted as they arrive, never from ffmpeg's own
@@ -1018,7 +1018,7 @@ Decoding goes through an ffmpeg pipe:
     its place with its timestamp is therefore taken as decoded whatever its CRC-32, with a
     warning; a wrong timestamp, a missing or an extra frame still fails, and seeks stay
     strict. One decoder thread settles it for H.264 and MPEG-2, not for HEVC (2026-10-21,
-    [seeking.md](../research/docs/seeking.md)): on one thread, 8 of 8 copies decoded their
+    [seeking.md](research/docs/seeking.md)): on one thread, 8 of 8 copies decoded their
     damaged frames the same every time, and a read started at a damaged frame's keyframe, or up
     to 3 before, gave the start's pictures on 60 of 60 reads in 5 of them; HEVC repeated on one
     thread in none of its 3 copies. A real file's damage doesn't always repeat from its own
@@ -1027,7 +1027,7 @@ Decoding goes through an ffmpeg pipe:
     from that keyframe, the same every time, and as from the start from 1 to 3 keyframes
     back. A read starts one keyframe before a frame's own, so it holds there too.
   - **One decoder thread isn't built** (decided on 2026-10-22,
-    [seeking.md](../research/docs/seeking.md#the-first-pass-on-one-decoder-thread)): it would
+    [seeking.md](research/docs/seeking.md#the-first-pass-on-one-decoder-thread)): it would
     make the decode the first pass's slow part on HD sources. On the 99-minute Blu-ray remux
     (H.264, 142,477 frames), the pass's ffmpeg command (the decode, the hashes, idet and the
     detector's small frames) took 1,024 to 1,035 s on one thread against 143 s on the default
@@ -1057,7 +1057,7 @@ round trip, white at 940, black at 64, chroma siting.
 
 Every zscale runs on one slice, with libavfilter's per-filter option `threads=1`, in the decode
 and in the `yuv420p10le` writer alike
-([numerics.md](../research/docs/numerics.md#the-masters-chroma-420-kernels-and-zscales-slices)).
+([numerics.md](research/docs/numerics.md#the-masters-chroma-420-kernels-and-zscales-slices)).
 By default, ffmpeg cuts zscale into slices, one per CPU the process may use, and each slice is
 a zimg graph of its own:
 - A `yuv420p10le` master then changes with the slice count, so with the machine, on the rows at
@@ -1078,8 +1078,8 @@ a `-filter_complex` one, whose slices follow `-filter_complex_threads`, not `-fi
 Shot detection is the biggest quality lever outside the model, and what both workflows start
 from (see [Two kinds of users](#two-kinds-of-users-both-first-class)). The detector was chosen
 on the user's labels: 130 candidates in two rounds, drawn where the detectors disagree, shown
-blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief), jointly with
-[cuts.md](../research/docs/cuts.md#what-it-means-for-shot-detection)).
+blind ([scene-detection.md](research/docs/scene-detection.md#decision-brief), jointly with
+[cuts.md](research/docs/cuts.md#what-it-means-for-shot-detection)).
 - **The detector: TransNetV2**, the official model (MIT): its PyTorch code vendored, its
   weights converted from the official TensorFlow ones by its own `convert_weights.py` (PyTorch
   matches TensorFlow within 5.1e-7, with the same detections), saved as safetensors by
@@ -1148,7 +1148,7 @@ blind ([scene-detection.md](../research/docs/scene-detection.md#decision-brief),
     real cuts between similar-coloured moving shots scored 0.207 and 0.155, while a shot in the
     same flight peaked at 0.232. No threshold separates them there: 0.2 finds 1 of the 2 and 1
     false cut, 0.15 both and 2 false ones
-    ([scene-detection.md](../research/docs/scene-detection.md#native-4k-animation-cuts-inside-fast-camera-motion)).
+    ([scene-detection.md](research/docs/scene-detection.md#native-4k-animation-cuts-inside-fast-camera-motion)).
     Full-resolution measures missed both cuts as well (scdet 1.8 and 1.3), and on a 1080p
     downscale TransNetV2 scores every frame within 0.016 of the 4K pass: the misses come from
     the motion, not the resolution.
@@ -1234,10 +1234,10 @@ The rule: the upscale must look like its source in any given player.
      computes from NaResize's int, and the resize to it is the same call, bit for bit.
    - Measured, the default stays: without antialiasing, worse on 7 of 7 clips; zimg's Spline36
      and Lanczos gain a little on some grainy or detailed clips and cost colour and flicker on
-     fast live action ([numerics.md](../research/docs/numerics.md)). No kernel option in v1.
+     fast live action ([numerics.md](research/docs/numerics.md)). No kernel option in v1.
    - The frame is then padded to multiples of 16: at least 8 rows reflected from the picture,
      then 16 black rows, all trimmed after decoding (`reflect>=8+black+16`,
-     [numerics.md](../research/docs/numerics.md#reflectblack16)).
+     [numerics.md](research/docs/numerics.md#reflectblack16)).
      - numz pads with black alone (8 rows at 1080p, none at 720p), which costs the bottom 16
        rows 3–10 dB. Padding without black, or cropping as ByteDance does, repairs that band
        but makes the whole frame worse on clips without black areas of their own (−0.6 to
@@ -1282,7 +1282,7 @@ The rule: the upscale must look like its source in any given player.
      mixes both scenes in one latent
    - windows stitched across a cut would cross-fade the two scenes
 
-   Measured ([cuts.md](../research/docs/cuts.md)): a missed cut costs the next shot's first
+   Measured ([cuts.md](research/docs/cuts.md)): a missed cut costs the next shot's first
    frames, mostly through the causal VAE, which carries the previous shot over. It is the
    costliest detection error (see [Open questions](#open-questions)).
 
@@ -1290,7 +1290,7 @@ The rule: the upscale must look like its source in any given player.
    to the ground truth than the next 8 frames (by 0.04–5.5 dB of PSNR-Y, on 11 shots), but
    re-rendered less by one measure: less sharp on 9 of them, by 3–55%, by the luma's
    Laplacian variance against the ground truth's
-   ([cuts.md](../research/docs/cuts.md#a-shots-first-frame-prepending-mirrored-frames)), a
+   ([cuts.md](research/docs/cuts.md#a-shots-first-frame-prepending-mirrored-frames)), a
    measure the user's eyes contradicted on the latent grid (see [To measure](#to-measure)).
    Prepending 4 mirrored frames, as numz's `--prepend_frames` does, gives it the next frames'
    look for one more latent per shot (2–8% more GPU time per hour of animation), at the cost of
@@ -1305,7 +1305,7 @@ The rule: the upscale must look like its source in any given player.
    (:635-648); ByteDance repeats the last frame (`inference_seedvr2_7b.py:178-196`). Decided
    and built on 2026-10-19: the last frame repeated, as ByteDance does. The padded length
    is the same, and the shot's end comes closer to the ground truth
-   ([cuts.md](../research/docs/cuts.md#a-shots-end-repeating-its-last-frame-against-mirroring)).
+   ([cuts.md](research/docs/cuts.md#a-shots-end-repeating-its-last-frame-against-mirroring)).
    Measured on numz on the 96 GB card, without colour correction, repeat against mirror:
    - 8 clips cut to 42 frames (3 padded), seeds 42 and 43: the last frame 3.4 dB higher in
      PSNR-Y (3.39 and 3.41 by seed) and 21.9 in VMAF, beyond the seeds' spread on 7 of the 8
@@ -1371,7 +1371,7 @@ The rule: the upscale must look like its source in any given player.
    - one window per DiT call. Batching windows breaks `na.unconcat_coalesce` when their
      window counts differ, and the planner sizes a window to fill the memory anyway.
 
-   [Measured](../research/docs/stitching.md) with `lab`: −80% boundary jump against independent
+   [Measured](research/docs/stitching.md) with `lab`: −80% boundary jump against independent
    batches, no softening, output 40.5–40.8 dB from the single-window result, about +3–9%
    compute (the VAE is most of the time).
 3. **VAE decode** of the shot: one streaming pass, or tiled when the planner says so.
@@ -1411,7 +1411,7 @@ The rule: the upscale must look like its source in any given player.
      - The overlap is fixed at 64 px: the colour study's tiles after `split` and the recipes
        validated per card size ran at 64 (see [Beyond numz's `lab`](#beyond-numzs-lab)), and
        the one pair measured, 512-px decode tiles at 1080p, gained nothing at 128 (38.3 dB
-       from the untiled decode both ways, [vram.md](../research/docs/vram.md#tiling)).
+       from the untiled decode both ways, [vram.md](research/docs/vram.md#tiling)).
      - A balanced grid, without the sliver row this one leaves (144 px at 1080p and 272 px at
        4K under 1024-px tiles), is a later change, measured as the padding was.
    - A tiled encode goes the same way, each tile over the whole shot: the transformed input is
@@ -1419,7 +1419,7 @@ The rule: the upscale must look like its source in any given player.
      of the half of the encoder's output the latent is made from, wait in system memory
      (0.26 MB per 1080p frame, 1.05 MB per 4K frame) and are divided slice by slice.
    - Streaming a tiled decode slice by slice would hold every tile's causal caches at once,
-     8.05 GiB per megapixel decoded ([decode-resume.md](../research/docs/decode-resume.md)): a
+     8.05 GiB per megapixel decoded ([decode-resume.md](research/docs/decode-resume.md)): a
      later way, for large cards.
 4. **Colour correction** against the input (see below).
 5. **Write** frames as they come out.
@@ -1461,7 +1461,7 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   the masters' does. Frames asked for in
   float (`--dump-frames`) are written by the run that makes them.
 - **Measured** (2026-10-20, numz, the 8 full-reference clips, seed 42;
-  [numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)): against
+  [numerics.md](research/docs/numerics.md#every-fourth-frame-the-latent-grid)): against
   one run, PSNR-Y +2.01 dB and VMAF +10.4 without correction (+1.51 and +7.85 after `split`),
   beyond the seeds' spread on 8 of 8 clips by VMAF, from +0.06 dB on a slow pan over a
   near-flat sky to +3.96 on a dark anime clip; the temporal errors lower on 8 of 8, so the
@@ -1473,7 +1473,7 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   blurry") and on 4 of 4 loops, 2 of them hard to tell in motion.
 - **At 4K** (2026-10-21, ×2 from 1080p, the 96 GB card, seed 42, 4 shots of a grainy
   live-action film and a painted animation shot;
-  [numerics.md](../research/docs/numerics.md#in-seedvr2x---quality-at-4k-and-in-the-manuals-example)):
+  [numerics.md](research/docs/numerics.md#in-seedvr2x---quality-at-4k-and-in-the-manuals-example)):
   `maximum` closer to the ground truth on every measure on all 5,
   PSNR-Y +0.09 to +1.98 dB and VMAF +1.3 to +19.1 (its 4K model), the temporal errors lower.
   To the eyes, blind, only on the painted shot: 2 of 2 places ("sharper, way less
@@ -1486,7 +1486,7 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
   clouds and a jet blurred all over by motion (cut falsely into shots of 2, 42 and 1 frames,
   by a whip pan's blur and a jet coming in), and 2 of a grainy cel animation scanned in 4K,
   a fast tilt and a still night street;
-  [numerics.md](../research/docs/numerics.md#more-shots-and-a-second-seed)): `maximum` closer
+  [numerics.md](research/docs/numerics.md#more-shots-and-a-second-seed)): `maximum` closer
   to the ground truth on all 9 by PSNR-Y and VMAF, from +0.06 dB and +1.7 on the grainy film's
   still face to +2.31 dB and +17.2 on the fast tilt; the grainy film's gains within 0.06 dB
   and 0.4 of VMAF of seed 42's. To the eyes, blind: `maximum` on 8 places of 18, `standard`
@@ -1544,7 +1544,7 @@ it ends its group of 4. Off by default: it costs as many times the GPU time.
 
 The model shifts colours, and the VAE's tiles shift each tile's level and colour. seedvr2x
 corrects both against the input with `split`, the colour study's winner
-([colour.md](../research/docs/colour.md)), which goes beyond numz's `lab` (see
+([colour.md](research/docs/colour.md)), which goes beyond numz's `lab` (see
 [Beyond numz's `lab`](#beyond-numzs-lab)). `--color-correction {split,none}`, `split` by
 default, is a setting, so a resume compares it. `lab`, which milestone 5 matched to numz's,
 goes, and with it the decode's two passes and their buffer (the user's decision, 2026-10-06,
@@ -1683,7 +1683,7 @@ study validated it against `lab` (see [Validation milestones](#validation-milest
 Milestone 5 matched numz's `lab`: a floor, not the aim. The user counts colour correction among
 seedvr2x's critical parts: it decides how faithful the output's colours are, it repairs what
 tiling does to them, and the measurements left room. The colour study
-([colour.md](../research/docs/colour.md)) went past it, to `split`.
+([colour.md](research/docs/colour.md)) went past it, to `split`.
 
 numz's `lab`, per batch slice (numz `4490bd1`):
 - **Inputs.** The content is the VAE's bf16 output, unclamped. The reference is the input
@@ -1705,10 +1705,10 @@ shot). `split` needs neither.
 
 - **The gap.** On the full-reference clips, `lab` brings the low-frequency colour error to the
   ground truth down by 37–55%, to a ΔE00 of 1.07–1.58 after a 4 px blur, but the input itself,
-  upscaled with Catmull-Rom, is at 0.6–0.7 ([numerics.md](../research/docs/numerics.md)). The
+  upscaled with Catmull-Rom, is at 0.6–0.7 ([numerics.md](research/docs/numerics.md)). The
   split replaces only what is coarser than about 30–60 px (σ ≈ 13 px), while the model's extra
   saturation and colour drift sit finer
-  ([quality.md](../research/docs/quality.md#colour-correction)). The histogram matching then
+  ([quality.md](research/docs/quality.md#colour-correction)). The histogram matching then
   corrects their distribution over the shot, not where they are.
 - **The aim:** colour and brightness as close to the source as the input holds them, at every
   scale where it does, with the model's detail kept: no detail lost, no flicker, halo or
@@ -1730,7 +1730,7 @@ shot). `split` needs neither.
 - **Tiles are part of it.** The VAE runs tiled at 4K on every card, the 96 GB one included (an
   untiled 4K decode needs ≈ 134 GiB), and at 1080p below 48 GB. A tile's damage is a colour
   drift: each tile shifted uniformly, by up to 2 levels in the decode and 4 in the encode at
-  512 px ([vram.md](../research/docs/vram.md#tiling)).
+  512 px ([vram.md](research/docs/vram.md#tiling)).
   - After `split`, the worst 60-px block of a frame moves by 0.04–0.50 8-bit levels at 1080p
     (5 clips: decode tiles from 1280 down to 512 px, and the consumer cards' encode / decode
     recipes 1344 / 1024 and 1024 / 768), and up to 0.77 with 512-px encode tiles, 0.27 at
@@ -1745,7 +1745,7 @@ shot). `split` needs neither.
     least. At 4K it holds on flat content too (a smooth sky, near space, painted animation):
     with 512-px decode tiles the flattest third moves by 0.08–0.15, the worst block by up to
     0.77, in painted texture
-    ([colour.md](../research/docs/colour.md#4k-tiles-on-flat-content)).
+    ([colour.md](research/docs/colour.md#4k-tiles-on-flat-content)).
 - **Protocol:** no model run per variant. The raw decodes and the float32 reference are dumped
   once per clip and tiling, and each variant post-processes them, built on `runtime/colour.py`
   so that the winner ports as it is. Scores: ΔE00 after blurs of 0 to 16 px, PSNR-Y, LPIPS,
@@ -1781,7 +1781,7 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     - The chroma is downsampled with zscale's bilinear, pinned, as `ffv1_out.py` does, on one
       slice (see [Input](#input)). Decimation wants a low-pass, not a sharp interpolator, and the
       measurement agrees
-      ([numerics.md](../research/docs/numerics.md#the-masters-chroma-420-kernels-and-zscales-slices)):
+      ([numerics.md](research/docs/numerics.md#the-masters-chroma-420-kernels-and-zscales-slices)):
       - On the 8 full-reference clips, bilinear gives the lowest ΔE00 on every clip, against
         Catmull-Rom, Spline16, Spline36 and Lanczos. These lose 0.3–0.5 dB on Cb and Cr on
         average, 0.05–0.07 of ΔE00, and ring more.
@@ -1793,7 +1793,7 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     research scoring use it). At its full size (see Master sizes below), it isn't meant for
     whole films.
 
-  Validated with the [`ffv1_out.py` wrap](../research/docs/output.md): bit-exact round trip,
+  Validated with the [`ffv1_out.py` wrap](research/docs/output.md): bit-exact round trip,
   tags checked by ffprobe. Our writers give a `yuv420p10le` bit-identical to its output. They
   set every tag both on the frames (`setparams`) and on the encoder: ffmpeg n9 converts frames
   whose tags differ from the encoder's.
@@ -1909,7 +1909,7 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     anime episode and 104.8 on a live-action film). The corrected float32 output fills the 16
     bits, tens of thousands of distinct codes in a frame against 300–400 in numz's bf16
     output, whose
-    `gbrp16le` masters took 250–350 GiB ([output.md](../research/docs/output.md) measured 2.97
+    `gbrp16le` masters took 250–350 GiB ([output.md](research/docs/output.md) measured 2.97
     MiB per frame). Rounding ours to bf16 would save 34–43%, for 8 significant bits.
   - **Rejected:** `--stream`, the output on stdout for a single compressor process. That
     process can't be paused, so a stopped run would leave parts to join by hand.
@@ -2017,8 +2017,8 @@ compressed is the user's choice: afterwards, from the master, or during the run 
 
 ## Memory planner
 
-Built into the CLI, from the validated models in [vram.md](../research/docs/vram.md) and
-[planner-limits.md](../research/docs/planner-limits.md). It makes one plan per job, after the
+Built into the CLI, from the validated models in [vram.md](research/docs/vram.md) and
+[planner-limits.md](research/docs/planner-limits.md). It makes one plan per job, after the
 first pass, whose shots are its input, and before the models load:
 - **Budget:** the free memory the driver reports (`mem_get_info`) once the shot detector has
   given its own back and before the models load, minus 0.6 GiB. That covers the desktop and
@@ -2212,7 +2212,7 @@ first pass, whose shots are its input, and before the models load:
       kept, which the planner's footing has loaded before the free memory is read.
   - the colour correction, counted in the decode's phase, where it runs on each decoded slice:
     0.56 GiB per 4K frame it corrects at once
-    ([colour.md](../research/docs/colour.md#cost-and-what-streams)).
+    ([colour.md](research/docs/colour.md#cost-and-what-streams)).
   - DiT (7B fp16) ≈ 15.87 GiB + 127.16 KiB per token + 2.726 MiB per attention window, the
     windows counted with the model's own window functions (the larger of its two layouts).
     That fits 26 window lengths, 1–78 latents at 1080p and 1–19 at 4K, to 0.005 GiB; tokens
@@ -2303,23 +2303,23 @@ first pass, whose shots are its input, and before the models load:
     a flat sky couldn't be judged at all, nothing in them to recognise, the uncorrected
     control's two among them. The worst 60×60 block moved 0.07 to 0.54 of a level and the
     flattest third 0.03 to 0.28, where 512-px decode tiles move it 9.36 without correction
-    ([colour.md](../research/docs/colour.md#through-seedvr2xs-split-for-the-eyes)).
+    ([colour.md](research/docs/colour.md#through-seedvr2xs-split-for-the-eyes)).
     The encode's drift more than the
     decode's (at 512 px, 33.4 dB from the untiled run against 38.3,
-    [vram.md](../research/docs/vram.md#tiling)). The planner chooses none above 2048 px, the
+    [vram.md](research/docs/vram.md#tiling)). The planner chooses none above 2048 px, the
     largest measured.
   - Nothing caps a large card: the memory a 16–32 GB card spends on BlockSwap and tiles goes,
     on 96 GB and more, to longer windows.
   - **`torch.compile`: the VAE, opt-in, in v0.1.0; the DiT, not** (decided on 2026-10-24,
     the user, on compile-2's study on an RTX 5090,
-    [compile.md](../research/docs/compile.md); built on 2026-10-30). PyTorch's compiler turns a
+    [compile.md](research/docs/compile.md); built on 2026-10-30). PyTorch's compiler turns a
     model's Python code into fused GPU kernels the first time the model meets an input of a
     given shape, and compiles again for each new shape. A job's frame size being fixed, the
     DiT's shape is its window's length in latents, and the VAE's, called slice by slice,
     stays the same all job long. numz's figures
-    ([vram.md](../research/docs/vram.md#torchcompile)) don't hold for seedvr2x: its compiled
+    ([vram.md](research/docs/vram.md#torchcompile)) don't hold for seedvr2x: its compiled
     VAE took twice its memory because its exclusion of the causal convolutions never took
-    effect ([bug 15](../research/bugs/15-compile-vae-exclusion-dead-code.md)).
+    effect ([bug 15](research/bugs/15-compile-vae-exclusion-dead-code.md)).
     - `--compile` compiles the VAE with those convolutions left out of the graph, as numz
       meant: each pass 0.79–0.95 of plain's time, its peak 1.04–1.10 times plain's, 4 to 6
       min of compilation per process in the study (238 s for its 1080p job), paid before the
@@ -2337,7 +2337,7 @@ first pass, whose shots are its input, and before the models load:
       It is a setting, recorded as compile_vae: its frames are not plain's, but the same in
       every process. The VAE alone, compiled against plain on the same latent, gave frames
       59.0–61.8 dB apart (2 to 9 levels at most), the encode's latent 0.10–0.14 apart at most
-      ([compile.md](../research/docs/compile.md)); the 51–61 dB said here until 2026-10-31
+      ([compile.md](research/docs/compile.md)); the 51–61 dB said here until 2026-10-31
       were the compiled DiT's. A whole job's frames, measured on 2026-11-01 on the RTX 5090
       (three 1080p excerpts of about 100 frames, two live action and one anime, plain code
       pinned to the compiled plan's tiles, window and blocks): 54–61 dB from plain code's
@@ -2575,14 +2575,14 @@ first pass, whose shots are its input, and before the models load:
   tiles, closer to the one-window, untiled run:
   - Windows change the output about as much as a change of seed: milestone 2's came out
     41.9 dB from the one-window run, and two seeds are 37–44 dB apart
-    ([models.md](../research/docs/models.md)).
+    ([models.md](research/docs/models.md)).
   - Tiles drift in colour, uniformly across each tile, more as they get smaller: 1024-pixel
     decode tiles came out 37.9–43.6 dB from the untiled decode on two clips, 512-pixel encode
-    tiles 33.4 ([vram.md](../research/docs/vram.md#tiling)). Colour correction removes most of
+    tiles 33.4 ([vram.md](research/docs/vram.md#tiling)). Colour correction removes most of
     it: tiled and untiled, both through `lab`, came out 48.9 dB apart
-    ([quality.md](../research/docs/quality.md#vae-tiling-on-flat-areas)), and `split` leaves
+    ([quality.md](research/docs/quality.md#vae-tiling-on-flat-areas)), and `split` leaves
     about half of what `lab` leaves
-    ([colour.md](../research/docs/colour.md#vae-tiles-at-1080p)).
+    ([colour.md](research/docs/colour.md#vae-tiles-at-1080p)).
   - So the plan is part of the job, and the manifest records it in two parts:
     - What shapes the output: the window cap, the tiles and their overlap, and the two compile
       flags. A resume compares them as it does the layout, and takes them as recorded.
@@ -2707,7 +2707,7 @@ first pass, whose shots are its input, and before the models load:
 ### BlockSwap, rewritten
 numz swaps its first N blocks: each goes to the GPU for its forward pass and back to pageable
 memory after it, synchronously, about 25 ms up and 95 ms back per block
-([measured](../research/docs/vram.md#blockswap)). Weights never change, so:
+([measured](research/docs/vram.md#blockswap)). Weights never change, so:
 - one **pinned** host copy per block that leaves the GPU, host→device only (57 GB/s pinned vs
   4 GB/s back to pageable memory): nothing is ever copied back. Each copy takes its bytes and
   no more: seedvr2x maps and registers the memory itself, torch's pinned allocator rounding
@@ -2742,7 +2742,7 @@ memory after it, synchronously, about 25 ms up and 95 ms back per block
   logged.
 - **The gate: swapping changes no bit** of the output, for any number of swapped blocks, with
   and without the prefetch. numz's own swap changed none
-  ([models.md](../research/docs/models.md#blockswaps-free-q4_k_m-swap-the-power-cap-test)).
+  ([models.md](research/docs/models.md#blockswaps-free-q4_k_m-swap-the-power-cap-test)).
   The resume rule rests on it (see [Memory planner](#memory-planner)). Passed on 2026-10-11,
   on the 96 GB card and on a 32 GB desktop card: 0, 3, 12 and 36 blocks swapped, with the
   prefetch and without, at 1, 6 and 12 latents at 1080p and at 4K; a plan that keeps the two
@@ -3150,7 +3150,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
     and leaves the GPU
 - **Later:**
   - Resuming a segment's decode mid-way
-    ([decode-resume.md](../research/docs/decode-resume.md)). Decoding a warm-up of min(s, 37)
+    ([decode-resume.md](research/docs/decode-resume.md)). Decoding a warm-up of min(s, 37)
     latents before the resume point and dropping them is bit-identical, never with fewer: 37
     is the decoder's receptive field, to the frame. A snapshot of its 33 causal-conv caches is
     the exact alternative, 8.05 GiB per output megapixel (18 GB at 1080p).
@@ -3178,7 +3178,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--resolution` | kept: the output's short side, 1080 by default, numz's |
 | `--max_resolution` | dropped from v0.1.0 (2026-10-31; said kept here, never built): the short side is the one size asked, and a size that doesn't fit is refused, naming the largest that does |
 | `--skip_first_frames`, `--load_cap` | dropped (2026-10-31): no option takes part of a source; the part wanted is cut first, and that file is the source. `--until` stops a job at a set time, which is not that |
-| `--swap_io_components` | dropped (2026-10-31): `--swap-blocks` swaps whole blocks; the DiT's other parameters (0.16 GiB) leave the GPU with the model when the plan sends it away for the VAE's passes, where numz's option left every unswapped block on the GPU through the decode ([bug 12](../research/bugs/12-swap-io-dit-leak.md)) |
+| `--swap_io_components` | dropped (2026-10-31): `--swap-blocks` swaps whole blocks; the DiT's other parameters (0.16 GiB) leave the GPU with the model when the plan sends it away for the VAE's passes, where numz's option left every unswapped block on the GPU through the decode ([bug 12](research/bugs/12-swap-io-dit-leak.md)) |
 | `--tile_debug` | dropped (2026-10-31): the plan's lines say each pass's tiles, their size, overlap and count |
 | `--compile_backend`, `--compile_mode`, `--compile_fullgraph`, `--compile_dynamic`, `--compile_dynamo_cache_size_limit`, `--compile_dynamo_recompile_limit` | dropped (2026-10-31): `--compile` takes no tuning: numz's settings (inductor in its default mode, not full-graph, static shapes), inductor's deterministic mode kept on, and the recompile limits raised to hold every shape the job meets, numz's 128 being too few at 4K |
 | `--debug` | replaced by `-v`, `--verbose` (2026-10-31) |
@@ -3200,9 +3200,9 @@ attention windows stay out of the user docs; they matter only to developers.
 - **The model itself shifts colours.** Raw SeedVR2 output is more saturated than its input,
   and its hue moves with the content. On a dark anime clip (clip A), with colour correction
   off, the saturation spread is +34% on a* and +28% on b*, toward blue, and the low-frequency
-  colour error is ΔE 4.44 ([quality.md](../research/docs/quality.md#colour-correction)). On 7
+  colour error is ΔE 4.44 ([quality.md](research/docs/quality.md#colour-correction)). On 7
   of 10 full-reference clips the shift is toward yellow
-  ([colour.md](../research/docs/colour.md)).
+  ([colour.md](research/docs/colour.md)).
 - **ByteDance's own pipeline corrects it, with a fix it can't ship.** Its inference script
   runs StableSR's wavelet colour fix after the model (`projects/inference_seedvr2_7b.py:300`),
   but the file is under a non-commercial licence, so the readme asks users to download it
@@ -3215,7 +3215,7 @@ attention windows stay out of the user docs; they matter only to developers.
   brightness below 6.5 px, the model's detail above, and no histogram matching, which is what
   moves `lab`'s colours. Against `lab` it gives a lower colour error at every scale, less
   flicker and half the tiles' drift, and the user's eyes found it never worse
-  ([colour.md](../research/docs/colour.md)). Its wavelet split is rewritten from the method,
+  ([colour.md](research/docs/colour.md)). Its wavelet split is rewritten from the method,
   with no non-commercial code. `none` gives the raw model's colours, for comparison or for
   users who grade themselves.
 
@@ -3233,12 +3233,12 @@ explanation.
     decode every batch, colour-correct every batch.
   - The latents wait in RAM between phases (`--tensor_offload_device cpu`), and the decoded
     frames gather in RAM before they are written. Without the cache options, the DiT is
-    loaded for each file or chunk ([cli-flags.md](../research/docs/cli-flags.md)).
+    loaded for each file or chunk ([cli-flags.md](research/docs/cli-flags.md)).
   - So RAM grows with the clip, every batch boundary is a visible jump, and a stop loses
     everything. Most knobs patch what this design creates:
     - `--temporal_overlap` cross-fades batch boundaries in pixels, after decoding. Its
       weights only blend with odd values ≥ 3
-      ([bug 06](../research/bugs/06-temporal-overlap-blend-weights.md)): 1, 2 and 4 are a
+      ([bug 06](research/bugs/06-temporal-overlap-blend-weights.md)): 1, 2 and 4 are a
       hard switch that costs compute. Even corrected, a pixel cross-fade removes 67% of the
       jump, softens the mixed frames by about 20%, and costs +16%.
     - `--chunk_size` bounds the RAM, and leaves a hard seam at every chunk boundary.
@@ -3246,8 +3246,8 @@ explanation.
       chunk is a full run.
     - `--prepend_frames` makes the clip's first frame not a batch's first. The causal VAE
       encodes a batch's first frame alone, and it comes out less restored
-      ([quality.md](../research/docs/quality.md#--prepend_frames)). On one GPU, numz doesn't
-      remove the prepended frames ([bug 05](../research/bugs/05-prepend-frames-not-removed.md)).
+      ([quality.md](research/docs/quality.md#--prepend_frames)). On one GPU, numz doesn't
+      remove the prepended frames ([bug 05](research/bugs/05-prepend-frames-not-removed.md)).
     - `--uniform_batch_size` pads a short last batch to full size.
     - The offload devices, `--blocks_to_swap` and the tile sizes fit the GPU, by hand.
 - **seedvr2x works per shot, from cut to cut, with no batch size.** A shot of any length is
@@ -3270,7 +3270,7 @@ explanation.
   - No batch boundary is left inside a shot, so there is nothing to cross-fade. Latent
     windows share whole latents, so there is no parity quirk. They remove 80% of a window
     boundary's jump, with no softening, for about +3–9%
-    ([stitching.md](../research/docs/stitching.md)).
+    ([stitching.md](research/docs/stitching.md)).
   - Streaming keeps RAM flat, so there are no chunks. One process runs the whole job, so
     there is no cache to keep.
   - Only a shot's first frame is encoded alone, right after its cut, where it is least
@@ -3289,12 +3289,12 @@ explanation.
 - the model: v1 runs ByteDance's 7B in fp16, the sharp 7B by default and the regular one as the
   reference every check is made against; phase 2 brings the smaller files, each with its
   measured quality
-- what the model does to live action ([numerics.md](../research/docs/numerics.md)): the
+- what the model does to live action ([numerics.md](research/docs/numerics.md)): the
   perceptual metrics side with it over a plain upscale, the pixel ones with the plain upscale.
   It redraws grain and detail of the right kind at the wrong place, and from a heavily degraded
   grainy source it gives back about half of the film's grain.
 - what the model does at 4K
-  ([colour.md](../research/docs/colour.md#step-5-4k-on-clean-and-grainy-sources-and-a-detail-strength),
+  ([colour.md](research/docs/colour.md#step-5-4k-on-clean-and-grainy-sources-and-a-detail-strength),
   step 6): ×2 from 1080p, it redraws rather than enlarges. Full-reference metrics, which reward
   a copy of the source's own blur and grain, put it behind a plain upscale on every score but
   banding, on clean sources as on grainy ones (17 shots, PSNR-Y 4–9 dB lower), while the eyes
@@ -3417,7 +3417,7 @@ writers, and the planner needs real shot lengths.
 
 **The build order:**
 1. Resume (milestone 4): passed on 2026-10-03. Real episodes needed it: at 4.4 s per 1080p
-   frame ([stitching.md](../research/docs/stitching.md#cost-model)), a 24-minute episode
+   frame ([stitching.md](research/docs/stitching.md#cost-model)), a 24-minute episode
    takes about 40 GPU hours on the power-capped card (see
    [Memory planner](#memory-planner)).
 2. The `lab` rewrite (milestone 5): passed on 2026-10-04. Then, as small steps of their own:
@@ -3481,7 +3481,7 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
      milestone passes.
 2. **Stitching.** Passed on 2026-10-02, with colour correction off. It isn't implemented yet,
    and `lab` cuts the remaining low-frequency jump about 3×
-   ([stitching.md](../research/docs/stitching.md)), so the study's figures don't carry over.
+   ([stitching.md](research/docs/stitching.md)), so the study's figures don't carry over.
    - Material: an 8-bit RGB copy of clip B's frames 20–100, against new numz runs: one batch
      of 81, independent batches of 21, and `STITCH_LATENT` 6:2. The windows are latents 0–6,
      4–10, 8–14, 12–18 and 16–21.
@@ -3683,14 +3683,14 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
 ## Open questions
 
 ### To measure
-- **Numerics:** settled ([numerics.md](../research/docs/numerics.md)). numz's choices stay
+- **Numerics:** settled ([numerics.md](research/docs/numerics.md)). numz's choices stay
   (see [Vendored model code](#vendored-model-code)), its bf16 decode included, and so does its
   resize; the padding of a frame changes (step 0 of the [Pipeline](#pipeline-per-shot)), and
   so does that of a shot's end (step 1, decided on 2026-10-19). The decode's chroma kernel is
   bilinear (2026-10-20, see [Input](#input)), and so is the master's downsampling (see
   [Output](#output)).
 - **Every fourth frame is the model's best**
-  ([numerics.md](../research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
+  ([numerics.md](research/docs/numerics.md#every-fourth-frame-the-latent-grid)). After a
   shot's first frame, the causal VAE packs 4 frames per latent, and the last frame of each
   group comes out closest to the ground truth: on 8 of 8 clips by VMAF and LPIPS, 7 of 8 by
   PSNR-Y, 0.8–5.0 dB above the group's second frame, the seeds agreeing within 0.5 dB, with
@@ -3699,7 +3699,7 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   from the input, which has no grid: PSNR-Y's from 2.72 dB without it to 1.87 with `lab` and
   1.59 with `split`, colour's (ΔE00 after a 4 px blur) from 0.50 to 0.29 and 0.12. The
   perceptual gap barely moves (LPIPS from 0.021 to 0.018): the inner frames' texture, ghosts
-  included, stays the model's ([colour.md](../research/docs/colour.md#the-latent-grid)).
+  included, stays the model's ([colour.md](research/docs/colour.md#the-latent-grid)).
   Nothing in one run removes it. By the luma's Laplacian variance against the ground truth's,
   the group's last frame is less sharp than its second on 6 of 8 clips; the user's eyes
   contradict that measure (below): it isn't theirs.
@@ -3751,7 +3751,7 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   less). Windows itself, in v0.2.0, is a third.
 - **`torch.compile` on the 96 GB card** (see [Memory planner](#memory-planner)). The study ran
   on an RTX 5090 alone: the 96 GB card died before its part
-  ([compile.md](../research/docs/compile.md)). Left for it:
+  ([compile.md](research/docs/compile.md)). Left for it:
   - the VAE untiled at 1080p and on 4K's 1536 to 2048-px tiles: which tiles a compiled VAE
     may take on 48 to 96 GB cards;
   - the DiT above 22 latents and in long windows (76 and more), with FlashAttention 2 and
@@ -3774,4 +3774,4 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
   (A · split + (1 − A) · input lightness) washes lines out to the eyes. Should users need one,
   the candidate is a strength that keeps the model's lines and tames its isotropic invented
   texture, measured on the colour study's runs
-  ([colour.md](../research/docs/colour.md#step-6-the-sharp-7b-for-the-eyes)).
+  ([colour.md](research/docs/colour.md#step-6-the-sharp-7b-for-the-eyes)).

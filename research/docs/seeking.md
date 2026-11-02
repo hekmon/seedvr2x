@@ -3,7 +3,7 @@
 > Status: **measured** with [`scripts/seek_test.py`](../scripts/seek_test.py) (ffmpeg n9.0.2,
 > CPU only, decoders at `-threads 16` on a shared 48-core machine; load averages next to the
 > timings), for the open question of the same name in
-> [DESIGN.md](../../seedvr2x/DESIGN.md#open-questions). One real DVD (MPEG-2 in MKV, closed GOP)
+> [DESIGN.md](../../DESIGN.md#open-questions). One real DVD (MPEG-2 in MKV, closed GOP)
 > was tested; MPEG-2 in VOB or broadcast TS, open-GOP MPEG-2 and open-GOP HEVC come from
 > synthetic files only.
 
@@ -55,7 +55,7 @@ are read and their md5 compared with a decode from the start):
 ## Why it matters for seedvr2x
 
 A resumed run restarts at a shot, a window or an output segment, and colour correction reads a
-shot's input frames again ([DESIGN.md](../../seedvr2x/DESIGN.md#pause-and-resume)), from
+shot's input frames again ([DESIGN.md](../../DESIGN.md#pause-and-resume)), from
 whatever users bring: Blu-ray and web H.264, HEVC, DVD MPEG-2, with B-frames and long or open
 GOPs, in MKV, MP4, M2TS or VOB. A frame off by one, or decoded wrongly, breaks the bit-identical
 resume and corrects colours against the wrong picture. DESIGN.md's third way, a lossless
@@ -464,7 +464,7 @@ A. The demuxer logs "DTS discontinuity" and "Packet corrupt" at the join in ever
    `-fps_mode passthrough`), the first 3,000 frames come out as the source's own, in order, none
    dropped or doubled (framemd5); ffmpeg n9 refuses `-r` with `-fps_mode passthrough` (measured by
    the design conversation, 2026-10-05). seedvr2x refuses such a file and says how to fix it
-   ([DESIGN.md](../../seedvr2x/DESIGN.md#input)).
+   ([DESIGN.md](../../DESIGN.md#input)).
 8. **ffmpeg-side counting resets when ffmpeg rebuilds its filter graph.** S6's first 14 frames
    carry no colour description and the 15th brings BT.601 (`smpte170m`). ffmpeg reconfigures the
    filter graph ("video parameters changed") and `select`'s `n` starts again from 0: `d_count`

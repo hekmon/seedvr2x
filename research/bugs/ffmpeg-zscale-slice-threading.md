@@ -87,7 +87,7 @@ handling of an active region at 10 bits, isn't established.
 option ("Allowed number of threads", beside `enable` and `thread_type`): `ffmpeg -h filter=zscale`
 doesn't list it, `ffmpeg -h full` does, and every build takes it. One band costs 2.3–2.6 ms per
 1080p frame. seedvr2x forces it on every zscale it runs
-([DESIGN.md](../../seedvr2x/DESIGN.md#input)), and [`ffv1_out.py`](../scripts/ffv1_out.py) and
+([DESIGN.md](../../DESIGN.md#input)), and [`ffv1_out.py`](../scripts/ffv1_out.py) and
 [`fr_clips.py`](../scripts/fr_clips.py) set it.
 
 ## Possible fix

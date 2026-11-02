@@ -2,7 +2,7 @@
 
 > Status: **rounds 1 and 2 labelled, brief and addendum written** (2026-10-05); **the threshold
 > below 0.3 estimated, and native 4K animation checked at 1080p** (2026-10-09). For seedvr2x's own
-> shot detection ([DESIGN.md](../../seedvr2x/DESIGN.md#shot-detection), decided from this page):
+> shot detection ([DESIGN.md](../../DESIGN.md#shot-detection), decided from this page):
 > which detector, which threshold, what to do with bursts, and whether shots need a minimum
 > length. Three detectors ran on every frame of 11 sources; the user labelled 130 of their
 > candidates in two rounds, drawn where the detectors disagree
@@ -76,7 +76,7 @@ In short (the statistics count detections; the estimates come from the labels):
 ## Why it matters for seedvr2x
 
 seedvr2x takes the source itself and cuts it into shots, its processing units
-([DESIGN.md](../../seedvr2x/DESIGN.md), "Two kinds of users" and "Pipeline, per shot"); both
+([DESIGN.md](../../DESIGN.md), "Two kinds of users" and "Pipeline, per shot"); both
 workflows start from that detection, the biggest quality lever outside the model. Question 2
 measured what each detection error costs against a ground truth
 ([cuts.md](cuts.md#what-it-means-for-shot-detection)):
@@ -161,7 +161,7 @@ scaler), and reproduce its `predict_frames` (windows of 100 frames every 50, eac
   detections at 0.5 (41 and 35). Our 48×27 frames are byte for byte the official extraction's
   over the first 9,000 and 53,000 frames of those sources.
 - **seedvr2x's detector gives these probabilities** (2026-10-10; its implementation's figures,
-  not measured here: [DESIGN.md](../../seedvr2x/DESIGN.md#shot-detection)). On the CPU,
+  not measured here: [DESIGN.md](../../DESIGN.md#shot-detection)). On the CPU,
   seedvr2x's first pass gives this study's single-frame probabilities (`tnet.npz`'s `single`)
   bit for bit on 11 single-file sources: 10 of the 11 here (anime-720, kept as segments, was
   not run) and the native 4K short
@@ -622,7 +622,7 @@ the trade 0.3 was: a third round of about 40 animated rows would settle it, shou
 default be wanted. Native 4K animation's misses in fast camera motion are the same at 1080p.
 
 Follow-up, 2026-10-10: seedvr2x's first pass runs this detector
-([DESIGN.md](../../seedvr2x/DESIGN.md#shot-detection)). Its implementation reports this study's
+([DESIGN.md](../../DESIGN.md#shot-detection)). Its implementation reports this study's
 probabilities reproduced bit for bit on the CPU on 11 single-file sources, and the same cut
 lists on the GPU ([TransNetV2](#transnetv2)).
 

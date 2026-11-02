@@ -1,7 +1,7 @@
 # torch.compile on seedvr2x: what it gives, what it costs, what it breaks
 
 > Status: **measured on an RTX 5090 only** (2026-10-23 and 24) for the open question
-> "torch.compile, undecided" of [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). seedvr2x at
+> "torch.compile, undecided" of [DESIGN.md](../../DESIGN.md#to-measure). seedvr2x at
 > main 7220e88, its code unchanged since (the commits after it touch docs only); its own runtime
 > imported by research harnesses that install the compiler at import time, nothing of seedvr2x
 > edited. One GPU: GeForce RTX 5090 32 GB under WSL2 (a desktop on it: 27.2 to 30.2 GiB free),

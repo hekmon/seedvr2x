@@ -3,7 +3,7 @@
 > Status: **measured** on the reference stack (7B fp16, `flash_attn_2`, 1080p output,
 > `--color_correction none`, seed 42), SeedVR2 `4490bd1`, against a ground truth with the
 > full-reference protocol of question 1 (degradation d1), for the open questions on shot
-> boundaries in [DESIGN.md](../../seedvr2x/DESIGN.md#open-questions). Tools:
+> boundaries in [DESIGN.md](../../DESIGN.md#open-questions). Tools:
 > [`scripts/cut_metrics.py`](../scripts/cut_metrics.py) (analysis),
 > [`scripts/fr_clips.py`](../scripts/fr_clips.py) `slice` (frame-exact sub-clips),
 > [`scripts/fr_metrics.py`](../scripts/fr_metrics.py) (per-frame metrics),
@@ -71,7 +71,7 @@ reference is the two shots run separately, what correct shot detection gives):
 
 ## Why it matters for seedvr2x
 
-seedvr2x processes a video shot by shot ([DESIGN.md](../../seedvr2x/DESIGN.md), "Pipeline, per
+seedvr2x processes a video shot by shot ([DESIGN.md](../../DESIGN.md), "Pipeline, per
 shot"), so its shot detection decides where every processing unit starts. Three mechanisms can carry
 one shot into the next when a cut falls inside a unit:
 

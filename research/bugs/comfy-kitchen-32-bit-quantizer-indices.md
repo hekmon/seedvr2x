@@ -130,7 +130,7 @@ print(torch.equal(q[2**31:], q[: q.numel() - 2**31]))  # True
   kernel is right. seedvr2x's validation runs do this above 2^31 − 1 values
   ([ck_patch.py](../../models/gpu/ck_patch.py),
   [VALIDATION.md](../../models/VALIDATION.md#fp8-w8a8-at-4k-comfy-kitchens-32-bit-indices)), and
-  seedvr2x's phase-2 runtime will too ([DESIGN.md](../../seedvr2x/DESIGN.md#weights)).
+  seedvr2x's phase-2 runtime will too ([DESIGN.md](../../DESIGN.md#weights)).
 
 ## Possible fix
 

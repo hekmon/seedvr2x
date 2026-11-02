@@ -1,8 +1,8 @@
 # Planner limits: the DiT at 4K and in long windows, tiled VAE at 4K, and the margin over free memory
 
 > Status: **measured** for the open question "4K and long windows" of
-> [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure) and the memory planner's margin over the free
-> memory the driver reports ([DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner): "≈ 0.6 GiB, to be
+> [DESIGN.md](../../DESIGN.md#to-measure) and the memory planner's margin over the free
+> memory the driver reports ([DESIGN.md](../../DESIGN.md#memory-planner): "≈ 0.6 GiB, to be
 > re-derived"). The DiT through [`scripts/dit_probe.py`](../scripts/dit_probe.py) (numz's own
 > runner and Phase 2 code, random latents); the tiled VAE through the CLI with
 > [`scripts/vae_probe.py`](../scripts/vae_probe.py); the margin by bisection of the emulated card
@@ -49,7 +49,7 @@ VAE and the margin through the CLI):
 
 ## Why it matters for seedvr2x
 
-The planner of [DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner) budgets the free memory the
+The planner of [DESIGN.md](../../DESIGN.md#memory-planner) budgets the free memory the
 driver reports once the CUDA context exists (`mem_get_info`) minus a margin, and fills it with
 per-phase peaks predicted by [vram.md](vram.md#practical-rules)'s formulas, the DiT's as
 16.05 GiB + 128.5 KiB per token. Three things were open:
@@ -677,7 +677,7 @@ measures of 2026-10-11, up to 0.03 GiB over the tile alone, were not repeated wi
   takes its own, the larger where it was measured twice, since the fits fall up to 0.797 GiB
   short for an encode and 0.671 for a decode. A tile cut off at another picture's rows, which
   nobody measured, takes the larger of its fit and of the line between the two squares around
-  its area, and 0.3 GiB more ([DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner)): the measured
+  its area, and 0.3 GiB more ([DESIGN.md](../../DESIGN.md#memory-planner)): the measured
   cut-off tiles stand 0.266 GiB over the larger of the two at the most. Beyond 2048 px nothing
   is measured.
   Each adds what is on the GPU before the call, the VAE's weights and the DiT blocks left there,

@@ -7,7 +7,7 @@
 > [`seedvr2_gguf_dyn.py`](seedvr2_gguf_dyn.py)), with [`ck_check.py`](ck_check.py) and
 > [`numz_gguf_check.py`](numz_gguf_check.py) loading the files in their runtimes. What each file
 > does to the video was measured by GPU runs: [VALIDATION.md](VALIDATION.md).
-> [DESIGN.md](../seedvr2x/DESIGN.md#weights) (Weights) cites these figures.
+> [DESIGN.md](../DESIGN.md#weights) (Weights) cites these figures.
 
 In short, on the 7B's 288 attention and MLP matrices of the blocks, 99% of its weights, the error
 per weight being ||W_hat - W|| / ||W|| against the fp32 master:

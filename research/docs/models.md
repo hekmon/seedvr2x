@@ -4,7 +4,7 @@
 > [numerics.md](numerics.md#the-full-reference-protocol)
 > ([`scripts/fr_metrics.py`](../scripts/fr_metrics.py), 16-bit masters from
 > [`scripts/ffv1_out.py`](../scripts/ffv1_out.py)), for the model-scope question of
-> [DESIGN.md](../../seedvr2x/DESIGN.md#phase-2-the-other-models); BlockSwap's power-cap
+> [DESIGN.md](../../DESIGN.md#phase-2-the-other-models); BlockSwap's power-cap
 > explanation tested with [`scripts/swap_idle.py`](../scripts/swap_idle.py). SeedVR2 `4490bd1`,
 > `flash_attn_2`, one batch of 45 frames, 1080p, `--color_correction none` with `lab` rendered
 > from the same run. Four animated clips; live action is not measured. Since then,
@@ -63,7 +63,7 @@ seed spreads):
 DESIGN.md asked whether v1 supports the 7B fp16 model only, or also the fp8, GGUF Q4_K_M and 3B
 weights from the start; design has since kept v1 to the two 7Bs in fp16, the sharp one by
 default, and moved the other models to a
-[phase 2 after v1](../../seedvr2x/DESIGN.md#phase-2-the-other-models), with no 3B; seedvr2x's
+[phase 2 after v1](../../DESIGN.md#phase-2-the-other-models), with no 3B; seedvr2x's
 own smaller files of both 7Bs are measured in [FORMATS.md](../../models/FORMATS.md) (the
 weights) and [VALIDATION.md](../../models/VALIDATION.md) (the video). Small GPUs need them:
 [vram.md's recipe](vram.md#recipe-per-card-size-validated) runs 8–16 GB cards on Q4_K_M with

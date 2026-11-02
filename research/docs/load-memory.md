@@ -1,7 +1,7 @@
 # The load's peak in system memory: the weights' file, mapped
 
 > Status: **measured** (2026-10-12) for the open question "The load's peak in system memory" of
-> [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure): a job's resident memory peaked at 16 to
+> [DESIGN.md](../../DESIGN.md#to-measure): a job's resident memory peaked at 16 to
 > 17 GiB while its weights loaded, where its plan counted 9 to 11. Through
 > [`scripts/load_peak.py`](../scripts/load_peak.py), on seedvr2x's own loader
 > (`runtime/model.py`, `runtime/blockswap.py`, at `0393413`) with seedvr2x's sharp 7B in fp16

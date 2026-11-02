@@ -6,8 +6,8 @@
 > cure, 2026-10-17; the passes the cure takes that never ran and the tiles no code ran, and
 > three tiles under torch's own allocator, 2026-10-18) for the
 > open question "The VAE's room" of
-> [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). seedvr2x's planner holds every VAE pass 1.5 GiB
-> further under its budget than a DiT window ([DESIGN.md](../../seedvr2x/DESIGN.md#memory-planner),
+> [DESIGN.md](../../DESIGN.md#to-measure). seedvr2x's planner holds every VAE pass 1.5 GiB
+> further under its budget than a DiT window ([DESIGN.md](../../DESIGN.md#memory-planner),
 > Budget), because passes packed to the 0.6 GiB margin ran out of memory on 2026-10-11, at one
 > large request, the card full while the allocator's pool held more than was asked. This is the
 > study of that room: seedvr2x's own command line on cards emulated by
@@ -871,7 +871,7 @@ pass's, its reference's beside them.
 The same floor for two of those tiles on a card whose driver gives memory the card doesn't have:
 an RTX 5090 under WSL2 (driver 616.92, torch 2.14.1+cu130, cuDNN 9.24, SDPA), where seedvr2x holds
 itself to the card under torch's own allocator with expandable segments
-([DESIGN.md](../../seedvr2x/DESIGN.md#allocator)). No ballast is refused there, so no smaller card
+([DESIGN.md](../../DESIGN.md#allocator)). No ballast is refused there, so no smaller card
 can be emulated: the room is set by torch's limit
 ([`scripts/held_floor.py`](../scripts/held_floor.py), `vae_room.py run --limit`). seedvr2x at
 6e1be76, its code unchanged; each card's frames judged against that card's own reference only.

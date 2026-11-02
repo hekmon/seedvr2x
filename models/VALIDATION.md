@@ -1,7 +1,7 @@
 # Validation: what phase 2's files do to the video
 
 > Status: **measured on the GPU** on 2026-10-07 and 08, for
-> [DESIGN.md](../seedvr2x/DESIGN.md#weights) (Weights: phase 2's files are validated by GPU runs
+> [DESIGN.md](../DESIGN.md#weights) (Weights: phase 2's files are validated by GPU runs
 > before they ship). Tier 1 (1080p, 8 clips) done for every file of the 7B and the sharp 7B, in
 > every way it multiplies; the 4K slice done for every file of the sharp 7B and for the 7B's fp8
 > W8A16, int8, Q8_0 and dynamic GGUF, its fp8 W8A8 on 2 of its 6 shots, its other 4-bit files
@@ -188,7 +188,7 @@ load, the 840 tensors kept in 16 bits must equal the float16 file's. Then:
   A further seed would still go past it on about one cell in twenty: a file is read by its count
   of cells past the line, its worst multiple, its distance in dB and the pattern, not by any one
   cell.
-- **The floor** ([DESIGN.md](../seedvr2x/DESIGN.md#weights): at 4K since 2026-10-07, at 1080p too
+- **The floor** ([DESIGN.md](../DESIGN.md#weights): at 4K since 2026-10-07, at 1080p too
   since 2026-10-08, one rule): the seeds can agree to the resolution a score is printed at, and
   their spread is then about 0, any difference a huge multiple of it (the sharp's ouatia-face at
   4K, ΔE00 lf with the correction: a spread near 0.00001, fp8 W8A8's +0.001 87.5 times it). The

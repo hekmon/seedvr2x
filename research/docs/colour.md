@@ -7,9 +7,9 @@
 > from step 6's runs, a blind set, the user's eyes on 2026-10-24). Step 0 (the diagnosis) ran on
 > the CPU from [numerics.md](numerics.md)'s masters; steps 1 to 3 and 5 on dumps of 7B fp16 runs
 > (1080p, ×1.5 to ×4, the heavier degradation, VAE tiles, 4K on 17 shots), scored on the CPU. The
-> study answers "Beyond numz's `lab`" in [DESIGN.md](../../seedvr2x/DESIGN.md#beyond-numzs-lab)
+> study answers "Beyond numz's `lab`" in [DESIGN.md](../../DESIGN.md#beyond-numzs-lab)
 > and, with steps 5 and 6, part of "4K output's quality" ([To
-> measure](../../seedvr2x/DESIGN.md#to-measure)); its decision brief is at the end.
+> measure](../../DESIGN.md#to-measure)); its decision brief is at the end.
 
 In short:
 
@@ -220,7 +220,7 @@ The histogram step on top of the split, against the split alone (ΔE00 after a b
   helps by 0.016 after a 4 px blur.
 - If the scores and the eyes confirm it (step 3), dropping the histogram step would also remove
   what makes the decode take two passes: the histograms pooled over the shot
-  ([DESIGN.md](../../seedvr2x/DESIGN.md#colour-correction)).
+  ([DESIGN.md](../../DESIGN.md#colour-correction)).
 
 ### Step 0's caveats
 
@@ -244,7 +244,7 @@ what a colour correction starts from:
 - `enc_bf16.pt`: the encoder's exact input (numz's frames in bfloat16 through the model's
   transform: resize, clamp, padding, normalisation);
 - `ref_f32.pt`: the same frames through the same transform in float32, seedvr2x's `lab` reference
-  since milestone 5 ([DESIGN.md](../../seedvr2x/DESIGN.md#colour-correction));
+  since milestone 5 ([DESIGN.md](../../DESIGN.md#colour-correction));
 - `latents.pt`: the DiT's output. `colour_dump.py decode` decodes it again through numz's own
   Phase 3 with other VAE tiles, or in float16.
 
@@ -1137,7 +1137,7 @@ At 1080p:
 
 ## Step 6: the sharp 7B, for the eyes
 
-DESIGN.md's "4K output's quality" ([To measure](../../seedvr2x/DESIGN.md#to-measure)) left two
+DESIGN.md's "4K output's quality" ([To measure](../../DESIGN.md#to-measure)) left two
 questions after step 5: whether ByteDance's sharp 7B over-renders less than the 7B, and whether a
 heavier degradation tames the over-rendering, since ByteDance's readme says its models "tend to
 overly generate details on inputs with very light degradations"

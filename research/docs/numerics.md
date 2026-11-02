@@ -8,7 +8,7 @@
 > paired statistics), [`scripts/chroma_kernels.py`](../scripts/chroma_kernels.py) (the master's
 > 4:2:0 conversion) and [`scripts/cut_metrics.py`](../scripts/cut_metrics.py) `phase` (the
 > 4-frame latent grid), for the "Numerics" question in
-> [DESIGN.md](../../seedvr2x/DESIGN.md#to-measure). SeedVR2 `4490bd1`, 7B fp16, `flash_attn_2`,
+> [DESIGN.md](../../DESIGN.md#to-measure). SeedVR2 `4490bd1`, 7B fp16, `flash_attn_2`,
 > one batch of 45 frames, 1080p (one 720p test), `--color_correction none`, with `lab` rendered
 > from the same run. Four animated clips, a fifth (a bright sky) for the VAE decode precision,
 > and three more for [live action and a bright anime](#live-action-and-a-bright-anime): two
@@ -114,7 +114,7 @@ of 3 seeds):
 ## Why it matters for seedvr2x
 
 seedvr2x vendors the model code and rewrites the runtime around it
-([DESIGN.md](../../seedvr2x/DESIGN.md#vendored-model-code)): every numerics choice and the whole
+([DESIGN.md](../../DESIGN.md#vendored-model-code)): every numerics choice and the whole
 input preparation become ours. numz and ByteDance's reference differ in RoPE precision, the
 casts of the input frames, the VAE's posterior mode against a sample, the weights' dtype, the
 DiT norms' output dtype, the VAE decode's autocast, the resize kernel, and padding (numz)
@@ -1145,7 +1145,7 @@ Paired difference to the default, `none` (5 clips; the last row: `dec16` on the 
 seedvr2x's default master is FFV1 `yuv420p10le`, converted from the float RGB frames as
 [`ffv1_out.py`](../scripts/ffv1_out.py) does it (zscale: BT.709 matrix, limited range, chroma
 sited left, no dither, zscale's default chroma kernel, bilinear;
-[DESIGN.md](../../seedvr2x/DESIGN.md#output)). Every default output goes through that chroma
+[DESIGN.md](../../DESIGN.md#output)). Every default output goes through that chroma
 downsampling. [`chroma_kernels.py`](../scripts/chroma_kernels.py) sends the 16-bit RGB output
 of the 8 clips (numz's default with `lab`, seed 42) and their GTs through `yuv420p10le` with 6
 chroma kernels and back to 16-bit RGB with one upsampler, seedvr2x's reader (zscale,
@@ -1228,7 +1228,7 @@ crops per clip where the GT's colour edges are sharpest.
 ## The decode's chroma: the kernel the model's input is read with
 
 A 4:2:0 source reaches the model as RGB: its chroma is upsampled first. seedvr2x reads with
-zscale's Catmull-Rom (bicubic, b = 0, c = 0.5; [DESIGN.md](../../seedvr2x/DESIGN.md#input)),
+zscale's Catmull-Rom (bicubic, b = 0, c = 0.5; [DESIGN.md](../../DESIGN.md#input)),
 while every input of this study so far was read with zscale's default, bilinear
 ([`fr_clips.py`](../scripts/fr_clips.py)'s `zscale_to_rgb` sets no kernel). `fr_clips.py
 chroma` decodes a clip's x264 intermediate again with another kernel, the rest of the chain
@@ -1296,7 +1296,7 @@ verdict counts clips beyond the default's 3-seed spread (better / worse):
 So: bilinear is the better kernel for the decode, as it is for the master's chroma, by a small
 margin on colour alone (a few tenths of a dB of chroma, edges a few percent cleaner on saturated
 animation), with no loss on luma: reading with bilinear loses no detail the metrics see.
-[DESIGN.md](../../seedvr2x/DESIGN.md#input) chose Catmull-Rom so that every interpolation feeding
+[DESIGN.md](../../DESIGN.md#input) chose Catmull-Rom so that every interpolation feeding
 the model would be the same kernel as the resize before it (Keys' cubic); measured, that
 consistency buys nothing here, and bilinear's softer chroma edges, which DESIGN.md counts against
 it, are what the output gains from. The reader converts at the source's size, so the kernel only

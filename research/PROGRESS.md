@@ -1,7 +1,7 @@
 # Measurement campaign: progress
 
 Checklist of the measurements that answer the open questions of
-[seedvr2x/DESIGN.md](../seedvr2x/DESIGN.md#open-questions), in priority order. Each question ends
+[DESIGN.md](../DESIGN.md#open-questions), in priority order. Each question ends
 with a decision brief (recommendation, evidence, confidence, caveats) for the design
 conversation. Methods and results go in [docs/](docs/), scripts in [scripts/](scripts/).
 

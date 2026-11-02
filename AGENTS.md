@@ -4,7 +4,7 @@ Read this, then [DESIGN.md](DESIGN.md), before changing any code.
 
 ## What this is
 
-seedvr2x is a SeedVR2 video upscaler for long runs, built from what [../research/](../research/)
+seedvr2x is a SeedVR2 video upscaler for long runs, built from what [research/](research/)
 measured on numz's CLI. DESIGN.md is its specification: what to build and why, with the
 measurement behind each decision. The code follows it. A decision the code shows to be wrong or
 missing is settled in DESIGN.md first, not changed in passing.
@@ -32,7 +32,7 @@ scripts in `../research/` stay standalone.
 ## The vendored model layer
 
 `src/seedvr2x/vendor/` holds the model code: ByteDance's SeedVR (`e4de8c2`) as modified by numz
-(`4490bd1`), under Apache-2.0. [provenance.md](../research/docs/provenance.md) says what each file
+(`4490bd1`), under Apache-2.0. [provenance.md](research/docs/provenance.md) says what each file
 is and what numz changed in it.
 
 - **Path for path.** numz's `src/X` is `vendor/X`, and its configs and text embeddings
@@ -98,8 +98,8 @@ beside it; the `__init__.py` is seedvr2x's.
   DESIGN.md, Input).
 - **FlashAttention 2 is not a dependency.** PyPI only has its source, a long CUDA build, and
   seedvr2x runs without it: it uses FA2 when installed, else PyTorch's SDPA, and logs which one
-  runs. To use it, build a wheel for your GPU ([setup_env.sh](../research/scripts/setup_env.sh),
-  [environment.md](../research/docs/environment.md)) and install it into the venv with
+  runs. To use it, build a wheel for your GPU ([setup_env.sh](research/scripts/setup_env.sh),
+  [environment.md](research/docs/environment.md)) and install it into the venv with
   `uv pip install --no-deps <wheel>`. `uv run` keeps it, but `uv sync` removes what the lock
   doesn't list: install it again after a sync, or sync with `--inexact`.
 
@@ -409,7 +409,7 @@ uv run pytest
 - Prose is in British English, as in `../research/` and DESIGN.md. Identifiers keep the spelling of
   the libraries they deal with (`color_range`, as ffmpeg, torch and numz write it).
 - No silent fallback: a fallback is logged with its reason. numz's silent ones are among its bugs
-  ([cli-flags.md](../research/docs/cli-flags.md)).
+  ([cli-flags.md](research/docs/cli-flags.md)).
 - Each document has its job: DESIGN.md decides; this file says how to work on the code, and
   records the approaches rejected, and why, as they come; README.md is for users;
   `../research/docs/` holds the measurements.
