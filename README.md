@@ -111,7 +111,8 @@ as possible:
   - **Windows itself:** the `seedvr2x` command on Windows, in version 0.2.0. Linux and WSL2 run
     it today.
   - **HDR sources,** their HDR10 metadata carried to the output.
-  - **Machines whose CPU and GPU share one memory:** Apple Silicon Macs and NVIDIA's DGX Spark.
+  - **Machines whose CPU and GPU share one memory:** Apple Silicon Macs, NVIDIA's DGX Spark and
+    RTX Spark PCs.
 
 ## In this repository
 
