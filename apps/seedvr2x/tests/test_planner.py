@@ -54,10 +54,12 @@ def test_constants() -> None:
     assert peaks.PER_TOKEN == 127.16 * 1024 and peaks.PER_WINDOW == 2.726 * 1024**2
     assert (peaks.BLOCKS, peaks.SLOTS) == (36, 2)
     # The blocks, the slots and the DiT's other parameters are the model's own constants
-    # (seedvr2x/weights.py), the 7B's, the one DiT seedvr2x runs; a block is one size, which the
-    # planner counts the 36 by.
-    assert peaks.DIT is weights.ACCEPTED["dit"] is weights.DIT_7B
+    # (seedvr2x/weights.py), the 7B's, the one DiT seedvr2x runs, in fp16 (peaks.DIT, the
+    # module's BLOCK) or in int8; a block is one size in each, which the planner counts the 36 by.
+    assert peaks.DIT is peaks.FP16 is weights.DIT_7B
+    assert peaks.DITS == weights.ACCEPTED["dit"] == (weights.DIT_7B, weights.DIT_7B_INT8)
     assert peaks.DIT.blocks == (peaks.BLOCK,) * peaks.BLOCKS
+    assert peaks.INT8.blocks == (peaks.block_bytes(peaks.INT8),) * peaks.BLOCKS
     assert (peaks.SLOTS, peaks.DIT_OTHER) == (weights.SLOTS, weights.DIT_7B.other)
     assert f"{gib(peaks.BLOCK):.4f}" == "0.4220" and f"{gib(36 * peaks.BLOCK):.2f}" == "15.19"
     assert f"{gib(peaks.DIT_OTHER):.3f}" == "0.155"

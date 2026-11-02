@@ -28,6 +28,14 @@ src/models/video_vae_v3/modules/attn_video_vae.py. They are numz's own, SeedVR's
 e4de8c2: models/video_vae_v3/modules/attn_video_vae.py) leaving both unwritten, under the Apache
 License, Version 2.0. That file says what was changed.
 
+It also includes, written in seedvr2x/int8.py from comfy-kitchen's source (Comfy Org,
+https://github.com/Comfy-Org/comfy-kitchen, version 0.2.37, commit be003b7), Copyright (c) 2025
+Comfy Org, under the Apache License, Version 2.0: its regular Hadamard rotation
+(comfy_kitchen/tensor/int8_utils.py) and the arithmetic of its int8 linear's activation
+quantizer and dequantization (comfy_kitchen/backends/cuda/ops/int8_linear.cu and
+cutlass_gemm_int8.cu), in PyTorch; no comfy-kitchen code runs in seedvr2x. That file says what
+it follows and where it differs.
+
 It also includes TransNetV2's official PyTorch model, seedvr2x/transnetv2/transnetv2_pytorch.py,
 copied unchanged from TransNetV2 (https://github.com/soCzech/TransNetV2, commit 85cef72,
 inference-pytorch/transnetv2_pytorch.py): TransNetV2, Copyright (c) 2020 Tomáš Souček, under the

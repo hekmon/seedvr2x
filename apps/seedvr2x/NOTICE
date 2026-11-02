@@ -4,7 +4,8 @@ Copyright 2026 Edouard Hur
 The seedvr2x command's code (main.py, the modules beside it and media/) is under the Apache
 License, Version 2.0, the licence in LICENSE. It uses the library seedvr2x-core (core/ in the
 repository), whose NOTICE credits the SeedVR2 model code, numz's and ByteDance's, it vendors and
-adapts, and TransNetV2, the shot detector's model, under the MIT License.
+adapts, TransNetV2, the shot detector's model, under the MIT License, and comfy-kitchen, under the
+Apache License, Version 2.0, whose int8 rotation and arithmetic its int8 linear follows.
 
 The manual's example picture, apps/seedvr2x/images/quality-teeth.png, is made from a frame of
 Sol Levante, Netflix and Production I.G, from Netflix's open content

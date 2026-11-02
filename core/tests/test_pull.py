@@ -187,12 +187,15 @@ INTO_MODEL_DIR = "or leave out --model-dir, which takes it from Hugging Face's c
 
 
 def test_pins_recorded() -> None:
-    # The model conversation's record of the upload (2026-10-08); test_pins_are_the_revisions
-    # holds them to the revision itself. Each in its role.
+    # The model conversation's record of the upload (2026-10-08), the int8 files' as
+    # models/seedvr2_int8.py pins their SHA-256 (OUTPUTS); test_pins_are_the_revisions holds them
+    # to the revision itself. Each in its role.
     assert (pull.REPO, pull.REVISION) == ("hekmon/seedvr2x", REVISION)
     assert {name: (pin.size, pin.sha256[:8], pin.role) for name, pin in pull.PINNED.items()} == {
         "seedvr2x_ema_7b_fp16.safetensors": (16_479_335_080, "071cab5e", "dit"),
         "seedvr2x_ema_7b_sharp_fp16.safetensors": (16_479_335_088, "5eb47fde", "dit"),
+        "seedvr2x_ema_7b_int8_convrot.safetensors": (8_333_648_992, "7eb2c784", "dit"),
+        "seedvr2x_ema_7b_sharp_int8_convrot.safetensors": (8_333_649_000, "d83aeaa4", "dit"),
         "seedvr2x_ema_vae_fp16.safetensors": (501_325_454, "b9c6ebf0", "vae"),
         "transnetv2.safetensors": (30_482_632, "bb8c8388", "detector"),
     }
@@ -326,6 +329,13 @@ def test_a_long_hash_is_named_before_it_starts(
     assert not caplog.messages
 
 
+# What --dit-model takes without --model-dir, as a refusal lists them: seedvr2x's own DiTs.
+DITS = (
+    "seedvr2x_ema_7b_fp16.safetensors, seedvr2x_ema_7b_sharp_fp16.safetensors,"
+    " seedvr2x_ema_7b_int8_convrot.safetensors or seedvr2x_ema_7b_sharp_int8_convrot.safetensors"
+)
+
+
 def test_pinned_name_in_the_other_role_refused(hub: Hub) -> None:
     # One of seedvr2x's own files given in the other role: refused by its name, before any lookup
     # or download (16.5 GB for the 7B as the VAE, which the header check would then refuse),
@@ -334,8 +344,7 @@ def test_pinned_name_in_the_other_role_refused(hub: Hub) -> None:
         pull.resolve(None, "seedvr2x_ema_vae_fp16.safetensors", "seedvr2x_ema_7b_fp16.safetensors")
     assert str(error.value).splitlines() == [
         "--dit-model seedvr2x_ema_vae_fp16.safetensors: seedvr2x's VAE, which --vae-model takes"
-        " (--dit-model: seedvr2x_ema_7b_fp16.safetensors or"
-        " seedvr2x_ema_7b_sharp_fp16.safetensors)",
+        f" (--dit-model: {DITS})",
         "--vae-model seedvr2x_ema_7b_fp16.safetensors: one of seedvr2x's DiTs, which --dit-model"
         " takes (--vae-model: seedvr2x_ema_vae_fp16.safetensors)",
     ]
@@ -504,8 +513,7 @@ def test_detector_named_in_another_role_refused(hub: Hub) -> None:
         pull.resolve(None, pull.DETECTOR, pull.DETECTOR)
     assert str(error.value).splitlines() == [
         "--dit-model transnetv2.safetensors: TransNetV2's weights, which seedvr2x's shot detection"
-        " takes (--dit-model: seedvr2x_ema_7b_fp16.safetensors or"
-        " seedvr2x_ema_7b_sharp_fp16.safetensors)",
+        f" takes (--dit-model: {DITS})",
         "--vae-model transnetv2.safetensors: TransNetV2's weights, which seedvr2x's shot detection"
         " takes (--vae-model: seedvr2x_ema_vae_fp16.safetensors)",
     ]
@@ -907,6 +915,15 @@ def test_pins_are_the_revisions(tmp_path: Path) -> None:
         assert found["sizes"][name] == pin.size, name
 
 
+# The four v1 files the opt-in pull fetches: the int8 files, 16.7 GB more, not among them.
+V1_FILES = (
+    "seedvr2x_ema_7b_fp16.safetensors",
+    "seedvr2x_ema_7b_sharp_fp16.safetensors",
+    "seedvr2x_ema_vae_fp16.safetensors",
+    pull.DETECTOR,
+)
+
+
 @pytest.mark.skipif(
     os.environ.get("SEEDVR2X_TESTS_PULL") != "1",
     reason="SEEDVR2X_TESTS_PULL=1 pulls seedvr2x's v1 files into Hugging Face's cache, about 33 GB"
@@ -919,9 +936,10 @@ def test_pull_v1_files(
     # by its pin; the cache read only, once they are there. The library's paths are resolved
     # (file_download.py:999), the cache's as seedvr2x names it maybe not: compared resolved.
     caplog.set_level(logging.INFO)
-    found = pull.fetch(pull.PINNED)
+    pins = {name: pin for name, pin in pull.PINNED.items() if name in V1_FILES}
+    found = pull.fetch(pins)
     hashes = pull.Hashes()
-    for name, pin in pull.PINNED.items():
+    for name, pin in pins.items():
         assert found[name].resolve().is_relative_to(pull.cache().resolve())
         pull.check_pin(name, found[name], pin, hashes, pull.cache())
     with capsys.disabled():

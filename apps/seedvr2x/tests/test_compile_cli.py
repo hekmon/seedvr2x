@@ -806,8 +806,11 @@ class Recorder:
             return {}
 
         monkeypatch.setattr(model, "_load_weights", load_weights)
+        # What the check finds in the files, as it says it: the 7B in fp16 and the VAE.
         monkeypatch.setattr(
-            model.weights, "check", lambda path, kind: SimpleNamespace(config="configs_7b")
+            model.weights,
+            "check",
+            lambda path, kind: model.weights.DIT_7B if kind == "dit" else model.weights.VAE,
         )
 
 

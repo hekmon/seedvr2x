@@ -28,7 +28,7 @@ from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 from tqdm import tqdm
 
-from seedvr2x import blockswap, memory, weights
+from seedvr2x import blockswap, int8, memory, weights
 from seedvr2x.blockswap import Part, Placement
 from seedvr2x.frames import BLACK, padding
 from seedvr2x.passes import Compilation, ModelPlan, Phase
@@ -172,9 +172,10 @@ def load_models(
 ) -> Models:
     """Build and load the DiT in the file at dit_file and the VAE in the file at vae_file, as
     pull.resolve found them, in --model-dir or in Hugging Face's cache, each checked first
-    (weights.check, ModelError): the DiT is built from the config of what its file is. A file
-    hashed this run (hashes) must still be the one hashed (Hashes.unchanged, ModelError), before
-    anything is built and right after its own load.
+    (weights.check, ModelError): the DiT is built from the config of what its file is, and from
+    an int8 file its block matrices as int8.Int8Linear, multiplied in int8 (seedvr2x/int8.py). A
+    file hashed this run (hashes) must still be the one hashed (Hashes.unchanged, ModelError),
+    before anything is built and right after its own load.
 
     Without a plan, every weight is on the device, for good. With one, the weights it has away
     from the device in some phase, the DiT's swapped blocks among them, are read straight into
@@ -191,7 +192,8 @@ def load_models(
     # numz goes by "7b" in the file name (src/core/model_configuration.py:718-720), so a renamed
     # file loads as what its name says; seedvr2x goes by the file's tensors (DESIGN.md, Weights).
     sampler_bars(logger.isEnabledFor(logging.DEBUG))
-    config_dir = weights.check(dit_file, "dit").config
+    dit_architecture = weights.check(dit_file, "dit")
+    config_dir = dit_architecture.config
     weights.check(vae_file, "vae")
 
     # Each file's stat again, before anything is built and right after its own load, which ends
@@ -255,7 +257,17 @@ def load_models(
     # gradient checkpointing stub (nadit.py:30-31).
     with torch.device("meta"):
         dit = create_object(runner.config.dit.model)
-    dit_parts = _load_weights(dit, dit_file, device, None, _dit_parts(model_plan, len(dit.blocks)))
+    skip = None
+    if dit_architecture.layout == weights.INT8:
+        # An int8 file's block matrices in the INT8 layout: an Int8Linear in each nn.Linear's
+        # place, swapped on the meta device before the load, so that vendor/ stays numz's
+        # (AGENTS.md). Their markers, checked with the file (weights.check), are no tensor of
+        # the model's: never read.
+        _swap_int8(dit)
+        skip = _marker
+    dit_parts = _load_weights(
+        dit, dit_file, device, None, _dit_parts(model_plan, len(dit.blocks)), skip
+    )
     unchanged(dit_file)
     dit.requires_grad_(False).eval()
     attention = attention_backend()
@@ -331,12 +343,32 @@ def _dit_parts(model_plan: ModelPlan | None, blocks: int) -> Callable[[str], str
     return blockswap.dit_parts(blocks, stay, other) if stay < blocks or other else None
 
 
+# The DiT's block matrices in an int8 file (weights.MATRIX), 8 a block.
+INT8_MATRICES = 288
+
+
+def _swap_int8(dit: torch.nn.Module) -> None:
+    """An int8.Int8Linear in the place of each of the 7B's 288 block matrices, built on the meta
+    device (int8.swap); RuntimeError for another count, a model the int8 file's tensors aren't
+    for, which weights.check has refused already."""
+    swapped = int8.swap(dit)
+    if len(swapped) != INT8_MATRICES:
+        raise RuntimeError(f"{len(swapped)} block matrices swapped to int8, not {INT8_MATRICES}")
+
+
+def _marker(key: str) -> bool:
+    """Whether a tensor of an int8 file is one of its markers (weights.MARK), which say its
+    layout and are no tensor of the model's."""
+    return key.endswith(weights.MARK)
+
+
 def _load_weights(
     model: torch.nn.Module,
     path: Path,
     device: torch.device,
     dtype: torch.dtype | None,
     part_of: Callable[[str], str | None] | None = None,
+    skip: Callable[[str], bool] | None = None,
 ) -> dict[str, Part]:
     """Load a safetensors checkpoint into a model built on the meta device, as numz does
     (src/core/model_loader.py:547-616, 777-835): the file's dtypes, or every floating tensor cast
@@ -344,8 +376,8 @@ def _load_weights(
     With part_of, the parameters it names a part for go to that part's pinned host copy, not to
     the device: the parts are returned, by name, away from the device. With or without parts,
     the file is read by blockswap.read, which says why it is never mapped, as safetensors'
-    own load_file maps it."""
-    state, parts = blockswap.read(model, path, device, dtype, part_of)
+    own load_file maps it. The tensors skip says True of aren't read (blockswap.read)."""
+    state, parts = blockswap.read(model, path, device, dtype, part_of, skip=skip)
     # strict=False as numz, but the mismatches are reported, where numz ignores them silently.
     result = model.load_state_dict(state, strict=False, assign=True)
     if result.missing_keys or result.unexpected_keys:

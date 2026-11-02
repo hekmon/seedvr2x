@@ -29,7 +29,7 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import Tensor
 
-from seedvr2x import blockswap, model, weights
+from seedvr2x import blockswap, int8, model, weights
 from seedvr2x.blockswap import OTHER, HostMemoryError, Part, Placement, dit_parts
 from seedvr2x.passes import ModelPlan
 from seedvr2x.weights import SLOTS
@@ -654,6 +654,186 @@ def test_swapping_changes_no_bit(policy: str, prefetch: bool) -> None:
         slots = min(SLOTS, swapped) * placement.block_bytes
         assert sim.live() == slots
         assert placement.device_bytes() == slots + (blocks - swapped + 2) * 292
+
+
+class Int8Block(torch.nn.Module):
+    """A toy block of seedvr2x's int8 files: an Int8Linear (seedvr2x/int8.py), its int8 weight,
+    float32 scale and float16 bias, and a table, a buffer. Its forward queues one kernel, the W8A8
+    linear on the memory its parameters were views of when it was queued, as a GPU's kernel
+    holds its addresses."""
+
+    def __init__(self, name: str, sim: Sim) -> None:
+        super().__init__()
+        self.name, self.sim = name, sim
+        generator = torch.Generator().manual_seed(len(name) * 31 + sum(map(ord, name)))
+        self.mix = int8.Int8Linear(INT8_WIDTH, INT8_WIDTH)
+        weight = torch.randint(-128, 128, (INT8_WIDTH, INT8_WIDTH), generator=generator)
+        self.mix.weight.data = weight.to(torch.int8)
+        self.mix.weight_scale.data = torch.rand(INT8_WIDTH, 1, generator=generator) * 0.02
+        assert self.mix.bias is not None
+        self.mix.bias.data = torch.randn(INT8_WIDTH, generator=generator).to(torch.float16)
+        self.table: Tensor
+        self.register_buffer("table", torch.randn(INT8_WIDTH, generator=generator))
+
+    def forward(self, x: Tensor) -> Tensor:
+        out = torch.empty_like(x)
+        weight, scale = self.mix.weight.data, self.mix.weight_scale.data
+        assert self.mix.bias is not None
+        bias, table = self.mix.bias.data, self.table
+
+        def run() -> None:
+            y = int8.linear(x, weight, scale, bias, torch.bfloat16).float()
+            out.copy_(torch.tanh(y) + table)
+
+        self.sim.kernel(self.name, run, [weight, scale, bias])
+        return out
+
+
+# The int8 toy's width: a multiple of the rotation's 256 columns.
+INT8_WIDTH = 256
+
+
+class Int8Toy(torch.nn.Module):
+    """A toy DiT of int8 blocks, an int8 layer before and after them."""
+
+    def __init__(self, blocks: int, sim: Sim) -> None:
+        super().__init__()
+        self.before = Int8Block("before", sim)
+        self.blocks = torch.nn.ModuleList(Int8Block(f"blocks.{i}", sim) for i in range(blocks))
+        self.after = Int8Block("after", sim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.before(x)
+        for block in self.blocks:
+            x = block(x)
+        return self.after(x)
+
+
+def int8_run(model: Int8Toy, sim: Sim, forwards: int = 2) -> list[Tensor]:
+    outputs: list[Tensor] = []
+    for index in range(forwards):
+        torch.manual_seed(2000 + index)
+        out = model(torch.randn(5, INT8_WIDTH))
+        sim.settle()
+        outputs.append(out.clone())
+    return outputs
+
+
+@pytest.mark.parametrize("prefetch", [False, True])
+@pytest.mark.parametrize("policy", ["side-first", "compute-first", "random-1"])
+def test_int8_blocks_swap_as_fp16_ones(policy: str, prefetch: bool) -> None:
+    # The int8 file's blocks, their int8 weights, float32 scales and float16 biases moved as any
+    # parameters: every count of swapped blocks gives the bits of none swapped. A part's bytes are
+    # its parameters' own, each on ALIGN: 65,536 for the weight, 1,024 for the scale and 512 for
+    # the bias, a block's 67,072 in a slot.
+    blocks = 5
+    plain = Sim(policy)
+    expected = int8_run(Int8Toy(blocks, plain).requires_grad_(False).eval(), plain)
+    for swapped in range(blocks + 1):
+        sim = Sim(policy)
+        model = Int8Toy(blocks, sim).requires_grad_(False).eval()
+        placement = Placement(model, CPU, swapped, prefetch, backend=sim)
+        placement.enter("dit")
+        assert same(int8_run(model, sim), expected), swapped
+        assert placement.block_bytes == (67_072 if swapped else 0)
+        assert sim.live() == min(SLOTS, swapped) * placement.block_bytes
+        fields = [field.dtype for field in placement._streaming[0].fields] if swapped else []  # pyright: ignore[reportPrivateUsage]
+        assert fields == ([torch.int8, torch.float32, torch.float16] if swapped else [])
+
+
+def test_an_int8_file_is_read_into_its_parts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # model._load_weights over an int8 file: the int8 weights and float32 scales read as the file
+    # holds them, into the parts' host copies for the blocks a plan swaps, onto the device for
+    # the rest; the markers never read (skip), no key missing or unexpected. The host copies
+    # pinned by the simulator, as the load's other tests pin them: no CUDA.
+    sim = Sim()
+    monkeypatch.setattr(blockswap, "Cuda", lambda device: sim)
+    source = Int8Toy(3, sim)
+    tensors = {key: value.contiguous() for key, value in source.state_dict().items()}
+    marker = torch.frombuffer(bytearray(b'{"format": "int8_tensorwise"}'), dtype=torch.uint8)
+    for layer in ("before.mix", "blocks.1.mix", "after.mix"):
+        tensors[f"{layer}.comfy_quant"] = marker.clone()
+    path = tmp_path / "int8.safetensors"
+    save_file(tensors, path)
+    with torch.device("meta"):
+        target = Int8Toy(3, sim)
+    parts = model._load_weights(  # pyright: ignore[reportPrivateUsage]
+        target,
+        path,
+        CPU,
+        None,
+        dit_parts(3, 1, other=False),
+        model._marker,  # pyright: ignore[reportPrivateUsage]
+    )
+    assert sorted(parts) == ["blocks.1", "blocks.2"]
+    for key, value in source.state_dict().items():
+        loaded = target.state_dict()[key]
+        assert loaded.dtype == value.dtype and torch.equal(loaded, value), key
+    assert target.get_parameter("blocks.1.mix.weight").dtype == torch.int8
+    host = parts["blocks.1"].host.bytes
+    for parameter in target.get_submodule("blocks.1").parameters():
+        assert overlap(parameter.data, host)
+
+
+# seedvr2x's int8 files, the sharp 7B's and the 7B's, the first in SEEDVR2X_MODEL_DIR taken.
+INT8_DITS = (
+    "seedvr2x_ema_7b_sharp_int8_convrot.safetensors",
+    "seedvr2x_ema_7b_int8_convrot.safetensors",
+)
+
+
+@pytest.mark.gpu
+def test_a_real_int8_dit_s_blocks_swap_and_change_no_bit() -> None:
+    # The fp16 gate of tests/test_placement.py on seedvr2x's int8 file, its helpers taken: the
+    # DiT loaded whole, then every parameter to a pinned host copy and 0, 3, 12 and 36 blocks
+    # swapped, without the prefetch and with it, the windows' bits those of the DiT loaded whole;
+    # its peak each swapped block's bytes less, but the two in the slots (peaks.block_bytes:
+    # 226,862,080 in int8). Needs CUDA with the int8 DiT and a window beside it (10 GiB free),
+    # SEEDVR2X_MODEL_DIR holding an int8 file and the VAE, and 8 GiB of host memory to pin.
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from test_placement import MODELS, SLACK, VAES, allocated, found, windows
+
+    if not MODELS:
+        pytest.skip("needs SEEDVR2X_MODEL_DIR")
+    from seedvr2x import peaks
+
+    device = torch.device("cuda:0")
+    models = model.load_models(found(INT8_DITS), found(VAES), device)
+    try:
+        dit = models.runner.dit
+        assert sum(isinstance(module, int8.Int8Linear) for module in dit.modules()) == 288
+        digests, peak = windows(models)
+        parts = blockswap.host(
+            dit, dit_parts(len(dit.blocks), 0, other=True), blockswap.Cuda(device)
+        )
+        torch.cuda.empty_cache()
+        away = allocated(device)
+        block = peaks.block_bytes(weights.DIT_7B_INT8)
+        for swapped, prefetch in [
+            (0, False),
+            (3, False),
+            (3, True),
+            (12, True),
+            (36, False),
+            (36, True),
+        ]:
+            said = f"{swapped} swapped, prefetch {prefetch}"
+            placement = Placement(dit, device, swapped, prefetch, parts=parts)
+            placement.enter("dit")
+            got, got_peak = windows(models)
+            assert got == digests, said
+            expected = peak - max(swapped - SLOTS, 0) * block
+            assert abs(got_peak - expected) < SLACK, (said, got_peak / 2**30, expected / 2**30)
+            placement.enter("encode", 0)
+            assert abs(allocated(device) - away) < SLACK, said
+            placement.close()
+    finally:
+        models.runner.dit = models.runner.vae = None
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("policy", POLICIES)

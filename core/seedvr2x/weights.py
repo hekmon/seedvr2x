@@ -3,10 +3,12 @@ header is read and checked before anything else runs, without torch, so that a w
 refused in a second, saying what it is, rather than failing after the first pass or running
 unchecked.
 
-v1 runs SeedVR2's 7B DiT, the regular or the sharp one, with its VAE, every tensor in fp16, and
-detects shots with TransNetV2 in fp32 (DESIGN.md, Input, Shot detection). A safetensors file is
-known by its header alone, read without the safetensors library: the header's length, then the
-header, never the data."""
+v1 runs SeedVR2's 7B DiT, the regular or the sharp one, every tensor in fp16 or in seedvr2x's int8
+files (INT8 W8A8, comfy-kitchen's layout with its rotation: DESIGN.md, Weights, "int8 before
+v0.1.0 is tagged"), with its VAE in fp16, and detects shots with TransNetV2 in fp32 (DESIGN.md,
+Input, Shot detection). A safetensors file is known by its header, read without the safetensors
+library: the header's length, then the header, never the tensors' data but for an int8 file's
+markers, 72 bytes for each of its 288 quantised layers, which say the layout its values are in."""
 
 import hashlib
 import json
@@ -15,7 +17,7 @@ import os
 import re
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
@@ -41,20 +43,53 @@ SLOTS = 2
 class Architecture:
     """A model seedvr2x knows by its tensors: their count and their inventory's digest
     (inventory); the vendored config directory a DiT is built from, None for another model; and
-    the dtype seedvr2x runs it in, every tensor's but a BatchNorm counter's (COUNTER), I64."""
+    the dtype seedvr2x runs it in, every tensor's but a BatchNorm counter's (COUNTER), I64, and
+    in a quantised layout (`layout`) but its quantised layers' (dtype_of)."""
 
     name: str
     tensors: int
     digest: str
     config: str | None
     dtype: str = "F16"
-    # A DiT's blocks, each one's parameters in bytes at dtype, in the model's order, and its
-    # parameters outside the blocks: what the placement moves between the GPU and the host
-    # (seedvr2x/blockswap.py) and the planner counts, by the model's shapes
-    # (tests/test_blockswap.py holds them to the vendored configs). No block, and 0, for another
-    # model.
+    # A DiT's blocks, each one's parameters in bytes as its file holds them, in the model's
+    # order, and its parameters outside the blocks: what the placement moves between the GPU and
+    # the host (seedvr2x/blockswap.py) and the planner counts, by the model's shapes
+    # (tests/test_blockswap.py holds them to the vendored configs, tests/test_weights.py to the
+    # files' headers). No block, and 0, for another model.
     blocks: tuple[int, ...] = ()
     other: int = 0
+    # How the file holds the block matrices (MATRIX), None where every tensor is in dtype: INT8,
+    # comfy-kitchen's INT8 layout with its rotation (seedvr2x/int8.py).
+    layout: str | None = None
+
+    def dtype_of(self, name: str) -> str:
+        """The dtype seedvr2x runs the tensor of this name in: in the INT8 layout, a block
+        matrix's weight I8, its scale F32 and its marker U8; a BatchNorm counter I64; any other
+        tensor the architecture's dtype."""
+        if name.endswith(COUNTER):
+            return "I64"
+        layer, _, leaf = name.rpartition(".")
+        if self.layout == INT8 and MATRIX.fullmatch(layer) and leaf in INT8_LEAVES:
+            return INT8_LEAVES[leaf]
+        return self.dtype
+
+
+# The 288 attention and MLP matrices of the 7B's blocks, 8 a block, by their modules' names: the
+# matrices phase 2's files quantise (DESIGN.md, Weights, Phase 2; models/seedvr2_fp8.py's BLOCK),
+# and the int8 files' (seedvr2x/int8.py swaps them).
+MATRIX = re.compile(r"blocks\.\d+\.(attn\.proj_(qkv|out)\.(vid|txt)|mlp\.(vid|txt)\.proj_(in|out))")
+# comfy-kitchen's INT8 layout with its rotation, as seedvr2x's int8 files hold it
+# (models/seedvr2_int8.py; models/FORMATS.md, INT8): each block matrix's `<layer>.weight` in int8,
+# its rows rotated per GROUP columns, `<layer>.weight_scale` (rows, 1) in float32, and
+# `<layer>.comfy_quant`, the marker, MARKER's bytes as U8; its bias, if any, F16 as every other
+# tensor.
+INT8 = "int8"
+INT8_LEAVES = {"weight": "I8", "weight_scale": "F32", "comfy_quant": "U8"}
+GROUP = 256
+MARK = ".comfy_quant"
+MARKER = {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": GROUP}
+# How such a file's values are said: what it is, and how it multiplies.
+INT8_SAID = "in int8, W8A8 with comfy-kitchen's rotation"
 
 
 # A BatchNorm layer's count of the batches it trained on, num_batches_tracked, I64 in PyTorch's
@@ -78,6 +113,24 @@ DIT_7B = Architecture(
     blocks=(453_133_312,) * 36,
     other=166_416_512,
 )
+# The 7B in seedvr2x's int8 files (DESIGN.md, Weights, "int8 before v0.1.0 is tagged"): the same
+# 1,128 tensors, each of the 288 block matrices' weight in int8, with its scale and its marker
+# beside it, 1,704 in all, the digest the vendored model's names and shapes give with those 576
+# added (tests/test_weights.py) and both files' headers at hekmon/seedvr2x's c14a2bc4 (read on
+# 2026-11-02 by range requests, not downloaded). Its 36 blocks of 226,862,080 bytes (0.2113 GiB:
+# the matrices' 226,492,416 values in int8, their 55,296 rows' scales in float32, the other 22
+# parameters in fp16), 7.61 of its 7.76 GiB; the 0.155 GiB outside the blocks the fp16 file's.
+# The headers say so: each block's tensors 226,862,100 bytes with its RoPE buffer's 20, which
+# isn't a parameter, and 166,416,512 bytes outside the blocks; the markers 20,736 bytes.
+DIT_7B_INT8 = Architecture(
+    "SeedVR2's 7B DiT",
+    1704,
+    "b67ac67e0f4dfe0d0cb777f26b3f4022829ada407897f29710c2eed29e7e8dde",
+    "configs_7b",
+    blocks=(226_862_080,) * 36,
+    other=166_416_512,
+    layout=INT8,
+)
 # The 3B: 32 blocks, the first 10 of 317,266,944 bytes (0.295 GiB, their text and video halves
 # apart), the other 22 of 158,633,472 (0.148 GiB, shared), 6.21 of its 6.32 GiB.
 DIT_3B = Architecture(
@@ -98,18 +151,23 @@ TRANSNETV2 = Architecture(
     None,
     "F32",
 )
-ARCHITECTURES = (DIT_7B, DIT_3B, VAE, TRANSNETV2)
+ARCHITECTURES = (DIT_7B, DIT_7B_INT8, DIT_3B, VAE, TRANSNETV2)
 
 # What v1 runs in each role (DESIGN.md, Weights): the 7B DiT, the regular and the sharp one alike
-# (one architecture, the same tensors), and the VAE, every tensor in F16; and TransNetV2, the shot
-# detector, as its official weights are converted, every tensor F32 but its counters (DESIGN.md,
-# Input, Shot detection).
-ACCEPTED: dict[Role, Architecture] = {"dit": DIT_7B, "vae": VAE, "detector": TRANSNETV2}
+# (one architecture, the same tensors), every tensor in F16 or in the INT8 layout, and the VAE,
+# every tensor in F16; and TransNetV2, the shot detector, as its official weights are converted,
+# every tensor F32 but its counters (DESIGN.md, Input, Shot detection).
+ACCEPTED: dict[Role, tuple[Architecture, ...]] = {
+    "dit": (DIT_7B, DIT_7B_INT8),
+    "vae": (VAE,),
+    "detector": (TRANSNETV2,),
+}
 # The end of every refusal of a readable file given as the DiT or the VAE, the 3B's included:
-# phase 2 brings the two 7Bs' smaller files, and no 3B (DESIGN.md, Weights, Phase 2).
+# phase 2 brings the two 7Bs' other smaller files, and no 3B (DESIGN.md, Weights, Phase 2).
 V1 = (
-    "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, with its VAE in fp16; phase 2"
-    " brings the two 7Bs' smaller files"
+    "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16 or in int8 (seedvr2x's int8"
+    " files, W8A8 with comfy-kitchen's rotation), with its VAE in fp16; phase 2 brings the two"
+    " 7Bs' other smaller files"
 )
 # The same, of a file given as the shot detector.
 SHOTS = "seedvr2x detects shots with TransNetV2 in fp32, as its own transnetv2.safetensors holds it"
@@ -140,10 +198,13 @@ UNNAMED: dict[Role, str] = {
 @dataclass(frozen=True)
 class TensorInfo:
     """A tensor as a safetensors header declares it: its dtype, by safetensors' name (F16, BF16,
-    F8_E4M3...), and its shape."""
+    F8_E4M3...), and its shape; and read from a file, where its data starts, from the file's
+    start, in bytes (the INT8 layout's markers are read there: _unmarked), which no comparison of
+    two tensors counts."""
 
     dtype: str
     shape: tuple[int, ...]
+    at: int | None = field(default=None, compare=False)
 
 
 # Bytes per value of the dtypes safetensors names, those whose data sizes are checked; any other
@@ -178,19 +239,32 @@ MATRICES = {"I8": "INT8", "U8": "4-bit values packed two per byte"}
 def check(path: Path, role: Role) -> Architecture:
     """The architecture of the model file at path, given as the DiT, the VAE or the shot detector
     (role), known by its tensors, not its name: SeedVR2's 7B DiT as the DiT, the regular or the
-    sharp one, whoever made the file, and its VAE as the VAE, every tensor F16; TransNetV2 as the
-    shot detector, every tensor F32 but its BatchNorm counters (COUNTER), I64. Anything else
-    raises ModelError, saying what the file is (describe)."""
+    sharp one, whoever made the file, every tensor F16 (DIT_7B) or in the INT8 layout, each of
+    its quantised layers marked as such (DIT_7B_INT8), and its VAE as the VAE, every tensor F16;
+    TransNetV2 as the shot detector, every tensor F32 but its BatchNorm counters (COUNTER), I64.
+    Anything else raises ModelError, saying what the file is (describe)."""
     tail = SHOTS if role == "detector" else V1
     read = _read(path)
     if isinstance(read, str):
         raise ModelError(f"{path}: {read}: {tail}")
-    found, accepted = _architecture(read), ACCEPTED[role]
-    if found is accepted and _as_run(read, accepted):
-        return accepted
+    found = _architecture(read)
+    if found in ACCEPTED[role] and _as_run(read, found):
+        assert found is not None
+        unmarked = _unmarked(path, read) if found.layout == INT8 else None
+        if unmarked is None:
+            return found
+        raise ModelError(f"{path}: {found.name} in comfy-kitchen's INT8 layout, {unmarked}: {tail}")
     owner = _role(read, found)
     given = f", {GIVEN[role]}" if owner is not None and owner != role else ""
     raise ModelError(f"{path}: {_what(read, found)}{given}: {tail}")
+
+
+def in_words(architecture: Architecture) -> str:
+    """What a file of this architecture, in the dtypes seedvr2x runs it in, is, in words: "SeedVR2's
+    7B DiT in fp16", "SeedVR2's 7B DiT in int8, W8A8 with comfy-kitchen's rotation"."""
+    if architecture.layout == INT8:
+        return f"{architecture.name} {INT8_SAID}"
+    return f"{architecture.name} in {PRECISIONS[architecture.dtype]}"
 
 
 def check_models(
@@ -230,7 +304,7 @@ def check_models(
                 said = f"{said.removesuffix(f'; {AGAIN}')}; {how}"
             refusals.append(said)
             continue
-        logger.info("%s %s: %s in %s", label, path.name, found.name, PRECISIONS[found.dtype])
+        logger.info("%s %s: %s", label, path.name, in_words(found))
     if refusals:
         raise ModelError("\n".join(refusals))
 
@@ -262,19 +336,44 @@ def _architecture(tensors: Mapping[str, TensorInfo]) -> Architecture | None:
 
 
 def _as_run(tensors: Mapping[str, TensorInfo], architecture: Architecture) -> bool:
-    """Whether an architecture's tensors are in the dtypes seedvr2x runs it in: its dtype, but a
-    BatchNorm's counters (COUNTER), I64."""
-    return all(
-        info.dtype == ("I64" if name.endswith(COUNTER) else architecture.dtype)
-        for name, info in tensors.items()
-    )
+    """Whether an architecture's tensors are in the dtypes seedvr2x runs it in (dtype_of): its
+    dtype, but a BatchNorm's counters (COUNTER), I64, and in the INT8 layout its quantised
+    layers' tensors."""
+    return all(info.dtype == architecture.dtype_of(name) for name, info in tensors.items())
+
+
+def _unmarked(path: Path, tensors: Mapping[str, TensorInfo]) -> str | None:
+    """What is wrong with the markers of a file of the INT8 layout's tensors, in words; None when
+    each says MARKER, the layout its layer's values are in, read where the header puts it
+    (TensorInfo.at): 288 reads of 72 bytes for the 7B. A marker of the same length can say
+    another rotation (a convrot_groupsize of 128), whose values the multiply would take for
+    others."""
+    markers = sorted((name, info) for name, info in tensors.items() if name.endswith(MARK))
+    try:
+        with path.open("rb") as file:
+            for name, info in markers:
+                assert info.at is not None, "read from a file"
+                file.seek(info.at)
+                raw = file.read(info.shape[0])
+                try:
+                    content: object = json.loads(raw.decode())
+                except ValueError:
+                    content = None
+                if content != MARKER:
+                    shown = raw.decode(errors="backslashreplace")
+                    return f"its {name.removesuffix(MARK)} marked {shown}, not {json.dumps(MARKER)}"
+    except OSError as error:
+        raise ModelError(f"{path}: {error.strerror}") from None
+    return None
 
 
 def _role(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> Role | None:
     """The role of the model these tensors are, found the architecture they are exactly, if any:
     a DiT's, SeedVR2's or one named as SeedVR2's names its tensors (_dit), the VAE's, or the shot
     detector's; None for any other file."""
-    if found in DITS.values() or (found is None and _dit(tensors) is not None):
+    if (found is not None and found.config is not None) or (
+        found is None and _dit(tensors) is not None
+    ):
         return "dit"
     if found is VAE:
         return "vae"
@@ -432,7 +531,7 @@ def _parse(path: Path, header: bytes) -> tuple[dict[str, TensorInfo], int]:
                 f"{name}: {_count(end - begin, 'byte')} of data for {_count(values, 'value')}"
                 f" of {dtype}",
             )
-        tensors[name] = TensorInfo(dtype, tuple(shape))
+        tensors[name] = TensorInfo(dtype, tuple(shape), 8 + len(header) + begin)
         spans.append((begin, end, name))
     position = 0
     for begin, end, name in sorted(spans):
@@ -465,6 +564,10 @@ def _what(tensors: Mapping[str, TensorInfo], found: Architecture | None) -> str:
     """What a safetensors file of these tensors is, in words; found, the architecture they are
     exactly, if any."""
     dtypes = Counter(info.dtype for info in tensors.values())
+    if found is not None and found.layout == INT8:
+        if _as_run(tensors, found):
+            return in_words(found)
+        return f"{found.name} in comfy-kitchen's INT8 layout, in other dtypes ({_counts(dtypes)})"
     if found is not None:
         # The precision of the values, a BatchNorm's counters (COUNTER) apart, said only when
         # they aren't I64, as PyTorch keeps them.

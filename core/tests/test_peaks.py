@@ -207,6 +207,61 @@ def test_dit_on_gpu_is_the_placements() -> None:
             placement.device_bytes(fixed + 1)
 
 
+def test_the_int8_dit_s_figures() -> None:
+    # The DiT in seedvr2x's int8 files: its weights by its headers (weights.DIT_7B_INT8), 0.2113
+    # GiB a block where fp16's take 0.4220, its other parameters fp16's; loaded, the fp16 fit's
+    # constant with its weights' bytes exchanged for these, 8.285 GiB for 15.871.
+    int8, fp16 = peaks.INT8, peaks.FP16
+    assert peaks.block_bytes(fp16) == peaks.BLOCK == 453_133_312
+    assert peaks.block_bytes(int8) == 226_862_080
+    assert f"{gib(peaks.block_bytes(int8)):.4f}" == "0.2113"
+    assert peaks.other_bytes(int8) == peaks.other_bytes(fp16) == peaks.DIT_OTHER
+    assert peaks.loaded(fp16) == peaks.DIT_LOADED
+    saved = 36 * (453_133_312 - 226_862_080)
+    assert peaks.loaded(int8) == peaks.DIT_LOADED - saved
+    assert f"{gib(peaks.loaded(int8)):.3f}" == "8.285" and f"{gib(saved):.3f}" == "7.586"
+    # Its window's peak: fp16's with those weights, and the W8A8 path's buffers (provisional,
+    # peaks.INT8_*): the same tokens and windows, on either attention backend.
+    for padded, latents in ((OURS_1080, 1), (OURS_1080, 20), (OURS_4K, 7)):
+        for attention in (peaks.FLASH_ATTN_2, peaks.SDPA):
+            plain = peaks.dit_peak(padded, latents, attention=attention)
+            quantised = peaks.dit_peak(padded, latents, attention=attention, dit_model=int8)
+            assert quantised == plain - saved + peaks.INT8_BUFFERS
+    # A swapped block takes its own bytes off, but for the two in the slots; the VAE away its.
+    whole = peaks.dit_peak(OURS_1080, 12, dit_model=int8)
+    assert peaks.dit_peak(OURS_1080, 12, 2, dit_model=int8) == whole
+    assert whole - peaks.dit_peak(OURS_1080, 12, 36, dit_model=int8) == 34 * 226_862_080
+    assert whole - peaks.dit_peak(OURS_1080, 12, vae_in_dit=False, dit_model=int8) == (
+        peaks.VAE_WEIGHTS
+    )
+    least = peaks.dit_least(OURS_1080, 12, 5, True, peaks.FLASH_ATTN_2, int8)
+    assert least <= peaks.dit_peak(OURS_1080, 12, 5, dit_model=int8)
+    # What of it a VAE phase finds on the GPU, by its blocks' bytes; and the passes over it.
+    never, other, block = peaks.DIT_BUFFERS, peaks.DIT_OTHER, 226_862_080
+    assert peaks.dit_on_gpu(None, 0, int8) == never + other + 36 * block
+    assert peaks.dit_on_gpu(None, 20, int8) == never + other + 18 * block
+    assert peaks.dit_on_gpu(10, 2, int8) == never + other + 10 * block
+    assert peaks.dit_on_gpu(0, 0, int8) == never
+    for resident in (None, 0, 12):
+        apart = peaks.dit_on_gpu(resident, 0) - peaks.dit_on_gpu(resident, 0, int8)
+        tiles = Tiles(1024)
+        assert peaks.encode_peak(OURS_1080, tiles, resident) - apart == peaks.encode_peak(
+            OURS_1080, tiles, resident, dit_model=int8
+        )
+        assert peaks.decode_peak(OURS_1080, HD, tiles, resident) - apart == peaks.decode_peak(
+            OURS_1080, HD, tiles, resident, dit_model=int8
+        )
+    # Another architecture has no figures here.
+    from seedvr2x import weights
+
+    for call in (
+        lambda: peaks.dit_peak(OURS_1080, 1, dit_model=weights.DIT_3B),
+        lambda: peaks.dit_on_gpu(None, 0, weights.VAE),
+    ):
+        with pytest.raises(ValueError, match="the DiT's figures are for"):
+            call()
+
+
 def largest(padded: tuple[int, int], tiles: Tiles) -> tuple[int, int]:
     """(rows, columns), in pixels, of the largest tile of a tiled pass over padded frames: the
     first of the shapes the planner counts a pass by."""

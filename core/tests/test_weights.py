@@ -1,13 +1,14 @@
 """The model check (DESIGN.md, Weights: recognised by content): a model file is known by its
 tensors, from its safetensors header, read without torch, never by its name. v1 accepts SeedVR2's
-7B DiT, regular or sharp, and its VAE, every tensor F16, and TransNetV2 as the shot detector, every
-tensor F32 but its BatchNorm counters, I64; anything else is refused before the first pass, the
-message saying what the file is, and a model given in another's role saying so.
+7B DiT, regular or sharp, every tensor F16 or in seedvr2x's int8 layout, each of its quantised
+layers marked so, and its VAE, every tensor F16, and TransNetV2 as the shot detector, every tensor
+F32 but its BatchNorm counters, I64; anything else is refused before the first pass, the message
+saying what the file is, and a model given in another's role saying so.
 
 The files are synthetic: a header written from the vendored model's tensors, or from a variant of
 them as the real files measured hold theirs, then the file extended to its full size without its
-data, a sparse file. The real files are checked too, header only, when SEEDVR2X_MODEL_DIR holds
-them.
+data, a sparse file, but for an int8 file's markers, written where its header puts them. The real
+files are checked too, header only, when SEEDVR2X_MODEL_DIR holds them.
 
 The command line over the check (a run refused before the first pass, the defaults in --help)
 is test_weights_cli.py's (apps/seedvr2x/tests/)."""
@@ -32,7 +33,15 @@ from typing import Any
 import pytest
 
 from seedvr2x import weights
-from seedvr2x.weights import DIT_3B, DIT_7B, VAE, Architecture, ModelError, TensorInfo
+from seedvr2x.weights import (
+    DIT_3B,
+    DIT_7B,
+    DIT_7B_INT8,
+    VAE,
+    Architecture,
+    ModelError,
+    TensorInfo,
+)
 
 # A model's tensors, by name: (dtype, shape).
 Tensors = dict[str, tuple[str, tuple[int, ...]]]
@@ -43,8 +52,9 @@ BYTES = {"F16": 2, "BF16": 2, "F32": 4, "F8_E4M3": 1, "I8": 1, "U8": 1, "I64": 8
 # What every refusal of a readable file given as the DiT or the VAE ends with, and as the shot
 # detector.
 V1 = (
-    "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16, with its VAE in fp16; phase 2"
-    " brings the two 7Bs' smaller files"
+    "seedvr2x v1 runs SeedVR2's 7B DiT, regular or sharp, in fp16 or in int8 (seedvr2x's int8"
+    " files, W8A8 with comfy-kitchen's rotation), with its VAE in fp16; phase 2 brings the two"
+    " 7Bs' other smaller files"
 )
 SHOTS = "seedvr2x detects shots with TransNetV2 in fp32, as its own transnetv2.safetensors holds it"
 TAILS: dict[weights.Role, str] = {"dit": V1, "vae": V1, "detector": SHOTS}
@@ -114,20 +124,31 @@ def transnetv2_with(
 TRANSNETV2_METADATA = {"format": "pt", "license": "mit"}
 
 
-def write(path: Path, tensors: Tensors, metadata: Mapping[str, str] | None = None) -> Path:
+def write(
+    path: Path,
+    tensors: Tensors,
+    metadata: Mapping[str, str] | None = None,
+    data: Mapping[str, bytes] | None = None,
+) -> Path:
     """A safetensors file of these tensors, their data contiguous in the order given: its header,
     with __metadata__ when given, then nothing but its full length, by truncate: a sparse file,
-    which costs no disk (the 7B in fp16, 16.48 GB on paper); the check reads the header alone."""
+    which costs no disk (the 7B in fp16, 16.48 GB on paper); the check reads the header alone,
+    and an int8 file's markers, whose bytes `data` gives by name, written in their places."""
     header: dict[str, object] = {} if metadata is None else {"__metadata__": dict(metadata)}
     offset = 0
+    starts: dict[str, int] = {}
     for name, (dtype, shape) in tensors.items():
         end = offset + math.prod(shape) * BYTES[dtype]
         header[name] = {"dtype": dtype, "shape": list(shape), "data_offsets": [offset, end]}
+        starts[name] = offset
         offset = end
     raw = json.dumps(header).encode()
     with path.open("wb") as file:
         file.write(len(raw).to_bytes(8, "little") + raw)
         file.truncate(8 + len(raw) + offset)
+        for name, content in (data or {}).items():
+            file.seek(8 + len(raw) + starts[name])
+            file.write(content)
     return path
 
 
@@ -143,8 +164,20 @@ def accepted_models(directory: Path) -> list[str]:
 
 
 # The 288 matrices of the 7B's blocks, 8 per block, which phase 2's files quantise (DESIGN.md,
-# Weights, Phase 2).
+# Weights, Phase 2): written here, the library's own (weights.MATRIX) held to it.
 MATRIX = re.compile(r"blocks\.\d+\.(attn\.proj_(qkv|out)\.(vid|txt)|mlp\.(vid|txt)\.proj_(in|out))")
+# The int8 files' marker, as models/seedvr2_int8.py writes it: 72 bytes.
+INT8_MARKER = json.dumps(
+    {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}
+).encode()
+
+
+def int8_file(path: Path, marker: bytes = INT8_MARKER, tensors: Tensors | None = None) -> Path:
+    """The 7B in the int8 layout (phase2), synthetic, each marker's bytes `marker` written: a
+    file the check accepts with the default marker. Its sparse data is 8.33 GB on paper."""
+    held = phase2("int8_convrot") if tensors is None else tensors
+    markers = {name: marker for name in held if name.endswith(".comfy_quant")}
+    return write(path, held, {"format": "pt"}, markers)
 
 
 def phase2(layout: str) -> Tensors:
@@ -219,6 +252,46 @@ def test_pinned_digests(model: str, architecture: Architecture) -> None:
         assert weights.DITS[(len(blocks), shapes["txt_in.weight"][0])] is architecture
 
 
+def test_int8_digest() -> None:
+    # The int8 files' architecture: the vendored 7B's tensors, each of its 288 block matrices'
+    # weight with a scale a row, (rows, 1), and its marker of 72 bytes beside it, 1,704 in all;
+    # both files' headers at c14a2bc4 give the same digest (weights.py says so). The library's
+    # MATRIX is the test's own, which names exactly 288 of the 7B's weights.
+    lines = []
+    for name, shape in vendored("7b").items():
+        lines.append(f"{name} {list(shape)}")
+        layer = name.removesuffix(".weight")
+        if name.endswith(".weight") and MATRIX.fullmatch(layer):
+            lines += [f"{layer}.weight_scale {[shape[0], 1]}", f"{layer}.comfy_quant [72]"]
+    assert len(lines) == DIT_7B_INT8.tensors == 1704
+    assert hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest() == DIT_7B_INT8.digest
+    assert weights.MATRIX.pattern == MATRIX.pattern
+    assert len(INT8_MARKER) == 72 and json.loads(INT8_MARKER) == weights.MARKER
+    assert DIT_7B_INT8.config == DIT_7B.config == "configs_7b"
+    assert weights.ACCEPTED["dit"] == (DIT_7B, DIT_7B_INT8)
+
+
+def test_int8_bytes_are_its_headers() -> None:
+    # A block's and the other parameters' bytes as the synthetic int8 file's header gives them,
+    # its markers and the RoPE buffers left out (no parameters): weights.py's figures, which the
+    # planner and the placement count by. The real headers gave the same (weights.py).
+    tensors = phase2("int8_convrot")
+    blocks = dict.fromkeys(range(36), 0)
+    other = 0
+    for name, (dtype, shape) in tensors.items():
+        if name.endswith(".comfy_quant") or ".rope." in name:
+            continue
+        size = math.prod(shape) * BYTES[dtype]
+        match = re.match(r"blocks\.(\d+)\.", name)
+        if match is None:
+            other += size
+        else:
+            blocks[int(match[1])] += size
+    assert tuple(blocks.values()) == DIT_7B_INT8.blocks and other == DIT_7B_INT8.other
+    assert f"{sum(DIT_7B_INT8.blocks) / 2**30:.2f}" == "7.61"
+    assert f"{(sum(DIT_7B_INT8.blocks) + DIT_7B_INT8.other) / 2**30:.2f}" == "7.76"
+
+
 def test_transnetv2_pinned() -> None:
     # TransNetV2's pin is the vendored model's inventory, as for the others; and the tensors of
     # seedvr2x's file, read from its header at c14a2bc4: 90, 84 F32 and its 6 BatchNorm counters
@@ -253,6 +326,68 @@ def test_7b_accepted(tmp_path: Path, name: str, metadata: dict[str, str] | None)
     found = weights.check(path, "dit")
     assert found is DIT_7B and found.config == "configs_7b"
     assert weights.describe(path) == "SeedVR2's 7B DiT in fp16"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "seedvr2x_ema_7b_int8_convrot.safetensors",
+        "seedvr2x_ema_7b_sharp_int8_convrot.safetensors",
+        "renamed_fp16.safetensors",
+    ],
+)
+def test_int8_accepted(tmp_path: Path, name: str) -> None:
+    # seedvr2x's int8 files, whatever their name, each marker read where the header puts it.
+    path = int8_file(tmp_path / name)
+    found = weights.check(path, "dit")
+    assert found is DIT_7B_INT8 and found.config == "configs_7b"
+    said = "SeedVR2's 7B DiT in int8, W8A8 with comfy-kitchen's rotation"
+    assert weights.describe(path) == weights.in_words(found) == said
+    assert weights.in_words(DIT_7B) == "SeedVR2's 7B DiT in fp16"
+    # The dtypes it runs them in, by name.
+    assert [
+        DIT_7B_INT8.dtype_of(name)
+        for name in (
+            "blocks.3.mlp.vid.proj_in.weight",
+            "blocks.3.mlp.vid.proj_in.weight_scale",
+            "blocks.3.mlp.vid.proj_in.comfy_quant",
+            "blocks.3.mlp.vid.proj_in.bias",
+            "blocks.3.ada.vid.attn_gate",
+            "vid_in.proj.weight",
+        )
+    ] == ["I8", "F32", "U8", "F16", "F16", "F16"]
+
+
+def test_int8_marked_otherwise_refused(tmp_path: Path) -> None:
+    # A marker of the same 72 bytes saying another rotation, or not JSON, refused, naming the
+    # layer and what it says; the other markers right.
+    other = INT8_MARKER.replace(b"256", b"128")
+    assert len(other) == 72
+    path = int8_file(tmp_path / "seedvr2x_ema_7b_int8_convrot.safetensors", other)
+    expected = json.dumps(weights.MARKER)
+    assert refused(path, "dit") == (
+        f"{path}: SeedVR2's 7B DiT in comfy-kitchen's INT8 layout, its blocks.0.attn.proj_out.txt"
+        f" marked {other.decode()}, not {expected}: {V1}"
+    )
+    tensors = phase2("int8_convrot")
+    markers = {name: INT8_MARKER for name in tensors if name.endswith(".comfy_quant")}
+    markers["blocks.7.mlp.vid.proj_out.comfy_quant"] = b"\xff" * 72
+    write(path, tensors, None, markers)
+    message = refused(path, "dit")
+    assert message.startswith(
+        f"{path}: SeedVR2's 7B DiT in comfy-kitchen's INT8 layout, its blocks.7.mlp.vid.proj_out"
+        " marked \\xff"
+    )
+    # Its scales in fp16, the int8 file's tensors otherwise: what it is, refused.
+    halved = {
+        name: ("F16" if name.endswith(".weight_scale") else dtype, shape)
+        for name, (dtype, shape) in tensors.items()
+    }
+    write(path, halved)
+    assert refused(path, "dit") == (
+        f"{path}: SeedVR2's 7B DiT in comfy-kitchen's INT8 layout, in other dtypes (1,128 F16, 288"
+        f" I8, 288 U8): {V1}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -322,8 +457,56 @@ def test_load_models_by_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert loaded == []
 
 
+def test_load_models_builds_the_int8_dit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An int8 file: the 7B built from its config, each of its 288 block matrices an Int8Linear
+    # (seedvr2x/int8.py) before its weights are read, its markers left unread; on the meta device
+    # here, the weights not loaded. The order of the model's parameters as the fp16 7B's, the
+    # first one the same (model.sample's autocast goes by it).
+    import torch
+
+    from seedvr2x import int8, model
+
+    loaded: list[tuple[str, object, object]] = []
+
+    def load_weights(module: Any, path: Path, *args: Any) -> dict[str, object]:
+        loaded.append((path.name, module, args[3] if len(args) > 3 else None))
+        return {}
+
+    monkeypatch.setattr(model, "_load_weights", load_weights)
+    dit = int8_file(tmp_path / "seedvr2x_ema_7b_int8_convrot.safetensors")
+    write(tmp_path / "ema_vae_fp16.safetensors", as_dtype("vae", "F16"))
+    models = model.load_models(dit, tmp_path / "ema_vae_fp16.safetensors", torch.device("cpu"))
+    assert [name for name, *_ in loaded] == [
+        "ema_vae_fp16.safetensors",
+        "seedvr2x_ema_7b_int8_convrot.safetensors",
+    ]
+    assert loaded[0][2] is None and loaded[1][2] is model._marker  # pyright: ignore[reportPrivateUsage]
+    built = models.runner.dit
+    assert built is loaded[1][1]
+    swapped = [name for name, m in built.named_modules() if isinstance(m, int8.Int8Linear)]
+    assert len(swapped) == 288 and all(MATRIX.fullmatch(name) for name in swapped)
+    # The file's tensors but the markers, by name and shape; the quantised ones in their dtypes,
+    # as built (the others take the file's at the load).
+    state = {name: tensor for name, tensor in built.state_dict().items()}
+    held = phase2("int8_convrot")
+    assert {name: tuple(tensor.shape) for name, tensor in state.items()} == {
+        name: shape for name, (_, shape) in held.items() if not name.endswith(".comfy_quant")
+    }
+    dtypes = {"F32": torch.float32, "I8": torch.int8}
+    for name, (dtype, _) in held.items():
+        if dtype in dtypes:
+            assert state[name].dtype == dtypes[dtype], name
+    fp16 = list(vendored("7b"))
+    parameters = [name for name, _ in built.named_parameters()]
+    assert parameters[0] == "vid_in.proj.weight"
+    assert [name for name in parameters if not name.endswith(".weight_scale")] == [
+        name for name in fp16 if name in parameters
+    ]
+
+
 QUANTISED = "SeedVR2's 7B DiT quantised, its block matrices in {} with scale tensors beside them,"
 QUANTISED += " in comfy-kitchen's layout ({})"
+INT8_SAID = "SeedVR2's 7B DiT in int8, W8A8 with comfy-kitchen's rotation"
 
 
 @pytest.mark.parametrize(
@@ -374,8 +557,8 @@ QUANTISED += " in comfy-kitchen's layout ({})"
         (
             "seedvr2x_ema_7b_int8_convrot.safetensors",
             lambda: phase2("int8_convrot"),
-            "dit",
-            QUANTISED.format("INT8", "1,704 tensors: 840 F16, 288 F32, 288 I8, 288 U8"),
+            "vae",
+            f"{INT8_SAID}, given as the VAE (--vae-model)",
         ),
         (
             "seedvr2x_ema_7b_sharp_nvfp4.safetensors",
@@ -457,8 +640,7 @@ QUANTISED += " in comfy-kitchen's layout ({})"
             "seedvr2x_ema_7b_int8_convrot.safetensors",
             lambda: phase2("int8_convrot"),
             "detector",
-            QUANTISED.format("INT8", "1,704 tensors: 840 F16, 288 F32, 288 I8, 288 U8")
-            + ", given as the shot detector",
+            f"{INT8_SAID}, given as the shot detector",
         ),
         # TransNetV2 in other dtypes, or with a tensor of another shape.
         (
@@ -497,7 +679,7 @@ QUANTISED += " in comfy-kitchen's layout ({})"
         "3b-fp16",
         "3b-fp8",
         "fp8-scaled",
-        "int8",
+        "int8-as-vae",
         "nvfp4",
         "7b-a-shape-changed",
         "vae-as-dit",
@@ -917,9 +1099,16 @@ REAL: list[tuple[str, weights.Role, str | None]] = [
         for sharp in ("", "_sharp")
         for layout, matrices in (
             ("fp8_scaled", "fp8"),
-            ("int8_convrot", "INT8"),
             ("nvfp4", "4-bit values packed two per byte"),
         )
+    ),
+    # seedvr2x's int8 files, each marker read.
+    ("seedvr2x_ema_7b_int8_convrot.safetensors", "dit", None),
+    ("seedvr2x_ema_7b_sharp_int8_convrot.safetensors", "dit", None),
+    (
+        "seedvr2x_ema_7b_sharp_int8_convrot.safetensors",
+        "vae",
+        "SeedVR2's 7B DiT in int8, W8A8 with comfy-kitchen's rotation, given as the VAE",
     ),
     *(
         (f"seedvr2x_ema_7b{sharp}_{kind}.gguf", "dit", GGUF)
@@ -953,7 +1142,7 @@ def test_real_files(name: str, role: weights.Role, refusal: str | None) -> None:
     if not path.is_file():
         pytest.skip(f"{name}: not in SEEDVR2X_MODEL_DIR")
     if refusal is None:
-        assert weights.check(path, role) is weights.ACCEPTED[role]
+        assert weights.check(path, role) in weights.ACCEPTED[role]
     else:
         message = refused(path, role)
         assert message.startswith(f"{path}: ") and refusal in message

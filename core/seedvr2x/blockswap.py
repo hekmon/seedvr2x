@@ -56,9 +56,11 @@ OTHER = "other"
 
 _BLOCK = re.compile(r"blocks\.(\d+)\.")
 # torch's dtype for each of safetensors' names the loader reads (read), each held to
-# safetensors' own reading by tests/test_blockswap.py. A file seedvr2x runs holds F16 alone
-# (weights.check); the other names of weights.DTYPE_BYTES, the unsigned ones over 8 bits and
-# fp8's two, which no such file holds, are refused there rather than read untested.
+# safetensors' own reading by tests/test_blockswap.py. A file seedvr2x runs holds F16 alone, or in
+# an int8 file I8 and F32 besides, the block matrices and their scales, and U8, their markers,
+# which the loader doesn't read (weights.check; model.load_models); the other names of
+# weights.DTYPE_BYTES, the unsigned ones over 8 bits and fp8's two, which no such file holds, are
+# refused there rather than read untested.
 _DTYPES: dict[str, torch.dtype] = {
     "F16": torch.float16,
     "BF16": torch.bfloat16,
@@ -267,27 +269,30 @@ def read(
     dtype: torch.dtype | None,
     part_of: Callable[[str], str | None] | None,
     backend: Cuda | None = None,
+    *,
+    skip: Callable[[str], bool] | None = None,
 ) -> tuple[dict[str, Tensor], dict[str, Part]]:
     """The tensors of the safetensors checkpoint at path, for model.load_state_dict(assign=True),
     on device, every floating one cast to dtype if given, there, as numz casts a model loaded
     whole; but the parameters part_of names a part for, if it is given: those go to their part's
     host copy, pinned, and never to the device whole (DESIGN.md, BlockSwap, rewritten: the
-    loader). Returns the tensors and the parts, by name, each to adopt the model once loaded.
-    Raises HostMemoryError before anything is pinned when the host has too little memory
-    available.
+    loader); and none of those skip says True of, if it is given, which aren't read: an int8
+    file's markers, which no model holds (model.load_models). Returns the tensors and the parts,
+    by name, each to adopt the model once loaded. Raises HostMemoryError before anything is
+    pinned when the host has too little memory available.
 
-    The file is read, never mapped, from its start to its end, each tensor's bytes at the
-    file's own offsets: a part's straight into its pinned copy, any other tensor's into one
-    buffer the size of the largest of them, which it leaves for the device before the next is
-    read. A file cut short since weights.check passed it is a ModelError, as the check's own.
-    Mapped, as safetensors gives a file's tensors, a page stays in the process from the copy
-    that reads it until the mapping goes, at the end of the file's read: with every weight of
-    the 7B bound for the device, its file's 15.35 GiB, the process 16.5 GiB resident at the
-    load's peak where it holds 1.25 once loaded; and as much whatever a plan pins, the pinned
-    copies in the mapped pages' place: 16.8 GiB with 6.38 pinned, 16.3 with the 36 blocks'
-    15.19 (and 31.4 when the blocks' copies were made from the mapping too). Read so, the
-    three loads peak at 1.1, 7.5 and 16.3 GiB, every tensor's bytes the same (measured on
-    the 96 GB card with research/scripts/load_peak.py, 2026-10-12;
+    The file is read, never mapped, from its start to its end, but for the tensors skipped,
+    each tensor's bytes at the file's own offsets: a part's straight into its pinned copy, any
+    other tensor's into one buffer the size of the largest of them, which it leaves for the
+    device before the next is read. A file cut short since weights.check passed it is a
+    ModelError, as the check's own. Mapped, as safetensors gives a file's tensors, a page stays
+    in the process from the copy that reads it until the mapping goes, at the end of the file's
+    read: with every weight of the 7B bound for the device, its file's 15.35 GiB, the process
+    16.5 GiB resident at the load's peak where it holds 1.25 once loaded; and as much whatever a
+    plan pins, the pinned copies in the mapped pages' place: 16.8 GiB with 6.38 pinned, 16.3
+    with the 36 blocks' 15.19 (and 31.4 when the blocks' copies were made from the mapping too).
+    Read so, the three loads peak at 1.1, 7.5 and 16.3 GiB, every tensor's bytes the same
+    (measured on the 96 GB card with research/scripts/load_peak.py, 2026-10-12;
     research/docs/load-memory.md)."""
     backend = Cuda(device) if backend is None else backend
     parameters = {name for name, _ in model.named_parameters()}
@@ -321,6 +326,8 @@ def read(
         tensors: dict[str, tuple[torch.dtype, tuple[int, ...], int, int]] = {}
         # By their offsets: the order the bytes are in, whatever the header's.
         for key, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
+            if skip is not None and skip(key):
+                continue
             if entry["dtype"] not in _DTYPES:
                 raise RuntimeError(f"{path.name}: {key} is {entry['dtype']}, which isn't read")
             found, shape = _DTYPES[entry["dtype"]], tuple(cast("list[int]", entry["shape"]))
@@ -331,7 +338,9 @@ def read(
                     f" {found.itemsize * prod(shape)}"
                 )
             tensors[key] = (found, shape, start, end)
-        whole = 8 + length + max((end for *_, end in tensors.values()), default=0)
+        # The file's whole size by its header, the tensors skipped counted.
+        ends = (cast("list[int]", entry["data_offsets"])[1] for entry in header.values())
+        whole = 8 + length + max(ends, default=0)
         layouts: dict[str, dict[str, tuple[torch.dtype, tuple[int, ...]]]] = {}
         for key, (found, shape, _, _) in tensors.items():
             name = part_of(key) if part_of is not None and key in parameters else None

@@ -1,12 +1,14 @@
 """What each brick takes of the GPU, predicted (DESIGN.md, Memory planner, Per-phase peaks): the
 DiT's peak in a window and where its weights are, the VAE's encode and decode in a pass, whole or
 tiled, in bytes, by the fits of research/docs/planner-limits.md and research/docs/vram.md,
-measured on numz's CLI with the 7B fp16, the one DiT seedvr2x runs (weights.ACCEPTED), and by the
-peaks measured on seedvr2x's own tiled passes (MEASURED); the compiled passes' range; and the
-store a tiled pass takes. The library's (DESIGN.md, Repository and apps), as the bricks are; the
-command line's planner (planner.py) chooses a job's plan with them. Sizes are (height,
-width) in pixels; `padded` is the frame the model takes, the target padded (frames.padded_size).
-No torch at import: the command line plans before it imports torch (tests/test_cli.py)."""
+measured on numz's CLI with the 7B fp16 (FP16), and by the peaks measured on seedvr2x's own tiled
+passes (MEASURED); the DiT in seedvr2x's int8 files (INT8) by its weights, read from its files'
+headers, and the fp16 fit's other terms, provisional until measured (INT8_*); the compiled
+passes' range; and the store a tiled pass takes. The library's (DESIGN.md, Repository and
+apps), as the bricks are; the command line's planner (planner.py) chooses a job's plan with them.
+Sizes are (height, width) in pixels; `padded` is the frame the model takes, the target padded
+(frames.padded_size). No torch at import: the command line plans before it imports torch
+(tests/test_cli.py)."""
 
 from functools import cache
 
@@ -76,24 +78,121 @@ DIT_ATTENTION = {FLASH_ATTN_2: (0, 1.0), SDPA: (round(0.141 * GIB), 1.0469)}
 # 0.47 GiB: 28.15 to 27.68 GiB (Memory planner, Per-phase peaks; vram.md, Practical rules).
 VAE_WEIGHTS = 501_306_880
 
-# The DiT seedvr2x runs, the 7B (weights.ACCEPTED), by the model's own constants
-# (seedvr2x/weights.py, which imports no torch; the placement moves the weights by the same): its
-# blocks, 36, and a block's parameters in bytes, 0.4220 GiB, all alike, the 36 holding 15.19 of
-# the DiT's 15.35 GiB (DESIGN.md, Memory planner, Host RAM). SLOTS: the buffers on the GPU its
-# swapped blocks stream through (DESIGN.md, BlockSwap, rewritten).
-DIT = weights.ACCEPTED["dit"]
-BLOCKS = len(DIT.blocks)
-BLOCK = DIT.blocks[0]
+# The DiT seedvr2x runs, the 7B, in either of its files' formats (weights.ACCEPTED): FP16, the
+# format the fits were measured in, and INT8, seedvr2x's int8 files. Each figure of a format's
+# weights by the model's own constants, its files' headers' (seedvr2x/weights.py, which imports
+# no torch; the placement moves the weights by the same): its blocks, 36 in both, and a block's
+# parameters in bytes, all alike, 0.4220 GiB in fp16, the 36 holding 15.19 of the DiT's 15.35 GiB
+# (DESIGN.md, Memory planner, Host RAM), and 0.2113 GiB in int8, 7.61 of its 7.76. The module's
+# BLOCK and DIT_OTHER are fp16's; block_bytes and other_bytes give either format's. SLOTS: the
+# buffers on the GPU its swapped blocks stream through (DESIGN.md, BlockSwap, rewritten).
+FP16 = weights.DIT_7B
+INT8 = weights.DIT_7B_INT8
+DITS = (FP16, INT8)
+DIT = FP16
+BLOCKS = len(FP16.blocks)
+BLOCK = FP16.blocks[0]
 SLOTS = weights.SLOTS
 # The DiT's parameters outside its blocks, emb_in, txt_in, vid_in and vid_out, in bytes: 0.155
-# GiB, by the model's shapes in fp16 (tests/test_planner.py builds the model). They leave the GPU
-# only with the last block a VAE phase keeps (dit_on_gpu).
-DIT_OTHER = DIT.other
+# GiB, by the model's shapes in fp16 (tests/test_planner.py builds the model), the same in an int8
+# file, which holds them in fp16. They leave the GPU only with the last block a VAE phase keeps
+# (dit_on_gpu).
+DIT_OTHER = FP16.other
 # What of the DiT never leaves the GPU (seedvr2x/blockswap.py: only parameters move): RoPE's
 # buffers with the text embeddings, 0.025 GiB, and the tables its blocks cache from them once a
 # window has run; 0.058 GiB in all, measured on seedvr2x after windows of 1 latent at 1080p
 # (milestone 3, 2026-10-11).
 DIT_BUFFERS = round(0.058 * GIB)
+
+# The DiT in seedvr2x's int8 files (INT8; DESIGN.md, Weights, "int8 before v0.1.0 is tagged"):
+# its peak is the fp16 fit's with its weights' bytes in the place of fp16's (loaded), exact, and
+# these terms, PROVISIONAL (impl-int8, 2026-11-02): nothing of the int8 DiT is measured yet, and
+# DESIGN.md's release gate has the 96 GB card measure them before v0.1.0 is tagged, the planner
+# keeping no blind spot. All of them are here:
+# - INT8_PER_TOKEN and INT8_PER_WINDOW: the fp16 fit's PER_TOKEN and PER_WINDOW, the attention
+#   backend's terms on them as on fp16's (DIT_ATTENTION). Between the linears the activations are
+#   the same tensors, in the pipeline's bfloat16, and a linear's output is the same size; a
+#   linear's input is rounded to bfloat16 W8A8_ROWS rows at a time, where autocast rounds an fp16
+#   linear's input whole. Measured, they would replace these;
+# - INT8_BUFFERS: what the W8A8 path holds beside a linear's output while it runs, W8A8_ROWS rows
+#   at a time (seedvr2x/int8.py's linear), by the 7B's block matrices' shapes (W8A8_MATRICES): the
+#   most of three moments, max(8 K, K + 4 N, 8 N) bytes a row for a matrix of K inputs and N
+#   outputs: the input in float32 and rotated, 4 bytes a value each, then the codes and their
+#   int32 product, 1 byte an input and 4 an output, then the product and its float32 rescaling,
+#   4 and 4 an output; 96 KiB a row for either of the MLP's matrices (K or N 12,288), 0.375 GiB at
+#   4,096 rows; beside them the weight's transposed copy torch's int8 multiply is given (int8.
+#   transposed), K x N bytes, 36 MiB for the MLP's, the bias in float32 and the rows' scales
+#   (W8A8_SMALL), and H, 0.25 MiB. Those are CUDA's, whose kernels convert their operands' dtypes
+#   as they read and write them; on the CPU, torch makes a float32 copy of the int32 product for
+#   its multiply by the token's scale and a float32 output for the last operation, rounded into
+#   the output's rows after (TensorIterator.cpp at v2.14.1, compute_types: temporaries for the
+#   CPU alone), 12 bytes an output at the most. With them counted, torch's memory profiler finds
+#   the path's buffers on the CPU those within W8A8_SMALL (tests/test_int8.py), and the card
+#   measures them on CUDA (its -m gpu tests). Where several linears run one after the other, one
+#   at a time: once. The fp16 linear's copy of its weight in bfloat16 under autocast, up to 72
+#   MiB, which int8 doesn't make, is left in the fp16 fit's constant: on the side of too much.
+INT8_PER_TOKEN = PER_TOKEN
+INT8_PER_WINDOW = PER_WINDOW
+# The rows of a linear's input the W8A8 path takes at a time, int8.ROWS (its PROVISIONAL choice):
+# a literal here, since seedvr2x/int8.py imports torch; tests/test_int8.py holds the two equal.
+W8A8_ROWS = 4096
+# The 7B's block matrices, (inputs, outputs), the video's and the text's alike: the attention's
+# qkv and output projections and the MLP's two (tests/test_int8.py holds them to the model).
+W8A8_MATRICES = ((3072, 9216), (3072, 3072), (3072, 12288), (12288, 3072))
+# H, the rotation's matrix, float32, kept on the device once made (int8.hadamard).
+W8A8_ROTATION = 256 * 256 * 4
+# The small buffers beside the rows': the bias in its dtype and in float32, 6 bytes an output,
+# and the rows' scales, about 20 bytes a row, 0.15 MiB for the 7B at 4,096 rows; 1 MiB.
+W8A8_SMALL = 1 << 20
+
+
+def w8a8_row_bytes(inputs: int, outputs: int) -> int:
+    """The most the W8A8 path holds beside a linear's output for a row of its input, in bytes, a
+    matrix of `inputs` and `outputs` (INT8_BUFFERS' three moments)."""
+    return max(8 * inputs, inputs + 4 * outputs, 8 * outputs)
+
+
+INT8_BUFFERS = (
+    W8A8_ROWS * max(w8a8_row_bytes(*shape) for shape in W8A8_MATRICES)
+    + max(inputs * outputs for inputs, outputs in W8A8_MATRICES)
+    + W8A8_SMALL
+    + W8A8_ROTATION
+)
+
+
+def block_bytes(dit_model: weights.Architecture) -> int:
+    """A block's parameters in bytes in one of the DiT's formats (DITS): 453,133,312 in fp16,
+    226,862,080 in int8, every block alike. ValueError for another architecture."""
+    return _format(dit_model).blocks[0]
+
+
+def other_bytes(dit_model: weights.Architecture) -> int:
+    """The DiT's parameters outside its blocks in bytes in one of its formats (DITS): 166,416,512,
+    fp16 in both. ValueError for another architecture."""
+    return _format(dit_model).other
+
+
+def weights_bytes(dit_model: weights.Architecture) -> int:
+    """The DiT's parameters in bytes in one of its formats (DITS), by its files' headers: 15.35
+    GiB in fp16, 7.76 in int8. ValueError for another architecture."""
+    found = _format(dit_model)
+    return sum(found.blocks) + found.other
+
+
+def loaded(dit_model: weights.Architecture) -> int:
+    """What the loaded DiT holds on the GPU before a forward in one of its formats (DITS), the
+    VAE's weights included, in bytes: DIT_LOADED, the fp16 fit's constant, its weights' bytes
+    exchanged for the format's own (weights_bytes): 15.871 GiB in fp16, 8.285 in int8.
+    ValueError for another architecture."""
+    return DIT_LOADED - weights_bytes(FP16) + weights_bytes(dit_model)
+
+
+def _format(dit_model: weights.Architecture) -> weights.Architecture:
+    """dit_model when it is one of the DiT's formats (DITS); ValueError for another."""
+    if dit_model not in DITS:
+        raise ValueError(f"{dit_model.name}: the DiT's figures are for {FP16.name} in fp16 or int8")
+    return dit_model
+
 
 # The VAE's peaks above what is on the GPU before the call, each (GiB, GiB per megapixel): of the
 # padded frame untiled, flat beyond 9 frames (DESIGN.md, Memory planner, Per-phase peaks, from
@@ -286,11 +385,13 @@ def dit_peak(
     swapped: int = 0,
     vae_in_dit: bool = True,
     attention: str = FLASH_ATTN_2,
+    dit_model: weights.Architecture = FP16,
 ) -> int:
     """The predicted peak of the DiT's phase, in bytes: one window of `latents` latents of padded
     frames, `swapped` of the DiT's blocks swapped, the VAE's weights on the GPU meanwhile unless
     vae_in_dit is False, by the fit of the attention backend the run takes (DIT_ATTENTION;
-    ValueError for another name).
+    ValueError for another name), the DiT in the format of its file (dit_model, one of DITS;
+    ValueError for another): in int8, its weights' bytes and the INT8_* terms (provisional).
 
     A swapped block takes its BLOCK off the peak, but for the SLOTS on the GPU (DESIGN.md,
     BlockSwap, rewritten), so that one or two swapped blocks save nothing: measured on seedvr2x,
@@ -298,12 +399,19 @@ def dit_peak(
     BLOCK x max(S - 2, 0), to 0.001 GiB (17.016 GiB with none, 16.595 with 3, 12.796 with 12,
     2.668 with 36; milestone 3, 2026-10-11, as tests/test_placement.py measures it). numz's own
     swap, one block there at a time, saved 0.4227 GiB x (S - 1)."""
-    windows = PER_WINDOW * attention_windows(padded, latents)
-    return round(dit_least(padded, latents, swapped, vae_in_dit, attention) + windows)
+    per_window = INT8_PER_WINDOW if _format(dit_model) == INT8 else PER_WINDOW
+    windows = per_window * attention_windows(padded, latents)
+    least = dit_least(padded, latents, swapped, vae_in_dit, attention, dit_model)
+    return round(least + windows)
 
 
 def dit_least(
-    padded: tuple[int, int], latents: int, swapped: int, vae_in_dit: bool, attention: str
+    padded: tuple[int, int],
+    latents: int,
+    swapped: int,
+    vae_in_dit: bool,
+    attention: str,
+    dit_model: weights.Architecture = FP16,
 ) -> float:
     """dit_peak less its attention windows' part, in bytes: never above the peak, and counted
     without the window functions, which lay out every window of each length they are asked."""
@@ -312,16 +420,19 @@ def dit_least(
     if attention not in DIT_ATTENTION:
         raise ValueError(f"attention {attention!r}: the DiT's fit is {FLASH_ATTN_2}'s or {SDPA}'s")
     constant, factor = DIT_ATTENTION[attention]
-    per_token = PER_TOKEN * factor * tokens(padded, latents)
-    least = DIT_LOADED + constant + per_token - BLOCK * max(0, swapped - SLOTS)
+    int8 = _format(dit_model) == INT8
+    per_token = (INT8_PER_TOKEN if int8 else PER_TOKEN) * factor * tokens(padded, latents)
+    buffers = INT8_BUFFERS if int8 else 0
+    block = block_bytes(dit_model)
+    least = loaded(dit_model) + constant + buffers + per_token - block * max(0, swapped - SLOTS)
     return least if vae_in_dit else least - VAE_WEIGHTS
 
 
-def dit_on_gpu(resident: int | None, swapped: int) -> int:
+def dit_on_gpu(resident: int | None, swapped: int, dit_model: weights.Architecture = FP16) -> int:
     """What of the DiT is on the GPU in a VAE phase, in bytes, `swapped` of its blocks being
     swapped, by what the phase is entered with (Plan.resident_encode, Plan.resident_decode), as
     blockswap.Placement.enter leaves its parameters there (Placement.device_bytes), with what
-    never moves (DIT_BUFFERS):
+    never moves (DIT_BUFFERS), the DiT in the format of its file (dit_model, one of DITS):
     - None: nothing moves, the DiT as its own phase has it: its other parameters (DIT_OTHER),
       the blocks that aren't swapped, and the slots, one per swapped block up to SLOTS;
     - 0: nothing of its parameters, the other ones away with the blocks;
@@ -331,11 +442,12 @@ def dit_on_gpu(resident: int | None, swapped: int) -> int:
     fixed = BLOCKS - swapped
     if not 0 <= swapped <= BLOCKS or not (resident is None or 0 <= resident <= fixed):
         raise ValueError(f"{resident} blocks resident, {swapped} swapped, of the DiT's {BLOCKS}")
+    block, other = block_bytes(dit_model), other_bytes(dit_model)
     if resident is None:
-        return DIT_BUFFERS + DIT_OTHER + BLOCK * (fixed + min(swapped, SLOTS))
+        return DIT_BUFFERS + other + block * (fixed + min(swapped, SLOTS))
     if resident == 0:
         return DIT_BUFFERS
-    return DIT_BUFFERS + DIT_OTHER + BLOCK * resident
+    return DIT_BUFFERS + other + block * resident
 
 
 @cache
@@ -367,11 +479,12 @@ def encode_peak(
     resident: int | None = None,
     swapped: int = 0,
     compiled: bool = False,
+    dit_model: weights.Architecture = FP16,
 ) -> int:
     """The predicted peak of the VAE's encode of padded frames, in bytes: its peak untiled
     (tiles None) or the most a tile of its grid takes (_fit), above what is on the GPU before
-    the call, the VAE's weights and what of the DiT stays there (dit_on_gpu's resident and
-    swapped); and what seedvr2x's encode holds over it (ENCODE_EXTRA). Whatever the shot's
+    the call, the VAE's weights and what of the DiT stays there (dit_on_gpu's resident, swapped
+    and dit_model); and what seedvr2x's encode holds over it (ENCODE_EXTRA). Whatever the shot's
     length: no encode keeps anything of the shot on the GPU, each slice's part of the latent
     taken off it as it is made, and a tiled encode summing in system memory (DESIGN.md, Memory
     planner, Per-phase peaks: at 1080p a shot of 301 frames peaked where one of 21 does, to the
@@ -385,7 +498,8 @@ def encode_peak(
     ValueError for tiles of which one covers the whole padded frame, which is no tiling
     (covers)."""
     above = _fit(padded, tiles, 0) * (COMPILE_PEAK if compiled else 1.0)
-    return round(above) + ENCODE_EXTRA + VAE_WEIGHTS + dit_on_gpu(resident, swapped)
+    there = dit_on_gpu(resident, swapped, dit_model)
+    return round(above) + ENCODE_EXTRA + VAE_WEIGHTS + there
 
 
 def decode_peak(
@@ -396,6 +510,7 @@ def decode_peak(
     swapped: int = 0,
     split: bool = False,
     compiled: bool = False,
+    dit_model: weights.Architecture = FP16,
 ) -> int:
     """The predicted peak of the VAE's decode of padded frames, in bytes, its peak above what is
     on the GPU before the call as encode_peak has the encode's (without ENCODE_EXTRA, the
@@ -423,7 +538,7 @@ def decode_peak(
     fit = _fit(padded, tiles, 1) * (COMPILE_PEAK if compiled else 1.0)
     corrected = SPLIT_FRAME_4K * SLICE * output[0] * output[1] / PIXELS_4K if split else 0
     above = fit + corrected if tiles is None else max(fit, corrected)
-    return round(above) + VAE_WEIGHTS + dit_on_gpu(resident, swapped)
+    return round(above) + VAE_WEIGHTS + dit_on_gpu(resident, swapped, dit_model)
 
 
 # The VAE's fits by MEASURED's columns, the encode's then the decode's: each untiled, of a tile

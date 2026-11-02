@@ -64,6 +64,16 @@ PINNED: dict[str, Pin] = {
     "seedvr2x_ema_7b_sharp_fp16.safetensors": Pin(
         16_479_335_088, "5eb47fdee4b620765573a697b6f82442234e7dc7aa0beeb3ba72fc63b917a817", "dit"
     ),
+    # The two 7Bs' int8 files (DESIGN.md, Weights, "int8 before v0.1.0 is tagged"), pinned the
+    # same way on 2026-11-02: each SHA-256 its line of SHA256SUMS at REVISION, which
+    # models/seedvr2_int8.py's OUTPUTS gives too, each size the API's. Downloaded only when
+    # --dit-model names one, as the regular 7B's file is.
+    "seedvr2x_ema_7b_int8_convrot.safetensors": Pin(
+        8_333_648_992, "7eb2c7841b1c480d3302d83c8583d345cb9bb80dc169ec83e9a72f3585ab33da", "dit"
+    ),
+    "seedvr2x_ema_7b_sharp_int8_convrot.safetensors": Pin(
+        8_333_649_000, "d83aeaa4687b43755658d85eadcf2e28bb10b70c0196798b303171cf9a16de43", "dit"
+    ),
     "seedvr2x_ema_vae_fp16.safetensors": Pin(
         501_325_454, "b9c6ebf0b14107be595825f476b9f89029a067d5b13e9db39c1351a608265468", "vae"
     ),
