@@ -1083,12 +1083,14 @@ def test_every_plan_s_phases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
                 dit_file,
                 CPU,
                 None,
-                model._dit_parts(plan, blocks),  # pyright: ignore[reportPrivateUsage]
+                model._dit_parts(plan.model_plan, blocks),  # pyright: ignore[reportPrivateUsage]
             )
             dit.requires_grad_(False).eval()
             vae.requires_grad_(False).eval()
             runner = SimpleNamespace(dit=dit, vae=vae)
-            models = model.Models(runner, torch.empty(0), torch.empty(0), "none", CPU, plan)
+            models = model.Models(
+                runner, torch.empty(0), torch.empty(0), "none", CPU, plan.model_plan
+            )
             if dit_parts_ or plan.swapped:
                 models.placement = Placement(dit, CPU, plan.swapped, parts=dit_parts_)
             models.vae = vae_parts.get(model.VAE_PART)
@@ -1145,7 +1147,7 @@ def test_a_phase_that_fails_to_enter_is_no_phase(monkeypatch: pytest.MonkeyPatch
     plan = Plan(None, swapped=2, resident_encode=0, resident_decode=0, vae_in_dit=False)
     runner = SimpleNamespace(dit=dit, vae=vae)
     models = model.Models(
-        runner, torch.empty(0), torch.empty(0), "none", CPU, plan, placement, part
+        runner, torch.empty(0), torch.empty(0), "none", CPU, plan.model_plan, placement, part
     )
     models.enter("decode")
     assert models.phase == "decode" and sim.live() == part.size
@@ -1320,7 +1322,9 @@ def test_one_or_two_swapped_blocks_are_said_to_free_nothing(
     placement = Placement(dit, CPU, swapped, backend=sim)
     plan = Plan(None, swapped=swapped)
     runner = SimpleNamespace(dit=dit, vae=None)
-    models = model.Models(runner, torch.empty(0), torch.empty(0), "none", CPU, plan, placement)
+    models = model.Models(
+        runner, torch.empty(0), torch.empty(0), "none", CPU, plan.model_plan, placement
+    )
     caplog.set_level("INFO")
     model._say_pinned(models, [f"blocks.{7 - 1 - j}" for j in range(swapped)])  # pyright: ignore[reportPrivateUsage]
     blocks = f"{swapped} of the DiT's blocks"

@@ -20,6 +20,7 @@ import numpy.typing as npt
 import torch
 
 from seedvr2x.clock import spent
+from seedvr2x.frames import output_size
 from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.decode import to_float32
 from seedvr2x.media.ffmpeg import MediaError
@@ -27,11 +28,13 @@ from seedvr2x.media.files import make_directories
 from seedvr2x.media.reader import Reader, listed
 from seedvr2x.media.source import Source
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer, quantise
+from seedvr2x.passes import Phase, Tiles
 from seedvr2x.runtime import compiling, memory, timing
 from seedvr2x.runtime import stop as stopping
-from seedvr2x.runtime.job import KEPT_SAMPLE_BYTES, OutputSegment, Run, Shot, output_size, run_of
+from seedvr2x.runtime.job import KEPT_SAMPLE_BYTES, OutputSegment, Run, Shot, run_of
 from seedvr2x.runtime.model import Models, synchronize
-from seedvr2x.runtime.plan import Phase, Plan, Tiles
+from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.scratch import ScratchError
 from seedvr2x.runtime.shot import (
     CopyError,
     Correction,
@@ -42,7 +45,6 @@ from seedvr2x.runtime.shot import (
     sample_windows,
 )
 from seedvr2x.runtime.stop import Stop
-from seedvr2x.runtime.tiling import ScratchError
 from seedvr2x.runtime.timing import ENTER, Clock, Key, Kind, Progress, run_name, tokens, units_of
 from seedvr2x.runtime.units import Units
 
@@ -91,7 +93,7 @@ def run_job(
     dump: Callable[[int, npt.NDArray[np.float32]], None] | None = None,
 ) -> None:
     """Upscale the shots of a job, which cover its source in order (job.shots_from_cuts), each
-    with its own seed (Shot.seed), its frames resized to target (job.target_size), as the job's
+    with its own seed (Shot.seed), its frames resized to target (frames.target_size), as the job's
     plan says (runtime/plan.py): its DiT windows capped at plan.window latents, or laid out as
     the manifest records a run's (units.manifest.layouts: a run kept by its own cap when the plan
     was made again for the memory free), its encodes and decodes tiled or not; write(frames) takes
@@ -649,7 +651,7 @@ class Kept:
         size = len(self.frames) * math.prod(self.shape) * KEPT_SAMPLE_BYTES
         make_directories(self.path.parent)
         # Derived data: a killed run's file, if the resume left it there, is replaced, unlinked
-        # rather than truncated, as tiling.Scratch replaces its own.
+        # rather than truncated, as scratch.Scratch replaces its own.
         self.path.unlink(missing_ok=True)
         try:
             with self.path.open("x+b") as file:

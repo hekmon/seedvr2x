@@ -41,16 +41,19 @@ import torch
 from test_probe import BT709_VUI, has_encoder, has_x265, x265_file
 from test_rate import mechanism7, retagged, strayed
 
-from seedvr2x import cli
+from seedvr2x import cli, peaks
+from seedvr2x.frames import output_size, padded_length, padded_size
 from seedvr2x.media import ffmpeg
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.passes import Tiles
+from seedvr2x.peaks import GIB
 from seedvr2x.runtime import calibration, planner, pull, timing, weights
 from seedvr2x.runtime.detector import BATCH, Detector
-from seedvr2x.runtime.job import Shot, output_size, padded_size
-from seedvr2x.runtime.plan import Plan, Tiles
-from seedvr2x.runtime.planner import GIB, Peaks, Pins
+from seedvr2x.runtime.job import Shot
+from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.planner import Peaks, Pins
 from seedvr2x.runtime.pull import Pin
-from seedvr2x.runtime.shot import decode_shot, padded_length, shot_layout
+from seedvr2x.runtime.shot import decode_shot, shot_layout
 
 
 def _usable() -> bool:
@@ -112,9 +115,9 @@ def stand_in_windows(
 def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[torch.Tensor]:
     """The VAE's decode of a stand-in latent (stand_in_encode), in its slices, the first two
     latents then one at a time: frames (3, t, H, W) at the target's size padded as the encoder's
-    input is (model.input_transform: job.padded_size, or numz's multiples of 16), in [-1, 1]: each
-    saying its index in the job, divided by 1000, NaN in the padding, which the decode crops; NaN
-    throughout for the frames of a latent whose channel 4 is NaN."""
+    input is (model.input_transform: frames.padded_size, or numz's multiples of 16), in [-1, 1]:
+    each saying its index in the job, divided by 1000, NaN in the padding, which the decode
+    crops; NaN throughout for the frames of a latent whose channel 4 is NaN."""
     first, frames = int(latent[0, 0, 0, 0]), int(latent[0, 0, 0, 1])
     height, width = int(latent[0, 0, 0, 2]), int(latent[0, 0, 0, 3])
     padded = padded_size((height, width))
@@ -143,7 +146,7 @@ def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[tor
 FREE, TOTAL = round(94.5 * GIB), 96 * GIB
 HOST = 64 * GIB
 # The stand-in's frames as the planner counts them: upscale's --resolution 96 of source's 64x48,
-# and its padding (job.padded_size), one tile's worth at most.
+# and its padding (frames.padded_size), one tile's worth at most.
 TARGET = (96, 128)
 PADDED = (128, 128)
 
@@ -929,10 +932,10 @@ def test_plan_recorded_and_phases_entered(
         "reserve": None,
         "attention": "flash_attn_2",
         "budget": FREE - planner.MARGIN,
-        "encode_peak": planner.encode_peak(PADDED),
+        "encode_peak": peaks.encode_peak(PADDED),
         # A window of the 6-latent shot.
-        "dit_peak": planner.dit_peak(PADDED, 4),
-        "decode_peak": planner.decode_peak(PADDED, TARGET),
+        "dit_peak": peaks.dit_peak(PADDED, 4),
+        "decode_peak": peaks.decode_peak(PADDED, TARGET),
         "bound": "encode",
         # The process's own, and the longest shot as its decode merges its two windows of 4: the
         # windows, 8 latents, the merged latent, 6, and a join's mix, 6, of 8,192 bytes each
@@ -1025,7 +1028,7 @@ def test_swap_blocks_pin_places_the_weights(
     # moves, the DiT's slots staying in the VAE's phases.
     pins = Pins(window=5, swap_blocks=36)
     made = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST)
-    assert plans == [made[0]] == [Plan(5, swapped=36)]
+    assert plans == [made[0].model_plan] == [Plan(5, swapped=36).model_plan]
     assert steps.calls == UNINTERRUPTED
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["plan"]["memory"]["swapped_blocks"] == 36
@@ -1106,7 +1109,7 @@ def test_a_driver_that_spills_is_planned_under_and_held(
     made = planner.plan(planned_in + planner.MARGIN, TARGET, JOB_SHOTS, Pins(window=5), HOST)
     # Held twice: before the first pass, and again once the plan is made, before the models
     # load; the stand-in's card has the same memory free both times.
-    assert loads == [(made[0], 2)] and limits == [(card - memory.HELD_BACK) / TOTAL] * 2
+    assert loads == [(made[0].model_plan, 2)] and limits == [(card - memory.HELD_BACK) / TOTAL] * 2
     assert steps.calls == UNINTERRUPTED
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     # The record keeps what the plan was made in, and beside it what the driver reported and
@@ -1856,7 +1859,7 @@ def test_pin_refused(
     steps.calls.clear()
     # With no block swapped, the memory that holds a window of 5 latents and not one of 6, the
     # VAE's weights away: --window 6, the longest shot in one window, is refused.
-    free_memory(monkeypatch, planner.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN)
+    free_memory(monkeypatch, peaks.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN)
     caplog.clear()
     pinned = ("--cuts", "cuts.txt", "--window", "6", "--swap-blocks", "0")
     assert upscale(tmp_path, source_path, "out", *pinned) == 1
@@ -1890,7 +1893,7 @@ def test_size_and_host_memory_refused(
     there = sorted(path.name for path in tmp_path.iterdir())
     # The stand-in's frames are too small for a tile: their floor is the untiled encode's, with
     # the room a VAE pass is held to (planner.VAE_ROOM).
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     with monkeypatch.context() as patch:
         free_memory(patch, encode + planner.MARGIN - 1)
         assert upscale(tmp_path, source_path, "out", *JOB) == 1
@@ -1932,14 +1935,14 @@ def test_one_file_plans_as_a_directory(
     # last shot, 6 latents in two windows of 4: the DiT's phase takes a window's peak.
     asked: list[set[str]] = []
     backends: list[str] = []
-    peaks: list[int] = []
+    predicted: list[int] = []
     plan = planner.plan
 
     def planned(*arguments: Any, **options: Any) -> Any:
         asked.append(set(options))
         backends.append(options["attention"])
         made = plan(*arguments, **options)
-        peaks.append(made[1].dit)
+        predicted.append(made[1].dit)
         return made
 
     monkeypatch.setattr(planner, "plan", planned)
@@ -1954,7 +1957,7 @@ def test_one_file_plans_as_a_directory(
     # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
     # here).
     assert backends == ["flash_attn_2"] * 3
-    assert peaks == [planner.dit_peak(PADDED, 4)] * 3
+    assert predicted == [peaks.dit_peak(PADDED, 4)] * 3
 
 
 @pytest.mark.usefixtures("stand_in")
@@ -1967,7 +1970,7 @@ def test_a_run_keeps_a_shot_as_its_units_copies(
     # its windows are sampled from is the copy the units kept or wrote, no other, nor the file
     # read back; and a window's output is let go of once it is kept, before the next window is
     # asked for. The stand-in's device is the CPU, where a unit's copy is the tensor itself: the
-    # helper that copies them (shot.moved) is replaced, for the units, by one that makes another
+    # helper that copies them (sampling.moved) is replaced, for the units, by one that makes another
     # tensor, as it does from a GPU.
     from seedvr2x.runtime import run, units
 
@@ -2070,7 +2073,7 @@ def test_resumed_keeps_its_cap(
     job_options = (*JOB[:2], *JOB[4:])  # JOB without its --window: the cap is the planner's
     options = (*job_options, "--swap-blocks", "0")
     # With no block swapped, the memory that holds a window of 5 latents and not one of 6.
-    less = planner.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN
+    less = peaks.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN
     free_memory(monkeypatch, less)
     steps.stop = "encode 4"
     stopped(tmp_path, source_path, "out", *options)
@@ -2147,9 +2150,9 @@ def test_resumed_with_other_memory(
     assert (started["plan"]["window"], started["plan"]["memory"]["swapped_blocks"]) == (6, 0)
     # The memory that holds the 6-latent window with 20 blocks swapped and the VAE's weights
     # away, and neither with 19 nor with the VAE there.
-    less = planner.dit_peak(PADDED, 6, 20, vae_in_dit=False) + planner.MARGIN
-    assert planner.dit_peak(PADDED, 6, 19, vae_in_dit=False) + planner.MARGIN > less
-    assert planner.dit_peak(PADDED, 6, 20) + planner.MARGIN > less
+    less = peaks.dit_peak(PADDED, 6, 20, vae_in_dit=False) + planner.MARGIN
+    assert peaks.dit_peak(PADDED, 6, 19, vae_in_dit=False) + planner.MARGIN > less
+    assert peaks.dit_peak(PADDED, 6, 20) + planner.MARGIN > less
     free_memory(monkeypatch, less)
     kept = contents(tmp_path / "out")
     caplog.clear()
@@ -2188,7 +2191,7 @@ def test_resumed_on_another_attention_backend(
     caplog.set_level(logging.INFO, logger="seedvr2x")
     source_path = job(tmp_path, monkeypatch)
     options = JOB[:2]
-    exact = planner.dit_peak(PADDED, 6) + planner.MARGIN
+    exact = peaks.dit_peak(PADDED, 6) + planner.MARGIN
     free_memory(monkeypatch, exact)
     steps.stop = "encode 4"
     stopped(tmp_path, source_path, "out", *options)
@@ -2248,7 +2251,7 @@ def test_recorded_plan_no_longer_fits(
     kept = contents(tmp_path / "out")
     steps.stop = None
     steps.calls.clear()
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     free_memory(monkeypatch, encode + planner.MARGIN - GIB // 4)
     figures = (
         "the recorded plan no longer fits the memory free now: the encode, untiled, with the"
@@ -2313,10 +2316,10 @@ def long_shots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, i
     patched for it, the stand-in's frames being tiny: the encode and the decode fit both."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "cuts.txt").write_text("57\n")
-    monkeypatch.setattr(planner, "PER_TOKEN", planner.PER_TOKEN * 200)
+    monkeypatch.setattr(peaks, "PER_TOKEN", peaks.PER_TOKEN * 200)
 
     def holds(latents: int) -> int:
-        return planner.dit_peak(PADDED, latents, planner.BLOCKS, False) + planner.MARGIN
+        return peaks.dit_peak(PADDED, latents, peaks.BLOCKS, False) + planner.MARGIN
 
     return source(tmp_path / "in.mkv", 114), holds(9), holds(7)
 
@@ -2770,7 +2773,7 @@ def test_a_resume_short_of_memory_is_warned_of_before_the_checks(
     steps.calls.clear()
     from seedvr2x.runtime import memory
 
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     # Short by a quarter of a GiB by NVML, this process's CUDA context counted off it.
     asked = early_card(monkeypatch, encode + planner.MARGIN - GIB // 4 + memory.CONTEXT)
     mark_checks(monkeypatch)
@@ -2812,7 +2815,7 @@ def test_the_early_warning_given_accept_env_change_says_what_the_plan_then_does(
     steps.calls.clear()
     from seedvr2x.runtime import memory
 
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     early_card(monkeypatch, encode + planner.MARGIN - GIB // 4 + memory.CONTEXT)
     mark_checks(monkeypatch)
     caplog.clear()
@@ -2855,7 +2858,7 @@ def test_the_early_warning_s_debug_line_says_nvml_s_reading_and_the_context_coun
             return real(*arguments)
 
     monkeypatch.setattr(memory, "early", early)
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     nvml = encode + planner.MARGIN - GIB // 4 + memory.CONTEXT + (3 * GIB if held else 0)
     early_card(monkeypatch, nvml)
     caplog.clear()
@@ -2930,7 +2933,7 @@ def test_the_early_warning_says_what_the_refusal_would_where_no_programs_cure(
 
     real = memory.early
     monkeypatch.setattr(memory, "early", lambda *a: _with_paravirtual(monkeypatch, held, real, *a))
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     nvml = encode + planner.MARGIN - GIB // 4 + memory.CONTEXT + (3 * GIB if held else 0)
     early_card(monkeypatch, nvml, 4 * GIB if cure else GIB // 10)
     mark_checks(monkeypatch)
@@ -2994,7 +2997,7 @@ def test_a_resume_warned_of_is_refused_at_its_place_after_the_checks(
     stopped(tmp_path, source_path, "out", *JOB)
     steps.stop = None
     steps.calls.clear()
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     short = encode + planner.MARGIN - GIB // 4
     free_memory(monkeypatch, short)
     early_card(monkeypatch, short + memory.CONTEXT)
@@ -3069,7 +3072,7 @@ def test_plan_planned_again_whole(
     left.mkdir(parents=True)
     (left / "latent.pt.partial").write_bytes(b"left")
     # With no block swapped, the memory that holds a window of 5 latents and not one of 6.
-    less = planner.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN
+    less = peaks.dit_peak(PADDED, 5, vae_in_dit=False) + planner.MARGIN
     free_memory(monkeypatch, less)
     steps.stop = "encode 0"
     caplog.clear()
@@ -3127,7 +3130,7 @@ def test_plan_without_its_record_planned_again(
 
 
 # A size a tile of 512 px doesn't cover, for the tests of the tiles: --resolution 528 of source's
-# 64x48 is 704x528, padded to 704x560 (job.padded_size), which tiles of 512 px cut 2 x 2 and
+# 64x48 is 704x528, padded to 704x560 (frames.padded_size), which tiles of 512 px cut 2 x 2 and
 # tiles of 640 px 1 x 2. The stand-in's frames otherwise are a tile's worth at most, where every
 # tile pin is refused (test_pin_refused).
 LARGER = ("--resolution", "528")
@@ -3143,10 +3146,11 @@ def tiled_steps(
 ) -> list[tuple[str, Tiles | None, Path | None, int]]:
     """Make the stand-in's encode and decode (steps) take a plan's tiles: each keeps a scratch in
     the directory the run gives it, on disk, as a tiled pass beyond its allowance does
-    (tiling.Scratch), around the stand-in's own pass, untiled. Returns the list each pass adds
+    (scratch.Scratch), around the stand-in's own pass, untiled. Returns the list each pass adds
     its kind, its tiles, that directory and the allowance the run gave it to. The tiled passes
     themselves are test_tiling.py's and test_shot.py's."""
-    from seedvr2x.runtime import run, tiling
+    from seedvr2x.runtime import run, tilegrid
+    from seedvr2x.runtime.scratch import Scratch
 
     given: list[tuple[str, Tiles | None, Path | None, int]] = []
 
@@ -3154,16 +3158,16 @@ def tiled_steps(
         *arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int, **options: Any
     ) -> Any:
         given.append(("encode", tiles, scratch, allowance))
-        assert scratch is not None and not (scratch / tiling.SCRATCH).exists()
-        with tiling.Scratch(scratch, 0).store(1, (8, 8)):
-            assert (scratch / tiling.SCRATCH).is_file()
+        assert scratch is not None and not (scratch / tilegrid.SCRATCH).exists()
+        with Scratch(scratch, 0).store(1, (8, 8)):
+            assert (scratch / tilegrid.SCRATCH).is_file()
             return steps.encode(*arguments, **options)
 
     def decode(*arguments: Any, tiles: Tiles | None, scratch: Path | None, allowance: int) -> None:
         given.append(("decode", tiles, scratch, allowance))
-        assert scratch is not None and not (scratch / tiling.SCRATCH).exists()
-        with tiling.Scratch(scratch, 0).store(1, (8, 8)):
-            assert (scratch / tiling.SCRATCH).is_file()
+        assert scratch is not None and not (scratch / tilegrid.SCRATCH).exists()
+        with Scratch(scratch, 0).store(1, (8, 8)):
+            assert (scratch / tilegrid.SCRATCH).is_file()
             steps.decode(*arguments)
 
     monkeypatch.setattr(run, "encode_shot", encode)
@@ -3196,7 +3200,7 @@ def test_tile_pins_are_the_plan_and_no_scratch_stays(
     # own, on disk, for what follows.
     pins = Pins(5, 640, 512)
     made = planner.plan(FREE, LARGER_TARGET, JOB_SHOTS, pins, HOST, split=split)
-    kept = planner.scratch(LARGER_PADDED, 21)
+    kept = peaks.scratch(LARGER_PADDED, 21)
     assert made[0] == Plan(5, Tiles(640), Tiles(512), scratch_allowance=kept)
     assert made[1].scratch == kept == 21 * 6 * 560 * 704
     lines = planner.said(*made, "a card", LARGER_TARGET, JOB_SHOTS, pins)
@@ -3254,7 +3258,7 @@ def test_tile_pins_are_the_jobs(
 def test_tile_pin_beyond_the_measured_sizes_warned_of(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A pass pinned in tiles larger than the largest measured (planner.TILE_MAX: 2048 px, which
+    # A pass pinned in tiles larger than the largest measured (peaks.TILE_MAX: 2048 px, which
     # the stand-in's frames don't reach, so 576 px here) is taken by its fit, and the log warns
     # of it once per pass, after the plan's lines (planner.beyond_measured): of the encode's 640
     # px, not of the decode's 512; again on the resume, which takes the tiles as recorded; and
@@ -3274,7 +3278,7 @@ def test_tile_pin_beyond_the_measured_sizes_warned_of(
     assert (
         warned() == [] and len(plan_lines(caplog)) == 18
     )  # a line a choice (planner.said), the disk's too
-    monkeypatch.setattr(planner, "TILE_MAX", 576)
+    monkeypatch.setattr(peaks, "TILE_MAX", 576)
     said = (
         "the encode in tiles of 640 px: its predicted peak is the fit's, beyond the sizes"
         " measured (up to 576 px), and the pass may take more"
@@ -3334,7 +3338,7 @@ def test_scratch_that_cant_be_made_stops_the_run(
     # and the same command resumes once there is room, which the message says, as a stop's does,
     # for a .mkv path as for a directory.
     from seedvr2x.runtime import run
-    from seedvr2x.runtime.tiling import ScratchError
+    from seedvr2x.runtime.scratch import ScratchError
 
     source_path = job(tmp_path, monkeypatch)
     said = "scratch.bf16: the shot's scratch, 12718080 bytes: [Errno 28] No space left on device"
@@ -3620,7 +3624,7 @@ def test_a_split_job_is_planned_with_its_correction(
 ) -> None:
     # The command line hands the planner the job's colour correction: a job that corrects its
     # colours is planned with the correction in its decode's phase, a slice of the output
-    # corrected beside an untiled decode (planner.decode_peak's split), and one that doesn't,
+    # corrected beside an untiled decode (peaks.decode_peak's split), and one that doesn't,
     # without. The stand-in's decode is untiled, where the term adds to the peak: the plan
     # recorded says which was counted. A tiled decode's peak is the same with and without it.
     source_path = job(tmp_path, monkeypatch)
@@ -3629,9 +3633,9 @@ def test_a_split_job_is_planned_with_its_correction(
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
     assert content["settings"]["color_correction"] == ("split" if split else "none")
     assert content["plan"]["decode_tiles"] is None
-    plain = planner.decode_peak(PADDED, TARGET)
-    corrected = planner.decode_peak(PADDED, TARGET, split=True)
-    slice_of_frames = planner.SPLIT_FRAME_4K * planner.SLICE * 96 * 128 / planner.PIXELS_4K
+    plain = peaks.decode_peak(PADDED, TARGET)
+    corrected = peaks.decode_peak(PADDED, TARGET, split=True)
+    slice_of_frames = peaks.SPLIT_FRAME_4K * peaks.SLICE * 96 * 128 / peaks.PIXELS_4K
     assert corrected - plain == pytest.approx(slice_of_frames, abs=1) and corrected > plain + 2**20
     assert content["plan"]["memory"]["decode_peak"] == (corrected if split else plain)
 
@@ -4083,10 +4087,10 @@ def test_split_frame_by_frame(
     # stand-in's frames get a pattern by channel and position, past ±1 in places, the padding
     # still NaN, so that a channel moved, a frame flipped or a value clamped on the way changes
     # the output.
+    from seedvr2x.frames import target_size
     from seedvr2x.media.decode import to_float32
     from seedvr2x.media.source import examine
     from seedvr2x.runtime import colour, model
-    from seedvr2x.runtime.job import target_size
     from seedvr2x.runtime.shot import pad_4n1
 
     source_path = job(tmp_path, monkeypatch)
@@ -6209,8 +6213,8 @@ def touch(path: Path, seconds: int = 5) -> None:
 
 
 def reads_of_files(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """The files read to be hashed (media.files.sha256) from here on, in order."""
-    from seedvr2x.media import files
+    """The files read to be hashed (files.sha256) from here on, in order."""
+    from seedvr2x import files
 
     read: list[Path] = []
     real = files.sha256

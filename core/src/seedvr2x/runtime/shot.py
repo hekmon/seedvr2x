@@ -33,9 +33,7 @@ against its own frames of the reference, built from the shot's input copy throug
 transform, in float32 (reference_inputs), then written: no second pass, no buffer.
 """
 
-import logging
 import math
-import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -47,24 +45,17 @@ import numpy.typing as npt
 import torch
 from torch import Tensor
 
+from seedvr2x import sampling
+from seedvr2x.frames import output_size, padded_length
 from seedvr2x.media.checksums import read_checksums
 from seedvr2x.media.conversion import Conversion
 from seedvr2x.media.decode import Decoder, to_float32
 from seedvr2x.media.ffmpeg import MediaError, input_args
+from seedvr2x.passes import Tiles
 from seedvr2x.runtime import colour, model, tiling
-from seedvr2x.runtime.job import (
-    ENCODE_SEED_OFFSET,
-    output_size,
-    padded_length,
-    window_layout,
-)
+from seedvr2x.runtime.job import ENCODE_SEED_OFFSET, window_layout
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
-from seedvr2x.runtime.plan import Tiles
-
-logger = logging.getLogger(__name__)
-
-GIB = 1024**3
-CPU = torch.device("cpu")
+from seedvr2x.runtime.scratch import Scratch
 
 # A shot's input copy read back: gbrp16le to gbrp16le, which zscale passes through unchanged.
 COPY_READ = Conversion("gbrp16le", "gbr", "full", "left")
@@ -124,27 +115,6 @@ def _parts(tensor: Tensor) -> Sequence[Tensor]:
     latents, a window's output likewise, a decode's slice by its frames (finite); the tensor
     itself when it has one dimension or none."""
     return tensor.unbind(0) if tensor.dim() > 1 else (tensor,)
-
-
-def moved(tensor: Tensor, device: torch.device, what: str) -> Tensor:
-    """tensor on device with its values and its memory layout, its strides: itself when it is
-    there already, else a copy. The noise drawn from a latent follows the latent's layout
-    (sample_windows), and the decode is fed the windows as the DiT gave them, so neither changes
-    layout on its way to system memory or back (runtime/units.py). torch keeps the strides of a
-    tensor that is dense, as an encode's latent and a window's output are, and lays the copy of
-    any other out anew, dense in the same order of dimensions (a slice of the shot's latent
-    along time): RuntimeError then, naming `what`.
-
-    The tensor's device is polled first (model.synchronize), so that a Ctrl-C is answered while
-    it finishes what the copy waits for."""
-    model.synchronize(tensor.device)
-    copy = tensor.to(device)
-    if copy.stride() != tensor.stride():
-        raise RuntimeError(
-            f"{what}: its copy on {device} has strides {tuple(copy.stride())}, not its"
-            f" {tuple(tensor.stride())}"
-        )
-    return copy
 
 
 def mix_weights(shared: int) -> list[float]:
@@ -243,9 +213,9 @@ def encode_shot(
     """The VAE latent of a shot of `count` frames, read as they are needed: (T', h, w, 16)
     bfloat16 in system memory, in the channel-major memory the encode gives it, which the noise
     drawn from it depends on (model.encode). T' is 1 + (padded_length(count) - 1) / 4, and (h, w)
-    the padded frames' size (job.padded_size) over 8. read(n) gives the shot's next n frames,
+    the padded frames' size (frames.padded_size) over 8. read(n) gives the shot's next n frames,
     (n, H, W, 3) float32 in [0, 1] at the source's size; target is the (height, width) the encode
-    resizes them to (job.target_size), through model.input_transform.
+    resizes them to (frames.target_size), through model.input_transform.
 
     numz_padding is for tests only (cli.NUMZ_PADDING): the frames padded as numz pads them
     (model.input_transform), so that milestone 1's regression holds the output to numz's. So is
@@ -256,9 +226,10 @@ def encode_shot(
     tile by tile (tiling.encode_tiled), numz's tiled encode of it, bit for bit, the frames still
     read once, their transformed slices waiting in the shot's scratch, each tile's crop taken from
     there. scratch is the directory the scratch's file goes to when it outgrows its allowance of
-    system memory (allowance, in bytes, the plan's; None: tiling.DEFAULT_ALLOWANCE; DESIGN.md,
-    Pipeline, per shot, steps 1 and 3), made only then, the file gone when this returns or fails;
-    None with nowhere to put one, a larger scratch then refused (tiling.ScratchError)."""
+    system memory (allowance, in bytes, the plan's; None: DEFAULT_ALLOWANCE of
+    runtime/scratch.py; DESIGN.md, Pipeline, per shot, steps 1 and 3), made only then, the file
+    gone when this returns or fails; None with nowhere to put one, a larger scratch then refused
+    (runtime/scratch.py's ScratchError)."""
     padded = padded_length(count)
     # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
     model.set_seed(seed + ENCODE_SEED_OFFSET)
@@ -267,7 +238,7 @@ def encode_shot(
     )
     if tiles is None:
         return model.encode_stream(models, inputs, padded)
-    store = tiling.Scratch(scratch, allowance)
+    store = Scratch(scratch, allowance)
     return tiling.encode_tiled(models, inputs, padded, tiles, store)
 
 
@@ -355,19 +326,21 @@ def sample_windows(
     The noise is drawn once for the shot, when the first window is asked for, in system memory
     and on the latent's layout, as numz draws it for a batch but for the device
     (generation_phases.py:663-680): its values follow the generator, the dtype, the shape and the
-    strides (_drawn), and no card. Nothing else draws, so a window's noise is the same whether
-    the windows before it ran in this process or in an earlier one, on this card or another: a
-    resumed shot draws it again, from a latent of the same layout. numz_draw is for tests only
-    (cli.NUMZ_DRAW): the noise drawn on the device, numz's draw, which follows the card.
+    strides (sampling.drawn), and no card. Nothing else draws, so a window's noise is the same
+    whether the windows before it ran in this process or in an earlier one, on this card or
+    another: a resumed shot draws it again, from a latent of the same layout. numz_draw is for
+    tests only (cli.NUMZ_DRAW): the noise drawn on the device, numz's draw, which follows the
+    card.
 
     The noise and the latent wait on the CPU, and each window's slices of them go to the device
     for its pass alone: beside a window the device holds nothing of the shot but that window
     (DESIGN.md, Memory planner, Per-phase peaks), and nothing of it whole, the draw included,
     but in numz's. The latent in system memory is the one given when it is given there, no copy
     being made; and no output is kept here once it is given. So torch.no_grad is on the steps
-    that compute (_drawn, _window), not on this generator: decorating a generator, it keeps the
-    value last yielded bound while the next one is computed (torch/utils/_contextlib.py,
-    _wrap_generator), a window's output on the device through the next window's pass.
+    that compute (sampling.drawn, sampling.window), not on this generator: decorating a
+    generator, it keeps the value last yielded bound while the next one is computed
+    (torch/utils/_contextlib.py, _wrap_generator), a window's output on the device through the
+    next window's pass.
 
     A slice sent to the device is laid out there on its own, dense, without the strides a
     slice of the shot taken on the device would have; a one-window shot's, the whole shot, has
@@ -378,81 +351,9 @@ def sample_windows(
     and draws nothing."""
     if layout[-1][1] != latent.shape[0]:
         raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
-    noise, latent = _drawn(models, latent, seed, numz_draw)
+    noise, latent = sampling.drawn(models, latent, seed, numz_draw)
     for s, e in layout[start:]:
-        yield _window(models, noise[s:e], latent[s:e])
-
-
-def draw(models: Models, latent: Tensor, seed: int, numz_draw: bool = False) -> Tensor:
-    """The noise of a shot's latent as sample_windows draws it (_drawn), on its own: for the time
-    estimates' calibration (runtime/calibration.py), which times it apart from the window."""
-    return _drawn(models, latent, seed, numz_draw)[0]
-
-
-@torch.no_grad()
-def _drawn(
-    models: Models, latent: Tensor, seed: int, numz_draw: bool = False
-) -> tuple[Tensor, Tensor]:
-    """A shot's noise, drawn from seed for its whole latent, and that latent: both on the CPU,
-    (T', h, w, 16) in the latent's memory layout (moved), the noise in COMPUTE_DTYPE; the
-    latent itself when it is given there.
-
-    The draw is torch.randn_like of the latent in system memory, from a CPU generator of the
-    draw's own seeded with seed: the generator fills the tensor in memory order, so that the
-    values follow the latent's strides as well as its shape. Its own, so that nothing drawing
-    from torch's global generator between the seeding and the draw can move the noise; seeded
-    alike, it is the same stream as the global CPU generator numz seeds (model.set_seed, still
-    called, as numz's draw is preceded by it), and gives the same values (tests/test_shot.py
-    holds their digest). A latent given on the device is copied to system memory first, strides
-    kept (moved). Nothing of the draw is on the GPU, and its values are the same on every card:
-    CUDA's generator lays its draw out by the card's count of processors, so that an RTX 5090
-    and an RTX PRO 6000 drew other noise for one seed at a shot's size, as another seed would
-    (DESIGN.md, Pipeline step 2, decided on 2026-10-13). Measured on 2026-10-16 (DESIGN.md, the
-    same step), the noise then drawn from the global CPU generator, which gives the same values:
-    the same noise on an RTX 5090 and an RTX PRO 6000, digest for digest, for every shot of a
-    job; and the two machines' CPUs draw the same values (tests/test_shot.py holds their digest,
-    which both pass). This draw alone, on a desktop's 16-core CPU (torch 2.14.1, 2026-10-16, a
-    process a shape, twice each): 8.8 to 9.0 s and 0.987 GiB for 1,000 latents at 1080p, padded
-    to 1104x1920; 12.2 to 12.6 s and 1.415 GiB for 361 at 4K, padded to 2192x3840; the process's
-    peak growing by the noise's bytes alone.
-
-    numz_draw is for tests only (cli.NUMZ_DRAW): the draw as numz makes it, torch.randn_like of
-    the latent on the device, the latent sent there for it, strides kept (moved), both copies
-    there given up when this returns. Milestone 1's regression holds the output to numz's with
-    it, as does every GPU test held to a reference numz made.
-
-    With -v, the draw is logged: where, for how many latents, its time and the noise's size."""
-    started = time.monotonic()
-    if numz_draw:
-        there = moved(latent, models.device, "the shot's latent")
-        model.set_seed(seed)
-        drawn = torch.randn_like(there, dtype=COMPUTE_DTYPE)
-        noise, latent = (
-            moved(drawn, CPU, "the shot's noise"),
-            moved(latent, CPU, "the shot's latent"),
-        )
-    else:
-        latent = moved(latent, CPU, "the shot's latent")
-        model.set_seed(seed)
-        generator = torch.Generator(device=CPU).manual_seed(seed)
-        noise = torch.randn_like(latent, dtype=COMPUTE_DTYPE, generator=generator)
-    logger.debug(
-        "noise drawn %s for the shot's %d latents in %.2f s: %.3f GiB",
-        "on the device (numz's draw)" if numz_draw else "on the CPU",
-        latent.shape[0],
-        time.monotonic() - started,
-        noise.numel() * noise.element_size() / GIB,
-    )
-    return noise, latent
-
-
-@torch.no_grad()
-def _window(models: Models, noise: Tensor, latent: Tensor) -> Tensor:
-    """The DiT's output for one window, (t, h, w, 16) on the device, from the window's slices of
-    its shot's noise and latent, on the CPU: sent to the device for the pass, where nothing of
-    them is left when this returns but the output."""
-    noise, latent = noise.to(models.device), latent.to(models.device)
-    return model.sample(models, noise, model.condition(models, noise, latent))
+        yield sampling.window(models, noise[s:e], latent[s:e])
 
 
 def merge_windows(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:
@@ -486,7 +387,7 @@ def decode_shot(
     """Decode the shot of `count` frames whose latents are merged (merge_windows), in system
     memory or on the device, in one stream, and write its frames as they come, write(frames)
     taking the output's next frames,
-    (n, H', W', 3) float32 in [0, 1], the target cropped to even sides (job.output_size); each
+    (n, H', W', 3) float32 in [0, 1], the target cropped to even sides (frames.output_size); each
     slice corrected first when a correction is given (_correct; DESIGN.md, Colour correction).
     Each slice decoded is checked for NaN or inf first (finite), its frames named for the job's,
     the shot's first being `first`.
@@ -496,9 +397,10 @@ def decode_shot(
     the last tile is decoded: the shot's frames wait in its scratch until then, and are handed on
     in the slices a streamed decode gives, each checked, corrected and written as one of those.
     scratch is the directory the scratch's file goes to when it outgrows its allowance of system
-    memory (allowance, in bytes, the plan's; None: tiling.DEFAULT_ALLOWANCE; DESIGN.md, Pipeline,
-    per shot, step 3), made only then, the file gone when this returns or fails; None with
-    nowhere to put one, a larger scratch then refused (tiling.ScratchError)."""
+    memory (allowance, in bytes, the plan's; None: DEFAULT_ALLOWANCE of runtime/scratch.py;
+    DESIGN.md, Pipeline, per shot, step 3), made only then, the file gone when this returns or
+    fails; None with nowhere to put one, a larger scratch then refused (runtime/scratch.py's
+    ScratchError)."""
     with _slices(models, merged, tiles, scratch, allowance) as slices:
         chunks = _decoded(slices, count, output_size(target), name, first)
         if correction is not None:
@@ -531,7 +433,7 @@ def _slices(
     if tiles is None:
         slices = model.decode_stream(models, latent)
     else:
-        store = tiling.Scratch(scratch, allowance)
+        store = Scratch(scratch, allowance)
         slices = tiling.decode_tiled(models, latent, tiles, store)
     try:
         yield slices
@@ -547,7 +449,7 @@ def _decoded(
     """The shot's frames as the VAE decodes them (generation_phases.py:900-958), slice by slice
     (slices, _slices): each (t, H, W, C), a view of the decode's (C, t, H', W') cropped to size
     (height, width) from its top left, which drops the padding, whatever its amount, at the bottom
-    and right (job.padding), in [-1, 1] unclamped, on the device; each checked (finite) before it
+    and right (frames.padding), in [-1, 1] unclamped, on the device; each checked (finite) before it
     goes."""
     height, width = size
     written = 0
@@ -678,7 +580,7 @@ def _merge(sampled: list[Tensor], layout: Sequence[tuple[int, int]]) -> Tensor:
     (planner.host_moments). A latent is in two windows at the most (window_layout), so the
     earlier window's shared latents are still as the DiT gave them when they are mixed."""
     first = sampled[0]
-    merged = torch.empty((layout[-1][1], *first.shape[1:]), dtype=first.dtype, device=CPU)
+    merged = torch.empty((layout[-1][1], *first.shape[1:]), dtype=first.dtype, device=sampling.CPU)
     merged[: layout[0][1]] = first
     for ((_, previous_end), (start, end)), current in zip(
         pairwise(layout), sampled[1:], strict=True

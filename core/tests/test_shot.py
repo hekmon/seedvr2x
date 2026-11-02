@@ -28,6 +28,7 @@ import numpy.typing as npt
 import pytest
 import torch
 from omegaconf import OmegaConf
+from test_scratch import mapped
 from test_tiling import (
     DITS,
     MEMORY,
@@ -37,16 +38,19 @@ from test_tiling import (
     failing_at,
     found,
     latent_of,
-    mapped,
     models_of,
     same,
 )
 from test_units import channel_major, job
 
+from seedvr2x import sampling
+from seedvr2x.frames import output_size, padded_length, padded_size
 from seedvr2x.media.ffmpeg import MediaError
+from seedvr2x.passes import Tiles
 from seedvr2x.runtime import model, planner, shot, tiling, units
-from seedvr2x.runtime.job import OutputSegment, Shot, output_size, padded_size
-from seedvr2x.runtime.plan import Plan, Tiles
+from seedvr2x.runtime.job import OutputSegment, Shot
+from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.scratch import DEFAULT_ALLOWANCE, Scratch, ScratchError
 from seedvr2x.runtime.shot import (
     Correction,
     decode_shot,
@@ -57,13 +61,11 @@ from seedvr2x.runtime.shot import (
     merge_windows,
     mix_weights,
     pad_4n1,
-    padded_length,
     reference_inputs,
     sample_windows,
     shot_layout,
     window_layout,
 )
-from seedvr2x.runtime.tiling import Scratch, ScratchError
 from seedvr2x.runtime.units import Units
 
 # The models as far as the encoder's input and split's reference use them: the CPU and the VAE's
@@ -316,7 +318,7 @@ def test_noise_is_drawn_in_system_memory(monkeypatch: pytest.MonkeyPatch) -> Non
     # draw follows. A latent given on the device is copied to system memory for it. numz's draw,
     # for the tests (cli.NUMZ_DRAW), is from the latent sent to the models' device.
     device = torch.device("cpu")  # no other here: what is drawn from, then, not where
-    assert device is not shot.CPU
+    assert device is not sampling.CPU
     models = cast(model.Models, SimpleNamespace(device=device))
     monkeypatch.setattr(model, "condition", lambda models, noise, latent: latent)
     monkeypatch.setattr(model, "sample", lambda models, noise, cond: noise)
@@ -336,7 +338,7 @@ def test_noise_is_drawn_in_system_memory(monkeypatch: pytest.MonkeyPatch) -> Non
 
     class OnTheDevice(torch.Tensor):
         def to(self, *args: Any, **kwargs: Any) -> torch.Tensor:
-            moves.append("system memory" if args[0] is shot.CPU else "device")
+            moves.append("system memory" if args[0] is sampling.CPU else "device")
             return elsewhere
 
     layout = [(0, 3), (2, 5)]
@@ -367,56 +369,6 @@ def test_noise_is_drawn_in_system_memory(monkeypatch: pytest.MonkeyPatch) -> Non
     assert moves == ["device", "system memory"]
     assert drawn_from[-1] is elsewhere
     assert all(same(one, other) for one, other in zip(numz, noise, strict=True))
-
-
-# The noise of a shot of 21 frames at 1080p, 6 latents of 138 x 240 positions (1104 x 1920
-# padded) in the layout an encode gives them, from seed 42: the SHA-256 of the bfloat16 values'
-# bits, in the latent's index order (test_the_draw_is_held_to_its_digest).
-DRAW_DIGEST = "90d8e6bcc5b463868eed13bf2f09493f998a771f4fc347d3e0f95492065f5f1e"
-
-
-def test_the_draw_is_held_to_its_digest(cpu_models: model.Models) -> None:
-    # The noise drawn on the CPU is the same on every card and every machine (DESIGN.md,
-    # Pipeline step 2): held here to its digest for a fixed seed and shape, so that another
-    # generator, another seeding or memory layout fails, and to its generator's being its own.
-    # The layout is the encode's:
-    # channel-major, a permuted view, which a 1-frame encode through the VAE gives here, its
-    # strides those of a latent so built. The noise keeps the latent's shape, dtype and strides.
-    import hashlib
-
-    frames = np.zeros((1, 32, 48, 3), dtype=np.float32)
-    with torch.no_grad():
-        video = pad_4n1(model.to_input(frames)).permute(0, 3, 1, 2).to(torch.float32)
-        encoded = model.encode(cpu_models, model.input_transform((32, 48))(video))
-
-    def channel_major_of(shape: tuple[int, ...]) -> torch.Tensor:
-        latents, height, width, channels = shape
-        empty = torch.zeros(channels, latents, height, width, dtype=model.COMPUTE_DTYPE)
-        return empty.permute(1, 2, 3, 0)
-
-    assert encoded.stride() == channel_major_of(tuple(encoded.shape)).stride()
-    latent = channel_major_of((6, 138, 240, 16))
-    noise, kept = shot._drawn(DEVICE, latent, 42)  # pyright: ignore[reportPrivateUsage]
-    assert kept is latent and noise.device.type == "cpu"
-    assert noise.shape == latent.shape and noise.stride() == latent.stride()
-    assert noise.dtype == model.COMPUTE_DTYPE == torch.bfloat16
-
-    def digest(noise: torch.Tensor) -> str:
-        return hashlib.sha256(noise.contiguous().view(torch.int16).numpy().tobytes()).hexdigest()
-
-    assert digest(noise) == DRAW_DIGEST
-    # The draw's generator is its own: torch's global one drawn from between the seeding and
-    # the draw, as anything else in the process could, moves no value.
-    set_seed = model.set_seed
-
-    def seeded_then_drawn_from(seed: int) -> None:
-        set_seed(seed)
-        torch.rand(3)
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(model, "set_seed", seeded_then_drawn_from)
-        again, _ = shot._drawn(DEVICE, latent, 42)  # pyright: ignore[reportPrivateUsage]
-    assert digest(again) == DRAW_DIGEST
 
 
 # The DiT's windows (sample_windows) over a stand-in for the DiT. Its device is the CPU, where a
@@ -512,48 +464,6 @@ def test_windows_are_slices_of_one_draw(
         next(sample_windows(DEVICE, latent, [(0, 5), (3, 8)], 1234))
 
 
-def test_nothing_of_the_draw_goes_to_a_gpu_but_numz_s(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # On a GPU the noise is drawn in system memory, nothing of the shot sent there for it, and
-    # its values are those the CPU draws; numz's draw, for the tests (cli.NUMZ_DRAW), sends the
-    # latent to the GPU and draws there, as numz does (generation_phases.py:663-680), said in
-    # the -v line. No GPU here: a device by its name alone, the copies to it and back recorded
-    # and left out.
-    gpu = cast(model.Models, SimpleNamespace(device=torch.device("cuda")))
-    sent: list[str] = []
-
-    def moving(tensor: torch.Tensor, device: torch.device, what: str) -> torch.Tensor:
-        sent.append(f"{what} to {device.type}")
-        return tensor
-
-    monkeypatch.setattr(shot, "moved", moving)
-    caplog.set_level(logging.DEBUG, logger="seedvr2x.runtime.shot")
-    latent = channel_major(9)
-    model.set_seed(1234)
-    expected = torch.randn_like(latent, dtype=model.COMPUTE_DTYPE)
-    noise, kept = shot._drawn(gpu, latent, 1234)  # pyright: ignore[reportPrivateUsage]
-    assert torch.equal(noise, expected) and kept is latent
-    assert sent == ["the shot's latent to cpu"]
-    assert re.fullmatch(
-        r"noise drawn on the CPU for the shot's 9 latents in \d+\.\d\d s: 0\.000 GiB",
-        caplog.messages[-1],
-    )
-    sent.clear()
-    noise, kept = shot._drawn(gpu, latent, 1234, numz_draw=True)  # pyright: ignore[reportPrivateUsage]
-    assert torch.equal(noise, expected) and kept is latent
-    assert sent == [
-        "the shot's latent to cuda",
-        "the shot's noise to cpu",
-        "the shot's latent to cpu",
-    ]
-    assert re.fullmatch(
-        r"noise drawn on the device \(numz's draw\) for the shot's 9 latents in \d+\.\d\d s:"
-        r" 0\.000 GiB",
-        caplog.messages[-1],
-    )
-
-
 def test_windows_from_the_units_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The latent as the units give it, the one written for a resume or the one a resume reads
     # back: the windows the encode's own latent gives. And that copy is the one the windows are
@@ -607,18 +517,18 @@ def test_the_device_is_given_each_window_s_slices_alone(
     # (shot.sample_windows); in numz's draw (cli.NUMZ_DRAW), the shot's latent whole for the
     # draw, then the noise and the latent back to system memory. On the CPU a move is the tensor
     # itself: the tensors here record the moves they are asked for, the shape moved and its way,
-    # by the device named: shot.CPU itself for system memory.
+    # by the device named: sampling.CPU itself for system memory.
     moves: list[tuple[str, tuple[int, ...]]] = []
 
     class Recorded(torch.Tensor):
         def to(self, *args: Any, **kwargs: Any) -> torch.Tensor:
-            home = bool(args) and args[0] is shot.CPU
+            home = bool(args) and args[0] is sampling.CPU
             moves.append(("system memory" if home else "device", tuple(self.shape)))
             return super().to(*args, **kwargs)
 
     monkeypatch.setattr(model, "condition", lambda models, noise, latent: latent)
     monkeypatch.setattr(model, "sample", lambda models, noise, cond: noise * 0.5 + cond)
-    assert DEVICE.device is not shot.CPU
+    assert DEVICE.device is not sampling.CPU
     latent = channel_major(9).as_subclass(Recorded)
     whole = tuple(latent.shape)
 
@@ -699,9 +609,7 @@ def test_tiled_encode_is_tilings(stand_in: model.Models, count: int) -> None:
     tiled = encode_shot(stand_in, reads, count, LARGE, 42, tiles=TILES)
     assert sum(reads.counts) == count and all(n <= 5 for n in reads.counts)
     inputs = encoder_inputs(stand_in, Reads(frames), count, LARGE)
-    direct = tiling.encode_tiled(
-        stand_in, inputs, padded_length(count), TILES, Scratch(None, MEMORY)
-    )
+    direct = tiling.encode_tiled(stand_in, inputs, padded_length(count), TILES, tiling.InMemory())
     assert tiled.shape == ((padded_length(count) - 1) // 4 + 1, 8, 10, 16)
     assert same(tiled, direct) and tiled.stride() == direct.stride()
     untiled = encode_shot(stand_in, Reads(frames), count, LARGE, 42)
@@ -713,7 +621,7 @@ def test_tiled_encode_is_tilings(stand_in: model.Models, count: int) -> None:
 def tiled_slices(models: model.Models, latent: torch.Tensor) -> Iterator[torch.Tensor]:
     """tiling's decode of latent under TILES, in model.decode_stream's place: the untiled pass
     then takes its slices, and gives what a tiled one must."""
-    return tiling.decode_tiled(models, latent, TILES, Scratch(None, MEMORY))
+    return tiling.decode_tiled(models, latent, TILES, tiling.InMemory())
 
 
 @pytest.mark.parametrize("count", [1, 6, 13])
@@ -780,9 +688,9 @@ def test_tiled_passes_keep_their_scratch_where_told(stand_in: model.Models, tmp_
 
     # Within its allowance, the scratch is in system memory: nothing on disk, no directory made.
     # The allowance is the pass's to be given, as a run gives it its plan's; without one, here
-    # for the encode, a default of 8 GiB (tiling.DEFAULT_ALLOWANCE).
+    # for the encode, a default of 8 GiB (runtime/scratch.py's DEFAULT_ALLOWANCE).
     needed = Scratch.needed(count, padded_size(LARGE))
-    assert needed < tiling.DEFAULT_ALLOWANCE == 8 * 2**30
+    assert needed < DEFAULT_ALLOWANCE == 8 * 2**30
     in_memory = encode_shot(
         stand_in, Reads(frames), count, LARGE, 42, tiles=TILES, scratch=directory
     )

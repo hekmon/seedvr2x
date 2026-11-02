@@ -3,7 +3,6 @@ resume: the manifest and the units a resume trusts)."""
 
 import contextlib
 import errno
-import hashlib
 import logging
 import os
 from pathlib import Path
@@ -12,20 +11,6 @@ logger = logging.getLogger(__name__)
 
 # The first directory whose sync failed, said once.
 _UNSYNCED: list[Path] = []
-
-
-# Under it, a size is said in MiB (size_said): 0.1 GiB.
-TINY = 2**30 // 10
-
-
-def size_said(count: int, places: int = 1) -> str:
-    """A size as the logs say it before a long read: "16.5 GiB" to `places` decimals, and "41 MiB"
-    under 0.1 GiB, where "0.0 GiB" says nothing (decided on 2026-10-29); "12 KiB" under 1 MiB."""
-    if count < 2**20:
-        return f"{count / 2**10:.0f} KiB"
-    if count < TINY:
-        return f"{count / 2**20:.0f} MiB"
-    return f"{count / 2**30:.{places}f} GiB"
 
 
 def partial_path(path: Path) -> Path:
@@ -70,13 +55,6 @@ def make_directories(path: Path) -> None:
     for directory in reversed(missing):
         directory.mkdir(exist_ok=True)
         _sync(directory.parent)
-
-
-def sha256(path: Path) -> str:
-    """The SHA-256 of a file's content, in hex: models and inputs are identified by their content
-    (DESIGN.md, Pause and resume)."""
-    with path.open("rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()
 
 
 def write_whole(path: Path, data: bytes) -> None:

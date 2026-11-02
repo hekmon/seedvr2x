@@ -40,8 +40,8 @@ from typing import Any, cast
 import torch
 from torch import Tensor
 
-from seedvr2x.runtime.job import JobError
-from seedvr2x.runtime.plan import Phase
+from seedvr2x.errors import Refusal
+from seedvr2x.passes import Phase
 from seedvr2x.runtime.weights import AGAIN, SLOTS, ModelError
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ _DTYPES: dict[str, torch.dtype] = {
 }
 
 
-class HostMemoryError(JobError):
+class HostMemoryError(Refusal):
     """The host can't hold the pinned copies a plan needs: the message names the RAM they take."""
 
 

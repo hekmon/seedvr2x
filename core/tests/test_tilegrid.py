@@ -8,15 +8,16 @@ import sys
 
 import pytest
 
+from seedvr2x.passes import OVERLAP, Tiles
 from seedvr2x.runtime import tilegrid, tiling
-from seedvr2x.runtime.plan import OVERLAP, Tiles
+from seedvr2x.runtime.scratch import Scratch
 from seedvr2x.runtime.tilegrid import Tile
 
 # What a process has imported once it has the module and has used it.
 IMPORTED = """
 import sys
 from seedvr2x.runtime import tilegrid
-from seedvr2x.runtime.plan import Tiles
+from seedvr2x.passes import Tiles
 
 assert tilegrid.largest((1104, 1920), Tiles(1024)) == 1024 * 1024
 assert tilegrid.scratch_bytes(1, (1104, 1920)) == 12_718_080
@@ -40,7 +41,7 @@ def test_tilings_names_are_these() -> None:
     assert (tiling.SCALE, tiling.CHANNELS, tiling.SCRATCH) == (8, 3, "scratch.bf16")
     assert (tilegrid.SCALE, tilegrid.CHANNELS, tilegrid.SCRATCH) == (8, 3, "scratch.bf16")
     for frames, padded in ((1, (1104, 1920)), (17, (64, 96)), (301, (2192, 3840))):
-        assert tiling.Scratch.needed(frames, padded) == tilegrid.scratch_bytes(frames, padded)
+        assert Scratch.needed(frames, padded) == tilegrid.scratch_bytes(frames, padded)
 
 
 def test_grid_of_real_frames() -> None:

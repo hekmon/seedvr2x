@@ -5,7 +5,7 @@ A tiled pass can't stream. The VAE is causal, and each tile keeps its own memory
 first slice to its last: the tiles run one after the other, each over every frame, as numz's do
 over a batch, and a frame is whole only after the last tile. Every tile advancing together, slice
 by slice, would hold every tile's causal memory at once, 8.05 GiB per megapixel decoded
-(research/docs/decode-resume.md). So the frames wait in the shot's scratch (Scratch), in bfloat16:
+(research/docs/decode-resume.md). So the frames wait in the shot's scratch (a Store), in bfloat16:
 the decode sums its weighted tiles there, and hands the frames on once the last tile is in, in the
 slices a streamed decode gives; the encode keeps its transformed input there, exact, and crops
 each tile from it, with no seeking back into the source.
@@ -37,19 +37,15 @@ So nothing on the device grows with the shot (DESIGN.md, Memory planner).
 
 import contextlib
 import logging
-import mmap
-import os
 from collections.abc import Generator, Iterable, Iterator
-from pathlib import Path
+from typing import Protocol
 
 import torch
 from torch import Tensor
 
-from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.media.files import make_directories
+from seedvr2x.passes import Tiles
 from seedvr2x.runtime import model
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
-from seedvr2x.runtime.plan import Tiles
 
 # The grid's arithmetic, kept without torch for the planner to import (runtime/tilegrid.py): its
 # names are this module's too.
@@ -63,145 +59,53 @@ from seedvr2x.runtime.tilegrid import latent_size, latent_tiles, scratch_bytes
 
 logger = logging.getLogger(__name__)
 
-# The bytes of a scratch kept in system memory where its pass is given no allowance (Scratch), a
-# larger one going to its file: for a test or a script that calls shot.encode_shot or
-# shot.decode_shot without one. 8 GiB, which holds 675 frames at 1080p (padded to 1104x1920,
-# 12,718,080 bytes each) and 170 at 4K (2192x3840, 50,503,680). A run gives each pass its plan's
-# allowance, which the planner sets from the host's memory (planner.plan; DESIGN.md, Memory
-# planner, Host RAM).
-DEFAULT_ALLOWANCE = 8 * 2**30
 
+class Store(Protocol):
+    """Where a tiled pass keeps the frames it waits on (DESIGN.md, Pipeline step 3): the
+    transformed input of an encode, the sums of a decode. The pass opens one store at a time, for
+    as long as it runs, and says where it is in its log. The command line's is runtime/scratch.py's
+    Scratch, system memory up to an allowance and a mapped file beyond; the library's is
+    InMemory."""
 
-class ScratchError(MediaError):
-    """A scratch that can't be made: no directory to put its file in, no room for it there, or no
-    mapping it; the message says which, with the bytes it takes.
-
-    PROVISIONAL: a MediaError, a file the run can't write: the command line reports its message
-    and what the run keeps, the units made before it, with exit status 1 (cli._run): a full disk
-    is the user's to fix, and the same command then resumes. DESIGN.md doesn't say how it is
-    reported."""
-
-
-class Scratch:
-    """Where a tiled shot's frames wait (DESIGN.md, Pipeline step 3): a store of (3, frames, H, W)
-    bfloat16 on the CPU, zeros at first. In system memory when its bytes (needed) are within
-    `allowance` (None: DEFAULT_ALLOWANCE), else a memory-mapped file in `directory`, the shot's
-    unit directory (SCRATCH).
-
-    The file is derived data, never recorded: it goes when its store is closed, on success and on
-    failure alike, a mapping the system refuses included, and nothing stays open on it. A run
-    killed leaves it, for the resume to discard."""
-
-    def __init__(self, directory: Path | None, allowance: int | None = None) -> None:
-        self.directory = directory
-        self.allowance = DEFAULT_ALLOWANCE if allowance is None else allowance
-        self._open = False
-
-    @staticmethod
-    def needed(frames: int, padded: tuple[int, int]) -> int:
-        """The bytes of a store of `frames` frames padded to (height, width) pixels: 12.7 MB per
-        1080p frame, padded to 1104x1920, 50.5 MB per 4K frame, padded to 2192x3840
-        (tilegrid.scratch_bytes, there without torch for the planner to count with)."""
-        return scratch_bytes(frames, padded)
+    def store(
+        self, frames: int, padded: tuple[int, int]
+    ) -> contextlib.AbstractContextManager[Tensor]:
+        """A store of `frames` frames padded to (height, width) pixels, open while the with block
+        runs: (3, frames, height, width) in COMPUTE_DTYPE on the CPU, zeros. One at a time."""
+        ...
 
     def where(self, frames: int, padded: tuple[int, int]) -> str:
-        """Where a store of that size is while it is open, for the logs: system memory, or its
-        file's path."""
-        if self.directory is None or self.needed(frames, padded) <= self.allowance:
-            return "system memory"
-        return str(self.directory / SCRATCH)
+        """Where a store of that size is while it is open, for the logs."""
+        ...
+
+
+class InMemory:
+    """The store in system memory alone, whatever its size (tilegrid.scratch_bytes bytes): the
+    library's, for a pass with no file to put one in, and the tests'."""
+
+    def __init__(self) -> None:
+        self._open = False
+
+    def where(self, frames: int, padded: tuple[int, int]) -> str:
+        """Where a store of that size is while it is open: system memory."""
+        return "system memory"
 
     @contextlib.contextmanager
     def store(self, frames: int, padded: tuple[int, int]) -> Generator[Tensor]:
         """A store of `frames` frames padded to (height, width) pixels, open while the with block
-        runs: (3, frames, height, width) bfloat16 on the CPU, zeros. One at a time.
-
-        ScratchError when it takes a file and there is no directory, no room for it there, or no
-        mapping it. The file is removed on leaving the block; its mapping goes with the last
-        tensor on it, so nothing taken from the store is kept past the block but copies."""
+        runs: (3, frames, height, width) bfloat16 on the CPU, zeros. One at a time."""
         if self._open:
             raise RuntimeError("a scratch holds one store at a time")
-        size = self.needed(frames, padded)
-        shape = (CHANNELS, frames, *padded)
         self._open = True
         try:
-            if size <= self.allowance:
-                yield torch.zeros(shape, dtype=COMPUTE_DTYPE)
-                return
-            with self._file(size) as flat:
-                yield flat.view(shape)
+            yield torch.zeros((CHANNELS, frames, *padded), dtype=COMPUTE_DTYPE)
         finally:
             self._open = False
-
-    @contextlib.contextmanager
-    def _file(self, size: int) -> Generator[Tensor]:
-        """The scratch's file, new, `size` bytes of zeros, mapped (_mapped): a flat tensor, the
-        file there while the with block runs."""
-        if self.directory is None:
-            # PROVISIONAL: the planner refuses such a job before the run (DESIGN.md, Memory
-            # planner); DESIGN.md doesn't say what the run itself does.
-            raise ScratchError(
-                f"a scratch of {size} bytes, over the {self.allowance} allowed in system memory,"
-                " and no directory for its file"
-            )
-        path = self.directory / SCRATCH
-        made = False
-        try:
-            try:
-                make_directories(self.directory)
-                # PROVISIONAL: a killed run's file, if the resume left it there, is replaced, not
-                # refused: it is derived data. Unlinked, never truncated, so that a process still
-                # mapping it keeps its own.
-                path.unlink(missing_ok=True)
-                # Read and written: the mapping is of this descriptor, and writes.
-                with path.open("x+b") as file:
-                    made = True
-                    # Allocated whole: a full disk fails here, not later as a SIGBUS on a page of
-                    # the mapping.
-                    os.posix_fallocate(file.fileno(), 0, size)
-                    # Mapped while the file allocated is still open, through its descriptor.
-                    flat = _mapped(file.fileno(), path, size)
-            except OSError as error:
-                raise ScratchError(f"{path}: the shot's scratch, {size} bytes: {error}") from error
-            yield flat
-        finally:
-            # Whatever ended the block, an allocation interrupted included. A file that stays
-            # changes no result: said, and the run goes on.
-            try:
-                if made:
-                    path.unlink(missing_ok=True)
-            except OSError as error:
-                logger.warning("%s: the shot's scratch, not removed: %s", path, error)
-
-
-def _mapped(descriptor: int, path: Path, size: int) -> Tensor:
-    """The file open as `descriptor`, read and written, `size` bytes, as a flat tensor in
-    COMPUTE_DTYPE: a shared mapping, so that what is written through the tensor is the file's,
-    which the system writes out and drops from memory as it needs to.
-
-    Mapped through the descriptor itself (mmap), which is the file that was allocated, whatever
-    its name has become: by its name, path, a link put there since the allocation would be mapped
-    in its place, and another file written (tests/test_tiling.py). path is for the message.
-
-    The mapping is never closed here: the tensor's storage keeps the mapping object, which goes
-    with the last tensor on it, as does the duplicate of the descriptor it holds, the descriptor
-    given closed or not. Closed under a tensor, it would leave the tensor on memory that is no
-    longer mapped, without an error. A mapping the system refuses is a ScratchError, and leaves
-    nothing open on the file: torch.from_file, which maps a name, kept its own descriptor on it
-    then."""
-    try:
-        # Shared, read and written: mmap's defaults.
-        mapping = mmap.mmap(descriptor, size)
-    except OSError as error:
-        raise ScratchError(
-            f"{path}: the shot's scratch, {size} bytes, not mapped: {error}"
-        ) from error
-    return torch.frombuffer(mapping, dtype=COMPUTE_DTYPE)
 
 
 @torch.no_grad()
 def encode_tiled(
-    models: Models, slices: Iterable[Tensor], frames: int, tiles: Tiles, scratch: Scratch
+    models: Models, slices: Iterable[Tensor], frames: int, tiles: Tiles, scratch: Store
 ) -> Tensor:
     """VAE latent of a shot of `frames` frames (4n + 1) fed slice by slice, as model.encode_stream
     takes them (each (C, t, H, W) in [-1, 1], COMPUTE_DTYPE on the device, t following
@@ -262,7 +166,7 @@ def _means(
     sizes: list[int],
     padded: tuple[int, int],
     tiles: Tiles,
-    scratch: Scratch,
+    scratch: Store,
 ) -> tuple[Tensor, Tensor]:
     """The tiles' weighted means (model.mode) of a shot fed in slices of `sizes` frames, summed,
     (1, 16, T', h, w), and the summed weights, (h, w), on the CPU, in the VAE's dtype
@@ -380,9 +284,7 @@ def _crops(models: Models, inputs: Tensor, tile: Tile, sizes: list[int]) -> Iter
 
 
 @torch.no_grad()
-def decode_tiled(
-    models: Models, latent: Tensor, tiles: Tiles, scratch: Scratch
-) -> Generator[Tensor]:
+def decode_tiled(models: Models, latent: Tensor, tiles: Tiles, scratch: Store) -> Generator[Tensor]:
     """VAE decode of latent (T', h, w, 16), as model.decode_stream takes it, a shot's in system
     memory, tile by tile (grid): frames (C, t, H, W) in [-1, 1], unclamped, on the device, in the
     slices model.decode_stream gives (t following model.decode_slices), handed on once the last
@@ -479,7 +381,7 @@ def _tiled(
     tiles: Tiles,
     frames: int,
     padded: tuple[int, int],
-    scratch: Scratch,
+    scratch: Store,
 ) -> None:
     """Say a tiled pass, the encode or the decode (kind), once its scratch's store is open: its
     grid over the shot's `frames` frames padded to (height, width) pixels, and where they wait."""
@@ -489,7 +391,7 @@ def _tiled(
         " %dx%d; its scratch, %d bytes, in %s",
         *(kind, len(layout), tiles.size, tiles.overlap, len(layout) // down, down),
         *(frames, padded[1], padded[0]),
-        *(Scratch.needed(frames, padded), scratch.where(frames, padded)),
+        *(scratch_bytes(frames, padded), scratch.where(frames, padded)),
     )
 
 

@@ -2,13 +2,11 @@
 decode held bit for bit to numz's tiled_encode and tiled_decode, the vendored ones, over a stand-in
 VAE and, once, over the real one with random weights."""
 
-import errno
+import contextlib
 import gc
 import logging
-import mmap
 import os
 import random
-import resource
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -17,15 +15,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
-import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
 from torch import Tensor
 
+from seedvr2x.passes import OVERLAP, Tiles
 from seedvr2x.runtime import model, tilegrid, tiling
-from seedvr2x.runtime.plan import OVERLAP, Tiles
-from seedvr2x.runtime.tiling import Scratch, ScratchError, Tile
+from seedvr2x.runtime.tiling import Tile
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
 from seedvr2x.vendor.models.video_vae_v3.modules.attn_video_vae import VideoAutoencoderKLWrapper
@@ -147,6 +144,18 @@ class Failing(RuntimeError):
     """What a stand-in raises when told to fail."""
 
 
+class Refusing:
+    """A store that refuses to be opened, for a pass that must not ask for one."""
+
+    def store(
+        self, frames: int, padded: tuple[int, int]
+    ) -> contextlib.AbstractContextManager[Tensor]:
+        raise Failing("asked for a store")
+
+    def where(self, frames: int, padded: tuple[int, int]) -> str:
+        return "nowhere"
+
+
 def failing_at(vae: StandIn, call: int) -> None:
     """Make the stand-in's pass number `call`, from 0, fail, counted from now."""
     vae.calls.clear()
@@ -243,23 +252,23 @@ def slices_of(models: model.Models, video: Tensor) -> list[Tensor]:
     return list(video.split(model.encode_slices(models, video.shape[1]), dim=1))
 
 
-def mapped(path: Path) -> bool:
-    """Whether this process maps the file at path, removed or not."""
-    return any(str(path) in line for line in Path("/proc/self/maps").read_text().splitlines())
+# The library's store.
 
 
-def open_on(path: Path) -> list[str]:
-    """What this process's descriptors on the file at path, removed or not, are open on
-    (/proc/self/fd): nothing once a scratch there and every tensor on it are gone."""
-    found: list[str] = []
-    for name in os.listdir("/proc/self/fd"):
-        try:
-            target = os.readlink(f"/proc/self/fd/{name}")
-        except OSError:  # the listing's own, closed since
-            continue
-        if target.startswith(str(path)):
-            found.append(target)
-    return found
+def test_in_memory_store() -> None:
+    # What a pass takes of its store (tiling.Store): (3, frames, H, W) bfloat16 on the CPU, zeros
+    # each time it is opened, one open at a time, said to be in system memory whatever its size.
+    stored = tiling.InMemory()
+    assert stored.where(10_000, (2192, 3840)) == "system memory"
+    with stored.store(5, (16, 24)) as store:
+        assert (store.shape, store.dtype, store.device) == ((3, 5, 16, 24), BF16, CPU)
+        assert not bits(store).any()
+        store += 1
+        with pytest.raises(RuntimeError, match="one store at a time"), stored.store(1, (8, 8)):
+            pass
+    with stored.store(5, (16, 24)) as again:  # free again, and zeros again
+        assert not bits(again).any()
+    assert tilegrid.scratch_bytes(5, (16, 24)) == again.numel() * again.element_size()
 
 
 # The grid.
@@ -400,240 +409,6 @@ def test_bad_sizes() -> None:
             tiling.largest(padded, Tiles(64))
 
 
-# The scratch.
-
-
-def test_scratch_needed() -> None:
-    # DESIGN.md, Pipeline step 3: 12.7 MB per 1080p frame, 50.5 MB per 4K frame, padded.
-    assert Scratch.needed(1, (1104, 1920)) == 3 * 1104 * 1920 * 2 == 12_718_080
-    assert Scratch.needed(1, (2192, 3840)) == 50_503_680
-    assert Scratch.needed(17, (64, 96)) == 17 * 3 * 64 * 96 * 2
-    # The count kept without torch, for the planner, is of the dtype the scratch is made in.
-    assert tilegrid.VALUE_BYTES == model.COMPUTE_DTYPE.itemsize == BF16.itemsize
-    assert tilegrid.scratch_bytes(17, (64, 96)) == Scratch.needed(17, (64, 96))
-
-
-def test_scratch_in_memory(tmp_path: Path) -> None:
-    needed = Scratch.needed(5, (16, 24))
-    scratch = Scratch(tmp_path, needed)
-    with scratch.store(5, (16, 24)) as store:
-        assert (store.shape, store.dtype, store.device) == ((3, 5, 16, 24), BF16, CPU)
-        assert not bits(store).any()
-        assert not list(tmp_path.iterdir())
-        with pytest.raises(RuntimeError, match="one store at a time"), scratch.store(1, (8, 8)):
-            pass
-    with scratch.store(1, (8, 8)):  # free again
-        pass
-
-
-def test_scratch_on_disk(tmp_path: Path) -> None:
-    directory = tmp_path / "resume" / "shot_000012"  # not there yet
-    needed = Scratch.needed(5, (16, 24))
-    scratch = Scratch(directory, needed - 1)
-    path = directory / tiling.SCRATCH
-    with scratch.store(5, (16, 24)) as store:
-        assert (store.shape, store.dtype, store.device) == ((3, 5, 16, 24), BF16, CPU)
-        assert not bits(store).any()
-        # Whole on disk from the start, its blocks allocated.
-        assert path.stat().st_size == needed <= path.stat().st_blocks * 512
-        assert mapped(path)
-        # The descriptor it was allocated through is closed: the mapping's own is the only one,
-        # and the mapping is the tensor's to keep, nothing else holding it.
-        assert len(open_on(path)) == 1
-        gc.collect()
-        # In-place adds through the tensor reach the file.
-        values = video_of(2, (7, 8))
-        store[:, 1:3, 2:9, 3:11] += values
-        store[:, 2:4, 4:11, 6:14] += values
-        expected = torch.zeros((3, 5, 16, 24), dtype=BF16)
-        expected[:, 1:3, 2:9, 3:11] += values
-        expected[:, 2:4, 4:11, 6:14] += values
-        on_disk = torch.from_numpy(np.fromfile(path, dtype=np.int16)).view(3, 5, 16, 24)
-        assert torch.equal(on_disk, bits(expected)) and same(store, expected)
-        kept = store[:, 0]
-        del store
-    # Removed with the store, and unmapped with the last tensor on it, which still reads and
-    # writes it until then; the file's blocks go with the mapping and its descriptor.
-    assert not path.exists() and mapped(path)
-    kept += 1
-    assert same(kept, expected[:, 0] + 1)
-    del kept
-    assert not mapped(path) and not open_on(path)
-
-
-def test_scratch_goes_on_failure(tmp_path: Path) -> None:
-    scratch = Scratch(tmp_path, 0)
-    path = tmp_path / tiling.SCRATCH
-    with pytest.raises(Failing), scratch.store(2, (8, 8)):
-        assert path.exists()
-        raise Failing
-    assert not path.exists() and not mapped(path) and not open_on(path)
-    with scratch.store(2, (8, 8)):  # free again
-        assert path.exists()
-
-
-def test_scratch_allowance_is_its_passs() -> None:
-    # What a scratch may take of system memory is given with it, a run's from its plan
-    # (planner.plan); one given none, by a test or a script, takes a default of 8 GiB.
-    assert Scratch(None, 0).allowance == 0 and Scratch(None, 12_345).allowance == 12_345
-    assert Scratch(None).allowance == Scratch(None, None).allowance == tiling.DEFAULT_ALLOWANCE
-    assert tiling.DEFAULT_ALLOWANCE == 8 * 2**30
-    assert Scratch(None).where(675, (1104, 1920)) == "system memory"
-    with (
-        pytest.raises(ScratchError, match=f"over the {8 * 2**30} allowed in system memory"),
-        Scratch(None).store(676, (1104, 1920)),
-    ):
-        pass
-
-
-def test_scratch_replaces_a_killed_runs(tmp_path: Path) -> None:
-    path = tmp_path / tiling.SCRATCH
-    path.write_bytes(b"\xff" * 4096)
-    with Scratch(tmp_path, 0).store(2, (8, 8)) as store:
-        assert path.stat().st_size == Scratch.needed(2, (8, 8)) and not bits(store).any()
-    assert not path.exists()
-
-
-@pytest.mark.parametrize("planted", ["link", "file"])
-def test_scratch_maps_the_file_it_allocated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: str
-) -> None:
-    # The scratch's name given to another file between the allocation and the mapping, a link
-    # to it or the file itself: the file allocated is mapped and written, by its descriptor,
-    # never the other.
-    directory = tmp_path / "shot"
-    path, other = directory / tiling.SCRATCH, tmp_path / "other"
-    needed = Scratch.needed(5, (16, 24))
-    theirs = b"\x55" * needed
-    other.write_bytes(theirs)
-    allocate = os.posix_fallocate
-    allocated: list[int] = []
-
-    def swapped(descriptor: int, offset: int, length: int) -> None:
-        allocate(descriptor, offset, length)
-        allocated.append(os.open(path, os.O_RDONLY))  # the file allocated, still under its name
-        path.unlink()
-        if planted == "link":
-            path.symlink_to(other)
-        else:
-            other.rename(path)
-
-    monkeypatch.setattr(os, "posix_fallocate", swapped)
-    values = video_of(5, (16, 24))
-    with Scratch(directory, 0).store(5, (16, 24)) as store:
-        monkeypatch.undo()
-        there = other if planted == "link" else path
-        assert path.is_symlink() == (planted == "link") and there.read_bytes() == theirs
-        assert not bits(store).any()
-        store += values
-        assert there.read_bytes() == theirs
-        # The file allocated, read by a descriptor of its own: no name is left to it.
-        (descriptor,) = allocated
-        status = os.fstat(descriptor)
-        assert (status.st_size, status.st_nlink) == (needed, 0)
-        written = torch.frombuffer(bytearray(os.pread(descriptor, needed, 0)), dtype=torch.int16)
-        assert torch.equal(written, bits(values).flatten()) and same(store, values)
-        os.close(descriptor)
-        del store
-    # The name goes with the store, as the scratch's own would: a link, not what it names.
-    assert not path.exists() and not path.is_symlink()
-    assert not mapped(path) and not open_on(path)
-    assert planted == "file" or other.read_bytes() == theirs
-
-
-def test_scratch_without_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    needed = Scratch.needed(2, (8, 8))
-    # No directory, and more than the allowance: the bytes and the allowance are named.
-    with (
-        pytest.raises(ScratchError, match=f"{needed} bytes.*the {needed - 1} allowed"),
-        Scratch(None, needed - 1).store(2, (8, 8)),
-    ):
-        pass
-
-    # A full disk fails at the allocation, naming the file, and leaves none.
-    def full(descriptor: int, offset: int, length: int) -> None:
-        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-
-    monkeypatch.setattr(os, "posix_fallocate", full)
-    path = tmp_path / tiling.SCRATCH
-    scratch = Scratch(tmp_path, 0)
-    with pytest.raises(ScratchError, match=f"{path}.*{needed} bytes.*No space left"):
-        with scratch.store(2, (8, 8)):
-            pass
-    assert not path.exists()
-
-    # An allocation interrupted leaves none either.
-    def interrupted(descriptor: int, offset: int, length: int) -> None:
-        assert path.exists()
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(os, "posix_fallocate", interrupted)
-    with pytest.raises(KeyboardInterrupt), scratch.store(2, (8, 8)):
-        pass
-    assert not path.exists()
-    monkeypatch.undo()
-
-    # A file that can't be mapped: refused, and removed, nothing left open on it.
-    def unmappable(*args: Any, **kwargs: Any) -> mmap.mmap:
-        assert path.stat().st_size == needed
-        raise OSError(errno.ENOMEM, os.strerror(errno.ENOMEM))
-
-    monkeypatch.setattr(mmap, "mmap", unmappable)
-    with pytest.raises(ScratchError, match=f"{path}.*{needed} bytes, not mapped: .*Cannot alloc"):
-        with scratch.store(2, (8, 8)):
-            pass
-    assert not path.exists() and not open_on(path)
-    monkeypatch.undo()
-    with scratch.store(2, (8, 8)):  # free again
-        pass
-
-
-def test_scratch_the_system_wont_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A mapping the system itself refuses: 25 GB, with the process's address space held to a
-    # gigabyte over what it has (the file left sparse, for the test's sake). A ScratchError, the
-    # file removed, and no descriptor left on it: torch.from_file, which mapped it before, kept
-    # its own open on the file, removed and allocated whole.
-    path = tmp_path / tiling.SCRATCH
-    needed = Scratch.needed(4000, (1024, 1024))
-    monkeypatch.setattr(
-        os, "posix_fallocate", lambda descriptor, offset, length: os.ftruncate(descriptor, length)
-    )
-    has = int(Path("/proc/self/statm").read_text().split()[0]) * os.sysconf("SC_PAGE_SIZE")
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    limit = has + (1 << 30)
-    if soft != resource.RLIM_INFINITY:
-        limit = min(limit, soft)
-    resource.setrlimit(resource.RLIMIT_AS, (limit, hard))
-    try:
-        with pytest.raises(ScratchError, match=f"{needed} bytes, not mapped: .*Cannot alloc"):
-            with Scratch(tmp_path, 0).store(4000, (1024, 1024)):
-                pass
-    finally:
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
-    assert not path.exists() and not mapped(path) and not open_on(path)
-
-
-def test_scratch_that_stays_is_said(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # A scratch that can't be removed changes no result: a warning, with the reason.
-    path = tmp_path / tiling.SCRATCH
-    with Scratch(tmp_path, 0).store(2, (8, 8)) as store:
-        store += 1
-
-        def denied(self: Path, missing_ok: bool = False) -> None:
-            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM), str(self))
-
-        monkeypatch.setattr(Path, "unlink", denied)
-    monkeypatch.undo()
-    assert path.exists()
-    assert f"{path}: the shot's scratch, not removed" in caplog.text
-    assert "Operation not permitted" in caplog.text
-
-
-# The slices.
-
-
 @pytest.mark.parametrize("split_size", [4, 8, 16])
 def test_slices_follow_the_loops(split_size: int) -> None:
     # model.decode_slices against the loop it describes, and model.encode_slices against its
@@ -710,7 +485,6 @@ def random_cases(count: int, seed: int) -> list[tuple[int, int, int, int, int]]:
 @pytest.mark.parametrize("device", [CPU, None], ids=["offload-cpu", "offload-unset"])
 def test_decode_is_numz(
     stand_in: model.Models,
-    tmp_path: Path,
     case: tuple[int, int, int, int, int],
     device: torch.device | None,
 ) -> None:
@@ -725,7 +499,7 @@ def test_decode_is_numz(
     vae.calls.clear()
     assert vae.carry.memory is None
 
-    scratch = Scratch(tmp_path, 0) if device is None else Scratch(None, MEMORY)
+    scratch = tiling.InMemory()
     slices = list(tiling.decode_tiled(stand_in, latent, tiles, scratch))
     # The same passes, in the same order, on the same crops; one pass over the shot per tile.
     assert vae.calls == theirs and vae.carry.memory is None
@@ -736,7 +510,7 @@ def test_decode_is_numz(
     assert [s.shape for s in slices] == [s.shape for s in model.decode_stream(stand_in, latent)]
     assert all(s.dtype == BF16 and s.is_contiguous() for s in slices)
     assert same(torch.cat(slices, dim=1), reference)
-    assert same(latent, given) and not (tmp_path / tiling.SCRATCH).exists()
+    assert same(latent, given)
     # Blended, not the untiled decode.
     untiled = torch.cat(list(model.decode_stream(stand_in, latent)), dim=1)
     assert not same(untiled, reference)
@@ -746,7 +520,6 @@ def test_decode_is_numz(
 @pytest.mark.parametrize("device", [CPU, None], ids=["offload-cpu", "offload-unset"])
 def test_encode_is_numz(
     stand_in: model.Models,
-    tmp_path: Path,
     case: tuple[int, int, int, int, int],
     device: torch.device | None,
 ) -> None:
@@ -762,14 +535,14 @@ def test_encode_is_numz(
     vae.calls.clear()
     assert vae.carry.memory is None
 
-    scratch = Scratch(tmp_path, 0) if device is None else Scratch(None, MEMORY)
+    scratch = tiling.InMemory()
     latent = tiling.encode_tiled(stand_in, iter(slices_of(stand_in, video)), frames, tiles, scratch)
     assert vae.calls == theirs and vae.carry.memory is None
     assert len(theirs) == len(grid) * len(model.encode_slices(stand_in, frames))
     # The latent in the memory numz's has: the noise drawn from it depends on it.
     assert latent.shape == (latents, rows, columns, 16) and latent.stride() == reference.stride()
     assert same(latent, reference)
-    assert same(video, given) and not (tmp_path / tiling.SCRATCH).exists()
+    assert same(video, given)
     untiled = model.encode_stream(stand_in, iter(slices_of(stand_in, video)), frames)
     assert untiled.stride() == latent.stride() and not same(untiled, reference)
 
@@ -802,7 +575,7 @@ def test_encode_latent_is_the_whole_batch_encodes(
     assert several == (max(size) > 2)
     whole = numz_encode(stand_in, video, tiles)
     tiled = tiling.encode_tiled(
-        stand_in, iter(slices_of(stand_in, video)), frames, tiles, Scratch(None, MEMORY)
+        stand_in, iter(slices_of(stand_in, video)), frames, tiles, tiling.InMemory()
     )
     assert tiled.stride() == streamed.stride() and tiled.shape == streamed.shape
     assert tiled.device == CPU and same(tiled, streamed) != several
@@ -845,8 +618,8 @@ def test_encode_refuses_moments_that_dont_fill_the_latent(stand_in: model.Models
 @pytest.mark.parametrize("latents", [1, 2, 3, 5])
 def test_one_tile_is_the_untiled_pass(stand_in: model.Models, latents: int) -> None:
     # The picture within one tile, in both directions or cut off in one: numz runs the untiled
-    # pass, and so do we, the scratch untouched: this one could only refuse.
-    untouched = Scratch(None, 0)
+    # pass, and so do we, the store untouched: this one could only refuse.
+    untouched = Refusing()
     frames = 1 + 4 * (latents - 1)
     for rows, columns, size in ((6, 9, 72), (9, 6, 72), (9, 9, 72), (4, 5, 1024)):
         tiles = Tiles(size, 8)
@@ -862,143 +635,37 @@ def test_one_tile_is_the_untiled_pass(stand_in: model.Models, latents: int) -> N
         streamed_latent = model.encode_stream(stand_in, slices_of(stand_in, video), frames)
         assert same(ours, streamed_latent) and ours.stride() == streamed_latent.stride()
         assert same(ours, numz_encode(stand_in, video, tiles))
-    # One latent more than the tile: tiled, and the scratch is asked for.
-    with pytest.raises(ScratchError):
+    # One latent more than the tile: tiled, and the store is asked for.
+    with pytest.raises(Failing, match="asked for a store"):
         list(tiling.decode_tiled(stand_in, latent_of(latents, (10, 9)), Tiles(72, 8), untouched))
-    with pytest.raises(ScratchError):
+    with pytest.raises(Failing, match="asked for a store"):
         video = video_of(frames, (72, 80))
         tiling.encode_tiled(stand_in, slices_of(stand_in, video), frames, Tiles(72, 8), untouched)
 
 
-def test_tiled_passes_are_said(
-    stand_in: model.Models, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_tiled_passes_are_said(stand_in: model.Models, caplog: pytest.LogCaptureFixture) -> None:
     # One debug line per pass the plan tiles, once its scratch's store is open: its grid, the
-    # shot's frames and where they wait; or that the picture is within one tile. The GPU tests
-    # read them (test_regression.py, test_resume.py).
+    # shot's frames and where they wait (the store's own word: tests/test_scratch.py has the
+    # file's); or that the picture is within one tile. The GPU tests read them
+    # (test_regression.py, test_resume.py).
     caplog.set_level(logging.DEBUG, logger="seedvr2x.runtime.tiling")
     tiles = Tiles(64, 16)
     latent, video = latent_of(4, (11, 13)), video_of(13, (88, 104))
-    assert Scratch.needed(13, (88, 104)) == 713_856
-    list(tiling.decode_tiled(stand_in, latent, tiles, Scratch(tmp_path, MEMORY)))
-    tiling.encode_tiled(stand_in, slices_of(stand_in, video), 13, tiles, Scratch(tmp_path, 0))
-    list(tiling.decode_tiled(stand_in, latent, Tiles(1024), Scratch(None, 0)))
-    tiling.encode_tiled(stand_in, slices_of(stand_in, video), 13, Tiles(1024), Scratch(None, 0))
+    assert tilegrid.scratch_bytes(13, (88, 104)) == 713_856
+    list(tiling.decode_tiled(stand_in, latent, tiles, tiling.InMemory()))
+    tiling.encode_tiled(stand_in, slices_of(stand_in, video), 13, tiles, tiling.InMemory())
+    list(tiling.decode_tiled(stand_in, latent, Tiles(1024), Refusing()))
+    tiling.encode_tiled(stand_in, slices_of(stand_in, video), 13, Tiles(1024), Refusing())
     grid = "4 tiles of 64 px sharing 16, 2 across and 2 down, over 13 frames padded to 104x88"
     assert [record.getMessage() for record in caplog.records] == [
         f"tiled decode: {grid}; its scratch, 713856 bytes, in system memory",
-        f"tiled encode: {grid}; its scratch, 713856 bytes, in {tmp_path / tiling.SCRATCH}",
+        f"tiled encode: {grid}; its scratch, 713856 bytes, in system memory",
         "tiled decode: the frames, padded to 104x88, are within one tile of 1024 px: the untiled"
         " pass",
         "tiled encode: the frames, padded to 104x88, are within one tile of 1024 px: the untiled"
         " pass",
     ]
     assert all(record.levelno == logging.DEBUG for record in caplog.records)
-
-
-def test_scratch_in_memory_is_the_scratch_on_disk(stand_in: model.Models, tmp_path: Path) -> None:
-    tiles = Tiles(64, 16)
-    latent = latent_of(4, (11, 13))
-    path = tmp_path / tiling.SCRATCH
-    in_memory = list(tiling.decode_tiled(stand_in, latent, tiles, Scratch(None, MEMORY)))
-    assert not list(tmp_path.iterdir())
-
-    # On disk: the file is there from the first tile to the last slice handed on, then gone.
-    vae = vae_of(stand_in)
-    seen: list[bool] = []
-    vae.before = lambda: seen.append(path.exists() and mapped(path))
-    decoding = tiling.decode_tiled(stand_in, latent, tiles, Scratch(tmp_path, 0))
-    assert not path.exists()  # nothing before the first slice is asked for
-    on_disk = [next(decoding)]
-    assert seen and all(seen) and path.exists()
-    assert path.stat().st_size == Scratch.needed(13, (88, 104))
-    on_disk += list(decoding)
-    assert not path.exists() and not mapped(path)
-    assert len(on_disk) == len(in_memory) == 3
-    assert all(same(disk, memory) for disk, memory in zip(on_disk, in_memory, strict=True))
-
-    video = video_of(13, (88, 104))
-    seen.clear()
-    kept = tiling.encode_tiled(
-        stand_in, slices_of(stand_in, video), 13, tiles, Scratch(tmp_path, 0)
-    )
-    assert seen and all(seen) and not path.exists() and not mapped(path)
-    vae.before = None
-    in_memory_latent = tiling.encode_tiled(
-        stand_in, slices_of(stand_in, video), 13, tiles, Scratch(None, MEMORY)
-    )
-    assert same(kept, in_memory_latent)
-
-
-def test_decode_closed_early(stand_in: model.Models, tmp_path: Path) -> None:
-    path = tmp_path / tiling.SCRATCH
-    scratch = Scratch(tmp_path, 0)
-    decoding = tiling.decode_tiled(stand_in, latent_of(4, (11, 13)), Tiles(64, 16), scratch)
-    first = next(decoding)
-    assert path.exists() and mapped(path)
-    cast(Any, decoding).close()
-    assert not path.exists() and not mapped(path) and not open_on(path)
-    # What was handed on is a copy, still whole.
-    assert first.shape == (3, 5, 88, 104) and bool(torch.isfinite(first.float()).all())
-    assert vae_of(stand_in).carry.memory is None
-    with scratch.store(1, (8, 8)):  # free again
-        pass
-
-
-@pytest.mark.parametrize("call", [0, 1, 4, 7])
-def test_decode_failing_in_a_tile(stand_in: model.Models, tmp_path: Path, call: int) -> None:
-    # A pass that fails, the first of a tile or a later one, in the first tile or another: the
-    # scratch goes and the causal memory is cleared.
-    vae, path = vae_of(stand_in), tmp_path / tiling.SCRATCH
-    scratch = Scratch(tmp_path, 0)
-    failing_at(vae, call)
-    with pytest.raises(Failing):
-        list(tiling.decode_tiled(stand_in, latent_of(4, (11, 13)), Tiles(64, 16), scratch))
-    assert len(vae.calls) == call and not path.exists()
-    assert vae.carry.memory is None and not mapped(path) and not open_on(path)
-    with scratch.store(1, (8, 8)):  # free again
-        pass
-
-
-def test_decode_failing_between_passes(
-    stand_in: model.Models, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A failure of ours, between a tile's passes, as a Ctrl-C raised while the device is polled:
-    # the tile's pass is closed, which clears its memory at once, and the scratch goes.
-    vae, path = vae_of(stand_in), tmp_path / tiling.SCRATCH
-    polls: list[bool] = []
-
-    def synchronize(device: torch.device) -> None:
-        polls.append(vae.carry.memory is not None)
-        if len(polls) == 5:
-            raise KeyboardInterrupt
-
-    monkeypatch.setattr(model, "synchronize", synchronize)
-    with pytest.raises(KeyboardInterrupt) as raised:
-        list(
-            tiling.decode_tiled(
-                stand_in, latent_of(4, (11, 13)), Tiles(64, 16), Scratch(tmp_path, 0)
-            )
-        )
-    assert polls[-1]  # in the middle of a tile, its memory kept
-    assert vae.carry.memory is None and not path.exists()
-    # The mapping goes with the failure's traceback, which holds the frames that held the store.
-    del raised
-    assert not mapped(path) and not open_on(path)
-
-
-@pytest.mark.parametrize("call", [0, 3, 5])
-def test_encode_failing_in_a_tile(stand_in: model.Models, tmp_path: Path, call: int) -> None:
-    vae, path = vae_of(stand_in), tmp_path / tiling.SCRATCH
-    scratch = Scratch(tmp_path, 0)
-    video = video_of(13, (88, 104))
-    failing_at(vae, call)
-    with pytest.raises(Failing):
-        tiling.encode_tiled(stand_in, slices_of(stand_in, video), 13, Tiles(64, 16), scratch)
-    assert len(vae.calls) == call and not path.exists()
-    assert vae.carry.memory is None and not mapped(path) and not open_on(path)
-    with scratch.store(1, (8, 8)):  # free again
-        pass
 
 
 @pytest.mark.parametrize("tiled", [True, False], ids=["tiled", "untiled"])
@@ -1022,7 +689,7 @@ def test_encode_hands_its_moments_on_slice_by_slice(
 
     monkeypatch.setattr(vae, "_encode", counted)
     video = video_of(21, (88, 104))
-    scratch = Scratch(None, MEMORY)
+    scratch = tiling.InMemory()
     if tiled:
         tiling.encode_tiled(stand_in, iter(slices_of(stand_in, video)), 21, Tiles(64, 16), scratch)
         assert len(most) == 5 * len(tiling.grid((11, 13), Tiles(64, 16)))
@@ -1065,7 +732,7 @@ def test_encode_lets_its_first_slice_go(
         model.encode_stream(stand_in, slices(), 13)
     else:
         assert len(tiling.grid((11, 13), tiles)) == layout
-        tiling.encode_tiled(stand_in, slices(), 13, tiles, Scratch(None, MEMORY))
+        tiling.encode_tiled(stand_in, slices(), 13, tiles, tiling.InMemory())
     assert first == ([True, False, False] if layout == 1 else [False] * (3 * layout))
     assert not any(ref() is not None for ref in fed)
 
@@ -1120,7 +787,7 @@ def test_decode_takes_its_latents_slice_by_slice(
 
     monkeypatch.setattr(vae, "_decode", counted)
     if tiled:
-        slices = tiling.decode_tiled(stand_in, latent, tiles, Scratch(None, MEMORY))
+        slices = tiling.decode_tiled(stand_in, latent, tiles, tiling.InMemory())
         crops = [(tile.rows, tile.columns) for tile in tiling.grid((11, 13), tiles)]
     else:
         slices = model.decode_stream(stand_in, latent)
@@ -1132,7 +799,7 @@ def test_decode_takes_its_latents_slice_by_slice(
     monkeypatch.undo()
     # The same frames as from the latent itself, which the subclass changes nothing to.
     if tiled:
-        ours = list(tiling.decode_tiled(stand_in, latent, tiles, Scratch(None, MEMORY)))
+        ours = list(tiling.decode_tiled(stand_in, latent, tiles, tiling.InMemory()))
         theirs = numz_decode(stand_in, plain, tiles)
     else:
         ours = list(model.decode_stream(stand_in, latent))
@@ -1177,7 +844,7 @@ def test_decoder_is_handed_what_numz_hands_it(
     theirs = list(handed)
     handed.clear()
     if tiled:
-        list(tiling.decode_tiled(stand_in, latent, tiles, Scratch(None, MEMORY)))
+        list(tiling.decode_tiled(stand_in, latent, tiles, tiling.InMemory()))
     else:
         list(model.decode_stream(stand_in, latent))
     assert (
@@ -1193,8 +860,8 @@ def test_decoder_is_handed_what_numz_hands_it(
     assert any(strides is not None for _, _, strides in handed) == (not tiled or latents > 2)
 
 
-def test_encode_refuses_slices_that_dont_follow(stand_in: model.Models, tmp_path: Path) -> None:
-    vae, path = vae_of(stand_in), tmp_path / tiling.SCRATCH
+def test_encode_refuses_slices_that_dont_follow(stand_in: model.Models) -> None:
+    vae = vae_of(stand_in)
     tiles = Tiles(64, 16)
     video = video_of(13, (88, 104))
     good = slices_of(stand_in, video)
@@ -1202,9 +869,9 @@ def test_encode_refuses_slices_that_dont_follow(stand_in: model.Models, tmp_path
 
     def refused(slices: list[Tensor], match: str) -> None:
         with pytest.raises(ValueError, match=match):
-            tiling.encode_tiled(stand_in, iter(slices), 13, tiles, Scratch(tmp_path, 0))
-        # Refused before any pass, and the scratch gone.
-        assert not vae.calls and not path.exists()
+            tiling.encode_tiled(stand_in, iter(slices), 13, tiles, tiling.InMemory())
+        # Refused before any pass.
+        assert not vae.calls
 
     # The counts, as model.encode_stream refuses them, in its words.
     refused(list(video.split([4, 5, 4], dim=1)), r"slice 0 of 4 frames, the VAE takes \[5, 4, 4\]")
@@ -1227,32 +894,30 @@ def test_encode_refuses_slices_that_dont_follow(stand_in: model.Models, tmp_path
     # Frames that aren't multiples of 8, as no padded frame is.
     with pytest.raises(ValueError, match="multiples of 8"):
         odd = video_of(5, (90, 104))
-        tiling.encode_tiled(stand_in, [odd], 5, tiles, Scratch(tmp_path, 0))
+        tiling.encode_tiled(stand_in, [odd], 5, tiles, tiling.InMemory())
     # A latent in another dtype than the VAE's.
     with pytest.raises(ValueError, match=r"latent torch\.float32"):
         list(
-            tiling.decode_tiled(
-                stand_in, latent_of(3, (11, 13)).float(), tiles, Scratch(tmp_path, 0)
-            )
+            tiling.decode_tiled(stand_in, latent_of(3, (11, 13)).float(), tiles, tiling.InMemory())
         )
-    assert not vae.calls and not path.exists()
+    assert not vae.calls
 
 
-def test_tiled_passes_are_bfloat16(tmp_path: Path) -> None:
+def test_tiled_passes_are_bfloat16() -> None:
     # A VAE in float32, as tests/test_shot.py's: its streamed passes run, its tiled ones are
-    # refused, since the scratch would round what it is given.
+    # refused, since the store would round what it is given.
     vae = StandIn()
     torch.nn.Module.to(vae, torch.float32)
-    models, tiles, path = models_of(vae), Tiles(64, 16), tmp_path / tiling.SCRATCH
+    models, tiles = models_of(vae), Tiles(64, 16)
     latent = latent_of(3, (11, 13)).float()
     assert sum(s.shape[1] for s in model.decode_stream(models, latent)) == 9
     vae.calls.clear()
     with pytest.raises(ValueError, match=r"a tiled decode takes torch\.bfloat16"):
-        list(tiling.decode_tiled(models, latent, tiles, Scratch(tmp_path, 0)))
+        list(tiling.decode_tiled(models, latent, tiles, tiling.InMemory()))
     video = video_of(9, (88, 104)).float()
     with pytest.raises(ValueError, match=r"slice 0 is .*float32, not .*bfloat16"):
-        tiling.encode_tiled(models, slices_of(models, video), 9, tiles, Scratch(tmp_path, 0))
-    assert not vae.calls and not path.exists()
+        tiling.encode_tiled(models, slices_of(models, video), 9, tiles, tiling.InMemory())
+    assert not vae.calls
 
 
 class Short(StandIn):
@@ -1262,14 +927,12 @@ class Short(StandIn):
         return super()._decode(z, memory_state)[:, :, : z.shape[2]]
 
 
-def test_decode_refuses_slices_of_another_shape(tmp_path: Path) -> None:
+def test_decode_refuses_slices_of_another_shape() -> None:
     # 2 frames where 5 are due would be added to the first 2 of the scratch's 5, without a word.
-    models, path = models_of(Short()), tmp_path / tiling.SCRATCH
+    models = models_of(Short())
     with pytest.raises(RuntimeError, match=r"slice 0 decoded as \(3, 2, 64, 64\) .*not \(3, 5, 64"):
-        list(
-            tiling.decode_tiled(models, latent_of(3, (11, 13)), Tiles(64, 16), Scratch(tmp_path, 0))
-        )
-    assert not path.exists() and vae_of(models).carry.memory is None
+        list(tiling.decode_tiled(models, latent_of(3, (11, 13)), Tiles(64, 16), tiling.InMemory()))
+    assert vae_of(models).carry.memory is None
 
 
 # Once through the real convolutions.
@@ -1291,7 +954,7 @@ def real() -> model.Models:
     return models
 
 
-def test_real_vae_tiled_is_numz(real: model.Models, tmp_path: Path) -> None:
+def test_real_vae_tiled_is_numz(real: model.Models) -> None:
     # 9 frames of 48x64 under 32-px tiles sharing 16: 6 tiles, each in two slices.
     tiles = Tiles(32, 16)
     assert len(tiling.grid((6, 8), tiles)) == 6
@@ -1301,18 +964,17 @@ def test_real_vae_tiled_is_numz(real: model.Models, tmp_path: Path) -> None:
     # numz crops its tiles from the input itself, and we from its copy in the scratch: the same
     # only if the encoder leaves its input as it was.
     assert same(video, given)
-    latent = tiling.encode_tiled(real, slices_of(real, video), 9, tiles, Scratch(tmp_path, 0))
+    latent = tiling.encode_tiled(real, slices_of(real, video), 9, tiles, tiling.InMemory())
     assert latent.shape == (3, 6, 8, 16) and latent.stride() == reference.stride()
     assert same(latent, reference)
     assert not same(model.encode_stream(real, slices_of(real, video), 9), reference)
 
     decoded = numz_decode(real, latent, tiles)
-    slices = list(tiling.decode_tiled(real, latent, tiles, Scratch(tmp_path, 0)))
+    slices = list(tiling.decode_tiled(real, latent, tiles, tiling.InMemory()))
     assert [s.shape[1] for s in slices] == model.decode_slices(real, 3) == [5, 4]
     assert [s.shape[1] for s in model.decode_stream(real, latent)] == [5, 4]
     assert decoded.shape == (3, 9, 48, 64) and same(torch.cat(slices, dim=1), decoded)
     assert bool(torch.isfinite(decoded.float()).all())
-    assert not (tmp_path / tiling.SCRATCH).exists()
 
 
 @pytest.mark.parametrize("latents", [1, 2, 3, 4])
@@ -1491,217 +1153,3 @@ def series(values: tuple[int, ...], shapes: list[tuple[int, int]]) -> str:
         f"tile {index}, {rows}x{columns}: {part}"
         for index, ((rows, columns), part) in enumerate(zip(shapes, parts, strict=True))
     )
-
-
-@pytest.mark.gpu
-def test_passes_keep_nothing_of_the_shot_on_the_device(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The four passes over the real VAE on a card, for a short shot and a long one: the encodes'
-    # latents are in system memory, in numz's layout, the decodes' slices on the device, and the
-    # device holds the same for both shots at the pass's peak and nothing after it: nothing there
-    # grows with the shot. The peak alone may not show what a pass gathers after its first slice,
-    # the largest (5 frames against 4), when that slice sets the peak; what the device holds as
-    # each of the VAE's calls starts hides nothing behind it, and is compared like with like: the
-    # same call of both shots, the long shot's later calls with an earlier one of its own
-    # (SETTLED), and a tile with an earlier one of its size. The largest of these figures isn't
-    # compared between the shots: 35 calls have more occasions for it than 3. They are, like
-    # the peak, the bytes asked of torch's allocator where it counts them, the bytes it allocated
-    # otherwise (SETTLED): one choice for the run, said in every line and message.
-    # A tiled decode hands its frames on after its last tile, when no call of the VAE starts any
-    # more: what the device holds then is read as each decoded slice is handed on (taken), and
-    # held between the shots and from slice to slice. Without it the whole scratch moved to the
-    # device there passed this test, under the pass's peak and gone before the pass's end (a
-    # review's mutation, 2026-10-12): 3 x 141 x 256 x 320 x 2 = 69,304,320 bytes for the long
-    # shot against 6,389,760 for the short one.
-    models = model.load_models(found(DITS), found(VAES), torch.device("cuda:0"))
-    device = models.device
-    height, width = PICTURE[0] // 8, PICTURE[1] // 8
-    layout = tiling.grid((height, width), FOUR)
-    assert len(layout) == 4
-    scratch = Scratch(tmp_path, 0)  # in its file, mapped
-
-    def fed(frames: int) -> Iterator[Tensor]:
-        # The shot's input, made slice by slice: one on the device at a time.
-        generator = torch.Generator().manual_seed(frames)
-        for size in model.encode_slices(models, frames):
-            yield (torch.rand((3, size, *PICTURE), generator=generator) * 2 - 1).to(device, BF16)
-
-    def held_now() -> tuple[int, int | None]:
-        torch.cuda.synchronize(device)
-        asked = torch.cuda.memory_stats(device).get("requested_bytes.all.current")
-        return torch.cuda.memory_allocated(device), asked
-
-    def taken(slices: Iterator[Tensor], handed: list[tuple[int, int | None]]) -> list[int]:
-        # handed: what the device holds as each slice is handed on, the slice among it, over
-        # what it held before the pass's first call: the allocated bytes and the requested ones.
-        frames: list[int] = []
-        before, asked_before = held_now()
-        for decoded in slices:
-            assert decoded.device == device and decoded.dtype == BF16
-            assert (decoded.shape[0], *decoded.shape[2:]) == (3, *PICTURE)
-            frames.append(decoded.shape[1])
-            there, asked = held_now()
-            apart = None if asked is None or asked_before is None else asked - asked_before
-            handed.append((there - before, apart))
-        return frames
-
-    def passes(frames: int) -> tuple[list[Use], list[list[tuple[int, int | None]]]]:
-        # The untiled encode, the tiled one, the untiled decode of the first's latent, the tiled.
-        latents = 1 + (frames - 1) // 4
-        untiled, encode = device_use(
-            models, monkeypatch, lambda: model.encode_stream(models, fed(frames), frames)
-        )
-        tiled, tiled_encode = device_use(
-            models,
-            monkeypatch,
-            lambda: tiling.encode_tiled(models, fed(frames), frames, FOUR, scratch),
-        )
-        # Channel-major memory seen through a permuted view, numz's.
-        numz = torch.empty((16, latents, height, width)).permute(1, 2, 3, 0)
-        for latent in (untiled, tiled):
-            assert latent.device.type == "cpu" and latent.dtype == BF16
-            assert latent.shape == numz.shape and latent.stride() == numz.stride()
-        assert not same(untiled, tiled)  # blended
-        handed: list[list[tuple[int, int | None]]] = [[], []]
-        given, decode = device_use(
-            models, monkeypatch, lambda: taken(model.decode_stream(models, untiled), handed[0])
-        )
-        tiled_given, tiled_decode = device_use(
-            models,
-            monkeypatch,
-            lambda: taken(tiling.decode_tiled(models, untiled, FOUR, scratch), handed[1]),
-        )
-        assert [len(held) for held in handed] == [len(given), len(tiled_given)]
-        assert given == tiled_given == model.decode_slices(models, latents) and sum(given) == frames
-        assert not (tmp_path / tiling.SCRATCH).exists()
-        # One figure per call of the VAE: a slice of the shot, and of each tile in a tiled pass.
-        uses = [encode, tiled_encode, decode, tiled_decode]
-        encodes, decodes = len(model.encode_slices(models, frames)), len(given)
-        calls = [encodes, len(layout) * encodes, decodes, len(layout) * decodes]
-        assert [len(use.allocated) for use in uses] == calls
-        return uses, handed
-
-    try:
-        # Once unmeasured: what a first pass sets up on the device for good is no shot's.
-        passes(SHORT)
-        (short, short_handed), (long, long_handed) = passes(SHORT), passes(LONG)
-    finally:
-        models.runner.dit = models.runner.vae = None
-        gc.collect()
-        torch.cuda.empty_cache()
-    names = ["encode", "tiled encode", "decode", "tiled decode"]
-    whole, tiles = [(height, width)], [(tile.rows, tile.columns) for tile in layout]
-    measured = list(zip(names, [whole, tiles, whole, tiles], short, long, strict=True))
-    # What the peaks and the calls' figures are compared on, for the whole run.
-    doubts = [use.doubt for use in (*short, *long) if use.doubt]
-    on, why = ("allocated", f" ({doubts[0]})") if doubts else ("requested", "")
-
-    def figures(use: Use) -> tuple[int, ...]:
-        return use.requested if on == "requested" else use.allocated
-
-    def top(use: Use) -> int:
-        return use.requested_peak if on == "requested" else use.peak
-
-    # Each pass's figures in a line per shot, said before anything is held of them: pytest shows
-    # the output of a test that fails, and of one that passes under -rP or -s.
-    for name, shapes, few, many in measured:
-        for frames, use in ((SHORT, few), (LONG, many)):
-            calls = len(use.allocated) // len(shapes)
-            peak = both = "not given by torch"
-            apart = ""
-            if use.requested:
-                peak, both = f"{use.requested_peak}", series(use.requested, shapes)
-                slack = [
-                    there - count for there, count in zip(use.allocated, use.requested, strict=True)
-                ]
-                apart = f"; allocated less requested: {min(slack)} to {max(slack)}"
-            print(
-                f"{name}, {frames} frames, compared on the {on} bytes{why}: requested peak"
-                f" {peak}; allocated peak {use.peak}, the two shots' {abs(many.peak - few.peak)}"
-                f" apart, and left {use.left}; held as each of the {calls}"
-                f" calls{' of a tile' if len(shapes) > 1 else ''} starts, requested: {both};"
-                f" allocated: {series(use.allocated, shapes)}{apart}"
-            )
-    for name, shapes, few, many in measured:
-        said = f"{name}: {on} peaks {top(few)} and {top(many)}; allocated "
-        if on == "requested":
-            said += f"peaks {few.peak} and {many.peak}, "
-        said += f"left {few.left} and {many.left}"
-        if on == "requested":
-            # The peak is this pass's: no less than what was requested as any of its calls
-            # started, and reset before it (Use.doubt).
-            for use in (few, many):
-                most = max(use.requested)
-                under = f"a peak of {use.requested_peak}, {most} as a call started: {said}"
-                assert use.requested_peak >= most, under
-        # The peaks of the two shots, on the requested bytes where they are taken. The allocated
-        # peaks aren't compared then: the allocator hands out blocks larger than what is asked,
-        # by up to 9.8 MB in the tiled passes on the card, where the tiled decode's allocated
-        # peaks were 1,671,168 bytes apart and every requested figure the same. The planner's
-        # figures, measured at real sizes, are GiB, and were equal to the fourth decimal.
-        assert top(few) > TOLERANCE, said  # measured: a pass takes megabytes
-        assert abs(few.left) <= TOLERANCE and abs(many.left) <= TOLERANCE, said
-        assert abs(top(many) - top(few)) <= TOLERANCE, said
-        brief, long_run = by_tile(figures(few), len(shapes)), by_tile(figures(many), len(shapes))
-        first: dict[tuple[int, int], int] = {}
-        for index, shape in enumerate(shapes):
-            starts, later = brief[index], long_run[index]
-            said = (
-                f"{name}, tile {index} of {len(shapes)}, {shape[0]}x{shape[1]} latents, {on}"
-                f" bytes held as each call starts: over {SHORT} frames {runs(starts)}; over"
-                f" {LONG} {runs(later)}"
-            )
-            assert 0 < len(starts) <= len(later) and SETTLED < len(later) - 1, said
-            # 1. The same call of both shots, the convolutions' memory and the pass's own slices
-            # as far along in both: what a pass puts on the device of the whole shot is in every
-            # one, 1,310,720 bytes more for the long shot's 32 latents more.
-            for call, start in enumerate(starts):
-                assert abs(later[call] - start) <= TOLERANCE, f"call {call} of both shots: {said}"
-            # 2. Nothing grows along the long shot: a buffer gathering it on the device takes
-            # 40,960 bytes more a call or more, a call being one latent after the first:
-            # 286,720 by the 7th call after the settled one, over the tolerance of 262,144, and
-            # 26 x 40,960 = 1,064,960 by the last, the 34th, 4 times it; numz's moments twice
-            # that.
-            for call in range(SETTLED + 1, len(later)):
-                against = f"call {call} against call {SETTLED}: {said}"
-                assert abs(later[call] - later[SETTLED]) <= TOLERANCE, against
-            # 3. Nothing gathers from tile to tile: a tile is measured against the first of its
-            # size, whose convolutions keep as much (tiles 1 and 3 against 0 and 2 here, the
-            # grid's lower row being 16 latents high, not 24). The smallest thing a tile could
-            # leave of the long shot, its 36 latents' means or the decoder's input for them,
-            # is 36 x 16 x 16 x 24 x 2 = 442,368 bytes, 1.7 times the tolerance.
-            earlier = first.setdefault(shape, index)
-            if earlier != index:
-                against = (
-                    f"call {SETTLED} against tile {earlier}'s, {runs(long_run[earlier])}: {said}"
-                )
-                assert abs(later[SETTLED] - long_run[earlier][SETTLED]) <= TOLERANCE, against
-        # The last tile had an earlier one of its size to be measured against.
-        assert len(shapes) == 1 or first[shapes[-1]] < len(shapes) - 1, shapes
-    # What the device holds as each decoded slice is handed on, on the same bytes as the rest.
-    column = 1 if on == "requested" else 0
-    decodes = zip(("decode", "tiled decode"), short_handed, long_handed, strict=True)
-    for name, few_held, many_held in decodes:
-        brief = tuple(cast(int, held[column]) for held in few_held)
-        along = tuple(cast(int, held[column]) for held in many_held)
-        said = (
-            f"{name}, {on} bytes held as each slice is handed on: over {SHORT} frames"
-            f" {runs(brief)}; over {LONG} {runs(along)}"
-        )
-        print(said)
-        assert len(brief) > 2 and len(along) > SETTLED + 1, said
-        # The slice handed on is there, megabytes of it: 5 frames, then 4.
-        assert min(brief) > TOLERANCE and min(along) > TOLERANCE, said
-        # 1. The same slice of both shots: the whole shot's frames on the device there are
-        # 62,914,560 bytes more for the long shot's 128 frames more.
-        for index, held in enumerate(brief):
-            assert abs(along[index] - held) <= TOLERANCE, f"slice {index} of both shots: {said}"
-        # 2. Nothing gathers as the slices are handed on: a slice kept there is 1,966,080 bytes
-        # more at the next one, 7 times the tolerance. The streamed decode against a settled
-        # slice, as its calls are; the tiled one, every tile decoded by then, against its
-        # second, the first of 4 frames.
-        against = SETTLED if name == "decode" else 1
-        for index in range(against + 1, len(along)):
-            gathered = f"slice {index} against slice {against}: {said}"
-            assert abs(along[index] - along[against]) <= TOLERANCE, gathered

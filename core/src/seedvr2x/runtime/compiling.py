@@ -17,7 +17,7 @@ causal convolution left out of the graph. numz means that exclusion and never ge
 without it the compiled VAE took twice its memory. Here the convolutions' forward is wrapped by
 torch.compiler.disable, which dynamo does read, and they run as plain code between the compiled
 pieces: each pass 0.79 to 0.95 of plain code's time, its peak 1.04 to 1.10 times
-(planner.COMPILE_PEAK).
+(peaks.COMPILE_PEAK).
 
 The model code is not edited: the vendored VAE is wrapped from outside, as the study did."""
 
@@ -32,13 +32,12 @@ from typing import Any
 
 import torch
 
-from seedvr2x.clock import spent
+from seedvr2x.clock import spent, spoken
+from seedvr2x.errors import Refusal
+from seedvr2x.passes import Compilation, Shapes
 from seedvr2x.runtime import blockswap, model
-from seedvr2x.runtime.job import JobError
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
-from seedvr2x.runtime.plan import Compilation, Shapes
 from seedvr2x.runtime.tilegrid import SCALE
-from seedvr2x.runtime.timing import spoken
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 
 logger = logging.getLogger(__name__)
@@ -66,7 +65,7 @@ RECOMPILE_LIMIT = 1024
 ACCUMULATED_RECOMPILE_LIMIT = 8192
 
 
-class CompileError(JobError):
+class CompileError(Refusal):
     """The VAE did not compile: a compiler torch needs missing, an error of inductor's or
     Triton's. The job is refused before the DiT loads, nothing run, and the message says so and
     names the way out, the same command without --compile. PROVISIONAL (impl-v010, 2026-10-29:

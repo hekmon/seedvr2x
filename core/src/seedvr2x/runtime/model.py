@@ -28,10 +28,10 @@ from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 from tqdm import tqdm
 
+from seedvr2x.frames import BLACK, padding
+from seedvr2x.passes import Compilation, ModelPlan, Phase
 from seedvr2x.runtime import blockswap, memory, weights
 from seedvr2x.runtime.blockswap import Part, Placement
-from seedvr2x.runtime.job import BLACK, padding
-from seedvr2x.runtime.plan import Compilation, Phase, Plan
 from seedvr2x.runtime.pull import Hashes
 from seedvr2x.runtime.weights import SLOTS
 from seedvr2x.vendor.common.config import create_object, load_config
@@ -87,7 +87,7 @@ class Models:
     text_neg: Tensor  # (64, 5120) bfloat16
     attention: str  # flash_attn_2 or sdpa
     device: torch.device
-    plan: Plan | None = None  # what the weights' places follow; None: all on the device
+    model_plan: ModelPlan | None = None  # what the weights' places follow; None: all on the device
     placement: Placement | None = None  # the DiT's, when the plan swaps blocks or sends it away
     vae: Part | None = None  # the VAE's weights, when the plan sends them away
     phase: Phase | None = None  # the phase entered last; None after the load, the parts away
@@ -107,7 +107,7 @@ class Models:
         # place), other programs filling the card stop the run here, before the unit passes it
         # (runtime/memory.py).
         memory.check(self.device)
-        if self.plan is None or phase == self.phase:
+        if self.model_plan is None or phase == self.phase:
             return
         # Unknown until every move is done: an enter that raises half-way, the VAE gone and the
         # DiT not back, must not pass for the phase it left.
@@ -121,9 +121,9 @@ class Models:
             backend.trim()
         if self.placement is not None:
             resident = {
-                "encode": self.plan.resident_encode,
+                "encode": self.model_plan.resident_encode,
                 "dit": None,
-                "decode": self.plan.resident_decode,
+                "decode": self.model_plan.resident_decode,
             }[phase]
             self.placement.enter(phase, resident)
         if self.vae is not None and not away and self.vae.device is None:
@@ -167,7 +167,7 @@ def load_models(
     vae_file: Path,
     device: torch.device,
     hashes: Hashes | None = None,
-    plan: Plan | None = None,
+    model_plan: ModelPlan | None = None,
     compilation: Compilation | None = None,
 ) -> Models:
     """Build and load the DiT in the file at dit_file and the VAE in the file at vae_file, as
@@ -221,7 +221,7 @@ def load_models(
     with torch.device("meta"):
         vae = create_object(vae_model_config)
     # The VAE's 0.47 GiB leave for the DiT's phase when the plan says so: one part.
-    vae_leaves = plan is not None and not plan.vae_in_dit
+    vae_leaves = model_plan is not None and not model_plan.vae_in_dit
     vae_parts = _load_weights(
         vae, vae_file, device, COMPUTE_DTYPE, (lambda key: VAE_PART) if vae_leaves else None
     )
@@ -239,9 +239,9 @@ def load_models(
     # for it, the DiT's place in them filled below.
     text_pos = torch.load(VENDOR / "pos_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
     text_neg = torch.load(VENDOR / "neg_emb.pt", weights_only=True).to(device, COMPUTE_DTYPE)
-    models = Models(runner, text_pos, text_neg, attention_backend(), device, plan)
+    models = Models(runner, text_pos, text_neg, attention_backend(), device, model_plan)
     models.vae = vae_parts.get(VAE_PART)
-    if plan is not None and plan.compile_vae:
+    if model_plan is not None and model_plan.compile_vae:
         if compilation is None:
             raise ValueError("a plan with compile_vae, and nothing to compile the VAE with")
         # The VAE compiled before the DiT is read: it alone is on the card, and torch's compile
@@ -255,7 +255,7 @@ def load_models(
     # gradient checkpointing stub (nadit.py:30-31).
     with torch.device("meta"):
         dit = create_object(runner.config.dit.model)
-    dit_parts = _load_weights(dit, dit_file, device, None, _dit_parts(plan, len(dit.blocks)))
+    dit_parts = _load_weights(dit, dit_file, device, None, _dit_parts(model_plan, len(dit.blocks)))
     unchanged(dit_file)
     dit.requires_grad_(False).eval()
     attention = attention_backend()
@@ -276,8 +276,8 @@ def load_models(
     runner.config.diffusion.timesteps.sampling.steps = 1
     runner.configure_diffusion(device=device, dtype=COMPUTE_DTYPE)
 
-    if plan is not None and (dit_parts or plan.swapped):
-        models.placement = Placement(dit, device, plan.swapped, parts=dit_parts)
+    if model_plan is not None and (dit_parts or model_plan.swapped):
+        models.placement = Placement(dit, device, model_plan.swapped, parts=dit_parts)
     _say_pinned(models, [*dit_parts, *vae_parts])
     return models
 
@@ -285,14 +285,14 @@ def load_models(
 def _say_pinned(models: Models, parts: Iterable[str]) -> None:
     """Log the host memory a plan's load has pinned, for the parts named, and the blocks it
     swaps; and when it swaps one or two, that they free nothing."""
-    plan, placement = models.plan, models.placement
+    model_plan, placement = models.model_plan, models.placement
     pinned = (placement.host_bytes if placement is not None else 0) + (
         models.vae.host.bytes.numel() if models.vae is not None else 0
     )
-    if plan is None or not pinned:
+    if model_plan is None or not pinned:
         return
     swapped = {0: "none of the DiT's blocks swapped", 1: "the DiT's last block swapped"}.get(
-        plan.swapped, f"the DiT's last {plan.swapped} blocks swapped"
+        model_plan.swapped, f"the DiT's last {model_plan.swapped} blocks swapped"
     )
     logger.info(
         "%.2f GiB of host memory pinned for the weights that leave the GPU: %s; %s",
@@ -300,7 +300,7 @@ def _say_pinned(models: Models, parts: Iterable[str]) -> None:
         blockswap.listing(parts),
         swapped,
     )
-    if placement is not None and 0 < plan.swapped <= SLOTS:
+    if placement is not None and 0 < model_plan.swapped <= SLOTS:
         # Taken as given, a pin being taken exactly (DESIGN.md, Memory planner): said, since it
         # buys nothing. The planner never chooses it.
         logger.warning(
@@ -313,19 +313,19 @@ def _say_pinned(models: Models, parts: Iterable[str]) -> None:
         )
 
 
-def _dit_parts(plan: Plan | None, blocks: int) -> Callable[[str], str | None] | None:
+def _dit_parts(model_plan: ModelPlan | None, blocks: int) -> Callable[[str], str | None] | None:
     """Which of the DiT's parameters a plan has away from the device in some phase, each by
     its part (blockswap.dit_parts); None when all stay: the blocks it swaps, the last ones; the
     blocks a VAE phase doesn't keep; and the parameters outside the blocks when one keeps
     nothing."""
-    if plan is None:
+    if model_plan is None:
         return None
-    fixed = blocks - plan.swapped
-    residents = (plan.resident_encode, plan.resident_decode)
-    if not 0 <= plan.swapped <= blocks or any(
+    fixed = blocks - model_plan.swapped
+    residents = (model_plan.resident_encode, model_plan.resident_decode)
+    if not 0 <= model_plan.swapped <= blocks or any(
         r is not None and not 0 <= r <= fixed for r in residents
     ):
-        raise ValueError(f"a plan for another DiT than this one of {blocks} blocks: {plan}")
+        raise ValueError(f"a plan for another DiT than this one of {blocks} blocks: {model_plan}")
     stay = min(fixed if resident is None else resident for resident in residents)
     other = 0 in residents
     return blockswap.dit_parts(blocks, stay, other) if stay < blocks or other else None
@@ -384,11 +384,11 @@ def input_transform(
     """numz's input preparation (src/core/generation_utils.py:72-84) of frames (T, C, H, W), but
     for its padding: resized to target, (height, width) (torchvision's bicubic, antialias on),
     values clamped to [0, 1], padded at the bottom and right (pad), normalised to [-1, 1], and
-    moved to (C, T, H', W'), (H', W') = job.padded_size(target).
+    moved to (C, T, H', W'), (H', W') = frames.padded_size(target).
 
     The resize is NaResize's (side_resize.py: TVF.resize, bicubic, antialias on) to an explicit
-    size, the display aspect's (job.target_size). For square pixels it is the size torchvision
-    computes from NaResize's int, so the same call, bit for bit (tests/test_job.py).
+    size, the display aspect's (frames.target_size). For square pixels it is the size torchvision
+    computes from NaResize's int, so the same call, bit for bit (tests/test_frames.py).
 
     numz_padding is for tests only (cli.NUMZ_PADDING): numz's own padding, DivisiblePad((16, 16)),
     zeros up to multiples of 16, in which milestone 1's regression holds the output to numz's."""
@@ -406,11 +406,12 @@ def input_transform(
 
 def pad(frames: Tensor) -> Tensor:
     """frames (T, C, H, W) padded for the model (DESIGN.md, Pipeline step 0): at the bottom, the
-    rows job.padding gives, reflected from the picture (torch's reflect, the edge row not repeated:
-    row H + k is row H - 2 - k), then job.BLACK rows of zeros, black once normalised; at the right,
-    columns the same way when any are reflected. As research/scripts/numerics_patch.py's Pad pads
-    for NUM_PAD=reflect>=8+black+16, the variant measured, bit for bit: the reflection in one call,
-    then the zeros in another (research/docs/numerics.md, reflect+black+16)."""
+    rows frames.padding gives, reflected from the picture (torch's reflect, the edge row not
+    repeated: row H + k is row H - 2 - k), then frames.BLACK rows of zeros, black once normalised;
+    at the right, columns the same way when any are reflected. As
+    research/scripts/numerics_patch.py's Pad pads for NUM_PAD=reflect>=8+black+16, the variant
+    measured, bit for bit: the reflection in one call, then the zeros in another
+    (research/docs/numerics.md, reflect+black+16)."""
     rows, columns = padding((frames.shape[-2], frames.shape[-1]))
     reflected = torch.nn.functional.pad(frames, (0, columns, 0, rows), mode="reflect")
     black = (0, BLACK if columns else 0, 0, BLACK)

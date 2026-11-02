@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from seedvr2x import clock
-from seedvr2x.clock import MIN_SPAN, Pace
+from seedvr2x.clock import MIN_SPAN, Pace, spoken, taking
 from seedvr2x.media import assembly
 from seedvr2x.runtime import run, timing
 from seedvr2x.runtime import stop as stop_module
@@ -568,3 +568,30 @@ def test_a_wall_step_of_59_s_inside_a_60_s_span_is_not_the_spans_seconds(
     sampled(readers, pace, 25.0)
     assert pace.spent(60.0) == 60.0
     assert "outside 0.8 to 1.25 of it" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("seconds", "said"),
+    [
+        (0.4, "0 s"),
+        (42.4, "42 s"),
+        (59.4, "59 s"),
+        (59.6, "1 min 0 s"),
+        (725, "12 min 5 s"),
+        (3599.4, "59 min 59 s"),
+        (3599.6, "1 h 0 min"),
+        (3 * 3600 + 7 * 60 + 20, "3 h 7 min"),
+        (86_399, "1 d 0 h"),
+        (2 * 86_400 + 4 * 3600 + 100, "2 d 4 h"),
+    ],
+)
+def test_spoken(seconds: float, said: str) -> None:
+    assert spoken(seconds) == said
+
+
+def test_a_time_taken_is_about_or_under_a_second() -> None:
+    # "about 0 s" said nothing (2026-10-29's list from a real job): under a second, said so.
+    assert taking(0.4) == "under a second"
+    assert taking(0.99) == "under a second"
+    assert taking(1.0) == "about 1 s"
+    assert taking(84.0) == "about 1 min 24 s"

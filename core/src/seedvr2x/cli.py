@@ -22,7 +22,7 @@ from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from seedvr2x.clock import sample, spent, wall
+from seedvr2x.clock import sample, spent, spoken, taking, wall
 from seedvr2x.media.conversion import MATRICES
 from seedvr2x.media.ffmpeg import MediaError
 from seedvr2x.media.writer import FORMATS
@@ -39,13 +39,14 @@ if TYPE_CHECKING:
     from seedvr2x.media.index import FrameIndex
     from seedvr2x.media.source import Declared, FirstPass, Source
     from seedvr2x.media.writer import Writer
+    from seedvr2x.passes import Compilation
     from seedvr2x.runtime.calibration import Calibrated
     from seedvr2x.runtime.cuts import Cut
     from seedvr2x.runtime.disk import Disk
     from seedvr2x.runtime.job import JobError, OutputSegment, Shot
     from seedvr2x.runtime.manifest import Manifest
     from seedvr2x.runtime.model import Models
-    from seedvr2x.runtime.plan import Compilation, Plan
+    from seedvr2x.runtime.plan import Plan
     from seedvr2x.runtime.planner import Pins, PlanError
     from seedvr2x.runtime.pull import ModelFile, ModelFiles
     from seedvr2x.runtime.timing import Clock, Unit
@@ -548,16 +549,16 @@ class _Checked:
 
 
 def _verify(output: Path) -> int:
+    from seedvr2x.errors import Refusal
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.checksums import check_frames, read_checksums
     from seedvr2x.media.ffmpeg import MediaError, argument, input_args
     from seedvr2x.media.writer import count_frames
-    from seedvr2x.runtime.job import JobError
 
     try:
         ffmpeg.found()
         checked = _checked(output)
-    except (MediaError, JobError) as error:
+    except (MediaError, Refusal) as error:
         logger.error("%s", error)
         return 1
     wrong = unfinished = 0
@@ -719,6 +720,8 @@ def _png_listing(directory: Path, count: int) -> list[str]:
 
 
 def _run(args: argparse.Namespace) -> int:
+    from seedvr2x.errors import Refusal
+    from seedvr2x.frames import check_target, output_size, target_size
     from seedvr2x.media import ffmpeg
     from seedvr2x.media.ffmpeg import MediaError
     from seedvr2x.media.fingerprint import fingerprint
@@ -730,12 +733,9 @@ def _run(args: argparse.Namespace) -> int:
         JobError,
         Shot,
         check_seed,
-        check_target,
-        output_size,
         read_cuts,
         shot_runs,
         shots_from_cuts,
-        target_size,
     )
     from seedvr2x.runtime.manifest import (
         ASSEMBLED,
@@ -808,7 +808,7 @@ def _run(args: argparse.Namespace) -> int:
         logger.debug("ffmpeg's conversions' fingerprint %s", conversions[:16])
         declared = declare(args.input, args.input_matrix, args.input_sar, args.frame_rate)
         # The size the frames are resized to, from what the source declares; refused, before the
-        # first pass, when too small to pad (job.check_target).
+        # first pass, when too small to pad (frames.check_target).
         stream = declared.stream
         target = target_size(stream.width, stream.height, declared.sample_aspect, args.resolution)
         check_target(target, args.resolution)
@@ -1262,7 +1262,7 @@ def _run(args: argparse.Namespace) -> int:
                 recorded_as(plan_record, plan.window).write()
         if prior is None or not complete(prior.recorded):
             _room_on_disk(args, directory, shots, target, prior, plan, numz_padding=numz_padding)
-    except (MediaError, JobError) as error:
+    except (MediaError, Refusal) as error:
         listed = _listed_anyway(args, listing)
         logger.error("%s%s%s", error, listed, _first_kept(kept_first))
         return 1
@@ -1302,7 +1302,7 @@ def _run(args: argparse.Namespace) -> int:
             replanned = _resume(
                 record, prior, final is not None, reshaped, args.plan is not None, remade
             )
-        except JobError as error:
+        except Refusal as error:
             logger.error("%s%s", error, _listed_anyway(args, listing))
             return 1
         remaining = [index for index, done in enumerate(record.finished) if not done]
@@ -1338,8 +1338,8 @@ def _run(args: argparse.Namespace) -> int:
     # its cache in the job's directory (manifest.COMPILE_CACHE), compiled as the models load.
     compilation = None
     if plan.compile_vae:
+        from seedvr2x.passes import Compilation
         from seedvr2x.runtime.manifest import COMPILE_CACHE
-        from seedvr2x.runtime.plan import Compilation
 
         shapes = planner.compile_shapes(
             plan, target, shots, QUALITY[args.quality], numz_padding=numz_padding
@@ -1555,7 +1555,7 @@ def _run(args: argparse.Namespace) -> int:
                 # A segment command failing among them (--segment-cmd): its segment unfinished,
                 # its shots' windows kept, which a resume decodes and writes again. And a tiled
                 # pass's scratch that can't be made, its disk full: the user's to fix
-                # (tiling.ScratchError). Derived data, its file gone; the units made before it
+                # (scratch.ScratchError). Derived data, its file gone; the units made before it
                 # are kept, which the message says as a stop's does.
                 logger.error("%s; stopped: %s", error, _kept(record, len(segments)))
                 return _Outcome(1)
@@ -1671,8 +1671,6 @@ def _date(moment: datetime.datetime) -> str:
 def _estimated(cost: float | None) -> str:
     """A unit's estimate as a stop by the clock says it: `cost` is Deadline's, already in the wall
     clock's seconds."""
-    from seedvr2x.runtime.timing import spoken
-
     return "nothing estimates it" if cost is None else f"its estimate {spoken(cost)}"
 
 
@@ -1704,7 +1702,7 @@ def _say_assembly_left(record: "Manifest", final: Path, until: datetime.datetime
     """--plan's time for a one-file output whose segments are all made: its assembly alone, at
     the rate its disk writes at, and with --until whether it ends by then (DESIGN.md, Pause and
     resume, Stopping)."""
-    from seedvr2x.runtime.timing import Clock, spoken
+    from seedvr2x.runtime.timing import Clock
 
     rate = _disk_rate(final.parent)
     if rate is None:
@@ -1745,7 +1743,7 @@ def _say_assembly_basis(record: "Manifest", rate: float) -> None:
     """What the assembly's time is counted from, at debug (under --verbose): the rate its disk
     writes at and the bytes of its masters, those finished as recorded, the others at most at
     their raw size until one is written (_masters)."""
-    from seedvr2x.media.files import size_said
+    from seedvr2x.files import size_said
 
     logger.debug(
         "time: the assembly counted at the rate its disk writes at, %s/s, its masters counted at"
@@ -1774,7 +1772,7 @@ def _say_until(
     (timing.would_end), and if not the unit it would stop before (DESIGN.md, Pause and resume,
     Stopping: "`--plan` given `--until` says whether the job ends by then and, if not, the unit
     it would stop before")."""
-    from seedvr2x.runtime.timing import spoken, would_end
+    from seedvr2x.runtime.timing import would_end
 
     ending = would_end(clock, units, start, until, last)
     if ending.before is None:
@@ -1989,7 +1987,7 @@ def _load(
             model_files.vae.path,
             device,
             model_files.hashes,
-            plan,
+            plan.model_plan,
             compilation,
         )
     except (ModelError, HostMemoryError, CompileError) as error:
@@ -2129,7 +2127,7 @@ def _say_times(
     process, before the DiT loads: said as the part of it that it was, never added to it, and the
     run that follows pays it again in its own load (a resume pays it again at its start,
     DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0")."""
-    from seedvr2x.runtime.timing import job_times, spoken
+    from seedvr2x.runtime.timing import job_times
 
     clock = calibrated.clock
     times = job_times(clock, units)
@@ -2598,8 +2596,7 @@ def _checking_said(paths: Sequence[Path], rate: float | None) -> str:
     (`rate`, bytes per second; the assembly's estimate counts this read, timing.assembly_seconds),
     the bytes alone where it isn't. Said because that read is silent otherwise, 30 to 70 minutes
     on the masters of a two-hour film on a slow disk (review of the assembly, 2026-10-28)."""
-    from seedvr2x.media.files import size_said
-    from seedvr2x.runtime.timing import taking
+    from seedvr2x.files import size_said
 
     total = 0
     for path in paths:
@@ -3199,8 +3196,10 @@ def _early_memory(
     and no more): the host's memory unchecked here, the attention by find_spec."""
     from importlib.util import find_spec
 
+    from seedvr2x import peaks
+    from seedvr2x.errors import Refusal
     from seedvr2x.runtime import memory, planner
-    from seedvr2x.runtime.job import JobError, Shot
+    from seedvr2x.runtime.job import Shot
     from seedvr2x.runtime.plan import Plan
 
     state = memory.card_state()
@@ -3213,7 +3212,7 @@ def _early_memory(
         known = Plan.recorded(recorded.get("plan"))
         shots = [Shot(int(shot["start"]), int(shot["end"])) for shot in recorded["shots"]]
         planner.check_recorded(known, shots, target, numz_padding=numz_padding)
-        attention = planner.FLASH_ATTN_2 if find_spec("flash_attn") else planner.SDPA
+        attention = peaks.FLASH_ATTN_2 if find_spec("flash_attn") else peaks.SDPA
         planner.plan(
             memory.early(*state),
             target,
@@ -3268,7 +3267,7 @@ def _early_memory(
             short.short,
             *freeing,
         )
-    except (JobError, KeyError, TypeError, ValueError) as error:
+    except (Refusal, KeyError, TypeError, ValueError) as error:
         logger.debug("the recorded plan isn't judged before the checks: %s", error)
 
 
@@ -3362,7 +3361,7 @@ def _attention() -> str:
     """The attention backend this run's DiT takes: FlashAttention 2 where it imports, else
     PyTorch's SDPA, as the loader decides it for every attention module, and warns of
     (model.attention_backend, model.load_models). The plan's DiT peak is predicted by that
-    backend's fit (planner.DIT_ATTENTION): today's, never a recorded environment's, which a
+    backend's fit (peaks.DIT_ATTENTION): today's, never a recorded environment's, which a
     resume in another one would plan by."""
     from seedvr2x.runtime import model
 
@@ -3380,8 +3379,9 @@ def _host_available(
     read: the plan then can't check the system memory it takes, nor size the allowance from the
     host's, a tiled shot's scratch allowed planner.ALLOWANCE_UNKNOWN_HOST at most. Said as a
     warning, once a run, which reads it once (_run)."""
+    from seedvr2x.peaks import GIB
     from seedvr2x.runtime import blockswap
-    from seedvr2x.runtime.planner import ALLOWANCE_UNKNOWN_HOST, GIB
+    from seedvr2x.runtime.planner import ALLOWANCE_UNKNOWN_HOST
 
     available = blockswap.available(proc, cgroups)
     if available is None:
@@ -3409,6 +3409,7 @@ def _recorded_plan(
     (JobError), naming the manifest, when its record isn't a plan's, or is one the planner makes
     for no job of these shots at this target: a cap they can't be laid out by, or a tile that
     covers the whole padded frame (planner.check_recorded)."""
+    from seedvr2x.errors import Refusal
     from seedvr2x.runtime import planner
     from seedvr2x.runtime.job import JobError
     from seedvr2x.runtime.plan import Plan
@@ -3416,7 +3417,7 @@ def _recorded_plan(
     try:
         plan = Plan.recorded(recorded.get("plan"))
         planner.check_recorded(plan, shots, target, numz_padding=numz_padding)
-    except JobError as error:
+    except Refusal as error:
         raise JobError(f"{path}: {error}") from None
     return plan
 
@@ -3872,10 +3873,9 @@ def _long_read(path: Path) -> tuple[str, str]:
     the file read at the disk's speed (assembly.timed_read), a floor where a cache answers.
     PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md leaves the estimate's way open): the same
     sample the rehearsal's line uses."""
+    from seedvr2x.files import size_said
     from seedvr2x.media import assembly
-    from seedvr2x.media.files import size_said
     from seedvr2x.runtime.pull import HASH_SAID_FROM
-    from seedvr2x.runtime.timing import taking
 
     size = size_said(path.stat().st_size)
     try:
@@ -3933,7 +3933,7 @@ def _content(path: Path, vouching: dict[str, Any] | None = None) -> dict[str, ob
     PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md says "by size and modification time"): the
     path must be the recorded one, so that another file at another path, a copy made with its
     time kept (cp -p) among them, never passes unread."""
-    from seedvr2x.media.files import sha256
+    from seedvr2x.files import sha256
 
     if vouching is not None:
         status = path.stat()
@@ -4237,10 +4237,10 @@ def _declared_job(
     width) before the output's rounding) and rate, against its record; another job when they
     differ (JobError, _another_job), the record untouched. Its frame count is the record's, the
     source's frames in places, no index being read (_finished_already, _finished_file)."""
+    from seedvr2x.frames import output_size
     from seedvr2x.media.scan import Idet
     from seedvr2x.media.source import Source
     from seedvr2x.runtime import resume
-    from seedvr2x.runtime.job import output_size
 
     entry: dict[str, Any] = recorded["input"]
     # The source as declared now, its frames the record's count, in places, and no index: nothing
@@ -5076,9 +5076,10 @@ def _room_on_disk(
     which passes are tiled and the allowance, before the models load; the job's first pass is
     kept by then (_first_kept). The shots of the segments a resumed job has finished write
     nothing again. The allocations in a shot's units stay the last guard (run.Kept,
-    tiling.Scratch). What a kill left in the shots' unit directories, kept frames or a scratch,
+    scratch.Scratch). What a kill left in the shots' unit directories, kept frames or a scratch,
     which the resume discards after this check (resume.leftovers), counts as free."""
-    from seedvr2x.runtime.job import JobError, kept_bytes, output_size
+    from seedvr2x.frames import output_size
+    from seedvr2x.runtime.job import JobError, kept_bytes
     from seedvr2x.runtime.manifest import STATE
     from seedvr2x.runtime.planner import scratch_file
     from seedvr2x.runtime.tilegrid import SCRATCH
@@ -5165,8 +5166,8 @@ def _disk(
     """The disk of the job in `directory` (disk.reading): its output segments, the bytes of those a
     resumed job has finished from its record, the output's size, a segment command's files or
     not, a one-file output's assembly or not."""
+    from seedvr2x.frames import output_size
     from seedvr2x.runtime.disk import reading
-    from seedvr2x.runtime.job import output_size
 
     taken: dict[tuple[int, int], int | None] = {}
     if prior is not None:

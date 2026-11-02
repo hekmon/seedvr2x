@@ -19,14 +19,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
-from seedvr2x.runtime.job import JobError
+from seedvr2x.errors import Refusal
 
 logger = logging.getLogger(__name__)
 
 Role = Literal["dit", "vae", "detector"]
 
 
-class ModelError(JobError):
+class ModelError(Refusal):
     """A model file seedvr2x refuses: the message says what the file is, or what is wrong with
     it."""
 

@@ -2097,13 +2097,13 @@ def test_the_card_is_checked_before_every_unit(monkeypatch: pytest.MonkeyPatch) 
     # anything moves: a refusal there leaves the phase as it was.
     from types import SimpleNamespace
 
+    from seedvr2x.passes import ModelPlan
     from seedvr2x.runtime import model
-    from seedvr2x.runtime.plan import Plan
 
     checked: list[str] = []
     monkeypatch.setattr(memory, "check", checked.append)
     runner = SimpleNamespace(dit=None, vae=None)
-    models = model.Models(runner, torch.empty(0), torch.empty(0), "none", "the card", Plan(None))  # pyright: ignore[reportArgumentType]
+    models = model.Models(runner, torch.empty(0), torch.empty(0), "none", "the card", ModelPlan())  # pyright: ignore[reportArgumentType]
     models.enter("encode")
     models.enter("encode")
     assert checked == ["the card"] * 2 and models.phase == "encode"

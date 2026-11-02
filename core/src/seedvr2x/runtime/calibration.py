@@ -21,16 +21,19 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from seedvr2x import peaks
 from seedvr2x.clock import spent
+from seedvr2x.frames import padded_size
 from seedvr2x.media.checksums import write_checksums
 from seedvr2x.media.decode import to_float32
 from seedvr2x.media.writer import FFV1Writer, Tags, Writer
-from seedvr2x.runtime import compiling, planner, run
-from seedvr2x.runtime.job import padded_size
+from seedvr2x.passes import Phase
+from seedvr2x.runtime import compiling, run
 from seedvr2x.runtime.model import Models, synchronize
-from seedvr2x.runtime.plan import Phase, Plan
-from seedvr2x.runtime.shot import Correction, draw, finite
+from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.shot import Correction, finite
 from seedvr2x.runtime.timing import ENTER, Clock, Kind, Model, tokens
+from seedvr2x.sampling import draw
 
 logger = logging.getLogger(__name__)
 
@@ -152,9 +155,9 @@ def calibrate(
     apart (DESIGN.md, Memory planner, Time estimates, decided on 2026-10-21): each change into the
     DiT's phase or the decode's (Models.enter), a constant per phase, the median of those seen,
     three into the DiT's and two into the decode's, one made alone after the steps; the noise's
-    draw (shot.draw), a rate per token, timed alone on the longest window's latent, and taken out of
-    the windows' times. The models are left in the decode's phase. numz_padding, numz_draw and
-    numz_tail are for tests only, as run.run_job takes them."""
+    draw (sampling.draw), a rate per token, timed alone on the longest window's latent, and taken
+    out of the windows' times. The models are left in the decode's phase. numz_padding, numz_draw
+    and numz_tail are for tests only, as run.run_job takes them."""
     started = time.monotonic()
     height, width = target if source is None else source
     if frames is None:
@@ -168,14 +171,14 @@ def calibrate(
 
     def fits(count: int) -> bool:
         """Whether a tiled encode's scratch of `count` frames stays in the plan's system memory,
-        as the run's does up to its allowance (tiling.Scratch); an untiled encode keeps nothing
+        as the run's does up to its allowance (scratch.Scratch); an untiled encode keeps nothing
         of its frames."""
         if plan.encode_tiles is None:
             return True
         padded = padded_size(target)
         if numz_padding:
             padded = (-(-target[0] // 16) * 16, -(-target[1] // 16) * 16)
-        return planner.scratch(padded, count) <= plan.scratch_allowance
+        return peaks.scratch(padded, count) <= plan.scratch_allowance
 
     with tempfile.TemporaryDirectory(prefix=".seedvr2x-calibration-", dir=directory) as made:
         scratch = Path(made)
@@ -317,7 +320,7 @@ def calibrate(
             warmed_window = window(repeated[:longest].contiguous())
             # The noise's draw, timed alone on the longest window's latent: a run's first window
             # draws its whole run's (shot.sample_windows), about 1 us a token on a desktop's CPU
-            # (shot._drawn's figure), which a window of the calibration pays for its own tokens.
+            # (sampling.drawn's figure), which a window of the calibration pays for its own tokens.
             begun = time.monotonic()
             draw(models, repeated[:longest].contiguous(), 0, numz_draw)
             drawing = (time.monotonic() - begun) / (longest * per_latent)
@@ -460,8 +463,8 @@ def _fit(measures: Sequence[tuple[int, float]], kind: str = "a kind") -> Model:
 
 def _second_length(per_frame: float, most: int | None, fits: Callable[[int], bool]) -> int:
     """The encode's second length, in frames (calibrate): about SECONDS at per_frame, its first
-    length's seconds a frame, on the VAE's grid of 4n + 1 frames (shot.padded_length); no more than
-    `most`, the job's longest run, nor than what `fits`, a tiled encode's scratch in the plan's
+    length's seconds a frame, on the VAE's grid of 4n + 1 frames (frames.padded_length); no more
+    than `most`, the job's longest run, nor than what `fits`, a tiled encode's scratch in the plan's
     memory; never fewer than FRAMES (decided on 2026-10-22: at 4K, an encode's 13 frames take
     more than SECONDS)."""
     wanted = FRAMES if per_frame <= 0 else SECONDS / per_frame

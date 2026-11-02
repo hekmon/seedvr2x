@@ -51,8 +51,9 @@ import numpy as np
 import numpy.typing as npt
 
 from seedvr2x.clock import wall
+from seedvr2x.files import size_said
 from seedvr2x.media.ffmpeg import MediaError, ends_with_us
-from seedvr2x.media.files import partial_path, replace_whole, size_said
+from seedvr2x.media.files import partial_path, replace_whole
 from seedvr2x.media.index import NOPTS, FrameIndex
 
 logger = logging.getLogger(__name__)

@@ -17,6 +17,8 @@ around it are: "models loaded in 88.2 s" was said for 79 s by the lines' times (
 2026-10-29, DESIGN.md, Architecture, What it prints). The span's start is found among the
 readings made as the run said things (sample), at the least one per line logged.
 
+It also words the durations the logs say (spoken, taking).
+
 At the top level of the package, importing nothing of seedvr2x, so that the media layer and the
 runtime layer both say their durations through it. Waits and timeouts that are not said (the
 reader's and the writer's) stay on the monotonic clock.
@@ -237,3 +239,24 @@ def spent(seconds: float) -> float:
 def sample() -> None:
     """A reading of both clocks for the spans to come (Pace.sample)."""
     pace.sample()
+
+
+def spoken(seconds: float) -> str:
+    """A duration as the logs say it: "42 s", "12 min 5 s", "3 h 7 min", "2 d 4 h": its two
+    largest units, rounded to the smaller."""
+    total = round(seconds)
+    if total < 60:
+        return f"{total} s"
+    if total < 3600:
+        return f"{total // 60} min {total % 60} s"
+    minutes = round(seconds / 60)
+    if minutes < 24 * 60:
+        return f"{minutes // 60} h {minutes % 60} min"
+    hours = round(seconds / 3600)
+    return f"{hours // 24} d {hours % 24} h"
+
+
+def taking(seconds: float) -> str:
+    """How long something takes as the logs say it before it starts: "about 42 s", "about 12 min
+    5 s", and "under a second" where it is, not "about 0 s" (decided on 2026-10-29)."""
+    return "under a second" if seconds < 1 else f"about {spoken(seconds)}"

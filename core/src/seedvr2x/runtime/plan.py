@@ -6,29 +6,10 @@ it by a resume (Plan.recorded). Nothing here imports torch: the command line pla
 does."""
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Literal, TypeGuard, cast
+from typing import Any, TypeGuard, cast
 
+from seedvr2x.passes import ModelPlan, Tiles
 from seedvr2x.runtime.job import JobError
-
-# The tiles' overlap, in output pixels, fixed (DESIGN.md, Pipeline, per shot, step 3): the colour
-# study's tiles after split and the recipes validated per card size ran at 64, and 512-px decode
-# tiles at 1080p gained nothing at 128 (research/docs/vram.md, Tiling).
-OVERLAP = 64
-
-# A phase of the run, each unit in one (Models.enter): a shot's encode, a window, a decode.
-Phase = Literal["encode", "dit", "decode"]
-
-
-@dataclass(frozen=True)
-class Tiles:
-    """A tiled VAE pass's tiles: squares of `size` output pixels a side, cut off at the picture's
-    edges, each sharing `overlap` pixels with its neighbours. A tile that covers the whole padded
-    frame is no tiling (DESIGN.md, Pipeline, per shot, step 3): the planner neither makes nor
-    takes one (planner.covers)."""
-
-    size: int
-    overlap: int = OVERLAP
 
 
 @dataclass(frozen=True)
@@ -53,7 +34,7 @@ class Plan:
     resident_decode: int | None = None
     vae_in_dit: bool = True  # False: the VAE's weights leave the GPU for the DiT's phase
     # What a tiled shot's scratch may take of system memory, in bytes, a larger one going to its
-    # file (tiling.Scratch): the planner's, from the host's memory (DESIGN.md, Memory planner,
+    # file (scratch.Scratch): the planner's, from the host's memory (DESIGN.md, Memory planner,
     # Host RAM); 0 when no pass is tiled.
     scratch_allowance: int = 0
     # torch.compile (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0; the
@@ -65,6 +46,17 @@ class Plan:
     # as recorded.
     compile_dit: bool = False
     compile_vae: bool = False
+
+    @property
+    def model_plan(self) -> ModelPlan:
+        """What the loaded models follow of this plan (model.load_models)."""
+        return ModelPlan(
+            swapped=self.swapped,
+            resident_encode=self.resident_encode,
+            resident_decode=self.resident_decode,
+            vae_in_dit=self.vae_in_dit,
+            compile_vae=self.compile_vae,
+        )
 
     @classmethod
     def recorded(cls, record: Any) -> "Plan":
@@ -127,35 +119,6 @@ class Plan:
                 "scratch_allowance": self.scratch_allowance,
             },
         }
-
-
-@dataclass(frozen=True)
-class Shapes:
-    """The shapes a compiled VAE is warmed with (planner.compile_shapes), each (rows, columns) in
-    pixels of the padded frames, `padded` being their size (job.padded_size): the encoder's input,
-    one per distinct tile of the plan's encode (the whole frame untiled), and the decoder's
-    output, likewise for the decode; `latents`, the shots' lengths the slices are warmed at, in
-    latents, 1, 2 or planner.COMPILE_LATENTS (3), the shortest of each kind the job runs and the
-    calibration's own (planner.COMPILE_CALIBRATED). The decoder's latent is warmed in one memory
-    layout, the DiT's, at all of them (compiling.warm; the calibration's decodes take it in that
-    layout too, calibration.calibrate)."""
-
-    padded: tuple[int, int]  # the padded frame (job.padded_size), (rows, columns)
-    encode: tuple[tuple[int, int], ...]
-    decode: tuple[tuple[int, int], ...]
-    latents: tuple[int, ...]
-
-
-@dataclass
-class Compilation:
-    """What model.load_models compiles the VAE with, once the plan has compile_vae
-    (runtime/compiling.py): the shapes to warm, the job's compile cache (a directory under the
-    job's own, manifest.COMPILE_CACHE), and, set by the load, the seconds the compilation took
-    in the run's own clock, 0.0 until then and where nothing is compiled."""
-
-    shapes: Shapes
-    cache: Path
-    seconds: float = 0.0
 
 
 def _whole(value: Any) -> TypeGuard[int]:

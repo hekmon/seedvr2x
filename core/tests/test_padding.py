@@ -22,21 +22,21 @@ import torch
 from torchvision.transforms import Compose, InterpolationMode, Lambda, Normalize
 from torchvision.transforms import functional as TVF
 
-from seedvr2x.runtime import model
-from seedvr2x.runtime.job import (
-    JobError,
+from seedvr2x.errors import Refusal
+from seedvr2x.frames import (
     check_target,
     output_size,
+    padded_length,
     padded_size,
     padding,
     target_size,
 )
+from seedvr2x.runtime import model
 from seedvr2x.runtime.shot import (
     _frames,
     decode_shot,
     encode_shot,
     encoder_inputs,
-    padded_length,
     reference_inputs,
 )
 from seedvr2x.vendor.data.image.transforms.divisible_crop import DivisiblePad
@@ -254,7 +254,7 @@ def test_vendored_divisible_pad_is_numz(numz_divisible_pad: Any) -> None:
 def test_encoder_slices_padded_as_asked(
     monkeypatch: pytest.MonkeyPatch, target: tuple[int, int]
 ) -> None:
-    # Each slice the encoder takes, from encoder_inputs and through encode_shot: job.padded_size
+    # Each slice the encoder takes, from encoder_inputs and through encode_shot: frames.padded_size
     # by default, numz's multiples of 16 in the tests' numz padding (cli.NUMZ_PADDING), the mode
     # passed down every call to the transform; run.py's calls are test_cli_run.py's
     # (test_numz_padding_for_tests_only). (24, 32) is padded to (48, 32), or (32, 32) in numz's
@@ -346,9 +346,9 @@ def test_too_small_to_pad_refused() -> None:
             if reflected:
                 check_target((height, width), 7)
             else:
-                with pytest.raises(JobError, match="17 rows and 16 columns at least"):
+                with pytest.raises(Refusal, match="17 rows and 16 columns at least"):
                     check_target((height, width), 7)
-    with pytest.raises(JobError) as refused:
+    with pytest.raises(Refusal) as refused:
         check_target((16, 21), 16)
     assert str(refused.value) == (
         "--resolution 16: the frames resized to 21x16 are too small for the padding, at least 8"

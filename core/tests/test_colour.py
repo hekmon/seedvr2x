@@ -26,8 +26,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from seedvr2x.frames import target_size
 from seedvr2x.runtime import colour
-from seedvr2x.runtime.job import target_size
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 # runtime/colour.py as the colour study ran it, which colour_variants.py loads as its baseline

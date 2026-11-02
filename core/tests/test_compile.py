@@ -24,15 +24,20 @@ from omegaconf import OmegaConf
 from test_planner import HD, UHD, our_free, shots
 from torch._dynamo.exc import FailOnRecompileLimitHit
 
+from seedvr2x import peaks
+from seedvr2x.errors import Refusal
+from seedvr2x.frames import output_size, padded_size
+from seedvr2x.passes import Compilation, Shapes, Tiles
+from seedvr2x.peaks import GIB
 from seedvr2x.runtime import compiling, model, planner, resume
-from seedvr2x.runtime.job import JobError, Shot, output_size, padded_size
+from seedvr2x.runtime.job import Shot
 from seedvr2x.runtime.model import COMPUTE_DTYPE, Models
-from seedvr2x.runtime.plan import Compilation, Plan, Shapes, Tiles
-from seedvr2x.runtime.planner import GIB, Pins, PlanError
+from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.planner import Pins, PlanError
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 from seedvr2x.vendor.models.video_vae_v3.modules.types import MemoryState
 
-# The tile peaks the planner holds (planner.MEASURED, planner-limits.md "seedvr2x's tiled passes:
+# The tile peaks the planner holds (peaks.MEASURED, planner-limits.md "seedvr2x's tiled passes:
 # every tile's peak"), above what is on the GPU before the pass, in GiB: 1024-px tiles and the
 # largest the compiled VAE may meet, as the study measured them (compile.md): the encode's
 # 1856-px tile and the decode's 1152-px one.
@@ -57,42 +62,42 @@ def test_constants() -> None:
     # measured on 2026-10-31 and fitted a shape (1080p's 6 shapes and 4K's 8 on one host): 40 s
     # a new job and 15 s a resume on Linux's disk, 65 s and 20 s on a Windows drive. The 1080p
     # frame padded is 1104x1920.
-    assert planner.COMPILE_PEAK == 1.1
-    assert (planner.COMPILE_ENCODE_TILE_MAX, planner.COMPILE_DECODE_TILE_MAX) == (1856, 1152)
-    assert planner.COMPILE_ENCODE_WHOLE == padded_size(HD) == (1104, 1920)
+    assert peaks.COMPILE_PEAK == 1.1
+    assert (peaks.COMPILE_ENCODE_TILE_MAX, peaks.COMPILE_DECODE_TILE_MAX) == (1856, 1152)
+    assert peaks.COMPILE_ENCODE_WHOLE == padded_size(HD) == (1104, 1920)
     assert (planner.COMPILE_SHAPE_NEW, planner.COMPILE_SHAPE_RESUME) == (40, 15)
     assert (planner.COMPILE_SHAPE_NEW_DRIVE, planner.COMPILE_SHAPE_RESUME_DRIVE) == (65, 20)
 
 
 def test_a_compiled_pass_peaks_at_1_1_times_the_tiles_plain_peak() -> None:
     # The tile's peak above what is on the GPU before the pass is 1.1 times its plain one, the
-    # table's (planner.MEASURED); the weights and the encode's 0.4 GiB of margin (ENCODE_EXTRA)
+    # table's (peaks.MEASURED); the weights and the encode's 0.4 GiB of margin (ENCODE_EXTRA)
     # are not scaled, as the study's run scaled the fit alone (research/scripts/compile_run.py,
     # --vae-peak-factor). Every tile, at 1080p and 4K, with the DiT's part on the GPU counted
     # as for a plain pass.
-    fixed_encode = planner.ENCODE_EXTRA + planner.VAE_WEIGHTS
+    fixed_encode = peaks.ENCODE_EXTRA + peaks.VAE_WEIGHTS
     for target in (HD, UHD):
         padded, output = padded_size(target), output_size(target)
         for size in range(512, 1857, 64):
             tiles = Tiles(size)
             for resident, swapped in ((None, 0), (5, 28), (0, 36)):
-                kept = planner.dit_on_gpu(resident, swapped)
-                plain = planner.encode_peak(padded, tiles, resident, swapped) - fixed_encode - kept
-                compiled = planner.encode_peak(padded, tiles, resident, swapped, True)
+                kept = peaks.dit_on_gpu(resident, swapped)
+                plain = peaks.encode_peak(padded, tiles, resident, swapped) - fixed_encode - kept
+                compiled = peaks.encode_peak(padded, tiles, resident, swapped, True)
                 assert compiled - fixed_encode - kept == pytest.approx(1.1 * plain, abs=1)
-                plain = planner.decode_peak(padded, output, tiles, resident, swapped) - kept
-                compiled = planner.decode_peak(
+                plain = peaks.decode_peak(padded, output, tiles, resident, swapped) - kept
+                compiled = peaks.decode_peak(
                     padded, output, tiles, resident, swapped, compiled=True
                 )
-                assert compiled - planner.VAE_WEIGHTS - kept == pytest.approx(
-                    1.1 * (plain - planner.VAE_WEIGHTS), abs=1
+                assert compiled - peaks.VAE_WEIGHTS - kept == pytest.approx(
+                    1.1 * (plain - peaks.VAE_WEIGHTS), abs=1
                 )
     # Untiled passes too (a small frame): the fit scaled, the correction's term not.
     small = (576, 960)
-    plain = planner.decode_peak(small, small, None, split=True)
-    compiled = planner.decode_peak(small, small, None, split=True, compiled=True)
+    plain = peaks.decode_peak(small, small, None, split=True)
+    compiled = peaks.decode_peak(small, small, None, split=True, compiled=True)
     assert compiled - plain == pytest.approx(
-        0.1 * (planner._fit(small, None, 1)),  # pyright: ignore[reportPrivateUsage]
+        0.1 * (peaks._fit(small, None, 1)),  # pyright: ignore[reportPrivateUsage]
         abs=1,
     )
 
@@ -103,12 +108,12 @@ def test_a_plan_with_the_vae_compiled_chooses_smaller_tiles_where_1_1_times_does
     # fits the budget at the compiled peak, its room counted.
     smaller = 0
     for card in range(18, 49, 2):
-        (plain, _), (compiled, peaks) = plain_and_compiled(our_free(card), HD)
+        (plain, _), (compiled, predicted) = plain_and_compiled(our_free(card), HD)
         assert compiled.compile_vae and not plain.compile_vae
-        assert planner.in_compile_range(padded_size(HD), "encode", compiled.encode_tiles)
-        assert planner.in_compile_range(padded_size(HD), "decode", compiled.decode_tiles)
+        assert peaks.in_compile_range(padded_size(HD), "encode", compiled.encode_tiles)
+        assert peaks.in_compile_range(padded_size(HD), "decode", compiled.decode_tiles)
         for phase in ("encode", "decode"):
-            assert peaks.need(phase) + peaks.free - peaks.budget <= peaks.free
+            assert predicted.need(phase) + predicted.free - predicted.budget <= predicted.free
         for ours, theirs in (
             (compiled.encode_tiles, plain.encode_tiles),
             (compiled.decode_tiles, plain.decode_tiles),
@@ -124,14 +129,14 @@ def test_the_compiled_plans_predicted_peaks_are_its_passes_compiled_peaks() -> N
     # tiles it chose and the DiT it keeps on the GPU there; the plain plan's are the plain ones.
     for card in (24, 32, 48, 96):
         for compile_vae in (False, True):
-            made, peaks = planner.plan(
+            made, predicted = planner.plan(
                 our_free(card), HD, shots(76), Pins(), None, compile_vae=compile_vae
             )
             padded, output = padded_size(HD), output_size(HD)
-            assert peaks.encode == planner.encode_peak(
+            assert predicted.encode == peaks.encode_peak(
                 padded, made.encode_tiles, made.resident_encode, made.swapped, compile_vae
             )
-            assert peaks.decode == planner.decode_peak(
+            assert predicted.decode == peaks.decode_peak(
                 padded,
                 output,
                 made.decode_tiles,
@@ -162,7 +167,7 @@ def test_the_range_is_the_1080p_frame_as_a_whole_not_its_area() -> None:
     # The more conservative reading of "the 1080p frame whole" (PROVISIONAL, planner.COMPILE_
     # ENCODE_WHOLE): rows and columns each no larger than the padded 1080p frame's. A portrait
     # frame of the same area is another shape, and so is 1440p.
-    inside = planner.in_compile_range
+    inside = peaks.in_compile_range
     assert inside((1104, 1920), "encode", None) and inside((752, 1280), "encode", None)
     assert not inside((1920, 1104), "encode", None) and not inside((1456, 2576), "encode", None)
     assert inside((1920, 1104), "encode", Tiles(1856))
@@ -201,7 +206,7 @@ def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() ->
         assert lines[0].startswith(
             f"--{phase}-tile {pin}: the VAE compiled has the {phase} {where} beyond the shapes"
         )
-        assert planner._compile_range_said(phase) in lines[0]  # pyright: ignore[reportPrivateUsage]
+        assert peaks.compile_range_said(phase) in lines[0]  # pyright: ignore[reportPrivateUsage]
         assert lines[1:] == [
             "The same command without --compile fits",
             f"The same command with --{phase}-tile {within} fits, within the shapes measured",
@@ -212,7 +217,7 @@ def test_a_pass_pinned_beyond_the_measured_range_is_refused_with_its_advice() ->
     assert lines[0].startswith("--decode-tile 1280: the VAE compiled has the decode in tiles of")
     assert lines[1] == (
         "--encode-tile 2048: the VAE compiled has the encode in tiles of 2048 px beyond the shapes"
-        f" measured ({planner._compile_range_said('encode')})"  # pyright: ignore[reportPrivateUsage]
+        f" measured ({peaks.compile_range_said('encode')})"  # pyright: ignore[reportPrivateUsage]
     )
     assert lines[2:] == [
         "The same command without --compile fits",
@@ -252,7 +257,7 @@ def test_a_pin_in_the_range_that_fits_plain_and_not_compiled_is_refused_with_its
     # largest tile that fits compiled.
     lines = refusal(our_free(25), HD, Pins(decode_tile=1152)).split("\n")
     assert lines[0].startswith("--decode-tile 1152: the decode in tiles of 1152 px takes ")
-    measured = [planner._compile_range_said(phase) for phase in ("encode", "decode")]  # pyright: ignore[reportPrivateUsage]
+    measured = [peaks.compile_range_said(phase) for phase in ("encode", "decode")]  # pyright: ignore[reportPrivateUsage]
     assert lines[1] == "--compile compiles only the shapes measured: " + "; ".join(measured)
     assert lines[2:] == [
         "The same command without --compile fits",
@@ -294,9 +299,9 @@ def test_a_recorded_plan_keeps_its_own_compile_flag() -> None:
         made, _ = planner.plan(free, HD, shots(76), Pins(), None, recorded=plain, compile_vae=asked)
         assert not made.compile_vae
     # Its peaks are the compiled ones: a card the plain shape fits and the compiled doesn't.
-    assert planner.decode_peak(
+    assert peaks.decode_peak(
         padded_size(HD), output_size(HD), Tiles(1024), compiled=True
-    ) > planner.decode_peak(padded_size(HD), output_size(HD), Tiles(1024))
+    ) > peaks.decode_peak(padded_size(HD), output_size(HD), Tiles(1024))
 
 
 def test_a_recorded_compiled_plan_beyond_the_range_is_no_plans() -> None:
@@ -947,7 +952,8 @@ def test_only_the_kinds_the_job_has_are_warmed() -> None:
     ]
 
 
-SMALL = (256, 384)  # a target whose tiles are small; its padded frame (job.padded_size) is 256x384
+# A target whose tiles are small; its padded frame (frames.padded_size) is 256x384.
+SMALL = (256, 384)
 
 
 def small_shapes(*lengths: int) -> Shapes:
@@ -1071,7 +1077,7 @@ def test_the_recompile_limits_are_raised_past_any_warm_up_and_never_lowered(
             Path("vae.safetensors"),
             torch.device("cpu"),
             None,
-            Plan(5, compile_vae=True),
+            Plan(5, compile_vae=True).model_plan,
             Compilation(small_shapes(12), tmp_path / "cache"),
         )
         return dynamo.recompile_limit, dynamo.accumulated_recompile_limit
@@ -1118,7 +1124,7 @@ def test_a_limit_hit_in_the_warm_up_is_a_refusal_and_the_setting_goes_back(
             Path("vae.safetensors"),
             torch.device("cpu"),
             None,
-            Plan(5, compile_vae=True),
+            Plan(5, compile_vae=True).model_plan,
             Compilation(Shapes((128, 128), (), (), ()), tmp_path / "cache"),
         )
 
@@ -1133,7 +1139,7 @@ def test_a_limit_hit_in_the_warm_up_is_a_refusal_and_the_setting_goes_back(
     monkeypatch.setattr(compiling, "warm", hit)
     with pytest.raises(compiling.CompileError) as error:
         load()
-    assert isinstance(error.value, JobError)
+    assert isinstance(error.value, Refusal)
     assert "recompile limit" in str(error.value)
     assert "the same command without --compile" in str(error.value)
     assert dynamo.fail_on_recompile_limit_hit is before and dynamo.suppress_errors is suppressing
@@ -1204,7 +1210,7 @@ def test_the_vae_is_compiled_before_the_dit_loads_and_the_workers_shut_before_it
         Path("vae.safetensors"),
         torch.device("cpu"),
         None,
-        plan,
+        plan.model_plan,
         compilation,
     )
     assert recorder.events == [
@@ -1218,7 +1224,7 @@ def test_the_vae_is_compiled_before_the_dit_loads_and_the_workers_shut_before_it
     assert recorder.deterministic_at_compile == [True, True]
     assert recorder.cache_at_compile == [str(tmp_path / "compile-cache")] * 2
     assert (tmp_path / "compile-cache").is_dir()
-    assert compilation.seconds >= 0 and models.plan is plan
+    assert compilation.seconds >= 0 and models.model_plan == plan.model_plan
     # The causal convolutions left out before anything compiled.
     convolutions = [m for m in models.runner.vae.modules() if isinstance(m, InflatedCausalConv3d)]
     assert convolutions and all("forward" in vars(m) for m in convolutions)
@@ -1230,7 +1236,11 @@ def test_a_plan_without_compile_loads_as_it_did(
     recorder = Recorder(monkeypatch)
     model.load_models(Path("dit.safetensors"), Path("vae.safetensors"), torch.device("cpu"))
     model.load_models(
-        Path("dit.safetensors"), Path("vae.safetensors"), torch.device("cpu"), None, Plan(5)
+        Path("dit.safetensors"),
+        Path("vae.safetensors"),
+        torch.device("cpu"),
+        None,
+        Plan(5).model_plan,
     )
     assert recorder.events == ["weights vae.safetensors", "weights dit.safetensors"] * 2
     with pytest.raises(ValueError, match="nothing to compile the VAE with"):
@@ -1239,7 +1249,7 @@ def test_a_plan_without_compile_loads_as_it_did(
             Path("vae.safetensors"),
             torch.device("cpu"),
             None,
-            Plan(5, compile_vae=True),
+            Plan(5, compile_vae=True).model_plan,
         )
 
 
@@ -1260,10 +1270,10 @@ def test_the_workers_shut_whatever_happens_and_a_failure_is_the_jobs_refusal(
             Path("vae.safetensors"),
             torch.device("cpu"),
             None,
-            Plan(5, compile_vae=True),
+            Plan(5, compile_vae=True).model_plan,
             compilation,
         )
-    assert isinstance(error.value, JobError)
+    assert isinstance(error.value, Refusal)
     assert str(error.value) == (
         "--compile: the VAE did not compile (RuntimeError: InductorError: no compiler); nothing"
         " was run, the same command without --compile runs the plain VAE"
@@ -1282,7 +1292,7 @@ def test_the_workers_shut_whatever_happens_and_a_failure_is_the_jobs_refusal(
             Path("vae.safetensors"),
             torch.device("cpu"),
             None,
-            Plan(5, compile_vae=True),
+            Plan(5, compile_vae=True).model_plan,
             compilation,
         )
     assert recorder.events[-1] == "workers shut"
@@ -1475,12 +1485,14 @@ def test_the_flag_is_recorded_and_the_models_load_with_the_compilation(
     assert out["settings"]["compile_vae"] is True
     assert (out["plan"]["compile_vae"], out["plan"]["compile_dit"]) == (True, False)
     [(*_, plan, compilation)] = loads.given
-    assert plan.compile_vae and not plan.compile_dit
+    assert plan.compile_vae
     assert compilation.cache == tmp_path / "out" / "compile-cache"
     # 704x560 frames: the decode in tiles of 640 px (the frame whole is no compiled decode), the
     # encode the frame whole, which the 1080p frame measured holds; JOB's shots are 2, 1 and 6
     # latents.
-    assert plan.encode_tiles is None and plan.decode_tiles == Tiles(640)
+    # The tiles are the plan's, not the loaded models': the manifest records them.
+    assert out["plan"]["encode_tiles"] is None
+    assert out["plan"]["decode_tiles"] == {"size": 640, "overlap": Tiles(640).overlap}
     assert compilation.shapes.padded == LARGER_PADDED
     assert compilation.shapes.encode == (LARGER_PADDED,)
     # 704 columns in tiles of 640 px sharing 64, a stride of 576: a second tile of 128.

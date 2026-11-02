@@ -32,10 +32,11 @@ from test_cli_run import (
 )
 from test_cli_runs import KEPT_BYTES, listed, short_disk
 
-from seedvr2x import cli
+from seedvr2x import cli, peaks
+from seedvr2x.passes import Tiles
 from seedvr2x.runtime import model, planner
 from seedvr2x.runtime.blockswap import HostMemoryError
-from seedvr2x.runtime.plan import Plan, Tiles
+from seedvr2x.runtime.plan import Plan
 
 # What every refusal after the first pass adds, the job's directory named (cli._first_kept).
 KEPT = (
@@ -55,7 +56,7 @@ def recorded(directory: Path) -> dict[str, Any]:
 def too_little_memory(patch: pytest.MonkeyPatch) -> None:
     """The stand-in's card short of the untiled encode's floor by a byte: the planner refuses
     every plan (test_cli_run.test_size_and_host_memory_refused)."""
-    encode = planner.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
+    encode = peaks.encode_peak(PADDED, None, 0) + planner.VAE_ROOM
     free_memory(patch, encode + planner.MARGIN - 1)
 
 
@@ -417,13 +418,13 @@ def test_scratch_file() -> None:
     # (planner.scratch_file; tiling.Scratch.where's rule).
     target = (1080, 1920)
     frames = 45
-    size = planner.scratch(planner._padded(target, False), frames)  # pyright: ignore[reportPrivateUsage]
+    size = peaks.scratch(planner._padded(target, False), frames)  # pyright: ignore[reportPrivateUsage]
     assert planner.scratch_file(Plan(12, scratch_allowance=0), target, frames) == 0
     tiled = Plan(12, decode_tiles=Tiles(1024), scratch_allowance=size)
     assert planner.scratch_file(tiled, target, frames) == 0
     over = Plan(12, encode_tiles=Tiles(1024), scratch_allowance=size - 1)
     assert planner.scratch_file(over, target, frames) == size
-    padded = planner.scratch(planner._padded(target, True), frames)  # pyright: ignore[reportPrivateUsage]
+    padded = peaks.scratch(planner._padded(target, True), frames)  # pyright: ignore[reportPrivateUsage]
     assert (
         planner.scratch_file(
             Plan(12, decode_tiles=Tiles(1024), scratch_allowance=0),

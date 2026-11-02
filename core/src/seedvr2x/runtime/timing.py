@@ -33,10 +33,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from seedvr2x.clock import wall
-from seedvr2x.runtime.job import OutputSegment, Shot, padded_size, shot_runs
-from seedvr2x.runtime.plan import Phase
-from seedvr2x.runtime.shot import padded_length, shot_layout
+from seedvr2x.clock import spoken, wall
+from seedvr2x.frames import padded_length, padded_size
+from seedvr2x.passes import Phase
+from seedvr2x.runtime.job import OutputSegment, Shot, shot_runs
+from seedvr2x.runtime.shot import shot_layout
 from seedvr2x.runtime.stop import late
 
 logger = logging.getLogger(__name__)
@@ -156,7 +157,7 @@ def _sized(kind: Kind, size: int) -> int:
 
 def tokens(target: tuple[int, int], latents: int, *, numz_padding: bool = False) -> int:
     """The tokens of a window of `latents` latents for frames resized to target, (height, width):
-    a token per TOKEN x TOKEN pixels of the padded frame (job.padded_size), per latent.
+    a token per TOKEN x TOKEN pixels of the padded frame (frames.padded_size), per latent.
     numz_padding is for tests only (cli.NUMZ_PADDING): numz's padding, up to multiples of 16."""
     height, width = target
     if numz_padding:
@@ -418,27 +419,6 @@ class Progress:
         seconds = wall(seconds)
         now = self.now()
         return f"about {spoken(seconds)} left, the job ending about {ending(now, seconds)}"
-
-
-def spoken(seconds: float) -> str:
-    """A duration as the logs say it: "42 s", "12 min 5 s", "3 h 7 min", "2 d 4 h": its two
-    largest units, rounded to the smaller."""
-    total = round(seconds)
-    if total < 60:
-        return f"{total} s"
-    if total < 3600:
-        return f"{total // 60} min {total % 60} s"
-    minutes = round(seconds / 60)
-    if minutes < 24 * 60:
-        return f"{minutes // 60} h {minutes % 60} min"
-    hours = round(seconds / 3600)
-    return f"{hours // 24} d {hours % 24} h"
-
-
-def taking(seconds: float) -> str:
-    """How long something takes as the logs say it before it starts: "about 42 s", "about 12 min
-    5 s", and "under a second" where it is, not "about 0 s" (decided on 2026-10-29)."""
-    return "under a second" if seconds < 1 else f"about {spoken(seconds)}"
 
 
 def ending(now: datetime, seconds: float) -> str:

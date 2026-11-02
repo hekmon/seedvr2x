@@ -12,10 +12,10 @@ from pathlib import Path
 
 import numpy as np
 
+from seedvr2x.files import sha256
 from seedvr2x.media import assembly, bitstream, grid, rate
 from seedvr2x.media.conversion import PIXEL_FORMATS, Conversion, conversion_for
 from seedvr2x.media.ffmpeg import MediaError
-from seedvr2x.media.files import sha256
 from seedvr2x.media.grid import Filling, Places
 from seedvr2x.media.index import NOPTS, FrameIndex
 from seedvr2x.media.probe import DoviRecord, VideoStream, probe

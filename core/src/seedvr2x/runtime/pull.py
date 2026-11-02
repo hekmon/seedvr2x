@@ -23,8 +23,8 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 
-from seedvr2x.clock import spent, wall
-from seedvr2x.media import files
+from seedvr2x import files
+from seedvr2x.clock import spent, taking, wall
 from seedvr2x.runtime.weights import ModelError, Role
 
 logger = logging.getLogger(__name__)
@@ -150,8 +150,6 @@ class Hashes:
             # decided on 2026-10-28; built on 2026-10-29): what is read, and for about how long.
             expected = wall(state[2] * HASH_SECONDS_PER_BYTE)
             if expected >= HASH_SAID_FROM:
-                from seedvr2x.runtime.timing import taking
-
                 logger.info(
                     "%s: reading its %s to check its SHA-256, %s",
                     path.name,

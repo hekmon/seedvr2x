@@ -47,7 +47,7 @@ YCC_INV = torch.inverse(YCC)  # torch.linalg.inv's alias, which the study calls
 
 def colour_stages(source: tuple[int, int], target: tuple[int, int]) -> int:
     """The à-trous stages of the colour (Cb, Cr) for frames of source (height, width), as stored,
-    resized to target (height, width) (job.target_size): the stage whose sigma is nearest 1.6
+    resized to target (height, width) (frames.target_size): the stage whose sigma is nearest 1.6
     source pixels, the input's own colour resolution (a 4:2:0 source has a chroma sample every 2),
     round(2 + log2 f), and COLOUR_STAGES_MIN at the least. f is the upscale factor; where the
     display aspect gives the two axes different factors (anamorphic SD), their geometric mean.

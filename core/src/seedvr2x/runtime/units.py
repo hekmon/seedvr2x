@@ -12,7 +12,7 @@ A run's windows are only ever taken in order: the run's latent is kept until its
 all done, and they are kept until its shot's decode.
 
 A unit is kept in a file, written from a copy in system memory, never from the GPU's own
-tensor, with its values and its memory layout (shot.moved): what the GPU holds mustn't grow with
+tensor, with its values and its memory layout (sampling.moved): what the GPU holds mustn't grow with
 the shot (DESIGN.md, Memory planner, Per-phase peaks)."""
 
 import hashlib
@@ -24,7 +24,7 @@ from torch import Tensor
 
 from seedvr2x.media.files import make_directories, partial_path, replace_whole
 from seedvr2x.runtime.manifest import STATE, Manifest, size
-from seedvr2x.runtime.shot import CPU, moved
+from seedvr2x.sampling import CPU, moved
 
 # A shot's files besides its units (DESIGN.md, Colour correction): the copy of its input frames,
 # an FFV1 gbrp16le file at the input's size, which split's reference is rebuilt from, and its
@@ -108,7 +108,7 @@ class Units:
     def save_latent(self, run: int, latent: Tensor) -> Tensor:
         """Keep run `run`'s latent, (T', h, w, 16) as its encode gives it, in system memory
         (shot.encode_shot). Returns the one written for a resume: itself, or its copy in system
-        memory were it given on the GPU, values and memory layout kept (shot.moved), so that a
+        memory were it given on the GPU, values and memory layout kept (sampling.moved), so that a
         run samples its windows from it (shot.sample_windows) and holds no second copy of a
         latent, nor reads back a file it wrote."""
         self.settle()
@@ -118,7 +118,7 @@ class Units:
 
     def save_window(self, run: int, window: int, sampled: Tensor) -> None:
         """Keep window `window` of run `run`, (t, h, w, 16) as the DiT gives it, wherever it
-        is: written from its copy on the CPU, values and memory layout kept (shot.moved), which
+        is: written from its copy on the CPU, values and memory layout kept (sampling.moved), which
         is given up once the file is whole."""
         self.settle()
         _save(sampled, self._unit(run, f"window_{window:04d}.pt"))
@@ -152,7 +152,7 @@ class Units:
 
 
 def _save(tensor: Tensor, path: Path) -> Tensor:
-    """Write tensor's copy on the CPU (shot.moved) whole at path, and give that copy."""
+    """Write tensor's copy on the CPU (sampling.moved) whole at path, and give that copy."""
     copy = moved(tensor, CPU, str(path))
     make_directories(path.parent)
     partial = partial_path(path)

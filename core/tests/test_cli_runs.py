@@ -41,9 +41,9 @@ from test_cli_run import (
     without_disk,
 )
 
+from seedvr2x.frames import padded_length
 from seedvr2x.runtime import job as runtime_job
 from seedvr2x.runtime import model, run
-from seedvr2x.runtime.shot import padded_length
 from seedvr2x.runtime.units import KEPT
 
 # The output's frames as test_cli_run's stand-in gives them (gbrp16le, 128x96), in bytes.

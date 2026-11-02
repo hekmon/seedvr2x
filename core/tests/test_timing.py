@@ -18,11 +18,14 @@ import numpy as np
 import pytest
 import torch
 
+from seedvr2x import peaks
+from seedvr2x.frames import padded_size
 from seedvr2x.media.checksums import read_checksums
-from seedvr2x.runtime import calibration, planner, run, timing
+from seedvr2x.passes import Tiles
+from seedvr2x.runtime import calibration, run, timing
 from seedvr2x.runtime.calibration import FIRST, FRAMES, SHORT, Calibrated, calibrate
-from seedvr2x.runtime.job import OutputSegment, Shot, padded_size, shot_runs
-from seedvr2x.runtime.plan import Plan, Tiles
+from seedvr2x.runtime.job import OutputSegment, Shot, shot_runs
+from seedvr2x.runtime.plan import Plan
 from seedvr2x.runtime.shot import Correction, shot_layout
 from seedvr2x.runtime.timing import (
     RATIOS,
@@ -36,7 +39,6 @@ from seedvr2x.runtime.timing import (
     ending,
     job_times,
     run_name,
-    spoken,
     tokens,
     units_of,
     would_end,
@@ -105,7 +107,7 @@ def test_a_constant_plus_a_rate() -> None:
 
 @pytest.mark.parametrize(("frames", "padded"), [(1, 1), (2, 5), (6, 9), (13, 13), (14, 17)])
 def test_frames_as_the_vae_takes_them(frames: int, padded: int) -> None:
-    # The VAE encodes and decodes a shot padded to 4n + 1 frames (shot.padded_length): a shot of
+    # The VAE encodes and decodes a shot padded to 4n + 1 frames (frames.padded_length): a shot of
     # 6 frames takes a shot of 9's time. A window's size is in tokens, taken as it is.
     clock = Clock(MODELS)
     assert clock.estimate("encode", frames) == 2.0 + 0.5 * padded
@@ -217,7 +219,7 @@ def test_record() -> None:
 
 
 def test_tokens() -> None:
-    # 1080x1920 is padded to 1104x1920 (job.padded_size): 69 x 120 tokens a latent; numz pads it
+    # 1080x1920 is padded to 1104x1920 (frames.padded_size): 69 x 120 tokens a latent; numz pads it
     # to 1088 rows, 68 x 120, the 48,960 tokens of planner-limits.md's 6 latents.
     assert tokens((1080, 1920), 1) == 69 * 120
     assert tokens((1080, 1920), 6, numz_padding=True) == 6 * 68 * 120 == 48_960
@@ -575,25 +577,6 @@ def test_the_first_encode_is_the_first() -> None:
 @pytest.mark.parametrize(
     ("seconds", "said"),
     [
-        (0.4, "0 s"),
-        (42.4, "42 s"),
-        (59.4, "59 s"),
-        (59.6, "1 min 0 s"),
-        (725, "12 min 5 s"),
-        (3599.4, "59 min 59 s"),
-        (3599.6, "1 h 0 min"),
-        (3 * 3600 + 7 * 60 + 20, "3 h 7 min"),
-        (86_399, "1 d 0 h"),
-        (2 * 86_400 + 4 * 3600 + 100, "2 d 4 h"),
-    ],
-)
-def test_spoken(seconds: float, said: str) -> None:
-    assert spoken(seconds) == said
-
-
-@pytest.mark.parametrize(
-    ("seconds", "said"),
-    [
         (0, "10:00"),
         (0.2, "10:01"),  # to the minute, rounded up
         (60, "10:01"),
@@ -729,14 +712,6 @@ def test_the_calibration_s_working_is_a_debug_line(caplog: pytest.LogCaptureFixt
     )
 
 
-def test_a_time_taken_is_about_or_under_a_second() -> None:
-    # "about 0 s" said nothing (2026-10-29's list from a real job): under a second, said so.
-    assert timing.taking(0.4) == "under a second"
-    assert timing.taking(0.99) == "under a second"
-    assert timing.taking(1.0) == "about 1 s"
-    assert timing.taking(84.0) == "about 1 min 24 s"
-
-
 TARGET = (48, 64)
 PER_LATENT = tokens(TARGET, 1)
 # What the fake models take to enter a phase the first time, the noise's draw a token.
@@ -748,8 +723,8 @@ class Steady:
     """The calibration's steps, run.encode_shot, run.sample_windows and run.decode_shot, replaced
     by ones that move a clock of their own: an encode takes 1 s and 0.5 s a frame, a decode 3 s
     and 2 s a frame, a window 1 s and 0.1 ms a token plus the noise's draw it makes, which
-    shot.draw takes 0.2 ms a token alone; the first of each kind 100 s more, as a process's first
-    does. Models.enter takes a time of its own for each change of phase: ENTERING[phase] for
+    sampling.draw takes 0.2 ms a token alone; the first of each kind 100 s more, as a process's
+    first does. Models.enter takes a time of its own for each change of phase: ENTERING[phase] for
     the first change into it, and 0.5 s more for each one after. `called` lists the steps with
     their arguments, `entered` the phases the models were told."""
 
@@ -1126,19 +1101,19 @@ def test_the_encode_s_second_length_within_a_tiled_plan_s_memory(
     # (tiling.Scratch): a second length over it is shortened by 4 frames until it fits.
     steady = Quick(monkeypatch)
     padded = padded_size(TARGET)
-    holding = planner.scratch(padded, 37)
-    assert planner.scratch(padded, 41) > holding > planner.scratch(padded, 33)
+    holding = peaks.scratch(padded, 37)
+    assert peaks.scratch(padded, 41) > holding > peaks.scratch(padded, 33)
     plan = Plan(9, encode_tiles=Tiles(512), scratch_allowance=holding)
     calibrate(steady.models, TARGET, plan, 9)
     assert encode_counts(steady) == [13, 5, 37]
     # The allowance holding 61 frames' scratch, or more: the time's length stays.
     steady.called.clear()
-    roomy = Plan(9, encode_tiles=Tiles(512), scratch_allowance=planner.scratch(padded, 61))
+    roomy = Plan(9, encode_tiles=Tiles(512), scratch_allowance=peaks.scratch(padded, 61))
     calibrate(steady.models, TARGET, roomy, 9)
     assert encode_counts(steady) == [13, 5, 61]
     # Under 13 frames' scratch: never fewer than 13, the run's own refusal to come if it must.
     steady.called.clear()
-    tight = Plan(9, encode_tiles=Tiles(512), scratch_allowance=planner.scratch(padded, 13) - 1)
+    tight = Plan(9, encode_tiles=Tiles(512), scratch_allowance=peaks.scratch(padded, 13) - 1)
     calibrate(steady.models, TARGET, tight, 9)
     assert encode_counts(steady) == [13, 5, 13]
 

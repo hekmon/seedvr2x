@@ -22,8 +22,9 @@ from seedvr2x.runtime import model, units
 from seedvr2x.runtime.job import QUALITY, OutputSegment, Shot, shot_runs
 from seedvr2x.runtime.manifest import Manifest
 from seedvr2x.runtime.plan import Plan
-from seedvr2x.runtime.shot import moved, sample_windows, shot_layout
+from seedvr2x.runtime.shot import sample_windows, shot_layout
 from seedvr2x.runtime.units import STATE, Units
+from seedvr2x.sampling import moved
 
 
 def channel_major(latents: int, seed: int = 0) -> Tensor:
@@ -410,7 +411,7 @@ def test_a_directorys_hash_frames_its_files(tmp_path: Path) -> None:
 
 def test_units_are_written_from_cpu_copies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A unit's file is written from the copy the shared helper makes of it on the CPU
-    # (shot.moved), with the values, the dtype and the strides of what was saved, a latent in
+    # (sampling.moved), with the values, the dtype and the strides of what was saved, a latent in
     # the encode's channel-major layout and windows as the DiT gives them, and reads back so. On
     # the CPU that copy is the tensor itself: the helper is replaced by one that copies, as it
     # does from a GPU, so that what the units write and give back is told from what they were
@@ -461,7 +462,7 @@ def test_saved_latent_is_the_copy_given_back(tmp_path: Path) -> None:
 
 
 def test_moved_keeps_the_layout_or_refuses() -> None:
-    # shot.moved, the copy every unit goes through: the tensor itself where it is already; on
+    # sampling.moved, the copy every unit goes through: the tensor itself where it is already; on
     # another device, its strides kept, or refused. torch keeps the strides of a dense tensor,
     # a latent in its channel-major layout, and lays out anew the copy of one that isn't, a
     # slice of that latent along time, dense in the same order of dimensions. The other device

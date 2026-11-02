@@ -12,10 +12,12 @@ import pytest
 import torch
 
 from seedvr2x import cli
+from seedvr2x.passes import OVERLAP, Tiles
+from seedvr2x.peaks import GIB
 from seedvr2x.runtime import resume
 from seedvr2x.runtime.job import JobError
-from seedvr2x.runtime.plan import OVERLAP, Plan, Tiles
-from seedvr2x.runtime.planner import GIB, PlanError
+from seedvr2x.runtime.plan import Plan
+from seedvr2x.runtime.planner import PlanError
 
 
 def test_record() -> None:

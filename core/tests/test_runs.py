@@ -20,6 +20,7 @@ import numpy.typing as npt
 import pytest
 import torch
 
+from seedvr2x.frames import padded_length
 from seedvr2x.media.source import Source
 from seedvr2x.media.writer import quantise
 from seedvr2x.runtime import job, manifest, planner, resume, run
@@ -34,8 +35,8 @@ from seedvr2x.runtime.job import (
 )
 from seedvr2x.runtime.manifest import Manifest
 from seedvr2x.runtime.plan import Plan
-from seedvr2x.runtime.shot import padded_length, shot_layout
-from seedvr2x.runtime.tiling import ScratchError
+from seedvr2x.runtime.scratch import ScratchError
+from seedvr2x.runtime.shot import shot_layout
 from seedvr2x.runtime.units import KEPT, Units, run_file
 
 # --- The rule -----------------------------------------------------------------------------------

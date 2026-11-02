@@ -27,7 +27,8 @@ import pytest
 import torch
 from torch import Tensor
 
-from seedvr2x.runtime import blockswap, job, model
+from seedvr2x import frames
+from seedvr2x.runtime import blockswap, model
 from seedvr2x.runtime.blockswap import Placement, dit_parts
 from seedvr2x.runtime.plan import Plan
 from seedvr2x.runtime.weights import DIT_7B, SLOTS
@@ -75,7 +76,7 @@ def digest(tensor: Tensor) -> str:
 def windows(models: model.Models) -> tuple[list[str], int]:
     """FORWARDS windows through the DiT, as shot.sample_windows runs one: their digests, and the
     device's peak over them, in bytes."""
-    height, width = job.padded_size(TARGET)
+    height, width = frames.padded_size(TARGET)
     generator = torch.Generator().manual_seed(7)
     values = torch.randn((16, LATENTS, height // 8, width // 8), generator=generator)
     latent = values.to(model.COMPUTE_DTYPE).permute(1, 2, 3, 0).to(models.device)
@@ -214,7 +215,7 @@ def test_a_plan_s_load_never_has_the_dit_whole_on_the_device(loaded: Loaded) -> 
     torch.cuda.reset_peak_memory_stats(device)
     plan = Plan(None, swapped=36, resident_encode=0, resident_decode=0, vae_in_dit=False)
     measure_resident()
-    models = model.load_models(found(DITS), found(VAES), device, plan=plan)
+    models = model.load_models(found(DITS), found(VAES), device, model_plan=plan.model_plan)
     host_peak, host_after = resident(peak=True), resident()
     placement, vae = models.placement, models.vae
     assert placement is not None and vae is not None

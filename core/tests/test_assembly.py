@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 from test_probe import has_encoder
 
+from seedvr2x.files import size_said
 from seedvr2x.media import assembly, ffmpeg, files, rate
 from seedvr2x.media.assembly import (
     LIST,
@@ -1904,7 +1905,6 @@ def test_the_stale_file_stays_while_the_new_file_is_synced(
     # The old file's checksums go only once the new file's data is on the disk, just before the
     # rename: a stop during that sync, which lasts as long as the file is large, leaves the old
     # file with its own (DESIGN.md, Output, Checksums).
-    from seedvr2x.media import files
 
     job = jobs()
     output, stale, work = tmp_path / "out.mkv", tmp_path / "out.mkv.crc32", workdir(tmp_path)
@@ -2158,7 +2158,7 @@ def test_the_other_streams_are_named_by_kind() -> None:
 def test_sizes_are_said_in_mib_under_a_tenth_of_a_gib() -> None:
     # "reading its 0.0 GiB" and "checking the bytes of 1 segment, 0.04 GiB" said nothing
     # (2026-10-29's list): MiB under 0.1 GiB, KiB under 1 MiB.
-    size = files.size_said
+    size = size_said
     assert size(16_479_335_080) == "15.3 GiB"
     assert size(16_479_335_080, 2) == "15.35 GiB"
     assert size(int(0.04 * 2**30), 2) == "41 MiB"

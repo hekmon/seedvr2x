@@ -58,8 +58,8 @@ from huggingface_hub.errors import (
 from test_cli_run import STAND_IN_MODELS, StandInDetector, source, stand_in_model
 from test_weights import SHOTS, V1, as_dtype, transnetv2, write
 
-from seedvr2x import cli
-from seedvr2x.media import ffmpeg, files
+from seedvr2x import cli, files
+from seedvr2x.media import ffmpeg
 from seedvr2x.runtime import model, pull, weights
 from seedvr2x.runtime.pull import Pin
 from seedvr2x.runtime.weights import ModelError

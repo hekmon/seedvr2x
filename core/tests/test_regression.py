@@ -188,8 +188,9 @@ from typing import Any, NoReturn
 import pytest
 
 from seedvr2x.cli import NUMZ_DRAW, NUMZ_PADDING, NUMZ_TAIL
+from seedvr2x.frames import target_size
 from seedvr2x.runtime import disk, memory, planner, pull
-from seedvr2x.runtime.job import Shot, target_size
+from seedvr2x.runtime.job import Shot
 from seedvr2x.runtime.manifest import NAME
 
 PROJECT = Path(__file__).resolve().parents[1]

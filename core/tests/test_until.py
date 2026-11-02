@@ -36,12 +36,13 @@ from test_cli_run import (
 from test_clock import measured
 
 from seedvr2x import cli, clock
-from seedvr2x.media.files import size_said
+from seedvr2x.clock import spoken
+from seedvr2x.files import size_said
 from seedvr2x.runtime import calibration, run, timing
 from seedvr2x.runtime import stop as stop_module
 from seedvr2x.runtime.plan import Plan
 from seedvr2x.runtime.shot import shot_layout
-from seedvr2x.runtime.timing import Clock, Kind, Model, spoken
+from seedvr2x.runtime.timing import Clock, Kind, Model
 
 # A step of the stand-in, an encode, a window or a shot's decode, on the test's clock.
 STEP = 60.0
@@ -794,7 +795,7 @@ def test_estimates_follow_a_drifting_card(
     # The steps take 1.3 times their model, by the size. A kind's first unit is estimated by the
     # model as it was calibrated; from its fourth, the median of the last ratios, 1 (the
     # calibration's) and three of 1.3, is 1.3 and the estimates are the steps' times.
-    from seedvr2x.runtime.shot import padded_length
+    from seedvr2x.frames import padded_length
 
     caplog.set_level(logging.DEBUG, logger="seedvr2x.runtime.run")
     source_path = job(tmp_path, monkeypatch)
