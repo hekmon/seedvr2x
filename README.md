@@ -1,11 +1,15 @@
 # seedvr2x
 
 **Upscale whole films and episodes with [SeedVR2](https://github.com/ByteDance-Seed/SeedVR), in
-one command.** SeedVR2's own code restores a video in one pass, every frame held in the GPU's
-memory at once: an 80 GB card holds about 4 seconds at 720p, and a film runs two hours. seedvr2x
-is built for the long input: it finds the shots, sizes the work to the GPU it is given, and runs
-for days if it must, stopping and resuming where it left off. It gives back a lossless master,
-or a finished file with the source's audio and subtitles.
+one command.**
+
+SeedVR2 is ByteDance Seed's one-step diffusion model for video restoration. Its original code
+restores a video in one pass, every frame held in the GPU's memory at once: an 80 GB card holds
+about 4 seconds at 720p, and a film runs two hours.
+
+seedvr2x is a runtime built around SeedVR2 for long videos: it finds the shots, sizes the work
+to the GPU it is given, and runs for days if it must, stopping and resuming where it left off.
+It gives back a lossless master, or a finished file with the source's audio and subtitles.
 
 ![The same square of a frame: the 960×540 input, then seedvr2x's 1920×1080 output](apps/seedvr2x/images/before-after.png)
 
@@ -15,10 +19,7 @@ compressed (left), then upscaled to 1080p by seedvr2x at `--quality maximum` (ri
 square of each enlarged. [The manual](apps/seedvr2x/MANUAL.md#an-example-sol-levante) sets it
 beside the original and the other levels.</sub>
 
-SeedVR2 is ByteDance Seed's one-step diffusion model for video restoration. seedvr2x runs its
-model code, as
-[numz's ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
-carries it, and builds around it what a whole film needs:
+## Why seedvr2x
 
 - **It fits your GPU without tuning.** A planner sizes the work from the memory free on the
   card: how many frames the model takes at once, how much of the model waits in system memory,
@@ -27,8 +28,8 @@ carries it, and builds around it what a whole film needs:
 - **Every frame at the model's best, on demand.** The model packs frames 4 at a time and
   initially rebuilds 3 of every 4 softer, only the last at its best. `--quality maximum`, the
   picture above, runs each shot 4 times, shifted a frame each time, and takes every frame from
-  the run that rebuilds it best, in four times the GPU time. `enhanced` takes 1 frame in 2 from
-  its best run and the others from the next best, in twice the time.
+  the run that rebuilds it best, in four times the GPU time. `--quality enhanced` takes 1 frame
+  in 2 from its best run and the others from the next best, in twice the time.
 - **It stops and resumes.** Every piece of work is saved as it is made. Stop it, or let
   `--until 07:30` stop it before morning: the same command resumes, and the result is the
   uninterrupted run's, bit for bit.
@@ -45,11 +46,11 @@ carries it, and builds around it what a whole film needs:
     space, it drops by 80% and nothing softens.
 - **The source's colours, the model's detail.** The model shifts colours. seedvr2x's own
   correction takes the colour back from the source and keeps the model's detail, with less
-  colour error than a LAB correction at every scale, and less flicker.
+  colour error than a LAB correction, from fine detail to broad areas, and less flicker.
 - **Lossless, then your way.** A 10-bit FFV1 master, tagged so that it looks like its source in
   any player, every frame checksummed. Compress it with your own encoder's command, during the
   run or after.
-- **Built on measurement.** Its defaults are measured, and the measurements published in
+- **Built on measurement.** Its defaults are measured, and the measurements are published in
   [research/](research/) with the scripts that made them: memory, speed, quality, colour.
 
 ## Try it
