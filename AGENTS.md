@@ -12,9 +12,9 @@ missing is settled in DESIGN.md first, not changed in passing.
 ## Layout
 
 ```
-seedvr2x/
-  AGENTS.md DESIGN.md README.md LICENSE NOTICE
-  pyproject.toml uv.lock .python-version
+AGENTS.md DESIGN.md README.md LICENSE NOTICE
+core/                    the library: distribution seedvr2x-core, import seedvr2x
+  pyproject.toml .python-version LICENSE NOTICE
   src/seedvr2x/
     cli.py __main__.py   CLI layer: options, logging
     media/               I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
@@ -24,10 +24,27 @@ seedvr2x/
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
   tests/
   tools/vendor.py        copy, diff and check of the vendored code
+  tools/compare.py       two runs' outputs compared bit for bit
+apps/cli/                the seedvr2x command: distribution seedvr2x
+  pyproject.toml uv.lock .python-version LICENSE
+  README.md MANUAL.md images/
+research/ models/ upstream/
 ```
 
-The layers are DESIGN.md's (Architecture). This is the only uv project of the repository: the
-scripts in `../research/` stay standalone.
+The layers are DESIGN.md's (Architecture), the layout its Repository and apps. Two uv projects:
+`core/` declares the library's dependencies as ranges; `apps/cli/` is the command's, with the
+exact pins, the lock and the dev tools, and installs `core/` by path, editable. Its environment
+is the one shipped, and the one the library is checked and tested in. The command's code,
+`cli.py` and the video-only code, stays in `core/` until DESIGN.md's step 3: `apps/cli/` has no
+module of its own yet. The scripts in `research/` stay standalone.
+
+- The CLI, from `apps/cli/`: `uv sync`, then `uv run seedvr2x --help`.
+- The checks and the tests, from `core/`, in the CLI's environment: `uv run --project
+  ../apps/cli` before each command ([Checks](#checks)).
+- No environment of `core/`'s own: its pyproject says `managed = false`, so that a plain
+  `uv run` there makes no lock or environment from the ranges, which wouldn't be the one shipped.
+- Paths below are `core/`'s (`src/`, `tests/`, `tools/`) unless they say otherwise; README.md
+  and MANUAL.md are `apps/cli/`'s.
 
 ## The vendored model layer
 
@@ -70,17 +87,17 @@ beside it; the `__init__.py` is seedvr2x's.
   The file's own directory is left out, `inference-pytorch` being no name Python imports.
 - **Byte for byte,** never reformatted, excluded from ruff and pyright as `vendor/` is:
   `tests/test_detector.py` holds the file and the licence to their SHA-256 at that commit, those
-  `../models/transnetv2_weights.py` pins (`SOURCES`), so any change is deliberate. It runs with
+  `models/transnetv2_weights.py` pins (`SOURCES`), so any change is deliberate. It runs with
   the locked torch unchanged; a change would be marked as `vendor/`'s are, its pin changed with it.
 - `runtime/detector.py` builds it, loads seedvr2x's `transnetv2.safetensors` into it (pinned in
-  `runtime/pull.py`, made by `../models/transnetv2_weights.py`) and runs measurement's windows on
-  it. NOTICE and README.md credit it.
+  `runtime/pull.py`, made by `models/transnetv2_weights.py`) and runs measurement's windows on
+  it. `core/`'s NOTICE and `apps/cli/`'s README.md credit it.
 
 ## Environment
 
-- A uv project on Python 3.13: `uv sync` creates `.venv` with the locked versions and the dev
-  tools.
-- The dependencies are pinned to the versions of the numz environment milestone 1 is compared
+- The CLI's uv project, on Python 3.13: `uv sync` in `apps/cli/` creates `apps/cli/.venv` with
+  the locked versions, `core/` installed editable, and the dev tools.
+- Its dependencies are pinned to the versions of the numz environment milestone 1 is compared
   with, so that the comparison differs by code only: torch and torchvision (CUDA 13.0 builds, from
   PyTorch's index), diffusers, rotary-embedding-torch and the rest. Bump one on purpose, and run
   that comparison again.
@@ -105,15 +122,17 @@ beside it; the `__init__.py` is seedvr2x's.
 
 ## Checks
 
+From `core/`:
+
 ```
-uv run ruff format --check
-uv run ruff check
-uv run pyright
-uv run pytest
+uv run --project ../apps/cli ruff format --check
+uv run --project ../apps/cli ruff check
+uv run --project ../apps/cli pyright
+uv run --project ../apps/cli pytest
 ```
 
 - ruff: line length 100, rules E, F, W, I, B, UP and RUF. The vendored code, `vendor/` and
-  `transnetv2/`, is excluded from formatting and from that lint. `uv run tools/vendor.py check`
+  `transnetv2/`, is excluded from formatting and from that lint. `tools/vendor.py check`
   lints `vendor/` for errors only (syntax errors, undefined names), and reports those that numz's
   own files don't have: numz has some already, false positives and a bug in a class nothing
   builds. `transnetv2/` is held to its pinned bytes (`tests/test_detector.py`).
@@ -122,9 +141,9 @@ uv run pytest
 
 ## Tests
 
-- `uv run pytest` runs on the CPU, needs no model and is quick. Tests that need ffmpeg skip
-  without a build seedvr2x accepts (see [Environment](#environment)).
-- `uv run pytest -m gpu` runs the tests that need CUDA, never selected by default.
+- `pytest` (as in [Checks](#checks)) runs on the CPU, needs no model and is quick. Tests that
+  need ffmpeg skip without a build seedvr2x accepts (see [Environment](#environment)).
+- `pytest -m gpu` runs the tests that need CUDA, never selected by default.
 - Edit nothing under `src/` while a test run is going: a job's
   settings record a hash of the package's files (`manifest.code_sha256`), so a file changed
   between a test's first run and its resume makes the resume another job, and the failure looks
@@ -150,7 +169,7 @@ uv run pytest
   Hugging Face's cache too, about 33 GB the first time; `test_regression.py`'s
   `test_milestone1_from_the_cache` (GPU) then runs the default models from the cache,
   `HF_HUB_OFFLINE=1`, and skips until the three it takes are there, saying how to fetch them
-  alone (`uv run hf download`, 17 GB).
+  alone (`hf download`, 17 GB).
 - `tests/test_regression.py` (GPU) holds every change to the runtime or the vendored code to
   milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames,
   with numz's 7B fp16, with seedvr2x's own 7B, and with seedvr2x's sharp 7B against numz's run
@@ -189,17 +208,17 @@ uv run pytest
   padding. `test_regression.py`'s padding cases and the other GPU tests run in the default
   padding.
 - `split`, the colour correction, is held to the colour study's own `split()`
-  (`../research/scripts/colour_variants.py`): on the CPU by `tests/test_colour.py`, on the GPU
+  (`research/scripts/colour_variants.py`): on the CPU by `tests/test_colour.py`, on the GPU
   in the pipeline by `tests/test_split.py`, at x2 and x4, in one window and in three, within one
   16-bit code. Both load the study's script with its baseline `colour.py` from the repository
   (the baseline from git), or from `SEEDVR2X_COLOUR_STUDY` (the directory holding
-  `colour_variants.py`) and `COLOUR_BASELINE` (that `colour.py`) on a copy of `seedvr2x/` alone,
+  `colour_variants.py`) and `COLOUR_BASELINE` (that `colour.py`) on a copy of `core/` alone,
   and skip without them; one of the two set without the other fails. `tests/test_split.py` also
   scores `split` against milestone 1's input with milestone 5's metrics, its thresholds its first
   run's figures (2026-10-09) plus milestone 5's tolerances.
 - The frame index and the reads through it (`media/index.py`, `media/reader.py`) are held by
   `tests/test_index.py` to full decodes of files it makes, the kinds of
-  `../research/scripts/seek_test.py`'s `synth` and three of `seeking.md`'s failure mechanisms
+  `research/scripts/seek_test.py`'s `synth` and three of `seeking.md`'s failure mechanisms
   made on purpose; the first pass's reading of ffmpeg's lines (`media/scan.py`) to a fake ffmpeg
   on `PATH` writing chosen ones, and to a source whose titles and language tag are made of its own
   lines; and a jump in the timestamps to MPEG-TS files joined, with the remux its refusal gives,
@@ -222,7 +241,7 @@ uv run pytest
   mean value): its file an empty `transnetv2.safetensors` beside the stand-in's model files,
   pinned so in place of TransNetV2's weights, which the pin's check then checks.
 - The cuts drawn from the probabilities (`runtime/cuts.py`) are held by `tests/test_cuts.py` to
-  measurement's own detection (`../research/scripts/scd_scores.py`'s `tnet_detections`, copied
+  measurement's own detection (`research/scripts/scd_scores.py`'s `tnet_detections`, copied
   there, on the float32 values read as float64, as its analysis reads them), the possible cuts
   and the cut list `--plan` writes with them, read back by `--cuts`. The CLI's
   (`--cut-threshold`, `--plan`, a plan planned again or taken up in another environment) by
@@ -402,17 +421,17 @@ uv run pytest
 ## Comments and documents
 
 - A comment gives the reason for the code it sits on, with the measurement or source behind it:
-  a section of `../research/docs/`, a numz `file:line` at `4490bd1`, a bug of `../research/bugs/`.
+  a section of `research/docs/`, a numz `file:line` at `4490bd1`, a bug of `research/bugs/`.
   Every figure is measured or sourced. A comment repeating what the code says is noise.
 - The docstrings of what other modules use give the units (frames, latent frames, GiB), and for a
   tensor its shape, dtype and range: `(T, H, W, C) float32 in [0, 1]`.
-- Prose is in British English, as in `../research/` and DESIGN.md. Identifiers keep the spelling of
+- Prose is in British English, as in `research/` and DESIGN.md. Identifiers keep the spelling of
   the libraries they deal with (`color_range`, as ffmpeg, torch and numz write it).
 - No silent fallback: a fallback is logged with its reason. numz's silent ones are among its bugs
   ([cli-flags.md](research/docs/cli-flags.md)).
 - Each document has its job: DESIGN.md decides; this file says how to work on the code, and
   records the approaches rejected, and why, as they come; README.md is for users;
-  `../research/docs/` holds the measurements.
+  `research/docs/` holds the measurements.
 
 ## Commits
 
