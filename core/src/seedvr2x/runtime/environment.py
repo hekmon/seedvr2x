@@ -17,6 +17,9 @@ import torch
 # seedvr2x's own modules, which the run is made of: their files are hashed (settings.code), and
 # the distributions they import are versioned (versions).
 PACKAGE = Path(__file__).resolve().parents[1]
+# Their distribution: the command's, seedvr2x, requires it and its dependencies (DESIGN.md,
+# Repository and apps).
+LIBRARY = "seedvr2x-core"
 
 # A requirement's distribution and the extras it asks of it, and the extras a marker names
 # (PEP 508): `cuda-toolkit[cublas,cudart]==13.0.3; platform_system == "Linux"`.
@@ -184,8 +187,10 @@ def _providers() -> Mapping[str, list[str]]:
 @functools.cache
 def _declared() -> frozenset[str]:
     """The distributions seedvr2x requires and flash-attn, and their requirements, through the
-    extras each asks: read once, as _providers."""
-    return frozenset(_required([*(metadata.requires("seedvr2x") or []), *UNDECLARED]))
+    extras each asks: read once, as _providers. The library's requirements (LIBRARY), not an
+    app's: an app's distribution requires the library itself, whose files settings.code hashes
+    already, and only the library's is in every environment it runs in."""
+    return frozenset(_required([*(metadata.requires(LIBRARY) or []), *UNDECLARED]))
 
 
 def _libraries(root: str) -> set[str]:

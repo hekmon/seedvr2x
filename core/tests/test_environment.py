@@ -102,6 +102,18 @@ def test_download_only_not_recorded(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_the_record_is_the_librarys_requirements() -> None:
+    # The library's requirements, not the command's distribution's (DESIGN.md, Repository and
+    # apps: seedvr2x requires seedvr2x-core): neither of seedvr2x's own distributions is recorded,
+    # their code being settings.code, and the record is the one made before the library had a
+    # distribution of its own.
+    own = {"seedvr2x", "seedvr2x-core"}
+    assert not own & environment._declared()  # pyright: ignore[reportPrivateUsage]
+    assert not own & set(environment.versions())
+    required = (environment.REQUIREMENT.match(each) for each in metadata.requires("seedvr2x") or [])
+    assert environment.LIBRARY in {environment._name(m[1]) for m in required if m}  # pyright: ignore[reportPrivateUsage]
+
+
 def stand_in_distribution(site: Path, name: str, module: str, *requires: str) -> None:
     """Installs a distribution of one empty module into site."""
     (site / module).mkdir()
