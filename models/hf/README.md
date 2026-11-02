@@ -47,9 +47,10 @@ restoration model. ByteDance publishes its weights in float32
 Each file here is one of them with every tensor rounded to the nearest float16, ties to even,
 under the same name and shape. Nothing else changes. numz's float16 files
 ([numz/SeedVR2_comfyUI](https://huggingface.co/numz/SeedVR2_comfyUI)), which
-ComfyUI-SeedVR2_VideoUpscaler runs, hold the same values: `seedvr2_fp16.py` checks ours against
-them, equal element for element. Only the header differs, which holds the metadata, and the file
-names: numz's downloader deletes a file that bears one of its names with another SHA-256.
+ComfyUI-SeedVR2_VideoUpscaler runs, hold the same values: `seedvr2_fp16.py` checks this
+repository's files against them, equal element for element. Only the header differs, which
+holds the metadata, and the file names: numz's downloader deletes a file that bears one of its
+names with another SHA-256.
 
 ## Precision
 
@@ -69,7 +70,7 @@ The 7B DiT, the model that does the upscaling (the VAE turns frames into its inp
 can be stored in several formats. A smaller file saves memory, sometimes time, and loses some
 precision. These tables measure that loss on the weights themselves, against ByteDance's
 originals, and this repository's files on video too: first the files of this repository, then
-the SeedVR2 files other repositories publish, each against ours.
+the SeedVR2 files other repositories publish, each against this repository's.
 
 **This repository's files**
 
@@ -101,10 +102,10 @@ the SeedVR2 files other repositories publish, each against ours.
 > - only the DiT gets faster, and at 1080p it takes about a fifth of a job (the VAE, which stays
 >   in float16, takes the rest).
 >
-> By our estimate, multiplies 3 to 4 times faster make the DiT about twice as fast, and a job
-> about 10% shorter. No speed is measured here. The main gain of a smaller file is memory: on a
-> 16–32 GB card, seedvr2x can process more frames at a time and move less of the model out to
-> system memory.
+> seedvr2x's estimate: multiplies 3 to 4 times faster make the DiT about twice as fast, and a
+> job about 10% shorter. No speed is measured here. The main gain of a smaller file is memory:
+> on a 16–32 GB card, seedvr2x can process more frames at a time and move less of the model out
+> to system memory.
 
 > **At 4K, the fp8 file in W8A8 and the NVFP4 file in W4A4 need care with comfy-kitchen.**
 >
@@ -159,9 +160,9 @@ How to read it:
   weight; here each is the one, of that scale and the 7 below it, that minimises its block's
   error, in the same layout, which comfy-kitchen runs as it is.
 
-**Other repositories' files, against ours**
+**Other repositories' files, against this repository's**
 
-| File | Repository | Size (7B) | Error per weight: typical (worst layer) | Against ours |
+| File | Repository | Size (7B) | Error per weight: typical (worst layer) | Against this repository's |
 |---|---|---|---|---|
 | float32, the original | ByteDance-Seed/SeedVR2-7B | 33 GB | 0, the reference | the source of every file here; too big to run |
 | float16 (7B, sharp 7B, VAE) | numz/SeedVR2_comfyUI | 16.5 GB | 0.02% (0.02%) | **the same values**, checked element for element; only the header differs |
@@ -174,8 +175,8 @@ How to read it:
 | MXFP8 | Comfy-Org/SeedVR2 | 8.6 GB | not measured | Blackwell only; not made here |
 | 3B (float16, fp8, GGUF) | numz/SeedVR2_comfyUI, AInVFX/SeedVR2_comfyUI | | | ByteDance's first 3B weights, which ByteDance replaced on 2025-06-22 (checked on the float16 and fp8 files); on video, at 1080p, the current weights' output differs from the first weights' more than two seeds of a 7B do, about as much as the 7B's from the sharp 7B's (seedvr2x's `models/VALIDATION.md`) |
 
-"The same" means weights as close to ByteDance's as ours; the files' bytes still differ, by their
-header and by the precision they were made from.
+"The same" means weights as close to ByteDance's as this repository's; the files' bytes still
+differ, by their header and by the precision they were made from.
 
 ## TransNetV2
 

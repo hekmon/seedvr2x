@@ -47,7 +47,7 @@ the library is checked and tested in. The build backends differ: `core/` is buil
 folder package; the CLI by setuptools, which lists each top-level module (`py-modules`,
 `packages`), and `apps/seedvr2x/tests/test_names.py` holds the list to the files and to
 `manifest.MODULES`, and each name to its own file in the environment, so that no dependency's
-`run` or `media` shadows ours. The scripts in `research/` stay standalone.
+`run` or `media` shadows the CLI's. The scripts in `research/` stay standalone.
 
 - The CLI, from `apps/seedvr2x/`: `uv sync`, then `uv run seedvr2x --help`. There is no
   `python -m seedvr2x`: the tests start the venv's `seedvr2x` script.
@@ -73,7 +73,7 @@ is and what numz changed in it.
   model code imports its own modules with relative imports only, so the copy imports unchanged,
   and its diff against numz only shows real changes.
 - **Never reformatted**, and linted for errors only (see [Checks](#checks)): a reformat would bury
-  our changes in the diff.
+  seedvr2x's changes in the diff.
 - **Modified files are marked**, as Apache-2.0 §4(b) requires: one line right under the original
   header, `# Modified for seedvr2x: <summary>.`, and a `# seedvr2x: <why>` comment on each change.
 - **Nothing in it imports numz's runtime** (`src/optimization`, `src/utils`, the rest of
@@ -89,7 +89,8 @@ is and what numz changed in it.
   submodules' git objects at the pinned commits, never from their work trees: a moved submodule
   can't shift the reference. `tools/vendor.py check`, also run by the tests, verifies that a file
   carries the marker exactly when it differs from numz, that the original headers are kept, that
-  nothing imports numz's runtime, and that our edits add no syntax error or undefined name.
+  nothing imports numz's runtime, and that seedvr2x's edits add no syntax error or undefined
+  name.
 
 ## The vendored TransNetV2
 
@@ -477,6 +478,8 @@ uv run pytest
   tensor its shape, dtype and range: `(T, H, W, C) float32 in [0, 1]`.
 - Prose is in British English, as in `research/` and DESIGN.md. Identifiers keep the spelling of
   the libraries they deal with (`color_range`, as ffmpeg, torch and numz write it).
+- The documents speak as the project, never "we", "our" or "ours": seedvr2x's model files, found
+  by seedvr2x's research, this repository's files (the user, 2026-11-02).
 - No silent fallback: a fallback is logged with its reason. numz's silent ones are among its bugs
   ([cli-flags.md](research/docs/cli-flags.md)).
 - Each document has its job: DESIGN.md decides; this file says how to work on the code, and

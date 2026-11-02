@@ -12,10 +12,8 @@ source's audio and subtitles.
 SeedVR2 is ByteDance Seed's one-step diffusion model for video restoration. seedvr2x runs
 ByteDance's model code, as
 [numz's ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler)
-modified it, and replaces what surrounds the model: reading and writing video, cutting it into
-pieces, fitting the GPU's memory. That is where nearly all of the
-[26 bugs](../../research/bugs/README.md) our research found in numz's CLI live, and where a long run
-is won or lost.
+modified it, and builds what surrounds the model for long runs: reading and writing video,
+cutting it into pieces, fitting the GPU's memory: the parts where a long run is won or lost.
 
 - **Shot by shot.** seedvr2x finds the cuts itself and upscales each shot on its own, from cut
   to cut. Nothing crosses a cut, and no batch boundary is left inside a shot: a long shot runs
@@ -287,17 +285,18 @@ Version 0.1.0 runs the float16 files, the sharp 7B by default,
 preferred to the regular 7B or no different on 67 (preferred on 27, the regular 7B on 8), and
 it has the same memory and time ([the model](MANUAL.md#the-model)).
 
-- **Smaller files come later.** The repository also holds int8, fp8, GGUF and NVFP4 files of
-  both 7Bs, each measured against the float16 model on video; seedvr2x will run them in a later
-  phase. The [model card](https://huggingface.co/hekmon/seedvr2x) has their tables: what each
-  gives up, its speed, its error per weight, and other repositories' files against ours, with
-  each file's SHA-256, origin and change. [FORMATS.md](../../models/FORMATS.md) holds the formats
-  and [VALIDATION.md](../../models/VALIDATION.md) the runs.
-- **Other repositories' files.** numz's float16 7B files hold the same values as ours, only
-  their header differs: version 1 runs them, given with `--model-dir` and `--dit-model`, the log
-  saying such a file isn't one of the pinned ones and the job's record keeping its SHA-256.
-  Comfy-Org's float16 7B is refused, for the text embeddings it holds beside the model's
-  tensors.
+- **Smaller files, already published.** The repository also holds int8, fp8, GGUF and NVFP4
+  files of both 7Bs, each measured against the float16 model on video; seedvr2x will run them,
+  int8 first ([the roadmap](../../README.md#roadmap)). The
+  [model card](https://huggingface.co/hekmon/seedvr2x) has their tables: what each gives up, its
+  speed, its error per weight, and other repositories' files against seedvr2x's, with each
+  file's SHA-256, origin and change. [FORMATS.md](../../models/FORMATS.md) holds the formats and
+  [VALIDATION.md](../../models/VALIDATION.md) the runs.
+- **Other repositories' files.** numz's float16 7B files hold the same values as seedvr2x's,
+  only their header differs: version 1 runs them, given with `--model-dir` and `--dit-model`,
+  the log saying such a file isn't one of the pinned ones and the job's record keeping its
+  SHA-256. Comfy-Org's float16 7B is refused, for the text embeddings it holds beside the
+  model's tensors.
 - **No 3B,** now or later: neither 3B in float16 (6.8 GB) comes as close to the source as the
   sharp 7B's 4.8 GB dynamic GGUF ([VALIDATION.md](../../models/VALIDATION.md)).
 
@@ -329,10 +328,11 @@ seedvr2x is under the Apache License 2.0 ([LICENSE](LICENSE)). [NOTICE](NOTICE) 
 - **The colour correction's wavelet split** is StableSR's method, whose code is under a
   non-commercial licence: seedvr2x's is rewritten from the method, with none of that code.
 
-The manual's example picture, [images/quality-teeth.png](images/quality-teeth.png), is made
-from frames of [Sol Levante](https://opencontent.netflix.com/), Netflix and Production I.G,
-CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/): frames of the SDR UHD master,
-downscaled, compressed and upscaled with seedvr2x to compare its `--quality` levels.
+The manual's example picture, [images/quality-teeth.png](images/quality-teeth.png), and the
+front page's, [images/before-after.png](images/before-after.png), are made from frames of
+[Sol Levante](https://opencontent.netflix.com/), Netflix and Production I.G, CC BY 4.0
+(https://creativecommons.org/licenses/by/4.0/): frames of the SDR UHD master, downscaled,
+compressed and upscaled with seedvr2x to compare its `--quality` levels.
 
 The model files are under the Apache License 2.0, as ByteDance's, and TransNetV2's under the MIT
 License: the [model card](https://huggingface.co/hekmon/seedvr2x) and its notices say what each
@@ -349,5 +349,4 @@ colour correction, the memory planner with BlockSwap and VAE tiling, the time es
 finished file's assembly and its record beside it, `--segment-cmd`, `--compile` (the VAE alone),
 and `seedvr2x verify`.
 
-Later versions: HDR, the smaller model files of [Which file to use](#which-file-to-use), and
-Windows itself.
+What comes next: [the roadmap](../../README.md#roadmap).
