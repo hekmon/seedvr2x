@@ -1,8 +1,7 @@
 [project]
-name = "seedvr2x"
+name = "seedvr2x-core"
 version = "0.1.0.dev0"
-description = "SeedVR2 video upscaler for long runs: lossless masters, no seams inside a shot"
-readme = "README.md"
+description = "SeedVR2 upscaling library: the model and its files, placement, tiling, colour correction"
 # MIT: TransNetV2's model, vendored, and its windows, rewritten (NOTICE).
 license = "Apache-2.0 AND MIT"
 license-files = ["LICENSE", "NOTICE", "src/seedvr2x/transnetv2/LICENSE"]
@@ -23,36 +22,20 @@ dependencies = [
     "torchvision==0.29.1",
 ]
 
-[project.scripts]
-seedvr2x = "seedvr2x.cli:main"
-
-[dependency-groups]
-dev = ["pyright[nodejs]", "pytest", "ruff"]
-
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+# The import name stays seedvr2x, the distribution's name being seedvr2x-core (DESIGN.md,
+# Repository and apps).
+module-name = "seedvr2x"
+
 [tool.uv]
-# Linux first (DESIGN.md). FlashAttention 2 is not a dependency: see AGENTS.md, Environment.
-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
-# torch's CUDA support packages, at the versions numz's environment got from PyTorch's index:
-# resolved from PyPI, they came out newer (cuda-bindings 13.4.3, cuda-pathfinder 1.8.3,
-# nvidia-nvjitlink 13.4.92).
-constraint-dependencies = [
-    "cuda-bindings==13.3.1",
-    "cuda-pathfinder==1.6.0",
-    "nvidia-nvjitlink==13.3.33",
-]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
-
-[[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
+# No environment or lock of its own: the library is checked and tested in the CLI's environment,
+# the one shipped (uv run --project ../apps/cli, from here; AGENTS.md, Layout). Resolved from the
+# ranges, uv would make another.
+managed = false
 
 [tool.ruff]
 line-length = 100
@@ -74,7 +57,9 @@ include = ["src", "tests", "tools"]
 exclude = ["src/seedvr2x/vendor", "src/seedvr2x/transnetv2", "**/__pycache__"]
 strict = ["src/seedvr2x"]
 pythonVersion = "3.13"
-venvPath = "."
+# The library is checked in the CLI's environment, the one shipped (DESIGN.md, Repository and
+# apps): see AGENTS.md, Checks.
+venvPath = "../apps/cli"
 venv = ".venv"
 
 [tool.pytest.ini_options]

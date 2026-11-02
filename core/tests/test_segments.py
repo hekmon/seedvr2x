@@ -235,6 +235,25 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 VERSION_2_BLOB = "4187c45028f04ae2509d83483d7a1850dc802686"
 
 
+def test_the_code_hash_holds_wherever_the_package_sits(tmp_path: Path) -> None:
+    # settings.code hashes the package's files by their paths inside it, so that the package moved
+    # (DESIGN.md, Repository and apps: seedvr2x/src/ to core/src/) leaves a job's record as it was
+    # and the job resumes: the same files elsewhere give the same hash.
+    from seedvr2x.runtime import manifest
+
+    package = Path(manifest.__file__).resolve().parents[1]
+    moved = tmp_path / "elsewhere" / "src" / package.name
+    shutil.copytree(package, moved, ignore=shutil.ignore_patterns("__pycache__"))
+    spec = importlib.util.spec_from_file_location(
+        "moved_manifest", moved / "runtime" / "manifest.py"
+    )
+    assert spec is not None and spec.loader is not None
+    copy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(copy)
+    assert Path(copy.__file__ or "").is_relative_to(tmp_path)
+    assert copy.code_sha256() == code_sha256()
+
+
 def test_older_code_refuses_version_3(tmp_path: Path) -> None:
     # Older code refuses a manifest of this code's for its version, naming both, rather than fail
     # on its shape (manifest.VERSION). Skipped without git or that blob, as on a copy of seedvr2x/

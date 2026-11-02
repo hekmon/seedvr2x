@@ -650,6 +650,7 @@ dependencies = [
     { name = "omegaconf" },
     { name = "rotary-embedding-torch" },
     { name = "safetensors" },
+    { name = "seedvr2x-core" },
     { name = "torch" },
     { name = "torchvision" },
 ]
@@ -670,6 +671,7 @@ requires-dist = [
     { name = "omegaconf", specifier = "==2.3.1" },
     { name = "rotary-embedding-torch", specifier = "==0.9.1" },
     { name = "safetensors", specifier = "==0.8.0" },
+    { name = "seedvr2x-core", editable = "../../core" },
     { name = "torch", specifier = "==2.14.1", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torchvision", specifier = "==0.29.1", index = "https://download.pytorch.org/whl/cu130" },
 ]
@@ -679,6 +681,35 @@ dev = [
     { name = "pyright", extras = ["nodejs"] },
     { name = "pytest" },
     { name = "ruff" },
+]
+
+[[package]]
+name = "seedvr2x-core"
+version = "0.1.0.dev0"
+source = { editable = "../../core" }
+dependencies = [
+    { name = "diffusers" },
+    { name = "einops" },
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "omegaconf" },
+    { name = "rotary-embedding-torch" },
+    { name = "safetensors" },
+    { name = "torch" },
+    { name = "torchvision" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "diffusers", specifier = "==0.40.0" },
+    { name = "einops", specifier = "==0.8.2" },
+    { name = "huggingface-hub", specifier = "==1.33.0" },
+    { name = "numpy", specifier = "==2.5.2" },
+    { name = "omegaconf", specifier = "==2.3.1" },
+    { name = "rotary-embedding-torch", specifier = "==0.9.1" },
+    { name = "safetensors", specifier = "==0.8.0" },
+    { name = "torch", specifier = "==2.14.1" },
+    { name = "torchvision", specifier = "==0.29.1" },
 ]
 
 [[package]]
