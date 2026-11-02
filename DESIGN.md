@@ -117,8 +117,8 @@ never requires it.
     - The later version measures passthrough against tone mapping first (2 HDR clips at
       1080p, about 1 GPU hour) and carries HDR10's metadata.
   - a rotation or flip in the display matrix (phone and camera files). The decode passes
-    `-noautorotate`, so nothing rotates behind our back. The likely later way is to process the
-    frames as stored and carry the rotation to the output.
+    `-noautorotate`, so nothing rotates behind seedvr2x's back. The likely later way is to
+    process the frames as stored and carry the rotation to the output.
   - declared cropping (MP4 `clap`, Matroska `PixelCrop`), which ffmpeg applies on decode. The
     likely later way is to accept the cropped picture and size everything from it.
   - any pixel format outside the tested list. Accepted:
@@ -132,8 +132,8 @@ never requires it.
     opaque), palette, grey, XYZ, Bayer, float, 5-6-5 RGB, 4:4:0 above 8 bits,
     `yuvj440p`/`yuvj411p`.
   - matrices other than BT.709, BT.601 (`bt470bg`, `smpte170m`) and BT.2020 non-constant
-    luminance. The constant-luminance ones and ICtCp need the transfer function, which we
-    never convert. FCC, SMPTE 240M and YCgCo are rare and would go untested.
+    luminance. The constant-luminance ones and ICtCp need the transfer function, which seedvr2x
+    never converts. FCC, SMPTE 240M and YCgCo are rare and would go untested.
   - RGB tagged limited range: rare, most likely a mis-tag, and either reading could be wrong
   - timestamps that jump: a step back of more than 0.1 s, or one forward of more than 10 s
     (ffmpeg's own bounds). The first pass keeps the source's timestamps, which the frame index
@@ -326,7 +326,7 @@ In steps:
        package folder would not be. None clashes today, with the standard library or the 248
        packages uv holds on the machine; a test holds that each name resolves to the CLI's
        own file, so that a dependency bringing a `run` or a `media` fails it, never replaces
-       ours silently. The CLI is never installed into a shared Python.
+       the CLI's own silently. The CLI is never installed into a shared Python.
      - It builds with setuptools, its modules listed (uv's backend packages folders only,
        tested on 2026-11-02); the `seedvr2x` command installs as before.
      - The library's import name `seedvr2x` and the folder's name don't meet: Python looks
@@ -361,9 +361,9 @@ In steps:
 | Layer | Contents | Origin |
 |---|---|---|
 | Model | DiT 7B/3B, VAE, windowed attention, RoPE, Euler sampler, configs, text embeddings | **vendored** from `upstream/seedvr2-numz` (ByteDance code, numz changes) |
-| Runtime | shot pipeline, latent stitching, memory planner, BlockSwap, resume | ours |
-| I/O | ffmpeg pipes in and out, FFV1/PNG writers, manifest | ours |
-| CLI | options, logging | ours |
+| Runtime | shot pipeline, latent stitching, memory planner, BlockSwap, resume | seedvr2x's |
+| I/O | ffmpeg pipes in and out, FFV1/PNG writers, manifest | seedvr2x's |
+| CLI | options, logging | seedvr2x's |
 
 **One long-running process** handles a whole job: the models are loaded once, and the plan says
 which stay on the GPU in each phase (see [BlockSwap, rewritten](#blockswap-rewritten)).
@@ -472,16 +472,16 @@ connect through files.
   - the configs and `pos_emb.pt`/`neg_emb.pt`
 
   About 11k lines ([provenance](research/docs/provenance.md)).
-- The submodules stay untouched. A script (`tools/vendor.py diff`) diffs our copy against numz
-  and ByteDance, so every change stays visible.
-- Changes made in our copy, each one checked bit-identical to numz by the milestone-1
+- The submodules stay untouched. A script (`tools/vendor.py diff`) diffs seedvr2x's copy against
+  numz and ByteDance, so every change stays visible.
+- Changes made in seedvr2x's copy, each one checked bit-identical to numz by the milestone-1
   regression test:
   - **numz's runtime dependencies removed:** `retry_on_oom`, the attention dispatch, MPS
     detection, the banners and import-time shims, the model registry
     (`src/utils/model_registry`), and the performance helpers
     (`src/optimization/performance`).
-  - **Logging:** `VideoDiffusionInfer` logs through numz's `Debug` object, which our runtime
-    supplies as a logging adapter.
+  - **Logging:** `VideoDiffusionInfer` logs through numz's `Debug` object, which seedvr2x's
+    runtime supplies as a logging adapter.
   - **Attention:** FlashAttention 2 when installed, else SDPA; any other mode is an error
     ([why](research/docs/attention.md)).
   - **Conv3d:** numz's workaround is removed. It called `torch.cudnn_convolution` directly,
@@ -528,8 +528,8 @@ connect through files.
   on 5 to 8 of the 8 clips for every score
   ([colour.md](research/docs/colour.md#a-float16-decode)). So no float16 decode, and no
   overflow fallback to go with it.
-- Licence: Apache-2.0. We keep the copyright headers, add a NOTICE, and mark modified files.
-  The StableSR-derived colour code (`color_fix.py`, non-commercial licence) is **not**
+- Licence: Apache-2.0. seedvr2x keeps the copyright headers, adds a NOTICE, and marks modified
+  files. The StableSR-derived colour code (`color_fix.py`, non-commercial licence) is **not**
   vendored: see [Colour correction](#colour-correction).
 
 ### Weights
@@ -572,7 +572,7 @@ two 7Bs' smaller files (below), their int8 files first:
   picture's rows. The colour study's scores count the bars, all but ΔE00's lightness and
   colour parts ([colour.md](research/docs/colour.md#what-step-7-recommends)).
 - **The regular 7B stays the reference** milestone 1 is checked with: numz's 7B fp16 file, and
-  ours equal to it.
+  seedvr2x's equal to it.
 - **Recognised by content.** A model file is checked by its own tensors, not by its name, which
   is what numz goes by (`src/core/model_configuration.py:718-720`): their names and shapes,
   pinned per architecture, and every tensor's dtype, read from the file's header without
@@ -664,14 +664,14 @@ What is known already:
     for another seed: within the seed spread on every metric
     ([numerics.md](research/docs/numerics.md#results)).
   - Converting from the master costs nothing more, so every file seedvr2x makes starts there.
-- **Files of our own,** made by `models/`'s scripts from the fp32 masters, the small tensors and
-  RoPE's frequencies kept in 16 bits, as in the Q4_K_M file. They are prepared ahead of phase 2,
-  on the CPU (the user's request, 2026-10-06), validated by GPU runs before implementation's
-  next steps, and uploaded with v1's files, every format of both 7Bs, each with its measured
-  quality (the user's choice, 2026-10-07):
+- **seedvr2x's own files,** made by `models/`'s scripts from the fp32 masters, the small tensors
+  and RoPE's frequencies kept in 16 bits, as in the Q4_K_M file. They are prepared ahead of
+  phase 2, on the CPU (the user's request, 2026-10-06), validated by GPU runs before
+  implementation's next steps, and uploaded with v1's files, every format of both 7Bs, each with
+  its measured quality (the user's choice, 2026-10-07):
   - Made, for the 7B and the sharp 7B, reproducible byte for byte, the 840 tensors outside the
-    288 block matrices our fp16 file's ([FORMATS.md](models/FORMATS.md); error per weight,
-    median and worst):
+    288 block matrices seedvr2x's fp16 file's ([FORMATS.md](models/FORMATS.md); error per
+    weight, median and worst):
   - fp8: the 288 block matrices in `e4m3fn` with one float32 scale per tensor (max |W| / 448),
     in comfy-kitchen's layout (weight and weight scale): 2.65% (2.67%); a scale per row gains
     nothing (2.64%). The activations get their scale at run time: multiplied in fp8 (W8A8) from
@@ -714,8 +714,8 @@ What is known already:
       8-bit multiply on GeForce cards from RTX 20, and comfy-kitchen's cheapest activation
       quantizer, fused, per token (compiled for Python 3.12 at most: on 3.13, see the int8
       note under [Weights](#weights)).
-  - **Validated on the GPU** (numz with comfy-kitchen's layers for our safetensors files, its
-    own loader for the GGUF ones; [VALIDATION.md](models/VALIDATION.md)), each file against
+  - **Validated on the GPU** (numz with comfy-kitchen's layers for seedvr2x's safetensors files,
+    its own loader for the GGUF ones; [VALIDATION.md](models/VALIDATION.md)), each file against
     its own model's float16 output at the same seed, at 1080p on 8 clips and at 4K on 5 shots
     for every file of the sharp 7B, on 6 for the 7B's (fp8 multiplied in 8 bits on 2; its Q4_K
     files and NVFP4 not yet):
@@ -754,14 +754,14 @@ What is known already:
     two importance files, the licences, the notice, the card and `SHA256SUMS`), each one's
     SHA-256 read back equal to `SHA256SUMS` and to its script's pin.
     - The names aren't numz's: numz's downloader deletes a file named like one of its own whose
-      SHA-256 differs (`src/utils/downloads.py:216-235`), and ours differ by their header, so
-      a model directory shared with numz would lose them.
+      SHA-256 differs (`src/utils/downloads.py:216-235`), and seedvr2x's differ by their header,
+      so a model directory shared with numz would lose them.
   - `models/`, at the repository's root, holds the scripts that make them. Each records its
-    inputs (URL, revision and SHA-256) and its outputs' SHA-256, and runs its check: our fp16
-    files equal numz's element for element; TransNetV2 in PyTorch matches its TensorFlow
+    inputs (URL, revision and SHA-256) and its outputs' SHA-256, and runs its check: seedvr2x's
+    fp16 files equal numz's element for element; TransNetV2 in PyTorch matches its TensorFlow
     original. A run from the masters gives the same bytes: the files are written in the
-    safetensors layout by our own writer, since the library writes the metadata in a random
-    order. The scripts run on
+    safetensors layout by seedvr2x's own writer, since the library writes the metadata in a
+    random order. The scripts run on
     their own, with inline dependencies (TensorFlow only in TransNetV2's conversion), so
     seedvr2x stays the repository's only uv project.
   - Every file is safetensors, TransNetV2's PyTorch conversion included: no pickle, and a
@@ -806,9 +806,9 @@ What is known already:
       is refused after the library's retries, about 23 s.
     - Built on 2026-10-09: the first pull on the GPU box fetched the three v1 files, 33.46 GB, in
       746 s, and the milestone-1 regression ran from the cache, offline, bit for bit.
-  - Our fp16 changes no bit of v1's output. numz's 7B and sharp 7B fp16 DiTs and its fp16 VAE
-    are the masters rounded to the nearest fp16, ties to even: every element of 1,128, 1,128
-    and 250 tensors, under the same names, the data sections byte for byte ours (the files
+  - seedvr2x's fp16 changes no bit of v1's output. numz's 7B and sharp 7B fp16 DiTs and its fp16
+    VAE are the masters rounded to the nearest fp16, ties to even: every element of 1,128, 1,128
+    and 250 tensors, under the same names, the data sections byte for byte seedvr2x's (the files
     differ in their headers' metadata alone). Truncation would differ on half the elements, a
     cast through bf16 on 87%. numz's 3B fp16 is ByteDance's first 3B master rounded the same
     way.
@@ -839,7 +839,7 @@ What is known already:
   On the 96 GB card at 1080p, windows are already longer than most shots: the gain is on small
   and mid-sized cards, and at 4K.
 - **Checks:** a file kept from numz is bit-identical to numz on milestone 1's input, the 3B fp8
-  against numz patched to use the fp16 RoPE values. A file of our own is judged against its
+  against numz patched to use the fp16 RoPE values. A file seedvr2x makes is judged against its
   float16 model's own seed spread on every kind of source, by the calibrated rule: a difference
   counts when its 95% interval excludes 0 and it exceeds K times that spread, K = 2.7 with 3
   seeds and 10.9 with 2, the multiple a further float16 seed exceeds 5% of the time. The plain
@@ -854,10 +854,10 @@ What is known already:
   each file's size, how it multiplies on each GPU generation (W8A8, W8A16, W4A4, W4A16), where
   it is faster and what that buys (the DiT is about a fifth of a 1080p run), and its measured
   quality against its float16 model's seed spread. A second table sets other repositories' files
-  (numz's, Comfy-Org's) against ours, measured the same way. Then the docs, per kind of source
-  (anime, dark, live action…), each figure read against the spread between seeds; `--plan`
-  showing what each model gets on the user's own card (window length, BlockSwap, tiles, time);
-  and whether the planner may pick a smaller file when the user allows it.
+  (numz's, Comfy-Org's) against seedvr2x's, measured the same way. Then the docs, per kind of
+  source (anime, dark, live action…), each figure read against the spread between seeds;
+  `--plan` showing what each model gets on the user's own card (window length, BlockSwap, tiles,
+  time); and whether the planner may pick a smaller file when the user allows it.
 
 ## Input
 
@@ -909,8 +909,9 @@ Decoding goes through an ffmpeg pipe:
   location, chroma kernel). Each is the tags' value; untagged values are guessed with a
   warning, and the matrix has an override:
   - matrix: BT.709 when the width is at least 1280 or the height above 576, else BT.601.
-    That's mpv's rule for untagged video, a player's explicit rule, as our rule (the upscale
-    looks like its source in a player) wants. Sizes in between, such as 960×540, count as SD.
+    That's mpv's rule for untagged video, a player's explicit rule, as seedvr2x's rule (the
+    upscale looks like its source in a player) wants. Sizes in between, such as 960×540, count
+    as SD.
   - range: limited for YUV (the `yuvj` formats are full); RGB is read full range
   - chroma location: left, the H.264, HEVC and MPEG-2 default. The JPEG family is
     centre-sited, and ffmpeg declares it so (MJPEG in AVI, MKV and MOV, with ffmpeg 6.1.1 and
@@ -1171,7 +1172,7 @@ Decoding goes through an ffmpeg pipe:
     aren't tested yet. The check covers them: a wrong or missing picture fails its CRC-32, and
     the read falls back.
 
-ffmpeg does every colour conversion, in and out: we pin its parameters rather than
+ffmpeg does every colour conversion, in and out: seedvr2x pins its parameters rather than
 reimplementing them. A startup check refuses a build lacking any filter, encoder, decoder or
 muxer the passes use (zscale, idet and ffv1 among them; for a finished file, the concat and
 Matroska demuxers and the `setts` bitstream filter too), or one whose `setparams` lacks
@@ -1346,7 +1347,7 @@ The rule: the upscale must look like its source in any given player.
 0. **Resize** of the input to the output size. The model restores a picture that is already at
    its final size: ByteDance's reference pipeline upsamples first ("Upsample image, model only
    trained for high res."), with torchvision's bicubic (`NaResize`). That is a compiled
-   C++/CUDA kernel, not Python code, and we keep it as the default.
+   C++/CUDA kernel, not Python code, and seedvr2x keeps it as the default.
    - Other kernels (zimg's Spline36 or Lanczos, through ffmpeg) are a measured choice, not a
      default: a sharper kernel pre-sharpens and rings, and the model takes that for content.
    - To pin: torchvision's bicubic depends on its `antialias` flag (PIL-like a = −0.5 with
@@ -1700,8 +1701,8 @@ What `split` does, frame by frame:
     its reference frame, so the correction asks for no second pass and no buffer: an untiled
     decode streams, a shot's first frames out as they are decoded (a tiled one holds them
     until its last tile, see [Pipeline](#pipeline-per-shot), step 3).
-- **Against our `lab`** (colour.md: 7B fp16, shots of 45 frames, each verdict paired by frame
-  and beyond `lab`'s seed spread, counted better / worse / within):
+- **Against seedvr2x's `lab`** (colour.md: 7B fp16, shots of 45 frames, each verdict paired by
+  frame and beyond `lab`'s seed spread, counted better / worse / within):
   - 1080p, ×2 from the mild degradation (8 clips, 3 seeds): ΔE00 −0.30, −0.46 and −0.29 after
     blurs of 0, 4 and 16 px (8 / 0 / 0); PSNR-Y +0.63 dB (4 / 0 / 4); LPIPS −0.0096 (7 / 0 / 1);
     DISTS −0.0023 (2 / 2 / 4); flicker −0.44 (6 / 0 / 2), at low frequency −0.76 (8 / 0 / 0);
@@ -1725,10 +1726,10 @@ What `split` does, frame by frame:
 - **Cost:** 22.8 ms and 0.56 GiB per 4K frame on the GPU, against `lab`'s 104.6 ms and 0.84
   GiB. It runs on each decoded slice as it comes out, so the planner counts it in the decode's
   phase.
-- **Licences.** The wavelet split is StableSR's method, whose code is non-commercial: ours is
-  rewritten from the method, clean room (another agent read StableSR's code and passed on only
-  the method). No numz code is left in the correction: the CIELAB conversions and the histogram
-  matching ported from numz (Apache-2.0) go with `lab`.
+- **Licences.** The wavelet split is StableSR's method, whose code is non-commercial: seedvr2x's
+  is rewritten from the method, clean room (another agent read StableSR's code and passed on
+  only the method). No numz code is left in the correction: the CIELAB conversions and the
+  histogram matching ported from numz (Apache-2.0) go with `lab`.
 - **Numerics.**
   - The split runs in float32. numz's bf16 is 0.10 level off on average, 1.17 at most.
   - The low band is moved by adding the difference of the low bands: content +
@@ -1745,7 +1746,7 @@ What `split` does, frame by frame:
       (`generation_phases.py:380-413`), and 89% of 8-bit codes round up in bf16: +0.114 level
       on average, +0.186 over codes 128–255, where the fp16 path averages 0.000.
     - A resize keeps the mean, so a reference built that way brightens the corrected output by
-      the clip's own bias. As first built, our `lab` exceeded numz's Y shift on 5 of 8
+      the clip's own bias. As first built, seedvr2x's `lab` exceeded numz's Y shift on 5 of 8
       full-reference clips, by 0.10–0.16 level, as predicted from their codes.
     - numz's own `lab` never used that tensor: it transforms the fp16 frames without the cast
       (`:127-168`).
@@ -1874,8 +1875,8 @@ shot). `split` needs neither.
   so that the winner ports as it is. Scores: ΔE00 after blurs of 0 to 16 px, PSNR-Y, LPIPS,
   DISTS, the Laplacian variance (detail kept), flicker, colour fringes at strong edges, CAMBI
   (banding), milestone 2's boundary steps on clip B, and the finalists through the default
-  `yuv420p10le` master. Verdicts are paired against our `lab` and must exceed its seed spread.
-  Then the user's eyes, on crops of edges, skin, skies and flat areas.
+  `yuv420p10le` master. Verdicts are paired against seedvr2x's `lab` and must exceed its seed
+  spread. Then the user's eyes, on crops of edges, skin, skies and flat areas.
 - **Constraints:** written from its own maths, never from StableSR's code (the clean room
   holds).
 
@@ -1917,9 +1918,9 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     whole films.
 
   Validated with the [`ffv1_out.py` wrap](research/docs/output.md): bit-exact round trip,
-  tags checked by ffprobe. Our writers give a `yuv420p10le` bit-identical to its output. They
-  set every tag both on the frames (`setparams`) and on the encoder: ffmpeg n9 converts frames
-  whose tags differ from the encoder's.
+  tags checked by ffprobe. seedvr2x's writers give a `yuv420p10le` bit-identical to its output.
+  They set every tag both on the frames (`setparams`) and on the encoder: ffmpeg n9 converts
+  frames whose tags differ from the encoder's.
   And they give the rate to ffmpeg's raw input twice, as its `-framerate` and as `-r`: with the
   first alone ffmpeg guessed the rate from 101 fps up, and seedvr2x's own masters at 120000/1001
   and 240000/1001 were written at 120/1 and 240/1, one place skipped in 1,100 frames and the
@@ -2033,7 +2034,8 @@ compressed is the user's choice: afterwards, from the master, or during the run 
     bits, tens of thousands of distinct codes in a frame against 300–400 in numz's bf16
     output, whose
     `gbrp16le` masters took 250–350 GiB ([output.md](research/docs/output.md) measured 2.97
-    MiB per frame). Rounding ours to bf16 would save 34–43%, for 8 significant bits.
+    MiB per frame). Rounding the corrected output to bf16 would save 34–43%, for 8 significant
+    bits.
   - **Rejected:** `--stream`, the output on stdout for a single compressor process. That
     process can't be paused, so a stopped run would leave parts to join by hand.
 - **Assembly** of the segments:
@@ -2879,9 +2881,9 @@ it, 2 to 10% at one latent and nothing measurable at 6.
 ### Allocator
 `cudaMallocAsync` is the allocator where the driver refuses a full card (it trims its pool
 there; `native` fragments and fails), and torch's own where the driver gives memory the card
-doesn't have (below). Set by us before torch is imported, documented, overridable: a user's
-`PYTORCH_CUDA_ALLOC_CONF` or `PYTORCH_ALLOC_CONF` stands, an empty one being no setting. The
-GPU's memory refused stops a run in one line, before the models load as after.
+doesn't have (below). Set by seedvr2x before torch is imported, documented, overridable: a
+user's `PYTORCH_CUDA_ALLOC_CONF` or `PYTORCH_ALLOC_CONF` stands, an empty one being no setting.
+The GPU's memory refused stops a run in one line, before the models load as after.
 - During a window the GPU holds more than torch's peak, the pool's slack: 2.7 to 3.7 GiB at 6
   latents of 1080p, 3.4 on the 96 GB card at 12. Where the driver refuses a full card, the
   pool gives it back, and the planner's margin was measured that way.
@@ -3289,7 +3291,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | numz option | seedvr2x |
 |---|---|
 | `--attention_mode` | dropped: FA2 when installed, else SDPA |
-| `--color_correction` | `split` (ours, beyond numz's `lab`) by default; `none` available; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` dropped |
+| `--color_correction` | `split` (seedvr2x's own, beyond numz's `lab`) by default; `none` available; numz's `lab`, `wavelet`, `wavelet_adaptive`, `hsv` and `adain` dropped |
 | `--input_noise_scale` | dropped (numz's own addition, only degrades) |
 | `--latent_noise_scale` | dropped from v1 (ByteDance uses 0; corrected version possibly later as an experiment, see bug 08) |
 | `--batch_size`, `--temporal_overlap`, `--prepend_frames`, `--uniform_batch_size` | replaced by shots, windows and latent stitching, chosen by the planner; `--window` pins the window cap |
@@ -3345,7 +3347,7 @@ attention windows stay out of the user docs; they matter only to developers.
 **The pipeline, for SeedVR2 users coming from numz.** numz's main knobs (`--batch_size`,
 `--temporal_overlap`, `--chunk_size`…) are absent from seedvr2x, which would puzzle its users.
 So the docs don't go knob by knob. They explain numz's pipeline with each knob where it acts,
-then ours, then why ours has no use for them. The
+then seedvr2x's, then why seedvr2x has no use for them. The
 [Options kept and dropped](#options-kept-and-dropped) table is the reference, not the
 explanation.
 - **numz works in phases over fixed batches.**
@@ -3547,8 +3549,8 @@ writers, and the planner needs real shot lengths.
 2. The `lab` rewrite (milestone 5): passed on 2026-10-04. Then, as small steps of their own:
    zscale on one slice (see [Input](#input)), the default master format (`yuv420p10le`, see
    [Output](#output)) and the model check of [Weights](#weights), done on 2026-10-08, the
-   milestone-1 regression bit-identical with numz's 7B, with ours, and with our sharp 7B
-   against numz's own run of it. Then, on 2026-10-09: the padding of step 0 (see
+   milestone-1 regression bit-identical with numz's 7B, with seedvr2x's, and with seedvr2x's
+   sharp 7B against numz's own run of it. Then, on 2026-10-09: the padding of step 0 (see
    [Pipeline](#pipeline-per-shot)), the refusal of HDR sources (see
    [Not in the first version](#not-in-the-first-version)) and `split` in place of `lab` (see
    [Colour correction](#colour-correction)): the decode streams, its buffer, the histograms
@@ -3594,11 +3596,11 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
 1. **Reproduce numz.** Passed on 2026-10-02: 45 of 45 frames bit-identical, on the FFV1
    masters and on the float32 dumps. Same settings: one batch, no tiling, `flash_attn_2`, same
    seed, numz's input preparation, colour correction off (numz's `lab` runs the StableSR code
-   we don't vendor).
+   seedvr2x doesn't vendor).
    - Both sides read the same RGB frames, from an 8-bit RGB copy of the sample. numz decodes
-     with OpenCV at 8 bits (`inference_cli.py:469`, `/ 255` at `:336`), which our 16-bit ffmpeg
-     decode can't match bit for bit. Our decode is validated by the conversion tests instead
-     (see [Input](#input)).
+     with OpenCV at 8 bits (`inference_cli.py:469`, `/ 255` at `:336`), which seedvr2x's 16-bit
+     ffmpeg decode can't match bit for bit. seedvr2x's decode is validated by the conversion
+     tests instead (see [Input](#input)).
    - The result must be bit-identical, or within quantisation, to numz's float frames, checked
      with the FFV1 masters.
    - The numerics choices (RoPE precision, attention dtype, VAE mode vs sample, input
@@ -3610,8 +3612,8 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
    - Material: an 8-bit RGB copy of clip B's frames 20–100, against new numz runs: one batch
      of 81, independent batches of 21, and `STITCH_LATENT` 6:2. The windows are latents 0–6,
      4–10, 8–14, 12–18 and 16–21.
-   - Our windowing, mixing and decode, run in an internal per-window reseed mode (tests only,
-     not user-facing), reproduce numz + `STITCH_LATENT` bit for bit. That mode went on
+   - seedvr2x's windowing, mixing and decode, run in an internal per-window reseed mode (tests
+     only, not user-facing), reproduce numz + `STITCH_LATENT` bit for bit. That mode went on
      2026-10-09, nothing calling it since; git keeps it.
    - The sliced noise against that reseed mode, both measured against the one-batch run:
 
@@ -3722,11 +3724,11 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
      also shows what emulation can't: pinned host memory, the transfers, a desktop's share of
      the card.
 4. **Resume:** interrupted and resumed runs bit-identical to uninterrupted ones.
-5. **Colour correction:** our `lab` against numz's `lab`, one batch = one shot.
+5. **Colour correction:** seedvr2x's `lab` against numz's `lab`, one batch = one shot.
    - Material: milestone 1's input, clip B and the measurement campaign's full-reference
      clips, plus multi-window shots against numz + `STITCH_LATENT` with `lab` (clip B, 6:2).
    - Both sides are scored alike from 16-bit masters.
-   - Accepted when ours is at least as good on every metric. Differences below the
+   - Accepted when seedvr2x's is at least as good on every metric. Differences below the
      tolerance count as equal.
 
      | Metric | Better is | Tolerance |
@@ -3736,18 +3738,18 @@ is measured and tested on it, and on emulated cards of the sizes users have (see
      | Y shift (signed) | closer to 0 | 0.1 level |
      | Hold and low-frequency boundary steps, as the excess over each run's own one-batch output (milestone 2's measure) | lower | 0.02 level |
 
-   - PSNR between ours and numz's is reported for information.
+   - PSNR between seedvr2x's and numz's is reported for information.
    - A GPU test, `test_lab.py`, holds the result on milestone 1's input, with thresholds set
      from the first runs.
    - Two rules were sharpened after the first run, on 2026-10-04. On a near-neutral sky, 1% of
      the input's a\* spread is 0.0097 unit, far below anything else the milestone resolves,
      hence the 0.1-unit floor, the ΔE tolerance's unit. A raw boundary step also counts each
-     pipeline's own motion there (ours' one-batch run 1.223, numz's 1.246): the excess
+     pipeline's own motion there (seedvr2x's one-batch run 1.223, numz's 1.246): the excess
      isolates the boundary.
    - **Passed on 2026-10-04: 11 of 11 materials,** with the float32 reference (step 3b).
-     - The first run, with the encoder's bf16 tensor as the reference, passed 4: ours came out
-       brighter than numz's on 5 of 8 full-reference clips, by each clip's own bf16 bias (see
-       [Colour correction](#colour-correction), Numerics).
+     - The first run, with the encoder's bf16 tensor as the reference, passed 4: seedvr2x's came
+       out brighter than numz's on 5 of 8 full-reference clips, by each clip's own bf16 bias
+       (see [Colour correction](#colour-correction), Numerics).
      - ΔE to the input: equal everywhere (within 0.008). ΔE00 to the ground truth: lower than
        numz's on 7 of 8 clips (anime-bright +0.0014). PSNR to numz: 53.6–60.3 dB on the
        one-batch materials, 0.5–1.5 dB above the first run's.
