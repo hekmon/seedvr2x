@@ -104,8 +104,8 @@ as possible:
   - **An image server:** images over HTTP, the models loaded once and kept on the GPU; the
     parameters in the request's headers, the image itself as the body, both ways.
   - **The 7B in smaller files,** int8 first: seedvr2x running the int8, fp8, GGUF and NVFP4
-    files already published, the same 7B in 4.8 to 8.8 GB instead of 16.5: more frames at a
-    time and less of the model moved out of a 16–32 GB card.
+    files already published, the same 7B in 4.8 to 8.8 GB instead of 16.5, less of it moved
+    out of the card's memory.
   - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows.
 - **Later:**
   - **Windows itself:** the `seedvr2x` command on Windows, in version 0.2.0. Linux and WSL2 run
@@ -137,7 +137,8 @@ seedvr2x stands on others' work:
 - **[TransNetV2](https://github.com/soCzech/TransNetV2)**, by Tomáš Souček and Jakub Lokoč: the
   shot detector's model and weights (MIT).
 - **[comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen)**, by Comfy Org: the layouts and
-  the rotation of the int8, fp8 and NVFP4 files (Apache-2.0).
+  the rotation of the int8, fp8 and NVFP4 files, and the arithmetic of seedvr2x's int8 linear
+  (Apache-2.0).
 - **[llama.cpp](https://github.com/ggml-org/llama.cpp)**, by the ggml authors: the quantizer and
   the importance-matrix method of the GGUF files (MIT).
 - **[StableSR](https://github.com/IceClear/StableSR)**: the wavelet method behind seedvr2x's

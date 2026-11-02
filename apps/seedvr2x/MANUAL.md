@@ -331,7 +331,7 @@ memory allows.
 | `--compile_backend`, `--compile_mode`, `--compile_fullgraph`, `--compile_dynamic`, `--compile_dynamo_cache_size_limit`, `--compile_dynamo_recompile_limit` | gone: `--compile` takes no tuning. It keeps numz's settings (inductor in its default mode, not full-graph, static shapes), with inductor's deterministic mode kept on and the recompile limits raised to hold every shape the job meets, numz's 128 being too few at 4K ([compiling the VAE](#compiling-the-vae---compile)) |
 | `--debug` | `-v`, `--verbose` ([the lines](#the-lines)) |
 | `--output_format`, `--video_backend`, `--10bit` | `--format`: FFV1 masters (`yuv420p10le` by default, `gbrp16le`) or 16-bit PNG |
-| `--dit_model`, `--model_dir` | `--dit-model` and `--model-dir`, the sharp 7B by default; version 0.1.0 runs the two 7Bs in float16 only, any 3B, GGUF or fp8 file refused; the files come from seedvr2x's own Hugging Face repository, pinned; no model file is ever deleted |
+| `--dit_model`, `--model_dir` | `--dit-model` and `--model-dir`, the sharp 7B by default; version 0.1.0 runs the two 7Bs in float16, and in int8 from seedvr2x's own files, any 3B, GGUF or fp8 file refused; the files come from seedvr2x's own Hugging Face repository, pinned; no model file is ever deleted |
 | `--cuda_device` | one device per process |
 
 ## The two workflows
@@ -531,8 +531,9 @@ mpv lands on the cut frame from the list's time itself.
 
 ## The model
 
-Version 1 runs ByteDance's SeedVR2 7B in float16, with its VAE in float16. ByteDance
-publishes two 7B models of the same architecture, memory and time:
+Version 1 runs ByteDance's SeedVR2 7B in float16, with its VAE in float16, and takes
+seedvr2x's int8 files of the 7B with `--dit-model`. ByteDance publishes two 7B models of the
+same architecture, memory and time:
 
 - **The sharp 7B is the default.** Judged by eye on 75 crops at 4K and 1080p, it was preferred
   or no different on 67 (preferred on 27, the regular 7B on 8). At 4K it invents less of the
@@ -549,10 +550,12 @@ publishes two 7B models of the same architecture, memory and time:
 
 The files, where they come from and how they are checked are in the README's
 [Model files](README.md#model-files); the [model card](https://huggingface.co/hekmon/seedvr2x)
-has the table of every format. A later phase brings
-the smaller files of both 7Bs, each with its measured quality. The VAE stays in float16: its
-weights take 0.47 GiB, so a smaller file would save nothing, and its memory is the pictures it
-computes, which tiling bounds.
+has the table of every format. The int8 files hold the DiT's weights in 7.76 GiB in place of
+15.35; their memory and speed are measured on the 96 GB card before v0.1.0 is tagged, and the
+plan says, in a line of its own, that it counts a window's memory as float16's, plus int8's
+buffers, until then. A later phase brings the fp8, GGUF and NVFP4 files of both 7Bs, each with
+its measured quality. The VAE stays in float16: its weights take 0.47 GiB, so a smaller file
+would save nothing, and its memory is the pictures it computes, which tiling bounds.
 
 ## What the model does to a picture
 
@@ -2110,7 +2113,7 @@ this manual is.
 | Option | What it does |
 |---|---|
 | `--model-dir MODEL_DIR` | Read the model files in that directory, by name, and download nothing ([README](README.md#model-files)). |
-| `--dit-model DIT_MODEL` | The DiT's file: `seedvr2x_ema_7b_sharp_fp16.safetensors` by default, or `seedvr2x_ema_7b_fp16.safetensors` ([the model](#the-model)). |
+| `--dit-model DIT_MODEL` | The DiT's file: `seedvr2x_ema_7b_sharp_fp16.safetensors` by default, or `seedvr2x_ema_7b_fp16.safetensors`, or the two in int8, `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` and `seedvr2x_ema_7b_int8_convrot.safetensors`: half the DiT's weights, multiplied in 8 bits ([the model](#the-model)). |
 | `--vae-model VAE_MODEL` | The VAE's file, `seedvr2x_ema_vae_fp16.safetensors` by default. |
 | `--seed SEED` | The seed, 42 by default ([seeds](#seeds-and-reproducibility)). |
 | `--quality LEVEL` | `standard` (the default), `enhanced` or `maximum`: each shot run 1, 2 or 4 times ([several runs of a shot](#several-runs-of-a-shot---quality)). |

@@ -16,9 +16,10 @@ AGENTS.md DESIGN.md README.md LICENSE NOTICE
 core/                    the library: distribution seedvr2x-core, import seedvr2x (uv_build)
   pyproject.toml .python-version LICENSE NOTICE
   seedvr2x/              no src/ folder: the package sits at core/seedvr2x/
-    model.py weights.py pull.py blockswap.py sampling.py tiling.py tilegrid.py compiling.py
-    colour.py memory.py detector.py      the bricks: models and their files, placement, sampling,
-                         the VAE passes, colour, the memory model, the shot detector
+    model.py weights.py pull.py blockswap.py int8.py sampling.py tiling.py tilegrid.py
+    compiling.py colour.py memory.py detector.py      the bricks: models and their files,
+                         placement, the int8 linear, sampling, the VAE passes, colour, the
+                         memory model, the shot detector
     frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share
     vendor/              model layer, vendored from numz (below)
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
@@ -185,10 +186,11 @@ uv run pytest
   `core/tests/` for the library's, `apps/seedvr2x/tests/` for the CLI's. File names are unique
   across the two, a helper being imported by name. A file that held both halves is two: the
   library's, and its `_cli` half beside the command (`test_pull_cli.py`, `test_weights_cli.py`,
-  `test_compile_cli.py`, `test_detector_cli.py`, `test_padding_cli.py`), which use the
-  library's half's helpers and say so in their docstring. The helpers both directories use
-  are `core/tests/`'s (`library_fixtures.py`, `stand_ins.py`, the fixtures `conftest.py` imports
-  from the first); the CLI's pytest puts `../../core/tests` on its `pythonpath`.
+  `test_compile_cli.py`, `test_detector_cli.py`, `test_padding_cli.py`, `test_int8_cli.py`),
+  which use the library's half's helpers and say so in their docstring. The helpers both
+  directories use are `core/tests/`'s (`library_fixtures.py`, `stand_ins.py`, the fixtures
+  `conftest.py` imports from the first); the CLI's pytest puts `../../core/tests` on its
+  `pythonpath`.
 - The rule between them: `core/tests/test_library.py` holds that no library file imports the
   CLI (a scan and a fresh process); `apps/seedvr2x/tests/test_names.py` holds the CLI's top-level
   names to its files, the standard library's and what else the environment provides (see
@@ -207,6 +209,24 @@ uv run pytest
   `test_detector_cli.py`: the cuts of a synthetic clip; `tests/test_detection.py`: the first pass
   recording the module's probabilities bit for bit); without, the detector's windows run on the
   untrained model's weights, written by the test.
+- `tests/test_int8.py` holds seedvr2x's int8 linear (`seedvr2x/int8.py`, W8A8 with
+  comfy-kitchen's rotation) on the CPU to a reference written there apart: the rotation in
+  float64, the quantization in NumPy with bfloat16's roundings by their bits, the integer
+  product in int64, the rescaling in float64; codes, scales and the product equal, the output
+  within bfloat16's rounding, the rows taken at a time changing no bit, its module under
+  autocast, the 7B's 288 block matrices swapped on the meta device, and its buffers measured by
+  torch's memory profiler within `peaks.W8A8_SMALL` of the memory model's count. The CPU path is
+  the tests' alone: the pipeline runs int8 on CUDA. `pytest -m gpu`, skipped without CUDA: the
+  path on CUDA against the CPU's for the 7B's four shapes, 1 to 4,101 rows (cuBLASLt's int32
+  product exact, the codes 99.999% equal at least, the outputs the CPU's but where codes or
+  scales differ, a call's memory within its output and `peaks.INT8_BUFFERS`); opt-in, the same
+  activations through comfy-kitchen 0.2.37's CUDA `int8_linear`, skipped unless it is installed
+  (`uv pip install --no-deps comfy-kitchen==0.2.37`; never a dependency); and
+  `tests/test_blockswap.py`'s gate on a real int8 file in `SEEDVR2X_MODEL_DIR`, its blocks
+  swapped giving the bits of the DiT loaded whole, skipped without one. `tests/test_weights.py`
+  holds the int8 files' headers and markers; `test_int8_cli.py` the command line over a
+  synthetic int8 file: its check, the plan by int8's figures and its line, the job's record, a
+  resume judged early by int8's figures.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it. The pins: `SHA256SUMS`, a few

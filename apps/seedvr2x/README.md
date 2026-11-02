@@ -256,6 +256,8 @@ A run downloads only the files it uses, one by one, never the repository whole (
 |---|---|---|
 | `seedvr2x_ema_7b_sharp_fp16.safetensors` | 16.5 GB | by default: the sharp 7B, the model that upscales |
 | `seedvr2x_ema_7b_fp16.safetensors` | 16.5 GB | only with `--dit-model seedvr2x_ema_7b_fp16.safetensors`: the regular 7B |
+| `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` | 8.3 GB | only with `--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors`: the sharp 7B in int8 |
+| `seedvr2x_ema_7b_int8_convrot.safetensors` | 8.3 GB | only with `--dit-model seedvr2x_ema_7b_int8_convrot.safetensors`: the regular 7B in int8 |
 | `seedvr2x_ema_vae_fp16.safetensors` | 0.5 GB | always: the VAE, which turns frames into the model's input and back |
 | `transnetv2.safetensors` | 30 MB | unless `--cuts` gives the cuts: the shot detector |
 
@@ -276,18 +278,25 @@ A run downloads only the files it uses, one by one, never the repository whole (
   Hugging Face's telemetry is off: seedvr2x sets `HF_HUB_DISABLE_TELEMETRY=1` unless you have
   set it.
 - **Recognised by content.** A model file is checked by its own tensors, not by its name.
-  Anything but SeedVR2's 7B in float16, sharp or regular, is refused, saying what the file is.
+  SeedVR2's 7B, sharp or regular, in float16 or in seedvr2x's int8 files, is accepted; anything
+  else is refused, saying what the file is.
 
 ### Which file to use
 
 Version 0.1.0 runs the float16 files, the sharp 7B by default,
-`seedvr2x_ema_7b_sharp_fp16.safetensors`. Judged by eye on 75 crops at 4K and 1080p, it was
-preferred to the regular 7B or no different on 67 (preferred on 27, the regular 7B on 8), and
-it has the same memory and time ([the model](MANUAL.md#the-model)).
+`seedvr2x_ema_7b_sharp_fp16.safetensors`, and takes the int8 files with `--dit-model`. Judged
+by eye on 75 crops at 4K and 1080p, the sharp 7B was preferred to the regular 7B or no
+different on 67 (preferred on 27, the regular 7B on 8), and it has the same memory and time
+([the model](MANUAL.md#the-model)).
 
-- **Smaller files, already published.** The repository also holds int8, fp8, GGUF and NVFP4
-  files of both 7Bs, each measured against the float16 model on video; seedvr2x will run them,
-  int8 first ([the roadmap](../../README.md#roadmap)). The
+- **The int8 files,** `--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors` or
+  `seedvr2x_ema_7b_int8_convrot.safetensors`: the same 7Bs in half the weights, 7.76 GiB in
+  place of 15.35, multiplied in 8 bits. Their memory and speed are measured on the 96 GB card
+  before v0.1.0 is tagged; until then the plan counts a window's memory as float16's, plus
+  int8's buffers.
+- **Smaller files, already published.** The repository also holds fp8, GGUF and NVFP4 files of
+  both 7Bs, each measured against the float16 model on video, as the int8 ones are; seedvr2x
+  will run them ([the roadmap](../../README.md#roadmap)). The
   [model card](https://huggingface.co/hekmon/seedvr2x) has their tables: what each gives up, its
   speed, its error per weight, and other repositories' files against seedvr2x's, with each
   file's SHA-256, origin and change. [FORMATS.md](../../models/FORMATS.md) holds the formats and
@@ -327,6 +336,10 @@ seedvr2x is under the Apache License 2.0 ([LICENSE](LICENSE)). [NOTICE](NOTICE) 
   repository.
 - **The colour correction's wavelet split** is StableSR's method, whose code is under a
   non-commercial licence: seedvr2x's is rewritten from the method, with none of that code.
+- **The int8 linear's arithmetic**, comfy-kitchen's (Comfy Org, Apache-2.0,
+  [Comfy-Org/comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen), version 0.2.37): its
+  rotation and the arithmetic of its int8 linear, written in PyTorch in `core/seedvr2x/int8.py`;
+  no comfy-kitchen code runs in seedvr2x.
 
 The manual's example picture, [images/quality-teeth.png](images/quality-teeth.png), and the
 front page's, [images/before-after.png](images/before-after.png), are made from frames of
