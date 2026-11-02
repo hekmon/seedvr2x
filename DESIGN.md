@@ -319,6 +319,10 @@ In steps:
    - Where each module, and each part of `planner.py`, goes is mapped first and agreed with
      the user before any code moves. No behaviour changes. The whole GPU suite runs on the
      result before it is pushed: on the 96 GB card if it is back, else on the RTX 5090.
+   - Built on 2026-11-02 (impl-split), the end state as agreed, file by file: the plan's choices
+     the same byte for byte over 5,480 cases and 8,051 bricks' results, the environment record
+     and the lock unchanged, the CPU suite passing. Its GPU run is the 96 GB card's first job,
+     before the push.
 3. The image upscale: `seedvr2x image`, then the image server if v0.1.0 takes it, each
    assembling the library's bricks for one image itself (an assembly the two would share is
    discussed then, as above), measured on the 96 GB card.
