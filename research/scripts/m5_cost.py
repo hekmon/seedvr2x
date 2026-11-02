@@ -11,7 +11,7 @@ LOG_DIR: m5_run.sh's logs/ (ours-NAME.log and ours-NAME.sizes); NAME: a run of i
 Historical: the record of how milestone 5 measured lab's cost (2026-10-03/04), kept to re-run it:
 m5_run.sh's cost holds, lab, none, lab, none back to back in one hold of the GPU lock on
 milestone 1's input and on clip B, seedvr2x at 27ce6ba, whose log lines it parses ("encoded in",
-"window i/n, latents a to b,", "decoded in", each with its VRAM peak). seedvr2x/DESIGN.md's input
+"window i/n, latents a to b,", "decoded in", each with its VRAM peak). DESIGN.md's input
 copy figure (about 32 MiB per second of 1080p input, 1.38 MB per frame on clip B) comes from its
 file sizes. seedvr2x's `--color-correction lab` went with 68b1529, when split replaced lab. Needs
 Python alone, and calls no research script.

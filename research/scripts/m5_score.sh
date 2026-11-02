@@ -1,6 +1,6 @@
 #!/bin/bash
 # Milestone 5's scoring of m5_run.sh's stage rest, CPU only, niced, from the 16-bit masters
-# (seedvr2x/DESIGN.md, Validation milestones 5):
+# (DESIGN.md, Validation milestones 5):
 #   bash m5_score.sh PY b        clip B one batch, and clip B on 6:2 windows (ours --window 6
 #                                against numz + STITCH_LATENT 6:2, each against its own one-batch run)
 #   bash m5_score.sh PY fr CLIP  one full-reference clip (+ ΔE00 lf to the ground truth, fr_metrics.py)

@@ -135,7 +135,7 @@ def load(path: Path, name: str) -> ModuleType:
 def numerics_patch() -> ModuleType:
     """research/scripts/numerics_patch.py, loaded: at import it only reads its NUM_ switches,
     unset here, its patches being installed by its main alone. Skipped where it is absent: where
-    research/ isn't beside seedvr2x/ (the package copied alone)."""
+    research/ isn't beside core/ (the package copied alone)."""
     if not NUMERICS_PATCH.is_file():
         pytest.skip(f"{NUMERICS_PATCH}: absent")
     with pytest.MonkeyPatch.context() as patch:

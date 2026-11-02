@@ -2,7 +2,7 @@
 """Milestone 5's scoring: the research scripts' metrics, frames read from 16-bit RGB masters.
 
 quality_metrics.py and stitch_metrics.py read 8-bit PNGs (cv2.IMREAD_COLOR). Milestone 5 scores
-both sides alike from their 16-bit FFV1 masters (seedvr2x/DESIGN.md, Validation milestones 5), so
+both sides alike from their 16-bit FFV1 masters (DESIGN.md, Validation milestones 5), so
 this wrapper hands those scripts the masters' frames instead, float32 on their 8-bit scale
 (v / 257, rounded nowhere), and runs their metric code unchanged. The input is read as they read
 it (cv2, the 8-bit RGB file both runs read).

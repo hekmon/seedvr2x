@@ -1,6 +1,6 @@
 #!/bin/bash
-# Milestone 5's step 3b: ours' side again (seedvr2x/DESIGN.md, Validation milestones 5), lab's
-# reference now built in float32 (seedvr2x/DESIGN.md, Colour correction, Numerics), on every
+# Milestone 5's step 3b: ours' side again (DESIGN.md, Validation milestones 5), lab's
+# reference now built in float32 (DESIGN.md, Colour correction, Numerics), on every
 # material: milestone 1's input, clip B, clip B in 6:2 windows, the 8 full-reference clips. Same
 # options as m5_run.sh's ours runs (one batch, seed 42, 1080p, the 7B fp16), the master format
 # named. Each run in its own hold of the GPU lock, the nvidia-smi check inside (m5_run.sh's hold

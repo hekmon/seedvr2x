@@ -11,7 +11,7 @@ Historical: the record of milestone 5's diagnosis (2026-10-04), kept to re-run i
 built (seedvr2x 27ce6ba) took numz's encoder input as lab's reference, so its output came out
 brighter than numz's by each input's own bias; this predicts it from the inputs' codes (milestone
 1's, clip B's, the full-reference clips' d1), against which the measured differences were set:
-seedvr2x/DESIGN.md, Colour correction ("by 0.10–0.16 level, as predicted from their codes"),
+DESIGN.md, Colour correction ("by 0.10–0.16 level, as predicted from their codes"),
 which made lab's reference float32 (eca0ff1). numz 4490bd1's lines cited. seedvr2x's
 `--color-correction lab` went with 68b1529, when split replaced lab. It calls no research script.
 """

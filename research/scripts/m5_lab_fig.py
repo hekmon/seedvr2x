@@ -12,7 +12,7 @@ imports (with its venv's python). OURS.mkv: ours' lab master of milestone 1's in
 master, numz_lab.mkv (m5_run.sh m1).
 
 Historical: the record of how milestone 5's step 3b set test_lab.py's figures (2026-10-04), kept
-to re-run it: PSNR to numz 60.18 dB, floor 59.5 (seedvr2x/DESIGN.md, Validation milestones 5).
+to re-run it: PSNR to numz 60.18 dB, floor 59.5 (DESIGN.md, Validation milestones 5).
 test_lab.py retired with lab when split replaced it (68b1529).
 """
 

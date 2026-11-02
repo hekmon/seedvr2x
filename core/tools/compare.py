@@ -5,10 +5,11 @@ Milestone 1 holds seedvr2x's output against numz's (DESIGN.md, Validation milest
 resume milestone an interrupted run against an uninterrupted one. Both ask for identical frames,
 so this reports equality first, then, for the frames that differ, how much.
 
-Usage, from seedvr2x/:
-  uv run tools/compare.py masters A.mkv B.mkv   decoded as gbrp16le, compared frame by frame
-  uv run tools/compare.py frames DIR_A DIR_B    frame_NNNNNN.npy float32 dumps (ffv1_out.py's
-                                                FFV1_OUT_DUMP, seedvr2x's --dump-frames)
+Usage, from core/, in the CLI's environment:
+  uv run --project ../apps/cli tools/compare.py masters A.mkv B.mkv
+      decoded as gbrp16le, compared frame by frame
+  uv run --project ../apps/cli tools/compare.py frames DIR_A DIR_B
+      frame_NNNNNN.npy float32 dumps (ffv1_out.py's FFV1_OUT_DUMP, seedvr2x's --dump-frames)
 """
 
 import argparse

@@ -12,7 +12,7 @@ per frame, the 16-bit codes its first frame uses, and re-encodes with seedvr2x's
 
 Historical: the record of how milestone 5 measured the masters' sizes (2026-10-04), kept to re-run
 it, on m5_run.sh's and m5_run3b.sh's gbrp16le masters (ours with lab or none, numz's): the
-figures in seedvr2x/DESIGN.md, Output (master sizes: gbrp16le with colour correction 2.0-2.5
+figures in DESIGN.md, Output (master sizes: gbrp16le with colour correction 2.0-2.5
 times numz's lab, tens of thousands of codes in a frame against 300-400 in numz's bf16 output,
 rounding ours to bf16 saving 34-43%) and Colour correction. The writer options and the
 yuv420p10le chain are seedvr2x's media/writer.py's at eca0ff1 (zscale on ffmpeg's default

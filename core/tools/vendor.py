@@ -7,10 +7,10 @@ text embeddings sit at the root of vendor/ (AGENTS.md, The vendored model layer)
 are read from the git objects of the pinned commits, never from a work tree, so a moved submodule
 can't shift the reference.
 
-Usage, from seedvr2x/:
-  uv run tools/vendor.py copy [--numz DIR] [--force]   write numz's files into vendor/
-  uv run tools/vendor.py diff [--bytedance] [--raw] [--full] [PATH...]
-  uv run tools/vendor.py check [--numz DIR]
+Usage, from core/, in the CLI's environment:
+  uv run --project ../apps/cli tools/vendor.py copy [--numz DIR] [--force]   numz's into vendor/
+  uv run --project ../apps/cli tools/vendor.py diff [--bytedance] [--raw] [--full] [PATH...]
+  uv run --project ../apps/cli tools/vendor.py check [--numz DIR]
 
 copy refuses to overwrite a file that differs from numz unless --force: those are our changes.
 diff compares vendor/ with numz, or with ByteDance (--bytedance), whose absolute imports are first

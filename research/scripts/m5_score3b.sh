@@ -1,7 +1,7 @@
 #!/bin/bash
 # Milestone 5's step 3b scoring, CPU only and niced: m5_run3b.sh's masters (ours3b/) against
 # numz's masters and metrics JSONs (m5_run.sh, m5_score.sh), under milestone 5's rules as
-# sharpened on 2026-10-04 (m5_score3b.py's verdict; seedvr2x/DESIGN.md, Validation milestones 5),
+# sharpened on 2026-10-04 (m5_score3b.py's verdict; DESIGN.md, Validation milestones 5),
 # and each master's frames against the ref32 experiment's, when its masters are there:
 #   bash m5_score3b.sh PY m1|b|fr CLIP|all
 # PY: numz's venv's python (numpy, opencv), as for m5_score.sh.

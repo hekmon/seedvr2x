@@ -256,7 +256,7 @@ def test_the_code_hash_holds_wherever_the_package_sits(tmp_path: Path) -> None:
 
 def test_older_code_refuses_version_3(tmp_path: Path) -> None:
     # Older code refuses a manifest of this code's for its version, naming both, rather than fail
-    # on its shape (manifest.VERSION). Skipped without git or that blob, as on a copy of seedvr2x/
+    # on its shape (manifest.VERSION). Skipped without git or that blob, as on a copy of core/
     # alone.
     why = "needs git and the repository's history: runtime/manifest.py as of 4c13da5"
     if shutil.which("git") is None or not (REPOSITORY / ".git").exists():

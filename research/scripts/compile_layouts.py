@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Window layouts and torch.compile strategies for seedvr2x: arithmetic on real cut lists (no GPU).
 
-seedvr2x runs its DiT on windows of each shot's latents (seedvr2x/DESIGN.md, Pipeline step 2).
+seedvr2x runs its DiT on windows of each shot's latents (DESIGN.md, Pipeline step 2).
 torch.compile compiles the DiT once per window LENGTH, in latents: a new length is a new
 compilation, tens of seconds, after which every window of that length runs faster. The first pass
 knows every shot before the DiT starts, so a job can tell beforehand which lengths it will meet,
@@ -90,7 +90,7 @@ Usage (numpy is the only dependency):
   python compile_layouts.py tables cuts.json > tables.md
   python compile_layouts.py tables cuts.json --gpu-speedup 2.5 --gain 5:0.26,21:0.30 \\
       --compile-cold 25,1.2 --compile-warm 8 --recompile-limit 8 --processes 3 --no-details
-  seedvr2x/.venv/bin/python research/scripts/compile_layouts.py check anime=probabilities.npz
+  apps/cli/.venv/bin/python research/scripts/compile_layouts.py check anime=probabilities.npz
 """
 import argparse
 import json
@@ -102,7 +102,7 @@ from itertools import pairwise
 
 import numpy as np
 
-SHARED = 2  # seedvr2x/src/seedvr2x/runtime/job.py: the latents two consecutive windows share
+SHARED = 2  # core/src/seedvr2x/runtime/job.py: the latents two consecutive windows share
 LAYOUTS = ("balanced", "full-short-last", "slid-back")
 STRATEGIES = ("every", "pay", "dynamic", "none")
 CAPS = "5,13,19,27,76"  # what 24 GB to 96 GB cards fit at 1080p
@@ -129,7 +129,7 @@ MODEL = {
 
 def detected_cuts(probabilities, threshold):
     """The first frame of each shot but the first, by seedvr2x's rule
-    (seedvr2x/src/seedvr2x/runtime/cuts.py: detected, _exact, _runs): one detection per run of
+    (core/src/seedvr2x/runtime/cuts.py: detected, _exact, _runs): one detection per run of
     frames whose probability reaches the threshold, at the first of its highest frames, the cut
     being the frame after; none after a peak on the last frame. The values are compared as
     recorded, float32, each widened to the double of its exact value."""
@@ -156,7 +156,7 @@ def latents_of(count):
 
 def balanced(latents, window, shared=SHARED):
     """seedvr2x's layout, [start, end) of each window: a copy of
-    seedvr2x/src/seedvr2x/runtime/shot.py's window_layout (`check` holds it to the original)."""
+    core/src/seedvr2x/runtime/shot.py's window_layout (`check` holds it to the original)."""
     if latents <= window:
         return [(0, latents)]
     if window < 2 * shared + 1:

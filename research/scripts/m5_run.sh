@@ -1,5 +1,5 @@
 #!/bin/bash
-# Milestone 5's GPU runs (seedvr2x/DESIGN.md, Validation milestones 5: seedvr2x's lab against
+# Milestone 5's GPU runs (DESIGN.md, Validation milestones 5: seedvr2x's lab against
 # numz's lab, one batch = one shot), one stage at a time:
 #   m1    numz's lab on milestone 1's input, then ours lab/none/lab/none on it in ONE lock hold
 #   rest  clip B (numz's lab, the cost hold, numz + STITCH_LATENT 6:2 with lab, ours --window 6
@@ -22,7 +22,7 @@
 # runs write). Then m5_score.sh scores stage rest, m5_cost.py and m5_sizes.py give lab's cost
 # and the masters' sizes.
 #
-# The materials: milestone 1's input (seedvr2x/tests/test_regression.py says how it was made),
+# The materials: milestone 1's input (core/tests/test_regression.py says how it was made),
 # clip B's (below), and the full-reference clips' degraded inputs, research/scripts/fr_clips.py's
 # d1 (<clip>.d1.lr.mkv: 960x540 8-bit RGB FFV1, 45 frames).
 #

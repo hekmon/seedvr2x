@@ -24,7 +24,7 @@ first pass, then the timing rule twice, as the command line takes it: without --
 refused with the guidance; with the rate it gives, accepted. Its figures are printed (pytest -rP):
 
     CUDA_VISIBLE_DEVICES= SEEDVR2X_RATE_SOURCE=<file> SEEDVR2X_RATE_EXPECTED=24000/1001 \\
-        uv run pytest tests/test_rate.py -k real_source -rP"""
+        uv run --project ../apps/cli pytest tests/test_rate.py -k real_source -rP"""
 
 import json
 import logging

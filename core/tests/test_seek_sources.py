@@ -33,8 +33,8 @@ from that keyframe on: only the reader's own check failed that seek, as it faile
 packed source (2026-10-09). Each read's attempts and time are printed, and the attempts by kind of
 target (pytest -rP).
 
-On the box: CUDA_VISIBLE_DEVICES= SEEDVR2X_SEEK_SOURCES=<list> uv run pytest
-tests/test_seek_sources.py -rP [-k S3]"""
+On the box, from core/: CUDA_VISIBLE_DEVICES= SEEDVR2X_SEEK_SOURCES=<list> uv run --project
+../apps/cli pytest tests/test_seek_sources.py -rP [-k S3]"""
 
 import json
 import os

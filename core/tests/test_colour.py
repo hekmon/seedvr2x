@@ -7,7 +7,7 @@ it amounts to; content moved onto itself comes back bit for bit.
 The study's script, research/scripts/colour_variants.py, is loaded from the repository with its
 baseline, the colour.py it was built on, taken from git (BASELINE_BLOB); or, when both are set,
 from STUDY, the directory holding colour_variants.py, and BASELINE, that baseline colour.py
-(test_split.py runs on a copy of seedvr2x/ alone). One set without the other fails, naming the
+(test_split.py runs on a copy of core/ alone). One set without the other fails, naming the
 other. With neither the repository nor both set, the comparisons are skipped."""
 
 import importlib.util
@@ -60,7 +60,7 @@ def load_study(scratch: Path) -> ModuleType | None:
         if not (directory and baseline):
             given, missing = (STUDY, BASELINE) if directory else (BASELINE, STUDY)
             pytest.fail(
-                f"{given} is set but {missing} isn't: set both (on a copy of seedvr2x/ alone), or"
+                f"{given} is set but {missing} isn't: set both (on a copy of core/ alone), or"
                 " neither (in the repository)",
                 pytrace=False,
             )

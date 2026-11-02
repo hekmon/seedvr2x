@@ -60,7 +60,7 @@ One more,
 test_milestone1_from_the_cache, runs ours-sharp with the default models taken from Hugging Face's
 cache (runtime/pull.py): no --model-dir, no --dit-model or --vae-model, and HF_HUB_OFFLINE=1 in
 its environment, so that only the cache can serve them; it needs no SEEDVR2X_MODEL_DIR, and is
-skipped, saying how to fill the cache (uv run hf download, the three files, 17 GB), unless the
+skipped, saying how to fill the cache (hf download, the three files, 17 GB), unless the
 run would find them there: at the pinned revision, or downloaded at another (runtime/pull.py).
 
 Every case pins the passes its reference was made with, untiled or in its tiles, but one,
@@ -1157,8 +1157,8 @@ def test_milestone1_from_the_cache(tmp_path: Path) -> None:
         if pull.cached(name) is None:
             pytest.skip(
                 f"{name}: not in Hugging Face's cache; fill it with the three default files, 17"
-                f" GB: uv run hf download {pull.REPO} {DEFAULT_DIT} {DEFAULT_VAE} {pull.DETECTOR}"
-                f" --revision {pull.REVISION}"
+                f" GB: uv run --project ../apps/cli hf download {pull.REPO} {DEFAULT_DIT}"
+                f" {DEFAULT_VAE} {pull.DETECTOR} --revision {pull.REVISION}"
             )
     job = case("milestone1", "numz_sharp", "input_rgb.mkv", 1080, "numz_sharp", "m1")
     referenced(tmp_path, job, (DEFAULT_DIT, DEFAULT_VAE), numz_padding=True)
