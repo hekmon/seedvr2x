@@ -2,13 +2,14 @@
 name = "seedvr2x-core"
 version = "0.1.0.dev0"
 description = "SeedVR2 upscaling library: the model and its files, placement, tiling, colour correction"
-# MIT: TransNetV2's model, vendored, and its windows, rewritten (NOTICE).
+# MIT: the shot detector, a brick of the library: TransNetV2's model, vendored, run over frames
+# (seedvr2x/detector.py, seedvr2x/transnetv2/; NOTICE).
 license = "Apache-2.0 AND MIT"
-license-files = ["LICENSE", "NOTICE", "src/seedvr2x/transnetv2/LICENSE"]
+license-files = ["LICENSE", "NOTICE", "seedvr2x/transnetv2/LICENSE"]
 requires-python = "==3.13.*"
 # Ranges, so that the library can run in another program's environment (DESIGN.md, Repository
 # and apps): from the versions of the numz environment milestone 1 is compared with, which the
-# CLI pins (apps/cli/pyproject.toml), to below the next major version. huggingface-hub pulls
+# CLI pins (apps/seedvr2x/pyproject.toml), to below the next major version. huggingface-hub pulls
 # seedvr2x's own model files (DESIGN.md, Weights).
 dependencies = [
     "diffusers>=0.40.0,<1",
@@ -30,10 +31,12 @@ build-backend = "uv_build"
 # The import name stays seedvr2x, the distribution's name being seedvr2x-core (DESIGN.md,
 # Repository and apps).
 module-name = "seedvr2x"
+# No src/ folder: the package sits at core/seedvr2x/ (DESIGN.md, Repository and apps, step 2).
+module-root = ""
 
 [tool.uv]
 # No environment or lock of its own: the library is checked and tested in the CLI's environment,
-# the one shipped (uv run --project ../apps/cli, from here; AGENTS.md, Layout). Resolved from the
+# the one shipped (uv run --project ../apps/seedvr2x, from here; AGENTS.md, Layout). Resolved from the
 # ranges, uv would make another.
 managed = false
 
@@ -45,21 +48,21 @@ target-version = "py313"
 select = ["E", "F", "W", "I", "B", "UP", "RUF"]
 # The vendored model code is linted apart, for errors only, and TransNetV2's held to its pinned
 # bytes: see AGENTS.md, Checks.
-exclude = ["src/seedvr2x/vendor/**", "src/seedvr2x/transnetv2/**"]
+exclude = ["seedvr2x/vendor/**", "seedvr2x/transnetv2/**"]
 
 [tool.ruff.format]
 # Python only: ruff also formats the code blocks of Markdown files, and the documents are edited
 # by hand.
-exclude = ["src/seedvr2x/vendor/**", "src/seedvr2x/transnetv2/**", "*.md"]
+exclude = ["seedvr2x/vendor/**", "seedvr2x/transnetv2/**", "*.md"]
 
 [tool.pyright]
-include = ["src", "tests", "tools"]
-exclude = ["src/seedvr2x/vendor", "src/seedvr2x/transnetv2", "**/__pycache__"]
-strict = ["src/seedvr2x"]
+include = ["seedvr2x", "tests", "tools"]
+exclude = ["seedvr2x/vendor", "seedvr2x/transnetv2", "**/__pycache__"]
+strict = ["seedvr2x"]
 pythonVersion = "3.13"
 # The library is checked in the CLI's environment, the one shipped (DESIGN.md, Repository and
 # apps): see AGENTS.md, Checks.
-venvPath = "../apps/cli"
+venvPath = "../apps/seedvr2x"
 venv = ".venv"
 
 [tool.pytest.ini_options]

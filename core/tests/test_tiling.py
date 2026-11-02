@@ -1,4 +1,4 @@
-"""The VAE tiling on the CPU (runtime/tiling.py): the grid, the scratch, and the tiled encode and
+"""The VAE tiling on the CPU (seedvr2x/tiling.py): the grid, the scratch, and the tiled encode and
 decode held bit for bit to numz's tiled_encode and tiled_decode, the vendored ones, over a stand-in
 VAE and, once, over the real one with random weights."""
 
@@ -20,9 +20,9 @@ import torch
 from omegaconf import OmegaConf
 from torch import Tensor
 
+from seedvr2x import model, tilegrid, tiling
 from seedvr2x.passes import OVERLAP, Tiles
-from seedvr2x.runtime import model, tilegrid, tiling
-from seedvr2x.runtime.tiling import Tile
+from seedvr2x.tiling import Tile
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
 from seedvr2x.vendor.models.video_vae_v3.modules.attn_video_vae import VideoAutoencoderKLWrapper
@@ -648,7 +648,7 @@ def test_tiled_passes_are_said(stand_in: model.Models, caplog: pytest.LogCapture
     # shot's frames and where they wait (the store's own word: tests/test_scratch.py has the
     # file's); or that the picture is within one tile. The GPU tests read them
     # (test_regression.py, test_resume.py).
-    caplog.set_level(logging.DEBUG, logger="seedvr2x.runtime.tiling")
+    caplog.set_level(logging.DEBUG, logger="seedvr2x.tiling")
     tiles = Tiles(64, 16)
     latent, video = latent_of(4, (11, 13)), video_of(13, (88, 104))
     assert tilegrid.scratch_bytes(13, (88, 104)) == 713_856

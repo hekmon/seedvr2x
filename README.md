@@ -6,7 +6,7 @@ command-line upscaler built from what the research found.
 | Path | What |
 |---|---|
 | [research/](research/) | Measurements and analysis of the [numz/ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) CLI: every option, VRAM per phase, attention, quality, the bugs found, and the scripts used to measure them |
-| [core/](core/), [apps/cli/](apps/cli/) | Our own CLI, in progress: [DESIGN.md](DESIGN.md) is its specification |
+| [core/](core/), [apps/seedvr2x/](apps/seedvr2x/) | Our own CLI, in progress: [DESIGN.md](DESIGN.md) is its specification |
 | [models/](models/) | The scripts that make seedvr2x's model files from ByteDance's fp32 masters (and TransNetV2's), their formats ([FORMATS.md](models/FORMATS.md)) and their validation on the GPU ([VALIDATION.md](models/VALIDATION.md)); the files themselves are on Hugging Face, [hekmon/seedvr2x](https://huggingface.co/hekmon/seedvr2x) |
 | [upstream/](upstream/) | Pinned, untouched submodules used as the code reference: `seedvr2-numz` (numz, `4490bd1`), `seedvr-bytedance` (ByteDance-Seed/SeedVR, `e4de8c2`) |
 

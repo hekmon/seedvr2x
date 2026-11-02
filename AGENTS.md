@@ -18,33 +18,36 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
   src/seedvr2x/
     cli.py __main__.py   CLI layer: options, logging
     media/               I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
-    runtime/             runtime layer: the pipeline per shot, then stitching, planner, BlockSwap,
-                         resume; the shot detector
+    model.py weights.py pull.py blockswap.py tiling.py tilegrid.py compiling.py colour.py
+    memory.py detector.py   the library's bricks: models, placement, tiling, colour, memory, the
+                         shot detector (clock.py, frames.py, passes.py, peaks.py, sampling.py ...)
+    runtime/             the CLI's runtime: the pipeline per shot, then stitching, planner,
+                         resume (the bricks above were here until the library went flat)
     vendor/              model layer, vendored from numz (below)
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
   tests/
   tools/vendor.py        copy, diff and check of the vendored code
   tools/compare.py       two runs' outputs compared bit for bit
-apps/cli/                the seedvr2x command: distribution seedvr2x
+apps/seedvr2x/           the seedvr2x command: distribution seedvr2x
   pyproject.toml uv.lock .python-version LICENSE
   README.md MANUAL.md images/
 research/ models/ upstream/
 ```
 
 The layers are DESIGN.md's (Architecture), the layout its Repository and apps. Two uv projects:
-`core/` declares the library's dependencies as ranges; `apps/cli/` is the command's, with the
+`core/` declares the library's dependencies as ranges; `apps/seedvr2x/` is the command's, with the
 exact pins, the lock and the dev tools, and installs `core/` by path, editable. Its environment
 is the one shipped, and the one the library is checked and tested in. The command's code,
-`cli.py` and the video-only code, stays in `core/` until DESIGN.md's step 3: `apps/cli/` has no
-module of its own yet. The scripts in `research/` stay standalone.
+`cli.py` and the video-only code, stays in `core/` until DESIGN.md's step 3: `apps/seedvr2x/` has
+no module of its own yet. The scripts in `research/` stay standalone.
 
-- The CLI, from `apps/cli/`: `uv sync`, then `uv run seedvr2x --help`.
+- The CLI, from `apps/seedvr2x/`: `uv sync`, then `uv run seedvr2x --help`.
 - The checks and the tests, from `core/`, in the CLI's environment: `uv run --project
-  ../apps/cli` before each command ([Checks](#checks)).
+  ../apps/seedvr2x` before each command ([Checks](#checks)).
 - No environment of `core/`'s own: its pyproject says `managed = false`, so that a plain
   `uv run` there makes no lock or environment from the ranges, which wouldn't be the one shipped.
 - Paths below are `core/`'s (`src/`, `tests/`, `tools/`) unless they say otherwise; README.md
-  and MANUAL.md are `apps/cli/`'s.
+  and MANUAL.md are `apps/seedvr2x/`'s.
 
 ## The vendored model layer
 
@@ -63,7 +66,7 @@ is and what numz changed in it.
 - **Nothing in it imports numz's runtime** (`src/optimization`, `src/utils`, the rest of
   `src/core`). DESIGN.md (Vendored model code) lists what goes.
 - The StableSR-derived colour code is not vendored: its licence is non-commercial (DESIGN.md,
-  Colour correction). `runtime/colour.py` writes its wavelet split from the method, clean room:
+  Colour correction). `seedvr2x/colour.py` writes its wavelet split from the method, clean room:
   whoever changes it doesn't read StableSR's functions in numz's `src/utils/color_fix.py`, lines
   25-247 at 4490bd1 (`adain_color_fix`, `wavelet_color_fix`, `calc_mean_std`,
   `adaptive_instance_normalization`, `wavelet_blur`, `wavelet_decomposition`,
@@ -89,14 +92,14 @@ beside it; the `__init__.py` is seedvr2x's.
   `tests/test_detector.py` holds the file and the licence to their SHA-256 at that commit, those
   `models/transnetv2_weights.py` pins (`SOURCES`), so any change is deliberate. It runs with
   the locked torch unchanged; a change would be marked as `vendor/`'s are, its pin changed with it.
-- `runtime/detector.py` builds it, loads seedvr2x's `transnetv2.safetensors` into it (pinned in
-  `runtime/pull.py`, made by `models/transnetv2_weights.py`) and runs measurement's windows on
-  it. `core/`'s NOTICE and `apps/cli/`'s README.md credit it.
+- `seedvr2x/detector.py` builds it, loads seedvr2x's `transnetv2.safetensors` into it (pinned in
+  `seedvr2x/pull.py`, made by `models/transnetv2_weights.py`) and runs measurement's windows on
+  it. `core/`'s NOTICE and `apps/seedvr2x/`'s README.md credit it.
 
 ## Environment
 
-- The CLI's uv project, on Python 3.13: `uv sync` in `apps/cli/` creates `apps/cli/.venv` with
-  the locked versions, `core/` installed editable, and the dev tools.
+- The CLI's uv project, on Python 3.13: `uv sync` in `apps/seedvr2x/` creates
+  `apps/seedvr2x/.venv` with the locked versions, `core/` installed editable, and the dev tools.
 - Its dependencies are pinned to the versions of the numz environment milestone 1 is compared
   with, so that the comparison differs by code only: torch and torchvision (CUDA 13.0 builds, from
   PyTorch's index), diffusers, rotary-embedding-torch and the rest. Bump one on purpose, and run
@@ -104,7 +107,7 @@ beside it; the `__init__.py` is seedvr2x's.
 - Linux x86_64 only for now (DESIGN.md: Linux first).
 - huggingface_hub is declared, at the version the lock held already through diffusers: it pulls
   seedvr2x's own model files from its repo at the pinned revision, into Hugging Face's cache
-  (`runtime/pull.py`). seedvr2x imports it to look in the cache on every run without
+  (`seedvr2x/pull.py`). seedvr2x imports it to look in the cache on every run without
   `--model-dir`, which reads the files from a directory instead; diffusers, which the vendored
   model imports, brings it into every run anyway. Its telemetry is off: `cli.main` sets
   `HF_HUB_DISABLE_TELEMETRY` before either import, unless the user has. hf_xet, its Xet
@@ -125,10 +128,10 @@ beside it; the `__init__.py` is seedvr2x's.
 From `core/`:
 
 ```
-uv run --project ../apps/cli ruff format --check
-uv run --project ../apps/cli ruff check
-uv run --project ../apps/cli pyright
-uv run --project ../apps/cli pytest
+uv run --project ../apps/seedvr2x ruff format --check
+uv run --project ../apps/seedvr2x ruff check
+uv run --project ../apps/seedvr2x pyright
+uv run --project ../apps/seedvr2x pytest
 ```
 
 - ruff: line length 100, rules E, F, W, I, B, UP and RUF. The vendored code, `vendor/` and
@@ -158,7 +161,7 @@ uv run --project ../apps/cli pytest
   bit for bit; `tests/test_detection.py`: the first pass recording the module's probabilities
   bit for bit); without, the detector's windows run on the untrained model's weights, written by
   the test.
-- `tests/test_pull.py` holds the pull of seedvr2x's own files (`runtime/pull.py`) on the CPU,
+- `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself: `SHA256SUMS`, a few
   kilobytes, downloaded into a temporary `HF_HOME` behind a link, and the sizes read from the
   Hub's API, skipped offline (no network to huggingface.co, or `HF_HUB_OFFLINE` set). A test
@@ -344,7 +347,7 @@ uv run --project ../apps/cli pytest
   estimate of the masters at 1080p, at 4K and at an odd size, from the segments a resume has
   written, a segment command's unknown and then measured, the room free to a user, and the line
   among `--plan`'s and a run's warning, which never refuses.
-- `--compile` is held on the CPU by `tests/test_compile.py` (`runtime/compiling.py`, the
+- `--compile` is held on the CPU by `tests/test_compile.py` (`seedvr2x/compiling.py`, the
   planner's compiled passes): the plan holding a compiled pass to 1.1 times its tile's plain peak
   and to the measured range of shapes, the shapes warmed (the decoder's latent in one layout, the
   DiT's, dense channels last, for the run's decodes and the calibration's: the run's own calls,

@@ -90,7 +90,7 @@ Usage (numpy is the only dependency):
   python compile_layouts.py tables cuts.json > tables.md
   python compile_layouts.py tables cuts.json --gpu-speedup 2.5 --gain 5:0.26,21:0.30 \\
       --compile-cold 25,1.2 --compile-warm 8 --recompile-limit 8 --processes 3 --no-details
-  apps/cli/.venv/bin/python research/scripts/compile_layouts.py check anime=probabilities.npz
+  apps/seedvr2x/.venv/bin/python research/scripts/compile_layouts.py check anime=probabilities.npz
 """
 import argparse
 import json

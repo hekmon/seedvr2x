@@ -11,11 +11,9 @@ from typing import Any, cast
 import numpy as np
 import pytest
 import torch
-from test_shot import DEVICE, cpu_models  # noqa: F401
-from test_units import channel_major
+from stand_ins import DEVICE, channel_major, cpu_models  # noqa: F401
 
-from seedvr2x import sampling
-from seedvr2x.runtime import model
+from seedvr2x import model, sampling
 
 # The noise of a shot of 21 frames at 1080p, 6 latents of 138 x 240 positions (1104 x 1920
 # padded) in the layout an encode gives them, from seed 42: the SHA-256 of the bfloat16 values'
@@ -32,7 +30,7 @@ def test_the_draw_is_held_to_its_digest(cpu_models: model.Models) -> None:  # no
     # strides those of a latent so built. The noise keeps the latent's shape, dtype and strides.
     import hashlib
 
-    # One frame: a shot of 1 is not padded to 4n + 1 (runtime/shot.py, pad_4n1).
+    # One frame: a shot of 1 is not padded to 4n + 1 (shot.py, pad_4n1).
     frames = np.zeros((1, 32, 48, 3), dtype=np.float32)
     with torch.no_grad():
         video = model.to_input(frames).permute(0, 3, 1, 2).to(torch.float32)
@@ -111,7 +109,7 @@ def test_nothing_of_the_draw_goes_to_a_gpu_but_numz_s(
 
 
 def test_draw_is_the_noise_alone() -> None:
-    # The calibration times the draw apart from the window (runtime/calibration.py): the noise
+    # The calibration times the draw apart from the window (calibration.py): the noise
     # sampling.draw gives is the one drawn gives, from the same seed, and the latent is not
     # touched.
     latent = torch.zeros(16, 5, 3, 4, dtype=model.COMPUTE_DTYPE).permute(1, 2, 3, 0)

@@ -89,7 +89,7 @@ class NVML:
 
 def test_nvidia_driver(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     # NVML stood in for: no driver is asked anything.
-    from seedvr2x.runtime import model
+    from seedvr2x import model
 
     for nvml, version in ((NVML(), "580.82.07"), (NVML(query=3), None)):
         monkeypatch.setattr(ctypes, "CDLL", lambda name, nvml=nvml: nvml)
@@ -126,7 +126,7 @@ def test_the_samplers_bars_are_out_of_the_default_output_but_not_a_download_s(
     # builds the bar with. A download's bar (huggingface_hub's own tqdm) keeps its own.
     from huggingface_hub.utils import tqdm as download_bar
 
-    from seedvr2x.runtime import model
+    from seedvr2x import model
     from seedvr2x.vendor.common.diffusion.samplers import base
 
     monkeypatch.setattr(base, "tqdm", base.tqdm)  # restored after the test
@@ -161,8 +161,8 @@ def test_the_models_load_sets_the_samplers_bars_by_the_log_level(
 
     import torch
 
-    from seedvr2x.runtime import model
-    from seedvr2x.runtime.weights import ModelError
+    from seedvr2x import model
+    from seedvr2x.weights import ModelError
 
     seen: list[bool] = []
     monkeypatch.setattr(model, "sampler_bars", seen.append)

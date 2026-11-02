@@ -1,4 +1,4 @@
-"""The shot detector (runtime/detector.py; DESIGN.md, Input, Shot detection): TransNetV2's official
+"""The shot detector (seedvr2x/detector.py; DESIGN.md, Input, Shot detection): TransNetV2's official
 PyTorch model, vendored byte for byte (transnetv2/), run on frames pushed as they come, in
 predict_frames' windows as measurement ran them.
 
@@ -16,7 +16,10 @@ a synthetic clip of four shots decoded to 48x27 as TransNetV2's official extract
 under 0.05; the streamed windows equal tnet_predict, bit for bit at one window a forward; the same
 bits twice. On the GPU (pytest -m gpu): the GPU's probabilities against the CPU's, the largest
 difference printed (-rP), the same detections at 0.3, the same bits twice, its memory given back
-and torch's settings as found."""
+and torch's settings as found.
+
+The cuts drawn from the probabilities, and the synthetic clip's, are test_detector_cli.py's
+(apps/seedvr2x/tests/): where the cuts fall is the CLI's (cuts.py)."""
 
 import hashlib
 import os
@@ -35,11 +38,10 @@ from safetensors.torch import load_file, save_file
 from test_weights import as_dtype, write
 
 import seedvr2x.transnetv2
-from seedvr2x.runtime import detector, pull
-from seedvr2x.runtime.cuts import detections
-from seedvr2x.runtime.detector import BATCH, STEP, WINDOW, Detector
-from seedvr2x.runtime.weights import ModelError
+from seedvr2x import detector, pull
+from seedvr2x.detector import BATCH, STEP, WINDOW, Detector
 from seedvr2x.transnetv2.transnetv2_pytorch import TransNetV2
+from seedvr2x.weights import ModelError
 
 VENDORED = Path(seedvr2x.transnetv2.__file__).parent
 # TransNetV2's files at 85cef72 (github.com/soCzech/TransNetV2), as models/transnetv2_weights.py
@@ -306,75 +308,6 @@ def test_model_file_checked(tmp_path: Path, untrained: Path) -> None:
         Detector(copy, CPU, hashes=hashes)
 
 
-# The synthetic clip: four lavfi sources at 25 fps, each moving, 73, 77, 62 and 68 frames, its cuts
-# the first frames of the shots but the first.
-SHOTS = (
-    ("testsrc2=s=320x180:r=25", 73),
-    ("mandelbrot=s=320x180:r=25", 77),
-    ("life=s=320x180:r=25:seed=1:mold=10:ratio=0.1:death_color=#202060:life_color=#e0c040", 62),
-    ("sierpinski=s=320x180:r=25:seed=1", 68),
-)
-CUTS = [73, 150, 212]
-
-
-@pytest.fixture(scope="module")
-def clip(tmp_path_factory: pytest.TempPathFactory) -> npt.NDArray[np.uint8]:
-    """The synthetic clip, an FFV1 file, decoded with the official extraction's arguments
-    (inference/transnetv2.py's predict_video: -f rawvideo -pix_fmt rgb24 -s 48x27): (280, 27, 48,
-    3) uint8."""
-    if shutil.which("ffmpeg") is None:
-        pytest.skip("needs ffmpeg")
-    path = tmp_path_factory.mktemp("clip") / "clip.mkv"
-    inputs = [arg for source, _ in SHOTS for arg in ("-f", "lavfi", "-i", source)]
-    trims = "".join(
-        f"[{k}]trim=end_frame={count},setpts=PTS-STARTPTS,format=yuv420p[s{k}];"
-        for k, (_, count) in enumerate(SHOTS)
-    )
-    joined = "".join(f"[s{k}]" for k in range(len(SHOTS)))
-    graph = f"{trims}{joined}concat=n={len(SHOTS)}:v=1:a=0[v]"
-    subprocess.run(
-        [
-            *("ffmpeg", "-v", "error", *inputs, "-filter_complex", graph, "-map", "[v]"),
-            *("-c:v", "ffv1", str(path)),
-        ],
-        check=True,
-    )
-    decoded = subprocess.run(
-        [
-            *("ffmpeg", "-hide_banner", "-nostats", "-v", "error", "-i", str(path)),
-            *("-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "48x27", "pipe:"),
-        ],
-        capture_output=True,
-        check=True,
-    ).stdout
-    frames = np.frombuffer(decoded, np.uint8).reshape(-1, 27, 48, 3)
-    assert len(frames) == sum(count for _, count in SHOTS)
-    return frames
-
-
-def test_cuts_found(trained: Path, clip: npt.NDArray[np.uint8]) -> None:
-    # Each cut peaks on the frame before it, the outgoing shot's last, above 0.5; every other
-    # frame stays under 0.05 (measured 2026-10-09: 0.963, 0.994 and 0.999 at the cuts, 0.024 at
-    # most elsewhere).
-    found = streamed(trained, clip)
-    peaks = [cut - 1 for cut in CUTS]
-    assert all(found[peak] > 0.5 for peak in peaks)
-    assert float(np.delete(found, peaks).max()) < 0.05
-    assert detections(found, 0.3) == detections(found, 0.5) == peaks
-
-
-def test_measurement_reproduced(trained: Path, clip: npt.NDArray[np.uint8]) -> None:
-    # Bit for bit tnet_predict's at one window a forward, the weights measurement ran; the same
-    # bits twice, at the GPU's batch too.
-    reference, _ = tnet_predict(official(trained), clip)
-    first = streamed(trained, clip)
-    assert first.tobytes() == reference.tobytes()
-    assert streamed(trained, clip, (17,)).tobytes() == first.tobytes()
-    batched = streamed(trained, clip, batch=BATCH)
-    assert streamed(trained, clip, (250, 30), batch=BATCH).tobytes() == batched.tobytes()
-    assert detections(batched, 0.3) == detections(first, 0.3)
-
-
 # A Detector built on the GPU before anything else of its process touched CUDA, then run.
 FIRST_ON_THE_GPU = """
 import sys
@@ -383,7 +316,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from seedvr2x.runtime.detector import Detector
+from seedvr2x.detector import Detector
 
 assert not torch.cuda.is_initialized()
 with Detector(Path(sys.argv[1]), torch.device("cuda", 0)) as found:
@@ -396,10 +329,10 @@ with Detector(Path(sys.argv[1]), torch.device("cuda", 0)) as found:
 @pytest.mark.parametrize("allocator", ["backend:cudaMallocAsync", "backend:native"])
 def test_gpu_detector_first_on_the_gpu(untrained: Path, allocator: str) -> None:
     # The detector doesn't depend on who initialised CUDA: built first thing in a process of its
-    # own, under the command line's allocator (runtime/memory.py sets cudaMallocAsync where the
+    # own, under the command line's allocator (seedvr2x/memory.py sets cudaMallocAsync where the
     # driver refuses what the card can't hold) and under torch's own. Under cudaMallocAsync, the
     # reset of torch's peak statistics before CUDA's initialisation raised "RuntimeError: Invalid
-    # device argument." on the GPU box (2026-10-10, runtime/detector.py), which no test saw:
+    # device argument." on the GPU box (2026-10-10, seedvr2x/detector.py), which no test saw:
     # each initialised CUDA before it built one, as the command line's runs do. With the
     # untrained model's weights: no file needed.
     if not torch.cuda.is_available():
@@ -414,34 +347,3 @@ def test_gpu_detector_first_on_the_gpu(untrained: Path, allocator: str) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["120"]
-
-
-@pytest.mark.gpu
-def test_gpu_against_cpu(trained: Path, clip: npt.NDArray[np.uint8]) -> None:
-    # The GPU's probabilities, at its batch, against the CPU's at one window a forward: the
-    # largest difference printed, the same detections at 0.3, the same bits twice; its memory
-    # given back, as torch counts it, and every setting as found.
-    if not torch.cuda.is_available():
-        pytest.skip("needs CUDA")
-    device = torch.device("cuda", 0)
-    cpu = streamed(trained, clip)
-    torch.cuda.init()
-    found = settings()
-    allocated, reserved = torch.cuda.memory_allocated(device), torch.cuda.memory_reserved(device)
-    free = torch.cuda.mem_get_info(device)[0]
-
-    gpu = streamed(trained, clip, batch=BATCH, device=device)
-    again = streamed(trained, clip, batch=BATCH, device=device)
-    torch.cuda.synchronize(device)
-    difference = float(np.abs(gpu.astype(np.float64) - cpu).max())
-    print(
-        f"GPU against CPU: {difference:.3g} at most; free memory {free / 2**30:.2f} GiB before,"
-        f" {torch.cuda.mem_get_info(device)[0] / 2**30:.2f} after; torch's allocated"
-        f" {allocated:,} then {torch.cuda.memory_allocated(device):,} bytes, reserved"
-        f" {reserved:,} then {torch.cuda.memory_reserved(device):,}"
-    )
-    assert detections(gpu, 0.3) == detections(cpu, 0.3) == [cut - 1 for cut in CUTS]
-    assert gpu.tobytes() == again.tobytes()
-    assert torch.cuda.memory_allocated(device) <= allocated
-    assert torch.cuda.memory_reserved(device) <= reserved
-    assert settings() == found

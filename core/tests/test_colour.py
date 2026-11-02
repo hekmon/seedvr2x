@@ -1,4 +1,4 @@
-"""The colour correction (runtime/colour.py), on the CPU: `split` equals the colour study's own
+"""The colour correction (seedvr2x/colour.py), on the CPU: `split` equals the colour study's own
 split() on the same frames, within one 16-bit code, at every factor the study ran and around them
 (DESIGN.md, Validation milestones 5); the colour's stages follow the upscale factor's rule,
 exactly; the à-trous low band is one computed apart in float64 and, away from the edges, the tent
@@ -26,11 +26,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from seedvr2x import colour
 from seedvr2x.frames import target_size
-from seedvr2x.runtime import colour
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-# runtime/colour.py as the colour study ran it, which colour_variants.py loads as its baseline
+# seedvr2x/colour.py as the colour study ran it, which colour_variants.py loads as its baseline
 # (COLOUR_BASELINE): colour.py as of 6c29aa1, unchanged until split replaced `lab`.
 BASELINE_BLOB = "f7ad9cc669b2742c16983de1bb5e836f2fa8aa81"
 # The directory holding colour_variants.py, and the baseline colour.py it loads, when the
@@ -53,7 +53,7 @@ def load_study(scratch: Path) -> ModuleType | None:
     One set without the other fails, naming the other, rather than skip the comparisons or load
     another study or baseline than the one meant: alone, neither says which pair goes together.
     BASELINE is the study's own variable, which colour.md's Reproduce exports for its scoring;
-    without it, colour_variants.py loads the repository's runtime/colour.py, split's since split
+    without it, colour_variants.py loads the repository's seedvr2x/colour.py, split's since split
     replaced lab, not its baseline."""
     directory, baseline = os.environ.get(STUDY), os.environ.get(BASELINE)
     if directory or baseline:

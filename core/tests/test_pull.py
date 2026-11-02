@@ -1,5 +1,5 @@
 """seedvr2x's own model files, pulled from its Hugging Face repo at a pinned revision, each checked
-by its pinned size and SHA-256 (runtime/pull.py; DESIGN.md, Weights).
+by its pinned size and SHA-256 (seedvr2x/pull.py; DESIGN.md, Weights).
 
 On the CPU, huggingface_hub's two calls replaced (Hub), and the pins by two small files' (pins):
 the pinned check, the size before the hash; each file hashed once a run, the manifest taking that
@@ -25,16 +25,16 @@ first time.
 Every test that could reach the Hub replaces the library's two calls, or runs in a process of its
 own whose HF_HOME is the test's, HF_HUB_OFFLINE=1 in its environment but for the revision's own
 test: none downloads a model file. hf_xet is imported in such a process only, since its import
-writes a log file under HF_HOME, and one of them holds seedvr2x to never importing it."""
+writes a log file under HF_HOME, and one of them holds seedvr2x to never importing it.
 
-import errno
+The tests that run the command line over the pull are test_pull_cli.py's (apps/seedvr2x/tests/); the
+helpers both use (Hub, pins, ...) are this file's, which that one imports."""
+
 import hashlib
 import json
 import logging
 import os
-import re
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -47,28 +47,16 @@ import httpx
 import pytest
 from huggingface_hub import constants, file_download
 from huggingface_hub.errors import (
-    DisabledRepoError,
     FileMetadataError,
-    HfHubHTTPError,
     LocalEntryNotFoundError,
-    RemoteEntryNotFoundError,
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
 )
-from test_cli_run import STAND_IN_MODELS, StandInDetector, source, stand_in_model
-from test_weights import SHOTS, V1, as_dtype, transnetv2, write
+from test_weights import SHOTS, as_dtype, write
 
-from seedvr2x import cli, files
-from seedvr2x.media import ffmpeg
-from seedvr2x.runtime import model, pull, weights
-from seedvr2x.runtime.pull import Pin
-from seedvr2x.runtime.weights import ModelError
+from seedvr2x import files, model, pull, weights
+from seedvr2x.pull import Pin
+from seedvr2x.weights import ModelError
 
-TESTS = Path(__file__).resolve().parent
 REVISION = "c14a2bc4aab04cf38ad9b0d324014c4213f07048"
-# Another revision's commit, as a download of the repo's head (hf download without --revision)
-# leaves the same files under it.
-OTHER = "0123456789abcdef0123456789abcdef01234567"
 SHORT = f"hekmon/seedvr2x at {REVISION[:8]}"
 ELSEWHERE = "or download the files elsewhere and give --model-dir with their directory"
 UNAVAILABLE = (
@@ -79,27 +67,11 @@ NO_TOKEN = (
     "hekmon/seedvr2x is public: seedvr2x downloads from it with no token, never sending one stored"
     " for huggingface_hub"
 )
-# The real check and lookup, which tests replace (stand_in_model, Hub).
-CHECK_MODELS = weights.check_models
-LOOKUP = file_download.try_to_load_from_cache
 
 # Two small files in place of seedvr2x's own (pins), as the DiT and the VAE: the stand-in's model
 # check passes them (stand_in_model).
 DIT, VAE = "small_dit.safetensors", "small_vae.safetensors"
 CONTENT = {DIT: b"the DiT's bytes " * 40, VAE: b"the VAE's bytes " * 25}
-
-
-def _usable() -> bool:
-    try:
-        ffmpeg.check()
-    except ffmpeg.MediaError:
-        return False
-    return True
-
-
-needs_ffmpeg = pytest.mark.skipif(
-    not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1"
-)
 
 
 class Hub:
@@ -186,31 +158,6 @@ def hashed(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     return read
 
 
-@pytest.fixture
-def stand_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    stand_in_model(monkeypatch.setattr)
-
-
-def upscale(tmp_path: Path, output: str, *options: str, detect: bool = False) -> int:
-    """seedvr2x run in this process on test_cli_run.py's source, the model's stand-in's frames
-    written as stored; with an empty cut list, unless `detect`, so that the shot detector, which it
-    replaces, neither fetches nor checks its file: these tests hold the DiT's and the VAE's pull,
-    and test_detector_pulled_with_the_others the detector's."""
-    input_path = tmp_path / "in.mkv"
-    if not input_path.exists():
-        source(input_path)
-    one_shot = tmp_path / "one_shot.txt"
-    one_shot.write_text("")
-    return cli.main(
-        [
-            *(str(input_path), "-o", str(tmp_path / output), "--resolution", "96"),
-            *("--seed", "42", "--color-correction", "none", "--format", "gbrp16le"),
-            *(() if detect else ("--cuts", str(one_shot))),
-            *options,
-        ]
-    )
-
-
 def model_dir(tmp_path: Path) -> Path:
     """The small files, as they should be, in a directory of their own."""
     directory = tmp_path / "models"
@@ -256,26 +203,6 @@ def test_pins_recorded() -> None:
         "57cf5a7b",
         None,
     )
-
-
-def test_help(capsys: pytest.CaptureFixture[str]) -> None:
-    # --model-dir optional, and where the files come from without it.
-    with pytest.raises(SystemExit) as exited:
-        cli.main(["--help"])
-    assert exited.value.code == 0
-    text = " ".join(capsys.readouterr().out.split())
-    assert "[--model-dir MODEL_DIR]" in text
-    assert (
-        "a directory holding the model files, each read there by its name, the shot detector's"
-        " transnetv2.safetensors among them unless --cuts is given; nothing is downloaded." in text
-    )
-    assert (
-        "taken from Hugging Face's cache (HF_HOME moves it) with the shot detector's, downloaded"
-        " into it from hekmon/seedvr2x at a pinned revision when missing (HF_HUB_OFFLINE keeps"
-        " the network out). Either way, seedvr2x's own files are checked by their pinned size and"
-        " SHA-256" in text
-    )
-    assert "without --model-dir, seedvr2x_ema_7b_fp16.safetensors or the default" in text
 
 
 def test_size_refused_before_the_hash(
@@ -397,254 +324,6 @@ def test_a_long_hash_is_named_before_it_starts(
     caplog.clear()
     hashes.sha256(directory / DIT)
     assert not caplog.messages
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-@pytest.mark.parametrize("where", ["model-dir", "cache"])
-def test_hashed_once_a_run(
-    tmp_path: Path, hub: Hub, pins: dict[str, Pin], hashed: list[Path], where: str
-) -> None:
-    # The pinned check reads each file of seedvr2x's own, and the manifest's record takes its hash:
-    # one read per file a run, whether --model-dir holds it or the cache.
-    if where == "model-dir":
-        options = ["--model-dir", str(model_dir(tmp_path))]
-    else:
-        options = []
-    assert upscale(tmp_path, "out", *options, "--dit-model", DIT, "--vae-model", VAE) == 0
-    paths = {
-        name: (tmp_path / "models" / name if where == "model-dir" else hub.snapshot(name))
-        for name in CONTENT
-    }
-    assert [path for path in hashed if path.name in CONTENT] == [paths[DIT], paths[VAE]]
-    settings = json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]
-    for key, name in (("dit_model", DIT), ("vae_model", VAE)):
-        assert settings[key] == {
-            "name": name,
-            "size": pins[name].size,
-            "sha256": pins[name].sha256,
-            # The file's time beside its size and hash (DESIGN.md, Pause and resume, 2026-10-29).
-            "mtime_ns": paths[name].stat().st_mtime_ns,
-        }
-    assert (hub.calls == []) == (where == "model-dir")
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_not_pinned_recorded(
-    tmp_path: Path, hub: Hub, hashed: list[Path], caplog: pytest.LogCaptureFixture
-) -> None:
-    # Not one of seedvr2x's own: run as the model check accepts it, said unpinned, hashed once
-    # a run, for its manifest: an output directory's, or a .mkv path's, in its work directory.
-    caplog.set_level(logging.INFO)
-    path = tmp_path / "w.safetensors"
-    path.write_bytes(b"numz's, say")
-    options = ["--model-dir", str(tmp_path), "--dit-model", path.name, "--vae-model", path.name]
-    assert upscale(tmp_path, "out", *options) == 0
-    said = "w.safetensors: not one of seedvr2x's pinned files, so not checked against a pin"
-    assert caplog.messages.count(said) == 1
-    assert [each for each in hashed if each.name == path.name] == [path]
-    settings = json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]
-    digest = hashlib.sha256(b"numz's, say").hexdigest()
-    assert settings["dit_model"] == settings["vae_model"]
-    assert settings["dit_model"] == {
-        "name": path.name,
-        "size": 11,
-        "sha256": digest,
-        "mtime_ns": path.stat().st_mtime_ns,
-    }
-    hashed.clear()
-    assert upscale(tmp_path, "one.mkv", *options) == 0
-    assert [each for each in hashed if each.name == path.name] == [path]
-    assert hub.calls == hub.lookups == []
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in", "pins")
-def test_model_dir_never_calls_the_library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def called(*args: object, **kwargs: object) -> None:
-        pytest.fail("huggingface_hub called")
-
-    monkeypatch.setattr(file_download, "try_to_load_from_cache", called)
-    monkeypatch.setattr(file_download, "hf_hub_download", called)
-    options = ["--model-dir", str(model_dir(tmp_path)), "--dit-model", DIT, "--vae-model", VAE]
-    assert upscale(tmp_path, "out", *options) == 0
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_downloaded_with_the_pin(
-    tmp_path: Path, hub: Hub, pins: dict[str, Pin], caplog: pytest.LogCaptureFixture
-) -> None:
-    # Without --model-dir: each file asked of the library by itself, at the pinned revision, into
-    # the cache, with no token, said once; the log names the cache, then each file, downloaded the
-    # first time, from the cache the next.
-    caplog.set_level(logging.INFO)
-    options = ["--dit-model", DIT, "--vae-model", VAE]
-    assert upscale(tmp_path, "one.mkv", *options) == 0
-    assert hub.calls == [
-        {
-            "repo_id": "hekmon/seedvr2x",
-            "filename": name,
-            "revision": REVISION,
-            "cache_dir": hub.cache,
-            "token": False,
-        }
-        for name in (DIT, VAE)
-    ]
-    assert f"{SHORT}, in Hugging Face's cache, {hub.cache}" in caplog.messages
-    assert caplog.messages.count(NO_TOKEN) == 1
-    for name in (DIT, VAE):
-        size = f"{pins[name].size:,} bytes"
-        assert f"{name}: not in the cache, downloading {size} from {SHORT}" in caplog.messages
-        assert f"{name}: downloaded in 0 s, {hub.snapshot(name)}" in caplog.messages
-    caplog.clear()
-    hub.calls.clear()
-    assert upscale(tmp_path, "two.mkv", *options) == 0
-    assert hub.calls == []
-    assert NO_TOKEN not in caplog.messages
-    for name in (DIT, VAE):
-        assert f"{name}: in the cache, {hub.snapshot(name)}" in caplog.messages
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-@pytest.mark.parametrize("output", ["out", "one.mkv"], ids=["finished", "its assembly left"])
-def test_a_job_with_every_segment_made_fetches_nothing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    pins: dict[str, Pin],
-    hashed: list[Path],
-    caplog: pytest.LogCaptureFixture,
-    output: str,
-) -> None:
-    # DESIGN.md, Pause and resume (decided on 2026-10-13): "a finished job whose own model file
-    # isn't there is held to the file's pin and fetches nothing, where today it downloads it
-    # before saying finished; a file the user names must be there". A job made from Hugging
-    # Face's cache, its DiT's file gone from it since: run again with every segment made, a
-    # directory's job finished or a .mkv path's with its assembly alone left, it asks the
-    # library for no download, neither reads nor checks the DiT's file, held to its pin, and is
-    # said finished, or assembled, exit 0, its VAE, still there, checked and hashed as any job's.
-    # A job with a unit to make in the same state fetches the file as before. (--model-dir's
-    # file missing is refused as before: test_cli_run.py, test_a_finished_job_is_held_to_its_
-    # model_files.)
-    caplog.set_level(logging.INFO)
-    options = ["--dit-model", DIT, "--vae-model", VAE]
-    if output == "one.mkv":
-        # The files downloaded by a job before, so that this one's assembly alone, made last, is
-        # refused for its room, every segment made.
-        assert upscale(tmp_path, "before", *options) == 0
-        with monkeypatch.context() as full:
-            full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
-            assert upscale(tmp_path, output, *options) == 1
-    else:
-        assert upscale(tmp_path, output, *options) == 0
-    assert [call["filename"] for call in hub.calls] == [DIT, VAE]
-    hub.snapshot(DIT).unlink()
-    hub.calls.clear()
-    hashed.clear()
-    caplog.clear()
-    assert upscale(tmp_path, output, *options) == 0
-    # The VAE, still there, is hashed as any job's where the job has its assembly left; a finished
-    # job compares it by size and time with its record and reads it not (DESIGN.md, Pause and
-    # resume, decided on 2026-10-29).
-    assert hub.calls == [] and [path for path in hashed if path.name in CONTENT] == (
-        [] if output == "out" else [hub.snapshot(VAE)]
-    )
-    held = (
-        f"{DIT}: not in Hugging Face's cache, and not downloaded: the job has every segment made"
-        f" and loads no model; held to its pin, hekmon/seedvr2x's at {REVISION[:8]}, SHA-256"
-        f" {pins[DIT].sha256}"
-    )
-    assert held in caplog.messages
-    if output == "one.mkv":
-        assert (tmp_path / output).is_file() and not (tmp_path / "one.mkv.work").exists()
-    else:
-        assert f"{tmp_path / output}: finished already, its 1 segment" in caplog.messages
-    assert not hub.snapshot(DIT).exists()
-    # Another job, with its units to make: its DiT downloaded again, as any job's.
-    assert upscale(tmp_path, "another", *options) == 0
-    assert [call["filename"] for call in hub.calls] == [DIT] and hub.snapshot(DIT).is_file()
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_a_job_whose_first_pass_runs_again_fetches_the_detector_alone(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    pins: dict[str, Pin],
-    detector_pin: Pin,
-    hashed: list[Path],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # DESIGN.md, Pause and resume (decided on 2026-10-16): "a job that loads no model fetches none
-    # even where its first pass must run again". A .mkv path's job, its shots detected, with
-    # every segment made and its assembly left; its frame index gone since, and its DiT's file
-    # and the shot detector's gone from Hugging Face's cache. Run again, its first pass runs
-    # again with the detector, whose file it downloads, as any run whose detector runs; the
-    # DiT's it neither downloads nor reads, held to its pin; the file is assembled, exit 0, its
-    # VAE, still there, checked and hashed as any job's. Until then it downloaded the DiT's file,
-    # 16.5 GB, for an assembly.
-    caplog.set_level(logging.INFO)
-    options = ["--dit-model", DIT, "--vae-model", VAE]
-    # The files downloaded by a job before, so that this one's assembly alone, made last, is
-    # refused for its room, every segment made.
-    assert upscale(tmp_path, "before", *options, detect=True) == 0
-    assert [call["filename"] for call in hub.calls] == [DIT, VAE, pull.DETECTOR]
-    with monkeypatch.context() as full:
-        full.setattr(os, "statvfs", lambda path: SimpleNamespace(f_bavail=0, f_frsize=4096))
-        assert upscale(tmp_path, "one.mkv", *options, detect=True) == 1
-    work = tmp_path / "one.mkv.work"
-    assert not (tmp_path / "one.mkv").exists()
-    (work / "frame_index.bin").unlink()
-    for name in (DIT, pull.DETECTOR):
-        hub.snapshot(name).unlink()
-    hub.calls.clear()
-    hashed.clear()
-    caplog.clear()
-    StandInDetector.built.clear()
-    assert upscale(tmp_path, "one.mkv", *options, detect=True) == 0
-    assert (tmp_path / "one.mkv").is_file() and not work.exists()
-    assert len(StandInDetector.built) == 1
-    assert [call["filename"] for call in hub.calls] == [pull.DETECTOR]
-    assert not hub.snapshot(DIT).exists() and hub.snapshot(pull.DETECTOR).is_file()
-    read = [path.name for path in hashed if path.name in (*CONTENT, pull.DETECTOR)]
-    assert sorted(read) == sorted([VAE, pull.DETECTOR])
-    held = (
-        f"{DIT}: not in Hugging Face's cache, and not downloaded: the job has every segment made"
-        f" and loads no model; held to its pin, hekmon/seedvr2x's at {REVISION[:8]}, SHA-256"
-        f" {pins[DIT].sha256}"
-    )
-    assert held in caplog.messages
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-@pytest.mark.parametrize(
-    ("option", "name", "listing"),
-    [
-        (
-            "--dit-model",
-            "seedvr2_ema_7b_fp16.safetensors",
-            "seedvr2x_ema_7b_fp16.safetensors or seedvr2x_ema_7b_sharp_fp16.safetensors",
-        ),
-        ("--vae-model", "ema_vae_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors"),
-    ],
-)
-def test_not_pinned_refused_without_model_dir(
-    tmp_path: Path, hub: Hub, caplog: pytest.LogCaptureFixture, option: str, name: str, listing: str
-) -> None:
-    # A file seedvr2x doesn't pin, without --model-dir: refused, listing seedvr2x's own files of
-    # its role, before the library is asked anything; nothing written.
-    assert upscale(tmp_path, "out", option, name) == 1
-    assert caplog.messages[-1] == (
-        f"{option} {name}: not one of seedvr2x's own model files, the only ones it downloads"
-        f" ({option}: {listing}); give --model-dir with the directory holding another file"
-    )
-    assert hub.calls == hub.lookups == []
-    assert not (tmp_path / "out").exists()
 
 
 def test_pinned_name_in_the_other_role_refused(hub: Hub) -> None:
@@ -833,105 +512,10 @@ def test_detector_named_in_another_role_refused(hub: Hub) -> None:
     assert hub.calls == hub.lookups == []
 
 
-def other_revision(cache: Path, layout: str) -> dict[str, Path]:
-    """The small files as a download at another revision (OTHER) leaves them in cache: each blob
-    in the repository's blobs/, named by its SHA-256, linked from that revision's snapshot; with
-    layout "shared", a link itself, into the shared store of Xet files, cache's blobs/, whose
-    names are Xet hashes, not SHA-256s (utils/_shared_blobs.py:16-19). Each file's blob, by
-    name."""
-    repository = cache / "models--hekmon--seedvr2x"
-    blobs: dict[str, Path] = {}
-    for name, data in CONTENT.items():
-        digest = hashlib.sha256(data).hexdigest()
-        blob = repository / "blobs" / digest
-        blob.parent.mkdir(parents=True, exist_ok=True)
-        if layout == "shared":
-            xet = hashlib.sha256(b"a Xet hash of " + data).hexdigest()
-            stored = cache / "blobs" / xet[:2] / xet
-            stored.parent.mkdir(parents=True, exist_ok=True)
-            stored.write_bytes(data)
-            blob.symlink_to(os.path.relpath(stored, blob.parent))
-        else:
-            blob.write_bytes(data)
-        link = repository / "snapshots" / OTHER / name
-        link.parent.mkdir(parents=True, exist_ok=True)
-        link.symlink_to(Path("..", "..", "blobs", digest))
-        blobs[name] = blob
-    return blobs
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in", "pins")
-@pytest.mark.parametrize("layout", ["own", "shared"])
-@pytest.mark.parametrize("offline", [False, True], ids=["online", "offline"])
-def test_another_revisions_download_taken(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    caplog: pytest.LogCaptureFixture,
-    layout: str,
-    offline: bool,
-) -> None:
-    # The files downloaded at another revision, the same bytes: found by their SHA-256, in the
-    # cache, so neither downloaded nor any space asked, offline too; then checked by their pins.
-    caplog.set_level(logging.INFO)
-    blobs = other_revision(hub.cache, layout)
-    asked: list[Path] = []
-    monkeypatch.setattr(shutil, "disk_usage", lambda path: asked.append(Path(path)))
-    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", offline)
-    assert upscale(tmp_path, "one.mkv", "--dit-model", DIT, "--vae-model", VAE) == 0
-    assert hub.calls == [] and asked == []
-    assert hub.lookups == [DIT, VAE]
-    for name in (DIT, VAE):
-        said = f"{name}: in the cache, from another revision's download, {blobs[name]}"
-        assert said in caplog.messages
-        assert f"{name}: its size and SHA-256 as seedvr2x pins them, {SHORT}" in caplog.messages
-    assert NO_TOKEN not in caplog.messages
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_another_revisions_blob_of_another_size_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    pins: dict[str, Pin],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # A blob of another size where the pinned file's would be: taken, as the library would link
-    # it rather than download (file_download.py:1256-1261), and refused by its pin's size, saying
-    # to remove it; no space asked, nothing downloaded, nothing written, the blob left as it is.
-    blobs = other_revision(hub.cache, "own")
-    blobs[VAE].write_bytes(CONTENT[VAE] + b"!")
-    monkeypatch.setattr(shutil, "disk_usage", lambda path: pytest.fail("space asked"))
-    assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
-    size = pins[VAE].size
-    assert caplog.messages[-1] == (
-        f"{blobs[VAE]}: {size + 1:,} bytes, where hekmon/seedvr2x's {VAE} at {REVISION[:8]} has"
-        f" {size:,}: not the file seedvr2x pins, left as it is;"
-        f" {from_the_cache(VAE, blobs[VAE], hub.cache)}"
-    )
-    assert hub.calls == [] and not (tmp_path / "out").exists()
-    assert blobs[VAE].read_bytes() == CONTENT[VAE] + b"!"
-
-
-def http_error(kind: type[HfHubHTTPError], status: int, message: str) -> HfHubHTTPError:
-    """An HTTP error of the library's, as hf_raise_for_status raises it."""
-    return kind(message, response=httpx.Response(status, request=httpx.Request("HEAD", url(DIT))))
-
-
 def unreachable() -> LocalEntryNotFoundError:
     """The library's error when the Hub can't be reached, the network's own as its cause."""
     error = LocalEntryNotFoundError("An error happened while trying to locate the file on the Hub")
     error.__cause__ = httpx.ConnectError("[Errno -3] Temporary failure in name resolution")
-    return error
-
-
-def forbidden_head() -> LocalEntryNotFoundError:
-    """The library's error when the Hub answers the file's HEAD with a 403, as its cause
-    (file_download.py:1959-1965)."""
-    error = LocalEntryNotFoundError("An error happened while trying to locate the file on the Hub")
-    error.__cause__ = http_error(HfHubHTTPError, 403, "403 Forbidden: None.")
     return error
 
 
@@ -957,164 +541,6 @@ def not_the_hub(endpoint: str = "https://huggingface.co") -> LocalEntryNotFoundE
     )
     error.__cause__ = cause
     return error
-
-
-CACHE = "{cache}"  # stands for the fake cache's directory in the messages below
-REFUSALS: list[tuple[str, BaseException | None, str]] = [
-    (
-        "offline",
-        None,
-        f"{DIT} and {VAE}: not in Hugging Face's cache, {CACHE}, and HF_HUB_OFFLINE keeps the"
-        f" network out: unset it to download 1,040 bytes, set HF_HOME (or HF_HUB_CACHE) to a"
-        f" cache holding them, {ELSEWHERE}",
-    ),
-    (
-        "unreachable",
-        unreachable(),
-        f"{DIT}: not in the cache, and https://huggingface.co couldn't be reached to download it"
-        f" ([Errno -3] Temporary failure in name resolution): run again once it can be,"
-        f" {ELSEWHERE}",
-    ),
-    (
-        # Reached, but answering without the Hub's headers: the endpoint or a proxy to check,
-        # where a rerun alone changes nothing.
-        "not-the-hub",
-        not_the_hub(),
-        f"{DIT}: not in the cache, and https://huggingface.co answered the request to download it"
-        f" without the Hub's headers ({no_commit('https://huggingface.co')}): check HF_ENDPOINT,"
-        f" if set, and any proxy on the way to the Hub, {ELSEWHERE}",
-    ),
-    (
-        "entry",
-        http_error(RemoteEntryNotFoundError, 404, "404 Client Error. Entry Not Found"),
-        f"{DIT}: not in hekmon/seedvr2x at {REVISION}, the revision this seedvr2x pins (the Hub:"
-        " entry not found): download it elsewhere and give --model-dir with its directory",
-    ),
-    (
-        "revision",
-        http_error(RevisionNotFoundError, 404, "404 Client Error. Revision Not Found"),
-        f"{DIT}: hekmon/seedvr2x has no revision {REVISION}, the one this seedvr2x pins (the Hub:"
-        " revision not found): download the files elsewhere and give --model-dir with their"
-        " directory",
-    ),
-    (
-        "repository",
-        http_error(RepositoryNotFoundError, 401, "401 Client Error. Repository Not Found"),
-        f"{DIT}: the Hub has no repository hekmon/seedvr2x, or not a public one (the Hub:"
-        " repository not found): download the files elsewhere and give --model-dir with their"
-        " directory",
-    ),
-    (
-        "refused",
-        http_error(HfHubHTTPError, 429, "429 Client Error: Too Many Requests"),
-        f"{DIT}: the Hub refused its download (429 Client Error: Too Many Requests): run again,"
-        f" which downloads it again, {ELSEWHERE}",
-    ),
-    (
-        "unauthorized",
-        http_error(HfHubHTTPError, 401, "401 Client Error: Unauthorized"),
-        f"{DIT}: the Hub refused it (401 Client Error: Unauthorized): {UNAVAILABLE}",
-    ),
-    (
-        "forbidden",
-        http_error(HfHubHTTPError, 403, "403 Forbidden: None."),
-        f"{DIT}: the Hub refused it (403 Forbidden: None.): {UNAVAILABLE}",
-    ),
-    (
-        "forbidden-head",
-        forbidden_head(),
-        f"{DIT}: the Hub refused it (403 Forbidden: None.): {UNAVAILABLE}",
-    ),
-    (
-        "disabled",
-        http_error(DisabledRepoError, 403, "Access to this resource is disabled."),
-        f"{DIT}: the Hub refused it (Access to this resource is disabled.): {UNAVAILABLE}",
-    ),
-    (
-        "permissions",
-        PermissionError(errno.EACCES, "Permission denied", "{cache}/models--hekmon--seedvr2x"),
-        f"{DIT}: Hugging Face's cache, {CACHE}, can't be written (Permission denied): set HF_HOME"
-        " (or HF_HUB_CACHE) to a directory you can write, on a disk with 1,040 bytes free,"
-        f" {ELSEWHERE}",
-    ),
-    (
-        # hf_xet's I/O error, its OS error's number in its message alone.
-        "full",
-        OSError("IO Error: No space left on device (os error 28)"),
-        f"{DIT}: Hugging Face's cache, {CACHE}, can't be written (No space left on device): set"
-        " HF_HOME (or HF_HUB_CACHE) to a directory you can write, on a disk with 1,040 bytes"
-        f" free, {ELSEWHERE}",
-    ),
-    (
-        "network-lost",
-        ConnectionError("Network error: connection reset"),
-        f"{DIT}: its download failed (Network error: connection reset): run again, which"
-        f" downloads it again, {ELSEWHERE}",
-    ),
-    (
-        "timed-out",
-        httpx.ReadTimeout("The read operation timed out"),
-        f"{DIT}: its download failed (The read operation timed out): run again, which downloads"
-        f" it again, {ELSEWHERE}",
-    ),
-    (
-        # httpx's errors that are RequestErrors but not TransportErrors.
-        "decoding",
-        httpx.DecodingError("Error -3 while decompressing data: invalid stored block lengths"),
-        f"{DIT}: its download failed (Error -3 while decompressing data: invalid stored block"
-        f" lengths): run again, which downloads it again, {ELSEWHERE}",
-    ),
-    (
-        "redirects",
-        httpx.TooManyRedirects("Exceeded maximum allowed redirects."),
-        f"{DIT}: its download failed (Exceeded maximum allowed redirects.): run again, which"
-        f" downloads it again, {ELSEWHERE}",
-    ),
-    (
-        "integrity",
-        RuntimeError("Data integrity error: hash mismatch"),
-        f"{DIT}: its download failed (Data integrity error: hash mismatch): run again, which"
-        f" downloads it again, {ELSEWHERE}",
-    ),
-    (
-        # hf_xet's Configuration error (xet_pkg/src/error.rs:308), and the library's own when the
-        # Hub's answer lacks the Xet headers (utils/_xet.py:179-181).
-        "xet-configuration",
-        ValueError("Configuration error: invalid range"),
-        f"{DIT}: its download failed (Configuration error: invalid range): check HF_ENDPOINT, if"
-        f" set, and any proxy on the way to the Hub, {ELSEWHERE}",
-    ),
-    (
-        "xet-headers",
-        ValueError("Xet headers have not been correctly set by the server."),
-        f"{DIT}: its download failed (Xet headers have not been correctly set by the server.):"
-        f" check HF_ENDPOINT, if set, and any proxy on the way to the Hub, {ELSEWHERE}",
-    ),
-]
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in", "pins")
-@pytest.mark.parametrize(("kind", "error", "said"), REFUSALS, ids=[kind for kind, _, _ in REFUSALS])
-def test_failures_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    caplog: pytest.LogCaptureFixture,
-    kind: str,
-    error: BaseException | None,
-    said: str,
-) -> None:
-    # Each of the library's failures, its errors caught by name: exit status 1, saying what to
-    # do, nothing written. HF_HUB_OFFLINE refuses before the library is asked to download.
-    if error is None:
-        monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
-    hub.error = error
-    assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
-    assert caplog.messages[-1] == said.replace(CACHE, str(hub.cache))
-    assert [call["filename"] for call in hub.calls] == ([] if error is None else [DIT])
-    assert not (tmp_path / "out").exists()
-    assert not hub.cache.exists()
 
 
 @pytest.mark.usefixtures("pins")
@@ -1160,41 +586,6 @@ def test_refusal_names_the_endpoint(monkeypatch: pytest.MonkeyPatch, hub: Hub, k
     assert str(error.value) == said
 
 
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in", "pins")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a directory whatever its permissions")
-@pytest.mark.parametrize("unreadable", ["snapshots", "blobs"])
-def test_cache_unreadable_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    caplog: pytest.LogCaptureFixture,
-    unreadable: str,
-) -> None:
-    # The cache's own lookup, the library's, listing the snapshots' directory
-    # (file_download.py:1606), and seedvr2x's of a blob, which stats into the repository's
-    # blobs/: a directory that can't be read refused, naming the cache and what to do, exit 1,
-    # nothing downloaded, nothing written.
-    monkeypatch.setattr(file_download, "try_to_load_from_cache", LOOKUP)
-    repository = hub.cache / "models--hekmon--seedvr2x"
-    for name in ("snapshots", "blobs"):
-        (repository / name).mkdir(parents=True)
-    locked = repository / unreadable
-    locked.chmod(0)
-    try:
-        assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
-    finally:
-        locked.chmod(0o755)
-    named = (
-        locked if unreadable == "snapshots" else locked / hashlib.sha256(CONTENT[DIT]).hexdigest()
-    )
-    assert caplog.messages[-1] == (
-        f"Hugging Face's cache, {hub.cache}, can't be read (Permission denied: {named}): make it"
-        f" readable, set HF_HOME (or HF_HUB_CACHE) to another cache, {ELSEWHERE}"
-    )
-    assert hub.calls == [] and not (tmp_path / "out").exists()
-
-
 # hf_xet's two errors for a file its storage doesn't have or won't give, raised by the library's
 # download, in a process of its own whose HF_HOME is the test's: importing hf_xet writes a log
 # under it. The library's two calls are replaced, its cache argv[1]; the error, argv[2].
@@ -1206,8 +597,8 @@ from types import SimpleNamespace
 import hf_xet
 from huggingface_hub import constants, file_download
 
-from seedvr2x.runtime import pull
-from seedvr2x.runtime.weights import ModelError
+from seedvr2x import pull
+from seedvr2x.weights import ModelError
 
 errors = {
     "not-found": hf_xet.XetObjectNotFoundError("Not found: the file's object"),
@@ -1273,8 +664,8 @@ from types import SimpleNamespace
 
 from huggingface_hub import constants, file_download
 
-from seedvr2x.runtime import pull
-from seedvr2x.runtime.weights import ModelError
+from seedvr2x import pull
+from seedvr2x.weights import ModelError
 
 
 def download(repo_id, filename, **options):
@@ -1324,245 +715,6 @@ def test_hf_xet_never_imported(tmp_path: Path) -> None:
     assert not (home / "xet").exists()
 
 
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_space_checked_before_a_download(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    pins: dict[str, Pin],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # The cache's disk, its free space mocked: too little for the files to download, refused
-    # before the first, naming the cache, HF_HOME and --model-dir; enough, downloaded; once in
-    # the cache, no space needed, nor checked.
-    asked: list[Path] = []
-    free = [pins[DIT].size + pins[VAE].size - 1]
-
-    def disk_usage(path: Path) -> SimpleNamespace:
-        asked.append(Path(path))
-        return SimpleNamespace(free=free[0])
-
-    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
-    options = ["--dit-model", DIT, "--vae-model", VAE]
-    assert upscale(tmp_path, "out", *options) == 1
-    assert caplog.messages[-1] == (
-        f"Hugging Face's cache, {hub.cache}: 1,039 bytes free on its disk, where downloading"
-        f" {DIT} and {VAE} needs 1,040 bytes: free some space there, set HF_HOME (or"
-        f" HF_HUB_CACHE) to a directory on a disk with room, {ELSEWHERE}"
-    )
-    assert hub.calls == [] and not (tmp_path / "out").exists()
-    # The nearest directory there is of the one the file goes in.
-    assert asked == [tmp_path]
-    free[0] += 1
-    asked.clear()
-    assert upscale(tmp_path, "out", *options) == 0
-    assert [call["filename"] for call in hub.calls] == [DIT, VAE]
-    assert len(asked) == 2
-    asked.clear()
-    free[0] = 0
-    assert upscale(tmp_path, "again", *options) == 0
-    assert asked == []
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_space_left_after_each_download(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: Hub, pins: dict[str, Pin]
-) -> None:
-    # The disk's free space lowered by each file downloaded, from exactly what both need: once
-    # the DiT is there, the VAE's check asks for the downloads left, the VAE alone.
-    free = [pins[DIT].size + pins[VAE].size]
-    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=free[0]))
-
-    def landed(name: str) -> None:
-        free[0] -= pins[name].size
-
-    hub.downloaded = landed
-    assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 0
-    assert [call["filename"] for call in hub.calls] == [DIT, VAE]
-    assert free == [0]
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-@pytest.mark.parametrize("count", [1, 2])
-def test_space_refusal_names_partial_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    pins: dict[str, Pin],
-    caplog: pytest.LogCaptureFixture,
-    count: int,
-) -> None:
-    # What interrupted downloads left beside the blobs, <blob>.<8 hex digits>.incomplete as
-    # huggingface_hub 1.33.0 names it (file_download.py:2003), <blob>.incomplete as older
-    # releases did: said in the refusal of too little space, each one's path and size, and left
-    # as they are.
-    blobs = hub.cache / "models--hekmon--seedvr2x" / "blobs"
-    blobs.mkdir(parents=True)
-    names = [f"{pins[DIT].sha256}.0123abcd.incomplete", f"{pins[VAE].sha256}.incomplete"]
-    sizes = {blobs / name: size for name, size in zip(names[:count], (300, 400), strict=False)}
-    for path, size in sizes.items():
-        path.write_bytes(bytes(size))
-    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(free=100))
-    assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
-    said = (
-        f"Hugging Face's cache, {hub.cache}: 100 bytes free on its disk, where downloading {DIT}"
-        f" and {VAE} needs 1,040 bytes: free some space there, set HF_HOME (or HF_HUB_CACHE) to a"
-        f" directory on a disk with room, {ELSEWHERE}."
-    )
-    listed = [f"{path} ({size:,} bytes)" for path, size in sorted(sizes.items())]
-    if count == 1:
-        said += (
-            f" {listed[0]} was left there by a download stopped before its end, or is one under"
-            " way: no later download takes it up, and removing it frees its space"
-        )
-    else:
-        said += (
-            f" {listed[0]} and {listed[1]} were left there by downloads stopped before their end,"
-            " or are under way: no later download takes them up, and removing them frees their"
-            " space"
-        )
-    assert caplog.messages[-1] == said
-    assert {path: path.stat().st_size for path in sizes} == sizes
-    assert hub.calls == []
-
-
-# The command line in a process of its own, whose HF_HOME is the test's, the library's two calls
-# replaced: the cache empty, its directory argv[1], and a download that says it started, then
-# waits, its finally writing argv[2] as the library's own removes its partial file
-# (file_download.py:2042-2045).
-TERMINATED = """
-import shutil
-import sys
-import time
-from pathlib import Path
-from types import SimpleNamespace
-
-from huggingface_hub import constants, file_download
-
-from seedvr2x import cli
-
-cleaned = Path(sys.argv[2])
-
-
-def download(repo_id, filename, **options):
-    try:
-        print("DOWNLOADING", file=sys.stderr, flush=True)
-        time.sleep(60)
-    finally:
-        cleaned.write_text(filename)
-
-
-constants.HF_HUB_CACHE = sys.argv[1]
-constants.HF_HUB_OFFLINE = False  # the library faked: nothing reaches the network
-file_download.try_to_load_from_cache = lambda *args, **kwargs: None
-file_download.hf_hub_download = download
-shutil.disk_usage = lambda path: SimpleNamespace(free=10**12)
-sys.exit(cli.main(sys.argv[3:]))
-"""
-
-
-@needs_ffmpeg
-def test_sigterm_during_a_download(tmp_path: Path) -> None:
-    # SIGTERM while a file downloads, before the run's own handlers: raised as Terminated, so that
-    # the download unwinds, its finally run, and the run stops at once, exit 143, nothing written.
-    source(tmp_path / "in.mkv")
-    cleaned = tmp_path / "cleaned"
-    hidden = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_XET_CACHE")
-    environment = {name: value for name, value in os.environ.items() if name not in hidden}
-    environment |= {"HF_HOME": str(tmp_path / "home"), "HF_HUB_OFFLINE": "1"}
-    process = subprocess.Popen(
-        [
-            *(sys.executable, "-c", TERMINATED, str(tmp_path / "hf" / "hub"), str(cleaned)),
-            *(str(tmp_path / "in.mkv"), "-o", str(tmp_path / "out")),
-        ],
-        stderr=subprocess.PIPE,
-        text=True,
-        env=environment,
-    )
-    assert process.stderr is not None
-    lines: list[str] = []
-    for line in process.stderr:
-        lines.append(line)
-        if line.startswith("DOWNLOADING"):
-            process.send_signal(signal.SIGTERM)
-    status = process.wait(timeout=60)
-    text = "".join(lines)
-    assert status == 143, text
-    assert cleaned.read_text() == "seedvr2x_ema_7b_sharp_fp16.safetensors"
-    assert "stopped at once (SIGTERM)" in text
-    assert not (tmp_path / "out").exists()
-
-
-# The command line's logging in a process of its own, whose HF_HOME is the test's, the library's
-# two calls replaced: the cache empty, its directory argv[1], and a download that logs as the
-# library logs, the Hub's advice to set a token (utils/_http.py:972-993) and another warning,
-# httpx a request (its _client.py:1025), then fails.
-LOGGED = """
-import logging
-import shutil
-import sys
-from types import SimpleNamespace
-
-from huggingface_hub import constants, file_download
-
-from seedvr2x import cli
-from seedvr2x.runtime import pull
-
-
-def download(repo_id, filename, **options):
-    http = logging.getLogger("huggingface_hub.utils._http")
-    http.warning(
-        "Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to"
-        " enable higher rate limits and faster downloads."
-    )
-    http.warning("another warning of the library's")
-    request = 'HTTP Request: HEAD %s "HTTP/1.1 302 Found"'
-    logging.getLogger("httpx").info(request, pull.url(filename))
-    raise RuntimeError("the download stops here")
-
-
-constants.HF_HUB_CACHE = sys.argv[1]
-constants.HF_HUB_OFFLINE = False  # the library faked: nothing reaches the network
-file_download.try_to_load_from_cache = lambda *args, **kwargs: None
-file_download.hf_hub_download = download
-shutil.disk_usage = lambda path: SimpleNamespace(free=10**12)
-sys.exit(cli.main(sys.argv[2:]))
-"""
-
-
-@needs_ffmpeg
-def test_library_log_once(tmp_path: Path) -> None:
-    # huggingface_hub's warnings once, in seedvr2x's log, as its lines are, but the Hub's advice
-    # to set a token, which seedvr2x never sends, saying so; httpx's requests not logged.
-    source(tmp_path / "in.mkv")
-    hidden = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_XET_CACHE")
-    environment = {name: value for name, value in os.environ.items() if name not in hidden}
-    environment |= {"HF_HOME": str(tmp_path / "home"), "HF_HUB_OFFLINE": "1"}
-    result = subprocess.run(
-        [
-            *(sys.executable, "-c", LOGGED, str(tmp_path / "hf" / "hub")),
-            *(str(tmp_path / "in.mkv"), "-o", str(tmp_path / "out.mkv")),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=environment,
-    )
-    assert result.returncode == 1, result.stderr
-    assert pull.TOKEN_ADVICE not in result.stderr
-    assert result.stderr.count("another warning of the library's") == 1
-    # A line without --verbose: the time of day, WARNING, the message (cli._Lines).
-    line = r"^\d\d:\d\d:\d\d WARNING another warning of the library's$"
-    assert re.search(line, result.stderr, re.MULTILINE), result.stderr
-    assert "HTTP Request" not in result.stderr
-    assert result.stderr.count(NO_TOKEN) == 1
-    failed = "its download failed (the download stops here)"
-    assert f"seedvr2x_ema_7b_sharp_fp16.safetensors: {failed}" in result.stderr
-
-
 # seedvr2x's handling of the library's log, in a fresh interpreter whose HF_HOME is the test's,
 # before seedvr2x has imported anything of the library, as a run of the command line starts: the
 # library's handler, which the import of its logging module adds, gone all the same.
@@ -1570,7 +722,7 @@ LIBRARY_HANDLER = """
 import logging
 import sys
 
-from seedvr2x.runtime import pull
+from seedvr2x import pull
 
 assert "huggingface_hub.utils.logging" not in sys.modules, "imported already"
 pull._library_logging()
@@ -1591,299 +743,6 @@ def test_library_handler_removed_before_its_import(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "0\n"
-
-
-# python -m seedvr2x in a process of its own, its arguments argv[1:]: the telemetry variable as
-# huggingface_hub reads it, when first imported (constants.py:244-248 in 1.33.0), and the
-# library's constant after the run, which imports it.
-TELEMETRY = """
-import os
-import runpy
-import sys
-
-seen = []
-
-
-class Watch:
-    def find_spec(self, name, path=None, target=None):
-        if name == "huggingface_hub" and not seen:
-            seen.append(os.environ.get("HF_HUB_DISABLE_TELEMETRY"))
-
-
-sys.meta_path.insert(0, Watch())
-sys.argv = ["seedvr2x", *sys.argv[1:]]
-try:
-    runpy.run_module("seedvr2x", run_name="__main__", alter_sys=True)
-except SystemExit as exit:
-    status = exit.code
-imported = "huggingface_hub" in sys.modules
-from huggingface_hub import constants
-
-print(status, imported, seen, constants.HF_HUB_DISABLE_TELEMETRY)
-"""
-
-
-@needs_ffmpeg
-@pytest.mark.parametrize("given", [None, "0", "1"], ids=["unset", "0", "1"])
-def test_telemetry_off_unless_set(tmp_path: Path, given: str | None) -> None:
-    # Hugging Face's telemetry off unless the user set it (DESIGN.md, Weights): seedvr2x's entry
-    # sets HF_HUB_DISABLE_TELEMETRY before anything imports huggingface_hub, the user's own value
-    # kept. A run without --model-dir, in a process of its own whose HF_HOME is the test's,
-    # offline: it imports the library to look in the cache, empty, then refuses the files
-    # missing, exit 1. The library's other two switches unset (constants.py:246-247).
-    source(tmp_path / "in.mkv")
-    hidden = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_XET_CACHE")
-    switches = ("HF_HUB_DISABLE_TELEMETRY", "DISABLE_TELEMETRY", "DO_NOT_TRACK")
-    environment = {
-        name: value for name, value in os.environ.items() if name not in (*hidden, *switches)
-    }
-    environment |= {"HF_HOME": str(tmp_path / "home"), "HF_HUB_OFFLINE": "1"}
-    if given is not None:
-        environment["HF_HUB_DISABLE_TELEMETRY"] = given
-    result = subprocess.run(
-        [
-            *(sys.executable, "-c", TELEMETRY),
-            *(str(tmp_path / "in.mkv"), "-o", str(tmp_path / "out.mkv")),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=environment,
-    )
-    assert result.returncode == 0, result.stderr
-    read = "1" if given is None else given
-    assert result.stdout == f"1 True ['{read}'] {read == '1'}\n", result.stderr
-    assert "not in Hugging Face's cache" in result.stderr
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_cache_behind_a_link(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    pins: dict[str, Pin],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # HF_HOME a link: huggingface_hub's constants give the cache through it, as seedvr2x names
-    # it, and the library resolves it to download (file_download.py:999). Downloaded, taken from
-    # the cache the next run, refused saying the file to remove where it is, and the command
-    # with the cache as given.
-    caplog.set_level(logging.INFO)
-    (tmp_path / "hf-target").mkdir()
-    (tmp_path / "hf").symlink_to(tmp_path / "hf-target")
-    hub = faked(monkeypatch, tmp_path / "hf" / "hub")
-    options = ["--dit-model", DIT, "--vae-model", VAE]
-    assert upscale(tmp_path, "one.mkv", *options) == 0
-    assert [call["cache_dir"] for call in hub.calls] == [hub.cache, hub.cache]
-    target = tmp_path / "hf-target" / "hub"
-    for name in (DIT, VAE):
-        assert f"{name}: downloaded in 0 s, {hub.snapshot(name, target)}" in caplog.messages
-    caplog.clear()
-    assert upscale(tmp_path, "two.mkv", *options) == 0
-    for name in (DIT, VAE):
-        assert f"{name}: in the cache, {hub.snapshot(name)}" in caplog.messages
-    other = bytes(len(CONTENT[VAE]))
-    hub.snapshot(VAE).write_bytes(other)
-    target_vae = hub.snapshot(VAE, target)
-    assert upscale(tmp_path, "three.mkv", *options) == 1
-    assert caplog.messages[-1] == (
-        f"{hub.snapshot(VAE)}: SHA-256 {hashlib.sha256(other).hexdigest()}, where"
-        f" hekmon/seedvr2x's {VAE} at {REVISION[:8]} has {pins[VAE].sha256}: not the file"
-        f" seedvr2x pins, left as it is; {from_the_cache(VAE, target_vae, hub.cache)}"
-    )
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_cache_refusal_says_the_cache(
-    tmp_path: Path, hub: Hub, pins: dict[str, Pin], caplog: pytest.LogCaptureFixture
-) -> None:
-    # A file of the cache of its pinned size, other bytes: refused saying how to fetch it again
-    # into the cache, the file to remove or huggingface_hub's command, and never to leave out the
-    # --model-dir no one gave.
-    other = bytes(len(CONTENT[DIT]))
-    hub.served[DIT] = other
-    assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
-    link = hub.snapshot(DIT)
-    assert caplog.messages[-1] == (
-        f"{link}: SHA-256 {hashlib.sha256(other).hexdigest()}, where hekmon/seedvr2x's {DIT} at"
-        f" {REVISION[:8]} has {pins[DIT].sha256}: not the file seedvr2x pins, left as it is;"
-        f" {from_the_cache(DIT, link, hub.cache)}"
-    )
-    assert not (tmp_path / "out").exists()
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-@pytest.mark.parametrize("change", ["size", "bytes"])
-def test_pinned_name_in_a_subdirectory(
-    tmp_path: Path, pins: dict[str, Pin], caplog: pytest.LogCaptureFixture, change: str
-) -> None:
-    # --dit-model sub/<pinned name> in --model-dir names the pinned file all the same, by the
-    # name's last part: checked by its pin, and refused, by its size or its SHA-256.
-    directory = model_dir(tmp_path)
-    (directory / "sub").mkdir()
-    path = directory / "sub" / DIT
-    data = CONTENT[DIT] + b"!" if change == "size" else bytes(len(CONTENT[DIT]))
-    path.write_bytes(data)
-    options = ["--model-dir", str(directory), "--dit-model", f"sub/{DIT}", "--vae-model", VAE]
-    assert upscale(tmp_path, "out", *options) == 1
-    if change == "size":
-        found, pinned = f"{len(data):,} bytes", f"{pins[DIT].size:,}"
-    else:
-        found, pinned = f"SHA-256 {hashlib.sha256(data).hexdigest()}", pins[DIT].sha256
-    assert caplog.messages[-1] == (
-        f"{path}: {found}, where hekmon/seedvr2x's {DIT} at {REVISION[:8]} has {pinned}: not the"
-        f" file seedvr2x pins, left as it is; fetch it again from {url(DIT)}, {INTO_MODEL_DIR}"
-    )
-    assert not (tmp_path / "out").exists()
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_header_refusal_says_how_to_fetch_again(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    hub: Hub,
-    pins: dict[str, Pin],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # The header check, which comes before the pins, refusing seedvr2x's own files: each refusal
-    # says how to fetch the file again, as the pin's would. In --model-dir, a file missing and one
-    # that isn't a model file: its URL. In the cache, one that isn't a model file and one cut
-    # short: the file to remove or huggingface_hub's command, in place of "fetch it again".
-    monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
-    directory = tmp_path / "models"
-    directory.mkdir()
-    (directory / VAE).write_bytes(CONTENT[VAE])
-    options = ["--model-dir", str(directory), "--dit-model", DIT, "--vae-model", VAE]
-    assert upscale(tmp_path, "out", *options) == 1
-    other = "neither safetensors, GGUF nor a PyTorch checkpoint"
-    assert caplog.messages[-1].splitlines() == [
-        f"{directory / DIT}: no such model file; fetch it from {url(DIT)}, {INTO_MODEL_DIR}",
-        f"{directory / VAE}: {other}: {V1}; fetch it again from {url(VAE)}, {INTO_MODEL_DIR}",
-    ]
-    hub.served[VAE] = (100).to_bytes(8, "little") + b"{"
-    assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
-    dit, vae = hub.snapshot(DIT), hub.snapshot(VAE)
-    # Each refusal's command on a line of its own: two lines each.
-    assert caplog.messages[-1].splitlines() == [
-        *f"{dit}: {other}: {V1}; {from_the_cache(DIT, dit, hub.cache)}".splitlines(),
-        *(
-            f"{vae}: cut short inside its header, 9 bytes of at least 108;"
-            f" {from_the_cache(VAE, vae, hub.cache)}"
-        ).splitlines(),
-    ]
-    assert not (tmp_path / "out").exists()
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-@pytest.mark.parametrize("held", ["own", "other", "missing"])
-def test_fetch_advice_in_its_own_role_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, held: str
-) -> None:
-    # seedvr2x's 7B and VAE in --model-dir, synthetic, each file holding its own header, the
-    # other's, or missing. Given in each other's roles, which only --model-dir lets through, no
-    # refusal says how to fetch them again: neither the URL, the pinned file fetched again being
-    # refused in that role all the same, nor leaving out --model-dir, resolve refusing the swap.
-    # The header check says the file in the wrong role, or missing; the pins, once the headers
-    # pass, the sizes. Given in their own roles, the advice as before.
-    monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
-    dit, vae = "seedvr2x_ema_7b_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors"
-    directory = tmp_path / "models"
-    directory.mkdir()
-    models = {"own": {dit: "7b", vae: "vae"}, "other": {dit: "vae", vae: "7b"}, "missing": {}}
-    sizes = {
-        name: write(directory / name, as_dtype(model, "F16")).stat().st_size
-        for name, model in models[held].items()
-    }
-    assert all(size != pull.PINNED[name].size for name, size in sizes.items())
-
-    def unpinned(name: str) -> str:
-        return (
-            f"{directory / name}: {sizes[name]:,} bytes, where hekmon/seedvr2x's {name} at"
-            f" {REVISION[:8]} has {pull.PINNED[name].size:,}: not the file seedvr2x pins, left as"
-            " it is"
-        )
-
-    def again(name: str) -> str:
-        return f"; fetch it again from {url(name)}, {INTO_MODEL_DIR}"
-
-    vae_as_dit = f"SeedVR2's VAE in fp16, given as the DiT (--dit-model): {V1}"
-    dit_as_vae = f"SeedVR2's 7B DiT in fp16, given as the VAE (--vae-model): {V1}"
-    if held == "own":
-        swapped = [f"{directory / vae}: {vae_as_dit}", f"{directory / dit}: {dit_as_vae}"]
-        own = [unpinned(dit) + again(dit), unpinned(vae) + again(vae)]
-    elif held == "other":
-        swapped = [unpinned(vae), unpinned(dit)]
-        own = [
-            f"{directory / dit}: {vae_as_dit}{again(dit)}",
-            f"{directory / vae}: {dit_as_vae}{again(vae)}",
-        ]
-    else:
-        # Never fetched there: "fetch it", no "again".
-        swapped = [f"{directory / name}: no such model file" for name in (vae, dit)]
-        own = [
-            f"{directory / name}: no such model file; fetch it from {url(name)}, {INTO_MODEL_DIR}"
-            for name in (dit, vae)
-        ]
-    options = ["--model-dir", str(directory)]
-    assert upscale(tmp_path, "out", *options, "--dit-model", vae, "--vae-model", dit) == 1
-    assert caplog.messages[-1].splitlines() == swapped
-    assert upscale(tmp_path, "out", *options, "--dit-model", dit, "--vae-model", vae) == 1
-    assert caplog.messages[-1].splitlines() == own
-    assert not (tmp_path / "out").exists()
-
-
-@needs_ffmpeg
-@pytest.mark.usefixtures("stand_in")
-def test_changed_during_the_first_pass_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    pins: dict[str, Pin],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    # A file of seedvr2x's own touched after its check, during the first pass: the load, given the
-    # run's hashes, finds it changed and refuses it, no unit recorded, the first pass kept as a
-    # plan (DESIGN.md, Pause and resume, A plan), which the next run plans again, the file's new
-    # hash a setting a plan takes (resume.FIRST_PASS_SETTINGS). The stand-in's load does what
-    # load_models does with them (runtime/model.py), the model built none.
-    from seedvr2x.media import source as media
-
-    directory = model_dir(tmp_path)
-    first_pass = media.first_pass
-
-    def touched(*args: Any, **kwargs: Any) -> Any:
-        state = (directory / DIT).stat()
-        os.utime(directory / DIT, ns=(state.st_atime_ns, state.st_mtime_ns + 1))
-        return first_pass(*args, **kwargs)
-
-    def load_models(
-        dit: Path,
-        vae: Path,
-        device: Any,
-        hashes: pull.Hashes | None = None,
-        plan: Any = None,
-        compilation: Any = None,
-    ) -> Any:
-        for path in (dit, vae):
-            if hashes is not None:
-                hashes.unchanged(path)
-        return STAND_IN_MODELS
-
-    monkeypatch.setattr(media, "first_pass", touched)
-    monkeypatch.setattr(model, "load_models", load_models)
-    options = ["--model-dir", str(directory), "--dit-model", DIT, "--vae-model", VAE]
-    assert upscale(tmp_path, "out", *options) == 1
-    assert caplog.messages[-1] == (
-        f"{directory / DIT}: changed since its SHA-256 was read, before its load ended: run"
-        f" again, which checks it again; the first pass is kept in {tmp_path / 'out'}: the same"
-        " command takes it up, or one changing what is named here, without decoding the source"
-        " again"
-    )
-    manifest = json.loads((tmp_path / "out" / "manifest.json").read_text())
-    assert manifest["plan"] is not None and not manifest["shots"][0]["encoded"]
 
 
 def test_changed_after_its_hash_refused(tmp_path: Path) -> None:
@@ -1975,127 +834,6 @@ def test_load_refuses_a_file_changed_since_its_hash(
     assert done == loaded
 
 
-# The command line, exiting 4 should the first pass run, 3 once torch is imported and 5 once
-# huggingface_hub is, a failed assert exiting 1, as a refusal does. huggingface_hub's two calls are
-# replaced as Hub does, its cache argv[1]; a download links the file from argv[2], where the test
-# made it.
-PULLED = """
-import os
-import shutil
-import sys
-from pathlib import Path
-from types import SimpleNamespace
-
-from seedvr2x import cli
-from seedvr2x.media import source
-
-cache, made, mode = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-
-
-def ran(*args, **kwargs):
-    sys.exit(4)
-
-
-def snapshot(name):
-    return cache / "models--hekmon--seedvr2x" / "snapshots" / "{revision}" / name
-
-
-def cached(repo_id, filename, cache_dir=None, revision=None, repo_type=None):
-    return str(snapshot(filename)) if snapshot(filename).is_file() else None
-
-
-def download(repo_id, filename, **options):
-    snapshot(filename).parent.mkdir(parents=True, exist_ok=True)
-    os.link(made / filename, snapshot(filename))
-    return str(snapshot(filename))
-
-
-source.first_pass = ran
-if mode != "model-dir":
-    from huggingface_hub import constants, file_download
-
-    constants.HF_HUB_CACHE = str(cache)
-    constants.HF_HUB_OFFLINE = False  # the library faked: nothing reaches the network
-    file_download.try_to_load_from_cache = cached
-    file_download.hf_hub_download = download
-    shutil.disk_usage = lambda path: SimpleNamespace(free=10**12)
-status = cli.main(sys.argv[4:])
-if "torch" in sys.modules:
-    sys.exit(3)
-sys.exit(5 if mode == "model-dir" and "huggingface_hub" in sys.modules else status)
-""".replace("{revision}", REVISION)
-
-
-@needs_ffmpeg
-@pytest.mark.parametrize("mode", ["cached", "downloaded", "model-dir", "resumed"])
-def test_pulled_before_torch(tmp_path: Path, mode: str) -> None:
-    # The default files, the shot detector's with them, from the cache, downloaded into it, or in
-    # --model-dir: their headers accepted, their sizes not the pinned ones (synthetic files, their
-    # data's holes), refused before the first pass, unhashed, without torch; with --model-dir,
-    # without huggingface_hub. A job resumed likewise (in --model-dir): its record is read before
-    # the model files, to know whether its first pass runs again, the shot detector with it, and
-    # nothing read for it imports torch (runtime/resume.py does, through runtime/units.py: read
-    # there, torch came before the files' check).
-    made = tmp_path / "made"
-    made.mkdir()
-    dit, vae = "seedvr2x_ema_7b_sharp_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors"
-    sizes = {
-        dit: write(made / dit, as_dtype("7b", "F16")).stat().st_size,
-        vae: write(made / vae, as_dtype("vae", "F16")).stat().st_size,
-        pull.DETECTOR: write(made / pull.DETECTOR, transnetv2()).stat().st_size,
-    }
-    assert all(size != pull.PINNED[name].size for name, size in sizes.items())
-    cache = tmp_path / "hf" / "hub"
-    where = cache / "models--hekmon--seedvr2x" / "snapshots" / REVISION
-    if mode == "cached":
-        where.mkdir(parents=True)
-        for name in sizes:
-            os.link(made / name, where / name)
-    source(tmp_path / "in.mkv")
-    args = [str(tmp_path / "in.mkv"), "-o", str(tmp_path / "out")]
-    if mode in ("model-dir", "resumed"):
-        args += ["--model-dir", str(made)]
-        where = made
-    record = {
-        "seedvr2x_manifest": 3,
-        "settings": {"detector_model": {}},
-        "environment": {"ffmpeg": "another"},
-        "input": {},
-    }
-    if mode == "resumed":
-        # A detecting job's record, another ffmpeg's: the first pass would run again, the shot
-        # detector with it, its file asked.
-        (tmp_path / "out").mkdir()
-        (tmp_path / "out" / "manifest.json").write_text(json.dumps(record))
-    # The user's cache out of reach, and the network: HF_HUB_OFFLINE=1, which the script lifts in
-    # the library only where it replaces its two calls.
-    hidden = ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_XET_CACHE")
-    environment = {name: value for name, value in os.environ.items() if name not in hidden}
-    environment |= {"HF_HOME": str(tmp_path / "home"), "HF_HUB_OFFLINE": "1"}
-    script_mode = "model-dir" if mode == "resumed" else mode
-    result = subprocess.run(
-        [sys.executable, "-c", PULLED, str(cache), str(made), script_mode, *args],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=environment,
-    )
-    assert result.returncode == 1, result.stderr
-    for name in sizes:
-        pin = pull.PINNED[name]
-        said = (
-            f"{where / name}: {sizes[name]:,} bytes, where hekmon/seedvr2x's {name} at"
-            f" {REVISION[:8]} has {pin.size:,}: not the file seedvr2x pins, left as it is;"
-        )
-        assert said in result.stderr
-    assert "SHA-256" not in result.stderr
-    if mode == "resumed":
-        left = {path.name: path.read_bytes() for path in (tmp_path / "out").iterdir()}
-        assert left == {"manifest.json": json.dumps(record).encode()}
-    else:
-        assert not (tmp_path / "out").exists()
-
-
 def _offline() -> str | None:
     """Why the network can't be had for the tests reading the revision, if it can't."""
     if constants.HF_HUB_OFFLINE:
@@ -2115,7 +853,7 @@ import json
 import logging
 import sys
 
-from seedvr2x.runtime import pull
+from seedvr2x import pull
 
 logging.basicConfig(level=logging.INFO)
 found = pull.fetch({pull.SUMS: pull.SUMS_PIN})[pull.SUMS]

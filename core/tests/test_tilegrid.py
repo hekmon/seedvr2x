@@ -1,6 +1,6 @@
-"""The arithmetic of VAE tiling without torch (runtime/tilegrid.py), as the planner is to take it:
+"""The arithmetic of VAE tiling without torch (seedvr2x/tilegrid.py), as the planner is to take it:
 the grid, the largest tile and the scratch's bytes. tests/test_tiling.py holds the same grid to
-numz's own tiles, through runtime/tiling.py, whose names these are."""
+numz's own tiles, through seedvr2x/tiling.py, whose names these are."""
 
 import random
 import subprocess
@@ -8,15 +8,14 @@ import sys
 
 import pytest
 
+from seedvr2x import tilegrid, tiling
 from seedvr2x.passes import OVERLAP, Tiles
-from seedvr2x.runtime import tilegrid, tiling
-from seedvr2x.runtime.scratch import Scratch
-from seedvr2x.runtime.tilegrid import Tile
+from seedvr2x.tilegrid import Tile
 
 # What a process has imported once it has the module and has used it.
 IMPORTED = """
 import sys
-from seedvr2x.runtime import tilegrid
+from seedvr2x import tilegrid
 from seedvr2x.passes import Tiles
 
 assert tilegrid.largest((1104, 1920), Tiles(1024)) == 1024 * 1024
@@ -40,8 +39,6 @@ def test_tilings_names_are_these() -> None:
     assert tiling.Tile is tilegrid.Tile
     assert (tiling.SCALE, tiling.CHANNELS, tiling.SCRATCH) == (8, 3, "scratch.bf16")
     assert (tilegrid.SCALE, tilegrid.CHANNELS, tilegrid.SCRATCH) == (8, 3, "scratch.bf16")
-    for frames, padded in ((1, (1104, 1920)), (17, (64, 96)), (301, (2192, 3840))):
-        assert Scratch.needed(frames, padded) == tilegrid.scratch_bytes(frames, padded)
 
 
 def test_grid_of_real_frames() -> None:

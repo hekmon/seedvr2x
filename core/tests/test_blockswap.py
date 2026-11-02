@@ -1,4 +1,4 @@
-"""The DiT's placement (runtime/blockswap.py) on the CPU: a toy model on simulated CUDA streams.
+"""The DiT's placement (seedvr2x/blockswap.py) on the CPU: a toy model on simulated CUDA streams.
 
 On a GPU, a block's forward only queues its kernels: they read its weights later, in the
 stream's order, and a copy queued on another stream runs whenever the events it waits for
@@ -29,10 +29,10 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from torch import Tensor
 
-from seedvr2x.runtime import blockswap, model, weights
-from seedvr2x.runtime.blockswap import OTHER, HostMemoryError, Part, Placement, dit_parts
-from seedvr2x.runtime.plan import Plan
-from seedvr2x.runtime.weights import SLOTS
+from seedvr2x import blockswap, model, weights
+from seedvr2x.blockswap import OTHER, HostMemoryError, Part, Placement, dit_parts
+from seedvr2x.passes import ModelPlan
+from seedvr2x.weights import SLOTS
 
 CPU = torch.device("cpu")
 WIDTH = 8
@@ -319,7 +319,7 @@ def test_the_parts_of_a_dit_by_name() -> None:
 @pytest.mark.parametrize("architecture", [weights.DIT_7B, weights.DIT_3B], ids=["7b", "3b"])
 def test_a_dit_s_blocks_are_weights_py_s(architecture: weights.Architecture) -> None:
     # By the model's shapes, in fp16, as the files hold them: the bytes the planner plans with
-    # and the placement moves, in runtime/weights.py, which imports no torch.
+    # and the placement moves, in seedvr2x/weights.py, which imports no torch.
     import seedvr2x.vendor
     from seedvr2x.vendor.common.config import create_object, load_config
 
@@ -1029,7 +1029,7 @@ def test_a_new_slot_waits_for_what_the_compute_stream_has_queued(
 
 
 def test_every_plan_s_phases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The loader's parts and Models.enter (runtime/model.py) over every plan of a toy of 4
+    # The loader's parts and Models.enter (seedvr2x/model.py) over every plan of a toy of 4
     # blocks with a toy VAE: each number of swapped blocks, each VAE phase keeping the DiT as it
     # is (None), nothing, or any number of its blocks that aren't swapped, the VAE staying for
     # the DiT's phase or not. After each phase entered: the device holds what the plan says, to
@@ -1054,7 +1054,7 @@ def test_every_plan_s_phases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     save_file(toy(blocks, plain).state_dict(), dit_file)
     save_file(toy_vae(plain).state_dict(), vae_file)
     order = ["encode", "dit", "decode", "encode", "dit", "dit", "decode", "decode", "dit", "encode"]
-    plans: set[Plan] = set()
+    plans: set[ModelPlan] = set()
     runs = 0
     for swapped in range(blocks + 1):
         fixed = blocks - swapped
@@ -1063,8 +1063,7 @@ def test_every_plan_s_phases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             residents, residents, (True, False), ("encode", "dit")
         ):
             runs += 1
-            plan = Plan(
-                None,
+            plan = ModelPlan(
                 swapped=swapped,
                 resident_encode=kept_encode,
                 resident_decode=kept_decode,
@@ -1083,14 +1082,12 @@ def test_every_plan_s_phases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
                 dit_file,
                 CPU,
                 None,
-                model._dit_parts(plan.model_plan, blocks),  # pyright: ignore[reportPrivateUsage]
+                model._dit_parts(plan, blocks),  # pyright: ignore[reportPrivateUsage]
             )
             dit.requires_grad_(False).eval()
             vae.requires_grad_(False).eval()
             runner = SimpleNamespace(dit=dit, vae=vae)
-            models = model.Models(
-                runner, torch.empty(0), torch.empty(0), "none", CPU, plan.model_plan
-            )
+            models = model.Models(runner, torch.empty(0), torch.empty(0), "none", CPU, plan)
             if dit_parts_ or plan.swapped:
                 models.placement = Placement(dit, CPU, plan.swapped, parts=dit_parts_)
             models.vae = vae_parts.get(model.VAE_PART)
@@ -1144,10 +1141,10 @@ def test_a_phase_that_fails_to_enter_is_no_phase(monkeypatch: pytest.MonkeyPatch
     torch.manual_seed(99)
     vae = Block("vae", sim).requires_grad_(False).eval()
     part = blockswap.host(vae, lambda key: model.VAE_PART, sim)[model.VAE_PART]
-    plan = Plan(None, swapped=2, resident_encode=0, resident_decode=0, vae_in_dit=False)
+    plan = ModelPlan(swapped=2, resident_encode=0, resident_decode=0, vae_in_dit=False)
     runner = SimpleNamespace(dit=dit, vae=vae)
     models = model.Models(
-        runner, torch.empty(0), torch.empty(0), "none", CPU, plan.model_plan, placement, part
+        runner, torch.empty(0), torch.empty(0), "none", CPU, plan, placement, part
     )
     models.enter("decode")
     assert models.phase == "decode" and sim.live() == part.size
@@ -1320,11 +1317,9 @@ def test_one_or_two_swapped_blocks_are_said_to_free_nothing(
     sim = Sim()
     dit = toy(7, sim)
     placement = Placement(dit, CPU, swapped, backend=sim)
-    plan = Plan(None, swapped=swapped)
+    plan = ModelPlan(swapped=swapped)
     runner = SimpleNamespace(dit=dit, vae=None)
-    models = model.Models(
-        runner, torch.empty(0), torch.empty(0), "none", CPU, plan.model_plan, placement
-    )
+    models = model.Models(runner, torch.empty(0), torch.empty(0), "none", CPU, plan, placement)
     caplog.set_level("INFO")
     model._say_pinned(models, [f"blocks.{7 - 1 - j}" for j in range(swapped)])  # pyright: ignore[reportPrivateUsage]
     blocks = f"{swapped} of the DiT's blocks"

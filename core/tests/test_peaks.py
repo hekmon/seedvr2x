@@ -2,17 +2,16 @@
 against the measurements it was fitted on, every expected figure copied from
 research/docs/planner-limits.md, research/docs/vram.md or DESIGN.md, the table named, or measured
 on seedvr2x with milestone 3 (2026-10-11), said so; where the weights are and what they take
-against runtime/blockswap.py's own rules; the tiles' measured peaks, and what a tile nobody
+against seedvr2x/blockswap.py's own rules; the tiles' measured peaks, and what a tile nobody
 measured takes. On the CPU, no weights: the models are built on the meta device where their
 shapes are counted."""
 
 import pytest
 
-from seedvr2x import peaks
+from seedvr2x import peaks, tilegrid
 from seedvr2x.frames import output_size, padded_size
 from seedvr2x.passes import Tiles
 from seedvr2x.peaks import GIB
-from seedvr2x.runtime import tilegrid
 
 # A 1080p target (tests/test_planner.py has it with the 4K one).
 HD = (1080, 1920)
@@ -174,7 +173,7 @@ def test_dit_on_gpu_is_the_placements() -> None:
     # swapped blocks and every phase's residency the loader accepts.
     import torch
 
-    from seedvr2x.runtime import blockswap
+    from seedvr2x import blockswap
 
     class Host(blockswap.Cuda):
         def host(self, size: int) -> blockswap.HostCopy:
@@ -216,7 +215,7 @@ def largest(padded: tuple[int, int], tiles: Tiles) -> tuple[int, int]:
 
 def test_grid_and_largest_tile() -> None:
     # The grid the plan's lines say and the tile a pass's peak follows are the tiled passes' own
-    # (runtime/tilegrid.py, which tests/test_tilegrid.py and tests/test_tiling.py hold to
+    # (seedvr2x/tilegrid.py, which tests/test_tilegrid.py and tests/test_tiling.py hold to
     # numz's). planner-limits.md, "Tiled VAE at 4K", Tiles (rows x columns), overlap 128: 1024 px
     # 3 x 5, 1536 px 2 x 3, 2048 px 2 x 2; vram.md, Tiling: 60 tiles of 512 px and 24 of 768 at
     # overlap 128, 12 of 1024 at overlap 64, 15 at 128 and at 256.

@@ -6,9 +6,9 @@ resume milestone an interrupted run against an uninterrupted one. Both ask for i
 so this reports equality first, then, for the frames that differ, how much.
 
 Usage, from core/, in the CLI's environment:
-  uv run --project ../apps/cli tools/compare.py masters A.mkv B.mkv
+  uv run --project ../apps/seedvr2x tools/compare.py masters A.mkv B.mkv
       decoded as gbrp16le, compared frame by frame
-  uv run --project ../apps/cli tools/compare.py frames DIR_A DIR_B
+  uv run --project ../apps/seedvr2x tools/compare.py frames DIR_A DIR_B
       frame_NNNNNN.npy float32 dumps (ffv1_out.py's FFV1_OUT_DUMP, seedvr2x's --dump-frames)
 """
 

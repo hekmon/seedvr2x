@@ -352,7 +352,7 @@ def narrow_vae() -> Any:
 
 def test_every_slice_of_a_vae_pass_takes_one_path(monkeypatch: pytest.MonkeyPatch) -> None:
     # The VAE's own convolutions (narrow_vae): an encode of 13 frames in slices of 5, 4 and 4, and
-    # a decode of 4 latents in slices of 2, 1 and 1, as the runtime feeds them (runtime/model.py,
+    # a decode of 4 latents in slices of 2, 1 and 1, as the runtime feeds them (seedvr2x/model.py,
     # encode_sliced and decode_sliced), 64 x 64 px. At every convolution the first slice holds one
     # frame more than the others, and the pieces along the rows are cut again along the columns
     # where they still pass the limit. For each size a convolution's first slice or its slices of

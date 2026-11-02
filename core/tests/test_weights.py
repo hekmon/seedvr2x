@@ -7,7 +7,10 @@ message saying what the file is, and a model given in another's role saying so.
 The files are synthetic: a header written from the vendored model's tensors, or from a variant of
 them as the real files measured hold theirs, then the file extended to its full size without its
 data, a sparse file. The real files are checked too, header only, when SEEDVR2X_MODEL_DIR holds
-them."""
+them.
+
+The command line over the check (a run refused before the first pass, the defaults in --help)
+is test_weights_cli.py's (apps/seedvr2x/tests/)."""
 
 import functools
 import hashlib
@@ -28,10 +31,8 @@ from typing import Any
 
 import pytest
 
-from seedvr2x import cli
-from seedvr2x.media import ffmpeg
-from seedvr2x.runtime import weights
-from seedvr2x.runtime.weights import DIT_3B, DIT_7B, VAE, Architecture, ModelError, TensorInfo
+from seedvr2x import weights
+from seedvr2x.weights import DIT_3B, DIT_7B, VAE, Architecture, ModelError, TensorInfo
 
 # A model's tensors, by name: (dtype, shape).
 Tensors = dict[str, tuple[str, tuple[int, ...]]]
@@ -56,7 +57,7 @@ def vendored(model: str) -> dict[str, tuple[int, ...]]:
     """The shapes of the vendored model's tensors, by name: its state_dict, built on the meta
     device with tests/test_model.py's BUILD calls; "7b" and "3b" the DiTs of configs_7b and
     configs_3b, "vae" configs_7b's VAE merged with its architecture's config, as
-    runtime/model.py's load_models merges it. Built once per session, as a module-scoped fixture
+    seedvr2x/model.py's load_models merges it. Built once per session, as a module-scoped fixture
     would be, and taken by the CLI's tests of other modules too (accepted_models)."""
     import torch
     from omegaconf import OmegaConf
@@ -132,7 +133,7 @@ def write(path: Path, tensors: Tensors, metadata: Mapping[str, str] | None = Non
 
 def accepted_models(directory: Path) -> list[str]:
     """SeedVR2's 7B DiT and its VAE in fp16, synthetic (write), in directory under numz's names,
-    which seedvr2x doesn't pin (runtime/pull.py): models the header check accepts and no pin
+    which seedvr2x doesn't pin (seedvr2x/pull.py): models the header check accepts and no pin
     refuses, for the CLI's tests running it for real in a process of their own, which imports no
     torch. Returns the options naming them."""
     dit, vae = "seedvr2_ema_7b_sharp_fp16.safetensors", "ema_vae_fp16.safetensors"
@@ -289,7 +290,7 @@ def test_load_models_by_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     # loaded: the 7B under a 3B's name builds the 7B, where numz would build the 3B.
     import torch
 
-    from seedvr2x.runtime import model
+    from seedvr2x import model
 
     loaded: list[str] = []
 
@@ -850,7 +851,7 @@ def test_check_models_with_the_detector(tmp_path: Path, caplog: pytest.LogCaptur
 NO_TORCH = """
 import sys
 from pathlib import Path
-from seedvr2x.runtime import weights
+from seedvr2x import weights
 assert weights.check(Path(sys.argv[1]), "dit") is weights.DIT_7B
 assert weights.check(Path(sys.argv[3]), "detector") is weights.TRANSNETV2
 print(weights.describe(Path(sys.argv[2])))
@@ -870,58 +871,6 @@ def test_header_read_without_torch(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "SeedVR2's 3B DiT in fp16\n"
-
-
-def _usable() -> bool:
-    try:
-        ffmpeg.check()
-    except ffmpeg.MediaError:
-        return False
-    return True
-
-
-@pytest.mark.skipif(not _usable(), reason="needs ffmpeg 7.1 or later with zscale, idet and ffv1")
-def test_cli_refuses_before_the_first_pass(tmp_path: Path) -> None:
-    # A 3B as the DiT stops the run in its checks, before the first pass (which logs the frames
-    # it counted) and before torch is imported.
-    source = tmp_path / "in.mkv"
-    subprocess.run(
-        [
-            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),
-            *("-frames:v", "3", "-c:v", "ffv1", str(source)),
-        ],
-        check=True,
-    )
-    write(tmp_path / "seedvr2x_ema_vae_fp16.safetensors", as_dtype("vae", "F16"))
-    write(tmp_path / "seedvr2_ema_3b_fp16.safetensors", as_dtype("3b", "F16"))
-    args = [str(source), "-o", "out.mkv", "--model-dir", "."]
-    args += ["--dit-model", "seedvr2_ema_3b_fp16.safetensors"]
-    # Exit 3 if torch was imported: a failed assert would exit 1, as the refusal does.
-    code = (
-        "import sys; from seedvr2x import cli; status = cli.main(sys.argv[1:]);"
-        " sys.exit(3 if 'torch' in sys.modules else status)"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code, *args],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=tmp_path,
-    )
-    assert result.returncode == 1, result.stderr
-    assert f"seedvr2_ema_3b_fp16.safetensors: SeedVR2's 3B DiT in fp16: {V1}" in result.stderr
-    assert "frames, 64x48" not in result.stderr
-    assert "VAE seedvr2x_ema_vae_fp16.safetensors: SeedVR2's VAE in fp16" in result.stderr
-
-
-def test_defaults_in_help(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exited:
-        cli.main(["--help"])
-    assert exited.value.code == 0
-    text = " ".join(capsys.readouterr().out.split())
-    assert "(default: seedvr2x_ema_7b_sharp_fp16.safetensors, the sharp 7B)" in text
-    assert "(default: seedvr2x_ema_vae_fp16.safetensors)" in text
-    assert "SeedVR2's 7B DiT, regular or sharp, in fp16, recognised by its tensors" in text
 
 
 MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")

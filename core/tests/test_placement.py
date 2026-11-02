@@ -1,4 +1,4 @@
-"""The DiT's placement on a real card (runtime/blockswap.py): milestone 3's first gate, swapping
+"""The DiT's placement on a real card (seedvr2x/blockswap.py): milestone 3's first gate, swapping
 changes no bit of the DiT's output (DESIGN.md, BlockSwap, rewritten), for 0, 3, 12 and all 36
 blocks swapped, without the prefetch and with it; the DiT's peak falls by each swapped block but
 the two in the slots; a model sent away leaves the device to the other; a plan's load never
@@ -27,11 +27,10 @@ import pytest
 import torch
 from torch import Tensor
 
-from seedvr2x import frames
-from seedvr2x.runtime import blockswap, model
-from seedvr2x.runtime.blockswap import Placement, dit_parts
-from seedvr2x.runtime.plan import Plan
-from seedvr2x.runtime.weights import DIT_7B, SLOTS
+from seedvr2x import blockswap, frames, model
+from seedvr2x.blockswap import Placement, dit_parts
+from seedvr2x.passes import ModelPlan
+from seedvr2x.weights import DIT_7B, SLOTS
 
 BLOCK_BYTES = DIT_7B.blocks[0]  # a block of the 7B in fp16: 0.4220 GiB
 
@@ -213,9 +212,9 @@ def test_a_plan_s_load_never_has_the_dit_whole_on_the_device(loaded: Loaded) -> 
     torch.cuda.empty_cache()
     before = allocated(device)
     torch.cuda.reset_peak_memory_stats(device)
-    plan = Plan(None, swapped=36, resident_encode=0, resident_decode=0, vae_in_dit=False)
+    plan = ModelPlan(swapped=36, resident_encode=0, resident_decode=0, vae_in_dit=False)
     measure_resident()
-    models = model.load_models(found(DITS), found(VAES), device, model_plan=plan.model_plan)
+    models = model.load_models(found(DITS), found(VAES), device, model_plan=plan)
     host_peak, host_after = resident(peak=True), resident()
     placement, vae = models.placement, models.vae
     assert placement is not None and vae is not None
@@ -246,7 +245,7 @@ def test_a_plan_s_load_never_has_the_dit_whole_on_the_device(loaded: Loaded) -> 
 
 
 def test_the_driver_is_asked() -> None:
-    # The startup probe (runtime/memory.py) on a real driver, its calls through ctypes and all:
+    # The startup probe (seedvr2x/memory.py) on a real driver, its calls through ctypes and all:
     # it answers, in under two seconds, and leaves the card as it found it. A driver reached
     # without WSL's device refuses what the card can't hold; under WSL, Windows' driver gave it
     # (driver 616.92, 2026-10-11), and whichever it does now is said in the test's output.
@@ -256,7 +255,7 @@ def test_the_driver_is_asked() -> None:
     # for one that spills, the card's figure given with the answer (memory.probe). Which of the
     # two the card is in is read here too, before the probe, and the answer held to it: a probe
     # that asks beside another program's memory takes the card from that program.
-    from seedvr2x.runtime import memory
+    from seedvr2x import memory
 
     device = torch.device("cuda:0")
     torch.cuda.synchronize(device)

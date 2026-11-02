@@ -1,0 +1,272 @@
+"""The environment a job's output depends on besides its settings and inputs, which a resume must
+find again to stay bit-identical (DESIGN.md, Pause and resume): the stack, the GPU, ffmpeg and its
+conversions, and the version of every distribution the run is made of, derived rather than
+listed, so that a new dependency can't be missed."""
+
+import functools
+import importlib
+import platform
+import re
+import sys
+from collections.abc import Iterable, Mapping
+from importlib import metadata
+from pathlib import Path
+
+import torch
+
+# seedvr2x's own modules, which the run is made of: the library's package and the CLI's own
+# modules (manifest.MODULES, manifest.PACKAGES). Their files are hashed (settings.code), and the
+# distributions they import are versioned (versions).
+#
+# The two distributions they ship in, left out of the record: the code hash covers their files.
+# The record is read from the CLI's, seedvr2x, whose requirements are seedvr2x-core and, through
+# it, the library's (DESIGN.md, Repository and apps): installed wherever the CLI runs, editable
+# or not, with the same metadata in both.
+OWN = frozenset({"seedvr2x", "seedvr2x-core"})
+DISTRIBUTION = "seedvr2x"
+
+# A requirement's distribution and the extras it asks of it, and the extras a marker names
+# (PEP 508): `cuda-toolkit[cublas,cudart]==13.0.3; platform_system == "Linux"`.
+REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[([^\]]*)\])?")
+EXTRA = re.compile(r"""\bextra\s*==\s*["']([^"']+)["']""")
+# A shared library (`libcublas.so.13`), and a Python extension module, which only an import loads
+# (PEP 3149: `_speedups.cpython-313-x86_64-linux-gnu.so`, `.abi3.so`). One named with a bare
+# `.so`, as triton's `libtriton.so`, passes for a library: that only errs toward recording.
+SHARED_LIBRARY = re.compile(r"\.so(\.\d+)*$")
+EXTENSION_MODULE = re.compile(r"\.(cpython-[^.]+|abi3)\.so$")
+# Used when installed, though not declared: PyPI only has its source (AGENTS.md, Environment).
+UNDECLARED = ("flash-attn",)
+# setuptools' hook, which site imports at every start from distutils-precedence.pth, unless
+# SETUPTOOLS_USE_DISTUTILS=stdlib, whatever the process runs: the run imports no setuptools, and
+# a resume mustn't depend on that variable.
+START_HOOKS = ("_distutils_hack",)
+# Imported by a download alone, huggingface_hub's of a Xet file (1.33.0: file_download.py:554,
+# utils/_xet.py:284), which leaves the output alone: what it fetches is checked against its pinned
+# SHA-256 before it loads (seedvr2x/pull.py). Recorded, it would set a job started with a download
+# apart from its resume, the files then in the cache. huggingface_hub itself is the run's: the
+# vendored model imports diffusers, which imports it. Provisional (implementation, 2026-10-09):
+# DESIGN.md's environment doesn't say.
+DOWNLOAD_ONLY = frozenset({"hf-xet"})
+# What torch.compile imports with inductor, triton and the extension builder, the first time it
+# compiles a model (--compile): see import_inductor.
+INDUCTOR = (
+    "torch._dynamo",
+    "torch._inductor.compile_fx",
+    "torch._inductor.async_compile",
+    "torch._inductor.codecache",
+    "torch._inductor.runtime.triton_heuristics",
+    "torch.utils.cpp_extension",
+    "triton",
+)
+
+
+def current(
+    device: torch.device | None,
+    ffmpeg_version: str,
+    conversions: str,
+    made_in: Mapping[str, object] | None = None,
+    *,
+    compiling: bool = False,
+) -> dict[str, object]:
+    """The environment of a run on device: torch, CUDA, cuDNN, the GPU, the attention backend and
+    FlashAttention, ffmpeg and its conversions' fingerprint (media/fingerprint.py), Python and
+    the versions of the distributions (versions); and the NVIDIA driver, for information only,
+    since the math kernels ship with torch.
+
+    device None: a run that takes no GPU, of a job recorded with every segment made (main._run):
+    a finished job said finished, or a file's assembly. seedvr2x asks nothing of the GPU there:
+    none of its code calls torch.cuda or loads NVML, and the GPU, its driver and cuDNN's version
+    are those of made_in, the environment the job's manifest records, the card that made its
+    segments, the rest being this run's. The process still asks once whether CUDA is there, as
+    a library is imported: no context, no memory. seedvr2x/model.py, imported here first, as it
+    is for every job, imports the vendored VAE (its causal_inflation_lib), which imports
+    diffusers' RMSNorm, and diffusers sets its device as its utilities are imported:
+    torch.cuda.is_available, once a process (diffusers 0.40.0, utils/torch_utils.py:409 and
+    :324, through utils/peft_utils.py:26). torch 2.14.1 answers it by CUDA's cudaGetDeviceCount,
+    which initialises the driver's API (cuInit) and makes no context; NVML in its place where
+    PYTORCH_NVML_BASED_CUDA_CHECK is 1 (torch/cuda/__init__.py, is_available). The packages'
+    listing (versions) imports the vendored models too, after it. cuDNN's version is the
+    record's: torch reads it through a first call that asks torch.cuda whether a device is
+    there, and its capability where one answers (torch 2.14.1, torch/backends/cudnn/__init__.py,
+    _init); the library is still compared, by its distribution's version among the packages
+    (versions). So another GPU alone is no difference there, and isn't said: saying it would
+    take asking for it. That is DESIGN.md's, Pause and resume (decided on 2026-10-12), for both
+    such jobs: another GPU alone is "neither said nor refused: nothing such a job makes can
+    depend on it", both asking the driver nothing and needing no GPU. The stack's and ffmpeg's
+    differences are said of the first and refuse the second without the flag; another GPU alone
+    does neither: the file is assembled, the manifest keeping the card that made its
+    segments.
+
+    compiling: the job compiles the VAE (--compile): inductor's modules are imported first
+    (import_inductor), so that the packages recorded are those the compilation will have
+    imported, at a start and at a resume alike. PROVISIONAL (impl-v010, 2026-10-29: DESIGN.md
+    has them imported "before the environment is recorded, so that a resume compares the same",
+    and doesn't say for which jobs): only with --compile, so that no other job's record moves.
+    What they add (jinja2, markupsafe, networkx, setuptools: resume.INDUCTOR_PACKAGES) counts in
+    a resume's comparison only between two jobs that both compile (DESIGN.md, decided on
+    2026-10-29), so a plan switched to or from --compile needs no --accept-env-change."""
+    from seedvr2x import model
+
+    if compiling:
+        import_inductor()
+    try:
+        flash_attn = metadata.version("flash_attn")
+    except metadata.PackageNotFoundError:
+        flash_attn = None
+    if device is None:
+        made = made_in or {}
+        gpu, driver, cudnn = made.get("gpu"), made.get("driver"), made.get("cudnn")
+    else:
+        gpu, driver = torch.cuda.get_device_name(device), model.nvidia_driver()
+        cudnn = torch.backends.cudnn.version()
+    return {
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "cudnn": cudnn,
+        "gpu": gpu,
+        "driver": driver,
+        "attention": model.attention_backend(),
+        "flash_attn": flash_attn,
+        "ffmpeg": ffmpeg_version,
+        "conversions": conversions,
+        "python": f"{platform.python_implementation()} {platform.python_version()}",
+        "packages": versions(),
+    }
+
+
+def import_inductor() -> None:
+    """Import what a compilation imports, the modules of INDUCTOR: torch.compile brings in, by
+    its first model, distributions the run otherwise never loads (sympy's dependencies, jinja2
+    and markupsafe, networkx, filelock, packaging, setuptools through the extension builder,
+    triton: measured on a small module compiled on the CPU, torch 2.14.1). Imported after the
+    environment is recorded, they would be a distribution of the run missing from its record, a
+    seedvr2x bug the end of the run says (main._run); imported before, a job and its resume record
+    the same packages. A module that is not installed is skipped: triton is a requirement of
+    torch on Linux, and the compilation would fail on its own where it is missing."""
+    for name in INDUCTOR:
+        try:
+            importlib.import_module(name)
+        except ModuleNotFoundError as error:
+            if error.name is None or not name.startswith(error.name):
+                raise
+
+
+def versions() -> dict[str, str]:
+    """The version of every distribution the run is made of, by its normalised name (PEP 503):
+    those of the run's it imports (imported) once every module of the library and of the CLI is,
+    the vendored models' too, which the run imports only when it builds them; and the shared
+    libraries torch requires, its runtime (cuBLAS, cuDNN…), loaded without being imported. The
+    same, so, whether a job starts or resumes, before or after its models load."""
+    for name in _own_modules():
+        importlib.import_module(name)
+    names = imported() | _libraries("torch")
+    return {name: metadata.version(name) for name in sorted(names)}
+
+
+def _roots() -> tuple[Path, Path]:
+    """The library package's directory (core/seedvr2x/ in a source tree, seedvr2x/ in
+    site-packages) and the CLI's, the app's root (apps/seedvr2x/, or site-packages)."""
+    import seedvr2x
+
+    return Path(seedvr2x.__file__).resolve().parent, Path(__file__).resolve().parent
+
+
+def _own_modules() -> list[str]:
+    """The import names of every module of the library (seedvr2x.…, the vendored models' too) and
+    of the CLI (manifest.MODULES, and the modules of manifest.PACKAGES), found by their files."""
+    from manifest import MODULES, PACKAGES
+
+    library, app = _roots()
+    names = list(MODULES)
+    for directory, base in [(library, library.parent), *((app / each, app) for each in PACKAGES)]:
+        for path in sorted(directory.rglob("*.py")):
+            parts = path.relative_to(base).with_suffix("").parts
+            # The entry point, or no module at all: a stray file, such as an editor's backup,
+            # which settings.code takes in all the same.
+            if parts[-1] == "__main__" or not all(part.isidentifier() for part in parts):
+                continue
+            names.append(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
+    return names
+
+
+def imported() -> set[str]:
+    """The run's distributions this process has imported, by their normalised names: those within
+    the closure of the CLI's declared requirements, and flash-attn. What else a process imports
+    is no part of the run, and a resume mustn't depend on it: pytest, pygments when a dev install
+    has it (httpx 0.28.1 imports it for its command line, httpx/__init__.py:15), a profiler, and
+    what a model file's download alone imports (DOWNLOAD_ONLY)."""
+    providers = _providers()
+    tops = {module.partition(".")[0] for module in list(sys.modules)} - set(START_HOOKS)
+    loaded = {_name(distribution) for top in tops for distribution in providers.get(top, ())}
+    return (loaded & _declared()) - DOWNLOAD_ONLY
+
+
+@functools.cache
+def _providers() -> Mapping[str, list[str]]:
+    """The distributions providing each top-level module, read once: reading every installed
+    distribution's files takes a few tenths of a second, and they don't change while a process
+    runs."""
+    return metadata.packages_distributions()
+
+
+@functools.cache
+def _declared() -> frozenset[str]:
+    """The distributions the CLI's distribution requires and flash-attn, and their requirements,
+    through the extras each asks: read once, as _providers. The library's among them, seedvr2x-core,
+    and so its own requirements; our own two distributions (OWN) are left out, their files being
+    hashed by settings.code."""
+    return frozenset(_required([*(metadata.requires(DISTRIBUTION) or []), *UNDECLARED]) - OWN)
+
+
+def _libraries(root: str) -> set[str]:
+    """The distributions root requires, its requirements' requirements and so on, through the
+    extras each asks, that ship a shared library other than Python's extension modules: one
+    native code loads, which no import shows. Extension modules are seen when imported, as
+    torch imports cuda-bindings' (torch 2.14.1, torch/cuda/_utils.py:9), or aren't loaded, as no
+    run imports MarkupSafe's (jinja2's speed-ups)."""
+    return {
+        name
+        for name in _required(metadata.requires(root) or [])
+        if any(
+            SHARED_LIBRARY.search(file.name) and not EXTENSION_MODULE.search(file.name)
+            for file in metadata.files(name) or []
+        )
+    }
+
+
+def _required(requirements: Iterable[str]) -> set[str]:
+    """The installed distributions requirements name (PEP 508), their requirements and so on,
+    through the extras each asks. Markers other than extras aren't evaluated: another platform's
+    or Python's requirement is rarely installed, and taken then."""
+    found: set[str] = set()
+    # Each requirement with the extras asked of the distribution declaring it.
+    pending: list[tuple[str, frozenset[str]]] = [(each, frozenset()) for each in requirements]
+    seen: set[tuple[str, frozenset[str]]] = set()
+    while pending:
+        requirement, extras = pending.pop()
+        match = REQUIREMENT.match(requirement)
+        if match is None:
+            continue
+        asked = _names(EXTRA.findall(requirement.partition(";")[2]))
+        if asked and not asked & extras:
+            continue  # an option not taken
+        name, wanted = _name(match[1]), frozenset(_names((match[2] or "").split(",")))
+        if (name, wanted) in seen:
+            continue
+        seen.add((name, wanted))
+        try:
+            requires = metadata.requires(name) or []
+        except metadata.PackageNotFoundError:
+            continue  # not installed: another platform's
+        found.add(name)
+        pending += [(each, wanted) for each in requires]
+    return found
+
+
+def _names(names: Iterable[str]) -> set[str]:
+    return {_name(name) for name in names if name.strip()}
+
+
+def _name(name: str) -> str:
+    """A distribution's name as pip and uv compare it (PEP 503)."""
+    return re.sub(r"[-_.]+", "-", name.strip()).lower()

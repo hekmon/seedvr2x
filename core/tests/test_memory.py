@@ -1,4 +1,4 @@
-"""The driver that gives memory the card doesn't have (runtime/memory.py): the probe's reading
+"""The driver that gives memory the card doesn't have (seedvr2x/memory.py): the probe's reading
 of the driver's answers, a stand-in in CUDA's place, and the whole card's free memory, a
 stand-in in NVML's. The probe on a real driver, its ctypes calls and its verdict:
 tests/test_placement.py's test_the_driver_is_asked (GPU); the card's free memory on a real one:
@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 import torch
 
-from seedvr2x.runtime import memory
-from seedvr2x.runtime.memory import GIB, OUT_OF_MEMORY, OVER, SUCCESS, Driver
+from seedvr2x import memory
+from seedvr2x.memory import GIB, OUT_OF_MEMORY, OVER, SUCCESS, Driver
 
 TOTAL = 32 * GIB
 # The allocator's setting a held run takes by default (memory.EXPANDABLE), spelt out: what torch
@@ -39,7 +39,7 @@ SHIPPED_HOLDS_LINE = (
     "seedvr2x holds itself to the card's own memory there: torch limited to the memory free"
     ' less 0.5 GiB, and the plan in 4.5 GiB less; the manual\'s "Under WSL2" section says why'
 )
-# The two figures a held run plans under, as measured (runtime/memory.py's comments), read
+# The two figures a held run plans under, as measured (seedvr2x/memory.py's comments), read
 # before the tests put their own in their place (round_figures).
 MEASURED = (memory.HELD_BACK, memory.RESERVE, memory.HELD_BACK_UNREAD)
 
@@ -61,7 +61,7 @@ def test_the_measured_figures() -> None:
     # 0.5 GiB left outside torch's limit under the card's own figure, design's figure where the
     # measure's own was 0.2 (DESIGN.md, Allocator, 2026-10-12: a desktop that wakes at night
     # mustn't stop a job); 3.0 under the driver's where the card's isn't read, and 4.5 planned
-    # under the limit again: an RTX 5090's under WSL2 (runtime/memory.py, HELD_BACK,
+    # under the limit again: an RTX 5090's under WSL2 (seedvr2x/memory.py, HELD_BACK,
     # HELD_BACK_UNREAD and RESERVE, their rows there). Changed with a new measure or a new
     # decision, and the comments with them.
     assert MEASURED == (round(0.5 * GIB), round(4.5 * GIB), 3 * GIB)
@@ -531,7 +531,7 @@ def test_a_driver_that_leaves_other_programs_out_is_not_asked(
 ) -> None:
     # The driver reports 30 GiB free to the process where the whole card has 20, another
     # program holding the rest: a request for what it reports and more would take the card from
-    # that program (it left the card, then came back under the run's limit: runtime/memory.py,
+    # that program (it left the card, then came back under the run's limit: seedvr2x/memory.py,
     # probe). Its own figure says what it is: taken for one that spills, and not asked.
     card, nvml = Card(30 * GIB, spills=True), Nvml({NAMED: 20 * GIB})
     libraries(monkeypatch, card, nvml)
@@ -591,7 +591,7 @@ def test_on_a_driver_that_spills_torch_is_held(
     )
     # The planner counts its peaks in what is free less what is held back and what it leaves
     # torch's allocator beyond a peak; never under nothing. The reading names each figure for
-    # the plan's own first line (runtime/planner.py); here it is said at debug level only.
+    # the plan's own first line (planner.py); here it is said at debug level only.
     assert nvml.calls.count("nvmlInit") == 1  # the probe's, which then asked the driver
     held_under = memory.Reading(30 * GIB, 31 * GIB, round(24.7 * GIB), True, 3 * GIB)
     assert memory.reading(30 * GIB) == held_under
@@ -873,7 +873,7 @@ def test_the_reading_names_its_figures(
     assert caplog.text == ""
     # One that spills: the smaller figure, the card's here, less HELD_BACK and RESERVE; and
     # nothing said at the level a user reads, where the plan's own first line says it
-    # (runtime/planner.py): once in a run's log, not twice. usable is the number alone. Each start
+    # (planner.py): once in a run's log, not twice. usable is the number alone. Each start
     # a process of its own, which finds no allocator set by the one before.
     monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
     startup(monkeypatch, Card(30 * GIB, spills=True), Nvml({NAMED: 28 * GIB}))
@@ -884,7 +884,7 @@ def test_the_reading_names_its_figures(
     assert memory.usable(30 * GIB) == counted
     assert caplog.text == ""
     # What torch's limit leaves is the reading's own: the larger margin where the card's figure
-    # isn't read, for the plan's first line to say (runtime/planner.py).
+    # isn't read, for the plan's first line to say (planner.py).
     startup(monkeypatch, Card(30 * GIB, spills=True))
     monkeypatch.setattr(memory, "HELD_BACK_UNREAD", 4 * GIB)
     counted = 30 * GIB - 4 * GIB - memory.RESERVE
@@ -981,7 +981,7 @@ def test_the_allocator_is_read_as_torch_reads_it() -> None:
 
 
 def test_torch_takes_the_first_variable_set_even_empty() -> None:
-    # What startup's handling of an empty setting rests on (runtime/memory.py), asked of torch
+    # What startup's handling of an empty setting rests on (seedvr2x/memory.py), asked of torch
     # itself: an empty setting names no allocator, torch's own then; and the first variable set
     # is the one read, empty or not, so that an empty PYTORCH_CUDA_ALLOC_CONF hides a
     # PYTORCH_ALLOC_CONF that names cudaMallocAsync.
@@ -2097,8 +2097,8 @@ def test_the_card_is_checked_before_every_unit(monkeypatch: pytest.MonkeyPatch) 
     # anything moves: a refusal there leaves the phase as it was.
     from types import SimpleNamespace
 
+    from seedvr2x import model
     from seedvr2x.passes import ModelPlan
-    from seedvr2x.runtime import model
 
     checked: list[str] = []
     monkeypatch.setattr(memory, "check", checked.append)

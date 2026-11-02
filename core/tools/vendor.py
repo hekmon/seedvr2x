@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy, diff and check the vendored model code in src/seedvr2x/vendor/.
+"""Copy, diff and check the vendored model code in core/seedvr2x/vendor/.
 
 The model code is numz's ComfyUI-SeedVR2_VideoUpscaler at 4490bd1, itself ByteDance's SeedVR at
 e4de8c2 with numz's changes, copied path for path: numz's src/X is vendor/X, and its configs and
@@ -8,9 +8,10 @@ are read from the git objects of the pinned commits, never from a work tree, so 
 can't shift the reference.
 
 Usage, from core/, in the CLI's environment:
-  uv run --project ../apps/cli tools/vendor.py copy [--numz DIR] [--force]   numz's into vendor/
-  uv run --project ../apps/cli tools/vendor.py diff [--bytedance] [--raw] [--full] [PATH...]
-  uv run --project ../apps/cli tools/vendor.py check [--numz DIR]
+  uv run --project ../apps/seedvr2x tools/vendor.py copy [--numz DIR] [--force]
+      numz's into vendor/
+  uv run --project ../apps/seedvr2x tools/vendor.py diff [--bytedance] [--raw] [--full] [PATH...]
+  uv run --project ../apps/seedvr2x tools/vendor.py check [--numz DIR]
 
 copy refuses to overwrite a file that differs from numz unless --force: those are our changes.
 diff compares vendor/ with numz, or with ByteDance (--bytedance), whose absolute imports are first
@@ -39,7 +40,7 @@ NUMZ_COMMIT = "4490bd1f482e026674543386bb2a4d176da245b9"
 BYTEDANCE_COMMIT = "e4de8c24441a67e1b7df56abea10645059bb1185"
 
 PROJECT = Path(__file__).resolve().parents[1]
-VENDOR = PROJECT / "src" / "seedvr2x" / "vendor"
+VENDOR = PROJECT / "seedvr2x" / "vendor"
 NUMZ = PROJECT.parent / "upstream" / "seedvr2-numz"
 BYTEDANCE = PROJECT.parent / "upstream" / "seedvr-bytedance"
 

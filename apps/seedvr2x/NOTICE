@@ -1,0 +1,15 @@
+seedvr2x
+Copyright 2026 Edouard Hur
+
+The seedvr2x command's code (main.py, the modules beside it and media/) is under the Apache
+License, Version 2.0, the licence in LICENSE. It uses the library seedvr2x-core (core/ in the
+repository), whose NOTICE credits the SeedVR2 model code, numz's and ByteDance's, it vendors and
+adapts, and TransNetV2, the shot detector's model, under the MIT License.
+
+The manual's example picture, apps/seedvr2x/images/quality-teeth.png, is made from a frame of Sol Levante,
+Netflix and Production I.G, from Netflix's open content (https://opencontent.netflix.com/), under
+the Creative Commons Attribution 4.0 International licence
+(https://creativecommons.org/licenses/by/4.0/). Changed for seedvr2x: the SDR UHD master's frame
+downscaled to 1920x1080 (the original) and again to 960x540, compressed with x264 (the input),
+upscaled back to 1080p by seedvr2x at each --quality level; the same square cut from each,
+enlarged without smoothing and labelled.
