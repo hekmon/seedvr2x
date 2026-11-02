@@ -545,15 +545,46 @@ two 7Bs' smaller files (below), their int8 files first:
   4K, (b) a run on every card seedvr2x supports, (c) no card slower than with float16; else
   float16 stays the default and int8 is an option. float16 stays one option away, and
   milestone 1's regression against numz is held on it. The roadmap shows int8 under next
-  until then. Its gain is memory first: half the DiT's weights, more frames at a time and
-  fewer blocks swapped on a 16-32 GB card; its speed in a job is unmeasured (the DiT is about
-  a fifth of a 1080p job).
-  - comfy-kitchen's compiled kernels ship for Python 3.10 to 3.12 only (0.2.37 to 0.2.40, on
-    PyPI on 2026-11-02). On Python 3.13, which seedvr2x runs, only its pure-Python wheel
-    installs: it multiplies through PyTorch's own `torch._int_mm` (cuBLASLt's int8) and
-    rotates and rounds each input unfused, in PyTorch or Triton. The implementation weighs
-    that against `torch._int_mm` with seedvr2x's own rotation (rebuilt in `models/`) and no
-    new dependency.
+  until then. Its gain is memory: half the DiT's weights, so fewer blocks swapped; at 1080p
+  the plans keep fp16's windows on every card, bounded by their tokens once every block is
+  swapped (24 GB: 17 latents either way, 20 blocks swapped instead of 28). Its speed in a job
+  is unmeasured (the DiT is about a fifth of a 1080p job).
+  - comfy-kitchen's compiled kernels ship as `cp312-abi3` wheels (0.2.40, on PyPI on
+    2026-11-02), Python's stable ABI: they install on 3.13, seedvr2x's, and their CUDA
+    extension imports there with the locked torch (impl-int8, 2026-11-02; a first reading of
+    the wheels' tags without their ABI had said otherwise). seedvr2x's own W8A8 linear
+    (`torch._int_mm`, the rotation rebuilt in `models/`) adds no dependency and keeps every
+    buffer known to the planner; whether comfy-kitchen's fused kernel is worth a dependency
+    for its speed is measured on the 96 GB card, both on the same activations.
+  - Built on 2026-11-02 on the CPU (impl-int8, then impl-int8-2; three reviews):
+    `seedvr2x/int8.py`, a W8A8 linear with the arithmetic of comfy-kitchen 0.2.37's CUDA
+    kernel, the files' validation path (each 256 columns of the input rotated, a scale per
+    token, `torch._int_mm`, the epilogue's order and dtypes). Its rotation is a float32
+    matmul: against an emulation of the kernel's transform, on synthetic activations shaped
+    as the DiT's, the codes are 100% and 99.9999% equal and the outputs 99.81-100% bit-equal,
+    where W8A8's own error is about 0.6%; a transform in torch's operations would be four
+    passes where the matmul is one. The 288 block matrices are swapped to it on the meta
+    device, the vendored model untouched; the files are recognised by their tensors and
+    their 288 markers, pinned (8.33 GB each) and fetched only when chosen; their blocks swap
+    as fp16's do; the DiT's figures go by format, read from the files' headers (weights 7.76
+    GiB against 15.35), the format recorded in the plan (`dit_format`, fp16 where an older
+    manifest has none). A window's memory is fp16's measured figure plus 0.41 GiB for int8's
+    buffers (rows 4,096 at a time), provisional until the card measures int8's own; an int8
+    plan says so in a line of its own, an fp16 plan prints as before. Its unfused path makes
+    several passes over each input and output where comfy-kitchen's kernel fuses them, a
+    risk for (c): the card times it against fp16's, against `torch.compile` of the linear
+    and against comfy-kitchen's fused kernel.
+  - On the card first, `pytest -m gpu` in `core/` (delivered, not yet run): the CUDA path
+    against the CPU's for the 7B's four shapes, comfy-kitchen 0.2.37's kernel on the same
+    activations (opt-in, never a dependency; its one-row kernel, `int8_linear_m1`, not yet
+    compared), and real int8 blocks swapped against the DiT loaded whole. Then the DiT's
+    peaks in int8 (windows, swaps, FA2 and SDPA), the rows at a time (1,024 frees 0.28 GiB),
+    the weight's transposed view in `torch._int_mm`, and seedvr2x's linear against
+    comfy-kitchen's on the model's own activations, whose figures replace the synthetic ones.
+  - TF32: the rotation is a float32 matmul, so TF32 in cuBLAS would change its codes far
+    beyond those figures. It is off by default and seedvr2x never sets it, but
+    `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` forces it: the pass after the card's measurements makes
+    an int8 run refuse it, saying why, as no difference stays silent.
 - **The sharp 7B is the default, on the user's eyes** (2026-10-07): on 75 windows of 4K and
   1080p crops they preferred it or saw no difference on 67 (it 27, the 7B 8), the grainy first
   film's skin no longer "almost reptilian". At 4K it invents less of the fine texture the eyes
@@ -714,8 +745,8 @@ What is known already:
       ([comfy-kitchen-32-bit-quantizer-indices.md](research/bugs/comfy-kitchen-32-bit-quantizer-indices.md)).
     - Phase 2's runtime starts with INT8 W8A8: the closest 8-bit file after Q8_0, the fastest
       8-bit multiply on GeForce cards from RTX 20, and comfy-kitchen's cheapest activation
-      quantizer, fused, per token (compiled for Python 3.12 at most: on 3.13, see the int8
-      note under [Weights](#weights)).
+      quantizer, fused, per token (its wheels install on 3.13: see the int8 note under
+      [Weights](#weights)).
   - **Validated on the GPU** (numz with comfy-kitchen's layers for seedvr2x's safetensors files,
     its own loader for the GGUF ones; [VALIDATION.md](models/VALIDATION.md)), each file against
     its own model's float16 output at the same seed, at 1080p on 8 clips and at 4K on 5 shots
