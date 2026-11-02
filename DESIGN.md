@@ -272,35 +272,48 @@ In steps:
    assembles them for long videos, and everything of a job: its plan, saving and resume.
    - The apps are named after their programs: `apps/cli/` becomes `apps/seedvr2x/`, beside
      `apps/imgserver/` and, after v0.1.0, `apps/comfyui/`.
-   - No `src/` folder: each project holds its package's folder directly, the one level Python
-     needs to install the `seedvr2x` command, named after the import name.
-   - `core/seedvr2x/`, the library: the model code (`vendor/`) and its loading (`model.py`); the
-     model files' pull and check (`weights.py`, `pull.py`); the DiT's placement and BlockSwap
-     (`blockswap.py`) and its sampling of latents, wherever that sits today; a VAE pass and its
-     tiling (`tiling.py`, `tilegrid.py`) and the VAE's compilation (`compiling.py`); the colour
-     correction (`colour.py`); the memory model (`memory.py`, and from `planner.py` what each
-     brick takes for its shapes: the DiT's, the encode's and the decode's peaks, the tokens,
-     the host's needs, the compiled range).
-   - `apps/seedvr2x/seedvr2x_cli/`, the CLI: the command (`main.py`, today's `cli.py`, and
-     `__main__.py`); the I/O (`media/`); the pipeline per shot (`shot.py`, `run.py`) and the
-     shots' cuts (`cuts.py`, `detector.py`, `transnetv2/`); the plan from `planner.py` (the
-     windows, tiles and swapped blocks a job takes, its segments, quality and lines); a job,
-     its saving and its resume (`manifest.py`, `resume.py`, `units.py`, what a job holds of
-     `job.py`, the environment record it keeps and checks on a resume, `environment.py`, and
-     its code identity); time (`calibration.py`, `timing.py`, `stop.py`, `--until`); the disk
-     line (`disk.py`).
-   - What both use is placed by the map below: the clock, the frame's padding and target size,
-     the plan's and the tiles' types.
-   - The CLI's own modules take another import name, `seedvr2x_cli`: `seedvr2x` is the
-     library's, which the image server and ComfyUI's nodes import, and two `seedvr2x/` on the
-     path would hide one another. The CLI's licence becomes "Apache-2.0 AND MIT", TransNetV2's
-     model moving with the detector.
+   - No `src/` folder, and no `runtime/` level: the runtime is the app itself (the user).
+   - `core/seedvr2x/`, the library (import `seedvr2x`), flat, its bricks: the model code
+     (`vendor/`) and its loading (`model.py`); the model files' pull and check (`weights.py`,
+     `pull.py`); the DiT's placement and BlockSwap (`blockswap.py`) and its sampling of latents,
+     the noise's draw and one window's pass (`sampling.py`, from `shot.py`); a tiled VAE pass
+     (`tiling.py`, `tilegrid.py`), its store handed in, and the VAE's compilation
+     (`compiling.py`); the colour correction (`colour.py`); the shot detector, TransNetV2 run
+     over frames (`detector.py`, `transnetv2/`), where the cuts fall staying the CLI's; the
+     card's memory (`memory.py`) and what each brick takes for its shapes (`peaks.py`, from
+     `planner.py`: the DiT's, the encode's and the decode's peaks, the tokens, the fits, the
+     compiled range). What the bricks share: their refusals (`errors.py`, `Refusal`, the base
+     of the CLI's errors), the frame's sizes (`frames.py`), the passes' types (`passes.py`:
+     the phases, tiles, shapes, compilation, and `ModelPlan`, what the loaded models follow),
+     a file's hash (`files.py`), the clock and the durations said (`clock.py`, the bricks
+     saying their own). Its licence "Apache-2.0 AND MIT", TransNetV2's model with the detector.
+   - `apps/seedvr2x/`, the CLI, flat, with no package folder (the user): `main.py` (the
+     command, today's `cli.py`), the pipeline per shot (`shot.py`, `run.py`), where the cuts
+     fall (`cuts.py`), the plan (`planner.py`, `plan.py`, `job.py`: the windows, tiles and
+     swapped blocks a job takes, its segments and quality, the host's count of its pipeline,
+     its compiled shapes and predicted peaks, its lines), a job's saving and resume
+     (`manifest.py`, `resume.py`, `units.py`, `scratch.py`: a tiled pass's store in memory or
+     a file of the shot's), the environment record a job keeps and checks on a resume
+     (`environment.py`) and its code identity, time (`calibration.py`, `timing.py`, `stop.py`,
+     `--until`), the disk line (`disk.py`), and the I/O (`media/`). Its licence "Apache-2.0".
+     - Each of its files is a top-level module, `import shot`, global to its environment as a
+       package folder would not be. None clashes today, with the standard library or the 248
+       packages uv holds on the machine; a test holds that each name resolves to the CLI's
+       own file, so that a dependency bringing a `run` or a `media` fails it, never replaces
+       ours silently. The CLI is never installed into a shared Python.
+     - It builds with setuptools, its modules listed (uv's backend packages folders only,
+       tested on 2026-11-02); the `seedvr2x` command installs as before.
+     - The library's import name `seedvr2x` and the folder's name don't meet: Python looks
+       inside the folders on its path, and there is no `seedvr2x` inside `apps/seedvr2x/`.
+       The CLI declares `seedvr2x-core`, found at `../../core`, installed editable.
+     - Its loggers are named explicitly under `cli.` (`cli.shot`, `cli.media.reader`), beside
+       the library's `seedvr2x.`; under `--verbose` the names change so, the default output
+       not at all. `python -m seedvr2x` goes; the `seedvr2x` command stays.
    - The library imports nothing of the CLI's, a test holding it. Where it does today, the
-     shared part moves into the library (the types a brick needs), or the CLI hands it in (the
-     tiled pass's scratch files, the models' check's time said ahead, the compile cache's
-     place).
-   - A job's code identity, the CLI's, covers both packages' files: a change to either refuses
-     an older job's resume, as a change to the one package does today.
+     shared part moves into the library (the types a brick needs, the durations said), or the
+     CLI hands it in (the tiled pass's store, the compile cache's place).
+   - A job's code identity, the CLI's, covers both the library's files and the CLI's: a change
+     to either refuses an older job's resume, as a change to the one package does today.
    - The tests split the same way, `core/tests/` and `apps/seedvr2x/tests/`, all run in the
      CLI's environment.
    - Where each module, and each part of `planner.py`, goes is mapped first and agreed with
