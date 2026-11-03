@@ -26,7 +26,14 @@ import stills
 import stop as stopping
 from cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
 from disk import RAW_BYTES
-from job import ENCODE_SEED_OFFSET, MIN_SEGMENT, QUALITY, SEED_LIMIT
+from job import (
+    DEFAULT_RESOLUTION,
+    ENCODE_SEED_OFFSET,
+    MIN_SEGMENT,
+    QUALITY,
+    SEED_LIMIT,
+    default_smaller,
+)
 from media.conversion import MATRICES
 from media.ffmpeg import MediaError
 from media.writer import FORMATS
@@ -198,6 +205,22 @@ def _warnings_in_lines() -> Generator[None]:
         warnings.showwarning = shown
 
 
+def _pillow_size_warning_off() -> None:
+    """Silence Pillow's DecompressionBombWarning for the whole process: a picture over
+    Image.MAX_IMAGE_PIXELS (89,478,485 pixels at Pillow 12.3) and up to twice that is read, with a
+    line of seedvr2x's own (seedvr2x/picture.py, _say_large), where Pillow's warning says
+    "could be decompression bomb DOS attack" of a photo from a phone (DESIGN.md, Still images).
+    The filter is installed here, once, at startup before any thread, and not by the library around
+    each read: warnings.catch_warnings swaps the module's global filters and is not safe on
+    several threads (Python 3.13), which the image server reads pictures on; the server installs
+    the same filter at its own start. Pillow's limit itself is left as it is, and a picture over
+    twice it is refused (an exception, no warning). The filter goes in front of the user's -W
+    options and PYTHONWARNINGS: the line replaces the warning."""
+    from PIL import Image
+
+    warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
+
+
 # The exit status of a run stopped by --until (DESIGN.md, Pause and resume, Stopping): sysexits.h's
 # EX_TEMPFAIL, "try again later", so that a script tells a job to run again from a finished one
 # (0) and from a Ctrl-C (130).
@@ -248,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _logging(args.verbose)
     _torch_lines(args.verbose)
+    _pillow_size_warning_off()
     # A stop at once, a second Ctrl-C or SIGTERM during the run (stop.py), SIGTERM during
     # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
     # manifest says, and the same command resumes.
@@ -361,9 +385,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resolution",
         type=_positive,
-        default=1080,
+        # No value, so that a size given is told from the default (the size line, job.
+        # default_smaller): each path takes DEFAULT_RESOLUTION where it reads the option.
         help="short side of the output, square pixels at the source's display aspect"
-        " (default: %(default)s)",
+        f" (default: {DEFAULT_RESOLUTION})",
     )
     # Without it, the shot detector runs in the first pass, its probabilities recorded, and the
     # cuts derive from them and --cut-threshold (DESIGN.md, Shot detection).
@@ -785,11 +810,12 @@ def _reads() -> "stills.Reads":
 
 
 def _video_arguments(args: argparse.Namespace) -> None:
-    """The arguments only a video's run reads, refused or defaulted: --format, --quality and
-    --min-segment, which have no default in the parser (DESIGN.md, Still images), take the video's
-    here, once, so that every reader below finds the value it always found and a job's settings
-    and record are unchanged; --plan without a file, the picture's (stills.BARE_PLAN), and a PNG
-    format for a picture alone or a .png name for the output are refused, as a video's."""
+    """The arguments only a video's run reads, refused or defaulted: --format, --quality,
+    --min-segment and --resolution, which have no default in the parser (DESIGN.md, Still images),
+    take the video's here, once, so that every reader below finds the value it always found and a
+    job's settings and record are unchanged (a picture takes --resolution's default in stills.py);
+    --plan without a file, the picture's (stills.BARE_PLAN), and a PNG format for a picture alone
+    or a .png name for the output are refused, as a video's."""
     from job import JobError
 
     if args.plan is BARE_PLAN:
@@ -807,12 +833,27 @@ def _video_arguments(args: argparse.Namespace) -> None:
             f"{args.output}: a .png file is a picture's output, and a video's PNG frames go in a"
             " directory, one per frame: --format png, with -o naming a new or empty directory"
         )
+    if args.resolution is None:
+        args.resolution = DEFAULT_RESOLUTION
     if args.format is None:
         args.format = DEFAULT_FORMAT
     if args.quality is None:
         args.quality = DEFAULT_QUALITY
     if args.min_segment is None:
         args.min_segment = MIN_SEGMENT
+
+
+def _say_default_smaller(args: argparse.Namespace, given: bool, declared: "Declared") -> None:
+    """Beside the output's size, in the run and in --plan: one line where --resolution was not
+    given and its default makes the output smaller than the source as displayed, naming the value
+    that keeps its size (DESIGN.md, Still images, Size); a size given says nothing more. A helper
+    of its own: _run is at the limit of what pyright will analyse."""
+    if given:
+        return
+    stream = declared.stream
+    said = default_smaller(str(args.input), stream.width, stream.height, declared.sample_aspect)
+    if said is not None:
+        logger.info("%s", said)
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -868,6 +909,7 @@ def _run(args: argparse.Namespace) -> int:
         # Anything else, a file that isn't there included, is a video's, as before.
         if (kind := _picture(args.input)) is not None:
             return stills.run(args, kind, _reads())
+        resolution_given = args.resolution is not None
         _video_arguments(args)
         numz_padding = _numz_padding()
         numz_draw = _numz_draw()
@@ -1149,6 +1191,7 @@ def _run(args: argparse.Namespace) -> int:
             out_width,
             out_height,
         )
+        _say_default_smaller(args, resolution_given, declared)
         import manifest
         from shot import shot_layout
 

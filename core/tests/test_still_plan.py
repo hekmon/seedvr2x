@@ -5,6 +5,7 @@ one by one with peaks.py's public figures, the choices in the planner's order, t
 refusals and the system memory. Cards are emulated as the planner's tests have them: a driver that
 refuses reports N - 1.49 GiB free on a card of N GiB (DESIGN.md, Memory planner, Budget)."""
 
+import math
 import mmap
 import random
 import re
@@ -18,7 +19,7 @@ import pytest
 from seedvr2x import memory, peaks, still_plan
 from seedvr2x.frames import check_target, output_size, padded_size
 from seedvr2x.memory import Reading
-from seedvr2x.passes import ModelPlan, Tiles
+from seedvr2x.passes import ModelPlan, Phase, Tiles
 from seedvr2x.peaks import GIB, VAE_ROOM
 from seedvr2x.still_plan import PictureTiles, Pins, PlanRefusal, StillPlan
 from seedvr2x.vendor.models.dit_7b.window import (
@@ -31,6 +32,7 @@ from seedvr2x.weights import Architecture
 
 EIGHT_K, SIX_BY_FOUR, FOUR_K = (7680, 4320), (6000, 4000), (3840, 2160)
 PROCESS = round(2.4 * GIB)  # the planner's HOST_RESIDENT, the process's own system memory
+INPUT = 12_192_768  # a 4032x3024 phone photo: the input the helper plans for unless a test says
 
 
 def card(gib: float) -> Reading:
@@ -54,12 +56,14 @@ def made(
     dit_model: Architecture = peaks.FP16,
     split: bool = True,
     pins: Pins = still_plan.NO_PINS,
+    input_pixels: int = INPUT,
 ) -> StillPlan:
     return still_plan.plan(
         bound,
         free,
         host,
         process=PROCESS,
+        input_pixels=input_pixels,
         attention=attention,
         dit_model=dit_model,
         split=split,
@@ -81,7 +85,9 @@ import sys
 from seedvr2x import still_plan
 from seedvr2x.peaks import GIB
 
-plan = still_plan.plan((3840, 2160), 31 * GIB, 64 * GIB, process=2 * GIB)
+plan = still_plan.plan(
+    (3840, 2160), 31 * GIB, 64 * GIB, process=2 * GIB, input_pixels=12_000_000
+)
 assert still_plan.windows_most((3840, 2160)) == 100
 assert still_plan.tiles(plan, (2160, 3840)).decode is not None
 assert still_plan.said(plan, (2160, 3840))
@@ -980,3 +986,194 @@ def test_plan_returns_the_models_the_loaders_follow() -> None:
     assert isinstance(plan.models, ModelPlan) and not plan.models.compile_vae
     assert plan.bound == EIGHT_K and plan.split and plan.attention == peaks.FLASH_ATTN_2
     assert plan.process == PROCESS and plan.tightened == ""
+
+
+# ---- The picture's own copies on the GPU ---------------------------------------------------------
+
+MEGAPIXELS_100 = 100_000_000
+LARGE_PHOTO = 12000 * 9000  # 108 MP, stored: resized down to a 1080p output on the GPU
+HD, HD_PADDED = (1920, 1080), 1120 * 1952  # the bound's largest padded frame (odd sides rounded up)
+
+
+def test_the_copies_are_counted_from_the_tensors_sizes() -> None:
+    # A 100 MP input, (1, 3, H, W): 1.2 GB in float32, 0.6 GB in bfloat16 (the sizes themselves,
+    # still_plan's comment lists the tensors). With no output (padded pixels 0), the encode's two
+    # resize moments are the stored picture and its float32 copy (0.6 + 1.2), then the stored
+    # picture alone beside the output's: torchvision's resize upcasts bfloat16 to float32.
+    encode = [moment.at(MEGAPIXELS_100, 0) for moment in still_plan.COPIES["encode"]]
+    assert encode[:2] == [600_000_000 + 1_200_000_000, 600_000_000]
+    # The reference, float32: stored 1.2 GB, no cast; the padding makes three tensors of the
+    # padded frame's size, the resize and the clamp two.
+    decode = [moment.at(MEGAPIXELS_100, 0) for moment in still_plan.COPIES["decode"]]
+    assert decode == [1_200_000_000] * 4
+    # Per pixel of the padded frame, bytes, the encode's moments (bfloat16 output 6, float32 12):
+    # the resize's output 12; its float32 output and the bfloat16 one 18; the clamp 12 (two
+    # bfloat16); the padding 18 (three); the normalisation 12 (two)...
+    assert [moment.per_padded for moment in still_plan.COPIES["encode"]] == [12, 18, 12, 18, 12]
+    # ... the decode's the same in float32 and the decoded frame's 6 (bfloat16, 3 channels).
+    assert [moment.per_padded for moment in still_plan.COPIES["decode"]] == [18, 30, 42, 30]
+    assert still_plan.copies_peak("encode", MEGAPIXELS_100, HD_PADDED) == (
+        18 * MEGAPIXELS_100 + 12 * HD_PADDED
+    )
+    assert still_plan.copies_peak("decode", MEGAPIXELS_100, HD_PADDED) == (
+        12 * MEGAPIXELS_100 + 42 * HD_PADDED
+    )
+
+
+def test_a_24_megapixel_input_to_4k_and_a_100_megapixel_one_to_1080p_have_their_figures() -> None:
+    four_k = made(FOUR_K, card(32), input_pixels=24_000_000)
+    padded = 2192 * 3872
+    assert still_plan._padded_pixels(FOUR_K) == padded
+    assert still_plan.input_copies(four_k) == {
+        "encode": 18 * 24_000_000 + 12 * padded,
+        "decode": 12 * 24_000_000 + 42 * padded,
+    }
+    hd = made(HD, card(32), input_pixels=MEGAPIXELS_100)
+    assert still_plan.input_copies(hd) == {
+        "encode": 18 * MEGAPIXELS_100 + 12 * HD_PADDED,
+        "decode": 12 * MEGAPIXELS_100 + 42 * HD_PADDED,
+    }
+    assert hd.input_pixels == MEGAPIXELS_100
+    # Without the colour correction there is no reference: the encode's moment alone.
+    plain = made(HD, card(32), input_pixels=MEGAPIXELS_100, split=False)
+    assert list(still_plan.input_copies(plain)) == ["encode"]
+
+
+def test_a_large_input_downscaled_is_planned_with_its_copies_counted() -> None:
+    # 12000x9000 to a 1080p output on a 16 GB card: 1.76 GiB of copies in the encode, beside the
+    # models and under the budget, so the placement is the small picture's.
+    plan = made(HD, card(16), input_pixels=LARGE_PHOTO)
+    copies = still_plan.input_copies(plan)
+    assert copies["encode"] == 18 * LARGE_PHOTO + 12 * HD_PADDED
+    job = still_plan._job_of(plan)
+    residents: list[tuple[Phase, int | None]] = [
+        ("encode", plan.models.resident_encode),
+        ("decode", plan.models.resident_decode),
+    ]
+    for phase, resident in residents:
+        assert still_plan._copies_need(job, phase, resident, plan.models.swapped) <= plan.budget
+    assert plan.models == made(HD, card(16), input_pixels=INPUT).models
+    text = "\n".join(still_plan.said(plan))
+    assert "the input: 108.0 MP at its stored size" in text
+    assert f"{copies['encode'] / GIB:.2f} GiB in the encode" in text
+    assert f"{copies['decode'] / GIB:.2f} GiB in the decode" in text
+    assert "not yet measured" in text
+    assert "the input:" in "\n".join(still_plan.said(plan, (1080, 1920)))
+
+
+def test_the_residents_are_lowered_where_the_copies_need_it() -> None:
+    # 770 MP on a 1080p bound with a 16 GB card: the encode's moment, 12.9 GiB, doesn't fit beside
+    # the 2 blocks of the DiT the passes allow, and fits beside none: lowered to the most that
+    # holds, as the floor proof lowers them. The decode's moment, in float32, holds at 2.
+    big = 770_000_000
+    plan = made(HD, card(16), input_pixels=big)
+    small = made(HD, card(16), input_pixels=INPUT)
+    assert small.models.resident_encode == 2 and small.models.resident_decode == 2
+    assert plan.models.resident_encode == 0 and plan.models.resident_decode == 2
+    job, swapped = still_plan._job_of(plan), plan.models.swapped
+    assert still_plan._copies_need(job, "encode", 0, swapped) <= plan.budget
+    # One block more would not fit the copies: lowered by the moment, not by the proof (which
+    # holds at 2).
+    assert still_plan._copies_need(job, "encode", 1, swapped) > plan.budget
+    assert still_plan._proof_need(job, "encode", 1, swapped) <= plan.budget
+    # A little less input: 1 block, the least lowering.
+    middle = made(HD, card(16), input_pixels=750_000_000)
+    assert middle.models.resident_encode == 1
+    # The planned tiles are the small picture's: the copies are gone before the encode.
+    tiles, tiles_small = (still_plan.tiles(each, (1080, 1920)) for each in (plan, small))
+    assert (tiles.encode, tiles.decode) == (tiles_small.encode, tiles_small.decode)
+
+
+def test_a_picture_whose_copies_fit_nowhere_is_refused_naming_the_largest_input_that_does() -> None:
+    with pytest.raises(PlanRefusal) as refused:
+        made(HD, card(16), input_pixels=1_000_000_000)
+    words = str(refused.value)
+    assert refused.value.phase == "encode"
+    fits = refused.value.fits_input
+    assert fits is not None and fits < 1_000_000_000
+    assert "the picture's input, 1000.0 MP at its stored size" in words
+    assert "copied to the GPU and resized there in the encode's phase" in words
+    assert "the driver reports 14.51 GiB free" in words and "GiB of free VRAM" in words
+    assert f"the largest input that fits is {fits // 100_000 / 10:.1f} MP" in words
+    width, height = (int(each) for each in found(r"about (\d+)x(\d+) at the bound", words).groups())
+    assert width * height <= fits and width * height > fits * 0.999 and width > height
+    assert abs(width / height - 1920 / 1080) < 0.01
+    assert "a smaller --resolution" in words
+    # The input that fits is planned, at resident 0 in the encode; one pixel more is not.
+    plan = made(HD, card(16), input_pixels=fits)
+    assert plan.models.resident_encode == 0
+    with pytest.raises(PlanRefusal) as over:
+        made(HD, card(16), input_pixels=fits + 1)
+    assert over.value.fits_input == fits
+    # The copies' figures add up: the peak, and the models with the margin.
+    copies = still_plan.copies_peak("encode", 1_000_000_000, HD_PADDED)
+    assert f"its copies take {math.ceil(copies / GIB * 100) / 100:.2f} GiB at the peak" in words
+
+
+def test_the_largest_input_that_fits_holds_every_phase_the_copies_are_made_in() -> None:
+    # 8K on a 48 GB card, searched by the planner's own refusal: the input it names is planned,
+    # and its copies fit at resident 0 in the encode and in the decode, with the colour correction.
+    bound, free = EIGHT_K, card(48)
+    with pytest.raises(PlanRefusal) as refused:
+        made(bound, free, input_pixels=5_000_000_000)
+    fits = refused.value.fits_input
+    assert fits is not None and refused.value.phase in ("encode", "decode")
+    plan = made(bound, free, input_pixels=fits)
+    job = still_plan._job_of(plan)
+    needs = [still_plan._copies_need(job, phase, 0, 0) for phase in ("encode", "decode")]
+    assert max(needs) <= plan.budget < max(needs) + 18
+    with pytest.raises(PlanRefusal):
+        made(bound, free, input_pixels=fits + 1)
+
+
+def test_without_the_colour_correction_the_decode_makes_no_copy() -> None:
+    # Only the encode's moment is judged: the decode is not the phase refused.
+    with pytest.raises(PlanRefusal) as refused:
+        made(HD, card(16), input_pixels=1_000_000_000, split=False)
+    assert refused.value.phase == "encode"
+    plan = made(HD, card(16), input_pixels=790_000_000, split=False)
+    assert list(still_plan.input_copies(plan)) == ["encode"]
+    assert "GiB in the decode" not in "\n".join(still_plan.said(plan))
+
+
+def test_no_input_fits_where_the_outputs_own_copies_are_over_the_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A moment whose padded-frame share alone is over the room (the table replaced): no input
+    # helps, the refusal says so and names the output.
+    huge = still_plan.Moment("a tensor of the output's size", 1, 4_000_000_000)
+    monkeypatch.setitem(still_plan.COPIES, "encode", (huge,))
+    with pytest.raises(PlanRefusal) as refused:
+        made(HD, card(16))
+    assert refused.value.fits_input is None and refused.value.phase == "encode"
+    assert "no input fits there, the output's own copies being over the memory" in str(
+        refused.value
+    )
+    assert "a tensor of the output's size" in str(refused.value)
+
+
+def test_a_small_inputs_size_changes_nothing_of_the_plan() -> None:
+    # The copies of an ordinary photo are far under every phase's room, so that the plan, its
+    # tiles and its lines are those of any other small input (but the input's own line).
+    for bound, gib in [(HD, 12), (HD, 16), (FOUR_K, 16), (FOUR_K, 24), (SIX_BY_FOUR, 32)]:
+        plans = [
+            made(bound, card(gib), 64 * GIB, input_pixels=pixels)
+            for pixels in (1_000, 2_000_000, 12_192_768, 24_000_000, 50_000_000)
+        ]
+        for each in plans[1:]:
+            assert replace(each, input_pixels=1_000) == plans[0], (bound, gib)
+            assert still_plan.tiles(each, (bound[1], bound[0])) == still_plan.tiles(
+                plans[0], (bound[1], bound[0])
+            )
+
+
+def test_a_refusal_for_the_copies_survives_the_tight_retry() -> None:
+    with pytest.raises(PlanRefusal) as refused:
+        made(HD, held(16.0), input_pixels=2_000_000_000)
+    assert refused.value.phase == "encode" and refused.value.fits_input is not None
+    assert "GiB more would have to be freed" in str(refused.value) or "short" in str(refused.value)
+
+
+def test_an_input_of_no_pixels_is_a_value_error() -> None:
+    with pytest.raises(ValueError, match="an input of 0 pixels"):
+        made(HD, card(16), input_pixels=0)

@@ -142,7 +142,7 @@ def run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
 def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     from fractions import Fraction
 
-    from job import JobError, Shot, check_seed
+    from job import DEFAULT_RESOLUTION, JobError, default_smaller
     from seedvr2x import memory, picture, png, pull, still_plan
     from seedvr2x.frames import check_target, output_size, target_size
     from seedvr2x.weights import check_models
@@ -151,9 +151,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     # no ffmpeg, no torch, no GPU.
     _check_options(args)
     bits = _bits(args)
-    # The seed as a shot of one frame at frame 0 is seeded (still.upscale doesn't check it): the
-    # seed plus the encode's offset under numz's limit.
-    check_seed(args.seed, [Shot(0, 1)])
+    _check_seed(args.seed)
     output: Path = args.output
     _check_output(output, args.input)
     name = str(args.input)
@@ -169,11 +167,15 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     # (DESIGN.md, Still images, Orientation): the target is the stored picture's, at the sample
     # aspect --input-sar gives, else square pixels.
     height, width = pic.pixels.shape[:2]
-    target = target_size(width, height, args.input_sar or Fraction(1), args.resolution)
-    check_target(target, args.resolution)
+    sample_aspect = args.input_sar or Fraction(1)
+    resolution = DEFAULT_RESOLUTION if args.resolution is None else args.resolution
+    target = target_size(width, height, sample_aspect, resolution)
+    check_target(target, resolution)
     out_height, out_width = output_size(target)
     _check_tile_pins(args, target)
     logger.info("%s", _read_said(name, pic, (out_width, out_height), bits))
+    if args.resolution is None and (said := default_smaller(name, width, height, sample_aspect)):
+        logger.info("%s", said)
     # The model files, as a video's run has them, minus the shot detector, which a picture never
     # runs: not fetched, its file not checked. The header check first, then seedvr2x's own files
     # by their pins (main._run).
@@ -216,6 +218,9 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         free,
         host,
         process=_process(pic.pixels.shape[:2], (out_height, out_width), bits),
+        # The picture goes to the GPU at its stored size and is resized there: its copies are
+        # counted (still_plan.COPIES).
+        input_pixels=height * width,
         attention=reads.attention(),
         dit_model=reads.dit_model(dit),
         split=split,
@@ -332,6 +337,21 @@ def _check_tile_pins(args: "argparse.Namespace", target: tuple[int, int]) -> Non
                 f" {width}x{height}: --{phase}-tile 0 pins an untiled {phase}",
                 phase="pin",
             )
+
+
+def _check_seed(seed: int) -> None:
+    """Refuse a seed out of numz's range (job.SEED_LIMIT), in a picture's words: the picture is a
+    shot of one frame at frame 0 (still.upscale doesn't check it), its noise drawn from the seed
+    and its encode seeded with ENCODE_SEED_OFFSET more, so the bound is job.check_seed's for a
+    shot at frame 0. The words are not the video's, which speak of shots and a source."""
+    from job import ENCODE_SEED_OFFSET, SEED_LIMIT, JobError
+
+    highest = SEED_LIMIT - 1 - ENCODE_SEED_OFFSET
+    if not 0 <= seed <= highest:
+        raise JobError(
+            f"--seed {seed}: a picture's noise is drawn from its seed and its encode seeded with"
+            f" {ENCODE_SEED_OFFSET:,} more, so the seed is from 0 up to {highest:,}"
+        )
 
 
 def _given(args: "argparse.Namespace", dest: str) -> bool:

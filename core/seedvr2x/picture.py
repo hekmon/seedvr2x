@@ -13,6 +13,7 @@ import re
 import shlex
 import struct
 import zlib
+from collections import deque
 from dataclasses import dataclass
 from typing import BinaryIO, cast
 
@@ -61,6 +62,36 @@ _PNG_GREY = (0, 4)
 _PNG_ALPHA = (4, 6)
 _PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
 
+# The TIFF tags and values that tell a camera's raw file built on TIFF (DNG, NEF, CR2, ARW, PEF,
+# SRW, ERF, 3FR, DCR, KDC, MOS and the like, which all start as TIFF files and which Pillow's TIFF
+# reader opens, or refuses as an unknown pixel mode), by their sources:
+# NewSubfileType (TIFF 6.0, section 8): bit 0 set marks an image as a reduced-resolution version
+# of another image in the file, the thumbnail or preview a raw file puts in its first IFD.
+_NEW_SUBFILE_TYPE = 254
+_REDUCED = 1
+# PhotometricInterpretation (TIFF 6.0, section 8, extended): 32803 is a colour filter array
+# (TIFF/EP, ISO 12234-2, and DNG 1.7), the sensor's mosaic before any demosaicing; 34892 is
+# LinearRaw (DNG 1.7), a sensor's samples already demosaiced but not developed. Neither is a
+# colour picture, and Pillow has no pixel mode for either.
+_PHOTOMETRIC = 262
+_RAW_PHOTOMETRIC = {32803: "a colour filter array", 34892: "linear raw samples"}
+# SubIFDs (TIFF Technical Note 1, Adobe PageMaker 6.0 TIFF Technical Notes): where TIFF/EP and
+# DNG keep the full image under a first IFD that is the preview.
+_SUB_IFDS = 330
+# DNGVersion (DNG 1.7, section "DNG tags"): four bytes in the first IFD of every DNG, whose
+# presence says the file is one, whatever its pages hold.
+_DNG_VERSION = 50706
+# Canon's CR2 puts "CR", its major and minor versions after the 8 bytes of TIFF header (the
+# format as ExifTool documents it).
+_CR2_MAGIC = b"CR"
+# Classic TIFF's headers (TIFF 6.0, section 2): the byte order, then 42. BigTIFF has no raw files.
+_TIFF_ORDER = {b"II*\x00": "<", b"MM\x00*": ">"}
+# IFDs walked at most (the chain and the first IFD's SubIFDs): a raw file holds a handful, and a
+# damaged or hostile file's chain must end.
+_MAX_IFDS = 64
+# TIFF's field types a tag read here has (TIFF 6.0, section 2; IFD is TIFF Technical Note 1's).
+_SHORT, _LONG, _IFD = 3, 4, 13
+
 
 @dataclass(frozen=True)
 class Picture:
@@ -101,7 +132,13 @@ def read(data: bytes, name: str = "FILE") -> Picture:
     """The picture in data, a file's whole content; name is the file's, said in the refusals'
     commands. Raises Refusal for what seedvr2x does not read: several frames, transparency, a
     mode other than RGB, grey and palette, a 16-bit TIFF, HDR, a damaged file, a size beyond
-    Pillow's guard."""
+    Pillow's guard, a camera's raw file built on TIFF."""
+    # Before Pillow opens it: it opens a raw file's preview as a picture, and refuses a colour
+    # filter array or linear raw image as an unknown pixel mode, which the damaged-file refusal
+    # below would then call a header it cannot read.
+    why = _raw_why(data)
+    if why is not None:
+        raise _raw(name, why)
     try:
         img = Image.open(io.BytesIO(data), formats=FORMATS)
     except Image.DecompressionBombError as error:
@@ -124,6 +161,7 @@ def read(data: bytes, name: str = "FILE") -> Picture:
 
 
 def _read(img: Image.Image, data: bytes, name: str) -> Picture:
+    _say_large(img.size, name)
     fmt = _format(img)
     frames = getattr(img, "n_frames", 1)
     if frames > 1 and not (MPO_FIRST_IMAGE and img.format == "MPO"):
@@ -174,6 +212,33 @@ def _read(img: Image.Image, data: bytes, name: str) -> Picture:
         chunks=png.chunks if png is not None else (),
         orientation=orientation,
         opaque_alpha_dropped=dropped,
+    )
+
+
+def _say_large(size: tuple[int, int], name: str) -> None:
+    """One line, at INFO, for a picture that Pillow's check against decompression bombs warns
+    of (more pixels than Image.MAX_IMAGE_PIXELS, which seedvr2x leaves as it is, and up to twice
+    that: over it, Pillow's open refuses and _too_large says so). The line is seedvr2x's own, said
+    from the size the file declares; Pillow's warning at open is left to the application to
+    silence, once and for the whole process (the CLI's main.py does, and the image server will):
+    warnings.catch_warnings, which would silence it here, swaps the module's global filters and is
+    not safe on several threads (Python 3.13). INFO because nothing is wrong or lost: a camera or
+    a scanner makes such pictures, and a file made to fill the memory is the case _too_large
+    refuses."""
+    limit = Image.MAX_IMAGE_PIXELS
+    width, height = size
+    if limit is None or max(1, width) * max(1, height) <= limit:
+        return
+    logger.info(
+        "%s: %dx%d, %.1f megapixels, over the %.1f at which Pillow, the library that reads"
+        " pictures here, starts to guard against files made to fill the memory (it refuses over"
+        " %.1f): read as a picture, a camera's or a scanner's being this large",
+        name,
+        width,
+        height,
+        width * height / 1e6,
+        limit / 1e6,
+        2 * limit / 1e6,
     )
 
 
@@ -366,6 +431,95 @@ def _sixteen_bit_tiff(img: Image.Image) -> bool:
     return samples == 16
 
 
+# A camera's raw file ----------------------------------------------------------------------------
+
+_Entry = tuple[int, int, int]  # an IFD entry: its field type, its count, the offset of its value
+
+
+def _raw_why(data: bytes) -> str | None:
+    """Why `data` is a camera's raw file built on TIFF, in words that complete "it is a raw file
+    because ...", or None when no marker of one is found (a file that is no TIFF, or a damaged
+    one, included: Pillow's reading says what is wrong with it). Reads the TIFF header and the
+    IFDs' entries from the bytes, never the image: the first image Pillow reads is a raw file's
+    preview, and its other images are the raw data, which Pillow has no pixel mode for.
+
+    The markers, by where they are written (the constants above give their sources): CR2's
+    header; the DNGVersion tag; the first IFD marked a reduced-resolution version of another
+    image; a colour filter array or linear raw PhotometricInterpretation in any IFD of the chain
+    (the pages Pillow counts), or in a SubIFD of the first, where TIFF/EP and DNG put the full
+    image under a preview."""
+    order = _TIFF_ORDER.get(data[:4])
+    if order is None or len(data) < 8:
+        return None
+    if data[8:10] == _CR2_MAGIC:
+        return "its header is Canon CR2's: CR follows the TIFF header"
+    pending = deque(struct.unpack_from(f"{order}I", data, 4))
+    seen: set[int] = set()
+    first = True
+    while pending and len(seen) < _MAX_IFDS:
+        offset = pending.popleft()
+        if offset in seen or (entries := _entries(data, order, offset)) is None:
+            continue
+        seen.add(offset)
+        tags, following = entries
+        if first:
+            if _DNG_VERSION in tags:
+                return f"it carries DNG's version tag (DNGVersion, tag {_DNG_VERSION})"
+            if any(
+                value & _REDUCED for value in _numbers(data, order, tags.get(_NEW_SUBFILE_TYPE))
+            ):
+                return (
+                    "its first image is marked a reduced-resolution version of another image in"
+                    f" the file (NewSubfileType, tag {_NEW_SUBFILE_TYPE}), as the preview a raw"
+                    " file holds first is"
+                )
+            pending.extend(_numbers(data, order, tags.get(_SUB_IFDS)))
+            first = False
+        for value in _numbers(data, order, tags.get(_PHOTOMETRIC)):
+            if value in _RAW_PHOTOMETRIC:
+                return (
+                    f"one of its images holds {_RAW_PHOTOMETRIC[value]} (PhotometricInterpretation"
+                    f" {value}), a camera's sensor samples and no colour picture"
+                )
+        if following:
+            pending.append(following)
+    return None
+
+
+def _entries(data: bytes, order: str, offset: int) -> tuple[dict[int, _Entry], int] | None:
+    """The entries of the IFD at `offset` by tag, and the offset of the next IFD (0 for none); None
+    when the IFD does not fit in the file."""
+    if offset < 8 or offset + 2 > len(data):
+        return None
+    (count,) = struct.unpack_from(f"{order}H", data, offset)
+    end = offset + 2 + 12 * count
+    if end + 4 > len(data):
+        return None
+    tags: dict[int, _Entry] = {}
+    for at in range(offset + 2, end, 12):
+        tag, kind, number = struct.unpack_from(f"{order}HHI", data, at)
+        tags[tag] = (kind, number, at + 8)
+    (following,) = struct.unpack_from(f"{order}I", data, end)
+    return tags, following
+
+
+def _numbers(data: bytes, order: str, entry: _Entry | None) -> list[int]:
+    """The values of an entry of SHORT, LONG or IFD type, the first _MAX_IFDS at most; empty for
+    no entry, another type or a value outside the file. A value of 4 bytes or fewer is in the
+    entry itself, else at the offset the entry holds (TIFF 6.0, section 2)."""
+    if entry is None:
+        return []
+    kind, number, field = entry
+    size = {_SHORT: 2, _LONG: 4, _IFD: 4}.get(kind)
+    if size is None:
+        return []
+    at = field if number * size <= 4 else struct.unpack_from(f"{order}I", data, field)[0]
+    number = min(number, _MAX_IFDS)
+    if at + number * size > len(data):
+        return []
+    return list(struct.unpack_from(f"{order}{('H' if size == 2 else 'I') * number}", data, at))
+
+
 # PNG's chunks ----------------------------------------------------------------------------------
 
 
@@ -512,6 +666,16 @@ def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> R
         f" ({VIDEO_RATE} frames a second here; its transparency, if any, is dropped, the colours"
         " under it showing):"
         f" ffmpeg -i {shlex.quote(name)} -vf fps={VIDEO_RATE},format=rgb24 -c:v ffv1 {video}"
+    )
+
+
+def _raw(name: str, why: str) -> Refusal:
+    return Refusal(
+        f"{name} is a camera's raw file, or the preview of one ({why}): seedvr2x upscales pictures,"
+        " and a raw file's preview is not the picture the camera recorded, nor can its sensor"
+        " samples be read as one. Develop it first in a raw developer (a program that turns a"
+        " camera's raw file into a picture, choosing its white balance, tone and colour), saving"
+        " a 16-bit PNG, and upscale the PNG"
     )
 
 

@@ -11,12 +11,18 @@ from itertools import pairwise
 from pathlib import Path
 
 from seedvr2x.errors import Refusal
+from seedvr2x.frames import output_size, short_side, target_size
 from seedvr2x.passes import ENCODE_SEED_OFFSET
 
 # numz seeds Python's, NumPy's and torch's generators with each seed (common/seed.py), and NumPy
 # takes seeds in [0, 2**32). numz seeds again before the VAE encode, with the seed plus
 # ENCODE_SEED_OFFSET (seedvr2x/passes.py): shot.py does the same.
 SEED_LIMIT = 2**32
+
+# --resolution's default, the output's short side: numz's (DESIGN.md, Options kept and dropped). The
+# parser has no value by default, so that a size given is told from the default (the size line,
+# default_smaller), and each path takes this where it reads the option, as --format's is.
+DEFAULT_RESOLUTION = 1080
 
 # Latents shared by consecutive DiT windows, M (DESIGN.md, Pipeline step 2): M = 2 cut the boundary
 # jump by 80% against independent batches in the stitching study (research/docs/stitching.md).
@@ -223,6 +229,23 @@ def merged_segments(
         OutputSegment(f"seg_{index:06d}", start, end)
         for index, (start, end) in enumerate(pairwise(bounds))
     ]
+
+
+def default_smaller(name: str, width: int, height: int, sample_aspect: Fraction) -> str | None:
+    """The line for a picture or a video of `width` x `height` (stored pixels, at `sample_aspect`)
+    when --resolution was not given and its default makes the output smaller than the source as
+    displayed (DESIGN.md, Still images, Size; decided on 2026-11-03 for a 12 MP photo, 4032x3024,
+    which comes out 1440x1080); None where it does not. It names the --resolution that keeps the
+    source's size (frames.short_side). A size given says nothing more."""
+    keeps = short_side(width, height, sample_aspect)
+    if DEFAULT_RESOLUTION >= keeps:
+        return None
+    rows, columns = output_size(target_size(width, height, sample_aspect, DEFAULT_RESOLUTION))
+    return (
+        f"{name}: no --resolution given, so the output is {columns}x{rows}, its short side the"
+        f" default {DEFAULT_RESOLUTION}, smaller than its source's {round(width * sample_aspect)}x"
+        f"{height}: --resolution {keeps} keeps the source's size"
+    )
 
 
 def check_seed(seed: int, shots: Sequence[Shot]) -> None:

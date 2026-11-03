@@ -16,6 +16,7 @@ of arithmetic (test_still.py), or a cheap stand-in where the pass is not what is
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,7 @@ import pytest
 import torch
 from PIL import Image, ImageCms
 from stand_ins import cpu_models  # noqa: F401
+from test_picture import header_only_png
 from test_still import PICTURE, SEED, TARGET, TILES, pipeline_models, pixels_of, stand_in_dit
 
 import main as cli
@@ -40,6 +42,7 @@ from media import ffmpeg
 from media.ffmpeg import MediaError
 from media.probe import IMAGE_BRANDS, IMAGE_DEMUXERS, PICTURES, image_kind
 from seedvr2x import model, picture, png, still, weights
+from seedvr2x.errors import Refusal
 from seedvr2x.frames import output_size
 from seedvr2x.passes import Tiles
 from seedvr2x.peaks import GIB
@@ -368,19 +371,24 @@ def test_every_option_is_taken_or_refused_on_a_picture() -> None:
             assert action.default in (None, False), action.dest
 
 
-def test_format_quality_and_min_segment_have_no_default_in_the_parser() -> None:
+def test_format_quality_min_segment_and_resolution_have_no_default_in_the_parser() -> None:
     # So that one given is told from its default; the video path takes its defaults at its start
-    # (main._video_arguments), and each help says them.
+    # (main._video_arguments), a picture takes --resolution's in stills.py, and each help says
+    # them.
     parsed = cli._parser().parse_args(["in.mkv", "-o", "out"])  # pyright: ignore[reportPrivateUsage]
     assert (parsed.format, parsed.quality, parsed.min_segment, parsed.plan) == (None,) * 4
+    assert parsed.resolution is None
     cli._video_arguments(parsed)  # pyright: ignore[reportPrivateUsage]
     assert (parsed.format, parsed.quality) == (cli.DEFAULT_FORMAT, cli.DEFAULT_QUALITY)
-    assert parsed.min_segment == cli.MIN_SEGMENT
+    assert parsed.min_segment == cli.MIN_SEGMENT and parsed.resolution == 1080
     assert (cli.DEFAULT_FORMAT, cli.DEFAULT_QUALITY, cli.MIN_SEGMENT) == (
         "yuv420p10le",
         "standard",
         5,
     )
+    given = cli._parser().parse_args(["in.mkv", "-o", "out", "--resolution", "720"])  # pyright: ignore[reportPrivateUsage]
+    cli._video_arguments(given)  # pyright: ignore[reportPrivateUsage]
+    assert given.resolution == 720
 
 
 # Each refused option with a value that parses, and a word of its reason.
@@ -460,13 +468,29 @@ def test_plan_with_a_file_is_refused_on_a_picture(
     assert not (tmp_path / "cuts.txt").exists() and not machine.asked
 
 
-def test_a_seed_out_of_range_is_refused_as_a_shot_at_frame_0(
-    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("seed", ["4293967296", "4294967295", "-1"])
+def test_a_seed_out_of_range_is_refused_in_a_pictures_words(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture, seed: str
 ) -> None:
-    status = run(
-        machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--seed", "4294967295"
-    )
-    assert status == 1 and "--seed 4294967295" in caplog.text and not machine.asked
+    status = run(machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--seed", seed)
+    assert status == 1 and not machine.asked
+    assert (
+        f"--seed {seed}: a picture's noise is drawn from its seed and its encode seeded with"
+        " 1,000,000 more, so the seed is from 0 up to 4,293,967,295"
+    ) in caplog.text
+    assert "shot" not in caplog.text and "source" not in caplog.text
+
+
+@pytest.mark.parametrize("seed", ["0", "4293967295"])
+def test_the_seeds_at_the_picture_bounds_are_taken(
+    machine: Machine, tmp_path: Path, seed: str
+) -> None:
+    # The same bound as a shot at frame 0 has (job.check_seed): the seed plus the encode's offset
+    # under numz's limit.
+    from job import Shot, check_seed
+
+    check_seed(int(seed), [Shot(0, 1)])
+    assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--seed", seed) == 0
 
 
 def test_a_resolution_too_small_for_the_padding_is_refused(
@@ -476,6 +500,96 @@ def test_a_resolution_too_small_for_the_padding_is_refused(
         machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--resolution", "8"
     )
     assert status == 1 and "too small for the padding" in caplog.text and not machine.asked
+
+
+# The size line: a default that makes the output smaller than the source ----------------------
+
+
+def large_picture(path: Path, width: int, height: int) -> Path:
+    Image.new("RGB", (width, height), (40, 90, 160)).save(path)
+    return path
+
+
+def without_resolution(made: Machine, source: Path, output: Path, *options: str) -> int:
+    """The command with no --resolution unless `options` give one (command() always gives 48): its
+    status."""
+    arguments = [
+        *(str(source), "-o", str(output)),
+        *("--model-dir", str(made.models_dir), "--dit-model", "w.safetensors"),
+        *("--vae-model", "w.safetensors", "--color-correction", "none", *options),
+    ]
+    return cli.main(arguments)
+
+
+def size_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "--resolution" in r.getMessage()]
+
+
+def test_a_picture_larger_than_the_default_says_what_keeps_its_size(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 1100 x 1300 at the default 1080: 1080 x 1276 out, its short side 1100 as stored.
+    source = large_picture(tmp_path / "photo.png", 1100, 1300)
+    assert without_resolution(machine, source, tmp_path / "o.png") == 0
+    assert size_lines(caplog) == [
+        f"{source}: no --resolution given, so the output is 1080x1276, its short side the default"
+        " 1080, smaller than its source's 1100x1300: --resolution 1100 keeps the source's size"
+    ]
+    assert read_back(tmp_path / "o.png").pixels.shape[:2] == (1276, 1080)
+
+
+def test_the_size_line_comes_beside_the_pictures_line_and_in_plan_too(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = large_picture(tmp_path / "photo.png", 1100, 1300)
+    assert without_resolution(machine, source, tmp_path / "o.png", "--plan") == 0
+    messages = [r.getMessage() for r in caplog.records]
+    said = next(n for n, m in enumerate(messages) if "no --resolution given" in m)
+    assert (
+        "a PNG picture, 1100x1300" in messages[said - 1]
+        and "output 1080x1276" in messages[said - 1]
+    )
+    assert not (tmp_path / "o.png").exists()
+
+
+@pytest.mark.parametrize("given", ["1080", "540", "2160", "1100"])
+def test_a_size_given_says_nothing_more(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture, given: str
+) -> None:
+    source = large_picture(tmp_path / "photo.png", 1100, 1300)
+    assert without_resolution(machine, source, tmp_path / "o.png", "--resolution", given) == 0
+    assert size_lines(caplog) == []
+
+
+@pytest.mark.parametrize("size", [(24, 40), (1080, 1500), (1500, 1080), (1000, 1080)])
+def test_a_picture_the_default_does_not_make_smaller_says_nothing(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture, size: tuple[int, int]
+) -> None:
+    # Smaller than 1080 on its short side (made larger by the default), or exactly 1080.
+    source = large_picture(tmp_path / "photo.png", *size)
+    assert without_resolution(machine, source, tmp_path / "o.png") == 0
+    assert size_lines(caplog) == []
+
+
+def test_the_short_side_is_the_one_as_displayed_with_a_sample_aspect(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 1100 x 1300 pixels, each twice as wide as tall: 2200 x 1300 displayed, short side 1300
+    # (target_size's), output 1080 x 1826 (1080 * 2200 / 1300 = 1827.7, floored, even).
+    source = large_picture(tmp_path / "photo.png", 1100, 1300)
+    status = without_resolution(machine, source, tmp_path / "o.png", "--input-sar", "2/1")
+    assert status == 0
+    assert size_lines(caplog) == [
+        f"{source}: no --resolution given, so the output is 1826x1080, its short side the default"
+        " 1080, smaller than its source's 2200x1300: --resolution 1300 keeps the source's size"
+    ]
+
+
+def test_the_resolution_the_line_names_keeps_the_size(machine: Machine, tmp_path: Path) -> None:
+    source = large_picture(tmp_path / "photo.png", 1100, 1300)
+    status = without_resolution(machine, source, tmp_path / "o.png", "--resolution", "1100")
+    assert status == 0
+    assert read_back(tmp_path / "o.png").pixels.shape[:2] == (1300, 1100)
 
 
 # -o -----------------------------------------------------------------------------------------------
@@ -767,6 +881,32 @@ def _has_ffmpeg() -> bool:
     return True
 
 
+def test_the_animated_refusals_command_makes_a_file_the_video_path_accepts(tmp_path: Path) -> None:
+    # A GIF of three frames with uneven delays (10, 250 and 40 hundredths of a second ...), the
+    # case the command's fixed rate is for: the picture path refuses it with an ffmpeg command,
+    # and the file that makes is a video the video path's probe and declaration take as it is.
+    from media.source import declare
+
+    if not _has_ffmpeg():
+        pytest.skip("needs ffmpeg 7.1 or later with the filters seedvr2x checks")
+    shown = [Image.fromarray((pixels_of(k) * 255).astype(np.uint8)) for k in range(3)]
+    source = tmp_path / "an imated.gif"
+    shown[0].save(source, save_all=True, append_images=shown[1:], duration=[100, 2500, 400])
+    with pytest.raises(Refusal) as caught:
+        picture.read(source.read_bytes(), source.name)
+    message = str(caught.value)
+    command = shlex.split(message[message.index("ffmpeg -i ") :])
+    assert command[:3] == ["ffmpeg", "-i", source.name] and command[-1] == f"{source.name}.mkv"
+    subprocess.run([*command[:1], "-v", "error", *command[1:]], cwd=tmp_path, check=True)
+    video = tmp_path / command[-1]
+    declared = declare(video)
+    assert declared.stream.codec_name == "ffv1" and declared.stream.frame_rate == 10
+    # fps=10,format=rgb24 into FFV1: packed RGB with an unused byte, ffmpeg 9.0's choice; the
+    # video path takes the RGB formats of FFV1 whichever it picks.
+    assert declared.stream.pix_fmt in ("bgr0", "rgb24", "bgra", "gbrp")
+    assert (declared.stream.width, declared.stream.height) == (PICTURE[1], PICTURE[0])
+
+
 # The run --------------------------------------------------------------------------------------
 
 
@@ -942,6 +1082,49 @@ def test_the_librarys_info_lines_reach_the_user_on_stderr(tmp_path: Path) -> Non
     assert done.returncode == 1 and "Traceback" not in done.stderr
 
 
+def test_pillows_size_warning_is_replaced_by_a_line_of_seedvr2xs_own(tmp_path: Path) -> None:
+    # In a process of its own (the filter is installed by main.main, once, for the process): a PNG
+    # whose IHDR says 10,000 x 10,000, over Pillow's check (89,478,485 pixels) and under its
+    # refusal, with image data that is empty, so that the run stops at the read, refused as
+    # damaged, with no 100-megapixel decode.
+    source = tmp_path / "big.png"
+    source.write_bytes(header_only_png(10_000, 10_000))
+    (tmp_path / "models").mkdir()
+    done = subprocess.run(
+        [
+            Path(sys.executable).with_name("seedvr2x"),
+            *(str(source), "-o", str(tmp_path / "out.png")),
+            *("--model-dir", str(tmp_path / "models")),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")},
+    )
+    assert f"{source}: 10000x10000, 100.0 megapixels, over the 89.5 at which Pillow" in done.stderr
+    assert "damaged or truncated" in done.stderr and done.returncode == 1
+    assert "decompression bomb" not in done.stderr.lower()
+    assert "DecompressionBombWarning" not in done.stderr and "Traceback" not in done.stderr
+
+
+def test_the_filter_is_installed_once_for_the_process_by_main(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Not the library's, per read: warnings.catch_warnings is not thread-safe. main.main installs
+    # the filter before it runs anything, and a read of such a picture then raises no warning.
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("default")
+        cli._pillow_size_warning_off()  # pyright: ignore[reportPrivateUsage]
+        assert warnings.filters[0][2] is Image.DecompressionBombWarning  # pyright: ignore[reportUnknownMemberType]
+        assert warnings.filters[0][0] == "ignore"
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.warn("size", Image.DecompressionBombWarning, stacklevel=1)
+            warnings.warn("other", RuntimeWarning, stacklevel=1)
+        assert [str(w.message) for w in seen] == ["other"]
+
+
 def test_no_ffmpeg_is_needed(
     machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1069,6 +1252,31 @@ def test_the_host_figure_counts_the_pictures_own_arrays(
             == 0
         )
         assert processes[-1] == expected, options
+
+
+def test_the_plan_is_given_the_pictures_stored_pixels(
+    machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The picture goes to the GPU at its stored size and is resized there: the plan counts its
+    # copies (still_plan.COPIES) from H x W as stored, whatever the output's size.
+    from seedvr2x import still_plan
+
+    inputs: list[int] = []
+    real = still_plan.plan
+
+    def spy(*arguments: Any, **keywords: Any) -> Any:
+        inputs.append(keywords["input_pixels"])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(still_plan, "plan", spy)
+    for width, height in ((160, 90), (90, 160), (301, 111)):
+        source = tmp_path / f"{width}x{height}.png"
+        Image.new("RGB", (width, height), (30, 60, 90)).save(source)
+        assert run(machine, source, tmp_path / "o.png", "--resolution", "1080", "--plan") == 0
+        assert inputs[-1] == width * height, (width, height)
+    # Not the output's: a 24 x 40 picture upscaled to 1080 rows.
+    assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--plan") == 0
+    assert inputs[-1] == 24 * 40
 
 
 # What goes wrong in the pass ------------------------------------------------------------------

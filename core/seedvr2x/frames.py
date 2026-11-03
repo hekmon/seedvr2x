@@ -25,6 +25,16 @@ def target_size(
     return resolution, math.floor(resolution * display_width / height)
 
 
+def short_side(width: int, height: int, sample_aspect: Fraction) -> int:
+    """The display picture's short side, in whole pixels: the resolution at which target_size gives
+    the input's own displayed size, so that nothing is made smaller or larger. The display width
+    is width * sample_aspect, a whole number for square pixels and rounded to the nearest pixel
+    when it is the short side and the sample aspect makes it fractional (the other side then
+    comes out within one pixel of the displayed one)."""
+    display_width = width * sample_aspect
+    return height if display_width > height else max(1, round(display_width))
+
+
 def output_size(target: tuple[int, int]) -> tuple[int, int]:
     """(height, width) of the output frames: the target, each side rounded down to an even
     number, as numz crops them (src/core/generation_utils.py:127-136)."""

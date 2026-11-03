@@ -487,7 +487,18 @@ uv run pytest
   format told by content (`identify`); the profile, the PNG's colour chunks verbatim and the
   EXIF orientation; an opaque alpha dropped and said; an MPO's first image read and warned of;
   JPEGs one after another (a raw MJPEG stream) refused as frames, found by the markers' walk, an
-  EXIF thumbnail no frame; every refusal, the commands it gives run. `tests/test_png.py` holds `seedvr2x/png.py`: the chunks'
+  EXIF thumbnail no frame; a camera's raw file built on TIFF refused by its markers, read from the
+  IFDs' bytes with no pixel decoded (Canon CR2's header, DNGVersion, a first image marked a
+  reduced-resolution one, a colour filter array or linear raw photometric interpretation in the
+  chain or a SubIFD), on files written by hand there, without a real raw file: which of them
+  Pillow opens and which it refuses, a multi-page TIFF whose first page is a preview refused as
+  raw and not as pages, one whose reduced-resolution image comes later refused as pages, ordinary
+  TIFFs (RGB, grey, LZW, with a profile) still read, a cut or looping file never called raw,
+  ORF's and RW2's magic numbers no TIFF; a picture over Pillow's limit and under its refusal said
+  in the library's own INFO line, from a header-only PNG, the library touching neither Pillow's
+  limit nor the warning filters; every refusal, the commands it gives run. `tests/test_frames.py`
+  holds `frames.short_side` (the `--resolution` that keeps the displayed size) to `target_size`.
+  `tests/test_png.py` holds `seedvr2x/png.py`: the chunks'
   order and CRCs, the five filters and the adaptive one, 8 and 16 bits, grey and RGB, read back
   by Pillow, torchvision, `picture.read` and ffmpeg, the profile and orientation by ffprobe.
   `tests/test_still.py` holds `seedvr2x/still.py` on `stand_ins.cpu_models`' VAE cast to bfloat16
@@ -497,7 +508,11 @@ uv run pytest
   8K and 6000x4000 bounds on cards of 16 to 48 GB given tiles that fit, by `peaks.py` alone; the
   attention windows counted as the DiT's window functions count them, and their most within a
   bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's order, int8, SDPA,
-  pins, the host's trades and refusal, held readings and the tight reserve. `tests/test_peaks.py`
+  pins, the host's trades and refusal, held readings and the tight reserve; the picture's own
+  copies and resize on the GPU (`input_pixels`, a 100 MP input's 1.2 GB in float32 and 0.6 in
+  bfloat16, the transform's tensors counted from their sizes, unmeasured): the residents lowered
+  where a moment needs it, the refusal naming the largest input that fits, a small input changing
+  nothing. `tests/test_peaks.py`
   holds the colour correction's term by its frames, a video's `SLICE` unchanged.
 - The command line's still path (`stills.py`, `main.py`'s branch by content): `tests/
   test_still_cli.py` holds `still.upscale` bit for bit to `shot.py`'s pass over a shot of one
@@ -511,9 +526,21 @@ uv run pytest
   formats ffprobe reads that seedvr2x doesn't as pictures (JPEG XL, AVIF and HEIC by their
   demuxer or major brand, a video listing a sequence brand among its compatible ones kept;
   files made by ffmpeg where its build can, skipped without); a tile pin covering the picture's
-  own padded frame refused in the video planner's words. The video's
-  `--format`, `--quality` and `--min-segment` have no parser default, applied after the branch
-  (`main._video_arguments`), and `tests/test_cli_run.py` holds a video job's record unchanged.
+  own padded frame refused in the video planner's words; a seed out of range refused in a
+  picture's words (no shot, no source), the bounds taken; Pillow's size warning replaced by the
+  library's line in a run of the `seedvr2x` script (its stderr holding the line, no "decompression
+  bomb", no `DecompressionBombWarning`), the filter `main._pillow_size_warning_off` installs once
+  for the process, in front of any thread (the library's `warnings.catch_warnings` would not be
+  thread-safe); the animated refusal's ffmpeg command, run on a GIF of uneven delays, making a
+  file the video path's `declare` accepts (FFV1, bgr0, 10/1), skipped without an ffmpeg seedvr2x
+  accepts. The video's `--format`, `--quality`, `--min-segment` and `--resolution` have no parser
+  default, applied after the branch (`main._video_arguments`; the help says 1080, a picture takes
+  it in `stills.py`), and `tests/test_cli_run.py` holds a video job's record unchanged, its
+  settings recording 1080 with and without the option. The size line (`job.default_smaller`: the
+  default makes the output smaller than the source, naming the `--resolution` that keeps its size,
+  by the displayed short side) is held for a picture, with `--plan`, with a sample aspect, with a
+  size given (nothing more) and where the output is not smaller (nothing), and for a video in the
+  run and in `--plan`, a source made larger than 1080 there, with a sample aspect too.
 - A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
   phase a refusal names, a recorded shape planned again releasing that part, planning importing
   no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),

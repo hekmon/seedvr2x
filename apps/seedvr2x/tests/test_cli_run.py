@@ -899,6 +899,111 @@ def test_the_system_memory_the_plan_counts_on_is_logged_at_debug(
     assert "the system memory available was not read: the plan counts on none" in caplog.text
 
 
+def large_source(path: Path, size: str, *filters: str) -> Path:
+    """Two frames of `size` ("1300x1200"), through `filters` (setsar, ...): a source whose short
+    side is over the default --resolution."""
+    subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=s={size}:r=25"),
+            *("-frames:v", "2", "-vf", ",".join(["format=yuv420p", *filters]), "-c:v", "ffv1"),
+            str(path),
+        ],
+        check=True,
+    )
+    return path
+
+
+def without_resolution(tmp_path: Path, input_path: Path, output: str, *options: str) -> int:
+    """upscale() with no --resolution (command() gives 96) unless options give one, and the empty
+    cut list that spares the stand-in detector."""
+    (tmp_path / "w.safetensors").write_bytes(b"")
+    (tmp_path / "cuts.txt").write_text("")
+    arguments = command(
+        tmp_path, input_path, output, "--cuts", str(tmp_path / "cuts.txt"), *options
+    )
+    at = arguments.index("--resolution")
+    return cli.main([*arguments[:at], *arguments[at + 2 :]])
+
+
+def size_line(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if "no --resolution given" in r.getMessage()]
+
+
+@pytest.mark.usefixtures("stand_in")
+@pytest.mark.parametrize("plan", [False, True], ids=["run", "plan"])
+def test_a_default_that_makes_the_output_smaller_than_the_source_says_what_keeps_its_size(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, plan: bool
+) -> None:
+    # 1300x1200 at the default 1080: 1170x1080 out (frames.target_size), and --resolution 1200 is
+    # the short side as displayed. Beside the output's size, in the run and in --plan.
+    levels(caplog, logging.INFO)
+    source_path = large_source(tmp_path / "in.mkv", "1300x1200")
+    more = ("--plan", str(tmp_path / "plan.txt")) if plan else ()
+    assert without_resolution(tmp_path, source_path, "out.mkv", *more) == 0
+    assert size_line(caplog) == [
+        f"{source_path}: no --resolution given, so the output is 1170x1080, its short side the"
+        " default 1080, smaller than its source's 1300x1200: --resolution 1200 keeps the"
+        " source's size"
+    ]
+    messages = [r.getMessage() for r in caplog.records]
+    said = next(n for n, m in enumerate(messages) if "no --resolution given" in m)
+    assert "output 1170x1080, square pixels" in messages[said - 1]
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_the_size_line_goes_by_the_displayed_size_of_a_source_with_a_sample_aspect(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # 650x1200 pixels twice as wide as tall: 1300x1200 displayed, as the source before.
+    levels(caplog, logging.INFO)
+    source_path = large_source(tmp_path / "in.mkv", "650x1200", "setsar=2/1")
+    assert without_resolution(tmp_path, source_path, "out.mkv") == 0
+    assert size_line(caplog) == [
+        f"{source_path}: no --resolution given, so the output is 1170x1080, its short side the"
+        " default 1080, smaller than its source's 1300x1200: --resolution 1200 keeps the"
+        " source's size"
+    ]
+
+
+@pytest.mark.usefixtures("stand_in")
+@pytest.mark.parametrize("given", ["1080", "540", "1200"])
+def test_a_video_with_a_resolution_given_says_nothing_more(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, given: str
+) -> None:
+    levels(caplog, logging.INFO)
+    source_path = large_source(tmp_path / "in.mkv", "1300x1200")
+    assert without_resolution(tmp_path, source_path, "out.mkv", "--resolution", given) == 0
+    assert size_line(caplog) == []
+
+
+@pytest.mark.usefixtures("stand_in")
+@pytest.mark.parametrize("size", ["64x48", "1920x1080", "1200x1080"])
+def test_a_video_the_default_does_not_make_smaller_says_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, size: str
+) -> None:
+    levels(caplog, logging.INFO)
+    source_path = large_source(tmp_path / "in.mkv", size)
+    assert without_resolution(tmp_path, source_path, "out.mkv") == 0
+    assert size_line(caplog) == []
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_the_default_resolution_is_recorded_as_given_would_be(tmp_path: Path) -> None:
+    # The settings record and the resume's comparison see 1080 on a video whether it was asked or
+    # defaulted: the same job either way.
+    source_path = large_source(tmp_path / "in.mkv", "1300x1200")
+    recorded = []
+    for name, more in (("default", ()), ("given", ("--resolution", "1080"))):
+        plan = tmp_path / f"{name}.txt"
+        assert (
+            without_resolution(tmp_path, source_path, f"{name}.mkv", *more, "--plan", str(plan))
+            == 0
+        )
+        manifest = json.loads((tmp_path / f"{name}.mkv.work" / "manifest.json").read_text())
+        recorded.append(manifest["settings"]["resolution"])
+    assert recorded == [1080, 1080]
+
+
 def test_plan_recorded_and_phases_entered(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -18,7 +18,11 @@ within the bound. Sizes are (height, width) in pixels, and a bound (long, short)
 
 A picture of one frame is one latent in the DiT, one frame in the VAE's passes: the figures of
 peaks.py are a video slice's, up to 5 frames, and one frame's are unmeasured (DESIGN.md, Still
-images: "the card measures them before it ships")."""
+images: "the card measures them before it ships").
+
+The plan also counts the picture's own copies on the GPU, at its stored size, which the output's
+size doesn't bound: the resize that still.upscale makes on the device (COPIES, input_copies).
+They are counted from the tensors' sizes and unmeasured on the card, like the rest."""
 
 import math
 import mmap
@@ -54,12 +58,22 @@ class PlanRefusal(Refusal):
     covering the whole padded frame, a tile that fits no picture within the bound); a swap pin
     that doesn't hold the DiT's phase is the "dit" phase's. `fits`: for a floor refusal, the
     largest bound (long, short) that fits the memory, searched as the planner searches the
-    largest output (_too_large); None elsewhere, and where no output size fits."""
+    largest output (_too_large); None elsewhere, and where no output size fits. `fits_input`:
+    for the refusal of a picture's copies (_input_refused, phase "encode" or "decode"), the
+    largest input in pixels that fits; None elsewhere, and where no input does (the output's own
+    copies are over the memory)."""
 
-    def __init__(self, message: str, phase: str = "", fits: Bound | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        phase: str = "",
+        fits: Bound | None = None,
+        fits_input: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.phase = phase
         self.fits = fits
+        self.fits_input = fits_input
 
 
 @dataclass(frozen=True)
@@ -88,6 +102,7 @@ class StillPlan:
     within it. The tiles are the picture's own (tiles)."""
 
     bound: Bound  # (long, short): the output's sides, either orientation
+    input_pixels: int  # the largest input, H x W as stored: its copies on the GPU are counted
     models: ModelPlan  # swapped, resident_encode, resident_decode, vae_in_dit; compile_vae False
     reading: Reading  # as made: tightened where the tight retry took it
     attention: str  # peaks.DIT_ATTENTION's
@@ -132,6 +147,7 @@ class _Job:
     `counted` the planner's _Job calls `free`), the DiT, and the host."""
 
     bound: Bound
+    input_pixels: int
     reading: Reading
     attention: str
     dit_model: Architecture
@@ -162,6 +178,7 @@ def plan(
     host_available: int | None,
     *,
     process: int,
+    input_pixels: int,
     attention: str = peaks.FLASH_ATTN_2,
     dit_model: Architecture = peaks.FP16,
     split: bool = True,
@@ -174,6 +191,11 @@ def plan(
     it), with `host_available` bytes of system memory (None: unchecked) and the process's own
     `process` bytes of it. PlanRefusal when a pin can't be taken exactly, when no plan fits, or
     when the plan takes more system memory than there is.
+
+    `input_pixels` is the largest input, in pixels (height x width as stored, before the resize):
+    the CLI's picture, the server's largest. The picture goes to the GPU at that size and is
+    resized there, in the encode's phase and, with the colour correction, in the decode's, which
+    the output's size doesn't bound (COPIES); ValueError below one pixel.
 
     The choices, in the planner's order (DESIGN.md, Memory planner, Choices), each made once for
     the bound:
@@ -188,10 +210,14 @@ def plan(
     4. the system memory (the planner's _unfit): where the plan takes more than is available,
        the VAE's weights kept for the DiT's phase with more blocks swapped (_vae_kept), then more
        of the DiT kept on the GPU in the VAE's phases (_dit_kept), as long as the proof holds.
+    The input's copies (step 3, _holds) are judged with the proof, and refused at the floor
+    (_input_refused).
     Then, on a held run, a refusal is planned again with memory.RESERVE_TIGHT in
     memory.RESERVE's place, as the planner's plan does (memory.tightened; DESIGN.md, Allocator),
     only under torch's own allocator with expandable segments (Reading.expandable)."""
     _check_bound(bound)
+    if input_pixels < 1:
+        raise ValueError(f"an input of {input_pixels} pixels")
     if attention not in peaks.DIT_ATTENTION:
         raise ValueError(
             f"attention {attention!r}: the DiT's fit is {peaks.FLASH_ATTN_2}'s or {peaks.SDPA}'s"
@@ -199,7 +225,9 @@ def plan(
     if dit_model not in peaks.DITS:
         raise ValueError(f"{dit_model.name}: the DiT's figures are for its fp16 and int8 files")
     reading = free if isinstance(free, Reading) else Reading(free, None, free, False)
-    job = _Job(bound, reading, attention, dit_model, split, pins, process, host_available)
+    job = _Job(
+        bound, input_pixels, reading, attention, dit_model, split, pins, process, host_available
+    )
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
         raise PlanRefusal(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {peaks.BLOCKS} blocks, so from 0 to"
@@ -231,13 +259,16 @@ def plan(
         try:
             _planned(tight)
         except PlanRefusal:
-            raise PlanRefusal(str(refused), refused.phase, refused.fits) from None
+            raise PlanRefusal(
+                str(refused), refused.phase, refused.fits, refused.fits_input
+            ) from None
         raise PlanRefusal(
             f"{refused}; torch's own allocator with its expandable segments, a held run's"
             " default, which the allocator's setting in the environment replaces here, would run"
             f" it with the reserve of {_gib(memory.RESERVE_TIGHT)} GiB, slower",
             refused.phase,
             refused.fits,
+            refused.fits_input,
         ) from None
     try:
         made = _planned(tight)
@@ -249,6 +280,7 @@ def plan(
             " figures these are",
             again.phase,
             again.fits,
+            again.fits_input,
         ) from None
     return replace(made, tightened=str(refused))
 
@@ -297,6 +329,7 @@ def _job_of(plan: StillPlan) -> _Job:
     """The job a made plan was made by, for the figures that follow from it."""
     return _Job(
         plan.bound,
+        plan.input_pixels,
         plan.reading,
         plan.attention,
         plan.dit_model,
@@ -676,8 +709,9 @@ def _place(job: _Job, swapped: int, vae_in_dit: bool) -> ModelPlan:
     """Where the models are for the bound (step 3 of plan): for each VAE phase, decode then
     encode as the planner does, what of the DiT stays on the GPU for the bound's own picture in
     each orientation, the less of the two (None the most); then lowered, in the order of
-    _residents, until every picture within the bound has a pass that fits at it (_proof_need).
-    The proof holds at 0 (the floor, and the pins'), so it ends."""
+    _residents, until every picture within the bound has a pass that fits at it (_proof_need) and
+    the input's copies fit beside the models (_copies_need): _holds. Both hold at 0 (the floor,
+    the pins', and _input_refused), so it ends."""
     chosen: dict[Phase, int | None] = {}
     for phase in ("decode", "encode"):
         output = (job.bound[1], job.bound[0])
@@ -685,7 +719,7 @@ def _place(job: _Job, swapped: int, vae_in_dit: bool) -> ModelPlan:
         resident = min(found, key=lambda each: (_level(each, swapped), each is None))
         order = _residents(swapped)
         for each in order[order.index(resident) :]:
-            if _proof_need(job, phase, each, swapped) <= job.budget:
+            if _holds(job, phase, each, swapped):
                 chosen[phase] = each
                 break
     return ModelPlan(swapped, chosen["encode"], chosen["decode"], vae_in_dit)
@@ -805,6 +839,241 @@ def _pin_refused(job: _Job, phase: Phase) -> PlanRefusal | None:
     )
 
 
+# ---- The picture's own copies on the GPU -------------------------------------------------------
+
+# still.upscale moves the picture to the device at its STORED size and resizes it there
+# (still.py _transformed: `.permute(0, 3, 1, 2).to(device, dtype)`, then model.input_transform's
+# Compose), so a 100 MP photo takes memory the output's size doesn't bound. The tensors the
+# transform makes on the device from a (1, 3, H, W) input, in the Compose's order
+# (model.py:428-434), torchvision 0.29.1 (the locked version), each alive while the next is made
+# (the Compose's `img = t(img)`), and the stored tensor alive through all of them
+# (_transformed's `frames`):
+#
+#   1. the stored picture, (1, 3, H, W) in the encode's dtype, bfloat16 (still.py _transformed
+#      with model.COMPUTE_DTYPE, model.py:52; model.to_input made it float16 on the CPU,
+#      model.py:406-410). The colour correction's reference is float32 (torch.as_tensor of the
+#      float32 pixels).
+#   2. TVF.resize(BICUBIC, antialias=True) (model.py:430): torchvision/transforms/
+#      _functional_tensor.py:441-474. _cast_squeeze_in(img, [float32, float64]) UPCASTS a bfloat16
+#      input to float32 (:516-529), a float32 copy of the stored picture; interpolate makes the
+#      float32 output at the target's size (<= the padded frame); _cast_squeeze_out casts it back
+#      to bfloat16 (:532-542) while the float32 output is alive. Two moments: stored + its float32
+#      copy + the float32 output, then stored + the float32 output + the bfloat16 output. A
+#      float32 input is not cast: stored + output.
+#   3. torch.clamp(x, 0, 1) (model.py:431): a new tensor beside the resize's.
+#   4. pad (model.py:439-450, Lambda(pad) at :432): the clamped tensor, `reflected` and the
+#      result of the zeros' second F.pad alive at once, three tensors of the padded frame's size
+#      at most.
+#   5. Normalize(0.5, 0.5) (:433; _functional_tensor.py:916-928 clones its input, then sub_ and
+#      div_ in place): the padded tensor and its clone.
+#   6. permute(1, 0, 2, 3) (:434): a view. After the call returns only the padded tensor stays,
+#      in the encode's dtype: the encode's input, which the encode's measured peak holds already
+#      (peaks.encode_peak's docstring: the frames the encode takes are part of what it measures,
+#      seedvr2x feeding it slice by slice), so no moment is counted past this one.
+#
+# Every target-size tensor is counted at the bound's largest padded frame (the resize's output is
+# at most the target, itself within the padded frame), the stored picture at `input_pixels`.
+# NOT counted, in compiled ATen code not read here, and for the card's batch to show: a
+# contiguous staging copy of the stored picture in the host-to-device `.to()` of a permuted view,
+# and one the antialiased kernel may make of a channels-last input. Either would add a
+# stored-size tensor to a moment above.
+#
+# The decode's phase (colour correction only): the decoded frame is alive while the reference is
+# made. It is bfloat16 (the VAE's dtype, model.COMPUTE_DTYPE; tiling.decode_tiled sums in the
+# same dtype), and `chunk` is a view of the slice the decode gave (still.upscale), so its storage
+# is the PADDED frame's, 3 channels. The decode's own working memory is gone: the generator is
+# closed first (still.upscale's `finally`).
+#
+# The moments are judged in their phase like a phase, but without VAE_ROOM and with the margin:
+# no VAE pass runs, and the room is a pass's (a convolution whose workspace the allocator refuses
+# runs on another engine and may give other frames: peaks.VAE_ROOM), where here are ATen's resize
+# and copies, which allocate the exact sizes above. The margin stays: it is the desktop's and the
+# first allocation's, whatever runs.
+
+
+@dataclass(frozen=True)
+class Moment:
+    """A moment of the picture's copies on the GPU: what is alive, in bytes per pixel of the
+    stored picture and per pixel of the bound's largest padded frame."""
+
+    what: str
+    per_input: int
+    per_padded: int
+
+    def at(self, input_pixels: int, padded_pixels: int) -> int:
+        return self.per_input * input_pixels + self.per_padded * padded_pixels
+
+
+CHANNELS = 3
+FLOAT32 = 4  # bytes: the resize's working dtype
+BFLOAT16 = 2  # bytes: the encode's dtype (model.COMPUTE_DTYPE)
+
+
+def _moments(itemsize: int, held: int) -> tuple[Moment, ...]:
+    """The moments of the transform in a dtype of `itemsize` bytes (the stored picture's, step 1
+    above), `held` bytes per padded pixel alive besides (the decoded frame)."""
+    sample, wide = CHANNELS * itemsize, CHANNELS * FLOAT32
+    if itemsize == FLOAT32:
+        resize = [Moment("the stored picture and the resize's output", sample, wide + held)]
+    else:
+        resize = [
+            Moment(
+                "the stored picture, its float32 copy and the resize's float32 output",
+                sample + wide,
+                wide + held,
+            ),
+            Moment(
+                "the stored picture, the resize's float32 output and its cast back",
+                sample,
+                wide + sample + held,
+            ),
+        ]
+    return (
+        *resize,
+        Moment(
+            "the stored picture, the resize's output and the clamped one", sample, 2 * sample + held
+        ),
+        Moment("the stored picture and the padding's three", sample, 3 * sample + held),
+        Moment(
+            "the stored picture, the padded tensor and its normalised clone",
+            sample,
+            2 * sample + held,
+        ),
+    )
+
+
+# The encode's phase: bfloat16. The decode's, with the colour correction: float32, and the
+# decoded frame (bfloat16, 3 channels, the padded frame's storage) beside.
+COPIES: dict[Phase, tuple[Moment, ...]] = {
+    "encode": _moments(BFLOAT16, 0),
+    "decode": _moments(FLOAT32, CHANNELS * BFLOAT16),
+}
+
+
+def copies_peak(phase: Phase, input_pixels: int, padded_pixels: int) -> int:
+    """The most the picture's copies and the transform's tensors take of the GPU at once in the
+    encode's or the decode's phase, in bytes, above what the models take there: counted from the
+    tensors' sizes (COPIES), UNMEASURED on the card, which the card's batch measures (DESIGN.md,
+    Still images, Measured before it ships)."""
+    return max(moment.at(input_pixels, padded_pixels) for moment in COPIES[phase])
+
+
+def _padded_pixels(bound: Bound) -> int:
+    """The area of the bound's largest padded frame (_most), in pixels."""
+    rows, columns = _most(bound)
+    return rows * columns
+
+
+def _copy_phases(job: _Job) -> tuple[Phase, ...]:
+    """The phases in which the picture is copied and resized: the encode's, and the decode's where
+    the colour correction compares it with the picture."""
+    return ("encode", "decode") if job.split else ("encode",)
+
+
+def _on_gpu(job: _Job, resident: int | None, swapped: int) -> int:
+    """What is on the GPU in a VAE phase before anything of the picture's: the VAE's weights and
+    what of the DiT stays there, as peaks.encode_peak counts them."""
+    return peaks.VAE_WEIGHTS + peaks.dit_on_gpu(resident, swapped, job.dit_model)
+
+
+def _copies_need(job: _Job, phase: Phase, resident: int | None, swapped: int) -> int:
+    """What the phase takes of the free VRAM at the moment of its copies, in bytes: the models on
+    the GPU there and the copies at the bound's largest padded frame (copies_peak). Judged
+    against the budget without VAE_ROOM."""
+    return _on_gpu(job, resident, swapped) + copies_peak(
+        phase, job.input_pixels, _padded_pixels(job.bound)
+    )
+
+
+def _holds(job: _Job, phase: Phase, resident: int | None, swapped: int) -> bool:
+    """Whether the phase holds at `resident` blocks of the DiT on the GPU: every picture within
+    the bound has a pass that fits (_proof_need) and the input's copies fit beside the models
+    (_copies_need)."""
+    if _proof_need(job, phase, resident, swapped) > job.budget:
+        return False
+    return (
+        phase not in _copy_phases(job) or _copies_need(job, phase, resident, swapped) <= job.budget
+    )
+
+
+def _largest_input(job: _Job) -> int | None:
+    """The largest input, in pixels, whose copies fit at resident 0 in every phase they are made
+    in, the output's size as it is: each moment is linear in the input's pixels, so the least
+    over the moments of what is left of the room after the padded frame's share, divided by the
+    bytes per pixel. None where the padded frame's share alone is over the room, or the input
+    would be under a pixel."""
+    padded = _padded_pixels(job.bound)
+    room = job.budget - _on_gpu(job, 0, 0)
+    fits: int | None = None
+    for phase in _copy_phases(job):
+        for moment in COPIES[phase]:
+            left = room - moment.per_padded * padded
+            if left < moment.per_input:
+                return None
+            most = left // moment.per_input
+            fits = most if fits is None else min(fits, most)
+    return fits
+
+
+def _input_refused(job: _Job) -> PlanRefusal | None:
+    """The refusal of a picture whose copies don't fit even with the DiT off the GPU (resident 0,
+    where the placement ends), None when they do: the phase that is over by the most, what its
+    copies take, and the largest input that fits, in megapixels and as about WxH at the bound's
+    ratio, the way out being a smaller copy of the picture, or a smaller --resolution where the
+    output's own part is what is over."""
+    over: dict[Phase, int] = {
+        phase: _copies_need(job, phase, 0, 0) - job.budget
+        for phase in _copy_phases(job)
+        if _copies_need(job, phase, 0, 0) > job.budget
+    }
+    if not over:
+        return None
+    phase = max(over, key=lambda each: over[each])
+    padded = _padded_pixels(job.bound)
+    copies = copies_peak(phase, job.input_pixels, padded)
+    held = _on_gpu(job, 0, 0)
+    need = held + copies + job.margin
+    fits = _largest_input(job)
+    if fits is None:
+        way = (
+            "no input fits there, the output's own copies being over the memory: a smaller"
+            " --resolution"
+        )
+    else:
+        long, short = job.bound
+        wide = math.isqrt(fits * long // short)
+        way = (
+            f"the largest input that fits is {_megapixels(fits, up=False)} MP, about"
+            f" {wide}x{fits // wide} at the bound's ratio: a copy of the picture no larger, or a"
+            " smaller --resolution, which lowers the output's part of it"
+        )
+    which = max(COPIES[phase], key=lambda each: each.at(job.input_pixels, padded))
+    return PlanRefusal(
+        f"the picture's input, {_megapixels(job.input_pixels, up=True)} MP at its stored size, is"
+        f" copied to the GPU and resized there in the {phase}'s phase: its copies take"
+        f" {_over(copies)} GiB at the peak ({which.what}, at the largest padded frame within"
+        f" {_bound_said(job.bound)}) and {_short(need, copies)} GiB more for the models on the GPU"
+        f" and the margin, {_over(need)} GiB of free VRAM, and {_there(job.reading)}:"
+        f" {_to_free(job.reading, need)}{way}",
+        phase=phase,
+        fits_input=fits,
+    )
+
+
+def input_copies(plan: StillPlan) -> dict[Phase, int]:
+    """The picture's copies at their peak in each phase they are made in (the encode's, and the
+    decode's with the colour correction), in bytes, above the models (copies_peak)."""
+    padded = _padded_pixels(plan.bound)
+    phases: tuple[Phase, ...] = ("encode", "decode") if plan.split else ("encode",)
+    return {phase: copies_peak(phase, plan.input_pixels, padded) for phase in phases}
+
+
+def _megapixels(pixels: int, *, up: bool) -> str:
+    """Pixels in megapixels (10^6), one decimal, rounded up or down."""
+    tenths = pixels / 1e5
+    return f"{(math.ceil(tenths - 1e-6) if up else math.floor(tenths + 1e-6)) / 10:.1f}"
+
+
 # ---- The system memory -------------------------------------------------------------------------
 
 
@@ -840,6 +1109,7 @@ def _account(job: _Job, models: ModelPlan) -> StillPlan:
     the bound's tiles or smaller ones, and a pin tiles the pictures it doesn't cover."""
     made = StillPlan(
         job.bound,
+        job.input_pixels,
         models,
         job.reading,
         job.attention,
@@ -902,9 +1172,9 @@ def _dit_kept(job: _Job, made: StillPlan) -> StillPlan | None:
             resident if _level(resident, models.swapped) >= keep else keep
             for resident in (models.resident_encode, models.resident_decode)
         )
-        if (
-            _proof_need(job, "encode", encode, models.swapped) > job.budget
-            or _proof_need(job, "decode", decode, models.swapped) > job.budget
+        if not (
+            _holds(job, "encode", encode, models.swapped)
+            and _holds(job, "decode", decode, models.swapped)
         ):
             return kept
         models = replace(models, resident_encode=encode, resident_decode=decode)
@@ -950,11 +1220,14 @@ def _planned(job: _Job) -> StillPlan:
     floor = _floor(job)
     if floor is not None:
         raise _too_large(job, *floor)
+    refused = _input_refused(job)
+    if refused is not None:
+        raise refused
     swapped, vae_in_dit = _swap_choice(job)
     for phase in ("decode", "encode"):
-        refused = _pin_refused(job, phase)
-        if refused is not None:
-            raise refused
+        pin_refused = _pin_refused(job, phase)
+        if pin_refused is not None:
+            raise pin_refused
     made = _account(job, _place(job, swapped, vae_in_dit))
     if job.host_available is None or made.host <= job.host_available:
         return made
@@ -1042,6 +1315,7 @@ def said(plan: StillPlan, target: tuple[int, int] | None = None) -> list[str]:
         f" {_resident_said(models.resident_encode, models.swapped)}; in the decode,"
         f" {_resident_said(models.resident_decode, models.swapped)}"
     )
+    lines.append(_copies_said(plan))
     process, pinned, scratch = _host_hundredths(plan)
     left = _left(models, "the DiT's other parameters", "the VAE")
     copies = f"{pinned / 100:.2f} GiB pinned for {left}" if left else "nothing pinned"
@@ -1066,6 +1340,25 @@ def said(plan: StillPlan, target: tuple[int, int] | None = None) -> list[str]:
             f" pass asks for at once: {_gib(VAE_ROOM)} GiB of the budget, beside each peak"
         )
     return [f"plan: {line}" for line in lines]
+
+
+def _copies_said(plan: StillPlan) -> str:
+    """The plan's line of the picture's copies (said): the input's size, and for each phase it is
+    resized in the copies at their peak, counted from the tensors' sizes and unmeasured, and what
+    is left under the budget at the placement's residents (_copies_need)."""
+    job, models = _job_of(plan), plan.models
+    figures: list[str] = []
+    for phase, resident in (("encode", models.resident_encode), ("decode", models.resident_decode)):
+        if phase not in input_copies(plan):
+            continue
+        copies = input_copies(plan)[phase]
+        room = plan.budget - _copies_need(job, phase, resident, models.swapped)
+        figures.append(f"{_gib(copies)} GiB in the {phase} ({_gib(room)} GiB under the budget)")
+    return (
+        f"the input: {_megapixels(plan.input_pixels, up=True)} MP at its stored size, copied to"
+        " the GPU and resized there, at the bound's largest padded frame, its copies"
+        f" {', '.join(figures)}; counted from the tensors' sizes, not yet measured"
+    )
 
 
 def _memory_said(plan: StillPlan) -> list[str]:

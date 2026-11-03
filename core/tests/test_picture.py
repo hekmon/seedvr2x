@@ -12,6 +12,7 @@ import shlex
 import shutil
 import struct
 import subprocess
+import warnings
 import zlib
 from collections.abc import Callable
 from pathlib import Path
@@ -260,6 +261,64 @@ def test_a_picture_too_large_for_pillows_guard_is_identified_and_refused() -> No
     assert "Make a smaller copy of it first" in message and "huge.png.small.png" in message
     assert "beyond what seedvr2x upscales" not in message
     assert Image.MAX_IMAGE_PIXELS == limit
+
+
+def header_only_png(width: int, height: int) -> bytes:
+    """A grey PNG whose IHDR says width x height and whose image data is empty: read as far as its
+    size, then refused as damaged without a pixel decoded."""
+    header = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(b""))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_a_picture_over_pillows_check_but_under_its_refusal_is_said_in_a_line_of_seedvrs_own(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # 9,500 x 9,500 is 90.25 million pixels, over Image.MAX_IMAGE_PIXELS (89,478,485) and under
+    # twice it. The library says so from the size it reads, at INFO, and changes no setting of
+    # Pillow's, nor its warning filters (the application's to set, once, for its threads).
+    limit, filters = Image.MAX_IMAGE_PIXELS, list(warnings.filters)
+    data = header_only_png(9_500, 9_500)
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    with pytest.warns(Image.DecompressionBombWarning):  # Pillow's own, not silenced here
+        message = refusal(data, "big.png")
+    assert "damaged" in message
+    lines = [r.getMessage() for r in caplog.records if r.name == LOGGER]
+    assert lines == [
+        "big.png: 9500x9500, 90.2 megapixels, over the 89.5 at which Pillow, the library that reads"
+        " pictures here, starts to guard against files made to fill the memory (it refuses over"
+        " 179.0): read as a picture, a camera's or a scanner's being this large"
+    ]
+    assert caplog.records[0].levelno == logging.INFO
+    assert Image.MAX_IMAGE_PIXELS == limit and warnings.filters == filters
+
+
+@pytest.mark.parametrize(
+    ("size", "said"),
+    [((9_400, 9_400), False), ((9_459, 9_459), False), ((9_460, 9_459), True)],
+)
+def test_the_size_line_starts_at_pillows_limit_exactly(
+    caplog: pytest.LogCaptureFixture, size: tuple[int, int], said: bool
+) -> None:
+    # Image.MAX_IMAGE_PIXELS is 89,478,485: 9,459 x 9,459 is 89,472,681 pixels, 9,460 x 9,459
+    # 89,482,140. Pillow's warning is silenced here, as the application does for the process.
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        refusal(header_only_png(*size))
+    assert any("megapixels" in r.getMessage() for r in caplog.records) is said
+
+
+def test_a_picture_over_twice_pillows_limit_is_refused_without_the_size_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    assert "decompression bombs" in refusal(header_only_png(14_000, 14_000))
+    assert not [r for r in caplog.records if "megapixels" in r.getMessage()]
 
 
 @needs_ffmpeg
@@ -651,6 +710,232 @@ def test_the_16_bit_grey_tiff_command_keeps_grey_at_16_bits(tmp_path: Path) -> N
 def test_an_8_bit_tiff_with_a_profile_is_not_the_16_bit_refusal() -> None:
     pic = reading(pillow(Image.fromarray(RGB8), "TIFF", icc_profile=PROFILE))
     assert pic.bits == 8 and pic.icc == PROFILE
+
+
+# Camera raw files built on TIFF -----------------------------------------------------------------
+
+BYTE, SHORT, LONG = 1, 3, 4
+Tags = dict[int, tuple[int, list[int]]]  # tag: (field type, values)
+
+
+def tiff_file(
+    *pages: Tags,
+    subs: tuple[Tags, ...] = (),
+    header: bytes = b"II*\x00",
+    cr2: bool = False,
+    strip_at: int | None = None,
+    loop: bool = False,
+) -> bytes:
+    """A TIFF written by hand, so that tags Pillow's writer has no way to write can be set: one
+    2 x 2 RGB strip, and each of `pages` an IFD of it chained to the next, with its tags
+    (a page's own tags replacing the defaults); `subs` are IFDs of their own, not chained, that
+    the first page's SubIFDs tag (330) points to; `cr2` writes Canon CR2's 8 bytes after the
+    header; `strip_at` puts the strip's offset elsewhere (outside the file, to show a check
+    reads no pixel); `loop` chains the last page to the first."""
+    order = "<" if header[:2] == b"II" else ">"
+    start = 16 if cr2 else 8
+    strip = bytes(range(12))
+    strip_offset = start if strip_at is None else strip_at
+
+    def laid(tags: Tags, at: int, following: int) -> bytes:
+        extra = b""
+        extra_at = at + 2 + 12 * len(tags) + 4
+        entries = b""
+        for tag in sorted(tags):
+            kind, values = tags[tag]
+            letter = {BYTE: "B", SHORT: "H", LONG: "I"}[kind]
+            packed = struct.pack(f"{order}{len(values)}{letter}", *values)
+            if len(packed) <= 4:
+                field = packed.ljust(4, b"\x00")
+            else:
+                field = struct.pack(f"{order}I", extra_at + len(extra))
+                extra += packed
+            entries += struct.pack(f"{order}HHI", tag, kind, len(values)) + field
+        return (
+            struct.pack(f"{order}H", len(tags))
+            + entries
+            + struct.pack(f"{order}I", following)
+            + extra
+        )
+
+    def defaults() -> Tags:
+        return {
+            256: (SHORT, [2]),
+            257: (SHORT, [2]),
+            258: (SHORT, [8, 8, 8]),
+            259: (SHORT, [1]),
+            262: (SHORT, [2]),
+            273: (LONG, [strip_offset]),
+            277: (SHORT, [3]),
+            278: (SHORT, [2]),
+            279: (LONG, [12]),
+        }
+
+    # Each IFD's size is known before it is laid, so that every offset is too.
+    complete = [{**defaults(), **page} for page in pages]
+    sub_tags = [{**defaults(), **sub} for sub in subs]
+    placeholder = complete[0] | ({330: (LONG, [0] * len(subs))} if subs else {})
+    sizes = [len(laid(tags, 0, 0)) for tags in [placeholder, *complete[1:], *sub_tags]]
+    offsets = [start + len(strip)]
+    for size in sizes[:-1]:
+        offsets.append(offsets[-1] + size)
+    chained, sub_offsets = offsets[: len(pages)], offsets[len(pages) :]
+    if subs:
+        complete[0][330] = (LONG, sub_offsets)
+    body = b""
+    for number, tags in enumerate(complete):
+        if number + 1 < len(pages):
+            following = chained[number + 1]
+        else:
+            following = chained[0] if loop else 0
+        body += laid(tags, chained[number], following)
+    for tags, at in zip(sub_tags, sub_offsets, strict=True):
+        body += laid(tags, at, 0)
+    head = header + struct.pack(f"{order}I", chained[0])
+    return head + (b"CR\x02\x00" + bytes(4) if cr2 else b"") + strip + body
+
+
+NEW_SUBFILE_TYPE, PHOTOMETRIC, SUB_IFDS, DNG_VERSION = 254, 262, 330, 50706
+CFA, LINEAR_RAW = 32803, 34892
+
+
+def marked(tag: int, kind: int, *values: int) -> Tags:
+    return {tag: (kind, list(values))}
+
+
+# The markers a camera's raw file built on TIFF is told by, and a file for each. Real raw files
+# are not in the repository: each of these holds the header and the tags its marker keys on, and
+# the strip is no sensor data. Pillow reads all but two as a picture (a raw file's preview, or
+# its first IFD, whatever the others hold), and refuses the CFA and linear raw ones as an unknown
+# pixel mode.
+RAW_FILES: dict[str, Callable[[], bytes]] = {
+    "dng": lambda: tiff_file(marked(DNG_VERSION, BYTE, 1, 4, 0, 0)),
+    "dng-big-endian": lambda: tiff_file(marked(DNG_VERSION, BYTE, 1, 6, 0, 0), header=b"MM\x00*"),
+    "cr2": lambda: tiff_file({}, cr2=True),
+    "preview": lambda: tiff_file(marked(NEW_SUBFILE_TYPE, LONG, 1), {}),
+    "cfa": lambda: tiff_file(marked(PHOTOMETRIC, SHORT, CFA)),
+    "linear-raw": lambda: tiff_file(marked(PHOTOMETRIC, SHORT, LINEAR_RAW)),
+    "cfa-in-the-second-page": lambda: tiff_file({}, marked(PHOTOMETRIC, SHORT, CFA)),
+    "cfa-in-a-subifd": lambda: tiff_file({}, subs=(marked(PHOTOMETRIC, SHORT, CFA),)),
+}
+PILLOW_OPENS = {
+    *("dng", "dng-big-endian", "cr2", "preview"),
+    *("cfa-in-the-second-page", "cfa-in-a-subifd"),
+}
+
+
+@pytest.mark.parametrize("which", list(RAW_FILES))
+def test_pillow_opens_what_the_raw_markers_catch_or_refuses_it_as_no_pixel_mode(
+    which: str,
+) -> None:
+    # The reason the check exists, and why it comes before Pillow's open: a raw file's preview is
+    # a picture to Pillow, and its sensor data has no pixel mode there.
+    data = RAW_FILES[which]()
+    if which in PILLOW_OPENS:
+        with Image.open(io.BytesIO(data), formats=picture.FORMATS) as img:
+            img.load()
+            assert img.format == "TIFF" and img.size == (2, 2)
+    else:
+        with pytest.raises(Image.UnidentifiedImageError):
+            Image.open(io.BytesIO(data), formats=picture.FORMATS)
+    assert picture.identify(io.BytesIO(data)) == "TIFF"
+
+
+WHY = {
+    "dng": "DNG's version tag (DNGVersion, tag 50706)",
+    "dng-big-endian": "DNG's version tag (DNGVersion, tag 50706)",
+    "cr2": "Canon CR2's: CR follows the TIFF header",
+    "preview": "a reduced-resolution version of another image in the file (NewSubfileType, tag",
+    "cfa": "(PhotometricInterpretation 32803), a camera's sensor samples",
+    "linear-raw": "(PhotometricInterpretation 34892), a camera's sensor samples",
+    "cfa-in-the-second-page": "(PhotometricInterpretation 32803)",
+    "cfa-in-a-subifd": "(PhotometricInterpretation 32803)",
+}
+
+
+@pytest.mark.parametrize("which", list(RAW_FILES))
+def test_a_camera_raw_file_is_refused_to_be_developed_to_a_16_bit_png(which: str) -> None:
+    message = refusal(RAW_FILES[which](), "IMG_0001.NEF")
+    assert message.startswith("IMG_0001.NEF is a camera's raw file, or the preview of one (")
+    assert WHY[which] in message
+    # The way out names the kind of tool, not a product, and the format that reads whole.
+    assert "raw developer" in message and "16-bit PNG" in message
+    assert "damaged" not in message and "frames" not in message
+
+
+def test_the_raw_check_reads_no_pixel() -> None:
+    # The strip's offset is outside the file: decoding would be refused as damaged, which an
+    # ordinary TIFF made the same way is.
+    outside = len(tiff_file({})) + 1000
+    assert "damaged" in refusal(tiff_file({}, strip_at=outside))
+    marker = marked(DNG_VERSION, BYTE, 1, 4, 0, 0)
+    assert "camera's raw file" in refusal(tiff_file(marker, strip_at=outside))
+
+
+@pytest.mark.parametrize(
+    ("value", "raw"), [(0, False), (1, True), (2, False), (3, True), (4, False)]
+)
+def test_only_bit_0_of_the_new_subfile_type_marks_a_preview(value: int, raw: bool) -> None:
+    # TIFF 6.0: bit 0 reduced resolution, bit 1 a page of a multi-page image, bit 2 a mask.
+    data = tiff_file(marked(NEW_SUBFILE_TYPE, LONG, value))
+    if raw:
+        assert "camera's raw file" in refusal(data)
+    else:
+        assert reading(data).pixels.shape == (2, 2, 3)
+
+
+def test_a_reduced_resolution_image_that_is_not_the_first_is_not_a_raw_marker() -> None:
+    # A pyramid with the full image first: several pages, refused as such.
+    data = tiff_file({}, marked(NEW_SUBFILE_TYPE, LONG, 1))
+    message = refusal(data, "pyramid.tif")
+    assert "holds 2 frames" in message and "raw" not in message
+
+
+def test_a_multi_page_tiff_whose_first_page_is_a_preview_is_refused_as_raw_not_as_pages() -> None:
+    # The first page marked reduced-resolution is what a raw file puts first: saying "save each
+    # page" would have the preview upscaled as a picture, so the raw refusal comes first.
+    data = tiff_file(marked(NEW_SUBFILE_TYPE, LONG, 1), {}, {})
+    message = refusal(data, "IMG.NEF")
+    assert "camera's raw file" in message and "holds 3 frames" not in message
+    assert "tiffsplit" not in message
+
+
+def test_other_raw_formats_with_their_own_magic_numbers_are_no_tiff_to_pillow() -> None:
+    # ORF (Olympus, "IIRO" and "IIRS") and RW2 (Panasonic, "IIU\0") start as TIFF files but with
+    # magic numbers of their own, which Pillow refuses: not a picture, as any unknown file.
+    for header in (b"IIRO", b"IIRS", b"IIU\x00"):
+        data = tiff_file({}, header=header)
+        assert picture.identify(io.BytesIO(data)) is None
+        assert "not a picture seedvr2x reads" in refusal(data)
+
+
+def test_ordinary_tiffs_are_still_read() -> None:
+    profile = pillow(Image.fromarray(RGB8), "TIFF", icc_profile=PROFILE)
+    for data in (
+        pillow(Image.fromarray(RGB8), "TIFF"),
+        pillow(Image.fromarray(GREY8), "TIFF"),
+        pillow(Image.fromarray(RGB8), "TIFF", compression="tiff_lzw"),
+        profile,
+        tiff_file({}),
+        tiff_file({}, subs=({},)),
+    ):
+        assert reading(data).format == "TIFF"
+    assert reading(profile).icc == PROFILE
+
+
+def test_a_chain_of_pages_that_loops_ends_and_is_no_raw_file() -> None:
+    # Pillow follows the loop to the page it came from and counts two pages.
+    message = refusal(tiff_file({}, {}, loop=True))
+    assert "holds 2 frames" in message and "raw" not in message
+
+
+@pytest.mark.parametrize("cut", [7, 9, 20, 25, 60])
+def test_a_tiff_cut_before_the_end_of_its_ifd_is_damaged_not_raw(cut: int) -> None:
+    # The header takes 8 bytes and the strip 12, the first IFD starts at 20 and is cut inside its
+    # entries: no marker is read from what is not all there.
+    data = tiff_file(marked(DNG_VERSION, BYTE, 1, 4, 0, 0))[:cut]
+    message = refusal(data)
+    assert "damaged" in message and "camera's raw file" not in message
 
 
 # Metadata ------------------------------------------------------------------------------------

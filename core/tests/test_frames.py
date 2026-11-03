@@ -8,7 +8,7 @@ import torch
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TVF
 
-from seedvr2x.frames import output_size, target_size
+from seedvr2x.frames import output_size, short_side, target_size
 from seedvr2x.vendor.data.image.transforms.na_resize import NaResize
 
 
@@ -50,6 +50,47 @@ def test_display_aspect(
     size: tuple[int, int], sample_aspect: Fraction, expected: tuple[int, int]
 ) -> None:
     assert target_size(*size, sample_aspect, 1080) == expected
+
+
+@pytest.mark.parametrize(
+    ("size", "sample_aspect", "expected"),
+    [
+        ((4032, 3024), Fraction(1), 3024),  # a 12 MP photo
+        ((3024, 4032), Fraction(1), 3024),  # the same, portrait
+        ((1920, 1080), Fraction(1), 1080),
+        ((2000, 2000), Fraction(1), 2000),  # square: the width is the short side
+        ((720, 480), Fraction(32, 27), 480),  # NTSC DVD, 16:9: 853.3 x 480 displayed
+        ((720, 576), Fraction(16, 15), 576),  # PAL DVD, 4:3
+        ((480, 720), Fraction(32, 27), 569),  # portrait: 568.9 x 720 displayed, the width is short
+        ((1000, 700), Fraction(1, 2), 500),  # anamorphic: 500 x 700 displayed
+        ((3, 1), Fraction(1, 10), 1),  # never 0
+    ],
+)
+def test_short_side_is_the_resolution_that_keeps_the_displayed_size(
+    size: tuple[int, int], sample_aspect: Fraction, expected: int
+) -> None:
+    assert short_side(*size, sample_aspect) == expected
+
+
+def test_target_size_at_the_short_side_is_the_displayed_size_within_a_pixel() -> None:
+    for width, height, sample_aspect in [
+        (4032, 3024, Fraction(1)),
+        (3024, 4032, Fraction(1)),
+        (4033, 3025, Fraction(1)),
+        (720, 480, Fraction(32, 27)),
+        (480, 720, Fraction(32, 27)),
+        (1440, 1080, Fraction(4, 3)),
+        (101, 200, Fraction(1)),
+    ]:
+        shown_width = width * sample_aspect
+        side = short_side(width, height, sample_aspect)
+        rows, columns = target_size(width, height, sample_aspect, side)
+        assert min(rows, columns) == side
+        # Exact where the displayed size is whole, else within the pixel the short side is rounded
+        # to; floor, as target_size's long side is.
+        assert abs(columns - shown_width) < 1.5 and abs(rows - height) <= 1
+        if shown_width.denominator == 1:
+            assert (rows, columns) == (height, int(shown_width))
 
 
 def test_even_output() -> None:
