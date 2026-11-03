@@ -568,19 +568,33 @@ two 7Bs' smaller files (below), their int8 files first:
     their 288 markers, pinned (8.33 GB each) and fetched only when chosen; their blocks swap
     as fp16's do; the DiT's figures go by format, read from the files' headers (weights 7.76
     GiB against 15.35), the format recorded in the plan (`dit_format`, fp16 where an older
-    manifest has none). A window's memory is fp16's measured figure plus 0.41 GiB for int8's
+    manifest has none). A window's memory is fp16's measured figure plus 0.38 GiB for int8's
     buffers (rows 4,096 at a time), provisional until the card measures int8's own; an int8
-    plan says so in a line of its own, an fp16 plan prints as before. Its unfused path makes
-    several passes over each input and output where comfy-kitchen's kernel fuses them, a
-    risk for (c): the card times it against fp16's, against `torch.compile` of the linear
-    and against comfy-kitchen's fused kernel.
-  - On the card first, `pytest -m gpu` in `core/` (delivered, not yet run): the CUDA path
+    plan says so in a line of its own, an fp16 plan prints as before.
+  - On the card first, `pytest -m gpu` in `core/` (green on the RTX 5090, below): the CUDA path
     against the CPU's for the 7B's four shapes, comfy-kitchen 0.2.37's kernel on the same
     activations (opt-in, never a dependency; its one-row kernel, `int8_linear_m1`, not yet
     compared), and real int8 blocks swapped against the DiT loaded whole. Then the DiT's
     peaks in int8 (windows, swaps, FA2 and SDPA), the rows at a time (1,024 frees 0.28 GiB),
-    the weight's transposed view in `torch._int_mm`, and seedvr2x's linear against
+    the weight's view in `torch._int_mm` on its cuBLAS, and seedvr2x's linear against
     comfy-kitchen's on the model's own activations, whose figures replace the synthetic ones.
+  - Measured on the RTX 5090 (2026-11-03; 1080p, FA2, one 239-frame shot): the GPU gate is
+    green on main's code with two fixes to tests; an int8 job runs, its DiT peak 0.41 GiB
+    under the plan, 20 blocks swapped instead of 28, 7.9 GiB of host memory pinned against
+    15.8; its output is 52.2 dB of PSNR-Y from fp16's at the same seed, where two fp16 seeds
+    are 37.3 dB apart. Speed: given to `torch._int_mm` as a contiguous transposed copy, the
+    weight made cuBLASLt pick a slow kernel; as a view of the file's own layout it gets the
+    int8 tensor-core kernel, the output the same bit for bit, the DiT 51.7 s against 60.1 s,
+    about fp16's 45.8-55.2 s (the desktop moved the blocks swapped). The view is built, the
+    copy's 36 MiB gone from the buffers. One chunk's computation under `torch.compile`, with
+    `emulate_precision_casts` (without it 4% of the codes move), is the same bit for bit and
+    takes the DiT to 42.7 s, for 13.6 s of compiling a job (4.5 s from a warm cache of 16
+    MB): it comes with `--compile`, in the pass after the card. comfy-kitchen 0.2.37's kernel
+    loads there (Python 3.13, sm_120), gives the same codes and is about twice as fast a call
+    still; it stays a test's reference, not a dependency: int8's speed comes from PyTorch,
+    maintained with it (the user, 2026-11-03). An int8 block kept on the card holds 2 MiB
+    more than its bytes (torch's allocator rounds its two 27 MiB QKV matrices to 28; 72 MiB
+    with all 36 kept): the planner counts it in that pass.
   - Measured on the default model only (the user, 2026-11-02): the sharp 7B stays the default,
     and int8 changes only its format, to `seedvr2x_ema_7b_sharp_int8_convrot.safetensors`,
     where checks (a)-(c), run on that file against the sharp 7B's float16, hold. The regular
