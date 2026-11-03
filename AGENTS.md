@@ -622,6 +622,12 @@ uv run pytest
   (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a `budget`). No
   video plan moves: the plan matrix's
   5,480 cases are main's byte for byte.
+- A picture's refusals carry their kind, their reason and their way out apart (`errors.Refusal`'s
+  `kind`, `reason`, `way`; `picture.KINDS`, and `frames.check_target`'s `too-small`), so that the
+  image server words its own way out with no file name and no command (DESIGN.md, The image
+  server, Errors): `tests/test_picture.py` holds each refusal's message word for word, its reason
+  free of the file's name, of `ffmpeg` and of options, and every kind raised; `tests/test_frames.py`
+  `too-small`'s.
 - A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
   phase a refusal names, a recorded shape planned again releasing that part, planning importing
   no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),

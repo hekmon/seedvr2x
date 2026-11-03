@@ -150,9 +150,12 @@ def read(data: bytes, name: str = "FILE") -> Picture:
             _walk_png(data, name)  # says which chunk is wrong, if it is one
         if fmt is not None:
             raise _damaged(name, ValueError(f"its {fmt} header cannot be read")) from error
-        raise Refusal(
-            f"{name} is not a picture seedvr2x reads: it reads {', '.join(FORMATS)} (told by"
-            " the file's content, never its name), and a video as a video"
+        raise _refused(
+            name,
+            "not-a-picture",
+            f"is not a picture seedvr2x reads: it reads {', '.join(FORMATS)} (told by"
+            " the file's content, never its name), and a video as a video",
+            subject="the file",
         ) from error
     except Exception as error:
         raise _damaged(name, error) from error
@@ -264,10 +267,13 @@ def _decoded8(img: Image.Image, name: str) -> tuple[npt.NDArray[np.float32], boo
     values as ffmpeg's decode for PNG, BMP, TIFF, GIF and lossless WebP."""
     mode = img.mode
     if mode not in _8_BIT_MODES:
-        raise Refusal(
-            f"{name} is in the {mode!r} colour mode, which seedvr2x does not read: it reads RGB,"
-            " grey and palette pictures. Convert it to RGB in an image editor, keeping its colour"
-            " profile, and upscale the result"
+        raise _refused(
+            name,
+            "colour-mode",
+            f"is in the {mode!r} colour mode, which seedvr2x does not read: it reads RGB, grey and"
+            " palette pictures",
+            "Convert it to RGB in an image editor, keeping its colour profile, and upscale the"
+            " result",
         )
     dropped = False
     source = img
@@ -650,21 +656,62 @@ def _check_cicp(body: bytes, name: str) -> None:
         raise _damaged(name, ValueError("the PNG's cICP chunk is not 4 bytes"))
     hdr = _HDR_TRANSFERS.get(body[1])
     if hdr is not None:
-        raise Refusal(
-            f"{name} is an HDR picture (its cICP chunk says the {hdr} transfer): the model was"
-            " trained on SDR video, and what it makes of HDR-coded pixels is unmeasured. For an"
-            " SDR upscale, tone-map the picture to SDR first, a grading choice for your own"
-            " tools, as a gamut conversion is"
+        raise _refused(
+            name,
+            "hdr",
+            f"is an HDR picture (its cICP chunk says the {hdr} transfer): the model was trained"
+            " on SDR video, and what it makes of HDR-coded pixels is unmeasured",
+            "For an SDR upscale, tone-map the picture to SDR first, a grading choice for your own"
+            " tools, as a gamut conversion is",
         )
 
 
 # The refusals ----------------------------------------------------------------------------------
 
+# Every kind of refusal that read can raise, as Refusal.kind (seedvr2x/errors.py). An application
+# that cannot give the command line's way out (the image server has no ffmpeg and names no file)
+# words its own by the kind; Refusal.reason says what is refused, whatever the application.
+KINDS = (
+    # A camera's raw file built on TIFF, or the preview of one: not the picture the camera
+    # recorded, nor can its sensor samples be read as one.
+    "raw",
+    # More pixels than twice Pillow's limit against decompression bombs.
+    "too-large",
+    # No format of FORMATS by its content (a video, a text, any other file).
+    "not-a-picture",
+    # A format of FORMATS whose bytes cannot be decoded: cut short, a chunk failing its CRC, a
+    # header Pillow cannot read. The detail of which is in the reason.
+    "damaged",
+    # A PNG whose cICP chunk says a high-dynamic-range transfer (PQ, HLG).
+    "hdr",
+    # Several frames where a still is one: an animation, JPEGs one after another, a TIFF's pages.
+    "frames",
+    # A TIFF of 16 bits per sample, which Pillow's decoder would cut to 8 bits.
+    "tiff16",
+    # At least one pixel that is not opaque.
+    "transparent",
+    # A pixel mode other than RGB, grey and palette (CMYK, floating point, ...).
+    "colour-mode",
+)
+
+
+def _refused(
+    name: str, kind: str, what: str, way: str = "", *, subject: str = "the picture"
+) -> Refusal:
+    """The refusal of kind `kind`, in its parts and as the command line says it. `what` completes
+    "the picture ...": the message is "{name} {what}. {way}" (no stop after `what` and no way
+    where `way` is empty), the reason "{subject} {what}" naming no file, and the way out as the
+    message has it, which may name the file and give a command."""
+    message = f"{name} {what}. {way}" if way else f"{name} {what}"
+    return Refusal(message, kind=kind, reason=f"{subject} {what}", way=way)
+
 
 def _damaged(name: str, error: Exception) -> Refusal:
-    return Refusal(
-        f"{name} is damaged or truncated, and cannot be decoded ({error}). Make a good copy of it,"
-        " or save it again from the program that made it"
+    return _refused(
+        name,
+        "damaged",
+        f"is damaged or truncated, and cannot be decoded ({error})",
+        "Make a good copy of it, or save it again from the program that made it",
     )
 
 
@@ -678,13 +725,16 @@ def _too_large(name: str, error: Exception) -> Refusal:
     # Into an 8192-px square, the ratio kept: 67 Mpixels at most, and always smaller, since a
     # picture over the limit has a side over 8192 (8192 x 8192 is 67,108,864 pixels).
     shrink = "scale=8192:8192:force_original_aspect_ratio=decrease"
-    return Refusal(
-        f"{name} has {count}, over the {limit:,} pixels that Pillow, the library that reads"
+    return _refused(
+        name,
+        "too-large",
+        f"has {count}, over the {limit:,} pixels that Pillow, the library that reads"
         " pictures here, takes in: its limit against decompression bombs (files made to fill the"
-        " memory), which seedvr2x leaves as it is. Make a smaller copy of it first, in an image"
-        " editor or with ffmpeg (at most 8192 pixels on a side), and upscale the copy:"
+        " memory), which seedvr2x leaves as it is",
+        "Make a smaller copy of it first, in an image editor or with ffmpeg (at most 8192 pixels"
+        " on a side), and upscale the copy:"
         f" ffmpeg -i {shlex.quote(name)} -vf {shlex.quote(shrink)}"
-        f" {shlex.quote(f'{name}.small.png')}"
+        f" {shlex.quote(f'{name}.small.png')}",
     )
 
 
@@ -696,12 +746,15 @@ def _transparent(name: str) -> Refusal:
         "format=rgba,split[a][b];[a]drawbox=c=white:t=fill:replace=1[bg];"
         "[bg][b]overlay=format=rgb,format=rgb24"
     )
-    return Refusal(
-        f"{name} has transparent pixels, and seedvr2x refuses it: the model would redraw the"
-        " colours hidden under them and fringe the edges. Flatten it onto a background first,"
-        " in an image editor (which keeps its colour profile), or at 8 bits onto white with"
+    return _refused(
+        name,
+        "transparent",
+        "has transparent pixels, and seedvr2x refuses it: the model would redraw the"
+        " colours hidden under them and fringe the edges",
+        "Flatten it onto a background first, in an image editor (which keeps its colour"
+        " profile), or at 8 bits onto white with"
         f" ffmpeg (which drops it): ffmpeg -i {shlex.quote(name)} -vf {shlex.quote(graph)}"
-        f" -frames:v 1 {shlex.quote(f'{name}.flat.png')}"
+        f" -frames:v 1 {shlex.quote(f'{name}.flat.png')}",
     )
 
 
@@ -712,34 +765,46 @@ def _several_frames(name: str, fmt: str, frames: int, stream: bool = False) -> R
     conversion drops an alpha plane without blending it (checked with a half-transparent frame on
     ffmpeg n9.0.2: the colour comes out as stored). `stream`: JPEGs
     one after another (a raw MJPEG stream, which ffmpeg reads at MJPEG_RATE unless told)."""
-    head = f"{name} holds {frames} frames, and seedvr2x reads one picture from a still."
+    what = f"holds {frames} frames, and seedvr2x reads one picture from a still"
     if fmt == "TIFF":
-        return Refusal(
-            f"{head} Save each page of it as a file of its own (an image editor, or libtiff's"
-            " tiffsplit), and upscale each"
+        return _refused(
+            name,
+            "frames",
+            what,
+            "Save each page of it as a file of its own (an image editor, or libtiff's"
+            " tiffsplit), and upscale each",
         )
     video = shlex.quote(f"{name}.mkv")
     if stream:
-        return Refusal(
-            f"{head} To upscale it as a video, make one of it first, choosing the rate"
+        return _refused(
+            name,
+            "frames",
+            what,
+            "To upscale it as a video, make one of it first, choosing the rate"
             f" ({MJPEG_RATE} frames a second here): ffmpeg -f mjpeg -framerate {MJPEG_RATE}"
-            f" -i {shlex.quote(name)} -pix_fmt rgb24 -c:v ffv1 {video}"
+            f" -i {shlex.quote(name)} -pix_fmt rgb24 -c:v ffv1 {video}",
         )
-    return Refusal(
-        f"{head} To upscale it as a video, make one of it first, choosing the rate"
+    return _refused(
+        name,
+        "frames",
+        what,
+        "To upscale it as a video, make one of it first, choosing the rate"
         f" ({VIDEO_RATE} frames a second here; its transparency, if any, is dropped, the colours"
         " under it showing):"
-        f" ffmpeg -i {shlex.quote(name)} -vf fps={VIDEO_RATE},format=rgb24 -c:v ffv1 {video}"
+        f" ffmpeg -i {shlex.quote(name)} -vf fps={VIDEO_RATE},format=rgb24 -c:v ffv1 {video}",
     )
 
 
 def _raw(name: str, why: str) -> Refusal:
-    return Refusal(
-        f"{name} is a camera's raw file, or the preview of one ({why}): seedvr2x upscales pictures,"
+    return _refused(
+        name,
+        "raw",
+        f"is a camera's raw file, or the preview of one ({why}): seedvr2x upscales pictures,"
         " and a raw file's preview is not the picture the camera recorded, nor can its sensor"
-        " samples be read as one. Develop it first in a raw developer (a program that turns a"
+        " samples be read as one",
+        "Develop it first in a raw developer (a program that turns a"
         " camera's raw file into a picture, choosing its white balance, tone and colour), saving"
-        " a 16-bit PNG, and upscale the PNG"
+        " a 16-bit PNG, and upscale the PNG",
     )
 
 
@@ -753,7 +818,10 @@ def _tiff16(name: str, icc: bool) -> Refusal:
         if icc
         else f"Make a 16-bit PNG of it, which seedvr2x reads whole: {command}"
     )
-    return Refusal(
-        f"{name} is a TIFF of 16 bits per sample, which seedvr2x does not read yet: its decoder"
-        f" cuts it to 8 bits. {way}"
+    return _refused(
+        name,
+        "tiff16",
+        "is a TIFF of 16 bits per sample, which seedvr2x does not read yet: its decoder"
+        " cuts it to 8 bits",
+        way,
     )

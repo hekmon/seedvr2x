@@ -147,10 +147,29 @@ def reading(data: bytes, name: str = "FILE") -> picture.Picture:
     return picture.read(data, name)
 
 
-def refusal(data: bytes, name: str = "FILE") -> str:
+def refused(data: bytes, name: str = "FILE") -> Refusal:
+    """The refusal read raises, its parts held to the rules of every refusal on the way (see
+    held_parts): each refusal the file's cases provoke has a kind of picture.KINDS."""
     with pytest.raises(Refusal) as caught:
         picture.read(data, name)
-    return str(caught.value)
+    held_parts(caught.value, name)
+    return caught.value
+
+
+def refusal(data: bytes, name: str = "FILE") -> str:
+    return str(refused(data, name))
+
+
+def held_parts(error: Refusal, name: str) -> None:
+    """What the image server relies on: the kind is one of KINDS; the reason is a clause that
+    names neither the file, nor ffmpeg, nor an option of the command line; and the message is
+    the command line's, made of the file's name, the reason's words and the way out."""
+    assert error.kind in picture.KINDS
+    reason = error.reason
+    assert reason.startswith(("the picture ", "the file "))
+    assert name not in reason and "ffmpeg" not in reason and "--" not in reason
+    body = reason.split(" ", 2)[2]
+    assert str(error) == f"{name} {body}" + (f". {error.way}" if error.way else "")
 
 
 def after_marker(message: str, marker: str) -> list[str]:
@@ -1394,3 +1413,114 @@ def test_nothing_but_picture_py_imports_torchcodec() -> None:
     source = Path(picture.__file__).read_text()
     assert not re.search(r"^(import|from)\s+torchcodec\b", source, re.MULTILINE)
     assert "torchvision" not in re.findall(r"^\s*(?:import|from)\s+(\w+)", source, re.MULTILINE)
+
+
+# The parts of the refusals ---------------------------------------------------------------------
+
+
+def _frames_files() -> dict[str, bytes]:
+    kinds = list(jpegs().values())
+    return {
+        **{f"animated {fmt}": data for fmt, data in animations().items()},
+        "tiff pages": pillow(
+            Image.fromarray(RGB8),
+            "TIFF",
+            save_all=True,
+            append_images=[Image.fromarray(RGB8[::-1])],
+        ),
+        "mjpeg stream": b"".join(kinds[:2]),
+    }
+
+
+def _damaged_files() -> dict[str, bytes]:
+    bad_crc = bytearray(chunk(b"gAMA", struct.pack(">I", 45455)))
+    bad_crc[-1] ^= 1
+    return {
+        **{
+            f"cut {fmt}": FORMAT_FILES[fmt]()[: len(FORMAT_FILES[fmt]()) // 2]
+            for fmt in FORMAT_FILES
+        },
+        "cut 16-bit png": png16(RGB16, 2)[:-40],
+        "png without its data": FORMAT_FILES["PNG"]()[:60],
+        "png header only": b"\x89PNG\r\n\x1a\n" + b"junk" * 10,
+        "jpeg header unreadable": b"\xff\xd8\xff" + b"\x00" * 20,
+        "bad crc": inserted(FORMAT_FILES["PNG"](), bytes(bad_crc)),
+        "malformed cicp": inserted(FORMAT_FILES["PNG"](), chunk(b"cICP", bytes([1, 13, 0]))),
+    }
+
+
+def _refusal_cases() -> dict[str, tuple[bytes, str, str]]:
+    """(file, kind, what the way holds: "" none, "text" advice alone, "ffmpeg" a command) for
+    each refusal site of picture.py, the sites' cases of this file."""
+    cmyk = pillow(Image.fromarray(RGB8).convert("CMYK"), "JPEG")
+    floats = pillow(Image.fromarray(RNG.random((16, 24), dtype=np.float32), "F"), "TIFF")
+    cases: dict[str, tuple[bytes, str, str]] = {
+        "bomb": (_bomb(), "too-large", "ffmpeg"),
+        "header only 14000x14000": (header_only_png(14_000, 14_000), "too-large", "ffmpeg"),
+        "video": (b"\x1aE\xdf\xa3" + bytes(64), "not-a-picture", ""),
+        "text": (b"hello, this is no picture", "not-a-picture", ""),
+        "hdr pq": (
+            inserted(FORMAT_FILES["PNG"](), chunk(b"cICP", bytes([9, 16, 0, 1]))),
+            "hdr",
+            "text",
+        ),
+        "hdr hlg 16": (
+            inserted(png16(RGB16, 2), chunk(b"cICP", bytes([9, 18, 0, 1]))),
+            "hdr",
+            "text",
+        ),
+        "cmyk jpeg": (cmyk, "colour-mode", "text"),
+        "float tiff": (floats, "colour-mode", "text"),
+        "tiff 16": (_tiff16_grey(), "tiff16", "ffmpeg"),
+        "tiff 16 with a profile": (_tiff16_grey(PROFILE), "tiff16", "ffmpeg"),
+    }
+    for which, data in _transparent_files().items():
+        cases[f"transparent {which}"] = (data, "transparent", "ffmpeg")
+    for which, data in _frames_files().items():
+        cases[f"frames {which}"] = (data, "frames", "text" if which == "tiff pages" else "ffmpeg")
+    for which, data in _damaged_files().items():
+        cases[f"damaged {which}"] = (data, "damaged", "text")
+    for which, make in RAW_FILES.items():
+        cases[f"raw {which}"] = (make(), "raw", "text")
+    return cases
+
+
+REFUSAL_CASES = _refusal_cases()
+
+
+@pytest.mark.parametrize("which", list(REFUSAL_CASES))
+def test_a_refusal_carries_its_kind_its_reason_and_its_way_apart(which: str) -> None:
+    data, kind, way = REFUSAL_CASES[which]
+    name = "my picture.x"
+    error = refused(data, name)
+    assert error.kind == kind
+    assert isinstance(error, ValueError) and str(error).startswith(f"{name} ")
+    # The way out is the end of the message, with the command and the file's name where it has
+    # one; the reason holds none of them (held_parts).
+    assert error.way and str(error).endswith(error.way) if way else not error.way
+    assert ("ffmpeg" in error.way) == (way == "ffmpeg")
+    if way == "ffmpeg":
+        assert name in error.way or shlex.quote(name) in error.way
+
+
+def test_every_kind_is_raised_by_a_case_and_every_case_has_a_kind() -> None:
+    assert len(set(picture.KINDS)) == len(picture.KINDS)
+    assert {kind for _, kind, _ in REFUSAL_CASES.values()} == set(picture.KINDS)
+
+
+def test_the_parts_of_the_refusals_are_the_commands_text_whatever_the_name() -> None:
+    # A name in the reason would be the file's: another name changes nothing in the reason, and
+    # the way changes with it where it holds a command.
+    for which in ("bomb", "frames animated GIF", "transparent rgba", "tiff 16", "raw dng"):
+        data, _, _ = REFUSAL_CASES[which]
+        first, second = refused(data, "a.png"), refused(data, "my 'odd' name -x.png")
+        assert first.reason == second.reason and first.kind == second.kind
+        assert (first.way != second.way) == ("ffmpeg" in first.way)
+
+
+def test_a_refusal_is_a_value_error_with_parts_that_may_be_left_out() -> None:
+    plain = Refusal("no parts")
+    assert str(plain) == "no parts" and isinstance(plain, ValueError)
+    assert (plain.kind, plain.reason, plain.way) == ("", "", "")
+    with pytest.raises(TypeError):
+        Refusal("m", "kind")  # type: ignore[misc]

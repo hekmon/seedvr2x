@@ -97,3 +97,28 @@ def test_even_output() -> None:
     assert output_size((1080, 1920)) == (1080, 1920)
     assert output_size((1215, 1080)) == (1214, 1080)
     assert output_size((541, 961)) == (540, 960)
+
+
+def test_the_refusal_of_a_target_too_small_carries_its_parts() -> None:
+    from seedvr2x.errors import Refusal
+    from seedvr2x.frames import check_target
+
+    with pytest.raises(Refusal) as caught:
+        check_target((16, 16), 16)
+    error = caught.value
+    # The message is the command line's, word for word; the reason, for the image server, names
+    # no option, and the way is the option the message names.
+    assert str(error) == (
+        "--resolution 16: the frames resized to 16x16 are too small for the padding, at least"
+        " 8 rows reflected from the picture under it, up to a multiple of 16, and columns alike:"
+        " it takes 17 rows and 16 columns at least"
+    )
+    assert error.kind == "too-small"
+    assert error.way == "--resolution 16"
+    assert error.reason.startswith("the picture resized to 16x16 is too small for the padding")
+    assert "--" not in error.reason and "resolution" not in error.reason
+    assert (
+        str(error)
+        == f"{error.way}: the frames resized to 16x16 are too small "
+        + (error.reason.split("too small ", 1)[1])
+    )
