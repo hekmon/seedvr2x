@@ -230,13 +230,13 @@ seedvr2x/                the repository
   image server's lock holds the same versions of what they share, a test checking it.
 - **The CLI:** `seedvr2x` keeps its command and options. The same command upscales a still
   image (the user, 2026-11-02: no `seedvr2x image` subcommand),
-  `seedvr2x photo.png -o photo.4k.png`, told from a video by what ffprobe reads the file as,
-  an image format holding one frame, never by its name; the output's format from `-o`'s
-  extension. It assembles the library's bricks: the same models, files, tiling and colour
-  correction, none of the long-run machinery (shots, windows, segments, jobs, resume,
-  calibration, masters). The options a still has no use for (`--cuts`, `--until`,
-  `--segment-cmd`, `--quality`, `--compile`, ...) are refused on one, saying why, never
-  ignored. What a still is, how it is read and written: [Still images](#still-images).
+  `seedvr2x photo.png -o photo.4k.png`, told from a video by its content, which the library's
+  reader identifies, never by its name; the output's format from `-o`'s extension. It
+  assembles the library's bricks: the same models, files, tiling and colour correction, none
+  of the long-run machinery (shots, windows, segments, jobs, resume, calibration, masters).
+  The options a still has no use for (`--cuts`, `--until`, `--segment-cmd`, `--quality`,
+  `--compile`, ...) are refused on one, saying why, never ignored. What a still is, how it is
+  read and written: [Still images](#still-images).
 - **The image server, `apps/imgserver/`:** images only, hence its name (a "server" would promise
   every CLI feature over HTTP). Python, the models in its own process, loaded once and kept on
   the GPU. Every parameter in the request's headers, the image's bytes as the body both ways,
@@ -358,12 +358,25 @@ In steps:
    models, the PNG written, the plan for one picture. Three of the server's needs shape it:
    the picture comes as bytes in memory, not a path; the pass takes models already loaded and
    never loads them; a plan is made once for the largest picture and holds for any smaller
-   one, apart from the pass. Where each part goes, the library or each app, is mapped file by
-   file and agreed with the user before any code is written, the library's rules held or
-   their change agreed: it imports nothing of the CLI, starts no process (the scan of
-   `test_ends_with_us.py` finds none in it), and must import on Windows and macOS for
-   ComfyUI's nodes. Neither holds the release if it isn't ready with the rest; the roadmap
-   shows them under next until then.
+   one, apart from the pass. Mapped file by file and agreed on 2026-11-03 (the user), the
+   library's rules held: it imports nothing of the CLI, starts no process (the scan of
+   `test_ends_with_us.py` finds none in it), and imports on Windows and macOS, for ComfyUI's
+   nodes. New in `core/seedvr2x/`:
+   - `picture.py`: a picture's bytes read and told by their content, to pixels `(H, W, 3)`
+     float32 in [0, 1], its profile, colour chunks and orientation, with the refusals;
+   - `png.py`: a PNG's bytes, 8 or 16 bits, grey or RGB, with the profile, the colour chunks
+     and the orientation before the image data;
+   - `still.py`: one picture through models already loaded, never loading them: the resize,
+     the encode, one latent sampled, the decode, the colour correction against the picture in
+     memory;
+   - `still_plan.py`: the plan for one picture ([Still images](#still-images)).
+
+   `peaks.py` takes the colour correction's term by its frames, and the planner's `MARGIN` and
+   `VAE_ROOM` (about 40 lines, `planner.py` importing them back); `sampling.py` takes `job.py`'s
+   `ENCODE_SEED_OFFSET`. Nothing else moves. `core/` declares Pillow, already locked and
+   imported by the vendored model code. The CLI branches in `main.py` by content, before its
+   ffmpeg check; the server, later, takes the same four modules. Neither holds the release if
+   it isn't ready with the rest; the roadmap shows them under next until then.
 4. After v0.1.0: ComfyUI's nodes, assembling the same bricks.
 
 ## Architecture
@@ -2205,51 +2218,88 @@ compressed is the user's choice: afterwards, from the master, or during the run 
 ## Still images
 
 Decided on 2026-11-03 (the user), for v0.1.0: the CLI's still images, and the image server's
-pictures, which follow the same rules. The ffmpeg readings are ffmpeg 9.0's, on test files
-made that day.
+pictures, which follow the same rules. A picture is read and written in the library,
+in-process, never through ffmpeg: Pillow (12.3) identifies and decodes it, torchvision's
+decoder reads a 16-bit RGB PNG, which Pillow cuts to 8 bits, and seedvr2x writes its PNG itself,
+no library locked writing one in 16-bit RGB; a still needs no ffmpeg. The figures below were
+measured that day on test files, against ffmpeg 9.0's decode.
 
-- **What a still is:** a file ffprobe reads as an image format holding one frame, never told
-  by its name. Read: PNG, JPEG, WebP, TIFF, BMP and a GIF of one frame, each tested; ffmpeg
-  reads JPEG through its `image2` reader, the others each as a format of its own. After
-  v0.1.0: HEIC (stored as tiles, in Display P3), AVIF (read as an MP4 file, its brand telling
-  it from a video of one frame) and JPEG XL.
-- **Animated GIF, APNG and WebP,** which ffmpeg reads as several frames, are refused in
+- **What a still is:** a file the library's reader identifies by its content as one of the
+  formats it reads, holding one frame, never told by its name: PNG, JPEG, WebP, TIFF, BMP and
+  a GIF of one frame, each tested.
+  - Pillow decodes PNG (RGB, palette, grey, 16-bit grey, alpha), BMP, TIFF, GIF and lossless
+    WebP as ffmpeg does, bit for bit. JPEG and lossy WebP come from their own decoders
+    (libjpeg-turbo, libwebp) in 8-bit RGB, at most 2.5 levels from the CLI's 16-bit reading
+    through zscale (57.4 dB of 16-bit PSNR on a 4:2:0 JPEG), about an 8-bit rounding.
+  - A 16-bit TIFF is refused in v0.1.0, the refusal giving the command that makes a 16-bit
+    PNG of it: Pillow reads it at 8 bits, and nothing locked reads it at 16.
+  - After v0.1.0: HEIC (stored as tiles, in Display P3), AVIF and JPEG XL. Until then the
+    video path refuses them, and any other image format ffprobe reads (by its brand where
+    ffprobe reads it as an MP4 file, as it reads an AVIF), naming the formats read as
+    pictures, so that none runs as a video of one frame.
+- **Animated GIF, APNG and WebP,** found holding several frames, are refused in
   v0.1.0, the refusal giving the ffmpeg command that makes a video of the file: a GIF's frame
   delays, palette and transparency would each need rules of their own.
 - **Transparency:** an alpha plane opaque at every pixel is dropped, said in one line, nothing
-  of the picture changing: lossless WebP and GIF decode with one, the test files holding no
-  transparent pixel. A picture with any pixel not opaque is refused: the model would redraw
-  the colours hidden under it and fringe the edges. Its alpha upscaled apart and put back is
-  for later, measured first.
-- **Pixel formats:** those the video path accepts (see [Input](#input)), and grey and palette
-  pictures, expanded exactly to RGB for the model. A grey picture comes back grey, the mean
-  of the output's three planes, which start equal. CMYK is refused.
+  of the picture changing (ffmpeg 9.0 decodes a lossless WebP and a GIF with one, the test
+  files holding no transparent pixel). A picture with any pixel not opaque is refused: the
+  model would redraw the colours hidden under it and fringe the edges. Its alpha upscaled
+  apart and put back is for later, measured first.
+- **Pixel formats:** RGB and grey at 8 or 16 bits, and palette pictures; grey and palette are
+  expanded exactly to RGB for the model. A grey picture comes back grey, the mean of the
+  output's three planes, which start equal. CMYK, and any other mode, is refused.
 - **Colour:** the stored values are processed, never converted, as a video's are. The
-  source's ICC profile is carried to the output unchanged, and its colour tags as the masters
-  copy them (cICP, cHRM, gAMA); a picture with neither is sRGB, as viewers take it. ffmpeg
-  reads a PNG's and a JPEG's profile into the frame, and its PNG writer writes it back, but
-  seedvr2x's raw frames carry none: seedvr2x attaches it itself. HDR (PQ, HLG) is refused, as
-  for video.
+  source's ICC profile is carried to the output unchanged, and a PNG's colour chunks (cICP,
+  cHRM, gAMA, sRGB) verbatim, which seedvr2x reads from the file's chunks itself, Pillow
+  reading no cICP; a picture with neither is sRGB, as viewers take it. HDR (a cICP transfer of
+  PQ or HLG) is refused, as for video.
 - **Orientation:** processed as stored, the EXIF orientation (a rotation, a mirror or both)
-  carried to the output, the video path's later way (see [Input](#input)). It is written
+  carried to the output, the video path's later way (see [Input](#input)). seedvr2x writes it
   before the image data, where Chrome (since 2024), Firefox and Safari read it, as ffmpeg's
-  PNG writer places it. Measured in the card's batch: a few phone photos upscaled stored
+  PNG writer does too. Measured in the card's batch: a few phone photos upscaled stored
   sideways and upright, compared by figures and the user's eyes; revisited if the model draws
   a sideways picture worse.
 - **Metadata:** nothing else is carried, no camera, date or place (EXIF beyond the
   orientation, XMP). The output holds its profile, its colour tags and its orientation only.
-- **Output:** PNG only in v0.1.0, from `-o`'s extension; another extension is refused, the
+- **Output:** PNG only in v0.1.0. `-o` is a `.png` file; another extension is refused, the
   refusal giving the command that converts the PNG (seedvr2x owns no lossy encoder:
-  [Output](#output)). 16 bits by default, all the model made; 8 bits on request, rounded to
-  the nearest code by seedvr2x (a 4K picture is 50 MB before compression at 16 bits, 25 MB at
-  8).
+  [Output](#output)); a directory, the source itself or a file already there is refused,
+  nothing replaced. The file is written whole, as a finished file is. 16 bits by default, all
+  the model made; 8 bits with `--format png8`, rounded to the nearest code (a 4K picture is
+  50 MB before compression at 16 bits, 25 MB at 8); the video formats are refused. A video
+  with `-o x.png` is refused, naming `--format png` and a directory. seedvr2x writes the PNG
+  with numpy and zlib: an 8K picture in 0.97 s, ffmpeg's writer taking 1.65 s.
+- **Options taken on a still:** `--resolution`, `--seed`, the model files' (`--model-dir`,
+  `--dit-model`, `--vae-model`), the pins (`--encode-tile`, `--decode-tile`, `--swap-blocks`),
+  `--color-correction`, `--input-sar`, `-v`, and `--plan`, which says the picture's plan and
+  runs nothing. Every other is refused, saying why. `--format`, `--quality` and
+  `--min-segment` have no value by default, so that one given is told from its default.
+- **The plan for one picture** (`still_plan.py`): made for a bound, the output's long and
+  short sides in either orientation; the CLI's bound is its picture, the server's its
+  largest.
+  - The DiT's and the VAE's placement (`ModelPlan`) is fixed once for the bound: the DiT on
+    one latent (the VAE away first, then the fewest blocks swapped), the colour correction's
+    term at the bound's area, and the 512-px floor proved over every shape a picture within
+    the bound cuts. The tiles are chosen per picture under that placement, never refused
+    within the bound.
+  - The largest picture's tiles don't hold for every smaller one: a cut-off tile is counted
+    at its rule plus 0.3 GiB, and measured steps aren't monotone (an encode at 752×896 takes
+    8.09 GiB, at 752×960 7.70).
+  - An addition beside the CLI's planner, not a move: the planner's choices take a job's
+    types, and its 5,480-case check would have to hold again. Its margins and its order of
+    choices are the planner's.
+  - The VAE's figures are a video slice's, up to 5 frames; one frame's are unmeasured, and
+    the card measures them before it ships.
 - **The model on one picture:** a still is encoded alone, as a shot's first frame is
   ([Pipeline, per shot](#pipeline-per-shot), step 1: closer to the ground truth, less
   re-rendered by one measure). Measured in the card's batch on blind stills: the picture alone
   against the picture repeated 5 times, its 5th frame kept, at a few times the GPU time. The
   picture alone until then.
-- **Measured before it ships:** outputs up to 8K, one latent at sizes video rarely reaches,
-  the planner keeping no blind spot.
+- **Measured before it ships** (the card's batch, then the RTX 5090), the planner keeping no
+  blind spot: the DiT on one latent at 4K to 8K (FA2 and SDPA, no block and 36 swapped); the
+  one-frame VAE passes at 8K and 6000×4000, tiles of 512 to 2048 px, cut-off shapes, and the
+  colour correction's term; whole pictures on card sizes emulated from 16 to 48 GB, each peak
+  against its prediction; 8K on the 32 GB card.
 
 ## Memory planner
 
