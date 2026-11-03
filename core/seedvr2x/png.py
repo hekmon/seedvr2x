@@ -6,8 +6,9 @@ alone), and ffmpeg is not run for a still.
 
 Quantised as the video writers' are (apps/seedvr2x/media/writer.py's quantise): clipped to
 [0, 1], scaled by 65535 (255 at 8 bits) and rounded to nearest. The bytes are a function of the
-pixels and the options: nothing of the time, the machine or the writer's version is in them,
-beyond zlib's own output for a given level."""
+pixels and the options: nothing of the time or the machine is in them, beyond zlib's own output
+for a given level; the writer's version only in the record the caller gives (xmp, software:
+record.py)."""
 
 import struct
 import zlib
@@ -48,6 +49,11 @@ IDAT_BYTES = 1 << 20
 # The ICC profile's name in iCCP: it is only a label, which readers ignore.
 ICC_NAME = b"ICC profile"
 
+# The keyword of the iTXt chunk that holds an XMP packet (XMP Specification Part 3, 1.1.5), and of
+# the tEXt chunk that names the program that wrote the file (PNG's predefined keywords, 11.3.4.2).
+XMP_KEYWORD = b"XML:com.adobe.xmp"
+SOFTWARE_KEYWORD = b"Software"
+
 
 def write(
     rgb: npt.NDArray[np.float32],
@@ -56,6 +62,8 @@ def write(
     grey: bool,
     icc: bytes | None,
     chunks: Sequence[bytes],
+    xmp: bytes | None = None,
+    software: str | None = None,
     filter_type: int | None = None,
     level: int | None = None,
 ) -> bytes:
@@ -65,8 +73,11 @@ def write(
 
     Chunks, in this order: IHDR; chunks, the source's colour chunks (cICP, cHRM, gAMA, sRGB),
     each whole as the file held it (length, type, data, CRC), in the order given; iCCP holding
-    icc (zlib-compressed under ICC_NAME) if icc is not None; IDAT; IEND. No eXIf: the picture is
-    written upright (picture.upright, DESIGN.md, Still images, Orientation), so no tool after
+    icc (zlib-compressed under ICC_NAME) if icc is not None; tEXt Software holding software
+    (Latin-1) if it is not None; iTXt XML:com.adobe.xmp holding the XMP packet xmp (UTF-8,
+    uncompressed, no language) if it is not None; IDAT; IEND. The last two are seedvr2x's record
+    (record.Record.creator and .xmp; DESIGN.md, The record in each output). No eXIf: the picture
+    is written upright (picture.upright, DESIGN.md, Still images, Orientation), so no tool after
     this one has a tag to honour. All before the image data, where the browsers read them.
 
     filter_type is one of the module's NONE to ADAPTIVE (ADAPTIVE: per row, the filter of
@@ -85,6 +96,15 @@ def write(
     parts = [SIGNATURE, chunk(b"IHDR", header), *chunks]
     if icc is not None:
         parts.append(chunk(b"iCCP", ICC_NAME + b"\0\0" + zlib.compress(icc, 9)))
+    if software is not None:
+        # tEXt is Latin-1, with no NUL: refused here, never cut (ValueError).
+        if "\0" in software:
+            raise ValueError("a PNG text holds no NUL")
+        parts.append(chunk(b"tEXt", SOFTWARE_KEYWORD + b"\0" + software.encode("latin-1")))
+    if xmp is not None:
+        # Keyword, compression flag and method (0, 0: uncompressed, as XMP's specification asks
+        # for a packet that tools may find by scanning), language and translated keyword empty.
+        parts.append(chunk(b"iTXt", XMP_KEYWORD + b"\0\0\0\0\0" + xmp))
     for piece in _idat(rgb, bits, channels, filter_type, LEVEL if level is None else level):
         parts.append(chunk(b"IDAT", piece))
     parts.append(chunk(b"IEND", b""))

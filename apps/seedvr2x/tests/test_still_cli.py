@@ -14,6 +14,7 @@ asked for. The machine is stood in as test_cli_run.py stands it in (no GPU, no w
 command's run on the CPU, the pass itself the library's own on a VAE of random weights and a DiT
 of arithmetic (test_still.py), or a cheap stand-in where the pass is not what is held."""
 
+import hashlib
 import logging
 import os
 import shlex
@@ -24,6 +25,7 @@ import sys
 import zlib
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +37,7 @@ import torch
 from PIL import Image, ImageCms
 from stand_ins import cpu_models  # noqa: F401
 from test_picture import exif_chunk, header_only_png, inserted
+from test_record import read_xmp
 from test_still import PICTURE, SEED, TARGET, TILES, pipeline_models, pixels_of, stand_in_dit
 
 import main as cli
@@ -43,7 +46,7 @@ import stills
 from media import ffmpeg
 from media.ffmpeg import MediaError
 from media.probe import IMAGE_BRANDS, IMAGE_DEMUXERS, PICTURES, image_kind
-from seedvr2x import model, picture, png, still, webp, weights
+from seedvr2x import model, picture, png, record, still, webp, weights
 from seedvr2x.errors import Refusal
 from seedvr2x.frames import output_size
 from seedvr2x.passes import Tiles
@@ -441,6 +444,49 @@ def run(made: Machine, source: Path, output: Path, *options: str) -> int:
 
 def read_back(path: Path) -> picture.Picture:
     return picture.read(path.read_bytes(), str(path))
+
+
+# The stand-in machine's model file, w.safetensors, empty: the SHA-256 of nothing.
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+
+
+def recorded(
+    output: tuple[int, int], keywords: dict[str, Any], colour: str = "none"
+) -> record.Record:
+    """The record the command writes on the stand-in machine (DESIGN.md, The record in each
+    output): this command's version, make_picture's 40 x 24 source, `output` (width, height) as
+    written, w.safetensors for both models, SEED, the colour correction, the tiles of the pass it
+    ran (still.upscale's keywords), and the attention the machine stands in."""
+
+    def side(tiles: Tiles | None) -> int:
+        return 0 if tiles is None else tiles.size
+
+    model_file = record.Model("w.safetensors", EMPTY_SHA256)
+    return record.Record(
+        version("seedvr2x"),
+        (40, 24),
+        output,
+        model_file,
+        model_file,
+        SEED,
+        colour,
+        side(keywords["encode_tiles"]),
+        side(keywords["decode_tiles"]),
+        "flash_attn_2",
+    )
+
+
+def png_written(pixels: npt.NDArray[np.float32], bits: int, made: record.Record) -> bytes:
+    """png.write of pixels, colour, no profile or chunk, with the record made."""
+    return png.write(
+        pixels,
+        bits=bits,
+        grey=False,
+        icc=None,
+        chunks=(),
+        xmp=made.xmp(),
+        software=made.creator,
+    )
 
 
 def srgb_profile() -> bytes:
@@ -1104,7 +1150,7 @@ def test_the_library_makes_the_png_the_command_writes(
     pixels, target, seed = arguments[1:4]
     assert target == TARGET and seed == SEED and keywords["correct"] is True
     again = still.upscale(models, pixels, target, seed, **keywords)
-    expected = png.write(again, bits=16, grey=False, icc=None, chunks=())
+    expected = png_written(again, 16, recorded((80, 48), keywords, "split"))
     assert output.read_bytes() == expected
     # The pixels are the model's, not the picture's.
     assert not np.array_equal(
@@ -1140,7 +1186,8 @@ def test_png8_writes_8_bits_rounded_to_the_nearest_code(machine: Machine, tmp_pa
         decode_tiles=None,
         correct=False,
     )
-    assert eight.read_bytes() == png.write(made, bits=8, grey=False, icc=None, chunks=())
+    keywords = machine.passes[-1][1]
+    assert eight.read_bytes() == png_written(made, 8, recorded((80, 48), keywords))
     with Image.open(eight) as image:
         assert image.mode == "RGB" and image.size == (80, 48)
 
@@ -1231,6 +1278,90 @@ def test_every_orientation_is_written_upright_with_no_tag(
         assert line.endswith(f", turned upright from its orientation {value}")
 
 
+def written_record(path: Path) -> tuple[str, str, list[tuple[str, str]], str | None]:
+    """The record a written picture holds, by test_record.read_xmp: its XMP packet, from the PNG's
+    iTXt chunk or the WebP's XMP chunk as Pillow reads them, and the PNG's Software text (None for
+    a WebP)."""
+    with Image.open(path) as image:
+        image.load()
+        if image.format == "PNG":
+            packet = image.info["XML:com.adobe.xmp"].encode()
+            software = image.info["Software"]
+        else:
+            packet, software = image.info["xmp"], None
+    return (*read_xmp(packet), software)
+
+
+@pytest.mark.parametrize("suffix", ["png", "webp"])
+@pytest.mark.parametrize("value", [1, 6])
+def test_the_file_carries_seedvr2xs_record(
+    machine: Machine,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    suffix: str,
+    value: int,
+) -> None:
+    """DESIGN.md, The record in each output: the version and the address, the mark, the source's
+    size as stored and the output's as written (upright: 48 x 80 at orientation 6), the model
+    files by name and SHA-256, the seed, the colour correction, the tiles (0 untiled) and the
+    attention kernel, written out here; the model files hashed before the models load."""
+    source = make_picture(tmp_path / "in.png", bits=8, orientation=value)
+    output = tmp_path / f"out.{suffix}"
+    assert run(machine, source, output, "--color-correction", "split") == 0
+    tool, mark, fields, software = written_record(output)
+    creator = f"seedvr2x {version('seedvr2x')} (https://github.com/hekmon/seedvr2x)"
+    assert tool == creator
+    assert software == (creator if suffix == "png" else None)
+    assert mark == (
+        "http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia"
+    )
+    assert fields == [
+        ("source_size", "40x24"),
+        ("output_size", "48x80" if value == 6 else "80x48"),
+        ("dit_model", "w.safetensors"),
+        ("dit_sha256", EMPTY_SHA256),
+        ("vae_model", "w.safetensors"),
+        ("vae_sha256", EMPTY_SHA256),
+        ("seed", str(SEED)),
+        ("color_correction", "split"),
+        ("encode_tile", "0"),
+        ("decode_tile", "0"),
+        ("attention", "flash_attn_2"),
+    ]
+    messages = [r.getMessage() for r in caplog.records]
+    hashed = messages.index(f"w.safetensors: SHA-256 {EMPTY_SHA256}, in 0.0 s")
+    assert hashed < next(i for i, m in enumerate(messages) if m.startswith("models loaded in"))
+
+
+def test_the_record_names_the_tiles_of_the_pass(
+    machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A picture's tiles, as the plan chose them for it, are the record's: the plan's choice stood
+    # in by tiles of 64 and 48 px, with TILES' overlap, which the 80 x 80 padded frame takes.
+    from seedvr2x import still_plan
+
+    def tiled(plan: Any, target: tuple[int, int]) -> still_plan.PictureTiles:
+        return still_plan.PictureTiles(Tiles(64, TILES.overlap), Tiles(48, TILES.overlap), 0, 0)
+
+    monkeypatch.setattr(still_plan, "tiles", tiled)
+    output = tmp_path / "out.png"
+    assert run(machine, make_picture(tmp_path / "in.png"), output) == 0
+    ((_, keywords),) = machine.passes
+    assert keywords["encode_tiles"].size == 64 and keywords["decode_tiles"].size == 48
+    fields = dict(written_record(output)[2])
+    assert (fields["encode_tile"], fields["decode_tile"]) == ("64", "48")
+    assert fields["color_correction"] == "none"
+
+
+def test_plan_hashes_no_model_file(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The record is made for a file written: --plan, which writes none, hashes no model file for
+    # it (the stand-in's file is no pinned one, which pull.check_pinned would hash before).
+    assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--plan") == 0
+    assert "SHA-256" not in caplog.text
+
+
 @pytest.mark.parametrize("suffix", ["png", "webp"])
 def test_the_library_makes_the_turned_file_the_command_writes(
     machine: Machine,
@@ -1249,10 +1380,12 @@ def test_the_library_makes_the_turned_file_the_command_writes(
     ((arguments, keywords),) = machine.passes
     pixels, target, seed = arguments[1:4]
     turned = picture.upright(still.upscale(models, pixels, target, seed, **keywords), 6)
+    # Written upright: 48 x 80.
+    made = recorded((48, 80), keywords, "split")
     if suffix == "png":
-        expected = png.write(turned, bits=16, grey=False, icc=None, chunks=())
+        expected = png_written(turned, 16, made)
     else:
-        expected = webp.write(turned, grey=False, icc=None, chunks=())
+        expected = webp.write(turned, grey=False, icc=None, chunks=(), xmp=made.xmp())
     assert output.read_bytes() == expected
 
 
@@ -1624,7 +1757,8 @@ def test_the_library_makes_the_webp_the_command_writes(
         pixels, target, seed = arguments[1:4]
         assert target == TARGET and seed == SEED and keywords["correct"] is True
         again = still.upscale(models, pixels, target, seed, **keywords)
-        expected = webp.write(again, grey=False, icc=None, chunks=())
+        made = recorded((80, 48), keywords, "split")
+        expected = webp.write(again, grey=False, icc=None, chunks=(), xmp=made.xmp())
         assert output.read_bytes() == expected
         written = read_back(output)
         assert (

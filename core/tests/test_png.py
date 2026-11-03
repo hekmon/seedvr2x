@@ -16,9 +16,11 @@ import numpy.typing as npt
 import pytest
 import torch
 from PIL import Image, ImageCms, ImageOps
+from test_record import read_xmp
 from torchcodec.decoders import decode_image  # pyright: ignore[reportPrivateImportUsage]
 
 from seedvr2x import picture, png
+from seedvr2x.record import DIGITAL_SOURCE_TYPE, Model, Record
 
 _FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 _banner = (
@@ -47,6 +49,20 @@ CODES16 = np.clip(
     65535,
 ).astype(np.uint16)
 PICTURE = (CODES16 / np.float32(65535)).astype(np.float32)
+
+# A record, as the CLI or the server gives one (seedvr2x/record.py).
+RECORD = Record(
+    "0.1.0",
+    (17, 11),
+    (17, 11),
+    Model("dit.safetensors", "1" * 64),
+    Model("vae.safetensors", "2" * 64),
+    42,
+    "split",
+    0,
+    512,
+    "sdpa",
+)
 
 
 def chunk(kind: bytes, data: bytes) -> bytes:
@@ -280,8 +296,74 @@ def test_the_input_is_left_alone() -> None:
 
 
 def test_the_same_bytes_every_time() -> None:
-    first = write(PICTURE, icc=PROFILE, chunks=COLOUR)
-    assert write(PICTURE, icc=PROFILE, chunks=COLOUR) == first
+    first = write(PICTURE, icc=PROFILE, chunks=COLOUR, xmp=RECORD.xmp(), software=RECORD.creator)
+    again = write(PICTURE, icc=PROFILE, chunks=COLOUR, xmp=RECORD.xmp(), software=RECORD.creator)
+    assert again == first
+
+
+# The record ----------------------------------------------------------------------------------
+
+
+def test_the_record_comes_after_the_colour_and_before_the_image_data() -> None:
+    # tEXt Software, then iTXt holding the XMP, after the colour chunks and the profile and
+    # before IDAT, where readers that stop at the image data still find them; each CRC checked
+    # (chunks_of).
+    data = write(PICTURE, icc=PROFILE, chunks=COLOUR, xmp=RECORD.xmp(), software=RECORD.creator)
+    kinds = [kind for kind, _ in chunks_of(data)]
+    assert kinds[:8] == [b"IHDR", b"cICP", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"tEXt", b"iTXt"]
+    assert set(kinds[8:-1]) == {b"IDAT"} and kinds[-1] == b"IEND"
+
+
+def test_the_xmp_is_an_uncompressed_itxt_named_as_xmp_asks() -> None:
+    data = write(PICTURE, xmp=RECORD.xmp())
+    (body,) = [body for kind, body in chunks_of(data) if kind == b"iTXt"]
+    # Keyword, NUL, compression flag 0, method 0, no language, no translated keyword, the packet.
+    assert body == b"XML:com.adobe.xmp\0\0\0\0\0" + RECORD.xmp()
+    tool, mark, fields = read_xmp(body[len(b"XML:com.adobe.xmp") + 5 :])
+    assert tool == RECORD.creator and mark == DIGITAL_SOURCE_TYPE
+    assert fields == RECORD.fields()
+
+
+def test_the_software_text_names_the_writer() -> None:
+    data = write(PICTURE, software=RECORD.creator)
+    (body,) = [body for kind, body in chunks_of(data) if kind == b"tEXt"]
+    assert body == b"Software\0seedvr2x 0.1.0 (https://github.com/hekmon/seedvr2x)"
+
+
+def test_readers_find_the_record() -> None:
+    # Pillow reads both texts; the pixels are those written without them.
+    data = write(PICTURE, xmp=RECORD.xmp(), software=RECORD.creator)
+    with Image.open(io.BytesIO(data)) as image:
+        image.load()
+        assert image.info["Software"] == RECORD.creator
+        assert image.info["XML:com.adobe.xmp"] == RECORD.xmp().decode()
+    assert np.array_equal(decoded16(data), decoded16(write(PICTURE)))
+
+
+def test_nothing_of_the_record_without_it() -> None:
+    kinds = {kind for kind, _ in chunks_of(write(PICTURE))}
+    assert not kinds & {b"tEXt", b"iTXt", b"zTXt"}
+
+
+def test_a_software_text_with_a_nul_is_refused() -> None:
+    with pytest.raises(ValueError):
+        write(PICTURE, software="a\0b")
+
+
+@needs_ffmpeg
+def test_ffprobe_reads_the_software_text(tmp_path: Path) -> None:
+    # ffmpeg's PNG decoder shows tEXt as the frame's tags, and no iTXt (n9.0.2, 2026-11-03), so
+    # the Software text alone is what ffprobe says of the record.
+    path = tmp_path / "record.png"
+    path.write_bytes(write(PICTURE, xmp=RECORD.xmp(), software=RECORD.creator))
+    shown = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "frame_tags", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    tags = json.loads(shown)["frames"][0]["tags"]
+    assert tags == {"Software": RECORD.creator}
 
 
 # The filters ---------------------------------------------------------------------------------

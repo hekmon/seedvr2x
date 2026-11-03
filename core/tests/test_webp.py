@@ -10,10 +10,12 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 from PIL import Image, ImageOps
-from test_png import COLOUR, PICTURE, PROFILE, chunk, ffmpeg_decode, needs_ffmpeg
+from test_png import COLOUR, PICTURE, PROFILE, RECORD, chunk, ffmpeg_decode, needs_ffmpeg
+from test_record import read_xmp
 
 from seedvr2x import picture, png, webp
 from seedvr2x.errors import Refusal
+from seedvr2x.record import DIGITAL_SOURCE_TYPE
 
 RNG = np.random.default_rng(20261104)
 
@@ -234,7 +236,7 @@ def test_a_bad_argument_is_a_value_error(arguments: dict[str, object]) -> None:
 
 
 def test_the_same_bytes_every_time() -> None:
-    assert write(icc=PROFILE) == write(icc=PROFILE)
+    assert write(icc=PROFILE, xmp=RECORD.xmp()) == write(icc=PROFILE, xmp=RECORD.xmp())
     assert write(RNG.random((6, 6, 3), dtype=np.float32)) != write()
 
 
@@ -287,3 +289,52 @@ def test_a_png_with_cicp_and_no_profile_is_read_with_the_chunk_that_webp_refuses
     data = png.write(PICTURE, bits=8, grey=False, icc=None, chunks=(COLOUR[0],))
     read = picture.read(data, "in.png")
     assert webp.why_not(read.bits, read.icc, read.chunks) is not None
+
+
+# The record ----------------------------------------------------------------------------------
+
+
+def riff_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
+    """(FourCC, payload) of every chunk of a WebP's RIFF container, in order, read by hand."""
+    assert data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    assert int.from_bytes(data[4:8], "little") == len(data) - 8
+    found: list[tuple[bytes, bytes]] = []
+    position = 12
+    while position < len(data):
+        kind, size = (
+            data[position : position + 4],
+            int.from_bytes(data[position + 4 : position + 8], "little"),
+        )
+        found.append((kind, data[position + 8 : position + 8 + size]))
+        position += 8 + size + (size & 1)
+    assert position == len(data)
+    return found
+
+
+def test_the_xmp_is_webps_xmp_chunk_flagged_in_vp8x() -> None:
+    # The extended format: VP8X first, its XMP flag (bit 2) set, the profile's (bit 5) too, then
+    # ICCP, the image, and the XMP chunk last, holding the packet as given (WebP Container
+    # Specification, Extended File Format).
+    data = write(icc=PROFILE, xmp=RECORD.xmp())
+    chunks = riff_chunks(data)
+    kinds = [kind for kind, _ in chunks]
+    assert kinds == [b"VP8X", b"ICCP", b"VP8L", b"XMP "]
+    flags = chunks[0][1][0]
+    assert flags & 0b100 and flags & 0b100000
+    packet = chunks[-1][1]
+    assert packet == RECORD.xmp()
+    tool, mark, fields = read_xmp(packet)
+    assert tool == RECORD.creator and mark == DIGITAL_SOURCE_TYPE
+    assert fields == RECORD.fields()
+
+
+def test_pillow_reads_the_record_and_the_pixels_are_unchanged() -> None:
+    data = write(xmp=RECORD.xmp())
+    with Image.open(io.BytesIO(data)) as image:
+        assert image.info["xmp"] == RECORD.xmp()
+    assert np.array_equal(decoded(data), decoded(write()))
+    assert b"EXIF" not in data
+
+
+def test_nothing_of_the_record_without_it() -> None:
+    assert b"XMP " not in [kind for kind, _ in riff_chunks(write())]

@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from seedvr2x.passes import ModelPlan
     from seedvr2x.picture import Picture
     from seedvr2x.pull import ModelFiles
+    from seedvr2x.record import Record
+    from seedvr2x.still_plan import PictureTiles
     from seedvr2x.weights import Architecture
 
 logger = logging.getLogger("cli.stills")
@@ -221,6 +223,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     assert dit is not None, "a plan made loads its models"
     pins = still_plan.Pins(args.encode_tile, args.decode_tile, args.swap_blocks)
     split = args.color_correction == "split"
+    attention = reads.attention()
     # The plan for this picture, made for a bound that is its own output: the long and short
     # sides, even as an output size always is (still_plan.plan). PROVISIONAL (impl-still,
     # 2026-11-03: DESIGN.md, Still images, "Measured before it ships"): the process's resident
@@ -234,7 +237,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         # The picture goes to the GPU at its stored size and is resized there: its copies are
         # counted (still_plan.COPIES).
         input_pixels=height * width,
-        attention=reads.attention(),
+        attention=attention,
         dit_model=reads.dit_model(dit),
         split=split,
         pins=pins,
@@ -245,11 +248,15 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     if args.plan is not None:
         # No upscale, as a video's --plan: the models are not loaded, nothing is written.
         return 0
+    tiles = still_plan.tiles(plan, target)
+    # The record the file carries (DESIGN.md, The record in each output), made before the models
+    # load: a model file seedvr2x doesn't pin, numz's, is hashed here, once, as a video's job
+    # hashes it for its manifest, and the load holds it to that hash (pull.Hashes.unchanged).
+    made = _record(pic, written, model_files, args, tiles, attention)
     loaded = reads.load(model_files, device, plan.models, plan.reading.reserve, "")
     if loaded is None:
         return 1
     models, _ = loaded
-    tiles = still_plan.tiles(plan, target)
     started = time.monotonic()
     out = _upscaled(models, pic, target, args.seed, tiles, split, reads)
     if out is None:
@@ -258,9 +265,17 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     # is a view, so the writers take it as it is (picture.upright says why).
     turned = picture.upright(out, pic.orientation)
     if _is_webp(output):
-        data = webp.write(turned, grey=pic.grey, icc=pic.icc, chunks=pic.chunks)
+        data = webp.write(turned, grey=pic.grey, icc=pic.icc, chunks=pic.chunks, xmp=made.xmp())
     else:
-        data = png.write(turned, bits=bits, grey=pic.grey, icc=pic.icc, chunks=pic.chunks)
+        data = png.write(
+            turned,
+            bits=bits,
+            grey=pic.grey,
+            icc=pic.icc,
+            chunks=pic.chunks,
+            xmp=made.xmp(),
+            software=made.creator,
+        )
     del out, turned
     _write(output, data)
     from seedvr2x.clock import spent
@@ -275,6 +290,41 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         _kept(pic, orientation=False) + _turned(pic),
     )
     return 0
+
+
+def _record(
+    pic: "Picture",
+    written: tuple[int, int],
+    model_files: "ModelFiles",
+    args: "argparse.Namespace",
+    tiles: "PictureTiles",
+    attention: str,
+) -> "Record":
+    """The picture's record (record.Record): this command's version, the source's size as its file
+    stores it and the output's as written (written, width and height, turned upright), the model
+    files by the names given and their SHA-256, the seed, the colour correction, the passes'
+    tiles (0 untiled) and the attention kernel."""
+    from importlib.metadata import version
+
+    from seedvr2x.record import Model, Record
+
+    height, width = pic.pixels.shape[:2]
+    dit, vae = (
+        Model(file.name, model_files.hashes.sha256(file.path))
+        for file in (model_files.dit, model_files.vae)
+    )
+    return Record(
+        version=version("seedvr2x"),
+        source=(width, height),
+        output=written,
+        dit=dit,
+        vae=vae,
+        seed=args.seed,
+        color_correction=args.color_correction,
+        encode_tile=0 if tiles.encode is None else tiles.encode.size,
+        decode_tile=0 if tiles.decode is None else tiles.decode.size,
+        attention=attention,
+    )
 
 
 def _upscaled(

@@ -89,13 +89,16 @@ def write(
     grey: bool,
     icc: bytes | None,
     chunks: Sequence[bytes],
+    xmp: bytes | None = None,
 ) -> bytes:
     """The file of a picture: rgb (H, W, 3) float32, any finite values (clipped to [0, 1]), any
     memory layout, written at 8 bits, rounded to the nearest code as png.write rounds. grey takes
     the mean of the three planes, in float32 and before the quantisation, as png.write does, and
     writes it as RGB with three equal planes: WebP has no grey mode.
 
-    The ICC profile icc if it is not None; no EXIF block, the picture being written upright
+    The ICC profile icc if it is not None; the XMP packet xmp in WebP's XMP chunk if it is not
+    None, seedvr2x's record (record.Record.xmp; DESIGN.md, The record in each output); no EXIF
+    block, the picture being written upright
     (picture.upright, DESIGN.md, Still images, Orientation). chunks, the PNG colour chunks of the
     source (Picture.chunks), are not written: a WebP has none, and cICP, cHRM or gAMA without a
     profile is refused, as check() does. The source's depth is the caller's to check(): the array
@@ -117,6 +120,8 @@ def write(
     options: dict[str, object] = {"lossless": True, "method": METHOD, "quality": QUALITY}
     if icc is not None:
         options["icc_profile"] = icc
+    if xmp is not None:
+        options["xmp"] = xmp
     out = io.BytesIO()
     Image.fromarray(codes, "RGB").save(out, "WEBP", **options)
     return out.getvalue()
