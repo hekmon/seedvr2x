@@ -236,16 +236,15 @@ seedvr2x/                the repository
   correction, none of the long-run machinery (shots, windows, segments, jobs, resume,
   calibration, masters). The options a still has no use for (`--cuts`, `--until`,
   `--segment-cmd`, `--quality`, `--compile`, ...) are refused on one, saying why, never
-  ignored; animated GIF, APNG and WebP, bit depth, transparency and colour profiles are
-  decided when it is designed. A still is one latent at sizes video rarely reaches (8K
-  outputs): the image upscale is measured before it ships, the planner keeping no blind spot.
+  ignored. What a still is, how it is read and written: [Still images](#still-images).
 - **The image server, `apps/imgserver/`:** images only, hence its name (a "server" would promise
   every CLI feature over HTTP). Python, the models in its own process, loaded once and kept on
   the GPU. Every parameter in the request's headers, the image's bytes as the body both ways,
-  its format said by Content-Type in the request and in the response. Linux first. Its details
-  are decided when it is designed. In v0.1.0 with the CLI's still images (the user,
-  2026-11-02), built and measured with the rest, neither holding the release if it isn't ready
-  with it.
+  its format said by Content-Type in the request and in the response. Linux first. Its pictures
+  follow [Still images](#still-images)'s rules. Its interface and limits are decided when it
+  is built, what it shares with the CLI's still images before (step 3). In v0.1.0 with them
+  (the user, 2026-11-02), built and measured with the rest, neither holding the release if it
+  isn't ready with it.
 - **ComfyUI's nodes, after v0.1.0, next on the roadmap** (the user, 2026-11-02: light on
   seedvr2x's side, its bricks tested by the library's suite, ComfyUI doing the input and
   output, the models and the memory): in this repository, where ComfyUI's own install (its
@@ -352,10 +351,19 @@ In steps:
      and the lock unchanged, the CPU suite passing. Its GPU run is the 96 GB card's first job,
      before the push.
 3. The image upscale, in v0.1.0 (the user, 2026-11-02): the CLI's still images, detected by
-   content, then the image server, each assembling the library's bricks for one image itself
-   (an assembly the two would share is discussed then, as above), measured on the 96 GB card.
-   Neither holds the release if it isn't ready with the rest; the roadmap shows them under
-   next until then.
+   content, then the image server, measured on the 96 GB card, both by
+   [Still images](#still-images)'s rules. What the two take alike for one picture is shared
+   from the start, not built in the CLI and moved later (the user, 2026-11-03, after the
+   split): a picture read with its profile, orientation and alpha rule, its pass through the
+   models, the PNG written, the plan for one picture. Three of the server's needs shape it:
+   the picture comes as bytes in memory, not a path; the pass takes models already loaded and
+   never loads them; a plan is made once for the largest picture and holds for any smaller
+   one, apart from the pass. Where each part goes, the library or each app, is mapped file by
+   file and agreed with the user before any code is written, the library's rules held or
+   their change agreed: it imports nothing of the CLI, starts no process (the scan of
+   `test_ends_with_us.py` finds none in it), and must import on Windows and macOS for
+   ComfyUI's nodes. Neither holds the release if it isn't ready with the rest; the roadmap
+   shows them under next until then.
 4. After v0.1.0: ComfyUI's nodes, assembling the same bricks.
 
 ## Architecture
@@ -2193,6 +2201,55 @@ compressed is the user's choice: afterwards, from the master, or during the run 
         `./`, so that a relative `-o` holding ": " is no longer taken for a protocol.
   - **with sptenc:** the directory as it is, for `sptenc encode <dir> <out> -f <source>` (or
     `sptenc concat` for one master)
+
+## Still images
+
+Decided on 2026-11-03 (the user), for v0.1.0: the CLI's still images, and the image server's
+pictures, which follow the same rules. The ffmpeg readings are ffmpeg 9.0's, on test files
+made that day.
+
+- **What a still is:** a file ffprobe reads as an image format holding one frame, never told
+  by its name. Read: PNG, JPEG, WebP, TIFF, BMP and a GIF of one frame, each tested; ffmpeg
+  reads JPEG through its `image2` reader, the others each as a format of its own. After
+  v0.1.0: HEIC (stored as tiles, in Display P3), AVIF (read as an MP4 file, its brand telling
+  it from a video of one frame) and JPEG XL.
+- **Animated GIF, APNG and WebP,** which ffmpeg reads as several frames, are refused in
+  v0.1.0, the refusal giving the ffmpeg command that makes a video of the file: a GIF's frame
+  delays, palette and transparency would each need rules of their own.
+- **Transparency:** an alpha plane opaque at every pixel is dropped, said in one line, nothing
+  of the picture changing: lossless WebP and GIF decode with one, the test files holding no
+  transparent pixel. A picture with any pixel not opaque is refused: the model would redraw
+  the colours hidden under it and fringe the edges. Its alpha upscaled apart and put back is
+  for later, measured first.
+- **Pixel formats:** those the video path accepts (see [Input](#input)), and grey and palette
+  pictures, expanded exactly to RGB for the model. A grey picture comes back grey, the mean
+  of the output's three planes, which start equal. CMYK is refused.
+- **Colour:** the stored values are processed, never converted, as a video's are. The
+  source's ICC profile is carried to the output unchanged, and its colour tags as the masters
+  copy them (cICP, cHRM, gAMA); a picture with neither is sRGB, as viewers take it. ffmpeg
+  reads a PNG's and a JPEG's profile into the frame, and its PNG writer writes it back, but
+  seedvr2x's raw frames carry none: seedvr2x attaches it itself. HDR (PQ, HLG) is refused, as
+  for video.
+- **Orientation:** processed as stored, the EXIF orientation (a rotation, a mirror or both)
+  carried to the output, the video path's later way (see [Input](#input)). It is written
+  before the image data, where Chrome (since 2024), Firefox and Safari read it, as ffmpeg's
+  PNG writer places it. Measured in the card's batch: a few phone photos upscaled stored
+  sideways and upright, compared by figures and the user's eyes; revisited if the model draws
+  a sideways picture worse.
+- **Metadata:** nothing else is carried, no camera, date or place (EXIF beyond the
+  orientation, XMP). The output holds its profile, its colour tags and its orientation only.
+- **Output:** PNG only in v0.1.0, from `-o`'s extension; another extension is refused, the
+  refusal giving the command that converts the PNG (seedvr2x owns no lossy encoder:
+  [Output](#output)). 16 bits by default, all the model made; 8 bits on request, rounded to
+  the nearest code by seedvr2x (a 4K picture is 50 MB before compression at 16 bits, 25 MB at
+  8).
+- **The model on one picture:** a still is encoded alone, as a shot's first frame is
+  ([Pipeline, per shot](#pipeline-per-shot), step 1: closer to the ground truth, less
+  re-rendered by one measure). Measured in the card's batch on blind stills: the picture alone
+  against the picture repeated 5 times, its 5th frame kept, at a few times the GPU time. The
+  picture alone until then.
+- **Measured before it ships:** outputs up to 8K, one latent at sizes video rarely reaches,
+  the planner keeping no blind spot.
 
 ## Memory planner
 
