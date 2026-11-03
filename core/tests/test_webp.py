@@ -1,7 +1,7 @@
 """The lossless WebP writer of a still (seedvr2x/webp.py; DESIGN.md, Still images, Output): 8 bits
-exact in Pillow's decode and ffmpeg's, grey as three equal planes, the profile and the orientation
-carried, no EXIF at orientation 1, each refusal by its words, the same bytes every time, and the
-file read back by picture.read. Uses test_png.py's pictures and ffmpeg check."""
+exact in Pillow's decode and ffmpeg's, grey as three equal planes, the profile carried, no EXIF
+block ever and the 8 orientations written upright, each refusal by its words, the same bytes
+every time, and the file read back by picture.read. Uses test_png.py's pictures and ffmpeg check."""
 
 import io
 from pathlib import Path
@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 import pytest
-from PIL import Image
+from PIL import Image, ImageOps
 from test_png import COLOUR, PICTURE, PROFILE, chunk, ffmpeg_decode, needs_ffmpeg
 
 from seedvr2x import picture, png, webp
@@ -18,7 +18,7 @@ from seedvr2x.errors import Refusal
 RNG = np.random.default_rng(20261104)
 
 # What write() gives by default, a picture with nothing to carry.
-NOTHING: dict[str, object] = {"grey": False, "icc": None, "chunks": (), "orientation": 1}
+NOTHING: dict[str, object] = {"grey": False, "icc": None, "chunks": ()}
 
 
 def write(rgb: npt.NDArray[np.float32] = PICTURE, **options: object) -> bytes:
@@ -82,7 +82,7 @@ def test_the_input_is_left_alone() -> None:
 def test_ffmpeg_decodes_the_same_codes(tmp_path: Path) -> None:
     rgb = RNG.random((11, 17, 3), dtype=np.float32)
     path = tmp_path / "out.webp"
-    path.write_bytes(write(rgb, icc=PROFILE, orientation=3))
+    path.write_bytes(write(rgb, icc=PROFILE))
     assert np.array_equal(ffmpeg_decode(path, "rgb24"), eight(rgb).ravel())
 
 
@@ -112,7 +112,7 @@ def test_a_grey_comes_back_equal_through_the_reader() -> None:
     assert (codes[..., 0] == codes[..., 1]).all() and (codes[..., 0] == codes[..., 2]).all()
 
 
-# The profile and the orientation ----------------------------------------------------------------
+# The profile, and no orientation ----------------------------------------------------------------
 
 
 def test_the_profile_is_carried_whole() -> None:
@@ -122,27 +122,32 @@ def test_the_profile_is_carried_whole() -> None:
         assert "icc_profile" not in image.info
 
 
-@pytest.mark.parametrize("value", range(2, 9))
-def test_the_orientation_is_carried_in_an_exif_block_that_holds_it_alone(value: int) -> None:
-    data = write(orientation=value)
+def test_no_exif_block_is_written() -> None:
+    data = write(icc=PROFILE)
     with Image.open(io.BytesIO(data)) as image:
-        assert dict(image.getexif()) == {0x0112: value}
-        # The EXIF chunk holds png.exif's TIFF, with no "Exif\0\0" header (the WebP container's).
-        assert image.info["exif"] == png.exif(value)
-    # The pixels are not rotated.
-    assert np.array_equal(decoded(data), eight(PICTURE))
-
-
-def test_no_exif_at_orientation_1() -> None:
-    data = write(orientation=1)
-    with Image.open(io.BytesIO(data)) as image:
-        assert "exif" not in image.info and len(image.getexif()) == 0
+        assert "exif" not in image.info and 0x0112 not in image.getexif()
     assert b"EXIF" not in data
 
 
-def test_the_profile_and_the_orientation_together() -> None:
-    with Image.open(io.BytesIO(write(icc=PROFILE, orientation=6))) as image:
-        assert image.info["icc_profile"] == PROFILE and image.getexif()[0x0112] == 6
+@pytest.mark.parametrize("value", range(1, 9))
+def test_a_picture_turned_upright_reads_back_upright_with_no_orientation(value: int) -> None:
+    """The 8 orientations: the picture turned by picture.upright and written reads back, in
+    Pillow, as Pillow's exif_transpose of the same picture carrying the orientation (a lossless
+    WebP with an EXIF block of its own), with no EXIF block in what seedvr2x wrote."""
+    turned = picture.upright(PICTURE, value)
+    data = write(turned, icc=PROFILE)
+    source = io.BytesIO()
+    exif = Image.Exif()
+    exif[0x0112] = value
+    Image.fromarray(eight(PICTURE)).save(source, "WEBP", lossless=True, exif=exif)
+    with Image.open(io.BytesIO(source.getvalue())) as stored:
+        expected = np.asarray(ImageOps.exif_transpose(stored))
+    assert np.array_equal(decoded(data), expected)
+    assert np.array_equal(decoded(data), eight(turned))
+    with Image.open(io.BytesIO(data)) as image:
+        assert "exif" not in image.info and 0x0112 not in image.getexif()
+        assert image.info["icc_profile"] == PROFILE
+    assert b"EXIF" not in data
 
 
 def test_the_srgb_chunk_alone_is_taken_as_nothing() -> None:
@@ -217,8 +222,6 @@ def test_a_side_over_webps_limit_is_refused_naming_png() -> None:
         {"rgb": np.zeros((4, 4), np.float32)},
         {"rgb": np.zeros((4, 4, 4), np.float32)},
         {"rgb": np.zeros((0, 4, 3), np.float32)},
-        {"orientation": 0},
-        {"orientation": 9},
     ],
 )
 def test_a_bad_argument_is_a_value_error(arguments: dict[str, object]) -> None:
@@ -231,8 +234,7 @@ def test_a_bad_argument_is_a_value_error(arguments: dict[str, object]) -> None:
 
 
 def test_the_same_bytes_every_time() -> None:
-    options = {"icc": PROFILE, "orientation": 8}
-    assert write(**options) == write(**options)
+    assert write(icc=PROFILE) == write(icc=PROFILE)
     assert write(RNG.random((6, 6, 3), dtype=np.float32)) != write()
 
 
@@ -252,30 +254,27 @@ def test_the_file_is_lossless_webp_of_the_chosen_effort(monkeypatch: pytest.Monk
 def test_a_smooth_picture_is_smaller_than_the_png_of_the_same_8_bits() -> None:
     y, x = np.mgrid[0:96, 0:128]
     rgb = np.stack([x / 128, y / 96, (x + y) / 224], axis=2).astype(np.float32)
-    assert len(write(rgb)) < len(
-        png.write(rgb, bits=8, grey=False, icc=None, chunks=(), orientation=1)
-    )
+    assert len(write(rgb)) < len(png.write(rgb, bits=8, grey=False, icc=None, chunks=()))
 
 
 # Read back by seedvr2x's reader -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("orientation", [1, 6])
 @pytest.mark.parametrize("icc", [None, PROFILE])
-def test_the_reader_gives_back_the_same_pixels(orientation: int, icc: bytes | None) -> None:
-    data = write(icc=icc, orientation=orientation)
+def test_the_reader_gives_back_the_same_pixels(icc: bytes | None) -> None:
+    data = write(icc=icc)
     read = picture.read(data, "out.webp")
     assert read.format == "WEBP" and read.bits == 8 and not read.grey
-    assert read.icc == icc and read.orientation == orientation and read.chunks == ()
+    assert read.icc == icc and read.orientation == 1 and read.chunks == ()
     assert not read.opaque_alpha_dropped
     assert read.pixels.shape == PICTURE.shape and read.pixels.dtype == np.float32
     assert np.array_equal(np.rint(read.pixels * np.float32(255)).astype(np.uint8), eight(PICTURE))
     # And written again, the same file.
-    assert write(read.pixels, icc=read.icc, orientation=read.orientation) == data
+    assert write(read.pixels, icc=read.icc) == data
 
 
 def test_a_16_bit_picture_the_reader_gives_is_refused_for_webp() -> None:
-    sixteen = png.write(PICTURE, bits=16, grey=False, icc=None, chunks=(COLOUR[3],), orientation=1)
+    sixteen = png.write(PICTURE, bits=16, grey=False, icc=None, chunks=(COLOUR[3],))
     read = picture.read(sixteen, "in.png")
     assert read.bits == 16
     with pytest.raises(Refusal, match="stored at 16"):
@@ -285,6 +284,6 @@ def test_a_16_bit_picture_the_reader_gives_is_refused_for_webp() -> None:
 
 
 def test_a_png_with_cicp_and_no_profile_is_read_with_the_chunk_that_webp_refuses() -> None:
-    data = png.write(PICTURE, bits=8, grey=False, icc=None, chunks=(COLOUR[0],), orientation=1)
+    data = png.write(PICTURE, bits=8, grey=False, icc=None, chunks=(COLOUR[0],))
     read = picture.read(data, "in.png")
     assert webp.why_not(read.bits, read.icc, read.chunks) is not None

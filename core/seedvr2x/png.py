@@ -1,7 +1,8 @@
 """The PNG writer of a still picture (DESIGN.md, Still images, Output): 16-bit or 8-bit, RGB or
-grey, with the source's colour chunks, ICC profile and EXIF orientation. numpy and the standard
-library's zlib only, no torch: no library locked writes a 48-bit RGB PNG (Pillow cannot, and
-torchvision's encoder takes uint8 alone), and ffmpeg is not run for a still.
+grey, with the source's colour chunks and ICC profile, and no orientation: the caller writes the
+picture upright (picture.upright). numpy and the standard library's zlib only, no torch: no
+library locked writes a 48-bit RGB PNG (Pillow cannot, and torchvision's encoder takes uint8
+alone), and ffmpeg is not run for a still.
 
 Quantised as the video writers' are (apps/seedvr2x/media/writer.py's quantise): clipped to
 [0, 1], scaled by 65535 (255 at 8 bits) and rounded to nearest. The bytes are a function of the
@@ -47,8 +48,6 @@ IDAT_BYTES = 1 << 20
 # The ICC profile's name in iCCP: it is only a label, which readers ignore.
 ICC_NAME = b"ICC profile"
 
-_ORIENTATION_TAG = 0x0112
-
 
 def write(
     rgb: npt.NDArray[np.float32],
@@ -57,7 +56,6 @@ def write(
     grey: bool,
     icc: bytes | None,
     chunks: Sequence[bytes],
-    orientation: int,
     filter_type: int | None = None,
     level: int | None = None,
 ) -> bytes:
@@ -67,8 +65,9 @@ def write(
 
     Chunks, in this order: IHDR; chunks, the source's colour chunks (cICP, cHRM, gAMA, sRGB),
     each whole as the file held it (length, type, data, CRC), in the order given; iCCP holding
-    icc (zlib-compressed under ICC_NAME) if icc is not None; eXIf holding orientation (1 to 8)
-    alone, if it is not 1; IDAT; IEND. All before the image data, where the browsers read them.
+    icc (zlib-compressed under ICC_NAME) if icc is not None; IDAT; IEND. No eXIf: the picture is
+    written upright (picture.upright, DESIGN.md, Still images, Orientation), so no tool after
+    this one has a tag to honour. All before the image data, where the browsers read them.
 
     filter_type is one of the module's NONE to ADAPTIVE (ADAPTIVE: per row, the filter of
     the smallest sum of absolute values, as libpng's heuristic), FILTER if None; level is zlib's,
@@ -77,8 +76,6 @@ def write(
         raise ValueError(f"rgb must be (H, W, 3) and not empty, not {rgb.shape}")
     if bits not in (8, 16):
         raise ValueError(f"bits must be 8 or 16, not {bits}")
-    if not 1 <= orientation <= 8:
-        raise ValueError(f"orientation must be 1 to 8, not {orientation}")
     filter_type = FILTER if filter_type is None else filter_type
     if filter_type not in range(ADAPTIVE + 1):
         raise ValueError(f"filter_type must be 0 to {ADAPTIVE}, not {filter_type}")
@@ -88,8 +85,6 @@ def write(
     parts = [SIGNATURE, chunk(b"IHDR", header), *chunks]
     if icc is not None:
         parts.append(chunk(b"iCCP", ICC_NAME + b"\0\0" + zlib.compress(icc, 9)))
-    if orientation != 1:
-        parts.append(chunk(b"eXIf", exif(orientation)))
     for piece in _idat(rgb, bits, channels, filter_type, LEVEL if level is None else level):
         parts.append(chunk(b"IDAT", piece))
     parts.append(chunk(b"IEND", b""))
@@ -99,12 +94,6 @@ def write(
 def chunk(kind: bytes, data: bytes) -> bytes:
     """A whole chunk: length, type, data, and the CRC of type and data."""
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", _crc(kind, data))
-
-
-def exif(orientation: int) -> bytes:
-    """The data of an eXIf chunk holding the orientation alone: a big-endian TIFF, its header,
-    one IFD of one entry (tag 0x0112, SHORT, one value) and no next IFD."""
-    return b"MM\x00\x2a" + struct.pack(">IHHHIHHI", 8, 1, _ORIENTATION_TAG, 3, 1, orientation, 0, 0)
 
 
 def _crc(kind: bytes, data: bytes) -> int:

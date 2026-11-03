@@ -507,10 +507,16 @@ uv run pytest
   holds `frames.short_side` (the `--resolution` that keeps the displayed size) to `target_size`.
   `tests/test_png.py` holds `seedvr2x/png.py`: the chunks'
   order and CRCs, the five filters and the adaptive one, 8 and 16 bits, grey and RGB, read back
-  by Pillow, torchvision, `picture.read` and ffmpeg, the profile and orientation by ffprobe.
+  by Pillow, torchvision, `picture.read` and ffmpeg, the profile by ffprobe; no eXIf chunk ever,
+  and each of the 8 orientations written upright (`picture.upright`, below) read back by Pillow as
+  its `exif_transpose` of the same picture with the orientation, no tag, no `displaymatrix` for
+  ffprobe. `picture.upright`, an exact permutation per EXIF orientation and a view, is held in
+  `tests/test_picture.py` to Pillow's `ImageOps.exif_transpose` for all 8 on a picture whose
+  samples all differ, the sides swapped for 5 to 8, turned back by its inverse, 0 and 9 refused.
   `tests/test_webp.py` holds `seedvr2x/webp.py`: the 8-bit codes of `png.quantised` exact in
   Pillow's decode and ffmpeg's (`rgb24`), grey as three equal planes of the mean, the profile
-  and the orientation (an EXIF block of that tag alone, none at 1) read back, the refusals by
+  carried and no EXIF block written whatever the orientation, the 8 orientations written upright
+  and read back by Pillow as its `exif_transpose` of the same picture, the refusals by
   their words (a source stored at 16 bits, cICP, cHRM or gAMA without a profile, a side over
   16,383; an sRGB chunk alone taken, a chunk told by its type), the bytes the same every time
   and the effort constants (`METHOD`, `QUALITY`, measured in the module's comment) pinned,
@@ -538,10 +544,16 @@ uv run pytest
   one unclassified fails), each refusal; `-o`'s rules and a write that fails leaving nothing;
   `--plan` alone saying the plan, loading and writing nothing; runs on the stand-ins whose file is
   `png.write` of `still.upscale` byte for byte, at 16 and 8 bits (`--format png8`), grey, the
-  profile and orientation kept, an opaque alpha dropped and its line reaching the user; `-o x.webp`
+  profile kept, an opaque alpha dropped and its line reaching the user; every picture written
+  upright, in PNG and in WebP, the 8 orientations of a source (an eXIf chunk put in the stand-in's
+  file by the test) giving the output of the same picture stored upright turned by
+  `picture.upright`, the file `png.write` or `webp.write` of the turned `still.upscale` byte for
+  byte, no eXIf or EXIF chunk and no tag in Pillow, the read line saying the source's
+  orientation and the result line `, turned upright from its orientation N` (nothing at 1) with
+  the written size, sides swapped for 5 to 8; `-o x.webp`
   (any case) whose file is `webp.write` of `still.upscale` byte for byte, `--format` refused with
   it, a source stored at 16 bits or with cICP and no profile refused naming `.png` before the card
-  is read and taken for a `.png`, the profile and orientation carried, grey as equal planes, a
+  is read and taken for a `.png`, the profile carried, grey as equal planes, a
   video with `-o x.webp` refused; no
   ffmpeg on `PATH`; and the video path's refusals: `-o x.png`, `png8`, `--plan` alone, and image
   formats ffprobe reads that seedvr2x doesn't as pictures (JPEG XL, AVIF and HEIC by their

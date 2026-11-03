@@ -126,8 +126,9 @@ def test_cuts_help_says_how_its_frames_are_counted(capsys: pytest.CaptureFixture
 def test_seed_and_resolution_help_show_their_defaults(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # --seed said what it seeds, its default and the range job.check_seed enforces; --resolution
-    # its default, as the other options' helps show theirs (next-batch item 14, wording).
+    # --seed said what it seeds (a picture, a video's shots), its default and the range
+    # job.check_seed enforces; --resolution its default, as the other options' helps show theirs
+    # (next-batch item 14, wording).
     from job import ENCODE_SEED_OFFSET, SEED_LIMIT
 
     with pytest.raises(SystemExit):
@@ -137,10 +138,11 @@ def test_seed_and_resolution_help_show_their_defaults(
     bound = f"{SEED_LIMIT - 1 - ENCODE_SEED_OFFSET:,}"
     assert bound == "4,293,967,295"
     assert (
-        "the seed of the model's noise (default: 42): each shot is seeded with it plus the shot's"
-        f" first frame, and its encode with {ENCODE_SEED_OFFSET:,} more, so it is from 0 up to"
-        f" {bound} less the first frame of the source's last shot, refused otherwise, naming that"
-        " bound for the source" in shown
+        "the seed of the model's noise (default: 42): a picture is seeded with it, and each shot"
+        " of a video with it plus the shot's first frame; the encode with"
+        f" {ENCODE_SEED_OFFSET:,} more, so it is from 0 up to {bound} (a video's, less the first"
+        " frame of the source's last shot), refused otherwise, naming that bound for the source"
+        in shown
     )
 
 

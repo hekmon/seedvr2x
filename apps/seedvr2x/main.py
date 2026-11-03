@@ -443,10 +443,11 @@ def _parser() -> argparse.ArgumentParser:
         "--seed",
         type=int,
         default=42,
-        help="the seed of the model's noise (default: %(default)s): each shot is seeded with it"
-        f" plus the shot's first frame, and its encode with {ENCODE_SEED_OFFSET:,} more, so it is"
-        f" from 0 up to {SEED_LIMIT - 1 - ENCODE_SEED_OFFSET:,} less the first frame of the"
-        " source's last shot, refused otherwise, naming that bound for the source",
+        help="the seed of the model's noise (default: %(default)s): a picture is seeded with it,"
+        " and each shot of a video with it plus the shot's first frame; the encode with"
+        f" {ENCODE_SEED_OFFSET:,} more, so it is from 0 up to"
+        f" {SEED_LIMIT - 1 - ENCODE_SEED_OFFSET:,} (a video's, less the first frame of the"
+        " source's last shot), refused otherwise, naming that bound for the source",
     )
     # Several runs of a shot, an option for quality (DESIGN.md, decided on 2026-10-20 on the user's
     # eyes, named for its users): 4 runs gave PSNR-Y +2.01 dB and VMAF +10.4 against one, on the 8

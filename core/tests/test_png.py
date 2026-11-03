@@ -15,7 +15,7 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 import torch
-from PIL import Image, ImageCms
+from PIL import Image, ImageCms, ImageOps
 from torchcodec.decoders import decode_image  # pyright: ignore[reportPrivateImportUsage]
 
 from seedvr2x import picture, png
@@ -66,7 +66,6 @@ def write(rgb: npt.NDArray[np.float32], bits: int = 16, **options: object) -> by
         "grey": False,
         "icc": None,
         "chunks": (),
-        "orientation": 1,
         **options,
     }
     return png.write(rgb, bits=bits, **settings)  # pyright: ignore[reportArgumentType]
@@ -90,8 +89,8 @@ def chunks_of(data: bytes) -> list[tuple[bytes, bytes]]:
 
 
 def decoded16(data: bytes) -> npt.NDArray[np.uint16]:
-    """(H, W, C) uint16 by TorchCodec's libpng, which turns a picture by its eXIf chunk: given
-    the pictures of these tests, written upright or without one."""
+    """(H, W, C) uint16 by TorchCodec's libpng, which turns a picture by its eXIf chunk: the
+    writer writes none."""
     tensor = decode_image(
         torch.frombuffer(bytearray(data), dtype=torch.uint8),
         mode="UNCHANGED",
@@ -122,10 +121,10 @@ def unfiltered_types(data: bytes) -> list[int]:
 
 
 def test_chunks_in_order_with_their_crcs() -> None:
-    data = write(PICTURE, icc=PROFILE, chunks=COLOUR, orientation=6)
+    data = write(PICTURE, icc=PROFILE, chunks=COLOUR)
     kinds = [kind for kind, _ in chunks_of(data)]
-    assert kinds[:7] == [b"IHDR", b"cICP", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"eXIf"]
-    assert set(kinds[7:-1]) == {b"IDAT"} and kinds[-1] == b"IEND" and len(kinds) >= 9
+    assert kinds[:6] == [b"IHDR", b"cICP", b"gAMA", b"cHRM", b"sRGB", b"iCCP"]
+    assert set(kinds[6:-1]) == {b"IDAT"} and kinds[-1] == b"IEND" and len(kinds) >= 8
 
 
 def test_the_colour_chunks_are_verbatim_and_in_the_order_given() -> None:
@@ -159,21 +158,30 @@ def test_icc_is_a_deflated_iccp_named_icc_profile() -> None:
     assert b"iCCP" not in dict(chunks_of(write(PICTURE)))
 
 
-@pytest.mark.parametrize("value", range(1, 9))
-def test_the_exif_holds_the_orientation_alone(value: int) -> None:
-    data = write(PICTURE, orientation=value)
-    if value == 1:
-        assert b"eXIf" not in dict(chunks_of(data))
-        return
-    body = dict(chunks_of(data))[b"eXIf"]
-    assert body == png.exif(value) and len(body) == 26
+def test_no_exif_chunk_is_written() -> None:
+    data = write(PICTURE, icc=PROFILE, chunks=COLOUR)
+    assert b"eXIf" not in dict(chunks_of(data))
     with Image.open(io.BytesIO(data)) as image:
-        exif = image.getexif()
-        assert dict(exif) == {0x0112: value}
+        assert 0x0112 not in image.getexif()
 
 
-def test_no_exif_at_orientation_1() -> None:
-    assert b"eXIf" not in write(PICTURE)
+@pytest.mark.parametrize("value", range(1, 9))
+def test_a_picture_turned_upright_reads_back_upright_with_no_orientation(value: int) -> None:
+    """The 8 orientations: the picture turned by picture.upright and written reads back, in
+    Pillow, as Pillow's exif_transpose of the same picture carrying the orientation, and in
+    TorchCodec (16 bits) as the turned array, with no eXIf chunk and no orientation tag."""
+    turned = picture.upright(PICTURE, value)
+    data = write(turned, 8)
+    assert b"eXIf" not in dict(chunks_of(data))
+    source = io.BytesIO()
+    exif = Image.Exif()
+    exif[0x0112] = value
+    Image.fromarray(quantised(PICTURE, 8).astype(np.uint8)).save(source, "PNG", exif=exif)
+    with Image.open(io.BytesIO(source.getvalue())) as stored, Image.open(io.BytesIO(data)) as read:
+        expected = ImageOps.exif_transpose(stored)
+        assert 0x0112 not in read.getexif()
+        assert np.array_equal(np.asarray(read), np.asarray(expected))
+    assert np.array_equal(decoded16(write(turned)), quantised(turned, 16))
 
 
 # The pixels ----------------------------------------------------------------------------------
@@ -272,8 +280,8 @@ def test_the_input_is_left_alone() -> None:
 
 
 def test_the_same_bytes_every_time() -> None:
-    first = write(PICTURE, icc=PROFILE, chunks=COLOUR, orientation=3)
-    assert write(PICTURE, icc=PROFILE, chunks=COLOUR, orientation=3) == first
+    first = write(PICTURE, icc=PROFILE, chunks=COLOUR)
+    assert write(PICTURE, icc=PROFILE, chunks=COLOUR) == first
 
 
 # The filters ---------------------------------------------------------------------------------
@@ -343,8 +351,6 @@ def test_a_large_picture_in_several_bands(monkeypatch: pytest.MonkeyPatch) -> No
         {"rgb": np.zeros((4, 4, 4), np.float32)},
         {"rgb": np.zeros((0, 4, 3), np.float32)},
         {"bits": 12},
-        {"orientation": 0},
-        {"orientation": 9},
         {"filter_type": 6},
     ],
 )
@@ -355,7 +361,6 @@ def test_a_bad_argument_is_a_value_error(arguments: dict[str, object]) -> None:
         "grey": False,
         "icc": None,
         "chunks": (),
-        "orientation": 1,
         **arguments,
     }
     with pytest.raises(ValueError):
@@ -365,22 +370,18 @@ def test_a_bad_argument_is_a_value_error(arguments: dict[str, object]) -> None:
 # Read back by seedvr2x's reader ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("orientation", [1, 6])
 @pytest.mark.parametrize(("bits", "grey"), [(16, False), (8, False), (16, True), (8, True)])
-def test_the_reader_gives_back_what_the_writer_was_given(
-    bits: int, grey: bool, orientation: int
-) -> None:
-    data = write(PICTURE, bits, grey=grey, icc=PROFILE, chunks=COLOUR, orientation=orientation)
+def test_the_reader_gives_back_what_the_writer_was_given(bits: int, grey: bool) -> None:
+    data = write(PICTURE, bits, grey=grey, icc=PROFILE, chunks=COLOUR)
     read = picture.read(data)
     assert (read.format, read.bits, read.grey) == ("PNG", bits, grey)
-    assert (read.icc, read.chunks, read.orientation) == (PROFILE, COLOUR, orientation)
+    assert (read.icc, read.chunks, read.orientation) == (PROFILE, COLOUR, 1)
     again = write(
         read.pixels,
         read.bits,
         grey=read.grey,
         icc=read.icc,
         chunks=read.chunks,
-        orientation=read.orientation,
     )
     assert again == data
 
@@ -418,7 +419,7 @@ def ffmpeg_decode(path: Path, pix_fmt: str) -> npt.NDArray[np.int64]:
 def test_ffmpeg_decodes_the_same_codes(tmp_path: Path, bits: int, grey: bool, pix_fmt: str) -> None:
     rgb = RNG.random((11, 17, 3), dtype=np.float32)
     path = tmp_path / "out.png"
-    path.write_bytes(write(rgb, bits, grey=grey, icc=PROFILE, chunks=COLOUR, orientation=3))
+    path.write_bytes(write(rgb, bits, grey=grey, icc=PROFILE, chunks=COLOUR))
     expected = quantised(rgb, bits)
     if grey:
         mean = (rgb[..., 0] + rgb[..., 1] + rgb[..., 2]) / np.float32(3)
@@ -469,14 +470,8 @@ def test_ffprobe_reads_the_cicp(tmp_path: Path) -> None:
 
 
 @needs_ffmpeg
-@pytest.mark.parametrize("value", range(2, 9))
-def test_ffprobe_reads_the_orientation_as_it_reads_pillows(tmp_path: Path, value: int) -> None:
-    ours = tmp_path / "ours.png"
-    ours.write_bytes(write(PICTURE, orientation=value))
-    exif = Image.Exif()
-    exif[0x0112] = value
-    theirs = tmp_path / "theirs.png"
-    Image.fromarray((CODES16 >> 8).astype(np.uint8)).save(theirs, exif=exif)
-    matrix = "3x3 displaymatrix"
-    assert matrix in ffprobe_side_data(ours)
-    assert ffprobe_side_data(ours)[matrix] == ffprobe_side_data(theirs)[matrix]
+@pytest.mark.parametrize("value", range(1, 9))
+def test_ffprobe_sees_no_rotation_in_a_picture_turned_upright(tmp_path: Path, value: int) -> None:
+    path = tmp_path / "ours.png"
+    path.write_bytes(write(picture.upright(PICTURE, value)))
+    assert "3x3 displaymatrix" not in ffprobe_side_data(path)

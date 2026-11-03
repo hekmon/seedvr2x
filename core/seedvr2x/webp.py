@@ -1,7 +1,7 @@
 """The lossless WebP writer of a still picture (DESIGN.md, Still images, Output; The image server,
-A request): 8 bits, RGB, with the source's ICC profile and an EXIF block holding its orientation
-alone. Pillow (libwebp) encodes; the module quantises as png.py's 8-bit path does, which is the
-video writers' (apps/seedvr2x/media/writer.py's quantise).
+A request): 8 bits, RGB, with the source's ICC profile and no orientation: the caller writes the
+picture upright (picture.upright). Pillow (libwebp) encodes; the module quantises as png.py's
+8-bit path does, which is the video writers' (apps/seedvr2x/media/writer.py's quantise).
 
 A WebP holds what a PNG does not carry the same way, and not all of it: 8 bits per sample, no grey
 mode, and, of PNG's colour chunks, none but an ICC profile (its sRGB, which is WebP's default,
@@ -89,24 +89,21 @@ def write(
     grey: bool,
     icc: bytes | None,
     chunks: Sequence[bytes],
-    orientation: int,
 ) -> bytes:
     """The file of a picture: rgb (H, W, 3) float32, any finite values (clipped to [0, 1]), any
     memory layout, written at 8 bits, rounded to the nearest code as png.write rounds. grey takes
     the mean of the three planes, in float32 and before the quantisation, as png.write does, and
     writes it as RGB with three equal planes: WebP has no grey mode.
 
-    The ICC profile icc if it is not None; an EXIF block holding orientation (1 to 8) alone, if it
-    is not 1 (png.exif's bytes, which WebP's EXIF chunk holds without the "Exif\\0\\0" header).
-    chunks, the PNG colour chunks of the source (Picture.chunks), are not written: a WebP has
-    none, and cICP, cHRM or gAMA without a profile is refused, as check() does. The source's depth
-    is the caller's to check(): the array has lost it.
+    The ICC profile icc if it is not None; no EXIF block, the picture being written upright
+    (picture.upright, DESIGN.md, Still images, Orientation). chunks, the PNG colour chunks of the
+    source (Picture.chunks), are not written: a WebP has none, and cICP, cHRM or gAMA without a
+    profile is refused, as check() does. The source's depth is the caller's to check(): the array
+    has lost it.
 
     Refusal for a side over MAX_SIDE; ValueError for an array that is not a picture."""
     if rgb.ndim != 3 or rgb.shape[2] != 3 or 0 in rgb.shape:
         raise ValueError(f"rgb must be (H, W, 3) and not empty, not {rgb.shape}")
-    if not 1 <= orientation <= 8:
-        raise ValueError(f"orientation must be 1 to 8, not {orientation}")
     check(8, icc, chunks)
     height, width = rgb.shape[:2]
     if max(height, width) > MAX_SIDE:
@@ -120,8 +117,6 @@ def write(
     options: dict[str, object] = {"lossless": True, "method": METHOD, "quality": QUALITY}
     if icc is not None:
         options["icc_profile"] = icc
-    if orientation != 1:
-        options["exif"] = png.exif(orientation)
     out = io.BytesIO()
     Image.fromarray(codes, "RGB").save(out, "WEBP", **options)
     return out.getvalue()

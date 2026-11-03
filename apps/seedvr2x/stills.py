@@ -174,9 +174,9 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
             webp.check(pic.bits, pic.icc, pic.chunks)
         except Refusal as error:
             raise Refusal(f"{name}: {error}") from None
-    # Processed as stored, the EXIF orientation carried to the output and not applied
-    # (DESIGN.md, Still images, Orientation): the target is the stored picture's, at the sample
-    # aspect --input-sar gives, else square pixels.
+    # Processed as stored, then turned upright for the file (DESIGN.md, Still images,
+    # Orientation): the target is the stored picture's, at the sample aspect --input-sar gives,
+    # else square pixels.
     height, width = pic.pixels.shape[:2]
     sample_aspect = args.input_sar or Fraction(1)
     resolution = DEFAULT_RESOLUTION if args.resolution is None else args.resolution
@@ -184,7 +184,9 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     check_target(target, resolution)
     out_height, out_width = output_size(target)
     _check_tile_pins(args, target)
-    logger.info("%s", _read_said(name, pic, (out_width, out_height), bits, _is_webp(output)))
+    # The file's size is the model's, its sides swapped by the turn for orientations 5 to 8.
+    written = (out_height, out_width) if pic.orientation >= 5 else (out_width, out_height)
+    logger.info("%s", _read_said(name, pic, written, bits, _is_webp(output)))
     if args.resolution is None and (said := default_smaller(name, width, height, sample_aspect)):
         logger.info("%s", said)
     # The model files, as a video's run has them, minus the shot detector, which a picture never
@@ -252,20 +254,14 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     out = _upscaled(models, pic, target, args.seed, tiles, split, reads)
     if out is None:
         return 1
+    # Turned upright after the model, in both formats, with no orientation tag written: the turn
+    # is a view, so the writers take it as it is (picture.upright says why).
+    turned = picture.upright(out, pic.orientation)
     if _is_webp(output):
-        data = webp.write(
-            out, grey=pic.grey, icc=pic.icc, chunks=pic.chunks, orientation=pic.orientation
-        )
+        data = webp.write(turned, grey=pic.grey, icc=pic.icc, chunks=pic.chunks)
     else:
-        data = png.write(
-            out,
-            bits=bits,
-            grey=pic.grey,
-            icc=pic.icc,
-            chunks=pic.chunks,
-            orientation=pic.orientation,
-        )
-    del out
+        data = png.write(turned, bits=bits, grey=pic.grey, icc=pic.icc, chunks=pic.chunks)
+    del out, turned
     _write(output, data)
     from seedvr2x.clock import spent
 
@@ -273,10 +269,10 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         "upscaled in %.1f s; wrote %s: %dx%d, %s%s",
         spent(time.monotonic() - started),
         output,
-        out_width,
-        out_height,
+        written[0],
+        written[1],
         _made(pic, bits, _is_webp(output)),
-        _kept(pic),
+        _kept(pic, orientation=False) + _turned(pic),
     )
     return 0
 
@@ -498,11 +494,21 @@ def _made(pic: "Picture", bits: int, lossless: bool) -> str:
     return f"{bits}-bit {'grey' if pic.grey else 'RGB'}"
 
 
-def _kept(pic: "Picture") -> str:
+def _kept(pic: "Picture", *, orientation: bool = True) -> str:
     """What of the picture the output carries besides its pixels, as a clause: ", with its ICC
-    profile and orientation 6", or "" when there is none (DESIGN.md, Still images, Colour,
-    Orientation, Metadata)."""
+    profile and colour chunks", or "" when there is none (DESIGN.md, Still images, Colour,
+    Metadata). The read line adds the source's orientation (orientation); the output has none
+    to carry, _turned says it was turned."""
     carried = ["its ICC profile"] if pic.icc is not None else []
     carried += ["its colour chunks"] if pic.chunks else []
-    carried += [f"its orientation, {pic.orientation}"] if pic.orientation != 1 else []
+    if orientation and pic.orientation != 1:
+        carried.append(f"its orientation, {pic.orientation}")
     return f", with {' and '.join(carried)}" if carried else ""
+
+
+def _turned(pic: "Picture") -> str:
+    """The result line's clause saying the picture was turned upright, whatever the format, and
+    nothing at orientation 1 (DESIGN.md, Still images, Orientation)."""
+    if pic.orientation == 1:
+        return ""
+    return f", turned upright from its orientation {pic.orientation}"

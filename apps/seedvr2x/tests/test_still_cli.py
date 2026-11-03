@@ -34,7 +34,7 @@ import pytest
 import torch
 from PIL import Image, ImageCms
 from stand_ins import cpu_models  # noqa: F401
-from test_picture import header_only_png
+from test_picture import exif_chunk, header_only_png, inserted
 from test_still import PICTURE, SEED, TARGET, TILES, pipeline_models, pixels_of, stand_in_dit
 
 import main as cli
@@ -417,17 +417,10 @@ def make_picture(
     orientation: int = 1,
     seed: int = 0,
 ) -> Path:
-    """A PNG of test_still.py's picture, 24 x 40, written by the library's writer."""
-    path.write_bytes(
-        png.write(
-            pixels_of(seed),
-            bits=bits,
-            grey=grey,
-            icc=icc,
-            chunks=(),
-            orientation=orientation,
-        )
-    )
+    """A PNG of test_still.py's picture, 24 x 40, written by the library's writer, an eXIf chunk
+    saying orientation put in after it when it is not 1 (the writer writes none)."""
+    data = png.write(pixels_of(seed), bits=bits, grey=grey, icc=icc, chunks=())
+    path.write_bytes(data if orientation == 1 else inserted(data, exif_chunk(orientation)))
     return path
 
 
@@ -1111,7 +1104,7 @@ def test_the_library_makes_the_png_the_command_writes(
     pixels, target, seed = arguments[1:4]
     assert target == TARGET and seed == SEED and keywords["correct"] is True
     again = still.upscale(models, pixels, target, seed, **keywords)
-    expected = png.write(again, bits=16, grey=False, icc=None, chunks=(), orientation=1)
+    expected = png.write(again, bits=16, grey=False, icc=None, chunks=())
     assert output.read_bytes() == expected
     # The pixels are the model's, not the picture's.
     assert not np.array_equal(
@@ -1147,9 +1140,7 @@ def test_png8_writes_8_bits_rounded_to_the_nearest_code(machine: Machine, tmp_pa
         decode_tiles=None,
         correct=False,
     )
-    assert eight.read_bytes() == png.write(
-        made, bits=8, grey=False, icc=None, chunks=(), orientation=1
-    )
+    assert eight.read_bytes() == png.write(made, bits=8, grey=False, icc=None, chunks=())
     with Image.open(eight) as image:
         assert image.mode == "RGB" and image.size == (80, 48)
 
@@ -1175,7 +1166,7 @@ def test_a_grey_picture_comes_back_grey(machine: Machine, tmp_path: Path) -> Non
             assert image.mode == mode and image.size == (80, 48)
 
 
-def test_the_profile_and_the_orientation_are_carried(
+def test_the_profile_is_carried_and_the_picture_written_upright(
     machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     profile = srgb_profile()
@@ -1183,15 +1174,86 @@ def test_the_profile_and_the_orientation_are_carried(
     output = tmp_path / "out.png"
     assert run(machine, source, output) == 0
     written = read_back(output)
-    # Processed as stored (not rotated): 80 wide, 48 high, the orientation carried unchanged.
-    assert written.icc == profile and written.orientation == 6
-    assert written.pixels.shape == (48, 80, 3)
+    # Processed as stored (24 x 40 in, 80 x 48 out), then turned upright: 48 wide, 80 high, with
+    # no orientation written.
+    assert written.icc == profile and written.orientation == 1
+    assert written.pixels.shape == (80, 48, 3)
     with Image.open(output) as image:
-        assert image.info["icc_profile"] == profile and image.getexif()[0x0112] == 6
-    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("upscaled in"))
+        assert image.info["icc_profile"] == profile and 0x0112 not in image.getexif()
+        assert image.size == (48, 80)
+    assert b"eXIf" not in output.read_bytes()
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        line.startswith(f"{source}: a PNG picture")
+        and line.endswith("with its ICC profile and its orientation, 6; output 48x80, a 16-bit PNG")
+        for line in lines
+    ), lines
+    line = next(line for line in lines if line.startswith("upscaled in"))
     assert line.endswith(
-        f"wrote {output}: 80x48, 16-bit RGB, with its ICC profile and its orientation, 6"
+        f"wrote {output}: 48x80, 16-bit RGB, with its ICC profile, turned upright from its"
+        " orientation 6"
     )
+
+
+@pytest.mark.parametrize("suffix", ["png", "webp"])
+@pytest.mark.parametrize("value", range(1, 9))
+def test_every_orientation_is_written_upright_with_no_tag(
+    machine: Machine,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    suffix: str,
+    value: int,
+) -> None:
+    """The 8 orientations, in PNG and in lossless WebP: the output is the output of the same
+    picture stored upright, turned by picture.upright, with no orientation tag whatever (no eXIf
+    chunk, no EXIF chunk), and the result line says it was turned, nothing at 1."""
+    upright_source = make_picture(tmp_path / "up.png", bits=8)
+    stored = make_picture(tmp_path / "stored.png", bits=8, orientation=value)
+    plain = tmp_path / f"plain.{suffix}"
+    output = tmp_path / f"out.{suffix}"
+    assert run(machine, upright_source, plain) == 0
+    caplog.clear()
+    assert run(machine, stored, output) == 0
+    turned = picture.upright(read_back(plain).pixels, value)
+    written = read_back(output)
+    assert written.orientation == 1 and written.pixels.shape == turned.shape
+    assert turned.shape == ((80, 48, 3) if value >= 5 else (48, 80, 3))
+    assert np.array_equal(written.pixels, turned)
+    with Image.open(output) as image:
+        assert 0x0112 not in image.getexif() and "exif" not in image.info
+    assert b"eXIf" not in output.read_bytes() and b"EXIF" not in output.read_bytes()
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("upscaled in"))
+    size = "48x80" if value >= 5 else "80x48"
+    assert f"wrote {output}: {size}, " in line
+    if value == 1:
+        assert "turned" not in line and ", its orientation" not in line
+    else:
+        assert line.endswith(f", turned upright from its orientation {value}")
+
+
+@pytest.mark.parametrize("suffix", ["png", "webp"])
+def test_the_library_makes_the_turned_file_the_command_writes(
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,  # noqa: F811
+    suffix: str,
+) -> None:
+    # The file is the writer's of what still.upscale gives, turned by picture.upright, byte for
+    # byte: the writers turn nothing and tag nothing.
+    models = pipeline_models(cpu_models)
+    use_library(machine, monkeypatch, models)
+    source = make_picture(tmp_path / "in.png", seed=3, bits=8, orientation=6)
+    output = tmp_path / f"out.{suffix}"
+    assert run(machine, source, output, "--color-correction", "split") == 0
+    ((arguments, keywords),) = machine.passes
+    pixels, target, seed = arguments[1:4]
+    turned = picture.upright(still.upscale(models, pixels, target, seed, **keywords), 6)
+    if suffix == "png":
+        expected = png.write(turned, bits=16, grey=False, icc=None, chunks=())
+    else:
+        expected = webp.write(turned, grey=False, icc=None, chunks=())
+    assert output.read_bytes() == expected
 
 
 def test_an_opaque_alpha_plane_is_dropped_and_said(
@@ -1536,7 +1598,7 @@ def cicp() -> bytes:
 
 def png_with(path: Path, *, chunks: tuple[bytes, ...] = (), **options: Any) -> Path:
     """A PNG of test_still.py's picture holding colour chunks, 8 bits."""
-    settings: dict[str, Any] = {"grey": False, "icc": None, "orientation": 1, **options}
+    settings: dict[str, Any] = {"grey": False, "icc": None, **options}
     path.write_bytes(png.write(pixels_of(), bits=8, chunks=chunks, **settings))
     return path
 
@@ -1562,7 +1624,7 @@ def test_the_library_makes_the_webp_the_command_writes(
         pixels, target, seed = arguments[1:4]
         assert target == TARGET and seed == SEED and keywords["correct"] is True
         again = still.upscale(models, pixels, target, seed, **keywords)
-        expected = webp.write(again, grey=False, icc=None, chunks=(), orientation=1)
+        expected = webp.write(again, grey=False, icc=None, chunks=())
         assert output.read_bytes() == expected
         written = read_back(output)
         assert (
@@ -1642,7 +1704,7 @@ def test_an_srgb_chunk_alone_or_a_profile_beside_the_chunks_is_taken_for_a_webp(
     assert read_back(tmp_path / "b.webp").icc == srgb_profile()
 
 
-def test_the_profile_and_the_orientation_are_carried_into_a_webp(
+def test_the_profile_is_carried_into_a_webp_and_the_picture_written_upright(
     machine: Machine, tmp_path: Path
 ) -> None:
     profile = srgb_profile()
@@ -1650,11 +1712,12 @@ def test_the_profile_and_the_orientation_are_carried_into_a_webp(
     output = tmp_path / "out.webp"
     assert run(machine, source, output) == 0
     written = read_back(output)
-    # Processed as stored, not rotated: 80 wide, 48 high, the orientation carried.
-    assert written.icc == profile and written.orientation == 6
-    assert written.pixels.shape == (48, 80, 3)
+    # Processed as stored, then turned upright: 48 wide, 80 high, no orientation written.
+    assert written.icc == profile and written.orientation == 1
+    assert written.pixels.shape == (80, 48, 3)
     with Image.open(output) as image:
-        assert image.info["icc_profile"] == profile and image.getexif()[0x0112] == 6
+        assert image.info["icc_profile"] == profile and 0x0112 not in image.getexif()
+        assert "exif" not in image.info
     # None of it when the source had none.
     plain = make_picture(tmp_path / "plain.png", bits=8)
     assert run(machine, plain, tmp_path / "plain.webp") == 0

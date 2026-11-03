@@ -131,6 +131,12 @@ def orientation_exif(value: int) -> Image.Exif:
     return exif
 
 
+def exif_chunk(value: int) -> bytes:
+    """A PNG eXIf chunk holding the orientation alone (the sources of these tests carry one; the
+    writers do not: picture.upright)."""
+    return chunk(b"eXIf", orientation_exif(value).tobytes()[6:])
+
+
 def codes(pixels: npt.NDArray[np.float32], bits: int) -> npt.NDArray[np.int64]:
     """The codes a writer would make of the pixels: media/writer.py's quantise."""
     scale = 65535 if bits == 16 else 255
@@ -963,6 +969,48 @@ def test_the_orientation_is_read_and_the_pixels_not_turned(value: int) -> None:
         assert pic.pixels.shape == (32, 48, 3), fmt
 
 
+# A picture of 5 rows and 7 columns in which every sample differs, so that no turn can pass for
+# another.
+ASYMMETRIC = np.arange(5 * 7 * 3, dtype=np.float32).reshape(5, 7, 3) / np.float32(105)
+
+
+@pytest.mark.parametrize("value", range(1, 9))
+def test_upright_is_pillows_exif_transpose(value: int) -> None:
+    """All 8 orientations, sample for sample, against Pillow's ImageOps.exif_transpose of a
+    picture carrying that orientation (a 32-bit float image per plane: no rounding)."""
+    exif = Image.Exif()
+    exif[0x0112] = value
+    turned = picture.upright(ASYMMETRIC, value)
+    expected = np.dstack(
+        [np.asarray(_exif_transposed(ASYMMETRIC[:, :, plane], exif)) for plane in range(3)]
+    )
+    assert turned.shape == expected.shape == ((7, 5, 3) if value >= 5 else (5, 7, 3))
+    assert turned.dtype == np.float32 and np.array_equal(turned, expected)
+
+
+def _exif_transposed(plane: npt.NDArray[np.float32], exif: Image.Exif) -> Image.Image:
+    from PIL import ImageOps
+
+    image = Image.fromarray(plane, "F")
+    image.info["exif"] = exif.tobytes()
+    return ImageOps.exif_transpose(image) or image
+
+
+def test_upright_is_a_view_and_turns_back() -> None:
+    for value in range(1, 9):
+        turned = picture.upright(ASYMMETRIC, value)
+        assert np.shares_memory(turned, ASYMMETRIC)
+    for value, inverse in ((6, 8), (8, 6), (2, 2), (3, 3), (4, 4), (5, 5), (7, 7)):
+        again = picture.upright(picture.upright(ASYMMETRIC, value), inverse)
+        assert np.array_equal(again, ASYMMETRIC), value
+
+
+@pytest.mark.parametrize("value", [0, 9, -1])
+def test_upright_refuses_an_orientation_out_of_range(value: int) -> None:
+    with pytest.raises(ValueError, match="orientation must be 1 to 8"):
+        picture.upright(ASYMMETRIC, value)
+
+
 def test_a_picture_without_orientation_is_1() -> None:
     assert reading(FORMAT_FILES["JPEG"]()).orientation == 1
     assert reading(pillow(Image.fromarray(SMOOTH), "JPEG", exif=Image.Exif())).orientation == 1
@@ -993,8 +1041,7 @@ def test_a_16_bit_png_is_decoded_as_stored_whatever_its_exif_chunk_says(value: i
 
 
 def test_an_exif_chunk_after_the_image_data_of_a_16_bit_png_turns_nothing() -> None:
-    exif = chunk(b"eXIf", orientation_exif(6).tobytes()[6:])
-    pic = reading(png16(RGB16, 2, after=(exif,)))
+    pic = reading(png16(RGB16, 2, after=(exif_chunk(6),)))
     assert pic.orientation == 6 and np.array_equal(codes(pic.pixels, 16), RGB16)
 
 
@@ -1010,8 +1057,7 @@ def test_the_exif_chunks_are_taken_out_and_nothing_else() -> None:
 
 
 def test_the_orientation_of_a_16_bit_png_is_read() -> None:
-    exif = chunk(b"eXIf", orientation_exif(6).tobytes()[6:])
-    assert reading(png16(RGB16, 2, after=(exif,))).orientation == 6
+    assert reading(png16(RGB16, 2, after=(exif_chunk(6),))).orientation == 6
 
 
 def test_png_colour_chunks_are_kept_whole_in_file_order() -> None:
@@ -1224,15 +1270,12 @@ def _smooth_png_palette() -> bytes:
 
 
 def stored_turned(orientation: int) -> bytes:
-    """RGB16 written at 16 bits by seedvr2x's own writer, its eXIf chunk saying orientation."""
-    return png.write(
-        RGB16.astype(np.float32) / np.float32(65535),
-        bits=16,
-        grey=False,
-        icc=None,
-        chunks=[],
-        orientation=orientation,
+    """RGB16 written at 16 bits by seedvr2x's own writer, an eXIf chunk saying orientation put
+    in after it (the writer writes none)."""
+    data = png.write(
+        RGB16.astype(np.float32) / np.float32(65535), bits=16, grey=False, icc=None, chunks=[]
     )
+    return inserted(data, exif_chunk(orientation))
 
 
 # name, file, ffmpeg's pixel format, the largest difference allowed (0: bit for bit), ffmpeg's

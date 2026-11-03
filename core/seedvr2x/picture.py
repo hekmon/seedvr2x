@@ -1,6 +1,6 @@
 """A still picture read from its bytes (DESIGN.md, Still images): what a file is by its content,
 and its pixels as the model takes them, with what the output carries of the file (ICC profile,
-PNG colour chunks, EXIF orientation).
+PNG colour chunks, EXIF orientation), and the turn that writes a picture upright (upright).
 
 Pillow identifies and decodes. TorchCodec's decoder reads the 16-bit colour PNGs that a Pillow
 decode would cut to 8 bits (imported where it is needed: the module imports no torch).
@@ -105,7 +105,7 @@ class Picture:
     grey: bool  # stored grey, in any grey mode: the output is written grey
     icc: bytes | None  # the ICC profile as stored (decompressed), for the output
     chunks: tuple[bytes, ...]  # a PNG's cICP, cHRM, gAMA and sRGB, whole, in file order
-    orientation: int  # EXIF orientation 1 to 8, 1 when there is none; pixels are not rotated
+    orientation: int  # EXIF orientation 1 to 8, 1 when there is none; pixels are not turned
     opaque_alpha_dropped: bool  # an alpha plane opaque everywhere was left out
 
 
@@ -409,6 +409,43 @@ def _jpeg_images(data: bytes) -> int:
         if not data.startswith(_SOI, end):
             return images
         start = end
+
+
+# Orientation -----------------------------------------------------------------------------------
+
+
+def upright(rgb: npt.NDArray[np.float32], orientation: int) -> npt.NDArray[np.float32]:
+    """rgb (H, W, 3) float32 turned the right way up for its EXIF orientation (1 to 8, as
+    Picture.orientation gives it), as a view of rgb, no copy: (H, W, 3) for 1 to 4, (W, H, 3) for
+    5 to 8. An exact permutation of the samples, as TIFF/EXIF define the eight: 2 mirrors
+    horizontally, 3 turns 180 degrees, 4 mirrors vertically, 5 transposes, 6 turns 90 degrees
+    clockwise, 7 transverses (transposes across the other diagonal), 8 turns 90 degrees
+    counter-clockwise. ValueError for an orientation outside 1 to 8.
+
+    Why every output is written turned and with no orientation tag (DESIGN.md, Still images,
+    Orientation): seedvr2x recreates every bit, so the picture leaves it the right way up, with no
+    tool after it left to honour a tag or to turn and re-encode it. Chrome and Firefox ignore a
+    WebP's EXIF orientation, and many tools ignore a PNG's eXIf. The model still processes the
+    picture as stored (read gives the stored pixels and the orientation, apart)."""
+    match orientation:
+        case 1:
+            return rgb
+        case 2:
+            return rgb[:, ::-1]
+        case 3:
+            return rgb[::-1, ::-1]
+        case 4:
+            return rgb[::-1]
+        case 5:
+            return rgb.transpose(1, 0, 2)
+        case 6:
+            return rgb.transpose(1, 0, 2)[:, ::-1]
+        case 7:
+            return rgb.transpose(1, 0, 2)[::-1, ::-1]
+        case 8:
+            return rgb.transpose(1, 0, 2)[::-1]
+        case _:
+            raise ValueError(f"orientation must be 1 to 8, not {orientation}")
 
 
 # Metadata --------------------------------------------------------------------------------------
