@@ -68,8 +68,8 @@ sptenc shapes the interfaces (segment directories, cut lists, master formats), b
 never requires it.
 
 ### Not in the first version
-- ComfyUI nodes, macOS/MPS, AMD/ROCm (still images are in v0.1.0 since 2026-11-02:
-  [Repository and apps](#repository-and-apps), step 3)
+- macOS/MPS, AMD/ROCm (still images and the image server are in v0.1.0 since 2026-11-02,
+  ComfyUI's nodes since 2026-11-03: [Repository and apps](#repository-and-apps), steps 3 and 4)
 - Windows itself: v0.2.0 (the user, 2026-10-24). Linux runs it, WSL2 included.
 - A job's work directory away from its output file (the user asked, on 2026-10-24, for the
   scratch on one disk and the file on another): its masters live there, as large as the file.
@@ -207,7 +207,7 @@ seedvr2x/                the repository
   apps/
     seedvr2x/            the seedvr2x command: video (long runs), still images, verify
     imgserver/           an HTTP server for images only
-    comfyui/             ComfyUI's nodes, after v0.1.0
+    comfyui/             ComfyUI's nodes
   research/  models/  upstream/
 ```
 
@@ -245,7 +245,7 @@ seedvr2x/                the repository
   [The image server](#the-image-server)'s. In v0.1.0 with the CLI's still images (the user,
   2026-11-02), built and measured with the rest, neither holding the release if it isn't
   ready with it.
-- **ComfyUI's nodes, after v0.1.0, next on the roadmap** (the user, 2026-11-02: light on
+- **ComfyUI's nodes, in v0.1.0** (the user, 2026-11-03; on 2026-11-02, after it: light on
   seedvr2x's side, its bricks tested by the library's suite, ComfyUI doing the input and
   output, the models and the memory): in this repository, where ComfyUI's own install (its
   Manager, its registry) finds them. Only the bare minimum ComfyUI needs to find and import them
@@ -380,7 +380,12 @@ In steps:
    later, takes the same four modules. Built on 2026-11-03 (impl-still), on the CPU, no video
    plan moving over the plan matrix's 5,480 cases. Neither holds the release if it isn't ready
    with the rest; the roadmap shows them under next until then.
-4. After v0.1.0: ComfyUI's nodes, assembling the same bricks.
+4. ComfyUI's nodes, in v0.1.0 (the user, 2026-11-03), assembling the same bricks, built by a
+   conductor of their own beside the image server's. Their specification is discussed once the
+   server's conductor has begun; meanwhile it changes the library only where the server needs
+   it, each change listed in its report, and never the CLI, so that what the nodes' conductor
+   would change with it is known before the nodes' conductor starts. Neither holds the release
+   if it isn't ready with the rest; the roadmap shows them under next until then.
 
 ## Architecture
 
