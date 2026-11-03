@@ -143,7 +143,7 @@ seedvr2x stands on others' work:
   the importance-matrix method of the GGUF files (MIT).
 - **[StableSR](https://github.com/IceClear/StableSR)**: the wavelet method behind seedvr2x's
   colour correction, written anew from the method.
-- **[Sol Levante](https://opencontent.netflix.com/)**, by Netflix and Production I.G: the frames
+- **[Sol Levante](https://opencontent.netflix.com/#h.yk08awhc210g)**, by Netflix and Production I.G: the frames
   of the picture above ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)).
 - **In the research scripts:** [DISTS](https://github.com/dingkeyan93/DISTS), by Keyan Ding
   (MIT), and [PySceneDetect](https://github.com/Breakthrough/PySceneDetect), by Brandon
