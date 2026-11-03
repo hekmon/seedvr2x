@@ -120,17 +120,18 @@ DIT_BUFFERS = round(0.058 * GIB)
 #   outputs: the input in float32 and rotated, 4 bytes a value each, then the codes and their
 #   int32 product, 1 byte an input and 4 an output, then the product and its float32 rescaling,
 #   4 and 4 an output; 96 KiB a row for either of the MLP's matrices (K or N 12,288), 0.375 GiB at
-#   4,096 rows; beside them the weight's transposed copy torch's int8 multiply is given (int8.
-#   transposed), K x N bytes, 36 MiB for the MLP's, the bias in float32 and the rows' scales
-#   (W8A8_SMALL), and H, 0.25 MiB. Those are CUDA's, whose kernels convert their operands' dtypes
-#   as they read and write them; on the CPU, torch makes a float32 copy of the int32 product for
-#   its multiply by the token's scale and a float32 output for the last operation, rounded into
-#   the output's rows after (TensorIterator.cpp at v2.14.1, compute_types: temporaries for the
-#   CPU alone), 12 bytes an output at the most. With them counted, torch's memory profiler finds
-#   the path's buffers on the CPU those within W8A8_SMALL (tests/test_int8.py), and the card
-#   measures them on CUDA (its -m gpu tests). Where several linears run one after the other, one
-#   at a time: once. The fp16 linear's copy of its weight in bfloat16 under autocast, up to 72
-#   MiB, which int8 doesn't make, is left in the fp16 fit's constant: on the side of too much.
+#   4,096 rows; beside them the bias in float32 and the rows' scales (W8A8_SMALL), and H, 0.25
+#   MiB. The weight itself is no buffer: torch's int8 multiply is given a view of the file's
+#   own (int8.transposed), never a copy. Those are CUDA's, whose kernels convert their operands'
+#   dtypes as they read and write them; on the CPU, torch makes a float32 copy of the int32
+#   product for its multiply by the token's scale and a float32 output for the last operation,
+#   rounded into the output's rows after (TensorIterator.cpp at v2.14.1, compute_types:
+#   temporaries for the CPU alone), 12 bytes an output at the most. With them counted, torch's
+#   memory profiler finds the path's buffers on the CPU those within W8A8_SMALL
+#   (tests/test_int8.py), and the card measures them on CUDA (its -m gpu tests). Where several
+#   linears run one after the other, one at a time: once. The fp16 linear's copy of its weight in
+#   bfloat16 under autocast, up to 72 MiB, which int8 doesn't make, is left in the fp16 fit's
+#   constant: on the side of too much.
 INT8_PER_TOKEN = PER_TOKEN
 INT8_PER_WINDOW = PER_WINDOW
 # The rows of a linear's input the W8A8 path takes at a time, int8.ROWS (its PROVISIONAL choice):
@@ -153,10 +154,7 @@ def w8a8_row_bytes(inputs: int, outputs: int) -> int:
 
 
 INT8_BUFFERS = (
-    W8A8_ROWS * max(w8a8_row_bytes(*shape) for shape in W8A8_MATRICES)
-    + max(inputs * outputs for inputs, outputs in W8A8_MATRICES)
-    + W8A8_SMALL
-    + W8A8_ROTATION
+    W8A8_ROWS * max(w8a8_row_bytes(*shape) for shape in W8A8_MATRICES) + W8A8_SMALL + W8A8_ROTATION
 )
 
 

@@ -3016,7 +3016,7 @@ def test_an_int8_dit_plans_by_its_own_figures() -> None:
     said = planner.said(int8_24, int8_24_peaks, "a card", *job[:3])
     assert said_line(said, "DiT") == (
         "plan: DiT: its weights in int8, 7.76 GiB, half of fp16's; a window's memory counted as"
-        " fp16's plus 0.41 GiB for int8's buffers until int8's own is measured; --dit-model names"
+        " fp16's plus 0.38 GiB for int8's buffers until int8's own is measured; --dit-model names"
         " the file"
     )
     # A recorded plan planned again around its shape, and a resume's refusal, in int8's figures.

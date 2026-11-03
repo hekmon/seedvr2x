@@ -237,14 +237,13 @@ def test_the_memory_model_s_figures_are_the_module_s() -> None:
     assert peaks.W8A8_ROWS == int8.ROWS == 4096
     assert int8.GROUP == weights.GROUP == GROUP
     assert peaks.W8A8_ROTATION == int8.hadamard("cpu").nbytes
-    # 96 KiB a row at the most, the MLP's two matrices: 0.375 GiB at 4,096 rows; the transposed
-    # weight of the largest, 36 MiB, and H.
+    # 96 KiB a row at the most, the MLP's two matrices: 0.375 GiB at 4,096 rows; W8A8_SMALL and
+    # H. The weight is multiplied as a view of its own memory, no copy to count.
     assert max(peaks.w8a8_row_bytes(*shape) for shape in peaks.W8A8_MATRICES) == 96 * 1024
     weight = torch.zeros(3072, 12288, dtype=torch.int8)
-    assert (
-        int8.transposed(weight).nbytes == 36 * 1024**2 and int8.transposed(weight).is_contiguous()
-    )
-    assert peaks.INT8_BUFFERS == 4096 * 96 * 1024 + 36 * 1024**2 + 1024**2 + 256 * 1024
+    view = int8.transposed(weight)
+    assert view.shape == (12288, 3072) and view.data_ptr() == weight.data_ptr()
+    assert peaks.INT8_BUFFERS == 4096 * 96 * 1024 + 1024**2 + 256 * 1024
 
 
 def allocated(run: Callable[[], object]) -> int:
@@ -282,8 +281,9 @@ def test_the_buffers_are_the_memory_model_s(
 ) -> None:
     # What the W8A8 path holds beside its output, measured on the CPU, its input of 200 rows
     # taken 64 at a time: the rows' buffers at their most (cpu_row_bytes, peaks.w8a8_row_bytes'
-    # three moments with the CPU's temporaries), the transposed weight, and the small ones within
-    # W8A8_SMALL; what peaks.INT8_BUFFERS counts for the 7B's shapes at 4,096 rows on CUDA.
+    # three moments with the CPU's temporaries) and the small ones within W8A8_SMALL, the weight
+    # multiplied through a view, never copied (int8.transposed); what peaks.INT8_BUFFERS counts
+    # for the 7B's shapes at 4,096 rows on CUDA.
     monkeypatch.setattr(int8, "ROWS", 64)
     x, weight, scale, bias = layer(200, inputs, outputs, seed=5, grid=False)
     x = x.to(dtype)
@@ -291,7 +291,7 @@ def test_the_buffers_are_the_memory_model_s(
     added = bias if biased else None
     most = allocated(lambda: int8.linear(x, weight, scale, added, torch.bfloat16))
     output = 200 * outputs * 2
-    counted = 64 * cpu_row_bytes(inputs, outputs) + inputs * outputs
+    counted = 64 * cpu_row_bytes(inputs, outputs)
     assert counted <= most - output <= counted + peaks.W8A8_SMALL
 
 
@@ -326,8 +326,8 @@ def bf16_ulp(values: Tensor) -> Tensor:
 def codes_agree(codes: Tensor, other: Tensor) -> None:
     """Fails unless two sides' codes, int8 of one shape, are the same for 99.999% of them, two
     allowed apart at the least: a first matrix of a few rows holds too few codes for a share,
-    and one code apart is the rare rounding the module's docstring measures (the codes 99.9999%
-    the kernel's into the MLP's output projection)."""
+    and a code apart is the rare rounding a float32 sum taken in another order tips (the
+    module's docstring: the kernel's codes 100% seedvr2x's on these activations, seed 8)."""
     apart = int((codes.cpu() != other.cpu()).sum())
     assert apart <= max(2, codes.numel() // 100_000), (apart, codes.numel())
 
@@ -388,14 +388,15 @@ def explained(
 @pytest.mark.parametrize("rows", GPU_ROWS)
 @pytest.mark.parametrize(("inputs", "outputs"), peaks.W8A8_MATRICES)
 def test_the_w8a8_linear_on_cuda_is_the_cpu_s(rows: int, inputs: int, outputs: int) -> None:
-    # The path on CUDA against the CPU's, the 7B's four shapes: cuBLASLt's int32 product exact,
-    # the integer product computed apart in float64; the codes the CPU's for 99.999% of them at
-    # least, the rotation's float32 sums rounding otherwise there (int8.py's docstring); the
-    # outputs the CPU's but for what the codes and the scales that differ make, within one
-    # bfloat16 spacing (explained). And a call's memory: what torch's allocator holds at its
-    # most beside the input, the weight and what the warm-up left (H, cuBLAS's workspace), the
-    # output and peaks.INT8_BUFFERS at the most, printed for the card's record (the PROVISIONAL
-    # figure measured on CUDA).
+    # The path on CUDA against the CPU's, the 7B's four shapes: cuBLASLt's int32 product, given
+    # the weight's view (int8.transposed), exact, the integer product computed apart in float64:
+    # on any card, a kernel cuBLASLt picks for that layout that gives other bits fails here; the
+    # codes the CPU's for 99.999% of them at least, the rotation's float32 sums rounding
+    # otherwise there (int8.py's docstring); the outputs the CPU's but for what the codes and the
+    # scales that differ make, within one bfloat16 spacing (explained). And a call's memory: what
+    # torch's allocator holds at its most beside the input, the weight and what the warm-up left
+    # (H, cuBLAS's workspace), the output and peaks.INT8_BUFFERS at the most, printed for the
+    # card's record (the PROVISIONAL figure measured on CUDA).
     device = cuda()
     x, weight, scale, bias = activations(rows, inputs, outputs, seed=7)
     on = (x.to(device), weight.to(device), scale.to(device), bias.to(device))

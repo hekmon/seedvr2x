@@ -96,7 +96,7 @@ def test_an_int8_dit_runs_planned_by_its_figures(
     dit_line = [line for line in plan_lines(caplog) if line.startswith("plan: DiT: ")]
     assert dit_line == [
         "plan: DiT: its weights in int8, 7.76 GiB, half of fp16's; a window's memory counted as"
-        " fp16's plus 0.41 GiB for int8's buffers until int8's own is measured; --dit-model names"
+        " fp16's plus 0.38 GiB for int8's buffers until int8's own is measured; --dit-model names"
         " the file"
     ]
     fp16_made = planner.plan(FREE, TARGET, JOB_SHOTS, pins, HOST)

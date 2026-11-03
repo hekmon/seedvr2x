@@ -36,27 +36,24 @@ which this follows.
 
 The rotation here is a float32 product with H; the kernel's is a fast Hadamard transform in four
 float32 stages of four terms, each stage's sums rounded. H's entries are 1/16 or -1/16, so every
-term is exact, but the two sum them in another order. Measured on synthetic activations shaped
-as the DiT's (2026-11-02: 256 tokens a matrix, each channel's magnitude drawn between 0.2 and
-8.2 and 8 channels multiplied by 30, GELU's output into the MLP's output projection; against an
-emulation of the kernel's transform), the rotated values are equal for 97% of them into the
-K = 3,072 matrices and 55% into the MLP's output projection (K = 12,288), the tokens' scales for
-93-98% and 67%, the codes for 100% and 99.9999%, and the outputs bit for bit for 99.9998-100%
-and 99.81%, 1e-4 apart relative where they differ: nothing against W8A8's own error, about
-0.6% (models/VALIDATION.md, Results: the int8 kernel's median per layer, 0.59%). The 96 GB card
-compares the model's own activations with the kernel itself. The product stays: a transform
+term is exact, but the two sum them in another order. Against the kernel itself (comfy-kitchen
+0.2.37's CUDA int8_linear on tests/test_int8.py's activations, seed 8, 2 to 4,101 rows of the
+7B's four shapes; RTX 5090, 2026-11-03), the codes are equal for 100% of them in every case, the
+tokens' scales for 99.00-100%, and the outputs bit for bit for 99.993-100%: nothing against
+W8A8's own error, about 0.6% (models/VALIDATION.md, Results: the int8 kernel's median per layer,
+0.59%). The 96 GB card compares the model's own activations. The product stays: a transform
 written in torch's operations is four passes over the values, each its own kernel and buffer,
 where the product is one.
 
 A linear takes ROWS of its input's rows at a time, the output allocated once: what the W8A8 path
 holds beside the output, the input in float32 and rotated, the codes, the int32 product and its
-float32 rescaling, is bounded by ROWS rows whatever the window, and a transposed copy of the
-weight beside them (peaks.INT8_BUFFERS counts it all). On the CPU, every step works on a row alone
-and the integer product is exact, so the rows taken at a time change no bit (tests/test_int8.py).
-On CUDA, cuBLAS may choose another kernel for a last chunk of fewer rows, the rotation's float32
-sums then in another order: still the same bits for the same window each time it runs, cuBLAS's
-results being the same run to run on the same card and toolkit (its documentation, "Results
-reproducibility"), so that a resume stays bit for bit."""
+float32 rescaling, is bounded by ROWS rows whatever the window (peaks.INT8_BUFFERS counts it
+all); the weight is multiplied as the file holds it, never copied (transposed). On the CPU,
+every step works on a row alone and the integer product is exact, so the rows taken at a time
+change no bit (tests/test_int8.py). On CUDA, cuBLAS may choose another kernel for a last chunk
+of fewer rows, the rotation's float32 sums then in another order: still the same bits for the
+same window each time it runs, cuBLAS's results being the same run to run on the same card and
+toolkit (its documentation, "Results reproducibility"), so that a resume stays bit for bit."""
 
 from collections.abc import Callable
 from typing import Any, cast
@@ -139,22 +136,33 @@ def quantize(rotated: Tensor, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
 
 
 def transposed(weight: Tensor) -> Tensor:
-    """weight (N, K) int8, as the file and the model hold it, transposed into a contiguous copy,
-    (K, N) int8: product's second matrix, made once a linear's call. torch._int_mm is given it
-    contiguous, as comfy-kitchen's eager int8 linear gives it (weight.T.contiguous()) and torchao's
-    safe_int_mm makes it, whose comment has cuBLAS give a wrong result silently for the transposed
-    view; torch's own _int_mm_out_cuda says as much ("cuBLAS is currently broken for some
-    combination of transposed inputs", native/cuda/Blas.cpp at v2.14.1). The copy stays until the
-    96 GB card has run the view against it. Up to 36 MiB for the 7B's MLP matrices, counted in
-    peaks.INT8_BUFFERS."""
-    return weight.t().contiguous()
+    """weight (N, K) int8, as the file and the model hold it, as product's second matrix: (K, N)
+    int8, a view of weight's own memory (weight.t()), no copy.
+
+    cuBLASLt chooses its kernel by the layout: measured on an RTX 5090 (2026-11-03, torch
+    2.14.1+cu130, 4,096 rows of 3,072 into 9,216), a contiguous (K, N) copy, which this made
+    before, takes cutlass_80_wmma_tensorop_i161616gemm_s8_forwardCompat, 1.15 ms, and the view
+    cutlass_80_tensorop_i16832gemm_s8_128x128_64x6_tn_align16, its int8 tensor-core kernel,
+    0.31-0.34 ms, without the copy's own 0.22-0.43 ms a call. The outputs are bit for bit the
+    copy's at 1, 2, 16, 17, 33, 4,096, 4,101 and 8,280 rows of the 7B's four shapes, and a 1080p
+    job's master frame for frame (framemd5), its DiT 51.7 s against 60.1 s.
+
+    The copy was made out of caution: torch's own _int_mm_out_cuda says "cuBLAS is currently
+    broken for some combination of transposed inputs" (native/cuda/Blas.cpp at v2.14.1), and
+    torchao's safe_int_mm and comfy-kitchen's eager int8 linear (weight.T.contiguous()) copy.
+    What guards the view on another card or toolkit: tests/test_int8.py's GPU test of CUDA
+    against the CPU (test_the_w8a8_linear_on_cuda_is_the_cpu_s) holds CUDA's int32 product
+    through it to the exact integer product, so a kernel giving other bits fails it wherever it
+    runs. On the CPU, torch's _int_mm takes the view too, with the same bits (tests/test_int8.py)
+    and no copy (its memory test)."""
+    return weight.t()
 
 
 def product(codes: Tensor, weight_t: Tensor) -> Tensor:
-    """codes (rows, K) int8 times weight_t (K, N) int8, contiguous (transposed): (rows, N) int32,
-    every sum exact (at most 12288 x 128 x 128, under 2^31, for the 7B). torch._int_mm: cuBLASLt's
-    int8 multiply on CUDA; on the CPU, which only the tests use, torch's own kernel, the same
-    integer product, exact in int32 (tests/test_int8.py holds it to an int64 one)."""
+    """codes (rows, K) int8 times weight_t (K, N) int8, the weight's view (transposed): (rows, N)
+    int32, every sum exact (at most 12288 x 128 x 128, under 2^31, for the 7B). torch._int_mm:
+    cuBLASLt's int8 multiply on CUDA; on the CPU, which only the tests use, torch's own kernel,
+    the same integer product, exact in int32 (tests/test_int8.py holds it to an int64 one)."""
     rows = codes.shape[0]
     if codes.is_cuda and rows <= 16:
         padded = codes.new_zeros((LEAST_ROWS, codes.shape[1]))
