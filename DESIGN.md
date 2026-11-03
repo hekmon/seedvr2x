@@ -230,13 +230,13 @@ seedvr2x/                the repository
   image server's lock holds the same versions of what they share, a test checking it.
 - **The CLI:** `seedvr2x` keeps its command and options. The same command upscales a still
   image (the user, 2026-11-02: no `seedvr2x image` subcommand),
-  `seedvr2x photo.png -o photo.4k.png`, told from a video by its content, which the library's
-  reader identifies, never by its name; the output's format from `-o`'s extension. It
-  assembles the library's bricks: the same models, files, tiling and colour correction, none
-  of the long-run machinery (shots, windows, segments, jobs, resume, calibration, masters).
-  The options a still has no use for (`--cuts`, `--until`, `--segment-cmd`, `--quality`,
-  `--compile`, ...) are refused on one, saying why, never ignored. What a still is, how it is
-  read and written: [Still images](#still-images).
+  `seedvr2x photo.png --resolution 2160 -o photo.4k.png`, told from a video by its content,
+  which the library's reader identifies, never by its name; the output's format from `-o`'s
+  extension. It assembles the library's bricks: the same models, files, tiling and colour
+  correction, none of the long-run machinery (shots, windows, segments, jobs, resume,
+  calibration, masters). The options a still has no use for (`--cuts`, `--until`,
+  `--segment-cmd`, `--quality`, `--compile`, ...) are refused on one, saying why, never
+  ignored. What a still is, how it is read and written: [Still images](#still-images).
 - **The image server, `apps/imgserver/`:** images only, hence its name (a "server" would promise
   every CLI feature over HTTP). Python, the models in its own process, loaded once and kept on
   the GPU. Every parameter in the request's headers, the image's bytes as the body both ways,
@@ -372,11 +372,14 @@ In steps:
    - `still_plan.py`: the plan for one picture ([Still images](#still-images)).
 
    `peaks.py` takes the colour correction's term by its frames, and the planner's `MARGIN` and
-   `VAE_ROOM` (about 40 lines, `planner.py` importing them back); `sampling.py` takes `job.py`'s
-   `ENCODE_SEED_OFFSET`. Nothing else moves. `core/` declares Pillow, already locked and
-   imported by the vendored model code. The CLI branches in `main.py` by content, before its
-   ffmpeg check; the server, later, takes the same four modules. Neither holds the release if
-   it isn't ready with the rest; the roadmap shows them under next until then.
+   `VAE_ROOM` (about 40 lines, `planner.py` importing them back); `passes.py` takes `job.py`'s
+   `ENCODE_SEED_OFFSET`, which `sampling.py` imports (`sampling.py` imports torch, which
+   `job.py` must not: the planner imports it before torch). Nothing else moves. `core/`
+   declares Pillow, already locked and imported by the vendored model code. The CLI branches
+   in `main.py` by content, before its ffmpeg check, to its own `stills.py`; the server,
+   later, takes the same four modules. Built on 2026-11-03 (impl-still), on the CPU, no video
+   plan moving over the plan matrix's 5,480 cases. Neither holds the release if it isn't ready
+   with the rest; the roadmap shows them under next until then.
 4. After v0.1.0: ComfyUI's nodes, assembling the same bricks.
 
 ## Architecture
@@ -2233,13 +2236,32 @@ measured that day on test files, against ffmpeg 9.0's decode.
     through zscale (57.4 dB of 16-bit PSNR on a 4:2:0 JPEG), about an 8-bit rounding.
   - A 16-bit TIFF is refused in v0.1.0, the refusal giving the command that makes a 16-bit
     PNG of it: Pillow reads it at 8 bits, and nothing locked reads it at 16.
+  - A 16-bit RGB PNG is decoded by torchvision, whose image decoding is deprecated since 0.29
+    for TorchCodec's (0.16): kept in v0.1.0, torchvision pinned, its successor chosen when the
+    pin moves past it, judged by the test that holds it to ffmpeg's decode bit for bit.
+  - A camera's raw file built on TIFF (DNG, NEF, CR2 and the like) is refused, told by its
+    markers (DNG's version tag, a first image marked as a reduced-resolution preview), to be
+    developed first, to a 16-bit PNG: Pillow reads its preview as a TIFF, which seedvr2x
+    would otherwise upscale without a word (found on 2026-11-03).
+  - An MPO, a camera's stereo pair or a JPEG carrying an HDR gain map as its second image (as
+    Ultra HDR photos do), is read as its first image, a warning saying what is left out: the
+    output is the picture every viewer shows, without its HDR.
+  - A raw MJPEG stream and a TIFF of several pages hold several frames: refused as animated
+    pictures are, each with its command.
+  - A picture over Pillow's limit against decompression bombs (178,956,970 pixels at Pillow
+    12.3) is refused, the refusal giving the command that makes a smaller one; one over half
+    that, a 108 MP phone photo, is read, a line of seedvr2x's own in place of Pillow's warning.
+  - A damaged file is refused, never read in part: a PNG's chunks before its image data are
+    held to their CRCs.
   - After v0.1.0: HEIC (stored as tiles, in Display P3), AVIF and JPEG XL. Until then the
     video path refuses them, and any other image format ffprobe reads (by its brand where
     ffprobe reads it as an MP4 file, as it reads an AVIF), naming the formats read as
     pictures, so that none runs as a video of one frame.
-- **Animated GIF, APNG and WebP,** found holding several frames, are refused in
-  v0.1.0, the refusal giving the ffmpeg command that makes a video of the file: a GIF's frame
-  delays, palette and transparency would each need rules of their own.
+- **Animated GIF, APNG and WebP,** found holding several frames, are refused in v0.1.0, the
+  refusal giving the ffmpeg command that makes a video of the file, at a steady 10 frames a
+  second, its transparency dropped, both said (`-vf fps=10,format=rgb24 -c:v ffv1`: an FFV1
+  file the video path reads): a GIF's frame delays, palette and transparency would each need
+  rules of their own.
 - **Transparency:** an alpha plane opaque at every pixel is dropped, said in one line, nothing
   of the picture changing (ffmpeg 9.0 decodes a lossless WebP and a GIF with one, the test
   files holding no transparent pixel). A picture with any pixel not opaque is refused: the
@@ -2263,25 +2285,44 @@ measured that day on test files, against ffmpeg 9.0's decode.
   orientation, XMP). The output holds its profile, its colour tags and its orientation only.
 - **Output:** PNG only in v0.1.0. `-o` is a `.png` file; another extension is refused, the
   refusal giving the command that converts the PNG (seedvr2x owns no lossy encoder:
-  [Output](#output)); a directory, the source itself or a file already there is refused,
-  nothing replaced. The file is written whole, as a finished file is. 16 bits by default, all
-  the model made; 8 bits with `--format png8`, rounded to the nearest code (a 4K picture is
-  50 MB before compression at 16 bits, 25 MB at 8); the video formats are refused. A video
-  with `-o x.png` is refused, naming `--format png` and a directory. seedvr2x writes the PNG
-  with numpy and zlib: an 8K picture in 0.97 s, ffmpeg's writer taking 1.65 s.
+  [Output](#output)); a directory, the source itself, a file already there or a missing
+  directory is refused, nothing replaced or made. The file is written whole, as a finished
+  file is. 16 bits by default, all the model made; 8 bits with `--format png8`, rounded to the
+  nearest code; the video formats are refused. A video with `-o x.png` is refused, naming
+  `--format png` and a directory, and `--format png8` on a video too.
+  - seedvr2x writes the PNG with numpy and zlib, each row's filter chosen as libpng chooses
+    it, at zlib's level 6: in the four cases measured, the smallest file or within 4.5% of
+    the smallest, at about 1.3 times the Up filter's time. A grainy 3840×2880 picture at 16
+    bits comes out at 46 MB (66 MB before compression), written in about 4 s; level 9 saves
+    0.5 to 4.5% for 2.3 to 7.6 times the time.
 - **Options taken on a still:** `--resolution`, `--seed`, the model files' (`--model-dir`,
   `--dit-model`, `--vae-model`), the pins (`--encode-tile`, `--decode-tile`, `--swap-blocks`),
-  `--color-correction`, `--input-sar`, `-v`, and `--plan`, which says the picture's plan and
-  runs nothing. Every other is refused, saying why. `--format`, `--quality` and
-  `--min-segment` have no value by default, so that one given is told from its default.
+  `--color-correction`, `--input-sar`, `-v`, and `--plan` alone, without a file, which says
+  the picture's plan and runs nothing (`-o` still given). Every other is refused, saying why,
+  a refusal exiting 1, as a job's does. `--plan` alone on a video is refused, a video's plan
+  writing its cut list to the file it names. `--format`, `--quality` and `--min-segment` have
+  no value by default, so that one given is told from its default.
+- **Size:** `--resolution` is the output's short side, 1080 by default, as for a video
+  (numz's). A size given is taken as asked, smaller than the picture included: a large photo
+  is redrawn smaller, and the planner's refusals on a small card name a smaller size as the
+  way out. Its only bounds are the padding's (17 rows and 16 columns) and the card's memory.
+  Where the default makes the output smaller than its source, a picture or a video, one line
+  says so and names the `--resolution` that keeps the source's size (the user, 2026-11-03: a
+  12 MP photo, 4032×3024, comes out 1440×1080 by default); a size given says nothing more.
 - **The plan for one picture** (`still_plan.py`): made for a bound, the output's long and
   short sides in either orientation; the CLI's bound is its picture, the server's its
   largest.
   - The DiT's and the VAE's placement (`ModelPlan`) is fixed once for the bound: the DiT on
     one latent (the VAE away first, then the fewest blocks swapped), the colour correction's
-    term at the bound's area, and the 512-px floor proved over every shape a picture within
-    the bound cuts. The tiles are chosen per picture under that placement, never refused
-    within the bound.
+    term at the bound's area, and the floor proved over every shape a picture within the
+    bound cuts: per class of pictures (the pair of tile spans their padded frame cuts), the
+    lesser of the 512-px tile's peak and the class's largest untiled pass. The tiles are
+    chosen per picture under that placement, never refused within the bound. The bound's own
+    picture is its largest padded rows by its largest padded columns, in each orientation.
+  - The DiT is held to its least at the bound's largest padded frame, plus 2.726 MiB for each
+    attention window at the most windows any picture within the bound takes: the 7B's
+    windows aren't monotone in the size (a 3000×2000 bound takes 72, a smaller picture within
+    it 81), up to 361 at 8K, 0.96 GiB.
   - The largest picture's tiles don't hold for every smaller one: a cut-off tile is counted
     at its rule plus 0.3 GiB, and measured steps aren't monotone (an encode at 752×896 takes
     8.09 GiB, at 752×960 7.70).
@@ -2290,16 +2331,21 @@ measured that day on test files, against ffmpeg 9.0's decode.
     choices are the planner's.
   - The VAE's figures are a video slice's, up to 5 frames; one frame's are unmeasured, and
     the card measures them before it ships.
+  - The host's figure for the CLI is a video job's process (2.4 GiB, `HOST_RESIDENT`) plus
+    the picture's own arrays, provisional until the card measures a still's; the server's is
+    a parameter of the plan.
 - **The model on one picture:** a still is encoded alone, as a shot's first frame is
   ([Pipeline, per shot](#pipeline-per-shot), step 1: closer to the ground truth, less
   re-rendered by one measure). Measured in the card's batch on blind stills: the picture alone
   against the picture repeated 5 times, its 5th frame kept, at a few times the GPU time. The
   picture alone until then.
 - **Measured before it ships** (the card's batch, then the RTX 5090), the planner keeping no
-  blind spot: the DiT on one latent at 4K to 8K (FA2 and SDPA, no block and 36 swapped); the
-  one-frame VAE passes at 8K and 6000×4000, tiles of 512 to 2048 px, cut-off shapes, and the
-  colour correction's term; whole pictures on card sizes emulated from 16 to 48 GB, each peak
-  against its prediction; 8K on the 32 GB card.
+  blind spot: the DiT on one latent at 4K to 8K (FA2 and SDPA, no block and 36 swapped), its
+  attention windows' term included, never measured past a video's windows; the one-frame VAE
+  passes at 8K and 6000×4000, tiles of 512 to 2048 px, cut-off shapes, and the colour
+  correction's term; a still's process memory; whole pictures on card sizes emulated from 16
+  to 48 GB, each peak against its prediction; 8K on the 32 GB card; the still's pass on CUDA
+  against a one-frame shot's, bit for bit, as it is on the CPU.
 
 ## Memory planner
 
@@ -3461,7 +3507,7 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
 | `--cache_dit`, `--cache_vae`, `--chunk_size` | dropped: one long-running process, streaming by design |
 | `--seed` | kept (comparisons, reproducibility) |
 | `--output_format`, `--video_backend`, `--10bit` | replaced by FFV1 (`yuv420p10le` by default, `gbrp16le`) and 16-bit PNG |
-| `--resolution` | kept: the output's short side, 1080 by default, numz's |
+| `--resolution` | kept: the output's short side, 1080 by default, numz's; a line where the default makes the output smaller than its source, naming the value that keeps its size |
 | `--max_resolution` | dropped from v0.1.0 (2026-10-31; said kept here, never built): the short side is the one size asked, and a size that doesn't fit is refused, naming the largest that does |
 | `--skip_first_frames`, `--load_cap` | dropped (2026-10-31): no option takes part of a source; the part wanted is cut first, and that file is the source. `--until` stops a job at a set time, which is not that |
 | `--swap_io_components` | dropped (2026-10-31): `--swap-blocks` swaps whole blocks; the DiT's other parameters (0.16 GiB) leave the GPU with the model when the plan sends it away for the VAE's passes, where numz's option left every unswapped block on the GPU through the decode ([bug 12](research/bugs/12-swap-io-dit-leak.md)) |
