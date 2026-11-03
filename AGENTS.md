@@ -658,6 +658,11 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   the tests alone), `test_main.py`, `test_names.py` and `test_lock.py` the parts alone. The
   library's three steps (`still.encoded`, `sampled`, `decoded`) are held to `still.upscale` by
   the CLI's `tests/test_still_cli.py`, through `upscale`, which composes them.
+- The image server's container (DESIGN.md, The image server, The Docker image):
+  `apps/imgserver/Dockerfile`, built from the repository's root (`docker build -f
+  apps/imgserver/Dockerfile .`), its ignore file `Dockerfile.dockerignore` beside it, and
+  `.github/workflows/imgserver-image.yml`, which pushes it to ghcr.io on release tags. No test
+  builds it: a build downloads torch's CUDA wheels, several GB.
 - A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
   phase a refusal names, a recorded shape planned again releasing that part, planning importing
   no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),

@@ -1,0 +1,21 @@
+# The build context is the repository's root (docker build -f apps/imgserver/Dockerfile .). BuildKit
+# reads this file, named after the Dockerfile, in place of a .dockerignore: everything is denied,
+# then what the server needs is allowed: the library's package, the server's modules and its lock.
+# No tests, no tools, no research, no upstream submodules, no environment or cache.
+*
+
+!core/pyproject.toml
+!core/LICENSE
+!core/NOTICE
+!core/seedvr2x
+
+!apps/imgserver/pyproject.toml
+!apps/imgserver/uv.lock
+!apps/imgserver/.python-version
+!apps/imgserver/LICENSE
+!apps/imgserver/NOTICE
+!apps/imgserver/README.md
+!apps/imgserver/*.py
+
+**/__pycache__
+**/*.py[cod]
