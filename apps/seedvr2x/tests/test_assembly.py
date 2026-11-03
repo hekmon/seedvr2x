@@ -46,7 +46,7 @@ from media.scan import scan
 from media.source import counted, declare, first_pass
 from media.writer import FFV1Writer, Tags
 from seedvr2x.files import size_said
-from seedvr2x.record import Model, Record, Video, tag_names
+from seedvr2x.record import Model, Record, Video
 
 
 def _usable() -> bool:
@@ -313,11 +313,15 @@ def workdir(directory: Path) -> Path:
     return work
 
 
-def assembled(directory: Path, job: Job, source: Path) -> Path:
+def assembled(
+    directory: Path, job: Job, source: Path, record: Sequence[tuple[str, str]] = ()
+) -> Path:
     """The job assembled with the source's other streams, its work directory left empty."""
     output = directory / "out.mkv"
     work = workdir(directory)
-    done = assemble(output, job.segments, job.frame_rate, source, indexed(source), work)
+    done = assemble(
+        output, job.segments, job.frame_rate, source, indexed(source), work, record=record
+    )
     assert done.frames == job.frames and done.size == output.stat().st_size
     assert not list(work.iterdir()) and not partial_path(output).exists()
     return output
@@ -575,48 +579,82 @@ def test_the_snap_is_refused_beyond_what_it_computes_exactly() -> None:
 # --- the source's other streams
 
 
-def recorded(decode_tile: int) -> Record:
-    """A video job's record, the decode's tile the one value to differ."""
+def recorded(decode_tile: int, *, seed: int = 42, cut_threshold: str | None = "0.3") -> Record:
+    """A video job's record, the decode's tile, the seed and the cuts' threshold the values to
+    differ."""
     return Record(
+        "seedvr2x",
         "0.1.0",
         (64, 48),
         (128, 96),
+        96,
+        Fraction(1),
         Model("seedvr2x_ema_7b_sharp_fp16.safetensors", "1" * 64),
         Model("ema_vae_fp16.safetensors", "2" * 64),
-        42,
+        seed,
         "split",
         0,
         decode_tile,
         "sdpa",
-        Video(20, "maximum", False),
+        Video(
+            20,
+            "maximum",
+            False,
+            False,
+            cut_threshold=cut_threshold,
+            cuts_sha256=None if cut_threshold else "3" * 64,
+        ),
     )
 
 
-def test_the_record_is_kept_from_the_first_segment(tmp_path: Path) -> None:
-    # DESIGN.md, The record in each output: the finished file's video keeps seedvr2x's tags from
-    # the first segment (a resume planned again for the memory free may write another on later
-    # segments), with its encoder's and the source's language and title; every other tag of the
-    # segment or of the source's video (mkvmerge's BPS) is dropped.
-    first, later = recorded(0), recorded(512)
-    assert assembly.KEPT == {"ENCODER"} | {name.upper() for name in tag_names()}
-    job = make_job(
-        tmp_path / "segments",
-        RATES["24000/1001"],
-        3,
-        records=[first.tags(), later.tags(), later.tags()],
-    )
+def test_the_finished_files_record_is_the_jobs_whatever_the_segments_carry(
+    tmp_path: Path,
+) -> None:
+    # DESIGN.md, The record in each output: the finished file's video holds the job's record, set
+    # by the join itself, not a segment's (a --segment-cmd writing MP4 or a bare stream drops
+    # stream tags): the segments here carry other values (the first a decode tile of 512 and a
+    # seed, the later a record with a cuts list's hash where the job has a threshold, and one
+    # none at all), and none of them is left. The video's other tags are the encoder's and the
+    # source's language and title; every other tag of the segment or of the source's video
+    # (mkvmerge's BPS) is dropped.
+    assert assembly.KEPT == "ENCODER"
+    job_record = recorded(0)
+    segment_records = [
+        recorded(512, seed=7).tags(),
+        recorded(512, cut_threshold=None).tags(),
+        [],
+    ]
+    job = make_job(tmp_path / "segments", RATES["24000/1001"], 3, records=segment_records)
+    assert streams(job.segments[0][0])[0]["tags"]["SEEDVR2X_DECODE_TILE"] == "512"
+    assert "SEEDVR2X_CUTS_SHA256" in streams(job.segments[1][0])[0]["tags"]
     source = rich(tmp_path / "source", job)
     assert "BPS" in streams(source)[0]["tags"]
-    output = assembled(tmp_path, job, source)
+    output = assembled(tmp_path, job, source, record=job_record.tags())
     written = {k: v for k, v in streams(output)[0]["tags"].items() if k != "DURATION"}
     assert written == {
         "language": "jpn",
         "title": "Main video",
         "ENCODER": streams(job.segments[0][0])[0]["tags"]["ENCODER"],
-        **{name.upper(): value for name, value in first.tags()},
+        **{name.upper(): value for name, value in job_record.tags()},
     }
-    assert written["SEEDVR2X_DECODE_TILE"] == "0"
+    assert written["SEEDVR2X_DECODE_TILE"] == "0" and written["SEEDVR2X_SEED"] == "42"
+    assert written["SEEDVR2X_CUT_THRESHOLD"] == "0.3" and "SEEDVR2X_CUTS_SHA256" not in written
     assert "BPS" not in written and "NUMBER_OF_FRAMES" not in written
+
+
+def test_without_a_record_no_seedvr2x_tag_is_left_from_the_segments(tmp_path: Path) -> None:
+    # assemble's record defaults to none: the segments' own are not kept, the encoder's alone.
+    job = make_job(
+        tmp_path / "segments",
+        RATES["24000/1001"],
+        2,
+        records=[recorded(512).tags(), recorded(512).tags()],
+    )
+    assert "SEEDVR2X_URL" in streams(job.segments[0][0])[0]["tags"]
+    output = assembled(tmp_path, job, rich(tmp_path / "source", job))
+    written = {k: v for k, v in streams(output)[0]["tags"].items() if k != "DURATION"}
+    assert not [k for k in written if k.startswith("SEEDVR2X_")]
+    assert written["ENCODER"] == streams(job.segments[0][0])[0]["tags"]["ENCODER"]
 
 
 @pytest.mark.parametrize("name", ["24000/1001", "30000/1001"])

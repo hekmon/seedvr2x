@@ -51,13 +51,12 @@ if TYPE_CHECKING:
     from job import JobError, OutputSegment, Shot
     from manifest import Manifest
     from media.index import FrameIndex
-    from media.probe import VideoStream
     from media.source import Declared, FirstPass, Source
     from media.writer import Writer
     from plan import Plan
     from planner import Pins, PlanError
     from seedvr2x.model import Models
-    from seedvr2x.passes import Compilation, ModelPlan, Tiles
+    from seedvr2x.passes import Compilation, ModelPlan
     from seedvr2x.pull import ModelFile, ModelFiles
     from seedvr2x.record import Record
     from seedvr2x.weights import Architecture
@@ -1497,8 +1496,9 @@ def _run(args: argparse.Namespace) -> int:
     units = Units(directory, record)
     tags = Tags.of(stream, source.conversion.matrix_tag)
     # seedvr2x's record on each master and on the stream --segment-cmd reads (DESIGN.md, The
-    # record in each output), from the job's settings and the plan the run follows.
-    recorded_tags = _stream_record(record.settings, stream, (out_width, out_height), plan).tags()
+    # record in each output), from the job's manifest as this run has it, a resume planned again
+    # included; the finished file's is written by the assembly from the same (_assemble).
+    recorded_tags = _job_record(record.content()).tags()
     # The VAE compiled, as the plan has it (--compile, planner.plan): its shapes from the plan,
     # its cache in the job's directory (manifest.COMPILE_CACHE), compiled as the models load.
     compilation = None
@@ -2719,6 +2719,10 @@ def _assemble(
                 *(final, segments, source.frame_rate, source.path, source.index),
                 work=directory,
                 stale=sums,
+                # The finished file's record, from the job's manifest, whatever the segments
+                # carry: a --segment-cmd writing MP4 or a bare stream drops stream tags (DESIGN.md,
+                # The record in each output).
+                record=_job_record(record.content()).tags(),
             )
         except Deadline as late:
             assert until is not None
@@ -4949,39 +4953,55 @@ def _model(file: "ModelFile", model_files: "ModelFiles") -> dict[str, object]:
     }
 
 
-def _stream_record(
-    settings: dict[str, Any], stream: "VideoStream", output: tuple[int, int], plan: "Plan"
-) -> "Record":
-    """A video job's record (seedvr2x.record.Record): this command's version, the source's size
-    as its stream stores it and the output's (output, width and height), the job's model files by
-    the names given and the SHA-256 its settings record, its seed, colour correction and level
-    (--quality), and of the plan the run follows the tiles (0 untiled), the window cap (0: each
-    shot in one window) and --compile; the attention kernel this run's DiT takes (_attention).
-    A job's settings are the same across its runs (resume), its plan and attention kernel may not
-    be: a resume planned again for the memory free (--accept-env-change) writes the new plan's on
-    the segments it makes, though a run whose windows were all done keeps its old cap and a latent
-    encoded its old tiles (resume.reshape), and the assembly keeps the first segment's. A question
-    for design (impl-record, 2026-11-03): DESIGN.md's record has one value per field."""
-    from seedvr2x.record import Model, Record, Video
+def _job_record(content: dict[str, Any]) -> "Record":
+    """A video job's record (seedvr2x.record.Record; DESIGN.md, The record in each output), from
+    its manifest's content (Manifest.content) alone, so that the masters and the finished file
+    say the same: this command's name and version; the source's size as its stream stores it and
+    its sample aspect as used (input), the output's size (output); from the settings the
+    resolution, the model files by the names given and their SHA-256, the seed, the colour
+    correction, the level and the cuts (the threshold, or the list's SHA-256); from the plan the
+    tiles (0 untiled), the window cap (0: each shot in one window) and --compile; the attention
+    kernel of its environment; and whether a resume planned it again (environment_changes: a
+    change whose `after` holds a plan, resume.shape_change). A job planned again holds the new
+    plan's values: each unit's own stay in the manifest (its runs' window_cap)."""
+    from fractions import Fraction
 
-    def model(entry: dict[str, Any]) -> Model:
-        return Model(entry["name"], entry["sha256"])
+    from seedvr2x.record import Model, Record, Video, cuts_sha256
 
-    def side(tiles: "Tiles | None") -> int:
-        return 0 if tiles is None else tiles.size
+    settings, plan, entry = content["settings"], content["plan"], content["input"]
 
+    def model(recorded: dict[str, Any]) -> Model:
+        return Model(recorded["name"], recorded["sha256"])
+
+    def side(tiles: dict[str, int] | None) -> int:
+        return 0 if tiles is None else tiles["size"]
+
+    width, height = entry["size"]
+    out_width, out_height = content["output"]["size"]
+    cuts = settings["cuts"]
+    replanned = any("plan" in change.get("after", {}) for change in content["environment_changes"])
     return Record(
+        app="seedvr2x",
         version=version("seedvr2x"),
-        source=(stream.width, stream.height),
-        output=output,
+        source=(width, height),
+        output=(out_width, out_height),
+        resolution=settings["resolution"],
+        sample_aspect=Fraction(entry["sample_aspect"]),
         dit=model(settings["dit_model"]),
         vae=model(settings["vae_model"]),
         seed=settings["seed"],
         color_correction=settings["color_correction"],
-        encode_tile=side(plan.encode_tiles),
-        decode_tile=side(plan.decode_tiles),
-        attention=_attention(),
-        video=Video(plan.window or 0, settings["quality"], plan.compile_vae),
+        encode_tile=side(plan["encode_tiles"]),
+        decode_tile=side(plan["decode_tiles"]),
+        attention=content["environment"]["attention"],
+        video=Video(
+            plan["window"] or 0,
+            settings["quality"],
+            plan["compile_vae"],
+            replanned,
+            cut_threshold=None if cuts is not None else settings["cut_threshold"],
+            cuts_sha256=None if cuts is None else cuts_sha256(cuts),
+        ),
     )
 
 

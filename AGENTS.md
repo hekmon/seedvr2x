@@ -493,11 +493,14 @@ uv run pytest
   read back by ffprobe (Matroska writes the names in upper case), the master's packets and
   checksums those written without it; none by default; on the stream `--segment-cmd` reads, and
   carried by an ffmpeg that re-encodes it; none in a PNG directory's frames.
-  `tests/test_assembly.py` holds the finished file keeping the first segment's record beside its
-  encoder (`KEPT`), the source's video tags dropped but language and title. The command line's
-  jobs (`tests/test_cli_run.py`, `tests/test_cli_segment_cmd.py`) hold each field against the
-  job's manifest, on the masters, on the finished `.mkv`, on a command's segments, and none in a
-  PNG job's frames. The tags change the masters' bytes and sizes, not their frames, packets or
+  `tests/test_assembly.py` holds the finished file's record written by the join from the job's
+  (`assemble`'s `record`), whatever the segments carry, the first segment's encoder kept
+  (`KEPT`), the source's video tags dropped but language and title. The command line's jobs
+  (`tests/test_cli_run.py`, `tests/test_cli_segment_cmd.py`) hold each field against the job's
+  manifest (`main._job_record`), on the masters, on the finished `.mkv`, on a command's segments,
+  the whole record on the finished file of a command writing MP4, which drops stream tags; a
+  re-planned resume's segments `replanned`, with the new plan's values; a cut list's SHA-256 or
+  the detection's threshold; and none in a PNG job's frames. The tags change the masters' bytes and sizes, not their frames, packets or
   checksums: what compares masters (the milestone-1 regression's `tools/compare.py`, the
   segments' SHA-256 and sizes, each against its own file's record) compares frames, or a file
   with its own record.
@@ -542,8 +545,11 @@ uv run pytest
   `tests/test_record.py` holds `seedvr2x/record.py`: its XMP packet parsed back by the standard
   library's XML parser (`read_xmp`, which `test_png.py`, `test_webp.py` and `test_still_cli.py`
   read a file's packet with), every field at its place under seedvr2x's namespace, the mark's
-  URI in full; a video's tags, the same fields prefixed `seedvr2x_`; the bytes the fields' alone;
-  a field out of range refused; a model's name that XML can't hold written so that it parses.
+  URI in full; the app named in the creator (`seedvr2x`, `seedvr2x-imgserver`); the resolution
+  asked and the sample aspect as `N:D`; a video's tags, the same fields prefixed `seedvr2x_`, with
+  its window cap, level, compile, `replanned` and cuts (a threshold, or `cuts_sha256`, the hash of
+  the plain list's text); the bytes the fields' alone; a field out of range refused; a model's
+  name that XML can't hold, or a path, written so that it parses, as its file name.
   `tests/test_still.py` holds `seedvr2x/still.py` on `stand_ins.cpu_models`' VAE cast to bfloat16
   and a stand-in DiT: one latent, the two seeds, nothing loaded, the phases in order, tiled
   passes in memory, the correction against the picture, NaN refused. `tests/
@@ -567,8 +573,9 @@ uv run pytest
   one unclassified fails), each refusal; `-o`'s rules and a write that fails leaving nothing;
   `--plan` alone saying the plan, loading and writing nothing, and hashing no model file for the
   record; seedvr2x's record read
-  back from each file, PNG and WebP, upright or turned (the version, the mark, the source's size
-  as stored and the output's as written, the model files by name and SHA-256, hashed before the
+  back from each file, PNG and WebP, upright or turned (the app and version, the mark, the source's
+  size as stored and the output's as written, the resolution asked and the sample aspect, 48 and
+  49 giving the same size, the model files by name and SHA-256, hashed before the
   load, the seed, the colour correction, the tiles of the pass, the attention kernel), written out
   in the test; runs on the stand-ins whose file is `png.write` of `still.upscale` with its record
   byte for byte, at 16 and 8 bits (`--format png8`), grey, the

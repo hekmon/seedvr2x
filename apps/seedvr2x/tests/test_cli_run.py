@@ -2560,6 +2560,41 @@ def test_a_finished_segment_and_a_latent_are_kept_when_a_shape_is_planned_again(
     assert (entry["windows_kept"], entry["windows_discarded"]) == (2, 1)
     assert indexes(out / "seg_000001.mkv") == list(range(57, 114))
     assert cli.main(["verify", str(out)]) == 0
+    # The record (DESIGN.md, The record in each output) says what each master was made under: the
+    # finished segment, untouched, the old cap of 9 and not planned again; the segment made
+    # after, the new cap of 7 and "replanned", from the same manifest.
+    assert (before["plan"]["window"], after["plan"]["window"]) == (9, 7)
+    old = recorded_tags(before, "64x48", "128x96")
+    new = recorded_tags(after, "64x48", "128x96", replanned=True)
+    assert (old["SEEDVR2X_WINDOW"], old["SEEDVR2X_REPLANNED"]) == ("9", "false")
+    assert (new["SEEDVR2X_WINDOW"], new["SEEDVR2X_REPLANNED"]) == ("7", "true")
+    for name, expected in (("seg_000000.mkv", old), ("seg_000001.mkv", new)):
+        tags = stream_tags_of(out / name)
+        assert {key: tags.get(key) for key in expected} == expected, name
+
+
+def test_the_finished_file_of_a_job_planned_again_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # The same job as a .mkv file: its segments are made under the plan they began with and the
+    # plan after, but the finished file holds the job's record as the manifest has it at the end,
+    # the new cap and "replanned" true, whatever its first segment carries (the assembly writes
+    # it, media.assembly.assemble's record).
+    source_path, wide, narrow = long_shots(tmp_path, monkeypatch)
+    options = ("--cuts", "cuts.txt", "--min-segment", "0")
+    free_memory(monkeypatch, wide)
+    steps.stop = "window 57:1"
+    stopped(tmp_path, source_path, "x.mkv", *options)
+    free_memory(monkeypatch, narrow)
+    steps.stop = None
+    assert upscale(tmp_path, source_path, "x.mkv", *options, "--accept-env-change") == 0
+    beside = json.loads((tmp_path / "x.mkv.manifest.json").read_text())
+    assert beside["plan"]["window"] == 7 and len(beside["environment_changes"]) == 1
+    expected = recorded_tags(beside, "64x48", "128x96", replanned=True)
+    assert (expected["SEEDVR2X_WINDOW"], expected["SEEDVR2X_REPLANNED"]) == ("7", "true")
+    tags = stream_tags_of(tmp_path / "x.mkv")
+    assert {key: tags.get(key) for key in expected} == expected
+    assert not [key for key in tags if key.startswith("SEEDVR2X_") and key not in expected]
 
 
 def test_an_environment_change_accepted_with_a_shape_planned_again_is_recorded_with_it(
@@ -6279,8 +6314,12 @@ def test_a_job_with_only_its_assembly_left_in_another_environment(
         monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "another card")
         nothing_asked_of_the_gpu(monkeypatch)
     elif change == "stack":
-        monkeypatch.setattr(model, "attention_backend", lambda: "another backend")
-        differs = f'environment.attention: "{recorded["attention"]}" -> "another backend"'
+        # The other of the two kernels: the record (DESIGN.md, The record in each output) holds
+        # the manifest's attention once a job is accepted in the new environment, and refuses a
+        # name that is neither.
+        other = peaks.SDPA if recorded["attention"] == peaks.FLASH_ATTN_2 else peaks.FLASH_ATTN_2
+        monkeypatch.setattr(model, "attention_backend", lambda: other)
+        differs = f'environment.attention: "{recorded["attention"]}" -> "{other}"'
     else:
         monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
         differs = f'environment.ffmpeg: "{recorded["ffmpeg"]}" -> "n0.0-another"'
@@ -6611,8 +6650,12 @@ def test_finished_job_in_another_environment(
         monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: pytest.fail("asked"))
         monkeypatch.setattr(model, "nvidia_driver", lambda: pytest.fail("asked"))
     elif change == "stack":
-        monkeypatch.setattr(model, "attention_backend", lambda: "another backend")
-        differs = f'environment.attention: "{recorded["attention"]}" -> "another backend"'
+        # The other of the two kernels: the record (DESIGN.md, The record in each output) holds
+        # the manifest's attention once a job is accepted in the new environment, and refuses a
+        # name that is neither.
+        other = peaks.SDPA if recorded["attention"] == peaks.FLASH_ATTN_2 else peaks.FLASH_ATTN_2
+        monkeypatch.setattr(model, "attention_backend", lambda: other)
+        differs = f'environment.attention: "{recorded["attention"]}" -> "{other}"'
     else:
         monkeypatch.setattr(ffmpeg, "check", lambda *options, **needs: "n0.0-another")
         differs = f'environment.ffmpeg: "{recorded["ffmpeg"]}" -> "n0.0-another"'
@@ -8972,9 +9015,12 @@ def stream_tags_of(path: Path) -> dict[str, str]:
     return json.loads(shown.stdout)["streams"][0].get("tags", {})
 
 
-def recorded_tags(content: dict[str, Any], source_size: str, output_size: str) -> dict[str, str]:
+def recorded_tags(
+    content: dict[str, Any], source_size: str, output_size: str, replanned: bool = False
+) -> dict[str, str]:
     """The record a job's masters carry (DESIGN.md, The record in each output), every value
-    written out here from the job's manifest and not rebuilt by main._stream_record."""
+    written out here from the job's manifest and not rebuilt by main._job_record: the cuts as a
+    threshold when the job detected them, else as the SHA-256 of their text written here."""
     from importlib.metadata import version
 
     settings, plan = content["settings"], content["plan"]
@@ -8982,14 +9028,24 @@ def recorded_tags(content: dict[str, Any], source_size: str, output_size: str) -
     def side(tiles: dict[str, int] | None) -> str:
         return "0" if tiles is None else str(tiles["size"])
 
+    # The manifest writes the sample aspect as a fraction ("1", "32/27"), the tag as N:D.
+    aspect = Fraction(content["input"]["sample_aspect"])
+    if settings["cuts"] is None:
+        cuts = {"SEEDVR2X_CUT_THRESHOLD": settings["cut_threshold"]}
+    else:
+        text = "".join(f"{cut}\n" for cut in settings["cuts"])
+        cuts = {"SEEDVR2X_CUTS_SHA256": hashlib.sha256(text.encode()).hexdigest()}
     return {
         "SEEDVR2X_URL": "https://github.com/hekmon/seedvr2x",
+        "SEEDVR2X_APP": "seedvr2x",
         "SEEDVR2X_VERSION": version("seedvr2x"),
         "SEEDVR2X_DIGITAL_SOURCE_TYPE": (
             "http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia"
         ),
         "SEEDVR2X_SOURCE_SIZE": source_size,
         "SEEDVR2X_OUTPUT_SIZE": output_size,
+        "SEEDVR2X_RESOLUTION": str(settings["resolution"]),
+        "SEEDVR2X_SAMPLE_ASPECT": f"{aspect.numerator}:{aspect.denominator}",
         "SEEDVR2X_DIT_MODEL": settings["dit_model"]["name"],
         "SEEDVR2X_DIT_SHA256": settings["dit_model"]["sha256"],
         "SEEDVR2X_VAE_MODEL": settings["vae_model"]["name"],
@@ -8998,10 +9054,12 @@ def recorded_tags(content: dict[str, Any], source_size: str, output_size: str) -
         "SEEDVR2X_COLOR_CORRECTION": settings["color_correction"],
         "SEEDVR2X_ENCODE_TILE": side(plan["encode_tiles"]),
         "SEEDVR2X_DECODE_TILE": side(plan["decode_tiles"]),
-        "SEEDVR2X_ATTENTION": cli._attention(),  # pyright: ignore[reportPrivateUsage]
+        "SEEDVR2X_ATTENTION": content["environment"]["attention"],
         "SEEDVR2X_WINDOW": str(plan["window"] or 0),
         "SEEDVR2X_QUALITY": settings["quality"],
         "SEEDVR2X_COMPILE": "true" if plan["compile_vae"] else "false",
+        "SEEDVR2X_REPLANNED": "true" if replanned else "false",
+        **cuts,
     }
 
 
@@ -9010,10 +9068,10 @@ def test_the_record_is_on_each_master_and_on_a_finished_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The record (DESIGN.md, The record in each output) on every segment of a directory job and
-    # on the finished -o x.mkv file (the first segment's, kept by the assembly), from the job's
+    # on the finished -o x.mkv file (written by the assembly from the job), from the job's
     # own manifest: the settings recorded, the plan the run followed, the source's stored size
     # and the output's. The passes are untiled (a tile is 512 px or more, the stand-in's frame
-    # 128x96): the tiles' tags are 0, and a tile's size is main._stream_record's own (side).
+    # 128x96): the tiles' tags are 0, and a tile's size is main._job_record's own (side).
     source_path = job(tmp_path, monkeypatch)
     options = (*JOB, "--format", "yuv420p10le")
     assert upscale(tmp_path, source_path, "out", *options) == 0
@@ -9034,6 +9092,35 @@ def test_the_record_is_on_each_master_and_on_a_finished_file(
     assert not [key for key in tags if key.startswith("SEEDVR2X_") and key not in expected]
 
 
+def test_a_detected_jobs_record_has_the_threshold_and_a_listed_ones_the_lists_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scripted: Steps
+) -> None:
+    # The cuts in the record (DESIGN.md, The record in each output): a job that detected its
+    # shots holds the threshold as the settings write it and no list hash; a job given --cuts
+    # the SHA-256 of the list (the text of the numbers one a line, written out in recorded_tags)
+    # and no threshold. Both on the masters; the listed one is JOB's, the record test above.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *CUT, "--cut-threshold", "0.15") == 0
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    assert content["settings"]["cuts"] is None
+    expected = recorded_tags(content, "64x48", "128x96")
+    assert expected["SEEDVR2X_CUT_THRESHOLD"] == "0.15"
+    assert "SEEDVR2X_CUTS_SHA256" not in expected
+    for master in sorted((tmp_path / "out").glob("seg_*.mkv")):
+        tags = stream_tags_of(master)
+        assert {key: tags.get(key) for key in expected} == expected, master.name
+        assert "SEEDVR2X_CUTS_SHA256" not in tags
+    assert upscale(tmp_path, source_path, "listed", "--cuts", "cuts.txt", "--window", "5") == 0
+    listed = json.loads((tmp_path / "listed" / "manifest.json").read_text())
+    expected = recorded_tags(listed, "64x48", "128x96")
+    assert expected["SEEDVR2X_CUTS_SHA256"] == hashlib.sha256(b"3\n4\n").hexdigest()
+    assert "SEEDVR2X_CUT_THRESHOLD" not in expected
+    for master in sorted((tmp_path / "listed").glob("seg_*.mkv")):
+        tags = stream_tags_of(master)
+        assert {key: tags.get(key) for key in expected} == expected, master.name
+        assert "SEEDVR2X_CUT_THRESHOLD" not in tags
+
+
 @pytest.mark.usefixtures("stand_in")
 def test_png_frames_carry_no_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A PNG job's frames hold none of it: the directory's manifest does.
@@ -9045,27 +9132,56 @@ def test_png_frames_carry_no_record(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 
 def test_a_tiled_plan_is_the_records_tiles_and_a_compiled_one_its_flag() -> None:
-    # The stand-in's frame is too small for a tile, so main._stream_record is given a plan with
-    # tiles and --compile directly: a tile is its side, an untiled pass 0, no cap 0, and the
-    # stream's stored size (not the displayed one) is the source's.
-    settings = {
-        "dit_model": {"name": "d.safetensors", "sha256": "1" * 64},
-        "vae_model": {"name": "v.safetensors", "sha256": "2" * 64},
-        "seed": 7,
-        "color_correction": "split",
-        "quality": "maximum",
+    # The stand-in's frame is too small for a tile, so main._job_record is given a manifest's
+    # content made here with tiles and --compile: a tile is its side, an untiled pass 0, no cap 0,
+    # the stream's stored size (not the displayed one) is the source's, the sample aspect N:D, a
+    # cut list its SHA-256 (of its text, written here) and no threshold; and a change of the
+    # environment_changes whose `after` holds a plan says the job was planned again.
+    content: dict[str, Any] = {
+        "settings": {
+            "dit_model": {"name": "d.safetensors", "sha256": "1" * 64},
+            "vae_model": {"name": "v.safetensors", "sha256": "2" * 64},
+            "seed": 7,
+            "resolution": 2160,
+            "color_correction": "split",
+            "quality": "maximum",
+            "cuts": [24, 96],
+        },
+        "plan": {
+            "window": None,
+            "encode_tiles": {"size": 512},
+            "decode_tiles": None,
+            "compile_vae": True,
+        },
+        "input": {"size": [1440, 1080], "sample_aspect": "32/27"},
+        "output": {"size": [2880, 2160]},
+        "environment": {"attention": "sdpa"},
+        "environment_changes": [],
     }
-    stream = SimpleNamespace(width=1440, height=1080)
-    plan = Plan(None, Tiles(512), None, compile_vae=True)
-    made = cli._stream_record(  # pyright: ignore[reportPrivateUsage]
-        settings,
-        stream,  # pyright: ignore[reportArgumentType]
-        (2880, 2160),
-        plan,
-    ).tags()
-    held = dict(made)
+    held = dict(cli._job_record(content).tags())  # pyright: ignore[reportPrivateUsage]
+    assert held["seedvr2x_app"] == "seedvr2x"
     assert held["seedvr2x_source_size"] == "1440x1080"
     assert held["seedvr2x_output_size"] == "2880x2160"
+    assert (held["seedvr2x_resolution"], held["seedvr2x_sample_aspect"]) == ("2160", "32:27")
     assert (held["seedvr2x_encode_tile"], held["seedvr2x_decode_tile"]) == ("512", "0")
     assert (held["seedvr2x_window"], held["seedvr2x_compile"]) == ("0", "true")
     assert (held["seedvr2x_quality"], held["seedvr2x_seed"]) == ("maximum", "7")
+    assert held["seedvr2x_attention"] == "sdpa" and held["seedvr2x_replanned"] == "false"
+    assert held["seedvr2x_cuts_sha256"] == hashlib.sha256(b"24\n96\n").hexdigest()
+    assert "seedvr2x_cut_threshold" not in held
+
+    # A detected job: the threshold as the settings write it, no list.
+    content["settings"].update(cuts=None, cut_threshold="0.3")
+    held = dict(cli._job_record(content).tags())  # pyright: ignore[reportPrivateUsage]
+    assert held["seedvr2x_cut_threshold"] == "0.3" and "seedvr2x_cuts_sha256" not in held
+
+    # An environment change alone (a package, say) is not a new plan; one whose `after` holds a
+    # plan is, and the window cap of the plan in the manifest is the one recorded.
+    changes: list[dict[str, Any]] = [{"before": {"torch": "a"}, "after": {"torch": "b"}}]
+    content["environment_changes"] = changes
+    held = dict(cli._job_record(content).tags())  # pyright: ignore[reportPrivateUsage]
+    assert held["seedvr2x_replanned"] == "false"
+    changes.append({"before": {"plan": {"window": 0}}, "after": {"plan": {"window": 3}}})
+    content["plan"]["window"] = 3
+    held = dict(cli._job_record(content).tags())  # pyright: ignore[reportPrivateUsage]
+    assert held["seedvr2x_replanned"] == "true" and held["seedvr2x_window"] == "3"

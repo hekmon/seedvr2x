@@ -34,6 +34,7 @@ from test_cli_run import (
     indexes,
     job,
     needs_x264,
+    recorded_tags,
     refused,
     stand_in_model,
     stopped,
@@ -649,13 +650,13 @@ def test_segments_with_other_headers_that_decode_alike_are_assembled(
     assert count_frames(final) == 25 and codec(final) == "hevc,2" and not work.exists()
 
 
-def test_the_command_reads_the_record_and_the_assembly_keeps_it(
+def test_the_command_reads_the_record_and_the_assembly_writes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
 ) -> None:
     # The record is on the stream --segment-cmd reads (DESIGN.md, The record in each output), so
-    # that the user's encoder carries it: ffmpeg copies an input stream's tags to its output's,
-    # here MPEG-4's. The segments hold the job's values, and so does the finished file, the first
-    # segment's tags kept by the assembly (which names the tag it keeps, upper case in Matroska).
+    # that the user's encoder may carry it: ffmpeg copies an input stream's tags to its output's,
+    # here MPEG-4's in a Matroska file. The segments hold the job's values, and so does the
+    # finished file, whose record the assembly writes from the job itself.
     source = job(tmp_path, monkeypatch)
     assert upscale(tmp_path, source, "out", *JOB, "--segment-cmd", MPEG4) == 0
     content = json.loads((tmp_path / "out" / "manifest.json").read_text())
@@ -671,3 +672,29 @@ def test_the_command_reads_the_record_and_the_assembly_keeps_it(
     assert upscale(tmp_path, source, "x.mkv", *JOB, "--segment-cmd", MPEG4) == 0
     tags = stream_tags_of(tmp_path / "x.mkv")
     assert {key: tags.get(key) for key in expected} == expected
+
+
+def test_an_encoder_that_drops_the_tags_still_leaves_the_whole_record_on_the_finished_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # The review of 2026-11-03: an encoder that keeps none of the input stream's tags (MP4 holds
+    # no unknown one, a bare stream no tag at all) leaves none on its segments; the finished
+    # -o x.mkv file is written by the assembly from the job's manifest, so it holds the whole
+    # record all the same, every value written out here (recorded_tags) from the manifest beside
+    # it. The command writes Matroska and drops the tags by ffmpeg's -map_metadata:s:v -1: the
+    # assembly refuses an MP4 segment (its time base is 1/12800 s, not Matroska's 1/1000), so the
+    # MP4 case itself is not a job that reaches the finished file.
+    source = job(tmp_path, monkeypatch)
+    command = "ffmpeg -nostdin -loglevel error -i - -c:v mpeg4 -map_metadata:s:v -1 {out}"
+    assert upscale(tmp_path, source, "out", *JOB, "--segment-cmd", command) == 0
+    for name in SEGMENTS:
+        # The encoder dropped them: the proof that the finished file's are not the segments'.
+        tags = stream_tags_of(tmp_path / "out" / name)
+        assert "ENCODER" in tags and not [k for k in tags if k.startswith("SEEDVR2X_")], name
+    assert upscale(tmp_path, source, "x.mkv", *JOB, "--segment-cmd", command) == 0
+    beside = json.loads((tmp_path / "x.mkv.manifest.json").read_text())
+    expected = recorded_tags(beside, "64x48", "128x96")
+    tags = stream_tags_of(tmp_path / "x.mkv")
+    assert {key: tags.get(key) for key in expected} == expected
+    assert not [key for key in tags if key.startswith("SEEDVR2X_") and key not in expected]
+    assert expected["SEEDVR2X_CUTS_SHA256"] and expected["SEEDVR2X_REPLANNED"] == "false"

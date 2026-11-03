@@ -25,6 +25,7 @@ import sys
 import zlib
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from fractions import Fraction
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -454,18 +455,22 @@ def recorded(
     output: tuple[int, int], keywords: dict[str, Any], colour: str = "none"
 ) -> record.Record:
     """The record the command writes on the stand-in machine (DESIGN.md, The record in each
-    output): this command's version, make_picture's 40 x 24 source, `output` (width, height) as
-    written, w.safetensors for both models, SEED, the colour correction, the tiles of the pass it
-    ran (still.upscale's keywords), and the attention the machine stands in."""
+    output): this command's name and version, make_picture's 40 x 24 source, `output` (width,
+    height) as written, command()'s --resolution 48 and square pixels, w.safetensors for both
+    models, SEED, the colour correction, the tiles of the pass it ran (still.upscale's keywords),
+    and the attention the machine stands in."""
 
     def side(tiles: Tiles | None) -> int:
         return 0 if tiles is None else tiles.size
 
     model_file = record.Model("w.safetensors", EMPTY_SHA256)
     return record.Record(
+        "seedvr2x",
         version("seedvr2x"),
         (40, 24),
         output,
+        48,
+        Fraction(1),
         model_file,
         model_file,
         SEED,
@@ -1318,6 +1323,8 @@ def test_the_file_carries_seedvr2xs_record(
     assert fields == [
         ("source_size", "40x24"),
         ("output_size", "48x80" if value == 6 else "80x48"),
+        ("resolution", "48"),
+        ("sample_aspect", "1:1"),
         ("dit_model", "w.safetensors"),
         ("dit_sha256", EMPTY_SHA256),
         ("vae_model", "w.safetensors"),
@@ -1351,6 +1358,23 @@ def test_the_record_names_the_tiles_of_the_pass(
     fields = dict(written_record(output)[2])
     assert (fields["encode_tile"], fields["decode_tile"]) == ("64", "48")
     assert fields["color_correction"] == "none"
+
+
+def test_the_record_names_the_resolution_asked_and_the_sample_aspect(
+    machine: Machine, tmp_path: Path
+) -> None:
+    # The short side asked and the sample aspect used, which the sizes alone don't pin
+    # (DESIGN.md, The record in each output): --resolution 48 and 49 both give 80x48 from the
+    # 40 x 24 picture (the even crop), with other bits; --input-sar is recorded as given.
+    source = make_picture(tmp_path / "in.png")
+    asked = {}
+    for name, options in (("48", ()), ("49", ("--resolution", "49", "--input-sar", "4:3"))):
+        output = tmp_path / f"{name}.png"
+        assert run(machine, source, output, *options) == 0
+        fields = dict(written_record(output)[2])
+        asked[name] = (fields["output_size"], fields["resolution"], fields["sample_aspect"])
+    assert asked["48"] == ("80x48", "48", "1:1")
+    assert asked["49"][1:] == ("49", "4:3")
 
 
 def test_plan_hashes_no_model_file(

@@ -23,6 +23,7 @@ from stop import terminable
 
 if TYPE_CHECKING:
     import argparse
+    from fractions import Fraction
 
     import torch
 
@@ -252,7 +253,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     # The record the file carries (DESIGN.md, The record in each output), made before the models
     # load: a model file seedvr2x doesn't pin, numz's, is hashed here, once, as a video's job
     # hashes it for its manifest, and the load holds it to that hash (pull.Hashes.unchanged).
-    made = _record(pic, written, model_files, args, tiles, attention)
+    made = _record(pic, written, resolution, sample_aspect, model_files, args, tiles, attention)
     loaded = reads.load(model_files, device, plan.models, plan.reading.reserve, "")
     if loaded is None:
         return 1
@@ -295,15 +296,18 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
 def _record(
     pic: "Picture",
     written: tuple[int, int],
+    resolution: int,
+    sample_aspect: "Fraction",
     model_files: "ModelFiles",
     args: "argparse.Namespace",
     tiles: "PictureTiles",
     attention: str,
 ) -> "Record":
-    """The picture's record (record.Record): this command's version, the source's size as its file
-    stores it and the output's as written (written, width and height, turned upright), the model
-    files by the names given and their SHA-256, the seed, the colour correction, the passes'
-    tiles (0 untiled) and the attention kernel."""
+    """The picture's record (record.Record): this command's name and version, the source's size as
+    its file stores it and the output's as written (written, width and height, turned upright),
+    the short side asked (resolution, given or the default) and the sample aspect used (--input-sar
+    or square pixels), the model files by the names given and their SHA-256, the seed, the colour
+    correction, the passes' tiles (0 untiled) and the attention kernel."""
     from importlib.metadata import version
 
     from seedvr2x.record import Model, Record
@@ -314,9 +318,12 @@ def _record(
         for file in (model_files.dit, model_files.vae)
     )
     return Record(
+        app="seedvr2x",
         version=version("seedvr2x"),
         source=(width, height),
         output=written,
+        resolution=resolution,
+        sample_aspect=sample_aspect,
         dit=dit,
         vae=vae,
         seed=args.seed,

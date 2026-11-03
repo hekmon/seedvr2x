@@ -719,9 +719,12 @@ def test_png_writer_numbering(tmp_path: Path) -> None:
 # master and of the stream a segment command reads. A model name holding "=" and a space is read
 # back exactly, since -metadata parts name and value at the first "=" and a name holds none.
 RECORD = Record(
+    "seedvr2x",
     "0.1.0",
     (64, 48),
     (128, 96),
+    96,
+    Fraction(1),
     Model("a=b c.safetensors", "1" * 64),
     Model("ema_vae_fp16.safetensors", "2" * 64),
     42,
@@ -729,7 +732,7 @@ RECORD = Record(
     0,
     512,
     "sdpa",
-    Video(20, "maximum", False),
+    Video(20, "maximum", False, False, cut_threshold="0.3"),
 ).tags()
 
 

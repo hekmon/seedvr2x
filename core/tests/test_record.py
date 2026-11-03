@@ -7,7 +7,9 @@ read_xmp is the helper test_png.py, test_webp.py and the CLI's test_still_cli.py
 packet with."""
 
 import dataclasses
+import hashlib
 import xml.etree.ElementTree as ET
+from fractions import Fraction
 
 import pytest
 
@@ -22,13 +24,18 @@ MARK = "http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgor
 
 DIT = Model("seedvr2x_ema_7b_sharp_fp16.safetensors", "1" * 64)
 VAE = Model("ema_vae_fp16.safetensors", "2" * 64)
-PICTURE = Record("0.1.0", (4032, 3024), (1440, 1080), DIT, VAE, 42, "split", 0, 1024, "sdpa")
-MOVIE = dataclasses.replace(PICTURE, video=Video(20, "maximum", True))
+PICTURE = Record(
+    "seedvr2x", "0.1.0", (4032, 3024), (1440, 1080), 1080, Fraction(1), DIT, VAE, 42, "split", 0,
+    1024, "sdpa",
+)  # fmt: skip
+MOVIE = dataclasses.replace(PICTURE, video=Video(20, "maximum", True, True, cut_threshold="0.3"))
 
 # What PICTURE's packet holds under seedvr2x's namespace, written out here, in order.
 FIELDS = [
     ("source_size", "4032x3024"),
     ("output_size", "1440x1080"),
+    ("resolution", "1080"),
+    ("sample_aspect", "1:1"),
     ("dit_model", "seedvr2x_ema_7b_sharp_fp16.safetensors"),
     ("dit_sha256", "1" * 64),
     ("vae_model", "ema_vae_fp16.safetensors"),
@@ -68,11 +75,44 @@ def test_the_packet_parses_back_to_every_field() -> None:
     assert fields == FIELDS
 
 
-def test_a_videos_packet_adds_its_window_quality_and_compile() -> None:
+def test_a_videos_packet_adds_its_window_quality_compile_replan_and_cuts() -> None:
     _, _, fields = read_xmp(MOVIE.xmp())
-    assert fields == [*FIELDS, ("window", "20"), ("quality", "maximum"), ("compile", "true")]
-    _, _, fields = read_xmp(dataclasses.replace(PICTURE, video=Video(0, "standard", False)).xmp())
-    assert fields[-3:] == [("window", "0"), ("quality", "standard"), ("compile", "false")]
+    assert fields == [
+        *FIELDS,
+        ("window", "20"),
+        ("quality", "maximum"),
+        ("compile", "true"),
+        ("replanned", "true"),
+        ("cut_threshold", "0.3"),
+    ]
+    listed = Video(0, "standard", False, False, cuts_sha256=record.cuts_sha256([24, 96]))
+    _, _, fields = read_xmp(dataclasses.replace(PICTURE, video=listed).xmp())
+    assert fields[-5:] == [
+        ("window", "0"),
+        ("quality", "standard"),
+        ("compile", "false"),
+        ("replanned", "false"),
+        ("cuts_sha256", hashlib.sha256(b"24\n96\n").hexdigest()),
+    ]
+
+
+def test_a_cut_lists_hash_is_that_of_its_plain_file() -> None:
+    # One frame number a line: the file --cuts reads where it holds them alone; an empty list,
+    # a source of one shot, the hash of nothing.
+    assert record.cuts_sha256([120, 250]) == hashlib.sha256(b"120\n250\n").hexdigest()
+    assert record.cuts_sha256([]) == hashlib.sha256(b"").hexdigest()
+
+
+def test_the_sample_aspect_is_written_as_ffprobe_writes_it() -> None:
+    anamorphic = dataclasses.replace(PICTURE, sample_aspect=Fraction(32, 27))
+    assert dict(anamorphic.fields())["sample_aspect"] == "32:27"
+
+
+def test_the_creator_names_the_app() -> None:
+    server = dataclasses.replace(PICTURE, app="seedvr2x-imgserver")
+    assert server.creator == "seedvr2x-imgserver 0.1.0 (https://github.com/hekmon/seedvr2x)"
+    assert read_xmp(server.xmp())[0] == server.creator
+    assert dict(server.tags())["seedvr2x_app"] == "seedvr2x-imgserver"
 
 
 def test_the_packet_is_wrapped_as_xmp_asks() -> None:
@@ -91,20 +131,23 @@ def test_the_namespace_is_under_the_repositorys_address_with_a_version() -> None
 def test_the_tags_hold_the_same_fields_prefixed() -> None:
     assert MOVIE.tags() == [
         ("seedvr2x_url", "https://github.com/hekmon/seedvr2x"),
+        ("seedvr2x_app", "seedvr2x"),
         ("seedvr2x_version", "0.1.0"),
         ("seedvr2x_digital_source_type", MARK),
         *((f"seedvr2x_{name}", value) for name, value in FIELDS),
         ("seedvr2x_window", "20"),
         ("seedvr2x_quality", "maximum"),
         ("seedvr2x_compile", "true"),
+        ("seedvr2x_replanned", "true"),
+        ("seedvr2x_cut_threshold", "0.3"),
     ]
-    assert record.tag_names() == {name for name, _ in MOVIE.tags()}
+    assert record.tag_names() == {name for name, _ in MOVIE.tags()} | {"seedvr2x_cuts_sha256"}
 
 
 def test_the_bytes_are_the_fields_alone() -> None:
     # No date, time or machine: two records of the same fields are the same bytes, and a
     # field changed changes them.
-    again = Record("0.1.0", (4032, 3024), (1440, 1080), DIT, VAE, 42, "split", 0, 1024, "sdpa")
+    again = dataclasses.replace(PICTURE)
     assert again.xmp() == PICTURE.xmp() and again.tags() == PICTURE.tags()
     assert dataclasses.replace(PICTURE, seed=43).xmp() != PICTURE.xmp()
 
@@ -126,9 +169,7 @@ def test_a_name_xml_cant_hold_is_written_so_the_packet_parses() -> None:
 
 def test_a_path_given_for_a_model_is_written_as_its_file_name() -> None:
     # --dit-model may name a path: the record holds nothing personal, so its file name alone.
-    named = dataclasses.replace(
-        PICTURE, vae=Model("/home/someone/models/vae.safetensors", "2" * 64)
-    )
+    named = dataclasses.replace(PICTURE, vae=Model("models/fp16/vae.safetensors", "2" * 64))
     assert dict(read_xmp(named.xmp())[2])["vae_model"] == "vae.safetensors"
     assert dict(named.tags())["seedvr2x_vae_model"] == "vae.safetensors"
 
@@ -144,7 +185,14 @@ def test_a_path_given_for_a_model_is_written_as_its_file_name() -> None:
         {"seed": -1},
         {"encode_tile": -1},
         {"attention": "flash"},
-        {"video": Video(-1, "standard", False)},
+        {"app": "SeedVR2X"},
+        {"app": ""},
+        {"resolution": 0},
+        {"sample_aspect": Fraction(0)},
+        {"video": Video(-1, "standard", False, False, "0.3")},
+        {"video": Video(5, "standard", False, False)},
+        {"video": Video(5, "standard", False, False, "0.3", "1" * 64)},
+        {"video": Video(5, "standard", False, False, None, "not hex")},
     ],
 )
 def test_a_field_out_of_range_is_a_value_error(change: dict[str, object]) -> None:

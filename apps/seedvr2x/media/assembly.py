@@ -55,7 +55,6 @@ from media.files import partial_path, replace_whole
 from media.index import NOPTS, FrameIndex
 from seedvr2x.clock import wall
 from seedvr2x.files import size_said
-from seedvr2x.record import tag_names
 
 logger = logging.getLogger("cli.media.assembly")
 
@@ -156,10 +155,11 @@ NOT_A_VIDEOS = frozenset({"attached_pic", "timed_thumbnails", "still_image"})
 # source's video. PROVISIONAL (implementation, 2026-10-10: DESIGN.md names "the source's other
 # streams" and not the video's own records).
 VIDEO_TAGS = ("language", "title")
-# The tags of the first segment's video stream the upscaled video keeps, as Matroska's muxer names
-# them, in upper case: what encoded it, and seedvr2x's record (DESIGN.md, The record in each
-# output: "whose assembly keeps them from the first segment as it keeps its encoder's").
-KEPT = frozenset({"ENCODER", *(name.upper() for name in tag_names())})
+# The tag of the first segment's video stream the upscaled video keeps: what encoded it. seedvr2x's
+# record is the job's, written by the join itself (assemble's record), not the segment's: a
+# --segment-cmd writing MP4 or a bare stream drops stream tags (DESIGN.md, The record in each
+# output; the review of 2026-11-03).
+KEPT = "ENCODER"
 
 
 @dataclass(frozen=True)
@@ -1234,6 +1234,7 @@ def assemble(
     index: FrameIndex,
     work: Path,
     stale: Path | None = None,
+    record: Sequence[tuple[str, str]] = (),
 ) -> Assembled:
     """Join a job's output segments into the Matroska file `output`, with every other stream of
     `source`, and put it in place once it is proven whole.
@@ -1241,7 +1242,9 @@ def assemble(
     segments: each segment's file and its frames, in order; frame_rate: the job's exact rate R,
     frames per second; index: the source's frame index, for where the frame grid starts (start);
     work: an existing directory for the files this writes meanwhile (work_file), removed before
-    it returns; stale: as FFV1Writer's, a file removed just before output is replaced.
+    it returns; stale: as FFV1Writer's, a file removed just before output is replaced; record:
+    seedvr2x's record as the video stream's tags, (name, value) in order (Record.tags), set on the
+    finished file's video whatever the segments carry, as its language and title are.
 
     The join is one ffmpeg process, by stream copy (_join): the video from the segments through
     the concat demuxer (concat_list), its timestamps snapped to the grid (snap), every other
@@ -1319,6 +1322,7 @@ def assemble(
         command = _join(
             *(source, source_layout, listed, shared, tags, attached),
             *(snap(frame_rate, first, total), partial, read),
+            record=record,
         )
         _strict(command, f"{output}: joining its segments", _pictures(source_layout))
         joined = time.monotonic()
@@ -1589,6 +1593,7 @@ def _join(
     snapping: str,
     partial: Path,
     read: Path,
+    record: Sequence[tuple[str, str]] = (),
 ) -> list[str]:
     """The join's ffmpeg command: the source, input 0, the segments through the concat demuxer,
     input 1, and the source once more, input 2, into the Matroska file partial, and the hashes of
@@ -1621,8 +1626,8 @@ def _join(
     - The streams are mapped in the order a read of the file gives them back (_written): the
       source's, the video in its video's place.
     - Each other stream's own tags and dispositions are copied by default. The video's are the
-      first segment's: its tags are removed, each by name, but its encoder's and seedvr2x's record
-      (KEPT), and the
+      first segment's: its tags are removed, each by name, but its encoder's (KEPT), seedvr2x's
+      record set from the job (record), and the
       source's video's language and title set (VIDEO_TAGS); its dispositions are the source's
       video's, given by name. A disposition given also keeps fftools from marking as default the
       first stream of a type that has none (ffmpeg_mux_init.c, set_dispositions), which a plain
@@ -1649,10 +1654,14 @@ def _join(
     records: list[str] = []
     for key in tags:
         # A key holding "=" can't be named to -metadata, which parts key and value at the first.
-        if key.upper() not in KEPT and key.lower() not in VIDEO_TAGS and "=" not in key:
+        if key.upper() != KEPT and key.lower() not in VIDEO_TAGS and "=" not in key:
             records += [f"-metadata:s:{place}", f"{key}="]
     for key in VIDEO_TAGS:
         records += [f"-metadata:s:{place}", f"{key}={video.tags.get(key, '')}"]
+    # After the segment's tags are emptied: ffmpeg's dictionary matches keys in any case, so the
+    # segment's SEEDVR2X_SEED, emptied above, is set again here to the job's.
+    for key, value in record:
+        records += [f"-metadata:s:{place}", f"{key}={value}"]
     kept = [name for name in video.dispositions if name not in NOT_A_VIDEOS]
     records += [f"-disposition:{place}", "+".join(kept) or "0"]
     attachments: list[str] = []

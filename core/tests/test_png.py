@@ -9,6 +9,7 @@ import shutil
 import struct
 import subprocess
 import zlib
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -52,9 +53,12 @@ PICTURE = (CODES16 / np.float32(65535)).astype(np.float32)
 
 # A record, as the CLI or the server gives one (seedvr2x/record.py).
 RECORD = Record(
+    "seedvr2x",
     "0.1.0",
     (17, 11),
     (17, 11),
+    11,
+    Fraction(1),
     Model("dit.safetensors", "1" * 64),
     Model("vae.safetensors", "2" * 64),
     42,
