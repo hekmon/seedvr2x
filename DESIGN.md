@@ -2267,8 +2267,9 @@ holds nothing personal.
   on the stream `--segment-cmd` reads, about 0.7 kB a file: the masters' frames, packets and
   checksums are unchanged, and nothing compares their bytes. The finished `.mkv`'s record is
   written by the assembly from the job, as it sets the video's language and title, whatever
-  the segments carry: a `--segment-cmd` writing MP4 or a bare stream drops stream tags (the
-  review, 2026-11-03), and the record is still written. A job re-planned on a resume
+  the segments carry: a `--segment-cmd` whose encoder drops stream tags leaves none on its
+  segments (the review, 2026-11-03; an MP4 segment the assembly refuses anyway, its time base
+  not Matroska's), and the record is still written. A job re-planned on a resume
   (`--accept-env-change`) says so (`replanned`), its values the manifest's for the job, each
   unit's own in the manifest. A PNG directory's frames carry none: the directory's manifest
   holds the record.
@@ -2387,7 +2388,9 @@ measured that day on test files, against ffmpeg 9.0's decode.
   make does ([Pause and resume](#pause-and-resume)): the record's SHA-256 is then that of the bytes
   used, pinned file or not. Kept so (the user, 2026-11-03): the CLI is a practical way to
   upscale one picture; many go to the image server, which loads and checks its models once, or
-  to ComfyUI's nodes, which may become the usual way for pictures.
+  to ComfyUI's nodes, which may become the usual way for pictures. A 4K picture from 1080p took
+  181 s on the RTX 5090: 86 reading the DiT to check it, 77 loading the models, 14 upscaling
+  (2026-11-03, the desktop live, rough).
 - **The plan for one picture** (`still_plan.py`): made for a bound, the output's long and
   short sides in either orientation; the CLI's bound is its picture, the server's its
   largest.
@@ -2402,8 +2405,8 @@ measured that day on test files, against ffmpeg 9.0's decode.
     encode's dtype, and in float32 for the colour correction's reference): the plan counts
     those copies in the phase where they live, so a bound takes a largest input too, in
     pixels, the CLI's its picture's (found by design on 2026-11-03: a 100 MP photo is 1.2 GB
-    in float32 on the card before its resize). Counted from the tensors' sizes, measured on
-    the card.
+    in float32 on the card before its resize). Counted from the tensors' sizes; measured on
+    the RTX 5090 at 1.4 to 1.8 times that count (below).
   - The DiT is held to its least at the bound's largest padded frame, plus 2.726 MiB for each
     attention window at the most windows any picture within the bound takes: the 7B's
     windows aren't monotone in the size (a 3000×2000 bound takes 72, a smaller picture within
@@ -2414,8 +2417,26 @@ measured that day on test files, against ffmpeg 9.0's decode.
   - An addition beside the CLI's planner, not a move: the planner's choices take a job's
     types, and its 5,480-case check would have to hold again. Its margins and its order of
     choices are the planner's.
-  - The VAE's figures are a video slice's, up to 5 frames; one frame's are unmeasured, and
-    the card measures them before it ships.
+  - Measured on the RTX 5090 (2026-11-03, design's agent; SDPA and FlashAttention 2, the
+    desktop live):
+    - one frame's VAE passes take 0.18 to 0.34 of the video slice's figures the plan counts,
+      the same for a tile at every size: the plan is 3.0 to 5.6 times over;
+    - the DiT's figure holds: SDPA 0.04 to 0.13 GiB under, FlashAttention 2 at most 5 MiB over,
+      within the margin;
+    - the colour correction's term at one frame is 1.09 to 1.31 times its count: the decoded
+      frame, the float32 reference and cuBLAS's 32 MiB workspace sit beside split's own;
+    - the picture's copies are 1.4 to 1.8 times their count. torch's antialiased bicubic, given
+      a channels-last view, copies its float32 input and writes its output twice: 30 bytes an
+      input pixel and 24 an output pixel in the encode, 24 and 24 in the decode. That is about
+      2 GiB short at Pillow's limit, hidden today by the VAE's over-count;
+    - reserved memory runs up to 2.75 GiB over the allocated peak (FlashAttention 2, 8K, 36
+      blocks swapped).
+  - Decided (design, 2026-11-03): the plan for one picture moves onto those figures in the
+    image server's first patch, provisional until the card's batch: one frame's VAE fits per
+    tile, the copies by the measured rule, the colour term with its frame, reference and
+    workspace, and the server's reservation on reserved figures. A contiguous input to the
+    resize, which would drop a copy and a write, waits for its bits to be checked against the
+    video path's.
   - The host's figure for the CLI is a video job's process (2.4 GiB, `HOST_RESIDENT`) plus
     the picture's own arrays, provisional until the card measures a still's; the server's is
     a parameter of the plan.
