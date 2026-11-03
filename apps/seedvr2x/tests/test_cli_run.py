@@ -8956,3 +8956,116 @@ def test_a_line_says_when_the_date_or_the_clocks_change_but_not_under_verbose(
     finally:
         monkeypatch.undo()
         time.tzset()
+
+
+def stream_tags_of(path: Path) -> dict[str, str]:
+    """The tags of path's first video stream (Matroska's muxer writes their names in upper case)."""
+    shown = subprocess.run(
+        [
+            *("ffprobe", "-v", "error", "-select_streams", "v:0", "-of", "json"),
+            *("-show_entries", "stream_tags", str(path)),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(shown.stdout)["streams"][0].get("tags", {})
+
+
+def recorded_tags(content: dict[str, Any], source_size: str, output_size: str) -> dict[str, str]:
+    """The record a job's masters carry (DESIGN.md, The record in each output), every value
+    written out here from the job's manifest and not rebuilt by main._stream_record."""
+    from importlib.metadata import version
+
+    settings, plan = content["settings"], content["plan"]
+
+    def side(tiles: dict[str, int] | None) -> str:
+        return "0" if tiles is None else str(tiles["size"])
+
+    return {
+        "SEEDVR2X_URL": "https://github.com/hekmon/seedvr2x",
+        "SEEDVR2X_VERSION": version("seedvr2x"),
+        "SEEDVR2X_DIGITAL_SOURCE_TYPE": (
+            "http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia"
+        ),
+        "SEEDVR2X_SOURCE_SIZE": source_size,
+        "SEEDVR2X_OUTPUT_SIZE": output_size,
+        "SEEDVR2X_DIT_MODEL": settings["dit_model"]["name"],
+        "SEEDVR2X_DIT_SHA256": settings["dit_model"]["sha256"],
+        "SEEDVR2X_VAE_MODEL": settings["vae_model"]["name"],
+        "SEEDVR2X_VAE_SHA256": settings["vae_model"]["sha256"],
+        "SEEDVR2X_SEED": str(settings["seed"]),
+        "SEEDVR2X_COLOR_CORRECTION": settings["color_correction"],
+        "SEEDVR2X_ENCODE_TILE": side(plan["encode_tiles"]),
+        "SEEDVR2X_DECODE_TILE": side(plan["decode_tiles"]),
+        "SEEDVR2X_ATTENTION": cli._attention(),  # pyright: ignore[reportPrivateUsage]
+        "SEEDVR2X_WINDOW": str(plan["window"] or 0),
+        "SEEDVR2X_QUALITY": settings["quality"],
+        "SEEDVR2X_COMPILE": "true" if plan["compile_vae"] else "false",
+    }
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_the_record_is_on_each_master_and_on_a_finished_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The record (DESIGN.md, The record in each output) on every segment of a directory job and
+    # on the finished -o x.mkv file (the first segment's, kept by the assembly), from the job's
+    # own manifest: the settings recorded, the plan the run followed, the source's stored size
+    # and the output's. The passes are untiled (a tile is 512 px or more, the stand-in's frame
+    # 128x96): the tiles' tags are 0, and a tile's size is main._stream_record's own (side).
+    source_path = job(tmp_path, monkeypatch)
+    options = (*JOB, "--format", "yuv420p10le")
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    expected = recorded_tags(content, "64x48", "128x96")
+    assert expected["SEEDVR2X_DECODE_TILE"] == expected["SEEDVR2X_ENCODE_TILE"] == "0"
+    assert expected["SEEDVR2X_WINDOW"] == "5" and expected["SEEDVR2X_COMPILE"] == "false"
+    assert expected["SEEDVR2X_SEED"] == "42" and expected["SEEDVR2X_QUALITY"] == "standard"
+    for name in ("seg_000000.mkv", "seg_000001.mkv"):
+        tags = stream_tags_of(tmp_path / "out" / name)
+        assert {key: tags.get(key) for key in expected} == expected, name
+    assert upscale(tmp_path, source_path, "x.mkv", *options) == 0
+    # The finished file's own record, its manifest beside it.
+    beside = json.loads((tmp_path / "x.mkv.manifest.json").read_text())
+    expected = recorded_tags(beside, "64x48", "128x96")
+    tags = stream_tags_of(tmp_path / "x.mkv")
+    assert {key: tags.get(key) for key in expected} == expected
+    assert not [key for key in tags if key.startswith("SEEDVR2X_") and key not in expected]
+
+
+@pytest.mark.usefixtures("stand_in")
+def test_png_frames_carry_no_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A PNG job's frames hold none of it: the directory's manifest does.
+    source_path = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source_path, "png", *JOB, "--format", "png") == 0
+    frames = sorted((tmp_path / "png").glob("seg_*/*.png"))
+    assert len(frames) == 25
+    assert not [frame for frame in frames if b"seedvr2x" in frame.read_bytes().lower()]
+
+
+def test_a_tiled_plan_is_the_records_tiles_and_a_compiled_one_its_flag() -> None:
+    # The stand-in's frame is too small for a tile, so main._stream_record is given a plan with
+    # tiles and --compile directly: a tile is its side, an untiled pass 0, no cap 0, and the
+    # stream's stored size (not the displayed one) is the source's.
+    settings = {
+        "dit_model": {"name": "d.safetensors", "sha256": "1" * 64},
+        "vae_model": {"name": "v.safetensors", "sha256": "2" * 64},
+        "seed": 7,
+        "color_correction": "split",
+        "quality": "maximum",
+    }
+    stream = SimpleNamespace(width=1440, height=1080)
+    plan = Plan(None, Tiles(512), None, compile_vae=True)
+    made = cli._stream_record(  # pyright: ignore[reportPrivateUsage]
+        settings,
+        stream,  # pyright: ignore[reportArgumentType]
+        (2880, 2160),
+        plan,
+    ).tags()
+    held = dict(made)
+    assert held["seedvr2x_source_size"] == "1440x1080"
+    assert held["seedvr2x_output_size"] == "2880x2160"
+    assert (held["seedvr2x_encode_tile"], held["seedvr2x_decode_tile"]) == ("512", "0")
+    assert (held["seedvr2x_window"], held["seedvr2x_compile"]) == ("0", "true")
+    assert (held["seedvr2x_quality"], held["seedvr2x_seed"]) == ("maximum", "7")

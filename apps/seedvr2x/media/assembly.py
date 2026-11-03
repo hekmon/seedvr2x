@@ -55,6 +55,7 @@ from media.files import partial_path, replace_whole
 from media.index import NOPTS, FrameIndex
 from seedvr2x.clock import wall
 from seedvr2x.files import size_said
+from seedvr2x.record import tag_names
 
 logger = logging.getLogger("cli.media.assembly")
 
@@ -155,8 +156,10 @@ NOT_A_VIDEOS = frozenset({"attached_pic", "timed_thumbnails", "still_image"})
 # source's video. PROVISIONAL (implementation, 2026-10-10: DESIGN.md names "the source's other
 # streams" and not the video's own records).
 VIDEO_TAGS = ("language", "title")
-# The tag of the first segment's video stream the upscaled video keeps: what encoded it.
-KEPT = "ENCODER"
+# The tags of the first segment's video stream the upscaled video keeps, as Matroska's muxer names
+# them, in upper case: what encoded it, and seedvr2x's record (DESIGN.md, The record in each
+# output: "whose assembly keeps them from the first segment as it keeps its encoder's").
+KEPT = frozenset({"ENCODER", *(name.upper() for name in tag_names())})
 
 
 @dataclass(frozen=True)
@@ -1618,7 +1621,8 @@ def _join(
     - The streams are mapped in the order a read of the file gives them back (_written): the
       source's, the video in its video's place.
     - Each other stream's own tags and dispositions are copied by default. The video's are the
-      first segment's: its tags are removed, each by name, but its encoder's (KEPT), and the
+      first segment's: its tags are removed, each by name, but its encoder's and seedvr2x's record
+      (KEPT), and the
       source's video's language and title set (VIDEO_TAGS); its dispositions are the source's
       video's, given by name. A disposition given also keeps fftools from marking as default the
       first stream of a type that has none (ffmpeg_mux_init.c, set_dispositions), which a plain
@@ -1645,7 +1649,7 @@ def _join(
     records: list[str] = []
     for key in tags:
         # A key holding "=" can't be named to -metadata, which parts key and value at the first.
-        if key.upper() != KEPT and key.lower() not in VIDEO_TAGS and "=" not in key:
+        if key.upper() not in KEPT and key.lower() not in VIDEO_TAGS and "=" not in key:
             records += [f"-metadata:s:{place}", f"{key}="]
     for key in VIDEO_TAGS:
         records += [f"-metadata:s:{place}", f"{key}={video.tags.get(key, '')}"]

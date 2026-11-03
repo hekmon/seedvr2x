@@ -29,6 +29,7 @@ from media.writer import (
     to_rgb48be,
     yuv_matrix,
 )
+from seedvr2x.record import Model, Record, Video
 
 
 def _usable() -> bool:
@@ -712,3 +713,123 @@ def test_png_writer_numbering(tmp_path: Path) -> None:
     writer = PNGWriter(tmp_path, 8, 8, RATE, Tags(), start=7)
     writer.write(np.zeros((1, 8, 8, 3), dtype=np.float32))
     assert writer.close() == 1 and writer.frame_path(7).is_file()
+
+
+# seedvr2x's record on the video stream (DESIGN.md, The record in each output): the tags of the
+# master and of the stream a segment command reads. A model name holding "=" and a space is read
+# back exactly, since -metadata parts name and value at the first "=" and a name holds none.
+RECORD = Record(
+    "0.1.0",
+    (64, 48),
+    (128, 96),
+    Model("a=b c.safetensors", "1" * 64),
+    Model("ema_vae_fp16.safetensors", "2" * 64),
+    42,
+    "split",
+    0,
+    512,
+    "sdpa",
+    Video(20, "maximum", False),
+).tags()
+
+
+def video_stream_tags(path: Path) -> dict[str, str]:
+    """The tags of path's first video stream, as ffprobe reads them (Matroska's in upper case)."""
+    result = subprocess.run(
+        [
+            *("ffprobe", "-v", "error", "-select_streams", "v:0", "-of", "json"),
+            *("-show_entries", "stream_tags", str(path)),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)["streams"][0].get("tags", {})
+
+
+def packet_sums(path: Path) -> list[str]:
+    """The lines of ffmpeg's framemd5 over path's packets copied as they are (size and MD5 of each
+    packet, its time): what the file holds of its video, tags aside."""
+    return subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:v",
+            "-c",
+            "copy",
+            "-f",
+            "framemd5",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+
+@pytest.mark.parametrize("pix_fmt", ["gbrp16le", "yuv420p10le"])
+def test_the_record_is_the_masters_stream_tags(tmp_path: Path, pix_fmt: str) -> None:
+    # Each name upper-cased by Matroska's muxer with its value exactly, the encoder's tag still
+    # there; and the tags change the file's bytes and nothing of its video: the same packets, the
+    # same checksums as the master written without them.
+    frames = frames_of(3, 64, 48)
+    written = {}
+    for name, record in (("plain", ()), ("recorded", RECORD)):
+        path = tmp_path / f"{name}.mkv"
+        with FFV1Writer(path, pix_fmt, 64, 48, RATE, BT709, record=record) as writer:
+            writer.write(frames)
+        written[name] = (path, writer.checksums)
+    tags = video_stream_tags(written["recorded"][0])
+    assert {key: tags.get(key) for key in (n.upper() for n, _ in RECORD)} == {
+        name.upper(): value for name, value in RECORD
+    }
+    assert tags["SEEDVR2X_DIT_MODEL"] == "a=b c.safetensors" and "ENCODER" in tags
+    assert written["recorded"][1] == written["plain"][1]
+    assert packet_sums(written["recorded"][0]) == packet_sums(written["plain"][0])
+    assert written["recorded"][0].read_bytes() != written["plain"][0].read_bytes()
+
+
+def test_no_record_no_seedvr2x_tag(tmp_path: Path) -> None:
+    # The default is none: the scratch a job writes for itself (the calibration's decodes) carries
+    # nothing of seedvr2x's.
+    path = tmp_path / "m.mkv"
+    with FFV1Writer(path, "gbrp16le", 32, 16, RATE, BT709) as writer:
+        writer.write(frames_of(2, 32, 16))
+    assert not [key for key in video_stream_tags(path) if key.startswith("SEEDVR2X_")]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat > {out}",
+        # A user's encoder: ffmpeg copies an input stream's tags to its output's by default.
+        "ffmpeg -nostdin -v error -i - -c:v ffv1 -f matroska {out}",
+    ],
+    ids=["as_it_is", "reencoded"],
+)
+def test_the_segment_commands_stream_carries_the_record(tmp_path: Path, command: str) -> None:
+    # DESIGN.md: "on the stream --segment-cmd reads, so the user's encoder can carry them".
+    path = tmp_path / "seg.mkv"
+    with CommandWriter(command, path, "gbrp16le", 32, 16, RATE, BT709, record=RECORD) as writer:
+        writer.write(frames_of(3, 32, 16))
+    assert count_frames(path) == 3
+    tags = video_stream_tags(path)
+    assert {key: tags.get(key) for key in (n.upper() for n, _ in RECORD)} == {
+        name.upper(): value for name, value in RECORD
+    }
+
+
+def test_a_png_directory_carries_no_record(tmp_path: Path) -> None:
+    # PNG frames hold none: the directory's manifest does (open_writer's docstring). No text
+    # chunk, and nothing of seedvr2x's in the bytes.
+    with open_writer("png", tmp_path / "png", 32, 16, RATE, BT709, record=RECORD) as writer:
+        writer.write(frames_of(2, 32, 16))
+    frames = sorted((tmp_path / "png").iterdir())
+    assert len(frames) == 2
+    for frame in frames:
+        assert b"seedvr2x" not in frame.read_bytes().lower()
+        assert not {"tEXt", "iTXt", "zTXt"} & set(png_chunks(frame))

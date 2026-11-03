@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import subprocess
+from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +37,7 @@ from test_cli_run import (
     refused,
     stand_in_model,
     stopped,
+    stream_tags_of,
     upscale,
 )
 from test_probe import has_encoder
@@ -645,3 +647,27 @@ def test_segments_with_other_headers_that_decode_alike_are_assembled(
     said = f"{work / 'seg_000001.mkv'}: its codec headers aren't those of seg_000000.mkv"
     assert caplog.text.count(said) == 2  # as it is finished, and by the assembly
     assert count_frames(final) == 25 and codec(final) == "hevc,2" and not work.exists()
+
+
+def test_the_command_reads_the_record_and_the_assembly_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # The record is on the stream --segment-cmd reads (DESIGN.md, The record in each output), so
+    # that the user's encoder carries it: ffmpeg copies an input stream's tags to its output's,
+    # here MPEG-4's. The segments hold the job's values, and so does the finished file, the first
+    # segment's tags kept by the assembly (which names the tag it keeps, upper case in Matroska).
+    source = job(tmp_path, monkeypatch)
+    assert upscale(tmp_path, source, "out", *JOB, "--segment-cmd", MPEG4) == 0
+    content = json.loads((tmp_path / "out" / "manifest.json").read_text())
+    expected = {
+        "SEEDVR2X_VERSION": version("seedvr2x"),
+        "SEEDVR2X_SEED": str(content["settings"]["seed"]),
+        "SEEDVR2X_DIT_SHA256": content["settings"]["dit_model"]["sha256"],
+    }
+    assert expected["SEEDVR2X_SEED"] == "42"
+    for name in SEGMENTS:
+        tags = stream_tags_of(tmp_path / "out" / name)
+        assert {key: tags.get(key) for key in expected} == expected, name
+    assert upscale(tmp_path, source, "x.mkv", *JOB, "--segment-cmd", MPEG4) == 0
+    tags = stream_tags_of(tmp_path / "x.mkv")
+    assert {key: tags.get(key) for key in expected} == expected

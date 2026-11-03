@@ -338,7 +338,12 @@ class FFV1Writer(Writer):
     from ffmpeg: a second output of the same process hashes the converted frames, framehash's
     CRC-32 of each raw frame being zlib's (tests/test_writer.py). stale, when given, is the file
     of the checksums of what path held before: removed just before path is replaced, so that
-    checksums beside a file are always its own, and a run stopped before keeps the old ones."""
+    checksums beside a file are always its own, and a run stopped before keeps the old ones.
+
+    record: seedvr2x's record as the video stream's tags, (name, value) in order
+    (seedvr2x.record.Record.tags; DESIGN.md, The record in each output), none by default: a
+    job's masters carry it, the scratch the job writes for itself (its input's copy, the
+    calibration's decodes) none. The tags change the file's bytes, never its packets."""
 
     def __init__(
         self,
@@ -350,6 +355,7 @@ class FFV1Writer(Writer):
         tags: Tags,
         slices: int = 16,
         stale: Path | None = None,
+        record: Sequence[tuple[str, str]] = (),
     ) -> None:
         self.path, self._stale = path, stale
         self._partial = partial_path(path)
@@ -375,7 +381,7 @@ class FFV1Writer(Writer):
         command = [
             *_planes_input(width, height, frame_rate),
             *graph,
-            *_ffv1_matroska(pix_fmt, slices, options),
+            *_ffv1_matroska(pix_fmt, slices, options, record),
             argument(self._partial),
             *hashed,
         ]
@@ -448,13 +454,21 @@ def _planes_input(width: int, height: int, frame_rate: Fraction) -> list[str]:
     ]
 
 
-def _ffv1_matroska(pix_fmt: str, slices: int, options: list[str]) -> list[str]:
+def _ffv1_matroska(
+    pix_fmt: str, slices: int, options: list[str], record: Sequence[tuple[str, str]] = ()
+) -> list[str]:
     """ffmpeg's options for an output holding a master's stream, its name left to give: FFV1 as
-    research/scripts/ffv1_out.py writes it, in Matroska, with the tags' options (master_filters).
-    One list for the master's file and for a segment command's stdin (CommandWriter), which is
-    "in the master's format" (DESIGN.md, Output) by being this very stream."""
+    research/scripts/ffv1_out.py writes it, in Matroska, with the tags' options (master_filters)
+    and seedvr2x's record as the stream's tags (FFV1Writer), which Matroska's muxer writes in
+    upper case (SEEDVR2X_VERSION). One list for the master's file and for a segment command's
+    stdin (CommandWriter), which is "in the master's format" (DESIGN.md, Output) by being this
+    very stream, so that the user's encoder can carry the record: ffmpeg copies an input
+    stream's tags to its output's by default."""
+    # A name holds no "=", where -metadata parts name and value; the value may (record.py's).
+    tagged = [option for name, value in record for option in ("-metadata:s:v:0", f"{name}={value}")]
     return [
         *("-fps_mode", "passthrough", *options),
+        *tagged,
         *("-c:v", "ffv1", "-level", "3", "-g", "1", "-slices", str(slices)),
         *("-slicecrc", "1", "-pix_fmt", pix_fmt, "-f", "matroska"),
     ]
@@ -634,7 +648,10 @@ class CommandWriter(Writer):
     Nothing times the command: an encoder may be as slow as it likes, and one that stops for good
     stops the run with it, until a Ctrl-C twice or a SIGTERM (stop.py). It runs in a
     process group of its own, out of the terminal's reach as ffmpeg is, by which abort() stops
-    the shell and whatever it started."""
+    the shell and whatever it started.
+
+    record: seedvr2x's record, the stream's tags as FFV1Writer's, on the stream the command reads.
+    """
 
     _holds_as_fed = False
 
@@ -649,6 +666,7 @@ class CommandWriter(Writer):
         tags: Tags,
         slices: int = 16,
         stale: Path | None = None,
+        record: Sequence[tuple[str, str]] = (),
     ) -> None:
         check_command(command)
         chain, options = master_filters(pix_fmt, yuv_matrix(width, height, tags.matrix), tags)
@@ -669,7 +687,7 @@ class CommandWriter(Writer):
         stream = [
             *_planes_input(width, height, frame_rate),
             *("-map", "0:v:0", "-vf", chain),
-            *_ffv1_matroska(pix_fmt, slices, options),
+            *_ffv1_matroska(pix_fmt, slices, options, record),
             "pipe:1",
         ]
         super().__init__(stream, path, width, height, stdout=subprocess.PIPE)
@@ -971,20 +989,33 @@ def open_writer(
     start: int = 0,
     stale: Path | None = None,
     command: str | None = None,
+    record: Sequence[tuple[str, str]] = (),
 ) -> Writer:
     """A writer of output_format (FORMATS): an FFV1 master at path, or PNG in the directory path,
     numbered from start; stale, the checksums of what path held before (FFV1Writer). With
     command, a segment command (CommandWriter), the file at path is the one it writes from the
-    FFV1 master's stream: PNG has no stream to give it."""
+    FFV1 master's stream: PNG has no stream to give it. record, seedvr2x's record as stream tags,
+    goes on the master and on the command's stream; a PNG directory's frames carry none, the
+    directory's manifest holding it (DESIGN.md, The record in each output)."""
     if command is not None:
         if output_format == "png":
             raise ValueError("no segment command with PNG: it reads an FFV1 master's stream")
         return CommandWriter(
-            command, path, output_format, width, height, frame_rate, tags, stale=stale
+            command,
+            path,
+            output_format,
+            width,
+            height,
+            frame_rate,
+            tags,
+            stale=stale,
+            record=record,
         )
     if output_format == "png":
         return PNGWriter(path, width, height, frame_rate, tags, start, stale)
-    return FFV1Writer(path, output_format, width, height, frame_rate, tags, stale=stale)
+    return FFV1Writer(
+        path, output_format, width, height, frame_rate, tags, stale=stale, record=record
+    )
 
 
 def count_packets(path: Path) -> int:

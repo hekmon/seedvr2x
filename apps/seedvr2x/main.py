@@ -51,13 +51,15 @@ if TYPE_CHECKING:
     from job import JobError, OutputSegment, Shot
     from manifest import Manifest
     from media.index import FrameIndex
+    from media.probe import VideoStream
     from media.source import Declared, FirstPass, Source
     from media.writer import Writer
     from plan import Plan
     from planner import Pins, PlanError
     from seedvr2x.model import Models
-    from seedvr2x.passes import Compilation, ModelPlan
+    from seedvr2x.passes import Compilation, ModelPlan, Tiles
     from seedvr2x.pull import ModelFile, ModelFiles
+    from seedvr2x.record import Record
     from seedvr2x.weights import Architecture
     from timing import Clock, Unit
 
@@ -1494,6 +1496,9 @@ def _run(args: argparse.Namespace) -> int:
                 return 0 if final is None else _assemble(final, record, paths, until=until)
     units = Units(directory, record)
     tags = Tags.of(stream, source.conversion.matrix_tag)
+    # seedvr2x's record on each master and on the stream --segment-cmd reads (DESIGN.md, The
+    # record in each output), from the job's settings and the plan the run follows.
+    recorded_tags = _stream_record(record.settings, stream, (out_width, out_height), plan).tags()
     # The VAE compiled, as the plan has it (--compile, planner.plan): its shapes from the plan,
     # its cache in the job's directory (manifest.COMPILE_CACHE), compiled as the models load.
     compilation = None
@@ -1621,9 +1626,11 @@ def _run(args: argparse.Namespace) -> int:
         size = (out_width, out_height, source.frame_rate)
         if args.segment_cmd is not None:
             # No checksums of what the user's command writes, so none of a file before it.
-            return open_writer(args.format, path, *size, tags, command=args.segment_cmd)
+            return open_writer(
+                args.format, path, *size, tags, command=args.segment_cmd, record=recorded_tags
+            )
         stale = _checksums_path(directory, path, args.format)
-        return open_writer(args.format, path, *size, tags, stale=stale)
+        return open_writer(args.format, path, *size, tags, stale=stale, record=recorded_tags)
 
     def make(remaining: list[int], progress: Progress, after: str | None = None) -> _Outcome:
         """Make the segments `remaining`, those not finished, in order, each unit checked against
@@ -4940,6 +4947,42 @@ def _model(file: "ModelFile", model_files: "ModelFiles") -> dict[str, object]:
         "sha256": digest,
         pull.TIMES: model_files.hashes.mtime_ns(file.path),
     }
+
+
+def _stream_record(
+    settings: dict[str, Any], stream: "VideoStream", output: tuple[int, int], plan: "Plan"
+) -> "Record":
+    """A video job's record (seedvr2x.record.Record): this command's version, the source's size
+    as its stream stores it and the output's (output, width and height), the job's model files by
+    the names given and the SHA-256 its settings record, its seed, colour correction and level
+    (--quality), and of the plan the run follows the tiles (0 untiled), the window cap (0: each
+    shot in one window) and --compile; the attention kernel this run's DiT takes (_attention).
+    A job's settings are the same across its runs (resume), its plan and attention kernel may not
+    be: a resume planned again for the memory free (--accept-env-change) writes the new plan's on
+    the segments it makes, though a run whose windows were all done keeps its old cap and a latent
+    encoded its old tiles (resume.reshape), and the assembly keeps the first segment's. A question
+    for design (impl-record, 2026-11-03): DESIGN.md's record has one value per field."""
+    from seedvr2x.record import Model, Record, Video
+
+    def model(entry: dict[str, Any]) -> Model:
+        return Model(entry["name"], entry["sha256"])
+
+    def side(tiles: "Tiles | None") -> int:
+        return 0 if tiles is None else tiles.size
+
+    return Record(
+        version=version("seedvr2x"),
+        source=(stream.width, stream.height),
+        output=output,
+        dit=model(settings["dit_model"]),
+        vae=model(settings["vae_model"]),
+        seed=settings["seed"],
+        color_correction=settings["color_correction"],
+        encode_tile=side(plan.encode_tiles),
+        decode_tile=side(plan.decode_tiles),
+        attention=_attention(),
+        video=Video(plan.window or 0, settings["quality"], plan.compile_vae),
+    )
 
 
 def _detector_model(model_files: "ModelFiles") -> dict[str, object]:

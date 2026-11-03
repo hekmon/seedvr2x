@@ -15,7 +15,7 @@ import re
 import shlex
 import signal
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from fractions import Fraction
@@ -46,6 +46,7 @@ from media.scan import scan
 from media.source import counted, declare, first_pass
 from media.writer import FFV1Writer, Tags
 from seedvr2x.files import size_said
+from seedvr2x.record import Model, Record, Video, tag_names
 
 
 def _usable() -> bool:
@@ -133,8 +134,9 @@ def write_master(
     count: int,
     frame_rate: Fraction,
     drawn: Callable[[int, int], np.ndarray] = pictures,
+    record: Sequence[tuple[str, str]] = (),
 ) -> None:
-    with FFV1Writer(path, "gbrp16le", WIDTH, HEIGHT, frame_rate, TAGS) as writer:
+    with FFV1Writer(path, "gbrp16le", WIDTH, HEIGHT, frame_rate, TAGS, record=record) as writer:
         writer.write(drawn(first, count))
 
 
@@ -158,8 +160,11 @@ def make_job(
     parts: int,
     seed: int = 1,
     drawn: Callable[[int, int], np.ndarray] = pictures,
+    records: Sequence[Sequence[tuple[str, str]]] = (),
 ) -> Job:
-    """A job of `parts` segments of 1 to 6 frames, FFV1Writer's masters, written 4 at a time."""
+    """A job of `parts` segments of 1 to 6 frames, FFV1Writer's masters, written 4 at a time.
+    records, when given, is each segment's record (its stream's tags); the one master of the same
+    frames, which sources are made from, carries none."""
     directory.mkdir(parents=True)
     chosen = random.Random(seed)
     counts = [chosen.randint(1, 6) for _ in range(parts)]
@@ -168,8 +173,10 @@ def make_job(
     with ThreadPoolExecutor(4) as pool:
         list(
             pool.map(
-                lambda made: write_master(made[0][0], made[1], made[0][1], frame_rate, drawn),
-                zip(segments, firsts, strict=True),
+                lambda made: write_master(
+                    made[0][0], made[1], made[0][1], frame_rate, drawn, made[2]
+                ),
+                zip(segments, firsts, records or [()] * parts, strict=True),
             )
         )
     master = directory / "master.mkv"
@@ -566,6 +573,50 @@ def test_the_snap_is_refused_beyond_what_it_computes_exactly() -> None:
 
 
 # --- the source's other streams
+
+
+def recorded(decode_tile: int) -> Record:
+    """A video job's record, the decode's tile the one value to differ."""
+    return Record(
+        "0.1.0",
+        (64, 48),
+        (128, 96),
+        Model("seedvr2x_ema_7b_sharp_fp16.safetensors", "1" * 64),
+        Model("ema_vae_fp16.safetensors", "2" * 64),
+        42,
+        "split",
+        0,
+        decode_tile,
+        "sdpa",
+        Video(20, "maximum", False),
+    )
+
+
+def test_the_record_is_kept_from_the_first_segment(tmp_path: Path) -> None:
+    # DESIGN.md, The record in each output: the finished file's video keeps seedvr2x's tags from
+    # the first segment (a resume planned again for the memory free may write another on later
+    # segments), with its encoder's and the source's language and title; every other tag of the
+    # segment or of the source's video (mkvmerge's BPS) is dropped.
+    first, later = recorded(0), recorded(512)
+    assert assembly.KEPT == {"ENCODER"} | {name.upper() for name in tag_names()}
+    job = make_job(
+        tmp_path / "segments",
+        RATES["24000/1001"],
+        3,
+        records=[first.tags(), later.tags(), later.tags()],
+    )
+    source = rich(tmp_path / "source", job)
+    assert "BPS" in streams(source)[0]["tags"]
+    output = assembled(tmp_path, job, source)
+    written = {k: v for k, v in streams(output)[0]["tags"].items() if k != "DURATION"}
+    assert written == {
+        "language": "jpn",
+        "title": "Main video",
+        "ENCODER": streams(job.segments[0][0])[0]["tags"]["ENCODER"],
+        **{name.upper(): value for name, value in first.tags()},
+    }
+    assert written["SEEDVR2X_DECODE_TILE"] == "0"
+    assert "BPS" not in written and "NUMBER_OF_FRAMES" not in written
 
 
 @pytest.mark.parametrize("name", ["24000/1001", "30000/1001"])

@@ -488,6 +488,19 @@ uv run pytest
   protocol or an option (`media/ffmpeg.argument`), for FFV1 and PNG; `tests/test_segment_cmd.py`
   the segment command's stop, 5 s between SIGTERM and SIGKILL with a line saying so, a second
   Ctrl-C killing it at once.
+- seedvr2x's record on a video (DESIGN.md, The record in each output; `seedvr2x/record.py`'s
+  tags): `tests/test_writer.py` holds it as the master's stream tags, gbrp16le and yuv420p10le,
+  read back by ffprobe (Matroska writes the names in upper case), the master's packets and
+  checksums those written without it; none by default; on the stream `--segment-cmd` reads, and
+  carried by an ffmpeg that re-encodes it; none in a PNG directory's frames.
+  `tests/test_assembly.py` holds the finished file keeping the first segment's record beside its
+  encoder (`KEPT`), the source's video tags dropped but language and title. The command line's
+  jobs (`tests/test_cli_run.py`, `tests/test_cli_segment_cmd.py`) hold each field against the
+  job's manifest, on the masters, on the finished `.mkv`, on a command's segments, and none in a
+  PNG job's frames. The tags change the masters' bytes and sizes, not their frames, packets or
+  checksums: what compares masters (the milestone-1 regression's `tools/compare.py`, the
+  segments' SHA-256 and sizes, each against its own file's record) compares frames, or a file
+  with its own record.
 - A still picture (DESIGN.md, Still images), on the CPU, in `core/tests/`: `tests/test_picture.py`
   holds `seedvr2x/picture.py` to files it makes, bytes in: every format and mode read (PNG in
   RGB, palette, grey at 1 to 16 bits, 16-bit RGB by TorchCodec's decoder, alpha; JPEG, WebP,
