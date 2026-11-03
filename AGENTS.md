@@ -41,6 +41,14 @@ apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools)
   tests/                 the CLI's, with levels.py and conftest.py
   pyproject.toml uv.lock .python-version LICENSE NOTICE
   README.md MANUAL.md images/
+apps/imgserver/          the image server: distribution seedvr2x-imgserver (setuptools), flat
+  main.py                options, environment, the server's life (`seedvr2x-imgserver = "main:main"`)
+  service.py reservation.py admission.py     the start (files, plan, reservation, warm-up), a
+                         picture's run under a lock per model, the queue
+  web.py answers.py metrics.py     HTTP (ThreadingHTTPServer), a request's headers and the
+                         server's words, /metrics
+  tests/                 the server's, with serving.py and conftest.py
+  pyproject.toml uv.lock .python-version LICENSE NOTICE README.md
 research/ models/ upstream/
 ```
 
@@ -55,6 +63,11 @@ folder package; the CLI by setuptools, which lists each top-level module (`py-mo
 `manifest.MODULES`, and each name to its own file in the environment, so that no dependency's
 `run` or `media` shadows the CLI's. The scripts in `research/` stay standalone.
 
+- The image server, `apps/imgserver/`, is a third uv project: its lock was started from the
+  CLI's and holds the same versions of everything the two share (`apps/imgserver/tests/
+  test_lock.py`; a moved one comes back by copying the CLI's lock and `uv lock`), `core/` by
+  path, editable, and its own venv, `apps/imgserver/.venv`, where its checks and tests run:
+  `uv sync`, then `uv run seedvr2x-imgserver --help`. Its loggers are `imgserver.<module>`.
 - The CLI, from `apps/seedvr2x/`: `uv sync`, then `uv run seedvr2x --help`. There is no
   `python -m seedvr2x`: the tests start the venv's `seedvr2x` script.
 - The checks and the tests, in the CLI's environment: from `apps/seedvr2x/` as written in
@@ -175,6 +188,8 @@ uv run ruff check
 uv run pyright
 uv run pytest
 ```
+
+From `apps/imgserver/`, in its own environment, the same four as the CLI's.
 
 - ruff: line length 100, rules E, F, W, I, B, UP and RUF, set in each pyproject. The vendored
   code, `seedvr2x/vendor/` and `seedvr2x/transnetv2/`, is excluded from formatting and from that
@@ -628,6 +643,21 @@ uv run pytest
   server, Errors): `tests/test_picture.py` holds each refusal's message word for word, its reason
   free of the file's name, of `ffmpeg` and of options, and every kind raised; `tests/test_frames.py`
   `too-small`'s.
+- The image server (DESIGN.md, The image server), on the CPU in its own venv, from
+  `apps/imgserver/`: `tests/serving.py` puts a stand-in machine in `service.Card`'s place (the
+  card's figures chosen, the stand-in models: `cpu_models`' VAE in bfloat16 and the DiT of
+  arithmetic of `core/tests/test_still.py`, failures put in on purpose) and runs the server over
+  a real socket on 127.0.0.1 (`main.launch`, `bring_up`, `shut`: `main.serve` less its signals,
+  which the main thread alone takes); `tests/test_web.py` every endpoint, header, status and
+  state, the limits before a body is read, the deadlines, a picture's bytes those the library
+  makes of it with the same seed and tiles; `tests/test_service.py` the steps under a lock per
+  model, one picture in the DiT while another is in the VAE, each with its bits alone, the
+  reservation held again when idle, the warm-up in both orientations, the start refused; `tests/test_stop.py` the stop in process and by
+  SIGTERM in a process of its own; `tests/test_reservation.py`, `test_admission.py`,
+  `test_answers.py`, `test_metrics.py` (read back by prometheus_client's parser, a dependency of
+  the tests alone), `test_main.py`, `test_names.py` and `test_lock.py` the parts alone. The
+  library's three steps (`still.encoded`, `sampled`, `decoded`) are held to `still.upscale` by
+  the CLI's `tests/test_still_cli.py`, through `upscale`, which composes them.
 - A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
   phase a refusal names, a recorded shape planned again releasing that part, planning importing
   no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),

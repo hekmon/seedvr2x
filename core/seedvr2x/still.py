@@ -49,8 +49,29 @@ def upscale(
     plan's (None: one pass), tile the VAE's passes (tiling). correct runs the colour correction
     (colour.split) against the picture itself.
 
-    ValueError for pixels that aren't (H, W, 3) float32; NonFinite when the decode holds NaN or
-    inf."""
+    The three steps one after the other: encoded, sampled, decoded, which a caller running
+    several pictures at once calls apart, each model taking one picture at a time (the VAE's
+    causal convolutions keep their memory in the modules). ValueError for pixels that aren't
+    (H, W, 3) float32; NonFinite when the decode holds NaN or inf."""
+    latent = encoded(models, pixels, target, seed, tiles=encode_tiles)
+    return decoded(
+        models, sampled(models, latent, seed), pixels, target, tiles=decode_tiles, correct=correct
+    )
+
+
+@torch.no_grad()
+def encoded(
+    models: Models,
+    pixels: npt.NDArray[np.float32],
+    target: tuple[int, int],
+    seed: int,
+    *,
+    tiles: Tiles | None,
+) -> Tensor:
+    """The picture's latent, (1, h, w, 16) in system memory in the encode's channel-major layout
+    (model.encode_stream): the encode's phase entered, seeded with seed + ENCODE_SEED_OFFSET,
+    the picture resized on the device and encoded in `tiles` (None: one pass). ValueError for
+    pixels that aren't (H, W, 3) float32 (upscale)."""
     if pixels.ndim != 3 or pixels.shape[2] != 3 or pixels.dtype != np.float32:
         raise ValueError(f"pixels {pixels.shape} {pixels.dtype}, not (H, W, 3) float32")
     # Encode: a shot of one frame is not padded to 4n + 1 and the VAE takes it in one slice
@@ -58,27 +79,50 @@ def upscale(
     models.enter("encode")
     model.set_seed(seed + ENCODE_SEED_OFFSET)
     frame = _transformed(models, model.to_input(pixels), target, COMPUTE_DTYPE)
-    if encode_tiles is None:
+    if tiles is None:
         latent = model.encode_stream(models, [frame], 1)
     else:
-        latent = tiling.encode_tiled(models, [frame], 1, encode_tiles, tiling.InMemory())
+        latent = tiling.encode_tiled(models, [frame], 1, tiles, tiling.InMemory())
     del frame
-    # The one window [(0, 1)]: the noise drawn in system memory from the latent, which
-    # merge_windows then returns as it is.
+    return latent
+
+
+@torch.no_grad()
+def sampled(models: Models, latent: Tensor, seed: int) -> Tensor:
+    """The DiT's output for the picture's latent (encoded), (1, h, w, 16) moved to system memory,
+    its layout kept: the DiT's phase entered, the noise drawn in system memory from seed
+    (sampling.drawn, a generator of its own: nothing of the pass draws from torch's global
+    ones), the one window [(0, 1)], which merge_windows returns as it is."""
     models.enter("dit")
     noise, latent = sampling.drawn(models, latent, seed)
-    sampled = sampling.window(models, noise, latent)
+    out = sampling.window(models, noise, latent)
     del noise, latent
     # decode_shot's start: the window's output leaves the device for system memory, and is
-    # decoded from there (shot._slices).
+    # decoded from there (shot._slices). Here before the decode's phase is entered, so that a
+    # picture waiting for the VAE holds nothing on the device.
+    model.synchronize(out.device)
+    return out.to("cpu")
+
+
+@torch.no_grad()
+def decoded(
+    models: Models,
+    latent: Tensor,
+    pixels: npt.NDArray[np.float32],
+    target: tuple[int, int],
+    *,
+    tiles: Tiles | None,
+    correct: bool,
+) -> npt.NDArray[np.float32]:
+    """The picture from the DiT's output (sampled), as upscale returns it: the decode's phase
+    entered, the latent decoded in `tiles` (None: one pass), cropped to the target's even sides,
+    and corrected against `pixels`, the picture as stored, where `correct`. NonFinite when the
+    decode holds NaN or inf."""
     models.enter("decode")
-    model.synchronize(sampled.device)
-    latent = sampled.to("cpu")
-    del sampled
     slices = (
         model.decode_stream(models, latent)
-        if decode_tiles is None
-        else tiling.decode_tiled(models, latent, decode_tiles, tiling.InMemory())
+        if tiles is None
+        else tiling.decode_tiled(models, latent, tiles, tiling.InMemory())
     )
     height, width = output_size(target)
     try:

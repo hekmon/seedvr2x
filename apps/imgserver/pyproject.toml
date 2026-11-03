@@ -1,0 +1,103 @@
+[project]
+name = "seedvr2x-imgserver"
+version = "0.1.0.dev0"
+description = "SeedVR2 image upscaler over HTTP: the models loaded once and kept on the GPU"
+readme = "README.md"
+# The server's distribution: its code is seedvr2x-core's (NOTICE there).
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = "==3.13.*"
+# The library, at the CLI's exact versions of everything the two share (DESIGN.md, Repository and
+# apps: "The image server's lock holds the same versions of what they share, a test checking
+# it": tests/test_lock.py). No HTTP framework: the standard library's ThreadingHTTPServer
+# (DESIGN.md, The image server, HTTP).
+dependencies = [
+    "seedvr2x-core",
+    "diffusers==0.40.0",
+    "einops==0.8.2",
+    "huggingface-hub==1.33.0",
+    "numpy==2.5.2",
+    "omegaconf==2.3.1",
+    "pillow==12.3.0",
+    "rotary-embedding-torch==0.9.1",
+    "safetensors==0.8.0",
+    "torch==2.14.1",
+    "torchcodec==0.17.0",
+    "torchvision==0.29.1",
+]
+
+[project.scripts]
+seedvr2x-imgserver = "main:main"
+
+[dependency-groups]
+# prometheus-client reads /metrics back in the tests alone: the server writes Prometheus' text
+# format itself, with no dependency (DESIGN.md, The image server, /metrics).
+dev = ["prometheus-client", "pyright[nodejs]", "pytest", "ruff"]
+
+# setuptools, as the CLI's: the server is flat, its modules at the app's root, each listed, and
+# tests/test_names.py holds the list to the files.
+[build-system]
+requires = ["setuptools>=84,<85"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "admission",
+    "answers",
+    "main",
+    "metrics",
+    "reservation",
+    "service",
+    "web",
+]
+
+[tool.uv]
+# Linux first (DESIGN.md), as the CLI. FlashAttention 2 is not a dependency (DESIGN.md, The image
+# server, The Docker image).
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# The CLI's constraints, so that the two locks resolve torch's CUDA support packages alike.
+constraint-dependencies = [
+    "cuda-bindings==13.3.1",
+    "cuda-pathfinder==1.6.0",
+    "nvidia-nvjitlink==13.3.33",
+]
+
+[tool.uv.sources]
+seedvr2x-core = { path = "../../core", editable = true }
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["seedvr2x"]
+
+[tool.ruff.format]
+exclude = ["*.md"]
+
+[tool.pyright]
+include = ["*.py", "tests"]
+exclude = [".venv", "**/__pycache__"]
+# The server's modules strictly, the tests at the standard level.
+strict = ["*.py"]
+pythonVersion = "3.13"
+venvPath = "."
+venv = ".venv"
+# The library as source, and its tests' helpers (stand_ins, library_fixtures), as the CLI's.
+extraPaths = ["../../core", "../../core/tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "-m", "not gpu"]
+markers = ["gpu: needs CUDA; never selected by default, run with -m gpu"]
+pythonpath = ["../../core/tests"]

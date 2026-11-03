@@ -13,8 +13,8 @@ name built at run time. The process runs with `-I` and the library's directory p
 by the code it is given: `-I` drops PYTHONPATH and the working directory, so that nothing else
 can stand for the package.
 
-The CLI's names are read from the repository, so the test skips where apps/seedvr2x isn't there
-(a copy of core/ alone)."""
+The names are every app's, read from the repository: the CLI's and the image server's (each
+apps/*/pyproject.toml), so the test skips where apps/ isn't there (a copy of core/ alone)."""
 
 import ast
 import json
@@ -27,18 +27,31 @@ import pytest
 
 CORE = Path(__file__).resolve().parents[1]
 PACKAGE = CORE / "seedvr2x"
-APP = CORE.parent / "apps" / "seedvr2x"
+APPS = CORE.parent / "apps"
+APP = APPS / "seedvr2x"
 # Calls that take a module's name as a string: import_module, __import__, find_spec.
 BY_NAME = ("import_module", "__import__", "find_spec")
 
 
+def app_roots() -> dict[Path, frozenset[str]]:
+    """Each app's directory with its top-level names, its modules and packages, from its
+    pyproject.toml's [tool.setuptools] py-modules and packages: every directory of apps/ that
+    has one."""
+    found: dict[Path, frozenset[str]] = {}
+    for pyproject in sorted(APPS.glob("*/pyproject.toml")):
+        setuptools = tomllib.loads(pyproject.read_text()).get("tool", {}).get("setuptools", {})
+        names = [*setuptools.get("py-modules", []), *setuptools.get("packages", [])]
+        if names:
+            found[pyproject.parent] = frozenset(names)
+    if APP not in found:
+        pytest.skip(f"needs the apps' pyproject.toml ({APP}): not a copy of core/ alone")
+    return found
+
+
 def cli_names() -> frozenset[str]:
-    """The CLI's top-level names, its modules and packages, from its pyproject.toml."""
-    pyproject = APP / "pyproject.toml"
-    if not pyproject.is_file():
-        pytest.skip(f"needs the CLI's pyproject.toml ({pyproject}): not a copy of core/ alone")
-    setuptools = tomllib.loads(pyproject.read_text())["tool"]["setuptools"]
-    return frozenset([*setuptools["py-modules"], *setuptools["packages"]])
+    """The top-level names of every app, the CLI's and the image server's: a library file that
+    imports one imports an app."""
+    return frozenset().union(*app_roots().values())
 
 
 def resolved(module: str, package: bool, level: int, name: str | None) -> str | None:
@@ -233,6 +246,17 @@ def test_the_cli_names_are_read_from_its_pyproject() -> None:
     assert "seedvr2x" not in names and "tests" not in names
 
 
+def test_the_image_servers_names_are_read_too() -> None:
+    roots = app_roots()
+    server = APPS / "imgserver"
+    if server not in roots:
+        pytest.skip("needs the image server's pyproject.toml")
+    assert {"admission", "answers", "main", "metrics", "reservation", "service", "web"} <= roots[
+        server
+    ]
+    assert {"admission", "service", "web"} <= cli_names()
+
+
 # The rule.
 
 
@@ -265,7 +289,6 @@ print(json.dumps({{
 def test_importing_the_whole_library_loads_nothing_of_the_cli() -> None:
     # A fresh process, seedvr2x from this tree alone (the module's docstring): every library
     # module imported, then the files of every module loaded looked at: none is one of the CLI's.
-    cli = cli_names()
     names = sorted(library_modules())
     code = IMPORT_ALL.format(core=str(CORE), names=names)
     done = subprocess.run(
@@ -275,13 +298,14 @@ def test_importing_the_whole_library_loads_nothing_of_the_cli() -> None:
     loaded: dict[str, str | None] = json.loads(done.stdout.splitlines()[-1])
     assert set(names) <= set(loaded)
     assert loaded["seedvr2x"] is not None and Path(loaded["seedvr2x"]).is_relative_to(CORE)
-    # The CLI's files are the app's root modules and packages; the app's directory holds its
-    # environment too (apps/seedvr2x/.venv), whose files are none of the CLI's.
+    # An app's files are its root modules and packages; its directory holds its environment too
+    # (apps/seedvr2x/.venv), whose files are none of the app's.
     ours = [
         name
         for name, file in loaded.items()
         if file
-        and Path(file).is_relative_to(APP)
-        and Path(file).relative_to(APP).parts[0].removesuffix(".py") in cli
+        for app, names in app_roots().items()
+        if Path(file).is_relative_to(app)
+        and Path(file).relative_to(app).parts[0].removesuffix(".py") in names
     ]
     assert ours == []

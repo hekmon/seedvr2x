@@ -1,0 +1,8 @@
+seedvr2x-imgserver
+Copyright 2026 Edouard Hur
+
+The seedvr2x image server's code (main.py and the modules beside it) is under the Apache License,
+Version 2.0, the licence in LICENSE. It uses the library seedvr2x-core (core/ in the repository),
+whose NOTICE credits the SeedVR2 model code, numz's and ByteDance's, it vendors and adapts,
+TransNetV2, the shot detector's model, under the MIT License, and comfy-kitchen, under the Apache
+License, Version 2.0, whose int8 rotation and arithmetic its int8 linear follows.
