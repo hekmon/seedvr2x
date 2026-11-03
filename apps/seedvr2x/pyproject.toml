@@ -10,7 +10,8 @@ requires-python = "==3.13.*"
 # The library, and the exact versions of the numz environment milestone 1 is compared with
 # (DESIGN.md, Validation milestones), so that the comparison differs by code only: bump one on
 # purpose, and run that comparison again. huggingface-hub, which pulls seedvr2x's own model files
-# (DESIGN.md, Weights), at the version the lock held already through diffusers.
+# (DESIGN.md, Weights), and pillow, which reads a still picture (DESIGN.md, Still images), at the
+# versions the lock held already through diffusers and torchvision.
 dependencies = [
     "seedvr2x-core",
     "diffusers==0.40.0",
@@ -18,6 +19,7 @@ dependencies = [
     "huggingface-hub==1.33.0",
     "numpy==2.5.2",
     "omegaconf==2.3.1",
+    "pillow==12.3.0",
     "rotary-embedding-torch==0.9.1",
     "safetensors==0.8.0",
     "torch==2.14.1",

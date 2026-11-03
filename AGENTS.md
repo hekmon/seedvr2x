@@ -20,6 +20,8 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
     compiling.py colour.py memory.py detector.py      the bricks: models and their files,
                          placement, the int8 linear, sampling, the VAE passes, colour, the
                          memory model, the shot detector
+    picture.py png.py still.py still_plan.py     a still picture: read, written as PNG,
+                         upscaled on models already loaded, its plan for a bound
     frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share
     vendor/              model layer, vendored from numz (below)
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
@@ -476,6 +478,26 @@ uv run pytest
   protocol or an option (`media/ffmpeg.argument`), for FFV1 and PNG; `tests/test_segment_cmd.py`
   the segment command's stop, 5 s between SIGTERM and SIGKILL with a line saying so, a second
   Ctrl-C killing it at once.
+- A still picture (DESIGN.md, Still images), on the CPU, in `core/tests/`: `tests/test_picture.py`
+  holds `seedvr2x/picture.py` to files it makes, bytes in: every format and mode read (PNG in
+  RGB, palette, grey at 1 to 16 bits, 16-bit RGB by torchvision's decoder, alpha; JPEG, WebP,
+  TIFF, BMP, GIF), values exact and, where an ffmpeg seedvr2x accepts is on `PATH`, ffmpeg's
+  decode bit for bit (JPEG and lossy WebP within 3 levels of its bilinear conversion); the
+  format told by content (`identify`); the profile, the PNG's colour chunks verbatim and the
+  EXIF orientation; an opaque alpha dropped and said; an MPO's first image read and warned of;
+  JPEGs one after another (a raw MJPEG stream) refused as frames, found by the markers' walk, an
+  EXIF thumbnail no frame; every refusal, the commands it gives run. `tests/test_png.py` holds `seedvr2x/png.py`: the chunks'
+  order and CRCs, the five filters and the adaptive one, 8 and 16 bits, grey and RGB, read back
+  by Pillow, torchvision, `picture.read` and ffmpeg, the profile and orientation by ffprobe.
+  `tests/test_still.py` holds `seedvr2x/still.py` on `stand_ins.cpu_models`' VAE cast to bfloat16
+  and a stand-in DiT: one latent, the two seeds, nothing loaded, the phases in order, tiled
+  passes in memory, the correction against the picture, NaN refused. `tests/
+  test_still_plan.py` holds `seedvr2x/still_plan.py`, importing no torch: every picture within
+  8K and 6000x4000 bounds on cards of 16 to 48 GB given tiles that fit, by `peaks.py` alone; the
+  attention windows counted as the DiT's window functions count them, and their most within a
+  bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's order, int8, SDPA,
+  pins, the host's trades and refusal, held readings and the tight reserve. `tests/test_peaks.py`
+  holds the colour correction's term by its frames, a video's `SLICE` unchanged.
 - A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
   phase a refusal names, a recorded shape planned again releasing that part, planning importing
   no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),

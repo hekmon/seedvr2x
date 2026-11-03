@@ -11,12 +11,12 @@ from itertools import pairwise
 from pathlib import Path
 
 from seedvr2x.errors import Refusal
+from seedvr2x.passes import ENCODE_SEED_OFFSET
 
 # numz seeds Python's, NumPy's and torch's generators with each seed (common/seed.py), and NumPy
 # takes seeds in [0, 2**32). numz seeds again before the VAE encode, with the seed plus
-# ENCODE_SEED_OFFSET (nothing draws then): shot.py does the same.
+# ENCODE_SEED_OFFSET (seedvr2x/passes.py): shot.py does the same.
 SEED_LIMIT = 2**32
-ENCODE_SEED_OFFSET = 1_000_000
 
 # Latents shared by consecutive DiT windows, M (DESIGN.md, Pipeline step 2): M = 2 cut the boundary
 # jump by 80% against independent batches in the stitching study (research/docs/stitching.md).

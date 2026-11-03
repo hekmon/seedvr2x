@@ -328,6 +328,37 @@ TILE_MIN = 512
 TILE_MAX = 2048
 TILE_STEP = 64
 
+# What the plan leaves of the free memory the driver reports, the budget being free - MARGIN
+# (DESIGN.md, Memory planner, Budget): bisected on emulated cards, a run needs 0.15-0.45 GiB
+# between the free memory it starts with and the torch peak of its bounding phase, the
+# decode-bound 8 GB card the most (it failed with 0.37); 0.6 keeps 0.23 over that failure
+# (planner-limits.md, The margin over free memory). Measured where the driver refuses a full
+# card, and a driver's alone: a run held to its card, whose driver gives memory the card doesn't
+# have, counts on memory.RESERVE less already, which measures the same need under torch's own
+# allocator, and takes no margin on top (the command line's planner.py, _Job.margin; DESIGN.md,
+# Allocator, 2026-10-12). The planner's, here so that the library's plan for one picture
+# (still_plan.py) takes the same.
+MARGIN = round(0.6 * GIB)
+
+# The room every VAE pass, encode or decode, tiled or not, must leave under the budget besides
+# its predicted peak, in bytes: 1.85 GiB under the free memory with the margin (DESIGN.md,
+# Memory planner, Budget, decided on 2026-10-18; To measure, The VAE's room). A pass packed
+# closer than about 1 GiB to its peak can run and give other frames, and say nothing: a
+# convolution whose workspace the allocator refuses runs on cuDNN's next engine, kept for the
+# process's life (vae-room.md). Judged by the frames against a run with room to spare, on the
+# 96 GB card emulating cards of 12 to 48 GB under cudaMallocAsync (2026-10-16 to 18): a pass
+# alone kept its frames with 0.97 GiB or less left (decodes 0.67 to 0.97, encodes their latent
+# with 0.87 or less), a whole run, the encode, the windows and the decode in one process, with
+# 1.08 or less (six tiles; near that floor two runs at one card didn't always agree). So 1.85
+# is 0.77 over the most a whole run was seen to need and 0.88 over the most a pass alone needs;
+# the 0.25 kept over the 1.0 those measures allow is for what wasn't measured: whole runs in
+# other tiles, cards not emulated, other GPU generations and cuDNN builds, whose engines and
+# workspaces are their own. An encode is held 0.4 GiB more besides (ENCODE_EXTRA). Before, 1.5
+# (2026-10-11), a guard while its cause wasn't known: the large passes refused at
+# memory_limit_conv's concatenation, which the one-output convolution spares most of them
+# (MEASURED).
+VAE_ROOM = round(1.25 * GIB)
+
 # --compile, the VAE compiled with its causal convolutions left out of the graph (DESIGN.md,
 # Memory planner, "torch.compile: the VAE, opt-in, in v0.1.0; the DiT, not", decided on
 # 2026-10-24; research/docs/compile.md). A compiled pass is held to COMPILE_PEAK times its tile's
@@ -509,13 +540,16 @@ def decode_peak(
     split: bool = False,
     compiled: bool = False,
     dit_model: weights.Architecture = FP16,
+    *,
+    frames: int = SLICE,
 ) -> int:
     """The predicted peak of the VAE's decode of padded frames, in bytes, its peak above what is
     on the GPU before the call as encode_peak has the encode's (without ENCODE_EXTRA, the
     encode's), whatever the shot's length too: a decode takes its latents from system memory
     slice by slice; with split, the colour correction too, which corrects a slice of the decode
-    at once, SLICE frames at most of the output's size (frames.output_size). ValueError for tiles
-    of which one covers the whole padded frame, as encode_peak.
+    at once, `frames` frames of the output's size (frames.output_size): a video's slice holds
+    SLICE at most, which the command line's planner passes, a still picture one. ValueError for
+    tiles of which one covers the whole padded frame, as encode_peak, and for frames under 1.
 
     The untiled decode, streamed, corrects each slice while it holds its working memory, and its
     peak is the two together: at 1080p with every weight on the GPU, 50.98 GiB measured for
@@ -533,8 +567,10 @@ def decode_peak(
     measured; tests/test_planner.py, test_first_matrix)."""
     # compiled: the tile's peak is COMPILE_PEAK times its plain one (encode_peak); the correction's
     # term, a pass of its own on the GPU, is not compiled.
+    if frames < 1:
+        raise ValueError(f"the colour correction's term over {frames} frames")
     fit = _fit(padded, tiles, 1) * (COMPILE_PEAK if compiled else 1.0)
-    corrected = SPLIT_FRAME_4K * SLICE * output[0] * output[1] / PIXELS_4K if split else 0
+    corrected = SPLIT_FRAME_4K * frames * output[0] * output[1] / PIXELS_4K if split else 0
     above = fit + corrected if tiles is None else max(fit, corrected)
     return round(above) + VAE_WEIGHTS + dit_on_gpu(resident, swapped, dit_model)
 

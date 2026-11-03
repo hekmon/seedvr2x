@@ -12,6 +12,12 @@ from typing import Literal
 # tiles at 1080p gained nothing at 128 (research/docs/vram.md, Tiling).
 OVERLAP = 64
 
+# The seed the VAE's encode is seeded with is the shot's or the picture's seed plus this: numz seeds
+# Python's, NumPy's and torch's generators again before the encode, with the seed plus 1,000,000
+# (numz src/core/generation_phases.py:329 at 4490bd1; nothing draws then). Here, not in sampling.py,
+# which imports torch: the command line's job.py bounds a seed by it before torch is imported.
+ENCODE_SEED_OFFSET = 1_000_000
+
 # A phase of the run, each unit in one (Models.enter): a shot's encode, a window, a decode.
 Phase = Literal["encode", "dit", "decode"]
 

@@ -11,6 +11,7 @@ from torch import Tensor
 
 from seedvr2x import model
 from seedvr2x.model import COMPUTE_DTYPE, Models
+from seedvr2x.passes import ENCODE_SEED_OFFSET as ENCODE_SEED_OFFSET
 
 logger = logging.getLogger(__name__)
 

@@ -1,0 +1,123 @@
+"""One picture through the models (DESIGN.md, Still images; Repository and apps, step 3): the
+resize, the encode, one latent sampled, the decode, the colour correction against the picture in
+memory. The library's brick: it takes models already loaded and never loads, unloads or
+reconfigures them, beyond entering the three phases as the video path does (Models.enter), so
+that a server can call it in a loop on the models it keeps.
+
+A picture is a shot of one frame at frame 0, encoded alone (DESIGN.md, Still images, the model on
+one picture) and seeded as such, so that the output is bit for bit what the command line's shot
+pipeline gives for it (apps/seedvr2x/shot.py: encode_shot, sample_windows over the one window
+[(0, 1)], decode_shot with its correction; tests/test_still_cli.py holds it). The tiled passes
+keep their scratch in system memory (tiling.InMemory): a picture's is 191 MiB at 8K."""
+
+from collections.abc import Generator
+
+import numpy as np
+import numpy.typing as npt
+import torch
+from torch import Tensor
+
+from seedvr2x import colour, model, sampling, tiling
+from seedvr2x.frames import output_size
+from seedvr2x.model import COMPUTE_DTYPE, Models
+from seedvr2x.passes import Tiles
+from seedvr2x.sampling import ENCODE_SEED_OFFSET
+
+
+class NonFinite(RuntimeError):
+    """NaN or inf in what a picture's decode made: the picture isn't returned."""
+
+
+@torch.no_grad()
+def upscale(
+    models: Models,
+    pixels: npt.NDArray[np.float32],
+    target: tuple[int, int],
+    seed: int,
+    *,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    correct: bool,
+) -> npt.NDArray[np.float32]:
+    """The picture upscaled: (H', W', 3) float32 in [0, 1] on the CPU, (H', W') =
+    frames.output_size(target).
+
+    pixels is the picture as stored, (H, W, 3) float32 in [0, 1]. target is the (height, width)
+    in pixels the encode resizes it to (frames.target_size, the caller's). seed is the picture's:
+    its encode is seeded with seed + ENCODE_SEED_OFFSET and its noise drawn from seed, as a
+    shot's first frame is (shot.encode_shot, sample_windows). encode_tiles and decode_tiles, the
+    plan's (None: one pass), tile the VAE's passes (tiling). correct runs the colour correction
+    (colour.split) against the picture itself.
+
+    ValueError for pixels that aren't (H, W, 3) float32; NonFinite when the decode holds NaN or
+    inf."""
+    if pixels.ndim != 3 or pixels.shape[2] != 3 or pixels.dtype != np.float32:
+        raise ValueError(f"pixels {pixels.shape} {pixels.dtype}, not (H, W, 3) float32")
+    # Encode: a shot of one frame is not padded to 4n + 1 and the VAE takes it in one slice
+    # (model.encode_slices, frames.padded_length), so the encode's input is one tensor.
+    models.enter("encode")
+    model.set_seed(seed + ENCODE_SEED_OFFSET)
+    frame = _transformed(models, model.to_input(pixels), target, COMPUTE_DTYPE)
+    if encode_tiles is None:
+        latent = model.encode_stream(models, [frame], 1)
+    else:
+        latent = tiling.encode_tiled(models, [frame], 1, encode_tiles, tiling.InMemory())
+    del frame
+    # The one window [(0, 1)]: the noise drawn in system memory from the latent, which
+    # merge_windows then returns as it is.
+    models.enter("dit")
+    noise, latent = sampling.drawn(models, latent, seed)
+    sampled = sampling.window(models, noise, latent)
+    del noise, latent
+    # decode_shot's start: the window's output leaves the device for system memory, and is
+    # decoded from there (shot._slices).
+    models.enter("decode")
+    model.synchronize(sampled.device)
+    latent = sampled.to("cpu")
+    del sampled
+    slices = (
+        model.decode_stream(models, latent)
+        if decode_tiles is None
+        else tiling.decode_tiled(models, latent, decode_tiles, tiling.InMemory())
+    )
+    height, width = output_size(target)
+    try:
+        # One frame: one slice. Cropped to the target's even sides, dropping the padding, as
+        # shot._decoded crops, (1, H', W', C) in [-1, 1] unclamped, on the device.
+        chunk = next(slices).permute(1, 2, 3, 0)[:1, :height, :width]
+        if chunk.shape[0] != 1:
+            raise RuntimeError(f"{chunk.shape[0]} frames decoded for a picture of one")
+    finally:
+        # A generator, as both decodes are; closing it clears the VAE's causal memory and the
+        # tiles' scratch at once (shot._slices).
+        if isinstance(slices, Generator):
+            slices.close()
+    # As shot.finite checks it, before the correction and the post-processing; the picture's
+    # frame is the one part.
+    if not bool(torch.isfinite(chunk).all()):
+        bad = int((~torch.isfinite(chunk)).sum())
+        raise NonFinite(f"the picture's decode holds NaN or inf: {bad} of {chunk.numel()} values")
+    if correct:
+        stages = colour.colour_stages((pixels.shape[0], pixels.shape[1]), target)
+        # split's reference is the picture through the encoder's transform in float32 (no
+        # float16 or bfloat16 step), cropped as the decode is (shot.reference_inputs, _frames).
+        reference = _transformed(models, torch.as_tensor(pixels), target, torch.float32)
+        reference = reference.permute(1, 0, 2, 3)[:, :, :height, :width]
+        corrected = colour.split(chunk.permute(0, 3, 1, 2), reference, stages)
+        model.synchronize(models.device)
+        return corrected.permute(0, 2, 3, 1)[0].to("cpu").numpy()
+    # Post-process (numz src/core/generation_phases.py:1340-1348 at 4490bd1): [-1, 1] to [0, 1].
+    chunk.clamp_(-1, 1).mul_(0.5).add_(0.5)
+    model.synchronize(models.device)
+    return chunk[0].to("cpu", torch.float32).numpy()
+
+
+def _transformed(
+    models: Models, frame: Tensor, target: tuple[int, int], dtype: torch.dtype
+) -> Tensor:
+    """The picture's frame, (H, W, 3) made a tensor on the CPU by the caller (model.to_input for
+    the encoder's input, float16 as numz's; torch.as_tensor for the reference), through
+    model.input_transform(target) as dtype on the device: (C, 1, H', W') in [-1, 1],
+    (H', W') = frames.padded_size(target) (shot._transformed)."""
+    frames = frame.unsqueeze(0).permute(0, 3, 1, 2).to(models.device, dtype)
+    return model.input_transform(target)(frames)

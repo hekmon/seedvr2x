@@ -673,6 +673,28 @@ def test_split_term() -> None:
     assert gib(split - before) == pytest.approx(4 * 5 * 0.56, abs=1e-6)
 
 
+def test_split_term_by_frames() -> None:
+    # The term counts the frames corrected at once: a video's slice, SLICE (5) at most, the
+    # default and what the command line's planner passes, so a video's figures are unchanged; a
+    # still picture, one frame, 2.24 GiB at 8K where a slice is 11.2 (DESIGN.md, Still images).
+    assert peaks.SLICE == 5
+    output, padded = (4320, 7680), (4336, 7680)
+    plain = peaks.decode_peak(padded, output, None, 0)
+    for frames in (1, 2, 5):
+        split = peaks.decode_peak(padded, output, None, 0, split=True, frames=frames)
+        assert gib(split - plain) == pytest.approx(frames * 4 * 0.56, abs=1e-6)
+    default = peaks.decode_peak(padded, output, None, 0, split=True)
+    assert default == peaks.decode_peak(padded, output, None, 0, split=True, frames=peaks.SLICE)
+    # Without split, the frames change nothing; tiled, the larger of the tile and the term.
+    assert peaks.decode_peak(padded, output, None, 0, frames=1) == plain
+    before = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, 0)
+    one = peaks.decode_peak(padded, output, Tiles(512), 0, split=True, frames=1)
+    assert round(gib(one - before), 2) == 5.89
+    for frames in (0, -1):
+        with pytest.raises(ValueError, match="frames"):
+            peaks.decode_peak(padded, output, None, 0, split=True, frames=frames)
+
+
 def test_scratch() -> None:
     # DESIGN.md, Pipeline, per shot, step 3: 12.7 MB per 1080p frame and 50.5 MB per 4K frame,
     # the padding included; a shot's frames padded to 4n + 1. The store either tiled pass opens
