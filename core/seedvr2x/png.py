@@ -123,7 +123,7 @@ def _idat(
     previous = np.zeros(row_bytes, np.uint8)
     pending = bytearray()
     for top in range(0, height, band):
-        samples = _quantised(rgb[top : top + band], bits, channels == 1)
+        samples = quantised(rgb[top : top + band], bits, channels == 1)
         raw = samples.view(np.uint8).reshape(samples.shape[0], row_bytes)
         pending += compressor.compress(_filtered(raw, previous, bpp, filter_type).tobytes())
         previous = raw[-1]
@@ -135,7 +135,7 @@ def _idat(
         yield bytes(pending[start : start + IDAT_BYTES])
 
 
-def _quantised(
+def quantised(
     rows: npt.NDArray[np.float32], bits: int, grey: bool
 ) -> npt.NDArray[np.uint8] | npt.NDArray[np.uint16]:
     """(R, W, 3) float32 to the samples of the rows, in network order: (R, W, C) bytes at 8 bits,

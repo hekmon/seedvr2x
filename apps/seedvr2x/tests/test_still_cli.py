@@ -18,8 +18,10 @@ import logging
 import os
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
+import zlib
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -41,7 +43,7 @@ import stills
 from media import ffmpeg
 from media.ffmpeg import MediaError
 from media.probe import IMAGE_BRANDS, IMAGE_DEMUXERS, PICTURES, image_kind
-from seedvr2x import model, picture, png, still, weights
+from seedvr2x import model, picture, png, still, webp, weights
 from seedvr2x.errors import Refusal
 from seedvr2x.frames import output_size
 from seedvr2x.passes import Tiles
@@ -58,17 +60,22 @@ def shots_pipeline(
     encode_tiles: Tiles | None,
     decode_tiles: Tiles | None,
     correction: Correction | None,
+    target: tuple[int, int] = TARGET,
 ) -> npt.NDArray[np.float32]:
     """The picture as the command line runs it, a shot of one frame at frame 0: its frame."""
     frames = pixels[None]
-    latent = encode_shot(models, lambda count: frames, 1, TARGET, seed, tiles=encode_tiles)
+    # The change of phase before each unit, as run.py makes it (Models.enter).
+    models.enter("encode")
+    latent = encode_shot(models, lambda count: frames, 1, target, seed, tiles=encode_tiles)
+    models.enter("dit")
     sampled = list(sample_windows(models, latent, LAYOUT, seed))
+    models.enter("decode")
     written: list[npt.NDArray[np.float32]] = []
     decode_shot(
         models,
         merge_windows(sampled, LAYOUT),
         1,
-        TARGET,
+        target,
         written.append,
         correction=correction,
         tiles=decode_tiles,
@@ -136,6 +143,164 @@ def test_a_picture_is_a_shot_of_one_frame(
         None if correct else Correction(Path("i.mkv"), Path("i.crc32"), PICTURE[1], PICTURE[0]),
     )
     assert other.tobytes() != expected.tobytes()
+
+
+# The picture on the GPU ----------------------------------------------------------------------
+
+# The real models, the sharp 7B fp16 and the VAE seedvr2x ships (the command line's defaults), in
+# SEEDVR2X_MODEL_DIR as the other GPU tests read it.
+GPU_MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")
+GPU_DIT, GPU_VAE = "seedvr2x_ema_7b_sharp_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors"
+# The cases, the picture's size (height, width) and the resolution it is upscaled to (x2):
+# - 720p, untiled in both passes: DESIGN.md asks 1080p untiled, but an untiled decode at 1080p
+#   takes about 35 GiB (peaks.decode_peak), beyond the 5090's 32 GiB, so the largest output the
+#   still plan leaves untiled in both passes in about 20 GiB is held (720p, found with
+#   still_plan.plan: 810p already tiles its decode);
+# - 1080p, both passes tiled by the plan (an encode tile of 1728, a decode tile of 1024 at 20
+#   GiB).
+GPU_CASES = {"720p-untiled": ((360, 640), 720, False), "1080p-tiled": ((540, 960), 1080, True)}
+# The test plans as if this much of the card's free memory (the smaller of main._free_memory and
+# NVML's) were taken by someone else: the card here drives a desktop as well.
+GPU_SPARE = 4 * GIB
+# Torch is held to the free memory less this, so that a plan that is wrong is an out-of-memory
+# error of the test's, never the desktop's memory taken or a driver that spills.
+GPU_HELD_BACK = 3 * GIB
+
+
+def scene(height: int, width: int, seed: int) -> npt.NDArray[np.float32]:
+    """A picture that looks like one, (H, W, 3) float32 in [0, 1]: smooth colour gradients, hard
+    edged discs and bars, a fine texture and a little noise, from a seeded generator (nothing of
+    it read from a file)."""
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    y /= height
+    x /= width
+    pixels = np.stack(
+        [0.2 + 0.6 * x, 0.3 + 0.4 * y + 0.2 * np.sin(6 * x), 0.8 - 0.5 * x * y], axis=-1
+    ).astype(np.float32)
+    for _ in range(12):
+        cy, cx, radius = rng.random(), rng.random(), 0.03 + 0.12 * rng.random()
+        disc = (y - cy) ** 2 + (x * width / height - cx * width / height) ** 2 < radius**2
+        pixels[disc] = rng.random(3, dtype=np.float32)
+    for _ in range(6):
+        top, left = int(rng.integers(0, height - 8)), int(rng.integers(0, width - 8))
+        pixels[top : top + 3 + int(rng.integers(2, 30)), left : left + 3] = rng.random(
+            3, dtype=np.float32
+        )
+    pixels += 0.04 * np.sin(120 * x + 40 * y)[..., None]
+    pixels += 0.02 * rng.standard_normal(pixels.shape, dtype=np.float32)
+    return np.clip(pixels, 0, 1).astype(np.float32)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not GPU_MODELS, reason="needs SEEDVR2X_MODEL_DIR")
+@pytest.mark.parametrize("case", GPU_CASES)
+def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
+    monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """still.upscale with the real models on CUDA, with the colour correction, equals the shot of
+    one frame of the command line bit for bit (float32 output), under the placement and the tiles
+    still_plan gives in the free memory less GPU_SPARE, the models loaded once for both."""
+    import gc
+    from fractions import Fraction
+
+    from seedvr2x import memory, peaks, still_plan
+    from seedvr2x.frames import target_size
+
+    assert GPU_MODELS is not None
+    directory = Path(GPU_MODELS)
+    dit, vae = directory / GPU_DIT, directory / GPU_VAE
+    if not (dit.is_file() and vae.is_file()):
+        pytest.skip(f"needs {GPU_DIT} and {GPU_VAE} in SEEDVR2X_MODEL_DIR")
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    size, resolution, tiled = GPU_CASES[case]
+    pixels = scene(*size, seed=11)
+    target = target_size(size[1], size[0], Fraction(1), resolution)
+    out_height, out_width = output_size(target)
+    device = torch.device("cuda", 0)
+    # The smaller of the driver's figure and the whole card's by NVML (nvidia-smi's): the WSL2
+    # driver reports free memory the card doesn't have, as it lends system memory (memory.reading).
+    reported = cli._free_memory(device)  # pyright: ignore[reportPrivateUsage]
+    card = memory.card_free(0)  # read with this process's context on the card
+    if card is None:
+        pytest.skip("the card's free memory can't be read through NVML")
+    free = min(reported, card)
+    counted = free - GPU_SPARE
+    host = cli._host_available()  # pyright: ignore[reportPrivateUsage]
+    # The plan for this picture's output, as the command makes it (stills._run).
+    plan = still_plan.plan(
+        (max(out_height, out_width), min(out_height, out_width)),
+        counted,
+        host,
+        process=stills._process(size, (out_height, out_width), 16),  # pyright: ignore[reportPrivateUsage]
+        input_pixels=size[0] * size[1],
+        attention=cli._attention(),  # pyright: ignore[reportPrivateUsage]
+        dit_model=peaks.FP16,
+        split=True,
+    )
+    tiles = still_plan.tiles(plan, target)
+    print(
+        f"\n{case}: {size[1]}x{size[0]} to {out_width}x{out_height}; free {free / GIB:.2f} GiB,"
+        f" planned in {counted / GIB:.2f} (budget {plan.budget / GIB:.2f}); {plan.models};"
+        f" encode {tiles.encode} ({tiles.encode_peak / GIB:.2f} GiB), decode {tiles.decode}"
+        f" ({tiles.decode_peak / GIB:.2f} GiB); attention {plan.attention}"
+    )
+    if tiled:
+        assert tiles.encode is not None and tiles.decode is not None, "the case tiles both passes"
+    elif tiles.encode is not None or tiles.decode is not None:
+        pytest.skip(f"the memory free plans {tiles}, not the untiled passes this case holds")
+
+    torch.cuda.set_per_process_memory_fraction(
+        (free - GPU_HELD_BACK) / torch.cuda.get_device_properties(device).total_memory, device
+    )
+    models = None
+    try:
+        models = model.load_models(dit, vae, device, None, plan.models)
+
+        # The input copy the correction re-reads for a job is read from memory here, as the CPU
+        # test does: the frame the encode read.
+        @contextmanager
+        def copy_reader(
+            correction: Correction, count: int
+        ) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
+            yield lambda n: pixels[None][:n]
+
+        monkeypatch.setattr(shot, "_copy_reader", copy_reader)
+        ours = still.upscale(
+            models,
+            pixels,
+            target,
+            SEED,
+            encode_tiles=tiles.encode,
+            decode_tiles=tiles.decode,
+            correct=True,
+        )
+        expected = shots_pipeline(
+            models,
+            pixels,
+            SEED,
+            tiles.encode,
+            tiles.decode,
+            Correction(Path("input.mkv"), Path("input.crc32"), size[1], size[0]),
+            target,
+        )
+        print(f"peak allocated {torch.cuda.max_memory_allocated(device) / GIB:.2f} GiB")
+    finally:
+        del models
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.set_per_process_memory_fraction(1.0, device)
+    assert ours.shape == expected.shape == (out_height, out_width, 3)
+    assert ours.dtype == expected.dtype == np.float32
+    assert ours.std() > 0.05
+    if not np.array_equal(ours, expected):
+        difference = np.abs(ours - expected)
+        place = np.unravel_index(int(difference.argmax()), difference.shape)
+        raise AssertionError(
+            f"{int((ours != expected).sum())} of {ours.size} values differ, at most"
+            f" {float(difference.max())} at {place}: {ours[place]} against {expected[place]}"
+        )
 
 
 # The command ----------------------------------------------------------------------------------
@@ -601,14 +766,14 @@ def test_o_must_be_a_png_file_and_a_conversion_is_given(
     source = make_picture(tmp_path / "in.png")
     assert run(machine, source, tmp_path / "photo.jpg") == 1
     assert (
-        f"{tmp_path / 'photo.jpg'}: seedvr2x writes a picture as a PNG only: write"
-        f" {tmp_path / 'photo.png'}, then convert it, e.g. ffmpeg -i {tmp_path / 'photo.png'}"
-        f" {tmp_path / 'photo.jpg'}"
+        f"{tmp_path / 'photo.jpg'}: seedvr2x writes a picture as a PNG or a lossless WebP only:"
+        f" write {tmp_path / 'photo.png'} (or {tmp_path / 'photo.webp'}), then convert it, e.g."
+        f" ffmpeg -i {tmp_path / 'photo.png'} {tmp_path / 'photo.jpg'}"
     ) in caplog.text
     caplog.clear()
     # No suffix at all: the example names a format.
     assert run(machine, source, tmp_path / "photo") == 1
-    assert f"write {tmp_path / 'photo.png'}, then convert it, e.g." in caplog.text
+    assert f"write {tmp_path / 'photo.png'} (or {tmp_path / 'photo.webp'}), then" in caplog.text
     assert f"{tmp_path / 'photo.jpg'}" in caplog.text
     assert not machine.asked and sorted(p.name for p in tmp_path.iterdir()) == ["in.png", "models"]
 
@@ -616,6 +781,13 @@ def test_o_must_be_a_png_file_and_a_conversion_is_given(
 def test_o_can_be_a_png_in_any_case(machine: Machine, tmp_path: Path) -> None:
     assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "OUT.PNG") == 0
     assert (tmp_path / "OUT.PNG").is_file()
+
+
+def test_o_can_be_a_webp_in_any_case(machine: Machine, tmp_path: Path) -> None:
+    source = make_picture(tmp_path / "in.png", bits=8)
+    for name in ("out.webp", "OUT.WEBP", "Out.WebP"):
+        assert run(machine, source, tmp_path / name) == 0
+        assert read_back(tmp_path / name).format == "WEBP"
 
 
 def test_o_is_never_a_directory_the_source_or_a_file_there(
@@ -629,7 +801,7 @@ def test_o_is_never_a_directory_the_source_or_a_file_there(
     (tmp_path / "link.png").symlink_to(source)
     (tmp_path / "dangling.png").symlink_to(tmp_path / "nowhere")
     cases = {
-        "dir.png": "a directory; a picture goes to a new .png file",
+        "dir.png": "a directory; a picture goes to a new .png or .webp file",
         "in.png": "the source itself; choose another -o",
         "link.png": "the source itself; choose another -o",
         "there.png": "a file already there, not replaced; remove it, or choose another -o",
@@ -710,6 +882,16 @@ def test_a_file_that_came_during_the_run_is_not_replaced(
 
 
 # The video path's new refusals ----------------------------------------------------------------
+
+
+def test_a_video_with_a_webp_o_is_refused(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    status = cli.main([str(tmp_path / "film.mkv"), "-o", str(tmp_path / "X.WebP")])
+    assert status == 1
+    assert (
+        f"{tmp_path / 'X.WebP'}: a .webp file is a picture's output, and a video's output is a"
+        " .mkv file or a directory"
+    ) in caplog.text
+    assert not (tmp_path / "X.WebP").exists()
 
 
 @pytest.mark.parametrize("name", ["x.png", "X.PNG", "frames.Png"])
@@ -1341,3 +1523,165 @@ def test_the_default_models_are_asked_for_without_the_shot_detector(
     monkeypatch.setattr(pull, "resolve", resolve)
     assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "out.png") == 0
     assert asked == [{"detector": False}]
+
+
+# Lossless WebP ----------------------------------------------------------------------------------
+
+
+def cicp() -> bytes:
+    """A cICP chunk (BT.709 primaries, the sRGB transfer, identity, full range), whole."""
+    body = bytes([1, 13, 0, 1])
+    return struct.pack(">I", 4) + b"cICP" + body + struct.pack(">I", zlib.crc32(b"cICP" + body))
+
+
+def png_with(path: Path, *, chunks: tuple[bytes, ...] = (), **options: Any) -> Path:
+    """A PNG of test_still.py's picture holding colour chunks, 8 bits."""
+    settings: dict[str, Any] = {"grey": False, "icc": None, "orientation": 1, **options}
+    path.write_bytes(png.write(pixels_of(), bits=8, chunks=chunks, **settings))
+    return path
+
+
+def test_the_library_makes_the_webp_the_command_writes(
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    cpu_models: model.Models,  # noqa: F811
+) -> None:
+    # As the PNG's test: the file is webp.write of what still.upscale gives for the plan's tiles,
+    # byte for byte, in either case of the suffix, 8 bits whatever the source's.
+    models = pipeline_models(cpu_models)
+    use_library(machine, monkeypatch, models)
+    source = make_picture(tmp_path / "in.png", seed=3, bits=8)
+    for name in ("out.webp", "OUT.WEBP"):
+        machine.passes.clear()
+        caplog.clear()
+        output = tmp_path / name
+        assert run(machine, source, output, "--color-correction", "split") == 0
+        ((arguments, keywords),) = machine.passes
+        pixels, target, seed = arguments[1:4]
+        assert target == TARGET and seed == SEED and keywords["correct"] is True
+        again = still.upscale(models, pixels, target, seed, **keywords)
+        expected = webp.write(again, grey=False, icc=None, chunks=(), orientation=1)
+        assert output.read_bytes() == expected
+        written = read_back(output)
+        assert (
+            written.format == "WEBP" and written.bits == 8 and written.pixels.shape == (48, 80, 3)
+        )
+        lines = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+        assert any(line.endswith("output 80x48, a lossless WebP, 8-bit") for line in lines), lines
+        assert any(
+            line.startswith("upscaled in ")
+            and line.endswith(f"wrote {output}: 80x48, 8-bit lossless WebP, RGB")
+            for line in lines
+        ), lines
+
+
+def test_a_webp_is_the_codes_of_png8(machine: Machine, tmp_path: Path) -> None:
+    # The same codes as --format png8 on the same picture.
+    source = make_picture(tmp_path / "in.png", bits=8, seed=5)
+    assert run(machine, source, tmp_path / "a.webp") == 0
+    assert run(machine, source, tmp_path / "a.png", "--format", "png8") == 0
+    with Image.open(tmp_path / "a.webp") as webp_image, Image.open(tmp_path / "a.png") as png_image:
+        assert webp_image.mode == "RGB" and np.array_equal(
+            np.asarray(webp_image), np.asarray(png_image)
+        )
+
+
+@pytest.mark.parametrize("given", ["png", "png8", "gbrp16le"])
+def test_format_with_a_webp_output_is_refused(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture, given: str
+) -> None:
+    source = make_picture(tmp_path / "in.png", bits=8)
+    assert run(machine, source, tmp_path / "out.webp", "--format", given) == 1
+    assert (
+        f"--format {given}: with a .webp output the format is the file's, a lossless WebP at 8"
+        " bits; --format is for a .png output (png, 16 bits, or png8, 8 bits)"
+    ) in caplog.text
+    assert not machine.asked and not (tmp_path / "out.webp").exists()
+
+
+def test_a_source_stored_at_16_bits_is_refused_for_a_webp_naming_png(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = make_picture(tmp_path / "in.png", bits=16)
+    assert run(machine, source, tmp_path / "out.webp") == 1
+    assert (
+        f"{source}: a lossless WebP holds 8 bits per sample and this picture is stored at 16,"
+        " which it would round away: write a PNG (a .png file), which holds them"
+    ) in caplog.text
+    # Refused before the card is read and the models load, and nothing is written.
+    assert not machine.asked and not machine.loads and not machine.passes
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["in.png", "models"]
+    # The same picture, as a PNG, is taken.
+    assert run(machine, source, tmp_path / "out.png") == 0
+
+
+def test_colour_chunks_without_a_profile_are_refused_for_a_webp_and_taken_for_a_png(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = png_with(tmp_path / "in.png", chunks=(cicp(),))
+    assert run(machine, source, tmp_path / "out.webp") == 1
+    assert (
+        f"{source}: a lossless WebP holds no cICP colour chunk and this picture has no ICC profile"
+        " to carry its colour instead, so its colour would change: write a PNG (a .png file),"
+        " which holds them"
+    ) in caplog.text
+    assert not machine.asked and not machine.loads and not (tmp_path / "out.webp").exists()
+    assert run(machine, source, tmp_path / "out.png", "--format", "png8") == 0
+    assert read_back(tmp_path / "out.png").chunks == read_back(source).chunks != ()
+
+
+def test_an_srgb_chunk_alone_or_a_profile_beside_the_chunks_is_taken_for_a_webp(
+    machine: Machine, tmp_path: Path
+) -> None:
+    srgb = (struct.pack(">I", 1) + b"sRGB\x00" + struct.pack(">I", zlib.crc32(b"sRGB\x00")),)
+    assert run(machine, png_with(tmp_path / "a.png", chunks=srgb), tmp_path / "a.webp") == 0
+    both = png_with(tmp_path / "b.png", chunks=(cicp(),), icc=srgb_profile())
+    assert run(machine, both, tmp_path / "b.webp") == 0
+    assert read_back(tmp_path / "b.webp").icc == srgb_profile()
+
+
+def test_the_profile_and_the_orientation_are_carried_into_a_webp(
+    machine: Machine, tmp_path: Path
+) -> None:
+    profile = srgb_profile()
+    source = make_picture(tmp_path / "in.png", bits=8, icc=profile, orientation=6)
+    output = tmp_path / "out.webp"
+    assert run(machine, source, output) == 0
+    written = read_back(output)
+    # Processed as stored, not rotated: 80 wide, 48 high, the orientation carried.
+    assert written.icc == profile and written.orientation == 6
+    assert written.pixels.shape == (48, 80, 3)
+    with Image.open(output) as image:
+        assert image.info["icc_profile"] == profile and image.getexif()[0x0112] == 6
+    # None of it when the source had none.
+    plain = make_picture(tmp_path / "plain.png", bits=8)
+    assert run(machine, plain, tmp_path / "plain.webp") == 0
+    with Image.open(tmp_path / "plain.webp") as image:
+        assert "icc_profile" not in image.info and "exif" not in image.info
+
+
+def test_a_grey_picture_is_written_to_a_webp_as_three_equal_planes(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = tmp_path / "grey.png"
+    Image.fromarray((pixels_of()[..., 0] * 255).astype(np.uint8), "L").save(source)
+    output = tmp_path / "out.webp"
+    assert run(machine, source, output) == 0
+    with Image.open(output) as image:
+        planes = np.asarray(image)
+    assert planes.shape == (48, 80, 3)
+    assert (planes[..., 0] == planes[..., 1]).all() and (planes[..., 0] == planes[..., 2]).all()
+    assert any(
+        r.getMessage().endswith(
+            f"wrote {output}: 80x48, 8-bit lossless WebP, grey as three equal planes"
+        )
+        for r in caplog.records
+    )
+
+
+def test_plan_alone_with_a_webp_output_writes_nothing(machine: Machine, tmp_path: Path) -> None:
+    source = make_picture(tmp_path / "in.png", bits=8)
+    assert run(machine, source, tmp_path / "out.webp", "--plan") == 0
+    assert not (tmp_path / "out.webp").exists() and not machine.loads

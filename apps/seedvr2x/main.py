@@ -316,7 +316,8 @@ def _parser() -> argparse.ArgumentParser:
         " once the file is whole, and the same command resumes a job stopped before. Else a new"
         " or empty directory: the output segments (FFV1 files, or PNG directories) and their"
         " manifest, the source cut at its shots, merged to --min-segment, never assembled. A"
-        " picture goes to a new .png file, nothing replaced, 16 bits (--format png8: 8)",
+        " picture goes to a new .png file (16 bits; --format png8: 8) or a new .webp file"
+        " (lossless, 8 bits, no --format), nothing replaced",
     )
     # yuv420p10le by default (DESIGN.md, Output): what every encoder takes, converted here by
     # zscale, exactly, rather than later by sptenc's swscale (16-bit white at 943, not 940). The
@@ -332,7 +333,8 @@ def _parser() -> argparse.ArgumentParser:
         " zscale (white at 940), about 100-135 GiB per hour of 1080p; gbrp16le, FFV1 master in"
         " 16-bit RGB, for precision work, tests and scoring on short samples, 540-690 GiB per hour"
         " of 1080p with colour correction; png, 16-bit PNG; png8, for a picture alone, an 8-bit PNG"
-        " (a picture's png is 16-bit)",
+        " (a picture's png is 16-bit); a picture's .webp output takes no --format (lossless, 8"
+        " bits)",
     )
     # DESIGN.md, Output, Writer: seedvr2x owns no encoder flags; how the output is compressed
     # during the run is the user's own command, one run per output segment.
@@ -815,7 +817,7 @@ def _video_arguments(args: argparse.Namespace) -> None:
     take the video's here, once, so that every reader below finds the value it always found and a
     job's settings and record are unchanged (a picture takes --resolution's default in stills.py);
     --plan without a file, the picture's (stills.BARE_PLAN), and a PNG format for a picture alone
-    or a .png name for the output are refused, as a video's."""
+    or a .png or .webp name for the output are refused, as a video's."""
     from job import JobError
 
     if args.plan is BARE_PLAN:
@@ -832,6 +834,11 @@ def _video_arguments(args: argparse.Namespace) -> None:
         raise JobError(
             f"{args.output}: a .png file is a picture's output, and a video's PNG frames go in a"
             " directory, one per frame: --format png, with -o naming a new or empty directory"
+        )
+    if args.output.suffix.lower() == ".webp":
+        raise JobError(
+            f"{args.output}: a .webp file is a picture's output, and a video's output is a .mkv"
+            " file or a directory"
         )
     if args.resolution is None:
         args.resolution = DEFAULT_RESOLUTION

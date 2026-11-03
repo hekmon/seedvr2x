@@ -1,7 +1,8 @@
 """The command's path for a still picture (DESIGN.md, Still images; Repository and apps, step 3):
 a file the library's reader identifies by its content as a picture (main._picture) is read, planned,
-upscaled by the library's one-picture pass and written as a PNG, none of a job's machinery (shots,
-windows, segments, manifest, resume) and no ffmpeg. main.py branches here before its build check.
+upscaled by the library's one-picture pass and written as a PNG or a lossless WebP, none of a job's
+machinery (shots, windows, segments, manifest, resume) and no ffmpeg. main.py branches here before
+its build check.
 
 The module imports no torch at its top (main imports it for the parser's constants, and the
 refusals that need no GPU come before anything loads): the picture's run imports it, after
@@ -45,7 +46,8 @@ BARE_PLAN = Path("(--plan alone)")
 # The options a picture takes, by their dest in the parser. Every other option is in REFUSED, and
 # tests/test_still_cli.py walks the parser to fail on one that is in neither, so that a new option
 # can't slip through unclassified (DESIGN.md: "Every other is refused, saying why, never ignored").
-# --format is taken for png and png8 alone (_bits), --plan alone (_check_options).
+# --format is taken for png and png8 alone, and not with a .webp output (_bits), --plan alone
+# (_check_options).
 TAKEN = frozenset(
     {
         "input",
@@ -143,16 +145,17 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     from fractions import Fraction
 
     from job import DEFAULT_RESOLUTION, JobError, default_smaller
-    from seedvr2x import memory, picture, png, pull, still_plan
+    from seedvr2x import memory, picture, png, pull, still_plan, webp
+    from seedvr2x.errors import Refusal
     from seedvr2x.frames import check_target, output_size, target_size
     from seedvr2x.weights import check_models
 
     # Refused first, before the file is read and before anything else is asked of the machine:
     # no ffmpeg, no torch, no GPU.
     _check_options(args)
+    output: Path = args.output
     bits = _bits(args)
     _check_seed(args.seed)
-    output: Path = args.output
     _check_output(output, args.input)
     name = str(args.input)
     logger.debug("%s: a %s picture by its content", name, kind)
@@ -163,6 +166,14 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         raise JobError(f"{name}: {error.strerror}") from None
     pic = picture.read(data, name)
     del data
+    if _is_webp(output):
+        # Refused with the picture read and nothing else asked of the machine: what a WebP can't
+        # hold (a source stored at 16 bits, colour chunks with no profile) is known from the file
+        # alone, so no model loads for a picture that can't be written there.
+        try:
+            webp.check(pic.bits, pic.icc, pic.chunks)
+        except Refusal as error:
+            raise Refusal(f"{name}: {error}") from None
     # Processed as stored, the EXIF orientation carried to the output and not applied
     # (DESIGN.md, Still images, Orientation): the target is the stored picture's, at the sample
     # aspect --input-sar gives, else square pixels.
@@ -173,7 +184,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     check_target(target, resolution)
     out_height, out_width = output_size(target)
     _check_tile_pins(args, target)
-    logger.info("%s", _read_said(name, pic, (out_width, out_height), bits))
+    logger.info("%s", _read_said(name, pic, (out_width, out_height), bits, _is_webp(output)))
     if args.resolution is None and (said := default_smaller(name, width, height, sample_aspect)):
         logger.info("%s", said)
     # The model files, as a video's run has them, minus the shot detector, which a picture never
@@ -241,26 +252,30 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     out = _upscaled(models, pic, target, args.seed, tiles, split, reads)
     if out is None:
         return 1
-    data = png.write(
-        out,
-        bits=bits,
-        grey=pic.grey,
-        icc=pic.icc,
-        chunks=pic.chunks,
-        orientation=pic.orientation,
-    )
+    if _is_webp(output):
+        data = webp.write(
+            out, grey=pic.grey, icc=pic.icc, chunks=pic.chunks, orientation=pic.orientation
+        )
+    else:
+        data = png.write(
+            out,
+            bits=bits,
+            grey=pic.grey,
+            icc=pic.icc,
+            chunks=pic.chunks,
+            orientation=pic.orientation,
+        )
     del out
     _write(output, data)
     from seedvr2x.clock import spent
 
     logger.info(
-        "upscaled in %.1f s; wrote %s: %dx%d, %d-bit %s%s",
+        "upscaled in %.1f s; wrote %s: %dx%d, %s%s",
         spent(time.monotonic() - started),
         output,
         out_width,
         out_height,
-        bits,
-        "grey" if pic.grey else "RGB",
+        _made(pic, bits, _is_webp(output)),
         _kept(pic),
     )
     return 0
@@ -378,11 +393,26 @@ def _check_options(args: "argparse.Namespace") -> None:
     raise JobError(f"{len(reasons)} options refused for a picture: {listed}")
 
 
+def _is_webp(output: Path) -> bool:
+    """Whether -o names a lossless WebP file (the suffix in any case): else it is a PNG, which
+    _check_output has held to be one of the two."""
+    return output.suffix.lower() == ".webp"
+
+
 def _bits(args: "argparse.Namespace") -> int:
-    """The PNG's depth: 16, all the model made, for png (the default); 8 for png8, rounded to the
-    nearest code (DESIGN.md, Still images, Output). A video's format is refused."""
+    """The output's depth: for a PNG, 16, all the model made, for png (the default); 8 for png8,
+    rounded to the nearest code; for a .webp, 8, the only depth a lossless WebP holds, and the
+    format is the file's, so --format with it is refused (DESIGN.md, Still images, Output). A
+    video's format is refused."""
     from job import JobError
 
+    if _is_webp(args.output):
+        if args.format is not None:
+            raise JobError(
+                f"--format {args.format}: with a .webp output the format is the file's, a lossless"
+                f" WebP at 8 bits; --format is for a .png output (png, 16 bits, or {PNG8}, 8 bits)"
+            )
+        return 8
     if args.format in (None, "png"):
         return 16
     if args.format == PNG8:
@@ -395,20 +425,21 @@ def _bits(args: "argparse.Namespace") -> int:
 
 def _check_output(output: Path, source: Path) -> None:
     """Refuse an -o a picture can't go to, before any work (DESIGN.md, Still images, Output): a
-    .png file, new, beside a directory that exists; a directory, the source itself or a file
-    already there is refused, nothing replaced."""
+    .png or .webp file, new, beside a directory that exists; a directory, the source itself or a
+    file already there is refused, nothing replaced."""
     from job import JobError
 
     if output.is_dir():
-        raise JobError(f"{output}: a directory; a picture goes to a new .png file")
-    if output.suffix.lower() != ".png":
-        # seedvr2x owns no encoder but its PNG writer (DESIGN.md, Output): the way to the user's
-        # format is a converter's, with their names.
+        raise JobError(f"{output}: a directory; a picture goes to a new .png or .webp file")
+    if output.suffix.lower() not in (".png", ".webp"):
+        # seedvr2x owns no encoder but its PNG and lossless WebP writers (DESIGN.md, Output): the
+        # way to the user's format is a converter's, with their names.
         written = output.with_suffix(".png")
         target = output if output.suffix else output.with_suffix(".jpg")
         raise JobError(
-            f"{output}: seedvr2x writes a picture as a PNG only: write {written}, then convert it,"
-            f" e.g. ffmpeg -i {shlex.quote(str(written))} {shlex.quote(str(target))}"
+            f"{output}: seedvr2x writes a picture as a PNG or a lossless WebP only: write"
+            f" {written} (or {output.with_suffix('.webp')}), then convert it, e.g. ffmpeg -i"
+            f" {shlex.quote(str(written))} {shlex.quote(str(target))}"
         )
     if _same(output, source):
         raise JobError(f"{output}: the source itself; choose another -o")
@@ -430,9 +461,9 @@ def _same(path: Path, other: Path) -> bool:
 
 
 def _write(path: Path, data: bytes) -> None:
-    """The PNG's bytes at path, written whole as a finished file is (media.files.write_whole): a
-    partial file beside it, then renamed. Nothing is left on a failure, a stop included; a file
-    that has come since the check is not replaced."""
+    """The file's bytes (PNG or WebP) at path, written whole as a finished file is
+    (media.files.write_whole): a partial file beside it, then renamed. Nothing is left on a
+    failure, a stop included; a file that has come since the check is not replaced."""
     from job import JobError
     from media.files import partial_path, write_whole
 
@@ -449,14 +480,22 @@ def _write(path: Path, data: bytes) -> None:
         raise
 
 
-def _read_said(name: str, pic: "Picture", size: tuple[int, int], bits: int) -> str:
+def _read_said(name: str, pic: "Picture", size: tuple[int, int], bits: int, lossless: bool) -> str:
     """The line saying what was read and what is made of it."""
     height, width = pic.pixels.shape[:2]
+    made = "a lossless WebP, 8-bit" if lossless else f"a {bits}-bit PNG"
     return (
         f"{name}: a {pic.format} picture, {width}x{height}, {pic.bits}-bit"
-        f" {'grey' if pic.grey else 'RGB'}{_kept(pic)}; output {size[0]}x{size[1]}, a {bits}-bit"
-        " PNG"
+        f" {'grey' if pic.grey else 'RGB'}{_kept(pic)}; output {size[0]}x{size[1]}, {made}"
     )
+
+
+def _made(pic: "Picture", bits: int, lossless: bool) -> str:
+    """What the result line says of the file: its depth and kind, and for a WebP that it is
+    lossless, with a grey picture's three equal planes (a WebP has no grey mode)."""
+    if lossless:
+        return "8-bit lossless WebP, " + ("grey as three equal planes" if pic.grey else "RGB")
+    return f"{bits}-bit {'grey' if pic.grey else 'RGB'}"
 
 
 def _kept(pic: "Picture") -> str:

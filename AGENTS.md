@@ -20,8 +20,8 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
     compiling.py colour.py memory.py detector.py      the bricks: models and their files,
                          placement, the int8 linear, sampling, the VAE passes, colour, the
                          memory model, the shot detector
-    picture.py png.py still.py still_plan.py     a still picture: read, written as PNG,
-                         upscaled on models already loaded, its plan for a bound
+    picture.py png.py webp.py still.py still_plan.py     a still picture: read, written as PNG
+                         or lossless WebP, upscaled on models already loaded, its plan for a bound
     frames.py passes.py peaks.py files.py clock.py errors.py     what the bricks share
     vendor/              model layer, vendored from numz (below)
     transnetv2/          the shot detector's model, vendored from TransNetV2 (below)
@@ -34,7 +34,7 @@ apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools)
   shot run cuts planner plan job manifest resume units scratch environment calibration timing
   stop disk .py          the pipeline per shot, then stitching, planner, a job's plan, saving and
                          resume, its environment record
-  stills.py              a still picture's run: its options, -o, plan, load, pass and PNG
+  stills.py              a still picture's run: its options, -o, plan, load, pass, PNG or WebP
   media/                 I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
   tests/                 the CLI's, with levels.py and conftest.py
   pyproject.toml uv.lock .python-version LICENSE NOTICE
@@ -501,6 +501,13 @@ uv run pytest
   `tests/test_png.py` holds `seedvr2x/png.py`: the chunks'
   order and CRCs, the five filters and the adaptive one, 8 and 16 bits, grey and RGB, read back
   by Pillow, torchvision, `picture.read` and ffmpeg, the profile and orientation by ffprobe.
+  `tests/test_webp.py` holds `seedvr2x/webp.py`: the 8-bit codes of `png.quantised` exact in
+  Pillow's decode and ffmpeg's (`rgb24`), grey as three equal planes of the mean, the profile
+  and the orientation (an EXIF block of that tag alone, none at 1) read back, the refusals by
+  their words (a source stored at 16 bits, cICP, cHRM or gAMA without a profile, a side over
+  16,383; an sRGB chunk alone taken, a chunk told by its type), the bytes the same every time
+  and the effort constants (`METHOD`, `QUALITY`, measured in the module's comment) pinned,
+  `picture.read` giving the pixels back.
   `tests/test_still.py` holds `seedvr2x/still.py` on `stand_ins.cpu_models`' VAE cast to bfloat16
   and a stand-in DiT: one latent, the two seeds, nothing loaded, the phases in order, tiled
   passes in memory, the correction against the picture, NaN refused. `tests/
@@ -516,12 +523,19 @@ uv run pytest
   holds the colour correction's term by its frames, a video's `SLICE` unchanged.
 - The command line's still path (`stills.py`, `main.py`'s branch by content): `tests/
   test_still_cli.py` holds `still.upscale` bit for bit to `shot.py`'s pass over a shot of one
-  frame, tiled and corrected; a picture told by its content whatever its name, a video named
+  frame, tiled and corrected, and under `-m gpu` on CUDA with the sharp 7B and the VAE from
+  `SEEDVR2X_MODEL_DIR`, untiled at 720p and both passes tiled at 1080p, placed by the plan for
+  one picture in the card's free memory less 4 GiB left to the desktop (the smaller of the
+  driver's and NVML's readings); a picture told by its content whatever its name, a video named
   `.png` sent to the video path; every option of the parser taken or refused on a still (a new
   one unclassified fails), each refusal; `-o`'s rules and a write that fails leaving nothing;
   `--plan` alone saying the plan, loading and writing nothing; runs on the stand-ins whose file is
   `png.write` of `still.upscale` byte for byte, at 16 and 8 bits (`--format png8`), grey, the
-  profile and orientation kept, an opaque alpha dropped and its line reaching the user; no
+  profile and orientation kept, an opaque alpha dropped and its line reaching the user; `-o x.webp`
+  (any case) whose file is `webp.write` of `still.upscale` byte for byte, `--format` refused with
+  it, a source stored at 16 bits or with cICP and no profile refused naming `.png` before the card
+  is read and taken for a `.png`, the profile and orientation carried, grey as equal planes, a
+  video with `-o x.webp` refused; no
   ffmpeg on `PATH`; and the video path's refusals: `-o x.png`, `png8`, `--plan` alone, and image
   formats ffprobe reads that seedvr2x doesn't as pictures (JPEG XL, AVIF and HEIC by their
   demuxer or major brand, a video listing a sequence brand among its compatible ones kept;
