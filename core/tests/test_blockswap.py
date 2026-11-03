@@ -790,8 +790,10 @@ def test_a_real_int8_dit_s_blocks_swap_and_change_no_bit() -> None:
     # DiT loaded whole, then every parameter to a pinned host copy and 0, 3, 12 and 36 blocks
     # swapped, without the prefetch and with it, the windows' bits those of the DiT loaded whole;
     # its peak each swapped block's bytes less, but the two in the slots (peaks.block_bytes:
-    # 226,862,080 in int8). Needs CUDA with the int8 DiT and a window beside it (10 GiB free),
-    # SEEDVR2X_MODEL_DIR holding an int8 file and the VAE, and 8 GiB of host memory to pin.
+    # 226,862,080 in int8), from the whole load's less its allocator's rounding (below); the
+    # device holding the placement's bytes as each enters. Needs CUDA with the int8 DiT and a
+    # window beside it (10 GiB free), SEEDVR2X_MODEL_DIR holding an int8 file and the VAE, and
+    # 8 GiB of host memory to pin.
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA")
     from test_placement import MODELS, SLACK, VAES, allocated, found, windows
@@ -806,11 +808,23 @@ def test_a_real_int8_dit_s_blocks_swap_and_change_no_bit() -> None:
         dit = models.runner.dit
         assert sum(isinstance(module, int8.Int8Linear) for module in dit.modules()) == 288
         digests, peak = windows(models)
+        whole = allocated(device)
         parts = blockswap.host(
             dit, dit_parts(len(dit.blocks), 0, other=True), blockswap.Cuda(device)
         )
         torch.cuda.empty_cache()
         away = allocated(device)
+        pinned = sum(part.host.bytes.numel() for part in parts.values())
+        # Loaded whole, the DiT holds 72 MiB more than its parameters' bytes, which a placement's
+        # packed parts don't: torch's allocator gives a request of 10 MiB or more a block rounded
+        # up to 2 MiB, left whole when 1 MiB or less would remain (c10/cuda/
+        # CUDACachingAllocator.cpp at v2.14.1: kMinLargeAlloc, kRoundLarge, should_split), and
+        # each of the int8 file's 72 QKV matrices, 9,216 x 3,072 bytes, 27 MiB, takes 28: 72
+        # blocks of 28,311,552 bytes, each 1 MiB over (memory_snapshot, RTX 5090, 2026-11-03).
+        # fp16's matrices are whole multiples of 2 MiB. The placements' peaks are held to the
+        # whole load's without it.
+        rounding = whole - away - pinned
+        assert abs(rounding - 72 * 2**20) < 2 * 2**20, rounding / 2**20
         block = peaks.block_bytes(weights.DIT_7B_INT8)
         for swapped, prefetch in [
             (0, False),
@@ -823,9 +837,10 @@ def test_a_real_int8_dit_s_blocks_swap_and_change_no_bit() -> None:
             said = f"{swapped} swapped, prefetch {prefetch}"
             placement = Placement(dit, device, swapped, prefetch, parts=parts)
             placement.enter("dit")
+            assert abs(allocated(device) - away - placement.device_bytes()) < SLACK, said
             got, got_peak = windows(models)
             assert got == digests, said
-            expected = peak - max(swapped - SLOTS, 0) * block
+            expected = peak - rounding - max(swapped - SLOTS, 0) * block
             assert abs(got_peak - expected) < SLACK, (said, got_peak / 2**30, expected / 2**30)
             placement.enter("encode", 0)
             assert abs(allocated(device) - away) < SLACK, said
