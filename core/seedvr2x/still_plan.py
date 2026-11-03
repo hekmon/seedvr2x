@@ -16,13 +16,18 @@ that fits (_worst); the tiles are chosen per picture under that placement (tiles
 within the bound. Sizes are (height, width) in pixels, and a bound (long, short), unless said;
 `padded` is the frame the model takes (frames.padded_size).
 
-A picture of one frame is one latent in the DiT, one frame in the VAE's passes: the figures of
-peaks.py are a video slice's, up to 5 frames, and one frame's are unmeasured (DESIGN.md, Still
-images: "the card measures them before it ships").
+A picture of one frame is one latent in the DiT, one frame in the VAE's passes: its passes take
+one frame's figures (peaks.picture_encode_peak, peaks.picture_decode_peak), measured on the RTX
+5090 against the video slice's, of which they are 0.18 to 0.34 (DESIGN.md, Still images,
+decided on 2026-11-03), provisional until the card's batch.
 
 The plan also counts the picture's own copies on the GPU, at its stored size, which the output's
-size doesn't bound: the resize that still.upscale makes on the device (COPIES, input_copies).
-They are counted from the tensors' sizes and unmeasured on the card, like the rest."""
+size doesn't bound: the resize that still.upscale makes on the device (COPIES, input_copies), by
+the rule measured on the RTX 5090.
+
+What a phase takes for the image server's reservation, its predicted peak with the room it is
+held to and the share torch's allocator reserves over it (Peak), is said at the bound
+(bound_peaks) and for one picture within it (picture_peaks)."""
 
 import math
 import mmap
@@ -285,7 +290,7 @@ def plan(
     return replace(made, tightened=str(refused))
 
 
-def tiles(plan: StillPlan, target: tuple[int, int]) -> PictureTiles:
+def tiles(plan: StillPlan, target: tuple[int, int], budget: int | None = None) -> PictureTiles:
     """The VAE passes of a picture resized to `target`, (height, width) as frames.target_size
     gives it, under the plan's placement: a pinned pass as pinned, or the first that fits of the
     planner's order (_options: untiled, then the tiles from the largest down), each judged with
@@ -293,7 +298,12 @@ def tiles(plan: StillPlan, target: tuple[int, int]) -> PictureTiles:
     a covering tile is no tiling (peaks.covers). ValueError for a target whose output is not
     within the plan's bound in one orientation or the other, or too small for the padding
     (frames.check_target's rule). Never a refusal within the bound: the proof of the plan holds for
-    every picture in it."""
+    every picture in it.
+
+    `budget`, bytes: what the picture's passes may count on in place of the plan's budget, for a
+    server that holds each picture to what the bound's own pictures take (the image server's
+    reservation); at least the proof's worst pass with its room in each phase (bound_peaks), so
+    that every picture still has a pass, and at most the plan's budget (ValueError over it)."""
     long, short = plan.bound
     height, width = output_size(target)
     if min(height, width) > short or max(height, width) > long:
@@ -304,6 +314,10 @@ def tiles(plan: StillPlan, target: tuple[int, int]) -> PictureTiles:
     if not _paddable(target):
         raise ValueError(f"a target of {target[1]}x{target[0]} pixels is too small for the padding")
     job = _job_of(plan)
+    if budget is not None:
+        if budget > plan.budget:
+            raise ValueError(f"a budget of {budget} bytes, over the plan's {plan.budget}")
+        job = replace(job, reading=replace(job.reading, counted=budget + job.margin))
     padded, output = padded_size(target), (height, width)
     models = plan.models
     encode = _first(job, "encode", padded, output, models.swapped, models.resident_encode)
@@ -537,12 +551,23 @@ def _tile_sizes(padded: tuple[int, int]) -> range:
     return range(largest, peaks.TILE_MIN - 1, -peaks.TILE_STEP)
 
 
-def _options(padded: tuple[int, int], pin: int | None) -> Iterator[Tiles | None]:
-    """The passes a picture of padded frame `padded` may take, in order: a pin exactly (0: untiled;
-    a tile that covers the frame is no tiling, the untiled pass), else the planner's order
-    (_fitting): untiled, then the tiles from the largest down."""
+def _untiled_measured(phase: Phase, padded: tuple[int, int]) -> bool:
+    """Whether one frame's untiled pass was measured on a frame as large as `padded`, either
+    orientation (peaks.ONE_FRAME_UNTILED_MEASURED): the plan chooses no untiled pass past it, a
+    pin alone taking one there, at the video slice's figure (DESIGN.md, Still images: the planner
+    keeping no blind spot; the review of 2026-11-03)."""
+    rows, columns = peaks.ONE_FRAME_UNTILED_MEASURED[0 if phase == "encode" else 1]
+    return max(padded) <= max(rows, columns) and min(padded) <= min(rows, columns)
+
+
+def _options(padded: tuple[int, int], pin: int | None, phase: Phase) -> Iterator[Tiles | None]:
+    """The passes a picture of padded frame `padded` may take in the phase, in order: a pin
+    exactly (0: untiled; a tile that covers the frame is no tiling, the untiled pass), else the
+    planner's order (_fitting): untiled where one frame's untiled pass was measured on such a
+    frame (_untiled_measured), then the tiles from the largest down."""
     if pin is None:
-        yield None
+        if _untiled_measured(phase, padded):
+            yield None
         yield from (Tiles(size) for size in _tile_sizes(padded))
     elif pin == 0 or peaks.covers(padded, Tiles(pin)):
         yield None
@@ -561,13 +586,12 @@ def _bare(
     dit_model: Architecture,
 ) -> int:
     """The predicted peak of a picture's encode or decode in `tiles`, in bytes, with `resident`
-    blocks of the DiT on the GPU and `swapped` swapped (peaks.encode_peak, peaks.decode_peak: one
-    frame, the colour correction's term at the output's size when the decode splits)."""
+    blocks of the DiT on the GPU and `swapped` swapped (peaks.picture_encode_peak,
+    peaks.picture_decode_peak: one frame, the colour correction at the output's size when the
+    decode splits)."""
     if phase == "encode":
-        return peaks.encode_peak(padded, tiles, resident, swapped, dit_model=dit_model)
-    return peaks.decode_peak(
-        padded, output, tiles, resident, swapped, split, dit_model=dit_model, frames=FRAMES
-    )
+        return peaks.picture_encode_peak(padded, tiles, resident, swapped, dit_model)
+    return peaks.picture_decode_peak(padded, output, tiles, resident, swapped, split, dit_model)
 
 
 def _first(
@@ -581,7 +605,7 @@ def _first(
     """The pass a picture takes: the first of its options (_options) that fits the budget with
     its room (VAE_ROOM), the planner's _pass, in a 1-tuple (None is the untiled pass); None when
     none does."""
-    for chosen in _options(padded, job.pin(phase)):
+    for chosen in _options(padded, job.pin(phase), phase):
         peak = _bare(phase, padded, output, chosen, resident, swapped, job.split, job.dit_model)
         if peak + VAE_ROOM <= job.budget:
             return (chosen,)
@@ -605,7 +629,8 @@ def _worst(bound: Bound, phase: Phase, size: int | None, split: bool) -> int:
     - a pin: 0, the untiled pass for all; else tiles of that side for the pictures whose padded
       frame is longer than it, and the untiled pass for those it covers (_options: peaks.covers
       is size >= the longer side);
-    - None, the unpinned pictures: the less of the untiled pass and of tiles of TILE_MIN, the
+    - None, the unpinned pictures: the less of the untiled pass (where one frame's was measured
+      on such a frame, _untiled_measured; else the tiles alone) and of tiles of TILE_MIN, the
       smallest the planner makes (a larger tile may take less on a strip or a cut-off shape, and
       the untiled pass can, on a frame little larger than a tile: the planner's _least_pass).
       The picture takes the first pass of the planner's order that fits (_first), so it has one
@@ -615,15 +640,20 @@ def _worst(bound: Bound, phase: Phase, size: int | None, split: bool) -> int:
     grid's tile shapes are the product of its rows' span lengths and its columns' (_lengths). So
     the pass depends on the padded frame by the two sets of lengths alone, and one padded frame
     per pair of sets stands for all of them (at most about 60 sets a side), the pair taken through
-    peaks.encode_peak and peaks.decode_peak. A side's set includes whether it is longer than the
-    tile: {64} is both 512 px whole and 960 px in two spans, and only the latter is cut. The
-    colour correction's term, one frame, is at the largest output the frame can give within the
-    bound (a tiled decode takes the larger of the tile and the term, peaks.decode_peak).
+    peaks.picture_encode_peak and peaks.picture_decode_peak: the largest frame of the pair (the
+    rows and columns ascend, and the key keeps the last), since their terms beside the tile's,
+    the picture's frame in the encode and the colour correction in the decode, grow with the
+    frame. A side's set includes whether it is longer than the tile: {64} is both 512 px whole
+    and 960 px in two spans, and only the latter is cut. The colour correction, one frame, is at
+    the largest output the frame can give within the bound (a picture's decode takes the larger
+    of its pass and the correction, peaks.picture_decode_peak).
 
     The untiled passes: the pictures too small for the tiles are the padded frames whose sides
     are both within the tile. The untiled pass takes more of the GPU the larger the frame: both
     of its fits (peaks.ENCODE_UNTILED, peaks.DECODE_UNTILED and the small tiles' fit it is the
-    larger of) have positive slopes in the area, so the largest frame, in area, is the worst. The
+    larger of) have positive slopes in the area, taken at one ratio whatever the size
+    (peaks.ONE_FRAME_UNTILED), and so do the frame's and the correction's terms, so the largest
+    frame, in area, is the worst. The
     same holds in a pair of sets of a cut picture: its members all take the same tile, and the
     untiled pass of the largest of them (the key's last row and column) is the most of theirs, so
     the worst member needs the less of the two."""
@@ -648,7 +678,7 @@ def _worst(bound: Bound, phase: Phase, size: int | None, split: bool) -> int:
                 for (_, cut_column), column in keyed_columns.items():
                     if cut_row or cut_column:
                         need = pass_of((row, column), Tiles(tile))
-                        if size is None:
+                        if size is None and _untiled_measured(phase, (row, column)):
                             need = min(need, pass_of((row, column), None))
                         worst = max(worst, need)
         small_rows = [row for row in rows if not tile or row <= tile]
@@ -857,9 +887,14 @@ def _pin_refused(job: _Job, phase: Phase) -> PlanRefusal | None:
 #      _functional_tensor.py:441-474. _cast_squeeze_in(img, [float32, float64]) UPCASTS a bfloat16
 #      input to float32 (:516-529), a float32 copy of the stored picture; interpolate makes the
 #      float32 output at the target's size (<= the padded frame); _cast_squeeze_out casts it back
-#      to bfloat16 (:532-542) while the float32 output is alive. Two moments: stored + its float32
-#      copy + the float32 output, then stored + the float32 output + the bfloat16 output. A
-#      float32 input is not cast: stored + output.
+#      to bfloat16 (:532-542). torch's antialiased bicubic on CUDA, given the channels-last view
+#      `frames` is, copies its float32 input to a contiguous tensor and writes its output twice,
+#      contiguous then in the input's layout. Measured on the RTX 5090 (2026-11-03, design's
+#      agent, 8 shapes from 960x540 to 12000x6750, matched to 0.0001 GiB): the resize holds 30
+#      bytes a stored pixel in the encode (the stored picture 6, its float32 copy 12, the
+#      contiguous copy 12) and 24 in the decode (the float32 stored picture and its contiguous
+#      copy), and 24 a pixel of its output in both (the float32 output twice), the bfloat16 cast
+#      after it within that. One moment, RESIZE.
 #   3. torch.clamp(x, 0, 1) (model.py:431): a new tensor beside the resize's.
 #   4. pad (model.py:439-450, Lambda(pad) at :432): the clamped tensor, `reflected` and the
 #      result of the zeros' second F.pad alive at once, three tensors of the padded frame's size
@@ -873,10 +908,10 @@ def _pin_refused(job: _Job, phase: Phase) -> PlanRefusal | None:
 #
 # Every target-size tensor is counted at the bound's largest padded frame (the resize's output is
 # at most the target, itself within the padded frame), the stored picture at `input_pixels`.
-# NOT counted, in compiled ATen code not read here, and for the card's batch to show: a
-# contiguous staging copy of the stored picture in the host-to-device `.to()` of a permuted view,
-# and one the antialiased kernel may make of a channels-last input. Either would add a
-# stored-size tensor to a moment above.
+# The host-to-device `.to()` of the permuted view stages the stored picture once more, 12 bytes a
+# stored pixel at the most, under the resize's moment. cuBLAS's workspace (peaks.CUBLAS_WORKSPACE)
+# is held beside every moment: allocated at the first matrix product, kept for the process, so
+# there from an image server's second picture on.
 #
 # The decode's phase (colour correction only): the decoded frame is alive while the reference is
 # made. It is bfloat16 (the VAE's dtype, model.COMPUTE_DTYPE; tiling.decode_tiled sums in the
@@ -888,20 +923,24 @@ def _pin_refused(job: _Job, phase: Phase) -> PlanRefusal | None:
 # no VAE pass runs, and the room is a pass's (a convolution whose workspace the allocator refuses
 # runs on another engine and may give other frames: peaks.VAE_ROOM), where here are ATen's resize
 # and copies, which allocate the exact sizes above. The margin stays: it is the desktop's and the
-# first allocation's, whatever runs.
+# first allocation's, whatever runs. PROVISIONAL until the card's batch. A contiguous input to the
+# resize, which would drop a copy and a write, waits for its bits to be checked against the
+# video path's (DESIGN.md, Still images, decided on 2026-11-03).
 
 
 @dataclass(frozen=True)
 class Moment:
     """A moment of the picture's copies on the GPU: what is alive, in bytes per pixel of the
-    stored picture and per pixel of the bound's largest padded frame."""
+    stored picture and per pixel of the bound's largest padded frame, and `held` bytes beside
+    them whatever the sizes (cuBLAS's workspace)."""
 
     what: str
     per_input: int
     per_padded: int
+    held: int = 0
 
     def at(self, input_pixels: int, padded_pixels: int) -> int:
-        return self.per_input * input_pixels + self.per_padded * padded_pixels
+        return self.per_input * input_pixels + self.per_padded * padded_pixels + self.held
 
 
 CHANNELS = 3
@@ -909,35 +948,38 @@ FLOAT32 = 4  # bytes: the resize's working dtype
 BFLOAT16 = 2  # bytes: the encode's dtype (model.COMPUTE_DTYPE)
 
 
-def _moments(itemsize: int, held: int) -> tuple[Moment, ...]:
-    """The moments of the transform in a dtype of `itemsize` bytes (the stored picture's, step 1
-    above), `held` bytes per padded pixel alive besides (the decoded frame)."""
-    sample, wide = CHANNELS * itemsize, CHANNELS * FLOAT32
-    if itemsize == FLOAT32:
-        resize = [Moment("the stored picture and the resize's output", sample, wide + held)]
-    else:
-        resize = [
-            Moment(
-                "the stored picture, its float32 copy and the resize's float32 output",
-                sample + wide,
-                wide + held,
-            ),
-            Moment(
-                "the stored picture, the resize's float32 output and its cast back",
-                sample,
-                wide + sample + held,
-            ),
-        ]
+# The resize's moment as measured (step 2 above), in bytes a stored pixel and a pixel of the
+# output, the encode's then the decode's.
+RESIZE: dict[Phase, tuple[int, int]] = {"encode": (30, 24), "decode": (24, 24)}
+
+
+def _moments(phase: Phase, itemsize: int, held: int) -> tuple[Moment, ...]:
+    """The moments of the transform in the phase, in a dtype of `itemsize` bytes (the stored
+    picture's, step 1 above), `held` bytes per padded pixel alive besides (the decoded frame), and
+    cuBLAS's workspace beside each."""
+    sample = CHANNELS * itemsize
+    per_input, per_output = RESIZE[phase]
+    workspace = peaks.CUBLAS_WORKSPACE
     return (
-        *resize,
         Moment(
-            "the stored picture, the resize's output and the clamped one", sample, 2 * sample + held
+            "the resize: the stored picture, its float32 and contiguous copies, and its output"
+            " written twice",
+            per_input,
+            per_output + held,
+            workspace,
         ),
-        Moment("the stored picture and the padding's three", sample, 3 * sample + held),
+        Moment(
+            "the stored picture, the resize's output and the clamped one",
+            sample,
+            2 * sample + held,
+            workspace,
+        ),
+        Moment("the stored picture and the padding's three", sample, 3 * sample + held, workspace),
         Moment(
             "the stored picture, the padded tensor and its normalised clone",
             sample,
             2 * sample + held,
+            workspace,
         ),
     )
 
@@ -945,16 +987,15 @@ def _moments(itemsize: int, held: int) -> tuple[Moment, ...]:
 # The encode's phase: bfloat16. The decode's, with the colour correction: float32, and the
 # decoded frame (bfloat16, 3 channels, the padded frame's storage) beside.
 COPIES: dict[Phase, tuple[Moment, ...]] = {
-    "encode": _moments(BFLOAT16, 0),
-    "decode": _moments(FLOAT32, CHANNELS * BFLOAT16),
+    "encode": _moments("encode", BFLOAT16, 0),
+    "decode": _moments("decode", FLOAT32, CHANNELS * BFLOAT16),
 }
 
 
 def copies_peak(phase: Phase, input_pixels: int, padded_pixels: int) -> int:
     """The most the picture's copies and the transform's tensors take of the GPU at once in the
-    encode's or the decode's phase, in bytes, above what the models take there: counted from the
-    tensors' sizes (COPIES), UNMEASURED on the card, which the card's batch measures (DESIGN.md,
-    Still images, Measured before it ships)."""
+    encode's or the decode's phase, in bytes, above what the models take there (COPIES), by the
+    rule measured on the RTX 5090, provisional until the card's batch."""
     return max(moment.at(input_pixels, padded_pixels) for moment in COPIES[phase])
 
 
@@ -1007,7 +1048,7 @@ def _largest_input(job: _Job) -> int | None:
     fits: int | None = None
     for phase in _copy_phases(job):
         for moment in COPIES[phase]:
-            left = room - moment.per_padded * padded
+            left = room - moment.per_padded * padded - moment.held
             if left < moment.per_input:
                 return None
             most = left // moment.per_input
@@ -1066,6 +1107,88 @@ def input_copies(plan: StillPlan) -> dict[Phase, int]:
     padded = _padded_pixels(plan.bound)
     phases: tuple[Phase, ...] = ("encode", "decode") if plan.split else ("encode",)
     return {phase: copies_peak(phase, plan.input_pixels, padded) for phase in phases}
+
+
+# ---- What a phase takes, for a reservation -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Peak:
+    """What a phase of one picture takes of the GPU, in bytes: its predicted allocated peak,
+    `models` of it what the models have on the GPU in that phase, and the room it is held to
+    beyond the peak (VAE_ROOM for a VAE pass, none for the DiT's)."""
+
+    allocated: int
+    models: int
+    room: int
+
+    @property
+    def above(self) -> int:
+        """What the picture itself takes: the peak above the models."""
+        return self.allocated - self.models
+
+    @property
+    def reserved(self) -> int:
+        """What torch's allocator is to hold for the phase: the peak, its room, and the share it
+        reserves over what it allocates above the models (peaks.RESERVED_OVER)."""
+        return self.allocated + self.room + math.ceil(peaks.RESERVED_OVER * self.above)
+
+
+def _dit_models(plan: StillPlan) -> int:
+    """What the models have on the GPU in the DiT's phase: the DiT as its placement keeps it,
+    and the VAE's weights where they stay (peaks.dit_on_gpu)."""
+    models = plan.models
+    vae = peaks.VAE_WEIGHTS if models.vae_in_dit else 0
+    return peaks.dit_on_gpu(None, models.swapped, plan.dit_model) + vae
+
+
+def bound_peaks(plan: StillPlan) -> dict[Phase, Peak]:
+    """The most each phase takes for a picture within the plan's bound from an input of its
+    input_pixels, under its placement: the DiT's phase as the plan counts it (dit_peak), each
+    VAE phase the larger of the worst picture's pass (_proof_need, its room apart) and the
+    input's copies (_copies_need, the picture's frame in the decode's included)."""
+    job, models = _job_of(plan), plan.models
+    found: dict[Phase, Peak] = {"dit": Peak(plan.dit_peak, _dit_models(plan), 0)}
+    pairs: tuple[tuple[Phase, int | None], ...] = (
+        ("encode", models.resident_encode),
+        ("decode", models.resident_decode),
+    )
+    for phase, resident in pairs:
+        allocated = _proof_need(job, phase, resident, models.swapped) - VAE_ROOM
+        if phase in _copy_phases(job):
+            allocated = max(allocated, _copies_need(job, phase, resident, models.swapped))
+        found[phase] = Peak(allocated, _on_gpu(job, resident, models.swapped), VAE_ROOM)
+    return {phase: found[phase] for phase in PHASES}
+
+
+def picture_peaks(
+    plan: StillPlan, target: tuple[int, int], input_pixels: int, budget: int | None = None
+) -> dict[Phase, Peak]:
+    """What each phase takes for one picture under the plan, resized to `target` (frames.
+    target_size's) from an input of `input_pixels` pixels as stored: the DiT's phase at its own
+    padded frame and windows (peaks.dit_peak), each VAE phase the larger of its passes (tiles)
+    and its copies at its own sizes (copies_peak), its tiles chosen within `budget` as tiles has
+    it. ValueError as tiles, and for an input over the plan's input_pixels or under a pixel."""
+    if not 1 <= input_pixels <= plan.input_pixels:
+        raise ValueError(f"an input of {input_pixels} pixels, the plan's {plan.input_pixels}")
+    found_tiles = tiles(plan, target, budget)
+    job, models = _job_of(plan), plan.models
+    padded = padded_size(target)
+    dit = peaks.dit_peak(
+        padded, 1, models.swapped, models.vae_in_dit, plan.attention, plan.dit_model
+    )
+    found: dict[Phase, Peak] = {"dit": Peak(dit, _dit_models(plan), 0)}
+    passes: tuple[tuple[Phase, int | None, int], ...] = (
+        ("encode", models.resident_encode, found_tiles.encode_peak),
+        ("decode", models.resident_decode, found_tiles.decode_peak),
+    )
+    for phase, resident, peak in passes:
+        on_gpu = _on_gpu(job, resident, models.swapped)
+        if phase in _copy_phases(job):
+            copies = copies_peak(phase, input_pixels, padded[0] * padded[1])
+            peak = max(peak, on_gpu + copies)
+        found[phase] = Peak(peak, on_gpu, VAE_ROOM)
+    return {phase: found[phase] for phase in PHASES}
 
 
 def _megapixels(pixels: int, *, up: bool) -> str:
@@ -1344,7 +1467,7 @@ def said(plan: StillPlan, target: tuple[int, int] | None = None) -> list[str]:
 
 def _copies_said(plan: StillPlan) -> str:
     """The plan's line of the picture's copies (said): the input's size, and for each phase it is
-    resized in the copies at their peak, counted from the tensors' sizes and unmeasured, and what
+    resized in the copies at their peak, by the measured rule (COPIES), and what
     is left under the budget at the placement's residents (_copies_need)."""
     job, models = _job_of(plan), plan.models
     figures: list[str] = []
@@ -1357,7 +1480,7 @@ def _copies_said(plan: StillPlan) -> str:
     return (
         f"the input: {_megapixels(plan.input_pixels, up=True)} MP at its stored size, copied to"
         " the GPU and resized there, at the bound's largest padded frame, its copies"
-        f" {', '.join(figures)}; counted from the tensors' sizes, not yet measured"
+        f" {', '.join(figures)}; by the rule measured on the RTX 5090"
     )
 
 

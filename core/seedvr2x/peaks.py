@@ -575,6 +575,141 @@ def decode_peak(
     return round(above) + VAE_WEIGHTS + dit_on_gpu(resident, swapped, dit_model)
 
 
+# ---- One still picture: one frame (DESIGN.md, Still images, "The plan for one picture") -------
+
+# One frame's VAE pass against the video slice's figure (_fit), by the tile's side in pixels:
+# the encode's then the decode's, the most measured over the pictures at that side, rounded up to
+# the hundredth. Measured on the RTX 5090 (2026-11-03, design's agent, the desktop live; SDPA,
+# torch 2.14.1, backend:native,expandable_segments:True), a fresh process a case, at 1080p, 4K,
+# 6000x4000 and 8K: a tile's peak is the same at every picture size to the MiB (the 512-px
+# encode 1.037 GiB in all four), the tiles cut off at 1080p's 1,104 rows taking the most at 1536
+# px (0.283 and 0.239), and the 1024-px decode's 1024x960 tile more than its square (4.784 GiB
+# where 6000x4000's grid, without it, took 4.430). Between two measured sides a tile takes the
+# larger of their two ratios; past 2048 px, which only a pin gives, the slice's own figure
+# (ONE_FRAME_UNTILED_MEASURED). PROVISIONAL until the card's batch measures one frame at every
+# tile size.
+ONE_FRAME_TILED: dict[int, tuple[float, float]] = {
+    512: (0.30, 0.33),
+    768: (0.33, 0.33),
+    1024: (0.34, 0.28),
+    1536: (0.29, 0.24),
+    2048: (0.24, 0.20),
+}
+# An untiled pass: 1080p's encode 0.255 and decode 0.207 of their figures, 4K's encode 0.194 (its
+# decode, untiled, past the 20 GiB the card's figures were taken under, at 0.146 or more). One
+# ratio up to the largest frame measured untiled, so that the untiled pass grows with the frame's
+# area as its fit does (still_plan._worst's proof takes the largest frame for the worst).
+ONE_FRAME_UNTILED = (0.26, 0.21)
+# The largest padded frames one frame's untiled pass was measured on, (rows, columns), the
+# encode's (4K's) and the decode's (1080p's), in either orientation: past them, and for tiles past
+# TILE_MAX, which only a pin gives, a picture's pass takes the video slice's figure, 3 to 5.6
+# times what one frame took where it was measured, until the card's batch measures them
+# (DESIGN.md, Still images, Measured before it ships: "the planner keeping no blind spot"; the
+# review of 2026-11-03).
+ONE_FRAME_UNTILED_MEASURED = ((2192, 3840), (1104, 1920))
+# The bytes the picture's own frame takes on the GPU beside the encode, per pixel of the padded
+# frame: 3 channels in bfloat16 (model.COMPUTE_DTYPE), alive through the pass (still.upscale's
+# `frame`), and allocated before it, so outside the measures above (6 B a pixel: 0.047 GiB at 4K,
+# the case's own figure).
+ONE_FRAME_INPUT = 3 * 2
+# The colour correction at one frame, beside split's own term (SPLIT_FRAME_4K at the output's
+# area): the decoded frame, 3 channels in bfloat16 at the padded frame's size; its float32
+# reference, 3 channels at the padded frame's size (a crop of it); and cuBLAS's workspace, which
+# stays allocated after the decode (CUBLAS_WORKSPACE). Measured on the RTX 5090 (2026-11-03): split
+# itself 0.116, 0.465, 1.343 and 1.856 GiB at 1080p, 4K, 6000x4000 and 8K, under its term (0.14,
+# 0.56, 1.62 and 2.24), the whole 0.183, 0.637, 1.780 and 2.448, which this counts 0.207, 0.732,
+# 2.060 and 2.833.
+ONE_FRAME_DECODED = 3 * 2
+ONE_FRAME_REFERENCE = 3 * 4
+# cuBLAS's workspace, allocated by torch's allocator at the first matrix product on a stream and
+# kept for the process: the 32 MiB that stayed allocated after every decode measured on the RTX
+# 5090 (2026-11-03; torch's default for compute capability 9.0 and up).
+CUBLAS_WORKSPACE = 32 * MIB
+
+# What torch's allocator reserves over a phase's allocated peak, as a share of what the phase
+# allocates above the models on the GPU in it: the most measured on the RTX 5090 (2026-11-03,
+# reserved and allocated peaks, a fresh process a case) is 0.182, the DiT under FlashAttention 2
+# at 1080p (0.204 GiB over 1.12 above the models), then 0.167, the 2048-px decode (2.02 over
+# 12.10), and 0.163, the DiT at 8K with its 36 blocks swapped (2.75 over 16.82); SDPA's DiT 0.13
+# at the most, the encodes 0.09. The image server's reservation counts it beside each phase's
+# peak (still_plan.Peak.reserved): what it holds for torch is what torch reserves, not what it
+# allocates. PROVISIONAL until the card's batch.
+RESERVED_OVER = 0.2
+
+
+def one_frame_ratio(
+    tiles: Tiles | None, column: int, padded: tuple[int, int] | None = None
+) -> float:
+    """One frame's VAE pass against the video slice's figure (_fit), the encode's (column 0) or
+    the decode's (1), for the pass in `tiles` (None: untiled) over frames padded to `padded`:
+    ONE_FRAME_TILED at a measured side, the larger of its two neighbours' between them, the
+    smallest's below; ONE_FRAME_UNTILED untiled within the frame measured
+    (ONE_FRAME_UNTILED_MEASURED, either orientation; `padded` None: within). 1.0, the slice's own
+    figure, past what was measured: an untiled pass over a larger frame, a tile past the largest
+    side measured."""
+    if tiles is None:
+        measured = ONE_FRAME_UNTILED_MEASURED[column]
+        if padded is not None and (max(padded) > max(measured) or min(padded) > min(measured)):
+            return 1.0
+        return ONE_FRAME_UNTILED[column]
+    sides = sorted(ONE_FRAME_TILED)
+    if tiles.size in ONE_FRAME_TILED:
+        return ONE_FRAME_TILED[tiles.size][column]
+    if tiles.size < sides[0]:
+        return ONE_FRAME_TILED[sides[0]][column]
+    if tiles.size > sides[-1]:
+        return 1.0
+    above = min(side for side in sides if side > tiles.size)
+    below = max(side for side in sides if side < tiles.size)
+    return max(ONE_FRAME_TILED[below][column], ONE_FRAME_TILED[above][column])
+
+
+def colour_one_frame(padded: tuple[int, int], output: tuple[int, int]) -> int:
+    """The colour correction of one picture on the GPU, in bytes, above the models: split's own
+    term at the output's size, the decoded frame and the float32 reference at the padded frame's,
+    and cuBLAS's workspace (ONE_FRAME_DECODED, ONE_FRAME_REFERENCE, CUBLAS_WORKSPACE)."""
+    split = SPLIT_FRAME_4K * output[0] * output[1] / PIXELS_4K
+    frames = (ONE_FRAME_DECODED + ONE_FRAME_REFERENCE) * padded[0] * padded[1]
+    return round(split) + frames + CUBLAS_WORKSPACE
+
+
+def picture_encode_peak(
+    padded: tuple[int, int],
+    tiles: Tiles | None = None,
+    resident: int | None = None,
+    swapped: int = 0,
+    dit_model: weights.Architecture = FP16,
+) -> int:
+    """The predicted peak of one picture's encode, in bytes: one frame's pass (one_frame_ratio of
+    the slice's _fit, the measures holding what seedvr2x's encode holds over the fit, so no
+    ENCODE_EXTRA), the picture's frame beside it (ONE_FRAME_INPUT), the VAE's weights and what of
+    the DiT stays on the GPU (dit_on_gpu). Without the room every VAE pass is held to (VAE_ROOM).
+    ValueError as encode_peak."""
+    above = one_frame_ratio(tiles, 0, padded) * _fit(padded, tiles, 0)
+    frame = ONE_FRAME_INPUT * padded[0] * padded[1]
+    return round(above) + frame + VAE_WEIGHTS + dit_on_gpu(resident, swapped, dit_model)
+
+
+def picture_decode_peak(
+    padded: tuple[int, int],
+    output: tuple[int, int],
+    tiles: Tiles | None = None,
+    resident: int | None = None,
+    swapped: int = 0,
+    split: bool = False,
+    dit_model: weights.Architecture = FP16,
+) -> int:
+    """The predicted peak of one picture's decode, in bytes: one frame's pass (one_frame_ratio),
+    or with split the colour correction after it (colour_one_frame), the larger, tiled or not: a
+    picture's decode is closed before its correction starts (still.upscale), so their working
+    memory is never alive at once; then the VAE's weights and what of the DiT stays on the GPU.
+    Without VAE_ROOM. ValueError as decode_peak."""
+    above = round(one_frame_ratio(tiles, 1, padded) * _fit(padded, tiles, 1))
+    if split:
+        above = max(above, colour_one_frame(padded, output))
+    return above + VAE_WEIGHTS + dit_on_gpu(resident, swapped, dit_model)
+
+
 # The VAE's fits by MEASURED's columns, the encode's then the decode's: each untiled, of a tile
 # from REFITTED pixels, and of one below.
 _FITS = (

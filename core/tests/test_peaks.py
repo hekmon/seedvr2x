@@ -708,3 +708,189 @@ def test_scratch() -> None:
         == (peaks.scratch(OURS_1080, 301))
     )
     assert peaks.scratch(OURS_4K, 2) == 5 * peaks.scratch(OURS_4K, 1)
+
+
+# ---- One still picture: one frame's passes (DESIGN.md, Still images) -----------------------------
+
+
+def test_one_frame_ratio_at_a_measured_side_is_its_entry_in_both_columns() -> None:
+    assert sorted(peaks.ONE_FRAME_TILED) == [512, 768, 1024, 1536, 2048]
+    for side, (encode, decode) in peaks.ONE_FRAME_TILED.items():
+        assert peaks.one_frame_ratio(Tiles(side), 0) == encode
+        assert peaks.one_frame_ratio(Tiles(side), 1) == decode
+    # The figures themselves (peaks.py's comment): the encode's then the decode's.
+    assert peaks.ONE_FRAME_TILED[1024] == (0.34, 0.28)
+    assert peaks.ONE_FRAME_TILED[1536] == (0.29, 0.24)
+
+
+def test_one_frame_ratio_between_two_measured_sides_is_the_larger_of_the_two() -> None:
+    for side, below, above in ((640, 512, 768), (1280, 1024, 1536), (1792, 1536, 2048)):
+        for column in (0, 1):
+            expected = max(
+                peaks.ONE_FRAME_TILED[below][column], peaks.ONE_FRAME_TILED[above][column]
+            )
+            assert peaks.one_frame_ratio(Tiles(side), column) == expected
+    # 640 px: 512's 0.30 and 768's 0.33 in the encode; both 0.33 in the decode. 1280 px: 1024's
+    # 0.34 over 1536's 0.29, and 0.28 over 0.24.
+    assert (peaks.one_frame_ratio(Tiles(640), 0), peaks.one_frame_ratio(Tiles(640), 1)) == (
+        0.33,
+        0.33,
+    )
+    assert (peaks.one_frame_ratio(Tiles(1280), 0), peaks.one_frame_ratio(Tiles(1280), 1)) == (
+        0.34,
+        0.28,
+    )
+
+
+def test_one_frame_ratio_above_the_largest_tile_is_the_slices_own_figure() -> None:
+    # Past 2048 px, which only a pin gives, nothing was measured: the slice's figure, 1.0 (the
+    # review of 2026-11-03), whatever the frame it is over and in either column.
+    for column in (0, 1):
+        for size in (2112, 2304, 4096):
+            assert peaks.one_frame_ratio(Tiles(size), column) == 1.0
+            assert peaks.one_frame_ratio(Tiles(size), column, OURS_4K) == 1.0
+            assert peaks.one_frame_ratio(Tiles(size), column, (1104, 1920)) == 1.0
+        assert peaks.one_frame_ratio(Tiles(2048), column) == peaks.ONE_FRAME_TILED[2048][column]
+
+
+def test_one_frame_ratio_below_the_smallest_tile_is_the_smallest_ones() -> None:
+    for column in (0, 1):
+        assert peaks.one_frame_ratio(Tiles(448), column) == peaks.ONE_FRAME_TILED[512][column]
+    assert (peaks.one_frame_ratio(Tiles(448), 0), peaks.one_frame_ratio(Tiles(448), 1)) == (
+        0.30,
+        0.33,
+    )
+
+
+def test_one_frame_ratio_untiled_is_one_ratio_within_the_frame_it_was_measured_on() -> None:
+    assert peaks.ONE_FRAME_UNTILED == (0.26, 0.21)
+    # `padded` not given: within the measured frame.
+    assert peaks.one_frame_ratio(None, 0) == 0.26 and peaks.one_frame_ratio(None, 1) == 0.21
+    # The encode was measured up to 4K's padded frame, the decode up to 1080p's, either
+    # orientation, and at any smaller frame the same ratio.
+    assert peaks.ONE_FRAME_UNTILED_MEASURED == ((2192, 3840), (1104, 1920))
+    for padded, ratio in (
+        ((2192, 3840), 0.26),
+        ((3840, 2192), 0.26),
+        ((1104, 1920), 0.26),
+        ((576, 960), 0.26),
+    ):
+        assert peaks.one_frame_ratio(None, 0, padded) == ratio
+    for padded, ratio in (
+        ((1104, 1920), 0.21),
+        ((1920, 1104), 0.21),
+        ((1088, 1920), 0.21),
+        ((576, 960), 0.21),
+    ):
+        assert peaks.one_frame_ratio(None, 1, padded) == ratio
+
+
+def test_one_frame_ratio_untiled_past_the_measured_frame_is_the_slices_figure() -> None:
+    # One row or column past the frame, in either orientation, and 8K (nothing measured there).
+    for padded in ((2208, 3840), (2192, 3856), (3856, 2192), (4352, 7712), (4352, 2192)):
+        assert peaks.one_frame_ratio(None, 0, padded) == 1.0, padded
+    for padded in ((1120, 1920), (1104, 1936), (1936, 1104), (2192, 3840), (4352, 7712)):
+        assert peaks.one_frame_ratio(None, 1, padded) == 1.0, padded
+    # 4K's encode is within its measured frame, its decode is not: the plan offers the encode
+    # untiled there and the decode in tiles.
+    assert peaks.one_frame_ratio(None, 0, OURS_4K) == 0.26
+    assert peaks.one_frame_ratio(None, 1, OURS_4K) == 1.0
+
+
+def test_a_pinned_untiled_pass_past_the_measured_frame_takes_the_slices_figure() -> None:
+    # A pin of 0 (untiled) is still taken for any picture, at the video slice's figure past the
+    # frame measured: the encode of 8K's padded frame and the decode of 4K's.
+    models = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, 0)
+    eight_k = (4352, 7712)
+    encode = peaks.picture_encode_peak(eight_k, None, 0, 0)
+    assert encode == (
+        round(peaks._fit(eight_k, None, 0)) + 6 * eight_k[0] * eight_k[1] + models  # pyright: ignore
+    )
+    decode = peaks.picture_decode_peak(OURS_4K, (2160, 3840), None, 0, 0, False)
+    assert decode == round(peaks._fit(OURS_4K, None, 1)) + models  # pyright: ignore
+    # Within the frame it is the measured ratio of the same fit.
+    within = peaks.picture_decode_peak(OURS_1080, (1080, 1920), None, 0, 0, False)
+    assert within == round(0.21 * peaks._fit(OURS_1080, None, 1)) + models  # pyright: ignore
+
+
+def test_a_pictures_encode_is_one_frames_ratio_of_the_fit_and_its_frame_without_the_extra() -> None:
+    # No ENCODE_EXTRA (the measures hold what seedvr2x's encode holds over the fit), the
+    # picture's frame beside it at 6 bytes a pixel of the padded frame (bfloat16, 3 channels).
+    models = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, 0)
+    for padded, tiles in ((OURS_1080, None), (OURS_4K, Tiles(1024)), (OURS_4K, Tiles(512))):
+        ratio = peaks.one_frame_ratio(tiles, 0)
+        expected = round(ratio * peaks._fit(padded, tiles, 0))  # pyright: ignore
+        frame = 6 * padded[0] * padded[1]
+        assert peaks.ONE_FRAME_INPUT == 6
+        assert peaks.picture_encode_peak(padded, tiles, 0, 0) == expected + frame + models
+        assert peaks.picture_encode_peak(padded, tiles, 0, 0) != (
+            peaks.encode_peak(padded, tiles, 0, 0)
+        )
+
+
+def test_the_colour_correction_of_one_frame_at_4k_is_the_formula() -> None:
+    # split's term at the output's area (a 4K output is SPLIT_FRAME_4K itself), the decoded frame
+    # (bfloat16, 6 bytes a pixel of the padded frame) and the reference (float32, 12) there, and
+    # cuBLAS's workspace, 32 MiB.
+    padded, output = OURS_4K, (2160, 3840)
+    expected = peaks.SPLIT_FRAME_4K + 18 * padded[0] * padded[1] + 32 * 1024 * 1024
+    assert peaks.colour_one_frame(padded, output) == expected
+    assert round(gib(expected), 3) == 0.732
+    # And it scales with the output's area for split's part: a quarter of it at 1080p.
+    small = peaks.colour_one_frame(OURS_1080, (1080, 1920))
+    assert small == round(peaks.SPLIT_FRAME_4K / 4) + 18 * 1104 * 1920 + 32 * 1024 * 1024
+
+
+def test_a_pictures_decode_with_the_correction_is_the_larger_of_the_pass_and_the_term() -> None:
+    models = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, 0)
+    # Tiled, the term the larger: 8K in 512-px tiles (2.47 GiB the pass, 2.83 the correction).
+    padded, output = (4352, 7680), (4320, 7680)
+    tiles = Tiles(512)
+    pass_alone = peaks.picture_decode_peak(padded, output, tiles, 0, 0)
+    corrected = peaks.picture_decode_peak(padded, output, tiles, 0, 0, split=True)
+    term = peaks.colour_one_frame(padded, output)
+    assert pass_alone - models < term
+    assert corrected == term + models == max(pass_alone - models, term) + models
+    # Tiled, the pass the larger: 2048-px tiles at 8K, the correction changes nothing.
+    big = Tiles(2048)
+    assert peaks.picture_decode_peak(padded, output, big, 0, 0, split=True) == (
+        peaks.picture_decode_peak(padded, output, big, 0, 0)
+    )
+    # Untiled, the pass the larger at any size seedvr2x makes (1080p: 7.39 GiB over 0.21 GiB);
+    # the next test makes the term large, and it is the peak.
+    padded, output = OURS_1080, (1080, 1920)
+    plain = peaks.picture_decode_peak(padded, output, None, 0, 0)
+    assert peaks.picture_decode_peak(padded, output, None, 0, 0, split=True) == plain
+    assert plain - models > peaks.colour_one_frame(padded, output)
+
+
+def test_a_pictures_decode_with_the_correction_is_the_term_untiled_where_it_is_larger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    models = peaks.VAE_WEIGHTS + peaks.dit_on_gpu(0, 0)
+    monkeypatch.setattr(peaks, "SPLIT_FRAME_4K", 100 * GIB)
+    padded, output = OURS_1080, (1080, 1920)
+    term = peaks.colour_one_frame(padded, output)
+    assert term > peaks.picture_decode_peak(padded, output, None, 0, 0) - models
+    assert peaks.picture_decode_peak(padded, output, None, 0, 0, split=True) == term + models
+
+
+def test_the_video_figures_are_unmoved_by_the_pictures() -> None:
+    # A 1080p frame (1104x1920), no block of the DiT resident, none swapped, untiled and in
+    # 1024-px tiles: computed on 2026-11-03 from the functions before the picture's were added
+    # (peaks.py's diff only adds), so that the video path's plan is the one measured at milestone 3.
+    padded, output = OURS_1080, (1080, 1920)
+    assert peaks.encode_peak(padded, None, 0, 0) == 22_310_274_636
+    assert peaks.encode_peak(padded, Tiles(1024), 0, 0) == 12_235_157_533
+    assert peaks.decode_peak(padded, output, None, 0, 0, False) == 38_066_001_384
+    assert peaks.decode_peak(padded, output, None, 0, 0, True) == 38_817_620_660
+    assert peaks.decode_peak(padded, output, Tiles(1024), 0, 0, False) == 19_311_116_153
+    assert peaks.decode_peak(padded, output, Tiles(1024), 0, 0, True) == 19_311_116_153
+    # With the DiT's blocks as the planner's default leaves them (resident None).
+    assert peaks.encode_peak(padded, None) == 38_789_490_380
+    assert peaks.encode_peak(padded, Tiles(1024)) == 28_714_373_277
+    assert peaks.decode_peak(padded, output, None) == 54_545_217_128
+    assert peaks.decode_peak(padded, output, Tiles(1024)) == 35_790_331_897
+    # One frame's figures are the pictures' own: the video's decode of a frame is not them.
+    assert peaks.decode_peak(padded, output, None, 0, 0, True, frames=1) == 38_216_325_239
+    assert peaks.picture_decode_peak(padded, output, None, 0, 0, True) != 38_216_325_239

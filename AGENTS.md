@@ -609,6 +609,19 @@ uv run pytest
   by the displayed short side) is held for a picture, with `--plan`, with a sample aspect, with a
   size given (nothing more) and where the output is not smaller (nothing), and for a video in the
   run and in `--plan`, a source made larger than 1080 there, with a sample aspect too.
+- One picture's figures on the RTX 5090 (DESIGN.md, Still images, decided on 2026-11-03):
+  `tests/test_still_measured.py` (`core/tests/`) holds every one-frame VAE pass, colour correction
+  and copies measured on that card that day under `peaks.picture_encode_peak`,
+  `peaks.picture_decode_peak`, `peaks.colour_one_frame` and `still_plan.copies_peak`, each
+  prediction at or over its measure and near it; `tests/test_peaks.py` the one-frame ratios by
+  tile side, the video slice's own figure past what one frame was measured on (an untiled pass
+  over a larger frame, a tile past 2048 px), and a video's figures unmoved; `tests/test_still_plan.py`
+  the plan choosing no untiled pass past the frame measured (`still_plan._untiled_measured`), a
+  pin taking one there at the slice's figure; `tests/test_still_plan.py` the copies' measured rule
+  (`still_plan.RESIZE`, cuBLAS's workspace held) and what a phase takes for a reservation
+  (`still_plan.Peak`, `bound_peaks`, `picture_peaks`, a picture's passes within a `budget`). No
+  video plan moves: the plan matrix's
+  5,480 cases are main's byte for byte.
 - A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
   phase a refusal names, a recorded shape planned again releasing that part, planning importing
   no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),
