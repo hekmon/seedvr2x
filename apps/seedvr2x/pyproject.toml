@@ -11,7 +11,9 @@ requires-python = "==3.13.*"
 # (DESIGN.md, Validation milestones), so that the comparison differs by code only: bump one on
 # purpose, and run that comparison again. huggingface-hub, which pulls seedvr2x's own model files
 # (DESIGN.md, Weights), and pillow, which reads a still picture (DESIGN.md, Still images), at the
-# versions the lock held already through diffusers and torchvision.
+# versions the lock held already through diffusers and torchvision. torchcodec, which decodes a
+# 16-bit colour PNG (Pillow cuts it to 8 bits, torchvision's decoder is deprecated since 0.29;
+# seedvr2x/picture.py imports it there alone), from PyPI.
 dependencies = [
     "seedvr2x-core",
     "diffusers==0.40.0",
@@ -23,6 +25,7 @@ dependencies = [
     "rotary-embedding-torch==0.9.1",
     "safetensors==0.8.0",
     "torch==2.14.1",
+    "torchcodec==0.17.0",
     "torchvision==0.29.1",
 ]
 

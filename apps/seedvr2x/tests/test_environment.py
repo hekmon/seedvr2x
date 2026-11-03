@@ -25,6 +25,27 @@ def test_versions_derived() -> None:
     assert all(found.values())
 
 
+def test_torchcodec_is_declared_and_not_recorded_by_a_run_that_reads_no_16_bit_png() -> None:
+    """torchcodec decodes a 16-bit colour PNG, imported there alone (seedvr2x/picture.py): a
+    video job never loads it, so its record is the one made before the dependency was declared,
+    and a resume of such a job finds the same packages. In a process of its own: another test
+    may have read such a picture here."""
+    code = (
+        "import environment as e, sys\n"
+        "print('torchcodec' in e._declared(), 'torchcodec' in e.versions(),"
+        " 'torchcodec' in sys.modules)"
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={**os.environ, "PYTHONPATH": str(Path(environment.__file__).parent)},
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["True", "False", "False"]
+
+
 def test_torch_runtime_libraries() -> None:
     # Loaded by torch without being imported, so found from its requirements: through the extras
     # it asks (cuda-toolkit[cublas,…]), those shipping a shared library other than Python's

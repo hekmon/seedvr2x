@@ -135,6 +135,13 @@ beside it; the `__init__.py` is seedvr2x's.
   model imports, brings it into every run anyway. Its telemetry is off: `main.main` sets
   `HF_HUB_DISABLE_TELEMETRY` before either import, unless the user has. hf_xet, its Xet
   downloader, seedvr2x never imports: its import writes a log file under `HF_HOME`.
+- TorchCodec is declared (PyPI's wheel) for one use: the decode of a 16-bit colour PNG, which
+  Pillow cuts to 8 bits and whose torchvision decoder is deprecated since 0.29
+  (`seedvr2x/picture.py`). It is imported there alone, inside the function, never at import:
+  its import loads the system's FFmpeg shared libraries where there are any, which no other
+  picture and no video run should do; its image decoders bundle libpng and need no FFmpeg. It
+  is never in a job's environment record (a video run never imports it), and it turns a picture
+  by its eXIf chunk with no switch to leave it, so the chunk is taken out of the bytes it decodes.
 - ffmpeg and ffprobe on PATH, 7.1 or later (for setparams' chroma_location), with zscale
   (libzimg), idet and ffv1: seedvr2x checks the build at startup and refuses to run without
   them, or without any other filter, encoder, decoder or muxer it uses (`media/ffmpeg.py`;
@@ -481,7 +488,7 @@ uv run pytest
   Ctrl-C killing it at once.
 - A still picture (DESIGN.md, Still images), on the CPU, in `core/tests/`: `tests/test_picture.py`
   holds `seedvr2x/picture.py` to files it makes, bytes in: every format and mode read (PNG in
-  RGB, palette, grey at 1 to 16 bits, 16-bit RGB by torchvision's decoder, alpha; JPEG, WebP,
+  RGB, palette, grey at 1 to 16 bits, 16-bit RGB by TorchCodec's decoder, alpha; JPEG, WebP,
   TIFF, BMP, GIF), values exact and, where an ffmpeg seedvr2x accepts is on `PATH`, ffmpeg's
   decode bit for bit (JPEG and lossy WebP within 3 levels of its bilinear conversion); the
   format told by content (`identify`); the profile, the PNG's colour chunks verbatim and the

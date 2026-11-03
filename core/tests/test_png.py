@@ -1,6 +1,6 @@
 """The PNG writer of a still (seedvr2x/png.py; DESIGN.md, Still images, Output): the chunks in their
 order with their CRCs, the quantisation of the video writers, 8 and 16 bits, colour and grey, every
-filter decoding exactly, read back by Pillow, torchvision, seedvr2x's reader and ffmpeg."""
+filter decoding exactly, read back by Pillow, TorchCodec, seedvr2x's reader and ffmpeg."""
 
 import io
 import json
@@ -16,10 +16,7 @@ import numpy.typing as npt
 import pytest
 import torch
 from PIL import Image, ImageCms
-from torchvision.io import (  # pyright: ignore[reportMissingTypeStubs]
-    ImageReadMode,
-    decode_image,
-)
+from torchcodec.decoders import decode_image  # pyright: ignore[reportPrivateImportUsage]
 
 from seedvr2x import picture, png
 
@@ -93,9 +90,12 @@ def chunks_of(data: bytes) -> list[tuple[bytes, bytes]]:
 
 
 def decoded16(data: bytes) -> npt.NDArray[np.uint16]:
-    """(H, W, C) uint16 by torchvision's libpng."""
+    """(H, W, C) uint16 by TorchCodec's libpng, which turns a picture by its eXIf chunk: given
+    the pictures of these tests, written upright or without one."""
     tensor = decode_image(
-        torch.frombuffer(bytearray(data), dtype=torch.uint8), mode=ImageReadMode.UNCHANGED
+        torch.frombuffer(bytearray(data), dtype=torch.uint8),
+        mode="UNCHANGED",
+        output_dtype=torch.uint16,
     )
     return tensor.permute(1, 2, 0).numpy()
 

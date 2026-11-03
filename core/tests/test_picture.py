@@ -12,6 +12,7 @@ import shlex
 import shutil
 import struct
 import subprocess
+import sys
 import warnings
 import zlib
 from collections.abc import Callable
@@ -22,7 +23,7 @@ import numpy.typing as npt
 import pytest
 from PIL import Image, ImageCms
 
-from seedvr2x import picture
+from seedvr2x import picture, png
 from seedvr2x.errors import Refusal
 
 
@@ -978,6 +979,36 @@ def test_an_orientation_out_of_range_is_taken_as_1_and_said(
     assert len(warnings) == 1 and "orientation is 9" in warnings[0].getMessage()
 
 
+@pytest.mark.parametrize("value", [2, 5, 6, 8])
+def test_a_16_bit_png_is_decoded_as_stored_whatever_its_exif_chunk_says(value: int) -> None:
+    """TorchCodec's decoder turns a picture by its eXIf chunk and has no switch to leave it: the
+    chunk is taken out of the bytes it is handed (picture._without_exif), the orientation read
+    apart and the pixels left as stored, as the array written."""
+    data = stored_turned(value)
+    assert b"eXIf" in data
+    pic = reading(data)
+    assert pic.orientation == value
+    assert pic.pixels.shape == RGB16.shape
+    assert np.array_equal(codes(pic.pixels, 16), RGB16)
+
+
+def test_an_exif_chunk_after_the_image_data_of_a_16_bit_png_turns_nothing() -> None:
+    exif = chunk(b"eXIf", orientation_exif(6).tobytes()[6:])
+    pic = reading(png16(RGB16, 2, after=(exif,)))
+    assert pic.orientation == 6 and np.array_equal(codes(pic.pixels, 16), RGB16)
+
+
+def test_the_exif_chunks_are_taken_out_and_nothing_else() -> None:
+    exif = chunk(b"eXIf", b"MM\x00*")
+    gama = chunk(b"gAMA", struct.pack(">I", 45455))
+    plain = png16(RGB16, 2, before=(gama,))
+    assert picture._without_exif(plain) == plain  # pyright: ignore[reportPrivateUsage]
+    both = png16(RGB16, 2, before=(exif, gama), after=(exif,))
+    assert picture._without_exif(both) == plain  # pyright: ignore[reportPrivateUsage]
+    # A file cut short: what follows the last whole chunk is kept as it is.
+    assert picture._without_exif(both[:-5]) == plain[:-5]  # pyright: ignore[reportPrivateUsage]
+
+
 def test_the_orientation_of_a_16_bit_png_is_read() -> None:
     exif = chunk(b"eXIf", orientation_exif(6).tobytes()[6:])
     assert reading(png16(RGB16, 2, after=(exif,))).orientation == 6
@@ -1192,6 +1223,18 @@ def _smooth_png_palette() -> bytes:
     return pillow(Image.fromarray(RGB8).quantize(colors=32), "PNG")
 
 
+def stored_turned(orientation: int) -> bytes:
+    """RGB16 written at 16 bits by seedvr2x's own writer, its eXIf chunk saying orientation."""
+    return png.write(
+        RGB16.astype(np.float32) / np.float32(65535),
+        bits=16,
+        grey=False,
+        icc=None,
+        chunks=[],
+        orientation=orientation,
+    )
+
+
 # name, file, ffmpeg's pixel format, the largest difference allowed (0: bit for bit), ffmpeg's
 # filter for the lossy ones.
 EXACT = 0
@@ -1201,6 +1244,9 @@ AGAINST_FFMPEG: list[tuple[str, Callable[[], bytes], str, int, str | None]] = [
     ("png grey", lambda: pillow(Image.fromarray(GREY8, "L"), "PNG"), "gray", EXACT, None),
     ("png grey 16", lambda: png16(GREY16, 0), "gray16le", EXACT, None),
     ("png rgb 16", lambda: png16(RGB16, 2), "rgb48le", EXACT, None),
+    # TorchCodec turns a picture by its eXIf chunk, ffmpeg (-noautorotate) does not: the stored
+    # pixels are what both give.
+    ("png rgb 16 turned", lambda: stored_turned(6), "rgb48le", EXACT, None),
     (
         "png rgba opaque",
         lambda: pillow(
@@ -1255,3 +1301,53 @@ def test_the_pixels_are_ffmpegs_decode(
         mine = mine[..., :1]
     assert mine.size == theirs.size
     assert np.abs(mine.ravel() - theirs).max() <= allowed
+
+
+IMPORTS = """
+import sys
+from seedvr2x import picture
+eight, sixteen = bytes.fromhex(sys.argv[1]), bytes.fromhex(sys.argv[2])
+gone = ("torchcodec", "torchvision.io")
+assert not [m for m in gone if m in sys.modules], "loaded by the import"
+assert picture.read(eight, "eight.png").bits == 8
+assert not [m for m in gone if m in sys.modules], "loaded by an 8-bit picture"
+assert picture.read(sixteen, "sixteen.png").bits == 16
+assert "torchcodec" in sys.modules, "not loaded by a 16-bit colour PNG"
+assert "torchvision.io" not in sys.modules, "torchvision.io loaded by a 16-bit colour PNG"
+"""
+
+
+def test_torchcodec_is_imported_by_a_16_bit_colour_png_alone() -> None:
+    """TorchCodec's import loads the system's FFmpeg libraries where there are any: neither the
+    import of picture.py nor any other picture may load it, nor torchvision's image decoding,
+    which picture.py no longer uses."""
+    done = subprocess.run(
+        [
+            *(sys.executable, "-I", "-c", IMPORTS),
+            *(FORMAT_FILES["PNG"]().hex(), png16(RGB16, 2).hex()),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert done.returncode == 0, done.stderr
+
+
+def test_nothing_but_picture_py_imports_torchcodec() -> None:
+    """A video run never loads TorchCodec, whose import loads the system's FFmpeg libraries:
+    no file of the library or the command imports it but picture.py, and there inside the
+    function that decodes."""
+    library = Path(picture.__file__).resolve().parent
+    command = library.parents[1] / "apps" / "seedvr2x"  # absent from a copy of core/ alone
+    files = [*library.rglob("*.py"), *command.glob("*.py"), *command.glob("media/*.py")]
+    found = {
+        path.name
+        for path in files
+        if "vendor" not in path.parts
+        and "transnetv2" not in path.parts
+        and re.search(r"^\s*(import|from)\s+torchcodec\b", path.read_text(), re.MULTILINE)
+    }
+    assert found == {"picture.py"}
+    source = Path(picture.__file__).read_text()
+    assert not re.search(r"^(import|from)\s+torchcodec\b", source, re.MULTILINE)
+    assert "torchvision" not in re.findall(r"^\s*(?:import|from)\s+(\w+)", source, re.MULTILINE)

@@ -2,8 +2,8 @@
 and its pixels as the model takes them, with what the output carries of the file (ICC profile,
 PNG colour chunks, EXIF orientation).
 
-Pillow identifies and decodes. torchvision's decoder reads the 16-bit PNGs whose colour a
-Pillow decode would cut to 8 bits (imported where it is needed: the module imports no torch).
+Pillow identifies and decodes. TorchCodec's decoder reads the 16-bit colour PNGs that a Pillow
+decode would cut to 8 bits (imported where it is needed: the module imports no torch).
 The library takes bytes, never a path, so that the command line and an image server read a
 picture the same way. Every refusal says why and what to do."""
 
@@ -298,20 +298,28 @@ def _expanded(codes: npt.NDArray[np.uint8], top: float) -> npt.NDArray[np.float3
 
 
 def _decoded16(data: bytes, png: "_Png", name: str) -> tuple[npt.NDArray[np.float32], bool, bool]:
-    """(pixels, grey, alpha dropped) of a 16-bit PNG, by torchvision's libpng decoder: Pillow cuts
+    """(pixels, grey, alpha dropped) of a 16-bit PNG, by TorchCodec's libpng decoder: Pillow cuts
     RGB, RGBA and grey-alpha at 16 bits to 8. Bit for bit ffmpeg's rgb48 and gray16 decodes on
-    the pictures tested (tests/test_picture.py)."""
+    the pictures tested (tests/test_picture.py), and bit for bit torchvision's decoder, which
+    TorchCodec's replaces (torchvision's image decoding is deprecated since 0.29)."""
     import torch
 
-    # torchvision.io ships no type stubs.
-    from torchvision.io import (  # pyright: ignore[reportMissingTypeStubs]
-        ImageReadMode,
-        decode_image,
-    )
+    # Imported here and nowhere else: TorchCodec's import loads the system's FFmpeg shared
+    # libraries where there are any, which no other picture and no video run should ever do
+    # (its image decoders bundle libpng and need no FFmpeg). decode_image is its documented
+    # public name, which its typing marks as private to _image_decoders (torchcodec 0.17.0).
+    from torchcodec.decoders import decode_image  # pyright: ignore[reportPrivateImportUsage]
 
+    # TorchCodec always applies the EXIF orientation (torchvision's switch to leave it is gone):
+    # a picture is processed as stored, its orientation read apart (_orientation) and written
+    # to the output, so the decoder is handed the bytes without the chunk.
     tensor = decode_image(
-        torch.frombuffer(bytearray(data), dtype=torch.uint8), mode=ImageReadMode.UNCHANGED
+        torch.frombuffer(bytearray(_without_exif(data)), dtype=torch.uint8),
+        mode="UNCHANGED",
+        output_dtype=torch.uint16,
     )
+    if tensor.dtype != torch.uint16:
+        raise _damaged(name, ValueError(f"{tensor.dtype} decoded, 16 bits stored"))
     planes = tensor.numpy()
     expected = _PNG_CHANNELS[png.colour_type]
     if planes.shape[0] != expected:
@@ -577,6 +585,25 @@ def _walk_png(data: bytes, name: str) -> _Png:
         if len(transparency) != 2 * _PNG_CHANNELS[colour_type]:
             raise _damaged(name, ValueError("the PNG's tRNS chunk has the wrong length"))
     return _Png(depth, colour_type, tuple(kept), transparency)
+
+
+def _without_exif(data: bytes) -> bytes:
+    """data without its eXIf chunks, wherever they stand (before the image data or after it).
+    The chunks up to the first IDAT were walked and checked by _walk_png; what follows is copied
+    as it is once a chunk is cut short, the decoder judging it."""
+    kept = [data[:8]]
+    position = 8
+    end = len(data)
+    while position + 12 <= end:
+        (length,) = struct.unpack_from(">I", data, position)
+        stop = position + 12 + length
+        if stop > end:
+            break
+        if data[position + 4 : position + 8] != b"eXIf":
+            kept.append(data[position:stop])
+        position = stop
+    kept.append(data[position:])
+    return b"".join(kept)
 
 
 def _check_cicp(body: bytes, name: str) -> None:
