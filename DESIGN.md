@@ -2382,6 +2382,12 @@ measured that day on test files, against ffmpeg 9.0's decode.
   Where the default makes the output smaller than its source, a picture or a video, one line
   says so and names the `--resolution` that keeps the source's size (the user, 2026-11-03: a
   12 MP photo, 4032×3024, comes out 1440×1080 by default); a size given says nothing more.
+- **Model files:** a picture's run reads each of its model files to check its SHA-256 at every
+  start, the DiT's 16.5 GB in about 84 s on the RTX 5090's disk, as any job with something to
+  make does ([Pause and resume](#pause-and-resume)): the record's SHA-256 is then that of the bytes
+  used, pinned file or not. Kept so (the user, 2026-11-03): the CLI is a practical way to
+  upscale one picture; many go to the image server, which loads and checks its models once, or
+  to ComfyUI's nodes, which may become the usual way for pictures.
 - **The plan for one picture** (`still_plan.py`): made for a bound, the output's long and
   short sides in either orientation; the CLI's bound is its picture, the server's its
   largest.
