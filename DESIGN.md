@@ -2229,14 +2229,26 @@ Decided on 2026-11-03 (the user, after sptenc's own tags): every output carries 
 record, what made it, and nothing of the source's but its size. Always written, no option: it
 holds nothing personal.
 
-- **What it holds:** seedvr2x's version and its repository's address (`seedvr2x 0.1.0
-  (https://github.com/hekmon/seedvr2x)`), the source's size and the output's, the DiT's and the
-  VAE's files with their SHA-256, the seed, the colour correction, the encode's and the decode's
-  tiles (0 for untiled), the attention kernel (FlashAttention 2 or SDPA), and for a video its
-  windows, `--quality` and `--compile`. That is what changes the output's bits, so an output can
-  be made again from it, the GPU and the libraries' versions aside (a video's manifest records
-  those). The tiles change the bits: each tile passes the VAE with its own surroundings and the
-  overlaps are blended, invisibly. Blocks swapped don't: the tests hold them bit for bit.
+- **What it holds:**
+  - the app that made it, its version and seedvr2x's address: `seedvr2x 0.1.0
+    (https://github.com/hekmon/seedvr2x)` for the CLI, `seedvr2x-imgserver 0.1.0 (...)` for the
+    server, the apps being released at one version;
+  - the source's size as stored and the output's as written, upright; the short side asked
+    (`--resolution`, given or its default) and the sample aspect used, which the sizes don't
+    pin (1080 and 1081 both give 1920×1080 from 1920×1080, by the even crop, with other bits);
+  - the DiT's and the VAE's files, by their file names alone (a path would put the user's
+    directories in every output), with their SHA-256;
+  - the seed, the colour correction, the encode's and the decode's tiles (0 for untiled), and
+    the attention kernel as the plan names it (`flash_attn_2`, `sdpa`);
+  - for a video, its window cap in latents (0 for one window per shot), `--quality`,
+    `--compile`, and its cuts: the threshold they were detected at, or the SHA-256 of the list
+    `--cuts` named.
+
+  That is what changes the output's bits, so an output can be made again from it, the GPU and
+  the libraries' versions aside (a video's manifest records those); the tiles' overlap is fixed
+  by the version. The tiles change the bits: each tile passes the VAE with its own surroundings
+  and the overlaps are blended, invisibly. Blocks swapped don't: the tests hold them bit for
+  bit.
 - **The AI mark** (the user, 2026-11-03): IPTC's digital source type
   `http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia`,
   "augmentation, correction or enhancement using a Generative AI model", the field platforms
@@ -2245,13 +2257,21 @@ holds nothing personal.
   doesn't substantially alter the input; seedvr2x marks them either way.
 - **Pictures, PNG and WebP:** one XMP packet (PNG's `iTXt` chunk `XML:com.adobe.xmp`, before the
   image data; WebP's XMP chunk): the version in `xmp:CreatorTool`, the mark in
-  `Iptc4xmpExt:DigitalSourceType`, the rest under seedvr2x's own namespace. PNG also has its
-  standard `Software` text, for the tools that read no XMP. The image server's pictures carry
-  the same.
+  `Iptc4xmpExt:DigitalSourceType`, the rest under seedvr2x's own namespace,
+  `https://github.com/hekmon/seedvr2x/xmp/1.0/`, whose version changes when a field's meaning
+  changes or a field goes, not when one is added. PNG also has its standard `Software` text, for
+  the tools that read no XMP. The image server's pictures carry the same. About 1.4 kB a
+  picture, no date in it, so the bytes stay deterministic.
 - **Videos:** tags on the video stream, named as sptenc names its own (`seedvr2x_url`,
   `seedvr2x_version`, `seedvr2x_dit_model`, ...), the mark among them, on the FFV1 masters and
-  on the finished `.mkv`, whose assembly keeps them from the first segment as it keeps its
-  encoder's. A PNG directory's frames carry none: the directory's manifest holds the record.
+  on the stream `--segment-cmd` reads, about 0.7 kB a file: the masters' frames, packets and
+  checksums are unchanged, and nothing compares their bytes. The finished `.mkv`'s record is
+  written by the assembly from the job, as it sets the video's language and title, whatever
+  the segments carry: a `--segment-cmd` writing MP4 or a bare stream drops stream tags (the
+  review, 2026-11-03), and the record is still written. A job re-planned on a resume
+  (`--accept-env-change`) says so (`replanned`), its values the manifest's for the job, each
+  unit's own in the manifest. A PNG directory's frames carry none: the directory's manifest
+  holds the record.
   The source's video tags stay dropped, its language and title aside (`media/assembly.py`,
   `VIDEO_TAGS`): they describe an encode that seedvr2x's redraw replaces (the user). sptenc,
   the masters' usual next step, keeps its input's stream tags by ffmpeg's default copy unless
