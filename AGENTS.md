@@ -34,6 +34,7 @@ apps/seedvr2x/          the seedvr2x command: distribution seedvr2x (setuptools)
   shot run cuts planner plan job manifest resume units scratch environment calibration timing
   stop disk .py          the pipeline per shot, then stitching, planner, a job's plan, saving and
                          resume, its environment record
+  stills.py              a still picture's run: its options, -o, plan, load, pass and PNG
   media/                 I/O layer: ffprobe, ffmpeg pipes, FFV1 and PNG writers
   tests/                 the CLI's, with levels.py and conftest.py
   pyproject.toml uv.lock .python-version LICENSE NOTICE
@@ -498,6 +499,21 @@ uv run pytest
   bound; the floor proved, and what of the DiT a pinned VAE phase keeps lowered for it; the DiT's order, int8, SDPA,
   pins, the host's trades and refusal, held readings and the tight reserve. `tests/test_peaks.py`
   holds the colour correction's term by its frames, a video's `SLICE` unchanged.
+- The command line's still path (`stills.py`, `main.py`'s branch by content): `tests/
+  test_still_cli.py` holds `still.upscale` bit for bit to `shot.py`'s pass over a shot of one
+  frame, tiled and corrected; a picture told by its content whatever its name, a video named
+  `.png` sent to the video path; every option of the parser taken or refused on a still (a new
+  one unclassified fails), each refusal; `-o`'s rules and a write that fails leaving nothing;
+  `--plan` alone saying the plan, loading and writing nothing; runs on the stand-ins whose file is
+  `png.write` of `still.upscale` byte for byte, at 16 and 8 bits (`--format png8`), grey, the
+  profile and orientation kept, an opaque alpha dropped and its line reaching the user; no
+  ffmpeg on `PATH`; and the video path's refusals: `-o x.png`, `png8`, `--plan` alone, and image
+  formats ffprobe reads that seedvr2x doesn't as pictures (JPEG XL, AVIF and HEIC by their
+  demuxer or major brand, a video listing a sequence brand among its compatible ones kept;
+  files made by ffmpeg where its build can, skipped without); a tile pin covering the picture's
+  own padded frame refused in the video planner's words. The video's
+  `--format`, `--quality` and `--min-segment` have no parser default, applied after the branch
+  (`main._video_arguments`), and `tests/test_cli_run.py` holds a video job's record unchanged.
 - A resume short of the memory free is held by `tests/test_planner.py` (the shortfall and the
   phase a refusal names, a recorded shape planned again releasing that part, planning importing
   no torch), `tests/test_memory.py` (the early NVML reading, off this process's own context),

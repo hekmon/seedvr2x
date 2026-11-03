@@ -47,6 +47,7 @@ MODULES: tuple[str, ...] = (
     "run",
     "scratch",
     "shot",
+    "stills",
     "stop",
     "timing",
     "units",

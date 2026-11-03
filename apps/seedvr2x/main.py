@@ -22,6 +22,7 @@ from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+import stills
 import stop as stopping
 from cuts import PLAYLISTS, POSSIBLE, THRESHOLD, playlist_path, write_playlists
 from disk import RAW_BYTES
@@ -31,6 +32,7 @@ from media.ffmpeg import MediaError
 from media.writer import FORMATS
 from seedvr2x.clock import sample, spent, spoken, taking, wall
 from seedvr2x.pull import DETECTOR, REPO
+from stills import BARE_PLAN, PNG8
 from stop import Deadline, Stop, Stopped, Terminated, deadline, terminable
 
 if TYPE_CHECKING:
@@ -47,7 +49,7 @@ if TYPE_CHECKING:
     from plan import Plan
     from planner import Pins, PlanError
     from seedvr2x.model import Models
-    from seedvr2x.passes import Compilation
+    from seedvr2x.passes import Compilation, ModelPlan
     from seedvr2x.pull import ModelFile, ModelFiles
     from seedvr2x.weights import Architecture
     from timing import Clock, Unit
@@ -58,6 +60,12 @@ if TYPE_CHECKING:
 VIDEO_SUFFIXES = frozenset(
     {".mp4", ".mov", ".m4v", ".avi", ".webm", ".ts", ".m2ts", ".mts", ".mxf", ".nut", ".mpg"}
 )
+
+# What a video job takes where --format and --quality are not given: the parser has no default for
+# either (DESIGN.md, Still images), so that a picture, which takes neither, tells one given from one
+# not; _run puts these in args at the video path's start, where every reader then finds them.
+DEFAULT_FORMAT = "yuv420p10le"
+DEFAULT_QUALITY = "standard"
 
 # The CLI's loggers sit under `cli.` (this one is cli.main), beside the library's `seedvr2x.`; both
 # reach the root handler _logging installs (DESIGN.md, Repository and apps).
@@ -236,6 +244,30 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["verify"]:
         return verify(argv[1:])
+    parser = _parser()
+    args = parser.parse_args(argv)
+    _logging(args.verbose)
+    _torch_lines(args.verbose)
+    # A stop at once, a second Ctrl-C or SIGTERM during the run (stop.py), SIGTERM during
+    # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
+    # manifest says, and the same command resumes.
+    with _warnings_in_lines():
+        try:
+            return _run(args)
+        except KeyboardInterrupt:
+            logger.error("stopped at once (Ctrl-C)")
+            return 130
+        except Terminated:
+            logger.error("stopped at once (SIGTERM)")
+            return 143
+        finally:
+            _unmake()
+            _unlock()
+
+
+def _parser() -> argparse.ArgumentParser:
+    """The command's options (stills.py classifies each one for a picture; tests/test_still_cli.py
+    walks them)."""
     parser = argparse.ArgumentParser(
         prog="seedvr2x",
         description="SeedVR2 video upscaler for long runs.",
@@ -243,7 +275,12 @@ def main(argv: list[str] | None = None) -> int:
         " written with it (seedvr2x verify --help)",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {version('seedvr2x')}")
-    parser.add_argument("input", type=Path, help="the source, one video file")
+    parser.add_argument(
+        "input",
+        type=Path,
+        help="the source: one video file, or one picture (PNG, JPEG, WebP, TIFF, BMP or a GIF of"
+        " one frame), told by the file's content, never by its name",
+    )
     parser.add_argument(
         "-o",
         "--output",
@@ -254,20 +291,24 @@ def main(argv: list[str] | None = None) -> int:
         " they are all done; they and the job's other files wait in PATH.work beside it, removed"
         " once the file is whole, and the same command resumes a job stopped before. Else a new"
         " or empty directory: the output segments (FFV1 files, or PNG directories) and their"
-        " manifest, the source cut at its shots, merged to --min-segment, never assembled",
+        " manifest, the source cut at its shots, merged to --min-segment, never assembled. A"
+        " picture goes to a new .png file, nothing replaced, 16 bits (--format png8: 8)",
     )
     # yuv420p10le by default (DESIGN.md, Output): what every encoder takes, converted here by
     # zscale, exactly, rather than later by sptenc's swscale (16-bit white at 943, not 940). The
     # sizes per hour of 1080p at 24000/1001: DESIGN.md, Output, Master sizes (milestone 5).
+    # No default in the parser (DESIGN.md, Still images: "--format, --quality and --min-segment
+    # have no value by default, so that one given is told from its default"): a picture refuses a
+    # video's, and the video path takes DEFAULT_FORMAT where it reads the option (_run).
     parser.add_argument(
         "--format",
-        choices=FORMATS,
-        default="yuv420p10le",
-        help="output format (default: %(default)s): yuv420p10le, FFV1 master in 10-bit YUV 4:2:0"
+        choices=(*FORMATS, PNG8),
+        help="output format (default: yuv420p10le): yuv420p10le, FFV1 master in 10-bit YUV 4:2:0"
         " (BT.709 at HD sizes, limited range), what encoders take, converted here exactly by"
         " zscale (white at 940), about 100-135 GiB per hour of 1080p; gbrp16le, FFV1 master in"
         " 16-bit RGB, for precision work, tests and scoring on short samples, 540-690 GiB per hour"
-        " of 1080p with colour correction; png, 16-bit PNG",
+        " of 1080p with colour correction; png, 16-bit PNG; png8, for a picture alone, an 8-bit PNG"
+        " (a picture's png is 16-bit)",
     )
     # DESIGN.md, Output, Writer: seedvr2x owns no encoder flags; how the output is compressed
     # during the run is the user's own command, one run per output segment.
@@ -355,6 +396,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--plan",
         type=Path,
+        nargs="?",
+        const=BARE_PLAN,
         metavar="FILE",
         help="plan the job and stop before the upscale: the first pass, then the cut list"
         f" written to FILE, for editing and --cuts, the possible cuts (runs peaking from {POSSIBLE}"
@@ -363,7 +406,9 @@ def main(argv: list[str] | None = None) -> int:
         " FILE.possible.m3u8 of the possible ones (none with --cuts); and the counts"
         " printed. The job's manifest and frame index are written too, in the output directory"
         " (PATH.work for a .mkv path): the same command without --plan then runs it, another"
-        " --cut-threshold or --cuts plans it again, with no second decode",
+        " --cut-threshold or --cuts plans it again, with no second decode. A video needs the"
+        " FILE; for a picture, --plan alone says the picture's plan (the memory, where the"
+        " models sit, the VAE's tiles) and stops: nothing is loaded or written",
     )
     # The range job.check_seed enforces, once the shots are known: each shot is seeded with the
     # seed plus its first frame, its encode with ENCODE_SEED_OFFSET more, all under numz's limit.
@@ -383,13 +428,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--quality",
         choices=list(QUALITY),
-        default="standard",
         metavar="LEVEL",
         help="standard, enhanced or maximum: each shot run 1, 2 or 4 times, its latent grid shifted"
         " a frame each time, and each frame taken from the run that rebuilds it best, for crisper"
         " frames: the model rebuilds 3 frames of every 4 softer, with doubled lines on fast"
         " motion; 2 or 4 times the GPU time, the same memory, and disk for the frames between"
-        " the runs; --plan says it before anything runs; see the manual (default: %(default)s)",
+        " the runs; --plan says it before anything runs; see the manual (default: standard)",
     )
     # split, the colour study's winner, in place of numz's lab (DESIGN.md, Colour correction).
     parser.add_argument(
@@ -402,10 +446,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--min-segment",
         type=_seconds,
-        default=MIN_SEGMENT,
         metavar="SECONDS",
         help="output segments last this long at least, each shorter one merged into its shorter"
-        " neighbour, as sptenc's -L (default: %(default)s; 0 keeps every cut)",
+        f" neighbour, as sptenc's -L (default: {MIN_SEGMENT}; 0 keeps every cut)",
     )
     parser.add_argument(
         "--input-matrix",
@@ -497,24 +540,7 @@ def main(argv: list[str] | None = None) -> int:
         help="also save every output frame as float32 frame_NNNNNN.npy, as ffv1_out.py does",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
-    args = parser.parse_args(argv)
-    _logging(args.verbose)
-    _torch_lines(args.verbose)
-    # A stop at once, a second Ctrl-C or SIGTERM during the run (stop.py), SIGTERM during
-    # the model files' fetch (stop.terminable), or Ctrl-C before the run: what is kept is what the
-    # manifest says, and the same command resumes.
-    with _warnings_in_lines():
-        try:
-            return _run(args)
-        except KeyboardInterrupt:
-            logger.error("stopped at once (Ctrl-C)")
-            return 130
-        except Terminated:
-            logger.error("stopped at once (SIGTERM)")
-            return 143
-        finally:
-            _unmake()
-            _unlock()
+    return parser
 
 
 def verify(argv: list[str]) -> int:
@@ -727,6 +753,68 @@ def _png_listing(directory: Path, count: int) -> list[str]:
     return found
 
 
+def _picture(path: Path) -> str | None:
+    """The format of the picture the file at path is by its content (picture.identify), None for
+    anything else: a video, a file that isn't there or can't be opened, a directory."""
+    from seedvr2x import picture
+
+    try:
+        # A regular file only: opening a pipe would wait for its writer.
+        if not path.is_file():
+            return None
+        with path.open("rb") as file:
+            return picture.identify(file)
+    except OSError:
+        return None
+
+
+def _reads() -> "stills.Reads":
+    """What the picture's run reads of the machine, as main reads it for a video: the free
+    memory, the host's, the attention backend, the DiT's format, the load of the models and the
+    words for a refused memory. Taken here at the call, not imported by stills.py, so that one
+    function replaces each for a test as it does for the video's run."""
+    return stills.Reads(
+        free=_free_memory,
+        host=_host_available,
+        attention=_attention,
+        dit_model=_dit_model,
+        load=_load,
+        refused=_refused,
+        out_of_memory=_out_of_memory,
+    )
+
+
+def _video_arguments(args: argparse.Namespace) -> None:
+    """The arguments only a video's run reads, refused or defaulted: --format, --quality and
+    --min-segment, which have no default in the parser (DESIGN.md, Still images), take the video's
+    here, once, so that every reader below finds the value it always found and a job's settings
+    and record are unchanged; --plan without a file, the picture's (stills.BARE_PLAN), and a PNG
+    format for a picture alone or a .png name for the output are refused, as a video's."""
+    from job import JobError
+
+    if args.plan is BARE_PLAN:
+        raise JobError(
+            "--plan alone: a video's plan writes its cut list, to the FILE it needs: --plan"
+            " FILE (--plan alone is for a picture)"
+        )
+    if args.format == PNG8:
+        raise JobError(
+            f"--format {PNG8}: a video's PNG segments are 16-bit; {PNG8}, an 8-bit PNG, is for a"
+            " still picture"
+        )
+    if args.output.suffix.lower() == ".png":
+        raise JobError(
+            f"{args.output}: a .png file is a picture's output, and a video's PNG frames go in a"
+            " directory, one per frame: --format png, with -o naming a new or empty directory"
+        )
+    if args.format is None:
+        args.format = DEFAULT_FORMAT
+    if args.quality is None:
+        args.quality = DEFAULT_QUALITY
+    if args.min_segment is None:
+        args.min_segment = MIN_SEGMENT
+
+
 def _run(args: argparse.Namespace) -> int:
     import planner
     from job import (
@@ -775,6 +863,12 @@ def _run(args: argparse.Namespace) -> int:
         # is done, the build's check included, so that nothing is made.
         if args.input.is_dir():
             raise JobError(_directory_refused(args.input))
+        # A picture, told by its content and never by its name, takes its own path (stills.py):
+        # before the build's check, so that a still needs no ffmpeg (DESIGN.md, Still images).
+        # Anything else, a file that isn't there included, is a video's, as before.
+        if (kind := _picture(args.input)) is not None:
+            return stills.run(args, kind, _reads())
+        _video_arguments(args)
         numz_padding = _numz_padding()
         numz_draw = _numz_draw()
         numz_tail = _numz_tail()
@@ -1383,7 +1477,12 @@ def _run(args: argparse.Namespace) -> int:
         if status or not remaining:
             return status
         loaded = _load(
-            model_files, identity.device, plan, reserve, _first_kept(kept_first), compilation
+            model_files,
+            identity.device,
+            plan.model_plan,
+            reserve,
+            _first_kept(kept_first),
+            compilation,
         )
         if loaded is None:
             return 1
@@ -1427,7 +1526,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         return EX_TEMPFAIL
     loaded = _load(
-        model_files, identity.device, plan, reserve, _first_kept(kept_first), compilation
+        model_files, identity.device, plan.model_plan, reserve, _first_kept(kept_first), compilation
     )
     if loaded is None:
         return 1
@@ -1969,12 +2068,13 @@ def _kept(record: "Manifest", segments: int, resumes: bool = True) -> str:
 def _load(
     model_files: "ModelFiles",
     device: "torch.device",
-    plan: "Plan",
+    plan: "ModelPlan",
     reserve: int | None = None,
     kept: str = "",
     compilation: "Compilation | None" = None,
 ) -> "tuple[Models, float] | None":
-    """The job's models loaded, as plan places them, and the seconds that took, the VAE's
+    """The models loaded, as plan places them (the job's Plan.model_plan, or a picture's
+    still_plan.StillPlan.models), and the seconds that took, the VAE's
     compilation among them where the plan has one (`compilation`, which the load fills in with
     its seconds); None once a refusal is logged, nothing run, `kept` said after it
     (_first_kept): the memory the driver spills held first, from the memory free now that the
@@ -2002,7 +2102,7 @@ def _load(
             model_files.vae.path,
             device,
             model_files.hashes,
-            plan.model_plan,
+            plan,
             compilation,
         )
     except (ModelError, HostMemoryError, CompileError) as error:

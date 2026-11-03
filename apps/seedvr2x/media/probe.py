@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from fractions import Fraction
@@ -46,8 +47,41 @@ LATER = ("-ignore_editlist", "1", "-threads", "0")
 # n9.0.2), whatever the file's suffix. A Matroska stream's rate is ffprobe's reading of a frame's
 # duration in whole nanoseconds (parse, rate.matroska_reading), or its guess from the timestamps
 # under 6 fps and above 1,000 (rate.matroska_guessed).
-CONTAINER = ("-show_entries", "format=format_name")
+# The container's major brand too, for an image in an MP4 file (IMAGE_BRANDS): ffprobe reads an
+# AVIF as "mov,mp4,m4a,3gp,3g2,mj2" with major_brand avif (and compatible_brands avifmif1miafMA1A,
+# not asked: a video lists image brands among its compatible ones), checked on n9.0.2, 2026-11-03,
+# where it reads a JPEG XL as jpegxl_pipe and a PNG as png_pipe.
+CONTAINER = ("-show_entries", "format=format_name:format_tags=major_brand")
 MATROSKA = "matroska"
+
+# The image formats ffprobe reads, none of them a video seedvr2x runs (DESIGN.md, Still images:
+# "any other image format ffprobe reads, by its brand where ffprobe reads it as an MP4 file ...
+# naming the formats read as pictures, so that none runs as a video of one frame"). By the
+# demuxer's name: every one ending in _pipe is an image format (ffmpeg n9.0.2's list, from
+# `ffmpeg -demuxers`: png_pipe, jpeg_pipe, jpegxl_pipe, webp_pipe, exr_pipe, ... but not
+# yuv4mpegpipe), and these others; and by the ISO base media file brands of the HEIF family
+# (ISO/IEC 23008-12 and 23000-22, JPEG XL's own box `jxl `), four characters each, the file's
+# major brand alone (image_kind). The pictures seedvr2x reads (PICTURES) are told by the library's
+# reader before this is looked at (main._picture), so only a file the reader doesn't know comes
+# here as an image: JPEG XL, AVIF, HEIC, EXR, a damaged one ffprobe still reads, ...
+IMAGE_DEMUXERS = frozenset(
+    {
+        "image2",
+        "image2pipe",
+        "alias_pix",
+        "brender_pix",
+        "fits",
+        "ico",
+        "apng",
+        "gif",
+    }
+)
+IMAGE_BRANDS = frozenset(
+    {"avif", "avis", "heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "mif2", "msf1", "jxl "}
+)
+# The formats seedvr2x reads as pictures, as the user knows them (seedvr2x.picture.FORMATS, which
+# tests/test_still_cli.py holds this to).
+PICTURES = "PNG, JPEG, WebP, TIFF, BMP and GIF"
 
 # What to do with a stream whose start doesn't decode.
 CUT_OR_ENCODE = "cut it at a keyframe, or re-encode it"
@@ -153,6 +187,9 @@ def probe(path: Path, first_frame: bool = True) -> VideoStream:
         return parse(path, _ffprobe(path, "-show_streams", *CONTAINER), first_frame=False)
     output = _ffprobe(path, "-show_streams", *CONTAINER, *_frames(FIRST_PACKETS))
     probed = cast(dict[str, Any], json.loads(output))
+    # An image before anything else, so that the second look at the packets below, and any
+    # decode error, are not what a file of one frame is refused for.
+    _refuse_image(path, probed)
     streams = cast(list[dict[str, Any]], probed.get("streams") or [])
     # Without a video stream, ffprobe has read the whole file for its packet: parse refuses it.
     if streams and not probed.get("frames"):
@@ -172,6 +209,37 @@ def probe(path: Path, first_frame: bool = True) -> VideoStream:
         probed["frames"] = later.get("frames") or []
         output = json.dumps(probed)
     return parse(path, output)
+
+
+def image_kind(container: dict[str, Any]) -> str:
+    """What makes a file ffprobe read an image format rather than a video, from its JSON's
+    "format" (CONTAINER): the demuxer's name, or the brand, said as such; "" for a video."""
+    names = str(container.get("format_name", "")).split(",")
+    for name in names:
+        if name.endswith("_pipe") or name in IMAGE_DEMUXERS:
+            return f"read by ffprobe as {name}"
+    tags = cast(dict[str, Any], container.get("tags") or {})
+    # The major brand alone: an MP4 or MOV video whose writer lists a sequence or image brand
+    # among its compatible ones (msf1, hevc, mif1 ...) stays a video; a file that is an image
+    # names its kind as the major brand (avif, heic ... checked on design's base.avif, n9.0.2).
+    brand = str(tags.get("major_brand", ""))
+    if brand in IMAGE_BRANDS:
+        return f"an MP4-family file of brand {brand.strip()}"
+    return ""
+
+
+def _refuse_image(path: Path, probed: dict[str, Any]) -> None:
+    """Refuse an image format that is no picture seedvr2x reads, before it is taken for a video
+    of one frame (image_kind)."""
+    kind = image_kind(cast(dict[str, Any], probed.get("format") or {}))
+    if kind:
+        raise MediaError(
+            f"{path}: an image file ({kind}), not a video, and not a picture seedvr2x reads:"
+            f" it reads {PICTURES} as pictures, told by their content, and refuses any other"
+            " image format, which ffmpeg would run as a video of one frame. Make a PNG of it with"
+            f" a tool that reads it, e.g. ffmpeg -i {shlex.quote(str(path))}"
+            f" {shlex.quote(str(path) + '.png')} where your ffmpeg decodes it"
+        )
 
 
 def _frames(packets: int) -> tuple[str, ...]:
@@ -224,6 +292,7 @@ def parse(path: Path, output: str, first_frame: bool = True) -> VideoStream:
     Raises MediaError for no video stream, one ffprobe has no decoder for or found no pixel
     format or size for, no frame when `first_frame`, or an unreadable Dolby Vision record."""
     probed = json.loads(output)
+    _refuse_image(path, probed)
     streams = cast(list[dict[str, Any]], probed.get("streams", []))
     if not streams:
         raise MediaError(f"{path}: no video stream")

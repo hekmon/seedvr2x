@@ -95,6 +95,7 @@ def test_every_logger_is_named_for_its_layer() -> None:
         "cli.planner",
         "cli.run",
         "cli.scratch",
+        "cli.stills",
         "cli.timing",
     }
     assert all(name.startswith("seedvr2x.") for name in named.values() if "cli" not in name)
@@ -745,3 +746,20 @@ def test_a_long_read_of_the_source_is_named_before_it_starts(
 
     monkeypatch.setattr(assembly, "timed_read", unreadable)
     assert long_read(source) == ("3 MiB", "")
+
+
+def test_the_help_names_pictures_png8_and_the_defaults(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+    shown = " ".join(capsys.readouterr().out.split())
+    assert (
+        "the source: one video file, or one picture (PNG, JPEG, WebP, TIFF, BMP or a GIF of one"
+        " frame), told by the file's content, never by its name" in shown
+    )
+    assert "png8, for a picture alone, an 8-bit PNG (a picture's png is 16-bit)" in shown
+    assert "output format (default: yuv420p10le)" in shown
+    assert "(default: standard)" in shown
+    assert "as sptenc's -L (default: 5; 0 keeps every cut)" in shown
+    assert (
+        "--plan [FILE]" in shown and "for a picture, --plan alone says the picture's plan" in shown
+    )

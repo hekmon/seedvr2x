@@ -1,0 +1,1135 @@
+"""The still path's command-line side. It uses the library's tests' helpers (core/tests):
+test_still.py's stand-in models and DiT, stand_ins.py's VAE; the library's half is
+tests/test_still.py there.
+
+A picture through seedvr2x.still gives, bit for bit, what the shot pipeline of the command line
+(shot.py) gives for a shot of one frame: encode_shot, sample_windows over the one window
+[(0, 1)], merge_windows, decode_shot, with its Correction when the picture is corrected, tiled or
+not.
+
+Then the command (stills.py, main._run's branch by content): a file told a picture by its content
+and not its name, every option classified as taken or refused on one, -o's rules, the PNG written
+at 16 or 8 bits with the picture's profile and orientation, --plan loading nothing, and no ffmpeg
+asked for. The machine is stood in as test_cli_run.py stands it in (no GPU, no weights): the
+command's run on the CPU, the pass itself the library's own on a VAE of random weights and a DiT
+of arithmetic (test_still.py), or a cheap stand-in where the pass is not what is held."""
+
+import logging
+import os
+import shutil
+import subprocess
+import sys
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import numpy as np
+import numpy.typing as npt
+import pytest
+import torch
+from PIL import Image, ImageCms
+from stand_ins import cpu_models  # noqa: F401
+from test_still import PICTURE, SEED, TARGET, TILES, pipeline_models, pixels_of, stand_in_dit
+
+import main as cli
+import shot
+import stills
+from media import ffmpeg
+from media.ffmpeg import MediaError
+from media.probe import IMAGE_BRANDS, IMAGE_DEMUXERS, PICTURES, image_kind
+from seedvr2x import model, picture, png, still, weights
+from seedvr2x.frames import output_size
+from seedvr2x.passes import Tiles
+from seedvr2x.peaks import GIB
+from shot import Correction, decode_shot, encode_shot, merge_windows, sample_windows
+
+LAYOUT = [(0, 1)]
+
+
+def shots_pipeline(
+    models: model.Models,
+    pixels: npt.NDArray[np.float32],
+    seed: int,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    correction: Correction | None,
+) -> npt.NDArray[np.float32]:
+    """The picture as the command line runs it, a shot of one frame at frame 0: its frame."""
+    frames = pixels[None]
+    latent = encode_shot(models, lambda count: frames, 1, TARGET, seed, tiles=encode_tiles)
+    sampled = list(sample_windows(models, latent, LAYOUT, seed))
+    written: list[npt.NDArray[np.float32]] = []
+    decode_shot(
+        models,
+        merge_windows(sampled, LAYOUT),
+        1,
+        TARGET,
+        written.append,
+        correction=correction,
+        tiles=decode_tiles,
+    )
+    assert len(written) == 1 and written[0].shape[0] == 1
+    return written[0][0]
+
+
+@pytest.mark.parametrize(
+    ("encode_tiles", "decode_tiles", "correct"),
+    [
+        (None, None, False),
+        (TILES, None, False),
+        (None, TILES, False),
+        (TILES, TILES, False),
+        (None, None, True),
+        (TILES, TILES, True),
+    ],
+)
+def test_a_picture_is_a_shot_of_one_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    correct: bool,
+    cpu_models: model.Models,  # noqa: F811
+) -> None:
+    # The shot's input copy, which the correction re-reads through ffmpeg for a job, is read from
+    # memory here (test_shot.py does the same): the frame the encode read.
+    pixels = pixels_of(7)
+
+    @contextmanager
+    def copy_reader(
+        correction: Correction, count: int
+    ) -> Generator[Callable[[int], npt.NDArray[np.float32]]]:
+        yield lambda n: pixels[None][:n]
+
+    monkeypatch.setattr(shot, "_copy_reader", copy_reader)
+    stand_in_dit(monkeypatch)
+    models = pipeline_models(cpu_models)
+    correction = (
+        Correction(Path("input.mkv"), Path("input.crc32"), PICTURE[1], PICTURE[0])
+        if correct
+        else None
+    )
+    expected = shots_pipeline(models, pixels, SEED, encode_tiles, decode_tiles, correction)
+    ours = still.upscale(
+        models,
+        pixels,
+        TARGET,
+        SEED,
+        encode_tiles=encode_tiles,
+        decode_tiles=decode_tiles,
+        correct=correct,
+    )
+    assert ours.shape == expected.shape == (48, 80, 3) and ours.dtype == expected.dtype
+    assert ours.tobytes() == expected.tobytes()
+    # Not a constant, nor the other correction's.
+    assert ours.std() > 0.01
+    other = shots_pipeline(
+        models,
+        pixels,
+        SEED,
+        encode_tiles,
+        decode_tiles,
+        None if correct else Correction(Path("i.mkv"), Path("i.crc32"), PICTURE[1], PICTURE[0]),
+    )
+    assert other.tobytes() != expected.tobytes()
+
+
+# The command ----------------------------------------------------------------------------------
+
+# The GPU the stand-in machine has free and in all, as its driver reports them
+# (torch.cuda.mem_get_info), in bytes: the 96 GB card's, which holds every plan a stand-in
+# picture asks for (test_cli_run.py's FREE and TOTAL); and the system memory its host has.
+FREE, TOTAL = round(94.5 * GIB), 96 * GIB
+HOST = 64 * GIB
+
+
+@pytest.fixture(autouse=True)
+def log_everything(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+
+
+class Machine:
+    """The stand-in machine and what it was asked: the GPU's free memory read (`asked`, the device
+    each time), the models loaded (`loads`, load_models's arguments) and the picture's passes
+    (`passes`, still.upscale's arguments, with the keywords)."""
+
+    def __init__(self, directory: Path) -> None:
+        self.models_dir = directory / "models"
+        self.models_dir.mkdir()
+        (self.models_dir / "w.safetensors").write_bytes(b"")
+        self.asked: list[torch.device] = []
+        self.loads: list[tuple[Any, ...]] = []
+        self.passes: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.free = FREE
+        self.library: Any = None  # still.upscale, as the library has it
+        self.models: Any = SimpleNamespace(
+            attention="none", device=torch.device("cpu"), enter=lambda phase: None
+        )
+
+
+def nearest(
+    models: object,
+    pixels: npt.NDArray[np.float32],
+    target: tuple[int, int],
+    seed: int,
+    *,
+    encode_tiles: Tiles | None,
+    decode_tiles: Tiles | None,
+    correct: bool,
+) -> npt.NDArray[np.float32]:
+    """A pass that takes no time: the picture's nearest-neighbour resize to the target's output
+    size, so that each output says which picture it comes from."""
+    height, width = output_size(target)
+    rows = np.arange(height) * pixels.shape[0] // height
+    columns = np.arange(width) * pixels.shape[1] // width
+    return np.ascontiguousarray(pixels[rows][:, columns])
+
+
+@pytest.fixture
+def machine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Machine:
+    """The command's machine stood in as test_cli_run.stand_in_model does for a video's: no GPU,
+    no weights, the memory read through the same function (main._free_memory) on the CPU, the
+    models' load a stand-in, and the picture's pass cheap (nearest); `use_library` puts the
+    library's own back."""
+    from seedvr2x import peaks
+
+    made = Machine(tmp_path)
+    made.library = still.upscale
+    free_memory = cli._free_memory  # pyright: ignore[reportPrivateUsage]
+
+    def read_free(device: torch.device) -> int:
+        made.asked.append(device)
+        return free_memory(torch.device("cpu"))
+
+    def load(*arguments: Any) -> Any:
+        made.loads.append(arguments)
+        return made.models
+
+    def upscale(*arguments: Any, **keywords: Any) -> npt.NDArray[np.float32]:
+        made.passes.append((arguments, keywords))
+        return nearest(*arguments, **keywords)
+
+    monkeypatch.setattr(weights, "check_models", lambda *a: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "a stand-in")
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (made.free, TOTAL))
+    monkeypatch.setattr(cli, "_free_memory", read_free)
+    monkeypatch.setattr(cli, "_host_available", lambda: HOST)
+    monkeypatch.setattr(cli, "_attention", lambda: "flash_attn_2")
+    monkeypatch.setattr(cli, "_dit_model", lambda path: peaks.FP16)
+    monkeypatch.setattr(model, "load_models", load)
+    monkeypatch.setattr(still, "upscale", upscale)
+    return made
+
+
+def use_library(made: Machine, monkeypatch: pytest.MonkeyPatch, models: model.Models) -> None:
+    """The library's own pass in the command, on `models` (a VAE of random weights and a DiT of
+    arithmetic: test_still.py's), each call recorded."""
+    real = made.library
+    stand_in_dit(monkeypatch)
+    # What main._load logs of the loaded models.
+    models.attention = "none"  # pyright: ignore[reportAttributeAccessIssue]
+    made.models = models
+
+    def upscale(*arguments: Any, **keywords: Any) -> npt.NDArray[np.float32]:
+        made.passes.append((arguments, keywords))
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(still, "upscale", upscale)
+
+
+def make_picture(
+    path: Path,
+    *,
+    bits: int = 16,
+    grey: bool = False,
+    icc: bytes | None = None,
+    orientation: int = 1,
+    seed: int = 0,
+) -> Path:
+    """A PNG of test_still.py's picture, 24 x 40, written by the library's writer."""
+    path.write_bytes(
+        png.write(
+            pixels_of(seed),
+            bits=bits,
+            grey=grey,
+            icc=icc,
+            chunks=(),
+            orientation=orientation,
+        )
+    )
+    return path
+
+
+def command(made: Machine, source: Path, output: Path, *options: str) -> list[str]:
+    """The picture's command line: its short side 48, so that 24 x 40 is TARGET, 48 x 80."""
+    return [
+        *(str(source), "-o", str(output)),
+        *("--model-dir", str(made.models_dir), "--dit-model", "w.safetensors"),
+        *("--vae-model", "w.safetensors", "--resolution", "48", "--seed", str(SEED)),
+        *(() if "--color-correction" in options else ("--color-correction", "none")),
+        *options,
+    ]
+
+
+def run(made: Machine, source: Path, output: Path, *options: str) -> int:
+    return cli.main(command(made, source, output, *options))
+
+
+def read_back(path: Path) -> picture.Picture:
+    return picture.read(path.read_bytes(), str(path))
+
+
+def srgb_profile() -> bytes:
+    return ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+
+
+# What is a picture ----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "filename"),
+    [
+        ("PNG", "p.mkv"),
+        ("JPEG", "p.mp4"),
+        ("WEBP", "p.avi"),
+        ("TIFF", "p.png"),
+        ("BMP", "p.mov"),
+        ("GIF", "p"),
+    ],
+)
+def test_a_picture_is_told_by_its_content_not_its_name(
+    machine: Machine, tmp_path: Path, name: str, filename: str
+) -> None:
+    # Every format the library reads, in a file named like a video, a picture's other suffix or
+    # none: the command goes the picture's way (the GPU asked once, one pass, one PNG written).
+    source = tmp_path / filename
+    Image.fromarray((pixels_of() * 255).astype(np.uint8)).save(source, format=name)
+    output = tmp_path / "out.png"
+    assert run(machine, source, output) == 0
+    assert len(machine.passes) == 1 and len(machine.loads) == 1
+    written = read_back(output)
+    assert written.pixels.shape == (48, 80, 3) and written.bits == 16 and not written.grey
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg to make a video")
+def test_a_video_named_png_goes_to_the_video_path(tmp_path: Path) -> None:
+    # The converse of the above, through test_cli_run's stand-in model: ffprobe reads it as the
+    # video it is, whatever its name.
+    from test_cli_run import source, stand_in_model, upscale
+
+    mp = pytest.MonkeyPatch()
+    try:
+        stand_in_model(mp.setattr)
+        renamed = source(tmp_path / "in.mkv").rename(tmp_path / "in.png")
+        assert upscale(tmp_path, renamed, "out.mkv") == 0
+        assert (tmp_path / "out.mkv").is_file()
+        assert cli.main(["verify", str(tmp_path / "out.mkv")]) == 0
+    finally:
+        mp.undo()
+
+
+def test_a_file_that_is_no_picture_goes_the_videos_way(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Not there, empty, text, a directory: none is identified (picture.identify), so each is the
+    # video path's to refuse, as before; the picture's path says nothing of it.
+    (tmp_path / "text.png").write_text("not a picture")
+    (tmp_path / "empty.png").write_bytes(b"")
+    for name in ("missing.png", "text.png", "empty.png"):
+        caplog.clear()
+        status = cli.main([str(tmp_path / name), "-o", str(tmp_path / "out"), "--format", "png"])
+        assert status == 1
+        assert "cli.stills" not in {record.name for record in caplog.records}
+
+
+# The options ----------------------------------------------------------------------------------
+
+
+def test_every_option_is_taken_or_refused_on_a_picture() -> None:
+    # A walk of the parser: an option in neither list is one a picture would ignore, which
+    # DESIGN.md forbids (Still images: "never ignored"), so a new option must be classified.
+    actions = [
+        action
+        for action in cli._parser()._actions  # pyright: ignore[reportPrivateUsage]
+        if action.dest not in ("help", "version")
+    ]
+    dests = {action.dest for action in actions}
+    assert dests == stills.TAKEN | set(stills.REFUSED)
+    assert not stills.TAKEN & set(stills.REFUSED)
+    for action in actions:
+        if action.dest in stills.REFUSED:
+            flag, why = stills.REFUSED[action.dest]
+            # The flag as the refusal says it is the option's own, and "given" (a value that is
+            # not None or False) is what the parser's default is not.
+            assert flag in action.option_strings and why
+            assert action.default in (None, False), action.dest
+
+
+def test_format_quality_and_min_segment_have_no_default_in_the_parser() -> None:
+    # So that one given is told from its default; the video path takes its defaults at its start
+    # (main._video_arguments), and each help says them.
+    parsed = cli._parser().parse_args(["in.mkv", "-o", "out"])  # pyright: ignore[reportPrivateUsage]
+    assert (parsed.format, parsed.quality, parsed.min_segment, parsed.plan) == (None,) * 4
+    cli._video_arguments(parsed)  # pyright: ignore[reportPrivateUsage]
+    assert (parsed.format, parsed.quality) == (cli.DEFAULT_FORMAT, cli.DEFAULT_QUALITY)
+    assert parsed.min_segment == cli.MIN_SEGMENT
+    assert (cli.DEFAULT_FORMAT, cli.DEFAULT_QUALITY, cli.MIN_SEGMENT) == (
+        "yuv420p10le",
+        "standard",
+        5,
+    )
+
+
+# Each refused option with a value that parses, and a word of its reason.
+GIVEN: dict[str, tuple[list[str], str]] = {
+    "cuts": (["--cuts", "cuts.txt"], "no shots"),
+    "cut_threshold": (["--cut-threshold", "0.5"], "no shots"),
+    "segment_cmd": (["--segment-cmd", "cat > {out}"], "no video segments"),
+    "quality": (["--quality", "maximum"], "encoded alone"),
+    "min_segment": (["--min-segment", "2"], "no output segments"),
+    "input_matrix": (["--input-matrix", "bt709"], "no YUV matrix"),
+    "frame_rate": (["--frame-rate", "25"], "no frame rate"),
+    "window": (["--window", "6"], "no windows"),
+    "compile": (["--compile"], "not over one picture"),
+    "until": (["--until", "07:00"], "one unit"),
+    "accept_env_change": (["--accept-env-change"], "no job to resume"),
+    "dump_frames": (["--dump-frames", "frames"], "the output file itself"),
+}
+
+
+def test_the_refused_options_are_all_given_here() -> None:
+    assert set(GIVEN) == set(stills.REFUSED)
+
+
+@pytest.mark.parametrize("dest", sorted(GIVEN))
+def test_a_refused_option_is_refused_saying_why(
+    machine: Machine,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    dest: str,
+) -> None:
+    options, why = GIVEN[dest]
+    output = tmp_path / "out.png"
+    assert run(machine, make_picture(tmp_path / "in.png"), output, *options) == 1
+    flag = stills.REFUSED[dest][0]
+    assert (
+        f"{flag}: " in caplog.text and why in caplog.text and "refused for a picture" in caplog.text
+    )
+    # Before anything else: no GPU asked, nothing loaded or written.
+    assert not machine.asked and not machine.loads and not machine.passes
+    assert not output.exists() and sorted(p.name for p in tmp_path.iterdir()) == [
+        "in.png",
+        "models",
+    ]
+
+
+def test_several_refused_options_are_all_named(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    status = run(
+        machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--cuts", "c", "--compile"
+    )
+    assert status == 1
+    assert "2 options refused for a picture: (1) --cuts: " in caplog.text
+    assert "(2) --compile: " in caplog.text
+
+
+@pytest.mark.parametrize("given", ["gbrp16le", "yuv420p10le"])
+def test_a_videos_format_is_refused_on_a_picture(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture, given: str
+) -> None:
+    status = run(machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--format", given)
+    assert status == 1
+    assert f"--format {given}: a video's format; a picture is written as a PNG" in caplog.text
+    assert not machine.asked
+
+
+def test_plan_with_a_file_is_refused_on_a_picture(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    status = run(
+        machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--plan", "cuts.txt"
+    )
+    assert status == 1
+    assert "--plan cuts.txt: a picture has no cut list to write; --plan alone says its plan" in (
+        caplog.text
+    )
+    assert not (tmp_path / "cuts.txt").exists() and not machine.asked
+
+
+def test_a_seed_out_of_range_is_refused_as_a_shot_at_frame_0(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    status = run(
+        machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--seed", "4294967295"
+    )
+    assert status == 1 and "--seed 4294967295" in caplog.text and not machine.asked
+
+
+def test_a_resolution_too_small_for_the_padding_is_refused(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    status = run(
+        machine, make_picture(tmp_path / "in.png"), tmp_path / "o.png", "--resolution", "8"
+    )
+    assert status == 1 and "too small for the padding" in caplog.text and not machine.asked
+
+
+# -o -----------------------------------------------------------------------------------------------
+
+
+def test_o_must_be_a_png_file_and_a_conversion_is_given(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = make_picture(tmp_path / "in.png")
+    assert run(machine, source, tmp_path / "photo.jpg") == 1
+    assert (
+        f"{tmp_path / 'photo.jpg'}: seedvr2x writes a picture as a PNG only: write"
+        f" {tmp_path / 'photo.png'}, then convert it, e.g. ffmpeg -i {tmp_path / 'photo.png'}"
+        f" {tmp_path / 'photo.jpg'}"
+    ) in caplog.text
+    caplog.clear()
+    # No suffix at all: the example names a format.
+    assert run(machine, source, tmp_path / "photo") == 1
+    assert f"write {tmp_path / 'photo.png'}, then convert it, e.g." in caplog.text
+    assert f"{tmp_path / 'photo.jpg'}" in caplog.text
+    assert not machine.asked and sorted(p.name for p in tmp_path.iterdir()) == ["in.png", "models"]
+
+
+def test_o_can_be_a_png_in_any_case(machine: Machine, tmp_path: Path) -> None:
+    assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "OUT.PNG") == 0
+    assert (tmp_path / "OUT.PNG").is_file()
+
+
+def test_o_is_never_a_directory_the_source_or_a_file_there(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = make_picture(tmp_path / "in.png")
+    kept = source.read_bytes()
+    (tmp_path / "dir.png").mkdir()
+    (tmp_path / "there.png").write_bytes(b"mine")
+    (tmp_path / "empty.png").write_bytes(b"")
+    (tmp_path / "link.png").symlink_to(source)
+    (tmp_path / "dangling.png").symlink_to(tmp_path / "nowhere")
+    cases = {
+        "dir.png": "a directory; a picture goes to a new .png file",
+        "in.png": "the source itself; choose another -o",
+        "link.png": "the source itself; choose another -o",
+        "there.png": "a file already there, not replaced; remove it, or choose another -o",
+        "empty.png": "a file already there, not replaced",
+        "dangling.png": "a file already there, not replaced",
+        "missing/out.png": "not a directory, so out.png can't be written there",
+    }
+    for name, said in cases.items():
+        caplog.clear()
+        assert run(machine, source, tmp_path / name) == 1, name
+        assert said in caplog.text, name
+    # Nothing replaced, nothing asked.
+    assert source.read_bytes() == kept
+    assert (tmp_path / "there.png").read_bytes() == b"mine" and not (
+        tmp_path / "empty.png"
+    ).stat().st_size
+    assert (tmp_path / "dangling.png").is_symlink() and not (tmp_path / "nowhere").exists()
+    assert not machine.asked and not list(tmp_path.glob("*.partial"))
+
+
+def test_a_png_is_written_whole_and_nothing_is_left_on_a_failure(
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import errno
+
+    from media import files
+
+    source = make_picture(tmp_path / "in.png")
+    output = tmp_path / "out.png"
+    seen: list[bool] = []
+    real = files.replace_whole
+
+    def replace(partial: Path, path: Path, stale: Path | None = None) -> None:
+        # The data is in a partial file beside the name, not yet at it.
+        seen.append(partial.is_file() and not path.exists())
+        real(partial, path, stale)
+
+    monkeypatch.setattr(files, "replace_whole", replace)
+    assert run(machine, source, output) == 0 and seen == [True]
+    assert not list(tmp_path.glob("*.partial"))
+    output.unlink()
+
+    def full(partial: Path, path: Path, stale: Path | None = None) -> None:
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr(files, "replace_whole", full)
+    assert run(machine, source, output) == 1
+    assert f"{output}: not written: No space left on device" in caplog.text
+    assert not output.exists() and not list(tmp_path.glob("*.partial"))
+
+    def stopped(partial: Path, path: Path, stale: Path | None = None) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(files, "replace_whole", stopped)
+    assert run(machine, source, output) == 130
+    assert not output.exists() and not list(tmp_path.glob("*.partial"))
+
+
+def test_a_file_that_came_during_the_run_is_not_replaced(
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    output = tmp_path / "out.png"
+
+    def upscale(*arguments: Any, **keywords: Any) -> npt.NDArray[np.float32]:
+        output.write_bytes(b"another program's")
+        return nearest(*arguments, **keywords)
+
+    monkeypatch.setattr(still, "upscale", upscale)
+    assert run(machine, make_picture(tmp_path / "in.png"), output) == 1
+    assert "written to since it was checked, by another program: not replaced" in caplog.text
+    assert output.read_bytes() == b"another program's"
+
+
+# The video path's new refusals ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["x.png", "X.PNG", "frames.Png"])
+def test_a_video_with_a_png_o_is_refused_naming_format_png_and_a_directory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    # Before ffmpeg and the file are looked at: the source need not exist.
+    status = cli.main([str(tmp_path / "film.mkv"), "-o", str(tmp_path / name)])
+    assert status == 1
+    assert (
+        f"{tmp_path / name}: a .png file is a picture's output, and a video's PNG frames go in a"
+        " directory, one per frame: --format png, with -o naming a new or empty directory"
+    ) in caplog.text
+    assert not (tmp_path / name).exists()
+
+
+def test_png8_is_refused_on_a_video(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    (tmp_path / "film.mkv").write_bytes(b"not a picture")
+    status = cli.main([str(tmp_path / "film.mkv"), "-o", str(tmp_path / "out"), "--format", "png8"])
+    assert status == 1
+    assert (
+        "--format png8: a video's PNG segments are 16-bit; png8, an 8-bit PNG, is for a still"
+        " picture"
+    ) in caplog.text
+
+
+def test_plan_alone_is_refused_on_a_video(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    status = cli.main([str(tmp_path / "film.mkv"), "-o", str(tmp_path / "out"), "--plan"])
+    assert status == 1
+    assert "--plan alone: a video's plan writes its cut list, to the FILE it needs" in caplog.text
+
+
+def test_the_formats_read_as_pictures_are_the_librarys() -> None:
+    names = {"WEBP": "WebP"}
+    said = [names.get(name, name) for name in picture.FORMATS]
+    assert PICTURES == f"{', '.join(said[:-1])} and {said[-1]}"
+
+
+@pytest.mark.parametrize(
+    ("container", "kind"),
+    [
+        ({"format_name": "png_pipe"}, "read by ffprobe as png_pipe"),
+        ({"format_name": "jpegxl_pipe"}, "read by ffprobe as jpegxl_pipe"),
+        ({"format_name": "exr_pipe"}, "read by ffprobe as exr_pipe"),
+        ({"format_name": "image2"}, "read by ffprobe as image2"),
+        ({"format_name": "gif"}, "read by ffprobe as gif"),
+        (
+            {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "tags": {"major_brand": "avif", "compatible_brands": "avifmif1miafMA1A"},
+            },
+            "an MP4-family file of brand avif",
+        ),
+        (
+            {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "tags": {"major_brand": "mif1", "compatible_brands": "mif1miafheic"},
+            },
+            "an MP4-family file of brand mif1",
+        ),
+        # A video whose writer lists a sequence or image brand among its compatible ones is a
+        # video: only the major brand tells an image (media/probe.image_kind).
+        (
+            {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "tags": {"major_brand": "isom", "compatible_brands": "isomiso2mif1"},
+            },
+            "",
+        ),
+        (
+            {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "tags": {"major_brand": "mp42", "compatible_brands": "mp42isomavc1msf1"},
+            },
+            "",
+        ),
+        (
+            {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "tags": {"major_brand": "isom", "compatible_brands": "isomhevchevx"},
+            },
+            "",
+        ),
+        (
+            {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "tags": {"major_brand": "heic", "compatible_brands": "mif1heic"},
+            },
+            "an MP4-family file of brand heic",
+        ),
+        ({"format_name": "matroska,webm"}, ""),
+        ({"format_name": "yuv4mpegpipe"}, ""),
+        ({"format_name": "mpegts"}, ""),
+        ({"format_name": "avi"}, ""),
+        (
+            {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "tags": {"major_brand": "isom", "compatible_brands": "isomiso2avc1mp41"},
+            },
+            "",
+        ),
+        (
+            {
+                "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+                "tags": {"major_brand": "qt  ", "compatible_brands": ""},
+            },
+            "",
+        ),
+    ],
+)
+def test_the_image_formats_ffprobe_reads_are_told_from_videos(
+    container: dict[str, Any], kind: str
+) -> None:
+    assert image_kind(container) == kind
+    assert all(len(brand) == 4 for brand in IMAGE_BRANDS)
+    assert not any(name.endswith("_pipe") for name in IMAGE_DEMUXERS)
+
+
+def encoded(tmp_path: Path, name: str, *options: str) -> Path:
+    """A one-frame file made by ffmpeg with `options`, or a skip where this build can't."""
+    path = tmp_path / name
+    made = subprocess.run(
+        [
+            *("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=25"),
+            *("-frames:v", "2", *options, str(path)),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if made.returncode != 0 or not path.is_file():
+        pytest.skip(f"this ffmpeg can't make {name}: {made.stderr.strip()[:200]}")
+    return path
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg to make the files")
+@pytest.mark.parametrize(
+    ("name", "options", "said"),
+    [
+        ("p.jxl", ("-frames:v", "1", "-c:v", "libjxl"), "jpegxl_pipe"),
+        ("p.avif", ("-frames:v", "1", "-c:v", "libaom-av1", "-still-picture", "1"), "brand avif"),
+        ("avif.mp4", ("-c:v", "mpeg4", "-brand", "avif"), "brand avif"),
+        ("heic.mp4", ("-c:v", "mpeg4", "-brand", "heic"), "brand heic"),
+    ],
+)
+def test_an_image_format_that_is_no_picture_is_refused_by_the_video_path(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    name: str,
+    options: tuple[str, ...],
+    said: str,
+) -> None:
+    # Made by ffmpeg where this build can, or a file whose brand says so: refused naming the
+    # formats read as pictures, before ffmpeg could run it as a video of one frame.
+    if not _has_ffmpeg():
+        pytest.skip("needs ffmpeg 7.1 or later with the filters seedvr2x checks")
+    path = encoded(tmp_path, name, *options)
+    assert cli.main([str(path), "-o", str(tmp_path / "out")]) == 1
+    assert "an image file" in caplog.text and said in caplog.text
+    assert "it reads PNG, JPEG, WebP, TIFF, BMP and GIF as pictures" in caplog.text
+    assert not (tmp_path / "out").exists()
+
+
+def _has_ffmpeg() -> bool:
+    try:
+        ffmpeg.check(("png",))
+    except MediaError:
+        return False
+    return True
+
+
+# The run --------------------------------------------------------------------------------------
+
+
+def test_the_library_makes_the_png_the_command_writes(
+    machine: Machine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    cpu_models: model.Models,  # noqa: F811
+) -> None:
+    # The command on the library's own pass (a VAE of random weights, a DiT of arithmetic): the
+    # file is png.write of what still.upscale gives for the plan's tiles, at 16 bits, the
+    # colour correction on, and the pass is the one the command planned for the picture.
+    models = pipeline_models(cpu_models)
+    use_library(machine, monkeypatch, models)
+    source = make_picture(tmp_path / "in.png", seed=3)
+    output = tmp_path / "out.png"
+    assert run(machine, source, output, "--color-correction", "split") == 0
+    ((arguments, keywords),) = machine.passes
+    pixels, target, seed = arguments[1:4]
+    assert target == TARGET and seed == SEED and keywords["correct"] is True
+    again = still.upscale(models, pixels, target, seed, **keywords)
+    expected = png.write(again, bits=16, grey=False, icc=None, chunks=(), orientation=1)
+    assert output.read_bytes() == expected
+    # The pixels are the model's, not the picture's.
+    assert not np.array_equal(
+        read_back(output).pixels, nearest(models, pixels, target, seed, **keywords)
+    )
+    assert read_back(output).pixels.shape == (48, 80, 3)
+    # One load, as the plan placed the models, the shot detector's file never asked for.
+    (loaded,) = machine.loads
+    assert loaded[0].name == "w.safetensors" and loaded[1].name == "w.safetensors"
+    assert "transnetv2" not in caplog.text.lower()
+    # The lines a user reads.
+    lines = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert any(line.startswith("plan: picture: 80x48, padded to 80x80") for line in lines)
+    assert any(
+        line.startswith("upscaled in ") and f"wrote {output}: 80x48, 16-bit RGB" in line
+        for line in lines
+    )
+
+
+def test_png8_writes_8_bits_rounded_to_the_nearest_code(machine: Machine, tmp_path: Path) -> None:
+    source = make_picture(tmp_path / "in.png", seed=4)
+    sixteen, eight = tmp_path / "16.png", tmp_path / "8.png"
+    assert run(machine, source, sixteen) == 0
+    assert run(machine, source, eight, "--format", "png8") == 0
+    assert (read_back(sixteen).bits, read_back(eight).bits) == (16, 8)
+    # The same pixels, the 8-bit one the nearest code of the 16-bit one's (what the pass made).
+    made = nearest(
+        None,
+        read_back(source).pixels,
+        TARGET,
+        SEED,
+        encode_tiles=None,
+        decode_tiles=None,
+        correct=False,
+    )
+    assert eight.read_bytes() == png.write(
+        made, bits=8, grey=False, icc=None, chunks=(), orientation=1
+    )
+    with Image.open(eight) as image:
+        assert image.mode == "RGB" and image.size == (80, 48)
+
+
+def test_an_8_bit_source_is_written_at_16_bits_by_default(machine: Machine, tmp_path: Path) -> None:
+    # All the model made (DESIGN.md, Still images, Output), whatever the source's depth.
+    source = tmp_path / "in.jpg"
+    Image.fromarray((pixels_of() * 255).astype(np.uint8)).save(source, quality=95)
+    assert run(machine, source, tmp_path / "out.png") == 0
+    assert read_back(tmp_path / "out.png").bits == 16
+
+
+def test_a_grey_picture_comes_back_grey(machine: Machine, tmp_path: Path) -> None:
+    source = tmp_path / "grey.png"
+    Image.fromarray((pixels_of()[..., 0] * 255).astype(np.uint8), "L").save(source)
+    assert read_back(source).grey
+    for options, bits, mode in (((), 16, "I;16"), (("--format", "png8"), 8, "L")):
+        output = tmp_path / f"out{bits}.png"
+        assert run(machine, source, output, *options) == 0
+        written = read_back(output)
+        assert written.grey and written.bits == bits
+        with Image.open(output) as image:
+            assert image.mode == mode and image.size == (80, 48)
+
+
+def test_the_profile_and_the_orientation_are_carried(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    profile = srgb_profile()
+    source = make_picture(tmp_path / "in.png", icc=profile, orientation=6)
+    output = tmp_path / "out.png"
+    assert run(machine, source, output) == 0
+    written = read_back(output)
+    # Processed as stored (not rotated): 80 wide, 48 high, the orientation carried unchanged.
+    assert written.icc == profile and written.orientation == 6
+    assert written.pixels.shape == (48, 80, 3)
+    with Image.open(output) as image:
+        assert image.info["icc_profile"] == profile and image.getexif()[0x0112] == 6
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("upscaled in"))
+    assert line.endswith(
+        f"wrote {output}: 80x48, 16-bit RGB, with its ICC profile and its orientation, 6"
+    )
+
+
+def test_an_opaque_alpha_plane_is_dropped_and_said(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = tmp_path / "rgba.png"
+    rgba = np.dstack([(pixels_of() * 255).astype(np.uint8), np.full(PICTURE, 255, np.uint8)])
+    Image.fromarray(rgba, "RGBA").save(source)
+    assert run(machine, source, tmp_path / "out.png") == 0
+    assert (
+        f"{source}: its alpha plane is opaque everywhere, left out: the picture is unchanged"
+        in (caplog.text)
+    )
+    rgba[3, 3, 3] = 254
+    Image.fromarray(rgba, "RGBA").save(source)
+    caplog.clear()
+    (tmp_path / "out.png").unlink()
+    assert run(machine, source, tmp_path / "out.png") == 1
+    assert "has transparent pixels, and seedvr2x refuses it" in caplog.text
+    assert not (tmp_path / "out.png").exists()
+
+
+@pytest.mark.parametrize("frames", [2])
+def test_a_picture_the_library_refuses_is_refused_as_a_job_is(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture, frames: int
+) -> None:
+    source = tmp_path / "anim.gif"
+    shown = [Image.fromarray((pixels_of(k) * 255).astype(np.uint8)) for k in range(frames)]
+    shown[0].save(source, save_all=True, append_images=shown[1:])
+    assert run(machine, source, tmp_path / "out.png") == 1
+    assert f"{source} holds {frames} frames, and seedvr2x reads one picture" in caplog.text
+    assert not machine.asked and not (tmp_path / "out.png").exists()
+
+
+def test_a_second_image_in_a_jpeg_is_read_as_the_first_and_said(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = tmp_path / "pair.jpg"
+    first = Image.fromarray((pixels_of() * 255).astype(np.uint8))
+    first.save(source, format="MPO", save_all=True, append_images=[first.copy()])
+    assert run(machine, source, tmp_path / "out.png") == 0
+    assert "2 images in the file" in caplog.text and "the first is read, 1 left out" in caplog.text
+
+
+def test_the_librarys_info_lines_reach_the_user_on_stderr(tmp_path: Path) -> None:
+    # Through main._logging in a process of its own (pytest's own handler would stand in the way
+    # in this one): the library's INFO line from seedvr2x.picture, said before the model files
+    # (an empty directory here) are asked for.
+    source = tmp_path / "rgba.png"
+    rgba = np.dstack([(pixels_of() * 255).astype(np.uint8), np.full(PICTURE, 255, np.uint8)])
+    Image.fromarray(rgba, "RGBA").save(source)
+    (tmp_path / "models").mkdir()
+    done = subprocess.run(
+        [
+            Path(sys.executable).with_name("seedvr2x"),
+            *(
+                str(source),
+                "-o",
+                str(tmp_path / "out.png"),
+                "--model-dir",
+                str(tmp_path / "models"),
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")},
+    )
+    assert f"{source}: its alpha plane is opaque everywhere, left out" in done.stderr
+    assert done.returncode == 1 and "Traceback" not in done.stderr
+
+
+def test_no_ffmpeg_is_needed(
+    machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    assert shutil.which("ffmpeg") is None and shutil.which("ffprobe") is None
+    source = make_picture(tmp_path / "in.png")
+    assert run(machine, source, tmp_path / "out.png") == 0
+    # And the video path, on the same PATH, is refused for the build it needs.
+    (tmp_path / "film.mkv").write_bytes(b"not a picture")
+    assert cli.main([str(tmp_path / "film.mkv"), "-o", str(tmp_path / "v")]) == 1
+
+
+# --plan ---------------------------------------------------------------------------------------
+
+
+def test_plan_says_the_pictures_plan_and_loads_and_writes_nothing(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = make_picture(tmp_path / "in.png")
+    output = tmp_path / "out.png"
+    assert run(machine, source, output, "--plan") == 0
+    assert not output.exists() and sorted(p.name for p in tmp_path.iterdir()) == [
+        "in.png",
+        "models",
+    ]
+    assert not machine.loads and not machine.passes
+    # The memory was read, as a video's --plan reads it, to plan.
+    assert machine.asked
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("plan: ")]
+    assert lines[0] == "plan: card: a stand-in"
+    for opening in (
+        "memory: ",
+        "bound: pictures within 80x48",
+        "attention: ",
+        "blocks swapped: ",
+        "the DiT's phase: ",
+        "system memory: ",
+        "picture: 80x48, padded to 80x80",
+        "encode: ",
+        "decode: ",
+    ):
+        assert any(line.startswith(f"plan: {opening}") for line in lines), opening
+    # The same plan as a run's: the run logs the lines --plan does, then loads.
+    caplog.clear()
+    assert run(machine, source, output) == 0
+    again = [r.getMessage() for r in caplog.records if r.getMessage().startswith("plan: ")]
+    assert again == lines and len(machine.loads) == 1
+
+
+def test_a_plan_refused_for_the_memory_is_a_refusal(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    machine.free = 2 * GIB
+    source = make_picture(tmp_path / "in.png")
+    assert run(machine, source, tmp_path / "out.png") == 1
+    assert "GiB" in caplog.text and not machine.loads and not (tmp_path / "out.png").exists()
+    caplog.clear()
+    assert run(machine, source, tmp_path / "out.png", "--plan") == 1
+    assert not machine.loads
+
+
+def test_the_pins_are_the_pictures(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    source = make_picture(tmp_path / "in.png")
+    # A swap count above the DiT's blocks is a pin that is no pin (still_plan.PlanRefusal).
+    assert run(machine, source, tmp_path / "o.png", "--swap-blocks", "99") == 1
+    assert "--swap-blocks 99: the DiT has 36 blocks" in caplog.text
+    assert run(machine, source, tmp_path / "o.png", "--swap-blocks", "36", "--plan") == 0
+    assert "blocks swapped: 36 of the DiT's 36, pinned by --swap-blocks" in caplog.text
+
+
+@pytest.mark.parametrize("phase", ["encode", "decode"])
+def test_a_tile_covering_the_pictures_padded_frame_is_refused_in_the_videos_words(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture, phase: str
+) -> None:
+    # A 1920x1080 output pads to 1920x1104 (frames.padded_size): a tile of 1920 px covers it. The
+    # bound's frame (the odd sides' rounding up) is larger, so still_plan.plan alone took the pin
+    # and the pass ran untiled without saying so.
+    source = tmp_path / "hd.png"
+    Image.new("RGB", (1920, 1080), (30, 60, 90)).save(source)
+    option = f"--{phase}-tile"
+    assert run(machine, source, tmp_path / "o.png", option, "1920", "--resolution", "1080") == 1
+    assert (
+        f"{option} 1920: a tile of 1920 px covers the whole padded frame, 1920x1104:"
+        f" {option} 0 pins an untiled {phase}"
+    ) in caplog.text
+    assert not machine.loads and not machine.passes and not (tmp_path / "o.png").exists()
+    # A smaller tile and the untiled pin are taken.
+    caplog.clear()
+    for pin in ("0", "1024"):
+        assert (
+            run(machine, source, tmp_path / "o.png", option, pin, "--resolution", "1080", "--plan")
+            == 0
+        )
+    assert "covers the whole padded frame" not in caplog.text
+
+
+def test_the_host_figure_counts_the_pictures_own_arrays(
+    machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An 8K output (7680x4320) from a small picture; --format png8 and the default 16 bits.
+    from planner import HOST_RESIDENT
+    from seedvr2x import still_plan
+
+    source = tmp_path / "small.png"
+    Image.new("RGB", (160, 90), (30, 60, 90)).save(source)
+    processes: list[int] = []
+    real = still_plan.plan
+
+    def spy(*arguments: Any, **keywords: Any) -> Any:
+        processes.append(keywords["process"])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(still_plan, "plan", spy)
+    out_h, out_w = 4320, 7680
+    samples = out_h * out_w * 3
+    for options, width in (((), 2), (("--format", "png8"), 1)):
+        raw = samples * width
+        expected = HOST_RESIDENT + 90 * 160 * 3 * 4 + 2 * samples * 4 + raw + 2 * raw
+        assert (
+            run(machine, source, tmp_path / "o.png", "--resolution", "4320", "--plan", *options)
+            == 0
+        )
+        assert processes[-1] == expected, options
+
+
+# What goes wrong in the pass ------------------------------------------------------------------
+
+
+def test_nan_in_the_decode_writes_nothing(
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def upscale(*arguments: Any, **keywords: Any) -> npt.NDArray[np.float32]:
+        raise still.NonFinite("the picture's decode holds NaN or inf: 3 of 11520 values")
+
+    monkeypatch.setattr(still, "upscale", upscale)
+    assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "out.png") == 1
+    assert "holds NaN or inf: 3 of 11520 values, so no picture is written" in caplog.text
+    assert not (tmp_path / "out.png").exists() and not list(tmp_path.glob("*.partial"))
+
+
+def test_the_gpus_memory_refused_in_the_pass_writes_nothing(
+    machine: Machine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def upscale(*arguments: Any, **keywords: Any) -> npt.NDArray[np.float32]:
+        raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB.")
+
+    monkeypatch.setattr(still, "upscale", upscale)
+    assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "out.png") == 1
+    assert (
+        "the GPU's memory was refused: CUDA out of memory. Tried to allocate 2.00 GiB"
+        in caplog.text
+    )
+    assert "nothing is written" in caplog.text and not (tmp_path / "out.png").exists()
+
+
+def test_a_stop_in_the_pass_exits_as_a_jobs_does(
+    machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def upscale(*arguments: Any, **keywords: Any) -> npt.NDArray[np.float32]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(still, "upscale", upscale)
+    assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "out.png") == 130
+    assert not (tmp_path / "out.png").exists()
+
+
+def test_the_default_models_are_asked_for_without_the_shot_detector(
+    machine: Machine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from seedvr2x import pull
+
+    asked: list[dict[str, Any]] = []
+    real = pull.resolve
+
+    def resolve(*arguments: Any, **keywords: Any) -> Any:
+        asked.append(keywords)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(pull, "resolve", resolve)
+    assert run(machine, make_picture(tmp_path / "in.png"), tmp_path / "out.png") == 0
+    assert asked == [{"detector": False}]

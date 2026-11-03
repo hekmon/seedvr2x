@@ -1,0 +1,449 @@
+"""The command's path for a still picture (DESIGN.md, Still images; Repository and apps, step 3):
+a file the library's reader identifies by its content as a picture (main._picture) is read, planned,
+upscaled by the library's one-picture pass and written as a PNG, none of a job's machinery (shots,
+windows, segments, manifest, resume) and no ffmpeg. main.py branches here before its build check.
+
+The module imports no torch at its top (main imports it for the parser's constants, and the
+refusals that need no GPU come before anything loads): the picture's run imports it, after
+memory.startup chose the allocator, as main._run does. What main reads of the machine
+(the memory free, the host's, the attention backend, the DiT's format, the load) is main's, handed
+in as `Reads`, so that one function replaces each for a test as it does for a video's run."""
+
+import logging
+import os
+import shlex
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from stop import terminable
+
+if TYPE_CHECKING:
+    import argparse
+
+    import torch
+
+    from seedvr2x.model import Models
+    from seedvr2x.passes import ModelPlan
+    from seedvr2x.picture import Picture
+    from seedvr2x.pull import ModelFiles
+    from seedvr2x.weights import Architecture
+
+logger = logging.getLogger("cli.stills")
+
+# --format's value for a picture's 8-bit PNG (DESIGN.md, Still images, Output): the picture's
+# `png` is 16-bit, all the model made. It is no writer's format (media.writer.FORMATS), a video
+# refuses it (main._video_arguments).
+PNG8 = "png8"
+
+# What --plan's value is when the option is given alone (main._parser): a picture's plan, with no
+# file, a video's cut list needing one. Told by identity, never by its content.
+BARE_PLAN = Path("(--plan alone)")
+
+# The options a picture takes, by their dest in the parser. Every other option is in REFUSED, and
+# tests/test_still_cli.py walks the parser to fail on one that is in neither, so that a new option
+# can't slip through unclassified (DESIGN.md: "Every other is refused, saying why, never ignored").
+# --format is taken for png and png8 alone (_bits), --plan alone (_check_options).
+TAKEN = frozenset(
+    {
+        "input",
+        "output",
+        "format",
+        "model_dir",
+        "dit_model",
+        "vae_model",
+        "resolution",
+        "plan",
+        "seed",
+        "color_correction",
+        "input_sar",
+        "encode_tile",
+        "decode_tile",
+        "swap_blocks",
+        "verbose",
+    }
+)
+
+# The options a picture refuses, by dest: the flag as the user writes it, and why. "Given" is told
+# from the parser's default, None for each of these, False for a flag (a store_true).
+REFUSED = {
+    "cuts": ("--cuts", "a picture has no shots to cut"),
+    "cut_threshold": ("--cut-threshold", "a picture has no shots, so no shot detector runs on it"),
+    "segment_cmd": (
+        "--segment-cmd",
+        "a picture is one PNG file, with no video segments for a command to encode: convert the"
+        " PNG afterwards",
+    ),
+    "quality": (
+        "--quality",
+        "a shot's repeated runs are for video; a picture is encoded alone, once",
+    ),
+    "min_segment": ("--min-segment", "a picture has no output segments to merge"),
+    "input_matrix": (
+        "--input-matrix",
+        "a picture's decoder gives its RGB, with no YUV matrix to name",
+    ),
+    "frame_rate": ("--frame-rate", "a picture has no frame rate"),
+    "window": ("--window", "a picture is one latent in the DiT, with no windows to cap"),
+    "compile": (
+        "--compile",
+        "the VAE's compilation pays back over a long job's frames, not over one picture",
+    ),
+    "until": ("--until", "a picture is one unit, with no gap between units to stop in"),
+    "accept_env_change": (
+        "--accept-env-change",
+        "a picture keeps no job to resume, so no environment to compare",
+    ),
+    "dump_frames": ("--dump-frames", "the picture is the output file itself"),
+}
+
+
+@dataclass(frozen=True)
+class Reads:
+    """What a picture's run reads of the machine and does with the models, main's own functions
+    (main._reads), as the video's run uses them."""
+
+    free: Callable[["torch.device"], int]  # main._free_memory: the GPU's free memory, in bytes
+    host: Callable[[], int | None]  # main._host_available: the system memory available, in bytes
+    attention: Callable[[], str]  # main._attention: the DiT's attention backend (peaks')
+    dit_model: Callable[[Path], "Architecture"]  # main._dit_model: the DiT file's format
+    # main._load(model_files, device, model plan, reserve, kept): the models, loaded, with the
+    # seconds that took; None once a refusal is logged.
+    load: Callable[
+        ["ModelFiles", "torch.device", "ModelPlan", int, str], "tuple[Models, float] | None"
+    ]
+    refused: Callable[[BaseException], str]  # main._refused: the GPU's memory refused, in words
+    out_of_memory: Callable[[], tuple[type[BaseException], ...]]  # main._out_of_memory
+
+
+def run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
+    """Upscale the picture args.input (of format `kind`, told by its content) to the PNG
+    args.output, or with --plan say the picture's plan and stop; the exit status. Every refusal is
+    logged here, one line and status 1, as a job's are."""
+    from media.ffmpeg import MediaError
+    from seedvr2x.errors import Refusal
+
+    try:
+        with terminable():
+            return _run(args, kind, reads)
+    except (MediaError, Refusal) as error:
+        logger.error("%s", error)
+        return 1
+    except reads.out_of_memory() as error:
+        # The GPU's memory refused before the models loaded, where the run first works on the
+        # device (the first allocation and the warm-up the free memory is read with): another
+        # program holding the card (main._run).
+        logger.error("%s, before the models loaded: nothing was run", reads.refused(error))
+        return 1
+
+
+def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
+    from fractions import Fraction
+
+    from job import JobError, Shot, check_seed
+    from seedvr2x import memory, picture, png, pull, still_plan
+    from seedvr2x.frames import check_target, output_size, target_size
+    from seedvr2x.weights import check_models
+
+    # Refused first, before the file is read and before anything else is asked of the machine:
+    # no ffmpeg, no torch, no GPU.
+    _check_options(args)
+    bits = _bits(args)
+    # The seed as a shot of one frame at frame 0 is seeded (still.upscale doesn't check it): the
+    # seed plus the encode's offset under numz's limit.
+    check_seed(args.seed, [Shot(0, 1)])
+    output: Path = args.output
+    _check_output(output, args.input)
+    name = str(args.input)
+    logger.debug("%s: a %s picture by its content", name, kind)
+    # The file whole, then the picture: the library takes bytes, never a path (picture.read).
+    try:
+        data = args.input.read_bytes()
+    except OSError as error:
+        raise JobError(f"{name}: {error.strerror}") from None
+    pic = picture.read(data, name)
+    del data
+    # Processed as stored, the EXIF orientation carried to the output and not applied
+    # (DESIGN.md, Still images, Orientation): the target is the stored picture's, at the sample
+    # aspect --input-sar gives, else square pixels.
+    height, width = pic.pixels.shape[:2]
+    target = target_size(width, height, args.input_sar or Fraction(1), args.resolution)
+    check_target(target, args.resolution)
+    out_height, out_width = output_size(target)
+    _check_tile_pins(args, target)
+    logger.info("%s", _read_said(name, pic, (out_width, out_height), bits))
+    # The model files, as a video's run has them, minus the shot detector, which a picture never
+    # runs: not fetched, its file not checked. The header check first, then seedvr2x's own files
+    # by their pins (main._run).
+    model_files = pull.resolve(args.model_dir, args.dit_model, args.vae_model, detector=False)
+    dit, vae = (None if file.absent else file.path for file in (model_files.dit, model_files.vae))
+    check_models(dit, vae, pull.advice(model_files), None)
+    pull.check_pinned(model_files)
+    # The allocator, set before torch is imported (seedvr2x/memory.py), where the run first takes
+    # the GPU: one refused before, for its picture, its settings or its model files, asks the card
+    # nothing.
+    memory.startup()
+    import torch
+
+    if not torch.cuda.is_available():
+        raise JobError("no CUDA device")
+    if not torch.cuda.is_bf16_supported():
+        raise JobError("the GPU doesn't compute in bfloat16, numz's pipeline dtype")
+    device = torch.device("cuda", 0)
+    memory.hold(device, first=True)
+    free = memory.reading(reads.free(device))
+    host = reads.host()
+    if host is None:
+        logger.debug("the system memory available was not read: the plan counts on none")
+    else:
+        logger.debug(
+            "the plan counts on %.2f GiB (%d bytes) of system memory available",
+            host / memory.GIB,
+            host,
+        )
+    assert dit is not None, "a plan made loads its models"
+    pins = still_plan.Pins(args.encode_tile, args.decode_tile, args.swap_blocks)
+    split = args.color_correction == "split"
+    # The plan for this picture, made for a bound that is its own output: the long and short
+    # sides, even as an output size always is (still_plan.plan). PROVISIONAL (impl-still,
+    # 2026-11-03: DESIGN.md, Still images, "Measured before it ships"): the process's resident
+    # system memory is HOST_RESIDENT, a job's measure, plus the picture's own arrays (_process,
+    # counted from their sizes); the tiled passes' scratch is the plan's own.
+    plan = still_plan.plan(
+        (max(out_height, out_width), min(out_height, out_width)),
+        free,
+        host,
+        process=_process(pic.pixels.shape[:2], (out_height, out_width), bits),
+        attention=reads.attention(),
+        dit_model=reads.dit_model(dit),
+        split=split,
+        pins=pins,
+    )
+    logger.info("plan: card: %s", torch.cuda.get_device_name(device))
+    for line in still_plan.said(plan, target):
+        logger.info("%s", line)
+    if args.plan is not None:
+        # No upscale, as a video's --plan: the models are not loaded, nothing is written.
+        return 0
+    loaded = reads.load(model_files, device, plan.models, plan.reading.reserve, "")
+    if loaded is None:
+        return 1
+    models, _ = loaded
+    tiles = still_plan.tiles(plan, target)
+    started = time.monotonic()
+    out = _upscaled(models, pic, target, args.seed, tiles, split, reads)
+    if out is None:
+        return 1
+    data = png.write(
+        out,
+        bits=bits,
+        grey=pic.grey,
+        icc=pic.icc,
+        chunks=pic.chunks,
+        orientation=pic.orientation,
+    )
+    del out
+    _write(output, data)
+    from seedvr2x.clock import spent
+
+    logger.info(
+        "upscaled in %.1f s; wrote %s: %dx%d, %d-bit %s%s",
+        spent(time.monotonic() - started),
+        output,
+        out_width,
+        out_height,
+        bits,
+        "grey" if pic.grey else "RGB",
+        _kept(pic),
+    )
+    return 0
+
+
+def _upscaled(
+    models: "Models",
+    pic: "Picture",
+    target: tuple[int, int],
+    seed: int,
+    tiles: Any,
+    split: bool,
+    reads: Reads,
+) -> Any:
+    """The picture through the models (still.upscale), (H', W', 3) float32 on the CPU; None once
+    a refusal is logged: the GPU's memory refused, or NaN or inf in the decode."""
+    from seedvr2x import memory, still
+
+    try:
+        # A held run warns where torch refused allocations during the pass (memory.watched).
+        with memory.watched(models.device, "the picture's passes", "pixels"):
+            return still.upscale(
+                models,
+                pic.pixels,
+                target,
+                seed,
+                encode_tiles=tiles.encode,
+                decode_tiles=tiles.decode,
+                correct=split,
+            )
+    except still.NonFinite as error:
+        logger.error("%s, so no picture is written", error)
+    except reads.out_of_memory() as error:
+        # The plan passed the GPU's memory: refused by the driver, or by torch where seedvr2x
+        # holds it under a driver that would give system memory instead (seedvr2x/memory.py).
+        logger.error("%s; nothing is written", reads.refused(error))
+    return None
+
+
+def _process(size: tuple[int, ...], output: tuple[int, int], bits: int) -> int:
+    """The process's own resident system memory for a picture of `size` (height, width) made into
+    `output` (height, width) written at `bits`, in bytes: a video run's HOST_RESIDENT (planner.py,
+    2.4 GiB over 6 shots) plus the picture's own arrays, counted from their sizes. PROVISIONAL,
+    unmeasured (DESIGN.md, Still images, "Measured before it ships"): the input pixels, (H, W, 3)
+    float32; the output and the decode's copy of it on the CPU, 2 of (H', W', 3) float32; the
+    samples quantised for the PNG, (H', W', 3) at 2 bytes (16 bits) or 1; and the PNG's bytes held
+    twice at most, 2 times the raw size, the worst case of zlib on noise (a grey picture's
+    are a third of that, counted as colour all the same)."""
+    from planner import HOST_RESIDENT
+
+    height, width = size
+    out_height, out_width = output
+    samples = out_height * out_width * 3
+    raw = samples * (bits // 8)
+    return HOST_RESIDENT + height * width * 3 * 4 + 2 * samples * 4 + raw + 2 * raw
+
+
+def _check_tile_pins(args: "argparse.Namespace", target: tuple[int, int]) -> None:
+    """Refuse a tile pin that covers the picture's own padded frame, as a video's planner does
+    (planner.plan), in its words: a covering tile is no tiling, and the tiled passes would run it
+    untiled without saying so. still_plan.plan refuses a pin covering the bound's largest frame,
+    where a bound's smaller pictures take a covering pin as the untiled pass; the command's bound
+    is its own picture's output, which a pin covering the picture alone (the bound's frame has
+    the odd sides rounded up) must not slip past."""
+    from seedvr2x import peaks, still_plan
+    from seedvr2x.frames import padded_size
+    from seedvr2x.passes import Tiles
+
+    height, width = padded_size(target)
+    for phase, pin in (("encode", args.encode_tile), ("decode", args.decode_tile)):
+        if pin and peaks.covers((height, width), Tiles(pin)):
+            raise still_plan.PlanRefusal(
+                f"--{phase}-tile {pin}: a tile of {pin} px covers the whole padded frame,"
+                f" {width}x{height}: --{phase}-tile 0 pins an untiled {phase}",
+                phase="pin",
+            )
+
+
+def _given(args: "argparse.Namespace", dest: str) -> bool:
+    """Whether the option was given: its value is not the parser's default (None, or False for a
+    flag)."""
+    return getattr(args, dest) not in (None, False)
+
+
+def _check_options(args: "argparse.Namespace") -> None:
+    """Refuse every option a picture has no use for, all at once, each saying why
+    (DESIGN.md, Still images, Options taken); --plan with a file, which would be a cut list."""
+    from job import JobError
+
+    reasons = [f"{flag}: {why}" for dest, (flag, why) in REFUSED.items() if _given(args, dest)]
+    if args.plan is not None and args.plan is not BARE_PLAN:
+        reasons.append(
+            f"--plan {args.plan}: a picture has no cut list to write; --plan alone says its plan"
+        )
+    if not reasons:
+        return
+    if len(reasons) == 1:
+        raise JobError(f"{reasons[0]} (refused for a picture)")
+    listed = "; ".join(f"({number}) {reason}" for number, reason in enumerate(reasons, 1))
+    raise JobError(f"{len(reasons)} options refused for a picture: {listed}")
+
+
+def _bits(args: "argparse.Namespace") -> int:
+    """The PNG's depth: 16, all the model made, for png (the default); 8 for png8, rounded to the
+    nearest code (DESIGN.md, Still images, Output). A video's format is refused."""
+    from job import JobError
+
+    if args.format in (None, "png"):
+        return 16
+    if args.format == PNG8:
+        return 8
+    raise JobError(
+        f"--format {args.format}: a video's format; a picture is written as a PNG, --format png"
+        f" (16 bits, the default) or --format {PNG8} (8 bits)"
+    )
+
+
+def _check_output(output: Path, source: Path) -> None:
+    """Refuse an -o a picture can't go to, before any work (DESIGN.md, Still images, Output): a
+    .png file, new, beside a directory that exists; a directory, the source itself or a file
+    already there is refused, nothing replaced."""
+    from job import JobError
+
+    if output.is_dir():
+        raise JobError(f"{output}: a directory; a picture goes to a new .png file")
+    if output.suffix.lower() != ".png":
+        # seedvr2x owns no encoder but its PNG writer (DESIGN.md, Output): the way to the user's
+        # format is a converter's, with their names.
+        written = output.with_suffix(".png")
+        target = output if output.suffix else output.with_suffix(".jpg")
+        raise JobError(
+            f"{output}: seedvr2x writes a picture as a PNG only: write {written}, then convert it,"
+            f" e.g. ffmpeg -i {shlex.quote(str(written))} {shlex.quote(str(target))}"
+        )
+    if _same(output, source):
+        raise JobError(f"{output}: the source itself; choose another -o")
+    if os.path.lexists(output):
+        raise JobError(
+            f"{output}: a file already there, not replaced; remove it, or choose another -o"
+        )
+    if not output.parent.is_dir():
+        raise JobError(f"{output.parent}: not a directory, so {output.name} can't be written there")
+
+
+def _same(path: Path, other: Path) -> bool:
+    """Whether path and other name one file: the same file when both exist, however each is
+    spelled (a link included); else the same place."""
+    try:
+        return os.path.samefile(path, other)
+    except OSError:
+        return path.resolve() == other.resolve()
+
+
+def _write(path: Path, data: bytes) -> None:
+    """The PNG's bytes at path, written whole as a finished file is (media.files.write_whole): a
+    partial file beside it, then renamed. Nothing is left on a failure, a stop included; a file
+    that has come since the check is not replaced."""
+    from job import JobError
+    from media.files import partial_path, write_whole
+
+    if os.path.lexists(path):
+        raise JobError(f"{path}: written to since it was checked, by another program: not replaced")
+    try:
+        write_whole(path, data)
+    except OSError as error:
+        raise JobError(f"{path}: not written: {error.strerror}") from error
+    except BaseException:
+        # Ctrl-C or SIGTERM (terminable) inside the write: write_whole removes its partial file
+        # for an OSError alone.
+        partial_path(path).unlink(missing_ok=True)
+        raise
+
+
+def _read_said(name: str, pic: "Picture", size: tuple[int, int], bits: int) -> str:
+    """The line saying what was read and what is made of it."""
+    height, width = pic.pixels.shape[:2]
+    return (
+        f"{name}: a {pic.format} picture, {width}x{height}, {pic.bits}-bit"
+        f" {'grey' if pic.grey else 'RGB'}{_kept(pic)}; output {size[0]}x{size[1]}, a {bits}-bit"
+        " PNG"
+    )
+
+
+def _kept(pic: "Picture") -> str:
+    """What of the picture the output carries besides its pixels, as a clause: ", with its ICC
+    profile and orientation 6", or "" when there is none (DESIGN.md, Still images, Colour,
+    Orientation, Metadata)."""
+    carried = ["its ICC profile"] if pic.icc is not None else []
+    carried += ["its colour chunks"] if pic.chunks else []
+    carried += [f"its orientation, {pic.orientation}"] if pic.orientation != 1 else []
+    return f", with {' and '.join(carried)}" if carried else ""
