@@ -2241,9 +2241,12 @@ measured that day on test files, against ffmpeg 9.0's decode.
     through zscale (57.4 dB of 16-bit PSNR on a 4:2:0 JPEG), about an 8-bit rounding.
   - A 16-bit TIFF is refused in v0.1.0, the refusal giving the command that makes a 16-bit
     PNG of it: Pillow reads it at 8 bits, and nothing locked reads it at 16.
-  - A 16-bit RGB PNG is decoded by torchvision, whose image decoding is deprecated since 0.29
-    for TorchCodec's (0.16): kept in v0.1.0, torchvision pinned, its successor chosen when the
-    pin moves past it, judged by the test that holds it to ffmpeg's decode bit for bit.
+  - A 16-bit colour PNG is decoded by TorchCodec (0.17), torchvision's image decoding being
+    deprecated since 0.29 (the user, 2026-11-03: no new code on a deprecated decoder), and only
+    there: Pillow, which cuts it to 8 bits, reads every other picture with its metadata in the
+    same pass, which TorchCodec doesn't return. TorchCodec is imported on that path alone, its
+    import loading the system's FFmpeg libraries where present; it always applies an EXIF
+    orientation, so the PNG reaches it as stored. Held to ffmpeg's decode bit for bit.
   - A camera's raw file built on TIFF (DNG, NEF, CR2 and the like) is refused, told by its
     markers (DNG's version tag, a first image marked as a reduced-resolution preview), to be
     developed first, to a 16-bit PNG: Pillow reads its preview as a TIFF, which seedvr2x
@@ -2258,10 +2261,11 @@ measured that day on test files, against ffmpeg 9.0's decode.
     that, a 108 MP phone photo, is read, a line of seedvr2x's own in place of Pillow's warning.
   - A damaged file is refused, never read in part: a PNG's chunks before its image data are
     held to their CRCs.
-  - After v0.1.0: HEIC (stored as tiles, in Display P3), AVIF and JPEG XL. Until then the
-    video path refuses them, and any other image format ffprobe reads (by its brand where
-    ffprobe reads it as an MP4 file, as it reads an AVIF), naming the formats read as
-    pictures, so that none runs as a video of one frame.
+  - After v0.1.0: HEIC (stored as tiles, in Display P3), AVIF and JPEG XL. TorchCodec decodes
+    the first two, their profile then read from the file's own boxes. Until then the video path
+    refuses them, and any other image format ffprobe reads (by its brand where ffprobe reads it
+    as an MP4 file, as it reads an AVIF), naming the formats read as pictures, so that none
+    runs as a video of one frame.
 - **Animated GIF, APNG and WebP,** found holding several frames, are refused in v0.1.0, the
   refusal giving the ffmpeg command that makes a video of the file, at a steady 10 frames a
   second, its transparency dropped, both said (`-vf fps=10,format=rgb24 -c:v ffv1`: an FFV1
@@ -2280,14 +2284,16 @@ measured that day on test files, against ffmpeg 9.0's decode.
   cHRM, gAMA, sRGB) verbatim, which seedvr2x reads from the file's chunks itself, Pillow
   reading no cICP; a picture with neither is sRGB, as viewers take it. HDR (a cICP transfer of
   PQ or HLG) is refused, as for video.
-- **Orientation:** processed as stored, the EXIF orientation (a rotation, a mirror or both)
-  carried to the output, the video path's later way (see [Input](#input)). seedvr2x writes it
-  before the image data, where Chrome (since 2024), Firefox and Safari read it, as ffmpeg's
-  PNG writer does too. Measured in the card's batch: a few phone photos upscaled stored
-  sideways and upright, compared by figures and the user's eyes; revisited if the model draws
-  a sideways picture worse.
-- **Metadata:** nothing else is carried, no camera, date or place (EXIF beyond the
-  orientation, XMP). The output holds its profile, its colour tags and its orientation only.
+- **Orientation:** processed as stored; the output's pixels are turned upright after the model,
+  an exact permutation of the 8 EXIF orientations (a rotation, a mirror or both), and no
+  orientation is written, in PNG and in WebP alike (the user, 2026-11-03: seedvr2x recreates
+  every bit, so the picture leaves it the right way up, with no tool after it left to honour a
+  tag, or to turn and re-encode it; Chrome and Firefox ignore a WebP's, many tools a PNG's
+  eXIf). Measured in the card's batch: a few phone photos upscaled stored sideways and
+  upright, compared by figures and the user's eyes; revisited if the model draws a sideways
+  picture worse.
+- **Metadata:** nothing else is carried, no camera, date or place (EXIF, XMP). The output holds
+  its profile and its colour tags only, upright.
 - **Output:** PNG, or lossless WebP (the user, 2026-11-03), in v0.1.0. `-o` is a `.png` or a
   `.webp` file; another extension is refused, the refusal giving the command that converts the
   PNG (seedvr2x owns no lossy encoder: [Output](#output)); a directory, the source itself, a
@@ -2298,9 +2304,10 @@ measured that day on test files, against ffmpeg 9.0's decode.
   on a video too.
   - Lossless WebP holds 8 bits and an ICC profile, not PNG's other colour chunks: `-o x.webp`
     writes 8 bits, `--format` refused with it, and a picture of 16 bits, or one carrying cICP,
-    cHRM or gAMA without a profile, is refused, naming `.png`. Pillow writes it, with the
-    profile and an EXIF block holding the orientation alone; whether browsers turn a WebP by
-    its EXIF orientation as they do a PNG is checked when it is built.
+    cHRM or gAMA without a profile, is refused, naming `.png`, and so is a side over 16,383 px,
+    WebP's limit. Pillow writes it with the profile, at libwebp's method 4 and quality 50,
+    lossless's effort, not its fidelity: 28 to 42% under the 8-bit PNG, methods 5 and 6 saving
+    nothing more.
   - seedvr2x writes the PNG with numpy and zlib, each row's filter chosen as libpng chooses
     it, at zlib's level 6: in the four cases measured, the smallest file or within 4.5% of
     the smallest, at about 1.3 times the Up filter's time. A grainy 3840×2880 picture at 16
@@ -2406,7 +2413,9 @@ library's four modules.
     missing or wrong; 406, an `Accept` it can't meet; 413, a body over the limit; 422, a
     picture refused or over the limits; 503 with `Retry-After`, the queue full, or the server
     starting or stopping; 500, a picture failed (out of memory, an output not finite), the
-    server still running.
+    server still running. The library's refusals carry the reason and the way out apart: the
+    CLI adds its ffmpeg command, with the file's name; the server words its own, with neither
+    (the user, 2026-11-03: Pillow alone, no ffmpeg, in production).
 - **Running:** a picture is read and checked in its request's thread, a refusal answered at
   once. It starts on the GPU when its predicted peak fits in what is left of the reservation,
   at most `--max-concurrent` at once, so smaller pictures run more at once than the limit's
