@@ -239,12 +239,12 @@ seedvr2x/                the repository
   ignored. What a still is, how it is read and written: [Still images](#still-images).
 - **The image server, `apps/imgserver/`:** images only, hence its name (a "server" would promise
   every CLI feature over HTTP). Python, the models in its own process, loaded once and kept on
-  the GPU. Every parameter in the request's headers, the image's bytes as the body both ways,
-  its format said by Content-Type in the request and in the response. Linux first. Its pictures
-  follow [Still images](#still-images)'s rules. Its interface and limits are decided when it
-  is built, what it shares with the CLI's still images before (step 3). In v0.1.0 with them
-  (the user, 2026-11-02), built and measured with the rest, neither holding the release if it
-  isn't ready with it.
+  the GPU. Its settings in the request's headers, the picture's bytes as the body both ways,
+  the picture told by its content and the answer's format chosen by `Accept`. Linux first. Its
+  pictures follow [Still images](#still-images)'s rules; its specification is
+  [The image server](#the-image-server)'s. In v0.1.0 with the CLI's still images (the user,
+  2026-11-02), built and measured with the rest, neither holding the release if it isn't
+  ready with it.
 - **ComfyUI's nodes, after v0.1.0, next on the roadmap** (the user, 2026-11-02: light on
   seedvr2x's side, its bricks tested by the library's suite, ComfyUI doing the input and
   output, the models and the memory): in this repository, where ComfyUI's own install (its
@@ -2283,13 +2283,19 @@ measured that day on test files, against ffmpeg 9.0's decode.
   a sideways picture worse.
 - **Metadata:** nothing else is carried, no camera, date or place (EXIF beyond the
   orientation, XMP). The output holds its profile, its colour tags and its orientation only.
-- **Output:** PNG only in v0.1.0. `-o` is a `.png` file; another extension is refused, the
-  refusal giving the command that converts the PNG (seedvr2x owns no lossy encoder:
-  [Output](#output)); a directory, the source itself, a file already there or a missing
-  directory is refused, nothing replaced or made. The file is written whole, as a finished
-  file is. 16 bits by default, all the model made; 8 bits with `--format png8`, rounded to the
-  nearest code; the video formats are refused. A video with `-o x.png` is refused, naming
-  `--format png` and a directory, and `--format png8` on a video too.
+- **Output:** PNG, or lossless WebP (the user, 2026-11-03), in v0.1.0. `-o` is a `.png` or a
+  `.webp` file; another extension is refused, the refusal giving the command that converts the
+  PNG (seedvr2x owns no lossy encoder: [Output](#output)); a directory, the source itself, a
+  file already there or a missing directory is refused, nothing replaced or made. The file is
+  written whole, as a finished file is. A PNG has 16 bits by default, all the model made, 8
+  bits with `--format png8`, rounded to the nearest code; the video formats are refused. A
+  video with `-o x.png` is refused, naming `--format png` and a directory, and `--format png8`
+  on a video too.
+  - Lossless WebP holds 8 bits and an ICC profile, not PNG's other colour chunks: `-o x.webp`
+    writes 8 bits, `--format` refused with it, and a picture of 16 bits, or one carrying cICP,
+    cHRM or gAMA without a profile, is refused, naming `.png`. Pillow writes it, with the
+    profile and an EXIF block holding the orientation alone; whether browsers turn a WebP by
+    its EXIF orientation as they do a PNG is checked when it is built.
   - seedvr2x writes the PNG with numpy and zlib, each row's filter chosen as libpng chooses
     it, at zlib's level 6: in the four cases measured, the smallest file or within 4.5% of
     the smallest, at about 1.3 times the Up filter's time. A grainy 3840×2880 picture at 16
@@ -2319,6 +2325,12 @@ measured that day on test files, against ffmpeg 9.0's decode.
     lesser of the 512-px tile's peak and the class's largest untiled pass. The tiles are
     chosen per picture under that placement, never refused within the bound. The bound's own
     picture is its largest padded rows by its largest padded columns, in each orientation.
+  - The picture's resize to its output size runs on the card, from its stored size (in the
+    encode's dtype, and in float32 for the colour correction's reference): the plan counts
+    those copies in the phase where they live, so a bound takes a largest input too, in
+    pixels, the CLI's its picture's (found by design on 2026-11-03: a 100 MP photo is 1.2 GB
+    in float32 on the card before its resize). Counted from the tensors' sizes, measured on
+    the card.
   - The DiT is held to its least at the bound's largest padded frame, plus 2.726 MiB for each
     attention window at the most windows any picture within the bound takes: the 7B's
     windows aren't monotone in the size (a 3000×2000 bound takes 72, a smaller picture within
@@ -2346,6 +2358,93 @@ measured that day on test files, against ffmpeg 9.0's decode.
   correction's term; a still's process memory; whole pictures on card sizes emulated from 16
   to 48 GB, each peak against its prediction; 8K on the 32 GB card; the still's pass on CUDA
   against a one-frame shot's, bit for bit, as it is on the CPU.
+
+## The image server
+
+Decided on 2026-11-03 (the user): `apps/imgserver/`, a production server of pictures, not the
+CLI over HTTP. A request sets its size and, if it wants, its seed; everything else is fixed at
+the server's start. Its pictures follow [Still images](#still-images)'s rules, through the
+library's four modules.
+
+- **Its start:** `seedvr2x-imgserver`, with `--listen` (127.0.0.1 and a port of its own by
+  default, not ComfyUI's 8188), `--max-size` (the largest output, 3840×2160 by default, in
+  either orientation), `--max-input` (the largest picture taken, in pixels), `--max-concurrent`
+  (the pictures upscaled at once), `--queue` (the pictures waiting, 8 by default), the CLI's
+  model options, its pins (at one picture at a time only), `--api-key`, and `-v`.
+  - It listens at once, then checks the model files as the CLI does, pulling them at the pinned
+    revision where they are missing, reads the card, and makes its reservation: the models,
+    `--max-concurrent` pictures at `--max-size` from inputs of `--max-input`, and the margin.
+    More than one picture at a time needs the whole DiT on the card; one at a time may swap
+    blocks. Where the card can't free the reservation, the start is refused, naming the most
+    pictures at that size, and the largest size at that count, that would fit.
+  - The reservation is held: allocated once, then freed, torch's allocator keeping it for the
+    process (it gives memory back to the card only on `empty_cache()`), and capped there
+    (`torch.cuda.set_per_process_memory_fraction`, as `memory.hold` sets it on a driver that
+    spills). The CUDA context, outside torch's allocator, comes on top, said so.
+  - A warm-up runs `--max-concurrent` pictures at `--max-size` at once through the models,
+    proving the plan on the card before the first request.
+  - Its log says the reservation, what it holds, and what fits in it: the largest single
+    picture, and the most pictures at `--max-size`.
+- **A request:** `POST /upscale`, the picture's bytes as the body, told by its content as a
+  file is, never by its Content-Type.
+  - `Seedvr2x-Resolution`, the output's short side, is required. `Seedvr2x-Seed` is optional:
+    a random seed where it is absent, within the range a seed is checked to, and the seed used
+    always returned in `Seedvr2x-Seed`, so that any answer can be made again. Any other
+    `Seedvr2x-` header is refused, never ignored. The colour correction is always `split`.
+  - The answer's format by `Accept`: PNG by default, lossless WebP where it is asked for. A
+    picture WebP can't hold (16 bits, or cICP, cHRM or gAMA without a profile) gets PNG where
+    the client takes it, else 406. The output keeps the input's depth, 8 bits for 8, 16 for 16
+    (a grainy 3840×2880 picture: 10 MB at 8 bits, 46 MB at 16).
+  - The answer: the picture, with `Seedvr2x-Seed`, the source's and the output's sizes, and
+    `Server-Timing` (the wait in the queue, the upscale).
+  - Errors, each with seedvr2x's message as text: 400, a header wrong or unknown; 401, a key
+    missing or wrong; 406, an `Accept` it can't meet; 413, a body over the limit; 422, a
+    picture refused or over the limits; 503 with `Retry-After`, the queue full, or the server
+    starting or stopping; 500, a picture failed (out of memory, an output not finite), the
+    server still running.
+- **Running:** a picture is read and checked in its request's thread, a refusal answered at
+  once. It starts on the GPU when its predicted peak fits in what is left of the reservation,
+  at most `--max-concurrent` at once, so smaller pictures run more at once than the limit's
+  count; else it waits, up to `--queue`. Its file is written in its request's thread. Nothing
+  is written to disk; a client gone while its picture waits is dropped.
+- **Several pictures at once** (the user, 2026-11-03: in v0.1.0, a small scope to measure it
+  in): measured on the card before a default is set, at 1, 2 and 4 at once on small, medium and
+  large pictures, by CUDA streams or by several pictures in one DiT pass (the DiT packs samples
+  of different shapes; whether it takes several pictures is checked). A picture is one DiT
+  pass over thousands of tokens (about 1,000 at 512×512, 8,000 at 1080p, 32,000 at 4K), as an
+  LLM's prompt is, not its token-by-token decoding, where batching gains the most.
+- **`/health`**, for a container's probes: 503 `starting` until the warm-up has passed; 200
+  `ready`; 503 `stopping`; 503 `failed` after a CUDA error other than out-of-memory, which
+  leaves the card's state untrusted, no picture taken after it, the orchestrator restarting
+  the container.
+- **`/metrics`:** Prometheus' text format, written by the server with no dependency, its tests
+  reading it with `prometheus_client`'s parser, a dependency of the tests alone: requests by
+  status, the upscale's and the wait's times, the pictures running and waiting, the output's
+  pixels, the VRAM reserved and its peak, ready, and the version and model files. `/health`
+  and `/metrics` take no key.
+- **The API key** (the user, 2026-11-03, as vLLM's): optional, `--api-key` or
+  `SEEDVR2X_API_KEY`, the option winning, the log saying the key's source and never the key.
+  `/upscale` then takes `Authorization: Bearer KEY`, compared in constant time, else 401 with
+  `WWW-Authenticate: Bearer`; an empty key is refused at the start. TLS and further
+  authentication stay a reverse proxy's, the key making sure that only it reaches the server,
+  on a LAN too. Over plain HTTP the key crosses the network in clear, and an option shows in
+  the host's process list: the docs say so, and advise the variable.
+- **Stopping** (SIGTERM, Ctrl-C): no new request, the pictures running finished, the waiting
+  ones answered 503, then the exit.
+- **Access:** 127.0.0.1 by default. In a container the server listens on 0.0.0.0, which port
+  publishing needs; the docs publish it on 127.0.0.1 unless a proxy is in front.
+- **HTTP:** Python's standard library (`ThreadingHTTPServer`), no new dependency; Python's own
+  docs call it not hardened for production, which the proxy covers.
+- **The Docker image:** a Dockerfile in `apps/imgserver/`, the server's lock installed by uv
+  on a slim Linux image, CUDA's libraries coming with PyTorch's wheels; the host gives the
+  NVIDIA driver and Container Toolkit. No ffmpeg. The models stay outside: a volume for
+  Hugging Face's cache, or a model directory mounted read-only, `HF_HUB_OFFLINE` for closed
+  networks. A user other than root; a `HEALTHCHECK` on `/health` through Python. Published to
+  `ghcr.io/hekmon/seedvr2x-imgserver` by a GitHub Actions workflow on release tags,
+  linux/amd64. No FlashAttention 2 at first (PyPI has its source only, a long build per GPU
+  generation): SDPA, which the plan counts, until the card shows FA2 pays for pictures.
+- **Tests:** on the CPU with stand-in models, over real sockets on localhost; on the card with
+  the batch.
 
 ## Memory planner
 
