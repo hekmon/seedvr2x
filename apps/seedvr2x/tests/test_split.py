@@ -40,6 +40,7 @@ They are research/scripts/quality_metrics.py's, against the input at its own siz
 brought to it by 2x2 means) on its 8-bit scale, CIELAB computed here (rgb_to_lab).
 """
 
+import inspect
 import json
 import math
 import os
@@ -208,9 +209,12 @@ def test_split_is_the_study(tmp_path: Path, factor: str, windows: str) -> None:
     scale, stages = FACTORS[factor]
     source = cut(m1, tmp_path / "input.mkv", scale)
     report = tmp_path / "report.json"
+    # The driver imports load_study from test_colour's own directory, the library's tests
+    # (core/tests/): pytest's pythonpath (pyproject.toml) is this process's, not the driver's.
+    library_tests = Path(inspect.getfile(load_study)).parent
     run = subprocess.run(
         [
-            *(sys.executable, "-c", DRIVER, str(Path(__file__).parent), str(tmp_path)),
+            *(sys.executable, "-c", DRIVER, str(library_tests), str(tmp_path)),
             *(str(report), str(FRAMES), *(str(side) for side in SIZE), str(source)),
             *("-o", str(tmp_path / "out.mkv"), "--model-dir", MODELS, *MODEL_OPTIONS),
             *("--resolution", "1080", *WINDOWS[windows]),
