@@ -354,8 +354,10 @@ def test_a_sha256_known_before_the_load_is_checked_at_once_and_proved_by_it(
 ) -> None:
     # A SHA-256 the run has before the load, from a record's size and time or a whole read at the
     # start, is held to the pin at once (check_pin, load or not), as before; the load then
-    # proves it, and refuses a file whose bytes changed since, in the words of the way it came:
-    # a record's (with a refusal of the caller's, or the library's own), a whole read's.
+    # proves it, and refuses a file whose bytes changed since, in the words of the way it came: a
+    # record's for a file seedvr2x doesn't pin (with a refusal of the caller's, or the library's
+    # own), the pin's for one it pins, which say how to fetch it again (DESIGN.md, Pause and
+    # resume, decided on 2026-11-03), a whole read's.
     caplog.set_level(logging.INFO)
     path = model_dir(tmp_path) / VAE
     status = path.stat()
@@ -368,7 +370,6 @@ def test_a_sha256_known_before_the_load_is_checked_at_once_and_proved_by_it(
     for words in (None, lambda found: f"the caller's words, {found}"):
         recorded = pull.Hashes()
         assert recorded.vouch(path, status.st_size, status.st_mtime_ns, digest, words)
-        pull.check_pin(VAE, path, pins[VAE], recorded, None, load=True)
         with pytest.raises(ModelError) as error:
             recorded.proved(path, "1" * 64, status)
         assert str(error.value) == (
@@ -378,6 +379,29 @@ def test_a_sha256_known_before_the_load_is_checked_at_once_and_proved_by_it(
             else f"the caller's words, {'1' * 64}"
         )
         recorded.proved(path, digest, status)
+    pinned = pull.Hashes()
+    assert pinned.vouch(path, status.st_size, status.st_mtime_ns, digest, lambda found: "record")
+    pull.check_pin(VAE, path, pins[VAE], pinned, None, load=True)
+    assert hashed == []
+    with pytest.raises(ModelError) as error:
+        pinned.proved(path, "1" * 64, status)
+    assert str(error.value) == (
+        f"{path}: SHA-256 {'1' * 64}, where hekmon/seedvr2x's {VAE} at {REVISION[:8]} has"
+        f" {digest}: not the file seedvr2x pins, left as it is; fetch it again from {url(VAE)},"
+        f" {INTO_MODEL_DIR}"
+    )
+    # With `whole`, a SHA-256 nothing vouches for is read at once, its size passed first: a job
+    # recorded whose record no longer vouches for the file.
+    (tmp_path / "long").write_bytes(CONTENT[VAE] + b"!")
+    with pytest.raises(ModelError, match="bytes, where hekmon"):
+        pull.check_pin(
+            VAE, tmp_path / "long", pins[VAE], pull.Hashes(), None, load=True, whole=True
+        )
+    assert hashed == []
+    whole = pull.Hashes()
+    pull.check_pin(VAE, path, pins[VAE], whole, None, load=True, whole=True)
+    assert hashed == [path] and whole.proven(path)
+    hashed.clear()
     read = pull.Hashes()
     pull.check_pin(VAE, path, pins[VAE], read, None)
     assert hashed == [path]

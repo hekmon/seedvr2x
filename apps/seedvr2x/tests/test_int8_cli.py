@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import test_cli_run
 from levels import levels
 from test_cli_run import (
     CHECK_MODELS,
@@ -72,6 +73,7 @@ def test_an_int8_dit_runs_planned_by_its_figures(
     monkeypatch.setattr(weights, "check_models", CHECK_MODELS)
     monkeypatch.setattr(cli, "_dit_model", DIT_MODEL)
     monkeypatch.setattr(files, "sha256", hashed)
+    monkeypatch.setattr(test_cli_run, "digest_of", hashed)  # the stand-in load's, the same
     loaded: list[Path] = []
     stand_in_load: Any = model.load_models
 
@@ -190,6 +192,7 @@ def test_an_int8_resume_is_judged_early_by_int8_s_figures(
     monkeypatch.setattr(
         files, "sha256", lambda path: hashed(path) if Path(path).parent == models else whole(path)
     )
+    monkeypatch.setattr(test_cli_run, "digest_of", files.sha256)  # the stand-in load's, the same
     chosen = ("--model-dir", str(models), "--vae-model", VAE, "--dit-model", INT8)
     steps.stop = "encode 4"
     assert cli.main(command(tmp_path, source_path, "out", *JOB, *chosen)) == 130

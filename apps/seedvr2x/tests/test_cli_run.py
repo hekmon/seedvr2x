@@ -176,6 +176,27 @@ def stand_in_probabilities(frames: npt.NDArray[np.uint8]) -> npt.NDArray[np.floa
     return (frames.mean(axis=(1, 2, 3), dtype=np.float64) / 255).astype(np.float32)
 
 
+def proved(path: Path, hashes: Any) -> None:
+    """As the library's loads do (blockswap.read, the shot detector's): the file at path read once,
+    hashed, and its SHA-256 proved by the run's hashes (pull.Hashes.proved, a ModelError where its
+    bytes aren't those the run took them for; DESIGN.md, Weights, decided on 2026-11-03). LOADED
+    lists the files so read."""
+    LOADED.append(path)
+    if hashes is not None:
+        hashes.proved(path, digest_of(path), path.stat())
+
+
+def whole_digest(path: Path) -> str:
+    """The SHA-256 of the file at path, in hex, as a load hashes every byte it reads."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# The model files the stand-in loads read (proved), in order; and how they hash them, which a
+# test over sparse files of gigabytes replaces as it replaces files.sha256 (test_int8_cli.py).
+LOADED: list[Path] = []
+digest_of = whole_digest
+
+
 class StandInDetector:
     """The shot detector's stand-in, seedvr2x/detector.py's Detector to the first pass: each
     frame's probability as soon as it is pushed (stand_in_probabilities), none at finish; its file,
@@ -185,10 +206,11 @@ class StandInDetector:
     built: ClassVar[list["StandInDetector"]] = []
 
     def __init__(
-        self, path: Path, device: torch.device, *, batch: int = 4, hashes: object = None
+        self, path: Path, device: torch.device, *, batch: int = 4, hashes: Any = None
     ) -> None:
         self.path, self.device, self.pushed, self.closed = path, device, 0, False
         StandInDetector.built.append(self)
+        proved(path, hashes)
 
     @property
     def scored(self) -> int:
@@ -239,6 +261,7 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
     patch(pull, "PINNED", {**pull.PINNED, pull.DETECTOR: STAND_IN_DETECTOR})
     StandInDetector.built.clear()
     ENTERED.clear()
+    LOADED.clear()
     patch(torch.cuda, "is_available", lambda: True)
     patch(torch.cuda, "is_bf16_supported", lambda: True)
     patch(torch.cuda, "get_device_name", lambda device: "a stand-in")
@@ -258,8 +281,10 @@ def stand_in_model(patch: Callable[[Any, str, Any], None]) -> None:
         ASKED.append(("free memory", device))
         return free_memory(STAND_IN_MODELS.device)
 
-    def load(*arguments: object) -> object:
+    def load(*arguments: Any) -> object:
         ASKED.append("models")
+        for path in arguments[:2]:
+            proved(path, arguments[3] if len(arguments) > 3 else None)
         return STAND_IN_MODELS
 
     patch(torch.cuda, "mem_get_info", lambda device: (FREE, TOTAL))
@@ -2889,9 +2914,9 @@ def mark_checks(monkeypatch: pytest.MonkeyPatch) -> None:
         log.warning("MARK the rehearsal")
         copied(*arguments)
 
-    def hashed(*arguments: Any) -> None:
+    def hashed(*arguments: Any, **more: Any) -> None:
         log.warning("MARK the hashes")
-        pinned(*arguments)
+        pinned(*arguments, **more)
 
     def probed() -> str:
         log.warning("MARK the probe")
@@ -2902,7 +2927,7 @@ def mark_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(memory, "startup", probed)
 
 
-@pytest.mark.parametrize(("output", "minutes"), [("out", 2), ("one.mkv", 2)])
+@pytest.mark.parametrize(("output", "minutes"), [("out", 1), ("one.mkv", 1)])
 def test_a_resume_short_of_memory_is_warned_of_before_the_checks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2914,8 +2939,9 @@ def test_a_resume_short_of_memory_is_warned_of_before_the_checks(
     # DESIGN.md, Memory planner, A plan shapes the output a little (decided on 2026-10-28): as
     # soon as the record is read, before the rehearsal and the hashes, the room is read through
     # NVML alone; where the recorded shape doesn't fit, a warning says so at once, what to free,
-    # and for about how long (the models' 2 min, a one-file output's 66 s more: memory's
-    # CHECK_*). The check that refuses stays at the plan: the memory moved meanwhile here, and
+    # and for about how long (the source's hash and a one-file output's rehearsal by the source's
+    # size, CHECK_*, a minute at least; the model files, vouched for by the record, nothing since
+    # 2026-11-04). The check that refuses stays at the plan: the memory moved meanwhile here, and
     # the job goes on.
     source_path = job(tmp_path, monkeypatch)
     options = JOB[:4]
@@ -2979,7 +3005,7 @@ def test_the_early_warning_given_accept_env_change_says_what_the_plan_then_does(
         " files are checked\n"
         "the rest of the job is planned again for the memory free if it is still short at the"
         " plan (--accept-env-change), unless it is freed meanwhile, within the checks now running"
-        f" (about 2 min): to free it, {cli.FREE_THE_CARD}"
+        f" (about 1 min): to free it, {cli.FREE_THE_CARD}"
     ]
 
 
@@ -3031,16 +3057,17 @@ def test_the_early_warning_s_debug_line_says_nvml_s_reading_and_the_context_coun
 @pytest.mark.parametrize(
     ("rehearses", "source", "seconds"),
     [
-        # The models' hashes alone, whatever the job: 2 min.
-        (False, 0, 120),
-        (True, 0, 120),
-        (False, 1_000_000, 120),
+        # The model files vouched for by the record, read by their load after the plan: nothing
+        # (2 min until 2026-11-04, DESIGN.md, Pause and resume, decided on 2026-11-03).
+        (False, 0, 0),
+        (True, 0, 0),
+        (False, 1_000_000, 0),
         # Milestone 7's third night, a 7.49 GB source: hashed in 36 s, rehearsed in 66 s.
-        (False, 7_490_000_000, 120 + 36),
-        (True, 7_490_000_000, 120 + 36 + 66),
-        # A source of 26 GB, 3.5 times that one: both scale, the models' time doesn't.
-        (False, 26_000_000_000, 120 + 125),
-        (True, 26_000_000_000, 120 + 125 + 229),
+        (False, 7_490_000_000, 36),
+        (True, 7_490_000_000, 36 + 66),
+        # A source of 26 GB, 3.5 times that one: both scale.
+        (False, 26_000_000_000, 125),
+        (True, 26_000_000_000, 125 + 229),
     ],
 )
 def test_the_checks_ahead_scale_with_the_source_s_size(
@@ -3048,8 +3075,8 @@ def test_the_checks_ahead_scale_with_the_source_s_size(
 ) -> None:
     # The early warning's minutes (cli._checks_ahead; DESIGN.md, Memory planner, A resume whose
     # recorded shape no longer fits, 2026-10-29): the source's hash and the remux rehearsal, where
-    # it runs, by the source's size at the rates of milestone 7's third night, the models' 2 min
-    # not. A sparse file stands for the source.
+    # it runs, by the source's size at the rates of milestone 7's third night; the model files,
+    # vouched for by the record, nothing. A sparse file stands for the source.
     path = tmp_path / "source.mkv"
     with path.open("wb") as written:
         written.truncate(source)
@@ -6585,16 +6612,16 @@ def test_a_finished_job_whose_record_has_no_time_is_hashed_as_before(
     assert finished.reads == [finished.model if lacks == "model time" else finished.source]
 
 
-def test_a_job_with_its_assembly_left_hashes_its_files_as_before(
+def test_a_job_with_its_assembly_left_reads_no_model_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     steps: Steps,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # A job with anything left to make, its assembly included, hashes its model files and its
-    # source at every start, their size and time as recorded: what it makes depends on their bytes
-    # (DESIGN.md, Pause and resume, decided on 2026-10-29). A .mkv path's job with every segment
-    # made and no file.
+    # DESIGN.md, Pause and resume (decided on 2026-11-03): a job with its assembly alone left
+    # reads no model file, its size and time as recorded: its segments were made from bytes their
+    # load checked. Its source is hashed as before (a .mkv path's job with every segment made and
+    # no file), nothing loaded.
     levels(caplog, logging.INFO)
     source_path = job(tmp_path, monkeypatch)
     model_file = tmp_path / "w.safetensors"
@@ -6607,10 +6634,121 @@ def test_a_job_with_its_assembly_left_hashes_its_files_as_before(
     record = json.loads((work / "manifest.json").read_text())
     assert record["settings"]["dit_model"]["mtime_ns"] == model_file.stat().st_mtime_ns
     reads = reads_of_files(monkeypatch)
+    LOADED.clear()
     caplog.clear()
     assert upscale(tmp_path, source_path, "one.mkv", *JOB) == 0
     assert final.is_file() and "finished already" not in caplog.text
-    assert model_file in reads and source_path in reads
+    assert model_file not in reads and source_path in reads and LOADED == []
+
+
+def resumable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, output: str
+) -> tuple[Path, Path]:
+    """A job stopped with units made and units left, its model file with content: its source and
+    model file, the steps and the files its load reads (LOADED) cleared."""
+    source_path = job(tmp_path, monkeypatch)
+    model_file = tmp_path / "w.safetensors"
+    model_file.write_bytes(b"model bytes")
+    steps.stop = "encode 4"
+    stopped(tmp_path, source_path, output, *JOB)
+    steps.stop = None
+    steps.calls.clear()
+    LOADED.clear()
+    return source_path, model_file
+
+
+@pytest.mark.parametrize("output", ["out", "one.mkv"])
+def test_a_resume_vouches_for_its_model_files_and_its_load_proves_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    output: str,
+) -> None:
+    # DESIGN.md, Pause and resume (decided on 2026-11-03): a job with anything left to make
+    # vouches for its model files by their size and time against its record, as a finished job
+    # does, and reads none at its start; its load reads each once and proves the record's
+    # SHA-256. Its source is hashed as before.
+    levels(caplog, logging.INFO)
+    source_path, model_file = resumable(tmp_path, monkeypatch, steps, output)
+    reads = reads_of_files(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, output, *JOB) == 0
+    assert model_file not in reads and source_path in reads
+    assert LOADED == [model_file, model_file]  # the DiT's and the VAE's, one file given as both
+    assert steps.calls[0] == "encode 4"
+    assert caplog.messages.count("w.safetensors: SHA-256 as expected, read as it loaded") == 1
+
+
+def test_a_model_file_changed_with_its_size_and_time_kept_is_refused_at_its_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # DESIGN.md, Pause and resume (decided on 2026-11-03): a file changed with its size and
+    # time kept, which the start vouches for, is refused at the end of its load, before any unit
+    # is made, logged without a traceback, the job's record as it was. Put back, it goes on.
+    source_path, model_file = resumable(tmp_path, monkeypatch, steps, "out")
+    status = model_file.stat()
+    model_file.write_bytes(b"other bytes")
+    os.utime(model_file, ns=(status.st_atime_ns, status.st_mtime_ns))
+    manifest = tmp_path / "out" / "manifest.json"
+    recorded = manifest.read_bytes()
+    reads = reads_of_files(monkeypatch)
+    caplog.clear()
+    assert upscale(tmp_path, source_path, "out", *JOB) == 1
+    assert model_file not in reads and LOADED == [model_file]
+    assert steps.calls == []
+    errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert len(errors) == 1 and errors[0].exc_info is None
+    assert errors[0].getMessage() == (
+        f"{model_file}: SHA-256 {hashlib.sha256(b'other bytes').hexdigest()} as it loaded, where"
+        f" the job's record has {hashlib.sha256(b'model bytes').hexdigest()} for it, with the"
+        " size and modification time it records: changed since the job recorded it; put back"
+        " the file the job was made with, or give another output directory (-o) to start a job"
+        " with the file as it is"
+    )
+    assert manifest.read_bytes() == recorded
+    model_file.write_bytes(b"model bytes")
+    os.utime(model_file, ns=(status.st_atime_ns, status.st_mtime_ns))
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert steps.calls[0] == "encode 4"
+
+
+def test_a_touched_model_file_is_hashed_at_the_start_and_by_its_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # DESIGN.md, Pause and resume (decided on 2026-11-03): a file whose size or time differs
+    # from the record is hashed at the start, as before, and again by its load.
+    source_path, model_file = resumable(tmp_path, monkeypatch, steps, "out")
+    touch(model_file)
+    reads = reads_of_files(monkeypatch)
+    assert upscale(tmp_path, source_path, "out", *JOB) == 0
+    assert reads.count(model_file) == 1 and LOADED == [model_file, model_file]
+    assert steps.calls[0] == "encode 4"
+
+
+def test_a_new_job_hashes_an_unpinned_file_at_its_start_and_a_pinned_one_by_its_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps
+) -> None:
+    # DESIGN.md, Pause and resume (decided on 2026-11-03): on a new job, a file seedvr2x doesn't
+    # pin is hashed at its start, its settings recording its SHA-256 from the start, and again by
+    # its load; one it pins (the stand-in detector's) is vouched for by its pin, its size checked,
+    # and read by its load alone, which proves the pin.
+    source_path = job(tmp_path, monkeypatch)
+    model_file = tmp_path / "w.safetensors"
+    model_file.write_bytes(b"model bytes")
+    reads = reads_of_files(monkeypatch)
+    LOADED.clear()
+    options = JOB[2:]  # no cut list: the shot detector runs
+    assert upscale(tmp_path, source_path, "out", *options) == 0
+    detector_file = tmp_path / pull.DETECTOR
+    assert reads.count(model_file) == 1 and detector_file not in reads
+    assert LOADED == [detector_file, model_file, model_file]
+    settings = json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]
+    assert settings["dit_model"]["sha256"] == hashlib.sha256(b"model bytes").hexdigest()
+    assert settings["detector_model"]["sha256"] == STAND_IN_DETECTOR.sha256
 
 
 @pytest.mark.parametrize("accept", [(), ("--accept-env-change",)], ids=["unasked", "accepted"])
@@ -8046,9 +8184,15 @@ DETECTED = [
 
 def before_the_load(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
     """--plan's log, level and message, before its models load for the time estimates'
-    calibration (DESIGN.md, Memory planner): its plan and cut list's lines, the time's after."""
+    calibration (DESIGN.md, Memory planner): its plan and cut list's lines, the time's after.
+    The load starts with the first of its lines: a file's SHA-256 proved as it loaded
+    (pull.Hashes.proved), or the models loaded."""
     said = [(r.levelname, r.getMessage()) for r in caplog.records]
-    loaded = [i for i, (_, message) in enumerate(said) if message.startswith("models loaded in")]
+    loaded = [
+        i
+        for i, (_, message) in enumerate(said)
+        if message.startswith("models loaded in") or message.endswith("read as it loaded")
+    ]
     return said[: loaded[0]] if loaded else said
 
 

@@ -34,7 +34,7 @@ from huggingface_hub.errors import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
-from test_cli_run import STAND_IN_MODELS, StandInDetector, source, stand_in_model
+from test_cli_run import LOADED, STAND_IN_MODELS, StandInDetector, kept, source, stand_in_model
 from test_pull import (
     CONTENT,
     DIT,
@@ -145,8 +145,9 @@ def test_hashed_once_a_run(
     hashed: list[Path],  # noqa: F811
     where: str,
 ) -> None:
-    # The pinned check reads each file of seedvr2x's own, and the manifest's record takes its hash:
-    # one read per file a run, whether --model-dir holds it or the cache.
+    # Each file of seedvr2x's own read once a run, by its load, which proves its pin; the pinned
+    # check takes its size alone, and the manifest's record the pin's SHA-256, whether
+    # --model-dir holds it or the cache (DESIGN.md, Weights, decided on 2026-11-03).
     if where == "model-dir":
         options = ["--model-dir", str(model_dir(tmp_path))]
     else:
@@ -156,7 +157,8 @@ def test_hashed_once_a_run(
         name: (tmp_path / "models" / name if where == "model-dir" else hub.snapshot(name))
         for name in CONTENT
     }
-    assert [path for path in hashed if path.name in CONTENT] == [paths[DIT], paths[VAE]]
+    assert [path for path in hashed if path.name in CONTENT] == []
+    assert [path for path in LOADED if path.name in CONTENT] == [paths[DIT], paths[VAE]]
     settings = json.loads((tmp_path / "out" / "manifest.json").read_text())["settings"]
     for key, name in (("dit_model", DIT), ("vae_model", VAE)):
         assert settings[key] == {
@@ -271,7 +273,8 @@ def test_a_job_with_every_segment_made_fetches_nothing(
     # Face's cache, its DiT's file gone from it since: run again with every segment made, a
     # directory's job finished or a .mkv path's with its assembly alone left, it asks the
     # library for no download, neither reads nor checks the DiT's file, held to its pin, and is
-    # said finished, or assembled, exit 0, its VAE, still there, checked and hashed as any job's.
+    # said finished, or assembled, exit 0, its VAE, still there, checked and vouched for by the
+    # record's size and time.
     # A job with a unit to make in the same state fetches the file as before. (--model-dir's
     # file missing is refused as before: test_cli_run.py, test_a_finished_job_is_held_to_its_
     # model_files.)
@@ -292,12 +295,10 @@ def test_a_job_with_every_segment_made_fetches_nothing(
     hashed.clear()
     caplog.clear()
     assert upscale(tmp_path, output, *options) == 0
-    # The VAE, still there, is hashed as any job's where the job has its assembly left; a finished
-    # job compares it by size and time with its record and reads it not (DESIGN.md, Pause and
-    # resume, decided on 2026-10-29).
-    assert hub.calls == [] and [path for path in hashed if path.name in CONTENT] == (
-        [] if output == "out" else [hub.snapshot(VAE)]
-    )
+    # The VAE, still there, is compared by size and time with the record and read not, a
+    # finished job's (DESIGN.md, Pause and resume, decided on 2026-10-29) or one with its
+    # assembly left (decided on 2026-11-03).
+    assert hub.calls == [] and [path for path in hashed if path.name in CONTENT] == []
     held = (
         f"{DIT}: not in Hugging Face's cache, and not downloaded: the job has every segment made"
         f" and loads no model; held to its pin, hekmon/seedvr2x's at {REVISION[:8]}, SHA-256"
@@ -331,8 +332,10 @@ def test_a_job_whose_first_pass_runs_again_fetches_the_detector_alone(
     # and the shot detector's gone from Hugging Face's cache. Run again, its first pass runs
     # again with the detector, whose file it downloads, as any run whose detector runs; the
     # DiT's it neither downloads nor reads, held to its pin; the file is assembled, exit 0, its
-    # VAE, still there, checked and hashed as any job's. Until then it downloaded the DiT's file,
-    # 16.5 GB, for an assembly.
+    # VAE, still there, vouched for by the record's size and time, and the detector's file,
+    # downloaded again, of another time than the record's, hashed at the start (DESIGN.md, Pause
+    # and resume, decided on 2026-11-03). Until then it downloaded the DiT's file, 16.5 GB, for
+    # an assembly.
     caplog.set_level(logging.INFO)
     options = ["--dit-model", DIT, "--vae-model", VAE]
     # The files downloaded by a job before, so that this one's assembly alone, made last, is
@@ -357,7 +360,7 @@ def test_a_job_whose_first_pass_runs_again_fetches_the_detector_alone(
     assert [call["filename"] for call in hub.calls] == [pull.DETECTOR]
     assert not hub.snapshot(DIT).exists() and hub.snapshot(pull.DETECTOR).is_file()
     read = [path.name for path in hashed if path.name in (*CONTENT, pull.DETECTOR)]
-    assert sorted(read) == sorted([VAE, pull.DETECTOR])
+    assert read == [pull.DETECTOR]
     held = (
         f"{DIT}: not in Hugging Face's cache, and not downloaded: the job has every segment made"
         f" and loads no model; held to its pin, hekmon/seedvr2x's at {REVISION[:8]}, SHA-256"
@@ -1025,10 +1028,11 @@ def test_cache_behind_a_link(
     hub.snapshot(VAE).write_bytes(other)
     target_vae = hub.snapshot(VAE, target)
     assert upscale(tmp_path, "three.mkv", *options) == 1
-    assert caplog.messages[-1] == (
+    assert caplog.messages[-1] == at_load(
         f"{hub.snapshot(VAE)}: SHA-256 {hashlib.sha256(other).hexdigest()}, where"
         f" hekmon/seedvr2x's {VAE} at {REVISION[:8]} has {pins[VAE].sha256}: not the file"
-        f" seedvr2x pins, left as it is; {from_the_cache(VAE, target_vae, hub.cache)}"
+        f" seedvr2x pins, left as it is; {from_the_cache(VAE, target_vae, hub.cache)}",
+        tmp_path / "three.mkv.work",
     )
 
 
@@ -1042,17 +1046,18 @@ def test_cache_refusal_says_the_cache(
 ) -> None:
     # A file of the cache of its pinned size, other bytes: refused saying how to fetch it again
     # into the cache, the file to remove or huggingface_hub's command, and never to leave out the
-    # --model-dir no one gave.
+    # --model-dir no one gave; at the end of its load, the first pass kept (DESIGN.md, Weights,
+    # decided on 2026-11-03).
     other = bytes(len(CONTENT[DIT]))
     hub.served[DIT] = other
     assert upscale(tmp_path, "out", "--dit-model", DIT, "--vae-model", VAE) == 1
     link = hub.snapshot(DIT)
-    assert caplog.messages[-1] == (
+    assert caplog.messages[-1] == at_load(
         f"{link}: SHA-256 {hashlib.sha256(other).hexdigest()}, where hekmon/seedvr2x's {DIT} at"
         f" {REVISION[:8]} has {pins[DIT].sha256}: not the file seedvr2x pins, left as it is;"
-        f" {from_the_cache(DIT, link, hub.cache)}"
+        f" {from_the_cache(DIT, link, hub.cache)}",
+        tmp_path / "out",
     )
-    assert not (tmp_path / "out").exists()
 
 
 @needs_ffmpeg
@@ -1065,7 +1070,9 @@ def test_pinned_name_in_a_subdirectory(
     change: str,
 ) -> None:
     # --dit-model sub/<pinned name> in --model-dir names the pinned file all the same, by the
-    # name's last part: checked by its pin, and refused, by its size or its SHA-256.
+    # name's last part: checked by its pin, and refused, by its size at the start or its
+    # SHA-256 at the end of its load, the first pass kept (DESIGN.md, Weights, decided on
+    # 2026-11-03).
     directory = model_dir(tmp_path)
     (directory / "sub").mkdir()
     path = directory / "sub" / DIT
@@ -1077,11 +1084,14 @@ def test_pinned_name_in_a_subdirectory(
         found, pinned = f"{len(data):,} bytes", f"{pins[DIT].size:,}"
     else:
         found, pinned = f"SHA-256 {hashlib.sha256(data).hexdigest()}", pins[DIT].sha256
-    assert caplog.messages[-1] == (
+    refusal = (
         f"{path}: {found}, where hekmon/seedvr2x's {DIT} at {REVISION[:8]} has {pinned}: not the"
         f" file seedvr2x pins, left as it is; fetch it again from {url(DIT)}, {INTO_MODEL_DIR}"
     )
-    assert not (tmp_path / "out").exists()
+    if change == "size":
+        assert caplog.messages[-1] == refusal and not (tmp_path / "out").exists()
+    else:
+        assert caplog.messages[-1] == at_load(refusal, tmp_path / "out")
 
 
 @needs_ffmpeg
@@ -1350,3 +1360,11 @@ def test_pulled_before_torch(tmp_path: Path, mode: str) -> None:
         assert left == {"manifest.json": json.dumps(record).encode()}
     else:
         assert not (tmp_path / "out").exists()
+
+
+def at_load(refusal: str, directory: Path) -> str:
+    """A pin's refusal of a file read by its load, after the first pass (DESIGN.md, Weights,
+    decided on 2026-11-03): what is kept said (test_cli_run.kept) before the command it advises,
+    which stays its last line (main._kept_before_command)."""
+    first, newline, command = refusal.partition("\n")
+    return f"{first}{kept(directory)}{newline}{command}"

@@ -267,7 +267,8 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   safetensors' own tensors. `tests/test_pull.py` the pin's check with `load` reading nothing, its
   size first, its SHA-256 proved at the load's end or refused there in the pin's words; a SHA-256
   known before (a record's, a whole read's) held to the pin at once and proved by the load, each
-  refused in its own words; a file unknown before taken with the load's; `load_models` refusing a
+  refused in its own words, but a pinned file's a record vouches for, in the pin's; with
+  `whole`, a SHA-256 nothing vouches for read at once once its size has passed; a file unknown before taken with the load's; `load_models` refusing a
   file whose bytes aren't those expected at the end of its own load, before the next.
   `tests/test_detector.py` the detector's file opened once for its bytes (and once for its
   header's check), hashed, loaded from them and proved. The picture's run and the server's start
@@ -402,8 +403,17 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   match, nothing; hashed where one differs, the job said finished if the content is the same and
   refused if another file has the same size and a new time; a source vouched for only at its
   recorded path (a copy elsewhere with the same size and time is hashed); a record without the
-  time hashed as before; a job with anything left to make, its assembly included, hashing
-  everything at each start.
+  time hashed as before. A job with anything left to make vouches for its model files the same
+  way (DESIGN.md, Pause and resume, decided on 2026-11-03; `tests/test_cli_run.py`): nothing read
+  at a resume's start where size and time match, its load reading each once and proving the
+  record's SHA-256 (the stand-in's loads prove as the library's do: `proved`, `LOADED`); a file
+  changed with its size and time kept refused at the end of its load, before any unit, the
+  record as it was; a touched one hashed at the start and by its load; a new job's unpinned file
+  hashed at its start, its pinned one (the stand-in detector's) by its load alone; a job with its
+  assembly alone left reading no model file. A pinned file of its size and other bytes is refused
+  at the end of its load, the first pass kept, what is kept said before the command the refusal
+  advises, which stays its last line (`tests/test_pull_cli.py`). The source is hashed at each start of such a job,
+  as before.
   A `.mkv` path's finished file keeps its own manifest beside it (`tests/test_assembled.py`): the
   same command makes nothing, another job or a changed file is refused, `--plan` writes nothing,
   and a stop after each of the end steps (file, checksums, work record, manifest beside it,

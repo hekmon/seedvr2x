@@ -1077,7 +1077,7 @@ def _run(args: argparse.Namespace) -> int:
         # directory's, finished, which makes nothing; a .mkv path's, whose assembly alone is
         # left, ffmpeg's work. Its driver isn't asked, no NVML is read, no CUDA device is
         # wanted, and its environment is compared without the GPU (_identity). It is held to its
-        # model files as any job, checked and hashed below, none of which takes a GPU; but it
+        # model files as any job, checked below, none of which takes a GPU; but it
         # loads none, and one of seedvr2x's own missing from Hugging Face's cache is held to its
         # pin, not downloaded (pull.resolve; DESIGN.md, Pause and resume, decided on 2026-10-13).
         # But a .mkv path's whose first pass must run again with the shot detector, its frame
@@ -1088,15 +1088,16 @@ def _run(args: argparse.Namespace) -> int:
         made = recorded is not None and complete(recorded)
         idle = made and not detects
         # The model files, from --model-dir, or seedvr2x's own from Hugging Face's cache, pulled
-        # into it when missing, in one fetch, but for a job with every segment made (`made`),
-        # which fetches the shot detector's alone, where its first pass runs with it;
-        # checked by their headers, in a second, then seedvr2x's own by their pinned size and
-        # SHA-256 (16.5 GB to read for the DiT), which the manifest's record takes: before the
-        # resume's comparison and the first pass, which decodes the whole source (DESIGN.md,
-        # Weights). The header check comes first, as DESIGN.md has it (Weights, Recognised by
-        # content); its refusal of one of seedvr2x's own files, given in its own role, says how
-        # to fetch it again, as the pin's does (pull.advice). SIGTERM, which kills the process at
-        # once until the run installs its handlers (stop.py), unwinds a download as
+        # into it when missing, in one fetch, but for a job with every segment made (`made`), which
+        # fetches the shot detector's alone, where its first pass runs with it; checked by their
+        # headers, in a second, then seedvr2x's own by their pinned size, and their SHA-256, which
+        # the manifest's record takes, vouched for by the job's record or the pin or read where
+        # neither does: before the resume's comparison and the first pass, which decodes the whole
+        # source; their load, after the plan, reads each once and proves it (DESIGN.md, Weights,
+        # decided on 2026-11-03). The header check comes first, as DESIGN.md has it (Weights,
+        # Recognised by content); its refusal of one of seedvr2x's own files, given in its own role,
+        # says how to fetch it again, as the pin's does (pull.advice). SIGTERM, which kills the
+        # process at once until the run installs its handlers (stop.py), unwinds a download as
         # Ctrl-C does, so that the library removes its partial file, up to 16.5 GB that no later
         # download takes up (seedvr2x/pull.py, at its end).
         with terminable():
@@ -1112,13 +1113,18 @@ def _run(args: argparse.Namespace) -> int:
         check_models(
             *(dit, vae, pull.advice(model_files)), None if detector is None else detector.path
         )
-        if recorded is not None and (final is None or finished_file) and complete(recorded):
-            # A finished job (every segment made and, for a .mkv path, its file in place:
-            # finished_file) holds its model files to its record by size and time, and reads none
-            # where both match; one with anything left to make, its assembly included, hashes
-            # them (DESIGN.md, Pause and resume, decided on 2026-10-29).
+        if recorded is not None:
+            # A job recorded, finished or not, holds its model files to its record by size and
+            # time, and reads none where both match: its load, if it runs, proves them, hashing
+            # the bytes it reads, before any unit (DESIGN.md, Pause and resume, decided on
+            # 2026-10-29 for a finished job, on 2026-11-03 for any). A file whose size or time
+            # differs is hashed at the start, as before, and again by its load.
             _vouch_models(model_files, recorded)
-        pull.check_pinned(model_files)
+        # A new job's file of seedvr2x's own is vouched for by its pin, its size checked, and
+        # proved by its load (a job with every segment made loads no DiT or VAE). On a job
+        # recorded, one its record doesn't vouch for is hashed at once, its size first passed by
+        # a stat; one seedvr2x doesn't pin is hashed for the job's settings (_model).
+        pull.check_pinned(model_files, load=not made, whole=recorded is not None)
         # The allocator, set before torch is imported, which the job's identity does and, for a
         # job recorded, the modules that compare it (_prior): numz's, which DESIGN.md keeps
         # (Allocator), or torch's own where the GPU's driver gives memory the card doesn't have,
@@ -2165,11 +2171,12 @@ def _load(
         )
     except (ModelError, HostMemoryError, CompileError) as error:
         # A model file replaced since its check, during the first pass: refused as the check
-        # refuses it, or as changed since its hash. Or a host that can't hold the pinned copies
-        # of the weights the plan has away from the GPU: refused before the run, naming the RAM
-        # they take (DESIGN.md, BlockSwap, rewritten). Or a VAE that did not compile
+        # refuses it, or as changed since its hash; or one whose bytes, read by its load, aren't
+        # those the run took them for (pull.Hashes.proved). Or a host that can't hold the
+        # pinned copies of the weights the plan has away from the GPU: refused before the run,
+        # naming the RAM they take (DESIGN.md, BlockSwap, rewritten). Or a VAE that did not compile
         # (--compile), refused as it is, never run plain in its place.
-        logger.error("%s%s", error, kept)
+        logger.error("%s", _kept_before_command(str(error), kept))
         return None
     except torch.OutOfMemoryError as error:
         # The weights the plan has on the GPU don't fit there after all: other programs hold
@@ -3270,14 +3277,16 @@ FREE_THE_CARD = (
     ' "GPU memory" section says how to see them on each system)'
 )
 # What the checks that come before a resume's plan take, for the early warning to say for how long
-# the memory can be freed: the model files' hashes, 120 s whatever the job (seconds), and the
-# source's hash and a one-file output's remux rehearsal, both by the source's size, at the rates of
-# milestone 7's third night on an RTX 5090, 2026-10-27, whose source was a 7.49 GB file: hashed in
-# 36 s and rehearsed in 66 s (DESIGN.md, Memory planner, A resume whose recorded shape no longer
-# fits, as design worded it on 2026-10-29), in bytes a second. The rehearsal is a one-file
-# output's alone (_copied). PROVISIONAL (impl-v010, 2026-10-29: rates of one night's disk, not a
-# timed read). Until 2026-10-29 the source was taken for 26 GB, 3.5 times what that night's was.
-CHECK_MODELS = 120
+# the memory can be freed: the source's hash and a one-file output's remux rehearsal, both by the
+# source's size, at the rates of milestone 7's third night on an RTX 5090, 2026-10-27, whose source
+# was a 7.49 GB file: hashed in 36 s and rehearsed in 66 s (DESIGN.md, Memory planner, A resume
+# whose recorded shape no longer fits, as design worded it on 2026-10-29), in bytes a second. The
+# rehearsal is a one-file output's alone (_copied). PROVISIONAL (impl-v010, 2026-10-29: rates of
+# one night's disk, not a timed read). Until 2026-10-29 the source was taken for 26 GB, 3.5 times
+# what that night's was. The model files' hashes, 2 min that night, counted until 2026-11-04: a
+# resume vouches for them by its record's sizes and times, and their load, after the plan, reads
+# them (_vouch_models; DESIGN.md, Pause and resume, decided on 2026-11-03); one touched since
+# is hashed before the plan, beyond the minutes said, which never says too much.
 CHECK_SOURCE_RATE, CHECK_REHEARSAL_RATE = 7.49e9 / 36, 7.49e9 / 66
 
 
@@ -3341,14 +3350,15 @@ def _replan_refusal(error: "PlanError") -> str:
 
 def _checks_ahead(args: argparse.Namespace, rehearses: bool) -> int:
     """The seconds the checks that come before a resume's plan take, for the early warning: the
-    models' hashes, the source's, and a one-file output's remux rehearsal where it runs, its
-    record not trusted (`rehearses`; _rehearsed), the last two by the source's size (CHECK_*)."""
+    source's hash and a one-file output's remux rehearsal where it runs, its record not trusted
+    (`rehearses`; _rehearsed), both by the source's size (CHECK_*); the model files, vouched for
+    by the record, are read by their load, after the plan."""
     try:
         source = args.input.stat().st_size
     except OSError:
         source = 0
     rehearsal = source / CHECK_REHEARSAL_RATE if rehearses else 0
-    return round(CHECK_MODELS + source / CHECK_SOURCE_RATE + rehearsal)
+    return round(source / CHECK_SOURCE_RATE + rehearsal)
 
 
 def _early_memory(
@@ -3455,6 +3465,15 @@ def _early_memory(
         )
     except (Refusal, KeyError, TypeError, ValueError) as error:
         logger.debug("the recorded plan isn't judged before the checks: %s", error)
+
+
+def _kept_before_command(refusal: str, kept: str) -> str:
+    """A refusal with what is kept (_first_kept) said before the command it advises on a line of
+    its own, which stays its last line, to be copied whole (DESIGN.md, Architecture, What it
+    prints, decided on 2026-10-29): the pin's refusal of a file read by its load, after the first
+    pass (pull.check_pin; DESIGN.md, Weights, decided on 2026-11-03)."""
+    first, newline, command = refusal.partition("\n")
+    return f"{first}{kept}{newline}{command}"
 
 
 def _first_kept(directory: Path | None) -> str:
@@ -4101,13 +4120,16 @@ def _long_read(path: Path) -> tuple[str, str]:
 
 
 def _vouch_models(model_files: "ModelFiles", recorded: dict[str, Any]) -> None:
-    """For a finished job (_run), take the SHA-256 its record holds for each model file whose size
-    and modification time are those recorded beside it (pull.Hashes.vouch), so that neither the
-    pin's check (pull.check_pinned) nor the job's identity (_model) reads the file: the DiT's
-    16.5 GB took 84 s to hash on the RTX 5090. A file by another name than the record's, or of
-    another size or time, or from a record that has no time (written before it was kept), is
-    hashed as before, said before it starts (pull.Hashes.sha256). The record is not rewritten
-    (a finished job's manifest never is), so a touched file is hashed at every start."""
+    """For a job recorded (_run), finished or not, take the SHA-256 its record holds for each model
+    file whose size and modification time are those recorded beside it (pull.Hashes.vouch), so
+    that neither the pin's check (pull.check_pinned) nor the job's identity (_model) reads the
+    file: the DiT's 16.5 GB took 84 s to hash on the RTX 5090. Its load, where the job has
+    anything to make, proves it, refusing a file changed with its size and time kept
+    (_changed_in_place) before any unit (DESIGN.md, Pause and resume, decided on 2026-11-03). A
+    file by another name than the record's, or of another size or time, or from a record that has
+    no time (written before it was kept), is hashed as before, said before it starts
+    (pull.Hashes.sha256). A finished job's record is not rewritten, so a touched file is hashed
+    at every start."""
     from seedvr2x import pull
 
     settings: Any = recorded.get("settings")
@@ -4127,12 +4149,33 @@ def _vouch_models(model_files: "ModelFiles", recorded: dict[str, Any]) -> None:
                 and type(size) is int
                 and type(time_ns) is int
                 and isinstance(digest, str)
-                and model_files.hashes.vouch(file.path, size, time_ns, digest)
+                and model_files.hashes.vouch(
+                    file.path, size, time_ns, digest, _changed_in_place(file.path, digest)
+                )
             ):
                 logger.debug(
                     "%s: size and modification time as recorded: SHA-256 not read", file.name
                 )
                 break
+
+
+def _changed_in_place(path: Path, digest: str) -> Callable[[str], str]:
+    """The refusal of a model file vouched for by the job's record, by its size and modification
+    time, whose load read another SHA-256 than the record's, found: the file changed with its size
+    and time kept, which another job's settings would hold. PROVISIONAL (impl-oneread, 2026-11-04:
+    DESIGN.md, Pause and resume, decided on 2026-11-03, says the file is refused at the end of its
+    load and gives no words). A file of seedvr2x's own is refused in its pin's words instead
+    (pull.check_pin)."""
+
+    def refusal(found: str) -> str:
+        return (
+            f"{path}: SHA-256 {found} as it loaded, where the job's record has {digest} for it,"
+            " with the size and modification time it records: changed since the job recorded it;"
+            " put back the file the job was made with, or give another output directory (-o) to"
+            " start a job with the file as it is"
+        )
+
+    return refusal
 
 
 def _content(path: Path, vouching: dict[str, Any] | None = None) -> dict[str, object]:
@@ -4929,15 +4972,17 @@ def _another_job(
 def _model(file: "ModelFile", model_files: "ModelFiles") -> dict[str, object]:
     """A model as the manifest records it: its file's name, as given, its size and SHA-256, models
     being identified by hash (DESIGN.md, Options kept and dropped). The 7B fp16 DiT is 16.5 GB to
-    read, once a run: a file seedvr2x pins was hashed by its check already (pull.Hashes). One of
+    read, once a run, by its load: the SHA-256 a job's record or a file's pin vouches for is
+    taken unread, and the load proves it before any unit (pull.Hashes; DESIGN.md, Weights,
+    decided on 2026-11-03); a file neither vouches for is hashed here, at the start. One of
     seedvr2x's own that a job with every segment made doesn't have, held to its pin
     (pull.ModelFile.absent): the pin's size and SHA-256, those its record has where the file
     passed its pin check, as the shot detector's is taken on a trusted resume
     (_detector_model).
 
     Its modification time, in nanoseconds, is recorded beside the size and the SHA-256 (decided on
-    2026-10-29, DESIGN.md, Pause and resume): a finished job run again compares the file by size
-    and time with it and reads nothing where both match (_vouch_models). Not compared as a
+    2026-10-29, DESIGN.md, Pause and resume): a job run again, finished or not, compares the file
+    by size and time with it and reads nothing where both match (_vouch_models). Not compared as a
     setting (pull.TIMES), and absent for a file held to its pin, which nothing stat'ed."""
     from seedvr2x import pull
 

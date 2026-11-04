@@ -197,6 +197,12 @@ class Hashes:
         """Whether the run knows the SHA-256 of the file at path, so that sha256 reads nothing."""
         return path in self._read
 
+    def proven(self, path: Path) -> bool:
+        """Whether a read of the whole file at path gave its SHA-256 this run: a hash at the start
+        (sha256) or its load (proved), not a record's or a pin's word for it."""
+        known = self._read.get(path)
+        return known is not None and known.proved
+
     def vouch(
         self,
         path: Path,
@@ -474,14 +480,15 @@ def fetch(pins: Mapping[str, Pin], download: Collection[str] | None = None) -> d
     return {name: found[name] for name in pins if name in found}
 
 
-def check_pinned(model_files: ModelFiles, *, load: bool = False) -> None:
+def check_pinned(model_files: ModelFiles, *, load: bool = False, whole: bool = False) -> None:
     """Check each of seedvr2x's own files among the run's against its pin (check_pin), by the name
     it was given, wherever it is read from: a file of --model-dir named like one of seedvr2x's own
     is checked as one, its refusal saying how to fetch it again only when given in the pinned
     file's own role (advice). Every file refused is said at once (ModelError, a line each, and
     another for the command a cache's refusal advises). A file seedvr2x doesn't pin is said so in
     the log, and runs as the header check accepted it. With `load`, the run loads the files, and
-    a SHA-256 not known yet is left to the load (check_pin)."""
+    a SHA-256 not known yet is left to the load, but with `whole`, where it is read at once, once
+    the size has passed (check_pin)."""
     refusals: list[str] = []
     # Each file once, in the first role it was given.
     first: dict[ModelFile, Role] = {}
@@ -500,6 +507,7 @@ def check_pinned(model_files: ModelFiles, *, load: bool = False) -> None:
             check_pin(
                 *(name, file.path, PINNED[name], model_files.hashes, model_files.cache, role),
                 load=load,
+                whole=whole,
             )
         except ModelError as error:
             refusals.append(str(error))
@@ -531,12 +539,16 @@ def check_pin(
     role: Role | None = None,
     *,
     load: bool = False,
+    whole: bool = False,
 ) -> None:
     """Refuse (ModelError) the file at path unless it is REPO's file name at REVISION as pin pins
     it: its size first, by a stat, then its SHA-256, read once per run (hashes). With `load`, a
-    file the run loads, whose SHA-256 the run doesn't know yet (Hashes.known), is read by its load
-    alone: its size checked here, its SHA-256 at the load's end, refused there in the same words
-    (Hashes.expect, Hashes.proved; DESIGN.md, Weights, decided on 2026-11-03). The refusal says
+    file the run loads, whose SHA-256 no whole read gave yet (Hashes.proven), is read by its load
+    alone: its size checked here, a SHA-256 a record vouches for held to the pin, the pin's
+    proved at the load's end, refused there in the same words (Hashes.expect, Hashes.proved;
+    DESIGN.md, Weights, decided on 2026-11-03); with `whole` too, a SHA-256 nothing vouches for
+    is read now, once its size has passed, as a job's record that no longer vouches for its file
+    asks (DESIGN.md, Pause and resume, decided on 2026-11-03). The refusal says
     both sizes or both hashes, and how to fetch the file again, into Hugging Face's cache (its
     directory, cache) or into --model-dir (cache None), unless it was given in a role (role) other
     than the pinned file's, as advice has it. Nothing is deleted, where numz's downloader deletes
@@ -558,9 +570,14 @@ def check_pin(
     if size != pin.size:
         raise ModelError(refusal(f"{size:,} bytes", f"{pin.size:,}"))
     said = f"{name}: its size and SHA-256 as seedvr2x pins them, {REPO} at {REVISION[:8]}"
-    if load and not hashes.known(path):
+    if load and not hashes.proven(path) and (hashes.known(path) or not whole):
         # Its load hashes it as it reads it, and refuses it at its end in the same words
-        # (DESIGN.md, Weights, decided on 2026-11-03): one read, not two.
+        # (DESIGN.md, Weights, decided on 2026-11-03): one read, not two. A SHA-256 a job's
+        # record vouches for (Hashes.vouch) is held to the pin at once, as before; the load then
+        # proves the pin's, and a file changed since is refused in the pin's words, which say
+        # how to fetch it again.
+        if hashes.known(path) and (vouched := hashes.sha256(path)) != pin.sha256:
+            raise ModelError(refusal(f"SHA-256 {vouched}", pin.sha256))
         hashes.expect(path, pin.sha256, lambda found: refusal(f"SHA-256 {found}", pin.sha256), said)
         logger.info(
             "%s: its size as seedvr2x pins it, %s at %s; its SHA-256 checked as it loads",
