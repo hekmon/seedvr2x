@@ -24,8 +24,8 @@ A SeedVR2 video upscaler for **long runs** (whole episodes or films) that:
     with every block swapped, 20 and 28 latents (20 measured on an emulated 24 GB card, see
     [Memory planner](#memory-planner)).
   - A 16 GB card can't hold the 7B fp16's weights (15.35 GiB) at all: it swaps every block,
-    for windows of 12 latents at 1080p (measured on an emulated one), and phase 2's smaller
-    files lighten it (see [Weights](#weights)).
+    for windows of 12 latents at 1080p (measured on an emulated one), and the 7B's smaller
+    files lighten it, int8 and the dynamic GGUF from v0.1.0 (see [Weights](#weights)).
   - Below 48 GB, the 1080p VAE decode only fits tiled. At 4K, every card tiles the decode,
     the 96 GB one included, and that one's windows hold about 19 latents.
   - 4K takes 22.4 GiB of free VRAM for the DiT's smallest window, every block swapped, and
@@ -68,9 +68,13 @@ sptenc shapes the interfaces (segment directories, cut lists, master formats), b
 never requires it.
 
 ### Not in the first version
-- macOS/MPS, AMD/ROCm (still images and the image server are in v0.1.0 since 2026-11-02,
-  ComfyUI's nodes since 2026-11-03: [Repository and apps](#repository-and-apps), steps 3 and 4)
-- Windows itself: v0.2.0 (the user, 2026-10-24). Linux runs it, WSL2 included.
+- AMD/ROCm (still images and the image server are in v0.1.0 since 2026-11-02:
+  [Repository and apps](#repository-and-apps), step 3)
+- Windows and macOS: v0.2.0, the multi-platform version (the user: Windows on 2026-10-24,
+  macOS with it on 2026-11-04). Linux runs it, WSL2 included.
+- ComfyUI's nodes, published: with v0.2.0, on Linux, Windows and macOS (the user,
+  2026-11-04). Their design and code begin before v0.1.0, run from a local ComfyUI
+  ([Repository and apps](#repository-and-apps), step 4)
 - A job's work directory away from its output file (the user asked, on 2026-10-24, for the
   scratch on one disk and the file on another): its masters live there, as large as the file.
 - Machines whose CPU and GPU share one memory: NVIDIA's DGX Spark (128 GB for both) and its RTX
@@ -78,16 +82,17 @@ never requires it.
   planner counts the card's free memory and the host's as two pools, one there, and swaps blocks
   between them, a copy within the same memory there. They need a planner of one pool, nothing
   swapped or pinned, the model and the scratch drawing on it alike, and the stack built for an
-  ARM CPU. Later, on a DGX Spark, which the user means to get (2026-10-29), on the RTX Spark PCs
-  (the user, 2026-11-02), which run Windows, so after the Windows port (version 0.2.0), and on
-  Apple's M chips, on the roadmap too (the user, 2026-11-02; the larger base of users): the M
-  chips also need PyTorch's MPS backend in place of CUDA.
+  ARM CPU. Apple's M chips first, with macOS in v0.2.0 (the user, 2026-11-04; the larger base
+  of users): they also need PyTorch's MPS backend in place of CUDA. Later, on a DGX Spark,
+  which the user means to get (2026-10-29), and on the RTX Spark PCs (the user, 2026-11-02),
+  which run Windows, both on the planner of one pool the M chips bring.
 - Multi-GPU in one process (separate processes on separate shot ranges can come later, see
   [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
-- Models other than ByteDance's 7B and sharp 7B in fp16, and their int8 files, built and
-  tested before v0.1.0 is tagged. Phase 2, after v1, brings their other smaller files; no
-  other model is planned (see [Weights](#weights))
+- Models other than ByteDance's 7B and sharp 7B in fp16, their int8 files and their dynamic
+  GGUF files (the model card's tiers; the GGUF for small cards, the user, 2026-11-04), built
+  and tested before v0.1.0 is tagged. Phase 2, after v1, brings their other smaller files
+  (fp8, Q8_0, Q4_K, NVFP4); no other model is planned (see [Weights](#weights))
 - An output size whose smallest window doesn't fit the VRAM free at the start, 4K under 22.4
   GiB free for one: refused, naming the free VRAM it takes and the largest size that fits
   (see [Memory planner](#memory-planner))
@@ -153,8 +158,9 @@ never requires it.
     hard-telecined sources often are. Measured: at most 2.1% on 36 real progressive sources'
     first 6,000 frames and 0.09% over 7 whole films and episodes, against 88% on a telecined
     DVD (97% over the whole). Its counts go in the manifest, for information.
-- Windows: Linux first, since inference is mostly a Linux world. Windows is a best-effort port
-  after the prototype, starting with an analysis of:
+- Windows and macOS: Linux first, since inference is mostly a Linux world. Both come in
+  v0.2.0, first-class (the user: Windows on 2026-10-24, macOS with it and both first-class on
+  2026-11-04, ComfyUI's nodes needing them). Windows starts with an analysis of:
   - FlashAttention 2 and `torch.compile`'s Triton there (SDPA works everywhere)
   - the driver spilling VRAM into system memory instead of failing (numz enforces the physical
     limit for this), which the planner must prevent. A Windows driver does it under WSL too,
@@ -217,9 +223,11 @@ seedvr2x/                the repository
   loading, the model files' pull and check, the DiT's placement and BlockSwap, its sampling of
   latents, a VAE pass and its tiling, the VAE's compilation, the colour correction, and the
   memory model that says what each brick takes. The workflows are the apps': the CLI's for long
-  videos (shots, windows, segments, a job's plan, saving and resume), the image server's,
-  ComfyUI's nodes. No workflow, nor any part of one, sits in the library: a part two apps would
-  share is discussed when it appears. The library is not the CLI stripped of its command. It
+  videos (shots, segments, a job's plan, saving and resume), the image server's, ComfyUI's
+  nodes. No workflow, nor any part of one, sits in the library: a part two apps would share is
+  discussed when it appears. The first is the shot's pass, its windows and their plan, which
+  moves to the library for ComfyUI's nodes (the user, 2026-11-04; below). The library is not
+  the CLI stripped of its command. It
   declares version ranges, not exact pins, so that it can run in another program's environment
   (ComfyUI's, with its own torch).
 - **Each app is its own uv project, with its own lock**, `core/` by path, so that an app's
@@ -245,20 +253,63 @@ seedvr2x/                the repository
   [The image server](#the-image-server)'s. In v0.1.0 with the CLI's still images (the user,
   2026-11-02), built and measured with the rest, neither holding the release if it isn't
   ready with it.
-- **ComfyUI's nodes, in v0.1.0** (the user, 2026-11-03; on 2026-11-02, after it: light on
-  seedvr2x's side, its bricks tested by the library's suite, ComfyUI doing the input and
-  output, the models and the memory): in this repository, where ComfyUI's own install (its
-  Manager, its registry) finds them. Only the bare minimum ComfyUI needs to find and import them
-  sits at the root, a `pyproject.toml` and an `__init__.py`, commented so: the `__init__.py`
-  only imports the nodes from `apps/comfyui/`, where all their code is. Real files, not
-  symbolic links, which Git on Windows checks out as text files. A light version, on purpose:
-  ComfyUI's own model and memory management, no cut detection (the frames given are one shot,
-  in sliding windows), no ffmpeg (ComfyUI's video nodes load and save). The full features stay
-  the CLI's, to which the nodes point. They need Windows and macOS: the library must then import
-  and run there, its Linux-only parts kept to the apps. macOS comes with Apple's M chips
-  (PyTorch's MPS backend, the roadmap's later); on Windows they need the library alone to run
-  there, not the command's port, version 0.2.0's. The sliding windows and their blend are the
-  CLI's today: the nodes need them too, a shared part discussed when the nodes are designed.
+- **ComfyUI's nodes, begun before v0.1.0 and published with v0.2.0** (the user: after v0.1.0
+  on 2026-11-02, in it on 2026-11-03, published with v0.2.0 on 2026-11-04). ComfyUI is where
+  most users will meet seedvr2x first, on their own cards, small ones included: the nodes show
+  what seedvr2x brings, and send users on to the CLI for the rest. Their specification began
+  on 2026-11-04 (the user):
+  - **Published with v0.2.0.** With seedvr2x's own placement (below), Windows and macOS are
+    first-class for the nodes: the library runs right there, not only imports. Their design and
+    code begin now, in `apps/comfyui/`, installed by hand into a local ComfyUI for
+    development; nothing of them is published with v0.1.0. They are published with v0.2.0,
+    the multi-platform version, when the command reaches Windows and macOS too and a user can
+    follow them to it. Published,
+    they sit in this repository, where ComfyUI's own install (its Manager, its registry) finds
+    them. Only the bare minimum ComfyUI needs to find and import them sits at the root, a
+    `pyproject.toml` and an `__init__.py`, commented so: the `__init__.py` only imports the
+    nodes from `apps/comfyui/`, where all their code is. Real files, not symbolic links, which
+    Git on Windows checks out as text files.
+  - **ComfyUI runs SeedVR2 itself** since its v0.28.0 (July 2026, its pull request 14424): its
+    own nodes, the 3B, the 7B and the sharp 7B in several precisions, int8 among them, on
+    ComfyUI's model and memory management. numz's nodes load and place the models their own
+    way, with a setting for each choice. Before the nodes are specified, both are measured
+    beside seedvr2x on the RTX 5090, smaller cards emulated: time, memory, what runs on which
+    card, and the pictures for the eyes.
+  - **seedvr2x's own loaders and placement**, reversing 2026-11-02's "ComfyUI's own model and
+    memory management": on ComfyUI's, the nodes would be ComfyUI's own SeedVR2 again, and its
+    partial loading knows none of the plan's windows, tiles and measured peaks. The nodes load
+    the models with the library and place them by the plan for the card. ComfyUI is asked to
+    unload its own models before they load, its Cancel is honoured between steps and its
+    progress bar moves; whether ComfyUI can unload seedvr2x's models when another node needs
+    the card is read in its code.
+  - **The model files from Hugging Face's cache**, as the CLI and the image server take them, or
+    from a directory given; not ComfyUI's `models/` folders, where its own SeedVR2 files sit and
+    its loaders would list seedvr2x's. A user who goes on to the CLI finds the files there
+    already. The README says where the cache is and how to move it (`HF_HOME`), for users who
+    keep their models on another disk.
+  - **No cut detection, no ffmpeg:** the frames given are one shot, in sliding windows, and
+    ComfyUI's video nodes load and save. A clip and its output are held in memory, as ComfyUI
+    holds any video (about 100 MB a 4K frame in float32). The full features stay the CLI's, to
+    which the nodes point; the README says the limits: a cut inside a window blends two scenes,
+    and nothing resumes.
+  - **Small cards are the nodes' users,** not a side case: v0.1.0 gives them seedvr2x's own
+    smaller files of the 7B (the user, 2026-11-04), int8's 8.3 GB and the dynamic GGUF's
+    4.8 GB, the model card's tiers, in every app ([Weights](#weights)). An 8 GB card stays out
+    at 1080p today by the VAE's floor (8.27 GiB free), which no DiT file moves: how the other
+    two fit one is the measurement's to show.
+  - **The shot's pass moves to the library.** The sliding windows, their blend and the plan that
+    sizes them, over frames in memory, are the CLI's today; used by two apps, they become
+    bricks of `core/`, the CLI keeping its jobs, cuts, segments and resume, by a change of its
+    own. The picture node comes first, on what the library already has.
+  - The nodes need Windows and macOS: the library must then import and run there, its Linux-only
+    parts kept to the apps. On macOS that is Apple's M chips, with PyTorch's MPS backend and
+    the planner of one pool ([Not in the first version](#not-in-the-first-version)). On Windows
+    the library must run right, not only import: pinned host memory, the card's readings, and
+    the driver's fallback to system memory, on by default.
+  - ComfyUI's process is not seedvr2x's: its Python, its torch and its allocator (ComfyUI turns
+    on `cudaMallocAsync` by default) are its user's, and the library requires Python 3.13
+    today. The plan's figures, measured in the CLI's environment, are checked in ComfyUI's
+    before the nodes rely on them.
 - **The front README:** short, there to catch a visitor long enough to send them on to the
   app's README (the user, 2026-11-02). A line saying what seedvr2x does; a picture of the best
   it makes, an input beside seedvr2x's output at `--quality maximum`, the caption saying so;
@@ -380,12 +431,11 @@ In steps:
    later, takes the same four modules. Built on 2026-11-03 (impl-still), on the CPU, no video
    plan moving over the plan matrix's 5,480 cases. Neither holds the release if it isn't ready
    with the rest; the roadmap shows them under next until then.
-4. ComfyUI's nodes, in v0.1.0 (the user, 2026-11-03), assembling the same bricks, built by a
-   conductor of their own beside the image server's. Their specification is discussed once the
-   server's conductor has begun; meanwhile it changes the library only where the server needs
-   it, each change listed in its report, and never the CLI, so that what the nodes' conductor
-   would change with it is known before the nodes' conductor starts. Neither holds the release
-   if it isn't ready with the rest; the roadmap shows them under next until then.
+4. ComfyUI's nodes, begun before v0.1.0 and published with v0.2.0 (the user, 2026-11-04),
+   assembling the same bricks, built by a conductor of their own. Their specification, begun
+   on 2026-11-04 (above), waits for two things: the measurement of ComfyUI's own SeedVR2 and
+   numz's nodes beside seedvr2x, and the shot's pass moved to the library. They don't hold
+   v0.1.0; the roadmap shows them under next.
 
 ## Architecture
 
@@ -583,7 +633,7 @@ connect through files.
 ### Weights
 v1 runs ByteDance's sharp 7B by default, and the regular 7B, both DiTs in fp16 with the fp16
 VAE, Apache-2.0 (seedvr2x's own files: see the Hugging Face repo below). Phase 2 brings the
-two 7Bs' smaller files (below), their int8 files first:
+two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
 - **int8 before v0.1.0 is tagged** (the user, 2026-11-02): the int8 files, INT8 W8A8 with
   comfy-kitchen's rotation, phase 2's first runtime (below), are built into seedvr2x and
   tested on the 96 GB card with the rest of v0.1.0's checks. They become the default where
@@ -652,6 +702,18 @@ two 7Bs' smaller files (below), their int8 files first:
     beyond those figures. It is off by default and seedvr2x never sets it, but
     `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` forces it: the pass after the card's measurements makes
     an int8 run refuse it, saying why, as no difference stays silent.
+- **The dynamic GGUF before v0.1.0 too** (the user, 2026-11-04, for the small cards ComfyUI's
+  nodes serve): the model card's 4 GB tier, `seedvr2x_ema_7b_sharp_dyn.gguf` and the regular
+  7B's beside it (4.8 GB, a type per matrix among Q3_K to Q8_0), in every app, the CLI, the
+  image server and the nodes alike: a model file is a brick of the library, and a file the
+  nodes took and the CLI refused would stop a user on the way to it. Its gain is memory, the
+  host's above all: every block swapped, the DiT's weights take about 4.5 GiB of pinned host
+  memory in place of float16's 15, and a swap moves under a third of float16's bytes. It saves
+  no VRAM where the VAE's floor binds (an 8 GB card at 1080p), and runs a little slower than
+  float16 (the model card). The rest is the build's: the file checked by its own header, as
+  int8's, each matrix dequantised on the card where it is used, the dequantisation held on the
+  CPU to ggml's own, its buffers in the planner by measurement, seedvr2x's own runs checked
+  against the model card's figures. It is an option, never the default.
 - **The sharp 7B is the default, on the user's eyes** (2026-10-07): on 75 windows of 4K and
   1080p crops they preferred it or saw no difference on 67 (it 27, the 7B 8), the grainy first
   film's skin no longer "almost reptilian". At 4K it invents less of the fine texture the eyes
@@ -677,19 +739,21 @@ two 7Bs' smaller files (below), their int8 files first:
   is what numz goes by (`src/core/model_configuration.py:718-720`): their names and shapes,
   pinned per architecture, and every tensor's dtype, read from the file's header without
   torch, before anything else runs (the resume's comparison, the first pass). Anything but a 7B
-  in fp16, the sharp one or the regular one (and their int8 files, once built: above), is
-  refused, saying what the file is; so is a file holding other tensors beside the model's.
+  in fp16, the sharp one or the regular one (and their int8 and dynamic GGUF files, once built:
+  above), is refused, saying what the file is; so is a file holding other tensors beside the
+  model's.
 - **Small cards** rely on BlockSwap and tiling (milestone 3): the 7B fp16 DiT's weights alone
   take 15.35 GiB. Milestone 3 measures how small a card that reaches, 16 GB being the aim:
   there every block is swapped, its weights in pinned host RAM (about 15 GiB of it). numz's
   Q4_K_M, every block swapped, ran 1080p in batches of 13 latents on an emulated 16 GB card,
   and of 5 on an 8 GB one ([vram.md](research/docs/vram.md#recipe-per-card-size-validated)):
-  phase 2's smaller files make small cards lighter on memory, host RAM and transfers.
+  the smaller files, int8 and the dynamic GGUF from v0.1.0 and phase 2's others after it, make
+  small cards lighter on memory, host RAM and transfers.
 
 #### Phase 2: the other models
-A phase of its own, after v1 (int8 excepted: above), settles which models to keep, which to
-make again and how, how they differ and by which metrics, and how users are guided to them.
-What is known already:
+A phase of its own, after v1 (int8 and the dynamic GGUF excepted: above), settles which
+models to keep, which to make again and how, how they differ and by which metrics, and how
+users are guided to them. What is known already:
 - **numz's registry**, Apache-2.0: the 3B and the 7B in fp16, fp8 (`e4m3fn`; the 7B's file
   keeps its last block in fp16) and GGUF (Q4_K_M, and Q8_0 for the 3B), and the sharp 7B in
   fp16, fp8 and Q4_K_M, all with the one VAE. Its default is the 3B fp8
@@ -881,7 +945,8 @@ What is known already:
     - File by file, only those the run uses: the DiT it runs (the sharp 7B by default, 16.5 GB)
       and the VAE (0.5 GB), the regular 7B only when asked for, TransNetV2's weights (30 MB)
       when the shot detector runs, so not with `--cuts`. Never the repository whole: 122 GB,
-      most of it phase 2's files, of which v1 runs only the int8 ones, once built (above).
+      most of it phase 2's files, of which v1 runs only the int8 and dynamic GGUF ones, once
+      built (above).
     - `huggingface_hub`'s download of one file, at the pinned revision (`c14a2bc4`), into Hugging
       Face's own cache, with no token: the repo is public. The library is already in the
       environment through diffusers; seedvr2x declares it.
@@ -3921,8 +3986,8 @@ explanation.
   from cut to cut); frame numbers count places where a source has frames missing
 - the model: v1 runs ByteDance's 7B in fp16, the sharp 7B by default and the regular one as the
   reference every check is made against; int8 too, the default if seedvr2x's own runs hold
-  it ([Weights](#weights)); phase 2 brings the other smaller files, each with its measured
-  quality
+  it, and the dynamic GGUF, 4.8 GB, for small cards ([Weights](#weights)); phase 2 brings the
+  other smaller files, each with its measured quality
 - what the model does to live action ([numerics.md](research/docs/numerics.md)): the
   perceptual metrics side with it over a plain upscale, the pixel ones with the plain upscale.
   It redraws grain and detail of the right kind at the wrong place, and from a heavily degraded
@@ -4093,8 +4158,8 @@ writers, and the planner needs real shot lengths.
 5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow: built on 2026-10-12
    (see [Output](#output)). The manual sptenc workflow already worked without it.
 
-After v1, phase 2 brings the two 7Bs' other smaller files; their int8 files are built and
-tested before v0.1.0 is tagged (see [Weights](#weights)).
+After v1, phase 2 brings the two 7Bs' other smaller files; their int8 and dynamic GGUF files
+are built and tested before v0.1.0 is tagged (see [Weights](#weights)).
 
 **v0.1.0 waits for the 96 GB card** (the user, 2026-10-24: a first version's features aren't
 half-baked). Meanwhile the RTX 5090 keeps the work going; once the card is back, everything
