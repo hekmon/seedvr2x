@@ -983,9 +983,10 @@ how users are guided to them. What is known already:
       little is refused, naming the directory, `HF_HOME` and `--model-dir`.
     - `--model-dir` becomes optional: given, the files are read from it by name and nothing is
       downloaded.
-    - Each of seedvr2x's own files is checked against its pinned size and SHA-256 before it
-      loads, hashed once per run, the manifest's record reusing that hash. A mismatch is
-      refused, naming the file, both hashes and how to fetch it again; nothing is deleted.
+    - Each of seedvr2x's own files is checked against its pinned size before it loads and its
+      SHA-256 as it loads (below), hashed once per run, the manifest's record reusing that
+      hash. A mismatch is refused, naming the file, both hashes and how to fetch it again;
+      nothing is deleted.
       - Decided on 2026-11-03 (the user), to build after the image server as one change
         across every load: the CLI's pictures and videos, the image server, the shot
         detector, ComfyUI's nodes (why in [Still images](#still-images), Model files). Every
@@ -994,6 +995,15 @@ how users are guided to them. What is known already:
         the pin before the load, the SHA-256 at its end: a mismatch is refused there, before
         any picture or unit is made. Before its load, a model file is read only where nothing
         vouches for it ([Pause and resume](#pause-and-resume)).
+      - Built on 2026-11-04 (impl-oneread): the DiT and the VAE are read front to back into
+        their tensors' memory in 8 MiB pieces, a thread hashing each piece one behind the
+        read, the header, the tensors a load skips and any gap included, so that the digest
+        is the whole file's; the shot detector's 30 MB is read once into memory, hashed and
+        loaded from those bytes. The check by content still reads each file's header first,
+        before torch and the first pass (kilobytes to a few MB, a second open): the data is
+        read once. A new video job's pinned file of the right size and other bytes is now
+        refused at the end of its load, after the first pass, which is kept, the refusal
+        saying so. Figures: [Still images](#still-images), Model files.
     - A file the user names that isn't one of seedvr2x's own (numz's 7B fp16, for one) runs
       when the model check accepts it, its SHA-256 recorded in the manifest and a line in the
       log saying it isn't pinned.
@@ -2499,14 +2509,14 @@ measured that day on test files, against ffmpeg 9.0's decode.
   Where the default makes the output smaller than its source, a picture or a video, one line
   says so and names the `--resolution` that keeps the source's size (the user, 2026-11-03: a
   12 MP photo, 4032×3024, comes out 1440×1080 by default); a size given says nothing more.
-- **Model files:** a picture's run reads each of its model files to check its SHA-256 at every
-  start, the DiT's 16.5 GB in about 84 s on the RTX 5090's disk, as any job with something to
-  make does ([Pause and resume](#pause-and-resume)): the record's SHA-256 is then that of the bytes
-  used, pinned file or not. Kept so (the user, 2026-11-03): the CLI is a practical way to
-  upscale one picture; many go to the image server, which loads and checks its models once, or
-  to ComfyUI's nodes, which may become the usual way for pictures. A 4K picture from 1080p took
-  181 s on the RTX 5090: 86 reading the DiT to check it, 77 loading the models, 14 upscaling
-  (2026-11-03, the desktop live, rough).
+- **Model files:** a picture's run checks each model file's SHA-256 as its load reads it, once
+  ([Weights](#weights)): the record's SHA-256 is that of the bytes put on the card, pinned file
+  or not. Until 2026-11-04 it read each file whole to check it, the DiT's 16.5 GB in about 84 s
+  on the RTX 5090's disk, then again to load it; kept so at first (the user, 2026-11-03): the
+  CLI is a practical way to upscale one picture; many go to the image server, which loads and
+  checks its models once, or to ComfyUI's nodes, which may become the usual way for pictures.
+  A 4K picture from 1080p took 181 s on the RTX 5090: 86 reading the DiT to check it, 77
+  loading the models, 14 upscaling (2026-11-03, the desktop live, rough).
   - The hash is not that cost (design's agent, 2026-11-03, on the Ryzen 9 9950X3D beside the
     RTX 5090). Python's hashlib, OpenSSL's, uses the CPU's SHA instructions: 2.7 GB/s in
     memory, 0.97 GB/s with them masked, about 6 s for the DiT's 16.5 GB. The models sat on a
@@ -2519,6 +2529,16 @@ measured that day on test files, against ffmpeg 9.0's decode.
     is then that of the very bytes put on the card, checked at the end of the load, before the
     picture: about 80 s less from a Windows drive, and on Linux's disk the 14 s go inside the
     load.
+  - Built on 2026-11-04 (impl-oneread). On the RTX 5090, a 1080p picture to 2160p, the models
+    from Hugging Face's cache on the Windows drive, the desktop live: 204.6 s before, 89.7 s
+    after, the start alone (the picture excluded) from 191 to 75 s; no hash before the load,
+    the load 71.4 s with the hash inside it against 73.9 s without; the two PNGs byte for
+    byte the same, the record included. On the CPU, the page cache dropped: the DiT from that
+    drive 156.8 s (its hash 94.1, the load's read 62.7) to 66.6 s, the read the bound (247
+    MB/s); 3.93 GB of it from Linux's disk 3.5 s to 1.7 s, the hash's rate the bound (2.25
+    GB/s, hashlib's 2.7 in memory), about 7.3 s for the whole DiT where hash and read took
+    about 15. The read goes in 8 MiB pieces, one thread hashing a piece behind it: hashed in
+    turn on the read's own thread, the same 3.93 GB took 2.5 s.
   - Several reads at once double 9p's rate (about 480 MB/s on 4 streams): not taken, the gain
     being WSL's alone.
 - **The plan for one picture** (`still_plan.py`): made for a bound, the output's long and
@@ -3752,17 +3772,19 @@ Work is saved in resumable units; a stop loses only the unit in progress. Milest
       after its start on the RTX 5090, where the models' SHA-256 alone took 84 s. A file
       whose size or time differs is hashed as before, said before it starts; the record
       keeps each model file's size and time beside its SHA-256. A job with anything left to
-      make, its assembly included, hashes them at every start: what it makes depends on
-      their bytes. Decided on 2026-11-03 (the user), to build after the image server with
-      every load's one read ([Weights](#weights)): such a job vouches for its model files the
-      same way at its start, and its load proves them, hashing the bytes it reads; a file
-      changed with its size and time kept is refused at the end of its load, before any unit
-      is made. A file whose size or time differs is still hashed at the start, and again by
-      its load; so is an unpinned file on a new job, whose settings record its SHA-256 from
-      the start. A job with its assembly alone left reads no model file: its segments were
-      made from bytes their load checked. The source is vouched for at its recorded path
-      only, and a touched file of the same content is hashed at every later start, a
-      finished job's manifest not being rewritten.
+      make, its assembly included, hashed them at every start until 2026-11-04: what it makes
+      depends on their bytes. Decided on 2026-11-03 (the user) and built on 2026-11-04
+      (impl-oneread) with every load's one read ([Weights](#weights)): such a job vouches for
+      its model files the same way at its start, and its load proves them, hashing the bytes
+      it reads; a file changed with its size and time kept is refused at the end of its load,
+      before any unit is made, the job's record untouched. A file whose size or time differs
+      is still hashed at the start, and again by its load; so is an unpinned file on a new
+      job, whose settings record its SHA-256 from the start. A job with its assembly alone
+      left reads no model file its record vouches for: its segments were made from bytes
+      their load checked; a touched one is hashed at its start, as a finished job's is, so
+      that the job's identity holds (design, 2026-11-04). The source is vouched for at its
+      recorded path only, and a touched file of the same content is hashed at every later
+      start, a finished job's manifest not being rewritten.
     - A job with every segment made is known before anything asks for the GPU: it needs no CUDA
       device, asks the driver nothing and reads no NVML (see [Allocator](#allocator)), a
       finished directory job as a file's job with its assembly alone left, unless its first pass
