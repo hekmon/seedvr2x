@@ -155,14 +155,17 @@ def test_a_picture_is_a_shot_of_one_frame(
 # SEEDVR2X_MODEL_DIR as the other GPU tests read it.
 GPU_MODELS = os.environ.get("SEEDVR2X_MODEL_DIR")
 GPU_DIT, GPU_VAE = "seedvr2x_ema_7b_sharp_fp16.safetensors", "seedvr2x_ema_vae_fp16.safetensors"
-# The cases, the picture's size (height, width) and the resolution it is upscaled to (x2):
-# - 720p, untiled in both passes: DESIGN.md asks 1080p untiled, but an untiled decode at 1080p
-#   takes about 35 GiB (peaks.decode_peak), beyond the 5090's 32 GiB, so the largest output the
-#   still plan leaves untiled in both passes in about 20 GiB is held (720p, found with
-#   still_plan.plan: 810p already tiles its decode);
-# - 1080p, both passes tiled by the plan (an encode tile of 1728, a decode tile of 1024 at 20
-#   GiB).
-GPU_CASES = {"720p-untiled": ((360, 640), 720, False), "1080p-tiled": ((540, 960), 1080, True)}
+# The cases, the picture's size (height, width), the resolution it is upscaled to (x2) and the
+# tiles pinned (encode, decode; None: the plan's own):
+# - 720p, untiled in both passes by the plan;
+# - 1080p, both passes tiled: pinned to the tiles the plan chose when it counted the video
+#   slice's VAE figures (an encode tile of 1728, a decode tile of 1024 at 20 GiB). On one frame's
+#   figures (peaks.ONE_FRAME_UNTILED, 1b96b25) the plan takes 1080p untiled in 24 GiB, so the case
+#   pins its tiles, the plan still placing the models around them.
+GPU_CASES: dict[str, tuple[tuple[int, int], int, tuple[int, int] | None]] = {
+    "720p-untiled": ((360, 640), 720, None),
+    "1080p-tiled": ((540, 960), 1080, (1728, 1024)),
+}
 # The test plans as if this much of the card's free memory (the smaller of main._free_memory and
 # NVML's) were taken by someone else: the card here drives a desktop as well.
 GPU_SPARE = 4 * GIB
@@ -218,7 +221,7 @@ def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
         pytest.skip(f"needs {GPU_DIT} and {GPU_VAE} in SEEDVR2X_MODEL_DIR")
     if not torch.cuda.is_available():
         pytest.skip("needs CUDA")
-    size, resolution, tiled = GPU_CASES[case]
+    size, resolution, pinned = GPU_CASES[case]
     pixels = scene(*size, seed=11)
     target = target_size(size[1], size[0], Fraction(1), resolution)
     out_height, out_width = output_size(target)
@@ -242,6 +245,9 @@ def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
         attention=cli._attention(),  # pyright: ignore[reportPrivateUsage]
         dit_model=peaks.FP16,
         split=True,
+        pins=still_plan.NO_PINS
+        if pinned is None
+        else still_plan.Pins(encode_tile=pinned[0], decode_tile=pinned[1]),
     )
     tiles = still_plan.tiles(plan, target)
     print(
@@ -250,7 +256,7 @@ def test_a_picture_is_a_shot_of_one_frame_on_the_gpu(
         f" encode {tiles.encode} ({tiles.encode_peak / GIB:.2f} GiB), decode {tiles.decode}"
         f" ({tiles.decode_peak / GIB:.2f} GiB); attention {plan.attention}"
     )
-    if tiled:
+    if pinned is not None:
         assert tiles.encode is not None and tiles.decode is not None, "the case tiles both passes"
     elif tiles.encode is not None or tiles.decode is not None:
         pytest.skip(f"the memory free plans {tiles}, not the untiled passes this case holds")
