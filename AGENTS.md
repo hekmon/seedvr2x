@@ -256,7 +256,23 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   resume judged early by int8's figures.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
-  `test_pull_cli.py` holds what the command line does over it. The pins: `SHA256SUMS`, a few
+  `test_pull_cli.py` holds what the command line does over it.
+- One read per load (DESIGN.md, Weights, decided on 2026-11-03): `tests/test_blockswap.py` holds
+  `blockswap.read` hashing every byte of the file once, in its order (the header, the tensors
+  skipped, bytes after the data), its SHA-256 hashlib's of the whole file and its tensors those
+  read without the hash; the hash thread a piece behind the read, the staging buffer read into
+  again only once its last piece is hashed (a slow hash, pieces of 5 bytes; the test fails
+  without that wait); a file cut short refused in the same words; and, where
+  `SEEDVR2X_MODEL_DIR` has them, seedvr2x's VAE and TransNetV2's weights read to their pins and to
+  safetensors' own tensors. `tests/test_pull.py` the pin's check with `load` reading nothing, its
+  size first, its SHA-256 proved at the load's end or refused there in the pin's words; a SHA-256
+  known before (a record's, a whole read's) held to the pin at once and proved by the load, each
+  refused in its own words; a file unknown before taken with the load's; `load_models` refusing a
+  file whose bytes aren't those expected at the end of its own load, before the next.
+  `tests/test_detector.py` the detector's file opened once for its bytes (and once for its
+  header's check), hashed, loaded from them and proved. The picture's run and the server's start
+  read no model file whole (`test_still_cli.py`, `apps/imgserver/tests/test_service.py`), their
+  stand-in loads proving the files as the library's does. The pins: `SHA256SUMS`, a few
   kilobytes, downloaded into a temporary `HF_HOME` behind a link, and the sizes read from the
   Hub's API, skipped offline (no network to huggingface.co, or `HF_HUB_OFFLINE` set). A test
   that runs seedvr2x in a process of its own gives it its own `HF_HOME` and `HF_HUB_OFFLINE=1`,
@@ -593,8 +609,8 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   record; seedvr2x's record read
   back from each file, PNG and WebP, upright or turned (the app and version, the mark, the source's
   size as stored and the output's as written, the resolution asked and the sample aspect, 48 and
-  49 giving the same size, the model files by name and SHA-256, hashed before the
-  load, the seed, the colour correction, the tiles of the pass, the attention kernel), written out
+  49 giving the same size, the model files by name and SHA-256, hashed by their load
+  alone, no file read whole before it, the seed, the colour correction, the tiles of the pass, the attention kernel), written out
   in the test; runs on the stand-ins whose file is `png.write` of `still.upscale` with its record
   byte for byte, at 16 and 8 bits (`--format png8`), grey, the
   profile kept, an opaque alpha dropped and its line reaching the user; every picture written

@@ -19,7 +19,7 @@ import shlex
 import shutil
 import sys
 import time
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 
@@ -144,16 +144,35 @@ HASH_SECONDS_PER_BYTE = 84 / PINNED["seedvr2x_ema_7b_fp16.safetensors"].size
 HASH_SAID_FROM = 5.0
 
 
+@dataclass
+class _Known:
+    """A model file's SHA-256 as the run knows it (Hashes), with the file as it was then (its
+    device and inode, size and modification time: _state); `refusal`, the message refusing a load
+    that reads another SHA-256, given the one it read; `proved`, whether a read of the whole file
+    gave it (a hash at the start, or a load); `said`, the line said once a load proves it."""
+
+    sha256: str
+    state: tuple[int, int, int, int]
+    refusal: Callable[[str], str]
+    proved: bool
+    said: str | None = None
+
+
 class Hashes:
-    """The SHA-256 of the run's model files, each read once (16.5 GB for the DiT, tens of seconds:
-    the pinned check and the manifest's record take the same), with each file as it was then, its
-    device and inode, size and modification time, which its load finds again (unchanged)."""
+    """The SHA-256 of the run's model files, each file read once a run where its load vouches for
+    it (DESIGN.md, Weights, decided on 2026-11-03): its load hashes every byte it reads
+    (blockswap.read, the shot detector's load) and proves what the run took for its SHA-256
+    before the load (proved), or gives it; the pin's check, a job's record or a whole read at the
+    start (sha256) give it before. The pinned check and the manifest's or the record's SHA-256
+    take the same, with each file as it was then, its device and inode, size and modification
+    time, which its load finds again (unchanged)."""
 
     def __init__(self) -> None:
-        self._read: dict[Path, tuple[str, tuple[int, int, int, int]]] = {}
+        self._read: dict[Path, _Known] = {}
 
     def sha256(self, path: Path) -> str:
-        """The SHA-256 of the file at path, in hex, read the first time only, its time logged."""
+        """The SHA-256 of the file at path, in hex: the one known already (vouched for, expected,
+        or proved by its load), or read whole now, the first time only, its time logged."""
         if path not in self._read:
             state = _state(path)
             # The silence named before it starts (DESIGN.md, Architecture, What it prints,
@@ -171,16 +190,29 @@ class Hashes:
             logger.info(
                 "%s: SHA-256 %s, in %.1f s", path.name, digest, spent(time.monotonic() - started)
             )
-            self._read[path] = (digest, state)
-        return self._read[path][0]
+            self._read[path] = _Known(digest, state, _changed(path), proved=True)
+        return self._read[path].sha256
 
-    def vouch(self, path: Path, size: int, mtime_ns: int, sha256: str) -> bool:
-        """Take the SHA-256 a finished job's record holds for the file at path, and read nothing,
-        when the file's size and modification time (nanoseconds) are those the record gives
-        beside it: True. Else False, the file hashed when asked (sha256), as before. DESIGN.md,
-        Pause and resume, decided on 2026-10-29: a finished job compares its model files by size
-        and time with its record, where the DiT's SHA-256 alone took 84 s on the RTX 5090. The
-        file is then held as hashed (unchanged), so its load finds it again as it does one read."""
+    def known(self, path: Path) -> bool:
+        """Whether the run knows the SHA-256 of the file at path, so that sha256 reads nothing."""
+        return path in self._read
+
+    def vouch(
+        self,
+        path: Path,
+        size: int,
+        mtime_ns: int,
+        sha256: str,
+        refusal: Callable[[str], str] | None = None,
+    ) -> bool:
+        """Take the SHA-256 a job's record holds for the file at path, and read nothing, when the
+        file's size and modification time (nanoseconds) are those the record gives beside it:
+        True. Else False, the file hashed when asked (sha256), as before. DESIGN.md, Pause and
+        resume, decided on 2026-10-29: a finished job compares its model files by size and time
+        with its record, where the DiT's SHA-256 alone took 84 s on the RTX 5090. The file is then
+        held as hashed (unchanged), and its load, if it runs, proves the record's SHA-256
+        (proved), refused otherwise with `refusal`'s words, given the SHA-256 read (the
+        library's own without it)."""
         if path in self._read:
             return True
         try:
@@ -189,34 +221,82 @@ class Hashes:
             return False
         if state[2] != size or state[3] != mtime_ns:
             return False
-        self._read[path] = (sha256, state)
+        self._read[path] = _Known(sha256, state, refusal or _recorded(path, sha256), proved=False)
         return True
+
+    def expect(self, path: Path, sha256: str, refusal: Callable[[str], str], said: str) -> None:
+        """Take sha256 for the SHA-256 of the file at path, its pin's, its size checked against the
+        pin already (check_pin), and read nothing: its load proves it (proved), refused otherwise
+        with `refusal`'s words, given the SHA-256 read, and says `said` once it has."""
+        self._read[path] = _Known(sha256, _state(path), refusal, proved=False, said=said)
+
+    def proved(self, path: Path, sha256: str, opened: os.stat_result) -> None:
+        """The SHA-256 of the file at path as its load read it, every byte, and its status as the
+        load opened it (opened): the SHA-256 known before (vouched for, expected or read at the
+        start) proved, else a ModelError in the words of the way it came (a pin's, a record's, a
+        whole read's), before anything is made of the model (DESIGN.md, Weights, decided on
+        2026-11-03); a file unknown before taken with this SHA-256."""
+        known = self._read.get(path)
+        if known is None:
+            state = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            self._read[path] = _Known(sha256, state, _changed(path), proved=True)
+            logger.info("%s: SHA-256 %s, read as it loaded", path.name, sha256)
+            return
+        if sha256 != known.sha256:
+            raise ModelError(known.refusal(sha256))
+        if not known.proved:
+            logger.info("%s", known.said or f"{path.name}: SHA-256 as expected, read as it loaded")
+        known.proved = True
 
     def mtime_ns(self, path: Path) -> int:
         """The modification time, in nanoseconds, of the file at path as it was when its SHA-256
-        was read (sha256) or vouched for (vouch): what the manifest records beside the hash."""
-        return self._read[path][1][3]
+        was read (sha256), vouched for (vouch) or expected (expect): what the manifest records
+        beside the hash."""
+        return self._read[path].state[3]
 
     def unchanged(self, path: Path) -> None:
-        """Refuse (ModelError) the file at path if it was hashed this run and isn't that file any
-        more: another size, modification time or inode. A file runs the bytes its hash checked:
-        its load checks it before and after (seedvr2x/model.py)."""
+        """Refuse (ModelError) the file at path if its SHA-256 is known this run and it isn't that
+        file any more: another size, modification time or inode. A file runs the bytes its hash
+        checked: its load checks it before and after (seedvr2x/model.py), and hashes it as it
+        reads it (proved)."""
         if path not in self._read:
             return
-        # Provisional (implementation, 2026-10-09; DESIGN.md doesn't say how): a stat, not a second
-        # read of 16.5 GB, so a file rewritten in place to the same size within its filesystem's
-        # timestamp granularity would pass. The inode is compared too, correctness first, though
+        # Provisional (implementation, 2026-10-09; DESIGN.md doesn't say how): a stat, the load's
+        # hash proving the bytes (proved). The inode is compared too, correctness first, though
         # a FUSE filesystem mounted without libfuse's use_ino option numbers its inodes itself and
         # may give a file that didn't change another one: such a file is refused, and runs again.
         try:
             now = _state(path)
         except OSError as error:
             raise ModelError(f"{path}: {error.strerror}, since its SHA-256 was read") from None
-        if now != self._read[path][1]:
-            raise ModelError(
-                f"{path}: changed since its SHA-256 was read, before its load ended: run again,"
-                " which checks it again"
-            )
+        if now != self._read[path].state:
+            raise ModelError(_changed(path)(""))
+
+
+def _changed(path: Path) -> Callable[[str], str]:
+    """The refusal of a file found changed since its SHA-256 was read whole or vouched for, by its
+    stat or by its load's hash: run again, which reads it again."""
+
+    def refusal(_: str) -> str:
+        return (
+            f"{path}: changed since its SHA-256 was read, before its load ended: run again, which"
+            " checks it again"
+        )
+
+    return refusal
+
+
+def _recorded(path: Path, sha256: str) -> Callable[[str], str]:
+    """The refusal of a file vouched for by a record's size and modification time whose load reads
+    another SHA-256 than the record's: changed with its size and time kept."""
+
+    def refusal(found: str) -> str:
+        return (
+            f"{path}: SHA-256 {found} as it loaded, where the record has {sha256} for it, with the"
+            " size and modification time it has: changed since, its size and time kept"
+        )
+
+    return refusal
 
 
 @dataclass(frozen=True)
@@ -394,13 +474,14 @@ def fetch(pins: Mapping[str, Pin], download: Collection[str] | None = None) -> d
     return {name: found[name] for name in pins if name in found}
 
 
-def check_pinned(model_files: ModelFiles) -> None:
+def check_pinned(model_files: ModelFiles, *, load: bool = False) -> None:
     """Check each of seedvr2x's own files among the run's against its pin (check_pin), by the name
     it was given, wherever it is read from: a file of --model-dir named like one of seedvr2x's own
     is checked as one, its refusal saying how to fetch it again only when given in the pinned
     file's own role (advice). Every file refused is said at once (ModelError, a line each, and
     another for the command a cache's refusal advises). A file seedvr2x doesn't pin is said so in
-    the log, and runs as the header check accepted it."""
+    the log, and runs as the header check accepted it. With `load`, the run loads the files, and
+    a SHA-256 not known yet is left to the load (check_pin)."""
     refusals: list[str] = []
     # Each file once, in the first role it was given.
     first: dict[ModelFile, Role] = {}
@@ -416,7 +497,10 @@ def check_pinned(model_files: ModelFiles) -> None:
             )
             continue
         try:
-            check_pin(name, file.path, PINNED[name], model_files.hashes, model_files.cache, role)
+            check_pin(
+                *(name, file.path, PINNED[name], model_files.hashes, model_files.cache, role),
+                load=load,
+            )
         except ModelError as error:
             refusals.append(str(error))
     if refusals:
@@ -439,10 +523,20 @@ def advice(model_files: ModelFiles) -> dict[Role, str]:
 
 
 def check_pin(
-    name: str, path: Path, pin: Pin, hashes: Hashes, cache: Path | None, role: Role | None = None
+    name: str,
+    path: Path,
+    pin: Pin,
+    hashes: Hashes,
+    cache: Path | None,
+    role: Role | None = None,
+    *,
+    load: bool = False,
 ) -> None:
     """Refuse (ModelError) the file at path unless it is REPO's file name at REVISION as pin pins
-    it: its size first, by a stat, then its SHA-256, read once per run (hashes). The refusal says
+    it: its size first, by a stat, then its SHA-256, read once per run (hashes). With `load`, a
+    file the run loads, whose SHA-256 the run doesn't know yet (Hashes.known), is read by its load
+    alone: its size checked here, its SHA-256 at the load's end, refused there in the same words
+    (Hashes.expect, Hashes.proved; DESIGN.md, Weights, decided on 2026-11-03). The refusal says
     both sizes or both hashes, and how to fetch the file again, into Hugging Face's cache (its
     directory, cache) or into --model-dir (cache None), unless it was given in a role (role) other
     than the pinned file's, as advice has it. Nothing is deleted, where numz's downloader deletes
@@ -451,24 +545,32 @@ def check_pin(
         size = path.stat().st_size
     except OSError as error:
         raise ModelError(f"{path}: {error.strerror}") from None
+
+    def refusal(found: str, pinned: str) -> str:
+        said = (
+            f"{path}: {found}, where {REPO}'s {name} at {REVISION[:8]} has {pinned}: not the file"
+            " seedvr2x pins, left as it is"
+        )
+        if role is None or role == pin.role:
+            said += f"; {_again(name, path, cache)}"
+        return said
+
     if size != pin.size:
-        found, pinned = f"{size:,} bytes", f"{pin.size:,}"
-    else:
-        digest = hashes.sha256(path)
-        if digest == pin.sha256:
-            logger.info(
-                "%s: its size and SHA-256 as seedvr2x pins them, %s at %s",
-                *(name, REPO, REVISION[:8]),
-            )
-            return
-        found, pinned = f"SHA-256 {digest}", pin.sha256
-    refusal = (
-        f"{path}: {found}, where {REPO}'s {name} at {REVISION[:8]} has {pinned}: not the file"
-        " seedvr2x pins, left as it is"
-    )
-    if role is None or role == pin.role:
-        refusal += f"; {_again(name, path, cache)}"
-    raise ModelError(refusal)
+        raise ModelError(refusal(f"{size:,} bytes", f"{pin.size:,}"))
+    said = f"{name}: its size and SHA-256 as seedvr2x pins them, {REPO} at {REVISION[:8]}"
+    if load and not hashes.known(path):
+        # Its load hashes it as it reads it, and refuses it at its end in the same words
+        # (DESIGN.md, Weights, decided on 2026-11-03): one read, not two.
+        hashes.expect(path, pin.sha256, lambda found: refusal(f"SHA-256 {found}", pin.sha256), said)
+        logger.info(
+            "%s: its size as seedvr2x pins it, %s at %s; its SHA-256 checked as it loads",
+            *(name, REPO, REVISION[:8]),
+        )
+        return
+    digest = hashes.sha256(path)
+    if digest != pin.sha256:
+        raise ModelError(refusal(f"SHA-256 {digest}", pin.sha256))
+    logger.info("%s", said)
 
 
 def url(name: str) -> str:

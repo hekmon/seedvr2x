@@ -13,6 +13,7 @@ through typed functions.
 import ctypes
 import functools
 import logging
+import os
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -175,7 +176,10 @@ def load_models(
     (weights.check, ModelError): the DiT is built from the config of what its file is, and from
     an int8 file its block matrices as int8.Int8Linear, multiplied in int8 (seedvr2x/int8.py). A
     file hashed this run (hashes) must still be the one hashed (Hashes.unchanged, ModelError),
-    before anything is built and right after its own load.
+    before anything is built and right after its own load. With hashes, each file is hashed as it
+    is read, once, and its SHA-256 proved or given at the end of its own load (Hashes.proved): a
+    file whose bytes aren't those the run took them for is refused there, before the model is
+    used (DESIGN.md, Weights, decided on 2026-11-03).
 
     Without a plan, every weight is on the device, for good. With one, the weights it has away
     from the device in some phase, the DiT's swapped blocks among them, are read straight into
@@ -205,6 +209,14 @@ def load_models(
 
     unchanged(dit_file)
     unchanged(vae_file)
+
+    # Each file hashed as its load reads it, every byte once, and its SHA-256 proved at the load's
+    # end, before anything is made of it (DESIGN.md, Weights, decided on 2026-11-03).
+    def hashed(path: Path) -> Callable[[str, os.stat_result], None] | None:
+        if hashes is None:
+            return None
+        return functools.partial(hashes.proved, path)
+
     assert config_dir is not None, "the DiT accepted has its config"
     config: Any = load_config(str(VENDOR / config_dir / "main.yaml"))
     runner: Any = VideoDiffusionInfer(config, _DebugLog())
@@ -225,7 +237,8 @@ def load_models(
     # The VAE's 0.47 GiB leave for the DiT's phase when the plan says so: one part.
     vae_leaves = model_plan is not None and not model_plan.vae_in_dit
     vae_parts = _load_weights(
-        vae, vae_file, device, COMPUTE_DTYPE, (lambda key: VAE_PART) if vae_leaves else None
+        *(vae, vae_file, device, COMPUTE_DTYPE, (lambda key: VAE_PART) if vae_leaves else None),
+        hashed=hashed(vae_file),
     )
     unchanged(vae_file)
     # Out of training mode, the causal convolutions keep their memory across slices
@@ -266,7 +279,8 @@ def load_models(
         _swap_int8(dit)
         skip = _marker
     dit_parts = _load_weights(
-        dit, dit_file, device, None, _dit_parts(model_plan, len(dit.blocks)), skip
+        *(dit, dit_file, device, None, _dit_parts(model_plan, len(dit.blocks)), skip),
+        hashed=hashed(dit_file),
     )
     unchanged(dit_file)
     dit.requires_grad_(False).eval()
@@ -369,6 +383,8 @@ def _load_weights(
     dtype: torch.dtype | None,
     part_of: Callable[[str], str | None] | None = None,
     skip: Callable[[str], bool] | None = None,
+    *,
+    hashed: Callable[[str, os.stat_result], None] | None = None,
 ) -> dict[str, Part]:
     """Load a safetensors checkpoint into a model built on the meta device, as numz does
     (src/core/model_loader.py:547-616, 777-835): the file's dtypes, or every floating tensor cast
@@ -376,8 +392,10 @@ def _load_weights(
     With part_of, the parameters it names a part for go to that part's pinned host copy, not to
     the device: the parts are returned, by name, away from the device. With or without parts,
     the file is read by blockswap.read, which says why it is never mapped, as safetensors'
-    own load_file maps it. The tensors skip says True of aren't read (blockswap.read)."""
-    state, parts = blockswap.read(model, path, device, dtype, part_of, skip=skip)
+    own load_file maps it. The tensors skip says True of aren't kept (blockswap.read). With
+    hashed, every byte of the file is hashed as it is read, and hashed is called with its SHA-256
+    and the file's status as opened, before the model takes the weights (blockswap.read)."""
+    state, parts = blockswap.read(model, path, device, dtype, part_of, skip=skip, hashed=hashed)
     # strict=False as numz, but the mismatches are reported, where numz ignores them silently.
     result = model.load_state_dict(state, strict=False, assign=True)
     if result.missing_keys or result.unexpected_keys:

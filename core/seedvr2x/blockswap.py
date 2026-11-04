@@ -25,17 +25,21 @@ bytes, so that a part moves in one copy, and a module's parameters are views int
 buffer holds those bytes at the time: the host copy, a buffer on the device, or a slot.
 """
 
+import hashlib
 import json
 import logging
 import mmap
+import os
 import re
 import time
 import weakref
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from io import BufferedReader
 from math import prod
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import torch
 from torch import Tensor
@@ -273,6 +277,109 @@ def dit_parts(blocks: int, stay: int, other: bool) -> Callable[[str], str | None
     return part_of
 
 
+# The bytes read at a time into a tensor's memory, each piece then hashed on the hash thread while
+# the next is read (_Tee): the wait for the last piece's hash, before a reused buffer is read into
+# again, about 3 ms at hashlib's 2.7 GB/s on the Ryzen 9 9950X3D beside the RTX 5090, where WSL2's
+# 9p reads at 170 to 250 MB/s whatever the piece (DESIGN.md, Still images, Model files).
+# PROVISIONAL (impl-oneread, 2026-11-04: DESIGN.md leaves the size open; on that machine the
+# DiT's 16.5 GB read and hashed from the Windows drive in 66.6 s, 71.6 s with the hash in turn on
+# the read's thread, and 3.93 GB of it from Linux's disk in 1.7 s, 2.5 s in turn, 3.5 s hashed
+# whole then read as before).
+PIECE = 8 << 20
+
+
+class _Tee:
+    """A file read from its start to its end, each byte hashed (SHA-256) in the file's order as
+    it is read, as Go's io.TeeReader: the hash is that of the very bytes read, which a whole-file
+    hash of the same file gives (hashlib.file_digest). Read into the tensors' own memory: hashlib
+    takes any buffer, with no copy, and releases the GIL over 2 KiB, as readinto does, so one
+    thread hashes each piece while the next is read. One file's SHA-256 can't be split across
+    cores: from a disk faster than hashlib (2.7 GB/s on the Ryzen 9 9950X3D, design's
+    measurement of 2026-11-03), the read waits for the hash.
+
+    Without `hashing`, nothing is hashed, the bytes not read skipped by a seek (read's callers
+    that ask for no SHA-256: tests)."""
+
+    def __init__(self, raw: BufferedReader, path: Path, hashing: bool) -> None:
+        self.raw = raw
+        self.path = path
+        self.position = 0
+        self.hash = hashlib.sha256() if hashing else None
+        self.thread = ThreadPoolExecutor(1, "seedvr2x-sha256") if hashing else None
+        self.pending: list[Future[None]] = []
+
+    def fill(
+        self, target: memoryview, at: int, whole: int | None = None, reused: bool = False
+    ) -> None:
+        """target, from the file's byte at on, which is at or after the bytes read so far: the
+        bytes between read and hashed (or skipped, without hashing). `reused`: target is a buffer
+        read into before, whose bytes the hash thread may still be reading: waited for first.
+        weights.check has passed the file whole: one cut short since, as it loads, is refused as
+        the check refuses one, in a line, with the bytes it holds and those it should (whole, by
+        its header; inside the header, the least it can), rather than read into wrong tensors or
+        a traceback."""
+        if at < self.position:
+            raise RuntimeError(f"{self.path.name}: bytes at {at:,} read after {self.position:,}")
+        self.skip(at, whole)
+        if reused:
+            self.wait()
+        done = 0
+        while done < len(target):
+            piece = target[done : done + PIECE] if self.hash is not None else target[done:]
+            got = self.raw.readinto(piece)
+            if not got:
+                self.cut(at + done, at + len(target), whole)
+            self.hashed(piece[:got])
+            done += got
+        self.position = at + len(target)
+
+    def skip(self, to: int, whole: int | None) -> None:
+        """The bytes from those read so far up to the file's byte `to`, which no tensor takes (the
+        tensors skip leaves out; weights.check refuses a gap): read and hashed, or skipped by a
+        seek without hashing."""
+        if self.hash is None:
+            self.raw.seek(to)
+        while self.position < to and self.hash is not None:
+            data = self.raw.read(min(PIECE, to - self.position))
+            if not data:
+                self.cut(self.position, to, whole)
+            self.hashed(memoryview(data))
+            self.position += len(data)
+        self.position = max(self.position, to)
+
+    def finish(self) -> str | None:
+        """The SHA-256 of the whole file, in hex, its bytes after the last tensor's read and hashed
+        to its end; None without hashing."""
+        if self.hash is None:
+            return None
+        while data := self.raw.read(PIECE):
+            self.hashed(memoryview(data))
+            self.position += len(data)
+        self.wait()
+        return self.hash.hexdigest()
+
+    def hashed(self, data: memoryview) -> None:
+        """data, just read, hashed on the hash thread after every piece before it."""
+        if self.thread is not None and self.hash is not None:
+            self.pending.append(self.thread.submit(self.hash.update, data))
+
+    def wait(self) -> None:
+        """Wait until every piece read so far is hashed, an error of the hash thread raised."""
+        for future in self.pending:
+            future.result()
+        self.pending.clear()
+
+    def close(self) -> None:
+        """The hash thread ended, the pieces it has yet to hash dropped."""
+        if self.thread is not None:
+            self.thread.shutdown(wait=True, cancel_futures=True)
+
+    def cut(self, at: int, least: int, whole: int | None) -> NoReturn:
+        """Refuse the file, cut short at byte `at` where `least` bytes at least were to be read."""
+        of = f"at least {least:,}" if whole is None else f"{whole:,}"
+        raise ModelError(f"{self.path}: cut short as it loaded, {at:,} of {of} bytes; {AGAIN}")
+
+
 def read(
     model: torch.nn.Module,
     path: Path,
@@ -282,119 +389,140 @@ def read(
     backend: Cuda | None = None,
     *,
     skip: Callable[[str], bool] | None = None,
+    hashed: Callable[[str, os.stat_result], None] | None = None,
 ) -> tuple[dict[str, Tensor], dict[str, Part]]:
     """The tensors of the safetensors checkpoint at path, for model.load_state_dict(assign=True),
     on device, every floating one cast to dtype if given, there, as numz casts a model loaded
     whole; but the parameters part_of names a part for, if it is given: those go to their part's
     host copy, pinned, and never to the device whole (DESIGN.md, BlockSwap, rewritten: the
-    loader); and none of those skip says True of, if it is given, which aren't read: an int8
+    loader); and none of those skip says True of, if it is given, which aren't kept: an int8
     file's markers, which no model holds (model.load_models). Returns the tensors and the parts,
     by name, each to adopt the model once loaded. Raises HostMemoryError before anything is
     pinned when the host has too little memory available.
 
-    The file is read, never mapped, from its start to its end, but for the tensors skipped,
-    each tensor's bytes at the file's own offsets: a part's straight into its pinned copy, any
-    other tensor's into one buffer the size of the largest of them, which it leaves for the
-    device before the next is read. A file cut short since weights.check passed it is a
-    ModelError, as the check's own. Mapped, as safetensors gives a file's tensors, a page stays
-    in the process from the copy that reads it until the mapping goes, at the end of the file's
-    read: with every weight of the 7B bound for the device, its file's 15.35 GiB, the process
-    16.5 GiB resident at the load's peak where it holds 1.25 once loaded; and as much whatever a
-    plan pins, the pinned copies in the mapped pages' place: 16.8 GiB with 6.38 pinned, 16.3
-    with the 36 blocks' 15.19 (and 31.4 when the blocks' copies were made from the mapping too).
-    Read so, the three loads peak at 1.1, 7.5 and 16.3 GiB, every tensor's bytes the same
-    (measured on the 96 GB card with research/scripts/load_peak.py, 2026-10-12;
-    research/docs/load-memory.md)."""
+    With `hashed`, every byte of the file is hashed as it is read, in the file's order, the
+    header and the tensors skipped included (_Tee), and hashed is called at the end with the
+    file's SHA-256, in hex, and the file's status as it was opened (os.fstat): the SHA-256 of the
+    very bytes loaded, the file read once (DESIGN.md, Weights, decided on 2026-11-03). Whatever
+    hashed raises (a ModelError: pull.Hashes.proved) ends the load.
+
+    The file is read, never mapped, from its start to its end, each tensor's bytes at the file's
+    own offsets: a part's straight into its pinned copy, any other tensor's into one buffer the
+    size of the largest of them, which it leaves for the device before the next is read. A file
+    cut short since weights.check passed it is a ModelError, as the check's own. Mapped, as
+    safetensors gives a file's tensors, a page stays in the process from the copy that reads it
+    until the mapping goes, at the end of the file's read: with every weight of the 7B bound for
+    the device, its file's 15.35 GiB, the process 16.5 GiB resident at the load's peak where it
+    holds 1.25 once loaded; and as much whatever a plan pins, the pinned copies in the mapped
+    pages' place: 16.8 GiB with 6.38 pinned, 16.3 with the 36 blocks' 15.19 (and 31.4 when the
+    blocks' copies were made from the mapping too). Read so, the three loads peak at 1.1, 7.5
+    and 16.3 GiB, every tensor's bytes the same (measured on the 96 GB card with
+    research/scripts/load_peak.py, 2026-10-12; research/docs/load-memory.md)."""
     backend = Cuda(device) if backend is None else backend
     parameters = {name for name, _ in model.named_parameters()}
     with open(path, "rb") as raw:
+        opened = os.fstat(raw.fileno())
+        tee = _Tee(raw, path, hashed is not None)
+        try:
+            state, parts = _read(
+                tee, model, parameters, path, device, dtype, part_of, backend, skip
+            )
+            digest = tee.finish()
+        finally:
+            tee.close()
+    if hashed is not None:
+        assert digest is not None
+        hashed(digest, opened)
+    return state, parts
 
-        def fill(target: memoryview, at: int, whole: int | None = None) -> None:
-            # target, from the file's byte at on. weights.check has passed the file whole: one
-            # cut short since, as it loads, is refused as the check refuses one, in a line,
-            # with the bytes it holds and those it should (whole, by its header; inside the
-            # header, the least it can), rather than read into wrong tensors or a traceback.
-            raw.seek(at)
-            done = 0
-            while done < len(target):
-                got = raw.readinto(target[done:])
-                if not got:
-                    of = f"at least {at + len(target):,}" if whole is None else f"{whole:,}"
-                    raise ModelError(
-                        f"{path}: cut short as it loaded, {at + done:,} of {of} bytes; {AGAIN}"
-                    )
-                done += got
 
-        # The file's layout, as safetensors lays it: the header's length, the header, the data,
-        # each tensor at its offsets from the header's end. weights.check has validated it.
-        size = bytearray(8)
-        fill(memoryview(size), 0)
-        length = int.from_bytes(size, "little")
-        text = bytearray(length)
-        fill(memoryview(text), 8)
-        header = cast("dict[str, Any]", json.loads(text))
-        header.pop("__metadata__", None)
-        tensors: dict[str, tuple[torch.dtype, tuple[int, ...], int, int]] = {}
-        # By their offsets: the order the bytes are in, whatever the header's.
-        for key, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
-            if skip is not None and skip(key):
-                continue
-            if entry["dtype"] not in _DTYPES:
-                raise RuntimeError(f"{path.name}: {key} is {entry['dtype']}, which isn't read")
-            found, shape = _DTYPES[entry["dtype"]], tuple(cast("list[int]", entry["shape"]))
-            start, end = cast("tuple[int, int]", tuple(entry["data_offsets"]))
-            if end - start != found.itemsize * prod(shape):
-                raise RuntimeError(
-                    f"{path.name}: {key} takes {end - start} bytes, not"
-                    f" {found.itemsize * prod(shape)}"
-                )
-            tensors[key] = (found, shape, start, end)
-        # The file's whole size by its header, the tensors skipped counted.
-        ends = (cast("list[int]", entry["data_offsets"])[1] for entry in header.values())
-        whole = 8 + length + max(ends, default=0)
-        layouts: dict[str, dict[str, tuple[torch.dtype, tuple[int, ...]]]] = {}
-        for key, (found, shape, _, _) in tensors.items():
-            name = part_of(key) if part_of is not None and key in parameters else None
-            if name is not None:
-                final = found if dtype is None or not found.is_floating_point else dtype
-                layouts.setdefault(name, {})[key] = (final, shape)
-        parts = _make(layouts, backend)
-        fields = {field.key: (part, field) for part in parts.values() for field in part.fields}
-        # What isn't read straight into a pinned copy passes through here, one tensor at a
-        # time: the largest of those tensors' size. For the 7B, its largest, 108 MiB (outside
-        # the blocks), or at the most a block's largest, 72 MiB, when a plan pins the
-        # parameters outside the blocks; for the VAE, cast as it loads, 13.5 MiB (the files'
-        # headers).
-        through = [
-            end - start
-            for key, (found, _, start, end) in tensors.items()
-            if key not in fields or (dtype is not None and found.is_floating_point)
-        ]
-        staging = torch.empty(max(through, default=0), dtype=torch.uint8)
-        state: dict[str, Tensor] = {}
-        for key, (found, shape, start, end) in tensors.items():
-            recast = dtype is not None and found.is_floating_point
-            placed = fields.get(key)
-            if placed is not None and not recast:
-                part, field = placed
-                state[key] = part.view(part.host.bytes, field)
-                target = part.host.bytes[field.offset : field.offset + field.size]
-            else:
-                target = staging[: end - start]
-            fill(memoryview(target.numpy()), 8 + length + start, whole)
-            if placed is not None and not recast:
-                continue
-            # A copy on the CPU too, where to() alone gives the buffer's own memory, which the
-            # next tensor's bytes replace. Cast on the device, as the whole-model load casts
-            # there: the same values.
-            moved = target.view(found).view(shape).to(device, copy=True)
-            moved = moved.to(dtype) if recast else moved
-            if placed is None:
-                state[key] = moved
-            else:
-                part, field = placed
-                state[key] = part.view(part.host.bytes, field)
-                state[key].copy_(moved)
+def _read(
+    tee: _Tee,
+    model: torch.nn.Module,
+    parameters: set[str],
+    path: Path,
+    device: torch.device,
+    dtype: torch.dtype | None,
+    part_of: Callable[[str], str | None] | None,
+    backend: Cuda,
+    skip: Callable[[str], bool] | None,
+) -> tuple[dict[str, Tensor], dict[str, Part]]:
+    """read's tensors and parts, read through tee."""
+    fill = tee.fill
+    # The file's layout, as safetensors lays it: the header's length, the header, the data,
+    # each tensor at its offsets from the header's end. weights.check has validated it.
+    size = bytearray(8)
+    fill(memoryview(size), 0)
+    length = int.from_bytes(size, "little")
+    text = bytearray(length)
+    fill(memoryview(text), 8)
+    header = cast("dict[str, Any]", json.loads(text))
+    header.pop("__metadata__", None)
+    tensors: dict[str, tuple[torch.dtype, tuple[int, ...], int, int]] = {}
+    # By their offsets: the order the bytes are in, whatever the header's. The tensors skipped
+    # are read past (_Tee.skip), hashed where the file is.
+    for key, entry in sorted(header.items(), key=lambda item: item[1]["data_offsets"][0]):
+        if skip is not None and skip(key):
+            continue
+        if entry["dtype"] not in _DTYPES:
+            raise RuntimeError(f"{path.name}: {key} is {entry['dtype']}, which isn't read")
+        found, shape = _DTYPES[entry["dtype"]], tuple(cast("list[int]", entry["shape"]))
+        start, end = cast("tuple[int, int]", tuple(entry["data_offsets"]))
+        if end - start != found.itemsize * prod(shape):
+            raise RuntimeError(
+                f"{path.name}: {key} takes {end - start} bytes, not {found.itemsize * prod(shape)}"
+            )
+        tensors[key] = (found, shape, start, end)
+    # The file's whole size by its header, the tensors skipped counted.
+    ends = (cast("list[int]", entry["data_offsets"])[1] for entry in header.values())
+    whole = 8 + length + max(ends, default=0)
+    layouts: dict[str, dict[str, tuple[torch.dtype, tuple[int, ...]]]] = {}
+    for key, (found, shape, _, _) in tensors.items():
+        name = part_of(key) if part_of is not None and key in parameters else None
+        if name is not None:
+            final = found if dtype is None or not found.is_floating_point else dtype
+            layouts.setdefault(name, {})[key] = (final, shape)
+    parts = _make(layouts, backend)
+    fields = {field.key: (part, field) for part in parts.values() for field in part.fields}
+    # What isn't read straight into a pinned copy passes through here, one tensor at a
+    # time: the largest of those tensors' size. For the 7B, its largest, 108 MiB (outside
+    # the blocks), or at the most a block's largest, 72 MiB, when a plan pins the
+    # parameters outside the blocks; for the VAE, cast as it loads, 13.5 MiB (the files'
+    # headers).
+    through = [
+        end - start
+        for key, (found, _, start, end) in tensors.items()
+        if key not in fields or (dtype is not None and found.is_floating_point)
+    ]
+    staging = torch.empty(max(through, default=0), dtype=torch.uint8)
+    state: dict[str, Tensor] = {}
+    for key, (found, shape, start, end) in tensors.items():
+        recast = dtype is not None and found.is_floating_point
+        placed = fields.get(key)
+        if placed is not None and not recast:
+            part, field = placed
+            state[key] = part.view(part.host.bytes, field)
+            target = part.host.bytes[field.offset : field.offset + field.size]
+            reused = False
+        else:
+            # The staging buffer, whose last tensor's bytes may still be hashing.
+            target, reused = staging[: end - start], True
+        fill(memoryview(target.numpy()), 8 + length + start, whole, reused)
+        if placed is not None and not recast:
+            continue
+        # A copy on the CPU too, where to() alone gives the buffer's own memory, which the
+        # next tensor's bytes replace. Cast on the device, as the whole-model load casts
+        # there: the same values.
+        moved = target.view(found).view(shape).to(device, copy=True)
+        moved = moved.to(dtype) if recast else moved
+        if placed is None:
+            state[key] = moved
+        else:
+            part, field = placed
+            state[key] = part.view(part.host.bytes, field)
+            state[key].copy_(moved)
+    # The tensors skipped after the last one read, up to the data's end.
+    tee.skip(whole, whole)
     return state, parts
 
 

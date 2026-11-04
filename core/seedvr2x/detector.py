@@ -13,7 +13,9 @@ STEP * k - PAD to STEP * k + WINDOW - PAD - 1, and can run once that last frame 
 frame c peaks at c - 1, the outgoing shot's last frame (offset -1 on 98% of measurement's sure
 cuts)."""
 
+import hashlib
 import logging
+import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,9 +25,7 @@ from typing import Self, cast
 import numpy as np
 import numpy.typing as npt
 import torch
-
-# Strict typing finds load_file's signature partly unknown, for its bare os.PathLike.
-from safetensors.torch import load_file  # pyright: ignore[reportUnknownVariableType]
+from safetensors.torch import load
 
 from seedvr2x import weights
 from seedvr2x.pull import Hashes
@@ -77,7 +77,9 @@ class Detector:
         """Load TransNetV2 with the weights in the file at path, checked first (weights.check:
         ModelError says what the file is otherwise), onto device, to run batch windows per forward
         (from 1). A file hashed this run (hashes) must still be the one hashed (Hashes.unchanged,
-        ModelError), before the load and right after it."""
+        ModelError), before the load and right after it; with hashes, the file is hashed as it is
+        read, once, and its SHA-256 proved or given before the model takes its weights
+        (Hashes.proved)."""
         if batch < 1:
             raise ValueError(f"batch {batch}: at least 1 window per forward")
         weights.check(path, "detector")
@@ -100,7 +102,17 @@ class Detector:
         with torch.device("meta"):
             model = TransNetV2()
         model.to_empty(device=device)
-        state = load_file(path)
+        # The file read once, into memory (30 MB), hashed and loaded from those bytes, where
+        # safetensors' load_file maps it and its SHA-256 was a read of its own: the SHA-256 of the
+        # very bytes loaded, proved before the model runs (DESIGN.md, Weights, decided on
+        # 2026-11-03; pull.Hashes.proved).
+        with path.open("rb") as file:
+            opened = os.fstat(file.fileno())
+            data = file.read()
+        if hashes is not None:
+            hashes.proved(path, hashlib.sha256(data).hexdigest(), opened)
+        state = load(data)
+        del data
         model.load_state_dict(state, strict=True)
         del state
         if hashes is not None:

@@ -288,21 +288,18 @@ class Service:
 
     def check_files(self) -> ModelFiles:
         """The model files found, pulled at the pinned revision where they are missing, and
-        checked as the CLI checks them: their headers, then each pinned file's size and SHA-256,
-        read once for the server's life (pull.Hashes); an unpinned file's SHA-256, which the
-        record holds, read now too. ModelError, a Refusal, where one is refused."""
+        checked as the CLI checks them: their headers, then each pinned file's size, its SHA-256
+        read by its load alone, once for the server's life, and proved at the load's end
+        (pull.Hashes.proved; DESIGN.md, Weights, decided on 2026-11-03). ModelError, a Refusal,
+        where one is refused."""
         from seedvr2x import weights
 
         options = self.options
         files = pull.resolve(options.model_dir, options.dit, options.vae, detector=False)
         dit, vae = (None if each.absent else each.path for each in (files.dit, files.vae))
         weights.check_models(dit, vae, pull.advice(files), None)
-        pull.check_pinned(files)
+        pull.check_pinned(files, load=True)
         self.files = files
-        self.record_models = (
-            records.Model(options.dit, files.hashes.sha256(files.dit.path)),
-            records.Model(options.vae, files.hashes.sha256(files.vae.path)),
-        )
         return files
 
     def plan(self) -> reservation.Made:
@@ -335,7 +332,13 @@ class Service:
         assert self.files is not None and self.made is not None
         started = time.monotonic()
         made = self.made
-        self.models = self.card.load(self.files, made.plan.models, made.plan.reading.reserve)
+        files = self.files
+        self.models = self.card.load(files, made.plan.models, made.plan.reading.reserve)
+        # The record's SHA-256, those of the very bytes the load read (pull.Hashes.proved).
+        self.record_models = (
+            records.Model(self.options.dit, files.hashes.sha256(files.dit.path)),
+            records.Model(self.options.vae, files.hashes.sha256(files.vae.path)),
+        )
         logger.info(
             "models loaded in %.1f s, attention: %s",
             time.monotonic() - started,

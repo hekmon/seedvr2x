@@ -801,7 +801,7 @@ class Recorder:
             compiling, "shutdown_workers", lambda: self.events.append("workers shut")
         )
 
-        def load_weights(module: Any, path: Path, *rest: Any) -> dict[str, Any]:
+        def load_weights(module: Any, path: Path, *rest: Any, **more: Any) -> dict[str, Any]:
             self.events.append(f"weights {path.name}")
             return {}
 

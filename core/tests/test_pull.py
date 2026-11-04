@@ -293,6 +293,127 @@ def test_a_file_vouched_for_by_size_and_time_is_not_read(
     assert not pull.Hashes().vouch(tmp_path / "gone", 1, 1, digest)
 
 
+def test_a_loaded_file_is_hashed_by_its_load(
+    tmp_path: Path, pins: dict[str, Pin], hashed: list[Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    # DESIGN.md, Weights (decided on 2026-11-03): a file the run loads is read once, by its load,
+    # which hashes it as it reads it. Its pin's check takes its size, by a stat, and leaves its
+    # SHA-256 to the load: nothing read here; the SHA-256 taken for the record is the pin's until
+    # the load proves it (Hashes.proved), said then; another SHA-256 read by the load is refused
+    # at its end in the words of the pin's refusal, into Hugging Face's cache and into
+    # --model-dir alike, the file left as it is.
+    caplog.set_level(logging.INFO)
+    cache = tmp_path / "hf" / "hub"
+    blob = cache / "models--hekmon--seedvr2x" / "blobs" / "0123abcd"
+    blob.parent.mkdir(parents=True)
+    other = bytes(len(CONTENT[DIT]))
+    blob.write_bytes(other)
+    link = cache / "models--hekmon--seedvr2x" / "snapshots" / REVISION / DIT
+    link.parent.mkdir(parents=True)
+    link.symlink_to(Path("..", "..", "blobs", blob.name))
+    directory = model_dir(tmp_path)
+    for path, where, refusal in (
+        (link, cache, from_the_cache(DIT, blob, cache)),
+        (directory / DIT, None, f"fetch it again from {url(DIT)}, {INTO_MODEL_DIR}"),
+    ):
+        hashes = pull.Hashes()
+        caplog.clear()
+        pull.check_pin(DIT, path, pins[DIT], hashes, where, load=True)
+        assert hashed == [] and hashes.known(path)
+        assert caplog.messages == [
+            f"{DIT}: its size as seedvr2x pins it, {SHORT}; its SHA-256 checked as it loads"
+        ]
+        assert hashes.sha256(path) == pins[DIT].sha256 and hashed == []
+        assert hashes.mtime_ns(path) == path.stat().st_mtime_ns
+        found = hashlib.sha256(path.read_bytes()).hexdigest()
+        if found == pins[DIT].sha256:
+            caplog.clear()
+            hashes.proved(path, found, path.stat())
+            assert caplog.messages == [
+                f"{DIT}: its size and SHA-256 as seedvr2x pins them, {SHORT}"
+            ]
+            hashes.proved(path, found, path.stat())  # said once
+            assert len(caplog.messages) == 1
+            continue
+        with pytest.raises(ModelError) as error:
+            hashes.proved(path, found, path.stat())
+        assert str(error.value) == (
+            f"{path}: SHA-256 {found}, where hekmon/seedvr2x's {DIT} at {REVISION[:8]} has"
+            f" {pins[DIT].sha256}: not the file seedvr2x pins, left as it is; {refusal}"
+        )
+        assert blob.read_bytes() == other
+    # The size still refused first, by a stat, before any load.
+    (directory / DIT).write_bytes(CONTENT[DIT] + b"!")
+    with pytest.raises(ModelError, match=r"bytes, where hekmon/seedvr2x's"):
+        pull.check_pin(DIT, directory / DIT, pins[DIT], pull.Hashes(), None, load=True)
+    assert hashed == []
+
+
+def test_a_sha256_known_before_the_load_is_checked_at_once_and_proved_by_it(
+    tmp_path: Path, pins: dict[str, Pin], hashed: list[Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    # A SHA-256 the run has before the load, from a record's size and time or a whole read at the
+    # start, is held to the pin at once (check_pin, load or not), as before; the load then
+    # proves it, and refuses a file whose bytes changed since, in the words of the way it came:
+    # a record's (with a refusal of the caller's, or the library's own), a whole read's.
+    caplog.set_level(logging.INFO)
+    path = model_dir(tmp_path) / VAE
+    status = path.stat()
+    vouched = pull.Hashes()
+    assert vouched.vouch(path, status.st_size, status.st_mtime_ns, "0" * 64)
+    with pytest.raises(ModelError, match=f"SHA-256 {'0' * 64}, where hekmon"):
+        pull.check_pin(VAE, path, pins[VAE], vouched, None, load=True)
+    assert hashed == []
+    digest = pins[VAE].sha256
+    for words in (None, lambda found: f"the caller's words, {found}"):
+        recorded = pull.Hashes()
+        assert recorded.vouch(path, status.st_size, status.st_mtime_ns, digest, words)
+        pull.check_pin(VAE, path, pins[VAE], recorded, None, load=True)
+        with pytest.raises(ModelError) as error:
+            recorded.proved(path, "1" * 64, status)
+        assert str(error.value) == (
+            f"{path}: SHA-256 {'1' * 64} as it loaded, where the record has {digest} for it,"
+            " with the size and modification time it has: changed since, its size and time kept"
+            if words is None
+            else f"the caller's words, {'1' * 64}"
+        )
+        recorded.proved(path, digest, status)
+    read = pull.Hashes()
+    pull.check_pin(VAE, path, pins[VAE], read, None)
+    assert hashed == [path]
+    with pytest.raises(ModelError) as error:
+        read.proved(path, "1" * 64, status)
+    assert str(error.value) == (
+        f"{path}: changed since its SHA-256 was read, before its load ended: run again, which"
+        " checks it again"
+    )
+    caplog.clear()
+    read.proved(path, digest, status)  # proved already by the whole read: nothing said
+    assert caplog.messages == []
+
+
+def test_a_file_unknown_before_its_load_takes_the_load_s_sha256(
+    tmp_path: Path, hashed: list[Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    # A file seedvr2x doesn't pin, on a run that needs its SHA-256 for a record made after the
+    # load (a picture's, the image server's): the load's, said once, with the file as the load
+    # opened it; nothing read besides.
+    caplog.set_level(logging.INFO)
+    path = tmp_path / "numz.safetensors"
+    path.write_bytes(b"numz's bytes")
+    hashes = pull.Hashes()
+    assert not hashes.known(path)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    hashes.proved(path, digest, path.stat())
+    assert hashes.sha256(path) == digest and hashed == []
+    assert hashes.mtime_ns(path) == path.stat().st_mtime_ns
+    assert caplog.messages == [f"numz.safetensors: SHA-256 {digest}, read as it loaded"]
+    hashes.unchanged(path)
+    os.utime(path, ns=(0, path.stat().st_mtime_ns + 1))
+    with pytest.raises(ModelError, match="changed since its SHA-256 was read"):
+        hashes.unchanged(path)
+
+
 def test_a_long_hash_is_named_before_it_starts(
     tmp_path: Path,
     pins: dict[str, Pin],
@@ -823,7 +944,9 @@ def test_load_refuses_a_file_changed_since_its_hash(
 
     done: list[str] = []
 
-    def load_weights(module: object, path: Path, *args: object) -> dict[str, object]:
+    def load_weights(
+        module: object, path: Path, *args: object, **more: object
+    ) -> dict[str, object]:
         role = "dit" if path == dit else "vae"
         done.append(role)
         if when == "during" and role == touched:
@@ -840,6 +963,36 @@ def test_load_refuses_a_file_changed_since_its_hash(
         " which checks it again"
     )
     assert done == loaded
+
+
+@pytest.mark.parametrize("wrong", ["vae", "dit"])
+def test_load_refuses_a_file_whose_bytes_are_not_those_expected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrong: str
+) -> None:
+    # load_models hands each file's load the Hashes' proof (model._load_weights's hashed): a file
+    # whose bytes, read by its load, aren't the SHA-256 the run took (here a pin's) is refused at
+    # the end of its own load, the VAE's first, before the DiT is read or anything is made.
+    import torch
+
+    dit = write(tmp_path / "seedvr2x_ema_7b_fp16.safetensors", as_dtype("7b", "F16"))
+    vae = write(tmp_path / "seedvr2x_ema_vae_fp16.safetensors", as_dtype("vae", "F16"))
+    paths = {"dit": dit, "vae": vae}
+    hashes = pull.Hashes()
+    for role, path in paths.items():
+        hashes.expect(path, f"{role} pinned", lambda found, role=role: f"{role}: not {found}", "ok")
+    done: list[str] = []
+
+    def load_weights(module: object, path: Path, *args: object, **more: Any) -> dict[str, object]:
+        role = "dit" if path == dit else "vae"
+        done.append(role)
+        more["hashed"]("another" if role == wrong else f"{role} pinned", path.stat())
+        return {}  # no part away from the device (model._load_weights)
+
+    monkeypatch.setattr(model, "_load_weights", load_weights)
+    with pytest.raises(ModelError) as error:
+        model.load_models(dit, vae, torch.device("cpu"), hashes)
+    assert str(error.value) == f"{wrong}: not another"
+    assert done == (["vae"] if wrong == "vae" else ["vae", "dit"])
 
 
 def _offline() -> str | None:

@@ -377,9 +377,12 @@ def test_the_refusal_of_pictures_at_once_names_no_option_the_server_refuses(
 # ---- The model files --------------------------------------------------------------------------
 
 
-def test_the_model_files_are_hashed_once_each(
+def test_the_model_files_are_read_by_their_load_alone(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
 ) -> None:
+    # DESIGN.md, Weights (decided on 2026-11-03): the start reads no model file whole; the
+    # load hashes each as it reads it, and the record holds the SHA-256 of the bytes it read,
+    # once for the server's life.
     directory = tmp_path / "files"
     directory.mkdir()
     (directory / "dit.safetensors").write_bytes(b"the dit")
@@ -395,18 +398,24 @@ def test_the_model_files_are_hashed_once_each(
     monkeypatch.setattr(files, "sha256", counting)
     given = options(tmp_path, model_dir=directory, dit="dit.safetensors", vae="vae.safetensors")
     service = services.Service(given, StandIn(cpu_models))
-    service.check_files()
-    assert sorted(path.name for path in read) == ["dit.safetensors", "vae.safetensors"]
-    assert service.record_models is not None
-    dit, vae = service.record_models
-    assert (dit.name, dit.sha256) == ("dit.safetensors", hashlib.sha256(b"the dit").hexdigest())
-    assert (vae.name, vae.sha256) == ("vae.safetensors", hashlib.sha256(b"the vae").hexdigest())
+    checked = service.check_files()
+    assert read == [] and service.record_models is None
+    StandIn(cpu_models).load(checked, None, 0)  # pyright: ignore[reportArgumentType]
+    assert [checked.hashes.sha256(each) for each in (checked.dit.path, checked.vae.path)] == [
+        hashlib.sha256(b"the dit").hexdigest(),
+        hashlib.sha256(b"the vae").hexdigest(),
+    ]
+    assert read == []
 
 
 def test_the_record_holds_the_hashes_of_the_files_the_server_started_on(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
 ) -> None:
+    # The SHA-256 of the bytes the start's load read, no file read whole besides.
+    read: list[Path] = []
+    monkeypatch.setattr(files, "sha256", lambda path: read.append(path) or "")
     with live(monkeypatch, tmp_path, cpu_models) as server:
+        assert read == []
         assert server.service.record_models is not None
         empty = hashlib.sha256(b"").hexdigest()
         assert [each.sha256 for each in server.service.record_models] == [empty, empty]

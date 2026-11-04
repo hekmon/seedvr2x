@@ -387,7 +387,13 @@ def machine(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Machine:
         return free_memory(torch.device("cpu"))
 
     def load(*arguments: Any) -> Any:
+        # As the library's load: each file hashed as it is read, its SHA-256 proved or given at
+        # its end (pull.Hashes.proved; DESIGN.md, Weights, decided on 2026-11-03).
         made.loads.append(arguments)
+        hashes: Any = arguments[3] if len(arguments) > 3 else None
+        for path in arguments[:2]:
+            if hashes is not None:
+                hashes.proved(path, hashlib.sha256(path.read_bytes()).hexdigest(), path.stat())
         return made.models
 
     def upscale(*arguments: Any, **keywords: Any) -> npt.NDArray[np.float32]:
@@ -1321,7 +1327,8 @@ def test_the_file_carries_seedvr2xs_record(
     """DESIGN.md, The record in each output: the version and the address, the mark, the source's
     size as stored and the output's as written (upright: 48 x 80 at orientation 6), the model
     files by name and SHA-256, the seed, the colour correction, the tiles (0 untiled) and the
-    attention kernel, written out here; the model files hashed before the models load."""
+    attention kernel, written out here; the model files hashed by their load alone, which reads
+    each once (DESIGN.md, Weights, decided on 2026-11-03): no whole read of a file before it."""
     source = make_picture(tmp_path / "in.png", bits=8, orientation=value)
     output = tmp_path / f"out.{suffix}"
     assert run(machine, source, output, "--color-correction", "split") == 0
@@ -1348,8 +1355,8 @@ def test_the_file_carries_seedvr2xs_record(
         ("attention", "flash_attn_2"),
     ]
     messages = [r.getMessage() for r in caplog.records]
-    hashed = messages.index(f"w.safetensors: SHA-256 {EMPTY_SHA256}, in 0.0 s")
-    assert hashed < next(i for i, m in enumerate(messages) if m.startswith("models loaded in"))
+    assert f"w.safetensors: SHA-256 {EMPTY_SHA256}, read as it loaded" in messages
+    assert not [m for m in messages if m.startswith("w.safetensors: SHA-256") and " in " in m]
 
 
 def test_the_record_names_the_tiles_of_the_pass(

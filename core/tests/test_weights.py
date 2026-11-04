@@ -429,7 +429,9 @@ def test_load_models_by_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     loaded: list[str] = []
 
-    def load_weights(module: object, path: Path, *args: object) -> dict[str, object]:
+    def load_weights(
+        module: object, path: Path, *args: object, **more: object
+    ) -> dict[str, object]:
         loaded.append(path.name)
         return {}  # no part away from the device (model._load_weights)
 
@@ -468,7 +470,7 @@ def test_load_models_builds_the_int8_dit(tmp_path: Path, monkeypatch: pytest.Mon
 
     loaded: list[tuple[str, object, object]] = []
 
-    def load_weights(module: Any, path: Path, *args: Any) -> dict[str, object]:
+    def load_weights(module: Any, path: Path, *args: Any, **more: Any) -> dict[str, object]:
         loaded.append((path.name, module, args[3] if len(args) > 3 else None))
         return {}
 

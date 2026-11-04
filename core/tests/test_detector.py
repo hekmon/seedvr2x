@@ -308,6 +308,45 @@ def test_model_file_checked(tmp_path: Path, untrained: Path) -> None:
         Detector(copy, CPU, hashes=hashes)
 
 
+def test_the_detector_s_file_is_read_once_and_hashed_as_it_loads(
+    tmp_path: Path, untrained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DESIGN.md, Weights (decided on 2026-11-03): the shot detector's file read once, into
+    # memory, hashed and loaded from those bytes, never mapped: its SHA-256 given to the run
+    # where unknown, proved where the run took one (a pin's), and refused at the load's end,
+    # before any frame, where its bytes aren't those; the weights the file's.
+    copy = tmp_path / "transnetv2.safetensors"
+    shutil.copyfile(untrained, copy)
+    digest = hashlib.sha256(copy.read_bytes()).hexdigest()
+    opened: list[str] = []
+    real = Path.open
+
+    def counted(path: Path, *args: Any, **more: Any) -> Any:
+        if path == copy:
+            opened.append(str(args[0] if args else more.get("mode", "r")))
+        return real(path, *args, **more)
+
+    monkeypatch.setattr(Path, "open", counted)
+    monkeypatch.setattr(detector, "load_file", None, raising=False)
+    hashes = pull.Hashes()
+    with Detector(copy, CPU, hashes=hashes) as found:
+        model = found._model  # pyright: ignore[reportPrivateUsage]
+        assert model is not None
+        expected = load_file(copy)
+        assert all(torch.equal(model.state_dict()[k], v) for k, v in expected.items())
+    # One read of its bytes; weights.check's read of the header besides.
+    assert opened.count("rb") == 2
+    assert hashes.known(copy) and hashes.sha256(copy) == digest
+    expecting = pull.Hashes()
+    expecting.expect(copy, "0" * 64, lambda got: f"not the pin's: {got}", "said")
+    with pytest.raises(ModelError) as error:
+        Detector(copy, CPU, hashes=expecting)
+    assert str(error.value) == f"not the pin's: {digest}"
+    proving = pull.Hashes()
+    proving.expect(copy, digest, lambda got: "refused", "said")
+    Detector(copy, CPU, hashes=proving).close()
+
+
 # A Detector built on the GPU before anything else of its process touched CUDA, then run.
 FIRST_ON_THE_GPU = """
 import sys

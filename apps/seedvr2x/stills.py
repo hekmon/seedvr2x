@@ -194,11 +194,12 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         logger.info("%s", said)
     # The model files, as a video's run has them, minus the shot detector, which a picture never
     # runs: not fetched, its file not checked. The header check first, then seedvr2x's own files
-    # by their pins (main._run).
+    # by their pinned sizes, their SHA-256 read by their load alone, which proves it at its end,
+    # before the picture (DESIGN.md, Still images, Model files; Weights, decided on 2026-11-03).
     model_files = pull.resolve(args.model_dir, args.dit_model, args.vae_model, detector=False)
     dit, vae = (None if file.absent else file.path for file in (model_files.dit, model_files.vae))
     check_models(dit, vae, pull.advice(model_files), None)
-    pull.check_pinned(model_files)
+    pull.check_pinned(model_files, load=True)
     # The allocator, set before torch is imported (seedvr2x/memory.py), where the run first takes
     # the GPU: one refused before, for its picture, its settings or its model files, asks the card
     # nothing.
@@ -254,14 +255,14 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         # No upscale, as a video's --plan: the models are not loaded, nothing is written.
         return 0
     tiles = still_plan.tiles(plan, target)
-    # The record the file carries (DESIGN.md, The record in each output), made before the models
-    # load: a model file seedvr2x doesn't pin, numz's, is hashed here, once, as a video's job
-    # hashes it for its manifest, and the load holds it to that hash (pull.Hashes.unchanged).
-    made = _record(pic, written, resolution, sample_aspect, model_files, args, tiles, attention)
     loaded = reads.load(model_files, device, plan.models, plan.reading.reserve, "")
     if loaded is None:
         return 1
     models, _ = loaded
+    # The record the file carries (DESIGN.md, The record in each output), made once the models
+    # are loaded: each model file's SHA-256 that of the very bytes its load read, a pinned
+    # file's or one seedvr2x doesn't pin, numz's (pull.Hashes.proved).
+    made = _record(pic, written, resolution, sample_aspect, model_files, args, tiles, attention)
     started = time.monotonic()
     out = _upscaled(models, pic, target, args.seed, tiles, split, reads)
     if out is None:

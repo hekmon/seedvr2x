@@ -5,6 +5,7 @@ listening on a port of its own, started and stopped as main.serve does (main.lau
 shut), without its signals, which only the main thread may take."""
 
 import contextlib
+import hashlib
 import http.client
 import io
 import threading
@@ -84,6 +85,11 @@ class StandIn:
 
     def load(self, files: ModelFiles, plan: ModelPlan, reserve: int) -> model.Models:
         self.plans.append(plan)
+        # As the library's load: each file hashed as it is read, its SHA-256 proved or given at
+        # its end (pull.Hashes.proved; DESIGN.md, Weights, decided on 2026-11-03).
+        for each in (files.dit.path, files.vae.path):
+            digest = hashlib.sha256(each.read_bytes()).hexdigest()
+            files.hashes.proved(each, digest, each.stat())
         loaded: Any = pipeline_models(self.vae_models)
         loaded.attention = self.attention_name
         return loaded

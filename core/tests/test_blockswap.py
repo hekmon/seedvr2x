@@ -13,9 +13,13 @@ The swap on a real card, the DiT's bits and the figures: tests/test_placement.py
 """
 
 import gc
+import hashlib
 import itertools
 import json
+import os
 import random
+import threading
+import time
 import weakref
 from collections import deque
 from collections.abc import Callable
@@ -572,11 +576,20 @@ def test_read_takes_the_file_from_its_start_to_its_end(
         def seek(self, position: int) -> int:
             return self.file.seek(position)
 
+        def fileno(self) -> int:
+            return self.file.fileno()
+
         def readinto(self, target: memoryview) -> int:
             start = self.file.tell()
             got = self.file.readinto(target)
             spans.append((start, start + got))
             return got
+
+        def read(self, size: int) -> bytes:
+            start = self.file.tell()
+            data = self.file.read(size)
+            spans.append((start, start + len(data)))
+            return data
 
     def recorded(name: Any, *args: Any, **more: Any) -> Any:
         opened = real(name, *args, **more)
@@ -592,6 +605,169 @@ def test_read_takes_the_file_from_its_start_to_its_end(
     # part's alike.
     assert spans[0][0] == 0 and spans[-1][1] == path.stat().st_size
     assert all(end == start for (_, end), (start, _) in itertools.pairwise(spans))
+
+
+def hashing(
+    module: torch.nn.Module,
+    path: Path,
+    dtype: torch.dtype | None,
+    part_of: Callable[[str], str | None] | None = None,
+    backend: blockswap.Cuda | None = None,
+    skip: Callable[[str], bool] | None = None,
+) -> tuple[dict[str, Tensor], dict[str, Part], str, os.stat_result]:
+    """blockswap.read over the file at path, on the CPU, with hashed: its tensors, parts, SHA-256
+    and status."""
+    given: list[tuple[str, os.stat_result]] = []
+    state, parts = blockswap.read(
+        *(module, path, CPU, dtype, part_of, backend),
+        skip=skip,
+        hashed=lambda d, s: given.append((d, s)),
+    )
+    assert len(given) == 1
+    return state, parts, *given[0]
+
+
+def test_read_hashes_every_byte_of_the_file_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DESIGN.md, Weights (decided on 2026-11-03): a load reads its file once, hashing every byte
+    # as it reads it, in the file's order: the header, the tensors kept, those skipped (an int8
+    # file's markers, first, between and last) and any byte after the data, so that the SHA-256
+    # is hashlib's of the whole file, the bytes put on the device among them. The tensors are
+    # today's, read without the hash; the file read once, front to back, and never mapped.
+    entries = {
+        "m0": {"dtype": "U8", "shape": [3], "data_offsets": [0, 3]},
+        "a": {"dtype": "F16", "shape": [2], "data_offsets": [3, 7]},
+        "m1": {"dtype": "U8", "shape": [2], "data_offsets": [7, 9]},
+        "b": {"dtype": "F16", "shape": [3], "data_offsets": [9, 15]},
+        "m2": {"dtype": "U8", "shape": [4], "data_offsets": [15, 19]},
+    }
+    data = bytes(range(1, 20))
+    for tail in (b"", b"after the data"):
+        path = written(tmp_path / f"marked{len(tail)}.safetensors", entries, data)
+        with path.open("ab") as file:
+            file.write(tail)
+        module = torch.nn.Module()
+        module.register_parameter("b", torch.nn.Parameter(torch.zeros(3, dtype=torch.float16)))
+        spans: list[tuple[int, int]] = []
+        real = blockswap._Tee.hashed  # pyright: ignore[reportPrivateUsage]
+
+        def recorded(
+            tee: Any, piece: memoryview, real: Any = real, spans: list[tuple[int, int]] = spans
+        ) -> None:
+            spans.append((tee.raw.tell() - len(piece), tee.raw.tell()))
+            real(tee, piece)
+
+        monkeypatch.setattr(blockswap._Tee, "hashed", recorded)  # pyright: ignore[reportPrivateUsage]
+        state, parts, digest, opened = hashing(
+            module, path, None, lambda key: "part", Sim(), lambda key: key[0] == "m"
+        )
+        monkeypatch.undo()
+        whole = path.read_bytes()
+        assert digest == hashlib.sha256(whole).hexdigest()
+        assert (opened.st_ino, opened.st_size) == (path.stat().st_ino, len(whole))
+        # Each byte hashed once, in the file's order, end to end.
+        assert spans[0][0] == 0 and spans[-1][1] == len(whole)
+        assert all(end == start for (_, end), (start, _) in itertools.pairwise(spans))
+        # The tensors those read without the hash; the markers skipped, not kept.
+        plain, _ = blockswap.read(
+            module, path, CPU, None, lambda key: "part", Sim(), skip=lambda key: key[0] == "m"
+        )
+        assert list(state) == list(plain) == ["a", "b"] and list(parts) == ["part"]
+        assert all(torch.equal(state[key], plain[key]) for key in state)
+        assert bytes(state["b"].view(torch.uint8)) == data[9:15]
+        assert not mappings(path)
+
+
+def test_the_hash_waits_for_nothing_but_the_buffer_it_reads_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The hash runs on a thread of its own, a piece behind the read (blockswap._Tee): the
+    # staging buffer, read into again for each tensor bound for the device, waits for its last
+    # piece's hash, so that the bytes hashed are the file's even where the hash is slow. Pieces
+    # of 5 bytes, a hash that sleeps on each and keeps a copy of what it was given: the copies
+    # are the file, its SHA-256 hashlib's, the tensors the file's.
+    saved = {f"t{i}": torch.arange(i, i + 7 + i, dtype=torch.int16) for i in range(6)}
+    path = tmp_path / "many.safetensors"
+    save_file(saved, path)
+    monkeypatch.setattr(blockswap, "PIECE", 5)
+    seen: list[bytes] = []
+    threads: set[str] = set()
+    real = hashlib.sha256
+
+    class Slow:
+        def __init__(self) -> None:
+            self.real = real()
+
+        def update(self, data: memoryview) -> None:
+            time.sleep(0.002)
+            threads.add(threading.current_thread().name)
+            seen.append(bytes(data))
+            self.real.update(data)
+
+        def hexdigest(self) -> str:
+            return self.real.hexdigest()
+
+    monkeypatch.setattr(blockswap.hashlib, "sha256", Slow)
+    state, parts, digest, _ = hashing(torch.nn.Module(), path, None)
+    monkeypatch.undo()
+    whole = path.read_bytes()
+    assert b"".join(seen) == whole and digest == hashlib.sha256(whole).hexdigest()
+    assert not parts and all(torch.equal(state[key], saved[key]) for key in saved)
+    assert len(threads) == 1 and next(iter(threads)).startswith("seedvr2x-sha256")
+    # The thread ends with the read.
+    assert not [t for t in threading.enumerate() if t.name.startswith("seedvr2x-sha256")]
+
+
+def test_a_file_cut_short_is_refused_as_it_hashes_too(tmp_path: Path) -> None:
+    # The same refusal with the hash as without (test_read_refuses_what_it_cannot_read), in a
+    # tensor read and in one skipped, its thread ended; nothing hashed is given.
+    half = {"dtype": "F16", "shape": [3], "data_offsets": [0, 6]}
+    after = {"dtype": "F16", "shape": [2], "data_offsets": [6, 10]}
+    short = written(tmp_path / "short.safetensors", {"x": half, "y": after}, bytes(8))
+    size = short.stat().st_size
+    given: list[str] = []
+    for skip in (None, lambda key: key == "y"):
+        with pytest.raises(weights.ModelError) as error:
+            blockswap.read(
+                *(torch.nn.Module(), short, CPU, None, None),
+                skip=skip,
+                hashed=lambda d, s: given.append(d),
+            )
+        assert str(error.value) == (
+            f"{short}: cut short as it loaded, {size:,} of {size + 2:,} bytes; fetch it again"
+        )
+    assert not given
+    assert not [t for t in threading.enumerate() if t.name.startswith("seedvr2x-sha256")]
+
+
+# seedvr2x's VAE and TransNetV2's weights, read on the CPU where SEEDVR2X_MODEL_DIR has them.
+REAL = {
+    "seedvr2x_ema_vae_fp16.safetensors": "b9c6ebf0",
+    "transnetv2.safetensors": "bb8c8388",
+}
+
+
+@pytest.mark.parametrize("name", list(REAL))
+def test_a_real_file_s_hash_is_its_pin_and_its_tensors_safetensors(name: str) -> None:
+    # The model files themselves, where the test's model directory has them: the read's SHA-256
+    # the file's pin (pull.PINNED), its tensors those of safetensors' own load, bit for bit, the
+    # VAE cast as a run loads it. The 7B's 16.5 GB are held by the GPU regression, bit for bit.
+    directory = os.environ.get("SEEDVR2X_MODEL_DIR")
+    if not directory or not (Path(directory) / name).is_file():
+        pytest.skip(f"needs SEEDVR2X_MODEL_DIR holding {name}")
+    from seedvr2x import pull
+
+    path = Path(directory) / name
+    for dtype in (None, torch.bfloat16) if "vae" in name else (None,):
+        state, parts, digest, _ = hashing(torch.nn.Module(), path, dtype)
+        assert digest == pull.PINNED[name].sha256 and digest.startswith(REAL[name])
+        expected = load_file(path)
+        assert not parts and state.keys() == expected.keys()
+        for key, tensor in state.items():
+            want = expected[key]
+            want = want.to(dtype) if dtype is not None and want.is_floating_point() else want
+            assert tensor.dtype == want.dtype and torch.equal(tensor, want), key
 
 
 def test_a_model_loaded_whole_is_read_too(tmp_path: Path) -> None:
