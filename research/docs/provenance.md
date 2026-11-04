@@ -57,7 +57,9 @@ reference inference scripts), `video_diffusion_sr/utils.py`, `common/utils.py`,
   `.bfloat16()` casts on q/k/v are removed, so attention runs in the pipeline's dtype.
   `.item()` calls are removed for `torch.compile`.
 - **Windowing** (`na.py`, the same file for both sizes): rewritten so `torch.compile` can trace
-  it (`tensor_split` instead of `.tolist()`); meant to be equivalent.
+  it (`tensor_split` instead of `.tolist()`); equivalent at a batch of one only: with several
+  samples `repeat_concat_idx` gives the wrong text to each window and fails on two sizes
+  ([bug 27](../bugs/27-repeat-concat-idx-batches.md)).
 - **Normalisation** (`normalization.py`): Apex's fused LayerNorm/RMSNorm replaced by plain
   PyTorch, with fp8 weight upcasts. ByteDance's configs use the fused versions, so ByteDance's
   code needs Apex.
