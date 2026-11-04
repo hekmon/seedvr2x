@@ -212,6 +212,26 @@ The picture is written upright whatever its orientation tag, and carries none.
 A 4K picture from 1080p took 14 s to upscale on an RTX 5090 with the desktop live (DESIGN.md,
 Still images). Throughput under load has not been measured yet.
 
+### `OPTIONS /upscale`
+
+What the endpoint takes, behind the key as POST is. The answer is 204 with no body:
+
+```
+curl -i -X OPTIONS http://127.0.0.1:8390/upscale -H 'Authorization: Bearer ...'
+```
+
+```
+HTTP/1.0 204 No Content
+Allow: POST, OPTIONS
+Accept-Post: image/png, image/jpeg, image/webp, image/tiff, image/bmp, image/gif
+```
+
+`Accept-Post` lists the formats of the pictures the server reads, from the library's own list. It
+is the header of the W3C's Linked Data Platform 1.0 (section 7.1), registered with IANA. The
+picture's format is still told by its content, never by `Content-Type`. The server sets no
+`Access-Control-*` header: a browser's cross-origin calls are for the reverse proxy to allow.
+`OPTIONS` on another path is a 404, and `OPTIONS *` a 501.
+
 ### Statuses
 
 Each error carries seedvr2x's message as text.
@@ -221,11 +241,12 @@ Each error carries seedvr2x's message as text.
 | 200 | The picture. |
 | 400 | A header wrong, missing or unknown (`Seedvr2x-Resolution` missing, a seed out of range, an unknown `Seedvr2x-` header, a setting given twice, an `Accept` weight not from 0 to 1); a `Content-Length` that is not one whole number. |
 | 401 | The key missing or wrong, with `WWW-Authenticate: Bearer`. Checked before any body is read. |
-| 404, 405, 501 | Another path; GET on `/upscale` (`Allow: POST`); another method. |
-| 406 | An `Accept` the server can't meet, or a picture WebP can't hold where PNG is not taken either. |
+| 204 | `OPTIONS /upscale`: `Allow` and `Accept-Post`, no body. |
+| 404, 405, 501 | Another path; GET on `/upscale` (`Allow: POST, OPTIONS`); another method. |
+| 406 | An `Accept` the server can't meet (the message names `image/png` and `image/webp`), or a picture WebP can't hold where PNG is not taken either. |
 | 411 | No `Content-Length`, or a chunked body. |
 | 413 | A body over the limit, which follows `--max-input`. The body is not read. |
-| 422 | The body is empty; the picture refused (not a picture, damaged, raw, HDR, animated, transparent, over `--max-input`, too small for the size asked); or the output over `--max-size`. The message names the way out. |
+| 422 | The body is empty; the picture refused (not a picture, damaged, raw, HDR, animated, transparent, over `--max-input`, too small for the size asked); or the output over `--max-size`. The message names the way out. A body that is not a picture the server reads also carries `Accept-Post`, the formats it takes. |
 | 503 | The queue is full, or the server is starting or stopping, with `Retry-After` (15 s). After a CUDA error the server has failed and answers 503 without `Retry-After`: it takes no picture until it is restarted. |
 | 500 | A picture failed (out of memory, an output not finite); the server goes on. A CUDA error other than out of memory answers 500 too, then the server exits ([exit codes](#exit-codes)). |
 

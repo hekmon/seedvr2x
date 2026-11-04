@@ -6,7 +6,8 @@ size before it is read, a deadline on a request's head and another on its body, 
 connections served at once, and a cap on the pictures taken in at once (a body read and decoded
 is host memory the plan counts, reservation.host_process).
 
-POST /upscale, GET /health and GET /metrics; every other path 404, every other method 501."""
+POST and OPTIONS /upscale, GET /health and GET /metrics; every other path 404, every other
+method 501 (OPTIONS * included)."""
 
 import hmac
 import logging
@@ -42,6 +43,8 @@ HEAD_SECONDS = 20.0
 # and no more), and 20 s lets a small picture start.
 BODY_SECONDS = 20.0
 BODY_RATE = 64 * 1024
+# What Allow says of /upscale (RFC 9110, 10.2.1): OPTIONS answers the formats in Accept-Post.
+UPSCALE_ALLOW = "POST, OPTIONS"
 # What Retry-After says for the queue full or the server starting or stopping, in seconds: a 4K
 # picture's upscale on the RTX 5090, 14 s (DESIGN.md, Still images), rounded up.
 RETRY_AFTER = 15
@@ -194,6 +197,13 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as error:
             logger.debug("%s: the answer couldn't be sent: %s", self.address_string(), error)
 
+    def _unauthorised(self) -> None:
+        self._text(
+            HTTPStatus.UNAUTHORIZED,
+            "an API key is needed: Authorization: Bearer KEY",
+            {"WWW-Authenticate": "Bearer"},
+        )
+
     def _unavailable(self, error: Unavailable) -> None:
         headers = {"Retry-After": str(RETRY_AFTER)} if error.retry else {}
         self._text(HTTPStatus.SERVICE_UNAVAILABLE, str(error), headers)
@@ -216,12 +226,42 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self._write(body)
         elif path == "/upscale":
-            self._text(HTTPStatus.METHOD_NOT_ALLOWED, "/upscale takes POST", {"Allow": "POST"})
+            self._text(
+                HTTPStatus.METHOD_NOT_ALLOWED,
+                "/upscale takes POST and OPTIONS",
+                {"Allow": UPSCALE_ALLOW},
+            )
         else:
             self._text(
                 HTTPStatus.NOT_FOUND,
-                f"{path}: the server answers POST /upscale, GET /health and GET /metrics",
+                f"{path}: the server answers POST and OPTIONS /upscale, GET /health and"
+                " GET /metrics",
             )
+
+    # ---- OPTIONS /upscale ------------------------------------------------------------------
+
+    def do_OPTIONS(self) -> None:
+        """What /upscale takes: 204 with Allow and Accept-Post (the formats of the pictures, the
+        W3C LDP 1.0's header, section 7.1), behind the API key as POST is. No Access-Control-*
+        header: a browser's cross-origin calls are the reverse proxy's to allow, never the
+        server's. Another path is a 404 as for GET; `OPTIONS *` stays unsupported (501), as it
+        was before this method existed."""
+        self._head_timer.cancel()
+        target = self.path.split("?", 1)[0]
+        if target == "*":
+            self.send_error(HTTPStatus.NOT_IMPLEMENTED, "Unsupported method ('OPTIONS')")
+            return
+        if target != "/upscale":
+            self._text(HTTPStatus.NOT_FOUND, f"{target}: the server answers /upscale")
+            return
+        if not self._authorised():
+            self._unauthorised()
+            return
+        # No Content-Length and no body: a 204 carries none (RFC 9110, 8.6).
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.send_header("Allow", UPSCALE_ALLOW)
+        self.send_header("Accept-Post", answers.ACCEPT_POST)
+        self.end_headers()
 
     # ---- POST /upscale ---------------------------------------------------------------------
 
@@ -234,11 +274,7 @@ class Handler(BaseHTTPRequestHandler):
         # The key first, then the server's state, the headers and the body's size: nothing of a
         # body is read for a request that would be refused anyway.
         if not self._authorised():
-            self._text(
-                HTTPStatus.UNAUTHORIZED,
-                "an API key is needed: Authorization: Bearer KEY",
-                {"WWW-Authenticate": "Bearer"},
-            )
+            self._unauthorised()
             return
         try:
             service.taking()
@@ -280,7 +316,9 @@ class Handler(BaseHTTPRequestHandler):
             del data
             made = service.run(prepared, self._gone)
         except Unprocessable as error:
-            self._text(HTTPStatus.UNPROCESSABLE_ENTITY, str(error))
+            # A body that is no picture the server takes says which formats it does.
+            headers = {"Accept-Post": answers.ACCEPT_POST} if error.kind == "not-a-picture" else {}
+            self._text(HTTPStatus.UNPROCESSABLE_ENTITY, str(error), headers)
             return
         except answers.NotAcceptable as error:
             self._text(HTTPStatus.NOT_ACCEPTABLE, str(error))

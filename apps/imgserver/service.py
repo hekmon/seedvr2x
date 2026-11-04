@@ -67,7 +67,13 @@ class State(Enum):
 
 
 class Unprocessable(Exception):
-    """A picture refused or over the server's limits: answered 422 with the message."""
+    """A picture refused or over the server's limits: answered 422 with the message. `kind` is
+    the library's kind of the refusal (picture.KINDS) where there is one, which the answer's
+    headers follow: Accept-Post for "not-a-picture"."""
+
+    def __init__(self, message: str, kind: str | None = None) -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 class Failed(Exception):
@@ -523,7 +529,7 @@ class Service:
         try:
             read = picture.read(data, "the picture")
         except Refusal as error:
-            raise Unprocessable(answers.refused(error)) from None
+            raise Unprocessable(answers.refused(error), error.kind) from None
         chosen = formats.first
         if chosen == answers.WEBP:
             why = webp.why_not(read.bits, read.icc, read.chunks)
@@ -556,7 +562,7 @@ class Service:
         try:
             frames.check_target(target, settings.resolution)
         except Refusal as error:
-            raise Unprocessable(answers.refused(error)) from None
+            raise Unprocessable(answers.refused(error), error.kind) from None
         out_height, out_width = frames.output_size(target)
         long, short = made.plan.bound
         if max(out_height, out_width) > long or min(out_height, out_width) > short:

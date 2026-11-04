@@ -4,9 +4,10 @@ own words for a refused picture, the library's reason with a way out of the serv
 file name and no command (the user, 2026-11-03: Pillow alone, no ffmpeg, in production). Plain
 Python, no torch."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from seedvr2x import picture
 from seedvr2x.errors import Refusal
 from seedvr2x.passes import ENCODE_SEED_OFFSET
 
@@ -25,6 +26,37 @@ DIGITS = 10
 
 PNG = "image/png"
 WEBP = "image/webp"
+
+# The media type of each format the server reads (Pillow's names, seedvr2x.picture.FORMATS). The
+# format is told by the picture's content, never by Content-Type, so these are only what
+# OPTIONS /upscale and the 422 for a body that is no picture say the server takes.
+MEDIA_TYPES = {
+    "PNG": PNG,
+    "JPEG": "image/jpeg",
+    "WEBP": WEBP,
+    "TIFF": "image/tiff",
+    "BMP": "image/bmp",
+    "GIF": "image/gif",
+}
+
+
+def accept_post(
+    names: Iterable[str] = picture.FORMATS, types: Mapping[str, str] = MEDIA_TYPES
+) -> str:
+    """The value of Accept-Post for the formats `names`, their media types in order, separated
+    by ", ". Accept-Post is the W3C Linked Data Platform 1.0's header (section 7.1, in IANA's
+    registry of HTTP field names): the media types a resource takes in a POST. ValueError where
+    a format has no type, so that a format added to the library can't be left out unseen."""
+    names = tuple(names)
+    missing = [name for name in names if name not in types]
+    if missing:
+        raise ValueError(f"no media type for the format(s) {', '.join(missing)}")
+    return ", ".join(types[name] for name in names)
+
+
+# What OPTIONS /upscale and the 422 for no picture say, built once at import: a format of the
+# library without a type fails the server's start, never an answer.
+ACCEPT_POST = accept_post()
 
 
 class BadRequest(Exception):

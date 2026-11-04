@@ -251,12 +251,108 @@ def test_a_picture_webp_cannot_hold_is_refused_where_the_client_takes_no_png(
     assert "image/png" in body.decode()
 
 
+def test_a_406_names_the_two_formats_the_server_answers(server: Live) -> None:
+    status, headers, body = server.upscale(
+        b"not a picture at all", 48, headers={"Accept": "image/jpeg"}
+    )
+    assert status == 406
+    assert "accept-post" not in headers
+    text = body.decode()
+    assert "image/png" in text
+    assert "image/webp" in text
+
+
 def test_an_accept_the_server_cannot_meet_is_refused_before_the_body_matters(
     server: Live,
 ) -> None:
     status, _, body = server.upscale(b"not a picture at all", 48, headers={"Accept": "image/jpeg"})
     assert status == 406
     assert "image/png" in body.decode()
+
+
+# ---- OPTIONS, 405 ---------------------------------------------------------------------------
+
+ACCEPT_POST = "image/png, image/jpeg, image/webp, image/tiff, image/bmp, image/gif"
+# The headers every answer carries, whatever it says.
+ALWAYS = ("date", "server")
+
+
+def test_the_media_types_cover_every_format_the_library_reads() -> None:
+    assert set(answers.MEDIA_TYPES) == set(picture.FORMATS)
+    assert answers.ACCEPT_POST == ACCEPT_POST
+
+
+def test_options_says_what_upscale_takes(server: Live) -> None:
+    status, headers, body = server.request("OPTIONS", "/upscale")
+    assert status == 204
+    assert body == b""
+    for name in ALWAYS:
+        headers.pop(name)
+    # No Content-Length on a 204 (RFC 9110, 8.6), and no cross-origin header: that is the
+    # reverse proxy's.
+    assert headers == {"allow": "POST, OPTIONS", "accept-post": ACCEPT_POST}
+
+
+def test_options_takes_a_query_and_a_body_it_ignores(server: Live) -> None:
+    status, headers, body = server.request("OPTIONS", "/upscale?x=1", b"ignored")
+    assert (status, body) == (204, b"")
+    assert headers["accept-post"] == ACCEPT_POST
+
+
+def test_options_is_behind_the_api_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
+) -> None:
+    with live(monkeypatch, tmp_path, cpu_models, key="secret") as server:
+        for given in (
+            [],
+            [("Authorization", "Bearer nope")],
+            [("Authorization", "Basic secret")],
+        ):
+            status, headers, body = raw(server, given, method="OPTIONS")
+            assert status == 401, given
+            assert headers["www-authenticate"] == "Bearer"
+            assert "API key" in body.decode()
+            assert "accept-post" not in headers
+        status, headers, body = raw(server, [("Authorization", "Bearer secret")], method="OPTIONS")
+        assert (status, body) == (204, b"")
+        assert headers["accept-post"] == ACCEPT_POST
+        # A path that isn't /upscale is a 404 whatever the key says, as for POST.
+        assert raw(server, [], method="OPTIONS", path="/nothing")[0] == 404
+        assert metric(server, "requests_total", status="401") == 3
+        assert metric(server, "requests_total", status="204") == 1
+
+
+def test_options_on_another_path_is_a_404_and_on_a_star_a_501(server: Live) -> None:
+    for path in ("/", "/health", "/metrics", "/nothing"):
+        status, headers, _ = server.request("OPTIONS", path)
+        assert status == 404, path
+        assert "allow" not in headers
+        assert "accept-post" not in headers
+    status, headers, body = raw(server, [], method="OPTIONS", path="*")
+    assert status == 501
+    assert "accept-post" not in headers
+    assert "OPTIONS" in body.decode()
+
+
+def test_options_carries_no_cross_origin_header_whatever_the_origin_asks(server: Live) -> None:
+    _, headers, _ = server.request(
+        "OPTIONS",
+        "/upscale",
+        headers={
+            "Origin": "https://example.org",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization",
+        },
+    )
+    assert not [name for name in headers if name.startswith("access-control-")]
+
+
+def test_get_on_upscale_is_a_405_that_allows_post_and_options(server: Live) -> None:
+    status, headers, body = server.request("GET", "/upscale")
+    assert status == 405
+    assert headers["allow"] == "POST, OPTIONS"
+    assert "accept-post" not in headers
+    assert "POST and OPTIONS" in body.decode()
 
 
 # ---- 400 ------------------------------------------------------------------------------------
@@ -406,9 +502,11 @@ def test_a_transparent_picture_is_refused_in_the_servers_words(server: Live) -> 
     pixels[:4, :4, 3] = 0
     out = io.BytesIO()
     Image.fromarray(pixels, "RGBA").save(out, "PNG")
-    status, _, body = server.upscale(out.getvalue(), 48)
+    status, headers, body = server.upscale(out.getvalue(), 48)
     text = body.decode()
     assert status == 422
+    # The picture is one the server takes, refused for its content: no Accept-Post.
+    assert "accept-post" not in headers
     assert "transparent" in text
     assert "Flatten it onto a background" in text
     assert "ffmpeg" not in text.lower()
@@ -453,17 +551,20 @@ def test_a_resolution_too_small_for_the_padding_is_refused(server: Live) -> None
 
 
 def test_an_empty_body_is_a_422(server: Live) -> None:
-    status, _, body = server.upscale(b"", 48)
+    status, headers, body = server.upscale(b"", 48)
     assert status == 422
+    assert "accept-post" not in headers
     assert "empty" in body.decode()
 
 
 def test_bytes_that_are_no_picture_are_a_422(server: Live) -> None:
-    status, _, body = server.upscale(b"this is not a picture, though it is bytes", 48)
+    status, headers, body = server.upscale(b"this is not a picture, though it is bytes", 48)
     text = body.decode()
     assert status == 422
     assert "PNG, JPEG" in text
     assert "ffmpeg" not in text.lower()
+    # The formats the server takes, as OPTIONS says them.
+    assert headers["accept-post"] == ACCEPT_POST
 
 
 # ---- 404, 501 -------------------------------------------------------------------------------

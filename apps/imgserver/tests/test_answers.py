@@ -340,3 +340,18 @@ def test_a_reason_ending_in_a_stop_is_not_given_a_second() -> None:
     words = answers.refused(Refusal("m", kind="raw", reason="it is raw."))
     assert words.startswith("It is raw. ")
     assert ".." not in words
+
+
+# ---- Accept-Post ---------------------------------------------------------------------------------
+
+
+def test_accept_post_lists_the_formats_the_library_reads_in_order() -> None:
+    assert answers.ACCEPT_POST == (
+        "image/png, image/jpeg, image/webp, image/tiff, image/bmp, image/gif"
+    )
+    assert set(answers.MEDIA_TYPES) == set(picture.FORMATS)
+
+
+def test_a_format_with_no_media_type_is_not_built() -> None:
+    with pytest.raises(ValueError, match="AVIF"):
+        answers.accept_post((*picture.FORMATS, "AVIF"))
