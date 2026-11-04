@@ -392,7 +392,10 @@ once.
   numz and its contributors (Apache-2.0): the server runs its code. The model layer is numz's
   copy of ByteDance's, taken at commit `4490bd1` and changed where seedvr2x needs it, each
   change marked; seedvr2x's VAE passes and its VAE tiling are adapted from numz's.
-- [core/NOTICE](../../core/NOTICE) credits the rest: TransNetV2, comfy-kitchen and the others.
+- **[comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen)**, by Comfy Org (Apache-2.0):
+  seedvr2x's int8 linear follows its rotation and its activations' quantisation, written in
+  PyTorch; none of its code runs.
+- [core/NOTICE](../../core/NOTICE) holds the full notices of the library the server installs.
 
 ## Licence
 
