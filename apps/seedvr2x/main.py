@@ -341,17 +341,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     # The sharp 7B by default, on the user's eyes: preferred or alike on 67 of 75 windows
     # (DESIGN.md, Weights). A file is recognised by its tensors, not its name (seedvr2x/weights.py).
-    # float16 stays the default, int8 an option, until seedvr2x's own runs decide (DESIGN.md,
-    # Weights, "int8 before v0.1.0 is tagged").
+    # float16 stays the default, int8 and the dynamic GGUF options (DESIGN.md, Weights, "int8
+    # before v0.1.0 is tagged", "The dynamic GGUF before v0.1.0 too").
     parser.add_argument(
         "--dit-model",
         default="seedvr2x_ema_7b_sharp_fp16.safetensors",
-        help="the DiT's file: SeedVR2's 7B DiT, regular or sharp, in fp16 or in int8 (seedvr2x's"
-        " int8 files: half the DiT's weights, multiplied in 8 bits), recognised by its tensors;"
-        " without --model-dir, seedvr2x_ema_7b_fp16.safetensors,"
-        " seedvr2x_ema_7b_int8_convrot.safetensors,"
-        " seedvr2x_ema_7b_sharp_int8_convrot.safetensors or the default (default: %(default)s,"
-        " the sharp 7B)",
+        help="the DiT's file: SeedVR2's 7B DiT, regular or sharp, in fp16, in int8 (seedvr2x's"
+        " int8 files: half the DiT's weights, multiplied in 8 bits) or in seedvr2x's dynamic"
+        " GGUF (under a third of fp16's weights: about 4.5 GiB of pinned system memory in place"
+        " of 15, a swap moving a third of the bytes; a little slower than fp16, and no less VRAM"
+        " where the VAE's floor binds), recognised by its tensors; without --model-dir,"
+        " seedvr2x_ema_7b_fp16.safetensors, seedvr2x_ema_7b_int8_convrot.safetensors,"
+        " seedvr2x_ema_7b_sharp_int8_convrot.safetensors, seedvr2x_ema_7b_dyn.gguf,"
+        " seedvr2x_ema_7b_sharp_dyn.gguf or the default (default: %(default)s, the sharp 7B)",
     )
     parser.add_argument(
         "--vae-model",
@@ -1305,18 +1307,20 @@ def _run(args: argparse.Namespace) -> int:
                     host,
                 )
             attention = _attention()
-            # The DiT's figures by its file's format, fp16's or int8's (peaks.DITS): a plan
-            # made loads the models, so its file is there.
+            # The DiT's figures by its file's format, fp16's, int8's or a GGUF's (peaks.DITS): a
+            # plan made loads the models, so its file is there.
             assert dit is not None, "a plan made loads its models"
             dit_model = _dit_model(dit)
             try:
-                plan, peaks = planner.plan(
+                plan, peaks = planner.plan_naming(
                     *(free, target, shots, pins, host),
                     split=split,
                     recorded=kept_plan,
                     attention=attention,
                     compile_vae=args.compile,
                     dit_model=dit_model,
+                    dit_file=dit.name,
+                    model_dir=args.model_dir is not None,
                 )
             except planner.PlanError as error:
                 if kept_plan is None or error.shortfall is None:
@@ -1365,6 +1369,20 @@ def _run(args: argparse.Namespace) -> int:
                 else _own_layouts(recorded_as(None, plan.window), prior, reshaped),
                 disk=room.line(),
                 compile_cache=directory / COMPILE_CACHE,
+                # The smaller DiT files that plan the job better, for a new job's plan.
+                smaller=planner.smaller_swaps(
+                    plan,
+                    peaks,
+                    (free, target, shots, pins, host),
+                    dict(
+                        split=split,
+                        recorded=kept_plan,
+                        attention=attention,
+                        compile_vae=args.compile,
+                        dit_model=dit_model,
+                    ),
+                    dit.name,
+                ),
             )
             for number, line in enumerate(said):
                 logger.info("%s", line)
@@ -3511,8 +3529,8 @@ def _free_memory(device: "torch.device") -> int:
 
 def _dit_model(path: Path) -> "Architecture":
     """The architecture of the DiT's file at path, one of the DiT's formats the plan counts by
-    (peaks.DITS: fp16, int8), by its header, as weights.check_models has checked it: a second's
-    read. The CPU tests' stand-in replaces it, its model file empty."""
+    (peaks.DITS: fp16, int8, the dynamic GGUF), by its header, as weights.check_models has
+    checked it: a second's read. The CPU tests' stand-in replaces it, its model file empty."""
     from seedvr2x import weights
 
     return weights.check(path, "dit")

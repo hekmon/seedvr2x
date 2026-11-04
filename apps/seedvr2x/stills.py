@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from seedvr2x.picture import Picture
     from seedvr2x.pull import ModelFiles
     from seedvr2x.record import Record
-    from seedvr2x.still_plan import PictureTiles
+    from seedvr2x.still_plan import PictureTiles, StillPlan
     from seedvr2x.weights import Architecture
 
 logger = logging.getLogger("cli.stills")
@@ -226,6 +226,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     pins = still_plan.Pins(args.encode_tile, args.decode_tile, args.swap_blocks)
     split = args.color_correction == "split"
     attention = reads.attention()
+
     # The plan for this picture alone, as stored, the way the model sees it (still_plan.plan's
     # `picture`; DESIGN.md, Still images, decided on 2026-11-04): a bound of its output in either
     # orientation proved its pins over the portrait frame too, and refused a pin of 0 on a
@@ -234,22 +235,27 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     # 2026-11-03: DESIGN.md, Still images, "Measured before it ships"): the process's resident
     # system memory is HOST_RESIDENT, a job's measure, plus the picture's own arrays (_process,
     # counted from their sizes); the tiled passes' scratch is the plan's own.
-    plan = still_plan.plan(
-        (max(out_height, out_width), min(out_height, out_width)),
-        free,
-        host,
-        process=_process(pic.pixels.shape[:2], (out_height, out_width), bits),
-        # The picture goes to the GPU at its stored size and is resized there: its copies are
-        # counted (still_plan.COPIES).
-        input_pixels=height * width,
-        attention=attention,
-        dit_model=reads.dit_model(dit),
-        split=split,
-        pins=pins,
-        picture=target,
+    def planned(dit_model: "Architecture") -> "StillPlan":
+        return still_plan.plan(
+            (max(out_height, out_width), min(out_height, out_width)),
+            free,
+            host,
+            process=_process(pic.pixels.shape[:2], (out_height, out_width), bits),
+            # The picture goes to the GPU at its stored size and is resized there: its copies
+            # are counted (still_plan.COPIES).
+            input_pixels=height * width,
+            attention=attention,
+            dit_model=dit_model,
+            split=split,
+            pins=pins,
+            picture=target,
+        )
+
+    plan, smaller = _planned(
+        planned, reads.dit_model(dit), dit.name, model_dir=args.model_dir is not None
     )
     logger.info("plan: card: %s", torch.cuda.get_device_name(device))
-    for line in still_plan.said(plan, target):
+    for line in still_plan.said(plan, target, smaller):
         logger.info("%s", line)
     if args.plan is not None:
         # No upscale, as a video's --plan: the models are not loaded, nothing is written.
@@ -296,6 +302,66 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         _kept(pic, orientation=False) + _turned(pic),
     )
     return 0
+
+
+def _planned(
+    planned: "Callable[[Architecture], StillPlan]",
+    dit_model: "Architecture",
+    dit_file: str,
+    *,
+    model_dir: bool,
+) -> "tuple[StillPlan, str | None]":
+    """The picture's plan in the format of its DiT file (`planned` makes it for a format;
+    `model_dir`: the run was given --model-dir, which the way out then says), and the plan's line
+    of the smaller DiT files that swap fewer blocks (a picture is one latent: no window to
+    lengthen), None where there is none: as the video's (planner.plan_naming,
+    planner.smaller_swaps), a refusal for memory adds the way out of the smaller files of the
+    same 7B (pull.smaller_files) that plan the picture, named with their option and size, and
+    the file is never changed by itself (DESIGN.md, Weights, "The dynamic GGUF before v0.1.0
+    too"). A pin's refusal (phase "pin") is left as it is."""
+    from seedvr2x import pull
+    from seedvr2x.still_plan import PlanRefusal
+
+    try:
+        made = planned(dit_model)
+    except PlanRefusal as refused:
+        if refused.phase in ("", "pin") or "\n" in str(refused):
+            raise
+
+        def plans(each: "Architecture") -> bool | None:
+            try:
+                planned(each)
+            except PlanRefusal:
+                return None
+            return True
+
+        found = pull.smaller_planning(dit_file, dit_model, plans)
+        if not found:
+            raise
+        way = pull.smaller_way([each for each, _ in found], model_dir)
+        raise PlanRefusal(
+            f"{refused}; or {way}", refused.phase, refused.fits, refused.fits_input
+        ) from None
+    swapped = made.models.swapped
+    if not swapped:
+        return made, None
+
+    def fewer(each: "Architecture") -> str | None:
+        try:
+            other = planned(each).models.swapped
+        except PlanRefusal:
+            return None
+        return _blocks_said(other) if other < swapped else None
+
+    found = pull.smaller_planning(dit_file, dit_model, fewer)
+    if not found:
+        return made, None
+    return made, pull.smaller_line(_blocks_said(swapped), found)
+
+
+def _blocks_said(swapped: int) -> str:
+    """The blocks a picture's plan swaps, as the line of the smaller files says them."""
+    return f"{swapped} block{'' if swapped == 1 else 's'}"
 
 
 def _record(

@@ -51,6 +51,8 @@ class StandIn:
     free_bytes: int = FREE
     host_bytes: int | None = HOST
     attention_name: str = peaks.FLASH_ATTN_2
+    # The format of the DiT file the server is started on (the stand-in's file is empty).
+    dit_format: Architecture = peaks.FP16
     reserves: list[int] = field(default_factory=list[int])
     # Bytes of the last reservation torch has given back to the card: reserved() is that less,
     # until reserve() is called again.
@@ -81,7 +83,7 @@ class StandIn:
         return self.attention_name
 
     def dit_model(self, path: Path) -> Architecture:
-        return peaks.FP16
+        return self.dit_format
 
     def load(self, files: ModelFiles, plan: ModelPlan, reserve: int) -> model.Models:
         self.plans.append(plan)

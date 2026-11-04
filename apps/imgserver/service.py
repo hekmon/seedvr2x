@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
@@ -319,6 +319,8 @@ class Service:
             machine.attention(),
             machine.dit_model(self.files.dit.path),
             options.pins,
+            PurePath(options.dit).name,
+            options.model_dir is not None,
         )
         made = reservation.make(asked)
         for line in still_plan.said(made.plan):

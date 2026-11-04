@@ -36,7 +36,7 @@ import planner
 from job import Shot
 from plan import Plan
 from planner import MARGIN, Peaks, Pins, PlanError
-from seedvr2x import memory, peaks, weights
+from seedvr2x import memory, peaks, still_plan, weights
 from seedvr2x.frames import output_size, padded_length, padded_size
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Phase, Tiles
@@ -3038,8 +3038,279 @@ def test_an_int8_dit_plans_by_its_own_figures() -> None:
     again, _ = planner.plan(our_free(24), *job, split=True, recorded=recorded, dit_model=peaks.INT8)
     assert bare(again) == bare(int8_24)
     # Another architecture has no figures to plan by.
-    with pytest.raises(ValueError, match="the DiT's figures are for its fp16 and int8 files"):
+    with pytest.raises(
+        ValueError, match="the DiT's figures are for its fp16, int8 and dynamic GGUF files"
+    ):
         planner.plan(our_free(24), *job, dit_model=weights.DIT_3B)
+
+
+def test_a_gguf_dit_plans_by_its_own_figures() -> None:
+    # The DiT of seedvr2x's dynamic GGUF files (peaks.GGUF_7B, the regular 7B's, and
+    # peaks.GGUF_7B_SHARP): its phase by its own weights and the dequantisation's buffers
+    # (peaks.dit_peak), its blocks' pinned copies by their own bytes, with a window as long as
+    # int8's on every card of 16 to 48 GB; its format recorded by the name DIT_FORMATS gives it,
+    # read back as itself, and its line saying so, in the words of the picture's (still_plan.said).
+    job = (HD, shots(76), Pins(), 64 * GIB)
+    assert planner.DIT_FORMATS["gguf_dyn"] == peaks.GGUF_7B
+    assert planner.DIT_FORMATS["gguf_sharp_dyn"] == peaks.GGUF_7B_SHARP
+    for dit_model, name in ((peaks.GGUF_7B, "gguf_dyn"), (peaks.GGUF_7B_SHARP, "gguf_sharp_dyn")):
+        for card in (16, 24, 32, 48):
+            _, int8_peaks = planner.plan(our_free(card), *job, split=True, dit_model=peaks.INT8)
+            made, predicted = planner.plan(our_free(card), *job, split=True, dit_model=dit_model)
+            assert predicted.dit_model == dit_model
+            record = predicted.record()
+            assert record["dit_format"] == name
+            assert planner.recorded_dit_model(record) == dit_model
+            # A window as long as int8's or longer (the longer window may swap more blocks).
+            assert predicted.window >= int8_peaks.window, (name, card)
+            assert predicted.dit == peaks.dit_peak(
+                OURS_1080, predicted.window, made.swapped, made.vae_in_dit, dit_model=dit_model
+            )
+            assert max(predicted.need(phase) for phase in ("encode", "dit", "decode")) <= (
+                predicted.budget
+            )
+            pinned = planner._pinned(made, dit_model)  # pyright: ignore[reportPrivateUsage]
+            assert predicted.host == (
+                planner.HOST_RESIDENT + pinned + predicted.shot + made.scratch_allowance
+            )
+            said = planner.said(made, predicted, "a card", *job[:3])
+            weights_gib = f"{gib(peaks.weights_bytes(dit_model)):.2f}"
+            assert said_line(said, "DiT") == (
+                f"plan: DiT: its weights in seedvr2x's dynamic GGUF, {weights_gib} GiB, under a"
+                " third of fp16's; a window's memory counted as fp16's plus"
+                f" {gib(peaks.GGUF_BUFFERS):.2f} GiB for the dequantisation's buffers;"
+                " --dit-model names the file"
+            )
+            # The same as the picture's plan says it.
+            assert said_line(said, "DiT").removeprefix("plan: ") in [
+                line.removeprefix("plan: ") for line in still_plan.said(still_for(dit_model))
+            ]
+    # A record from before the GGUF, with no format, is fp16's.
+    assert planner.recorded_dit_model({"attention": "sdpa"}) == peaks.FP16
+    # A recorded plan planned again around its shape, in the GGUF's figures.
+    made, _ = planner.plan(our_free(24), *job, split=True, dit_model=peaks.GGUF_7B)
+    recorded = replace(bare(made), swapped=0, resident_encode=None, resident_decode=None)
+    again, _ = planner.plan(
+        our_free(24), *job, split=True, recorded=recorded, dit_model=peaks.GGUF_7B
+    )
+    assert bare(again) == bare(made)
+
+
+def still_for(dit_model: Any) -> Any:
+    """A picture's plan (still_plan) for 1080p on 24 GB in the DiT's format, for its DiT line."""
+    return still_plan.plan(
+        (1920, 1080),
+        our_free(24),
+        64 * GIB,
+        process=planner.HOST_RESIDENT,
+        input_pixels=1920 * 1080,
+        dit_model=dit_model,
+    )
+
+
+# A card of 16 GB and a shot of 301 frames: the host's memory decides which files plan. fp16's
+# 15 GiB of pinned copies are refused at 5 GiB and under, int8's at 4 and under, the GGUF's at 2
+# (planner.plan, measured by the plan itself: the tests below ask it).
+SHARP_FILES = {
+    "fp16": "seedvr2x_ema_7b_sharp_fp16.safetensors",
+    "int8": "seedvr2x_ema_7b_sharp_int8_convrot.safetensors",
+    "gguf": "seedvr2x_ema_7b_sharp_dyn.gguf",
+}
+INT8_WAY = (
+    "int8 (--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB)",
+    "the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)",
+)
+
+
+def naming(host: int, dit_model: Any, dit_file: str, **options: Any) -> PlanError:
+    """The refusal of the job on a card of 16 GB with `host` GiB of system memory, naming files."""
+    with pytest.raises(PlanError) as refused:
+        planner.plan_naming(
+            our_free(16), HD, shots(76), Pins(), host * GIB, dit_file=dit_file,
+            dit_model=dit_model, split=True, **options,
+        )  # fmt: skip
+    return refused.value
+
+
+def plain(host: int, dit_model: Any, **options: Any) -> PlanError:
+    with pytest.raises(PlanError) as refused:
+        planner.plan(
+            our_free(16), HD, shots(76), Pins(), host * GIB, dit_model=dit_model, split=True,
+            **options,
+        )  # fmt: skip
+    return refused.value
+
+
+def test_a_refusal_for_memory_names_the_smaller_files_that_plan() -> None:
+    # DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too": where the host's memory is short
+    # for float16, the refusal's way out names the smaller files that plan the same job, found
+    # by planning it again in their figures; the file is never changed by itself. The refusal's
+    # own words stay, the way out after them.
+    # 5 GiB: int8 plans (12 blocks swapped on 6 GiB, 7 on 5), the GGUF too: both named.
+    refused = naming(5, peaks.FP16, SHARP_FILES["fp16"])
+    assert str(refused).startswith(str(plain(5, peaks.FP16)) + "; or ")
+    assert str(refused).endswith("a smaller DiT file that plans this job: " + " or ".join(INT8_WAY))
+    assert (refused.phase, refused.shortfall, refused.instead) == ("host", None, "")
+    # 3 GiB: int8 is refused as fp16 is; only the GGUF plans, and only it is named.
+    only = naming(3, peaks.FP16, SHARP_FILES["fp16"])
+    assert str(only).endswith("a smaller DiT file that plans this job: " + INT8_WAY[1])
+    assert "int8" not in str(only).removeprefix(str(plain(3, peaks.FP16)))
+    # Where the run was given --model-dir, the way out says once that the file goes there.
+    here = naming(5, peaks.FP16, SHARP_FILES["fp16"], model_dir=True)
+    assert str(here).endswith(
+        "a smaller DiT file that plans this job, put in --model-dir: " + " or ".join(INT8_WAY)
+    )
+    assert str(here).count("--model-dir") == 1
+    assert str(here).replace(", put in --model-dir", "") == str(refused)
+    # The regular 7B's pinned file gets the regular 7B's smaller files, unmarked.
+    regular = str(naming(5, peaks.FP16, "seedvr2x_ema_7b_fp16.safetensors"))
+    assert regular.endswith(
+        "a smaller DiT file that plans this job: int8 (--dit-model"
+        " seedvr2x_ema_7b_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF (--dit-model"
+        " seedvr2x_ema_7b_dyn.gguf, 4.8 GB)"
+    )
+    # A file that is not a pinned one (numz's, a renamed one) is never taken for a 7B by its
+    # name: both 7Bs' files are named, each said as its model's, those that plan.
+    for name in ("seedvr2_ema_7b_fp16.safetensors", "seedvr2_ema_7b_sharp_fp16.safetensors", "x"):
+        assert str(naming(5, peaks.FP16, name)).endswith(
+            "a smaller DiT file that plans this job: for the sharp 7B, "
+            + " or ".join(INT8_WAY)
+            + "; for the 7B, int8 (--dit-model seedvr2x_ema_7b_int8_convrot.safetensors, 8.3 GB)"
+            " or the dynamic GGUF (--dit-model seedvr2x_ema_7b_dyn.gguf, 4.8 GB)"
+        )
+    # An int8 DiT is offered the GGUF alone; a GGUF DiT nothing: its own refusal, as it was.
+    assert str(naming(3, peaks.INT8, SHARP_FILES["int8"])).endswith(
+        "a smaller DiT file that plans this job: " + INT8_WAY[1]
+    )
+    assert str(naming(1, peaks.GGUF_7B_SHARP, SHARP_FILES["gguf"])) == str(
+        plain(1, peaks.GGUF_7B_SHARP)
+    )
+    # Nothing plans: the refusal is the plan's, as it was.
+    assert str(naming(1, peaks.FP16, SHARP_FILES["fp16"])) == str(plain(1, peaks.FP16))
+    # A resume's recorded shape (a smaller file is another job) and a pin's refusal (it ends with
+    # the pin that fits) are left as they are, and so is the card's: the VAE's floor binds the
+    # same in every format.
+    made, _ = planner.plan(our_free(24), HD, shots(76), Pins(), 64 * GIB, split=True)
+    with pytest.raises(PlanError) as small:
+        planner.plan_naming(
+            round(6 * GIB), HD, shots(76), Pins(), 64 * GIB, dit_file=SHARP_FILES["fp16"],
+            split=True, recorded=made,
+        )  # fmt: skip
+    assert "smaller DiT file" not in str(small.value)
+    with pytest.raises(PlanError) as pin:
+        planner.plan_naming(
+            our_free(16), HD, shots(76), Pins(window=60), 5 * GIB, dit_file=SHARP_FILES["fp16"],
+            split=True,
+        )  # fmt: skip
+    assert pin.value.instead and "smaller DiT file" not in str(pin.value)
+    with pytest.raises(PlanError) as card:
+        planner.plan_naming(
+            round(6 * GIB), HD, shots(76), Pins(), 64 * GIB, dit_file=SHARP_FILES["fp16"],
+            split=True,
+        )  # fmt: skip
+    assert "smaller DiT file" not in str(card.value)
+    # The files the refusal names are the pinned ones, with the pins' sizes.
+    from seedvr2x import pull
+
+    for each in pull.smaller_files(SHARP_FILES["fp16"], peaks.FP16):
+        assert pull.PINNED[each.name].size == each.size
+
+
+def test_the_plan_names_the_smaller_files_that_plan_the_job_better() -> None:
+    # The same job planned in int8's and the GGUF's figures: the plan's line names those that swap
+    # fewer blocks than the plan's own or run a longer window, saying both figures for the plan
+    # and for each file, never for a recorded plan or a GGUF DiT (DESIGN.md, Weights).
+    job = (HD, shots(76), Pins(), 64 * GIB)
+    arguments = (our_free(24), *job)
+    options: dict[str, Any] = dict(split=True, dit_model=peaks.FP16)
+    made, predicted = planner.plan(*arguments, split=True)
+    swapped = {
+        name: planner.plan(*arguments, split=True, dit_model=model)[0].swapped
+        for name, model in (("int8", peaks.INT8), ("gguf", peaks.GGUF_7B_SHARP))
+    }
+    assert made.swapped == 28 and swapped == {"int8": 20, "gguf": 36}
+    windows = {
+        name: planner.plan(*arguments, split=True, dit_model=model)[1].window
+        for name, model in (("int8", peaks.INT8), ("gguf", peaks.GGUF_7B_SHARP))
+    }
+    line = planner.smaller_swaps(made, predicted, arguments, options, SHARP_FILES["fp16"])
+    assert line == (
+        "smaller DiT files plan this job better: this plan swaps 28 blocks with windows of"
+        f" {predicted.window} latents; int8 20 blocks, windows of {windows['int8']}; the dynamic"
+        f" GGUF 36 blocks, windows of {windows['gguf']}; --dit-model names them"
+    )
+    lines = planner.said(made, predicted, "a card", *job[:3], smaller=line)
+    at = next(
+        number for number, each in enumerate(lines) if each.startswith("plan: blocks swapped")
+    )
+    assert lines[at + 1] == f"plan: {line}"
+    assert planner.said(made, predicted, "a card", *job[:3]) == [
+        each for each in lines if each != f"plan: {line}"
+    ]
+    # An int8 DiT is offered the GGUF alone, only if that plans better.
+    int8_made, int8_predicted = planner.plan(*arguments, split=True, dit_model=peaks.INT8)
+    assert planner.smaller_swaps(
+        int8_made,
+        int8_predicted,
+        arguments,
+        dict(split=True, dit_model=peaks.INT8),
+        SHARP_FILES["int8"],
+    ) == (
+        "smaller DiT files plan this job better: this plan swaps 20 blocks with windows of"
+        f" {int8_predicted.window} latents; the dynamic GGUF 36 blocks, windows of"
+        f" {windows['gguf']}; --dit-model names them"
+    )
+    gguf_made, gguf_predicted = planner.plan(*arguments, split=True, dit_model=peaks.GGUF_7B_SHARP)
+    gguf = dict(split=True, dit_model=peaks.GGUF_7B_SHARP)
+    assert (
+        planner.smaller_swaps(gguf_made, gguf_predicted, arguments, gguf, SHARP_FILES["gguf"])
+        is None
+    )
+    # The DiT whole on the card, the longest window the shot has: nothing better, nothing named.
+    whole = (our_free(48), HD, shots(76), Pins(window=5), 64 * GIB)
+    whole_made, whole_predicted = planner.plan(*whole, split=True)
+    assert whole_made.swapped == 0
+    assert (
+        planner.smaller_swaps(whole_made, whole_predicted, whole, options, SHARP_FILES["fp16"])
+        is None
+    )
+    # A recorded plan keeps its file.
+    recorded = dict(options, recorded=made)
+    assert planner.smaller_swaps(made, predicted, arguments, recorded, "x") is None
+
+
+def test_the_plan_names_a_smaller_file_that_runs_a_longer_window_where_the_host_is_short() -> None:
+    # The review's case (impl-gguf, 2026-11-04): 1080p, one shot of 101 latents, SDPA, 24 GiB free
+    # and 8 GiB of system memory. The host cuts float16's window (its pinned copies are 15 GiB,
+    # the window shortened for them: planner.plan, "host"), and the smaller files swap more blocks
+    # yet run longer windows: the line names them by the window, as DESIGN.md has it, "where the
+    # card or the host's memory is short for float16".
+    arguments = (24 * GIB, HD, shots(101), Pins(), 8 * GIB)
+    options: dict[str, Any] = dict(split=True, attention="sdpa", dit_model=peaks.FP16)
+    made, predicted = planner.plan(*arguments, **options)
+    found = {
+        name: planner.plan(*arguments, **dict(options, dit_model=model))
+        for name, model in (("int8", peaks.INT8), ("gguf", peaks.GGUF_7B_SHARP))
+    }
+    assert (made.swapped, predicted.window) == (11, 10)
+    assert [(each.swapped, each_peaks.window) for each, each_peaks in found.values()] == [
+        (19, 17),
+        (16, 19),
+    ]
+    line = planner.smaller_swaps(made, predicted, arguments, options, SHARP_FILES["fp16"])
+    assert line == (
+        "smaller DiT files plan this job better: this plan swaps 11 blocks with windows of 10"
+        " latents; int8 19 blocks, windows of 17; the dynamic GGUF 16 blocks, windows of 19;"
+        " --dit-model names them"
+    )
+    # A file that is not a pinned one: each 7B's files in brackets.
+    other = planner.smaller_swaps(made, predicted, arguments, options, "x")
+    assert other is not None and other.startswith(
+        "smaller DiT files plan this job better: this plan swaps 11 blocks with windows of 10"
+        " latents; for the sharp 7B (int8 19 blocks, windows of 17; the dynamic GGUF 16 blocks,"
+        " windows of 19); for the 7B (int8 19 blocks, windows of 17; the dynamic GGUF 16 blocks,"
+        " windows of 19); --dit-model"
+    )
 
 
 def test_said() -> None:

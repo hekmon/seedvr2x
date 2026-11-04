@@ -130,8 +130,8 @@ def test_help(capsys: pytest.CaptureFixture[str]) -> None:
     )
     assert (
         "without --model-dir, seedvr2x_ema_7b_fp16.safetensors,"
-        " seedvr2x_ema_7b_int8_convrot.safetensors, seedvr2x_ema_7b_sharp_int8_convrot.safetensors"
-        " or the default" in text
+        " seedvr2x_ema_7b_int8_convrot.safetensors, seedvr2x_ema_7b_sharp_int8_convrot.safetensors,"
+        " seedvr2x_ema_7b_dyn.gguf, seedvr2x_ema_7b_sharp_dyn.gguf or the default" in text
     )
 
 

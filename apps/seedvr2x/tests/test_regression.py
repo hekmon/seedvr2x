@@ -55,7 +55,15 @@ the tiles pinned (untiled unless the case pins them):
   numz's seedvr2_ema_7b_fp16.safetensors and ema_vae_fp16.safetensors (DESIGN.md, Weights), so
   that numz-7b and ours-7b, the two cases, are held to the one reference, bit for bit;
 - sharp: seedvr2x_ema_7b_sharp_fp16.safetensors and seedvr2x_ema_vae_fp16.safetensors (the cases
-  ours-sharp and test_milestone1_from_the_cache).
+  ours-sharp and test_milestone1_from_the_cache);
+- sharp_dyn: seedvr2x_ema_7b_sharp_dyn.gguf, the sharp 7B's dynamic GGUF, and
+  seedvr2x_ema_vae_fp16.safetensors (the case ours-sharp-gguf), made on 2026-11-04 by the code
+  that brought the GGUF in (impl-gguf), not by main 9a18423: numz never ran it. The reference
+  only holds that output still (a regression guard, made by the code it guards). How far it is
+  from float16 is not held here: DESIGN.md's claim, the output within the model card's figures
+  for the file, is measured on the RTX 5090 by a job at 1080p (impl-gguf's GPU window), against
+  models/VALIDATION.md ("1080p, the sharp 7B": the file's RGB PSNR to the sharp float16's output
+  at seed 42, tier 1's 8 clips, is 42.48 dB on average and 36.36 dB at the worst clip).
 Every run detects its shots, as a user's does without --cuts (DESIGN.md, Shot detection): the
 shot detector runs on the GPU in the first pass, before the models load, so that its settings,
 scoped to its own forwards, and the memory it gives back are held to the bits too. At
@@ -916,6 +924,15 @@ def bit_identical(
             "seedvr2x_ema_vae_fp16.safetensors",
             "sharp",
             id="ours-sharp",
+        ),
+        # The sharp 7B's dynamic GGUF (DESIGN.md, Weights, "The dynamic GGUF before v0.1.0
+        # too"): its matrices dequantised on the card before each multiply, held to its own
+        # reference as float16 is to its own.
+        pytest.param(
+            "seedvr2x_ema_7b_sharp_dyn.gguf",
+            "seedvr2x_ema_vae_fp16.safetensors",
+            "sharp_dyn",
+            id="ours-sharp-gguf",
         ),
     ],
 )

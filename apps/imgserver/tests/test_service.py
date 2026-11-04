@@ -38,7 +38,18 @@ import main
 import reservation
 import service as services
 from metrics import Metrics
-from seedvr2x import files, frames, memory, model, peaks, picture, still, still_plan, weights
+from seedvr2x import (
+    files,
+    frames,
+    memory,
+    model,
+    peaks,
+    picture,
+    pull,
+    still,
+    still_plan,
+    weights,
+)
 from seedvr2x.errors import Refusal
 
 
@@ -361,6 +372,68 @@ def test_pictures_at_once_on_a_card_that_swaps_are_refused_naming_what_fits(
     one = StandIn(cpu_models, free_bytes=free * GIB)
     with live(monkeypatch, tmp_path, cpu_models, machine=one, count=1) as server:
         assert server.service.state is services.State.READY
+
+
+@pytest.mark.parametrize("dit_format", [peaks.INT8, peaks.GGUF_7B_SHARP])
+def test_a_start_the_fp16_dit_is_refused_names_the_smaller_files_and_they_start_it(
+    dit_format: weights.Architecture,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+) -> None:
+    """DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too": two pictures at once on 14 GiB
+    are refused for the fp16 DiT, and the refusal names the int8 and GGUF files of both 7Bs (the
+    stand-in's file name is no pinned one) with their sizes (reservation.smaller); the server
+    started on either file's format, the stand-in's, starts on the same card, and the file it was
+    given is never changed by itself."""
+    machine = StandIn(cpu_models, free_bytes=14 * GIB)
+    with live(monkeypatch, tmp_path, cpu_models, ready=False, machine=machine, count=2) as server:
+        with pytest.raises(reservation.ReservationRefused) as refused:
+            main.bring_up(server.running)
+        assert str(refused.value).endswith(
+            "; or a smaller DiT file that plans this job, put in --model-dir: for the sharp 7B,"
+            " int8 (--dit-model"
+            " seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF"
+            " (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB); for the 7B, int8 (--dit-model"
+            " seedvr2x_ema_7b_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF (--dit-model"
+            " seedvr2x_ema_7b_dyn.gguf, 4.8 GB)"
+        )
+        assert server.service.options.dit == "w.safetensors"
+        assert machine.reserves == []
+    smaller = StandIn(cpu_models, free_bytes=14 * GIB, dit_format=dit_format)
+    with live(monkeypatch, tmp_path, cpu_models, machine=smaller, count=2) as server:
+        assert server.service.state is services.State.READY
+        assert server.service.made is not None
+        assert server.service.made.plan.dit_model == dit_format
+
+
+def test_a_dit_given_by_an_absolute_path_is_known_by_its_file_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
+) -> None:
+    """The reservation looks the DiT up by its file name, as the command line does (dit.name):
+    a pinned file of the sharp 7B given as an absolute path gets the sharp 7B's smaller files
+    alone, unmarked, not both 7Bs' as an unknown file does. An absolute path is read where
+    --model-dir is given (the directory joined to it), so the way out says to put the file
+    there."""
+    name = "seedvr2x_ema_7b_sharp_fp16.safetensors"
+    directory = tmp_path / "elsewhere"
+    directory.mkdir()
+    (directory / name).write_bytes(b"")
+    monkeypatch.setattr(pull, "check_pinned", lambda *args, **kwargs: None)
+    machine = StandIn(cpu_models, free_bytes=14 * GIB)
+    with live(
+        monkeypatch, tmp_path, cpu_models, ready=False, machine=machine, count=2,
+        dit=str(directory / name),
+    ) as server:  # fmt: skip
+        with pytest.raises(reservation.ReservationRefused) as refused:
+            main.bring_up(server.running)
+    text = str(refused.value)
+    assert text.endswith(
+        "; or a smaller DiT file that plans this job, put in --model-dir: int8 (--dit-model"
+        " seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF"
+        " (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)"
+    ), text
+    assert "for the sharp 7B" not in text and "seedvr2x_ema_7b_dyn.gguf" not in text
 
 
 def test_the_refusal_of_pictures_at_once_names_no_option_the_server_refuses(

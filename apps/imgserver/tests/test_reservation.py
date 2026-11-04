@@ -738,3 +738,71 @@ def test_one_picture_takes_the_plans_own_tiles(dit: Architecture) -> None:
             False,
         )
         assert reservation.gib(made.reservation) == "18.42"
+
+
+# ---- The smaller DiT files a refused start names ------------------------------------------------
+
+SHARP_INT8 = "int8 (--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB)"
+SHARP_GGUF = "the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)"
+
+
+def two_in_full_hd(free_gib: float, dit: Architecture, name: str) -> Asked:
+    """Two pictures within 1920x1080 from 0.6 MP on `free_gib` GiB, the DiT file `name` in the
+    format dit (SDPA): they need the whole DiT on the card, which fp16 never gets in 18 GiB or
+    less, int8 from 15 and the GGUF from 11 (measured by the plan, the tests below)."""
+    held = asked(free_gib, 2, bound=FULL_HD, attention=peaks.SDPA)
+    return replace(held, dit_model=dit, input_pixels=NIGHT_INPUT, dit_file=name)
+
+
+def test_a_refused_start_names_the_smaller_files_that_fit() -> None:
+    # DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too": where the card is short for the
+    # fp16 DiT, the start's refusal ends with the smaller files of the same 7B that would fit the
+    # same bound and count, found by planning it again in their figures. The refusal's own words
+    # stay before them.
+    sharp = "seedvr2x_ema_7b_sharp_fp16.safetensors"
+    for free, named in (
+        (16, f"{SHARP_INT8} or {SHARP_GGUF}"),
+        (12, SHARP_GGUF),
+    ):
+        wanted = two_in_full_hd(free, peaks.FP16, sharp)
+        with pytest.raises(ReservationRefused) as error:
+            reservation.make(wanted)
+        with pytest.raises(ReservationRefused) as plain:
+            reservation.make(replace(wanted, dit_file=""))
+        assert (
+            str(error.value) == f"{plain.value}; or a smaller DiT file that plans this job: {named}"
+        )
+        assert (error.value.most, error.value.largest) == (plain.value.most, plain.value.largest)
+    # Where the server was given --model-dir, the way out says once that the file goes there; the
+    # pinned names alone would send the user to a directory that may not hold them.
+    wanted = replace(two_in_full_hd(16, peaks.FP16, sharp), model_dir=True)
+    with pytest.raises(ReservationRefused) as error:
+        reservation.make(wanted)
+    assert str(error.value).endswith(
+        f"; or a smaller DiT file that plans this job, put in --model-dir: {SHARP_INT8} or"
+        f" {SHARP_GGUF}"
+    )
+    assert str(error.value).count("--model-dir") == 1
+    # The regular 7B's file gets the regular 7B's files.
+    regular = two_in_full_hd(16, peaks.FP16, "seedvr2x_ema_7b_fp16.safetensors")
+    with pytest.raises(ReservationRefused) as error:
+        reservation.make(regular)
+    assert str(error.value).endswith(
+        "int8 (--dit-model seedvr2x_ema_7b_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF"
+        " (--dit-model seedvr2x_ema_7b_dyn.gguf, 4.8 GB)"
+    )
+    # An int8 DiT is offered the GGUF alone; the GGUF DiT nothing; nothing that fits, nothing.
+    int8 = two_in_full_hd(12, peaks.INT8, "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")
+    with pytest.raises(ReservationRefused) as error:
+        reservation.make(int8)
+    assert str(error.value).endswith(f"a smaller DiT file that plans this job: {SHARP_GGUF}")
+    for held in (
+        two_in_full_hd(10, peaks.GGUF_7B_SHARP, "seedvr2x_ema_7b_sharp_dyn.gguf"),
+        two_in_full_hd(10, peaks.FP16, sharp),
+    ):
+        with pytest.raises(ReservationRefused) as error:
+            reservation.make(held)
+        assert "smaller DiT file" not in str(error.value)
+    # A start that fits is untouched: the same plan and reservation with or without a name.
+    fits = two_in_full_hd(16, peaks.INT8, "seedvr2x_ema_7b_sharp_int8_convrot.safetensors")
+    assert reservation.make(fits) == reservation.make(replace(fits, dit_file=""))

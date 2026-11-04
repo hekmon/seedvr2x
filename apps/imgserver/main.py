@@ -146,7 +146,15 @@ def parser() -> argparse.ArgumentParser:
         help="read the model files from DIR, nothing downloaded; by default seedvr2x's own"
         " files, from Hugging Face's cache, pulled at the pinned revision where missing",
     )
-    found.add_argument("--dit-model", default=DIT, metavar="FILE", help=f"the DiT, {DIT}")
+    found.add_argument(
+        "--dit-model",
+        default=DIT,
+        metavar="FILE",
+        help=f"the DiT, {DIT} (the default, fp16); smaller files of the same 7B: seedvr2x's int8"
+        " files (half the weights) and its dynamic GGUF files (under a third: about 4.5 GiB of"
+        " pinned system memory in place of 15, a little slower, no less VRAM where the VAE's"
+        " floor binds), recognised by their tensors",
+    )
     found.add_argument("--vae-model", default=VAE, metavar="FILE", help=f"the VAE, {VAE}")
     found.add_argument(
         "--encode-tile", type=_tile, metavar="PX", help="pin the encode's tiles (0: untiled)"

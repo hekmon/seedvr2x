@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import cache
 
-from seedvr2x import frames, peaks, still_plan
+from seedvr2x import frames, peaks, pull, still_plan
 from seedvr2x.errors import Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Phase
@@ -173,7 +173,9 @@ class Asked:
     """What the start asks of the plan: the bound (long, short) of --max-size, the largest input
     in pixels, the pictures at once and waiting, the reading of the card and the host's memory
     available (None: unread), the attention kernel and the DiT's format, and the pins (one
-    picture at a time only)."""
+    picture at a time only); `dit_file`, the DiT file's name ("" says unknown), whose smaller
+    files a refused start names where they would fit (make); `model_dir`, whether the server was
+    given --model-dir, which that way out then says (pull.smaller_way)."""
 
     bound: Bound
     input_pixels: int
@@ -184,6 +186,8 @@ class Asked:
     attention: str
     dit_model: Architecture
     pins: Pins = still_plan.NO_PINS
+    dit_file: str = ""
+    model_dir: bool = False
 
 
 class _Moves(ReservationRefused):
@@ -357,7 +361,9 @@ def largest(asked: Asked) -> Bound | None:
 def make(asked: Asked) -> Made:
     """The reservation for the start: ReservationRefused where it doesn't fit, its message saying
     why and naming the most pictures at the asked size, and the largest size at the asked count,
-    that would."""
+    that would; and the smaller DiT files that would fit the asked bound and count as they are
+    (smaller; DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too": the file is never changed
+    by itself)."""
     try:
         return _made(asked, asked.bound, asked.count)
     except Refusal as error:
@@ -376,7 +382,24 @@ def make(asked: Asked) -> Made:
         if ways
         else "; no picture fits there at any size the plan takes"
     )
-    raise ReservationRefused(f"{refused}{way}", at_most, found) from None
+    raise ReservationRefused(f"{refused}{way}{smaller(asked)}", at_most, found) from None
+
+
+def smaller(asked: Asked) -> str:
+    """The way out of a refused start that names the smaller DiT files of the asked file
+    (pull.smaller_files) whose reservation fits the asked bound and count, as the command line's
+    refusals name them (pull.smaller_way); "" where none does, the file is in the smallest
+    format, or its name is unknown."""
+    if not asked.dit_file:
+        return ""
+
+    def plans(each: Architecture) -> bool | None:
+        return True if fits(replace(asked, dit_model=each), asked.bound, asked.count) else None
+
+    found = pull.smaller_planning(asked.dit_file, asked.dit_model, plans)
+    if not found:
+        return ""
+    return f"; or {pull.smaller_way([each for each, _ in found], asked.model_dir)}"
 
 
 def _count(count: int) -> str:

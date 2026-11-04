@@ -6,11 +6,11 @@ which don't wait for torch (tests/test_cli.py).
 Its memory model, the bricks' (peaks.py; the constants named below are its): what each phase is
 predicted to peak at on the GPU, in bytes. The DiT's and the VAE's passes by the fits of
 research/docs/planner-limits.md and research/docs/vram.md, measured on numz's CLI with the 7B
-fp16 (peaks.FP16), and the DiT of seedvr2x's int8 files by its own weights and the fp16 fit's
-other terms, provisional (peaks.INT8, the job's dit_model); a tile by the peak measured on
-seedvr2x's own tiled passes (MEASURED), the fits serving the tiles cut off at the picture's edges
-at a size nobody measured. No VAE pass keeps anything of the shot on
-the GPU (shot.py, seedvr2x/tiling.py), and none is counted by its shot's length. Nor is
+fp16 (peaks.FP16), and the DiT of seedvr2x's int8 files and dynamic GGUF files by its own weights
+and the fp16 fit's other terms, provisional (peaks.INT8, peaks.GGUF_7B, the job's dit_model); a
+tile by the peak measured on seedvr2x's own tiled passes (MEASURED), the fits serving the tiles
+cut off at the picture's edges at a size nobody measured. No VAE pass keeps anything of the shot
+on the GPU (shot.py, seedvr2x/tiling.py), and none is counted by its shot's length. Nor is
 the DiT's phase, judged by its longest window alone: it keeps nothing of a shot beside the
 window it runs, the shot's noise drawn in system memory (shot.sample_windows; DESIGN.md,
 Pipeline step 2). Where the weights are in each phase, and what that takes, by what
@@ -57,7 +57,7 @@ from job import (
     window_layout,
 )
 from plan import Plan
-from seedvr2x import memory, peaks, tilegrid
+from seedvr2x import memory, peaks, pull, tilegrid
 from seedvr2x.errors import Refusal
 from seedvr2x.frames import check_target, output_size, padded_length, padded_size
 from seedvr2x.memory import Reading
@@ -449,9 +449,15 @@ class Peaks:
         }
 
 
-# The DiT's formats by the name a plan's record gives them (Peaks.record's dit_format): fp16's
-# and int8's, peaks.DITS.
-DIT_FORMATS: dict[str, Architecture] = {"fp16": peaks.FP16, "int8": peaks.INT8}
+# The DiT's formats by the name a plan's record gives them (Peaks.record's dit_format), peaks.DITS:
+# fp16's, int8's and the two dynamic GGUF files', the regular 7B's and the sharp one's (DESIGN.md,
+# Weights, "The dynamic GGUF before v0.1.0 too").
+DIT_FORMATS: dict[str, Architecture] = {
+    "fp16": peaks.FP16,
+    "int8": peaks.INT8,
+    "gguf_dyn": peaks.GGUF_7B,
+    "gguf_sharp_dyn": peaks.GGUF_7B_SHARP,
+}
 
 
 def _format_name(dit_model: Architecture) -> str:
@@ -462,7 +468,7 @@ def _format_name(dit_model: Architecture) -> str:
 def recorded_dit_model(memory_record: dict[str, Any]) -> Architecture:
     """The DiT's format a plan's record says its peaks were predicted for (Peaks.record's
     dit_format), for whoever makes the plan again from a manifest: fp16 where the record has
-    none, a manifest from before int8, whose plans were all fp16's. KeyError for a name
+    none, a manifest from before int8 and the GGUF, whose plans were all fp16's. KeyError for a name
     DIT_FORMATS doesn't know."""
     return DIT_FORMATS[memory_record.get("dit_format", "fp16")]
 
@@ -481,7 +487,7 @@ class _Job:
     attention: str  # DIT_ATTENTION's
     compile_vae: bool = False  # the VAE compiled (--compile): its passes at COMPILE_PEAK
     # The DiT's file's format, whose figures its phase and its weights' places are counted by
-    # (peaks.DITS): fp16's, or int8's.
+    # (peaks.DITS): fp16's, int8's or a dynamic GGUF file's.
     dit_model: Architecture = peaks.FP16
 
     @property
@@ -690,10 +696,7 @@ def plan(
         )
     except PlanError as error:
         raise PlanError(
-            f"{error}; refused with the reserve of {_gib(memory.RESERVE)} GiB that a held run's"
-            f" plan leaves torch's allocator beyond a step's peak, and with"
-            f" {_gib(memory.RESERVE_TIGHT)},"
-            " the one it takes where that is refused, whose figures these are",
+            f"{error}{_held_note()}",
             shortfall=error.shortfall,
             phase=error.phase,
         ) from None
@@ -713,6 +716,118 @@ def plan(
         "the plan with the reserve of %s GiB was refused: %s", _gib(memory.RESERVE), refused
     )
     return made, replace(predicted, tightened=refused, instead=instead)
+
+
+def _held_note() -> str:
+    """What a held run's refusal adds after its figures: both reserves tried (plan)."""
+    return (
+        f"; refused with the reserve of {_gib(memory.RESERVE)} GiB that a held run's plan leaves"
+        f" torch's allocator beyond a step's peak, and with {_gib(memory.RESERVE_TIGHT)}, the one"
+        " it takes where that is refused, whose figures these are"
+    )
+
+
+def plan_naming(
+    free: int | Reading,
+    target: tuple[int, int],
+    shots: Sequence[Shot],
+    pins: Pins,
+    host_available: int | None,
+    *,
+    dit_file: str,
+    model_dir: bool = False,
+    **options: Any,
+) -> tuple[Plan, Peaks]:
+    """`plan` for a new job whose DiT file is dit_file (`model_dir`: the run was given
+    --model-dir, which the way out then says, pull.smaller_way), a refusal for memory adding the
+    way out of a smaller DiT file: the same job planned again in int8's figures and in the GGUF's
+    (the smaller formats of the DiT's, pull.smaller_files), and those that plan it named with
+    their option and size (pull.smaller_way), the file never changed by itself (DESIGN.md, Weights,
+    "The dynamic GGUF before v0.1.0 too"). Left as plan has it: a pin's refusal, which ends with
+    the pin that fits (PlanError.instead), a refusal that is no memory's (no phase), the
+    compiled VAE's, whose advice has lines of its own, and a recorded shape's (a resume's job
+    has its file, and a smaller one is another job); and a DiT in the smallest format, or one
+    that no smaller file plans for."""
+    try:
+        return plan(free, target, shots, pins, host_available, **options)
+    except PlanError as error:
+        refused = error
+    dit_model = options.get("dit_model", peaks.FP16)
+    if (
+        options.get("recorded") is not None
+        or not refused.phase
+        or refused.instead
+        or "\n" in str(refused)
+    ):
+        raise refused
+
+    def plans(each: Architecture) -> bool | None:
+        again: dict[str, Any] = {**options, "dit_model": each}
+        try:
+            plan(free, target, shots, pins, host_available, **again)
+        except PlanError:
+            return None
+        return True
+
+    found = pull.smaller_planning(dit_file, dit_model, plans)
+    if not found:
+        raise refused
+    way = pull.smaller_way([each for each, _ in found], model_dir)
+    # The way out sits beside the refusal's own (a pin's, the fewest blocks that hold it), before
+    # a held run's note on the reserves its figures were found with (_held_note).
+    said, note = str(refused), _held_note()
+    if said.endswith(note):
+        said = said[: -len(note)]
+    else:
+        note = ""
+    raise PlanError(
+        f"{said}; or {way}{note}", shortfall=refused.shortfall, phase=refused.phase
+    ) from None
+
+
+def smaller_swaps(
+    made: Plan,
+    predicted: Peaks,
+    arguments: tuple[int | Reading, tuple[int, int], Sequence[Shot], Pins, int | None],
+    options: dict[str, Any],
+    dit_file: str,
+) -> str | None:
+    """The plan's line of the smaller DiT files that plan the job better than `made`, the plan of
+    a new job with the DiT file dit_file (said's `smaller`), `predicted` its Peaks: each smaller
+    format (pull.smaller_files) planned for the same job, `arguments` as plan takes them and
+    `options` its keywords, and named where it swaps fewer blocks than made.swapped or runs a
+    longer window (Peaks.window, in latents: the host's memory cuts float16's window where its
+    pinned copies don't fit, DESIGN.md, Weights, "The dynamic GGUF before v0.1.0 too"). The line
+    says both figures for this plan and for each file named. None where no smaller format is
+    better by either, or for a recorded plan (a resume's file is its job's). The file is never
+    changed by itself; --dit-model names them."""
+    if options.get("recorded") is not None:
+        return None
+
+    def better(each: Architecture) -> str | None:
+        again: dict[str, Any] = {**options, "dit_model": each}
+        try:
+            other, other_peaks = plan(*arguments, **again)
+        except PlanError:
+            return None
+        if other.swapped < made.swapped or other_peaks.window > predicted.window:
+            return _swaps_said(other.swapped, other_peaks.window)
+        return None
+
+    found = pull.smaller_planning(dit_file, options.get("dit_model", peaks.FP16), better)
+    if not found:
+        return None
+    return pull.smaller_line(_swaps_said(made.swapped, predicted.window, "with"), found)
+
+
+def _swaps_said(swapped: int, window: int, join: str = "") -> str:
+    """The blocks a plan swaps and the longest window it runs, in latents, as the line of the
+    smaller files says them: "11 blocks with windows of 10 latents" for the plan itself, "19
+    blocks, windows of 17" for a file."""
+    blocks = f"{swapped} block{'' if swapped == 1 else 's'}"
+    if join:
+        return f"{blocks} {join} windows of {window} latent{'' if window == 1 else 's'}"
+    return f"{blocks}, windows of {window}"
 
 
 # The parts of a shape that plan_again releases for a refused phase, in order (Pins' fields): the
@@ -1280,6 +1395,7 @@ def said(
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
     disk: str | None = None,
     compile_cache: Path | None = None,
+    smaller: str | None = None,
 ) -> list[str]:
     """The plan as --plan prints it and every run and resume logs it, before the first unit,
     a line per choice in plain words (DESIGN.md, Memory planner, Every choice of the plan is
@@ -1319,6 +1435,9 @@ def said(
     plan's compile_shapes), warm only where
     `recorded` too; None says a new job on Linux's own disk.
 
+    smaller: the line of the smaller DiT files (smaller_swaps) that plan the job better than this
+    plan's, after the swapped blocks' line; None says none.
+
     The line of the compiled VAE is the plan's own (plan.compile_vae, the setting's, always: a
     job outside the shapes measured is refused, plan)."""
     # shot.py imports torch, which this module's import mustn't (the module's docstring).
@@ -1353,6 +1472,8 @@ def said(
         )
     if job.dit_model == peaks.INT8:
         lines.append(_int8_said())
+    elif job.dit_model in (peaks.GGUF_7B, peaks.GGUF_7B_SHARP):
+        lines.append(_gguf_said(job.dit_model))
     lines.append(
         f"shots: {len(shots)}, the longest of {_count(job.frames, 'frame')}"
         f" ({_count(job.lengths[-1], 'latent')})"
@@ -1360,6 +1481,8 @@ def said(
     lines.append(_windows_said(job, plan, predicted, pins, recorded, whole, joins, len(shots)))
     lines.append(_quality_said(shots, target, quality))
     lines.append(_swap_said(plan, pins))
+    if smaller is not None:
+        lines.append(smaller)
     lines.append(_vae_said(plan))
     # The three lines below say what they are for first, in the manual's words, then their
     # figures (DESIGN.md, What it prints, decided on 2026-10-29: "each in the manual's words,
@@ -1459,6 +1582,18 @@ def _int8_said() -> str:
         f"DiT: its weights in int8, {_gib(peaks.weights_bytes(peaks.INT8))} GiB, half of fp16's;"
         f" a window's memory counted as fp16's plus {_gib(peaks.INT8_BUFFERS)} GiB for int8's"
         " buffers until int8's own is measured; --dit-model names the file"
+    )
+
+
+def _gguf_said(dit_model: Architecture) -> str:
+    """The plan's line of a DiT in a dynamic GGUF file (said), in the words of the picture's
+    (still_plan.said): its weights' bytes by its header, and that a window's memory beside them
+    is fp16's plus the dequantisation's buffers (peaks.GGUF_BUFFERS, measured on the RTX 5090)."""
+    return (
+        f"DiT: its weights in seedvr2x's dynamic GGUF, {_gib(peaks.weights_bytes(dit_model))} GiB,"
+        " under a third of fp16's; a window's memory counted as fp16's plus"
+        f" {_gib(peaks.GGUF_BUFFERS)} GiB for the dequantisation's buffers;"
+        " --dit-model names the file"
     )
 
 
@@ -1616,7 +1751,9 @@ def _job(
             f"attention {attention!r}: the DiT's fit is {peaks.FLASH_ATTN_2}'s or {peaks.SDPA}'s"
         )
     if dit_model not in peaks.DITS:
-        raise ValueError(f"{dit_model.name}: the DiT's figures are for its fp16 and int8 files")
+        raise ValueError(
+            f"{dit_model.name}: the DiT's figures are for its fp16, int8 and dynamic GGUF files"
+        )
     # A number is a driver that refuses: what it reports free is the card's, and all the plan's.
     reading = free if isinstance(free, Reading) else Reading(free, None, free, False)
     lengths = sorted({_latents(shot.frames) for shot in shots})

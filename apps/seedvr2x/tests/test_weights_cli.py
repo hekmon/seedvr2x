@@ -64,6 +64,9 @@ def test_defaults_in_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert "(default: seedvr2x_ema_7b_sharp_fp16.safetensors, the sharp 7B)" in text
     assert "(default: seedvr2x_ema_vae_fp16.safetensors)" in text
     assert (
-        "SeedVR2's 7B DiT, regular or sharp, in fp16 or in int8 (seedvr2x's int8 files: half the"
-        " DiT's weights, multiplied in 8 bits), recognised by its tensors" in text
+        "SeedVR2's 7B DiT, regular or sharp, in fp16, in int8 (seedvr2x's int8 files: half the"
+        " DiT's weights, multiplied in 8 bits) or in seedvr2x's dynamic GGUF (under a third of"
+        " fp16's weights: about 4.5 GiB of pinned system memory in place of 15, a swap moving a"
+        " third of the bytes; a little slower than fp16, and no less VRAM where the VAE's floor"
+        " binds), recognised by its tensors" in text
     )

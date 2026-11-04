@@ -2056,10 +2056,13 @@ def test_one_file_plans_as_a_directory(
     plan = planner.plan
 
     def planned(*arguments: Any, **options: Any) -> Any:
-        asked.append(set(options))
-        backends.append(options["attention"])
         made = plan(*arguments, **options)
-        predicted.append(made[1].dit)
+        # The job's own plan, in its DiT's format: the plan's line of the smaller DiT files
+        # plans the same job again in theirs (planner.smaller_swaps), not counted here.
+        if options["dit_model"] is peaks.FP16:
+            asked.append(set(options))
+            backends.append(options["attention"])
+            predicted.append(made[1].dit)
         return made
 
     monkeypatch.setattr(planner, "plan", planned)
