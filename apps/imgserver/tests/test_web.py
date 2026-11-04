@@ -697,9 +697,11 @@ def test_a_head_that_stops_halfway_is_cut_at_its_deadline(
 ) -> None:
     monkeypatch.setattr(web, "HEAD_SECONDS", 0.5)
     caplog.set_level("INFO", logger="imgserver.web")
+    # The clock starts before the connection: the server's timer starts once it has accepted it
+    # (web.Handler.setup), and this thread may be held up after that, before or after its send.
+    started = time.monotonic()
     with socket.create_connection(server.running.address, timeout=10) as client:
         client.sendall(b"POST /upsc")
-        started = time.monotonic()
         # The server shuts the connection down: an end of file (or a reset), well before TIMEOUT.
         try:
             assert client.recv(1) == b""
