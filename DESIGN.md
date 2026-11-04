@@ -70,8 +70,9 @@ never requires it.
 ### Not in the first version
 - AMD/ROCm (still images and the image server are in v0.1.0 since 2026-11-02:
   [Repository and apps](#repository-and-apps), step 3)
-- Windows and macOS: v0.2.0, the multi-platform version (the user: Windows on 2026-10-24,
-  macOS with it on 2026-11-04). Linux runs it, WSL2 included.
+- Windows and macOS: v0.2.0, the multi-platform version and the one with every model file
+  (the user: Windows on 2026-10-24, macOS and the files with it on 2026-11-04). Linux runs it,
+  WSL2 included.
 - ComfyUI's nodes, published: with v0.2.0, on Linux, Windows and macOS (the user,
   2026-11-04). Their design and code begin before v0.1.0, run from a local ComfyUI
   ([Repository and apps](#repository-and-apps), step 4)
@@ -86,13 +87,15 @@ never requires it.
   of users): they also need PyTorch's MPS backend in place of CUDA. Later, on a DGX Spark,
   which the user means to get (2026-10-29), and on the RTX Spark PCs (the user, 2026-11-02),
   which run Windows, both on the planner of one pool the M chips bring.
-- Multi-GPU in one process (separate processes on separate shot ranges can come later, see
-  [Pause and resume](#pause-and-resume))
+- Multi-GPU in one process. Separate processes, one per card, each taking its own shots of one
+  job, come after v0.2.0 (the user, 2026-11-04), on one machine first, and are tested on a
+  machine with several cards before they ship (see [Pause and resume](#pause-and-resume))
 - Options that only work around numz's own design (see [Options](#options-kept-and-dropped))
 - Models other than ByteDance's 7B and sharp 7B in fp16, their int8 files and their dynamic
   GGUF files (the model card's tiers; the GGUF for small cards, the user, 2026-11-04), built
-  and tested before v0.1.0 is tagged. Phase 2, after v1, brings their other smaller files
-  (fp8, Q8_0, Q4_K, NVFP4); no other model is planned (see [Weights](#weights))
+  and tested before v0.1.0 is tagged. Phase 2, in v0.2.0 (the user, 2026-11-04), brings their
+  other smaller files (fp8, Q8_0, Q4_K, NVFP4); no other model is planned (see
+  [Weights](#weights))
 - An output size whose smallest window doesn't fit the VRAM free at the start, 4K under 22.4
   GiB free for one: refused, naming the free VRAM it takes and the largest size that fits
   (see [Memory planner](#memory-planner))
@@ -769,13 +772,14 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
   there every block is swapped, its weights in pinned host RAM (about 15 GiB of it). numz's
   Q4_K_M, every block swapped, ran 1080p in batches of 13 latents on an emulated 16 GB card,
   and of 5 on an 8 GB one ([vram.md](research/docs/vram.md#recipe-per-card-size-validated)):
-  the smaller files, int8 and the dynamic GGUF from v0.1.0 and phase 2's others after it, make
-  small cards lighter on memory, host RAM and transfers.
+  the smaller files, int8 and the dynamic GGUF from v0.1.0 and phase 2's others in v0.2.0,
+  make small cards lighter on memory, host RAM and transfers.
 
 #### Phase 2: the other models
-A phase of its own, after v1 (int8 and the dynamic GGUF excepted: above), settles which
-models to keep, which to make again and how, how they differ and by which metrics, and how
-users are guided to them. What is known already:
+A phase of its own, in v0.2.0 (the user, 2026-11-04: v0.2.0 is the multi-platform version and
+the one with every model file; int8 and the dynamic GGUF excepted, in v0.1.0: above), settles
+which models to keep, which to make again and how, how they differ and by which metrics, and
+how users are guided to them. What is known already:
 - **numz's registry**, Apache-2.0: the 3B and the 7B in fp16, fp8 (`e4m3fn`; the 7B's file
   keeps its last block in fp16) and GGUF (Q4_K_M, and Q8_0 for the 3B), and the sharp 7B in
   fp16, fp8 and Q4_K_M, all with the one VAE. Its default is the 3B fp8
@@ -4008,8 +4012,8 @@ explanation.
   from cut to cut); frame numbers count places where a source has frames missing
 - the model: v1 runs ByteDance's 7B in fp16, the sharp 7B by default and the regular one as the
   reference every check is made against; int8 too, the default if seedvr2x's own runs hold
-  it, and the dynamic GGUF, 4.8 GB, for small cards ([Weights](#weights)); phase 2 brings the
-  other smaller files, each with its measured quality
+  it, and the dynamic GGUF, 4.8 GB, for small cards ([Weights](#weights)); phase 2, in v0.2.0,
+  brings the other smaller files, each with its measured quality
 - what the model does to live action ([numerics.md](research/docs/numerics.md)): the
   perceptual metrics side with it over a plain upscale, the pixel ones with the plain upscale.
   It redraws grain and detail of the right kind at the wrong place, and from a heavily degraded
@@ -4180,8 +4184,8 @@ writers, and the planner needs real shot lengths.
 5. Assembly and `--segment-cmd` (milestone 6), for the regular workflow: built on 2026-10-12
    (see [Output](#output)). The manual sptenc workflow already worked without it.
 
-After v1, phase 2 brings the two 7Bs' other smaller files; their int8 and dynamic GGUF files
-are built and tested before v0.1.0 is tagged (see [Weights](#weights)).
+Phase 2, in v0.2.0, brings the two 7Bs' other smaller files; their int8 and dynamic GGUF
+files are built and tested before v0.1.0 is tagged (see [Weights](#weights)).
 
 **v0.1.0 waits for the 96 GB card** (the user, 2026-10-24: a first version's features aren't
 half-baked). Meanwhile the RTX 5090 keeps the work going; once the card is back, everything
