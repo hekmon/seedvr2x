@@ -225,8 +225,11 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
     pins = still_plan.Pins(args.encode_tile, args.decode_tile, args.swap_blocks)
     split = args.color_correction == "split"
     attention = reads.attention()
-    # The plan for this picture, made for a bound that is its own output: the long and short
-    # sides, even as an output size always is (still_plan.plan). PROVISIONAL (impl-still,
+    # The plan for this picture alone, as stored, the way the model sees it (still_plan.plan's
+    # `picture`; DESIGN.md, Still images, decided on 2026-11-04): a bound of its output in either
+    # orientation proved its pins over the portrait frame too, and refused a pin of 0 on a
+    # landscape 1080p picture the plan itself took untiled. The bound is its output's long and
+    # short sides, even as an output size always is. PROVISIONAL (impl-still,
     # 2026-11-03: DESIGN.md, Still images, "Measured before it ships"): the process's resident
     # system memory is HOST_RESIDENT, a job's measure, plus the picture's own arrays (_process,
     # counted from their sizes); the tiled passes' scratch is the plan's own.
@@ -242,6 +245,7 @@ def _run(args: "argparse.Namespace", kind: str, reads: Reads) -> int:
         dit_model=reads.dit_model(dit),
         split=split,
         pins=pins,
+        picture=target,
     )
     logger.info("plan: card: %s", torch.cuda.get_device_name(device))
     for line in still_plan.said(plan, target):
@@ -389,10 +393,8 @@ def _process(size: tuple[int, ...], output: tuple[int, int], bits: int) -> int:
 def _check_tile_pins(args: "argparse.Namespace", target: tuple[int, int]) -> None:
     """Refuse a tile pin that covers the picture's own padded frame, as a video's planner does
     (planner.plan), in its words: a covering tile is no tiling, and the tiled passes would run it
-    untiled without saying so. still_plan.plan refuses a pin covering the bound's largest frame,
-    where a bound's smaller pictures take a covering pin as the untiled pass; the command's bound
-    is its own picture's output, which a pin covering the picture alone (the bound's frame has
-    the odd sides rounded up) must not slip past."""
+    untiled without saying so. still_plan.plan, made for the picture alone, refuses the same pin
+    at the same frame; this refuses it before the card is read."""
     from seedvr2x import peaks, still_plan
     from seedvr2x.frames import padded_size
     from seedvr2x.passes import Tiles

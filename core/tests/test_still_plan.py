@@ -57,6 +57,7 @@ def made(
     split: bool = True,
     pins: Pins = still_plan.NO_PINS,
     input_pixels: int = INPUT,
+    picture: tuple[int, int] | None = None,
 ) -> StillPlan:
     return still_plan.plan(
         bound,
@@ -68,6 +69,7 @@ def made(
         dit_model=dit_model,
         split=split,
         pins=pins,
+        picture=picture,
     )
 
 
@@ -1559,3 +1561,135 @@ def test_a_pinned_untiled_pass_is_taken_past_the_measured_frame_at_the_slices_fi
     )
     measured = still_plan.tiles(plan, (2160, 3840))
     assert measured.encode is None and measured.encode_peak < 0.5 * found.encode_peak
+
+
+# ---- The command line's one picture, as stored ---------------------------------------------------
+
+# The card the CLI's 1080p picture was refused on (2026-11-04, the RTX 5090 with its desktop): 24
+# GiB free, the 7B in fp16, and a 4032x3024 input's copies counted (INPUT).
+TONIGHT = 24 * GIB
+LANDSCAPE_HD, PORTRAIT_HD = (1080, 1920), (1920, 1080)
+
+
+def test_a_landscape_1080p_picture_pinned_untiled_is_taken_where_its_own_plan_is_untiled() -> None:
+    # Its own plan takes both passes untiled; pinned 0 and 0, the same passes and peaks.
+    own = made(HD, TONIGHT, picture=LANDSCAPE_HD)
+    chosen = still_plan.tiles(own, LANDSCAPE_HD)
+    assert chosen.encode is None and chosen.decode is None
+    pinned = made(HD, TONIGHT, pins=Pins(0, 0), picture=LANDSCAPE_HD)
+    assert still_plan.tiles(pinned, LANDSCAPE_HD) == chosen
+    assert pinned.models == own.models
+    text = "\n".join(still_plan.said(pinned, LANDSCAPE_HD))
+    assert "encode: untiled, pinned by --encode-tile" in text
+    assert "decode: untiled, pinned by --decode-tile" in text
+    # The image server's bound, either orientation, refuses the same pin as before: its portrait
+    # frame is past the one frame's untiled decode was measured on, at the slice's figure.
+    with pytest.raises(PlanRefusal) as refused:
+        made(HD, TONIGHT, pins=Pins(0, 0))
+    assert refused.value.phase == "pin"
+    assert str(refused.value).startswith(
+        "--decode-tile 0: the decode untiled, for the pictures within 1920x1080, takes 38."
+    )
+
+
+def test_one_orientation_of_the_bound_would_not_have_taken_the_pin() -> None:
+    # Why the CLI's plan is its picture alone and not its orientation of the bound: a smaller
+    # landscape picture within 1920x1080 pads past the picture's frame, and past the frame one
+    # frame's untiled decode was measured on, so its pin of 0 takes the slice's figure.
+    assert padded_size(LANDSCAPE_HD) == (1104, 1920)
+    assert measured_untiled("decode", padded_size(LANDSCAPE_HD))
+    smaller = (1079, 1919)
+    assert output_size(smaller) == (1078, 1918) and padded_size(smaller) == (1104, 1952)
+    assert not measured_untiled("decode", padded_size(smaller))
+    untiled = peaks.picture_decode_peak(padded_size(smaller), output_size(smaller), None, 0, 0)
+    assert untiled + VAE_ROOM > TONIGHT
+
+
+def test_a_portrait_picture_is_judged_by_its_own_frame() -> None:
+    # 1080x1920 as stored pads to 1104x1952, past the decode measured untiled: its own plan tiles
+    # the decode, and a pin of 0 is refused for it, in the picture's words.
+    assert padded_size(PORTRAIT_HD) == (1952, 1104)
+    own = made(HD, TONIGHT, picture=PORTRAIT_HD)
+    assert still_plan.tiles(own, PORTRAIT_HD).decode is not None
+    with pytest.raises(PlanRefusal) as refused:
+        made(HD, TONIGHT, pins=Pins(decode_tile=0), picture=PORTRAIT_HD)
+    assert str(refused.value).startswith(
+        "--decode-tile 0: the decode untiled, for the picture, 1080x1920, takes"
+    )
+    # A portrait picture whose frame is within the one measured, 1072x1920 padded, takes it.
+    measured = (1888, 1072)
+    assert padded_size(measured) == (1920, 1072)
+    assert measured_untiled("decode", padded_size(measured))
+    pinned = made((1888, 1072), TONIGHT, pins=Pins(0, 0), picture=measured)
+    found = still_plan.tiles(pinned, measured)
+    assert found.encode is None and found.decode is None
+
+
+def test_a_pictures_plan_counts_its_own_frame_and_windows() -> None:
+    # The DiT's phase is the picture's own (peaks.dit_peak at its frame and windows), never over
+    # the bound's, which counts the most any picture within it takes.
+    for picture, bound in ((LANDSCAPE_HD, HD), (PORTRAIT_HD, HD), ((3000, 2000), (3000, 2000))):
+        own = made(bound, card(32), picture=picture)
+        either = made(bound, card(32))
+        assert own.windows == still_plan._windows(*(side // 16 for side in padded_size(picture)))
+        assert own.dit_peak == still_plan.picture_peaks(own, picture, INPUT)["dit"].allocated
+        assert own.dit_peak <= either.dit_peak and own.windows <= either.windows
+    # 1920x1080 landscape: 30 windows, where its bound's portrait pictures take 36.
+    assert made(HD, card(32), picture=LANDSCAPE_HD).windows == 30
+    assert made(HD, card(32)).windows == 36
+
+
+@pytest.mark.parametrize("bound", [EIGHT_K, FOUR_K, HD, (480, 320)])
+def test_the_servers_bound_is_unchanged_without_a_picture(bound: still_plan.Bound) -> None:
+    # The image server gives no picture: its plan is every picture within the bound in either
+    # orientation, its figures and words as they were (the dump of 4,179 lines of plans, refusals,
+    # lines and peaks compared before and after, impl-imgserver patch 10, 2026-11-04).
+    reading = card(24)
+    plan = still_plan.plan(bound, reading, None, process=PROCESS, input_pixels=INPUT)
+    assert plan.picture is None
+    assert repr(plan) == repr(made(bound, reading, picture=None))
+    assert "in either orientation" in still_plan.said(plan)[1]
+    long, short = bound
+    for target in ((short, long), (long, short)):
+        first_fit(plan, target)
+
+
+def test_a_pictures_plan_says_the_picture_and_takes_its_target_alone() -> None:
+    plan = made(HD, TONIGHT, picture=LANDSCAPE_HD)
+    lines = still_plan.said(plan)
+    assert lines[1] == (
+        "plan: bound: the picture alone, 1920x1080 as stored, padded to 1920x1104 for the model,"
+        " 8,280 tokens, one latent"
+    )
+    assert not any("either orientation" in line for line in lines)
+    assert any("GiB for the picture, one latent, 30 attention windows" in line for line in lines)
+    portrait = made(HD, TONIGHT, picture=PORTRAIT_HD)
+    assert (
+        "the picture alone, 1080x1920 as stored, padded to 1104x1952"
+        in still_plan.said(portrait)[1]
+    )
+    # The other orientation, a smaller picture or one a pixel over: not the plan's picture.
+    for target in (PORTRAIT_HD, (540, 960), (1081, 1920)):
+        with pytest.raises(ValueError, match="the plan is for one picture, 1920x1080 as stored"):
+            still_plan.tiles(plan, target)
+    with pytest.raises(ValueError, match="the plan is for one picture, 1080x1920 as stored"):
+        still_plan.tiles(portrait, LANDSCAPE_HD)
+    # A bound that is not the picture's output is no plan.
+    for bound in ((1920, 1088), (3840, 2160)):
+        with pytest.raises(ValueError, match="the bound is the picture's output"):
+            made(bound, TONIGHT, picture=LANDSCAPE_HD)
+
+
+def test_a_picture_refused_for_the_memory_names_the_largest_picture_that_fits() -> None:
+    # In its own orientation and words: the floor's refusal of one picture, walked down at its
+    # ratio as the planner walks.
+    for picture, said in ((LANDSCAPE_HD, "1920x1080"), (PORTRAIT_HD, "1080x1920")):
+        with pytest.raises(PlanRefusal) as refused:
+            made(HD, 4 * GIB, input_pixels=1000, picture=picture)
+        error = refused.value
+        assert error.fits is not None
+        assert str(error).startswith(f"the picture, {said}, takes")
+        long, short = error.fits
+        fits = (long, short) if picture[0] > picture[1] else (short, long)
+        assert str(error).endswith(f"the largest picture that fits there is {fits[1]}x{fits[0]}")
+        made(error.fits, 4 * GIB, input_pixels=1000, picture=fits)

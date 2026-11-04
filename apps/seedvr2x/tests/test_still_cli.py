@@ -1566,7 +1566,7 @@ def test_plan_says_the_pictures_plan_and_loads_and_writes_nothing(
     assert lines[0] == "plan: card: a stand-in"
     for opening in (
         "memory: ",
-        "bound: pictures within 80x48",
+        "bound: the picture alone, 80x48 as stored",
         "attention: ",
         "blocks swapped: ",
         "the DiT's phase: ",
@@ -1630,6 +1630,31 @@ def test_a_tile_covering_the_pictures_padded_frame_is_refused_in_the_videos_word
             == 0
         )
     assert "covers the whole padded frame" not in caplog.text
+
+
+def test_a_landscape_1080p_picture_pinned_untiled_is_taken_where_its_plan_is_untiled(
+    machine: Machine, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The plan is the picture's alone, as stored (still_plan.plan's `picture`): with the bound in
+    # either orientation, --encode-tile 0 --decode-tile 0 was refused on 24 GiB (2026-11-04, the
+    # RTX 5090), the portrait frame past the one measured untiled, where the plan unpinned took
+    # the picture untiled.
+    machine.free = 24 * GIB
+    source = tmp_path / "hd.png"
+    Image.new("RGB", (1920, 1080), (30, 60, 90)).save(source)
+    sized = ("--resolution", "1080")
+    assert run(machine, source, tmp_path / "o.png", *sized, "--plan") == 0
+    for phase in ("encode", "decode"):
+        assert f"plan: {phase}: untiled, the whole frame fitting the budget" in caplog.text
+    caplog.clear()
+    pins = ("--encode-tile", "0", "--decode-tile", "0")
+    assert run(machine, source, tmp_path / "o.png", *sized, *pins) == 0
+    for phase in ("encode", "decode"):
+        assert f"plan: {phase}: untiled, pinned by --{phase}-tile" in caplog.text
+    assert "bound: the picture alone, 1920x1080 as stored" in caplog.text
+    ((_, keywords),) = machine.passes
+    assert keywords["encode_tiles"] is None and keywords["decode_tiles"] is None
+    assert read_back(tmp_path / "o.png").pixels.shape[:2] == (1080, 1920)
 
 
 def test_the_host_figure_counts_the_pictures_own_arrays(

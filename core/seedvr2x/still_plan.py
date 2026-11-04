@@ -1,7 +1,10 @@
 """The plan for one picture (DESIGN.md, Still images, "The plan for one picture"; Repository and
 apps, step 3): where the models are and how the VAE's passes are tiled, made once for a bound, the
-output's long and short sides in either orientation, and holding for every picture within it. The
-CLI's bound is its picture's output, the image server's its largest.
+output's long and short sides, and holding for every picture within it. The image server's bound
+is its largest picture, in either orientation; the CLI's is its one picture as stored, the way the
+model sees it (plan's `picture`): its own padded frame and output, and no other (decided on
+2026-11-04: in either orientation, a pin of 0 was refused for a landscape 1080p picture that the
+plan itself took untiled, the portrait frame being past the one measured untiled).
 
 An addition beside the CLI's planner (apps/seedvr2x/planner.py), not a move: it imports nothing of
 the CLI, and no torch, the command line planning before torch is imported
@@ -14,7 +17,9 @@ GiB, and measured steps aren't monotone). So the placement of the DiT and the VA
 (peaks.ModelPlan) is fixed for the bound, once, by a proof that every picture within it has a pass
 that fits (_worst); the tiles are chosen per picture under that placement (tiles), never refused
 within the bound. Sizes are (height, width) in pixels, and a bound (long, short), unless said;
-`padded` is the frame the model takes (frames.padded_size).
+`padded` is the frame the model takes (frames.padded_size). A picture's own plan is the same
+plan over one picture: every function that walks the bound's pictures (_orientations) walks it
+alone.
 
 A picture of one frame is one latent in the DiT, one frame in the VAE's passes: its passes take
 one frame's figures (peaks.picture_encode_peak, peaks.picture_decode_peak), measured on the RTX
@@ -106,7 +111,8 @@ class StillPlan:
     """The plan for one picture, made for a bound (plan): everything that holds for every picture
     within it. The tiles are the picture's own (tiles)."""
 
-    bound: Bound  # (long, short): the output's sides, either orientation
+    bound: Bound  # (long, short): the output's sides, either orientation unless `picture`
+    picture: tuple[int, int] | None  # the one picture, its target (height, width) as stored
     input_pixels: int  # the largest input, H x W as stored: its copies on the GPU are counted
     models: ModelPlan  # swapped, resident_encode, resident_decode, vae_in_dit; compile_vae False
     reading: Reading  # as made: tightened where the tight retry took it
@@ -152,6 +158,7 @@ class _Job:
     `counted` the planner's _Job calls `free`), the DiT, and the host."""
 
     bound: Bound
+    picture: tuple[int, int] | None
     input_pixels: int
     reading: Reading
     attention: str
@@ -188,6 +195,7 @@ def plan(
     dit_model: Architecture = peaks.FP16,
     split: bool = True,
     pins: Pins = NO_PINS,
+    picture: tuple[int, int] | None = None,
 ) -> StillPlan:
     """The plan for every picture whose output is within `bound`, (long, short) in pixels, each
     side even (frames.output_size) and either orientation, in the GPU memory it may count on
@@ -201,6 +209,15 @@ def plan(
     the CLI's picture, the server's largest. The picture goes to the GPU at that size and is
     resized there, in the encode's phase and, with the colour correction, in the decode's, which
     the output's size doesn't bound (COPIES); ValueError below one pixel.
+
+    `picture`, the command line's: its one picture, the target (height, width) frames.target_size
+    gives it, as stored: the plan is then for that picture alone, its own padded frame and output
+    in its own orientation, the way the model sees it, `bound` being its output's (long, short)
+    (ValueError otherwise). Within a bound, even one orientation of it, smaller pictures pad past
+    the picture's frame (a 1919x1079 target pads to 1952x1104 where 1920x1080 pads to 1920x1104,
+    past the frame one frame's untiled decode was measured on), so a pin proved over them is
+    refused where the picture itself takes it. None: every picture within the bound, in either
+    orientation (the image server's).
 
     The choices, in the planner's order (DESIGN.md, Memory planner, Choices), each made once for
     the bound:
@@ -221,6 +238,13 @@ def plan(
     memory.RESERVE's place, as the planner's plan does (memory.tightened; DESIGN.md, Allocator),
     only under torch's own allocator with expandable segments (Reading.expandable)."""
     _check_bound(bound)
+    if picture is not None:
+        height, width = output_size(picture)
+        if (max(height, width), min(height, width)) != bound or not _paddable(picture):
+            raise ValueError(
+                f"a picture of {picture[1]}x{picture[0]} pixels, output {width}x{height}, for a"
+                f" bound of {bound[0]}x{bound[1]}: the bound is the picture's output"
+            )
     if input_pixels < 1:
         raise ValueError(f"an input of {input_pixels} pixels")
     if attention not in peaks.DIT_ATTENTION:
@@ -231,7 +255,16 @@ def plan(
         raise ValueError(f"{dit_model.name}: the DiT's figures are for its fp16 and int8 files")
     reading = free if isinstance(free, Reading) else Reading(free, None, free, False)
     job = _Job(
-        bound, input_pixels, reading, attention, dit_model, split, pins, process, host_available
+        bound,
+        picture,
+        input_pixels,
+        reading,
+        attention,
+        dit_model,
+        split,
+        pins,
+        process,
+        host_available,
     )
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
         raise PlanRefusal(
@@ -241,8 +274,8 @@ def plan(
         )
     # The planner's refusal of a tile pin that covers the frame, before any memory is counted: for
     # a bound, the larger of its two orientations' frames; a smaller picture takes the untiled pass
-    # then (tiles), which is no tiling.
-    largest = max(_frames(job.bound), key=max)
+    # then (tiles), which is no tiling. For one picture, its own frame.
+    largest = max(_frames(job.bound, job.picture), key=max)
     for phase, pin in (("encode", pins.encode_tile), ("decode", pins.decode_tile)):
         if pin and peaks.covers(largest, Tiles(pin)):
             height, width = largest
@@ -297,8 +330,8 @@ def tiles(plan: StillPlan, target: tuple[int, int], budget: int | None = None) -
     its room (VAE_ROOM). A pin that covers the picture's padded frame gives the untiled pass:
     a covering tile is no tiling (peaks.covers). ValueError for a target whose output is not
     within the plan's bound in one orientation or the other, or too small for the padding
-    (frames.check_target's rule). Never a refusal within the bound: the proof of the plan holds for
-    every picture in it.
+    (frames.check_target's rule), and for a plan made for one picture, any target but its own.
+    Never a refusal within the bound: the proof of the plan holds for every picture in it.
 
     `budget`, bytes: what the picture's passes may count on in place of the plan's budget, for a
     server that holds each picture to what the bound's own pictures take (the image server's
@@ -306,6 +339,11 @@ def tiles(plan: StillPlan, target: tuple[int, int], budget: int | None = None) -
     that every picture still has a pass, and at most the plan's budget (ValueError over it)."""
     long, short = plan.bound
     height, width = output_size(target)
+    if plan.picture is not None and target != plan.picture:
+        raise ValueError(
+            f"a target of {target[1]}x{target[0]} pixels: the plan is for one picture,"
+            f" {plan.picture[1]}x{plan.picture[0]} as stored"
+        )
     if min(height, width) > short or max(height, width) > long:
         raise ValueError(
             f"a target of {target[1]}x{target[0]} pixels, output {width}x{height}, is not within"
@@ -343,6 +381,7 @@ def _job_of(plan: StillPlan) -> _Job:
     """The job a made plan was made by, for the figures that follow from it."""
     return _Job(
         plan.bound,
+        plan.picture,
         plan.input_pixels,
         plan.reading,
         plan.attention,
@@ -404,25 +443,66 @@ def _columns(side: int) -> tuple[int, ...]:
 
 
 @cache
-def _orientations(bound: Bound) -> tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]:
+def _orientations(
+    bound: Bound, picture: tuple[int, int] | None = None
+) -> tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]:
     """The padded rows and columns of the pictures within the bound, for each orientation: the
     short side along the rows (landscape) or along the columns (portrait). Rows and columns are
-    independent (_rows), so every pair is a picture."""
+    independent (_rows), so every pair is a picture. With `picture` (plan's), its own padded rows
+    and columns alone, one orientation."""
+    if picture is not None:
+        rows, columns = padded_size(picture)
+        return (((rows,), (columns,)),)
     long, short = bound
     return ((_rows(short), _columns(long)), (_rows(long), _columns(short)))
 
 
-def _frames(bound: Bound) -> tuple[tuple[int, int], tuple[int, int]]:
+def _outputs(bound: Bound, picture: tuple[int, int] | None) -> tuple[tuple[int, int], ...]:
+    """The largest output, (height, width), of each orientation of _orientations: the bound's
+    sides, or the picture's own output."""
+    if picture is not None:
+        return (output_size(picture),)
+    long, short = bound
+    return ((short, long), (long, short))
+
+
+def _frames(bound: Bound, picture: tuple[int, int] | None = None) -> tuple[tuple[int, int], ...]:
     """The largest padded frame of each orientation (_orientations): every picture within the
     bound is padded to a frame no larger in either side."""
-    (rows_a, columns_a), (rows_b, columns_b) = _orientations(bound)
-    return (rows_a[-1], columns_a[-1]), (rows_b[-1], columns_b[-1])
+    return tuple((rows[-1], columns[-1]) for rows, columns in _orientations(bound, picture))
 
 
-def _most(bound: Bound) -> tuple[int, int]:
+def _most(bound: Bound, picture: tuple[int, int] | None = None) -> tuple[int, int]:
     """The padded frame of the most tokens within the bound, the DiT's tokens growing with each
     side: the larger of the two orientations' largest frames."""
-    return max(_frames(bound), key=lambda frame: frame[0] * frame[1])
+    return max(_frames(bound, picture), key=lambda frame: frame[0] * frame[1])
+
+
+def _shapes(job: "_Job") -> tuple[tuple[tuple[int, int], tuple[int, int]], ...]:
+    """The bound's own picture in each orientation, as the placement counts it: its padded frame
+    (_frames) and an output for the colour correction's term, the bound's landscape one for both
+    (its term is the output's area); a picture's own frame and output."""
+    if job.picture is not None:
+        return ((padded_size(job.picture), output_size(job.picture)),)
+    output = (job.bound[1], job.bound[0])
+    return tuple((frame, output) for frame in _frames(job.bound))
+
+
+def _oriented(bound: Bound, picture: tuple[int, int] | None) -> str:
+    """A bound as its pictures are, WxH: (long, short) in either orientation, as the picture is
+    for one picture."""
+    long, short = bound
+    if picture is not None and picture[0] > picture[1]:
+        return f"{short}x{long}"
+    return f"{long}x{short}"
+
+
+def _whose(job: "_Job", which: str) -> str:
+    """The pictures a figure is for, in words, a comma after: `which` of the pictures within the
+    bound, or the one picture with its output's size."""
+    if job.picture is None:
+        return f"{which} within {_bound_said(job.bound)},"
+    return f"the picture, {_oriented(job.bound, job.picture)},"
 
 
 # ---- The DiT on one latent ---------------------------------------------------------------------
@@ -469,10 +549,10 @@ def _windows(rows: int, columns: int) -> int:
 
 
 @cache
-def windows_most(bound: Bound) -> int:
+def windows_most(bound: Bound, picture: tuple[int, int] | None = None) -> int:
     """The most attention windows the DiT cuts a picture within the bound into, one latent: the
     larger of its two layouts' counts (peaks.attention_windows) at every token grid (the padded
-    frame / 16) of every picture within the bound, both orientations.
+    frame / 16) of every picture within the bound, both orientations; with `picture`, its own.
 
     Not the bound's own count: the windows are not monotone in the picture's size (vendor/models/
     dit_7b/window.py): over token grids up to 300 x 560 the count reaches 441, and neighbouring
@@ -483,7 +563,7 @@ def windows_most(bound: Bound) -> int:
     Python on the 187,000 token grids of an 8K bound in 0.10 s, 125,000 at 6000x4000 in 0.07 s
     (measured on one CPU core, 2026-11-03)."""
     token_columns: dict[int, set[int]] = {}
-    for rows, columns in _orientations(bound):
+    for rows, columns in _orientations(bound, picture):
         for row in rows:
             token_columns.setdefault(row // 16, set()).update(column // 16 for column in columns)
     return max(
@@ -500,8 +580,9 @@ def _dit_need(job: _Job, swapped: int, vae_in_dit: bool) -> int:
     latent, `swapped` blocks swapped and the VAE's weights there or not: peaks.dit_peak's, with
     the tokens of the largest padded frame (_most) and the most windows any picture takes
     (windows_most), the larger of each, which no one picture need take together."""
-    least = peaks.dit_least(_most(job.bound), 1, swapped, vae_in_dit, job.attention, job.dit_model)
-    return round(least + _per_window(job) * windows_most(job.bound))
+    most = _most(job.bound, job.picture)
+    least = peaks.dit_least(most, 1, swapped, vae_in_dit, job.attention, job.dit_model)
+    return round(least + _per_window(job) * windows_most(job.bound, job.picture))
 
 
 def _fewest(job: _Job) -> tuple[int, bool] | None:
@@ -529,8 +610,8 @@ def _swap_choice(job: _Job) -> tuple[int, bool]:
     if _dit_need(job, swapped, vae_in_dit=False) > job.budget:
         need = _dit_need(job, swapped, vae_in_dit=False) + job.margin
         raise PlanRefusal(
-            f"--swap-blocks {swapped}: the DiT's phase, one latent of the largest picture within"
-            f" {_bound_said(job.bound)}, takes {_over(need)} GiB of free VRAM with"
+            f"--swap-blocks {swapped}: the DiT's phase, one latent of"
+            f" {_whose(job, 'the largest picture')} takes {_over(need)} GiB of free VRAM with"
             f" {_count(swapped, 'block')} swapped, and {_there(job.reading)}:"
             f" {_to_free(job.reading, need)}the fewest blocks that hold it are --swap-blocks"
             f" {fewest[0]}",
@@ -622,7 +703,13 @@ def _lengths(padded_side: int, size: int) -> frozenset[int]:
 
 
 @cache
-def _worst(bound: Bound, phase: Phase, size: int | None, split: bool) -> int:
+def _worst(
+    bound: Bound,
+    phase: Phase,
+    size: int | None,
+    split: bool,
+    picture: tuple[int, int] | None = None,
+) -> int:
     """The most any picture within the bound needs of a VAE pass, in bytes, with the DiT away
     (resident 0) and without the room (VAE_ROOM): every picture has a pass that fits when this is
     within the budget (the floor proof). `size` is the pass the pictures are proved for:
@@ -656,12 +743,13 @@ def _worst(bound: Bound, phase: Phase, size: int | None, split: bool) -> int:
     frame, in area, is the worst. The
     same holds in a pair of sets of a cut picture: its members all take the same tile, and the
     untiled pass of the largest of them (the key's last row and column) is the most of theirs, so
-    the worst member needs the less of the two."""
-    long, short = bound
+    the worst member needs the less of the two.
+
+    With `picture` (plan's), the one picture alone: its padded frame and output."""
     tile = peaks.TILE_MIN if size is None else size
     worst = 0
     for (rows, columns), (high, wide) in zip(
-        _orientations(bound), ((short, long), (long, short)), strict=True
+        _orientations(bound, picture), _outputs(bound, picture), strict=True
     ):
         # The output of a picture is no larger than its padded frame, nor than the bound's side
         # along that axis: the colour correction's term at the most it can be.
@@ -694,7 +782,7 @@ def _proof_need(job: _Job, phase: Phase, resident: int | None, swapped: int) -> 
     0 (_worst), whose peak is the pass's own and what of the DiT is on the GPU, plus what the
     placement keeps there beyond it (peaks.dit_on_gpu; the rest of a pass's peak doesn't depend
     on it)."""
-    base = _worst(job.bound, phase, job.pin(phase), job.split)
+    base = _worst(job.bound, phase, job.pin(phase), job.split, job.picture)
     kept = peaks.dit_on_gpu(resident, swapped, job.dit_model)
     return base + kept - peaks.dit_on_gpu(0, swapped, job.dit_model) + VAE_ROOM
 
@@ -744,8 +832,7 @@ def _place(job: _Job, swapped: int, vae_in_dit: bool) -> ModelPlan:
     the pins', and _input_refused), so it ends."""
     chosen: dict[Phase, int | None] = {}
     for phase in ("decode", "encode"):
-        output = (job.bound[1], job.bound[0])
-        found = [_resident(job, phase, frame, output, swapped) for frame in _frames(job.bound)]
+        found = [_resident(job, phase, frame, output, swapped) for frame, output in _shapes(job)]
         resident = min(found, key=lambda each: (_level(each, swapped), each is None))
         order = _residents(swapped)
         for each in order[order.index(resident) :]:
@@ -764,9 +851,9 @@ def _floor(job: _Job) -> tuple[Phase, int] | None:
     (the planner's _floor); else None. The DiT's: one latent, every block swapped and the VAE
     away. The VAE's: the unpinned proof (_worst), the DiT away, the room with it."""
     least: dict[Phase, int] = {
-        "encode": _worst(job.bound, "encode", None, job.split) + VAE_ROOM,
+        "encode": _worst(job.bound, "encode", None, job.split, job.picture) + VAE_ROOM,
         "dit": _dit_need(job, peaks.BLOCKS, vae_in_dit=False),
-        "decode": _worst(job.bound, "decode", None, job.split) + VAE_ROOM,
+        "decode": _worst(job.bound, "decode", None, job.split, job.picture) + VAE_ROOM,
     }
     phase = max(PHASES, key=lambda each: least[each])
     return (phase, least[phase]) if least[phase] > job.budget else None
@@ -778,7 +865,10 @@ def _fits(job: _Job) -> Bound | None:
     long side in proportion (to an even number), while the padding can be made (_paddable), the
     floor checked at each; None when none does. The floor of a smaller bound is never above a larger
     one's (the pictures within it are some of theirs, and each figure is the most over them), so
-    the search is bisected, and finds what the planner's walk down would."""
+    the search is bisected, and finds what the planner's walk down would. For one picture, the
+    candidates are pictures in its orientation, whose figures are their own and so not ordered
+    (the windows are not monotone, windows_most, nor are the padded frames): walked down, as the
+    planner walks, a few dozen frames of one picture each."""
     long, short = job.bound
     candidates: list[Bound] = []
     for side in range((short - 1) // 16 * 16, 0, -16):
@@ -786,6 +876,17 @@ def _fits(job: _Job) -> Bound | None:
         if not _paddable((side, smaller[0])):
             break  # too small for the padding, as every smaller one is
         candidates.append(smaller)
+    if job.picture is not None:
+        portrait = job.picture[0] > job.picture[1]
+        return next(
+            (
+                each
+                for each in candidates
+                if _floor(replace(job, bound=each, picture=each if portrait else each[::-1]))
+                is None
+            ),
+            None,
+        )
     low, high = 0, len(candidates)
     while low < high:
         middle = (low + high) // 2
@@ -799,17 +900,16 @@ def _fits(job: _Job) -> Bound | None:
 def _too_large(job: _Job, phase: Phase, least: int) -> PlanRefusal:
     """The floor's refusal (_floor), counted in free VRAM, never in card sizes: the free VRAM
     the bound takes, what is there for it (_there), and the largest bound that fits in it
-    (_fits); the planner's _too_large."""
+    (_fits); the planner's _too_large. For one picture, the picture and the largest that fits at
+    its ratio."""
+    most = "" if job.picture is not None else ", at the most any picture within it takes"
     if phase == "dit":
-        how = (
-            "one latent, with every block of the DiT swapped and the VAE off the GPU, at the"
-            " most any picture within it takes"
-        )
+        how = f"one latent, with every block of the DiT swapped and the VAE off the GPU{most}"
         room = 0
     else:
         how = (
-            f"its {phase} in tiles of {peaks.TILE_MIN} px or untiled, with the DiT off the GPU,"
-            " at the most any picture within it takes"
+            f"its {phase} in tiles of {peaks.TILE_MIN} px or untiled, with the DiT off the"
+            f" GPU{most}"
         )
         room = VAE_ROOM
     # The room as what is left of the total once the peak and the margin are said, each rounded
@@ -819,13 +919,19 @@ def _too_large(job: _Job, phase: Phase, least: int) -> PlanRefusal:
     held = f", {rest:.2f} of room a VAE pass is held to" if room else ""
     margin = f", and {_gib(job.margin)} of margin" if job.margin else ""
     fits = _fits(job)
-    fitting = (
-        "no output size fits there"
-        if fits is None
-        else f"the largest bound that fits there is {_bound_said(fits)}"
+    if fits is None:
+        fitting = "no output size fits there"
+    elif job.picture is None:
+        fitting = f"the largest bound that fits there is {_bound_said(fits)}"
+    else:
+        fitting = f"the largest picture that fits there is {_oriented(fits, job.picture)}"
+    takes = (
+        f"pictures within {_bound_said(job.bound)} take"
+        if job.picture is None
+        else f"the picture, {_oriented(job.bound, job.picture)}, takes"
     )
     return PlanRefusal(
-        f"pictures within {_bound_said(job.bound)} take {total / 100:.2f} GiB of free VRAM"
+        f"{takes} {total / 100:.2f} GiB of free VRAM"
         f" ({how}: a peak of {peak / 100:.2f} GiB{held}{margin}), and {_there(job.reading)}:"
         f" {_to_free(job.reading, least + job.margin)}{fitting}",
         phase=phase,
@@ -837,19 +943,19 @@ def _pin_refused(job: _Job, phase: Phase) -> PlanRefusal | None:
     """The refusal of the phase's tile pin, None when it holds: the pin is taken exactly or
     refused, and it holds when every picture within the bound has a pass that fits with it, the
     DiT away (_worst at the pin; the planner's _pass). The refusal names the largest tile that
-    fits, in the planner's sizes at the bound's largest frame."""
+    fits, in the planner's sizes at the bound's largest frame. For one picture, its own pass."""
     pin = job.pin(phase)
     if pin is None:
         return None
-    need = _worst(job.bound, phase, pin, job.split) + VAE_ROOM
+    need = _worst(job.bound, phase, pin, job.split, job.picture) + VAE_ROOM
     if need <= job.budget:
         return None
-    sizes = _tile_sizes(max(_frames(job.bound), key=max))
+    sizes = _tile_sizes(max(_frames(job.bound, job.picture), key=max))
     largest = next(
         (
             size
             for size in sizes
-            if _worst(job.bound, phase, size, job.split) + VAE_ROOM <= job.budget
+            if _worst(job.bound, phase, size, job.split, job.picture) + VAE_ROOM <= job.budget
         ),
         None,
     )
@@ -861,8 +967,8 @@ def _pin_refused(job: _Job, phase: Phase) -> PlanRefusal | None:
     said = "untiled" if pin == 0 else f"in tiles of {pin} px"
     need += job.margin
     return PlanRefusal(
-        f"--{phase}-tile {pin}: the {phase} {said}, for the pictures within"
-        f" {_bound_said(job.bound)}, takes {_over(need)} GiB of free VRAM, the DiT off the GPU,"
+        f"--{phase}-tile {pin}: the {phase} {said}, for {_whose(job, 'the pictures')} takes"
+        f" {_over(need)} GiB of free VRAM, the DiT off the GPU,"
         f" {VAE_ROOM / peaks.GIB:.2f} of them the room a VAE pass is held to, and"
         f" {_there(job.reading)}: {_to_free(job.reading, need)}{fits}",
         phase="pin",
@@ -999,9 +1105,9 @@ def copies_peak(phase: Phase, input_pixels: int, padded_pixels: int) -> int:
     return max(moment.at(input_pixels, padded_pixels) for moment in COPIES[phase])
 
 
-def _padded_pixels(bound: Bound) -> int:
+def _padded_pixels(bound: Bound, picture: tuple[int, int] | None = None) -> int:
     """The area of the bound's largest padded frame (_most), in pixels."""
-    rows, columns = _most(bound)
+    rows, columns = _most(bound, picture)
     return rows * columns
 
 
@@ -1022,7 +1128,7 @@ def _copies_need(job: _Job, phase: Phase, resident: int | None, swapped: int) ->
     the GPU there and the copies at the bound's largest padded frame (copies_peak). Judged
     against the budget without VAE_ROOM."""
     return _on_gpu(job, resident, swapped) + copies_peak(
-        phase, job.input_pixels, _padded_pixels(job.bound)
+        phase, job.input_pixels, _padded_pixels(job.bound, job.picture)
     )
 
 
@@ -1043,7 +1149,7 @@ def _largest_input(job: _Job) -> int | None:
     over the moments of what is left of the room after the padded frame's share, divided by the
     bytes per pixel. None where the padded frame's share alone is over the room, or the input
     would be under a pixel."""
-    padded = _padded_pixels(job.bound)
+    padded = _padded_pixels(job.bound, job.picture)
     room = job.budget - _on_gpu(job, 0, 0)
     fits: int | None = None
     for phase in _copy_phases(job):
@@ -1070,7 +1176,7 @@ def _input_refused(job: _Job) -> PlanRefusal | None:
     if not over:
         return None
     phase = max(over, key=lambda each: over[each])
-    padded = _padded_pixels(job.bound)
+    padded = _padded_pixels(job.bound, job.picture)
     copies = copies_peak(phase, job.input_pixels, padded)
     held = _on_gpu(job, 0, 0)
     need = held + copies + job.margin
@@ -1082,18 +1188,21 @@ def _input_refused(job: _Job) -> PlanRefusal | None:
         )
     else:
         long, short = job.bound
-        wide = math.isqrt(fits * long // short)
+        # The ratio as the pictures are: the bound's (long, short), or the picture's own.
+        height, width = (short, long) if job.picture is None else output_size(job.picture)
+        wide = math.isqrt(fits * width // height)
+        whose = "the bound's" if job.picture is None else "the picture's"
         way = (
             f"the largest input that fits is {_megapixels(fits, up=False)} MP, about"
-            f" {wide}x{fits // wide} at the bound's ratio: a copy of the picture no larger, or a"
+            f" {wide}x{fits // wide} at {whose} ratio: a copy of the picture no larger, or a"
             " smaller --resolution, which lowers the output's part of it"
         )
     which = max(COPIES[phase], key=lambda each: each.at(job.input_pixels, padded))
     return PlanRefusal(
         f"the picture's input, {_megapixels(job.input_pixels, up=True)} MP at its stored size, is"
         f" copied to the GPU and resized there in the {phase}'s phase: its copies take"
-        f" {_over(copies)} GiB at the peak ({which.what}, at the largest padded frame within"
-        f" {_bound_said(job.bound)}) and {_short(need, copies)} GiB more for the models on the GPU"
+        f" {_over(copies)} GiB at the peak ({which.what}, at {_frame_said(job)}) and"
+        f" {_short(need, copies)} GiB more for the models on the GPU"
         f" and the margin, {_over(need)} GiB of free VRAM, and {_there(job.reading)}:"
         f" {_to_free(job.reading, need)}{way}",
         phase=phase,
@@ -1101,10 +1210,19 @@ def _input_refused(job: _Job) -> PlanRefusal | None:
     )
 
 
+def _frame_said(job: _Job) -> str:
+    """The padded frame the copies are counted at, in words: the bound's largest, or the
+    picture's own."""
+    if job.picture is None:
+        return f"the largest padded frame within {_bound_said(job.bound)}"
+    rows, columns = padded_size(job.picture)
+    return f"its padded frame, {columns}x{rows}"
+
+
 def input_copies(plan: StillPlan) -> dict[Phase, int]:
     """The picture's copies at their peak in each phase they are made in (the encode's, and the
     decode's with the colour correction), in bytes, above the models (copies_peak)."""
-    padded = _padded_pixels(plan.bound)
+    padded = _padded_pixels(plan.bound, plan.picture)
     phases: tuple[Phase, ...] = ("encode", "decode") if plan.split else ("encode",)
     return {phase: copies_peak(phase, plan.input_pixels, padded) for phase in phases}
 
@@ -1232,6 +1350,7 @@ def _account(job: _Job, models: ModelPlan) -> StillPlan:
     the bound's tiles or smaller ones, and a pin tiles the pictures it doesn't cover."""
     made = StillPlan(
         job.bound,
+        job.picture,
         job.input_pixels,
         models,
         job.reading,
@@ -1241,21 +1360,21 @@ def _account(job: _Job, models: ModelPlan) -> StillPlan:
         job.pins,
         job.process,
         _dit_need(job, models.swapped, models.vae_in_dit),
-        windows_most(job.bound),
+        windows_most(job.bound, job.picture),
         _pinned(models, job.dit_model),
         0,
         job.host_available,
     )
-    output = (job.bound[1], job.bound[0])
     tiled = any(
         found is not None and found[0] is not None
-        for frame in _frames(job.bound)
+        for frame, output in _shapes(job)
         for found in (
             _first(job, "encode", frame, output, models.swapped, models.resident_encode),
             _first(job, "decode", frame, output, models.swapped, models.resident_decode),
         )
     )
-    scratch = max(peaks.scratch(frame, FRAMES) for frame in _frames(job.bound)) if tiled else 0
+    frames = _frames(job.bound, job.picture)
+    scratch = max(peaks.scratch(frame, FRAMES) for frame in frames) if tiled else 0
     return replace(made, host=job.process + made.pinned + scratch)
 
 
@@ -1384,13 +1503,20 @@ def said(plan: StillPlan, target: tuple[int, int] | None = None) -> list[str]:
     where the VAE is in the DiT's phase with the DiT's peak, what of the DiT stays on the GPU in
     each VAE phase, the system memory; and with `target` (frames.target_size's), the picture's
     encode and decode, untiled or in tiles with the grid and the predicted peaks."""
-    frame = _most(plan.bound)
+    frame = _most(plan.bound, plan.picture)
     height, width = frame
+    tokens = f"{peaks.tokens(frame, 1):,} tokens, one latent"
     lines = _memory_said(plan)
-    lines.append(
-        f"bound: pictures within {_bound_said(plan.bound)} in either orientation, padded to at"
-        f" most {width}x{height} for the model, {peaks.tokens(frame, 1):,} tokens, one latent"
-    )
+    if plan.picture is None:
+        lines.append(
+            f"bound: pictures within {_bound_said(plan.bound)} in either orientation, padded to at"
+            f" most {width}x{height} for the model, {tokens}"
+        )
+    else:
+        lines.append(
+            f"bound: the picture alone, {_oriented(plan.bound, plan.picture)} as stored, padded to"
+            f" {width}x{height} for the model, {tokens}"
+        )
     if plan.attention == peaks.FLASH_ATTN_2:
         lines.append(f"attention: {_ATTENTION_SAID[plan.attention]}, which is installed")
     else:
@@ -1427,14 +1553,22 @@ def said(plan: StillPlan, target: tuple[int, int] | None = None) -> list[str]:
             f"the VAE: off the GPU in the DiT's phase, its {_gib(peaks.VAE_WEIGHTS)} GiB given to"
             " the DiT"
         )
-    lines.append(
-        f"the DiT's phase: {_gib(plan.dit_peak)} GiB at the most for a picture within the bound,"
-        f" one latent, the tokens of the largest and the most windows any takes,"
-        f" {plan.windows}, {_gib(plan.budget - plan.dit_peak)} GiB under the budget"
-    )
+    under = f"{_gib(plan.budget - plan.dit_peak)} GiB under the budget"
+    if plan.picture is None:
+        lines.append(
+            f"the DiT's phase: {_gib(plan.dit_peak)} GiB at the most for a picture within the"
+            " bound, one latent, the tokens of the largest and the most windows any takes,"
+            f" {plan.windows}, {under}"
+        )
+    else:
+        lines.append(
+            f"the DiT's phase: {_gib(plan.dit_peak)} GiB for the picture, one latent,"
+            f" {_count(plan.windows, 'attention window')}, {under}"
+        )
+    worst = "the worst picture's pass" if plan.picture is None else "the picture's pass"
     lines.append(
         "the DiT in the VAE's passes: which model stays on the GPU in which phase, as much of the"
-        f" DiT as fits beside the worst picture's pass: in the encode,"
+        f" DiT as fits beside {worst}: in the encode,"
         f" {_resident_said(models.resident_encode, models.swapped)}; in the decode,"
         f" {_resident_said(models.resident_decode, models.swapped)}"
     )
@@ -1477,9 +1611,10 @@ def _copies_said(plan: StillPlan) -> str:
         copies = input_copies(plan)[phase]
         room = plan.budget - _copies_need(job, phase, resident, models.swapped)
         figures.append(f"{_gib(copies)} GiB in the {phase} ({_gib(room)} GiB under the budget)")
+    at = "the bound's largest padded frame" if plan.picture is None else "its padded frame"
     return (
         f"the input: {_megapixels(plan.input_pixels, up=True)} MP at its stored size, copied to"
-        " the GPU and resized there, at the bound's largest padded frame, its copies"
+        f" the GPU and resized there, at {at}, its copies"
         f" {', '.join(figures)}; by the rule measured on the RTX 5090"
     )
 

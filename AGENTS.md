@@ -576,7 +576,10 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   copies and resize on the GPU (`input_pixels`, a 100 MP input's 1.2 GB in float32 and 0.6 in
   bfloat16, the transform's tensors counted from their sizes, unmeasured): the residents lowered
   where a moment needs it, the refusal naming the largest input that fits, a small input changing
-  nothing. `tests/test_peaks.py`
+  nothing; the CLI's bound its one picture as stored (`plan`'s `picture`: its own frame, windows
+  and pins, a landscape 1080p pinned untiled taken where its plan is untiled, a portrait one
+  judged by its own frame, `tiles` taking its target alone), the server's every picture in either
+  orientation, unchanged without it. `tests/test_peaks.py`
   holds the colour correction's term by its frames, a video's `SLICE` unchanged.
 - The command line's still path (`stills.py`, `main.py`'s branch by content): `tests/
   test_still_cli.py` holds `still.upscale` bit for bit to `shot.py`'s pass over a shot of one
