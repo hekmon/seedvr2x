@@ -331,7 +331,7 @@ memory allows.
 | `--compile_backend`, `--compile_mode`, `--compile_fullgraph`, `--compile_dynamic`, `--compile_dynamo_cache_size_limit`, `--compile_dynamo_recompile_limit` | gone: `--compile` takes no tuning. It keeps numz's settings (inductor in its default mode, not full-graph, static shapes), with inductor's deterministic mode kept on and the recompile limits raised to hold every shape the job meets, numz's 128 being too few at 4K ([compiling the VAE](#compiling-the-vae---compile)) |
 | `--debug` | `-v`, `--verbose` ([the lines](#the-lines)) |
 | `--output_format`, `--video_backend`, `--10bit` | `--format`: FFV1 masters (`yuv420p10le` by default, `gbrp16le`) or 16-bit PNG |
-| `--dit_model`, `--model_dir` | `--dit-model` and `--model-dir`, the sharp 7B by default; version 0.1.0 runs the two 7Bs in float16, and in int8 from seedvr2x's own files, any 3B, GGUF or fp8 file refused; the files come from seedvr2x's own Hugging Face repository, pinned; no model file is ever deleted |
+| `--dit_model`, `--model_dir` | `--dit-model` and `--model-dir`, the sharp 7B by default; version 0.1.0 runs the two 7Bs in float16, and in int8 and in the dynamic GGUF from seedvr2x's own files, any 3B, fp8 or other GGUF file refused; the files come from seedvr2x's own Hugging Face repository, pinned; no model file is ever deleted |
 | `--cuda_device` | one device per process |
 
 ## The two workflows
@@ -532,8 +532,8 @@ mpv lands on the cut frame from the list's time itself.
 ## The model
 
 Version 1 runs ByteDance's SeedVR2 7B in float16, with its VAE in float16, and takes
-seedvr2x's int8 files of the 7B with `--dit-model`. ByteDance publishes two 7B models of the
-same architecture, memory and time:
+seedvr2x's int8 and dynamic GGUF files of the 7B with `--dit-model`. ByteDance publishes two 7B
+models of the same architecture, memory and time:
 
 - **The sharp 7B is the default.** Judged by eye on 75 crops at 4K and 1080p, it was preferred
   or no different on 67 (preferred on 27, the regular 7B on 8). At 4K it invents less of the
@@ -553,9 +553,36 @@ The files, where they come from and how they are checked are in the README's
 has the table of every format. The int8 files hold the DiT's weights in 7.76 GiB in place of
 15.35; their memory and speed are measured on the 96 GB card before v0.1.0 is tagged, and the
 plan says, in a line of its own, that it counts a window's memory as float16's, plus int8's
-buffers, until then. A later phase brings the fp8, GGUF and NVFP4 files of both 7Bs, each with
-its measured quality. The VAE stays in float16: its weights take 0.47 GiB, so a smaller file
-would save nothing, and its memory is the pictures it computes, which tiling bounds.
+buffers, until then. Version 0.2.0 brings the fp8 and NVFP4 files of both 7Bs and the other
+GGUF types, each with its measured quality. The VAE stays in float16: its weights take 0.47 GiB,
+so a smaller file would save nothing, and its memory is the pictures it computes, which tiling
+bounds.
+
+### The dynamic GGUF
+
+`--dit-model seedvr2x_ema_7b_sharp_dyn.gguf` (4,757,129,024 bytes) or
+`--dit-model seedvr2x_ema_7b_dyn.gguf` (4,757,055,264 bytes), the two 7Bs in the model card's 4 GB
+tier: a ggml type per block matrix (Q3_K, Q4_K or Q5_K), every other tensor in float16. It is the
+closest 4 GB file to float16 ([VALIDATION.md](../../models/VALIDATION.md)).
+
+- **What it saves.** Memory, the host's above all. With every block swapped, the DiT's weights
+  take about 4.5 GiB of pinned system memory in place of float16's 15, and a swap moves under a
+  third of float16's bytes. It saves no VRAM where the VAE's floor binds (an 8 GB card at
+  1080p), and runs a little slower than float16 (the model card).
+- **How it runs.** seedvr2x reads the file and dequantises it with its own code, written from
+  GGUF's format and ggml's arithmetic (llama.cpp, MIT): each matrix is dequantised on the card
+  just before its multiply, equal in float32 to llama.cpp's own (its `gguf` package). The file is
+  recognised by its tensors and their types, read from its header before anything runs, and the
+  log says what it is: `DiT seedvr2x_ema_7b_sharp_dyn.gguf: SeedVR2's sharp 7B DiT in seedvr2x's
+  dynamic GGUF, its block matrices in Q3_K, Q4_K and Q5_K`.
+- **Only an option.** The sharp 7B in float16 stays the default, and seedvr2x never changes the
+  file by itself. Where float16 is short of the card's or the host's memory, the plan names the
+  smaller files ([small cards](#small-cards)).
+- **What the plan says.** Its DiT line:
+
+```
+plan: DiT: its weights in seedvr2x's dynamic GGUF, 4.43 GiB, under a third of fp16's; a window's memory counted as fp16's plus 0.07 GiB for the dequantisation's buffers; --dit-model names the file
+```
 
 ## What the model does to a picture
 
@@ -1123,8 +1150,35 @@ counted from what is free at the start, not from the card's size. 4K takes 22.40
 - These cards also compute more slowly: an RTX 5080 has 84 compute units (SMs) where the
   96 GB card has 188. A job lasts longer there, and [resume](#resume) and
   [`--until`](#stopping-at-a-set-time) matter most.
-- A later phase brings smaller model files, which lighten the swapping
-  ([README](README.md#which-file-to-use)).
+- The smaller model files lighten the swapping: int8 and the dynamic GGUF
+  ([README](README.md#which-file-to-use)), the others with version 0.2.0.
+
+**The smaller files, named by the plan.** Where float16 is short, the plan names the smaller
+files of the same 7B, never taking one by itself:
+
+- In a refusal for memory (the card's or the host's), after its words, the files that would plan
+  the job, with their option and size, and only those that do. Where you gave `--model-dir`, it
+  says once that the file goes there (the files are named as Hugging Face's repository has them,
+  and only a file put in that directory is read there):
+
+```
+...; or a smaller DiT file that plans this job: int8 (--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)
+...; or a smaller DiT file that plans this job, put in --model-dir: int8 (--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors, 8.3 GB) or the dynamic GGUF (--dit-model seedvr2x_ema_7b_sharp_dyn.gguf, 4.8 GB)
+```
+
+- In the plan, after the line of the blocks swapped, a line of those that plan the job better
+  than the plan itself, by the blocks they swap (fewer) or by the window they run (longer: a
+  host short of memory shortens float16's window, where the smaller files' pinned copies fit),
+  with both figures for the plan and for each file. For a picture, one latent, the blocks alone:
+
+```
+plan: smaller DiT files plan this job better: this plan swaps 11 blocks with windows of 10 latents; int8 19 blocks, windows of 17; the dynamic GGUF 17 blocks, windows of 19; --dit-model names them
+```
+
+For a file that is not one of seedvr2x's pinned ones (another repository's, or a renamed one),
+which does not say which 7B it holds, the files of both 7Bs are named, each after "for the sharp
+7B," or "for the 7B," (in the plan's line, in brackets), separated by semicolons. A DiT in the dynamic GGUF is offered nothing,
+being the smallest.
 
 ## Under WSL2
 
@@ -1950,7 +2004,9 @@ why it was taken, what it costs, and the option that changes it ([GPU memory](#g
 - **quality:** the level, and what the others would cost ([several runs of a
   shot](#several-runs-of-a-shot---quality)).
 - **blocks swapped:** 33 of the DiT's 36 wait in system memory, so that the window gets their
-  room. Slower, not worse: swapping changes no bit.
+  room. Slower, not worse: swapping changes no bit. A DiT file in float16 or int8 that swaps
+  blocks may be followed by a line naming the smaller files that would plan the job better,
+  swapping fewer blocks or running a longer window ([small cards](#small-cards)).
 - **the VAE** and **the DiT in the VAE's passes:** which model stays on the GPU in which phase.
 - **system memory:** 18.77 GiB of the host, 15.81 pinned. A host short of it gets another plan,
   or a refusal naming each part ([small cards](#small-cards)).
@@ -2113,7 +2169,7 @@ this manual is.
 | Option | What it does |
 |---|---|
 | `--model-dir MODEL_DIR` | Read the model files in that directory, by name, and download nothing ([README](README.md#model-files)). |
-| `--dit-model DIT_MODEL` | The DiT's file: `seedvr2x_ema_7b_sharp_fp16.safetensors` by default, or `seedvr2x_ema_7b_fp16.safetensors`, or the two in int8, `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` and `seedvr2x_ema_7b_int8_convrot.safetensors`: half the DiT's weights, multiplied in 8 bits ([the model](#the-model)). |
+| `--dit-model DIT_MODEL` | The DiT's file: `seedvr2x_ema_7b_sharp_fp16.safetensors` by default, or `seedvr2x_ema_7b_fp16.safetensors`, or the two in int8, `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` and `seedvr2x_ema_7b_int8_convrot.safetensors`: half the DiT's weights, multiplied in 8 bits, or the two in the dynamic GGUF, `seedvr2x_ema_7b_sharp_dyn.gguf` and `seedvr2x_ema_7b_dyn.gguf`: under a third of float16's weights ([the model](#the-model)). |
 | `--vae-model VAE_MODEL` | The VAE's file, `seedvr2x_ema_vae_fp16.safetensors` by default. |
 | `--seed SEED` | The seed, 42 by default ([seeds](#seeds-and-reproducibility)). |
 | `--quality LEVEL` | `standard` (the default), `enhanced` or `maximum`: each shot run 1, 2 or 4 times ([several runs of a shot](#several-runs-of-a-shot---quality)). |

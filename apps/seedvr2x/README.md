@@ -258,6 +258,8 @@ A run downloads only the files it uses, one by one, never the repository whole (
 | `seedvr2x_ema_7b_fp16.safetensors` | 16.5 GB | only with `--dit-model seedvr2x_ema_7b_fp16.safetensors`: the regular 7B |
 | `seedvr2x_ema_7b_sharp_int8_convrot.safetensors` | 8.3 GB | only with `--dit-model seedvr2x_ema_7b_sharp_int8_convrot.safetensors`: the sharp 7B in int8 |
 | `seedvr2x_ema_7b_int8_convrot.safetensors` | 8.3 GB | only with `--dit-model seedvr2x_ema_7b_int8_convrot.safetensors`: the regular 7B in int8 |
+| `seedvr2x_ema_7b_sharp_dyn.gguf` | 4.8 GB | only with `--dit-model seedvr2x_ema_7b_sharp_dyn.gguf`: the sharp 7B in the dynamic GGUF |
+| `seedvr2x_ema_7b_dyn.gguf` | 4.8 GB | only with `--dit-model seedvr2x_ema_7b_dyn.gguf`: the regular 7B in the dynamic GGUF |
 | `seedvr2x_ema_vae_fp16.safetensors` | 0.5 GB | always: the VAE, which turns frames into the model's input and back |
 | `transnetv2.safetensors` | 30 MB | unless `--cuts` gives the cuts: the shot detector |
 
@@ -278,13 +280,14 @@ A run downloads only the files it uses, one by one, never the repository whole (
   Hugging Face's telemetry is off: seedvr2x sets `HF_HUB_DISABLE_TELEMETRY=1` unless you have
   set it.
 - **Recognised by content.** A model file is checked by its own tensors, not by its name.
-  SeedVR2's 7B, sharp or regular, in float16 or in seedvr2x's int8 files, is accepted; anything
-  else is refused, saying what the file is.
+  SeedVR2's 7B, sharp or regular, in float16, in seedvr2x's int8 files or in its dynamic GGUF
+  files, is accepted; anything else is refused, saying what the file is.
 
 ### Which file to use
 
 Version 0.1.0 runs the float16 files, the sharp 7B by default,
-`seedvr2x_ema_7b_sharp_fp16.safetensors`, and takes the int8 files with `--dit-model`. Judged
+`seedvr2x_ema_7b_sharp_fp16.safetensors`, and takes the int8 files and the dynamic GGUF files
+with `--dit-model`. Judged
 by eye on 75 crops at 4K and 1080p, the sharp 7B was preferred to the regular 7B or no
 different on 67 (preferred on 27, the regular 7B on 8), and it has the same memory and time
 ([the model](MANUAL.md#the-model)).
@@ -294,9 +297,22 @@ different on 67 (preferred on 27, the regular 7B on 8), and it has the same memo
   place of 15.35, multiplied in 8 bits. Their memory and speed are measured on the 96 GB card
   before v0.1.0 is tagged; until then the plan counts a window's memory as float16's, plus
   int8's buffers.
-- **Smaller files, already published.** The repository also holds fp8, GGUF and NVFP4 files of
-  both 7Bs, each measured against the float16 model on video, as the int8 ones are; seedvr2x
-  will run them ([the roadmap](../../README.md#roadmap)). The
+- **The dynamic GGUF files,** `--dit-model seedvr2x_ema_7b_sharp_dyn.gguf` or
+  `seedvr2x_ema_7b_dyn.gguf` (4.8 GB): the model card's 4 GB tier and the closest 4 GB file to
+  float16 ([VALIDATION.md](../../models/VALIDATION.md)). A type per block matrix (Q3_K, Q4_K or
+  Q5_K), the other tensors in float16. With every block swapped, the DiT's weights take about
+  4.5 GiB of pinned system memory in place of float16's 15, and a swap moves under a third of
+  float16's bytes. It saves no VRAM where the VAE's floor binds (an 8 GB card at 1080p), and
+  runs a little slower than float16 (the model card). seedvr2x reads the file and dequantises
+  each matrix on the card just before its multiply, with its own code, equal in float32 to
+  llama.cpp's. Its memory and speed are measured on the RTX 5090 before v0.1.0 is tagged; until
+  then the plan counts a window's memory as float16's, plus the dequantisation's buffers.
+- **Only an option.** The sharp 7B in float16 stays the default, and seedvr2x never changes the
+  file by itself: where float16 is short of the card's or the host's memory, the plan names the
+  smaller files, in a line and in the refusal's way out ([the manual](MANUAL.md#small-cards)).
+- **Smaller files, already published.** The repository also holds fp8, NVFP4 and the other GGUF
+  types of both 7Bs, each measured against the float16 model on video, as the int8 ones are;
+  seedvr2x will run them with version 0.2.0 ([the roadmap](../../README.md#roadmap)). The
   [model card](https://huggingface.co/hekmon/seedvr2x) has their tables: what each gives up, its
   speed, its error per weight, and other repositories' files against seedvr2x's, with each
   file's SHA-256, origin and change. [FORMATS.md](../../models/FORMATS.md) holds the formats and
@@ -345,6 +361,11 @@ seedvr2x is under the Apache License 2.0 ([LICENSE](LICENSE)). [NOTICE](NOTICE) 
   [Comfy-Org/comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen), version 0.2.37): its
   rotation and the arithmetic of its int8 linear, written in PyTorch in `core/seedvr2x/int8.py`;
   no comfy-kitchen code runs in seedvr2x.
+- **The GGUF reader and the dequantisation**, from GGUF's format and ggml's arithmetic
+  (llama.cpp, by the ggml authors, MIT,
+  [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)): written in PyTorch in
+  `core/seedvr2x/gguf_file.py` and `core/seedvr2x/kquant.py`; no llama.cpp code runs in
+  seedvr2x. Its `gguf` package is the tests' reference only.
 
 The manual's example picture, [images/quality-teeth.png](images/quality-teeth.png), and the
 front page's, [images/before-after.png](images/before-after.png), are made from frames of

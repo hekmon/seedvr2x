@@ -162,7 +162,7 @@ so build with `docker buildx build` (or `DOCKER_BUILDKIT=1 docker build`, with b
 | `--max-concurrent N` | `1` | The pictures upscaled at once. More than one needs the whole DiT on the card ([several pictures at once](#several-pictures-at-once)). |
 | `--queue N` | `8` | The pictures that may wait for the GPU. Past them, 503. |
 | `--model-dir DIR` | none | Read the model files from DIR, nothing downloaded. By default seedvr2x's own files come from Hugging Face's cache, pulled at the pinned revision where missing. |
-| `--dit-model FILE` | `seedvr2x_ema_7b_sharp_fp16.safetensors` | The DiT. |
+| `--dit-model FILE` | `seedvr2x_ema_7b_sharp_fp16.safetensors` | The DiT: float16, or one of the smaller files ([the DiT's files](#the-dits-files)). |
 | `--vae-model FILE` | `seedvr2x_ema_vae_fp16.safetensors` | The VAE. |
 | `--encode-tile PX` | planned | Pin the encode's tiles (0: untiled; else a multiple of 64 from 512). One picture at a time only. |
 | `--decode-tile PX` | planned | Pin the decode's tiles, as above. |
@@ -172,6 +172,24 @@ so build with `docker buildx build` (or `DOCKER_BUILDKIT=1 docker build`, with b
 
 The three pins fix one picture at a time's plan: with `--max-concurrent` above 1 the server
 refuses them.
+
+### The DiT's files
+
+The DiT is the sharp 7B in float16 by default. `--dit-model` takes seedvr2x's other files for the
+same two 7Bs, recognised by their tensors, from Hugging Face's cache like the default (pulled at
+the pinned revision when missing) or by name from `--model-dir`. An option, never the default:
+the server never changes the file by itself.
+
+| File | Size | What it saves |
+|---|---|---|
+| `seedvr2x_ema_7b_sharp_fp16.safetensors` (the default), `seedvr2x_ema_7b_fp16.safetensors` | 16.5 GB | Nothing: the reference. |
+| `seedvr2x_ema_7b_sharp_int8_convrot.safetensors`, `seedvr2x_ema_7b_int8_convrot.safetensors` | 8.3 GB | Half the DiT's weights, multiplied in 8 bits. |
+| `seedvr2x_ema_7b_sharp_dyn.gguf`, `seedvr2x_ema_7b_dyn.gguf` | 4.8 GB | Under a third of float16's weights, a type per block matrix among Q3_K, Q4_K and Q5_K (the dynamic GGUF): with every block swapped, the DiT's weights take about 4.5 GiB of pinned system memory in place of float16's 15, and a swap moves under a third of float16's bytes. |
+
+The dynamic GGUF saves no VRAM where the VAE's floor binds (an 8 GB card at 1080p), and runs a
+little slower than float16. Where the card or the host's memory is short for float16, the start's
+refusal names the smaller files that would fit the same `--max-size`, `--max-concurrent` and
+`--max-input` (with `--model-dir` given, saying that the file goes there); the choice stays yours.
 
 ## The start
 
@@ -395,6 +413,9 @@ once.
 - **[comfy-kitchen](https://github.com/Comfy-Org/comfy-kitchen)**, by Comfy Org (Apache-2.0):
   seedvr2x's int8 linear follows its rotation and its activations' quantisation, written in
   PyTorch; none of its code runs.
+- **[llama.cpp](https://github.com/ggml-org/llama.cpp)**, by its authors (MIT): seedvr2x's GGUF
+  reader and its dequantisation of the K-quants are written from GGUF's format and ggml's
+  arithmetic; none of its code runs.
 - [core/NOTICE](../../core/NOTICE) holds the full notices of the library the server installs.
 
 ## Licence

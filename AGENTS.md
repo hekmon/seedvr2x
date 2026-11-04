@@ -20,6 +20,9 @@ core/                    the library: distribution seedvr2x-core, import seedvr2
     compiling.py colour.py memory.py detector.py      the bricks: models and their files,
                          placement, the int8 linear, sampling, the VAE passes, colour, the
                          memory model, the shot detector
+    gguf_file.py kquant.py      a dynamic GGUF file: its header read without torch, and the
+                         K-quants' dequantisation on the card with the linear that uses it;
+                         pull.py also holds the smaller files of a DiT file, which a plan names
     picture.py png.py webp.py still.py still_plan.py     a still picture: read, written as PNG
                          or lossless WebP, upscaled on models already loaded, its plan for a bound
     record.py            seedvr2x's record in each output: its fields and the AI mark, a picture's
@@ -143,6 +146,9 @@ beside it; the `__init__.py` is seedvr2x's.
   diffusers, rotary-embedding-torch and the rest. A bump can move the output's bits: it remakes
   the references, with the measured reason said in its commit (DESIGN.md).
 - Linux x86_64 only for now (DESIGN.md: Linux first).
+- `gguf` (llama.cpp's own gguf-py, 0.19.0) is a dev dependency of `apps/seedvr2x` alone, pinned
+  there: the tests' reference for the GGUF reader and the dequantisation, never the library's or
+  the shipped environment's; the tests that use it skip without it.
 - huggingface_hub is declared, at the version the lock held already through diffusers: it pulls
   seedvr2x's own model files from its repo at the pinned revision, into Hugging Face's cache
   (`seedvr2x/pull.py`). seedvr2x imports it to look in the cache on every run without
@@ -213,9 +219,9 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   `core/tests/` for the library's, `apps/seedvr2x/tests/` for the CLI's. File names are unique
   across the two, a helper being imported by name. A file that held both halves is two: the
   library's, and its `_cli` half beside the command (`test_pull_cli.py`, `test_weights_cli.py`,
-  `test_compile_cli.py`, `test_detector_cli.py`, `test_padding_cli.py`, `test_int8_cli.py`),
-  which use the library's half's helpers and say so in their docstring. The helpers both
-  directories use are `core/tests/`'s (`library_fixtures.py`, `stand_ins.py`, the fixtures
+  `test_compile_cli.py`, `test_detector_cli.py`, `test_padding_cli.py`, `test_int8_cli.py`,
+  `test_gguf_cli.py`), which use the library's half's helpers and say so in their docstring. The
+  helpers both directories use are `core/tests/`'s (`library_fixtures.py`, `stand_ins.py`, the fixtures
   `conftest.py` imports from the first); the CLI's pytest puts `../../core/tests` on its
   `pythonpath`.
 - The rule between them: `core/tests/test_library.py` holds that no library file imports the
@@ -254,6 +260,31 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   holds the int8 files' headers and markers; `test_int8_cli.py` the command line over a
   synthetic int8 file: its check, the plan by int8's figures and its line, the job's record, a
   resume judged early by int8's figures.
+- `tests/test_gguf_file.py` holds `seedvr2x/gguf_file.py`, the GGUF header read without torch or
+  the tensors' data, to files written there by hand with struct from the format's specification
+  (every size and type, every refusal, every prefix cut short) and to `gguf.GGUFReader` on the
+  same files; where `SEEDVR2X_MODEL_DIR` has seedvr2x's two dynamic files, to their real headers.
+  `tests/test_kquant.py` holds `seedvr2x/kquant.py` on the CPU: each type's dequantisation (Q3_K,
+  Q4_K, Q5_K) equal in float32, bit for bit, to the `gguf` package's, on synthetic blocks of every
+  type (random bytes, the fp16 scales of several magnitudes, every 6-bit scale value in every
+  position) and, with the files, on real matrices; the dtype rounding per chunk equal to the
+  float32 matrix rounded whole, the blocks taken at a time changing no bit, the module under
+  autocast, the 7B's 288 block matrices swapped on the meta device. `pytest -m gpu`: the
+  dequantisation on CUDA against the CPU's, bit for bit, and a linear's memory printed for the
+  planner. `tests/test_weights.py` holds the dynamic files' pins, headers (the types per matrix
+  by the test's own reading), recognition by content and every refusal (other types, other
+  tensors, versions, a file cut short), the header read without torch; `tests/test_blockswap.py`
+  the blocks of unequal sizes swapped as any others, the file read into its parts and hashed once
+  (the one read, below), a file cut short refused in safetensors' words, and, `-m gpu`, a real
+  GGUF file's blocks swapped giving the bits of the DiT loaded whole; `tests/test_peaks.py` and
+  `tests/test_still_plan.py` the GGUF DiT's figures by its own blocks (`peaks.leaving_blocks`)
+  and the smaller files' line in a picture's plan; `tests/test_pull.py` the pins and
+  `pull.smaller_files`; `tests/test_planner.py` and `test_gguf_cli.py` (the CLI's) the plan by
+  the GGUF's figures and its line, the job's record, a resume judged early, the smaller files
+  named in a refusal for memory (with `--model-dir` said once) and in the plan where they swap
+  fewer blocks or run a longer window, and the file never
+  changed by itself, for a video and for a picture; the image server's `tests/test_reservation.py`
+  and `test_service.py` the same way out in a refused start, and a start that then takes the file.
 - `tests/test_pull.py` holds the pull of seedvr2x's own files (`seedvr2x/pull.py`) on the CPU,
   huggingface_hub's two calls replaced, and the pins to the revision itself;
   `test_pull_cli.py` holds what the command line does over it.
@@ -262,7 +293,8 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   skipped, bytes after the data), its SHA-256 hashlib's of the whole file and its tensors those
   read without the hash; the hash thread a piece behind the read, the staging buffer read into
   again only once its last piece is hashed (a slow hash, pieces of 5 bytes; the test fails
-  without that wait); a file cut short refused in the same words; and, where
+  without that wait); a file cut short refused in the same words; a GGUF file's header parsed again from the bytes
+  hashed, a header read differently the second time refused as changed while it loaded; and, where
   `SEEDVR2X_MODEL_DIR` has them, seedvr2x's VAE and TransNetV2's weights read to their pins and to
   safetensors' own tensors. `tests/test_pull.py` the pin's check with `load` reading nothing, its
   size first, its SHA-256 proved at the load's end or refused there in the pin's words; a SHA-256

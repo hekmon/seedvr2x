@@ -78,10 +78,12 @@ seedvr2x downloads its own model files from Hugging Face,
 SHA-256. They are unofficial conversions, each made from its original (ByteDance's float32
 weights, TransNetV2's TensorFlow ones) by a script of [models/](models/) that pins its inputs
 and checks its output. Version 0.1.0 runs the float16 files, by default the sharp 7B,
-ByteDance's sharper version of the model, and the 7Bs in int8 (`--dit-model`).
+ByteDance's sharper version of the model, and the 7Bs in int8 and in the dynamic GGUF, 4.8 GB
+(`--dit-model`): the closest 4 GB file to float16 ([VALIDATION.md](models/VALIDATION.md)), for
+the smaller cards.
 
-Beside them, the same 7Bs in smaller files (int8, fp8, GGUF, NVFP4), each made to lose as little
-as possible:
+The same 7Bs come in smaller files (int8, fp8, GGUF, NVFP4), each made to lose as little as
+possible:
 
 - **Only the 288 block matrices are quantized,** 99% of the weights. The other 840 tensors
   (biases, norms, modulation tables and the 6 matrices outside the blocks) stay in 16 bits.
@@ -102,8 +104,9 @@ as possible:
     correction.
   - **An image server:** pictures over HTTP, the models loaded once and kept on the GPU, in a
     container.
-  - **The 7B in smaller files,** for smaller cards: int8, 8.3 GB, and a GGUF of 4.8 GB, instead
-    of the float16's 16.5, less of it held in the computer's memory and moved to the card.
+  - **The 7B in smaller files,** for smaller cards: int8, 8.3 GB, and the dynamic GGUF, 4.8 GB,
+    instead of the float16's 16.5, less of it held in the computer's memory and moved to the
+    card. Options, never the default: where float16 is short, the plan names them.
   - **seedvr2x on its own:** its output was numz's CLI's bit for bit on 2026-11-04, the proof
     that it runs the same model. Since then seedvr2x's own outputs are its reference, and the
     model code changes wherever a measurement shows a gain.
@@ -149,7 +152,8 @@ seedvr2x stands on others' work:
   the rotation of the int8, fp8 and NVFP4 files, and the arithmetic of seedvr2x's int8 linear
   (Apache-2.0).
 - **[llama.cpp](https://github.com/ggml-org/llama.cpp)**, by the ggml authors: the quantizer and
-  the importance-matrix method of the GGUF files (MIT).
+  the importance-matrix method of the GGUF files, and the format and arithmetic of seedvr2x's
+  GGUF reader and dequantisation, written anew from them (MIT).
 - **[StableSR](https://github.com/IceClear/StableSR)**: the wavelet method behind seedvr2x's
   colour correction, written anew from the method.
 - **[Sol Levante](https://opencontent.netflix.com/#h.yk08awhc210g)**, by Netflix and Production I.G: the frames
