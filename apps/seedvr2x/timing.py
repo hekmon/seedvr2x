@@ -155,15 +155,10 @@ def _sized(kind: Kind, size: int) -> int:
     return padded_length(size) if kind in ("encode", "decode") else size
 
 
-def tokens(target: tuple[int, int], latents: int, *, numz_padding: bool = False) -> int:
+def tokens(target: tuple[int, int], latents: int) -> int:
     """The tokens of a window of `latents` latents for frames resized to target, (height, width):
-    a token per TOKEN x TOKEN pixels of the padded frame (frames.padded_size), per latent.
-    numz_padding is for tests only (main.NUMZ_PADDING): numz's padding, up to multiples of 16."""
-    height, width = target
-    if numz_padding:
-        height, width = -(-height // TOKEN) * TOKEN, -(-width // TOKEN) * TOKEN
-    else:
-        height, width = padded_size(target)
+    a token per TOKEN x TOKEN pixels of the padded frame (frames.padded_size), per latent."""
+    height, width = padded_size(target)
     return latents * (height // TOKEN) * (width // TOKEN)
 
 

@@ -138,10 +138,10 @@ beside it; the `__init__.py` is seedvr2x's.
 - The CLI's uv project, on Python 3.13: `uv sync` in `apps/seedvr2x/` creates
   `apps/seedvr2x/.venv` with the locked versions, `core/` installed editable, and the dev tools.
   The scripts of `research/` that import seedvr2x run with its `bin/python`.
-- Its dependencies are pinned to the versions of the numz environment milestone 1 is compared
-  with, so that the comparison differs by code only: torch and torchvision (CUDA 13.0 builds, from
-  PyTorch's index), diffusers, rotary-embedding-torch and the rest. Bump one on purpose, and run
-  that comparison again.
+- Its dependencies are pinned to the versions seedvr2x's own references were made with (milestone
+  1's regression, below): torch and torchvision (CUDA 13.0 builds, from PyTorch's index),
+  diffusers, rotary-embedding-torch and the rest. A bump can move the output's bits: it remakes
+  the references, with the measured reason said in its commit (DESIGN.md).
 - Linux x86_64 only for now (DESIGN.md: Linux first).
 - huggingface_hub is declared, at the version the lock held already through diffusers: it pulls
   seedvr2x's own model files from its repo at the pinned revision, into Hugging Face's cache
@@ -285,17 +285,23 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   `HF_HUB_OFFLINE=1`, and skips until the three it takes are there, saying how to fetch them
   alone (`hf download`, 17 GB).
 - `tests/test_regression.py` (GPU) holds every change to the runtime or the vendored code to
-  milestone 1: the output must stay bit-identical to numz's, FFV1 master and float32 frames,
-  with numz's 7B fp16, with seedvr2x's own 7B, and with seedvr2x's sharp 7B against numz's run
-  of its sharp 7B, all in numz's padding. seedvr2x's own padding, the default, is held
-  bit-identical to numz patched to pad the same way (`numerics_patch.py`'s `NUM_PAD`) at 1080p,
-  at 720p and on a crop whose width isn't a multiple of 16. Its runs detect their shots, as a
-  user's does without `--cuts`, the shot detector on the GPU before the models load, at
-  `--cut-threshold 0.5`, where milestone 1's input is one shot, as numz's one batch (0.3 cuts it
-  in three): each case skips, naming the file, without `transnetv2.safetensors` in
-  `SEEDVR2X_MODEL_DIR`. The other GPU tests' runs give a cut list, empty for one shot. Its
-  references, in the `m1/` directory of `SEEDVR2X_REFERENCE_DIR`, and how to make them are in its
-  docstring.
+  milestone 1: the output must stay bit-identical to seedvr2x's own references, FFV1 master and
+  float32 frames, made once on main's code in seedvr2x's defaults (its own padding, its tail
+  repeating a shot's last frame, its noise drawn on the CPU) and checked equal to numz's in the
+  same GPU session (2026-11-04, the last comparison with numz): milestone 1's input with the 7B
+  fp16 of numz and of seedvr2x (one reference, `7b`) and with seedvr2x's sharp 7B (`sharp`), at
+  1080p, at 720p and on a crop whose width isn't a multiple of 16 (the padding cases), and under
+  three pairs of VAE tiles. The references are per card, in `seedvr2x/<card>/` of
+  `SEEDVR2X_REFERENCE_DIR` with a `cases.json` giving each case's size on that card, the inputs
+  in `m1/`; a card with no directory skips every case, naming it, and one with a directory fails
+  a case whose reference is missing, unless the card can't run it. A change that moves the
+  output's bits is allowed with a measured reason, and remakes the references, said in its
+  commit (DESIGN.md). Its runs detect their shots, as a user's does without `--cuts`, the shot
+  detector on the GPU before the models load, at `--cut-threshold 0.5`, where milestone 1's input
+  is one shot (0.3 cuts it in three): each case skips, naming the file, without
+  `transnetv2.safetensors` in `SEEDVR2X_MODEL_DIR`. The other GPU tests' runs give a cut list,
+  empty for one shot. How to make the references is in the file's docstring;
+  `tests/test_regression_cases.py` holds, on the CPU, what a card takes of each case.
 - `test_milestone1_unpinned` (same file) pins no tile: its two calls, `--plan` then the run, are
   each compared with the plan the planner makes for the memory that call recorded itself
   (`compare_with_planner`), never with each other: a desktop that drives the card moves its free
@@ -316,11 +322,10 @@ From `apps/imgserver/`, in its own environment, the same four as the CLI's.
   by the system memory from the logged bytes), the disk line compared by its masters alone and
   rebuilt from a manifest, errors found with and without `--verbose`, the comparison and its
   failure message (each call's reading, windows, blocks and disk masters), the run stopped.
-- numz's padding is a mode for the tests only, never a user's: `test_regression.py`'s milestone-1
-  cases run the CLI with `SEEDVR2X_TESTS_NUMZ_PADDING=1` in its environment (`main.NUMZ_PADDING`),
-  which an output directory's manifest records, so that a job is never resumed in the other
-  padding. `test_regression.py`'s padding cases and the other GPU tests run in the default
-  padding.
+- seedvr2x runs in no mode for the tests only: numz's padding, tail and noise draw, which the
+  regression ran in until 2026-11-04 to reproduce numz's references, retired with them. A
+  manifest written before, holding `numz_padding`, `numz_draw` or `numz_tail` among its settings is
+  another job (`tests/test_cli_run.py`), refused naming the setting.
 - `split`, the colour correction (`seedvr2x/colour.py`), is held to the colour study's own `split()`
   (`research/scripts/colour_variants.py`): on the CPU by `tests/test_colour.py` (`core/tests/`), on
   the GPU in the pipeline by `tests/test_split.py` (the CLI's), at x2 and x4, in one window and in

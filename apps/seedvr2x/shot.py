@@ -9,12 +9,12 @@ for the shot, on the CPU, and sliced per window: it waits in system memory with 
 window's slices sent to the device for its pass, so that the DiT's phase holds nothing of the
 shot there beside the window it runs (DESIGN.md, Pipeline step 2). Every other step keeps numz's
 order and dtypes (src/core/generation_phases.py at 4490bd1), so a shot that fits one window gives
-numz's one-batch output, bit for bit, in numz's padding and numz's draw, on the device (milestone
-1); in seedvr2x's padding (DESIGN.md, Pipeline step 0), numz's patched to pad alike
-(research/scripts/numerics_patch.py, NUM_PAD=reflect>=8+black+16). Only the latents and their
-noise are ever whole in memory, unless a pass is tiled, and in system memory: on the device, the
-VAE's passes hold a slice's at a time and the DiT's a window's, whatever the shot's length
-(sample_windows; DESIGN.md, Memory planner).
+the one-batch output of numz patched to pad alike (research/scripts/numerics_patch.py,
+NUM_PAD=reflect>=8+black+16; DESIGN.md, Pipeline step 0), bit for bit, once the shot's end and
+the noise are alike too (milestone 1; the regression holds seedvr2x's own references). Only the
+latents and their noise are ever whole in memory, unless a pass is tiled, and in system memory: on
+the device, the VAE's passes hold a slice's at a time and the DiT's a window's, whatever the
+shot's length (sample_windows; DESIGN.md, Memory planner).
 
 A tiled pass can't stream (seedvr2x/tiling.py; DESIGN.md, Pipeline steps 1 and 3): each tile runs
 over the whole shot, so a tiled encode keeps the shot's transformed input, and a tiled decode
@@ -129,33 +129,23 @@ def shot_layout(count: int, window: int | None) -> list[tuple[int, int]]:
     return window_layout(latents, window or latents)
 
 
-def pad_4n1(frames: Tensor, *, numz_tail: bool = False) -> Tensor:
+def pad_4n1(frames: Tensor) -> Tensor:
     """frames (T, ...) padded at the end to 4n + 1: the last frame repeated, 1 to 3 times, as
     ByteDance pads (projects/inference_seedvr2_7b.py:178-196 at e4de8c2, cut_videos, at sp_size
     1, seedvr2x's). A shot of 1 or 4n + 1 frames is not padded; one of 2, 3 or 4 is padded to 5.
+    numz mirrors the end instead (src/core/generation_utils.py:635-656 at 4490bd1,
+    pad_video_temporal); seedvr2x repeats the last frame (DESIGN.md, Pipeline step 1, decided on
+    2026-10-19)."""
+    return torch.cat([frames, _padding(frames[-4:], frames.shape[0])])
 
-    numz_tail is for tests only (main.NUMZ_TAIL): numz's own padding instead, which mirrors the
-    end (src/core/generation_utils.py:651-656 at 4490bd1, pad_video_temporal): the frames before
-    the last, mirrored, and the last one repeated beyond a full mirror (:635-648)."""
-    return torch.cat([frames, _padding(frames[-4:], frames.shape[0], numz_tail)])
 
-
-def _padding(tail: Tensor, count: int, numz_tail: bool = False) -> Tensor:
+def _padding(tail: Tensor, count: int) -> Tensor:
     """The frames pad_4n1 appends to a shot of `count` frames, from tail, its last min(count, 4)
-    frames: at most 3 are missing, so the mirror of numz_tail never reaches further back. The
-    last frame repeated by default (DESIGN.md, Pipeline step 1, decided on 2026-10-19); numz's
-    mirror (generation_utils.py:635-656 at 4490bd1) with numz_tail, so that the tests held to
-    numz's references stay numz's whatever length a reference is made again with: milestone 1's
-    are one shot of 45 frames, 4n + 1, which neither pads."""
+    frames: the last frame repeated, the 1 to 3 missing."""
     missing = padded_length(count) - count
     if missing == 0:
         return tail[:0]
-    if not numz_tail:
-        return tail[-1:].repeat(missing, *([1] * (tail.dim() - 1)))
-    if missing >= count:
-        repeated = tail[-1:].repeat(missing - count + 1, *([1] * (tail.dim() - 1)))
-        return torch.cat([tail[1:].flip(0), repeated])
-    return tail[-missing - 1 : -1].flip(0)
+    return tail[-1:].repeat(missing, *([1] * (tail.dim() - 1)))
 
 
 def input_slices(
@@ -163,11 +153,9 @@ def input_slices(
     count: int,
     sizes: list[int],
     to_tensor: Callable[[npt.NDArray[np.float32]], Tensor] = model.to_input,
-    *,
-    numz_tail: bool = False,
 ) -> Iterator[Tensor]:
     """The `count` frames of a shot, read as they are needed, padded at the end as pad_4n1 pads
-    them (numz_tail as it takes it), in slices of `sizes` frames (model.encode_slices): (t, H, W,
+    them, in slices of `sizes` frames (model.encode_slices): (t, H, W,
     3) on the CPU, as to_tensor makes them, by default float16, numz's input (model.to_input).
     Only the last 4 frames read are kept, for the padding."""
     remaining, given = count, 0
@@ -187,7 +175,7 @@ def input_slices(
         if real < size:
             if padding is None:
                 assert tail is not None
-                padding = _padding(tail, count, numz_tail)
+                padding = _padding(tail, count)
             parts.append(padding[given : given + size - real])
             given += size - real
         yield parts[0] if len(parts) == 1 else torch.cat(parts)
@@ -203,8 +191,6 @@ def encode_shot(
     target: tuple[int, int],
     seed: int,
     *,
-    numz_padding: bool = False,
-    numz_tail: bool = False,
     tiles: Tiles | None = None,
     scratch: Path | None = None,
     allowance: int | None = None,
@@ -215,11 +201,6 @@ def encode_shot(
     the padded frames' size (frames.padded_size) over 8. read(n) gives the shot's next n frames,
     (n, H, W, 3) float32 in [0, 1] at the source's size; target is the (height, width) the encode
     resizes them to (frames.target_size), through model.input_transform.
-
-    numz_padding is for tests only (main.NUMZ_PADDING): the frames padded as numz pads them
-    (model.input_transform), so that milestone 1's regression holds the output to numz's. So is
-    numz_tail (main.NUMZ_TAIL): a shot's end padded as numz pads it, mirrored (pad_4n1), not
-    repeated.
 
     tiles, when the plan tiles the encode (None: one pass, streamed): the shot is then encoded
     tile by tile (tiling.encode_tiled), numz's tiled encode of it, bit for bit, the frames still
@@ -232,9 +213,7 @@ def encode_shot(
     padded = padded_length(count)
     # Encode (generation_phases.py:329-504). numz seeds here; nothing draws.
     model.set_seed(seed + ENCODE_SEED_OFFSET)
-    inputs = encoder_inputs(
-        *(models, read, count, target), numz_padding=numz_padding, numz_tail=numz_tail
-    )
+    inputs = encoder_inputs(models, read, count, target)
     if tiles is None:
         return model.encode_stream(models, inputs, padded)
     store = Scratch(scratch, allowance)
@@ -246,19 +225,11 @@ def encoder_inputs(
     read: Callable[[int], npt.NDArray[np.float32]],
     count: int,
     target: tuple[int, int],
-    *,
-    numz_padding: bool = False,
-    numz_tail: bool = False,
 ) -> Iterator[Tensor]:
     """The encoder's input for a shot of `count` frames, read as they are needed (encode_shot),
     slice by slice: each (C, t, H, W) in [-1, 1], COMPUTE_DTYPE on the device, t following
-    model.encode_slices over the shot padded to 4n + 1; numz_padding and numz_tail as encode_shot
-    takes them."""
-    return _transformed(
-        *(models, read, count, target, model.to_input, COMPUTE_DTYPE),
-        numz_padding=numz_padding,
-        numz_tail=numz_tail,
-    )
+    model.encode_slices over the shot padded to 4n + 1."""
+    return _transformed(models, read, count, target, model.to_input, COMPUTE_DTYPE)
 
 
 def reference_inputs(
@@ -270,8 +241,7 @@ def reference_inputs(
     """split's reference for a shot of `count` frames, read from its input copy as they are
     needed (_correct): the frames through the encoder's transform (model.input_transform) in
     float32, slice by slice as encoder_inputs gives the encoder's input: each (C, t, H, W) float32
-    in [-1, 1] on the device (DESIGN.md, Colour correction, Numerics). Padded by default whatever
-    the encoder's padding (numz_padding) and the tail of the shot's end (numz_tail): split takes
+    in [-1, 1] on the device (DESIGN.md, Colour correction, Numerics). split takes
     each frame's picture alone, cropped as the decode's frames are (_frames, _decoded), which no
     padding moves, nor the frames appended at the end, cropped away.
 
@@ -290,21 +260,18 @@ def _transformed(
     target: tuple[int, int],
     to_tensor: Callable[[npt.NDArray[np.float32]], Tensor],
     dtype: torch.dtype,
-    *,
-    numz_padding: bool = False,
-    numz_tail: bool = False,
 ) -> Iterator[Tensor]:
     """The frames of a shot of `count` frames, read as they are needed, made tensors by
     to_tensor (input_slices) and through model.input_transform(target) as dtype on the device,
     slice by slice: each (C, t, H, W) in [-1, 1], t following model.encode_slices over the shot
     padded to 4n + 1."""
-    transform = model.input_transform(target, numz_padding=numz_padding)
+    transform = model.input_transform(target)
     # (t, 3, H, W): a view, moved with its layout (generation_phases.py:92-104, 380-388), then
     # prepared slice by slice: every step works frame by frame.
     sizes = model.encode_slices(models, padded_length(count))
     return (
         transform(frames.permute(0, 3, 1, 2).to(models.device, dtype))
-        for frames in input_slices(read, count, sizes, to_tensor, numz_tail=numz_tail)
+        for frames in input_slices(read, count, sizes, to_tensor)
     )
 
 
@@ -314,8 +281,6 @@ def sample_windows(
     layout: Sequence[tuple[int, int]],
     seed: int,
     start: int = 0,
-    *,
-    numz_draw: bool = False,
 ) -> Iterator[Tensor]:
     """The DiT's output for each window of layout from window `start` on, in order, each (t, h, w,
     16) on the device: one Euler step per window, from the shot's latent, (T', h, w, 16) in the
@@ -327,9 +292,7 @@ def sample_windows(
     (generation_phases.py:663-680): its values follow the generator, the dtype, the shape and the
     strides (sampling.drawn), and no card. Nothing else draws, so a window's noise is the same
     whether the windows before it ran in this process or in an earlier one, on this card or
-    another: a resumed shot draws it again, from a latent of the same layout. numz_draw is for
-    tests only (main.NUMZ_DRAW): the noise drawn on the device, numz's draw, which follows the
-    card.
+    another: a resumed shot draws it again, from a latent of the same layout.
 
     The noise and the latent wait on the CPU, and each window's slices of them go to the device
     for its pass alone: beside a window the device holds nothing of the shot but that window
@@ -350,7 +313,7 @@ def sample_windows(
     and draws nothing."""
     if layout[-1][1] != latent.shape[0]:
         raise ValueError(f"windows {layout} over a latent of {latent.shape[0]}")
-    noise, latent = sampling.drawn(models, latent, seed, numz_draw)
+    noise, latent = sampling.drawn(models, latent, seed)
     for s, e in layout[start:]:
         yield sampling.window(models, noise[s:e], latent[s:e])
 

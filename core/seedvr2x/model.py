@@ -37,7 +37,6 @@ from seedvr2x.pull import Hashes
 from seedvr2x.vendor.common.config import create_object, load_config
 from seedvr2x.vendor.common.seed import set_seed as vendor_set_seed
 from seedvr2x.vendor.core.infer import VideoDiffusionInfer
-from seedvr2x.vendor.data.image.transforms.divisible_crop import DivisiblePad
 from seedvr2x.vendor.models.dit_3b import attention as attention_3b
 from seedvr2x.vendor.models.dit_7b import attention as attention_7b
 from seedvr2x.vendor.models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
@@ -428,9 +427,7 @@ def to_input(frames: npt.NDArray[np.float32]) -> Tensor:
     return torch.from_numpy(frames).to(torch.float16)
 
 
-def input_transform(
-    target: tuple[int, int], *, numz_padding: bool = False
-) -> Callable[[Tensor], Tensor]:
+def input_transform(target: tuple[int, int]) -> Callable[[Tensor], Tensor]:
     """numz's input preparation (src/core/generation_utils.py:72-84) of frames (T, C, H, W), but
     for its padding: resized to target, (height, width) (torchvision's bicubic, antialias on),
     values clamped to [0, 1], padded at the bottom and right (pad), normalised to [-1, 1], and
@@ -438,16 +435,13 @@ def input_transform(
 
     The resize is NaResize's (side_resize.py: TVF.resize, bicubic, antialias on) to an explicit
     size, the display aspect's (frames.target_size). For square pixels it is the size torchvision
-    computes from NaResize's int, so the same call, bit for bit (tests/test_frames.py).
-
-    numz_padding is for tests only (main.NUMZ_PADDING): numz's own padding, DivisiblePad((16, 16)),
-    zeros up to multiples of 16, in which milestone 1's regression holds the output to numz's."""
+    computes from NaResize's int, so the same call, bit for bit (tests/test_frames.py)."""
     size = list(target)
     return Compose(
         [
             Lambda(lambda x: TVF.resize(x, size, InterpolationMode.BICUBIC, antialias=True)),
             Lambda(lambda x: torch.clamp(x, 0.0, 1.0)),
-            DivisiblePad((16, 16)) if numz_padding else Lambda(pad),
+            Lambda(pad),
             Normalize(0.5, 0.5),
             Lambda(lambda x: x.permute(1, 0, 2, 3)),
         ]

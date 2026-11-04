@@ -34,11 +34,8 @@ from shot import (
 def test_encoder_slices_padded_as_asked(
     monkeypatch: pytest.MonkeyPatch, target: tuple[int, int]
 ) -> None:
-    # Each slice the encoder takes, from encoder_inputs and through encode_shot: frames.padded_size
-    # by default, numz's multiples of 16 in the tests' numz padding (cli.NUMZ_PADDING), the mode
-    # passed down every call to the transform; run.py's calls are test_cli_run.py's
-    # (test_numz_padding_for_tests_only). (24, 32) is padded to (48, 32), or (32, 32) in numz's
-    # padding; (30, 37) to (64, 64), or (32, 48).
+    # Each slice the encoder takes, from encoder_inputs and through encode_shot:
+    # frames.padded_size. (24, 32) is padded to (48, 32); (30, 37) to (64, 64).
     from test_shot import SLICING, Reads
 
     count = 6
@@ -53,14 +50,12 @@ def test_encoder_slices_padded_as_asked(
         return torch.zeros(1)
 
     monkeypatch.setattr(model, "encode_stream", encode_stream)
-    numz = (-(-target[0] // 16) * 16, -(-target[1] // 16) * 16)
-    assert padded_size(target) != numz
-    for numz_padding, size in ((False, padded_size(target)), (True, numz)):
-        given = encoder_inputs(SLICING, Reads(frames), count, target, numz_padding=numz_padding)
-        assert [(x.shape[-2], x.shape[-1]) for x in given] == [size] * len(sizes)
-        encoded.clear()
-        encode_shot(SLICING, Reads(frames), count, target, 0, numz_padding=numz_padding)
-        assert encoded == [size] * len(sizes)
+    size = padded_size(target)
+    given = encoder_inputs(SLICING, Reads(frames), count, target)
+    assert [(x.shape[-2], x.shape[-1]) for x in given] == [size] * len(sizes)
+    encoded.clear()
+    encode_shot(SLICING, Reads(frames), count, target, 0)
+    assert encoded == [size] * len(sizes)
 
 
 @pytest.mark.parametrize(
@@ -92,7 +87,7 @@ def test_decode_trimmed(monkeypatch: pytest.MonkeyPatch, target: tuple[int, int]
 @pytest.mark.parametrize("target", [(24, 32), (17, 16), (30, 37), (541, 961)])
 def test_reference_is_the_picture(target: tuple[int, int]) -> None:
     # split's reference, cropped as the decode's frames are (_frames): the picture alone, whatever
-    # padding the transform made, numz's included: the frames resized, clamped and normalised.
+    # padding the transform made: the frames resized, clamped and normalised.
     from test_shot import SLICING, Reads
 
     count = 6
@@ -107,6 +102,5 @@ def test_reference_is_the_picture(target: tuple[int, int]) -> None:
     picture = Normalize(0.5, 0.5)(resized)[..., :height, :width]
     assert reference.shape == (count, 3, height, width)
     assert torch.equal(reference, picture)
-    for numz_padding in (False, True):
-        out = model.input_transform(target, numz_padding=numz_padding)(video)
-        assert torch.equal(out.permute(1, 0, 2, 3)[..., :height, :width], picture)
+    out = model.input_transform(target)(video)
+    assert torch.equal(out.permute(1, 0, 2, 3)[..., :height, :width], picture)

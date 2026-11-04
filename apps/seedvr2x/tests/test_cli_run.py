@@ -83,23 +83,18 @@ def stand_in_encode(
     target: tuple[int, int],
     seed: int,
     *,
-    numz_padding: bool = False,
-    numz_tail: bool = False,
     tiles: Tiles | None = None,
     scratch: Path | None = None,
     allowance: int | None = None,
 ) -> torch.Tensor:
     """A latent (T', 1, 1, 16) in channel-major memory, as the VAE's, saying the shot's first frame
-    (channel 0), its frame count (1), the target's height and width (2, 3), and whether the frames
-    were padded as numz pads them (6: cli.NUMZ_PADDING) and the shot's end as numz pads it (7:
-    cli.NUMZ_TAIL). Untiled, with no scratch and nothing allowed one: the plan's tiles are the
-    tiled passes' own tests'."""
+    (channel 0), its frame count (1) and the target's height and width (2, 3). Untiled,
+    with no scratch and nothing allowed one: the plan's tiles are the tiled passes' own tests'."""
     assert tiles is None and scratch is None and not allowance
     assert read(count).shape[0] == count
     latent = torch.zeros(16, (padded_length(count) - 1) // 4 + 1, 1, 1)
     latent[0], latent[1] = seed - SEED, count
     latent[2], latent[3] = target
-    latent[6], latent[7] = numz_padding, numz_tail
     return latent.permute(1, 2, 3, 0)
 
 
@@ -109,8 +104,6 @@ def stand_in_windows(
     layout: list[tuple[int, int]],
     seed: int,
     start: int = 0,
-    *,
-    numz_draw: bool = False,
 ) -> Iterator[torch.Tensor]:
     for s, e in layout[start:]:
         yield latent[s:e] + 0
@@ -119,14 +112,12 @@ def stand_in_windows(
 def stand_in_decode_stream(models: object, latent: torch.Tensor) -> Iterator[torch.Tensor]:
     """The VAE's decode of a stand-in latent (stand_in_encode), in its slices, the first two
     latents then one at a time: frames (3, t, H, W) at the target's size padded as the encoder's
-    input is (model.input_transform: frames.padded_size, or numz's multiples of 16), in [-1, 1]:
+    input is (model.input_transform: frames.padded_size), in [-1, 1]:
     each saying its index in the job, divided by 1000, NaN in the padding, which the decode
     crops; NaN throughout for the frames of a latent whose channel 4 is NaN."""
     first, frames = int(latent[0, 0, 0, 0]), int(latent[0, 0, 0, 1])
     height, width = int(latent[0, 0, 0, 2]), int(latent[0, 0, 0, 3])
     padded = padded_size((height, width))
-    if latent[0, 0, 0, 6]:
-        padded = (-(-height // 16) * 16, -(-width // 16) * 16)
     # Every latent says so: the shot's own windows, none of another's.
     assert (latent[..., 0] == first).all() and (latent[..., 1] == frames).all()
     assert latent.shape[0] == (padded_length(frames) - 1) // 4 + 1
@@ -628,9 +619,6 @@ class Steps:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.read: dict[int, str] = {}
-        self.numz_padding: list[bool] = []  # each encode's, as run_job passed it
-        self.numz_draw: list[bool] = []  # each shot's windows', as run_job passed it
-        self.numz_tail: list[bool] = []  # each encode's, as run_job passed it
         self.stop: str | None = None
         self.poison: str | None = None
         self.damage: str | None = None
@@ -648,21 +636,15 @@ class Steps:
         target: tuple[int, int],
         seed: int,
         *,
-        numz_padding: bool = False,
-        numz_tail: bool = False,
         tiles: Tiles | None = None,
         scratch: Path | None = None,
         allowance: int | None = None,
     ) -> torch.Tensor:
         frames = read(count)
         self.read[seed - SEED] = hashlib.md5(frames.tobytes()).hexdigest()
-        self.numz_padding.append(numz_padding)
-        self.numz_tail.append(numz_tail)
         self._call(f"encode {seed - SEED}")
         latent = stand_in_encode(
             *(models, lambda n: frames[:n], count, target, seed),
-            numz_padding=numz_padding,
-            numz_tail=numz_tail,
             tiles=tiles,
             scratch=scratch,
             allowance=allowance,
@@ -678,10 +660,7 @@ class Steps:
         layout: list[tuple[int, int]],
         seed: int,
         start: int = 0,
-        *,
-        numz_draw: bool = False,
     ) -> Iterator[torch.Tensor]:
-        self.numz_draw.append(numz_draw)
         for number, sampled in enumerate(stand_in_windows(models, latent, layout, seed, start)):
             name = f"window {seed - SEED}:{start + number}"
             self._call(name)
@@ -2091,10 +2070,7 @@ def test_one_file_plans_as_a_directory(
     assert upscale(tmp_path, source_path, "other.mkv", *JOB[:4], "--plan", listed) == 0
     # --compile's setting is asked of the planner for every job (planner.plan's compile_vae),
     # which is no output's own: the three alike.
-    assert (
-        asked
-        == [{"split", "numz_padding", "recorded", "attention", "compile_vae", "dit_model"}] * 3
-    )
+    assert asked == [{"split", "recorded", "attention", "compile_vae", "dit_model"}] * 3
     # Each is planned for the attention backend its run takes (cli._attention, the stand-in's
     # here).
     assert backends == ["flash_attn_2"] * 3
@@ -2137,8 +2113,6 @@ def test_a_run_keeps_a_shot_as_its_units_copies(
         layout: list[tuple[int, int]],
         seed: int,
         start: int,
-        *,
-        numz_draw: bool = False,
     ) -> Iterator[torch.Tensor]:
         from_a_copy.append(any(latent is copy for copy in copies))
         made = stand_in_windows(models, latent, layout, seed, start)
@@ -4637,157 +4611,29 @@ def test_another_job_refused(
     assert steps.calls == ["window 4:1", "decode 4"]
 
 
-def test_numz_padding_for_tests_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize("mode", ["numz_padding", "numz_draw", "numz_tail"])
+def test_a_manifest_of_a_retired_test_mode_is_another_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    steps: Steps,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
 ) -> None:
-    # numz's padding (cli.NUMZ_PADDING), which holds the GPU tests' output to numz's: set, every
-    # encode gets it, the output is the same (the stand-in's decode crops numz's padding then),
-    # and the job's settings record it, so that a resume in the other padding is refused; unset,
-    # the settings don't name it.
+    # Until 2026-11-04 the tests could run seedvr2x in numz's padding, draw or tail, and the
+    # manifest then recorded the mode as a setting; none does now, and none is recorded. A job
+    # stopped by an older seedvr2x in a mode is refused as another job, the setting named, never
+    # a crash, as a resume in the other mode was; the settings of a job without one name none.
     source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "ours", *JOB) == 0
-    assert steps.numz_padding == [False] * 3
-    ours = json.loads((tmp_path / "ours" / "manifest.json").read_text())
-    assert "numz_padding" not in ours["settings"]
-    monkeypatch.setenv(cli.NUMZ_PADDING, "1")
-    steps.numz_padding.clear()
-    assert upscale(tmp_path, source_path, "numz", *JOB) == 0
-    assert steps.numz_padding == [True] * 3
-    assert f"{cli.NUMZ_PADDING}=1: numz's padding, for seedvr2x's tests only" in caplog.text
-    numz = json.loads((tmp_path / "numz" / "manifest.json").read_text())
-    assert numz["settings"] == {**ours["settings"], "numz_padding": True}
-    for name in ("seg_000000.mkv", "seg_000001.mkv"):
-        assert decoded(tmp_path / "numz" / name) == decoded(tmp_path / "ours" / name)
-    # Every encode of the other paths too: a .mkv path's, run in its work directory and
-    # assembled, and split, each encode copying the frames it reads (run._sample).
-    for output, options in (("numz.mkv", JOB[:4]), ("numz_split", (*JOB, *SPLIT))):
-        steps.numz_padding.clear()
-        assert upscale(tmp_path, source_path, output, *options) == 0
-        assert steps.numz_padding == [True] * 3, output
-    # A job stopped in one padding isn't resumed in the other.
     steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "numz_stopped", *JOB)
-    monkeypatch.delenv(cli.NUMZ_PADDING)
-    assert "settings.numz_padding: true -> null" in refused(
-        tmp_path, source_path, caplog, *JOB, output="numz_stopped"
+    stopped(tmp_path, source_path, "old", *JOB)
+    path = tmp_path / "old" / "manifest.json"
+    content = json.loads(path.read_text())
+    assert not {"numz_padding", "numz_draw", "numz_tail"} & set(content["settings"])
+    content["settings"][mode] = True
+    path.write_text(json.dumps(content))
+    assert f"settings.{mode}: true -> null" in refused(
+        tmp_path, source_path, caplog, *JOB, output="old"
     )
-    stopped(tmp_path, source_path, "ours_stopped", *JOB)
-    monkeypatch.setenv(cli.NUMZ_PADDING, "1")
-    assert "settings.numz_padding: null -> true" in refused(
-        tmp_path, source_path, caplog, *JOB, output="ours_stopped"
-    )
-    # Anything else than 1 is refused, set but empty too.
-    for value in ("yes", ""):
-        monkeypatch.setenv(cli.NUMZ_PADDING, value)
-        text = refused(tmp_path, source_path, caplog, *JOB, output="other")
-        assert f"{cli.NUMZ_PADDING}={value!r}: for seedvr2x's tests only, 1 or unset" in text
-
-
-def test_numz_draw_for_tests_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
-) -> None:
-    # numz's draw of the noise, on the GPU (cli.NUMZ_DRAW), which holds the GPU tests' output to
-    # numz's references: set, every shot's windows get it, and the job's settings record it, so
-    # that a resume in the other draw is refused; unset, the settings don't name it. Apart from
-    # numz's padding (cli.NUMZ_PADDING): each its own variable.
-    source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "ours", *JOB) == 0
-    assert steps.numz_draw == [False] * 3
-    ours = json.loads((tmp_path / "ours" / "manifest.json").read_text())
-    assert "numz_draw" not in ours["settings"]
-    monkeypatch.setenv(cli.NUMZ_DRAW, "1")
-    steps.numz_draw.clear()
-    assert upscale(tmp_path, source_path, "numz", *JOB) == 0
-    assert steps.numz_draw == [True] * 3 and steps.numz_padding[-3:] == [False] * 3
-    said = f"{cli.NUMZ_DRAW}=1: numz's draw of the noise, on the GPU, for seedvr2x's tests only"
-    assert said in caplog.text
-    numz = json.loads((tmp_path / "numz" / "manifest.json").read_text())
-    assert numz["settings"] == {**ours["settings"], "numz_draw": True}
-    # With numz's padding too, both recorded.
-    monkeypatch.setenv(cli.NUMZ_PADDING, "1")
-    assert upscale(tmp_path, source_path, "both", *JOB) == 0
-    both = json.loads((tmp_path / "both" / "manifest.json").read_text())
-    assert both["settings"] == {**ours["settings"], "numz_draw": True, "numz_padding": True}
-    monkeypatch.delenv(cli.NUMZ_PADDING)
-    # The other paths too: a .mkv path's, run in its work directory and assembled, and split.
-    for output, options in (("numz.mkv", JOB[:4]), ("numz_split", (*JOB, *SPLIT))):
-        steps.numz_draw.clear()
-        assert upscale(tmp_path, source_path, output, *options) == 0
-        assert steps.numz_draw == [True] * 3, output
-    # A job stopped in one draw isn't resumed in the other.
-    steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "numz_stopped", *JOB)
-    monkeypatch.delenv(cli.NUMZ_DRAW)
-    assert "settings.numz_draw: true -> null" in refused(
-        tmp_path, source_path, caplog, *JOB, output="numz_stopped"
-    )
-    stopped(tmp_path, source_path, "ours_stopped", *JOB)
-    monkeypatch.setenv(cli.NUMZ_DRAW, "1")
-    assert "settings.numz_draw: null -> true" in refused(
-        tmp_path, source_path, caplog, *JOB, output="ours_stopped"
-    )
-    # Anything else than 1 is refused, set but empty too.
-    for value in ("yes", ""):
-        monkeypatch.setenv(cli.NUMZ_DRAW, value)
-        text = refused(tmp_path, source_path, caplog, *JOB, output="other")
-        assert f"{cli.NUMZ_DRAW}={value!r}: for seedvr2x's tests only, 1 or unset" in text
-
-
-def test_numz_tail_for_tests_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, steps: Steps, caplog: pytest.LogCaptureFixture
-) -> None:
-    # numz's padding of a shot's end, mirrored (cli.NUMZ_TAIL), which holds the GPU tests' output
-    # to numz's references where a shot is not 4n + 1 frames long: set, every encode gets it, and
-    # the job's settings record it, so that a resume in the other tail is refused; unset, the
-    # settings don't name it. Apart from numz's padding and draw (cli.NUMZ_PADDING,
-    # cli.NUMZ_DRAW): each its own variable.
-    source_path = job(tmp_path, monkeypatch)
-    assert upscale(tmp_path, source_path, "ours", *JOB) == 0
-    assert steps.numz_tail == [False] * 3
-    ours = json.loads((tmp_path / "ours" / "manifest.json").read_text())
-    assert "numz_tail" not in ours["settings"]
-    monkeypatch.setenv(cli.NUMZ_TAIL, "1")
-    steps.numz_tail.clear()
-    assert upscale(tmp_path, source_path, "numz", *JOB) == 0
-    assert steps.numz_tail == [True] * 3
-    assert steps.numz_padding[-3:] == [False] * 3 and steps.numz_draw[-3:] == [False] * 3
-    said = f"{cli.NUMZ_TAIL}=1: numz's padding of a shot's end, for seedvr2x's tests only"
-    assert said in caplog.text
-    numz = json.loads((tmp_path / "numz" / "manifest.json").read_text())
-    assert numz["settings"] == {**ours["settings"], "numz_tail": True}
-    # With numz's padding and draw too, the three recorded.
-    monkeypatch.setenv(cli.NUMZ_PADDING, "1")
-    monkeypatch.setenv(cli.NUMZ_DRAW, "1")
-    assert upscale(tmp_path, source_path, "all", *JOB) == 0
-    every = json.loads((tmp_path / "all" / "manifest.json").read_text())
-    assert every["settings"] == {
-        **ours["settings"],
-        **{"numz_padding": True, "numz_draw": True, "numz_tail": True},
-    }
-    monkeypatch.delenv(cli.NUMZ_PADDING)
-    monkeypatch.delenv(cli.NUMZ_DRAW)
-    # The other paths too: a .mkv path's, run in its work directory and assembled, and split.
-    for output, options in (("numz.mkv", JOB[:4]), ("numz_split", (*JOB, *SPLIT))):
-        steps.numz_tail.clear()
-        assert upscale(tmp_path, source_path, output, *options) == 0
-        assert steps.numz_tail == [True] * 3, output
-    # A job stopped in one tail isn't resumed in the other.
-    steps.stop = "window 4:1"
-    stopped(tmp_path, source_path, "numz_stopped", *JOB)
-    monkeypatch.delenv(cli.NUMZ_TAIL)
-    assert "settings.numz_tail: true -> null" in refused(
-        tmp_path, source_path, caplog, *JOB, output="numz_stopped"
-    )
-    stopped(tmp_path, source_path, "ours_stopped", *JOB)
-    monkeypatch.setenv(cli.NUMZ_TAIL, "1")
-    assert "settings.numz_tail: null -> true" in refused(
-        tmp_path, source_path, caplog, *JOB, output="ours_stopped"
-    )
-    # Anything else than 1 is refused, set but empty too.
-    for value in ("yes", ""):
-        monkeypatch.setenv(cli.NUMZ_TAIL, value)
-        text = refused(tmp_path, source_path, caplog, *JOB, output="other")
-        assert f"{cli.NUMZ_TAIL}={value!r}: for seedvr2x's tests only, 1 or unset" in text
 
 
 # The model check, which the stand-in replaces (stand_in_model), as the module was imported.

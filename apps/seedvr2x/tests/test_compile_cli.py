@@ -369,7 +369,6 @@ def lines(plan: Plan, peaks: planner.Peaks, *, target: tuple[int, int] = HD) -> 
             target,
             shots(76),
             Pins(),
-            numz_padding=False,
         )
     )
 
@@ -463,7 +462,6 @@ def compile_line(
         target,
         shots(76),
         Pins(),
-        numz_padding=False,
         compile_cache=cache,
         recorded=recorded,
     )

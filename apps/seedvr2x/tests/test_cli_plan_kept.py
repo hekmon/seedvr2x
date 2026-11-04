@@ -38,6 +38,7 @@ import planner
 from plan import Plan
 from seedvr2x import model, peaks
 from seedvr2x.blockswap import HostMemoryError
+from seedvr2x.frames import padded_size
 from seedvr2x.passes import Tiles
 
 # What every refusal after the first pass adds, the job's directory named (cli._first_kept).
@@ -420,21 +421,17 @@ def test_scratch_file() -> None:
     # (planner.scratch_file; tiling.Scratch.where's rule).
     target = (1080, 1920)
     frames = 45
-    size = peaks.scratch(planner._padded(target, False), frames)  # pyright: ignore[reportPrivateUsage]
+    size = peaks.scratch(padded_size(target), frames)
     assert planner.scratch_file(Plan(12, scratch_allowance=0), target, frames) == 0
     tiled = Plan(12, decode_tiles=Tiles(1024), scratch_allowance=size)
     assert planner.scratch_file(tiled, target, frames) == 0
     over = Plan(12, encode_tiles=Tiles(1024), scratch_allowance=size - 1)
     assert planner.scratch_file(over, target, frames) == size
-    padded = peaks.scratch(planner._padded(target, True), frames)  # pyright: ignore[reportPrivateUsage]
     assert (
         planner.scratch_file(
-            Plan(12, decode_tiles=Tiles(1024), scratch_allowance=0),
-            target,
-            frames,
-            numz_padding=True,
+            Plan(12, decode_tiles=Tiles(1024), scratch_allowance=0), target, frames
         )
-        == padded
+        == size
     )
 
 

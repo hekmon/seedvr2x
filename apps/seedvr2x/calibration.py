@@ -102,9 +102,6 @@ def calibrate(
     split: bool = False,
     writer: Callable[[Path], Writer] | None = None,
     directory: Path | None = None,
-    numz_padding: bool = False,
-    numz_draw: bool = False,
-    numz_tail: bool = False,
 ) -> Calibrated:
     """A clock for a job whose frames are resized to target, (height, width), run by plan, whose
     longest window is `longest` latents (shot.shot_layout): the models of its three kinds of
@@ -156,8 +153,7 @@ def calibrate(
     DiT's phase or the decode's (Models.enter), a constant per phase, the median of those seen,
     three into the DiT's and two into the decode's, one made alone after the steps; the noise's
     draw (sampling.draw), a rate per token, timed alone on the longest window's latent, and taken
-    out of the windows' times. The models are left in the decode's phase. numz_padding, numz_draw
-    and numz_tail are for tests only, as run.run_job takes them."""
+    out of the windows' times. The models are left in the decode's phase."""
     started = time.monotonic()
     height, width = target if source is None else source
     if frames is None:
@@ -167,7 +163,7 @@ def calibrate(
 
         frames = blank
     read_source = frames
-    per_latent = tokens(target, 1, numz_padding=numz_padding)
+    per_latent = tokens(target, 1)
 
     def fits(count: int) -> bool:
         """Whether a tiled encode's scratch of `count` frames stays in the plan's system memory,
@@ -176,8 +172,6 @@ def calibrate(
         if plan.encode_tiles is None:
             return True
         padded = padded_size(target)
-        if numz_padding:
-            padded = (-(-target[0] // 16) * 16, -(-target[1] // 16) * 16)
         return peaks.scratch(padded, count) <= plan.scratch_allowance
 
     with tempfile.TemporaryDirectory(prefix=".seedvr2x-calibration-", dir=directory) as made:
@@ -213,8 +207,6 @@ def calibrate(
             def encoded(read: Callable[[int], npt.NDArray[np.float32]]) -> torch.Tensor:
                 return run.encode_shot(
                     *(models, read, count, target, 0),
-                    numz_padding=numz_padding,
-                    numz_tail=numz_tail,
                     tiles=plan.encode_tiles,
                     # The run's: a tiled pass's alone (run._scratch).
                     scratch=None if plan.encode_tiles is None else where,
@@ -242,7 +234,7 @@ def calibrate(
             enter("dit")
             begun = time.monotonic()
             layout = [(0, latent.shape[0])]
-            output = next(run.sample_windows(models, latent, layout, 0, numz_draw=numz_draw))
+            output = next(run.sample_windows(models, latent, layout, 0))
             finite(output, "the calibration's window")
             del output
             return time.monotonic() - begun
@@ -322,7 +314,7 @@ def calibrate(
             # draws its whole run's (shot.sample_windows), about 1 us a token on a desktop's CPU
             # (sampling.drawn's figure), which a window of the calibration pays for its own tokens.
             begun = time.monotonic()
-            draw(models, repeated[:longest].contiguous(), 0, numz_draw)
+            draw(models, repeated[:longest].contiguous(), 0)
             drawing = (time.monotonic() - begun) / (longest * per_latent)
             sizes = [short]
             timed = [window(repeated[:short].contiguous())]

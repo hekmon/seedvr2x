@@ -2,8 +2,8 @@
 least 8 rows reflected from the picture, up to a multiple of 16, then 16 black ones; at the right,
 columns alike when the width isn't a multiple of 16; all trimmed after the decode, and from
 split's reference. Held bit for bit to research/scripts/numerics_patch.py's Pad, which padded the
-variant measured (NUM_PAD=reflect>=8+black+16), and the tests' numz padding to numz's
-DivisiblePad. The GPU's side is test_regression.py's.
+variant measured (NUM_PAD=reflect>=8+black+16), and the vendored DivisiblePad to numz's. The
+GPU's side is test_regression.py's.
 
 The padding as the shot pipeline applies it (shot.py's encoder inputs, the decode's trim, the
 reference) is test_padding_cli.py's (apps/seedvr2x/tests/)."""
@@ -217,19 +217,9 @@ def numz_divisible_pad() -> Any:
     return namespace["DivisiblePad"]
 
 
-@pytest.mark.parametrize("target", [(1080, 1920), (720, 1280), (1060, 1912), (541, 961)])
-def test_numz_mode_is_divisible_pad(target: tuple[int, int]) -> None:
-    # The tests' numz padding (cli.NUMZ_PADDING) is numz's chain, its DivisiblePad: zeros up to
-    # multiples of 16 (none at 720p), bit for bit.
-    frames = torch.rand(5, 3, 540, 960, generator=torch.Generator().manual_seed(2)).bfloat16()
-    ours = model.input_transform(target, numz_padding=True)(frames)
-    assert ours.shape[-2:] == tuple(-(-side // 16) * 16 for side in target)
-    assert torch.equal(ours, chain(target, DivisiblePad((16, 16)))(frames))
-
-
 def test_vendored_divisible_pad_is_numz(numz_divisible_pad: Any) -> None:
-    # The vendored DivisiblePad, which the numz padding runs, is numz's own, bit for bit, at
-    # every size of the table.
+    # The vendored DivisiblePad, which the numz-patched references of research/ run, is numz's
+    # own, bit for bit, at every size of the table.
     ours, theirs = DivisiblePad((16, 16)), numz_divisible_pad((16, 16))
     base = torch.rand(1, 1, max(ROWS), max(COLUMNS), generator=torch.Generator().manual_seed(3))
     for dtype in (torch.float32, torch.bfloat16):

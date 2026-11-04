@@ -227,32 +227,6 @@ def _pillow_size_warning_off() -> None:
 # (0) and from a Ctrl-C (130).
 EX_TEMPFAIL = 75
 
-# numz's padding of the frames before the model, DivisiblePad((16, 16)), zeros up to multiples of
-# 16, in place of seedvr2x's (DESIGN.md, Pipeline step 0), for seedvr2x's GPU tests only, never a
-# user's: milestone 1's regression holds the output to numz's own with it. It runs the CLI in a
-# process of its own, the allocator being set before torch is imported (seedvr2x/memory.py's
-# startup, from _run), so an environment variable reaches it, and no option shows it to users.
-# Read once (_run), passed down as a parameter, and recorded in an output directory's settings,
-# so that a job is never resumed in the other padding.
-NUMZ_PADDING = "SEEDVR2X_TESTS_NUMZ_PADDING"
-# numz's draw of each shot's noise, on the GPU, whose generator follows the card (DESIGN.md,
-# Pipeline step 2), in place of seedvr2x's, on the CPU: for seedvr2x's GPU tests only, never a
-# user's, as NUMZ_PADDING, and read, passed down and recorded the same way, so that a job is
-# never resumed in the other draw. Milestone 1's regression holds the output to numz's own with
-# it, and every GPU test held to a reference numz made. PROVISIONAL (implementation,
-# 2026-10-16): the planner counts nothing of that draw, the shot's latent and noise whole on the
-# GPU before its first window, beside the DiT's phase's weights: 2,088,960 bytes a latent in
-# numz's padding at 1080p, 25,067,520 for milestone 1's 12 latents, by the tensors' sizes.
-NUMZ_DRAW = "SEEDVR2X_TESTS_NUMZ_DRAW"
-# numz's padding of a shot's end, the frames before its last one mirrored (generation_utils.py:
-# 651-656 at 4490bd1), in place of seedvr2x's, the last frame repeated as ByteDance does
-# (DESIGN.md, Pipeline step 1, decided on 2026-10-19): for seedvr2x's GPU tests only, never a
-# user's, as NUMZ_PADDING, and read, passed down and recorded the same way, so that a job is
-# never resumed in the other tail. Milestone 1's regression runs with it, so that its cases stay
-# numz's whatever length a reference is made again with: today one shot of 45 frames, 4n + 1,
-# which neither pads.
-NUMZ_TAIL = "SEEDVR2X_TESTS_NUMZ_TAIL"
-
 
 def main(argv: list[str] | None = None) -> int:
     """Run seedvr2x with argv (sys.argv[1:] when None) and return the exit status."""
@@ -920,9 +894,6 @@ def _run(args: argparse.Namespace) -> int:
             return stills.run(args, kind, _reads())
         resolution_given = args.resolution is not None
         _video_arguments(args)
-        numz_padding = _numz_padding()
-        numz_draw = _numz_draw()
-        numz_tail = _numz_tail()
         if args.window is not None and args.window < 2 * SHARED + 1:
             raise JobError(
                 f"--window {args.window}: windows share {SHARED} latents with each neighbour, so"
@@ -1006,7 +977,7 @@ def _run(args: argparse.Namespace) -> int:
                 )
             # A run stopped between its file put in place and its work directory removed: the
             # removal finished, nothing started (_assembled).
-            asked = (args, cuts, numz_padding, numz_draw, numz_tail)
+            asked = (args, cuts)
             if final is not None and _assembled(*asked, final, directory, recorded):
                 return 0
             # Anyone else's files refused as soon as the record is read, before the first pass
@@ -1030,9 +1001,7 @@ def _run(args: argparse.Namespace) -> int:
                 rehearses = final is not None and not _rehearsal_trusted(
                     recorded, ffmpeg_version, conversions
                 )
-                _early_memory(
-                    args, recorded, target, pins, numz_padding=numz_padding, rehearses=rehearses
-                )
+                _early_memory(args, recorded, target, pins, rehearses=rehearses)
         elif beside is not None and beside.is_file():
             recorded, finished_file = read(beside), True
         # The remux rehearsal of a .mkv path's job, recorded with its first pass's
@@ -1135,7 +1104,7 @@ def _run(args: argparse.Namespace) -> int:
         if recorded is not None:
             prior = _prior(
                 *(args, directory, recorded, trusted, cuts, declared, ffmpeg_version),
-                *(conversions, numz_padding, numz_draw, numz_tail, model_files),
+                *(conversions, model_files),
                 idle=idle,
                 beside=beside if finished_file else None,
             )
@@ -1157,10 +1126,7 @@ def _run(args: argparse.Namespace) -> int:
                         args.input, directory, prior.recorded, ffmpeg_version, conversions
                     )
         else:
-            identity = _identity(
-                *(args, cuts, ffmpeg_version, conversions),
-                *(numz_padding, numz_draw, numz_tail, model_files),
-            )
+            identity = _identity(args, cuts, ffmpeg_version, conversions, model_files)
         if not idle:
             # Where the driver spills, torch is held a first time here, before anything of the
             # run works on the GPU: the shot detector in the first pass, then the first
@@ -1303,9 +1269,7 @@ def _run(args: argparse.Namespace) -> int:
         reshaped: Plan | None = None
         plan_record: dict[str, Any] | None = None
         if prior is not None and not planned(prior.recorded):
-            kept_plan = _recorded_plan(
-                *(directory / NAME, prior.recorded, shots, target), numz_padding=numz_padding
-            )
+            kept_plan = _recorded_plan(directory / NAME, prior.recorded, shots, target)
             if complete(prior.recorded):
                 # A finished job makes nothing again, and its manifest isn't rewritten
                 # (DESIGN.md, Pause and resume), its plan no more than the rest: it stays as
@@ -1349,7 +1313,6 @@ def _run(args: argparse.Namespace) -> int:
                 plan, peaks = planner.plan(
                     *(free, target, shots, pins, host),
                     split=split,
-                    numz_padding=numz_padding,
                     recorded=kept_plan,
                     attention=attention,
                     compile_vae=args.compile,
@@ -1371,7 +1334,6 @@ def _run(args: argparse.Namespace) -> int:
                         recorded=kept_plan,
                         refused=error,
                         split=split,
-                        numz_padding=numz_padding,
                         attention=attention,
                         dit_model=dit_model,
                     )
@@ -1396,7 +1358,6 @@ def _run(args: argparse.Namespace) -> int:
 
             said = planner.said(
                 *(plan, peaks, card, target, shots, pins),
-                numz_padding=numz_padding,
                 quality=args.quality,
                 recorded=kept_plan is not None and reshaped is None,
                 layouts=None
@@ -1428,7 +1389,7 @@ def _run(args: argparse.Namespace) -> int:
                 # else can refuse the job.
                 recorded_as(plan_record, plan.window).write()
         if prior is None or not complete(prior.recorded):
-            _room_on_disk(args, directory, shots, target, prior, plan, numz_padding=numz_padding)
+            _room_on_disk(args, directory, shots, target, prior, plan)
     except (MediaError, Refusal) as error:
         listed = _listed_anyway(args, listing)
         logger.error("%s%s%s", error, listed, _first_kept(kept_first))
@@ -1512,9 +1473,7 @@ def _run(args: argparse.Namespace) -> int:
         from manifest import COMPILE_CACHE
         from seedvr2x.passes import Compilation
 
-        shapes = planner.compile_shapes(
-            plan, target, shots, QUALITY[args.quality], numz_padding=numz_padding
-        )
+        shapes = planner.compile_shapes(plan, target, shots, QUALITY[args.quality])
         compilation = Compilation(shapes, directory / COMPILE_CACHE)
 
     def open_scratch(path: Path) -> Writer:
@@ -1526,7 +1485,6 @@ def _run(args: argparse.Namespace) -> int:
         return open_writer(args.format, path, *size, tags)
 
     calibrating = (args, source, shots, plan, target, open_scratch, directory)
-    numz = {"numz_padding": numz_padding, "numz_draw": numz_draw, "numz_tail": numz_tail}
     if args.plan is not None:
         # No upscale: --plan prints the plan "without running the job" (DESIGN.md, Memory
         # planner). Its cut list first, which the first pass paid for; then the time estimate,
@@ -1550,14 +1508,14 @@ def _run(args: argparse.Namespace) -> int:
             return 1
         models, loading = loaded
         planned_kept = "no time estimated; the plan and its cut list are kept"
-        calibrated = _calibrated(models, *calibrating, planned_kept, **numz)
+        calibrated = _calibrated(models, *calibrating, planned_kept)
         if calibrated is None:
             return 1
-        left = job_units(units, plan, target, numz_padding, start="decode")
+        left = job_units(units, plan, target, start="decode")
         levels = None
         if planned(record.content()):
             levels = {
-                level: _level_units(shots, segments, runs, plan, target, numz_padding)
+                level: _level_units(shots, segments, runs, plan, target)
                 for level, runs in QUALITY.items()
             }
         rate = None if final is None else _disk_rate(final.parent)
@@ -1603,11 +1561,11 @@ def _run(args: argparse.Namespace) -> int:
     # last unit, at the rate its disk writes at. The calibration leaves the models in the
     # decode's phase (calibration.calibrate), where the job's units start from.
     rate = None if final is None else _disk_rate(final.parent)
-    left = job_units(units, plan, target, numz_padding, start="decode")
+    left = job_units(units, plan, target, start="decode")
     made = "nothing of the job made" + _first_kept(kept_first)
     if kept_first is None and prior is not None:
         made = _kept(record, len(segments))
-    calibrated = _calibrated(models, *calibrating, made, **numz)
+    calibrated = _calibrated(models, *calibrating, made)
     if calibrated is None:
         return 1
     clock = calibrated.clock
@@ -1697,9 +1655,6 @@ def _run(args: argparse.Namespace) -> int:
                     run_job(
                         *(models, source, shots, segments, target, args.seed, plan, units),
                         *(write, stop, args.color_correction == "split"),
-                        numz_padding=numz_padding,
-                        numz_draw=numz_draw,
-                        numz_tail=numz_tail,
                         progress=progress,
                         dump=None if args.dump_frames is None else dumped,
                     )
@@ -1795,7 +1750,7 @@ def _run(args: argparse.Namespace) -> int:
             # The segments found damaged at the assembly, recorded unfinished (_remake): their
             # units made again by this run, its models loaded (DESIGN.md, Output, Assembly,
             # decided on 2026-10-28).
-            left = job_units(units, plan, target, numz_padding, start="decode")
+            left = job_units(units, plan, target, start="decode")
             said = "the check of the segments' bytes" if asked else None
             return make(damaged, Progress(clock, left, stopping.now, extra), after=said)
 
@@ -2198,7 +2153,6 @@ def _calibrated(
     writer: "Callable[[Path], Writer]",
     directory: Path,
     kept: str,
-    **numz: bool,
 ) -> "Calibrated | None":
     """The job's time estimates calibrated (calibration.calibrate), through its own passes: the
     source's size, its colour correction, its writer (`writer`, the job's kind of output at a
@@ -2261,7 +2215,6 @@ def _calibrated(
                 split=args.color_correction == "split",
                 writer=writer,
                 directory=directory.parent,
-                **numz,
             )
     except (MediaError, NonFinite) as error:
         logger.error("%s, in the time estimates' calibration: %s", error, kept)
@@ -2278,13 +2231,12 @@ def _level_units(
     runs: int,
     plan: "Plan",
     target: tuple[int, int],
-    numz_padding: bool,
 ) -> "list[Unit]":
     """The units of a job of shots and segments with nothing made, `runs` runs a shot
     (timing.units_of): its --quality level's."""
     from timing import tokens, units_of
 
-    per_latent = tokens(target, 1, numz_padding=numz_padding)
+    per_latent = tokens(target, 1)
     return units_of(shots, segments, runs, plan.window, per_latent)
 
 
@@ -2911,9 +2863,6 @@ def _bytes_changed(path: Path, detail: str, again: str = "made again now") -> No
 def _assembled(
     args: argparse.Namespace,
     cuts: list[int],
-    numz_padding: bool,
-    numz_draw: bool,
-    numz_tail: bool,
     final: Path,
     directory: Path,
     recorded: dict[str, Any],
@@ -2974,7 +2923,7 @@ def _assembled(
         else source,
     }
     now = {
-        "settings": _settings(args, cuts, numz_padding, numz_draw, numz_tail, None),
+        "settings": _settings(args, cuts, None),
         "input": {"bytes": args.input.stat().st_size},
     }
     found = resume.differences(was, now)
@@ -3367,7 +3316,6 @@ def _early_memory(
     target: tuple[int, int],
     pins: "Pins",
     *,
-    numz_padding: bool,
     rehearses: bool,
 ) -> None:
     """Warn at once, as soon as a resume's record is read, where the memory free on the card
@@ -3398,7 +3346,7 @@ def _early_memory(
     try:
         known = Plan.recorded(recorded.get("plan"))
         shots = [Shot(int(shot["start"]), int(shot["end"])) for shot in recorded["shots"]]
-        planner.check_recorded(known, shots, target, numz_padding=numz_padding)
+        planner.check_recorded(known, shots, target)
         attention = peaks.FLASH_ATTN_2 if find_spec("flash_attn") else peaks.SDPA
         dit_model = _early_dit_model(args)
         if dit_model is None:
@@ -3415,7 +3363,6 @@ def _early_memory(
             pins,
             None,
             split=args.color_correction == "split",
-            numz_padding=numz_padding,
             recorded=known,
             attention=attention,
             dit_model=dit_model,
@@ -3636,8 +3583,6 @@ def _recorded_plan(
     recorded: dict[str, Any],
     shots: "Sequence[Shot]",
     target: tuple[int, int],
-    *,
-    numz_padding: bool,
 ) -> "Plan":
     """The plan the manifest at path records, as a resume takes it (Plan.recorded): refused
     (JobError), naming the manifest, when its record isn't a plan's, or is one the planner makes
@@ -3650,7 +3595,7 @@ def _recorded_plan(
 
     try:
         plan = Plan.recorded(recorded.get("plan"))
-        planner.check_recorded(plan, shots, target, numz_padding=numz_padding)
+        planner.check_recorded(plan, shots, target)
     except Refusal as error:
         raise JobError(f"{path}: {error}") from None
     return plan
@@ -3664,16 +3609,11 @@ HASHED = ("code", "dit_model", "vae_model", "detector_model")
 def _settings(
     args: argparse.Namespace,
     cuts: list[int],
-    numz_padding: bool,
-    numz_draw: bool,
-    numz_tail: bool,
     model_files: "ModelFiles | None",
 ) -> dict[str, object]:
-    """The settings a manifest records, those a resume must find again; numz's padding, numz's
-    draw and numz's tail each only when the tests ask for it (NUMZ_PADDING, NUMZ_DRAW, NUMZ_TAIL),
-    so that a user's manifest never names them. Without model_files, those the command line
-    alone gives, the records that take a hash left out (HASHED): what tells one job from another
-    before any file is read (_assembled)."""
+    """The settings a manifest records, those a resume must find again. Without model_files,
+    those the command line alone gives, the records that take a hash left out (HASHED): what tells
+    one job from another before any file is read (_assembled)."""
     from manifest import code_sha256
 
     detects = args.cuts is None
@@ -3730,57 +3670,7 @@ def _settings(
         # design, 2026-10-10).
         "frame_rate": None if args.frame_rate is None else str(args.frame_rate),
     }
-    if numz_padding:
-        settings["numz_padding"] = True
-    if numz_draw:
-        settings["numz_draw"] = True
-    if numz_tail:
-        settings["numz_tail"] = True
     return settings
-
-
-def _numz_padding() -> bool:
-    """Whether seedvr2x's tests ask for numz's padding (NUMZ_PADDING=1), said when they do;
-    refused (JobError) when the variable is set to anything else."""
-    from job import JobError
-
-    value = os.environ.get(NUMZ_PADDING)
-    if value is None:
-        return False
-    if value != "1":
-        raise JobError(f"{NUMZ_PADDING}={value!r}: for seedvr2x's tests only, 1 or unset")
-    logger.warning("%s=1: numz's padding, for seedvr2x's tests only", NUMZ_PADDING)
-    return True
-
-
-def _numz_draw() -> bool:
-    """Whether seedvr2x's tests ask for numz's draw of the noise, on the GPU (NUMZ_DRAW=1), said
-    when they do; refused (JobError) when the variable is set to anything else."""
-    from job import JobError
-
-    value = os.environ.get(NUMZ_DRAW)
-    if value is None:
-        return False
-    if value != "1":
-        raise JobError(f"{NUMZ_DRAW}={value!r}: for seedvr2x's tests only, 1 or unset")
-    logger.warning(
-        "%s=1: numz's draw of the noise, on the GPU, for seedvr2x's tests only", NUMZ_DRAW
-    )
-    return True
-
-
-def _numz_tail() -> bool:
-    """Whether seedvr2x's tests ask for numz's padding of a shot's end, mirrored (NUMZ_TAIL=1),
-    said when they do; refused (JobError) when the variable is set to anything else."""
-    from job import JobError
-
-    value = os.environ.get(NUMZ_TAIL)
-    if value is None:
-        return False
-    if value != "1":
-        raise JobError(f"{NUMZ_TAIL}={value!r}: for seedvr2x's tests only, 1 or unset")
-    logger.warning("%s=1: numz's padding of a shot's end, for seedvr2x's tests only", NUMZ_TAIL)
-    return True
 
 
 # The output directories this process holds locked (_lock), until main returns: their
@@ -3866,9 +3756,6 @@ def _identity(
     cuts: list[int],
     ffmpeg_version: str,
     conversions: str,
-    numz_padding: bool,
-    numz_draw: bool,
-    numz_tail: bool,
     model_files: "ModelFiles",
     made_in: dict[str, Any] | None = None,
 ) -> _Identity:
@@ -3885,7 +3772,7 @@ def _identity(
     The device is still named, and used by nothing."""
     from job import JobError
 
-    settings = _settings(args, cuts, numz_padding, numz_draw, numz_tail, model_files)
+    settings = _settings(args, cuts, model_files)
     import torch
 
     if made_in is not None:
@@ -3915,9 +3802,6 @@ def _prior(
     declared: "Declared",
     ffmpeg_version: str,
     conversions: str,
-    numz_padding: bool,
-    numz_draw: bool,
-    numz_tail: bool,
     model_files: "ModelFiles",
     idle: bool = False,
     beside: Path | None = None,
@@ -3975,10 +3859,7 @@ def _prior(
         # Not a record of this code's, without an environment: refused below, as another job.
         was: Any = recorded.get("environment")
         made_in = cast(dict[str, Any], was) if isinstance(was, dict) else {}
-    identity = _identity(
-        *(args, cuts, ffmpeg_version, conversions),
-        *(numz_padding, numz_draw, numz_tail, model_files, made_in),
-    )
+    identity = _identity(args, cuts, ffmpeg_version, conversions, model_files, made_in)
     finished = (_final(args.output) is None or beside is not None) and complete(recorded)
     was_input: Any = recorded["input"]
     asked = {
@@ -5371,8 +5252,6 @@ def _room_on_disk(
     target: tuple[int, int],
     prior: "_Prior | None",
     plan: "Plan",
-    *,
-    numz_padding: bool,
 ) -> None:
     """Refuse a job whose disk can't hold what it writes beside its manifest at a shot's peak,
     at every level (DESIGN.md, Several runs of a shot: "a job whose disk can't hold it is
@@ -5410,7 +5289,7 @@ def _room_on_disk(
         """What shot keeps of its frames, and its scratch's file, in bytes."""
         return (
             kept_bytes(shot, runs, size),
-            scratch_file(plan, target, shot.frames, numz_padding=numz_padding),
+            scratch_file(plan, target, shot.frames),
         )
 
     if not left or max(sum(parts(shot)) for shot in left) == 0:

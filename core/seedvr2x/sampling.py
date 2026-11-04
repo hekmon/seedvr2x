@@ -40,17 +40,15 @@ def moved(tensor: Tensor, device: torch.device, what: str) -> Tensor:
     return copy
 
 
-def draw(models: Models, latent: Tensor, seed: int, numz_draw: bool = False) -> Tensor:
+def draw(models: Models, latent: Tensor, seed: int) -> Tensor:
     """The noise of a shot's latent as shot.py's sample_windows draws it (drawn), on
     its own: for the time estimates' calibration (calibration.py), which times it apart
     from the window."""
-    return drawn(models, latent, seed, numz_draw)[0]
+    return drawn(models, latent, seed)[0]
 
 
 @torch.no_grad()
-def drawn(
-    models: Models, latent: Tensor, seed: int, numz_draw: bool = False
-) -> tuple[Tensor, Tensor]:
+def drawn(models: Models, latent: Tensor, seed: int) -> tuple[Tensor, Tensor]:
     """A shot's noise, drawn from seed for its whole latent, and that latent: both on the CPU,
     (T', h, w, 16) in the latent's memory layout (moved), the noise in COMPUTE_DTYPE; the
     latent itself when it is given there.
@@ -74,29 +72,14 @@ def drawn(
     to 1104x1920; 12.2 to 12.6 s and 1.415 GiB for 361 at 4K, padded to 2192x3840; the process's
     peak growing by the noise's bytes alone.
 
-    numz_draw is for tests only (main.NUMZ_DRAW): the draw as numz makes it, torch.randn_like of
-    the latent on the device, the latent sent there for it, strides kept (moved), both copies
-    there given up when this returns. Milestone 1's regression holds the output to numz's with
-    it, as does every GPU test held to a reference numz made.
-
     With -v, the draw is logged: where, for how many latents, its time and the noise's size."""
     started = time.monotonic()
-    if numz_draw:
-        there = moved(latent, models.device, "the shot's latent")
-        model.set_seed(seed)
-        drawn = torch.randn_like(there, dtype=COMPUTE_DTYPE)
-        noise, latent = (
-            moved(drawn, CPU, "the shot's noise"),
-            moved(latent, CPU, "the shot's latent"),
-        )
-    else:
-        latent = moved(latent, CPU, "the shot's latent")
-        model.set_seed(seed)
-        generator = torch.Generator(device=CPU).manual_seed(seed)
-        noise = torch.randn_like(latent, dtype=COMPUTE_DTYPE, generator=generator)
+    latent = moved(latent, CPU, "the shot's latent")
+    model.set_seed(seed)
+    generator = torch.Generator(device=CPU).manual_seed(seed)
+    noise = torch.randn_like(latent, dtype=COMPUTE_DTYPE, generator=generator)
     logger.debug(
-        "noise drawn %s for the shot's %d latents in %.2f s: %.3f GiB",
-        "on the device (numz's draw)" if numz_draw else "on the CPU",
+        "noise drawn on the CPU for the shot's %d latents in %.2f s: %.3f GiB",
         latent.shape[0],
         time.monotonic() - started,
         noise.numel() * noise.element_size() / GIB,

@@ -87,9 +87,6 @@ def run_job(
     stop: Stop | None = None,
     split: bool = False,
     *,
-    numz_padding: bool = False,
-    numz_draw: bool = False,
-    numz_tail: bool = False,
     progress: Progress | None = None,
     dump: Callable[[int, npt.NDArray[np.float32]], None] | None = None,
 ) -> None:
@@ -130,11 +127,6 @@ def run_job(
     latent and windows kept; one its decode can't read whole and intact (CopyError) is removed,
     its checksums with it, and the run stops there, for the next run to make it again.
 
-    numz_padding is for tests only (main.NUMZ_PADDING): each encode's frames padded as numz pads
-    them (shot.encode_shot). So is numz_draw (main.NUMZ_DRAW): each shot's noise drawn on the
-    device, as numz draws it (shot.sample_windows). So is numz_tail (main.NUMZ_TAIL): each shot's
-    end padded as numz pads it, mirrored, not repeated (shot.pad_4n1).
-
     progress holds the job's units left and the clock that says what they take (timing.py):
     each unit's estimate is held against --until's time before it begins (_begin; DESIGN.md,
     Pause and resume, Stopping), each part's time given to the clock once made, and each unit's
@@ -142,7 +134,7 @@ def run_job(
     calibrated and which takes its first units' times (DESIGN.md, Memory planner, Time
     estimates), over the units job_units lists."""
     if progress is None:
-        progress = Progress(Clock(), job_units(units, plan, target, numz_padding), stopping.now)
+        progress = Progress(Clock(), job_units(units, plan, target), stopping.now)
     stream = source.stream
     copies = Copies(stream.width, stream.height, source.frame_rate) if split else None
     groups = [
@@ -159,7 +151,7 @@ def run_job(
             sample = (models, inputs, shots, target, seed, plan, units, stop, copies)
             for index in group:
                 for run in units.manifest.shot_runs(index):
-                    _sample(run, *sample, numz_padding, numz_draw, numz_tail, progress)
+                    _sample(run, *sample, progress)
             key = ("decode", segment)
             unit = f"segment {segment + 1}/{len(segments)}'s decode and write"
             _begin(stop, unit, progress.cost(key))
@@ -180,18 +172,16 @@ def job_units(
     units: Units,
     plan: Plan,
     target: tuple[int, int],
-    numz_padding: bool = False,
     *,
     start: Phase | None = None,
 ) -> list["timing.Unit"]:
     """The units the job recorded by units.manifest has left, in the order run_job makes them
     (timing.units_of), its windows capped as plan says, for frames resized to target, the
-    models in phase `start` before the first (None: unknown). numz_padding as run_job takes it:
-    numz's padded size, its windows' tokens."""
+    models in phase `start` before the first (None: unknown)."""
     manifest = units.manifest
     return units_of(
         *(manifest.shots, manifest.segments, manifest.runs_per_shot, plan.window),
-        tokens(target, 1, numz_padding=numz_padding),
+        tokens(target, 1),
         encoded=manifest.encoded,
         windows_done=manifest.windows_done,
         finished=manifest.finished,
@@ -291,9 +281,6 @@ def _sample(
     units: Units,
     stop: Stop | None,
     copies: Copies | None,
-    numz_padding: bool,
-    numz_draw: bool,
-    numz_tail: bool,
     progress: Progress | None = None,
 ) -> None:
     """Run `index`'s encode and windows (units.manifest.runs), those not kept yet; with copies, the
@@ -301,8 +288,8 @@ def _sample(
     latent is recorded, so recorded with it, and the copy of a shot whose first run is encoded
     already made again if it or its checksums are missing. A later run makes no copy: its
     correction reads its shot's from its own first frame (shot.Correction's first).
-    numz_padding, numz_draw, numz_tail and progress as run_job takes them; without progress, a
-    clock of its own, which times nothing ahead.
+    progress as run_job takes it; without progress, a clock of its own, which times nothing
+    ahead.
 
     The process's first encode whose reader seeks to its first frame through the frame index, a
     resumed run's, isn't given to the clock (DESIGN.md, Memory planner, Time estimates: "a
@@ -351,8 +338,6 @@ def _sample(
             if copying is None:
                 latent = encode_shot(
                     *(models, read, shot.frames, target, run.seed(seed)),
-                    numz_padding=numz_padding,
-                    numz_tail=numz_tail,
                     tiles=tiles,
                     scratch=scratch,
                     allowance=plan.scratch_allowance,
@@ -361,8 +346,6 @@ def _sample(
                 with _copying(units, index, copying) as copy:
                     latent = encode_shot(
                         *(models, _copied(read, copy), shot.frames, target, run.seed(seed)),
-                        numz_padding=numz_padding,
-                        numz_tail=numz_tail,
                         tiles=tiles,
                         scratch=scratch,
                         allowance=plan.scratch_allowance,
@@ -387,8 +370,8 @@ def _sample(
         )
     # The latent is in system memory, the one the units keep or read back, where the noise is
     # drawn from it, with the first window made here (shot.sample_windows).
-    sampled = sample_windows(models, latent, layout, run.seed(seed), done, numz_draw=numz_draw)
-    per_latent = tokens(target, 1, numz_padding=numz_padding)
+    sampled = sample_windows(models, latent, layout, run.seed(seed), done)
+    per_latent = tokens(target, 1)
     for number in range(done, len(layout)):
         key = ("window", index, number)
         unit = f"{name}'s window {number + 1}/{len(layout)}"

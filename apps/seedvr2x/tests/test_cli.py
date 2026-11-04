@@ -101,16 +101,6 @@ def test_every_logger_is_named_for_its_layer() -> None:
     assert all(name.startswith("seedvr2x.") for name in named.values() if "cli" not in name)
 
 
-def test_numz_padding_not_an_option(capsys: pytest.CaptureFixture[str]) -> None:
-    # numz's padding, and the tail of its padding of a shot's end, are for seedvr2x's tests only
-    # (cli.NUMZ_PADDING, cli.NUMZ_TAIL): never in the help.
-    with pytest.raises(SystemExit):
-        cli.main(["--help"])
-    shown = capsys.readouterr().out
-    assert cli.NUMZ_PADDING not in shown and "padding" not in shown.lower()
-    assert cli.NUMZ_TAIL not in shown and "mirror" not in shown.lower()
-
-
 def test_cuts_help_says_how_its_frames_are_counted(capsys: pytest.CaptureFixture[str]) -> None:
     # A cut list's frame numbers are places (media/grid.py): said where --cuts is read about, a
     # list numbered by a tool that counts decoded frames being off by the holes before each cut.
@@ -599,9 +589,7 @@ args = argparse.Namespace(
     model_dir=Path(sys.argv[2]),
     dit_model=sys.argv[3],
 )
-cli._early_memory(
-    args, recorded, (1080, 1920), planner.Pins(), numz_padding=False, rehearses=False
-)
+cli._early_memory(args, recorded, (1080, 1920), planner.Pins(), rehearses=False)
 print(*sorted(name for name in ("torch", "torchvision") if name in sys.modules))
 """
 

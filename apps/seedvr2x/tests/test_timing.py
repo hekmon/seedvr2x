@@ -222,16 +222,12 @@ def test_record() -> None:
 
 
 def test_tokens() -> None:
-    # 1080x1920 is padded to 1104x1920 (frames.padded_size): 69 x 120 tokens a latent; numz pads it
-    # to 1088 rows, 68 x 120, the 48,960 tokens of planner-limits.md's 6 latents.
+    # 1080x1920 is padded to 1104x1920 (frames.padded_size): 69 x 120 tokens a latent.
     assert tokens((1080, 1920), 1) == 69 * 120
-    assert tokens((1080, 1920), 6, numz_padding=True) == 6 * 68 * 120 == 48_960
     assert tokens((1080, 1920), 6) == 6 * 69 * 120
     assert tokens((540, 960), 2) == 2 * 36 * 60
-    # Columns padded too when the width isn't a multiple of 16: 1060x1912 to 1088x1936; numz
-    # pads it to 1072x1912's multiples, 1072x1920.
+    # Columns padded too when the width isn't a multiple of 16: 1060x1912 to 1088x1936.
     assert tokens((1060, 1912), 3) == 3 * 68 * 121
-    assert tokens((1060, 1912), 3, numz_padding=True) == 3 * 67 * 120
 
 
 # Shots of 3, 1 and 21 frames in two segments, as test_cli_run's JOB makes them; windows capped
@@ -757,8 +753,8 @@ class Steady:
             self.changes[phase] += 1
         self.phase = phase
 
-    def draw(self, models: Any, latent: torch.Tensor, seed: int, numz_draw: bool = False) -> Any:
-        assert models is self.models and not numz_draw
+    def draw(self, models: Any, latent: torch.Tensor, seed: int) -> Any:
+        assert models is self.models
         self.called.append(("draw", latent.shape[0]))
         self.at += DRAWING * latent.shape[0] * PER_LATENT
         return latent
@@ -842,7 +838,7 @@ class Quick(Steady):
 
 
 def untiled(**more: Any) -> dict[str, Any]:
-    return {"numz_padding": False, "numz_tail": False, "tiles": None, "scratch": None, **more}
+    return {"tiles": None, "scratch": None, **more}
 
 
 def test_the_calibrations_decodes_take_the_latent_in_the_dits_layout(
@@ -1172,11 +1168,6 @@ def test_calibration_passes_a_tiled_plans_scratch(
     calibrate(steady.models, TARGET, both, 9)
     decodes = [call[3] for call in steady.called if call[0] == "decode"]
     assert all(o["tiles"] == Tiles(256) and isinstance(o["scratch"], Path) for o in decodes)
-    # The tests' options are the run's.
-    steady.called.clear()
-    calibrate(steady.models, TARGET, Plan(9), 9, numz_padding=True, numz_tail=True)
-    option = next(call[4] for call in steady.called if call[0] == "encode")
-    assert option["numz_padding"] is True and option["numz_tail"] is True
 
 
 class FakeCopy:

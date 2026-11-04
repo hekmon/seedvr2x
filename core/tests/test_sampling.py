@@ -66,14 +66,12 @@ def test_the_draw_is_held_to_its_digest(cpu_models: model.Models) -> None:  # no
     assert digest(again) == DRAW_DIGEST
 
 
-def test_nothing_of_the_draw_goes_to_a_gpu_but_numz_s(
+def test_nothing_of_the_draw_goes_to_a_gpu(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # On a GPU the noise is drawn in system memory, nothing of the shot sent there for it, and
-    # its values are those the CPU draws; numz's draw, for the tests (cli.NUMZ_DRAW), sends the
-    # latent to the GPU and draws there, as numz does (generation_phases.py:663-680), said in
-    # the -v line. No GPU here: a device by its name alone, the copies to it and back recorded
-    # and left out.
+    # its values are those the CPU draws, said in the -v line. No GPU here: a device by its name
+    # alone, the copies to it and back recorded and left out.
     gpu = cast(model.Models, SimpleNamespace(device=torch.device("cuda")))
     sent: list[str] = []
 
@@ -91,19 +89,6 @@ def test_nothing_of_the_draw_goes_to_a_gpu_but_numz_s(
     assert sent == ["the shot's latent to cpu"]
     assert re.fullmatch(
         r"noise drawn on the CPU for the shot's 9 latents in \d+\.\d\d s: 0\.000 GiB",
-        caplog.messages[-1],
-    )
-    sent.clear()
-    noise, kept = sampling.drawn(gpu, latent, 1234, numz_draw=True)
-    assert torch.equal(noise, expected) and kept is latent
-    assert sent == [
-        "the shot's latent to cuda",
-        "the shot's noise to cpu",
-        "the shot's latent to cpu",
-    ]
-    assert re.fullmatch(
-        r"noise drawn on the device \(numz's draw\) for the shot's 9 latents in \d+\.\d\d s:"
-        r" 0\.000 GiB",
         caplog.messages[-1],
     )
 

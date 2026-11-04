@@ -141,11 +141,9 @@ def test_one_latent_sampled_from_the_seeds_of_a_shots_first_frame(
         seeded.append(seed)
         set_seed(seed)
 
-    def spy_drawn(
-        models: model.Models, latent: Tensor, seed: int, numz_draw: bool = False
-    ) -> tuple[Tensor, Tensor]:
+    def spy_drawn(models: model.Models, latent: Tensor, seed: int) -> tuple[Tensor, Tensor]:
         drawn.append((seed, tuple(latent.shape)))
-        return draw(models, latent, seed, numz_draw)
+        return draw(models, latent, seed)
 
     monkeypatch.setattr(model, "set_seed", spy_seed)
     monkeypatch.setattr(sampling, "drawn", spy_drawn)

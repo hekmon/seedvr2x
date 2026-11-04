@@ -585,7 +585,7 @@ def test_own_cap_lays_the_shots_out_alike() -> None:
     trimmed = 0
     for lengths in films:
         film = shots(*lengths)
-        counted = job(GIB, HD, film, False, False)
+        counted = job(GIB, HD, film, False)
         for cap in range(counted.smallest, max(lengths) + 3):
             own = own_cap(counted, cap)
             run = longest(counted.lengths, cap)
@@ -597,7 +597,7 @@ def test_own_cap_lays_the_shots_out_alike() -> None:
             trimmed += own < cap
     assert trimmed > 1000
     # Shots of 6 latents on a card that holds 5: two windows of 4 each, under a cap of 5.
-    counted = job(GIB, HD, shots(6, 6, 6), False, False)
+    counted = job(GIB, HD, shots(6, 6, 6), False)
     assert (longest(counted.lengths, 5), own_cap(counted, 5)) == (4, 5)
     assert shot_layout(21, 5) == [(0, 4), (2, 6)]
     with pytest.raises(ValueError, match="windows of 4 latents leave none of their own"):
@@ -894,6 +894,9 @@ def test_recipes(
     free, shot = numz_free(card), [Shot(0, frames)]
     latents = (frames - 1) // 4 + 1
     padded = (-(-target[0] // 16) * 16, target[1])
+    # numz's padding, zeros up to multiples of 16, which these recipes were measured in: the
+    # planner's own padding (frames.padded_size) put back for this test.
+    monkeypatch.setattr(planner, "padded_size", lambda size: (-(-size[0] // 16) * 16, size[1]))
     encode, decode = (None if size is None else Tiles(size) for size in tiles)
     recipe = Plan(latents, encode, decode, swapped, 0, 0)
     # The DiT's peak: the fit's, within 0.01 GiB of the measured one with no block swapped.
@@ -921,14 +924,14 @@ def test_recipes(
     # It fits by the model, but for the 4K one on 32 GB: its 7 latents with every block swapped
     # take 30.09 GiB with the model's two slots, 0.14 over the budget, where numz measured
     # 29.65; it fits with the VAE's weights away, as the planner has them there.
-    said = fits(recipe, free, target, shot, None, numz_padding=True)
+    said = fits(recipe, free, target, shot, None)
     if (target, card) == (UHD, 32):
         assert said == (
             "the DiT's phase, a window of 7 latents with 36 blocks swapped, takes 30.70 GiB of"
             " free VRAM and the driver reports 30.56 GiB free, 0.14 GiB short"
         )
         recipe = replace(recipe, vae_in_dit=False)
-        said = fits(recipe, free, target, shot, None, numz_padding=True)
+        said = fits(recipe, free, target, shot, None)
     assert said is None
     # The planner's own plan for that shot on that card is at least as good: the window whole,
     # no more blocks swapped, no smaller tiles, each VAE pass with its room (planner.VAE_ROOM),
@@ -936,7 +939,7 @@ def test_recipes(
     # of 1856 px with 1.5 GiB of room, the untiled one lacking that room), and on 32 GB untiled
     # with 19 of the DiT's blocks (18); at 4K on 48 GB its tiles stop at 2048 px
     # (peaks.TILE_MAX).
-    made, predicted = planner.plan(free, target, shot, Pins(), None, numz_padding=True)
+    made, predicted = planner.plan(free, target, shot, Pins(), None)
     assert (made.window, predicted.window) == (latents, latents)
     assert made.swapped <= swapped
     for ours, theirs in ((made.encode_tiles, encode), (made.decode_tiles, decode)):
@@ -1165,14 +1168,13 @@ def fits(
     host_available: int | None,
     *,
     split: bool = False,
-    numz_padding: bool = False,
     attention: str = peaks.FLASH_ATTN_2,
 ) -> str | None:
     """Why a plan given, the planner's own or one made here by hand, doesn't fit a job's memory:
     the sentence the planner says of every plan it makes, by the two functions planner.plan
     judges with (planner._job, planner._unfit); None when it fits. The tests' own: no run
     judges a plan handed to it, and the planner keeps no public function for it."""
-    job = planner._job(free, target, film, split, numz_padding, attention)  # pyright: ignore[reportPrivateUsage]
+    job = planner._job(free, target, film, split, attention)  # pyright: ignore[reportPrivateUsage]
     return planner._unfit(job, plan, host_available)  # pyright: ignore[reportPrivateUsage]
 
 
@@ -1353,10 +1355,10 @@ def test_tile_pin_that_covers_the_frame_refused() -> None:
         with pytest.raises(PlanError) as error:
             planner.check_recorded(recorded, shots(40), HD)
         assert str(error.value) == whole
-    # In numz's padding, the tests' own, 1080p is 1088 rows, and 4K 2160x3840: the same tiles.
-    planner.check_recorded(Plan(5, Tiles(3776), Tiles(1024)), shots(40), UHD, numz_padding=True)
-    with pytest.raises(PlanError, match="with frames padded to 3840x2160"):
-        planner.check_recorded(Plan(5, Tiles(3840)), shots(40), UHD, numz_padding=True)
+    # 4K is padded to 2192x3840: tiles of 3776 px leave it a grid, tiles of 3840 cover it.
+    planner.check_recorded(Plan(5, Tiles(3776), Tiles(1024)), shots(40), UHD)
+    with pytest.raises(PlanError, match="with frames padded to 3840x2192"):
+        planner.check_recorded(Plan(5, Tiles(3840)), shots(40), UHD)
     # Nor has such a plan peaks, or a sentence of fits: no pass is run in such tiles.
     with pytest.raises(ValueError, match="tiles of 1920 px over frames padded to 1920x1104"):
         fits(Plan(12, Tiles(1920)), free, HD, shots(12), None)
@@ -1548,22 +1550,24 @@ def test_floor() -> None:
     assert (predicted.encode, predicted.bound) == (encode, "encode")
 
 
-def test_least_pass_is_the_least() -> None:
+def test_least_pass_is_the_least(monkeypatch: pytest.MonkeyPatch) -> None:
     # The pass a size's floor counts for its encode and for its decode (planner._least_pass) is
     # the least of every pass the planner may make, untiled or in tiles from 512 px to the
     # largest under the frame's longer side, whatever the shot's length and with split or
-    # without: over frames from 48 px a side to 4K, in numz's padding, the target's own size.
+    # without: over frames from 48 px a side to 4K, the target's own size (the padding replaced by
+    # none, every side being a multiple of 16).
     least_pass = planner._least_pass  # pyright: ignore[reportPrivateUsage]
     vae_need = planner._vae_need  # pyright: ignore[reportPrivateUsage]
     tile_sizes = planner._tile_sizes  # pyright: ignore[reportPrivateUsage]
     job = planner._job  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(planner, "padded_size", lambda size: size)
     heights = (48, 64, 80, 128, 144, 160, 496, 512, 528, 544, 576, 1024, 1104, 2192)
     widths = (48, 512, 528, 544, 576, 1040, 1104, 1920, 3840)
     found: dict[tuple[str, int | None], set[tuple[int, int]]] = {}
     for padded in ((height, width) for height in heights for width in widths):
         for latents in (1, 40, 1000):
             for split in (False, True):
-                counted = job(GIB, padded, shots(latents), split, True)
+                counted = job(GIB, padded, shots(latents), split)
                 assert counted.padded == padded
                 passes = (None, *(Tiles(size) for size in tile_sizes(padded)))
                 for phase in ("encode", "decode"):
@@ -2268,7 +2272,7 @@ def test_the_tiles_shrunk_for_the_host_are_the_largest_that_fit_it() -> None:
                     if peaks.shrunk is None:
                         continue
                     shrunk += 1
-                    job = planner._job(free, target, film, False, False)  # pyright: ignore[reportPrivateUsage]
+                    job = planner._job(free, target, film, False)  # pyright: ignore[reportPrivateUsage]
                     assert peaks.host <= host and fits(made, free, target, film, host) is None
                     alone = replace(
                         made,
@@ -2982,7 +2986,7 @@ def test_an_int8_dit_plans_by_its_own_figures() -> None:
             assert planner.recorded_dit_model(record) == predicted.dit_model
         assert int8_peaks.window >= fp16_peaks.window and int8.swapped <= fp16.swapped, card
         assert int8_peaks.dit == peaks.dit_peak(
-            planner._padded(HD, False),  # pyright: ignore[reportPrivateUsage]
+            OURS_1080,
             int8_peaks.window,
             int8.swapped,
             int8.vae_in_dit,
@@ -3762,7 +3766,7 @@ def test_a_held_run_s_choices_for_the_host_take_no_margin_either() -> None:
 
 
 def test_the_unpinned_case_skips_a_small_card_alone() -> None:
-    # tests/test_regression.py's unpinned case, on a card whose plan can't make numz's untiled
+    # tests/test_regression.py's unpinned case, on a card whose plan can't make the untiled
     # master (test_regression.unpinned): skipped where the driver reports under 40 GiB free,
     # failed where it reports 40 or more, a plan that tiles or is refused there being wrong;
     # and failed where the log doesn't say, a refusal for the system memory alone. By the
@@ -3775,20 +3779,20 @@ def test_the_unpinned_case_skips_a_small_card_alone() -> None:
         return [line for line in lines if line.startswith(("plan: encode: ", "plan: decode: "))]
 
     job = (HD, shots(12), Pins())
-    made, peaks = planner.plan(our_free(24), *job, None, split=True, numz_padding=True)
-    lines = planner.said(made, peaks, "a card", *job, numz_padding=True)
+    made, peaks = planner.plan(our_free(24), *job, None, split=True)
+    lines = planner.said(made, peaks, "a card", *job)
     tiled = [line for line in passes(lines) if "tiles of" in line]
-    assert len(tiled) == 1 and test_regression.reported(logged(lines)) == 22.57
+    assert tiled and test_regression.reported(logged(lines)) == 22.57
     with pytest.raises(pytest.skip.Exception) as skipped:
         test_regression.unpinned(logged(lines), f"the plan tiles a pass: {tiled[0]}")
     assert str(skipped.value).startswith(
-        "the driver reports 22.57 GiB free, under the 40 a card makes numz's untiled master"
-        " from: the plan tiles a pass: plan: decode: tiles of "
+        "the driver reports 22.57 GiB free, under the 40 a card makes the untiled master"
+        " from: the plan tiles a pass: plan: encode: tiles of "
     )
     # 48 GB: 46.57 GiB reported, and both passes untiled, as numz ran them: no verdict to give.
-    made, peaks = planner.plan(our_free(48), *job, None, split=True, numz_padding=True)
+    made, peaks = planner.plan(our_free(48), *job, None, split=True)
     assert (made.encode_tiles, made.decode_tiles) == (None, None)
-    lines = planner.said(made, peaks, "a card", *job, numz_padding=True)
+    lines = planner.said(made, peaks, "a card", *job)
     assert test_regression.reported(logged(lines)) == 46.57
     assert [line.split(",")[0] for line in passes(lines)] == [
         "plan: encode: untiled",

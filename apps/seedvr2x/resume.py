@@ -93,7 +93,7 @@ CUT_SETTINGS = frozenset({"cuts", "cut_threshold", "detector_model"})
 # (manifest.planned), is planned again from its record, with no decode (main._prior,
 # main._replan): the cuts, the quality level, the pins, the resolution, the models, the colour
 # correction, the output's format, the segments' command and their least length, the input's
-# matrix and sample aspect, the seed, and the tests' numz modes.
+# matrix and sample aspect, and the seed.
 FIRST_PASS_SETTINGS = frozenset({"seedvr2x", "code", "frame_rate"})
 
 

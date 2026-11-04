@@ -282,8 +282,6 @@ def compile_shapes(
     target: tuple[int, int],
     shots: Sequence[Shot],
     runs: int,
-    *,
-    numz_padding: bool = False,
 ) -> Shapes:
     """The shapes the plan's VAE passes meet, for the compiled VAE to be warmed with before the
     DiT loads (seedvr2x/compiling.py): one per distinct tile of each pass (tile_shapes), the whole
@@ -302,7 +300,7 @@ def compile_shapes(
     lengths 1 to 64 to the run's own slicing). The decoder's latent is warmed in one memory
     layout, the DiT's, at all these lengths: the calibration's decodes take it in that layout
     too (calibration.calibrate; design's ruling of 2026-10-30)."""
-    padded = _padded(target, numz_padding)
+    padded = padded_size(target)
 
     def cut(tiles: Tiles | None) -> tuple[tuple[int, int], ...]:
         return (padded,) if tiles is None else peaks.tile_shapes(padded, tiles)
@@ -320,9 +318,7 @@ def compile_shapes(
     return Shapes(padded, cut(plan.encode_tiles), cut(plan.decode_tiles), tuple(latents))
 
 
-def scratch_file(
-    plan: Plan, target: tuple[int, int], frames: int, *, numz_padding: bool = False
-) -> int:
+def scratch_file(plan: Plan, target: tuple[int, int], frames: int) -> int:
     """What the scratch of a shot of `frames` frames takes on disk under plan, in bytes: its
     memory-mapped file in the shot's unit directory (scratch.Scratch) where the plan tiles a pass
     and the scratch is over the plan's allowance, as scratch.Scratch.where decides; 0 where no pass
@@ -330,7 +326,7 @@ def scratch_file(
     store, one at a time (scratch); a shot's first run is its longest (job.shot_runs)."""
     if plan.encode_tiles is None and plan.decode_tiles is None:
         return 0
-    size = peaks.scratch(_padded(target, numz_padding), frames)
+    size = peaks.scratch(padded_size(target), frames)
     return size if size > plan.scratch_allowance else 0
 
 
@@ -481,7 +477,6 @@ class _Job:
     lengths: tuple[int, ...]  # its shots' lengths in latents, each once, ascending
     frames: int  # its longest shot's frames
     split: bool
-    numz_padding: bool
     reading: Reading  # how `free` was read, for the plan's words and its record
     attention: str  # DIT_ATTENTION's
     compile_vae: bool = False  # the VAE compiled (--compile): its passes at COMPILE_PEAK
@@ -503,7 +498,7 @@ class _Job:
 
     @property
     def padded(self) -> tuple[int, int]:
-        return _padded(self.target, self.numz_padding)
+        return padded_size(self.target)
 
     @property
     def output(self) -> tuple[int, int]:
@@ -525,7 +520,6 @@ def plan(
     host_available: int | None,
     *,
     split: bool = False,
-    numz_padding: bool = False,
     recorded: Plan | None = None,
     attention: str = peaks.FLASH_ATTN_2,
     compile_vae: bool = False,
@@ -536,7 +530,7 @@ def plan(
     count on, less its margin, and what it is predicted to take; refused (PlanError) when a pin
     can't be taken exactly, when no plan fits that memory, or when the plan takes more system
     memory than host_available, in bytes (None: not checked). split: whether the decode corrects
-    colours; numz_padding is for tests only (main.NUMZ_PADDING). An output directory and a .mkv
+    colours. An output directory and a .mkv
     path plan alike: both jobs keep their units in a directory (units.py).
 
     `free` is that memory: a number of bytes, what a driver that refuses reports free; or the
@@ -639,7 +633,6 @@ def plan(
                 pins,
                 host_available,
                 split=split,
-                numz_padding=numz_padding,
                 recorded=None,
                 attention=attention,
                 compile_vae=True,
@@ -650,11 +643,9 @@ def plan(
             raise _compile_refusal(
                 refused,
                 (free, target, shots, pins, host_available),
-                dict(
-                    split=split, numz_padding=numz_padding, attention=attention, dit_model=dit_model
-                ),
+                dict(split=split, attention=attention, dit_model=dit_model),
             ) from None
-    job = _job(free, target, shots, split, numz_padding, attention, compile_vae, dit_model)
+    job = _job(free, target, shots, split, attention, compile_vae, dit_model)
     if pins.swap_blocks is not None and pins.swap_blocks > peaks.BLOCKS:
         raise PlanError(
             f"--swap-blocks {pins.swap_blocks}: the DiT has {peaks.BLOCKS} blocks, so from 0 to"
@@ -749,7 +740,6 @@ def plan_again(
     recorded: Plan,
     refused: PlanError,
     split: bool = False,
-    numz_padding: bool = False,
     attention: str = peaks.FLASH_ATTN_2,
     dit_model: Architecture = peaks.FP16,
 ) -> tuple[Plan, Peaks]:
@@ -797,7 +787,6 @@ def plan_again(
                 held,
                 host_available,
                 split=split,
-                numz_padding=numz_padding,
                 attention=attention,
                 compile_vae=recorded.compile_vae,
                 compile_fixed=True,
@@ -823,8 +812,7 @@ def _compile_refusal(
     (DESIGN.md, Memory planner, "torch.compile: the VAE, opt-in", decided on 2026-10-29): the same
     command without --compile and, for a tile pinned, the pin within the shapes that the planner
     takes (the untiled pass if it is within them, else the largest tile that fits). `job` is plan's
-    free, target, shots, pins and host_available, `options` its split, numz_padding, attention and
-    dit_model.
+    free, target, shots, pins and host_available, `options` its split, attention and dit_model.
     A job no plain plan fits is refused as it was, whatever --compile asked: the plain plan's
     refusal.
 
@@ -1082,12 +1070,9 @@ def check_recorded(
     recorded: Plan,
     shots: Sequence[Shot],
     target: tuple[int, int],
-    *,
-    numz_padding: bool = False,
 ) -> None:
     """Refuse (PlanError) a recorded plan that the planner makes for no job of `shots` resized to
-    target (frames.target_size; numz_padding as plan takes it), which Plan.recorded, with neither,
-    can't tell from one it does:
+    target (frames.target_size), which Plan.recorded, with neither, can't tell from one it does:
     - a cap no layout exists for (job.window_layout): one under 2 * SHARED + 1 latents that a
       shot is longer than. The planner makes a cap that short only for a job whose longest shot
       is as short, each shot then one window (_Job.smallest), so that record was edited;
@@ -1101,7 +1086,7 @@ def check_recorded(
             f" {_count(longest, 'latent')}: a cap that a shot is longer than is"
             f" {2 * SHARED + 1} latents at least"
         )
-    _check_tiles(_padded(target, numz_padding), recorded)
+    _check_tiles(padded_size(target), recorded)
 
 
 def _check_tiles(padded: tuple[int, int], recorded: Plan) -> None:
@@ -1290,7 +1275,6 @@ def said(
     shots: Sequence[Shot],
     pins: Pins,
     *,
-    numz_padding: bool = False,
     quality: str = "standard",
     recorded: bool = False,
     layouts: Sequence[Sequence[tuple[int, int]]] | None = None,
@@ -1341,7 +1325,7 @@ def said(
     from shot import shot_layout
 
     job = _job(
-        *(predicted.reading, target, shots, False, numz_padding, predicted.attention),
+        *(predicted.reading, target, shots, False, predicted.attention),
         plan.compile_vae,
         predicted.dit_model,
     )
@@ -1435,7 +1419,7 @@ def said(
         f" {_gib(predicted.budget - predicted.need(predicted.bound))} GiB under the budget"
     )
     if plan.compile_vae:
-        shapes = compile_shapes(plan, target, shots, QUALITY[quality], numz_padding=numz_padding)
+        shapes = compile_shapes(plan, target, shots, QUALITY[quality])
         compiling = _compile_time_said(
             compile_cache, recorded, len(shapes.encode) + len(shapes.decode)
         )
@@ -1621,7 +1605,6 @@ def _job(
     target: tuple[int, int],
     shots: Sequence[Shot],
     split: bool,
-    numz_padding: bool,
     attention: str = peaks.FLASH_ATTN_2,
     compile_vae: bool = False,
     dit_model: Architecture = peaks.FP16,
@@ -1639,19 +1622,11 @@ def _job(
     lengths = sorted({_latents(shot.frames) for shot in shots})
     frames = max(shot.frames for shot in shots)
     return _Job(
-        *(reading.counted, target, tuple(lengths), frames, split, numz_padding, reading),
+        *(reading.counted, target, tuple(lengths), frames, split, reading),
         attention,
         compile_vae,
         dit_model,
     )
-
-
-def _padded(target: tuple[int, int], numz_padding: bool) -> tuple[int, int]:
-    """The frame the model takes: the target in seedvr2x's padding (frames.padded_size), or in
-    numz's, zeros up to multiples of 16, for the tests (model.input_transform)."""
-    if numz_padding:
-        return -(-target[0] // 16) * 16, -(-target[1] // 16) * 16
-    return padded_size(target)
 
 
 def _latents(frames: int) -> int:

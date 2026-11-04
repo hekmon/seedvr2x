@@ -1,16 +1,31 @@
-"""Milestone 1 as a regression test: seedvr2x's output stays bit-identical to numz's, in numz's
-padding; and in seedvr2x's own (DESIGN.md, Pipeline step 0), to numz's with that padding patched
-in. And the VAE tiling (DESIGN.md, Pipeline step 3): seedvr2x tiled, to numz tiled. Every case
-runs in numz's draw of the noise (cli.NUMZ_DRAW, for the tests only): numz drew each reference's
-noise on the GPU, whose generator follows the card, where seedvr2x draws it on the CPU (DESIGN.md,
-Pipeline step 2), so that the references hold on the card that made them. And in numz's tail
-(cli.NUMZ_TAIL): numz mirrors a shot's end, seedvr2x repeats its last frame by default (DESIGN.md,
-Pipeline step 1, decided on 2026-10-19). The input's 45 frames are one shot of 4n + 1 frames, which
-neither pads: the mode changes no bit of these cases, and keeps them numz's whatever input a
-reference is remade with.
+"""Milestone 1 as a regression test: seedvr2x's output stays bit-identical to its own references,
+masters and float32 frames, by core/tools/compare.py, in seedvr2x's defaults (its own padding,
+DESIGN.md, Pipeline step 0; its tail repeating a shot's last frame, Pipeline step 1; its noise
+drawn on the CPU, Pipeline step 2). And the VAE tiling (DESIGN.md, Pipeline step 3): seedvr2x
+tiled, to its own tiled references.
 
-Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR) and milestone 1's reference, in
-the m1/ directory of SEEDVR2X_REFERENCE_DIR:
+The references were made on 2026-11-04 on the RTX 5090 by main 9a18423, in one GPU session: first
+this test as it stood there, its 12 cases held to numz's references bit for bit (on that card,
+seedvr2x's frames in numz's modes, which numz 4490bd1, run there on milestone 1's case, had
+matched on 2026-10-22), the last comparison with numz (DESIGN.md, Vendored model code, "seedvr2x's
+own model since 2026-11-04"); then each case's command (command()) in seedvr2x's defaults, its
+master and frames kept as the case's reference.
+The references hold seedvr2x's output from then on: a change that moves its bits is allowed with
+a measured reason, and makes them again, said in its commit.
+
+Until 2026-11-04 the references were numz's, and seedvr2x ran in three modes for the tests only to
+reproduce them: numz's padding, numz's mirrored tail and numz's draw of the noise on the GPU.
+Those modes are gone, and so is numz's own output as a reference; the cases' input and their
+names are the same.
+
+Needs a GPU (pytest -m gpu), the weights (SEEDVR2X_MODEL_DIR) and the references, in
+SEEDVR2X_REFERENCE_DIR: the inputs in m1/, and seedvr2x's references in seedvr2x/<card>/, <card>
+being the name torch gives the card (torch.cuda.get_device_name) with each run of characters
+other than letters and digits a hyphen (seedvr2x/NVIDIA-GeForce-RTX-5090/). Each card holds to
+references of its own (decided on 2026-10-21): the noise is the same on every card (Pipeline
+step 2), but the kernels the GPU picks are not, so that another card's frames differ from a
+card's in the last bits. A card with no directory there has every case skipped, naming the card.
+A card with one runs every case, and a reference missing fails it. Inputs, in m1/:
 - input_rgb.mkv: 45 frames of 8-bit RGB FFV1 at 960x540, read alike by numz (OpenCV) and by
   seedvr2x: frames 48-92 of SEGMENT, a 1920x1080 yuv420p FFV1 segment of an animated episode
   (limited range, chroma left, no colour tags, 23.976 fps, 377 frames; its first 26 black, then a
@@ -25,146 +40,97 @@ the m1/ directory of SEEDVR2X_REFERENCE_DIR:
 
   Remade so on 2026-10-09: the same frames and packets, the two files differing only in the
   Matroska muxer's random UIDs.
-- numz.mkv and numz_frames/: numz 4490bd1's output for input_rgb.mkv, captured by
-  research/scripts/ffv1_out.py, from numz's checkout:
-
-    FFV1_OUT_PATH=numz.mkv FFV1_OUT_KEEP=0 FFV1_OUT_DUMP=numz_frames \
-    FFV1_OUT_DUMP_FRAMES=$(seq -s, 0 44) python ffv1_out.py inference_cli.py input_rgb.mkv \
-      --output out --output_format png --model_dir MODELS \
-      --dit_model seedvr2_ema_7b_fp16.safetensors --resolution 1080 --batch_size 45 \
-      --seed 42 --attention_mode flash_attn_2 --color_correction none
-
-- numz_sharp.mkv and numz_sharp_frames/: the same with the sharp 7B (made on 2026-10-08), the
-  same command with FFV1_OUT_PATH=numz_sharp.mkv, FFV1_OUT_DUMP=numz_sharp_frames and
-  --dit_model seedvr2_ema_7b_sharp_fp16.safetensors.
-
-Each case is a run of its own, both model files named, in numz's padding (cli.NUMZ_PADDING, for
-the tests only) and numz's draw:
-- numz-7b: numz's seedvr2_ema_7b_fp16.safetensors and ema_vae_fp16.safetensors, against numz.mkv;
-- ours-7b: seedvr2x's seedvr2x_ema_7b_fp16.safetensors and seedvr2x_ema_vae_fp16.safetensors,
-  the same values as numz's files (DESIGN.md, Weights), so against the same reference, bit for
-  bit;
-- ours-sharp: seedvr2x_ema_7b_sharp_fp16.safetensors and seedvr2x_ema_vae_fp16.safetensors, against
-  numz_sharp.mkv, skipped when that reference is absent.
-Every run detects its shots, as a user's does without --cuts (DESIGN.md, Shot detection): the
-shot detector runs on the GPU in the first pass, before the models load, so that its settings,
-scoped to its own forwards, and the memory it gives back are held to the bits too. At
---cut-threshold 0.5, where its cuts are none, so that the job is one shot, as numz's one batch,
-which the log must say. At the default, 0.3, it isn't: input_rgb.mkv ends on two short shots,
-which numz's batch ran through, TransNetV2 peaking at 0.3242 on frame 41 and 0.3880 on frame 43,
-and at 0.1171 on frame 0, on the CPU and on the GPU alike (1.19e-07 apart; the same on its
-956x530 crop): cut at 42 and 44, 3 shots, none of the run's 45 frames was numz's, where at 0.5,
-1 shot and 2 possible cuts, all 45 are (the GPU box, 2026-10-10). A case whose model file, or the
-shot detector's (transnetv2.safetensors), isn't in SEEDVR2X_MODEL_DIR is skipped, naming the file.
-One more,
-test_milestone1_from_the_cache, runs ours-sharp with the default models taken from Hugging Face's
-cache (seedvr2x/pull.py): no --model-dir, no --dit-model or --vae-model, and HF_HUB_OFFLINE=1 in
-its environment, so that only the cache can serve them; it needs no SEEDVR2X_MODEL_DIR, and is
-skipped, saying how to fill the cache (hf download, the three files, 17 GB), unless the
-run would find them there: at the pinned revision, or downloaded at another (seedvr2x/pull.py).
-
-Every case pins the passes its reference was made with, untiled or in its tiles, but one,
-test_milestone1_unpinned: numz-7b with no tile pinned, so that a bit comparison goes through the
-planner's own choice of passes (DESIGN.md, Memory planner, Choices, 3). The plan is made first,
-by the same command with --plan, which runs the first pass and plans, loading no model today
-(DESIGN.md has --plan load them for the time estimates' calibration, which isn't built): its
-lines of the passes, "plan: encode: untiled, ..." and "plan: decode: untiled, ...", must say both
-untiled, as numz ran them; the run then makes a plan of its own (each
-call's held to the planner's for the free memory that call read, not to the other's: the desktop
-moves it), and the master and frames are numz's bit for bit. A card that can't run untiled
-can't make numz's untiled
-master (the untiled decode of these frames, padded to 1920x1088, takes 37.09 GiB of free VRAM by
-the planner, the DiT off the GPU, its room and the margin counted): where the driver reports
-under 40 GiB free (UNTILED_FREE), a plan that tiles a pass, or is refused, skips the case before
-any run, saying that line or the refusal. With 40 GiB or more reported, such a plan fails it: the
-plan is wrong there, or what the log says of the free memory no longer reads (reported).
-
-seedvr2x's own padding, the default (at least 8 rows reflected from the picture, up to a multiple
-of 16, then 16 black rows; columns alike when the width isn't a multiple of 16), is held to numz
-patched by research/scripts/numerics_patch.py with NUM_PAD=reflect>=8+black+16, which pads the
-same way, numz's 7B fp16 and VAE on both sides. Each reference was made on 2026-10-09, from numz's
-checkout, with numerics_patch.py running ffv1_out.py running numz's CLI:
-- pad1080: input_rgb.mkv at --resolution 1080, 1920x1080 padded to 1920x1104 (8 rows reflected,
-  no column), against numz_pad1080.mkv and numz_pad1080_frames/:
-
-    NUM_PAD='reflect>=8+black+16' FFV1_OUT_PATH=numz_pad1080.mkv FFV1_OUT_KEEP=0 \
-    FFV1_OUT_DUMP=numz_pad1080_frames FFV1_OUT_DUMP_FRAMES=$(seq -s, 0 44) \
-    python numerics_patch.py ffv1_out.py inference_cli.py input_rgb.mkv \
-      --output out --output_format png --model_dir MODELS \
-      --dit_model seedvr2_ema_7b_fp16.safetensors --resolution 1080 --batch_size 45 \
-      --seed 42 --attention_mode flash_attn_2 --color_correction none
-
-- pad720: input_rgb.mkv at --resolution 720, 1280x720 padded to 1280x752 (16 rows reflected),
-  against numz_pad720.mkv and numz_pad720_frames/: the same command with
-  FFV1_OUT_PATH=numz_pad720.mkv, FFV1_OUT_DUMP=numz_pad720_frames and --resolution 720;
-- padcols: input_rgb_956x530.mkv, input_rgb.mkv's top left 956x530, cropped losslessly,
+- input_rgb_956x530.mkv, input_rgb.mkv's top left 956x530, cropped losslessly:
 
     ffmpeg -i input_rgb.mkv -vf crop=956:530:0:0 -c:v ffv1 -pix_fmt bgr0 input_rgb_956x530.mkv
 
-  at --resolution 1060, 1912x1060 padded to 1936x1088 (12 rows and 8 columns reflected), against
-  numz_padcols.mkv and numz_padcols_frames/: the same command with input_rgb_956x530.mkv,
-  FFV1_OUT_PATH=numz_padcols.mkv, FFV1_OUT_DUMP=numz_padcols_frames and --resolution 1060.
-numz logs each size (src/core/generation_utils.py:274-279):
-"Padded: 1920x1104px → Output: 1920x1080px", "Padded: 1280x752px → Output: 1280x720px",
-"Padded: 1936x1088px → Output: 1912x1060px"; seedvr2x's --resolution gives the same
-(tests/test_padding.py). A case whose input or reference is absent is skipped, naming the file.
+numz's own references (numz.mkv, numz_sharp.mkv, numz_pad*.mkv, numz_padcols.mkv and the tiled
+ones, made on numz 4490bd1 through ffv1_out.py, in m1/, m3/ and cards/) stay on disk, unused.
 
-The VAE tiling (seedvr2x/tiling.py) is held to numz's own, on milestone 1's input in numz's padding,
-numz's 7B fp16 and VAE on both sides: seedvr2x with its tiles pinned, the whole shot under each
-tile, against numz 4490bd1's CLI tiling its one batch of 45 frames, bit for bit. The references are
-in the m3/ directory of SEEDVR2X_REFERENCE_DIR, each made on 2026-10-10 by numz.mkv's command
-above with numz's tiling options added, its overlap the 64 px seedvr2x fixes, and
---tensor_offload_device left at its default, cpu: numz then weights each tile on the GPU, sums
-them on the CPU and divides the sums on the GPU, as seedvr2x/tiling.py does:
-- d1024: --decode-tile 1024, against numz_d1024.mkv and numz_d1024_frames/ (FFV1_OUT_PATH and
-  FFV1_OUT_DUMP so named, as for each case), made with
-  --vae_decode_tiled --vae_decode_tile_size 1024 --vae_decode_tile_overlap 64: on the frames
-  padded to 1920x1088, 4 tiles, 2 rows of 2 (rows 0-1024 and 960-1088, columns 0-1024 and
-  960-1920);
-- e1344-d1024: --encode-tile 1344 --decode-tile 1024, against numz_e1344-d1024.mkv and
-  numz_e1344-d1024_frames/, made with d1024's three options and
-  --vae_encode_tiled --vae_encode_tile_size 1344 --vae_encode_tile_overlap 64: the encode in 2
-  tiles, one row (columns 0-1344 and 1280-1920);
-- e512-d512: --encode-tile 512 --decode-tile 512, against numz_e512-d512.mkv and
-  numz_e512-d512_frames/, made with the six options at 512 and 64: 15 tiles each way, 3 rows of 5.
-Each run's log must say those grids. A case whose reference is absent is skipped, naming the file.
+Each reference is <name>.mkv, the master (FFV1, gbrp16le: --format gbrp16le), and <name>_frames/,
+the float32 frames (--dump-frames), as core/tools/compare.py reads them. Each case is a run of its
+own, both model files named, in seedvr2x's defaults, with --color-correction none, --seed 42 and
+the tiles pinned (untiled unless the case pins them):
+- 7b: seedvr2x_ema_7b_fp16.safetensors and seedvr2x_ema_vae_fp16.safetensors, the same values as
+  numz's seedvr2_ema_7b_fp16.safetensors and ema_vae_fp16.safetensors (DESIGN.md, Weights), so
+  that numz-7b and ours-7b, the two cases, are held to the one reference, bit for bit;
+- sharp: seedvr2x_ema_7b_sharp_fp16.safetensors and seedvr2x_ema_vae_fp16.safetensors (the cases
+  ours-sharp and test_milestone1_from_the_cache).
+Every run detects its shots, as a user's does without --cuts (DESIGN.md, Shot detection): the
+shot detector runs on the GPU in the first pass, before the models load, so that its settings,
+scoped to its own forwards, and the memory it gives back are held to the bits too. At
+--cut-threshold 0.5, where its cuts are none, so that the job is one shot, which the log must
+say. At the default, 0.3, it isn't: input_rgb.mkv ends on two short shots, TransNetV2 peaking at
+0.3242 on frame 41 and 0.3880 on frame 43, and at 0.1171 on frame 0, on the CPU and on the GPU
+alike (1.19e-07 apart; the same on its 956x530 crop): cut at 42 and 44, 3 shots, where at 0.5 it
+is 1 shot and 2 possible cuts (the GPU box, 2026-10-10). A case whose model file, or the shot
+detector's (transnetv2.safetensors), isn't in SEEDVR2X_MODEL_DIR is skipped, naming the file.
+One more, test_milestone1_from_the_cache, runs sharp's case with the default models taken from
+Hugging Face's cache (seedvr2x/pull.py): no --model-dir, no --dit-model or --vae-model, and
+HF_HUB_OFFLINE=1 in its environment, so that only the cache can serve them; it needs no
+SEEDVR2X_MODEL_DIR, and is skipped, saying how to fill the cache (hf download, the three files,
+17 GB), unless the run would find them there: at the pinned revision, or downloaded at another
+(seedvr2x/pull.py).
 
-Each card holds to references of its own (decided on 2026-10-21): numz drew each reference's noise
-on the card that made it, and another card's frames differ from them (3 cases ran on an RTX 5090
-and none of their 45 frames was the 96 GB card's). Another card's references are seedvr2x's own
-frames on it, made by the code the 96 GB card gated that day, whose frames there are numz's bit
-for bit (main 35435f2, its seedvr2x subset 13979c69, that of 490baf1), by the commands command()
-gives, in these cases and modes; numz itself is run there once as a cross-check (DESIGN.md,
-Validation milestones 3). A test takes its card's, by name as torch gives it (card();
-torch.cuda.get_device_name). The 96 GB card's are those above, in m1/ and m3/ (ROOT_CARD).
-Another card's are in cards/<its name>/m1/ and m3/, its name's runs of characters other than
-letters and digits each a hyphen (cards/NVIDIA-GeForce-RTX-5090/), the inputs staying m1/'s,
-with cards/<its name>/cases.json saying what each case takes there (case): "milestone1":
-{"resolution": R, "references": {"numz": NAME, "numz_sharp": NAME}} for the milestone 1 cases,
-the unpinned one and the one from the cache, which run untiled at the largest size the card's
-untiled passes fit; "padding", by each case's id, its "source", "resolution" and "reference";
-"tiled", by each case's id, its "reference", at 1080 as above or at its own "resolution", with
-what its debug log says of each tiled pass there, the start of each grid's line ("grids") and the
-end every one shares ("over"); and "made", the commit and subset that made them. A gate's case
-keeps 2 GiB of the card's budget (DESIGN.md, Validation, decided on 2026-10-21): on the RTX 5090
-(2026-10-22, a desktop holding 5.5 GB of the card, 20.41 GiB the plan counts on), each case at a
-size whose plan beside a second program holding 2 GiB of the card is neither refused nor made
-with the reserve of 2.5 GiB, its window and tiles the same: milestone 1 at 720 (1280x720; 756
-takes 2.5 there, 792 too, with nothing beside it); the padding cases pad1080 at 648 (1152x648
-padded to 1152x672, 8 rows reflected and no column, as pad1080 at 1080), pad720 at 576
-(1024x576 padded to 1024x608, its height already a multiple of 16, as pad720 at 720), padcols
-at 530 (956x530 padded to 992x560, rows and columns reflected); the tiled cases d1024 and
-e1344-d1024 at 864 (1536x864, a decode in 2 tiles of 1024 px, 2 across and 1 down; an encode in
-2 tiles of 1344 px likewise), e512-d512 at 1080. The references made again at a size kept
-(padcols, e512-d512) are those of 2026-10-21 frame for frame. Its numz cross-check, numz 4490bd1
-through ffv1_out.py with its block swap (--blocks_to_swap 36 --dit_offload_device cpu
---vae_offload_device cpu): in each case but d1024 at 2026-10-21's sizes, and on milestone 1's
-case at 720, the same frames, 45 of 45 in each. A case a card has no reference for is skipped,
-naming the card and the reference missing, or, where the card can't run it, with its refusal's
-figures (no_reference); a case refused there at its run is skipped the same way, and a case
-planned there with the reserve of 2.5 GiB fails (upscaled), the card no longer leaving it the
-room its reference was made in. On the 96 GB card nothing of this changes, and nothing skips:
-a refusal there fails the case.
+Every case pins the passes its reference was made with, untiled or in its tiles, but one,
+test_milestone1_unpinned: the 7b case with no tile pinned, so that a bit comparison goes through
+the planner's own choice of passes (DESIGN.md, Memory planner, Choices, 3). The plan is made
+first, by the same command with --plan, which runs the first pass and plans, loading no model
+today (DESIGN.md has --plan load them for the time estimates' calibration, which isn't built): its
+lines of the passes, "plan: encode: untiled, ..." and "plan: decode: untiled, ...", must say both
+untiled, as the reference ran them; the run then makes a plan of its own (each call's held to the
+planner's for the free memory that call read, not to the other's: the desktop moves it), and the
+master and frames are the reference's bit for bit. A card that can't run untiled can't make the
+untiled master (the untiled decode of these frames, padded to 1920x1104, takes 37.31 GiB of free
+VRAM by the planner, the DiT off the GPU, its room and the margin counted; asked of the planner
+with --decode-tile 0 on 2026-11-04): where the driver reports under 40 GiB free (UNTILED_FREE), a
+plan that tiles a pass, or is refused, skips the case before any run, saying that line or the
+refusal. With 40 GiB or more reported, such a plan fails it: the plan is wrong there, or what the
+log says of the free memory no longer reads (reported).
+
+seedvr2x's own padding (at least 8 rows reflected from the picture, up to a multiple of 16, then
+16 black rows; columns alike when the width isn't a multiple of 16) has its three cases on the
+7b files, each with the sizes numz logs (src/core/generation_utils.py:274-279) and seedvr2x's
+--resolution gives (tests/test_padding.py):
+- pad1080: input_rgb.mkv at --resolution 1080, 1920x1080 padded to 1920x1104 (8 rows reflected,
+  no column);
+- pad720: input_rgb.mkv at --resolution 720, 1280x720 padded to 1280x752 (16 rows reflected);
+- padcols: input_rgb_956x530.mkv at --resolution 1060, 1912x1060 padded to 1936x1088 (12 rows and
+  8 columns reflected).
+The milestone 1 cases themselves run at 1080 in the same padding, and a card's cases.json may
+name another size for them.
+
+The VAE tiling (seedvr2x/tiling.py) is held on milestone 1's input in the 7b files: seedvr2x with
+its tiles pinned, the whole shot under each tile, with the 64 px overlap seedvr2x fixes, which
+was numz's tiling bit for bit when the references were numz's (DESIGN.md, Pipeline step 3):
+- d1024: --decode-tile 1024: on the frames padded to 1920x1104, 4 tiles, 2 rows of 2;
+- e1344-d1024: --encode-tile 1344 --decode-tile 1024: the encode in 2 tiles, one row;
+- e512-d512: --encode-tile 512 --decode-tile 512: 15 tiles each way, 3 rows of 5.
+Each run's log must say those grids (the debug line of seedvr2x/tiling.py, with -v).
+
+A card's directory holds cases.json, which says what each case takes on that card:
+{"card": NAME, "made": {...}, "milestone1": {"resolution": R}, "padding": {"pad1080":
+{"resolution": R}, ...}, "tiled": {"d1024": {"resolution": R, "grids": [...], "over": "..."},
+...}}. "made" is free-form: the commit and code subset that made the references, the date, and what
+checked them. "milestone1" gives the resolution for all its cases, the unpinned one and the one
+from the cache included, which run untiled at the largest size the card's untiled passes fit;
+"padding" and "tiled" give each case's by its reference name; a tiled case at another size than
+1080 says what its debug log says of each tiled pass there: the start of each grid's line
+("grids") and the end every one shares ("over"). A key absent is the test's own (1080 and the
+grids above, over 45 frames padded to 1920x1104).
+
+To make a card's references again, or for a new card: run each case's command (command() gives it:
+the options above, in seedvr2x's defaults, with --dump-frames and the master's output) at the
+card's sizes, on a commit whose regression passed on a card that has references, and move each
+run's ours.mkv and frames/ to <name>.mkv and <name>_frames/ in the card's directory; write
+cases.json. A gate's case keeps 2 GiB of the card's budget (DESIGN.md, Validation, decided on
+2026-10-21): each case at a size whose plan beside a second program holding 2 GiB of the card is
+neither refused nor planned with the reserve of 2.5 GiB, its window and tiles the same. A change
+that moves the output's bits is allowed with a measured reason, which remakes the references, said
+in its commit (DESIGN.md). A case refused at its run for the memory it takes is skipped, with the
+refusal's figures (upscaled), and one without its reference where the card can't run it likewise
+(no_reference); a case planned with the reserve of 2.5 GiB fails (upscaled), the card no longer
+leaving it the room its reference was made in.
 
 The run goes through the CLI in a process of its own, as a user's would: the allocator is set
 before torch is imported, which a test process importing torch first wouldn't do. And this
@@ -190,7 +156,6 @@ import pytest
 import disk
 import planner
 from job import Shot
-from main import NUMZ_DRAW, NUMZ_PADDING, NUMZ_TAIL
 from manifest import NAME
 from seedvr2x import memory, peaks, pull
 from seedvr2x.frames import target_size
@@ -208,7 +173,8 @@ pytestmark = [
     pytest.mark.skipif(not REFERENCE, reason="needs SEEDVR2X_REFERENCE_DIR"),
 ]
 
-# numz's model files, which the references were made with.
+# numz's model files: the same values as seedvr2x's own (DESIGN.md, Weights), so that the 7B
+# fp16 and the VAE of either give the references' bits.
 NUMZ_DIT, NUMZ_VAE = "seedvr2_ema_7b_fp16.safetensors", "ema_vae_fp16.safetensors"
 # The command line's defaults, the sharp 7B and the VAE (main.py).
 DEFAULT_DIT, DEFAULT_VAE = (
@@ -227,11 +193,9 @@ def models_present(*names: str) -> None:
             pytest.skip(f"{name}: not in SEEDVR2X_MODEL_DIR")
 
 
-# The card whose references are m1/ and m3/ of SEEDVR2X_REFERENCE_DIR, numz having made them on it
-# (the module's docstring), as torch names it (torch.cuda.get_device_name). Another card's are in
-# cards/<its name>/ beside them (card_directory), with what each case of it takes (CASES).
-ROOT_CARD = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
-CARDS = "cards"
+# The directory of SEEDVR2X_REFERENCE_DIR that holds seedvr2x's own references, one directory a
+# card (card_directory), and the file in it that says what each case takes on that card.
+OWN = "seedvr2x"
 CASES = "cases.json"
 
 
@@ -250,21 +214,19 @@ def card() -> str:
 
 
 def card_directory(name: str) -> Path:
-    """Where the references of the card `name` are: SEEDVR2X_REFERENCE_DIR itself for ROOT_CARD;
-    for another, cards/<name>/ in it, its name's runs of other characters than letters and digits
-    each a hyphen ("NVIDIA GeForce RTX 5090": cards/NVIDIA-GeForce-RTX-5090/)."""
+    """Where the references of the card `name` are: OWN/<name>/ in SEEDVR2X_REFERENCE_DIR, its
+    name's runs of other characters than letters and digits each a hyphen ("NVIDIA GeForce RTX
+    5090": seedvr2x/NVIDIA-GeForce-RTX-5090/)."""
     assert REFERENCE is not None
-    if name == ROOT_CARD:
-        return Path(REFERENCE)
-    return Path(REFERENCE) / CARDS / re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")
+    return Path(REFERENCE) / OWN / re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-")
 
 
 @dataclass(frozen=True)
 class Case:
     """A case as this card runs it: its input, the resolution it is upscaled to, and its reference,
-    <reference>.mkv and <reference>_frames/; for a tiled case at another size than 1080 on a card
-    other than ROOT_CARD, what its debug log says of each tiled pass there, the start of each
-    grid's line and the end every one shares (grids, over), else None: the test's own, at 1080."""
+    <reference>.mkv and <reference>_frames/ in the card's directory; for a tiled case, what its
+    debug log says of each tiled pass at the card's size where that isn't the test's own, the start
+    of each grid's line and the end every one shares (grids, over), else None."""
 
     source: Path
     resolution: int
@@ -273,32 +235,29 @@ class Case:
     over: str | None = None
 
 
-def case(kind: str, name: str, source: str, resolution: int, reference: str, where: str) -> Case:
-    """The case `name` of `kind` (milestone1, padding or tiled) on this card (card()). On
-    ROOT_CARD, as the test's parameters give it: its input in m1/, its reference in `where` (m1
-    or m3) of SEEDVR2X_REFERENCE_DIR. On another, as its directory's CASES has it (the module's
-    docstring): milestone1's resolution for all its cases; each padding case's source, resolution
-    and reference by its id; each tiled case's reference by its id, at 1080 as on ROOT_CARD or at
-    its own "resolution", with its tiled passes' "grids" and what they are "over" there; the
-    parameters for what the entry doesn't say, its reference in `where` of the card's directory.
-    The inputs are the same on every card: m1/ of SEEDVR2X_REFERENCE_DIR."""
+def case(kind: str, source: str, resolution: int, reference: str) -> Case:
+    """The case of `kind` (milestone1, padding or tiled) on this card (card()), skipped where the
+    card has no directory of references (card_directory), naming the card. The card's CASES says
+    what the case takes there (the module's docstring): milestone1's resolution, for all its
+    cases; each padding case's resolution, and each tiled case's, with its tiled passes' "grids"
+    and what they are "over", by the case's reference name; the parameters for what it doesn't
+    say. The inputs are the same on every card: m1/ of SEEDVR2X_REFERENCE_DIR."""
     assert REFERENCE is not None
-    inputs = Path(REFERENCE) / "m1"
     directory = card_directory(card())
-    if card() == ROOT_CARD:
-        return Case(inputs / source, resolution, directory / where / reference)
+    if not directory.is_dir():
+        pytest.skip(
+            f"{card()}: no references of seedvr2x's own for this card ({OWN}/{directory.name}/);"
+            " this module's docstring says how to make them"
+        )
     said: Any = {}
     if (directory / CASES).is_file():
         said = json.loads((directory / CASES).read_text()).get(kind, {})
-    if kind == "milestone1":
-        entry: Any = {**said, "reference": said.get("references", {}).get(name, reference)}
-    else:
-        entry = said.get(name, {})
+    entry: Any = said if kind == "milestone1" else said.get(reference, {})
     grids = entry.get("grids")
     return Case(
-        inputs / entry.get("source", source),
+        Path(REFERENCE) / "m1" / source,
         int(entry.get("resolution", resolution)),
-        directory / where / entry.get("reference", reference),
+        directory / reference,
         None if grids is None else tuple(str(grid) for grid in grids),
         entry.get("over"),
     )
@@ -318,18 +277,12 @@ def refusal(log: str) -> str | None:
     return None
 
 
-def no_reference(
-    tmp_path: Path, job: Case, models: tuple[str, str], *more: str, numz_padding: bool
-) -> NoReturn:
-    """Skip a case this card has no reference for: with the refusal's figures where the card
-    can't run it, its --plan refused (the planner's own words), else naming the card and the
-    reference missing. On ROOT_CARD a reference absent is skipped as before, naming it."""
+def no_reference(tmp_path: Path, job: Case, models: tuple[str, str], *more: str) -> NoReturn:
+    """A case this card has no reference for, on a card that has references: skipped with the
+    refusal's figures where the card can't run it, its --plan refused (the planner's own words),
+    else failed, naming the reference missing."""
     missing = f"{job.reference}.mkv"
-    if card() == ROOT_CARD:
-        pytest.skip(f"{missing}: absent; this module's docstring says how to make it")
-    arguments, environment = command(
-        *(tmp_path, job.source, job.resolution, models, *more), numz_padding=numz_padding
-    )
+    arguments, environment = command(*(tmp_path, job.source, job.resolution, models, *more))
     plan = subprocess.run(
         [*arguments, "--plan", str(tmp_path / "cuts.txt")],
         capture_output=True,
@@ -340,23 +293,13 @@ def no_reference(
     refused = refusal(plan.stderr)
     if plan.returncode == 1 and refused is not None:
         pytest.skip(f"{card()}: the case can't run there: {refused}")
-    pytest.skip(f"{card()}: no reference for it, {missing}; this module's docstring says how")
+    pytest.fail(f"{card()}: no reference for it, {missing}; this module's docstring says how")
 
 
-def referenced(
-    tmp_path: Path,
-    job: Case,
-    models: tuple[str, str],
-    *more: str,
-    numz_padding: bool,
-    required: bool = False,
-) -> None:
-    """Go on with a case only where its input and reference are there (no_reference). On
-    ROOT_CARD, a case `required` goes on whatever is there, as it always did, its comparison
-    failing where its reference is missing: milestone 1's own references, numz.mkv's, are the
-    module's; the others were skipped when absent and still are."""
-    if card() == ROOT_CARD and required:
-        return
+def referenced(tmp_path: Path, job: Case, models: tuple[str, str], *more: str) -> None:
+    """Go on with a case only where its input is there (skipped, naming it) and its reference
+    (no_reference): a card that has references and lacks one fails the case, but where it can't
+    run it."""
     if not job.source.exists():
         pytest.skip(f"{job.source}: absent; this module's docstring says how to make it")
     for path in (
@@ -364,7 +307,7 @@ def referenced(
         job.reference.parent / f"{job.reference.name}_frames",
     ):
         if not path.exists():
-            no_reference(tmp_path, job, models, *more, numz_padding=numz_padding)
+            no_reference(tmp_path, job, models, *more)
 
 
 # The tile pins of a run (main.py): one not given is pinned untiled (upscaled), but where a case
@@ -378,23 +321,15 @@ def command(
     resolution: int,
     models: tuple[str, str] | None,
     *more: str,
-    numz_padding: bool,
     pin_untiled: bool = True,
 ) -> tuple[list[str], dict[str, str]]:
     """seedvr2x's command line on source at resolution with the DiT and VAE files of models in
     SEEDVR2X_MODEL_DIR, or with None, its default models from Hugging Face's cache, offline
-    (HF_HUB_OFFLINE=1), in numz's padding or in its own, with the options of `more` besides, to
-    tmp_path's ours.mkv and frames/ (same_bits); and the environment to run it in, numz's draw
-    of the noise in it whatever the padding (NUMZ_DRAW: the module's docstring), and numz's tail
-    (NUMZ_TAIL: the same). A pass that `more` doesn't pin is pinned untiled, unless pin_untiled is
-    False, which leaves it to the planner."""
+    (HF_HUB_OFFLINE=1), in seedvr2x's defaults, with the options of `more` besides, to tmp_path's
+    ours.mkv and frames/ (same_bits); and the environment to run it in. A pass that `more` doesn't
+    pin is pinned untiled, unless pin_untiled is False, which leaves it to the planner."""
     master, frames = tmp_path / "ours.mkv", tmp_path / "frames"
-    modes = (NUMZ_PADDING, NUMZ_DRAW, NUMZ_TAIL)
-    environment = {name: value for name, value in os.environ.items() if name not in modes}
-    environment[NUMZ_DRAW] = "1"
-    environment[NUMZ_TAIL] = "1"
-    if numz_padding:
-        environment[NUMZ_PADDING] = "1"
+    environment = dict(os.environ)
     if models is None:
         options = []
         environment["HF_HUB_OFFLINE"] = "1"
@@ -405,17 +340,18 @@ def command(
         *(COMMAND, str(source), "-o", str(master), *options),
         *("--resolution", str(resolution), "--seed", "42", "--dump-frames", str(frames)),
         # The shots detected, and none found: at the default 0.3, the input is cut at 42 and
-        # 44, 3 shots where numz ran one batch (the module's docstring).
+        # 44, 3 shots where the references are one (the module's docstring).
         *("--cut-threshold", "0.5"),
-        # numz's output milestone 1 holds to, without its lab (StableSR's, not vendored).
+        # The references are made without a colour correction, so that they hold the model's
+        # output alone.
         *("--color-correction", "none"),
-        # numz.mkv's format, ffv1_out.py's default: compare.py reads both masters as stored.
+        # The references' format, gbrp16le: compare.py reads both masters as stored.
         *("--format", "gbrp16le"),
         # The passes the reference was made with, pinned: untiled unless `more` pins tiles, so
         # that a card too small for them refuses the job (DESIGN.md, Memory planner, Pins)
-        # where the planner would tile what numz ran untiled, bits that aren't its. None pinned
-        # for the case that leaves its passes to the planner, and looks at what it chose
-        # (test_milestone1_unpinned).
+        # where the planner would tile what the reference ran untiled, bits that aren't its.
+        # None pinned for the case that leaves its passes to the planner, and looks at what it
+        # chose (test_milestone1_unpinned).
         *(
             pin
             for option in TILE_PINS
@@ -433,7 +369,6 @@ def upscaled(
     resolution: int,
     models: tuple[str, str] | None,
     *more: str,
-    numz_padding: bool,
     pin_untiled: bool = True,
     planned: str | None = None,
 ) -> str:
@@ -442,15 +377,12 @@ def upscaled(
     of the same command's --plan call before it, where the run says it resumes a job. Returns the
     run's log."""
     arguments, environment = command(
-        *(tmp_path, source, resolution, models, *more),
-        numz_padding=numz_padding,
-        pin_untiled=pin_untiled,
+        *(tmp_path, source, resolution, models, *more), pin_untiled=pin_untiled
     )
     run = subprocess.run(arguments, capture_output=True, text=True, check=False, env=environment)
-    # A card other than ROOT_CARD that can't run the case: skipped with the refusal's figures
-    # (decided on 2026-10-21). On ROOT_CARD, which made the references, a refusal fails it.
+    # A card that can't run the case: skipped with the refusal's figures (decided on 2026-10-21).
     refused = refusal(run.stderr)
-    if run.returncode == 1 and refused is not None and card() != ROOT_CARD:
+    if run.returncode == 1 and refused is not None:
         pytest.skip(f"{card()}: the case can't run there: {refused}")
     assert run.returncode == 0, run.stderr[-3000:]
     # A held run's plan made with the reserve of 2.5 GiB, the one with 4.5 refused (planner.plan):
@@ -471,7 +403,7 @@ def upscaled(
 
 def detected(log: str) -> None:
     """A run's first pass, by its log: the shot detector ran, on the GPU, and gave its memory
-    back; no cut at 0.5, the input one shot, as numz's one batch (the module's docstring)."""
+    back; no cut at 0.5, the input one shot (the module's docstring)."""
     assert "the shot detector scored" in log, log[-3000:]
     assert "shot detector: VRAM peak" in log, log[-3000:]
     assert "1 shot: 0 cuts detected at --cut-threshold 0.5" in log, log[-3000:]
@@ -518,7 +450,7 @@ def choices(lines: list[str]) -> list[str]:
 REFUSED = (" GiB of free VRAM", " GiB of system memory")
 
 # The free memory, in GiB as the driver reports it, from which test_milestone1_unpinned holds a
-# card to numz's untiled passes: the plan takes 37.09 GiB of free VRAM for them (the module's
+# card to its untiled passes: the plan takes 37.31 GiB of free VRAM for them (the module's
 # docstring), and a card of 48 GB reports 46.5 or more (cli._free_memory: N - 1.49 on a card
 # emulated at N GB).
 UNTILED_FREE = 40.0
@@ -548,7 +480,7 @@ def reported(log: str) -> float | None:
 
 
 def unpinned(log: str, why: str, free: float | None = None) -> None:
-    """The unpinned case on a card whose plan can't make numz's untiled master, `why` saying
+    """The unpinned case on a card whose plan can't make the untiled master, `why` saying
     it, the refusal or the plan's line of its passes: skipped where the driver reported under
     UNTILED_FREE GiB free to the --plan run whose log this is (reported), failed where it
     reported that or more, or where the log doesn't say. `free`, in GiB, is that figure where
@@ -557,7 +489,7 @@ def unpinned(log: str, why: str, free: float | None = None) -> None:
     if free is not None and free < UNTILED_FREE:
         pytest.skip(
             f"the driver reports {free:.2f} GiB free, under the {UNTILED_FREE:.0f} a card makes"
-            f" numz's untiled master from: {why}"
+            f" the untiled master from: {why}"
         )
     there = (
         "what the driver reports free isn't in the log"
@@ -737,7 +669,7 @@ def readings(free: Free, monkeypatch: pytest.MonkeyPatch) -> list[memory.Reading
 def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> list[str]:
     """The plan lines (plan_lines, choices) the planner makes for `reading` and the job's
     inputs: nothing pinned, the decode splitting no colours (the command's --color-correction
-    none), numz's padding, `host` the system memory available, the disk's line given for the
+    none), `host` the system memory available, the disk's line given for the
     job's masters (compared keeps that part and drops the free space, which follows the disk). A
     refusal is one line, "refused: ...", which no run's plan equals."""
     try:
@@ -747,7 +679,6 @@ def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> l
             inputs.shots,
             planner.Pins(),
             host,
-            numz_padding=True,
             attention=inputs.attention,
             dit_model=inputs.dit_model,
         )
@@ -760,7 +691,6 @@ def planner_says(reading: memory.Reading, inputs: Inputs, host: int | None) -> l
         inputs.target,
         inputs.shots,
         planner.Pins(),
-        numz_padding=True,
         disk=inputs.disk,
     )
     return compared(plan_lines("\n".join(said)))
@@ -962,12 +892,11 @@ def bit_identical(
     models: tuple[str, str] | None,
     reference: Path,
     *more: str,
-    numz_padding: bool,
 ) -> str:
     """Run seedvr2x as upscaled does, the passes `more` doesn't pin pinned untiled, and compare
     its master and float32 frames with the reference's, bit for bit (same_bits). Returns its
     log."""
-    log = upscaled(tmp_path, source, resolution, models, *more, numz_padding=numz_padding)
+    log = upscaled(tmp_path, source, resolution, models, *more)
     same_bits(tmp_path, reference)
     return log
 
@@ -975,17 +904,17 @@ def bit_identical(
 @pytest.mark.parametrize(
     ("dit", "vae", "reference"),
     [
-        pytest.param(NUMZ_DIT, NUMZ_VAE, "numz", id="numz-7b"),
+        pytest.param(NUMZ_DIT, NUMZ_VAE, "7b", id="numz-7b"),
         pytest.param(
             "seedvr2x_ema_7b_fp16.safetensors",
             "seedvr2x_ema_vae_fp16.safetensors",
-            "numz",
+            "7b",
             id="ours-7b",
         ),
         pytest.param(
             "seedvr2x_ema_7b_sharp_fp16.safetensors",
             "seedvr2x_ema_vae_fp16.safetensors",
-            "numz_sharp",
+            "sharp",
             id="ours-sharp",
         ),
     ],
@@ -993,23 +922,22 @@ def bit_identical(
 def test_milestone1_bit_identical(tmp_path: Path, dit: str, vae: str, reference: str) -> None:
     assert REFERENCE is not None
     models_present(dit, vae)
-    job = case("milestone1", reference, "input_rgb.mkv", 1080, reference, "m1")
-    referenced(tmp_path, job, (dit, vae), numz_padding=True, required=reference == "numz")
-    bit_identical(
-        tmp_path, job.source, job.resolution, (dit, vae), job.reference, numz_padding=True
-    )
+    job = case("milestone1", "input_rgb.mkv", 1080, reference)
+    referenced(tmp_path, job, (dit, vae))
+    bit_identical(tmp_path, job.source, job.resolution, (dit, vae), job.reference)
 
 
 def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # numz-7b with no tile pinned: the passes are the planner's own choice, and the bits go
     # through it. Decided before any run, by the same command with --plan: the first pass and
     # the plan, its cut list written and no master (main.py); --plan loads no model today. A card
-    # where the plan is refused, or tiles a pass, can't make numz's untiled master: the case is
+    # where the plan is refused, or tiles a pass, can't make the untiled master: the case is
     # skipped where the driver reports under 40 GiB free, saying the refusal, or the plan's line
     # of the pass it tiles (planner.said), and fails where it reports more (unpinned). Else the
-    # encode's and the decode's lines say untiled, as numz ran them, and nothing is pinned; the
-    # run then makes a plan of its own, and its bits are numz's. The run resumes the job the
-    # --plan call made, so its first pass is read in that call's log (upscaled).
+    # encode's and the decode's lines say untiled, as the reference ran them, and nothing is
+    # pinned; the run then makes a plan of its own, and its bits are the reference's. The run
+    # resumes the job the --plan call made, so its first pass is read in that call's log
+    # (upscaled).
     # The two calls are not compared with each other: a desktop that drives the card moves its
     # free memory between them (0.3 GiB on an RTX 5090 under WSL2, 5 blocks swapped in one call
     # and 4 in the other), and a plan that follows it is right. Each call's plan is compared with
@@ -1022,10 +950,10 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # the verdict after it, follow the disk and are not (compared; design, baton 4, 2026-10-31).
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
-    numz = case("milestone1", "numz", "input_rgb.mkv", 1080, "numz", "m1")
-    referenced(tmp_path, numz, (NUMZ_DIT, NUMZ_VAE), numz_padding=True, required=True)
-    job = (tmp_path, numz.source, numz.resolution, (NUMZ_DIT, NUMZ_VAE))
-    arguments, environment = command(*job, numz_padding=True, pin_untiled=False)
+    own = case("milestone1", "input_rgb.mkv", 1080, "7b")
+    referenced(tmp_path, own, (NUMZ_DIT, NUMZ_VAE))
+    job = (tmp_path, own.source, own.resolution, (NUMZ_DIT, NUMZ_VAE))
+    arguments, environment = command(*job, pin_untiled=False)
     listed = tmp_path / "cuts.txt"
     plan = subprocess.run(
         [*arguments, "-v", "--plan", str(listed)],
@@ -1038,13 +966,10 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # fails the case. The call runs with -v, so that its log holds the system memory it planned
     # with (logged_host) as the run's does: its lines are the logger's (errors_of).
     refusals = [error for error in errors_of(plan.stderr) if any(w in error for w in REFUSED)]
-    # Another card than ROOT_CARD, whose reference is made untiled at the size its untiled passes
-    # fit (the module's docstring): its plan there refused, or tiling a pass, skips the case,
-    # saying it; ROOT_CARD's is held to UNTILED_FREE (unpinned). A refusal records no reading:
-    # its figure is the one its words give (reported).
-    other = card() != ROOT_CARD
-    if plan.returncode == 1 and refusals and other:
-        pytest.skip(f"{card()}: the plan is refused: {refusals[0]}")
+    # A plan refused, or tiling a pass, is held to UNTILED_FREE (unpinned): a card's reference is
+    # made untiled at the size its untiled passes fit (the module's docstring), a card reporting
+    # less than that being skipped, saying it. A refusal records no reading: its figure is the
+    # one its words give (reported).
     if plan.returncode == 1 and refusals:
         unpinned(plan.stderr, f"the plan is refused: {refusals[0]}")
     assert plan.returncode == 0, plan.stderr[-3000:]
@@ -1056,8 +981,6 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     # before the run, whose plan may write it again.
     inputs, free_planned = recorded_inputs(json.loads((work_of(tmp_path) / NAME).read_text()))
     tiled = [line for line in passes if "tiles of" in line]
-    if tiled and other:
-        pytest.skip(f"{card()}: the plan tiles a pass: plan: {tiled[0]}")
     if tiled:
         unpinned(
             plan.stderr,
@@ -1067,7 +990,7 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert passes[0].startswith("encode: untiled, "), planned
     assert passes[1].startswith("decode: untiled, "), planned
     assert listed.is_file() and not (tmp_path / "ours.mkv").exists()
-    log = upscaled(*job, "-v", numz_padding=True, pin_untiled=False, planned=plan.stderr)
+    log = upscaled(*job, "-v", pin_untiled=False, planned=plan.stderr)
     free_ran = logged_free(log)
     assert free_ran is not None, f"no free memory read in the run's --verbose log: {log[-3000:]}"
     assert_planned_as_read(
@@ -1083,8 +1006,6 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     run_passes = [line for line in ran if line.startswith(("encode: ", "decode: "))]
     assert len(run_passes) == 2 and any(line.startswith("pinned: nothing") for line in ran), ran
     run_tiled = [line for line in run_passes if "tiles of" in line]
-    if run_tiled and other:
-        pytest.skip(f"{card()}: the run's plan tiles a pass: plan: {run_tiled[0]}")
     if run_tiled:
         unpinned(
             log,
@@ -1101,7 +1022,7 @@ def test_milestone1_unpinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
             )
         ]
     )
-    same_bits(tmp_path, numz.reference)
+    same_bits(tmp_path, own.reference)
 
 
 def test_plan_and_run_read_the_same_free_memory(tmp_path: Path) -> None:
@@ -1117,16 +1038,11 @@ def test_plan_and_run_read_the_same_free_memory(tmp_path: Path) -> None:
     # test skips, saying the figures. (Design's check, baton 3, 2026-10-30.)
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
-    numz = case("milestone1", "numz", "input_rgb.mkv", 1080, "numz", "m1")
-    if not numz.source.exists():
-        pytest.skip(f"{numz.source}: absent; this module's docstring says how to make it")
+    own = case("milestone1", "input_rgb.mkv", 1080, "7b")
+    if not own.source.exists():
+        pytest.skip(f"{own.source}: absent; this module's docstring says how to make it")
     arguments, environment = command(
-        tmp_path,
-        numz.source,
-        numz.resolution,
-        (NUMZ_DIT, NUMZ_VAE),
-        numz_padding=True,
-        pin_untiled=False,
+        tmp_path, own.source, own.resolution, (NUMZ_DIT, NUMZ_VAE), pin_untiled=False
     )
     before = other_programs()
     plan = subprocess.run(
@@ -1177,11 +1093,9 @@ def test_milestone1_from_the_cache(tmp_path: Path) -> None:
                 f" GB: uv run --project ../apps/seedvr2x hf download {pull.REPO} {DEFAULT_DIT}"
                 f" {DEFAULT_VAE} {pull.DETECTOR} --revision {pull.REVISION}"
             )
-    job = case("milestone1", "numz_sharp", "input_rgb.mkv", 1080, "numz_sharp", "m1")
-    referenced(tmp_path, job, (DEFAULT_DIT, DEFAULT_VAE), numz_padding=True)
-    log = bit_identical(
-        tmp_path, job.source, job.resolution, None, job.reference, numz_padding=True
-    )
+    job = case("milestone1", "input_rgb.mkv", 1080, "sharp")
+    referenced(tmp_path, job, (DEFAULT_DIT, DEFAULT_VAE))
+    log = bit_identical(tmp_path, job.source, job.resolution, None, job.reference)
     for name in (DEFAULT_DIT, DEFAULT_VAE, pull.DETECTOR):
         assert f"{name}: in the cache, " in log
         pinned = f"its size and SHA-256 as seedvr2x pins them, {pull.REPO} at {pull.REVISION[:8]}"
@@ -1192,21 +1106,20 @@ def test_milestone1_from_the_cache(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("source", "resolution", "reference"),
     [
-        pytest.param("input_rgb.mkv", 1080, "numz_pad1080", id="pad1080"),
-        pytest.param("input_rgb.mkv", 720, "numz_pad720", id="pad720"),
-        pytest.param("input_rgb_956x530.mkv", 1060, "numz_padcols", id="padcols"),
+        pytest.param("input_rgb.mkv", 1080, "pad1080", id="pad1080"),
+        pytest.param("input_rgb.mkv", 720, "pad720", id="pad720"),
+        pytest.param("input_rgb_956x530.mkv", 1060, "padcols", id="padcols"),
     ],
 )
 def test_padding_bit_identical(
-    request: pytest.FixtureRequest, tmp_path: Path, source: str, resolution: int, reference: str
+    tmp_path: Path, source: str, resolution: int, reference: str
 ) -> None:
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
-    name = request.node.callspec.id
-    job = case("padding", name, source, resolution, reference, "m1")
+    job = case("padding", source, resolution, reference)
     models = (NUMZ_DIT, NUMZ_VAE)
-    referenced(tmp_path, job, models, numz_padding=False)
-    bit_identical(tmp_path, job.source, job.resolution, models, job.reference, numz_padding=False)
+    referenced(tmp_path, job, models)
+    bit_identical(tmp_path, job.source, job.resolution, models, job.reference)
 
 
 @pytest.mark.parametrize(
@@ -1214,13 +1127,13 @@ def test_padding_bit_identical(
     [
         pytest.param(
             ("--decode-tile", "1024"),
-            "numz_d1024",
+            "d1024",
             ["tiled decode: 4 tiles of 1024 px sharing 64, 2 across and 2 down,"],
             id="d1024",
         ),
         pytest.param(
             ("--encode-tile", "1344", "--decode-tile", "1024"),
-            "numz_e1344-d1024",
+            "e1344-d1024",
             [
                 "tiled encode: 2 tiles of 1344 px sharing 64, 2 across and 1 down,",
                 "tiled decode: 4 tiles of 1024 px sharing 64, 2 across and 2 down,",
@@ -1229,7 +1142,7 @@ def test_padding_bit_identical(
         ),
         pytest.param(
             ("--encode-tile", "512", "--decode-tile", "512"),
-            "numz_e512-d512",
+            "e512-d512",
             [
                 "tiled encode: 15 tiles of 512 px sharing 64, 5 across and 3 down,",
                 "tiled decode: 15 tiles of 512 px sharing 64, 5 across and 3 down,",
@@ -1239,24 +1152,17 @@ def test_padding_bit_identical(
     ],
 )
 def test_tiled_bit_identical(
-    request: pytest.FixtureRequest,
-    tmp_path: Path,
-    pins: tuple[str, ...],
-    reference: str,
-    grids: list[str],
+    tmp_path: Path, pins: tuple[str, ...], reference: str, grids: list[str]
 ) -> None:
-    # seedvr2x's tiled passes against numz's own tiling, in numz's padding (the module's
-    # docstring): the whole shot under each tile here, numz's one batch there. The debug log
-    # says each tiled pass's grid, over the 45 frames padded to 1920x1088, its scratch in system
-    # memory at that size (564,019,200 bytes).
+    # seedvr2x's tiled passes against their own references (the module's docstring): the whole
+    # shot under each tile. The debug log says each tiled pass's grid, over the 45 frames padded to
+    # 1920x1104, its scratch in system memory at that size (572,313,600 bytes).
     assert REFERENCE is not None
     models_present(NUMZ_DIT, NUMZ_VAE)
-    job = case("tiled", request.node.callspec.id, "input_rgb.mkv", 1080, reference, "m3")
+    job = case("tiled", "input_rgb.mkv", 1080, reference)
     models = (NUMZ_DIT, NUMZ_VAE)
-    referenced(tmp_path, job, models, *pins, numz_padding=True)
-    log = bit_identical(
-        tmp_path, job.source, job.resolution, models, job.reference, *pins, "-v", numz_padding=True
-    )
+    referenced(tmp_path, job, models, *pins)
+    log = bit_identical(tmp_path, job.source, job.resolution, models, job.reference, *pins, "-v")
     # The job's own passes: those of its time estimates' calibration come before, said too
     # (calibration.calibrate, which every run makes: DESIGN.md, Memory planner, Time estimates).
     job_lines = log.split("time estimates: the job's own steps timed once, in", 1)[-1]
@@ -1264,10 +1170,14 @@ def test_tiled_bit_identical(
         line.split("tiling: ", 1)[1] for line in job_lines.splitlines() if "tiling: tiled " in line
     ]
     # At 1080, or at the card's own size where its cases.json gives one, with what each tiled
-    # pass's line says there (case).
+    # pass's line says there (case). The default's grids are tilegrid.grid's over the 1104x1920
+    # frame (138 x 240 latents, tiles of 128, 168 and 64 latents sharing 8, a stride of 120, 160
+    # and 56), as tiling._tiled logs them, and its scratch is tilegrid.scratch_bytes: 3 channels
+    # x 45 frames x 1104 x 1920 x 2 bytes, 564,019,200 bytes at numz's 1088 rows, 572,313,600
+    # now.
     grids = list(job.grids) if job.grids is not None else grids
     over = job.over or (
-        "over 45 frames padded to 1920x1088; its scratch, 564019200 bytes, in system memory"
+        "over 45 frames padded to 1920x1104; its scratch, 572313600 bytes, in system memory"
     )
     assert len(said) == len(grids), said
     for line, grid in zip(said, grids, strict=True):
