@@ -172,21 +172,12 @@ class Card:
         return model.load_models(files.dit.path, files.vae.path, self.device, files.hashes, plan)
 
     def reserve(self, size: int) -> None:
-        """torch's allocator made to reserve `size` bytes in all, models included, and held there:
-        what it doesn't reserve yet allocated at once and freed, the allocator keeping it for the
-        process (it gives memory back to the card on empty_cache() alone, or to an allocation it
-        can't otherwise serve), then its limit set to it (set_per_process_memory_fraction, as
-        memory.hold sets it where the driver spills). torch.OutOfMemoryError where the card can't
-        give it."""
-        torch = self.torch
-        missing = size - int(torch.cuda.memory_reserved(self.device))
-        if missing > 0:
-            block = torch.empty(missing, dtype=torch.uint8, device=self.device)
-            del block
-        total = int(torch.cuda.mem_get_info(self.device)[1])
-        fraction = min(size / total, 1.0)
-        torch.cuda.set_per_process_memory_fraction(fraction, self.device)  # pyright: ignore[reportUnknownMemberType]
-        torch.cuda.reset_peak_memory_stats(self.device)
+        """torch's allocator made to reserve `size` bytes in all, models included, kept there for
+        the process and capped there, the card judged first where the driver spills
+        (memory.keep): torch.OutOfMemoryError where the card can't give it. Its peak counted
+        from there."""
+        memory.keep(self.device, size)
+        self.torch.cuda.reset_peak_memory_stats(self.device)
 
     def reserved(self) -> int:
         return int(self.torch.cuda.memory_reserved(self.device))
@@ -387,6 +378,14 @@ class Service:
                 f"the models' {reservation.gib(made.models)} GiB, all on the card, one picture in"
                 f" the VAE and one in the DiT at a time, within {long}x{short} {each}"
             )
+            pins = made.plan.pins
+            if pins.encode_tile is not None and pins.encode_tile == pins.decode_tile:
+                # The tiles reservation._made pinned for the DiT to stay whole: said, a picture's
+                # passes taking them where the plan's own for one picture would be larger.
+                holds += (
+                    f", the VAE's passes in tiles of {pins.encode_tile} px (untiled where a"
+                    " picture's frame is no larger), so that the DiT stays whole beside them"
+                )
             fits = (
                 f"what fits: {made.count} pictures in flight within {long}x{short}"
                 " (--max-concurrent), two on the GPU at a time, one in each model, the others"
@@ -691,9 +690,25 @@ class Service:
         running (Admission.when_idle): torch gives its cached memory back to the card where an
         allocation can't otherwise be served under its limit (an allocation refused, or
         fragmentation at the cap), and the hold is made again from what the card has free, or
-        said lost in a warning."""
+        said lost in a warning.
+
+        Not at every picture: the models' moves between phases leave the reservation alone
+        (memory.keep; before, every picture of 12 gave it back where the plan moved the DiT's
+        blocks, an RTX 5090 under WSL2, 2026-11-04). A held run's check gives it back too where
+        it finds the card short (memory.check), and stops the picture or says why; what is left
+        is torch's own release at its cap, where its cache has no block for an allocation (a
+        picture's buffers met in another order), which takes nothing from the bound: said at
+        info level, as it is done. PROVISIONAL (impl-imgserver, 2026-11-04): how often that is
+        on a card is for its GPU run to count."""
         admitted, made = self.admitted, self.made
-        if admitted is None or made is None or self.card.reserved() >= made.reservation:
+        # torch reserves in steps (memory.keep takes the reservation in allocations of
+        # memory.MIN_LARGE and more, which torch rounds to memory.ROUND_LARGE), so it holds up to
+        # a step under a reservation that is no multiple of one: on the RTX 5090 (2026-11-04,
+        # int8, 18.43 GiB) 0.2 to 2.2 MiB under it after every picture, which made this line say
+        # the hold was lost each time. Within a step of it, the hold is whole.
+        if admitted is None or made is None:
+            return
+        if self.card.reserved() >= made.reservation - memory.MIN_LARGE - memory.ROUND_LARGE:
             return
 
         def again() -> None:

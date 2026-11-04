@@ -279,7 +279,7 @@ def quiet_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in memory.VARIABLES:
         monkeypatch.delenv(name, raising=False)
     state = (("_spills", False), ("_native", False), ("_limit", None), ("_footing", None))
-    held = (("_segments", False), ("_plan_s_limit", None), ("_base", None))
+    held = (("_segments", False), ("_plan_s_limit", None), ("_base", None), ("_kept", None))
     for name, value in (*state, *held, ("_planned", None), ("_left", memory.HELD_BACK)):
         monkeypatch.setattr(memory, name, value)
 

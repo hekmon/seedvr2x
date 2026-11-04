@@ -11,14 +11,19 @@ whatever the bound (the review, 2026-11-03).
 
 One picture at a time may swap blocks, as the plan chooses. Several at once need the whole DiT on
 the card: the pictures share the models, which a placement that moves them per phase can't serve
-to two pictures in two phases. The server runs one picture in each model at a time (service.py:
-the VAE keeps its causal memory in its modules), so several pictures at once take the models, one
-picture's share in the VAE and one in the DiT, whatever --max-concurrent: the pictures past two
-wait on the CPU, between the models."""
+to two pictures in two phases. The plan, made for one picture, lowers the DiT beside a VAE pass
+before it tiles that pass smaller (still_plan._place); several pictures take the VAE's passes in
+tiles pinned smaller instead, the largest that keep the DiT whole with a reservation in the memory
+counted (_made; an RTX 5090 under WSL2, 2026-11-04: two pictures within 1920x1080 on the int8 DiT
+were refused where tiles of 1088 px fit). The server runs one picture in each model at a time
+(service.py: the VAE keeps its causal memory in its modules), so several pictures at once take the
+models, one picture's share in the VAE and one in the DiT, whatever --max-concurrent: the pictures
+past two wait on the CPU, between the models."""
 
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import cache
 
 from seedvr2x import frames, peaks, still_plan
 from seedvr2x.errors import Refusal
@@ -181,8 +186,36 @@ class Asked:
     pins: Pins = still_plan.NO_PINS
 
 
-def _plan(asked: Asked, bound: Bound, count: int, reading: Reading) -> StillPlan:
-    pins = asked.pins if count == 1 else Pins(swap_blocks=0)
+class _Moves(ReservationRefused):
+    """Several pictures at once refused for a plan that moves the models (_tried)."""
+
+
+@cache
+def tile_sides(bound: Bound) -> range:
+    """The tiles' sides the pictures at once are pinned to, the largest first: still_plan's own
+    sizes for the bound (its _tile_sizes at the bound's largest padded frame), multiples of
+    TILE_STEP from the largest under the longest padded side of any picture within the bound, or
+    from TILE_MAX, down to TILE_MIN. A tile covering a smaller picture's frame gives that picture
+    the untiled pass (still_plan._options), which the plan's proof counts."""
+    long = bound[0]
+    sides = range(1, long + 2)
+    within = [side for side in sides if side - side % 2 <= long]
+    padded = max(
+        max(frames.padded_size((side, frames.MULTIPLE))[0] for side in within),
+        max(frames.padded_size((2 * frames.MULTIPLE, side))[1] for side in within),
+    )
+    largest = min(peaks.TILE_MAX, (padded - 1) // peaks.TILE_STEP * peaks.TILE_STEP)
+    return range(largest, peaks.TILE_MIN - 1, -peaks.TILE_STEP)
+
+
+def _several(bound: Bound) -> list[Pins]:
+    """The pins several pictures at once within `bound` are tried with, in order: no block
+    swapped and the plan's own tiles, then both VAE phases pinned to each of tile_sides."""
+    tiled = [Pins(side, side, swap_blocks=0) for side in tile_sides(bound)]
+    return [Pins(swap_blocks=0), *tiled]
+
+
+def _plan(asked: Asked, bound: Bound, count: int, reading: Reading, pins: Pins) -> StillPlan:
     return still_plan.plan(
         bound,
         reading,
@@ -197,30 +230,56 @@ def _plan(asked: Asked, bound: Bound, count: int, reading: Reading) -> StillPlan
 
 
 def _made(asked: Asked, bound: Bound, count: int) -> Made:
-    """The reservation for `count` pictures within `bound`: the plan made for one picture, then
-    made again on less memory while `count` pictures at its ceilings, with the share torch
-    reserves beside each phase, take more than the reading's budget, so that the plan swaps more
-    blocks or tiles smaller; each try lowers the memory one picture counts on by what the last was
-    short over the reservation's rate. still_plan.PlanRefusal where no plan fits;
-    ReservationRefused (with no counts) where the reservation doesn't."""
+    """The reservation for `count` pictures within `bound`, tried with each of _pins in turn
+    (_tried), the first that fits taken: for one picture the asked pins alone; for several, the
+    plan's own tiles first, then the VAE's passes in tiles pinned smaller until a plan keeps the
+    DiT whole with a reservation that fits. The plan places what of the DiT stays beside a VAE
+    pass for one picture, lowering the DiT before it tiles smaller (still_plan._place), which
+    several pictures can't take: the int8 DiT's 8.25 GiB within 1920x1080 on 18.45 GiB counted
+    kept the DiT whole at the plan's own tiles but over the reservation, and lowered it on the
+    memory lowered (the RTX 5090, 2026-11-04), where both passes in tiles of 1088 px keep it whole
+    and reserve 18.20. still_plan.PlanRefusal where no plan fits one picture; ReservationRefused
+    (with no counts) where the reservation doesn't."""
+    if count == 1:
+        return _tried(asked, bound, count, asked.pins)
+    for pins in _several(bound):
+        try:
+            return _tried(asked, bound, count, pins)
+        except ReservationRefused:
+            # The plan moves the models (_Moves), or its reservation doesn't fit: smaller tiles
+            # next.
+            continue
+    raise ReservationRefused(
+        f"{count} pictures at once need the whole DiT on the card, every block of it in every"
+        " phase and the VAE beside it, and no plan for pictures within"
+        f" {_bound_said(bound)} keeps it there with their reservation in the memory the plan"
+        f" counts on, the VAE's passes tiled down to {peaks.TILE_MIN} px",
+        0,
+        None,
+    )
+
+
+def _tried(asked: Asked, bound: Bound, count: int, pins: Pins) -> Made:
+    """The reservation for `count` pictures within `bound` under `pins`: the plan made for one
+    picture, then made again on less memory while `count` pictures at its ceilings, with the share
+    torch reserves beside each phase, take more than the reading's budget, so that the plan swaps
+    more blocks or tiles smaller; each try lowers the memory one picture counts on by what the last
+    was short over the reservation's rate. still_plan.PlanRefusal where no plan fits one picture;
+    _Moves where several pictures' plan moves the models or is refused; ReservationRefused (with
+    no counts) where the reservation doesn't fit."""
     reading, short = asked.reading, 0
     for _ in range(TRIES):
         try:
-            made = _plan(asked, bound, count, reading)
+            made = _plan(asked, bound, count, reading, pins)
         except still_plan.PlanRefusal:
             if count == 1:
                 raise
-            # The plan's own refusal names the pin it was made with, --swap-blocks 0, which the
-            # server takes from no user at several pictures at once (main.main).
+            # The plan's own refusal names the pins it was made with, --swap-blocks 0 and the
+            # tiles tried, which the server takes from no user at several pictures at once
+            # (main.main): a pin it refuses is one the next tries smaller.
             made = None
         if made is None or (count > 1 and not whole(made)):
-            raise ReservationRefused(
-                f"{count} pictures at once need the whole DiT on the card, every block of it in"
-                " every phase and the VAE beside it, and the plan for pictures within"
-                f" {_bound_said(bound)} moves them",
-                0,
-                None,
-            )
+            raise _Moves(f"{count} pictures at once: the plan moves the models", 0, None)
         budget_of = picture_budget(made, asked.input_pixels)
         peaks_of = ceilings(made, budget_of)
         reservation = reserved(peaks_of, count)

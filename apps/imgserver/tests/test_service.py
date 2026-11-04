@@ -444,6 +444,29 @@ def test_the_reservation_is_made_again_when_torch_holds_less_and_no_picture_runs
         assert machine.reserved() == wanted
 
 
+def test_a_hold_a_step_short_of_the_reservation_is_whole_and_said_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cpu_models: model.Models,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """torch reserves in steps, so a hold up to memory.MIN_LARGE + ROUND_LARGE under a reservation
+    that is no multiple of one is whole: not made again, nothing said (on the RTX 5090, int8, it
+    was 0.2 to 2.2 MiB under after each picture, and the line came 12 times in 12 pictures)."""
+    with live(monkeypatch, tmp_path, cpu_models) as server:
+        machine = server.machine
+        before = len(machine.reserves)
+        machine.fail = lambda: setattr(machine, "lost", 2 << 20)
+        with caplog.at_level(logging.INFO, logger="imgserver.service"):
+            assert server.upscale(png_of(40, 24), 48, 1)[0] == 200
+        assert len(machine.reserves) == before
+        assert "the reservation held again" not in caplog.text
+        machine.fail = None
+        machine.lost = memory.MIN_LARGE + memory.ROUND_LARGE + 1
+        server.service._held()
+        assert len(machine.reserves) == before + 1
+
+
 def test_the_warm_up_leaves_the_hold_whole(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cpu_models: model.Models
 ) -> None:
@@ -761,6 +784,39 @@ def test_the_reservations_lines_say_how_many_pictures_the_gpu_runs(
         assert "one picture in the VAE and one in the DiT" in lines[0]
     else:
         assert "two on the GPU" not in lines[0] + fits[0]
+
+
+@pytest.mark.parametrize("dit", [peaks.INT8, peaks.FP16])
+def test_the_reservations_line_says_the_tiles_pictures_at_once_take(
+    dit: weights.Architecture, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Two pictures within 1920x1080 on the RTX 5090 under WSL2 (2026-11-04: 18.45 GiB counted of
+    # 23.45 free on the whole card), the int8 DiT kept whole by the VAE's passes in tiles of 1088
+    # px (reservation._made): the line says so. One picture at a time takes the plan's own
+    # tiles, and its line says none.
+    held = memory.Reading(
+        round(30.03 * GIB), round(23.45 * GIB), round(18.45 * GIB), True, left=memory.HELD_BACK
+    )
+    for count in (2, 1):
+        if dit == peaks.FP16 and count == 2:
+            continue  # refused (tests/test_reservation.py)
+        asked = reservation.Asked(
+            (1920, 1080), 1024 * 576, count, 8, held, 64 * GIB, peaks.SDPA, dit
+        )
+        server = services.Service(
+            options(tmp_path, bound=(1920, 1080), input_pixels=1024 * 576, count=count), None
+        )
+        server.made = reservation.make(asked)
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="imgserver.service"):
+            server._say_reservation()  # pyright: ignore[reportPrivateUsage]
+        line = caplog.messages[0]
+        tiles = (
+            ", the VAE's passes in tiles of 1088 px (untiled where a picture's frame is no"
+            " larger), so that the DiT stays whole beside them; the CUDA context"
+        )
+        assert (tiles in line) == (count == 2), line
+        assert "tiles of" not in line or count == 2
 
 
 # ---- It listens at once -------------------------------------------------------------------------

@@ -15,10 +15,18 @@ the picture budget, or the DiT's peak at one picture when it binds), counted at 
   3 at 16, 4 at 24 and 32); of the 654 cases, 449 take 1, 64 take 2, 55 take 3, 80 take 4 and 6
   take 5;
 - two or four pictures: the same figures at both, the reservation not growing with the count
-  (the server runs one picture in each model at a time): 1 plan where the first fits or the plan
-  moves blocks (refused for the whole DiT), 2 where it is lowered and fits, 3 at the most (a
-  refusal after two lowerings).
-No case takes more than 5, and none more than 3 at two or more pictures: the tests hold them."""
+  (the server runs one picture in each model at a time), each pin tried (reservation._several:
+  the plan's own tiles, then both VAE passes pinned to each of the 25 sides from 2048 to 512 px)
+  taking 3 plans at the most: 1 plan where the first fits (355 cases), 2 where it is lowered and
+  fits (56); 17 to 36 where the plan's own tiles move the models or reserve too much and smaller
+  tiles are tried, 86 of them fitting so and 157 refused once every side was tried.
+No case takes more than 5 at one picture, nor more than 3 for each pin at two or more: the tests
+hold them.
+
+The night's case on the RTX 5090 under WSL2 (2026-11-04, server_int8_n2.log and
+server_fp16_n2.log): two pictures within 1920x1080 from inputs of 0.6 MP, the run held to the
+card, 18.45 GiB counted of the 23.45 free on the whole card, SDPA: the int8 DiT whole with both
+passes in tiles of 1088 px, the fp16 refused, naming what fits."""
 
 import math
 from dataclasses import replace
@@ -27,11 +35,12 @@ import pytest
 
 import reservation
 from reservation import Asked, ReservationRefused
-from seedvr2x import peaks, still_plan
+from seedvr2x import memory, peaks, still_plan
 from seedvr2x.errors import Refusal
 from seedvr2x.memory import Reading
 from seedvr2x.passes import Phase
-from seedvr2x.still_plan import Bound, Peak, PlanRefusal
+from seedvr2x.still_plan import Bound, Peak, Pins, PlanRefusal
+from seedvr2x.weights import Architecture
 
 # pyright: reportPrivateUsage=false
 
@@ -406,7 +415,8 @@ def test_the_pins_stand_for_one_picture_and_not_for_several() -> None:
     assert reservation.make(pinned).plan.models.swapped == 2
     # Several pictures plan with no block swapped, whatever the pins say.
     two = replace(asked(96, 2), pins=still_plan.Pins(swap_blocks=2))
-    assert reservation._plan(two, FOUR_K, 2, two.reading).models.swapped == 0
+    made = reservation._made(two, FOUR_K, 2)
+    assert made.plan.models.swapped == 0 and made.plan.pins == still_plan.Pins(swap_blocks=0)
 
 
 def test_a_smaller_queue_leaves_the_reservation_room() -> None:
@@ -500,8 +510,26 @@ def test_fits_says_a_refusal_as_false() -> None:
 
 
 def most_tries(count: int) -> int:
-    """The most plans a start takes at `count` pictures (the file's docstring)."""
+    """The most plans a start takes at `count` pictures for each pin it tries (the file's
+    docstring)."""
     return 5 if count == 1 else 3
+
+
+class Tried:
+    """reservation._tried replaced by a wrapper that counts the plans each pin takes."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, counter: Counted) -> None:
+        self.each: list[int] = []
+        original = reservation._tried
+
+        def counting(*args: object) -> reservation.Made:
+            before = counter.count
+            try:
+                return original(*args)  # type: ignore[arg-type]
+            finally:
+                self.each.append(counter.count - before)
+
+        monkeypatch.setattr(reservation, "_tried", counting)
 
 
 @pytest.mark.parametrize("count", [1, 2, 4])
@@ -510,9 +538,12 @@ def test_the_tries_stay_under_the_limit(
     free: int, count: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     counter = Counted(monkeypatch)
+    tried = Tried(monkeypatch, counter)
     plans, _ = counter.tries(asked(free, count), FOUR_K, count)
-    assert 1 <= plans <= reservation.TRIES
-    assert plans <= most_tries(count)  # the figures in this file's docstring
+    assert 1 <= len(tried.each) <= (1 if count == 1 else len(reservation._several(FOUR_K)))
+    assert sum(tried.each) == plans
+    assert all(1 <= each <= reservation.TRIES for each in tried.each)
+    assert max(tried.each) <= most_tries(count)  # the figures in this file's docstring
 
 
 @pytest.mark.parametrize("count", [1, 2, 4])
@@ -521,17 +552,27 @@ def test_the_tries_stay_under_the_limit_on_cards_between(
 ) -> None:
     # 2.0 to 100 GiB free in steps of 0.3, both kernels: the file's docstring counts them.
     counter = Counted(monkeypatch)
+    tried = Tried(monkeypatch, counter)
     seen: dict[int, int] = {}
+    outcomes: dict[str, int] = {}
     for tenths in range(20, 1001, 3):
         for attention in ATTENTIONS:
-            plans, _ = counter.tries(asked(tenths / 10, count, attention=attention), FOUR_K, count)
-            assert plans <= most_tries(count), (tenths, attention)
+            tried.each = []
+            wanted = asked(tenths / 10, count, attention=attention)
+            plans, outcome = counter.tries(wanted, FOUR_K, count)
+            assert max(tried.each) <= most_tries(count), (tenths, attention)
             seen[plans] = seen.get(plans, 0) + 1
+            if outcome == "fits" and count > 1:
+                pinned = reservation._made(wanted, FOUR_K, count).plan.pins.encode_tile
+                outcome = "fits" if pinned is None else "fits pinned"
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
     assert sum(seen.values()) == 654
     if count == 1:
         assert seen == {1: 449, 2: 64, 3: 55, 4: 80, 5: 6}
     else:
-        assert max(seen) == 3
+        assert seen[1] == 355 and seen[2] == 56
+        assert min(plans for plans in seen if plans > 2) == 17 and max(seen) == 36
+        assert outcomes == {"fits": 411, "fits pinned": 86, "reservation refused": 157}
 
 
 def test_the_tries_of_a_fit_follow_how_far_the_first_plan_is_over(
@@ -552,11 +593,18 @@ def test_several_pictures_take_as_many_tries_as_two_and_never_more_than_three(
     count: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     counter = Counted(monkeypatch)
+    tried = Tried(monkeypatch, counter)
     for free in (48, 96):
         assert counter.tries(asked(free, count), FOUR_K, count) == (1, "fits")
-    # Below, the plan moves blocks: refused at once, for the whole DiT.
-    assert counter.tries(asked(24, count), FOUR_K, count) == (1, "reservation refused")
-    assert counter.tries(asked(32, count), FOUR_K, count)[0] <= 3
+    # Below, no tile keeps the DiT whole with a reservation that fits: every pin tried, 3 plans
+    # at the most each, refused for the whole DiT.
+    tried.each = []
+    plans, outcome = counter.tries(asked(24, count), FOUR_K, count)
+    assert outcome == "reservation refused" and plans == sum(tried.each)
+    assert len(tried.each) == len(reservation._several(FOUR_K)) and max(tried.each) <= 3
+    tried.each = []
+    counter.tries(asked(32, count), FOUR_K, count)
+    assert max(tried.each) <= 3
 
 
 def test_a_reading_that_never_fits_ends_in_a_refusal_not_a_loop(
@@ -578,3 +626,115 @@ def test_a_reading_that_never_fits_ends_in_a_refusal_not_a_loop(
     with pytest.raises(ReservationRefused, match="doesn't fit the memory"):
         reservation._made(asked(96), FOUR_K, 1)
     assert counter.count <= reservation.TRIES
+
+
+# ---- Several pictures at once: the VAE's passes tiled smaller -----------------------------------
+
+FULL_HD: Bound = (1920, 1080)
+# The night's inputs, 1024x576, 0.6 MP (the warm-up's).
+NIGHT_INPUT = 1024 * 576
+
+
+def night(dit: Architecture, count: int) -> Asked:
+    """The RTX 5090 under WSL2 (2026-11-04, the n2 runs' logs): the run held to the card, "the
+    plan counts on 18.45 GiB of the GPU's memory, of the 23.45 GiB free on the whole card by NVML
+    (its driver reports 30.03 GiB free to this process)", 0.5 left outside torch's limit; SDPA,
+    FlashAttention 2 not installed; two pictures within 1920x1080 from 0.6 MP."""
+    held = Reading(
+        round(30.03 * GIB), round(23.45 * GIB), round(18.45 * GIB), True, left=memory.HELD_BACK
+    )
+    return Asked(FULL_HD, NIGHT_INPUT, count, 8, held, SYSTEM, peaks.SDPA, dit)
+
+
+@pytest.mark.parametrize("bound", [FULL_HD, FOUR_K, (1280, 720), (1918, 1078), (2048, 1152)])
+def test_the_tiles_tried_are_the_plans_own_sizes(bound: Bound) -> None:
+    sides = still_plan._tile_sizes(max(still_plan._frames(bound), key=max))
+    assert reservation.tile_sides(bound) == sides
+    assert reservation._several(bound) == [
+        Pins(swap_blocks=0),
+        *(Pins(side, side, swap_blocks=0) for side in sides),
+    ]
+    # A bound too small for a tile: the plan's own tiles alone.
+    assert reservation._several((128, 96)) == [Pins(swap_blocks=0)]
+
+
+def test_two_pictures_on_the_int8_dit_keep_it_whole_in_tiles_of_1088() -> None:
+    # Refused that night: the plan's own tiles kept the DiT whole at the memory counted, but
+    # reserved more than it, and lowered the DiT beside the decode on the memory lowered.
+    wanted = night(peaks.INT8, 2)
+    first = reservation._plan(wanted, FULL_HD, 2, wanted.reading, Pins(swap_blocks=0))
+    assert reservation.whole(first)
+    ceiling = reservation.ceilings(first, reservation.picture_budget(first, NIGHT_INPUT))
+    assert reservation.reserved(ceiling, 2) > first.budget
+    with pytest.raises(reservation._Moves, match="the plan moves the models"):
+        reservation._tried(wanted, FULL_HD, 2, Pins(swap_blocks=0))
+    made = reservation.make(wanted)
+    assert reservation.whole(made.plan)
+    assert made.plan.pins == Pins(1088, 1088, swap_blocks=0)
+    assert made.reservation <= wanted.reading.counted - made.plan.margin
+    assert reservation.gib(made.reservation) == "18.20"
+    assert (
+        reservation.gib(made.models) == "8.29"
+    )  # the int8 DiT and the VAE, as the plan counts them
+    assert made.reservation == reservation.reserved(reservation.ceilings(made.plan, made.budget), 2)
+    # The first side that does: every larger one moves the models or reserves too much.
+    for side in reservation.tile_sides(FULL_HD):
+        if side == 1088:
+            break
+        with pytest.raises(ReservationRefused):
+            reservation._tried(wanted, FULL_HD, 2, Pins(side, side, swap_blocks=0))
+    # Every picture within the bound has its passes, in those tiles or untiled where its frame is
+    # no larger, within the picture budget the reservation counts.
+    for target in ((1080, 1920), (1920, 1080), (720, 1280), (360, 640)):
+        tiles = still_plan.tiles(made.plan, target, made.budget)
+        for phase, chosen in (("encode", tiles.encode), ("decode", tiles.decode)):
+            assert chosen is None or chosen.size == 1088, (target, phase)
+    small = still_plan.tiles(made.plan, (360, 640), made.budget)
+    assert small.encode is None and small.decode is None
+    # Four at once reserve the same: one picture in each model at a time.
+    assert reservation.make(night(peaks.INT8, 4)).reservation == made.reservation
+
+
+def test_two_pictures_on_the_fp16_dit_are_refused_naming_what_fits() -> None:
+    # Its 15.87 GiB of DiT and two pictures' shares pass the 18.45 GiB counted at every tile:
+    # refused, naming one picture at that size and the largest size at two.
+    wanted = night(peaks.FP16, 2)
+    for pins in reservation._several(FULL_HD):
+        with pytest.raises(ReservationRefused):
+            reservation._tried(wanted, FULL_HD, 2, pins)
+    with pytest.raises(ReservationRefused) as error:
+        reservation.make(wanted)
+    assert str(error.value) == (
+        "2 pictures at once need the whole DiT on the card, every block of it in every phase and"
+        " the VAE beside it, and no plan for pictures within 1920x1080 keeps it there with their"
+        " reservation in the memory the plan counts on, the VAE's passes tiled down to 512 px;"
+        " what would fit: one picture at once within 1920x1080 (--max-concurrent), or 2 pictures"
+        " at once within 482x272 (--max-size)"
+    )
+    assert error.value.most == 1 and error.value.largest == (482, 272)
+
+
+@pytest.mark.parametrize("dit", [peaks.INT8, peaks.FP16])
+def test_one_picture_takes_the_plans_own_tiles(dit: Architecture) -> None:
+    # One picture at a time: the asked pins alone, none here, the plan's own tiles and placement
+    # (the night's: the int8 DiT lowered to 30 blocks beside the decode, the fp16 to 22 and 15
+    # beside the encode and the decode and the VAE away from the DiT's phase), as before.
+    wanted = night(dit, 1)
+    made = reservation.make(wanted)
+    assert made.plan.pins == still_plan.NO_PINS
+    assert made == reservation._tried(wanted, FULL_HD, 1, still_plan.NO_PINS)
+    models = made.plan.models
+    if dit == peaks.INT8:
+        assert (models.resident_encode, models.resident_decode, models.vae_in_dit) == (
+            None,
+            30,
+            True,
+        )
+        assert reservation.gib(made.reservation) == "18.43"
+    else:
+        assert (models.resident_encode, models.resident_decode, models.vae_in_dit) == (
+            22,
+            15,
+            False,
+        )
+        assert reservation.gib(made.reservation) == "18.42"

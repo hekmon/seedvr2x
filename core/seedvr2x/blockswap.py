@@ -40,6 +40,7 @@ from typing import Any, cast
 import torch
 from torch import Tensor
 
+from seedvr2x import memory
 from seedvr2x.errors import Refusal
 from seedvr2x.passes import Phase
 from seedvr2x.weights import AGAIN, SLOTS, ModelError
@@ -170,7 +171,17 @@ class Cuda:
         buffers of it. A card that refuses makes the allocator give it back when it must; one
         whose driver spills into system memory never does (research/scripts/spill_probe.py):
         there the driver had 5.5 GiB free in the VAE's phase after the whole DiT had left, and
-        29.3 with this, for 0.28 s (DESIGN.md, BlockSwap, rewritten, Per phase)."""
+        29.3 with this, for 0.28 s (DESIGN.md, BlockSwap, rewritten, Per phase).
+
+        Nothing where a caller keeps a reservation (memory.keep, the image server's): the freed
+        weights' memory is then the reservation's, which the next phase's work is counted in;
+        given back to the card, it would leave the reservation at every phase that sends
+        weights away (an RTX 5090 under WSL2, 2026-11-04: at every picture of 12). Under the
+        reservation's limit torch gives its cache back itself where an allocation can't
+        otherwise be served (memory.keep)."""
+        if memory.kept() is not None:
+            logger.debug("torch's cache kept as weights leave the GPU: the reservation holds it")
+            return
         torch.cuda.empty_cache()
 
     def wait(self, *streams: Any) -> None:

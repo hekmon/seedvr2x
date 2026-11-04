@@ -2231,3 +2231,194 @@ def test_a_driver_that_spills_is_warned_of_in_a_line_each_at_every_start(
     assert caplog.messages[0] == LENDS_LINE
     assert caplog.messages[1] == HOLDS_LINE
     assert all(len(message) < 220 for message in caplog.messages)
+
+
+# ---- A reservation kept (memory.keep, the image server's) ----------------------------------------
+
+
+class Allocator:
+    """torch's caching allocator, in stand-in: what it reserves of the card, the blocks in use and
+    those it keeps free, an allocation served by the smallest free block that holds it (the rest
+    of that block kept free) or by a new segment of its size, which the card's free memory by
+    NVML (`nvml`, the stand-in's NAMED card) loses; empty_cache gives the free blocks back to the
+    card. torch.empty, memory_reserved, memory_allocated, empty_cache, mem_get_info and
+    set_per_process_memory_fraction in torch's place; the limits given, as fractions of a 32 GiB
+    card, in `limits`."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, nvml: Nvml | None, reserved: int) -> None:
+        self.nvml = nvml
+        self.used = reserved
+        self.free: list[int] = []
+        self.limits: list[float] = []
+        self.emptied = 0
+        self.cuda_free = 0
+        cuda = torch.cuda
+        monkeypatch.setattr(cuda, "memory_reserved", lambda device: self.reserved)
+        monkeypatch.setattr(cuda, "memory_allocated", lambda device: self.used)
+        monkeypatch.setattr(cuda, "empty_cache", self.empty_cache)
+        monkeypatch.setattr(cuda, "mem_get_info", lambda device: (self.cuda_free, 32 * GIB))
+        monkeypatch.setattr(
+            cuda, "set_per_process_memory_fraction", lambda f, device: self.limits.append(f)
+        )
+        original = torch.empty
+
+        def empty(*size: Any, dtype: Any = None, device: Any = None) -> Any:
+            if device is None or str(device) == "cpu":
+                return original(*size, dtype=dtype)
+            return self.allocate(int(size[0]))
+
+        monkeypatch.setattr(torch, "empty", empty)
+
+    @property
+    def reserved(self) -> int:
+        return self.used + sum(self.free)
+
+    def allocate(self, size: int) -> "Block":
+        holding = sorted(block for block in self.free if block >= size)
+        if holding:
+            self.free.remove(holding[0])
+            if holding[0] > size:
+                self.free.append(holding[0] - size)
+        elif self.nvml is not None:
+            self.nvml.cards[NAMED] -= size
+        self.used += size
+        return Block(self, size)
+
+    def empty_cache(self) -> None:
+        if self.nvml is not None:
+            self.nvml.cards[NAMED] += sum(self.free)
+        self.free = []
+        self.emptied += 1
+
+
+class Block:
+    """An allocation of the stand-in allocator, freed to its cache when dropped."""
+
+    def __init__(self, allocator: Allocator, size: int) -> None:
+        self.allocator, self.size = allocator, size
+
+    def __del__(self) -> None:
+        self.allocator.used -= self.size
+        self.allocator.free.append(self.size)
+
+
+def kept_run(monkeypatch: pytest.MonkeyPatch, nvml: Nvml) -> Allocator:
+    """A held run (held_run: the plan's limit 25.5 GiB, the card's 26 free less 0.5) whose models
+    loaded take 8 GiB of the card, 18 left free, torch holding them; the stand-in allocator in
+    torch's place from there."""
+    monkeypatch.setattr(memory, "_kept", None)
+    held_run(monkeypatch, nvml)
+    nvml.cards[NAMED] = 18 * GIB
+    return Allocator(monkeypatch, nvml, 8 * GIB)
+
+
+def test_a_reservation_is_reserved_whatever_torch_s_cache_serves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A driver that refuses: nothing judged. torch holds 14 GiB, 6 in use and 8 free in its cache
+    # (a picture's decode freed): one allocation of the 4 missing for 18 would be served from that
+    # cache and reserve nothing more, which held the image server's 17.79 GiB at 14.57 on the RTX
+    # 5090 (2026-11-04). Kept until it is reached: 18 reserved, the limit set at 18 of 32.
+    monkeypatch.setattr(memory, "_kept", None)
+    startup(monkeypatch, None)
+    allocator = Allocator(monkeypatch, None, 6 * GIB)
+    allocator.free = [8 * GIB]
+    assert memory.kept() is None
+    memory.keep("cuda:0", 18 * GIB)
+    assert allocator.reserved == 18 * GIB and allocator.used == 6 * GIB
+    assert allocator.limits == [18 / 32]
+    assert memory.kept() == 18 * GIB
+    # Within a large allocation's rounding of it, never past it.
+    allocator = Allocator(monkeypatch, None, 6 * GIB)
+    memory.keep("cuda:0", 18 * GIB - 5 * memory.ROUND_LARGE - 1)
+    assert 0 <= 18 * GIB - 5 * memory.ROUND_LARGE - 1 - allocator.reserved < memory.MIN_LARGE
+    # A new start keeps none.
+    startup(monkeypatch, None)
+    assert memory.kept() is None
+
+
+def test_a_kept_reservation_is_the_run_s_own_to_the_checks(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The night's case (an RTX 5090 under WSL2, 2026-11-04): the image server's reservation under
+    # the plan's limit, the checks counting what torch may still take from that limit: 25.5 - 20
+    # here, 5.5 GiB, where the card has 6 free once the reservation is taken, 0.5 to spare. The
+    # memory outside torch growing 1 GiB (cuBLAS's and cuDNN's), a check would find the card
+    # short and give torch's cache, the reservation's free part, back. Kept, the limit is the
+    # reservation: torch reserving all of it may take nothing more, and nothing is given back.
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    nvml = Nvml({NAMED: 26 * GIB})
+    allocator = kept_run(monkeypatch, nvml)
+    memory.keep("cuda:0", 20 * GIB)
+    assert allocator.reserved == 20 * GIB and nvml.cards[NAMED] == 6 * GIB
+    assert allocator.limits == [20 / 32]
+    nvml.cards[NAMED] = 5 * GIB
+    said = len(caplog.records)
+    for _ in range(3):
+        memory.check("cuda:0")
+    assert allocator.emptied == 0 and allocator.limits == [20 / 32]
+    assert [record.levelname for record in caplog.records[said:]] == []
+    # torch giving 4 GiB of it back at its cap, the card able to give it again: nothing; taken
+    # again, the card judged first: 4 needed, 9 free.
+    allocator.free = []
+    allocator.used = 16 * GIB
+    nvml.cards[NAMED] = 9 * GIB
+    memory.check("cuda:0")
+    assert allocator.emptied == 0
+    memory.keep("cuda:0", 20 * GIB)
+    assert allocator.reserved == 20 * GIB and nvml.cards[NAMED] == 5 * GIB
+
+
+def test_a_kept_reservation_still_holds_the_run_to_the_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The bound holds: a reservation the card can't give with 0.5 GiB left to the rest of it is
+    # refused, nothing set, the driver lending system memory in its place.
+    nvml = Nvml({NAMED: 26 * GIB})
+    allocator = kept_run(monkeypatch, nvml)
+    with pytest.raises(torch.OutOfMemoryError, match=r"needs 17\.51 GiB more of the GPU, which"):
+        memory.keep("cuda:0", round(25.51 * GIB))
+    assert allocator.reserved == 8 * GIB and allocator.limits == [] and memory.kept() is None
+    memory.keep("cuda:0", round(25.5 * GIB))
+    assert allocator.reserved == round(25.5 * GIB)
+    # Kept at 20, torch giving 4 GiB of it back, then another program taking the card to 2 GiB
+    # free: a check finds the card short of what torch may still take under the reservation,
+    # gives the cache back, and stops the picture; taken again, the card can't give it.
+    nvml = Nvml({NAMED: 26 * GIB})
+    allocator = kept_run(monkeypatch, nvml)
+    memory.keep("cuda:0", 20 * GIB)
+    allocator.free = []
+    allocator.used = 16 * GIB
+    nvml.cards[NAMED] = 2 * GIB
+    with pytest.raises(torch.OutOfMemoryError, match=r"may still take 4\.00"):
+        memory.check("cuda:0")
+    assert allocator.emptied == 1
+    with pytest.raises(torch.OutOfMemoryError, match=r"needs 4\.00 GiB more of the GPU"):
+        memory.keep("cuda:0", 20 * GIB)
+    # NVML silent on the card's footing: not taken on the driver's figure.
+    nvml.failing = "nvmlDeviceGetMemoryInfo"
+    with pytest.raises(torch.OutOfMemoryError, match="couldn't be read through NVML"):
+        memory.keep("cuda:0", 20 * GIB)
+
+
+def test_a_kept_reservation_is_not_given_back_as_weights_leave(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The placement's trim (blockswap.Cuda.trim), at every phase that sends weights away, gave the
+    # image server's reservation back to the card at every picture: kept, it leaves the cache
+    # alone, said at debug level; with none kept, as before.
+    from seedvr2x import blockswap
+
+    caplog.set_level(logging.DEBUG, logger="seedvr2x")
+    emptied: list[int] = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append(1))
+    monkeypatch.setattr(memory, "_kept", None)
+    backend = blockswap.Cuda(torch.device("cuda", 0))
+    backend.trim()
+    assert emptied == [1]
+    monkeypatch.setattr(memory, "_kept", 20 * GIB)
+    backend.trim()
+    assert emptied == [1]
+    assert caplog.messages[-1] == (
+        "torch's cache kept as weights leave the GPU: the reservation holds it"
+    )

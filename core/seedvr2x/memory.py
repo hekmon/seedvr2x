@@ -521,6 +521,16 @@ _footing: str | None = None
 # it wasn't read then, or no plan made yet: what the limit is set from where NVML, having given it
 # to the plan, fails as the limit is set (hold).
 _planned: int | None = None
+# The reservation a caller keeps torch's allocator at (keep), in bytes: the image server's, which
+# holds torch's cache for the process; None where none does (the CLI, whose phases give their
+# cache back to the card: blockswap.Cuda.trim).
+_kept: int | None = None
+# torch's caching allocator rounds an allocation of kMinLargeAlloc (10 MiB) and more up to
+# kRoundLarge (2 MiB) and gives it a segment of that size, where a smaller one may take a buffer
+# of 20 MiB (c10/core/AllocatorConfig.h, torch 2.14.1): keep takes the reservation in such
+# allocations, so that what torch reserves never passes the reservation.
+ROUND_LARGE = 2 << 20
+MIN_LARGE = 10 << 20
 
 
 class _Memory(ctypes.Structure):
@@ -551,9 +561,9 @@ def startup() -> str:
     the card didn't have every time it was asked, and a run held for nothing loses memory, a
     run not held where it should be loses its frames."""
     global _spills, _native, _segments, _limit, _left, _footing, _planned, _plan_s_limit, _base
-    global _reserve
+    global _reserve, _kept
     _spills, _limit, _left, _footing, _planned = False, None, HELD_BACK, None, None
-    _plan_s_limit, _base, _reserve = None, None, RESERVE
+    _plan_s_limit, _base, _reserve, _kept = None, None, RESERVE, None
     if paravirtual():
         found = probe()
         if found is None:
@@ -1011,6 +1021,94 @@ def check(device: Any) -> None:
         f" outside that allocator grew {_up(grown)} GiB {where} since torch's limit was set"
         f"{bound}"
     )
+
+
+def keep(device: Any, size: int) -> None:
+    """torch's allocator on `device` (a torch.device) made to reserve `size` bytes in all, what it
+    holds already included, kept for the process and capped there: for a caller that reserves
+    the GPU's memory once and keeps it, the image server (apps/imgserver/service.py; DESIGN.md,
+    The image server, Its start). torch.OutOfMemoryError where the card can't give it.
+
+    What torch doesn't reserve yet is allocated and freed, the allocator keeping it (it gives
+    memory back to the card on empty_cache(), or to serve an allocation it can't otherwise under
+    its limit), in allocations kept until the reservation is reached: one allocation of what is
+    missing would be served from torch's free cache where it has a block that large, and reserve
+    nothing more (an RTX 5090 under WSL2, 2026-11-04: an image server's reservation of 17.79 GiB
+    taken again so held 14.57 GiB, the decode's freed buffers serving it). Each a multiple of
+    ROUND_LARGE and at least MIN_LARGE, so that torch reserves no more than `size`: within 10
+    MiB of it.
+
+    Then torch's limit is `size` (set_per_process_memory_fraction), and while a caller keeps a
+    reservation the models' moves between phases leave torch's cache alone (kept;
+    blockswap.Cuda.trim): given back to the card at every phase that sends weights away, the
+    reservation would go back with it, as it went at every picture of the image server whose
+    plan moved the DiT's blocks for its decode (the same night, 12 pictures of 12, int8 and
+    fp16).
+
+    On a driver that spills, held (hold), the card is judged first, on the run's footing as a
+    check judges it (_footing): what torch doesn't reserve yet must be free on the card, with
+    HELD_BACK left to the rest of it outside torch's limit, as hold sets a limit; refused
+    otherwise, the driver lending system memory in its place (DESIGN.md, Allocator). NVML failing
+    twice on the card's footing refuses it too: the driver's figure isn't the card's near a full
+    card (check). The checks then count from the reservation: the limit is `size` (_limit), and
+    what torch reserves of it is the run's own, so that a check finds the card short only where
+    torch has given part of it back and the card can't give it again. Nothing is judged on a
+    driver that refuses, which refuses what the card can't hold itself."""
+    global _kept, _limit, _base
+    import torch
+
+    reserved = int(torch.cuda.memory_reserved(device))
+    reported, total = torch.cuda.mem_get_info(device)
+    judged: int | None = None
+    if _spills and _limit is not None:
+        card: int | None = None
+        if _footing == CARD:
+            read = _twice(_index(device))
+            if not isinstance(read, int):
+                raise torch.OutOfMemoryError(
+                    f"the reservation of {size / GIB:.2f} GiB isn't taken: the whole card's free"
+                    f" memory couldn't be read through NVML, asked twice ({read}), and the"
+                    " driver's figure isn't the card's near a full card"
+                )
+            card = read
+        judged = reported if card is None else card
+        need = size - reserved
+        if need > 0 and judged - need < _left:
+            raise torch.OutOfMemoryError(
+                f"the reservation of {size / GIB:.2f} GiB needs {_up(need)} GiB more of the GPU,"
+                f" which has {_down(judged)} GiB free {_named(reported, card, smaller=False)},"
+                f" {_left / GIB:.1f} of them left to the rest of the card outside torch's"
+                " limit: the run holds itself to the card's own memory, which other programs"
+                " hold the rest of, where its driver would lend system memory"
+            )
+    fraction = min(size / total, 1.0)
+    torch.cuda.set_per_process_memory_fraction(fraction, device)  # pyright: ignore[reportUnknownMemberType]
+    blocks: list[Any] = []
+    # What torch holds in use bounds the takes: every byte allocated is reserved, so once they
+    # reach what is missing over it the reservation is reached, whatever the cache served.
+    allowed = size - int(torch.cuda.memory_allocated(device))
+    taken = 0
+    while taken < allowed:
+        missing = (size - int(torch.cuda.memory_reserved(device))) // ROUND_LARGE * ROUND_LARGE
+        if missing < MIN_LARGE:
+            break
+        blocks.append(torch.empty(missing, dtype=torch.uint8, device=device))
+        taken += missing
+    del blocks
+    _kept = size
+    if judged is not None:
+        _limit, _base = size, (judged, reserved)
+    logger.debug(
+        "torch's allocator reserves %.2f GiB on the GPU, kept and capped at %.2f",
+        int(torch.cuda.memory_reserved(device)) / GIB,
+        size / GIB,
+    )
+
+
+def kept() -> int | None:
+    """The reservation a caller keeps torch's allocator at (keep), in bytes; None where none
+    does, the CLI's runs."""
+    return _kept
 
 
 def _figures(device: Any, again: bool = False) -> tuple[int, int, int | None] | None:
