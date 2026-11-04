@@ -108,13 +108,14 @@ as possible:
     that it runs the same model. Since then seedvr2x's own outputs are its reference, and the
     model code changes wherever a measurement shows a gain.
 - **Next, after 0.1.0:**
+  - **Version 0.2.0, Windows, macOS and every model file:** the `seedvr2x` command on Windows
+    and on macOS (Apple's M chips), Linux and WSL2 running it today; and the 7B's other smaller
+    files, already published: fp8, NVFP4 and the other GGUF types, 4.8 to 8.8 GB instead of
+    16.5.
   - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows: begun, published
     with version 0.2.0, on Linux, Windows and macOS.
-  - **The 7B's other smaller files,** already published: fp8, NVFP4 and the other GGUF types,
-    4.8 to 8.8 GB instead of 16.5.
 - **Later:**
-  - **Windows and macOS:** the `seedvr2x` command on both in version 0.2.0, macOS on Apple's M
-    chips. Linux and WSL2 run it today.
+  - **Several GPUs for one job,** one process per card, each taking its own shots.
   - **HDR sources,** their HDR10 metadata carried to the output.
   - **NVIDIA's machines whose CPU and GPU share one memory,** as a Mac's do: the DGX Spark and
     the RTX Spark PCs.
