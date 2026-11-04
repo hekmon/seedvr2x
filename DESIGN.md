@@ -555,20 +555,25 @@ connect through files.
   About 11k lines ([provenance](research/docs/provenance.md)).
 - The submodules stay untouched. A script (`tools/vendor.py diff`) diffs seedvr2x's copy against
   numz and ByteDance, so every change stays visible.
-- **numz's model until v0.1.0, then seedvr2x's own** (the user, 2026-11-04). Until v0.1.0 is
-  released, every change here and in the runtime is held bit for bit to numz by the milestone-1
-  regression, as below, so that the first release is proven to run numz's model. After it,
-  seedvr2x stands on its own:
-  - the regression's references become seedvr2x's, the files as they are (bit-identical to
-    numz's output on 2026-11-04's gate); a change that moves the output's bits is allowed with a
-    measured reason, and remakes them, said in its commit;
-  - this copy becomes seedvr2x's to change, each change still marked as the licence asks, and
+- **seedvr2x's own model since 2026-11-04** (the user, cutting the link to numz that day
+  rather than at v0.1.0, as decided that morning: the link held features back, and its proof
+  was made). seedvr2x's output was numz's bit for bit at the gate of 2026-11-04 (main
+  4325101): numz's 7B fp16, seedvr2x's own 7B and its sharp 7B against numz's run of its sharp
+  7B, all in numz's padding, and seedvr2x's own padding against numz patched to pad the same
+  way, at 1080p, at 720p and on a crop: the proof that seedvr2x runs numz's model. Since then:
+  - the milestone-1 regression keeps its bit-for-bit check, on seedvr2x's own references: its
+    output made once on main's code and checked equal to numz's in the same run, the last
+    comparison with numz; a change that moves the output's bits is allowed with a measured
+    reason, and remakes them, said in its commit;
+  - this copy is seedvr2x's to change, each change still marked as the licence asks, and
     `tools/vendor.py` still showing the diff against numz and ByteDance;
   - numz's padding mode, a mode of the tests alone, retires once the references are remade in
     seedvr2x's own padding;
-  - then what the link kept out is looked at again: batching several pictures in one DiT pass,
-    ByteDance's `repeat_concat_idx` restored ([The image server](#the-image-server)), and a
-    picture's resize from a contiguous input ([Still images](#still-images)).
+  - what the link kept out is looked at again, each on its measurement: batching several
+    pictures in one DiT pass, ByteDance's `repeat_concat_idx` restored
+    ([The image server](#the-image-server)), a picture's resize from a contiguous input
+    ([Still images](#still-images)), and numz's bugs in this copy
+    ([research/bugs](research/bugs/)).
 
   numz stays credited for the code seedvr2x runs: this copy, and the VAE passes and tiling
   adapted from numz's own (`core/NOTICE`).
@@ -725,10 +730,12 @@ two 7Bs' smaller files (below), their int8 and dynamic GGUF files before v0.1.0:
     the plan names the smaller files, in a line and in a refusal's way out, and never changes
     the file by itself.
 
-  Under the link to numz until v0.1.0 ([Vendored model code](#vendored-model-code)), its output
-  is held to numz's run of the same file, which is how the model card's validation ran it
-  (numz's GGUF loader, `models/VALIDATION.md`): bit for bit where the arithmetic allows, else
-  the difference shown, its cause named, and the output within the model card's figures.
+  Held to GGUF's own arithmetic, not to numz's run (the user, 2026-11-04, the link to numz cut:
+  [Vendored model code](#vendored-model-code)): its dequantisation equal, in float32, to
+  ggml's, and its output within the model card's figures for the file, measured against
+  float16 as the model card measures it. numz's GGUF path, which the model card's validation
+  ran (`models/VALIDATION.md`), decodes in float16: its output is compared once, for the
+  record, not matched.
 - **The sharp 7B is the default, on the user's eyes** (2026-10-07): on 75 windows of 4K and
   1080p crops they preferred it or saw no difference on 67 (it 27, the 7B 8), the grainy first
   film's skin no longer "almost reptilian". At 4K it invents less of the fine texture the eyes
@@ -2669,10 +2676,10 @@ library's four modules.
     the text of the wrong sample and fails on two sizes, where ByteDance's
     (`models/dit_v2/na.py:101-142` at e4de8c2) doesn't: harmless at the batch of one seedvr2x
     runs.
-  - Decided (the user, 2026-11-04): no batching in v0.1.0; the card measures 1, 2 and 4 at once
-    by the locks as built. After v0.1.0, the link to numz cut ([Vendored model
-    code](#vendored-model-code)), batching is measured again on the 96 GB card with ByteDance's
-    `repeat_concat_idx` restored, and decided on its figures.
+  - Decided (the user, 2026-11-04): the card measures 1, 2 and 4 at once by the locks as built.
+    The link to numz cut the same day ([Vendored model code](#vendored-model-code)), batching
+    is measured there too with ByteDance's `repeat_concat_idx` restored, and its figures decide
+    whether v0.1.0 has it.
 - **`/health`**, for a container's probes: 503 `starting` until the warm-up has passed; 200
   `ready`; 503 `stopping`; 503 `failed` after a CUDA error other than out-of-memory, which
   leaves the card's state untrusted: the pictures running are answered 500, the waiting ones
