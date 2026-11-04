@@ -104,13 +104,12 @@ as possible:
     container.
   - **The 7B in smaller files,** for smaller cards: int8, 8.3 GB, and a GGUF of 4.8 GB, instead
     of the float16's 16.5, less of it held in the computer's memory and moved to the card.
+  - **seedvr2x on its own:** its output was numz's CLI's bit for bit on 2026-11-04, the proof
+    that it runs the same model. Since then seedvr2x's own outputs are its reference, and the
+    model code changes wherever a measurement shows a gain.
 - **Next, after 0.1.0:**
   - **ComfyUI nodes,** built on the same library, for ComfyUI's own workflows: begun, published
     with version 0.2.0, on Linux, Windows and macOS.
-  - **seedvr2x on its own:** 0.1.0's output is held bit for bit to numz's CLI, which proves it
-    runs the same model. After it, seedvr2x's own outputs become its reference, and the model
-    code changes wherever a measurement shows a gain, several pictures in one pass for the image
-    server first.
   - **The 7B's other smaller files,** already published: fp8, NVFP4 and the other GGUF types,
     4.8 to 8.8 GB instead of 16.5.
 - **Later:**
