@@ -2414,8 +2414,10 @@ measured that day on test files, against ffmpeg 9.0's decode.
   - Several reads at once double 9p's rate (about 480 MB/s on 4 streams): not taken, the gain
     being WSL's alone.
 - **The plan for one picture** (`still_plan.py`): made for a bound, the output's long and
-  short sides in either orientation; the CLI's bound is its picture, the server's its
-  largest.
+  short sides: the server's, its largest picture in either orientation; the CLI's, its one
+  picture as stored, the way the model sees it (decided on 2026-11-04, design, to build: in
+  either orientation, a pin of 0 was refused for a landscape 1080p picture that the plan
+  itself took untiled, the portrait frame being past the one measured untiled).
   - The DiT's and the VAE's placement (`ModelPlan`) is fixed once for the bound: the DiT on
     one latent (the VAE away first, then the fewest blocks swapped), the colour correction's
     term at the bound's area, and the floor proved over every shape a picture within the
@@ -2459,6 +2461,11 @@ measured that day on test files, against ffmpeg 9.0's decode.
     workspace, and the server's reservation on reserved figures. A contiguous input to the
     resize, which would drop a copy and a write, waits for its bits to be checked against the
     video path's.
+  - Built (1b96b25) and run on the RTX 5090 (2026-11-04, the desktop live, a 4 GiB ballast):
+    every phase's allocated peak at or under the plan's, the DiT's the tightest, 0.13 to 0.14
+    GiB under (1920×1080 to 4K, 3000×2000 to 6000×4000, 12000×6750 down to 4K); the plan's
+    own untiled 1080p picture bit for bit to a shot of one frame, 21.39 GiB allocated against
+    the decode's 21.52 predicted.
   - The host's figure for the CLI is a video job's process (2.4 GiB, `HOST_RESIDENT`) plus
     the picture's own arrays, provisional until the card measures a still's; the server's is
     a parameter of the plan.
@@ -2482,25 +2489,39 @@ CLI over HTTP. A request sets its size and, if it wants, its seed; everything el
 the server's start. Its pictures follow [Still images](#still-images)'s rules, through the
 library's four modules.
 
-- **Its start:** `seedvr2x-imgserver`, with `--listen` (127.0.0.1 and a port of its own by
-  default, not ComfyUI's 8188), `--max-size` (the largest output, 3840×2160 by default, in
-  either orientation), `--max-input` (the largest picture taken, in pixels), `--max-concurrent`
-  (the pictures upscaled at once), `--queue` (the pictures waiting, 8 by default), the CLI's
-  model options, its pins (at one picture at a time only), `--api-key`, and `-v`.
+- **Its start:** `seedvr2x-imgserver`, with `--listen` (127.0.0.1:8390 by default, a port of
+  its own, not ComfyUI's 8188; or `SEEDVR2X_LISTEN`, the option winning), `--max-size` (the
+  largest output, 3840×2160 by default, in either orientation), `--max-input` (the largest
+  picture taken, 50 MP by default), `--max-concurrent` (the pictures in flight, 1 by default),
+  `--queue` (the pictures waiting, 8 by default), the CLI's model options, its pins (at one
+  picture at a time only), `--api-key`, and `-v`. Built on 2026-11-03 and 04 (impl-imgserver).
   - It listens at once, then checks the model files as the CLI does, pulling them at the pinned
-    revision where they are missing, reads the card, and makes its reservation: the models,
-    `--max-concurrent` pictures at `--max-size` from inputs of `--max-input`, and the margin.
-    More than one picture at a time needs the whole DiT on the card; one at a time may swap
-    blocks. Where the card can't free the reservation, the start is refused, naming the most
-    pictures at that size, and the largest size at that count, that would fit.
-  - The reservation is held: allocated once, then freed, torch's allocator keeping it for the
-    process (it gives memory back to the card only on `empty_cache()`), and capped there
-    (`torch.cuda.set_per_process_memory_fraction`, as `memory.hold` sets it on a driver that
-    spills). The CUDA context, outside torch's allocator, comes on top, said so.
-  - A warm-up runs `--max-concurrent` pictures at `--max-size` at once through the models,
-    proving the plan on the card before the first request.
-  - Its log says the reservation, what it holds, and what fits in it: the largest single
-    picture, and the most pictures at `--max-size`.
+    revision where they are missing, reads the card, and makes its reservation: what the
+    models and `--max-concurrent` pictures at `--max-size` from inputs of `--max-input` take
+    with the plan's tiles, and the margin, not the whole card (4K from 50 MP: 40.7 GiB on the
+    96 GB card). More than one picture at a time needs the whole DiT on the card; one at a
+    time may swap blocks. For several, the plan's tiles first, then both VAE passes pinned to
+    each tile side down to 512 px, the first plan that keeps the DiT whole and fits; the log
+    names the tiles. Where the card can't free the reservation, the start is refused, naming
+    the most pictures at that size, and the largest size at that count, that would fit.
+  - Its allocator is torch's own with expandable segments, a user's setting kept and
+    `cudaMallocAsync` warned of: the cap must hold, which `cudaMallocAsync` went 2.06 GiB past
+    ([Allocator](#allocator)).
+  - The reservation is held: taken in allocations kept until torch has reserved it, freed into
+    torch's cache and capped there (`torch.cuda.set_per_process_memory_fraction`, as
+    `memory.hold` sets it on a driver that spills). torch gives cached memory back to the card
+    on `empty_cache()`, which the placement's trims call as the plan moves the models between
+    phases, and where an allocation under the cap can't be served from its cache: the trims do
+    nothing while the server holds its reservation, and it takes back what was given when no
+    picture runs, saying so. Lost after every picture before that (the RTX 5090, 2026-11-04:
+    14.6 of 17.8 GiB kept), the pictures ran 13% (int8) and 27% (fp16) slower. The CUDA
+    context, outside torch's allocator, comes on top, said so.
+  - A warm-up runs `--max-concurrent` pictures at `--max-size` at once through the models, at
+    the bound's ratio with the input as large as `--max-input` allows there, in both
+    orientations, proving the plan on the card before the first request.
+  - Its log says the reservation, what it holds, and what fits: one picture at a time within
+    `--max-size`, a larger one refused; or that many pictures in flight within it, two on the
+    GPU at a time, one in each model.
 - **A request:** `POST /upscale`, the picture's bytes as the body, told by its content as a
   file is, never by its Content-Type.
   - `Seedvr2x-Resolution`, the output's short side, is required. `Seedvr2x-Seed` is optional:
@@ -2513,6 +2534,9 @@ library's four modules.
     (a grainy 3840×2880 picture: 10 MB at 8 bits, 46 MB at 16).
   - The answer: the picture, with `Seedvr2x-Seed`, the source's and the output's sizes, and
     `Server-Timing` (the wait in the queue, the upscale).
+  - `OPTIONS /upscale` says what it takes (the user, 2026-11-04): 204, `Allow: POST, OPTIONS`
+    and `Accept-Post` (W3C LDP's field) with the media types of the library's formats, behind
+    the key; the 422 for a body that is no picture taken carries the same field.
   - Errors, each with seedvr2x's message as text: 400, a header wrong or unknown; 401, a key
     missing or wrong; 406, an `Accept` it can't meet; 413, a body over the limit; 422, a
     picture refused or over the limits; 503 with `Retry-After`, the queue full, or the server
@@ -2520,21 +2544,44 @@ library's four modules.
     server still running. The library's refusals carry the reason and the way out apart: the
     CLI adds its ffmpeg command, with the file's name; the server words its own, with neither
     (the user, 2026-11-03: Pillow alone, no ffmpeg, in production).
+  - Built so too (impl-imgserver, design's yes, 2026-11-03): 411 for a body without its
+    length; 404, 405 and 501 for another path or method; `Retry-After: 15`; a client's head
+    within 20 s and its body at 64 KiB/s at least, plus 20 s; connections capped at the
+    pictures in flight and waiting, plus 32.
 - **Running:** a picture is read and checked in its request's thread, a refusal answered at
-  once. It starts on the GPU when its predicted peak fits in what is left of the reservation,
-  at most `--max-concurrent` at once, so smaller pictures run more at once than the limit's
-  count; else it waits, up to `--queue`. Its file is written in its request's thread. Nothing
-  is written to disk; a client gone while its picture waits is dropped.
+  once. At most `--max-concurrent` pictures are in flight, the others waiting, up to `--queue`.
+  On the GPU, one picture per model at a time (the VAE's encode or decode, the DiT's pass): one
+  picture's DiT runs while another's VAE does, their work on the CPU (reading, tiles, PNG)
+  beside them, and the reservation counts the models, one VAE share and one DiT share. A
+  picture's bits are its own alone, the same kernels on the same shapes, nothing drawn from
+  torch's global generators: equal to the CLI's for the same picture, seed and tiles (the RTX
+  5090, 2026-11-04, at one at a time and at two). Its file is written in its request's thread.
+  Nothing is written to disk; a client gone while its picture waits is dropped.
 - **Several pictures at once** (the user, 2026-11-03: in v0.1.0, a small scope to measure it
-  in): measured on the card before a default is set, at 1, 2 and 4 at once on small, medium and
-  large pictures, by CUDA streams or by several pictures in one DiT pass (the DiT packs samples
-  of different shapes; whether it takes several pictures is checked). A picture is one DiT
-  pass over thousands of tokens (about 1,000 at 512×512, 8,000 at 1080p, 32,000 at 4K), as an
-  LLM's prompt is, not its token-by-token decoding, where batching gains the most.
+  in). A picture is one DiT pass over thousands of tokens (about 1,000 at 512×512, 8,000 at
+  1080p, 32,000 at 4K), as an LLM's prompt is, not its token-by-token decoding, where batching
+  gains the most. Two passes in one VAE at once can't run: its causal convolutions keep their
+  memory in its modules.
+  - Measured on the RTX 5090 (2026-11-04, the desktop live, rough): 12 pictures, 720p and
+    1080p from 4 clients, 40.3 a minute with the int8 DiT one at a time, 42.8 two at once
+    (+6%); 38.5 with fp16 one at a time, two refused on 32 GB (the DiT whole leaves no room).
+  - Batching, several pictures in one DiT pass, measured there too: 8 to 11% less DiT time for
+    two 720p pictures or a 720p and a 1080p, and a picture's bits no longer its own (43 to
+    48 dB against the picture alone; int8's integer products don't make it hold). numz's
+    rewrite of `repeat_concat_idx` (`vendor/models/dit_7b/na.py:320`) gives a batch's windows
+    the text of the wrong sample and fails on two sizes, where ByteDance's
+    (`models/dit_v2/na.py:101-142` at e4de8c2) doesn't: harmless at the batch of one seedvr2x
+    runs.
+  - Decided (the user, 2026-11-04): no batching in v0.1.0; the card measures 1, 2 and 4 at once
+    by the locks as built. After v0.1.0, the link to numz cut ([Vendored model
+    code](#vendored-model-code)), batching is measured again on the 96 GB card with ByteDance's
+    `repeat_concat_idx` restored, and decided on its figures.
 - **`/health`**, for a container's probes: 503 `starting` until the warm-up has passed; 200
   `ready`; 503 `stopping`; 503 `failed` after a CUDA error other than out-of-memory, which
-  leaves the card's state untrusted, no picture taken after it, the orchestrator restarting
-  the container.
+  leaves the card's state untrusted: the pictures running are answered 500, the waiting ones
+  503, then the process exits with code 3 (0 stopped, 1 a start refused, 2 a wrong option,
+  128+N a second signal), so that Docker's `--restart` and Kubernetes restart it (the user,
+  2026-11-03: plain Docker acts on an exit, never on a health check).
 - **`/metrics`:** Prometheus' text format, written by the server with no dependency, its tests
   reading it with `prometheus_client`'s parser, a dependency of the tests alone: requests by
   status, the upscale's and the wait's times, the pictures running and waiting, the output's
@@ -2550,19 +2597,32 @@ library's four modules.
 - **Stopping** (SIGTERM, Ctrl-C): no new request, the pictures running finished, the waiting
   ones answered 503, then the exit.
 - **Access:** 127.0.0.1 by default. In a container the server listens on 0.0.0.0, which port
-  publishing needs; the docs publish it on 127.0.0.1 unless a proxy is in front.
+  publishing needs, set by the image's `SEEDVR2X_LISTEN` (the user, 2026-11-04: an address in
+  the entrypoint can't be changed, and one in `CMD` is dropped by any option given); the docs
+  publish it on 127.0.0.1 unless a proxy is in front.
 - **HTTP:** Python's standard library (`ThreadingHTTPServer`), no new dependency; Python's own
   docs call it not hardened for production, which the proxy covers.
 - **The Docker image:** a Dockerfile in `apps/imgserver/`, the server's lock installed by uv
   on a slim Linux image, CUDA's libraries coming with PyTorch's wheels; the host gives the
-  NVIDIA driver and Container Toolkit. No ffmpeg. The models stay outside: a volume for
-  Hugging Face's cache, or a model directory mounted read-only, `HF_HUB_OFFLINE` for closed
-  networks. A user other than root; a `HEALTHCHECK` on `/health` through Python. Published to
+  NVIDIA driver and Container Toolkit. No ffmpeg. Its entrypoint the bare command and `CMD`
+  empty, so that options append; `SEEDVR2X_LISTEN=0.0.0.0:8390`, and a `HEALTHCHECK` on
+  `/health` through Python at that variable's port. A user other than root (UID 10001), torch's
+  and Triton's caches under `/tmp`, so that the image runs under any UID. Published to
   `ghcr.io/hekmon/seedvr2x-imgserver` by a GitHub Actions workflow on release tags,
-  linux/amd64. No FlashAttention 2 at first (PyPI has its source only, a long build per GPU
-  generation): SDPA, which the plan counts, until the card shows FA2 pays for pictures.
-- **Tests:** on the CPU with stand-in models, over real sockets on localhost; on the card with
-  the batch.
+  linux/amd64.
+  - The models stay outside, three ways (the user, 2026-11-04): a volume for Hugging Face's
+    cache, the default, filled at the first start; the host's cache, the production pattern,
+    its `hub` directory alone mounted read-only with `HF_HUB_OFFLINE=1` (never the whole
+    Hugging Face home, which holds any token stored); or that directory read-write, the
+    container run as the host's user (`--user`). Or a model directory read-only, with
+    `--model-dir`. Both bind mounts ran on the RTX 5090 (2026-11-04), nothing written in the
+    read-only cache.
+  - No FlashAttention 2 (PyPI has its source only, a long build per GPU generation): SDPA, which
+    the plan counts. FA2 gives the DiT the same time within 1.5%, under the run-to-run drift,
+    attention being 4 to 9% of it ([attention.md](research/docs/attention.md), the 96 GB card,
+    videos); the card checks it on pictures.
+- **Tests:** on the CPU with stand-in models, over real sockets on localhost; on the card by
+  hand (the RTX 5090, 2026-11-04) and with the batch; no `-m gpu` test of its own yet.
 
 ## Memory planner
 
