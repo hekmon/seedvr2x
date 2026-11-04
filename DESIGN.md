@@ -505,6 +505,23 @@ connect through files.
   About 11k lines ([provenance](research/docs/provenance.md)).
 - The submodules stay untouched. A script (`tools/vendor.py diff`) diffs seedvr2x's copy against
   numz and ByteDance, so every change stays visible.
+- **numz's model until v0.1.0, then seedvr2x's own** (the user, 2026-11-04). Until v0.1.0 is
+  released, every change here and in the runtime is held bit for bit to numz by the milestone-1
+  regression, as below, so that the first release is proven to run numz's model. After it,
+  seedvr2x stands on its own:
+  - the regression's references become seedvr2x's, the files as they are (bit-identical to
+    numz's output on 2026-11-04's gate); a change that moves the output's bits is allowed with a
+    measured reason, and remakes them, said in its commit;
+  - this copy becomes seedvr2x's to change, each change still marked as the licence asks, and
+    `tools/vendor.py` still showing the diff against numz and ByteDance;
+  - numz's padding mode, a mode of the tests alone, retires once the references are remade in
+    seedvr2x's own padding;
+  - then what the link kept out is looked at again: batching several pictures in one DiT pass,
+    ByteDance's `repeat_concat_idx` restored ([The image server](#the-image-server)), and a
+    picture's resize from a contiguous input ([Still images](#still-images)).
+
+  numz stays credited for the code seedvr2x runs: this copy, and the VAE passes and tiling
+  adapted from numz's own (`core/NOTICE`).
 - Changes made in seedvr2x's copy, each one checked bit-identical to numz by the milestone-1
   regression test:
   - **numz's runtime dependencies removed:** `retry_on_oom`, the attention dispatch, MPS
