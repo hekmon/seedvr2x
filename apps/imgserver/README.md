@@ -88,9 +88,30 @@ image's name.
   image's `CMD` would be dropped by any option given, and the server would listen on the
   container's own 127.0.0.1, which publishing can't reach. The address must be one the
   container's network answers: 0.0.0.0, not 127.0.0.1.
-- **The models stay outside the image.** The volume `hf-cache` holds Hugging Face's cache
-  (`HF_HOME=/data/huggingface`): the first start fills it, the next ones read it. A bind mount
-  must be writable by the image's user (UID 10001).
+- **The models stay outside the image,** in Hugging Face's cache, `HF_HOME=/data/huggingface`
+  in the container. Three ways to give it, the first the default:
+  1. **A Docker volume,** `-v hf-cache:/data/huggingface` as above: the first start pulls
+     seedvr2x's files into it, at the revision this version pins, and the next ones read them.
+  2. **The host's Hugging Face cache, read-only,** the pattern for production: its `hub`
+     directory alone, downloads off.
+
+     ```
+     docker run --rm --gpus all --stop-timeout 120 -p 127.0.0.1:8390:8390 \
+       -v ~/.cache/huggingface/hub:/data/huggingface/hub:ro -e HF_HUB_OFFLINE=1 \
+       -e SEEDVR2X_API_KEY=a-long-random-string \
+       ghcr.io/hekmon/seedvr2x-imgserver
+     ```
+
+     `$HF_HOME/hub` where the host sets `HF_HOME`. Never the whole Hugging Face home: it holds
+     any token stored on the host, which the container has no use for. The files must be
+     readable by the image's user (UID 10001), as the cache's usually are. A file missing from
+     the cache is refused at the start; fetch it on the host with
+     `hf download hekmon/seedvr2x FILE --revision c14a2bc4aab04cf38ad9b0d324014c4213f07048`,
+     or with one run of seedvr2x's command line, which pulls the same files.
+  3. **The host's cache, writable,** the container downloading into it: the `hub` directory
+     mounted read-write, and the container run as the host's user, so that what it writes there
+     is the user's: `--user "$(id -u):$(id -g)" -v ~/.cache/huggingface/hub:/data/huggingface/hub`.
+     The image keeps its own caches under `/tmp`, which any user can write.
 - **A model directory instead,** mounted read-only, holding the DiT and the VAE files:
 
   ```

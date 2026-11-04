@@ -661,6 +661,18 @@ def test_the_entrypoint_is_the_bare_command_and_cmd_is_empty() -> None:
     assert instructions()["CMD"] == ["[]"]
 
 
+def test_the_caches_the_image_writes_are_where_any_user_can_write() -> None:
+    # A container run with --user doesn't own the image's HOME: torch's kernel cache under it
+    # could not be created (an RTX 5090, 2026-11-04, --user 1000:1000). torch makes torch/kernels
+    # under XDG_CACHE_HOME but not the directory itself: /tmp, the base image's, writable by any
+    # user.
+    environment = dict(
+        part.split("=", 1) for part in " ".join(instructions()["ENV"]).split() if "=" in part
+    )
+    assert environment["XDG_CACHE_HOME"] == "/tmp"
+    assert environment["TRITON_CACHE_DIR"].startswith("/tmp/")
+
+
 def test_the_variable_the_dockerfile_sets_is_an_address_the_server_takes() -> None:
     (value,) = [
         part.split("=", 1)[1]

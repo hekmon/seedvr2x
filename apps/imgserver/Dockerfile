@@ -55,6 +55,18 @@ ENV PATH="/app/apps/imgserver/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     SEEDVR2X_LISTEN=0.0.0.0:8390
 
+# The caches the server writes, where any user can: a container run with --user (the host's
+# Hugging Face cache mounted writable, the README) is not the owner of HOME, and torch's kernel
+# cache under it could not be created, the caching off (an RTX 5090, 2026-11-04, --user
+# 1000:1000: "Specified kernel cache directory could not be created!",
+# /home/seedvr2x/.cache/torch/kernels). torch takes XDG_CACHE_HOME before HOME
+# (aten/src/ATen/native/cuda/jit_utils.cpp) and makes torch/kernels under it, but not the
+# directory itself: /tmp/cache, missing, failed the same way for every user (the same night), so
+# it is /tmp, which the base image has (mode 1777), a tmpfs mounted there too. Triton reads its
+# own variable, not XDG's.
+ENV XDG_CACHE_HOME=/tmp \
+    TRITON_CACHE_DIR=/tmp/triton
+
 VOLUME /data/huggingface
 EXPOSE 8390
 
